@@ -5,15 +5,15 @@
 //! classified").
 //!
 //! Lives in `skull-mir` because `compute_call_spec` is internal to
-//! `lower::shape`; this exposes the RESULT rendered as strings rather than
-//! widening that module. The rendering is
-//! [`MonoTy::render`](crate::monoty::MonoTy::render), the one canonical
-//! spelling, so the two sides are comparable without a translation.
+//! `lower::shape`; this exposes the RESULT encoded as strings rather than
+//! widening that module. The encoding is
+//! [`MonoTy::canonical`](crate::monoty::MonoTy::canonical), which is
+//! unambiguous, so the two sides are comparable and no pretty-printing
+//! ambiguity can match two different types to each other.
 //!
-//! A `None` slot is the partial key's erasure: `reify_type` answered nothing for
-//! that generic (valid `any`, unit, never or function type, plus tuples that
-//! reify but whose node cannot). It is rendered as `None` and treated as a
-//! WILDCARD when reconciling -- the shadow side is total, so it always has a
+//! A `None` slot is the partial key's erasure: `reify_type` declined to admit
+//! that generic (a valid `any`, unit, never or function type). It is treated as
+//! a WILDCARD when reconciling -- the shadow side is total, so it always has a
 //! concrete type where this side has a hole.
 
 use bone_semantic::hir::{BodyOwner, FnBackend};
@@ -83,7 +83,7 @@ pub fn today_specializations(ws: &Workspace, target: FnBackend) -> (Vec<TodaySpe
                 out.push(TodaySpec {
                     caller,
                     func,
-                    slots: key.iter().map(|s| s.as_ref().map(crate::monoty::MonoTy::render)).collect(),
+                    slots: key.iter().map(|s| s.as_ref().map(crate::monoty::MonoTy::canonical)).collect(),
                 });
             }
         }

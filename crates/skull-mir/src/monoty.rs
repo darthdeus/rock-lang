@@ -167,11 +167,101 @@ impl MonoTy {
         }
     }
 
+    /// The cross-process IDENTITY of a type: a tagged, length-prefixed,
+    /// terminated encoding, unambiguous by construction.
+    ///
+    /// [`Self::render`] cannot serve this. A pretty type syntax is ambiguous
+    /// wherever a postfix and an infix constructor meet -- `(fn(int) -> int)?`
+    /// and `fn(int) -> int?` both read as "fn(int) -> int" then "?" -- and
+    /// bracketing one case moves the collision to its neighbour rather than
+    /// removing it. A tag per constructor, a length before every child list and
+    /// a terminator after it leaves nothing to parse ambiguously, and a nominal
+    /// carries its own length so a struct named `Vec` cannot alias the container
+    /// ctor.
+    ///
+    /// This is also the encoding a specialized body's emitted symbol is built
+    /// from ([`crate::mangle::spec_fn_name`]), so identity and symbol cannot
+    /// drift apart.
+    pub fn canonical(&self) -> String {
+        let mut s = String::new();
+        self.write_canonical(&mut s);
+        s
+    }
+
+    pub(crate) fn write_canonical(&self, out: &mut String) {
+        let prim = |out: &mut String, name: &str| {
+            out.push_str("p_");
+            out.push_str(name);
+        };
+        match self {
+            MonoTy::Int => prim(out, "int"),
+            MonoTy::Float => prim(out, "float"),
+            MonoTy::Bool => prim(out, "bool"),
+            MonoTy::String => prim(out, "string"),
+            MonoTy::Any => prim(out, "any"),
+            MonoTy::Unit => prim(out, "unit"),
+            MonoTy::Never => prim(out, "never"),
+            // `T = E?` is a DIFFERENT type from `T = E` (its slots carry a
+            // presence leaf), so the encoding has to separate them or the two
+            // collide on one symbol.
+            MonoTy::Nullable(inner) => {
+                out.push_str("o_");
+                inner.write_canonical(out);
+            }
+            // Length-prefixed and terminated like `App`, so `(A, B)` cannot
+            // encode the same as a one-slot tuple of something that encodes as
+            // `A_B`.
+            MonoTy::Tuple(parts) => {
+                out.push_str("t_");
+                out.push_str(&parts.len().to_string());
+                for part in parts {
+                    out.push('_');
+                    part.write_canonical(out);
+                }
+                out.push_str("_z");
+            }
+            MonoTy::App { ctor, params } => {
+                out.push_str("a_");
+                match ctor {
+                    MonoCtor::Array => out.push('v'),
+                    MonoCtor::Map => out.push('m'),
+                    MonoCtor::Nominal(name) => {
+                        out.push('n');
+                        out.push_str(&name.len().to_string());
+                        out.push('_');
+                        out.push_str(name.as_str());
+                    }
+                }
+                out.push('_');
+                out.push_str(&params.len().to_string());
+                for param in params {
+                    out.push('_');
+                    param.write_canonical(out);
+                }
+                out.push_str("_z");
+            }
+            // The result is part of the identity, so it is encoded and
+            // terminated like any other child rather than folded in with the
+            // parameters.
+            MonoTy::Function { params, ret } => {
+                out.push_str("f_");
+                out.push_str(&params.len().to_string());
+                for param in params {
+                    out.push('_');
+                    param.write_canonical(out);
+                }
+                out.push('_');
+                ret.write_canonical(out);
+                out.push_str("_z");
+            }
+        }
+    }
+
     /// FNV-1a over the canonical rendering. Stable across processes, unlike
     /// anything derived from an arena id or from a `FxHashMap` iteration.
     pub fn structural_hash(&self) -> u64 {
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-        for b in self.render().bytes() {
+        for b in self.canonical().bytes() {
             h ^= b as u64;
             h = h.wrapping_mul(0x0000_0100_0000_01b3);
         }
@@ -322,6 +412,11 @@ impl MonoArena {
     /// The canonical structural rendering of an interned type.
     pub fn render(&self, id: MonoTyId) -> String {
         self.get(id).render()
+    }
+
+    /// The canonical identity string of an interned type.
+    pub fn canonical(&self, id: MonoTyId) -> String {
+        self.get(id).canonical()
     }
 
     /// Structural nesting depth of an interned type.

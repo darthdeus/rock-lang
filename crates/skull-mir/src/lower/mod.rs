@@ -2044,8 +2044,10 @@ fn native_buffer_alloc_elem_ctype_spec(
         }
         _ => None,
     };
+    if let Some(prim) = leaf.as_ref().and_then(crate::monoty::MonoTy::prim_name) {
+        return Ok(Ustr::from(prim));
+    }
     match leaf {
-        Some(ty) if ty.prim_name().is_some() => Ok(Ustr::from(ty.prim_name().unwrap())),
         Some(ty) if ty.nominal().is_some() => {
             let n = ty.nominal().unwrap();
             if !map_is_value_struct(ws, n) {

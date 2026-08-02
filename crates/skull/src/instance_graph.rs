@@ -286,9 +286,11 @@ pub const INDEX_TRIGGERED: &[(&str, &[&str])] = &[
 pub const MAX_INSTANTIATION_DEPTH: u32 = 12;
 
 impl InstanceGraph {
-    /// The deterministic symbol for an instance: the function's mangled name
-    /// plus its rendered logical arguments. Sorting by this is what makes the
-    /// manifest byte-stable regardless of discovery order.
+    /// The READABLE symbol for an instance: the function's mangled name plus its
+    /// rendered logical arguments. For display only -- two distinct instances can
+    /// share one rendering ([`MonoTy::render`] is a pretty type syntax, not an
+    /// identity), so deduplicating or matching on this would merge them. Key on
+    /// [`Self::identity`].
     pub fn symbol(&self, ws: &Workspace, i: &Instance) -> String {
         let f = &ws.module(i.func.module).functions[i.func.func];
         let base = mangle_fn(ws, f);
@@ -299,12 +301,31 @@ impl InstanceGraph {
         format!("{base}<{}>", args.join(", "))
     }
 
-    /// Instances sorted by symbol -- the manifest order.
+    /// The instance's IDENTITY: the mangled name plus its arguments' canonical
+    /// encodings. Unambiguous, so sorting and dedup on it cannot merge two
+    /// distinct instances.
+    pub fn identity(&self, ws: &Workspace, i: &Instance) -> String {
+        let f = &ws.module(i.func.module).functions[i.func.func];
+        let base = mangle_fn(ws, f);
+        if i.args.is_empty() {
+            return base;
+        }
+        let args: Vec<String> = i.args.iter().map(|a| self.arena.canonical(*a)).collect();
+        format!("{base}<{}>", args.join(","))
+    }
+
+    /// Instances in manifest order: sorted and deduplicated by IDENTITY, then
+    /// shown by symbol. Two instances that render alike therefore appear twice
+    /// rather than silently becoming one.
     pub fn sorted_symbols(&self, ws: &Workspace) -> Vec<String> {
-        let mut v: Vec<String> = self.instances.iter().map(|i| self.symbol(ws, i)).collect();
+        let mut v: Vec<(String, String)> = self
+            .instances
+            .iter()
+            .map(|i| (self.identity(ws, i), self.symbol(ws, i)))
+            .collect();
         v.sort();
         v.dedup();
-        v
+        v.into_iter().map(|(_, sym)| sym).collect()
     }
 
     pub fn edge_histogram(&self) -> BTreeMap<&'static str, usize> {
@@ -1137,7 +1158,9 @@ pub struct Reconciliation {
 }
 
 /// A today-slot matches a shadow arg when the slot is `None` (the partial key
-/// erased it, so it constrains nothing) or the rendered types are equal.
+/// erased it, so it constrains nothing) or the canonical types are equal. Both
+/// sides encode with `MonoTy::canonical`, so a pretty-printing ambiguity cannot
+/// match two different types to each other.
 fn slots_match(slots: &[Option<String>], shadow: &[String]) -> bool {
     slots.len() == shadow.len()
         && slots
@@ -1153,13 +1176,13 @@ pub fn reconcile(
 ) -> Reconciliation {
     let (today, rejected_sites) = skull_mir::spec_census::today_specializations(ws, target);
 
-    // Shadow instances grouped by function, as rendered argument lists.
+    // Shadow instances grouped by function, as canonical argument lists.
     let mut by_func: FxHashMap<(u32, u32), Vec<Vec<String>>> = FxHashMap::default();
     for i in &g.instances {
         by_func
             .entry((i.func.module.raw(), i.func.func.into_raw().into_u32()))
             .or_default()
-            .push(i.args.iter().map(|a| g.arena.render(*a)).collect());
+            .push(i.args.iter().map(|a| g.arena.canonical(*a)).collect());
     }
 
     let mut r = Reconciliation { today: today.len(), rejected_sites, ..Default::default() };
@@ -1202,7 +1225,7 @@ pub fn reconcile(
         .iter()
         .filter(|i| {
             let k = (i.func.module.raw(), i.func.func.into_raw().into_u32());
-            let args: Vec<String> = i.args.iter().map(|a| g.arena.render(*a)).collect();
+            let args: Vec<String> = i.args.iter().map(|a| g.arena.canonical(*a)).collect();
             !matched_shadow.contains(&(k.0, k.1, args))
         })
         .count();

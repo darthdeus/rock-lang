@@ -1455,10 +1455,7 @@ pub(crate) fn mono_type_node(ty: &MonoTy) -> Option<TypeExpr> {
         MonoTy::Int => TypeExpr::Builtin(BuiltinTy::Int),
         MonoTy::Float => TypeExpr::Builtin(BuiltinTy::Float),
         MonoTy::Bool => TypeExpr::Builtin(BuiltinTy::Bool),
-        // A `string` leaf is opaque to every shape decision this feeds, and the
-        // node it would need is one no consumer reads; it has answered with the
-        // recovery builtin since it began reifying.
-        MonoTy::String => TypeExpr::Builtin(BuiltinTy::Error),
+        MonoTy::String => TypeExpr::Builtin(BuiltinTy::String),
     })
 }
 
@@ -2695,4 +2692,37 @@ pub fn coroutine_yield_channel(ws: &Workspace, return_ty: TyId) -> Option<YieldC
 /// positional, then record leaves -- `value_shape` leaf order).
 pub fn yield_slot(i: usize) -> Ustr {
     Ustr::from(format!("__y{i}").as_str())
+}
+
+#[cfg(test)]
+mod adapter_tests {
+    use super::*;
+
+    /// A primitive binding's node is that primitive. `string` in particular is
+    /// NOT the recovery builtin: recovery poison means "inference failed", and
+    /// answering it for a valid `string` hands every consumer a type that names
+    /// no value. The other three are here as the controls that say this test is
+    /// about the mapping rather than about one arm.
+    #[test]
+    fn a_primitive_binding_maps_to_its_own_builtin() {
+        for (bound, want) in [
+            (MonoTy::Int, BuiltinTy::Int),
+            (MonoTy::Float, BuiltinTy::Float),
+            (MonoTy::Bool, BuiltinTy::Bool),
+            (MonoTy::String, BuiltinTy::String),
+        ] {
+            assert_eq!(
+                mono_type_node(&bound),
+                Some(TypeExpr::Builtin(want)),
+                "{bound:?} must substitute to its own builtin"
+            );
+        }
+        assert!(
+            !matches!(
+                mono_type_node(&MonoTy::String),
+                Some(TypeExpr::Builtin(BuiltinTy::Error))
+            ),
+            "a valid `string` binding must never be spelled as recovery poison"
+        );
+    }
 }

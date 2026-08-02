@@ -236,6 +236,58 @@ fn structural_equality_is_the_identity() {
     assert_ne!(a.render(fn_i_f), a.render(fn_f_i));
 }
 
+/// The adversarial pairs a COMPOSED generator does not reach, because each pair
+/// needs two specific constructors nested a specific way round. Every pair here
+/// is two genuinely distinct logical types whose cross-process identity must
+/// differ; interning separates them by construction, so the load-bearing
+/// assertion is the one on the identity STRING and its hash.
+#[test]
+fn distinct_types_cannot_share_a_cross_process_identity() {
+    let mut a = MonoArena::new();
+    let int = a.intern(MonoTy::Int);
+    let nullable_int = a.nullable(int);
+
+    // `(fn(int) -> int)?` vs `fn(int) -> int?`. A postfix `?` on an unbracketed
+    // arrow type is the ambiguity: both spell "fn(int) -> int" then "?".
+    let fn_i_i = a.function(&[int], int);
+    let nullable_fn = a.nullable(fn_i_i);
+    let fn_i_nullable = a.function(&[int], nullable_int);
+
+    // `(int)` the one-tuple vs `int` in brackets -- and the same one round of
+    // nesting further out, which is where a naive bracket fix collides again.
+    let tuple_1 = a.tuple(&[int]);
+    let tuple_1_fn = a.tuple(&[fn_i_i]);
+    let nullable_tuple_1_fn = a.nullable(tuple_1_fn);
+
+    // A NOMINAL that happens to be spelled like a builtin container ctor is a
+    // different type from the ctor itself.
+    let vec_int = a.app(MonoCtor::Array, &[int]);
+    let nominal_vec_int = a.app(MonoCtor::Nominal(Ustr::from("Vec")), &[int]);
+    let map_int = a.app(MonoCtor::Map, &[int]);
+    let nominal_map_int = a.app(MonoCtor::Nominal(Ustr::from("Map")), &[int]);
+
+    let pairs = [
+        ("nullable fn vs fn returning nullable", nullable_fn, fn_i_nullable),
+        ("nullable tuple-of-fn vs nullable fn", nullable_tuple_1_fn, nullable_fn),
+        ("one-tuple vs its element", tuple_1, int),
+        ("Vec ctor vs a nominal named Vec", vec_int, nominal_vec_int),
+        ("Map ctor vs a nominal named Map", map_int, nominal_map_int),
+    ];
+    for (what, x, y) in pairs {
+        assert_ne!(x, y, "{what}: interning merged two distinct types");
+        assert_ne!(
+            a.canonical(x),
+            a.canonical(y),
+            "{what}: two distinct types share one canonical identity"
+        );
+        assert_ne!(
+            a.structural_hash(x),
+            a.structural_hash(y),
+            "{what}: two distinct types share one structural hash"
+        );
+    }
+}
+
 // -- order independence (S 20g.4) ------------------------------------------
 
 /// Insertion order changes the integer ids and NOTHING else. Built here as two

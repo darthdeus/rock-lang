@@ -56,6 +56,8 @@ pub fn do_monoty_census(root: Option<&str>) -> Result<()> {
     // MonoTys" is a whole-world count rather than a sum of per-project counts.
     let mut union = MonoArena::new();
     let mut union_ids = std::collections::HashSet::new();
+    // Distinct types (by canonical identity) containing an unadmitted ctor.
+    let mut union_gap_ids: std::collections::HashSet<String> = Default::default();
     let mut union_converted = 0usize;
     // Occurrences whose logical type a SpecKey slot cannot be keyed on.
     let mut union_gap_occurrences = 0usize;
@@ -63,7 +65,7 @@ pub fn do_monoty_census(root: Option<&str>) -> Result<()> {
 
     for dir in &projects {
         let name = rel(&root, dir);
-        match census_project(dir, &mut union, &mut union_ids) {
+        match census_project(dir, &mut union, &mut union_ids, &mut union_gap_ids) {
             Ok((stats, converted, failures, gap)) => {
                 union_converted += converted;
                 union_gap_occurrences += gap;
@@ -104,8 +106,6 @@ pub fn do_monoty_census(root: Option<&str>) -> Result<()> {
 
     // The Stage-1 cost/benefit line: how much of the corpus is a type today's
     // partial tree cannot name, and therefore silently folds onto a shared key.
-    let gap_types: Vec<&String> =
-        union_ids.iter().filter(|r| render_is_gap(r)).collect();
     println!("## what totality costs");
     println!();
     println!(
@@ -116,9 +116,9 @@ pub fn do_monoty_census(root: Option<&str>) -> Result<()> {
     );
     println!(
         "- DISTINCT logical types that contain one: **{}** of {} ({:.1}%)",
-        gap_types.len(),
+        union_gap_ids.len(),
         union_ids.len(),
-        100.0 * gap_types.len() as f64 / union_ids.len().max(1) as f64
+        100.0 * union_gap_ids.len() as f64 / union_ids.len().max(1) as f64
     );
     println!();
 
@@ -182,6 +182,7 @@ fn census_project(
     dir: &PathBuf,
     union: &mut MonoArena,
     union_ids: &mut std::collections::HashSet<String>,
+    union_gap_ids: &mut std::collections::HashSet<String>,
 ) -> Result<ProjectResult> {
     let spec = crate::common::path_to_source_spec(&dir.display().to_string());
     let sources = crate::unified_compile::discover_sources(&spec)?;
@@ -210,7 +211,10 @@ fn census_project(
                         if outside_reified_type(union.get(id)) {
                             gap += 1;
                         }
-                        let r = union.render(id);
+                        let r = union.canonical(id);
+                        if outside_reified_type(union.get(id)) {
+                            union_gap_ids.insert(r.clone());
+                        }
                         seen_here.insert(r.clone());
                         union_ids.insert(r);
                     }
@@ -229,7 +233,10 @@ fn census_project(
                         if outside_reified_type(union.get(id)) {
                             gap += 1;
                         }
-                        let r = union.render(id);
+                        let r = union.canonical(id);
+                        if outside_reified_type(union.get(id)) {
+                            union_gap_ids.insert(r.clone());
+                        }
                         seen_here.insert(r.clone());
                         union_ids.insert(r);
                     }
@@ -285,29 +292,4 @@ fn short(file: Ustr) -> String {
 
 fn module_ids(ws: &Workspace) -> Vec<ModuleId> {
     (0..ws.modules.len() as u32).map(ModuleId::new).collect()
-}
-
-/// The gap test over a canonical rendering, for the distinct-type count (the
-/// union set is keyed by rendering, not by id). Substring-safe because the
-/// renderer emits these as whole tokens.
-fn render_is_gap(r: &str) -> bool {
-    r.contains("fn(")
-        || token(r, "any")
-        || token(r, "unit")
-        || token(r, "never")
-}
-
-fn token(hay: &str, needle: &str) -> bool {
-    let bytes = hay.as_bytes();
-    let mut from = 0;
-    while let Some(i) = hay[from..].find(needle).map(|i| i + from) {
-        let before_ok = i == 0 || !bytes[i - 1].is_ascii_alphanumeric();
-        let j = i + needle.len();
-        let after_ok = j >= bytes.len() || !bytes[j].is_ascii_alphanumeric();
-        if before_ok && after_ok {
-            return true;
-        }
-        from = i + 1;
-    }
-    false
 }

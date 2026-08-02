@@ -56,76 +56,11 @@ pub fn spec_fn_name(
     Some(out)
 }
 
-/// Total over [`MonoTy`](crate::monoty::MonoTy), so a symbol exists for every
-/// logical type rather than for the subset a key happens to carry today. The
-/// leaf spellings are the identifier -- changing one renames a function in every
-/// emitted artifact.
+/// A specialized body's symbol IS the type's canonical identity
+/// ([`MonoTy::canonical`](crate::monoty::MonoTy::canonical)) -- one encoder, so
+/// a symbol and an instance identity cannot disagree about which type they name.
 fn encode_mono_type(ty: &crate::monoty::MonoTy, out: &mut String) {
-    use crate::monoty::{MonoCtor, MonoTy};
-    let prim = |out: &mut String, name: &str| {
-        out.push_str("p_");
-        out.push_str(name);
-    };
-    match ty {
-        MonoTy::Int => prim(out, "int"),
-        MonoTy::Float => prim(out, "float"),
-        MonoTy::Bool => prim(out, "bool"),
-        MonoTy::String => prim(out, "string"),
-        MonoTy::Any => prim(out, "any"),
-        MonoTy::Unit => prim(out, "unit"),
-        MonoTy::Never => prim(out, "never"),
-        // `T = E?` is a DIFFERENT specialization from `T = E` (its slots carry a
-        // presence leaf), so the mangled name has to separate them or the two
-        // snapshots collide on one symbol.
-        MonoTy::Nullable(inner) => {
-            out.push_str("o_");
-            encode_mono_type(inner, out);
-        }
-        // Length-prefixed and terminated like `App`, so `(A, B)` cannot encode
-        // the same as a one-slot tuple of something that encodes as `A_B`.
-        MonoTy::Tuple(parts) => {
-            out.push_str("t_");
-            out.push_str(&parts.len().to_string());
-            for part in parts {
-                out.push('_');
-                encode_mono_type(part, out);
-            }
-            out.push_str("_z");
-        }
-        MonoTy::App { ctor, params } => {
-            out.push_str("a_");
-            match ctor {
-                MonoCtor::Array => out.push('v'),
-                MonoCtor::Map => out.push('m'),
-                MonoCtor::Nominal(name) => {
-                    out.push('n');
-                    out.push_str(&name.len().to_string());
-                    out.push('_');
-                    out.push_str(name.as_str());
-                }
-            }
-            out.push('_');
-            out.push_str(&params.len().to_string());
-            for param in params {
-                out.push('_');
-                encode_mono_type(param, out);
-            }
-            out.push_str("_z");
-        }
-        // The result is part of the identity, so it is encoded and terminated
-        // like any other child rather than folded in with the parameters.
-        MonoTy::Function { params, ret } => {
-            out.push_str("f_");
-            out.push_str(&params.len().to_string());
-            for param in params {
-                out.push('_');
-                encode_mono_type(param, out);
-            }
-            out.push('_');
-            encode_mono_type(ret, out);
-            out.push_str("_z");
-        }
-    }
+    ty.write_canonical(out);
 }
 
 /// True if `f` keeps its bare surface name (never mangled).
