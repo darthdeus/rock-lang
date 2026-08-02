@@ -88,7 +88,7 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
 
     for dir in &projects {
         let name = dir.strip_prefix(&root).unwrap_or(dir).display().to_string();
-        match one_project(dir, &name, dump.map(|d| (d, name.as_str()))) {
+        match one_project(dir, &name, &root, dump.map(|d| (d, name.as_str()))) {
             Ok(p) => {
                 for (k, v) in &p.hist {
                     *hist.entry(k).or_insert(0) += v;
@@ -447,7 +447,20 @@ struct OneProject {
     projections: Vec<skull::target_projection::Projection>,
 }
 
-fn one_project(dir: &PathBuf, name: &str, dump: Option<(&str, &str)>) -> Result<OneProject> {
+/// A span's file, relative to the analyzed root. An absolute path varies by
+/// checkout and would make the report non-comparable across machines; the root
+/// is the one the census was invoked on, never a checkout-directory name.
+/// Pseudo-files (`<bone-stdlib:...>`) have no prefix to strip and pass through.
+fn relativize(file: &str, root: &Path) -> String {
+    Path::new(file).strip_prefix(root).map(|r| r.display().to_string()).unwrap_or_else(|_| file.to_string())
+}
+
+fn one_project(
+    dir: &PathBuf,
+    name: &str,
+    root: &Path,
+    dump: Option<(&str, &str)>,
+) -> Result<OneProject> {
     let spec = crate::common::path_to_source_spec(&dir.display().to_string());
     let sources = crate::unified_compile::discover_sources(&spec)?;
     let (mut modules, _entry) = crate::skull_backend::skull_assemble_project(&sources)
@@ -596,14 +609,11 @@ fn one_project(dir: &PathBuf, name: &str, dump: Option<(&str, &str)>) -> Result<
         *reasons.entry(u.reason.to_string()).or_insert(0) += 1;
     }
     // A few examples per reason: one can be an accident, three show a pattern.
-    // The file is relativized for the same reason the project name is -- an
-    // absolute path varies by checkout and makes the report non-comparable.
     let mut examples: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for u in &g.unresolved {
         let e = examples.entry(u.reason.to_string()).or_default();
         let f = &ws.module(u.callee.module).functions[u.callee.func];
-        let file = u.span.file.as_str();
-        let file = file.rsplit_once("rock-mono/").map(|(_, r)| r).unwrap_or(file);
+        let file = relativize(u.span.file.as_str(), root);
         let at = format!("`{}` at {}:{}", f.name, file, u.span.line_range.0 + 1);
         if e.len() < 3 && !e.contains(&at) {
             e.push(at);
@@ -617,8 +627,7 @@ fn one_project(dir: &PathBuf, name: &str, dump: Option<(&str, &str)>) -> Result<
     let mut rejection_examples: Vec<String> = Vec::new();
     for r in &g.rejections {
         *rejections.entry(r.kind.name()).or_insert(0) += 1;
-        let file = r.span.file.as_str();
-        let file = file.rsplit_once("rock-mono/").map(|(_, x)| x).unwrap_or(file);
+        let file = relativize(r.span.file.as_str(), root);
         if rejection_examples.len() < 3 {
             rejection_examples.push(format!(
                 "`{}` at {}:{} -- {}",

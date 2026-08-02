@@ -184,57 +184,6 @@ fn main() {
     );
 }
 
-/// Ordinary same-instance recursion is finite and must be reported as such,
-/// not as a polymorphic-recursion candidate.
-#[test]
-fn same_instance_recursion_is_not_polymorphic() {
-    let (ws, g) = graph_of(
-        r#"
-fn countdown(n: int) -> int {
-    if n <= 0 { return 0 }
-    return countdown(n - 1)
-}
-fn main() { countdown(3) }
-"#,
-    );
-    let census = g.recursion_census(&ws);
-    assert!(
-        census.direct_same_instance.iter().any(|s| s.contains("countdown")),
-        "direct recursion not detected: {:?}",
-        census.direct_same_instance
-    );
-    assert!(
-        census.changing_instance.is_empty(),
-        "same-instance recursion was misfiled as polymorphic: {:?}",
-        census.changing_instance
-    );
-}
-
-/// Polymorphic recursion (`f<T> -> f<[T]>`) grows the instantiation TYPE
-/// without bound. It must terminate as a capped report rather than diverging --
-/// and it must be filed as changing-instance, distinct from the case above.
-/// The plan (S 7) records that this shape compiles and RUNS today.
-#[test]
-fn changing_instance_recursion_is_capped_and_reported() {
-    let (ws, g) = graph_of(
-        r#"
-fn depth<T>(x: T, n: int) -> int {
-    if n <= 0 { return 0 }
-    let wrapped: [T] = [x]
-    return 1 + depth(wrapped, n - 1)
-}
-fn main() { depth(1, 3) }
-"#,
-    );
-    let census = g.recursion_census(&ws);
-    assert!(
-        !census.changing_instance.is_empty(),
-        "polymorphic recursion was not reported as changing-instance"
-    );
-    // The walk terminated, which is the point of the cap.
-    assert!(g.instances.len() < 500, "instance explosion: {}", g.instances.len());
-}
-
 /// Plan S 15a: every specialization today's conditional machinery produces must
 /// appear in the shadow graph as a complete instance. Equality is NOT expected
 /// -- the shadow side is strictly larger, because the old mechanism is
@@ -656,6 +605,14 @@ fn main() { depth(1, 3) }
         "a rejection carried no span: {:?}",
         g.rejections
     );
+    // The WALK still had to terminate to produce that rejection -- detection is
+    // a post-pass, so `MAX_INSTANTIATION_DEPTH` is what stops the expansion.
+    assert!(g.instances.len() < 500, "instance explosion: {}", g.instances.len());
+    assert_eq!(
+        g.recursion_census(&ws).changing_instance.len(),
+        1,
+        "the census disagrees with the rejection it is derived from"
+    );
 }
 
 /// Mutual polymorphic recursion. The type grows around a two-function cycle, so
@@ -709,6 +666,11 @@ fn main() {
     assert!(r.is_empty(), "finite recursion was rejected: {r:?}");
     // ...and the fixture really did produce the recursion it claims to.
     let census = g.recursion_census(&ws);
+    assert!(
+        census.changing_instance.is_empty(),
+        "same-instance recursion was misfiled as polymorphic: {:?}",
+        census.changing_instance
+    );
     assert!(
         census.direct_same_instance.iter().any(|s| s.contains("countdown")),
         "the fixture produced no direct recursion to control against"
@@ -970,5 +932,72 @@ fn main() {
     assert!(
         nexts.iter().all(|e| !e.to.args.is_empty()),
         "a `next` witness lost its instantiation"
+    );
+}
+
+/// HOSTILE: the witness record is keyed by the RESOLVED declaration's `VarId`s,
+/// but the walk instantiates the declaration the TARGET selects. Sibling
+/// declarations are separate functions with separate `VarId`s, so reading the
+/// record against the selected variant's generics finds nothing and the witness
+/// silently degrades to `*-generic-unbound` on the non-default target only.
+///
+/// The corpus cannot catch this: it has no generic backend-sibling `iter`. The
+/// fixture supplies one, and the Lua view is the control -- the same witness
+/// must be instantiated identically on both targets, because instance identity
+/// is target-neutral (plan S 20a).
+#[test]
+fn a_generic_witness_survives_backend_variant_selection() {
+    let src = r#"
+struct Bag<T> { items: [T] }
+struct BagIter<T> { items: [T], i: int }
+
+fn iter<T>(b: Bag<T>) -> BagIter<T> {
+    return BagIter { items: b.items, i: 0 }
+}
+inline(js) fn iter<T>(b: Bag<T>) -> BagIter<T> = "return { items: b.items, i: 0 };"
+
+fn next<T>(it: BagIter<T>) -> (bool, T) {
+    if it.i >= it.items.len() { return (false, it.items[0]) }
+    it.i = it.i + 1
+    return (true, it.items[it.i - 1])
+}
+
+fn main() {
+    let b = Bag { items: [1, 2, 3] }
+    let total = 0
+    for v in b { total = total + v }
+}
+"#;
+    let ws = check(src);
+    let roots = instance_graph::emission_roots(&ws, None);
+
+    let witness_args = |target: bone_semantic::hir::FnBackend| -> Vec<String> {
+        let g = instance_graph::build_for_target(&ws, roots.clone(), false, target);
+        assert!(
+            !g.unresolved.iter().any(|u| u.reason.contains("unbound")),
+            "{target:?}: a witness degraded to unbound: {:?}",
+            g.unresolved
+                .iter()
+                .map(|u| (u.reason, ws.module(u.callee.module).functions[u.callee.func].name))
+                .collect::<Vec<_>>()
+        );
+        let mut v: Vec<String> = g
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::IteratorIter)
+            .map(|e| {
+                e.to.args.iter().map(|a| g.arena.canonical(*a)).collect::<Vec<_>>().join(",")
+            })
+            .collect();
+        v.sort();
+        assert!(!v.is_empty(), "{target:?}: no iterator-iter edge");
+        v
+    };
+
+    let lua = witness_args(bone_semantic::hir::FnBackend::Lua);
+    let js = witness_args(bone_semantic::hir::FnBackend::Js);
+    assert_eq!(
+        lua, js,
+        "the same logical witness instantiated differently once the target selected a sibling"
     );
 }

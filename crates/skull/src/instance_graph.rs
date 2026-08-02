@@ -204,8 +204,8 @@ pub struct Edge {
 /// Stage 3's cutover is what makes them fatal.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum RejectionKind {
-    /// A recursive SCC whose recursive edges change their instance arguments.
-    /// Demand-driven instantiation does not terminate on it (plan S 7).
+    /// A function that recurs at a DIFFERENT instantiation than it was reached
+    /// at. Demand-driven instantiation does not terminate on it (plan S 7).
     ChangingInstanceRecursion,
     /// A generic function taken as a VALUE. There is no call site to key an
     /// instantiation on, and inferring one from the instances reachable
@@ -806,9 +806,11 @@ fn record_witness(
     kind: EdgeKind,
     target: bone_semantic::hir::FnBackend,
 ) {
-    let callee = variant_for(ws, FuncRef { module: witness.func.0, func: witness.func.1 }, target);
+    let rep = FuncRef { module: witness.func.0, func: witness.func.1 };
+    let resolved = &ws.module(rep.module).functions[rep.func];
+    let callee = variant_for(ws, rep, target);
     let cf = &ws.module(callee.module).functions[callee.func];
-    match instantiate_next(&mut g.arena, ws, inf, cf, &witness.generics, subst) {
+    match instantiate_witness(&mut g.arena, ws, inf, resolved, cf, &witness.generics, subst) {
         Ok((args, callee_subst)) => {
             let to = Instance { func: callee, args };
             g.edges.push(Edge { from: from.clone(), to: to.clone(), kind, span });
@@ -856,9 +858,11 @@ fn record_bound_next(
     target: bone_semantic::hir::FnBackend,
 ) {
     let BoundNext::Concrete { func: (m, f), next_generics, sub } = next else { return };
-    let callee = variant_for(ws, FuncRef { module: *m, func: *f }, target);
+    let rep = FuncRef { module: *m, func: *f };
+    let resolved = &ws.module(rep.module).functions[rep.func];
+    let callee = variant_for(ws, rep, target);
     let cf = &ws.module(callee.module).functions[callee.func];
-    match instantiate_next(&mut g.arena, ws, inf, cf, next_generics, subst) {
+    match instantiate_witness(&mut g.arena, ws, inf, resolved, cf, next_generics, subst) {
         Ok((args, callee_subst)) => {
             let to = Instance { func: callee, args };
             g.edges.push(Edge { from: from.clone(), to: to.clone(), kind, span });
@@ -939,37 +943,52 @@ fn instantiate(
     Ok((args, callee_subst))
 }
 
-/// The `for`-protocol `next` witness's instantiation. It is SYNTHESIZED, so it
-/// has no call expr and can never appear in `call_generic_bindings`;
-/// `next_generics` is the only record of what its generics bound to (plan S 12:
-/// resolve the witness at instantiation). Reading the callee's DECLARED generics
-/// and looking each up here is the same route `spec_key_from_next_generics`
-/// takes -- a shape comes from a declaration, never from the body's own
-/// inference.
-fn instantiate_next(
+/// A SYNTHESIZED call's instantiation, from the record bone kept for it: the
+/// `for`-protocol `next` witness (`next_generics`), the `for`-head `iter` and
+/// the coerced-argument `iter` (`IterWitness::generics`) all take this route.
+///
+/// Such a call has no call expr, so it can never appear in
+/// `call_generic_bindings` (plan S 12: resolve the witness at instantiation).
+/// Reading the callee's DECLARED generics and looking each up here is the same
+/// route `spec_key_from_next_generics` takes -- a shape comes from a
+/// declaration, never from the body's own inference.
+fn instantiate_witness(
     arena: &mut MonoArena,
     ws: &Workspace,
     inf: &BodyInference,
+    resolved: &Function,
     callee: &Function,
-    next_generics: &FxHashMap<bone_semantic::hir::VarId, bone_semantic::prelude::TyId>,
+    record: &FxHashMap<bone_semantic::hir::VarId, bone_semantic::prelude::TyId>,
     caller_subst: &MonoSubst,
 ) -> Result<(Vec<MonoTyId>, MonoSubst), Fail> {
     if callee.generics.is_empty() {
         return Ok((Vec::new(), MonoSubst::default()));
     }
+    // The record is keyed by the RESOLVED declaration's `VarId`s; the walk
+    // instantiates the declaration the TARGET selected. Backend siblings are
+    // separate functions with separate `VarId`s, so the two are read
+    // POSITIONALLY -- generic `i` of the resolved decl supplies generic `i` of
+    // the variant. Keying the lookup on the variant instead silently degrades a
+    // generic witness to unbound on the non-default target alone.
+    if resolved.generics.len() != callee.generics.len() {
+        return Err(Fail::Unresolved("variant-generic-arity-mismatch"));
+    }
     let mut args = Vec::with_capacity(callee.generics.len());
     let mut callee_subst = MonoSubst::default();
-    for g in &callee.generics {
-        let Some(var) = skull_mir::monoty::generic_var_of(ws, inf, *g) else {
+    for (rg, cg) in resolved.generics.iter().zip(&callee.generics) {
+        let (Some(rvar), Some(cvar)) = (
+            skull_mir::monoty::generic_var_of(ws, inf, *rg),
+            skull_mir::monoty::generic_var_of(ws, inf, *cg),
+        ) else {
             return Err(Fail::Unresolved("declared-generic-not-generic"));
         };
-        let Some(bound) = next_generics.get(&var) else {
-            return Err(Fail::Unresolved("next-generic-unbound"))
+        let Some(bound) = record.get(&rvar) else {
+            return Err(Fail::Unresolved("witness-generic-unbound"))
         };
         let ty =
             skull_mir::monoty::convert(ws, inf, *bound, caller_subst).map_err(convert_fail)?;
         args.push(arena.intern(ty.clone()));
-        callee_subst.insert(var, ty);
+        callee_subst.insert(cvar, ty);
     }
     Ok((args, callee_subst))
 }
