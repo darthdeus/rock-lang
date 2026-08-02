@@ -47,6 +47,10 @@ pub const JS_INTRINSICS: &[(&str, usize, &str)] = &[
     ("round", 1, "Math.floor($1 + 0.5)"),
     ("sign", 1, "Math.sign($1)"),
     ("fract", 1, "($1 - Math.floor($1))"),
+    // Reference identity (stdlib `same_ref`). `===` on two objects is JS
+    // identity, the same question luajit's `rawequal` answers; on primitives
+    // both reduce to value equality, which is also what identity means there.
+    ("same_ref", 2, "($1 === $2)"),
     // IEEE non-finite predicates (docs/shaders.md bvec tier). isinf excludes NaN
     // (a NaN is neither finite nor infinite). any/greater_than/to_vec3 co-emit
     // their portable Rock bodies -- no JS row.
@@ -461,7 +465,10 @@ function deepcopy(obj) { return __rock_deepcopy_value(obj, new Map()); }
 /// / `_log_throttled_*_impl`) route here. `__stone_emit`'s no-sink fallback is
 /// `print("[cat] msg")`, so lines land in the same per-test buffer as `print`.
 /// The one Rock global (`__stone_log_level`) lives in `__G` (unified with the
-/// module-globals path); dedup/throttle/now are bare vars (never Rock globals).
+/// module-globals path); dedup/throttle/counts/sites/now are bare vars (never
+/// Rock globals). `_log_once_impl` COUNTS rather than flagging, and the throttle
+/// impl records its own counts, because `log_suppression_summary` reports the
+/// totals -- a boolean dedup cannot answer "this site fired 38k times".
 /// `__stone_log_now` uses `Date.now()` as the os.clock() analog (the fallback
 /// test uses a huge interval, so the absolute value never matters).
 pub const JS_LOG_RUNTIME: &str = r#"
@@ -480,21 +487,47 @@ function __stone_log(level, category, msg) {
 function log_set_level(level) { __G.__stone_log_level = level; }
 var __stone_log_dedup = {};
 var __stone_log_throttle = {};
+var __stone_log_counts = {};
+var __stone_log_sites = {};
+var __stone_log_summary_done = false;
 var __stone_log_now_override = null;
 function _log_once_impl(category, msg, site) {
   __stone_log_init();
   if (0 > __G.__stone_log_level) return;
-  if (__stone_log_dedup[site]) return;
-  __stone_log_dedup[site] = true;
+  var n = (__stone_log_dedup[site] || 0) + 1;
+  __stone_log_dedup[site] = n;
+  __stone_log_sites[site] = (category || "") + "|" + msg;
+  if (n > 1) return;
   __stone_emit(0, category, msg);
 }
 function _log_throttled_with_now_impl(now_sec, category, msg, interval_sec, site) {
   __stone_log_init();
   if (0 > __G.__stone_log_level) return;
+  __stone_log_counts[site] = (__stone_log_counts[site] || 0) + 1;
+  __stone_log_sites[site] = (category || "") + "|" + msg;
   var last = __stone_log_throttle[site];
   if (last != null && (now_sec - last) < interval_sec) return;
   __stone_log_throttle[site] = now_sec;
   __stone_emit(0, category, msg);
+}
+function log_suppression_summary() {
+  __stone_log_init();
+  if (__stone_log_summary_done) return;
+  __stone_log_summary_done = true;
+  var rows = [];
+  function collect(tbl) {
+    for (var site in tbl) { if (tbl[site] > 1) rows.push({ site: site, n: tbl[site] }); }
+  }
+  collect(__stone_log_dedup);
+  collect(__stone_log_counts);
+  if (rows.length === 0) return;
+  rows.sort(function(a, b) { return b.n - a.n; });
+  for (var i = 0; i < rows.length; i++) {
+    var rec = __stone_log_sites[rows[i].site] || "|";
+    var bar = rec.indexOf("|");
+    __stone_emit(0, rec.slice(0, bar),
+      "suppressed x" + rows[i].n + " at " + rows[i].site + ": " + rec.slice(bar + 1));
+  }
 }
 function stone_log_set_now(now_sec) { __stone_log_now_override = now_sec; }
 function stone_log_clear_now() { __stone_log_now_override = null; }
@@ -505,7 +538,7 @@ function __stone_log_now() {
 function _log_throttled_impl(category, msg, interval_sec, site) {
   _log_throttled_with_now_impl(__stone_log_now(), category, msg, interval_sec, site);
 }
-function log_reset_dedup() { __stone_log_dedup = {}; __stone_log_throttle = {}; }
+function log_reset_dedup() { __stone_log_dedup = {}; __stone_log_throttle = {}; __stone_log_counts = {}; __stone_log_sites = {}; __stone_log_summary_done = false; }
 function log_dedup_count() { return Object.keys(__stone_log_dedup).length; }
 "#;
 
@@ -1025,6 +1058,20 @@ function stone_create_canvas(w, h, format, depth) {
   var handle = __SW.nextCanvas++;
   __SW.canvases[handle] = { fbo: fbo, tex: texHandle, w: w, h: h, format: format };
   return handle;
+}
+function stone_set_canvas_filter(h, mode) {
+  var c = __SW.canvases[h];
+  if (!c) { __sw_log_once("stone_set_canvas_filter: unknown canvas " + h); return false; }
+  var gl = __SW.gl;
+  // An integer texture is not filterable in GLES 3.0 / WebGL2 -- LINEAR on one
+  // is an INVALID_ENUM, so report the refusal rather than setting it and
+  // letting the caller believe it took (bloom's pyramid logs on false).
+  if (c.format === 3 && mode === 1) return false;
+  var f = (mode === 1) ? gl.LINEAR : gl.NEAREST;
+  gl.bindTexture(gl.TEXTURE_2D, __SW.textures[c.tex]);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, f);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, f);
+  return true;
 }
 function stone_destroy_canvas(h) {
   var c = __SW.canvases[h];

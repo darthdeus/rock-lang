@@ -1271,6 +1271,20 @@ impl Emitter<'_> {
             // `(--1.5)`, which JS lexes as the `--` decrement operator.
             Inst::Neg(x) => format!("(- {})", self.render_val(*x)?),
             Inst::Not(x) => format!("(!{})", self.render_val(*x)?),
+            // Bitwise: luajit lowers these to `bit.*`, whose results are SIGNED
+            // 32-bit; JS `& | ^ ~ <<` are signed 32-bit too, so those map
+            // straight across. `bit.rshift` is the LOGICAL shift, which is JS
+            // `>>>` -- but `>>>` yields an UNSIGNED 32-bit value, so `| 0`
+            // brings it back to the signed range luajit reports
+            // (`bit.rshift(-1, 0)` is -1, not 4294967295).
+            Inst::BitAnd(a, b) => bin(a, "&", b, self)?,
+            Inst::BitOr(a, b) => bin(a, "|", b, self)?,
+            Inst::BitXor(a, b) => bin(a, "^", b, self)?,
+            Inst::Shl(a, b) => bin(a, "<<", b, self)?,
+            Inst::Shr(a, b) => {
+                format!("(({} >>> {}) | 0)", self.render_val(*a)?, self.render_val(*b)?)
+            }
+            Inst::BitNot(x) => format!("(~{})", self.render_val(*x)?),
             // Identity on JS (all doubles), like codegen-lua on luajit.
             Inst::IntToFloat(x) => self.render_val(*x)?,
             // Rock float->int truncates toward -inf == floor.
@@ -3785,6 +3799,7 @@ fn is_host_log_fn(cf: &bone_semantic::hir::Function) -> bool {
         ("_log_throttled_impl", 4),
         ("log_reset_dedup", 0),
         ("log_dedup_count", 0),
+        ("log_suppression_summary", 0),
     ];
     (cf.is_extern || cf.inline_body.is_some())
         && LOG_FNS.iter().any(|(n, a)| *n == cf.name.as_str() && *a == cf.param_decls.len())

@@ -770,6 +770,18 @@ deco init on_reload {
     return not __op_eq(a, b)
 """
 
+// Reference identity -- "are these the same object", which `==` cannot answer.
+// `__op_eq` above is STRUCTURAL for every reference type: it walks fields, so
+// two independently-created structs (including two distinct coroutines) with
+// equal contents compare equal. Callers that mean identity -- "is this still
+// the same task the slot held", "is this the same batch pool" -- need this.
+//
+// `@native_required`: identity is not expressible as a portable Rock body, so a
+// backend with no mapping must fail loudly rather than silently fall back to a
+// structural walk that answers a different question.
+@intrinsic @native_required @pure @inline
+inline(lua) fn same_ref(a: any, b: any) -> bool = "rawequal(a, b)"
+
 // Tag a newly-created struct table with its type. Emitted by structs.rs for
 // every struct literal in user code. `__ty` is the single, direct type marker
 // (same scheme as Vec and every other value) -- `__rock_get_type` reads it,
