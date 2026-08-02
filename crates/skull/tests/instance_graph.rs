@@ -1877,10 +1877,33 @@ fn d() -> string { return hold("t") }
 fn main() { a(); b(); c(); d() }
 "#,
     );
-    assert!(
-        g.subst_comparisons > 0,
-        "no instance was reached twice, so the fixture never tested agreement"
-    );
+    // The denominator must be tied to the CLAIMED instances. A global
+    // comparison count is satisfied by any re-reached instance in the graph --
+    // including stdlib ones the fixture says nothing about -- so it would not
+    // prove that `ident<int>` and `ident<string>` were each reached through
+    // both of their callers.
+    let compared: std::collections::BTreeMap<String, usize> = g
+        .subst_compared
+        .iter()
+        .map(|(i, n)| (g.identity(&ws, i), *n))
+        .collect();
+    // `ident<int>` is reached from `a` directly and from `hold<int>`
+    // transitively, so its substitution is computed twice from two different
+    // callers' inference; same for `string`. `hold` itself has ONE caller per
+    // instantiation and is never re-reached -- measured, not assumed, and the
+    // reason the claim names `ident` only.
+    for arg in ["int", "string"] {
+        let hits: usize = compared
+            .iter()
+            .filter(|(id, _)| id.starts_with("ident") && id.contains(arg))
+            .map(|(_, n)| *n)
+            .sum();
+        assert!(
+            hits > 0,
+            "`ident` at `{arg}` was never reached from two callers, so its agreement was \
+             never tested; compared: {compared:?}"
+        );
+    }
     let disagreements: Vec<String> = g
         .subst_disagreements
         .iter()
@@ -1892,18 +1915,33 @@ fn main() { a(); b(); c(); d() }
         g.subst_disagreements.len(),
         g.subst_comparisons
     );
-    // The substitution is KEPT, not merely checked -- `ConcreteBody` needs it,
-    // and the walk used to drop it on the floor.
-    for i in &g.instances {
-        if i.args.is_empty() {
-            continue;
+    // The substitution is KEPT for EVERY instance, not merely checked --
+    // `ConcreteBody` needs it, and the walk used to drop it on the floor. Not
+    // restricted to generic instances: a non-generic one's substitution is
+    // EMPTY, not absent, and skipping them hid that root seeding bypassed the
+    // recorder entirely.
+    let missing = g.instances_without_substitution(&ws);
+    assert!(missing.is_empty(), "instances with no recorded substitution: {missing:?}");
+    assert!(
+        g.substitutions.contains_key(&instance_graph::Instance {
+            func: main_ref(&ws),
+            args: Vec::new(),
+        }),
+        "`main`, a non-generic root, has no recorded substitution"
+    );
+}
+
+/// `main`'s `FuncRef`. Named directly so the assertion above is about the root
+/// seeding path and not about whichever instance happens to sort first.
+fn main_ref(ws: &Workspace) -> skull_mir::mir::FuncRef {
+    for module in ws.modules.iter() {
+        for (fid, f) in module.functions.iter() {
+            if f.name.as_str() == "main" {
+                return skull_mir::mir::FuncRef { module: module.id, func: fid };
+            }
         }
-        assert!(
-            g.substitutions.contains_key(i),
-            "instance `{}` has arguments but no recorded substitution",
-            g.identity(&ws, i)
-        );
     }
+    panic!("no `main`");
 }
 
 /// `record_bound_next`'s own `Unresolved` write. The three recorders do NOT

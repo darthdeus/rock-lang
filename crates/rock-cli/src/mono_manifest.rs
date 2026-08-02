@@ -87,6 +87,8 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     let mut coroutine_collisions = 0usize;
     let mut always_emitted_seeds = 0usize;
     let mut subst_disagreements = 0usize;
+    let mut subst_disagreeing_instances = 0usize;
+    let mut no_subst: std::collections::BTreeSet<String> = Default::default();
     let mut subst_examples: Vec<String> = Vec::new();
     let mut substitutions_recorded = 0usize;
     let mut subst_comparisons = 0usize;
@@ -171,6 +173,8 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
                 coroutine_collisions += p.coroutine_helper_collisions;
                 always_emitted_seeds += p.always_emitted_seeds;
                 subst_disagreements += p.subst_disagreements;
+                subst_disagreeing_instances += p.subst_disagreeing_instances;
+                no_subst.extend(p.instances_without_substitution);
                 substitutions_recorded += p.substitutions_recorded;
                 subst_comparisons += p.subst_comparisons;
                 for x in p.subst_examples {
@@ -533,8 +537,17 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
          **{subst_comparisons}**"
     );
     println!(
-        "- instances reached at DIFFERENT substitutions (must be 0): **{subst_disagreements}**"
+        "- DISAGREEING COMPARISONS (must be 0): **{subst_disagreements}**, over \
+         **{subst_disagreeing_instances}** distinct instances"
     );
+    println!(
+        "- instances with NO recorded substitution (must be 0 -- a non-generic \
+         instance's substitution is EMPTY, not absent): **{}**",
+        no_subst.len()
+    );
+    for n in no_subst.iter().take(5) {
+        println!("  - `{n}`");
+    }
     for x in &subst_examples {
         println!("  - `{x}`");
     }
@@ -670,6 +683,8 @@ struct OneProject {
     coroutine_helper_collisions: usize,
     always_emitted_seeds: usize,
     subst_disagreements: usize,
+    subst_disagreeing_instances: usize,
+    instances_without_substitution: std::collections::BTreeSet<String>,
     subst_examples: Vec<String>,
     substitutions_recorded: usize,
     subst_comparisons: usize,
@@ -931,6 +946,13 @@ fn one_project(
         coroutine_helper_collisions: g.colliding_coroutine_helpers().len(),
         always_emitted_seeds: g.always_emitted_seeds,
         subst_disagreements: g.subst_disagreements.len(),
+        subst_disagreeing_instances: g
+            .subst_disagreements
+            .iter()
+            .map(|d| g.identity(&ws, &d.instance))
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        instances_without_substitution: g.instances_without_substitution(&ws),
         substitutions_recorded: g.substitutions.len(),
         subst_comparisons: g.subst_comparisons,
         subst_examples: g

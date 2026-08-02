@@ -306,6 +306,10 @@ pub struct InstanceGraph {
     /// How many times the walk actually COMPARED an instance's substitution
     /// against a recorded one. The denominator for `subst_disagreements`.
     pub subst_comparisons: usize,
+    /// The same, PER INSTANCE. A global count cannot say that any PARTICULAR
+    /// instance was reached from two callers, which is what the agreement
+    /// property is about.
+    pub subst_compared: BTreeMap<Instance, usize>,
     /// Callees seeded from an ALWAYS-EMITTED body (a decorator definition or a
     /// global initializer) rather than from a function root. Production treats
     /// their call edges as reachability roots (`mir_emit::reachable_fns`'s
@@ -549,6 +553,11 @@ impl InstanceGraph {
         subst: MonoSubst,
         depth: u32,
     ) {
+        // `depth` is the depth to ENTER `to` at, so a root enters at 0 and a
+        // callee at its caller's depth + 1. Roots come through here too: a
+        // non-generic instance's substitution is EMPTY, not absent, and
+        // seeding them directly is what left corpus instances with no
+        // recorded substitution at all.
         match self.substitutions.get(&to) {
             Some(prev) => {
                 // The COMPARISONS are the denominator, not the recorded
@@ -556,6 +565,7 @@ impl InstanceGraph {
                 // this arm, and counting recordings would report agreement the
                 // walk never tested.
                 self.subst_comparisons += 1;
+                *self.subst_compared.entry(to.clone()).or_insert(0) += 1;
                 if *prev != subst {
                     self.subst_disagreements.push(SubstDisagreement {
                         instance: to.clone(),
@@ -569,8 +579,19 @@ impl InstanceGraph {
             }
         }
         if self.instances.insert(to.clone()) {
-            work.push((to, subst, depth + 1));
+            work.push((to, subst, depth));
         }
+    }
+
+    /// Instances with no recorded substitution. Must be empty: a non-generic
+    /// instance's substitution is EMPTY, not absent, and a `ConcreteBody`
+    /// cannot be built for a body whose substitution the walk never kept.
+    pub fn instances_without_substitution(&self, ws: &Workspace) -> BTreeSet<String> {
+        self.instances
+            .iter()
+            .filter(|i| !self.substitutions.contains_key(*i))
+            .map(|i| self.identity(ws, i))
+            .collect()
     }
 
     /// A generic function production emits regardless of any call, that no call
@@ -943,6 +964,7 @@ pub fn build_for_target(
         substitutions: BTreeMap::new(),
         subst_disagreements: Vec::new(),
         subst_comparisons: 0,
+        subst_compared: BTreeMap::new(),
     };
 
     // A root that is generic has no instantiation of its own; it is a shared
@@ -955,9 +977,7 @@ pub fn build_for_target(
             continue;
         }
         let inst = Instance { func: r, args: Vec::new() };
-        if g.instances.insert(inst.clone()) {
-            work.push((inst, MonoSubst::default(), 0));
-        }
+        g.reach(&mut work, inst, MonoSubst::default(), 0);
     }
 
     // Globals and decorators have no `Instance` origin, so their body edges
@@ -1238,7 +1258,7 @@ fn record_call(
     if let Some(from) = from {
         g.edges.push(Edge { from: from.clone(), to: to.clone(), kind, span });
     }
-    g.reach(work, to, callee_subst, depth);
+    g.reach(work, to, callee_subst, depth + 1);
 }
 
 /// Plan S 7's rejection: a recursive edge must preserve its instance arguments.
@@ -1342,7 +1362,7 @@ fn record_witness(
             if let Some(from) = from {
                 g.edges.push(Edge { from: from.clone(), to: to.clone(), kind, span });
             }
-            g.reach(work, to, callee_subst, depth);
+            g.reach(work, to, callee_subst, depth + 1);
         }
         // See `record_call`: the classification survives the absence of a
         // `from` instance.
@@ -1415,7 +1435,7 @@ fn record_bound_next(
             if let Some(from) = from {
                 g.edges.push(Edge { from: from.clone(), to: to.clone(), kind, span });
             }
-            g.reach(work, to, callee_subst, depth);
+            g.reach(work, to, callee_subst, depth + 1);
         }
         // See `record_call`: the classification survives the absence of a
         // `from` instance.
