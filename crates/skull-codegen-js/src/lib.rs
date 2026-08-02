@@ -1372,6 +1372,17 @@ function stone_uniform_block_buffer_count() {
   }
   return n;
 }
+// The JS runtime keys blocks off the shader record itself, so there is no
+// second registry to go stale -- reported as the same number the Rock-side view
+// computes, which keeps the cross-view arm meaningful on both tiers.
+function stone_block_program_count() {
+  var n = 0;
+  for (var k in __SW.shaders) {
+    var sh = __SW.shaders[k];
+    if (sh && sh.blocks && sh.blocks.length) n++;
+  }
+  return n;
+}
 function stone_shader_bind_uniform_block(h, key, name, binding, size, fingerprint) {
   var gl = __SW.gl, sh = __SW.shaders[h];
   if (!gl || !sh) { __sw_log_once("bind_uniform_block: no shader " + h); return false; }
