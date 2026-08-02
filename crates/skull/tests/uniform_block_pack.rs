@@ -221,3 +221,54 @@ fn main() {
     );
     assert_eq!(out.split_whitespace().collect::<Vec<_>>(), ["1", "5", "6"]);
 }
+
+/// `uniform_block_id(expr)` reads only its expression's TYPE -- it must never
+/// LOWER the expression. Load-bearing rather than incidental: it is what lets
+/// `set_uniform_block_if_present` name its value twice while evaluating it once
+/// (inside the found branch), which is what keeps a `SpriteFragU` off the
+/// sprite flush's hot path when the shader declares its own group instead.
+///
+/// Measured with an observable side effect rather than by reading the emit, so
+/// the property is pinned at runtime and not by a substring that could drift.
+#[test]
+fn the_fingerprint_never_evaluates_its_argument() {
+    let out = run_luajit(
+        &format!(
+            "{}\nmain()\n",
+            emit_module(
+                r#"
+value FpProbeU { a: float, b: float }
+
+global CALLS: int = 0
+
+fn make_probe() -> FpProbeU {
+    CALLS = CALLS + 1
+    return FpProbeU { a: 1.0, b: 2.0 }
+}
+
+fn main() {
+    let id = uniform_block_id(make_probe())
+    // Non-zero proves the intrinsic really produced this type's fingerprint,
+    // so a zero `CALLS` cannot be the whole call having been dropped.
+    print(id != 0)
+    print(CALLS)
+
+    // ... and the SAME constructor does run when it is actually packed, so the
+    // zero above is the fingerprint's doing and not an inert fixture.
+    let f = native_buffer_float(8)
+    let i = native_buffer_int(8)
+    pack_uniform_block(f.ptr, i.ptr, make_probe())
+    print(CALLS)
+}
+"#
+            )
+        ),
+        "fingerprint_no_eval",
+    );
+    assert_eq!(
+        out.split_whitespace().collect::<Vec<_>>(),
+        ["true", "0", "1"],
+        "expected a real fingerprint, ZERO constructor calls for it, and one \
+         call once the value is genuinely packed"
+    );
+}
