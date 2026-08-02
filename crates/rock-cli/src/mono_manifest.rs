@@ -92,6 +92,23 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     let mut subst_examples: Vec<String> = Vec::new();
     let mut substitutions_recorded = 0usize;
     let mut subst_comparisons = 0usize;
+    let mut body_count = 0usize;
+    let mut body_expr_examined = 0usize;
+    let mut body_binding_examined = 0usize;
+    let mut body_free: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut body_free_by_slot: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut body_free_spanless = 0usize;
+    let mut body_gaps: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut body_free_examples: Vec<String> = Vec::new();
+    let mut body_unexpanded = 0usize;
+    let mut body_generics_bound = 0usize;
+    let mut body_generic_bodies = 0usize;
+    let mut body_untyped_by_kind: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut body_untyped_examples: Vec<String> = Vec::new();
+    let mut body_untyped_exprs = 0usize;
+    let mut body_untyped_bindings = 0usize;
+    let mut body_expr_slots = 0usize;
+    let mut body_binding_slots = 0usize;
     let mut span_edges: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
     let mut span_rejections: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
     let mut span_unresolved: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
@@ -192,6 +209,39 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
                         let e = map.entry(k).or_insert((0, 0));
                         e.0 += c.examined;
                         e.1 += c.spanless;
+                    }
+                }
+                body_count += p.body_census.bodies;
+                body_expr_examined += p.body_census.expr_examined;
+                body_binding_examined += p.body_census.binding_examined;
+                body_free_spanless += p.body_census.spanless;
+                for (k, v) in &p.body_census.free_by_reason {
+                    *body_free.entry(*k).or_insert(0) += v;
+                }
+                for (k, v) in &p.body_census.free_by_slot {
+                    *body_free_by_slot.entry(*k).or_insert(0) += v;
+                }
+                for (k, v) in &p.body_census.gaps {
+                    *body_gaps.entry(*k).or_insert(0) += v;
+                }
+                body_unexpanded += p.bodies_missing_for_expanded;
+                body_generics_bound += p.body_census.generics_bound;
+                body_generic_bodies += p.body_census.generic_bodies;
+                body_untyped_exprs += p.body_census.untyped_exprs;
+                for (k, v) in &p.body_census.untyped_by_kind {
+                    *body_untyped_by_kind.entry(*k).or_insert(0) += v;
+                }
+                for x in p.body_untyped_examples {
+                    if body_untyped_examples.len() < 10 {
+                        body_untyped_examples.push(x);
+                    }
+                }
+                body_untyped_bindings += p.body_census.untyped_bindings;
+                body_expr_slots += p.body_census.expr_slots;
+                body_binding_slots += p.body_census.binding_slots;
+                for x in p.body_free_examples {
+                    if body_free_examples.len() < 10 {
+                        body_free_examples.push(x);
                     }
                 }
                 shared_instances += p.shared_instances;
@@ -553,6 +603,63 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     }
     println!();
 
+    println!("## ConcreteBody type tables (plan S 9, S 15a)");
+    println!();
+    println!(
+        "Every expanded instance's `expr_types`/`binding_types`, converted from the"
+    );
+    println!("inferred `TyId`s under THAT INSTANCE's substitution. \"No free generic types\"");
+    println!("is a TOTALITY claim, not a structural one -- `MonoTy` has no generic");
+    println!("constructor, so a slot that would hold one is a recorded failure instead.");
+    println!();
+    println!("- bodies built: **{body_count}**");
+    println!(
+        "- expanded instances with NO body built (must be 0): **{}**",
+        body_unexpanded
+    );
+    for (k, v) in &body_gaps {
+        println!("  - `{k}`: {v}");
+    }
+    println!(
+        "- slots converted (the DENOMINATOR): **{body_expr_examined}** expr + \
+         **{body_binding_examined}** binding"
+    );
+    println!(
+        "- ...of those bodies, built under a NON-EMPTY substitution: **{body_generic_bodies}**"
+    );
+    println!(
+        "- declared generics resolved THROUGH the substitution (the space the zero \
+         below is measured over -- a body that never consults `subst` reports no \
+         free types for the trivial reason): **{body_generics_bound}**"
+    );
+    println!(
+        "- slots that stayed NON-CONCRETE (must be 0): **{}**",
+        body_free.values().sum::<usize>()
+    );
+    for (k, v) in &body_free {
+        println!("  - `{k}`: {v}");
+    }
+    for (k, v) in &body_free_by_slot {
+        println!("  - slot `{k}`: {v}");
+    }
+    println!("- ...of those, with no span: **{body_free_spanless}**");
+    println!(
+        "- slots in the bodies' own arenas with NO inferred type, so the tables \
+         never saw them (a free type cannot be reported for a slot that was never \
+         examined): **{body_untyped_exprs}** expr of **{body_expr_slots}**, \
+         **{body_untyped_bindings}** binding of **{body_binding_slots}**"
+    );
+    for (k, v) in &body_untyped_by_kind {
+        println!("  - `{k}`: {v}");
+    }
+    for x in &body_untyped_examples {
+        println!("  - {x}");
+    }
+    for x in &body_free_examples {
+        println!("  - {x}");
+    }
+    println!();
+
     println!("## always-emitted body seeds");
     println!();
     println!(
@@ -690,6 +797,13 @@ struct OneProject {
     subst_comparisons: usize,
     /// Instances both target views reached, and how many of those took a
     /// different SYMBOL on the two targets. The identity property.
+    body_census: skull::concrete_body::BodyCensus,
+    /// Expanded instances the table builder produced nothing for. Counted from
+    /// the graph's own `expanded` set rather than from the gap list, so a body
+    /// that was silently never attempted is still a miss.
+    bodies_missing_for_expanded: usize,
+    body_free_examples: Vec<String>,
+    body_untyped_examples: Vec<String>,
     shared_instances: usize,
     identity_conflicts: usize,
     /// Callees that resolved to a DIFFERENT `FuncRef` on JS than on Lua. If
@@ -730,7 +844,7 @@ fn one_project(
     let project_root = dir.display().to_string();
     let roots = instance_graph::emission_roots(&ws, Some(&project_root));
 
-    let g = instance_graph::build(&ws, roots.clone(), false);
+    let mut g = instance_graph::build(&ws, roots.clone(), false);
     // S 20g.4: perturbing discovery order may not change the manifest.
     let g2 = instance_graph::build(&ws, roots.clone(), true);
     let text = instance_graph::render_manifest(&ws, &g);
@@ -898,6 +1012,48 @@ fn one_project(
         }
     }
 
+    // The ConcreteBody type tables, over the walk's OWN record of which bodies
+    // it entered. Interned into `g.arena`, so a slot's type id means the same
+    // thing as an instance argument's.
+    let bodies = skull::concrete_body::build(&ws, &mut g);
+    let body_census = bodies.census();
+    let bodies_missing_for_expanded =
+        g.expanded.iter().filter(|i| !bodies.bodies.contains_key(*i)).count();
+    let body_free_examples: Vec<String> = bodies
+        .free_types
+        .iter()
+        .take(3)
+        .map(|(i, f)| {
+            format!(
+                "`{}` {} slot, `{}` at {}:{}",
+                g.identity(&ws, i),
+                f.slot.kind(),
+                f.reason.bucket(),
+                relativize(f.span.file.as_str(), root),
+                f.span.line_range.0 + 1
+            )
+        })
+        .collect();
+
+    // One example per KIND, not the first three overall: the population is
+    // dominated by one kind, so a flat head repeats it and says nothing about
+    // the others.
+    let mut seen_kinds: std::collections::BTreeSet<&'static str> = Default::default();
+    let body_untyped_examples: Vec<String> = bodies
+        .untyped
+        .iter()
+        .filter(|(_, u)| seen_kinds.insert(u.kind))
+        .map(|(i, u)| {
+            format!(
+                "`{}` `{}` at {}:{}",
+                g.identity(&ws, i),
+                u.kind,
+                relativize(u.span.file.as_str(), root),
+                u.span.line_range.0 + 1
+            )
+        })
+        .collect();
+
     let census = g.recursion_census(&ws);
     let row = ProjectRow {
         // Relative: an absolute path varies by checkout and would make the
@@ -961,6 +1117,10 @@ fn one_project(
             .take(3)
             .map(|d| g.identity(&ws, &d.instance))
             .collect(),
+        body_census,
+        bodies_missing_for_expanded,
+        body_free_examples,
+        body_untyped_examples,
         shared_instances,
         identity_conflicts,
         target_variant_switches,

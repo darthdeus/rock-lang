@@ -14,6 +14,8 @@ mod bounded_lambda_inline;
 mod capture_free_hoist;
 #[path = "closure_snapshot.rs"]
 mod closure_snapshot;
+#[path = "concrete_body.rs"]
+mod concrete_body;
 #[path = "const_hoist.rs"]
 mod const_hoist;
 #[path = "const_hot_reload.rs"]

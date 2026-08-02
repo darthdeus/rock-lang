@@ -476,6 +476,19 @@ impl MonoArena {
     ) -> Result<MonoTyId, MonoTyReason> {
         Ok(self.intern(convert(ws, inf, ty, subst)?))
     }
+
+    /// [`convert`], interned, reporting how many declared generics the
+    /// conversion resolved THROUGH `subst`.
+    pub fn convert_counting(
+        &mut self,
+        ws: &Workspace,
+        inf: &BodyInference,
+        ty: TyId,
+        subst: &MonoSubst,
+        bound: &mut usize,
+    ) -> Result<MonoTyId, MonoTyReason> {
+        Ok(self.intern(convert_counting(ws, inf, ty, subst, bound)?))
+    }
 }
 
 /// Convert an inferred `TyId` to its total logical type.
@@ -490,7 +503,23 @@ pub fn convert<S: std::hash::BuildHasher>(
     ty: TyId,
     subst: &std::collections::HashMap<VarId, MonoTy, S>,
 ) -> Result<MonoTy, MonoTyReason> {
-    convert_at(ws, inf, ty, subst, 0)
+    convert_at(ws, inf, ty, subst, 0, &mut 0)
+}
+
+/// [`convert`], reporting how many declared generics it resolved THROUGH
+/// `subst`.
+///
+/// A census over converted types cannot otherwise tell "every slot was already
+/// concrete" from "the substitution supplied every generic": both report zero
+/// failures, and only one of them exercises the substitution at all.
+pub fn convert_counting<S: std::hash::BuildHasher>(
+    ws: &Workspace,
+    inf: &BodyInference,
+    ty: TyId,
+    subst: &std::collections::HashMap<VarId, MonoTy, S>,
+    bound: &mut usize,
+) -> Result<MonoTy, MonoTyReason> {
+    convert_at(ws, inf, ty, subst, 0, bound)
 }
 
 fn convert_at<S: std::hash::BuildHasher>(
@@ -499,6 +528,7 @@ fn convert_at<S: std::hash::BuildHasher>(
     ty: TyId,
     subst: &std::collections::HashMap<VarId, MonoTy, S>,
     depth: u32,
+    bound: &mut usize,
 ) -> Result<MonoTy, MonoTyReason> {
     if depth > MAX_DEPTH {
         return Err(MonoTyReason::DepthLimit);
@@ -517,18 +547,20 @@ fn convert_at<S: std::hash::BuildHasher>(
         },
         TypeExpr::Infer(var, name) => {
             let next = inf.substitutions.get(var).ok_or(MonoTyReason::UnresolvedInfer(name))?;
-            return convert_at(ws, inf, next, subst, depth + 1);
+            return convert_at(ws, inf, next, subst, depth + 1, bound);
         }
         TypeExpr::Generic(var, name) => {
-            return subst.get(&var).cloned().ok_or(MonoTyReason::UnboundGeneric(name));
+            let bound_to = subst.get(&var).cloned().ok_or(MonoTyReason::UnboundGeneric(name))?;
+            *bound += 1;
+            return Ok(bound_to);
         }
         TypeExpr::Nullable(inner) => {
-            MonoTy::Nullable(Box::new(convert_at(ws, inf, ty.with_idx(inner), subst, depth + 1)?))
+            MonoTy::Nullable(Box::new(convert_at(ws, inf, ty.with_idx(inner), subst, depth + 1, bound)?))
         }
         TypeExpr::Tuple { elements } => {
             let mut parts = Vec::new();
             for el in elements {
-                parts.push(convert_at(ws, inf, ty.with_idx(el), subst, depth + 1)?);
+                parts.push(convert_at(ws, inf, ty.with_idx(el), subst, depth + 1, bound)?);
             }
             MonoTy::Tuple(parts)
         }
@@ -540,16 +572,16 @@ fn convert_at<S: std::hash::BuildHasher>(
             };
             let mut ps = Vec::new();
             for p in params {
-                ps.push(convert_at(ws, inf, ty.with_idx(p), subst, depth + 1)?);
+                ps.push(convert_at(ws, inf, ty.with_idx(p), subst, depth + 1, bound)?);
             }
             MonoTy::App { ctor, params: ps }
         }
         TypeExpr::Function { params, ret } => {
             let mut ps = Vec::new();
             for p in params {
-                ps.push(convert_at(ws, inf, ty.with_idx(p), subst, depth + 1)?);
+                ps.push(convert_at(ws, inf, ty.with_idx(p), subst, depth + 1, bound)?);
             }
-            let ret = convert_at(ws, inf, ty.with_idx(ret), subst, depth + 1)?;
+            let ret = convert_at(ws, inf, ty.with_idx(ret), subst, depth + 1, bound)?;
             MonoTy::Function { params: ps, ret: Box::new(ret) }
         }
     })
