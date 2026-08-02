@@ -86,6 +86,10 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     let mut coroutine_helpers = 0usize;
     let mut coroutine_collisions = 0usize;
     let mut always_emitted_seeds = 0usize;
+    let mut subst_disagreements = 0usize;
+    let mut subst_examples: Vec<String> = Vec::new();
+    let mut substitutions_recorded = 0usize;
+    let mut subst_comparisons = 0usize;
     let mut span_edges: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
     let mut span_rejections: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
     let mut span_unresolved: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
@@ -166,6 +170,14 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
                 coroutine_helpers += p.coroutine_helpers;
                 coroutine_collisions += p.coroutine_helper_collisions;
                 always_emitted_seeds += p.always_emitted_seeds;
+                subst_disagreements += p.subst_disagreements;
+                substitutions_recorded += p.substitutions_recorded;
+                subst_comparisons += p.subst_comparisons;
+                for x in p.subst_examples {
+                    if subst_examples.len() < 10 {
+                        subst_examples.push(x);
+                    }
+                }
                 for (map, from) in [
                     (&mut span_edges, &p.span_census.edges),
                     (&mut span_rejections, &p.span_census.rejections),
@@ -505,6 +517,29 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     );
     println!();
 
+    println!("## instance substitutions (plan S 9 precondition)");
+    println!();
+    println!(
+        "A `ConcreteBody`'s type tables are built under the instance's substitution, so"
+    );
+    println!("that substitution must be a FUNCTION OF THE INSTANCE. The `VarId` keys come");
+    println!("from the CALLER's inference, so nothing structural forces two callers of one");
+    println!("instance to agree.");
+    println!();
+    println!("- substitutions recorded: **{substitutions_recorded}**");
+    println!(
+        "- times the walk COMPARED a re-reached instance's substitution (the \
+         DENOMINATOR -- an instance reached once never tests agreement): \
+         **{subst_comparisons}**"
+    );
+    println!(
+        "- instances reached at DIFFERENT substitutions (must be 0): **{subst_disagreements}**"
+    );
+    for x in &subst_examples {
+        println!("  - `{x}`");
+    }
+    println!();
+
     println!("## always-emitted body seeds");
     println!();
     println!(
@@ -634,6 +669,10 @@ struct OneProject {
     coroutine_helpers: usize,
     coroutine_helper_collisions: usize,
     always_emitted_seeds: usize,
+    subst_disagreements: usize,
+    subst_examples: Vec<String>,
+    substitutions_recorded: usize,
+    subst_comparisons: usize,
     /// Instances both target views reached, and how many of those took a
     /// different SYMBOL on the two targets. The identity property.
     shared_instances: usize,
@@ -891,6 +930,15 @@ fn one_project(
         coroutine_helpers: g.coroutine_helpers.len(),
         coroutine_helper_collisions: g.colliding_coroutine_helpers().len(),
         always_emitted_seeds: g.always_emitted_seeds,
+        subst_disagreements: g.subst_disagreements.len(),
+        substitutions_recorded: g.substitutions.len(),
+        subst_comparisons: g.subst_comparisons,
+        subst_examples: g
+            .subst_disagreements
+            .iter()
+            .take(3)
+            .map(|d| g.identity(&ws, &d.instance))
+            .collect(),
         shared_instances,
         identity_conflicts,
         target_variant_switches,

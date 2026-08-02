@@ -294,6 +294,18 @@ pub struct InstanceGraph {
     /// synthesized-call population. Without it a zero synthesized-edge count
     /// cannot be told apart from a walk that asked nothing.
     pub synthesized_examined: usize,
+    /// Each instance's substitution: callee `VarId` -> its concrete type. What
+    /// a `ConcreteBody`'s type tables are built under (plan S 9). Kept because
+    /// the walk computed it and then dropped it, leaving nothing able to state
+    /// an instance's types concretely.
+    pub substitutions: BTreeMap<Instance, MonoSubst>,
+    /// Instances two callers reached with DIFFERENT substitutions. Non-empty
+    /// means the substitution is not a function of the instance, so a
+    /// `ConcreteBody` built from it would depend on discovery order.
+    pub subst_disagreements: Vec<SubstDisagreement>,
+    /// How many times the walk actually COMPARED an instance's substitution
+    /// against a recorded one. The denominator for `subst_disagreements`.
+    pub subst_comparisons: usize,
     /// Callees seeded from an ALWAYS-EMITTED body (a decorator definition or a
     /// global initializer) rather than from a function root. Production treats
     /// their call edges as reachability roots (`mir_emit::reachable_fns`'s
@@ -518,6 +530,47 @@ impl InstanceGraph {
         v.sort();
         v.dedup();
         v
+    }
+
+    /// Reach `to` at `subst`: record the instance, keep its substitution, and
+    /// worklist it the first time.
+    ///
+    /// The substitution must be a FUNCTION OF THE INSTANCE -- a specialized
+    /// body's shape comes from declarations plus the instance substitution, so
+    /// two callers reaching one instance must agree on it. That is not
+    /// self-evident: the `VarId` keys come from `generic_var_of` reading the
+    /// CALLER's `BodyInference`, so nothing structural forces agreement, and
+    /// the worklist keeps only whichever arrived first. Disagreements are
+    /// recorded rather than resolved by arrival order.
+    fn reach(
+        &mut self,
+        work: &mut Vec<(Instance, MonoSubst, u32)>,
+        to: Instance,
+        subst: MonoSubst,
+        depth: u32,
+    ) {
+        match self.substitutions.get(&to) {
+            Some(prev) => {
+                // The COMPARISONS are the denominator, not the recorded
+                // substitutions: an instance reached exactly once never runs
+                // this arm, and counting recordings would report agreement the
+                // walk never tested.
+                self.subst_comparisons += 1;
+                if *prev != subst {
+                    self.subst_disagreements.push(SubstDisagreement {
+                        instance: to.clone(),
+                        kept: prev.clone(),
+                        discarded: subst.clone(),
+                    });
+                }
+            }
+            None => {
+                self.substitutions.insert(to.clone(), subst.clone());
+            }
+        }
+        if self.instances.insert(to.clone()) {
+            work.push((to, subst, depth + 1));
+        }
     }
 
     /// A generic function production emits regardless of any call, that no call
@@ -790,6 +843,14 @@ pub struct RootHole {
     pub instances: usize,
 }
 
+/// One instance reached at two different substitutions.
+#[derive(Debug, Clone)]
+pub struct SubstDisagreement {
+    pub instance: Instance,
+    pub kept: MonoSubst,
+    pub discarded: MonoSubst,
+}
+
 /// A spanless population and the population it was measured over.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SpanCoverage {
@@ -879,6 +940,9 @@ pub fn build_for_target(
         storage_failures: Vec::new(),
         synthesized_examined: 0,
         always_emitted_seeds: 0,
+        substitutions: BTreeMap::new(),
+        subst_disagreements: Vec::new(),
+        subst_comparisons: 0,
     };
 
     // A root that is generic has no instantiation of its own; it is a shared
@@ -1174,9 +1238,7 @@ fn record_call(
     if let Some(from) = from {
         g.edges.push(Edge { from: from.clone(), to: to.clone(), kind, span });
     }
-    if g.instances.insert(to.clone()) {
-        work.push((to, callee_subst, depth + 1));
-    }
+    g.reach(work, to, callee_subst, depth);
 }
 
 /// Plan S 7's rejection: a recursive edge must preserve its instance arguments.
@@ -1280,9 +1342,7 @@ fn record_witness(
             if let Some(from) = from {
                 g.edges.push(Edge { from: from.clone(), to: to.clone(), kind, span });
             }
-            if g.instances.insert(to.clone()) {
-                work.push((to, callee_subst, depth + 1));
-            }
+            g.reach(work, to, callee_subst, depth);
         }
         // See `record_call`: the classification survives the absence of a
         // `from` instance.
@@ -1355,9 +1415,7 @@ fn record_bound_next(
             if let Some(from) = from {
                 g.edges.push(Edge { from: from.clone(), to: to.clone(), kind, span });
             }
-            if g.instances.insert(to.clone()) {
-                work.push((to, callee_subst, depth + 1));
-            }
+            g.reach(work, to, callee_subst, depth);
         }
         // See `record_call`: the classification survives the absence of a
         // `from` instance.

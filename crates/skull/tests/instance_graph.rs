@@ -1854,6 +1854,58 @@ fn main() {
     );
 }
 
+/// Plan S 9's precondition: a `ConcreteBody`'s type tables are built under the
+/// instance's substitution, so that substitution must be a FUNCTION OF THE
+/// INSTANCE. Nothing structural forces it -- the `VarId` keys come from
+/// `generic_var_of` reading the CALLER's `BodyInference`, and the worklist
+/// keeps whichever substitution arrived first -- so two callers of one instance
+/// could disagree and the kept one would depend on discovery order.
+///
+/// The fixture reaches one instance from several callers, and the assertion is
+/// on the COMPARISON count: an instance reached exactly once never tests
+/// agreement, so a zero over recorded substitutions would say nothing.
+#[test]
+fn an_instance_substitution_does_not_depend_on_which_caller_reached_it() {
+    let (ws, g) = graph_of(
+        r#"
+fn ident<T>(x: T) -> T { return x }
+fn hold<T>(v: T) -> T { return ident(v) }
+fn a() -> int { return ident(1) }
+fn b() -> int { return hold(2) }
+fn c() -> string { return ident("s") }
+fn d() -> string { return hold("t") }
+fn main() { a(); b(); c(); d() }
+"#,
+    );
+    assert!(
+        g.subst_comparisons > 0,
+        "no instance was reached twice, so the fixture never tested agreement"
+    );
+    let disagreements: Vec<String> = g
+        .subst_disagreements
+        .iter()
+        .map(|d| g.identity(&ws, &d.instance))
+        .collect();
+    assert!(
+        disagreements.is_empty(),
+        "{} of {} comparisons found an instance reached at two substitutions: {disagreements:?}",
+        g.subst_disagreements.len(),
+        g.subst_comparisons
+    );
+    // The substitution is KEPT, not merely checked -- `ConcreteBody` needs it,
+    // and the walk used to drop it on the floor.
+    for i in &g.instances {
+        if i.args.is_empty() {
+            continue;
+        }
+        assert!(
+            g.substitutions.contains_key(i),
+            "instance `{}` has arguments but no recorded substitution",
+            g.identity(&ws, i)
+        );
+    }
+}
+
 /// `record_bound_next`'s own `Unresolved` write. The three recorders do NOT
 /// share one: `record_call`, `record_witness` and `record_bound_next` each push
 /// independently, so covering the `iter` half of a `for` protocol says nothing
