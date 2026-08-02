@@ -360,7 +360,8 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     }
     println!("- expansions cut by the depth cap: **{}**", closure_capped.len());
     println!(
-        "- generic emission roots no call instantiates (production emits these): **{}**",
+        "- uncovered bare-name obligations (production emits these as shared \
+         generic bodies): **{}**",
         uninst_names.len()
     );
     println!(

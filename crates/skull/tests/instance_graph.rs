@@ -1765,6 +1765,128 @@ fn main() { let y = F(1) }
     );
 }
 
+/// `record_call`'s own `Unresolved` write, reached the way the corpus reached
+/// it: `instantiate` answers `no-bindings` when a generic call has no
+/// `call_generic_bindings` record. That is not a poisoned program -- the plan
+/// measured `no-bindings` 126 times on valid corpus code before the graph fix
+/// -- so the fixture removes the RECORD from a successfully inferred workspace
+/// rather than corrupting the source.
+///
+/// `BodyInference` is public result data, so this reaches the recorder without
+/// inventing an invalid program, and it is what makes a `Span::unknown`
+/// mutation in `record_call` visible.
+#[test]
+fn a_call_with_no_binding_record_is_unresolved_with_a_span() {
+    let mut ws = check(
+        r#"
+fn ident<T>(x: T) -> T { return x }
+fn main() { let a = ident(1) }
+"#,
+    );
+    let removed = drop_generic_binding_records(&mut ws, "main");
+    assert!(removed > 0, "the fixture removed no binding record, so it proves nothing");
+    let roots = instance_graph::emission_roots(&ws, None);
+    let g = instance_graph::build(&ws, roots, false);
+    // Asserted on CONTENT, not on a count: not every removed record yields a
+    // site (`main`'s other generic-call record is `get`, whose callee the walk
+    // resolves without one), so an equality against `removed` would be a number
+    // the fixture cannot justify.
+    let sites: Vec<&instance_graph::Unresolved> =
+        g.unresolved.iter().filter(|u| u.reason == "no-bindings").collect();
+    let callees: Vec<&str> = sites
+        .iter()
+        .map(|u| ws.module(u.callee.module).functions[u.callee.func].name.as_str())
+        .collect();
+    assert_eq!(
+        callees,
+        vec!["ident"],
+        "expected exactly the `ident` call to lose its instantiation, got {:?}",
+        g.unresolved.iter().map(|u| u.reason).collect::<Vec<_>>()
+    );
+    assert!(
+        sites.iter().all(|u| !instance_graph::is_spanless(&u.span)),
+        "a `no-bindings` unresolved call carries no span: {sites:?}"
+    );
+}
+
+/// The witness recorders' `Unresolved` write, same method: strip the
+/// `for`-protocol witness generics that `instantiate_witness` reads.
+#[test]
+fn a_witness_with_no_generic_record_is_unresolved_with_a_span() {
+    let mut ws = check(
+        r#"
+fn main() {
+    let xs: [int] = [1, 2, 3]
+    let t = 0
+    for x in xs { t = t + x }
+}
+"#,
+    );
+    let removed = drop_witness_generic_records(&mut ws, "main");
+    assert!(removed > 0, "the fixture removed no witness record, so it proves nothing");
+    let roots = instance_graph::emission_roots(&ws, None);
+    let g = instance_graph::build(&ws, roots, false);
+    let sites: Vec<&instance_graph::Unresolved> = g
+        .unresolved
+        .iter()
+        .filter(|u| u.reason == "witness-generic-unbound" || u.reason == "no-bindings")
+        .collect();
+    assert!(
+        !sites.is_empty(),
+        "stripping the witness generics produced no unresolved site: {:?}",
+        g.unresolved.iter().map(|u| u.reason).collect::<Vec<_>>()
+    );
+    assert!(
+        sites.iter().all(|u| !instance_graph::is_spanless(&u.span)),
+        "a witness unresolved site carries no span: {sites:?}"
+    );
+}
+
+/// Remove every `call_generic_bindings` entry in `fn_name`'s body, returning
+/// how many were dropped. The COUNT is the denominator the caller asserts
+/// against -- a helper that silently removed nothing would make its test vacuous.
+fn drop_generic_binding_records(ws: &mut Workspace, fn_name: &str) -> usize {
+    let owner = body_owner_of(ws, fn_name);
+    let mut n = 0;
+    for inference in ws.inferences.iter_mut().flatten() {
+        if let Some(inf) = inference.per_fn.get_mut(&owner) {
+            n += inf.call_generic_bindings.len();
+            inf.call_generic_bindings.clear();
+        }
+    }
+    n
+}
+
+/// Same, for the `for`-protocol witness generics `instantiate_witness` reads.
+fn drop_witness_generic_records(ws: &mut Workspace, fn_name: &str) -> usize {
+    let owner = body_owner_of(ws, fn_name);
+    let mut n = 0;
+    for inference in ws.inferences.iter_mut().flatten() {
+        if let Some(inf) = inference.per_fn.get_mut(&owner) {
+            for info in inf.for_iter_protocol.values_mut() {
+                if let Some(w) = info.iter.as_mut() {
+                    if !w.generics.is_empty() {
+                        w.generics.clear();
+                        n += 1;
+                    }
+                }
+            }
+        }
+    }
+    n
+}
+
+fn body_owner_of(ws: &Workspace, fn_name: &str) -> bone_semantic::hir::BodyOwner {
+    for module in ws.modules.iter() {
+        for (fid, f) in module.functions.iter() {
+            if f.name.as_str() == fn_name {
+                return bone_semantic::hir::BodyOwner::Function(fid);
+            }
+        }
+    }
+    panic!("no fn named `{fn_name}`");
+}
+
 /// The positive fixture for the `Unresolved` axis of the span census.
 ///
 /// The corpus's Lua view records ZERO unresolved sites, so without this the
@@ -1773,12 +1895,10 @@ fn main() { let y = F(1) }
 /// supplies the population: a column intercept's runtime entry has no JS
 /// sibling, so the synthesized call resolves to nothing on that target.
 ///
-/// This covers ONE of the four `Unresolved` recorders -- the
-/// `compiler-generated-entry-missing-for-target` write in `walk_body_edges`.
-/// The writes in `record_call`, `record_witness` and `record_bound_next` need a
-/// `Fail::Unresolved`, whose reasons (`recovery-error`, `no-node`,
-/// `depth-limit`) are compiler invariants a program passing `semantic_pass`
-/// cannot produce, so no valid fixture reaches them.
+/// This covers the `compiler-generated-entry-missing-for-target` write in
+/// `walk_body_edges`. The `record_call` and witness recorders are covered by
+/// `a_call_with_no_binding_record_is_unresolved_with_a_span` and
+/// `a_witness_with_no_generic_record_is_unresolved_with_a_span`.
 #[test]
 fn an_unresolved_call_site_keeps_its_span() {
     use bone_semantic::hir::FnBackend;

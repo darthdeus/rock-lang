@@ -687,9 +687,15 @@ pub struct Closure {
     pub unexpanded: BTreeSet<String>,
     /// Expansion cut by [`MAX_INSTANTIATION_DEPTH`].
     pub depth_capped: BTreeSet<String>,
-    /// Generic emission roots no call instantiates. Production emits these as
-    /// shared generic bodies, so a non-empty set is the shared-body surface that
-    /// still has no instance -- the honest remaining hole, stated by name.
+    /// Names with an UNCOVERED BARE-NAME OBLIGATION, whatever their
+    /// [`RootHole`] cause. Production emits these as shared generic bodies
+    /// callable under a bare name, so a non-empty set is the shared-body
+    /// surface, stated by name.
+    ///
+    /// NOT "roots no call instantiates": six of the corpus's have concrete
+    /// instances from Rock call sites. Those instances discharge the call
+    /// sites and not the bare-name entry, so the name stays here -- dropping
+    /// the instanced ones is the falsely-green reading.
     pub uninstantiated_roots: BTreeSet<String>,
     /// LOGICAL symbol -> the distinct instance identities encoding to it. Any
     /// entry means the encoder is not injective. The FINAL emitted spelling is
@@ -705,7 +711,8 @@ pub struct Closure {
 }
 
 impl Closure {
-    /// Every hole, including generic emission roots no call instantiates.
+    /// Every hole, including a generic emission root whose bare-name
+    /// obligation nothing discharges.
     pub fn is_closed(&self) -> bool {
         self.unexpanded.is_empty()
             && self.depth_capped.is_empty()
