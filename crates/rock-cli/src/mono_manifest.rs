@@ -59,7 +59,7 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     let mut unresolved_examples: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut rejection_kinds: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut rejection_examples: Vec<String> = Vec::new();
-    let mut uninst_names: std::collections::BTreeSet<String> = Default::default();
+    let mut uninst_names: BTreeMap<String, instance_graph::RootHole> = BTreeMap::new();
     let mut closure_unexpanded: std::collections::BTreeSet<String> = Default::default();
     let mut closure_capped: std::collections::BTreeSet<String> = Default::default();
     let mut synth_examined = 0usize;
@@ -110,7 +110,14 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
                 for (k, v) in p.reasons {
                     *unresolved_reasons.entry(k).or_insert(0) += v;
                 }
-                uninst_names.extend(p.uninstantiated_root_names);
+                for (name, hole) in p.uninstantiated_root_names {
+                    let e = uninst_names.entry(name).or_insert_with(
+                        instance_graph::RootHole::default,
+                    );
+                    e.generic_root |= hole.generic_root;
+                    e.always_emitted_reasons.extend(hole.always_emitted_reasons);
+                    e.instances += hole.instances;
+                }
                 synth_examined += p.synthesized_examined;
                 for (k, v) in p.storage_failures {
                     *storage_failures.entry(k).or_insert(0) += v;
@@ -230,9 +237,32 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     if !uninst_names.is_empty() {
         println!();
         println!("uninstantiated generic roots, union over projects ({}):", uninst_names.len());
-        for n in &uninst_names {
-            println!("- `{n}`");
+        println!();
+        println!("| name | cause | instances elsewhere |");
+        println!("|---|---|---:|");
+        for (n, h) in &uninst_names {
+            let mut cause: Vec<String> = Vec::new();
+            if h.generic_root {
+                cause.push("generic emission root".to_string());
+            }
+            for r in &h.always_emitted_reasons {
+                cause.push(format!("always-emitted call: `{r}`"));
+            }
+            println!(
+                "| `{n}` | {} | {} |",
+                cause.join("; "),
+                if h.instances == 0 { "0".to_string() } else { format!("**{}**", h.instances) }
+            );
         }
+        println!();
+        println!(
+            "`instances elsewhere` is NOT a closed hole. A generic emission root's \
+             obligation is to exist under a BARE name that opaque Lua text can call, and \
+             concrete instances from Rock call sites do not discharge it -- a boundary \
+             contract has to. The column separates \"no concrete body of this function \
+             exists at all\" from \"the Rock calls are covered and only the opaque-caller \
+             entry is not\"."
+        );
     }
     println!();
     println!(
@@ -551,7 +581,7 @@ struct OneProject {
     reasons: BTreeMap<String, usize>,
     examples: BTreeMap<String, Vec<String>>,
     census: instance_graph::RecursionCensus,
-    uninstantiated_root_names: std::collections::BTreeSet<String>,
+    uninstantiated_root_names: BTreeMap<String, instance_graph::RootHole>,
     closure: skull::instance_graph::Closure,
     synthesized_examined: usize,
     /// Storage-query failures by `MonoTyReason`, kept apart from the rejection

@@ -260,10 +260,10 @@ pub struct InstanceGraph {
     pub unresolved: Vec<Unresolved>,
     /// Constructions the model refuses. See [`RejectionKind`].
     pub rejections: Vec<Rejection>,
-    /// Generic functions that are roots but that no call instantiates -- they
-    /// have no concrete instance to emit, which is the shared-generic-body
-    /// surface stated as a count.
-    pub uninstantiated_roots: BTreeSet<String>,
+    /// Names with no concrete instance covering the obligation that put them
+    /// here, BY CAUSE. See [`RootHole`]: one set carrying several different
+    /// facts could only ever be read as the weakest of them.
+    pub uninstantiated_roots: BTreeMap<String, RootHole>,
     /// Instances whose expansion was cut by [`MAX_INSTANTIATION_DEPTH`].
     pub depth_capped: Vec<Instance>,
     /// Instances whose Rock body the walk actually entered and enumerated the
@@ -494,7 +494,10 @@ impl InstanceGraph {
             instances: self.instances.len(),
             unexpanded,
             depth_capped: self.depth_capped.iter().map(|i| self.identity(ws, i)).collect(),
-            uninstantiated_roots: self.uninstantiated_roots.clone(),
+            // Every hole, whatever its cause. A root WITH instances is still a
+            // hole: the instances discharge its Rock call sites, never the
+            // bare-name obligation that made it a root.
+            uninstantiated_roots: self.uninstantiated_roots.keys().cloned().collect(),
             colliding_symbols: colliding,
             expanded: self.expanded.len(),
         }
@@ -515,6 +518,23 @@ impl InstanceGraph {
         v.sort();
         v.dedup();
         v
+    }
+
+    /// A generic function production emits regardless of any call, that no call
+    /// instantiates.
+    fn record_generic_root(&mut self, name: String) {
+        self.uninstantiated_roots.entry(name).or_default().generic_root = true;
+    }
+
+    /// A call from an always-emitted body whose instantiation failed. There is
+    /// no `from` instance to file an [`Unresolved`] or a [`Rejection`] against,
+    /// but the REASON is the same one those carry and is kept.
+    fn record_always_emitted_hole(&mut self, name: String, reason: &'static str) {
+        self.uninstantiated_roots
+            .entry(name)
+            .or_default()
+            .always_emitted_reasons
+            .insert(reason);
     }
 
     /// Which recorded facts could produce a located error and which could not
@@ -673,6 +693,36 @@ impl Closure {
     }
 }
 
+/// Why one name has no concrete instance covering its obligation.
+///
+/// The two causes are genuinely different obligations and were previously one
+/// unlabelled set of names:
+///
+/// - a generic EMISSION ROOT is a body production emits regardless of any call
+///   (`@nomangle`, `extern`, `@test`/`@sim`, a decorator root), so its
+///   obligation is to exist under a BARE name that opaque Lua text can call.
+///   Instances cannot discharge it; a boundary contract has to.
+/// - a call from an ALWAYS-EMITTED body (a global initializer or a decorator
+///   definition) that failed to instantiate is an ordinary unresolved call that
+///   merely has no `from` instance to be filed against. Its reason is the same
+///   `Fail::reason` an instantiated body's call would carry.
+///
+/// `instances` is the finding the note asked for: a root can be listed here and
+/// still have concrete instances from OTHER call sites. That does not close the
+/// hole -- the bare-name obligation survives -- but it separates "no concrete
+/// body of this function exists at all" from "the Rock calls are covered and
+/// only the opaque-caller entry is not".
+#[derive(Debug, Default, Clone)]
+pub struct RootHole {
+    /// A generic function that is an emission root no call instantiates.
+    pub generic_root: bool,
+    /// Reasons a call from an always-emitted body could not instantiate it.
+    /// Empty when [`Self::generic_root`] is the only cause.
+    pub always_emitted_reasons: BTreeSet<&'static str>,
+    /// Instances of this same function the walk created from other call sites.
+    pub instances: usize,
+}
+
 /// A spanless population and the population it was measured over.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SpanCoverage {
@@ -747,7 +797,7 @@ pub fn build_for_target(
         edges: Vec::new(),
         unresolved: Vec::new(),
         rejections: Vec::new(),
-        uninstantiated_roots: BTreeSet::new(),
+        uninstantiated_roots: BTreeMap::new(),
         depth_capped: Vec::new(),
         expanded: BTreeSet::new(),
         target,
@@ -766,7 +816,7 @@ pub fn build_for_target(
     for r in roots {
         let f = &ws.module(r.module).functions[r.func];
         if !f.generics.is_empty() {
-            g.uninstantiated_roots.insert(mangle_fn(ws, f));
+            g.record_generic_root(mangle_fn(ws, f));
             continue;
         }
         let inst = Instance { func: r, args: Vec::new() };
@@ -824,6 +874,22 @@ pub fn build_for_target(
         );
     }
 
+    // Which holes nevertheless have concrete instances from other call sites.
+    // A post-pass because a root is recorded before the worklist runs, so at
+    // insertion time no instance of it exists yet -- which is how a name a
+    // later call fully instantiated went on reading as having no concrete body
+    // at all.
+    if !g.uninstantiated_roots.is_empty() {
+        let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+        for i in &g.instances {
+            let f = &ws.module(i.func.module).functions[i.func.func];
+            *counts.entry(mangle_fn(ws, f)).or_default() += 1;
+        }
+        for (name, hole) in g.uninstantiated_roots.iter_mut() {
+            hole.instances = counts.get(name).copied().unwrap_or(0);
+        }
+    }
+
     record_inline_body_deps(&mut g, ws);
     detect_changing_instance_recursion(&mut g, ws);
     classify_boundaries(&mut g, ws);
@@ -875,7 +941,7 @@ fn walk_body_edges(
                 });
             } else {
                 g.always_emitted_seeds += 1;
-                g.uninstantiated_roots.insert(mangle_fn(ws, cf));
+                g.record_always_emitted_hole(mangle_fn(ws, cf), "generic-fn-value");
             }
         }
 
@@ -984,8 +1050,11 @@ fn record_call(
     let cf = &ws.module(callee.module).functions[callee.func];
     let (args, callee_subst) = match instantiate(&mut g.arena, ws, inf, cf, bindings, subst) {
         Ok(v) => v,
-        Err(Fail::Unconstrained(_)) if from.is_none() => {
-            g.uninstantiated_roots.insert(mangle_fn(ws, cf));
+        // Both failure classes reach the same place from an always-emitted
+        // body, and both keep the reason an instantiated body's call would
+        // carry. Ordered before the classifying arms so that guard wins.
+        Err(fail) if from.is_none() => {
+            g.record_always_emitted_hole(mangle_fn(ws, cf), fail.reason());
             return;
         }
         Err(Fail::Unconstrained(_)) => {
@@ -1000,10 +1069,6 @@ fn record_call(
                      no concrete type to instantiate it at"
                 ),
             });
-            return;
-        }
-        Err(_) if from.is_none() => {
-            g.uninstantiated_roots.insert(mangle_fn(ws, cf));
             return;
         }
         Err(fail) => {
@@ -1130,8 +1195,11 @@ fn record_witness(
                 work.push((to, callee_subst, depth + 1));
             }
         }
-        Err(Fail::Unconstrained(_)) if from.is_none() => {
-            g.uninstantiated_roots.insert(mangle_fn(ws, cf));
+        // Both failure classes reach the same place from an always-emitted
+        // body, and both keep the reason an instantiated body's call would
+        // carry. Ordered before the classifying arms so that guard wins.
+        Err(fail) if from.is_none() => {
+            g.record_always_emitted_hole(mangle_fn(ws, cf), fail.reason());
         }
         Err(Fail::Unconstrained(_)) => {
             g.rejections.push(Rejection {
@@ -1143,9 +1211,6 @@ fn record_witness(
                     mangle_fn(ws, cf)
                 ),
             });
-        }
-        Err(_) if from.is_none() => {
-            g.uninstantiated_roots.insert(mangle_fn(ws, cf));
         }
         Err(fail) => {
             g.unresolved.push(Unresolved {
@@ -1195,8 +1260,11 @@ fn record_bound_next(
                 work.push((to, callee_subst, depth + 1));
             }
         }
-        Err(Fail::Unconstrained(_)) if from.is_none() => {
-            g.uninstantiated_roots.insert(mangle_fn(ws, cf));
+        // Both failure classes reach the same place from an always-emitted
+        // body, and both keep the reason an instantiated body's call would
+        // carry. Ordered before the classifying arms so that guard wins.
+        Err(fail) if from.is_none() => {
+            g.record_always_emitted_hole(mangle_fn(ws, cf), fail.reason());
         }
         Err(Fail::Unconstrained(_)) => {
             g.rejections.push(Rejection {
@@ -1208,9 +1276,6 @@ fn record_bound_next(
                     mangle_fn(ws, cf)
                 ),
             });
-        }
-        Err(_) if from.is_none() => {
-            g.uninstantiated_roots.insert(mangle_fn(ws, cf));
         }
         Err(fail) => {
             g.unresolved.push(Unresolved {

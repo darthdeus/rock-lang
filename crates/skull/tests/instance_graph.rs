@@ -1515,6 +1515,95 @@ fn synthesized_targets_belong_to_the_runtime_catalogue() {
     assert!(missing.is_empty(), "synthesized targets outside the catalogue: {missing:?}");
 }
 
+/// A generic emission root can have concrete instances from other call sites
+/// and STILL be a hole. Its obligation is to exist under a BARE name that
+/// opaque Lua text can call; instances do not discharge that, a boundary
+/// contract has to.
+///
+/// The root is recorded before the worklist runs, so at insertion time no
+/// instance of it exists -- which is how a name that later calls fully
+/// instantiated went on reading as having no concrete body at all. Both halves
+/// are asserted here: the count is visible, and the hole does not close.
+#[test]
+fn a_root_with_instances_reports_them_and_stays_a_hole() {
+    let (ws, g) = graph_of(
+        r#"
+fn main() {
+    let xs: [int] = []
+    xs.push(1)
+    let ys: [string] = []
+    ys.push("a")
+}
+"#,
+    );
+    let hole = g
+        .uninstantiated_roots
+        .get("vec_push")
+        .unwrap_or_else(|| panic!("`vec_push` is not a root: {:?}", g.uninstantiated_roots.keys()));
+    assert!(hole.generic_root, "`vec_push` was recorded under the wrong cause: {hole:?}");
+    assert!(
+        hole.instances >= 2,
+        "`vec_push` is called at two element types but reports {} instances",
+        hole.instances
+    );
+    assert!(
+        g.closure(&ws).uninstantiated_roots.contains("vec_push"),
+        "a root with instances stopped counting as a hole -- the falsely-green reading"
+    );
+    assert!(!g.closure(&ws).is_closed(), "the corpus hole vanished from the closure gate");
+}
+
+/// The OTHER cause: a call from an always-emitted body (here a global
+/// initializer) whose instantiation fails. It has no `from` instance to be
+/// filed against as an [`Unresolved`] or a [`Rejection`], but it carries the
+/// same reason those would.
+///
+/// The corpus has NO population for this cause -- all 14 of its holes are
+/// generic emission roots -- so this fixture is its only evidence.
+///
+/// The fixture is built with a project root the test module does NOT sit under,
+/// which makes every fn in it a library fn. Without that, `<test>` is the
+/// project and `pick` is an emission root too, so the two causes coincide and
+/// the fixture cannot show that this one fires on its own.
+#[test]
+fn an_always_emitted_call_hole_keeps_its_reason() {
+    let ws = check(
+        r#"
+fn pick<T>() -> int { return 1 }
+global G: int = pick()
+fn main() { let x = G }
+"#,
+    );
+    let roots = instance_graph::emission_roots(&ws, Some("<project>"));
+    let g = instance_graph::build(&ws, roots, false);
+    let hole = g.uninstantiated_roots.get("pick_ret_int").unwrap_or_else(|| {
+        panic!("no hole recorded for `pick`: {:?}", g.uninstantiated_roots)
+    });
+    assert!(
+        !hole.always_emitted_reasons.is_empty(),
+        "the always-emitted hole discarded its failure reason: {hole:?}"
+    );
+    assert!(
+        !hole.generic_root,
+        "the fixture did not isolate the cause -- `pick` is an emission root here too: {hole:?}"
+    );
+    // CONTROL: the same failure from an INSTANTIATED body is the stronger
+    // classification -- a rejection with a span -- and must not be filed here.
+    let (_ws2, g2) = graph_of(
+        r#"
+fn pick<T>() -> int { return 1 }
+fn main() { let x = pick() }
+"#,
+    );
+    assert!(
+        g2.rejections
+            .iter()
+            .any(|r| r.kind == instance_graph::RejectionKind::UnconstrainedTypeVar),
+        "the same call from a function body did not reject: {:?}",
+        g2.rejections
+    );
+}
+
 /// Plan S 2: "Retain each edge's source span, for good errors at unresolved
 /// boundaries." An edge whose span is unknown cannot produce one, so the
 /// property is per-EDGE and not per-edge-kind: one spanless edge in a kind that
