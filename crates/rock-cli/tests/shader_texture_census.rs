@@ -161,8 +161,8 @@ const EXPECTED: &[(&str, &str, &str)] = &[
     ("sprite_batch_vert+sprite_batch_frag", "uShadowmapTex", "bare"),
     ("sprite_batch_vert+sprite_batch_frag", "uTexture", "bare"),
     ("text_vert+text_frag", "text", "bare"),
-    ("tonemap_frag", "bloom_tex", "bare"),
-    ("tonemap_frag", "scene_tex", "bare"),
+    ("tonemap_frag", "bloom_tex", "slot 1"),
+    ("tonemap_frag", "scene_tex", "slot 0"),
     ("ui_vert+ui_dissolve_frag", "uTexture", "bare"),
 ];
 
