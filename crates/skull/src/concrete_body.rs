@@ -21,13 +21,13 @@
 
 use std::collections::BTreeMap;
 
-use bone_semantic::hir::{BindingInfo, Body, BodyOwner, Expr};
+use bone_semantic::hir::{BindingInfo, Body, Expr};
 use bone_semantic::inference::{BodyInference, Workspace};
-use bone_semantic::prelude::{Span, TyId};
-use comfy_la_arena::Idx;
+use bone_semantic::prelude::Span;
+use comfy_la_arena::{ArenaMap, Idx};
 use skull_mir::monoty::{MonoArena, MonoSubst, MonoTyId, MonoTyReason};
 
-use crate::instance_graph::{is_spanless, Instance, InstanceGraph};
+use crate::instance_graph::{function_body, is_spanless, FunctionBody, Instance, InstanceGraph};
 
 /// Which table a slot belongs to. Kept apart in the census because the two have
 /// independent denominators: a body with no locals still has expressions.
@@ -49,8 +49,8 @@ impl Slot {
 /// One instance's concrete type tables.
 pub struct ConcreteBody {
     pub instance: Instance,
-    pub expr_types: BTreeMap<Idx<Expr>, MonoTyId>,
-    pub binding_types: BTreeMap<Idx<BindingInfo>, MonoTyId>,
+    pub expr_types: ArenaMap<Idx<Expr>, MonoTyId>,
+    pub binding_types: ArenaMap<Idx<BindingInfo>, MonoTyId>,
 }
 
 /// A slot whose inferred type did not convert under the instance's
@@ -75,6 +75,8 @@ pub enum BodyGap {
     NoInference,
     /// The module has no `Body` for this function.
     NoBody,
+    /// The body was relowered after this inference was recorded.
+    StaleInference,
 }
 
 impl BodyGap {
@@ -83,6 +85,7 @@ impl BodyGap {
             Self::NoSubstitution => "no-substitution",
             Self::NoInference => "no-inference",
             Self::NoBody => "no-body",
+            Self::StaleInference => "stale-inference",
         }
     }
 }
@@ -237,8 +240,8 @@ fn expr_kind(e: &Expr) -> &'static str {
 /// One body's tables under one substitution.
 #[derive(Default)]
 pub struct Converted {
-    pub expr_types: BTreeMap<Idx<Expr>, MonoTyId>,
-    pub binding_types: BTreeMap<Idx<BindingInfo>, MonoTyId>,
+    pub expr_types: ArenaMap<Idx<Expr>, MonoTyId>,
+    pub binding_types: ArenaMap<Idx<BindingInfo>, MonoTyId>,
     pub failures: Vec<FreeType>,
     pub expr_examined: usize,
     pub binding_examined: usize,
@@ -276,15 +279,9 @@ pub fn convert_body(
     subst: &MonoSubst,
 ) -> Converted {
     let mut c = Converted::default();
-    // Sorted, because both tables and the failure list are compared and
-    // rendered: `ArenaMap` iteration order is an arena-position artifact, and a
-    // report ordered by it is not diffable across runs.
-    let mut exprs: Vec<(Idx<Expr>, TyId)> =
-        inf.expr_types.iter().map(|(e, ty)| (e, *ty)).collect();
-    exprs.sort_by_key(|(e, _)| *e);
-    for (e, ty) in exprs {
+    for (e, ty) in inf.expr_types.iter() {
         c.expr_examined += 1;
-        match arena.convert_counting(ws, inf, ty, subst, &mut c.generics_bound) {
+        match arena.convert_counting(ws, inf, *ty, subst, &mut c.generics_bound) {
             Ok(id) => {
                 c.expr_types.insert(e, id);
             }
@@ -311,12 +308,9 @@ pub fn convert_body(
         }
     }
 
-    let mut bindings: Vec<(Idx<BindingInfo>, TyId)> =
-        inf.binding_types.iter().map(|(b, ty)| (b, *ty)).collect();
-    bindings.sort_by_key(|(b, _)| *b);
-    for (b, ty) in bindings {
+    for (b, ty) in inf.binding_types.iter() {
         c.binding_examined += 1;
-        match arena.convert_counting(ws, inf, ty, subst, &mut c.generics_bound) {
+        match arena.convert_counting(ws, inf, *ty, subst, &mut c.generics_bound) {
             Ok(id) => {
                 c.binding_types.insert(b, id);
             }
@@ -338,18 +332,24 @@ pub fn build(ws: &Workspace, g: &mut InstanceGraph) -> ConcreteBodies {
     let mut out = ConcreteBodies::default();
     let expanded: Vec<Instance> = g.expanded.iter().cloned().collect();
     for inst in expanded {
-        let owner = BodyOwner::Function(inst.func.func);
         let Some(subst) = g.substitutions.get(&inst).cloned() else {
             out.gaps.push(MissingBody { instance: inst, gap: BodyGap::NoSubstitution });
             continue;
         };
-        let Some(inf) = ws.inference(inst.func.module).and_then(|ir| ir.per_fn.get(&owner)) else {
-            out.gaps.push(MissingBody { instance: inst, gap: BodyGap::NoInference });
-            continue;
-        };
-        let Some(body) = ws.module(inst.func.module).bodies.get(&owner) else {
-            out.gaps.push(MissingBody { instance: inst, gap: BodyGap::NoBody });
-            continue;
+        let (inf, body) = match function_body(ws, inst.func) {
+            FunctionBody::Ready { inf, body } => (inf, body),
+            FunctionBody::NoInference => {
+                out.gaps.push(MissingBody { instance: inst, gap: BodyGap::NoInference });
+                continue;
+            }
+            FunctionBody::NoBody => {
+                out.gaps.push(MissingBody { instance: inst, gap: BodyGap::NoBody });
+                continue;
+            }
+            FunctionBody::StaleInference => {
+                out.gaps.push(MissingBody { instance: inst, gap: BodyGap::StaleInference });
+                continue;
+            }
         };
         let c = convert_body(&mut g.arena, ws, inf, body, &subst);
         out.expr_examined += c.expr_examined;

@@ -33,7 +33,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use bone_semantic::hir::{BodyOwner, Function};
+use bone_semantic::hir::{Body, BodyOwner, Function};
 use bone_semantic::inference::{BodyInference, Workspace};
 use bone_semantic::prelude::{BoundNext, IterWitness, ModuleId, Span};
 use comfy_la_arena::Idx;
@@ -1007,9 +1007,10 @@ pub fn build_for_target(
             g.depth_capped.push(inst);
             continue;
         }
-        let Some(inf) = body_inference(ws, inst.func) else { continue };
+        let FunctionBody::Ready { inf, body } = function_body(ws, inst.func) else {
+            continue;
+        };
         let module = ws.module(inst.func.module);
-        let body = module.bodies.get(&BodyOwner::Function(inst.func.func));
         // A boundary's Rock body is not the one emission uses -- it emits the
         // foreign text -- so the walk STOPS here. Marking it unexpanded while
         // continuing to enumerate its calls was the worst of both: the closure
@@ -1020,12 +1021,10 @@ pub fn build_for_target(
         if declared_boundary(f).is_some() {
             continue;
         }
-        if body.is_some() {
-            g.expanded.insert(inst.clone());
-        }
+        g.expanded.insert(inst.clone());
 
         walk_body_edges(
-            &mut g, &mut work, ws, inf, body, Some(&inst), &subst, depth, target,
+            &mut g, &mut work, ws, inf, Some(body), Some(&inst), &subst, depth, target,
         );
     }
 
@@ -2004,8 +2003,25 @@ impl InstanceGraph {
     }
 }
 
-fn body_inference(ws: &Workspace, f: FuncRef) -> Option<&BodyInference> {
-    ws.inference(f.module)?.per_fn.get(&BodyOwner::Function(f.func))
+pub(crate) enum FunctionBody<'a> {
+    Ready { inf: &'a BodyInference, body: &'a Body },
+    NoInference,
+    NoBody,
+    StaleInference,
+}
+
+pub(crate) fn function_body(ws: &Workspace, f: FuncRef) -> FunctionBody<'_> {
+    let owner = BodyOwner::Function(f.func);
+    let Some(inf) = ws.inference(f.module).and_then(|ir| ir.per_fn.get(&owner)) else {
+        return FunctionBody::NoInference;
+    };
+    let Some(body) = ws.module(f.module).bodies.get(&owner) else {
+        return FunctionBody::NoBody;
+    };
+    if inf.body_generation != body.generation {
+        return FunctionBody::StaleInference;
+    }
+    FunctionBody::Ready { inf, body }
 }
 
 /// Every function the emitter would root, using production's own predicate.

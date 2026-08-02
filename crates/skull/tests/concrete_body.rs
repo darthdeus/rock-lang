@@ -8,10 +8,12 @@
 
 use std::sync::LazyLock;
 
+use bone_semantic::hir::{BindingInfo, Expr};
 use bone_semantic::inference::Workspace;
-use skull::concrete_body::{self, ConcreteBodies, Slot};
+use comfy_la_arena::{ArenaMap, Idx};
+use skull::concrete_body::{self, ConcreteBodies, ConcreteBody, Slot};
 use skull::instance_graph::{self, InstanceGraph};
-use skull_mir::monoty::MonoTyReason;
+use skull_mir::monoty::{MonoTyId, MonoTyReason};
 use ustr::Ustr;
 
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
@@ -36,6 +38,11 @@ fn bodies_of(src: &str) -> (Workspace, InstanceGraph, ConcreteBodies) {
     let mut g = instance_graph::build(&ws, roots, false);
     let bodies = concrete_body::build(&ws, &mut g);
     (ws, g, bodies)
+}
+
+fn assert_arena_tables(body: &ConcreteBody) {
+    let _: &ArenaMap<Idx<Expr>, MonoTyId> = &body.expr_types;
+    let _: &ArenaMap<Idx<BindingInfo>, MonoTyId> = &body.binding_types;
 }
 
 /// Every instance the walk EXPANDED gets a body, and every one of its slots is
@@ -108,7 +115,7 @@ fn main() {
     let shared: Vec<_> = a
         .expr_types
         .iter()
-        .filter_map(|(e, ty)| b.expr_types.get(e).map(|other| (*e, *ty, *other)))
+        .filter_map(|(e, ty)| b.expr_types.get(e).map(|other| (e, *ty, *other)))
         .collect();
     assert!(!shared.is_empty(), "the two tables share no slot at all");
     let differing: Vec<_> = shared.iter().filter(|(_, x, y)| x != y).collect();
@@ -147,8 +154,55 @@ fn main() { let a = plain(1) }
         .find(|i| g.identity(&ws, i).starts_with("plain"))
         .map(|i| &bodies.bodies[i])
         .expect("`plain` has no ConcreteBody");
-    assert!(!found.expr_types.is_empty(), "`plain`'s table is empty");
+    assert_arena_tables(found);
+    assert!(found.expr_types.values().next().is_some(), "`plain`'s table is empty");
     assert_eq!(bodies.free_types.len(), 0);
+}
+
+#[test]
+fn stale_inference_cannot_build_a_concrete_body() {
+    let mut ws = check(
+        r#"
+fn plain(x: int) -> int { return x + 1 }
+fn main() { let a = plain(1) }
+"#,
+    );
+    let roots = instance_graph::emission_roots(&ws, None);
+    let mut g = instance_graph::build(&ws, roots, false);
+    let inst = g
+        .expanded
+        .iter()
+        .find(|i| g.identity(&ws, i).starts_with("plain"))
+        .cloned()
+        .expect("no plain instance was expanded");
+    let owner = bone_semantic::hir::BodyOwner::Function(inst.func.func);
+    ws.module_mut(inst.func.module)
+        .bodies
+        .get_mut(&owner)
+        .expect("plain has no body")
+        .generation += 1;
+
+    let stale_roots = instance_graph::emission_roots(&ws, None);
+    let stale_graph = instance_graph::build(&ws, stale_roots, false);
+    assert!(
+        stale_graph.expanded.iter().all(|i| i.func != inst.func),
+        "the instance graph expanded a body from stale inference"
+    );
+
+    let bodies = concrete_body::build(&ws, &mut g);
+
+    assert!(
+        !bodies.bodies.contains_key(&inst),
+        "stale inference produced a ConcreteBody"
+    );
+    assert!(
+        bodies
+            .gaps
+            .iter()
+            .any(|gap| gap.instance == inst && gap.gap.label() == "stale-inference"),
+        "stale inference was not classified: {:?}",
+        bodies.census().gaps
+    );
 }
 
 /// The failure arm fires, and says WHERE. Perturbing only the CONSUMER's
@@ -255,7 +309,9 @@ fn body(v: [int]) -> int {
     // target, so the annotation is the discriminant, not the assignment.
     let annotated: int = 0
     if v.len() > 0 { annotated = 1 } else { annotated = 2 }
-    return total + annotated
+    let inferred = 0
+    if v.len() > 0 { inferred = 1 } else { inferred = 2 }
+    return total + annotated + inferred
 }
 fn main() { let a = body([1, 2]) }
 "#,
@@ -278,8 +334,38 @@ fn main() { let a = body([1, 2]) }
         .keys()
         .find(|i| g.identity(&ws, i).starts_with("body"))
         .expect("`body` has no ConcreteBody");
+    let hir_body = ws
+        .module(body_inst.func.module)
+        .bodies
+        .get(&bone_semantic::hir::BodyOwner::Function(body_inst.func.func))
+        .expect("`body` has no HIR body");
+    let mut annotated_targets = Vec::new();
+    let mut inferred_targets = Vec::new();
+    for (_, expr) in hir_body.expr_arena.iter() {
+        let Expr::Assign { target, .. } = expr else { continue };
+        let Expr::Var(binding) = hir_body.expr_arena[*target] else { continue };
+        match hir_body.binding_arena[binding].name.as_str() {
+            "annotated" => annotated_targets.push(*target),
+            "inferred" => inferred_targets.push(*target),
+            _ => {}
+        }
+    }
+    assert_eq!(annotated_targets.len(), 2, "fixture has the wrong annotated targets");
+    assert_eq!(inferred_targets.len(), 2, "fixture has the wrong inferred targets");
     assert!(
-        bodies.bodies[body_inst].expr_types.len() > 20,
+        annotated_targets
+            .iter()
+            .all(|target| !bodies.bodies[body_inst].expr_types.contains_idx(*target)),
+        "annotated assignment targets are no longer untyped; flip this sentinel"
+    );
+    assert!(
+        inferred_targets
+            .iter()
+            .all(|target| bodies.bodies[body_inst].expr_types.contains_idx(*target)),
+        "the inferred assignment control became untyped"
+    );
+    assert!(
+        bodies.bodies[body_inst].expr_types.values().count() > 20,
         "almost nothing in `body` was typed, so the pinned kinds are not what is special"
     );
     assert_eq!(bodies.free_types.len(), 0);
