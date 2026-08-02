@@ -1824,22 +1824,33 @@ fn main() {
 "#,
     );
     let removed = drop_witness_generic_records(&mut ws, "main");
-    assert!(removed > 0, "the fixture removed no witness record, so it proves nothing");
+    assert_eq!(removed, 1, "expected the one `for`-protocol ITER record to be dropped");
     let roots = instance_graph::emission_roots(&ws, None);
     let g = instance_graph::build(&ws, roots, false);
-    let sites: Vec<&instance_graph::Unresolved> = g
-        .unresolved
-        .iter()
-        .filter(|u| u.reason == "witness-generic-unbound" || u.reason == "no-bindings")
-        .collect();
-    assert!(
-        !sites.is_empty(),
-        "stripping the witness generics produced no unresolved site: {:?}",
-        g.unresolved.iter().map(|u| u.reason).collect::<Vec<_>>()
+    // Discriminated by CALLEE, not by reason: both halves fail through
+    // `instantiate_witness` and report `witness-generic-unbound`, so a
+    // reason-only filter would accept the other recorder's site.
+    let sites = unresolved_witnesses_of(&ws, &g, "iter");
+    assert_eq!(
+        sites.len(),
+        removed,
+        "expected exactly one unresolved `iter` witness, got {:?}",
+        all_unresolved(&ws, &g)
     );
     assert!(
         sites.iter().all(|u| !instance_graph::is_spanless(&u.span)),
         "a witness unresolved site carries no span: {sites:?}"
+    );
+    // CONTROL: the NEXT half is untouched and still resolves. Without it this
+    // fixture would also pass on a `record_bound_next` regression.
+    assert!(
+        g.edges.iter().any(|e| e.kind == EdgeKind::IteratorNext),
+        "the fixture disturbed the next half too, so it does not isolate `record_witness`"
+    );
+    assert!(
+        unresolved_witnesses_of(&ws, &g, "next").is_empty(),
+        "the next half went unresolved as well: {:?}",
+        all_unresolved(&ws, &g)
     );
 }
 
@@ -1862,15 +1873,13 @@ fn main() {
     assert_eq!(removed, 1, "expected the one `for`-protocol `next` record to be dropped");
     let roots = instance_graph::emission_roots(&ws, None);
     let g = instance_graph::build(&ws, roots, false);
-    let sites: Vec<&instance_graph::Unresolved> = g
-        .unresolved
-        .iter()
-        .filter(|u| u.reason == "witness-generic-unbound")
-        .collect();
-    assert!(
-        !sites.is_empty(),
-        "clearing `next_generics` produced no unresolved site: {:?}",
-        g.unresolved.iter().map(|u| u.reason).collect::<Vec<_>>()
+    // Same discriminant as the iter fixture, pointed at the other callee.
+    let sites = unresolved_witnesses_of(&ws, &g, "next");
+    assert_eq!(
+        sites.len(),
+        removed,
+        "expected exactly one unresolved `next` witness, got {:?}",
+        all_unresolved(&ws, &g)
     );
     assert!(
         sites.iter().all(|u| !instance_graph::is_spanless(&u.span)),
@@ -1883,6 +1892,36 @@ fn main() {
         g.edges.iter().any(|e| e.kind == EdgeKind::IteratorIter),
         "the fixture disturbed the iter half too, so it does not isolate `record_bound_next`"
     );
+}
+
+/// Unresolved witness sites whose CALLEE is `fn_name`. The `iter` and `next`
+/// halves of a `for` protocol both fail through `instantiate_witness` with
+/// `witness-generic-unbound`, so the callee is what separates the two
+/// recorders.
+fn unresolved_witnesses_of<'g>(
+    ws: &Workspace,
+    g: &'g instance_graph::InstanceGraph,
+    fn_name: &str,
+) -> Vec<&'g instance_graph::Unresolved> {
+    g.unresolved
+        .iter()
+        .filter(|u| {
+            u.reason == "witness-generic-unbound"
+                && ws.module(u.callee.module).functions[u.callee.func].name.as_str() == fn_name
+        })
+        .collect()
+}
+
+fn all_unresolved(ws: &Workspace, g: &instance_graph::InstanceGraph) -> Vec<(String, String)> {
+    g.unresolved
+        .iter()
+        .map(|u| {
+            (
+                u.reason.to_string(),
+                ws.module(u.callee.module).functions[u.callee.func].name.to_string(),
+            )
+        })
+        .collect()
 }
 
 /// The one body to mutate, as `(module, owner)`.
