@@ -2047,9 +2047,8 @@ fn native_buffer_alloc_elem_ctype_spec(
     if let Some(prim) = leaf.as_ref().and_then(crate::monoty::MonoTy::prim_name) {
         return Ok(Ustr::from(prim));
     }
-    match leaf {
-        Some(ty) if ty.nominal().is_some() => {
-            let n = ty.nominal().unwrap();
+    match leaf.as_ref().map(|ty| (ty, ty.nominal())) {
+        Some((_, Some(n))) => {
             if !map_is_value_struct(ws, n) {
                 Err(format!("`native_buffer_alloc<{n}>` is invalid: `{n}` is not a `value` struct."))
             } else if value_struct_is_gc(ws, n) {
@@ -2061,7 +2060,7 @@ fn native_buffer_alloc_elem_ctype_spec(
                 Ok(n)
             }
         }
-        Some(_) => Err(
+        Some((_, None)) => Err(
             "`native_buffer_alloc<T>` requires a primitive or FFI-clean value-struct element"
                 .to_string(),
         ),

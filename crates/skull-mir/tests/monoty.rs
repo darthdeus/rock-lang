@@ -372,15 +372,18 @@ fn generated_composition_to_depth_three_is_total() {
         every.extend(level.iter().copied());
     }
 
-    // Every generated type renders, and the rendering round-trips to the same
-    // id through the arena -- i.e. rendering is injective over what we built.
+    // Every generated type has a non-empty display spelling, and its CANONICAL
+    // encoding round-trips to the same id -- i.e. the identity is injective over
+    // what we built. The display spelling is deliberately not asserted injective:
+    // it is a pretty type syntax, and `distinct_types_cannot_share_a_cross_process_identity`
+    // pins the pairs where it collides.
     let mut seen: std::collections::HashMap<String, skull_mir::monoty::MonoTyId> =
         std::collections::HashMap::new();
     for id in &every {
-        let r = a.render(*id);
-        assert!(!r.is_empty(), "a generated type rendered empty");
-        if let Some(prev) = seen.insert(r.clone(), *id) {
-            assert_eq!(prev, *id, "two distinct ids rendered identically: `{r}`");
+        assert!(!a.render(*id).is_empty(), "a generated type displayed empty");
+        let c = a.canonical(*id);
+        if let Some(prev) = seen.insert(c.clone(), *id) {
+            assert_eq!(prev, *id, "two distinct ids share one canonical encoding: `{c}`");
         }
     }
     // Every constructor must actually appear -- a count alone would pass while
@@ -409,7 +412,7 @@ fn generated_composition_to_depth_three_is_total() {
     assert_eq!(
         seen.len(),
         every.iter().copied().collect::<std::collections::HashSet<_>>().len(),
-        "rendering is not injective over the generated set"
+        "the canonical encoding is not injective over the generated set"
     );
 }
 

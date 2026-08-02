@@ -23,8 +23,9 @@
 //!    construction, and nominal identity is carried by name -- two nominals with
 //!    identical leaves stay distinct.
 //! 3. **Order-independent.** Arena insertion order and the process hash seed
-//!    change the numeric ids, and nothing else. Manifests and symbols must read
-//!    [`MonoTy::render`] / [`MonoTy::structural_hash`], never the integer.
+//!    change the numeric ids, and nothing else. Cross-process identity is
+//!    [`MonoTy::canonical`] / [`MonoTy::structural_hash`], never the integer --
+//!    and never [`MonoTy::render`], which is a display spelling and ambiguous.
 //!
 //! The API takes NO target. Lua, JS and any later projection consume the same
 //! arena; only ABI and layout may differ downstream.
@@ -80,8 +81,12 @@ pub enum MonoTy {
 }
 
 impl MonoTy {
-    /// The canonical structural rendering -- the cross-process identity. Two
-    /// programs that built the same type render it the same.
+    /// A readable spelling of the type, for manifests, censuses and messages.
+    ///
+    /// DISPLAY ONLY. This is a pretty type syntax, so it is NOT injective:
+    /// `(fn(int) -> int)?` and `fn(int) -> int?` both spell
+    /// `fn(int) -> int?`. Anything that compares, deduplicates, sets, maps or
+    /// hashes types must use [`Self::canonical`].
     pub fn render(&self) -> String {
         let mut s = String::new();
         self.write(&mut s);
@@ -257,8 +262,9 @@ impl MonoTy {
         }
     }
 
-    /// FNV-1a over the canonical rendering. Stable across processes, unlike
-    /// anything derived from an arena id or from a `FxHashMap` iteration.
+    /// FNV-1a over [`Self::canonical`]. Stable across processes, unlike
+    /// anything derived from an arena id or from a `FxHashMap` iteration, and
+    /// unambiguous, unlike anything derived from the display rendering.
     pub fn structural_hash(&self) -> u64 {
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
         for b in self.canonical().bytes() {
@@ -409,7 +415,8 @@ impl MonoArena {
         id
     }
 
-    /// The canonical structural rendering of an interned type.
+    /// The display rendering of an interned type. Not an identity -- see
+    /// [`MonoTy::render`].
     pub fn render(&self, id: MonoTyId) -> String {
         self.get(id).render()
     }
@@ -424,7 +431,7 @@ impl MonoArena {
         self.get(id).depth()
     }
 
-    /// FNV-1a over the canonical rendering of an interned type.
+    /// FNV-1a over the canonical encoding of an interned type.
     pub fn structural_hash(&self, id: MonoTyId) -> u64 {
         self.get(id).structural_hash()
     }

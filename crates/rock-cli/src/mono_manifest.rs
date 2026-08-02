@@ -453,23 +453,27 @@ fn one_project(dir: &PathBuf, name: &str, dump: Option<(&str, &str)>) -> Result<
     let lua_only = lua_syms.difference(&js_syms).count();
     let js_only = js_syms.difference(&lua_syms).count();
     // The IDENTITY property, stated directly: an instance reached by both
-    // targets keys on `(FuncRef, args)`, and its rendered symbol must not
-    // depend on the target. Set difference alone cannot test this -- a symbol
-    // missing on JS is usually an unreached body, which is availability.
+    // targets keys on `(FuncRef, args)`, and its identity must not depend on
+    // the target. Set difference alone cannot test this -- a symbol missing on
+    // JS is usually an unreached body, which is availability.
+    //
+    // Keyed and compared on the CANONICAL encoding throughout. Keying on the
+    // display rendering would let two different instances share a key, and a
+    // conflict between them would then be reported as agreement.
     let mut lua_by_key: BTreeMap<(u32, u32, Vec<String>), String> = BTreeMap::new();
     for i in &g.instances {
-        let args: Vec<String> = i.args.iter().map(|a| g.arena.render(*a)).collect();
+        let args: Vec<String> = i.args.iter().map(|a| g.arena.canonical(*a)).collect();
         let key = (i.func.module.raw(), i.func.func.into_raw().into_u32(), args);
-        lua_by_key.insert(key, g.symbol(&ws, i));
+        lua_by_key.insert(key, g.identity(&ws, i));
     }
     let mut identity_conflicts = 0usize;
     let mut shared_instances = 0usize;
     for i in &js.instances {
-        let args: Vec<String> = i.args.iter().map(|a| js.arena.render(*a)).collect();
+        let args: Vec<String> = i.args.iter().map(|a| js.arena.canonical(*a)).collect();
         let key = (i.func.module.raw(), i.func.func.into_raw().into_u32(), args);
-        if let Some(lua_sym) = lua_by_key.get(&key) {
+        if let Some(lua_ident) = lua_by_key.get(&key) {
             shared_instances += 1;
-            if *lua_sym != js.symbol(&ws, i) {
+            if *lua_ident != js.identity(&ws, i) {
                 identity_conflicts += 1;
             }
         }

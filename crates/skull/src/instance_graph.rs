@@ -177,7 +177,7 @@ pub struct Boundary {
 /// source mangling.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct CoroutineHelper {
-    pub owner_symbol: String,
+    pub owner_identity: String,
     pub suffix: &'static str,
     /// What emission produces TODAY: mangled source name + suffix.
     pub symbol_today: String,
@@ -314,18 +314,21 @@ impl InstanceGraph {
         format!("{base}<{}>", args.join(","))
     }
 
-    /// Instances in manifest order: sorted and deduplicated by IDENTITY, then
-    /// shown by symbol. Two instances that render alike therefore appear twice
-    /// rather than silently becoming one.
-    pub fn sorted_symbols(&self, ws: &Workspace) -> Vec<String> {
-        let mut v: Vec<(String, String)> = self
+    /// Manifest lines, sorted and deduplicated by IDENTITY: `<identity>\t<symbol>`.
+    ///
+    /// The identity is IN the line, not merely the sort key. A caller that
+    /// diffed, hashed or set-compared display symbols alone would collapse two
+    /// instances whose arguments happen to render alike, which is exactly the
+    /// property the identity encoding exists to prevent.
+    pub fn manifest_lines(&self, ws: &Workspace) -> Vec<String> {
+        let mut v: Vec<String> = self
             .instances
             .iter()
-            .map(|i| (self.identity(ws, i), self.symbol(ws, i)))
+            .map(|i| format!("{}\t{}", self.identity(ws, i), self.symbol(ws, i)))
             .collect();
         v.sort();
         v.dedup();
-        v.into_iter().map(|(_, sym)| sym).collect()
+        v
     }
 
     pub fn edge_histogram(&self) -> BTreeMap<&'static str, usize> {
@@ -355,7 +358,7 @@ impl InstanceGraph {
         // Direct: an instance that calls itself.
         for (from, tos) in &succ {
             if tos.iter().any(|t| *t == *from) {
-                direct.insert(self.symbol(ws, from));
+                direct.insert(self.identity(ws, from));
             }
         }
         // Mutual: any cycle of length > 1, found by an iterative DFS with a
@@ -371,7 +374,7 @@ impl InstanceGraph {
             dfs(start, &succ, &mut color, &mut path, &mut |cycle: &[&Instance]| {
                 if cycle.len() > 1 {
                     for n in cycle {
-                        mutual.insert(self.symbol(ws, n));
+                        mutual.insert(self.identity(ws, n));
                     }
                 }
             });
@@ -386,7 +389,7 @@ impl InstanceGraph {
             changing_instance: self
                 .depth_capped
                 .iter()
-                .map(|i| self.symbol(ws, i))
+                .map(|i| self.identity(ws, i))
                 .collect(),
         }
     }
@@ -1037,7 +1040,7 @@ fn record_coroutine_helpers(g: &mut InstanceGraph, ws: &Workspace) {
             continue;
         }
         let base = mangle_fn(ws, f);
-        let owner_symbol = g.symbol(ws, i);
+        let owner_identity = g.identity(ws, i);
         let mut suffixes: Vec<&'static str> = vec!["__step", "__resume"];
         if f.return_ty
             .and_then(|t| skull_mir::lower::coroutine_yield_channel(ws, t))
@@ -1047,7 +1050,7 @@ fn record_coroutine_helpers(g: &mut InstanceGraph, ws: &Workspace) {
         }
         for suffix in suffixes {
             out.insert(CoroutineHelper {
-                owner_symbol: owner_symbol.clone(),
+                owner_identity: owner_identity.clone(),
                 suffix,
                 symbol_today: format!("{base}{suffix}"),
             });
@@ -1078,7 +1081,7 @@ impl InstanceGraph {
             by_symbol
                 .entry(h.symbol_today.clone())
                 .or_default()
-                .insert(h.owner_symbol.clone());
+                .insert(h.owner_identity.clone());
         }
         by_symbol.retain(|_, owners| owners.len() > 1);
         by_symbol
@@ -1107,10 +1110,11 @@ pub fn emission_roots(ws: &Workspace, project_root: Option<&str>) -> Vec<FuncRef
     roots
 }
 
-/// The compact manifest: one line per instance, sorted by symbol.
+/// The compact manifest: one line per instance, sorted by identity, each line
+/// carrying its identity and its display symbol.
 pub fn render_manifest(ws: &Workspace, g: &InstanceGraph) -> String {
     let mut out = String::new();
-    for s in g.sorted_symbols(ws) {
+    for s in g.manifest_lines(ws) {
         out.push_str(&s);
         out.push('\n');
     }

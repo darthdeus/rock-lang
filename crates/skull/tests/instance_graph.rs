@@ -44,7 +44,7 @@ fn main() {
 }
 "#,
     );
-    let syms = g.sorted_symbols(&ws);
+    let syms = g.manifest_lines(&ws);
     let idents: Vec<&String> = syms.iter().filter(|s| s.contains("ident")).collect();
     assert_eq!(
         idents.len(),
@@ -70,7 +70,7 @@ fn main() {
 }
 "#,
     );
-    let syms = g.sorted_symbols(&ws);
+    let syms = g.manifest_lines(&ws);
     for want in ["<int>", "<bool>"] {
         assert!(
             syms.iter().any(|s| s.contains("inner") && s.ends_with(want)),
@@ -150,7 +150,7 @@ fn main() {
 }
 "#,
     );
-    let syms = g.sorted_symbols(&ws);
+    let syms = g.manifest_lines(&ws);
     let idents: Vec<&String> = syms.iter().filter(|s| s.contains("ident")).collect();
     assert_eq!(idents.len(), 2, "P and Q must not share an instance: {idents:?}");
     assert!(idents.iter().any(|s| s.ends_with("<P>")), "{idents:?}");
@@ -581,4 +581,58 @@ fn main() {
         "digest differs across the two knobs"
     );
     assert!(!normal_text.is_empty(), "the fixture produced an empty manifest");
+}
+
+/// The identity adversary: one generic instantiated at `(fn(int) -> int)?` and
+/// at `fn(int) -> int?`. Those are different types that RENDER alike -- a
+/// postfix `?` on an unbracketed arrow type is ambiguous -- so every set, map
+/// and digest over the graph has to key on the canonical encoding.
+///
+/// The equal-renderings assertion is what makes this adversarial: if the two
+/// ever displayed differently, the pair would no longer be the collision and
+/// the separation below would prove nothing.
+#[test]
+fn two_instances_whose_arguments_render_alike_stay_distinct() {
+    let (ws, g) = graph_of(
+        r#"
+fn twice(n: int) -> int { return n * 2 }
+fn maybe(n: int) -> int? { return n * 2 }
+fn ident<T>(x: T) -> T { return x }
+fn main() {
+    let f: fn(int) -> int? = maybe
+    let g: (fn(int) -> int)? = twice
+    let a = ident(f)
+    let b = ident(g)
+}
+"#,
+    );
+
+    let idents: Vec<&instance_graph::Instance> = g
+        .instances
+        .iter()
+        .filter(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "ident")
+        .collect();
+    assert_eq!(idents.len(), 2, "expected two `ident` instances, got {}", idents.len());
+
+    let display: Vec<String> = idents.iter().map(|i| g.symbol(&ws, i)).collect();
+    assert_eq!(
+        display[0], display[1],
+        "the pair is no longer the ambiguity this test exists for: {display:?}"
+    );
+
+    let identity: Vec<String> = idents.iter().map(|i| g.identity(&ws, i)).collect();
+    assert_ne!(
+        identity[0], identity[1],
+        "two distinct instances share one identity: {identity:?}"
+    );
+
+    // ...and the manifest keeps both, rather than deduplicating them into one.
+    let lines = g.manifest_lines(&ws);
+    let ident_lines: Vec<&String> =
+        lines.iter().filter(|l| l.contains("ident")).collect();
+    assert_eq!(
+        ident_lines.len(),
+        2,
+        "the manifest collapsed two distinct instances: {ident_lines:?}"
+    );
 }
