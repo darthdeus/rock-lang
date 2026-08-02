@@ -71,11 +71,11 @@ impl Builder<'_> {
     /// element stores as flat columns, everything else keeps the single `_data`
     /// backing. An unresolved / generic element is NOT eligible -- the columns
     /// need a concrete value-struct leaf list, and an opaque `T` has none.
-    pub(crate) fn vec_kind(&self, e: Idx<Expr>) -> ContainerKind {
-        match self.vec_column_elem_of(e) {
+    pub(crate) fn vec_kind(&self, e: Idx<Expr>) -> Result<ContainerKind, CompilerError> {
+        Ok(match self.vec_column_elem_of(e)? {
             Some(elem) => ContainerKind::VecValueColumns(elem),
             None => ContainerKind::Vec,
-        }
+        })
     }
 
     /// The column-eligible value-struct element of `e`'s `[E]` type, if any.
@@ -85,12 +85,13 @@ impl Builder<'_> {
     /// is the concrete struct rather than an opaque `T`. Without this the
     /// stdlib iterator lowers `it.vec[it.i]` against the boxed representation
     /// and reads a `_data` that column storage does not have.
-    pub(crate) fn vec_column_elem_of(&self, e: Idx<Expr>) -> Option<ColumnElem> {
-        crate::lower::shape::vec_column_elem_mono(
-            self.ws,
-            self.scx.target,
-            &self.concrete_ty(e)?,
-        )
+    pub(crate) fn vec_column_elem_of(
+        &self,
+        e: Idx<Expr>,
+    ) -> Result<Option<ColumnElem>, CompilerError> {
+        Ok(self.concrete_ty(e)?.and_then(|ty| {
+            crate::lower::shape::vec_column_elem_mono(self.ws, self.scx.target, &ty)
+        }))
     }
 
     /// The column shape of `elem`: its value shape, marked nullable when the
@@ -115,24 +116,56 @@ impl Builder<'_> {
     /// The KEY is deliberately not consulted -- a value-struct key rejects
     /// upstream (LuaJIT hashes cdata by pointer), and the spine stores whatever
     /// key the boxed representation already stored.
-    pub(crate) fn map_column_value_of(&self, e: Idx<Expr>) -> Option<ColumnElem> {
-        crate::lower::shape::map_column_value_mono(
-            self.ws,
-            self.scx.target,
-            &self.concrete_ty(e)?,
-        )
+    pub(crate) fn map_column_value_of(
+        &self,
+        e: Idx<Expr>,
+    ) -> Result<Option<ColumnElem>, CompilerError> {
+        Ok(self.concrete_ty(e)?.and_then(|ty| {
+            crate::lower::shape::map_column_value_mono(self.ws, self.scx.target, &ty)
+        }))
     }
 
     /// The expression's CONCRETE type under the active specialization.
     ///
-    /// `Err` is the shared generic snapshot: a body lowered with no
-    /// instantiation has an opaque `T`, which is not column-eligible and must
-    /// keep the representation every instantiation can read. That is the same
-    /// answer the `TypeExpr` walk gave by falling out of its `Generic` arm, now
-    /// stated once instead of at each navigation step.
-    pub(crate) fn concrete_ty(&self, e: Idx<Expr>) -> Option<MonoTy> {
-        let inf = self.inf?;
-        crate::monoty::convert(self.ws, inf, *inf.expr_types.get(e)?, &self.spec_subst).ok()
+    /// Failure is not uniformly "boxed". Three outcomes, and which reason lands
+    /// in which is the whole point -- reading them all as a negative picks a
+    /// REPRESENTATION for a type the compiler could not resolve, and that is the
+    /// silent fallback this codebase rejects.
+    ///
+    /// - `UnboundGeneric` -> `None`, correctly. This body is the SHARED generic
+    ///   snapshot, lowered with no instantiation, so its element is opaque and
+    ///   not column-eligible; it must keep the representation every
+    ///   instantiation can read. Same answer the `TypeExpr` walk gave by falling
+    ///   out of its `Generic` arm.
+    /// - `UnresolvedInfer` -> `None`, and NOT because it is benign. It is the
+    ///   S 0h decided rejection (a type argument no constraint reaches:
+    ///   `let v = vec_new()` whose element is never used), which the instance
+    ///   graph already records as `RejectionKind::UnconstrainedTypeVar` with a
+    ///   span. Emission still runs the pre-mono path, so making it fatal HERE
+    ///   would reject `tests/vec_sort_test.rock` and `tests/enumerate_tests.rock`
+    ///   ahead of the cutover -- measured, both fail to emit. The rejection lands
+    ///   with Stage 3, in one place, not twice on two schedules.
+    /// - Everything else -> a spanned error. Recovery poison means the program
+    ///   should have been rejected upstream, a missing node means a `TyId` names
+    ///   nothing, and a depth limit means a cyclic substitution chain. None of
+    ///   the three occurs over the corpus or the Rock suite, so this arm has
+    ///   teeth without a population.
+    pub(crate) fn concrete_ty(&self, e: Idx<Expr>) -> Result<Option<MonoTy>, CompilerError> {
+        use crate::monoty::MonoTyReason as R;
+        let Some(inf) = self.inf else { return Ok(None) };
+        let Some(ty) = inf.expr_types.get(e) else { return Ok(None) };
+        match crate::monoty::convert(self.ws, inf, *ty, &self.spec_subst) {
+            Ok(m) => Ok(Some(m)),
+            Err(R::UnboundGeneric(_)) | Err(R::UnresolvedInfer(_)) => Ok(None),
+            Err(r) => Err(CompilerError::new_with_label(
+                self.body.expr_spans[e],
+                format!(
+                    "cannot decide container storage: the receiver's type does not resolve to \
+                     a concrete type here ({})",
+                    r.bucket()
+                ),
+            )),
+        }
     }
 
     /// `m.data`, the column Vec a column-stored Map's values live in. Every
@@ -166,7 +199,7 @@ impl Builder<'_> {
             let buf = self.emit_cur(Inst::Field { base: b, field: Ustr::from("buf") });
             return Ok((buf, kind));
         }
-        let kind = self.coll_kind(base);
+        let kind = self.coll_kind(base)?;
         let b = self.lower_expr(base)?;
         Ok((b, kind))
     }
@@ -175,12 +208,12 @@ impl Builder<'_> {
     /// the index/length shape (decision 9). bone's index/iter whitelist is closed
     /// (`Vec`/`Map`/`NativeBuffer`+sized), so any other type reaching here is a
     /// front-end/back-end disagreement, not a program the user could write.
-    pub(crate) fn coll_kind(&self, base: Idx<Expr>) -> ContainerKind {
-        match self.expr_ty(base) {
+    pub(crate) fn coll_kind(&self, base: Idx<Expr>) -> Result<ContainerKind, CompilerError> {
+        Ok(match self.expr_ty(base) {
             Some(TypeExpr::App {
                 ctor: TypeCtor::Array,
                 ..
-            }) => self.vec_kind(base),
+            }) => self.vec_kind(base)?,
             Some(TypeExpr::App {
                 ctor: TypeCtor::Map,
                 ..
@@ -200,7 +233,7 @@ impl Builder<'_> {
                      bone admitted an index/iter on `{rendered}`"
                 )
             }
-        }
+        })
     }
 
     // --- type queries (decision: ops are typed at BUILD time) ---

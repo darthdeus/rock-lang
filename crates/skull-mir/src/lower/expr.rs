@@ -212,7 +212,7 @@ impl Builder<'_> {
                 // while the storage still has no element slot to name.
                 if self.value_struct_of(e).is_some()
                     || self.nullable_place_value_of(e).is_some()
-                    || self.vec_column_elem_of(base).is_some()
+                    || self.vec_column_elem_of(base)?.is_some()
                 {
                     let r = self.lower_expr_repr(e)?;
                     return Ok(self.pack(r));
@@ -687,7 +687,7 @@ impl Builder<'_> {
                 }
                 // A column-stored Map has no slot at the key either: the write
                 // goes through the spine to a slot, then leaf-wise into `data`.
-                if let Some(elem) = self.map_column_value_of(base) {
+                if let Some(elem) = self.map_column_value_of(base)? {
                     return self.map_column_store(b, i, value, elem);
                 }
                 if let ContainerKind::NativeBufferValue(elem) = kind {
@@ -1389,13 +1389,13 @@ impl Builder<'_> {
             // Column storage: transpose the literal's elements into one array
             // per leaf. Each element lowers as a repr, so no element box is
             // built even for a literal with entries.
-            if let Some(elem) = self.vec_column_elem_of(lit) {
+            if let Some(elem) = self.vec_column_elem_of(lit)? {
                 return self.column_vec_literal(&idxs, elem);
             }
             let vs: Vec<Idx<Inst>> = idxs.iter().map(|&e| self.lower_expr(e)).collect::<Result<_, _>>()?;
             return Ok(self.emit_cur(Inst::MakeVec(vs)));
         }
-        if let Some(elem) = self.vec_column_elem_of(lit) {
+        if let Some(elem) = self.vec_column_elem_of(lit)? {
             let capacity = self.emit_cur(Inst::Const(Lit::Int(0)));
             let arr = self.empty_column_vec(elem, capacity)?;
             for &e in &idxs {
@@ -1489,7 +1489,7 @@ impl Builder<'_> {
         src: Idx<Inst>,
         dest: SpreadDest,
     ) -> Result<(), CompilerError> {
-        let src_kind = self.coll_kind(src_expr);
+        let src_kind = self.coll_kind(src_expr)?;
         let n = self.emit_cur(Inst::Len { base: src, kind: src_kind });
         let i_cell = self.f.new_cell(None);
         let zero = self.emit_cur(Inst::Const(Lit::Int(0)));

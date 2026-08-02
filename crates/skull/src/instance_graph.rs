@@ -211,6 +211,13 @@ pub enum RejectionKind {
     /// instantiation on, and inferring one from the instances reachable
     /// elsewhere is explicitly not the rule (plan S 0h).
     GenericFnValue,
+    /// A COMPILER INVARIANT, not a language decision: a type that should have
+    /// been concrete here is recovery poison, names no node, or resolves
+    /// cyclically. Unlike the three above, no author call admits this -- the
+    /// program should have been rejected upstream. It is a rejection rather than
+    /// a silent negative because the alternative is picking a representation for
+    /// a type the compiler could not resolve.
+    ConcreteTypeUnavailable,
     /// A type argument no constraint reaches, so it has no concrete type to
     /// instantiate at. Distinct from a declared generic read inside a shared
     /// body, which is [`Unresolved`] data.
@@ -223,6 +230,7 @@ impl RejectionKind {
             Self::ChangingInstanceRecursion => "changing-instance-recursion",
             Self::GenericFnValue => "generic-fn-value",
             Self::UnconstrainedTypeVar => "unconstrained-type-var",
+            Self::ConcreteTypeUnavailable => "concrete-type-unavailable",
         }
     }
 }
@@ -275,6 +283,14 @@ pub struct InstanceGraph {
     /// reached (`docs/boundary-contracts.md` S 1.4). A name absent here is one
     /// the corpus never triggers, not one that does not exist.
     pub erased_entries: BTreeSet<String>,
+    /// Runtime entries an opaque `inline(lua)` body calls: owner symbol -> the
+    /// entries it names. Emission must emit these even though no Rock call site
+    /// reaches them.
+    pub inline_body_deps: BTreeMap<String, BTreeSet<String>>,
+    /// Storage-condition queries the walk ran, the denominator for the
+    /// synthesized-call population. Without it a zero synthesized-edge count
+    /// cannot be told apart from a walk that asked nothing.
+    pub synthesized_examined: usize,
     /// Callees seeded from an ALWAYS-EMITTED body (a decorator definition or a
     /// global initializer) rather than from a function root. Production treats
     /// their call edges as reachability roots (`mir_emit::reachable_fns`'s
@@ -355,6 +371,27 @@ pub const INDEX_TRIGGERED: &[(&str, StorageCond, &[&str])] = &[
     ("NativeBuffer", StorageCond::Always, &["__nb_checked_index"]),
 ];
 
+/// Every runtime entry a synthesized call or an opaque body can name
+/// (`docs/boundary-contracts.md` S 1.4). Kept as ONE list so the inline-body
+/// scan and the synthesized-call table cannot drift about what the catalogue is.
+pub const ERASED_RUNTIME_ENTRIES: &[&str] = &[
+    "__map_col_clear",
+    "__map_col_contains",
+    "__map_col_free",
+    "__map_col_len",
+    "__map_col_slot",
+    "__map_col_slot_checked",
+    "__map_col_slot_of",
+    "__nb_checked_index",
+    "__rock_col_capacity",
+    "__rock_col_copy",
+    "__rock_col_insert",
+    "__rock_col_sort",
+    "__rock_col_sort_leaves",
+    "__rock_vec_column_elements",
+    "table_len",
+];
+
 /// Polymorphic recursion (`f<T> -> f<[T]>`) does not terminate under
 /// demand-driven instantiation (plan S 7). The cap turns divergence into a
 /// REPORT: a capped instance is a changing-instance recursion candidate.
@@ -411,9 +448,19 @@ impl InstanceGraph {
     /// asserted there, not here.
     pub fn logical_symbol(&self, ws: &Workspace, i: &Instance) -> String {
         let f = &ws.module(i.func.module).functions[i.func.func];
+        // Two cases, both explicit. A non-generic instance IS the base symbol --
+        // not a fallback for a failed lookup. A generic one always has concrete
+        // arguments, so `spec_fn_name` cannot decline (it returns `None` only for
+        // an all-`None` key, which an instance can never build), and an
+        // `unwrap_or_else` back to the base name would silently give a
+        // specialization the shared body's symbol.
+        if i.args.is_empty() {
+            return mangle_fn(ws, f);
+        }
         let key: Vec<Option<skull_mir::monoty::MonoTy>> =
             i.args.iter().map(|a| Some(self.arena.get(*a).clone())).collect();
-        skull_mir::mangle::spec_fn_name(ws, f, &key).unwrap_or_else(|| mangle_fn(ws, f))
+        skull_mir::mangle::spec_fn_name(ws, f, &key)
+            .expect("an instance with arguments always has a specialized symbol")
     }
 
     /// Plan S 2's Stage-2 gate, as data: what is NOT closed about this graph.
@@ -439,7 +486,7 @@ impl InstanceGraph {
             .iter()
             .filter(|i| !self.expanded.contains(*i))
             .filter(|i| {
-                boundary_class_of(&ws.module(i.func.module).functions[i.func.func], erased)
+                boundary_class_for(&ws.module(i.func.module).functions[i.func.func], erased)
                     .is_none()
             })
             .map(|i| self.identity(ws, i))
@@ -664,6 +711,8 @@ pub fn build_for_target(
         boundaries: BTreeMap::new(),
         coroutine_helpers: BTreeSet::new(),
         erased_entries: BTreeSet::new(),
+        inline_body_deps: BTreeMap::new(),
+        synthesized_examined: 0,
         always_emitted_seeds: 0,
     };
 
@@ -809,7 +858,37 @@ pub fn build_for_target(
 
             // Synthesized stdlib calls. Over-approximated -- see
             // `COMPILER_GENERATED_TRIGGERS`.
-            for (e, name) in compiler_generated_sites(ws, inf, b, &subst, target) {
+            let mut failures: Vec<(Idx<bone_semantic::hir::Expr>, MonoTyReason)> = Vec::new();
+            let sites = compiler_generated_sites(
+                ws,
+                inf,
+                b,
+                &subst,
+                target,
+                &mut g.synthesized_examined,
+                &mut failures,
+            );
+            for (e, reason) in failures {
+                let span = b.expr_spans.get(e).copied().unwrap_or_else(Span::unknown);
+                // An unfinished inference variable IS the S 0h unconstrained
+                // case; poison, a missing node and a cyclic chain are not type
+                // arguments at all, so they take the invariant kind.
+                let kind = match reason {
+                    MonoTyReason::UnresolvedInfer(_) => RejectionKind::UnconstrainedTypeVar,
+                    _ => RejectionKind::ConcreteTypeUnavailable,
+                };
+                g.rejections.push(Rejection {
+                    kind,
+                    at: inst.clone(),
+                    span,
+                    message: format!(
+                        "a synthesized-call receiver has no concrete type in an instantiated \
+                         body ({}), so its storage cannot be decided",
+                        reason.bucket()
+                    ),
+                });
+            }
+            for GeneratedSite { expr: e, name } in sites {
                 let span = b.expr_spans.get(e).copied().unwrap_or_else(Span::unknown);
                 match stdlib_entry(ws, name, target) {
                     Some(callee) => {
@@ -870,6 +949,7 @@ pub fn build_for_target(
         }
     }
 
+    record_inline_body_deps(&mut g, ws);
     detect_changing_instance_recursion(&mut g, ws);
     classify_boundaries(&mut g, ws);
     record_coroutine_helpers(&mut g, ws);
@@ -1243,6 +1323,24 @@ fn fn_value_sites(
     out
 }
 
+/// One synthesized-call site, resolved against its instance.
+struct GeneratedSite {
+    expr: Idx<bone_semantic::hir::Expr>,
+    name: &'static str,
+}
+
+/// The verdict on one storage-condition query, kept as three outcomes rather
+/// than a bool. A bool made every conversion failure read as "boxed", which is
+/// only the right answer for ONE of them.
+enum CondVerdict {
+    Holds,
+    /// The receiver is not column-stored -- an ordinary negative.
+    DoesNot,
+    /// The receiver's type could not be made concrete. In an INSTANTIATED body
+    /// this is an invariant violation, not a storage answer.
+    Failed(MonoTyReason),
+}
+
 /// Source operations whose lowering can SYNTHESIZE a `stdlib_funcref` /
 /// `call_spine` call, paired with each name it can synthesize. Over-approximates
 /// -- see [`COMPILER_GENERATED_TRIGGERS`].
@@ -1252,18 +1350,24 @@ fn compiler_generated_sites(
     body: &bone_semantic::hir::Body,
     subst: &MonoSubst,
     target: bone_semantic::hir::FnBackend,
-) -> Vec<(Idx<bone_semantic::hir::Expr>, &'static str)> {
+    examined: &mut usize,
+    failures: &mut Vec<(Idx<bone_semantic::hir::Expr>, MonoTyReason)>,
+) -> Vec<GeneratedSite> {
     use bone_semantic::hir::{Callee, Expr as E};
     // The receiver's CONCRETE type under this instance's substitution, which is
-    // what the storage condition is asked about. `Err` is a shared generic
-    // snapshot -- not column-eligible, and the same answer lowering gives.
-    let holds = |recv: Idx<bone_semantic::hir::Expr>, cond: StorageCond| -> bool {
+    // what the storage condition is asked about.
+    let verdict = |recv: Idx<bone_semantic::hir::Expr>, cond: StorageCond| -> CondVerdict {
         if cond == StorageCond::Always {
-            return true;
+            return CondVerdict::Holds;
         }
-        let Some(ty) = inf.expr_types.get(recv) else { return false };
-        let Ok(mono) = skull_mir::monoty::convert(ws, inf, *ty, subst) else { return false };
-        match cond {
+        let Some(ty) = inf.expr_types.get(recv) else {
+            return CondVerdict::Failed(MonoTyReason::NoNode);
+        };
+        let mono = match skull_mir::monoty::convert(ws, inf, *ty, subst) {
+            Ok(m) => m,
+            Err(r) => return CondVerdict::Failed(r),
+        };
+        let holds = match cond {
             StorageCond::VecColumn => {
                 skull_mir::lower::vec_column_elem_mono(ws, target, &mono).is_some()
             }
@@ -1271,9 +1375,29 @@ fn compiler_generated_sites(
                 skull_mir::lower::map_column_value_mono(ws, target, &mono).is_some()
             }
             StorageCond::Always => true,
+        };
+        if holds { CondVerdict::Holds } else { CondVerdict::DoesNot }
+    };
+    // `UnboundGeneric` is the ONE failure that is also a storage answer: it means
+    // this body is the shared generic snapshot, whose element is opaque and
+    // therefore not column-eligible -- the same answer lowering gives. Every
+    // other reason (recovery poison, unfinished inference, a missing node, a
+    // cyclic substitution) is an invariant violation in an instantiated body and
+    // is REPORTED with its span rather than silently read as "boxed", which
+    // would let `no-bindings = 0` mean "the sites were discarded".
+    let mut settle = |recv, cond, e: Idx<bone_semantic::hir::Expr>| -> bool {
+        *examined += 1;
+        match verdict(recv, cond) {
+            CondVerdict::Holds => true,
+            CondVerdict::DoesNot => false,
+            CondVerdict::Failed(MonoTyReason::UnboundGeneric(_)) => false,
+            CondVerdict::Failed(r) => {
+                failures.push((e, r));
+                false
+            }
         }
     };
-    let mut out: Vec<(Idx<bone_semantic::hir::Expr>, &'static str)> = Vec::new();
+    let mut out: Vec<GeneratedSite> = Vec::new();
     for (e, expr) in body.expr_arena.iter() {
         match expr {
             E::Call { callee: Callee::Unresolved { name, .. }, args } => {
@@ -1285,10 +1409,10 @@ fn compiler_generated_sites(
                 // The receiver is the UFCS first argument; an arm with no
                 // receiver cannot be the column form.
                 let Some(recv) = args.clone().next() else { continue };
-                if !holds(recv, *cond) {
+                if !settle(recv, *cond, e) {
                     continue;
                 }
-                out.extend(names.iter().map(|n| (e, *n)));
+                out.extend(names.iter().map(|n| GeneratedSite { expr: e, name: n }));
             }
             // The index forms have no callee name to key on: the receiver's
             // CONSTRUCTOR is the trigger. Rendering is confined to index exprs,
@@ -1304,15 +1428,15 @@ fn compiler_generated_sites(
                 else {
                     continue;
                 };
-                if !holds(*base, *cond) {
+                if !settle(*base, *cond, e) {
                     continue;
                 }
-                out.extend(names.iter().map(|n| (e, *n)));
+                out.extend(names.iter().map(|n| GeneratedSite { expr: e, name: n }));
             }
             _ => {}
         }
     }
-    out.sort_by_key(|(e, n)| (*e, *n));
+    out.sort_by_key(|s| (s.expr, s.name));
     out
 }
 
@@ -1398,7 +1522,7 @@ fn always_emitted_callees(
 /// walk enters. The ONE classifier: [`classify_boundaries`] and
 /// [`InstanceGraph::closure`] both ask it, so "is this a boundary" cannot be
 /// answered two ways.
-fn boundary_class_of(
+pub fn boundary_class_for(
     f: &Function,
     erased: &BTreeSet<String>,
 ) -> Option<BoundaryClass> {
@@ -1414,16 +1538,78 @@ fn boundary_class_of(
 /// two instances were reached in. It is a SUBSET of the full classification, so
 /// nothing the walk calls expandable can later be excused as a boundary and
 /// nothing the walk skips can become un-excused.
+///
+/// **`@intrinsic` is not unconditionally foreign.** Emit resolution is
+/// `backend mapping > portable Rock fallback > spanned reject`
+/// (`skull_mir::intrinsics`), so an intrinsic that HAS a Rock body has a body
+/// the shared graph must expand -- the walk enumerates it either way, and
+/// calling it a boundary made "expanded or boundary" a label rather than a
+/// partition. Three declarations keep it foreign, each for its own reason:
+///
+/// - a compile-time expansion intrinsic (`@struct_expand`, `@shader_expand`,
+///   `@vertex_expand`, `@uniform_expand`, `@materialize`) has no callable body
+///   at all -- the annotation IS the declaration surface;
+/// - `@native_required` skips the fallback rung, so its Rock body, if any, is
+///   never the emitted one and a missing mapping is fatal rather than portable;
+/// - an intrinsic with no Rock body has nothing to expand.
+///
+/// A target artifact view may still REPLACE an expanded fallback with that
+/// target's mapping. That is an artifact decision, not a shared-graph one.
 fn declared_boundary(f: &Function) -> Option<BoundaryClass> {
-    if f.annotations.iter().any(|a| a.name.name.as_str() == "intrinsic") {
-        Some(BoundaryClass::Intrinsic)
-    } else if f.is_extern {
-        Some(BoundaryClass::Extern)
-    } else if f.inline_body.is_some() {
-        Some(BoundaryClass::InlineBody)
-    } else {
-        None
+    if f.is_extern {
+        return Some(BoundaryClass::Extern);
     }
+    if skull_mir::intrinsics::expand_kind(f).is_some() {
+        return Some(BoundaryClass::Intrinsic);
+    }
+    if f.annotations.iter().any(|a| a.name.name.as_str() == "intrinsic") {
+        // `inline_body` is the luajit MAPPING; a Rock body is the fallback.
+        return (skull_mir::intrinsics::is_native_required(f) || !has_rock_body(f))
+            .then_some(BoundaryClass::Intrinsic);
+    }
+    if f.inline_body.is_some() {
+        return Some(BoundaryClass::InlineBody);
+    }
+    None
+}
+
+/// Whether the declaration carries a portable Rock body, as opposed to only a
+/// foreign one. `has_body` on the module is the walk's own question; this is the
+/// declaration-level form the classifier needs before any module lookup.
+fn has_rock_body(f: &Function) -> bool {
+    f.inline_body.is_none() && !f.is_extern
+}
+
+/// Runtime entries an opaque `inline(lua)` body CALLS.
+///
+/// An inline body is foreign text, so the walk cannot lower it -- but emission
+/// still has to emit every symbol it names, and "opaque by design" cannot make a
+/// required symbol vanish from the graph. The corpus's case is
+/// `__rock_vec_column_elements`: the reflection walker calls it from Lua, no
+/// lowering arm synthesizes it, and before this it appeared only as a
+/// side-effect of the name-keyed over-approximation -- i.e. for the wrong
+/// reason, and it disappeared the moment that was fixed.
+///
+/// The scan is over [`ERASED_RUNTIME_ENTRIES`] only. That is deliberate: a
+/// general Lua parse is not what this needs, and the catalogue is the closed set
+/// of compiler-owned runtime symbols an opaque body may depend on. A name
+/// appearing in a comment or a string inside the body would be a false positive;
+/// none exists in the corpus, and a false POSITIVE keeps a symbol alive, where a
+/// false negative drops one emission requires.
+fn record_inline_body_deps(g: &mut InstanceGraph, ws: &Workspace) {
+    let mut deps: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for i in &g.instances {
+        let f = &ws.module(i.func.module).functions[i.func.func];
+        let Some(body) = &f.inline_body else { continue };
+        let text = body.1.as_str();
+        for name in ERASED_RUNTIME_ENTRIES {
+            if text.contains(name) {
+                deps.entry(mangle_fn(ws, f)).or_default().insert((*name).to_string());
+                g.erased_entries.insert((*name).to_string());
+            }
+        }
+    }
+    g.inline_body_deps = deps;
 }
 
 fn classify_boundaries(g: &mut InstanceGraph, ws: &Workspace) {
@@ -1432,7 +1618,7 @@ fn classify_boundaries(g: &mut InstanceGraph, ws: &Workspace) {
     for i in &g.instances {
         let f = &ws.module(i.func.module).functions[i.func.func];
         let symbol = mangle_fn(ws, f);
-        let Some(class) = boundary_class_of(f, &erased) else { continue };
+        let Some(class) = boundary_class_for(f, &erased) else { continue };
         // `variant_for` kept the representative when nothing served the target,
         // so a decl whose backend does not serve it is the S 1.6 outcome:
         // reject with a span, never a stub.

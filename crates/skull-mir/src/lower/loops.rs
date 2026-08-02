@@ -111,7 +111,7 @@ impl Builder<'_> {
         if self.expr_is_flat_vec(iter) {
             return self.lower_for_array(vars, iter, body);
         }
-        match self.coll_kind(iter) {
+        match self.coll_kind(iter)? {
             // `for x in [T]` always arrives with `for_iter_protocol` populated
             // (bone routes Array to the stdlib VecIter protocol); reaching the
             // dispatch means bone and skull disagree -- reject, don't emit a
@@ -513,7 +513,7 @@ impl Builder<'_> {
         // A column-stored Map iterates its SPINE: the walk yields (key, slot),
         // and the value is read leaf-wise out of `data` at that slot. No element
         // table is touched, because none exists.
-        let col = self.map_column_value_of(iter);
+        let col = self.map_column_value_of(iter)?;
         let m = self.lower_expr(iter)?;
         let table = match col {
             Some(_) => self.emit_cur(Inst::Field { base: m, field: Ustr::from("spine") }),
@@ -682,7 +682,7 @@ impl Builder<'_> {
             },
             _ => None,
         };
-        let kind = self.coll_kind(coll);
+        let kind = self.coll_kind(coll)?;
         if kind == ContainerKind::Map {
             let (ib, xpat) = split.ok_or_else(|| gap("enumerate over Map with a single binding"))?;
             return self.lower_for_map_enumerate(ib, &xpat, coll, body);
@@ -776,7 +776,7 @@ impl Builder<'_> {
             let len = self.emit_cur(Inst::Field { base: fv, field: Ustr::from("len") });
             (kind, buf, len)
         } else {
-            let kind = self.coll_kind(iter);
+            let kind = self.coll_kind(iter)?;
             let arr_v = self.lower_expr(iter)?;
             let len_v = self.emit_cur(Inst::Len { base: arr_v, kind });
             (kind, arr_v, len_v)

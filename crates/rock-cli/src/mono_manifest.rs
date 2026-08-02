@@ -62,6 +62,8 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     let mut uninst_names: std::collections::BTreeSet<String> = Default::default();
     let mut closure_unexpanded: std::collections::BTreeSet<String> = Default::default();
     let mut closure_capped: std::collections::BTreeSet<String> = Default::default();
+    let mut synth_examined = 0usize;
+    let mut inline_dep_names: std::collections::BTreeSet<String> = Default::default();
     let mut closure_expanded = 0usize;
     let mut closure_instances = 0usize;
     let mut closure_closed = true;
@@ -105,6 +107,8 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
                     *unresolved_reasons.entry(k).or_insert(0) += v;
                 }
                 uninst_names.extend(p.uninstantiated_root_names);
+                synth_examined += p.synthesized_examined;
+                inline_dep_names.extend(p.inline_dep_names);
                 closure_expanded += p.closure.expanded;
                 closure_instances += p.closure.instances;
                 closure_closed &= p.closure.is_closed();
@@ -253,6 +257,33 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     // Plan S 0h's three decided rejections. Zero over the corpus is the
     // measurement the decisions were taken on; a non-zero count is a real
     // program the concrete-program model refuses, not a diagnostic detail.
+    println!("## synthesized column intercepts");
+    println!();
+    println!(
+        "- storage-condition queries run (the DENOMINATOR): **{synth_examined}**;          edges produced: **{}**",
+        hist.get("compiler-generated").copied().unwrap_or(0)
+    );
+    println!(
+        "- receivers whose concrete type could not be decided (reported, never read as boxed):          **{}**",
+        rejection_kinds
+            .iter()
+            .filter(|(k, _)| **k == "concrete-type-unavailable")
+            .map(|(_, v)| *v)
+            .sum::<usize>()
+    );
+    println!(
+        "- runtime entries an opaque `inline(lua)` body depends on: **{}**",
+        inline_dep_names.len()
+    );
+    for n in inline_dep_names.iter().take(10) {
+        println!("  - `{n}`");
+    }
+    println!();
+    println!(
+        "Still an OVER-approximation, by two named arms: a Map INDEX site emits one of          `__map_col_slot`/`_slot_checked`/`_free` and all three are counted, and          `__vec_data_sort` keeps both of its nobox alternatives. Exact per-operation          attribution waits on `ConcreteBody` recording the operation."
+    );
+    println!();
+
     println!("## graph closure (plan S 2 gate)");
     println!();
     println!("- instances expanded / reached: **{closure_expanded}** / **{closure_instances}**");
@@ -466,6 +497,8 @@ struct OneProject {
     census: instance_graph::RecursionCensus,
     uninstantiated_root_names: std::collections::BTreeSet<String>,
     closure: skull::instance_graph::Closure,
+    synthesized_examined: usize,
+    inline_dep_names: std::collections::BTreeSet<String>,
     rejections: BTreeMap<&'static str, usize>,
     rejection_examples: Vec<String>,
     reconciliation: instance_graph::Reconciliation,
@@ -715,6 +748,8 @@ fn one_project(
         census,
         uninstantiated_root_names: g.uninstantiated_roots.clone(),
         closure: g.closure(&ws),
+        synthesized_examined: g.synthesized_examined,
+        inline_dep_names: g.inline_body_deps.values().flatten().cloned().collect(),
         rejections,
         rejection_examples,
         reconciliation: rec,

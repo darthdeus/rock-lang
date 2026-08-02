@@ -754,12 +754,15 @@ fn main() {
 }
 "#,
     );
-    // Every call that carries the unbound variable is rejected, not only the
-    // one that introduced it: `len` is called on the `[T]` it returned.
+    // Every site that carries the unbound variable is rejected, not only the one
+    // that introduced it: `len` is called on the `[T]` it returned, and the
+    // synthesized-call scan cannot decide that receiver's STORAGE either -- an
+    // unresolved receiver must be reported, never read as "boxed".
     let r = rejections_of(&ws, &g, instance_graph::RejectionKind::UnconstrainedTypeVar);
-    assert_eq!(r.len(), 2, "expected the `make` and `len` call sites, got {r:?}");
+    assert_eq!(r.len(), 3, "expected `make`, `len` and the storage query, got {r:?}");
     assert!(r.iter().any(|s| s.contains("make")), "{r:?}");
-    assert!(r.iter().any(|s| s.contains("len")), "{r:?}");
+    assert!(r.iter().any(|s| s.contains("len_arr_T")), "{r:?}");
+    assert!(r.iter().any(|s| s.contains("storage cannot be decided")), "{r:?}");
 }
 
 /// CONTROL: a type variable constrained anywhere in the body -- not at the call
@@ -1011,11 +1014,16 @@ fn main() {
 // Stage 2 gate: graph closure and symbol injectivity.
 // ---------------------------------------------------------------------------
 
-/// The gate on an ordinary program: every reached instance was expanded or is a
-/// boundary, nothing was cut by the depth cap, and no two distinct instances
-/// claim one emitted symbol.
+/// Every reached instance was expanded or is a boundary, nothing was cut by the
+/// depth cap, and no two distinct instances encode to one logical symbol.
+///
+/// NOT a closure assertion. `is_closed()` also requires that no generic emission
+/// root went uninstantiated, and a program built against the whole stdlib always
+/// leaves some -- the corpus answers `closed: NO` for that reason. This pins the
+/// three properties that do hold; the depth-cap arm gets its positive from
+/// `changing_instance_recursion_is_rejected`.
 #[test]
-fn an_ordinary_program_produces_a_closed_graph() {
+fn every_instance_is_expanded_or_a_boundary() {
     let (ws, g) = graph_of(
         r#"
 fn ident<T>(x: T) -> T { return x }
@@ -1302,4 +1310,132 @@ fn main() {
         !sources.iter().any(|s| s.contains("<int>")),
         "the `int` instantiation gained an intercept it never emits: {sources:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Stage 2: `@intrinsic` is not unconditionally a boundary.
+// ---------------------------------------------------------------------------
+
+fn is_expanded(
+    ws: &Workspace,
+    g: &instance_graph::InstanceGraph,
+    name: &str,
+) -> bool {
+    g.expanded
+        .iter()
+        .any(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == name)
+}
+
+fn reached(ws: &Workspace, g: &instance_graph::InstanceGraph, name: &str) -> bool {
+    g.instances
+        .iter()
+        .any(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == name)
+}
+
+/// HOSTILE: an `@intrinsic` whose body is a portable ROCK fallback. Emit
+/// resolution is `backend mapping > portable fallback > reject`, so the shared
+/// graph must EXPAND that fallback -- it is the body a target with no mapping
+/// runs, and its callees are real edges. Classifying every `@intrinsic` as
+/// foreign made "expanded or boundary" a label rather than a partition: the walk
+/// enumerated the body and recorded its edges while the closure gate excused the
+/// instance as having none.
+#[test]
+fn a_rock_bodied_intrinsic_expands_its_fallback() {
+    let (ws, g) = graph_of(
+        r#"
+fn helper_called_only_by_the_fallback(x: int) -> int { return x + 1 }
+@intrinsic fn portable_op(x: int) -> int {
+    return helper_called_only_by_the_fallback(x)
+}
+fn main() { portable_op(1) }
+"#,
+    );
+    assert!(
+        is_expanded(&ws, &g, "portable_op"),
+        "a Rock-bodied intrinsic was excused as a boundary instead of expanded"
+    );
+    assert!(
+        reached(&ws, &g, "helper_called_only_by_the_fallback"),
+        "the fallback body's callee is missing from the graph"
+    );
+    assert!(
+        !g.boundaries.keys().any(|k| k.contains("portable_op")),
+        "a Rock-bodied intrinsic was classified as a foreign boundary: {:?}",
+        g.boundaries.keys().collect::<Vec<_>>()
+    );
+}
+
+/// CONTROL: `@native_required` SKIPS the fallback rung -- a missing backend
+/// mapping is fatal rather than portable -- so its body is never the emitted one
+/// and it stays a boundary even with a Rock body beside it.
+#[test]
+fn a_native_required_intrinsic_stays_a_boundary() {
+    let (ws, g) = graph_of(
+        r#"
+fn unreachable_through_a_native_required_body(x: int) -> int { return x + 1 }
+@intrinsic @native_required fn pinned_op(x: int) -> int {
+    return unreachable_through_a_native_required_body(x)
+}
+fn main() { pinned_op(1) }
+"#,
+    );
+    assert!(
+        !is_expanded(&ws, &g, "pinned_op"),
+        "a native-required intrinsic expanded a fallback rung it skips"
+    );
+    assert!(
+        g.boundaries.keys().any(|k| k.contains("pinned_op")),
+        "a native-required intrinsic was not classified as a boundary"
+    );
+}
+
+/// CONTROL: an intrinsic with only a FOREIGN body has nothing to expand.
+#[test]
+fn a_foreign_bodied_intrinsic_stays_a_boundary() {
+    let (ws, g) = graph_of(
+        r#"
+@intrinsic inline(lua) fn mapped_op(x: int) -> int = "return x + 1"
+fn main() { mapped_op(1) }
+"#,
+    );
+    assert!(!is_expanded(&ws, &g, "mapped_op"), "an inline-only intrinsic reported an expansion");
+    assert!(
+        g.boundaries.keys().any(|k| k.contains("mapped_op")),
+        "an inline-only intrinsic was not classified as a boundary"
+    );
+}
+
+/// Every instance is EITHER expanded or classified as a boundary -- the property
+/// the closure gate's arithmetic depends on, asserted directly rather than
+/// inferred from `unexpanded` being empty.
+#[test]
+fn expanded_and_boundary_partition_the_instances() {
+    let (ws, g) = graph_of(
+        r#"
+value P { x: float, y: float }
+@intrinsic fn portable_op(x: int) -> int { return x + 1 }
+fn main() {
+    let xs: [P] = [P { x: 1.0, y: 2.0 }]
+    xs.push(P { x: 3.0, y: 4.0 })
+    portable_op(1)
+    let s = "{xs.len()}"
+}
+"#,
+    );
+    let c = g.closure(&ws);
+    assert!(c.unexpanded.is_empty(), "neither expanded nor a boundary: {:?}", c.unexpanded);
+    let both: Vec<String> = g
+        .expanded
+        .iter()
+        .filter(|i| {
+            instance_graph::boundary_class_for(
+                &ws.module(i.func.module).functions[i.func.func],
+                &g.erased_entries,
+            )
+            .is_some()
+        })
+        .map(|i| g.identity(&ws, i))
+        .collect();
+    assert!(both.is_empty(), "instances counted as BOTH expanded and boundary: {both:?}");
+    assert!(c.expanded > 0 && c.expanded < c.instances);
 }

@@ -354,8 +354,8 @@ impl Builder<'_> {
             // element-type guard below: column storage has no element slot at
             // all, and inside a body specialized at `T = E?` the element type is
             // an unsubstituted generic that no type predicate can classify.
-            Expr::Index { base, index } if self.vec_column_elem_of(base).is_some() => {
-                let elem = self.vec_column_elem_of(base).expect("guard matched");
+            Expr::Index { base, index } if self.vec_column_elem_of(base)?.is_some() => {
+                let elem = self.vec_column_elem_of(base)?.expect("guard matched");
                 let (b, _) = self.lower_index_base(base)?;
                 let i = self.lower_expr(index)?;
                 self.column_element_repr(b, i, elem)
@@ -385,7 +385,7 @@ impl Builder<'_> {
                 // A column-stored Map reaches its leaves the same way, one
                 // indirection out: the spine resolves the key to a slot, and the
                 // slot indexes `data`'s columns.
-                if let Some(elem) = self.map_column_value_of(base) {
+                if let Some(elem) = self.map_column_value_of(base)? {
                     return self.map_column_index_repr(b, i, elem);
                 }
                 // Leaf addressing: no slot reference, no nested ctor -- each

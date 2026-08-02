@@ -129,12 +129,10 @@ pub fn vec_column_elem(ws: &Workspace, name: Ustr, nullable: bool) -> Option<Ust
 
 /// Column eligibility for a `[E]`, decided on the CONCRETE type.
 ///
-/// **The one oracle.** `Builder::vec_column_elem_of` navigates a `TypeExpr`
-/// through the `SpecSubst`-aware adapter, which the instance graph cannot use --
-/// it holds no `Builder` and no `SpecSubst`, and the adapter is lossy about the
-/// very structure this reads. The decision is extracted here, over [`MonoTy`],
-/// so lowering and artifact discovery answer with one function rather than two
-/// that agree until they do not.
+/// **The one oracle.** `Builder::vec_column_elem_of` is a thin caller of this,
+/// and the instance graph calls it directly -- it holds no `Builder` and no
+/// `SpecSubst`, so before the extraction it could not ask at all. The decision
+/// no longer runs through the lossy `TypeExpr` adapter on either side.
 ///
 /// A nullable element columnizes only when its payload is `nobox`: for an
 /// unmarked value struct the boxed element is a legal representation that

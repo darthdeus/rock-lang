@@ -406,24 +406,24 @@ impl Builder<'_> {
     ) -> Result<Option<ValueRepr>, CompilerError> {
         match (name, arg_idxs) {
             ("__vec_data_get", [recv, index]) => {
-                let Some(elem) = self.vec_column_elem_of(*recv) else { return Ok(None) };
+                let Some(elem) = self.vec_column_elem_of(*recv)? else { return Ok(None) };
                 let vec = self.lower_expr(*recv)?;
                 let i = self.lower_expr(*index)?;
                 Ok(Some(self.column_element_repr(vec, i, elem)?))
             }
             ("__vec_data_set", [recv, index, value]) => {
-                let Some(elem) = self.vec_column_elem_of(*recv) else { return Ok(None) };
+                let Some(elem) = self.vec_column_elem_of(*recv)? else { return Ok(None) };
                 let vec = self.lower_expr(*recv)?;
                 let i = self.lower_expr(*index)?;
                 self.column_element_store(vec, i, *value, elem)?;
                 Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)))))
             }
             ("__vec_data_unset", [recv, _index]) => {
-                let Some(_) = self.vec_column_elem_of(*recv) else { return Ok(None) };
+                let Some(_) = self.vec_column_elem_of(*recv)? else { return Ok(None) };
                 Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)))))
             }
             ("__vec_data_capacity", [recv]) => {
-                let Some(elem) = self.vec_column_elem_of(*recv) else { return Ok(None) };
+                let Some(elem) = self.vec_column_elem_of(*recv)? else { return Ok(None) };
                 let shape = self.column_shape(elem)?;
                 let vec = self.lower_expr(*recv)?;
                 let header = self.column_header(vec);
@@ -460,7 +460,7 @@ impl Builder<'_> {
             // Shift every column at the same slot, so they stay in lockstep. The
             // element is consumed as LEAVES, so the inserted value never boxes.
             ("__vec_data_insert", [recv, index, value]) => {
-                let Some(elem) = self.vec_column_elem_of(*recv) else { return Ok(None) };
+                let Some(elem) = self.vec_column_elem_of(*recv)? else { return Ok(None) };
                 let shape = self.column_shape(elem)?;
                 let paths = column_leaf_paths(&shape);
                 let vec = self.lower_expr(*recv)?;
@@ -485,7 +485,7 @@ impl Builder<'_> {
             // share a column with the original, or a later push would be seen by
             // both.
             ("__vec_data_clone", [recv]) => {
-                let Some(elem) = self.vec_column_elem_of(*recv) else { return Ok(None) };
+                let Some(elem) = self.vec_column_elem_of(*recv)? else { return Ok(None) };
                 let shape = self.column_shape(elem)?;
                 let paths = column_leaf_paths(&shape);
                 let vec = self.lower_expr(*recv)?;
@@ -529,7 +529,7 @@ impl Builder<'_> {
             // so the key applies with no element at all and the two forms split
             // here rather than at a box the mark would forbid.
             ("__vec_data_sort", [recv, key_fn]) => {
-                let Some(elem) = self.vec_column_elem_of(*recv) else { return Ok(None) };
+                let Some(elem) = self.vec_column_elem_of(*recv)? else { return Ok(None) };
                 let vec = self.lower_expr(*recv)?;
                 let k = self.lower_expr(*key_fn)?;
                 if !self.is_nobox_struct(elem.name) {
@@ -554,7 +554,7 @@ impl Builder<'_> {
                 }))))
             }
             ("__rock_vec_to_lua_array", [recv]) => {
-                let Some(elem) = self.vec_column_elem_of(*recv) else { return Ok(None) };
+                let Some(elem) = self.vec_column_elem_of(*recv)? else { return Ok(None) };
                 if self.is_nobox_struct(elem.name) {
                     return Err(CompilerError::new_with_label(
                         self.body.expr_spans[*recv],
@@ -650,25 +650,25 @@ impl Builder<'_> {
     ) -> Result<Option<ValueRepr>, CompilerError> {
         match (name, arg_idxs) {
             ("get", [recv, key]) => {
-                let Some(elem) = self.map_column_value_of(*recv) else { return Ok(None) };
+                let Some(elem) = self.map_column_value_of(*recv)? else { return Ok(None) };
                 let m = self.lower_expr(*recv)?;
                 let k = self.lower_expr(*key)?;
                 Ok(Some(self.map_column_get_repr(m, k, elem)?))
             }
             ("table_unset", [recv, key]) => {
-                let Some(_) = self.map_column_value_of(*recv) else { return Ok(None) };
+                let Some(_) = self.map_column_value_of(*recv)? else { return Ok(None) };
                 let m = self.lower_expr(*recv)?;
                 let k = self.lower_expr(*key)?;
                 self.call_spine("__map_col_free", vec![m, k])?;
                 Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)))))
             }
             ("len" | "map_len", [recv]) => {
-                let Some(_) = self.map_column_value_of(*recv) else { return Ok(None) };
+                let Some(_) = self.map_column_value_of(*recv)? else { return Ok(None) };
                 let m = self.lower_expr(*recv)?;
                 Ok(Some(ValueRepr::Scalar(self.call_spine("__map_col_len", vec![m])?)))
             }
             ("contains", [recv, key]) => {
-                let Some(_) = self.map_column_value_of(*recv) else { return Ok(None) };
+                let Some(_) = self.map_column_value_of(*recv)? else { return Ok(None) };
                 let m = self.lower_expr(*recv)?;
                 let k = self.lower_expr(*key)?;
                 Ok(Some(ValueRepr::Scalar(
@@ -676,7 +676,7 @@ impl Builder<'_> {
                 )))
             }
             ("clear", [recv]) => {
-                let Some(_) = self.map_column_value_of(*recv) else { return Ok(None) };
+                let Some(_) = self.map_column_value_of(*recv)? else { return Ok(None) };
                 let m = self.lower_expr(*recv)?;
                 self.call_spine("__map_col_clear", vec![m])?;
                 Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)))))
@@ -812,7 +812,7 @@ impl Builder<'_> {
         // the spine turns the key into a slot, and the slot indexes `data`.
         // Without this a field write through `m[k]` takes a whole-element place
         // base, which the wrapper has no slot for.
-        if let Some(elem) = self.map_column_value_of(base) {
+        if let Some(elem) = self.map_column_value_of(base)? {
             let m = self.lower_expr(base)?;
             let k = self.lower_expr(index)?;
             let slot = self.call_spine("__map_col_slot_checked", vec![m, k])?;
@@ -820,7 +820,7 @@ impl Builder<'_> {
             let at = self.checked_column_index(data, slot);
             return Ok(Some((data, at, elem)));
         }
-        let Some(elem) = self.vec_column_elem_of(base) else {
+        let Some(elem) = self.vec_column_elem_of(base)? else {
             return Ok(None);
         };
         let vec = self.lower_expr(base)?;
