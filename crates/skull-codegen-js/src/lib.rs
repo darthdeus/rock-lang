@@ -955,7 +955,6 @@ function stone_draw_mesh(data, count, stride, attr_sizes, attr_count, tex) {
   __sw_mark_drawn(sh);
 }
 
-var __SW_IDENTITY = new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]);
 var __sw_logged = {};
 function __sw_log_once(msg) {
   if (__sw_logged[msg]) return;
@@ -982,21 +981,11 @@ function __sw_ortho_size() {
   return [__SW.logicalW, __SW.logicalH];
 }
 
-// Ortho uProjection (2/w, -2/h Y-down, sized to the bound target), uView =
-// translate(ox*scale, oy*scale)*scale, uTransform identity (sprite.rs:223-282).
-function stone_set_camera(shader, ox, oy, scale) {
-  var gl = __SW.gl, sh = __SW.shaders[shader];
-  if (!gl || !sh) return;
-  var wh = __sw_ortho_size(), w = wh[0], h = wh[1];
-  var proj = new Float32Array([2/w,0,0,0, 0,-2/h,0,0, 0,0,-1,0, -1,1,0,1]);
-  var view = new Float32Array([scale,0,0,0, 0,scale,0,0, 0,0,1,0, ox*scale,oy*scale,0,1]);
-  var prev = __SW.curShader;
-  gl.useProgram(sh.prog);
-  var lp = __sw_uloc(sh, "uProjection"); if (lp) gl.uniformMatrix4fv(lp, false, proj);
-  var lv = __sw_uloc(sh, "uView"); if (lv) gl.uniformMatrix4fv(lv, false, view);
-  if (prev !== 0 && __SW.shaders[prev]) gl.useProgram(__SW.shaders[prev].prog);
-}
-function stone_reset_camera(shader) { stone_set_camera(shader, 0, 0, 1.0); }
+// The camera matrices are built in Rock and arrive in the ENGINE block at
+// binding 0, so there is no camera math here any more -- only the bound
+// target's size, which Rock derives its ortho from.
+function stone_current_target_width() { return __sw_ortho_size()[0]; }
+function stone_current_target_height() { return __sw_ortho_size()[1]; }
 
 // --- textures / images ---
 function __sw_new_texture() {
@@ -1767,8 +1756,6 @@ function __sw_bytes_to_string(b) {
 
 // --- camera state / immediate sprite path (MB: batches only; the immediate
 // sprite quad lands with the MD canvas-present blit) ---
-var __sw_cameraActive = false;
-function stone_is_camera_active() { return __sw_cameraActive; }
 function stone_current_shader_bound() { return __SW.curShader !== 0; }
 function stone_sprite_begin(shader) { if (shader) stone_set_shader(shader); }
 function stone_sprite_draw(shader, handle, x, y, w, h, sx, sy, sw, sh, rot, scx, scy, r, g, b, a) {
@@ -1805,14 +1792,6 @@ function stone_sprite_draw_texture(shader, tex, tw, th, x, y, w, h, sx, sy, sw, 
     px[2], py[2], u1, v1, r, g, b, a,
     px[3], py[3], u0, v1, r, g, b, a,
   ]);
-  if (cur === 0) {
-    // Standalone caller: bound-target pixel ortho + identity view/transform
-    // (native set_default_sprite_uniforms).
-    var wh = __sw_ortho_size();
-    var proj = new Float32Array([2 / wh[0], 0, 0, 0, 0, -2 / wh[1], 0, 0, 0, 0, -1, 0, -1, 1, 0, 1]);
-    var lp = __sw_uloc(sh2, "uProjection"); if (lp) gl.uniformMatrix4fv(lp, false, proj);
-    var lv = __sw_uloc(sh2, "uView"); if (lv) gl.uniformMatrix4fv(lv, false, __SW_IDENTITY);
-  }
   gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_2D, t);
   var ltx = __sw_uloc(sh2, "uTexture"); if (ltx) gl.uniform1i(ltx, 0);

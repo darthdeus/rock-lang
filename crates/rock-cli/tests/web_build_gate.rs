@@ -123,12 +123,24 @@ fn main() { print("{SHADER_KEY}") }
     );
     // The `@uniform` blocks travel as parallel FLAT lists: names, sizes,
     // fingerprints, per-block member counts, then members and their std140
-    // offsets concatenated. This fixture's only group is on the VERTEX stage,
-    // which is loose for one more step (the `@engine` port), so the lists are
-    // empty -- still as arguments, never as a short call, which is the
-    // silent-on-JS failure this gate exists for.
-    assert!(
-        line.contains(r#"{_data: [], len: 0, __ty: "Vec"}, {_data: [], len: 0, __ty: "Vec"}, {_data: [], len: 0, __ty: "Vec"}, {_data: [], len: 0, __ty: "Vec"}, {_data: [], len: 0, __ty: "Vec"}, {_data: [], len: 0, __ty: "Vec"});"#),
-        "registration uniform-block arguments drifted:\n{line}"
-    );
+    // offsets concatenated. This fixture's group is on the VERTEX stage, which
+    // is a block since the `@engine` port. The empty-list case -- present as
+    // arguments, never a short call, which is the silent-on-JS failure this
+    // shape guards -- is covered by `shader_register_arity_gate`.
+    //
+    // The fingerprint is skipped deliberately: it is a number the algorithm
+    // produced, so asserting it would pin the hash rather than the layout.
+    // Size and offsets are std140 truths for three mat4 members.
+    for expected in [
+        r#"{_data: ["UiVertU"], len: 1, __ty: "Vec"}"#,
+        r#"{_data: [192], len: 1, __ty: "Vec"}"#,
+        r#"{_data: [3], len: 1, __ty: "Vec"}"#,
+        r#"{_data: ["uProjection", "uView", "uTransform"], len: 3, __ty: "Vec"}"#,
+        r#"{_data: [0, 64, 128], len: 3, __ty: "Vec"});"#,
+    ] {
+        assert!(
+            line.contains(expected),
+            "registration uniform-block arguments drifted -- missing {expected}:\n{line}"
+        );
+    }
 }

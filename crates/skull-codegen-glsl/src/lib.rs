@@ -2843,8 +2843,10 @@ pub fn emit_shader_pipeline_with_dependencies(
     // is only correct together with porting those shaders to `@engine`. The
     // emitter half is done and tested (`engine_block_*` in tests/a2.rs); this
     // is sequencing, not a limitation.
-    let vert_plan: Option<UniformBlockPlan> = None;
-    let _ = vshape.uniform_group;
+    let vert_plan = vshape
+        .uniform_group
+        .map(|g| uniform_block(ws, g).map_err(|e| err(vf.name_span, e.message)))
+        .transpose()?;
     let frag_plan = fshape
         .uniform_group
         .map(|g| uniform_block(ws, g).map_err(|e| err(ff.name_span, e.message)))
@@ -2872,6 +2874,32 @@ pub fn emit_shader_pipeline_with_dependencies(
     let engine_plan = engine_group
         .map(|g| uniform_block(ws, g).map_err(|e| err(vf.name_span, e.message)))
         .transpose()?;
+
+    // An unnamed-instance block's members are BARE GLOBALS, so the engine block
+    // and a stage's own block share one GLSL namespace. A duplicate name is a
+    // driver compile error (`declaration of "uTime" conflicts with previous
+    // declaration`) with no Rock span on it, which is the silent-collision class
+    // `pos`/`EntityId` hit one level down in P1 -- reject it here instead, where
+    // the offending member can be named.
+    //
+    // Only engine-vs-stage: a vertex block and a fragment block never share a
+    // compilation unit, so identical names there are correct.
+    if let Some(engine) = engine_plan.as_ref() {
+        for (stage, plan, span) in [
+            ("vertex", vert_plan.as_ref(), vf.name_span),
+            ("fragment", frag_plan.as_ref(), ff.name_span),
+        ] {
+            let Some(plan) = plan else { continue };
+            for m in &plan.members {
+                if engine.members.iter().any(|e| e.name == m.name) {
+                    return Err(err(span, format!(
+                        "shader pipeline: the {stage} group `{}` declares `{}`, which the @engine block `{}` already declares -- block members are bare globals in GLSL, so the two collide",
+                        plan.struct_name, m.name, engine.struct_name
+                    )));
+                }
+            }
+        }
+    }
 
     let (vertex_block, vertex_dependencies) =
         emit_vertex_stage(ws, &scx, vfref, &vshape, &varyings, vert_plan.as_ref(), engine_plan.as_ref())?;
