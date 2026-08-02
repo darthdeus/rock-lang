@@ -24,6 +24,8 @@ mod replay_window_tests;
 mod shader_failure_gate;
 #[path = "uniform_block_gate.rs"]
 mod uniform_block_gate;
+#[path = "texture_slot_gate.rs"]
+mod texture_slot_gate;
 #[path = "skull_overlay_wipe.rs"]
 mod skull_overlay_wipe;
 #[path = "web_smoke_tests.rs"]
