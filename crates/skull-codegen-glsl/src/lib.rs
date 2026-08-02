@@ -1823,18 +1823,33 @@ pub struct ShaderEmission {
     /// still needs the NAME once, to point each sampler uniform at its unit at
     /// link time; after that it binds by slot and never by name again.
     pub texture_slots: Vec<Ustr>,
-    /// The program's `@uniform` block layouts, in BINDING order -- slot N is
-    /// index N, the same contract `texture_slots` uses for units. Empty when
-    /// the program declares no group.
+    /// The program's uniform block layouts, each paired with its BINDING INDEX.
+    /// Empty when the program declares no group.
     ///
-    /// A1 has at most one. An A2 pipeline has one PER STAGE, because the two
-    /// stages declare different types and a vertex entry is reused across
-    /// several fragment entries, so they cannot be merged into one.
+    /// The index comes from the param ROLE, not from position in this list:
+    /// `@engine` is 0, the vertex `@uniform` group 1, the fragment group 2
+    /// (`UNIFORM_BLOCK_BINDING_*`). Position was the index until the engine
+    /// block landed, which made 0 mean "engine block" only for programs that
+    /// happened to have one -- a program without `@engine` put its own group
+    /// there, so the engine could not tell the two apart and "binding 0 is the
+    /// engine's" was unenforceable. Reserving the slot is what makes it real.
+    ///
+    /// A1 has at most one (a fragment group, so binding 2). An A2 pipeline has
+    /// one per stage, because the stages declare different types and a vertex
+    /// entry is reused across several fragment entries.
     ///
     /// The single authority for each block's bytes: the GLSL declaration, the
     /// CPU packer and the link-time driver assertion all read it.
-    pub uniform_blocks: Vec<UniformBlockPlan>,
+    pub uniform_blocks: Vec<(u32, UniformBlockPlan)>,
 }
+
+/// Uniform block binding indices, assigned by param ROLE so the slot is
+/// structural rather than a consequence of how many groups a program declares.
+/// Slot 0 is RESERVED for `@engine` whether or not the program has one, which is
+/// what lets the engine reject a foreign block there at registration.
+pub const UNIFORM_BLOCK_BINDING_ENGINE: u32 = 0;
+pub const UNIFORM_BLOCK_BINDING_VERTEX: u32 = 1;
+pub const UNIFORM_BLOCK_BINDING_FRAGMENT: u32 = 2;
 
 pub fn emit_shader_entry_with_dependencies(
     ws: &Workspace,
@@ -1932,7 +1947,7 @@ pub fn emit_shader_entry_with_dependencies(
         source,
         dependencies,
         texture_slots,
-        uniform_blocks: block_plan.into_iter().collect(),
+        uniform_blocks: block_plan.into_iter().map(|p| (UNIFORM_BLOCK_BINDING_FRAGMENT, p)).collect(),
     })
 }
 
@@ -2757,7 +2772,26 @@ fn emit_fragment_stage(
 /// one GLSL namespace -- the linked program has a single uniform namespace, so
 /// a vertex/fragment same-name pair is a link error (or a silent alias), never
 /// two distinct bindings. Varyings are one name in both stages (inserted once).
-fn check_pipeline_collisions(v: &VertexShape, varyings: &VaryingsShape, fs: &FragShape, span: Span) -> Result<(), CompilerError> {
+///
+/// THE ENGINE BLOCK'S MEMBERS BELONG HERE TOO. An unnamed-instance block's
+/// members are bare globals, so they sit in the same namespace as everything
+/// above. A stage's own `@uniform` group already arrives through `uniforms`
+/// whether or not it became a block, but `@engine` is a separate ROLE landing in
+/// `engine_uniforms`, so it was outside this census entirely -- and a missed
+/// pair is a raw driver error carrying no Rock span (`declaration of "uTime"
+/// conflicts with previous declaration`), which is exactly the class this
+/// exists to convert into a spanned rejection.
+///
+/// Taken from the PLAN rather than from both shapes' `engine_uniforms`: the
+/// engine block is declared in both stages but is ONE block, so listing it per
+/// stage would collide with itself.
+fn check_pipeline_collisions(
+    v: &VertexShape,
+    varyings: &VaryingsShape,
+    fs: &FragShape,
+    engine_plan: Option<&UniformBlockPlan>,
+    span: Span,
+) -> Result<(), CompilerError> {
     // gl_Position is always reserved. `FragColor` is reserved only for the
     // single-output form -- with MRT the outputs are explicit named fields (one
     // of which may itself be `FragColor`), so they go through the collision check
@@ -2767,6 +2801,8 @@ fn check_pipeline_collisions(v: &VertexShape, varyings: &VaryingsShape, fs: &Fra
         seen.insert(Ustr::from("FragColor"));
     }
     let mrt_outputs = fs.outputs.iter().flatten().map(|&(n, _)| n);
+    let engine_members: Vec<Ustr> =
+        engine_plan.map(|p| p.members.iter().map(|m| m.name).collect()).unwrap_or_default();
     let names = v.attrs.iter().map(|&(n, _, _)| n)
         .chain(v.uniforms.iter().map(|&(n, _)| n))
         .chain(v.samplers.iter().map(|&(_, n, _)| n))
@@ -2775,10 +2811,11 @@ fn check_pipeline_collisions(v: &VertexShape, varyings: &VaryingsShape, fs: &Fra
         .chain(fs.uniforms.iter().map(|&(n, _)| n))
         .chain(fs.samplers.iter().map(|&(_, n, _)| n))
         .chain(fs.arrays.iter().map(|&(_, n, ..)| n))
-        .chain(mrt_outputs);
+        .chain(mrt_outputs)
+        .chain(engine_members);
     for n in names {
         if !seen.insert(n) {
-            return Err(err(span, format!("shader pipeline: name `{n}` would collide (attributes, uniforms, varyings, samplers and reserved names share one GLSL namespace across both stages)")));
+            return Err(err(span, format!("shader pipeline: name `{n}` would collide (attributes, uniforms, engine-block members, varyings, samplers and reserved names share one GLSL namespace across both stages)")));
         }
     }
     Ok(())
@@ -2826,7 +2863,6 @@ pub fn emit_shader_pipeline_with_dependencies(
     let vshape = classify_vertex(ws, vf)?;
     let varyings = classify_varyings(ws, vshape.varyings_ty, vf.name_span)?;
     let fshape = classify_pipeline_fragment(ws, ff, vshape.varyings_ty)?;
-    check_pipeline_collisions(&vshape, &varyings, &fshape, vf.name_span)?;
 
     // One std140 block per STAGE, each at its own binding index. The stages
     // declare different `@uniform` types and cannot be made to share one: a
@@ -2834,15 +2870,9 @@ pub fn emit_shader_pipeline_with_dependencies(
     // serves three), so a merged per-program type would need that one fn to
     // declare a different struct per program.
     //
-    // The vertex stage's OWN group stays loose for one more step. The old
-    // rationale ("every A2 vertex group is engine-authored") was false --
-    // bitgun's grass mixes camera/time with a game-owned `entity_count` -- and
-    // `@engine` is what expresses the boundary now. But every vertex group in
-    // the tree still holds engine-authored matrices set BY NAME from
-    // `stone_set_camera`, and a block member has no location, so flipping this
-    // is only correct together with porting those shaders to `@engine`. The
-    // emitter half is done and tested (`engine_block_*` in tests/a2.rs); this
-    // is sequencing, not a limitation.
+    // A stage group holds only what that shader OWNS: the engine-authored
+    // camera/time/screen band lives in `@engine` instead, which is what lets
+    // bitgun's grass keep a game-owned `entity_count` beside them.
     let vert_plan = vshape
         .uniform_group
         .map(|g| uniform_block(ws, g).map_err(|e| err(vf.name_span, e.message)))
@@ -2875,31 +2905,9 @@ pub fn emit_shader_pipeline_with_dependencies(
         .map(|g| uniform_block(ws, g).map_err(|e| err(vf.name_span, e.message)))
         .transpose()?;
 
-    // An unnamed-instance block's members are BARE GLOBALS, so the engine block
-    // and a stage's own block share one GLSL namespace. A duplicate name is a
-    // driver compile error (`declaration of "uTime" conflicts with previous
-    // declaration`) with no Rock span on it, which is the silent-collision class
-    // `pos`/`EntityId` hit one level down in P1 -- reject it here instead, where
-    // the offending member can be named.
-    //
-    // Only engine-vs-stage: a vertex block and a fragment block never share a
-    // compilation unit, so identical names there are correct.
-    if let Some(engine) = engine_plan.as_ref() {
-        for (stage, plan, span) in [
-            ("vertex", vert_plan.as_ref(), vf.name_span),
-            ("fragment", frag_plan.as_ref(), ff.name_span),
-        ] {
-            let Some(plan) = plan else { continue };
-            for m in &plan.members {
-                if engine.members.iter().any(|e| e.name == m.name) {
-                    return Err(err(span, format!(
-                        "shader pipeline: the {stage} group `{}` declares `{}`, which the @engine block `{}` already declares -- block members are bare globals in GLSL, so the two collide",
-                        plan.struct_name, m.name, engine.struct_name
-                    )));
-                }
-            }
-        }
-    }
+    // Runs AFTER the plans, because a group's members are only in the namespace
+    // once it is a block -- and they are not in `uniforms` any more when it is.
+    check_pipeline_collisions(&vshape, &varyings, &fshape, engine_plan.as_ref(), vf.name_span)?;
 
     let (vertex_block, vertex_dependencies) =
         emit_vertex_stage(ws, &scx, vfref, &vshape, &varyings, vert_plan.as_ref(), engine_plan.as_ref())?;
@@ -2936,7 +2944,10 @@ pub fn emit_shader_pipeline_with_dependencies(
         source,
         dependencies,
         texture_slots,
-        uniform_blocks: engine_plan.into_iter().chain(vert_plan).chain(frag_plan).collect(),
+        uniform_blocks: engine_plan.into_iter().map(|p| (UNIFORM_BLOCK_BINDING_ENGINE, p))
+            .chain(vert_plan.map(|p| (UNIFORM_BLOCK_BINDING_VERTEX, p)))
+            .chain(frag_plan.map(|p| (UNIFORM_BLOCK_BINDING_FRAGMENT, p)))
+            .collect(),
     })
 }
 

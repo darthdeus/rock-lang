@@ -1603,21 +1603,26 @@ fn shader_registration_lines(ws: &Workspace) -> Result<ShaderRegistrations, Comp
         // with no group sends empty lists, which are still arguments; a short
         // call is what rock-cli/tests/shader_register_arity_gate.rs catches.
         let blocks = &emission.uniform_blocks;
-        let names: Vec<&str> = blocks.iter().map(|p| p.struct_name.as_str()).collect();
-        let sizes: Vec<i64> = blocks.iter().map(|p| p.size as i64).collect();
-        let fingerprints: Vec<i64> = blocks.iter().map(|p| p.fingerprint() as i64).collect();
-        let counts: Vec<i64> = blocks.iter().map(|p| p.members.len() as i64).collect();
+        // The BINDING travels explicitly rather than as position in these
+        // lists: slot 0 is reserved for `@engine`, so a program without one
+        // leaves it empty instead of shifting its own block into it.
+        let bindings: Vec<i64> = blocks.iter().map(|(b, _)| *b as i64).collect();
+        let names: Vec<&str> = blocks.iter().map(|(_, p)| p.struct_name.as_str()).collect();
+        let sizes: Vec<i64> = blocks.iter().map(|(_, p)| p.size as i64).collect();
+        let fingerprints: Vec<i64> = blocks.iter().map(|(_, p)| p.fingerprint() as i64).collect();
+        let counts: Vec<i64> = blocks.iter().map(|(_, p)| p.members.len() as i64).collect();
         let member_names: Vec<&str> =
-            blocks.iter().flat_map(|p| p.members.iter().map(|m| m.name.as_str())).collect();
+            blocks.iter().flat_map(|(_, p)| p.members.iter().map(|m| m.name.as_str())).collect();
         let offsets: Vec<i64> =
-            blocks.iter().flat_map(|p| p.members.iter().map(|m| m.offset as i64)).collect();
+            blocks.iter().flat_map(|(_, p)| p.members.iter().map(|m| m.offset as i64)).collect();
         let _ = writeln!(
             out,
-            "__rock_shader_register({:?}, {}, {}, {}, {}, {}, {}, {}, {})",
+            "__rock_shader_register({:?}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
             pair.key,
             lua_long_bracket(&emission.source),
             skull_codegen_lua::lua_string_vec(&slot_names),
             skull_codegen_lua::lua_string_vec(&names),
+            skull_codegen_lua::lua_int_vec(&bindings),
             skull_codegen_lua::lua_int_vec(&sizes),
             skull_codegen_lua::lua_int_vec(&fingerprints),
             skull_codegen_lua::lua_int_vec(&counts),

@@ -133,6 +133,10 @@ fn main() { print("{SHADER_KEY}") }
     // Size and offsets are std140 truths for three mat4 members.
     for expected in [
         r#"{_data: ["UiVertU"], len: 1, __ty: "Vec"}"#,
+        // Binding 1: the VERTEX slot. Not 0 -- that is reserved for `@engine`,
+        // which this fixture does not declare, so the slot stays empty rather
+        // than sliding this block into it.
+        r#"{_data: [1], len: 1, __ty: "Vec"}"#,
         r#"{_data: [192], len: 1, __ty: "Vec"}"#,
         r#"{_data: [3], len: 1, __ty: "Vec"}"#,
         r#"{_data: ["uProjection", "uView", "uTransform"], len: 3, __ty: "Vec"}"#,
