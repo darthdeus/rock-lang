@@ -916,7 +916,11 @@ function __sw_target_size() {
 function __sw_ortho_size() {
   if (__SW.boundCanvas !== 0) {
     var c = __SW.canvases[__SW.boundCanvas];
-    if (c) return [c.w, c.h];
+    // ACTIVE, not capacity: binding viewports and scissors to the active rect
+    // and the ortho has to describe that same rectangle, or the world projects
+    // to one place and rasterizes at another (stone-rs reports the active
+    // extent as CURRENT_TARGET_SIZE for exactly this reason).
+    if (c) return [c.activeW || c.w, c.activeH || c.h];
   }
   return [__SW.logicalW, __SW.logicalH];
 }
@@ -1869,11 +1873,17 @@ function __sw_read_shape(gl, c) {
 function stone_read_canvas_pixel(h, x, y) {
   var gl = __SW.gl;
   var c = __SW.canvases[h];
-  if (!c || x < 0 || y < 0 || x >= c.w || y >= c.h) return 0;
+  if (!c) return 0;
+  // Bounds-check and flip against the ACTIVE image, not the backing texture
+  // (stone-rs canvas.rs does the same): a scene target is allocated at
+  // capacity and rendered into its active rect, which is anchored at the GL
+  // origin, so the top-left row converts against the active height.
+  var aw = c.activeW || c.w, ah = c.activeH || c.h;
+  if (x < 0 || y < 0 || x >= aw || y >= ah) return 0;
   var shape = __sw_read_shape(gl, c);
   gl.bindFramebuffer(gl.FRAMEBUFFER, c.fbo);
   gl.finish();
-  gl.readPixels(x, c.h - 1 - y, 1, 1, shape.fmt, shape.type, shape.view);
+  gl.readPixels(x, ah - 1 - y, 1, 1, shape.fmt, shape.type, shape.view);
   var prev = __SW.canvases[__SW.boundCanvas];
   gl.bindFramebuffer(gl.FRAMEBUFFER, prev ? prev.fbo : null);
   return shape.get(shape.view);
@@ -1932,7 +1942,8 @@ function stone_pixel_readback_submit(id, canvasH, x, y) {
     s.stagingPrimed = false;
   }
   var c = __SW.canvases[canvasH];
-  var ok = !!c && x >= 0 && y >= 0 && x < c.w && y < c.h;
+  var aw = c ? (c.activeW || c.w) : 0, ah = c ? (c.activeH || c.h) : 0;
+  var ok = !!c && x >= 0 && y >= 0 && x < aw && y < ah;
   if (ok && s.depth) {
     __sw_log_once("depth pixel readback unsupported on WebGL2; returning far plane");
     ok = false;
@@ -1943,7 +1954,7 @@ function stone_pixel_readback_submit(id, canvasH, x, y) {
   gl.bindFramebuffer(gl.READ_FRAMEBUFFER, c.fbo);
   gl.bindBuffer(gl.PIXEL_PACK_BUFFER, s.pbos[s.stagingIdx]);
   gl.pixelStorei(gl.PACK_ALIGNMENT, 1);
-  gl.readPixels(x, c.h - 1 - y, 1, 1, shape.fmt, shape.type, 0);
+  gl.readPixels(x, ah - 1 - y, 1, 1, shape.fmt, shape.type, 0);
   gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
   if (s.fences[s.stagingIdx]) gl.deleteSync(s.fences[s.stagingIdx]);
   s.fences[s.stagingIdx] = gl.fenceSync ? gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0) : null;

@@ -210,9 +210,18 @@ fn web_chrome_screenshot_and_click_pick_mag() {
         .arg(format!("http://127.0.0.1:{port}/index.html"))
         .arg(&shot)
         .args(["--frames", "30"])
-        // The player renders at ~(950, 465) in the fixed level's boot camera
-        // (1280x720 window crop of the 1920x1080 canvas).
-        .args(["--click", "950", "465"])
+        // Derive the click from the player's LIVE projection, never a literal
+        // pixel: a hard-coded point silently becomes a test of the current
+        // framing and goes stale whenever camera framing or present scaling
+        // moves (it did -- Arc A's FrameView work invalidated the old 950,465).
+        // `render_pos + 1.5` is the sprite body rather than the feet anchor,
+        // matching mag's own `player_body_probe_world` test hook, and logical
+        // output units map to CSS through the canvas element's rect so the
+        // expression holds at any devicePixelRatio.
+        .args([
+            "--click-expr",
+            "(function(){               var rp=render_pos_Movable_ret_Vec2(__G.player.movable);               var s=world_to_screen_Vec2_ret_Vec2(rp[0],rp[1]+1.5);               var c=document.querySelector('canvas');var r=c.getBoundingClientRect();               return [r.left+s[0]*(r.width/__SW.logicalW),                       r.top+s[1]*(r.height/__SW.logicalH)];})()",
+        ])
         .args(["--expect", "__G.last_click_target && __G.last_click_target.__variant"])
         .args(["--value", "Player"])
         .output()
