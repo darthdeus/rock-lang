@@ -307,29 +307,6 @@ fn main() {
     );
 }
 
-/// THE WATCH ITEM (plan S 0h). A GENERIC function taken as a value has no call
-/// site, so there are no bindings to key an instantiation on -- structurally the
-/// same gap as the `iter` witness. It must be REPORTED, not silently instantiated
-/// at some invented type and not silently dropped.
-#[test]
-fn a_generic_function_taken_as_a_value_has_no_instantiation() {
-    let (_ws, g) = graph_of(
-        r#"
-fn ident<T>(x: T) -> T { return x }
-fn apply(f: fn(int) -> int, v: int) -> int { return f(v) }
-fn main() {
-    apply(ident, 1)
-}
-"#,
-    );
-    let n = g
-        .unresolved
-        .iter()
-        .filter(|u| u.reason == "fn-value-generic-no-instantiation")
-        .count();
-    assert!(n > 0, "a generic fn value was not reported as uninstantiable");
-}
-
 /// Every level of a combinator chain gets a CONCRETE witness instance.
 ///
 /// HONEST SCOPE: this does not test the `bound_call_trees` walk or the nested
@@ -635,4 +612,231 @@ fn main() {
         2,
         "the manifest collapsed two distinct instances: {ident_lines:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Stage 2: the three decided rejections at instance construction (plan S 0h).
+// Each has a control that must NOT be rejected beside it -- a rejection whose
+// only evidence is the rejected input proves the gate fires, not that it
+// discriminates.
+// ---------------------------------------------------------------------------
+
+fn rejections_of(
+    ws: &Workspace,
+    g: &instance_graph::InstanceGraph,
+    kind: instance_graph::RejectionKind,
+) -> Vec<String> {
+    g.rejections
+        .iter()
+        .filter(|r| r.kind == kind)
+        .map(|r| format!("{} at {:?}: {}", g.identity(ws, &r.at), r.span, r.message))
+        .collect()
+}
+
+/// `f<T> -> f<[T]>` cannot be monomorphized: the instantiation type grows
+/// without bound. Plan S 7 records that it compiles and RUNS today, so this is
+/// a deliberate language-surface rejection, not a bug fix.
+#[test]
+fn changing_instance_recursion_is_rejected() {
+    let (ws, g) = graph_of(
+        r#"
+fn depth<T>(x: T, n: int) -> int {
+    if n <= 0 { return 0 }
+    let wrapped: [T] = [x]
+    return 1 + depth(wrapped, n - 1)
+}
+fn main() { depth(1, 3) }
+"#,
+    );
+    let r = rejections_of(&ws, &g, instance_graph::RejectionKind::ChangingInstanceRecursion);
+    assert_eq!(r.len(), 1, "expected exactly one polymorphic-recursion rejection, got {r:?}");
+    assert!(r[0].contains("depth"), "{r:?}");
+    assert!(
+        !g.rejections.iter().any(|x| x.span.file.as_str() == "<unknown>"),
+        "a rejection carried no span: {:?}",
+        g.rejections
+    );
+}
+
+/// Mutual polymorphic recursion. The type grows around a two-function cycle, so
+/// neither edge on its own changes a function's own arguments -- a self-edge
+/// check alone cannot see this.
+#[test]
+fn mutual_changing_instance_recursion_is_rejected() {
+    let (ws, g) = graph_of(
+        r#"
+fn ping<T>(x: T, n: int) -> int {
+    if n <= 0 { return 0 }
+    return pong(x, n - 1)
+}
+fn pong<T>(x: T, n: int) -> int {
+    let wrapped: [T] = [x]
+    return 1 + ping(wrapped, n - 1)
+}
+fn main() { ping(1, 3) }
+"#,
+    );
+    let r = rejections_of(&ws, &g, instance_graph::RejectionKind::ChangingInstanceRecursion);
+    assert!(!r.is_empty(), "mutual polymorphic recursion was not rejected");
+}
+
+/// CONTROL: ordinary same-instance recursion, direct and mutual, is finite and
+/// must survive. It is the shape the corpus actually contains (11 direct, 9
+/// mutual), so a gate that rejected it would reject every real program.
+#[test]
+fn same_instance_recursion_is_not_rejected() {
+    let (ws, g) = graph_of(
+        r#"
+fn countdown(n: int) -> int {
+    if n <= 0 { return 0 }
+    return countdown(n - 1)
+}
+fn even(n: int) -> bool { if n == 0 { return true } return odd(n - 1) }
+fn odd(n: int) -> bool { if n == 0 { return false } return even(n - 1) }
+fn hold<T>(x: T, n: int) -> int {
+    if n <= 0 { return 0 }
+    return hold(x, n - 1)
+}
+fn main() {
+    countdown(3)
+    even(4)
+    hold(1, 2)
+    hold("s", 2)
+}
+"#,
+    );
+    let r = rejections_of(&ws, &g, instance_graph::RejectionKind::ChangingInstanceRecursion);
+    assert!(r.is_empty(), "finite recursion was rejected: {r:?}");
+    // ...and the fixture really did produce the recursion it claims to.
+    let census = g.recursion_census(&ws);
+    assert!(
+        census.direct_same_instance.iter().any(|s| s.contains("countdown")),
+        "the fixture produced no direct recursion to control against"
+    );
+    assert!(
+        !census.mutual_same_instance.is_empty(),
+        "the fixture produced no mutual recursion to control against"
+    );
+    // `hold` recurs at two distinct instantiations, neither reachable from the
+    // other. Two instances of one function inside a recursive SCC is NOT
+    // polymorphic recursion.
+    assert_eq!(
+        g.instances
+            .iter()
+            .filter(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "hold")
+            .count(),
+        2,
+        "the fixture lost the two-instantiation arm of the control"
+    );
+}
+
+/// THE WATCH ITEM (plan S 0h). A GENERIC function taken as a value has no call
+/// site to key an instantiation on -- structurally the same gap as the `iter`
+/// witness, decided the other way. It must be REJECTED with a real diagnostic,
+/// not instantiated at an invented type and not silently dropped.
+#[test]
+fn a_generic_fn_value_is_rejected() {
+    let (ws, g) = graph_of(
+        r#"
+fn ident<T>(x: T) -> T { return x }
+fn apply(f: fn(int) -> int, v: int) -> int { return f(v) }
+fn main() {
+    apply(ident, 1)
+}
+"#,
+    );
+    let r = rejections_of(&ws, &g, instance_graph::RejectionKind::GenericFnValue);
+    assert_eq!(r.len(), 1, "expected one generic-fn-value rejection, got {r:?}");
+    assert!(r[0].contains("ident"), "the rejection does not name the function: {r:?}");
+}
+
+/// CONTROL: a concrete function taken as a value is ordinary and must survive.
+#[test]
+fn a_concrete_fn_value_is_not_rejected() {
+    let (ws, g) = graph_of(
+        r#"
+fn bump(x: int) -> int { return x + 1 }
+fn apply(f: fn(int) -> int, v: int) -> int { return f(v) }
+fn main() {
+    let h = bump
+    apply(bump, 1)
+}
+"#,
+    );
+    assert!(
+        rejections_of(&ws, &g, instance_graph::RejectionKind::GenericFnValue).is_empty(),
+        "a concrete fn value was rejected"
+    );
+    assert!(
+        g.edges.iter().any(|e| e.kind == EdgeKind::FnValue),
+        "the fixture produced no fn-value edge to control against"
+    );
+}
+
+/// A type argument no constraint reaches. `make()`'s `T` is bound by nothing at
+/// the call, in the body, or at the binding -- there is no concrete type to
+/// instantiate, and today it compiles and runs. Decided REJECT (plan S 0h).
+#[test]
+fn an_unconstrained_type_variable_is_rejected() {
+    let (ws, g) = graph_of(
+        r#"
+fn make<T>() -> [T] { return [] }
+fn main() {
+    let xs = make()
+    let n = xs.len()
+}
+"#,
+    );
+    // Every call that carries the unbound variable is rejected, not only the
+    // one that introduced it: `len` is called on the `[T]` it returned.
+    let r = rejections_of(&ws, &g, instance_graph::RejectionKind::UnconstrainedTypeVar);
+    assert_eq!(r.len(), 2, "expected the `make` and `len` call sites, got {r:?}");
+    assert!(r.iter().any(|s| s.contains("make")), "{r:?}");
+    assert!(r.iter().any(|s| s.contains("len")), "{r:?}");
+}
+
+/// CONTROL: a type variable constrained anywhere in the body -- not at the call
+/// -- still unifies to a concrete type and must NOT be rejected. This is the
+/// arm that decides whether the gate reads "unconstrained" or merely "not
+/// constrained by the call's own arguments".
+#[test]
+fn a_body_constrained_type_variable_is_not_rejected() {
+    let (ws, g) = graph_of(
+        r#"
+fn make<T>() -> [T] { return [] }
+fn main() {
+    let xs = make()
+    xs.push(7)
+}
+"#,
+    );
+    let r = rejections_of(&ws, &g, instance_graph::RejectionKind::UnconstrainedTypeVar);
+    assert!(r.is_empty(), "a body-constrained type variable was rejected: {r:?}");
+    let makes: Vec<String> = g
+        .instances
+        .iter()
+        .filter(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "make")
+        .map(|i| g.symbol(&ws, i))
+        .collect();
+    assert_eq!(makes.len(), 1, "expected one concrete `make` instance, got {makes:?}");
+    assert!(makes[0].ends_with("<int>"), "T did not unify to int: {makes:?}");
+}
+
+/// A valid program reaches instance construction with NOTHING rejected. Without
+/// this, every assertion above could be satisfied by a gate that rejects
+/// everything.
+#[test]
+fn an_ordinary_generic_program_is_not_rejected() {
+    let (_ws, g) = graph_of(
+        r#"
+fn ident<T>(x: T) -> T { return x }
+fn main() {
+    let a = ident(1)
+    let b = ident("s")
+    let xs = [1, 2, 3]
+    for v in xs { ident(v) }
+}
+"#,
+    );
+    assert!(g.rejections.is_empty(), "a valid program was rejected: {:?}", g.rejections);
 }

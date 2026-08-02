@@ -57,6 +57,8 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     let mut hist: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut unresolved_reasons: BTreeMap<String, usize> = BTreeMap::new();
     let mut unresolved_examples: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut rejection_kinds: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut rejection_examples: Vec<String> = Vec::new();
     let mut direct_rec: std::collections::BTreeSet<String> = Default::default();
     let mut mutual_rec: std::collections::BTreeSet<String> = Default::default();
     let mut changing_rec: std::collections::BTreeSet<String> = Default::default();
@@ -103,6 +105,14 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
                 rec_shadow_only += p.reconciliation.shadow_only;
                 rec_unreached += p.reconciliation.missing_unreached_caller;
                 rec_missing.extend(p.reconciliation.missing);
+                for (k, v) in &p.rejections {
+                    *rejection_kinds.entry(k).or_insert(0) += v;
+                }
+                for x in p.rejection_examples {
+                    if rejection_examples.len() < 10 {
+                        rejection_examples.push(x);
+                    }
+                }
                 for (k, v) in p.examples {
                     let e = unresolved_examples.entry(k).or_default();
                     for x in v {
@@ -216,12 +226,32 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     }
     println!();
 
+    // Plan S 0h's three decided rejections. Zero over the corpus is the
+    // measurement the decisions were taken on; a non-zero count is a real
+    // program the concrete-program model refuses, not a diagnostic detail.
+    println!("## rejected constructions (plan S 0h)");
+    println!();
+    if rejection_kinds.is_empty() {
+        println!("none.");
+    } else {
+        println!("| kind | count |");
+        println!("|---|---:|");
+        for (k, v) in &rejection_kinds {
+            println!("| `{k}` | {v} |");
+        }
+        println!();
+        for x in &rejection_examples {
+            println!("- {x}");
+        }
+    }
+    println!();
+
     println!("## recursion census");
     println!();
     println!("- direct, same-instance (finite): **{}**", direct_rec.len());
     println!("- mutual, same-instance (finite): **{}**", mutual_rec.len());
     println!(
-        "- changing-instance (polymorphic, expansion capped at depth {}): **{}**",
+        "- changing-instance (polymorphic, rejected; walk capped at type depth {}): **{}**",
         instance_graph::MAX_INSTANTIATION_DEPTH,
         changing_rec.len()
     );
@@ -388,6 +418,8 @@ struct OneProject {
     reasons: BTreeMap<String, usize>,
     examples: BTreeMap<String, Vec<String>>,
     census: instance_graph::RecursionCensus,
+    rejections: BTreeMap<&'static str, usize>,
+    rejection_examples: Vec<String>,
     reconciliation: instance_graph::Reconciliation,
     /// Boundary counts by class, for the graph's own (Lua) target.
     boundaries: BTreeMap<&'static str, usize>,
@@ -581,6 +613,23 @@ fn one_project(dir: &PathBuf, name: &str, dump: Option<(&str, &str)>) -> Result<
     for b in g.boundaries.values() {
         *boundaries.entry(b.class.name()).or_insert(0) += 1;
     }
+    let mut rejections: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut rejection_examples: Vec<String> = Vec::new();
+    for r in &g.rejections {
+        *rejections.entry(r.kind.name()).or_insert(0) += 1;
+        let file = r.span.file.as_str();
+        let file = file.rsplit_once("rock-mono/").map(|(_, x)| x).unwrap_or(file);
+        if rejection_examples.len() < 3 {
+            rejection_examples.push(format!(
+                "`{}` at {}:{} -- {}",
+                r.kind.name(),
+                file,
+                r.span.line_range.0 + 1,
+                r.message
+            ));
+        }
+    }
+
     let census = g.recursion_census(&ws);
     let row = ProjectRow {
         // Relative: an absolute path varies by checkout and would make the
@@ -607,6 +656,8 @@ fn one_project(dir: &PathBuf, name: &str, dump: Option<(&str, &str)>) -> Result<
         reasons,
         examples,
         census,
+        rejections,
+        rejection_examples,
         reconciliation: rec,
         boundaries,
         boundaries_invalid: g.boundaries.values().filter(|b| b.invalid_on_target).count(),

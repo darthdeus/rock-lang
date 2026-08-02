@@ -19,6 +19,11 @@
 //! different instance from the same fn at `VecIter<int>`, and it is what today's
 //! conditional specializer only does when `any_value` happens to hold.
 //!
+//! **Two outcomes are not the same.** [`Unresolved`] is a construction the walk
+//! could not complete -- data. [`Rejection`] is one the concrete-program model
+//! REFUSES (plan S 0h), carrying a span and a message for the compile error
+//! Stage 3's cutover attaches it to. Nothing here is fatal yet.
+//!
 //! **Where the graph is still incomplete**, stated so a reader does not mistake
 //! the histogram for the whole graph: `iterator-iter` has no edges at all
 //! (a generic `iter` witness has no instantiation record to build one from --
@@ -191,6 +196,48 @@ pub struct Edge {
     pub span: Span,
 }
 
+/// A construction the concrete-program model REFUSES, as opposed to one it
+/// merely could not complete yet ([`Unresolved`]).
+///
+/// The three members are the Stage-0h author calls
+/// (`docs/monomorphization-plan.md` S 0h), each measured at zero uses over the
+/// 26-project corpus before being decided. They are recorded here rather than
+/// raised as compile errors because emission still runs on the pre-mono path;
+/// Stage 3's cutover is what makes them fatal.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum RejectionKind {
+    /// A recursive SCC whose recursive edges change their instance arguments.
+    /// Demand-driven instantiation does not terminate on it (plan S 7).
+    ChangingInstanceRecursion,
+    /// A generic function taken as a VALUE. There is no call site to key an
+    /// instantiation on, and inferring one from the instances reachable
+    /// elsewhere is explicitly not the rule (plan S 0h).
+    GenericFnValue,
+    /// A type argument no constraint reaches, so it has no concrete type to
+    /// instantiate at. Distinct from a declared generic read inside a shared
+    /// body, which is [`Unresolved`] data.
+    UnconstrainedTypeVar,
+}
+
+impl RejectionKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::ChangingInstanceRecursion => "changing-instance-recursion",
+            Self::GenericFnValue => "generic-fn-value",
+            Self::UnconstrainedTypeVar => "unconstrained-type-var",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Rejection {
+    pub kind: RejectionKind,
+    /// The instance whose construction the rejection happened in.
+    pub at: Instance,
+    pub span: Span,
+    pub message: String,
+}
+
 /// A call the walk could not turn into an instance. Data, not an error: an
 /// unbound generic here means the caller is itself an uninstantiated shared
 /// body, which is exactly the surface Stage 2 must supply.
@@ -207,6 +254,8 @@ pub struct InstanceGraph {
     pub instances: BTreeSet<Instance>,
     pub edges: Vec<Edge>,
     pub unresolved: Vec<Unresolved>,
+    /// Constructions the model refuses. See [`RejectionKind`].
+    pub rejections: Vec<Rejection>,
     /// Generic functions that are roots but that no call instantiates -- they
     /// have no concrete instance to emit, which is the shared-generic-body
     /// surface stated as a count.
@@ -387,9 +436,10 @@ impl InstanceGraph {
             direct_same_instance: direct,
             mutual_same_instance: mutual,
             changing_instance: self
-                .depth_capped
+                .rejections
                 .iter()
-                .map(|i| self.identity(ws, i))
+                .filter(|r| r.kind == RejectionKind::ChangingInstanceRecursion)
+                .map(|r| self.identity(ws, &r.at))
                 .collect(),
         }
     }
@@ -423,8 +473,7 @@ fn dfs<'a>(
 pub struct RecursionCensus {
     pub direct_same_instance: BTreeSet<String>,
     pub mutual_same_instance: BTreeSet<String>,
-    /// Instances whose expansion hit the depth cap -- changing-instance
-    /// (polymorphic) recursion candidates.
+    /// Instances a [`RejectionKind::ChangingInstanceRecursion`] names.
     pub changing_instance: BTreeSet<String>,
 }
 
@@ -461,6 +510,7 @@ pub fn build_for_target(
         instances: BTreeSet::new(),
         edges: Vec::new(),
         unresolved: Vec::new(),
+        rejections: Vec::new(),
         uninstantiated_roots: BTreeSet::new(),
         depth_capped: Vec::new(),
         target,
@@ -527,11 +577,27 @@ pub fn build_for_target(
             let (args, callee_subst) =
                 match instantiate(&mut g.arena, ws, inf, cf, bindings, &subst) {
                     Ok(v) => v,
-                    Err(reason) => {
+                    // A rejection is not also unresolved data: it is the
+                    // stronger classification, and recording it twice would
+                    // double-count the same site in two censuses.
+                    Err(Fail::Unconstrained(_)) => {
+                        let name = mangle_fn(ws, cf);
+                        g.rejections.push(Rejection {
+                            kind: RejectionKind::UnconstrainedTypeVar,
+                            at: inst.clone(),
+                            span,
+                            message: format!(
+                                "`{name}` is called with a type argument no constraint reaches, \
+                                 so there is no concrete type to instantiate it at"
+                            ),
+                        });
+                        return;
+                    }
+                    Err(fail) => {
                         g.unresolved.push(Unresolved {
                             from: inst.clone(),
                             callee,
-                            reason,
+                            reason: fail.reason(),
                             span,
                         });
                         return;
@@ -567,17 +633,20 @@ pub fn build_for_target(
                 if cf.generics.is_empty() {
                     record(&mut g, &mut work, callee, None, EdgeKind::FnValue, span);
                 } else {
-                    // THE WATCH ITEM. A fn value has no call site, so there are
-                    // no bindings to key an instantiation on -- structurally the
-                    // same gap as the `iter` witness, and a Stage-0h author call:
-                    // a generic fn taken as a value cannot be monomorphized
-                    // without either a recorded instantiation at the take site or
-                    // a rule that rejects it.
-                    g.unresolved.push(Unresolved {
-                        from: inst.clone(),
-                        callee,
-                        reason: "fn-value-generic-no-instantiation",
+                    // A fn value has no call site, so there are no bindings to
+                    // key an instantiation on -- structurally the same gap as
+                    // the `iter` witness, but decided the other way (plan S 0h):
+                    // the `iter` witness gets a recorded instantiation, a
+                    // generic fn value is rejected.
+                    g.rejections.push(Rejection {
+                        kind: RejectionKind::GenericFnValue,
+                        at: inst.clone(),
                         span,
+                        message: format!(
+                            "`{}` is generic and is taken as a value rather than called, so no \
+                             call site decides its instantiation",
+                            mangle_fn(ws, cf)
+                        ),
                     });
                 }
             }
@@ -671,9 +740,77 @@ pub fn build_for_target(
         }
     }
 
+    detect_changing_instance_recursion(&mut g, ws);
     classify_boundaries(&mut g, ws);
     record_coroutine_helpers(&mut g, ws);
     g
+}
+
+/// Plan S 7's rejection: a recursive edge must preserve its instance arguments.
+///
+/// Polymorphic recursion does NOT appear as a cycle over instances: every
+/// instance on the chain is distinct, which is exactly why it diverges. It
+/// appears as a PATH from one instance of a function to a DIFFERENT instance of
+/// that same function. That reachability test is the whole discriminant, and it
+/// is what keeps two independent instantiations of one recursive function legal:
+/// `hold<int>` and `hold<string>` never reach each other.
+///
+/// Reachability is searched over the WHOLE instance graph rather than over
+/// recursive SCCs first. Restricting to an SCC is sound -- every function on an
+/// `f`-to-`f` path lies on an `f`-to-`f` cycle, so no path crosses out of one --
+/// but it buys nothing: the graph is leaf-heavy, so the full search costs 110k
+/// traversal steps on the corpus's largest project (mag: 2,560 starts, 26,883
+/// edges), and the whole 26-project census runs in 1.5s. Measured, after
+/// writing the SCC pass and finding it inert.
+fn detect_changing_instance_recursion(g: &mut InstanceGraph, ws: &Workspace) {
+    // Instance-level adjacency, carrying each edge's span so a rejection can
+    // name the call that changed the arguments.
+    let mut succ: FxHashMap<&Instance, Vec<(&Instance, Span)>> = FxHashMap::default();
+    for e in &g.edges {
+        succ.entry(&e.from).or_default().push((&e.to, e.span));
+    }
+
+    let mut order: Vec<&Instance> = succ.keys().copied().collect();
+    order.sort();
+    let mut found: Vec<(Instance, Span, String)> = Vec::new();
+    let mut already: BTreeSet<(u32, u32)> = BTreeSet::new();
+    for start in order {
+        let key = (start.func.module.raw(), start.func.func.into_raw().into_u32());
+        if already.contains(&key) {
+            continue;
+        }
+        let mut seen: BTreeSet<&Instance> = BTreeSet::new();
+        let mut queue: Vec<(&Instance, Span)> = vec![(start, Span::unknown())];
+        while let Some((node, via)) = queue.pop() {
+            if node.func == start.func && node.args != start.args {
+                already.insert(key);
+                found.push((
+                    start.clone(),
+                    via,
+                    format!(
+                        "polymorphic recursion: `{}` recurs as `{}`; instantiation does not \
+                         terminate on a recursive call whose type arguments change",
+                        g.symbol(ws, start),
+                        g.symbol(ws, node)
+                    ),
+                ));
+                break;
+            }
+            for (next, span) in succ.get(node).map(|v| v.as_slice()).unwrap_or(&[]) {
+                if seen.insert(next) {
+                    queue.push((next, *span));
+                }
+            }
+        }
+    }
+    for (at, span, message) in found {
+        g.rejections.push(Rejection {
+            kind: RejectionKind::ChangingInstanceRecursion,
+            at,
+            span,
+            message,
+        });
+    }
 }
 
 /// One `next` witness plus, recursively, the witnesses of ITS bounded generics.
@@ -708,9 +845,21 @@ fn record_bound_next(
                 work.push((to, callee_subst, depth + 1));
             }
         }
-        Err(reason) => {
-            g.unresolved.push(Unresolved { from: from.clone(), callee, reason, span })
-        }
+        Err(Fail::Unconstrained(_)) => g.rejections.push(Rejection {
+            kind: RejectionKind::UnconstrainedTypeVar,
+            at: from.clone(),
+            span,
+            message: format!(
+                "the `next` witness `{}` binds a type argument no constraint reaches",
+                mangle_fn(ws, cf)
+            ),
+        }),
+        Err(fail) => g.unresolved.push(Unresolved {
+            from: from.clone(),
+            callee,
+            reason: fail.reason(),
+            span,
+        }),
     }
     walk_bound_tree(g, work, ws, inf, from, subst, depth, sub, span, target);
 }
@@ -748,21 +897,21 @@ fn instantiate(
     callee: &Function,
     bindings: Option<&Vec<bone_semantic::prelude::TyId>>,
     caller_subst: &MonoSubst,
-) -> Result<(Vec<MonoTyId>, MonoSubst), &'static str> {
+) -> Result<(Vec<MonoTyId>, MonoSubst), Fail> {
     if callee.generics.is_empty() {
         return Ok((Vec::new(), MonoSubst::default()));
     }
-    let Some(bindings) = bindings else { return Err("no-bindings") };
+    let Some(bindings) = bindings else { return Err(Fail::Unresolved("no-bindings")) };
     if bindings.len() != callee.generics.len() {
-        return Err("arity-mismatch");
+        return Err(Fail::Unresolved("arity-mismatch"));
     }
     let mut args = Vec::with_capacity(bindings.len());
     let mut callee_subst = MonoSubst::default();
     for (g, b) in callee.generics.iter().zip(bindings) {
         let Some(var) = skull_mir::monoty::generic_var_of(ws, inf, *g) else {
-            return Err("declared-generic-not-generic");
+            return Err(Fail::Unresolved("declared-generic-not-generic"));
         };
-        let ty = skull_mir::monoty::convert(ws, inf, *b, caller_subst).map_err(reason_name)?;
+        let ty = skull_mir::monoty::convert(ws, inf, *b, caller_subst).map_err(convert_fail)?;
         args.push(arena.intern(ty.clone()));
         callee_subst.insert(var, ty);
     }
@@ -783,7 +932,7 @@ fn instantiate_next(
     callee: &Function,
     next_generics: &FxHashMap<bone_semantic::hir::VarId, bone_semantic::prelude::TyId>,
     caller_subst: &MonoSubst,
-) -> Result<(Vec<MonoTyId>, MonoSubst), &'static str> {
+) -> Result<(Vec<MonoTyId>, MonoSubst), Fail> {
     if callee.generics.is_empty() {
         return Ok((Vec::new(), MonoSubst::default()));
     }
@@ -791,19 +940,43 @@ fn instantiate_next(
     let mut callee_subst = MonoSubst::default();
     for g in &callee.generics {
         let Some(var) = skull_mir::monoty::generic_var_of(ws, inf, *g) else {
-            return Err("declared-generic-not-generic");
+            return Err(Fail::Unresolved("declared-generic-not-generic"));
         };
-        let Some(bound) = next_generics.get(&var) else { return Err("next-generic-unbound") };
+        let Some(bound) = next_generics.get(&var) else {
+            return Err(Fail::Unresolved("next-generic-unbound"))
+        };
         let ty =
-            skull_mir::monoty::convert(ws, inf, *bound, caller_subst).map_err(reason_name)?;
+            skull_mir::monoty::convert(ws, inf, *bound, caller_subst).map_err(convert_fail)?;
         args.push(arena.intern(ty.clone()));
         callee_subst.insert(var, ty);
     }
     Ok((args, callee_subst))
 }
 
-fn reason_name(r: MonoTyReason) -> &'static str {
-    r.bucket()
+/// Why an instantiation produced no instance. The split IS the policy: an
+/// [`Fail::Unresolved`] is a shared generic body the walk holds no binding for
+/// -- data -- while an [`Fail::Unconstrained`] is a decided rejection
+/// ([`RejectionKind::UnconstrainedTypeVar`]).
+enum Fail {
+    Unresolved(&'static str),
+    Unconstrained(&'static str),
+}
+
+impl Fail {
+    fn reason(&self) -> &'static str {
+        match self {
+            Self::Unresolved(r) | Self::Unconstrained(r) => r,
+        }
+    }
+}
+
+fn convert_fail(r: MonoTyReason) -> Fail {
+    match r {
+        // Inference never bound the variable, so there is no type to
+        // instantiate at -- not a missing record, an absent constraint.
+        MonoTyReason::UnresolvedInfer(_) => Fail::Unconstrained(r.bucket()),
+        _ => Fail::Unresolved(r.bucket()),
+    }
 }
 
 /// The backend variant of `rep` serving `target`, through production's own
