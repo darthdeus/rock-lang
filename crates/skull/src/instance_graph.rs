@@ -260,6 +260,9 @@ pub struct InstanceGraph {
     pub uninstantiated_roots: BTreeSet<String>,
     /// Instances whose expansion was cut by [`MAX_INSTANTIATION_DEPTH`].
     pub depth_capped: Vec<Instance>,
+    /// Instances whose Rock body the walk actually entered and enumerated the
+    /// callees of. Recorded, never inferred from a proxy.
+    pub expanded: BTreeSet<Instance>,
     /// The execution target this graph was built for. Instance IDENTITY is
     /// target-neutral (plan S 20a); the target decides which backend variant a
     /// call resolves to and which boundaries are available.
@@ -280,43 +283,76 @@ pub struct InstanceGraph {
     pub always_emitted_seeds: usize,
 }
 
-/// Calls lowering SYNTHESIZES, keyed by the source operation that triggers
-/// them: `(trigger name, the `stdlib_funcref`/`call_spine` names its arm can
-/// emit)`. Read off `crates/skull-mir/src/lower/storage.rs`; the complete
-/// 15-name set is catalogued in `docs/boundary-contracts.md` S 1.4.
+/// The storage condition a synthesized-call arm is gated on in
+/// `crates/skull-mir/src/lower/storage.rs`. Every arm there opens with
+/// `let Some(..) = self.<oracle>(recv) else { return Ok(None) }`, so the trigger
+/// name alone never decides whether the call is emitted.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum StorageCond {
+    /// The receiver's `[E]` element is column-stored.
+    VecColumn,
+    /// The receiver's `Map<K, V>` value is column-stored.
+    MapColumn,
+    /// No storage condition: the debug-mode `NativeBuffer` bounds check fires on
+    /// the receiver type alone.
+    Always,
+}
+
+/// Calls lowering SYNTHESIZES, keyed by the source operation that triggers them:
+/// `(trigger name, storage condition, the `stdlib_funcref`/`call_spine` names
+/// the arm emits WHEN THAT CONDITION HOLDS)`. Read off
+/// `crates/skull-mir/src/lower/storage.rs`; the complete 15-name set is
+/// catalogued in `docs/boundary-contracts.md` S 1.4.
 ///
-/// **This OVER-APPROXIMATES, deliberately and by a large factor.** Each arm
-/// fires only when the receiver's CONCRETE element is column-stored
-/// (`vec_column_elem_of` / `map_column_value_of` returning `Some`); this table
-/// keys on the trigger name alone, so a body operating exclusively on boxed
-/// elements gets edges emission will never produce. The true set is a SUBSET of
-/// what the histogram reports. Checking the storage condition needs the
-/// element's concrete representation at each call, which is a lowering
-/// question, not an HIR one -- so the honest options were an over-approximation
-/// or nothing, and an over-approximation still proves the class is non-empty
-/// and names which entries are reachable at all.
-pub const COMPILER_GENERATED_TRIGGERS: &[(&str, &[&str])] = &[
-    ("__vec_data_capacity", &["table_len", "__rock_col_capacity"]),
-    ("__vec_data_insert", &["__rock_col_insert"]),
-    ("__vec_data_clone", &["__rock_col_copy"]),
-    ("__vec_data_sort", &["__rock_col_sort", "__rock_col_sort_leaves"]),
-    ("__rock_vec_to_lua_array", &["__rock_vec_column_elements"]),
-    ("table_unset", &["__map_col_free"]),
-    ("len", &["__map_col_len"]),
-    ("map_len", &["__map_col_len"]),
-    ("contains", &["__map_col_contains"]),
-    ("clear", &["__map_col_clear"]),
-    ("get", &["__map_col_slot_of"]),
+/// The condition is checked, not assumed. It was once absent here, and the
+/// comment justifying that said the check "needs the element's concrete
+/// representation at each call, which is a lowering question, not an HIR one".
+/// That was true of the question and false of the conclusion: the decision now
+/// lives in `skull_mir::lower::shape::{vec_column_elem_mono, map_column_value_mono}`
+/// over a `MonoTy`, which the walk has for every instance, and lowering asks the
+/// SAME function. The names are the column-path ones only -- a non-column
+/// receiver takes a different route entirely, so `table_len` (the boxed
+/// `__vec_data_capacity` path) is not an edge this arm produces.
+///
+/// Two residual approximations, both named, both measured against the emitted
+/// Lua per project rather than asserted:
+///
+/// - `__vec_data_sort` picks between `__rock_col_sort` and
+///   `__rock_col_sort_leaves` on `is_nobox_struct`, which reads the lowering
+///   context's `values_first_class` flag rather than the workspace, so both
+///   names are kept.
+/// - A Map INDEX site emits exactly one of `__map_col_slot` /
+///   `__map_col_slot_checked` / `__map_col_free` depending on whether it reads,
+///   writes, or writes null; all three are kept. Cross-checked against emitted
+///   Lua call sites: mag and match3 are now EXACT, bitgun over-reports these two
+///   names and nothing else.
+///
+/// Calls made from inside an `inline(lua)` body are invisible here by design --
+/// the body is opaque (`BoundaryClass::InlineBody`). `__rock_vec_column_elements`
+/// is the corpus's example: emission calls it once per project, from the Lua
+/// text of the reflection walker, not from any lowering arm. The old
+/// name-keyed table happened to report it, for the wrong reason.
+pub const COMPILER_GENERATED_TRIGGERS: &[(&str, StorageCond, &[&str])] = &[
+    ("__vec_data_capacity", StorageCond::VecColumn, &["__rock_col_capacity"]),
+    ("__vec_data_insert", StorageCond::VecColumn, &["__rock_col_insert"]),
+    ("__vec_data_clone", StorageCond::VecColumn, &["__rock_col_copy"]),
+    ("__vec_data_sort", StorageCond::VecColumn, &["__rock_col_sort", "__rock_col_sort_leaves"]),
+    ("__rock_vec_to_lua_array", StorageCond::VecColumn, &["__rock_vec_column_elements"]),
+    ("table_unset", StorageCond::MapColumn, &["__map_col_free"]),
+    ("len", StorageCond::MapColumn, &["__map_col_len"]),
+    ("map_len", StorageCond::MapColumn, &["__map_col_len"]),
+    ("contains", StorageCond::MapColumn, &["__map_col_contains"]),
+    ("clear", StorageCond::MapColumn, &["__map_col_clear"]),
+    ("get", StorageCond::MapColumn, &["__map_col_slot_of"]),
 ];
 
 /// The synthesized entries reached from an INDEX rather than from a named call:
 /// `m[k]` / `m[k] = v` on a column Map (`column_index_place`,
 /// `map_column_store`, `map_column_index_repr`) and the debug-mode
-/// `NativeBuffer` bounds check (`nb_checked_index`). Same over-approximation as
-/// [`COMPILER_GENERATED_TRIGGERS`].
-pub const INDEX_TRIGGERED: &[(&str, &[&str])] = &[
-    ("Map", &["__map_col_slot", "__map_col_slot_checked", "__map_col_free"]),
-    ("NativeBuffer", &["__nb_checked_index"]),
+/// `NativeBuffer` bounds check (`nb_checked_index`).
+pub const INDEX_TRIGGERED: &[(&str, StorageCond, &[&str])] = &[
+    ("Map", StorageCond::MapColumn, &["__map_col_slot", "__map_col_slot_checked", "__map_col_free"]),
+    ("NativeBuffer", StorageCond::Always, &["__nb_checked_index"]),
 ];
 
 /// Polymorphic recursion (`f<T> -> f<[T]>`) does not terminate under
@@ -361,12 +397,19 @@ impl InstanceGraph {
         format!("{base}<{}>", args.join(","))
     }
 
-    /// The symbol EMISSION would give this instance, through the one encoder
-    /// (`skull_mir::mangle::spec_fn_name`) rather than a second spelling built
-    /// here. A non-generic instance keeps its base mangling; a generic one is
-    /// suffixed with its arguments' canonical encodings, which is why this is
-    /// injective where [`Self::symbol`] is not.
-    pub fn emitted_symbol(&self, ws: &Workspace, i: &Instance) -> String {
+    /// The instance's LOGICAL symbol: `skull_mir::mangle::spec_fn_name`, the
+    /// encoder today's specializer already spells a specialized body with.
+    /// A non-generic instance keeps its base mangling; a generic one is suffixed
+    /// with its arguments' canonical encodings, which is why this is injective
+    /// where [`Self::symbol`] is not.
+    ///
+    /// **This is not the final emitted spelling.** Plan S 0h puts that under the
+    /// ARTIFACT's ABI/boundary plan -- one symbol per `(artifact, instance)` --
+    /// so a target may legally spell this instance differently. What is tested
+    /// here is the ENCODER: distinct logical instances must not encode alike.
+    /// Per-artifact injectivity is a property of each artifact view and is
+    /// asserted there, not here.
+    pub fn logical_symbol(&self, ws: &Workspace, i: &Instance) -> String {
         let f = &ws.module(i.func.module).functions[i.func.func];
         let key: Vec<Option<skull_mir::monoty::MonoTy>> =
             i.args.iter().map(|a| Some(self.arena.get(*a).clone())).collect();
@@ -381,29 +424,32 @@ impl InstanceGraph {
     /// never entered has callees missing from the graph, and it is closed only
     /// if it has no body to enter (a boundary) or is recorded as cut.
     pub fn closure(&self, ws: &Workspace) -> Closure {
-        // The SAME question the walk asks -- `build` skips an instance whose
-        // `body_inference` is absent -- so "expanded" here cannot drift from what
-        // expansion actually required.
+        // Expansion is RECORDED by the walk (`expanded`), not inferred from a
+        // proxy. `body_inference(..).is_some()` was that proxy and it answered
+        // yes for every reached declaration, externs included -- so it reported
+        // 0 unexpanded and made the boundary exemption below look dead when in
+        // fact nothing was ever being asked.
         //
-        // MEASURED EMPTY, and empty by construction: bone gives every reached
-        // declaration a `BodyInference`, externs and `inline(..)` bodies
-        // included, so a member would mean an instance bone never typechecked.
-        // An exemption for boundary declarations was written here and DELETED:
-        // removing it left the corpus at 0, which makes it dead rather than
-        // load-bearing. Read this arm as an invariant, not as a population --
-        // no fixture produces a member.
+        // An instance is legitimately unexpanded when it has NO Rock body to
+        // enter: a boundary. Anything else with callees the graph never
+        // enumerated is the real hole.
+        let erased = &self.erased_entries;
         let unexpanded: BTreeSet<String> = self
             .instances
             .iter()
-            .filter(|i| body_inference(ws, i.func).is_none())
+            .filter(|i| !self.expanded.contains(*i))
+            .filter(|i| {
+                boundary_class_of(&ws.module(i.func.module).functions[i.func.func], erased)
+                    .is_none()
+            })
             .map(|i| self.identity(ws, i))
             .collect();
-        // Symbol injectivity: two DISTINCT instances must not claim one emitted
-        // spelling. Keyed on identity, never on the display symbol, which is
-        // ambiguous by construction.
+        // Encoder injectivity: two DISTINCT instances must not encode to one
+        // logical symbol. Keyed on identity, never on the display symbol, which
+        // is ambiguous by construction.
         let mut by_symbol: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for i in &self.instances {
-            by_symbol.entry(self.emitted_symbol(ws, i)).or_default().insert(self.identity(ws, i));
+            by_symbol.entry(self.logical_symbol(ws, i)).or_default().insert(self.identity(ws, i));
         }
         let colliding: BTreeMap<String, BTreeSet<String>> =
             by_symbol.into_iter().filter(|(_, ids)| ids.len() > 1).collect();
@@ -413,6 +459,7 @@ impl InstanceGraph {
             depth_capped: self.depth_capped.iter().map(|i| self.identity(ws, i)).collect(),
             uninstantiated_roots: self.uninstantiated_roots.clone(),
             colliding_symbols: colliding,
+            expanded: self.expanded.len(),
         }
     }
 
@@ -528,6 +575,8 @@ fn dfs<'a>(
 #[derive(Debug, Default)]
 pub struct Closure {
     pub instances: usize,
+    /// Instances whose body the walk actually entered.
+    pub expanded: usize,
     /// Reached, has no body, and is not a boundary -- its callees are missing.
     pub unexpanded: BTreeSet<String>,
     /// Expansion cut by [`MAX_INSTANTIATION_DEPTH`].
@@ -536,25 +585,33 @@ pub struct Closure {
     /// shared generic bodies, so a non-empty set is the shared-body surface that
     /// still has no instance -- the honest remaining hole, stated by name.
     pub uninstantiated_roots: BTreeSet<String>,
-    /// Emitted symbol -> the distinct instance identities claiming it. Any entry
-    /// is a Stage-3 collision: two bodies would be emitted under one name.
+    /// LOGICAL symbol -> the distinct instance identities encoding to it. Any
+    /// entry means the encoder is not injective. The FINAL emitted spelling is
+    /// an artifact-ABI-plan property (plan S 0h), asserted per artifact view.
     ///
     /// **The corpus zero here is weak evidence and must not be read as strong.**
     /// Replacing the encoder with the AMBIGUOUS display rendering leaves the
     /// corpus at 0 too -- measured -- so the 26 projects simply contain no
     /// render-colliding instance pair. Only
-    /// `instances_that_render_alike_get_distinct_emitted_symbols` separates the
+    /// `instances_that_render_alike_get_distinct_logical_symbols` separates the
     /// two encoders.
     pub colliding_symbols: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl Closure {
-    /// Closed except for the roots no call instantiates, which is a separate,
-    /// named fact rather than a silent pass.
+    /// Every hole, including the generic emission roots no call instantiates.
+    ///
+    /// Those roots were originally excluded here as "a separate, named fact".
+    /// That was wrong: production EMITS them, as shared generic bodies, so a
+    /// graph with no instance for them does not describe the program that runs.
+    /// Excluding them let `is_closed` answer true while 23 emitted bodies had no
+    /// instance -- exactly the falsely-green Stage 2 the cutover must not
+    /// inherit.
     pub fn is_closed(&self) -> bool {
         self.unexpanded.is_empty()
             && self.depth_capped.is_empty()
             && self.colliding_symbols.is_empty()
+            && self.uninstantiated_roots.is_empty()
     }
 }
 
@@ -602,6 +659,7 @@ pub fn build_for_target(
         rejections: Vec::new(),
         uninstantiated_roots: BTreeSet::new(),
         depth_capped: Vec::new(),
+        expanded: BTreeSet::new(),
         target,
         boundaries: BTreeMap::new(),
         coroutine_helpers: BTreeSet::new(),
@@ -655,6 +713,15 @@ pub fn build_for_target(
         let Some(inf) = body_inference(ws, inst.func) else { continue };
         let module = ws.module(inst.func.module);
         let body = module.bodies.get(&BodyOwner::Function(inst.func.func));
+        // A boundary's Rock body is not the one emission uses -- it emits the
+        // foreign text -- so walking it is not expansion. bone gives externs and
+        // `inline(..)` decls a body entry, so testing `body.is_some()` alone
+        // called every reached declaration expanded and left the closure gate
+        // with nothing to measure.
+        let f = &module.functions[inst.func.func];
+        if body.is_some() && declared_boundary(f).is_none() {
+            g.expanded.insert(inst.clone());
+        }
 
         let record = |g: &mut InstanceGraph,
                           work: &mut Vec<(Instance, MonoSubst, u32)>,
@@ -742,7 +809,7 @@ pub fn build_for_target(
 
             // Synthesized stdlib calls. Over-approximated -- see
             // `COMPILER_GENERATED_TRIGGERS`.
-            for (e, name) in compiler_generated_sites(ws, inf, b) {
+            for (e, name) in compiler_generated_sites(ws, inf, b, &subst, target) {
                 let span = b.expr_spans.get(e).copied().unwrap_or_else(Span::unknown);
                 match stdlib_entry(ws, name, target) {
                     Some(callee) => {
@@ -1183,22 +1250,45 @@ fn compiler_generated_sites(
     ws: &Workspace,
     inf: &BodyInference,
     body: &bone_semantic::hir::Body,
+    subst: &MonoSubst,
+    target: bone_semantic::hir::FnBackend,
 ) -> Vec<(Idx<bone_semantic::hir::Expr>, &'static str)> {
     use bone_semantic::hir::{Callee, Expr as E};
-    let mut out: Vec<(Idx<bone_semantic::hir::Expr>, &'static str)> = Vec::new();
-    let mut push = |e, names: &'static [&'static str]| {
-        for n in names {
-            out.push((e, *n));
+    // The receiver's CONCRETE type under this instance's substitution, which is
+    // what the storage condition is asked about. `Err` is a shared generic
+    // snapshot -- not column-eligible, and the same answer lowering gives.
+    let holds = |recv: Idx<bone_semantic::hir::Expr>, cond: StorageCond| -> bool {
+        if cond == StorageCond::Always {
+            return true;
+        }
+        let Some(ty) = inf.expr_types.get(recv) else { return false };
+        let Ok(mono) = skull_mir::monoty::convert(ws, inf, *ty, subst) else { return false };
+        match cond {
+            StorageCond::VecColumn => {
+                skull_mir::lower::vec_column_elem_mono(ws, target, &mono).is_some()
+            }
+            StorageCond::MapColumn => {
+                skull_mir::lower::map_column_value_mono(ws, target, &mono).is_some()
+            }
+            StorageCond::Always => true,
         }
     };
+    let mut out: Vec<(Idx<bone_semantic::hir::Expr>, &'static str)> = Vec::new();
     for (e, expr) in body.expr_arena.iter() {
         match expr {
-            E::Call { callee: Callee::Unresolved { name, .. }, .. } => {
-                if let Some((_, names)) =
-                    COMPILER_GENERATED_TRIGGERS.iter().find(|(t, _)| *t == name.as_str())
-                {
-                    push(e, names);
+            E::Call { callee: Callee::Unresolved { name, .. }, args } => {
+                let Some((_, cond, names)) =
+                    COMPILER_GENERATED_TRIGGERS.iter().find(|(t, _, _)| *t == name.as_str())
+                else {
+                    continue;
+                };
+                // The receiver is the UFCS first argument; an arm with no
+                // receiver cannot be the column form.
+                let Some(recv) = args.clone().next() else { continue };
+                if !holds(recv, *cond) {
+                    continue;
                 }
+                out.extend(names.iter().map(|n| (e, *n)));
             }
             // The index forms have no callee name to key on: the receiver's
             // CONSTRUCTOR is the trigger. Rendering is confined to index exprs,
@@ -1209,11 +1299,15 @@ fn compiler_generated_sites(
                 // `None` panics rather than degrading, which is how this was
                 // caught immediately.
                 let r = ws.render(Some(inf), *ty);
-                if let Some((_, names)) =
-                    INDEX_TRIGGERED.iter().find(|(ctor, _)| r.starts_with(*ctor))
-                {
-                    push(e, names);
+                let Some((_, cond, names)) =
+                    INDEX_TRIGGERED.iter().find(|(ctor, _, _)| r.starts_with(*ctor))
+                else {
+                    continue;
+                };
+                if !holds(*base, *cond) {
+                    continue;
                 }
+                out.extend(names.iter().map(|n| (e, *n)));
             }
             _ => {}
         }
@@ -1300,24 +1394,45 @@ fn always_emitted_callees(
 /// them (plan S 9: one `InstanceId` OR one `BoundaryId`), and keeping both here
 /// makes the split's cost countable instead of changing the round-1 numbers
 /// underneath it.
+/// The boundary class of one declaration, or `None` if it has a Rock body the
+/// walk enters. The ONE classifier: [`classify_boundaries`] and
+/// [`InstanceGraph::closure`] both ask it, so "is this a boundary" cannot be
+/// answered two ways.
+fn boundary_class_of(
+    f: &Function,
+    erased: &BTreeSet<String>,
+) -> Option<BoundaryClass> {
+    if erased.contains(f.name.as_str()) {
+        return Some(BoundaryClass::ErasedRuntimeEntry);
+    }
+    declared_boundary(f)
+}
+
+/// The part of the classification that reads only the DECLARATION. The walk uses
+/// this rather than [`boundary_class_of`] because `erased_entries` is still
+/// being discovered while it runs, and expansion must not depend on the order
+/// two instances were reached in. It is a SUBSET of the full classification, so
+/// nothing the walk calls expandable can later be excused as a boundary and
+/// nothing the walk skips can become un-excused.
+fn declared_boundary(f: &Function) -> Option<BoundaryClass> {
+    if f.annotations.iter().any(|a| a.name.name.as_str() == "intrinsic") {
+        Some(BoundaryClass::Intrinsic)
+    } else if f.is_extern {
+        Some(BoundaryClass::Extern)
+    } else if f.inline_body.is_some() {
+        Some(BoundaryClass::InlineBody)
+    } else {
+        None
+    }
+}
+
 fn classify_boundaries(g: &mut InstanceGraph, ws: &Workspace) {
     let erased: BTreeSet<String> = g.erased_entries.clone();
     let mut found: BTreeMap<String, Boundary> = BTreeMap::new();
     for i in &g.instances {
         let f = &ws.module(i.func.module).functions[i.func.func];
         let symbol = mangle_fn(ws, f);
-        let intrinsic = f.annotations.iter().any(|a| a.name.name.as_str() == "intrinsic");
-        let class = if erased.contains(f.name.as_str()) {
-            BoundaryClass::ErasedRuntimeEntry
-        } else if intrinsic {
-            BoundaryClass::Intrinsic
-        } else if f.is_extern {
-            BoundaryClass::Extern
-        } else if f.inline_body.is_some() {
-            BoundaryClass::InlineBody
-        } else {
-            continue;
-        };
+        let Some(class) = boundary_class_of(f, &erased) else { continue };
         // `variant_for` kept the representative when nothing served the target,
         // so a decl whose backend does not serve it is the S 1.6 outcome:
         // reject with a span, never a stub.

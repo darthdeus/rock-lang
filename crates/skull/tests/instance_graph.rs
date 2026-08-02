@@ -1034,17 +1034,28 @@ fn main() {
     assert!(c.depth_capped.is_empty(), "expansion was cut: {:?}", c.depth_capped);
     assert!(
         c.colliding_symbols.is_empty(),
-        "two instances claim one emitted symbol: {:?}",
+        "two instances encode to one logical symbol: {:?}",
         c.colliding_symbols
     );
-    assert!(c.is_closed());
+    // Expansion is RECORDED, so the count is evidence rather than a restatement
+    // of the instance count: the fixture reaches stdlib boundaries, which are
+    // never expanded and are excused by class, not by silence.
+    assert!(c.expanded > 0, "nothing was expanded");
+    assert!(
+        c.expanded < c.instances,
+        "every reached instance counted as expanded ({}/{}), so the boundary arm of the \
+         closure gate has no population and asserts nothing",
+        c.expanded,
+        c.instances
+    );
 }
 
-/// Symbol injectivity is the property `symbol` CANNOT provide. The
+/// Encoder injectivity is the property `symbol` CANNOT provide. The
 /// render-collision adversary produces two instances that display alike; their
-/// emitted symbols must still differ, because emission gives each a body.
+/// LOGICAL symbols must still differ. The final emitted spelling is an
+/// artifact-ABI-plan property (plan S 0h) and is not what this asserts.
 #[test]
-fn instances_that_render_alike_get_distinct_emitted_symbols() {
+fn instances_that_render_alike_get_distinct_logical_symbols() {
     let (ws, g) = graph_of(
         r#"
 fn twice(n: int) -> int { return n * 2 }
@@ -1066,12 +1077,12 @@ fn main() {
     assert_eq!(idents.len(), 2);
     let display: Vec<String> = idents.iter().map(|i| g.symbol(&ws, i)).collect();
     assert_eq!(display[0], display[1], "the fixture is no longer the collision it tests");
-    let emitted: Vec<String> = idents.iter().map(|i| g.emitted_symbol(&ws, i)).collect();
-    assert_ne!(emitted[0], emitted[1], "two bodies would be emitted as `{}`", emitted[0]);
+    let encoded: Vec<String> = idents.iter().map(|i| g.logical_symbol(&ws, i)).collect();
+    assert_ne!(encoded[0], encoded[1], "two instances encode alike as `{}`", encoded[0]);
     assert!(g.closure(&ws).colliding_symbols.is_empty());
 }
 
-/// A non-generic instance keeps its base mangling -- emission must not rename
+/// A non-generic instance keeps its base mangling -- the encoder must not rename
 /// every function the moment instances exist.
 #[test]
 fn a_non_generic_instance_keeps_its_base_symbol() {
@@ -1086,7 +1097,7 @@ fn main() { bump(1) }
         .iter()
         .find(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "bump")
         .expect("no `bump` instance");
-    assert_eq!(g.emitted_symbol(&ws, bump), "bump_int_ret_int");
+    assert_eq!(g.logical_symbol(&ws, bump), "bump_int_ret_int");
 }
 
 /// A call INSIDE a shared generic body, walked at an instance, resolves through
@@ -1135,5 +1146,160 @@ fn main() {
             .filter(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "hold")
             .all(|i| !i.args.is_empty()),
         "a `hold` instance carries no arguments"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Stage 2: synthesized column-intercept calls are gated on the SAME storage
+// oracle lowering uses (`skull_mir::lower::vec_column_elem_mono` /
+// `map_column_value_mono`), not on the trigger name alone.
+// ---------------------------------------------------------------------------
+
+fn generated_edges(
+    ws: &Workspace,
+    g: &instance_graph::InstanceGraph,
+) -> Vec<String> {
+    let mut v: Vec<String> = g
+        .edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::CompilerGenerated)
+        .map(|e| ws.module(e.to.func.module).functions[e.to.func.func].name.to_string())
+        .collect();
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// A COLUMN-stored element takes the intercept: `[P]` over an all-scalar value
+/// struct stores as flat columns, so `sort`/`clone`/`insert` route through the
+/// column helpers.
+#[test]
+fn a_column_element_produces_the_synthesized_intercept() {
+    let (ws, g) = graph_of(
+        r#"
+value P { x: float, y: float }
+fn main() {
+    let xs: [P] = [P { x: 1.0, y: 2.0 }]
+    xs.push(P { x: 3.0, y: 4.0 })
+    let c = xs.clone()
+    xs.sort(_.x)
+}
+"#,
+    );
+    let names = generated_edges(&ws, &g);
+    assert!(
+        names.iter().any(|n| n.starts_with("__rock_col_")),
+        "a column-stored `[P]` produced no column intercept: {names:?}"
+    );
+}
+
+/// CONTROL, and the one that matters: a BOXED element must produce NONE of
+/// them. The trigger names are identical -- `sort`, `clone`, `push` on a `[int]`
+/// -- so a table keyed on the name alone reports edges emission never makes,
+/// which is exactly the over-approximation this replaced.
+#[test]
+fn a_boxed_element_produces_no_synthesized_intercept() {
+    let (ws, g) = graph_of(
+        r#"
+fn main() {
+    let xs: [int] = [1, 2, 3]
+    xs.push(4)
+    let c = xs.clone()
+    xs.sort(_ + 0)
+}
+"#,
+    );
+    let names = generated_edges(&ws, &g);
+    assert!(
+        !names.iter().any(|n| n.starts_with("__rock_col_") || n.starts_with("__map_col_")),
+        "a boxed `[int]` produced column intercepts: {names:?}"
+    );
+}
+
+/// The Map sibling of the pair above: a column-stored VALUE takes the intercept,
+/// a boxed one does not.
+#[test]
+fn map_column_intercepts_follow_the_value_type() {
+    let (ws, col) = graph_of(
+        r#"
+value P { x: float, y: float }
+fn main() {
+    let m: Map<string, P> = map_new()
+    m["a"] = P { x: 1.0, y: 2.0 }
+    let n = m.len()
+}
+"#,
+    );
+    let (ws2, boxed) = graph_of(
+        r#"
+fn main() {
+    let m: Map<string, string> = map_new()
+    m["a"] = "b"
+    let n = m.len()
+}
+"#,
+    );
+    assert!(
+        generated_edges(&ws, &col).iter().any(|n| n.starts_with("__map_col_")),
+        "a column-stored Map value produced no intercept: {:?}",
+        generated_edges(&ws, &col)
+    );
+    assert!(
+        !generated_edges(&ws2, &boxed).iter().any(|n| n.starts_with("__map_col_")),
+        "a boxed Map value produced column intercepts: {:?}",
+        generated_edges(&ws2, &boxed)
+    );
+}
+
+/// The intercept resolves through the INSTANCE's substitution. The trigger is
+/// not at the user's call site at all -- `xs.clone()` calls the stdlib's
+/// generic `clone`, whose body holds the `__vec_data_clone` trigger -- so the
+/// SAME body and the SAME site must intercept at `[P]` and not at `[int]`.
+/// Keying on the trigger name cannot express that difference.
+#[test]
+fn the_storage_condition_follows_the_instantiation() {
+    let src = r#"
+value P { x: float, y: float }
+fn dup<T>(xs: [T]) -> [T] { return xs.clone() }
+fn main() {
+    let a: [P] = [P { x: 1.0, y: 2.0 }]
+    let b: [int] = [1, 2, 3]
+    dup(a)
+    dup(b)
+}
+"#;
+    let (ws, g) = graph_of(src);
+    // Both instantiations exist, so the fixture really does put one body under
+    // two substitutions.
+    let dups: Vec<String> = g
+        .instances
+        .iter()
+        .filter(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "dup")
+        .map(|i| g.symbol(&ws, i))
+        .collect();
+    assert_eq!(dups.len(), 2, "expected `dup<P>` and `dup<int>`: {dups:?}");
+
+    // Every column intercept comes from an instance instantiated at `P`. None
+    // comes from the `int` one, which is the discriminant.
+    let sources: Vec<String> = g
+        .edges
+        .iter()
+        .filter(|e| {
+            e.kind == EdgeKind::CompilerGenerated
+                && ws.module(e.to.func.module).functions[e.to.func.func]
+                    .name
+                    .as_str()
+                    .starts_with("__rock_col_")
+        })
+        .map(|e| g.symbol(&ws, &e.from))
+        .collect();
+    assert!(!sources.is_empty(), "no column intercept at all: the fixture proves nothing");
+    assert!(
+        sources.iter().all(|s| s.contains("P")),
+        "a column intercept came from a non-`P` instantiation: {sources:?}"
+    );
+    assert!(
+        !sources.iter().any(|s| s.contains("<int>")),
+        "the `int` instantiation gained an intercept it never emits: {sources:?}"
     );
 }

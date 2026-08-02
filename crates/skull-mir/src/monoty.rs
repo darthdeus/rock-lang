@@ -484,20 +484,20 @@ impl MonoArena {
 /// [`MonoTyReason::UnboundGeneric`] rather than a guess, because the caller is
 /// the only one who knows whether that is expected (a shared generic body) or a
 /// defect (a missing instantiation).
-pub fn convert(
+pub fn convert<S: std::hash::BuildHasher>(
     ws: &Workspace,
     inf: &BodyInference,
     ty: TyId,
-    subst: &MonoSubst,
+    subst: &std::collections::HashMap<VarId, MonoTy, S>,
 ) -> Result<MonoTy, MonoTyReason> {
     convert_at(ws, inf, ty, subst, 0)
 }
 
-fn convert_at(
+fn convert_at<S: std::hash::BuildHasher>(
     ws: &Workspace,
     inf: &BodyInference,
     ty: TyId,
-    subst: &MonoSubst,
+    subst: &std::collections::HashMap<VarId, MonoTy, S>,
     depth: u32,
 ) -> Result<MonoTy, MonoTyReason> {
     if depth > MAX_DEPTH {

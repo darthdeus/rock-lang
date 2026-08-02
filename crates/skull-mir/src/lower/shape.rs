@@ -127,6 +127,58 @@ pub fn vec_column_elem(ws: &Workspace, name: Ustr, nullable: bool) -> Option<Ust
     (columns <= MAX_COLUMN_LEAVES && !paths.iter().any(|p| p.as_str() == "len")).then_some(name)
 }
 
+/// Column eligibility for a `[E]`, decided on the CONCRETE type.
+///
+/// **The one oracle.** `Builder::vec_column_elem_of` navigates a `TypeExpr`
+/// through the `SpecSubst`-aware adapter, which the instance graph cannot use --
+/// it holds no `Builder` and no `SpecSubst`, and the adapter is lossy about the
+/// very structure this reads. The decision is extracted here, over [`MonoTy`],
+/// so lowering and artifact discovery answer with one function rather than two
+/// that agree until they do not.
+///
+/// A nullable element columnizes only when its payload is `nobox`: for an
+/// unmarked value struct the boxed element is a legal representation that
+/// already works, while columnizing it would route the materializing helpers
+/// (`__rock_col_sort`, `to_lua_array`, serialization) at a shape they have no
+/// presence concept for. The mark is what forbids the box, so the mark is what
+/// obliges the presence column.
+///
+/// Nullability is read STRUCTURALLY here, which is why a spelled-out `[E?]` and
+/// a generic bound to `E?` cannot answer differently: both are one `MonoTy`.
+pub fn vec_column_elem_mono(
+    ws: &Workspace,
+    target: bone_semantic::hir::FnBackend,
+    ty: &MonoTy,
+) -> Option<ColumnElem> {
+    let MonoTy::App { ctor: MonoCtor::Array, params } = ty else { return None };
+    let (elem, nullable) = params.first()?.peel_nullable();
+    let en = elem.nominal()?;
+    if nullable && !is_nobox_nominal(ws, en) {
+        return None;
+    }
+    vec_column_elem(ws, en, nullable)
+        .filter(|&name| columns_available(ws, target, name))
+        .map(|name| ColumnElem { name, nullable })
+}
+
+/// The `Map<K, V>` sibling of [`vec_column_elem_mono`].
+///
+/// `Map<K, P?>` is column-stored too and, unlike `[P?]`, needs no presence
+/// column: an absent value collapses to key REMOVAL, because a bare Map already
+/// cannot tell an absent key from a key holding null. The KEY is deliberately
+/// not consulted -- a value-struct key rejects upstream (LuaJIT hashes cdata by
+/// pointer), and the spine stores whatever key the boxed representation stored.
+pub fn map_column_value_mono(
+    ws: &Workspace,
+    _target: bone_semantic::hir::FnBackend,
+    ty: &MonoTy,
+) -> Option<ColumnElem> {
+    let MonoTy::App { ctor: MonoCtor::Map, params } = ty else { return None };
+    let (val, _) = params.get(1)?.peel_nullable();
+    let vn = val.nominal()?;
+    vec_column_elem(ws, vn, false).map(|name| ColumnElem { name, nullable: false })
+}
+
 /// The column KEYS of `shape`, presence first when the element type is nullable.
 ///
 /// This is [`value_leaf_paths`] plus the one key that has no path of its own: a

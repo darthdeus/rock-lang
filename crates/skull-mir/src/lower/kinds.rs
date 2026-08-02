@@ -2,6 +2,7 @@
 //! native-buffer flavour a receiver is, element types behind a column, and the
 //! numeric coercions (`int`->`float`, binding and param types).
 use super::*;
+use crate::monoty::MonoTy;
 
 impl Builder<'_> {
     pub(crate) fn expr_is_flat_vec(&self, e: Idx<Expr>) -> bool {
@@ -85,44 +86,11 @@ impl Builder<'_> {
     /// stdlib iterator lowers `it.vec[it.i]` against the boxed representation
     /// and reads a `_data` that column storage does not have.
     pub(crate) fn vec_column_elem_of(&self, e: Idx<Expr>) -> Option<ColumnElem> {
-        let ty = self.resolve_tyid(*self.inf?.expr_types.get(e)?)?;
-        let TypeExpr::App { ctor: TypeCtor::Array, params } = self.ty_node(ty)? else {
-            return None;
-        };
-        let p = params.into_iter().next()?;
-        let mut elem = self.resolve_tyid(ty.with_idx(p))?;
-        // A NULLABLE element columnizes only when the payload is `nobox`. For an
-        // unmarked value struct the boxed element is a legal representation and
-        // already works, while columnizing it would newly route the materializing
-        // helpers (`__rock_col_sort`, `to_lua_array`, serialization) at a shape
-        // they have no presence concept for. The mark is what makes the box
-        // forbidden, so the mark is what obliges the presence column.
-        //
-        // Asked BEFORE the peel, and through the one nullability query, so a
-        // spelled-out `[E?]` and a generic bound to `E?` answer alike -- the
-        // latter's `?` lives in the binding, and `ty_node` substitutes the
-        // payload over it.
-        let nullable = self.is_nullable_ty(elem);
-        if let Some(TypeExpr::Nullable(inner)) = self.ty_node(elem) {
-            elem = self.resolve_tyid(elem.with_idx(inner))?;
-        }
-        let en = match self.ty_node(elem)? {
-            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => n,
-            // An UNSUBSTITUTED generic element stays boxed: the shared
-            // (non-specialized) snapshot of a generic body must keep the
-            // representation that every instantiation can read.
-            TypeExpr::Generic(var, _) => match self.spec_subst.get(&var) {
-                Some(ty) => ty.peel_nullable().0.nominal()?,
-                _ => return None,
-            },
-            _ => return None,
-        };
-        if nullable && !is_nobox_nominal(self.ws, en) {
-            return None;
-        }
-        vec_column_elem(self.ws, en, nullable)
-            .filter(|&name| columns_available(self.ws, self.scx.target, name))
-            .map(|name| ColumnElem { name, nullable })
+        crate::lower::shape::vec_column_elem_mono(
+            self.ws,
+            self.scx.target,
+            &self.concrete_ty(e)?,
+        )
     }
 
     /// The column shape of `elem`: its value shape, marked nullable when the
@@ -148,29 +116,23 @@ impl Builder<'_> {
     /// upstream (LuaJIT hashes cdata by pointer), and the spine stores whatever
     /// key the boxed representation already stored.
     pub(crate) fn map_column_value_of(&self, e: Idx<Expr>) -> Option<ColumnElem> {
-        let ty = self.resolve_tyid(*self.inf?.expr_types.get(e)?)?;
-        let TypeExpr::App { ctor: TypeCtor::Map, params } = self.ty_node(ty)? else {
-            return None;
-        };
-        let v = params.into_iter().nth(1)?;
-        let mut val = self.resolve_tyid(ty.with_idx(v))?;
-        // `Map<K, P?>` is column-stored too, and unlike `[P?]` it needs no
-        // presence column: an absent value collapses to key REMOVAL, because a
-        // bare Map already cannot tell an absent key from a key holding null.
-        if let Some(TypeExpr::Nullable(inner)) = self.ty_node(val) {
-            val = self.resolve_tyid(val.with_idx(inner))?;
-        }
-        let vn = match self.ty_node(val)? {
-            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => n,
-            TypeExpr::Generic(var, _) => match self.spec_subst.get(&var) {
-                Some(ty) => ty.nominal()?,
-                _ => return None,
-            },
-            _ => return None,
-        };
-        // `nullable: false` is the point of the peel above -- the spine carries
-        // presence, so the value columns never need a presence leaf.
-        vec_column_elem(self.ws, vn, false).map(|name| ColumnElem { name, nullable: false })
+        crate::lower::shape::map_column_value_mono(
+            self.ws,
+            self.scx.target,
+            &self.concrete_ty(e)?,
+        )
+    }
+
+    /// The expression's CONCRETE type under the active specialization.
+    ///
+    /// `Err` is the shared generic snapshot: a body lowered with no
+    /// instantiation has an opaque `T`, which is not column-eligible and must
+    /// keep the representation every instantiation can read. That is the same
+    /// answer the `TypeExpr` walk gave by falling out of its `Generic` arm, now
+    /// stated once instead of at each navigation step.
+    pub(crate) fn concrete_ty(&self, e: Idx<Expr>) -> Option<MonoTy> {
+        let inf = self.inf?;
+        crate::monoty::convert(self.ws, inf, *inf.expr_types.get(e)?, &self.spec_subst).ok()
     }
 
     /// `m.data`, the column Vec a column-stored Map's values live in. Every
