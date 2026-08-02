@@ -613,6 +613,11 @@ fn main() { depth(1, 3) }
         1,
         "the census disagrees with the rejection it is derived from"
     );
+    // ...and the graph is NOT closed, which is what makes `is_closed` a test
+    // rather than a constant: the capped expansion left callees undiscovered.
+    let c = g.closure(&ws);
+    assert!(!c.depth_capped.is_empty(), "a capped expansion was not reported");
+    assert!(!c.is_closed(), "a graph with a cut expansion reported itself closed");
 }
 
 /// Mutual polymorphic recursion. The type grows around a two-function cycle, so
@@ -999,5 +1004,136 @@ fn main() {
     assert_eq!(
         lua, js,
         "the same logical witness instantiated differently once the target selected a sibling"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Stage 2 gate: graph closure and symbol injectivity.
+// ---------------------------------------------------------------------------
+
+/// The gate on an ordinary program: every reached instance was expanded or is a
+/// boundary, nothing was cut by the depth cap, and no two distinct instances
+/// claim one emitted symbol.
+#[test]
+fn an_ordinary_program_produces_a_closed_graph() {
+    let (ws, g) = graph_of(
+        r#"
+fn ident<T>(x: T) -> T { return x }
+fn main() {
+    let xs: [int] = [1, 2, 3]
+    let ys: [string] = ["a"]
+    xs.push(ident(4))
+    ys.push(ident("b"))
+    let total = 0
+    for v in xs { total = total + v }
+}
+"#,
+    );
+    let c = g.closure(&ws);
+    assert!(c.unexpanded.is_empty(), "instances with a missing body: {:?}", c.unexpanded);
+    assert!(c.depth_capped.is_empty(), "expansion was cut: {:?}", c.depth_capped);
+    assert!(
+        c.colliding_symbols.is_empty(),
+        "two instances claim one emitted symbol: {:?}",
+        c.colliding_symbols
+    );
+    assert!(c.is_closed());
+}
+
+/// Symbol injectivity is the property `symbol` CANNOT provide. The
+/// render-collision adversary produces two instances that display alike; their
+/// emitted symbols must still differ, because emission gives each a body.
+#[test]
+fn instances_that_render_alike_get_distinct_emitted_symbols() {
+    let (ws, g) = graph_of(
+        r#"
+fn twice(n: int) -> int { return n * 2 }
+fn maybe(n: int) -> int? { return n * 2 }
+fn ident<T>(x: T) -> T { return x }
+fn main() {
+    let f: fn(int) -> int? = maybe
+    let g: (fn(int) -> int)? = twice
+    let a = ident(f)
+    let b = ident(g)
+}
+"#,
+    );
+    let idents: Vec<&instance_graph::Instance> = g
+        .instances
+        .iter()
+        .filter(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "ident")
+        .collect();
+    assert_eq!(idents.len(), 2);
+    let display: Vec<String> = idents.iter().map(|i| g.symbol(&ws, i)).collect();
+    assert_eq!(display[0], display[1], "the fixture is no longer the collision it tests");
+    let emitted: Vec<String> = idents.iter().map(|i| g.emitted_symbol(&ws, i)).collect();
+    assert_ne!(emitted[0], emitted[1], "two bodies would be emitted as `{}`", emitted[0]);
+    assert!(g.closure(&ws).colliding_symbols.is_empty());
+}
+
+/// A non-generic instance keeps its base mangling -- emission must not rename
+/// every function the moment instances exist.
+#[test]
+fn a_non_generic_instance_keeps_its_base_symbol() {
+    let (ws, g) = graph_of(
+        r#"
+fn bump(x: int) -> int { return x + 1 }
+fn main() { bump(1) }
+"#,
+    );
+    let bump = g
+        .instances
+        .iter()
+        .find(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "bump")
+        .expect("no `bump` instance");
+    assert_eq!(g.emitted_symbol(&ws, bump), "bump_int_ret_int");
+}
+
+/// A call INSIDE a shared generic body, walked at an instance, resolves through
+/// the caller's substitution and reaches a CONCRETE callee.
+///
+/// `docs/mono-stage0e-ablation.md` prices this population at 43 pairs / 46 sites
+/// / 23 callees, but that is measured on the EMISSION path, which still lowers
+/// shared generic bodies. In the graph every walked body is an instance, so the
+/// binding always has a substitution to resolve against, and no `unbound-generic`
+/// can arise; this fixture is one level deeper than
+/// `instantiation_flows_through_a_generic_caller` -- the inner call binds a
+/// collection over the caller's own generic rather than the generic itself.
+#[test]
+fn a_callee_binding_inside_a_generic_body_is_concrete() {
+    let (ws, g) = graph_of(
+        r#"
+fn hold<T>(x: T) -> int {
+    let xs: [T] = [x]
+    xs.push(x)
+    return xs.len()
+}
+fn main() {
+    hold(1)
+    hold("s")
+}
+"#,
+    );
+    assert!(
+        !g.unresolved.iter().any(|u| u.reason == "unbound-generic"),
+        "a callee binding inside a generic body had no substitution: {:?}",
+        g.unresolved.iter().map(|u| u.reason).collect::<Vec<_>>()
+    );
+    let pushes: Vec<String> = g
+        .instances
+        .iter()
+        .filter(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "push")
+        .map(|i| g.symbol(&ws, i))
+        .collect();
+    assert!(
+        pushes.iter().any(|s| s.contains("int")) && pushes.iter().any(|s| s.contains("string")),
+        "`push` was not instantiated at both of `hold`'s instantiations: {pushes:?}"
+    );
+    assert!(
+        g.instances
+            .iter()
+            .filter(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "hold")
+            .all(|i| !i.args.is_empty()),
+        "a `hold` instance carries no arguments"
     );
 }

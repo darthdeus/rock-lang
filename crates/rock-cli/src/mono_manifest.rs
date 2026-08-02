@@ -59,6 +59,11 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     let mut unresolved_examples: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut rejection_kinds: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut rejection_examples: Vec<String> = Vec::new();
+    let mut uninst_names: std::collections::BTreeSet<String> = Default::default();
+    let mut closure_unexpanded: std::collections::BTreeSet<String> = Default::default();
+    let mut closure_capped: std::collections::BTreeSet<String> = Default::default();
+    let mut closure_collisions: BTreeMap<String, std::collections::BTreeSet<String>> =
+        BTreeMap::new();
     let mut direct_rec: std::collections::BTreeSet<String> = Default::default();
     let mut mutual_rec: std::collections::BTreeSet<String> = Default::default();
     let mut changing_rec: std::collections::BTreeSet<String> = Default::default();
@@ -95,6 +100,12 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
                 }
                 for (k, v) in p.reasons {
                     *unresolved_reasons.entry(k).or_insert(0) += v;
+                }
+                uninst_names.extend(p.uninstantiated_root_names);
+                closure_unexpanded.extend(p.closure.unexpanded);
+                closure_capped.extend(p.closure.depth_capped);
+                for (k, v) in p.closure.colliding_symbols {
+                    closure_collisions.entry(k).or_default().extend(v);
                 }
                 direct_rec.extend(p.census.direct_same_instance);
                 mutual_rec.extend(p.census.mutual_same_instance);
@@ -188,6 +199,13 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
         );
     }
     let uninst: usize = rows.iter().map(|r| r.uninstantiated_roots).max().unwrap_or(0);
+    if !uninst_names.is_empty() {
+        println!();
+        println!("uninstantiated generic roots, union over projects ({}):", uninst_names.len());
+        for n in &uninst_names {
+            println!("- `{n}`");
+        }
+    }
     println!();
     println!(
         "`uninst. generic roots` (max over projects): **{uninst}** -- generic fns that are \
@@ -229,6 +247,22 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     // Plan S 0h's three decided rejections. Zero over the corpus is the
     // measurement the decisions were taken on; a non-zero count is a real
     // program the concrete-program model refuses, not a diagnostic detail.
+    println!("## graph closure (plan S 2 gate)");
+    println!();
+    println!("- instances with no body and no boundary class (callees MISSING): **{}**", closure_unexpanded.len());
+    for n in closure_unexpanded.iter().take(10) {
+        println!("  - `{n}`");
+    }
+    println!("- expansions cut by the depth cap: **{}**", closure_capped.len());
+    println!(
+        "- emitted symbols claimed by MORE THAN ONE instance: **{}**",
+        closure_collisions.len()
+    );
+    for (sym, ids) in closure_collisions.iter().take(10) {
+        println!("  - `{sym}` <- {}", ids.iter().map(|i| format!("`{i}`")).collect::<Vec<_>>().join(", "));
+    }
+    println!();
+
     println!("## rejected constructions (plan S 0h)");
     println!();
     if rejection_kinds.is_empty() {
@@ -418,6 +452,8 @@ struct OneProject {
     reasons: BTreeMap<String, usize>,
     examples: BTreeMap<String, Vec<String>>,
     census: instance_graph::RecursionCensus,
+    uninstantiated_root_names: std::collections::BTreeSet<String>,
+    closure: skull::instance_graph::Closure,
     rejections: BTreeMap<&'static str, usize>,
     rejection_examples: Vec<String>,
     reconciliation: instance_graph::Reconciliation,
@@ -665,6 +701,8 @@ fn one_project(
         reasons,
         examples,
         census,
+        uninstantiated_root_names: g.uninstantiated_roots.clone(),
+        closure: g.closure(&ws),
         rejections,
         rejection_examples,
         reconciliation: rec,

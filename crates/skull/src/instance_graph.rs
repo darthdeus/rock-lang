@@ -361,6 +361,61 @@ impl InstanceGraph {
         format!("{base}<{}>", args.join(","))
     }
 
+    /// The symbol EMISSION would give this instance, through the one encoder
+    /// (`skull_mir::mangle::spec_fn_name`) rather than a second spelling built
+    /// here. A non-generic instance keeps its base mangling; a generic one is
+    /// suffixed with its arguments' canonical encodings, which is why this is
+    /// injective where [`Self::symbol`] is not.
+    pub fn emitted_symbol(&self, ws: &Workspace, i: &Instance) -> String {
+        let f = &ws.module(i.func.module).functions[i.func.func];
+        let key: Vec<Option<skull_mir::monoty::MonoTy>> =
+            i.args.iter().map(|a| Some(self.arena.get(*a).clone())).collect();
+        skull_mir::mangle::spec_fn_name(ws, f, &key).unwrap_or_else(|| mangle_fn(ws, f))
+    }
+
+    /// Plan S 2's Stage-2 gate, as data: what is NOT closed about this graph.
+    ///
+    /// Closure is not "every edge target is an instance" -- `record` inserts the
+    /// target, so that holds by construction and would assert nothing. The
+    /// question is whether every instance was EXPANDED: one whose body the walk
+    /// never entered has callees missing from the graph, and it is closed only
+    /// if it has no body to enter (a boundary) or is recorded as cut.
+    pub fn closure(&self, ws: &Workspace) -> Closure {
+        // The SAME question the walk asks -- `build` skips an instance whose
+        // `body_inference` is absent -- so "expanded" here cannot drift from what
+        // expansion actually required.
+        //
+        // MEASURED EMPTY, and empty by construction: bone gives every reached
+        // declaration a `BodyInference`, externs and `inline(..)` bodies
+        // included, so a member would mean an instance bone never typechecked.
+        // An exemption for boundary declarations was written here and DELETED:
+        // removing it left the corpus at 0, which makes it dead rather than
+        // load-bearing. Read this arm as an invariant, not as a population --
+        // no fixture produces a member.
+        let unexpanded: BTreeSet<String> = self
+            .instances
+            .iter()
+            .filter(|i| body_inference(ws, i.func).is_none())
+            .map(|i| self.identity(ws, i))
+            .collect();
+        // Symbol injectivity: two DISTINCT instances must not claim one emitted
+        // spelling. Keyed on identity, never on the display symbol, which is
+        // ambiguous by construction.
+        let mut by_symbol: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for i in &self.instances {
+            by_symbol.entry(self.emitted_symbol(ws, i)).or_default().insert(self.identity(ws, i));
+        }
+        let colliding: BTreeMap<String, BTreeSet<String>> =
+            by_symbol.into_iter().filter(|(_, ids)| ids.len() > 1).collect();
+        Closure {
+            instances: self.instances.len(),
+            unexpanded,
+            depth_capped: self.depth_capped.iter().map(|i| self.identity(ws, i)).collect(),
+            uninstantiated_roots: self.uninstantiated_roots.clone(),
+            colliding_symbols: colliding,
+        }
+    }
+
     /// Manifest lines, sorted and deduplicated by IDENTITY: `<identity>\t<symbol>`.
     ///
     /// The identity is IN the line, not merely the sort key. A caller that
@@ -465,6 +520,42 @@ fn dfs<'a>(
     }
     path.pop();
     color.insert(node, 2);
+}
+
+/// What the instance graph does not yet close over. Every field is a NAMED set,
+/// not a count: a gate that compares counts cannot tell a closed gap from a new
+/// one that replaced it.
+#[derive(Debug, Default)]
+pub struct Closure {
+    pub instances: usize,
+    /// Reached, has no body, and is not a boundary -- its callees are missing.
+    pub unexpanded: BTreeSet<String>,
+    /// Expansion cut by [`MAX_INSTANTIATION_DEPTH`].
+    pub depth_capped: BTreeSet<String>,
+    /// Generic emission roots no call instantiates. Production emits these as
+    /// shared generic bodies, so a non-empty set is the shared-body surface that
+    /// still has no instance -- the honest remaining hole, stated by name.
+    pub uninstantiated_roots: BTreeSet<String>,
+    /// Emitted symbol -> the distinct instance identities claiming it. Any entry
+    /// is a Stage-3 collision: two bodies would be emitted under one name.
+    ///
+    /// **The corpus zero here is weak evidence and must not be read as strong.**
+    /// Replacing the encoder with the AMBIGUOUS display rendering leaves the
+    /// corpus at 0 too -- measured -- so the 26 projects simply contain no
+    /// render-colliding instance pair. Only
+    /// `instances_that_render_alike_get_distinct_emitted_symbols` separates the
+    /// two encoders.
+    pub colliding_symbols: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl Closure {
+    /// Closed except for the roots no call instantiates, which is a separate,
+    /// named fact rather than a silent pass.
+    pub fn is_closed(&self) -> bool {
+        self.unexpanded.is_empty()
+            && self.depth_capped.is_empty()
+            && self.colliding_symbols.is_empty()
+    }
 }
 
 #[derive(Debug, Default)]
