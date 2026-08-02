@@ -728,8 +728,8 @@ fn body_edges(
 fn inference_edges(bi: &BodyInference, out: &mut Vec<(ModuleId, Idx<Function>)>) {
     out.extend(bi.resolved_overload_calls.values().copied());
     for info in bi.for_iter_protocol.values() {
-        if let Some(f) = info.iter_fn {
-            out.push(f);
+        if let Some(w) = &info.iter {
+            out.push(w.func);
         }
         collect_bound_next(&info.next, out);
     }

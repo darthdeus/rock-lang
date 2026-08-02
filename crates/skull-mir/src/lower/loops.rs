@@ -74,7 +74,7 @@ impl Builder<'_> {
         // User iterator protocol (bone recorded the resolution for this For):
         // desugar to `it = iter(coll); loop { (ok, ..) = next(it); !ok -> break }`.
         // Only populated for non-builtin collections, so this never shadows a
-        // builtin template. `iter_fn: None` = identity (the collection IS the
+        // builtin template. `iter: None` = identity (the collection IS the
         // iterator); a `CallerGeneric` next = placeholder in a bounded body.
         if let Some(info) = self.inf.and_then(|i| i.for_iter_protocol.get(&iter).cloned()) {
             return self.lower_for_user_iter(&vars, iter, body, &info);
@@ -156,13 +156,13 @@ impl Builder<'_> {
         info: &ForIterInfo,
     ) -> Result<(), CompilerError> {
         let coll = self.lower_expr(iter_expr)?;
-        let it_val = match info.iter_fn {
+        let it_val = match info.iter.as_ref().map(|w| w.func) {
             Some((m, f)) => {
                 // Stage-0e: the `iter` witness is emitted with NO spec binding,
-                // so a generic one always reaches the shared generic body. bone
-                // records `next_generics` for `next` and nothing for `iter_fn`,
-                // which is the S 0d finding -- a missing RECORD, not a missing
-                // binding at a call site.
+                // so a generic one still reaches the shared generic body here.
+                // bone now records the witness's own instantiation
+                // (`IterWitness::generics`), and the instance graph consumes it;
+                // EMISSION consumes it at the Stage-3 cutover, not before.
                 let iter_ref = FuncRef { module: m, func: f };
                 if crate::ablation::enabled() {
                     let cf = &self.ws.module(m).functions[f];
@@ -177,8 +177,9 @@ impl Builder<'_> {
                                 .copied()
                                 .unwrap_or(cf.name_span),
                             "the `for`-protocol `iter` witness has no instantiation record \
-                             anywhere: bone records `next_generics` for `next` and nothing \
-                             for `iter_fn`, and this call is emitted with no spec binding",
+                             in emission: the recorded `IterWitness::generics` is not \
+                             consumed here until the Stage-3 cutover, so this call is \
+                             emitted with no spec binding",
                         );
                     }
                 }

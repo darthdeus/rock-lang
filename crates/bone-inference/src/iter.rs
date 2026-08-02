@@ -204,14 +204,14 @@ pub(crate) fn resolve_for_iter_protocol(
         };
         gamma.out.for_iter_protocol.insert(
             iter_expr,
-            ForIterInfo { iter_fn: None, next: BoundNext::CallerGeneric(idx) },
+            ForIterInfo { iter: None, next: BoundNext::CallerGeneric(idx) },
         );
         return Ok(elem);
     }
 
     let (iter_fn, it_ty) =
         match resolve_unary_by_recv(c, gamma, Ustr::from("iter"), coll_ty, span) {
-            Ok((f, ret, _subs)) => {
+            Ok((f, ret, subs)) => {
                 let (fm, ff) = f;
                 if gamma.workspace.module(fm).functions[ff]
                     .generic_bounds
@@ -224,7 +224,7 @@ pub(crate) fn resolve_for_iter_protocol(
                         gamma.render(coll_ty)
                     );
                 }
-                (Some(f), ret)
+                (Some(IterWitness { func: f, generics: subs }), ret)
             }
             // Identity: the collection IS the iterator if `next` resolves on it.
             Err(_) => (None, coll_ty),
@@ -265,7 +265,7 @@ pub(crate) fn resolve_for_iter_protocol(
     gamma.out.for_iter_protocol.insert(
         iter_expr,
         ForIterInfo {
-            iter_fn,
+            iter: iter_fn,
             next: BoundNext::Concrete { func: next_fn, sub, next_generics: next_subs },
         },
     );
@@ -441,7 +441,7 @@ pub(crate) fn implicit_iter_target(
     gamma: &mut Gamma,
     aty: TyId,
     span: Span,
-) -> Option<((ModuleId, Idx<Function>), TyId)> {
+) -> Option<(IterWitness, TyId)> {
     let a = resolve(gamma, aty, span);
     if matches!(*gamma.get(a), TypeExpr::Generic(..) | TypeExpr::Infer(..)) {
         return None;
@@ -454,7 +454,7 @@ pub(crate) fn implicit_iter_target(
     }
     let snap = gamma.out.checkpoint();
     match resolve_unary_by_recv(c, gamma, Ustr::from("iter"), a, span) {
-        Ok((f, ret, _subs)) => {
+        Ok((f, ret, subs)) => {
             // A bounded `iter` fn can't be a coercion target (same restriction
             // as the for head).
             if gamma.workspace.module(f.0).functions[f.1]
@@ -465,7 +465,7 @@ pub(crate) fn implicit_iter_target(
                 gamma.out.rollback_to(snap);
                 return None;
             }
-            Some((f, ret))
+            Some((IterWitness { func: f, generics: subs }, ret))
         }
         Err(_) => {
             gamma.out.rollback_to(snap);

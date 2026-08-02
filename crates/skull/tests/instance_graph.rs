@@ -840,3 +840,135 @@ fn main() {
     );
     assert!(g.rejections.is_empty(), "a valid program was rejected: {:?}", g.rejections);
 }
+
+// ---------------------------------------------------------------------------
+// Stage 2: synthesized `iter` witnesses resolve to concrete instances.
+//
+// A synthesized `iter` call has no call expr, so it can never be keyed in
+// `call_generic_bindings`. bone now retains the substitution it already
+// computed while resolving the witness -- symmetric to `next_generics` -- and
+// the walk instantiates from that record. The two routes are independent: the
+// `for` head (`for_iter_protocol`) and an iterable argument coerced at an
+// `Iterator`-bounded param (`implicit_iter_args`).
+// ---------------------------------------------------------------------------
+
+/// The `for` head over a type whose `iter` is GENERIC. `iter<T>(Arena<T>)` is
+/// the stdlib's own, so the fixture does not invent a protocol.
+#[test]
+fn a_generic_for_head_iter_witness_is_instantiated() {
+    let (ws, g) = graph_of(
+        r#"
+fn main() {
+    let a: Arena<int> = arena_new()
+    let total = 0
+    for (e, v) in a { total = total + v }
+}
+"#,
+    );
+    let iters: Vec<String> = g
+        .edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::IteratorIter)
+        .map(|e| g.symbol(&ws, &e.to))
+        .collect();
+    assert!(!iters.is_empty(), "the `for` head recorded no iterator-iter edge");
+    assert!(
+        iters.iter().any(|s| s.contains("iter") && s.ends_with("<int>")),
+        "the generic `iter` witness was not instantiated at `int`: {iters:?}"
+    );
+    assert!(
+        !g.unresolved.iter().any(|u| u.reason == "iter-witness-no-instantiation-record"),
+        "a witness was still filed as having no instantiation record"
+    );
+}
+
+/// The call-argument route. `count<I: Iterator<T>, T>` takes an `Iterator`, so
+/// passing an `Arena<int>` coerces through the same generic `iter` -- a
+/// DIFFERENT bone map (`implicit_iter_args`) reached by a different code path.
+#[test]
+fn a_generic_implicit_iter_witness_is_instantiated() {
+    let (ws, g) = graph_of(
+        r#"
+fn main() {
+    let a: Arena<int> = arena_new()
+    let n = a.count()
+}
+"#,
+    );
+    let iters: Vec<String> = g
+        .edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::ImplicitIter)
+        .map(|e| g.symbol(&ws, &e.to))
+        .collect();
+    assert!(!iters.is_empty(), "the coerced argument recorded no implicit-iter edge");
+    assert!(
+        iters.iter().any(|s| s.contains("iter") && s.ends_with("<int>")),
+        "the generic `iter` witness was not instantiated at `int`: {iters:?}"
+    );
+    assert!(
+        !g.unresolved
+            .iter()
+            .any(|u| u.reason == "implicit-iter-witness-no-instantiation-record"),
+        "a witness was still filed as having no instantiation record"
+    );
+}
+
+/// CONTROL: a NON-generic `iter` witness needs no record and must keep working
+/// through the empty-substitution path.
+#[test]
+fn a_concrete_iter_witness_still_resolves() {
+    let (ws, g) = graph_of(
+        r#"
+struct Counter { i: int, n: int }
+fn iter(c: Counter) -> Counter { return c }
+fn next(c: Counter) -> (bool, int) {
+    if c.i >= c.n { return (false, 0) }
+    c.i = c.i + 1
+    return (true, c.i)
+}
+fn main() {
+    let c = Counter { i: 0, n: 3 }
+    let total = 0
+    for v in c { total = total + v }
+}
+"#,
+    );
+    let iters: Vec<String> = g
+        .edges
+        .iter()
+        .filter(|e| e.kind == EdgeKind::IteratorIter)
+        .map(|e| g.symbol(&ws, &e.to))
+        .collect();
+    assert!(!iters.is_empty(), "a concrete `iter` witness produced no edge");
+    assert!(
+        g.edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::IteratorIter)
+            .all(|e| e.to.args.is_empty()),
+        "a non-generic witness was given instance arguments: {iters:?}"
+    );
+}
+
+/// CONTROL: the `next` witness's own record (`next_generics`) is untouched by
+/// the `iter` one. Both witnesses of one loop must be concrete, and they are
+/// resolved from two separate records.
+#[test]
+fn the_next_witness_record_is_unchanged() {
+    let (_ws, g) = graph_of(
+        r#"
+fn main() {
+    let a: Arena<int> = arena_new()
+    let total = 0
+    for (e, v) in a { total = total + v }
+}
+"#,
+    );
+    let nexts: Vec<&instance_graph::Edge> =
+        g.edges.iter().filter(|e| e.kind == EdgeKind::IteratorNext).collect();
+    assert!(!nexts.is_empty(), "no iterator-next edge was recorded");
+    assert!(
+        nexts.iter().all(|e| !e.to.args.is_empty()),
+        "a `next` witness lost its instantiation"
+    );
+}

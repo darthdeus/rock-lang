@@ -25,10 +25,8 @@
 //! Stage 3's cutover attaches it to. Nothing here is fatal yet.
 //!
 //! **Where the graph is still incomplete**, stated so a reader does not mistake
-//! the histogram for the whole graph: `iterator-iter` has no edges at all
-//! (a generic `iter` witness has no instantiation record to build one from --
-//! the finding, not an omission), `CompilerGenerated` OVER-approximates, and a
-//! coroutine's `__defer`/`__on_*` helpers exist only after the MIR transform so
+//! the histogram for the whole graph: `CompilerGenerated` OVER-approximates, and
+//! a coroutine's `__defer`/`__on_*` helpers exist only after the MIR transform so
 //! nothing here can count them. Every edge recorded is real;
 //! [`InstanceGraph::uninstantiated_roots`] records the generic roots no
 //! instantiation reached. Full accounting: `docs/mono-stage0d-manifest.md`.
@@ -37,7 +35,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use bone_semantic::hir::{BodyOwner, Function};
 use bone_semantic::inference::{BodyInference, Workspace};
-use bone_semantic::prelude::{BoundNext, ModuleId, Span};
+use bone_semantic::prelude::{BoundNext, IterWitness, ModuleId, Span};
 use comfy_la_arena::Idx;
 use rustc_hash::FxHashMap;
 use skull_mir::mangle::mangle_fn;
@@ -673,26 +671,15 @@ pub fn build_for_target(
         }
 
         // Iterable args coerced through `iter()` at an `Iterator`-bounded param.
-        let mut implicit: Vec<(Idx<bone_semantic::hir::Expr>, (ModuleId, Idx<Function>))> =
-            inf.implicit_iter_args.iter().map(|(e, r)| (*e, *r)).collect();
+        let mut implicit: Vec<(Idx<bone_semantic::hir::Expr>, &IterWitness)> =
+            inf.implicit_iter_args.iter().map(|(e, w)| (*e, w)).collect();
         implicit.sort_by_key(|(e, _)| *e);
-        for (e, (m, f)) in implicit {
-            let callee = variant_for(ws, FuncRef { module: m, func: f }, target);
+        for (e, w) in implicit {
             let span = body.and_then(|b| b.expr_spans.get(e).copied()).unwrap_or_else(Span::unknown);
-            let cf = &ws.module(callee.module).functions[callee.func];
-            if cf.generics.is_empty() {
-                record(&mut g, &mut work, callee, None, EdgeKind::ImplicitIter, span);
-            } else {
-                // The SAME missing record as the `for`-head `iter` witness: bone
-                // stores the resolved fn and no instantiation for it. Filed under
-                // its own reason so the two sites stay countable apart.
-                g.unresolved.push(Unresolved {
-                    from: inst.clone(),
-                    callee,
-                    reason: "implicit-iter-witness-no-instantiation-record",
-                    span,
-                });
-            }
+            record_witness(
+                &mut g, &mut work, ws, inf, &inst, &subst, depth, w, span,
+                EdgeKind::ImplicitIter, target,
+            );
         }
 
         // `next` witnesses of calls to BOUNDED generic fns.
@@ -712,26 +699,11 @@ pub fn build_for_target(
         iters.sort_by_key(|(e, _)| *e);
         for (e, info) in iters {
             let span = body.and_then(|b| b.expr_spans.get(e).copied()).unwrap_or_else(Span::unknown);
-            // The `iter` witness has NO recorded instantiation anywhere: bone
-            // records `next_generics` for `next` and nothing for `iter_fn`, and
-            // skull emits this call with no spec binding (`lower/loops.rs:159`),
-            // so it always reaches the shared generic body. A generic one
-            // therefore cannot be given a concrete instance here -- its own
-            // bucket, because it is a missing RECORD, not a missing binding at a
-            // call site.
-            if let Some((m, f)) = info.iter_fn {
-                let callee = FuncRef { module: m, func: f };
-                let cf = &ws.module(callee.module).functions[callee.func];
-                if cf.generics.is_empty() {
-                    record(&mut g, &mut work, callee, None, EdgeKind::IteratorIter, span);
-                } else {
-                    g.unresolved.push(Unresolved {
-                        from: inst.clone(),
-                        callee,
-                        reason: "iter-witness-no-instantiation-record",
-                        span,
-                    });
-                }
+            if let Some(w) = &info.iter {
+                record_witness(
+                    &mut g, &mut work, ws, inf, &inst, &subst, depth, w, span,
+                    EdgeKind::IteratorIter, target,
+                );
             }
             record_bound_next(
                 &mut g, &mut work, ws, inf, &inst, &subst, depth, &info.next, span,
@@ -810,6 +782,55 @@ fn detect_changing_instance_recursion(g: &mut InstanceGraph, ws: &Workspace) {
             span,
             message,
         });
+    }
+}
+
+/// A synthesized `iter` witness: the `for` head's or a coerced argument's.
+///
+/// It has no call expr, so it can never appear in `call_generic_bindings`, and
+/// its instantiation comes from the substitution bone retained while resolving
+/// it. That record has the same shape as `next_generics`, so the same
+/// instantiation route serves both -- one oracle for what a synthesized call
+/// instantiates at, rather than a second one per witness kind.
+#[allow(clippy::too_many_arguments)]
+fn record_witness(
+    g: &mut InstanceGraph,
+    work: &mut Vec<(Instance, MonoSubst, u32)>,
+    ws: &Workspace,
+    inf: &BodyInference,
+    from: &Instance,
+    subst: &MonoSubst,
+    depth: u32,
+    witness: &IterWitness,
+    span: Span,
+    kind: EdgeKind,
+    target: bone_semantic::hir::FnBackend,
+) {
+    let callee = variant_for(ws, FuncRef { module: witness.func.0, func: witness.func.1 }, target);
+    let cf = &ws.module(callee.module).functions[callee.func];
+    match instantiate_next(&mut g.arena, ws, inf, cf, &witness.generics, subst) {
+        Ok((args, callee_subst)) => {
+            let to = Instance { func: callee, args };
+            g.edges.push(Edge { from: from.clone(), to: to.clone(), kind, span });
+            if g.instances.insert(to.clone()) {
+                work.push((to, callee_subst, depth + 1));
+            }
+        }
+        Err(Fail::Unconstrained(_)) => g.rejections.push(Rejection {
+            kind: RejectionKind::UnconstrainedTypeVar,
+            at: from.clone(),
+            span,
+            message: format!(
+                "the `iter` witness `{}` binds a type argument no constraint reaches",
+                mangle_fn(ws, cf)
+            ),
+        }),
+        Err(fail) => g.unresolved.push(Unresolved {
+            from: from.clone(),
+            callee,
+            reason: fail.reason(),
+            span,
+        }),
     }
 }
 
@@ -1144,7 +1165,7 @@ fn always_emitted_callees(
             let mut calls: Vec<(ModuleId, Idx<Function>)> =
                 inf.resolved_overload_calls.values().copied().collect();
             for info in inf.for_iter_protocol.values() {
-                calls.extend(info.iter_fn);
+                calls.extend(info.iter.as_ref().map(|w| w.func));
             }
             calls.sort_by_key(|(m, f)| (m.raw(), f.into_raw().into_u32()));
             out.extend(
