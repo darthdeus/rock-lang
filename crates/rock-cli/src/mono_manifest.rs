@@ -63,6 +63,7 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     let mut closure_unexpanded: std::collections::BTreeSet<String> = Default::default();
     let mut closure_capped: std::collections::BTreeSet<String> = Default::default();
     let mut synth_examined = 0usize;
+    let mut storage_failures: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut inline_dep_names: std::collections::BTreeSet<String> = Default::default();
     let mut closure_expanded = 0usize;
     let mut closure_instances = 0usize;
@@ -108,6 +109,9 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
                 }
                 uninst_names.extend(p.uninstantiated_root_names);
                 synth_examined += p.synthesized_examined;
+                for (k, v) in p.storage_failures {
+                    *storage_failures.entry(k).or_insert(0) += v;
+                }
                 inline_dep_names.extend(p.inline_dep_names);
                 closure_expanded += p.closure.expanded;
                 closure_instances += p.closure.instances;
@@ -260,17 +264,16 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     println!("## synthesized column intercepts");
     println!();
     println!(
-        "- storage-condition queries run (the DENOMINATOR): **{synth_examined}**;          edges produced: **{}**",
+        "- storage-condition queries run (the DENOMINATOR): **{synth_examined}**; edges: **{}**",
         hist.get("compiler-generated").copied().unwrap_or(0)
     );
     println!(
-        "- receivers whose concrete type could not be decided (reported, never read as boxed):          **{}**",
-        rejection_kinds
-            .iter()
-            .filter(|(k, _)| **k == "concrete-type-unavailable")
-            .map(|(_, v)| *v)
-            .sum::<usize>()
+        "- storage queries whose receiver had no concrete type (reported, never boxed): **{}**",
+        storage_failures.values().sum::<usize>()
     );
+    for (reason, n) in &storage_failures {
+        println!("  - `{reason}`: {n}");
+    }
     println!(
         "- runtime entries an opaque `inline(lua)` body depends on: **{}**",
         inline_dep_names.len()
@@ -280,8 +283,11 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     }
     println!();
     println!(
-        "Still an OVER-approximation, by two named arms: a Map INDEX site emits one of          `__map_col_slot`/`_slot_checked`/`_free` and all three are counted, and          `__vec_data_sort` keeps both of its nobox alternatives. Exact per-operation          attribution waits on `ConcreteBody` recording the operation."
+        "Still an OVER-approximation by two named arms: a Map INDEX site emits ONE of"
     );
+    println!("`__map_col_slot`/`_slot_checked`/`_free` and all three are counted, and");
+    println!("`__vec_data_sort` keeps both of its nobox alternatives. Exact per-operation");
+    println!("attribution waits on `ConcreteBody` recording the operation.");
     println!();
 
     println!("## graph closure (plan S 2 gate)");
@@ -498,6 +504,11 @@ struct OneProject {
     uninstantiated_root_names: std::collections::BTreeSet<String>,
     closure: skull::instance_graph::Closure,
     synthesized_examined: usize,
+    /// Storage-query failures by `MonoTyReason`, kept apart from the rejection
+    /// KIND histogram: a query that failed on an unbound generic is filed under
+    /// `unconstrained-type-var` there, so counting only
+    /// `concrete-type-unavailable` would under-report the storage population.
+    storage_failures: BTreeMap<&'static str, usize>,
     inline_dep_names: std::collections::BTreeSet<String>,
     rejections: BTreeMap<&'static str, usize>,
     rejection_examples: Vec<String>,
@@ -749,6 +760,13 @@ fn one_project(
         uninstantiated_root_names: g.uninstantiated_roots.clone(),
         closure: g.closure(&ws),
         synthesized_examined: g.synthesized_examined,
+        storage_failures: {
+            let mut m: BTreeMap<&'static str, usize> = BTreeMap::new();
+            for r in &g.storage_failures {
+                *m.entry(r.bucket()).or_insert(0) += 1;
+            }
+            m
+        },
         inline_dep_names: g.inline_body_deps.values().flatten().cloned().collect(),
         rejections,
         rejection_examples,

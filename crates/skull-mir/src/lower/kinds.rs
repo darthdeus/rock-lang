@@ -145,6 +145,9 @@ impl Builder<'_> {
     ///   would reject `tests/vec_sort_test.rock` and `tests/enumerate_tests.rock`
     ///   ahead of the cutover -- measured, both fail to emit. The rejection lands
     ///   with Stage 3, in one place, not twice on two schedules.
+    /// - A missing `BodyInference`, or an expression bone typed nothing for ->
+    ///   a spanned error for the same reason: absence of a type is not evidence
+    ///   of a representation.
     /// - Everything else -> a spanned error. Recovery poison means the program
     ///   should have been rejected upstream, a missing node means a `TyId` names
     ///   nothing, and a depth limit means a cyclic substitution chain. None of
@@ -152,8 +155,19 @@ impl Builder<'_> {
     ///   teeth without a population.
     pub(crate) fn concrete_ty(&self, e: Idx<Expr>) -> Result<Option<MonoTy>, CompilerError> {
         use crate::monoty::MonoTyReason as R;
-        let Some(inf) = self.inf else { return Ok(None) };
-        let Some(ty) = inf.expr_types.get(e) else { return Ok(None) };
+        // Neither of these is a storage answer. A body being lowered without
+        // inference, or an expression bone typed nothing for, is a
+        // front-end/back-end disagreement -- answering "boxed" would pick a
+        // representation from the absence of a type.
+        let Some(inf) = self.inf else {
+            return Err(self.gap_here("container storage asked in a body with no inference"));
+        };
+        let Some(ty) = inf.expr_types.get(e) else {
+            return Err(CompilerError::new_with_label(
+                self.body.expr_spans[e],
+                "cannot decide container storage: bone typed no expression here".to_string(),
+            ));
+        };
         match crate::monoty::convert(self.ws, inf, *ty, &self.spec_subst) {
             Ok(m) => Ok(Some(m)),
             Err(R::UnboundGeneric(_)) | Err(R::UnresolvedInfer(_)) => Ok(None),

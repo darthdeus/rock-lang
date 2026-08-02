@@ -287,6 +287,11 @@ pub struct InstanceGraph {
     /// entries it names. Emission must emit these even though no Rock call site
     /// reaches them.
     pub inline_body_deps: BTreeMap<String, BTreeSet<String>>,
+    /// Every storage query that could not decide, by reason. Kept beside the
+    /// rejection list because a rejection KIND aggregates several reasons, so
+    /// the kind histogram cannot answer "how many storage queries failed, and
+    /// why".
+    pub storage_failures: Vec<MonoTyReason>,
     /// Storage-condition queries the walk ran, the denominator for the
     /// synthesized-call population. Without it a zero synthesized-edge count
     /// cannot be told apart from a walk that asked nothing.
@@ -712,6 +717,7 @@ pub fn build_for_target(
         coroutine_helpers: BTreeSet::new(),
         erased_entries: BTreeSet::new(),
         inline_body_deps: BTreeMap::new(),
+        storage_failures: Vec::new(),
         synthesized_examined: 0,
         always_emitted_seeds: 0,
     };
@@ -763,12 +769,16 @@ pub fn build_for_target(
         let module = ws.module(inst.func.module);
         let body = module.bodies.get(&BodyOwner::Function(inst.func.func));
         // A boundary's Rock body is not the one emission uses -- it emits the
-        // foreign text -- so walking it is not expansion. bone gives externs and
-        // `inline(..)` decls a body entry, so testing `body.is_some()` alone
-        // called every reached declaration expanded and left the closure gate
-        // with nothing to measure.
+        // foreign text -- so the walk STOPS here. Marking it unexpanded while
+        // continuing to enumerate its calls was the worst of both: the closure
+        // gate excused the instance as having no callees while the graph carried
+        // them, and a `@native_required` fallback body reached callees emission
+        // never routes through.
         let f = &module.functions[inst.func.func];
-        if body.is_some() && declared_boundary(f).is_none() {
+        if declared_boundary(f).is_some() {
+            continue;
+        }
+        if body.is_some() {
             g.expanded.insert(inst.clone());
         }
 
@@ -869,12 +879,15 @@ pub fn build_for_target(
                 &mut failures,
             );
             for (e, reason) in failures {
+                g.storage_failures.push(reason.clone());
                 let span = b.expr_spans.get(e).copied().unwrap_or_else(Span::unknown);
                 // An unfinished inference variable IS the S 0h unconstrained
                 // case; poison, a missing node and a cyclic chain are not type
                 // arguments at all, so they take the invariant kind.
                 let kind = match reason {
-                    MonoTyReason::UnresolvedInfer(_) => RejectionKind::UnconstrainedTypeVar,
+                    MonoTyReason::UnresolvedInfer(_) | MonoTyReason::UnboundGeneric(_) => {
+                        RejectionKind::UnconstrainedTypeVar
+                    }
                     _ => RejectionKind::ConcreteTypeUnavailable,
                 };
                 g.rejections.push(Rejection {
@@ -1231,10 +1244,19 @@ fn instantiate_witness(
     Ok((args, callee_subst))
 }
 
-/// Why an instantiation produced no instance. The split IS the policy: an
-/// [`Fail::Unresolved`] is a shared generic body the walk holds no binding for
-/// -- data -- while an [`Fail::Unconstrained`] is a decided rejection
+/// Why an instantiation produced no instance.
+///
+/// [`Fail::Unresolved`] is data: the walk had no binding to key an
+/// instantiation on, which is a property of the RECORD, not of the types.
+/// [`Fail::Unconstrained`] is a decided rejection
 /// ([`RejectionKind::UnconstrainedTypeVar`]).
+///
+/// **`UnboundGeneric` is a rejection here, not data.** A shared generic root is
+/// never put on the worklist -- it goes to
+/// [`InstanceGraph::uninstantiated_roots`] -- so every body the walk enters is
+/// INSTANTIATED, and a declared generic missing from the enclosing substitution
+/// means that substitution is incomplete. The boxed answer belongs only to
+/// legacy lowering, where shared snapshots actually exist.
 enum Fail {
     Unresolved(&'static str),
     Unconstrained(&'static str),
@@ -1253,6 +1275,8 @@ fn convert_fail(r: MonoTyReason) -> Fail {
         // Inference never bound the variable, so there is no type to
         // instantiate at -- not a missing record, an absent constraint.
         MonoTyReason::UnresolvedInfer(_) => Fail::Unconstrained(r.bucket()),
+        // An incomplete substitution in an instantiated body. See [`Fail`].
+        MonoTyReason::UnboundGeneric(_) => Fail::Unconstrained(r.bucket()),
         _ => Fail::Unresolved(r.bucket()),
     }
 }
@@ -1378,19 +1402,17 @@ fn compiler_generated_sites(
         };
         if holds { CondVerdict::Holds } else { CondVerdict::DoesNot }
     };
-    // `UnboundGeneric` is the ONE failure that is also a storage answer: it means
-    // this body is the shared generic snapshot, whose element is opaque and
-    // therefore not column-eligible -- the same answer lowering gives. Every
-    // other reason (recovery poison, unfinished inference, a missing node, a
-    // cyclic substitution) is an invariant violation in an instantiated body and
-    // is REPORTED with its span rather than silently read as "boxed", which
-    // would let `no-bindings = 0` mean "the sites were discarded".
+    // EVERY failure is reported, including `UnboundGeneric`. The walk only ever
+    // enters instantiated bodies -- a shared generic root goes to
+    // `uninstantiated_roots` and is never worklisted -- so an unbound declared
+    // generic here means the substitution is incomplete, not that the element is
+    // legitimately opaque. Reading any of them as "boxed" would let a zero edge
+    // count mean "the sites were discarded".
     let mut settle = |recv, cond, e: Idx<bone_semantic::hir::Expr>| -> bool {
         *examined += 1;
         match verdict(recv, cond) {
             CondVerdict::Holds => true,
             CondVerdict::DoesNot => false,
-            CondVerdict::Failed(MonoTyReason::UnboundGeneric(_)) => false,
             CondVerdict::Failed(r) => {
                 failures.push((e, r));
                 false
@@ -1597,6 +1619,12 @@ fn has_rock_body(f: &Function) -> bool {
 /// none exists in the corpus, and a false POSITIVE keeps a symbol alive, where a
 /// false negative drops one emission requires.
 fn record_inline_body_deps(g: &mut InstanceGraph, ws: &Workspace) {
+    // METADATA ONLY so far: the dependency is recorded and joins
+    // `erased_entries`, but it is not yet resolved to a `BoundaryId` or an
+    // instance the way a call edge is. That resolution belongs to the artifact
+    // view, which is what decides the emitted spelling and the retention set;
+    // recording it here without a target would be a second, weaker reachability
+    // mechanism.
     let mut deps: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for i in &g.instances {
         let f = &ws.module(i.func.module).functions[i.func.func];

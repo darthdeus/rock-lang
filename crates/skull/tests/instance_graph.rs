@@ -1343,7 +1343,7 @@ fn reached(ws: &Workspace, g: &instance_graph::InstanceGraph, name: &str) -> boo
 fn a_rock_bodied_intrinsic_expands_its_fallback() {
     let (ws, g) = graph_of(
         r#"
-fn helper_called_only_by_the_fallback(x: int) -> int { return x + 1 }
+fn helper_called_only_by_the_fallback<T>(x: T) -> T { return x }
 @intrinsic fn portable_op(x: int) -> int {
     return helper_called_only_by_the_fallback(x)
 }
@@ -1354,6 +1354,10 @@ fn main() { portable_op(1) }
         is_expanded(&ws, &g, "portable_op"),
         "a Rock-bodied intrinsic was excused as a boundary instead of expanded"
     );
+    // GENERIC on purpose: a non-generic callee is an emission root in its own
+    // right, so its presence would prove nothing about whether the fallback body
+    // was walked. A generic one has an INSTANCE only if some body instantiated
+    // it.
     assert!(
         reached(&ws, &g, "helper_called_only_by_the_fallback"),
         "the fallback body's callee is missing from the graph"
@@ -1372,7 +1376,7 @@ fn main() { portable_op(1) }
 fn a_native_required_intrinsic_stays_a_boundary() {
     let (ws, g) = graph_of(
         r#"
-fn unreachable_through_a_native_required_body(x: int) -> int { return x + 1 }
+fn unreachable_through_a_native_required_body<T>(x: T) -> T { return x }
 @intrinsic @native_required fn pinned_op(x: int) -> int {
     return unreachable_through_a_native_required_body(x)
 }
@@ -1387,6 +1391,24 @@ fn main() { pinned_op(1) }
         g.boundaries.keys().any(|k| k.contains("pinned_op")),
         "a native-required intrinsic was not classified as a boundary"
     );
+    // The fixture's callee is named for what must be true of it, and is GENERIC
+    // so that only an instantiation puts it in the graph. Marking the instance
+    // unexpanded while still enumerating its body left this reachable: a body
+    // emission never routes through, contributing edges to the graph.
+    assert!(
+        !reached(&ws, &g, "unreachable_through_a_native_required_body"),
+        "a callee reachable ONLY through a skipped fallback rung is in the graph"
+    );
+    let out: Vec<String> = g
+        .edges
+        .iter()
+        .filter(|e| {
+            ws.module(e.from.func.module).functions[e.from.func.func].name.as_str()
+                == "pinned_op"
+        })
+        .map(|e| g.symbol(&ws, &e.to))
+        .collect();
+    assert!(out.is_empty(), "a boundary produced outgoing edges: {out:?}");
 }
 
 /// CONTROL: an intrinsic with only a FOREIGN body has nothing to expand.
@@ -1402,6 +1424,13 @@ fn main() { mapped_op(1) }
     assert!(
         g.boundaries.keys().any(|k| k.contains("mapped_op")),
         "an inline-only intrinsic was not classified as a boundary"
+    );
+    assert!(
+        !g.edges.iter().any(|e| {
+            ws.module(e.from.func.module).functions[e.from.func.func].name.as_str()
+                == "mapped_op"
+        }),
+        "a foreign-bodied boundary produced outgoing edges"
     );
 }
 
@@ -1438,4 +1467,59 @@ fn main() {
         .collect();
     assert!(both.is_empty(), "instances counted as BOTH expanded and boundary: {both:?}");
     assert!(c.expanded > 0 && c.expanded < c.instances);
+}
+
+/// Every name a synthesized-call table can produce belongs to the ONE
+/// catalogue. Two lists that must agree will eventually not; this makes the
+/// disagreement a test failure rather than a symbol emission never emits.
+#[test]
+fn synthesized_targets_belong_to_the_runtime_catalogue() {
+    let catalogue = instance_graph::ERASED_RUNTIME_ENTRIES;
+    let mut missing: Vec<&str> = Vec::new();
+    for (_, _, names) in instance_graph::COMPILER_GENERATED_TRIGGERS {
+        missing.extend(names.iter().filter(|n| !catalogue.contains(n)));
+    }
+    for (_, _, names) in instance_graph::INDEX_TRIGGERED {
+        missing.extend(names.iter().filter(|n| !catalogue.contains(n)));
+    }
+    assert!(missing.is_empty(), "synthesized targets outside the catalogue: {missing:?}");
+}
+
+/// HOSTILE: an opaque `inline(lua)` body that CALLS a compiler-owned runtime
+/// entry. No Rock call site reaches it, no lowering arm synthesizes it, and the
+/// walk cannot enter the body -- so without the dependency scan the symbol
+/// vanishes from the graph while emission still has to emit it. That is exactly
+/// how `__rock_vec_column_elements` disappeared once the name-keyed
+/// over-approximation stopped covering for it.
+#[test]
+fn an_opaque_body_declares_its_runtime_dependency() {
+    let (ws, g) = graph_of(
+        r#"
+@nomangle inline(lua) fn opaque_caller(v: any) -> any = """
+    return __rock_vec_column_elements(v)
+"""
+fn main() { opaque_caller(1) }
+"#,
+    );
+    let deps: Vec<String> = g
+        .inline_body_deps
+        .iter()
+        .flat_map(|(owner, names)| names.iter().map(move |n| format!("{owner} -> {n}")))
+        .collect();
+    assert!(
+        deps.iter().any(|d| d.contains("opaque_caller")
+            && d.contains("__rock_vec_column_elements")),
+        "an opaque body's runtime dependency was not recorded: {deps:?}"
+    );
+    assert!(
+        g.erased_entries.contains("__rock_vec_column_elements"),
+        "the dependency did not reach the erased-entry set emission draws from"
+    );
+    // CONTROL: the scan does not simply report the whole catalogue.
+    assert!(
+        !g.erased_entries.contains("__map_col_slot_checked"),
+        "the dependency scan reported an entry the body never names: {:?}",
+        g.erased_entries
+    );
+    let _ = &ws;
 }
