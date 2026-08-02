@@ -888,13 +888,16 @@ function __sw_ortho_size() {
   return [__SW.logicalW, __SW.logicalH];
 }
 
-// Ortho uProjection (2/w, -2/h Y-down, sized to the bound target), uView =
-// translate(ox*scale, oy*scale)*scale, uTransform identity (sprite.rs:223-282).
-function stone_set_camera(shader, ox, oy, scale) {
+// Ortho uProjection (2/w, sized to the bound target), uView =
+// translate(ox*scale, oy*scale)*scale, uTransform identity (sprite.rs).
+// ySign -1 is the Direct convention (authored y grows into the target's rows);
+// +1 is PresentSource, for a canvas the present pass samples with a flip.
+// Must stay in lockstep with stone-rs set_camera_impl.
+function __sw_set_camera(shader, ox, oy, scale, ySign) {
   var gl = __SW.gl, sh = __SW.shaders[shader];
   if (!gl || !sh) return;
   var wh = __sw_ortho_size(), w = wh[0], h = wh[1];
-  var proj = new Float32Array([2/w,0,0,0, 0,-2/h,0,0, 0,0,-1,0, -1,1,0,1]);
+  var proj = new Float32Array([2/w,0,0,0, 0,ySign*2/h,0,0, 0,0,-1,0, -1,-ySign,0,1]);
   var view = new Float32Array([scale,0,0,0, 0,scale,0,0, 0,0,1,0, ox*scale,oy*scale,0,1]);
   var prev = __SW.curShader;
   gl.useProgram(sh.prog);
@@ -903,6 +906,8 @@ function stone_set_camera(shader, ox, oy, scale) {
   var lt = __sw_uloc(sh, "uTransform"); if (lt) gl.uniformMatrix4fv(lt, false, __SW_IDENTITY);
   if (prev !== 0 && __SW.shaders[prev]) gl.useProgram(__SW.shaders[prev].prog);
 }
+function stone_set_camera(shader, ox, oy, scale) { __sw_set_camera(shader, ox, oy, scale, -1); }
+function stone_set_camera_present_source(shader, ox, oy, scale) { __sw_set_camera(shader, ox, oy, scale, 1); }
 function stone_reset_camera(shader) { stone_set_camera(shader, 0, 0, 1.0); }
 
 // --- textures / images ---
