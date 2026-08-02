@@ -47,7 +47,7 @@ fn declared_samplers(src: &str) -> Vec<String> {
 /// Walk `projects` and return every distinct `(program, sampler, slot|bare)`,
 /// sorted. Deduped across projects, because the engine set re-registers per
 /// project while the binding contract is per PROGRAM.
-fn census_over(projects: &[&str]) -> Vec<(String, String, &'static str)> {
+fn census_over(projects: &[&str]) -> Vec<(String, String, String)> {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
@@ -56,7 +56,7 @@ fn census_over(projects: &[&str]) -> Vec<(String, String, &'static str)> {
         .to_path_buf();
     std::env::set_current_dir(&root).expect("chdir to repo root");
 
-    let mut uniq: std::collections::BTreeMap<(String, String), &'static str> =
+    let mut uniq: std::collections::BTreeMap<(String, String), String> =
         std::collections::BTreeMap::new();
 
     for dir in projects {
@@ -80,8 +80,18 @@ fn census_over(projects: &[&str]) -> Vec<(String, String, &'static str)> {
             let slots: Vec<String> =
                 em.texture_slots.iter().map(|u| u.as_str().to_string()).collect();
             for name in declared_samplers(&em.source) {
-                let kind = if slots.contains(&name) { "slot" } else { "bare" };
-                uniq.insert((pair.key.to_string(), name), kind);
+                let kind = match slots.iter().position(|slot_name| slot_name == &name) {
+                    Some(slot) => format!("slot {slot}"),
+                    None => "bare".to_string(),
+                };
+                let key = (pair.key.to_string(), name);
+                if let Some(previous) = uniq.insert(key.clone(), kind.clone()) {
+                    assert_eq!(
+                        previous, kind,
+                        "program `{}` sampler `{}` changed binding across projects",
+                        key.0, key.1
+                    );
+                }
             }
         }
     }
@@ -97,20 +107,22 @@ fn shader_texture_census() {
         println!("{prog:<42} {samp:<22} {kind}");
     }
     println!("{:-<100}", "");
-    let grouped = got.iter().filter(|(_, _, k)| *k == "slot").count();
+    let programs: std::collections::BTreeSet<&str> =
+        got.iter().map(|(program, _, _)| program.as_str()).collect();
+    let grouped = got.iter().filter(|(_, _, k)| k.starts_with("slot ")).count();
     println!(
-        "examined {} distinct (program, sampler) pair(s): {grouped} in a @textures group, {} BARE",
+        "examined {} program(s), {} distinct (program, sampler) pair(s): \
+         {grouped} in a @textures group, {} BARE",
+        programs.len(),
         got.len(),
         got.len() - grouped
     );
 
-    // The EXACT set, not a count. `programs > 0` passed with `logo/` omitted
-    // and passed again while every `ISampler2D` was being dropped -- a census
-    // is only as strong as the space it measured, so the space is the
-    // assertion. Both defects fail here, and both are mutation-controlled below.
-    let want: Vec<(String, String, &'static str)> = EXPECTED
+    // The exact set makes an omitted project, sampler kind, or slot-order change
+    // fail instead of hiding behind a still-nonzero summary.
+    let want: Vec<(String, String, String)> = EXPECTED
         .iter()
-        .map(|(p, s, k)| (p.to_string(), s.to_string(), *k))
+        .map(|(p, s, k)| (p.to_string(), s.to_string(), k.to_string()))
         .collect();
     assert_eq!(
         got, want,
@@ -119,7 +131,7 @@ fn shader_texture_census() {
     );
 }
 
-/// Every `(program, sampler, grouped|bare)` on the registered surface, sorted.
+/// Every `(program, sampler, slot|bare)` on the registered surface, sorted.
 /// Deduped across projects: the engine set re-registers per project, and the
 /// binding contract is per PROGRAM.
 const EXPECTED: &[(&str, &str, &str)] = &[
@@ -131,9 +143,12 @@ const EXPECTED: &[(&str, &str, &str)] = &[
     ("color_grade_frag", "scene_tex", "bare"),
     ("depth_visualize_frag", "uTexture", "bare"),
     ("entity_id_debug_frag", "id_buffer", "bare"),
-    ("grass_vert+grass_frag", "mask_tex", "slot"),
-    ("grass_vert+grass_frag", "shadowmap_tex", "slot"),
-    ("grass_vert+grass_frag", "uTexture", "slot"),
+    ("glyph_window", "core_tex", "bare"),
+    ("glyph_window", "mask_tex", "bare"),
+    ("grain_frag", "scene_tex", "bare"),
+    ("grass_vert+grass_frag", "mask_tex", "slot 1"),
+    ("grass_vert+grass_frag", "shadowmap_tex", "slot 2"),
+    ("grass_vert+grass_frag", "uTexture", "slot 0"),
     ("heat_shimmer_frag", "scene_tex", "bare"),
     ("nonfinite_frag", "src_tex", "bare"),
     ("outline_detect_vert+outline_detect_frag", "target_mask", "bare"),
@@ -151,14 +166,13 @@ const EXPECTED: &[(&str, &str, &str)] = &[
     ("ui_vert+ui_dissolve_frag", "uTexture", "bare"),
 ];
 
-/// Mutation control for the OMITTED-PROJECT defect: the first census never
-/// looked in `logo/`, and `programs > 0` was happy. `ui_dissolve` is mag's, so
-/// dropping mag must lose rows the full sweep has.
+/// Dropping a project with unique shader registrations must lose rows.
 #[test]
 #[ignore = "analysis artifact for the @textures port, not a gate"]
 fn census_omitting_a_project_loses_rows() {
     let full = census_over(PROJECTS);
-    let partial = census_over(&["bitgun", "games/testbed"]);
+    let without_logo: Vec<&str> = PROJECTS.iter().copied().filter(|p| *p != "logo").collect();
+    let partial = census_over(&without_logo);
     assert!(
         partial.len() < full.len(),
         "dropping projects must shrink the surface, else the sweep is not \
@@ -167,33 +181,30 @@ fn census_omitting_a_project_loses_rows() {
         partial.len()
     );
     assert!(
-        full.iter().any(|(p, _, _)| p.starts_with("ui_vert")),
-        "the full sweep must see mag-only programs"
+        full.iter().any(|(p, _, _)| p == "glyph_window"),
+        "the full sweep must see logo's live glyph shader"
     );
 }
 
-/// Mutation control for the OMITTED-SAMPLER-KIND defect: matching on the first
-/// token drops `isampler2D` (and any precision-qualified ES declaration). Those
-/// are outline_detect's two and entity_id_debug's one.
+/// Matching only a first-token `sampler2D` drops integer and precision-qualified
+/// sampler declarations.
 #[test]
 #[ignore = "analysis artifact for the @textures port, not a gate"]
 fn a_first_token_type_match_would_drop_the_integer_samplers() {
     let src = "uniform isampler2D visible_id;\nuniform highp sampler2D scene_tex;\n";
     assert_eq!(declared_samplers(src), vec!["visible_id", "scene_tex"]);
 
-    // The old, broken form, kept HERE so its blindness is demonstrated rather
-    // than described.
+    // First-token matching cannot recognize another sampler type or a qualifier.
     let first_token_only: Vec<String> = src
         .lines()
         .filter_map(|l| l.trim().strip_prefix("uniform "))
         .filter_map(|r| r.split_once(char::is_whitespace))
-        .filter(|(ty, _)| ty.contains("sampler"))
+        .filter(|(ty, _)| *ty == "sampler2D")
         .map(|(_, n)| n.trim().trim_end_matches(';').to_string())
         .collect();
     assert_eq!(
         first_token_only,
-        vec!["visible_id"],
-        "the old form must miss the qualified declaration -- if it does not, \
-         this control no longer demonstrates the defect it exists for"
+        Vec::<String>::new(),
+        "first-token sampler2D matching must miss both declarations"
     );
 }
