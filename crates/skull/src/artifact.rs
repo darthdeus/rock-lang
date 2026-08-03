@@ -1,51 +1,46 @@
-//! A target's ARTIFACT VIEW of the one shared instance graph
+//! A target's ARTIFACT VIEW of the shared instance graph
 //! (`docs/monomorphization-plan.md` S 9, S 11).
 //!
-//! The shared [`InstanceGraph`] is target-NEUTRAL: it holds every logical
-//! instance any target could reach, including declarations only another target
-//! can emit. An artifact view is one target's REALIZATION of it -- which
-//! declarations it retains, how each foreign body is actually supplied, which
-//! opaque dependency resolves to which declaration, and what it spells each
-//! retained instance.
+//! An artifact view is one target's REALIZATION of a graph it did not build:
+//! which instances it REACHES, how each is supplied, which opaque dependency
+//! resolves to which callee, and what it spells each retained instance.
 //!
 //! **It may DROP and it may REJECT; it may never DISCOVER.** [`realize`] takes
 //! `&InstanceGraph`, so it cannot rebuild or extend what it measures -- plan
 //! S 20g.1 asks whether logical identity survives realization differing, and a
 //! view that invented an instance would be answering its own question.
 //!
-//! Four decisions are ONE decision, which is why they land together:
+//! **It is a REACHABLE view, not a declaration filter.** Retention is a walk
+//! from the artifact's own roots over the graph's recorded call sites, so a
+//! declaration this target could compile but nothing here calls is
+//! [`Exclusion::Unreachable`], not retained. And a retained caller whose
+//! concrete callee is unrealizable is a [`Severed`] call -- the diagnostic a
+//! filter cannot produce at all, because a filter never looks at an edge.
 //!
-//! 1. **Retention reads the DECLARATION, never a symbol.**
-//!    [`InstanceGraph::boundaries`] is keyed by mangled symbol, so two
-//!    `@nomangle` backend siblings (`__nb_checked_index` in `unified.rock` and
-//!    in `js.rock`) collapse into one entry and one silently answers for the
-//!    other. Both are `@nomangle`, so both are emission roots, so both are
-//!    instances of the Lua graph. The artifact asks
-//!    [`instance_graph::serves`] of the declaration each instance names.
-//! 2. **Intrinsic availability comes from the artifact's OWN native mapping**
-//!    ([`ArtifactMappings`]), never from a compatible `FnBackend` and never
-//!    from the presence of a Rock body. `@native_required` skips the portable
-//!    rung by definition (`skull_mir::intrinsics`), so "it has a fallback" is
-//!    the answer that marker exists to refuse.
-//! 3. **Opaque dependencies resolve HERE**, because the declaration serving a
-//!    runtime-entry name differs by target. The graph records names; the
-//!    artifact turns each into a declaration it retains, or a rejection.
-//! 4. **One symbol per `(artifact, instance)`, injective over what the artifact
-//!    retains.** `InstanceGraph::logical_symbol` tests the ENCODER, which is
-//!    injective over its own input; it cannot answer for an artifact holding
-//!    two declarations that encode alike. Retention is what makes the artifact
-//!    table injective, which is why (1) and (4) are not separable.
+//! **The graph must be built FOR this artifact.** `build_for_target` selects
+//! backend variants and resolves callees per target, so filtering a Lua graph
+//! for a JS artifact would answer JS's question with Lua's edges. `realize`
+//! records [`ArtifactCensus::graph_mismatch`] rather than trusting the caller;
+//! it is a defect, not a tolerated approximation.
+//!
+//! **Identity across artifacts is the shared [`Instance`], NOT the spelling.**
+//! Plan S 0h: `InstanceId` is target-neutral and the ARTIFACT owns the emitted
+//! spelling, one symbol per `(artifact, instance)`. Two artifacts may legally
+//! spell one instance differently, so this module asserts totality and
+//! injectivity INSIDE each artifact and leaves cross-artifact comparison to the
+//! `Instance`. The default [`SymbolPlanner`] happens to be target-neutral;
+//! the renaming planner in `artifact_view` exists so that fact cannot be
+//! mistaken for a requirement.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use bone_semantic::hir::{FnBackend, Function};
 use bone_semantic::inference::Workspace;
 use skull_mir::intrinsics::{self, IntrinsicTable};
 use skull_mir::mir::FuncRef;
 
-use crate::instance_graph::{
-    self, BoundaryClass, DeclKey, Instance, InstanceGraph,
-};
+use crate::concrete_body::{BoundaryId, Callee};
+use crate::instance_graph::{self, BoundaryClass, DeclKey, Instance, InstanceGraph, Site, SiteOutcome};
 use crate::target_projection::{supports, ExecutionTargetSpec};
 
 /// Where an artifact's NATIVE MAPPING for an `@intrinsic` fn comes from.
@@ -94,6 +89,68 @@ impl<'a> ArtifactMappings<'a> {
     }
 }
 
+/// What an artifact SPELLS an instance.
+///
+/// A seam, not indirection for its own sake: plan S 0h puts the emitted
+/// spelling under the artifact, so "every artifact spells this instance alike"
+/// is a property of the default planner and not of the model. A test planner
+/// that renames deliberately is what keeps the two apart.
+pub trait SymbolPlanner {
+    fn symbol(&self, ws: &Workspace, g: &InstanceGraph, i: &Instance) -> String;
+    fn describe(&self) -> &'static str;
+}
+
+/// The default: today's logical encoder (`spec_fn_name`), which is
+/// target-neutral. Injective over the instances it is given, which is exactly
+/// what it CANNOT answer for an artifact holding two declarations that encode
+/// alike -- hence the per-artifact collision check.
+pub struct LogicalSymbols;
+
+impl SymbolPlanner for LogicalSymbols {
+    fn symbol(&self, ws: &Workspace, g: &InstanceGraph, i: &Instance) -> String {
+        g.logical_symbol(ws, i)
+    }
+    fn describe(&self) -> &'static str {
+        "logical"
+    }
+}
+
+/// Everything one artifact view is taken through.
+pub struct ArtifactRequest<'a> {
+    pub spec: ExecutionTargetSpec,
+    pub mappings: ArtifactMappings<'a>,
+    /// The artifact's emission roots. Plan S 11: "the target may change roots",
+    /// so they are an INPUT, never re-derived here from the graph's contents.
+    pub roots: &'a [FuncRef],
+    pub symbols: &'a dyn SymbolPlanner,
+}
+
+impl<'a> ArtifactRequest<'a> {
+    /// The default request for `spec`: its own backend's mapping, no table, and
+    /// the logical spelling.
+    pub fn new(spec: ExecutionTargetSpec, roots: &'a [FuncRef]) -> Self {
+        Self {
+            mappings: match spec.backend {
+                Some(b) => ArtifactMappings::for_backend(b),
+                None => ArtifactMappings::none(),
+            },
+            spec,
+            roots,
+            symbols: &LogicalSymbols,
+        }
+    }
+
+    pub fn with_mappings(mut self, m: ArtifactMappings<'a>) -> Self {
+        self.mappings = m;
+        self
+    }
+
+    pub fn with_symbols(mut self, p: &'a dyn SymbolPlanner) -> Self {
+        self.symbols = p;
+        self
+    }
+}
+
 /// How this artifact actually supplies a retained declaration. Plan S 10's
 /// body-kind taxonomy, resolved rather than declared: the same `@intrinsic`
 /// declaration is [`Self::NativeMapping`] on one artifact and
@@ -122,6 +179,19 @@ impl Realization {
             Self::NativeMapping => "native-mapping",
             Self::PortableFallback => "portable-fallback",
             Self::CompileTimeExpansion => "compile-time-expansion",
+        }
+    }
+
+    /// The boundary class this realization is, when it is one. A `Rock`
+    /// callee has none; a foreign or erased one does, and its class is part of
+    /// the [`BoundaryId`] a dependency must terminate in.
+    pub fn boundary_class(self) -> Option<BoundaryClass> {
+        match self {
+            Self::ForeignBody(c) => Some(c),
+            Self::NativeMapping | Self::CompileTimeExpansion => {
+                Some(BoundaryClass::Intrinsic)
+            }
+            Self::RockBody | Self::PortableFallback => None,
         }
     }
 }
@@ -154,28 +224,62 @@ impl Unrealizable {
     }
 }
 
-/// A declaration the shared graph holds and this artifact cannot realize.
+/// Why an instance the shared graph holds is not in this artifact. The two are
+/// different findings: an unrealizable declaration is a REJECTION the artifact
+/// would have to report if anything called it, while an unreachable one is
+/// simply not this artifact's program.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum Exclusion {
+    Unrealizable(Unrealizable),
+    /// Realizable here, but no root of this artifact reaches it.
+    Unreachable,
+}
+
+impl Exclusion {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Unrealizable(u) => u.label(),
+            Self::Unreachable => "unreachable",
+        }
+    }
+}
+
+/// An instance the shared graph holds and this artifact does not.
 #[derive(Clone, Debug)]
 pub struct Excluded {
     pub instance: Instance,
+    pub cause: Exclusion,
+}
+
+/// A call from a RETAINED instance whose concrete callee this artifact cannot
+/// realize. The diagnostic a declaration filter structurally cannot produce:
+/// the caller survives, so emission would emit a call to a body that is not in
+/// the artifact.
+#[derive(Clone, Debug)]
+pub struct Severed {
+    pub caller: Instance,
+    pub site: Site,
+    pub callee: Instance,
     pub cause: Unrealizable,
 }
 
-/// One opaque-body dependency, resolved to a declaration in THIS artifact.
+/// One opaque-body dependency, terminating in a concrete callee.
 #[derive(Clone, Debug)]
 pub struct InlineDep {
     /// The opaque body that names it.
     pub owner: FuncRef,
     pub entry: &'static str,
-    /// The declaration serving `entry` on this artifact.
-    pub target: FuncRef,
-    /// The artifact's spelling of `target` -- what emission must produce.
-    pub symbol: String,
+    /// [`Callee::Boundary`] for a runtime entry, [`Callee::Rock`] for a
+    /// declaration this artifact lowers. Never a bare `FuncRef`: that loses the
+    /// boundary class and cannot name WHICH instance when a declaration has
+    /// more than one.
+    pub callee: Callee,
 }
 
-/// An opaque-body dependency this artifact cannot resolve. A located rejection:
-/// the owner is retained and its text calls a name nothing here supplies, so
-/// emission would produce a call to a symbol that does not exist.
+/// An opaque-body dependency this artifact cannot resolve to one callee. A
+/// located rejection: the owner is retained and its text calls a name nothing
+/// here supplies (or supplies twice over), so emission would produce a call to
+/// a symbol that does not exist or cannot be chosen.
 #[derive(Clone, Debug)]
 pub struct UnresolvedInlineDep {
     pub owner: FuncRef,
@@ -192,20 +296,29 @@ pub struct SymbolCollision {
 
 #[derive(Clone, Debug, Default)]
 pub struct ArtifactCensus {
-    /// Instances retained, and the shared-graph population they came from.
+    /// Instances retained, the roots they were reached from, and the shared
+    /// population they were taken from.
     pub instances: usize,
+    pub roots: usize,
     pub shared_instances: usize,
     pub excluded: usize,
     pub excluded_by_cause: BTreeMap<&'static str, usize>,
     pub realized_by_kind: BTreeMap<&'static str, usize>,
+    /// Call sites traversed by the reachability walk -- the denominator for
+    /// `severed`. Zero sites walked and zero severed calls are the same number.
+    pub sites_walked: usize,
+    pub severed: usize,
+    pub severed_by_cause: BTreeMap<&'static str, usize>,
     pub symbols: usize,
     pub symbol_collisions: usize,
-    /// Dependencies examined, and how many named no declaration here.
+    /// Dependencies examined, and how many named no single callee here.
     pub inline_deps_examined: usize,
     pub inline_deps_unresolved: usize,
-    /// Resolved dependencies whose target the artifact does NOT retain. Must be
-    /// 0: emission would name a symbol this artifact never emits.
-    pub inline_deps_outside: usize,
+    pub inline_deps_boundary: usize,
+    pub inline_deps_rock: usize,
+    /// Non-zero is a DEFECT: the artifact was handed a graph built for another
+    /// target, whose variant selection answers a different question.
+    pub graph_mismatch: bool,
     /// Deferred obligations, carried from the target spec.
     pub deferred: Vec<&'static str>,
 }
@@ -213,13 +326,22 @@ pub struct ArtifactCensus {
 /// One target's realization of a graph it did not build.
 pub struct ArtifactView {
     pub spec: ExecutionTargetSpec,
-    /// Retained instances. A SUBSET of `g.instances`, asserted rather than
-    /// assumed -- see `realization_never_invents_an_instance`.
+    /// The target the GRAPH was built for. Must serve `spec.backend`.
+    pub graph_target: FnBackend,
+    pub graph_mismatch: bool,
+    /// The artifact's root instances -- realizable emission roots, plus the
+    /// callees of always-emitted bodies, which have no incoming edge.
+    pub roots: BTreeSet<Instance>,
+    /// Retained instances: reachable from `roots` AND realizable here. A SUBSET
+    /// of `g.instances`.
     pub instances: BTreeSet<Instance>,
     /// How each retained instance is supplied here.
     pub realization: BTreeMap<Instance, Realization>,
     pub excluded: Vec<Excluded>,
-    /// One symbol per retained instance. Total and injective.
+    pub severed: Vec<Severed>,
+    pub sites_walked: usize,
+    /// One symbol per retained instance. Total and injective WITHIN this
+    /// artifact; nothing here claims another artifact spells it the same.
     pub symbols: BTreeMap<Instance, String>,
     pub symbol_collisions: Vec<SymbolCollision>,
     pub inline_deps: Vec<InlineDep>,
@@ -233,17 +355,26 @@ impl ArtifactView {
     pub fn census(&self) -> ArtifactCensus {
         let mut c = ArtifactCensus {
             instances: self.instances.len(),
+            roots: self.roots.len(),
             shared_instances: self.shared_instances,
             excluded: self.excluded.len(),
+            sites_walked: self.sites_walked,
+            severed: self.severed.len(),
             symbols: self.symbols.len(),
             symbol_collisions: self.symbol_collisions.len(),
             inline_deps_examined: self.inline_deps.len() + self.unresolved_inline_deps.len(),
             inline_deps_unresolved: self.unresolved_inline_deps.len(),
-            inline_deps_outside: self
+            inline_deps_boundary: self
                 .inline_deps
                 .iter()
-                .filter(|d| !self.instances.iter().any(|i| i.func == d.target))
+                .filter(|d| matches!(d.callee, Callee::Boundary(_)))
                 .count(),
+            inline_deps_rock: self
+                .inline_deps
+                .iter()
+                .filter(|d| matches!(d.callee, Callee::Rock(_)))
+                .count(),
+            graph_mismatch: self.graph_mismatch,
             deferred: self.deferred.clone(),
             ..Default::default()
         };
@@ -252,6 +383,9 @@ impl ArtifactView {
         }
         for r in self.realization.values() {
             *c.realized_by_kind.entry(r.label()).or_insert(0) += 1;
+        }
+        for s in &self.severed {
+            *c.severed_by_cause.entry(s.cause.label()).or_insert(0) += 1;
         }
         c
     }
@@ -283,12 +417,25 @@ impl ArtifactView {
             .collect()
     }
 
+    pub fn render_severed(&self, ws: &Workspace, g: &InstanceGraph) -> Vec<String> {
+        self.severed
+            .iter()
+            .map(|s| {
+                format!(
+                    "{} {} -> {} ({})",
+                    g.identity(ws, &s.caller),
+                    s.site.op.name(),
+                    g.identity(ws, &s.callee),
+                    s.cause.label()
+                )
+            })
+            .collect()
+    }
+
     pub fn render_excluded(&self, ws: &Workspace, g: &InstanceGraph) -> Vec<String> {
         self.excluded
             .iter()
-            .map(|e| {
-                format!("{} -- {}", g.identity(ws, &e.instance), e.cause.label())
-            })
+            .map(|e| format!("{} -- {}", g.identity(ws, &e.instance), e.cause.label()))
             .collect()
     }
 }
@@ -393,36 +540,105 @@ fn has_rock_body(ws: &Workspace, decl: FuncRef) -> bool {
         .contains_key(&bone_semantic::hir::BodyOwner::Function(decl.func))
 }
 
-/// Realize `g` for `spec`. Read-only in the type system, not just by
-/// convention: `g` is `&`, so no discovery can happen here.
-pub fn realize(
-    ws: &Workspace,
-    g: &InstanceGraph,
-    spec: ExecutionTargetSpec,
-    mappings: ArtifactMappings<'_>,
-) -> ArtifactView {
-    let mut instances = BTreeSet::new();
-    let mut realization = BTreeMap::new();
-    let mut excluded = Vec::new();
+/// Realize `g` for `req`. Read-only in the type system, not just by convention:
+/// `g` is `&`, so no discovery can happen here.
+///
+/// `g` must have been built FOR this artifact (`build_for_target`), because the
+/// walk resolves each callee through that target's `backend_variant`. A
+/// mismatch is recorded rather than silently tolerated.
+pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> ArtifactView {
+    let spec = req.spec;
+    // A target with no `FnBackend` of its own is walked as `Any` -- the union
+    // graph, which selects no variant at all -- and then filtered to portable
+    // declarations. Stated rather than defaulted: `Any` is not "this target",
+    // it is "no variant selection happened".
+    let want = spec.backend.unwrap_or(FnBackend::Any);
+    let graph_mismatch = g.target != want;
+
+    // Realizability of every instance the graph holds, computed once. It is a
+    // property of the DECLARATION and the artifact, independent of reachability.
+    let mut realizable: BTreeMap<Instance, Result<Realization, Unrealizable>> = BTreeMap::new();
     for i in &g.instances {
         let f = &ws.module(i.func.module).functions[i.func.func];
-        match realize_decl(ws, i.func, f, &g.erased_entries, &spec, &mappings) {
-            Ok(r) => {
-                instances.insert(i.clone());
-                realization.insert(i.clone(), r);
-            }
-            Err(cause) => excluded.push(Excluded { instance: i.clone(), cause }),
+        realizable.insert(
+            i.clone(),
+            realize_decl(ws, i.func, f, &g.erased_entries, &spec, &req.mappings),
+        );
+    }
+
+    // The artifact's ROOTS: its emission roots that are realizable here, plus
+    // the callees of always-emitted bodies, which carry no incoming edge and
+    // would otherwise read as unreachable.
+    let root_decls: BTreeSet<DeclKey> = req.roots.iter().map(|r| DeclKey(*r)).collect();
+    let mut roots: BTreeSet<Instance> = BTreeSet::new();
+    for i in &g.instances {
+        let is_root = root_decls.contains(&DeclKey(i.func))
+            || g.always_emitted_targets.contains(i);
+        if is_root && realizable[i].is_ok() {
+            roots.insert(i.clone());
         }
     }
 
-    // One symbol per retained instance, from the logical encoder. The artifact
-    // OWNS the spelling (plan S 0h), and today's spelling is the encoder's;
-    // what is new is that injectivity is asserted over the ARTIFACT's set,
-    // which the encoder cannot answer for on its own.
+    // Reachability over the walk's OWN record of what each site resolved to.
+    // Not over `g.edges`: an edge says two instances are related, a site says
+    // WHICH operation related them, which is what a severed call has to name.
+    let mut instances: BTreeSet<Instance> = BTreeSet::new();
+    let mut severed: Vec<Severed> = Vec::new();
+    let mut sites_walked = 0usize;
+    let mut queue: VecDeque<Instance> = roots.iter().cloned().collect();
+    for r in &roots {
+        instances.insert(r.clone());
+    }
+    while let Some(caller) = queue.pop_front() {
+        let Some(sites) = g.call_sites.get(&caller) else { continue };
+        for (site, rec) in sites {
+            sites_walked += 1;
+            let SiteOutcome::Resolved(callee) = &rec.outcome else { continue };
+            match realizable.get(callee) {
+                Some(Ok(_)) => {
+                    if instances.insert(callee.clone()) {
+                        queue.push_back(callee.clone());
+                    }
+                }
+                Some(Err(cause)) => severed.push(Severed {
+                    caller: caller.clone(),
+                    site: site.clone(),
+                    callee: callee.clone(),
+                    cause: *cause,
+                }),
+                // The walk resolved a callee the graph does not hold. Already a
+                // `ConcreteBody` finding (`unknown_rock_callees`); nothing to
+                // realize here.
+                None => {}
+            }
+        }
+    }
+
+    let realization: BTreeMap<Instance, Realization> = instances
+        .iter()
+        .map(|i| (i.clone(), *realizable[i].as_ref().expect("retained means realizable")))
+        .collect();
+
+    // The partition: every shared instance is retained, unrealizable, or
+    // unreachable. Reported as a partition so a lost instance cannot hide.
+    let excluded: Vec<Excluded> = g
+        .instances
+        .iter()
+        .filter(|i| !instances.contains(*i))
+        .map(|i| Excluded {
+            instance: i.clone(),
+            cause: match realizable[i] {
+                Ok(_) => Exclusion::Unreachable,
+                Err(u) => Exclusion::Unrealizable(u),
+            },
+        })
+        .collect();
+
+    // One symbol per retained instance, from THIS artifact's planner.
     let mut by_symbol: BTreeMap<String, Vec<Instance>> = BTreeMap::new();
     let mut symbols = BTreeMap::new();
     for i in &instances {
-        let s = g.logical_symbol(ws, i);
+        let s = req.symbols.symbol(ws, g, i);
         by_symbol.entry(s.clone()).or_default().push(i.clone());
         symbols.insert(i.clone(), s);
     }
@@ -432,11 +648,10 @@ pub fn realize(
         .map(|(symbol, instances)| SymbolCollision { symbol, instances })
         .collect();
 
-    // Opaque dependencies, resolved to declarations THIS artifact retains.
+    // Opaque dependencies, terminating in a concrete callee of THIS artifact.
     let mut inline_deps = Vec::new();
     let mut unresolved_inline_deps = Vec::new();
-    let retained_decls: BTreeSet<DeclKey> =
-        instances.iter().map(|i| DeclKey(i.func)).collect();
+    let retained_decls: BTreeSet<DeclKey> = instances.iter().map(|i| DeclKey(i.func)).collect();
     for (owner, entries) in &g.inline_body_deps {
         // An owner this artifact dropped carries no obligation: its text is
         // never emitted here.
@@ -444,8 +659,7 @@ pub fn realize(
             continue;
         }
         for entry in entries {
-            let backend = spec.backend.unwrap_or(FnBackend::Any);
-            let Some(target) = instance_graph::stdlib_entry(ws, entry, backend) else {
+            let Some(target) = instance_graph::stdlib_entry(ws, entry, want) else {
                 unresolved_inline_deps.push(UnresolvedInlineDep {
                     owner: owner.0,
                     entry,
@@ -453,29 +667,49 @@ pub fn realize(
                 });
                 continue;
             };
-            let Some(symbol) = instances
-                .iter()
-                .find(|i| i.func == target)
-                .map(|i| symbols[i].clone())
-            else {
+            // WHICH instance, not merely which declaration. A runtime entry is
+            // non-generic so one instance is expected, but picking the first of
+            // several would silently choose.
+            let matching: Vec<&Instance> =
+                instances.iter().filter(|i| i.func == target).collect();
+            let [inst] = matching.as_slice() else {
                 unresolved_inline_deps.push(UnresolvedInlineDep {
                     owner: owner.0,
                     entry,
-                    reason: "the serving declaration is not retained by the artifact",
+                    reason: if matching.is_empty() {
+                        "the serving declaration is not retained by the artifact"
+                    } else {
+                        "the serving declaration has more than one retained instance"
+                    },
                 });
                 continue;
             };
-            inline_deps.push(InlineDep { owner: owner.0, entry, target, symbol });
+            let inst = (*inst).clone();
+            let callee = match realization[&inst].boundary_class() {
+                Some(class) => Callee::Boundary(BoundaryId {
+                    declaration: target,
+                    class,
+                    target: want,
+                    symbol: symbols[&inst].clone(),
+                }),
+                None => Callee::Rock(inst),
+            };
+            inline_deps.push(InlineDep { owner: owner.0, entry, callee });
         }
     }
 
     ArtifactView {
+        graph_target: g.target,
+        graph_mismatch,
         shared_instances: g.instances.len(),
         deferred: crate::target_projection::deferred_for(&spec),
         spec,
+        roots,
         instances,
         realization,
         excluded,
+        severed,
+        sites_walked,
         symbols,
         symbol_collisions,
         inline_deps,

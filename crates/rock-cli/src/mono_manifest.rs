@@ -31,7 +31,12 @@ struct ArtifactTotals {
     symbol_collisions: usize,
     inline_deps_examined: usize,
     inline_deps_unresolved: usize,
-    inline_deps_outside: usize,
+    inline_deps_boundary: usize,
+    inline_deps_rock: usize,
+    roots: usize,
+    sites_walked: usize,
+    severed: usize,
+    severed_by_cause: BTreeMap<&'static str, usize>,
     deferred: Vec<&'static str>,
 }
 
@@ -156,7 +161,10 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     let mut art_dep_examples: Vec<String> = Vec::new();
     let mut art_shared_pairs = 0usize;
     let mut art_spelling_conflicts = 0usize;
+    let mut art_spelling_agreements = 0usize;
     let mut art_shared_collisions = 0usize;
+    let mut art_graph_mismatches = 0usize;
+    let mut art_severed_examples: Vec<String> = Vec::new();
 
     for dir in &projects {
         let name = dir.strip_prefix(&root).unwrap_or(dir).display().to_string();
@@ -327,7 +335,14 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
                 art_invented += p.artifact_invented;
                 art_shared_pairs += p.artifact_shared_pairs;
                 art_spelling_conflicts += p.artifact_spelling_conflicts;
+                art_spelling_agreements += p.artifact_spelling_agreements;
                 art_shared_collisions += p.shared_symbol_collisions;
+                art_graph_mismatches += p.artifact_graph_mismatches;
+                for x in p.artifact_severed_examples {
+                    if art_severed_examples.len() < 10 {
+                        art_severed_examples.push(x);
+                    }
+                }
                 for x in p.artifact_symbol_examples {
                     if art_symbol_examples.len() < 10 {
                         art_symbol_examples.push(x);
@@ -350,7 +365,12 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
                         symbol_collisions: 0,
                         inline_deps_examined: 0,
                         inline_deps_unresolved: 0,
-                        inline_deps_outside: 0,
+                        inline_deps_boundary: 0,
+                        inline_deps_rock: 0,
+                        roots: 0,
+                        sites_walked: 0,
+                        severed: 0,
+                        severed_by_cause: BTreeMap::new(),
                         deferred: c.deferred.clone(),
                     });
                     e.instances += c.instances;
@@ -359,7 +379,14 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
                     e.symbol_collisions += c.symbol_collisions;
                     e.inline_deps_examined += c.inline_deps_examined;
                     e.inline_deps_unresolved += c.inline_deps_unresolved;
-                    e.inline_deps_outside += c.inline_deps_outside;
+                    e.inline_deps_boundary += c.inline_deps_boundary;
+                    e.inline_deps_rock += c.inline_deps_rock;
+                    e.roots += c.roots;
+                    e.sites_walked += c.sites_walked;
+                    e.severed += c.severed;
+                    for (k, v) in &c.severed_by_cause {
+                        *e.severed_by_cause.entry(*k).or_insert(0) += v;
+                    }
                     for (k, v) in &c.excluded_by_cause {
                         *e.excluded_by_cause.entry(*k).or_insert(0) += v;
                     }
@@ -888,19 +915,24 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
 
     println!("## artifact views (plan S 9, S 11)");
     println!();
-    println!("Each target's REALIZATION of the one shared graph: which declarations it");
-    println!("retains, how each is supplied, and what it spells them. A view may drop and it");
-    println!("may reject; it may never DISCOVER, which is the `invented` column.");
+    println!("Each target's REALIZATION of a graph BUILT FOR IT: which instances it reaches");
+    println!("from its own roots, how each is supplied, and what it spells them. Retention is");
+    println!("a WALK, not a declaration filter -- `unreachable` and the unrealizable causes");
+    println!("are separate populations, and a retained caller whose callee is unrealizable is");
+    println!("a SEVERED call, which a filter cannot produce because it never reads an edge.");
     println!();
     println!(
-        "| artifact | retained / shared | excluded | symbol collisions | inline deps unres./exam. |"
+        "| artifact | retained / shared | roots | sites walked | severed | excluded | symbol collisions | deps unres./exam. |"
     );
-    println!("|---|---:|---:|---:|---:|");
+    println!("|---|---:|---:|---:|---:|---:|---:|---:|");
     for (name, a) in &art_rows {
         println!(
-            "| `{name}` | {}/{} | {} | {} | {}/{} |",
+            "| `{name}` | {}/{} | {} | {} | {} | {} | {} | {}/{} |",
             a.instances,
             a.shared,
+            a.roots,
+            a.sites_walked,
+            a.severed,
             a.excluded,
             a.symbol_collisions,
             a.inline_deps_unresolved,
@@ -909,27 +941,48 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     }
     println!();
     println!(
-        "- instances an artifact realized that the shared graph does NOT hold \
+        "- instances an artifact realized that ITS OWN graph does NOT hold \
          (must be 0): **{art_invented}**"
     );
     println!(
-        "- resolved inline-body dependencies whose target the artifact does not retain \
-         (must be 0): **{}**",
-        art_rows.values().map(|a| a.inline_deps_outside).sum::<usize>()
+        "- views handed a graph built for another target (must be 0): \
+         **{art_graph_mismatches}**"
+    );
+    println!(
+        "- inline-body dependencies terminating in a `Callee::Boundary` / \
+         `Callee::Rock`: **{}** / **{}**",
+        art_rows.values().map(|a| a.inline_deps_boundary).sum::<usize>(),
+        art_rows.values().map(|a| a.inline_deps_rock).sum::<usize>()
     );
     println!();
-    println!("**Identity across artifacts** (plan S 20g.1), over the SHARED population");
-    println!("rather than over a digest of `g` -- every artifact reads the same graph, so a");
-    println!("digest of it would agree even if realization were inert:");
+    println!("**Identity across artifacts** (plan S 20g.1) is the shared `Instance`, NOT the");
+    println!("spelling: plan S 0h puts the emitted spelling under the ARTIFACT, one symbol per");
+    println!("`(artifact, instance)`, and two artifacts may legally spell one instance");
+    println!("differently. Totality and injectivity are asserted INSIDE each artifact; what");
+    println!("is compared across them is the instance.");
     println!();
     println!(
         "- `(artifact, artifact, instance)` triples where BOTH artifacts retain the \
          instance: **{art_shared_pairs}**"
     );
     println!(
-        "- ...of those, spelled DIFFERENTLY by the two artifacts (must be 0): \
-         **{art_spelling_conflicts}**"
+        "- ...of those, spelled the same by both / spelled DIFFERENTLY: **{}** / \
+         **{art_spelling_conflicts}**",
+        art_spelling_agreements
     );
+    println!(
+        "  Neither number is a pass or a fail. The default planner is target-neutral, so"
+    );
+    println!(
+        "  these four artifacts agree; a renaming planner would make the second number the"
+    );
+    println!(
+        "  whole population and change nothing about identity."
+    );
+    println!(
+        "  `artifact_view::cross_artifact_identity_is_the_instance_and_not_the_spelling`"
+    );
+    println!("  uses one, so this agreement cannot be mistaken for the property.");
     println!();
     for (name, a) in &art_rows {
         println!("`{name}` realizes:");
@@ -971,6 +1024,18 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
              `an_artifact_symbol_is_total_and_injective_over_what_it_retains`",
         ),
         (
+            "unreachable",
+            art_rows
+                .values()
+                .map(|a| a.excluded_by_cause.get("unreachable").copied().unwrap_or(0))
+                .sum(),
+            "production's root predicate makes every non-library declaration an \
+             emission root, so nothing REALIZABLE is unreachable under it -- the \
+             population exists only when an artifact narrows its roots, which plan \
+             S 11 permits. Fixture: \
+             `retention_is_reachability_not_a_declaration_filter`",
+        ),
+        (
             "unresolved inline deps",
             art_rows.values().map(|a| a.inline_deps_unresolved).sum(),
             "measured over 26 examined dependencies on luajit and 0 on the other \
@@ -997,7 +1062,13 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     for x in &art_dep_examples {
         println!("- unresolved dependency: {x}");
     }
-    if !art_symbol_examples.is_empty() || !art_dep_examples.is_empty() {
+    for x in &art_severed_examples {
+        println!("- severed call: {x}");
+    }
+    if !art_symbol_examples.is_empty()
+        || !art_dep_examples.is_empty()
+        || !art_severed_examples.is_empty()
+    {
         println!();
     }
 
@@ -1091,11 +1162,15 @@ struct OneProject {
     /// population that can actually witness it.
     artifact_shared_pairs: usize,
     artifact_spelling_conflicts: usize,
+    artifact_spelling_agreements: usize,
     artifact_symbol_examples: Vec<String>,
     artifact_dep_examples: Vec<String>,
     /// Symbols the SHARED graph spells for more than one instance -- the space
     /// each artifact's zero is measured against.
     shared_symbol_collisions: usize,
+    /// Views handed a graph built for another target. Must be 0.
+    artifact_graph_mismatches: usize,
+    artifact_severed_examples: Vec<String>,
 }
 
 /// A span's file, relative to the analyzed root. An absolute path varies by
@@ -1135,7 +1210,7 @@ fn one_project(
     // only because nothing differed cannot read as the property holding.
     let js = instance_graph::build_for_target(
         &ws,
-        roots,
+        roots.clone(),
         false,
         bone_semantic::hir::FnBackend::Js,
     );
@@ -1233,57 +1308,117 @@ fn one_project(
     let js_boundaries_invalid =
         js.boundaries.values().filter(|b| b.invalid_on_target).count();
 
-    // Artifact views: one built graph, four realizations. `realize` takes `&g`,
-    // so it structurally cannot discover -- `artifact_invented` asserts the
-    // consequence rather than trusting the signature.
+    // Artifact views. Each realizes a graph built FOR ITS OWN TARGET:
+    // `build_for_target` resolves every callee through that target's
+    // `backend_variant`, so realizing a Lua graph for the JS artifact would
+    // answer JS's question with Lua's edges. `graph_mismatch` is reported so
+    // this cannot silently regress.
     //
     // The JS artifact gets the REAL backend table. Without it a
     // `@native_required` intrinsic would read as unmapped on JS for the
     // trivial reason that nothing was wired, and the corpus number would be
     // measuring this driver rather than the artifact.
     let js_table = skull_codegen_js::JsIntrinsics;
-    let views: Vec<skull::artifact::ArtifactView> = skull::target_projection::ALL
+    // A target with no `FnBackend` of its own is walked as `Any`: the union
+    // graph, in which no variant selection happened. Stated rather than
+    // defaulted -- `Any` is not "this target", it is "no variant was selected".
+    let any_graph = instance_graph::build_for_target(
+        &ws,
+        roots.clone(),
+        false,
+        bone_semantic::hir::FnBackend::Any,
+    );
+    let artifact_graphs: Vec<(skull::target_projection::ExecutionTargetSpec, &InstanceGraph)> =
+        skull::target_projection::ALL
+            .iter()
+            .map(|spec| {
+                let ag = match spec.backend {
+                    Some(bone_semantic::hir::FnBackend::Js) => &js,
+                    Some(_) => &g,
+                    None => &any_graph,
+                };
+                (*spec, ag)
+            })
+            .collect();
+    let views: Vec<skull::artifact::ArtifactView> = artifact_graphs
         .iter()
-        .map(|spec| {
-            let m = match spec.backend {
-                Some(b @ bone_semantic::hir::FnBackend::Js) => {
-                    skull::artifact::ArtifactMappings::for_backend(b).with_table(&js_table)
-                }
-                Some(b) => skull::artifact::ArtifactMappings::for_backend(b),
-                None => skull::artifact::ArtifactMappings::none(),
+        .map(|(spec, ag)| {
+            let req = skull::artifact::ArtifactRequest::new(*spec, &roots);
+            let req = match spec.backend {
+                Some(b @ bone_semantic::hir::FnBackend::Js) => req.with_mappings(
+                    skull::artifact::ArtifactMappings::for_backend(b).with_table(&js_table),
+                ),
+                _ => req,
             };
-            skull::artifact::realize(&ws, &g, *spec, m)
+            skull::artifact::realize(&ws, ag, &req)
         })
         .collect();
-    let artifact_invented = views
+    // Each view is checked against ITS OWN graph -- checking against `g` would
+    // let a JS-only instance read as "invented" merely because the Lua graph
+    // does not hold it.
+    let artifact_invented: usize = views
         .iter()
-        .map(|v| v.instances.iter().filter(|i| !g.instances.contains(*i)).count())
+        .zip(&artifact_graphs)
+        .map(|(v, (_, ag))| v.instances.iter().filter(|i| !ag.instances.contains(*i)).count())
         .sum();
+    let artifact_graph_mismatches =
+        views.iter().filter(|v| v.census().graph_mismatch).count();
     // Identity across artifacts, over the population that can witness it: an
-    // instance BOTH artifacts retain. Pairs, not a digest of `g`.
+    // instance BOTH artifacts retain.
+    //
+    // Keyed on the CANONICAL identity string, never on `Instance` itself. An
+    // `Instance` holds `MonoTyId`s, which are indices into the graph's OWN
+    // arena; two separately built graphs intern in whatever order their walks
+    // reached types, so comparing raw ids across them compares arena positions.
+    let ident_map = |v: &skull::artifact::ArtifactView, ag: &InstanceGraph| {
+        v.instances
+            .iter()
+            .map(|i| (ag.identity(&ws, i), v.symbols[i].clone()))
+            .collect::<BTreeMap<String, String>>()
+    };
+    let by_artifact: Vec<BTreeMap<String, String>> =
+        views.iter().zip(&artifact_graphs).map(|(v, (_, ag))| ident_map(v, ag)).collect();
     let mut artifact_shared_pairs = 0usize;
     let mut artifact_spelling_conflicts = 0usize;
-    for a in &views {
-        for b in &views {
-            if a.spec.name >= b.spec.name {
-                continue;
+    for (ai, a) in by_artifact.iter().enumerate() {
+        for b in by_artifact.iter().skip(ai + 1) {
+            for id in a.keys() {
+                if b.contains_key(id) {
+                    artifact_shared_pairs += 1;
+                }
             }
-            for i in a.instances.intersection(&b.instances) {
-                artifact_shared_pairs += 1;
-                if a.symbols.get(i) != b.symbols.get(i) {
-                    artifact_spelling_conflicts += 1;
+        }
+    }
+    // The IDENTITY property: a shared identity string is one instance. That is
+    // an equality by construction here -- the map is keyed on it -- so what is
+    // actually reported is the population, and the spelling comparison below is
+    // kept SEPARATE because plan S 0h permits it to differ.
+    let mut artifact_spelling_agreements = 0usize;
+    for (ai, a) in by_artifact.iter().enumerate() {
+        for b in by_artifact.iter().skip(ai + 1) {
+            for (id, sa) in a {
+                if let Some(sb) = b.get(id) {
+                    if sa == sb {
+                        artifact_spelling_agreements += 1;
+                    } else {
+                        artifact_spelling_conflicts += 1;
+                    }
                 }
             }
         }
     }
     let mut artifact_symbol_examples: Vec<String> = Vec::new();
     let mut artifact_dep_examples: Vec<String> = Vec::new();
-    for v in &views {
+    let mut artifact_severed_examples: Vec<String> = Vec::new();
+    for (v, (_, ag)) in views.iter().zip(&artifact_graphs) {
         for x in v.render_symbol_collisions(&ws).into_iter().take(2) {
             artifact_symbol_examples.push(format!("`{}` {x}", v.spec.name));
         }
         for x in v.render_unresolved_inline_deps(&ws).into_iter().take(2) {
             artifact_dep_examples.push(format!("`{}` {x}", v.spec.name));
+        }
+        for x in v.render_severed(&ws, ag).into_iter().take(2) {
+            artifact_severed_examples.push(format!("`{}` {x}", v.spec.name));
         }
     }
     // The CONTRAST for the artifacts' zero: how many symbols the SHARED graph
@@ -1562,9 +1697,12 @@ fn one_project(
         artifact_invented,
         artifact_shared_pairs,
         artifact_spelling_conflicts,
+        artifact_spelling_agreements,
         artifact_symbol_examples,
         artifact_dep_examples,
         shared_symbol_collisions,
+        artifact_graph_mismatches,
+        artifact_severed_examples,
     })
 }
 

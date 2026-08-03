@@ -15,8 +15,9 @@ use std::sync::LazyLock;
 
 use bone_semantic::hir::FnBackend;
 use bone_semantic::inference::Workspace;
-use skull::artifact::{self, ArtifactMappings, Unrealizable};
-use skull::instance_graph::{self, InstanceGraph};
+use skull::artifact::{self, ArtifactMappings, ArtifactRequest, Exclusion, Unrealizable};
+use skull::concrete_body::Callee;
+use skull::instance_graph::{self, Instance, InstanceGraph};
 use skull::target_projection::{JAVASCRIPT, LUAJIT, NATIVE_C64};
 use skull_mir::intrinsics::{Emission, IntrinsicEntry, IntrinsicTable};
 use ustr::Ustr;
@@ -37,9 +38,36 @@ fn check(src: &str) -> Workspace {
     bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass")
 }
 
-fn graph_for(ws: &Workspace, target: FnBackend) -> InstanceGraph {
+/// The graph AND the roots it was built from. An artifact's roots are an input
+/// to `realize` (plan S 11: "the target may change roots"), so a helper that
+/// dropped them would make every view root-less.
+fn graph_for(ws: &Workspace, target: FnBackend) -> (InstanceGraph, Vec<skull_mir::mir::FuncRef>) {
     let roots = instance_graph::emission_roots(ws, None);
-    instance_graph::build_for_target(ws, roots, false, target)
+    (instance_graph::build_for_target(ws, roots.clone(), false, target), roots)
+}
+
+/// The artifact's own graph, built for ITS backend -- not a Lua graph filtered
+/// afterwards. `build_for_target` selects backend variants per target, so
+/// realizing a Lua graph for a JS artifact would answer JS's question with
+/// Lua's edges.
+fn view_of<'a>(
+    ws: &'a Workspace,
+    spec: skull::target_projection::ExecutionTargetSpec,
+) -> (InstanceGraph, Vec<skull_mir::mir::FuncRef>) {
+    graph_for(ws, spec.backend.unwrap_or(FnBackend::Any))
+}
+
+/// A planner that spells everything with a target prefix. It exists so
+/// "both artifacts spell this instance alike" cannot be mistaken for the
+/// identity property: plan S 0h puts the spelling under the ARTIFACT.
+struct Prefixed(&'static str);
+impl artifact::SymbolPlanner for Prefixed {
+    fn symbol(&self, ws: &Workspace, g: &InstanceGraph, i: &Instance) -> String {
+        format!("{}${}", self.0, g.logical_symbol(ws, i))
+    }
+    fn describe(&self) -> &'static str {
+        "prefixed"
+    }
 }
 
 /// A backend table that maps exactly one name -- the stand-in for a real
@@ -71,7 +99,7 @@ impl IntrinsicTable for OneName {
 #[test]
 fn premise_the_shared_graph_keeps_both_backend_siblings() {
     let ws = check("fn main() { let b: NativeBuffer<int> = nb_new(4); let x = b[0] }");
-    let g = graph_for(&ws, FnBackend::Lua);
+    let (g, _) = graph_for(&ws, FnBackend::Lua);
     let backends: Vec<FnBackend> = g
         .instances
         .iter()
@@ -94,8 +122,6 @@ fn premise_the_shared_graph_keeps_both_backend_siblings() {
 #[test]
 fn an_artifact_retains_only_the_sibling_that_serves_it() {
     let ws = check("fn main() { let b: NativeBuffer<int> = nb_new(4); let x = b[0] }");
-    let g = graph_for(&ws, FnBackend::Lua);
-
     let sibling_backends = |view: &artifact::ArtifactView| -> Vec<FnBackend> {
         view.instances
             .iter()
@@ -107,8 +133,12 @@ fn an_artifact_retains_only_the_sibling_that_serves_it() {
             .collect()
     };
 
-    let lua = artifact::realize(&ws, &g, LUAJIT, ArtifactMappings::for_backend(FnBackend::Lua));
-    let js = artifact::realize(&ws, &g, JAVASCRIPT, ArtifactMappings::for_backend(FnBackend::Js));
+    // Each artifact realizes ITS OWN graph.
+    let (lg, lr) = view_of(&ws, LUAJIT);
+    let (jg, jr) = view_of(&ws, JAVASCRIPT);
+    let lua = artifact::realize(&ws, &lg, &ArtifactRequest::new(LUAJIT, &lr));
+    let js = artifact::realize(&ws, &jg, &ArtifactRequest::new(JAVASCRIPT, &jr));
+    assert!(!lua.census().graph_mismatch && !js.census().graph_mismatch);
     assert_eq!(
         sibling_backends(&lua),
         vec![FnBackend::Lua],
@@ -125,7 +155,7 @@ fn an_artifact_retains_only_the_sibling_that_serves_it() {
         lua.excluded.iter().any(|e| {
             ws.module(e.instance.func.module).functions[e.instance.func.func].name.as_str()
                 == "__nb_checked_index"
-                && e.cause == Unrealizable::ForeignToArtifact
+                && e.cause == Exclusion::Unrealizable(Unrealizable::ForeignToArtifact)
         }),
         "the dropped sibling has no recorded cause: {:?}",
         lua.census().excluded_by_cause
@@ -149,7 +179,7 @@ fn main() { let a = fast_op(1) }
 #[test]
 fn premise_a_compatible_backend_and_a_rock_fallback_both_say_available() {
     let ws = check(NATIVE_REQUIRED);
-    let g = graph_for(&ws, FnBackend::Lua);
+    let (g, _) = graph_for(&ws, FnBackend::Lua);
     let f = g
         .instances
         .iter()
@@ -171,8 +201,8 @@ fn premise_a_compatible_backend_and_a_rock_fallback_both_say_available() {
 #[test]
 fn native_required_availability_comes_from_the_artifact_mapping() {
     let ws = check(NATIVE_REQUIRED);
-    let g = graph_for(&ws, FnBackend::Lua);
-    let named = |view: &artifact::ArtifactView| -> Option<Unrealizable> {
+    let (g, roots) = graph_for(&ws, FnBackend::Lua);
+    let named = |view: &artifact::ArtifactView| -> Option<Exclusion> {
         view.excluded
             .iter()
             .find(|e| {
@@ -182,10 +212,10 @@ fn native_required_availability_comes_from_the_artifact_mapping() {
             .map(|e| e.cause)
     };
 
-    let bare = artifact::realize(&ws, &g, LUAJIT, ArtifactMappings::for_backend(FnBackend::Lua));
+    let bare = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT, &roots));
     assert_eq!(
         named(&bare),
-        Some(Unrealizable::NativeMappingMissing),
+        Some(Exclusion::Unrealizable(Unrealizable::NativeMappingMissing)),
         "a `@native_required` intrinsic with only a Rock fallback was realized"
     );
 
@@ -195,8 +225,9 @@ fn native_required_availability_comes_from_the_artifact_mapping() {
     let mapped = artifact::realize(
         &ws,
         &g,
-        LUAJIT,
-        ArtifactMappings::for_backend(FnBackend::Lua).with_table(&table),
+        &ArtifactRequest::new(LUAJIT, &roots).with_mappings(
+            ArtifactMappings::for_backend(FnBackend::Lua).with_table(&table),
+        ),
     );
     assert_eq!(
         named(&mapped),
@@ -217,8 +248,8 @@ fn portable_op(x: int) -> int { return x * 2 }
 fn main() { let a = portable_op(1) }
 "#,
     );
-    let g = graph_for(&ws, FnBackend::Lua);
-    let view = artifact::realize(&ws, &g, LUAJIT, ArtifactMappings::for_backend(FnBackend::Lua));
+    let (g, roots) = graph_for(&ws, FnBackend::Lua);
+    let view = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT, &roots));
     assert!(
         view.instances.iter().any(|i| {
             ws.module(i.func.module).functions[i.func.func].name.as_str() == "portable_op"
@@ -246,7 +277,7 @@ fn main() { let a = portable_op(1) }
 #[test]
 fn premise_inline_body_dependencies_are_unresolved_names() {
     let ws = check("fn main() { let v: [Vec2] = []; let l = v.to_lua_array() }");
-    let g = graph_for(&ws, FnBackend::Lua);
+    let (g, _) = graph_for(&ws, FnBackend::Lua);
     let deps: Vec<&str> = g
         .inline_body_deps
         .values()
@@ -266,8 +297,8 @@ fn premise_inline_body_dependencies_are_unresolved_names() {
 #[test]
 fn inline_body_dependencies_resolve_to_targets_in_the_artifact() {
     let ws = check("fn main() { let v: [Vec2] = []; let l = v.to_lua_array() }");
-    let g = graph_for(&ws, FnBackend::Lua);
-    let view = artifact::realize(&ws, &g, LUAJIT, ArtifactMappings::for_backend(FnBackend::Lua));
+    let (g, roots) = graph_for(&ws, FnBackend::Lua);
+    let view = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT, &roots));
     let c = view.census();
     assert!(c.inline_deps_examined > 0, "no dependency was examined: {c:?}");
     assert_eq!(
@@ -275,17 +306,28 @@ fn inline_body_dependencies_resolve_to_targets_in_the_artifact() {
         "unresolved inline-body dependencies: {:?}",
         view.render_unresolved_inline_deps(&ws)
     );
-    // Each resolved target is a declaration the artifact RETAINS, so emission
-    // cannot be asked for a symbol the artifact dropped.
+    // Each dependency terminates in a CALLEE, not a bare declaration: a
+    // runtime entry is a `Callee::Boundary` carrying its class and the symbol
+    // emission must produce, and anything else names a concrete instance.
+    assert!(c.inline_deps_boundary > 0, "no dependency resolved to a boundary: {c:?}");
     for dep in &view.inline_deps {
-        assert!(
-            view.instances.iter().any(|i| i.func == dep.target),
-            "a dependency resolved to a declaration outside the artifact"
-        );
-        assert!(
-            view.symbols.keys().any(|i| i.func == dep.target),
-            "a resolved dependency has no artifact symbol"
-        );
+        match &dep.callee {
+            Callee::Boundary(b) => {
+                assert_eq!(b.target, FnBackend::Lua, "the boundary names another target");
+                assert!(
+                    view.instances.iter().any(|i| i.func == b.declaration),
+                    "a dependency resolved to a declaration outside the artifact"
+                );
+                assert!(
+                    view.symbols.values().any(|s| *s == b.symbol),
+                    "the boundary's symbol is not one the artifact assigned"
+                );
+            }
+            Callee::Rock(i) => assert!(
+                view.instances.contains(i),
+                "a dependency resolved to an instance outside the artifact"
+            ),
+        }
     }
 }
 
@@ -300,8 +342,8 @@ fn inline_body_dependencies_resolve_to_targets_in_the_artifact() {
 #[test]
 fn premise_two_retained_siblings_would_share_one_symbol() {
     let ws = check("fn main() { let b: NativeBuffer<int> = nb_new(4); let x = b[0] }");
-    let g = graph_for(&ws, FnBackend::Lua);
-    let siblings: Vec<&skull::instance_graph::Instance> = g
+    let (g, _) = graph_for(&ws, FnBackend::Lua);
+    let siblings: Vec<&Instance> = g
         .instances
         .iter()
         .filter(|i| {
@@ -335,8 +377,8 @@ fn main() {
 }
 "#,
     );
-    let g = graph_for(&ws, FnBackend::Lua);
-    let view = artifact::realize(&ws, &g, LUAJIT, ArtifactMappings::for_backend(FnBackend::Lua));
+    let (g, roots) = graph_for(&ws, FnBackend::Lua);
+    let view = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT, &roots));
     let c = view.census();
     assert!(c.instances > 0, "the artifact retained nothing");
     assert_eq!(
@@ -363,7 +405,7 @@ fn main() {
     assert_ne!(idents[0], idents[1], "two instantiations spell alike");
 
     // Deterministic: realizing the same graph twice gives the same table.
-    let again = artifact::realize(&ws, &g, LUAJIT, ArtifactMappings::for_backend(FnBackend::Lua));
+    let again = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT, &roots));
     assert_eq!(view.symbols, again.symbols, "the symbol assignment is not deterministic");
 }
 
@@ -376,23 +418,11 @@ fn main() {
 /// equal size can still disagree.
 #[test]
 fn realization_never_invents_an_instance() {
-    let ws = check(
-        r#"
-fn ident<T>(x: T) -> T { return x }
-fn main() {
-    let b: NativeBuffer<int> = nb_new(4)
-    let x = b[0]
-    let a = ident(1)
-}
-"#,
-    );
-    let g = graph_for(&ws, FnBackend::Lua);
-    for (spec, mappings) in [
-        (LUAJIT, ArtifactMappings::for_backend(FnBackend::Lua)),
-        (JAVASCRIPT, ArtifactMappings::for_backend(FnBackend::Js)),
-        (NATIVE_C64, ArtifactMappings::none()),
-    ] {
-        let view = artifact::realize(&ws, &g, spec, mappings);
+    let ws = check(REACH);
+    for spec in [LUAJIT, JAVASCRIPT, NATIVE_C64] {
+        let (g, roots) = view_of(&ws, spec);
+        let view = artifact::realize(&ws, &g, &ArtifactRequest::new(spec, &roots));
+        assert!(!view.census().graph_mismatch, "`{}` got a foreign graph", spec.name);
         for i in &view.instances {
             assert!(
                 g.instances.contains(i),
@@ -401,8 +431,8 @@ fn main() {
                 g.identity(&ws, i)
             );
         }
-        // The accounting is exact: every shared instance is retained or
-        // excluded, never quietly absent from both.
+        // The accounting is a PARTITION: every shared instance is retained,
+        // unrealizable, or unreachable, never quietly absent from all three.
         assert_eq!(
             view.instances.len() + view.excluded.len(),
             g.instances.len(),
@@ -412,51 +442,305 @@ fn main() {
     }
 }
 
-/// The cross-target control. Two artifacts must SHARE logical instances --
-/// otherwise "identity survives realization" is a claim about disjoint sets --
-/// and must DIFFER in what they realize, otherwise the realization axis is
-/// inert and every arm above could be dead.
-#[test]
-fn two_artifacts_share_logical_instances_and_differ_in_realization() {
-    let ws = check(
-        r#"
+/// A fixture with a declaration nothing calls, so `unreachable` has a
+/// population distinct from `unrealizable`.
+const REACH: &str = r#"
 fn ident<T>(x: T) -> T { return x }
+@nomangle fn never_called_from_main(x: int) -> int { return x + 1 }
 fn main() {
     let b: NativeBuffer<int> = nb_new(4)
     let x = b[0]
     let a = ident(1)
 }
+"#;
+
+/// Retention is a WALK, not a declaration filter. A declaration this artifact
+/// could compile but no root of ITS reaches is `Unreachable` -- a filter would
+/// keep it, and the two causes must not be one bucket.
+///
+/// The graph is built from the FULL root set and the artifact is given a
+/// narrower one, which is plan S 11's "the target may change roots" stated as a
+/// fixture: the instance exists in the shared graph and is simply not this
+/// artifact's program.
+#[test]
+fn retention_is_reachability_not_a_declaration_filter() {
+    let ws = check(REACH);
+    let (g, all_roots) = view_of(&ws, LUAJIT);
+    let main_only: Vec<skull_mir::mir::FuncRef> = all_roots
+        .iter()
+        .copied()
+        .filter(|r| ws.module(r.module).functions[r.func].name.as_str() == "main")
+        .collect();
+    assert_eq!(main_only.len(), 1, "the fixture has no unique `main` root");
+
+    let view = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT, &main_only));
+    let c = view.census();
+    // EXACTLY the roots it was given, plus the always-emitted callees, which
+    // carry no incoming edge and would otherwise read as unreachable. Stated as
+    // a set equality, so a view that quietly seeded from the whole graph could
+    // not pass by having "enough" roots.
+    let expected: std::collections::BTreeSet<&Instance> = g
+        .instances
+        .iter()
+        .filter(|i| {
+            (i.func == main_only[0] && i.args.is_empty())
+                || g.always_emitted_targets.contains(*i)
+        })
+        .collect();
+    assert_eq!(
+        view.roots.iter().collect::<std::collections::BTreeSet<_>>(),
+        expected,
+        "the artifact's roots are not the ones it was given: {c:?}"
+    );
+    assert!(c.sites_walked > 0, "the walk traversed no call site: {c:?}");
+    // Both causes have a population, so neither reads as the other.
+    assert!(
+        c.excluded_by_cause.get("unreachable").copied().unwrap_or(0) > 0,
+        "nothing was excluded as unreachable, so retention is still a filter: {:?}",
+        c.excluded_by_cause
+    );
+    assert!(
+        c.excluded_by_cause.get("foreign-to-artifact").copied().unwrap_or(0) > 0,
+        "nothing was excluded as unrealizable: {:?}",
+        c.excluded_by_cause
+    );
+    // Named, not merely counted: the fixture's uncalled declaration is
+    // REALIZABLE here, which is what makes its exclusion a reachability fact
+    // and not a realization one.
+    let uncalled = view.excluded.iter().find(|e| {
+        ws.module(e.instance.func.module).functions[e.instance.func.func].name.as_str()
+            == "never_called_from_main"
+    });
+    assert_eq!(
+        uncalled.map(|e| e.cause),
+        Some(Exclusion::Unreachable),
+        "an uncalled but compilable declaration was not excluded as unreachable"
+    );
+    // CONTROL: the same declaration IS retained when it is a root, so the
+    // exclusion above is a property of reachability and not of the declaration.
+    let wide = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT, &all_roots));
+    assert!(
+        wide.instances.iter().any(|i| {
+            ws.module(i.func.module).functions[i.func.func].name.as_str()
+                == "never_called_from_main"
+        }),
+        "the uncalled declaration is unreachable even as a root, so the fixture \
+         cannot distinguish"
+    );
+    // ...and the walk genuinely reaches transitively, not just its roots.
+    assert!(
+        view.instances.len() > view.roots.len(),
+        "the walk retained nothing beyond its roots: {c:?}"
+    );
+    assert!(
+        view.instances.iter().any(|i| {
+            ws.module(i.func.module).functions[i.func.func].name.as_str() == "ident"
+        }),
+        "the walk did not reach a called generic"
+    );
+}
+
+/// A retained caller whose concrete callee this artifact cannot realize is a
+/// SEVERED call -- the finding a declaration filter structurally cannot
+/// produce, because it never looks at an edge.
+#[test]
+fn a_retained_caller_naming_an_unrealizable_callee_is_severed() {
+    let ws = check(
+        r#"
+@intrinsic @native_required
+fn fast_op(x: int) -> int { return x * 2 }
+fn caller(x: int) -> int { return fast_op(x) }
+fn main() { let a = caller(1) }
 "#,
     );
-    let g = graph_for(&ws, FnBackend::Lua);
-    let lua = artifact::realize(&ws, &g, LUAJIT, ArtifactMappings::for_backend(FnBackend::Lua));
-    let js = artifact::realize(&ws, &g, JAVASCRIPT, ArtifactMappings::for_backend(FnBackend::Js));
+    let (g, roots) = graph_for(&ws, FnBackend::Lua);
+    let view = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT, &roots));
+    let c = view.census();
+    assert!(c.sites_walked > 0, "no site was walked, so 0 severed says nothing: {c:?}");
+    let named: Vec<String> = view.render_severed(&ws, &g);
+    assert_eq!(
+        c.severed, 1,
+        "expected exactly the `fast_op` call to be severed, got {named:?}"
+    );
+    assert!(named[0].contains("fast_op"), "the severed call is not the one expected: {named:?}");
+    assert_eq!(
+        c.severed_by_cause.get("native-mapping-missing").copied(),
+        Some(1),
+        "the severed call lost its cause: {:?}",
+        c.severed_by_cause
+    );
+    // The CALLER survives -- which is precisely why the severed call matters:
+    // emission would emit a call to a body that is not in the artifact.
+    assert!(
+        view.instances.iter().any(|i| {
+            ws.module(i.func.module).functions[i.func.func].name.as_str() == "caller"
+        }),
+        "the caller was dropped, so nothing would have emitted the call anyway"
+    );
+    // CONTROL: mapping the intrinsic removes the severed call without touching
+    // anything else.
+    let table = OneName("fast_op");
+    let mapped = artifact::realize(
+        &ws,
+        &g,
+        &ArtifactRequest::new(LUAJIT, &roots).with_mappings(
+            ArtifactMappings::for_backend(FnBackend::Lua).with_table(&table),
+        ),
+    );
+    assert_eq!(mapped.census().severed, 0, "mapping the callee left the call severed");
+}
 
-    let shared: Vec<&skull::instance_graph::Instance> =
-        lua.instances.iter().filter(|i| js.instances.contains(*i)).collect();
+/// Realizing a graph built for ANOTHER target is a recorded defect, not a
+/// tolerated approximation: `build_for_target` resolves each callee through
+/// that target's `backend_variant`, so a Lua graph answers JS's question with
+/// Lua's edges.
+///
+/// The consequence is measured, not asserted from the signature. The two graphs
+/// hold the SAME instances here -- both `@nomangle` siblings are emission roots
+/// -- and differ in exactly one thing: which sibling a SITE resolves to. On the
+/// wrong graph that site names a Lua body, which is unrealizable on JS, so the
+/// call comes out SEVERED. An instance-set comparison would have found nothing.
+#[test]
+fn a_graph_built_for_another_target_is_a_recorded_mismatch() {
+    let ws = check(REACH);
+    let (lua_graph, roots) = graph_for(&ws, FnBackend::Lua);
+    let (js_graph, _) = graph_for(&ws, FnBackend::Js);
+    assert_eq!(
+        lua_graph.instances, js_graph.instances,
+        "the fixture's two graphs differ in instances, so the severed count \
+         below could be explained by that instead"
+    );
+
+    let wrong = artifact::realize(&ws, &lua_graph, &ArtifactRequest::new(JAVASCRIPT, &roots));
+    assert!(
+        wrong.census().graph_mismatch,
+        "a JS artifact realized a Lua graph without complaint"
+    );
+    assert_eq!(wrong.graph_target, FnBackend::Lua);
+
+    let right = artifact::realize(&ws, &js_graph, &ArtifactRequest::new(JAVASCRIPT, &roots));
+    assert!(!right.census().graph_mismatch, "the JS artifact rejected its own graph");
+    assert_eq!(right.graph_target, FnBackend::Js);
+
+    // The mismatch is not cosmetic: the wrong graph's variant selection severs
+    // a call the right one resolves.
+    assert!(
+        wrong.census().severed > right.census().severed,
+        "realizing the wrong graph severed no more calls than the right one \
+         ({} vs {}), so the target's variant selection is not reaching the view",
+        wrong.census().severed,
+        right.census().severed
+    );
+    assert!(
+        !wrong.render_severed(&ws, &lua_graph).is_empty(),
+        "the severed call has no rendering"
+    );
+}
+
+/// Identity across artifacts is the shared `Instance`, NOT the spelling.
+///
+/// Plan S 0h: `InstanceId` is target-neutral and the ARTIFACT owns the emitted
+/// spelling. The default planner happens to be target-neutral; a hostile one
+/// that renames deliberately must leave identity intact and each artifact's own
+/// table total and injective. Asserting spelling equality across artifacts
+/// would forbid exactly what the plan permits.
+#[test]
+fn cross_artifact_identity_is_the_instance_and_not_the_spelling() {
+    let ws = check(REACH);
+    let (lg, lr) = view_of(&ws, LUAJIT);
+    let (jg, jr) = view_of(&ws, JAVASCRIPT);
+    let lua_p = Prefixed("lua");
+    let js_p = Prefixed("js");
+    let lua = artifact::realize(
+        &ws,
+        &lg,
+        &ArtifactRequest::new(LUAJIT, &lr).with_symbols(&lua_p),
+    );
+    let js = artifact::realize(
+        &ws,
+        &jg,
+        &ArtifactRequest::new(JAVASCRIPT, &jr).with_symbols(&js_p),
+    );
+
+    // The shared population, keyed on the CANONICAL identity string -- never on
+    // `Instance` itself. An `Instance` holds `MonoTyId`s, which index the
+    // graph's OWN arena; two separately built graphs intern in whatever order
+    // their walks reached types, so comparing raw ids across them compares
+    // arena positions and not types.
+    let ids_of = |v: &artifact::ArtifactView, ag: &InstanceGraph| {
+        v.instances
+            .iter()
+            .map(|i| (ag.identity(&ws, i), v.symbols[i].clone()))
+            .collect::<std::collections::BTreeMap<String, String>>()
+    };
+    let lua_ids = ids_of(&lua, &lg);
+    let js_ids = ids_of(&js, &jg);
+    let shared: Vec<&String> = lua_ids.keys().filter(|k| js_ids.contains_key(*k)).collect();
     assert!(!shared.is_empty(), "the two artifacts share no logical instance at all");
-    // Shared instances keep ONE logical identity across the two artifacts --
-    // the S 20g.1 property, asserted over the shared population rather than
-    // over a digest that could agree for the wrong reason.
-    for i in &shared {
-        assert_eq!(
-            lua.symbols.get(*i),
-            js.symbols.get(*i),
-            "`{}` is spelled differently by the two artifacts",
-            g.identity(&ws, i)
+
+    // The hostile planners spell every shared instance DIFFERENTLY, and that is
+    // legal. If this test asserted equality it would be asserting the opposite
+    // of the signed decision (plan S 0h: the ARTIFACT owns the spelling).
+    for id in &shared {
+        assert_ne!(
+            lua_ids[*id], js_ids[*id],
+            "the hostile planners agree on `{id}`, so the fixture cannot distinguish"
         );
     }
 
-    let only_lua: Vec<&skull::instance_graph::Instance> =
-        lua.instances.iter().filter(|i| !js.instances.contains(*i)).collect();
-    let only_js: Vec<&skull::instance_graph::Instance> =
-        js.instances.iter().filter(|i| !lua.instances.contains(*i)).collect();
+    // What must hold is INSIDE each artifact: total and injective.
+    for v in [&lua, &js] {
+        assert_eq!(
+            v.symbols.len(),
+            v.instances.len(),
+            "`{}`'s symbol table is not total",
+            v.spec.name
+        );
+        assert_eq!(
+            v.census().symbol_collisions,
+            0,
+            "`{}` spells two instances alike: {:?}",
+            v.spec.name,
+            v.render_symbol_collisions(&ws)
+        );
+    }
+
+    // CONTROL: with the DEFAULT planner the same two artifacts spell the shared
+    // instances alike. Without this, `assert_ne!` above could be passing
+    // because the two views share nothing meaningful.
+    let d_lua = artifact::realize(&ws, &lg, &ArtifactRequest::new(LUAJIT, &lr));
+    let d_js = artifact::realize(&ws, &jg, &ArtifactRequest::new(JAVASCRIPT, &jr));
+    let (dl, dj) = (ids_of(&d_lua, &lg), ids_of(&d_js, &jg));
+    let agreed = shared.iter().filter(|id| dl.get(**id) == dj.get(**id)).count();
+    assert_eq!(
+        agreed,
+        shared.len(),
+        "the default planner already disagrees, so the hostile one proves nothing"
+    );
+}
+
+/// The realization axis must not be inert: two artifacts must differ in what
+/// they realize, or every arm above could be dead.
+#[test]
+fn two_artifacts_differ_in_realization() {
+    let ws = check(REACH);
+    let (lg, lr) = view_of(&ws, LUAJIT);
+    let (jg, jr) = view_of(&ws, JAVASCRIPT);
+    let lua = artifact::realize(&ws, &lg, &ArtifactRequest::new(LUAJIT, &lr));
+    let js = artifact::realize(&ws, &jg, &ArtifactRequest::new(JAVASCRIPT, &jr));
+
+    let only_lua = lua.instances.difference(&js.instances).count();
+    let only_js = js.instances.difference(&lua.instances).count();
     assert!(
-        !only_lua.is_empty() && !only_js.is_empty(),
-        "the two artifacts realize identical sets, so the realization axis is inert: \
-         lua-only {}, js-only {}",
-        only_lua.len(),
-        only_js.len()
+        only_lua > 0 && only_js > 0,
+        "the two artifacts realize identical sets, so the realization axis is \
+         inert: lua-only {only_lua}, js-only {only_js}"
+    );
+    // ...and they differ in HOW, not only in WHICH.
+    assert_ne!(
+        lua.census().realized_by_kind,
+        js.census().realized_by_kind,
+        "the two artifacts supply every retained declaration the same way"
     );
 }
 
@@ -466,8 +750,8 @@ fn main() {
 #[test]
 fn a_target_with_no_backend_keeps_only_portable_bodies() {
     let ws = check("fn main() { let b: NativeBuffer<int> = nb_new(4); let x = b[0] }");
-    let g = graph_for(&ws, FnBackend::Lua);
-    let view = artifact::realize(&ws, &g, NATIVE_C64, ArtifactMappings::none());
+    let (g, roots) = view_of(&ws, NATIVE_C64);
+    let view = artifact::realize(&ws, &g, &ArtifactRequest::new(NATIVE_C64, &roots));
     let c = view.census();
     assert!(c.excluded > 0, "the hostile target excluded nothing: {c:?}");
     assert!(c.instances > 0, "the hostile target excluded everything: {c:?}");
@@ -478,5 +762,69 @@ fn a_target_with_no_backend_keeps_only_portable_bodies() {
             "`{}` has a foreign body but survived a target with no foreign backend",
             f.name
         );
+    }
+}
+
+/// The ambiguity arm's PRECONDITION, measured rather than assumed.
+///
+/// `InlineDep` must name one instance, not one declaration, so `realize` refuses
+/// a declaration with several. That arm has no population today and a mutation
+/// that picks the first candidate reddens nothing -- so this records WHY rather
+/// than leaving a dead branch: every erased runtime entry that gets an instance
+/// is non-generic, and the generic ones (`__rock_col_sort<T, K>`) get NO
+/// instance at all, because a synthesized call to a generic entry has no
+/// binding record (the `no-bindings` hole, `docs/parked/mono.md` backlog 4).
+///
+/// When that hole closes, a generic entry gains instances and this goes red at
+/// the `<= 1` assertion -- which is the point at which the ambiguity arm starts
+/// mattering.
+#[test]
+fn every_inline_dependency_target_has_at_most_one_instance() {
+    let ws = check(
+        r#"
+value P { x: float, y: float }
+value Q { a: float, b: float }
+@nomangle inline(lua) fn opaque_sorter(v: any) -> any = """
+    return __rock_col_sort(v)
+"""
+fn main() {
+    let ps: [P] = []
+    ps.sort(_.x)
+    let qs: [Q] = []
+    qs.sort(_.a)
+    let v: [Vec2] = []
+    let l = v.to_lua_array()
+    opaque_sorter(1)
+}
+"#,
+    );
+    let (g, roots) = graph_for(&ws, FnBackend::Lua);
+    let view = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT, &roots));
+    assert!(
+        !view.inline_deps.is_empty(),
+        "the fixture resolved no dependency, so the count below is vacuous"
+    );
+    // The generic entry the fixture deliberately names is NOT instantiated --
+    // that is the reason the ambiguity arm is unreachable, stated as a
+    // measurement.
+    let generic_entry = g
+        .instances
+        .iter()
+        .filter(|i| {
+            ws.module(i.func.module).functions[i.func.func].name.as_str() == "__rock_col_sort"
+        })
+        .count();
+    assert_eq!(
+        generic_entry, 0,
+        "`__rock_col_sort` now has instances, so the ambiguity arm is live -- give \
+         it a fixture"
+    );
+    for dep in &view.inline_deps {
+        let decl = match &dep.callee {
+            Callee::Boundary(b) => b.declaration,
+            Callee::Rock(i) => i.func,
+        };
+        let n = view.instances.iter().filter(|i| i.func == decl).count();
+        assert_eq!(n, 1, "a resolved dependency had {n} candidate instances");
     }
 }

@@ -468,6 +468,13 @@ pub struct InstanceGraph {
     pub bound_tree_disagreements: Vec<BoundTreeDisagreement>,
     /// Re-reaches whose witness trees were actually compared.
     pub bound_tree_comparisons: usize,
+    /// Instances reached from an ALWAYS-EMITTED body -- a decorator definition
+    /// or a global initializer. They have no `from` instance, so they carry no
+    /// incoming [`Edge`] and no [`Site`], and a reachability walk over the edges
+    /// alone would call them unreachable. Production treats them as roots
+    /// (`mir_emit::reachable_fns`'s `extra_roots`), so an artifact view must
+    /// seed from them too.
+    pub always_emitted_targets: BTreeSet<Instance>,
     /// Per instance, the callee EACH of its source operations resolved to.
     /// `ConcreteBody`'s callee tables are this record projected per table; the
     /// walk is the one resolver (plan S 9).
@@ -1178,6 +1185,7 @@ pub fn build_for_target(
         synthesized_examined: 0,
         synthesized_approximated: 0,
         always_emitted_seeds: 0,
+        always_emitted_targets: BTreeSet::new(),
         call_sites: BTreeMap::new(),
         duplicate_sites: Vec::new(),
         sites_attempted: 0,
@@ -1534,8 +1542,13 @@ fn record_call(
         }
     };
     let to = Instance { func: callee, args };
-    if let Some(from) = from {
-        g.edges.push(Edge { from: from.clone(), to: to.clone(), kind, span });
+    match from {
+        Some(from) => g.edges.push(Edge { from: from.clone(), to: to.clone(), kind, span }),
+        // No `from`, so no edge and no site: an always-emitted body's callee is
+        // a ROOT, and only this record says so.
+        None => {
+            g.always_emitted_targets.insert(to.clone());
+        }
     }
     g.record_site(from, site, SiteOutcome::Resolved(to.clone()), span);
     g.reach(work, to.clone(), callee_subst, depth + 1);
@@ -1641,8 +1654,14 @@ fn record_witness(
     match instantiate_witness(&mut g.arena, ws, inf, resolved, cf, &witness.generics, subst) {
         Ok((args, callee_subst)) => {
             let to = Instance { func: callee, args };
-            if let Some(from) = from {
-                g.edges.push(Edge { from: from.clone(), to: to.clone(), kind, span });
+            match from {
+                Some(from) => {
+                    g.edges.push(Edge { from: from.clone(), to: to.clone(), kind, span })
+                }
+                // See `record_call`: an always-emitted body's callee is a root.
+                None => {
+                    g.always_emitted_targets.insert(to.clone());
+                }
             }
             g.record_site(from, site, SiteOutcome::Resolved(to.clone()), span);
             g.reach(work, to, callee_subst, depth + 1);
@@ -1746,8 +1765,14 @@ fn record_bound_next(
     match instantiate_witness(&mut g.arena, ws, inf, resolved, cf, next_generics, subst) {
         Ok((args, callee_subst)) => {
             let to = Instance { func: callee, args };
-            if let Some(from) = from {
-                g.edges.push(Edge { from: from.clone(), to: to.clone(), kind, span });
+            match from {
+                Some(from) => {
+                    g.edges.push(Edge { from: from.clone(), to: to.clone(), kind, span })
+                }
+                // See `record_call`: an always-emitted body's callee is a root.
+                None => {
+                    g.always_emitted_targets.insert(to.clone());
+                }
             }
             g.record_site(from, site, SiteOutcome::Resolved(to.clone()), span);
             g.reach(work, to.clone(), callee_subst, depth + 1);
