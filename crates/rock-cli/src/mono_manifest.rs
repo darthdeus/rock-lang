@@ -17,14 +17,21 @@ use skull::instance_graph::{self, InstanceGraph};
 
 use crate::Result;
 
-/// Per-target projection totals across the whole corpus. The deferred list is
-/// a property of the TARGET, not of a project, so it is copied rather than
-/// summed.
-struct ProjTotals {
+/// Per-artifact totals across the whole corpus. The deferred list is a property
+/// of the TARGET, not of a project, so it is copied rather than summed.
+struct ArtifactTotals {
+    /// Retained instances and the SHARED population they were taken from --
+    /// a retained count with no denominator cannot say whether an artifact
+    /// dropped one declaration or all of them.
     instances: usize,
-    boundaries_available: usize,
-    boundaries_total: usize,
-    unsupported_by_class: BTreeMap<&'static str, usize>,
+    shared: usize,
+    excluded: usize,
+    excluded_by_cause: BTreeMap<&'static str, usize>,
+    realized_by_kind: BTreeMap<&'static str, usize>,
+    symbol_collisions: usize,
+    inline_deps_examined: usize,
+    inline_deps_unresolved: usize,
+    inline_deps_outside: usize,
     deferred: Vec<&'static str>,
 }
 
@@ -141,8 +148,15 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     let mut lua_only_total = 0usize;
     let mut js_only_total = 0usize;
     let mut divergent_groups: std::collections::BTreeSet<String> = Default::default();
-    let mut proj_digests: BTreeMap<&'static str, Vec<u64>> = BTreeMap::new();
-    let mut proj_rows: BTreeMap<&'static str, ProjTotals> = BTreeMap::new();
+    let mut art_rows: BTreeMap<&'static str, ArtifactTotals> = BTreeMap::new();
+    // Instances one artifact retained that the shared graph does not hold. A
+    // view may drop and reject; it may never discover.
+    let mut art_invented = 0usize;
+    let mut art_symbol_examples: Vec<String> = Vec::new();
+    let mut art_dep_examples: Vec<String> = Vec::new();
+    let mut art_shared_pairs = 0usize;
+    let mut art_spelling_conflicts = 0usize;
+    let mut art_shared_collisions = 0usize;
 
     for dir in &projects {
         let name = dir.strip_prefix(&root).unwrap_or(dir).display().to_string();
@@ -310,22 +324,47 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
                 js_only_total += p.js_only;
                 divergent_groups.extend(p.divergent_variant_groups);
                 js_invalid += p.js_boundaries_invalid;
-                for pr in p.projections {
-                    proj_digests.entry(pr.target).or_default().push(pr.manifest_digest);
+                art_invented += p.artifact_invented;
+                art_shared_pairs += p.artifact_shared_pairs;
+                art_spelling_conflicts += p.artifact_spelling_conflicts;
+                art_shared_collisions += p.shared_symbol_collisions;
+                for x in p.artifact_symbol_examples {
+                    if art_symbol_examples.len() < 10 {
+                        art_symbol_examples.push(x);
+                    }
+                }
+                for x in p.artifact_dep_examples {
+                    if art_dep_examples.len() < 10 {
+                        art_dep_examples.push(x);
+                    }
+                }
+                for (target, c) in p.artifacts {
                     // SUMMED across projects. `insert` here reported the last
                     // project's numbers under a whole-corpus heading.
-                    let e = proj_rows.entry(pr.target).or_insert_with(|| ProjTotals {
+                    let e = art_rows.entry(target).or_insert_with(|| ArtifactTotals {
                         instances: 0,
-                        boundaries_available: 0,
-                        boundaries_total: 0,
-                        unsupported_by_class: BTreeMap::new(),
-                        deferred: pr.deferred.clone(),
+                        shared: 0,
+                        excluded: 0,
+                        excluded_by_cause: BTreeMap::new(),
+                        realized_by_kind: BTreeMap::new(),
+                        symbol_collisions: 0,
+                        inline_deps_examined: 0,
+                        inline_deps_unresolved: 0,
+                        inline_deps_outside: 0,
+                        deferred: c.deferred.clone(),
                     });
-                    e.instances += pr.instances;
-                    e.boundaries_available += pr.boundaries_available;
-                    e.boundaries_total += pr.boundaries_total;
-                    for (k, v) in &pr.unsupported_by_class {
-                        *e.unsupported_by_class.entry(*k).or_insert(0) += v;
+                    e.instances += c.instances;
+                    e.shared += c.shared_instances;
+                    e.excluded += c.excluded;
+                    e.symbol_collisions += c.symbol_collisions;
+                    e.inline_deps_examined += c.inline_deps_examined;
+                    e.inline_deps_unresolved += c.inline_deps_unresolved;
+                    e.inline_deps_outside += c.inline_deps_outside;
+                    for (k, v) in &c.excluded_by_cause {
+                        *e.excluded_by_cause.entry(*k).or_insert(0) += v;
+                    }
+                    for (k, v) in &c.realized_by_kind {
+                        *e.realized_by_kind.entry(*k).or_insert(0) += v;
                     }
                 }
                 rows.push(p.row);
@@ -847,48 +886,118 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     }
     println!();
 
-    println!("## capability projections");
+    println!("## artifact views (plan S 9, S 11)");
+    println!();
+    println!("Each target's REALIZATION of the one shared graph: which declarations it");
+    println!("retains, how each is supplied, and what it spells them. A view may drop and it");
+    println!("may reject; it may never DISCOVER, which is the `invented` column.");
     println!();
     println!(
-        "| target | instances | boundaries avail./total | unsupported | deferred obligations |"
+        "| artifact | retained / shared | excluded | symbol collisions | inline deps unres./exam. |"
     );
-    println!("|---|---:|---:|---|---:|");
-    for (name, p) in &proj_rows {
-        let unsup = if p.unsupported_by_class.is_empty() {
-            "--".to_string()
-        } else {
-            p.unsupported_by_class
-                .iter()
-                .map(|(k, v)| format!("{k}: {v}"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
+    println!("|---|---:|---:|---:|---:|");
+    for (name, a) in &art_rows {
         println!(
-            "| `{name}` | {} | {}/{} | {unsup} | {} |",
-            p.instances, p.boundaries_available, p.boundaries_total, p.deferred.len()
+            "| `{name}` | {}/{} | {} | {} | {}/{} |",
+            a.instances,
+            a.shared,
+            a.excluded,
+            a.symbol_collisions,
+            a.inline_deps_unresolved,
+            a.inline_deps_examined
         );
     }
     println!();
-    let identity_stable = proj_digests.values().all(|v| !v.is_empty())
-        && {
-            let first = proj_digests.values().next().cloned().unwrap_or_default();
-            proj_digests.values().all(|v| *v == first)
-        };
     println!(
-        "**logical instance identity byte-stable across all {} projections: {}** \
-         (plan S 20g.1) -- the per-project manifest digests are equal for every target.",
-        proj_rows.len(),
-        if identity_stable { "YES" } else { "**NO**" }
+        "- instances an artifact realized that the shared graph does NOT hold \
+         (must be 0): **{art_invented}**"
+    );
+    println!(
+        "- resolved inline-body dependencies whose target the artifact does not retain \
+         (must be 0): **{}**",
+        art_rows.values().map(|a| a.inline_deps_outside).sum::<usize>()
     );
     println!();
-    for (name, p) in &proj_rows {
-        if p.deferred.is_empty() {
-            continue;
+    println!("**Identity across artifacts** (plan S 20g.1), over the SHARED population");
+    println!("rather than over a digest of `g` -- every artifact reads the same graph, so a");
+    println!("digest of it would agree even if realization were inert:");
+    println!();
+    println!(
+        "- `(artifact, artifact, instance)` triples where BOTH artifacts retain the \
+         instance: **{art_shared_pairs}**"
+    );
+    println!(
+        "- ...of those, spelled DIFFERENTLY by the two artifacts (must be 0): \
+         **{art_spelling_conflicts}**"
+    );
+    println!();
+    for (name, a) in &art_rows {
+        println!("`{name}` realizes:");
+        for (k, v) in &a.realized_by_kind {
+            println!("- `{k}`: {v}");
         }
-        println!("`{name}` defers:");
-        for d in &p.deferred {
-            println!("- {d}");
+        if !a.excluded_by_cause.is_empty() {
+            println!("...and excludes:");
+            for (k, v) in &a.excluded_by_cause {
+                println!("- `{k}`: {v}");
+            }
         }
+        for d in &a.deferred {
+            println!("- DEFERRED: {d}");
+        }
+        println!();
+    }
+    // An empty axis NAMES its fixture rather than claiming coverage. Two of the
+    // four discriminants have no corpus population, and a zero over zero is not
+    // evidence that the arm works.
+    let empty_axes: Vec<(&str, usize, &str)> = vec![
+        (
+            "native-mapping-missing",
+            art_rows
+                .values()
+                .map(|a| a.excluded_by_cause.get("native-mapping-missing").copied().unwrap_or(0))
+                .sum(),
+            "`@native_required` intrinsics in this workspace all carry an `inline(lua)` \
+             body, so on luajit they MAP and on every other artifact they are \
+             foreign-to-artifact before the mapping is asked. Fixture: \
+             `native_required_availability_comes_from_the_artifact_mapping`",
+        ),
+        (
+            "symbol collisions",
+            art_rows.values().map(|a| a.symbol_collisions).sum(),
+            "retention is what makes the artifact table injective; the shared graph \
+             DOES hold two declarations that encode alike. Fixtures: \
+             `premise_two_retained_siblings_would_share_one_symbol` + \
+             `an_artifact_symbol_is_total_and_injective_over_what_it_retains`",
+        ),
+        (
+            "unresolved inline deps",
+            art_rows.values().map(|a| a.inline_deps_unresolved).sum(),
+            "measured over 26 examined dependencies on luajit and 0 on the other \
+             three, whose opaque OWNERS are themselves excluded. Fixture: \
+             `inline_body_dependencies_resolve_to_targets_in_the_artifact`",
+        ),
+    ];
+    println!(
+        "- ...measured against **{art_shared_collisions}** symbols the SHARED graph \
+         spells for more than one instance. Retention is what removes them, so this \
+         is the space the zero above is measured over."
+    );
+    for (axis, n, fixture) in &empty_axes {
+        if *n == 0 {
+            println!("- `{axis}`: **0** corpus-wide -- {fixture}");
+        } else {
+            println!("- `{axis}`: **{n}**");
+        }
+    }
+    println!();
+    for x in &art_symbol_examples {
+        println!("- symbol collision: {x}");
+    }
+    for x in &art_dep_examples {
+        println!("- unresolved dependency: {x}");
+    }
+    if !art_symbol_examples.is_empty() || !art_dep_examples.is_empty() {
         println!();
     }
 
@@ -973,7 +1082,20 @@ struct OneProject {
     /// Names whose same-signature backend variants do not share a mangling.
     divergent_variant_groups: std::collections::BTreeSet<String>,
     js_boundaries_invalid: usize,
-    projections: Vec<skull::target_projection::Projection>,
+    /// One census per artifact, keyed by target name.
+    artifacts: Vec<(&'static str, skull::artifact::ArtifactCensus)>,
+    /// Instances an artifact realized that the shared graph does not hold.
+    artifact_invented: usize,
+    /// `(artifact, artifact, instance)` triples both artifacts retain, and how
+    /// many of those the two spell differently. The identity property, over the
+    /// population that can actually witness it.
+    artifact_shared_pairs: usize,
+    artifact_spelling_conflicts: usize,
+    artifact_symbol_examples: Vec<String>,
+    artifact_dep_examples: Vec<String>,
+    /// Symbols the SHARED graph spells for more than one instance -- the space
+    /// each artifact's zero is measured against.
+    shared_symbol_collisions: usize,
 }
 
 /// A span's file, relative to the analyzed root. An absolute path varies by
@@ -1111,13 +1233,70 @@ fn one_project(
     let js_boundaries_invalid =
         js.boundaries.values().filter(|b| b.invalid_on_target).count();
 
-    // Capability projections. They read `g` -- one built graph, four views --
-    // which is what makes "the projection did not change the key" checkable.
-    let projections: Vec<skull::target_projection::Projection> =
-        skull::target_projection::ALL
-            .iter()
-            .map(|spec| skull::target_projection::project(&ws, &g, *spec))
-            .collect();
+    // Artifact views: one built graph, four realizations. `realize` takes `&g`,
+    // so it structurally cannot discover -- `artifact_invented` asserts the
+    // consequence rather than trusting the signature.
+    //
+    // The JS artifact gets the REAL backend table. Without it a
+    // `@native_required` intrinsic would read as unmapped on JS for the
+    // trivial reason that nothing was wired, and the corpus number would be
+    // measuring this driver rather than the artifact.
+    let js_table = skull_codegen_js::JsIntrinsics;
+    let views: Vec<skull::artifact::ArtifactView> = skull::target_projection::ALL
+        .iter()
+        .map(|spec| {
+            let m = match spec.backend {
+                Some(b @ bone_semantic::hir::FnBackend::Js) => {
+                    skull::artifact::ArtifactMappings::for_backend(b).with_table(&js_table)
+                }
+                Some(b) => skull::artifact::ArtifactMappings::for_backend(b),
+                None => skull::artifact::ArtifactMappings::none(),
+            };
+            skull::artifact::realize(&ws, &g, *spec, m)
+        })
+        .collect();
+    let artifact_invented = views
+        .iter()
+        .map(|v| v.instances.iter().filter(|i| !g.instances.contains(*i)).count())
+        .sum();
+    // Identity across artifacts, over the population that can witness it: an
+    // instance BOTH artifacts retain. Pairs, not a digest of `g`.
+    let mut artifact_shared_pairs = 0usize;
+    let mut artifact_spelling_conflicts = 0usize;
+    for a in &views {
+        for b in &views {
+            if a.spec.name >= b.spec.name {
+                continue;
+            }
+            for i in a.instances.intersection(&b.instances) {
+                artifact_shared_pairs += 1;
+                if a.symbols.get(i) != b.symbols.get(i) {
+                    artifact_spelling_conflicts += 1;
+                }
+            }
+        }
+    }
+    let mut artifact_symbol_examples: Vec<String> = Vec::new();
+    let mut artifact_dep_examples: Vec<String> = Vec::new();
+    for v in &views {
+        for x in v.render_symbol_collisions(&ws).into_iter().take(2) {
+            artifact_symbol_examples.push(format!("`{}` {x}", v.spec.name));
+        }
+        for x in v.render_unresolved_inline_deps(&ws).into_iter().take(2) {
+            artifact_dep_examples.push(format!("`{}` {x}", v.spec.name));
+        }
+    }
+    // The CONTRAST for the artifacts' zero: how many symbols the SHARED graph
+    // spells for more than one instance. A per-artifact zero measured against
+    // an unstated space cannot say whether retention did anything.
+    let mut shared_by_symbol: BTreeMap<String, usize> = BTreeMap::new();
+    for i in &g.instances {
+        *shared_by_symbol.entry(g.logical_symbol(&ws, i)).or_insert(0) += 1;
+    }
+    let shared_symbol_collisions =
+        shared_by_symbol.values().filter(|n| **n > 1).count();
+    let artifacts: Vec<(&'static str, skull::artifact::ArtifactCensus)> =
+        views.iter().map(|v| (v.spec.name, v.census())).collect();
 
     if let Some((path, name)) = dump {
         let stem = format!("{path}/{}", name.replace('/', "_"));
@@ -1332,7 +1511,7 @@ fn one_project(
             }
             m
         },
-        inline_dep_names: g.inline_body_deps.values().flatten().cloned().collect(),
+        inline_dep_names: g.inline_body_deps.values().flatten().map(|s| (*s).to_string()).collect(),
         span_census: g.span_census(),
         rejections,
         rejection_examples,
@@ -1379,7 +1558,13 @@ fn one_project(
         js_only,
         divergent_variant_groups,
         js_boundaries_invalid,
-        projections,
+        artifacts,
+        artifact_invented,
+        artifact_shared_pairs,
+        artifact_spelling_conflicts,
+        artifact_symbol_examples,
+        artifact_dep_examples,
+        shared_symbol_collisions,
     })
 }
 

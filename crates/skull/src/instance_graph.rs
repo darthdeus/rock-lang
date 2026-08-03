@@ -50,6 +50,33 @@ pub struct Instance {
     pub args: Vec<MonoTyId>,
 }
 
+/// A `FuncRef` as an ORDERED map key.
+///
+/// `FuncRef` is not `Ord`, and ordering by it would be ordering by arena
+/// position anyway. This is `(module, function index)` -- stable within a build
+/// and used only to make iteration deterministic, the same contract
+/// [`ord_key`] states for an [`Instance`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct DeclKey(pub FuncRef);
+
+impl DeclKey {
+    fn raw(self) -> (u32, u32) {
+        (self.0.module.raw(), self.0.func.into_raw().into_u32())
+    }
+}
+
+impl Ord for DeclKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.raw().cmp(&other.raw())
+    }
+}
+
+impl PartialOrd for DeclKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 /// `FuncRef` is not `Ord`, and ordering by it would be ordering by arena
 /// position anyway. The key is `(module, function index, args)` -- stable within
 /// a build, and only ever used to make iteration order deterministic; the
@@ -393,10 +420,17 @@ pub struct InstanceGraph {
     /// reached (`docs/boundary-contracts.md` S 1.4). A name absent here is one
     /// the corpus never triggers, not one that does not exist.
     pub erased_entries: BTreeSet<String>,
-    /// Runtime entries an opaque `inline(lua)` body calls: owner symbol -> the
-    /// entries it names. Emission must emit these even though no Rock call site
-    /// reaches them.
-    pub inline_body_deps: BTreeMap<String, BTreeSet<String>>,
+    /// Runtime entries an opaque `inline(lua)` body calls: the owning
+    /// DECLARATION -> the entries its text names. Emission must emit these even
+    /// though no Rock call site reaches them.
+    ///
+    /// Keyed by `FuncRef`, not by mangled symbol: two `@nomangle` backend
+    /// siblings share one symbol, so a symbol key merges a Lua body's
+    /// dependencies with a JS body's and no artifact can tell which are its
+    /// own. The ENTRY names stay names here -- resolving one to a declaration
+    /// is a per-artifact decision (`crate::artifact`), because the serving
+    /// declaration differs by target.
+    pub inline_body_deps: BTreeMap<DeclKey, BTreeSet<&'static str>>,
     /// Every storage query that could not decide, by reason. Kept beside the
     /// rejection list because a rejection KIND aggregates several reasons, so
     /// the kind histogram cannot answer "how many storage queries failed, and
@@ -2176,7 +2210,7 @@ fn compiler_generated_sites(
 /// The unique stdlib function `name` serving `target` -- the same lookup
 /// `Builder::stdlib_funcref` performs, and it fails on the same conditions
 /// (missing name, no serving body, residual ambiguity).
-fn stdlib_entry(
+pub fn stdlib_entry(
     ws: &Workspace,
     name: &str,
     target: bone_semantic::hir::FnBackend,
@@ -2193,7 +2227,11 @@ fn stdlib_entry(
     }
 }
 
-fn serves(
+/// Whether a declaration with backend `decl` can be emitted for `target`.
+/// THE compatibility test -- the walk, the boundary pass and every artifact
+/// view ask this one, so "does this declaration serve me" cannot be answered
+/// two ways.
+pub fn serves(
     decl: bone_semantic::hir::FnBackend,
     target: bone_semantic::hir::FnBackend,
 ) -> bool {
@@ -2291,14 +2329,14 @@ fn record_inline_body_deps(g: &mut InstanceGraph, ws: &Workspace) {
     // view, which is what decides the emitted spelling and the retention set;
     // recording it here without a target would be a second, weaker reachability
     // mechanism.
-    let mut deps: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut deps: BTreeMap<DeclKey, BTreeSet<&'static str>> = BTreeMap::new();
     for i in &g.instances {
         let f = &ws.module(i.func.module).functions[i.func.func];
         let Some(body) = &f.inline_body else { continue };
         let text = body.1.as_str();
         for name in ERASED_RUNTIME_ENTRIES {
             if text.contains(name) {
-                deps.entry(mangle_fn(ws, f)).or_default().insert((*name).to_string());
+                deps.entry(DeclKey(i.func)).or_default().insert(name);
                 g.erased_entries.insert((*name).to_string());
             }
         }

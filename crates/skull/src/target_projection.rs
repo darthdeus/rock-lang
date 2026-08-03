@@ -1,26 +1,20 @@
-//! Synthetic target projections (`docs/monomorphization-plan.md` S 0c final
-//! bullet, S 0d projection bullet, S 20g.1).
-//!
-//! A projection reads an already-built [`InstanceGraph`] and classifies it for a
-//! target: which roots survive, which boundaries that target can supply, and
-//! which ABI/ownership obligations it defers to a later stage. It **may not**
-//! discover instances, rebuild the graph, or touch a logical key -- plan S 20g.1
-//! asks precisely whether identity survives realization differing, so a
-//! projection that recomputed identity would answer its own question.
-//!
-//! That constraint is the whole design: [`project`] takes `&InstanceGraph` and
-//! returns counts. It has no `&mut`, so it *cannot* change what it measures.
+//! The TARGET SPECS an artifact view is taken through
+//! (`docs/monomorphization-plan.md` S 0c final bullet, S 20a, S 20g.1).
 //!
 //! **Structured capabilities, not a target enum** (plan S 20a). The variants a
 //! flat enum would grow -- `LuaDesktop`, `JsWeb`, `CAndroid`, `WasmWeb` -- are
 //! cross products of independent axes. [`ExecutionTargetSpec`] carries the axes
 //! as fields so a new target is a fixture, not a match arm in every consumer.
+//!
+//! The COUNT-ONLY projection this module used to return is gone. Counting
+//! `g.boundaries` answered a symbol-keyed question -- two `@nomangle` backend
+//! siblings share one entry there -- and a count cannot say WHICH declaration a
+//! target keeps, which is the only form in which "identity survives
+//! realization differing" is checkable. `crate::artifact::realize` returns the
+//! realized sets instead; this module keeps the specs and the two per-target
+//! predicates they answer.
 
-use std::collections::BTreeMap;
-
-use bone_semantic::inference::Workspace;
-
-use crate::instance_graph::{BoundaryClass, InstanceGraph};
+use crate::instance_graph::BoundaryClass;
 
 /// What a target can supply. Each field is a question some boundary class or
 /// ABI decision actually asks; none is a target NAME.
@@ -49,12 +43,17 @@ pub struct Capabilities {
 pub struct ExecutionTargetSpec {
     pub name: &'static str,
     pub pointer_width: u8,
+    /// The `FnBackend` whose declarations this artifact emits, when it has one.
+    /// `None` is a target with no Rock-level backend of its own: it realizes
+    /// the PORTABLE subset and no verbatim body at all.
+    pub backend: Option<bone_semantic::hir::FnBackend>,
     pub caps: Capabilities,
 }
 
 /// The luajit artifact.
 pub const LUAJIT: ExecutionTargetSpec = ExecutionTargetSpec {
     name: "luajit",
+    backend: Some(bone_semantic::hir::FnBackend::Lua),
     pointer_width: 64,
     caps: Capabilities {
         foreign_symbols: true,
@@ -69,6 +68,7 @@ pub const LUAJIT: ExecutionTargetSpec = ExecutionTargetSpec {
 /// The browser artifact.
 pub const JAVASCRIPT: ExecutionTargetSpec = ExecutionTargetSpec {
     name: "javascript",
+    backend: Some(bone_semantic::hir::FnBackend::Js),
     pointer_width: 64,
     caps: Capabilities {
         foreign_symbols: false,
@@ -85,6 +85,7 @@ pub const JAVASCRIPT: ExecutionTargetSpec = ExecutionTargetSpec {
 /// real targets while sharing their logical graph.
 pub const NATIVE_C64: ExecutionTargetSpec = ExecutionTargetSpec {
     name: "native-c64",
+    backend: None,
     pointer_width: 16,
     caps: Capabilities {
         foreign_symbols: true,
@@ -101,6 +102,7 @@ pub const NATIVE_C64: ExecutionTargetSpec = ExecutionTargetSpec {
 /// is false -- an `extern` needs an import entry the artifact must carry.
 pub const WASM32: ExecutionTargetSpec = ExecutionTargetSpec {
     name: "wasm32",
+    backend: None,
     pointer_width: 32,
     caps: Capabilities {
         foreign_symbols: false,
@@ -114,33 +116,13 @@ pub const WASM32: ExecutionTargetSpec = ExecutionTargetSpec {
 
 pub const ALL: &[ExecutionTargetSpec] = &[LUAJIT, JAVASCRIPT, NATIVE_C64, WASM32];
 
-/// One target's view of a graph it did not build.
-#[derive(Clone, Debug)]
-pub struct Projection {
-    pub target: &'static str,
-    /// Logical instances. Identical across every projection BY CONSTRUCTION --
-    /// see the module docs -- and asserted anyway, because "by construction" is
-    /// a claim about code that can be edited.
-    pub instances: usize,
-    /// Digest of the rendered manifest. The property under test.
-    pub manifest_digest: u64,
-    pub boundaries_total: usize,
-    pub boundaries_available: usize,
-    /// Unsupported boundaries by class. Each is plan S 10's `Invalid boundary`
-    /// outcome on this target: a spanned rejection, never a stub.
-    pub unsupported_by_class: BTreeMap<&'static str, usize>,
-    /// Obligations this target defers to a later stage. Deferred is not
-    /// unknown: each names the plan section that owns it.
-    pub deferred: Vec<&'static str>,
-}
-
 /// Can `target` supply this boundary class?
 ///
 /// The erased runtime entries are deliberately NOT capability-gated: S 1.4's
 /// contract is that the entry exists for EVERY target skull emits, and the
 /// compile-time rejection in `stdlib_funcref` is what enforces it. A projection
 /// that let one be unavailable would be asserting the opposite of the contract.
-fn supports(caps: &Capabilities, class: BoundaryClass) -> bool {
+pub fn supports(caps: &Capabilities, class: BoundaryClass) -> bool {
     match class {
         BoundaryClass::Extern => caps.foreign_symbols,
         BoundaryClass::InlineBody => caps.inline_lua || caps.inline_js,
@@ -149,19 +131,9 @@ fn supports(caps: &Capabilities, class: BoundaryClass) -> bool {
     }
 }
 
-/// Project `g` through `spec`. Read-only in the type system, not just by
-/// convention: `g` is `&`, so no discovery can happen here.
-pub fn project(ws: &Workspace, g: &InstanceGraph, spec: ExecutionTargetSpec) -> Projection {
-    let mut unsupported_by_class: BTreeMap<&'static str, usize> = BTreeMap::new();
-    let mut available = 0usize;
-    for b in g.boundaries.values() {
-        if supports(&spec.caps, b.class) {
-            available += 1;
-        } else {
-            *unsupported_by_class.entry(b.class.name()).or_insert(0) += 1;
-        }
-    }
-
+/// The obligations `spec` defers to a later stage. Deferred is not unknown:
+/// each names the plan section that owns it.
+pub fn deferred_for(spec: &ExecutionTargetSpec) -> Vec<&'static str> {
     let mut deferred = Vec::new();
     if !spec.caps.garbage_collected {
         deferred.push("ownership realization: retain/release + cycle policy (plan S 20c)");
@@ -178,14 +150,5 @@ pub fn project(ws: &Workspace, g: &InstanceGraph, spec: ExecutionTargetSpec) -> 
     if !spec.caps.foreign_symbols {
         deferred.push("`extern` needs a declared import entry rather than a host lookup");
     }
-
-    Projection {
-        target: spec.name,
-        instances: g.instances.len(),
-        manifest_digest: crate::instance_graph::manifest_digest(ws, g),
-        boundaries_total: g.boundaries.len(),
-        boundaries_available: available,
-        unsupported_by_class,
-        deferred,
-    }
+    deferred
 }

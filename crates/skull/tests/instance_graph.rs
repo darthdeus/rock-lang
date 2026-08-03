@@ -337,12 +337,13 @@ fn main() {
 }
 
 /// Plan S 20g.1: feed the SAME shadow graph to every capability fixture and
-/// require logical instance identity to be unchanged while realization
-/// obligations differ. The projections must not re-derive identity -- `project`
-/// takes `&InstanceGraph`, so it structurally cannot, and this asserts the
-/// consequence.
+/// require logical instance identity to be unchanged while REALIZATION
+/// differs. Asserted over the realized SETS, not over a digest of the shared
+/// graph -- that digest is a property of `g`, which every artifact reads
+/// unchanged, so it would agree even if realization were inert.
 #[test]
-fn a_projection_never_changes_logical_identity() {
+fn an_artifact_never_changes_logical_identity() {
+    use skull::artifact::{self, ArtifactMappings};
     use skull::target_projection as tp;
     let (ws, g) = graph_of(
         r#"
@@ -356,24 +357,48 @@ fn main() {
 }
 "#,
     );
-    let projections: Vec<tp::Projection> =
-        tp::ALL.iter().map(|s| tp::project(&ws, &g, *s)).collect();
-    assert_eq!(projections.len(), 4, "all four fixtures must project");
-    let first = projections[0].manifest_digest;
-    for p in &projections {
-        assert_eq!(
-            p.manifest_digest, first,
-            "projection `{}` changed the manifest digest",
-            p.target
-        );
-        assert_eq!(p.instances, projections[0].instances, "`{}`", p.target);
+    let mappings = |spec: tp::ExecutionTargetSpec| match spec.backend {
+        Some(b) => ArtifactMappings::for_backend(b),
+        None => ArtifactMappings::none(),
+    };
+    let views: Vec<artifact::ArtifactView> =
+        tp::ALL.iter().map(|s| artifact::realize(&ws, &g, *s, mappings(*s))).collect();
+    assert_eq!(views.len(), 4, "all four fixtures must realize");
+
+    // Identity: an instance realized by two artifacts is spelled identically by
+    // both, and no artifact holds one the shared graph does not.
+    for v in &views {
+        for i in &v.instances {
+            assert!(
+                g.instances.contains(i),
+                "`{}` invented an instance",
+                v.spec.name
+            );
+        }
+        for w in &views {
+            for i in v.instances.intersection(&w.instances) {
+                assert_eq!(
+                    v.symbols.get(i),
+                    w.symbols.get(i),
+                    "`{}` and `{}` spell `{}` differently",
+                    v.spec.name,
+                    w.spec.name,
+                    g.identity(&ws, i)
+                );
+            }
+        }
     }
+
     // ...while realization genuinely differs, or the equality above is vacuous.
-    let luajit = projections.iter().find(|p| p.target == "luajit").unwrap();
-    let wasm = projections.iter().find(|p| p.target == "wasm32").unwrap();
+    let by = |name: &str| views.iter().find(|v| v.spec.name == name).unwrap();
+    let (luajit, wasm) = (by("luajit"), by("wasm32"));
     assert!(
-        wasm.boundaries_available < luajit.boundaries_available,
-        "wasm32 must lose boundaries luajit has, or the fixtures are not distinct"
+        wasm.instances.len() < luajit.instances.len(),
+        "wasm32 must lose declarations luajit keeps, or the fixtures are not distinct"
+    );
+    assert!(
+        !wasm.instances.is_empty(),
+        "wasm32 kept nothing, so the comparison is vacuous"
     );
     assert!(
         !wasm.deferred.is_empty() && luajit.deferred.is_empty(),
@@ -383,32 +408,62 @@ fn main() {
 
 /// An `extern` is available exactly where the target supplies foreign symbols.
 /// The `Invalid boundary` outcome (plan S 10) is per-target, so this is what
-/// makes a boundary's `target` field load-bearing rather than decorative.
+/// makes an artifact's capability read load-bearing rather than decorative.
 #[test]
 fn extern_availability_follows_the_capability_not_the_target_name() {
+    use skull::artifact::{self, ArtifactMappings, Unrealizable};
+    use skull::instance_graph::BoundaryClass;
     use skull::target_projection as tp;
+    // TWO externs, because the two causes are different questions. The
+    // Lua-hosted one is foreign to any non-Lua artifact before its CLASS is
+    // ever asked; only a JS-hosted extern on the JS artifact reaches the
+    // capability arm.
     let (ws, g) = graph_of(
         r#"
 extern(ffi, "stone") fn host_tick(n: int) -> int
+extern(js) fn web_tick(n: int) -> int
 fn main() { host_tick(3) }
 "#,
     );
     assert!(
-        g.boundaries.values().any(|b| b.class
-            == skull::instance_graph::BoundaryClass::Extern),
-        "the extern was not classified as a boundary at all"
+        g.instances.iter().any(|i| ws.module(i.func.module).functions[i.func.func].is_extern),
+        "the extern is not in the graph at all"
     );
-    let unsupported = |spec| {
-        tp::project(&ws, &g, spec)
-            .unsupported_by_class
-            .get("extern")
-            .copied()
-            .unwrap_or(0)
+    let cause_of = |spec: tp::ExecutionTargetSpec, name: &str| -> Option<Unrealizable> {
+        let m = match spec.backend {
+            Some(b) => ArtifactMappings::for_backend(b),
+            None => ArtifactMappings::none(),
+        };
+        artifact::realize(&ws, &g, spec, m)
+            .excluded
+            .iter()
+            .find(|e| {
+                ws.module(e.instance.func.module).functions[e.instance.func.func].name.as_str()
+                    == name
+            })
+            .map(|e| e.cause)
     };
-    assert_eq!(unsupported(tp::LUAJIT), 0, "luajit supplies foreign symbols");
-    assert_eq!(unsupported(tp::NATIVE_C64), 0, "a C target supplies foreign symbols");
-    assert!(unsupported(tp::JAVASCRIPT) > 0, "JS has no `ffi.load`");
-    assert!(unsupported(tp::WASM32) > 0, "wasm imports are declared, not looked up");
+    assert_eq!(cause_of(tp::LUAJIT, "host_tick"), None, "luajit supplies foreign symbols");
+    // The CAPABILITY arm: this declaration serves the JS artifact, so the class
+    // question is reached, and `foreign_symbols: false` is what rejects it.
+    assert_eq!(
+        cause_of(tp::JAVASCRIPT, "web_tick"),
+        Some(Unrealizable::ClassUnsupported(BoundaryClass::Extern)),
+        "JS declares no foreign-symbol capability, so even its own extern must \
+         be an invalid boundary rather than a stub"
+    );
+    // The BACKEND arm: a Lua-hosted extern names a host these artifacts do not
+    // have, which is answered before the class question. `NATIVE_C64` declares
+    // `foreign_symbols: true`, and that is exactly why this must not be decided
+    // by the capability -- no declaration in this workspace names a C host.
+    for spec in [tp::JAVASCRIPT, tp::NATIVE_C64, tp::WASM32] {
+        assert_eq!(
+            cause_of(spec, "host_tick"),
+            Some(Unrealizable::ForeignToArtifact),
+            "a Lua-hosted extern survived `{}` on the strength of a capability flag",
+            spec.name
+        );
+    }
 }
 
 /// A coroutine instance OWNS helper symbols, and today every one of them is
@@ -1711,7 +1766,10 @@ fn main() { opaque_caller(1) }
     let deps: Vec<String> = g
         .inline_body_deps
         .iter()
-        .flat_map(|(owner, names)| names.iter().map(move |n| format!("{owner} -> {n}")))
+        .flat_map(|(owner, names)| {
+            let name = ws.module(owner.0.module).functions[owner.0.func].name;
+            names.iter().map(move |n| format!("{name} -> {n}"))
+        })
         .collect();
     assert!(
         deps.iter().any(|d| d.contains("opaque_caller")
@@ -1728,7 +1786,6 @@ fn main() { opaque_caller(1) }
         "the dependency scan reported an entry the body never names: {:?}",
         g.erased_entries
     );
-    let _ = &ws;
 }
 
 /// The other rejection an always-emitted body can hold: a generic function
