@@ -61,6 +61,9 @@ mod instance_graph;
 #[path = "artifact_view.rs"]
 mod artifact_view;
 
+#[path = "shader_artifact.rs"]
+mod shader_artifact;
+
 #[path = "intrinsics.rs"]
 mod intrinsics;
 #[path = "lambda_static.rs"]

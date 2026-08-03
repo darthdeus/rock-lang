@@ -206,7 +206,7 @@ impl skull_mir::reach::ReachPolicy for Reach<'_> {
     fn visit(&mut self, fref: FuncRef) -> Result<Vec<FuncRef>, CompilerError> {
         let f = &self.ws.module(fref.module).functions[fref.func];
         // Signature must be tier 0.
-        check_signature(self.ws, f)?;
+        check_tier0_signature(self.ws, f)?;
         // Lower to MIR (values-first-class) and profile-check the body.
         let mf = lower_function(self.ws, self.scx, fref.module, fref.func).map_err(|e| {
             err(f.name_span, format!("shader profile: `{}` cannot lower for GLSL: {}", f.name, e.message))
@@ -219,7 +219,11 @@ impl skull_mir::reach::ReachPolicy for Reach<'_> {
 }
 
 /// Reject a signature whose params/return aren't tier 0.
-fn check_signature(ws: &Workspace, f: &Function) -> Result<(), CompilerError> {
+///
+/// Public because the mono SHADER ARTIFACT VIEW asks it of what a target
+/// packages: the same function the emission walk runs, so a view cannot admit
+/// a signature emission refuses.
+pub fn check_tier0_signature(ws: &Workspace, f: &Function) -> Result<(), CompilerError> {
     for pd in &f.param_decls {
         glsl_ty(ws, pd.ty, f.name_span, &format!("parameter `{}`", pd.name))?;
     }
@@ -414,7 +418,7 @@ impl IntrinsicTable for GlslIntrinsics {
 /// Vec operator's native infix), rather than emitted as a GLSL fn definition. A
 /// `__op_*` reaching codegen as a real call is always non-scalar (scalar ops lower
 /// to native MIR insts), so a 2-arg `__op_*` is always a Vec operator.
-fn renders_inline(f: &Function) -> bool {
+pub fn renders_inline(f: &Function) -> bool {
     GlslIntrinsics.lookup(f).is_some()
         || (vec_op_symbol(f.name.as_str()).is_some() && f.param_decls.iter().count() == 2)
 }

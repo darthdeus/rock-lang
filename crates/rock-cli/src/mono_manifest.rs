@@ -190,6 +190,7 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     let mut art_severed_examples: Vec<String> = Vec::new();
     let mut art_severed_groups: BTreeMap<(&'static str, String, &'static str), (usize, usize)> =
         BTreeMap::new();
+    let mut shader_totals = ShaderStats::default();
 
     for dir in &projects {
         let name = dir.strip_prefix(&root).unwrap_or(dir).display().to_string();
@@ -353,6 +354,7 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
                 art_shared_collisions += p.shared_symbol_collisions;
                 art_id_collisions += p.identity_collisions.0;
                 art_id_collisions_by_name += p.identity_collisions.1;
+                shader_totals.merge(&p.shader_stats);
                 for (k, (sites, insts)) in p.artifact_severed_groups {
                     let e = art_severed_groups.entry(k).or_insert((0, 0));
                     e.0 += sites;
@@ -1086,6 +1088,38 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
         println!("- severed call: {x}");
     }
     println!();
+    println!("## shader artifact views (plan S 9, S 20a)");
+    println!();
+    println!(
+        "The GPU half of the same artifacts, over the SAME graph: the `rock_shader` entries \
+         production registers, the helpers they reach, and GLSL's own rejections over exactly \
+         that retained set. The profile is the TYPED value on the shader axis; a target with \
+         no shader axis packages none."
+    );
+    println!();
+    println!(
+        "- target/project pairs packaging a shader artifact: **{}**, without one: **{}**",
+        shader_totals.targets_with_shader, shader_totals.targets_without_shader
+    );
+    println!(
+        "- shader entries **{}**, helpers **{}**, inline-rendered builtins **{}**, over \
+         **{}** call sites walked",
+        shader_totals.entries,
+        shader_totals.helpers,
+        shader_totals.builtins,
+        shader_totals.sites_walked
+    );
+    println!(
+        "- rejections: recursion **{}**, tier-0 profile **{}**; artifacts packaging a profile \
+         other than `Core330`: **{}**",
+        shader_totals.recursion_rejections,
+        shader_totals.profile_rejections,
+        shader_totals.non_core330
+    );
+    for x in &shader_totals.examples {
+        println!("- shader rejection: {x}");
+    }
+    println!();
     println!("### severed calls, by callee and cause");
     println!();
     println!(
@@ -1239,6 +1273,43 @@ struct OneProject {
     /// per-site total is the COST of the artifact's missing bodies; this is the
     /// obligation list, which is what a worklist actually needs.
     artifact_severed_groups: Vec<((&'static str, String, &'static str), (usize, usize))>,
+    shader_stats: ShaderStats,
+}
+
+/// The shader artifact's census, summed over targets and projects. Entries and
+/// helpers are reported apart from the walk's site denominator: zero rejections
+/// over zero sites walked is not a clean shader artifact, it is an absent one.
+#[derive(Default, Clone)]
+struct ShaderStats {
+    targets_with_shader: usize,
+    targets_without_shader: usize,
+    entries: usize,
+    helpers: usize,
+    builtins: usize,
+    sites_walked: usize,
+    recursion_rejections: usize,
+    profile_rejections: usize,
+    non_core330: usize,
+    examples: Vec<String>,
+}
+
+impl ShaderStats {
+    fn merge(&mut self, o: &ShaderStats) {
+        self.targets_with_shader += o.targets_with_shader;
+        self.targets_without_shader += o.targets_without_shader;
+        self.entries += o.entries;
+        self.helpers += o.helpers;
+        self.builtins += o.builtins;
+        self.sites_walked += o.sites_walked;
+        self.recursion_rejections += o.recursion_rejections;
+        self.profile_rejections += o.profile_rejections;
+        self.non_core330 += o.non_core330;
+        for x in &o.examples {
+            if self.examples.len() < 10 {
+                self.examples.push(x.clone());
+            }
+        }
+    }
 }
 
 /// A span's file, relative to the analyzed root. An absolute path varies by
@@ -1484,6 +1555,52 @@ fn one_project(
     let artifacts: Vec<(&'static str, skull::artifact::ArtifactCensus)> =
         views.iter().map(|v| (v.spec.name, v.census())).collect();
 
+    // The SHADER half of the same artifacts, over the same graph: the
+    // `rock_shader` entries production registers plus the helpers they reach.
+    // Roots come from `skull_mir`'s own collector -- an input, exactly like the
+    // CPU emission roots.
+    let shader_roots: Vec<skull_mir::mir::FuncRef> =
+        skull_mir::lower::collect_shader_collection(&ws)
+            .map(|c| {
+                c.pairs
+                    .into_iter()
+                    .flat_map(|p| p.vert.into_iter().chain(std::iter::once(p.frag)))
+                    .collect()
+            })
+            .unwrap_or_default();
+    let mut shader_stats = ShaderStats::default();
+    for spec in skull::target_projection::ALL {
+        let Some(sv) = skull::shader_artifact::realize_shader(
+            &ws,
+            &g,
+            &skull::shader_artifact::ShaderArtifactRequest { spec: *spec, roots: &shader_roots },
+        ) else {
+            shader_stats.targets_without_shader += 1;
+            continue;
+        };
+        shader_stats.targets_with_shader += 1;
+        shader_stats.entries += sv.roots.len();
+        shader_stats.helpers += sv.helpers.len();
+        shader_stats.builtins += sv.builtins.len();
+        shader_stats.sites_walked += sv.sites_walked;
+        for r in &sv.rejections {
+            match r.kind {
+                skull::shader_artifact::ShaderRejectionKind::Recursion => {
+                    shader_stats.recursion_rejections += 1
+                }
+                skull::shader_artifact::ShaderRejectionKind::Profile(_) => {
+                    shader_stats.profile_rejections += 1
+                }
+            }
+        }
+        for x in sv.render_rejections(&ws).into_iter().take(2) {
+            shader_stats.examples.push(format!("`{}` {x}", spec.name));
+        }
+        if sv.profile != skull_codegen_glsl::GlslProfile::Core330 {
+            shader_stats.non_core330 += 1;
+        }
+    }
+
     if let Some((path, name)) = dump {
         let stem = format!("{path}/{}", name.replace('/', "_"));
         std::fs::write(format!("{stem}.manifest"), &text)
@@ -1727,6 +1844,7 @@ fn one_project(
         identity_collisions: g.colliding_identities(&ws),
         artifact_severed_examples,
         artifact_severed_groups,
+        shader_stats,
     })
 }
 
