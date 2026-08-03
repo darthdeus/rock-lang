@@ -106,6 +106,46 @@ fn unfilled_texture_slot_fails_a_sim() {
     }
 }
 
+/// An activation mark answers for EVERY draw in the activation. Without a
+/// second tier the first audit clears it and every later draw false-alarms,
+/// which is what makes a four-sampler program unauditable per draw.
+#[test]
+fn an_activation_mark_survives_every_audit_until_the_program_is_rebound() {
+    let (ok, ok_success) =
+        run_named_sim("texture_slot_mark_tiers", &[("SIM_TIER_ARM", "activation_survives")]);
+    assert!(
+        ok_success,
+        "an activation mark must satisfy every audit in its activation.\n{ok}"
+    );
+
+    // The other half of the tier: a PER-DRAW mark answers for one draw only, or
+    // an earlier binding hides a later missing one.
+    let (per_draw, per_draw_success) =
+        run_named_sim("texture_slot_mark_tiers", &[("SIM_TIER_ARM", "per_draw_cleared")]);
+    assert!(
+        !per_draw_success,
+        "the second audit must report all three slots, failing the run.\n{per_draw}"
+    );
+    assert!(
+        per_draw.contains("and none of them survives into the next draw (missing=3)"),
+        "per-draw marks must be cleared after every audit.\n{per_draw}"
+    );
+
+    // Re-binding the program starts a new activation, so the previous one's
+    // bindings must stop answering: "bound while this program is current" is
+    // scoped to the current bind, not to the program's whole lifetime.
+    let (rebind, rebind_success) =
+        run_named_sim("texture_slot_mark_tiers", &[("SIM_TIER_ARM", "rebind_clears")]);
+    assert!(
+        !rebind_success,
+        "the audit after a re-bind must report the unbound slot, failing the run.\n{rebind}"
+    );
+    assert!(
+        rebind.contains("re-binding the program drops its activation marks (missing=1)"),
+        "a re-bind must clear the program's activation marks.\n{rebind}"
+    );
+}
+
 /// A nonzero image handle is not a bind: `sprite.rs` misses in IMAGES, binds
 /// nothing, sets no sampler uniform and draws anyway. The gate must mark slot 0
 /// from the RESOLVED texture, or it calls that slot filled while the shader
