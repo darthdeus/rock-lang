@@ -1,13 +1,7 @@
 //! `stone/engine/web/imgui_stubs.rock` is GENERATED from the authoritative
 //! declarations in `stone/engine/ui/imgui.rock`. This test regenerates it and
-//! fails if the checked-in file differs, so the two cannot drift.
-//!
-//! It replaced a hand-maintained mirror. That mirror had silently lost seven
-//! bridges, and the name-only gate that first caught them could not have seen a
-//! changed SIGNATURE at all -- which is the drift that actually broke the web
-//! build (`stone_play_sound` lost its `bus` param the same way). Comparing the
-//! whole generated text catches names, parameters, return types and bodies
-//! alike.
+//! fails if the checked-in file differs, so the two cannot drift; the whole
+//! text is compared, so a changed SIGNATURE is caught, not just a missing name.
 //!
 //! Regenerate with `just gen-imgui-web-stubs`.
 //!
@@ -66,14 +60,32 @@ fn parse_inline_lua_decls(src: &str) -> Vec<Decl> {
             continue;
         }
 
-        // Annotations sit before `inline(lua)` on the same line, and are the
-        // ONLY thing allowed to; anything else means this is not a declaration.
-        if !before.is_empty()
-            && !before.split_whitespace().all(|t| t.starts_with('@'))
-        {
+        // Same-line annotations are the ONLY other thing allowed before
+        // `inline(lua)`; anything else means this is not a declaration.
+        if !before.is_empty() && !is_all_annotations(before) {
             continue;
         }
-        let annotations = before.to_string();
+        // Rock also allows annotations on their own lines above the decl
+        // (`@nomangle\ninline(lua) fn ...`, as in systems.rock). Missing those
+        // would emit a twin WITHOUT `@nomangle`, silently breaking every
+        // by-name call into it, so collect the contiguous run above as well.
+        let mut anns: Vec<&str> = Vec::new();
+        let mut cursor = line_start;
+        while cursor > 0 {
+            let prev_end = cursor - 1; // the '\n' ending the previous line
+            let prev_start = src[..prev_end].rfind('\n').map(|i| i + 1).unwrap_or(0);
+            let prev = src[prev_start..prev_end].trim();
+            if prev.is_empty() || !is_all_annotations(prev) {
+                break;
+            }
+            anns.push(prev);
+            cursor = prev_start;
+        }
+        anns.reverse();
+        if !before.is_empty() {
+            anns.push(before);
+        }
+        let annotations = anns.join(" ");
 
         let Some(fn_rel) = src[search..].find("fn ") else { continue };
         let name_start = search + fn_rel + 3;
@@ -114,6 +126,49 @@ fn parse_inline_lua_decls(src: &str) -> Vec<Decl> {
         out.push(Decl { annotations, name, params, ret });
     }
     out
+}
+
+/// Is `text` composed ENTIRELY of annotations (`@name` or `@name(...)`, one or
+/// more)? Used to decide whether a line above a declaration belongs to it.
+/// Parenthesised arguments may contain commas and quoted strings
+/// (`@allow(long_inline_lua, "why")`), so the scan tracks quotes and depth.
+fn is_all_annotations(text: &str) -> bool {
+    let mut rest = text.trim();
+    if rest.is_empty() {
+        return false;
+    }
+    while !rest.is_empty() {
+        let Some(after_at) = rest.strip_prefix('@') else { return false };
+        let name_len =
+            after_at.chars().take_while(|c| c.is_alphanumeric() || *c == '_').count();
+        if name_len == 0 {
+            return false;
+        }
+        rest = &after_at[name_len..];
+        if rest.starts_with('(') {
+            let mut depth = 0usize;
+            let mut in_str = false;
+            let mut end = None;
+            for (i, c) in rest.char_indices() {
+                match c {
+                    '"' => in_str = !in_str,
+                    '(' if !in_str => depth += 1,
+                    ')' if !in_str => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = Some(i);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let Some(e) = end else { return false };
+            rest = &rest[e + 1..];
+        }
+        rest = rest.trim_start();
+    }
+    true
 }
 
 /// Is `at` inside a `"""..."""` body? Counts delimiters before it -- an odd
@@ -247,4 +302,49 @@ fn imgui_web_stubs_are_generated_from_imgui_rock() {
          Regenerate with `just gen-imgui-web-stubs`.\n\
          --- checked in ---\n{got}\n--- generated ---\n{want}"
     );
+}
+
+/// Rock allows an annotation on its own line above a declaration, and the twin
+/// must carry it: an `inline(js)` sibling that lost `@nomangle` gets a mangled
+/// name, so every by-name call into it (other inline bodies, compiler codegen)
+/// silently misses. Same-line, own-line and mixed forms all have to land.
+#[test]
+fn annotations_above_the_declaration_reach_the_generated_twin() {
+    let src = "\
+@nomangle
+inline(lua) fn own_line(a: int) -> bool = \"\"\"
+    return true
+\"\"\"
+
+@pure @nomangle
+inline(lua) fn several_on_one_line() = \"\"\"
+\"\"\"
+
+@nomangle
+@allow(long_inline_lua, \"has a comma and a string\")
+inline(lua) fn stacked_lines(x: float) -> float = \"\"\"
+    return x
+\"\"\"
+
+@inline inline(lua) fn same_line() = \"\"\"
+\"\"\"
+
+// A blank line breaks the run: this decl owns no annotation.
+@nomangle
+
+inline(lua) fn detached() = \"\"\"
+\"\"\"
+";
+    let got = generate(src);
+    for want in [
+        "@nomangle inline(js) fn own_line(a: int) -> bool = \"return false;\"",
+        "@pure @nomangle inline(js) fn several_on_one_line() = \"\"",
+        "@nomangle @allow(long_inline_lua, \"has a comma and a string\") \
+         inline(js) fn stacked_lines(x: float) -> float = \"return 0;\"",
+        "@inline inline(js) fn same_line() = \"\"",
+        "\ninline(js) fn detached() = \"\"",
+    ] {
+        let want = want.replace("         ", "");
+        assert!(got.contains(&want), "missing `{want}` in:\n{got}");
+    }
 }
