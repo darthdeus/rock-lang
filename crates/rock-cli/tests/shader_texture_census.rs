@@ -160,10 +160,10 @@ const EXPECTED: &[(&str, &str, &str)] = &[
     ("sprite_batch_vert+sprite_batch_frag", "uNormalTex", "bare"),
     ("sprite_batch_vert+sprite_batch_frag", "uShadowmapTex", "bare"),
     ("sprite_batch_vert+sprite_batch_frag", "uTexture", "bare"),
-    ("text_vert+text_frag", "text", "bare"),
+    ("text_vert+text_frag", "text", "slot 0"),
     ("tonemap_frag", "bloom_tex", "slot 1"),
     ("tonemap_frag", "scene_tex", "slot 0"),
-    ("ui_vert+ui_dissolve_frag", "uTexture", "bare"),
+    ("ui_vert+ui_dissolve_frag", "uTexture", "slot 0"),
 ];
 
 /// Dropping a project with unique shader registrations must lose rows.
