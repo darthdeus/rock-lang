@@ -123,8 +123,7 @@ fn premise_the_shared_graph_keeps_both_backend_siblings() {
 fn an_artifact_retains_only_the_sibling_that_serves_it() {
     let ws = check("fn main() { let b: NativeBuffer<int> = nb_new(4); let x = b[0] }");
     let sibling_backends = |view: &artifact::ArtifactView| -> Vec<FnBackend> {
-        view.instances
-            .iter()
+        view.retained()
             .filter(|i| {
                 ws.module(i.func.module).functions[i.func.func].name.as_str()
                     == "__nb_checked_index"
@@ -251,7 +250,7 @@ fn main() { let a = portable_op(1) }
     let (g, roots) = graph_for(&ws, FnBackend::Lua);
     let view = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT, &roots));
     assert!(
-        view.instances.iter().any(|i| {
+        view.retained().any(|i| {
             ws.module(i.func.module).functions[i.func.func].name.as_str() == "portable_op"
         }),
         "a portable intrinsic was dropped: {:?}",
@@ -315,8 +314,12 @@ fn inline_body_dependencies_resolve_to_targets_in_the_artifact() {
             Callee::Boundary(b) => {
                 assert_eq!(b.target, FnBackend::Lua, "the boundary names another target");
                 assert!(
-                    view.instances.iter().any(|i| i.func == b.declaration),
+                    view.retained().any(|i| i.func == b.declaration),
                     "a dependency resolved to a declaration outside the artifact"
+                );
+                assert!(
+                    view.boundaries.keys().any(|k| k.declaration == b.declaration),
+                    "a boundary dependency is not in the artifact's boundary set"
                 );
                 assert!(
                     view.symbols.values().any(|s| *s == b.symbol),
@@ -383,9 +386,15 @@ fn main() {
     assert!(c.instances > 0, "the artifact retained nothing");
     assert_eq!(
         view.symbols.len(),
-        view.instances.len(),
+        c.retained,
         "the symbol table is not total over the retained instances"
     );
+    assert_eq!(
+        c.retained,
+        c.instances + c.boundaries,
+        "the Rock/boundary split does not partition the retained set: {c:?}"
+    );
+    assert!(c.boundaries > 0, "the fixture retained no boundary at all: {c:?}");
     assert_eq!(
         c.symbol_collisions, 0,
         "two retained instances share one symbol: {:?}",
@@ -423,7 +432,7 @@ fn realization_never_invents_an_instance() {
         let (g, roots) = view_of(&ws, spec);
         let view = artifact::realize(&ws, &g, &ArtifactRequest::new(spec, &roots));
         assert!(!view.census().graph_mismatch, "`{}` got a foreign graph", spec.name);
-        for i in &view.instances {
+        for i in view.retained() {
             assert!(
                 g.instances.contains(i),
                 "`{}` realized an instance the shared graph does not have: {}",
@@ -431,12 +440,14 @@ fn realization_never_invents_an_instance() {
                 g.identity(&ws, i)
             );
         }
-        // The accounting is a PARTITION: every shared instance is retained,
-        // unrealizable, or unreachable, never quietly absent from all three.
+        // The accounting is a PARTITION: every shared instance is a retained
+        // Rock instance, a retained boundary, unrealizable, or unreachable --
+        // never quietly absent from all four.
+        let c = view.census();
         assert_eq!(
-            view.instances.len() + view.excluded.len(),
+            c.instances + c.boundaries + view.excluded.len(),
             g.instances.len(),
-            "`{}` lost instances between the graph and the view",
+            "`{}` lost instances between the graph and the view: {c:?}",
             spec.name
         );
     }
@@ -520,7 +531,7 @@ fn retention_is_reachability_not_a_declaration_filter() {
     // exclusion above is a property of reachability and not of the declaration.
     let wide = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT, &all_roots));
     assert!(
-        wide.instances.iter().any(|i| {
+        wide.retained().any(|i| {
             ws.module(i.func.module).functions[i.func.func].name.as_str()
                 == "never_called_from_main"
         }),
@@ -529,15 +540,23 @@ fn retention_is_reachability_not_a_declaration_filter() {
     );
     // ...and the walk genuinely reaches transitively, not just its roots.
     assert!(
-        view.instances.len() > view.roots.len(),
+        c.retained > view.roots.len(),
         "the walk retained nothing beyond its roots: {c:?}"
     );
     assert!(
-        view.instances.iter().any(|i| {
+        view.retained().any(|i| {
             ws.module(i.func.module).functions[i.func.func].name.as_str() == "ident"
         }),
         "the walk did not reach a called generic"
     );
+    // Only ROCK bodies are traversed. A boundary is retained and never queued,
+    // which is the same rule the graph walk follows when it stops at one.
+    for i in &view.instances {
+        assert!(
+            view.realization[i].boundary_class().is_none(),
+            "a boundary was enqueued as a Rock instance"
+        );
+    }
 }
 
 /// A retained caller whose concrete callee this artifact cannot realize is a
@@ -668,8 +687,7 @@ fn cross_artifact_identity_is_the_instance_and_not_the_spelling() {
     // their walks reached types, so comparing raw ids across them compares
     // arena positions and not types.
     let ids_of = |v: &artifact::ArtifactView, ag: &InstanceGraph| {
-        v.instances
-            .iter()
+        v.retained()
             .map(|i| (ag.identity(&ws, i), v.symbols[i].clone()))
             .collect::<std::collections::BTreeMap<String, String>>()
     };
@@ -692,7 +710,7 @@ fn cross_artifact_identity_is_the_instance_and_not_the_spelling() {
     for v in [&lua, &js] {
         assert_eq!(
             v.symbols.len(),
-            v.instances.len(),
+            v.census().retained,
             "`{}`'s symbol table is not total",
             v.spec.name
         );
@@ -729,8 +747,8 @@ fn two_artifacts_differ_in_realization() {
     let lua = artifact::realize(&ws, &lg, &ArtifactRequest::new(LUAJIT, &lr));
     let js = artifact::realize(&ws, &jg, &ArtifactRequest::new(JAVASCRIPT, &jr));
 
-    let only_lua = lua.instances.difference(&js.instances).count();
-    let only_js = js.instances.difference(&lua.instances).count();
+    let only_lua = lua.retained().filter(|i| !js.retains(i)).count();
+    let only_js = js.retained().filter(|i| !lua.retains(i)).count();
     assert!(
         only_lua > 0 && only_js > 0,
         "the two artifacts realize identical sets, so the realization axis is \
@@ -755,7 +773,7 @@ fn a_target_with_no_backend_keeps_only_portable_bodies() {
     let c = view.census();
     assert!(c.excluded > 0, "the hostile target excluded nothing: {c:?}");
     assert!(c.instances > 0, "the hostile target excluded everything: {c:?}");
-    for i in &view.instances {
+    for i in view.retained() {
         let f = &ws.module(i.func.module).functions[i.func.func];
         assert!(
             f.inline_body.is_none() && !f.is_extern,
@@ -824,7 +842,7 @@ fn main() {
             Callee::Boundary(b) => b.declaration,
             Callee::Rock(i) => i.func,
         };
-        let n = view.instances.iter().filter(|i| i.func == decl).count();
+        let n = view.retained().filter(|i| i.func == decl).count();
         assert_eq!(n, 1, "a resolved dependency had {n} candidate instances");
     }
 }

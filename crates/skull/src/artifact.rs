@@ -298,7 +298,11 @@ pub struct SymbolCollision {
 pub struct ArtifactCensus {
     /// Instances retained, the roots they were reached from, and the shared
     /// population they were taken from.
+    /// Rock instances the artifact lowers, and boundaries it names. Reported
+    /// apart because they are different obligations; `retained` is their sum.
     pub instances: usize,
+    pub boundaries: usize,
+    pub retained: usize,
     pub roots: usize,
     pub shared_instances: usize,
     pub excluded: usize,
@@ -332,9 +336,16 @@ pub struct ArtifactView {
     /// The artifact's root instances -- realizable emission roots, plus the
     /// callees of always-emitted bodies, which have no incoming edge.
     pub roots: BTreeSet<Instance>,
-    /// Retained instances: reachable from `roots` AND realizable here. A SUBSET
-    /// of `g.instances`.
+    /// Retained ROCK instances: reachable from `roots`, realizable here, and
+    /// lowered from a Rock body. A SUBSET of `g.instances`.
+    ///
+    /// Plan S 9's `ArtifactGraph` separates `instances` from `boundaries`, and
+    /// so does this: a boundary has no body the artifact lowers, so enqueueing
+    /// it as an instance would ask for callees it does not have.
     pub instances: BTreeSet<Instance>,
+    /// Retained BOUNDARIES, by the identity a call must name. Reached, never
+    /// traversed.
+    pub boundaries: BTreeMap<BoundaryId, Instance>,
     /// How each retained instance is supplied here.
     pub realization: BTreeMap<Instance, Realization>,
     pub excluded: Vec<Excluded>,
@@ -352,9 +363,23 @@ pub struct ArtifactView {
 }
 
 impl ArtifactView {
+    /// Every retained instance -- Rock bodies AND boundaries. The positive side
+    /// of the partition, and what `symbols` is total over: a boundary still
+    /// needs a spelling, it just has no body to traverse.
+    pub fn retained(&self) -> impl Iterator<Item = &Instance> {
+        self.realization.keys()
+    }
+
+    /// Whether this artifact retains `i`, however it is supplied.
+    pub fn retains(&self, i: &Instance) -> bool {
+        self.realization.contains_key(i)
+    }
+
     pub fn census(&self) -> ArtifactCensus {
         let mut c = ArtifactCensus {
             instances: self.instances.len(),
+            boundaries: self.boundaries.len(),
+            retained: self.realization.len(),
             roots: self.roots.len(),
             shared_instances: self.shared_instances,
             excluded: self.excluded.len(),
@@ -583,11 +608,48 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     // Not over `g.edges`: an edge says two instances are related, a site says
     // WHICH operation related them, which is what a severed call has to name.
     let mut instances: BTreeSet<Instance> = BTreeSet::new();
+    let mut boundaries: BTreeMap<BoundaryId, Instance> = BTreeMap::new();
+    let mut realization: BTreeMap<Instance, Realization> = BTreeMap::new();
     let mut severed: Vec<Severed> = Vec::new();
     let mut sites_walked = 0usize;
-    let mut queue: VecDeque<Instance> = roots.iter().cloned().collect();
+    let mut queue: VecDeque<Instance> = VecDeque::new();
+
+    // Admitting one reached instance. EVERY reached callee goes through here --
+    // roots and call sites alike -- so plan S 9's `Rock` / `Boundary` split is
+    // made once. Only a Rock body is ENQUEUED: a boundary has no body the
+    // artifact lowers, which is the same rule the graph walk follows when it
+    // stops at a boundary rather than enumerating its callees.
+    let mut admit = |i: &Instance,
+                     instances: &mut BTreeSet<Instance>,
+                     boundaries: &mut BTreeMap<BoundaryId, Instance>,
+                     realization: &mut BTreeMap<Instance, Realization>,
+                     queue: &mut VecDeque<Instance>| {
+        let r = *realizable[i].as_ref().expect("admitted means realizable");
+        if realization.insert(i.clone(), r).is_some() {
+            return;
+        }
+        match r.boundary_class() {
+            Some(class) => {
+                let f = &ws.module(i.func.module).functions[i.func.func];
+                boundaries.insert(
+                    BoundaryId {
+                        declaration: i.func,
+                        class,
+                        target: want,
+                        symbol: skull_mir::mangle::mangle_fn(ws, f),
+                    },
+                    i.clone(),
+                );
+            }
+            None => {
+                instances.insert(i.clone());
+                queue.push_back(i.clone());
+            }
+        }
+    };
+
     for r in &roots {
-        instances.insert(r.clone());
+        admit(r, &mut instances, &mut boundaries, &mut realization, &mut queue);
     }
     while let Some(caller) = queue.pop_front() {
         let Some(sites) = g.call_sites.get(&caller) else { continue };
@@ -595,11 +657,13 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
             sites_walked += 1;
             let SiteOutcome::Resolved(callee) = &rec.outcome else { continue };
             match realizable.get(callee) {
-                Some(Ok(_)) => {
-                    if instances.insert(callee.clone()) {
-                        queue.push_back(callee.clone());
-                    }
-                }
+                Some(Ok(_)) => admit(
+                    callee,
+                    &mut instances,
+                    &mut boundaries,
+                    &mut realization,
+                    &mut queue,
+                ),
                 Some(Err(cause)) => severed.push(Severed {
                     caller: caller.clone(),
                     site: site.clone(),
@@ -614,17 +678,13 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         }
     }
 
-    let realization: BTreeMap<Instance, Realization> = instances
-        .iter()
-        .map(|i| (i.clone(), *realizable[i].as_ref().expect("retained means realizable")))
-        .collect();
-
-    // The partition: every shared instance is retained, unrealizable, or
-    // unreachable. Reported as a partition so a lost instance cannot hide.
+    // The partition: every shared instance is a retained Rock instance, a
+    // retained boundary, unrealizable, or unreachable. Reported as a partition
+    // so a lost instance cannot hide.
     let excluded: Vec<Excluded> = g
         .instances
         .iter()
-        .filter(|i| !instances.contains(*i))
+        .filter(|i| !realization.contains_key(*i))
         .map(|i| Excluded {
             instance: i.clone(),
             cause: match realizable[i] {
@@ -637,7 +697,7 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     // One symbol per retained instance, from THIS artifact's planner.
     let mut by_symbol: BTreeMap<String, Vec<Instance>> = BTreeMap::new();
     let mut symbols = BTreeMap::new();
-    for i in &instances {
+    for i in realization.keys() {
         let s = req.symbols.symbol(ws, g, i);
         by_symbol.entry(s.clone()).or_default().push(i.clone());
         symbols.insert(i.clone(), s);
@@ -651,7 +711,8 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     // Opaque dependencies, terminating in a concrete callee of THIS artifact.
     let mut inline_deps = Vec::new();
     let mut unresolved_inline_deps = Vec::new();
-    let retained_decls: BTreeSet<DeclKey> = instances.iter().map(|i| DeclKey(i.func)).collect();
+    let retained_decls: BTreeSet<DeclKey> =
+        realization.keys().map(|i| DeclKey(i.func)).collect();
     for (owner, entries) in &g.inline_body_deps {
         // An owner this artifact dropped carries no obligation: its text is
         // never emitted here.
@@ -671,7 +732,7 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
             // non-generic so one instance is expected, but picking the first of
             // several would silently choose.
             let matching: Vec<&Instance> =
-                instances.iter().filter(|i| i.func == target).collect();
+                realization.keys().filter(|i| i.func == target).collect();
             let [inst] = matching.as_slice() else {
                 unresolved_inline_deps.push(UnresolvedInlineDep {
                     owner: owner.0,
@@ -706,6 +767,7 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         spec,
         roots,
         instances,
+        boundaries,
         realization,
         excluded,
         severed,

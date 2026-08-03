@@ -643,7 +643,7 @@ fn iterator_operations_resolve_to_concrete_witnesses() {
     let main = bodies
         .bodies
         .keys()
-        .find(|i| g.identity(&ws, i) == "main")
+        .find(|i| g.identity(&ws, i).starts_with("main@"))
         .expect("no `main` body");
     let ops = &bodies.bodies[main].iterator_ops;
     let named: Vec<(IteratorOpKind, String)> = ops
@@ -703,7 +703,7 @@ fn main() {
 }
 "#,
     );
-    let main = bodies.bodies.keys().find(|i| g.identity(&ws, i) == "main").expect("no `main`");
+    let main = bodies.bodies.keys().find(|i| g.identity(&ws, i).starts_with("main@")).expect("no `main`");
     let mut names: Vec<&str> = bodies.bodies[main]
         .synthesized_calls
         .keys()

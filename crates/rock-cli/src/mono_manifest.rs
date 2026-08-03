@@ -20,10 +20,13 @@ use crate::Result;
 /// Per-artifact totals across the whole corpus. The deferred list is a property
 /// of the TARGET, not of a project, so it is copied rather than summed.
 struct ArtifactTotals {
-    /// Retained instances and the SHARED population they were taken from --
-    /// a retained count with no denominator cannot say whether an artifact
-    /// dropped one declaration or all of them.
+    /// Rock instances the artifact lowers, boundaries it names, their sum, and
+    /// the SHARED population they were taken from -- a retained count with no
+    /// denominator cannot say whether an artifact dropped one declaration or
+    /// all of them.
     instances: usize,
+    boundaries: usize,
+    retained: usize,
     shared: usize,
     excluded: usize,
     excluded_by_cause: BTreeMap<&'static str, usize>,
@@ -164,6 +167,8 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     let mut art_spelling_agreements = 0usize;
     let mut art_shared_collisions = 0usize;
     let mut art_graph_mismatches = 0usize;
+    let mut art_id_collisions = 0usize;
+    let mut art_id_collisions_by_name = 0usize;
     let mut art_severed_examples: Vec<String> = Vec::new();
 
     for dir in &projects {
@@ -338,6 +343,8 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
                 art_spelling_agreements += p.artifact_spelling_agreements;
                 art_shared_collisions += p.shared_symbol_collisions;
                 art_graph_mismatches += p.artifact_graph_mismatches;
+                art_id_collisions += p.identity_collisions.0;
+                art_id_collisions_by_name += p.identity_collisions.1;
                 for x in p.artifact_severed_examples {
                     if art_severed_examples.len() < 10 {
                         art_severed_examples.push(x);
@@ -358,6 +365,8 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
                     // project's numbers under a whole-corpus heading.
                     let e = art_rows.entry(target).or_insert_with(|| ArtifactTotals {
                         instances: 0,
+                        boundaries: 0,
+                        retained: 0,
                         shared: 0,
                         excluded: 0,
                         excluded_by_cause: BTreeMap::new(),
@@ -374,6 +383,8 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
                         deferred: c.deferred.clone(),
                     });
                     e.instances += c.instances;
+                    e.boundaries += c.boundaries;
+                    e.retained += c.retained;
                     e.shared += c.shared_instances;
                     e.excluded += c.excluded;
                     e.symbol_collisions += c.symbol_collisions;
@@ -922,13 +933,15 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     println!("a SEVERED call, which a filter cannot produce because it never reads an edge.");
     println!();
     println!(
-        "| artifact | retained / shared | roots | sites walked | severed | excluded | symbol collisions | deps unres./exam. |"
+        "| artifact | rock + boundary = retained / shared | roots | sites walked | severed | excluded | symbol collisions | deps unres./exam. |"
     );
     println!("|---|---:|---:|---:|---:|---:|---:|---:|");
     for (name, a) in &art_rows {
         println!(
-            "| `{name}` | {}/{} | {} | {} | {} | {} | {} | {}/{} |",
+            "| `{name}` | {} + {} = {}/{} | {} | {} | {} | {} | {} | {}/{} |",
             a.instances,
+            a.boundaries,
+            a.retained,
             a.shared,
             a.roots,
             a.sites_walked,
@@ -943,6 +956,13 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     println!(
         "- instances an artifact realized that ITS OWN graph does NOT hold \
          (must be 0): **{art_invented}**"
+    );
+    println!(
+        "- instances the shared graph's IDENTITY merges (must be 0 -- every consumer \
+         keys, sorts and deduplicates on it): **{art_id_collisions}**, against \
+         **{art_id_collisions_by_name}** that the NAME-keyed identity it replaced \
+         merged. The first is 0 by construction now; the second is what that \
+         construction bought."
     );
     println!(
         "- views handed a graph built for another target (must be 0): \
@@ -1170,6 +1190,10 @@ struct OneProject {
     shared_symbol_collisions: usize,
     /// Views handed a graph built for another target. Must be 0.
     artifact_graph_mismatches: usize,
+    /// `(instances merged by the declaration-keyed identity, by the name-keyed
+    /// one it replaced)`. The first must be 0; the second is the magnitude of
+    /// what the old key was hiding.
+    identity_collisions: (usize, usize),
     artifact_severed_examples: Vec<String>,
 }
 
@@ -1359,7 +1383,7 @@ fn one_project(
     let artifact_invented: usize = views
         .iter()
         .zip(&artifact_graphs)
-        .map(|(v, (_, ag))| v.instances.iter().filter(|i| !ag.instances.contains(*i)).count())
+        .map(|(v, (_, ag))| v.retained().filter(|i| !ag.instances.contains(i)).count())
         .sum();
     let artifact_graph_mismatches =
         views.iter().filter(|v| v.census().graph_mismatch).count();
@@ -1371,8 +1395,7 @@ fn one_project(
     // arena; two separately built graphs intern in whatever order their walks
     // reached types, so comparing raw ids across them compares arena positions.
     let ident_map = |v: &skull::artifact::ArtifactView, ag: &InstanceGraph| {
-        v.instances
-            .iter()
+        v.retained()
             .map(|i| (ag.identity(&ws, i), v.symbols[i].clone()))
             .collect::<BTreeMap<String, String>>()
     };
@@ -1702,6 +1725,7 @@ fn one_project(
         artifact_dep_examples,
         shared_symbol_collisions,
         artifact_graph_mismatches,
+        identity_collisions: g.colliding_identities(&ws),
         artifact_severed_examples,
     })
 }

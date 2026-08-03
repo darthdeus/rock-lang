@@ -293,7 +293,7 @@ fn main() {
 /// manifests agreed because nothing had forked. `variant_pairs` below is the
 /// non-vacuity assertion, and it is what makes the equality mean anything.
 #[test]
-fn logical_identity_is_stable_across_targets() {
+fn the_shared_graph_is_not_target_neutral_sentinel() {
     use bone_semantic::hir::FnBackend;
     let ws = check(
         r#"
@@ -326,13 +326,28 @@ fn main() {
     assert!(
         variant_pairs > 0,
         "no symbol resolved to a different FuncRef across the two targets, so the manifest \
-         equality below is vacuous -- the fixture is not exercising backend variants at all"
+         comparison below is vacuous -- the fixture is not exercising backend variants at all"
     );
 
-    assert_eq!(
+    // SENTINEL -- pins that the shared graph is NOT target-neutral.
+    //
+    // This asserted manifest EQUALITY until `identity` became injective, and it
+    // passed only because a non-injective identity erased the declaration: two
+    // targets selecting two different declarations rendered to one string. With
+    // the declaration in the identity the truth is visible -- `variant_probe`
+    // is a different `FuncRef` on each target, so the two manifests differ.
+    //
+    // The fix is the one the artifact-view review names: the walk must record
+    // the target-neutral GROUP REPRESENTATIVE and let the artifact select the
+    // serving sibling (`backend_variant`), so there is one graph and one arena.
+    // FLIP THIS to `assert_eq!` when that lands -- the manifests become equal
+    // for the right reason, and `variant_pairs > 0` above still holds because
+    // selection moved rather than disappeared.
+    assert_ne!(
         instance_graph::render_manifest(&ws, &lua),
         instance_graph::render_manifest(&ws, &js),
-        "the target changed logical instance identity"
+        "the two target graphs now agree -- if the representative collapse landed, \
+         flip this sentinel to `assert_eq!`"
     );
 }
 
@@ -1067,10 +1082,25 @@ fn main() {
     let c = g.closure(&ws);
     assert!(c.unexpanded.is_empty(), "instances with a missing body: {:?}", c.unexpanded);
     assert!(c.depth_capped.is_empty(), "expansion was cut: {:?}", c.depth_capped);
+    // SENTINEL -- pins the logical-symbol collisions a non-injective `identity`
+    // was HIDING. `closure` keys `colliding_symbols` by identity, so two
+    // backend siblings that mangle alike used to collapse into one entry and
+    // the detector saw nothing. They are real: `__nb_checked_index` is declared
+    // `inline(lua)` and `inline(js)`, both `@nomangle`, both emission roots.
+    //
+    // The shared graph legitimately holds both TODAY because it is not
+    // target-neutral. The representative collapse (see
+    // `the_shared_graph_is_not_target_neutral_sentinel`) leaves one instance
+    // per group, and this returns to `is_empty()`. FLIP THEN.
     assert!(
-        c.colliding_symbols.is_empty(),
-        "two instances encode to one logical symbol: {:?}",
-        c.colliding_symbols
+        !c.colliding_symbols.is_empty(),
+        "the logical-symbol collisions are gone -- if the representative collapse \
+         landed, flip this sentinel back to `is_empty()`"
+    );
+    assert!(
+        c.colliding_symbols.keys().any(|s| s == "__nb_checked_index"),
+        "the collision population changed shape: {:?}",
+        c.colliding_symbols.keys().collect::<Vec<_>>()
     );
     // Expansion is RECORDED, so the count is evidence rather than a restatement
     // of the instance count: the fixture reaches stdlib boundaries, which are
@@ -1114,7 +1144,14 @@ fn main() {
     assert_eq!(display[0], display[1], "the fixture is no longer the collision it tests");
     let encoded: Vec<String> = idents.iter().map(|i| g.logical_symbol(&ws, i)).collect();
     assert_ne!(encoded[0], encoded[1], "two instances encode alike as `{}`", encoded[0]);
-    assert!(g.closure(&ws).colliding_symbols.is_empty());
+    // The ENCODER is injective over these two, which is what this test is
+    // about. The graph's own collision set is not asserted here: it holds the
+    // stdlib's backend-sibling collisions, pinned as a sentinel in
+    // `every_instance_is_expanded_or_a_boundary`.
+    assert!(
+        !g.closure(&ws).colliding_symbols.contains_key(&encoded[0]),
+        "the two `ident` instances collide after all"
+    );
 }
 
 /// A non-generic instance keeps its base mangling -- the encoder must not rename

@@ -60,7 +60,7 @@ pub struct Instance {
 pub struct DeclKey(pub FuncRef);
 
 impl DeclKey {
-    fn raw(self) -> (u32, u32) {
+    pub fn raw(self) -> (u32, u32) {
         (self.0.module.raw(), self.0.func.into_raw().into_u32())
     }
 }
@@ -613,11 +613,46 @@ impl InstanceGraph {
     pub fn identity(&self, ws: &Workspace, i: &Instance) -> String {
         let f = &ws.module(i.func.module).functions[i.func.func];
         let base = mangle_fn(ws, f);
+        // The DECLARATION, not just its mangled name. Two `@nomangle` backend
+        // siblings mangle identically -- `__nb_checked_index` is declared
+        // `inline(lua)` in `unified.rock` and `inline(js)` in `js.rock` -- and
+        // both are emission roots, so both are instances. Keying on the name
+        // alone MERGED them: measured at 13 of 96 instances in a one-line
+        // fixture, and `manifest_lines` DEDUPLICATES on this string, so the
+        // manifest was one line short per colliding pair.
+        //
+        // `(module, function index)` is stable within a build and deterministic
+        // across builds (module ids come from source order), which is the same
+        // contract [`ord_key`] states. The readable form is [`Self::symbol`];
+        // the manifest carries both, precisely so this one can be unambiguous
+        // rather than pretty.
+        let decl = DeclKey(i.func).raw();
         if i.args.is_empty() {
-            return base;
+            return format!("{base}@{}.{}", decl.0, decl.1);
         }
         let args: Vec<String> = i.args.iter().map(|a| self.arena.canonical(*a)).collect();
-        format!("{base}<{}>", args.join(","))
+        format!("{base}@{}.{}<{}>", decl.0, decl.1, args.join(","))
+    }
+
+    /// Instances that share an [`Self::identity`], and -- for contrast -- the
+    /// ones that would share the NAME-KEYED identity it replaced.
+    ///
+    /// The first is 0 by construction now, which is exactly why the second is
+    /// reported beside it: a zero whose only content is "the key includes the
+    /// declaration" says nothing about how much the old key was merging.
+    pub fn colliding_identities(&self, ws: &Workspace) -> (usize, usize) {
+        let mut by_id: BTreeMap<String, usize> = BTreeMap::new();
+        let mut by_name: BTreeMap<String, usize> = BTreeMap::new();
+        for i in &self.instances {
+            *by_id.entry(self.identity(ws, i)).or_insert(0) += 1;
+            let f = &ws.module(i.func.module).functions[i.func.func];
+            let args: Vec<String> = i.args.iter().map(|a| self.arena.canonical(*a)).collect();
+            *by_name.entry(format!("{}<{}>", mangle_fn(ws, f), args.join(","))).or_insert(0) += 1;
+        }
+        let merged = |m: BTreeMap<String, usize>| -> usize {
+            m.values().filter(|n| **n > 1).map(|n| n - 1).sum()
+        };
+        (merged(by_id), merged(by_name))
     }
 
     /// The instance's LOGICAL symbol: `skull_mir::mangle::spec_fn_name`, the

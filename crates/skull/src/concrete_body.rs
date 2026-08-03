@@ -70,6 +70,29 @@ pub struct BoundaryId {
     pub symbol: String,
 }
 
+/// Ordered by the DECLARATION first, so a boundary set is deterministic and two
+/// backend siblings sharing a symbol stay apart. `FuncRef` is not `Ord`, and
+/// ordering by it would be ordering by arena position anyway -- the same
+/// contract `instance_graph::DeclKey` states.
+impl Ord for BoundaryId {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        let key = |b: &BoundaryId| {
+            (
+                b.declaration.module.raw(),
+                b.declaration.func.into_raw().into_u32(),
+                b.symbol.clone(),
+            )
+        };
+        key(self).cmp(&key(other))
+    }
+}
+
+impl PartialOrd for BoundaryId {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 /// Plan S 9's `enum Callee { Rock(InstanceId), Boundary(BoundaryId) }`.
 ///
 /// There is no third arm and no absent arm. A call that resolved to neither is
