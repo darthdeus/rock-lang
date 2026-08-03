@@ -174,22 +174,16 @@ fn web_fake_gl_smoke_mag() {
     run_fake_gl_smoke("mag");
 }
 
-// mag in real headless Chrome, CDP-driven: the virtual-time screenshot path
-// deterministically races mag's first present (~175 MB preload; frame 1 does
-// every shader compile + texture upload under swiftshader), so the driver
-// (tools/web/chrome_cdp_smoke.js) waits for 30 REAL frames instead, then
-// verifies PICKING end-to-end -- an injected click on the player must flow
-// MRT FragId write -> R32I attachment -> async PBO readback -> SELECTION ->
-// `last_click_target == ClickTarget::Player` -- and captures the screenshot
-// for the non-blank color bar.
-#[test]
-fn web_chrome_screenshot_and_click_pick_mag() {
+// Build `game`, serve it, and drive it with tools/web/chrome_cdp_smoke.js.
+// Returns the tempdir (keep it alive -- the screenshot lives in it) and the
+// screenshot path, or None when node/chrome is absent.
+fn run_cdp(game: &str, test: &str, args: &[&str]) -> Option<(tempfile::TempDir, PathBuf)> {
     if Command::new("node").arg("--version").output().map(|o| !o.status.success()).unwrap_or(true) {
-        eprintln!("SKIP web_chrome_screenshot_and_click_pick_mag: node not on PATH");
-        return;
+        eprintln!("SKIP {test}: node not on PATH");
+        return None;
     }
     let dir = tempfile::tempdir().expect("tempdir");
-    build_web("mag", dir.path());
+    build_web(game, dir.path());
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let port = listener.local_addr().unwrap().port();
@@ -204,26 +198,11 @@ fn web_chrome_screenshot_and_click_pick_mag() {
     std::thread::sleep(std::time::Duration::from_millis(300));
 
     let shot = dir.path().join("shot.png");
-    let driver = repo_root().join("tools/web/chrome_cdp_smoke.js");
     let out = Command::new("node")
-        .arg(&driver)
+        .arg(repo_root().join("tools/web/chrome_cdp_smoke.js"))
         .arg(format!("http://127.0.0.1:{port}/index.html"))
         .arg(&shot)
-        .args(["--frames", "30"])
-        // Derive the click from the player's LIVE projection, never a literal
-        // pixel: a hard-coded point silently becomes a test of the current
-        // framing and goes stale whenever camera framing or present scaling
-        // moves (it did -- Arc A's FrameView work invalidated the old 950,465).
-        // `render_pos + 1.5` is the sprite body rather than the feet anchor,
-        // matching mag's own `player_body_probe_world` test hook, and logical
-        // output units map to CSS through the canvas element's rect so the
-        // expression holds at any devicePixelRatio.
-        .args([
-            "--click-expr",
-            "(function(){               var rp=render_pos_Movable_ret_Vec2(__G.player.movable);               var s=world_to_screen_Vec2_ret_Vec2(rp[0],rp[1]+1.5);               var c=document.querySelector('canvas');var r=c.getBoundingClientRect();               return [r.left+s[0]*(r.width/__SW.logicalW),                       r.top+s[1]*(r.height/__SW.logicalH)];})()",
-        ])
-        .args(["--expect", "__G.last_click_target && __G.last_click_target.__variant"])
-        .args(["--value", "Player"])
+        .args(args)
         .output()
         .expect("spawn cdp driver");
     let _ = server.kill();
@@ -231,15 +210,18 @@ fn web_chrome_screenshot_and_click_pick_mag() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     if stderr.contains("SKIP: no chrome") {
-        eprintln!("SKIP web_chrome_screenshot_and_click_pick_mag: no chrome on PATH");
-        return;
+        eprintln!("SKIP {test}: no chrome on PATH");
+        return None;
     }
     assert!(
         out.status.success() && stdout.contains("PASS"),
-        "mag CDP smoke failed.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+        "{test} CDP smoke failed.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
+    Some((dir, shot))
+}
 
-    let img = image::open(&shot).expect("read screenshot").to_rgba8();
+fn assert_not_blank(shot: &std::path::Path, subject: &str) {
+    let img = image::open(shot).expect("read screenshot").to_rgba8();
     let mut colors = std::collections::HashSet::new();
     for p in img.pixels() {
         colors.insert((p[0] / 16, p[1] / 16, p[2] / 16));
@@ -249,9 +231,77 @@ fn web_chrome_screenshot_and_click_pick_mag() {
     }
     assert!(
         colors.len() >= 8,
-        "screenshot looks blank ({} distinct quantized colors); the mag scene should produce many",
+        "screenshot looks blank ({} distinct quantized colors); {subject} should produce many",
         colors.len()
     );
+}
+
+// Arc C box 1, WebGL2 leg. The same fixture the native sim drives
+// (games/testbed/sampling.rock, sim explicit_sampling): one two-texel image
+// drawn nearest AND linear in one frame, plus a load-time-linear control quad,
+// measured by the ramp width at the magnified texel boundary. The verdict is
+// computed in Rock so both backends assert identical claims -- the driver only
+// flips the fixture on and compares one string.
+//
+// It reads back through stone_read_window_rect, which is why that has a WebGL2
+// twin at all; before this the extern(js) decl had no implementation and any
+// WindowProbe on the web threw.
+#[test]
+fn web_sampling_nearest_and_linear() {
+    let Some((_dir, shot)) = run_cdp(
+        "games/testbed",
+        "web_sampling_nearest_and_linear",
+        &[
+            "--frames",
+            "10",
+            "--setup-expr",
+            "__G.SAMPLING_REQUEST = true",
+            "--expect",
+            "__G.SAMPLING_VERDICT",
+            "--value",
+            "PASS",
+        ],
+    ) else {
+        return;
+    };
+    assert_not_blank(&shot, "the three sampling quads");
+}
+
+// mag in real headless Chrome, CDP-driven: the virtual-time screenshot path
+// deterministically races mag's first present (~175 MB preload; frame 1 does
+// every shader compile + texture upload under swiftshader), so the driver
+// (tools/web/chrome_cdp_smoke.js) waits for 30 REAL frames instead, then
+// verifies PICKING end-to-end -- an injected click on the player must flow
+// MRT FragId write -> R32I attachment -> async PBO readback -> SELECTION ->
+// `last_click_target == ClickTarget::Player` -- and captures the screenshot
+// for the non-blank color bar.
+#[test]
+fn web_chrome_screenshot_and_click_pick_mag() {
+    let Some((_dir, shot)) = run_cdp(
+        "mag",
+        "web_chrome_screenshot_and_click_pick_mag",
+        &[
+            "--frames",
+            "30",
+            // Derive the click from the player's LIVE projection, never a
+            // literal pixel: a hard-coded point silently becomes a test of the
+            // current framing and goes stale whenever camera framing or present
+            // scaling moves (it did -- Arc A's FrameView work invalidated the
+            // old 950,465). `render_pos + 1.5` is the sprite body rather than
+            // the feet anchor, matching mag's own `player_body_probe_world`
+            // test hook, and logical output units map to CSS through the canvas
+            // element's rect so the expression holds at any devicePixelRatio.
+            "--click-expr",
+            "(function(){               var rp=render_pos_Movable_ret_Vec2(__G.player.movable);               var s=world_to_screen_Vec2_ret_Vec2(rp[0],rp[1]+1.5);               var c=document.querySelector('canvas');var r=c.getBoundingClientRect();               return [r.left+s[0]*(r.width/__SW.logicalW),                       r.top+s[1]*(r.height/__SW.logicalH)];})()",
+            "--expect",
+            "__G.last_click_target && __G.last_click_target.__variant",
+            "--value",
+            "Player",
+        ],
+    ) else {
+        return;
+    };
+    assert_not_blank(&shot, "the mag scene");
 }
 
 #[test]

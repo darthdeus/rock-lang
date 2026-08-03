@@ -624,6 +624,7 @@ var __SW = {
   // creates the GL texture lazily+synchronously (GL exists by @init) and caches
   // path -> handle; handle -> {w,h} feeds get_image_size.
   imageBitmaps: {}, imageHandles: {}, imageSizes: {},
+  imageData: {}, nextImageData: 0,
   canvases: {}, nextCanvas: 1, boundCanvas: 0, // 0 = default framebuffer
   shaders: {}, nextShader: 1, curShader: 0,
   meshVbo: null, // shared STREAM_DRAW vertex buffer
@@ -1015,18 +1016,99 @@ function stone_unload_image(h) {
   for (var p in __SW.imageHandles) { if (__SW.imageHandles[p] === h) delete __SW.imageHandles[p]; }
 }
 function stone_reload_image(h, path) { return false; }
-function stone_create_image_data(w, h) { return 0; }
-function stone_destroy_image_data(h) {}
-function stone_image_data_clone(src) { return 0; }
-function stone_image_data_copy_into(dst, src) { return false; }
-function stone_image_data_set_pixel(h, x, y, r, g, b, a) {}
-function stone_image_data_get_pixel(h, x, y, pr, pg, pb, pa) { pr[0] = 0; pg[0] = 0; pb[0] = 0; pa[0] = 0; }
-function stone_image_data_fill_rgba(h, rgba, n) {}
-function stone_image_data_load_png(path) { return 0; }
-function stone_image_data_save_png(h, path) { return false; }
-function stone_image_update_from_data(ih, dh) { return false; }
-function stone_new_image_from_data(dh, fm) { return 0; }
-function stone_save_png_rgba8(path, w, h, pixels) { return false; }
+// CPU-side pixel buffers (image_data.rs's twin). These were stubs returning 0,
+// which is the worst shape available: a caller got a handle-shaped 0, uploaded
+// it, and silently drew the white fallback with no log line anywhere. A real
+// buffer is a few lines; the codec-backed PNG entry points below stay
+// unimplemented and say so once.
+function __sw_byte(v) { v = Math.round(v * 255); return v < 0 ? 0 : v > 255 ? 255 : v; }
+function stone_create_image_data(w, h) {
+  if (w <= 0 || h <= 0) return 0;
+  var id = ++__SW.nextImageData;
+  __SW.imageData[id] = { w: w, h: h, px: new Uint8Array(w * h * 4) };
+  return id;
+}
+function stone_destroy_image_data(h) { delete __SW.imageData[h]; }
+function stone_image_data_clone(src) {
+  var s = __SW.imageData[src];
+  if (!s) return 0;
+  var id = stone_create_image_data(s.w, s.h);
+  if (id) __SW.imageData[id].px.set(s.px);
+  return id;
+}
+function stone_image_data_copy_into(dst, src) {
+  var d = __SW.imageData[dst], s = __SW.imageData[src];
+  if (!d || !s || d.w !== s.w || d.h !== s.h) return false;
+  d.px.set(s.px);
+  return true;
+}
+function stone_image_data_set_pixel(h, x, y, r, g, b, a) {
+  var d = __SW.imageData[h];
+  if (!d || x < 0 || y < 0 || x >= d.w || y >= d.h) return;
+  var o = (y * d.w + x) * 4;
+  d.px[o] = __sw_byte(r); d.px[o + 1] = __sw_byte(g);
+  d.px[o + 2] = __sw_byte(b); d.px[o + 3] = __sw_byte(a);
+}
+function stone_image_data_get_pixel(h, x, y, pr, pg, pb, pa) {
+  var d = __SW.imageData[h];
+  if (!d || x < 0 || y < 0 || x >= d.w || y >= d.h) {
+    pr[0] = 0; pg[0] = 0; pb[0] = 0; pa[0] = 0;
+    return;
+  }
+  var o = (y * d.w + x) * 4;
+  pr[0] = d.px[o] / 255; pg[0] = d.px[o + 1] / 255;
+  pb[0] = d.px[o + 2] / 255; pa[0] = d.px[o + 3] / 255;
+}
+function stone_image_data_fill_rgba(h, rgba, n) {
+  var d = __SW.imageData[h];
+  if (!d || !rgba) return;
+  var len = Math.min(n * 4, d.px.length, rgba.length);
+  d.px.set(rgba.subarray(0, len));
+}
+// fm < 0 leaves the sampler state alone -- an in-place update must not silently
+// reset the filter the texture was created with.
+function __sw_upload_image_data(h, d, fm) {
+  var gl = __SW.gl;
+  gl.bindTexture(gl.TEXTURE_2D, __SW.textures[h]);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, d.w, d.h, 0, gl.RGBA, gl.UNSIGNED_BYTE, d.px);
+  if (fm >= 0) {
+    var filt = (fm === 1) ? gl.LINEAR : gl.NEAREST;
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filt);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filt);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  }
+  __SW.imageSizes[h] = { w: d.w, h: d.h };
+}
+function stone_new_image_from_data(dh, fm) {
+  var d = __SW.imageData[dh];
+  if (!d) { __sw_log_once("stone_new_image_from_data: no ImageData " + dh); return 0; }
+  var h = __sw_new_texture();
+  __sw_upload_image_data(h, d, fm);
+  return h;
+}
+function stone_image_update_from_data(ih, dh) {
+  var d = __SW.imageData[dh];
+  if (!d || !__SW.textures[ih]) return false;
+  var s = __SW.imageSizes[ih];
+  if (s && (s.w !== d.w || s.h !== d.h)) return false;
+  __sw_upload_image_data(ih, d, -1);
+  return true;
+}
+function stone_image_data_load_png(path) {
+  __sw_log_once("stone_image_data_load_png unimplemented on the web (" + path + ")");
+  return 0;
+}
+function stone_image_data_save_png(h, path) {
+  __sw_log_once("stone_image_data_save_png unimplemented on the web (" + path + ")");
+  return false;
+}
+function stone_save_png_rgba8(path, w, h, pixels) {
+  __sw_log_once("stone_save_png_rgba8 unimplemented on the web (" + path + ")");
+  return false;
+}
 
 // --- canvases (FBOs) ---
 function stone_create_canvas(w, h, format, depth) {
@@ -1887,6 +1969,42 @@ function stone_read_canvas_pixel(h, x, y) {
   var prev = __SW.canvases[__SW.boundCanvas];
   gl.bindFramebuffer(gl.FRAMEBUFFER, prev ? prev.fbo : null);
   return shape.get(shape.view);
+}
+// Read a w*h RGBA8 rect of the WINDOW into `out` in top-left coordinates --
+// the twin of canvas.rs's stone_read_window_rect, and what WindowProbe runs
+// on. Default framebuffer, so it is the DRAWABLE that bounds and flips it, not
+// the logical size: the probe addresses window pixels exactly as native does.
+function stone_read_window_rect(x, y, w, h, out) {
+  var gl = __SW.gl;
+  if (!gl || !out || w <= 0 || h <= 0) return;
+  // The engine's window space is LOGICAL here -- the default framebuffer is
+  // driven in CSS pixels (the hidpi ortho gate) while readPixels addresses the
+  // backing store, so headless Chrome at deviceScaleFactor 1.5 reads 1920x1080
+  // for a window the engine calls 1280x720. Native has no such split; at dpr 1
+  // this reduces to a plain read.
+  var bw = gl.drawingBufferWidth, bh = gl.drawingBufferHeight;
+  var sx = bw / (__SW.logicalW || bw), sy = bh / (__SW.logicalH || bh);
+  var rx = Math.round(x * sx), ry = Math.round(y * sy);
+  var rw = Math.max(1, Math.round(w * sx)), rh = Math.max(1, Math.round(h * sy));
+  if (rx < 0 || ry < 0 || rx + rw > bw || ry + rh > bh) return;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.pixelStorei(gl.PACK_ALIGNMENT, 1);
+  var buf = new Uint8Array(rw * rh * 4);
+  gl.readPixels(rx, bh - ry - rh, rw, rh, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+  // Bottom-up device pixels -> top-down window pixels, POINT-sampled. A probe
+  // reports what a window pixel shows; averaging would smear exactly the hard
+  // steps probes exist to measure.
+  for (var r = 0; r < h; r++) {
+    var srow = rh - 1 - Math.min(rh - 1, Math.round(r * sy));
+    for (var c = 0; c < w; c++) {
+      var si = (srow * rw + Math.min(rw - 1, Math.round(c * sx))) * 4;
+      var di = (r * w + c) * 4;
+      out[di] = buf[si]; out[di + 1] = buf[si + 1];
+      out[di + 2] = buf[si + 2]; out[di + 3] = buf[si + 3];
+    }
+  }
+  var prev = __SW.canvases[__SW.boundCanvas];
+  gl.bindFramebuffer(gl.FRAMEBUFFER, prev ? prev.fbo : null);
 }
 // WebGL2 has no DEPTH_COMPONENT readPixels at all (the GLES rule) -- far plane.
 function stone_read_depth_pixel(h, x, y) {
