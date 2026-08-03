@@ -177,6 +177,7 @@ pub fn do_run_sim_opts(backend: crate::Backend, project: &str, sim_name: &str, q
         &project,
         sim_name,
         quiet,
+        false,
         update_snapshots,
         &output,
         &env_by_wire,
@@ -235,6 +236,7 @@ fn run_named_entry(
     project: &str,
     chain_spec: &str,
     quiet: bool,
+    buffered: bool,
     update_snapshots: bool,
     output: &str,
     env_by_wire: &HashMap<String, Vec<(String, String)>>,
@@ -271,6 +273,7 @@ fn run_named_entry(
             project,
             part,
             quiet,
+            buffered,
             update_snapshots,
             &out_path,
             output,
@@ -357,12 +360,14 @@ pub fn do_run_named_sims(
     let run_at = |i: usize,
                   stone: Option<&mut crate::skull_backend::SkullStone>|
      -> Result<(String, SimSummary)> {
-        // quiet=true into the runner: suppress the live per-expect stream and
-        // the on-failure game-log dump. The concise `print` below still lists
-        // each sim's failing assertions so a failure isn't opaque.
+        // Buffered, not silenced: the per-expect stream is suppressed (it
+        // would interleave), but the child's diagnostics are retained and
+        // emitted with the record below, and `print` lists each sim's failing
+        // assertions so a failure isn't opaque.
         let (display_name, summary) = run_named_entry(
             &project,
             &names[i],
+            quiet,
             true,
             update_snapshots,
             &output,
@@ -371,6 +376,9 @@ pub fn do_run_named_sims(
         )?;
         let _lock = report.lock().unwrap();
         if !quiet {
+            if !summary.diagnostics.is_empty() {
+                eprint!("{}", summary.diagnostics);
+            }
             summary.print(&display_name, false);
         }
         Ok((display_name, summary))
@@ -494,6 +502,7 @@ pub fn do_run_all_sims(
         let mut summary = run_one_sim(
             &project,
             &wire_names[i],
+            quiet,
             !streaming,
             update_snapshots,
             tempdir.path(),
@@ -501,14 +510,24 @@ pub fn do_run_all_sims(
             &env_pairs,
             stone,
         )?;
-        drop(tempdir);
 
         let _lock = report.lock().unwrap();
+        // `tempdir` is `$OUT` and MUST outlive this: `expect_video` shells out
+        // to ffprobe against files the sim wrote there, and `cleanup_path` sims
+        // verify a file's metadata before tidying it. Dropping it earlier
+        // deletes the artifacts these assertions are about, and they fail with
+        // a missing-file error rather than a real verdict.
         process_video_assertions(&mut summary);
         for p in std::mem::take(&mut summary.cleanup_paths) {
             let _ = std::fs::remove_file(&p);
         }
+        drop(tempdir);
         if !quiet {
+            // Result output: the child's own retained stderr/stdout, emitted
+            // here so it lands with its record instead of interleaving.
+            if !summary.diagnostics.is_empty() {
+                eprint!("{}", summary.diagnostics);
+            }
             // Concurrent runs never streamed the per-expect lines, so the
             // record must carry its own sited failures (`streamed = false`).
             summary.print(&wire_names[i], streaming);
@@ -713,6 +732,7 @@ fn run_one_sim(
     project: &str,
     sim_part: &str,
     quiet: bool,
+    buffered: bool,
     update_snapshots: bool,
     out_path: &Path,
     output: &str,
@@ -792,7 +812,12 @@ fn run_one_sim(
 
     let stderr_thread = {
         let lines = Arc::clone(&stderr_lines);
-        let quiet = quiet;
+        // Buffered runs must not write anything from this thread: several
+        // children are live, so a direct write here interleaves into the middle
+        // of another sim's locked record. The lines are retained and handed
+        // back for the caller to emit inside that lock.
+        let quiet = quiet || buffered;
+        let buffered = buffered;
         std::thread::spawn(move || {
             let reader = BufReader::new(stderr_handle);
             for line in reader.lines() {
@@ -812,7 +837,7 @@ fn run_one_sim(
                     if !quiet {
                         print_progress(rest);
                     }
-                } else {
+                } else if !buffered {
                     // Result output, NOT logging: verbatim passthrough of
                     // the child game's own stderr (non-`__SIM__` lines) —
                     // the game's output stream, not run_sim's diagnostics.
@@ -965,7 +990,29 @@ fn run_one_sim(
         });
     }
 
-    if !quiet && (summary.has_failures() || summary.timed_out || summary.process_failure_code.is_some()) {
+    if buffered {
+        // Same CONTENT a streaming run writes live, just held until the caller
+        // owns the record lock: the child's own stderr, plus its stdout when
+        // the sim failed. Without this a concurrent run silently loses every
+        // game-side diagnostic that a serial run prints.
+        let mut diag = String::new();
+        for line in stderr_lines.lock().unwrap().iter() {
+            if !line.starts_with("__SIM__ ") {
+                diag.push_str(line);
+                diag.push('\n');
+            }
+        }
+        if !quiet
+            && (summary.has_failures() || summary.timed_out || summary.process_failure_code.is_some())
+            && !stdout_str.trim().is_empty()
+        {
+            diag.push_str(&format!("--- game stdout for `{sim_part}` ---\n"));
+            diag.push_str(&stdout_str);
+        }
+        summary.diagnostics = diag;
+    }
+
+    if !quiet && !buffered && (summary.has_failures() || summary.timed_out || summary.process_failure_code.is_some()) {
         if !stdout_str.trim().is_empty() {
             log::error!(target: "SIM", "--- game stdout for `{sim_part}` ---");
             // Result output, NOT logging: verbatim dump of the child
@@ -1281,12 +1328,25 @@ fn handle_json_snapshot(snap: &SnapshotOp, baseline: &Path, update: bool) -> Res
         .map_err(|e| anyhow!("emitted value is not valid JSON: {e}; raw={}", snap.value_json))?;
     let actual_pretty = serde_json::to_string_pretty(&actual)? + "\n";
 
-    if update || !baseline.exists() {
+    if update {
         if let Some(parent) = baseline.parent() {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::write(baseline, &actual_pretty)?;
         return Ok(SnapResult::Wrote);
+    }
+    // An assertion that cannot be evaluated is not satisfied -- the same rule
+    // `handle_image_snapshot` already applies. Blessing a missing baseline from
+    // the current run and counting it as a passing expect proves nothing, and
+    // under `--jobs` two sims sharing a snapshot name could each bless a
+    // different value and both pass, with scheduling picking the winner.
+    if !baseline.exists() {
+        return Ok(SnapResult::Fail(format!(
+            "snapshot `{}` has no baseline at `{}`; re-run with --update-snapshots to \
+             create it (a missing baseline is not a pass)",
+            snap.name,
+            baseline.display()
+        )));
     }
 
     let baseline_str = std::fs::read_to_string(baseline)?;
@@ -1379,6 +1439,9 @@ struct SimSummary {
     cleanup_paths: Vec<String>,
     timed_out: bool,
     process_failure_code: Option<i32>,
+    /// Child diagnostics retained by a buffered (concurrent) run, emitted by
+    /// the caller inside the record lock. Empty when the run wrote them live.
+    diagnostics: String,
 }
 
 impl SimSummary {
@@ -1395,6 +1458,7 @@ impl SimSummary {
         self.video_assertions.extend(other.video_assertions);
         self.video_match_assertions.extend(other.video_match_assertions);
         self.cleanup_paths.extend(other.cleanup_paths);
+        self.diagnostics.push_str(&other.diagnostics);
         self.timed_out = self.timed_out || other.timed_out;
         if other.process_failure_code.is_some() {
             self.process_failure_code = other.process_failure_code;
@@ -1710,6 +1774,27 @@ mod tests {
         assert!(is_reload_lane(&mixed));
     }
 
+    /// The job count is a safety bound, not a preference: it must never exceed
+    /// what the machine can run, and `--update-snapshots` must pin to serial
+    /// because it writes baseline files whose destinations are not proven
+    /// unique before spawning.
+    #[test]
+    fn resolve_jobs_is_bounded_and_serial_for_snapshot_updates() {
+        let cpus = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1);
+
+        assert_eq!(resolve_jobs(None, false), DEFAULT_SIM_JOBS.min(cpus));
+        assert_eq!(resolve_jobs(Some(1), false), 1);
+        // Never above what the machine has, however large the request.
+        assert_eq!(resolve_jobs(Some(usize::MAX), false), cpus);
+        // 0 is meaningless; clamp up rather than deadlock on an empty pool.
+        assert_eq!(resolve_jobs(Some(0), false), 1);
+        // --update-snapshots wins over ANY explicit request.
+        assert_eq!(resolve_jobs(None, true), 1);
+        assert_eq!(resolve_jobs(Some(8), true), 1);
+    }
+
     /// A comma-chain is scheduled as one entry, so ONE reload part makes the
     /// whole entry exclusive. Missing that would let the session go live while
     /// other children exist.
@@ -1730,6 +1815,48 @@ mod tests {
         assert!(!entry_is_reload_lane("plain,plain", &env));
         // A name with no recorded env is ordinary, not a panic.
         assert!(!entry_is_reload_lane("unknown", &env));
+    }
+
+    /// A missing JSON baseline used to bless itself from the current run and
+    /// count as a passing expect -- the same hole `handle_image_snapshot` had.
+    /// It is worse under `--jobs`: two sims sharing a snapshot name can each
+    /// write a different value and both pass, with the winner decided by
+    /// scheduling. Only `--update-snapshots` may create a baseline.
+    #[test]
+    fn a_missing_json_baseline_is_not_a_pass() {
+        let dir = std::env::temp_dir().join(format!(
+            "rock-json-golden-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).expect("tmp dir");
+        let baseline = dir.join("golden.json");
+        let snap = SnapshotOp {
+            name: "golden".into(),
+            value_json: r#"{"a":1}"#.into(),
+            site: String::new(),
+        };
+
+        let r = handle_json_snapshot(&snap, &baseline, false).expect("no hard error");
+        assert!(
+            matches!(r, SnapResult::Fail(_)),
+            "a missing JSON baseline must not pass; got {r:?}"
+        );
+        assert!(
+            !baseline.exists(),
+            "and it must NOT have been written behind our back"
+        );
+
+        // Both sides: with --update-snapshots, writing it is the point.
+        let r = handle_json_snapshot(&snap, &baseline, true).expect("no hard error");
+        assert!(matches!(r, SnapResult::Wrote), "update writes it; got {r:?}");
+        assert!(baseline.exists(), "the baseline is created under update");
+
+        // And an existing baseline still compares rather than being rewritten.
+        let r = handle_json_snapshot(&snap, &baseline, false).expect("no hard error");
+        assert!(matches!(r, SnapResult::Pass), "matching value passes; got {r:?}");
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
