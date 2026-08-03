@@ -62,8 +62,17 @@ fn parse_inline_lua_decls(src: &str) -> Vec<Decl> {
 
         // Same-line annotations are the ONLY other thing allowed before
         // `inline(lua)`; anything else means this is not a declaration.
-        if !before.is_empty() && !is_all_annotations(before) {
-            continue;
+        if !before.is_empty() {
+            if !before.starts_with('@') {
+                continue;
+            }
+            match annotation_remainder(before) {
+                Ok("") => {}
+                Ok(_) => continue,
+                Err(()) => panic!(
+                    "imgui.rock: cannot parse same-line annotations before `inline(lua)`: `{before}`"
+                ),
+            }
         }
         // Rock also allows annotations on their own lines above the decl
         // (`@nomangle\ninline(lua) fn ...`, as in systems.rock). Missing those
@@ -75,8 +84,15 @@ fn parse_inline_lua_decls(src: &str) -> Vec<Decl> {
             let prev_end = cursor - 1; // the '\n' ending the previous line
             let prev_start = src[..prev_end].rfind('\n').map(|i| i + 1).unwrap_or(0);
             let prev = src[prev_start..prev_end].trim();
-            if prev.is_empty() || !is_all_annotations(prev) {
+            if prev.is_empty() || !prev.starts_with('@') {
                 break;
+            }
+            match annotation_remainder(prev) {
+                Ok("") => {}
+                Ok(_) => break,
+                Err(()) => {
+                    panic!("imgui.rock: cannot parse annotation line above `inline(lua)`: `{prev}`")
+                }
             }
             anns.push(prev);
             cursor = prev_start;
@@ -128,32 +144,48 @@ fn parse_inline_lua_decls(src: &str) -> Vec<Decl> {
     out
 }
 
-/// Is `text` composed ENTIRELY of annotations (`@name` or `@name(...)`, one or
-/// more)? Used to decide whether a line above a declaration belongs to it.
-/// Parenthesised arguments may contain commas and quoted strings
-/// (`@allow(long_inline_lua, "why")`), so the scan tracks quotes and depth.
-fn is_all_annotations(text: &str) -> bool {
+/// Consume leading annotations and return any declaration text after them.
+/// Malformed annotation syntax is an error; parenthesised arguments may contain
+/// commas and escaped quoted strings (`@allow(long_inline_lua, "why")`).
+fn annotation_remainder(text: &str) -> Result<&str, ()> {
     let mut rest = text.trim();
     if rest.is_empty() {
-        return false;
+        return Err(());
     }
     while !rest.is_empty() {
-        let Some(after_at) = rest.strip_prefix('@') else { return false };
-        let name_len =
-            after_at.chars().take_while(|c| c.is_alphanumeric() || *c == '_').count();
+        let Some(after_at) = rest.strip_prefix('@') else {
+            return Ok(rest);
+        };
+        let name_len = after_at
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .count();
         if name_len == 0 {
-            return false;
+            return Err(());
         }
         rest = &after_at[name_len..];
         if rest.starts_with('(') {
             let mut depth = 0usize;
             let mut in_str = false;
+            let mut escaped = false;
             let mut end = None;
             for (i, c) in rest.char_indices() {
+                if in_str {
+                    if escaped {
+                        escaped = false;
+                    } else {
+                        match c {
+                            '\\' => escaped = true,
+                            '"' => in_str = false,
+                            _ => {}
+                        }
+                    }
+                    continue;
+                }
                 match c {
-                    '"' => in_str = !in_str,
-                    '(' if !in_str => depth += 1,
-                    ')' if !in_str => {
+                    '"' => in_str = true,
+                    '(' => depth += 1,
+                    ')' => {
                         depth -= 1;
                         if depth == 0 {
                             end = Some(i);
@@ -163,12 +195,12 @@ fn is_all_annotations(text: &str) -> bool {
                     _ => {}
                 }
             }
-            let Some(e) = end else { return false };
+            let Some(e) = end else { return Err(()) };
             rest = &rest[e + 1..];
         }
         rest = rest.trim_start();
     }
-    true
+    Ok(rest)
 }
 
 /// Is `at` inside a `"""..."""` body? Counts delimiters before it -- an odd
@@ -346,5 +378,27 @@ inline(lua) fn detached() = \"\"\"
     ] {
         let want = want.replace("         ", "");
         assert!(got.contains(&want), "missing `{want}` in:\n{got}");
+    }
+
+    let escaped = r#"@allow(long_inline_lua, "say \") why")
+inline(lua) fn escaped_quote() = ""
+"#;
+    let got = generate(escaped);
+    assert!(
+        got.contains(
+            r#"@allow(long_inline_lua, "say \") why") inline(js) fn escaped_quote() = """#
+        ),
+        "escaped quotes and parentheses inside annotation strings must survive:\n{got}"
+    );
+
+    for malformed in [
+        r#"@allow(long_inline_lua, "unterminated)
+inline(lua) fn own_line_bad() = """#,
+        r#"@allow(long_inline_lua, "unterminated) inline(lua) fn same_line_bad() = """#,
+    ] {
+        assert!(
+            std::panic::catch_unwind(|| generate(malformed)).is_err(),
+            "annotation-like syntax must fail loudly instead of dropping a stub or annotation:\n{malformed}"
+        );
     }
 }
