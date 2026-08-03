@@ -1080,18 +1080,33 @@ function stone_create_canvas(w, h, format, depth) {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
   gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
-  var rb = null;
+  // The depth attachment is a TEXTURE, not a renderbuffer, so the
+  // depth-visualize overlay can sample the world pass's own depth. It goes in
+  // the same __SW.textures registry as any other texture, which is what lets
+  // stone_bind_texture_to_unit take it.
+  var depthTexHandle = 0;
   if (depth) {
-    rb = gl.createRenderbuffer();
-    gl.bindRenderbuffer(gl.RENDERBUFFER, rb);
-    gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, w, h);
-    gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, rb);
+    depthTexHandle = __sw_new_texture();
+    gl.bindTexture(gl.TEXTURE_2D, __SW.textures[depthTexHandle]);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.DEPTH_COMPONENT24, w, h, 0,
+                  gl.DEPTH_COMPONENT, gl.UNSIGNED_INT, null);
+    // Depth textures are not filterable and carry no mips: the default MIPMAP
+    // min filter makes them INCOMPLETE, and every sample reads black -- which
+    // is indistinguishable from "near".
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_COMPARE_MODE, gl.NONE);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D,
+                            __SW.textures[depthTexHandle], 0);
   }
   var ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   if (!ok) { __sw_log_once("stone_create_canvas: incomplete FBO (format " + format + ")"); }
   var handle = __SW.nextCanvas++;
-  __SW.canvases[handle] = { fbo: fbo, tex: texHandle, w: w, h: h, format: format };
+  __SW.canvases[handle] = { fbo: fbo, tex: texHandle, depthTex: depthTexHandle, w: w, h: h, format: format };
   return handle;
 }
 function stone_destroy_canvas(h) {
@@ -1101,6 +1116,10 @@ function stone_destroy_canvas(h) {
   gl.deleteFramebuffer(c.fbo);
   gl.deleteTexture(__SW.textures[c.tex]);
   delete __SW.textures[c.tex];
+  if (c.depthTex) {
+    gl.deleteTexture(__SW.textures[c.depthTex]);
+    delete __SW.textures[c.depthTex];
+  }
   delete __SW.canvases[h];
 }
 function stone_set_canvas(h) {
@@ -1118,6 +1137,14 @@ function stone_set_canvas(h) {
   gl.viewport(0, 0, wh[0], wh[1]);
 }
 function stone_get_canvas_texture(h) { var c = __SW.canvases[h]; return c ? c.tex : 0; }
+function stone_get_canvas_depth_texture(h) { var c = __SW.canvases[h]; return c ? (c.depthTex || 0) : 0; }
+// Sub-rect of the bound target, logical top-left px -> GL bottom-origin.
+// Reset by re-binding the target, same contract as the native side.
+function stone_set_viewport_rect(x, y, w, h) {
+  if (w <= 0 || h <= 0) { __sw_log_once("stone_set_viewport_rect: empty rect"); return; }
+  var wh = __sw_target_size();
+  __SW.gl.viewport(x, wh[1] - y - h, w, h);
+}
 // mode: 0 = nearest, 1 = linear. Integer formats refuse -- a linear-filtered
 // integer texture samples zero.
 function stone_set_canvas_filter(h, mode) {

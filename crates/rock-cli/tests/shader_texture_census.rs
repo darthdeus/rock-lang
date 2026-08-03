@@ -141,7 +141,7 @@ const EXPECTED: &[(&str, &str, &str)] = &[
     ("bloom_prefilter_frag", "src_tex", "slot 0"),
     ("bloom_up_frag", "src_tex", "slot 0"),
     ("color_grade_frag", "scene_tex", "slot 0"),
-    ("depth_visualize_frag", "uTexture", "bare"),
+    ("depth_visualize_frag", "depth_tex", "slot 0"),
     ("entity_id_debug_frag", "id_buffer", "slot 0"),
     ("glyph_window", "core_tex", "slot 0"),
     ("glyph_window", "mask_tex", "slot 1"),
