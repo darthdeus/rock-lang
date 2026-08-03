@@ -24,6 +24,8 @@ mod inline_pipeline;
 mod inspect;
 #[path = "lambda.rs"]
 mod lambda;
+#[path = "web_canvas_active_extent.rs"]
+mod web_canvas_active_extent;
 #[path = "log_dedup.rs"]
 mod log_dedup;
 #[path = "loops.rs"]

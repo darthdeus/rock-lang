@@ -52,6 +52,8 @@ mod stone_test_decorator_cleanup;
 mod stone_test_endtoend;
 #[path = "watcher_tmp_project_path.rs"]
 mod watcher_tmp_project_path;
+#[path = "imgui_web_stubs.rs"]
+mod imgui_web_stubs;
 #[path = "web_build_gate.rs"]
 mod web_build_gate;
 #[path = "web_watch_tests.rs"]
