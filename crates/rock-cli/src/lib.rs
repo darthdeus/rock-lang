@@ -668,7 +668,7 @@ impl Args {
                 .help("For `rock sim`: rewrite snapshot baselines instead of diffing."))
             .arg(Arg::new("jobs").long("jobs").short('j').value_name("N")
                 .value_parser(clap::value_parser!(usize))
-                .help("For `rock sim`: run up to N sim children concurrently (default 4, 1 = serial)."))
+                .help("For `rock sim`: run up to N sim children concurrently (default 4, 1 = serial). Applies to the whole-suite and multi-name forms."))
             .arg(Arg::new("record").long("record").value_name("FILE")
                 .help("For `rock frame`: record per-tick input + dt to FILE (a replay log). Replay it with --replay."))
             .arg(Arg::new("replay").long("replay").value_name("FILE")

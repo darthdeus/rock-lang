@@ -180,7 +180,7 @@ pub fn do_run_sim_opts(backend: crate::Backend, project: &str, sim_name: &str, q
         update_snapshots,
         &output,
         &env_by_wire,
-        &mut stone,
+        Some(&mut stone),
     )?;
     let sim_name = display_name.as_str();
 
@@ -238,7 +238,7 @@ fn run_named_entry(
     update_snapshots: bool,
     output: &str,
     env_by_wire: &HashMap<String, Vec<(String, String)>>,
-    stone: &mut crate::skull_backend::SkullStone,
+    stone: Option<&mut crate::skull_backend::SkullStone>,
 ) -> Result<(String, SimSummary)> {
     let tempdir = TempDir::new().context("creating sim tempdir")?;
     let out_path = tempdir.path().to_path_buf();
@@ -257,9 +257,16 @@ fn run_named_entry(
     };
 
     let mut combined = SimSummary::default();
+    let mut stone = stone;
     for part in &parts {
         let env_pairs = env_by_wire.get(*part).cloned().unwrap_or_default();
-        let lane = is_reload_lane(&env_pairs).then(|| &mut *stone);
+        // Parts of a chain run in order and share `$OUT`; only the parts that
+        // opted into the reload lane may touch the session.
+        let lane = if is_reload_lane(&env_pairs) {
+            stone.as_deref_mut()
+        } else {
+            None
+        };
         let part_summary = run_one_sim(
             project,
             part,
@@ -319,8 +326,10 @@ pub fn do_run_named_sims(
     names: &[String],
     quiet: bool,
     update_snapshots: bool,
+    jobs: Option<usize>,
 ) -> Result<()> {
-    // One name: identical to the classic single-run path (full detail).
+    // One name: identical to the classic single-run path (full detail). There
+    // is nothing to overlap, so `--jobs` does not apply.
     if names.len() == 1 {
         return do_run_sim_opts(backend, project, &names[0], quiet, update_snapshots);
     }
@@ -336,24 +345,73 @@ pub fn do_run_named_sims(
         compile_sims(backend, project_path, PathBuf::from(&output))?;
     sim_spawn_barrier();
 
-    let mut passed = 0usize;
-    let mut failed: Vec<String> = Vec::new();
-    for name in names {
+    let jobs = resolve_jobs(jobs, update_snapshots);
+
+    // Same two lanes as the suite path. The unit of parallelism is the ENTRY,
+    // not the part: a comma-chain's parts share one `$OUT` and run in order,
+    // so they stay together on one worker.
+    let (reload_idx, ordinary_idx): (Vec<usize>, Vec<usize>) =
+        (0..names.len()).partition(|&i| entry_is_reload_lane(&names[i], &env_by_wire));
+
+    let report = Mutex::new(());
+    let run_at = |i: usize,
+                  stone: Option<&mut crate::skull_backend::SkullStone>|
+     -> Result<(String, SimSummary)> {
         // quiet=true into the runner: suppress the live per-expect stream and
         // the on-failure game-log dump. The concise `print` below still lists
         // each sim's failing assertions so a failure isn't opaque.
         let (display_name, summary) = run_named_entry(
             &project,
-            name,
+            &names[i],
             true,
             update_snapshots,
             &output,
             &env_by_wire,
-            &mut stone,
+            stone,
         )?;
+        let _lock = report.lock().unwrap();
         if !quiet {
             summary.print(&display_name, false);
         }
+        Ok((display_name, summary))
+    };
+
+    let mut results: HashMap<usize, Result<(String, SimSummary)>> = HashMap::new();
+    if jobs > 1 && ordinary_idx.len() > 1 {
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let collected: Mutex<Vec<(usize, Result<(String, SimSummary)>)>> =
+            Mutex::new(Vec::new());
+        let workers = jobs.min(ordinary_idx.len());
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(|| loop {
+                    let slot = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let Some(&i) = ordinary_idx.get(slot) else { break };
+                    let r = run_at(i, None);
+                    collected.lock().unwrap().push((i, r));
+                });
+            }
+        });
+        results.extend(collected.into_inner().unwrap());
+    } else {
+        for &i in &ordinary_idx {
+            results.insert(i, run_at(i, None));
+        }
+    }
+    for &i in &reload_idx {
+        results.insert(i, run_at(i, Some(&mut stone)));
+    }
+
+    // Accounting walks the order the user gave, so the failed list matches a
+    // serial run's regardless of completion order.
+    let mut passed = 0usize;
+    let mut failed: Vec<String> = Vec::new();
+    for i in 0..names.len() {
+        let (display_name, summary) = match results.remove(&i) {
+            Some(Ok(v)) => v,
+            Some(Err(e)) => return Err(e),
+            None => return Err(anyhow!("sim `{}` was never scheduled", names[i])),
+        };
         if entry_passed(&summary) {
             passed += 1;
         } else {
@@ -592,6 +650,20 @@ fn revert_reload_edits(
         stone.apply_edit(Path::new(&file), &text, &main_path, &incremental_path)?;
     }
     crate::skull_backend::wipe_overlay(&incremental_path)
+}
+
+/// Whether a named entry belongs to the exclusive reload lane.
+///
+/// An entry is a comma-chain of parts sharing one `$OUT`; if ANY part opts into
+/// the reload lane the whole entry is exclusive, because the parts run in one
+/// sequence and the session must not be live while another child exists.
+fn entry_is_reload_lane(
+    chain_spec: &str,
+    env_by_wire: &HashMap<String, Vec<(String, String)>>,
+) -> bool {
+    parse_sim_chain(chain_spec)
+        .iter()
+        .any(|part| env_by_wire.get(*part).is_some_and(|e| is_reload_lane(e)))
 }
 
 /// Conservative default for concurrent sim children.
@@ -1636,6 +1708,28 @@ mod tests {
         let mut mixed = pair("ROCK_TEST_SEED", "42");
         mixed.extend(pair("STONE_HOT_RELOAD", "1"));
         assert!(is_reload_lane(&mixed));
+    }
+
+    /// A comma-chain is scheduled as one entry, so ONE reload part makes the
+    /// whole entry exclusive. Missing that would let the session go live while
+    /// other children exist.
+    #[test]
+    fn a_chain_is_reload_lane_if_any_part_is() {
+        let mut env: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        env.insert("plain".into(), vec![("ROCK_TEST_SEED".into(), "42".into())]);
+        env.insert(
+            "reloader".into(),
+            vec![("STONE_HOT_RELOAD".into(), "1".into())],
+        );
+
+        assert!(!entry_is_reload_lane("plain", &env));
+        assert!(entry_is_reload_lane("reloader", &env));
+        // Either position in the chain routes the entry to the lane.
+        assert!(entry_is_reload_lane("plain,reloader", &env));
+        assert!(entry_is_reload_lane("reloader,plain", &env));
+        assert!(!entry_is_reload_lane("plain,plain", &env));
+        // A name with no recorded env is ordinary, not a panic.
+        assert!(!entry_is_reload_lane("unknown", &env));
     }
 
     #[test]
