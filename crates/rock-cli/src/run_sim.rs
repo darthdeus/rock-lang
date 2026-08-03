@@ -34,6 +34,51 @@ pub fn parse_sim_chain(name: &str) -> Vec<&str> {
     name.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect()
 }
 
+/// Test-only barrier between compiling the sim build and spawning the first
+/// child. `ROCK_SIM_SPAWN_BARRIER=<path>` makes an invocation park here until
+/// `<path>` exists, so a test can deterministically interleave a second
+/// invocation's compile against this one's spawn. Bounded so a mistaken set
+/// cannot wedge a run forever. Env-gated and once per invocation, never in a
+/// per-frame or per-sim path.
+/// A sim invocation's private directory for `main.lua` + its `incremental.lua`
+/// overlay.
+///
+/// This MUST NOT be a fixed workspace path. Two `rock sim` invocations (or a
+/// `rock stone` watcher alongside one) each compile their own `@sim` registry,
+/// and a shared path lets the second compile replace the chunk the first is
+/// about to run -- the first then reports `unknown sim: <name>` for names its
+/// own registry contains. Pinned by
+/// `tests/sim_concurrent_invocations.rs`.
+///
+/// Lives under `tmp/` rather than the system temp dir so a failing run's build
+/// is still findable next to `tmp/libstone.so` for `luajit main.lua` debugging.
+/// The engine cdylibs stay in `tmp/` itself: they are staged before any spawn
+/// and children resolve them through the relative `tmp` entry that
+/// `rock_host::project::lib_path_value` puts on the library search path.
+fn sim_output_dir() -> Result<TempDir> {
+    fs_err::create_dir_all("tmp").context("creating tmp/ for sim output")?;
+    tempfile::Builder::new()
+        .prefix("sim-")
+        .tempdir_in("tmp")
+        .context("creating sim output directory")
+}
+
+fn sim_spawn_barrier() {
+    let Some(gate) = std::env::var_os("ROCK_SIM_SPAWN_BARRIER") else {
+        return;
+    };
+    let gate = PathBuf::from(gate);
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    while !gate.exists() {
+        if std::time::Instant::now() > deadline {
+            log::warn!(target: "SIM",
+                "ROCK_SIM_SPAWN_BARRIER `{}` never appeared; proceeding", gate.display());
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 /// Compile `project` into `output_path` and walk the `@sim` registry
 /// once, returning the registry-ordered wire names alongside each sim's
 /// `@sim_env` pairs. Single source of suite discovery for the list,
@@ -72,7 +117,8 @@ pub fn do_list_sims(backend: crate::Backend, project: &str) -> Result<()> {
 
     let project_path = rock_host::project::resolve_project_dir(project)?;
 
-    let (wire_names, _, _) = compile_sims(backend, project_path, PathBuf::from("tmp"))?;
+    let out_dir = sim_output_dir()?;
+    let (wire_names, _, _) = compile_sims(backend, project_path, out_dir.path().to_path_buf())?;
     for name in wire_names {
         // Result output, NOT logging: `--list` exists to print the sim
         // names to stdout — this is the command's answer, consumed by
@@ -92,14 +138,16 @@ pub fn do_run_sim_opts(backend: crate::Backend, project: &str, sim_name: &str, q
     let project = project_path.to_string_lossy().into_owned();
     rock_host::engine_build::build_engine_libs(&project)?;
 
-    let output = "tmp".to_string();
-    let output_path = PathBuf::from(&output);
+    let out_dir = sim_output_dir()?;
+    let output = out_dir.path().to_string_lossy().into_owned();
+    let output_path = out_dir.path().to_path_buf();
 
     // Compile once and collect `@sim_env("K", "V")` env pairs by wire name.
     // The runner applies them via `Command::env` before luajit spawns --
     // the in-process runtime `set_env()` runs after `@init`, so it can't
     // influence env-var-driven game config like `ANVIL_VIDEO`.
     let (_, env_by_wire, mut stone) = compile_sims(backend, project_path, output_path)?;
+    sim_spawn_barrier();
 
     let (display_name, summary) = run_named_entry(
         &project,
@@ -255,9 +303,11 @@ pub fn do_run_named_sims(
     let project = project_path.to_string_lossy().into_owned();
     rock_host::engine_build::build_engine_libs(&project)?;
 
-    let output = "tmp".to_string();
+    let out_dir = sim_output_dir()?;
+    let output = out_dir.path().to_string_lossy().into_owned();
     let (_, env_by_wire, mut stone) =
         compile_sims(backend, project_path, PathBuf::from(&output))?;
+    sim_spawn_barrier();
 
     let mut passed = 0usize;
     let mut failed: Vec<String> = Vec::new();
@@ -315,9 +365,11 @@ pub fn do_run_all_sims(backend: crate::Backend, project: &str, quiet: bool, upda
     let project = project_path.to_string_lossy().into_owned();
     rock_host::engine_build::build_engine_libs(&project)?;
 
-    let output = "tmp".to_string();
+    let out_dir = sim_output_dir()?;
+    let output = out_dir.path().to_string_lossy().into_owned();
     let (wire_names, env_by_wire, mut stone) =
         compile_sims(backend, project_path, PathBuf::from(&output))?;
+    sim_spawn_barrier();
     if wire_names.is_empty() {
         return Err(anyhow!("no @sim coroutines found in project `{project}`"));
     }
