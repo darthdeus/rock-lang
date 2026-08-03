@@ -999,15 +999,27 @@ function stone_load_image(path, filterMode) {
   __SW.imageSizes[h] = { w: bmp.width, h: bmp.height };
   return h;
 }
+// Whether a sampler is bound on `unit` -- the twin of stone-rs's
+// stone_sampler_bound. See the note there; the sampler_release sim pins it.
+function stone_sampler_bound(unit) {
+  var gl = __SW.gl;
+  if (!gl || unit < 0) return false;
+  gl.activeTexture(gl.TEXTURE0 + unit);
+  var bound = gl.getParameter(gl.SAMPLER_BINDING);
+  gl.activeTexture(gl.TEXTURE0);
+  return !!bound;
+}
 // Immutable sampler objects, one per (filter, wrap) pair, created once and
 // never mutated -- the twin of stone-rs's SAMPLERS. `image` selects the wrap
 // half: a bound sampler overrides the texture's own wrap, so one that disagrees
-// would silently clamp a REPEAT texture (trails). mode < 0 releases the unit
-// back to texture-object filtering, which every unmigrated path still uses.
-function stone_bind_sampler(mode, image) {
+// would silently clamp a REPEAT texture (trails); pass 0 for a canvas, whose
+// texture is always CLAMP_TO_EDGE. mode < 0 releases `unit` back to
+// texture-object filtering, which the paths that bind a texture without coming
+// through here still use.
+function stone_bind_sampler(unit, mode, image) {
   var gl = __SW.gl;
-  if (!gl) return;
-  if (mode < 0) { gl.bindSampler(0, null); return; }
+  if (!gl || unit < 0) return;
+  if (mode < 0) { gl.bindSampler(unit, null); return; }
   var repeat = __SW.imageRepeat[image] ? 1 : 0;
   var filt = (mode === 1) ? 1 : 0;
   var key = filt + ":" + repeat;
@@ -1022,7 +1034,7 @@ function stone_bind_sampler(mode, image) {
     gl.samplerParameteri(s, gl.TEXTURE_WRAP_T, w);
     __SW.samplers[key] = s;
   }
-  gl.bindSampler(0, s);
+  gl.bindSampler(unit, s);
 }
 function stone_image_set_wrap(h, repeat) {
   var gl = __SW.gl, t = __SW.textures[h];
@@ -1170,20 +1182,6 @@ function stone_create_canvas(w, h, format, depth) {
   var handle = __SW.nextCanvas++;
   __SW.canvases[handle] = { fbo: fbo, tex: texHandle, w: w, h: h, format: format };
   return handle;
-}
-function stone_set_canvas_filter(h, mode) {
-  var c = __SW.canvases[h];
-  if (!c) { __sw_log_once("stone_set_canvas_filter: unknown canvas " + h); return false; }
-  var gl = __SW.gl;
-  // An integer texture is not filterable in GLES 3.0 / WebGL2 -- LINEAR on one
-  // is an INVALID_ENUM, so report the refusal rather than setting it and
-  // letting the caller believe it took (bloom's pyramid logs on false).
-  if (c.format === 3 && mode === 1) return false;
-  var f = (mode === 1) ? gl.LINEAR : gl.NEAREST;
-  gl.bindTexture(gl.TEXTURE_2D, __SW.textures[c.tex]);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, f);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, f);
-  return true;
 }
 function stone_destroy_canvas(h) {
   var c = __SW.canvases[h];

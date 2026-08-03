@@ -280,7 +280,9 @@ fn web_sampling_nearest_and_linear() {
 // assert identical claims. See games/testbed/pass_sampling.rock.
 #[test]
 fn web_pass_sampling() {
-    let Some((_dir, shot)) = run_cdp(
+    // No screenshot check: this fixture renders into offscreen canvases, so the
+    // window stays the empty testbed scene. The verdict IS the oracle.
+    let Some(_) = run_cdp(
         "games/testbed",
         "web_pass_sampling",
         &[
@@ -296,7 +298,6 @@ fn web_pass_sampling() {
     ) else {
         return;
     };
-    assert_not_blank(&shot, "the testbed scene");
 }
 
 #[test]
