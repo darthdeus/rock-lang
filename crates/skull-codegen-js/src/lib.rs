@@ -624,7 +624,7 @@ var __SW = {
   // creates the GL texture lazily+synchronously (GL exists by @init) and caches
   // path -> handle; handle -> {w,h} feeds get_image_size.
   imageBitmaps: {}, imageHandles: {}, imageSizes: {},
-  imageData: {}, nextImageData: 0,
+  imageData: {}, nextImageData: 0, imageRepeat: {}, samplers: {},
   canvases: {}, nextCanvas: 1, boundCanvas: 0, // 0 = default framebuffer
   shaders: {}, nextShader: 1, curShader: 0,
   meshVbo: null, // shared STREAM_DRAW vertex buffer
@@ -999,9 +999,35 @@ function stone_load_image(path, filterMode) {
   __SW.imageSizes[h] = { w: bmp.width, h: bmp.height };
   return h;
 }
+// Immutable sampler objects, one per (filter, wrap) pair, created once and
+// never mutated -- the twin of stone-rs's SAMPLERS. `image` selects the wrap
+// half: a bound sampler overrides the texture's own wrap, so one that disagrees
+// would silently clamp a REPEAT texture (trails). mode < 0 releases the unit
+// back to texture-object filtering, which every unmigrated path still uses.
+function stone_bind_sampler(mode, image) {
+  var gl = __SW.gl;
+  if (!gl) return;
+  if (mode < 0) { gl.bindSampler(0, null); return; }
+  var repeat = __SW.imageRepeat[image] ? 1 : 0;
+  var filt = (mode === 1) ? 1 : 0;
+  var key = filt + ":" + repeat;
+  var s = __SW.samplers[key];
+  if (!s) {
+    s = gl.createSampler();
+    var f = filt ? gl.LINEAR : gl.NEAREST;
+    var w = repeat ? gl.REPEAT : gl.CLAMP_TO_EDGE;
+    gl.samplerParameteri(s, gl.TEXTURE_MIN_FILTER, f);
+    gl.samplerParameteri(s, gl.TEXTURE_MAG_FILTER, f);
+    gl.samplerParameteri(s, gl.TEXTURE_WRAP_S, w);
+    gl.samplerParameteri(s, gl.TEXTURE_WRAP_T, w);
+    __SW.samplers[key] = s;
+  }
+  gl.bindSampler(0, s);
+}
 function stone_image_set_wrap(h, repeat) {
   var gl = __SW.gl, t = __SW.textures[h];
   if (!t) return false;
+  __SW.imageRepeat[h] = !!repeat;
   var mode = repeat ? gl.REPEAT : gl.CLAMP_TO_EDGE;
   gl.bindTexture(gl.TEXTURE_2D, t);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, mode);
