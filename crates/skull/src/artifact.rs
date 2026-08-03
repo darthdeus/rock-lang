@@ -17,11 +17,13 @@
 //! concrete callee is unrealizable is a [`Severed`] call -- the diagnostic a
 //! filter cannot produce at all, because a filter never looks at an edge.
 //!
-//! **The graph must be built FOR this artifact.** `build_for_target` selects
-//! backend variants and resolves callees per target, so filtering a Lua graph
-//! for a JS artifact would answer JS's question with Lua's edges. `realize`
-//! records [`ArtifactCensus::graph_mismatch`] rather than trusting the caller;
-//! it is a defect, not a tolerated approximation.
+//! **There is ONE graph, and it is target-neutral.** It records bone's collapsed
+//! group REPRESENTATIVE at every callee, so selecting the backend sibling that
+//! serves a target happens here, in [`realize_decl`], and nowhere else. One
+//! shared [`Instance`] therefore realizes to a DIFFERENT declaration -- and a
+//! different [`BoundaryId`] -- on two artifacts while remaining one logical
+//! identity, which is plan S 20a's separation stated as a mechanism rather than
+//! as a claim about two graphs that happened to agree.
 //!
 //! **Identity across artifacts is the shared [`Instance`], NOT the spelling.**
 //! Plan S 0h: `InstanceId` is target-neutral and the ARTIFACT owns the emitted
@@ -39,7 +41,7 @@ use bone_semantic::inference::Workspace;
 use skull_mir::intrinsics::{self, IntrinsicTable};
 use skull_mir::mir::FuncRef;
 
-use crate::concrete_body::{BoundaryId, Callee};
+use crate::concrete_body::BoundaryId;
 use crate::instance_graph::{self, BoundaryClass, DeclKey, Instance, InstanceGraph, Site, SiteOutcome};
 use crate::target_projection::{supports, ExecutionTargetSpec};
 
@@ -196,6 +198,19 @@ impl Realization {
     }
 }
 
+/// One instance, realized: the DECLARATION this artifact selected for it and how
+/// that declaration is supplied.
+///
+/// The declaration is not `Instance::func`. The graph holds the target-neutral
+/// representative; a backend sibling serving this artifact is a different
+/// `FuncRef`, and it is the one whose body is emitted and whose contract a
+/// [`BoundaryId`] names.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Realized {
+    pub decl: FuncRef,
+    pub kind: Realization,
+}
+
 /// Why a declaration in the shared graph is not realizable on this artifact.
 /// Each is plan S 10's `Invalid boundary` outcome with its cause kept, because
 /// "unavailable" collapses three different diagnostics into one word.
@@ -263,17 +278,29 @@ pub struct Severed {
     pub cause: Unrealizable,
 }
 
+/// What a call in THIS artifact terminates in -- [`Callee`] with the boundary
+/// arm REALIZED.
+///
+/// The shared form cannot carry a [`BoundaryId`]: an id names a target and an
+/// emitted symbol, and a target-neutral body has neither. This is the same
+/// split one rung down, not a second callee model.
+#[derive(Clone, Debug)]
+pub enum RealizedCallee {
+    Rock(Instance),
+    Boundary(BoundaryId),
+}
+
 /// One opaque-body dependency, terminating in a concrete callee.
 #[derive(Clone, Debug)]
 pub struct InlineDep {
     /// The opaque body that names it.
     pub owner: FuncRef,
     pub entry: &'static str,
-    /// [`Callee::Boundary`] for a runtime entry, [`Callee::Rock`] for a
-    /// declaration this artifact lowers. Never a bare `FuncRef`: that loses the
-    /// boundary class and cannot name WHICH instance when a declaration has
-    /// more than one.
-    pub callee: Callee,
+    /// [`RealizedCallee::Boundary`] for a runtime entry, [`RealizedCallee::Rock`]
+    /// for a declaration this artifact lowers. Never a bare `FuncRef`: that
+    /// loses the boundary class and cannot name WHICH instance when a
+    /// declaration has more than one.
+    pub callee: RealizedCallee,
 }
 
 /// An opaque-body dependency this artifact cannot resolve to one callee. A
@@ -320,9 +347,6 @@ pub struct ArtifactCensus {
     pub inline_deps_unresolved: usize,
     pub inline_deps_boundary: usize,
     pub inline_deps_rock: usize,
-    /// Non-zero is a DEFECT: the artifact was handed a graph built for another
-    /// target, whose variant selection answers a different question.
-    pub graph_mismatch: bool,
     /// Deferred obligations, carried from the target spec.
     pub deferred: Vec<&'static str>,
 }
@@ -330,9 +354,6 @@ pub struct ArtifactCensus {
 /// One target's realization of a graph it did not build.
 pub struct ArtifactView {
     pub spec: ExecutionTargetSpec,
-    /// The target the GRAPH was built for. Must serve `spec.backend`.
-    pub graph_target: FnBackend,
-    pub graph_mismatch: bool,
     /// The artifact's root instances -- realizable emission roots, plus the
     /// callees of always-emitted bodies, which have no incoming edge.
     pub roots: BTreeSet<Instance>,
@@ -343,11 +364,16 @@ pub struct ArtifactView {
     /// so does this: a boundary has no body the artifact lowers, so enqueueing
     /// it as an instance would ask for callees it does not have.
     pub instances: BTreeSet<Instance>,
-    /// Retained BOUNDARIES, by the identity a call must name. Reached, never
-    /// traversed.
-    pub boundaries: BTreeMap<BoundaryId, Instance>,
-    /// How each retained instance is supplied here.
-    pub realization: BTreeMap<Instance, Realization>,
+    /// Retained BOUNDARIES: the identity a call must name, PER INSTANCE.
+    /// Reached, never traversed.
+    ///
+    /// Keyed by [`Instance`] rather than by [`BoundaryId`]. A boundary is
+    /// retained because an instance reached it, so the instance is the identity
+    /// that cannot collide; keying the other way made two instances of one
+    /// generic boundary declaration overwrite each other.
+    pub boundaries: BTreeMap<Instance, BoundaryId>,
+    /// How each retained instance is supplied here, and by which declaration.
+    pub realization: BTreeMap<Instance, Realized>,
     pub excluded: Vec<Excluded>,
     pub severed: Vec<Severed>,
     pub sites_walked: usize,
@@ -392,14 +418,13 @@ impl ArtifactView {
             inline_deps_boundary: self
                 .inline_deps
                 .iter()
-                .filter(|d| matches!(d.callee, Callee::Boundary(_)))
+                .filter(|d| matches!(d.callee, RealizedCallee::Boundary(_)))
                 .count(),
             inline_deps_rock: self
                 .inline_deps
                 .iter()
-                .filter(|d| matches!(d.callee, Callee::Rock(_)))
+                .filter(|d| matches!(d.callee, RealizedCallee::Rock(_)))
                 .count(),
-            graph_mismatch: self.graph_mismatch,
             deferred: self.deferred.clone(),
             ..Default::default()
         };
@@ -407,7 +432,7 @@ impl ArtifactView {
             *c.excluded_by_cause.entry(e.cause.label()).or_insert(0) += 1;
         }
         for r in self.realization.values() {
-            *c.realized_by_kind.entry(r.label()).or_insert(0) += 1;
+            *c.realized_by_kind.entry(r.kind.label()).or_insert(0) += 1;
         }
         for s in &self.severed {
             *c.severed_by_cause.entry(s.cause.label()).or_insert(0) += 1;
@@ -484,27 +509,52 @@ impl ArtifactView {
 /// emission would reject.
 fn realize_decl(
     ws: &Workspace,
+    rep: FuncRef,
+    erased: &BTreeSet<String>,
+    spec: &ExecutionTargetSpec,
+    mappings: &ArtifactMappings<'_>,
+) -> Result<Realized, Unrealizable> {
+    // SIBLING SELECTION, and this is the only place it happens. `rep` is the
+    // shared graph's target-neutral representative; `backend_variant` is
+    // production's own selector, so the declaration this artifact emits is the
+    // one lowering would pick. `Err` -- nothing in the group serves this
+    // artifact -- is the `@nomangle`-sibling case: a JS body asked of a Lua
+    // artifact.
+    let decl = match spec.backend {
+        Some(b) => {
+            let name = ws.module(rep.module).functions[rep.func].name;
+            skull_mir::lower::backend_variant(ws, name, rep, b)
+                .map_err(|_| Unrealizable::ForeignToArtifact)?
+        }
+        // A target with no Rock-level backend of its own names no host, so there
+        // is no sibling to select and only a declaration that names none --
+        // `FnBackend::Any`, a portable Rock body -- serves it. Deliberately NOT
+        // `serves(f.backend, Any)`, which answers yes to everything: that is the
+        // "any target" convenience and would keep `extern(lua) fn print` on a C
+        // artifact.
+        None => {
+            if ws.module(rep.module).functions[rep.func].backend != FnBackend::Any {
+                return Err(Unrealizable::ForeignToArtifact);
+            }
+            rep
+        }
+    };
+    let f = &ws.module(decl.module).functions[decl.func];
+    let kind = realize_body(ws, decl, f, erased, spec, mappings)?;
+    Ok(Realized { decl, kind })
+}
+
+/// How the SELECTED declaration is supplied. Split from the selection above so
+/// the two questions -- which declaration, and what kind of body it has -- cannot
+/// be answered against different `FuncRef`s.
+fn realize_body(
+    ws: &Workspace,
     decl: FuncRef,
     f: &Function,
     erased: &BTreeSet<String>,
     spec: &ExecutionTargetSpec,
     mappings: &ArtifactMappings<'_>,
 ) -> Result<Realization, Unrealizable> {
-    // The declaration's own backend first. A `@nomangle` sibling that serves
-    // another backend is not this artifact's, whatever its class.
-    let serves_artifact = match spec.backend {
-        Some(b) => instance_graph::serves(f.backend, b),
-        // A target with no Rock-level backend of its own names no host, so only
-        // a declaration that names none -- `FnBackend::Any`, a portable Rock
-        // body -- serves it. Deliberately NOT `serves(f.backend, Any)`, which
-        // answers yes to everything: that is the WALK's "any target"
-        // convenience and would keep `extern(lua) fn print` on a C artifact.
-        None => f.backend == FnBackend::Any,
-    };
-    if !serves_artifact {
-        return Err(Unrealizable::ForeignToArtifact);
-    }
-
     // An erased runtime entry is an IDENTITY, not a body kind: S 1.4's contract
     // is that the entry exists under its bare name for every target skull
     // emits, so it is classified before anything reads a body slot.
@@ -565,36 +615,38 @@ fn has_rock_body(ws: &Workspace, decl: FuncRef) -> bool {
         .contains_key(&bone_semantic::hir::BodyOwner::Function(decl.func))
 }
 
-/// Realize `g` for `req`. Read-only in the type system, not just by convention:
-/// `g` is `&`, so no discovery can happen here.
+/// Realize the shared `g` for `req`. Read-only in the type system, not just by
+/// convention: `g` is `&`, so no discovery can happen here.
 ///
-/// `g` must have been built FOR this artifact (`build_for_target`), because the
-/// walk resolves each callee through that target's `backend_variant`. A
-/// mismatch is recorded rather than silently tolerated.
+/// Every artifact realizes the SAME graph. There is no per-target build and
+/// therefore no mismatch to detect -- backend-sibling selection lives in
+/// [`realize_decl`], which is reached from here and from nowhere else.
 pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> ArtifactView {
     let spec = req.spec;
-    // A target with no `FnBackend` of its own is walked as `Any` -- the union
-    // graph, which selects no variant at all -- and then filtered to portable
-    // declarations. Stated rather than defaulted: `Any` is not "this target",
-    // it is "no variant selection happened".
+    // A target with no `FnBackend` of its own selects no variant at all. Stated
+    // rather than defaulted: `Any` is not "this target", it is "no host".
     let want = spec.backend.unwrap_or(FnBackend::Any);
-    let graph_mismatch = g.target != want;
 
     // Realizability of every instance the graph holds, computed once. It is a
     // property of the DECLARATION and the artifact, independent of reachability.
-    let mut realizable: BTreeMap<Instance, Result<Realization, Unrealizable>> = BTreeMap::new();
+    let mut realizable: BTreeMap<Instance, Result<Realized, Unrealizable>> = BTreeMap::new();
     for i in &g.instances {
-        let f = &ws.module(i.func.module).functions[i.func.func];
-        realizable.insert(
-            i.clone(),
-            realize_decl(ws, i.func, f, &g.erased_entries, &spec, &req.mappings),
-        );
+        realizable
+            .insert(i.clone(), realize_decl(ws, i.func, &g.erased_entries, &spec, &req.mappings));
     }
 
     // The artifact's ROOTS: its emission roots that are realizable here, plus
     // the callees of always-emitted bodies, which carry no incoming edge and
     // would otherwise read as unreachable.
-    let root_decls: BTreeSet<DeclKey> = req.roots.iter().map(|r| DeclKey(*r)).collect();
+    //
+    // Canonicalized, because an instance names the group REPRESENTATIVE while
+    // production hands over whichever declaration it discovered. A root given as
+    // a backend sibling would otherwise match nothing.
+    let root_decls: BTreeSet<DeclKey> = req
+        .roots
+        .iter()
+        .map(|r| DeclKey(skull_mir::lower::canonical_variant(ws, *r)))
+        .collect();
     let mut roots: BTreeSet<Instance> = BTreeSet::new();
     for i in &g.instances {
         let is_root = root_decls.contains(&DeclKey(i.func))
@@ -608,8 +660,7 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     // Not over `g.edges`: an edge says two instances are related, a site says
     // WHICH operation related them, which is what a severed call has to name.
     let mut instances: BTreeSet<Instance> = BTreeSet::new();
-    let mut boundaries: BTreeMap<BoundaryId, Instance> = BTreeMap::new();
-    let mut realization: BTreeMap<Instance, Realization> = BTreeMap::new();
+    let mut realization: BTreeMap<Instance, Realized> = BTreeMap::new();
     let mut severed: Vec<Severed> = Vec::new();
     let mut sites_walked = 0usize;
     let mut queue: VecDeque<Instance> = VecDeque::new();
@@ -619,37 +670,26 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     // made once. Only a Rock body is ENQUEUED: a boundary has no body the
     // artifact lowers, which is the same rule the graph walk follows when it
     // stops at a boundary rather than enumerating its callees.
-    let mut admit = |i: &Instance,
-                     instances: &mut BTreeSet<Instance>,
-                     boundaries: &mut BTreeMap<BoundaryId, Instance>,
-                     realization: &mut BTreeMap<Instance, Realization>,
-                     queue: &mut VecDeque<Instance>| {
+    //
+    // The boundary's IDENTITY is not minted here. It needs this artifact's
+    // spelling, which is the planner's answer over the full retained set, so it
+    // is built once below -- see `boundaries`.
+    let admit = |i: &Instance,
+                 instances: &mut BTreeSet<Instance>,
+                 realization: &mut BTreeMap<Instance, Realized>,
+                 queue: &mut VecDeque<Instance>| {
         let r = *realizable[i].as_ref().expect("admitted means realizable");
         if realization.insert(i.clone(), r).is_some() {
             return;
         }
-        match r.boundary_class() {
-            Some(class) => {
-                let f = &ws.module(i.func.module).functions[i.func.func];
-                boundaries.insert(
-                    BoundaryId {
-                        declaration: i.func,
-                        class,
-                        target: want,
-                        symbol: skull_mir::mangle::mangle_fn(ws, f),
-                    },
-                    i.clone(),
-                );
-            }
-            None => {
-                instances.insert(i.clone());
-                queue.push_back(i.clone());
-            }
+        if r.kind.boundary_class().is_none() {
+            instances.insert(i.clone());
+            queue.push_back(i.clone());
         }
     };
 
     for r in &roots {
-        admit(r, &mut instances, &mut boundaries, &mut realization, &mut queue);
+        admit(r, &mut instances, &mut realization, &mut queue);
     }
     while let Some(caller) = queue.pop_front() {
         let Some(sites) = g.call_sites.get(&caller) else { continue };
@@ -657,13 +697,7 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
             sites_walked += 1;
             let SiteOutcome::Resolved(callee) = &rec.outcome else { continue };
             match realizable.get(callee) {
-                Some(Ok(_)) => admit(
-                    callee,
-                    &mut instances,
-                    &mut boundaries,
-                    &mut realization,
-                    &mut queue,
-                ),
+                Some(Ok(_)) => admit(callee, &mut instances, &mut realization, &mut queue),
                 Some(Err(cause)) => severed.push(Severed {
                     caller: caller.clone(),
                     site: site.clone(),
@@ -708,6 +742,28 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         .map(|(symbol, instances)| SymbolCollision { symbol, instances })
         .collect();
 
+    // THE boundary identities, minted once, per retained instance. Every
+    // consumer -- an ordinary call site and an opaque dependency alike -- reads
+    // this map rather than constructing an id of its own, so an artifact cannot
+    // name one boundary two ways. The symbol is the PLANNER's, which is what
+    // makes a renaming planner visible here instead of silently ignored.
+    let boundaries: BTreeMap<Instance, BoundaryId> = realization
+        .iter()
+        .filter_map(|(i, r)| {
+            r.kind.boundary_class().map(|class| {
+                (
+                    i.clone(),
+                    BoundaryId {
+                        declaration: r.decl,
+                        class,
+                        target: want,
+                        symbol: symbols[i].clone(),
+                    },
+                )
+            })
+        })
+        .collect();
+
     // Opaque dependencies, terminating in a concrete callee of THIS artifact.
     let mut inline_deps = Vec::new();
     let mut unresolved_inline_deps = Vec::new();
@@ -720,11 +776,15 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
             continue;
         }
         for entry in entries {
-            let Some(target) = instance_graph::stdlib_entry(ws, entry, want) else {
+            // The REPRESENTATIVE, because that is what an instance is keyed by.
+            // Which declaration serves this artifact was already decided by
+            // `realize_decl`, and asking a target-specific lookup here would be
+            // a second selector answering the same question.
+            let Some(rep) = instance_graph::stdlib_entry_representative(ws, entry) else {
                 unresolved_inline_deps.push(UnresolvedInlineDep {
                     owner: owner.0,
                     entry,
-                    reason: "no declaration serves this entry on the artifact",
+                    reason: "no single declaration supplies this entry",
                 });
                 continue;
             };
@@ -732,7 +792,7 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
             // non-generic so one instance is expected, but picking the first of
             // several would silently choose.
             let matching: Vec<&Instance> =
-                realization.keys().filter(|i| i.func == target).collect();
+                realization.keys().filter(|i| i.func == rep).collect();
             let [inst] = matching.as_slice() else {
                 unresolved_inline_deps.push(UnresolvedInlineDep {
                     owner: owner.0,
@@ -746,22 +806,15 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
                 continue;
             };
             let inst = (*inst).clone();
-            let callee = match realization[&inst].boundary_class() {
-                Some(class) => Callee::Boundary(BoundaryId {
-                    declaration: target,
-                    class,
-                    target: want,
-                    symbol: symbols[&inst].clone(),
-                }),
-                None => Callee::Rock(inst),
+            let callee = match boundaries.get(&inst) {
+                Some(id) => RealizedCallee::Boundary(id.clone()),
+                None => RealizedCallee::Rock(inst),
             };
             inline_deps.push(InlineDep { owner: owner.0, entry, callee });
         }
     }
 
     ArtifactView {
-        graph_target: g.target,
-        graph_mismatch,
         shared_instances: g.instances.len(),
         deferred: crate::target_projection::deferred_for(&spec),
         spec,

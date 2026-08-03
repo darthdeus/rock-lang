@@ -96,7 +96,6 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     let mut rec_unreached = 0usize;
     let mut boundary_classes: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut boundary_max: BTreeMap<&'static str, usize> = BTreeMap::new();
-    let mut boundaries_invalid = 0usize;
     let mut erased_entries: std::collections::BTreeSet<String> = Default::default();
     let mut coroutine_helpers = 0usize;
     let mut coroutine_collisions = 0usize;
@@ -138,8 +137,6 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     let mut callee_boundary = 0usize;
     let mut callee_holes: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
     let mut callee_hole_examples: Vec<String> = Vec::new();
-    let mut callee_invalid = 0usize;
-    let mut callee_invalid_examples: Vec<String> = Vec::new();
     let mut callee_unknown_rock = 0usize;
     let mut callee_duplicate_sites = 0usize;
     let mut untyped_as_callee_key: BTreeMap<&'static str, usize> = BTreeMap::new();
@@ -148,13 +145,9 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     let mut span_rejections: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
     let mut span_unresolved: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
     let mut span_always_emitted: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
-    let mut identity_disagreements: Vec<String> = Vec::new();
-    let mut shared_instances = 0usize;
-    let mut identity_conflicts = 0usize;
-    let mut variant_switches = 0usize;
-    let mut js_invalid = 0usize;
-    let mut lua_only_total = 0usize;
-    let mut js_only_total = 0usize;
+    let mut sibling_selections = 0usize;
+    let mut boundary_pairs = 0usize;
+    let mut boundary_divergences = 0usize;
     let mut divergent_groups: std::collections::BTreeSet<String> = Default::default();
     let mut art_rows: BTreeMap<&'static str, ArtifactTotals> = BTreeMap::new();
     // Instances one artifact retained that the shared graph does not hold. A
@@ -166,7 +159,6 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     let mut art_spelling_conflicts = 0usize;
     let mut art_spelling_agreements = 0usize;
     let mut art_shared_collisions = 0usize;
-    let mut art_graph_mismatches = 0usize;
     let mut art_id_collisions = 0usize;
     let mut art_id_collisions_by_name = 0usize;
     let mut art_severed_examples: Vec<String> = Vec::new();
@@ -231,7 +223,6 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
                     *boundary_classes.entry(*k).or_insert(0) += v;
                     boundary_max.insert(*k, (*boundary_max.get(k).unwrap_or(&0)).max(*v));
                 }
-                boundaries_invalid += p.boundaries_invalid;
                 erased_entries.extend(p.erased_entries);
                 coroutine_helpers += p.coroutine_helpers;
                 coroutine_collisions += p.coroutine_helper_collisions;
@@ -310,12 +301,6 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
                         callee_hole_examples.push(x);
                     }
                 }
-                callee_invalid += p.body_census.invalid_boundary_calls;
-                for x in p.callee_invalid_examples {
-                    if callee_invalid_examples.len() < 10 {
-                        callee_invalid_examples.push(x);
-                    }
-                }
                 callee_unknown_rock += p.body_census.unknown_rock_callees;
                 callee_duplicate_sites += p.duplicate_sites;
                 for (k, v) in &p.body_census.untyped_as_callee_key {
@@ -327,22 +312,15 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
                         body_free_examples.push(x);
                     }
                 }
-                shared_instances += p.shared_instances;
-                identity_conflicts += p.identity_conflicts;
-                if p.identity_conflicts > 0 {
-                    identity_disagreements.push(p.row.name.clone());
-                }
-                variant_switches += p.target_variant_switches;
-                lua_only_total += p.lua_only;
-                js_only_total += p.js_only;
+                sibling_selections += p.artifact_sibling_selections;
+                boundary_pairs += p.artifact_boundary_pairs;
+                boundary_divergences += p.artifact_boundary_divergences;
                 divergent_groups.extend(p.divergent_variant_groups);
-                js_invalid += p.js_boundaries_invalid;
                 art_invented += p.artifact_invented;
                 art_shared_pairs += p.artifact_shared_pairs;
                 art_spelling_conflicts += p.artifact_spelling_conflicts;
                 art_spelling_agreements += p.artifact_spelling_agreements;
                 art_shared_collisions += p.shared_symbol_collisions;
-                art_graph_mismatches += p.artifact_graph_mismatches;
                 art_id_collisions += p.identity_collisions.0;
                 art_id_collisions_by_name += p.identity_collisions.1;
                 for x in p.artifact_severed_examples {
@@ -670,7 +648,7 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     println!("- call sites whose spec decision REJECTED (Stage 0b): **{rec_rejected}**");
     println!();
 
-    println!("## foreign boundaries (Lua view)");
+    println!("## foreign boundaries (shared graph)");
     println!();
     println!("| class | total across projects | max in one project |");
     println!("|---|---:|---:|");
@@ -679,8 +657,8 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     }
     println!();
     println!(
-        "- boundaries INVALID on the target (plan S 10: a spanned rejection, never a stub): \
-         **{boundaries_invalid}**"
+        "- whether a target can SERVE one is an ARTIFACT question, reported per CALL as a \
+         severed call below (plan S 10: a spanned rejection, never a stub)"
     );
     println!(
         "- erased runtime entries reached, of the 15 catalogued in \
@@ -807,18 +785,15 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     println!();
     println!("- callee sites recorded (the DENOMINATOR): **{sites_examined}**");
     println!(
-        "- ...accounted for as entries + holes + invalid-boundary rejections: \
-         **{}** + **{}** + **{}** = **{}**",
+        "- ...accounted for as entries + holes: **{}** + **{}** = **{}**",
         callee_direct + callee_fn_values + callee_synthesized
             + callee_iterator_ops.values().sum::<usize>(),
         callee_holes.values().map(|(n, _)| n).sum::<usize>(),
-        callee_invalid,
         callee_direct
             + callee_fn_values
             + callee_synthesized
             + callee_iterator_ops.values().sum::<usize>()
             + callee_holes.values().map(|(n, _)| n).sum::<usize>()
-            + callee_invalid
     );
     println!(
         "- resolved sites vs EDGES (separate structures, one edge per resolved callee): \
@@ -848,13 +823,6 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
         println!("  - `{k}`: {n} / {spanless}");
     }
     for x in &callee_hole_examples {
-        println!("  - {x}");
-    }
-    println!(
-        "- calls to a boundary this target cannot serve, kept OUT of the tables as \
-         located rejections (plan S 10): **{callee_invalid}**"
-    );
-    for x in &callee_invalid_examples {
         println!("  - {x}");
     }
     println!(
@@ -888,33 +856,23 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     );
     println!();
 
-    println!("## Lua vs JS target views");
+    println!("## one graph, many realizations");
     println!();
-    println!("**IDENTITY** -- an instance reached by both targets keys on");
-    println!("`(FuncRef, args)`; its symbol must not depend on the target.");
-    println!();
-    println!("- instances reached by BOTH views: **{shared_instances}**");
-    println!(
-        "- ...whose symbol DIFFERS between the two (the failure): **{identity_conflicts}**"
-    );
-    for d in &identity_disagreements {
-        println!("  - `{d}`");
-    }
-    println!();
-    println!("**REACHABILITY** -- which bodies each target reaches. Expected to");
-    println!("differ (plan S 0d: \"roots and foreign boundaries may differ\").");
+    println!("There is ONE target-neutral graph. Sibling selection happens in");
+    println!("`artifact::realize_decl`, so a shared `Instance` realizes to a different");
+    println!("DECLARATION -- and a different `BoundaryId` -- per artifact while remaining");
+    println!("one logical identity. Identity is that shared `Instance`, not a comparison");
+    println!("between two graphs that happened to agree.");
     println!();
     println!(
-        "- symbols reached only on Lua: **{lua_only_total}** -- a call resolving to an \
-         `inline(js)` sibling has no Rock body, so the whole subtree below it \
-         disappears from the JS walk"
+        "- retained instances whose artifact declaration is NOT the shared representative \
+         (every agreement below is vacuous if this is 0): **{sibling_selections}**"
     );
-    println!("- symbols reached only on JS: **{js_only_total}**");
     println!(
-        "- instances whose callee resolved to a different `FuncRef` on JS \
-         (the agreement is vacuous if this is 0): **{variant_switches}**"
+        "- instances two artifacts both retain as a BOUNDARY: **{boundary_pairs}**, of which \
+         **{boundary_divergences}** carry different `BoundaryId`s -- one logical identity, \
+         two target contracts"
     );
-    println!("- boundaries invalid on the JS target: **{js_invalid}**");
     println!(
         "- names whose same-signature backend variants do NOT share a mangling: **{}**",
         divergent_groups.len()
@@ -926,7 +884,7 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
 
     println!("## artifact views (plan S 9, S 11)");
     println!();
-    println!("Each target's REALIZATION of a graph BUILT FOR IT: which instances it reaches");
+    println!("Each target's REALIZATION of the ONE shared graph: which instances it reaches");
     println!("from its own roots, how each is supplied, and what it spells them. Retention is");
     println!("a WALK, not a declaration filter -- `unreachable` and the unrealizable causes");
     println!("are separate populations, and a retained caller whose callee is unrealizable is");
@@ -954,7 +912,7 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     }
     println!();
     println!(
-        "- instances an artifact realized that ITS OWN graph does NOT hold \
+        "- instances an artifact realized that the SHARED graph does NOT hold \
          (must be 0): **{art_invented}**"
     );
     println!(
@@ -965,12 +923,8 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
          construction bought."
     );
     println!(
-        "- views handed a graph built for another target (must be 0): \
-         **{art_graph_mismatches}**"
-    );
-    println!(
-        "- inline-body dependencies terminating in a `Callee::Boundary` / \
-         `Callee::Rock`: **{}** / **{}**",
+        "- inline-body dependencies terminating in a `RealizedCallee::Boundary` / \
+         `RealizedCallee::Rock`: **{}** / **{}**",
         art_rows.values().map(|a| a.inline_deps_boundary).sum::<usize>(),
         art_rows.values().map(|a| a.inline_deps_rock).sum::<usize>()
     );
@@ -1038,9 +992,9 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
         (
             "symbol collisions",
             art_rows.values().map(|a| a.symbol_collisions).sum(),
-            "retention is what makes the artifact table injective; the shared graph \
-             DOES hold two declarations that encode alike. Fixtures: \
-             `premise_two_retained_siblings_would_share_one_symbol` + \
+            "the SHARED graph no longer holds two instances that encode alike either \
+             (see the shared-collision line above), so this is not being bought by \
+             retention dropping a duplicate. Fixture: \
              `an_artifact_symbol_is_total_and_injective_over_what_it_retains`",
         ),
         (
@@ -1127,7 +1081,6 @@ struct OneProject {
     /// Boundary counts by class, for the graph's own (Lua) target.
     boundaries: BTreeMap<&'static str, usize>,
     /// Boundaries the target cannot serve -- plan S 10's `Invalid boundary`.
-    boundaries_invalid: usize,
     erased_entries: std::collections::BTreeSet<String>,
     coroutine_helpers: usize,
     coroutine_helper_collisions: usize,
@@ -1158,21 +1111,19 @@ struct OneProject {
     sites_edges: usize,
     duplicate_sites: usize,
     callee_hole_examples: Vec<String>,
-    callee_invalid_examples: Vec<String>,
     synthesized_approximated: usize,
-    shared_instances: usize,
-    identity_conflicts: usize,
-    /// Callees that resolved to a DIFFERENT `FuncRef` on JS than on Lua. If
-    /// this is 0 the agreement above is vacuous, so it is reported beside it.
-    target_variant_switches: usize,
-    /// Symbols present on Lua and absent on JS. Non-zero is the FINDING: a
-    /// logical instance was renamed or lost by changing target.
-    lua_only: usize,
-    /// Symbols present only on JS -- availability, not identity.
-    js_only: usize,
+    /// Retained instances whose ARTIFACT declaration is not the shared
+    /// representative -- sibling selection actually happened. Every
+    /// cross-artifact agreement below is vacuous if this is 0.
+    artifact_sibling_selections: usize,
+    /// Instances two artifacts BOTH retain as a boundary, and how many of those
+    /// pairs carry different `BoundaryId`s. One shared logical identity
+    /// realizing to two target contracts is the property; the pair count is the
+    /// population it was measured over.
+    artifact_boundary_pairs: usize,
+    artifact_boundary_divergences: usize,
     /// Names whose same-signature backend variants do not share a mangling.
     divergent_variant_groups: std::collections::BTreeSet<String>,
-    js_boundaries_invalid: usize,
     /// One census per artifact, keyed by target name.
     artifacts: Vec<(&'static str, skull::artifact::ArtifactCensus)>,
     /// Instances an artifact realized that the shared graph does not hold.
@@ -1188,8 +1139,6 @@ struct OneProject {
     /// Symbols the SHARED graph spells for more than one instance -- the space
     /// each artifact's zero is measured against.
     shared_symbol_collisions: usize,
-    /// Views handed a graph built for another target. Must be 0.
-    artifact_graph_mismatches: usize,
     /// `(instances merged by the declaration-keyed identity, by the name-keyed
     /// one it replaced)`. The first must be 0; the second is the magnitude of
     /// what the old key was hiding.
@@ -1226,53 +1175,6 @@ fn one_project(
     let g2 = instance_graph::build(&ws, roots.clone(), true);
     let text = instance_graph::render_manifest(&ws, &g);
     let stable = text == instance_graph::render_manifest(&ws, &g2);
-
-    // The JS view. Roots are the same predicate, but every callee runs through
-    // `backend_variant`, so a same-name `inline(lua)`/`inline(js)` pair resolves
-    // to a DIFFERENT `FuncRef` here. Logical identity must survive that; the
-    // switch count is reported beside the verdict so an agreement that holds
-    // only because nothing differed cannot read as the property holding.
-    let js = instance_graph::build_for_target(
-        &ws,
-        roots.clone(),
-        false,
-        bone_semantic::hir::FnBackend::Js,
-    );
-    // Set difference, not text equality: the question is whether a logical
-    // instance KEEPS its symbol, and `lua_only` is the direction that answers
-    // it. A symbol present on Lua and absent on JS means the same logical
-    // function was renamed or lost; extra JS symbols are availability.
-    let js_text = instance_graph::render_manifest(&ws, &js);
-    let lua_syms: std::collections::BTreeSet<&str> = text.lines().collect();
-    let js_syms: std::collections::BTreeSet<&str> = js_text.lines().collect();
-    let lua_only = lua_syms.difference(&js_syms).count();
-    let js_only = js_syms.difference(&lua_syms).count();
-    // The IDENTITY property, stated directly: an instance reached by both
-    // targets keys on `(FuncRef, args)`, and its identity must not depend on
-    // the target. Set difference alone cannot test this -- a symbol missing on
-    // JS is usually an unreached body, which is availability.
-    //
-    // Keyed and compared on the CANONICAL encoding throughout. Keying on the
-    // display rendering would let two different instances share a key, and a
-    // conflict between them would then be reported as agreement.
-    let mut lua_by_key: BTreeMap<(u32, u32, Vec<String>), String> = BTreeMap::new();
-    for i in &g.instances {
-        let args: Vec<String> = i.args.iter().map(|a| g.arena.canonical(*a)).collect();
-        let key = (i.func.module.raw(), i.func.func.into_raw().into_u32(), args);
-        lua_by_key.insert(key, g.identity(&ws, i));
-    }
-    let mut identity_conflicts = 0usize;
-    let mut shared_instances = 0usize;
-    for i in &js.instances {
-        let args: Vec<String> = i.args.iter().map(|a| js.arena.canonical(*a)).collect();
-        let key = (i.func.module.raw(), i.func.func.into_raw().into_u32(), args);
-        if let Some(lua_ident) = lua_by_key.get(&key) {
-            shared_instances += 1;
-            if *lua_ident != js.identity(&ws, i) {
-                identity_conflicts += 1;
-            }
-        }
-    }
 
     // Variant groups whose members do NOT share a mangling. `@nomangle` and
     // `extern` are exemptions carried by a DECLARATION, and the backend
@@ -1319,54 +1221,20 @@ fn one_project(
             ));
         }
     }
-    let lua_refs: std::collections::BTreeSet<(u32, u32)> = g
-        .instances
-        .iter()
-        .map(|i| (i.func.module.raw(), i.func.func.into_raw().into_u32()))
-        .collect();
-    let target_variant_switches = js
-        .instances
-        .iter()
-        .filter(|i| !lua_refs.contains(&(i.func.module.raw(), i.func.func.into_raw().into_u32())))
-        .count();
-    let js_boundaries_invalid =
-        js.boundaries.values().filter(|b| b.invalid_on_target).count();
 
-    // Artifact views. Each realizes a graph built FOR ITS OWN TARGET:
-    // `build_for_target` resolves every callee through that target's
-    // `backend_variant`, so realizing a Lua graph for the JS artifact would
-    // answer JS's question with Lua's edges. `graph_mismatch` is reported so
-    // this cannot silently regress.
+    // Artifact views. Every one realizes THE SAME `g`: the graph records bone's
+    // collapsed representative, and each artifact selects the backend sibling
+    // that serves it. There is no per-target graph to mismatch and no second
+    // arena to compare across.
     //
     // The JS artifact gets the REAL backend table. Without it a
     // `@native_required` intrinsic would read as unmapped on JS for the
     // trivial reason that nothing was wired, and the corpus number would be
     // measuring this driver rather than the artifact.
     let js_table = skull_codegen_js::JsIntrinsics;
-    // A target with no `FnBackend` of its own is walked as `Any`: the union
-    // graph, in which no variant selection happened. Stated rather than
-    // defaulted -- `Any` is not "this target", it is "no variant was selected".
-    let any_graph = instance_graph::build_for_target(
-        &ws,
-        roots.clone(),
-        false,
-        bone_semantic::hir::FnBackend::Any,
-    );
-    let artifact_graphs: Vec<(skull::target_projection::ExecutionTargetSpec, &InstanceGraph)> =
-        skull::target_projection::ALL
-            .iter()
-            .map(|spec| {
-                let ag = match spec.backend {
-                    Some(bone_semantic::hir::FnBackend::Js) => &js,
-                    Some(_) => &g,
-                    None => &any_graph,
-                };
-                (*spec, ag)
-            })
-            .collect();
-    let views: Vec<skull::artifact::ArtifactView> = artifact_graphs
+    let views: Vec<skull::artifact::ArtifactView> = skull::target_projection::ALL
         .iter()
-        .map(|(spec, ag)| {
+        .map(|spec| {
             let req = skull::artifact::ArtifactRequest::new(*spec, &roots);
             let req = match spec.backend {
                 Some(b @ bone_semantic::hir::FnBackend::Js) => req.with_mappings(
@@ -1374,33 +1242,41 @@ fn one_project(
                 ),
                 _ => req,
             };
-            skull::artifact::realize(&ws, ag, &req)
+            skull::artifact::realize(&ws, &g, &req)
         })
         .collect();
-    // Each view is checked against ITS OWN graph -- checking against `g` would
-    // let a JS-only instance read as "invented" merely because the Lua graph
-    // does not hold it.
-    let artifact_invented: usize = views
+    let artifact_invented: usize =
+        views.iter().map(|v| v.retained().filter(|i| !g.instances.contains(i)).count()).sum();
+    // The NON-VACUITY number for every cross-artifact agreement below: retained
+    // instances whose artifact declaration is not the shared representative, so
+    // sibling selection actually happened somewhere. Zero here would mean the
+    // agreements hold because nothing forked.
+    let artifact_sibling_selections: usize = views
         .iter()
-        .zip(&artifact_graphs)
-        .map(|(v, (_, ag))| v.retained().filter(|i| !ag.instances.contains(i)).count())
+        .map(|v| v.realization.iter().filter(|(i, r)| r.decl != i.func).count())
         .sum();
-    let artifact_graph_mismatches =
-        views.iter().filter(|v| v.census().graph_mismatch).count();
-    // Identity across artifacts, over the population that can witness it: an
-    // instance BOTH artifacts retain.
-    //
-    // Keyed on the CANONICAL identity string, never on `Instance` itself. An
-    // `Instance` holds `MonoTyId`s, which are indices into the graph's OWN
-    // arena; two separately built graphs intern in whatever order their walks
-    // reached types, so comparing raw ids across them compares arena positions.
-    let ident_map = |v: &skull::artifact::ArtifactView, ag: &InstanceGraph| {
-        v.retained()
-            .map(|i| (ag.identity(&ws, i), v.symbols[i].clone()))
-            .collect::<BTreeMap<String, String>>()
-    };
-    let by_artifact: Vec<BTreeMap<String, String>> =
-        views.iter().zip(&artifact_graphs).map(|(v, (_, ag))| ident_map(v, ag)).collect();
+    // One shared `Instance` realizing to DIFFERENT boundary identities. The
+    // pair count is the denominator: a divergence count alone cannot say
+    // whether any instance was retained as a boundary by two artifacts at all.
+    let mut artifact_boundary_pairs = 0usize;
+    let mut artifact_boundary_divergences = 0usize;
+    for (ai, a) in views.iter().enumerate() {
+        for b in views.iter().skip(ai + 1) {
+            for (inst, ida) in &a.boundaries {
+                let Some(idb) = b.boundaries.get(inst) else { continue };
+                artifact_boundary_pairs += 1;
+                artifact_boundary_divergences += usize::from(ida != idb);
+            }
+        }
+    }
+    let by_artifact: Vec<BTreeMap<String, String>> = views
+        .iter()
+        .map(|v| {
+            v.retained()
+                .map(|i| (g.identity(&ws, i), v.symbols[i].clone()))
+                .collect::<BTreeMap<String, String>>()
+        })
+        .collect();
     let mut artifact_shared_pairs = 0usize;
     let mut artifact_spelling_conflicts = 0usize;
     for (ai, a) in by_artifact.iter().enumerate() {
@@ -1433,14 +1309,14 @@ fn one_project(
     let mut artifact_symbol_examples: Vec<String> = Vec::new();
     let mut artifact_dep_examples: Vec<String> = Vec::new();
     let mut artifact_severed_examples: Vec<String> = Vec::new();
-    for (v, (_, ag)) in views.iter().zip(&artifact_graphs) {
+    for v in &views {
         for x in v.render_symbol_collisions(&ws).into_iter().take(2) {
             artifact_symbol_examples.push(format!("`{}` {x}", v.spec.name));
         }
         for x in v.render_unresolved_inline_deps(&ws).into_iter().take(2) {
             artifact_dep_examples.push(format!("`{}` {x}", v.spec.name));
         }
-        for x in v.render_severed(&ws, ag).into_iter().take(2) {
+        for x in v.render_severed(&ws, &g).into_iter().take(2) {
             artifact_severed_examples.push(format!("`{}` {x}", v.spec.name));
         }
     }
@@ -1460,14 +1336,6 @@ fn one_project(
         let stem = format!("{path}/{}", name.replace('/', "_"));
         std::fs::write(format!("{stem}.manifest"), &text)
             .map_err(|e| anyhow::anyhow!("writing {stem}.manifest: {e}"))?;
-        // The JS view beside it: a target disagreement is only diagnosable by
-        // diffing the two manifests, and re-deriving one by hand is how a
-        // difference gets attributed to the wrong cause.
-        std::fs::write(
-            format!("{stem}.js.manifest"),
-            instance_graph::render_manifest(&ws, &js),
-        )
-        .map_err(|e| anyhow::anyhow!("writing {stem}.js.manifest: {e}"))?;
         // The synthesized-call name histogram. This is the artifact the
         // "exactly the entries lowering emits" claim is checked against: the
         // same names counted in the project's emitted Lua must agree, and a
@@ -1616,23 +1484,6 @@ fn one_project(
             )
         })
         .collect();
-    let callee_invalid_examples: Vec<String> = bodies
-        .invalid_boundary_calls
-        .iter()
-        .take(3)
-        .map(|c| {
-            format!(
-                "`{}` {} calls `{}` ({}) at {}:{}",
-                g.identity(&ws, &c.instance),
-                c.site.op.name(),
-                c.boundary.symbol,
-                c.boundary.class.name(),
-                relativize(c.span.file.as_str(), root),
-                c.span.line_range.0 + 1
-            )
-        })
-        .collect();
-
     let census = g.recursion_census(&ws);
     let row = ProjectRow {
         // Relative: an absolute path varies by checkout and would make the
@@ -1675,7 +1526,6 @@ fn one_project(
         rejection_examples,
         reconciliation: rec,
         boundaries,
-        boundaries_invalid: g.boundaries.values().filter(|b| b.invalid_on_target).count(),
         erased_entries: g.erased_entries.clone(),
         coroutine_helpers: g.coroutine_helpers.len(),
         coroutine_helper_collisions: g.colliding_coroutine_helpers().len(),
@@ -1703,19 +1553,15 @@ fn one_project(
         sites_edges: g.edges.len(),
         duplicate_sites: g.duplicate_sites.len(),
         callee_hole_examples,
-        callee_invalid_examples,
         synthesized_approximated: g.synthesized_approximated,
         body_census,
         bodies_missing_for_expanded,
         body_free_examples,
         body_untyped_examples,
-        shared_instances,
-        identity_conflicts,
-        target_variant_switches,
-        lua_only,
-        js_only,
+        artifact_sibling_selections,
+        artifact_boundary_pairs,
+        artifact_boundary_divergences,
         divergent_variant_groups,
-        js_boundaries_invalid,
         artifacts,
         artifact_invented,
         artifact_shared_pairs,
@@ -1724,7 +1570,6 @@ fn one_project(
         artifact_symbol_examples,
         artifact_dep_examples,
         shared_symbol_collisions,
-        artifact_graph_mismatches,
         identity_collisions: g.colliding_identities(&ws),
         artifact_severed_examples,
     })

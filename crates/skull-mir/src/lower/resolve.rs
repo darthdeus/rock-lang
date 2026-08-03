@@ -63,6 +63,33 @@ pub fn backend_variant(
     Err(NoServingBinding)
 }
 
+/// The backend-variant group representative of `rep` -- the declaration bone
+/// would have collapsed the group to, whichever member a caller happens to hold.
+///
+/// The inverse direction of [`backend_variant`]: that goes representative ->
+/// serving sibling for a target, this goes any member -> representative. A
+/// target-neutral consumer (`skull::instance_graph`) needs it for roots, which
+/// production hands it as raw declarations rather than as bone-resolved callees.
+///
+/// The preference order IS bone's `backend_rank` (`Any` < `Lua` < `Js`,
+/// `bone-inference/src/calls.rs`) and the grouping IS [`sibling_variant`]'s, so
+/// there is no second rendered-signature implementation and no second notion of
+/// which member represents the group.
+pub fn canonical_variant(ws: &Workspace, rep: FuncRef) -> FuncRef {
+    use bone_semantic::hir::FnBackend;
+    let backend = ws.module(rep.module).functions[rep.func].backend;
+    if backend == FnBackend::Any {
+        return rep;
+    }
+    if let Some(sib) = sibling_variant(ws, rep, FnBackend::Any, true) {
+        return sib;
+    }
+    if backend == FnBackend::Lua {
+        return rep;
+    }
+    sibling_variant(ws, rep, FnBackend::Lua, true).unwrap_or(rep)
+}
+
 /// A same-name, same-signature sibling of `rep` whose backend serves `target`.
 /// Signature match is param-type equality (rendered, inference-free) -- the
 /// same key bone's `collapse_backend_variants` groups on. The caller has

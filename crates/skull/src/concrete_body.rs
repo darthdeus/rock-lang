@@ -33,7 +33,6 @@ use bone_semantic::hir::{BindingInfo, Body, Expr, FnBackend};
 use bone_semantic::inference::{BodyInference, Workspace};
 use bone_semantic::prelude::Span;
 use comfy_la_arena::{ArenaMap, Idx};
-use skull_mir::mangle::mangle_fn;
 use skull_mir::monoty::{MonoArena, MonoSubst, MonoTyId, MonoTyReason};
 use skull_mir::mir::FuncRef;
 
@@ -70,38 +69,42 @@ pub struct BoundaryId {
     pub symbol: String,
 }
 
-/// Ordered by the DECLARATION first, so a boundary set is deterministic and two
-/// backend siblings sharing a symbol stay apart. `FuncRef` is not `Ord`, and
-/// ordering by it would be ordering by arena position anyway -- the same
-/// contract `instance_graph::DeclKey` states.
-impl Ord for BoundaryId {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        let key = |b: &BoundaryId| {
-            (
-                b.declaration.module.raw(),
-                b.declaration.func.into_raw().into_u32(),
-                b.symbol.clone(),
-            )
-        };
-        key(self).cmp(&key(other))
-    }
-}
-
-impl PartialOrd for BoundaryId {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-/// Plan S 9's `enum Callee { Rock(InstanceId), Boundary(BoundaryId) }`.
+/// Deliberately NOT `Ord`. The hand-written ordering this replaces keyed on
+/// `(module, func, symbol)` while `Eq` also compared the class and the target,
+/// so two unequal identities compared `Equal` and any ordered collection keyed
+/// by it would merge boundaries the contract says are distinct. Nothing orders
+/// a `BoundaryId` today -- `ArtifactView::boundaries` is keyed by the
+/// [`Instance`] that reached it -- so the inconsistency is removed rather than
+/// re-derived. A consumer that needs an ordering should key on the instance, or
+/// bring its own total order and a test that it agrees with `Eq`.
+/// Plan S 9's `enum Callee { Rock(InstanceId), Boundary(BoundaryId) }`, in the
+/// SHARED graph's target-neutral form.
 ///
 /// There is no third arm and no absent arm. A call that resolved to neither is
 /// a [`CalleeHole`], reported with its span, never an entry a consumer could
 /// read as callable.
+///
+/// [`Self::Boundary`] carries the [`Instance`] and its DECLARED class, not a
+/// [`BoundaryId`]: an id names a target and an emitted symbol, and a shared body
+/// has neither. Minting one is `artifact::realize`'s job, which is also the only
+/// place that knows the declaration this instance resolves to on a given target
+/// and the planner that spells it. The class here is the declaration's own
+/// (`boundary_class_for`); an artifact may realize the same declaration
+/// differently, and that is its answer to make.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Callee {
     Rock(Instance),
-    Boundary(BoundaryId),
+    Boundary(Instance, BoundaryClass),
+}
+
+impl Callee {
+    /// The instance either arm names. Both arms have one -- the split is about
+    /// whether a body is LOWERED here, not about whether there is a callee.
+    pub fn instance(&self) -> &Instance {
+        match self {
+            Self::Rock(i) | Self::Boundary(i, _) => i,
+        }
+    }
 }
 
 /// Which iterator operation an [`Site`] in `iterator_ops` is.
@@ -186,19 +189,6 @@ pub struct CalleeHole {
     pub span: Span,
 }
 
-/// A call whose boundary the graph's target cannot serve (plan S 10's
-/// `Invalid boundary`). Kept OUT of the callee tables and reported here with a
-/// span: a table entry would be exactly the fallback the plan forbids, and a
-/// consumer reading it would emit a call to a body that does not exist on this
-/// target.
-#[derive(Clone, Debug)]
-pub struct InvalidBoundaryCall {
-    pub instance: Instance,
-    pub site: Site,
-    pub boundary: BoundaryId,
-    pub span: Span,
-}
-
 /// A slot whose inferred type did not convert under the instance's
 /// substitution. The reason is the bucket, the span is where the compile error
 /// goes at the Stage-3 cutover.
@@ -273,7 +263,6 @@ pub struct ConcreteBodies {
     /// denominator for every callee count below.
     pub sites_examined: usize,
     pub callee_holes: Vec<CalleeHole>,
-    pub invalid_boundary_calls: Vec<InvalidBoundaryCall>,
     /// A `Callee::Rock` whose instance is not in the graph. Must be empty: the
     /// walk `reach`es every callee it resolves, so a missing one means the
     /// tables and the graph disagree about what exists.
@@ -298,7 +287,6 @@ impl ConcreteBodies {
             expr_slots: self.expr_slots,
             binding_slots: self.binding_slots,
             sites_examined: self.sites_examined,
-            invalid_boundary_calls: self.invalid_boundary_calls.len(),
             unknown_rock_callees: self.unknown_rock_callees.len(),
             untyped_as_callee_key: self.untyped_as_callee_key.clone(),
             ..Default::default()
@@ -313,7 +301,7 @@ impl ConcreteBodies {
             for (_, callee) in b.callees() {
                 match callee {
                     Callee::Rock(_) => c.rock_callees += 1,
-                    Callee::Boundary(_) => c.boundary_callees += 1,
+                    Callee::Boundary(..) => c.boundary_callees += 1,
                 }
             }
         }
@@ -369,28 +357,6 @@ impl ConcreteBodies {
             .collect()
     }
 
-    /// Invalid-on-target boundary calls, as the located rejections they are.
-    pub fn render_invalid_boundary_calls(
-        &self,
-        ws: &Workspace,
-        g: &InstanceGraph,
-    ) -> Vec<String> {
-        self.invalid_boundary_calls
-            .iter()
-            .map(|c| {
-                format!(
-                    "{} {} calls `{}` ({}), which no body serves on this target, at {}:{}",
-                    g.identity(ws, &c.instance),
-                    c.site.op.name(),
-                    c.boundary.symbol,
-                    c.boundary.class.name(),
-                    c.span.file,
-                    c.span.line_range.0 + 1
-                )
-            })
-            .collect()
-    }
-
     /// Free types as `<instance> <slot-kind> <bucket> at <file>:<line>`, for a
     /// report or a failing assertion.
     pub fn render_free_types(&self, ws: &Workspace, g: &InstanceGraph) -> Vec<String> {
@@ -437,7 +403,6 @@ pub struct BodyCensus {
     pub boundary_callees: usize,
     /// Reason -> (holes, of those with no span).
     pub callee_holes: BTreeMap<&'static str, (usize, usize)>,
-    pub invalid_boundary_calls: usize,
     pub unknown_rock_callees: usize,
     pub untyped_as_callee_key: BTreeMap<&'static str, usize>,
 }
@@ -607,27 +572,11 @@ fn callee_tables(
         };
         let f = &ws.module(target.func.module).functions[target.func.func];
         let callee = match boundary_class_for(f, &g.erased_entries) {
-            Some(class) => {
-                let symbol = mangle_fn(ws, f);
-                let boundary = BoundaryId {
-                    declaration: target.func,
-                    class,
-                    target: g.target,
-                    symbol,
-                };
-                // A boundary the target cannot serve is plan S 10's `Invalid
-                // boundary`: a located rejection, never an entry.
-                if g.boundary_invalid_on_target(f) {
-                    out.invalid_boundary_calls.push(InvalidBoundaryCall {
-                        instance: inst.clone(),
-                        site: site.clone(),
-                        boundary,
-                        span: rec.span,
-                    });
-                    continue;
-                }
-                Callee::Boundary(boundary)
-            }
+            // Whether a target can SERVE this boundary is not asked here: the
+            // graph names no target. A call to a boundary no artifact body
+            // supplies is that artifact's `Severed` call, located at this same
+            // site (`artifact::Unrealizable::ForeignToArtifact`).
+            Some(class) => Callee::Boundary(target.clone(), class),
             None => {
                 if !g.instances.contains(target) {
                     out.unknown_rock_callees.push((inst.clone(), site.clone()));

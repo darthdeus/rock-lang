@@ -280,21 +280,19 @@ fn main() {
     }
 }
 
-/// Logical instance identity is target-neutral (plan S 20a): the target decides
-/// which backend VARIANT serves a call and which boundaries exist, never the
-/// key. Two views that resolve genuinely different `FuncRef`s must still produce
-/// one manifest, because the variants share a `(name, signature)` and therefore
-/// one mangling.
+/// Logical instance identity is target-neutral (plan S 20a), and now so is the
+/// GRAPH: one build, one arena, one manifest, whatever artifact realizes it.
 ///
-/// The fixture carries an EXPLICIT `inline(lua)`/`inline(js)` pair. It used to
-/// rely on the stdlib chain its iterator loop pulls in, and the claim that the
-/// chain resolved different `FuncRef`s was never measured -- measured, it is
-/// FALSE: 89 instances on each side and ZERO resolving differently, so the
-/// manifests agreed because nothing had forked. `variant_pairs` below is the
-/// non-vacuity assertion, and it is what makes the equality mean anything.
+/// The fixture carries an EXPLICIT `inline(lua)`/`inline(js)` pair, which is
+/// what makes the equality mean anything: the two artifacts genuinely select
+/// different declarations for `variant_probe`, and `sibling_selections` below is
+/// the non-vacuity assertion for that. It used to rely on the stdlib chain its
+/// iterator loop pulls in, and the claim that the chain resolved different
+/// `FuncRef`s was never measured -- measured, it was FALSE.
 #[test]
-fn the_shared_graph_is_not_target_neutral_sentinel() {
-    use bone_semantic::hir::FnBackend;
+fn the_shared_graph_is_target_neutral() {
+    use skull::artifact::{self, ArtifactRequest};
+    use skull::target_projection as tp;
     let ws = check(
         r#"
 value P { x: float, y: float }
@@ -311,43 +309,39 @@ fn main() {
 "#,
     );
     let roots = instance_graph::emission_roots(&ws, None);
-    let lua = instance_graph::build_for_target(&ws, roots.clone(), false, FnBackend::Lua);
-    let js = instance_graph::build_for_target(&ws, roots, false, FnBackend::Js);
+    let g = instance_graph::build(&ws, roots.clone(), false);
 
-    let by_symbol = |g: &instance_graph::InstanceGraph| {
-        g.instances
-            .iter()
-            .map(|i| (g.symbol(&ws, i), i.func))
-            .collect::<std::collections::BTreeMap<_, _>>()
-    };
-    let (l, j) = (by_symbol(&lua), by_symbol(&js));
-    let variant_pairs =
-        l.iter().filter(|(sym, lf)| j.get(*sym).is_some_and(|jf| jf != *lf)).count();
-    assert!(
-        variant_pairs > 0,
-        "no symbol resolved to a different FuncRef across the two targets, so the manifest \
-         comparison below is vacuous -- the fixture is not exercising backend variants at all"
+    // The property, formerly a sentinel asserting the opposite: there is no
+    // second graph to disagree with. Rebuilding must be the same manifest --
+    // the walk selects no variant, so nothing it records can depend on a target.
+    let again = instance_graph::build(&ws, roots.clone(), false);
+    assert_eq!(
+        instance_graph::render_manifest(&ws, &g),
+        instance_graph::render_manifest(&ws, &again)
     );
 
-    // SENTINEL -- pins that the shared graph is NOT target-neutral.
-    //
-    // This asserted manifest EQUALITY until `identity` became injective, and it
-    // passed only because a non-injective identity erased the declaration: two
-    // targets selecting two different declarations rendered to one string. With
-    // the declaration in the identity the truth is visible -- `variant_probe`
-    // is a different `FuncRef` on each target, so the two manifests differ.
-    //
-    // The fix is the one the artifact-view review names: the walk must record
-    // the target-neutral GROUP REPRESENTATIVE and let the artifact select the
-    // serving sibling (`backend_variant`), so there is one graph and one arena.
-    // FLIP THIS to `assert_eq!` when that lands -- the manifests become equal
-    // for the right reason, and `variant_pairs > 0` above still holds because
-    // selection moved rather than disappeared.
+    // NON-VACUITY: the two artifacts really do select different declarations
+    // for one shared instance. Without this the equality above would hold
+    // because nothing ever forked.
+    let lua = artifact::realize(&ws, &g, &ArtifactRequest::new(tp::LUAJIT, &roots));
+    let js = artifact::realize(&ws, &g, &ArtifactRequest::new(tp::JAVASCRIPT, &roots));
+    let probe = |v: &artifact::ArtifactView| {
+        v.realization
+            .iter()
+            .filter(|(i, _)| {
+                ws.module(i.func.module).functions[i.func.func].name.as_str() == "variant_probe"
+            })
+            .map(|(i, r)| (i.clone(), r.decl))
+            .collect::<Vec<_>>()
+    };
+    let (lp, jp) = (probe(&lua), probe(&js));
+    assert_eq!(lp.len(), 1, "the probe was not retained exactly once on luajit");
+    assert_eq!(jp.len(), 1, "the probe was not retained exactly once on javascript");
+    assert_eq!(lp[0].0, jp[0].0, "one shared instance, not two");
     assert_ne!(
-        instance_graph::render_manifest(&ws, &lua),
-        instance_graph::render_manifest(&ws, &js),
-        "the two target graphs now agree -- if the representative collapse landed, \
-         flip this sentinel to `assert_eq!`"
+        lp[0].1, jp[0].1,
+        "both artifacts selected the same declaration, so this fixture is not \
+         exercising backend variants at all and the manifest equality is vacuous"
     );
 }
 
@@ -381,11 +375,10 @@ fn main() { host_tick(3) }
             .any(|i| ws.module(i.func.module).functions[i.func.func].is_extern),
         "the extern is not in the graph at all"
     );
-    // Each artifact realizes ITS OWN graph: `build_for_target` selects backend
-    // variants per target, so filtering a Lua graph would answer with Lua's.
+    // Every artifact realizes THE SAME graph; the declaration each selects is
+    // `realize_decl`'s answer, not a per-target walk's.
+    let g = instance_graph::build(&ws, roots.clone(), false);
     let cause_of = |spec: tp::ExecutionTargetSpec, name: &str| -> Option<Exclusion> {
-        let target = spec.backend.unwrap_or(bone_semantic::hir::FnBackend::Any);
-        let g = instance_graph::build_for_target(&ws, roots.clone(), false, target);
         artifact::realize(&ws, &g, &ArtifactRequest::new(spec, &roots))
             .excluded
             .iter()
@@ -1020,35 +1013,40 @@ fn main() {
 "#;
     let ws = check(src);
     let roots = instance_graph::emission_roots(&ws, None);
-
-    let witness_args = |target: bone_semantic::hir::FnBackend| -> Vec<String> {
-        let g = instance_graph::build_for_target(&ws, roots.clone(), false, target);
-        assert!(
-            !g.unresolved.iter().any(|u| u.reason.contains("unbound")),
-            "{target:?}: a witness degraded to unbound: {:?}",
-            g.unresolved
-                .iter()
-                .map(|u| (u.reason, ws.module(u.callee.module).functions[u.callee.func].name))
-                .collect::<Vec<_>>()
-        );
-        let mut v: Vec<String> = g
-            .edges
+    let g = instance_graph::build(&ws, roots.clone(), false);
+    assert!(
+        !g.unresolved.iter().any(|u| u.reason.contains("unbound")),
+        "a witness degraded to unbound: {:?}",
+        g.unresolved
             .iter()
-            .filter(|e| e.kind == EdgeKind::IteratorIter)
-            .map(|e| {
-                e.to.args.iter().map(|a| g.arena.canonical(*a)).collect::<Vec<_>>().join(",")
-            })
-            .collect();
-        v.sort();
-        assert!(!v.is_empty(), "{target:?}: no iterator-iter edge");
-        v
-    };
+            .map(|u| (u.reason, ws.module(u.callee.module).functions[u.callee.func].name))
+            .collect::<Vec<_>>()
+    );
+    let witnesses: Vec<&instance_graph::Edge> =
+        g.edges.iter().filter(|e| e.kind == EdgeKind::IteratorIter).collect();
+    assert!(!witnesses.is_empty(), "no iterator-iter edge");
 
-    let lua = witness_args(bone_semantic::hir::FnBackend::Lua);
-    let js = witness_args(bone_semantic::hir::FnBackend::Js);
-    assert_eq!(
-        lua, js,
-        "the same logical witness instantiated differently once the target selected a sibling"
+    // The witness is ONE instance, and each artifact realizes it to its own
+    // declaration. Selection is what used to fork the walk, and forking it is
+    // what let a generic witness instantiate differently on one target only.
+    use skull::artifact::{self, ArtifactRequest};
+    use skull::target_projection as tp;
+    let lua = artifact::realize(&ws, &g, &ArtifactRequest::new(tp::LUAJIT, &roots));
+    let js = artifact::realize(&ws, &g, &ArtifactRequest::new(tp::JAVASCRIPT, &roots));
+    let mut selected = 0usize;
+    for e in &witnesses {
+        let (Some(l), Some(j)) = (lua.realization.get(&e.to), js.realization.get(&e.to)) else {
+            panic!("an artifact did not retain the witness at all");
+        };
+        // Same instance -- it is the same key in both maps -- with the JS
+        // sibling chosen only on JS.
+        assert_eq!(l.decl, e.to.func, "luajit did not select the representative itself");
+        selected += usize::from(j.decl != e.to.func);
+    }
+    assert!(
+        selected > 0,
+        "no witness selected a different declaration on JS, so the shared-instance \
+         claim is vacuous -- the fixture is not exercising backend variants"
     );
 }
 
@@ -1082,24 +1080,20 @@ fn main() {
     let c = g.closure(&ws);
     assert!(c.unexpanded.is_empty(), "instances with a missing body: {:?}", c.unexpanded);
     assert!(c.depth_capped.is_empty(), "expansion was cut: {:?}", c.depth_capped);
-    // SENTINEL -- pins the logical-symbol collisions a non-injective `identity`
-    // was HIDING. `closure` keys `colliding_symbols` by identity, so two
-    // backend siblings that mangle alike used to collapse into one entry and
-    // the detector saw nothing. They are real: `__nb_checked_index` is declared
-    // `inline(lua)` and `inline(js)`, both `@nomangle`, both emission roots.
+    // The logical-symbol collisions a non-injective `identity` used to HIDE and
+    // the target-per-graph walk then made real: `__nb_checked_index` is declared
+    // `inline(lua)` and `inline(js)`, both `@nomangle`, both emission roots, and
+    // both were separate instances. One target-neutral graph holds the group
+    // REPRESENTATIVE only, so there is one instance and one symbol.
     //
-    // The shared graph legitimately holds both TODAY because it is not
-    // target-neutral. The representative collapse (see
-    // `the_shared_graph_is_not_target_neutral_sentinel`) leaves one instance
-    // per group, and this returns to `is_empty()`. FLIP THEN.
+    // Corpus-wide this is NOT yet empty: a same-BACKEND `@nomangle` pair has no
+    // target to tell it apart and is a Stage-3 emit collision
+    // (`skull_mir::mangle`'s `collision_errors`), not a graph artifact. This
+    // fixture holds no such pair, which is why it can assert the property
+    // directly.
     assert!(
-        !c.colliding_symbols.is_empty(),
-        "the logical-symbol collisions are gone -- if the representative collapse \
-         landed, flip this sentinel back to `is_empty()`"
-    );
-    assert!(
-        c.colliding_symbols.keys().any(|s| s == "__nb_checked_index"),
-        "the collision population changed shape: {:?}",
+        c.colliding_symbols.is_empty(),
+        "two instances spell alike: {:?}",
         c.colliding_symbols.keys().collect::<Vec<_>>()
     );
     // Expansion is RECORDED, so the count is evidence rather than a restatement
@@ -2138,13 +2132,19 @@ fn drop_bound_next_generic_records(ws: &mut Workspace, fn_name: &str) -> usize {
 
 /// The positive fixture for the `Unresolved` axis of the span census.
 ///
-/// The corpus's Lua view records ZERO unresolved sites, so without this the
-/// census's "0 spanless" for that axis is zero over zero and an `Unresolved`
-/// recorder switched to `Span::unknown` would go unnoticed. The JS view
-/// supplies the population: a column intercept's runtime entry has no JS
-/// sibling, so the synthesized call resolves to nothing on that target.
+/// The corpus records ZERO unresolved sites, so without this the census's
+/// "0 spanless" for that axis is zero over zero and an `Unresolved` recorder
+/// switched to `Span::unknown` would go unnoticed.
 ///
-/// This covers the `compiler-generated-entry-missing-for-target` write in
+/// The population is a compiler-generated entry the walk cannot resolve to ONE
+/// declaration. `stdlib_entry_representative` demands that every declaration of
+/// the name canonicalize to one backend-variant group; a second `__map_col_len`
+/// with a different signature is a genuine overload, so the group is not one and
+/// the entry is refused -- the same residual ambiguity `Builder::stdlib_funcref`
+/// refuses. Chosen because it is a permanent property of the lookup rather than
+/// a live gap: closing anything cannot silently make this fixture resolve.
+///
+/// This covers the `compiler-generated-entry-unresolved` write in
 /// `walk_body_edges`. The other three recorders each push their OWN
 /// `Unresolved` and are covered one fixture apiece:
 /// `a_call_with_no_binding_record_is_unresolved_with_a_span`,
@@ -2153,29 +2153,30 @@ fn drop_bound_next_generic_records(ws: &mut Workspace, fn_name: &str) -> usize {
 /// any one recorder's span reddens only its own fixture -- measured.
 #[test]
 fn an_unresolved_call_site_keeps_its_span() {
-    use bone_semantic::hir::FnBackend;
-    let ws = check(
-        r#"
-value P { x: float, y: float }
-fn main() {
+    let program = |extra: &str| {
+        format!(
+            r#"
+{extra}
+value P {{ x: float, y: float }}
+fn main() {{
     let m: Map<string, P> = map_new()
-    m["a"] = P { x: 1.0, y: 2.0 }
+    m["a"] = P {{ x: 1.0, y: 2.0 }}
     let n = m.len()
-}
-"#,
-    );
+}}
+"#
+        )
+    };
+    let ws = check(&program(r#"inline(lua) fn __map_col_len(n: int) -> int = "return n""#));
     let roots = instance_graph::emission_roots(&ws, None);
-    let g = instance_graph::build_for_target(&ws, roots.clone(), false, FnBackend::Js);
-    // The EXACT denominator and reasons, not merely non-empty: a fixture that
-    // silently drops to one site still satisfies "non-zero" while covering
-    // less than it claims.
+    let g = instance_graph::build(&ws, roots.clone(), false);
+    // The EXACT denominator and reason, not merely non-empty: a fixture that
+    // silently drops to a different site still satisfies "non-zero" while
+    // covering less than it claims. `m.len()` is the one site naming the
+    // ambiguous entry; the store names `__map_col_slot`, which is unaffected.
     let reasons: Vec<&str> = g.unresolved.iter().map(|u| u.reason).collect();
-    // Two sites, not four: the store names `__map_col_slot` alone now that the
-    // index's position and stored value decide the entry, and `m.len()` names
-    // `__map_col_len`. Both still have no JS sibling, which is the property.
     assert_eq!(
         reasons,
-        vec!["compiler-generated-entry-missing-for-target"; 2],
+        vec!["compiler-generated-entry-unresolved"; 1],
         "the unresolved population changed shape"
     );
     let spanless: Vec<&str> = g
@@ -2191,13 +2192,16 @@ fn main() {
         g.unresolved.len(),
         "the census did not examine every unresolved site"
     );
-    // CONTROL: the same program on Lua resolves those entries, so the
-    // unresolved population is a property of the TARGET and not of the fixture
-    // being malformed.
-    let lua = instance_graph::build_for_target(&ws, roots, false, FnBackend::Lua);
+
+    // CONTROL: the same program WITHOUT the ambiguating declaration resolves
+    // every entry, so the population is a property of the ambiguity and not of
+    // the fixture being malformed.
+    let clean_ws = check(&program(""));
+    let clean_roots = instance_graph::emission_roots(&clean_ws, None);
+    let clean = instance_graph::build(&clean_ws, clean_roots, false);
     assert!(
-        lua.unresolved.is_empty(),
-        "the Lua view should resolve every synthesized entry: {:?}",
-        lua.unresolved.iter().map(|u| u.reason).collect::<Vec<_>>()
+        clean.unresolved.is_empty(),
+        "the shared walk should resolve every synthesized entry: {:?}",
+        clean.unresolved.iter().map(|u| u.reason).collect::<Vec<_>>()
     );
 }

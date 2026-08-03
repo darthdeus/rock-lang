@@ -182,18 +182,20 @@ impl BoundaryClass {
     }
 }
 
-/// One reached boundary, classified for the graph's target.
+/// One reached boundary, classified from the DECLARATION alone.
 ///
 /// `symbol` is the name emission must produce: bare for `extern`/`@nomangle`,
 /// mangled otherwise -- the rule `skull_mir::mangle` applies, read from it
 /// rather than restated.
+///
+/// Whether a target can SERVE it is deliberately absent. That is plan S 10's
+/// `Invalid boundary`, and it is a property of an artifact, which is where it
+/// is answered (`artifact::Unrealizable::ForeignToArtifact`, reported per CALL
+/// as a `Severed` rather than per declaration).
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct Boundary {
     pub class: BoundaryClass,
     pub symbol: String,
-    /// The target has no body serving this boundary, so plan S 10's
-    /// `Invalid boundary` outcome is required: reject with a span, never a stub.
-    pub invalid_on_target: bool,
 }
 
 /// A helper symbol a coroutine instance OWNS. Not an [`Edge`]: the target is
@@ -408,10 +410,6 @@ pub struct InstanceGraph {
     /// Instances whose Rock body the walk actually entered and enumerated the
     /// callees of. Recorded, never inferred from a proxy.
     pub expanded: BTreeSet<Instance>,
-    /// The execution target this graph was built for. Instance IDENTITY is
-    /// target-neutral (plan S 20a); the target decides which backend variant a
-    /// call resolves to and which boundaries are available.
-    pub target: bone_semantic::hir::FnBackend,
     /// Every reached boundary, classified per `docs/boundary-contracts.md`.
     pub boundaries: BTreeMap<String, Boundary>,
     /// Helper symbols owned by coroutine instances.
@@ -840,18 +838,6 @@ impl InstanceGraph {
         }
     }
 
-    /// Whether no body serves this DECLARATION on the graph's target -- plan
-    /// S 10's `Invalid boundary`.
-    ///
-    /// Asked of the declaration a site actually resolved to, never of
-    /// [`Self::boundaries`], which is keyed by mangled SYMBOL: two `@nomangle`
-    /// backend siblings share one key there, so one overwrites the other and
-    /// the surviving entry answers for both. Measured: reading that map made
-    /// every `__nb_checked_index` call on Lua an invalid boundary.
-    pub fn boundary_invalid_on_target(&self, f: &Function) -> bool {
-        !serves(f.backend, self.target)
-    }
-
     /// A generic function production emits regardless of any call, that no call
     /// instantiates.
     fn record_generic_root(&mut self, name: String) {
@@ -1174,28 +1160,23 @@ pub struct RecursionCensus {
     pub changing_instance: BTreeSet<String>,
 }
 
-/// Build the shadow graph for `ws`.
+/// Build the ONE shared instance graph for `ws`.
+///
+/// **Target-neutral, and there is no per-target builder.** Every callee is
+/// recorded as bone's collapsed GROUP REPRESENTATIVE -- which is what
+/// `resolved_overload_calls` already holds -- and roots, which production hands
+/// over as raw declarations, are canonicalized to the same representative
+/// (`skull_mir::lower::canonical_variant`). Selecting the sibling that serves a
+/// target is `artifact::realize`'s job, so one graph and one [`MonoArena`] serve
+/// every artifact and cross-artifact identity is the shared [`Instance`] rather
+/// than a comparison between two arenas.
 ///
 /// `roots` is supplied by the caller so this shares production's root
 /// discovery instead of re-deriving it. `perturb` reverses the seeding order;
 /// the manifest must be identical either way (plan S 20g.4).
 pub fn build(ws: &Workspace, roots: Vec<FuncRef>, perturb: bool) -> InstanceGraph {
-    build_for_target(ws, roots, perturb, bone_semantic::hir::FnBackend::Lua)
-}
-
-/// [`build`], for an explicit execution target.
-///
-/// The target changes which backend VARIANT each call resolves to
-/// (`skull_mir::lower::backend_variant`, production's own selector) and which
-/// boundaries are available. It must NOT change logical instance identity --
-/// that is plan S 20a's separation, and
-/// `logical_identity_is_stable_across_targets` is the assertion.
-pub fn build_for_target(
-    ws: &Workspace,
-    mut roots: Vec<FuncRef>,
-    perturb: bool,
-    target: bone_semantic::hir::FnBackend,
-) -> InstanceGraph {
+    let mut roots: Vec<FuncRef> =
+        roots.into_iter().map(|r| skull_mir::lower::canonical_variant(ws, r)).collect();
     roots.sort_by_key(|r| (r.module.raw(), r.func.into_raw().into_u32()));
     roots.dedup();
     if perturb {
@@ -1211,7 +1192,6 @@ pub fn build_for_target(
         uninstantiated_roots: BTreeMap::new(),
         depth_capped: Vec::new(),
         expanded: BTreeSet::new(),
-        target,
         boundaries: BTreeMap::new(),
         coroutine_helpers: BTreeSet::new(),
         erased_entries: BTreeSet::new(),
@@ -1261,7 +1241,7 @@ pub fn build_for_target(
             let Some(inf) = inference.per_fn.get(&owner) else { continue };
             let body = module.bodies.get(&owner);
             walk_body_edges(
-                &mut g, &mut work, ws, inf, body, None, &MonoSubst::default(), 0, target,
+                &mut g, &mut work, ws, inf, body, None, &MonoSubst::default(), 0,
             );
         }
     }
@@ -1290,7 +1270,7 @@ pub fn build_for_target(
         g.expanded.insert(inst.clone());
 
         walk_body_edges(
-            &mut g, &mut work, ws, inf, Some(body), Some(&inst), &subst, depth, target,
+            &mut g, &mut work, ws, inf, Some(body), Some(&inst), &subst, depth,
         );
     }
 
@@ -1327,7 +1307,6 @@ fn walk_body_edges(
     from: Option<&Instance>,
     subst: &MonoSubst,
     depth: u32,
-    target: bone_semantic::hir::FnBackend,
 ) {
     let mut resolved_calls: FxHashMap<Idx<bone_semantic::hir::Expr>, Instance> =
         FxHashMap::default();
@@ -1335,7 +1314,9 @@ fn walk_body_edges(
         inf.resolved_overload_calls.iter().map(|(e, r)| (*e, *r)).collect();
     calls.sort_by_key(|(e, _)| *e);
     for (e, (m, f)) in calls {
-        let callee = variant_for(ws, FuncRef { module: m, func: f }, target);
+        // bone's collapsed representative, verbatim. Selecting the sibling that
+        // serves a target happens in `artifact::realize`, not here.
+        let callee = FuncRef { module: m, func: f };
         let bindings = inf.call_generic_bindings.get(&e);
         let span = body.and_then(|b| b.expr_spans.get(e).copied()).unwrap_or_else(Span::unknown);
         let kind = if bindings.is_some() { EdgeKind::GenericCall } else { EdgeKind::DirectCall };
@@ -1348,7 +1329,7 @@ fn walk_body_edges(
     }
 
     if let Some(body) = body {
-        for (e, callee) in fn_value_sites(ws, inf, body, target) {
+        for (e, callee) in fn_value_sites(ws, inf, body) {
             let span = body.expr_spans.get(e).copied().unwrap_or_else(Span::unknown);
             let cf = &ws.module(callee.module).functions[callee.func];
             if cf.generics.is_empty() {
@@ -1385,7 +1366,7 @@ fn walk_body_edges(
 
         let mut failures: Vec<(Idx<bone_semantic::hir::Expr>, MonoTyReason)> = Vec::new();
         let sites = compiler_generated_sites(
-            ws, inf, body, subst, target, &mut g.synthesized_examined, &mut failures,
+            ws, inf, body, subst, &mut g.synthesized_examined, &mut failures,
             &mut g.synthesized_approximated,
         );
         for (e, reason) in failures {
@@ -1412,7 +1393,7 @@ fn walk_body_edges(
         for GeneratedSite { expr: e, name } in sites {
             let span = body.expr_spans.get(e).copied().unwrap_or_else(Span::unknown);
             let site = Site { expr: e, op: SiteOp::Synthesized(name) };
-            match stdlib_entry(ws, name, target) {
+            match stdlib_entry_representative(ws, name) {
                 Some(callee) => {
                     record_call(
                         g, work, ws, inf, from, subst, depth, callee, None,
@@ -1424,14 +1405,14 @@ fn walk_body_edges(
                     g.record_site(
                         from,
                         site,
-                        SiteOutcome::Failed("compiler-generated-entry-missing-for-target"),
+                        SiteOutcome::Failed("compiler-generated-entry-unresolved"),
                         span,
                     );
                     if let Some(from) = from {
                         g.unresolved.push(Unresolved {
                             from: from.clone(),
                             callee: from.func,
-                            reason: "compiler-generated-entry-missing-for-target",
+                            reason: "compiler-generated-entry-unresolved",
                             span,
                         });
                     }
@@ -1446,7 +1427,7 @@ fn walk_body_edges(
     for (e, witness) in implicit {
         let span = body.and_then(|b| b.expr_spans.get(e).copied()).unwrap_or_else(Span::unknown);
         record_witness(
-            g, work, ws, inf, from, subst, depth, witness, span, EdgeKind::ImplicitIter, target,
+            g, work, ws, inf, from, subst, depth, witness, span, EdgeKind::ImplicitIter,
             Site { expr: e, op: SiteOp::ImplicitIter },
         );
     }
@@ -1457,7 +1438,7 @@ fn walk_body_edges(
     for (e, tree) in trees {
         let span = body.and_then(|b| b.expr_spans.get(e).copied()).unwrap_or_else(Span::unknown);
         let concrete = walk_bound_tree(
-            g, work, ws, inf, from, subst, depth, tree, span, target, e, BoundRoot::Call, &[],
+            g, work, ws, inf, from, subst, depth, tree, span, e, BoundRoot::Call, &[],
         );
         if let Some(to) = resolved_calls.get(&e) {
             g.record_bound_tree(to, concrete);
@@ -1497,12 +1478,12 @@ fn walk_body_edges(
         if let Some(witness) = &info.iter {
             record_witness(
                 g, work, ws, inf, from, subst, depth, witness, span,
-                EdgeKind::IteratorIter, target, Site { expr: e, op: SiteOp::ForIter },
+                EdgeKind::IteratorIter, Site { expr: e, op: SiteOp::ForIter },
             );
         }
         let _ = record_bound_next(
             g, work, ws, inf, from, subst, depth, &info.next, span,
-            EdgeKind::IteratorNext, target, e, BoundRoot::For, &[],
+            EdgeKind::IteratorNext, e, BoundRoot::For, &[],
         );
     }
 }
@@ -1676,7 +1657,6 @@ fn record_witness(
     witness: &IterWitness,
     span: Span,
     kind: EdgeKind,
-    target: bone_semantic::hir::FnBackend,
     site: Site,
 ) {
     if from.is_none() {
@@ -1684,7 +1664,7 @@ fn record_witness(
     }
     let rep = FuncRef { module: witness.func.0, func: witness.func.1 };
     let resolved = &ws.module(rep.module).functions[rep.func];
-    let callee = variant_for(ws, rep, target);
+    let callee = rep;
     let cf = &ws.module(callee.module).functions[callee.func];
     match instantiate_witness(&mut g.arena, ws, inf, resolved, cf, &witness.generics, subst) {
         Ok((args, callee_subst)) => {
@@ -1760,7 +1740,6 @@ fn record_bound_next(
     next: &BoundNext,
     span: Span,
     kind: EdgeKind,
-    target: bone_semantic::hir::FnBackend,
     expr: Idx<bone_semantic::hir::Expr>,
     root: BoundRoot,
     path: &[usize],
@@ -1792,7 +1771,7 @@ fn record_bound_next(
     };
     let rep = FuncRef { module: *m, func: *f };
     let resolved = &ws.module(rep.module).functions[rep.func];
-    let callee = variant_for(ws, rep, target);
+    let callee = rep;
     let cf = &ws.module(callee.module).functions[callee.func];
     if from.is_none() {
         g.always_emitted_seeds += 1;
@@ -1812,7 +1791,7 @@ fn record_bound_next(
             g.record_site(from, site, SiteOutcome::Resolved(to.clone()), span);
             g.reach(work, to.clone(), callee_subst, depth + 1);
             let concrete_sub = walk_bound_tree(
-                g, work, ws, inf, from, subst, depth, sub, span, target, expr, root, path,
+                g, work, ws, inf, from, subst, depth, sub, span, expr, root, path,
             );
             g.record_bound_tree(&to, concrete_sub.clone());
             Some(InstanceBoundNext { callee: to, sub: concrete_sub })
@@ -1874,7 +1853,6 @@ fn walk_bound_tree(
     depth: u32,
     tree: &bone_semantic::prelude::BoundTree,
     span: Span,
-    target: bone_semantic::hir::FnBackend,
     expr: Idx<bone_semantic::hir::Expr>,
     root: BoundRoot,
     path: &[usize],
@@ -1889,7 +1867,7 @@ fn walk_bound_tree(
         child.push(*k);
         if let Some(next) = record_bound_next(
             g, work, ws, inf, from, subst, depth, &tree.next[k], span,
-            EdgeKind::BoundNextWitness, target, expr, root, &child,
+            EdgeKind::BoundNextWitness, expr, root, &child,
         ) {
             resolved.next.insert(*k, next);
         }
@@ -2015,19 +1993,6 @@ fn convert_fail(r: MonoTyReason) -> Fail {
     }
 }
 
-/// The backend variant of `rep` serving `target`, through production's own
-/// selector. `Err` (nothing serves it) keeps `rep`: the boundary pass reports
-/// that as an INVALID boundary for the target, which is the outcome plan S 10
-/// requires, rather than dropping the edge and under-reporting the graph.
-fn variant_for(
-    ws: &Workspace,
-    rep: FuncRef,
-    target: bone_semantic::hir::FnBackend,
-) -> FuncRef {
-    let name = ws.module(rep.module).functions[rep.func].name;
-    skull_mir::lower::backend_variant(ws, name, rep, target).unwrap_or(rep)
-}
-
 /// Every `Expr::Global(name)` in `body` that names a FUNCTION -- skull's own
 /// fn-value discriminant (`lower/expr.rs:75`).
 ///
@@ -2043,7 +2008,6 @@ fn fn_value_sites(
     ws: &Workspace,
     inf: &BodyInference,
     body: &bone_semantic::hir::Body,
-    target: bone_semantic::hir::FnBackend,
 ) -> Vec<(Idx<bone_semantic::hir::Expr>, FuncRef)> {
     use bone_semantic::hir::{Callee, Expr as E};
     let mut called_values: BTreeSet<u32> = BTreeSet::new();
@@ -2075,7 +2039,10 @@ fn fn_value_sites(
                 FuncRef { module: m, func: f }
             }
         };
-        out.push((e, variant_for(ws, rep, target)));
+        // bone's own resolution is already the representative; the fallback
+        // above picked an arbitrary member of a group that manglings proved
+        // uniform, so it is canonicalized to the same one.
+        out.push((e, skull_mir::lower::canonical_variant(ws, rep)));
     }
     out.sort_by_key(|(e, _)| *e);
     out
@@ -2148,12 +2115,11 @@ fn compiler_generated_sites(
     inf: &BodyInference,
     body: &bone_semantic::hir::Body,
     subst: &MonoSubst,
-    target: bone_semantic::hir::FnBackend,
     examined: &mut usize,
     failures: &mut Vec<(Idx<bone_semantic::hir::Expr>, MonoTyReason)>,
     approximated: &mut usize,
 ) -> Vec<GeneratedSite> {
-    use bone_semantic::hir::{Callee, Expr as E};
+    use bone_semantic::hir::{Callee, Expr as E, FnBackend};
     // The receiver's CONCRETE type under this instance's substitution, which is
     // what the storage condition is asked about.
     let verdict = |recv: Idx<bone_semantic::hir::Expr>, cond: StorageCond| -> CondVerdict {
@@ -2168,8 +2134,17 @@ fn compiler_generated_sites(
             Err(r) => return CondVerdict::Failed(r),
         };
         let elem = match cond {
-            StorageCond::VecColumn => skull_mir::lower::vec_column_elem_mono(ws, target, &mono),
-            StorageCond::MapColumn => skull_mir::lower::map_column_value_mono(ws, target, &mono),
+            // `Any`, stated rather than defaulted: this graph selects no
+            // variant. The storage oracle's target argument reaches
+            // `columns_available`, which is unconditionally true, so the two
+            // agree for every target -- and a target-dependent answer here
+            // would be a second target-dependence in a target-neutral walk.
+            StorageCond::VecColumn => {
+                skull_mir::lower::vec_column_elem_mono(ws, FnBackend::Any, &mono)
+            }
+            StorageCond::MapColumn => {
+                skull_mir::lower::map_column_value_mono(ws, FnBackend::Any, &mono)
+            }
             StorageCond::Always => return CondVerdict::Holds(None),
         };
         match elem {
@@ -2267,24 +2242,24 @@ fn compiler_generated_sites(
     out
 }
 
-/// The unique stdlib function `name` serving `target` -- the same lookup
-/// `Builder::stdlib_funcref` performs, and it fails on the same conditions
-/// (missing name, no serving body, residual ambiguity).
-pub fn stdlib_entry(
-    ws: &Workspace,
-    name: &str,
-    target: bone_semantic::hir::FnBackend,
-) -> Option<FuncRef> {
+/// The GROUP REPRESENTATIVE of the stdlib function `name` -- the target-neutral
+/// form of the lookup `Builder::stdlib_funcref` performs, and it fails on the
+/// same conditions (missing name, residual ambiguity).
+///
+/// A compiler-generated entry may be declared as a backend-variant group
+/// (`inline(lua)` + `inline(js)` of one signature). Filtering candidates by a
+/// TARGET would put target selection back into the walk, and filtering by `Any`
+/// -- which serves everything -- would call every such group ambiguous. So every
+/// declaration is canonicalized through the ONE grouping oracle and the answer
+/// must be unanimous: a name whose declarations are NOT one backend-variant
+/// group is the residual ambiguity `stdlib_funcref` also refuses.
+pub fn stdlib_entry_representative(ws: &Workspace, name: &str) -> Option<FuncRef> {
     let decls = ws.functions_by_name.get(&ustr::Ustr::from(name))?;
-    let serving: Vec<FuncRef> = decls
+    let mut reps = decls
         .iter()
-        .filter(|(m, f)| serves(ws.module(*m).functions[*f].backend, target))
-        .map(|&(m, f)| FuncRef { module: m, func: f })
-        .collect();
-    match serving.as_slice() {
-        [one] => Some(*one),
-        _ => None,
-    }
+        .map(|&(m, f)| skull_mir::lower::canonical_variant(ws, FuncRef { module: m, func: f }));
+    let first = reps.next()?;
+    reps.all(|r| r == first).then_some(first)
 }
 
 /// Whether a declaration with backend `decl` can be emitted for `target`.
@@ -2411,11 +2386,7 @@ fn classify_boundaries(g: &mut InstanceGraph, ws: &Workspace) {
         let f = &ws.module(i.func.module).functions[i.func.func];
         let symbol = mangle_fn(ws, f);
         let Some(class) = boundary_class_for(f, &erased) else { continue };
-        // `variant_for` kept the representative when nothing served the target,
-        // so a decl whose backend does not serve it is the S 1.6 outcome:
-        // reject with a span, never a stub.
-        let invalid_on_target = !serves(f.backend, g.target);
-        found.insert(symbol.clone(), Boundary { class, symbol, invalid_on_target });
+        found.insert(symbol.clone(), Boundary { class, symbol });
     }
     g.boundaries = found;
 }

@@ -13,7 +13,6 @@ use bone_semantic::inference::Workspace;
 use comfy_la_arena::{ArenaMap, Idx};
 use skull::concrete_body::{self, Callee, ConcreteBodies, ConcreteBody, IteratorOpKind, Slot};
 use skull::instance_graph::{self, InstanceGraph, Site, SiteOp, SiteOutcome};
-use skull_mir::mangle::mangle_fn;
 use skull_mir::monoty::{MonoTyId, MonoTyReason};
 use ustr::Ustr;
 
@@ -415,7 +414,7 @@ fn every_recorded_operation_becomes_one_entry_a_hole_or_a_rejection() {
     let c = bodies.census();
     assert!(c.sites_examined > 0, "no callee sites were examined at all: {c:?}");
     assert_eq!(
-        c.callee_entries() + c.callee_hole_total() + c.invalid_boundary_calls,
+        c.callee_entries() + c.callee_hole_total(),
         c.sites_examined,
         "sites went missing between the walk and the tables: {c:?}"
     );
@@ -472,17 +471,17 @@ fn every_recorded_operation_becomes_one_entry_a_hole_or_a_rejection() {
             h.site
         );
     }
-    // Every boundary id preserves the exact declaration, target, class and
-    // spelling the graph resolved, even where the symbol-only graph catalogue
-    // cannot distinguish backend siblings.
+    // A boundary callee names the INSTANCE the walk resolved and the class the
+    // ONE classifier gives that declaration. It carries no target and no
+    // spelling: a shared body has neither, and `artifact::realize` is what
+    // turns this into a `BoundaryId`
+    // (`artifact_view::an_artifact_realizes_the_shared_instance_to_the_sibling_that_serves_it`).
     for b in bodies.bodies.values() {
         for (site, callee) in b.callees() {
-            let Callee::Boundary(id) = callee else { continue };
-            let f = &ws.module(id.declaration.module).functions[id.declaration.func];
-            assert_eq!(id.target, g.target, "wrong target at {:?}", site.op);
-            assert_eq!(id.symbol, mangle_fn(&ws, f), "wrong symbol at {:?}", site.op);
+            let Callee::Boundary(inst, class) = callee else { continue };
+            let f = &ws.module(inst.func.module).functions[inst.func.func];
             assert_eq!(
-                Some(id.class),
+                Some(*class),
                 instance_graph::boundary_class_for(f, &g.erased_entries),
                 "wrong boundary class at {:?}",
                 site.op
@@ -566,7 +565,7 @@ fn main() {
         .values()
         .map(|c| match c {
             Callee::Rock(i) => g.identity(&ws, i),
-            Callee::Boundary(b) => b.symbol.clone(),
+            Callee::Boundary(i, _) => g.identity(&ws, i),
         })
         .collect();
     assert!(
@@ -585,7 +584,7 @@ fn main() {
         .filter(|op| op.kind == IteratorOpKind::Next)
         .map(|op| match &op.callee {
             Callee::Rock(i) => g.identity(&ws, i),
-            Callee::Boundary(b) => b.symbol.clone(),
+            Callee::Boundary(i, _) => g.identity(&ws, i),
         })
         .collect();
     assert!(
@@ -653,7 +652,7 @@ fn iterator_operations_resolve_to_concrete_witnesses() {
                 op.kind,
                 match &op.callee {
                     Callee::Rock(i) => g.identity(&ws, i),
-                    Callee::Boundary(b) => b.symbol.clone(),
+                    Callee::Boundary(i, _) => g.identity(&ws, i),
                 },
             )
         })
@@ -829,131 +828,4 @@ fn main() { let a = body([1, 2]) }
         "the template-lowered `for` header has a callee entry after all"
     );
     assert_eq!(g.storage_failures.len(), 0, "a synthesized receiver had no concrete type");
-}
-
-/// A boundary the target cannot serve is a LOCATED REJECTION, not a table entry.
-/// Emitting a call to a body that does not exist on the target is exactly the
-/// fallback plan S 10 forbids.
-#[test]
-fn a_boundary_the_target_cannot_serve_is_a_located_rejection() {
-    let ws = check(
-        r#"
-inline(lua) fn only_lua(x: int) -> int = "return x + 1"
-fn main() { let a = only_lua(1) }
-"#,
-    );
-    let roots = instance_graph::emission_roots(&ws, None);
-    // CONTROL: on Lua the same call is an ordinary boundary entry, so the
-    // rejection below is a property of the TARGET and not of the fixture.
-    let mut lua = instance_graph::build_for_target(
-        &ws,
-        roots.clone(),
-        false,
-        bone_semantic::hir::FnBackend::Lua,
-    );
-    let lua_bodies = concrete_body::build(&ws, &mut lua);
-    assert_eq!(
-        lua_bodies.invalid_boundary_calls.len(),
-        0,
-        "the Lua view rejected its own boundary: {:?}",
-        lua_bodies.render_invalid_boundary_calls(&ws, &lua)
-    );
-    assert!(
-        lua_bodies.bodies.values().any(|b| b
-            .direct_calls
-            .values()
-            .any(|c| matches!(c, Callee::Boundary(id) if id.symbol.starts_with("only_lua")))),
-        "the Lua view did not tabulate `only_lua` as a boundary at all"
-    );
-
-    let mut js = instance_graph::build_for_target(
-        &ws,
-        roots,
-        false,
-        bone_semantic::hir::FnBackend::Js,
-    );
-    let js_bodies = concrete_body::build(&ws, &mut js);
-    // The fixture's OWN call, named -- the stdlib supplies a background
-    // population of Lua-only boundaries on this target, and a total count would
-    // pass whether or not `only_lua` was among them.
-    let mine: Vec<&concrete_body::InvalidBoundaryCall> = js_bodies
-        .invalid_boundary_calls
-        .iter()
-        .filter(|c| c.boundary.symbol.starts_with("only_lua"))
-        .collect();
-    assert_eq!(
-        mine.len(),
-        1,
-        "expected `only_lua` to be rejected once, among {:?}",
-        js_bodies.render_invalid_boundary_calls(&ws, &js)
-    );
-    assert_eq!(mine[0].boundary.class, skull::instance_graph::BoundaryClass::InlineBody);
-    for c in &js_bodies.invalid_boundary_calls {
-        assert!(
-            !instance_graph::is_spanless(&c.span),
-            "an invalid-boundary rejection with no span cannot become a compile error: {:?}",
-            c.boundary
-        );
-    }
-    // And it is NOT in the tables: a consumer must not be able to read a
-    // callable entry for it.
-    assert!(
-        js_bodies.bodies.values().all(|b| b
-            .callees()
-            .iter()
-            .all(|(_, c)| !matches!(c, Callee::Boundary(id) if id.symbol.starts_with("only_lua")))),
-        "the rejected boundary is still a callee entry on JS"
-    );
-}
-
-/// Backend siblings deliberately share an emitted symbol, but they are
-/// different target contracts. Boundary identity must therefore differ across
-/// the two artifact targets even when the spelling is identical.
-#[test]
-fn backend_siblings_do_not_share_a_boundary_id() {
-    let ws = check(
-        r#"
-@nomangle
-inline(lua) fn target_op(x: int) -> int = "return x + 1"
-@nomangle
-inline(js) fn target_op(x: int) -> int = "return x + 2;"
-fn main() { let x = target_op(1) }
-"#,
-    );
-    let roots = instance_graph::emission_roots(&ws, None);
-    let mut lua = instance_graph::build_for_target(
-        &ws,
-        roots.clone(),
-        false,
-        bone_semantic::hir::FnBackend::Lua,
-    );
-    let lua_bodies = concrete_body::build(&ws, &mut lua);
-    let mut js = instance_graph::build_for_target(
-        &ws,
-        roots,
-        false,
-        bone_semantic::hir::FnBackend::Js,
-    );
-    let js_bodies = concrete_body::build(&ws, &mut js);
-
-    let boundary = |bodies: &ConcreteBodies| {
-        bodies
-            .bodies
-            .values()
-            .flat_map(|b| b.direct_calls.values())
-            .find_map(|c| match c {
-                Callee::Boundary(id) if id.symbol == "target_op" => Some(id.clone()),
-                _ => None,
-            })
-            .expect("the target call did not become a boundary")
-    };
-    let lua_id = boundary(&lua_bodies);
-    let js_id = boundary(&js_bodies);
-    assert_eq!(lua_id.symbol, js_id.symbol, "fixture no longer shares an emitted symbol");
-    assert_eq!(lua_id.target, bone_semantic::hir::FnBackend::Lua);
-    assert_eq!(js_id.target, bone_semantic::hir::FnBackend::Js);
-    assert_eq!(lua_id.class, skull::instance_graph::BoundaryClass::InlineBody);
-    assert_eq!(js_id.class, skull::instance_graph::BoundaryClass::InlineBody);
-    assert_ne!(lua_id.declaration, js_id.declaration, "fixture resolved one declaration twice");
-    assert_ne!(lua_id, js_id, "target-distinct boundary contracts collapsed to one id");
 }
