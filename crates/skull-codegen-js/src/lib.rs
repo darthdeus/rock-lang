@@ -1503,11 +1503,12 @@ function stone_shader_set_vec4_array(h, name, values, count) {
 }
 function stone_bind_texture_to_unit(tex, unit) {
   var gl = __SW.gl, t = __SW.textures[tex];
-  if (!gl || !t) return;
+  if (!gl || !t || unit < 0) return 0;
   gl.activeTexture(gl.TEXTURE0 + unit);
   gl.bindTexture(gl.TEXTURE_2D, t);
   gl.activeTexture(gl.TEXTURE0);
   (__SW.unitInt = __SW.unitInt || {})[unit] = !!(__SW.intTextures && __SW.intTextures[tex]);
+  return 1;
 }
 
 // WebGL2 (unlike desktop GL) makes ANY draw INVALID_OPERATION when an active
