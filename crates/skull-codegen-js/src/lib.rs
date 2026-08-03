@@ -910,23 +910,26 @@ function stone_sprite_init() {
 // The layout is the CALLER's, same contract as the native stone_draw_mesh:
 // component counts in location order, offsets accumulated from them. Nothing
 // here states the sprite vertex; the Rock `Vertex` struct owns it and the
-// caller derives both numbers from it. Fails closed if no program bound.
+// caller derives both numbers from it. Returns -1 for no draw, 0 for an
+// untextured draw, and 1 when the texture was bound.
 function stone_draw_mesh(data, count, stride, attr_sizes, attr_count, tex) {
   var gl = __SW.gl;
-  if (!gl || count <= 0) return;
+  if (!gl || count <= 0) return -1;
   var sh = __SW.shaders[__SW.curShader];
   if (!sh) {
     __sw_log_once("stone_draw_mesh: no shader bound; skipping");
-    return;
+    return -1;
   }
   gl.useProgram(sh.prog);
   var t = __SW.textures[tex];
+  var textureBound = false;
   if (t) {
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, t);
     var lt = __sw_uloc(sh, "uTexture");
     if (lt) gl.uniform1i(lt, 0);
     if (__SW.unitInt) __SW.unitInt[0] = false;
+    textureBound = true;
   }
   __sw_fix_stale_int_units(gl, sh);
   gl.bindBuffer(gl.ARRAY_BUFFER, __SW.meshVbo);
@@ -936,13 +939,13 @@ function stone_draw_mesh(data, count, stride, attr_sizes, attr_count, tex) {
     var n = attr_sizes[i];
     if (n < 1 || n > 4) {
       __sw_log_once("stone_draw_mesh: attr sizes must be 1..4, got " + n);
-      return;
+      return -1;
     }
     sum += n;
   }
   if (sum !== stride) {
     __sw_log_once("stone_draw_mesh: attr sizes sum to " + sum + " but stride is " + stride);
-    return;
+    return -1;
   }
   var sb = stride * 4;
   var off = 0;
@@ -953,6 +956,7 @@ function stone_draw_mesh(data, count, stride, attr_sizes, attr_count, tex) {
   }
   gl.drawArrays(gl.TRIANGLES, 0, count);
   __sw_mark_drawn(sh);
+  return textureBound ? 1 : 0;
 }
 
 var __sw_logged = {};
