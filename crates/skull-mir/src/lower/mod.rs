@@ -430,6 +430,33 @@ pub fn scalar_abi_param_leaf_widths(
     )
 }
 
+/// The physical RESULT LANES of `fref`'s declared return: how many values the
+/// call wire carries.
+///
+/// 0 for a fn with no return, 1 for an ordinary one, and more for the two
+/// shapes that put several values on the wire -- a tuple return (each element
+/// its own slot, a `nobox` element splatting into its leaves) and a bare
+/// `nobox` value return under the scalar ABI.
+///
+/// This is what a JS multi-lane publisher's arity comes from
+/// (`docs/boundary-contracts.md` 1.2, plan S 13b): leaf 0 rides the ordinary
+/// JS `return`, lanes 1..N ride the module-scope scratch bank. Derived from the
+/// same [`fn_scalar_abi`] policy and [`tuple_ret_shape`] every definition and
+/// call site read, so a publisher cannot disagree with the wire its own callers
+/// capture -- which is exactly what a textual scan of the opaque body for
+/// `__rock_retN` could not guarantee.
+pub fn result_lane_count(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef) -> usize {
+    let f = &ws.module(fref.module).functions[fref.func];
+    let Some(ret) = f.return_ty else { return 0 };
+    if let Some(shape) = shape::tuple_ret_shape(ws, &SpecSubst::new(), ret) {
+        return shape.slot_count();
+    }
+    match fn_scalar_abi(ws, scx, fref).and_then(|abi| abi.ret_shape) {
+        Some(vs) => vs.leaf_count(),
+        None => 1,
+    }
+}
+
 /// THE invariant: a function's emitted Lua parameter list must be INJECTIVE.
 ///
 /// The scalar-ABI leaf encoding joins nested field names with `__`, and `__` is

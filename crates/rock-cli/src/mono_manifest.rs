@@ -64,6 +64,11 @@ struct ArtifactTotals {
     sites_walked: usize,
     severed: usize,
     severed_by_cause: BTreeMap<&'static str, usize>,
+    /// Foreign bodies the artifact emits, how many publish more than one
+    /// result lane, and the widest wire its scratch bank must cover.
+    foreign_bodies: usize,
+    multi_lane_publishers: usize,
+    widest_result_lanes: usize,
     deferred: Vec<&'static str>,
 }
 
@@ -395,6 +400,9 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
                         sites_walked: 0,
                         severed: 0,
                         severed_by_cause: BTreeMap::new(),
+                        foreign_bodies: 0,
+                        multi_lane_publishers: 0,
+                        widest_result_lanes: 0,
                         deferred: c.deferred.clone(),
                     });
                     e.instances += c.instances;
@@ -410,6 +418,9 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
                     e.roots += c.roots;
                     e.sites_walked += c.sites_walked;
                     e.severed += c.severed;
+                    e.foreign_bodies += c.foreign_bodies;
+                    e.multi_lane_publishers += c.multi_lane_publishers;
+                    e.widest_result_lanes = e.widest_result_lanes.max(c.widest_result_lanes);
                     for (k, v) in &c.severed_by_cause {
                         *e.severed_by_cause.entry(*k).or_insert(0) += v;
                     }
@@ -1086,6 +1097,21 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     }
     for x in &art_severed_examples {
         println!("- severed call: {x}");
+    }
+    println!();
+    println!("### foreign bodies and their PUBLISHER LANES (plan S 13b)");
+    println!();
+    println!(
+        "The result wire of every foreign body an artifact emits, from the concrete result ABI \
+         (`skull_mir::lower::result_lane_count`) rather than from the body text. A multi-lane \
+         body publishes through one final `return __rock_publish(..)` whose arity is this number."
+    );
+    println!();
+    for (name, a) in &art_rows {
+        println!(
+            "- `{name}`: **{}** foreign bodies, **{}** multi-lane publishers, widest wire **{}**",
+            a.foreign_bodies, a.multi_lane_publishers, a.widest_result_lanes
+        );
     }
     println!();
     println!("## shader artifact views (plan S 9, S 20a)");

@@ -1452,3 +1452,73 @@ fn main() { let n = bound_probe(1) + host_probe(2) }
         "a host binding displaced a body the artifact actually emits"
     );
 }
+
+/// **The JS view's reachable `inline(js)` population, with its publisher
+/// lanes.** Two halves that a count cannot separate: a body a JS root reaches
+/// is retained AND states the width of its result wire (plan S 13b: the
+/// publisher's arity comes from the concrete ABI, never from the body text),
+/// while a body nothing reaches is `Unreachable` and states nothing.
+#[test]
+fn the_js_view_retains_reachable_inline_js_bodies_with_their_lanes() {
+    let ws = check(
+        r#"
+inline(js) fn reached_pair(v: float) -> (bool, float) = "return __rock_publish(false, v);"
+inline(js) fn reached_scalar(v: float) -> float = "return v;"
+inline(js) fn never_reached(v: float) -> (bool, float) = "return __rock_publish(false, v);"
+fn main() {
+    let (ok, f) = reached_pair(1.0)
+    let s = reached_scalar(2.0)
+}
+"#,
+    );
+    let (g, all_roots) = graph_for(&ws);
+    // The artifact's roots are narrower than the graph's, which is plan S 11's
+    // "the target may change roots": every declaration is an emission root of
+    // the shared graph, so an unreachable control needs the view to walk from
+    // `main` alone.
+    let roots: Vec<skull_mir::mir::FuncRef> = all_roots
+        .iter()
+        .copied()
+        .filter(|r| ws.module(r.module).functions[r.func].name.as_str() == "main")
+        .collect();
+    let js = artifact::realize(&ws, &g, &ArtifactRequest::new(JAVASCRIPT_WEB, &roots));
+    let lanes = |name: &str| {
+        js.publisher_lanes
+            .iter()
+            .find(|(i, _)| {
+                ws.module(i.func.module).functions[i.func.func].name.as_str() == name
+            })
+            .map(|(_, n)| *n)
+    };
+
+    assert_eq!(lanes("reached_pair"), Some(2), "a reachable 2-lane publisher lost its width");
+    assert_eq!(lanes("reached_scalar"), Some(1));
+    // The UNREACHABLE control: retention is a walk, so a body no root reaches
+    // carries no obligation -- and its absence here is what says the two lane
+    // counts above are a property of reachability rather than of declaration.
+    assert_eq!(lanes("never_reached"), None, "an unreachable body was given a lane count");
+    assert!(
+        js.excluded.iter().any(|e| {
+            ws.module(e.instance.func.module).functions[e.instance.func.func].name.as_str()
+                == "never_reached"
+                && e.cause == Exclusion::Unreachable
+        }),
+        "the unreachable body is missing from the exclusion partition"
+    );
+
+    let c = js.census();
+    assert!(c.foreign_bodies >= 2, "no foreign body population: {c:?}");
+    assert_eq!(c.widest_result_lanes, 2, "the artifact's widest result wire is wrong: {c:?}");
+    assert!(c.multi_lane_publishers >= 1);
+
+    // The LUAJIT artifact over the same graph selects Lua bodies, so these JS
+    // declarations are not what it measures -- the lanes belong to the artifact,
+    // not to the shared instance.
+    let lua = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
+    assert!(
+        !lua.publisher_lanes.keys().any(|i| {
+            ws.module(i.func.module).functions[i.func.func].name.as_str() == "reached_pair"
+        }),
+        "the luajit artifact claimed a JS-only body's result wire"
+    );
+}

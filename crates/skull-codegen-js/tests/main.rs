@@ -28,6 +28,8 @@ mod lambda;
 mod log_dedup;
 #[path = "loops.rs"]
 mod loops;
+#[path = "publisher_abi.rs"]
+mod publisher_abi;
 #[path = "map_iter.rs"]
 mod map_iter;
 #[path = "match_fold.rs"]

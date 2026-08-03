@@ -413,6 +413,12 @@ pub struct ArtifactCensus {
     pub inline_deps_unresolved: usize,
     pub inline_deps_boundary: usize,
     pub inline_deps_rock: usize,
+    /// Foreign bodies the artifact emits, and how many of them publish more
+    /// than one result lane -- the population plan S 13b's publisher contract
+    /// governs, and the widest wire the artifact's scratch bank must cover.
+    pub foreign_bodies: usize,
+    pub multi_lane_publishers: usize,
+    pub widest_result_lanes: usize,
     /// Deferred obligations, carried from the target spec.
     pub deferred: Vec<&'static str>,
 }
@@ -449,6 +455,15 @@ pub struct ArtifactView {
     pub symbol_collisions: Vec<SymbolCollision>,
     pub inline_deps: Vec<InlineDep>,
     pub unresolved_inline_deps: Vec<UnresolvedInlineDep>,
+    /// The physical RESULT LANES of every retained instance the artifact emits
+    /// as a foreign body: how many values its result wire carries. Plan S 13b's
+    /// JS publisher takes its arity from exactly this, so an artifact that
+    /// retains a multi-lane `inline(js)` body states the lane count here rather
+    /// than leaving emission to read it out of the body text.
+    ///
+    /// Derived from `skull_mir::lower::result_lane_count`, the ABI policy every
+    /// definition and call site already reads.
+    pub publisher_lanes: BTreeMap<Instance, usize>,
     /// The shared population this view was taken over -- the denominator.
     pub shared_instances: usize,
     pub deferred: Vec<&'static str>,
@@ -468,6 +483,7 @@ impl ArtifactView {
             && self.symbol_collisions == other.symbol_collisions
             && self.inline_deps == other.inline_deps
             && self.unresolved_inline_deps == other.unresolved_inline_deps
+            && self.publisher_lanes == other.publisher_lanes
             && self.shared_instances == other.shared_instances
             && self.deferred == other.deferred
     }
@@ -508,6 +524,9 @@ impl ArtifactView {
                 .iter()
                 .filter(|d| matches!(d.callee, RealizedCallee::Rock(_)))
                 .count(),
+            foreign_bodies: self.publisher_lanes.len(),
+            multi_lane_publishers: self.publisher_lanes.values().filter(|n| **n > 1).count(),
+            widest_result_lanes: self.publisher_lanes.values().copied().max().unwrap_or(0),
             deferred: self.deferred.clone(),
             ..Default::default()
         };
@@ -971,8 +990,26 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         }
     }
 
+    // The result-lane width of every foreign body this artifact emits. Asked of
+    // the SELECTED declaration -- the one whose body is emitted -- under this
+    // artifact's own execution backend.
+    let scx = req
+        .spec
+        .execution
+        .backend
+        .map(|b| skull_mir::lower::ScalarCtx::new(ws).with_target(b));
+    let publisher_lanes: BTreeMap<Instance, usize> = match &scx {
+        Some(scx) => realization
+            .iter()
+            .filter(|(_, r)| matches!(r.kind, Realization::ForeignBody(BoundaryClass::InlineBody)))
+            .map(|(i, r)| (i.clone(), skull_mir::lower::result_lane_count(ws, scx, r.decl)))
+            .collect(),
+        None => BTreeMap::new(),
+    };
+
     ArtifactView {
         shared_instances: g.instances.len(),
+        publisher_lanes,
         // An execution-axis question too: every obligation it names is about
         // memory, coroutines, widths or foreign symbols. A shader-derived
         // deferral would be a separate list on a separate axis.
