@@ -275,6 +275,30 @@ fn web_sampling_nearest_and_linear() {
 // MRT FragId write -> R32I attachment -> async PBO readback -> SELECTION ->
 // `last_click_target == ClickTarget::Player` -- and captures the screenshot
 // for the non-blank color bar.
+// Arc C box 4, WebGL2 leg. One canvas bound twice in a single pass -- unit 1
+// nearest, unit 2 linear -- with the verdict computed in Rock so both backends
+// assert identical claims. See games/testbed/pass_sampling.rock.
+#[test]
+fn web_pass_sampling() {
+    let Some((_dir, shot)) = run_cdp(
+        "games/testbed",
+        "web_pass_sampling",
+        &[
+            "--frames",
+            "10",
+            "--setup-expr",
+            "__G.PASS_SAMPLING_REQUEST = true",
+            "--expect",
+            "__G.PASS_SAMPLING_VERDICT",
+            "--value",
+            "PASS",
+        ],
+    ) else {
+        return;
+    };
+    assert_not_blank(&shot, "the testbed scene");
+}
+
 #[test]
 fn web_chrome_screenshot_and_click_pick_mag() {
     let Some((_dir, shot)) = run_cdp(
