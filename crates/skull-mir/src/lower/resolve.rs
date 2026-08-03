@@ -72,29 +72,44 @@ pub fn backend_variant(
 /// production hands it as raw declarations rather than as bone-resolved callees.
 ///
 /// The preference order IS bone's `backend_rank` (`Any` < `Lua` < `Js`,
-/// `bone-inference/src/calls.rs`) and the grouping IS [`sibling_variant`]'s, so
-/// there is no second rendered-signature implementation and no second notion of
-/// which member represents the group.
+/// `bone-inference/src/calls.rs`) and [`backend_variant_group`] owns the complete
+/// grouping rule, including bone's repeated-backend refusal.
 pub fn canonical_variant(ws: &Workspace, rep: FuncRef) -> FuncRef {
-    use bone_semantic::hir::FnBackend;
-    let backend = ws.module(rep.module).functions[rep.func].backend;
-    if backend == FnBackend::Any {
-        return rep;
+    backend_variant_group(ws, rep)
+        .into_iter()
+        .min_by_key(|r| ws.module(r.module).functions[r.func].backend)
+        .expect("a variant group contains its requested member")
+}
+
+/// The backend-variant group containing `member`.
+///
+/// This is bone's complete collapse rule: same name and rendered parameter
+/// signature, with every backend distinct. A repeated backend is a genuine
+/// overload ambiguity, so no group exists and the member stays by itself.
+pub fn backend_variant_group(ws: &Workspace, member: FuncRef) -> Vec<FuncRef> {
+    let mf = &ws.module(member.module).functions[member.func];
+    let member_sig: Vec<String> =
+        mf.param_decls.iter().map(|p| ws.render(None, p.ty)).collect();
+    let Some(cands) = ws.functions_by_name.get(&mf.name) else { return vec![member] };
+    let mut group = Vec::new();
+    for &(mid, fid) in cands.iter() {
+        let f = &ws.module(mid).functions[fid];
+        if f.param_decls.len() != member_sig.len() {
+            continue;
+        }
+        if f.param_decls.iter().zip(&member_sig).all(|(p, r)| ws.render(None, p.ty) == *r) {
+            group.push(FuncRef { module: mid, func: fid });
+        }
     }
-    if let Some(sib) = sibling_variant(ws, rep, FnBackend::Any, true) {
-        return sib;
+    let mut backends = std::collections::BTreeSet::new();
+    if group.iter().all(|r| backends.insert(ws.module(r.module).functions[r.func].backend)) {
+        group
+    } else {
+        vec![member]
     }
-    if backend == FnBackend::Lua {
-        return rep;
-    }
-    sibling_variant(ws, rep, FnBackend::Lua, true).unwrap_or(rep)
 }
 
 /// A same-name, same-signature sibling of `rep` whose backend serves `target`.
-/// Signature match is param-type equality (rendered, inference-free) -- the
-/// same key bone's `collapse_backend_variants` groups on. The caller has
-/// already established the name has >=2 candidates, so `rep_sig` (a per-param
-/// render) is only built when a sibling could exist.
 pub fn sibling_variant(
     ws: &Workspace,
     rep: FuncRef,
@@ -102,15 +117,11 @@ pub fn sibling_variant(
     exact: bool,
 ) -> Option<FuncRef> {
     use bone_semantic::hir::FnBackend;
-    let rf = &ws.module(rep.module).functions[rep.func];
-    let name = rf.name;
-    let rep_sig: Vec<String> = rf.param_decls.iter().map(|p| ws.render(None, p.ty)).collect();
-    let cands = ws.functions_by_name.get(&name)?;
-    for &(mid, fid) in cands.iter() {
-        if mid == rep.module && fid == rep.func {
+    for candidate in backend_variant_group(ws, rep) {
+        if candidate == rep {
             continue;
         }
-        let f = &ws.module(mid).functions[fid];
+        let f = &ws.module(candidate.module).functions[candidate.func];
         let ok = if exact {
             f.backend == target
         } else {
@@ -119,12 +130,7 @@ pub fn sibling_variant(
         if !ok {
             continue;
         }
-        if f.param_decls.len() != rep_sig.len() {
-            continue;
-        }
-        if f.param_decls.iter().zip(&rep_sig).all(|(p, r)| ws.render(None, p.ty) == *r) {
-            return Some(FuncRef { module: mid, func: fid });
-        }
+        return Some(candidate);
     }
     None
 }

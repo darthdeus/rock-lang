@@ -345,6 +345,42 @@ fn main() {
     );
 }
 
+/// A repeated backend makes the whole same-signature set a genuine overload
+/// ambiguity. Bone deliberately leaves every candidate distinct; the root-side
+/// inverse must not manufacture a representative that bone never chose.
+#[test]
+fn canonical_variant_preserves_a_repeated_backend_group() {
+    let ws = check(
+        r#"
+inline(lua) fn __canonical_duplicate_probe(x: int) -> int = "return x"
+inline(js) fn __canonical_duplicate_probe(x: int) -> int = "return x;"
+inline(js) fn __canonical_duplicate_probe(x: int) -> int = "return x + 1;"
+fn main() {}
+"#,
+    );
+    let decls: Vec<skull_mir::mir::FuncRef> = ws.functions_by_name
+        [&Ustr::from("__canonical_duplicate_probe")]
+        .iter()
+        .map(|&(module, func)| skull_mir::mir::FuncRef { module, func })
+        .collect();
+    let mut representatives: Vec<skull_mir::mir::FuncRef> = decls
+        .iter()
+        .map(|d| skull_mir::lower::canonical_variant(&ws, *d))
+        .collect();
+    representatives.sort_by_key(|r| (r.module.raw(), r.func.into_raw().into_u32()));
+    representatives.dedup();
+    assert_eq!(
+        representatives.len(),
+        decls.len(),
+        "a repeated-backend group was collapsed: {representatives:?}"
+    );
+    assert_eq!(
+        instance_graph::stdlib_entry_representative(&ws, "__canonical_duplicate_probe"),
+        None,
+        "a residual overload ambiguity resolved to one compiler-generated entry"
+    );
+}
+
 /// An `extern` is available exactly where the target supplies foreign symbols.
 /// The `Invalid boundary` outcome (plan S 10) is per-target, so this is what
 /// makes an artifact's capability read load-bearing rather than decorative.

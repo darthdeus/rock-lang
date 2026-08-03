@@ -768,7 +768,7 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     let mut inline_deps = Vec::new();
     let mut unresolved_inline_deps = Vec::new();
     let retained_decls: BTreeSet<DeclKey> =
-        realization.keys().map(|i| DeclKey(i.func)).collect();
+        realization.values().map(|r| DeclKey(r.decl)).collect();
     for (owner, entries) in &g.inline_body_deps {
         // An owner this artifact dropped carries no obligation: its text is
         // never emitted here.

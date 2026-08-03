@@ -2343,7 +2343,7 @@ fn has_rock_body(f: &Function) -> bool {
     f.inline_body.is_none() && !f.is_extern
 }
 
-/// Runtime entries an opaque `inline(lua)` body CALLS.
+/// Runtime entries an opaque inline body CALLS.
 ///
 /// An inline body is foreign text, so the walk cannot lower it -- but emission
 /// still has to emit every symbol it names, and "opaque by design" cannot make a
@@ -2358,20 +2358,27 @@ fn has_rock_body(f: &Function) -> bool {
 /// none exists in the corpus, and a false POSITIVE keeps a symbol alive, where a
 /// false negative drops one emission requires.
 fn record_inline_body_deps(g: &mut InstanceGraph, ws: &Workspace) {
-    // METADATA ONLY so far: the dependency is recorded and joins
+    // METADATA ONLY so far: each sibling's dependency is recorded and joins
     // `erased_entries`, but it is not yet resolved to a `BoundaryId` or an
     // instance the way a call edge is. That resolution belongs to the artifact
     // view, which is what decides the emitted spelling and the retention set;
     // recording it here without a target would be a second, weaker reachability
-    // mechanism.
+    // mechanism. All members of a represented backend-variant group are scanned;
+    // the artifact later reads only the declaration it selected.
     let mut deps: BTreeMap<DeclKey, BTreeSet<&'static str>> = BTreeMap::new();
-    for i in &g.instances {
-        let f = &ws.module(i.func.module).functions[i.func.func];
+    let declarations: BTreeSet<DeclKey> = g
+        .instances
+        .iter()
+        .flat_map(|i| skull_mir::lower::backend_variant_group(ws, i.func))
+        .map(DeclKey)
+        .collect();
+    for decl in declarations {
+        let f = &ws.module(decl.0.module).functions[decl.0.func];
         let Some(body) = &f.inline_body else { continue };
         let text = body.1.as_str();
         for name in ERASED_RUNTIME_ENTRIES {
             if text.contains(name) {
-                deps.entry(DeclKey(i.func)).or_default().insert(name);
+                deps.entry(decl).or_default().insert(name);
                 g.erased_entries.insert((*name).to_string());
             }
         }

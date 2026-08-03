@@ -78,16 +78,12 @@ impl IntrinsicTable for OneName {
 }
 
 // ---------------------------------------------------------------------------
-// PREMISE 1 -- the shared graph retains BOTH `@nomangle` backend siblings.
+// PREMISE 1 -- the shared graph retains one backend-group representative.
 // ---------------------------------------------------------------------------
 
 /// `__nb_checked_index` is declared twice: `inline(lua)` in `unified.rock` and
-/// `inline(js)` in `js.rock`. Both are `@nomangle`, so both are emission roots,
-/// so BOTH are instances of the Lua graph -- a JS-only body is reachable in a
-/// Lua walk, and the two share one mangled symbol.
-///
-/// This is the premise the artifact view exists to fix, asserted here so the
-/// fix has a measured defect to point at rather than a design preference.
+/// `inline(js)` in `js.rock`. Both raw declarations are emission roots, but the
+/// target-neutral graph canonicalizes them to one logical instance.
 #[test]
 fn premise_the_shared_graph_keeps_one_representative_per_sibling_group() {
     let ws = check("fn main() { let b: NativeBuffer<int> = nb_new(4); let x = b[0] }");
@@ -340,6 +336,62 @@ fn inline_body_dependencies_resolve_to_targets_in_the_artifact() {
             ),
         }
     }
+}
+
+/// Dependency metadata follows the declaration the artifact SELECTED. The
+/// target-neutral representative's body is different text and names no runtime
+/// entry, so scanning only that declaration silently loses the JS dependency.
+#[test]
+fn inline_body_dependencies_follow_the_selected_sibling() {
+    let ws = check(
+        r#"
+@nomangle inline(lua) fn selected_dep_probe(x: int) -> int = "return x"
+@nomangle inline(js) fn selected_dep_probe(x: int) -> int = "return __nb_checked_index({ len: 1 }, x);"
+fn main() { let n = selected_dep_probe(1) }
+"#,
+    );
+    let (g, roots) = graph_for(&ws);
+    let lua = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT, &roots));
+    let js = artifact::realize(&ws, &g, &ArtifactRequest::new(JAVASCRIPT, &roots));
+
+    let selected = |view: &artifact::ArtifactView| {
+        view.realization
+            .values()
+            .find(|r| {
+                ws.module(r.decl.module).functions[r.decl.func].name.as_str()
+                    == "selected_dep_probe"
+            })
+            .copied()
+            .expect("the artifact did not retain the probe")
+    };
+    let lua_probe = selected(&lua);
+    let js_probe = selected(&js);
+    assert_eq!(
+        ws.module(lua_probe.decl.module).functions[lua_probe.decl.func].backend,
+        FnBackend::Lua
+    );
+    assert_eq!(
+        ws.module(js_probe.decl.module).functions[js_probe.decl.func].backend,
+        FnBackend::Js
+    );
+    assert!(
+        g.inline_body_deps
+            .get(&instance_graph::DeclKey(js_probe.decl))
+            .is_some_and(|deps| deps.contains("__nb_checked_index")),
+        "the shared graph did not record the selected sibling's metadata: {:?}",
+        g.inline_body_deps
+    );
+    assert!(
+        lua.inline_deps.iter().all(|d| d.owner != lua_probe.decl),
+        "the Lua body acquired a dependency it does not name"
+    );
+    assert!(
+        js.inline_deps
+            .iter()
+            .any(|d| d.owner == js_probe.decl && d.entry == "__nb_checked_index"),
+        "the selected JS body's runtime dependency was lost: {:?}",
+        js.render_unresolved_inline_deps(&ws)
+    );
 }
 
 // ---------------------------------------------------------------------------
