@@ -12,7 +12,7 @@
 use anyhow::{anyhow, Context, Result};
 use std::collections::HashMap;
 use colored::Colorize;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{mpsc, Arc, Mutex};
@@ -101,6 +101,20 @@ fn sim_spawn_barrier() {
         }
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+fn record_sim_lifecycle(event: &str, sim_name: &str) {
+    let Some(path) = std::env::var_os("ROCK_SIM_LIFECYCLE_LOG") else {
+        return;
+    };
+    static LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+    let Ok(_guard) = LOCK.get_or_init(|| Mutex::new(())).lock() else {
+        return;
+    };
+    let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) else {
+        return;
+    };
+    let _ = writeln!(file, "{event}\t{sim_name}");
 }
 
 /// Compile `project` into `output_path` and walk the `@sim` registry
@@ -232,6 +246,34 @@ pub fn do_run_sim_opts(backend: crate::Backend, project: &str, sim_name: &str, q
 /// The tempdir is exposed to the child as `OUT`; comma-chained parts (`a,b`)
 /// share it so a fixture saved by part 1 is readable by part 2. Distinct
 /// named entries each get their own via separate calls.
+struct SimArtifacts {
+    out_dir: TempDir,
+}
+
+impl SimArtifacts {
+    fn new() -> Result<Self> {
+        Ok(Self {
+            out_dir: TempDir::new().context("creating sim tempdir")?,
+        })
+    }
+
+    fn path(&self) -> &Path {
+        self.out_dir.path()
+    }
+
+    fn finish(self, summary: &mut SimSummary) {
+        self.finish_with(summary, process_video_assertions);
+    }
+
+    fn finish_with(self, summary: &mut SimSummary, process: impl FnOnce(&mut SimSummary)) {
+        let _keep_out_live = &self.out_dir;
+        process(summary);
+        for path in std::mem::take(&mut summary.cleanup_paths) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 fn run_named_entry(
     project: &str,
     chain_spec: &str,
@@ -242,8 +284,8 @@ fn run_named_entry(
     env_by_wire: &HashMap<String, Vec<(String, String)>>,
     stone: Option<&mut crate::skull_backend::SkullStone>,
 ) -> Result<(String, SimSummary)> {
-    let tempdir = TempDir::new().context("creating sim tempdir")?;
-    let out_path = tempdir.path().to_path_buf();
+    let artifacts = SimArtifacts::new()?;
+    let out_path = artifacts.path().to_path_buf();
 
     // Comma-separated names = chained multi-start. Each part spawns a fresh
     // luajit child; expects/snapshots/video-assertions aggregate into one
@@ -285,14 +327,7 @@ fn run_named_entry(
 
     // Video assertions after all parts run (they need ffprobe/ffmpeg
     // subprocesses, and a multi-start chain may assert in either part).
-    process_video_assertions(&mut combined);
-    // Deferred cleanup after assertions so `cleanup_path` sims can verify a
-    // file's metadata and tidy up without racing the post-process ffprobe.
-    for p in std::mem::take(&mut combined.cleanup_paths) {
-        let _ = std::fs::remove_file(&p);
-    }
-
-    drop(tempdir);
+    artifacts.finish(&mut combined);
     Ok((display_name, combined))
 }
 
@@ -497,7 +532,7 @@ pub fn do_run_all_sims(
     let run_at = |i: usize, stone: Option<&mut crate::skull_backend::SkullStone>| -> Result<SimSummary> {
         // Fresh tempdir per sim -- distinct sims don't share OUT the way
         // a comma-chain's parts do.
-        let tempdir = TempDir::new().context("creating sim tempdir")?;
+        let artifacts = SimArtifacts::new()?;
         let env_pairs = env_by_wire.get(&wire_names[i]).cloned().unwrap_or_default();
         let mut summary = run_one_sim(
             &project,
@@ -505,23 +540,14 @@ pub fn do_run_all_sims(
             quiet,
             !streaming,
             update_snapshots,
-            tempdir.path(),
+            artifacts.path(),
             &output,
             &env_pairs,
             stone,
         )?;
 
         let _lock = report.lock().unwrap();
-        // `tempdir` is `$OUT` and MUST outlive this: `expect_video` shells out
-        // to ffprobe against files the sim wrote there, and `cleanup_path` sims
-        // verify a file's metadata before tidying it. Dropping it earlier
-        // deletes the artifacts these assertions are about, and they fail with
-        // a missing-file error rather than a real verdict.
-        process_video_assertions(&mut summary);
-        for p in std::mem::take(&mut summary.cleanup_paths) {
-            let _ = std::fs::remove_file(&p);
-        }
-        drop(tempdir);
+        artifacts.finish(&mut summary);
         if !quiet {
             // Result output: the child's own retained stderr/stdout, emitted
             // here so it lands with its record instead of interleaving.
@@ -725,6 +751,10 @@ pub fn is_reload_lane(env_pairs: &[(String, String)]) -> bool {
         .any(|(k, v)| k == "STONE_HOT_RELOAD" && v != "0")
 }
 
+fn writes_live(buffered: bool) -> bool {
+    !buffered
+}
+
 /// Spawn one luajit process for `sim_part` and demux its side channel.
 /// `out_path` is the shared `OUT` env value across all parts in a
 /// multi-start chain.
@@ -795,6 +825,7 @@ fn run_one_sim(
     }
 
     let mut child = cmd.spawn()?;
+    record_sim_lifecycle("start", sim_part);
     let stderr_handle = child.stderr.take().expect("piped");
     let stdout_handle = child.stdout.take().expect("piped");
 
@@ -818,10 +849,13 @@ fn run_one_sim(
         // back for the caller to emit inside that lock.
         let quiet = quiet || buffered;
         let buffered = buffered;
-        std::thread::spawn(move || {
+        std::thread::spawn(move || -> Option<String> {
             let reader = BufReader::new(stderr_handle);
             for line in reader.lines() {
-                let Ok(line) = line else { break };
+                let line = match line {
+                    Ok(line) => line,
+                    Err(e) => return Some(format!("error reading game stderr: {e}")),
+                };
                 if let Some(rest) = line.strip_prefix("__SIM__ ") {
                     if extract_str_field(rest, "op").as_deref() == Some("reload_edit") {
                         // Send failure = the wait loop already reaped the child;
@@ -837,7 +871,7 @@ fn run_one_sim(
                     if !quiet {
                         print_progress(rest);
                     }
-                } else if !buffered {
+                } else if writes_live(buffered) {
                     // Result output, NOT logging: verbatim passthrough of
                     // the child game's own stderr (non-`__SIM__` lines) —
                     // the game's output stream, not run_sim's diagnostics.
@@ -845,24 +879,26 @@ fn run_one_sim(
                 }
                 lines.lock().unwrap().push(line);
             }
+            None
         })
     };
 
     let stdout_thread = {
         let buf = Arc::clone(&stdout_buf);
         let label = sim_part.to_string();
-        std::thread::spawn(move || {
+        std::thread::spawn(move || -> Option<String> {
             let mut h = stdout_handle;
             let mut local = Vec::new();
             // Surface read failures: a silent `let _ = ...` would hand
             // an empty buffer back to the post-run "game stdout for ..."
             // dump on failure, hiding any partial output we did get
             // (silent-errors audit, 2026-05-02).
-            if let Err(e) = h.read_to_end(&mut local) {
-                log::warn!(target: "SIM",
-                    "rock sim `{label}`: error reading game stdout: {e}");
-            }
+            let error = h
+                .read_to_end(&mut local)
+                .err()
+                .map(|e| format!("rock sim `{label}`: error reading game stdout: {e}"));
             *buf.lock().unwrap() = local;
+            error
         })
     };
 
@@ -900,16 +936,15 @@ fn run_one_sim(
                         };
                         if let Err(e) = serviced {
                             let site = compress_site(&req.site);
-                            // Result output, NOT logging: runner-side failure
-                            // in the sim's live result stream. It never came
-                            // through the child's `__SIM__` channel, and
-                            // `summary.print` suppresses sited entries as
-                            // already-streamed -- this IS that live print.
-                            eprintln!(
-                                "{}{} reload_edit: {e}",
-                                format!("[{}] ", site).bright_black(),
-                                "error:".red().bold(),
-                            );
+                            // Stream now for a single run; buffered callers emit
+                            // the retained error under their record lock.
+                            if writes_live(buffered) {
+                                eprintln!(
+                                    "{}{} reload_edit: {e}",
+                                    format!("[{}] ", site).bright_black(),
+                                    "error:".red().bold(),
+                                );
+                            }
                             reload_errors.push(SiteMessage {
                                 message: format!("reload_edit: {e}"),
                                 site,
@@ -942,15 +977,26 @@ fn run_one_sim(
     // __SIM__ side channel + raw game stderr) with no diagnostic, leaving
     // the user with a "0/0 expects passed" PASS line and no clue why
     // (silent-errors audit, 2026-05-02).
-    if let Err(panic) = stderr_thread.join() {
-        log::warn!(target: "SIM",
+    let mut reader_diagnostics = Vec::new();
+    match stderr_thread.join() {
+        Ok(Some(message)) => reader_diagnostics.push(format!("rock sim `{sim_part}`: {message}")),
+        Ok(None) => {}
+        Err(panic) => reader_diagnostics.push(format!(
             "rock sim `{sim_part}`: stderr reader thread panicked; sim output may be incomplete: {panic:?}"
-        );
+        )),
     }
-    if let Err(panic) = stdout_thread.join() {
-        log::warn!(target: "SIM",
+    match stdout_thread.join() {
+        Ok(Some(message)) => reader_diagnostics.push(message),
+        Ok(None) => {}
+        Err(panic) => reader_diagnostics.push(format!(
             "rock sim `{sim_part}`: stdout reader thread panicked; game stdout may be incomplete: {panic:?}"
-        );
+        )),
+    }
+    record_sim_lifecycle("end", sim_part);
+    if writes_live(buffered) {
+        for message in &reader_diagnostics {
+            log::warn!(target: "SIM", "{message}");
+        }
     }
 
     let stderr_str = stderr_lines.lock().unwrap().join("\n");
@@ -1002,6 +1048,11 @@ fn run_one_sim(
                 diag.push('\n');
             }
         }
+        for message in reader_diagnostics {
+            diag.push_str("[SIM] warning: ");
+            diag.push_str(&message);
+            diag.push('\n');
+        }
         if !quiet
             && (summary.has_failures() || summary.timed_out || summary.process_failure_code.is_some())
             && !stdout_str.trim().is_empty()
@@ -1012,7 +1063,7 @@ fn run_one_sim(
         summary.diagnostics = diag;
     }
 
-    if !quiet && !buffered && (summary.has_failures() || summary.timed_out || summary.process_failure_code.is_some()) {
+    if !quiet && writes_live(buffered) && (summary.has_failures() || summary.timed_out || summary.process_failure_code.is_some()) {
         if !stdout_str.trim().is_empty() {
             log::error!(target: "SIM", "--- game stdout for `{sim_part}` ---");
             // Result output, NOT logging: verbatim dump of the child
@@ -1857,6 +1908,27 @@ mod tests {
         assert!(matches!(r, SnapResult::Pass), "matching value passes; got {r:?}");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn buffered_runs_never_write_live() {
+        assert!(writes_live(false));
+        assert!(!writes_live(true));
+    }
+
+    #[test]
+    fn deferred_artifacts_run_before_their_out_dir_is_dropped() {
+        let artifacts = SimArtifacts::new().expect("sim artifacts");
+        let out_path = artifacts.path().to_path_buf();
+        let marker = out_path.join("marker");
+        std::fs::write(&marker, "live").expect("write marker");
+        let mut summary = SimSummary::default();
+
+        artifacts.finish_with(&mut summary, |_| {
+            assert!(marker.exists(), "$OUT was dropped before deferred processing");
+        });
+
+        assert!(!out_path.exists(), "$OUT must be removed after processing");
     }
 
     #[test]
