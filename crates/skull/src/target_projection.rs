@@ -1,10 +1,21 @@
 //! The TARGET SPECS an artifact view is taken through
 //! (`docs/monomorphization-plan.md` S 0c final bullet, S 20a, S 20g.1).
 //!
-//! **Structured capabilities, not a target enum** (plan S 20a). The variants a
-//! flat enum would grow -- `LuaDesktop`, `JsWeb`, `CAndroid`, `WasmWeb` -- are
-//! cross products of independent axes. [`ExecutionTargetSpec`] carries the axes
-//! as fields so a new target is a fixture, not a match arm in every consumer.
+//! **Three independent axes, not a target enum** (plan S 20a). The variants a
+//! flat enum would grow -- `LuaDesktop`, `LuaIos`, `JsWeb`, `CAndroid`,
+//! `WasmWasi` -- are cross products of things that vary separately:
+//! [`PlatformSpec`] is where an artifact RUNS, [`ExecutionTargetSpec`] is what
+//! emits and executes its CPU code, and [`ShaderTargetSpec`] is what is packaged
+//! beside it. [`TargetSpec`] holds one of each, so a new target is a
+//! COMBINATION, not a match arm in every consumer.
+//!
+//! **CPU realization reads the EXECUTION axis only.** Plan S 20a: "CPU function
+//! ABI depends on `ExecutionTargetSpec`, not on which optional shader target is
+//! packaged beside it." That is enforced by the signature rather than by this
+//! comment -- `artifact::realize_decl` takes `&ExecutionTargetSpec` and has no
+//! way to reach a platform or a shader profile. `execution_axes_alone_decide_realization`
+//! is the measurement, and `an_artifact_name_decides_nothing` is the hostile
+//! control against a consumer branching on a target NAME.
 //!
 //! The COUNT-ONLY projection this module used to return is gone. Counting
 //! `g.boundaries` answered a symbol-keyed question -- two `@nomangle` backend
@@ -37,8 +48,13 @@ pub struct Capabilities {
     pub float64: bool,
 }
 
-/// One execution target's identity and capabilities (plan S 20a's
-/// `ExecutionTargetSpec`, reduced to the fields Stage 0 can actually consume).
+/// One EXECUTION backend's identity and capabilities (plan S 20a's
+/// `ExecutionTargetSpec`, reduced to the fields Stage 2 can actually consume).
+///
+/// This is one axis of a [`TargetSpec`], not the whole target. It is also the
+/// ONLY axis CPU realization is given: `artifact::realize_decl` takes a
+/// `&ExecutionTargetSpec`, so packaging a different shader beside an artifact
+/// cannot reach it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExecutionTargetSpec {
     pub name: &'static str,
@@ -50,7 +66,79 @@ pub struct ExecutionTargetSpec {
     pub caps: Capabilities,
 }
 
-/// The luajit artifact.
+/// Where an artifact RUNS. An axis of its own: one execution backend is
+/// packaged for several platforms (luajit on desktop AND on iOS), and one
+/// platform hosts several backends (the web runs JavaScript and WebAssembly).
+///
+/// Plan S 20a's payloads (os/arch, browser capabilities, api level) are not
+/// modelled yet -- nothing consumes them. What exists is the AXIS, so a platform
+/// distinction lands as a field here rather than as a new target variant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlatformKind {
+    Desktop,
+    Web,
+    Ios,
+    Android,
+    Wasi,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlatformSpec {
+    /// DISPLAY ONLY. Nothing branches on it; `an_artifact_name_decides_nothing`
+    /// renames every axis and asserts the view is unchanged.
+    pub name: &'static str,
+    pub kind: PlatformKind,
+}
+
+/// What is packaged BESIDE the CPU artifact. Optional, because a target may
+/// have no GPU route at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShaderTarget {
+    Glsl,
+    SpirV,
+    Wgsl,
+    Msl,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ShaderTargetSpec {
+    /// DISPLAY ONLY. See [`PlatformSpec::name`].
+    pub name: &'static str,
+    pub target: ShaderTarget,
+    /// The profile or environment string the shader emitter selects. GLSL's
+    /// profile is chosen by the runtime GL context, so a desktop and a GLES
+    /// artifact differ HERE and nowhere on the CPU side.
+    pub profile: &'static str,
+}
+
+/// One artifact's target: plan S 20a's `TargetSpec`.
+///
+/// Three fields, three axes. Composing a new one is a `TargetSpec { .. }`
+/// literal, which is what keeps this from becoming the cross-product enum.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TargetSpec {
+    /// DISPLAY ONLY -- the label a report puts on this combination. It is not
+    /// an identity: two `TargetSpec`s with equal axes and different names
+    /// realize identically, which `an_artifact_name_decides_nothing` asserts.
+    pub name: &'static str,
+    pub platform: PlatformSpec,
+    pub execution: ExecutionTargetSpec,
+    pub shader: Option<ShaderTargetSpec>,
+}
+
+// --- the axes, declared once each and shared by the combinations below -------
+
+pub const DESKTOP: PlatformSpec = PlatformSpec { name: "desktop", kind: PlatformKind::Desktop };
+pub const WEB: PlatformSpec = PlatformSpec { name: "web", kind: PlatformKind::Web };
+pub const IOS: PlatformSpec = PlatformSpec { name: "ios", kind: PlatformKind::Ios };
+pub const WASI: PlatformSpec = PlatformSpec { name: "wasi", kind: PlatformKind::Wasi };
+
+pub const GLSL_330: ShaderTargetSpec =
+    ShaderTargetSpec { name: "glsl-330", target: ShaderTarget::Glsl, profile: "330 core" };
+pub const GLSL_ES_300: ShaderTargetSpec =
+    ShaderTargetSpec { name: "glsl-es-300", target: ShaderTarget::Glsl, profile: "300 es" };
+
+/// The luajit execution backend.
 pub const LUAJIT: ExecutionTargetSpec = ExecutionTargetSpec {
     name: "luajit",
     backend: Some(bone_semantic::hir::FnBackend::Lua),
@@ -65,7 +153,7 @@ pub const LUAJIT: ExecutionTargetSpec = ExecutionTargetSpec {
     },
 };
 
-/// The browser artifact.
+/// The browser execution backend.
 pub const JAVASCRIPT: ExecutionTargetSpec = ExecutionTargetSpec {
     name: "javascript",
     backend: Some(bone_semantic::hir::FnBackend::Js),
@@ -82,7 +170,7 @@ pub const JAVASCRIPT: ExecutionTargetSpec = ExecutionTargetSpec {
 
 /// Deliberately hostile synthetic fixture: 16-bit pointers, no GC, no
 /// suspendable frame, 32-bit floats. It exists to be maximally UNLIKE the two
-/// real targets while sharing their logical graph.
+/// real backends while sharing their logical graph.
 pub const NATIVE_C64: ExecutionTargetSpec = ExecutionTargetSpec {
     name: "native-c64",
     backend: None,
@@ -114,7 +202,47 @@ pub const WASM32: ExecutionTargetSpec = ExecutionTargetSpec {
     },
 };
 
-pub const ALL: &[ExecutionTargetSpec] = &[LUAJIT, JAVASCRIPT, NATIVE_C64, WASM32];
+// --- the combinations --------------------------------------------------------
+//
+// Each is a literal over the axes above. `LUAJIT_DESKTOP` and `LUAJIT_IOS` are
+// the pair that makes the separation checkable: ONE execution axis, two
+// platforms, two shader profiles -- and this repo really ships both (desktop GL
+// 3.3 and iOS GLES, `docs/ios-bringup.md`), so the pair is not invented for the
+// test.
+
+pub const LUAJIT_DESKTOP: TargetSpec = TargetSpec {
+    name: "luajit-desktop",
+    platform: DESKTOP,
+    execution: LUAJIT,
+    shader: Some(GLSL_330),
+};
+
+pub const LUAJIT_IOS: TargetSpec = TargetSpec {
+    name: "luajit-ios",
+    platform: IOS,
+    execution: LUAJIT,
+    shader: Some(GLSL_ES_300),
+};
+
+pub const JAVASCRIPT_WEB: TargetSpec = TargetSpec {
+    name: "javascript-web",
+    platform: WEB,
+    execution: JAVASCRIPT,
+    shader: Some(GLSL_ES_300),
+};
+
+pub const NATIVE_C64_DESKTOP: TargetSpec = TargetSpec {
+    name: "native-c64-desktop",
+    platform: DESKTOP,
+    execution: NATIVE_C64,
+    shader: None,
+};
+
+pub const WASM32_WASI: TargetSpec =
+    TargetSpec { name: "wasm32-wasi", platform: WASI, execution: WASM32, shader: None };
+
+pub const ALL: &[TargetSpec] =
+    &[LUAJIT_DESKTOP, LUAJIT_IOS, JAVASCRIPT_WEB, NATIVE_C64_DESKTOP, WASM32_WASI];
 
 /// Can `target` supply this boundary class?
 ///

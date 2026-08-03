@@ -323,8 +323,8 @@ fn main() {
     // NON-VACUITY: the two artifacts really do select different declarations
     // for one shared instance. Without this the equality above would hold
     // because nothing ever forked.
-    let lua = artifact::realize(&ws, &g, &ArtifactRequest::new(tp::LUAJIT, &roots));
-    let js = artifact::realize(&ws, &g, &ArtifactRequest::new(tp::JAVASCRIPT, &roots));
+    let lua = artifact::realize(&ws, &g, &ArtifactRequest::new(tp::LUAJIT_DESKTOP, &roots));
+    let js = artifact::realize(&ws, &g, &ArtifactRequest::new(tp::JAVASCRIPT_WEB, &roots));
     let probe = |v: &artifact::ArtifactView| {
         v.realization
             .iter()
@@ -414,7 +414,7 @@ fn main() { host_tick(3) }
     // Every artifact realizes THE SAME graph; the declaration each selects is
     // `realize_decl`'s answer, not a per-target walk's.
     let g = instance_graph::build(&ws, roots.clone(), false);
-    let cause_of = |spec: tp::ExecutionTargetSpec, name: &str| -> Option<Exclusion> {
+    let cause_of = |spec: tp::TargetSpec, name: &str| -> Option<Exclusion> {
         artifact::realize(&ws, &g, &ArtifactRequest::new(spec, &roots))
             .excluded
             .iter()
@@ -425,7 +425,7 @@ fn main() { host_tick(3) }
             .map(|e| e.cause)
     };
     assert_eq!(
-        cause_of(tp::LUAJIT, "host_tick"),
+        cause_of(tp::LUAJIT_DESKTOP, "host_tick"),
         None,
         "luajit supplies foreign symbols, and `main` calls this one"
     );
@@ -433,7 +433,7 @@ fn main() { host_tick(3) }
     // question is reached, and `foreign_symbols: false` is what rejects it.
     // Unreachability cannot answer for it -- an `extern` is an emission ROOT.
     assert_eq!(
-        cause_of(tp::JAVASCRIPT, "web_tick"),
+        cause_of(tp::JAVASCRIPT_WEB, "web_tick"),
         Some(Exclusion::Unrealizable(Unrealizable::ClassUnsupported(BoundaryClass::Extern))),
         "JS declares no foreign-symbol capability, so even its own extern must \
          be an invalid boundary rather than a stub"
@@ -442,7 +442,7 @@ fn main() { host_tick(3) }
     // have, which is answered before the class question. `NATIVE_C64` declares
     // `foreign_symbols: true`, and that is exactly why this must not be decided
     // by the capability -- no declaration in this workspace names a C host.
-    for spec in [tp::JAVASCRIPT, tp::NATIVE_C64, tp::WASM32] {
+    for spec in [tp::JAVASCRIPT_WEB, tp::NATIVE_C64_DESKTOP, tp::WASM32_WASI] {
         assert_eq!(
             cause_of(spec, "host_tick"),
             Some(Exclusion::Unrealizable(Unrealizable::ForeignToArtifact)),
@@ -1067,8 +1067,8 @@ fn main() {
     // what let a generic witness instantiate differently on one target only.
     use skull::artifact::{self, ArtifactRequest};
     use skull::target_projection as tp;
-    let lua = artifact::realize(&ws, &g, &ArtifactRequest::new(tp::LUAJIT, &roots));
-    let js = artifact::realize(&ws, &g, &ArtifactRequest::new(tp::JAVASCRIPT, &roots));
+    let lua = artifact::realize(&ws, &g, &ArtifactRequest::new(tp::LUAJIT_DESKTOP, &roots));
+    let js = artifact::realize(&ws, &g, &ArtifactRequest::new(tp::JAVASCRIPT_WEB, &roots));
     let mut selected = 0usize;
     for e in &witnesses {
         let (Some(l), Some(j)) = (lua.realization.get(&e.to), js.realization.get(&e.to)) else {

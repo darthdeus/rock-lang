@@ -43,7 +43,7 @@ use skull_mir::mir::FuncRef;
 
 use crate::concrete_body::BoundaryId;
 use crate::instance_graph::{self, BoundaryClass, DeclKey, Instance, InstanceGraph, Site, SiteOutcome};
-use crate::target_projection::{supports, ExecutionTargetSpec};
+use crate::target_projection::{supports, ExecutionTargetSpec, TargetSpec};
 
 /// Where an artifact's NATIVE MAPPING for an `@intrinsic` fn comes from.
 ///
@@ -119,7 +119,10 @@ impl SymbolPlanner for LogicalSymbols {
 
 /// Everything one artifact view is taken through.
 pub struct ArtifactRequest<'a> {
-    pub spec: ExecutionTargetSpec,
+    /// The artifact's full target: platform, execution and optional shader
+    /// (plan S 20a). [`realize`] passes only `spec.execution` down, so the other
+    /// two axes are carried and reported, never consulted.
+    pub spec: TargetSpec,
     pub mappings: ArtifactMappings<'a>,
     /// The artifact's emission roots. Plan S 11: "the target may change roots",
     /// so they are an INPUT, never re-derived here from the graph's contents.
@@ -130,9 +133,9 @@ pub struct ArtifactRequest<'a> {
 impl<'a> ArtifactRequest<'a> {
     /// The default request for `spec`: its own backend's mapping, no table, and
     /// the logical spelling.
-    pub fn new(spec: ExecutionTargetSpec, roots: &'a [FuncRef]) -> Self {
+    pub fn new(spec: TargetSpec, roots: &'a [FuncRef]) -> Self {
         Self {
-            mappings: match spec.backend {
+            mappings: match spec.execution.backend {
                 Some(b) => ArtifactMappings::for_backend(b),
                 None => ArtifactMappings::none(),
             },
@@ -353,7 +356,7 @@ pub struct ArtifactCensus {
 
 /// One target's realization of a graph it did not build.
 pub struct ArtifactView {
-    pub spec: ExecutionTargetSpec,
+    pub spec: TargetSpec,
     /// The artifact's root instances -- realizable emission roots, plus the
     /// callees of always-emitted bodies, which have no incoming edge.
     pub roots: BTreeSet<Instance>,
@@ -622,17 +625,21 @@ fn has_rock_body(ws: &Workspace, decl: FuncRef) -> bool {
 /// therefore no mismatch to detect -- backend-sibling selection lives in
 /// [`realize_decl`], which is reached from here and from nowhere else.
 pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> ArtifactView {
-    let spec = req.spec;
+    // ONLY the execution axis, and it is a local binding rather than a field
+    // read at each use so the platform and the shader are not in scope below at
+    // all. Plan S 20a: the CPU ABI depends on the execution target, not on what
+    // is packaged beside it.
+    let exec = req.spec.execution;
     // A target with no `FnBackend` of its own selects no variant at all. Stated
     // rather than defaulted: `Any` is not "this target", it is "no host".
-    let want = spec.backend.unwrap_or(FnBackend::Any);
+    let want = exec.backend.unwrap_or(FnBackend::Any);
 
     // Realizability of every instance the graph holds, computed once. It is a
     // property of the DECLARATION and the artifact, independent of reachability.
     let mut realizable: BTreeMap<Instance, Result<Realized, Unrealizable>> = BTreeMap::new();
     for i in &g.instances {
         realizable
-            .insert(i.clone(), realize_decl(ws, i.func, &g.erased_entries, &spec, &req.mappings));
+            .insert(i.clone(), realize_decl(ws, i.func, &g.erased_entries, &exec, &req.mappings));
     }
 
     // The artifact's ROOTS: its emission roots that are realizable here, plus
@@ -816,8 +823,11 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
 
     ArtifactView {
         shared_instances: g.instances.len(),
-        deferred: crate::target_projection::deferred_for(&spec),
-        spec,
+        // An execution-axis question too: every obligation it names is about
+        // memory, coroutines, widths or foreign symbols. A shader-derived
+        // deferral would be a separate list on a separate axis.
+        deferred: crate::target_projection::deferred_for(&exec),
+        spec: req.spec,
         roots,
         instances,
         boundaries,

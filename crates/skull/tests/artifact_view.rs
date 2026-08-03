@@ -18,7 +18,7 @@ use bone_semantic::inference::Workspace;
 use skull::artifact::{self, ArtifactMappings, ArtifactRequest, Exclusion, Unrealizable};
 use skull::artifact::RealizedCallee;
 use skull::instance_graph::{self, Instance, InstanceGraph};
-use skull::target_projection::{JAVASCRIPT, LUAJIT, NATIVE_C64};
+use skull::target_projection::{JAVASCRIPT_WEB, LUAJIT_DESKTOP, NATIVE_C64_DESKTOP};
 use skull_mir::intrinsics::{Emission, IntrinsicEntry, IntrinsicTable};
 use ustr::Ustr;
 
@@ -129,8 +129,8 @@ fn premise_the_shared_graph_keeps_one_representative_per_sibling_group() {
 fn an_artifact_realizes_the_shared_instance_to_the_sibling_that_serves_it() {
     let ws = check("fn main() { let b: NativeBuffer<int> = nb_new(4); let x = b[0] }");
     let (g, roots) = graph_for(&ws);
-    let lua = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT, &roots));
-    let js = artifact::realize(&ws, &g, &ArtifactRequest::new(JAVASCRIPT, &roots));
+    let lua = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
+    let js = artifact::realize(&ws, &g, &ArtifactRequest::new(JAVASCRIPT_WEB, &roots));
 
     let selected = |view: &artifact::ArtifactView| -> Vec<(Instance, FnBackend)> {
         view.realization
@@ -213,7 +213,7 @@ fn native_required_availability_comes_from_the_artifact_mapping() {
             .map(|e| e.cause)
     };
 
-    let bare = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT, &roots));
+    let bare = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
     assert_eq!(
         named(&bare),
         Some(Exclusion::Unrealizable(Unrealizable::NativeMappingMissing)),
@@ -226,7 +226,7 @@ fn native_required_availability_comes_from_the_artifact_mapping() {
     let mapped = artifact::realize(
         &ws,
         &g,
-        &ArtifactRequest::new(LUAJIT, &roots).with_mappings(
+        &ArtifactRequest::new(LUAJIT_DESKTOP, &roots).with_mappings(
             ArtifactMappings::for_backend(FnBackend::Lua).with_table(&table),
         ),
     );
@@ -250,7 +250,7 @@ fn main() { let a = portable_op(1) }
 "#,
     );
     let (g, roots) = graph_for(&ws);
-    let view = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT, &roots));
+    let view = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
     assert!(
         view.retained().any(|i| {
             ws.module(i.func.module).functions[i.func.func].name.as_str() == "portable_op"
@@ -299,7 +299,7 @@ fn premise_inline_body_dependencies_are_unresolved_names() {
 fn inline_body_dependencies_resolve_to_targets_in_the_artifact() {
     let ws = check("fn main() { let v: [Vec2] = []; let l = v.to_lua_array() }");
     let (g, roots) = graph_for(&ws);
-    let view = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT, &roots));
+    let view = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
     let c = view.census();
     assert!(c.inline_deps_examined > 0, "no dependency was examined: {c:?}");
     assert_eq!(
@@ -351,8 +351,8 @@ fn main() { let n = selected_dep_probe(1) }
 "#,
     );
     let (g, roots) = graph_for(&ws);
-    let lua = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT, &roots));
-    let js = artifact::realize(&ws, &g, &ArtifactRequest::new(JAVASCRIPT, &roots));
+    let lua = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
+    let js = artifact::realize(&ws, &g, &ArtifactRequest::new(JAVASCRIPT_WEB, &roots));
 
     let selected = |view: &artifact::ArtifactView| {
         view.realization
@@ -418,7 +418,7 @@ fn main() {
 "#,
     );
     let (g, roots) = graph_for(&ws);
-    let view = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT, &roots));
+    let view = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
     let c = view.census();
     assert!(c.instances > 0, "the artifact retained nothing");
     assert_eq!(
@@ -451,7 +451,7 @@ fn main() {
     assert_ne!(idents[0], idents[1], "two instantiations spell alike");
 
     // Deterministic: realizing the same graph twice gives the same table.
-    let again = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT, &roots));
+    let again = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
     assert_eq!(view.symbols, again.symbols, "the symbol assignment is not deterministic");
 }
 
@@ -465,7 +465,7 @@ fn main() {
 #[test]
 fn realization_never_invents_an_instance() {
     let ws = check(REACH);
-    for spec in [LUAJIT, JAVASCRIPT, NATIVE_C64] {
+    for spec in [LUAJIT_DESKTOP, JAVASCRIPT_WEB, NATIVE_C64_DESKTOP] {
         let (g, roots) = graph_for(&ws);
         let view = artifact::realize(&ws, &g, &ArtifactRequest::new(spec, &roots));
         for i in view.retained() {
@@ -520,7 +520,7 @@ fn retention_is_reachability_not_a_declaration_filter() {
         .collect();
     assert_eq!(main_only.len(), 1, "the fixture has no unique `main` root");
 
-    let view = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT, &main_only));
+    let view = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &main_only));
     let c = view.census();
     // EXACTLY the roots it was given, plus the always-emitted callees, which
     // carry no incoming edge and would otherwise read as unreachable. Stated as
@@ -565,7 +565,7 @@ fn retention_is_reachability_not_a_declaration_filter() {
     );
     // CONTROL: the same declaration IS retained when it is a root, so the
     // exclusion above is a property of reachability and not of the declaration.
-    let wide = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT, &all_roots));
+    let wide = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &all_roots));
     assert!(
         wide.retained().any(|i| {
             ws.module(i.func.module).functions[i.func.func].name.as_str()
@@ -609,7 +609,7 @@ fn main() { let a = caller(1) }
 "#,
     );
     let (g, roots) = graph_for(&ws);
-    let view = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT, &roots));
+    let view = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
     let c = view.census();
     assert!(c.sites_walked > 0, "no site was walked, so 0 severed says nothing: {c:?}");
     let named: Vec<String> = view.render_severed(&ws, &g);
@@ -638,7 +638,7 @@ fn main() { let a = caller(1) }
     let mapped = artifact::realize(
         &ws,
         &g,
-        &ArtifactRequest::new(LUAJIT, &roots).with_mappings(
+        &ArtifactRequest::new(LUAJIT_DESKTOP, &roots).with_mappings(
             ArtifactMappings::for_backend(FnBackend::Lua).with_table(&table),
         ),
     );
@@ -656,8 +656,8 @@ fn one_shared_instance_realizes_to_a_different_declaration_per_artifact() {
     let ws = check(REACH);
     let (g, roots) = graph_for(&ws);
 
-    let lua = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT, &roots));
-    let js = artifact::realize(&ws, &g, &ArtifactRequest::new(JAVASCRIPT, &roots));
+    let lua = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
+    let js = artifact::realize(&ws, &g, &ArtifactRequest::new(JAVASCRIPT_WEB, &roots));
     assert_eq!(
         lua.shared_instances, js.shared_instances,
         "the two views were taken over different populations"
@@ -723,11 +723,11 @@ fn cross_artifact_identity_is_the_instance_and_not_the_spelling() {
     let lua_p = Prefixed("lua");
     let js_p = Prefixed("js");
     let lua =
-        artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT, &roots).with_symbols(&lua_p));
+        artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots).with_symbols(&lua_p));
     let js = artifact::realize(
         &ws,
         &g,
-        &ArtifactRequest::new(JAVASCRIPT, &roots).with_symbols(&js_p),
+        &ArtifactRequest::new(JAVASCRIPT_WEB, &roots).with_symbols(&js_p),
     );
 
     // The shared population is now `Instance` itself: one graph, one arena, so
@@ -771,8 +771,8 @@ fn cross_artifact_identity_is_the_instance_and_not_the_spelling() {
     // CONTROL: with the DEFAULT planner the same two artifacts spell the shared
     // instances alike. Without this, `assert_ne!` above could be passing
     // because the two views share nothing meaningful.
-    let d_lua = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT, &roots));
-    let d_js = artifact::realize(&ws, &g, &ArtifactRequest::new(JAVASCRIPT, &roots));
+    let d_lua = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
+    let d_js = artifact::realize(&ws, &g, &ArtifactRequest::new(JAVASCRIPT_WEB, &roots));
     let agreed = shared.iter().filter(|i| d_lua.symbols.get(**i) == d_js.symbols.get(**i)).count();
     assert_eq!(
         agreed,
@@ -787,8 +787,8 @@ fn cross_artifact_identity_is_the_instance_and_not_the_spelling() {
 fn two_artifacts_differ_in_realization() {
     let ws = check(REACH);
     let (g, roots) = graph_for(&ws);
-    let lua = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT, &roots));
-    let js = artifact::realize(&ws, &g, &ArtifactRequest::new(JAVASCRIPT, &roots));
+    let lua = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
+    let js = artifact::realize(&ws, &g, &ArtifactRequest::new(JAVASCRIPT_WEB, &roots));
 
     let only_lua = lua.retained().filter(|i| !js.retains(i)).count();
     let only_js = js.retained().filter(|i| !lua.retains(i)).count();
@@ -812,7 +812,7 @@ fn two_artifacts_differ_in_realization() {
 fn a_target_with_no_backend_keeps_only_portable_bodies() {
     let ws = check("fn main() { let b: NativeBuffer<int> = nb_new(4); let x = b[0] }");
     let (g, roots) = graph_for(&ws);
-    let view = artifact::realize(&ws, &g, &ArtifactRequest::new(NATIVE_C64, &roots));
+    let view = artifact::realize(&ws, &g, &ArtifactRequest::new(NATIVE_C64_DESKTOP, &roots));
     let c = view.census();
     assert!(c.excluded > 0, "the hostile target excluded nothing: {c:?}");
     assert!(c.instances > 0, "the hostile target excluded everything: {c:?}");
@@ -863,7 +863,7 @@ fn main() {
 "#,
     );
     let (g, roots) = graph_for(&ws);
-    let view = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT, &roots));
+    let view = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
     assert!(
         !view.inline_deps.is_empty(),
         "the fixture resolved no dependency, so the count below is vacuous"
@@ -908,7 +908,7 @@ fn main() { let a = only_lua(1) }
 
     // CONTROL: on luajit the same call is an ordinary retained boundary, so the
     // severing below is a property of the ARTIFACT and not of the fixture.
-    let lua = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT, &roots));
+    let lua = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
     fn mine<'a>(ws: &Workspace, view: &'a artifact::ArtifactView) -> Vec<&'a Instance> {
         view.boundaries
             .keys()
@@ -924,7 +924,7 @@ fn main() { let a = only_lua(1) }
         lua.render_severed(&ws, &g)
     );
 
-    let js = artifact::realize(&ws, &g, &ArtifactRequest::new(JAVASCRIPT, &roots));
+    let js = artifact::realize(&ws, &g, &ArtifactRequest::new(JAVASCRIPT_WEB, &roots));
     // The fixture's OWN call, NAMED -- the stdlib supplies a background
     // population of Lua-only boundaries on this artifact, and a total count
     // would pass whether or not `only_lua` was among them.
@@ -950,4 +950,252 @@ fn main() { let a = only_lua(1) }
     // And it is NOT retained: a consumer must not be able to read a callable
     // entry for it.
     assert!(mine(&ws, &js).is_empty(), "the severed boundary is still retained on JS");
+}
+
+// ---------------------------------------------------------------------------
+// S 20a -- platform, execution and shader are SEPARATE axes.
+// ---------------------------------------------------------------------------
+
+/// Everything one artifact view decides, in a comparable form.
+///
+/// Built by projection rather than by deriving `PartialEq` on `ArtifactView`:
+/// a derive would compare whatever fields happen to exist, and the claim under
+/// test is about the NAMED decisions -- reachability, the declaration selected
+/// for each instance, how it is realized, what it is spelled, and the
+/// classification of every severed call. A field added later that these do not
+/// cover is a finding for whoever adds it, not a silent extension of the claim.
+#[derive(PartialEq, Debug)]
+struct Decisions {
+    roots: Vec<Instance>,
+    instances: Vec<Instance>,
+    /// (instance, selected declaration, realization kind).
+    realization: Vec<(Instance, skull_mir::mir::FuncRef, artifact::Realization)>,
+    boundaries: Vec<(Instance, skull::concrete_body::BoundaryId)>,
+    symbols: Vec<(Instance, String)>,
+    /// (caller, site, callee, CLASSIFICATION).
+    severed: Vec<(Instance, skull::instance_graph::Site, Instance, Unrealizable)>,
+    excluded: Vec<(Instance, Exclusion)>,
+    sites_walked: usize,
+    inline_deps: Vec<(String, &'static str, String)>,
+    deferred: Vec<&'static str>,
+}
+
+fn decisions(v: &artifact::ArtifactView) -> Decisions {
+    let mut severed: Vec<_> = v
+        .severed
+        .iter()
+        .map(|s| (s.caller.clone(), s.site.clone(), s.callee.clone(), s.cause))
+        .collect();
+    severed.sort();
+    let mut inline_deps: Vec<_> = v
+        .inline_deps
+        .iter()
+        .map(|d| {
+            let terminal = match &d.callee {
+                RealizedCallee::Boundary(b) => format!("boundary:{}", b.symbol),
+                RealizedCallee::Rock(i) => format!("rock:{:?}", i.func),
+            };
+            (format!("{:?}", d.owner), d.entry, terminal)
+        })
+        .collect();
+    inline_deps.sort();
+    Decisions {
+        roots: v.roots.iter().cloned().collect(),
+        instances: v.instances.iter().cloned().collect(),
+        realization: v
+            .realization
+            .iter()
+            .map(|(i, r)| (i.clone(), r.decl, r.kind))
+            .collect(),
+        boundaries: v.boundaries.iter().map(|(i, b)| (i.clone(), b.clone())).collect(),
+        symbols: v.symbols.iter().map(|(i, s)| (i.clone(), s.clone())).collect(),
+        severed,
+        excluded: v.excluded.iter().map(|e| (e.instance.clone(), e.cause)).collect(),
+        sites_walked: v.sites_walked,
+        inline_deps,
+        deferred: v.deferred.clone(),
+    }
+}
+
+/// A fixture with all three axes in play: an `extern` and a Lua-only inline body
+/// (so boundaries and severed calls both have a population), a generic so
+/// realization has more than one instance per declaration, an opaque body with a
+/// runtime dependency, and a portable/`inline(lua)` pair.
+///
+/// That last one is why it is here rather than the simpler `NativeBuffer`
+/// program: `__nb_checked_index`'s representative is already the Lua sibling, so
+/// the LUAJIT artifact selects nothing and the declaration comparison below
+/// would have been vacuous on the very axis under test. A portable
+/// representative with an exact Lua sibling makes luajit select too.
+const AXES: &str = r#"
+extern(ffi, "stone") fn host_tick(n: int) -> int
+inline(lua) fn only_lua(x: int) -> int = "return x + 1"
+fn portable_op(x: int) -> int { return x * 3 }
+inline(lua) fn portable_op(x: int) -> int = "return x * 3"
+fn ident<T>(x: T) -> T { return x }
+fn main() {
+    let b: NativeBuffer<int> = nb_new(4)
+    let x = b[0]
+    let v: [Vec2] = []
+    let l = v.to_lua_array()
+    host_tick(only_lua(portable_op(ident(1))))
+    let s = ident("s")
+}
+"#;
+
+/// **The S 20a separation, measured.** Two targets whose EXECUTION axis is
+/// identical decide the same thing, however they are packaged: same
+/// reachability, same selected declarations, same realizations, same severed
+/// classifications.
+///
+/// Plan S 20a: "CPU function ABI depends on `ExecutionTargetSpec`, not on which
+/// optional shader target is packaged beside it." The property is enforced by
+/// the signature -- `artifact::realize_decl` takes a `&ExecutionTargetSpec` --
+/// and measured here, because a signature says what a function CAN read and
+/// this says what the answer actually is.
+///
+/// The pair is not synthetic: this repo ships a desktop GL 3.3 artifact and an
+/// iOS GLES artifact off one luajit backend (`docs/ios-bringup.md`).
+#[test]
+fn execution_axes_alone_decide_realization() {
+    use skull::target_projection as tp;
+    let ws = check(AXES);
+    let (g, roots) = graph_for(&ws);
+    let view = |spec: tp::TargetSpec| artifact::realize(&ws, &g, &ArtifactRequest::new(spec, &roots));
+
+    let base = view(tp::LUAJIT_DESKTOP);
+
+    // NON-VACUITY, first: the thing being compared has to be able to differ.
+    // A view that decided nothing would satisfy every equality below.
+    let b = decisions(&base);
+    assert!(!b.instances.is_empty(), "the fixture retained no Rock instance");
+    assert!(!b.boundaries.is_empty(), "the fixture retained no boundary");
+    assert!(!b.inline_deps.is_empty(), "the fixture resolved no opaque dependency");
+    assert!(
+        b.realization.iter().any(|(i, decl, _)| *decl != i.func),
+        "no instance selected a backend sibling, so declaration equality is vacuous"
+    );
+
+    // ...and a DIFFERENT execution axis really does change the answer. Without
+    // this, "packaging changes nothing" could just mean nothing changes
+    // anything.
+    assert_ne!(
+        decisions(&view(tp::JAVASCRIPT_WEB)),
+        b,
+        "changing the EXECUTION axis changed nothing, so the equalities below \
+         are measuring an inert function"
+    );
+    assert!(
+        !decisions(&view(tp::JAVASCRIPT_WEB)).severed.is_empty(),
+        "the fixture severs nothing on JS, so severed classifications are not \
+         part of what is being compared"
+    );
+
+    // The real shipped pair: one execution axis, two platforms, two GLSL
+    // profiles.
+    assert_eq!(decisions(&view(tp::LUAJIT_IOS)), b, "packaging changed a CPU decision");
+
+    // The axes ISOLATED, composed here rather than declared as fixtures --
+    // which is itself the point: a new combination is a literal, not a variant.
+    let shader_only = tp::TargetSpec { name: "luajit-desktop-no-shader", shader: None, ..tp::LUAJIT_DESKTOP };
+    assert_eq!(
+        decisions(&view(shader_only)),
+        b,
+        "dropping the shader axis entirely changed a CPU decision"
+    );
+    let platform_only =
+        tp::TargetSpec { name: "luajit-web", platform: tp::WEB, ..tp::LUAJIT_DESKTOP };
+    assert_eq!(
+        decisions(&view(platform_only)),
+        b,
+        "changing the platform axis alone changed a CPU decision"
+    );
+    let both = tp::TargetSpec {
+        name: "luajit-android-spirv",
+        platform: tp::PlatformSpec { name: "android", kind: tp::PlatformKind::Android },
+        shader: Some(tp::ShaderTargetSpec {
+            name: "spirv-1.5",
+            target: tp::ShaderTarget::SpirV,
+            profile: "vulkan1.2",
+        }),
+        ..tp::LUAJIT_DESKTOP
+    };
+    assert_eq!(
+        decisions(&view(both)),
+        b,
+        "a platform and shader combination this repo has never declared changed \
+         a CPU decision"
+    );
+}
+
+/// A target NAME decides nothing. The hostile control against a consumer that
+/// reaches for `spec.name` instead of a capability -- exactly the conditional
+/// S 20a exists to prevent, and the one thing structured axes cannot rule out
+/// by construction.
+///
+/// Every name on every axis is replaced, and the fixture is the same one
+/// `execution_axes_alone_decide_realization` proves is non-vacuous.
+#[test]
+fn an_artifact_name_decides_nothing() {
+    use skull::target_projection as tp;
+    let ws = check(AXES);
+    let (g, roots) = graph_for(&ws);
+    let view = |spec: tp::TargetSpec| artifact::realize(&ws, &g, &ArtifactRequest::new(spec, &roots));
+
+    let renamed = tp::TargetSpec {
+        name: "\u{0}not-a-target",
+        platform: tp::PlatformSpec { name: "\u{0}nowhere", ..tp::LUAJIT_DESKTOP.platform },
+        execution: tp::ExecutionTargetSpec { name: "\u{0}nothing", ..tp::LUAJIT_DESKTOP.execution },
+        shader: Some(tp::ShaderTargetSpec { name: "\u{0}none", ..tp::GLSL_330 }),
+    };
+    assert_eq!(
+        decisions(&view(renamed)),
+        decisions(&view(tp::LUAJIT_DESKTOP)),
+        "renaming the axes changed a decision, so something is branching on a \
+         target NAME rather than on a capability"
+    );
+}
+
+/// The fixtures are COMBINATIONS of shared axes, not a cross-product enum.
+///
+/// Stated as two structural facts a cross-product enum cannot have: one
+/// execution axis appears under more than one platform, and one platform
+/// appears under more than one execution axis. If every fixture owned its own
+/// axes, both counts would be 1 and `TargetSpec` would be a flat enum wearing
+/// three fields.
+#[test]
+fn target_fixtures_are_combinations_of_shared_axes() {
+    use skull::target_projection as tp;
+    use std::collections::BTreeMap;
+
+    let mut platforms_per_execution: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    let mut executions_per_platform: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for spec in tp::ALL {
+        platforms_per_execution
+            .entry(spec.execution.name)
+            .or_default()
+            .push(spec.platform.name);
+        executions_per_platform
+            .entry(spec.platform.name)
+            .or_default()
+            .push(spec.execution.name);
+    }
+    assert!(
+        platforms_per_execution.values().any(|p| p.len() > 1),
+        "no execution axis is packaged for two platforms: {platforms_per_execution:?}"
+    );
+    assert!(
+        executions_per_platform.values().any(|e| e.len() > 1),
+        "no platform hosts two execution axes: {executions_per_platform:?}"
+    );
+    // Every combination is DISTINCT as a whole. Sharing axes must not mean two
+    // fixtures are the same artifact under two names.
+    let mut triples: Vec<_> = tp::ALL
+        .iter()
+        .map(|s| (s.platform, s.execution.name, s.shader.map(|sh| sh.name)))
+        .collect();
+    let before = triples.len();
+    triples.sort_by_key(|(p, e, sh)| (p.name, *e, *sh));
+    triples.dedup_by_key(|(p, e, sh)| (p.name, *e, *sh));
+    assert_eq!(before, triples.len(), "two fixtures name the same combination");
 }

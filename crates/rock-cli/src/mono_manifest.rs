@@ -145,6 +145,8 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     let mut span_rejections: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
     let mut span_unresolved: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
     let mut span_always_emitted: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
+    let mut exec_pairs = 0usize;
+    let mut exec_disagreements: Vec<String> = Vec::new();
     let mut sibling_selections = 0usize;
     let mut boundary_pairs = 0usize;
     let mut boundary_divergences = 0usize;
@@ -310,6 +312,12 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
                 for x in p.body_free_examples {
                     if body_free_examples.len() < 10 {
                         body_free_examples.push(x);
+                    }
+                }
+                exec_pairs += p.exec_pairs;
+                for x in p.exec_disagreements {
+                    if exec_disagreements.len() < 10 {
+                        exec_disagreements.push(x);
                     }
                 }
                 sibling_selections += p.artifact_sibling_selections;
@@ -874,6 +882,17 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
          two target contracts"
     );
     println!(
+        "- artifact pairs sharing ONE execution axis: **{exec_pairs}**, of which \
+         **{}** decide anything differently -- plan S 20a's separation, measured \
+         rather than declared. The pair count is the denominator; the axes are \
+         `platform` / `execution` / `shader`, and only the middle one reaches \
+         `realize_decl`.",
+        exec_disagreements.len()
+    );
+    for d in exec_disagreements.iter().take(10) {
+        println!("  - {d}");
+    }
+    println!(
         "- names whose same-signature backend variants do NOT share a mangling: **{}**",
         divergent_groups.len()
     );
@@ -948,7 +967,7 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
         "  Neither number is a pass or a fail. The default planner is target-neutral, so"
     );
     println!(
-        "  these four artifacts agree; a renaming planner would make the second number the"
+        "  these artifacts agree; a renaming planner would make the second number the"
     );
     println!(
         "  whole population and change nothing about identity."
@@ -1128,6 +1147,11 @@ struct OneProject {
     artifacts: Vec<(&'static str, skull::artifact::ArtifactCensus)>,
     /// Instances an artifact realized that the shared graph does not hold.
     artifact_invented: usize,
+    /// Artifact pairs sharing one EXECUTION axis, and the ones whose CPU
+    /// decisions nevertheless differ (plan S 20a). The pair count is the
+    /// denominator: 0 disagreements over 0 pairs asserts nothing.
+    exec_pairs: usize,
+    exec_disagreements: Vec<String>,
     /// `(artifact, artifact, instance)` triples both artifacts retain, and how
     /// many of those the two spell differently. The identity property, over the
     /// population that can actually witness it.
@@ -1236,7 +1260,7 @@ fn one_project(
         .iter()
         .map(|spec| {
             let req = skull::artifact::ArtifactRequest::new(*spec, &roots);
-            let req = match spec.backend {
+            let req = match spec.execution.backend {
                 Some(b @ bone_semantic::hir::FnBackend::Js) => req.with_mappings(
                     skull::artifact::ArtifactMappings::for_backend(b).with_table(&js_table),
                 ),
@@ -1245,6 +1269,56 @@ fn one_project(
             skull::artifact::realize(&ws, &g, &req)
         })
         .collect();
+
+    // **The S 20a separation, at corpus scale.** Two artifacts whose EXECUTION
+    // axis is the same must decide the same thing however they are packaged.
+    // Measured as PAIRS with a denominator rather than left to a reader
+    // comparing two rows of the table: a group of one would report 0
+    // disagreements and mean nothing.
+    let mut exec_pairs = 0usize;
+    let mut exec_disagreements: Vec<String> = Vec::new();
+    let decisions = |v: &skull::artifact::ArtifactView| {
+        let realization: BTreeMap<String, (String, &'static str)> = v
+            .realization
+            .iter()
+            .map(|(i, r)| {
+                let f = &ws.module(r.decl.module).functions[r.decl.func];
+                (g.identity(&ws, i), (format!("{}:{:?}", f.name, f.backend), r.kind.label()))
+            })
+            .collect();
+        let boundaries: BTreeMap<String, String> = v
+            .boundaries
+            .iter()
+            .map(|(i, b)| (g.identity(&ws, i), format!("{}/{}", b.symbol, b.class.name())))
+            .collect();
+        let mut severed: Vec<String> = v
+            .severed
+            .iter()
+            .map(|s| {
+                format!(
+                    "{} {} {} {}",
+                    g.identity(&ws, &s.caller),
+                    s.site.op.name(),
+                    g.identity(&ws, &s.callee),
+                    s.cause.label()
+                )
+            })
+            .collect();
+        severed.sort();
+        (realization, boundaries, severed, v.symbols.len(), v.sites_walked)
+    };
+    for (ai, a) in views.iter().enumerate() {
+        for b in views.iter().skip(ai + 1) {
+            if a.spec.execution != b.spec.execution {
+                continue;
+            }
+            exec_pairs += 1;
+            if decisions(a) != decisions(b) {
+                exec_disagreements
+                    .push(format!("`{}` vs `{}`", a.spec.name, b.spec.name));
+            }
+        }
+    }
     let artifact_invented: usize =
         views.iter().map(|v| v.retained().filter(|i| !g.instances.contains(i)).count()).sum();
     // The NON-VACUITY number for every cross-artifact agreement below: retained
@@ -1564,6 +1638,8 @@ fn one_project(
         divergent_variant_groups,
         artifacts,
         artifact_invented,
+        exec_pairs,
+        exec_disagreements,
         artifact_shared_pairs,
         artifact_spelling_conflicts,
         artifact_spelling_agreements,
