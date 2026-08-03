@@ -77,6 +77,19 @@ impl IntrinsicTable for OneName {
     }
 }
 
+/// The stand-in for a real backend's hand-written host bindings
+/// (`skull_codegen_js::host_binding`): the two names this fixture's artifact
+/// supplies itself.
+struct TwoBound;
+impl artifact::HostBindings for TwoBound {
+    fn supplies(&self, _ws: &Workspace, f: &bone_semantic::hir::Function) -> bool {
+        matches!(f.name.as_str(), "bound_probe" | "host_probe")
+    }
+    fn describe(&self) -> &'static str {
+        "two-bound"
+    }
+}
+
 // ---------------------------------------------------------------------------
 // PREMISE 1 -- the shared graph retains one backend-group representative.
 // ---------------------------------------------------------------------------
@@ -1198,5 +1211,244 @@ fn target_fixtures_are_combinations_of_shared_axes() {
             (a.platform, a.execution, a.shader) != (b.platform, b.execution, b.shader)
         }),
         "two fixtures carry the same complete axis combination"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The JS artifact view: its severed population, grouped.
+// ---------------------------------------------------------------------------
+
+/// The severed census is per SITE, and a per-site total cannot say what the
+/// work is. Grouped by CALLEE and CAUSE it names the obligations: how many
+/// DECLARATIONS the artifact is missing, and how many call sites each one
+/// costs. Both denominators, because either alone reads as the other.
+#[test]
+fn severed_calls_group_by_callee_and_cause() {
+    let ws = check(
+        r#"
+inline(lua) fn only_lua(x: int) -> int = "return x + 1"
+@intrinsic @native_required
+fn fast_op(x: int) -> int { return x * 2 }
+fn a(x: int) -> int { return only_lua(x) }
+fn b(x: int) -> int { return only_lua(x) + fast_op(x) }
+fn main() { let n = a(1) + b(2) }
+"#,
+    );
+    let (g, roots) = graph_for(&ws);
+    let js = artifact::realize(&ws, &g, &ArtifactRequest::new(JAVASCRIPT_WEB, &roots));
+    let named = |fr: skull_mir::mir::FuncRef| {
+        ws.module(fr.module).functions[fr.func].name.as_str().to_string()
+    };
+    let groups = js.severed_groups();
+    let mine: Vec<&artifact::SeveredGroup> = groups
+        .iter()
+        .filter(|grp| matches!(named(grp.callee).as_str(), "only_lua" | "fast_op"))
+        .collect();
+
+    let only_lua = mine.iter().find(|grp| named(grp.callee) == "only_lua").expect("only_lua group");
+    assert_eq!(only_lua.cause, Unrealizable::ForeignToArtifact);
+    assert_eq!(only_lua.sites, 2, "two call sites collapsed to one, or split into three");
+    assert_eq!(only_lua.callers.len(), 2, "the two callers were not both recorded");
+
+    let fast_op = mine.iter().find(|grp| named(grp.callee) == "fast_op").expect("fast_op group");
+    assert_eq!(fast_op.cause, Unrealizable::NativeMappingMissing);
+    assert_eq!(fast_op.sites, 1);
+
+    // The grouping is a PARTITION of the per-site population: nothing is
+    // dropped and nothing is counted twice.
+    let grouped: usize = groups.iter().map(|grp| grp.sites).sum();
+    assert_eq!(grouped, js.severed.len(), "grouping lost or duplicated severed sites");
+    // ...and the two denominators are different numbers here, which is the
+    // whole reason both are reported.
+    assert!(
+        groups.len() < js.severed.len(),
+        "every group holds one site, so the fixture cannot show that a \
+         declaration costs many call sites"
+    );
+}
+
+/// **The mapping question does not need a source body.** An `@intrinsic` this
+/// artifact maps in its OWN table is realized by that mapping -- there is no
+/// declaration whose body gets emitted, so which backend wrote the source body
+/// decides nothing. Asking for a backend sibling first rejects `nb_get` on JS
+/// as `foreign-to-artifact` even though `JsIntrinsics` maps it, which is the
+/// same PROXY shape the intrinsic arm was already caught by once:
+/// `skull_mir::intrinsics`' order is mapping > portable fallback > reject.
+#[test]
+fn a_natively_mapped_intrinsic_needs_no_backend_sibling() {
+    let ws = check(
+        r#"
+@intrinsic inline(lua) fn mapped_probe(x: int) -> int = "return x * 2"
+fn main() { let n = mapped_probe(1) }
+"#,
+    );
+    let (g, roots) = graph_for(&ws);
+    let named = |view: &artifact::ArtifactView| {
+        view.realization
+            .iter()
+            .find(|(i, _)| {
+                ws.module(i.func.module).functions[i.func.func].name.as_str() == "mapped_probe"
+            })
+            .map(|(_, r)| r.kind)
+    };
+    let severed_here = |view: &artifact::ArtifactView| {
+        view.severed_groups()
+            .into_iter()
+            .find(|grp| {
+                ws.module(grp.callee.module).functions[grp.callee.func].name.as_str()
+                    == "mapped_probe"
+            })
+            .map(|grp| grp.cause)
+    };
+
+    // CONTROL: with no table, JS has neither a body nor a mapping, so the call
+    // stays severed. The reorder alone must not admit it.
+    let unmapped = artifact::realize(&ws, &g, &ArtifactRequest::new(JAVASCRIPT_WEB, &roots));
+    assert_eq!(severed_here(&unmapped), Some(Unrealizable::ForeignToArtifact));
+    assert_eq!(named(&unmapped), None, "an unmapped Lua-only body was realized on JS");
+
+    let table = OneName("mapped_probe");
+    let mapped = artifact::realize(
+        &ws,
+        &g,
+        &ArtifactRequest::new(JAVASCRIPT_WEB, &roots)
+            .with_mappings(ArtifactMappings::for_backend(FnBackend::Js).with_table(&table)),
+    );
+    assert_eq!(
+        named(&mapped),
+        Some(artifact::Realization::NativeMapping),
+        "the JS artifact refused an intrinsic its own table maps"
+    );
+    assert_eq!(severed_here(&mapped), None, "a mapped intrinsic is still a severed call");
+
+    // The luajit artifact is unmoved: its mapping IS the `inline(lua)` body.
+    let lua = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
+    assert_eq!(named(&lua), Some(artifact::Realization::NativeMapping));
+}
+
+/// **A compile-time expansion has no body on ANY backend.** `@struct_expand` and
+/// friends are expanded at MIR lowering, so asking which backend declared the
+/// (never-emitted) opaque body is asking a question with no consumer -- and
+/// answering `foreign-to-artifact` severs a call every target actually expands.
+#[test]
+fn a_compile_time_expansion_needs_no_backend_sibling() {
+    let ws = check(
+        r#"
+@struct_expand inline(lua) fn expand_probe(x: int) -> int = "return 0"
+fn main() { let n = expand_probe(1) }
+"#,
+    );
+    let (g, roots) = graph_for(&ws);
+    let kind = |view: &artifact::ArtifactView| {
+        view.realization
+            .iter()
+            .find(|(i, _)| {
+                ws.module(i.func.module).functions[i.func.func].name.as_str() == "expand_probe"
+            })
+            .map(|(_, r)| r.kind)
+    };
+
+    // CONTROL: the luajit artifact already answers this, so the JS answer below
+    // is a divergence between two artifacts over ONE declaration.
+    let lua = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
+    assert_eq!(kind(&lua), Some(artifact::Realization::CompileTimeExpansion));
+
+    let js = artifact::realize(&ws, &g, &ArtifactRequest::new(JAVASCRIPT_WEB, &roots));
+    assert_eq!(
+        kind(&js),
+        Some(artifact::Realization::CompileTimeExpansion),
+        "the JS artifact asked for a backend body for an expansion that has none"
+    );
+    assert!(
+        !js.severed_groups().iter().any(|grp| {
+            ws.module(grp.callee.module).functions[grp.callee.func].name.as_str()
+                == "expand_probe"
+        }),
+        "an expansion the artifact performs is still a severed call"
+    );
+}
+
+/// A backend may supply a declaration's body ITSELF, with a hand-written
+/// binding, instead of emitting the declaration's foreign body. The JS backend
+/// does exactly this for `phantom`, `vec_push`, `error` and 60-odd others
+/// (`skull_codegen_js::host_binding`), so an artifact view that only asks
+/// "which backend wrote the source body" severs calls the artifact serves --
+/// 2,433 sites for `phantom` alone on the corpus.
+///
+/// It is asked LAST, after the declaration's own body: where a real
+/// `inline(js)` sibling exists, that body is what the artifact emits.
+#[test]
+fn a_declaration_the_artifact_binds_itself_is_not_severed() {
+    let ws = check(
+        r#"
+inline(lua) fn bound_probe(x: int) -> int = "return x + 1"
+extern(ffi, "stone") fn host_probe(n: int) -> int
+fn main() { let n = bound_probe(1) + host_probe(2) }
+"#,
+    );
+    let (g, roots) = graph_for(&ws);
+    let kind = |view: &artifact::ArtifactView, name: &str| {
+        view.realization
+            .iter()
+            .find(|(i, _)| ws.module(i.func.module).functions[i.func.func].name.as_str() == name)
+            .map(|(_, r)| r.kind)
+    };
+    let severed = |view: &artifact::ArtifactView, name: &str| {
+        view.severed_groups()
+            .into_iter()
+            .find(|grp| {
+                ws.module(grp.callee.module).functions[grp.callee.func].name.as_str() == name
+            })
+            .map(|grp| grp.cause)
+    };
+
+    // CONTROL: unbound, the two calls are severed under their own causes -- a
+    // Lua-only body and a host symbol the web platform has none of.
+    let plain = artifact::realize(&ws, &g, &ArtifactRequest::new(JAVASCRIPT_WEB, &roots));
+    assert_eq!(severed(&plain, "bound_probe"), Some(Unrealizable::ForeignToArtifact));
+    // An `extern(ffi)` is a Lua-backend declaration, so JS fails to select a
+    // sibling before the class question is ever reached.
+    assert_eq!(severed(&plain, "host_probe"), Some(Unrealizable::ForeignToArtifact));
+
+    let bindings = TwoBound;
+    let bound = artifact::realize(
+        &ws,
+        &g,
+        &ArtifactRequest::new(JAVASCRIPT_WEB, &roots).with_mappings(
+            ArtifactMappings::for_backend(FnBackend::Js).with_host_bindings(&bindings),
+        ),
+    );
+    assert_eq!(kind(&bound, "bound_probe"), Some(artifact::Realization::HostBinding));
+    assert_eq!(kind(&bound, "host_probe"), Some(artifact::Realization::HostBinding));
+    assert_eq!(severed(&bound, "bound_probe"), None);
+    assert_eq!(severed(&bound, "host_probe"), None);
+    // A host binding has no Rock body here, so it is a BOUNDARY the artifact
+    // names -- never an instance whose callees would be enqueued.
+    let inst = bound
+        .realization
+        .keys()
+        .find(|i| {
+            ws.module(i.func.module).functions[i.func.func].name.as_str() == "bound_probe"
+        })
+        .expect("bound_probe retained")
+        .clone();
+    assert!(bound.boundaries.contains_key(&inst));
+    assert!(!bound.instances.contains(&inst));
+
+    // The declaration's OWN body wins where it has one: binding everything must
+    // not make the artifact stop emitting an `inline(js)` sibling.
+    let lua = artifact::realize(
+        &ws,
+        &g,
+        &ArtifactRequest::new(LUAJIT_DESKTOP, &roots).with_mappings(
+            ArtifactMappings::for_backend(FnBackend::Lua).with_host_bindings(&bindings),
+        ),
+    );
+    assert_eq!(
+        kind(&lua, "bound_probe"),
+        Some(artifact::Realization::ForeignBody(
+            skull::instance_graph::BoundaryClass::InlineBody
+        )),
+        "a host binding displaced a body the artifact actually emits"
     );
 }

@@ -62,6 +62,28 @@ pub struct ArtifactMappings<'a> {
     pub inline_backend: Option<FnBackend>,
     /// This artifact's Rust-side table, when it has one.
     pub table: Option<&'a dyn IntrinsicTable>,
+    /// Declarations this artifact supplies with a HAND-WRITTEN binding rather
+    /// than with any declared body. See [`HostBindings`].
+    pub host_bindings: Option<&'a dyn HostBindings>,
+}
+
+/// Declarations an artifact supplies ITSELF, outside the `@intrinsic`
+/// mechanism.
+///
+/// This is not a design preference, it is a measured fact about the JS backend:
+/// `skull_codegen_js`'s `host_binding` renders `phantom`, `vec_push`, `error`,
+/// `deepcopy` and 60-odd other host-bodied stdlib declarations from a
+/// hand-written Rust table that has no `@intrinsic` marker at all. An artifact
+/// view that only asks "which backend wrote the source body" therefore severs
+/// calls that emission serves -- 2,433 sites for `phantom` alone corpus-wide.
+///
+/// The implementation must be the BACKEND's own predicate, not a copy of its
+/// table: this trait is the seam that lets the driver hand the emitter's own
+/// oracle to the view. That the two tables should be one `@intrinsic` mechanism
+/// is recorded in `docs/unfuck-backlog.md`, not papered over here.
+pub trait HostBindings {
+    fn supplies(&self, ws: &Workspace, f: &Function) -> bool;
+    fn describe(&self) -> &'static str;
 }
 
 impl<'a> ArtifactMappings<'a> {
@@ -71,12 +93,24 @@ impl<'a> ArtifactMappings<'a> {
     }
 
     pub fn for_backend(b: FnBackend) -> Self {
-        Self { inline_backend: Some(b), table: None }
+        Self { inline_backend: Some(b), table: None, host_bindings: None }
     }
 
     pub fn with_table(mut self, t: &'a dyn IntrinsicTable) -> Self {
         self.table = Some(t);
         self
+    }
+
+    pub fn with_host_bindings(mut self, b: &'a dyn HostBindings) -> Self {
+        self.host_bindings = Some(b);
+        self
+    }
+
+    /// Does this artifact supply `f` with a hand-written binding of its own?
+    /// Asked only after no declared body serves: a real sibling is what gets
+    /// emitted where one exists.
+    fn binds(&self, ws: &Workspace, f: &Function) -> bool {
+        self.host_bindings.is_some_and(|b| b.supplies(ws, f))
     }
 
     /// Does this artifact map `f` NATIVELY? A Rock body is not consulted --
@@ -170,6 +204,9 @@ pub enum Realization {
     NativeMapping,
     /// An `@intrinsic` with no mapping here, served by its portable Rock body.
     PortableFallback,
+    /// A declaration this artifact supplies with a hand-written binding of its
+    /// own, with no declared body emitted at all ([`HostBindings`]).
+    HostBinding,
     /// An `@intrinsic` whose emission is compile-time on every backend
     /// (`@struct_expand` and friends). It has no callable body to map or fall
     /// back to, so neither question applies.
@@ -182,6 +219,7 @@ impl Realization {
             Self::RockBody => "rock-body",
             Self::ForeignBody(c) => c.name(),
             Self::NativeMapping => "native-mapping",
+            Self::HostBinding => "host-binding",
             Self::PortableFallback => "portable-fallback",
             Self::CompileTimeExpansion => "compile-time-expansion",
         }
@@ -193,7 +231,11 @@ impl Realization {
     pub fn boundary_class(self) -> Option<BoundaryClass> {
         match self {
             Self::ForeignBody(c) => Some(c),
-            Self::NativeMapping | Self::CompileTimeExpansion => {
+            // A hand-written backend binding is class 1.3 by content -- a
+            // mapping that lives in Rust, per backend, rather than in the
+            // source -- so it names the same contract an `@intrinsic` mapping
+            // does.
+            Self::NativeMapping | Self::CompileTimeExpansion | Self::HostBinding => {
                 Some(BoundaryClass::Intrinsic)
             }
             Self::RockBody | Self::PortableFallback => None,
@@ -279,6 +321,27 @@ pub struct Severed {
     pub site: Site,
     pub callee: Instance,
     pub cause: Unrealizable,
+}
+
+/// Severed calls sharing one callee DECLARATION and one cause -- the
+/// artifact's obligations, as opposed to the per-site cost of not meeting them.
+///
+/// Both numbers are kept because either alone reads as the other: 76,972
+/// severed JS sites is a worklist of that size only if every site is its own
+/// missing declaration, and the declaration count alone hides that one missing
+/// body can cost thousands of calls.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct SeveredGroup {
+    /// The shared graph's representative declaration for the callee. Not a
+    /// realized one: nothing here realized, which is the point.
+    pub callee: FuncRef,
+    pub cause: Unrealizable,
+    /// Call sites -- the per-site population this group covers.
+    pub sites: usize,
+    /// The distinct callee INSTANCES: one declaration can be severed at several
+    /// instantiations, and supplying a body discharges all of them.
+    pub instances: BTreeSet<Instance>,
+    pub callers: BTreeSet<Instance>,
 }
 
 /// What a call in THIS artifact terminates in -- [`Callee`] with the boundary
@@ -460,6 +523,47 @@ impl ArtifactView {
         c
     }
 
+    /// The severed population grouped by `(callee declaration, cause)`, widest
+    /// first. A PARTITION of `severed`: `sites` sums to it.
+    pub fn severed_groups(&self) -> Vec<SeveredGroup> {
+        let mut by: BTreeMap<(DeclKey, Unrealizable), SeveredGroup> = BTreeMap::new();
+        for s in &self.severed {
+            let e = by.entry((DeclKey(s.callee.func), s.cause)).or_insert_with(|| SeveredGroup {
+                callee: s.callee.func,
+                cause: s.cause,
+                sites: 0,
+                instances: BTreeSet::new(),
+                callers: BTreeSet::new(),
+            });
+            e.sites += 1;
+            e.instances.insert(s.callee.clone());
+            e.callers.insert(s.caller.clone());
+        }
+        let mut groups: Vec<SeveredGroup> = by.into_values().collect();
+        groups.sort_by(|a, b| {
+            b.sites.cmp(&a.sites).then(DeclKey(a.callee).cmp(&DeclKey(b.callee)))
+        });
+        groups
+    }
+
+    pub fn render_severed_groups(&self, ws: &Workspace) -> Vec<String> {
+        self.severed_groups()
+            .iter()
+            .map(|grp| {
+                let f = &ws.module(grp.callee.module).functions[grp.callee.func];
+                format!(
+                    "`{}` [{:?}] {} -- {} sites, {} instances, {} callers",
+                    f.name,
+                    f.backend,
+                    grp.cause.label(),
+                    grp.sites,
+                    grp.instances.len(),
+                    grp.callers.len()
+                )
+            })
+            .collect()
+    }
+
     pub fn render_symbol_collisions(&self, ws: &Workspace) -> Vec<String> {
         self.symbol_collisions
             .iter()
@@ -534,17 +638,38 @@ fn realize_decl(
     target: &CpuTargetSpec,
     mappings: &ArtifactMappings<'_>,
 ) -> Result<Realized, Unrealizable> {
+    // THE BODY-INDEPENDENT RUNGS, first. Both answer without emitting any
+    // declaration's body, so "which backend wrote the source body" has no
+    // consumer -- and asking for a sibling ahead of them rejects work the
+    // artifact actually performs. Measured on the JS corpus: `nb_get` (1,127
+    // sites) is mapped by `JsIntrinsics` and `rock_shader` is expanded at MIR
+    // lowering, and both were `foreign-to-artifact` because the sibling
+    // question came first.
+    //
+    // This is `skull_mir::intrinsics`' own order -- backend mapping > portable
+    // fallback > reject -- with the portable rung left below, where it belongs:
+    // a fallback IS a Rock body, so it needs the declaration that holds one.
+    let rep_f = &ws.module(rep.module).functions[rep.func];
+    if intrinsics::is_intrinsic(rep_f) && supports(target, BoundaryClass::Intrinsic) {
+        if intrinsics::expand_kind(rep_f).is_some() {
+            return Ok(Realized { decl: rep, kind: Realization::CompileTimeExpansion });
+        }
+        if mappings.maps(rep_f) {
+            return Ok(Realized { decl: rep, kind: Realization::NativeMapping });
+        }
+    }
+
     // SIBLING SELECTION, and this is the only place it happens. `rep` is the
     // shared graph's target-neutral representative; `backend_variant` is
     // production's own selector, so the declaration this artifact emits is the
     // one lowering would pick. `Err` -- nothing in the group serves this
     // artifact -- is the `@nomangle`-sibling case: a JS body asked of a Lua
     // artifact.
-    let decl = match target.execution.backend {
+    let selected: Result<FuncRef, Unrealizable> = match target.execution.backend {
         Some(b) => {
             let name = ws.module(rep.module).functions[rep.func].name;
             skull_mir::lower::backend_variant(ws, name, rep, b)
-                .map_err(|_| Unrealizable::ForeignToArtifact)?
+                .map_err(|_| Unrealizable::ForeignToArtifact)
         }
         // A target with no Rock-level backend of its own names no host, so there
         // is no sibling to select and only a declaration that names none --
@@ -554,14 +679,31 @@ fn realize_decl(
         // artifact.
         None => {
             if ws.module(rep.module).functions[rep.func].backend != FnBackend::Any {
-                return Err(Unrealizable::ForeignToArtifact);
+                Err(Unrealizable::ForeignToArtifact)
+            } else {
+                Ok(rep)
             }
-            rep
         }
     };
-    let f = &ws.module(decl.module).functions[decl.func];
-    let kind = realize_body(ws, decl, f, erased, target, mappings)?;
-    Ok(Realized { decl, kind })
+    let realized = selected.and_then(|decl| {
+        let f = &ws.module(decl.module).functions[decl.func];
+        realize_body(ws, decl, f, erased, target, mappings)
+            .map(|kind| Realized { decl, kind })
+    });
+    // THE LAST RUNG: no declared body serves this artifact, and the artifact
+    // supplies this declaration itself. Asked after selection AND after the
+    // selected body, so a real sibling still wins -- binding a name must not
+    // stop the artifact from emitting a body it has.
+    match realized {
+        Ok(r) => Ok(r),
+        Err(cause) => {
+            if mappings.binds(ws, rep_f) {
+                Ok(Realized { decl: rep, kind: Realization::HostBinding })
+            } else {
+                Err(cause)
+            }
+        }
+    }
 }
 
 /// How the SELECTED declaration is supplied. Split from the selection above so

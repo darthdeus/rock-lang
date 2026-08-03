@@ -2100,10 +2100,7 @@ impl Emitter<'_> {
         // struct named `Map` (a `Nominal`) with its own `get` fn is a plain callee
         // and co-emits like any other. NativeBuffer falls to its intrinsic
         // template; Vec and user receivers fall to the co-emit path.
-        if cf.name.as_str() == "get"
-            && cf.param_decls.len() == 2
-            && first_param_is_builtin_map(self.ws, cf)
-        {
+        if is_builtin_map_get(self.ws, cf) {
             return Ok(format!("{}.get({})", rargs[0], rargs[1]));
         }
         // Host-bodied stdlib fns (extern / inline(lua)) with a hand-written JS
@@ -4991,6 +4988,27 @@ fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
 /// and the `emit_with_closure` callee walk so both agree on what NOT to reject.
 fn is_host_mapped(cf: &bone_semantic::hir::Function) -> bool {
     is_host_print(cf) || is_host_put(cf) || is_host_log_fn(cf) || host_fn_template(cf).is_some()
+}
+
+/// **Does this backend supply `cf`'s body ITSELF?** The disjunction of every
+/// gate `render_call` consults before it looks for a co-emitted callee: the
+/// host templates, the `print`/`put`/logging globals, the builtin-`Map`
+/// receivers, and the `map_new` interception.
+///
+/// Published because the mono ARTIFACT VIEW has to ask the same question -- a
+/// view that only knows which backend declared the source body severs every
+/// `phantom`, `vec_push` and `error` call this table serves. It is the same
+/// predicate `render_call` branches on, not a second list: a copy would drift
+/// silently, and the artifact's answer would stop describing this emitter.
+pub fn host_binding(ws: &Workspace, cf: &bone_semantic::hir::Function) -> bool {
+    is_host_mapped(cf) || is_map_new(cf) || is_builtin_map_get(ws, cf)
+}
+
+/// The overloaded `get`/2 on a builtin `Map` receiver, which renders as
+/// `.get(k)` rather than co-emitting. Factored out of `render_call` so
+/// [`host_binding`] and the call site cannot disagree.
+fn is_builtin_map_get(ws: &Workspace, cf: &bone_semantic::hir::Function) -> bool {
+    cf.name.as_str() == "get" && cf.param_decls.len() == 2 && first_param_is_builtin_map(ws, cf)
 }
 
 /// `map_new()`: pure Rock (`transmute(table_new())`), but intercepted to a real

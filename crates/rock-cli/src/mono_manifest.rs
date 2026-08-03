@@ -188,6 +188,8 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     let mut art_id_collisions = 0usize;
     let mut art_id_collisions_by_name = 0usize;
     let mut art_severed_examples: Vec<String> = Vec::new();
+    let mut art_severed_groups: BTreeMap<(&'static str, String, &'static str), (usize, usize)> =
+        BTreeMap::new();
 
     for dir in &projects {
         let name = dir.strip_prefix(&root).unwrap_or(dir).display().to_string();
@@ -351,6 +353,11 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
                 art_shared_collisions += p.shared_symbol_collisions;
                 art_id_collisions += p.identity_collisions.0;
                 art_id_collisions_by_name += p.identity_collisions.1;
+                for (k, (sites, insts)) in p.artifact_severed_groups {
+                    let e = art_severed_groups.entry(k).or_insert((0, 0));
+                    e.0 += sites;
+                    e.1 += insts;
+                }
                 for x in p.artifact_severed_examples {
                     if art_severed_examples.len() < 10 {
                         art_severed_examples.push(x);
@@ -1078,6 +1085,47 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     for x in &art_severed_examples {
         println!("- severed call: {x}");
     }
+    println!();
+    println!("### severed calls, by callee and cause");
+    println!();
+    println!(
+        "The per-SITE severed total is the COST of an artifact's missing bodies; grouping by \
+         `(callee declaration, cause)` is the obligation list. Both denominators are reported \
+         because either alone reads as the other."
+    );
+    println!();
+    for target in
+        art_rows.keys().copied().filter(|t| art_severed_groups.keys().any(|(a, ..)| a == t))
+    {
+        let mut rows: Vec<(&String, &'static str, usize, usize)> = art_severed_groups
+            .iter()
+            .filter(|((a, ..), _)| *a == target)
+            .map(|((_, callee, cause), (sites, insts))| (callee, *cause, *sites, *insts))
+            .collect();
+        rows.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(b.0)));
+        let sites: usize = rows.iter().map(|r| r.2).sum();
+        let mut by_cause: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
+        for r in &rows {
+            let e = by_cause.entry(r.1).or_insert((0, 0));
+            e.0 += 1;
+            e.1 += r.2;
+        }
+        println!(
+            "`{target}`: **{}** severed call sites over **{}** `(callee, cause)` groups",
+            sites,
+            rows.len()
+        );
+        for (cause, (decls, n)) in &by_cause {
+            println!("  - `{cause}`: {decls} declarations, {n} sites");
+        }
+        for (callee, cause, n, insts) in rows.iter().take(15) {
+            println!("  - {callee} `{cause}`: {n} sites, {insts} instances");
+        }
+        if rows.len() > 15 {
+            println!("  - ...and {} further groups", rows.len() - 15);
+        }
+    }
+    println!();
     if !art_symbol_examples.is_empty()
         || !art_dep_examples.is_empty()
         || !art_severed_examples.is_empty()
@@ -1187,6 +1235,10 @@ struct OneProject {
     /// what the old key was hiding.
     identity_collisions: (usize, usize),
     artifact_severed_examples: Vec<String>,
+    /// Severed calls grouped by `(artifact, callee declaration, cause)`. The
+    /// per-site total is the COST of the artifact's missing bodies; this is the
+    /// obligation list, which is what a worklist actually needs.
+    artifact_severed_groups: Vec<((&'static str, String, &'static str), (usize, usize))>,
 }
 
 /// A span's file, relative to the analyzed root. An absolute path varies by
@@ -1195,6 +1247,24 @@ struct OneProject {
 /// Pseudo-files (`<bone-stdlib:...>`) have no prefix to strip and pass through.
 fn relativize(file: &str, root: &Path) -> String {
     Path::new(file).strip_prefix(root).map(|r| r.display().to_string()).unwrap_or_else(|_| file.to_string())
+}
+
+/// The JS backend's OWN host-binding predicate, handed to the artifact view.
+/// Wiring it here rather than reproducing the table keeps one oracle: what the
+/// emitter renders itself is what the view reports as realized.
+struct JsHostBindings;
+
+impl skull::artifact::HostBindings for JsHostBindings {
+    fn supplies(
+        &self,
+        ws: &bone_semantic::inference::Workspace,
+        f: &bone_semantic::hir::Function,
+    ) -> bool {
+        skull_codegen_js::emit::host_binding(ws, f)
+    }
+    fn describe(&self) -> &'static str {
+        "js-host-bindings"
+    }
 }
 
 fn one_project(
@@ -1275,11 +1345,14 @@ fn one_project(
     // trivial reason that nothing was wired, and the corpus number would be
     // measuring this driver rather than the artifact.
     let js_table = skull_codegen_js::JsIntrinsics;
+    let js_bindings = JsHostBindings;
     let realize = |spec: skull::target_projection::TargetSpec| {
             let req = skull::artifact::ArtifactRequest::new(spec, &roots);
             let req = match spec.execution.backend {
                 Some(b @ bone_semantic::hir::FnBackend::Js) => req.with_mappings(
-                    skull::artifact::ArtifactMappings::for_backend(b).with_table(&js_table),
+                    skull::artifact::ArtifactMappings::for_backend(b)
+                        .with_table(&js_table)
+                        .with_host_bindings(&js_bindings),
                 ),
                 _ => req,
             };
@@ -1375,6 +1448,8 @@ fn one_project(
     let mut artifact_symbol_examples: Vec<String> = Vec::new();
     let mut artifact_dep_examples: Vec<String> = Vec::new();
     let mut artifact_severed_examples: Vec<String> = Vec::new();
+    let mut artifact_severed_groups: Vec<((&'static str, String, &'static str), (usize, usize))> =
+        Vec::new();
     for v in &views {
         for x in v.render_symbol_collisions(&ws).into_iter().take(2) {
             artifact_symbol_examples.push(format!("`{}` {x}", v.spec.name));
@@ -1384,6 +1459,17 @@ fn one_project(
         }
         for x in v.render_severed(&ws, &g).into_iter().take(2) {
             artifact_severed_examples.push(format!("`{}` {x}", v.spec.name));
+        }
+        // Keyed by the callee's NAME and backend rather than by its `FuncRef`:
+        // the corpus is 26 separately typechecked workspaces, so an arena index
+        // is not comparable across them and the same stdlib declaration must
+        // aggregate.
+        for grp in v.severed_groups() {
+            let f = &ws.module(grp.callee.module).functions[grp.callee.func];
+            artifact_severed_groups.push((
+                (v.spec.name, format!("{} [{:?}]", f.name, f.backend), grp.cause.label()),
+                (grp.sites, grp.instances.len()),
+            ));
         }
     }
     // The CONTRAST for the artifacts' zero: how many symbols the SHARED graph
@@ -1640,6 +1726,7 @@ fn one_project(
         shared_symbol_collisions,
         identity_collisions: g.colliding_identities(&ws),
         artifact_severed_examples,
+        artifact_severed_groups,
     })
 }
 
