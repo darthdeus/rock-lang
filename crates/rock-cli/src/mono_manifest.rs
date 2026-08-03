@@ -17,6 +17,30 @@ use skull::instance_graph::{self, InstanceGraph};
 
 use crate::Result;
 
+#[derive(Default)]
+struct FindingSummary {
+    total: usize,
+    examples: Vec<String>,
+}
+
+impl FindingSummary {
+    fn record(&mut self, example: String) {
+        self.total += 1;
+        if self.examples.len() < 10 {
+            self.examples.push(example);
+        }
+    }
+
+    fn absorb(&mut self, other: Self) {
+        self.total += other.total;
+        for example in other.examples {
+            if self.examples.len() < 10 {
+                self.examples.push(example);
+            }
+        }
+    }
+}
+
 /// Per-artifact totals across the whole corpus. The deferred list is a property
 /// of the TARGET, not of a project, so it is copied rather than summed.
 struct ArtifactTotals {
@@ -145,8 +169,8 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     let mut span_rejections: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
     let mut span_unresolved: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
     let mut span_always_emitted: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
-    let mut exec_pairs = 0usize;
-    let mut exec_disagreements: Vec<String> = Vec::new();
+    let mut shader_packaging_pairs = 0usize;
+    let mut shader_packaging_disagreements = FindingSummary::default();
     let mut sibling_selections = 0usize;
     let mut boundary_pairs = 0usize;
     let mut boundary_divergences = 0usize;
@@ -314,12 +338,8 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
                         body_free_examples.push(x);
                     }
                 }
-                exec_pairs += p.exec_pairs;
-                for x in p.exec_disagreements {
-                    if exec_disagreements.len() < 10 {
-                        exec_disagreements.push(x);
-                    }
-                }
+                shader_packaging_pairs += p.shader_packaging_pairs;
+                shader_packaging_disagreements.absorb(p.shader_packaging_disagreements);
                 sibling_selections += p.artifact_sibling_selections;
                 boundary_pairs += p.artifact_boundary_pairs;
                 boundary_divergences += p.artifact_boundary_divergences;
@@ -882,14 +902,14 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
          two target contracts"
     );
     println!(
-        "- artifact pairs sharing ONE execution axis: **{exec_pairs}**, of which \
+        "- shader-packaging pairs sharing one platform + execution target: \
+         **{shader_packaging_pairs}**, of which \
          **{}** decide anything differently -- plan S 20a's separation, measured \
-         rather than declared. The pair count is the denominator; the axes are \
-         `platform` / `execution` / `shader`, and only the middle one reaches \
-         `realize_decl`.",
-        exec_disagreements.len()
+         rather than declared. The pair count is the denominator; shader \
+         packaging cannot reach CPU realization.",
+        shader_packaging_disagreements.total
     );
-    for d in exec_disagreements.iter().take(10) {
+    for d in &shader_packaging_disagreements.examples {
         println!("  - {d}");
     }
     println!(
@@ -1147,11 +1167,10 @@ struct OneProject {
     artifacts: Vec<(&'static str, skull::artifact::ArtifactCensus)>,
     /// Instances an artifact realized that the shared graph does not hold.
     artifact_invented: usize,
-    /// Artifact pairs sharing one EXECUTION axis, and the ones whose CPU
-    /// decisions nevertheless differ (plan S 20a). The pair count is the
-    /// denominator: 0 disagreements over 0 pairs asserts nothing.
-    exec_pairs: usize,
-    exec_disagreements: Vec<String>,
+    /// Pairs that differ only in shader packaging, and any CPU decisions that
+    /// nevertheless differ. The pair count is the denominator.
+    shader_packaging_pairs: usize,
+    shader_packaging_disagreements: FindingSummary,
     /// `(artifact, artifact, instance)` triples both artifacts retain, and how
     /// many of those the two spell differently. The identity property, over the
     /// population that can actually witness it.
@@ -1256,10 +1275,8 @@ fn one_project(
     // trivial reason that nothing was wired, and the corpus number would be
     // measuring this driver rather than the artifact.
     let js_table = skull_codegen_js::JsIntrinsics;
-    let views: Vec<skull::artifact::ArtifactView> = skull::target_projection::ALL
-        .iter()
-        .map(|spec| {
-            let req = skull::artifact::ArtifactRequest::new(*spec, &roots);
+    let realize = |spec: skull::target_projection::TargetSpec| {
+            let req = skull::artifact::ArtifactRequest::new(spec, &roots);
             let req = match spec.execution.backend {
                 Some(b @ bone_semantic::hir::FnBackend::Js) => req.with_mappings(
                     skull::artifact::ArtifactMappings::for_backend(b).with_table(&js_table),
@@ -1267,56 +1284,31 @@ fn one_project(
                 _ => req,
             };
             skull::artifact::realize(&ws, &g, &req)
-        })
+        };
+    let views: Vec<skull::artifact::ArtifactView> = skull::target_projection::ALL
+        .iter()
+        .map(|spec| realize(*spec))
         .collect();
 
-    // **The S 20a separation, at corpus scale.** Two artifacts whose EXECUTION
-    // axis is the same must decide the same thing however they are packaged.
-    // Measured as PAIRS with a denominator rather than left to a reader
-    // comparing two rows of the table: a group of one would report 0
-    // disagreements and mean nothing.
-    let mut exec_pairs = 0usize;
-    let mut exec_disagreements: Vec<String> = Vec::new();
-    let decisions = |v: &skull::artifact::ArtifactView| {
-        let realization: BTreeMap<String, (String, &'static str)> = v
-            .realization
-            .iter()
-            .map(|(i, r)| {
-                let f = &ws.module(r.decl.module).functions[r.decl.func];
-                (g.identity(&ws, i), (format!("{}:{:?}", f.name, f.backend), r.kind.label()))
-            })
-            .collect();
-        let boundaries: BTreeMap<String, String> = v
-            .boundaries
-            .iter()
-            .map(|(i, b)| (g.identity(&ws, i), format!("{}/{}", b.symbol, b.class.name())))
-            .collect();
-        let mut severed: Vec<String> = v
-            .severed
-            .iter()
-            .map(|s| {
-                format!(
-                    "{} {} {} {}",
-                    g.identity(&ws, &s.caller),
-                    s.site.op.name(),
-                    g.identity(&ws, &s.callee),
-                    s.cause.label()
-                )
-            })
-            .collect();
-        severed.sort();
-        (realization, boundaries, severed, v.symbols.len(), v.sites_walked)
-    };
-    for (ai, a) in views.iter().enumerate() {
-        for b in views.iter().skip(ai + 1) {
-            if a.spec.execution != b.spec.execution {
-                continue;
-            }
-            exec_pairs += 1;
-            if decisions(a) != decisions(b) {
-                exec_disagreements
-                    .push(format!("`{}` vs `{}`", a.spec.name, b.spec.name));
-            }
+    // The comparison changes only shader packaging. Platform capabilities may
+    // legitimately change roots or boundary admission; the CPU ABI's shader
+    // independence says nothing about that axis.
+    let mut shader_packaging_pairs = 0usize;
+    let mut shader_packaging_disagreements = FindingSummary::default();
+    for a in &views {
+        let paired_spec = skull::target_projection::TargetSpec {
+            name: "shader-packaging-probe",
+            shader: if a.spec.shader.is_some() {
+                None
+            } else {
+                Some(skull::target_projection::GLSL_330)
+            },
+            ..a.spec
+        };
+        let b = realize(paired_spec);
+        shader_packaging_pairs += 1;
+        if !a.same_cpu_decisions(&b) {
+            shader_packaging_disagreements.record(format!("`{}`", a.spec.name));
         }
     }
     let artifact_invented: usize =
@@ -1638,8 +1630,8 @@ fn one_project(
         divergent_variant_groups,
         artifacts,
         artifact_invented,
-        exec_pairs,
-        exec_disagreements,
+        shader_packaging_pairs,
+        shader_packaging_disagreements,
         artifact_shared_pairs,
         artifact_spelling_conflicts,
         artifact_spelling_agreements,
@@ -1653,4 +1645,24 @@ fn one_project(
 
 fn hist_of(g: &InstanceGraph) -> BTreeMap<&'static str, usize> {
     g.edge_histogram()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FindingSummary;
+
+    #[test]
+    fn finding_summary_counts_past_its_example_limit() {
+        let mut findings = FindingSummary::default();
+        for i in 0..6 {
+            findings.record(format!("finding-{i}"));
+        }
+        let mut more = FindingSummary::default();
+        for i in 6..12 {
+            more.record(format!("finding-{i}"));
+        }
+        findings.absorb(more);
+        assert_eq!(findings.total, 12);
+        assert_eq!(findings.examples.len(), 10);
+    }
 }

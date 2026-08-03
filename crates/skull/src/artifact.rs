@@ -43,7 +43,7 @@ use skull_mir::mir::FuncRef;
 
 use crate::concrete_body::BoundaryId;
 use crate::instance_graph::{self, BoundaryClass, DeclKey, Instance, InstanceGraph, Site, SiteOutcome};
-use crate::target_projection::{supports, ExecutionTargetSpec, TargetSpec};
+use crate::target_projection::{supports, CpuTargetSpec, TargetSpec};
 
 /// Where an artifact's NATIVE MAPPING for an `@intrinsic` fn comes from.
 ///
@@ -119,9 +119,9 @@ impl SymbolPlanner for LogicalSymbols {
 
 /// Everything one artifact view is taken through.
 pub struct ArtifactRequest<'a> {
-    /// The artifact's full target: platform, execution and optional shader
-    /// (plan S 20a). [`realize`] passes only `spec.execution` down, so the other
-    /// two axes are carried and reported, never consulted.
+    /// The artifact's full target: platform, execution and optional shader.
+    /// [`realize`] derives a platform+execution CPU target; shader packaging is
+    /// carried and reported but cannot reach admission.
     pub spec: TargetSpec,
     pub mappings: ArtifactMappings<'a>,
     /// The artifact's emission roots. Plan S 11: "the target may change roots",
@@ -263,7 +263,7 @@ impl Exclusion {
 }
 
 /// An instance the shared graph holds and this artifact does not.
-#[derive(Clone, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Excluded {
     pub instance: Instance,
     pub cause: Exclusion,
@@ -273,7 +273,7 @@ pub struct Excluded {
 /// realize. The diagnostic a declaration filter structurally cannot produce:
 /// the caller survives, so emission would emit a call to a body that is not in
 /// the artifact.
-#[derive(Clone, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Severed {
     pub caller: Instance,
     pub site: Site,
@@ -287,14 +287,14 @@ pub struct Severed {
 /// The shared form cannot carry a [`BoundaryId`]: an id names a target and an
 /// emitted symbol, and a target-neutral body has neither. This is the same
 /// split one rung down, not a second callee model.
-#[derive(Clone, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum RealizedCallee {
     Rock(Instance),
     Boundary(BoundaryId),
 }
 
 /// One opaque-body dependency, terminating in a concrete callee.
-#[derive(Clone, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct InlineDep {
     /// The opaque body that names it.
     pub owner: FuncRef,
@@ -310,7 +310,7 @@ pub struct InlineDep {
 /// located rejection: the owner is retained and its text calls a name nothing
 /// here supplies (or supplies twice over), so emission would produce a call to
 /// a symbol that does not exist or cannot be chosen.
-#[derive(Clone, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct UnresolvedInlineDep {
     pub owner: FuncRef,
     pub entry: &'static str,
@@ -318,7 +318,7 @@ pub struct UnresolvedInlineDep {
 }
 
 /// Two retained instances that spell alike.
-#[derive(Clone, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct SymbolCollision {
     pub symbol: String,
     pub instances: Vec<Instance>,
@@ -392,6 +392,23 @@ pub struct ArtifactView {
 }
 
 impl ArtifactView {
+    /// Compare every realized output except the target description itself.
+    pub fn same_cpu_decisions(&self, other: &Self) -> bool {
+        self.roots == other.roots
+            && self.instances == other.instances
+            && self.boundaries == other.boundaries
+            && self.realization == other.realization
+            && self.excluded == other.excluded
+            && self.severed == other.severed
+            && self.sites_walked == other.sites_walked
+            && self.symbols == other.symbols
+            && self.symbol_collisions == other.symbol_collisions
+            && self.inline_deps == other.inline_deps
+            && self.unresolved_inline_deps == other.unresolved_inline_deps
+            && self.shared_instances == other.shared_instances
+            && self.deferred == other.deferred
+    }
+
     /// Every retained instance -- Rock bodies AND boundaries. The positive side
     /// of the partition, and what `symbols` is total over: a boundary still
     /// needs a spelling, it just has no body to traverse.
@@ -514,7 +531,7 @@ fn realize_decl(
     ws: &Workspace,
     rep: FuncRef,
     erased: &BTreeSet<String>,
-    spec: &ExecutionTargetSpec,
+    target: &CpuTargetSpec,
     mappings: &ArtifactMappings<'_>,
 ) -> Result<Realized, Unrealizable> {
     // SIBLING SELECTION, and this is the only place it happens. `rep` is the
@@ -523,7 +540,7 @@ fn realize_decl(
     // one lowering would pick. `Err` -- nothing in the group serves this
     // artifact -- is the `@nomangle`-sibling case: a JS body asked of a Lua
     // artifact.
-    let decl = match spec.backend {
+    let decl = match target.execution.backend {
         Some(b) => {
             let name = ws.module(rep.module).functions[rep.func].name;
             skull_mir::lower::backend_variant(ws, name, rep, b)
@@ -543,7 +560,7 @@ fn realize_decl(
         }
     };
     let f = &ws.module(decl.module).functions[decl.func];
-    let kind = realize_body(ws, decl, f, erased, spec, mappings)?;
+    let kind = realize_body(ws, decl, f, erased, target, mappings)?;
     Ok(Realized { decl, kind })
 }
 
@@ -555,20 +572,20 @@ fn realize_body(
     decl: FuncRef,
     f: &Function,
     erased: &BTreeSet<String>,
-    spec: &ExecutionTargetSpec,
+    target: &CpuTargetSpec,
     mappings: &ArtifactMappings<'_>,
 ) -> Result<Realization, Unrealizable> {
     // An erased runtime entry is an IDENTITY, not a body kind: S 1.4's contract
     // is that the entry exists under its bare name for every target skull
     // emits, so it is classified before anything reads a body slot.
     if erased.contains(f.name.as_str()) {
-        return class_or_reject(spec, BoundaryClass::ErasedRuntimeEntry);
+        return class_or_reject(target, BoundaryClass::ErasedRuntimeEntry);
     }
     if f.is_extern {
-        return class_or_reject(spec, BoundaryClass::Extern);
+        return class_or_reject(target, BoundaryClass::Extern);
     }
     if intrinsics::is_intrinsic(f) {
-        if !supports(&spec.caps, BoundaryClass::Intrinsic) {
+        if !supports(target, BoundaryClass::Intrinsic) {
             return Err(Unrealizable::ClassUnsupported(BoundaryClass::Intrinsic));
         }
         // An expansion intrinsic has no callable body on ANY backend -- its
@@ -591,16 +608,13 @@ fn realize_body(
         return Err(Unrealizable::NativeMappingMissing);
     }
     if f.inline_body.is_some() {
-        return class_or_reject(spec, BoundaryClass::InlineBody);
+        return class_or_reject(target, BoundaryClass::InlineBody);
     }
     Ok(Realization::RockBody)
 }
 
-fn class_or_reject(
-    spec: &ExecutionTargetSpec,
-    class: BoundaryClass,
-) -> Result<Realization, Unrealizable> {
-    if supports(&spec.caps, class) {
+fn class_or_reject(target: &CpuTargetSpec, class: BoundaryClass) -> Result<Realization, Unrealizable> {
+    if supports(target, class) {
         Ok(Realization::ForeignBody(class))
     } else {
         Err(Unrealizable::ClassUnsupported(class))
@@ -625,21 +639,15 @@ fn has_rock_body(ws: &Workspace, decl: FuncRef) -> bool {
 /// therefore no mismatch to detect -- backend-sibling selection lives in
 /// [`realize_decl`], which is reached from here and from nowhere else.
 pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> ArtifactView {
-    // ONLY the execution axis, and it is a local binding rather than a field
-    // read at each use so the platform and the shader are not in scope below at
-    // all. Plan S 20a: the CPU ABI depends on the execution target, not on what
-    // is packaged beside it.
-    let exec = req.spec.execution;
-    // A target with no `FnBackend` of its own selects no variant at all. Stated
-    // rather than defaulted: `Any` is not "this target", it is "no host".
-    let want = exec.backend.unwrap_or(FnBackend::Any);
-
+    // Shader packaging is absent from this value by construction. Platform
+    // capabilities remain available for host boundary admission.
+    let target = req.spec.cpu();
     // Realizability of every instance the graph holds, computed once. It is a
     // property of the DECLARATION and the artifact, independent of reachability.
     let mut realizable: BTreeMap<Instance, Result<Realized, Unrealizable>> = BTreeMap::new();
     for i in &g.instances {
         realizable
-            .insert(i.clone(), realize_decl(ws, i.func, &g.erased_entries, &exec, &req.mappings));
+            .insert(i.clone(), realize_decl(ws, i.func, &g.erased_entries, &target, &req.mappings));
     }
 
     // The artifact's ROOTS: its emission roots that are realizable here, plus
@@ -763,7 +771,7 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
                     BoundaryId {
                         declaration: r.decl,
                         class,
-                        target: want,
+                        target,
                         symbol: symbols[i].clone(),
                     },
                 )
@@ -826,7 +834,7 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         // An execution-axis question too: every obligation it names is about
         // memory, coroutines, widths or foreign symbols. A shader-derived
         // deferral would be a separate list on a separate axis.
-        deferred: crate::target_projection::deferred_for(&exec),
+        deferred: crate::target_projection::deferred_for(&target.execution),
         spec: req.spec,
         roots,
         instances,

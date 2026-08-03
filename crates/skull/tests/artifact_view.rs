@@ -314,7 +314,11 @@ fn inline_body_dependencies_resolve_to_targets_in_the_artifact() {
     for dep in &view.inline_deps {
         match &dep.callee {
             RealizedCallee::Boundary(b) => {
-                assert_eq!(b.target, FnBackend::Lua, "the boundary names another target");
+                assert_eq!(
+                    b.target.execution.backend,
+                    Some(FnBackend::Lua),
+                    "the boundary names another execution backend"
+                );
                 assert!(
                     view.realization.values().any(|r| r.decl == b.declaration),
                     "a dependency resolved to a declaration outside the artifact"
@@ -952,70 +956,114 @@ fn main() { let a = only_lua(1) }
     assert!(mine(&ws, &js).is_empty(), "the severed boundary is still retained on JS");
 }
 
+#[test]
+fn platform_capabilities_participate_in_boundary_admission() {
+    use skull::target_projection as tp;
+
+    let ws = check(
+        r#"
+extern(ffi, "stone") fn host_tick(n: int) -> int
+fn main() { let n = host_tick(1) }
+"#,
+    );
+    let (g, roots) = graph_for(&ws);
+    let target = |platform| tp::TargetSpec {
+        name: "platform-admission-probe",
+        platform,
+        ..tp::LUAJIT_DESKTOP
+    };
+    let desktop = artifact::realize(
+        &ws,
+        &g,
+        &ArtifactRequest::new(target(tp::DESKTOP), &roots),
+    );
+    let web = artifact::realize(
+        &ws,
+        &g,
+        &ArtifactRequest::new(target(tp::WEB), &roots),
+    );
+    let host_tick_severed = |view: &artifact::ArtifactView| {
+        view.severed.iter().find_map(|s| {
+            (ws.module(s.callee.func.module).functions[s.callee.func.func].name.as_str()
+                == "host_tick")
+                .then_some(s.cause)
+        })
+    };
+
+    assert!(host_tick_severed(&desktop).is_none(), "desktop rejected a host symbol");
+    assert_eq!(
+        host_tick_severed(&web),
+        Some(Unrealizable::ClassUnsupported(
+            skull::instance_graph::BoundaryClass::Extern,
+        )),
+        "the web platform admitted a host symbol solely because luajit can call one"
+    );
+}
+
+#[test]
+fn platform_is_part_of_boundary_contract_identity() {
+    use skull::target_projection as tp;
+
+    let ws = check(
+        r#"
+extern(ffi, "stone") fn host_tick(n: int) -> int
+fn main() { let n = host_tick(1) }
+"#,
+    );
+    let (g, roots) = graph_for(&ws);
+    let desktop = artifact::realize(
+        &ws,
+        &g,
+        &ArtifactRequest::new(tp::LUAJIT_DESKTOP, &roots),
+    );
+    let ios = artifact::realize(
+        &ws,
+        &g,
+        &ArtifactRequest::new(tp::LUAJIT_IOS, &roots),
+    );
+    let host_tick = |view: &artifact::ArtifactView| {
+        view.boundaries
+            .iter()
+            .find(|(i, _)| {
+                ws.module(i.func.module).functions[i.func.func].name.as_str() == "host_tick"
+            })
+            .map(|(_, id)| id.clone())
+            .expect("host_tick boundary")
+    };
+
+    assert_ne!(
+        host_tick(&desktop),
+        host_tick(&ios),
+        "two platform contracts collapsed to one execution-backend identity"
+    );
+}
+
+#[test]
+fn in_game_shader_packaging_uses_the_runtime_adapted_source_profile() {
+    use skull::target_projection as tp;
+
+    assert_eq!(
+        tp::LUAJIT_DESKTOP.shader,
+        Some(tp::ShaderTargetSpec::Glsl(
+            skull_codegen_glsl::GlslProfile::Core330,
+        )),
+        "in-game packaging no longer carries the runtime-adapted Core330 source"
+    );
+    assert_eq!(
+        tp::LUAJIT_IOS.shader,
+        tp::LUAJIT_DESKTOP.shader,
+        "iOS selected an ES profile at build time instead of runtime adaptation"
+    );
+    assert_eq!(
+        tp::JAVASCRIPT_WEB.shader,
+        tp::LUAJIT_DESKTOP.shader,
+        "web selected an ES profile at build time instead of runtime adaptation"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // S 20a -- platform, execution and shader are SEPARATE axes.
 // ---------------------------------------------------------------------------
-
-/// Everything one artifact view decides, in a comparable form.
-///
-/// Built by projection rather than by deriving `PartialEq` on `ArtifactView`:
-/// a derive would compare whatever fields happen to exist, and the claim under
-/// test is about the NAMED decisions -- reachability, the declaration selected
-/// for each instance, how it is realized, what it is spelled, and the
-/// classification of every severed call. A field added later that these do not
-/// cover is a finding for whoever adds it, not a silent extension of the claim.
-#[derive(PartialEq, Debug)]
-struct Decisions {
-    roots: Vec<Instance>,
-    instances: Vec<Instance>,
-    /// (instance, selected declaration, realization kind).
-    realization: Vec<(Instance, skull_mir::mir::FuncRef, artifact::Realization)>,
-    boundaries: Vec<(Instance, skull::concrete_body::BoundaryId)>,
-    symbols: Vec<(Instance, String)>,
-    /// (caller, site, callee, CLASSIFICATION).
-    severed: Vec<(Instance, skull::instance_graph::Site, Instance, Unrealizable)>,
-    excluded: Vec<(Instance, Exclusion)>,
-    sites_walked: usize,
-    inline_deps: Vec<(String, &'static str, String)>,
-    deferred: Vec<&'static str>,
-}
-
-fn decisions(v: &artifact::ArtifactView) -> Decisions {
-    let mut severed: Vec<_> = v
-        .severed
-        .iter()
-        .map(|s| (s.caller.clone(), s.site.clone(), s.callee.clone(), s.cause))
-        .collect();
-    severed.sort();
-    let mut inline_deps: Vec<_> = v
-        .inline_deps
-        .iter()
-        .map(|d| {
-            let terminal = match &d.callee {
-                RealizedCallee::Boundary(b) => format!("boundary:{}", b.symbol),
-                RealizedCallee::Rock(i) => format!("rock:{:?}", i.func),
-            };
-            (format!("{:?}", d.owner), d.entry, terminal)
-        })
-        .collect();
-    inline_deps.sort();
-    Decisions {
-        roots: v.roots.iter().cloned().collect(),
-        instances: v.instances.iter().cloned().collect(),
-        realization: v
-            .realization
-            .iter()
-            .map(|(i, r)| (i.clone(), r.decl, r.kind))
-            .collect(),
-        boundaries: v.boundaries.iter().map(|(i, b)| (i.clone(), b.clone())).collect(),
-        symbols: v.symbols.iter().map(|(i, s)| (i.clone(), s.clone())).collect(),
-        severed,
-        excluded: v.excluded.iter().map(|e| (e.instance.clone(), e.cause)).collect(),
-        sites_walked: v.sites_walked,
-        inline_deps,
-        deferred: v.deferred.clone(),
-    }
-}
 
 /// A fixture with all three axes in play: an `extern` and a Lua-only inline body
 /// (so boundaries and severed calls both have a population), a generic so
@@ -1043,8 +1091,8 @@ fn main() {
 }
 "#;
 
-/// **The S 20a separation, measured.** Two targets whose EXECUTION axis is
-/// identical decide the same thing, however they are packaged: same
+/// **The S 20a separation, measured.** Two targets whose CPU target is
+/// identical decide the same thing under different shader packaging: same
 /// reachability, same selected declarations, same realizations, same severed
 /// classifications.
 ///
@@ -1054,10 +1102,8 @@ fn main() {
 /// and measured here, because a signature says what a function CAN read and
 /// this says what the answer actually is.
 ///
-/// The pair is not synthetic: this repo ships a desktop GL 3.3 artifact and an
-/// iOS GLES artifact off one luajit backend (`docs/ios-bringup.md`).
 #[test]
-fn execution_axes_alone_decide_realization() {
+fn shader_packaging_does_not_decide_cpu_realization() {
     use skull::target_projection as tp;
     let ws = check(AXES);
     let (g, roots) = graph_for(&ws);
@@ -1067,64 +1113,35 @@ fn execution_axes_alone_decide_realization() {
 
     // NON-VACUITY, first: the thing being compared has to be able to differ.
     // A view that decided nothing would satisfy every equality below.
-    let b = decisions(&base);
-    assert!(!b.instances.is_empty(), "the fixture retained no Rock instance");
-    assert!(!b.boundaries.is_empty(), "the fixture retained no boundary");
-    assert!(!b.inline_deps.is_empty(), "the fixture resolved no opaque dependency");
+    assert!(!base.instances.is_empty(), "the fixture retained no Rock instance");
+    assert!(!base.boundaries.is_empty(), "the fixture retained no boundary");
+    assert!(!base.inline_deps.is_empty(), "the fixture resolved no opaque dependency");
     assert!(
-        b.realization.iter().any(|(i, decl, _)| *decl != i.func),
+        base.realization.iter().any(|(i, r)| r.decl != i.func),
         "no instance selected a backend sibling, so declaration equality is vacuous"
     );
 
     // ...and a DIFFERENT execution axis really does change the answer. Without
     // this, "packaging changes nothing" could just mean nothing changes
     // anything.
-    assert_ne!(
-        decisions(&view(tp::JAVASCRIPT_WEB)),
-        b,
+    let js = view(tp::JAVASCRIPT_WEB);
+    assert!(
+        !base.same_cpu_decisions(&js),
         "changing the EXECUTION axis changed nothing, so the equalities below \
          are measuring an inert function"
     );
     assert!(
-        !decisions(&view(tp::JAVASCRIPT_WEB)).severed.is_empty(),
+        !js.severed.is_empty(),
         "the fixture severs nothing on JS, so severed classifications are not \
          part of what is being compared"
     );
 
-    // The real shipped pair: one execution axis, two platforms, two GLSL
-    // profiles.
-    assert_eq!(decisions(&view(tp::LUAJIT_IOS)), b, "packaging changed a CPU decision");
-
-    // The axes ISOLATED, composed here rather than declared as fixtures --
-    // which is itself the point: a new combination is a literal, not a variant.
+    // Composed here rather than declared as a fixture: a packaging variation is
+    // a field change, not a new target variant.
     let shader_only = tp::TargetSpec { name: "luajit-desktop-no-shader", shader: None, ..tp::LUAJIT_DESKTOP };
-    assert_eq!(
-        decisions(&view(shader_only)),
-        b,
+    assert!(
+        base.same_cpu_decisions(&view(shader_only)),
         "dropping the shader axis entirely changed a CPU decision"
-    );
-    let platform_only =
-        tp::TargetSpec { name: "luajit-web", platform: tp::WEB, ..tp::LUAJIT_DESKTOP };
-    assert_eq!(
-        decisions(&view(platform_only)),
-        b,
-        "changing the platform axis alone changed a CPU decision"
-    );
-    let both = tp::TargetSpec {
-        name: "luajit-android-spirv",
-        platform: tp::PlatformSpec { name: "android", kind: tp::PlatformKind::Android },
-        shader: Some(tp::ShaderTargetSpec {
-            name: "spirv-1.5",
-            target: tp::ShaderTarget::SpirV,
-            profile: "vulkan1.2",
-        }),
-        ..tp::LUAJIT_DESKTOP
-    };
-    assert_eq!(
-        decisions(&view(both)),
-        b,
-        "a platform and shader combination this repo has never declared changed \
-         a CPU decision"
     );
 }
 
@@ -1133,8 +1150,8 @@ fn execution_axes_alone_decide_realization() {
 /// S 20a exists to prevent, and the one thing structured axes cannot rule out
 /// by construction.
 ///
-/// Every name on every axis is replaced, and the fixture is the same one
-/// `execution_axes_alone_decide_realization` proves is non-vacuous.
+/// The artifact's report label is replaced; axis identity is structural and
+/// has no independently mutable display name.
 #[test]
 fn an_artifact_name_decides_nothing() {
     use skull::target_projection as tp;
@@ -1144,14 +1161,11 @@ fn an_artifact_name_decides_nothing() {
 
     let renamed = tp::TargetSpec {
         name: "\u{0}not-a-target",
-        platform: tp::PlatformSpec { name: "\u{0}nowhere", ..tp::LUAJIT_DESKTOP.platform },
-        execution: tp::ExecutionTargetSpec { name: "\u{0}nothing", ..tp::LUAJIT_DESKTOP.execution },
-        shader: Some(tp::ShaderTargetSpec { name: "\u{0}none", ..tp::GLSL_330 }),
+        ..tp::LUAJIT_DESKTOP
     };
-    assert_eq!(
-        decisions(&view(renamed)),
-        decisions(&view(tp::LUAJIT_DESKTOP)),
-        "renaming the axes changed a decision, so something is branching on a \
+    assert!(
+        view(renamed).same_cpu_decisions(&view(tp::LUAJIT_DESKTOP)),
+        "renaming the artifact changed a decision, so something is branching on a \
          target NAME rather than on a capability"
     );
 }
@@ -1166,36 +1180,23 @@ fn an_artifact_name_decides_nothing() {
 #[test]
 fn target_fixtures_are_combinations_of_shared_axes() {
     use skull::target_projection as tp;
-    use std::collections::BTreeMap;
 
-    let mut platforms_per_execution: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-    let mut executions_per_platform: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-    for spec in tp::ALL {
-        platforms_per_execution
-            .entry(spec.execution.name)
-            .or_default()
-            .push(spec.platform.name);
-        executions_per_platform
-            .entry(spec.platform.name)
-            .or_default()
-            .push(spec.execution.name);
-    }
+    let pairs = tp::ALL.iter().enumerate().flat_map(|(i, a)| {
+        tp::ALL.iter().skip(i + 1).map(move |b| (a, b))
+    });
+    let pairs: Vec<_> = pairs.collect();
     assert!(
-        platforms_per_execution.values().any(|p| p.len() > 1),
-        "no execution axis is packaged for two platforms: {platforms_per_execution:?}"
+        pairs.iter().any(|(a, b)| a.execution == b.execution && a.platform != b.platform),
+        "no complete execution axis is packaged for two platforms"
     );
     assert!(
-        executions_per_platform.values().any(|e| e.len() > 1),
-        "no platform hosts two execution axes: {executions_per_platform:?}"
+        pairs.iter().any(|(a, b)| a.platform == b.platform && a.execution != b.execution),
+        "no complete platform axis hosts two execution axes"
     );
-    // Every combination is DISTINCT as a whole. Sharing axes must not mean two
-    // fixtures are the same artifact under two names.
-    let mut triples: Vec<_> = tp::ALL
-        .iter()
-        .map(|s| (s.platform, s.execution.name, s.shader.map(|sh| sh.name)))
-        .collect();
-    let before = triples.len();
-    triples.sort_by_key(|(p, e, sh)| (p.name, *e, *sh));
-    triples.dedup_by_key(|(p, e, sh)| (p.name, *e, *sh));
-    assert_eq!(before, triples.len(), "two fixtures name the same combination");
+    assert!(
+        pairs.iter().all(|(a, b)| {
+            (a.platform, a.execution, a.shader) != (b.platform, b.execution, b.shader)
+        }),
+        "two fixtures carry the same complete axis combination"
+    );
 }

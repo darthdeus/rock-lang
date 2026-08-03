@@ -29,7 +29,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use bone_semantic::hir::{BindingInfo, Body, Expr, FnBackend};
+use bone_semantic::hir::{BindingInfo, Body, Expr};
 use bone_semantic::inference::{BodyInference, Workspace};
 use bone_semantic::prelude::Span;
 use comfy_la_arena::{ArenaMap, Idx};
@@ -40,6 +40,7 @@ use crate::instance_graph::{
     boundary_class_for, function_body, is_spanless, BoundaryClass, FunctionBody, Instance,
     InstanceGraph, Site, SiteOp, SiteOutcome,
 };
+use crate::target_projection::CpuTargetSpec;
 
 /// Which table a slot belongs to. Kept apart in the census because the two have
 /// independent denominators: a body with no locals still has expressions.
@@ -65,7 +66,7 @@ impl Slot {
 pub struct BoundaryId {
     pub declaration: FuncRef,
     pub class: BoundaryClass,
-    pub target: FnBackend,
+    pub target: CpuTargetSpec,
     pub symbol: String,
 }
 

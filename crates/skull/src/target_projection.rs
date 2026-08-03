@@ -9,13 +9,10 @@
 //! beside it. [`TargetSpec`] holds one of each, so a new target is a
 //! COMBINATION, not a match arm in every consumer.
 //!
-//! **CPU realization reads the EXECUTION axis only.** Plan S 20a: "CPU function
-//! ABI depends on `ExecutionTargetSpec`, not on which optional shader target is
-//! packaged beside it." That is enforced by the signature rather than by this
-//! comment -- `artifact::realize_decl` takes `&ExecutionTargetSpec` and has no
-//! way to reach a platform or a shader profile. `execution_axes_alone_decide_realization`
-//! is the measurement, and `an_artifact_name_decides_nothing` is the hostile
-//! control against a consumer branching on a target NAME.
+//! **Shader packaging cannot affect CPU realization.** Artifact admission takes
+//! [`CpuTargetSpec`] -- platform plus execution -- because host capabilities
+//! affect available boundaries. It cannot inspect the optional shader target.
+//! `shader_packaging_does_not_decide_cpu_realization` measures that separation.
 //!
 //! The COUNT-ONLY projection this module used to return is gone. Counting
 //! `g.boundaries` answered a symbol-keyed question -- two `@nomangle` backend
@@ -31,7 +28,7 @@ use crate::instance_graph::BoundaryClass;
 /// ABI decision actually asks; none is a target NAME.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Capabilities {
-    /// Can call a foreign C symbol -- decides `extern` (S 1.1).
+    /// Can issue a foreign C call. The platform must also expose host symbols.
     pub foreign_symbols: bool,
     /// Has a verbatim-body backend of this flavour -- decides `inline(..)`
     /// (S 1.2).
@@ -51,13 +48,10 @@ pub struct Capabilities {
 /// One EXECUTION backend's identity and capabilities (plan S 20a's
 /// `ExecutionTargetSpec`, reduced to the fields Stage 2 can actually consume).
 ///
-/// This is one axis of a [`TargetSpec`], not the whole target. It is also the
-/// ONLY axis CPU realization is given: `artifact::realize_decl` takes a
-/// `&ExecutionTargetSpec`, so packaging a different shader beside an artifact
-/// cannot reach it.
+/// This is one axis of a [`TargetSpec`], not the whole target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExecutionTargetSpec {
-    pub name: &'static str,
+    pub kind: ExecutionBackend,
     pub pointer_width: u8,
     /// The `FnBackend` whose declarations this artifact emits, when it has one.
     /// `None` is a target with no Rock-level backend of its own: it realizes
@@ -66,13 +60,21 @@ pub struct ExecutionTargetSpec {
     pub caps: Capabilities,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExecutionBackend {
+    LuaJit,
+    JavaScript,
+    NativeC,
+    WebAssembly,
+}
+
 /// Where an artifact RUNS. An axis of its own: one execution backend is
 /// packaged for several platforms (luajit on desktop AND on iOS), and one
 /// platform hosts several backends (the web runs JavaScript and WebAssembly).
 ///
-/// Plan S 20a's payloads (os/arch, browser capabilities, api level) are not
-/// modelled yet -- nothing consumes them. What exists is the AXIS, so a platform
-/// distinction lands as a field here rather than as a new target variant.
+/// Plan S 20a's detailed payloads (os/arch, browser limits, API level) remain
+/// demand-driven. Host-symbol availability is already live in artifact
+/// admission, so platform is not decorative.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlatformKind {
     Desktop,
@@ -83,32 +85,26 @@ pub enum PlatformKind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlatformCapabilities {
+    /// The host exposes symbols an execution backend capable of foreign calls
+    /// can bind. Browser and WASI artifacts require declared imports instead.
+    pub host_symbols: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlatformSpec {
-    /// DISPLAY ONLY. Nothing branches on it; `an_artifact_name_decides_nothing`
-    /// renames every axis and asserts the view is unchanged.
-    pub name: &'static str,
     pub kind: PlatformKind,
+    pub caps: PlatformCapabilities,
 }
 
 /// What is packaged BESIDE the CPU artifact. Optional, because a target may
 /// have no GPU route at all.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ShaderTarget {
-    Glsl,
+pub enum ShaderTargetSpec {
+    Glsl(skull_codegen_glsl::GlslProfile),
     SpirV,
     Wgsl,
     Msl,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ShaderTargetSpec {
-    /// DISPLAY ONLY. See [`PlatformSpec::name`].
-    pub name: &'static str,
-    pub target: ShaderTarget,
-    /// The profile or environment string the shader emitter selects. GLSL's
-    /// profile is chosen by the runtime GL context, so a desktop and a GLES
-    /// artifact differ HERE and nowhere on the CPU side.
-    pub profile: &'static str,
 }
 
 /// One artifact's target: plan S 20a's `TargetSpec`.
@@ -126,21 +122,43 @@ pub struct TargetSpec {
     pub shader: Option<ShaderTargetSpec>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CpuTargetSpec {
+    pub platform: PlatformSpec,
+    pub execution: ExecutionTargetSpec,
+}
+
+impl TargetSpec {
+    pub fn cpu(self) -> CpuTargetSpec {
+        CpuTargetSpec { platform: self.platform, execution: self.execution }
+    }
+}
+
 // --- the axes, declared once each and shared by the combinations below -------
 
-pub const DESKTOP: PlatformSpec = PlatformSpec { name: "desktop", kind: PlatformKind::Desktop };
-pub const WEB: PlatformSpec = PlatformSpec { name: "web", kind: PlatformKind::Web };
-pub const IOS: PlatformSpec = PlatformSpec { name: "ios", kind: PlatformKind::Ios };
-pub const WASI: PlatformSpec = PlatformSpec { name: "wasi", kind: PlatformKind::Wasi };
+pub const DESKTOP: PlatformSpec = PlatformSpec {
+    kind: PlatformKind::Desktop,
+    caps: PlatformCapabilities { host_symbols: true },
+};
+pub const WEB: PlatformSpec = PlatformSpec {
+    kind: PlatformKind::Web,
+    caps: PlatformCapabilities { host_symbols: false },
+};
+pub const IOS: PlatformSpec = PlatformSpec {
+    kind: PlatformKind::Ios,
+    caps: PlatformCapabilities { host_symbols: true },
+};
+pub const WASI: PlatformSpec = PlatformSpec {
+    kind: PlatformKind::Wasi,
+    caps: PlatformCapabilities { host_symbols: false },
+};
 
 pub const GLSL_330: ShaderTargetSpec =
-    ShaderTargetSpec { name: "glsl-330", target: ShaderTarget::Glsl, profile: "330 core" };
-pub const GLSL_ES_300: ShaderTargetSpec =
-    ShaderTargetSpec { name: "glsl-es-300", target: ShaderTarget::Glsl, profile: "300 es" };
+    ShaderTargetSpec::Glsl(skull_codegen_glsl::GlslProfile::Core330);
 
 /// The luajit execution backend.
 pub const LUAJIT: ExecutionTargetSpec = ExecutionTargetSpec {
-    name: "luajit",
+    kind: ExecutionBackend::LuaJit,
     backend: Some(bone_semantic::hir::FnBackend::Lua),
     pointer_width: 64,
     caps: Capabilities {
@@ -155,7 +173,7 @@ pub const LUAJIT: ExecutionTargetSpec = ExecutionTargetSpec {
 
 /// The browser execution backend.
 pub const JAVASCRIPT: ExecutionTargetSpec = ExecutionTargetSpec {
-    name: "javascript",
+    kind: ExecutionBackend::JavaScript,
     backend: Some(bone_semantic::hir::FnBackend::Js),
     pointer_width: 64,
     caps: Capabilities {
@@ -172,7 +190,7 @@ pub const JAVASCRIPT: ExecutionTargetSpec = ExecutionTargetSpec {
 /// suspendable frame, 32-bit floats. It exists to be maximally UNLIKE the two
 /// real backends while sharing their logical graph.
 pub const NATIVE_C64: ExecutionTargetSpec = ExecutionTargetSpec {
-    name: "native-c64",
+    kind: ExecutionBackend::NativeC,
     backend: None,
     pointer_width: 16,
     caps: Capabilities {
@@ -189,7 +207,7 @@ pub const NATIVE_C64: ExecutionTargetSpec = ExecutionTargetSpec {
 /// instantiation, not a `dlopen` the compiler can assume, so `foreign_symbols`
 /// is false -- an `extern` needs an import entry the artifact must carry.
 pub const WASM32: ExecutionTargetSpec = ExecutionTargetSpec {
-    name: "wasm32",
+    kind: ExecutionBackend::WebAssembly,
     backend: None,
     pointer_width: 32,
     caps: Capabilities {
@@ -204,11 +222,8 @@ pub const WASM32: ExecutionTargetSpec = ExecutionTargetSpec {
 
 // --- the combinations --------------------------------------------------------
 //
-// Each is a literal over the axes above. `LUAJIT_DESKTOP` and `LUAJIT_IOS` are
-// the pair that makes the separation checkable: ONE execution axis, two
-// platforms, two shader profiles -- and this repo really ships both (desktop GL
-// 3.3 and iOS GLES, `docs/ios-bringup.md`), so the pair is not invented for the
-// test.
+// Each is a literal over the axes above. In-game GLSL is packaged as Core330 on
+// every platform; the runtime GL context performs the GLES header adaptation.
 
 pub const LUAJIT_DESKTOP: TargetSpec = TargetSpec {
     name: "luajit-desktop",
@@ -221,14 +236,14 @@ pub const LUAJIT_IOS: TargetSpec = TargetSpec {
     name: "luajit-ios",
     platform: IOS,
     execution: LUAJIT,
-    shader: Some(GLSL_ES_300),
+    shader: Some(GLSL_330),
 };
 
 pub const JAVASCRIPT_WEB: TargetSpec = TargetSpec {
     name: "javascript-web",
     platform: WEB,
     execution: JAVASCRIPT,
-    shader: Some(GLSL_ES_300),
+    shader: Some(GLSL_330),
 };
 
 pub const NATIVE_C64_DESKTOP: TargetSpec = TargetSpec {
@@ -250,10 +265,14 @@ pub const ALL: &[TargetSpec] =
 /// contract is that the entry exists for EVERY target skull emits, and the
 /// compile-time rejection in `stdlib_funcref` is what enforces it. A projection
 /// that let one be unavailable would be asserting the opposite of the contract.
-pub fn supports(caps: &Capabilities, class: BoundaryClass) -> bool {
+pub fn supports(target: &CpuTargetSpec, class: BoundaryClass) -> bool {
     match class {
-        BoundaryClass::Extern => caps.foreign_symbols,
-        BoundaryClass::InlineBody => caps.inline_lua || caps.inline_js,
+        BoundaryClass::Extern => {
+            target.execution.caps.foreign_symbols && target.platform.caps.host_symbols
+        }
+        BoundaryClass::InlineBody => {
+            target.execution.caps.inline_lua || target.execution.caps.inline_js
+        }
         BoundaryClass::Intrinsic => true,
         BoundaryClass::ErasedRuntimeEntry => true,
     }
