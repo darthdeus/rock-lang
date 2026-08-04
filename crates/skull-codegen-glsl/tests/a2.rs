@@ -528,6 +528,10 @@ fn instanced_locations_continue_across_structs() {
 }
 
 // --- UniformArray<T> + at() + @size(N) (decision 3; pulled into A2c by grass) -
+//
+// These cover the BODY half -- `at()` lowering to indexing, and the int loop
+// bound. The array BLOCK the declarations now live in has its own coverage in
+// `uniform_array_block_decl.rs`.
 
 /// The grass shape: a vertex-stage uniform array read in a dynamic-bound loop.
 #[test]
@@ -548,7 +552,7 @@ fn uniform_array_vertex_decl_and_at() {
         fn fr(vary: Vary) -> Vec4 { return Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 } }
     "#;
     let glsl = emit_pipeline(src, "vt", "fr").expect("emit");
-    assert!(glsl.contains("uniform vec2 entity_positions[32];"), "got:\n{glsl}");
+    assert!(glsl.contains("    vec2 entity_positions[32];"), "got:\n{glsl}");
     assert!(glsl.contains("entity_positions["), "at() must render as indexing:\n{glsl}");
     assert!(!glsl.contains("at("), "at() must not render as a call:\n{glsl}");
     // The loop-bound temp for min(int, int) must be int: ES300 has no implicit
@@ -577,7 +581,7 @@ fn uniform_array_fragment_stage() {
         }
     "#;
     let glsl = emit_pipeline(src, "vt", "fr").expect("emit");
-    assert!(glsl.contains("uniform float weights[4];"), "got:\n{glsl}");
+    assert!(glsl.contains("    float weights[4];"), "got:\n{glsl}");
     assert!(glsl.contains("weights[0]"), "got:\n{glsl}");
 }
 

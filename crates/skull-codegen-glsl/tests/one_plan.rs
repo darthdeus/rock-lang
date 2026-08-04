@@ -23,14 +23,14 @@ static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         .iter()
         .map(|f| {
             let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());
-            skull_parser::parse_module(f.contents, id).expect("stdlib parse")
+            skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
         })
         .collect()
 });
 
 fn workspace(src: &str) -> (bone_semantic::inference::Workspace, bone_semantic::prelude::ModuleId) {
     let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module(src, Ustr::from("<test>")).expect("parse"));
+    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
     (ws, mid)
@@ -293,4 +293,41 @@ fn good_pipe_frag(vary: PipeVary, @textures t: PipeTex) -> Vec4 {
     let answers = pipeline_answers(pipeline, "good_vert", "good_pipe_frag");
     assert_eq!(answers.0, Ok(()), "a valid A2 pipeline was refused by the check");
     assert_agree("valid pipeline", answers);
+}
+
+/// The ES 3.0 block budget is enforced on the REAL entry path, and the check and
+/// the emitter answer identically -- the whole point of one plan.
+///
+/// Population matters here: this repo's live blocks are all a few hundred bytes,
+/// so a budget check could sit dead forever and look fine. `@uniform` groups get
+/// far bigger the moment uniform ARRAYS move inside a block (backlog 4b), which
+/// is what this guards. Both sides of the boundary are driven, because the
+/// rejecting side alone cannot show the check admits anything.
+#[test]
+fn the_gles_block_budget_is_enforced_where_shaders_are_planned() {
+    // Mat4 is 64 std140 bytes, the densest member a block can hold.
+    let src = |n: usize| {
+        let fields: Vec<String> = (0..n).map(|i| format!("m{i}: Mat4")).collect();
+        format!(
+            "value BigU {{ {} }}\n\n\
+             @shader(fragment)\n\
+             fn big_frag(@uniform u: BigU, tc: Vec2) -> Vec4 {{\n\
+             \x20   let _ = tc\n\
+             \x20   return u.m0 * Vec4 {{ x: 1.0, y: 0.0, z: 0.0, w: 1.0 }}\n\
+             }}\n",
+            fields.join(", ")
+        )
+    };
+
+    let at_limit = entry_answers(&src(256), "big_frag");
+    assert_eq!(at_limit.0, Ok(()), "16384 bytes is the budget, not over it");
+    assert_agree("block exactly at the ES 3.0 budget", at_limit);
+
+    let over = entry_answers(&src(257), "big_frag");
+    let msg = over.0.clone().expect_err("16448 bytes must be refused");
+    assert!(
+        msg.contains("16448") && msg.contains("16384"),
+        "the rejection must name the size and the budget, got: {msg}"
+    );
+    assert_agree("block over the ES 3.0 budget", over);
 }

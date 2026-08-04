@@ -29,7 +29,8 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use skull_codegen_lua::mangle_fn;
 use skull_mir::cfg::reverse_postorder;
 use skull_mir::gpu_layout::{
-    AttrKind, SamplerKind, UniformBlockPlan, WireKind, texture_slots, uniform_block, vertex_attrs,
+    ArrayMemberDecl, AttrKind, SamplerKind, UniformArrayBlockPlan, UniformBlockPlan, WireKind,
+    texture_slots, uniform_array_block, uniform_block, vertex_attrs,
 };
 use skull_mir::intrinsics::{Emission, IntrinsicEntry, IntrinsicTable};
 use skull_mir::lower::{lower_function, ScalarCtx};
@@ -1955,15 +1956,123 @@ pub struct ShaderEmission {
     /// The single authority for each block's bytes: the GLSL declaration, the
     /// CPU packer and the link-time driver assertion all read it.
     pub uniform_blocks: Vec<(u32, UniformBlockPlan)>,
+    /// The program's `UniformArray<T>` blocks, each paired with its BINDING
+    /// INDEX -- one per stage that declares `@size(N)` params, empty otherwise.
+    ///
+    /// A SEPARATE block from the stage's scalar group, and separate for a
+    /// LIFETIME reason rather than a typing one: `SpriteFragU` changes per DRAW
+    /// while the light arrays change per ACTIVATION, so one combined block would
+    /// force either a 1.8 KB copy into every batch or partial-update state --
+    /// and "a block is uploaded WHOLE" is the invariant that deleted a leak
+    /// class. Two blocks keep whole-block uploads and independent fingerprints.
+    pub uniform_array_blocks: Vec<(u32, UniformArrayBlockPlan)>,
+}
+
+/// A program's uniform blocks -- scalar AND array -- flattened into the
+/// PARALLEL LISTS the registration call carries.
+///
+/// One entry per block in `names`/`bindings`/`sizes`/`fingerprints`/`counts`,
+/// with the members of every block concatenated into the `member_*` lists and
+/// `counts[i]` saying how many belong to block `i`. A hand-written driver never
+/// has to nest, which is why the shape is this and not a table.
+///
+/// **Built once, read by both hosts.** The Lua and JS registration lines are
+/// written by different emitters, and a second flattener is how the two would
+/// come to disagree about member order -- the offsets the host packs against
+/// are positional, so a divergence there is silent wrong bytes rather than an
+/// error.
+///
+/// Array blocks are appended AFTER the scalar ones. They travel the same wire
+/// deliberately: a block is a block to the driver -- bind, verify against the
+/// plan, allocate scratch, upload whole -- and giving arrays their own
+/// registration call would split a registration that has to be transactional.
+/// The three per-member lists are what tells them apart:
+///
+/// - `member_kinds` is the [`WireKind::code`] of every member, array or not;
+/// - `member_capacities` is `0` for a scalar member and `N` for a `@size(N)`
+///   array -- so "how many elements may be written here" answers "is this an
+///   array" without a separate flag;
+/// - `member_strides` is `0` for a scalar member and the std140 array stride
+///   otherwise. Sent rather than re-derived host-side: it is 16 for every kind
+///   an array may hold today, and a host that recomputed it would be a second
+///   layout authority the moment that stops being true.
+#[derive(Debug, Default)]
+pub struct BlockWire<'a> {
+    pub names: Vec<&'a str>,
+    pub bindings: Vec<i64>,
+    pub sizes: Vec<i64>,
+    pub fingerprints: Vec<i64>,
+    pub counts: Vec<i64>,
+    pub member_names: Vec<&'a str>,
+    pub member_offsets: Vec<i64>,
+    pub member_kinds: Vec<i64>,
+    pub member_capacities: Vec<i64>,
+    pub member_strides: Vec<i64>,
+}
+
+impl<'a> BlockWire<'a> {
+    pub fn of(
+        scalar: impl Iterator<Item = &'a (u32, UniformBlockPlan)>,
+        arrays: impl Iterator<Item = &'a (u32, UniformArrayBlockPlan)>,
+    ) -> Self {
+        let mut w = BlockWire::default();
+        for (binding, p) in scalar {
+            w.names.push(p.struct_name.as_str());
+            w.bindings.push(*binding as i64);
+            w.sizes.push(p.size as i64);
+            w.fingerprints.push(p.fingerprint() as i64);
+            w.counts.push(p.members.len() as i64);
+            for m in &p.members {
+                w.member_names.push(m.name.as_str());
+                w.member_offsets.push(m.offset as i64);
+                w.member_kinds.push(m.kind.code() as i64);
+                // A scalar member takes no array payload, and the host's push
+                // verbs reject a capacity-0 target rather than writing one
+                // element into it.
+                w.member_capacities.push(0);
+                w.member_strides.push(0);
+            }
+        }
+        for (binding, p) in arrays {
+            w.names.push(p.block_name.as_str());
+            w.bindings.push(*binding as i64);
+            w.sizes.push(p.size as i64);
+            w.fingerprints.push(p.fingerprint() as i64);
+            w.counts.push(p.members.len() as i64);
+            for m in &p.members {
+                w.member_names.push(m.name.as_str());
+                w.member_offsets.push(m.offset as i64);
+                w.member_kinds.push(m.elem.code() as i64);
+                w.member_capacities.push(m.capacity as i64);
+                w.member_strides.push(m.stride as i64);
+            }
+        }
+        w
+    }
 }
 
 /// Uniform block binding indices, assigned by param ROLE so the slot is
 /// structural rather than a consequence of how many groups a program declares.
 /// Slot 0 is RESERVED for `@engine` whether or not the program has one, which is
 /// what lets the engine reject a foreign block there at registration.
+///
+/// The array slots are reserved on the same terms. ES 3.0 guarantees 12 uniform
+/// blocks per stage and 24 combined, so five reserved indices are affordable.
 pub const UNIFORM_BLOCK_BINDING_ENGINE: u32 = 0;
 pub const UNIFORM_BLOCK_BINDING_VERTEX: u32 = 1;
 pub const UNIFORM_BLOCK_BINDING_FRAGMENT: u32 = 2;
+pub const UNIFORM_BLOCK_BINDING_VERTEX_ARRAYS: u32 = 3;
+pub const UNIFORM_BLOCK_BINDING_FRAGMENT_ARRAYS: u32 = 4;
+
+/// The GLSL block name for a stage's array block, minted from the stage entry.
+///
+/// Deterministic and per-STAGE: the two entries of a pipeline always have
+/// different names, so a program's two array blocks cannot collide with each
+/// other. A collision with a user's `@uniform` group name is possible and is
+/// rejected (`check_block_name_collisions`), never renamed around.
+fn array_block_name(entry: Ustr) -> Ustr {
+    Ustr::from(&format!("{entry}_Arrays"))
+}
 
 /// **One stage's validated plan**: its lowered body, the emittable helpers it
 /// reaches in emission order, and the prelude flags those bodies imply.
@@ -2167,6 +2276,10 @@ fn render_shader_entry(
             .cloned()
             .map(|p| (UNIFORM_BLOCK_BINDING_FRAGMENT, p))
             .collect(),
+        // A1 has none: `classify_entry` refuses a `UniformArray` param outright
+        // (it is not a tier-0 leaf and carries no role), so arrays are an A2
+        // pipeline feature and this is an absence rather than an omission.
+        uniform_array_blocks: Vec::new(),
     })
 }
 
@@ -2228,8 +2341,8 @@ struct VertexShape {
     uniforms: Vec<(Ustr, GlslTy)>,
     /// Sampler params (rare in vertex, but legal).
     samplers: Vec<(usize, Ustr, GlslTy)>,
-    /// `UniformArray<T>` params: (index, name, element type, @size capacity).
-    arrays: Vec<(usize, Ustr, GlslTy, i64)>,
+    /// `UniformArray<T>` params, declaration order -- the array block's members.
+    arrays: Vec<ArrayParam>,
     /// The varyings value-struct return type.
     varyings_ty: TyId,
 }
@@ -2262,8 +2375,8 @@ struct FragShape {
     texture_group: Option<Ustr>,
     uniforms: Vec<(Ustr, GlslTy)>,
     samplers: Vec<(usize, Ustr, GlslTy)>,
-    /// `UniformArray<T>` params: (index, name, element type, @size capacity).
-    arrays: Vec<(usize, Ustr, GlslTy, i64)>,
+    /// `UniformArray<T>` params, declaration order -- the array block's members.
+    arrays: Vec<ArrayParam>,
     /// MRT outputs: `Some` when the entry returns a value struct of Vec4/int
     /// fields -> one `layout(location=N) out <ty> <field>` per field, in
     /// declaration order. `None` = the single implicit `FragColor` output.
@@ -2290,10 +2403,17 @@ fn anno_int(annos: &[bone_semantic::hir::Annotation], name: &str) -> Option<i64>
         })
 }
 
-/// The element type of a `UniformArray<T>`-typed param, or `None` when the type
-/// is not the uniform-array phantom. Elements are the corpus set (decision 3):
-/// float, int, Vec2, Vec4.
-fn uniform_array_elem(ws: &Workspace, ty: TyId, span: Span) -> Result<Option<GlslTy>, CompilerError> {
+/// The element WIRE KIND of a `UniformArray<T>`-typed param, or `None` when the
+/// type is not the uniform-array phantom.
+///
+/// A wire kind and not a [`GlslTy`], because the array block's DECLARATION is
+/// rendered from the layout plan: classifying the element here as a GLSL type
+/// too would make the emitter a second authority on what an array holds, free to
+/// disagree with the one that computed the offsets. Which kinds are ADMITTED is
+/// likewise `uniform_array_block`'s answer, not this function's -- it rejects
+/// `Vec3`/`Mat4`/`bool` with a span, so re-stating the set here would be the same
+/// drift one level down.
+fn uniform_array_elem(ws: &Workspace, ty: TyId, span: Span) -> Result<Option<WireKind>, CompilerError> {
     let Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), params }) = ty_expr(ws, ty) else {
         return Ok(None);
     };
@@ -2303,13 +2423,91 @@ fn uniform_array_elem(ws: &Workspace, ty: TyId, span: Span) -> Result<Option<Gls
     let Some(first) = params.into_iter().next() else {
         return Err(err(span, "shader: UniformArray needs an element type argument"));
     };
-    match glsl_ty(ws, ty.with_idx(first), span, "uniform-array element")? {
-        t @ (GlslTy::Float | GlslTy::Int | GlslTy::Vec2 | GlslTy::Vec4) => Ok(Some(t)),
-        other => Err(err(span, format!(
-            "shader: UniformArray element type `{}` is not supported (allowed: float, int, Vec2, Vec4)",
-            other.name()
-        ))),
+    let ety = ty.with_idx(first);
+    skull_mir::gpu_layout::wire_kind(ws, ety).map(Some).ok_or_else(|| {
+        err(span, format!(
+            "shader: UniformArray element type `{}` has no std140 form (allowed: float, int, Vec2, Vec4)",
+            glsl_ty(ws, ety, span, "uniform-array element")
+                .map(|t| t.name().to_string())
+                .unwrap_or_else(|_| "?".to_string())
+        ))
+    })
+}
+
+/// One classified `UniformArray<T>` param: where it sits in the entry's
+/// signature (so it can be dropped from the emitted one) and its DECLARATION for
+/// the layout planner.
+struct ArrayParam {
+    param: usize,
+    decl: ArrayMemberDecl,
+}
+
+/// Classify param `i` as an array member, or `None` when it is not one.
+///
+/// The `@size` ANNOTATION's span travels on the decl and is what every layout
+/// rejection is reported at. `ParamDecl` carries no span of its own (that is
+/// bone's, and off limits), and the annotation is both present on every array
+/// param by construction and the exact thing an author edits to fix a capacity
+/// or budget rejection.
+fn classify_array_param(
+    ws: &Workspace,
+    pd: &bone_semantic::hir::ParamDecl,
+    i: usize,
+    span: Span,
+    stage: &str,
+) -> Result<Option<ArrayParam>, CompilerError> {
+    let Some(elem) = uniform_array_elem(ws, pd.ty, span)? else { return Ok(None) };
+    let anno = pd.annotations.iter().find(|a| a.name.name.as_str() == "size").ok_or_else(|| {
+        err(span, format!(
+            "shader {stage}: uniform-array param `{}` needs @size(N) (the declared GLSL array capacity)",
+            pd.name
+        ))
+    })?;
+    let n = anno_int(&pd.annotations, "size").expect("@size arity/type is registry-validated");
+    // `N` is source-controlled, so it reaches the layout as a `u32` only through
+    // a rejection: a negative or absurd literal must not wrap into a small
+    // capacity that then passes the very budget check it should fail.
+    let capacity = u32::try_from(n).map_err(|_| {
+        CompilerError::new_with_label(anno.span, format!(
+            "shader {stage}: uniform-array param `{}` has @size({n}), which is not a usable element count",
+            pd.name
+        ))
+    })?;
+    Ok(Some(ArrayParam {
+        param: i,
+        decl: ArrayMemberDecl { name: pd.name, elem, capacity, span: anno.span },
+    }))
+}
+
+/// The array block for one stage, or `None` when the stage declares no arrays.
+/// An empty block binds nothing, so the absence stays an absence.
+fn stage_array_block(
+    entry: Ustr,
+    arrays: &[ArrayParam],
+) -> Result<Option<UniformArrayBlockPlan>, CompilerError> {
+    if arrays.is_empty() {
+        return Ok(None);
     }
+    let decls: Vec<ArrayMemberDecl> = arrays.iter().map(|a| a.decl).collect();
+    uniform_array_block(array_block_name(entry), &decls).map(Some)
+}
+
+/// The `layout(std140) uniform <Blk> { T name[N]; .. };` declaration for an
+/// array block.
+///
+/// Every line comes from the PLAN -- element kind through [`wire_glsl_ty`], the
+/// same function the scalar declaration uses, and capacity from the member the
+/// offsets were computed for. The emitter deliberately holds no `GlslTy` for an
+/// array element: a second classification of the same param is exactly how a
+/// declaration and a layout drift into disagreeing, and "one layout authority"
+/// would stop being true the moment it existed.
+fn uniform_array_block_decl(plan: &UniformArrayBlockPlan) -> String {
+    let mut s = format!("layout(std140) uniform {} {{\n", plan.block_name);
+    for m in &plan.members {
+        s.push_str(&format!("    {} {}[{}];\n", wire_glsl_ty(m.elem), m.name, m.capacity));
+    }
+    s.push_str("};\n");
+    s
 }
 
 /// The [`StructDef`] behind a nominal type, if any.
@@ -2476,12 +2674,8 @@ fn classify_vertex(ws: &Workspace, f: &Function) -> Result<VertexShape, Compiler
     let mut engine_group: Option<Ustr> = None;
     let mut engine_params: Vec<usize> = Vec::new();
     for (i, pd) in f.param_decls.iter().enumerate() {
-        if let Some(elem) = uniform_array_elem(ws, pd.ty, span)? {
-            let n = anno_int(&pd.annotations, "size").ok_or_else(|| err(span, format!(
-                "shader vertex: uniform-array param `{}` needs @size(N) (the declared GLSL array capacity)",
-                pd.name
-            )))?;
-            arrays.push((i, pd.name, elem, n));
+        if let Some(a) = classify_array_param(ws, pd, i, span, "vertex")? {
+            arrays.push(a);
             continue;
         }
         if has_anno(&pd.annotations, "textures") {
@@ -2643,12 +2837,8 @@ fn classify_pipeline_fragment(ws: &Workspace, f: &Function, vert_varyings_ty: Ty
     let mut engine_params: Vec<usize> = Vec::new();
     let mut engine_uniforms: Vec<(Ustr, GlslTy)> = Vec::new();
     for (i, pd) in f.param_decls.iter().enumerate().skip(1) {
-        if let Some(elem) = uniform_array_elem(ws, pd.ty, span)? {
-            let n = anno_int(&pd.annotations, "size").ok_or_else(|| err(span, format!(
-                "shader fragment: uniform-array param `{}` needs @size(N) (the declared GLSL array capacity)",
-                pd.name
-            )))?;
-            arrays.push((i, pd.name, elem, n));
+        if let Some(a) = classify_array_param(ws, pd, i, span, "fragment")? {
+            arrays.push(a);
             continue;
         }
         if has_anno(&pd.annotations, "textures") {
@@ -2785,6 +2975,7 @@ fn emit_vertex_stage(
     varyings: &VaryingsShape,
     vert_block: Option<&UniformBlockPlan>,
     engine_block: Option<&UniformBlockPlan>,
+    array_block: Option<&UniformArrayBlockPlan>,
 ) -> Result<(String, Vec<FuncRef>), CompilerError> {
     let fref = stage.fref;
     let shape = EntryShape {
@@ -2804,7 +2995,7 @@ fn emit_vertex_stage(
             .chain(v.uniforms.iter().copied())
             .collect(),
         samplers: v.samplers.clone(),
-        arrays: v.arrays.iter().map(|&(i, ..)| i).collect(),
+        arrays: v.arrays.iter().map(|a| a.param).collect(),
         texture_group: v.texture_group,
         // A2 keeps loose uniforms until the second slice.
         uniform_group: None,
@@ -2834,11 +3025,11 @@ fn emit_vertex_stage(
             }
         }
     }
-    // `UniformArray<T>` stays LOOSE either way: it is a param-only phantom, and
-    // moving an array inside a block needs a host payload model that does not
-    // exist yet.
-    for (_, n, t, cap) in &v.arrays {
-        out.push_str(&format!("uniform {} {}[{cap}];\n", t.name(), n));
+    // The stage's `@size(N)` params, as ONE std140 block at their own reserved
+    // binding. Separate from the scalar block above because their LIFETIME is:
+    // arrays change per activation, the scalar group per draw.
+    if let Some(plan) = array_block {
+        out.push_str(&uniform_array_block_decl(plan));
     }
     if vert_block.is_some() || engine_block.is_some() || !v.uniforms.is_empty() || !v.arrays.is_empty() {
         out.push('\n');
@@ -2860,6 +3051,7 @@ fn emit_fragment_stage(
     varyings: &VaryingsShape,
     frag_block: Option<&UniformBlockPlan>,
     engine_block: Option<&UniformBlockPlan>,
+    array_block: Option<&UniformArrayBlockPlan>,
 ) -> Result<(String, Vec<FuncRef>), CompilerError> {
     let fref = stage.fref;
     // MRT: the entry is emitted as `void main()` destructuring its returned
@@ -2883,7 +3075,7 @@ fn emit_fragment_stage(
             .chain(fs.uniforms.iter().copied())
             .collect(),
         samplers: fs.samplers.clone(),
-        arrays: fs.arrays.iter().map(|&(i, ..)| i).collect(),
+        arrays: fs.arrays.iter().map(|a| a.param).collect(),
         main_out,
         texture_group: fs.texture_group,
         // A2 keeps loose uniforms until the second slice.
@@ -2917,9 +3109,9 @@ fn emit_fragment_stage(
             }
         }
     }
-    // Loose for the same reason as the vertex stage's arrays.
-    for (_, n, t, cap) in &fs.arrays {
-        out.push_str(&format!("uniform {} {}[{cap}];\n", t.name(), n));
+    // The fragment stage's array block -- see the vertex stage.
+    if let Some(plan) = array_block {
+        out.push_str(&uniform_array_block_decl(plan));
     }
     for (_, n, t) in &fs.samplers {
         out.push_str(&format!("uniform {} {};\n", t.uniform_decl(), n));
@@ -2978,16 +3170,52 @@ fn check_pipeline_collisions(
     let names = v.attrs.iter().map(|&(n, _, _)| n)
         .chain(v.uniforms.iter().map(|&(n, _)| n))
         .chain(v.samplers.iter().map(|&(_, n, _)| n))
-        .chain(v.arrays.iter().map(|&(_, n, ..)| n))
+        .chain(v.arrays.iter().map(|a| a.decl.name))
         .chain(varyings.varyings.iter().map(|&(n, _, _)| n))
         .chain(fs.uniforms.iter().map(|&(n, _)| n))
         .chain(fs.samplers.iter().map(|&(_, n, _)| n))
-        .chain(fs.arrays.iter().map(|&(_, n, ..)| n))
+        .chain(fs.arrays.iter().map(|a| a.decl.name))
         .chain(mrt_outputs)
         .chain(engine_members);
     for n in names {
         if !seen.insert(n) {
             return Err(err(span, format!("shader pipeline: name `{n}` would collide (attributes, uniforms, engine-block members, varyings, samplers and reserved names share one GLSL namespace across both stages)")));
+        }
+    }
+    Ok(())
+}
+
+/// Reject two blocks of one program sharing a BLOCK name.
+///
+/// Block names are their own GLSL namespace -- distinct from the member names
+/// `check_pipeline_collisions` censuses, which is why this is a second check and
+/// not a line in that one. It matters because an array block's name is MINTED
+/// (`<entry>_Arrays`) rather than written by the author: a user struct that
+/// happens to spell it would otherwise produce two `layout(std140) uniform
+/// <same>` declarations, which is a link error carrying no Rock span. Minting a
+/// different name instead is the fallback this repo does not take -- the
+/// compiler's job is to refuse the program.
+fn check_block_name_collisions(
+    scalar: [Option<&UniformBlockPlan>; 3],
+    arrays: [Option<&UniformArrayBlockPlan>; 2],
+    span: Span,
+) -> Result<(), CompilerError> {
+    let mut seen: HashSet<Ustr> = HashSet::default();
+    // The engine block is declared in BOTH stages but is ONE block, so the
+    // scalar list is deduped by identity before the census rather than after --
+    // otherwise it collides with itself.
+    let names = scalar
+        .into_iter()
+        .flatten()
+        .map(|p| p.struct_name)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .chain(arrays.into_iter().flatten().map(|p| p.block_name));
+    for n in names {
+        if !seen.insert(n) {
+            return Err(err(span, format!(
+                "shader pipeline: uniform block name `{n}` is declared twice -- a stage's array block is named `<entry>_Arrays`, so a @uniform group of that name collides with it"
+            )));
         }
     }
     Ok(())
@@ -3037,6 +3265,8 @@ struct PipelinePlan {
     vert_block: Option<UniformBlockPlan>,
     frag_block: Option<UniformBlockPlan>,
     engine_block: Option<UniformBlockPlan>,
+    vert_array_block: Option<UniformArrayBlockPlan>,
+    frag_array_block: Option<UniformArrayBlockPlan>,
     texture_slots: Vec<Ustr>,
 }
 
@@ -3106,9 +3336,21 @@ fn plan_shader_pipeline(
         .map(|g| uniform_block(ws, g).map_err(|e| err(vf.name_span, e.message)))
         .transpose()?;
 
+    // One array block per stage that declares `@size(N)` params, at its own
+    // reserved binding. Built from the SAME std140 authority as the scalar
+    // blocks above and refusing the same element set, so the declaration and the
+    // host's offsets cannot come from two different answers.
+    let vert_array_block = stage_array_block(vf.name, &vshape.arrays)?;
+    let frag_array_block = stage_array_block(ff.name, &fshape.arrays)?;
+
     // Runs AFTER the block plans, because the `@engine` members it censuses come
     // from the PLAN -- one list, though the block is declared in both stages.
     check_pipeline_collisions(&vshape, &varyings, &fshape, engine_block.as_ref(), vf.name_span)?;
+    check_block_name_collisions(
+        [vert_block.as_ref(), frag_block.as_ref(), engine_block.as_ref()],
+        [vert_array_block.as_ref(), frag_array_block.as_ref()],
+        vf.name_span,
+    )?;
 
     let vert = plan_stage(ws, scx, vfref, Stage::Vertex)?;
     let frag = plan_stage(ws, scx, ffref, Stage::Fragment)?;
@@ -3137,6 +3379,8 @@ fn plan_shader_pipeline(
         vert_block,
         frag_block,
         engine_block,
+        vert_array_block,
+        frag_array_block,
         texture_slots,
     })
 }
@@ -3182,6 +3426,7 @@ fn render_shader_pipeline(
         &plan.varyings,
         plan.vert_block.as_ref(),
         plan.engine_block.as_ref(),
+        plan.vert_array_block.as_ref(),
     )?;
     let (pixel_block, pixel_dependencies) = emit_fragment_stage(
         ws,
@@ -3190,6 +3435,7 @@ fn render_shader_pipeline(
         &plan.varyings,
         plan.frag_block.as_ref(),
         plan.engine_block.as_ref(),
+        plan.frag_array_block.as_ref(),
     )?;
 
     let (version, precision) = profile_header(profile);
@@ -3218,6 +3464,18 @@ fn render_shader_pipeline(
             .map(|p| (UNIFORM_BLOCK_BINDING_ENGINE, p))
             .chain(plan.vert_block.iter().cloned().map(|p| (UNIFORM_BLOCK_BINDING_VERTEX, p)))
             .chain(plan.frag_block.iter().cloned().map(|p| (UNIFORM_BLOCK_BINDING_FRAGMENT, p)))
+            .collect(),
+        uniform_array_blocks: plan
+            .vert_array_block
+            .iter()
+            .cloned()
+            .map(|p| (UNIFORM_BLOCK_BINDING_VERTEX_ARRAYS, p))
+            .chain(
+                plan.frag_array_block
+                    .iter()
+                    .cloned()
+                    .map(|p| (UNIFORM_BLOCK_BINDING_FRAGMENT_ARRAYS, p)),
+            )
             .collect(),
     })
 }
