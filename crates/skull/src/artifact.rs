@@ -38,52 +38,42 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use bone_semantic::hir::{FnBackend, Function};
 use bone_semantic::inference::Workspace;
-use skull_mir::intrinsics::{self, IntrinsicTable};
+use skull_mir::intrinsics::{self, BackendRealization};
 use skull_mir::mir::FuncRef;
 
 use crate::concrete_body::BoundaryId;
-use crate::instance_graph::{self, BoundaryClass, DeclKey, Instance, InstanceGraph, Site, SiteOutcome};
+use crate::instance_graph::{
+    self, BoundaryClass, Concreteness, DeclKey, Instance, InstanceGraph, Site, SiteOutcome,
+};
 use crate::target_projection::{supports, CpuTargetSpec, TargetSpec};
 
-/// Where an artifact's NATIVE MAPPING for an `@intrinsic` fn comes from.
+/// Where an artifact's realization of a callee comes from, when the
+/// declaration's own body is not it.
 ///
-/// Two sources, both real: luajit's mapping IS the set of in-source
-/// `inline(lua)` bodies (the body-slot rule -- `skull_mir::intrinsics`), and
-/// GLSL/JS own a Rust [`IntrinsicTable`]. A target with neither maps nothing,
-/// which is the honest answer for a synthetic fixture: it has no backend to
-/// map with.
+/// Two independent sources, both real:
 ///
-/// Deliberately NOT a `&Function -> bool` closure supplied per call site. The
-/// question "does this artifact map this intrinsic natively" has exactly these
-/// two answers today, and a closure would let a caller pass `|_| true`.
+/// - **the body slot**, which IS luajit's mapping (`skull_mir::intrinsics`'
+///   body-slot rule: an `inline(lua)` body is the luajit implementation of an
+///   `@intrinsic`). A rule about the declaration, not a table.
+/// - **the backend's own realization oracle**, for a backend that supplies
+///   callees from Rust: its `@intrinsic` mappings AND everything else it
+///   renders itself, layered in its own precedence
+///   ([`BackendRealization`]).
+///
+/// ONE oracle for the second, not one per mechanism. The JS backend renders
+/// `nb_get` from an `@intrinsic` template and `phantom` from a hand-written one
+/// with no marker at all, and a view that knew about one severed the other --
+/// so `skull_codegen_js` publishes a single `js_supply` that `render_call`,
+/// `discover_callees` and this view all read.
+///
+/// A target with neither maps nothing, which is the honest answer for a
+/// synthetic fixture: it has no backend to map with.
 #[derive(Clone, Copy, Default)]
 pub struct ArtifactMappings<'a> {
     /// The backend whose in-source body slot IS this artifact's mapping.
     pub inline_backend: Option<FnBackend>,
-    /// This artifact's Rust-side table, when it has one.
-    pub table: Option<&'a dyn IntrinsicTable>,
-    /// Declarations this artifact supplies with a HAND-WRITTEN binding rather
-    /// than with any declared body. See [`HostBindings`].
-    pub host_bindings: Option<&'a dyn HostBindings>,
-}
-
-/// Declarations an artifact supplies ITSELF, outside the `@intrinsic`
-/// mechanism.
-///
-/// This is not a design preference, it is a measured fact about the JS backend:
-/// `skull_codegen_js`'s `host_binding` renders `phantom`, `vec_push`, `error`,
-/// `deepcopy` and 60-odd other host-bodied stdlib declarations from a
-/// hand-written Rust table that has no `@intrinsic` marker at all. An artifact
-/// view that only asks "which backend wrote the source body" therefore severs
-/// calls that emission serves -- 2,433 sites for `phantom` alone corpus-wide.
-///
-/// The implementation must be the BACKEND's own predicate, not a copy of its
-/// table: this trait is the seam that lets the driver hand the emitter's own
-/// oracle to the view. That the two tables should be one `@intrinsic` mechanism
-/// is recorded in `docs/unfuck-backlog.md`, not papered over here.
-pub trait HostBindings {
-    fn supplies(&self, ws: &Workspace, f: &Function) -> bool;
-    fn describe(&self) -> &'static str;
+    /// This artifact's backend realization oracle, when it has one.
+    pub supply: Option<&'a dyn BackendRealization>,
 }
 
 impl<'a> ArtifactMappings<'a> {
@@ -93,35 +83,31 @@ impl<'a> ArtifactMappings<'a> {
     }
 
     pub fn for_backend(b: FnBackend) -> Self {
-        Self { inline_backend: Some(b), table: None, host_bindings: None }
+        Self { inline_backend: Some(b), supply: None }
     }
 
-    pub fn with_table(mut self, t: &'a dyn IntrinsicTable) -> Self {
-        self.table = Some(t);
+    pub fn with_supply(mut self, s: &'a dyn BackendRealization) -> Self {
+        self.supply = Some(s);
         self
     }
 
-    pub fn with_host_bindings(mut self, b: &'a dyn HostBindings) -> Self {
-        self.host_bindings = Some(b);
-        self
-    }
-
-    /// Does this artifact supply `f` with a hand-written binding of its own?
-    /// Asked only after no declared body serves: a real sibling is what gets
-    /// emitted where one exists.
-    fn binds(&self, ws: &Workspace, f: &Function) -> bool {
-        self.host_bindings.is_some_and(|b| b.supplies(ws, f))
+    /// Does this artifact's BACKEND supply `f` itself -- with no declared body
+    /// emitted for it at all? Asked at the top of realization, ahead of sibling
+    /// selection and ahead of every body branch, because that is where the
+    /// backend asks it.
+    fn supplies(&self, ws: &Workspace, f: &Function) -> bool {
+        self.supply.is_some_and(|s| s.supplies(ws, f))
     }
 
     /// Does this artifact map `f` NATIVELY? A Rock body is not consulted --
     /// that is the portable rung, a different answer to a different question.
-    pub fn maps(&self, f: &Function) -> bool {
+    pub fn maps(&self, ws: &Workspace, f: &Function) -> bool {
         if let Some(b) = self.inline_backend {
             if f.inline_body.is_some_and(|(be, _)| instance_graph::serves(be, b)) {
                 return true;
             }
         }
-        self.table.is_some_and(|t| t.lookup(f).is_some())
+        self.supplies(ws, f)
     }
 }
 
@@ -204,8 +190,11 @@ pub enum Realization {
     NativeMapping,
     /// An `@intrinsic` with no mapping here, served by its portable Rock body.
     PortableFallback,
-    /// A declaration this artifact supplies with a hand-written binding of its
-    /// own, with no declared body emitted at all ([`HostBindings`]).
+    /// A declaration with no `@intrinsic` marker that this artifact's backend
+    /// supplies itself, with no declared body emitted at all -- the JS
+    /// backend's `phantom`, `error` and `map_new` renderings. The same oracle
+    /// answers for [`Self::NativeMapping`]; what separates them is whether the
+    /// DECLARATION carries the marker.
     HostBinding,
     /// An `@intrinsic` whose emission is compile-time on every backend
     /// (`@struct_expand` and friends). It has no callable body to map or fall
@@ -423,6 +412,9 @@ pub struct ArtifactCensus {
     /// state. The denominator's other half: `foreign_bodies` counts only what
     /// was actually answered.
     pub lanes_unknown: usize,
+    /// Retained instances with no substitution record in the shared graph. An
+    /// invariant finding; 0 is the only acceptable value.
+    pub missing_substitutions: usize,
     /// Deferred obligations, carried from the target spec.
     pub deferred: Vec<&'static str>,
 }
@@ -472,6 +464,14 @@ pub struct ArtifactView {
     /// answer for: their substitution is not empty, so the declared return is
     /// not the shape this artifact carries. Reported, never guessed.
     pub publisher_lanes_unknown: BTreeSet<Instance>,
+    /// **An invariant finding, not an unknown.** Retained instances the shared
+    /// graph holds no substitution record for at all. `reach` records one for
+    /// every instance it reaches, roots included, so an absent record means a
+    /// producer bypassed the recorder -- and until it is explained, nothing may
+    /// read the declaration as the instance's shape. Kept apart from
+    /// `publisher_lanes_unknown` because "generic, so the declaration cannot
+    /// answer" and "the graph is incomplete" are different findings.
+    pub missing_substitutions: BTreeSet<Instance>,
     /// The shared population this view was taken over -- the denominator.
     pub shared_instances: usize,
     pub deferred: Vec<&'static str>,
@@ -493,6 +493,7 @@ impl ArtifactView {
             && self.unresolved_inline_deps == other.unresolved_inline_deps
             && self.publisher_lanes == other.publisher_lanes
             && self.publisher_lanes_unknown == other.publisher_lanes_unknown
+            && self.missing_substitutions == other.missing_substitutions
             && self.shared_instances == other.shared_instances
             && self.deferred == other.deferred
     }
@@ -537,6 +538,7 @@ impl ArtifactView {
             multi_lane_publishers: self.publisher_lanes.values().filter(|n| **n > 1).count(),
             widest_result_lanes: self.publisher_lanes.values().copied().max().unwrap_or(0),
             lanes_unknown: self.publisher_lanes_unknown.len(),
+            missing_substitutions: self.missing_substitutions.len(),
             deferred: self.deferred.clone(),
             ..Default::default()
         };
@@ -688,14 +690,17 @@ fn realize_decl(
     if intrinsics::expand_kind(rep_f).is_some() && supports(target, BoundaryClass::Intrinsic) {
         return Ok(Realized { decl: rep, kind: Realization::CompileTimeExpansion });
     }
-    if mappings.binds(ws, rep_f) {
-        return Ok(Realized { decl: rep, kind: Realization::HostBinding });
-    }
-    if intrinsics::is_intrinsic(rep_f)
-        && supports(target, BoundaryClass::Intrinsic)
-        && mappings.maps(rep_f)
-    {
-        return Ok(Realized { decl: rep, kind: Realization::NativeMapping });
+    if supports(target, BoundaryClass::Intrinsic) && mappings.supplies(ws, rep_f) {
+        // ONE rung, ONE oracle. `@intrinsic` or not only decides which LABEL
+        // the census carries -- both are the same backend-supplied contract
+        // (`Realization::boundary_class`), and asking the two questions
+        // separately is what let `map_new` reach a body branch.
+        let kind = if intrinsics::is_intrinsic(rep_f) {
+            Realization::NativeMapping
+        } else {
+            Realization::HostBinding
+        };
+        return Ok(Realized { decl: rep, kind });
     }
 
     // SIBLING SELECTION, and this is the only place it happens. `rep` is the
@@ -761,7 +766,7 @@ fn realize_body(
         if intrinsics::expand_kind(f).is_some() {
             return Ok(Realization::CompileTimeExpansion);
         }
-        if mappings.maps(f) {
+        if mappings.maps(ws, f) {
             return Ok(Realization::NativeMapping);
         }
         // THE discriminant. Asked of the declaration, before the fallback rung,
@@ -1017,21 +1022,36 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
             if !matches!(r.kind, Realization::ForeignBody(BoundaryClass::InlineBody)) {
                 continue;
             }
-            let concrete =
-                i.args.is_empty() && g.substitutions.get(i).map(|s| s.is_empty()).unwrap_or(true);
-            if concrete {
-                publisher_lanes
-                    .insert(i.clone(), skull_mir::lower::result_lane_count(ws, scx, r.decl));
-            } else {
-                publisher_lanes_unknown.insert(i.clone());
+            match g.concreteness(i) {
+                Concreteness::Concrete => {
+                    publisher_lanes
+                        .insert(i.clone(), skull_mir::lower::result_lane_count(ws, scx, r.decl));
+                }
+                // Generic OR missing: the declaration is not known to be the
+                // shape, so no width is stated. The two are told apart by
+                // `missing_substitutions` below rather than by guessing here.
+                Concreteness::Generic | Concreteness::Missing => {
+                    publisher_lanes_unknown.insert(i.clone());
+                }
             }
         }
     }
+
+    // The invariant finding, over EVERY retained instance rather than only the
+    // foreign-body slice: a producer that bypassed `reach`'s recorder is a
+    // graph defect wherever it lands, and the lane question is just the first
+    // consumer that would have read the hole as "concrete".
+    let missing_substitutions: BTreeSet<Instance> = realization
+        .keys()
+        .filter(|i| g.concreteness(i) == Concreteness::Missing)
+        .cloned()
+        .collect();
 
     ArtifactView {
         shared_instances: g.instances.len(),
         publisher_lanes,
         publisher_lanes_unknown,
+        missing_substitutions,
         // An execution-axis question too: every obligation it names is about
         // memory, coroutines, widths or foreign symbols. A shader-derived
         // deferral would be a separate list on a separate axis.

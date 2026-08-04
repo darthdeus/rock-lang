@@ -66,8 +66,8 @@ mod test_exit_status_gate;
 mod test_harness_truncation;
 #[path = "watcher_tmp_project_path.rs"]
 mod watcher_tmp_project_path;
-#[path = "mono_js_host_bindings.rs"]
-mod mono_js_host_bindings;
+#[path = "mono_js_backend_realization.rs"]
+mod mono_js_backend_realization;
 #[path = "web_build_gate.rs"]
 mod web_build_gate;
 #[path = "web_fake_gl_tests.rs"]

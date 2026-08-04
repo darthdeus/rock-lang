@@ -19,7 +19,7 @@ use skull::artifact::{self, ArtifactMappings, ArtifactRequest, Exclusion, Unreal
 use skull::artifact::RealizedCallee;
 use skull::instance_graph::{self, Instance, InstanceGraph};
 use skull::target_projection::{JAVASCRIPT_WEB, LUAJIT_DESKTOP, NATIVE_C64_DESKTOP};
-use skull_mir::intrinsics::{Emission, IntrinsicEntry, IntrinsicTable};
+use skull_mir::intrinsics::BackendRealization;
 use ustr::Ustr;
 
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
@@ -62,31 +62,17 @@ impl artifact::SymbolPlanner for Prefixed {
     }
 }
 
-/// A backend table that maps exactly one name -- the stand-in for a real
-/// backend's `IntrinsicTable`.
-struct OneName(&'static str);
-impl IntrinsicTable for OneName {
+/// A backend realization oracle that supplies exactly the named declarations --
+/// the stand-in for a real backend's own (`skull_codegen_js::js_supply`). One
+/// oracle, so an `@intrinsic` mapping and a hand-written host binding differ
+/// only in whether the DECLARATION carries the marker.
+struct Supplies(&'static [&'static str]);
+impl BackendRealization for Supplies {
     fn backend(&self) -> &'static str {
         "toy"
     }
-    fn lookup(&self, f: &bone_semantic::hir::Function) -> Option<Emission> {
-        (f.name.as_str() == self.0).then_some(Emission::Template("$1"))
-    }
-    fn entries(&self) -> Vec<IntrinsicEntry> {
-        vec![IntrinsicEntry { name: self.0, arity: 1 }]
-    }
-}
-
-/// The stand-in for a real backend's hand-written host bindings
-/// (`skull_codegen_js::host_binding`): the two names this fixture's artifact
-/// supplies itself.
-struct TwoBound;
-impl artifact::HostBindings for TwoBound {
     fn supplies(&self, _ws: &Workspace, f: &bone_semantic::hir::Function) -> bool {
-        matches!(f.name.as_str(), "bound_probe" | "host_probe")
-    }
-    fn describe(&self) -> &'static str {
-        "two-bound"
+        self.0.contains(&f.name.as_str())
     }
 }
 
@@ -235,12 +221,12 @@ fn native_required_availability_comes_from_the_artifact_mapping() {
 
     // CONTROL: the same graph, the same target, one table entry different. If
     // the arm rejected every intrinsic this would still be excluded.
-    let table = OneName("fast_op");
+    let table = Supplies(&["fast_op"]);
     let mapped = artifact::realize(
         &ws,
         &g,
         &ArtifactRequest::new(LUAJIT_DESKTOP, &roots).with_mappings(
-            ArtifactMappings::for_backend(FnBackend::Lua).with_table(&table),
+            ArtifactMappings::for_backend(FnBackend::Lua).with_supply(&table),
         ),
     );
     assert_eq!(
@@ -651,12 +637,12 @@ fn main() { let a = caller(1) }
     );
     // CONTROL: mapping the intrinsic removes the severed call without touching
     // anything else.
-    let table = OneName("fast_op");
+    let table = Supplies(&["fast_op"]);
     let mapped = artifact::realize(
         &ws,
         &g,
         &ArtifactRequest::new(LUAJIT_DESKTOP, &roots).with_mappings(
-            ArtifactMappings::for_backend(FnBackend::Lua).with_table(&table),
+            ArtifactMappings::for_backend(FnBackend::Lua).with_supply(&table),
         ),
     );
     assert_eq!(mapped.census().severed, 0, "mapping the callee left the call severed");
@@ -1307,12 +1293,12 @@ fn main() { let n = mapped_probe(1) }
     assert_eq!(severed_here(&unmapped), Some(Unrealizable::ForeignToArtifact));
     assert_eq!(named(&unmapped), None, "an unmapped Lua-only body was realized on JS");
 
-    let table = OneName("mapped_probe");
+    let table = Supplies(&["mapped_probe"]);
     let mapped = artifact::realize(
         &ws,
         &g,
         &ArtifactRequest::new(JAVASCRIPT_WEB, &roots)
-            .with_mappings(ArtifactMappings::for_backend(FnBackend::Js).with_table(&table)),
+            .with_mappings(ArtifactMappings::for_backend(FnBackend::Js).with_supply(&table)),
     );
     assert_eq!(
         named(&mapped),
@@ -1410,12 +1396,12 @@ fn main() { let n = bound_probe(1) + host_probe(2) }
     // sibling before the class question is ever reached.
     assert_eq!(severed(&plain, "host_probe"), Some(Unrealizable::ForeignToArtifact));
 
-    let bindings = TwoBound;
+    let bindings = Supplies(&["bound_probe", "host_probe"]);
     let bound = artifact::realize(
         &ws,
         &g,
         &ArtifactRequest::new(JAVASCRIPT_WEB, &roots).with_mappings(
-            ArtifactMappings::for_backend(FnBackend::Js).with_host_bindings(&bindings),
+            ArtifactMappings::for_backend(FnBackend::Js).with_supply(&bindings),
         ),
     );
     assert_eq!(kind(&bound, "bound_probe"), Some(artifact::Realization::HostBinding));
@@ -1444,7 +1430,7 @@ fn main() { let n = bound_probe(1) + host_probe(2) }
         &ws,
         &g,
         &ArtifactRequest::new(LUAJIT_DESKTOP, &roots).with_mappings(
-            ArtifactMappings::for_backend(FnBackend::Lua).with_host_bindings(&bindings),
+            ArtifactMappings::for_backend(FnBackend::Lua).with_supply(&bindings),
         ),
     );
     assert_eq!(
@@ -1482,15 +1468,6 @@ fn main() { let n = rock_bound(1) }
         .copied()
         .filter(|r| ws.module(r.module).functions[r.func].name.as_str() == "main")
         .collect();
-    struct BindsRockBound;
-    impl artifact::HostBindings for BindsRockBound {
-        fn supplies(&self, _ws: &Workspace, f: &bone_semantic::hir::Function) -> bool {
-            f.name.as_str() == "rock_bound"
-        }
-        fn describe(&self) -> &'static str {
-            "binds-rock-bound"
-        }
-    }
     let named = |view: &artifact::ArtifactView, name: &str| {
         view.realization
             .iter()
@@ -1503,12 +1480,12 @@ fn main() { let n = rock_bound(1) }
     assert_eq!(named(&plain, "rock_bound"), Some(artifact::Realization::RockBody));
     assert_eq!(named(&plain, "rock_bound_callee"), Some(artifact::Realization::RockBody));
 
-    let bindings = BindsRockBound;
+    let bindings = Supplies(&["rock_bound"]);
     let bound = artifact::realize(
         &ws,
         &g,
         &ArtifactRequest::new(JAVASCRIPT_WEB, &roots).with_mappings(
-            ArtifactMappings::for_backend(FnBackend::Js).with_host_bindings(&bindings),
+            ArtifactMappings::for_backend(FnBackend::Js).with_supply(&bindings),
         ),
     );
     assert_eq!(named(&bound, "rock_bound"), Some(artifact::Realization::HostBinding));
@@ -1517,6 +1494,77 @@ fn main() { let n = rock_bound(1) }
         None,
         "the walk entered a body the artifact's own binding replaces"
     );
+}
+
+/// **A missing substitution record fails CLOSED on the publisher ABI too.**
+///
+/// The lane oracle answers for the DECLARED signature, so it is exact only for
+/// an instance whose substitution is empty. `unwrap_or(true)` on an absent
+/// record answered "empty", i.e. concrete -- so a hole in the graph produced a
+/// stated wire width. Removing one record must move the instance out of
+/// `publisher_lanes` and into an explicit finding.
+///
+/// The same oracle (`InstanceGraph::concreteness`) governs the GLSL passes;
+/// `a_missing_substitution_record_is_a_finding_not_a_concrete_shape` in
+/// `shader_artifact` is its other consumer.
+#[test]
+fn a_missing_substitution_record_states_no_publisher_width() {
+    let ws = check(
+        r#"
+inline(js) fn wired_pair(v: float) -> (bool, float) = "return __rock_publish(false, v);"
+fn main() {
+    let (ok, f) = wired_pair(1.0)
+}
+"#,
+    );
+    let (mut g, all_roots) = graph_for(&ws);
+    let roots: Vec<skull_mir::mir::FuncRef> = all_roots
+        .iter()
+        .copied()
+        .filter(|r| ws.module(r.module).functions[r.func].name.as_str() == "main")
+        .collect();
+    let named = |v: &artifact::ArtifactView, name: &str| {
+        v.publisher_lanes
+            .iter()
+            .find(|(i, _)| ws.module(i.func.module).functions[i.func.func].name.as_str() == name)
+            .map(|(_, n)| *n)
+    };
+
+    // CONTROL: with the record present the width IS stated, so the assertion
+    // below measures the missing record and not an unreached body.
+    let before = artifact::realize(&ws, &g, &ArtifactRequest::new(JAVASCRIPT_WEB, &roots));
+    assert_eq!(named(&before, "wired_pair"), Some(2));
+    assert!(before.missing_substitutions.is_empty());
+    assert_eq!(before.census().missing_substitutions, 0);
+
+    let inst = before
+        .publisher_lanes
+        .keys()
+        .find(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "wired_pair")
+        .expect("the publisher instance")
+        .clone();
+    assert!(g.substitutions.remove(&inst).is_some(), "there was no record to remove");
+
+    let after = artifact::realize(&ws, &g, &ArtifactRequest::new(JAVASCRIPT_WEB, &roots));
+    assert_eq!(
+        named(&after, "wired_pair"),
+        None,
+        "a width was stated from the declaration for an instance with no substitution record"
+    );
+    assert!(
+        after.publisher_lanes_unknown.contains(&inst),
+        "the instance left the stated population without joining the unknown one"
+    );
+    assert!(
+        after.missing_substitutions.contains(&inst),
+        "the missing record produced no explicit finding"
+    );
+    assert_eq!(after.census().missing_substitutions, 1);
+    // The population is CONSERVED, not lost: `foreign_bodies` counts only what
+    // was answered, so the instance moves from that half of the denominator to
+    // `lanes_unknown` rather than disappearing from both.
+    assert_eq!(after.census().foreign_bodies + 1, before.census().foreign_bodies);
+    assert_eq!(after.census().lanes_unknown, before.census().lanes_unknown + 1);
 }
 
 /// **The JS view's reachable `inline(js)` population, with its publisher

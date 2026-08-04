@@ -589,7 +589,49 @@ pub const ERASED_RUNTIME_ENTRIES: &[&str] = &[
 /// regardless of how it was reached.
 pub const MAX_INSTANTIATION_DEPTH: u32 = 12;
 
+/// Whether an instance's substitution makes it a CONCRETE shape -- the one
+/// question every declaration-based pass has to ask before it may answer.
+///
+/// Three answers, not two. `unwrap_or(true)` on a missing record collapsed
+/// [`Self::Missing`] into [`Self::Concrete`], so an instance whose substitution
+/// the walk never recorded was handed to a declaration-based oracle as if the
+/// declaration WERE its shape. `reach` records a substitution for every
+/// instance it reaches -- roots included, whose substitution is EMPTY and not
+/// absent -- so a missing record is an INVARIANT BREAK, and the honest answer
+/// to "is this concrete" is that nothing knows.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum Concreteness {
+    /// The declaration IS the shape: no logical arguments and an empty recorded
+    /// substitution. Declaration-based passes are exact here and nowhere else.
+    Concrete,
+    /// A real substitution the declaration does not carry.
+    Generic,
+    /// No substitution record at all. Never `Concrete`.
+    Missing,
+}
+
+impl Concreteness {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Concrete => "concrete",
+            Self::Generic => "generic",
+            Self::Missing => "missing-substitution",
+        }
+    }
+}
+
 impl InstanceGraph {
+    /// **The one substitution oracle.** Both the publisher-ABI lanes and the
+    /// GLSL artifact passes read this, so the two cannot classify one instance
+    /// differently.
+    pub fn concreteness(&self, i: &Instance) -> Concreteness {
+        match self.substitutions.get(i) {
+            None => Concreteness::Missing,
+            Some(s) if s.is_empty() && i.args.is_empty() => Concreteness::Concrete,
+            Some(_) => Concreteness::Generic,
+        }
+    }
+
     /// The READABLE symbol for an instance: the function's mangled name plus its
     /// rendered logical arguments. For display only -- two distinct instances can
     /// share one rendering ([`MonoTy::render`] is a pretty type syntax, not an

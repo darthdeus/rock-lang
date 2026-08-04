@@ -314,7 +314,7 @@ fn main() { let key = rock_shader(tier_frag) }
     // shader in this repo.
     let ws3 = check(
         r#"
-struct ProbeU { scale: float }
+value ProbeU { scale: float }
 
 @shader(fragment)
 fn uniform_frag(uTexture: Sampler2D, @uniform u: ProbeU, tc: Vec2) -> Vec4 {
@@ -433,38 +433,58 @@ fn main() { let key = rock_shader(foreign_frag) }
     }
 }
 
-/// **A declaration-based check may not answer for a generic instance.** GLSL
-/// lowering takes no substitution, so a generic helper's declaration is not the
-/// shape any artifact packages. The view records it as unchecked rather than
-/// validating the wrong thing -- and the concrete control shows the bucket is
-/// not simply where everything lands.
+/// **A declaration-based check may not answer for a generic instance, and that
+/// is a property of the whole PROGRAM, not just its entry.**
+///
+/// GLSL lowering takes no substitution, so a generic declaration is not the
+/// shape any artifact packages. `check_entry_profile` lowers and walks the
+/// entry's HELPERS as well as the entry, so a concrete entry over a generic
+/// helper still produces a verdict about a body no instance has. The program is
+/// recorded unchecked and the pass is not run.
+///
+/// The generic helper is called at TWO different types so it cannot be read as
+/// an inlineable one-off, and the fixture carries a NEIGHBOURING fully concrete
+/// program so the exclusion is not simply "nothing is checked".
 #[test]
-fn a_generic_shader_instance_is_recorded_unchecked_rather_than_validated() {
+fn a_program_reaching_a_generic_helper_is_not_declaration_validated() {
     let ws = check(
         r#"
-@pure fn twice<T>(x: T) -> T { return x }
+@pure fn passthrough<T>(x: T) -> T { return x }
 @pure fn concrete_helper(x: float) -> float { return x * 2.0 }
 
 @shader(fragment)
 fn generic_frag(uTexture: Sampler2D, tc: Vec2) -> Vec4 {
-    let d = concrete_helper(twice(tc.x))
+    let d = concrete_helper(passthrough(tc.x))
+    let n = passthrough(3)
+    return v(d, d, d, float(n))
+}
+
+@shader(fragment)
+fn concrete_frag(uTexture: Sampler2D, tc: Vec2) -> Vec4 {
+    let d = concrete_helper(tc.x)
     return v(d, d, d, 1.0)
 }
 
-fn main() { let key = rock_shader(generic_frag) }
+fn main() {
+    let a = rock_shader(generic_frag)
+    let b = rock_shader(concrete_frag)
+}
 "#,
     );
     let (g, _) = graph_for(&ws);
+    let programs = shader_roots(&ws);
+    assert_eq!(programs.len(), 2, "the fixture registered {} programs", programs.len());
     let view = shader_artifact::realize_shader(
         &ws,
         &g,
-        &ShaderArtifactRequest { spec: LUAJIT_DESKTOP, programs: &shader_roots(&ws) },
+        &ShaderArtifactRequest { spec: LUAJIT_DESKTOP, programs: &programs },
     )
     .expect("shader artifact");
 
+    // The helper instance is recorded unchecked.
     let unchecked = names(&ws, view.unchecked_generic.iter().cloned());
     assert!(
-        unchecked.iter().any(|n| n == "twice"),
+        unchecked.iter().any(|n| n == "passthrough"),
         "a generic helper instance was not recorded as unchecked: {unchecked:?}"
     );
     // CONTROL: the concrete helper is NOT in that bucket, so it is not simply
@@ -473,7 +493,110 @@ fn main() { let key = rock_shader(generic_frag) }
         !unchecked.iter().any(|n| n == "concrete_helper"),
         "a concrete instance was recorded as unchecked: {unchecked:?}"
     );
-    assert!(view.entries_checked > 0, "the concrete entry was not checked");
+
+    // The PROGRAM that reaches it is excluded from the checked denominator, and
+    // the partition accounts for every registered program.
+    assert_eq!(view.programs, 2);
+    assert_eq!(
+        view.entries_checked, 1,
+        "the generic-helper program was declaration-validated anyway"
+    );
+    assert_eq!(view.programs_unchecked, 1);
+    assert_eq!(view.entries_checked + view.programs_unchecked, view.programs);
+
+    // Nothing was recorded FOR it: no rejection, and no agreement/disagreement
+    // either -- a pass that cannot answer produces neither verdict.
+    assert!(
+        view.rejections.is_empty(),
+        "a program that was never checked produced a rejection: {:?}",
+        view.render_rejections(&ws)
+    );
+    assert!(
+        view.disagreements.is_empty(),
+        "a program that was never checked produced a disagreement: {:?}",
+        view.disagreements
+    );
+
+    // ...and the NEIGHBOURING fully concrete program still is checked: both
+    // entries are packaged, and the concrete one is the single checked program.
+    let root_names = names(&ws, view.roots.iter().cloned());
+    assert!(root_names.iter().any(|n| n == "generic_frag"), "{root_names:?}");
+    assert!(root_names.iter().any(|n| n == "concrete_frag"), "{root_names:?}");
+
+    // CONTROL: with the generic program removed, the remaining one is checked,
+    // so `entries_checked == 1` above is the concrete program and not an
+    // accident of counting.
+    let concrete_only: Vec<ShaderProgram> = programs
+        .iter()
+        .copied()
+        .filter(|p| {
+            ws.module(p.frag.module).functions[p.frag.func].name.as_str() == "concrete_frag"
+        })
+        .collect();
+    let solo = shader_artifact::realize_shader(
+        &ws,
+        &g,
+        &ShaderArtifactRequest { spec: LUAJIT_DESKTOP, programs: &concrete_only },
+    )
+    .expect("shader artifact");
+    assert_eq!(solo.entries_checked, 1);
+    assert_eq!(solo.programs_unchecked, 0);
+    assert!(solo.unchecked_generic.is_empty(), "{:?}", names(&ws, solo.unchecked_generic.iter().cloned()));
+}
+
+/// **A missing substitution record fails CLOSED.** `reach` records a
+/// substitution for every instance it reaches, roots included; an absent record
+/// is an invariant break, and the old `unwrap_or(true)` read it as "empty", i.e.
+/// concrete. Removing one record must move the program out of the validated
+/// population and into an explicit finding -- never into `entries_checked`.
+#[test]
+fn a_missing_substitution_record_is_a_finding_not_a_concrete_shape() {
+    let ws = check(REACHED);
+    let (mut g, _) = graph_for(&ws);
+    let programs = shader_roots(&ws);
+
+    // The control: with the record present, the program IS validated.
+    let before = shader_artifact::realize_shader(
+        &ws,
+        &g,
+        &ShaderArtifactRequest { spec: LUAJIT_DESKTOP, programs: &programs },
+    )
+    .expect("shader artifact");
+    assert_eq!(before.entries_checked, 1, "the fixture's program was not checked to begin with");
+    assert!(before.missing_substitutions.is_empty());
+
+    // Remove exactly ONE record -- the entry's own.
+    let entry = before
+        .roots
+        .iter()
+        .find(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "probe_frag")
+        .expect("the entry instance")
+        .clone();
+    assert!(g.substitutions.remove(&entry).is_some(), "the entry had no substitution to remove");
+
+    let after = shader_artifact::realize_shader(
+        &ws,
+        &g,
+        &ShaderArtifactRequest { spec: LUAJIT_DESKTOP, programs: &programs },
+    )
+    .expect("shader artifact");
+    assert_eq!(
+        after.entries_checked, 0,
+        "a program with a missing substitution record was declaration-validated"
+    );
+    assert_eq!(after.programs_unchecked, 1);
+    assert!(after.rejections.is_empty(), "{:?}", after.render_rejections(&ws));
+    // The finding is EXPLICIT and names the instance -- not folded into the
+    // generic bucket, which would read as "we know it is generic".
+    assert!(
+        after.missing_substitutions.contains(&entry),
+        "the missing record produced no finding: {:?}",
+        names(&ws, after.missing_substitutions.iter().cloned())
+    );
+    assert!(
+        !after.unchecked_generic.contains(&entry),
+        "a missing record was reported as a known-generic instance"
+    );
 }
 
 /// **A PIPELINE fragment is not a standalone entry.** Its signature carries the

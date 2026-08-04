@@ -70,6 +70,10 @@ struct ArtifactTotals {
     multi_lane_publishers: usize,
     widest_result_lanes: usize,
     lanes_unknown: usize,
+    /// Retained instances with NO substitution record in the shared graph. An
+    /// invariant finding, reported apart from `lanes_unknown`: "generic, so the
+    /// declaration cannot answer" and "the graph is incomplete" are different.
+    missing_substitutions: usize,
     deferred: Vec<&'static str>,
 }
 
@@ -405,6 +409,7 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
                         multi_lane_publishers: 0,
                         widest_result_lanes: 0,
                         lanes_unknown: 0,
+                        missing_substitutions: 0,
                         deferred: c.deferred.clone(),
                     });
                     e.instances += c.instances;
@@ -423,6 +428,7 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
                     e.foreign_bodies += c.foreign_bodies;
                     e.multi_lane_publishers += c.multi_lane_publishers;
                     e.lanes_unknown += c.lanes_unknown;
+                    e.missing_substitutions += c.missing_substitutions;
                     e.widest_result_lanes = e.widest_result_lanes.max(c.widest_result_lanes);
                     for (k, v) in &c.severed_by_cause {
                         *e.severed_by_cause.entry(*k).or_insert(0) += v;
@@ -1113,11 +1119,13 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     for (name, a) in &art_rows {
         println!(
             "- `{name}`: **{}** foreign bodies with a stated wire, **{}** multi-lane publishers, \
-             widest wire **{}**, **{}** whose generic substitution leaves the wire unstated",
+             widest wire **{}**, **{}** whose generic substitution leaves the wire unstated, \
+             **{}** retained instances with no substitution record at all (must be 0)",
             a.foreign_bodies,
             a.multi_lane_publishers,
             a.widest_result_lanes,
-            a.lanes_unknown
+            a.lanes_unknown,
+            a.missing_substitutions
         );
     }
     println!();
@@ -1145,17 +1153,21 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     println!(
         "- shader PROGRAMS the GLSL pass (emission's own `check_entry_profile` / \
          `check_pipeline_profile`) actually ran over: \
-         **{}**; rejections: recursion **{}**, profile **{}**; structural-vs-emitter \
-         disagreements: **{}**",
+         **{}** of **{}** registered, **{}** excluded; rejections: recursion **{}**, profile \
+         **{}**; structural-vs-emitter disagreements: **{}**",
         shader_totals.entries_checked,
+        shader_totals.programs,
+        shader_totals.programs_unchecked,
         shader_totals.recursion_rejections,
         shader_totals.profile_rejections,
         shader_totals.disagreements
     );
     println!(
         "- retained shader instances the DECLARATION-based pass cannot answer for (non-empty \
-         substitution): **{}**; artifacts packaging a profile other than `Core330`: **{}**",
+         substitution): **{}**; with NO substitution record at all (an invariant finding, must \
+         be 0): **{}**; artifacts packaging a profile other than `Core330`: **{}**",
         shader_totals.unchecked_generic,
+        shader_totals.missing_substitutions,
         shader_totals.non_core330
     );
     for x in &shader_totals.examples {
@@ -1332,7 +1344,10 @@ struct ShaderStats {
     recursion_rejections: usize,
     profile_rejections: usize,
     entries_checked: usize,
+    programs_unchecked: usize,
+    programs: usize,
     unchecked_generic: usize,
+    missing_substitutions: usize,
     disagreements: usize,
     non_core330: usize,
     examples: Vec<String>,
@@ -1349,7 +1364,10 @@ impl ShaderStats {
         self.recursion_rejections += o.recursion_rejections;
         self.profile_rejections += o.profile_rejections;
         self.entries_checked += o.entries_checked;
+        self.programs_unchecked += o.programs_unchecked;
+        self.programs += o.programs;
         self.unchecked_generic += o.unchecked_generic;
+        self.missing_substitutions += o.missing_substitutions;
         self.disagreements += o.disagreements;
         self.non_core330 += o.non_core330;
         for x in &o.examples {
@@ -1366,24 +1384,6 @@ impl ShaderStats {
 /// Pseudo-files (`<bone-stdlib:...>`) have no prefix to strip and pass through.
 fn relativize(file: &str, root: &Path) -> String {
     Path::new(file).strip_prefix(root).map(|r| r.display().to_string()).unwrap_or_else(|_| file.to_string())
-}
-
-/// The JS backend's OWN host-binding predicate, handed to the artifact view.
-/// Wiring it here rather than reproducing the table keeps one oracle: what the
-/// emitter renders itself is what the view reports as realized.
-struct JsHostBindings;
-
-impl skull::artifact::HostBindings for JsHostBindings {
-    fn supplies(
-        &self,
-        ws: &bone_semantic::inference::Workspace,
-        f: &bone_semantic::hir::Function,
-    ) -> bool {
-        skull_codegen_js::emit::host_binding(ws, f)
-    }
-    fn describe(&self) -> &'static str {
-        "js-host-bindings"
-    }
 }
 
 fn one_project(
@@ -1459,19 +1459,17 @@ fn one_project(
     // that serves it. There is no per-target graph to mismatch and no second
     // arena to compare across.
     //
-    // The JS artifact gets the REAL backend table. Without it a
+    // The JS artifact gets the REAL backend oracle -- ONE seam, carrying
+    // `skull_codegen_js::emit::js_supply` itself. Without it a
     // `@native_required` intrinsic would read as unmapped on JS for the
     // trivial reason that nothing was wired, and the corpus number would be
     // measuring this driver rather than the artifact.
-    let js_table = skull_codegen_js::JsIntrinsics;
-    let js_bindings = JsHostBindings;
+    let js_supply = skull_codegen_js::JsBackendRealization;
     let realize = |spec: skull::target_projection::TargetSpec| {
             let req = skull::artifact::ArtifactRequest::new(spec, &roots);
             let req = match spec.execution.backend {
                 Some(b @ bone_semantic::hir::FnBackend::Js) => req.with_mappings(
-                    skull::artifact::ArtifactMappings::for_backend(b)
-                        .with_table(&js_table)
-                        .with_host_bindings(&js_bindings),
+                    skull::artifact::ArtifactMappings::for_backend(b).with_supply(&js_supply),
                 ),
                 _ => req,
             };
@@ -1635,7 +1633,10 @@ fn one_project(
         shader_stats.builtins += sv.builtins.len();
         shader_stats.sites_walked += sv.sites_walked;
         shader_stats.entries_checked += sv.entries_checked;
+        shader_stats.programs_unchecked += sv.programs_unchecked;
+        shader_stats.programs += sv.programs;
         shader_stats.unchecked_generic += sv.unchecked_generic.len();
+        shader_stats.missing_substitutions += sv.missing_substitutions.len();
         shader_stats.disagreements += sv.disagreements.len();
         for x in sv.disagreements.iter().take(2) {
             shader_stats.examples.push(format!("`{}` DISAGREEMENT {x}", spec.name));

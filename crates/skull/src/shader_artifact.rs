@@ -31,7 +31,7 @@ use skull_codegen_glsl::GlslProfile;
 use skull_mir::mir::FuncRef;
 use skull_parser::Span;
 
-use crate::instance_graph::{DeclKey, Instance, InstanceGraph, SiteOutcome};
+use crate::instance_graph::{Concreteness, DeclKey, Instance, InstanceGraph, SiteOutcome};
 use crate::target_projection::{ShaderTargetSpec, TargetSpec};
 
 /// One registered shader program: a `(vertex, fragment)` pair, or the
@@ -94,15 +94,31 @@ pub struct ShaderArtifactView {
     pub rejections: Vec<ShaderRejection>,
     /// Retained instances the declaration-based GLSL passes cannot answer for:
     /// their substitution is not empty, so the declaration is not the shape the
-    /// artifact packages. Reported, never silently validated.
+    /// artifact packages. Reported, never silently validated -- and the PROGRAM
+    /// that reaches one is not validated either (see `programs_unchecked`).
+    /// Entries and reachable HELPERS both: `check_entry_profile` lowers the
+    /// helpers too, so a concrete entry over a generic helper still gets a
+    /// verdict about a shape nothing packages.
     pub unchecked_generic: BTreeSet<Instance>,
+    /// **An invariant finding.** Retained shader instances the shared graph
+    /// holds no substitution record for. Not "concrete by default": a missing
+    /// record means a producer bypassed `reach`'s recorder, and a program that
+    /// reaches one is excluded from validation exactly as a generic one is.
+    pub missing_substitutions: BTreeSet<Instance>,
     /// Where the structural cycle finding and the GLSL pass disagree. Both
     /// answer "is this recursive"; keeping the comparison is what makes the
     /// typed `Recursion` kind evidence rather than a second opinion.
     pub disagreements: Vec<String>,
-    /// Entries the GLSL pass actually ran over -- the denominator for
+    /// PROGRAMS the GLSL pass actually ran over -- the denominator for
     /// `rejections`.
     pub entries_checked: usize,
+    /// Programs excluded from that denominator because their retained set is
+    /// not answerable by a declaration-based pass. `entries_checked +
+    /// programs_unchecked == programs`, so a zero rejection count cannot hide
+    /// a population that was never asked.
+    pub programs_unchecked: usize,
+    /// Registered programs -- the total the two above partition.
+    pub programs: usize,
     /// Call sites the retention walk traversed -- the denominator for
     /// `rejections`, so zero rejections over zero sites cannot read as clean.
     pub sites_walked: usize,
@@ -199,28 +215,57 @@ pub fn realize_shader(
     let mut rejections: Vec<ShaderRejection> = Vec::new();
     let mut disagreements: Vec<String> = Vec::new();
     let mut checked = 0usize;
+    let mut unchecked_generic: BTreeSet<Instance> = BTreeSet::new();
+    let mut missing_substitutions: BTreeSet<Instance> = BTreeSet::new();
+    let mut programs_unchecked = 0usize;
     for program in req.programs {
-        // The PROGRAM's instances -- the fragment entry, and the vertex stage
-        // when the pair has one.
-        let Some(root) = roots.iter().find(|i| DeclKey(i.func) == DeclKey(
-            skull_mir::lower::canonical_variant(ws, program.frag),
-        )) else {
-            continue;
+        // The PROGRAM's own root instances -- the fragment entry, and the
+        // vertex stage when the pair has one.
+        let entry_of = |r: FuncRef| -> Option<&Instance> {
+            let key = DeclKey(skull_mir::lower::canonical_variant(ws, r));
+            roots.iter().find(|i| DeclKey(i.func) == key)
         };
-        // DECLARATION-BASED, so it is asked only of a concrete instance. GLSL
-        // lowering takes no substitution today, so handing it a generic
-        // declaration would validate a shape no instance has -- see
-        // `unchecked_generic`.
-        if !substitution_is_empty(g, root)
-            || program.vert.is_some_and(|v| {
-                roots
-                    .iter()
-                    .find(|i| DeclKey(i.func) == DeclKey(skull_mir::lower::canonical_variant(ws, v)))
-                    .is_none_or(|i| !substitution_is_empty(g, i))
-            })
-        {
+        let Some(root) = entry_of(program.frag) else { continue };
+        let mut program_roots: Vec<Instance> = vec![root.clone()];
+        if let Some(v) = program.vert {
+            match entry_of(v) {
+                Some(i) => program_roots.push(i.clone()),
+                // A registered vertex stage the graph holds no instance for is
+                // not something this pass may check around.
+                None => {
+                    programs_unchecked += 1;
+                    continue;
+                }
+            }
+        }
+
+        // THE COMPLETE RETAINED SET FOR THIS PROGRAM, not just its entries.
+        // `check_entry_profile` lowers and walks the entry's HELPERS too, and
+        // GLSL lowering takes no substitution -- so one generic helper anywhere
+        // under the program makes the declaration-based verdict a statement
+        // about a shape no artifact packages. The program is recorded unchecked
+        // and the pass is not run: a verdict it cannot answer is not evidence,
+        // and it may not enter the `entries_checked` denominator either.
+        let retained = reachable_from(&program_roots, &edges);
+        let mut answerable = true;
+        for i in &retained {
+            match g.concreteness(i) {
+                Concreteness::Concrete => {}
+                Concreteness::Generic => {
+                    unchecked_generic.insert(i.clone());
+                    answerable = false;
+                }
+                Concreteness::Missing => {
+                    missing_substitutions.insert(i.clone());
+                    answerable = false;
+                }
+            }
+        }
+        if !answerable {
+            programs_unchecked += 1;
             continue;
         }
+
         checked += 1;
         let entry_cycle = cyclic.contains(root)
             || reaches_cycle(root, &edges, &cyclic);
@@ -260,16 +305,24 @@ pub fn realize_shader(
             }
         }
     }
-    // Retained shader instances the declaration-based pass above cannot answer
-    // for. Reported rather than skipped silently: a generic helper validated
-    // against its generic declaration is a verdict about a shape no artifact
-    // packages, which is exactly what an instance view exists to avoid.
-    let unchecked_generic: BTreeSet<Instance> = roots
-        .iter()
-        .chain(helpers.iter())
-        .filter(|i| !substitution_is_empty(g, i))
-        .cloned()
-        .collect();
+
+    // ...and the same classification over the WHOLE retained set, so an
+    // instance no registered program's walk reached (a second instantiation of
+    // an entry declaration) is still reported rather than silently absent. The
+    // per-program loop above decides what gets VALIDATED; this decides what
+    // gets REPORTED, and the reported set is the larger of the two by
+    // construction.
+    for i in roots.iter().chain(helpers.iter()) {
+        match g.concreteness(i) {
+            Concreteness::Concrete => {}
+            Concreteness::Generic => {
+                unchecked_generic.insert(i.clone());
+            }
+            Concreteness::Missing => {
+                missing_substitutions.insert(i.clone());
+            }
+        }
+    }
 
     Some(ShaderArtifactView {
         profile,
@@ -278,16 +331,33 @@ pub fn realize_shader(
         builtins,
         rejections,
         unchecked_generic,
+        missing_substitutions,
         disagreements,
         entries_checked: checked,
+        programs_unchecked,
+        programs: req.programs.len(),
         sites_walked,
     })
 }
 
-/// Whether this instance's substitution is empty -- i.e. the declaration IS the
-/// concrete shape. The declaration-based GLSL passes are exact only here.
-fn substitution_is_empty(g: &InstanceGraph, i: &Instance) -> bool {
-    i.args.is_empty() && g.substitutions.get(i).map(|s| s.is_empty()).unwrap_or(true)
+/// The instances reachable from `roots` over the RETAINED shader call relation
+/// -- one program's own packaged set, taken from the same recorded edges the
+/// whole-artifact walk built. Roots are included: an entry's own substitution
+/// governs the declaration-based pass exactly as a helper's does.
+fn reachable_from(
+    roots: &[Instance],
+    edges: &BTreeMap<Instance, Vec<(Instance, Span)>>,
+) -> BTreeSet<Instance> {
+    let mut seen: BTreeSet<Instance> = roots.iter().cloned().collect();
+    let mut queue: VecDeque<Instance> = roots.iter().cloned().collect();
+    while let Some(n) = queue.pop_front() {
+        for (callee, _) in edges.get(&n).into_iter().flatten() {
+            if seen.insert(callee.clone()) {
+                queue.push_back(callee.clone());
+            }
+        }
+    }
+    seen
 }
 
 /// Whether `root` reaches any instance on a cycle.

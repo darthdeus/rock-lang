@@ -17,6 +17,7 @@ use skull_mir::intrinsics::{Emission, IntrinsicTable};
 use skull_mir::lower::SpecKey;
 use skull_mir::mir::{Block, Cell, ContainerKind, FuncRef, Inst, Lit, MirFunc, Term};
 use skull_parser::{CompilerError, Span};
+use ustr::Ustr;
 
 use crate::structure::{self, LoopRegion, Structure};
 use crate::{fill_template, JsIntrinsics};
@@ -2296,71 +2297,24 @@ impl Emitter<'_> {
         let rargs: Result<Vec<String>, CompilerError> =
             args.iter().map(|a| self.render_val(*a)).collect();
         let rargs = rargs?;
-        // The overloaded `get`/2 dispatches on its receiver: NativeBuffer via the
-        // intrinsic template (below), Map via the JS `Map.get` (miss -> undefined,
-        // which `== null` reads as nil), Vec co-emits its pure-Rock body. Any
-        // other receiver rejects rather than kinda-working.
-        // Only the BUILTIN Map (`TypeCtor::Map`) renders inline as `.get` -- a user
-        // struct named `Map` (a `Nominal`) with its own `get` fn is a plain callee
-        // and co-emits like any other. NativeBuffer falls to its intrinsic
-        // template; Vec and user receivers fall to the co-emit path.
-        if is_builtin_map_get(self.ws, cf) {
-            return Ok(format!("{}.get({})", rargs[0], rargs[1]));
+        // THE ONE ORACLE. Everything this backend supplies itself -- the
+        // builtin-`Map` interceptions, the host globals, the hand-written
+        // templates and the `@intrinsic` table -- in one precedence, shared
+        // with `discover_callees` and with the mono artifact view. A callee it
+        // answers for is never co-emitted, whatever body the declaration has.
+        if let Some(supply) = js_supply(self.ws, cf) {
+            return Ok(render_supply(supply, &rargs, cf.param_decls.len()));
         }
-        // Host-bodied stdlib fns (extern / inline(lua)) with a hand-written JS
-        // binding: `print` (variadic -> the harness global), the fixed-arity
-        // templates (`tostring`, `__rock_format_float`).
-        if is_host_print(cf) {
-            return Ok(format!("print({})", rargs.join(", ")));
-        }
-        if is_host_put(cf) {
-            return Ok(format!("put({})", rargs.join(", ")));
-        }
-        // Logging dedup/throttle impls -> their JS runtime port, same name.
-        if is_host_log_fn(cf) {
-            return Ok(format!("{}({})", cf.name, rargs.join(", ")));
-        }
-        if let Some(tmpl) = host_fn_template(cf) {
-            // A defaulted trailing param (e.g. `string.find`'s `from = 0`) is not
-            // materialized into the call args, so a template `$N` for it would
-            // stay literal. Pad to the declared arity with `undefined`: JS reads
-            // an omitted arg as `undefined`, and for the templated fns that carry
-            // a default (`find` -> indexOf, whose `from` defaults to 0) that
-            // coincides with the Rock default. Fixed-arity templates are already
-            // full, so this is a no-op there.
-            let mut padded = rargs.clone();
-            while padded.len() < cf.param_decls.len() {
-                padded.push("undefined".to_string());
-            }
-            let refs: Vec<&str> = padded.iter().map(|s| s.as_str()).collect();
-            return Ok(fill_template(tmpl, &refs));
-        }
-        // `map_new` is pure Rock (`transmute(table_new())`) but must be a real JS
-        // `Map`, not a plain object -- a plain object coerces keys to strings, so
-        // Lua's 1 vs "1" distinction would be lost. Intercept it (and skip its
-        // co-emission in the closure walk).
-        if is_map_new(cf) {
-            return Ok("new Map()".to_string());
-        }
-        // Templates apply only to stdlib @intrinsic decls (`is_mapped_intrinsic`):
-        // a user fn sharing an entry's (name, arity) must co-emit, not become
-        // `Math.abs`.
-        match if is_mapped_intrinsic(cf) { JsIntrinsics.lookup(cf) } else { None } {
-            Some(Emission::Template(tmpl)) => {
-                let refs: Vec<&str> = rargs.iter().map(|s| s.as_str()).collect();
-                Ok(fill_template(tmpl, &refs))
-            }
-            _ => match self.callee_name(iid, func) {
-                Some(name) => Ok(format!("{name}({})", rargs.join(", "))),
-                None if self.mf.spec_bindings.contains_key(&iid) => Err(err(format!(
-                    "JS subset: no specialized body emitted for the `{}` instantiation at this call",
-                    cf.name
-                ))),
-                None => Err(err(format!(
-                    "JS subset: call to `{}` is not a mapped JS intrinsic",
-                    cf.name
-                ))),
-            },
+        match self.callee_name(iid, func) {
+            Some(name) => Ok(format!("{name}({})", rargs.join(", "))),
+            None if self.mf.spec_bindings.contains_key(&iid) => Err(err(format!(
+                "JS subset: no specialized body emitted for the `{}` instantiation at this call",
+                cf.name
+            ))),
+            None => Err(err(format!(
+                "JS subset: call to `{}` is not a mapped JS intrinsic",
+                cf.name
+            ))),
         }
     }
 }
@@ -4009,15 +3963,11 @@ fn discover_callees(
     let mut findings: Vec<CompilerError> = Vec::new();
     for callee in skull_mir::reach::call_targets(mf) {
         let cf = &ws.module(callee.module).functions[callee.func];
-        // Only the BUILTIN Map renders inline (skip its co-emission); NativeBuffer
-        // via the intrinsic table; Vec and user-struct `get` co-emit (fall through).
-        if cf.name.as_str() == "get"
-            && cf.param_decls.len() == 2
-            && first_param_is_builtin_map(ws, cf)
-        {
-            continue;
-        }
-        if is_mapped_intrinsic(cf) || is_host_mapped(cf) || is_map_new(cf) {
+        // THE ONE ORACLE, ahead of every body branch below -- the same call
+        // `render_call` makes. A callee the backend supplies itself has no
+        // definition to co-emit, and asking about its body first is how
+        // `map_new` (a pure Rock body rendered `new Map()`) got walked into.
+        if js_supply(ws, cf).is_some() {
             continue;
         }
         // `inline(js)`: co-emit its raw JS body verbatim (never MIR-lowered). The
@@ -5201,25 +5151,95 @@ fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
     }
 }
 
-/// A host-bodied fn the emitter renders directly (bypassing co-emission): the
-/// `print` global or one of the fixed-arity templates. Shared by `render_call`
-/// and the `emit_with_closure` callee walk so both agree on what NOT to reject.
-fn is_host_mapped(cf: &bone_semantic::hir::Function) -> bool {
-    is_host_print(cf) || is_host_put(cf) || is_host_log_fn(cf) || host_fn_template(cf).is_some()
+/// What the JS backend renders for a call it supplies ITSELF.
+///
+/// Two shapes, because the surface has two: a fixed-arity expression template,
+/// and a variadic host global no template can express.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum JsSupply {
+    /// A `$1..$n` expression template.
+    Template(&'static str),
+    /// A bare JS global, called with every rendered argument.
+    Global(Ustr),
 }
 
-/// **Does this backend supply `cf`'s body ITSELF?** The disjunction of every
-/// gate `render_call` consults before it looks for a co-emitted callee: the
-/// host templates, the `print`/`put`/logging globals, the builtin-`Map`
-/// receivers, and the `map_new` interception.
+/// **The one JS backend realization oracle**: how the JS backend supplies a
+/// callee ITSELF, ahead of any declared body, in the ONE precedence
+/// [`Emitter::render_call`] renders and [`discover_callees`] skips on.
 ///
-/// Published because the mono ARTIFACT VIEW has to ask the same question -- a
-/// view that only knows which backend declared the source body severs every
-/// `phantom`, `vec_push` and `error` call this table serves. It is the same
-/// predicate `render_call` branches on, not a second list: a copy would drift
-/// silently, and the artifact's answer would stop describing this emitter.
-pub fn host_binding(ws: &Workspace, cf: &bone_semantic::hir::Function) -> bool {
-    is_host_mapped(cf) || is_map_new(cf) || is_builtin_map_get(ws, cf)
+/// Everything the backend supplies is here -- the builtin-`Map` receiver
+/// interceptions, the `print`/`put`/logging globals, the hand-written host
+/// templates, and the `@intrinsic` table -- because "how does this artifact
+/// supply this declaration" is ONE question. Splitting it produced answers that
+/// disagreed: `nb_get` (1,127 sites) is an `@intrinsic` template while
+/// `phantom` (2,433 sites) is a host template with no marker at all, and a
+/// consumer that knew about one severed the other.
+///
+/// **The ORDER is load-bearing, not a preference.** `map_new` is a PURE ROCK
+/// body rendered as `new Map()`, so anything that asks about the declaration's
+/// body first classifies it as a Rock body and walks into callees this backend
+/// never emits.
+///
+/// The mono artifact view reads this through
+/// [`crate::JsBackendRealization`], so its realization report is this emitter's
+/// behavior rather than a description of it.
+pub fn js_supply(ws: &Workspace, cf: &bone_semantic::hir::Function) -> Option<JsSupply> {
+    // The overloaded `get`/2 dispatches on its receiver: only the BUILTIN Map
+    // (`TypeCtor::Map`) renders inline as `.get` -- a user struct named `Map`
+    // with its own `get` fn is a plain callee and co-emits, and NativeBuffer
+    // falls to its intrinsic template below.
+    if is_builtin_map_get(ws, cf) {
+        return Some(JsSupply::Template("$1.get($2)"));
+    }
+    // Host-bodied stdlib fns (extern / inline(lua)) with a hand-written JS
+    // binding: `print` (variadic -> the harness global), `put` (raw write), the
+    // logging dedup/throttle runtime ports, and the fixed-arity templates.
+    if is_host_print(cf) {
+        return Some(JsSupply::Global(Ustr::from("print")));
+    }
+    if is_host_put(cf) {
+        return Some(JsSupply::Global(Ustr::from("put")));
+    }
+    if is_host_log_fn(cf) {
+        return Some(JsSupply::Global(cf.name));
+    }
+    if let Some(tmpl) = host_fn_template(cf) {
+        return Some(JsSupply::Template(tmpl));
+    }
+    // `map_new` is pure Rock (`transmute(table_new())`) but must be a real JS
+    // `Map`, not a plain object -- a plain object coerces keys to strings, so
+    // Lua's 1 vs "1" distinction would be lost.
+    if is_map_new(cf) {
+        return Some(JsSupply::Template("new Map()"));
+    }
+    // Templates apply only to stdlib @intrinsic decls: a user fn sharing an
+    // entry's (name, arity) must co-emit, not become `Math.abs`.
+    match if is_mapped_intrinsic(cf) { JsIntrinsics.lookup(cf) } else { None } {
+        Some(Emission::Template(tmpl)) => Some(JsSupply::Template(tmpl)),
+        _ => None,
+    }
+}
+
+/// Render one supplied call from its arguments.
+///
+/// A template is padded to the callee's DECLARED arity with `undefined`: a
+/// defaulted trailing param (e.g. `string.find`'s `from = 0`) is not
+/// materialized into the call args, so a `$N` for it would otherwise stay
+/// literal. JS reads an omitted arg as `undefined`, and for the templated fns
+/// that carry a default that coincides with the Rock default. A global is
+/// variadic and takes the arguments as they came.
+fn render_supply(supply: JsSupply, args: &[String], declared_arity: usize) -> String {
+    match supply {
+        JsSupply::Template(tmpl) => {
+            let mut padded: Vec<String> = args.to_vec();
+            while padded.len() < declared_arity {
+                padded.push("undefined".to_string());
+            }
+            let refs: Vec<&str> = padded.iter().map(|s| s.as_str()).collect();
+            fill_template(tmpl, &refs)
+        }
+        JsSupply::Global(name) => format!("{name}({})", args.join(", ")),
+    }
 }
 
 /// The overloaded `get`/2 on a builtin `Map` receiver, which renders as
