@@ -310,6 +310,8 @@ pub fn normalize_diagnostics(lines: &[String], out_dir: &Path) -> String {
 /// (`crates/rock-log/src/lib.rs`, `level_tag`). WARN and INFO are space-padded
 /// to that width, which is why the closing bracket can look detached.
 const LOG_LEVEL_TAGS: [&str; 5] = ["ERROR", "WARN ", "INFO ", "DEBUG", "TRACE"];
+const LOG_TIME_WIDTH: usize = 8;
+const LOG_TIME_PRECISION: usize = 3;
 
 /// Remove a `rock_log` stamp, or return the line untouched.
 ///
@@ -321,25 +323,42 @@ const LOG_LEVEL_TAGS: [&str; 5] = ["ERROR", "WARN ", "INFO ", "DEBUG", "TRACE"];
 /// line like `[1.23s SCORE] result` is game output, not a log stamp, and both
 /// its fractional precision and its tag say so.
 fn strip_log_stamp(line: &str) -> &str {
-    let Some(rest) = line.strip_prefix('[') else { return line };
+    let Some(rest) = line.strip_prefix('[') else {
+        return line;
+    };
     let padded = rest.trim_start_matches(' ');
+    let padding = rest.len() - padded.len();
     let int_digits = padded
         .find(|c: char| !c.is_ascii_digit())
         .unwrap_or(padded.len());
     if int_digits == 0 {
         return line;
     }
-    let Some(frac) = padded[int_digits..].strip_prefix('.') else { return line };
-    if frac.len() < 3 || !frac.as_bytes()[..3].iter().all(u8::is_ascii_digit) {
+    let Some(frac) = padded[int_digits..].strip_prefix('.') else {
+        return line;
+    };
+    if frac.len() < LOG_TIME_PRECISION
+        || !frac.as_bytes()[..LOG_TIME_PRECISION]
+            .iter()
+            .all(u8::is_ascii_digit)
+    {
         return line;
     }
-    // A fourth fractional digit fails this, which is what pins "exactly three".
-    let Some(tail) = frac[3..].strip_prefix("s ") else { return line };
+    let number_width = int_digits + 1 + LOG_TIME_PRECISION;
+    if padding != LOG_TIME_WIDTH.saturating_sub(number_width) {
+        return line;
+    }
+    // A fourth fractional digit fails this, which is what pins the precision.
+    let Some(tail) = frac[LOG_TIME_PRECISION..].strip_prefix("s ") else {
+        return line;
+    };
     let Some(tail) = LOG_LEVEL_TAGS.iter().find_map(|tag| tail.strip_prefix(tag)) else {
         return line;
     };
-    let Some(body) = tail.strip_prefix(']') else { return line };
-    body.strip_prefix(' ').unwrap_or(body)
+    let Some(body) = tail.strip_prefix("] ") else {
+        return line;
+    };
+    body
 }
 
 #[cfg(test)]
@@ -509,6 +528,9 @@ mod tests {
             "[   0.789 INFO ] no seconds marker",
             "[   0.789sINFO ] no space after the seconds",
             "[   0.789s INFO] the tag is padded, so this is one char short",
+            "[    0.789s INFO ] too much width padding",
+            "[  0.789s INFO ] too little width padding",
+            "[   0.789s ERROR]no separator after the bracket",
             "[   .789s INFO ] no integer digits",
             "[   0.789s] no level at all",
             "[0.5] a bracketed number that is not a stamp",
