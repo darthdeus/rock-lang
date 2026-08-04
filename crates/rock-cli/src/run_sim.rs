@@ -265,9 +265,15 @@ impl SimArtifacts {
         self.finish_with(summary, process_video_assertions);
     }
 
+    /// Deferred artifact work, all of it while `$OUT` is still live: run
+    /// `process` (the video assertions, which shell out to ffprobe/ffmpeg
+    /// against files under `$OUT`), record the manifest of what the entry
+    /// produced, and only then honor the sim's `cleanup_path` removals. The
+    /// manifest is taken BEFORE cleanup so it describes what the sim wrote,
+    /// not what survived teardown.
     fn finish_with(self, summary: &mut SimSummary, process: impl FnOnce(&mut SimSummary)) {
-        let _keep_out_live = &self.out_dir;
         process(summary);
+        summary.artifacts = crate::sim_record::manifest_of_dir(self.out_dir.path());
         for path in std::mem::take(&mut summary.cleanup_paths) {
             let _ = std::fs::remove_file(path);
         }
@@ -755,21 +761,102 @@ fn writes_live(buffered: bool) -> bool {
     !buffered
 }
 
-/// Spawn one luajit process for `sim_part` and demux its side channel.
-/// `out_path` is the shared `OUT` env value across all parts in a
-/// multi-start chain.
-fn run_one_sim(
+/// One queued sim body. A worker child runs these in order in ONE process;
+/// the parts of a comma-chain share an `out_dir`, distinct entries do not.
+#[derive(Clone)]
+struct WorkerPart {
+    name: String,
+    out_dir: PathBuf,
+    frame_budget: usize,
+    env: Vec<(String, String)>,
+}
+
+/// One part's `__SIM__` and raw stderr lines, carved out of the worker's single
+/// stream by the child's `entry_start`/`entry_end` envelope.
+#[derive(Default)]
+struct EntryStream {
+    started: bool,
+    sim: Vec<String>,
+    raw: Vec<String>,
+}
+
+/// Split a worker's stderr by the per-entry envelope.
+///
+/// Lines outside any envelope (process boot, teardown) are attributed to the
+/// most recently started entry, which is where a single-entry run has always
+/// put them. An `entry_start` whose sequence is missing or out of range is a
+/// protocol violation and rejected: guessing an entry would file one sim's
+/// failures under another's name.
+fn split_worker_stream(lines: &[String], n: usize) -> Result<Vec<EntryStream>> {
+    let mut out: Vec<EntryStream> = (0..n).map(|_| EntryStream::default()).collect();
+    let mut current: Option<usize> = None;
+    let mut last = 0usize;
+    for line in lines {
+        let Some(rest) = line.strip_prefix("__SIM__ ") else {
+            out[current.unwrap_or(last)].raw.push(line.clone());
+            continue;
+        };
+        match extract_str_field(rest, "op").as_deref() {
+            Some("entry_start") => {
+                let seq = extract_raw_field(rest, "seq")
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .filter(|s| *s < n)
+                    .ok_or_else(|| {
+                        anyhow!("worker sent an entry_start with no usable seq (n={n}): {line}")
+                    })?;
+                current = Some(seq);
+                last = seq;
+                out[seq].started = true;
+            }
+            Some("entry_end") => current = None,
+            _ => out[current.unwrap_or(last)].sim.push(line.clone()),
+        }
+    }
+    Ok(out)
+}
+
+/// Spawn ONE luajit process that runs `parts` in order and demux its side
+/// channel into one summary per part.
+///
+/// A single-part call is the ordinary fresh-process sim: the queue mechanism is
+/// the same one, so there is no second lifecycle to keep in step. More than one
+/// part means the entries share a booted process with NO state reset between
+/// them yet (`docs/sim-speed-plan.md` B1/B3) -- that is the condition the
+/// differential oracle exists to measure, not a supported way to run a suite.
+fn run_worker(
     project: &str,
-    sim_part: &str,
+    parts: &[WorkerPart],
     quiet: bool,
     buffered: bool,
     update_snapshots: bool,
-    out_path: &Path,
     output: &str,
-    env_pairs: &[(String, String)],
     stone: Option<&mut crate::skull_backend::SkullStone>,
-) -> Result<SimSummary> {
-    let sim_source = find_sim_source(project, sim_part);
+) -> Result<Vec<SimSummary>> {
+    let Some(first) = parts.first() else {
+        return Err(anyhow!("worker got an empty entry queue"));
+    };
+
+    // Only runner-owned values (`$OUT`, sim name, frame budget) are per entry.
+    // Everything else in `@sim_env` is consumed during global init, engine init
+    // and `@init`, so a shared process can only serve entries that agree on it.
+    if parts.len() > 1 {
+        for p in &parts[1..] {
+            if p.env != first.env {
+                return Err(anyhow!(
+                    "sims `{}` and `{}` have different @sim_env boot signatures and \
+                     cannot share one worker process",
+                    first.name,
+                    p.name
+                ));
+            }
+        }
+        if let Some((k, v)) = first.env.iter().find(|(_, v)| v.contains("$OUT")) {
+            return Err(anyhow!(
+                "@sim_env(\"{k}\", \"{v}\") is resolved before the process starts, so it \
+                 cannot follow a per-entry $OUT; sims using it stay on the isolated path"
+            ));
+        }
+    }
 
     // Overlay handling belongs ONLY to the reload lane. The overlay is one file
     // shared by every child of this invocation, so wiping it here would be a
@@ -788,22 +875,47 @@ fn run_one_sim(
                 .with_file_name("incremental.lua"),
         )?;
     }
-    // Expand `$OUT` in env values to the per-run tempdir absolute path.
+
+    // The entry queue the child reads. Lives in the invocation-owned output
+    // directory and stays alive for the child's whole run.
+    let mut plan_file = tempfile::Builder::new()
+        .prefix("entry-plan-")
+        .suffix(".tsv")
+        .tempfile_in(output)
+        .context("creating the worker entry plan")?;
+    for p in parts {
+        writeln!(
+            plan_file,
+            "{}\t{}\t{}",
+            p.name,
+            p.out_dir.to_string_lossy(),
+            p.frame_budget
+        )?;
+    }
+    plan_file.flush()?;
+
+    // Expand `$OUT` in env values to the entry's tempdir absolute path.
     // Lets sims write `@sim_env("ANVIL_SESSION", "$OUT/resume.json")`
     // and have it resolve before luajit spawns. Runtime `set_env()`
     // runs after `@init` so it can't influence env-var-driven config.
-    let out_str = out_path.to_string_lossy().to_string();
-    let preset_env: Vec<(String, String)> = env_pairs
+    let out_str = first.out_dir.to_string_lossy().to_string();
+    let preset_env: Vec<(String, String)> = first
+        .env
         .iter()
         .map(|(k, v)| (k.clone(), v.replace("$OUT", &out_str)))
         .collect();
 
     let lua_file = std::path::PathBuf::from(output).join(rock_host::project::MAIN_LUA_FILENAME);
     let mut cmd = rock_host::project::build_luajit_command(&lua_file, &[]);
-    cmd.env("ROCK_RUN_SIM", sim_part)
-        .env("FRAME_COUNT", DEFAULT_FRAME_BUDGET.to_string())
+    // `ROCK_RUN_SIM` / `OUT` / `FRAME_COUNT` carry the FIRST entry: they are read
+    // during boot (`sim_mode_active()` gates audio, the screenshot helper reads
+    // the budget) before the queue starts, and the child re-publishes them
+    // through setenv at each entry boundary.
+    cmd.env("ROCK_SIM_ENTRY_PLAN", plan_file.path())
+        .env("ROCK_RUN_SIM", &first.name)
+        .env("FRAME_COUNT", first.frame_budget.to_string())
         .env("STONE_HEADLESS", "1")
-        .env("OUT", out_path)
+        .env("OUT", &first.out_dir)
         // Default deterministic seed for sims. An explicit
         // `@sim_env("ROCK_TEST_SEED", ...)` in a sim still overrides
         // because `preset_env` is layered after this baseline.
@@ -824,8 +936,11 @@ fn run_one_sim(
         cmd.env("STONE_LOG", "warn");
     }
 
+    let label = parts.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(",");
     let mut child = cmd.spawn()?;
-    record_sim_lifecycle("start", sim_part);
+    for p in parts {
+        record_sim_lifecycle("start", &p.name);
+    }
     let stderr_handle = child.stderr.take().expect("piped");
     let stdout_handle = child.stdout.take().expect("piped");
 
@@ -885,7 +1000,7 @@ fn run_one_sim(
 
     let stdout_thread = {
         let buf = Arc::clone(&stdout_buf);
-        let label = sim_part.to_string();
+        let label = label.clone();
         std::thread::spawn(move || -> Option<String> {
             let mut h = stdout_handle;
             let mut local = Vec::new();
@@ -979,33 +1094,108 @@ fn run_one_sim(
     // (silent-errors audit, 2026-05-02).
     let mut reader_diagnostics = Vec::new();
     match stderr_thread.join() {
-        Ok(Some(message)) => reader_diagnostics.push(format!("rock sim `{sim_part}`: {message}")),
+        Ok(Some(message)) => reader_diagnostics.push(format!("rock sim `{label}`: {message}")),
         Ok(None) => {}
         Err(panic) => reader_diagnostics.push(format!(
-            "rock sim `{sim_part}`: stderr reader thread panicked; sim output may be incomplete: {panic:?}"
+            "rock sim `{label}`: stderr reader thread panicked; sim output may be incomplete: {panic:?}"
         )),
     }
     match stdout_thread.join() {
         Ok(Some(message)) => reader_diagnostics.push(message),
         Ok(None) => {}
         Err(panic) => reader_diagnostics.push(format!(
-            "rock sim `{sim_part}`: stdout reader thread panicked; game stdout may be incomplete: {panic:?}"
+            "rock sim `{label}`: stdout reader thread panicked; game stdout may be incomplete: {panic:?}"
         )),
     }
-    record_sim_lifecycle("end", sim_part);
+    for p in parts {
+        record_sim_lifecycle("end", &p.name);
+    }
     if writes_live(buffered) {
         for message in &reader_diagnostics {
             log::warn!(target: "SIM", "{message}");
         }
     }
 
-    let stderr_str = stderr_lines.lock().unwrap().join("\n");
+    let collected = stderr_lines.lock().unwrap().clone();
     let stdout_buf_locked = stdout_buf.lock().unwrap();
     let stdout_str = String::from_utf8_lossy(&stdout_buf_locked).to_string();
     drop(stdout_buf_locked);
 
-    let mut summary = SimSummary::from_stderr(&stderr_str);
-    summary.errors.extend(reload_errors);
+    let streams = split_worker_stream(&collected, parts.len())?;
+    // Process-level outcomes belong to the entry that was live when they
+    // happened: the LAST one that started. For a single-entry worker that is
+    // entry 0, exactly as before.
+    let blamed = streams.iter().rposition(|s| s.started).unwrap_or(0);
+
+    let mut summaries = Vec::with_capacity(parts.len());
+    for (i, (part, stream)) in parts.iter().zip(streams.iter()).enumerate() {
+        let mut summary = SimSummary::from_stderr(&stream.sim.join("\n"));
+        if !stream.started {
+            summary.errors.push(SiteMessage {
+                message: format!(
+                    "sim `{}` never started: the worker process ended during an earlier entry",
+                    part.name
+                ),
+                site: String::new(),
+            });
+        }
+        if i == blamed {
+            summary.errors.extend(std::mem::take(&mut reload_errors));
+            summary.timed_out = timed_out;
+            if !status.success() {
+                summary.process_failure_code = Some(status.code().unwrap_or(-1));
+            }
+        }
+
+        let snap_dir = find_sim_source(project, &part.name)
+            .as_deref()
+            .map(snap_dir_for);
+        if let Some(dir) = snap_dir.as_ref() {
+            process_snapshots(&mut summary, dir, update_snapshots);
+        } else if !summary.snapshots.is_empty() || !summary.image_snapshots.is_empty() {
+            summary.errors.push(SiteMessage {
+                message: format!(
+                    "could not locate .rock source for sim `{}` -- snapshot ops cannot resolve baseline dir",
+                    part.name
+                ),
+                site: String::new(),
+            });
+        }
+
+        if buffered {
+            // Same CONTENT a streaming run writes live, just held until the
+            // caller owns the record lock: the child's own stderr, plus its
+            // stdout when the sim failed. Without this a concurrent run
+            // silently loses every game-side diagnostic that a serial run
+            // prints.
+            let mut diag = String::new();
+            for line in &stream.raw {
+                diag.push_str(line);
+                diag.push('\n');
+            }
+            if i == blamed {
+                for message in &reader_diagnostics {
+                    diag.push_str("[SIM] warning: ");
+                    diag.push_str(message);
+                    diag.push('\n');
+                }
+                if !quiet
+                    && (summary.has_failures()
+                        || summary.timed_out
+                        || summary.process_failure_code.is_some())
+                    && !stdout_str.trim().is_empty()
+                {
+                    // Process-wide stream; it cannot be split per entry, so it
+                    // rides with the entry the process died in.
+                    diag.push_str(&format!("--- game stdout for `{}` ---\n", part.name));
+                    diag.push_str(&stdout_str);
+                }
+            }
+            summary.diagnostics = diag;
+        }
+        summaries.push(summary);
+    }
+
     // Restore the session + remove the overlay even when the sim failed --
     // a revert failure is itself a loud error (it would poison every later
     // sim in the suite).
@@ -1014,58 +1204,20 @@ fn run_one_sim(
         .map(|st| revert_reload_edits(st, output, &mut pristine))
         .unwrap_or(Ok(()))
     {
-        summary.errors.push(SiteMessage {
+        summaries[blamed].errors.push(SiteMessage {
             message: format!("reload_edit revert failed: {e}"),
             site: String::new(),
         });
     }
-    summary.timed_out = timed_out;
-    if !status.success() {
-        summary.process_failure_code = Some(status.code().unwrap_or(-1));
-    }
 
-    let snap_dir = sim_source.as_deref().map(snap_dir_for);
-    if let Some(dir) = snap_dir.as_ref() {
-        process_snapshots(&mut summary, dir, update_snapshots);
-    } else if !summary.snapshots.is_empty() || !summary.image_snapshots.is_empty() {
-        summary.errors.push(SiteMessage {
-            message: format!(
-                "could not locate .rock source for sim `{sim_part}` -- snapshot ops cannot resolve baseline dir"
-            ),
-            site: String::new(),
-        });
-    }
-
-    if buffered {
-        // Same CONTENT a streaming run writes live, just held until the caller
-        // owns the record lock: the child's own stderr, plus its stdout when
-        // the sim failed. Without this a concurrent run silently loses every
-        // game-side diagnostic that a serial run prints.
-        let mut diag = String::new();
-        for line in stderr_lines.lock().unwrap().iter() {
-            if !line.starts_with("__SIM__ ") {
-                diag.push_str(line);
-                diag.push('\n');
-            }
-        }
-        for message in reader_diagnostics {
-            diag.push_str("[SIM] warning: ");
-            diag.push_str(&message);
-            diag.push('\n');
-        }
-        if !quiet
-            && (summary.has_failures() || summary.timed_out || summary.process_failure_code.is_some())
+    if !quiet && writes_live(buffered) {
+        let blamed_summary = &summaries[blamed];
+        if (blamed_summary.has_failures()
+            || blamed_summary.timed_out
+            || blamed_summary.process_failure_code.is_some())
             && !stdout_str.trim().is_empty()
         {
-            diag.push_str(&format!("--- game stdout for `{sim_part}` ---\n"));
-            diag.push_str(&stdout_str);
-        }
-        summary.diagnostics = diag;
-    }
-
-    if !quiet && writes_live(buffered) && (summary.has_failures() || summary.timed_out || summary.process_failure_code.is_some()) {
-        if !stdout_str.trim().is_empty() {
-            log::error!(target: "SIM", "--- game stdout for `{sim_part}` ---");
+            log::error!(target: "SIM", "--- game stdout for `{}` ---", parts[blamed].name);
             // Result output, NOT logging: verbatim dump of the child
             // game's captured stdout on failure — structured child
             // output, not a run_sim log record.
@@ -1073,7 +1225,183 @@ fn run_one_sim(
         }
     }
 
-    Ok(summary)
+    Ok(summaries)
+}
+
+/// Spawn one luajit process for `sim_part` and demux its side channel.
+/// `out_path` is the shared `OUT` env value across all parts in a
+/// multi-start chain.
+fn run_one_sim(
+    project: &str,
+    sim_part: &str,
+    quiet: bool,
+    buffered: bool,
+    update_snapshots: bool,
+    out_path: &Path,
+    output: &str,
+    env_pairs: &[(String, String)],
+    stone: Option<&mut crate::skull_backend::SkullStone>,
+) -> Result<SimSummary> {
+    let part = WorkerPart {
+        name: sim_part.to_string(),
+        out_dir: out_path.to_path_buf(),
+        frame_budget: DEFAULT_FRAME_BUDGET,
+        env: env_pairs.to_vec(),
+    };
+    let mut summaries = run_worker(
+        project,
+        std::slice::from_ref(&part),
+        quiet,
+        buffered,
+        update_snapshots,
+        output,
+        stone,
+    )?;
+    Ok(summaries.remove(0))
+}
+
+/// Build the structured record for one finished entry.
+fn record_of(name: &str, seq: usize, summary: SimSummary) -> crate::sim_record::SimRecord {
+    crate::sim_record::SimRecord {
+        name: name.to_string(),
+        seq,
+        expects_pass: summary.expects_pass,
+        expects_fail: summary.expects_fail,
+        errors: summary.errors,
+        saw_stop: summary.saw_stop,
+        timed_out: summary.timed_out,
+        exit_code: summary.process_failure_code,
+        diagnostics: summary.diagnostics,
+        artifacts: summary.artifacts,
+    }
+}
+
+/// How many processes an entry queue is spread across.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Grouping {
+    /// The fresh-process contract: one child per part, which is what the suite
+    /// runner does today and therefore what the oracle compares against.
+    PerPart,
+    /// One booted child for the whole queue -- the Phase B seam under test.
+    Shared,
+}
+
+/// Run `entry_specs` (each a comma-chain sharing one `$OUT`) and return a
+/// record per entry. Every entry's `$OUT` stays live until its child has
+/// exited and its deferred artifacts have been processed.
+fn run_entries(
+    project: &str,
+    output: &str,
+    env_by_wire: &HashMap<String, Vec<(String, String)>>,
+    entry_specs: &[String],
+    grouping: Grouping,
+) -> Result<Vec<crate::sim_record::SimRecord>> {
+    let mut artifacts = Vec::with_capacity(entry_specs.len());
+    let mut part_counts = Vec::with_capacity(entry_specs.len());
+    let mut parts: Vec<WorkerPart> = Vec::new();
+    for spec in entry_specs {
+        let entry_artifacts = SimArtifacts::new()?;
+        let chain = parse_sim_chain(spec);
+        if chain.is_empty() {
+            return Err(anyhow!("sim got an empty sim name"));
+        }
+        part_counts.push(chain.len());
+        for name in chain {
+            parts.push(WorkerPart {
+                name: name.to_string(),
+                out_dir: entry_artifacts.path().to_path_buf(),
+                frame_budget: DEFAULT_FRAME_BUDGET,
+                env: env_by_wire.get(name).cloned().unwrap_or_default(),
+            });
+        }
+        artifacts.push(entry_artifacts);
+    }
+
+    // Not quiet, but buffered: nothing is written live (several entries share
+    // one stream), and every diagnostic is retained into its record instead.
+    let summaries = match grouping {
+        Grouping::Shared => run_worker(project, &parts, false, true, false, output, None)?,
+        Grouping::PerPart => {
+            let mut out = Vec::with_capacity(parts.len());
+            for part in &parts {
+                out.extend(run_worker(
+                    project,
+                    std::slice::from_ref(part),
+                    false,
+                    true,
+                    false,
+                    output,
+                    None,
+                )?);
+            }
+            out
+        }
+    };
+
+    let mut records = Vec::with_capacity(entry_specs.len());
+    let mut summaries = summaries.into_iter();
+    for ((seq, spec), entry_artifacts) in entry_specs.iter().enumerate().zip(artifacts) {
+        let mut merged = SimSummary::default();
+        for summary in summaries.by_ref().take(part_counts[seq]) {
+            merged.merge(summary);
+        }
+        entry_artifacts.finish(&mut merged);
+        records.push(record_of(spec, seq, merged));
+    }
+    Ok(records)
+}
+
+/// What to compare: `target` run alone in a fresh process against `target` run
+/// after `predecessors` in one process.
+pub struct DifferentialPlan {
+    /// Entries the worker runs before the target. Each gets its own `$OUT`.
+    pub predecessors: Vec<String>,
+    /// The entry under comparison. A comma-chain runs its parts in order
+    /// sharing one `$OUT`, exactly as the suite schedules it.
+    pub target: String,
+}
+
+/// Run both sides of the Phase B differential and return
+/// `(isolated, worker)` records for the target entry.
+///
+/// Both sides go through the same spawn, demux, artifact and record code, so
+/// the two schemas cannot drift; the ONLY difference is how many entries share
+/// the process. Compare them with [`crate::sim_record::compare`].
+pub fn run_differential(
+    backend: crate::Backend,
+    project: &str,
+    plan: &DifferentialPlan,
+) -> Result<(crate::sim_record::SimRecord, crate::sim_record::SimRecord)> {
+    rock_host::project::ensure_workspace_root()?;
+    let project_path = rock_host::project::resolve_project_dir(project)?;
+    let project = project_path.to_string_lossy().into_owned();
+    rock_host::engine_build::build_engine_libs(&project)?;
+
+    let out_dir = sim_output_dir()?;
+    let output = out_dir.path().to_string_lossy().into_owned();
+    let (_, env_by_wire, _stone) = compile_sims(backend, project_path, PathBuf::from(&output))?;
+
+    let isolated = run_entries(
+        &project,
+        &output,
+        &env_by_wire,
+        std::slice::from_ref(&plan.target),
+        Grouping::PerPart,
+    )?
+    .remove(0);
+
+    let mut worker_specs = plan.predecessors.clone();
+    worker_specs.push(plan.target.clone());
+    let mut worker = run_entries(
+        &project,
+        &output,
+        &env_by_wire,
+        &worker_specs,
+        Grouping::Shared,
+    )?;
+    let worker = worker.remove(worker.len() - 1);
+
+    Ok((isolated, worker))
 }
 
 /// Compress a `@call_site` path to `<stem>:<line>` for display — the
@@ -1247,8 +1575,14 @@ fn process_snapshots(summary: &mut SimSummary, snap_dir: &Path, update: bool) {
         let baseline = snap_dir.join(format!("{}.json", snap.name));
         let site = snap.site.clone();
         match handle_json_snapshot(&snap, &baseline, update) {
-            Ok(SnapResult::Pass) => summary.expects_ok += 1,
-            Ok(SnapResult::Wrote) => summary.expects_ok += 1,
+            Ok(SnapResult::Pass) => summary.expects_pass.push(SiteMessage {
+                message: prefix_with_site(&site, &format!("snapshot `{}` matches baseline", snap.name)),
+                site: String::new(),
+            }),
+            Ok(SnapResult::Wrote) => summary.expects_pass.push(SiteMessage {
+                message: prefix_with_site(&site, &format!("snapshot `{}` baseline written", snap.name)),
+                site: String::new(),
+            }),
             Ok(SnapResult::Fail(msg)) => summary.expects_fail.push(SiteMessage {
                 message: prefix_with_site(&site, &msg),
                 site: String::new(),
@@ -1276,7 +1610,14 @@ fn process_snapshots(summary: &mut SimSummary, snap_dir: &Path, update: bool) {
         }
         let baseline = snap_dir.join(format!("{}.png", img.name));
         match handle_image_snapshot(&img, &baseline, update) {
-            Ok(SnapResult::Pass) | Ok(SnapResult::Wrote) => summary.expects_ok += 1,
+            Ok(SnapResult::Pass) => summary.expects_pass.push(SiteMessage {
+                message: prefix_with_site(&site, &format!("image_snapshot `{}` within tolerance", img.name)),
+                site: String::new(),
+            }),
+            Ok(SnapResult::Wrote) => summary.expects_pass.push(SiteMessage {
+                message: prefix_with_site(&site, &format!("image_snapshot `{}` baseline written", img.name)),
+                site: String::new(),
+            }),
             Ok(SnapResult::Fail(msg)) => summary.expects_fail.push(SiteMessage {
                 message: prefix_with_site(&site, &msg),
                 site: String::new(),
@@ -1309,7 +1650,10 @@ enum SnapResult {
 fn process_video_assertions(summary: &mut SimSummary) {
     for v in std::mem::take(&mut summary.video_assertions) {
         match eval_video_assertion(&v) {
-            Ok(true) => summary.expects_ok += 1,
+            Ok(true) => summary.expects_pass.push(SiteMessage {
+                message: format!("expect_video {} {} {} {}", v.path, v.field, v.cmp, v.value_json),
+                site: String::new(),
+            }),
             Ok(false) => summary.expects_fail.push(SiteMessage {
                 message: format!("expect_video {} {} {} {}", v.path, v.field, v.cmp, v.value_json),
                 site: String::new(),
@@ -1322,7 +1666,13 @@ fn process_video_assertions(summary: &mut SimSummary) {
     }
     for m in std::mem::take(&mut summary.video_match_assertions) {
         match crate::image_video::ffmpeg_ssim(&m.a, &m.b) {
-            Ok(score) if score >= m.min_sim => summary.expects_ok += 1,
+            Ok(score) if score >= m.min_sim => summary.expects_pass.push(SiteMessage {
+                message: format!(
+                    "expect_videos_match {} {} similarity>={:.4} (got {:.4})",
+                    m.a, m.b, m.min_sim, score
+                ),
+                site: String::new(),
+            }),
             Ok(score) => summary.expects_fail.push(SiteMessage {
                 message: format!(
                     "expect_videos_match {} {} similarity>={:.4} (got {:.4})",
@@ -1472,14 +1822,18 @@ fn handle_image_snapshot(
 /// (`mag/tests/sims/foo.rock:42`) it originated at, captured via
 /// `@call_site` in the sim runtime helpers. Empty `site` for messages
 /// the runner synthesizes itself (e.g. process failure / timeout).
-struct SiteMessage {
-    message: String,
-    site: String,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SiteMessage {
+    pub message: String,
+    pub site: String,
 }
 
 #[derive(Default)]
 struct SimSummary {
-    expects_ok: usize,
+    /// Passing expects, in emission order, with the site each came from.
+    /// A bare count could not tell two runs apart when one passed a
+    /// DIFFERENT assertion than the other.
+    expects_pass: Vec<SiteMessage>,
     expects_fail: Vec<SiteMessage>,
     errors: Vec<SiteMessage>,
     saw_stop: bool,
@@ -1493,11 +1847,14 @@ struct SimSummary {
     /// Child diagnostics retained by a buffered (concurrent) run, emitted by
     /// the caller inside the record lock. Empty when the run wrote them live.
     diagnostics: String,
+    /// What the entry left under its `$OUT`, keyed by relative path. Captured
+    /// by `SimArtifacts::finish_with` while the directory is still live.
+    artifacts: std::collections::BTreeMap<String, crate::sim_record::ArtifactEntry>,
 }
 
 impl SimSummary {
     fn merge(&mut self, other: SimSummary) {
-        self.expects_ok += other.expects_ok;
+        self.expects_pass.extend(other.expects_pass);
         self.expects_fail.extend(other.expects_fail);
         self.errors.extend(other.errors);
         // saw_stop reflects the *last* part: if the chain's tail
@@ -1510,6 +1867,7 @@ impl SimSummary {
         self.video_match_assertions.extend(other.video_match_assertions);
         self.cleanup_paths.extend(other.cleanup_paths);
         self.diagnostics.push_str(&other.diagnostics);
+        self.artifacts.extend(other.artifacts);
         self.timed_out = self.timed_out || other.timed_out;
         if other.process_failure_code.is_some() {
             self.process_failure_code = other.process_failure_code;
@@ -1561,7 +1919,10 @@ impl SimSummary {
             let site_raw = extract_str_field(rest, "site").unwrap_or_default();
             let site = compress_site(&site_raw);
             match op.as_str() {
-                "expect_ok" => s.expects_ok += 1,
+                "expect_ok" => {
+                    let message = extract_str_field(rest, "message").unwrap_or_default();
+                    s.expects_pass.push(SiteMessage { message, site });
+                }
                 "expect_fail" => {
                     let message = extract_str_field(rest, "message").unwrap_or_default();
                     s.expects_fail.push(SiteMessage { message, site });
@@ -1657,7 +2018,7 @@ impl SimSummary {
                 eprintln!("[sim] FAIL [{}]: {}", f.site, f.message);
             }
         }
-        let total = self.expects_ok + self.expects_fail.len();
+        let total = self.expects_pass.len() + self.expects_fail.len();
         // The PRINTED verdict must come from the same predicate as the real
         // outcome. Computing it from `has_failures()` alone printed `PASS` for a
         // sim that had aborted mid-body -- a C++ assert in imgui produced
@@ -1674,7 +2035,7 @@ impl SimSummary {
         };
         eprintln!(
             "[sim] {sim_name}: {status} ({}/{} expects passed){stop_note}",
-            self.expects_ok, total
+            self.expects_pass.len(), total
         );
     }
 }
@@ -2021,7 +2382,7 @@ __SIM__ {"op":"expect_fail","message":"c","site":"foo.rock:4"}
 __SIM__ {"op":"stop","site":"foo.rock:5"}
 "#;
         let s = SimSummary::from_stderr(stderr);
-        assert_eq!(s.expects_ok, 2);
+        assert_eq!(s.expects_pass.len(), 2);
         assert_eq!(s.expects_fail.len(), 1);
         assert_eq!(s.expects_fail[0].message, "c");
         assert_eq!(s.expects_fail[0].site, "foo:4");
@@ -2033,7 +2394,7 @@ __SIM__ {"op":"stop","site":"foo.rock:5"}
     fn summary_flags_missing_stop() {
         let stderr = r#"__SIM__ {"op":"expect_ok","message":"a","site":"foo.rock:1"}"#;
         let s = SimSummary::from_stderr(stderr);
-        assert_eq!(s.expects_ok, 1);
+        assert_eq!(s.expects_pass.len(), 1);
         assert!(!s.saw_stop);
         assert!(!s.has_failures());
     }
