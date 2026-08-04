@@ -1204,6 +1204,36 @@ enum EnvelopeStep {
     Raw { in_entry: bool },
 }
 
+/// The live half of the wedged-child guard: each stderr line runs through the
+/// strict envelope, and the deadline anchor may reset exactly when this says
+/// so -- an accepted `entry_start`, nothing else. The first violation poisons
+/// the guard, so no later line can extend the deadline either; the violation
+/// itself is reported after the exit by `split_worker_stream` running the
+/// same interpretation. Without the gate, a sim wedged inside one tick --
+/// where the frame budget can never be evaluated -- could flood bogus starts
+/// and evade the only bound able to kill it.
+struct DeadlineGuard {
+    envelope: Option<EnvelopeTracker>,
+}
+
+impl DeadlineGuard {
+    fn for_parts(parts: &[WorkerPart]) -> Self {
+        Self { envelope: Some(EnvelopeTracker::for_parts(parts)) }
+    }
+
+    /// True exactly when `line` must reset the deadline anchor.
+    fn observe_resets(&mut self, line: &str) -> bool {
+        match self.envelope.as_mut().map(|t| t.observe(line)) {
+            Some(Ok(EnvelopeStep::Started(_))) => true,
+            Some(Err(_)) => {
+                self.envelope = None;
+                false
+            }
+            _ => false,
+        }
+    }
+}
+
 impl EnvelopeTracker {
     fn for_parts(parts: &[WorkerPart]) -> Self {
         Self {
@@ -1452,13 +1482,7 @@ fn run_worker(
     let stderr_thread = {
         let lines = Arc::clone(&stderr_lines);
         let anchor = Arc::clone(&deadline_anchor);
-        // The SAME strict envelope the post-exit demux applies, driven live:
-        // the anchor resets only on a start the demux would accept, so a line
-        // it would reject cannot buy a wedged child more time. On the first
-        // violation the tracker is poisoned and no later line resets --
-        // fail closed; the violation itself is reported after the exit by
-        // `split_worker_stream` running the same interpretation.
-        let mut envelope = Some(EnvelopeTracker::for_parts(parts));
+        let mut deadline_guard = DeadlineGuard::for_parts(parts);
         // Buffered runs must not write anything from this thread: several
         // children are live, so a direct write here interleaves into the middle
         // of another sim's locked record. The lines are retained and handed
@@ -1472,12 +1496,8 @@ fn run_worker(
                     Ok(line) => line,
                     Err(e) => return Some(format!("error reading game stderr: {e}")),
                 };
-                match envelope.as_mut().map(|t| t.observe(&line)) {
-                    Some(Ok(EnvelopeStep::Started(_))) => {
-                        *anchor.lock().unwrap() = std::time::Instant::now();
-                    }
-                    Some(Err(_)) => envelope = None,
-                    _ => {}
+                if deadline_guard.observe_resets(&line) {
+                    *anchor.lock().unwrap() = std::time::Instant::now();
                 }
                 if let Some(rest) = line.strip_prefix("__SIM__ ") {
                     let op = extract_str_field(rest, "op");
@@ -3170,6 +3190,38 @@ mod tests {
         assert!(t.observe(&start(1, "b")).is_err(), "out of order: entry 1 before entry 0");
         let mut t = EnvelopeTracker::for_parts(&parts);
         assert!(t.observe(&start(0, "b")).is_err(), "wrong name for the seq");
+    }
+
+    /// The wedged-child evasion, deterministically: a sim stuck inside one
+    /// tick can flood `entry_start`-shaped lines, and the deadline may reset
+    /// on NONE of them -- only on a start the strict envelope accepts. After
+    /// any violation the guard is poisoned, so even a line that would
+    /// otherwise be the valid next start extends nothing.
+    #[test]
+    fn the_deadline_guard_resets_only_on_accepted_starts() {
+        let parts = worker_parts(&["a", "b"]);
+
+        let mut g = DeadlineGuard::for_parts(&parts);
+        assert!(g.observe_resets(&start(0, "a")), "the expected first start resets");
+        assert!(!g.observe_resets(&expect_ok("inside a")), "an ordinary op does not");
+        assert!(!g.observe_resets("[   0.1s INFO ] raw logging"), "raw output does not");
+        // Every start shape a wedged sim can emit while its own entry is open.
+        assert!(!g.observe_resets(r#"__SIM__ {"op":"entry_start"}"#), "malformed: no seq");
+        assert!(!g.observe_resets(&start(0, "a")), "duplicate of the open entry");
+        assert!(!g.observe_resets(&start(1, "b")), "next entry while one is open");
+        // Poisoned by the violations above: the sequence end(0) -> start(1)
+        // WOULD be valid to a fresh envelope, and must extend nothing now.
+        assert!(!g.observe_resets(&end(0, "a")));
+        assert!(
+            !g.observe_resets(&start(1, "b")),
+            "a poisoned guard must not resume resetting on later well-formed lines"
+        );
+
+        // The healthy path keeps resetting across the whole queue.
+        let mut g = DeadlineGuard::for_parts(&parts);
+        assert!(g.observe_resets(&start(0, "a")));
+        assert!(!g.observe_resets(&end(0, "a")), "an entry's end is not a reset");
+        assert!(g.observe_resets(&start(1, "b")), "the valid next start resets");
     }
 
     fn start(seq: usize, name: &str) -> String {

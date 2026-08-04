@@ -661,53 +661,6 @@ fn a_duplicated_spec_runs_and_reports_twice_in_worker_mode() {
     );
 }
 
-/// The other side of the per-entry deadline: only a start the strict envelope
-/// ACCEPTS may reset it. `b2_evade_tail` wedges inside one tick -- the frame
-/// budget can never be evaluated, so the wall-clock guard is the only bound --
-/// while flooding malformed `entry_start` lines. A deadline that reset on
-/// unvalidated starts never fires and the suite call never returns, which is
-/// why this test runs the call on a watchdog thread. The kill is proven by the
-/// call RETURNING at all: the post-exit demux only runs once the child is
-/// dead, and it rejects the bogus line with the protocol's own error.
-#[test]
-fn a_rejected_entry_start_cannot_extend_the_deadline() {
-    const VAR: &str = "ROCK_SIM_TIMEOUT_SECS";
-    struct Restore(Option<String>);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            // SAFETY: the heavy harness runs single-threaded (--test-threads=1).
-            unsafe {
-                match &self.0 {
-                    Some(v) => std::env::set_var(VAR, v),
-                    None => std::env::remove_var(VAR),
-                }
-            }
-        }
-    }
-    let _restore = Restore(std::env::var(VAR).ok());
-    unsafe { std::env::set_var(VAR, "8") };
-
-    let call = std::thread::spawn(|| {
-        run_worker_suite(Backend::Skull, "testbed", &["b2_evade_head,b2_evade_tail".to_string()])
-    });
-    let started = std::time::Instant::now();
-    while !call.is_finished() {
-        assert!(
-            started.elapsed() < std::time::Duration::from_secs(120),
-            "the worker was never killed: a rejected entry_start extended the deadline"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(500));
-    }
-    let err = call
-        .join()
-        .expect("watchdog thread")
-        .expect_err("the killed worker's stream still carries the bogus start, which the demux rejects");
-    assert!(
-        format!("{err:#}").contains("no usable seq"),
-        "the refusal must be the strict protocol's own, not a new interpretation: {err:#}"
-    );
-}
-
 /// The wall-clock timeout is the WEDGED-CHILD guard, so it bounds an entry,
 /// not the worker process: a queue of individually healthy entries must not
 /// fail whichever one happens to be running when their sum crosses it.
