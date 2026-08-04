@@ -20,6 +20,8 @@ mod replay_roundtrip_tests;
 mod replay_timeline_tests;
 #[path = "replay_window_tests.rs"]
 mod replay_window_tests;
+#[path = "frame_error_gate.rs"]
+mod frame_error_gate;
 #[path = "shader_failure_gate.rs"]
 mod shader_failure_gate;
 #[path = "uniform_block_gate.rs"]
