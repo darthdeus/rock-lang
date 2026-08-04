@@ -2424,14 +2424,19 @@ fn uniform_array_elem(ws: &Workspace, ty: TyId, span: Span) -> Result<Option<Wir
         return Err(err(span, "shader: UniformArray needs an element type argument"));
     };
     let ety = ty.with_idx(first);
-    skull_mir::gpu_layout::wire_kind(ws, ety).map(Some).ok_or_else(|| {
-        err(span, format!(
-            "shader: UniformArray element type `{}` has no std140 form (allowed: float, int, Vec2, Vec4)",
-            glsl_ty(ws, ety, span, "uniform-array element")
-                .map(|t| t.name().to_string())
-                .unwrap_or_else(|_| "?".to_string())
-        ))
-    })
+    if let Some(k) = skull_mir::gpu_layout::wire_kind(ws, ety) {
+        return Ok(Some(k));
+    }
+    // The element has no std140 form. Naming it needs its GLSL spelling, and
+    // when THAT fails too the right diagnostic is the one `glsl_ty` produced --
+    // it knows why the type is unusable, and this function does not. Replacing
+    // it with a fabricated `?` would discard the compiler's own information at
+    // exactly the point the author needs it.
+    let name = glsl_ty(ws, ety, span, "uniform-array element")?;
+    Err(err(span, format!(
+        "shader: UniformArray element type `{}` has no std140 form (allowed: float, int, Vec2, Vec4)",
+        name.name()
+    )))
 }
 
 /// One classified `UniformArray<T>` param: where it sits in the entry's

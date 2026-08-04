@@ -1658,14 +1658,40 @@ function stone_shader_check_uniform_block_layout(h, name, names, names_len, offs
   var indices = gl.getUniformIndices(sh.prog, members);
   var driver = gl.getActiveUniforms(sh.prog, indices, gl.UNIFORM_OFFSET);
   var ok = true;
+  var active = 0;
   for (var i = 0; i < members.length; i++) {
     // An INACTIVE member is optimized out and reports no index: skipped, not
     // failed. The check is a PARTIAL oracle for that reason.
     if (indices[i] === gl.INVALID_INDEX || indices[i] == null) continue;
+    active++;
     if (driver[i] !== offsets[i]) {
       __sw_log_once("check_uniform_block_layout: `" + name + "`.`" + members[i] + "` is at " + driver[i] + ", the plan says " + offsets[i]);
       ok = false;
     }
+  }
+  // ZERO comparisons is not a pass. Every member skipped means the loop above
+  // examined nothing and `ok` is still its initial true -- a gate arm with no
+  // population, reporting success for a block it never looked at. The native
+  // sibling rejects here for the same reason, and the two must agree or the web
+  // tier silently accepts what the desktop one refuses.
+  //
+  // The case that makes it load-bearing: an ARRAY block is queried as
+  // `name[0]`, and if that spelling ever regresses to the bare name, EVERY
+  // member misses at once -- so the block where this matters most is exactly
+  // the one where the skip stops being partial coverage.
+  //
+  // A context that models no std140 layout at all declares itself, because
+  // "asked a driver and it reported nothing" and "there is no driver to ask"
+  // are different answers and only the first is a failure. The declaration is
+  // the STUB's, it is logged every run so a silent skip is impossible, and no
+  // real WebGL context carries it.
+  if (active === 0) {
+    if (gl.__rockNoUniformLayout) {
+      __sw_log_once("check_uniform_block_layout: `" + name + "` NOT VERIFIED -- this GL context models no std140 layout");
+      return true;
+    }
+    __sw_log_once("check_uniform_block_layout: `" + name + "` has no active members -- nothing to verify");
+    return false;
   }
   return ok;
 }
