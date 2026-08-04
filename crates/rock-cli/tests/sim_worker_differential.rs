@@ -485,6 +485,40 @@ fn an_out_interpolating_env_is_refused_with_its_own_reason() {
     );
 }
 
+/// SENTINEL -- the DROPPED-DEFINITION static (`docs/sim-speed-plan.md` B1).
+///
+/// Unlike its two B0 siblings, this cell is not merely unrestored: it is
+/// unregistered. Its owner is `Iterator`-bounded, so `mir_emit` skips its
+/// definition entirely and it lives only inlined at its call sites, which means
+/// its cell never reaches `all_statics` and nothing in `__rock_known_globals`
+/// names it. A checkpoint built from that registry cannot see this state at
+/// all. Pinned at the emitted-Lua level too, by
+/// `crates/skull/tests/static_registration_coverage.rs`.
+///
+/// FLIP WHEN FIXED: becomes `assert_equivalent` when the registry covers owners
+/// with no standalone definition AND the checkpoint restores them.
+#[test]
+fn a_dropped_definitions_static_still_leaks_into_the_next_entry() {
+    let (isolated, worker) = differential(&["b1_dropped_seed"], "b1_dropped_probe");
+    let c = compare(&isolated, &worker);
+
+    assert!(
+        !c.is_equivalent(),
+        "the dropped-definition static no longer leaks -- flip this sentinel to \
+         assert_equivalent"
+    );
+    for arm in ["verdict", "expects_pass", "expects_fail", "artifacts"] {
+        assert!(c.differs_on(arm), "expected a `{arm}` difference:\n{}", c.report());
+    }
+    assert_eq!(isolated.verdict(), "PASS");
+    assert_eq!(worker.verdict(), "FAIL");
+    assert_eq!(
+        isolated.artifacts["calls.txt"].len, worker.artifacts["calls.txt"].len,
+        "both write a one-digit count; only the digit differs"
+    );
+    assert_ne!(isolated.artifacts["calls.txt"], worker.artifacts["calls.txt"]);
+}
+
 /// Mutation guard for the comparator itself: every arm must be present, and
 /// every arm a fixture can populate must have compared a non-zero population
 /// in at least one fixture. Deleting an arm from `compare` makes `population`

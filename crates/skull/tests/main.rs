@@ -106,6 +106,8 @@ mod reserved_namespace;
 mod shader_pipeline_register;
 #[path = "static_hot_reload.rs"]
 mod static_hot_reload;
+#[path = "static_registration_coverage.rs"]
+mod static_registration_coverage;
 #[path = "struct_expand.rs"]
 mod struct_expand;
 #[path = "synthetic_name_collision.rs"]
