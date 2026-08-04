@@ -2581,16 +2581,24 @@ pub struct EnumFlatShape {
 pub(crate) enum FlatSlot {
     /// One dynamic slot -- today's shape, and what every non-`nobox` payload keeps.
     Opaque,
-    /// A `nobox` value payload, spanning its leaves.
-    Leaves(ValueShape),
+    /// The `nobox` value payloads SHARING this position, in variant-declaration
+    /// order and deduplicated by name. The position is as wide as the widest;
+    /// each variant writes and reads only its own leaves in the leading slots and
+    /// nil-pads the rest, discriminated by the tag the ctor makes static and the
+    /// match already tests. Never empty.
+    Leaves(Vec<ValueShape>),
 }
 
 impl FlatSlot {
-    /// Slots this position occupies.
+    /// Slots this position occupies: the widest payload sharing it.
     pub(crate) fn width(&self) -> usize {
         match self {
             FlatSlot::Opaque => 1,
-            FlatSlot::Leaves(vs) => vs.leaf_count(),
+            FlatSlot::Leaves(vss) => vss
+                .iter()
+                .map(ValueShape::leaf_count)
+                .max()
+                .expect("a widened position carries at least one shape"),
         }
     }
 }
@@ -2607,6 +2615,19 @@ impl EnumFlatShape {
     /// has nothing to write.
     pub(crate) fn slot_offset(&self, pos: usize) -> usize {
         self.slots.iter().take(pos).map(FlatSlot::width).sum()
+    }
+
+    /// The leaf shape position `pos` holds for a payload of nominal `name`, else
+    /// `None`. THE oracle for both the ctor's placement and a match arm's read,
+    /// so a write and a read of one position cannot disagree: a position may be
+    /// widened for a SIBLING variant while this variant's payload there is
+    /// ordinary, or a `nobox` value of a different shape.
+    pub(crate) fn position_shape(&self, pos: usize, name: Option<Ustr>) -> Option<&ValueShape> {
+        let FlatSlot::Leaves(vss) = self.slots.get(pos)? else {
+            return None;
+        };
+        let n = name?;
+        vss.iter().find(|vs| vs.name == n)
     }
 
     /// The number of scalar leaves this enum threads as across a call: the
@@ -2642,27 +2663,24 @@ pub(crate) fn flat_enum_shape(ws: &Workspace, name: Ustr) -> Option<EnumFlatShap
         return None;
     }
     let ed = &ws.modules[eid.module.index()].enums[eid.def];
-    // Per position: `None` = no `nobox` payload seen (one opaque slot), `Some` =
-    // the agreed leaf shape. `conflict` marks a position where two variants want
-    // DIFFERENT nobox shapes -- there is no one layout for it, so it stays opaque
-    // and a `nobox` payload there keeps rejecting at the ctor, loudly.
-    let mut want: Vec<Option<ValueShape>> = Vec::new();
-    let mut conflict: Vec<bool> = Vec::new();
+    // Per position: every DISTINCT `nobox` payload shape any variant carries
+    // there. Empty = no `nobox` payload seen, so one opaque slot. Several shapes
+    // share the position by width, each variant addressing its own leaves under
+    // the tag -- the alternative, letting the losing variant fall back to the
+    // opaque slot, is the implicit materialization the mark forbids.
+    let mut want: Vec<Vec<ValueShape>> = Vec::new();
     let mut record_fields: Vec<Ustr> = Vec::new();
     for v in &ed.variants {
         match &v.payload {
             VariantPayload::Unit => {}
             VariantPayload::Tuple(tys) => {
                 if want.len() < tys.len() {
-                    want.resize(tys.len(), None);
-                    conflict.resize(tys.len(), false);
+                    want.resize(tys.len(), Vec::new());
                 }
                 for (i, ty) in tys.iter().enumerate() {
                     let Some(vs) = nobox_payload_shape(ws, *ty) else { continue };
-                    match &want[i] {
-                        Some(prev) if prev.name != vs.name => conflict[i] = true,
-                        Some(_) => {}
-                        None => want[i] = Some(vs),
+                    if !want[i].iter().any(|prev| prev.name == vs.name) {
+                        want[i].push(vs);
                     }
                 }
             }
@@ -2677,11 +2695,7 @@ pub(crate) fn flat_enum_shape(ws: &Workspace, name: Ustr) -> Option<EnumFlatShap
     }
     let slots = want
         .into_iter()
-        .zip(conflict)
-        .map(|(w, bad)| match w {
-            Some(vs) if !bad => FlatSlot::Leaves(vs),
-            _ => FlatSlot::Opaque,
-        })
+        .map(|w| if w.is_empty() { FlatSlot::Opaque } else { FlatSlot::Leaves(w) })
         .collect();
     Some(EnumFlatShape { name, slots, record_fields })
 }

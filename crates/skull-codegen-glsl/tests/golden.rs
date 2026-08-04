@@ -8,7 +8,7 @@ static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         .iter()
         .map(|f| {
             let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());
-            skull_parser::parse_module(f.contents, id).expect("stdlib parse")
+            skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
         })
         .collect()
 });
@@ -23,7 +23,7 @@ static STDLIB_NOBOX_VEC2: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         .map(|f| {
             let src = f.contents.replace("\nvalue Vec2 {", "\nnobox value Vec2 {");
             let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());
-            skull_parser::parse_module(&src, id).expect("stdlib parse")
+            skull_parser::parse_module_clean(&src, id).expect("stdlib parse")
         })
         .collect()
 });
@@ -39,7 +39,7 @@ fn emit_with(
     roots: &[&str],
 ) -> Result<String, String> {
     let mut modules = stdlib.to_vec();
-    modules.push(skull_parser::parse_module(src, Ustr::from("<test>")).expect("parse"));
+    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
     // `semantic_pass` returns Ok with per-body errors recorded in `ws.errors`;
     // the CLI reports those and refuses to emit. Without this check the goldens
@@ -729,7 +729,7 @@ fn emit_entry_profile(
     profile: skull_codegen_glsl::GlslProfile,
 ) -> Result<String, String> {
     let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module(src, Ustr::from("<test>")).expect("parse"));
+    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
     // `semantic_pass` returns Ok with per-body errors recorded in `ws.errors`;
     // the CLI reports those and refuses to emit. Without this check the goldens

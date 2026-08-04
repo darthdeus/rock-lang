@@ -5,7 +5,7 @@
 use bone_semantic::prelude::*;
 
 fn parse(name: &str, src: &str) -> skull_parser::Ast {
-    skull_parser::parse_module(src, Ustr::from(name)).expect("parse")
+    skull_parser::parse_module_clean(src, Ustr::from(name)).expect("parse")
 }
 
 const DECL: &str = "struct Pair<T, U = int> {\n    a: T,\n    b: U,\n}\n";

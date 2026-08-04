@@ -16,14 +16,14 @@ static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         .iter()
         .map(|f| {
             let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());
-            skull_parser::parse_module(f.contents, id).expect("stdlib parse")
+            skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
         })
         .collect()
 });
 
 fn workspace(src: &str) -> (bone_semantic::inference::Workspace, bone_semantic::prelude::ModuleId) {
     let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module(src, Ustr::from("<test>")).expect("parse"));
+    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
     (ws, mid)
@@ -157,12 +157,14 @@ fn pipeline_emits_one_block_per_stage() {
         glsl.contains("layout(std140) uniform UiFragU {\n    vec2 uSize;\n    float uRatio;\n};\n"),
         "got:\n{glsl}"
     );
-    // The VERTEX group is loose for one more step. `@engine` now carries the
-    // engine-authored half (see `engine_block_*`), and this group flips to a
-    // block when the shaders that hold engine matrices are ported to it --
-    // sequencing, not a limitation of the emission.
-    assert!(glsl.contains("uniform mat4 uProjection;"), "got:\n{glsl}");
-    assert!(!glsl.contains("uniform UiVertU"), "vertex block lands with the port:\n{glsl}");
+    // The VERTEX group is a block too: one per STAGE, each at its own binding.
+    assert!(
+        glsl.contains("layout(std140) uniform UiVertU {\n    mat4 uProjection;\n    mat4 uView;\n    mat4 uTransform;\n};\n"),
+        "got:\n{glsl}"
+    );
+    // No member falls back to a loose uniform -- a block member has no location,
+    // so a by-name setter aimed at one writes nothing.
+    assert!(!glsl.contains("uniform mat4 uProjection;"), "got:\n{glsl}");
     // Unnamed instance -- members stay bare globals, so bodies are unchanged.
     assert!(!glsl.contains("u.uSize"), "got:\n{glsl}");
 }
@@ -176,11 +178,11 @@ fn pipeline_scaffold_vertex_block() {
     assert!(glsl.contains("layout (location = 0) in vec2 aPos;"), "got:\n{glsl}");
     assert!(glsl.contains("layout (location = 1) in vec2 aTexCoord;"), "got:\n{glsl}");
     assert!(glsl.contains("layout (location = 2) in vec4 aColor;"), "got:\n{glsl}");
-    // Vertex uniforms are loose for one more step -- see
-    // `pipeline_emits_one_block_per_stage`.
-    assert!(glsl.contains("uniform mat4 uProjection;"), "got:\n{glsl}");
-    assert!(glsl.contains("uniform mat4 uView;"), "got:\n{glsl}");
-    assert!(glsl.contains("uniform mat4 uTransform;"), "got:\n{glsl}");
+    // Vertex uniforms are a std140 block -- see `pipeline_emits_one_block_per_stage`.
+    assert!(glsl.contains("layout(std140) uniform UiVertU {"), "got:\n{glsl}");
+    assert!(glsl.contains("    mat4 uProjection;"), "got:\n{glsl}");
+    assert!(glsl.contains("    mat4 uView;"), "got:\n{glsl}");
+    assert!(glsl.contains("    mat4 uTransform;"), "got:\n{glsl}");
     // Varyings out -- position is suppressed (it is gl_Position, not a varying).
     assert!(glsl.contains("out vec2 TexCoord;"), "got:\n{glsl}");
     assert!(glsl.contains("out vec4 Color;"), "got:\n{glsl}");
@@ -1184,31 +1186,32 @@ fn engine_block_is_declared_in_both_stages() {
 /// rules out collapsing everything into one shared camera type (bitgun's grass
 /// mixes engine-owned camera/time with a game-owned `entity_count`).
 ///
-/// Asserted on the FRAGMENT stage because the vertex stage's own group is still
-/// loose for one more step (see `vert_plan` in the emitter): the engine block
-/// and a shader-owned block coexist at distinct bindings either way, which is
-/// the property here.
+/// Asserted on BOTH stages: the engine block and a shader-owned block coexist at
+/// distinct bindings, which is the property here.
 #[test]
 fn engine_block_coexists_with_a_shader_owned_block() {
     let glsl = emit_pipeline(ENGINE_SRC, "e_vert", "e_frag").expect("emit");
     assert!(glsl.contains("layout(std140) uniform UiFragU {\n    vec2 uSize;\n    float uRatio;\n};\n"), "got:\n{glsl}");
     assert!(glsl.contains("layout(std140) uniform EngineU {"), "got:\n{glsl}");
-    // The vertex stage's own group is the one still loose.
-    assert!(glsl.contains("uniform int entity_count;"), "got:\n{glsl}");
+    // The vertex stage's own group is a block at its own binding.
+    assert!(glsl.contains("layout(std140) uniform GrassVertU {\n    int entity_count;\n};\n"), "got:\n{glsl}");
     // ...but the engine block's members never fall back to loose uniforms.
     assert!(!glsl.contains("uniform mat4 uProjection;"), "got:\n{glsl}");
 }
 
-/// Position in `uniform_blocks` IS the binding index, so the engine block must
-/// come first: it is the one both stages share and the one the engine fills.
+/// The binding index comes from the param ROLE, not from position: `@engine` is
+/// slot 0, the vertex group 1, the fragment group 2. Reserved that way so slot 0
+/// means "the engine's block" even for a program that declares no `@engine` --
+/// which is what `register_uniform_blocks` relies on to turn a foreign block
+/// away there.
 #[test]
 fn engine_block_binds_at_index_zero() {
     let (ws, mid) = workspace(ENGINE_SRC);
     let em = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(&ws, mid, "e_vert", "e_frag", GlslProfile::Core330)
         .expect("emit");
-    let names: Vec<&str> = em.uniform_blocks.iter().map(|b| b.struct_name.as_str()).collect();
-    // `GrassVertU` joins between these two when the vertex gate flips.
-    assert_eq!(names, vec!["EngineU", "UiFragU"], "binding order");
+    let bound: Vec<(u32, &str)> =
+        em.uniform_blocks.iter().map(|(b, p)| (*b, p.struct_name.as_str())).collect();
+    assert_eq!(bound, vec![(0, "EngineU"), (1, "GrassVertU"), (2, "UiFragU")], "role -> binding");
 }
 
 /// One block per PROGRAM, so the stages cannot name different engine groups --
@@ -1221,4 +1224,177 @@ fn engine_groups_must_agree_across_stages() {
     );
     let e = emit_pipeline(&src, "e_vert", "e_frag").expect_err("must reject");
     assert!(e.contains("different @engine groups"), "got: {e}");
+}
+
+/// `@textures` is exclusive with EVERY other role, `@engine` included. Its
+/// checker enumerated the roles that existed when it was written, so adding a
+/// fourth silently widened what slips through -- a group is a binding set of
+/// its own, never engine-block data.
+#[test]
+fn textures_and_engine_conflict() {
+    let src = r#"
+        value QuadVert { aPos: Vec2, aTexCoord: Vec2 }
+        value EngineU  { uProjection: Mat4, uView: Mat4 }
+        struct Tex     { atlas: Sampler2D }
+        value Vary     { position: Vec4, TexCoord: Vec2 }
+
+        @shader(vertex)
+        fn t_vert(@attr a: QuadVert, @textures @engine t: Tex) -> Vary {
+            return Vary {
+                position: Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 },
+                TexCoord: a.aTexCoord,
+            }
+        }
+
+        @shader(fragment)
+        fn t_frag(vary: Vary) -> Vec4 {
+            return Vec4 { x: vary.TexCoord.x, y: 0.0, z: 0.0, w: 1.0 }
+        }
+    "#;
+    let e = emit_pipeline(src, "t_vert", "t_frag").expect_err("must reject");
+    assert!(e.contains("@textures"), "got: {e}");
+}
+
+// --- block members share the global GLSL namespace ---------------------------
+//
+// An unnamed-instance block's members are bare globals, so an `@engine` member
+// collides with an attribute, sampler, array, varying or MRT output exactly as
+// two loose uniforms would. A stage's own group already reaches the census
+// through `uniforms` whether or not it became a block; `@engine` is a separate
+// ROLE landing in `engine_uniforms`, so it had to be added explicitly.
+// Uncaught, each of these is a raw driver error carrying no Rock span.
+//
+// One rejection per namespace, because the census chains them separately and a
+// single case cannot show the others are covered.
+
+/// Builds a pipeline whose ENGINE block declares `name`, against a fixture that
+/// already uses that name in another namespace.
+fn engine_member_named(name: &str) -> String {
+    format!(r#"
+    value QuadVert  {{ aPos: Vec2, TexCoordAttr: Vec2 }}
+    value EngineU   {{ uProjection: Mat4, {name}: float }}
+    value Vary      {{ position: Vec4, TexCoord: Vec2 }}
+
+    @shader(vertex)
+    fn c_vert(@attr a: QuadVert, @engine e: EngineU) -> Vary {{
+        return Vary {{
+            position: e.uProjection * Vec4 {{ x: a.aPos.x, y: a.aPos.y, z: e.{name}, w: 1.0 }},
+            TexCoord: a.TexCoordAttr,
+        }}
+    }}
+
+    @shader(fragment)
+    fn c_frag(vary: Vary, tex: Sampler2D, @size(4) tints: UniformArray<Vec4>) -> Vec4 {{
+        return texture(tex, vary.TexCoord) + at(tints, 0)
+    }}
+"#)
+}
+
+#[test]
+fn engine_member_colliding_with_an_attribute_rejects() {
+    let e = emit_pipeline(&engine_member_named("aPos"), "c_vert", "c_frag").unwrap_err();
+    assert!(e.contains("`aPos` would collide"), "got: {e}");
+}
+
+#[test]
+fn engine_member_colliding_with_a_varying_rejects() {
+    let e = emit_pipeline(&engine_member_named("TexCoord"), "c_vert", "c_frag").unwrap_err();
+    assert!(e.contains("`TexCoord` would collide"), "got: {e}");
+}
+
+#[test]
+fn engine_member_colliding_with_a_sampler_rejects() {
+    let e = emit_pipeline(&engine_member_named("tex"), "c_vert", "c_frag").unwrap_err();
+    assert!(e.contains("`tex` would collide"), "got: {e}");
+}
+
+#[test]
+fn engine_member_colliding_with_a_uniform_array_rejects() {
+    let e = emit_pipeline(&engine_member_named("tints"), "c_vert", "c_frag").unwrap_err();
+    assert!(e.contains("`tints` would collide"), "got: {e}");
+}
+
+/// An MRT output, whose names are ARBITRARY struct fields rather than the
+/// reserved `FragColor`. Using `FragColor` here would prove nothing: the
+/// single-output form pre-seeds that name as reserved, so such a test passes
+/// with `mrt_outputs` removed from the census entirely.
+#[test]
+fn engine_member_colliding_with_an_mrt_output_rejects() {
+    let src = r#"
+    value QuadVert { aPos: Vec2 }
+    value EngineU  { uProjection: Mat4, FragId: float }
+    value Vary     { position: Vec4, @flat EntityId: float }
+    value SpriteOut { FragColor: Vec4, FragId: Vec4 }
+
+    @shader(vertex)
+    fn c_vert(@attr a: QuadVert, @engine e: EngineU) -> Vary {
+        return Vary {
+            position: e.uProjection * Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 },
+            EntityId: e.FragId,
+        }
+    }
+
+    @shader(fragment)
+    fn c_frag(vary: Vary) -> SpriteOut {
+        return SpriteOut {
+            FragColor: Vec4 { x: 1.0, y: 0.0, z: 0.0, w: 1.0 },
+            FragId: Vec4 { x: vary.EntityId, y: 0.0, z: 0.0, w: 1.0 },
+        }
+    }
+"#;
+    let e = emit_pipeline(src, "c_vert", "c_frag").unwrap_err();
+    assert!(e.contains("`FragId` would collide"), "got: {e}");
+}
+
+/// Both sides of admission: the same fixture with a name that collides with
+/// nothing must EMIT, or the rejections above would pass for the wrong reason
+/// (a fixture that never compiles).
+#[test]
+fn engine_member_with_a_free_name_emits() {
+    let glsl = emit_pipeline(&engine_member_named("uEngineTime"), "c_vert", "c_frag").expect("emit");
+    assert!(glsl.contains("layout(std140) uniform EngineU {"), "got:\n{glsl}");
+    assert!(glsl.contains("float uEngineTime;"), "got:\n{glsl}");
+}
+
+/// The collision that actually shipped: mag's per-draw `BoltFragU.uTime` against
+/// an engine clock of the same name. This is the case the raw driver error
+/// (`declaration of "uTime" conflicts with previous declaration`) came from, and
+/// it is why the engine's clock is `uEngineTime`.
+#[test]
+fn engine_member_colliding_with_a_stage_block_member_rejects() {
+    let src = r#"
+    value QuadVert { aPos: Vec2 }
+    value EngineU  { uProjection: Mat4, uTime: float }
+    value BoltFragU { uTime: float }
+    value Vary     { position: Vec4 }
+
+    @shader(vertex)
+    fn c_vert(@attr a: QuadVert, @engine e: EngineU) -> Vary {
+        return Vary { position: e.uProjection * Vec4 { x: a.aPos.x, y: a.aPos.y, z: e.uTime, w: 1.0 } }
+    }
+
+    @shader(fragment)
+    fn c_frag(vary: Vary, @uniform u: BoltFragU) -> Vec4 {
+        return Vec4 { x: u.uTime, y: 0.0, z: 0.0, w: 1.0 }
+    }
+"#;
+    let e = emit_pipeline(src, "c_vert", "c_frag").unwrap_err();
+    assert!(e.contains("`uTime` would collide"), "got: {e}");
+}
+
+/// The reserved slot's whole point: a program with NO `@engine` group leaves
+/// binding 0 empty rather than sliding its own block into it. Before roles
+/// assigned the index, this fixture's fragment block landed at 0 and was
+/// indistinguishable from an engine block at registration.
+#[test]
+fn a_program_without_an_engine_group_leaves_slot_zero_empty() {
+    let (ws, mid) = workspace(UI_SRC);
+    let em = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
+        &ws, mid, "ui_vert", "ui_frag", GlslProfile::Core330,
+    )
+    .expect("emit");
+    let bound: Vec<(u32, &str)> =
+        em.uniform_blocks.iter().map(|(b, p)| (*b, p.struct_name.as_str())).collect();
+    assert_eq!(bound, vec![(1, "UiVertU"), (2, "UiFragU")], "role -> binding");
+    assert!(!em.uniform_blocks.iter().any(|(b, _)| *b == 0), "slot 0 is the engine's");
 }

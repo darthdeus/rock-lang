@@ -39,7 +39,7 @@ fn co_emits_plain_rock_callee_transitively() {
 #[test]
 fn rejects_unmapped_inline_lua_callee_with_emitter_message() {
     let ws = crate::common::ws_with(
-        "inline(lua) fn my_lua_thing(x: int) -> int \"\"\" return x \"\"\"\n\
+        "inline(lua) fn my_lua_thing(x: int) -> int = \"\"\" return x \"\"\"\n\
          fn root(y: int) -> int { my_lua_thing(y) }\n",
     );
     let scx = ScalarCtx::new(&ws);

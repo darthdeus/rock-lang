@@ -512,6 +512,9 @@ pub struct Args {
     pub no_timeout: bool,
     pub dump_state: bool,
     pub update_snapshots: bool,
+    /// For `rock sim`: how many sim children may run at once. `None` uses the
+    /// conservative default in `run_sim::resolve_jobs`.
+    pub jobs: Option<usize>,
 
     /// For `rock frame`: record per-tick input + dt to this replay log
     /// (docs/replay-scrub-plan.md). Mutually exclusive with `--replay`.
@@ -663,6 +666,9 @@ impl Args {
                 .help("Dump all global state as JSON after the last frame (for AI/human diagnostics)"))
             .arg(Arg::new("update-snapshots").long("update-snapshots").action(ArgAction::SetTrue)
                 .help("For `rock sim`: rewrite snapshot baselines instead of diffing."))
+            .arg(Arg::new("jobs").long("jobs").short('j').value_name("N")
+                .value_parser(clap::value_parser!(usize))
+                .help("For `rock sim`: run up to N sim children concurrently (default 4, 1 = serial)."))
             .arg(Arg::new("record").long("record").value_name("FILE")
                 .help("For `rock frame`: record per-tick input + dt to FILE (a replay log). Replay it with --replay."))
             .arg(Arg::new("replay").long("replay").value_name("FILE")
@@ -738,6 +744,7 @@ impl Args {
             no_timeout: m.get_flag("no-timeout"),
             dump_state: m.get_flag("dump-state"),
             update_snapshots: m.get_flag("update-snapshots"),
+            jobs: m.get_one::<usize>("jobs").copied(),
             record: m.get_one::<String>("record").cloned(),
             replay: m.get_one::<String>("replay").cloned(),
             checkpoint_interval: m.get_one::<usize>("checkpoint-interval").copied(),

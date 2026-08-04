@@ -109,11 +109,11 @@ fn every_js_entry_is_backed_by_a_stdlib_intrinsic() {
         .iter()
         .map(|f| {
             let id = ustr::Ustr::from(format!("<stdlib:{}>", f.name).as_str());
-            skull_parser::parse_module(f.contents, id).expect("stdlib parse")
+            skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
         })
         .collect();
     let mut modules = modules;
-    modules.push(skull_parser::parse_module("fn main() {}", ustr::Ustr::from("<test>")).expect("parse"));
+    modules.push(skull_parser::parse_module_clean("fn main() {}", ustr::Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
 
     let declared = declared_intrinsics(&ws);

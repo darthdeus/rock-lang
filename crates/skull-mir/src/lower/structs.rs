@@ -107,9 +107,10 @@ impl Builder<'_> {
                                 }
                             }
                             None => {
-                                let dv = self.lower_struct_default(name, fname)?;
-                                let leaves = self.embed_leaf_reads(cname, dv);
-                                fs.extend(Self::embed_field_slots(fname, (None, leaves)));
+                                let slots = self.with_struct_default(name, fname, |s, def| {
+                                    s.embed_value_leaves(nullable, cname, def)
+                                })?;
+                                fs.extend(Self::embed_field_slots(fname, slots));
                             }
                         }
                     } else if let Some(shape) = self.flat_field_of_struct(name, fname) {
@@ -350,6 +351,19 @@ impl Builder<'_> {
         struct_name: Ustr,
         field: Ustr,
     ) -> Result<Idx<Inst>, CompilerError> {
+        self.with_struct_default(struct_name, field, |s, def| s.lower_expr(def))
+    }
+
+    /// Run `f` on a field's default INITIALIZER EXPRESSION with the defaults
+    /// body's arena and inference installed. Consumers that need more than a
+    /// boxed value (an embed field's presence-plus-leaves) must see the expr,
+    /// not its lowering: reading leaves off a lowered `null` indexes nil.
+    pub(crate) fn with_struct_default<T>(
+        &mut self,
+        struct_name: Ustr,
+        field: Ustr,
+        f: impl FnOnce(&mut Self, Idx<Expr>) -> Result<T, CompilerError>,
+    ) -> Result<T, CompilerError> {
         let sid = *self
             .ws
             .struct_by_name
@@ -379,7 +393,7 @@ impl Builder<'_> {
         let saved_inf = self.inf;
         self.body = defaults_body;
         self.inf = defaults_inf;
-        let result = self.lower_expr(def_expr);
+        let result = f(self, def_expr);
         self.body = saved_body;
         self.inf = saved_inf;
         result
@@ -507,7 +521,7 @@ impl Builder<'_> {
             .into_iter()
             .enumerate()
             .map(|(i, part)| {
-                let field = names.get(i).copied().unwrap_or(name);
+                let field = *names.get(i).expect("a Group's parts are its nominal's declared fields");
                 (field, self.materialize_repr(part))
             })
             .collect();

@@ -9,7 +9,7 @@ use rock_core::errors::CompilerErrorLevel;
 const FILE: &str = "<catalog>";
 
 fn parse(src: &str) -> skull_parser::Ast {
-    skull_parser::parse_module(src, Ustr::from(FILE)).expect("parse")
+    skull_parser::parse_module_clean(src, Ustr::from(FILE)).expect("parse")
 }
 
 fn findings(src: &str) -> Vec<Finding> {

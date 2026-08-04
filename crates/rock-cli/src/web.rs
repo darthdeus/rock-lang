@@ -693,21 +693,23 @@ fn shader_register_lines_js(ws: &bone_semantic::inference::Workspace) -> Result<
         // is silent on JS (the missing argument reads `undefined`), which is
         // what rock-cli/tests/shader_register_arity_gate.rs exists to catch.
         let blocks = &emission.uniform_blocks;
-        let names: Vec<ustr::Ustr> = blocks.iter().map(|p| p.struct_name).collect();
-        let sizes: Vec<i64> = blocks.iter().map(|p| p.size as i64).collect();
-        let fingerprints: Vec<i64> = blocks.iter().map(|p| p.fingerprint() as i64).collect();
-        let counts: Vec<i64> = blocks.iter().map(|p| p.members.len() as i64).collect();
+        let bindings: Vec<i64> = blocks.iter().map(|(b, _)| *b as i64).collect();
+        let names: Vec<ustr::Ustr> = blocks.iter().map(|(_, p)| p.struct_name).collect();
+        let sizes: Vec<i64> = blocks.iter().map(|(_, p)| p.size as i64).collect();
+        let fingerprints: Vec<i64> = blocks.iter().map(|(_, p)| p.fingerprint() as i64).collect();
+        let counts: Vec<i64> = blocks.iter().map(|(_, p)| p.members.len() as i64).collect();
         let member_names: Vec<ustr::Ustr> =
-            blocks.iter().flat_map(|p| p.members.iter().map(|m| m.name)).collect();
+            blocks.iter().flat_map(|(_, p)| p.members.iter().map(|m| m.name)).collect();
         let offsets: Vec<i64> =
-            blocks.iter().flat_map(|p| p.members.iter().map(|m| m.offset as i64)).collect();
+            blocks.iter().flat_map(|(_, p)| p.members.iter().map(|m| m.offset as i64)).collect();
         let _ = writeln!(
             out,
-            "__rock_shader_register({}, {}, {}, {}, {}, {}, {}, {}, {});",
+            "__rock_shader_register({}, {}, {}, {}, {}, {}, {}, {}, {}, {});",
             crate::js_test::js_str(&pair.key),
             crate::js_test::js_str(&emission.source),
             js_string_vec(&emission.texture_slots),
             js_string_vec(&names),
+            js_int_vec(&bindings),
             js_int_vec(&sizes),
             js_int_vec(&fingerprints),
             js_int_vec(&counts),

@@ -22,7 +22,11 @@ mod replay_timeline_tests;
 mod replay_window_tests;
 #[path = "shader_failure_gate.rs"]
 mod shader_failure_gate;
+#[path = "uniform_block_gate.rs"]
+mod uniform_block_gate;
 #[path = "skull_overlay_wipe.rs"]
 mod skull_overlay_wipe;
+#[path = "sim_concurrent_invocations.rs"]
+mod sim_concurrent_invocations;
 #[path = "web_smoke_tests.rs"]
 mod web_smoke_tests;

@@ -19,7 +19,9 @@
 
 mod structure;
 
-use bone_semantic::hir::{AnnoValue, BuiltinTy, Function, StructDef, TyId, TypeCtor, TypeExpr};
+use bone_semantic::hir::{
+    AnnoValue, BodyOwner, BuiltinTy, Expr, Function, StructDef, TyId, TypeCtor, TypeExpr,
+};
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::{FnList, ModuleId, Span};
 use comfy_la_arena::Idx;
@@ -130,6 +132,87 @@ fn fmt_float(f: f64) -> String {
     }
 }
 
+// --- const globals ----------------------------------------------------------
+
+/// Depth cap on `const A = B` alias chains. A cycle is impossible in a
+/// well-formed program (bone rejects one), so this only bounds a pathological
+/// chain rather than implementing cycle detection.
+const CONST_CHAIN_DEPTH: usize = 16;
+
+/// Fold a `const` global to its literal value, or `None` if it is not a `const`
+/// or its initializer is not a constant expression.
+///
+/// GLSL has no module-level mutable state, so a `global` read can never lower.
+/// A `const` is different in kind: bone enforces it read-only
+/// (`ws.const_globals`, rejected at any rebind), so baking its value into the
+/// shader cannot drift from the CPU-side value. It folds at the use site rather
+/// than emitting a GLSL `const` declaration -- a declaration would have to join
+/// the one cross-stage namespace shared by uniforms, varyings, attributes and
+/// samplers, and collide-check against it, for no gain the folded literal
+/// doesn't already give.
+///
+/// Only literals and alias chains fold today. Arithmetic (`const TAU = PI * 2`)
+/// lowers to an operator CALL in HIR, not a `BinOp`, so folding it means
+/// evaluating calls -- deliberately out of scope; such a const rejects with a
+/// message naming the real cause.
+fn const_lit(ws: &Workspace, name: Ustr) -> Option<Lit> {
+    const_lit_depth(ws, name, 0)
+}
+
+fn const_lit_depth(ws: &Workspace, name: Ustr, depth: usize) -> Option<Lit> {
+    if depth > CONST_CHAIN_DEPTH || !ws.const_globals.contains(&name) {
+        return None;
+    }
+    let (module, gid) = ws.modules.iter().find_map(|m| {
+        m.globals
+            .iter()
+            .find(|(_, g)| g.name == name && g.is_const)
+            .map(|(gid, _)| (m, gid))
+    })?;
+    let body = module.bodies.get(&BodyOwner::Global(gid))?;
+    fold_const_expr(ws, module, body, body.root?, depth)
+}
+
+fn fold_const_expr(
+    ws: &Workspace,
+    module: &bone_semantic::hir::Module,
+    body: &bone_semantic::hir::Body,
+    e: Idx<Expr>,
+    depth: usize,
+) -> Option<Lit> {
+    match body.expr_arena[e] {
+        Expr::Int(i) => Some(Lit::Int(i)),
+        Expr::Float(f) => Some(Lit::Float(f.into_inner())),
+        Expr::Bool(b) => Some(Lit::Bool(b)),
+        Expr::UnaryMinus(inner) => match fold_const_expr(ws, module, body, inner, depth)? {
+            Lit::Int(i) => Some(Lit::Int(-i)),
+            Lit::Float(f) => Some(Lit::Float(-f)),
+            _ => None,
+        },
+        Expr::Global(g) => const_lit_depth(ws, g, depth + 1),
+        _ => None,
+    }
+}
+
+/// The GLSL type a folded const literal renders at.
+fn const_lit_ty(lit: &Lit) -> GlslTy {
+    match lit {
+        Lit::Int(_) => GlslTy::Int,
+        Lit::Bool(_) => GlslTy::Bool,
+        _ => GlslTy::Float,
+    }
+}
+
+/// Render a folded const literal as a GLSL expression.
+fn render_const_lit(lit: &Lit) -> Option<String> {
+    match lit {
+        Lit::Float(f) => Some(fmt_float(*f)),
+        Lit::Int(i) => Some(i.to_string()),
+        Lit::Bool(b) => Some(b.to_string()),
+        Lit::Nil | Lit::Str(_) => None,
+    }
+}
+
 // --- reachability + profile pass --------------------------------------------
 
 /// GLSL's reachability policy for [`skull_mir::reach`]: walk the shader entry's
@@ -212,7 +295,7 @@ impl skull_mir::reach::ReachPolicy for Reach<'_> {
             err(f.name_span, format!("shader profile: `{}` cannot lower for GLSL: {}", f.name, e.message))
         })?;
         let mut callees: Vec<FuncRef> = Vec::new();
-        profile_body(f, &mf, &mut callees)?;
+        profile_body(self.ws, f, &mf, &mut callees)?;
         self.bodies.insert(fref, mf);
         Ok(callees)
     }
@@ -238,6 +321,7 @@ pub fn check_tier0_signature(ws: &Workspace, f: &Function) -> Result<(), Compile
 /// Walk a fn's MIR, rejecting any non-tier-0 instruction and collecting the
 /// [`FuncRef`]s it calls directly.
 fn profile_body(
+    ws: &Workspace,
     f: &Function,
     mf: &MirFunc,
     callees: &mut Vec<FuncRef>,
@@ -246,6 +330,21 @@ fn profile_body(
     for (_, inst) in mf.insts.iter() {
         match inst {
             Inst::Call { func, .. } => callees.push(*func),
+            // A `const` global folds to its literal at the use site; a mutable
+            // `global` is runtime state with no GLSL equivalent.
+            Inst::Global(name) => {
+                if const_lit(ws, *name).is_none() {
+                    if ws.const_globals.contains(name) {
+                        return Err(err(span, format!(
+                            "shader profile: const `{name}` has an initializer that is not a constant expression -- only literals and const aliases fold for GLSL"
+                        )));
+                    }
+                    return Err(err(span, format!(
+                        "shader profile: `{}` uses a non-tier-0 construct (global read) that has no GLSL lowering -- a mutable `global` has no GLSL equivalent; a `const` folds to its literal",
+                        f.name
+                    )));
+                }
+            }
             Inst::Const(Lit::Str(_)) => {
                 return Err(err(span, format!("shader profile: `{}` uses a non-tier-0 construct (string literal) that has no GLSL lowering", f.name)));
             }
@@ -943,6 +1042,9 @@ impl FnEmit<'_> {
             Inst::FloatToInt(_) => GlslTy::Int,
             Inst::IntToFloat(_) => GlslTy::Float,
             Inst::Load(c) => self.cell_ty.get(c).copied().unwrap_or(GlslTy::Float),
+            Inst::Global(name) => {
+                const_lit(self.ws, *name).as_ref().map_or(GlslTy::Float, const_lit_ty)
+            }
             Inst::Field { base, field } => {
                 if self.is_uniform_base(*base) {
                     self.uniform_fields.get(field).copied().unwrap_or(GlslTy::Float)
@@ -1019,6 +1121,14 @@ impl FnEmit<'_> {
             Inst::Const(Lit::Bool(b)) => b.to_string(),
             Inst::Const(Lit::Nil) => return Err(err(self.span(), "shader profile: null literal is not tier 0")),
             Inst::Const(Lit::Str(_)) => return Err(err(self.span(), "shader profile: string literal is not tier 0")),
+            // Admitted by `profile_body` only when it folds, so a miss here is a
+            // profile/emit divergence, not user error.
+            Inst::Global(name) => const_lit(self.ws, *name)
+                .as_ref()
+                .and_then(render_const_lit)
+                .ok_or_else(|| err(self.span(), format!(
+                    "shader profile: const `{name}` passed the profile pass but did not fold at emit -- a compiler bug"
+                )))?,
             Inst::Load(c) => {
                 // A global-base struct param has no GLSL identity -- its fields
                 // are bare globals, read via `Field` (which never renders the
@@ -1827,18 +1937,33 @@ pub struct ShaderEmission {
     /// still needs the NAME once, to point each sampler uniform at its unit at
     /// link time; after that it binds by slot and never by name again.
     pub texture_slots: Vec<Ustr>,
-    /// The program's `@uniform` block layouts, in BINDING order -- slot N is
-    /// index N, the same contract `texture_slots` uses for units. Empty when
-    /// the program declares no group.
+    /// The program's uniform block layouts, each paired with its BINDING INDEX.
+    /// Empty when the program declares no group.
     ///
-    /// A1 has at most one. An A2 pipeline has one PER STAGE, because the two
-    /// stages declare different types and a vertex entry is reused across
-    /// several fragment entries, so they cannot be merged into one.
+    /// The index comes from the param ROLE, not from position in this list:
+    /// `@engine` is 0, the vertex `@uniform` group 1, the fragment group 2
+    /// (`UNIFORM_BLOCK_BINDING_*`). Position was the index until the engine
+    /// block landed, which made 0 mean "engine block" only for programs that
+    /// happened to have one -- a program without `@engine` put its own group
+    /// there, so the engine could not tell the two apart and "binding 0 is the
+    /// engine's" was unenforceable. Reserving the slot is what makes it real.
+    ///
+    /// A1 has at most one (a fragment group, so binding 2). An A2 pipeline has
+    /// one per stage, because the stages declare different types and a vertex
+    /// entry is reused across several fragment entries.
     ///
     /// The single authority for each block's bytes: the GLSL declaration, the
     /// CPU packer and the link-time driver assertion all read it.
-    pub uniform_blocks: Vec<UniformBlockPlan>,
+    pub uniform_blocks: Vec<(u32, UniformBlockPlan)>,
 }
+
+/// Uniform block binding indices, assigned by param ROLE so the slot is
+/// structural rather than a consequence of how many groups a program declares.
+/// Slot 0 is RESERVED for `@engine` whether or not the program has one, which is
+/// what lets the engine reject a foreign block there at registration.
+pub const UNIFORM_BLOCK_BINDING_ENGINE: u32 = 0;
+pub const UNIFORM_BLOCK_BINDING_VERTEX: u32 = 1;
+pub const UNIFORM_BLOCK_BINDING_FRAGMENT: u32 = 2;
 
 /// **One stage's validated plan**: its lowered body, the emittable helpers it
 /// reaches in emission order, and the prelude flags those bodies imply.
@@ -1895,7 +2020,7 @@ fn plan_stage(
         err(f.name_span, format!("shader profile: `{}` cannot lower for GLSL: {}", f.name, e.message))
     })?;
     let mut callees: Vec<FuncRef> = Vec::new();
-    profile_body(f, &mf, &mut callees)?;
+    profile_body(ws, f, &mf, &mut callees)?;
 
     let mut reach = Reach::new(ws, scx);
     // The entry is lowered above; a callee calling back into it is recursion.
@@ -2036,7 +2161,12 @@ fn render_shader_entry(
         source,
         dependencies: plan.stage.dependencies(),
         texture_slots: plan.texture_slots.clone(),
-        uniform_blocks: plan.block_plan.iter().cloned().collect(),
+        uniform_blocks: plan
+            .block_plan
+            .iter()
+            .cloned()
+            .map(|p| (UNIFORM_BLOCK_BINDING_FRAGMENT, p))
+            .collect(),
     })
 }
 
@@ -2295,6 +2425,12 @@ fn texture_group_samplers(
     Ok(ts.slots.iter().map(|s| (param_index, s.name, sampler_glsl_ty(s.kind))).collect())
 }
 
+/// Every param role, so a check that means "all the others" cannot go stale by
+/// listing them. `reject_conflicting_texture_role` enumerated the three that
+/// existed when it was written, and adding `@engine` silently widened what it
+/// let through.
+const PARAM_ROLES: [&str; 4] = ["attr", "instance", "uniform", "engine"];
+
 /// `@textures` is exclusive with the other param roles -- a group is a binding
 /// set of its own, not attribute or uniform-block data.
 fn reject_conflicting_texture_role(
@@ -2303,7 +2439,7 @@ fn reject_conflicting_texture_role(
     span: Span,
     stage: &str,
 ) -> Result<(), CompilerError> {
-    for other in ["attr", "instance", "uniform"] {
+    for other in PARAM_ROLES.iter().copied() {
         if has_anno(annos, other) {
             return Err(err(
                 span,
@@ -2808,7 +2944,26 @@ fn emit_fragment_stage(
 /// one GLSL namespace -- the linked program has a single uniform namespace, so
 /// a vertex/fragment same-name pair is a link error (or a silent alias), never
 /// two distinct bindings. Varyings are one name in both stages (inserted once).
-fn check_pipeline_collisions(v: &VertexShape, varyings: &VaryingsShape, fs: &FragShape, span: Span) -> Result<(), CompilerError> {
+///
+/// THE ENGINE BLOCK'S MEMBERS BELONG HERE TOO. An unnamed-instance block's
+/// members are bare globals, so they sit in the same namespace as everything
+/// above. A stage's own `@uniform` group already arrives through `uniforms`
+/// whether or not it became a block, but `@engine` is a separate ROLE landing in
+/// `engine_uniforms`, so it was outside this census entirely -- and a missed
+/// pair is a raw driver error carrying no Rock span (`declaration of "uTime"
+/// conflicts with previous declaration`), which is exactly the class this
+/// exists to convert into a spanned rejection.
+///
+/// Taken from the PLAN rather than from both shapes' `engine_uniforms`: the
+/// engine block is declared in both stages but is ONE block, so listing it per
+/// stage would collide with itself.
+fn check_pipeline_collisions(
+    v: &VertexShape,
+    varyings: &VaryingsShape,
+    fs: &FragShape,
+    engine_plan: Option<&UniformBlockPlan>,
+    span: Span,
+) -> Result<(), CompilerError> {
     // gl_Position is always reserved. `FragColor` is reserved only for the
     // single-output form -- with MRT the outputs are explicit named fields (one
     // of which may itself be `FragColor`), so they go through the collision check
@@ -2818,6 +2973,8 @@ fn check_pipeline_collisions(v: &VertexShape, varyings: &VaryingsShape, fs: &Fra
         seen.insert(Ustr::from("FragColor"));
     }
     let mrt_outputs = fs.outputs.iter().flatten().map(|&(n, _)| n);
+    let engine_members: Vec<Ustr> =
+        engine_plan.map(|p| p.members.iter().map(|m| m.name).collect()).unwrap_or_default();
     let names = v.attrs.iter().map(|&(n, _, _)| n)
         .chain(v.uniforms.iter().map(|&(n, _)| n))
         .chain(v.samplers.iter().map(|&(_, n, _)| n))
@@ -2826,10 +2983,11 @@ fn check_pipeline_collisions(v: &VertexShape, varyings: &VaryingsShape, fs: &Fra
         .chain(fs.uniforms.iter().map(|&(n, _)| n))
         .chain(fs.samplers.iter().map(|&(_, n, _)| n))
         .chain(fs.arrays.iter().map(|&(_, n, ..)| n))
-        .chain(mrt_outputs);
+        .chain(mrt_outputs)
+        .chain(engine_members);
     for n in names {
         if !seen.insert(n) {
-            return Err(err(span, format!("shader pipeline: name `{n}` would collide (attributes, uniforms, varyings, samplers and reserved names share one GLSL namespace across both stages)")));
+            return Err(err(span, format!("shader pipeline: name `{n}` would collide (attributes, uniforms, engine-block members, varyings, samplers and reserved names share one GLSL namespace across both stages)")));
         }
     }
     Ok(())
@@ -2873,12 +3031,9 @@ struct PipelinePlan {
     fshape: FragShape,
     vert: StagePlan,
     frag: StagePlan,
-    /// The vertex stage's own `@uniform` block. Always `None` for one more
-    /// step: every A2 vertex group in the tree still holds engine-authored
-    /// matrices set BY NAME from `stone_set_camera`, and a block member has no
-    /// location, so packing it is only correct together with porting those
-    /// shaders to `@engine`. The emitter half is done and tested
-    /// (`engine_block_*` in tests/a2.rs).
+    /// The vertex stage's own `@uniform` block, holding only what that shader
+    /// OWNS -- the engine-authored camera/time band arrives through
+    /// [`Self::engine_block`] instead.
     vert_block: Option<UniformBlockPlan>,
     frag_block: Option<UniformBlockPlan>,
     engine_block: Option<UniformBlockPlan>,
@@ -2909,15 +3064,20 @@ fn plan_shader_pipeline(
     let vshape = classify_vertex(ws, vf)?;
     let varyings = classify_varyings(ws, vshape.varyings_ty, vf.name_span)?;
     let fshape = classify_pipeline_fragment(ws, ff, vshape.varyings_ty)?;
-    check_pipeline_collisions(&vshape, &varyings, &fshape, vf.name_span)?;
 
     // One std140 block per STAGE, each at its own binding index. The stages
     // declare different `@uniform` types and cannot be made to share one: a
     // vertex entry is reused across several fragment entries (mag's `ui_vert`
     // serves three), so a merged per-program type would need that one fn to
     // declare a different struct per program.
-    let vert_block: Option<UniformBlockPlan> = None;
-    let _ = vshape.uniform_group;
+    //
+    // A stage group holds only what that shader OWNS: the engine-authored
+    // camera/time/screen band lives in `@engine` instead, which is what lets
+    // bitgun's grass keep a game-owned `entity_count` beside them.
+    let vert_block = vshape
+        .uniform_group
+        .map(|g| uniform_block(ws, g).map_err(|e| err(vf.name_span, e.message)))
+        .transpose()?;
     let frag_block = fshape
         .uniform_group
         .map(|g| uniform_block(ws, g).map_err(|e| err(ff.name_span, e.message)))
@@ -2927,6 +3087,13 @@ fn plan_shader_pipeline(
     // agree: it is engine-owned and fixed, and both stages naming the same block
     // at index 0 is what lets the engine fill it once per pass rather than once
     // per stage.
+    //
+    // What this does NOT check is that the type IS the engine's own `EngineU` --
+    // deliberately. A compiler that knows an engine type by name has engine
+    // policy inside the language. The fingerprint the plan ships is what the
+    // ENGINE compares at registration, which is the layer that owns the answer;
+    // a game marking its own struct `@engine` gets a block nothing fills, and
+    // that check belongs there rather than here.
     let engine_group = match (vshape.engine_group, fshape.engine_group) {
         (Some(v), Some(f)) if v != f => {
             return Err(err(vf.name_span, format!(
@@ -2938,6 +3105,10 @@ fn plan_shader_pipeline(
     let engine_block = engine_group
         .map(|g| uniform_block(ws, g).map_err(|e| err(vf.name_span, e.message)))
         .transpose()?;
+
+    // Runs AFTER the block plans, because the `@engine` members it censuses come
+    // from the PLAN -- one list, though the block is declared in both stages.
+    check_pipeline_collisions(&vshape, &varyings, &fshape, engine_block.as_ref(), vf.name_span)?;
 
     let vert = plan_stage(ws, scx, vfref, Stage::Vertex)?;
     let frag = plan_stage(ws, scx, ffref, Stage::Fragment)?;
@@ -3031,9 +3202,11 @@ fn render_shader_pipeline(
         .collect::<HashSet<_>>()
         .into_iter()
         .collect();
-    // Binding order: the ENGINE block at 0 (both stages name it), then the
-    // vertex block, then the fragment block -- position in this list IS the
-    // binding index on the engine side.
+    // Each block carries its binding, taken from the param ROLE: the engine
+    // block at 0 (both stages name it), the vertex group at 1, the fragment
+    // group at 2. Unlike `@textures` -- one group per PROGRAM, since texture
+    // units are program-scoped -- `@uniform` blocks are per STAGE, so differing
+    // types there are correct rather than a collision.
     Ok(ShaderEmission {
         source,
         dependencies,
@@ -3041,9 +3214,10 @@ fn render_shader_pipeline(
         uniform_blocks: plan
             .engine_block
             .iter()
-            .chain(plan.vert_block.iter())
-            .chain(plan.frag_block.iter())
             .cloned()
+            .map(|p| (UNIFORM_BLOCK_BINDING_ENGINE, p))
+            .chain(plan.vert_block.iter().cloned().map(|p| (UNIFORM_BLOCK_BINDING_VERTEX, p)))
+            .chain(plan.frag_block.iter().cloned().map(|p| (UNIFORM_BLOCK_BINDING_FRAGMENT, p)))
             .collect(),
     })
 }

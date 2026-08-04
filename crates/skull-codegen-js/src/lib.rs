@@ -952,9 +952,9 @@ function stone_draw_mesh(data, count, stride, attr_sizes, attr_count, tex) {
     off += attr_sizes[i];
   }
   gl.drawArrays(gl.TRIANGLES, 0, count);
+  __sw_mark_drawn(sh);
 }
 
-var __SW_IDENTITY = new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]);
 var __sw_logged = {};
 function __sw_log_once(msg) {
   if (__sw_logged[msg]) return;
@@ -981,21 +981,11 @@ function __sw_ortho_size() {
   return [__SW.logicalW, __SW.logicalH];
 }
 
-// Ortho uProjection (2/w, -2/h Y-down, sized to the bound target), uView =
-// translate(ox*scale, oy*scale)*scale, uTransform identity (sprite.rs:223-282).
-function stone_set_camera(shader, ox, oy, scale) {
-  var gl = __SW.gl, sh = __SW.shaders[shader];
-  if (!gl || !sh) return;
-  var wh = __sw_ortho_size(), w = wh[0], h = wh[1];
-  var proj = new Float32Array([2/w,0,0,0, 0,-2/h,0,0, 0,0,-1,0, -1,1,0,1]);
-  var view = new Float32Array([scale,0,0,0, 0,scale,0,0, 0,0,1,0, ox*scale,oy*scale,0,1]);
-  var prev = __SW.curShader;
-  gl.useProgram(sh.prog);
-  var lp = __sw_uloc(sh, "uProjection"); if (lp) gl.uniformMatrix4fv(lp, false, proj);
-  var lv = __sw_uloc(sh, "uView"); if (lv) gl.uniformMatrix4fv(lv, false, view);
-  if (prev !== 0 && __SW.shaders[prev]) gl.useProgram(__SW.shaders[prev].prog);
-}
-function stone_reset_camera(shader) { stone_set_camera(shader, 0, 0, 1.0); }
+// The camera matrices are built in Rock and arrive in the ENGINE block at
+// binding 0, so there is no camera math here any more -- only the bound
+// target's size, which Rock derives its ortho from.
+function stone_current_target_width() { return __sw_ortho_size()[0]; }
+function stone_current_target_height() { return __sw_ortho_size()[1]; }
 
 // --- textures / images ---
 function __sw_new_texture() {
@@ -1297,9 +1287,18 @@ function stone_create_shader_from_combined(src) {
   __SW.shaders[h] = { prog: prog, ulocs: {}, floatSamplers: floatSamplers, samplerUnits: {} };
   return h;
 }
+// Owns the program's WHOLE resource set, mirroring the native side. A rejected
+// registration candidate is destroyed mid-registration, so it may already have
+// bound blocks and allocated their buffers; deleting only the program leaked one
+// buffer per block per reload.
 function stone_destroy_shader(h) {
   var sh = __SW.shaders[h];
   if (!sh) return;
+  if (sh.blocks) {
+    for (var i = 0; i < sh.blocks.length; i++) {
+      if (sh.blocks[i]) __SW.gl.deleteBuffer(sh.blocks[i].buffer);
+    }
+  }
   __SW.gl.deleteProgram(sh.prog);
   delete __SW.shaders[h];
 }
@@ -1324,10 +1323,67 @@ function __sw_bind_blocks(h) {
   if (!gl || !sh || !sh.blocks) return;
   for (var i = 0; i < sh.blocks.length; i++) {
     var b = sh.blocks[i];
-    if (b) gl.bindBufferBase(gl.UNIFORM_BUFFER, b.binding, b.buffer);
+    if (b) { gl.bindBufferBase(gl.UNIFORM_BUFFER, b.binding, b.buffer); }
   }
 }
-function stone_shader_bind_uniform_block(h, name, binding, size, fingerprint) {
+// Stamped at each draw with the SHADER THAT DRAW WENT THROUGH, not at bind and
+// not from `curShader`: `stone_sprite_draw_texture` falls back to a passed
+// handle when nothing is current, and a curShader-based stamp cannot see it.
+function __sw_mark_drawn(sh) {
+  if (!sh || !sh.blocks) return;
+  for (var i = 0; i < sh.blocks.length; i++) {
+    if (sh.blocks[i]) sh.blocks[i].drawn = true;
+  }
+}
+// A block whose program is drawn with but which nothing ever fills reads zeroes
+// in the shader, silently. Both flags are sticky, so this fires only for a block
+// never filled across the whole run.
+function __sw_report_unfilled_blocks() {
+  var shaders = __SW.shaders;
+  for (var h in shaders) {
+    var sh = shaders[h];
+    if (!sh || !sh.blocks) continue;
+    for (var i = 0; i < sh.blocks.length; i++) {
+      var b = sh.blocks[i];
+      if (!b || b.uploaded || !b.drawn || b.reported) continue;
+      b.reported = true;
+      __sw_log_once("shader `" + b.key + "` was drawn with but nothing ever filled its uniform block `" +
+        b.name + "` (binding " + b.binding + ") -- it is reading zeroes.");
+    }
+  }
+}
+function stone_unfilled_uniform_block_count() {
+  var n = 0, shaders = __SW.shaders;
+  for (var h in shaders) {
+    var sh = shaders[h];
+    if (!sh || !sh.blocks) continue;
+    for (var i = 0; i < sh.blocks.length; i++) {
+      var b = sh.blocks[i];
+      if (b && b.drawn && !b.uploaded) n++;
+    }
+  }
+  return n;
+}
+function stone_uniform_block_buffer_count() {
+  var n = 0;
+  for (var k in __SW.shaders) {
+    var sh = __SW.shaders[k];
+    if (sh && sh.blocks) for (var i = 0; i < sh.blocks.length; i++) if (sh.blocks[i]) n++;
+  }
+  return n;
+}
+// The JS runtime keys blocks off the shader record itself, so there is no
+// second registry to go stale -- reported as the same number the Rock-side view
+// computes, which keeps the cross-view arm meaningful on both tiers.
+function stone_block_program_count() {
+  var n = 0;
+  for (var k in __SW.shaders) {
+    var sh = __SW.shaders[k];
+    if (sh && sh.blocks && sh.blocks.length) n++;
+  }
+  return n;
+}
+function stone_shader_bind_uniform_block(h, key, name, binding, size, fingerprint) {
   var gl = __SW.gl, sh = __SW.shaders[h];
   if (!gl || !sh) { __sw_log_once("bind_uniform_block: no shader " + h); return false; }
   if (!name || size <= 0) { __sw_log_once("bind_uniform_block: null name or non-positive size " + size); return false; }
@@ -1348,7 +1404,7 @@ function stone_shader_bind_uniform_block(h, name, binding, size, fingerprint) {
   // program's stale tail is dropped, since registration walks bindings from 0.
   if (binding < sh.blocks.length && sh.blocks[binding]) gl.deleteBuffer(sh.blocks[binding].buffer);
   sh.blocks.length = binding;
-  sh.blocks[binding] = { buffer: buf, size: size, binding: binding, fingerprint: fingerprint };
+  sh.blocks[binding] = { buffer: buf, size: size, binding: binding, fingerprint: fingerprint, key: key, name: name, uploaded: false, drawn: false, reported: false };
   return true;
 }
 function stone_shader_upload_uniform_block(h, data, size, fingerprint) {
@@ -1369,6 +1425,7 @@ function stone_shader_upload_uniform_block(h, data, size, fingerprint) {
   gl.bindBuffer(gl.UNIFORM_BUFFER, b.buffer);
   gl.bufferSubData(gl.UNIFORM_BUFFER, 0, data.subarray ? data.subarray(0, size) : data);
   gl.bindBuffer(gl.UNIFORM_BUFFER, null);
+  b.uploaded = true;
   return true;
 }
 function stone_shader_check_uniform_block_layout(h, name, names, names_len, offsets, count, plan_size) {
@@ -1508,6 +1565,7 @@ function stone_draw_fullscreen_quad() {
   gl.disableVertexAttribArray(3);
   gl.disableVertexAttribArray(4);
   gl.drawArrays(gl.TRIANGLES, 0, 6);
+  __sw_mark_drawn(sh);
 }
 
 // --- text: canvas2d glyph atlas (MC, docs/stone-web-plan.md § text) ---
@@ -1726,8 +1784,6 @@ function __sw_bytes_to_string(b) {
 
 // --- camera state / immediate sprite path (MB: batches only; the immediate
 // sprite quad lands with the MD canvas-present blit) ---
-var __sw_cameraActive = false;
-function stone_is_camera_active() { return __sw_cameraActive; }
 function stone_current_shader_bound() { return __SW.curShader !== 0; }
 function stone_sprite_begin(shader) { if (shader) stone_set_shader(shader); }
 function stone_sprite_draw(shader, handle, x, y, w, h, sx, sy, sw, sh, rot, scx, scy, r, g, b, a) {
@@ -1764,14 +1820,6 @@ function stone_sprite_draw_texture(shader, tex, tw, th, x, y, w, h, sx, sy, sw, 
     px[2], py[2], u1, v1, r, g, b, a,
     px[3], py[3], u0, v1, r, g, b, a,
   ]);
-  if (cur === 0) {
-    // Standalone caller: bound-target pixel ortho + identity view/transform
-    // (native set_default_sprite_uniforms).
-    var wh = __sw_ortho_size();
-    var proj = new Float32Array([2 / wh[0], 0, 0, 0, 0, -2 / wh[1], 0, 0, 0, 0, -1, 0, -1, 1, 0, 1]);
-    var lp = __sw_uloc(sh2, "uProjection"); if (lp) gl.uniformMatrix4fv(lp, false, proj);
-    var lv = __sw_uloc(sh2, "uView"); if (lv) gl.uniformMatrix4fv(lv, false, __SW_IDENTITY);
-  }
   gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_2D, t);
   var ltx = __sw_uloc(sh2, "uTexture"); if (ltx) gl.uniform1i(ltx, 0);
@@ -1786,6 +1834,7 @@ function stone_sprite_draw_texture(shader, tex, tw, th, x, y, w, h, sx, sy, sw, 
   gl.disableVertexAttribArray(3);
   gl.disableVertexAttribArray(4);
   gl.drawArrays(gl.TRIANGLES, 0, 6);
+  __sw_mark_drawn(sh2);
 }
 
 // --- audio (WebAudio; silent no-op in a no-AudioContext env) ---

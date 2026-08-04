@@ -8,7 +8,7 @@ use bone_semantic::prelude::*;
 use rock_core::errors::CompilerErrorLevel;
 
 fn parse(src: &str) -> skull_parser::Ast {
-    skull_parser::parse_module(src, Ustr::from("<transmute_of_nullable>")).expect("parse")
+    skull_parser::parse_module_clean(src, Ustr::from("<transmute_of_nullable>")).expect("parse")
 }
 
 const PRELUDE: &str = r#"

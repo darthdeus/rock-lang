@@ -88,7 +88,7 @@ fn real_sources_are_idempotent_reparse_and_keep_comments() {
         // Only a *changed* output is the formatter's responsibility to keep
         // valid (an unparseable input is passed through unchanged).
         if once != src {
-            match skull_parser::parse_module(&once, "<roundtrip>".into()) {
+            match skull_parser::parse_module_clean(&once, "<roundtrip>".into()) {
                 Ok(ast) if ast.recovery_errors.is_empty() => {}
                 Ok(ast) => fails.push(format!(
                     "output has recovery errors: {short}: {:?}",

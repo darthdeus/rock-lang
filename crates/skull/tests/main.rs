@@ -14,6 +14,8 @@ mod bounded_lambda_inline;
 mod capture_free_hoist;
 #[path = "closure_snapshot.rs"]
 mod closure_snapshot;
+#[path = "coalesce_value_struct_literal_field_sentinel.rs"]
+mod coalesce_value_struct_literal_field_sentinel;
 #[path = "concrete_body.rs"]
 mod concrete_body;
 #[path = "const_hoist.rs"]

@@ -343,6 +343,7 @@ impl CommandContext {
                 project,
                 self.args.quiet,
                 self.args.update_snapshots,
+                self.args.jobs,
             )
         } else {
             // files[0] = project, files[1..] = one or more sim names. One name

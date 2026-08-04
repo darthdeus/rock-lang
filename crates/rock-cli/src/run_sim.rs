@@ -22,9 +22,33 @@ use tempfile::TempDir;
 /// Frame budget. Sims terminate naturally via the runner's `sim_done`
 /// check; this is the upper bound for runaway / hung body.
 const DEFAULT_FRAME_BUDGET: usize = 600;
-/// Wall-clock timeout. Belt-and-suspenders alongside FRAME_COUNT for
-/// sims that wedge the game without hitting frame budget.
-const TIMEOUT_SECS: u64 = 30;
+/// Wall-clock timeout. An INDEPENDENT bound, not a backstop for the frame
+/// budget: it is the only thing that catches a child which never advances a
+/// frame at all -- an infinite loop inside one tick, a blocked FFI call, a
+/// driver stall -- where `FRAME_COUNT` can never be reached and so can never
+/// fire. Neither bound subsumes the other.
+///
+/// Deliberately generous, because it is a wedge detector and not a deadline.
+/// Per-child wall time rises sharply under `--jobs` (render-heavy mag sims have
+/// been measured taking 15 s for a single frame with four children live), and a
+/// value tuned for serial runs kills healthy children. Override with
+/// `ROCK_SIM_TIMEOUT_SECS` for a genuinely long-running sim.
+const DEFAULT_TIMEOUT_SECS: u64 = 300;
+
+fn sim_timeout_secs() -> u64 {
+    match std::env::var("ROCK_SIM_TIMEOUT_SECS") {
+        Ok(v) => match v.parse::<u64>() {
+            Ok(n) if n > 0 => n,
+            _ => {
+                log::warn!(target: "SIM",
+                    "ROCK_SIM_TIMEOUT_SECS=`{v}` is not a positive integer; \
+                     using {DEFAULT_TIMEOUT_SECS}s");
+                DEFAULT_TIMEOUT_SECS
+            }
+        },
+        Err(_) => DEFAULT_TIMEOUT_SECS,
+    }
+}
 
 /// Split a `--sim` value on `,` into chain parts. Empty parts dropped,
 /// whitespace trimmed. Single source of truth for the multi-start
@@ -32,6 +56,51 @@ const TIMEOUT_SECS: u64 = 30;
 /// resolver.
 pub fn parse_sim_chain(name: &str) -> Vec<&str> {
     name.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect()
+}
+
+/// Test-only barrier between compiling the sim build and spawning the first
+/// child. `ROCK_SIM_SPAWN_BARRIER=<path>` makes an invocation park here until
+/// `<path>` exists, so a test can deterministically interleave a second
+/// invocation's compile against this one's spawn. Bounded so a mistaken set
+/// cannot wedge a run forever. Env-gated and once per invocation, never in a
+/// per-frame or per-sim path.
+/// A sim invocation's private directory for `main.lua` + its `incremental.lua`
+/// overlay.
+///
+/// This MUST NOT be a fixed workspace path. Two `rock sim` invocations (or a
+/// `rock stone` watcher alongside one) each compile their own `@sim` registry,
+/// and a shared path lets the second compile replace the chunk the first is
+/// about to run -- the first then reports `unknown sim: <name>` for names its
+/// own registry contains. Pinned by
+/// `tests/sim_concurrent_invocations.rs`.
+///
+/// Lives under `tmp/` rather than the system temp dir so a failing run's build
+/// is still findable next to `tmp/libstone.so` for `luajit main.lua` debugging.
+/// The engine cdylibs stay in `tmp/` itself: they are staged before any spawn
+/// and children resolve them through the relative `tmp` entry that
+/// `rock_host::project::lib_path_value` puts on the library search path.
+fn sim_output_dir() -> Result<TempDir> {
+    fs_err::create_dir_all("tmp").context("creating tmp/ for sim output")?;
+    tempfile::Builder::new()
+        .prefix("sim-")
+        .tempdir_in("tmp")
+        .context("creating sim output directory")
+}
+
+fn sim_spawn_barrier() {
+    let Some(gate) = std::env::var_os("ROCK_SIM_SPAWN_BARRIER") else {
+        return;
+    };
+    let gate = PathBuf::from(gate);
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    while !gate.exists() {
+        if std::time::Instant::now() > deadline {
+            log::warn!(target: "SIM",
+                "ROCK_SIM_SPAWN_BARRIER `{}` never appeared; proceeding", gate.display());
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// Compile `project` into `output_path` and walk the `@sim` registry
@@ -72,7 +141,8 @@ pub fn do_list_sims(backend: crate::Backend, project: &str) -> Result<()> {
 
     let project_path = rock_host::project::resolve_project_dir(project)?;
 
-    let (wire_names, _, _) = compile_sims(backend, project_path, PathBuf::from("tmp"))?;
+    let out_dir = sim_output_dir()?;
+    let (wire_names, _, _) = compile_sims(backend, project_path, out_dir.path().to_path_buf())?;
     for name in wire_names {
         // Result output, NOT logging: `--list` exists to print the sim
         // names to stdout — this is the command's answer, consumed by
@@ -92,14 +162,16 @@ pub fn do_run_sim_opts(backend: crate::Backend, project: &str, sim_name: &str, q
     let project = project_path.to_string_lossy().into_owned();
     rock_host::engine_build::build_engine_libs(&project)?;
 
-    let output = "tmp".to_string();
-    let output_path = PathBuf::from(&output);
+    let out_dir = sim_output_dir()?;
+    let output = out_dir.path().to_string_lossy().into_owned();
+    let output_path = out_dir.path().to_path_buf();
 
     // Compile once and collect `@sim_env("K", "V")` env pairs by wire name.
     // The runner applies them via `Command::env` before luajit spawns --
     // the in-process runtime `set_env()` runs after `@init`, so it can't
     // influence env-var-driven game config like `ANVIL_VIDEO`.
     let (_, env_by_wire, mut stone) = compile_sims(backend, project_path, output_path)?;
+    sim_spawn_barrier();
 
     let (display_name, summary) = run_named_entry(
         &project,
@@ -118,7 +190,9 @@ pub fn do_run_sim_opts(backend: crate::Backend, project: &str, sim_name: &str, q
 
     if summary.timed_out {
         return Err(anyhow!(
-            "sim `{sim_name}` timed out after {TIMEOUT_SECS}s (frame budget {DEFAULT_FRAME_BUDGET})"
+            "sim `{sim_name}` timed out after {}s (frame budget {DEFAULT_FRAME_BUDGET}); \
+             override with ROCK_SIM_TIMEOUT_SECS",
+            sim_timeout_secs()
         ));
     }
     if let Some(code) = summary.process_failure_code {
@@ -185,6 +259,7 @@ fn run_named_entry(
     let mut combined = SimSummary::default();
     for part in &parts {
         let env_pairs = env_by_wire.get(*part).cloned().unwrap_or_default();
+        let lane = is_reload_lane(&env_pairs).then(|| &mut *stone);
         let part_summary = run_one_sim(
             project,
             part,
@@ -193,7 +268,7 @@ fn run_named_entry(
             &out_path,
             output,
             &env_pairs,
-            stone,
+            lane,
         )?;
         combined.merge(part_summary);
     }
@@ -255,9 +330,11 @@ pub fn do_run_named_sims(
     let project = project_path.to_string_lossy().into_owned();
     rock_host::engine_build::build_engine_libs(&project)?;
 
-    let output = "tmp".to_string();
+    let out_dir = sim_output_dir()?;
+    let output = out_dir.path().to_string_lossy().into_owned();
     let (_, env_by_wire, mut stone) =
         compile_sims(backend, project_path, PathBuf::from(&output))?;
+    sim_spawn_barrier();
 
     let mut passed = 0usize;
     let mut failed: Vec<String> = Vec::new();
@@ -308,55 +385,120 @@ pub fn do_run_named_sims(
 /// tally. Returns Err (non-zero exit) if any sim failed. Distinct sims
 /// don't chain, so each gets its own `OUT`; use the comma form for
 /// multi-start chains.
-pub fn do_run_all_sims(backend: crate::Backend, project: &str, quiet: bool, update_snapshots: bool) -> Result<()> {
+pub fn do_run_all_sims(
+    backend: crate::Backend,
+    project: &str,
+    quiet: bool,
+    update_snapshots: bool,
+    jobs: Option<usize>,
+) -> Result<()> {
     rock_host::project::ensure_workspace_root()?;
 
     let project_path = rock_host::project::resolve_project_dir(project)?;
     let project = project_path.to_string_lossy().into_owned();
     rock_host::engine_build::build_engine_libs(&project)?;
 
-    let output = "tmp".to_string();
+    let out_dir = sim_output_dir()?;
+    let output = out_dir.path().to_string_lossy().into_owned();
     let (wire_names, env_by_wire, mut stone) =
         compile_sims(backend, project_path, PathBuf::from(&output))?;
+    sim_spawn_barrier();
     if wire_names.is_empty() {
         return Err(anyhow!("no @sim coroutines found in project `{project}`"));
     }
 
-    let mut passed = 0usize;
-    let mut failed: Vec<String> = Vec::new();
-    for name in &wire_names {
+    let jobs = resolve_jobs(jobs, update_snapshots);
+
+    // Two lanes. Reload sims mutate the one session and the one overlay, so
+    // they run alone with nothing else in flight; everything else is
+    // independent once the compiled output is invocation-owned.
+    let (reload_idx, ordinary_idx): (Vec<usize>, Vec<usize>) = (0..wire_names.len())
+        .partition(|&i| is_reload_lane(env_by_wire.get(&wire_names[i]).map_or(&[][..], |v| v)));
+
+    // Concurrent children cannot stream: their progress lines would interleave
+    // into nonsense. Buffer instead and print each sim's complete record in
+    // registry order below, which is what the concise multi-run path already
+    // does. Serial runs keep today's live stream.
+    let streaming = jobs == 1 && !quiet;
+    let mut summaries: HashMap<usize, Result<SimSummary>> = HashMap::new();
+
+    // A record is finished, printed, and accounted in ONE place, so a sim's
+    // lines can never interleave with another's: everything after the child
+    // exits happens under `report` for concurrent runs. Video assertions shell
+    // out to ffprobe/ffmpeg but ride the same pool, so they stay bounded by
+    // `--jobs` rather than fanning out on their own.
+    let report = Mutex::new(());
+    let run_at = |i: usize, stone: Option<&mut crate::skull_backend::SkullStone>| -> Result<SimSummary> {
         // Fresh tempdir per sim -- distinct sims don't share OUT the way
         // a comma-chain's parts do.
         let tempdir = TempDir::new().context("creating sim tempdir")?;
-        let out_path = tempdir.path().to_path_buf();
-        let env_pairs = env_by_wire.get(name).cloned().unwrap_or_default();
-
+        let env_pairs = env_by_wire.get(&wire_names[i]).cloned().unwrap_or_default();
         let mut summary = run_one_sim(
             &project,
-            name,
-            quiet,
+            &wire_names[i],
+            !streaming,
             update_snapshots,
-            &out_path,
+            tempdir.path(),
             &output,
             &env_pairs,
-            &mut stone,
+            stone,
         )?;
+        drop(tempdir);
+
+        let _lock = report.lock().unwrap();
         process_video_assertions(&mut summary);
         for p in std::mem::take(&mut summary.cleanup_paths) {
             let _ = std::fs::remove_file(&p);
         }
-
         if !quiet {
-            summary.print(name, true);
+            // Concurrent runs never streamed the per-expect lines, so the
+            // record must carry its own sited failures (`streamed = false`).
+            summary.print(&wire_names[i], streaming);
         }
+        Ok(summary)
+    };
 
-        let ok = entry_passed(&summary);
-        if ok {
+    if jobs > 1 && ordinary_idx.len() > 1 {
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let collected: Mutex<Vec<(usize, Result<SimSummary>)>> = Mutex::new(Vec::new());
+        let workers = jobs.min(ordinary_idx.len());
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(|| loop {
+                    let slot = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let Some(&i) = ordinary_idx.get(slot) else { break };
+                    let r = run_at(i, None);
+                    collected.lock().unwrap().push((i, r));
+                });
+            }
+        });
+        summaries.extend(collected.into_inner().unwrap());
+    } else {
+        for &i in &ordinary_idx {
+            summaries.insert(i, run_at(i, None));
+        }
+    }
+
+    // Reload lane, strictly after the pool has drained.
+    for &i in &reload_idx {
+        summaries.insert(i, run_at(i, Some(&mut stone)));
+    }
+
+    // Records printed in completion order; the ACCOUNTING is registry order, so
+    // the failed list and tally are identical to a serial run's.
+    let mut passed = 0usize;
+    let mut failed: Vec<String> = Vec::new();
+    for (i, name) in wire_names.iter().enumerate() {
+        let summary = match summaries.remove(&i) {
+            Some(Ok(s)) => s,
+            Some(Err(e)) => return Err(e),
+            None => return Err(anyhow!("sim `{name}` was never scheduled")),
+        };
+        if entry_passed(&summary) {
             passed += 1;
         } else {
             failed.push(name.clone());
         }
-        drop(tempdir);
     }
 
     // Result output, NOT logging: the suite verdict is this command's
@@ -452,6 +594,46 @@ fn revert_reload_edits(
     crate::skull_backend::wipe_overlay(&incremental_path)
 }
 
+/// Conservative default for concurrent sim children.
+///
+/// Deliberately well under the point where a machine starts failing: sim
+/// children each create a GL context, and oversubscribing the driver produces
+/// GL errors rather than slowdown. The suite only has to beat serial, so this
+/// is not tuned for the best observed number and should only be raised from a
+/// measurement on more than one machine (`docs/sim-speed-plan.md`).
+const DEFAULT_SIM_JOBS: usize = 4;
+
+/// Resolve the requested job count. `--update-snapshots` pins to serial: it
+/// rewrites baseline files, and the runner does not yet prove every
+/// destination path is unique before spawning (several `@sim`s can share one
+/// source file, so its `.snap` directory is shared too).
+fn resolve_jobs(requested: Option<usize>, update_snapshots: bool) -> usize {
+    if update_snapshots {
+        if requested.is_some_and(|j| j > 1) {
+            log::warn!(target: "SIM",
+                "--update-snapshots rewrites snapshot baselines; running serially");
+        }
+        return 1;
+    }
+    let available = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    requested.unwrap_or(DEFAULT_SIM_JOBS).clamp(1, available.max(1))
+}
+
+/// Whether a sim belongs to the exclusive reload lane.
+///
+/// Reload sims drive `SkullStone::apply_edit` against the one live session and
+/// the one `incremental.lua`, so they cannot share the runner with any other
+/// child. Opting in is `@sim_env("STONE_HOT_RELOAD", "1")` -- the same switch
+/// that makes the child's watcher poll the overlay at all, so a sim that could
+/// observe a reload is exactly a sim that declares this.
+pub fn is_reload_lane(env_pairs: &[(String, String)]) -> bool {
+    env_pairs
+        .iter()
+        .any(|(k, v)| k == "STONE_HOT_RELOAD" && v != "0")
+}
+
 /// Spawn one luajit process for `sim_part` and demux its side channel.
 /// `out_path` is the shared `OUT` env value across all parts in a
 /// multi-start chain.
@@ -463,18 +645,27 @@ fn run_one_sim(
     out_path: &Path,
     output: &str,
     env_pairs: &[(String, String)],
-    stone: &mut crate::skull_backend::SkullStone,
+    stone: Option<&mut crate::skull_backend::SkullStone>,
 ) -> Result<SimSummary> {
     let sim_source = find_sim_source(project, sim_part);
 
-    // No stale overlay may exist when the child spawns: with STONE_HOT_RELOAD=1
-    // the in-game watcher fires on the overlay's FIRST appearance (baseline
-    // modtime 0), so a leftover from a previous sim would be dofile'd at startup.
-    crate::skull_backend::wipe_overlay(
-        &Path::new(output)
-            .join(rock_host::project::MAIN_LUA_FILENAME)
-            .with_file_name("incremental.lua"),
-    )?;
+    // Overlay handling belongs ONLY to the reload lane. The overlay is one file
+    // shared by every child of this invocation, so wiping it here would be a
+    // cross-child mutation the moment ordinary sims run concurrently. Ordinary
+    // children never write it, and the reload lane is exclusive and reverts its
+    // own edits, so nothing stale can survive into an ordinary child.
+    //
+    // With STONE_HOT_RELOAD=1 the in-game watcher fires on the overlay's FIRST
+    // appearance (baseline modtime 0), so a leftover would be dofile'd at
+    // startup -- that is what this wipe prevents, for the lane that can create
+    // one.
+    if stone.is_some() {
+        crate::skull_backend::wipe_overlay(
+            &Path::new(output)
+                .join(rock_host::project::MAIN_LUA_FILENAME)
+                .with_file_name("incremental.lua"),
+        )?;
+    }
     // Expand `$OUT` in env values to the per-run tempdir absolute path.
     // Lets sims write `@sim_env("ANVIL_SESSION", "$OUT/resume.json")`
     // and have it resolve before luajit spawns. Runtime `set_env()`
@@ -578,10 +769,11 @@ fn run_one_sim(
         })
     };
 
-    let timeout = Duration::from_secs(TIMEOUT_SECS);
+    let timeout = Duration::from_secs(sim_timeout_secs());
     let start_time = std::time::Instant::now();
     let mut pristine: HashMap<String, String> = HashMap::new();
     let mut reload_errors: Vec<SiteMessage> = Vec::new();
+    let mut stone = stone;
     let (status, timed_out) = loop {
         match child.try_wait()? {
             Some(s) => break (s, false),
@@ -597,7 +789,19 @@ fn run_one_sim(
                 // keep the poll cadence with a plain sleep.
                 match reload_rx.recv_timeout(Duration::from_millis(50)) {
                     Ok(req) => {
-                        if let Err(e) = service_reload_edit(stone, output, &mut pristine, &req) {
+                        // An ordinary (non-reload) sim has no session to edit.
+                        // Servicing it here would mutate build state shared with
+                        // every other child, so refuse loudly rather than
+                        // silently dropping the request or reaching for the
+                        // session from a parallel lane.
+                        let serviced = match stone.as_deref_mut() {
+                            Some(st) => service_reload_edit(st, output, &mut pristine, &req),
+                            None => Err(anyhow!(
+                                "reload_edit is only available to sims that opt into the \
+                                 reload lane with `@sim_env(\"STONE_HOT_RELOAD\", \"1\")`"
+                            )),
+                        };
+                        if let Err(e) = serviced {
                             let site = compress_site(&req.site);
                             // Result output, NOT logging: runner-side failure
                             // in the sim's live result stream. It never came
@@ -662,7 +866,11 @@ fn run_one_sim(
     // Restore the session + remove the overlay even when the sim failed --
     // a revert failure is itself a loud error (it would poison every later
     // sim in the suite).
-    if let Err(e) = revert_reload_edits(stone, output, &mut pristine) {
+    if let Err(e) = stone
+        .as_deref_mut()
+        .map(|st| revert_reload_edits(st, output, &mut pristine))
+        .unwrap_or(Ok(()))
+    {
         summary.errors.push(SiteMessage {
             message: format!("reload_edit revert failed: {e}"),
             site: String::new(),
@@ -921,6 +1129,7 @@ fn prefix_with_site(site: &str, msg: &str) -> String {
     }
 }
 
+#[derive(Debug)]
 enum SnapResult {
     Pass,
     Wrote,
@@ -1038,12 +1247,25 @@ fn handle_image_snapshot(
         ));
     }
 
-    if update || !baseline.exists() {
+    if update {
         if let Some(parent) = baseline.parent() {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::copy(produced, baseline)?;
         return Ok(SnapResult::Wrote);
+    }
+    // An assertion that cannot be evaluated is not satisfied. Bootstrapping a
+    // missing golden from the current frame and counting it as a passing expect
+    // meant a sim whose goldens are untracked -- `vfx_capture.snap/` is
+    // gitignored as display-specific -- self-passed on any machine that had
+    // never run it, proving nothing about the pixels it exists to check.
+    if !baseline.exists() {
+        return Ok(SnapResult::Fail(format!(
+            "image_snapshot `{}` has no baseline at `{}`; re-run with --update-snapshots to \
+             create it (a missing golden is not a pass)",
+            img.name,
+            baseline.display()
+        )));
     }
 
     let diff = crate::image_video::image_diff(baseline, produced)
@@ -1354,6 +1576,67 @@ fn extract_raw_field(json: &str, key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A MISSING image golden used to bootstrap itself from the current frame
+    /// and count as a passing expect, so a sim whose goldens are untracked
+    /// (`mag/tests/sims/vfx_capture.snap/`, gitignored as display-specific)
+    /// self-passed on any machine that had never run it -- the assertion was
+    /// never evaluated. Only `--update-snapshots` may write a baseline.
+    #[test]
+    fn a_missing_image_golden_is_not_a_pass() {
+        let dir = std::env::temp_dir().join(format!(
+            "rock-golden-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).expect("tmp dir");
+        let produced = dir.join("produced.png");
+        // A 1x1 PNG; the bytes never get compared on the paths under test.
+        std::fs::write(&produced, [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]).expect("write");
+        let baseline = dir.join("golden.png");
+        let img = ImageSnapshotOp {
+            name: "golden".into(),
+            path: produced.to_string_lossy().into_owned(),
+            tol: 0.001,
+            save_ok: true,
+            site: String::new(),
+        };
+
+        let r = handle_image_snapshot(&img, &baseline, false).expect("no hard error");
+        assert!(
+            matches!(r, SnapResult::Fail(_)),
+            "a missing golden must not pass; got {r:?}"
+        );
+        assert!(!baseline.exists(), "and it must NOT have been written behind our back");
+
+        // Both sides: with --update-snapshots, writing it is the point.
+        let r = handle_image_snapshot(&img, &baseline, true).expect("no hard error");
+        assert!(matches!(r, SnapResult::Wrote), "update writes the baseline; got {r:?}");
+        assert!(baseline.exists(), "the baseline is created under update");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The lane discriminant decides whether a child may touch the one live
+    /// `SkullStone` session and the one `incremental.lua`. Getting it wrong in
+    /// the permissive direction lets an ordinary child mutate build state
+    /// shared with every other child once the suite runs in parallel.
+    #[test]
+    fn reload_lane_is_opt_in_via_stone_hot_reload() {
+        let pair = |k: &str, v: &str| vec![(k.to_string(), v.to_string())];
+
+        assert!(is_reload_lane(&pair("STONE_HOT_RELOAD", "1")));
+        // Only the opt-in key routes to the lane; a busy sim env does not.
+        assert!(!is_reload_lane(&pair("SIM_SKIP_RENDER", "0")));
+        assert!(!is_reload_lane(&[]));
+        // An explicit disable is not an opt-in: the child's watcher does not
+        // poll, so it can never observe a reload.
+        assert!(!is_reload_lane(&pair("STONE_HOT_RELOAD", "0")));
+        // The key still routes when it is not the only pair.
+        let mut mixed = pair("ROCK_TEST_SEED", "42");
+        mixed.extend(pair("STONE_HOT_RELOAD", "1"));
+        assert!(is_reload_lane(&mixed));
+    }
 
     #[test]
     fn extract_str_field_basic() {
