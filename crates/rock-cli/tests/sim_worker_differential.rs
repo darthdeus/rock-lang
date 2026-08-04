@@ -298,6 +298,39 @@ fn a_held_key_still_reaches_the_next_entry() {
     assert_ne!(isolated.artifacts["hold.txt"], worker.artifacts["hold.txt"]);
 }
 
+/// SENTINEL -- a poller task still live when its entry stopped. Nothing at the
+/// entry boundary cancels the engine poller's registrations, so a
+/// fire-and-forget task spawned by a predecessor keeps advancing inside the
+/// next entry's frames.
+///
+/// The discriminant is a DELTA measured strictly inside the probe's window, not
+/// the counter's value: a value would only repeat the leaked-global class,
+/// while a delta can move only if foreign work is still being polled here.
+///
+/// FLIP WHEN FIXED: becomes `assert_equivalent` when the boundary cancels the
+/// previous entry's tasks.
+#[test]
+fn a_task_left_live_at_stop_sim_still_ticks_in_the_next_entry() {
+    let (isolated, worker) = differential(&["b0_poller_seed"], "b0_poller_probe");
+    let c = compare(&isolated, &worker);
+
+    assert!(
+        !c.is_equivalent(),
+        "the worker no longer polls a predecessor's task -- land the cancel and \
+         flip this sentinel to assert_equivalent"
+    );
+    for arm in ["verdict", "expects_pass", "expects_fail", "artifacts"] {
+        assert!(c.differs_on(arm), "expected a `{arm}` difference:\n{}", c.report());
+    }
+    assert_eq!(isolated.verdict(), "PASS", "nothing foreign ticks in a fresh process");
+    assert_eq!(worker.verdict(), "FAIL");
+    assert_eq!(
+        isolated.artifacts["ticks.txt"].len, worker.artifacts["ticks.txt"].len,
+        "both write a one-digit delta; only the digit differs"
+    );
+    assert_ne!(isolated.artifacts["ticks.txt"], worker.artifacts["ticks.txt"]);
+}
+
 /// Mutation guard for the comparator itself: every arm must be present, and
 /// every arm a fixture can populate must have compared a non-zero population
 /// in at least one fixture. Deleting an arm from `compare` makes `population`
