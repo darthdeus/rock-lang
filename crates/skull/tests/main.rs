@@ -72,6 +72,8 @@ mod mangle_rename_hot_reload;
 mod mir_execution_oracle;
 #[path = "multi_rejection.rs"]
 mod multi_rejection;
+#[path = "nb_storage_registry.rs"]
+mod nb_storage_registry;
 #[path = "native_buffer_alloc.rs"]
 mod native_buffer_alloc;
 #[path = "native_buffer_leaf_addressing.rs"]

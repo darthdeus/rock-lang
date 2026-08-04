@@ -429,7 +429,8 @@ fn runtime_prelude() -> &'static str {
     static PRELUDE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
         let out = PRELUDE_TEMPLATE
             .replace("{FN_MT}", skull_codegen_lua::FN_MT_PRELUDE)
-            .replace("{LEAF_VIEWS}", &skull_mir::lower::leaf_views_lua_table());
+            .replace("{LEAF_VIEWS}", &skull_mir::lower::leaf_views_lua_table())
+            .replace("{NB_PRIM_STORAGE}", &skull_mir::lower::nb_prim_storage_lua());
         // `str::replace` on a placeholder that drifted out of the template is a
         // NO-OP, and the survivor is valid Lua: `= {LEAF_VIEWS}` reads an unset
         // global, so the table is EMPTY rather than a syntax error. `pairs({})`
@@ -437,8 +438,12 @@ fn runtime_prelude() -> &'static str {
         // after a grow -- silently, which is the class that killed mag's
         // spell_damages once already. Fail loudly at build time instead.
         assert!(
-            !out.contains('{') || !out.contains("{LEAF_VIEWS}"),
+            !out.contains("{LEAF_VIEWS}"),
             "prelude template still contains an unsubstituted {{LEAF_VIEWS}} placeholder"
+        );
+        assert!(
+            !out.contains("{NB_PRIM_STORAGE}"),
+            "prelude template still contains an unsubstituted {{NB_PRIM_STORAGE}} placeholder"
         );
         out
     });
@@ -457,6 +462,31 @@ _G.__ROCK_LEAF_VIEWS = {LEAF_VIEWS}
 -- Never legitimately empty: an empty table means the generator emitted nothing,
 -- which would make view refresh a silent no-op and leave every view dangling.
 assert(next(_G.__ROCK_LEAF_VIEWS), "__ROCK_LEAF_VIEWS is empty; leaf-view refresh would silently do nothing")
+-- Compiler-described NativeBuffer STORAGE, keyed by the ctype LuaJIT gives the
+-- allocation itself. Generated from skull_mir::lower (NB_PRIM_ELEMS for the
+-- primitive/sized element types, value_leaf_layout_checked + LEAF_VIEWS for the
+-- value-struct ones), so a holder of a storage cdata can ask what its bytes mean
+-- -- element ctype, element width, and the views minted over it -- rather than
+-- reading a `__ty` string or re-deriving a layout. An element array whose ctype
+-- is absent here is storage the compiler does not describe, and every consumer
+-- must fail closed on it.
+--
+-- Keyed by `tostring(ffi.typeof(...))` because a ctype cdata hashes by identity
+-- as a table key, and because a typedef'd anonymous struct only gets its
+-- `struct <n>` spelling from LuaJIT. Registering through the same `ffi.typeof`
+-- the lookup uses is what makes the two agree.
+_G.__ROCK_NB_STORAGE = {}
+local function __rock_nb_storage(ctype, elem_size, views)
+  local ok, ct = pcall(ffi.typeof, ctype .. "[?]")
+  if not ok then error("skull: __ROCK_NB_STORAGE names undeclared ctype `" .. ctype .. "`", 0) end
+  if ffi.sizeof(ctype) ~= elem_size then
+    error("skull storage drift: sizeof(" .. ctype .. ") = " .. ffi.sizeof(ctype)
+          .. ", expected " .. elem_size, 0)
+  end
+  _G.__ROCK_NB_STORAGE[tostring(ct)] = { ctype = ctype, elem_size = elem_size, views = views }
+end
+_G.__rock_nb_storage = __rock_nb_storage
+{NB_PRIM_STORAGE}
 if not _G.__rock_on_hot_reload then _G.__rock_on_hot_reload = {} end
 -- THE way to read/write a global found by name in `__ROCK_GLOBALS`. A `nobox`
 -- global has no slot under its own name -- its storage is its leaf globals -- so
@@ -684,7 +714,36 @@ fn value_struct_defs(
     // is a genuine emit bug and must abort with LuaJIT's own message — the old
     // pcall swallowed it and every `<Name>_ct` use downstream failed cryptically.
     let checks = value_leaf_layout_checks(ws, &emitted)?;
-    Ok((format!("ffi.cdef[[\n{}]]\n{}{}", typedefs, ctors, checks), emitted, gc))
+    let storage = nb_value_storage_defs(ws, &emitted)?;
+    Ok((format!("ffi.cdef[[\n{}]]\n{}{}{}", typedefs, ctors, checks, storage), emitted, gc))
+}
+
+/// Register every FFI-clean value struct as a `NativeBuffer` storage element in
+/// `_G.__ROCK_NB_STORAGE` (declared by the prelude, which also registers the
+/// primitive/sized element types). This is the value-element half of the ONE
+/// compiler-owned storage description; both halves go through the same
+/// `nb_storage_call` generator in `skull_mir::lower`.
+///
+/// The set is `emitted` -- exactly the structs a cdef was declared for, which is
+/// exactly the set `ffi.new("<T>[?]", n)` can allocate. A name whose layout does
+/// not validate is an invariant failure for the same reason it is in
+/// `value_leaf_layout_checks`: the emitter would then allocate storage nothing
+/// described.
+fn nb_value_storage_defs(
+    ws: &Workspace,
+    emitted: &rustc_hash::FxHashSet<ustr::Ustr>,
+) -> Result<String, CompilerError> {
+    let mut names: Vec<ustr::Ustr> = emitted.iter().copied().collect();
+    names.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    let mut out = String::new();
+    for name in names {
+        out.push_str(&skull_mir::lower::nb_value_storage_lua(ws, name).map_err(|e| {
+            CompilerError::new_no_location(format!(
+                "skull: cannot describe `{name}` as NativeBuffer storage: {e}"
+            ))
+        })?);
+    }
+    Ok(out)
 }
 
 /// Assert, once at chunk load, that skull's C layout model agrees with LuaJIT's
