@@ -474,8 +474,31 @@ pub fn uniform_block(ws: &Workspace, struct_name: Ustr) -> Result<UniformBlockPl
         offset += kind.size();
     }
 
-    Ok(UniformBlockPlan { struct_name, members, size: round_up(offset, 16) })
+    let size = round_up(offset, 16);
+    if size > GLES3_MAX_UNIFORM_BLOCK_SIZE {
+        return Err(err(
+            sd.name_span,
+            format!(
+                "uniform block: `{struct_name}` needs {size} std140 bytes, over the {GLES3_MAX_UNIFORM_BLOCK_SIZE} \
+                 an ES 3.0 driver is required to offer. The GLSL profile follows the runtime GL \
+                 context, so this has to fit the tightest target the program can land on -- and \
+                 nothing downstream would catch it, because `shader-validate`'s 300es leg links \
+                 against the host driver's own (much larger) limit"
+            ),
+        ));
+    }
+
+    Ok(UniformBlockPlan { struct_name, members, size })
 }
+
+/// The ES 3.0 guaranteed minimum for `MAX_UNIFORM_BLOCK_SIZE` (ES 3.0 spec table
+/// 6.31), and the budget a block is held to.
+///
+/// Not the host driver's limit, deliberately: a desktop GL implementation
+/// reports far more (65536 on the dev machine's NVIDIA driver), so a block
+/// between the two numbers compiles and links on every gate in this repo and
+/// fails only on a physical device. A size the block may REACH, not exceed.
+pub const GLES3_MAX_UNIFORM_BLOCK_SIZE: u32 = 16384;
 
 fn ty_expr(ws: &Workspace, ty: TyId) -> Option<TypeExpr> {
     match ty {
