@@ -713,41 +713,19 @@ fn value_struct_defs(
     // Direct ffi.cdef: a skull chunk loads once per process, so a failure here
     // is a genuine emit bug and must abort with LuaJIT's own message — the old
     // pcall swallowed it and every `<Name>_ct` use downstream failed cryptically.
-    let checks = value_leaf_layout_checks(ws, &emitted)?;
-    let storage = nb_value_storage_defs(ws, &emitted)?;
+    let (checks, storage) = value_leaf_layout_checks(ws, &emitted)?;
     Ok((format!("ffi.cdef[[\n{}]]\n{}{}{}", typedefs, ctors, checks, storage), emitted, gc))
 }
 
-/// Register every FFI-clean value struct as a `NativeBuffer` storage element in
-/// `_G.__ROCK_NB_STORAGE` (declared by the prelude, which also registers the
-/// primitive/sized element types). This is the value-element half of the ONE
-/// compiler-owned storage description; both halves go through the same
-/// `nb_storage_call` generator in `skull_mir::lower`.
-///
-/// The set is `emitted` -- exactly the structs a cdef was declared for, which is
-/// exactly the set `ffi.new("<T>[?]", n)` can allocate. A name whose layout does
-/// not validate is an invariant failure for the same reason it is in
-/// `value_leaf_layout_checks`: the emitter would then allocate storage nothing
-/// described.
-fn nb_value_storage_defs(
-    ws: &Workspace,
-    emitted: &rustc_hash::FxHashSet<ustr::Ustr>,
-) -> Result<String, CompilerError> {
-    let mut names: Vec<ustr::Ustr> = emitted.iter().copied().collect();
-    names.sort_by(|a, b| a.as_str().cmp(b.as_str()));
-    let mut out = String::new();
-    for name in names {
-        out.push_str(&skull_mir::lower::nb_value_storage_lua(ws, name).map_err(|e| {
-            CompilerError::new_no_location(format!(
-                "skull: cannot describe `{name}` as NativeBuffer storage: {e}"
-            ))
-        })?);
-    }
-    Ok(out)
-}
-
 /// Assert, once at chunk load, that skull's C layout model agrees with LuaJIT's
-/// for every leaf of every FFI-clean value struct.
+/// for every leaf of every FFI-clean value struct -- and, from that same checked
+/// layout, register each struct as `NativeBuffer` storage in
+/// `_G.__ROCK_NB_STORAGE` (whose primitive/sized half the prelude declares).
+///
+/// One walk, two emitted views. The registry states what a buffer of this
+/// element is made of; the assertions state that the model producing it agrees
+/// with LuaJIT. Deriving both from the same `value_leaf_layout_checked` result
+/// is what keeps them from describing different layouts.
 ///
 /// Leaf addressing (`docs/native-buffer-leaf-addressing-plan.md`) indexes typed
 /// views with COMPILER-COMPUTED byte offsets — a literal constant per leaf, which
@@ -765,11 +743,12 @@ fn nb_value_storage_defs(
 fn value_leaf_layout_checks(
     ws: &Workspace,
     emitted: &rustc_hash::FxHashSet<ustr::Ustr>,
-) -> Result<String, CompilerError> {
+) -> Result<(String, String), CompilerError> {
     use std::fmt::Write as _;
     let mut names: Vec<ustr::Ustr> = emitted.iter().copied().collect();
     names.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     let mut out = String::new();
+    let mut storage = String::new();
     for name in names {
         let (leaves, size, _align) = skull_mir::lower::value_leaf_layout_checked(ws, name)
             .map_err(|e| {
@@ -782,7 +761,7 @@ fn value_leaf_layout_checks(
             "if ffi.sizeof(\"{name}\") ~= {size} then error(\"skull layout drift: \
              sizeof({name}) = \" .. ffi.sizeof(\"{name}\") .. \", expected {size}\", 0) end"
         );
-        for l in leaves {
+        for l in &leaves {
             let _ = writeln!(
                 out,
                 "if ({expr}) ~= {off} then error(\"skull layout drift: {name}.{path} at \" \
@@ -792,8 +771,9 @@ fn value_leaf_layout_checks(
                 path = l.path,
             );
         }
+        storage.push_str(&skull_mir::lower::nb_value_storage_lua(name, &leaves, size));
     }
-    Ok(out)
+    Ok((out, storage))
 }
 
 /// Emit the table-repr materialization defs for every GC-carrying value struct:

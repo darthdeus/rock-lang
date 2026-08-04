@@ -383,12 +383,18 @@ pub fn nb_prim_storage_lua() -> String {
     NB_PRIM_ELEMS.iter().map(|(cty, size)| nb_storage_call(cty, *size, &[])).collect()
 }
 
-/// The registration for FFI-clean value struct `elem` used as a buffer element:
-/// its LuaJIT byte width and the distinct leaf views a buffer of it carries.
-pub fn nb_value_storage_lua(ws: &Workspace, elem: Ustr) -> Result<String, String> {
-    let size = value_leaf_size(ws, elem)?;
-    let views = leaf_view_ctys(ws, elem)?;
-    Ok(nb_storage_call(elem.as_str(), size, &views))
+/// The registration for FFI-clean value struct `elem` used as a buffer element,
+/// derived from the layout its caller ALREADY validated. Takes the checked
+/// leaves and size rather than re-walking: the emitter needs one layout per
+/// struct and the registry is a second view of it, not a second computation.
+pub fn nb_value_storage_lua(elem: Ustr, leaves: &[LeafSlot], size: usize) -> String {
+    let mut views: Vec<&'static str> = Vec::new();
+    for l in leaves {
+        if !views.contains(&l.cty) {
+            views.push(l.cty);
+        }
+    }
+    nb_storage_call(elem.as_str(), size, &views)
 }
 
 /// [`value_leaf_paths`] by type name -- the `ValueShape`-side leaf order, for
