@@ -94,25 +94,17 @@ fn main() { RESULT = hits() }
     assert_every_live_cell_is_registered(&lua, "an ordinary fn's static");
 }
 
-/// SENTINEL -- asserts the CURRENTLY BROKEN behavior, and it is B1's first RED
-/// (`docs/sim-speed-plan.md`).
+/// The dropped-definition shape: a generic fn with an `Iterator` bound has NO
+/// standalone emitted definition (`mir_emit`'s fn-def loop skips it) and exists
+/// only inlined at its call sites. Its cell used to miss `all_statics`
+/// entirely, so nothing could reset, preserve or checkpoint it while the
+/// inlined copies read and wrote it every call.
 ///
-/// A generic fn with an `Iterator` bound has NO standalone emitted definition:
-/// `mir_emit`'s fn-def loop skips it (`fn_has_bounds`) because it exists only
-/// inlined at its call sites. Its chunk is therefore never pulled, so its
-/// `static` cell never reaches `all_statics` -- while the inlined copies at the
-/// call sites read and write that very cell at runtime. The cell is live and
-/// unregistered.
-///
-/// This is the DROPPED-DEFINITION shape the plan distinguishes from the two
-/// ordinary static rows: those cells are registered and merely not restored,
-/// this one cannot be restored because nothing knows it exists.
-///
-/// FLIP WHEN FIXED: when the collection covers owners with no standalone
-/// definition, this becomes `assert_every_live_cell_is_registered(&lua, ...)`
-/// in the same commit as the fix, and its name loses `_sentinel`.
+/// The inliner now carries a spliced callee's `statics` into the body it
+/// splices into, which is where those cells actually live. Was a sentinel; the
+/// fix and this assertion landed together (`docs/sim-speed-plan.md` B1).
 #[test]
-fn a_bounded_generics_static_is_still_unregistered_sentinel() {
+fn a_bounded_generics_static_is_registered_through_its_call_sites() {
     let lua = emit_module(
         r#"
 global RESULT: int = 0
@@ -126,20 +118,99 @@ fn tally<I: Iterator<int>>(it: I) -> int {
 fn main() { RESULT = tally([1, 2, 3].iter()) }
 "#,
     );
-    let live = live_cells(&lua);
-    let registered = registered_cells(&lua);
-    let owned: Vec<&String> = live.iter().filter(|c| c.contains("_tally_")).collect();
+    assert!(
+        live_cells(&lua).iter().any(|c| c.contains("_tally_")),
+        "the fixture must put the bounded generic's cell in the emitted program, \
+         or it is not testing what it says: {:?}",
+        live_cells(&lua)
+    );
+    assert_every_live_cell_is_registered(&lua, "a bounded generic's static");
+}
+
+/// A `co fn` cannot call a bounded fn, so real sim code reaches one through an
+/// ordinary wrapper -- the shape `games/testbed/tests/sims/b1_static_dropped.rock`
+/// uses. The cell belongs to the bounded owner either way (a `static` is one
+/// cell per owning fn), so the wrapper is where it must be registered from.
+#[test]
+fn a_bounded_generic_reached_through_a_wrapper_is_registered() {
+    let lua = emit_module(
+        r#"
+global RESULT: int = 0
+fn tally<I: Iterator<int>>(it: I) -> int {
+    static calls = 0
+    calls = calls + 1
+    let n = 0
+    for x in it { n = n + x }
+    return n + calls
+}
+fn wrapper(a: int, b: int) -> int { return tally([a, b].iter()) }
+fn main() { RESULT = wrapper(1, 2) }
+"#,
+    );
+    assert_every_live_cell_is_registered(&lua, "a bounded generic behind a wrapper");
+}
+
+/// One cell per owning fn, not per call site: a second call site must not mint
+/// a second cell, and registration must not report the same one twice.
+#[test]
+fn two_call_sites_share_one_registered_cell() {
+    let lua = emit_module(
+        r#"
+global RESULT: int = 0
+fn tally<I: Iterator<int>>(it: I) -> int {
+    static calls = 0
+    calls = calls + 1
+    let n = 0
+    for x in it { n = n + x }
+    return n + calls
+}
+fn a() -> int { return tally([1].iter()) }
+fn b() -> int { return tally([2, 3].iter()) }
+fn main() { RESULT = a() + b() }
+"#,
+    );
+    let live: Vec<String> = live_cells(&lua).into_iter().filter(|c| c.contains("_tally_")).collect();
+    assert_eq!(live.len(), 1, "two call sites, one cell: {live:?}");
+    assert_every_live_cell_is_registered(&lua, "a bounded generic called twice");
+
+    let line = registry_line(&lua).expect("registry");
+    let cell = &live[0];
     assert_eq!(
-        owned.len(),
+        line.matches(&format!("[{cell:?}]")).count(),
         1,
-        "the fixture must put exactly one bounded-generic cell in the emitted \
-         program, or it is not testing what it says: {live:?}"
+        "the cell must be registered exactly once, not once per splice"
+    );
+}
+
+/// A specialized instantiation shares its source fn's cell name (the owner tag
+/// is the fn name plus its DECLARED param types, not the substitution), so this
+/// is the case that would break if a per-instance owner tag were ever
+/// introduced without extending the collection to `emit_specialized_callees`.
+#[test]
+fn a_specialized_generics_static_is_registered() {
+    let lua = emit_module(
+        r#"
+value V2 { x: float, y: float }
+global RESULT: float = 0.0
+
+@inline fn tagged<T>(v: T) -> T {
+    static seen = 0
+    seen = seen + 1
+    return v
+}
+
+fn use_it(a: V2) -> float {
+    let r = tagged(a)
+    return r.x
+}
+
+fn main() { RESULT = use_it(V2 { x: 1.0, y: 2.0 }) }
+"#,
     );
     assert!(
-        !registered.iter().any(|c| c.contains("_tally_")),
-        "the bounded generic's static cell is now registered -- the gap is \
-         closed, so flip this sentinel to \
-         `assert_every_live_cell_is_registered(&lua, ..)` and drop the \
-         `_sentinel` suffix. registered: {registered:?}"
+        live_cells(&lua).iter().any(|c| c.contains("_tagged_")),
+        "the fixture must reach the generic's static: {:?}",
+        live_cells(&lua)
     );
+    assert_every_live_cell_is_registered(&lua, "a specialized generic's static");
 }
