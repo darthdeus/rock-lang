@@ -192,6 +192,17 @@ inline(js) fn ffi_string(ptr: any, len: int?) -> string = """
 // The ONE representation difference that matters: a Vec's `_data` is 1-based on
 // luajit and 0-BASED here, so the free-list push/pop are spelled in the other
 // order. Everything else is the luajit body transliterated.
+// Object.create(null), NOT {}: a spine key is DATA. An object literal inherits
+// Object.prototype, so "constructor" / "toString" / "valueOf" read back as
+// occupied slots that were never stored, and "__proto__" is not a data key at
+// all -- assigning it re-points the prototype instead of storing. A
+// null-prototype object has neither problem, which is why every lookup below
+// can stay a plain `m.spine[key]` rather than an ownership check.
+// Pinned by tests/map_prototype_keys.rock.
+@nomangle inline(js) fn __map_col_new_spine() -> any = """
+  return Object.create(null);
+"""
+
 @nomangle inline(js) fn __map_col_slot(m: any, key: any) -> int = """
   var s = m.spine[key];
   if (s !== undefined) return s;

@@ -2265,6 +2265,14 @@ fn Map<K, V>.insert(map, key: K, value: V) {
     return s
 """
 
+// The spine is a key -> slot dictionary, and a map key is DATA: it must never
+// collide with a name the host object model already defines. A Lua table
+// inherits nothing, so this is a bare table; the JS sibling needs a
+// null-prototype object (stdlib/js.rock). Pinned by tests/map_prototype_keys.rock.
+@nomangle inline(lua) fn __map_col_new_spine() -> any = """
+    return {}
+"""
+
 @nomangle inline(lua) fn __map_col_len(m: any) -> int = """
     return m.occupied_count
 """

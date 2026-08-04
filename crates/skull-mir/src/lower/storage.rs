@@ -620,7 +620,10 @@ impl Builder<'_> {
     pub(crate) fn empty_column_map(&mut self, elem: ColumnElem) -> Result<Idx<Inst>, CompilerError> {
         let zero_cap = self.emit_cur(Inst::Const(Lit::Int(0)));
         let data = self.empty_column_vec(elem, zero_cap)?;
-        let spine = self.emit_cur(Inst::MakeStruct { ty: None, fields: Vec::new() });
+        // Through the helper, not a bare `MakeStruct`: the spine's key space is
+        // user data and must not inherit host object-model names, which an
+        // object literal does on JS. See `__map_col_new_spine`.
+        let spine = self.call_spine("__map_col_new_spine", Vec::new())?;
         let free = self.emit_cur(Inst::MakeVec(Vec::new()));
         let count = self.emit_cur(Inst::Const(Lit::Int(0)));
         Ok(self.emit_cur(Inst::MakeStruct {
