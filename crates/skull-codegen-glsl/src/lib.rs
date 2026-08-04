@@ -289,7 +289,7 @@ impl skull_mir::reach::ReachPolicy for Reach<'_> {
     fn visit(&mut self, fref: FuncRef) -> Result<Vec<FuncRef>, CompilerError> {
         let f = &self.ws.module(fref.module).functions[fref.func];
         // Signature must be tier 0.
-        check_signature(self.ws, f)?;
+        check_tier0_signature(self.ws, f)?;
         // Lower to MIR (values-first-class) and profile-check the body.
         let mf = lower_function(self.ws, self.scx, fref.module, fref.func).map_err(|e| {
             err(f.name_span, format!("shader profile: `{}` cannot lower for GLSL: {}", f.name, e.message))
@@ -302,7 +302,11 @@ impl skull_mir::reach::ReachPolicy for Reach<'_> {
 }
 
 /// Reject a signature whose params/return aren't tier 0.
-fn check_signature(ws: &Workspace, f: &Function) -> Result<(), CompilerError> {
+///
+/// Public because the mono SHADER ARTIFACT VIEW asks it of what a target
+/// packages: the same function the emission walk runs, so a view cannot admit
+/// a signature emission refuses.
+pub fn check_tier0_signature(ws: &Workspace, f: &Function) -> Result<(), CompilerError> {
     for pd in &f.param_decls {
         glsl_ty(ws, pd.ty, f.name_span, &format!("parameter `{}`", pd.name))?;
     }
@@ -513,7 +517,7 @@ impl IntrinsicTable for GlslIntrinsics {
 /// Vec operator's native infix), rather than emitted as a GLSL fn definition. A
 /// `__op_*` reaching codegen as a real call is always non-scalar (scalar ops lower
 /// to native MIR insts), so a 2-arg `__op_*` is always a Vec operator.
-fn renders_inline(f: &Function) -> bool {
+pub fn renders_inline(f: &Function) -> bool {
     GlslIntrinsics.lookup(f).is_some()
         || (vec_op_symbol(f.name.as_str()).is_some() && f.param_decls.iter().count() == 2)
 }
@@ -1687,7 +1691,7 @@ fn is_incr_latch(f: &MirFunc, p: Idx<Block>, slot: Idx<Cell>) -> bool {
 // --- public API --------------------------------------------------------------
 
 /// Resolve a root fn name to a unique [`FuncRef`], preferring the user module.
-fn resolve_root(ws: &Workspace, user_mid: ModuleId, name: &str) -> Result<FuncRef, CompilerError> {
+pub fn resolve_root(ws: &Workspace, user_mid: ModuleId, name: &str) -> Result<FuncRef, CompilerError> {
     let key = Ustr::from(name);
     let Some(list): Option<&FnList> = ws.functions_by_name.get(&key) else {
         return Err(CompilerError::new_no_location(format!("shader root `{name}` not found")));
@@ -1961,42 +1965,70 @@ pub const UNIFORM_BLOCK_BINDING_ENGINE: u32 = 0;
 pub const UNIFORM_BLOCK_BINDING_VERTEX: u32 = 1;
 pub const UNIFORM_BLOCK_BINDING_FRAGMENT: u32 = 2;
 
-pub fn emit_shader_entry_with_dependencies(
-    ws: &Workspace,
-    mid: ModuleId,
-    root: &str,
-    profile: GlslProfile,
-) -> Result<ShaderEmission, CompilerError> {
-    let scx = ScalarCtx::new_values_first_class(ws);
-    let fref = resolve_root(ws, mid, root)?;
-    let f = &ws.module(fref.module).functions[fref.func];
+/// **One stage's validated plan**: its lowered body, the emittable helpers it
+/// reaches in emission order, and the prelude flags those bodies imply.
+///
+/// Built once by [`plan_stage`], which performs every rejection the stage's own
+/// code can produce -- lowering, the tier-0 body profile, the [`Reach`] walk
+/// (recursion, a foreign body with no GLSL mapping, a helper outside tier 0)
+/// and the stage-specific builtin validation. Rendering reads it and cannot
+/// reach a different verdict, because there is nothing left to decide.
+struct StagePlan {
+    fref: FuncRef,
+    mf: MirFunc,
+    /// Emittable helpers in post-order (callees before callers).
+    order: Vec<FuncRef>,
+    bodies: HashMap<FuncRef, MirFunc>,
+    uses_idiv: bool,
+    uses_imod: bool,
+}
 
-    match shader_stage(f) {
-        Some("fragment") => {}
-        Some(stage) => {
-            return Err(err(f.name_span, format!("shader entry: @shader({stage}) is not supported yet -- only @shader(fragment) (vertex entries are A2)")));
+impl StagePlan {
+    /// The helpers this stage emits: the int-div/mod prelude the reachable
+    /// bodies need, then each helper definition in emission order.
+    fn render_helpers(&self, ws: &Workspace) -> Result<String, CompilerError> {
+        let mut out = String::new();
+        let prelude = helper_prelude(self.uses_idiv, self.uses_imod);
+        if !prelude.is_empty() {
+            out.push_str(&prelude);
+            out.push('\n');
         }
-        None => {
-            return Err(err(f.name_span, format!("shader entry: `{root}` has no @shader(fragment) annotation")));
+        for &href in &self.order {
+            out.push_str(&emit_fn_def(ws, href, &self.bodies[&href])?);
+            out.push('\n');
         }
+        Ok(out)
     }
-    let shape = classify_entry(ws, f)?;
 
-    // The entry's signature is validated by the classification above, not
-    // check_signature (the uniform struct is not a tier-0 leaf); its body and
-    // callees go through the same strict profile pass as fn-library roots.
-    let mf = lower_function(ws, &scx, fref.module, fref.func)
-        .map_err(|e| err(f.name_span, format!("shader profile: `{}` cannot lower for GLSL: {}", f.name, e.message)))?;
+    /// The stage's helpers plus the stage entry itself -- the hot-reload
+    /// dependency set.
+    fn dependencies(&self) -> Vec<FuncRef> {
+        let mut deps = self.order.clone();
+        deps.push(self.fref);
+        deps
+    }
+}
+
+fn plan_stage(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    fref: FuncRef,
+    stage: Stage,
+) -> Result<StagePlan, CompilerError> {
+    let f = &ws.module(fref.module).functions[fref.func];
+    let mf = lower_function(ws, scx, fref.module, fref.func).map_err(|e| {
+        err(f.name_span, format!("shader profile: `{}` cannot lower for GLSL: {}", f.name, e.message))
+    })?;
     let mut callees: Vec<FuncRef> = Vec::new();
     profile_body(ws, f, &mf, &mut callees)?;
 
-    let mut reach = Reach::new(ws, &scx);
+    let mut reach = Reach::new(ws, scx);
     // The entry is lowered above; a callee calling back into it is recursion.
     reach.entry = Some(fref);
     reach.seeds = callees;
     let order = reach.walk()?;
 
-    reject_stage_violations(ws, Stage::Fragment, reach.bodies.values().chain(std::iter::once(&mf)), f.name_span)?;
+    reject_stage_violations(ws, stage, reach.bodies.values().chain(std::iter::once(&mf)), f.name_span)?;
 
     let (mut uses_idiv, mut uses_imod) = (false, false);
     for body in reach.bodies.values().chain(std::iter::once(&mf)) {
@@ -2008,16 +2040,104 @@ pub fn emit_shader_entry_with_dependencies(
             }
         }
     }
+    Ok(StagePlan { fref, mf, order, bodies: reach.bodies, uses_idiv, uses_imod })
+}
 
+/// **The one validated plan for a single-entry (A1) shader program.**
+///
+/// Everything emission decides before it writes GLSL, in emission's own order:
+/// the stage classification of the entry's signature, its lowering and tier-0
+/// body pass, the [`Reach`] walk over its callees, the stage-builtin
+/// validation, the `@uniform` block's std140 layout and the program's
+/// `@textures` slot assignment.
+///
+/// [`check_entry_profile`] builds this and DROPS it; [`emit_shader_entry`]
+/// builds it and renders it. There is no second sequence, so the mono shader
+/// artifact view structurally cannot admit a program emission refuses -- which
+/// is not what a summary of these checks could promise, and did not deliver: it
+/// accepted a standalone `@shader(vertex)` entry and never reached the
+/// layout/slot planning at all.
+struct EntryPlan {
+    fref: FuncRef,
+    shape: EntryShape,
+    stage: StagePlan,
+    block_plan: Option<UniformBlockPlan>,
+    texture_slots: Vec<Ustr>,
+}
+
+fn plan_shader_entry(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    fref: FuncRef,
+) -> Result<EntryPlan, CompilerError> {
+    let f = &ws.module(fref.module).functions[fref.func];
+    match shader_stage(f) {
+        Some("fragment") => {}
+        Some(stage) => {
+            return Err(err(f.name_span, format!("shader entry: @shader({stage}) is not supported yet -- only @shader(fragment) (vertex entries are A2)")));
+        }
+        None => {
+            return Err(err(f.name_span, format!("shader entry: `{}` has no @shader(fragment) annotation", f.name)));
+        }
+    }
+    // The entry's signature is validated by its STAGE classification, never by
+    // the fn-library tier-0 leaf check: an `@uniform` block param is legal here
+    // and is not a tier-0 leaf (asking the library check of an entry rejected
+    // 1,539 real shaders).
+    let shape = classify_entry(ws, f)?;
+    let stage = plan_stage(ws, scx, fref, Stage::Fragment)?;
     let block_plan = shape
         .uniform_group
         .map(|g| uniform_block(ws, g).map_err(|e| err(f.name_span, e.message)))
         .transpose()?;
+    let texture_slots = program_texture_slots(
+        ws,
+        shape.texture_group,
+        has_bare_sampler(&shape.samplers, &shape.global_params),
+        f.name_span,
+    )?;
+    Ok(EntryPlan { fref, shape, stage, block_plan, texture_slots })
+}
+
+/// Validate one shader ENTRY exactly as emission does, without emitting.
+///
+/// Published for the mono SHADER ARTIFACT VIEW, which must not be able to admit
+/// what emission refuses. It IS emission's preparation ([`plan_shader_entry`]),
+/// not a summary of it: the only thing left out below this point is the GLSL
+/// text itself.
+///
+/// Declaration-based, like the rest of GLSL lowering today -- `lower_function`
+/// takes no substitution -- so a caller holding concrete instances must not
+/// hand this a generic declaration and read the answer as concrete.
+pub fn check_entry_profile(ws: &Workspace, fref: FuncRef) -> Result<(), CompilerError> {
+    let scx = ScalarCtx::new_values_first_class(ws);
+    plan_shader_entry(ws, &scx, fref).map(|_| ())
+}
+
+pub fn emit_shader_entry_with_dependencies(
+    ws: &Workspace,
+    mid: ModuleId,
+    root: &str,
+    profile: GlslProfile,
+) -> Result<ShaderEmission, CompilerError> {
+    let scx = ScalarCtx::new_values_first_class(ws);
+    let fref = resolve_root(ws, mid, root)?;
+    let plan = plan_shader_entry(ws, &scx, fref)?;
+    render_shader_entry(ws, &plan, profile)
+}
+
+fn render_shader_entry(
+    ws: &Workspace,
+    plan: &EntryPlan,
+    profile: GlslProfile,
+) -> Result<ShaderEmission, CompilerError> {
+    let f = &ws.module(plan.fref.module).functions[plan.fref.func];
+    let shape = &plan.shape;
 
     let mut px = String::new();
     px.push_str("in vec2 TexCoord;\nout vec4 FragColor;\n\n");
-    if let Some(plan) = &block_plan {
-        px.push_str(&uniform_block_decl(plan));
+    if let Some(block) = &plan.block_plan {
+        px.push_str(&uniform_block_decl(block));
     }
     // Samplers are opaque: GLSL forbids them inside a uniform block, so they
     // stay loose beside it and bind by unit (`@textures` / ShaderEmission).
@@ -2025,16 +2145,8 @@ pub fn emit_shader_entry_with_dependencies(
         px.push_str(&format!("uniform {} {};\n", t.uniform_decl(), n));
     }
     px.push('\n');
-    let prelude = helper_prelude(uses_idiv, uses_imod);
-    if !prelude.is_empty() {
-        px.push_str(&prelude);
-        px.push('\n');
-    }
-    for &href in &order {
-        px.push_str(&emit_fn_def(ws, href, &reach.bodies[&href])?);
-        px.push('\n');
-    }
-    px.push_str(&emit_fn_def_with(ws, fref, &mf, Some(&shape))?);
+    px.push_str(&plan.stage.render_helpers(ws)?);
+    px.push_str(&emit_fn_def_with(ws, plan.fref, &plan.stage.mf, Some(shape))?);
     px.push('\n');
     px.push_str(&format!("void main() {{\n  FragColor = {}(TexCoord);\n}}\n", f.name));
 
@@ -2045,19 +2157,16 @@ pub fn emit_shader_entry_with_dependencies(
     let source = format!(
         "{version}\n\n#ifdef PIXEL\n\n{precision}{px}\n#endif\n\n#ifdef VERTEX\n\n{precision}{FULLSCREEN_VERTEX}\n#endif\n"
     );
-    let mut dependencies = order;
-    dependencies.push(fref);
-    let texture_slots = program_texture_slots(
-        ws,
-        shape.texture_group,
-        has_bare_sampler(&shape.samplers, &shape.global_params),
-        f.name_span,
-    )?;
     Ok(ShaderEmission {
         source,
-        dependencies,
-        texture_slots,
-        uniform_blocks: block_plan.into_iter().map(|p| (UNIFORM_BLOCK_BINDING_FRAGMENT, p)).collect(),
+        dependencies: plan.stage.dependencies(),
+        texture_slots: plan.texture_slots.clone(),
+        uniform_blocks: plan
+            .block_plan
+            .iter()
+            .cloned()
+            .map(|p| (UNIFORM_BLOCK_BINDING_FRAGMENT, p))
+            .collect(),
     })
 }
 
@@ -2655,54 +2764,6 @@ fn reject_stage_violations<'a>(
     Ok(())
 }
 
-/// Lower a shader entry, profile it (strict tier-0 + per-stage builtin gating),
-/// and emit its reachable helper fns + the floored-int prelude. Returns the
-/// entry's own MIR plus the concatenated helper GLSL.
-fn lower_reach_helpers(
-    ws: &Workspace,
-    scx: &ScalarCtx,
-    fref: FuncRef,
-    stage: Stage,
-) -> Result<(MirFunc, String, Vec<FuncRef>), CompilerError> {
-    let f = &ws.module(fref.module).functions[fref.func];
-    let mf = lower_function(ws, scx, fref.module, fref.func)
-        .map_err(|e| err(f.name_span, format!("shader profile: `{}` cannot lower for GLSL: {}", f.name, e.message)))?;
-    let mut callees: Vec<FuncRef> = Vec::new();
-    profile_body(ws, f, &mf, &mut callees)?;
-
-    let mut reach = Reach::new(ws, scx);
-    // The entry is lowered above; a callee calling back into it is recursion.
-    reach.entry = Some(fref);
-    reach.seeds = callees;
-    let order = reach.walk()?;
-
-    reject_stage_violations(ws, stage, reach.bodies.values().chain(std::iter::once(&mf)), f.name_span)?;
-
-    let (mut uses_idiv, mut uses_imod) = (false, false);
-    for body in reach.bodies.values().chain(std::iter::once(&mf)) {
-        for (_, inst) in body.insts.iter() {
-            match inst {
-                Inst::IntDiv(..) => uses_idiv = true,
-                Inst::IntMod(..) => uses_imod = true,
-                _ => {}
-            }
-        }
-    }
-    let mut helpers = String::new();
-    let prelude = helper_prelude(uses_idiv, uses_imod);
-    if !prelude.is_empty() {
-        helpers.push_str(&prelude);
-        helpers.push('\n');
-    }
-    for &href in &order {
-        helpers.push_str(&emit_fn_def(ws, href, &reach.bodies[&href])?);
-        helpers.push('\n');
-    }
-    let mut dependencies = order;
-    dependencies.push(fref);
-    Ok((mf, helpers, dependencies))
-}
-
 /// Reject a fragment-stage read of the varyings `position` field: it is
 /// gl_Position (vertex-only), not a fragment input.
 fn reject_position_read(ws: &Workspace, mf: &MirFunc, varyings_cell: Idx<Cell>, span: Span) -> Result<(), CompilerError> {
@@ -2719,13 +2780,13 @@ fn reject_position_read(ws: &Workspace, mf: &MirFunc, varyings_cell: Idx<Cell>, 
 
 fn emit_vertex_stage(
     ws: &Workspace,
-    scx: &ScalarCtx,
-    fref: FuncRef,
+    stage: &StagePlan,
     v: &VertexShape,
     varyings: &VaryingsShape,
     vert_block: Option<&UniformBlockPlan>,
     engine_block: Option<&UniformBlockPlan>,
 ) -> Result<(String, Vec<FuncRef>), CompilerError> {
+    let fref = stage.fref;
     let shape = EntryShape {
         global_params: v
             .attr_params
@@ -2752,7 +2813,7 @@ fn emit_vertex_stage(
             position_is_gl: true,
         }),
     };
-    let (mf, helpers, dependencies) = lower_reach_helpers(ws, scx, fref, Stage::Vertex)?;
+    let (mf, helpers, dependencies) = (&stage.mf, stage.render_helpers(ws)?, stage.dependencies());
 
     let mut out = String::new();
     for (n, t, loc) in &v.attrs {
@@ -2788,20 +2849,19 @@ fn emit_vertex_stage(
     }
     out.push('\n');
     out.push_str(&helpers);
-    out.push_str(&emit_fn_def_with(ws, fref, &mf, Some(&shape))?);
+    out.push_str(&emit_fn_def_with(ws, fref, mf, Some(&shape))?);
     Ok((out, dependencies))
 }
 
 fn emit_fragment_stage(
     ws: &Workspace,
-    scx: &ScalarCtx,
-    fref: FuncRef,
+    stage: &StagePlan,
     fs: &FragShape,
     varyings: &VaryingsShape,
     frag_block: Option<&UniformBlockPlan>,
     engine_block: Option<&UniformBlockPlan>,
 ) -> Result<(String, Vec<FuncRef>), CompilerError> {
-    let f = &ws.module(fref.module).functions[fref.func];
+    let fref = stage.fref;
     // MRT: the entry is emitted as `void main()` destructuring its returned
     // output struct into the `layout(location=N) out` globals (like the vertex
     // varyings path). Single-output keeps the `vec4 <fn>()` + wrapper form.
@@ -2829,8 +2889,7 @@ fn emit_fragment_stage(
         // A2 keeps loose uniforms until the second slice.
         uniform_group: None,
     };
-    let (mf, helpers, dependencies) = lower_reach_helpers(ws, scx, fref, Stage::Fragment)?;
-    reject_position_read(ws, &mf, mf.params[fs.varyings_param], f.name_span)?;
+    let (mf, helpers, dependencies) = (&stage.mf, stage.render_helpers(ws)?, stage.dependencies());
 
     let mut out = String::new();
     for (n, t, flat) in &varyings.varyings {
@@ -2867,12 +2926,15 @@ fn emit_fragment_stage(
     }
     out.push('\n');
     out.push_str(&helpers);
-    out.push_str(&emit_fn_def_with(ws, fref, &mf, Some(&shape))?);
+    out.push_str(&emit_fn_def_with(ws, fref, mf, Some(&shape))?);
     // Single-output: the entry fn returns Vec4; main() forwards it to FragColor.
     // MRT: the entry IS `void main()` (destructured), so no wrapper.
     if fs.outputs.is_none() {
         out.push('\n');
-        out.push_str(&format!("void main() {{\n  FragColor = {}();\n}}\n", f.name));
+        out.push_str(&format!(
+            "void main() {{\n  FragColor = {}();\n}}\n",
+            ws.module(fref.module).functions[fref.func].name
+        ));
     }
     Ok((out, dependencies))
 }
@@ -2951,23 +3013,52 @@ pub fn emit_shader_pipeline(
     .source)
 }
 
-pub fn emit_shader_pipeline_with_dependencies(
+/// **The one validated plan for an A2 `(vertex, fragment)` program.**
+///
+/// Everything emission decides before it writes GLSL, in emission's own order:
+/// both stage annotations, the vertex shape and its varyings, the fragment
+/// classified AGAINST those varyings (not as a standalone entry, where a
+/// varyings param has no meaning), the cross-stage collisions, the per-stage
+/// `@uniform` and program `@engine` std140 layouts, each stage's own lowering +
+/// tier-0 + reachability + stage-builtin pass, and the program's `@textures`
+/// slot assignment.
+///
+/// [`check_pipeline_profile`] builds this and DROPS it; emission builds it and
+/// renders it.
+struct PipelinePlan {
+    vshape: VertexShape,
+    varyings: VaryingsShape,
+    fshape: FragShape,
+    vert: StagePlan,
+    frag: StagePlan,
+    /// The vertex stage's own `@uniform` block, holding only what that shader
+    /// OWNS -- the engine-authored camera/time band arrives through
+    /// [`Self::engine_block`] instead.
+    vert_block: Option<UniformBlockPlan>,
+    frag_block: Option<UniformBlockPlan>,
+    engine_block: Option<UniformBlockPlan>,
+    texture_slots: Vec<Ustr>,
+}
+
+fn plan_shader_pipeline(
     ws: &Workspace,
-    mid: ModuleId,
-    vert_root: &str,
-    frag_root: &str,
-    profile: GlslProfile,
-) -> Result<ShaderEmission, CompilerError> {
-    let scx = ScalarCtx::new_values_first_class(ws);
-    let vfref = resolve_root(ws, mid, vert_root)?;
-    let ffref = resolve_root(ws, mid, frag_root)?;
+    scx: &ScalarCtx,
+    vfref: FuncRef,
+    ffref: FuncRef,
+) -> Result<PipelinePlan, CompilerError> {
     let vf = &ws.module(vfref.module).functions[vfref.func];
     let ff = &ws.module(ffref.module).functions[ffref.func];
     if shader_stage(vf) != Some("vertex") {
-        return Err(err(vf.name_span, format!("shader pipeline: the vertex root `{vert_root}` must carry @shader(vertex)")));
+        return Err(err(
+            vf.name_span,
+            format!("shader pipeline: the vertex root `{}` must carry @shader(vertex)", vf.name),
+        ));
     }
     if shader_stage(ff) != Some("fragment") {
-        return Err(err(ff.name_span, format!("shader pipeline: the fragment root `{frag_root}` must carry @shader(fragment)")));
+        return Err(err(
+            ff.name_span,
+            format!("shader pipeline: the fragment root `{}` must carry @shader(fragment)", ff.name),
+        ));
     }
 
     let vshape = classify_vertex(ws, vf)?;
@@ -2983,11 +3074,11 @@ pub fn emit_shader_pipeline_with_dependencies(
     // A stage group holds only what that shader OWNS: the engine-authored
     // camera/time/screen band lives in `@engine` instead, which is what lets
     // bitgun's grass keep a game-owned `entity_count` beside them.
-    let vert_plan = vshape
+    let vert_block = vshape
         .uniform_group
         .map(|g| uniform_block(ws, g).map_err(|e| err(vf.name_span, e.message)))
         .transpose()?;
-    let frag_plan = fshape
+    let frag_block = fshape
         .uniform_group
         .map(|g| uniform_block(ws, g).map_err(|e| err(ff.name_span, e.message)))
         .transpose()?;
@@ -3011,29 +3102,20 @@ pub fn emit_shader_pipeline_with_dependencies(
         }
         (v, f) => v.or(f),
     };
-    let engine_plan = engine_group
+    let engine_block = engine_group
         .map(|g| uniform_block(ws, g).map_err(|e| err(vf.name_span, e.message)))
         .transpose()?;
 
-    // Runs AFTER the plans, because the `@engine` members it censuses come from
-    // the PLAN -- one list, though the block is declared in both stages.
-    check_pipeline_collisions(&vshape, &varyings, &fshape, engine_plan.as_ref(), vf.name_span)?;
+    // Runs AFTER the block plans, because the `@engine` members it censuses come
+    // from the PLAN -- one list, though the block is declared in both stages.
+    check_pipeline_collisions(&vshape, &varyings, &fshape, engine_block.as_ref(), vf.name_span)?;
 
-    let (vertex_block, vertex_dependencies) =
-        emit_vertex_stage(ws, &scx, vfref, &vshape, &varyings, vert_plan.as_ref(), engine_plan.as_ref())?;
-    let (pixel_block, pixel_dependencies) =
-        emit_fragment_stage(ws, &scx, ffref, &fshape, &varyings, frag_plan.as_ref(), engine_plan.as_ref())?;
+    let vert = plan_stage(ws, scx, vfref, Stage::Vertex)?;
+    let frag = plan_stage(ws, scx, ffref, Stage::Fragment)?;
+    reject_position_read(ws, &frag.mf, frag.mf.params[fshape.varyings_param], ff.name_span)?;
 
-    let (version, precision) = profile_header(profile);
-    let source = format!(
-        "{version}\n\n#ifdef VERTEX\n\n{precision}{vertex_block}\n#endif\n\n#ifdef PIXEL\n\n{precision}{pixel_block}\n#endif\n"
-    );
-    let dependencies = vertex_dependencies
-        .into_iter()
-        .chain(pixel_dependencies)
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
+    // Unlike `@uniform` -- one block per STAGE -- `@textures` is one group per
+    // PROGRAM, since texture units are program-scoped.
     let group = match (vshape.texture_group, fshape.texture_group) {
         (Some(v), Some(f)) if v != f => {
             return Err(err(vf.name_span, format!(
@@ -3045,6 +3127,81 @@ pub fn emit_shader_pipeline_with_dependencies(
     let bare = has_bare_sampler(&vshape.samplers, &vshape.texture_params)
         || has_bare_sampler(&fshape.samplers, &fshape.texture_params);
     let texture_slots = program_texture_slots(ws, group, bare, vf.name_span)?;
+
+    Ok(PipelinePlan {
+        vshape,
+        varyings,
+        fshape,
+        vert,
+        frag,
+        vert_block,
+        frag_block,
+        engine_block,
+        texture_slots,
+    })
+}
+
+/// The PIPELINE counterpart of [`check_entry_profile`]: emission's own
+/// preparation for a `(vertex, fragment)` pair, run without emitting.
+///
+/// A pipeline fragment is NOT checkable as a single entry: `classify_entry`
+/// refuses its varyings param outright, which is why the mono view must be
+/// given the PAIRS production registers rather than a flat root list.
+pub fn check_pipeline_profile(
+    ws: &Workspace,
+    vfref: FuncRef,
+    ffref: FuncRef,
+) -> Result<(), CompilerError> {
+    let scx = ScalarCtx::new_values_first_class(ws);
+    plan_shader_pipeline(ws, &scx, vfref, ffref).map(|_| ())
+}
+
+pub fn emit_shader_pipeline_with_dependencies(
+    ws: &Workspace,
+    mid: ModuleId,
+    vert_root: &str,
+    frag_root: &str,
+    profile: GlslProfile,
+) -> Result<ShaderEmission, CompilerError> {
+    let scx = ScalarCtx::new_values_first_class(ws);
+    let vfref = resolve_root(ws, mid, vert_root)?;
+    let ffref = resolve_root(ws, mid, frag_root)?;
+    let plan = plan_shader_pipeline(ws, &scx, vfref, ffref)?;
+    render_shader_pipeline(ws, &plan, profile)
+}
+
+fn render_shader_pipeline(
+    ws: &Workspace,
+    plan: &PipelinePlan,
+    profile: GlslProfile,
+) -> Result<ShaderEmission, CompilerError> {
+    let (vertex_block, vertex_dependencies) = emit_vertex_stage(
+        ws,
+        &plan.vert,
+        &plan.vshape,
+        &plan.varyings,
+        plan.vert_block.as_ref(),
+        plan.engine_block.as_ref(),
+    )?;
+    let (pixel_block, pixel_dependencies) = emit_fragment_stage(
+        ws,
+        &plan.frag,
+        &plan.fshape,
+        &plan.varyings,
+        plan.frag_block.as_ref(),
+        plan.engine_block.as_ref(),
+    )?;
+
+    let (version, precision) = profile_header(profile);
+    let source = format!(
+        "{version}\n\n#ifdef VERTEX\n\n{precision}{vertex_block}\n#endif\n\n#ifdef PIXEL\n\n{precision}{pixel_block}\n#endif\n"
+    );
+    let dependencies = vertex_dependencies
+        .into_iter()
+        .chain(pixel_dependencies)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
     // Each block carries its binding, taken from the param ROLE: the engine
     // block at 0 (both stages name it), the vertex group at 1, the fragment
     // group at 2. Unlike `@textures` -- one group per PROGRAM, since texture
@@ -3053,10 +3210,14 @@ pub fn emit_shader_pipeline_with_dependencies(
     Ok(ShaderEmission {
         source,
         dependencies,
-        texture_slots,
-        uniform_blocks: engine_plan.into_iter().map(|p| (UNIFORM_BLOCK_BINDING_ENGINE, p))
-            .chain(vert_plan.map(|p| (UNIFORM_BLOCK_BINDING_VERTEX, p)))
-            .chain(frag_plan.map(|p| (UNIFORM_BLOCK_BINDING_FRAGMENT, p)))
+        texture_slots: plan.texture_slots.clone(),
+        uniform_blocks: plan
+            .engine_block
+            .iter()
+            .cloned()
+            .map(|p| (UNIFORM_BLOCK_BINDING_ENGINE, p))
+            .chain(plan.vert_block.iter().cloned().map(|p| (UNIFORM_BLOCK_BINDING_VERTEX, p)))
+            .chain(plan.frag_block.iter().cloned().map(|p| (UNIFORM_BLOCK_BINDING_FRAGMENT, p)))
             .collect(),
     })
 }

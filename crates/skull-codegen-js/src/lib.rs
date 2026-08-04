@@ -2465,6 +2465,25 @@ impl IntrinsicTable for JsIntrinsics {
     }
 }
 
+/// The JS backend's realization oracle, as the artifact seam.
+///
+/// A zero-sized handle over [`emit::js_supply`] -- the SAME function
+/// `render_call` and `discover_callees` branch on. `skull::artifact` cannot
+/// depend on this crate (the backend is driven from `rock-cli`), so the view
+/// takes the oracle through
+/// [`skull_mir::intrinsics::BackendRealization`]; what it carries is the
+/// behavior, not a description of it.
+pub struct JsBackendRealization;
+
+impl skull_mir::intrinsics::BackendRealization for JsBackendRealization {
+    fn backend(&self) -> &'static str {
+        "js"
+    }
+    fn supplies(&self, ws: &bone_semantic::inference::Workspace, f: &Function) -> bool {
+        emit::js_supply(ws, f).is_some()
+    }
+}
+
 /// Fill `$1..$n` in an expression template with `args` -- the call-site render
 /// primitive a real JS codegen would use (the same shape GLSL uses). Kept here
 /// so the `Emission::Template` contract is exercised end to end by a test.

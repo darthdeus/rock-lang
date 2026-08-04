@@ -77,7 +77,9 @@ mod loops;
 mod nobox;
 mod pattern;
 mod resolve;
-pub use resolve::{backend_variant, sibling_variant, NoServingBinding};
+pub use resolve::{
+    backend_variant, backend_variant_group, canonical_variant, sibling_variant, NoServingBinding,
+};
 mod stmt;
 mod storage;
 mod structs;
@@ -426,6 +428,39 @@ pub fn scalar_abi_param_leaf_widths(
     Some(
         abi.param_shapes.iter().map(RetSlot::slot_count).collect(),
     )
+}
+
+/// The physical RESULT LANES of `fref`'s declared return: how many values the
+/// call wire carries.
+///
+/// 0 for a fn with no return, 1 for an ordinary one, and more for the two
+/// shapes that put several values on the wire -- a tuple return (each element
+/// its own slot, a `nobox` element splatting into its leaves) and a bare
+/// `nobox` value return under the scalar ABI.
+///
+/// **Answered for the DECLARED signature**, under an empty substitution -- the
+/// only shape GLSL/JS lowering can ask about today. A caller holding concrete
+/// instances must therefore ask this only of an instance whose substitution is
+/// empty; for a generic one the declared return is not the shape the artifact
+/// carries, and `ArtifactView::publisher_lanes` records it as unknown instead.
+///
+/// This is what a JS multi-lane publisher's arity comes from
+/// (`docs/boundary-contracts.md` 1.2, plan S 13b): leaf 0 rides the ordinary
+/// JS `return`, lanes 1..N ride the module-scope scratch bank. Derived from the
+/// same [`fn_scalar_abi`] policy and [`tuple_ret_shape`] every definition and
+/// call site read, so a publisher cannot disagree with the wire its own callers
+/// capture -- which is exactly what a textual scan of the opaque body for
+/// `__rock_retN` could not guarantee.
+pub fn result_lane_count(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef) -> usize {
+    let f = &ws.module(fref.module).functions[fref.func];
+    let Some(ret) = f.return_ty else { return 0 };
+    if let Some(shape) = shape::tuple_ret_shape(ws, &SpecSubst::new(), ret) {
+        return shape.slot_count();
+    }
+    match fn_scalar_abi(ws, scx, fref).and_then(|abi| abi.ret_shape) {
+        Some(vs) => vs.leaf_count(),
+        None => 1,
+    }
 }
 
 /// THE invariant: a function's emitted Lua parameter list must be INJECTIVE.
@@ -826,9 +861,10 @@ fn hash_init_expr(body: &Body, e: Idx<Expr>, h: &mut std::collections::hash_map:
         }
         Expr::Break => tag!(21),
         Expr::Continue => tag!(22),
-        Expr::As { value, target } => {
+        Expr::As { value, target, kind } => {
             tag!(23);
             target.hash(h);
+            kind.hash(h);
             go!(value);
         }
         Expr::TupleIndex { tuple, index } => {
@@ -2043,10 +2079,11 @@ fn native_buffer_alloc_elem_ctype_spec(
         }
         _ => None,
     };
-    match leaf {
-        Some(ReifiedType::Prim(p)) => Ok(Ustr::from(p)),
-        Some(ty) if ty.nominal().is_some() => {
-            let n = ty.nominal().unwrap();
+    if let Some(prim) = leaf.as_ref().and_then(crate::monoty::MonoTy::prim_name) {
+        return Ok(Ustr::from(prim));
+    }
+    match leaf.as_ref().map(|ty| (ty, ty.nominal())) {
+        Some((_, Some(n))) => {
             if !map_is_value_struct(ws, n) {
                 Err(format!("`native_buffer_alloc<{n}>` is invalid: `{n}` is not a `value` struct."))
             } else if value_struct_is_gc(ws, n) {
@@ -2058,7 +2095,7 @@ fn native_buffer_alloc_elem_ctype_spec(
                 Ok(n)
             }
         }
-        Some(_) => Err(
+        Some((_, None)) => Err(
             "`native_buffer_alloc<T>` requires a primitive or FFI-clean value-struct element"
                 .to_string(),
         ),
@@ -2249,7 +2286,7 @@ pub fn native_buffer_alloc_reject(ws: &Workspace, mid: ModuleId) -> Option<(Stri
                     // which lowering swallows -- reject it loudly here).
                     None => spec.is_some_and(|(key, _)| {
                         key.iter().all(|l| match l {
-                            Some(ReifiedType::Prim(_)) => true,
+                            Some(ty) if ty.prim_name().is_some() => true,
                             Some(ty) => !ty.any_nominal(&|name| nominal_is_gc_value(ws, name)),
                             None => false,
                         })
@@ -2852,35 +2889,10 @@ mod tests;
 /// Support for `crate::spec_census` -- the Stage-0d reconciliation needs the
 /// RESULT of `compute_call_spec` without `lower::shape` becoming public.
 pub(crate) mod shape_census_support {
-    use super::shape::{compute_call_spec, ReifiedCtor, ReifiedType, SpecKey, SpecSubst};
+    use super::shape::{compute_call_spec, SpecKey, SpecSubst};
     use crate::mir::FuncRef;
     use bone_semantic::hir::FnBackend;
     use bone_semantic::inference::{BodyInference, Workspace};
-
-    /// Canonical rendering, byte-identical to `MonoArena::render` for the types
-    /// both trees can express. The reconciliation compares these strings.
-    pub(crate) fn render_reified(ty: &ReifiedType) -> String {
-        match ty {
-            ReifiedType::Prim(p) => (*p).to_string(),
-            ReifiedType::Nullable(inner) => format!("{}?", render_reified(inner)),
-            ReifiedType::Tuple(parts) => {
-                let ps: Vec<String> = parts.iter().map(render_reified).collect();
-                format!("({})", ps.join(", "))
-            }
-            ReifiedType::App { ctor, params } => {
-                let base = match ctor {
-                    ReifiedCtor::Array => "Vec".to_string(),
-                    ReifiedCtor::Map => "Map".to_string(),
-                    ReifiedCtor::Nominal(n) => n.to_string(),
-                };
-                if params.is_empty() {
-                    return base;
-                }
-                let ps: Vec<String> = params.iter().map(render_reified).collect();
-                format!("{base}<{}>", ps.join(", "))
-            }
-        }
-    }
 
     /// Every call in this body that today's machinery specializes, plus the
     /// count of sites whose spec decision REJECTED (the Stage-0b invariants).

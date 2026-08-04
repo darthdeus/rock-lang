@@ -2,6 +2,7 @@
 //! native-buffer flavour a receiver is, element types behind a column, and the
 //! numeric coercions (`int`->`float`, binding and param types).
 use super::*;
+use crate::monoty::MonoTy;
 
 impl Builder<'_> {
     pub(crate) fn expr_is_flat_vec(&self, e: Idx<Expr>) -> bool {
@@ -70,11 +71,11 @@ impl Builder<'_> {
     /// element stores as flat columns, everything else keeps the single `_data`
     /// backing. An unresolved / generic element is NOT eligible -- the columns
     /// need a concrete value-struct leaf list, and an opaque `T` has none.
-    pub(crate) fn vec_kind(&self, e: Idx<Expr>) -> ContainerKind {
-        match self.vec_column_elem_of(e) {
+    pub(crate) fn vec_kind(&self, e: Idx<Expr>) -> Result<ContainerKind, CompilerError> {
+        Ok(match self.vec_column_elem_of(e)? {
             Some(elem) => ContainerKind::VecValueColumns(elem),
             None => ContainerKind::Vec,
-        }
+        })
     }
 
     /// The column-eligible value-struct element of `e`'s `[E]` type, if any.
@@ -84,45 +85,13 @@ impl Builder<'_> {
     /// is the concrete struct rather than an opaque `T`. Without this the
     /// stdlib iterator lowers `it.vec[it.i]` against the boxed representation
     /// and reads a `_data` that column storage does not have.
-    pub(crate) fn vec_column_elem_of(&self, e: Idx<Expr>) -> Option<ColumnElem> {
-        let ty = self.resolve_tyid(*self.inf?.expr_types.get(e)?)?;
-        let TypeExpr::App { ctor: TypeCtor::Array, params } = self.ty_node(ty)? else {
-            return None;
-        };
-        let p = params.into_iter().next()?;
-        let mut elem = self.resolve_tyid(ty.with_idx(p))?;
-        // A NULLABLE element columnizes only when the payload is `nobox`. For an
-        // unmarked value struct the boxed element is a legal representation and
-        // already works, while columnizing it would newly route the materializing
-        // helpers (`__rock_col_sort`, `to_lua_array`, serialization) at a shape
-        // they have no presence concept for. The mark is what makes the box
-        // forbidden, so the mark is what obliges the presence column.
-        //
-        // Asked BEFORE the peel, and through the one nullability query, so a
-        // spelled-out `[E?]` and a generic bound to `E?` answer alike -- the
-        // latter's `?` lives in the binding, and `ty_node` substitutes the
-        // payload over it.
-        let nullable = self.is_nullable_ty(elem);
-        if let Some(TypeExpr::Nullable(inner)) = self.ty_node(elem) {
-            elem = self.resolve_tyid(elem.with_idx(inner))?;
-        }
-        let en = match self.ty_node(elem)? {
-            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => n,
-            // An UNSUBSTITUTED generic element stays boxed: the shared
-            // (non-specialized) snapshot of a generic body must keep the
-            // representation that every instantiation can read.
-            TypeExpr::Generic(var, _) => match self.spec_subst.get(&var) {
-                Some(ty) => ty.peel_nullable().0.nominal()?,
-                _ => return None,
-            },
-            _ => return None,
-        };
-        if nullable && !is_nobox_nominal(self.ws, en) {
-            return None;
-        }
-        vec_column_elem(self.ws, en, nullable)
-            .filter(|&name| columns_available(self.ws, self.scx.target, name))
-            .map(|name| ColumnElem { name, nullable })
+    pub(crate) fn vec_column_elem_of(
+        &self,
+        e: Idx<Expr>,
+    ) -> Result<Option<ColumnElem>, CompilerError> {
+        Ok(self.concrete_ty(e)?.and_then(|ty| {
+            crate::lower::shape::vec_column_elem_mono(self.ws, self.scx.target, &ty)
+        }))
     }
 
     /// The column shape of `elem`: its value shape, marked nullable when the
@@ -147,30 +116,70 @@ impl Builder<'_> {
     /// The KEY is deliberately not consulted -- a value-struct key rejects
     /// upstream (LuaJIT hashes cdata by pointer), and the spine stores whatever
     /// key the boxed representation already stored.
-    pub(crate) fn map_column_value_of(&self, e: Idx<Expr>) -> Option<ColumnElem> {
-        let ty = self.resolve_tyid(*self.inf?.expr_types.get(e)?)?;
-        let TypeExpr::App { ctor: TypeCtor::Map, params } = self.ty_node(ty)? else {
-            return None;
+    pub(crate) fn map_column_value_of(
+        &self,
+        e: Idx<Expr>,
+    ) -> Result<Option<ColumnElem>, CompilerError> {
+        Ok(self.concrete_ty(e)?.and_then(|ty| {
+            crate::lower::shape::map_column_value_mono(self.ws, self.scx.target, &ty)
+        }))
+    }
+
+    /// The expression's CONCRETE type under the active specialization.
+    ///
+    /// Failure is not uniformly "boxed". Three outcomes, and which reason lands
+    /// in which is the whole point -- reading them all as a negative picks a
+    /// REPRESENTATION for a type the compiler could not resolve, and that is the
+    /// silent fallback this codebase rejects.
+    ///
+    /// - `UnboundGeneric` -> `None`, correctly. This body is the SHARED generic
+    ///   snapshot, lowered with no instantiation, so its element is opaque and
+    ///   not column-eligible; it must keep the representation every
+    ///   instantiation can read. Same answer the `TypeExpr` walk gave by falling
+    ///   out of its `Generic` arm.
+    /// - `UnresolvedInfer` -> `None`, and NOT because it is benign. It is the
+    ///   S 0h decided rejection (a type argument no constraint reaches:
+    ///   `let v = vec_new()` whose element is never used), which the instance
+    ///   graph already records as `RejectionKind::UnconstrainedTypeVar` with a
+    ///   span. Emission still runs the pre-mono path, so making it fatal HERE
+    ///   would reject `tests/vec_sort_test.rock` and `tests/enumerate_tests.rock`
+    ///   ahead of the cutover -- measured, both fail to emit. The rejection lands
+    ///   with Stage 3, in one place, not twice on two schedules.
+    /// - A missing `BodyInference`, or an expression bone typed nothing for ->
+    ///   a spanned error for the same reason: absence of a type is not evidence
+    ///   of a representation.
+    /// - Everything else -> a spanned error. Recovery poison means the program
+    ///   should have been rejected upstream, a missing node means a `TyId` names
+    ///   nothing, and a depth limit means a cyclic substitution chain. None of
+    ///   the three occurs over the corpus or the Rock suite, so this arm has
+    ///   teeth without a population.
+    pub(crate) fn concrete_ty(&self, e: Idx<Expr>) -> Result<Option<MonoTy>, CompilerError> {
+        use crate::monoty::MonoTyReason as R;
+        // Neither of these is a storage answer. A body being lowered without
+        // inference, or an expression bone typed nothing for, is a
+        // front-end/back-end disagreement -- answering "boxed" would pick a
+        // representation from the absence of a type.
+        let Some(inf) = self.inf else {
+            return Err(self.gap_here("container storage asked in a body with no inference"));
         };
-        let v = params.into_iter().nth(1)?;
-        let mut val = self.resolve_tyid(ty.with_idx(v))?;
-        // `Map<K, P?>` is column-stored too, and unlike `[P?]` it needs no
-        // presence column: an absent value collapses to key REMOVAL, because a
-        // bare Map already cannot tell an absent key from a key holding null.
-        if let Some(TypeExpr::Nullable(inner)) = self.ty_node(val) {
-            val = self.resolve_tyid(val.with_idx(inner))?;
+        let Some(ty) = inf.expr_types.get(e) else {
+            return Err(CompilerError::new_with_label(
+                self.body.expr_spans[e],
+                "cannot decide container storage: bone typed no expression here".to_string(),
+            ));
+        };
+        match crate::monoty::convert(self.ws, inf, *ty, &self.spec_subst) {
+            Ok(m) => Ok(Some(m)),
+            Err(R::UnboundGeneric(_)) | Err(R::UnresolvedInfer(_)) => Ok(None),
+            Err(r) => Err(CompilerError::new_with_label(
+                self.body.expr_spans[e],
+                format!(
+                    "cannot decide container storage: the receiver's type does not resolve to \
+                     a concrete type here ({})",
+                    r.bucket()
+                ),
+            )),
         }
-        let vn = match self.ty_node(val)? {
-            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => n,
-            TypeExpr::Generic(var, _) => match self.spec_subst.get(&var) {
-                Some(ty) => ty.nominal()?,
-                _ => return None,
-            },
-            _ => return None,
-        };
-        // `nullable: false` is the point of the peel above -- the spine carries
-        // presence, so the value columns never need a presence leaf.
-        vec_column_elem(self.ws, vn, false).map(|name| ColumnElem { name, nullable: false })
     }
 
     /// `m.data`, the column Vec a column-stored Map's values live in. Every
@@ -204,7 +213,7 @@ impl Builder<'_> {
             let buf = self.emit_cur(Inst::Field { base: b, field: Ustr::from("buf") });
             return Ok((buf, kind));
         }
-        let kind = self.coll_kind(base);
+        let kind = self.coll_kind(base)?;
         let b = self.lower_expr(base)?;
         Ok((b, kind))
     }
@@ -213,12 +222,12 @@ impl Builder<'_> {
     /// the index/length shape (decision 9). bone's index/iter whitelist is closed
     /// (`Vec`/`Map`/`NativeBuffer`+sized), so any other type reaching here is a
     /// front-end/back-end disagreement, not a program the user could write.
-    pub(crate) fn coll_kind(&self, base: Idx<Expr>) -> ContainerKind {
-        match self.expr_ty(base) {
+    pub(crate) fn coll_kind(&self, base: Idx<Expr>) -> Result<ContainerKind, CompilerError> {
+        Ok(match self.expr_ty(base) {
             Some(TypeExpr::App {
                 ctor: TypeCtor::Array,
                 ..
-            }) => self.vec_kind(base),
+            }) => self.vec_kind(base)?,
             Some(TypeExpr::App {
                 ctor: TypeCtor::Map,
                 ..
@@ -238,7 +247,7 @@ impl Builder<'_> {
                      bone admitted an index/iter on `{rendered}`"
                 )
             }
-        }
+        })
     }
 
     // --- type queries (decision: ops are typed at BUILD time) ---

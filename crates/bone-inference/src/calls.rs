@@ -1354,10 +1354,10 @@ pub(crate) fn commit_selected_call(
                             resolve(gamma, t, span)
                         }
                     };
-                    if let Some((iter_fn, it_ty)) = implicit_iter_target(c, gamma, aty, span)
+                    if let Some((witness, it_ty)) = implicit_iter_target(c, gamma, aty, span)
                     {
                         coerce(gamma, it_ty, pty, c.body.expr_spans[arg])?;
-                        gamma.out.implicit_iter_args.insert(arg, iter_fn);
+                        gamma.out.implicit_iter_args.insert(arg, witness);
                         coerced = true;
                     } else {
                         coerce(gamma, aty, pty, c.body.expr_spans[arg])?;

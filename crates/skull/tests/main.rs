@@ -16,6 +16,8 @@ mod capture_free_hoist;
 mod closure_snapshot;
 #[path = "coalesce_value_struct_literal_field_sentinel.rs"]
 mod coalesce_value_struct_literal_field_sentinel;
+#[path = "concrete_body.rs"]
+mod concrete_body;
 #[path = "const_hoist.rs"]
 mod const_hoist;
 #[path = "const_hot_reload.rs"]
@@ -58,6 +60,12 @@ mod inline_lua_column_container_param_sentinel;
 mod inline_value_specialization;
 #[path = "instance_graph.rs"]
 mod instance_graph;
+#[path = "artifact_view.rs"]
+mod artifact_view;
+
+#[path = "shader_artifact.rs"]
+mod shader_artifact;
+
 #[path = "intrinsics.rs"]
 mod intrinsics;
 #[path = "lambda_static.rs"]

@@ -127,7 +127,7 @@ impl Builder<'_> {
             let Some(TypeExpr::App { ctor: TypeCtor::Array, .. }) = self.ty_node(pty) else {
                 continue;
             };
-            let Some(elem) = self.vec_column_elem_of(arg) else { continue };
+            let Some(elem) = self.vec_column_elem_of(arg)? else { continue };
             return Err(CompilerError::new_with_label(
                 self.body.expr_spans[arg],
                 format!(

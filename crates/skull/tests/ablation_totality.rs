@@ -251,7 +251,7 @@ fn main() {
     );
 }
 
-/// A generic call whose binding is a valid type `ReifiedType` cannot represent
+/// A generic call whose binding is a valid type specialization does not admit
 /// (`unit`, a function type, `any`) must produce a classified fatal.
 ///
 /// It does not today: `compute_spec_from_bindings` pushes `None` into the key
@@ -261,7 +261,7 @@ fn main() {
 /// S 2a's `f<Vec2, unit>` / `f<Vec2, any>` / `f<Vec2, fn(int)->int` collision,
 /// realized INSIDE the mode whose whole job is to reject shared generic bodies.
 #[test]
-fn a_binding_absent_from_reifiedtype_is_a_classified_fatal() {
+fn an_unadmitted_binding_is_a_classified_fatal() {
     let _g = ModeGuard::on();
     let fatals = fatals_of(
         r#"
@@ -291,7 +291,7 @@ fn main() {
         assert_eq!(
             f.category,
             FatalCategory::UnsupportedSurface,
-            "a VALID type `ReifiedType` cannot represent is a surface gap, not a missing \
+            "a VALID type specialization does not admit is a surface gap, not a missing \
              record: the graph edge exists and bone recorded the binding"
         );
     }

@@ -10,9 +10,12 @@
 //! anything, because it never reads the bank: the second call overwrites slots
 //! nobody looks at.
 //!
-//! So the audit target is READS, not double invocations. Writes are legitimate
-//! and expected -- the imgui stubs publish by hand, and `max_hand_published_slot`
-//! exists to size the bank over exactly those.
+//! So the audit target is READS, not double invocations. Publishing is
+//! legitimate and expected -- the imgui stubs publish, through the one
+//! compiler-owned `return __rock_publish(..)` whose arity comes from the
+//! concrete result ABI. Writing a slot BY HAND is no longer legal at all
+//! (`lower_publisher` rejects it), so the writer population this scan is
+//! anchored against is the publishers.
 //!
 //! A hand-written READ would be the real hazard, and it would be silent: the
 //! slot holds a stale leaf from whatever multi-value call ran last, which reads
@@ -108,36 +111,27 @@ fn no_hand_written_js_reads_a_return_bank_slot() {
 
 /// The scan is only worth anything if it is actually looking at the bodies that
 /// publish. Without this a bad path list would pass by finding nothing at all.
+///
+/// Anchored on the PUBLISHERS, not on hand-written slot writes: those are the
+/// mechanism this contract replaced, and counting them would leave the read gate
+/// vacuous the moment the last one was migrated -- which is exactly what
+/// happened when they were.
 #[test]
-fn the_scan_sees_the_known_hand_written_writers() {
-    let mut writes = 0usize;
+fn the_scan_sees_the_known_hand_written_publishers() {
+    let mut publishers = 0usize;
     for path in hand_written_sources() {
         let text = std::fs::read_to_string(&path).unwrap();
-        for (i, line) in text.lines().enumerate() {
-            let _ = i;
-            if line.starts_with("//") {
+        for line in text.lines() {
+            if line.trim_start().starts_with("//") {
                 continue;
             }
-            let mut from = 0;
-            while let Some(rel) = line[from..].find("__rock_ret") {
-                let at = from + rel;
-                from = at + "__rock_ret".len();
-                let rest = &line[from..];
-                let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-                if digits.is_empty() {
-                    continue;
-                }
-                if rest[digits.len()..].trim_start().starts_with('=') {
-                    writes += 1;
-                }
-            }
+            publishers += line.matches("__rock_publish(").count();
         }
     }
-    // The imgui stubs are the hand-publishing set; 13 bodies, one of which
-    // publishes two slots.
+    // The imgui stubs are the publishing set: 13 multi-lane bodies.
     assert!(
-        writes >= 14,
-        "expected the known hand-written bank writers to be in scan range, saw {writes} \
+        publishers >= 13,
+        "expected the known multi-lane publishers to be in scan range, saw {publishers} \
          -- the path list is probably wrong, which would make the read gate vacuous"
     );
 }

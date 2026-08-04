@@ -19,20 +19,23 @@
 //! different instance from the same fn at `VecIter<int>`, and it is what today's
 //! conditional specializer only does when `any_value` happens to hold.
 //!
+//! **Two outcomes are not the same.** [`Unresolved`] is a construction the walk
+//! could not complete -- data. [`Rejection`] is one the concrete-program model
+//! REFUSES (plan S 0h), carrying a span and a message for the compile error
+//! Stage 3's cutover attaches it to. Nothing here is fatal yet.
+//!
 //! **Where the graph is still incomplete**, stated so a reader does not mistake
-//! the histogram for the whole graph: `iterator-iter` has no edges at all
-//! (a generic `iter` witness has no instantiation record to build one from --
-//! the finding, not an omission), `CompilerGenerated` OVER-approximates, and a
-//! coroutine's `__defer`/`__on_*` helpers exist only after the MIR transform so
+//! the histogram for the whole graph: `CompilerGenerated` OVER-approximates, and
+//! a coroutine's `__defer`/`__on_*` helpers exist only after the MIR transform so
 //! nothing here can count them. Every edge recorded is real;
 //! [`InstanceGraph::uninstantiated_roots`] records the generic roots no
 //! instantiation reached. Full accounting: `docs/mono-stage0d-manifest.md`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use bone_semantic::hir::{BodyOwner, Function};
+use bone_semantic::hir::{Body, BodyOwner, Function};
 use bone_semantic::inference::{BodyInference, Workspace};
-use bone_semantic::prelude::{BoundNext, ModuleId, Span};
+use bone_semantic::prelude::{BoundNext, IterWitness, ModuleId, Span};
 use comfy_la_arena::Idx;
 use rustc_hash::FxHashMap;
 use skull_mir::mangle::mangle_fn;
@@ -45,6 +48,33 @@ use skull_mir::mir::FuncRef;
 pub struct Instance {
     pub func: FuncRef,
     pub args: Vec<MonoTyId>,
+}
+
+/// A `FuncRef` as an ORDERED map key.
+///
+/// `FuncRef` is not `Ord`, and ordering by it would be ordering by arena
+/// position anyway. This is `(module, function index)` -- stable within a build
+/// and used only to make iteration deterministic, the same contract
+/// [`ord_key`] states for an [`Instance`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct DeclKey(pub FuncRef);
+
+impl DeclKey {
+    pub fn raw(self) -> (u32, u32) {
+        (self.0.module.raw(), self.0.func.into_raw().into_u32())
+    }
+}
+
+impl Ord for DeclKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.raw().cmp(&other.raw())
+    }
+}
+
+impl PartialOrd for DeclKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 /// `FuncRef` is not `Ord`, and ordering by it would be ordering by arena
@@ -152,18 +182,20 @@ impl BoundaryClass {
     }
 }
 
-/// One reached boundary, classified for the graph's target.
+/// One reached boundary, classified from the DECLARATION alone.
 ///
 /// `symbol` is the name emission must produce: bare for `extern`/`@nomangle`,
 /// mangled otherwise -- the rule `skull_mir::mangle` applies, read from it
 /// rather than restated.
+///
+/// Whether a target can SERVE it is deliberately absent. That is plan S 10's
+/// `Invalid boundary`, and it is a property of an artifact, which is where it
+/// is answered (`artifact::Unrealizable::ForeignToArtifact`, reported per CALL
+/// as a `Severed` rather than per declaration).
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct Boundary {
     pub class: BoundaryClass,
     pub symbol: String,
-    /// The target has no body serving this boundary, so plan S 10's
-    /// `Invalid boundary` outcome is required: reject with a span, never a stub.
-    pub invalid_on_target: bool,
 }
 
 /// A helper symbol a coroutine instance OWNS. Not an [`Edge`]: the target is
@@ -177,7 +209,7 @@ pub struct Boundary {
 /// source mangling.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct CoroutineHelper {
-    pub owner_symbol: String,
+    pub owner_identity: String,
     pub suffix: &'static str,
     /// What emission produces TODAY: mangled source name + suffix.
     pub symbol_today: String,
@@ -189,6 +221,166 @@ pub struct Edge {
     pub to: Instance,
     pub kind: EdgeKind,
     pub span: Span,
+}
+
+/// WHICH operation of a body a callee was resolved for.
+///
+/// An [`Idx<Expr>`] alone is not a site identity: one `for` header carries both
+/// an `iter` and a `next` witness, one bounded call carries a whole conformance
+/// tree, and one column-Map index can emit two runtime entries. Each of those is
+/// a separate callee obligation at the same expression, so the operation is part
+/// of the key.
+///
+/// This exists so `ConcreteBody` can read the callee the WALK resolved instead
+/// of resolving one again. A second resolver could disagree with the graph, and
+/// correlating the two by span could not even detect that -- several of these
+/// share one span by construction.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum SiteOp {
+    /// A call expression bone resolved (`resolved_overload_calls`).
+    DirectCall,
+    /// An `Expr::Global` naming a function, taken as a value.
+    FnValue,
+    /// The `for` head's `iter()` witness.
+    ForIter,
+    /// The `for` protocol's `next` witness, and the conformance path beneath it
+    /// (`BoundNext::sub`). Empty path is the outermost witness.
+    ForNext(Vec<usize>),
+    /// An iterable argument coerced through `iter()` at an `Iterator`-bounded
+    /// parameter.
+    ImplicitIter,
+    /// A witness from a bounded CALL's conformance tree, by path. Kept apart
+    /// from [`Self::ForNext`] because a `for` over a bounded call has both, at
+    /// the same expression and with the same paths.
+    BoundNext(Vec<usize>),
+    /// A call lowering synthesizes, named EXACTLY -- see
+    /// [`COMPILER_GENERATED_TRIGGERS`].
+    Synthesized(&'static str),
+}
+
+impl SiteOp {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::DirectCall => "direct-call",
+            Self::FnValue => "fn-value",
+            Self::ForIter => "for-iter",
+            Self::ForNext(_) => "for-next",
+            Self::ImplicitIter => "implicit-iter",
+            Self::BoundNext(_) => "bound-next",
+            Self::Synthesized(_) => "synthesized",
+        }
+    }
+}
+
+/// One callee obligation of one body: an expression plus the operation at it.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub struct Site {
+    pub expr: Idx<bone_semantic::hir::Expr>,
+    pub op: SiteOp,
+}
+
+/// What the walk resolved a site to. `Failed` is kept in the SAME table as a
+/// success rather than only in [`InstanceGraph::unresolved`]: a consumer asking
+/// "what does this operation call" must be able to see that the walk tried and
+/// could not, otherwise an absent key means both "no such operation" and "the
+/// operation has no callee".
+#[derive(Clone, Debug)]
+pub enum SiteOutcome {
+    Resolved(Instance),
+    Failed(&'static str),
+}
+
+#[derive(Clone, Debug)]
+pub struct SiteRecord {
+    pub outcome: SiteOutcome,
+    pub span: Span,
+}
+
+/// One bounded generic's concrete `next` witness at an instance.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct InstanceBoundNext {
+    pub callee: Instance,
+    pub sub: InstanceBoundTree,
+}
+
+/// The concrete witnesses supplied for an instance's bounded generics.
+#[derive(Clone, Default, PartialEq, Eq, Debug)]
+pub struct InstanceBoundTree {
+    pub next: BTreeMap<usize, InstanceBoundNext>,
+}
+
+#[derive(Clone, Debug)]
+pub struct BoundTreeDisagreement {
+    pub instance: Instance,
+    pub recorded: InstanceBoundTree,
+    pub incoming: InstanceBoundTree,
+}
+
+/// Which of the two bounded-witness roots a conformance tree hangs under.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum BoundRoot {
+    For,
+    Call,
+}
+
+impl BoundRoot {
+    fn site(self, expr: Idx<bone_semantic::hir::Expr>, path: Vec<usize>) -> Site {
+        Site {
+            expr,
+            op: match self {
+                Self::For => SiteOp::ForNext(path),
+                Self::Call => SiteOp::BoundNext(path),
+            },
+        }
+    }
+}
+
+/// A construction the concrete-program model REFUSES, as opposed to one it
+/// merely could not complete yet ([`Unresolved`]).
+///
+/// Three variants reject author programs under
+/// `docs/monomorphization-plan.md` S 0h. `ConcreteTypeUnavailable` records a
+/// compiler invariant instead. They become fatal at Stage 3's emission cutover.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum RejectionKind {
+    /// A function that recurs at a DIFFERENT instantiation than it was reached
+    /// at. Demand-driven instantiation does not terminate on it (plan S 7).
+    ChangingInstanceRecursion,
+    /// A generic function taken as a VALUE. There is no call site to key an
+    /// instantiation on, and inferring one from the instances reachable
+    /// elsewhere is explicitly not the rule (plan S 0h).
+    GenericFnValue,
+    /// A COMPILER INVARIANT, not a language decision: a type that should have
+    /// been concrete here is recovery poison, names no node, or resolves
+    /// cyclically. Unlike the author-call variants, no valid program admits
+    /// this -- the program should have been rejected upstream. It is a rejection rather than
+    /// a silent negative because the alternative is picking a representation for
+    /// a type the compiler could not resolve.
+    ConcreteTypeUnavailable,
+    /// A type argument no constraint reaches, so it has no concrete type to
+    /// instantiate at. Distinct from a declared generic read inside a shared
+    /// body, which is [`Unresolved`] data.
+    UnconstrainedTypeVar,
+}
+
+impl RejectionKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::ChangingInstanceRecursion => "changing-instance-recursion",
+            Self::GenericFnValue => "generic-fn-value",
+            Self::UnconstrainedTypeVar => "unconstrained-type-var",
+            Self::ConcreteTypeUnavailable => "concrete-type-unavailable",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Rejection {
+    pub kind: RejectionKind,
+    /// The instance whose construction the rejection happened in.
+    pub at: Instance,
+    pub span: Span,
+    pub message: String,
 }
 
 /// A call the walk could not turn into an instance. Data, not an error: an
@@ -207,16 +399,17 @@ pub struct InstanceGraph {
     pub instances: BTreeSet<Instance>,
     pub edges: Vec<Edge>,
     pub unresolved: Vec<Unresolved>,
-    /// Generic functions that are roots but that no call instantiates -- they
-    /// have no concrete instance to emit, which is the shared-generic-body
-    /// surface stated as a count.
-    pub uninstantiated_roots: BTreeSet<String>,
+    /// Constructions the model refuses. See [`RejectionKind`].
+    pub rejections: Vec<Rejection>,
+    /// Names with no concrete instance covering the obligation that put them
+    /// here, BY CAUSE. See [`RootHole`]: one set carrying several different
+    /// facts could only ever be read as the weakest of them.
+    pub uninstantiated_roots: BTreeMap<String, RootHole>,
     /// Instances whose expansion was cut by [`MAX_INSTANTIATION_DEPTH`].
     pub depth_capped: Vec<Instance>,
-    /// The execution target this graph was built for. Instance IDENTITY is
-    /// target-neutral (plan S 20a); the target decides which backend variant a
-    /// call resolves to and which boundaries are available.
-    pub target: bone_semantic::hir::FnBackend,
+    /// Instances whose Rock body the walk actually entered and enumerated the
+    /// callees of. Recorded, never inferred from a proxy.
+    pub expanded: BTreeSet<Instance>,
     /// Every reached boundary, classified per `docs/boundary-contracts.md`.
     pub boundaries: BTreeMap<String, Boundary>,
     /// Helper symbols owned by coroutine instances.
@@ -225,51 +418,162 @@ pub struct InstanceGraph {
     /// reached (`docs/boundary-contracts.md` S 1.4). A name absent here is one
     /// the corpus never triggers, not one that does not exist.
     pub erased_entries: BTreeSet<String>,
+    /// Runtime entries an opaque `inline(lua)` body calls: the owning
+    /// DECLARATION -> the entries its text names. Emission must emit these even
+    /// though no Rock call site reaches them.
+    ///
+    /// Keyed by `FuncRef`, not by mangled symbol: two `@nomangle` backend
+    /// siblings share one symbol, so a symbol key merges a Lua body's
+    /// dependencies with a JS body's and no artifact can tell which are its
+    /// own. The ENTRY names stay names here -- resolving one to a declaration
+    /// is a per-artifact decision (`crate::artifact`), because the serving
+    /// declaration differs by target.
+    pub inline_body_deps: BTreeMap<DeclKey, BTreeSet<&'static str>>,
+    /// Every storage query that could not decide, by reason. Kept beside the
+    /// rejection list because a rejection KIND aggregates several reasons, so
+    /// the kind histogram cannot answer "how many storage queries failed, and
+    /// why".
+    pub storage_failures: Vec<MonoTyReason>,
+    /// Storage-condition queries the walk ran, the denominator for the
+    /// synthesized-call population. Without it a zero synthesized-edge count
+    /// cannot be told apart from a walk that asked nothing.
+    pub synthesized_examined: usize,
+    /// Synthesized sites whose exact entry could NOT be decided, so more than
+    /// one name was kept. The residual over-approximation, as a number rather
+    /// than a paragraph.
+    pub synthesized_approximated: usize,
+    /// Each instance's substitution: callee `VarId` -> its concrete type. What
+    /// a `ConcreteBody`'s type tables are built under (plan S 9). Kept because
+    /// the walk computed it and then dropped it, leaving nothing able to state
+    /// an instance's types concretely.
+    pub substitutions: BTreeMap<Instance, MonoSubst>,
+    /// Instances two callers reached with DIFFERENT substitutions. Non-empty
+    /// means the substitution is not a function of the instance, so a
+    /// `ConcreteBody` built from it would depend on discovery order.
+    pub subst_disagreements: Vec<SubstDisagreement>,
+    /// How many times the walk actually COMPARED an instance's substitution
+    /// against a recorded one. The denominator for `subst_disagreements`.
+    pub subst_comparisons: usize,
+    /// The same, PER INSTANCE. A global count cannot say that any PARTICULAR
+    /// instance was reached from two callers, which is what the agreement
+    /// property is about.
+    pub subst_compared: BTreeMap<Instance, usize>,
+    /// Concrete conformance witnesses for each bounded instance. This replaces
+    /// the splice-time `CallerGeneric` environment for consumers of the graph.
+    pub bound_trees: BTreeMap<Instance, InstanceBoundTree>,
+    /// One logical instance reached with two different witness trees. Empty is
+    /// required: otherwise its body would depend on discovery order.
+    pub bound_tree_disagreements: Vec<BoundTreeDisagreement>,
+    /// Re-reaches whose witness trees were actually compared.
+    pub bound_tree_comparisons: usize,
+    /// Instances reached from an ALWAYS-EMITTED body -- a decorator definition
+    /// or a global initializer. They have no `from` instance, so they carry no
+    /// incoming [`Edge`] and no [`Site`], and a reachability walk over the edges
+    /// alone would call them unreachable. Production treats them as roots
+    /// (`mir_emit::reachable_fns`'s `extra_roots`), so an artifact view must
+    /// seed from them too.
+    pub always_emitted_targets: BTreeSet<Instance>,
+    /// Per instance, the callee EACH of its source operations resolved to.
+    /// `ConcreteBody`'s callee tables are this record projected per table; the
+    /// walk is the one resolver (plan S 9).
+    ///
+    /// Keyed only for instances -- an always-emitted body has no instance for a
+    /// site to belong to, and its failures are already recorded per site in
+    /// [`RootHole::always_emitted_sites`].
+    pub call_sites: BTreeMap<Instance, BTreeMap<Site, SiteRecord>>,
+    /// Sites recorded more than once for one instance. Must be empty: a body is
+    /// walked exactly once per instance, so a repeat means two operations
+    /// collapsed onto one key and one of them is invisible.
+    pub duplicate_sites: Vec<(Instance, Site)>,
+    /// Every site the walk ATTEMPTED, including the ones with no `from`
+    /// instance to record against. The denominator for `call_sites`.
+    pub sites_attempted: usize,
     /// Callees seeded from an ALWAYS-EMITTED body (a decorator definition or a
     /// global initializer) rather than from a function root. Production treats
     /// their call edges as reachability roots (`mir_emit::reachable_fns`'s
-    /// `extra_roots`/`extra_root_names`); round 1 walked neither body kind, so
-    /// anything reachable only from a global initializer was missing entirely.
+    /// `extra_roots`/`extra_root_names`).
     pub always_emitted_seeds: usize,
 }
 
-/// Calls lowering SYNTHESIZES, keyed by the source operation that triggers
-/// them: `(trigger name, the `stdlib_funcref`/`call_spine` names its arm can
-/// emit)`. Read off `crates/skull-mir/src/lower/storage.rs`; the complete
-/// 15-name set is catalogued in `docs/boundary-contracts.md` S 1.4.
+/// The storage condition a synthesized-call arm is gated on in
+/// `crates/skull-mir/src/lower/storage.rs`. Every arm there opens with
+/// `let Some(..) = self.<oracle>(recv) else { return Ok(None) }`, so the trigger
+/// name alone never decides whether the call is emitted.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum StorageCond {
+    /// The receiver's `[E]` element is column-stored.
+    VecColumn,
+    /// The receiver's `Map<K, V>` value is column-stored.
+    MapColumn,
+    /// No storage condition: the debug-mode `NativeBuffer` bounds check fires on
+    /// the receiver type alone.
+    Always,
+}
+
+/// Calls lowering SYNTHESIZES, keyed by the source operation that triggers them:
+/// `(trigger name, storage condition, the `stdlib_funcref`/`call_spine` names
+/// the arm emits WHEN THAT CONDITION HOLDS)`. Read off
+/// `crates/skull-mir/src/lower/storage.rs`; the complete 15-name set is
+/// catalogued in `docs/boundary-contracts.md` S 1.4.
 ///
-/// **This OVER-APPROXIMATES, deliberately and by a large factor.** Each arm
-/// fires only when the receiver's CONCRETE element is column-stored
-/// (`vec_column_elem_of` / `map_column_value_of` returning `Some`); this table
-/// keys on the trigger name alone, so a body operating exclusively on boxed
-/// elements gets edges emission will never produce. The true set is a SUBSET of
-/// what the histogram reports. Checking the storage condition needs the
-/// element's concrete representation at each call, which is a lowering
-/// question, not an HIR one -- so the honest options were an over-approximation
-/// or nothing, and an over-approximation still proves the class is non-empty
-/// and names which entries are reachable at all.
-pub const COMPILER_GENERATED_TRIGGERS: &[(&str, &[&str])] = &[
-    ("__vec_data_capacity", &["table_len", "__rock_col_capacity"]),
-    ("__vec_data_insert", &["__rock_col_insert"]),
-    ("__vec_data_clone", &["__rock_col_copy"]),
-    ("__vec_data_sort", &["__rock_col_sort", "__rock_col_sort_leaves"]),
-    ("__rock_vec_to_lua_array", &["__rock_vec_column_elements"]),
-    ("table_unset", &["__map_col_free"]),
-    ("len", &["__map_col_len"]),
-    ("map_len", &["__map_col_len"]),
-    ("contains", &["__map_col_contains"]),
-    ("clear", &["__map_col_clear"]),
-    ("get", &["__map_col_slot_of"]),
+/// The condition uses the same
+/// `skull_mir::lower::shape::{vec_column_elem_mono, map_column_value_mono}`
+/// oracle as lowering. The names are the column-path ones only -- a non-column
+/// receiver takes a different route entirely, so `table_len` (the boxed
+/// `__vec_data_capacity` path) is not an edge this arm produces.
+///
+/// A trigger with more than one name here is one whose arm SELECTS between
+/// them; the selection is made per site, not kept as a set. `__vec_data_sort`
+/// splits on the element ([`sort_entry`]) and a Map index on the index's
+/// position and stored value ([`map_index_entries`]), so the names below are the
+/// alternatives a trigger can produce, never the ones a site does.
+///
+/// Calls made from inside an `inline(lua)` body are invisible here by design --
+/// the body is opaque (`BoundaryClass::InlineBody`). `__rock_vec_column_elements`
+/// is the corpus's example: emission calls it once per project, from the Lua
+/// text of the reflection walker, not from any lowering arm.
+pub const COMPILER_GENERATED_TRIGGERS: &[(&str, StorageCond, &[&str])] = &[
+    ("__vec_data_capacity", StorageCond::VecColumn, &["__rock_col_capacity"]),
+    ("__vec_data_insert", StorageCond::VecColumn, &["__rock_col_insert"]),
+    ("__vec_data_clone", StorageCond::VecColumn, &["__rock_col_copy"]),
+    ("__vec_data_sort", StorageCond::VecColumn, &["__rock_col_sort", "__rock_col_sort_leaves"]),
+    ("__rock_vec_to_lua_array", StorageCond::VecColumn, &["__rock_vec_column_elements"]),
+    ("table_unset", StorageCond::MapColumn, &["__map_col_free"]),
+    ("len", StorageCond::MapColumn, &["__map_col_len"]),
+    ("map_len", StorageCond::MapColumn, &["__map_col_len"]),
+    ("contains", StorageCond::MapColumn, &["__map_col_contains"]),
+    ("clear", StorageCond::MapColumn, &["__map_col_clear"]),
+    ("get", StorageCond::MapColumn, &["__map_col_slot_of"]),
 ];
 
 /// The synthesized entries reached from an INDEX rather than from a named call:
 /// `m[k]` / `m[k] = v` on a column Map (`column_index_place`,
 /// `map_column_store`, `map_column_index_repr`) and the debug-mode
-/// `NativeBuffer` bounds check (`nb_checked_index`). Same over-approximation as
-/// [`COMPILER_GENERATED_TRIGGERS`].
-pub const INDEX_TRIGGERED: &[(&str, &[&str])] = &[
-    ("Map", &["__map_col_slot", "__map_col_slot_checked", "__map_col_free"]),
-    ("NativeBuffer", &["__nb_checked_index"]),
+/// `NativeBuffer` bounds check (`nb_checked_index`).
+pub const INDEX_TRIGGERED: &[(&str, StorageCond, &[&str])] = &[
+    ("Map", StorageCond::MapColumn, &["__map_col_slot", "__map_col_slot_checked", "__map_col_free"]),
+    ("NativeBuffer", StorageCond::Always, &["__nb_checked_index"]),
+];
+
+/// Every runtime entry a synthesized call or an opaque body can name
+/// (`docs/boundary-contracts.md` S 1.4). Kept as ONE list so the inline-body
+/// scan and the synthesized-call table cannot drift about what the catalogue is.
+pub const ERASED_RUNTIME_ENTRIES: &[&str] = &[
+    "__map_col_clear",
+    "__map_col_contains",
+    "__map_col_free",
+    "__map_col_len",
+    "__map_col_slot",
+    "__map_col_slot_checked",
+    "__map_col_slot_of",
+    "__nb_checked_index",
+    "__rock_col_capacity",
+    "__rock_col_copy",
+    "__rock_col_insert",
+    "__rock_col_sort",
+    "__rock_col_sort_leaves",
+    "__rock_vec_column_elements",
+    "table_len",
 ];
 
 /// Polymorphic recursion (`f<T> -> f<[T]>`) does not terminate under
@@ -285,10 +589,54 @@ pub const INDEX_TRIGGERED: &[(&str, &[&str])] = &[
 /// regardless of how it was reached.
 pub const MAX_INSTANTIATION_DEPTH: u32 = 12;
 
+/// Whether an instance's substitution makes it a CONCRETE shape -- the one
+/// question every declaration-based pass has to ask before it may answer.
+///
+/// Three answers, not two. `unwrap_or(true)` on a missing record collapsed
+/// [`Self::Missing`] into [`Self::Concrete`], so an instance whose substitution
+/// the walk never recorded was handed to a declaration-based oracle as if the
+/// declaration WERE its shape. `reach` records a substitution for every
+/// instance it reaches -- roots included, whose substitution is EMPTY and not
+/// absent -- so a missing record is an INVARIANT BREAK, and the honest answer
+/// to "is this concrete" is that nothing knows.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum Concreteness {
+    /// The declaration IS the shape: no logical arguments and an empty recorded
+    /// substitution. Declaration-based passes are exact here and nowhere else.
+    Concrete,
+    /// A real substitution the declaration does not carry.
+    Generic,
+    /// No substitution record at all. Never `Concrete`.
+    Missing,
+}
+
+impl Concreteness {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Concrete => "concrete",
+            Self::Generic => "generic",
+            Self::Missing => "missing-substitution",
+        }
+    }
+}
+
 impl InstanceGraph {
-    /// The deterministic symbol for an instance: the function's mangled name
-    /// plus its rendered logical arguments. Sorting by this is what makes the
-    /// manifest byte-stable regardless of discovery order.
+    /// **The one substitution oracle.** Both the publisher-ABI lanes and the
+    /// GLSL artifact passes read this, so the two cannot classify one instance
+    /// differently.
+    pub fn concreteness(&self, i: &Instance) -> Concreteness {
+        match self.substitutions.get(i) {
+            None => Concreteness::Missing,
+            Some(s) if s.is_empty() && i.args.is_empty() => Concreteness::Concrete,
+            Some(_) => Concreteness::Generic,
+        }
+    }
+
+    /// The READABLE symbol for an instance: the function's mangled name plus its
+    /// rendered logical arguments. For display only -- two distinct instances can
+    /// share one rendering ([`MonoTy::render`] is a pretty type syntax, not an
+    /// identity), so deduplicating or matching on this would merge them. Key on
+    /// [`Self::identity`].
     pub fn symbol(&self, ws: &Workspace, i: &Instance) -> String {
         let f = &ws.module(i.func.module).functions[i.func.func];
         let base = mangle_fn(ws, f);
@@ -299,12 +647,303 @@ impl InstanceGraph {
         format!("{base}<{}>", args.join(", "))
     }
 
-    /// Instances sorted by symbol -- the manifest order.
-    pub fn sorted_symbols(&self, ws: &Workspace) -> Vec<String> {
-        let mut v: Vec<String> = self.instances.iter().map(|i| self.symbol(ws, i)).collect();
+    /// The instance's IDENTITY: the mangled name plus its arguments' canonical
+    /// encodings. Unambiguous, so sorting and dedup on it cannot merge two
+    /// distinct instances.
+    pub fn identity(&self, ws: &Workspace, i: &Instance) -> String {
+        let f = &ws.module(i.func.module).functions[i.func.func];
+        let base = mangle_fn(ws, f);
+        // The DECLARATION, not just its mangled name. Two `@nomangle` backend
+        // siblings mangle identically -- `__nb_checked_index` is declared
+        // `inline(lua)` in `unified.rock` and `inline(js)` in `js.rock` -- and
+        // both are emission roots, so both are instances. Keying on the name
+        // alone MERGED them: measured at 13 of 96 instances in a one-line
+        // fixture, and `manifest_lines` DEDUPLICATES on this string, so the
+        // manifest was one line short per colliding pair.
+        //
+        // `(module, function index)` is stable within a build and deterministic
+        // across builds (module ids come from source order), which is the same
+        // contract [`ord_key`] states. The readable form is [`Self::symbol`];
+        // the manifest carries both, precisely so this one can be unambiguous
+        // rather than pretty.
+        let decl = DeclKey(i.func).raw();
+        if i.args.is_empty() {
+            return format!("{base}@{}.{}", decl.0, decl.1);
+        }
+        let args: Vec<String> = i.args.iter().map(|a| self.arena.canonical(*a)).collect();
+        format!("{base}@{}.{}<{}>", decl.0, decl.1, args.join(","))
+    }
+
+    /// Instances that share an [`Self::identity`], and -- for contrast -- the
+    /// ones that would share the NAME-KEYED identity it replaced.
+    ///
+    /// The first is 0 by construction now, which is exactly why the second is
+    /// reported beside it: a zero whose only content is "the key includes the
+    /// declaration" says nothing about how much the old key was merging.
+    pub fn colliding_identities(&self, ws: &Workspace) -> (usize, usize) {
+        let mut by_id: BTreeMap<String, usize> = BTreeMap::new();
+        let mut by_name: BTreeMap<String, usize> = BTreeMap::new();
+        for i in &self.instances {
+            *by_id.entry(self.identity(ws, i)).or_insert(0) += 1;
+            let f = &ws.module(i.func.module).functions[i.func.func];
+            let args: Vec<String> = i.args.iter().map(|a| self.arena.canonical(*a)).collect();
+            *by_name.entry(format!("{}<{}>", mangle_fn(ws, f), args.join(","))).or_insert(0) += 1;
+        }
+        let merged = |m: BTreeMap<String, usize>| -> usize {
+            m.values().filter(|n| **n > 1).map(|n| n - 1).sum()
+        };
+        (merged(by_id), merged(by_name))
+    }
+
+    /// The instance's LOGICAL symbol: `skull_mir::mangle::spec_fn_name`, the
+    /// encoder today's specializer already spells a specialized body with.
+    /// A non-generic instance keeps its base mangling; a generic one is suffixed
+    /// with its arguments' canonical encodings, which is why this is injective
+    /// where [`Self::symbol`] is not.
+    ///
+    /// **This is not the final emitted spelling.** Plan S 0h puts that under the
+    /// ARTIFACT's ABI/boundary plan -- one symbol per `(artifact, instance)` --
+    /// so a target may legally spell this instance differently. What is tested
+    /// here is the ENCODER: distinct logical instances must not encode alike.
+    /// Per-artifact injectivity is a property of each artifact view and is
+    /// asserted there, not here.
+    pub fn logical_symbol(&self, ws: &Workspace, i: &Instance) -> String {
+        let f = &ws.module(i.func.module).functions[i.func.func];
+        // Two cases, both explicit. A non-generic instance IS the base symbol --
+        // not a fallback for a failed lookup. A generic one always has concrete
+        // arguments, so `spec_fn_name` cannot decline (it returns `None` only for
+        // an all-`None` key, which an instance can never build), and an
+        // `unwrap_or_else` back to the base name would silently give a
+        // specialization the shared body's symbol.
+        if i.args.is_empty() {
+            return mangle_fn(ws, f);
+        }
+        let key: Vec<Option<skull_mir::monoty::MonoTy>> =
+            i.args.iter().map(|a| Some(self.arena.get(*a).clone())).collect();
+        skull_mir::mangle::spec_fn_name(ws, f, &key)
+            .expect("an instance with arguments always has a specialized symbol")
+    }
+
+    /// Plan S 2's Stage-2 gate, as data: what is NOT closed about this graph.
+    ///
+    /// Closure is not "every edge target is an instance" -- `record` inserts the
+    /// target, so that holds by construction and would assert nothing. The
+    /// question is whether every instance was EXPANDED: one whose body the walk
+    /// never entered has callees missing from the graph, and it is closed only
+    /// if it has no body to enter (a boundary) or is recorded as cut.
+    pub fn closure(&self, ws: &Workspace) -> Closure {
+        // `expanded` records bodies the walk entered. A boundary has no Rock
+        // body to enter; every other unexpanded instance is a closure hole.
+        let erased = &self.erased_entries;
+        let unexpanded: BTreeSet<String> = self
+            .instances
+            .iter()
+            .filter(|i| !self.expanded.contains(*i))
+            .filter(|i| {
+                boundary_class_for(&ws.module(i.func.module).functions[i.func.func], erased)
+                    .is_none()
+            })
+            .map(|i| self.identity(ws, i))
+            .collect();
+        // Encoder injectivity: two DISTINCT instances must not encode to one
+        // logical symbol. Keyed on identity, never on the display symbol, which
+        // is ambiguous by construction.
+        let mut by_symbol: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for i in &self.instances {
+            by_symbol.entry(self.logical_symbol(ws, i)).or_default().insert(self.identity(ws, i));
+        }
+        let colliding: BTreeMap<String, BTreeSet<String>> =
+            by_symbol.into_iter().filter(|(_, ids)| ids.len() > 1).collect();
+        Closure {
+            instances: self.instances.len(),
+            unexpanded,
+            depth_capped: self.depth_capped.iter().map(|i| self.identity(ws, i)).collect(),
+            // Every hole, whatever its cause. A root WITH instances is still a
+            // hole: the instances discharge its Rock call sites, never the
+            // bare-name obligation that made it a root.
+            uninstantiated_roots: self.uninstantiated_roots.keys().cloned().collect(),
+            colliding_symbols: colliding,
+            expanded: self.expanded.len(),
+        }
+    }
+
+    /// Manifest lines, sorted and deduplicated by IDENTITY: `<identity>\t<symbol>`.
+    ///
+    /// The identity is IN the line, not merely the sort key. A caller that
+    /// diffed, hashed or set-compared display symbols alone would collapse two
+    /// instances whose arguments happen to render alike, which is exactly the
+    /// property the identity encoding exists to prevent.
+    pub fn manifest_lines(&self, ws: &Workspace) -> Vec<String> {
+        let mut v: Vec<String> = self
+            .instances
+            .iter()
+            .map(|i| format!("{}\t{}", self.identity(ws, i), self.symbol(ws, i)))
+            .collect();
         v.sort();
         v.dedup();
         v
+    }
+
+    /// Reach `to` at `subst`: record the instance, keep its substitution, and
+    /// worklist it the first time.
+    ///
+    /// The substitution must be a FUNCTION OF THE INSTANCE -- a specialized
+    /// body's shape comes from declarations plus the instance substitution, so
+    /// two callers reaching one instance must agree on it. That is not
+    /// self-evident: the `VarId` keys come from `generic_var_of` reading the
+    /// CALLER's `BodyInference`, so nothing structural forces agreement, and
+    /// the worklist keeps only whichever arrived first. Disagreements are
+    /// recorded rather than resolved by arrival order.
+    fn reach(
+        &mut self,
+        work: &mut Vec<(Instance, MonoSubst, u32)>,
+        to: Instance,
+        subst: MonoSubst,
+        depth: u32,
+    ) {
+        // `depth` is the depth to ENTER `to` at, so a root enters at 0 and a
+        // callee at its caller's depth + 1. Roots come through here too: a
+        // non-generic instance's substitution is EMPTY, not absent, and
+        // seeding them directly is what left corpus instances with no
+        // recorded substitution at all.
+        match self.substitutions.get(&to) {
+            Some(prev) => {
+                // The COMPARISONS are the denominator, not the recorded
+                // substitutions: an instance reached exactly once never runs
+                // this arm, and counting recordings would report agreement the
+                // walk never tested.
+                self.subst_comparisons += 1;
+                *self.subst_compared.entry(to.clone()).or_insert(0) += 1;
+                if *prev != subst {
+                    self.subst_disagreements.push(SubstDisagreement {
+                        instance: to.clone(),
+                        kept: prev.clone(),
+                        discarded: subst.clone(),
+                    });
+                }
+            }
+            None => {
+                self.substitutions.insert(to.clone(), subst.clone());
+            }
+        }
+        if self.instances.insert(to.clone()) {
+            work.push((to, subst, depth));
+        }
+    }
+
+    /// Instances with no recorded substitution. Must be empty: a non-generic
+    /// instance's substitution is EMPTY, not absent, and a `ConcreteBody`
+    /// cannot be built for a body whose substitution the walk never kept.
+    pub fn instances_without_substitution(&self, ws: &Workspace) -> BTreeSet<String> {
+        self.instances
+            .iter()
+            .filter(|i| !self.substitutions.contains_key(*i))
+            .map(|i| self.identity(ws, i))
+            .collect()
+    }
+
+    /// Record what one source operation resolved to.
+    ///
+    /// Every recorder funnels through here, so a site cannot be recorded in one
+    /// place and resolved in another. A repeat key is kept as a finding rather
+    /// than overwritten: silently replacing it would make the second operation
+    /// vanish from the tables while the counts still looked total.
+    fn record_site(&mut self, from: Option<&Instance>, site: Site, outcome: SiteOutcome, span: Span) {
+        self.sites_attempted += 1;
+        let Some(from) = from else { return };
+        let prev = self
+            .call_sites
+            .entry(from.clone())
+            .or_default()
+            .insert(site.clone(), SiteRecord { outcome, span });
+        if prev.is_some() {
+            self.duplicate_sites.push((from.clone(), site));
+        }
+    }
+
+    fn record_bound_tree(&mut self, instance: &Instance, incoming: InstanceBoundTree) {
+        match self.bound_trees.get(instance) {
+            Some(recorded) if recorded != &incoming => {
+                self.bound_tree_comparisons += 1;
+                self.bound_tree_disagreements.push(BoundTreeDisagreement {
+                    instance: instance.clone(),
+                    recorded: recorded.clone(),
+                    incoming,
+                });
+            }
+            Some(_) => {
+                self.bound_tree_comparisons += 1;
+            }
+            None => {
+                self.bound_trees.insert(instance.clone(), incoming);
+            }
+        }
+    }
+
+    /// A generic function production emits regardless of any call, that no call
+    /// instantiates.
+    fn record_generic_root(&mut self, name: String) {
+        self.uninstantiated_roots.entry(name).or_default().generic_root = true;
+    }
+
+    /// A call from an always-emitted body whose instantiation failed. There is
+    /// no `from` instance to file an [`Unresolved`] or a [`Rejection`] against,
+    /// but the REASON and the SPAN are the same ones those carry and are kept.
+    ///
+    /// Per SITE, not per reason: two failures of one callee are two diagnostics
+    /// at two places, and a set keyed on the reason reports them as one fact
+    /// with no location.
+    fn record_always_emitted_hole(
+        &mut self,
+        name: String,
+        outcome: AlwaysEmittedOutcome,
+        span: Span,
+    ) {
+        self.uninstantiated_roots
+            .entry(name)
+            .or_default()
+            .always_emitted_sites
+            .push(AlwaysEmittedFailure { outcome, span });
+    }
+
+    /// Which recorded facts could produce a located error and which could not
+    /// (plan S 2: "retain each edge's source span, for good errors at unresolved
+    /// boundaries").
+    ///
+    /// Reported with its denominator per kind. A spanless COUNT alone cannot be
+    /// told apart from a kind the walk never produced, and the fallback that
+    /// makes an edge spanless -- `expr_spans` missing the key, or no body at all
+    /// -- is silent by construction.
+    pub fn span_census(&self) -> SpanCensus {
+        let mut c = SpanCensus::default();
+        for e in &self.edges {
+            let k = c.edges.entry(e.kind.name()).or_default();
+            k.examined += 1;
+            k.spanless += usize::from(is_spanless(&e.span));
+        }
+        for r in &self.rejections {
+            let k = c.rejections.entry(r.kind.name()).or_default();
+            k.examined += 1;
+            k.spanless += usize::from(is_spanless(&r.span));
+        }
+        for u in &self.unresolved {
+            let k = c.unresolved.entry(u.reason).or_default();
+            k.examined += 1;
+            k.spanless += usize::from(is_spanless(&u.span));
+        }
+        // An always-emitted failure is the same diagnostic as an `Unresolved`
+        // or a `Rejection` with no `from` instance to hang it on, so it is
+        // measured on the same axis and keyed by which of the two it is.
+        // Leaving it out was how a whole population of facts stayed spanless
+        // while the census reported full coverage.
+        for hole in self.uninstantiated_roots.values() {
+            for site in &hole.always_emitted_sites {
+                let k = c.always_emitted.entry(site.outcome.label()).or_default();
+                k.examined += 1;
+                k.spanless += usize::from(is_spanless(&site.span));
+            }
+        }
+        c
     }
 
     pub fn edge_histogram(&self) -> BTreeMap<&'static str, usize> {
@@ -334,7 +973,7 @@ impl InstanceGraph {
         // Direct: an instance that calls itself.
         for (from, tos) in &succ {
             if tos.iter().any(|t| *t == *from) {
-                direct.insert(self.symbol(ws, from));
+                direct.insert(self.identity(ws, from));
             }
         }
         // Mutual: any cycle of length > 1, found by an iterative DFS with a
@@ -350,7 +989,7 @@ impl InstanceGraph {
             dfs(start, &succ, &mut color, &mut path, &mut |cycle: &[&Instance]| {
                 if cycle.len() > 1 {
                     for n in cycle {
-                        mutual.insert(self.symbol(ws, n));
+                        mutual.insert(self.identity(ws, n));
                     }
                 }
             });
@@ -363,9 +1002,10 @@ impl InstanceGraph {
             direct_same_instance: direct,
             mutual_same_instance: mutual,
             changing_instance: self
-                .depth_capped
+                .rejections
                 .iter()
-                .map(|i| self.symbol(ws, i))
+                .filter(|r| r.kind == RejectionKind::ChangingInstanceRecursion)
+                .map(|r| self.identity(ws, &r.at))
                 .collect(),
         }
     }
@@ -395,37 +1035,190 @@ fn dfs<'a>(
     color.insert(node, 2);
 }
 
+/// What the instance graph does not yet close over. Every field is a NAMED set,
+/// not a count: a gate that compares counts cannot tell a closed gap from a new
+/// one that replaced it.
+#[derive(Debug, Default)]
+pub struct Closure {
+    pub instances: usize,
+    /// Instances whose body the walk actually entered.
+    pub expanded: usize,
+    /// Reached, has no body, and is not a boundary -- its callees are missing.
+    pub unexpanded: BTreeSet<String>,
+    /// Expansion cut by [`MAX_INSTANTIATION_DEPTH`].
+    pub depth_capped: BTreeSet<String>,
+    /// Names with an UNCOVERED BARE-NAME OBLIGATION, whatever their
+    /// [`RootHole`] cause. Production emits these as shared generic bodies
+    /// callable under a bare name, so a non-empty set is the shared-body
+    /// surface, stated by name.
+    ///
+    /// NOT "roots no call instantiates": six of the corpus's have concrete
+    /// instances from Rock call sites. Those instances discharge the call
+    /// sites and not the bare-name entry, so the name stays here -- dropping
+    /// the instanced ones is the falsely-green reading.
+    pub uninstantiated_roots: BTreeSet<String>,
+    /// LOGICAL symbol -> the distinct instance identities encoding to it. Any
+    /// entry means the encoder is not injective. The FINAL emitted spelling is
+    /// an artifact-ABI-plan property (plan S 0h), asserted per artifact view.
+    ///
+    /// **The corpus zero here is weak evidence and must not be read as strong.**
+    /// Replacing the encoder with the AMBIGUOUS display rendering leaves the
+    /// corpus at 0 too -- measured -- so the 26 projects simply contain no
+    /// render-colliding instance pair. Only
+    /// `instances_that_render_alike_get_distinct_logical_symbols` separates the
+    /// two encoders.
+    pub colliding_symbols: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl Closure {
+    /// Every hole, including a generic emission root whose bare-name
+    /// obligation nothing discharges.
+    pub fn is_closed(&self) -> bool {
+        self.unexpanded.is_empty()
+            && self.depth_capped.is_empty()
+            && self.colliding_symbols.is_empty()
+            && self.uninstantiated_roots.is_empty()
+    }
+}
+
+/// What the same failure WOULD have been recorded as if the body it happened in
+/// had an instance to file it against.
+///
+/// The distinction is the classification itself, not a label: an
+/// [`Unresolved`] is data the walk could not complete, a [`Rejection`] is a
+/// construction the model refuses (plan S 0h) and becomes a compile error at
+/// the Stage-3 cutover. Storing only a reason string forced Stage 3 to
+/// reconstruct which one it was by parsing that string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlwaysEmittedOutcome {
+    Unresolved(&'static str),
+    Rejection(RejectionKind),
+}
+
+impl AlwaysEmittedOutcome {
+    /// Census key. Reason bucket for the unresolved case, kind name for the
+    /// rejection case -- the two never collide because the kind names are the
+    /// `RejectionKind` catalogue.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Unresolved(r) => r,
+            Self::Rejection(k) => k.name(),
+        }
+    }
+}
+
+/// One call site in an always-emitted body whose instantiation failed. Carries
+/// what a [`Rejection`] or an [`Unresolved`] at the same failure would: the
+/// classification, and the span the Stage-3 diagnostic points at.
+#[derive(Debug, Clone)]
+pub struct AlwaysEmittedFailure {
+    pub outcome: AlwaysEmittedOutcome,
+    pub span: Span,
+}
+
+/// Why one name has no concrete instance covering its obligation.
+///
+/// The two causes are genuinely different obligations and were previously one
+/// unlabelled set of names:
+///
+/// - a generic EMISSION ROOT is a body production emits regardless of any call
+///   (`@nomangle`, `extern`, `@test`/`@sim`, a decorator root), so its
+///   obligation is to exist under a BARE name that opaque Lua text can call.
+///   Instances cannot discharge it; a boundary contract has to.
+/// - a call from an ALWAYS-EMITTED body (a global initializer or a decorator
+///   definition) that failed to instantiate is an ordinary unresolved call that
+///   merely has no `from` instance to be filed against. Its reason is the same
+///   `Fail::reason` an instantiated body's call would carry.
+///
+/// `instances` is the finding the note asked for: a root can be listed here and
+/// still have concrete instances from OTHER call sites. That does not close the
+/// hole -- the bare-name obligation survives -- but it separates "no concrete
+/// body of this function exists at all" from "the Rock calls are covered and
+/// only the opaque-caller entry is not".
+#[derive(Debug, Default, Clone)]
+pub struct RootHole {
+    /// A generic function that is an emission root: production emits its body
+    /// regardless of any call, so its obligation is to exist under a BARE name.
+    /// Concrete instances do not discharge that, which is why this coexists
+    /// with a non-zero [`Self::instances`].
+    pub generic_root: bool,
+    /// Every SITE at which a call from an always-emitted body could not
+    /// instantiate it, with the span the diagnostic points at. Empty when
+    /// [`Self::generic_root`] is the only cause.
+    pub always_emitted_sites: Vec<AlwaysEmittedFailure>,
+    /// Instances of this same function the walk created from other call sites.
+    pub instances: usize,
+}
+
+/// One instance reached at two different substitutions.
+#[derive(Debug, Clone)]
+pub struct SubstDisagreement {
+    pub instance: Instance,
+    pub kept: MonoSubst,
+    pub discarded: MonoSubst,
+}
+
+/// A spanless population and the population it was measured over.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SpanCoverage {
+    pub examined: usize,
+    pub spanless: usize,
+}
+
+/// Span coverage of everything the graph records that a Stage-3 diagnostic would
+/// have to point at.
+#[derive(Debug, Default)]
+pub struct SpanCensus {
+    pub edges: BTreeMap<&'static str, SpanCoverage>,
+    pub rejections: BTreeMap<&'static str, SpanCoverage>,
+    pub unresolved: BTreeMap<&'static str, SpanCoverage>,
+    /// Failed calls from always-emitted bodies. Same diagnostic obligation as
+    /// [`Self::unresolved`]; they differ only in having no `from` instance.
+    pub always_emitted: BTreeMap<&'static str, SpanCoverage>,
+}
+
+impl SpanCensus {
+    pub fn total_spanless(&self) -> usize {
+        let sum = |m: &BTreeMap<&'static str, SpanCoverage>| {
+            m.values().map(|c| c.spanless).sum::<usize>()
+        };
+        sum(&self.edges) + sum(&self.rejections) + sum(&self.unresolved)
+            + sum(&self.always_emitted)
+    }
+}
+
+/// A span the walk could not fill in. `Span::unknown` is the only way one is
+/// produced here, and its file sentinel is what distinguishes it -- a real span
+/// with a zero line range is line 1 of a real file.
+pub fn is_spanless(span: &Span) -> bool {
+    span.file.as_str() == "<unknown>"
+}
+
 #[derive(Debug, Default)]
 pub struct RecursionCensus {
     pub direct_same_instance: BTreeSet<String>,
     pub mutual_same_instance: BTreeSet<String>,
-    /// Instances whose expansion hit the depth cap -- changing-instance
-    /// (polymorphic) recursion candidates.
+    /// Instances a [`RejectionKind::ChangingInstanceRecursion`] names.
     pub changing_instance: BTreeSet<String>,
 }
 
-/// Build the shadow graph for `ws`.
+/// Build the ONE shared instance graph for `ws`.
+///
+/// **Target-neutral, and there is no per-target builder.** Every callee is
+/// recorded as bone's collapsed GROUP REPRESENTATIVE -- which is what
+/// `resolved_overload_calls` already holds -- and roots, which production hands
+/// over as raw declarations, are canonicalized to the same representative
+/// (`skull_mir::lower::canonical_variant`). Selecting the sibling that serves a
+/// target is `artifact::realize`'s job, so one graph and one [`MonoArena`] serve
+/// every artifact and cross-artifact identity is the shared [`Instance`] rather
+/// than a comparison between two arenas.
 ///
 /// `roots` is supplied by the caller so this shares production's root
 /// discovery instead of re-deriving it. `perturb` reverses the seeding order;
 /// the manifest must be identical either way (plan S 20g.4).
 pub fn build(ws: &Workspace, roots: Vec<FuncRef>, perturb: bool) -> InstanceGraph {
-    build_for_target(ws, roots, perturb, bone_semantic::hir::FnBackend::Lua)
-}
-
-/// [`build`], for an explicit execution target.
-///
-/// The target changes which backend VARIANT each call resolves to
-/// (`skull_mir::lower::backend_variant`, production's own selector) and which
-/// boundaries are available. It must NOT change logical instance identity --
-/// that is plan S 20a's separation, and
-/// `logical_identity_is_stable_across_targets` is the assertion.
-pub fn build_for_target(
-    ws: &Workspace,
-    mut roots: Vec<FuncRef>,
-    perturb: bool,
-    target: bone_semantic::hir::FnBackend,
-) -> InstanceGraph {
+    let mut roots: Vec<FuncRef> =
+        roots.into_iter().map(|r| skull_mir::lower::canonical_variant(ws, r)).collect();
     roots.sort_by_key(|r| (r.module.raw(), r.func.into_raw().into_u32()));
     roots.dedup();
     if perturb {
@@ -437,13 +1230,29 @@ pub fn build_for_target(
         instances: BTreeSet::new(),
         edges: Vec::new(),
         unresolved: Vec::new(),
-        uninstantiated_roots: BTreeSet::new(),
+        rejections: Vec::new(),
+        uninstantiated_roots: BTreeMap::new(),
         depth_capped: Vec::new(),
-        target,
+        expanded: BTreeSet::new(),
         boundaries: BTreeMap::new(),
         coroutine_helpers: BTreeSet::new(),
         erased_entries: BTreeSet::new(),
+        inline_body_deps: BTreeMap::new(),
+        storage_failures: Vec::new(),
+        synthesized_examined: 0,
+        synthesized_approximated: 0,
         always_emitted_seeds: 0,
+        always_emitted_targets: BTreeSet::new(),
+        call_sites: BTreeMap::new(),
+        duplicate_sites: Vec::new(),
+        sites_attempted: 0,
+        substitutions: BTreeMap::new(),
+        subst_disagreements: Vec::new(),
+        subst_comparisons: 0,
+        subst_compared: BTreeMap::new(),
+        bound_trees: BTreeMap::new(),
+        bound_tree_disagreements: Vec::new(),
+        bound_tree_comparisons: 0,
     };
 
     // A root that is generic has no instantiation of its own; it is a shared
@@ -452,33 +1261,30 @@ pub fn build_for_target(
     for r in roots {
         let f = &ws.module(r.module).functions[r.func];
         if !f.generics.is_empty() {
-            g.uninstantiated_roots.insert(mangle_fn(ws, f));
+            g.record_generic_root(mangle_fn(ws, f));
             continue;
         }
         let inst = Instance { func: r, args: Vec::new() };
-        if g.instances.insert(inst.clone()) {
-            work.push((inst, MonoSubst::default(), 0));
-        }
+        g.reach(&mut work, inst, MonoSubst::default(), 0);
     }
 
-    // Bodies that are ALWAYS emitted and are not functions: decorator
-    // definitions and global initializers. Production seeds their call edges as
-    // reachability roots (`mir_emit::reachable_fns`'s `extra_roots` /
-    // `extra_root_names`); the walk has no `Instance` to hang them on, so their
-    // callees are seeded as roots instead. A generic callee therefore arrives
-    // with no substitution to instantiate from and lands in
-    // `uninstantiated_roots` -- honest, and exactly what production does with it
-    // today (it emits the shared generic body).
-    for r in always_emitted_callees(ws, target) {
-        let f = &ws.module(r.module).functions[r.func];
-        g.always_emitted_seeds += 1;
-        if !f.generics.is_empty() {
-            g.uninstantiated_roots.insert(mangle_fn(ws, f));
-            continue;
-        }
-        let inst = Instance { func: r, args: Vec::new() };
-        if g.instances.insert(inst.clone()) {
-            work.push((inst, MonoSubst::default(), 0));
+    // Globals and decorators have no `Instance` origin, so their body edges
+    // seed the same worklist as function roots.
+    for module in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
+        let Some(inference) = ws.inference(module.id) else { continue };
+        let mut owners: Vec<BodyOwner> = module
+            .bodies
+            .keys()
+            .filter(|o| matches!(o, BodyOwner::Decorator(_) | BodyOwner::Global(_)))
+            .copied()
+            .collect();
+        owners.sort_by_key(|o| format!("{o:?}"));
+        for owner in owners {
+            let Some(inf) = inference.per_fn.get(&owner) else { continue };
+            let body = module.bodies.get(&owner);
+            walk_body_edges(
+                &mut g, &mut work, ws, inf, body, None, &MonoSubst::default(), 0,
+            );
         }
     }
 
@@ -489,206 +1295,593 @@ pub fn build_for_target(
             g.depth_capped.push(inst);
             continue;
         }
-        let Some(inf) = body_inference(ws, inst.func) else { continue };
-        let module = ws.module(inst.func.module);
-        let body = module.bodies.get(&BodyOwner::Function(inst.func.func));
-
-        let record = |g: &mut InstanceGraph,
-                          work: &mut Vec<(Instance, MonoSubst, u32)>,
-                          callee: FuncRef,
-                          bindings: Option<&Vec<bone_semantic::prelude::TyId>>,
-                          kind: EdgeKind,
-                          span: Span| {
-            let cf = &ws.module(callee.module).functions[callee.func];
-            let (args, callee_subst) =
-                match instantiate(&mut g.arena, ws, inf, cf, bindings, &subst) {
-                    Ok(v) => v,
-                    Err(reason) => {
-                        g.unresolved.push(Unresolved {
-                            from: inst.clone(),
-                            callee,
-                            reason,
-                            span,
-                        });
-                        return;
-                    }
-                };
-            let to = Instance { func: callee, args };
-            g.edges.push(Edge { from: inst.clone(), to: to.clone(), kind, span });
-            if g.instances.insert(to.clone()) {
-                work.push((to, callee_subst, depth + 1));
-            }
+        let FunctionBody::Ready { inf, body } = function_body(ws, inst.func) else {
+            continue;
         };
-
-        // Direct + generic calls.
-        let mut calls: Vec<(Idx<bone_semantic::hir::Expr>, (ModuleId, Idx<Function>))> =
-            inf.resolved_overload_calls.iter().map(|(e, r)| (*e, *r)).collect();
-        calls.sort_by_key(|(e, _)| *e);
-        for (e, (m, f)) in calls {
-            let callee = variant_for(ws, FuncRef { module: m, func: f }, target);
-            let bindings = inf.call_generic_bindings.get(&e);
-            let span = body.and_then(|b| b.expr_spans.get(e).copied()).unwrap_or_else(Span::unknown);
-            let kind =
-                if bindings.is_some() { EdgeKind::GenericCall } else { EdgeKind::DirectCall };
-            record(&mut g, &mut work, callee, bindings, kind, span);
+        let module = ws.module(inst.func.module);
+        // A boundary's Rock body is not the one emission uses -- it emits the
+        // foreign text -- so the walk STOPS here. Marking it unexpanded while
+        // continuing to enumerate its calls was the worst of both: the closure
+        // gate excused the instance as having no callees while the graph carried
+        // them, and a `@native_required` fallback body reached callees emission
+        // never routes through.
+        let f = &module.functions[inst.func.func];
+        if declared_boundary(f).is_some() {
+            continue;
         }
+        g.expanded.insert(inst.clone());
 
-        // Rock functions taken as VALUES. Not in any inference map: skull
-        // lowers them from `Expr::Global(name)` under exactly this guard
-        // (`lower/expr.rs:75`), so the expr arena is the only place they exist.
-        if let Some(b) = body {
-            for (e, callee) in fn_value_sites(ws, inf, b, target) {
-                let span = b.expr_spans.get(e).copied().unwrap_or_else(Span::unknown);
-                let cf = &ws.module(callee.module).functions[callee.func];
-                if cf.generics.is_empty() {
-                    record(&mut g, &mut work, callee, None, EdgeKind::FnValue, span);
-                } else {
-                    // THE WATCH ITEM. A fn value has no call site, so there are
-                    // no bindings to key an instantiation on -- structurally the
-                    // same gap as the `iter` witness, and a Stage-0h author call:
-                    // a generic fn taken as a value cannot be monomorphized
-                    // without either a recorded instantiation at the take site or
-                    // a rule that rejects it.
-                    g.unresolved.push(Unresolved {
-                        from: inst.clone(),
-                        callee,
-                        reason: "fn-value-generic-no-instantiation",
-                        span,
-                    });
-                }
-            }
+        walk_body_edges(
+            &mut g, &mut work, ws, inf, Some(body), Some(&inst), &subst, depth,
+        );
+    }
 
-            // Synthesized stdlib calls. Over-approximated -- see
-            // `COMPILER_GENERATED_TRIGGERS`.
-            for (e, name) in compiler_generated_sites(ws, inf, b) {
-                let span = b.expr_spans.get(e).copied().unwrap_or_else(Span::unknown);
-                match stdlib_entry(ws, name, target) {
-                    Some(callee) => {
-                        record(&mut g, &mut work, callee, None, EdgeKind::CompilerGenerated, span);
-                        g.erased_entries.insert(name.to_string());
-                    }
-                    // `stdlib_funcref` REJECTS here rather than falling back;
-                    // recording the same absence keeps the two in step.
-                    None => g.unresolved.push(Unresolved {
-                        from: inst.clone(),
-                        callee: inst.func,
-                        reason: "compiler-generated-entry-missing-for-target",
-                        span,
-                    }),
-                }
-            }
+    // Which holes nevertheless have concrete instances from other call sites.
+    // A post-pass because a root is recorded before the worklist runs, so at
+    // insertion time no instance of it exists yet -- which is how a name a
+    // later call fully instantiated went on reading as having no concrete body
+    // at all.
+    if !g.uninstantiated_roots.is_empty() {
+        let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+        for i in &g.instances {
+            let f = &ws.module(i.func.module).functions[i.func.func];
+            *counts.entry(mangle_fn(ws, f)).or_default() += 1;
         }
-
-        // Iterable args coerced through `iter()` at an `Iterator`-bounded param.
-        let mut implicit: Vec<(Idx<bone_semantic::hir::Expr>, (ModuleId, Idx<Function>))> =
-            inf.implicit_iter_args.iter().map(|(e, r)| (*e, *r)).collect();
-        implicit.sort_by_key(|(e, _)| *e);
-        for (e, (m, f)) in implicit {
-            let callee = variant_for(ws, FuncRef { module: m, func: f }, target);
-            let span = body.and_then(|b| b.expr_spans.get(e).copied()).unwrap_or_else(Span::unknown);
-            let cf = &ws.module(callee.module).functions[callee.func];
-            if cf.generics.is_empty() {
-                record(&mut g, &mut work, callee, None, EdgeKind::ImplicitIter, span);
-            } else {
-                // The SAME missing record as the `for`-head `iter` witness: bone
-                // stores the resolved fn and no instantiation for it. Filed under
-                // its own reason so the two sites stay countable apart.
-                g.unresolved.push(Unresolved {
-                    from: inst.clone(),
-                    callee,
-                    reason: "implicit-iter-witness-no-instantiation-record",
-                    span,
-                });
-            }
-        }
-
-        // `next` witnesses of calls to BOUNDED generic fns.
-        let mut trees: Vec<(Idx<bone_semantic::hir::Expr>, &bone_semantic::prelude::BoundTree)> =
-            inf.bound_call_trees.iter().map(|(e, t)| (*e, t)).collect();
-        trees.sort_by_key(|(e, _)| *e);
-        for (e, tree) in trees {
-            let span = body.and_then(|b| b.expr_spans.get(e).copied()).unwrap_or_else(Span::unknown);
-            walk_bound_tree(
-                &mut g, &mut work, ws, inf, &inst, &subst, depth, tree, span, target,
-            );
-        }
-
-        // Synthesized iterator operations (plan S 12).
-        let mut iters: Vec<(Idx<bone_semantic::hir::Expr>, &bone_semantic::prelude::ForIterInfo)> =
-            inf.for_iter_protocol.iter().map(|(e, i)| (*e, i)).collect();
-        iters.sort_by_key(|(e, _)| *e);
-        for (e, info) in iters {
-            let span = body.and_then(|b| b.expr_spans.get(e).copied()).unwrap_or_else(Span::unknown);
-            // The `iter` witness has NO recorded instantiation anywhere: bone
-            // records `next_generics` for `next` and nothing for `iter_fn`, and
-            // skull emits this call with no spec binding (`lower/loops.rs:159`),
-            // so it always reaches the shared generic body. A generic one
-            // therefore cannot be given a concrete instance here -- its own
-            // bucket, because it is a missing RECORD, not a missing binding at a
-            // call site.
-            if let Some((m, f)) = info.iter_fn {
-                let callee = FuncRef { module: m, func: f };
-                let cf = &ws.module(callee.module).functions[callee.func];
-                if cf.generics.is_empty() {
-                    record(&mut g, &mut work, callee, None, EdgeKind::IteratorIter, span);
-                } else {
-                    g.unresolved.push(Unresolved {
-                        from: inst.clone(),
-                        callee,
-                        reason: "iter-witness-no-instantiation-record",
-                        span,
-                    });
-                }
-            }
-            record_bound_next(
-                &mut g, &mut work, ws, inf, &inst, &subst, depth, &info.next, span,
-                EdgeKind::IteratorNext, target,
-            );
+        for (name, hole) in g.uninstantiated_roots.iter_mut() {
+            hole.instances = counts.get(name).copied().unwrap_or(0);
         }
     }
 
+    record_inline_body_deps(&mut g, ws);
+    detect_changing_instance_recursion(&mut g, ws);
     classify_boundaries(&mut g, ws);
     record_coroutine_helpers(&mut g, ws);
     g
 }
 
+#[allow(clippy::too_many_arguments)]
+fn walk_body_edges(
+    g: &mut InstanceGraph,
+    work: &mut Vec<(Instance, MonoSubst, u32)>,
+    ws: &Workspace,
+    inf: &BodyInference,
+    body: Option<&bone_semantic::hir::Body>,
+    from: Option<&Instance>,
+    subst: &MonoSubst,
+    depth: u32,
+) {
+    let mut resolved_calls: FxHashMap<Idx<bone_semantic::hir::Expr>, Instance> =
+        FxHashMap::default();
+    let mut calls: Vec<(Idx<bone_semantic::hir::Expr>, (ModuleId, Idx<Function>))> =
+        inf.resolved_overload_calls.iter().map(|(e, r)| (*e, *r)).collect();
+    calls.sort_by_key(|(e, _)| *e);
+    for (e, (m, f)) in calls {
+        // bone's collapsed representative, verbatim. Selecting the sibling that
+        // serves a target happens in `artifact::realize`, not here.
+        let callee = FuncRef { module: m, func: f };
+        let bindings = inf.call_generic_bindings.get(&e);
+        let span = body.and_then(|b| b.expr_spans.get(e).copied()).unwrap_or_else(Span::unknown);
+        let kind = if bindings.is_some() { EdgeKind::GenericCall } else { EdgeKind::DirectCall };
+        if let Some(to) = record_call(
+            g, work, ws, inf, from, subst, depth, callee, bindings, kind, span,
+            Site { expr: e, op: SiteOp::DirectCall },
+        ) {
+            resolved_calls.insert(e, to);
+        }
+    }
+
+    if let Some(body) = body {
+        for (e, callee) in fn_value_sites(ws, inf, body) {
+            let span = body.expr_spans.get(e).copied().unwrap_or_else(Span::unknown);
+            let cf = &ws.module(callee.module).functions[callee.func];
+            if cf.generics.is_empty() {
+                record_call(
+                    g, work, ws, inf, from, subst, depth, callee, None, EdgeKind::FnValue, span,
+                    Site { expr: e, op: SiteOp::FnValue },
+                );
+            } else if let Some(from) = from {
+                g.record_site(
+                    Some(from),
+                    Site { expr: e, op: SiteOp::FnValue },
+                    SiteOutcome::Failed("generic-fn-value"),
+                    span,
+                );
+                g.rejections.push(Rejection {
+                    kind: RejectionKind::GenericFnValue,
+                    at: from.clone(),
+                    span,
+                    message: format!(
+                        "`{}` is generic and is taken as a value rather than called, so no \
+                         call site decides its instantiation",
+                        mangle_fn(ws, cf)
+                    ),
+                });
+            } else {
+                g.always_emitted_seeds += 1;
+                g.record_always_emitted_hole(
+                    mangle_fn(ws, cf),
+                    AlwaysEmittedOutcome::Rejection(RejectionKind::GenericFnValue),
+                    span,
+                );
+            }
+        }
+
+        let mut failures: Vec<(Idx<bone_semantic::hir::Expr>, MonoTyReason)> = Vec::new();
+        let sites = compiler_generated_sites(
+            ws, inf, body, subst, &mut g.synthesized_examined, &mut failures,
+            &mut g.synthesized_approximated,
+        );
+        for (e, reason) in failures {
+            g.storage_failures.push(reason.clone());
+            let Some(from) = from else { continue };
+            let span = body.expr_spans.get(e).copied().unwrap_or_else(Span::unknown);
+            let kind = match reason {
+                MonoTyReason::UnresolvedInfer(_) | MonoTyReason::UnboundGeneric(_) => {
+                    RejectionKind::UnconstrainedTypeVar
+                }
+                _ => RejectionKind::ConcreteTypeUnavailable,
+            };
+            g.rejections.push(Rejection {
+                kind,
+                at: from.clone(),
+                span,
+                message: format!(
+                    "a synthesized-call receiver has no concrete type in an instantiated body \
+                     ({}), so its storage cannot be decided",
+                    reason.bucket()
+                ),
+            });
+        }
+        for GeneratedSite { expr: e, name } in sites {
+            let span = body.expr_spans.get(e).copied().unwrap_or_else(Span::unknown);
+            let site = Site { expr: e, op: SiteOp::Synthesized(name) };
+            match stdlib_entry_representative(ws, name) {
+                Some(callee) => {
+                    record_call(
+                        g, work, ws, inf, from, subst, depth, callee, None,
+                        EdgeKind::CompilerGenerated, span, site,
+                    );
+                    g.erased_entries.insert(name.to_string());
+                }
+                None => {
+                    g.record_site(
+                        from,
+                        site,
+                        SiteOutcome::Failed("compiler-generated-entry-unresolved"),
+                        span,
+                    );
+                    if let Some(from) = from {
+                        g.unresolved.push(Unresolved {
+                            from: from.clone(),
+                            callee: from.func,
+                            reason: "compiler-generated-entry-unresolved",
+                            span,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    let mut implicit: Vec<(Idx<bone_semantic::hir::Expr>, &IterWitness)> =
+        inf.implicit_iter_args.iter().map(|(e, w)| (*e, w)).collect();
+    implicit.sort_by_key(|(e, _)| *e);
+    for (e, witness) in implicit {
+        let span = body.and_then(|b| b.expr_spans.get(e).copied()).unwrap_or_else(Span::unknown);
+        record_witness(
+            g, work, ws, inf, from, subst, depth, witness, span, EdgeKind::ImplicitIter,
+            Site { expr: e, op: SiteOp::ImplicitIter },
+        );
+    }
+
+    let mut trees: Vec<(Idx<bone_semantic::hir::Expr>, &bone_semantic::prelude::BoundTree)> =
+        inf.bound_call_trees.iter().map(|(e, tree)| (*e, tree)).collect();
+    trees.sort_by_key(|(e, _)| *e);
+    for (e, tree) in trees {
+        let span = body.and_then(|b| b.expr_spans.get(e).copied()).unwrap_or_else(Span::unknown);
+        let concrete = walk_bound_tree(
+            g, work, ws, inf, from, subst, depth, tree, span, e, BoundRoot::Call, &[],
+        );
+        if let Some(to) = resolved_calls.get(&e) {
+            g.record_bound_tree(to, concrete);
+        }
+    }
+
+    let mut bound_calls: Vec<(Idx<bone_semantic::hir::Expr>, usize)> =
+        inf.bound_calls.iter().map(|(e, idx)| (*e, *idx)).collect();
+    bound_calls.sort_by_key(|(e, _)| *e);
+    for (e, gidx) in bound_calls {
+        let span = body.and_then(|b| b.expr_spans.get(e).copied()).unwrap_or_else(Span::unknown);
+        let site = Site { expr: e, op: SiteOp::DirectCall };
+        let resolved = from
+            .and_then(|i| g.bound_trees.get(i))
+            .and_then(|tree| tree.next.get(&gidx))
+            .cloned();
+        let Some(resolved) = resolved else {
+            g.record_site(from, site, SiteOutcome::Failed("caller-generic-witness-unbound"), span);
+            continue;
+        };
+        if let Some(from) = from {
+            g.edges.push(Edge {
+                from: from.clone(),
+                to: resolved.callee.clone(),
+                kind: EdgeKind::BoundNextWitness,
+                span,
+            });
+        }
+        g.record_site(from, site, SiteOutcome::Resolved(resolved.callee), span);
+    }
+
+    let mut iters: Vec<(Idx<bone_semantic::hir::Expr>, &bone_semantic::prelude::ForIterInfo)> =
+        inf.for_iter_protocol.iter().map(|(e, info)| (*e, info)).collect();
+    iters.sort_by_key(|(e, _)| *e);
+    for (e, info) in iters {
+        let span = body.and_then(|b| b.expr_spans.get(e).copied()).unwrap_or_else(Span::unknown);
+        if let Some(witness) = &info.iter {
+            record_witness(
+                g, work, ws, inf, from, subst, depth, witness, span,
+                EdgeKind::IteratorIter, Site { expr: e, op: SiteOp::ForIter },
+            );
+        }
+        let _ = record_bound_next(
+            g, work, ws, inf, from, subst, depth, &info.next, span,
+            EdgeKind::IteratorNext, e, BoundRoot::For, &[],
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_call(
+    g: &mut InstanceGraph,
+    work: &mut Vec<(Instance, MonoSubst, u32)>,
+    ws: &Workspace,
+    inf: &BodyInference,
+    from: Option<&Instance>,
+    subst: &MonoSubst,
+    depth: u32,
+    callee: FuncRef,
+    bindings: Option<&Vec<bone_semantic::prelude::TyId>>,
+    kind: EdgeKind,
+    span: Span,
+    site: Site,
+) -> Option<Instance> {
+    if from.is_none() {
+        g.always_emitted_seeds += 1;
+    }
+    let cf = &ws.module(callee.module).functions[callee.func];
+    let (args, callee_subst) = match instantiate(&mut g.arena, ws, inf, cf, bindings, subst) {
+        Ok(v) => v,
+        // An always-emitted body has no `from` to file against, but the
+        // CLASSIFICATION is the same one an instantiated body's call gets:
+        // `Unconstrained` is the decided `UnconstrainedTypeVar` rejection
+        // either way. Ordered before the classifying arms so these guards win.
+
+        Err(Fail::Unconstrained(_)) if from.is_none() => {
+            g.record_always_emitted_hole(
+                mangle_fn(ws, cf),
+                AlwaysEmittedOutcome::Rejection(RejectionKind::UnconstrainedTypeVar),
+                span,
+            );
+            g.record_site(from, site, SiteOutcome::Failed("unconstrained-type-var"), span);
+            return None;
+        }
+        Err(fail) if from.is_none() => {
+            g.record_always_emitted_hole(
+                mangle_fn(ws, cf),
+                AlwaysEmittedOutcome::Unresolved(fail.reason()),
+                span,
+            );
+            g.record_site(from, site, SiteOutcome::Failed(fail.reason()), span);
+            return None;
+        }
+        Err(Fail::Unconstrained(_)) => {
+            let name = mangle_fn(ws, cf);
+            g.rejections.push(Rejection {
+                kind: RejectionKind::UnconstrainedTypeVar,
+                at: from.expect("guarded above").clone(),
+                span,
+                message: format!(
+                    "`{name}` is called with a type argument no constraint reaches, so there is \
+                     no concrete type to instantiate it at"
+                ),
+            });
+            g.record_site(from, site, SiteOutcome::Failed("unconstrained-type-var"), span);
+            return None;
+        }
+        Err(fail) => {
+            g.unresolved.push(Unresolved {
+                from: from.expect("guarded above").clone(),
+                callee,
+                reason: fail.reason(),
+                span,
+            });
+            g.record_site(from, site, SiteOutcome::Failed(fail.reason()), span);
+            return None;
+        }
+    };
+    let to = Instance { func: callee, args };
+    match from {
+        Some(from) => g.edges.push(Edge { from: from.clone(), to: to.clone(), kind, span }),
+        // No `from`, so no edge and no site: an always-emitted body's callee is
+        // a ROOT, and only this record says so.
+        None => {
+            g.always_emitted_targets.insert(to.clone());
+        }
+    }
+    g.record_site(from, site, SiteOutcome::Resolved(to.clone()), span);
+    g.reach(work, to.clone(), callee_subst, depth + 1);
+    Some(to)
+}
+
+/// Plan S 7's rejection: a recursive edge must preserve its instance arguments.
+///
+/// Polymorphic recursion does NOT appear as a cycle over instances: every
+/// instance on the chain is distinct, which is exactly why it diverges. It
+/// appears as a PATH from one instance of a function to a DIFFERENT instance of
+/// that same function. That reachability test is the whole discriminant, and it
+/// is what keeps two independent instantiations of one recursive function legal:
+/// `hold<int>` and `hold<string>` never reach each other.
+///
+/// Reachability is searched over the WHOLE instance graph rather than over
+/// recursive SCCs first. Restricting to an SCC is sound -- every function on an
+/// `f`-to-`f` path lies on an `f`-to-`f` cycle, so no path crosses out of one --
+/// but it buys nothing: the graph is leaf-heavy, so the full search costs 110k
+/// traversal steps on the corpus's largest project (mag: 2,560 starts, 26,883
+/// edges), and the whole 26-project census runs in 1.5s. Measured, after
+/// writing the SCC pass and finding it inert.
+fn detect_changing_instance_recursion(g: &mut InstanceGraph, ws: &Workspace) {
+    // Instance-level adjacency, carrying each edge's span so a rejection can
+    // name the call that changed the arguments.
+    let mut succ: FxHashMap<&Instance, Vec<(&Instance, Span)>> = FxHashMap::default();
+    for e in &g.edges {
+        succ.entry(&e.from).or_default().push((&e.to, e.span));
+    }
+
+    let mut order: Vec<&Instance> = succ.keys().copied().collect();
+    order.sort();
+    let mut found: Vec<(Instance, Span, String)> = Vec::new();
+    let mut already: BTreeSet<(u32, u32)> = BTreeSet::new();
+    for start in order {
+        let key = (start.func.module.raw(), start.func.func.into_raw().into_u32());
+        if already.contains(&key) {
+            continue;
+        }
+        let mut seen: BTreeSet<&Instance> = BTreeSet::new();
+        let mut queue: Vec<(&Instance, Span)> = vec![(start, Span::unknown())];
+        while let Some((node, via)) = queue.pop() {
+            if node.func == start.func && node.args != start.args {
+                already.insert(key);
+                found.push((
+                    start.clone(),
+                    via,
+                    format!(
+                        "polymorphic recursion: `{}` recurs as `{}`; instantiation does not \
+                         terminate on a recursive call whose type arguments change",
+                        g.symbol(ws, start),
+                        g.symbol(ws, node)
+                    ),
+                ));
+                break;
+            }
+            for (next, span) in succ.get(node).map(|v| v.as_slice()).unwrap_or(&[]) {
+                if seen.insert(next) {
+                    queue.push((next, *span));
+                }
+            }
+        }
+    }
+    for (at, span, message) in found {
+        g.rejections.push(Rejection {
+            kind: RejectionKind::ChangingInstanceRecursion,
+            at,
+            span,
+            message,
+        });
+    }
+}
+
+/// A synthesized `iter` witness: the `for` head's or a coerced argument's.
+///
+/// It has no call expr, so it can never appear in `call_generic_bindings`, and
+/// its instantiation comes from the substitution bone retained while resolving
+/// it. That record has the same shape as `next_generics`, so the same
+/// instantiation route serves both -- one oracle for what a synthesized call
+/// instantiates at, rather than a second one per witness kind.
+#[allow(clippy::too_many_arguments)]
+fn record_witness(
+    g: &mut InstanceGraph,
+    work: &mut Vec<(Instance, MonoSubst, u32)>,
+    ws: &Workspace,
+    inf: &BodyInference,
+    from: Option<&Instance>,
+    subst: &MonoSubst,
+    depth: u32,
+    witness: &IterWitness,
+    span: Span,
+    kind: EdgeKind,
+    site: Site,
+) {
+    if from.is_none() {
+        g.always_emitted_seeds += 1;
+    }
+    let rep = FuncRef { module: witness.func.0, func: witness.func.1 };
+    let resolved = &ws.module(rep.module).functions[rep.func];
+    let callee = rep;
+    let cf = &ws.module(callee.module).functions[callee.func];
+    match instantiate_witness(&mut g.arena, ws, inf, resolved, cf, &witness.generics, subst) {
+        Ok((args, callee_subst)) => {
+            let to = Instance { func: callee, args };
+            match from {
+                Some(from) => {
+                    g.edges.push(Edge { from: from.clone(), to: to.clone(), kind, span })
+                }
+                // See `record_call`: an always-emitted body's callee is a root.
+                None => {
+                    g.always_emitted_targets.insert(to.clone());
+                }
+            }
+            g.record_site(from, site, SiteOutcome::Resolved(to.clone()), span);
+            g.reach(work, to, callee_subst, depth + 1);
+        }
+        // See `record_call`: the classification survives the absence of a
+        // `from` instance.
+        Err(Fail::Unconstrained(_)) if from.is_none() => {
+            g.record_always_emitted_hole(
+                mangle_fn(ws, cf),
+                AlwaysEmittedOutcome::Rejection(RejectionKind::UnconstrainedTypeVar),
+                span,
+            );
+            g.record_site(from, site, SiteOutcome::Failed("unconstrained-type-var"), span);
+        }
+        Err(fail) if from.is_none() => {
+            g.record_always_emitted_hole(
+                mangle_fn(ws, cf),
+                AlwaysEmittedOutcome::Unresolved(fail.reason()),
+                span,
+            );
+            g.record_site(from, site, SiteOutcome::Failed(fail.reason()), span);
+        }
+        Err(Fail::Unconstrained(_)) => {
+            g.rejections.push(Rejection {
+                kind: RejectionKind::UnconstrainedTypeVar,
+                at: from.expect("guarded above").clone(),
+                span,
+                message: format!(
+                    "the `iter` witness `{}` binds a type argument no constraint reaches",
+                    mangle_fn(ws, cf)
+                ),
+            });
+            g.record_site(from, site, SiteOutcome::Failed("unconstrained-type-var"), span);
+        }
+        Err(fail) => {
+            g.unresolved.push(Unresolved {
+                from: from.expect("guarded above").clone(),
+                callee,
+                reason: fail.reason(),
+                span,
+            });
+            g.record_site(from, site, SiteOutcome::Failed(fail.reason()), span);
+        }
+    }
+}
+
 /// One `next` witness plus, recursively, the witnesses of ITS bounded generics.
 ///
-/// The nested `sub` tree is why this recurses: a chained iterator resolves
-/// `next(MapIter<VecIter<..>>)` to MapIter's `next`, whose own inner bound
-/// resolves to VecIter's, and only the outermost is named in `info.next`.
-/// Round 1 stopped at the top level, so every inner witness of a combinator
-/// chain was missing from the graph.
+/// A chained iterator resolves `next(MapIter<VecIter<..>>)` to MapIter's
+/// `next`; only the outermost witness is named in `info.next`, so `sub` carries
+/// the inner witnesses.
 #[allow(clippy::too_many_arguments)]
 fn record_bound_next(
     g: &mut InstanceGraph,
     work: &mut Vec<(Instance, MonoSubst, u32)>,
     ws: &Workspace,
     inf: &BodyInference,
-    from: &Instance,
+    from: Option<&Instance>,
     subst: &MonoSubst,
     depth: u32,
     next: &BoundNext,
     span: Span,
     kind: EdgeKind,
-    target: bone_semantic::hir::FnBackend,
-) {
-    let BoundNext::Concrete { func: (m, f), next_generics, sub } = next else { return };
-    let callee = variant_for(ws, FuncRef { module: *m, func: *f }, target);
+    expr: Idx<bone_semantic::hir::Expr>,
+    root: BoundRoot,
+    path: &[usize],
+) -> Option<InstanceBoundNext> {
+    let site = root.site(expr, path.to_vec());
+    if let BoundNext::CallerGeneric(gidx) = next {
+        let resolved = from
+            .and_then(|i| g.bound_trees.get(i))
+            .and_then(|tree| tree.next.get(gidx))
+            .cloned();
+        let Some(resolved) = resolved else {
+            g.record_site(from, site, SiteOutcome::Failed("caller-generic-witness-unbound"), span);
+            return None;
+        };
+        if let Some(from) = from {
+            g.edges.push(Edge {
+                from: from.clone(),
+                to: resolved.callee.clone(),
+                kind,
+                span,
+            });
+        }
+        g.record_site(from, site, SiteOutcome::Resolved(resolved.callee.clone()), span);
+        return Some(resolved);
+    }
+
+    let BoundNext::Concrete { func: (m, f), next_generics, sub } = next else {
+        unreachable!("CallerGeneric handled above")
+    };
+    let rep = FuncRef { module: *m, func: *f };
+    let resolved = &ws.module(rep.module).functions[rep.func];
+    let callee = rep;
     let cf = &ws.module(callee.module).functions[callee.func];
-    match instantiate_next(&mut g.arena, ws, inf, cf, next_generics, subst) {
+    if from.is_none() {
+        g.always_emitted_seeds += 1;
+    }
+    match instantiate_witness(&mut g.arena, ws, inf, resolved, cf, next_generics, subst) {
         Ok((args, callee_subst)) => {
             let to = Instance { func: callee, args };
-            g.edges.push(Edge { from: from.clone(), to: to.clone(), kind, span });
-            if g.instances.insert(to.clone()) {
-                work.push((to, callee_subst, depth + 1));
+            match from {
+                Some(from) => {
+                    g.edges.push(Edge { from: from.clone(), to: to.clone(), kind, span })
+                }
+                // See `record_call`: an always-emitted body's callee is a root.
+                None => {
+                    g.always_emitted_targets.insert(to.clone());
+                }
             }
+            g.record_site(from, site, SiteOutcome::Resolved(to.clone()), span);
+            g.reach(work, to.clone(), callee_subst, depth + 1);
+            let concrete_sub = walk_bound_tree(
+                g, work, ws, inf, from, subst, depth, sub, span, expr, root, path,
+            );
+            g.record_bound_tree(&to, concrete_sub.clone());
+            Some(InstanceBoundNext { callee: to, sub: concrete_sub })
         }
-        Err(reason) => {
-            g.unresolved.push(Unresolved { from: from.clone(), callee, reason, span })
+        // See `record_call`: the classification survives the absence of a
+        // `from` instance.
+        Err(Fail::Unconstrained(_)) if from.is_none() => {
+            g.record_always_emitted_hole(
+                mangle_fn(ws, cf),
+                AlwaysEmittedOutcome::Rejection(RejectionKind::UnconstrainedTypeVar),
+                span,
+            );
+            g.record_site(from, site, SiteOutcome::Failed("unconstrained-type-var"), span);
+            None
+        }
+        Err(fail) if from.is_none() => {
+            g.record_always_emitted_hole(
+                mangle_fn(ws, cf),
+                AlwaysEmittedOutcome::Unresolved(fail.reason()),
+                span,
+            );
+            g.record_site(from, site, SiteOutcome::Failed(fail.reason()), span);
+            None
+        }
+        Err(Fail::Unconstrained(_)) => {
+            g.rejections.push(Rejection {
+                kind: RejectionKind::UnconstrainedTypeVar,
+                at: from.expect("guarded above").clone(),
+                span,
+                message: format!(
+                    "the `next` witness `{}` binds a type argument no constraint reaches",
+                    mangle_fn(ws, cf)
+                ),
+            });
+            g.record_site(from, site, SiteOutcome::Failed("unconstrained-type-var"), span);
+            None
+        }
+        Err(fail) => {
+            g.unresolved.push(Unresolved {
+                from: from.expect("guarded above").clone(),
+                callee,
+                reason: fail.reason(),
+                span,
+            });
+            g.record_site(from, site, SiteOutcome::Failed(fail.reason()), span);
+            None
         }
     }
-    walk_bound_tree(g, work, ws, inf, from, subst, depth, sub, span, target);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -697,21 +1890,31 @@ fn walk_bound_tree(
     work: &mut Vec<(Instance, MonoSubst, u32)>,
     ws: &Workspace,
     inf: &BodyInference,
-    from: &Instance,
+    from: Option<&Instance>,
     subst: &MonoSubst,
     depth: u32,
     tree: &bone_semantic::prelude::BoundTree,
     span: Span,
-    target: bone_semantic::hir::FnBackend,
-) {
+    expr: Idx<bone_semantic::hir::Expr>,
+    root: BoundRoot,
+    path: &[usize],
+) -> InstanceBoundTree {
+    let mut resolved = InstanceBoundTree::default();
     let mut keys: Vec<&usize> = tree.next.keys().collect();
     keys.sort();
     for k in keys {
-        record_bound_next(
+        // The conformance PATH, not the parameter index alone: two witnesses at
+        // different depths of one tree can carry the same key.
+        let mut child = path.to_vec();
+        child.push(*k);
+        if let Some(next) = record_bound_next(
             g, work, ws, inf, from, subst, depth, &tree.next[k], span,
-            EdgeKind::BoundNextWitness, target,
-        );
+            EdgeKind::BoundNextWitness, expr, root, &child,
+        ) {
+            resolved.next.insert(*k, next);
+        }
     }
+    resolved
 }
 
 /// The callee's instantiation: its generic bindings converted to `MonoTy` under
@@ -724,74 +1927,112 @@ fn instantiate(
     callee: &Function,
     bindings: Option<&Vec<bone_semantic::prelude::TyId>>,
     caller_subst: &MonoSubst,
-) -> Result<(Vec<MonoTyId>, MonoSubst), &'static str> {
+) -> Result<(Vec<MonoTyId>, MonoSubst), Fail> {
     if callee.generics.is_empty() {
         return Ok((Vec::new(), MonoSubst::default()));
     }
-    let Some(bindings) = bindings else { return Err("no-bindings") };
+    let Some(bindings) = bindings else { return Err(Fail::Unresolved("no-bindings")) };
     if bindings.len() != callee.generics.len() {
-        return Err("arity-mismatch");
+        return Err(Fail::Unresolved("arity-mismatch"));
     }
     let mut args = Vec::with_capacity(bindings.len());
     let mut callee_subst = MonoSubst::default();
     for (g, b) in callee.generics.iter().zip(bindings) {
         let Some(var) = skull_mir::monoty::generic_var_of(ws, inf, *g) else {
-            return Err("declared-generic-not-generic");
+            return Err(Fail::Unresolved("declared-generic-not-generic"));
         };
-        let id = arena.convert(ws, inf, *b, caller_subst).map_err(reason_name)?;
-        callee_subst.insert(var, id);
-        args.push(id);
+        let ty = skull_mir::monoty::convert(ws, inf, *b, caller_subst).map_err(convert_fail)?;
+        args.push(arena.intern(ty.clone()));
+        callee_subst.insert(var, ty);
     }
     Ok((args, callee_subst))
 }
 
-/// The `for`-protocol `next` witness's instantiation. It is SYNTHESIZED, so it
-/// has no call expr and can never appear in `call_generic_bindings`;
-/// `next_generics` is the only record of what its generics bound to (plan S 12:
-/// resolve the witness at instantiation). Reading the callee's DECLARED generics
-/// and looking each up here is the same route `spec_key_from_next_generics`
-/// takes -- a shape comes from a declaration, never from the body's own
-/// inference.
-fn instantiate_next(
+/// A SYNTHESIZED call's instantiation, from the record bone kept for it: the
+/// `for`-protocol `next` witness (`next_generics`), the `for`-head `iter` and
+/// the coerced-argument `iter` (`IterWitness::generics`) all take this route.
+///
+/// Such a call has no call expr, so it can never appear in
+/// `call_generic_bindings` (plan S 12: resolve the witness at instantiation).
+/// Reading the callee's DECLARED generics and looking each up here is the same
+/// route `spec_key_from_next_generics` takes -- a shape comes from a
+/// declaration, never from the body's own inference.
+fn instantiate_witness(
     arena: &mut MonoArena,
     ws: &Workspace,
     inf: &BodyInference,
+    resolved: &Function,
     callee: &Function,
-    next_generics: &FxHashMap<bone_semantic::hir::VarId, bone_semantic::prelude::TyId>,
+    record: &FxHashMap<bone_semantic::hir::VarId, bone_semantic::prelude::TyId>,
     caller_subst: &MonoSubst,
-) -> Result<(Vec<MonoTyId>, MonoSubst), &'static str> {
+) -> Result<(Vec<MonoTyId>, MonoSubst), Fail> {
     if callee.generics.is_empty() {
         return Ok((Vec::new(), MonoSubst::default()));
     }
+    // The record is keyed by the RESOLVED declaration's `VarId`s; the walk
+    // instantiates the declaration the TARGET selected. Backend siblings are
+    // separate functions with separate `VarId`s, so the two are read
+    // POSITIONALLY -- generic `i` of the resolved decl supplies generic `i` of
+    // the variant. Keying the lookup on the variant instead silently degrades a
+    // generic witness to unbound on the non-default target alone.
+    if resolved.generics.len() != callee.generics.len() {
+        return Err(Fail::Unresolved("variant-generic-arity-mismatch"));
+    }
     let mut args = Vec::with_capacity(callee.generics.len());
     let mut callee_subst = MonoSubst::default();
-    for g in &callee.generics {
-        let Some(var) = skull_mir::monoty::generic_var_of(ws, inf, *g) else {
-            return Err("declared-generic-not-generic");
+    for (rg, cg) in resolved.generics.iter().zip(&callee.generics) {
+        let (Some(rvar), Some(cvar)) = (
+            skull_mir::monoty::generic_var_of(ws, inf, *rg),
+            skull_mir::monoty::generic_var_of(ws, inf, *cg),
+        ) else {
+            return Err(Fail::Unresolved("declared-generic-not-generic"));
         };
-        let Some(bound) = next_generics.get(&var) else { return Err("next-generic-unbound") };
-        let id = arena.convert(ws, inf, *bound, caller_subst).map_err(reason_name)?;
-        callee_subst.insert(var, id);
-        args.push(id);
+        let Some(bound) = record.get(&rvar) else {
+            return Err(Fail::Unresolved("witness-generic-unbound"))
+        };
+        let ty =
+            skull_mir::monoty::convert(ws, inf, *bound, caller_subst).map_err(convert_fail)?;
+        args.push(arena.intern(ty.clone()));
+        callee_subst.insert(cvar, ty);
     }
     Ok((args, callee_subst))
 }
 
-fn reason_name(r: MonoTyReason) -> &'static str {
-    r.bucket()
+/// Why an instantiation produced no instance.
+///
+/// [`Fail::Unresolved`] is data: the walk had no binding to key an
+/// instantiation on, which is a property of the RECORD, not of the types.
+/// [`Fail::Unconstrained`] is a decided rejection
+/// ([`RejectionKind::UnconstrainedTypeVar`]).
+///
+/// **`UnboundGeneric` is a rejection here, not data.** A shared generic root is
+/// never put on the worklist -- it goes to
+/// [`InstanceGraph::uninstantiated_roots`] -- so every body the walk enters is
+/// INSTANTIATED, and a declared generic missing from the enclosing substitution
+/// means that substitution is incomplete. The boxed answer belongs only to
+/// legacy lowering, where shared snapshots actually exist.
+enum Fail {
+    Unresolved(&'static str),
+    Unconstrained(&'static str),
 }
 
-/// The backend variant of `rep` serving `target`, through production's own
-/// selector. `Err` (nothing serves it) keeps `rep`: the boundary pass reports
-/// that as an INVALID boundary for the target, which is the outcome plan S 10
-/// requires, rather than dropping the edge and under-reporting the graph.
-fn variant_for(
-    ws: &Workspace,
-    rep: FuncRef,
-    target: bone_semantic::hir::FnBackend,
-) -> FuncRef {
-    let name = ws.module(rep.module).functions[rep.func].name;
-    skull_mir::lower::backend_variant(ws, name, rep, target).unwrap_or(rep)
+impl Fail {
+    fn reason(&self) -> &'static str {
+        match self {
+            Self::Unresolved(r) | Self::Unconstrained(r) => r,
+        }
+    }
+}
+
+fn convert_fail(r: MonoTyReason) -> Fail {
+    match r {
+        // Inference never bound the variable, so there is no type to
+        // instantiate at -- not a missing record, an absent constraint.
+        MonoTyReason::UnresolvedInfer(_) => Fail::Unconstrained(r.bucket()),
+        // An incomplete substitution in an instantiated body. See [`Fail`].
+        MonoTyReason::UnboundGeneric(_) => Fail::Unconstrained(r.bucket()),
+        _ => Fail::Unresolved(r.bucket()),
+    }
 }
 
 /// Every `Expr::Global(name)` in `body` that names a FUNCTION -- skull's own
@@ -809,7 +2050,6 @@ fn fn_value_sites(
     ws: &Workspace,
     inf: &BodyInference,
     body: &bone_semantic::hir::Body,
-    target: bone_semantic::hir::FnBackend,
 ) -> Vec<(Idx<bone_semantic::hir::Expr>, FuncRef)> {
     use bone_semantic::hir::{Callee, Expr as E};
     let mut called_values: BTreeSet<u32> = BTreeSet::new();
@@ -841,10 +2081,72 @@ fn fn_value_sites(
                 FuncRef { module: m, func: f }
             }
         };
-        out.push((e, variant_for(ws, rep, target)));
+        // bone's own resolution is already the representative; the fallback
+        // above picked an arbitrary member of a group that manglings proved
+        // uniform, so it is canonicalized to the same one.
+        out.push((e, skull_mir::lower::canonical_variant(ws, rep)));
     }
     out.sort_by_key(|(e, _)| *e);
     out
+}
+
+/// One synthesized-call site, resolved against its instance.
+struct GeneratedSite {
+    expr: Idx<bone_semantic::hir::Expr>,
+    name: &'static str,
+}
+
+/// The verdict on one storage-condition query, kept as three outcomes rather
+/// than a bool. A bool made every conversion failure read as "boxed", which is
+/// only the right answer for ONE of them.
+enum CondVerdict {
+    /// The column element the receiver stores, when there is one.
+    /// [`StorageCond::Always`] holds without naming an element.
+    Holds(Option<skull_mir::mir::ColumnElem>),
+    /// The receiver is not column-stored -- an ordinary negative.
+    DoesNot,
+    /// The receiver's type could not be made concrete. In an INSTANTIATED body
+    /// this is an invariant violation, not a storage answer.
+    Failed(MonoTyReason),
+}
+
+/// Which of `__vec_data_sort`'s two column arms a site emits
+/// (`skull-mir/src/lower/storage.rs`, the `("__vec_data_sort", ..)` arm): a
+/// `nobox` element applies the key to the LEAVES, everything else to the
+/// materialized element.
+///
+/// Lowering asks `is_nobox_struct`, which is `is_nobox_nominal` plus the
+/// `values_first_class` gate. That flag is set only by the GLSL emitter, and
+/// GLSL is not an `FnBackend` this walk runs for, so the two agree on every
+/// target an `InstanceGraph` is built for -- and on a target where they would
+/// not, an `is_nobox_nominal` answer is the wrong one to bake in here.
+fn sort_entry(ws: &Workspace, elem: &skull_mir::mir::ColumnElem) -> &'static str {
+    if skull_mir::lower::is_nobox_nominal(ws, elem.name) {
+        "__rock_col_sort_leaves"
+    } else {
+        "__rock_col_sort"
+    }
+}
+
+/// Which runtime entries an INDEX on a column-stored `Map` emits.
+///
+/// Three arms in `storage.rs`, and the HIR says which one is taken:
+/// `m[k] = v` is `map_column_store` (`__map_col_slot`, plus `__map_col_free`
+/// on the absent arm when the stored value can be null); every other position
+/// -- an rvalue read, or the place base of `m[k].f = v` -- resolves the key
+/// through `__map_col_slot_checked`.
+///
+/// `nullable` is `None` when the stored value's type did not convert. Both
+/// names are kept then and the site is counted as approximated: dropping
+/// `__map_col_free` would drop a symbol emission requires, which is the
+/// direction that breaks a build.
+fn map_index_entries(store: Option<Option<bool>>) -> (Vec<&'static str>, bool) {
+    match store {
+        None => (vec!["__map_col_slot_checked"], false),
+        Some(Some(true)) => (vec!["__map_col_slot", "__map_col_free"], false),
+        Some(Some(false)) => (vec!["__map_col_slot"], false),
+        Some(None) => (vec!["__map_col_slot", "__map_col_free"], true),
+    }
 }
 
 /// Source operations whose lowering can SYNTHESIZE a `stdlib_funcref` /
@@ -854,22 +2156,99 @@ fn compiler_generated_sites(
     ws: &Workspace,
     inf: &BodyInference,
     body: &bone_semantic::hir::Body,
-) -> Vec<(Idx<bone_semantic::hir::Expr>, &'static str)> {
-    use bone_semantic::hir::{Callee, Expr as E};
-    let mut out: Vec<(Idx<bone_semantic::hir::Expr>, &'static str)> = Vec::new();
-    let mut push = |e, names: &'static [&'static str]| {
-        for n in names {
-            out.push((e, *n));
+    subst: &MonoSubst,
+    examined: &mut usize,
+    failures: &mut Vec<(Idx<bone_semantic::hir::Expr>, MonoTyReason)>,
+    approximated: &mut usize,
+) -> Vec<GeneratedSite> {
+    use bone_semantic::hir::{Callee, Expr as E, FnBackend};
+    // The receiver's CONCRETE type under this instance's substitution, which is
+    // what the storage condition is asked about.
+    let verdict = |recv: Idx<bone_semantic::hir::Expr>, cond: StorageCond| -> CondVerdict {
+        if cond == StorageCond::Always {
+            return CondVerdict::Holds(None);
+        }
+        let Some(ty) = inf.expr_types.get(recv) else {
+            return CondVerdict::Failed(MonoTyReason::NoNode);
+        };
+        let mono = match skull_mir::monoty::convert(ws, inf, *ty, subst) {
+            Ok(m) => m,
+            Err(r) => return CondVerdict::Failed(r),
+        };
+        let elem = match cond {
+            // `Any`, stated rather than defaulted: this graph selects no
+            // variant. The storage oracle's target argument reaches
+            // `columns_available`, which is unconditionally true, so the two
+            // agree for every target -- and a target-dependent answer here
+            // would be a second target-dependence in a target-neutral walk.
+            StorageCond::VecColumn => {
+                skull_mir::lower::vec_column_elem_mono(ws, FnBackend::Any, &mono)
+            }
+            StorageCond::MapColumn => {
+                skull_mir::lower::map_column_value_mono(ws, FnBackend::Any, &mono)
+            }
+            StorageCond::Always => return CondVerdict::Holds(None),
+        };
+        match elem {
+            Some(elem) => CondVerdict::Holds(Some(elem)),
+            None => CondVerdict::DoesNot,
         }
     };
+    // EVERY failure is reported, including `UnboundGeneric`. The walk only ever
+    // enters instantiated bodies -- a shared generic root goes to
+    // `uninstantiated_roots` and is never worklisted -- so an unbound declared
+    // generic here means the substitution is incomplete, not that the element is
+    // legitimately opaque. Reading any of them as "boxed" would let a zero edge
+    // count mean "the sites were discarded".
+    let mut settle = |recv, cond, e: Idx<bone_semantic::hir::Expr>| -> Option<Option<_>> {
+        *examined += 1;
+        match verdict(recv, cond) {
+            CondVerdict::Holds(elem) => Some(elem),
+            CondVerdict::DoesNot => None,
+            CondVerdict::Failed(r) => {
+                failures.push((e, r));
+                None
+            }
+        }
+    };
+    // `m[k] = v` is the one index position that lowers through
+    // `map_column_store`; the value expression is what decides whether the
+    // absent arm (`__map_col_free`) exists at all.
+    let mut stored_through: FxHashMap<Idx<bone_semantic::hir::Expr>, Idx<bone_semantic::hir::Expr>> =
+        FxHashMap::default();
+    for (_, expr) in body.expr_arena.iter() {
+        if let E::Assign { target, value } = expr {
+            stored_through.insert(*target, *value);
+        }
+    }
+    // Whether the stored value can be null. `None` means its type did not
+    // convert, which keeps both arms -- see [`map_index_entries`].
+    let stored_nullable = |value: Idx<bone_semantic::hir::Expr>| -> Option<bool> {
+        let ty = inf.expr_types.get(value)?;
+        let mono = skull_mir::monoty::convert(ws, inf, *ty, subst).ok()?;
+        Some(mono.peel_nullable().1)
+    };
+
+    let mut out: Vec<GeneratedSite> = Vec::new();
     for (e, expr) in body.expr_arena.iter() {
         match expr {
-            E::Call { callee: Callee::Unresolved { name, .. }, .. } => {
-                if let Some((_, names)) =
-                    COMPILER_GENERATED_TRIGGERS.iter().find(|(t, _)| *t == name.as_str())
-                {
-                    push(e, names);
+            E::Call { callee: Callee::Unresolved { name, .. }, args } => {
+                let Some((trigger, cond, names)) =
+                    COMPILER_GENERATED_TRIGGERS.iter().find(|(t, _, _)| *t == name.as_str())
+                else {
+                    continue;
+                };
+                // The receiver is the UFCS first argument; an arm with no
+                // receiver cannot be the column form.
+                let Some(recv) = args.clone().next() else { continue };
+                let Some(elem) = settle(recv, *cond, e) else { continue };
+                // The one trigger with alternatives: the element decides which.
+                if *trigger == "__vec_data_sort" {
+                    let Some(elem) = elem else { continue };
+                    out.push(GeneratedSite { expr: e, name: sort_entry(ws, &elem) });
+                    continue;
                 }
+                out.extend(names.iter().map(|n| GeneratedSite { expr: e, name: n }));
             }
             // The index forms have no callee name to key on: the receiver's
             // CONSTRUCTOR is the trigger. Rendering is confined to index exprs,
@@ -880,88 +2259,61 @@ fn compiler_generated_sites(
                 // `None` panics rather than degrading, which is how this was
                 // caught immediately.
                 let r = ws.render(Some(inf), *ty);
-                if let Some((_, names)) =
-                    INDEX_TRIGGERED.iter().find(|(ctor, _)| r.starts_with(*ctor))
-                {
-                    push(e, names);
+                let Some((ctor, cond, names)) =
+                    INDEX_TRIGGERED.iter().find(|(ctor, _, _)| r.starts_with(*ctor))
+                else {
+                    continue;
+                };
+                if settle(*base, *cond, e).is_none() {
+                    continue;
                 }
+                if *ctor == "Map" {
+                    let (names, approx) = map_index_entries(
+                        stored_through.get(&e).map(|v| stored_nullable(*v)),
+                    );
+                    *approximated += usize::from(approx);
+                    out.extend(names.into_iter().map(|n| GeneratedSite { expr: e, name: n }));
+                    continue;
+                }
+                out.extend(names.iter().map(|n| GeneratedSite { expr: e, name: n }));
             }
             _ => {}
         }
     }
-    out.sort_by_key(|(e, n)| (*e, *n));
+    out.sort_by_key(|s| (s.expr, s.name));
     out
 }
 
-/// The unique stdlib function `name` serving `target` -- the same lookup
-/// `Builder::stdlib_funcref` performs, and it fails on the same conditions
-/// (missing name, no serving body, residual ambiguity).
-fn stdlib_entry(
-    ws: &Workspace,
-    name: &str,
-    target: bone_semantic::hir::FnBackend,
-) -> Option<FuncRef> {
+/// The GROUP REPRESENTATIVE of the stdlib function `name` -- the target-neutral
+/// form of the lookup `Builder::stdlib_funcref` performs, and it fails on the
+/// same conditions (missing name, residual ambiguity).
+///
+/// A compiler-generated entry may be declared as a backend-variant group
+/// (`inline(lua)` + `inline(js)` of one signature). Filtering candidates by a
+/// TARGET would put target selection back into the walk, and filtering by `Any`
+/// -- which serves everything -- would call every such group ambiguous. So every
+/// declaration is canonicalized through the ONE grouping oracle and the answer
+/// must be unanimous: a name whose declarations are NOT one backend-variant
+/// group is the residual ambiguity `stdlib_funcref` also refuses.
+pub fn stdlib_entry_representative(ws: &Workspace, name: &str) -> Option<FuncRef> {
     let decls = ws.functions_by_name.get(&ustr::Ustr::from(name))?;
-    let serving: Vec<FuncRef> = decls
+    let mut reps = decls
         .iter()
-        .filter(|(m, f)| serves(ws.module(*m).functions[*f].backend, target))
-        .map(|&(m, f)| FuncRef { module: m, func: f })
-        .collect();
-    match serving.as_slice() {
-        [one] => Some(*one),
-        _ => None,
-    }
+        .map(|&(m, f)| skull_mir::lower::canonical_variant(ws, FuncRef { module: m, func: f }));
+    let first = reps.next()?;
+    reps.all(|r| r == first).then_some(first)
 }
 
-fn serves(
+/// Whether a declaration with backend `decl` can be emitted for `target`.
+/// THE compatibility test -- the walk, the boundary pass and every artifact
+/// view ask this one, so "does this declaration serve me" cannot be answered
+/// two ways.
+pub fn serves(
     decl: bone_semantic::hir::FnBackend,
     target: bone_semantic::hir::FnBackend,
 ) -> bool {
     use bone_semantic::hir::FnBackend;
     decl == FnBackend::Any || target == FnBackend::Any || decl == target
-}
-
-/// Callees of the bodies production ALWAYS emits and that are not functions:
-/// decorator definitions and global initializers. Mirrors
-/// `mir_emit::reachable_fns`'s `extra_roots` / `extra_root_names` pair -- the
-/// inference-map edges and the fn-value name scan, which are complementary nets.
-fn always_emitted_callees(
-    ws: &Workspace,
-    target: bone_semantic::hir::FnBackend,
-) -> Vec<FuncRef> {
-    let mut out = Vec::new();
-    for module in ws.modules.iter() {
-        if module.id == ModuleId::builtin() {
-            continue;
-        }
-        let Some(inference) = ws.inference(module.id) else { continue };
-        let mut owners: Vec<&BodyOwner> = module
-            .bodies
-            .keys()
-            .filter(|o| matches!(o, BodyOwner::Decorator(_) | BodyOwner::Global(_)))
-            .collect();
-        owners.sort_by_key(|o| format!("{o:?}"));
-        for owner in owners {
-            let Some(inf) = inference.per_fn.get(owner) else { continue };
-            let mut calls: Vec<(ModuleId, Idx<Function>)> =
-                inf.resolved_overload_calls.values().copied().collect();
-            for info in inf.for_iter_protocol.values() {
-                calls.extend(info.iter_fn);
-            }
-            calls.sort_by_key(|(m, f)| (m.raw(), f.into_raw().into_u32()));
-            out.extend(
-                calls
-                    .into_iter()
-                    .map(|(m, f)| variant_for(ws, FuncRef { module: m, func: f }, target)),
-            );
-            if let Some(b) = module.bodies.get(owner) {
-                out.extend(fn_value_sites(ws, inf, b, target).into_iter().map(|(_, f)| f));
-            }
-        }
-    }
-    out.sort_by_key(|r| (r.module.raw(), r.func.into_raw().into_u32()));
-    out.dedup();
-    out
 }
 
 /// Classify every reached callee that is a BOUNDARY, per
@@ -971,29 +2323,119 @@ fn always_emitted_callees(
 /// them (plan S 9: one `InstanceId` OR one `BoundaryId`), and keeping both here
 /// makes the split's cost countable instead of changing the round-1 numbers
 /// underneath it.
+/// The boundary class of one declaration, or `None` if it has a Rock body the
+/// walk enters. The ONE classifier: [`classify_boundaries`] and
+/// [`InstanceGraph::closure`] both ask it, so "is this a boundary" cannot be
+/// answered two ways.
+pub fn boundary_class_for(
+    f: &Function,
+    erased: &BTreeSet<String>,
+) -> Option<BoundaryClass> {
+    if erased.contains(f.name.as_str()) {
+        return Some(BoundaryClass::ErasedRuntimeEntry);
+    }
+    declared_boundary(f)
+}
+
+/// The part of the classification that reads only the DECLARATION. The walk uses
+/// this rather than [`boundary_class_of`] because `erased_entries` is still
+/// being discovered while it runs, and expansion must not depend on the order
+/// two instances were reached in. It is a SUBSET of the full classification, so
+/// nothing the walk calls expandable can later be excused as a boundary and
+/// nothing the walk skips can become un-excused.
+///
+/// **`@intrinsic` is not unconditionally foreign.** Emit resolution is
+/// `backend mapping > portable Rock fallback > spanned reject`
+/// (`skull_mir::intrinsics`), so an intrinsic that HAS a Rock body has a body
+/// the shared graph must expand -- the walk enumerates it either way, and
+/// calling it a boundary made "expanded or boundary" a label rather than a
+/// partition. Three declarations keep it foreign, each for its own reason:
+///
+/// - a compile-time expansion intrinsic (`@struct_expand`, `@shader_expand`,
+///   `@vertex_expand`, `@uniform_expand`, `@materialize`) has no callable body
+///   at all -- the annotation IS the declaration surface;
+/// - `@native_required` skips the fallback rung, so its Rock body, if any, is
+///   never the emitted one and a missing mapping is fatal rather than portable;
+/// - an intrinsic with no Rock body has nothing to expand.
+///
+/// A target artifact view may still REPLACE an expanded fallback with that
+/// target's mapping. That is an artifact decision, not a shared-graph one.
+fn declared_boundary(f: &Function) -> Option<BoundaryClass> {
+    if f.is_extern {
+        return Some(BoundaryClass::Extern);
+    }
+    if skull_mir::intrinsics::expand_kind(f).is_some() {
+        return Some(BoundaryClass::Intrinsic);
+    }
+    if f.annotations.iter().any(|a| a.name.name.as_str() == "intrinsic") {
+        // `inline_body` is the luajit MAPPING; a Rock body is the fallback.
+        return (skull_mir::intrinsics::is_native_required(f) || !has_rock_body(f))
+            .then_some(BoundaryClass::Intrinsic);
+    }
+    if f.inline_body.is_some() {
+        return Some(BoundaryClass::InlineBody);
+    }
+    None
+}
+
+/// Whether the declaration carries a portable Rock body, as opposed to only a
+/// foreign one. `has_body` on the module is the walk's own question; this is the
+/// declaration-level form the classifier needs before any module lookup.
+fn has_rock_body(f: &Function) -> bool {
+    f.inline_body.is_none() && !f.is_extern
+}
+
+/// Runtime entries an opaque inline body CALLS.
+///
+/// An inline body is foreign text, so the walk cannot lower it -- but emission
+/// still has to emit every symbol it names, and "opaque by design" cannot make a
+/// required symbol vanish from the graph. The corpus's case is
+/// `__rock_vec_column_elements`: the reflection walker calls it from Lua and no
+/// lowering arm synthesizes it.
+///
+/// The scan is over [`ERASED_RUNTIME_ENTRIES`] only. That is deliberate: a
+/// general Lua parse is not what this needs, and the catalogue is the closed set
+/// of compiler-owned runtime symbols an opaque body may depend on. A name
+/// appearing in a comment or a string inside the body would be a false positive;
+/// none exists in the corpus, and a false POSITIVE keeps a symbol alive, where a
+/// false negative drops one emission requires.
+fn record_inline_body_deps(g: &mut InstanceGraph, ws: &Workspace) {
+    // METADATA ONLY so far: each sibling's dependency is recorded and joins
+    // `erased_entries`, but it is not yet resolved to a `BoundaryId` or an
+    // instance the way a call edge is. That resolution belongs to the artifact
+    // view, which is what decides the emitted spelling and the retention set;
+    // recording it here without a target would be a second, weaker reachability
+    // mechanism. All members of a represented backend-variant group are scanned;
+    // the artifact later reads only the declaration it selected.
+    let mut deps: BTreeMap<DeclKey, BTreeSet<&'static str>> = BTreeMap::new();
+    let declarations: BTreeSet<DeclKey> = g
+        .instances
+        .iter()
+        .flat_map(|i| skull_mir::lower::backend_variant_group(ws, i.func))
+        .map(DeclKey)
+        .collect();
+    for decl in declarations {
+        let f = &ws.module(decl.0.module).functions[decl.0.func];
+        let Some(body) = &f.inline_body else { continue };
+        let text = body.1.as_str();
+        for name in ERASED_RUNTIME_ENTRIES {
+            if text.contains(name) {
+                deps.entry(decl).or_default().insert(name);
+                g.erased_entries.insert((*name).to_string());
+            }
+        }
+    }
+    g.inline_body_deps = deps;
+}
+
 fn classify_boundaries(g: &mut InstanceGraph, ws: &Workspace) {
     let erased: BTreeSet<String> = g.erased_entries.clone();
     let mut found: BTreeMap<String, Boundary> = BTreeMap::new();
     for i in &g.instances {
         let f = &ws.module(i.func.module).functions[i.func.func];
         let symbol = mangle_fn(ws, f);
-        let intrinsic = f.annotations.iter().any(|a| a.name.name.as_str() == "intrinsic");
-        let class = if erased.contains(f.name.as_str()) {
-            BoundaryClass::ErasedRuntimeEntry
-        } else if intrinsic {
-            BoundaryClass::Intrinsic
-        } else if f.is_extern {
-            BoundaryClass::Extern
-        } else if f.inline_body.is_some() {
-            BoundaryClass::InlineBody
-        } else {
-            continue;
-        };
-        // `variant_for` kept the representative when nothing served the target,
-        // so a decl whose backend does not serve it is the S 1.6 outcome:
-        // reject with a span, never a stub.
-        let invalid_on_target = !serves(f.backend, g.target);
-        found.insert(symbol.clone(), Boundary { class, symbol, invalid_on_target });
+        let Some(class) = boundary_class_for(f, &erased) else { continue };
+        found.insert(symbol.clone(), Boundary { class, symbol });
     }
     g.boundaries = found;
 }
@@ -1015,7 +2457,7 @@ fn record_coroutine_helpers(g: &mut InstanceGraph, ws: &Workspace) {
             continue;
         }
         let base = mangle_fn(ws, f);
-        let owner_symbol = g.symbol(ws, i);
+        let owner_identity = g.identity(ws, i);
         let mut suffixes: Vec<&'static str> = vec!["__step", "__resume"];
         if f.return_ty
             .and_then(|t| skull_mir::lower::coroutine_yield_channel(ws, t))
@@ -1025,7 +2467,7 @@ fn record_coroutine_helpers(g: &mut InstanceGraph, ws: &Workspace) {
         }
         for suffix in suffixes {
             out.insert(CoroutineHelper {
-                owner_symbol: owner_symbol.clone(),
+                owner_identity: owner_identity.clone(),
                 suffix,
                 symbol_today: format!("{base}{suffix}"),
             });
@@ -1039,32 +2481,41 @@ impl InstanceGraph {
     ///
     /// Each is a Stage-3 collision: `emit_coroutine` names helpers from the
     /// source `FuncRef`, so every instance of one generic `co fn` produces the
-    /// same `<name>__step` / `__resume` / `__advance`. Nothing detects it today
-    /// because no generic `co fn` is ever specialized -- `compute_call_spec`
-    /// bails on `is_coroutine` first (`shape.rs:1584`, the subject of
-    /// `generic_coroutine_column_param_sentinel`).
-    ///
-    /// **That premise is branch-scoped.** It holds on `mono`, where the sentinel
-    /// stays pinned. The Stage-0f tactical slice (`mono-0f-slice`, `285853bad`)
-    /// falsifies it: it drops the `is_coroutine` bail on the column trigger, two
-    /// instantiations of one `co fn` come out correct, and the sentinel FLIPS --
-    /// on that branch only. If that slice or a successor merges, this helper
-    /// starts seeing specialized coroutines and the collisions stop being latent.
+    /// same `<name>__step` / `__resume` / `__advance`. The current specializer
+    /// does not specialize coroutines, so the graph exposes collisions that the
+    /// Stage-3 cutover must prevent.
     pub fn colliding_coroutine_helpers(&self) -> BTreeMap<String, BTreeSet<String>> {
         let mut by_symbol: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for h in &self.coroutine_helpers {
             by_symbol
                 .entry(h.symbol_today.clone())
                 .or_default()
-                .insert(h.owner_symbol.clone());
+                .insert(h.owner_identity.clone());
         }
         by_symbol.retain(|_, owners| owners.len() > 1);
         by_symbol
     }
 }
 
-fn body_inference(ws: &Workspace, f: FuncRef) -> Option<&BodyInference> {
-    ws.inference(f.module)?.per_fn.get(&BodyOwner::Function(f.func))
+pub(crate) enum FunctionBody<'a> {
+    Ready { inf: &'a BodyInference, body: &'a Body },
+    NoInference,
+    NoBody,
+    StaleInference,
+}
+
+pub(crate) fn function_body(ws: &Workspace, f: FuncRef) -> FunctionBody<'_> {
+    let owner = BodyOwner::Function(f.func);
+    let Some(inf) = ws.inference(f.module).and_then(|ir| ir.per_fn.get(&owner)) else {
+        return FunctionBody::NoInference;
+    };
+    let Some(body) = ws.module(f.module).bodies.get(&owner) else {
+        return FunctionBody::NoBody;
+    };
+    if inf.body_generation != body.generation {
+        return FunctionBody::StaleInference;
+    }
+    FunctionBody::Ready { inf, body }
 }
 
 /// Every function the emitter would root, using production's own predicate.
@@ -1085,10 +2536,11 @@ pub fn emission_roots(ws: &Workspace, project_root: Option<&str>) -> Vec<FuncRef
     roots
 }
 
-/// The compact manifest: one line per instance, sorted by symbol.
+/// The compact manifest: one line per instance, sorted by identity, each line
+/// carrying its identity and its display symbol.
 pub fn render_manifest(ws: &Workspace, g: &InstanceGraph) -> String {
     let mut out = String::new();
-    for s in g.sorted_symbols(ws) {
+    for s in g.manifest_lines(ws) {
         out.push_str(&s);
         out.push('\n');
     }
@@ -1110,8 +2562,8 @@ pub fn instance_count(g: &InstanceGraph) -> usize {
     g.instances.len()
 }
 
-/// Reconciliation of today's conditional specializer against the shadow graph
-/// (plan S 15a). Equality is NOT expected -- the old mechanism is conditional,
+/// Reconciliation of the current conditional specializer against the shadow graph
+/// (plan S 15a). Equality is NOT expected -- the current mechanism is conditional,
 /// so the shadow side is strictly larger. What must hold is that nothing today's
 /// machinery produces is MISSING from the shadow graph; an absence in that
 /// direction means the shadow walk cannot see an edge production already takes.
@@ -1136,7 +2588,9 @@ pub struct Reconciliation {
 }
 
 /// A today-slot matches a shadow arg when the slot is `None` (the partial key
-/// erased it, so it constrains nothing) or the rendered types are equal.
+/// erased it, so it constrains nothing) or the canonical types are equal. Both
+/// sides encode with `MonoTy::canonical`, so a pretty-printing ambiguity cannot
+/// match two different types to each other.
 fn slots_match(slots: &[Option<String>], shadow: &[String]) -> bool {
     slots.len() == shadow.len()
         && slots
@@ -1152,13 +2606,13 @@ pub fn reconcile(
 ) -> Reconciliation {
     let (today, rejected_sites) = skull_mir::spec_census::today_specializations(ws, target);
 
-    // Shadow instances grouped by function, as rendered argument lists.
+    // Shadow instances grouped by function, as canonical argument lists.
     let mut by_func: FxHashMap<(u32, u32), Vec<Vec<String>>> = FxHashMap::default();
     for i in &g.instances {
         by_func
             .entry((i.func.module.raw(), i.func.func.into_raw().into_u32()))
             .or_default()
-            .push(i.args.iter().map(|a| g.arena.render(*a)).collect());
+            .push(i.args.iter().map(|a| g.arena.canonical(*a)).collect());
     }
 
     let mut r = Reconciliation { today: today.len(), rejected_sites, ..Default::default() };
@@ -1201,7 +2655,7 @@ pub fn reconcile(
         .iter()
         .filter(|i| {
             let k = (i.func.module.raw(), i.func.func.into_raw().into_u32());
-            let args: Vec<String> = i.args.iter().map(|a| g.arena.render(*a)).collect();
+            let args: Vec<String> = i.args.iter().map(|a| g.arena.canonical(*a)).collect();
             !matched_shadow.contains(&(k.0, k.1, args))
         })
         .count();

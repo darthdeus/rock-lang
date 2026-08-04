@@ -1,7 +1,8 @@
 //! @no_check
-//! Cast expressions: `e as T`. The result type is the target annotation `T`
-//! (the operand is still type-checked). Needs `Expr::As` HIR + lowering
-//! (`ExprKind::As`, lowering the TypeExpr) + inference (infer operand, return T).
+//! Cast expressions: `e as T`. `as` is a checked explicit conversion -- the
+//! operand's inferred type must reach `T` through the closed conversion
+//! relation (`int`/`float` either way, or ordinary assignment compatibility).
+//! The result type is `T`.
 
 //- as_int_to_float
 fn f() -> int {
@@ -17,8 +18,10 @@ fn f() -> int {
     5
 }
 
-// the target may be a nominal type
-//- as_to_nominal
+// `as` cannot reinterpret `any` as a nominal type: that asserts a type without
+// static proof, a runtime nominal check, or backend representation validation.
+// `cast<T>` is the explicit escape hatch for erased storage and FFI recovery.
+//- as_to_nominal @fail
 struct Point { x: int, y: int }
 fn f(a: any) -> int {
     let p = a as Point

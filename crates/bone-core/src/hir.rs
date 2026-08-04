@@ -571,6 +571,15 @@ pub struct InterpSpec {
     pub format_type: Option<char>,
 }
 
+/// Which surface form produced an `Expr::As`. `::` checks its operand against
+/// the target as an expected type; `as` converts an independently inferred
+/// source type through the closed conversion relation.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum AsKind {
+    Ascribe,
+    Cast,
+}
+
 #[derive(Copy, Clone, Debug)]
 pub enum Expr {
     Unit,
@@ -609,6 +618,7 @@ pub enum Expr {
     As {
         value: Idx<Expr>,
         target: TyId,
+        kind: AsKind,
     },
 
     Index {

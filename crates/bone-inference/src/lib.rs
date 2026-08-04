@@ -2,9 +2,9 @@ use bone_core::hir::{Expr, Module, Statement};
 
 use bone_core::{
     hir::{
-        BindingInfo, BindingKind, BindingPattern, BuiltinTy, Callee, DecoratorDef, Function,
-        GlobalDef, InterpPart, Pattern, StructDef, StructFieldDef, TyId, TypeCtor, TypeExpr, VarId,
-        VariantArgs, VariantPayload,
+        AsKind, BindingInfo, BindingKind, BindingPattern, BuiltinTy, Callee, DecoratorDef,
+        Function, GlobalDef, InterpPart, Pattern, StructDef, StructFieldDef, TyId, TypeCtor,
+        TypeExpr, VarId, VariantArgs, VariantPayload,
     },
     prelude::*,
 };

@@ -29,7 +29,7 @@ impl Builder<'_> {
         if let Callee::Unresolved { name, .. } = callee {
             if matches!(name.as_str(), "inspect" | "inspect_formatted") {
                 if let Some(&arg) = arg_idxs.first() {
-                    if let Some(elem) = self.vec_column_elem_of(arg) {
+                    if let Some(elem) = self.vec_column_elem_of(arg)? {
                         if self.is_nobox_struct(elem.name) {
                             return Err(CompilerError::new_with_label(
                                 self.body.expr_spans[e],
@@ -143,7 +143,7 @@ impl Builder<'_> {
         if let Callee::Unresolved { name, .. } = callee {
             if matches!(name.as_str(), "push" | "vec_push") {
                 if let [recv, item] = arg_idxs[..] {
-                    if let Some(elem) = self.vec_column_elem_of(recv) {
+                    if let Some(elem) = self.vec_column_elem_of(recv)? {
                         return self.column_push(recv, item, elem);
                     }
                 }
@@ -170,13 +170,13 @@ impl Builder<'_> {
             // the opaque body would hand back a `_data` table that every later
             // column access then indexes as nil.
             if name.as_str() == "__vec_data_alloc" && arg_idxs.len() == 1 {
-                if let Some(elem) = self.vec_column_elem_of(e) {
+                if let Some(elem) = self.vec_column_elem_of(e)? {
                     let capacity = self.lower_expr(arg_idxs[0])?;
                     return Ok(ValueRepr::Scalar(self.empty_column_vec(elem, capacity)?));
                 }
             }
             if name.as_str() == "vec_new" && arg_idxs.is_empty() {
-                if let Some(elem) = self.vec_column_elem_of(e) {
+                if let Some(elem) = self.vec_column_elem_of(e)? {
                     let capacity = self.emit_cur(Inst::Const(Lit::Int(0)));
                     return Ok(ValueRepr::Scalar(self.empty_column_vec(elem, capacity)?));
                 }
@@ -194,12 +194,12 @@ impl Builder<'_> {
             // `map_new()` is the Map's `vec_new`: its value type comes from the
             // CALL's own type, so it cannot be read off an argument.
             if name.as_str() == "map_new" && arg_idxs.is_empty() {
-                if let Some(elem) = self.map_column_value_of(e) {
+                if let Some(elem) = self.map_column_value_of(e)? {
                     return Ok(ValueRepr::Scalar(self.empty_column_map(elem)?));
                 }
             }
             if name.as_str() == "__rock_vec_from_lua_array" {
-                if let ([raw, len], Some(elem)) = (&arg_idxs[..], self.vec_column_elem_of(e)) {
+                if let ([raw, len], Some(elem)) = (&arg_idxs[..], self.vec_column_elem_of(e)?) {
                     let raw = self.lower_expr(*raw)?;
                     let len = self.lower_expr(*len)?;
                     return Ok(ValueRepr::Scalar(
@@ -468,7 +468,7 @@ impl Builder<'_> {
                 if let Some(d) = key
                     .iter()
                     .flatten()
-                    .map(crate::lower::shape::reified_depth)
+                    .map(crate::lower::shape::growth_depth)
                     .max()
                     .filter(|d| *d > crate::lower::shape::ABLATION_GROWTH_DEPTH)
                 {
