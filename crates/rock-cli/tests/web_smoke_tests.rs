@@ -243,76 +243,56 @@ fn web_pass_sampling() {
     };
 }
 
-// mag's UNIFORM BLOCKS, in a real WebGL2 context, against a real driver.
+// mag's ARRAY BLOCK, in a real WebGL2 context, against a real driver.
 //
-// The sprite program's array block (binding 4) is the subject. Nothing else
-// reaches it in a browser: `just t`'s fake-GL harness records call shapes and
-// STUBS the layout check outright, because that stub models no std140 layout --
-// so it can say the block was bound, never that the driver agrees with the
-// offsets the compiler planned, and never that anything filled it.
+// Nothing else reaches it in a browser: `just t`'s fake-GL harness records call
+// shapes and STUBS the layout check outright, because that stub models no std140
+// layout -- so it can say a block was bound, never that a driver agrees with the
+// offsets the compiler planned, and never that anything filled it. Passing here
+// is also the only confirmation that an array member's `name[0]` query resolves
+// on a real driver: registration is transactional and publishes nothing when the
+// layout check fails.
 //
-// `stone_unfilled_uniform_block_count` is the same draw-time gate that caught
-// the half-finished port natively: it stamps a block at each real draw and at
-// each upload, and reports any block drawn with but never filled. Zero after 30
-// real frames means every declared block -- both array blocks among them -- was
-// filled before it was drawn with, on a driver that computed its own offsets.
+// **`unfilled == 0` alone proves nothing**, which is the trap this shape exists
+// to avoid. That counter reports blocks DRAWN WITH but never filled; a block
+// nobody draws is never stamped `drawn` and so can never contribute, and a build
+// that registered binding 4 and never rendered through it reads zero and looks
+// clean. `registered` and `drawn` are its denominators.
+//
+// All four numbers come from ONE run, so they describe the same frames. Split
+// across two runs they would rebuild and re-render mag twice -- real cost
+// against a full profile that already has contention timeouts -- while letting
+// the premises drift apart.
+//
+// Read out of `__SW`, the JS runtime's OWN per-block record, which is the state
+// the gate itself consults rather than a re-derivation of it.
 //
 // Separate from `web_chrome_screenshot_and_click_pick_mag` deliberately. That
-// one fails on its click-pick step (`docs/known-failing-tests.md`), and a red
-// gate cannot certify anything underneath it -- an unfilled block would hide
-// inside a failure the suite already tolerates.
+// one is red (`docs/known-failing-tests.md`), and an already-red gate cannot
+// certify anything underneath it -- an unfilled block would hide inside a
+// failure the suite already tolerates.
 #[test]
-fn web_chrome_mag_uniform_blocks_are_filled() {
+fn web_chrome_mag_array_block_is_registered_drawn_and_filled() {
     let Some(_) = run_cdp(
         "mag",
-        "web_chrome_mag_uniform_blocks_are_filled",
+        "web_chrome_mag_array_block_is_registered_drawn_and_filled",
         &[
             "--frames",
             "30",
-            // A COUNT, not a boolean: "0" distinguishes "every block was filled"
-            // from a predicate that could read true for a build with no blocks
-            // at all. The registration itself is asserted below.
+            // The two premises report as booleans and the two failure counts as
+            // NUMBERS, so a mismatch names which one broke and by how much
+            // rather than collapsing to `false`.
             "--expect",
-            "String(stone_unfilled_uniform_block_count())",
+            "(function(){var reg=0,drawn=0,unfilled=0,S=__SW.shaders;\
+             for (var h in S) { var sh=S[h]; if(!sh||!sh.blocks) continue;\
+             for (var i=0;i<sh.blocks.length;i++){ var b=sh.blocks[i];\
+             if(!b||b.binding!==4) continue; reg++;\
+             if(b.drawn) drawn++; if(b.drawn&&!b.uploaded) unfilled++; } }\
+             return (reg>0)+\":\"+(drawn>0)+\":\"+unfilled+\":\"+\
+             stone_unfilled_uniform_block_count();})()",
+            // registered : drawn : unfilled-at-binding-4 : unfilled-anywhere
             "--value",
-            "0",
-        ],
-    ) else {
-        return;
-    };
-}
-
-// The denominator for the test above: mag really did register uniform blocks in
-// the browser. Without it, an unfilled count of zero is equally consistent with
-// a build whose shaders all failed to register -- zero over zero.
-//
-// The ARRAY binding is named explicitly rather than counting blocks in total: a
-// non-zero total is satisfied by the scalar blocks alone, and would read the
-// same with the array lane entirely absent.
-//
-// Asked through the engine's own accessor, which answers non-null exactly when
-// the program registered a block at that binding -- so this is the published
-// registration, not a re-derivation of it. Registration is transactional and
-// only publishes on success, which means a driver that rejected the bind or
-// disagreed with the layout leaves nothing here.
-//
-// The `_opt` suffix is the mangled `-> ArrayBlockWriter?`. If mangling changes
-// this fails loudly rather than silently probing `undefined != null`, which is
-// why the answer is compared against a string instead of coerced to a boolean.
-#[test]
-fn web_chrome_mag_registers_its_array_blocks() {
-    let Some(_) = run_cdp(
-        "mag",
-        "web_chrome_mag_registers_its_array_blocks",
-        &[
-            "--frames",
-            "30",
-            "--expect",
-            "String(typeof array_block_begin_string_int_ret_ArrayBlockWriter_opt) + \":\" + \
-             String(array_block_begin_string_int_ret_ArrayBlockWriter_opt(\
-             \"sprite_batch_vert+sprite_batch_frag\", 4) != null)",
-            "--value",
-            "function:true",
+            "true:true:0:0",
         ],
     ) else {
         return;
