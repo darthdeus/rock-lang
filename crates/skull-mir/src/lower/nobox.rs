@@ -106,12 +106,22 @@ impl Builder<'_> {
     /// column-eligible on the same terms and fails identically. The element type
     /// is the discriminant -- a boxed `[int]` keeps `_data` and is fine.
     ///
-    /// Keyed on the DECLARED PARAM type, not the argument's. A param spelled
-    /// `[T]` states that the body expects the vec representation, and a column
-    /// vec is not one. A param spelled `any` states the opposite -- it claims no
-    /// representation at all -- and the column-introspection probes that read
-    /// `v["@vec"]` deliberately take `any`, so keying on the argument would
-    /// reject the bodies that handle columns CORRECTLY.
+    /// Keyed on the DECLARED SEMANTIC param type under the concrete
+    /// substitution, not the argument's (`docs/boundary-contracts.md` 2.4). A
+    /// param spelled `[T]` or `Map<K, V>` states that the body expects that
+    /// container's boxed representation, and a column-stored one is not it. A
+    /// param spelled `any` states the opposite -- it claims no representation at
+    /// all -- and the column-introspection probes that read `v["@vec"]`
+    /// deliberately take `any`, so keying on the argument would reject the
+    /// bodies that handle columns CORRECTLY.
+    ///
+    /// A method's IMPLICIT receiver is such a declared type: it is `param_decls`
+    /// slot 0 and carries the semantic `Map<K, V>` though the source writes no
+    /// type for it. Reading the written syntax instead would miss every method.
+    ///
+    /// The intercepted stdlib names are exempt BY CONSTRUCTION, not by an
+    /// exception here: `lower_call` replaces them and returns before this check
+    /// is reached.
     pub(crate) fn reject_column_container_opaque_args(
         &self,
         func: FuncRef,
@@ -124,17 +134,27 @@ impl Builder<'_> {
         let name = callee.name;
         for (i, &arg) in args.iter().enumerate() {
             let Some(pty) = self.param_ty(func, i) else { continue };
-            let Some(TypeExpr::App { ctor: TypeCtor::Array, .. }) = self.ty_node(pty) else {
-                continue;
+            let Some(TypeExpr::App { ctor, .. }) = self.ty_node(pty) else { continue };
+            // The physical form the boxed body assumes, per container. Both
+            // answers come from the same storage oracles lowering routes on, so
+            // the rule cannot drift from what the representation actually is.
+            let found = match ctor {
+                TypeCtor::Array => self
+                    .vec_column_elem_of(arg)?
+                    .map(|e| (format!("[{}]", e.name), "`_data`")),
+                TypeCtor::Map => self
+                    .map_column_value_of(arg)?
+                    .map(|e| (format!("Map<_, {}>", e.name), "a bare key table")),
+                TypeCtor::Nominal(_) => None,
             };
-            let Some(elem) = self.vec_column_elem_of(arg)? else { continue };
+            let Some((rendered, physical)) = found else { continue };
             return Err(CompilerError::new_with_label(
                 self.body.expr_spans[arg],
                 format!(
-                    "column-stored `[{}]` cannot cross opaque body boundary `{name}` \
-                     (an inline/extern body has no `_data`; take `any` if the body \
-                     reads the column layout itself, else use a boxed element type)",
-                    elem.name
+                    "column-stored `{rendered}` cannot cross opaque body boundary \
+                     `{name}` (an inline/extern body has no {physical}; take `any` if \
+                     the body reads the column layout itself, else use a boxed \
+                     element type)"
                 ),
             ));
         }
