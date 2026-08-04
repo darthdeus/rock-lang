@@ -109,6 +109,8 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     let mut rejection_kinds: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut rejection_examples: Vec<String> = Vec::new();
     let mut uninst_names: BTreeMap<String, instance_graph::RootHole> = BTreeMap::new();
+    let mut excused_roots: BTreeMap<&'static str, std::collections::BTreeSet<String>> =
+        BTreeMap::new();
     let mut closure_unexpanded: std::collections::BTreeSet<String> = Default::default();
     let mut closure_capped: std::collections::BTreeSet<String> = Default::default();
     let mut synth_examined = 0usize;
@@ -219,6 +221,9 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
                     e.generic_root |= hole.generic_root;
                     e.always_emitted_sites.extend(hole.always_emitted_sites);
                     e.instances += hole.instances;
+                }
+                for (reason, names) in p.excused_generic_roots {
+                    excused_roots.entry(reason).or_default().extend(names);
                 }
                 synth_examined += p.synthesized_examined;
                 for (k, v) in p.storage_failures {
@@ -516,10 +521,37 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     }
     println!();
     println!(
-        "`uncovered bare-name obligations` (max over projects): **{uninst}**. Not \"no call instantiates them\": six of the \
-         corpus's have concrete instances from Rock call sites, which discharge those \
-         call sites and not the bare-name entry opaque Lua text can call."
+        "`uncovered bare-name obligations` (max over projects): **{uninst}**. Not \"no call \
+         instantiates them\": a root listed above can have concrete instances from Rock call \
+         sites, which discharge those call sites and not the bare-name entry opaque Lua text \
+         can call."
     );
+    // The EXCLUDED population, by reason. A narrowing whose rejects are not
+    // reported is indistinguishable from a check that never fires.
+    println!();
+    let excused_total: usize = excused_roots.values().map(|n| n.len()).sum();
+    println!(
+        "generic emission roots carrying NO bare-name obligation ({excused_total}), by what \
+         discharges them:"
+    );
+    println!();
+    for (reason, names) in &excused_roots {
+        let what = match *reason {
+            "mangled" => "emitted symbol is mangled -- opaque text cannot spell it",
+            "stdlib-funcref" => {
+                "`stdlib_funcref` catalogue entry -- existence per target is rejected at \
+                 compile time, not promised"
+            }
+            other => other,
+        };
+        println!("- **{reason}** ({}): {what}", names.len());
+        for n in names.iter().take(8) {
+            println!("  - `{n}`");
+        }
+        if names.len() > 8 {
+            println!("  - ...and {} more", names.len() - 8);
+        }
+    }
     println!();
     println!("digests (manifest text, FNV-1a):");
     for r in &rows {
@@ -1241,6 +1273,7 @@ struct OneProject {
     examples: BTreeMap<String, Vec<String>>,
     census: instance_graph::RecursionCensus,
     uninstantiated_root_names: BTreeMap<String, instance_graph::RootHole>,
+    excused_generic_roots: BTreeMap<&'static str, std::collections::BTreeSet<String>>,
     closure: skull::instance_graph::Closure,
     synthesized_examined: usize,
     /// Storage-query failures by `MonoTyReason`, kept apart from the rejection
@@ -1838,6 +1871,7 @@ fn one_project(
         examples,
         census,
         uninstantiated_root_names: g.uninstantiated_roots.clone(),
+        excused_generic_roots: g.excused_generic_roots.clone(),
         closure: g.closure(&ws),
         synthesized_examined: g.synthesized_examined,
         storage_failures: {

@@ -111,20 +111,26 @@ fn both_receiver_forms_answer_correctly() {
     assert_eq!(run(BOXED_RECEIVER, "vec_push_boxed_recv"), "7");
 }
 
-/// `vec_push` is `@nomangle`, so retyping the payload `T` -> `any` cannot move
-/// the emitted symbol -- and an opaque body never specializes
-/// (`compute_call_spec` bails on `inline_body.is_some()`), so there is no
-/// per-instantiation copy whose name could drift either.
+/// An opaque body never specializes (`compute_call_spec` bails on
+/// `inline_body.is_some()`), so retyping the payload `T` -> `any` cannot produce
+/// a per-instantiation copy.
+///
+/// Stated over the definition COUNT, not the spelling. `vec_push` is not
+/// `@nomangle` -- no opaque body names it, so it carries no bare-name obligation
+/// (`docs/boundary-contracts.md` 2.3b) -- and asserting a bare spelling would
+/// pin the mangling exemption rather than the no-specialization property this
+/// test is about.
 #[test]
-fn the_boxed_body_keeps_its_bare_symbol() {
+fn the_boxed_body_has_exactly_one_definition() {
     let lua = emit(BOXED_RECEIVER);
-    assert!(
-        lua.contains("function vec_push("),
-        "@nomangle keeps the definition bare; a mangled spelling would break \
-         every opaque caller that names it"
-    );
-    assert!(
-        !lua.contains("vec_push_"),
-        "an inline body never specializes, so no `vec_push_<spec>` copy exists"
+    let defs: Vec<&str> = lua
+        .match_indices("function vec_push")
+        .filter_map(|(i, _)| lua[i..].lines().next())
+        .collect();
+    assert_eq!(
+        defs.len(),
+        1,
+        "an inline body never specializes, so exactly one `vec_push` definition \
+         may exist: {defs:?}"
     );
 }

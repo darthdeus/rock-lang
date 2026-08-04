@@ -1588,33 +1588,80 @@ fn synthesized_targets_belong_to_the_runtime_catalogue() {
 /// instance of it exists -- which is how a name that later calls fully
 /// instantiated went on reading as having no concrete body at all. Both halves
 /// are asserted here: the count is visible, and the hole does not close.
+///
+/// The fixture DECLARES its own `@nomangle` generic rather than borrowing a
+/// stdlib one. A stdlib name is a live entry in the obligation matrix, so
+/// closing that entry silently disarms this test while it stays green -- which
+/// is what happened when `vec_push`'s last opaque caller was removed and its
+/// `@nomangle` dropped. A declaration the test owns cannot be closed out from
+/// under it.
 #[test]
 fn a_root_with_instances_reports_them_and_stays_a_hole() {
     let (ws, g) = graph_of(
         r#"
+@nomangle fn keep<T>(x: T) -> T { return x }
 fn main() {
-    let xs: [int] = []
-    xs.push(1)
-    let ys: [string] = []
-    ys.push("a")
+    let a = keep(1)
+    let b = keep("s")
 }
 "#,
     );
     let hole = g
         .uninstantiated_roots
-        .get("vec_push")
-        .unwrap_or_else(|| panic!("`vec_push` is not a root: {:?}", g.uninstantiated_roots.keys()));
-    assert!(hole.generic_root, "`vec_push` was recorded under the wrong cause: {hole:?}");
+        .get("keep")
+        .unwrap_or_else(|| panic!("`keep` is not a root: {:?}", g.uninstantiated_roots.keys()));
+    assert!(hole.generic_root, "`keep` was recorded under the wrong cause: {hole:?}");
     assert!(
         hole.instances >= 2,
-        "`vec_push` is called at two element types but reports {} instances",
+        "`keep` is called at two type arguments but reports {} instances",
         hole.instances
     );
     assert!(
-        g.closure(&ws).uninstantiated_roots.contains("vec_push"),
+        g.closure(&ws).uninstantiated_roots.contains("keep"),
         "a root with instances stopped counting as a hole -- the falsely-green reading"
     );
-    assert!(!g.closure(&ws).is_closed(), "the corpus hole vanished from the closure gate");
+    assert!(!g.closure(&ws).is_closed(), "the fixture hole vanished from the closure gate");
+}
+
+/// The narrowing in `generic_root_obligation`, both sides. A generic emission
+/// root whose emitted symbol is MANGLED carries no bare-name obligation --
+/// opaque text cannot spell a mangling the compiler owns -- while the same
+/// declaration with `@nomangle` does.
+///
+/// Both arms come from ONE source differing only in the annotation, so a
+/// difference cannot be an artifact of two fixtures.
+#[test]
+fn only_a_bare_symbol_carries_a_bare_name_obligation() {
+    let src = |anno: &str| {
+        format!(
+            r#"
+{anno} fn keep<T>(x: T) -> T {{ return x }}
+fn main() {{ let a = keep(1) }}
+"#
+        )
+    };
+    let (_, bare) = graph_of(&src("@nomangle"));
+    assert!(
+        bare.uninstantiated_roots.contains_key("keep"),
+        "a `@nomangle` generic root IS a bare-name obligation: {:?}",
+        bare.uninstantiated_roots.keys()
+    );
+
+    let (_, mangled) = graph_of(&src(""));
+    let excused: Vec<&String> = mangled
+        .excused_generic_roots
+        .get("mangled")
+        .map(|s| s.iter().collect())
+        .unwrap_or_default();
+    assert!(
+        excused.iter().any(|n| n.starts_with("keep_")),
+        "the mangled twin must be EXCUSED, not silently absent: {excused:?}"
+    );
+    assert!(
+        !mangled.uninstantiated_roots.keys().any(|n| n.starts_with("keep")),
+        "a mangled generic root is not an obligation: {:?}",
+        mangled.uninstantiated_roots.keys()
+    );
 }
 
 /// The OTHER cause: a call from an always-emitted body (here a global
