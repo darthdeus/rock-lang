@@ -1073,6 +1073,14 @@ function stone_sampler_bound(unit) {
   gl.activeTexture(gl.TEXTURE0);
   return !!bound;
 }
+// Every unit glActiveTexture can select -- the twin of stone-rs's
+// stone_max_texture_units, and 0 with no context so a scan's denominator
+// assertion fails instead of its loop silently emptying.
+function stone_max_texture_units() {
+  var gl = __SW.gl;
+  if (!gl) return 0;
+  return gl.getParameter(gl.MAX_COMBINED_TEXTURE_IMAGE_UNITS) | 0;
+}
 // Immutable sampler objects, one per (filter, wrap) pair, created once and
 // never mutated -- the twin of stone-rs's SAMPLERS. `image` selects the wrap
 // half: a bound sampler overrides the texture's own wrap, so one that disagrees
