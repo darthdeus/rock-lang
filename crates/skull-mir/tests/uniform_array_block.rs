@@ -39,7 +39,10 @@ fn ws_of(src: &str) -> bone_semantic::inference::Workspace {
 }
 
 fn decl(name: &str, elem: WireKind, capacity: u32) -> ArrayMemberDecl {
-    ArrayMemberDecl { name: Ustr::from(name), elem, capacity }
+    // A synthetic span: these cases exercise the LAYOUT, and the real `@size(N)`
+    // site is supplied by the GLSL classifier. That the rejections land on the
+    // offending param is pinned there, against real source.
+    ArrayMemberDecl { name: Ustr::from(name), elem, capacity, span: bone_semantic::prelude::Span::unknown() }
 }
 
 /// `(name, offset, stride, capacity)` per member.
