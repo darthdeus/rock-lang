@@ -196,3 +196,51 @@ fn repr_opaque_waives_the_declared_slot_under_named_arguments() {
         "the waiver follows the declared index, not the call's argument order"
     );
 }
+
+/// An IRRELEVANT generic the call never pins. `U` appears in no slot, so
+/// nothing binds it -- and the slot under test, `sink`, is fully determined.
+/// Abandoning the whole call when ANY generic fails to convert let an unrelated
+/// unbound variable disarm the rule.
+const IRRELEVANT_UNBOUND_GENERIC: &str = r#"
+value G { x: float, y: float }
+
+@nomangle inline(lua) fn probe<T, U>(sink: [T]) -> int = """
+    return #sink._data
+"""
+
+fn main() {
+    let xs: [G] = [G { x: 1.0, y: 2.0 }]
+    print("{probe(xs)}")
+}
+"#;
+
+/// The admission twin: the same unpinned `U`, a BOXED element. It must stay
+/// admitted, or "reject whenever a generic is unbound" would pass the case
+/// above for the wrong reason.
+const IRRELEVANT_UNBOUND_GENERIC_BOXED: &str = r#"
+struct B { s: string }
+
+@nomangle inline(lua) fn probe<T, U>(sink: [T]) -> int = """
+    return #sink._data
+"""
+
+fn main() {
+    let xs: [B] = [B { s: "a" }]
+    print("{probe(xs)}")
+}
+"#;
+
+#[test]
+fn an_irrelevant_unbound_generic_does_not_disarm_the_rule() {
+    let msg = outcome(IRRELEVANT_UNBOUND_GENERIC).expect_err("must reject");
+    assert!(
+        msg.contains("column-stored `[G]`") && msg.contains("probe"),
+        "the checked slot is determined; an unrelated generic is not its business, \
+         got: {msg}"
+    );
+}
+
+#[test]
+fn an_irrelevant_unbound_generic_still_admits_a_boxed_element() {
+    assert_eq!(run(IRRELEVANT_UNBOUND_GENERIC_BOXED, "decl_unbound_boxed"), "1");
+}

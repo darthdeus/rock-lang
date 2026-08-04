@@ -230,7 +230,21 @@ impl Builder<'_> {
     /// `call_generic_bindings`; the types they bind TO belong to the caller and
     /// may name the CALLER's generics, which only the enclosing `SpecSubst`
     /// resolves. So each binding is converted under the enclosing substitution
-    /// first, and the declared type is then converted under the result.
+    /// first, and the declared slot is then converted under the result.
+    ///
+    /// The substitution is deliberately PARTIAL. A generic the call never pins
+    /// is skipped rather than abandoning the call, because it may have nothing
+    /// to do with the slot being asked about -- `fn probe<T, U>(sink: [T])`
+    /// determines `sink` whether or not `U` is ever bound, and abandoning the
+    /// call let an unrelated variable disarm the rule.
+    ///
+    /// Two reasons are out of scope BY DECISION, matching `concrete_ty` arm for
+    /// arm so the two cannot disagree: `UnboundGeneric` is the shared generic
+    /// body Stage 2 owns, and `UnresolvedInfer` is the S 0h decided rejection
+    /// the instance graph already records and Stage 3 raises. The rest --
+    /// recovery poison, a `TyId` naming no node, a cyclic substitution chain,
+    /// missing inference -- refuse the call with its span rather than picking a
+    /// representation from a failure.
     fn declared_slot_mono(
         &self,
         e: Idx<Expr>,
@@ -238,26 +252,65 @@ impl Builder<'_> {
         ty: TyId,
     ) -> Result<Option<crate::monoty::MonoTy>, CompilerError> {
         use crate::monoty::MonoTyReason as R;
-        let Some(inf) = self.inf else { return Ok(None) };
         let f = &self.ws.module(func.module).functions[func.func];
+        let refuse = |what: String| {
+            CompilerError::new_with_label(
+                self.body.expr_spans[e],
+                format!(
+                    "cannot decide the representation contract of opaque callee \
+                     `{}`: {what}. The call is refused rather than admitted.",
+                    f.name
+                ),
+            )
+        };
+        let inf = self
+            .inf
+            .ok_or_else(|| refuse("this body has no inference".into()))?;
         let mut subst = self.spec_subst.clone();
+        // Why a generic could NOT be converted, kept per name rather than acted
+        // on here: a generic the slot does not mention is none of its business,
+        // and rejecting in this loop would let an unrelated variable disarm the
+        // rule. The reason is consulted only if the slot turns out to need it.
+        let mut unconverted: Vec<(Ustr, &'static str)> = Vec::new();
         for (i, g) in f.generics.iter().enumerate() {
-            let Some(TypeExpr::Generic(var, _)) = self.raw_ty_node(*g) else { continue };
-            let Some(bound) = self.callee_binding_at(e, func, i)? else { return Ok(None) };
+            let Some(TypeExpr::Generic(var, name)) = self.raw_ty_node(*g) else { continue };
+            let Some(bound) = self.callee_binding_at(e, func, i)? else {
+                unconverted.push((name, "no recorded binding"));
+                continue;
+            };
             match crate::monoty::convert(self.ws, inf, bound, &self.spec_subst) {
                 Ok(m) => {
                     subst.insert(var, m);
                 }
-                // The call did not pin this generic. Not a storage answer, and
-                // not this rule's rejection to make -- Stage 2 records it.
-                Err(R::UnboundGeneric(_)) | Err(R::UnresolvedInfer(_)) => return Ok(None),
-                Err(_) => return Ok(None),
+                // `UnresolvedInfer` is the S 0h DECIDED rejection (a type
+                // argument no constraint reaches), already recorded by the
+                // instance graph as `UnconstrainedTypeVar` and landing with
+                // Stage 3. Raising it here too would reject it twice on two
+                // schedules -- measured: `tests/vec_sort_test.rock`.
+                // `concrete_ty` answers `None` for it for the same reason.
+                Err(R::UnboundGeneric(_)) | Err(R::UnresolvedInfer(_)) => {}
+                Err(r) => unconverted.push((name, r.bucket())),
             }
         }
-        Ok(match crate::monoty::convert(self.ws, inf, ty, &subst) {
-            Ok(m) => Some(m),
-            Err(_) => None,
-        })
+        match crate::monoty::convert(self.ws, inf, ty, &subst) {
+            Ok(m) => Ok(Some(m)),
+            Err(R::UnboundGeneric(missing)) => {
+                // The slot needs a generic that did not convert. If it failed for
+                // a reason other than being unbound, that reason is the answer --
+                // reporting "out of scope" here would hide unfinished inference
+                // behind the Stage-2 exemption.
+                match unconverted.iter().find(|(n, _)| *n == missing) {
+                    Some((_, why)) => Err(refuse(format!(
+                        "the slot needs generic `{missing}`, which resolves to {why}"
+                    ))),
+                    // Genuinely still generic: the shared generic body, which
+                    // Stage 2 owns and this rule does not answer for.
+                    None => Ok(None),
+                }
+            }
+            Err(R::UnresolvedInfer(_)) => Ok(None),
+            Err(r) => Err(refuse(format!("the slot resolves to {}", r.bucket()))),
+        }
     }
 
     /// What this call binds a CALLEE generic to. Fails CLOSED: a generic whose
@@ -315,9 +368,6 @@ impl Builder<'_> {
             .is_some_and(|pd| pd.annotations.iter().any(|a| a.name.name == "repr"))
     }
 
-
-    /// Fails CLOSED: a generic parameter whose binding cannot be resolved is a
-    /// parameter whose representation is unknown, and admitting it is exactly
 
     /// A fn taken BY VALUE must have the ABI an indirect caller can derive.
     ///
