@@ -702,7 +702,6 @@ var __SW = {
   // Polled input state (stone_is_key_down / _is_mouse_button_down): keyed by the
   // SDL key STRING (sdl_keycode_to_string vocabulary) and 1-based button index.
   keysDown: {}, mouseButtons: {},
-  texFilter: 0, // 0 nearest, 1 linear
   // one handle space for images AND canvas textures: handle -> WebGLTexture
   textures: {}, nextTex: 1, whiteImage: 0,
   // images: boot decodes path -> ImageBitmap (no GL yet); stone_load_image
@@ -905,7 +904,6 @@ function stone_get_dpi_scale() { return __SW.dpr; }
 function stone_take_window_resized() { var r = __SW.resized; __SW.resized = false; return r; }
 function stone_gl_finish() { if (__SW.gl && __SW.gl.finish) __SW.gl.finish(); }
 function stone_gl_flush() { if (__SW.gl && __SW.gl.flush) __SW.gl.flush(); }
-function stone_set_default_texture_filter(f) { __SW.texFilter = f; }
 
 // --- sprite system / mesh draw ---
 function stone_sprite_init() {
@@ -1226,7 +1224,9 @@ function stone_create_canvas(w, h, format, depth) {
   else if (format === 3) { internal = gl.R32I; fmt = gl.RED_INTEGER; type = gl.INT; }
   gl.texImage2D(gl.TEXTURE_2D, 0, internal, w, h, 0, fmt, type, null);
   if (format === 3) (__SW.intTextures = __SW.intTextures || {})[texHandle] = true;
-  var filter = (__SW.texFilter === 1 && format !== 3) ? gl.LINEAR : gl.NEAREST;
+  // Sampling is per-draw sampler state; the texture object's own filter is
+  // never observed by a sampled bind.
+  var filter = gl.NEAREST;
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -1883,7 +1883,7 @@ function stone_load_font(path, pixelSize) {
   var texHandle = __sw_new_texture();
   gl.bindTexture(gl.TEXTURE_2D, __SW.textures[texHandle]);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, aw, ah, 0, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
-  var filter = __SW.texFilter === 1 ? gl.LINEAR : gl.NEAREST;
+  var filter = gl.NEAREST; // sampling is per-draw sampler state (Font.sampling)
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
