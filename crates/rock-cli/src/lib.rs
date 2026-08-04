@@ -524,6 +524,10 @@ pub struct Args {
     /// grouped by boot signature share one booted process with the B2 restore
     /// boundary between them. Ineligible entries stay isolated with a reason.
     pub workers: bool,
+    /// For `rock sim <project>`: the B4 corpus gate. Runs the whole project in
+    /// three predecessor orders and compares every sim against its own
+    /// fresh-process reference. An arc checkpoint, not an iteration step.
+    pub multi_order: bool,
 
     /// For `rock frame`: record per-tick input + dt to this replay log
     /// (docs/replay-scrub-plan.md). Mutually exclusive with `--replay`.
@@ -683,6 +687,9 @@ impl Args {
                 .help("For `rock sim`: force one fresh process per entry -- the permanent reference oracle. Today also the default."))
             .arg(Arg::new("workers").long("workers").action(ArgAction::SetTrue)
                 .help("For `rock sim`: run eligible entries grouped by @sim_env boot signature in shared boot-checkpoint worker processes (experimental until B3/B4 land; see docs/sim-speed-plan.md). Hot-reload sims and rejected signatures stay isolated with a reported reason."))
+            .arg(Arg::new("multi-order").long("multi-order").action(ArgAction::SetTrue)
+                .conflicts_with_all(["isolated", "workers"])
+                .help("For `rock sim <project>`: the B4 corpus gate -- run the whole project in registry, reverse and one fixed shuffled order and compare every sim against its own fresh-process reference. Slow; an arc checkpoint."))
             .arg(Arg::new("record").long("record").value_name("FILE")
                 .help("For `rock frame`: record per-tick input + dt to FILE (a replay log). Replay it with --replay."))
             .arg(Arg::new("replay").long("replay").value_name("FILE")
@@ -761,6 +768,7 @@ impl Args {
             jobs: m.get_one::<usize>("jobs").copied(),
             isolated: m.get_flag("isolated"),
             workers: m.get_flag("workers"),
+            multi_order: m.get_flag("multi-order"),
             record: m.get_one::<String>("record").cloned(),
             replay: m.get_one::<String>("replay").cloned(),
             checkpoint_interval: m.get_one::<usize>("checkpoint-interval").copied(),

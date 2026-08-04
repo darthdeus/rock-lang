@@ -10,7 +10,7 @@
 //! op-specific fields. See `stone/engine/sim.rock`.
 
 use anyhow::{anyhow, Context, Result};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use colored::Colorize;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -2002,6 +2002,195 @@ fn run_specs_recovering(
 /// Test-facing surface for the recovering worker queue: compile, run
 /// `entry_specs` in one worker (with recovery), and return a structured record
 /// per spec, artifact manifest included.
+/// The shuffled arm's permutation. Deterministic by construction: an order that
+/// varies per run makes a divergence unreproducible and a green run unrepeatable,
+/// which is the opposite of what a gate is for. One fixed seed, Fisher-Yates.
+fn fixed_shuffle(n: usize) -> Vec<usize> {
+    let mut idx: Vec<usize> = (0..n).collect();
+    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+    for i in (1..n).rev() {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        idx.swap(i, (state % (i as u64 + 1)) as usize);
+    }
+    idx
+}
+
+/// Run `ordered` the way `--workers` schedules it -- eligible specs grouped by
+/// boot signature into shared recovering workers, the remainder isolated -- and
+/// return a record per spec, aligned to `ordered`.
+///
+/// Results are carried by INDEX, never by spec spelling: a corpus may name the
+/// same sim twice and those are two entries with two results.
+fn run_worker_arm(
+    project: &str,
+    output: &str,
+    env_by_wire: &HashMap<String, Vec<(String, String)>>,
+    ordered: &[String],
+) -> Result<Vec<crate::sim_record::SimRecord>> {
+    let (groups, isolated) = group_worker_specs(ordered, env_by_wire);
+    let mut out: Vec<Option<crate::sim_record::SimRecord>> = vec![None; ordered.len()];
+
+    for members in groups {
+        let specs: Vec<String> = members.iter().map(|&i| ordered[i].clone()).collect();
+        let results = run_specs_recovering(project, output, env_by_wire, &specs, false, true)?;
+        if results.len() != members.len() {
+            return Err(anyhow!(
+                "worker group returned {} results for {} specs",
+                results.len(),
+                members.len()
+            ));
+        }
+        for (k, (spec, summary)) in results.into_iter().enumerate() {
+            out[members[k]] = Some(record_of(&spec, members[k], summary));
+        }
+    }
+    for (i, _reason) in isolated {
+        let mut records = run_entries(
+            project,
+            output,
+            env_by_wire,
+            std::slice::from_ref(&ordered[i]),
+            Grouping::PerPart,
+        )?;
+        out[i] = Some(records.remove(0));
+    }
+
+    out.into_iter()
+        .enumerate()
+        .map(|(i, r)| r.ok_or_else(|| anyhow!("sim `{}` was never scheduled", ordered[i])))
+        .collect()
+}
+
+/// The Phase B4 corpus gate (`docs/sim-speed-plan.md`): every sim's worker
+/// result must equal its own fresh-process reference, under three different
+/// predecessor assignments.
+///
+/// Three orders and not one because the class this gate exists to catch is
+/// leakage FROM a predecessor: in registry order a given sim always follows the
+/// same neighbour, so a leak between two sims that happen to agree would never
+/// be exercised. Reverse and a fixed shuffle give each sim different
+/// predecessors without giving up reproducibility.
+///
+/// The reference is per SIM, taken once in one fresh process each, which is the
+/// permanent `--isolated` oracle -- not a second worker arm, and not the
+/// previous arm's result.
+pub fn run_multi_order_gate(backend: crate::Backend, project: &str) -> Result<()> {
+    use crate::sim_record::{compare, COMPARED_ARMS};
+
+    rock_host::project::ensure_workspace_root()?;
+    let project_path = rock_host::project::resolve_project_dir(project)?;
+    let project = project_path.to_string_lossy().into_owned();
+    rock_host::engine_build::build_engine_libs(&project)?;
+
+    let out_dir = sim_output_dir()?;
+    let output = out_dir.path().to_string_lossy().into_owned();
+    let (wire_names, env_by_wire, _stone) =
+        compile_sims(backend, project_path, PathBuf::from(&output))?;
+    // Hot-reload sims are out of the corpus, and not because they are awkward:
+    // they mutate the ONE `incremental.lua` overlay, which the suite runner
+    // serializes behind an exclusive lane holding the compile session. This gate
+    // runs the corpus four times over, so each pass would hand them a different
+    // starting overlay and the divergence measured would be the harness's, not
+    // the worker's. They also never reach a worker (`worker_ineligibility`
+    // classifies the reload lane), so excluding them removes nothing this gate
+    // could have decided.
+    let (wire_names, excluded): (Vec<String>, Vec<String>) = wire_names
+        .into_iter()
+        .partition(|name| !is_reload_lane(env_by_wire.get(name).map_or(&[][..], |v| v)));
+    let n = wire_names.len();
+    if n == 0 {
+        return Err(anyhow!("`{project}` registered no sims, so this gate would measure nothing"));
+    }
+    if !excluded.is_empty() {
+        println!(
+            "[multi-order] excluded {} hot-reload sim(s) -- they share one overlay and never \
+             reach a worker: {}",
+            excluded.len(),
+            excluded.join(", ")
+        );
+    }
+
+    println!("[multi-order] {n} sims; reference arm (one fresh process per sim)");
+    let reference = run_entries(&project, &output, &env_by_wire, &wire_names, Grouping::PerPart)?;
+    let reference_at: HashMap<&str, &crate::sim_record::SimRecord> =
+        wire_names.iter().map(String::as_str).zip(reference.iter()).collect();
+
+    let arms: Vec<(&str, Vec<usize>)> = vec![
+        ("registry", (0..n).collect()),
+        ("reverse", (0..n).rev().collect()),
+        ("shuffle", fixed_shuffle(n)),
+    ];
+
+    let mut totals: BTreeMap<&'static str, usize> =
+        COMPARED_ARMS.iter().map(|a| (*a, 0usize)).collect();
+    let mut diverged: Vec<String> = Vec::new();
+
+    for (label, order) in &arms {
+        println!("[multi-order] {label} arm");
+        let ordered: Vec<String> = order.iter().map(|&i| wire_names[i].clone()).collect();
+        let records = run_worker_arm(&project, &output, &env_by_wire, &ordered)?;
+        for (pos, record) in records.iter().enumerate() {
+            let name = &ordered[pos];
+            let Some(expected) = reference_at.get(name.as_str()) else {
+                return Err(anyhow!("`{name}` has no reference record"));
+            };
+            let c = compare(expected, record);
+            for a in COMPARED_ARMS {
+                *totals.get_mut(a).expect("totals is keyed by COMPARED_ARMS") += c.population(a);
+            }
+            if !c.is_equivalent() {
+                diverged.push(format!("[{label}] {name}\n{}", c.report()));
+            }
+        }
+    }
+
+    // A comparison that found nothing is only evidence when each arm had
+    // something to compare. `verdict`, `saw_stop`, `timed_out` and `exit_code`
+    // are populated by every record by construction, so they cannot report an
+    // empty corpus; the rest can, and a zero there means the gate ran over sims
+    // that never produced that kind of observation.
+    println!("[multi-order] compared populations across {} arms:", arms.len());
+    let mut empty: Vec<&str> = Vec::new();
+    for a in COMPARED_ARMS {
+        let total = totals[a];
+        println!("[multi-order]   {a}: {total}");
+        if total == 0 {
+            empty.push(a);
+        }
+    }
+
+    if !diverged.is_empty() {
+        for d in &diverged {
+            println!("{d}");
+        }
+        return Err(anyhow!(
+            "{} of {} comparisons diverged from the isolated reference",
+            diverged.len(),
+            n * arms.len()
+        ));
+    }
+    if !empty.is_empty() {
+        // Not a fudge factor to relax: `expects_fail` and `errors` populate only
+        // from sims that FAIL, so a corpus where everything passes standalone
+        // cannot certify them and this gate must say so rather than report a
+        // green it did not measure. mag carries known-red sims and populates
+        // both; testbed does not, which is why testbed validates the mechanism
+        // and mag is the gate.
+        return Err(anyhow!(
+            "these arms compared an empty population, so their agreement is evidence of \
+             nothing: {}",
+            empty.join(", ")
+        ));
+    }
+    println!(
+        "[multi-order] {} comparisons equivalent to the isolated reference",
+        n * arms.len()
+    );
+    Ok(())
+}
+
 pub fn run_worker_suite(
     backend: crate::Backend,
     project: &str,
