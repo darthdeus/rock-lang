@@ -187,33 +187,49 @@ fn an_inlined_static_resets_at_the_entry_boundary() {
     );
 }
 
-/// SENTINEL -- and the reason the `entry_diagnostics` arm exists. `log_once`
-/// dedups per call site in a process-global table, so a predecessor that logged
-/// through the same helper SUPPRESSES the probe's warning entirely. No other
-/// arm can see this: the sim passes, writes nothing, and exits cleanly.
-///
-/// FLIP WHEN FIXED: becomes `assert_equivalent` when the boundary clears logger
-/// dedup/throttle state.
+/// Logger suppression state restores at the boundary -- and this is the reason
+/// the `entry_diagnostics` arm exists. `log_once` dedups per call site in a Lua
+/// global outside `__ROCK_GLOBALS`, so the census never reaches it and a
+/// predecessor that logged through the same helper used to SUPPRESS the probe's
+/// warning entirely. No other arm can see that: the sim passes, writes nothing,
+/// and exits cleanly either way.
 #[test]
-fn logger_dedup_still_suppresses_the_next_entrys_warning() {
+fn logger_dedup_does_not_suppress_the_next_entrys_warning() {
     let (isolated, worker) = differential(&["b0_dedup_seed"], "b0_dedup_probe");
     let c = compare(&isolated, &worker);
+    assert_equivalent("b0_dedup_probe", &c);
 
+    // Agreement over silence would be agreement over nothing: the class is only
+    // observable when the isolated side actually emitted the warning.
     assert!(
-        c.differs_on("entry_diagnostics"),
-        "the worker no longer suppresses a repeated warning -- flip this sentinel:\n{}",
-        c.report()
-    );
-    assert!(
-        isolated.entry_diagnostics.contains("b#") || isolated.entry_diagnostics.contains("dedup"),
+        isolated.entry_diagnostics.contains("b0 dedup fixture warning"),
         "the isolated run must actually emit the warning: {:?}",
         isolated.entry_diagnostics
     );
-    assert_eq!(
-        isolated.verdict(),
-        worker.verdict(),
-        "a suppressed warning changes no verdict -- that is what makes it invisible elsewhere"
+    assert!(
+        worker.entry_diagnostics.contains("b0 dedup fixture warning"),
+        "the worker's second entry must emit it too: {:?}",
+        worker.entry_diagnostics
     );
+}
+
+/// The throttle half of the same class, and a separate test for the same reason
+/// the fixture is separate: a last-fire TIMESTAMP compared against restored game
+/// time resets differently from a count that suppresses forever, and one
+/// fixture's first failure would hide the other.
+#[test]
+fn a_throttled_sites_last_fire_does_not_reach_the_next_entry() {
+    let (isolated, worker) = differential(&["b0_throttle_seed"], "b0_throttle_probe");
+    let c = compare(&isolated, &worker);
+    assert_equivalent("b0_throttle_probe", &c);
+
+    for (label, record) in [("isolated", &isolated), ("worker", &worker)] {
+        assert!(
+            record.entry_diagnostics.contains("b0 throttle fixture warning"),
+            "{label}: nothing was emitted, so the agreement is over silence: {:?}",
+            record.entry_diagnostics
+        );
+    }
 }
 
 /// Engine configuration restores at the boundary. `TIME_SCALE` is a Stone
@@ -280,51 +296,43 @@ fn a_task_left_live_at_stop_sim_does_not_tick_in_the_next_entry() {
     assert_eq!(isolated.artifacts["ticks.txt"], worker.artifacts["ticks.txt"]);
 }
 
-/// SENTINEL -- a native resource. Subprocesses are the one native class the
-/// runtime exposes an honest observer for: handles are 1-based registry slots
-/// (`stone-rs/src/proc.rs`) and `stone_proc_alive` answers per handle, so the
-/// fixture compares handle SETS. A count could not see this at all -- the
-/// registry reuses a freed slot, so the freed and the leaked case have the same
-/// count.
+/// A native resource -- and the one native class the runtime exposes an honest
+/// observer for: handles are 1-based registry slots (`stone-rs/src/proc.rs`) and
+/// `stone_proc_alive` answers per handle, so the fixture compares handle SETS.
+/// A count could not see this at all -- the registry reuses a freed slot, so the
+/// freed and the leaked case have the same count.
 ///
-/// Both views must move: the probe finds a live handle it never spawned, AND
-/// its own spawn is pushed off the first slot the predecessor is still holding.
-///
-/// FLIP WHEN FIXED: becomes `assert_equivalent` when the boundary tears down
-/// per-entry native resources (`docs/sim-speed-plan.md` B3).
+/// The boundary's teardown (`sim_worker_teardown_procs`) has to satisfy both
+/// views: nothing the predecessor spawned is still live, AND the probe's own
+/// spawn lands on the first slot rather than being pushed past a held one. A
+/// teardown that killed the child but kept the slot passes the first and fails
+/// the second.
 #[test]
-fn a_subprocess_still_outlives_the_entry_that_spawned_it() {
+fn a_subprocess_does_not_outlive_the_entry_that_spawned_it() {
     let (isolated, worker) = differential(&["b0_proc_seed"], "b0_proc_probe");
     let c = compare(&isolated, &worker);
+    assert_equivalent("b0_proc_probe", &c);
 
-    assert!(
-        !c.is_equivalent(),
-        "the worker no longer inherits a live subprocess -- land the teardown \
-         and flip this sentinel to assert_equivalent"
-    );
-    for arm in ["verdict", "expects_pass", "expects_fail", "artifacts"] {
-        assert!(c.differs_on(arm), "expected a `{arm}` difference:\n{}", c.report());
-    }
     assert_eq!(isolated.verdict(), "PASS", "a fresh process inherits nothing");
-    assert_eq!(worker.verdict(), "FAIL");
 
     for view in [
         "no subprocess from a predecessor is live in this entry",
         "this entry's own subprocess takes the first registry slot",
     ] {
         assert!(
-            worker.expects_fail.iter().any(|m| m.message.contains(view)),
+            worker.expects_pass.iter().any(|m| m.message.contains(view)),
             "the `{view}` view did not fire, so only one of the two independent \
              observations is evidence: {:?}",
-            worker.expects_fail
+            worker.expects_pass
         );
     }
-    // The isolated run has to have taken the same measurement and found it
-    // empty -- otherwise the probe never looked.
+    // Both runs have to have taken the measurement and found it empty --
+    // otherwise the agreement is between two probes that never looked.
     assert_eq!(
         isolated.artifacts["procs.txt"].len, 2,
         "the isolated live-handle set must be the empty `[]`, not unwritten"
     );
+    assert_eq!(isolated.artifacts["procs.txt"], worker.artifacts["procs.txt"]);
 }
 
 /// A non-default frame budget is per ENTRY, not per process: the budget an
