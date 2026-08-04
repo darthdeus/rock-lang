@@ -42,6 +42,9 @@ mod misc_intrinsics;
 mod module_globals;
 #[path = "multi_rejection.rs"]
 mod multi_rejection;
+
+#[path = "opaque_container_axes_js.rs"]
+mod opaque_container_axes_js;
 #[path = "multivalue.rs"]
 mod multivalue;
 #[path = "nb_differential.rs"]

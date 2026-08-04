@@ -132,6 +132,12 @@ impl Builder<'_> {
         if callee.inline_body.is_none() && !callee.is_extern {
             return Ok(());
         }
+        // An `ExpandKind` body needs no exemption HERE: the call is replaced
+        // during expansion and never reaches this check, exactly as the
+        // intercepted stdlib names do not. Measured -- a guard on
+        // `fn_expand_kind` was written, mutated, and found inert, so it was
+        // deleted rather than left looking load-bearing. Pinned by
+        // `an_expansion_intrinsic_over_a_native_buffer_is_admitted`.
         let name = callee.name;
         for (i, &arg) in args.iter().enumerate() {
             // `@repr(opaque)`: this parameter's body makes no assumption about
@@ -155,6 +161,22 @@ impl Builder<'_> {
                 TypeCtor::Map => self
                     .map_column_value_of(arg)?
                     .map(|e| (format!("Map<_, {}>", e.name), "a bare key table")),
+                // `Arena` / `FlatVec` / `NativeBuffer` -- 2.4's remaining
+                // container constructors. The element comes from the ARGUMENT's
+                // concrete type, the same way the two above take theirs.
+                TypeCtor::Nominal(c)
+                    if crate::lower::shape::is_nominal_container(c) =>
+                {
+                    self.nominal_container_elem(arg)?.and_then(|elem| {
+                    crate::lower::shape::opaque_container_hazard(
+                        self.ws,
+                        self.scx.target,
+                        c,
+                        elem,
+                    )
+                    .map(|physical| (format!("{c}<{elem}>"), physical))
+                    })
+                }
                 TypeCtor::Nominal(_) => None,
             };
             let Some((rendered, physical)) = found else { continue };
@@ -187,6 +209,21 @@ impl Builder<'_> {
     /// the pass that owns the answer, and `compute_call_spec` reads this very
     /// record. It bails on `inline_body.is_some()` BEFORE reading it, which is
     /// why an opaque callee has no `SpecSubst` while its bindings still exist.
+    /// The single type ARGUMENT of a nominal container expression
+    /// (`Arena<E>` -> `E`), read from the argument's concrete type.
+    ///
+    /// The declared parameter decides WHICH container, and the argument decides
+    /// the concrete element -- exactly the split the Vec and Map arms use.
+    fn nominal_container_elem(&self, e: Idx<Expr>) -> Result<Option<Ustr>, CompilerError> {
+        let Some(ty) = self.concrete_ty(e)? else { return Ok(None) };
+        let crate::monoty::MonoTy::App { ctor: crate::monoty::MonoCtor::Nominal(_), params } = &ty
+        else {
+            return Ok(None);
+        };
+        let [only] = params.as_slice() else { return Ok(None) };
+        Ok(only.peel_nullable().0.nominal())
+    }
+
     /// Whether parameter `i` of `func` carries the `@repr(opaque)` contract.
     ///
     /// Read off `ParamDecl::annotations`, the declaration -- never off the

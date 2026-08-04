@@ -1443,6 +1443,49 @@ pub(crate) fn spec_key_has_target_storage(
     })
 }
 
+/// The physical form an opaque body would WRONGLY assume for a container
+/// parameter, or `None` when the boxed assumption still holds.
+///
+/// One oracle for every container constructor 2.4 names
+/// (`docs/boundary-contracts.md`), so the rejection rule cannot drift from the
+/// storage lowering actually selects -- it composes exactly the two predicates
+/// [`spec_key_has_target_storage`] does, for the same reason.
+///
+/// The `Arena` / `FlatVec` / `NativeBuffer` split is not stylistic:
+///
+/// - `Arena<E>`'s `data` IS a column vec at a column-eligible `E`, on every
+///   target, so an opaque body's `a.data._data` is nil everywhere.
+/// - `FlatVec<E>` and `NativeBuffer<E>` are `{ptr, len}` over C storage. On
+///   luajit `ptr` is an `E*`, so `ptr[i]` is an element REFERENCE and the body
+///   is right; JS backs them with flat slots, where `ptr[i]` is a leaf. Hence a
+///   JS-only rejection, the same asymmetry the spec-key trigger already makes.
+/// The nominal container constructors 2.4 covers. Asked BEFORE the element is
+/// resolved: reading a concrete type is not free of consequence -- `concrete_ty`
+/// reports "bone typed no expression here" as an error -- so a `Sampler2D`
+/// parameter must never be asked in the first place.
+pub fn is_nominal_container(name: Ustr) -> bool {
+    matches!(name.as_str(), "Arena" | "FlatVec" | "NativeBuffer")
+}
+
+pub fn opaque_container_hazard(
+    ws: &Workspace,
+    target: bone_semantic::hir::FnBackend,
+    container: Ustr,
+    elem: Ustr,
+) -> Option<&'static str> {
+    let js = target == bone_semantic::hir::FnBackend::Js;
+    let columns = (vec_column_elem(ws, elem, false).is_some()
+        || vec_column_elem(ws, elem, true).is_some())
+        && columns_available(ws, target, elem);
+    match container.as_str() {
+        "Arena" if columns => Some("`data._data`"),
+        "FlatVec" | "NativeBuffer" if js && leaf_addr_plan(ws, elem).is_ok() => {
+            Some("a per-element view over `ptr`")
+        }
+        _ => None,
+    }
+}
+
 /// Whether `[elem]` takes column storage when lowering for `target`.
 ///
 /// Every target now serves columns, so this is unconditional. It survives as a
