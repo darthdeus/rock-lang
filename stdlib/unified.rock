@@ -1578,7 +1578,10 @@ inline(lua) fn table_new() -> any = """return {}"""
     o[f] = v
 """
 
-@inline inline(lua) fn table_unset(tbl: any, index: any) = """
+// Typed for the same reason the `__vec_data_*` receivers are: `any` claimed no
+// representation, so a missing column route fell through to the boxed body.
+// Both callers are Map methods (`remove`, `clear`).
+@inline inline(lua) fn table_unset<K, V>(tbl: Map<K, V>, index: K) = """
     tbl[index] = nil
 """
 
@@ -1587,9 +1590,13 @@ inline(lua) fn table_new() -> any = """return {}"""
 // `[i]` via the intrinsic map) so the shared pure-Rock Vec ops stop hard-coding
 // the Lua base. `@inline` so hot `vec_get` / drain callsites still splice with
 // no call frame.
-@nomangle @inline inline(lua) fn __vec_data_get(vec: any, index: int) -> any = "return vec._data[index + 1]"
-@nomangle @inline inline(lua) fn __vec_data_set(vec: any, index: int, value: any) = "vec._data[index + 1] = value"
-@nomangle @inline inline(lua) fn __vec_data_unset(vec: any, index: int) = "vec._data[index + 1] = nil"
+// The RECEIVER is typed so 2.4 can protect these: spelled `any` they claimed no
+// representation, and a missing column route fell through to the boxed body and
+// died at runtime on `_data` instead of rejecting. The VALUE stays `any` -- it
+// is stored opaquely. `docs/boundary-contracts.md` 2.3b.
+@nomangle @inline inline(lua) fn __vec_data_get<T>(vec: [T], index: int) -> any = "return vec._data[index + 1]"
+@nomangle @inline inline(lua) fn __vec_data_set<T>(vec: [T], index: int, value: any) = "vec._data[index + 1] = value"
+@nomangle @inline inline(lua) fn __vec_data_unset<T>(vec: [T], index: int) = "vec._data[index + 1] = nil"
 
 // The COLD half of the same boundary. `get`/`set`/`unset` cover every op that
 // reaches storage one element at a time; these are the ops that touch the
