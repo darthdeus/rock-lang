@@ -1664,6 +1664,55 @@ fn main() {{ let a = keep(1) }}
     );
 }
 
+/// The `stdlib-funcref` excusal is a DECLARATION property, never a name one.
+/// `ERASED_RUNTIME_ENTRIES` holds NAMES, and membership alone is a proxy for
+/// "this is the entry `stdlib_funcref` resolves to" -- a weaker question. A user
+/// `@nomangle` generic sharing a catalogue name is not that entry.
+///
+/// A/B on exactly that, one fixture differing only by the shadowing overload.
+/// Without it the stdlib's `__rock_col_sort` is excused; with it the resolver
+/// is ambiguous -- what `stdlib_funcref` itself rejects on -- so nothing is
+/// excused and the obligation stands.
+#[test]
+fn the_funcref_excusal_follows_the_declaration_not_the_name() {
+    let (_, plain) = graph_of("fn main() { }");
+    assert!(
+        plain
+            .excused_generic_roots
+            .get("stdlib-funcref")
+            .is_some_and(|s| s.contains("__rock_col_sort")),
+        "the stdlib's own `__rock_col_sort` IS the entry `stdlib_funcref` resolves \
+         to, so it must be excused: {:?}",
+        plain.excused_generic_roots
+    );
+    assert!(
+        !plain.uninstantiated_roots.contains_key("__rock_col_sort"),
+        "...and therefore not an obligation: {:?}",
+        plain.uninstantiated_roots.keys()
+    );
+
+    let (_, shadowed) = graph_of(
+        r#"
+@nomangle fn __rock_col_sort<T>(x: T) -> int { return 1 }
+fn main() { }
+"#,
+    );
+    assert!(
+        shadowed.uninstantiated_roots.contains_key("__rock_col_sort"),
+        "a same-name overload makes the entry unresolvable, so the obligation \
+         returns rather than riding the catalogue name: excused={:?}",
+        shadowed.excused_generic_roots
+    );
+    assert!(
+        !shadowed
+            .excused_generic_roots
+            .get("stdlib-funcref")
+            .is_some_and(|s| s.contains("__rock_col_sort")),
+        "nothing may be excused under a name the resolver cannot decide: {:?}",
+        shadowed.excused_generic_roots
+    );
+}
+
 /// The OTHER cause: a call from an always-emitted body (here a global
 /// initializer) whose instantiation fails. It has no `from` instance to be
 /// filed against as an [`Unresolved`] or a [`Rejection`], but it carries the

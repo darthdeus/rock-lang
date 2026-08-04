@@ -600,14 +600,26 @@ pub const ERASED_RUNTIME_ENTRIES: &[&str] = &[
 ///   stdlib has no body serving the active target. Existence-per-target is the
 ///   contract, and it is checked, not asserted (1.4).
 ///
+/// The catalogue is a set of NAMES, and a name is not a declaration. Membership
+/// alone is a PROXY for "this is the entry the compiler resolves to", and a
+/// weaker question than the one being asked: a user `@nomangle` generic sharing
+/// a catalogue name is not that entry, and excusing it would falsely close a
+/// program. So the excusal asks the same resolver `stdlib_funcref` does
+/// ([`stdlib_entry_representative`]) and excuses only the declaration it
+/// selects. When that resolver is ambiguous -- exactly what `stdlib_funcref`
+/// itself rejects on -- nothing is excused and the obligation stands.
+///
 /// Deliberately NOT a discharge: having concrete instances from Rock call
 /// sites. Those cover the call sites and not the bare-name entry, which is the
 /// falsely-green reading [`RootHole`] exists to prevent.
-fn generic_root_obligation(f: &Function) -> Option<&'static str> {
+fn generic_root_obligation(ws: &Workspace, r: FuncRef, f: &Function) -> Option<&'static str> {
     if !skull_mir::mangle::is_exempt(f) {
         return Some("mangled");
     }
-    if ERASED_RUNTIME_ENTRIES.contains(&f.name.as_str()) {
+    // `r` is already canonicalized by `build`, so this compares like for like.
+    if ERASED_RUNTIME_ENTRIES.contains(&f.name.as_str())
+        && stdlib_entry_representative(ws, f.name.as_str()) == Some(r)
+    {
         return Some("stdlib-funcref");
     }
     None
@@ -1303,7 +1315,7 @@ pub fn build(ws: &Workspace, roots: Vec<FuncRef>, perturb: bool) -> InstanceGrap
     for r in roots {
         let f = &ws.module(r.module).functions[r.func];
         if !f.generics.is_empty() {
-            match generic_root_obligation(f) {
+            match generic_root_obligation(ws, r, f) {
                 Some(reason) => g.excuse_generic_root(reason, mangle_fn(ws, f)),
                 None => g.record_generic_root(mangle_fn(ws, f)),
             }
