@@ -1451,7 +1451,10 @@ pub(crate) fn spec_key_has_target_storage(
 /// storage lowering actually selects -- it composes exactly the two predicates
 /// [`spec_key_has_target_storage`] does, for the same reason.
 ///
-/// The `Arena` / `FlatVec` / `NativeBuffer` split is not stylistic:
+/// The split is not stylistic:
+///
+/// - `[E]`/`Vec<E>` is per-leaf column arrays with no `_data`, and `Map<K, E>`
+///   at a column-eligible `E` is a spine wrapper rather than a bare key table.
 ///
 /// - `Arena<E>`'s `data` IS a column vec at a column-eligible `E`, on every
 ///   target, so an opaque body's `a.data._data` is nil everywhere.
@@ -1467,17 +1470,27 @@ pub fn is_nominal_container(name: Ustr) -> bool {
     matches!(name.as_str(), "Arena" | "FlatVec" | "NativeBuffer")
 }
 
+/// The name [`opaque_container_hazard`] knows a builtin container by.
+pub const VEC_CONTAINER: &str = "Vec";
+pub const MAP_CONTAINER: &str = "Map";
+
 pub fn opaque_container_hazard(
     ws: &Workspace,
     target: bone_semantic::hir::FnBackend,
     container: Ustr,
     elem: Ustr,
+    nullable: bool,
 ) -> Option<&'static str> {
     let js = target == bone_semantic::hir::FnBackend::Js;
-    let columns = (vec_column_elem(ws, elem, false).is_some()
-        || vec_column_elem(ws, elem, true).is_some())
-        && columns_available(ws, target, elem);
+    // The element's own nullability, NOT either flavour.
+    // [`spec_key_has_target_storage`] may over-approximate -- an extra
+    // specialized copy costs nothing -- and a REJECTION may not: an unmarked
+    // `[BV2?]` is a boxed vec while its non-nullable twin `[BV2]` is columns.
+    let columns =
+        vec_column_elem(ws, elem, nullable).is_some() && columns_available(ws, target, elem);
     match container.as_str() {
+        "Vec" if columns => Some("`_data`"),
+        "Map" if columns => Some("a bare key table"),
         "Arena" if columns => Some("`data._data`"),
         "FlatVec" | "NativeBuffer" if js && leaf_addr_plan(ws, elem).is_ok() => {
             Some("a per-element view over `ptr`")

@@ -54,6 +54,9 @@ mod generic_coroutine_column_param_sentinel;
 mod hole_runtime_error;
 #[path = "incremental_emit.rs"]
 mod incremental_emit;
+#[path = "opaque_declared_type_reach.rs"]
+mod opaque_declared_type_reach;
+
 #[path = "opaque_container_axes.rs"]
 mod opaque_container_axes;
 
