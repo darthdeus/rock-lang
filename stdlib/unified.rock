@@ -1380,7 +1380,11 @@ inline(js) fn float_to_int(value: float) -> int = "return Math.floor(value);"
     return copy
 """
 
-@nomangle inline(lua) fn deepcopy<T>(obj: T) -> T = """
+// Not `@nomangle`: nothing calls this by its bare name. `@nomangle` is what
+// creates a bare-name obligation for opaque text to call, and these are reached
+// only through ordinary Rock calls and the column intercept, which match the
+// Rock name rather than the emitted symbol.
+inline(lua) fn deepcopy<T>(obj: T) -> T = """
     return __rock_deepcopy_value(obj, {})
 """
 
@@ -1607,25 +1611,29 @@ inline(lua) fn table_new() -> any = """return {}"""
 //
 // Not `@inline`: these are cold (construction, clone, sort), so a call frame is
 // the right trade and splicing them into every caller is not.
-@nomangle inline(lua) fn __vec_data_alloc<T>(capacity: int) -> [T] = """
+// Not `@nomangle`: nothing calls this by its bare name. `@nomangle` is what
+// creates a bare-name obligation for opaque text to call, and these are reached
+// only through ordinary Rock calls and the column intercept, which match the
+// Rock name rather than the emitted symbol.
+inline(lua) fn __vec_data_alloc<T>(capacity: int) -> [T] = """
     local tbl = {}
     for i = 1, capacity do tbl[i] = false end
     return { _data = tbl, len = 0, __ty = "Vec" }
 """
 
-@nomangle inline(lua) fn __vec_data_capacity<T>(vec: [T]) -> int = "return #vec._data"
+inline(lua) fn __vec_data_capacity<T>(vec: [T]) -> int = "return #vec._data"
 
-@nomangle inline(lua) fn __vec_data_insert<T>(vec: [T], lua_index: int, value: T) = """
+inline(lua) fn __vec_data_insert<T>(vec: [T], lua_index: int, value: T) = """
     table.insert(vec._data, lua_index, value)
 """
 
-@nomangle inline(lua) fn __vec_data_clone<T>(vec: [T]) -> [T] = """
+inline(lua) fn __vec_data_clone<T>(vec: [T]) -> [T] = """
     local copy = {}
     for i = 1, #vec._data do copy[i] = vec._data[i] end
     return { _data = copy, len = vec.len, __ty = "Vec" }
 """
 
-@nomangle inline(lua) fn __vec_data_sort<T, K>(vec: [T], key_fn: fn(T) -> K) = """
+inline(lua) fn __vec_data_sort<T, K>(vec: [T], key_fn: fn(T) -> K) = """
     table.sort(vec._data, function(a, b)
         return key_fn(a) < key_fn(b)
     end)
