@@ -283,47 +283,88 @@ pub fn manifest_of_dir(dir: &Path) -> anyhow::Result<BTreeMap<String, ArtifactEn
 /// Normalize one entry's raw child stderr so two runs of the same sim produce
 /// the same text.
 ///
-/// Removes the leading `[   0.123s LEVEL ]` stamp, rewrites the entry's `$OUT`
-/// path to a literal `$OUT`, and collapses digit runs to `#`. What survives is
-/// WHICH log records the entry emitted, in order -- which is the property a
-/// per-entry logger reset owes, without the wall-clock timings and frame
-/// numbers that legitimately differ run to run.
+/// Two rewrites only: the logger's leading `[   0.123s LEVEL ]` timestamp is
+/// removed, and the entry's `$OUT` path becomes a literal `$OUT`. Everything
+/// else -- including every digit in the message -- is preserved. Numbers in a
+/// log record are frame counters, entity ids, resource handles and error
+/// payloads, which is to say they are exactly the leaked state this arm exists
+/// to catch; a run whose warning says `gate 7` where the reference says
+/// `gate 0` has diverged.
 pub fn normalize_diagnostics(lines: &[String], out_dir: &Path) -> String {
     let out_str = out_dir.to_string_lossy().to_string();
     let mut result = String::new();
     for line in lines {
         let body = strip_log_stamp(line);
-        let body = if out_str.is_empty() { body.to_string() } else { body.replace(&out_str, "$OUT") };
-        let mut normalized = String::with_capacity(body.len());
-        let mut in_number = false;
-        for c in body.chars() {
-            if c.is_ascii_digit() {
-                if !in_number {
-                    normalized.push('#');
-                    in_number = true;
-                }
-            } else {
-                in_number = false;
-                normalized.push(c);
-            }
-        }
-        result.push_str(normalized.trim_end());
+        let body = if out_str.is_empty() {
+            body
+        } else {
+            &body.replace(&out_str, "$OUT")
+        };
+        result.push_str(body.trim_end());
         result.push('\n');
     }
     result
 }
 
-/// Drop a `[   0.123s INFO ]` style stamp, keeping the rest of the line.
+/// Remove a `[   0.123s INFO ]` logger stamp, or return the line untouched.
+///
+/// Parsed exactly -- elapsed seconds, `s`, a level word, `]` -- rather than
+/// sniffed. A loose match would eat a game's own `[CATEGORY] ...` prefix and
+/// erase the category this arm needs to tell records apart.
 fn strip_log_stamp(line: &str) -> &str {
     let Some(rest) = line.strip_prefix('[') else { return line };
-    let Some(close) = rest.find(']') else { return line };
-    let stamp = &rest[..close];
-    // Only a real stamp: it always carries the elapsed-seconds marker. A game
-    // line that merely starts with `[CATEGORY]` must survive untouched.
-    if !stamp.contains('s') || !stamp.chars().any(|c| c.is_ascii_digit()) {
+    let mut c = rest.chars().peekable();
+    let mut consumed = 0usize;
+    let take = |c: &mut std::iter::Peekable<std::str::Chars>, consumed: &mut usize| {
+        let ch = c.next();
+        if let Some(ch) = ch {
+            *consumed += ch.len_utf8();
+        }
+        ch
+    };
+
+    while c.peek() == Some(&' ') {
+        take(&mut c, &mut consumed);
+    }
+    // <digits> "." <digits> "s"
+    let mut digits = 0;
+    while c.peek().is_some_and(|ch| ch.is_ascii_digit()) {
+        take(&mut c, &mut consumed);
+        digits += 1;
+    }
+    if digits == 0 || take(&mut c, &mut consumed) != Some('.') {
         return line;
     }
-    rest[close + 1..].trim_start()
+    let mut frac = 0;
+    while c.peek().is_some_and(|ch| ch.is_ascii_digit()) {
+        take(&mut c, &mut consumed);
+        frac += 1;
+    }
+    if frac == 0 || take(&mut c, &mut consumed) != Some('s') {
+        return line;
+    }
+    if take(&mut c, &mut consumed) != Some(' ') {
+        return line;
+    }
+    while c.peek() == Some(&' ') {
+        take(&mut c, &mut consumed);
+    }
+    // A level word, then optional padding, then the closing bracket.
+    let mut level = 0;
+    while c.peek().is_some_and(|ch| ch.is_ascii_uppercase()) {
+        take(&mut c, &mut consumed);
+        level += 1;
+    }
+    if level == 0 {
+        return line;
+    }
+    while c.peek() == Some(&' ') {
+        take(&mut c, &mut consumed);
+    }
+    if take(&mut c, &mut consumed) != Some(']') {
+        return line;
+    }
+    rest[consumed..].trim_start()
 }
 
 #[cfg(test)]
@@ -415,7 +456,7 @@ mod tests {
     }
 
     #[test]
-    fn normalized_diagnostics_drop_timing_but_keep_which_records_fired() {
+    fn normalization_drops_the_stamp_and_the_tempdir_and_nothing_else() {
         let out = Path::new("/tmp/sim-abc123");
         let a = normalize_diagnostics(
             &[
@@ -424,32 +465,49 @@ mod tests {
             ],
             out,
         );
+        // Same records, different elapsed times: the stamp is the only timing
+        // the arm forgives.
         let b = normalize_diagnostics(
             &[
-                // Same records, different elapsed times and a different count.
-                "[  12.010s WARN ] [MAG] gate 7: no member spawners".to_string(),
+                "[  12.010s WARN ] [MAG] gate 0: no member spawners".to_string(),
                 "[  13.900s INFO ] wrote /tmp/sim-abc123/count.txt".to_string(),
             ],
             out,
         );
-        assert_eq!(a, b, "timings and counters must not create false differences");
+        assert_eq!(a, b, "the elapsed-time stamp must not create a false difference");
         assert!(a.contains("$OUT/count.txt"), "the tempdir path is rewritten: {a}");
-
-        // But a record that did not fire at all is still a difference -- that is
-        // the logger-dedup signal the arm exists for.
-        let suppressed = normalize_diagnostics(
-            &["[   1.004s INFO ] wrote /tmp/sim-abc123/count.txt".to_string()],
-            out,
-        );
-        assert_ne!(a, suppressed);
     }
 
+    /// Digits inside a message are frame counters, entity ids, resource handles
+    /// and error payloads -- leaked state, not noise. Collapsing them would
+    /// blind the arm to the divergences it exists to report.
     #[test]
-    fn a_bare_category_prefix_is_not_mistaken_for_a_log_stamp() {
-        // `[MAG] ...` has no elapsed-seconds field; stripping it would erase
-        // the category the dedup arm needs to tell records apart.
-        let kept = normalize_diagnostics(&["[MAG] gate: no spawners".to_string()], Path::new(""));
-        assert_eq!(kept, "[MAG] gate: no spawners\n");
+    fn a_message_digit_is_a_difference() {
+        let out = Path::new("/tmp/sim-abc123");
+        let zero = normalize_diagnostics(
+            &["[   0.789s WARN ] [MAG] gate 0: no member spawners".to_string()],
+            out,
+        );
+        let seven = normalize_diagnostics(
+            &["[   0.789s WARN ] [MAG] gate 7: no member spawners".to_string()],
+            out,
+        );
+        assert_ne!(zero, seven, "`gate 0` and `gate 7` are not the same record");
+    }
+
+    /// A record that did not fire at all is the logger-dedup signal.
+    #[test]
+    fn a_suppressed_record_is_a_difference() {
+        let out = Path::new("/tmp/sim-abc123");
+        let both = normalize_diagnostics(
+            &[
+                "[   0.789s WARN ] [B0] fixture warning".to_string(),
+                "[   1.004s INFO ] done".to_string(),
+            ],
+            out,
+        );
+        let suppressed = normalize_diagnostics(&["[   1.004s INFO ] done".to_string()], out);
+        assert_ne!(both, suppressed);
     }
 
     #[test]

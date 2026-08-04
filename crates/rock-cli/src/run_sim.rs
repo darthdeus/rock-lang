@@ -851,6 +851,14 @@ fn split_worker_stream(lines: &[String], parts: &[WorkerPart]) -> Result<Vec<Ent
         match op.as_str() {
             "entry_start" => {
                 let seq = envelope_seq(rest, line)?;
+                // Bounds FIRST. After the last entry closes `next_expected`
+                // equals the queue length, so a further start would satisfy the
+                // ordering check below and then index off the end.
+                if seq >= n {
+                    return Err(anyhow!(
+                        "worker started entry {seq} but the queue has only {n} entries: {line}"
+                    ));
+                }
                 if let Some(live) = open {
                     return Err(anyhow!(
                         "worker started entry {seq} while entry {live} (`{}`) was still open: {line}",
@@ -948,6 +956,19 @@ fn run_worker(
     // Everything else in `@sim_env` is consumed during global init, engine init
     // and `@init`, so a shared process can only serve entries that agree on it.
     if parts.len() > 1 {
+        // `os_setenv` reaches the C runtime environment. On Windows that is
+        // `_putenv_s`, which Microsoft documents as operating on the
+        // CRT-accessible structures -- a native reader going through the Win32
+        // block directly would still see the previous entry's `$OUT`. Until
+        // both views are updated AND tested, Windows keeps the fresh-process
+        // path rather than running a queue that is quietly wrong.
+        if cfg!(windows) {
+            return Err(anyhow!(
+                "worker entry queues are not available on Windows: the per-entry \
+                 environment reaches only the CRT view, so a native reader using the \
+                 Win32 environment block would see the previous entry's $OUT"
+            ));
+        }
         for p in &parts[1..] {
             if p.env != first.env {
                 return Err(anyhow!(
@@ -2531,6 +2552,16 @@ mod tests {
                 vec![start(0, "a"), end(0, "a"), expect_ok("orphan")],
             ),
             (
+                "a start past the end of the queue",
+                vec![
+                    start(0, "a"),
+                    end(0, "a"),
+                    start(1, "b"),
+                    end(1, "b"),
+                    start(2, "c"),
+                ],
+            ),
+            (
                 "an operation after the last entry",
                 vec![
                     start(0, "a"),
@@ -2548,6 +2579,14 @@ mod tests {
                 "{what} was accepted; a stray op would land on the wrong sim"
             );
         }
+
+        // Same guard against a ONE-entry queue, where `next_expected` reaches
+        // the queue length after a single clean entry.
+        let one = worker_parts(&["a"]);
+        assert!(
+            split_worker_stream(&[start(0, "a"), end(0, "a"), start(1, "b")], &one).is_err(),
+            "a start past the end of a one-entry queue was accepted"
+        );
     }
 
     /// Hashing `$OUT` reads every byte a sim produced -- for a game writing
