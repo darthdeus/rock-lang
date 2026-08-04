@@ -2,9 +2,11 @@
 //!
 //! A boot-checkpoint worker is only allowed to become the default when a sim
 //! that ran after a predecessor in ONE process is observationally identical to
-//! the same sim in a fresh process. This is the gate that decides that, and it
-//! exists BEFORE the reset it will eventually certify: the leak fixture below
-//! is red today and pins exactly how far the seam currently is from correct.
+//! the same sim in a fresh process. This is the gate that decides that. The B2
+//! boundary (`sim_worker_restore_boot`) restores the Lua-visible world --
+//! globals, statics, RNG, buffer bytes, engine config, input maps, the poller
+//! -- and the remaining sentinels (logger dedup, subprocesses) pin exactly the
+//! native half B3 still owes.
 //!
 //! Both sides of every comparison are produced by the same spawn/demux/record
 //! code with the same schema, differing only in how many entries share the
@@ -115,97 +117,74 @@ fn deferred_artifacts_are_recorded_while_out_is_still_live() {
     }
 }
 
-/// SENTINEL -- asserts the CURRENTLY BROKEN behavior. The worker seam runs
-/// entries back to back with no state reset (`docs/sim-speed-plan.md` B1/B3 are
-/// unimplemented), so a game global set by one entry survives into the next.
-///
-/// FLIP WHEN FIXED: once the boot-checkpoint restore lands, this must become
-/// `assert_equivalent`, in the same commit as the fix.
+/// The boot-checkpoint restore at the worker boundary
+/// (`sim_worker_restore_boot`) puts game globals back: a counter the
+/// predecessor bumped reads fresh in the next entry, in the probe's expect and
+/// in the file whose contents encode the value.
 #[test]
-fn a_leaked_global_still_reaches_the_next_entry() {
+fn a_predecessors_global_does_not_reach_the_next_entry() {
     let (isolated, worker) = differential(&["b0_leak_seed"], "b0_leak_probe");
     let c = compare(&isolated, &worker);
+    assert_equivalent("b0_leak_probe", &c);
 
-    assert!(
-        !c.is_equivalent(),
-        "the worker no longer leaks a game global -- land the reset and flip this \
-         sentinel to assert_equivalent"
-    );
-    // Named arms, not just "some difference": the leak has to be visible both
-    // as an assertion outcome and in a produced file's CONTENTS, because a
-    // reset that only fixed one of those would still be wrong.
-    for arm in ["verdict", "expects_pass", "expects_fail", "artifacts"] {
-        assert!(c.differs_on(arm), "expected a `{arm}` difference:\n{}", c.report());
-    }
-
+    // Agreement is only evidence when the probe measured: it passed its own
+    // fresh-counter expect and wrote the counter into an artifact.
     assert_eq!(isolated.verdict(), "PASS", "the probe passes in a fresh process");
-    assert_eq!(worker.verdict(), "FAIL", "and fails after a predecessor");
+    assert!(c.population("expects_pass") > 0, "the fixture asserted nothing");
     assert_eq!(
         worker.artifacts["count.txt"].len, 1,
-        "the counter is written as one digit either way"
+        "the counter is written as one digit"
     );
-    assert_ne!(
-        isolated.artifacts["count.txt"], worker.artifacts["count.txt"],
-        "same-length file, different contents -- a name-only manifest would miss this"
-    );
+    assert_eq!(isolated.artifacts["count.txt"], worker.artifacts["count.txt"]);
 }
 
-/// SENTINEL -- the RNG stream position is process-global, so a predecessor's
-/// draws move the probe's. Both entries still PASS their own assertions: the
-/// leak reaches the record only through the produced file's contents, which is
-/// why the manifest hashes bytes rather than listing names.
-///
-/// FLIP WHEN FIXED: becomes `assert_equivalent` when the checkpoint restores
-/// RNG state.
+/// The checkpoint restores the RNG stream position, so the probe's first draw
+/// after a predecessor is the same one a fresh `ROCK_TEST_SEED=42` process
+/// makes. Only the produced file can see this class -- both sides pass their
+/// own expects either way -- so the load-bearing comparison is the artifact's
+/// CONTENTS.
 #[test]
-fn the_rng_stream_position_still_leaks_into_the_next_entry() {
+fn the_rng_stream_position_resets_at_the_entry_boundary() {
     let (isolated, worker) = differential(&["b0_rng_seed"], "b0_rng_probe");
     let c = compare(&isolated, &worker);
+    assert_equivalent("b0_rng_probe", &c);
 
-    assert!(
-        c.differs_on("artifacts"),
-        "the worker no longer leaks RNG position -- flip this sentinel:\n{}",
-        c.report()
-    );
-    assert_eq!(
-        isolated.verdict(),
-        worker.verdict(),
-        "both sides pass their own expects; only the drawn value moved"
-    );
-    assert_ne!(isolated.artifacts["draw.txt"], worker.artifacts["draw.txt"]);
+    assert!(c.population("artifacts") > 0, "the probe never wrote its draw");
+    assert_eq!(isolated.artifacts["draw.txt"], worker.artifacts["draw.txt"]);
 }
 
-/// SENTINEL -- a `static` local in an ordinarily-called function. Skull records
-/// this one's cell and done flag in `__rock_known_globals`, so it is the case a
-/// checkpoint registry can already see.
-///
-/// FLIP WHEN FIXED: becomes `assert_equivalent` when statics are restored.
+/// A `static` local in an ordinarily-called function restores at the boundary:
+/// the probe's bump reaches a fresh cell.
 #[test]
-fn a_called_function_static_still_leaks_into_the_next_entry() {
+fn a_called_function_static_resets_at_the_entry_boundary() {
     let (isolated, worker) = differential(&["b0_static_called_seed"], "b0_static_called_probe");
     let c = compare(&isolated, &worker);
+    assert_equivalent("b0_static_called_probe", &c);
 
-    assert!(!c.is_equivalent(), "the called-function static no longer leaks -- flip this sentinel");
-    for arm in ["verdict", "expects_fail", "artifacts"] {
-        assert!(c.differs_on(arm), "expected a `{arm}` difference:\n{}", c.report());
-    }
+    assert_eq!(isolated.verdict(), "PASS", "the probe passes in a fresh process");
+    assert!(c.population("expects_pass") > 0, "the fixture asserted nothing");
+    assert_eq!(
+        isolated.artifacts["called_static.txt"],
+        worker.artifacts["called_static.txt"]
+    );
 }
 
-/// SENTINEL -- the same state class reached through INLINED call sites, where
-/// the cell is read and written directly in the caller's body rather than
-/// through a call. Kept separate from its called-function sibling because a
-/// registry built from emitted bodies treats the two differently.
-///
-/// FLIP WHEN FIXED: becomes `assert_equivalent` when statics are restored.
+/// The same state class reached through INLINED call sites, where the cell is
+/// read and written directly in the caller's body rather than through a call.
+/// Kept separate from its called-function sibling because a registry built
+/// from emitted bodies treats the two differently.
 #[test]
-fn an_inlined_static_still_leaks_into_the_next_entry() {
+fn an_inlined_static_resets_at_the_entry_boundary() {
     let (isolated, worker) = differential(&["b0_static_inlined_seed"], "b0_static_inlined_probe");
     let c = compare(&isolated, &worker);
+    assert_equivalent("b0_static_inlined_probe", &c);
 
-    assert!(!c.is_equivalent(), "the inlined static no longer leaks -- flip this sentinel");
-    for arm in ["verdict", "expects_fail", "artifacts"] {
-        assert!(c.differs_on(arm), "expected a `{arm}` difference:\n{}", c.report());
-    }
+    assert_eq!(isolated.verdict(), "PASS", "the probe passes in a fresh process");
+    assert!(c.population("expects_pass") > 0, "the fixture asserted nothing");
+    assert_eq!(
+        isolated.artifacts["inlined_static.txt"],
+        worker.artifacts["inlined_static.txt"]
+    );
 }
 
 /// SENTINEL -- and the reason the `entry_diagnostics` arm exists. `log_once`
@@ -237,98 +216,68 @@ fn logger_dedup_still_suppresses_the_next_entrys_warning() {
     );
 }
 
-/// SENTINEL -- engine configuration. `TIME_SCALE` is a Stone global outside
-/// replay's six-global predicate, so nothing in the existing restore surface
-/// puts it back, and the runner multiplies the sim's fixed dt by it: the probe
-/// inherits both the scale and a quarter-speed frame.
-///
-/// FLIP WHEN FIXED: becomes `assert_equivalent` once the boot checkpoint
-/// restores engine configuration, in the same commit as the fix.
+/// Engine configuration restores at the boundary. `TIME_SCALE` is a Stone
+/// global outside replay's six-global predicate; the checkpoint's membership is
+/// the whole registry, so the probe sees real time -- in the scale field AND in
+/// the dt its own frame advances, which is the reason this class matters.
 #[test]
-fn leaked_engine_configuration_still_reaches_the_next_entry() {
+fn engine_configuration_resets_at_the_entry_boundary() {
     let (isolated, worker) = differential(&["b0_config_seed"], "b0_config_probe");
     let c = compare(&isolated, &worker);
+    assert_equivalent("b0_config_probe", &c);
 
-    assert!(
-        !c.is_equivalent(),
-        "the worker no longer leaks TIME_SCALE -- land the reset and flip this \
-         sentinel to assert_equivalent"
-    );
-    for arm in ["verdict", "expects_pass", "expects_fail", "artifacts"] {
-        assert!(c.differs_on(arm), "expected a `{arm}` difference:\n{}", c.report());
-    }
     assert_eq!(isolated.verdict(), "PASS", "the probe passes in a fresh process");
-    assert_eq!(worker.verdict(), "FAIL", "and fails after a predecessor");
-    // The inherited scale is not merely a stale number: it changes the dt the
-    // probe's own frame advances, which is the reason this class matters.
-    assert!(
-        worker
-            .expects_fail
-            .iter()
-            .any(|m| m.message.contains("one frame advances a full fixed dt")),
-        "the leak must reach game time, not only the scale field: {:?}",
-        worker.expects_fail
-    );
-    assert_ne!(isolated.artifacts["scale.txt"], worker.artifacts["scale.txt"]);
+    for (label, record) in [("isolated", &isolated), ("worker", &worker)] {
+        assert!(
+            record
+                .expects_pass
+                .iter()
+                .any(|m| m.message.contains("one frame advances a full fixed dt")),
+            "{label}: the probe never measured game time, so agreement proves \
+             nothing about the dt the scale feeds: {:?}",
+            record.expects_pass
+        );
+    }
+    assert_eq!(isolated.artifacts["scale.txt"], worker.artifacts["scale.txt"]);
 }
 
-/// SENTINEL -- input edges. A body that stops mid-hold leaves `keys_down` set,
-/// and `input_end_frame` copies it forward every frame afterwards, so the next
-/// entry starts with a key held that it never pressed.
-///
-/// FLIP WHEN FIXED: becomes `assert_equivalent` once the boot checkpoint
-/// restores the input maps.
+/// Input edges restore at the boundary: a predecessor that stopped mid-hold
+/// left `keys_down` set, and `input_end_frame` would roll it forward forever --
+/// the restored map starts the probe with nothing held and no release edge.
 #[test]
-fn a_held_key_still_reaches_the_next_entry() {
+fn a_held_key_does_not_reach_the_next_entry() {
     let (isolated, worker) = differential(&["b0_input_seed"], "b0_input_probe");
     let c = compare(&isolated, &worker);
+    assert_equivalent("b0_input_probe", &c);
 
-    assert!(
-        !c.is_equivalent(),
-        "the worker no longer leaks a held key -- flip this sentinel to \
-         assert_equivalent"
-    );
-    for arm in ["verdict", "expects_pass", "expects_fail", "artifacts"] {
-        assert!(c.differs_on(arm), "expected a `{arm}` difference:\n{}", c.report());
-    }
-    assert_eq!(isolated.verdict(), "PASS");
-    assert_eq!(worker.verdict(), "FAIL");
-    // Same length, different bytes: a name-only manifest would call these equal.
-    assert_eq!(isolated.artifacts["hold.txt"].len, worker.artifacts["hold.txt"].len);
-    assert_ne!(isolated.artifacts["hold.txt"], worker.artifacts["hold.txt"]);
+    assert_eq!(isolated.verdict(), "PASS", "the probe passes in a fresh process");
+    assert!(c.population("expects_pass") > 0, "the fixture asserted nothing");
+    // "held" and "free" are the same length, so the CONTENTS comparison is the
+    // load-bearing one -- a name-or-length manifest would call a leak equal.
+    assert_eq!(isolated.artifacts["hold.txt"], worker.artifacts["hold.txt"]);
 }
 
-/// SENTINEL -- a poller task still live when its entry stopped. Nothing at the
-/// entry boundary cancels the engine poller's registrations, so a
-/// fire-and-forget task spawned by a predecessor keeps advancing inside the
-/// next entry's frames.
+/// A task left live at `stop_sim()` does not tick in the next entry: restoring
+/// `POLLER` rebinds the boot arena, so the predecessor's registration is
+/// ABANDONED -- never polled again, and its terminal defers deliberately do not
+/// fire, because a fresh process's exit would not have fired them either.
 ///
 /// The discriminant is a DELTA measured strictly inside the probe's window, not
 /// the counter's value: a value would only repeat the leaked-global class,
 /// while a delta can move only if foreign work is still being polled here.
-///
-/// FLIP WHEN FIXED: becomes `assert_equivalent` when the boundary cancels the
-/// previous entry's tasks.
 #[test]
-fn a_task_left_live_at_stop_sim_still_ticks_in_the_next_entry() {
+fn a_task_left_live_at_stop_sim_does_not_tick_in_the_next_entry() {
     let (isolated, worker) = differential(&["b0_poller_seed"], "b0_poller_probe");
     let c = compare(&isolated, &worker);
+    assert_equivalent("b0_poller_probe", &c);
 
-    assert!(
-        !c.is_equivalent(),
-        "the worker no longer polls a predecessor's task -- land the cancel and \
-         flip this sentinel to assert_equivalent"
-    );
-    for arm in ["verdict", "expects_pass", "expects_fail", "artifacts"] {
-        assert!(c.differs_on(arm), "expected a `{arm}` difference:\n{}", c.report());
-    }
     assert_eq!(isolated.verdict(), "PASS", "nothing foreign ticks in a fresh process");
-    assert_eq!(worker.verdict(), "FAIL");
+    assert!(c.population("expects_pass") > 0, "the fixture asserted nothing");
     assert_eq!(
-        isolated.artifacts["ticks.txt"].len, worker.artifacts["ticks.txt"].len,
-        "both write a one-digit delta; only the digit differs"
+        worker.artifacts["ticks.txt"].len, 1,
+        "the probe writes its one-digit delta, so the zero was measured"
     );
-    assert_ne!(isolated.artifacts["ticks.txt"], worker.artifacts["ticks.txt"]);
+    assert_eq!(isolated.artifacts["ticks.txt"], worker.artifacts["ticks.txt"]);
 }
 
 /// SENTINEL -- a native resource. Subprocesses are the one native class the
@@ -485,38 +434,26 @@ fn an_out_interpolating_env_is_refused_with_its_own_reason() {
     );
 }
 
-/// SENTINEL -- the DROPPED-DEFINITION static (`docs/sim-speed-plan.md` B1).
-///
-/// Unlike its two B0 siblings, this cell is not merely unrestored: it is
-/// unregistered. Its owner is `Iterator`-bounded, so `mir_emit` skips its
-/// definition entirely and it lives only inlined at its call sites, which means
-/// its cell never reaches `all_statics` and nothing in `__rock_known_globals`
-/// names it. A checkpoint built from that registry cannot see this state at
-/// all. Pinned at the emitted-Lua level too, by
+/// The DROPPED-DEFINITION static (`docs/sim-speed-plan.md` B1). Its
+/// `Iterator`-bounded owner has no standalone emission, so the cell exists only
+/// inlined at call sites; the B1 registration fix carries a spliced callee's
+/// statics into the body they splice into, so the cell reaches
+/// `__ROCK_STATICS` and the checkpoint restores it like any other. Pinned at
+/// the emitted-Lua level too, by
 /// `crates/skull/tests/static_registration_coverage.rs`.
-///
-/// FLIP WHEN FIXED: becomes `assert_equivalent` when the registry covers owners
-/// with no standalone definition AND the checkpoint restores them.
 #[test]
-fn a_dropped_definitions_static_still_leaks_into_the_next_entry() {
+fn a_dropped_definitions_static_resets_at_the_entry_boundary() {
     let (isolated, worker) = differential(&["b1_dropped_seed"], "b1_dropped_probe");
     let c = compare(&isolated, &worker);
+    assert_equivalent("b1_dropped_probe", &c);
 
-    assert!(
-        !c.is_equivalent(),
-        "the dropped-definition static no longer leaks -- flip this sentinel to \
-         assert_equivalent"
-    );
-    for arm in ["verdict", "expects_pass", "expects_fail", "artifacts"] {
-        assert!(c.differs_on(arm), "expected a `{arm}` difference:\n{}", c.report());
-    }
-    assert_eq!(isolated.verdict(), "PASS");
-    assert_eq!(worker.verdict(), "FAIL");
+    assert_eq!(isolated.verdict(), "PASS", "the probe passes in a fresh process");
+    assert!(c.population("expects_pass") > 0, "the fixture asserted nothing");
     assert_eq!(
-        isolated.artifacts["calls.txt"].len, worker.artifacts["calls.txt"].len,
-        "both write a one-digit count; only the digit differs"
+        worker.artifacts["calls.txt"].len, 1,
+        "the probe writes its one-digit count, so the fresh cell was measured"
     );
-    assert_ne!(isolated.artifacts["calls.txt"], worker.artifacts["calls.txt"]);
+    assert_eq!(isolated.artifacts["calls.txt"], worker.artifacts["calls.txt"]);
 }
 
 /// Mutation guard for the comparator itself: every arm must be present, and
@@ -526,9 +463,11 @@ fn a_dropped_definitions_static_still_leaks_into_the_next_entry() {
 /// assert.
 #[test]
 fn every_comparator_arm_is_present_and_exercised() {
-    // No single fixture reaches every arm: the leak differential is the only
-    // one populating `expects_fail`, and only the dedup one logs inside its
-    // entry envelope. The denominator is the union.
+    // No single fixture reaches every arm: only the dedup one logs inside its
+    // entry envelope, and with the B2 boundary landed nothing fails in a worker
+    // that would not fail isolated -- `expects_fail` is populated by the
+    // deliberate chained-only failure, identical on both sides. The denominator
+    // is the union.
     let comparisons = [
         {
             let (i, w) = differential(&["b0_leak_seed"], "b0_leak_probe");
@@ -537,6 +476,24 @@ fn every_comparator_arm_is_present_and_exercised() {
         {
             let (i, w) = differential(&["b0_dedup_seed"], "b0_dedup_probe");
             compare(&i, &w)
+        },
+        {
+            let (i, w) = differential(&["b0_leak_seed"], "b0_fail_head,b0_fail_tail");
+            let c = compare(&i, &w);
+            // The tail has a standalone branch; population is only evidence
+            // once both sides are known to have taken the FAILING one.
+            for (label, record) in [("isolated", &i), ("worker", &w)] {
+                assert!(
+                    record
+                        .expects_fail
+                        .iter()
+                        .any(|m| m.message.contains("deliberate chained-only failure")),
+                    "{label}: the tail took its standalone branch, so `expects_fail` \
+                     was never populated deliberately: {:?}",
+                    record.expects_fail
+                );
+            }
+            c
         },
     ];
 
