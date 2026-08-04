@@ -124,6 +124,7 @@ impl Builder<'_> {
     /// is reached.
     pub(crate) fn reject_column_container_opaque_args(
         &self,
+        e: Idx<Expr>,
         func: FuncRef,
         args: &[Idx<Expr>],
     ) -> Result<(), CompilerError> {
@@ -133,8 +134,17 @@ impl Builder<'_> {
         }
         let name = callee.name;
         for (i, &arg) in args.iter().enumerate() {
-            let Some(pty) = self.param_ty(func, i) else { continue };
-            let Some(TypeExpr::App { ctor, .. }) = self.ty_node(pty) else { continue };
+            // `@repr(opaque)`: this parameter's body makes no assumption about
+            // its physical form, so there is nothing for the layout rule to
+            // protect. PER PARAMETER -- a waiver on one must not disarm the
+            // call, which is what `vec_push(sink, @repr(opaque) item)` needs:
+            // the sink still has to be a boxed vec.
+            if self.param_is_repr_opaque(func, i) {
+                continue;
+            }
+            let Some(ctor) = self.callee_param_ctor(e, func, i)? else {
+                continue;
+            };
             // The physical form the boxed body assumes, per container. Both
             // answers come from the same storage oracles lowering routes on, so
             // the rule cannot drift from what the representation actually is.
@@ -152,13 +162,103 @@ impl Builder<'_> {
                 self.body.expr_spans[arg],
                 format!(
                     "column-stored `{rendered}` cannot cross opaque body boundary \
-                     `{name}` (an inline/extern body has no {physical}; take `any` if \
-                     the body reads the column layout itself, else use a boxed \
-                     element type)"
+                     `{name}` (an inline/extern body sees per-leaf columns, not \
+                     {physical}; take `any` if the body reads the column layout \
+                     itself, else use a boxed element type)"
                 ),
             ));
         }
         Ok(())
+    }
+
+    /// The type CONSTRUCTOR the callee's parameter `i` declares, resolved
+    /// through THIS CALL's generic bindings.
+    ///
+    /// [`Self::param_ty`] alone returns the declaration's `TyId`, and
+    /// [`Self::ty_node`] resolves a generic through the ENCLOSING builder's
+    /// substitution -- the caller's, not the callee's. A param spelled `T` that
+    /// binds to `[Q]` only at this call would read as committing to no
+    /// constructor at all, and the opaque body would be admitted over column
+    /// storage: measured as a guarded body answering `-1`.
+    ///
+    /// The bindings come from bone (`call_generic_bindings`) and are never
+    /// re-derived here. Binding a callee's generics from its argument types is
+    /// unification; a restatement of it in skull would be free to disagree with
+    /// the pass that owns the answer, and `compute_call_spec` reads this very
+    /// record. It bails on `inline_body.is_some()` BEFORE reading it, which is
+    /// why an opaque callee has no `SpecSubst` while its bindings still exist.
+    /// Whether parameter `i` of `func` carries the `@repr(opaque)` contract.
+    ///
+    /// Read off `ParamDecl::annotations`, the declaration -- never off the
+    /// call. The registry (`bone_core::annotations`) has already checked the
+    /// kind and that the enclosing fn is an opaque boundary, so reaching here
+    /// with the name present means the contract is valid.
+    fn param_is_repr_opaque(&self, func: FuncRef, i: usize) -> bool {
+        self.ws.module(func.module).functions[func.func]
+            .param_decls
+            .get(i)
+            .is_some_and(|pd| pd.annotations.iter().any(|a| a.name.name == "repr"))
+    }
+
+    /// Fails CLOSED: a generic parameter whose binding cannot be resolved is a
+    /// parameter whose representation is unknown, and admitting it is exactly
+    /// how the silent wrong answer this rule exists to stop gets back in.
+    fn callee_param_ctor(
+        &self,
+        e: Idx<Expr>,
+        func: FuncRef,
+        i: usize,
+    ) -> Result<Option<TypeCtor>, CompilerError> {
+        // The callee's DECLARATION, read RAW. `ty_node` resolves a generic
+        // through the ENCLOSING body's `SpecSubst`, whose variables are the
+        // CALLER's -- a callee generic sharing a var id would be answered with
+        // the caller's binding, which is a different type entirely.
+        let Some(pty) = self.param_ty(func, i) else { return Ok(None) };
+        let Some(node) = self.raw_ty_node(pty) else { return Ok(None) };
+        let var = match node {
+            TypeExpr::App { ctor, .. } => return Ok(Some(ctor)),
+            TypeExpr::Generic(var, _) => var,
+            _ => return Ok(None),
+        };
+        let f = &self.ws.module(func.module).functions[func.func];
+        let refuse = |what: String| {
+            CompilerError::new_with_label(
+                self.body.expr_spans[e],
+                format!(
+                    "internal: cannot resolve generic parameter {i} of opaque callee \
+                     `{}`: {what}. Its representation contract cannot be checked, so \
+                     the call is refused rather than admitted.",
+                    f.name
+                ),
+            )
+        };
+        let inf = self.inf.ok_or_else(|| refuse("this body has no inference".into()))?;
+        let bindings = inf.call_generic_bindings.get(&e).ok_or_else(|| {
+            refuse("inference recorded no generic bindings for this call".into())
+        })?;
+        if bindings.len() != f.generics.len() {
+            return Err(refuse(format!(
+                "the call supplied {} binding(s) for {} declared generic(s)",
+                bindings.len(),
+                f.generics.len()
+            )));
+        }
+        let at = f
+            .generics
+            .iter()
+            .position(|g| {
+                matches!(self.raw_ty_node(*g), Some(TypeExpr::Generic(v, _)) if v == var)
+            })
+            .ok_or_else(|| {
+                refuse("the parameter names a type variable the callee does not declare".into())
+            })?;
+        // The BINDING is the CALLER's type, so it is read WITH the enclosing
+        // substitution: inside a generic caller it can name the caller's own
+        // generic, and only that substitution resolves it.
+        Ok(match self.ty_node(bindings[at]) {
+            Some(TypeExpr::App { ctor, .. }) => Some(ctor),
+            _ => None,
+        })
     }
 
     /// A fn taken BY VALUE must have the ABI an indirect caller can derive.

@@ -1809,6 +1809,14 @@ pub fn build_function(
     let (body_failed, inline_body, is_extern, ffi_lib, backend, mut errors) =
         lower_fn_body_into(ctx, a, f, &mut body, &param_tys)?;
     errors.extend(anno_errors);
+    // Needs the body kind, which only exists after the lower above.
+    if let Err(e) = bone_core::annotations::validate_param_repr_against_body(
+        f.name.name,
+        &param_decls,
+        inline_body.is_some() || is_extern,
+    ) {
+        errors.push(e);
+    }
 
     let is_variadic = f.params.last().map_or(false, |p| p.is_variadic);
     let num_required = f

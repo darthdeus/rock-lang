@@ -1057,7 +1057,12 @@ fn assert_null<T>(value: T?, message: string = "Expected null value") {
 // translated from the Rock equivalent
 // `{ vec.len = vec.len + 1; table_set(vec._data, vec.len, item) }`.
 // See docs/jit-fnew-codegen-investigation.md §"Fourth pass".
-@nomangle @inline inline(lua) fn vec_push<T>(vec: [T], item: T) = """
+// `vec` names the vec LAYOUT, so a column-stored receiver must not reach this
+// body -- `column_push` routes around it. `item` is stored and never indexed,
+// so it makes no layout claim and carries the contract that says so. It stays
+// spelled `T`: that is the inference edge giving `vec_new()` its element type,
+// and `any`/`any?` would sever it. See `docs/boundary-contracts.md` 2.4.
+@nomangle @inline inline(lua) fn vec_push<T>(vec: [T], @repr(opaque) item: T) = """
     vec.len = vec.len + 1
     vec._data[vec.len] = item
 """

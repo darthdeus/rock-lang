@@ -19,6 +19,45 @@
 //! so they never reach the check at `:645`. `a_column_map_still_works_through_
 //! the_stdlib_surface` is the control that keeps that true.
 
+/// Control 2 proper: the receiver is IMPLICIT. `probe` writes no type for
+/// `map`, so only the semantic `param_decls` slot 0 carries `Map<K, V>` -- a
+/// rule reading written syntax sees nothing here. Called through method syntax.
+/// The name is deliberately not one the intercept consumes (`get`, `contains`,
+/// `len`, `clear`, `table_unset`, `map_new`), or it would never reach the check.
+const IMPLICIT_RECEIVER: &str = r#"
+value Q { x: float, y: float }
+
+@nomangle inline(lua) fn Map<K, V>.probe(map) -> int = """
+    local n = 0
+    for k, v in pairs(map) do n = n + 1 end
+    return n
+"""
+
+fn main() {
+    let m: Map<string, Q> = map_new()
+    m["a"] = Q { x: 1.0, y: 2.0 }
+    print("{m.probe()}")
+}
+"#;
+
+/// The same implicit receiver at a BOXED value: the identical method must stay
+/// correct, or the rejection above is just "methods reject".
+const IMPLICIT_RECEIVER_BOXED: &str = r#"
+struct Boxy { s: string }
+
+@nomangle inline(lua) fn Map<K, V>.probe(map) -> int = """
+    local n = 0
+    for k, v in pairs(map) do n = n + 1 end
+    return n
+"""
+
+fn main() {
+    let m: Map<string, Boxy> = map_new()
+    m["a"] = Boxy { s: "z" }
+    print("{m.probe()}")
+}
+"#;
+
 const USER_BODY_GENERIC: &str = r#"
 value Q { x: float, y: float }
 
@@ -114,6 +153,27 @@ fn rejection(src: &str) -> String {
     crate::common::try_emit_module(src)
         .expect_err("a column map at an opaque `Map<K, V>` param must reject")
         .message
+}
+
+/// CONTROL 2. Distinct from the explicitly-typed cases below: the receiver has
+/// no written type at all, so this is the only case that proves the rule reads
+/// the semantic declared type rather than the syntax.
+#[test]
+fn an_implicit_method_receiver_is_classified() {
+    let msg = rejection(IMPLICIT_RECEIVER);
+    assert!(
+        msg.contains("column-stored `Map<_, Q>`") && msg.contains("probe"),
+        "an implicit `Map<K, V>` receiver must be classified, got: {msg}"
+    );
+}
+
+#[test]
+fn an_implicit_method_receiver_at_a_boxed_value_is_correct() {
+    assert_eq!(
+        run(IMPLICIT_RECEIVER_BOXED, "inline_map_recv_boxed"),
+        "1",
+        "the rejection is about the value's storage, not about method syntax"
+    );
 }
 
 #[test]
