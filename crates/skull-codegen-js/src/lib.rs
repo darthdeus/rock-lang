@@ -935,8 +935,6 @@ function stone_draw_mesh(data, count, stride, attr_sizes, attr_count, tex) {
   if (t) {
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, t);
-    var lt = __sw_uloc(sh, "uTexture");
-    if (lt) gl.uniform1i(lt, 0);
     if (__SW.unitInt) __SW.unitInt[0] = false;
     textureBound = true;
   }
@@ -2084,7 +2082,6 @@ function stone_sprite_draw_texture(shader, tex, tw, th, x, y, w, h, sx, sy, sw, 
   ]);
   gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_2D, t);
-  var ltx = __sw_uloc(sh2, "uTexture"); if (ltx) gl.uniform1i(ltx, 0);
   gl.bindBuffer(gl.ARRAY_BUFFER, __SW.meshVbo);
   gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STREAM_DRAW);
   gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 32, 0);
