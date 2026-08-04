@@ -383,8 +383,8 @@ fn ufcs_method_completion_reuses_existing_open_paren() {
     assert_ne!(it.insert_text_format, Some(lsp_types::InsertTextFormat::SNIPPET), "{it:?}");
 }
 
-// -- One-shot field-ref method pre-fill (docs/fieldof-method-completion-plan.md).
-// A UFCS method with a `FieldOf<recv, V>` param fills the field arg at method-
+// -- One-shot field-ref method pre-fill (docs/fieldref-method-completion-plan.md).
+// A UFCS method with a `FieldRef<recv, V>` param fills the field arg at method-
 // selection time: `mob.kil` -> `mob.kill_co(.attack_co)`. The receiver is a
 // bare generic (`o: T`), so `ufcs_methods` never surfaces it -- these items are
 // enumerated separately, gated on the receiver having a matching field.
@@ -392,9 +392,9 @@ fn ufcs_method_completion_reuses_existing_open_paren() {
 #[test]
 fn field_ref_method_prefills_single_field() {
     // `Mob` has exactly one `int?` field -> `mob.kil` completes to
-    // `kill_co(.attack_co)` as a snippet, filling the FieldOf arg in one step.
+    // `kill_co(.attack_co)` as a snippet, filling the FieldRef arg in one step.
     let src = "struct Mob { health: int, attack_co: int?, name: string }\n\
-               fn kill_co<T>(o: T, f: FieldOf<T, int?>) {}\n\
+               fn kill_co<T>(o: T, f: FieldRef<T, int?>) {}\n\
                fn r(mob: Mob) {\n  mob.kil\n}\n";
     let it = item(src, 3, 9, "kill_co");
     assert_eq!(it.insert_text.as_deref(), Some("kill_co(.attack_co)"), "{it:?}");
@@ -405,7 +405,7 @@ fn field_ref_method_prefills_single_field() {
 fn field_ref_method_prefills_choice_on_multiple_fields() {
     // Two `int?` fields -> a snippet CHOICE placeholder, in declaration order.
     let src = "struct Mob { health: int, attack_co: int?, cast_co: int?, name: string }\n\
-               fn kill_co<T>(o: T, f: FieldOf<T, int?>) {}\n\
+               fn kill_co<T>(o: T, f: FieldRef<T, int?>) {}\n\
                fn r(mob: Mob) {\n  mob.kil\n}\n";
     let it = item(src, 3, 9, "kill_co");
     assert_eq!(it.insert_text.as_deref(), Some("kill_co(${1|.attack_co,.cast_co|})"), "{it:?}");
@@ -418,7 +418,7 @@ fn field_ref_method_absent_when_no_matching_field() {
     // callable: there's no field to pass). `min`/`max`-class generics likewise
     // never leak into member completion.
     let src = "struct Mob { health: int, name: string }\n\
-               fn kill_co<T>(o: T, f: FieldOf<T, int?>) {}\n\
+               fn kill_co<T>(o: T, f: FieldRef<T, int?>) {}\n\
                fn r(mob: Mob) {\n  mob.kil\n}\n";
     let l = labels(src, 3, 9);
     assert!(!l.iter().any(|s| s == "kill_co"), "kill_co must not surface without a matching field: {l:?}");
@@ -429,7 +429,7 @@ fn field_ref_method_reuses_existing_open_paren() {
     // A `(` already follows -> insert the bare name (the arg-position path fills
     // the field once the cursor is inside the parens); no doubled parens.
     let src = "struct Mob { health: int, attack_co: int?, name: string }\n\
-               fn kill_co<T>(o: T, f: FieldOf<T, int?>) {}\n\
+               fn kill_co<T>(o: T, f: FieldRef<T, int?>) {}\n\
                fn r(mob: Mob) {\n  mob.kil()\n}\n";
     let it = item(src, 3, 9, "kill_co");
     assert_eq!(it.insert_text.as_deref(), Some("kill_co"), "{it:?}");
@@ -437,18 +437,18 @@ fn field_ref_method_reuses_existing_open_paren() {
 }
 
 #[test]
-fn field_ref_method_prefills_nontrailing_fieldof_arg() {
-    // `set_co`'s FieldOf is arg 0 of `(field, next)`, not the trailing param --
+fn field_ref_method_prefills_nontrailing_fieldref_arg() {
+    // `set_co`'s FieldRef is arg 0 of `(field, next)`, not the trailing param --
     // the field lands in slot 0 and `next` becomes a numbered placeholder.
     let src = "struct Mob { health: int, attack_co: int?, name: string }\n\
-               fn set_co<T>(o: T, f: FieldOf<T, int?>, next: int?) {}\n\
+               fn set_co<T>(o: T, f: FieldRef<T, int?>, next: int?) {}\n\
                fn r(mob: Mob) {\n  mob.se\n}\n";
     let it = item(src, 3, 8, "set_co");
     assert_eq!(it.insert_text.as_deref(), Some("set_co(.attack_co, ${1:next})"), "{it:?}");
     assert_eq!(it.insert_text_format, Some(lsp_types::InsertTextFormat::SNIPPET), "{it:?}");
 }
 
-// An `Entity<T>`-receiver FieldOf method resolves the owner struct through the
+// An `Entity<T>`-receiver FieldRef method resolves the owner struct through the
 // Entity's type argument: `e.run_` (e: Entity<Mob>) fills the field of the
 // ELEMENT struct (`Mob`), symmetric with the value-owner overload. The p0 is
 // nominal `Entity<T>`, so `ufcs_methods` DOES surface it -- the prefill must
@@ -457,7 +457,7 @@ fn field_ref_method_prefills_nontrailing_fieldof_arg() {
 #[test]
 fn field_ref_method_entity_receiver_prefills_single_field() {
     let src = "struct Mob { health: int, attack_co: int?, name: string }\n\
-               fn run_into<T>(e: Entity<T>, f: FieldOf<T, int?>, co: int) {}\n\
+               fn run_into<T>(e: Entity<T>, f: FieldRef<T, int?>, co: int) {}\n\
                fn r(e: Entity<Mob>) {\n  e.run\n}\n";
     let it = item(src, 3, 7, "run_into");
     assert_eq!(it.insert_text.as_deref(), Some("run_into(.attack_co, ${1:co})"), "{it:?}");
@@ -467,7 +467,7 @@ fn field_ref_method_entity_receiver_prefills_single_field() {
 #[test]
 fn field_ref_method_entity_receiver_prefills_choice_on_multiple_fields() {
     let src = "struct Mob { health: int, attack_co: int?, cast_co: int?, name: string }\n\
-               fn run_into<T>(e: Entity<T>, f: FieldOf<T, int?>, co: int) {}\n\
+               fn run_into<T>(e: Entity<T>, f: FieldRef<T, int?>, co: int) {}\n\
                fn r(e: Entity<Mob>) {\n  e.run\n}\n";
     let it = item(src, 3, 7, "run_into");
     assert_eq!(it.insert_text.as_deref(), Some("run_into(${1|.attack_co,.cast_co|}, ${2:co})"), "{it:?}");
@@ -479,7 +479,7 @@ fn field_ref_method_entity_receiver_no_duplicate_item() {
     // The Entity overload is nominal, so it surfaces once via `ufcs_methods`;
     // the prefill rewrites that single item rather than appending a second.
     let src = "struct Mob { health: int, attack_co: int?, name: string }\n\
-               fn run_into<T>(e: Entity<T>, f: FieldOf<T, int?>, co: int) {}\n\
+               fn run_into<T>(e: Entity<T>, f: FieldRef<T, int?>, co: int) {}\n\
                fn r(e: Entity<Mob>) {\n  e.run\n}\n";
     let l = labels(src, 3, 7);
     assert_eq!(l.iter().filter(|s| s.as_str() == "run_into").count(), 1, "exactly one run_into item: {l:?}");
@@ -1773,16 +1773,16 @@ fn arg_position_boosts_member_field_matching_expected_type() {
     assert!(pco < pt, "type-matching `attack_co` must rank first in the Coroutine arg slot: {l:?}");
 }
 
-// -- field-reference key paths (`FieldOf<Struct, V>`) ------------------------
+// -- field-reference key paths (`FieldRef<Struct, V>`) ------------------------
 // A leading `.field` in a call-arg position whose expected param is
-// `FieldOf<Struct, V>` completes to Struct's fields whose declared type is
+// `FieldRef<Struct, V>` completes to Struct's fields whose declared type is
 // EXACTLY V -- the invariance the typechecker enforces. Presence AND absence
 // matter (a `contains` .rock.lsp can't assert the exclusion).
 
 #[test]
 fn field_ref_arg_completes_only_fields_matching_v() {
     let src = "struct Mob { health: int, attack_co: int?, name: string }\n\
-               fn poll_slot(f: FieldOf<Mob, int?>) {}\n\
+               fn poll_slot(f: FieldRef<Mob, int?>) {}\n\
                fn main() {\n  poll_slot(.)\n}\n";
     // cursor right after the `.` in `poll_slot(.)`
     let col = "  poll_slot(.".len() as u32;
@@ -1797,7 +1797,7 @@ fn field_ref_arg_completes_only_fields_matching_v() {
 #[test]
 fn field_ref_arg_v_int_offers_the_int_field() {
     let src = "struct Mob { health: int, attack_co: int?, name: string }\n\
-               fn want_int(f: FieldOf<Mob, int>) {}\n\
+               fn want_int(f: FieldRef<Mob, int>) {}\n\
                fn main() {\n  want_int(.)\n}\n";
     let col = "  want_int(.".len() as u32;
     let l = labels(src, 3, col);
@@ -1806,12 +1806,12 @@ fn field_ref_arg_v_int_offers_the_int_field() {
 }
 
 // generic T resolved from a sibling arg: poll_slot<T>(e: Entity<T>, f:
-// FieldOf<T, int?>) at `poll_slot(e, .co)` -- T is bound to Mob from `e`.
+// FieldRef<T, int?>) at `poll_slot(e, .co)` -- T is bound to Mob from `e`.
 #[test]
 fn field_ref_generic_t_resolved_from_sibling_arg() {
     let src = "struct Mob { hp: int, co: int? }\n\
                struct Entity<T> { i: int }\n\
-               fn poll_slot<T>(e: Entity<T>, f: FieldOf<T, int?>) {}\n\
+               fn poll_slot<T>(e: Entity<T>, f: FieldRef<T, int?>) {}\n\
                fn r() {\n  let e: Entity<Mob> = Entity { i: 0 }\n  poll_slot(e, .co)\n}\n";
     let col = "  poll_slot(e, .co".len() as u32;
     let l = labels(src, 5, col);
@@ -1819,12 +1819,12 @@ fn field_ref_generic_t_resolved_from_sibling_arg() {
     assert!(!l.iter().any(|s| s.starts_with(".hp")), "hp (int) excluded by invariance: {l:?}");
 }
 
-// empty-arg slot (no `.` typed yet): the FieldOf fields are offered proactively,
+// empty-arg slot (no `.` typed yet): the FieldRef fields are offered proactively,
 // and the insert text adds the leading dot.
 #[test]
 fn field_ref_empty_arg_offers_fields_and_inserts_dot() {
     let src = "struct Mob { hp: int, co: int? }\n\
-               fn poll_slot(f: FieldOf<Mob, int?>) {}\n\
+               fn poll_slot(f: FieldRef<Mob, int?>) {}\n\
                fn r() {\n  poll_slot()\n}\n";
     // cursor right inside `poll_slot(|)`
     let col = "  poll_slot(".len() as u32;
@@ -1832,51 +1832,51 @@ fn field_ref_empty_arg_offers_fields_and_inserts_dot() {
     assert_eq!(it.insert_text.as_deref(), Some(".co"), "empty-arg insert adds the dot: {it:?}");
     let l = labels(src, 3, col);
     assert!(!l.iter().any(|s| s.starts_with(".hp")), "hp (int) excluded: {l:?}");
-    assert!(!l.iter().any(|s| s == "poll_slot"), "no global dump in a FieldOf slot: {l:?}");
+    assert!(!l.iter().any(|s| s == "poll_slot"), "no global dump in a FieldRef slot: {l:?}");
 }
 
 // UFCS field-ref args: typing `.field` INSIDE a UFCS call's parens must offer
-// the FieldOf field-set, resolving the owner through the receiver -- symmetric
-// with the method-selection prefill above. `p.stop(.co)` binds the FieldOf `T`
+// the FieldRef field-set, resolving the owner through the receiver -- symmetric
+// with the method-selection prefill above. `p.stop(.co)` binds the FieldRef `T`
 // to the receiver, not a paren sibling.
 #[test]
 fn field_ref_ufcs_generic_receiver_offers_fields() {
-    // `stop<T>(o: T, f: FieldOf<T, int?>)` on a `Player` receiver: T binds to
-    // Player via the receiver, so the FieldOf offers Player's int? fields.
+    // `stop<T>(o: T, f: FieldRef<T, int?>)` on a `Player` receiver: T binds to
+    // Player via the receiver, so the FieldRef offers Player's int? fields.
     let src = "struct Player { hp: int, cast_co: int? }\n\
-               fn stop<T>(o: T, f: FieldOf<T, int?>) {}\n\
+               fn stop<T>(o: T, f: FieldRef<T, int?>) {}\n\
                fn r() {\n  let p: Player = Player { hp: 0, cast_co: null }\n  p.stop(.)\n}\n";
     let col = "  p.stop(.".len() as u32;
     let l = labels(src, 4, col);
     assert!(l.contains(&".cast_co: int?".to_string()), "cast_co offered: {l:?}");
     assert!(!l.iter().any(|s| s.starts_with(".hp")), "hp (int) excluded by invariance: {l:?}");
-    assert!(!l.iter().any(|s| s == "stop" || s == "Player"), "no global dump in a FieldOf slot: {l:?}");
+    assert!(!l.iter().any(|s| s == "stop" || s == "Player"), "no global dump in a FieldRef slot: {l:?}");
 }
 
 #[test]
-fn field_ref_ufcs_second_overload_supplies_the_fieldof_slot() {
-    // `stop` has a 1-param non-FieldOf overload FIRST and the 2-param FieldOf
+fn field_ref_ufcs_second_overload_supplies_the_fieldref_slot() {
+    // `stop` has a 1-param non-FieldRef overload FIRST and the 2-param FieldRef
     // overload second; the arg-position field-ref must consult ALL overloads,
-    // or `p.stop(.co)` sees no FieldOf slot and dumps globals.
+    // or `p.stop(.co)` sees no FieldRef slot and dumps globals.
     let src = "struct Player { hp: int, cast_co: int? }\n\
                fn stop(t: int) {}\n\
-               fn stop<T>(o: T, f: FieldOf<T, int?>) {}\n\
+               fn stop<T>(o: T, f: FieldRef<T, int?>) {}\n\
                fn r() {\n  let p: Player = Player { hp: 0, cast_co: null }\n  p.stop(.)\n}\n";
     let col = "  p.stop(.".len() as u32;
     let l = labels(src, 5, col);
-    assert!(l.contains(&".cast_co: int?".to_string()), "second-overload FieldOf resolved: {l:?}");
+    assert!(l.contains(&".cast_co: int?".to_string()), "second-overload FieldRef resolved: {l:?}");
     assert!(!l.iter().any(|s| s == "stop"), "no global dump: {l:?}");
 }
 
 #[test]
 fn field_ref_ufcs_entity_receiver_offers_fields() {
-    // `run_into<T>(e: Entity<T>, f: FieldOf<T, int?>, co: int)` on an
-    // `Entity<Glyph>` receiver: the FieldOf owner `T` binds through the ctor to
+    // `run_into<T>(e: Entity<T>, f: FieldRef<T, int?>, co: int)` on an
+    // `Entity<Glyph>` receiver: the FieldRef owner `T` binds through the ctor to
     // the element struct `Glyph`, so `e.run_into(.co)` offers Glyph's int? field.
     let src = "struct Glyph { life: int, co: int? }\n\
                struct Entity<T> { i: int }\n\
-               fn run_into<T>(o: T, f: FieldOf<T, int?>, co: int) {}\n\
-               fn run_into<T>(e: Entity<T>, f: FieldOf<T, int?>, co: int) {}\n\
+               fn run_into<T>(o: T, f: FieldRef<T, int?>, co: int) {}\n\
+               fn run_into<T>(e: Entity<T>, f: FieldRef<T, int?>, co: int) {}\n\
                fn r() {\n  let e: Entity<Glyph> = Entity { i: 0 }\n  e.run_into(.)\n}\n";
     let col = "  e.run_into(.".len() as u32;
     let l = labels(src, 6, col);
@@ -1885,10 +1885,10 @@ fn field_ref_ufcs_entity_receiver_offers_fields() {
     assert!(!l.iter().any(|s| s == "run_into"), "no global dump: {l:?}");
 }
 
-// A non-FieldOf UFCS call arg keeps NORMAL completion -- the resolver returning
+// A non-FieldRef UFCS call arg keeps NORMAL completion -- the resolver returning
 // None must remain the fall-through signal (no false-positive field-ref).
 #[test]
-fn field_ref_ufcs_non_fieldof_arg_falls_through() {
+fn field_ref_ufcs_non_fieldref_arg_falls_through() {
     let src = "struct Player { hp: int }\n\
                fn take(o: Player, n: int) {}\n\
                fn helper_val() -> int { 0 }\n\

@@ -50,8 +50,11 @@ pub mod live_project;
 pub mod web;
 mod test_protocol;
 mod lint_cmd;
-mod lint_union;
+pub(crate) mod lint_union;
 pub mod lint_pass;
+pub mod ablation_report;
+mod mono_manifest;
+mod monoty_census;
 mod lsp_survey;
 mod lsp_test;
 mod parallel_runner;
@@ -169,6 +172,18 @@ pub enum CliCommand {
     /// (mean/p50/p99) + overlay size. Mirrors what `SkullStone::recompile` does on
     /// a body edit (no reassembly). See `skull_backend::skull_iter_incremental`.
     IterIncremental,
+    /// `rock mono-ty-census [root]` -- DIAGNOSTIC (Stage 0c,
+    /// `docs/monomorphization-plan.md`): convert every inferred expr/binding
+    /// type of the closed world to the total `MonoTy` and report conversions,
+    /// distinct logical types, and failures bucketed by reason. Changes no
+    /// emission. See `monoty_census::do_monoty_census`.
+    MonoTyCensus,
+    /// `rock mono-manifest [root]` -- DIAGNOSTIC (Stage 0d,
+    /// `docs/monomorphization-plan.md`): build the SHADOW instance graph over
+    /// the closed world (instances keyed by `MonoTy`, not `SpecKey`), and
+    /// report instance/edge counts, the edge-kind histogram and the recursion
+    /// census. Changes no emission. See `mono_manifest::do_mono_manifest`.
+    MonoManifest,
     /// `rock iter-lsp <project> [--iters N --warmup W]` -- tight-loop profiler
     /// for the per-edit LSP query path on the bone backend (the work the editor
     /// does per keystroke through `BoneWorkspace`): `update` (didChange) +
@@ -244,7 +259,7 @@ pub enum CliCommand {
     /// `rock shader-validate <project> [project...]` -- compile+link every
     /// `rock_shader` pair the project(s) register, on REAL GL contexts in both
     /// profiles (330core + 300es), via `stone-glsl-runner`'s compile-only mode
-    /// (`docs/shader-mobile-port-plan.md` A3). A driver rejection is a FAIL
+    /// (`docs/shaders.md` § Testing). A driver rejection is a FAIL
     /// carrying the compile log; a no-display environment skips-with-log
     /// (runner exit 2, the one sanctioned skip); zero verdicts exits non-zero.
     /// See `glsl_test::shader_validate`.
@@ -276,6 +291,8 @@ impl clap::ValueEnum for CliCommand {
             Self::SkullInlineStats,
             Self::SkullIncrementalProfile,
             Self::IterIncremental,
+            Self::MonoTyCensus,
+            Self::MonoManifest,
             Self::IterLsp,
             Self::LspSurvey,
             Self::IterReinfer,
@@ -324,6 +341,8 @@ impl CliCommand {
             Self::SkullInlineStats => "skull-inline-stats",
             Self::SkullIncrementalProfile => "skull-incremental-profile",
             Self::IterIncremental => "iter-incremental",
+            Self::MonoTyCensus => "mono-ty-census",
+            Self::MonoManifest => "mono-manifest",
             Self::IterLsp => "iter-lsp",
             Self::LspSurvey => "lsp-survey",
             Self::IterReinfer => "iter-reinfer",
@@ -493,6 +512,9 @@ pub struct Args {
     pub no_timeout: bool,
     pub dump_state: bool,
     pub update_snapshots: bool,
+    /// For `rock sim`: how many sim children may run at once. `None` uses the
+    /// conservative default in `run_sim::resolve_jobs`.
+    pub jobs: Option<usize>,
 
     /// For `rock frame`: record per-tick input + dt to this replay log
     /// (docs/replay-scrub-plan.md). Mutually exclusive with `--replay`.
@@ -644,6 +666,9 @@ impl Args {
                 .help("Dump all global state as JSON after the last frame (for AI/human diagnostics)"))
             .arg(Arg::new("update-snapshots").long("update-snapshots").action(ArgAction::SetTrue)
                 .help("For `rock sim`: rewrite snapshot baselines instead of diffing."))
+            .arg(Arg::new("jobs").long("jobs").short('j').value_name("N")
+                .value_parser(clap::value_parser!(usize))
+                .help("For `rock sim`: run up to N sim children concurrently (default 4, 1 = serial)."))
             .arg(Arg::new("record").long("record").value_name("FILE")
                 .help("For `rock frame`: record per-tick input + dt to FILE (a replay log). Replay it with --replay."))
             .arg(Arg::new("replay").long("replay").value_name("FILE")
@@ -719,6 +744,7 @@ impl Args {
             no_timeout: m.get_flag("no-timeout"),
             dump_state: m.get_flag("dump-state"),
             update_snapshots: m.get_flag("update-snapshots"),
+            jobs: m.get_one::<usize>("jobs").copied(),
             record: m.get_one::<String>("record").cloned(),
             replay: m.get_one::<String>("replay").cloned(),
             checkpoint_interval: m.get_one::<usize>("checkpoint-interval").copied(),

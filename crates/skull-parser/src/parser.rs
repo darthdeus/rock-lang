@@ -216,6 +216,7 @@ impl<'a> Parser<'a> {
             if self.at_end() {
                 break;
             }
+            let item_start = self.pos;
             match self.parse_item() {
                 Ok(item) => self.ast.items.push(item),
                 Err(e) => {
@@ -227,7 +228,7 @@ impl<'a> Parser<'a> {
                     // supported item start has a branch in `parse_item_inner`), so
                     // this stays empty for well-formed programs.
                     self.ast.recovery_errors.push(e);
-                    self.recover_to_next_item();
+                    self.recover_to_next_item(self.pos > item_start);
                 }
             }
         }
@@ -251,10 +252,15 @@ impl<'a> Parser<'a> {
     /// Skip a balanced span of tokens up to the next top-level `fn`. Used to
     /// step over unsupported items (and malformed `fn`s) without aborting
     /// the whole module.
-    fn recover_to_next_item(&mut self) {
+    /// `made_progress` says the failed item parse consumed at least one token, so
+    /// the loop is already guaranteed to advance. Only when it consumed NOTHING
+    /// must recovery force a token, and forcing it unconditionally is how a
+    /// neighbour's error ate a valid function: an item error detected AT an item
+    /// boundary leaves the parser on the next `fn`, and consuming that `fn` sent
+    /// the scan to the one after it.
+    fn recover_to_next_item(&mut self, made_progress: bool) {
         let mut depth: i32 = 0;
-        // Always consume at least one token so recovery makes progress.
-        if !self.at_end() {
+        if !made_progress && !self.at_end() {
             self.advance_tracking_depth(&mut depth);
         }
         while !self.at_end() {
@@ -556,12 +562,24 @@ impl<'a> Parser<'a> {
                     _ => self.parse_fn(false, None, backend),
                 }
             }
-            TokenKind::Struct => self.parse_struct(false),
+            TokenKind::Struct => self.parse_struct(false, false),
             // `value Name { .. }` — contextual keyword (only before a type name).
             TokenKind::Ident(n)
                 if n.as_str() == "value" && matches!(self.peek_kind(), TokenKind::Ident(_)) =>
             {
-                self.parse_struct(true)
+                self.parse_struct(true, false)
+            }
+            TokenKind::Ident(n)
+                if n.as_str() == "nobox"
+                    && matches!(self.peek_kind(), TokenKind::Ident(v) if v.as_str() == "value") =>
+            {
+                self.parse_struct(true, true)
+            }
+            TokenKind::Ident(n)
+                if n.as_str() == "nobox"
+                    && !matches!(self.peek_kind(), TokenKind::OpenParen | TokenKind::Bang) =>
+            {
+                Err(self.err("`nobox` requires `value`"))
             }
             TokenKind::Enum => self.parse_enum(),
             TokenKind::Newtype => self.parse_newtype(),
@@ -925,8 +943,9 @@ impl<'a> Parser<'a> {
     /// Generic params + `(params)` + optional `-> ret` + body, shared by
     /// `parse_fn` and `parse_operator`. The body is `Rock` for a `{ }` block,
     /// `Inline(inline_backend, ..)` for an `= "..."` inline body, else
-    /// `extern_body` (a body-less extern decl) — `None` for the non-extern
-    /// callers, who never reach it.
+    /// `extern_body` (a body-less extern decl). `extern_body` is `None` for every
+    /// non-extern caller, and a missing body then REJECTS — a fn with no body is
+    /// not a foreign declaration.
     fn finish_fn_def(
         &mut self,
         name: Ident,
@@ -1010,16 +1029,29 @@ impl<'a> Parser<'a> {
                         self.advance();
                         s
                     }
-                    // Malformed inline body (not a string literal): parse-past for
-                    // recovery and keep an empty source.
+                    // Rock has no expression-bodied fn form. Parsing past this and
+                    // keeping an empty source emitted `function f(x) return end` --
+                    // a fn that type-checks and answers nil.
                     _ => {
-                        self.with_allow_literals(true, |p| p.parse_expr(0))?;
-                        Ustr::from("")
+                        return Err(self.err(
+                            "an `= <body>` function body must be a string literal (an inline \
+                             backend body); Rock has no expression-bodied fn form, use `{ .. }`",
+                        ))
                     }
                 };
                 FunctionBody::Inline(inline_backend, src)
             } else {
-                extern_body.unwrap_or(FunctionBody::ExternC)
+                // Only `extern fn` declares a body-less foreign symbol. Every other
+                // form reaching here is missing its body, and defaulting to
+                // `ExternC` made it a call to a Lua global that does not exist --
+                // accepted by the compiler, fatal at runtime.
+                let Some(eb) = extern_body else {
+                    return Err(self.err(
+                        "this function has no body: expected a block `{ .. }` or an inline \
+                         backend body `= \"..\"` (only `extern fn` may omit one)",
+                    ));
+                };
+                eb
             };
             self.eat(TokenKind::Semicolon);
             (body, Vec::new())
@@ -1218,13 +1250,17 @@ impl<'a> Parser<'a> {
         Ok(params)
     }
 
-    /// `struct Name<gen> { field: T [= default], ... }` (also `value struct`,
-    /// entered with `value` already consumed and `is_value = true`).
-    fn parse_struct(&mut self, is_value: bool) -> PResult<Item> {
+    /// `struct Name<gen> { field: T [= default], ... }` or `value Name`.
+    fn parse_struct(&mut self, is_value: bool, is_nobox: bool) -> PResult<Item> {
         let start = self.span();
-        // `value Name { .. }` (contextual keyword, no `struct`) vs `struct Name`.
-        if is_value {
-            self.advance(); // `value`
+        if is_nobox {
+            self.advance();
+            match self.kind() {
+                TokenKind::Ident(n) if n.as_str() == "value" => self.advance(),
+                _ => return Err(self.err("`nobox` requires `value`")),
+            }
+        } else if is_value {
+            self.advance();
         } else {
             self.expect(TokenKind::Struct)?;
         }
@@ -1232,7 +1268,19 @@ impl<'a> Parser<'a> {
         let generics = self.parse_generics();
         let fields = self.parse_field_block()?;
         let span = self.span_from(start);
-        Ok(Item { annotations: Vec::new(), span, kind: ItemKind::Struct(StructDef { span, keyword_span: Some(start), name, generics, fields, is_value }) })
+        Ok(Item {
+            annotations: Vec::new(),
+            span,
+            kind: ItemKind::Struct(StructDef {
+                span,
+                keyword_span: Some(start),
+                name,
+                generics,
+                fields,
+                is_value,
+                is_nobox,
+            }),
+        })
     }
 
     /// `{ field: T [= default], ... }` — struct body / enum record variant.
@@ -1246,6 +1294,13 @@ impl<'a> Parser<'a> {
                 break;
             }
             let annotations = self.parse_item_annotations()?;
+            // `embed` is contextual: it is the modifier only when a field name
+            // follows it, so `embed: int` stays a field named `embed`.
+            let is_embed = matches!(self.kind(), TokenKind::Ident(n) if n.as_str() == "embed")
+                && matches!(self.peek_kind(), TokenKind::Ident(_));
+            if is_embed {
+                self.advance();
+            }
             let name = self.expect_ident()?;
             self.expect(TokenKind::Colon)?;
             let ty = self.parse_type()?;
@@ -1255,7 +1310,7 @@ impl<'a> Parser<'a> {
                 None
             };
             let span = self.span_from(name.span);
-            fields.push(Field { span, name, ty, default, annotations });
+            fields.push(Field { span, name, ty, default, annotations, is_embed });
             self.skip_comments();
             // Item separator: comma or newline (both allowed).
             self.eat(TokenKind::Comma);
@@ -1327,6 +1382,13 @@ impl<'a> Parser<'a> {
         let generics = self.parse_generics();
         self.expect(TokenKind::OpenParen)?;
         let wrapped = self.parse_type()?;
+        if self.kind() == TokenKind::Comma {
+            return Err(self.err(format!(
+                "a newtype wraps exactly one type, but `{}` declares more than one \
+                 (use a struct, or wrap a tuple: `newtype {}((A, B))`)",
+                name.name, name.name
+            )));
+        }
         self.expect(TokenKind::CloseParen)?;
         let span = self.span_from(start);
         Ok(Item { annotations: Vec::new(), span, kind: ItemKind::Newtype(NewtypeDef { span, name, generics, wrapped }) })

@@ -124,9 +124,14 @@ fn incremental_recompile_lua_runs_correctly_under_hot_reload() {
         panic!("LuaJIT failed on watcher output:\n{}", e);
     });
     assert!(
-        out.trim().starts_with("PASS"),
+        out.success,
+        "LuaJIT exited non-zero on the watcher's output:\n{}",
+        out.combined(),
+    );
+    assert!(
+        out.stdout.trim().starts_with("PASS"),
         "watcher's incremental Lua output diverges from expected runtime behavior:\n{}",
-        out,
+        out.combined(),
     );
 }
 

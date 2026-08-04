@@ -1,0 +1,80 @@
+// Mechanism I -- a DIFFERENT defect from the embed/safe-nav pair, despite both
+// being silent. Those read a field against the wrong key; this is a generic
+// return-representation mismatch at a specialization boundary.
+//
+// `lower.rs:4957-4972` (the `inf.bound_calls` branch) hardcodes exactly 2
+// destination cells for `next()` with no specialization awareness. Its sibling
+// `lower_for_user_iter` (:8262-8312) sizes `dests` from `ret_shape.slot_count()`
+// and its doc comment states the safeguard that was never ported here -- "the
+// post-emit validator turns that into a rejection instead of a miscompile". The
+// validator does not fire. The two-opaque-slot assumption also lives in
+// `CallBoundMulti` (`skull-mir/src/mir.rs:246`).
+//
+// Every stdlib combinator calls `next(it.__inner)` as a plain expression, so all
+// route through it. `for`, `enumerate` and `count` consume a concrete
+// `VecIter<P>` directly and do not -- pinned as controls below, which run even
+// though the probes fault (the runner isolates each `@test`).
+//
+// NOT arity: the 1-leaf probe, where the hardcoded 2 WOULD be correct, still
+// faults. That is what rules out sizing as the whole story and makes this a
+// reconstruction defect -- so do NOT fold it into the embed field-read fix.
+//
+// nobox-only, so not reachable from unmarked code today. It IS a `Vec2` marking
+// blocker: `[Vec2]` already uses column storage, so marking flips this path and
+// breaks every `[Vec2].map/.any/.filter` in game code.
+
+nobox value P { x: int, y: int }
+nobox value Q { x: int }
+
+fn seed(n: int) -> int { return n }
+
+// --- controls: the paths that do NOT go through the bound-call branch ---
+
+@test(output = "1 7")
+fn control_plain_for_loop() {
+    let xs: [P] = [P { x: seed(1), y: 2 }, P { x: 7, y: 9 }]
+    let total = ""
+    for v in xs { total = "{total}{v.x} " }
+    print("{total.trim()}")
+}
+
+@test(output = "0:1 1:7")
+fn control_enumerate() {
+    let xs: [P] = [P { x: seed(1), y: 2 }, P { x: 7, y: 9 }]
+    let total = ""
+    for (i, v) in enumerate(xs) { total = "{total}{i}:{v.x} " }
+    print("{total.trim()}")
+}
+
+// `count` never touches the element, so it survives the broken reconstruction.
+@test(output = "2")
+fn control_count_never_reads_element() {
+    let xs: [P] = [P { x: seed(1), y: 2 }, P { x: 7, y: 9 }]
+    print("{xs.iter().count()}")
+}
+
+// --- probes ---
+
+// Today: `attempt to index local 'r0' (a number value)`.
+@test(output = "true")
+fn probe_any_over_column_stored_element() {
+    let xs: [P] = [P { x: seed(1), y: 2 }, P { x: 7, y: 9 }]
+    print("{xs.any(v => v.x > 4)}")
+}
+
+// A ONE-LEAF element, where the hardcoded 2 destinations would be the right
+// count. Still faults -- the evidence that this is reconstruction, not arity.
+@test(output = "true")
+fn probe_any_one_leaf_element_is_not_arity() {
+    let xs: [Q] = [Q { x: seed(1) }, Q { x: 7 }]
+    print("{xs.any(v => v.x > 4)}")
+}
+
+// A lambda that never dereferences the element still faults, so the fault is at
+// the `next()` boundary, BEFORE user code -- which is why mechanism I has no
+// silent-wrong-answer variant, only crashes.
+@test(output = "true")
+fn probe_any_never_dereferences_element() {
+    let xs: [P] = [P { x: seed(1), y: 2 }, P { x: 7, y: 9 }]
+    print("{xs.any(v => true)}")
+}

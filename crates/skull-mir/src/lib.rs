@@ -8,11 +8,17 @@
 //! `skull-codegen-*`. Roadmap + premises under test:
 //! `docs/skull-bone-mir-faithful-plan.md`.
 
+pub mod ablation;
 pub mod cfg;
 pub mod decorator;
+pub mod gpu_layout;
 pub mod display;
 pub mod intrinsics;
 pub mod lower;
 pub mod mangle;
 pub mod mir;
+pub mod monoty;
+pub mod reach;
+pub mod spec_census;
 pub mod verdict;
+pub mod vertex_plan;

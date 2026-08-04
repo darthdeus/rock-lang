@@ -13,13 +13,22 @@ pub(crate) fn infer_statement(c: BodyCtx, gamma: &mut Gamma, s: Idx<Statement>) 
         }
 
         Statement::Return(e) => {
-            let e_ty = match e {
-                Some(e) => infer_expr(c, gamma, *e)?,
-                None => gamma.workspace.builtins.unit(),
-            };
-
-            if let Some(declared_ret_ty) = gamma.declared_ret_ty {
-                coerce(gamma, e_ty, declared_ret_ty, c.body.statement_spans[s])?;
+            // CHECKED against the declared return, not inferred-then-coerced: a
+            // returned lambda has to record the type of the hole it fills, or the
+            // body and every indirect call site derive different fn-value ABIs
+            // from it. Same rule the `let` arm below already follows.
+            match (e, gamma.declared_ret_ty) {
+                (Some(e), Some(declared)) => {
+                    check_expr(c, gamma, *e, declared, c.body.statement_spans[s])?;
+                }
+                (Some(e), None) => {
+                    infer_expr(c, gamma, *e)?;
+                }
+                (None, Some(declared)) => {
+                    let unit = gamma.workspace.builtins.unit();
+                    coerce(gamma, unit, declared, c.body.statement_spans[s])?;
+                }
+                (None, None) => {}
             }
         }
 
@@ -462,9 +471,26 @@ pub fn infer_expr_used(
             resolve(gamma, inner_ty, c.body.expr_spans[*target])
         }
 
-        Expr::As { value, target } => {
-            infer_expr(c, gamma, *value)?;
-            resolve(gamma, *target, expr_span)
+        Expr::As { value, target, kind } => {
+            let (value, kind) = (*value, *kind);
+            let target = resolve(gamma, *target, expr_span);
+            let value_span = c.body.expr_spans[value];
+            match kind {
+                // `::` is the operand's expected type, so it reaches the operand
+                // through the same route as a `let`/param/return hole -- which is
+                // also what binds a bare `null` and an unannotated lambda param.
+                AsKind::Ascribe => {
+                    let target_str = gamma.render(target);
+                    check_expr(c, gamma, value, target, value_span).map_err(|e| {
+                        e.with_label(expr_span, format!("`::` ascribes `{target_str}` here"))
+                    })?
+                }
+                AsKind::Cast => {
+                    let value_ty = infer_expr(c, gamma, value)?;
+                    check_cast(gamma, value_ty, target, expr_span)?;
+                }
+            }
+            target
         }
 
         Expr::Lambda { params, body } => {
@@ -842,68 +868,7 @@ pub fn infer_expr_used(
         },
 
         Expr::Block { statements, tail } => {
-            let mut g_saved: Vec<(Idx<BindingInfo>, TyId)> = vec![];
-            // Snapshot the path-refinement set on entry; restore on exit. This
-            // scopes to the block BOTH escaping guard narrows AND
-            // assignment-refinements (`x.f = nonNull` marks `x.f` non-null):
-            // flow-sensitively, a refinement established inside a block must not
-            // survive past it (the other control path didn't run it). Whole-local
-            // narrows peel `binding_types` and are restored via `g_saved`. The set
-            // is usually empty/small, so the clone is cheap (an empty FxHashSet
-            // clone doesn't allocate).
-            let refined_snapshot = gamma.refined_nonnull.clone();
-
-            for statement in *statements {
-                if let Err(e) = infer_statement(c, gamma, statement) {
-                    gamma.body_errors.push(e);
-                    continue;
-                };
-
-                for (root, fields) in stmt_guard_narrows(gamma, c, statement) {
-                    match root {
-                        Root::Local(b) if fields.is_empty() => {
-                            if let Some(cur) = gamma.out.binding_types.get(b).copied() {
-                                let narrowed = peel_nullable(gamma, cur, expr_span);
-                                gamma.out.binding_types.insert(b, narrowed);
-                                g_saved.push((b, cur));
-                            }
-                        }
-                        _ => {
-                            gamma.refined_nonnull.insert((root, fields));
-                        }
-                    }
-                }
-            }
-
-            let result = match tail {
-                Some(tail) => match infer_expr_used(c, gamma, *tail, used) {
-                    Ok(t) => t,
-                    Err(err) => {
-                        gamma.body_errors.push(err);
-                        gamma.workspace.builtins.error()
-                    }
-                },
-                None => {
-                    let diverges = (*statements)
-                        .into_iter()
-                        .rfind(|&s| !matches!(c.body.statement_arena[s], Statement::Comment(_)))
-                        .is_some_and(|s| matches!(c.body.statement_arena[s], Statement::Return(_)));
-
-                    if diverges {
-                        gamma.workspace.builtins.never()
-                    } else {
-                        gamma.workspace.builtins.unit()
-                    }
-                }
-            };
-
-            for (b, old) in g_saved {
-                gamma.out.binding_types.insert(b, old);
-            }
-
-            gamma.refined_nonnull = refined_snapshot;
-
-            result
+            infer_block(c, gamma, statements, tail, used, expr_span, None)
         }
 
         Expr::If {
@@ -1122,7 +1087,7 @@ pub fn infer_expr_used(
                 .sibling_fields
                 .last()
                 .and_then(|m| m.get(&name))
-                .ok_or_else(|| CompilerError::new_with_label(expr_span, format!("field reference `.{name}` is only valid against an expected `FieldOf<T, V>` / `KeyPath<T, V>` or in a struct-field default")))?
+                .ok_or_else(|| CompilerError::new_with_label(expr_span, format!("field reference `.{name}` is only valid against an expected `FieldRef<T, V>` / `ReadFieldRef<T, V>` / `WriteFieldRef<T, V>` or in a struct-field default")))?
         }
 
         Expr::SafeNav { base, field } => {
@@ -1343,11 +1308,14 @@ pub fn infer_expr_used(
                     seen_unguarded_wildcard = true;
                 }
 
+                let tag = unqualified_arm_variant(c, gamma, arm.pattern, scrut_ty, expr_span)?;
                 check_pattern(c, gamma, arm.pattern, scrut_ty, expr_span)?;
 
                 if let Some(guard) = arm.guard {
                     let guard_ty = infer_expr(c, gamma, guard)?;
                     unify(gamma, guard_ty, gamma.workspace.builtins.bool(), expr_span)?;
+                } else if let Some(v) = tag {
+                    covered.insert(v);
                 } else {
                     if matches!(
                         c.body.pattern_arena[arm.pattern],
@@ -1532,13 +1500,19 @@ pub fn infer_expr_used(
         }
 
         Expr::Return(e) => {
-            let e_ty = match e {
-                Some(e) => infer_expr(c, gamma, *e)?,
-                None => gamma.workspace.builtins.unit(),
-            };
-
-            if let Some(declared) = gamma.declared_ret_ty {
-                coerce(gamma, e_ty, declared, expr_span)?;
+            // Checked, not inferred-then-coerced -- see `Statement::Return`.
+            match (e, gamma.declared_ret_ty) {
+                (Some(e), Some(declared)) => {
+                    check_expr(c, gamma, *e, declared, expr_span)?;
+                }
+                (Some(e), None) => {
+                    infer_expr(c, gamma, *e)?;
+                }
+                (None, Some(declared)) => {
+                    let unit = gamma.workspace.builtins.unit();
+                    coerce(gamma, unit, declared, expr_span)?;
+                }
+                (None, None) => {}
             }
 
             gamma.workspace.builtins.never()
@@ -1579,6 +1553,99 @@ pub(crate) fn redundant_optional_on(gamma: &mut Gamma, ty: TyId, span: Span) -> 
     )
 }
 
+
+/// A block's statements, scoping and tail -- the shared body of the `Expr::Block`
+/// arm above and [`check_expr`]'s. `expected` is `Some` only on the checked
+/// path, where it is pushed to the TAIL; everything else is identical, which is
+/// the point: the two must not drift.
+#[allow(clippy::too_many_arguments)]
+fn infer_block(
+    c: BodyCtx,
+    gamma: &mut Gamma,
+    statements: &IdxRange<Statement>,
+    tail: &Option<Idx<Expr>>,
+    used: Use,
+    expr_span: Span,
+    expected: Option<TyId>,
+) -> TyId {
+            let mut g_saved: Vec<(Idx<BindingInfo>, TyId)> = vec![];
+            // Snapshot the path-refinement set on entry; restore on exit. This
+            // scopes to the block BOTH escaping guard narrows AND
+            // assignment-refinements (`x.f = nonNull` marks `x.f` non-null):
+            // flow-sensitively, a refinement established inside a block must not
+            // survive past it (the other control path didn't run it). Whole-local
+            // narrows peel `binding_types` and are restored via `g_saved`. The set
+            // is usually empty/small, so the clone is cheap (an empty FxHashSet
+            // clone doesn't allocate).
+            let refined_snapshot = gamma.refined_nonnull.clone();
+
+            for statement in *statements {
+                if let Err(e) = infer_statement(c, gamma, statement) {
+                    gamma.body_errors.push(e);
+                    continue;
+                };
+
+                for (root, fields) in stmt_guard_narrows(gamma, c, statement) {
+                    match root {
+                        Root::Local(b) if fields.is_empty() => {
+                            if let Some(cur) = gamma.out.binding_types.get(b).copied() {
+                                let narrowed = peel_nullable(gamma, cur, expr_span);
+                                gamma.out.binding_types.insert(b, narrowed);
+                                g_saved.push((b, cur));
+                            }
+                        }
+                        _ => {
+                            gamma.refined_nonnull.insert((root, fields));
+                        }
+                    }
+                }
+            }
+
+            let result = match tail {
+                // The ONE difference between inferring a block and checking one:
+                // a checked block pushes the hole down to its TAIL. Without it a
+                // lambda in tail position records its own type, which is narrower
+                // than the hole it fills, and the fn-value ABI disagrees at the
+                // two ends (`nobox_fn_value_nullable_return_sentinel`).
+                Some(tail) => match expected {
+                    Some(exp) => match check_expr(c, gamma, *tail, exp, c.body.expr_spans[*tail]) {
+                        Ok(()) => exp,
+                        Err(err) => {
+                            gamma.body_errors.push(err);
+                            gamma.workspace.builtins.error()
+                        }
+                    },
+                    None => match infer_expr_used(c, gamma, *tail, used) {
+                        Ok(t) => t,
+                        Err(err) => {
+                            gamma.body_errors.push(err);
+                            gamma.workspace.builtins.error()
+                        }
+                    },
+                },
+                None => {
+                    let diverges = (*statements)
+                        .into_iter()
+                        .rfind(|&s| !matches!(c.body.statement_arena[s], Statement::Comment(_)))
+                        .is_some_and(|s| matches!(c.body.statement_arena[s], Statement::Return(_)));
+
+                    if diverges {
+                        gamma.workspace.builtins.never()
+                    } else {
+                        gamma.workspace.builtins.unit()
+                    }
+                }
+            };
+
+            for (b, old) in g_saved {
+                gamma.out.binding_types.insert(b, old);
+            }
+
+            gamma.refined_nonnull = refined_snapshot;
+
+            result
+}
+
 pub(crate) fn check_expr(
     c: BodyCtx,
     gamma: &mut Gamma,
@@ -1586,6 +1653,21 @@ pub(crate) fn check_expr(
     expected: TyId,
     span: Span,
 ) -> Result<(), CompilerError> {
+    // A block fills the hole with its TAIL, so push `expected` through rather
+    // than inferring the block and coercing the result -- otherwise the arms
+    // below never see a tail expression, and a fn body whose tail is a lambda
+    // records the lambda's own narrower type.
+    if let Expr::Block { statements, tail } = &c.body.expr_arena[e] {
+        let ty = infer_block(c, gamma, statements, tail, Use::Value, span, Some(expected));
+        // No re-coerce: a tail was checked against `expected` already, and a
+        // tail-less block still has to answer for its unit/never type.
+        if tail.is_none() {
+            coerce(gamma, ty, expected, span)?;
+        }
+        gamma.assign_expr_type(c, e, ty)?;
+        return Ok(());
+    }
+
     if let Expr::Lambda { params, body } = c.body.expr_arena[e] {
         let exp_r = resolve(gamma, expected, span);
 
@@ -1607,7 +1689,17 @@ pub(crate) fn check_expr(
                 Some(fn_ty.with_idx(ret)),
                 c.body.expr_spans[e],
             )?;
-            return coerce(gamma, lam_ty, expected, span);
+            coerce(gamma, lam_ty, expected, span)?;
+            // The EXPECTED type, not the lambda's own -- same as the `Array` and
+            // `SiblingRef` arms below. A lambda's inferred return is narrower than
+            // the hole it fills (`if c { P {..} } else { null }` infers `P`, the
+            // `null` arm does not widen it), and codegen reads this type to decide
+            // the fn-value ABI at BOTH ends. Recording the narrow one gives the
+            // body a return shape with no presence slot while the indirect call
+            // site, reading the declared fn type, binds one. Every RETURN position
+            // routes here for exactly that reason -- see the `Block` arm above.
+            gamma.assign_expr_type(c, e, exp_r)?;
+            return Ok(());
         }
     }
 
@@ -1643,17 +1735,18 @@ pub(crate) fn check_expr(
             params,
         } = *gamma.get(exp_r)
         {
-            if former.as_str() == "FieldOf" || former.as_str() == "KeyPath" {
+            if matches!(former.as_str(), "FieldRef" | "ReadFieldRef" | "WriteFieldRef") {
                 let mut it = params.into_iter();
                 let t = exp_r.with_idx(it.next().unwrap());
                 let v = exp_r.with_idx(it.next().unwrap());
 
                 let t_r = resolve(gamma, t, span);
-                // `FieldOf` is the WRITABLE ref (`field_set`, `poll_co_field`): it
-                // cannot resolve against a `value` struct, whose fields are
-                // immutable. `KeyPath` (read-only, `field_get`) allows it -- reading
-                // a value-struct field is fine. Split per docs/field-refs-plan.md 1.
-                if former.as_str() == "FieldOf" {
+                // `FieldRef` and `WriteFieldRef` carry the WRITE capability
+                // (`field_set`, `poll_co_field`), so neither can resolve against a
+                // `value` struct, whose fields are immutable. `ReadFieldRef`
+                // (read-only, `field_get`) allows it -- reading a value-struct
+                // field is fine. Lattice per docs/field-refs-plan.md.
+                if matches!(former.as_str(), "FieldRef" | "WriteFieldRef") {
                     if let TypeExpr::App { ctor: TypeCtor::Nominal(tn), .. } = *gamma.get(t_r) {
                         let is_value = resolve_struct(gamma, tn)
                             .is_some_and(|sid| gamma.workspace.module(sid.module).structs[sid.def].is_value);
@@ -1667,7 +1760,58 @@ pub(crate) fn check_expr(
                         }
                     }
                 }
+                // ADMISSION: every field ref satisfies `WriteFieldRef`; only a
+                // NON-embed field also satisfies the readable formers. An
+                // embedded field has no whole value to hand out, and `FieldRef`
+                // coerces onward to `ReadFieldRef`, so it re-opens the same
+                // extraction (docs/scalarization-and-boxing-design.md S 6).
+                if matches!(former.as_str(), "FieldRef" | "ReadFieldRef") {
+                    if let TypeExpr::App { ctor: TypeCtor::Nominal(tn), .. } = *gamma.get(t_r) {
+                        let is_embed = resolve_struct(gamma, tn).is_some_and(|sid| {
+                            gamma.workspace.module(sid.module).structs[sid.def]
+                                .fields
+                                .iter()
+                                .any(|f| f.name == field && f.is_embed)
+                        });
+                        if is_embed {
+                            comp_error!(
+                                span,
+                                "`{}` is an `embed` field of `{}`, so it admits only the write-only `WriteFieldRef<{}, _>`; a readable selector would hand out the whole value",
+                                field,
+                                tn,
+                                tn
+                            );
+                        }
+                    }
+                }
+
                 let fty = struct_field_ty(gamma, t_r, field, span)?;
+
+                // The write capability is INVARIANT in V, and `unify` alone does
+                // not deliver that: its `(_, Nullable)` arm widens on the right,
+                // so `unify(int, int?)` succeeds and a non-null field would hand
+                // out a `FieldRef<T, int?>` that `field_set(o, f, null)` writes
+                // nil through. A read-only `ReadFieldRef` keeps the widening --
+                // reading an `int` as `int?` is sound.
+                if matches!(former.as_str(), "FieldRef" | "WriteFieldRef") {
+                    let (fty_r, v_r) = (resolve(gamma, fty, span), resolve(gamma, v, span));
+                    let unbound_v = matches!(
+                        gamma.get(v_r),
+                        TypeExpr::Infer(..) | TypeExpr::Generic(..)
+                    );
+                    if !unbound_v
+                        && matches!(gamma.get(v_r), TypeExpr::Nullable(_))
+                        && !matches!(gamma.get(fty_r), TypeExpr::Nullable(_))
+                    {
+                        comp_error!(
+                            span,
+                            "type mismatch: expected `{}`, found `{}` -- a writable field reference is invariant, so `.{}` cannot widen to a nullable selector",
+                            gamma.render(v_r),
+                            gamma.render(fty_r),
+                            field
+                        );
+                    }
+                }
 
                 unify(gamma, fty, v, span)?;
 
@@ -1723,6 +1867,88 @@ pub(crate) fn check_expr(
     }
 
     Ok(())
+}
+
+// The closed `as` conversion relation. A pair is admitted only if it is an
+// ordinary assignment-compatible one or one of the two explicit numeric
+// conversions; everything else is a spanned rejection, never a silent identity.
+//
+// `as` is not contextual: the target validates an already-inferred source, so
+// nothing here may bind an operand variable or discharge a constraint waiting on
+// one. That is `::`'s job.
+pub(crate) fn check_cast(
+    gamma: &mut Gamma,
+    from: TyId,
+    to: TyId,
+    span: Span,
+) -> Result<(), CompilerError> {
+    let from_r = resolve(gamma, from, span);
+    let to_r = resolve(gamma, to, span);
+
+    if has_unbound_infer(gamma, from_r) {
+        let (from_str, to_str) = (gamma.render(from_r), gamma.render(to_r));
+        return Err(CompilerError::new_with_label(
+            span,
+            format!(
+                "cannot convert `{from_str}` to `{to_str}` with `as`: the operand \
+                 is not fully inferred on its own, and `as` does not take types \
+                 from its target -- annotate the operand, or ascribe it with \
+                 `:: {to_str}`"
+            ),
+        ));
+    }
+
+    // The same rule on the other side. A `_` in the target is an inference hole,
+    // so there is no written type to validate against: the relation would pass
+    // vacuously and the surrounding expectation would then bind the hole, which
+    // is how `let s: string = 42 as _` laundered a rejected pair.
+    if has_unbound_infer(gamma, to_r) {
+        let (from_str, to_str) = (gamma.render(from_r), gamma.render(to_r));
+        return Err(CompilerError::new_with_label(
+            span,
+            format!(
+                "cannot convert `{from_str}` to `{to_str}` with `as`: the target \
+                 is not a written type, and `as` validates against one -- name \
+                 the target type, or ascribe with `::` to infer it from context"
+            ),
+        ));
+    }
+
+    // Explicit narrowing/widening between the two numeric builtins. `int -> float`
+    // is also assignment-compatible; `float -> int` is admitted ONLY here, which
+    // is what keeps it out of `::`.
+    if matches!(
+        (gamma.get(from_r), gamma.get(to_r)),
+        (
+            TypeExpr::Builtin(BuiltinTy::Int),
+            TypeExpr::Builtin(BuiltinTy::Float)
+        ) | (
+            TypeExpr::Builtin(BuiltinTy::Float),
+            TypeExpr::Builtin(BuiltinTy::Int)
+        )
+    ) {
+        return Ok(());
+    }
+
+    // `coerce` decides assignment compatibility by unifying, which records
+    // bindings. Ask it against a checkpoint and roll back whatever it wrote, so
+    // the answer is a classification and not inference evidence.
+    let snap = gamma.out.checkpoint();
+    let compatible = gamma.trial(|g| coerce(g, from_r, to_r, span).is_ok());
+    gamma.out.rollback_to(snap);
+    if compatible {
+        return Ok(());
+    }
+
+    let (from_str, to_str) = (gamma.render(from_r), gamma.render(to_r));
+    Err(CompilerError::new_with_label(
+        span,
+        format!(
+            "cannot convert `{from_str}` to `{to_str}` with `as`; \
+             `as` converts only between `int` and `float`, or where `{from_str}` \
+             is already assignable to `{to_str}`"
+        ),
+    ))
 }
 
 // Find the `/` (float division) responsible for a `float` value flowing into an

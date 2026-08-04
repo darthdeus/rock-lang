@@ -128,3 +128,34 @@ fn mutated_capture_lowers_to_box_threaded_into_record() {
     );
     assert!(!body.contains("return function"), "a boxed capture gets no by-value snapshot IIFE:\n{body}");
 }
+
+// A VALUE struct bound per iteration by a `for` and captured. Scalarization
+// splits the binding into leaf cells, and every leaf must inherit the BINDING's
+// lifetime -- one snapshot per iteration, no box. SROA's alias-unification
+// (`Store(p, Load(cursor_dest))` treated as the same object) is correct for a
+// reference struct but hands a value binding the loop cursor's own storage,
+// which the exhausted path nils: every closure then reads that nil.
+const PER_ITER_VALUE_CAPTURE: &str = r#"
+value Pt2 { x: float, y: float }
+
+fn main() {
+    let pts = [Pt2 { x: 1.0, y: 2.0 }, Pt2 { x: 2.0, y: 3.0 }, Pt2 { x: 3.0, y: 4.0 }]
+    let fns: [fn() -> float] = []
+    for p in pts { fns.push(() => p.x + p.y) }
+    for f in fns { print(f()) }
+}
+"#;
+
+#[test]
+fn per_iteration_value_capture_snapshots_flat_leaves() {
+    let lua = emit_module(PER_ITER_VALUE_CAPTURE);
+    let body = function_body(&lua, "main");
+    assert!(!declares_box(&body), "a per-iteration value capture must not box its leaves:\n{body}");
+    assert!(!body.contains(".v = "), "no leaf is stored through a box:\n{body}");
+    assert!(
+        body.contains("setmetatable({ __fn = main__lambda0"),
+        "the leaves snapshot into a per-iteration env record:\n{body}"
+    );
+    let out = run_luajit(&format!("{lua}\nmain()\n"), "perit");
+    assert_eq!(out, "3\n5\n7", "each closure reads ITS iteration's leaves; got:\n{out}");
+}

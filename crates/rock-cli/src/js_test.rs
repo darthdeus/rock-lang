@@ -22,14 +22,26 @@ use skull_mir::mir::FuncRef;
 use std::time::Instant;
 
 /// One unit's (file or package) outcome under the JS executor.
+/// Every reason one emission rejection carries: the emitter's primary plus its
+/// siblings (independent findings from the same pass). One skipped test can owe
+/// the subset several constructs.
+fn all_reasons(e: &rock_core::CompilerError) -> Vec<String> {
+    std::iter::once(e.message.clone())
+        .chain(e.siblings.iter().map(|s| s.message.clone()))
+        .collect()
+}
+
 enum JsUnitOutcome {
     /// bone accepted the unit; per-test verdicts follow.
     Ran {
         passed: usize,
         /// FAIL detail lines (throw under node, or a harness-invariant breach).
         fails: Vec<String>,
-        /// (test name, skip reason) for tests outside the JS subset.
-        skips: Vec<(String, String)>,
+        /// (test name, EVERY skip reason) for tests outside the JS subset. All
+        /// of them, not just the emitter's primary: the reason histogram is the
+        /// subset's work list, and one reason per skipped test makes it a floor
+        /// (the emitter computes the rest of the list in the same pass).
+        skips: Vec<(String, Vec<String>)>,
     },
     /// bone rejected the unit and every `@test` expected the failure -- each
     /// counts as a passing test (luajit-path parity).
@@ -88,7 +100,11 @@ pub fn js_test(paths: &[String]) -> Result<()> {
             );
         }
     }
-    if summary.tests_failed > 0 || summary.unit_failures > 0 {
+    // Before the exit below, for the same reason `skull_test` reports here:
+    // `process::exit` runs no destructor and never returns to `main`.
+    let ablation_fatals = crate::ablation_report::report("rock test --backend js");
+
+    if summary.tests_failed > 0 || summary.unit_failures > 0 || ablation_fatals {
         std::process::exit(1);
     }
     Ok(())
@@ -137,8 +153,8 @@ pub fn js_test_run(paths: &[String], print: bool) -> Result<JsSuiteSummary> {
                 summary.tests_passed += passed;
                 summary.tests_failed += fails.len();
                 summary.tests_skipped += skips.len();
-                for (_, reason) in &skips {
-                    all_skip_reasons.push(reason.clone());
+                for (_, reasons) in &skips {
+                    all_skip_reasons.extend(reasons.iter().cloned());
                 }
                 if print && (passed + fails.len() + skips.len() > 0) {
                     let status = if fails.is_empty() { "ok".green() } else { "FAILED".red() };
@@ -298,7 +314,7 @@ fn js_run_tests(
     tests: &[(FuncRef, skull::SkullTest)],
 ) -> JsUnitOutcome {
     let mut fails: Vec<String> = Vec::new();
-    let mut skips: Vec<(String, String)> = Vec::new();
+    let mut skips: Vec<(String, Vec<String>)> = Vec::new();
 
     let scx = ScalarCtx::new(ws).with_target(bone_semantic::hir::FnBackend::Js);
     // (test index, per-test isolated defs) for tests emittable in ISOLATION.
@@ -316,14 +332,14 @@ fn js_run_tests(
         match emitted {
             Ok(Ok(js)) => supported.push((i, js)),
             Ok(Err(e)) if is_decorator_populated_reject(&e.message) => deco_pending.push(i),
-            Ok(Err(e)) => skips.push((t.name.clone(), e.message.clone())),
+            Ok(Err(e)) => skips.push((t.name.clone(), all_reasons(&e))),
             Err(panic) => {
                 let msg = panic
                     .downcast_ref::<&str>()
                     .map(|s| s.to_string())
                     .or_else(|| panic.downcast_ref::<String>().cloned())
                     .unwrap_or_else(|| "unknown panic".to_string());
-                skips.push((t.name.clone(), format!("panic during JS emission: {msg}")));
+                skips.push((t.name.clone(), vec![format!("panic during JS emission: {msg}")]));
             }
         }
     }
@@ -348,7 +364,7 @@ fn js_run_tests(
                 // unsupported construct past the deco-global read): keep the
                 // individually-supported tests, skip the deco-dependent ones.
                 for &i in &deco_pending {
-                    skips.push((tests[i].1.name.clone(), e.message.clone()));
+                    skips.push((tests[i].1.name.clone(), all_reasons(&e)));
                 }
                 run_idxs = supported.iter().map(|(i, _)| *i).collect();
                 supported.iter().map(|(_, d)| d.as_str()).collect::<String>()

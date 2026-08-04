@@ -1,13 +1,13 @@
-//! stone-web Arc 2 MB gates (game-integration tier, excluded from the default
-//! nextest profile like game_snapshot_tests -- runs under `-P full`):
+//! stone-web Arc 2 MB gates, headless-Chrome tier (game-integration tier,
+//! excluded from the default nextest profile like game_snapshot_tests -- runs
+//! under `-P full`):
 //!
-//! - `web_fake_gl_smoke`: `rock web games/match3` -> tools/web/fake_gl_smoke.js
-//!   drives 10 frames of the emitted build under node against a recorded-call
-//!   GL stub, asserting per frame: >=1 clear, >=2 TRIANGLES draws at the
-//!   40-byte (10-float) vertex stride, `running` stays true.
 //! - `web_chrome_screenshot_nonblank`: headless Chrome renders the build and
 //!   the screenshot must not be blank (>= 8 distinct colors: board tiles +
 //!   frame + background). Skips with a log when chrome is absent.
+//!
+//! The fast node/fake-GL half lives in `web_fake_gl_tests` and runs in the
+//! DEFAULT profile -- see that file's header for why the split exists.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -29,55 +29,6 @@ fn build_web(game: &str, out: &std::path::Path) {
     assert!(status.success(), "rock web {game} failed");
     assert!(out.join("game.js").is_file(), "game.js not emitted");
     assert!(out.join("index.html").is_file(), "index.html not emitted");
-}
-
-fn run_fake_gl_smoke(game: &str) {
-    run_fake_gl_smoke_dpr(game, "1");
-}
-
-// dpr != 1 additionally asserts default-FB orthos are LOGICAL-sized (the
-// fractional-scaling bug: backing-sized ortho renders at 1/dpr while
-// input/hit-testing stay logical, so clicks land on the wrong element).
-fn run_fake_gl_smoke_dpr(game: &str, dpr: &str) {
-    if Command::new("node").arg("--version").output().map(|o| !o.status.success()).unwrap_or(true) {
-        eprintln!("SKIP fake_gl_smoke ({game}): node not on PATH");
-        return;
-    }
-    let dir = tempfile::tempdir().expect("tempdir");
-    build_web(game, dir.path());
-    let harness = repo_root().join("tools/web/fake_gl_smoke.js");
-    let out = Command::new("node")
-        .arg(&harness)
-        .arg(dir.path().join("game.js"))
-        .arg("10")
-        .arg(dpr)
-        .output()
-        .expect("spawn node smoke");
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        out.status.success() && stdout.contains("PASS"),
-        "fake-GL smoke ({game}, dpr={dpr}) failed.\nstdout:\n{stdout}\nstderr:\n{stderr}"
-    );
-}
-
-#[test]
-fn web_fake_gl_smoke() {
-    run_fake_gl_smoke("games/match3");
-}
-
-#[test]
-fn web_fake_gl_smoke_hidpi() {
-    run_fake_gl_smoke_dpr("games/match3", "2");
-}
-
-// Chess: the fake-GL harness is game-agnostic (drives web_run_frame). Chess
-// draws the board + panels every frame, well past the >=2 stride-40 TRIANGLES
-// floor; the emit-unblock siblings (proc/file/timestamp) + WebAudio must not
-// throw headlessly (no AudioContext -> silent stubs).
-#[test]
-fn web_fake_gl_smoke_chess() {
-    run_fake_gl_smoke("games/chess");
 }
 
 // One headless-Chrome screenshot smoke: build the game's web dir, serve it over
@@ -164,14 +115,6 @@ fn web_chrome_screenshot_nonblank_with_text() {
 #[test]
 fn web_chrome_screenshot_nonblank_chess() {
     run_chrome_screenshot("games/chess", 10000, "the chess board");
-}
-
-// mag (v2 tier) in the node fake-GL env: boots through global init, the whole
-// @init image-load phase (no fetch -> every stone_load_image takes the loud
-// white-pixel fallback rung), and runs 10 full frames of the world render.
-#[test]
-fn web_fake_gl_smoke_mag() {
-    run_fake_gl_smoke("mag");
 }
 
 // Build `game`, serve it, and drive it with tools/web/chrome_cdp_smoke.js.
@@ -318,10 +261,17 @@ fn web_chrome_screenshot_and_click_pick_mag() {
             // element's rect so the expression holds at any devicePixelRatio.
             "--click-expr",
             "(function(){               var rp=render_pos_Movable_ret_Vec2(__G.player.movable);               var s=world_to_screen_Vec2_ret_Vec2(rp[0],rp[1]+1.5);               var c=document.querySelector('canvas');var r=c.getBoundingClientRect();               return [r.left+s[0]*(r.width/__SW.logicalW),                       r.top+s[1]*(r.height/__SW.logicalH)];})()",
+            // Report whether anything was picked AT ALL, so the two failures are
+            // told apart from the message alone:
+            //   "nohover:None" -> the click landed off the sprite (a projection
+            //                     or framing fault, since the point is derived).
+            //   "hover:None"   -> something was picked and the click path
+            //                     dropped it; that is a real pipeline defect.
             "--expect",
-            "__G.last_click_target && __G.last_click_target.__variant",
+            "(__G.HOVER_ENTITY_ID ? \"hover\" : \"nohover\") + \":\" + \
+             (__G.last_click_target && __G.last_click_target.__variant)",
             "--value",
-            "Player",
+            "hover:Player",
         ],
     ) else {
         return;

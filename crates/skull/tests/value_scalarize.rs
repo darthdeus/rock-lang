@@ -126,13 +126,17 @@ fn value_struct_field_reads_dont_materialize_cdata() {
     );
 }
 
-/// Storing a value-struct literal into a `NativeBuffer<value>` element must
-/// write the slot's fields in place (`slot = buf[i]; slot.f = ..`), NOT build
-/// the whole nested cdata and copy it (`__nb_checked_set(i, Vertex_ct(..))`).
-/// The packed form allocates ~5 cdata per element that can't sink across the
-/// store (the mag HUD/text glyph-quad path). The scalarized form uses the
-/// bounds-checked slot READ (`__nb_checked_get`) + per-field writes; rock writes
-/// 0 bytes/element this way.
+/// Storing a value-struct literal into a `NativeBuffer<value>` element writes
+/// the element's LEAVES through typed views -- no whole cdata copy
+/// (`__nb_checked_set(i, Vertex_ct(..))`), and no slot reference either.
+///
+/// This supersedes the slot-write form (`slot = buf[i]; slot.f = ..`) that a
+/// previous arc landed. That form sank to 0 B/element ON TRACE, but paid a
+/// 24 B slot reference plus a nested cdata per nested field everywhere sinking
+/// does not happen; leaf addressing is 0 on both. Measured on this repo's own
+/// benchmarks: `nativebuffer_value_store` 72.9 -> 0.9 B/vertex under
+/// `jit.off()`, unchanged at 0 with the JIT on.
+/// See docs/native-buffer-leaf-addressing-plan.md.
 const NATIVE_BUFFER_VALUE_STORE: &str = r#"
 value V2 { x: float, y: float }
 value Vert { pos: V2, uv: V2, w: float }
@@ -155,28 +159,28 @@ fn main() {
 "#;
 
 #[test]
-fn native_buffer_value_store_writes_slot_in_place() {
+fn native_buffer_value_store_writes_leaves_through_views() {
     let lua = emit_module(NATIVE_BUFFER_VALUE_STORE);
     let body = function_body(&lua, "fill");
-    // Slot-write form: bounds-checked READ of the slot, then field writes.
+    // Leaf form: the element is bounds-checked ONCE by index, then each leaf is
+    // written through its own view -- no slot reference is taken at all.
     assert!(
-        body.contains("__nb_checked_get("),
-        "NativeBuffer<value> store should read the slot in place:\n{body}"
+        body.contains("__nb_checked_index("),
+        "NativeBuffer<value> store should bounds-check the index:\n{body}"
+    );
+    assert!(
+        !body.contains("__nb_checked_get("),
+        "leaf addressing must not take a slot reference:\n{body}"
     );
     // NOT the packed form (build the whole cdata and copy it in).
     assert!(
         !body.contains("__nb_checked_set("),
         "NativeBuffer<value> store should not build+copy a whole cdata:\n{body}"
     );
-    // The slot + its field writes form a `do … end` cluster with a BLOCK-scoped
-    // local (`__nbslot<N>`), not a reused function register -- a function register
-    // gets a loop-carried PHI on the `buf.ptr[i]` pointer cdata that LuaJIT can't
-    // sink (24 B/elem); the block local is dead at the loop header, so it sinks to
-    // 0 (rock parity). Bench: nativebuffer_value_store.rock 24 -> 0 bytes/vertex.
-    assert!(
-        body.contains("local __nbslot"),
-        "NativeBuffer<value> slot must be a block-scoped local, not a function register:\n{body}"
-    );
+    // No ctor survives -- neither the element's nor a nested field's.
+    for ct in ["Vert_ct(", "V2_ct("] {
+        assert!(!body.contains(ct), "`{ct}` must not survive the store:\n{body}");
+    }
 }
 
 const NATIVE_BUFFER_SINGLE_FIELD: &str = r#"
@@ -198,17 +202,20 @@ fn main() {
 "#;
 
 #[test]
-fn native_buffer_single_field_store_is_block_scoped() {
-    // Even a SINGLE field store keeps the slot pointer cdata live across the
-    // iteration in a function register -> loop-carried PHI -> 24 B/iter. The
-    // block-scope cluster must fire for any store count >= 1, not just >= 2
-    // (the original guard skipped this, leaking 24 B -- bench
-    // phi-scope/slot_write_single_field.rock).
+fn native_buffer_single_field_store_takes_no_slot() {
+    // A single-leaf element is the leakiest case for the slot form: the slot
+    // pointer cdata stays live across the iteration in a function register
+    // (loop-carried PHI, 24 B/iter). Leaf addressing takes no slot at all --
+    // bench phi-scope/slot_write_single_field.rock is 0 B/iter, JIT on AND off.
     let lua = emit_module(NATIVE_BUFFER_SINGLE_FIELD);
     let body = function_body(&lua, "fill");
     assert!(
-        body.contains("local __nbslot"),
-        "single-field NativeBuffer store must also be block-scoped:\n{body}"
+        !body.contains("__nb_checked_get("),
+        "single-field NativeBuffer store should take no slot reference:\n{body}"
+    );
+    assert!(
+        body.contains("__nb_checked_index("),
+        "the element access must still be bounds-checked:\n{body}"
     );
 }
 
@@ -241,5 +248,171 @@ fn generic_value_struct_rides_scalar_abi() {
     assert!(
         !drive.contains("Pair_vt") && !drive.contains("Pair_ct"),
         "a non-escaping generic value chain must not materialize a table:\n{drive}"
+    );
+}
+
+const NESTED_SCALAR_ABI: &str = r#"
+value V2 { x: float, y: float }
+value Rect { tl: V2, br: V2 }
+
+@scalar_abi inline(lua) fn nested_leaves(r: Rect) -> float = """
+    return r__tl__x + r__br__y
+"""
+
+fn main() { let _ = nested_leaves(Rect { tl: V2 { x: 1.0, y: 2.0 }, br: V2 { x: 4.0, y: 8.0 } }) }
+"#;
+
+/// The `@scalar_abi` leaf-param namer must be INJECTIVE. `leaf_param_names`
+/// recursed into a nested value field with the base unchanged, so `Rect { tl, br }`
+/// emitted `function f(r__x, r__y, r__x, r__y)` -- Lua binds the later pair over
+/// the earlier, and a body naming its own leaves silently read `br` where it
+/// wrote `tl`. `leaf_paths_rec` (the column-key twin) had already solved this
+/// with dotted paths; the param namer never got the fix, and the comment there
+/// calling the case unreachable was scoped to `nobox` crossings -- an ordinary
+/// unmarked nested value reaches it today.
+#[test]
+fn nested_scalar_abi_leaf_params_are_injective() {
+    let lua = emit_module(NESTED_SCALAR_ABI);
+    let f = function_body(&lua, "nested_leaves");
+    let params = f
+        .split_once('(')
+        .and_then(|(_, rest)| rest.split_once(')'))
+        .map(|(p, _)| p.to_string())
+        .unwrap_or_else(|| panic!("no param list in:\n{f}"));
+    let names: Vec<&str> = params.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+    let mut uniq = names.clone();
+    uniq.sort_unstable();
+    uniq.dedup();
+    assert_eq!(
+        uniq.len(),
+        names.len(),
+        "nested value leaf params must be distinct, got {names:?} in:\n{f}"
+    );
+}
+
+const UNDERSCORE_FIELD_NO_COLLISION: &str = r#"
+nobox value V2 { x: float, y: float }
+nobox value Ok { tl__z: float, tl: V2 }
+
+@scalar_abi inline(lua) fn fine(r: Ok) -> float = """
+    return r__tl__z + r__tl__x * 10.0 + r__tl__y * 100.0
+"""
+
+fn apply(f: (Ok) -> float, r: Ok) -> float { return f(r) }
+
+@nomangle inline(lua) fn __out(x: float) = "io.write(tostring(x))"
+fn main() {
+    let r = Ok { tl__z: 7.0, tl: V2 { x: 1.0, y: 2.0 } }
+    __out(apply(fine, r))
+}
+"#;
+
+const UNMARKED_VALUE_VIA_NULLABLE_FN_VALUE: &str = r#"
+value V2 { x: float, y: float }
+value Box2 { tl: V2, w: float }
+
+@scalar_abi inline(lua) fn probe(r: Box2) -> float = """
+    return r__tl__x + r__tl__y * 10.0 + r__w * 100.0
+"""
+
+fn apply(f: ((Box2) -> float)?, r: Box2) -> float {
+    if f != null { return f.unwrap()(r) }
+    return -1.0
+}
+
+fn main() {
+    let r = Box2 { tl: V2 { x: 1.0, y: 2.0 }, w: 3.0 }
+    print("{apply(probe, r)}")
+}
+"#;
+
+const UNMARKED_VALUE_VIA_FN_VALUE: &str = r#"
+value V2 { x: float, y: float }
+value Box2 { tl: V2, w: float }
+
+@scalar_abi inline(lua) fn probe(r: Box2) -> float = """
+    return r__tl__x + r__tl__y * 10.0 + r__w * 100.0
+"""
+
+fn apply(f: (Box2) -> float, r: Box2) -> float { return f(r) }
+
+fn main() {
+    let r = Box2 { tl: V2 { x: 1.0, y: 2.0 }, w: 3.0 }
+    print("{apply(probe, r)}")
+}
+"#;
+
+/// FIXED -- was a sentinel. An UNMARKED `value` struct reaching a `@scalar_abi`
+/// fn through a FN VALUE used to compile clean and die at runtime; it is now a
+/// spanned rejection where the fn is taken by value.
+///
+/// THE MECHANISM: the two ends derived the ABI from different sources. A
+/// definition reads `fn_scalar_abi`; an indirect call site has only the fn TYPE,
+/// so it reads `fn_value_abi`. Those agree by construction for an ordinary body
+/// -- `fn_scalar_abi` NARROWS an address-taken one (`scx.taken_by_ref`) to
+/// exactly the `nobox` shapes the type yields, which is what that narrowing
+/// exists for. `@scalar_abi` is the one thing that bypasses it, and deliberately:
+/// its hand-written `inline(lua)` body spells the leaf params (`r__tl__x`), so
+/// narrowing the definition would break the BODY instead of the call.
+///
+/// So the two cannot be reconciled by re-deriving either side, which is the case
+/// the old sentinel text named as the alternative. The definition scalarized to
+/// `probe(r__tl__x, r__tl__y, r__w)` while `apply` packed one `Box2_ct(...)`:
+/// the first leaf got the whole cdata and the rest went nil.
+///
+/// The `nobox` sibling below is the positive control and still emits, because
+/// there both ends DO agree -- which is exactly the fix the diagnostic suggests.
+#[test]
+fn unmarked_value_through_fn_value_rejects() {
+    let err = crate::common::try_emit_module(UNMARKED_VALUE_VIA_FN_VALUE)
+        .expect_err("an unreconcilable fn-value ABI must reject");
+    assert!(
+        err.message.contains("cannot be taken as a fn value") && err.message.contains("probe"),
+        "the rejection must name the fn and the reason, got: {}",
+        err.message
+    );
+}
+
+/// The NULLABLE spelling of [`unmarked_value_through_fn_value_rejects`], and the
+/// property the `Nullable` peel in `fn_value_abi` ENDANGERED: before the peel a
+/// nullable fn-value type answered `None` and fell to the boxed ABI, so this
+/// mismatched for that reason rather than on its merits. After the peel the type
+/// answers, and it must still reject -- an UNMARKED value yields no leaves, so
+/// `fn_value_abi` returns `None` again and the `@scalar_abi` definition still
+/// disagrees with it. A peel that widened past `nobox` would turn this green.
+#[test]
+fn unmarked_value_through_a_nullable_fn_value_still_rejects() {
+    let err = crate::common::try_emit_module(UNMARKED_VALUE_VIA_NULLABLE_FN_VALUE)
+        .expect_err("a nullable fn-value reference must not launder an unreconcilable ABI");
+    assert!(
+        err.message.contains("cannot be taken as a fn value") && err.message.contains("probe"),
+        "the rejection must name the fn and the reason, got: {}",
+        err.message
+    );
+}
+
+/// POSITIVE CONTROL for the `value_leaf_name_collisions` rejection: a `__`-bearing
+/// field name only collides when it JOINS to an existing nested path, so `tl__z`
+/// beside a nested `tl: V2 { x, y }` is unambiguous and must still emit -- and the
+/// leaf params must stay distinct. Both routes are exercised (the fn is reached
+/// through a fn value, which narrows the ABI to what the fn TYPE alone yields), and
+/// the result is checked under luajit so a mis-ordered leaf splat is caught too.
+///
+/// The REJECTION cases live in `tests/errors/value_leaf_name_collision.rock.err`.
+#[test]
+fn non_colliding_underscore_field_still_scalarizes() {
+    let lua = emit_module(UNDERSCORE_FIELD_NO_COLLISION);
+    let f = function_body(&lua, "fine");
+    for leaf in ["r__tl__z", "r__tl__x", "r__tl__y"] {
+        assert!(f.contains(leaf), "leaf param `{leaf}` must be emitted:\n{f}");
+    }
+    assert!(
+        !f.contains("r__tl__z, r__tl__z"),
+        "the non-colliding leaves must stay distinct:\n{f}"
+    );
+    assert_eq!(
+        crate::common::run_luajit(&format!("{lua}\nmain()\n"), "underscore_no_collision"),
+        "217",
+        "7 + 1*10 + 2*100 -- a wrong leaf order or a duplicate param would shift this"
     );
 }

@@ -14,7 +14,7 @@ use bone_semantic::prelude::*;
 use bone_incremental::session::{changed_names, item_prints, name_shapes, Session, UpdateResult, UpdateTier};
 
 fn parse_rock_with_file(src: &str, file: &str) -> Result<skull_parser::Ast, CompilerError> {
-    skull_parser::parse_module(src, Ustr::from(file))
+    skull_parser::parse_module_clean(src, Ustr::from(file))
 }
 
 // ---------------------------------------------------------------------------
@@ -1753,7 +1753,7 @@ fn stdlib_warm_modules() -> Vec<skull_parser::Ast> {
         .iter()
         .map(|(name, contents)| {
             let file = Ustr::from(format!("<bone-stdlib:{name}>").as_str());
-            skull_parser::parse_module(contents, file)
+            skull_parser::parse_module_clean(contents, file)
                 .unwrap_or_else(|e| panic!("stdlib {name} must parse: {e:?}"))
         })
         .collect()

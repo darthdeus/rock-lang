@@ -49,7 +49,7 @@ pub fn definition_at(
 
             hir::Expr::Global(name) => def_of_name(ws, *name),
 
-            // A `.field` ref: in a `FieldOf<Struct, V>` slot it resolves to the
+            // A `.field` ref: in a `FieldRef<Struct, V>` slot it resolves to the
             // struct's field decl (like `recv.field` access); otherwise it's a
             // sibling/global name.
             hir::Expr::SiblingRef(name) => inf
@@ -389,9 +389,9 @@ pub fn hover_at(
                                     }
                                 }
                             }
-                            // A `.field` ref in a `FieldOf<Struct, V>` slot ->
+                            // A `.field` ref in a `FieldRef<Struct, V>` slot ->
                             // the referenced field (`f: V (field of Struct)`),
-                            // not the raw FieldOf wrapper type.
+                            // not the raw FieldRef wrapper type.
                             hir::Expr::SiblingRef(name) => {
                                 if let Some(sname) =
                                     field_ref_struct(ws, bi, *bi.expr_types.get(e)?)
@@ -1538,7 +1538,7 @@ fn field_references(ws: &Workspace, sname: Ustr, field: Ustr) -> Vec<RefSite> {
                         }
                     }
                     // `.field` sibling ref: a default body of THIS struct
-                    // (`boosted: int = .power`), or a `FieldOf<sname, V>`-typed
+                    // (`boosted: int = .power`), or a `FieldRef<sname, V>`-typed
                     // key-path arg. Span ends at the name (leading dot stays).
                     hir::Expr::SiblingRef(n) if *n == field => {
                         let of_struct = match owner {
@@ -1551,7 +1551,7 @@ fn field_references(ws: &Workspace, sname: Ustr, field: Ustr) -> Vec<RefSite> {
                                     .copied()
                                     .and_then(|t| struct_app_args(ws, bi, t))
                                     .and_then(|(ctor, args)| {
-                                        matches!(ctor.as_str(), "FieldOf" | "KeyPath")
+                                        matches!(ctor.as_str(), "FieldRef" | "ReadFieldRef" | "WriteFieldRef")
                                             .then(|| args.into_iter().next())
                                             .flatten()
                                     })
@@ -2287,22 +2287,39 @@ fn function_target(
     let module = ws.modules.get(mid.index())?;
 
     if let Some(owner) = module.body_at(offset) {
-        if let Some(NodeRef::Expr(e)) = module
-            .bodies
-            .get(&owner)
-            .and_then(|body| {
-                body.node_index()
-                    .find(offset, offset + 1)
-                    .min_by_key(|x| x.stop - x.start)
-            })
-            .map(|iv| iv.val)
-        {
-            if let Some((cmid, fid)) = inf
-                .per_fn
-                .get(&owner)
-                .and_then(|bi| bi.resolved_overload_calls.get(&e))
+        if let Some(body) = module.bodies.get(&owner) {
+            if let Some(NodeRef::Expr(e)) = body
+                .node_index()
+                .find(offset, offset + 1)
+                .min_by_key(|x| x.stop - x.start)
+                .map(|iv| iv.val)
             {
-                return Some((*cmid, *fid));
+                if let Some((cmid, fid)) = inf
+                    .per_fn
+                    .get(&owner)
+                    .and_then(|bi| bi.resolved_overload_calls.get(&e))
+                {
+                    return Some((*cmid, *fid));
+                }
+
+                // A bare top-level name used as a VALUE, never called
+                // (`apply(double, ..)`, `rock_shader(card_000_frag)`): HIR
+                // lowers this to `Expr::Global(name)`, which has no entry in
+                // `resolved_overload_calls` (keyed on Call nodes only).
+                // `def_of_name` already resolves this case for
+                // go-to-definition; find-references/rename need the same case,
+                // restricted to functions.
+                if let hir::Expr::Global(name) = &body.expr_arena[e] {
+                    if !name.as_str().starts_with("__") {
+                        for m in ws.modules.iter() {
+                            if let Some((fmid, fid)) =
+                                m.functions_by_name.get(name).and_then(|l| l.first())
+                            {
+                                return Some((*fmid, *fid));
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -2404,6 +2421,23 @@ fn function_references_by_name<'t>(
                             }
                         }
                         _ => {}
+                    }
+                }
+            }
+
+            // A bare top-level name used as a VALUE, never called
+            // (`apply(double, ..)`, `rock_shader(card_000_frag)`): HIR lowers
+            // this to `Expr::Global(name)`, with no entry in
+            // `resolved_overload_calls` (keyed on Call nodes only). Unlike a
+            // call, a bare value reference carries no argument list to
+            // disambiguate an overload, so it's matched by name for both
+            // scopes -- there's no finer-grained target to restrict to.
+            for (e, expr) in body.expr_arena.iter() {
+                if let hir::Expr::Global(gname) = expr {
+                    if *gname == name {
+                        if let Some(sp) = body.expr_spans.get(e) {
+                            out.push(*sp);
+                        }
                     }
                 }
             }
@@ -2866,12 +2900,12 @@ pub(crate) fn receiver_vec_elem(
 
 /// `(struct name, inferred type args)` if `ty` is a nominal-struct `App`
 /// (peeling a `Nullable`). Args are `TyId`s in the same arena as `ty`.
-/// If `ty` is `FieldOf<Struct, V>`, the `Struct` name -- the struct a `.field`
+/// If `ty` is `FieldRef<Struct, V>`, the `Struct` name -- the struct a `.field`
 /// ref in that slot indexes. `None` for any other type (a plain sibling ref, or
-/// a `FieldOf` whose first arg isn't a nominal struct).
+/// a `FieldRef` whose first arg isn't a nominal struct).
 fn field_ref_struct(ws: &Workspace, bi: &BodyInference, ty: TyId) -> Option<Ustr> {
     let (ctor, args) = struct_app_args(ws, bi, ty)?;
-    if !matches!(ctor.as_str(), "FieldOf" | "KeyPath") {
+    if !matches!(ctor.as_str(), "FieldRef" | "ReadFieldRef" | "WriteFieldRef") {
         return None;
     }
     let (sname, _) = struct_app_args(ws, bi, *args.first()?)?;
@@ -2896,8 +2930,8 @@ fn struct_app_args(ws: &Workspace, bi: &BodyInference, ty: TyId) -> Option<(Ustr
 /// The struct name of a single-type-argument nominal's SOLE argument
 /// (`Entity<Glyph>` -> "Glyph"), peeling a `Nullable`. `None` for a non-nominal,
 /// a multi-arg nominal, or an argument that isn't a nominal struct. Feeds
-/// FieldOf method completion on wrapper-receiver overloads (`e.run_into(.co)`),
-/// where the FieldOf owner `T` binds through the receiver's `Entity<T>`.
+/// FieldRef method completion on wrapper-receiver overloads (`e.run_into(.co)`),
+/// where the FieldRef owner `T` binds through the receiver's `Entity<T>`.
 fn sole_type_arg_struct(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -> Option<Ustr> {
     match deref_ty(ws, bi, ty)? {
         hir::TypeExpr::App { ctor: hir::TypeCtor::Nominal(_), params } if params.len() == 1 => {

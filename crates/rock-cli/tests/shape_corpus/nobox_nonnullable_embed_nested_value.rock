@@ -1,0 +1,25 @@
+// CONTROL for `nobox_nested_nullable_embed_group`. The nested field here is
+// NON-nullable, which leaves `Outer` FFI-clean rather than leaf-table. That tier
+// once decided the outcome and no longer does: the splice walks ask
+// `embed_field_of_spliced`, which does not re-apply the contiguous-cdata bail,
+// so an FFI-clean nested value field contributes its own dotted leaves like the
+// leaf-table twin always did.
+//
+// `embed` is not the variable either -- the same shape on a plain reference
+// struct field rejected identically, since a nobox field is spliced whether or
+// not it is spelled `embed` (`tests/nobox_nested_ctor.rock`).
+
+nobox value P { x: int, y: int }
+nobox value Outer { a: P, b: int }
+struct Holder { embed o: Outer, tag: int }
+
+global H: Holder = Holder { o: Outer { a: P { x: 0, y: 0 }, b: 0 }, tag: 0 }
+
+fn seed(n: int) -> int { return n }
+fn fill(n: int) { H = Holder { o: Outer { a: P { x: n, y: 2 }, b: 3 }, tag: 7 } }
+
+@test(output = "1 3 7")
+fn probe_nonnullable_embed_nested_value() {
+    fill(seed(1))
+    print("{H.o.a.x} {H.o.b} {H.tag}")
+}

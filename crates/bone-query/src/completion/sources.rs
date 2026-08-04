@@ -46,7 +46,7 @@ pub(crate) fn callee_param_names(ws: &Workspace, callee: &str) -> Vec<(Ustr, Str
 }
 
 /// Struct `t_name`'s field names whose declared type renders exactly as
-/// `v_str` -- the field-set a `FieldOf<t_name, V>` slot admits (typechecker
+/// `v_str` -- the field-set a `FieldRef<t_name, V>` slot admits (typechecker
 /// invariance). Deduped, first-seen order. Shared by the arg-position field-ref
 /// path and the method-selection-time pre-fill in `build_member_items`.
 pub(crate) fn fields_of_type(ws: &Workspace, t_name: Ustr, v_str: &str) -> Vec<Ustr> {
@@ -75,7 +75,7 @@ pub(crate) fn fields_of_type(ws: &Workspace, t_name: Ustr, v_str: &str) -> Vec<U
 /// `Ctor<T>` whose ctor is the receiver struct binds `T` to the receiver's sole
 /// type-arg element (`Entity<Glyph>` -> owner `Glyph`). `(None, recv_struct)`
 /// for a non-generic first param. Both `recv_struct`/`recv_elem` are `None` for
-/// a non-UFCS prefix call -- the FieldOf owner then binds from a sibling arg.
+/// a non-UFCS prefix call -- the FieldRef owner then binds from a sibling arg.
 fn receiver_owner_binding(
     ws: &Workspace,
     f: &bone_semantic::hir::Function,
@@ -101,15 +101,15 @@ fn receiver_owner_binding(
     }
 }
 
-/// Resolve the `FieldOf<owner, V>` at param `pi` of overload `f` to its owner
+/// Resolve the `FieldRef<owner, V>` at param `pi` of overload `f` to its owner
 /// struct + rendered V. The owner comes from: a literal nominal first arg; the
-/// receiver, when the FieldOf's generic matches the var the receiver bound
+/// receiver, when the FieldRef's generic matches the var the receiver bound
 /// (`recv_var`/`recv_owner` from `receiver_owner_binding`); or `sibling_owner`
 /// (a preceding-arg binding, the non-UFCS prefix-call path). `None` when the
-/// param isn't a `FieldOf`, or its generic owner can't be resolved. The shared
-/// FieldOf-slot resolver -- both the arg-completion path and the prefill synth
+/// param isn't a `FieldRef`, or its generic owner can't be resolved. The shared
+/// FieldRef-slot resolver -- both the arg-completion path and the prefill synth
 /// consume it, so their owner/slot logic cannot drift.
-fn fieldof_slot_owner(
+fn fieldref_slot_owner(
     ws: &Workspace,
     f: &bone_semantic::hir::Function,
     pi: usize,
@@ -121,7 +121,8 @@ fn fieldof_slot_owner(
     let p = f.param_decls.get(pi)?;
     let (t_idx, v_idx) = match ty_of(ws, None, p.ty) {
         TypeExpr::App { ctor: TypeCtor::Nominal(n), params }
-            if matches!(n.as_str(), "FieldOf" | "KeyPath") && params.len() == 2 =>
+            if matches!(n.as_str(), "FieldRef" | "ReadFieldRef" | "WriteFieldRef")
+                && params.len() == 2 =>
         {
             let mut it = params.into_iter();
             (it.next().unwrap(), it.next().unwrap())
@@ -177,12 +178,12 @@ fn sibling_owner_bind(
 }
 
 /// Field-ref completions for a call-arg slot. `None` if no overload's slot at
-/// `arg_idx` is a resolvable `FieldOf<Struct, V>` (caller falls through to
+/// `arg_idx` is a resolvable `FieldRef<Struct, V>` (caller falls through to
 /// normal completion); `Some(items)` when one is -- offering the struct's
 /// fields whose declared type is exactly V (the typechecker's invariance),
 /// whether or not the leading `.` is typed. ALL overloads are consulted; the
-/// FieldOf owner resolves from the UFCS receiver (`recv_end`), a literal
-/// nominal, or a preceding sibling arg (`fieldof_slot_owner`).
+/// FieldRef owner resolves from the UFCS receiver (`recv_end`), a literal
+/// nominal, or a preceding sibling arg (`fieldref_slot_owner`).
 pub(crate) fn field_ref_arg_completions(
     ws: &Workspace,
     path: &str,
@@ -206,12 +207,12 @@ pub(crate) fn field_ref_arg_completions(
         .unwrap_or((None, None));
     let recv_offset = usize::from(recv_end.is_some());
 
-    // First overload whose `arg_idx` slot resolves to a FieldOf with >=1 field.
+    // First overload whose `arg_idx` slot resolves to a FieldRef with >=1 field.
     let (t_name, v_str) = ws.modules.iter().find_map(|m| {
         m.functions_by_name.get(&name)?.iter().find_map(|(fmid, fid)| {
             let f = &ws.modules[fmid.index()].functions[*fid];
             let (recv_var, recv_owner) = receiver_owner_binding(ws, f, recv_struct, recv_elem);
-            let (owner, v_str) = fieldof_slot_owner(ws, f, arg_idx, recv_var, recv_owner, |gname| {
+            let (owner, v_str) = fieldref_slot_owner(ws, f, arg_idx, recv_var, recv_owner, |gname| {
                 sibling_owner_bind(ws, path, src, offset, arg_idx, recv_offset, f, gname)
             })?;
             (!fields_of_type(ws, owner, &v_str).is_empty()).then_some((owner, v_str))
@@ -1204,16 +1205,16 @@ pub(crate) fn member_completion_items(
     )
 }
 
-/// If UFCS fn `f` has a `FieldOf<owner, V>` param and the owner struct has >=1
+/// If UFCS fn `f` has a `FieldRef<owner, V>` param and the owner struct has >=1
 /// field of type `V`, returns `(arg_idx, field names)` -- `arg_idx` is the
-/// FieldOf's position among the *non-receiver* args, so the pre-fill lands the
-/// field in the right slot (`set_co`'s FieldOf is arg 0 of `(field, next)`, not
+/// FieldRef's position among the *non-receiver* args, so the pre-fill lands the
+/// field in the right slot (`set_co`'s FieldRef is arg 0 of `(field, next)`, not
 /// the trailing param). `None` otherwise (leave the item untouched). Two
 /// receiver shapes bind the owner: a bare-generic `o: T` is itself the owner
-/// (`stop<T>(o: T, f: FieldOf<T, V>)`, owner = `recv_struct`); a wrapper
+/// (`stop<T>(o: T, f: FieldRef<T, V>)`, owner = `recv_struct`); a wrapper
 /// `e: Entity<T>` binds `T` to `recv_elem` (`Entity<Glyph>` -> owner `Glyph`),
-/// resolving the FieldOf through the ctor. The FieldOf's `T` is then that same
-/// generic var, or a literal `FieldOf<owner, V>` whose struct is the owner.
+/// resolving the FieldRef through the ctor. The FieldRef's `T` is then that same
+/// generic var, or a literal `FieldRef<owner, V>` whose struct is the owner.
 fn field_ref_slot(
     ws: &Workspace,
     recv_struct: Ustr,
@@ -1221,14 +1222,14 @@ fn field_ref_slot(
     f: &bone_semantic::hir::Function,
 ) -> Option<(usize, Vec<Ustr>)> {
     // A UFCS receiver always binds the owner; a sibling arg never contributes
-    // here (that path serves the non-UFCS prefix call). The FieldOf's owner must
-    // be the receiver's own struct -- a literal `FieldOf<Other, V>` on a `recv`
+    // here (that path serves the non-UFCS prefix call). The FieldRef's owner must
+    // be the receiver's own struct -- a literal `FieldRef<Other, V>` on a `recv`
     // method isn't a `recv.method(.field)` slot, so gate nominal owners on that.
     let (recv_var, recv_owner) = receiver_owner_binding(ws, f, Some(recv_struct), recv_elem);
     let recv_owner = recv_owner?;
     for pi in 1..f.param_decls.len() {
         let Some((owner, v_str)) =
-            fieldof_slot_owner(ws, f, pi, recv_var, Some(recv_owner), |_| None)
+            fieldref_slot_owner(ws, f, pi, recv_var, Some(recv_owner), |_| None)
         else {
             continue;
         };
@@ -1243,7 +1244,7 @@ fn field_ref_slot(
     None
 }
 
-/// Snippet `insert_text` for a field-ref method: the FieldOf arg pre-filled with
+/// Snippet `insert_text` for a field-ref method: the FieldRef arg pre-filled with
 /// the field (a `${1|.a,.b|}` choice when >1 field), every other arg a numbered
 /// placeholder named after its param. `mob.kill_co` -> `kill_co(.attack_co)`;
 /// `mob.set_co` -> `set_co(.attack_co, ${1:next})`.
@@ -1269,13 +1270,13 @@ fn field_ref_insert(name: &str, f: &bone_semantic::hir::Function, field_arg_idx:
 /// UFCS field-ref methods applicable to this receiver: a fn whose first param
 /// is either a bare generic `T` (owner = `recv_struct`) or a wrapper `Ctor<T>`
 /// whose ctor is `recv_struct` (owner = `recv_elem`, e.g. `Entity<Glyph>`), and
-/// which has a `FieldOf<T, V>` param where the owner has a field of type `V`.
+/// which has a `FieldRef<T, V>` param where the owner has a field of type `V`.
 /// `mob.kill_co(.attack_co)` / `e.run_into(.co, ..)` are UFCS-legal; the generic
 /// receiver is never surfaced by `ufcs_methods` (nominal-match), so this fills
 /// that gap, while the wrapper overload IS surfaced there (caller suppresses the
 /// plain item and keeps this pre-filled one). Gated on a matching field, so a
 /// struct with no `Task?` field never sees the method (and generic helpers like
-/// `min`/`max`, which carry no FieldOf param, never leak in). Deduped by name,
+/// `min`/`max`, which carry no FieldRef param, never leak in). Deduped by name,
 /// first-wins. Returns `(fn, arg_idx, field names)`.
 fn field_ref_methods<'a>(
     ws: &'a Workspace,
@@ -1328,7 +1329,7 @@ fn build_member_items(
     // Receiver's rendered element type for a Vec (`[Vec2]` -> "Vec2"); filters
     // UFCS methods to those whose element unifies. None for nominal receivers.
     vec_elem: Option<String>,
-    // Receiver's sole type-arg struct (`Entity<Glyph>` -> "Glyph"); the FieldOf
+    // Receiver's sole type-arg struct (`Entity<Glyph>` -> "Glyph"); the FieldRef
     // owner `T` binds through it on wrapper-receiver overloads (`e.run_into(.co)`).
     recv_elem: Option<Ustr>,
     prefix: &str,
@@ -1423,7 +1424,7 @@ fn build_member_items(
                 ..Default::default()
             })
         });
-        // FieldOf field-ref methods for this receiver, resolved once. Two shapes:
+        // FieldRef field-ref methods for this receiver, resolved once. Two shapes:
         // a bare-generic receiver (`mob.stop`, never surfaced by `ufcs_methods`)
         // and a wrapper `Entity<T>` overload (`e.run_into`, which the NOMINAL
         // `ufcs_methods` DOES surface as a plain item). For the latter, suppress

@@ -624,7 +624,36 @@ fn content_type(path: &Path) -> &'static str {
     }
 }
 
-/// One `__rock_shader_register("<key>", "<glsl>")` line per distinct
+/// A `[string]` literal in the JS Vec repr. Unlike the Lua sibling
+/// (`skull_codegen_lua::lua_string_vec`) `_data` is 0-based.
+fn js_string_vec(items: &[ustr::Ustr]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::from("{_data: [");
+    for (i, s) in items.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        out.push_str(&crate::js_test::js_str(s.as_str()));
+    }
+    let _ = write!(out, "], len: {}, __ty: \"Vec\"}}", items.len());
+    out
+}
+
+/// The `[int]` sibling of [`js_string_vec`] (a uniform block's member offsets).
+fn js_int_vec(items: &[i64]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::from("{_data: [");
+    for (i, n) in items.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        let _ = write!(out, "{n}");
+    }
+    let _ = write!(out, "], len: {}, __ty: \"Vec\"}}", items.len());
+    out
+}
+
+/// One `__rock_shader_register("<key>", "<glsl>", <slots>)` line per distinct
 /// `rock_shader` pair -- the JS mirror of skull's Lua `shader_registration_lines`
 /// (same collector, same Core330 profile: the profile is a property of the GL
 /// context, and the web `stone_create_shader_from_combined` shim does the ES
@@ -639,10 +668,10 @@ fn shader_register_lines_js(ws: &bone_semantic::inference::Workspace) -> Result<
     let profile = skull_codegen_glsl::GlslProfile::Core330;
     for pair in pairs {
         let fname = ws.module(pair.frag.module).functions[pair.frag.func].name;
-        let glsl = match pair.vert {
+        let emission = match pair.vert {
             Some(vert) => {
                 let vname = ws.module(vert.module).functions[vert.func].name;
-                skull_codegen_glsl::emit_shader_pipeline(
+                skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
                     ws,
                     vert.module,
                     vname.as_str(),
@@ -650,16 +679,42 @@ fn shader_register_lines_js(ws: &bone_semantic::inference::Workspace) -> Result<
                     profile,
                 )
             }
-            None => {
-                skull_codegen_glsl::emit_shader_entry(ws, pair.frag.module, fname.as_str(), profile)
-            }
+            None => skull_codegen_glsl::emit_shader_entry_with_dependencies(
+                ws,
+                pair.frag.module,
+                fname.as_str(),
+                profile,
+            ),
         }
         .map_err(|e| anyhow::anyhow!(e.message))?;
+        // The `@uniform` blocks' std140 layouts, in binding order (A1 at most
+        // one, an A2 pipeline one per stage), as PARALLEL FLAT lists -- see the
+        // Lua driver in skull/src/mir_emit.rs, which this mirrors. A SHORT call
+        // is silent on JS (the missing argument reads `undefined`), which is
+        // what rock-cli/tests/shader_register_arity_gate.rs exists to catch.
+        let blocks = &emission.uniform_blocks;
+        let bindings: Vec<i64> = blocks.iter().map(|(b, _)| *b as i64).collect();
+        let names: Vec<ustr::Ustr> = blocks.iter().map(|(_, p)| p.struct_name).collect();
+        let sizes: Vec<i64> = blocks.iter().map(|(_, p)| p.size as i64).collect();
+        let fingerprints: Vec<i64> = blocks.iter().map(|(_, p)| p.fingerprint() as i64).collect();
+        let counts: Vec<i64> = blocks.iter().map(|(_, p)| p.members.len() as i64).collect();
+        let member_names: Vec<ustr::Ustr> =
+            blocks.iter().flat_map(|(_, p)| p.members.iter().map(|m| m.name)).collect();
+        let offsets: Vec<i64> =
+            blocks.iter().flat_map(|(_, p)| p.members.iter().map(|m| m.offset as i64)).collect();
         let _ = writeln!(
             out,
-            "__rock_shader_register({}, {});",
+            "__rock_shader_register({}, {}, {}, {}, {}, {}, {}, {}, {}, {});",
             crate::js_test::js_str(&pair.key),
-            crate::js_test::js_str(&glsl)
+            crate::js_test::js_str(&emission.source),
+            js_string_vec(&emission.texture_slots),
+            js_string_vec(&names),
+            js_int_vec(&bindings),
+            js_int_vec(&sizes),
+            js_int_vec(&fingerprints),
+            js_int_vec(&counts),
+            js_string_vec(&member_names),
+            js_int_vec(&offsets),
         );
     }
     Ok(out)

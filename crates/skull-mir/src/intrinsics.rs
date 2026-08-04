@@ -39,6 +39,9 @@ pub enum Emission {
 /// A compile-time expansion kind -- the emission of an expansion intrinsic.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExpandKind {
+    /// `materialize<T>(value: T) -> T` makes a value aggregate's runtime box
+    /// explicit at this source position.
+    Materialize,
     /// `@struct_expand fn f<T>(u: T) -> [(string, E)]` -> the literal pairs list
     /// (docs/shaders.md, Layer 2).
     StructPairs,
@@ -47,6 +50,19 @@ pub enum ExpandKind {
     /// `__rock_shader_register(key, glsl)` per distinct pair
     /// (docs/shaders.md).
     ShaderPipeline,
+    /// `@vertex_expand fn f<T>(v: FlatVec<T>) -> int | [int]` -> the element's
+    /// vertex layout as a literal: the stride for an `int` return, the
+    /// per-attribute component counts for `[int]`. Both from one
+    /// `vertex_plan`, so the two cannot drift
+    /// (docs/shader-binding-layout-plan.md, P1 wiring).
+    VertexLayout,
+    /// `@uniform_expand fn f<T>(fv: Ptr<float>, iv: Ptr<int>, u: T)` -> one
+    /// DIRECT typed store per primitive leaf of `u`, at the std140 offsets
+    /// `gpu_layout::uniform_block` computes. Never a per-leaf helper call. The
+    /// views are params rather than looked up here, so the compiler names no
+    /// runtime field; the `set_uniform_block` macro is what pairs them with one
+    /// scratch (docs/shader-binding-layout-plan.md).
+    UniformBlock,
 }
 
 /// True iff `f` is an intrinsic in the mechanism's sense: declared `@intrinsic`,
@@ -60,11 +76,20 @@ pub fn is_intrinsic(f: &Function) -> bool {
 /// intrinsic. THE ONE recognizer -- `lower_call_repr` routes through it instead
 /// of a bespoke annotation check, so there is no second ad-hoc registry.
 pub fn expand_kind(f: &Function) -> Option<ExpandKind> {
+    if has_anno(f, "materialize") {
+        return Some(ExpandKind::Materialize);
+    }
     if has_anno(f, "struct_expand") {
         return Some(ExpandKind::StructPairs);
     }
     if has_anno(f, "shader_expand") {
         return Some(ExpandKind::ShaderPipeline);
+    }
+    if has_anno(f, "vertex_expand") {
+        return Some(ExpandKind::VertexLayout);
+    }
+    if has_anno(f, "uniform_expand") {
+        return Some(ExpandKind::UniformBlock);
     }
     None
 }
@@ -111,6 +136,29 @@ pub trait IntrinsicTable {
     fn lookup(&self, f: &Function) -> Option<Emission>;
     /// Every entry's (name, arity) -- the fail-closed key surface.
     fn entries(&self) -> Vec<IntrinsicEntry>;
+}
+
+/// **How a backend supplies a callee ITSELF** -- the whole of it, in the
+/// backend's own precedence, as one question with one answer.
+///
+/// Not a second table beside [`IntrinsicTable`]. A backend's intrinsic table is
+/// an INPUT to its realization, layered under the call-site renderings that win
+/// ahead of it: the JS backend renders `map_new` as `new Map()` even though the
+/// declaration is a pure Rock body, and skips a host-bound callee before it
+/// reaches the `inline(js)` co-emit and plain-Rock branches. Asking the table
+/// alone gets a different answer than the emitter gives.
+///
+/// The implementor's own call rendering and callee discovery MUST branch on
+/// exactly this, so "how the artifact says this is supplied" and "what the
+/// emitter does" cannot drift. `skull_codegen_js::JsBackendRealization` is the
+/// worked example: `render_call`, `discover_callees` and the mono artifact view
+/// all read `js_supply`.
+pub trait BackendRealization {
+    /// Backend identity, for diagnostics.
+    fn backend(&self) -> &'static str;
+    /// True iff this backend renders or serves `f` without emitting any
+    /// declared body for it.
+    fn supplies(&self, ws: &Workspace, f: &Function) -> bool;
 }
 
 /// One backend-table entry's identity, for the fail-closed key check.

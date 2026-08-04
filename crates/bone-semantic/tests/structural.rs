@@ -9,11 +9,11 @@ use bone_semantic::test_support::ExpectPretty;
 /// Parse a source string into a raw (uncooked) skull `Ast`. Shims rock's old
 /// `parse_rock`/`parse_rock_with_file` so call sites need no rewriting.
 fn parse_rock(src: &str) -> Result<skull_parser::Ast, CompilerError> {
-    skull_parser::parse_module(src, Ustr::from("<parse_rock>"))
+    skull_parser::parse_module_clean(src, Ustr::from("<parse_rock>"))
 }
 #[allow(dead_code)]
 fn parse_rock_with_file(src: &str, file: &str) -> Result<skull_parser::Ast, CompilerError> {
-    skull_parser::parse_module(src, Ustr::from(file))
+    skull_parser::parse_module_clean(src, Ustr::from(file))
 }
 
 /// Parse + type-check one source as a standalone module (no stdlib) — the
@@ -1329,6 +1329,15 @@ fn value_annotation_on_struct_rejected() {
         !bone_rejects("value Foo { x: int }"),
         "the `value` keyword form must still be accepted"
     );
+}
+
+#[test]
+fn nobox_marker_reaches_typed_struct() {
+    let ws = check("nobox value V { x: int }").expect("nobox value type checks");
+    let module = ws.modules.iter().find(|m| m.id != ModuleId::builtin()).unwrap();
+    let struct_idx = module.struct_by_name[&Ustr::from("V")];
+    assert!(module.structs[struct_idx].is_value);
+    assert!(module.structs[struct_idx].is_nobox);
 }
 
 #[test]

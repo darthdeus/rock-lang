@@ -343,6 +343,7 @@ impl CommandContext {
                 project,
                 self.args.quiet,
                 self.args.update_snapshots,
+                self.args.jobs,
             )
         } else {
             // files[0] = project, files[1..] = one or more sim names. One name
@@ -582,6 +583,22 @@ impl CommandContext {
         if self.args.command == CliCommand::IterIncremental {
             let path = self.get_path_or_current()?;
             return crate::skull_backend::skull_iter_incremental(&path, self.args.iters, self.args.warmup);
+        }
+        // mono-ty-census converts the closed world's inferred types to MonoTy and
+        // reports; a Stage-0 diagnostic that touches no emission, dispatched early
+        // like the other skull diagnostics.
+        if self.args.command == CliCommand::MonoTyCensus {
+            let root = self.get_path_or_current()?;
+            return crate::monoty_census::do_monoty_census(Some(&root));
+        }
+        // mono-manifest builds the Stage-0d shadow instance graph; a diagnostic
+        // that touches no emission, dispatched early like its 0c sibling.
+        if self.args.command == CliCommand::MonoManifest {
+            let root = self.get_path_or_current()?;
+            // `ROCK_MONO_DUMP=<dir>` writes the per-project Lua and JS manifests
+            // there. A target disagreement is only diagnosable by diffing them.
+            let dump = std::env::var("ROCK_MONO_DUMP").ok();
+            return crate::mono_manifest::do_mono_manifest(Some(&root), dump.as_deref());
         }
         // iter-lsp is the tight-loop profiler for the per-edit LSP query path
         // (BoneWorkspace on the bone backend); dispatched early like the other

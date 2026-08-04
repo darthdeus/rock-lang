@@ -14,7 +14,7 @@ use bone_semantic::semantic_passes::semantic_pass;
 /// Build a checked workspace from a single source string and return it plus the
 /// (sole) user module id.
 fn ws_of(src: &str) -> (Workspace, ModuleId) {
-    let module = skull_parser::parse_module(src, Ustr::from("<query-test>")).expect("parse_rock");
+    let module = skull_parser::parse_module_clean(src, Ustr::from("<query-test>")).expect("parse_rock");
     let ws = semantic_pass(&mut [module]).expect("semantic_pass");
     let mid = ws
         .modules
@@ -109,10 +109,10 @@ fn definition_of_global() {
 
 #[test]
 fn definition_of_field_ref_resolves_to_the_struct_field() {
-    // `.attack_co` in a `FieldOf<Mob, int?>` slot -> the `attack_co` field decl
+    // `.attack_co` in a `FieldRef<Mob, int?>` slot -> the `attack_co` field decl
     // on `Mob` (mirrors `mob.attack_co` field access, which already resolves).
     let src = "struct Mob { health: int, attack_co: int? }\n\
-               fn kill_co<T>(o: T, f: FieldOf<T, int?>) {}\n\
+               fn kill_co<T>(o: T, f: FieldRef<T, int?>) {}\n\
                fn r(mob: Mob) {\n    kill_co(mob, .attack_co)\n}\n";
     let use_off = nth_offset(src, ".attack_co", 1) + ".".len();
     let decl_off = nth_offset(src, "attack_co: int?", 1);

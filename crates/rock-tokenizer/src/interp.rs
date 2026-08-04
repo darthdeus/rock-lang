@@ -284,6 +284,11 @@ fn scan_hole(src: &str, open: usize, flavor: Flavor) -> (usize, Piece) {
                 let spec = spec_start.map(|s| (s, i));
                 return (i + 1, Piece::Hole { range: (open, i + 1), expr, spec, closed: true });
             }
+            // `::` is a path separator, not the spec split: `{Col::Green}`.
+            b':' if depth == 0 && spec_start.is_none() && b.get(i + 1) == Some(&b':') => {
+                i += 2;
+                continue;
+            }
             b':' if depth == 0 && spec_start.is_none() => {
                 spec_start = Some(i + 1);
                 i += 1;

@@ -1,0 +1,22 @@
+// Mechanism A at the ENUM PAYLOAD context. `enum_value_shape` (:1348) builds
+// slots via `scalar_c_type` (:1338), which matches only Int/Float/Bool -- a
+// nullable payload field matches no arm, so `add_slot(..)?` propagates `None`
+// and disqualifies the WHOLE enum from cdata/leaf treatment. It falls back to
+// the boxed enum repr, which trips the materialization verifier.
+//
+// Same root cause as the struct-field context (no `Nullable` arm), different
+// constructor -- so a fix to `value_shape_rec` alone leaves this standing.
+
+nobox value P { x: int, y: int }
+enum E { Has(P?), Nope }
+
+fn seed(n: int) -> int { return n }
+
+@test(output = "1 2")
+fn probe_nullable_nobox_enum_payload() {
+    let e = E::Has(P { x: seed(1), y: 2 })
+    match e {
+        E::Has(p) => print("{p?.x} {p?.y}"),
+        E::Nope => print("nope"),
+    }
+}

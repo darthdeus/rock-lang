@@ -457,8 +457,8 @@ fn backend_name(b: FnBackend) -> Option<&'static str> {
 ///
 /// A name declared on two concrete backends is a *sibling set*: shared code
 /// calls it and each backend emits its own body, so the decls have to agree.
-/// They drift silently -- the split of `field_get` onto `KeyPath<T, V>` left the
-/// `inline(js)` sibling on `FieldOf`, which nothing caught until a luajit build
+/// They drift silently -- the split of `field_get` onto `ReadFieldRef<T, V>` left the
+/// `inline(js)` sibling on `FieldRef`, which nothing caught until a luajit build
 /// resolved to the js-only decl and emit rejected it. skull's emit check sees
 /// only the backend being built and only reached calls, so the OTHER backend's
 /// half stays broken until someone builds for it.
@@ -723,13 +723,15 @@ fn body_edges(
 }
 
 /// Every function a body's inference resolved a call/protocol edge to:
-/// overload-resolved calls (incl. operators and UFCS), the `iter`/`next` of a
-/// user `for`-loop, and bounded-generic `next` chains.
+/// overload-resolved calls (incl. operators and UFCS), implicit iterable
+/// coercions, the `iter`/`next` of a user `for`-loop, and bounded-generic `next`
+/// chains.
 fn inference_edges(bi: &BodyInference, out: &mut Vec<(ModuleId, Idx<Function>)>) {
     out.extend(bi.resolved_overload_calls.values().copied());
+    out.extend(bi.implicit_iter_args.values().map(|w| w.func));
     for info in bi.for_iter_protocol.values() {
-        if let Some(f) = info.iter_fn {
-            out.push(f);
+        if let Some(w) = &info.iter {
+            out.push(w.func);
         }
         collect_bound_next(&info.next, out);
     }
@@ -745,7 +747,7 @@ fn collect_bound_tree(tree: &BoundTree, out: &mut Vec<(ModuleId, Idx<Function>)>
 }
 
 fn collect_bound_next(bn: &BoundNext, out: &mut Vec<(ModuleId, Idx<Function>)>) {
-    if let BoundNext::Concrete { func, sub } = bn {
+    if let BoundNext::Concrete { func, sub, .. } = bn {
         out.push(*func);
         collect_bound_tree(sub, out);
     }

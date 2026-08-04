@@ -5,7 +5,7 @@ use bone_lints::{backend_sibling_mismatches, BackendSiblingIssue, BackendSibling
 use bone_semantic::prelude::*;
 
 fn parse_named(src: &str, name: &str) -> skull_parser::Ast {
-    skull_parser::parse_module(src, Ustr::from(name)).expect("parse")
+    skull_parser::parse_module_clean(src, Ustr::from(name)).expect("parse")
 }
 
 fn findings(srcs: &[&str]) -> Vec<BackendSiblingMismatch> {
@@ -39,8 +39,8 @@ fn summary(srcs: &[&str]) -> Vec<String> {
 
 #[test]
 fn flags_a_sibling_pair_whose_param_types_drifted() {
-    // The canonical bug: `field_get`'s js sibling kept the pre-split `FieldOf`
-    // param after the lua decl moved to `KeyPath`. Each side is unmatched on
+    // The canonical bug: `field_get`'s js sibling kept the pre-split `FieldRef`
+    // param after the lua decl moved to `ReadFieldRef`. Each side is unmatched on
     // the other backend, so both decls are reported.
     let src = "inline(lua) fn probe(x: int) -> int = \"return x\"\n\
                inline(js) fn probe(x: float) -> int = \"return x;\"";

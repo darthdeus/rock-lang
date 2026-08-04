@@ -4,18 +4,18 @@
 // them. IVec2/Rect/Color and their constructors stay engine-side
 // (stone/engine/math/) because they touch engine-only types or globals.
 
-value Vec2 {
+nobox value Vec2 {
     x: float,
     y: float,
 }
 
-value Vec3 {
+nobox value Vec3 {
     x: float,
     y: float,
     z: float,
 }
 
-value Vec4 {
+nobox value Vec4 {
     x: float,
     y: float,
     z: float,

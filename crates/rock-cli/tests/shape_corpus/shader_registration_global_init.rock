@@ -1,0 +1,22 @@
+// SHAPE: `rock_shader(<entry>)` in a GLOBAL INITIALIZER x nobox representation.
+//
+// The control that isolates the spurious rejection in
+// `shader_registration_fn_value.rock` to the fn-body SPELLING: the same expression
+// with the same marked `Vec2` in the entry's signature emits clean here, into
+// `__skull_ginit_shape_reg_global()` returning the entry name.
+//
+// This is the form every real in-tree registration uses
+// (`stone/engine/rendering/draw.rock`), which is why a marked-tier census of the
+// games reports none of them.
+//
+// Corpus cases: `shader_registration_global_init_unmarked`,
+// `shader_registration_global_init_vec2_marked` -- both CORRECT.
+
+value ShapeRegU { amount: float }
+
+@shader(fragment)
+fn shape_reg_global_frag(@uniform u: ShapeRegU, tc: Vec2) -> Vec4 {
+    return Vec4 { x: tc.x * u.amount, y: tc.y, z: 0.0, w: 1.0 }
+}
+
+global shape_reg_global: string = rock_shader(shape_reg_global_frag)

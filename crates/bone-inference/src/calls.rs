@@ -92,21 +92,25 @@ pub(crate) fn fit_cost(gamma: &mut Gamma, arg: TyId, param: TyId, span: Span) ->
                 _ => false,
             };
 
-            // A writable field ref reads read-only: `FieldOf<T, V>` fits a
-            // `KeyPath<T, V>` param (docs/field-refs-plan.md 1). Scoring has to
-            // know it too -- otherwise the coercion only survives the
-            // single-candidate bypass in `check_call`, and a second decl of the
-            // name (a backend sibling, an unrelated overload) makes every
-            // `field_get(o, f: FieldOf<..>)` a no-fit.
-            let p_is_keypath_from_fieldof = match (*gamma.get(a), *gamma.get(p)) {
+            // A full field ref carries both capabilities: `FieldRef<T, V>` fits a
+            // `ReadFieldRef<T, V>` param (`field_get`) and a `WriteFieldRef<T, V>`
+            // one (`field_set`) -- docs/field-refs-plan.md. Scoring has to know it
+            // too -- otherwise the coercion only survives the single-candidate
+            // bypass in `check_call`, and a second decl of the name (a backend
+            // sibling, an unrelated overload) makes every
+            // `field_get(o, f: FieldRef<..>)` a no-fit.
+            let p_is_single_cap_from_fieldref = match (*gamma.get(a), *gamma.get(p)) {
                 (
                     TypeExpr::App { ctor: TypeCtor::Nominal(an), .. },
                     TypeExpr::App { ctor: TypeCtor::Nominal(pn), .. },
-                ) => an.as_str() == "FieldOf" && pn.as_str() == "KeyPath",
+                ) => {
+                    an.as_str() == "FieldRef"
+                        && matches!(pn.as_str(), "ReadFieldRef" | "WriteFieldRef")
+                }
                 _ => false,
             };
 
-            if p_is_iface || p_is_keypath_from_fieldof {
+            if p_is_iface || p_is_single_cap_from_fieldref {
                 let snap = gamma.out.checkpoint();
                 if gamma.trial(|g| coerce(g, a, p, span).is_ok()) {
                     return Some(if p_is_iface { 3 } else { 1 });
@@ -1108,7 +1112,7 @@ pub(crate) fn resolve_named_call_inner(
         }
 
         for a in args {
-            // A `.field` arg needs a FieldOf expected type to infer, so like a
+            // A `.field` arg needs a FieldRef expected type to infer, so like a
             // lambda it gets a fresh var (fits any candidate, stops
             // discriminating) and stays out of `preinferred` -- so post-selection
             // it falls through to `check_expr` against the winner's param.
@@ -1350,10 +1354,10 @@ pub(crate) fn commit_selected_call(
                             resolve(gamma, t, span)
                         }
                     };
-                    if let Some((iter_fn, it_ty)) = implicit_iter_target(c, gamma, aty, span)
+                    if let Some((witness, it_ty)) = implicit_iter_target(c, gamma, aty, span)
                     {
                         coerce(gamma, it_ty, pty, c.body.expr_spans[arg])?;
-                        gamma.out.implicit_iter_args.insert(arg, iter_fn);
+                        gamma.out.implicit_iter_args.insert(arg, witness);
                         coerced = true;
                     } else {
                         coerce(gamma, aty, pty, c.body.expr_spans[arg])?;

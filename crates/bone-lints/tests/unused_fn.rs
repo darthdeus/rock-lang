@@ -1,11 +1,11 @@
 //! unused-fn reachability lint over bone HIR. Same harness as unused_var:
 //! `semantic_pass(&mut [parse(src)])` -> `Workspace` (with inference).
 
-use bone_lints::{filter_suppressed, unused_fns, UnusedFn};
+use bone_lints::{UnusedFn, filter_suppressed, unused_fns};
 use bone_semantic::prelude::*;
 
 fn parse(src: &str) -> skull_parser::Ast {
-    skull_parser::parse_module(src, Ustr::from("<unused_fn>")).expect("parse")
+    skull_parser::parse_module_clean(src, Ustr::from("<unused_fn>")).expect("parse")
 }
 
 fn findings(src: &str) -> Vec<UnusedFn> {
@@ -117,6 +117,21 @@ fn custom_for_loop_iterator_is_not_flagged() {
     assert!(
         names(src).is_empty(),
         "custom iterator iter/next reached via for-loop must not flag: got {:?}",
+        names(src)
+    );
+}
+
+#[test]
+fn implicit_iterator_coercion_target_is_not_flagged() {
+    let src = "struct R {\n    lo: int,\n    hi: int,\n}\n\
+               struct RIter {\n    cur: int,\n    hi: int,\n}\n\
+               fn iter(r: R) -> RIter {\n    return RIter { cur: r.lo, hi: r.hi }\n}\n\
+               fn next(it: RIter) -> (bool, int) {\n    if it.cur >= it.hi {\n        return (false, 0)\n    }\n    let v = it.cur\n    it.cur += 1\n    return (true, v)\n}\n\
+               fn sum_it<I: Iterator<int>>(it: I) -> int {\n    let total = 0\n    for v in it { total += v }\n    return total\n}\n\
+               @test\nfn uses_it() {\n    (R { lo: 1, hi: 4 }).sum_it()\n}";
+    assert!(
+        names(src).is_empty(),
+        "custom iterator reached through an implicit coercion must not flag: got {:?}",
         names(src)
     );
 }

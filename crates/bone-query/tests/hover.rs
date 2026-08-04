@@ -275,12 +275,12 @@ fn assign_target_ident_hovers_its_binding_type_not_unit() {
 }
 
 #[test]
-fn field_ref_hovers_the_referenced_field_not_the_fieldof_wrapper() {
-    // Hovering `.attack_co` in a `FieldOf<Mob, int?>` slot must show the field
+fn field_ref_hovers_the_referenced_field_not_the_fieldref_wrapper() {
+    // Hovering `.attack_co` in a `FieldRef<Mob, int?>` slot must show the field
     // it refers to (`attack_co: int? (field of Mob)`), not the raw
-    // `FieldOf<Mob, int?>` wrapper type.
+    // `FieldRef<Mob, int?>` wrapper type.
     let src = "struct Mob { health: int, attack_co: int? }\n\
-               fn kill_co<T>(o: T, f: FieldOf<T, int?>) {}\n\
+               fn kill_co<T>(o: T, f: FieldRef<T, int?>) {}\n\
                fn r(mob: Mob) {\n    kill_co(mob, .attack_co)\n}\n";
     let mut bone = BoneWorkspace::new();
     bone.update(PATH, src.to_string());
@@ -288,5 +288,5 @@ fn field_ref_hovers_the_referenced_field_not_the_fieldof_wrapper() {
     let h = hover_at(&bone, pos);
     assert!(h.contains("attack_co"), "field-ref hover should name the field: {h:?}");
     assert!(h.contains("field of Mob"), "field-ref hover should show the owning struct: {h:?}");
-    assert!(!h.contains("FieldOf"), "field-ref hover must not show the FieldOf wrapper: {h:?}");
+    assert!(!h.contains("FieldRef"), "field-ref hover must not show the FieldRef wrapper: {h:?}");
 }

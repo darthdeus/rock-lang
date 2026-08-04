@@ -30,6 +30,8 @@ mod web_canvas_active_extent;
 mod log_dedup;
 #[path = "loops.rs"]
 mod loops;
+#[path = "publisher_abi.rs"]
+mod publisher_abi;
 #[path = "map_iter.rs"]
 mod map_iter;
 #[path = "match_fold.rs"]
@@ -38,10 +40,14 @@ mod match_fold;
 mod misc_intrinsics;
 #[path = "module_globals.rs"]
 mod module_globals;
+#[path = "multi_rejection.rs"]
+mod multi_rejection;
 #[path = "multivalue.rs"]
 mod multivalue;
 #[path = "nb_differential.rs"]
 mod nb_differential;
+#[path = "nb_leaf_layout_premise.rs"]
+mod nb_leaf_layout_premise;
 #[path = "nb_value_struct.rs"]
 mod nb_value_struct;
 #[path = "no_inline_function.rs"]
@@ -54,10 +60,16 @@ mod number_format;
 mod overlay;
 #[path = "parse_float.rs"]
 mod parse_float;
+#[path = "prelude_decl_arity.rs"]
+mod prelude_decl_arity;
 #[path = "program.rs"]
 mod program;
 #[path = "put.rs"]
 mod put;
+#[path = "ret_bank_no_hand_readers.rs"]
+mod ret_bank_no_hand_readers;
+#[path = "ret_bank_sizing.rs"]
+mod ret_bank_sizing;
 #[path = "rng.rs"]
 mod rng;
 #[path = "shader_register.rs"]
@@ -68,6 +80,10 @@ mod shared_tail;
 mod snippets;
 #[path = "sort.rs"]
 mod sort;
+#[path = "spec_column_callee.rs"]
+mod spec_column_callee;
+#[path = "stdlib_sibling_location.rs"]
+mod stdlib_sibling_location;
 #[path = "string_builder.rs"]
 mod string_builder;
 #[path = "string_primitives.rs"]
@@ -84,3 +100,5 @@ mod try_call;
 mod value_gc_eq;
 #[path = "value_structs.rs"]
 mod value_structs;
+#[path = "vec_columns.rs"]
+mod vec_columns;

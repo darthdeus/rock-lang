@@ -1,0 +1,31 @@
+// M3, marked tier: a `nobox` value projected straight off a fn's TUPLE RETURN.
+//
+// `mk_pair(n).1` projects the part REPR out of the splatting return rather than
+// packing the tuple and reading a boxed element back out, so the value never
+// materializes. The projection site is not a discriminant: projecting at the
+// call expression, binding the tuple first, and projecting into a direct-call
+// argument all work.
+//
+// The control (`nobox_tuple_return_projected_control.rock`) binds the tuple to a
+// name first. It stays in its own file: it predates this working, when a compile
+// rejection here would have aborted a control living alongside it.
+
+nobox value NV { a: int, b: int }
+
+fn seed(n: int) -> int { return n }
+fn mk_pair(n: int) -> (int, NV) { return (n, NV { a: n, b: 11 }) }
+fn take(v: NV) -> int { return v.a }
+
+// The shape: project at the call expression.
+@test(output = "7 11")
+fn probe_tuple_return_projected_at_call() {
+    let v = mk_pair(seed(7)).1
+    print("{v.a} {v.b}")
+}
+
+// The same projection into a direct-call argument, so the consumer is not a
+// discriminant either.
+@test(output = "7")
+fn probe_tuple_return_projected_into_arg() {
+    print("{take(mk_pair(seed(7)).1)}")
+}

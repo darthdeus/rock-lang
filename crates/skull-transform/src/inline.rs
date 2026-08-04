@@ -24,10 +24,14 @@
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
-use bone_semantic::inference::Workspace;
+use bone_semantic::hir::BodyOwner;
+use bone_semantic::inference::{BodyInference, Workspace};
 use bone_semantic::prelude::{BoundNext, BoundTree, CompilerError};
 use comfy_la_arena::Idx;
-use skull_mir::lower::{lower_function_spec, spec_subst_from_key, ScalarCtx, SpecKey};
+use skull_mir::lower::{
+    bound_next_shape, lower_function_spec, spec_key_from_next_generics, spec_subst_from_key,
+    BoundNextElem, ElemRebuild, ScalarCtx, SpecKey, SpecSubst,
+};
 use skull_mir::mir::*;
 
 use crate::top_level_blocks;
@@ -158,6 +162,13 @@ fn annotation_gate(has_inline: bool, has_pure: bool, size_heuristic: bool) -> Op
 fn classify(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef, key: &SpecKey) -> Option<CalleeBody> {
     let f = &ws.module(fref.module).functions[fref.func];
     if f.is_extern || f.inline_body.is_some() || f.is_coroutine {
+        return None;
+    }
+    // Stage-0e disables inlining outright so no splice can hide a missing
+    // standalone instance (plan S 8: disabling inlining must only make the
+    // program slower or larger, never change whether it compiles -- the mode
+    // exists to find out where that is false today).
+    if skull_mir::ablation::enabled() {
         return None;
     }
     let has_inline = f.annotations.iter().any(|a| a.name.name.as_str() == "inline");
@@ -634,9 +645,10 @@ fn graft_bound_tree(tree: &BoundTree, n: &BoundTree) -> Result<BoundTree, Compil
 
 fn graft_bound_next(bn: &BoundNext, n: &BoundTree) -> Result<BoundNext, CompilerError> {
     match bn {
-        BoundNext::Concrete { func, sub } => Ok(BoundNext::Concrete {
+        BoundNext::Concrete { func, sub, next_generics } => Ok(BoundNext::Concrete {
             func: *func,
             sub: graft_bound_tree(sub, n)?,
+            next_generics: next_generics.clone(),
         }),
         BoundNext::CallerGeneric(g) => n.next.get(g).cloned().ok_or_else(|| {
             CompilerError::new_no_location(format!(
@@ -657,6 +669,9 @@ fn resolve_cloned_bound_calls(
     callee: &MirFunc,
     inst_map: &HashMap<Idx<Inst>, Idx<Inst>>,
     site_tree: Option<&BoundTree>,
+    ws: &Workspace,
+    caller_inf: Option<&BodyInference>,
+    caller_subst: &SpecSubst,
 ) -> Result<(), CompilerError> {
     let empty = BoundTree::default();
     let n = site_tree.unwrap_or(&empty);
@@ -676,7 +691,11 @@ fn resolve_cloned_bound_calls(
         debug_assert!(matches!(callee.insts[old_id], Inst::CallBoundMulti { .. }));
         let g = *generic_idx as usize;
         match n.next.get(&g) {
-            Some(BoundNext::Concrete { func: (m, f), sub }) => {
+            Some(BoundNext::Concrete {
+                func: (m, f),
+                sub,
+                next_generics,
+            }) => {
                 let concrete = FuncRef { module: *m, func: *f };
                 let (dests, args) = (dests.clone(), args.clone());
                 if !sub.is_empty() {
@@ -687,7 +706,32 @@ fn resolve_cloned_bound_calls(
                         func.bound_trees.insert(new_id, grafted);
                     }
                 }
+                let spec = match caller_inf {
+                    Some(inf) => {
+                        spec_key_from_next_generics(ws, inf, concrete, next_generics, caller_subst)?
+                    }
+                    None => None,
+                };
                 func.insts[new_id] = Inst::CallMulti { dests, func: concrete, args };
+                if let Some(key) = spec.clone() {
+                    func.spec_bindings.insert(new_id, key);
+                }
+                // The placeholder's arity is `(bool, E)` because bound conformance
+                // fixes it there; the CONCRETE callee is only known here. When its
+                // element splats into leaves, the extra returns were being dropped
+                // by Lua and `E` bound the first leaf -- so the body then projected
+                // a field off a number. Size the dests to what the callee really
+                // returns and repack the element, so the body's own view of `E` is
+                // unchanged. The repack is a transient: SROA folds the field reads
+                // straight to the leaf cells, and a body that never touches the
+                // element (`count`) drops it as dead -- which is why this does not
+                // reintroduce the box the mark forbids, and why it does not
+                // over-reject `count` the way a splice-time arity check did.
+                if callee.bound_next_split.contains(&old_id) {
+                    check_bound_next_split(func, new_id, ws, concrete, spec.as_ref())?;
+                } else {
+                    repack_bound_next_element(func, new_id, ws, concrete, spec.as_ref())?;
+                }
             }
             Some(BoundNext::CallerGeneric(_)) | None => {
                 return Err(CompilerError::new_no_location(format!(
@@ -698,6 +742,170 @@ fn resolve_cloned_bound_calls(
         }
     }
     Ok(())
+}
+
+/// The lowering already split this placeholder's element into leaf cells, so
+/// there is nothing to rebuild -- only the two sides' agreement to confirm.
+///
+/// They read the same instantiation from opposite ends: the lowering from the
+/// loop pattern's binding types, this from the concrete callee's return type. A
+/// disagreement means the body binds a different number of leaves than the call
+/// returns, which is a positional mis-pairing -- a leaf's value landing in
+/// another leaf's cell, silently. Rejected rather than repacked, because a
+/// repack over an already-split element would write into a cell nothing reads.
+fn check_bound_next_split(
+    func: &MirFunc,
+    call: Idx<Inst>,
+    ws: &Workspace,
+    concrete: FuncRef,
+    spec: Option<&SpecKey>,
+) -> Result<(), CompilerError> {
+    let Some(shape) = bound_next_shape(ws, concrete, spec) else {
+        return Ok(());
+    };
+    let Inst::CallMulti { dests, .. } = &func.insts[call] else {
+        return Ok(());
+    };
+    if dests.len() == shape.slot_count {
+        return Ok(());
+    }
+    Err(CompilerError::new_no_location(format!(
+        "`{}`: the loop element was split into {} destinations but `next` returns \
+         {} values at this specialization -- the two read the same instantiation \
+         and must agree, or a leaf's value lands in another leaf's cell",
+        func.name,
+        dests.len(),
+        shape.slot_count
+    )))
+}
+
+/// Re-size a just-substituted `next` call to the concrete callee's real return
+/// arity, and rebuild the element from the extra leaves into the cell the body
+/// already reads.
+///
+/// Only the placeholder path needs this. `lower_for_user_iter` sizes its dests
+/// from `ret_shape.slot_count()` at lowering time because it has the concrete
+/// callee in hand; a generic combinator body does not, so the correction lands
+/// here, at the first point the callee is known.
+fn repack_bound_next_element(
+    func: &mut MirFunc,
+    call: Idx<Inst>,
+    ws: &Workspace,
+    concrete: FuncRef,
+    spec: Option<&SpecKey>,
+) -> Result<(), CompilerError> {
+    let Some(shape) = bound_next_shape(ws, concrete, spec) else {
+        return Ok(());
+    };
+    let Inst::CallMulti { dests, .. } = &func.insts[call] else {
+        return Ok(());
+    };
+    let dests = dests.clone();
+    // Triggered by the element SPLATTING, never by the arity growing. A ONE-leaf
+    // element returns `(ok, leaf)` -- the same arity the placeholder assumed -- and
+    // still needs the repack, because what lands in the element cell is a bare
+    // leaf the body then projects a field off. Gating on arity leaves exactly that
+    // case broken, which is the seed's "NOT arity" probe.
+    let plan = match &shape.elem {
+        BoundNextElem::Opaque => return Ok(()),
+        BoundNextElem::Rebuild(plan) => plan,
+        // Never rewrite the call without knowing how to put the element back
+        // together: the leaves would land in cells nothing reads while the body
+        // still projects fields off one of them.
+        BoundNextElem::Unsupported => {
+            return Err(CompilerError::new_no_location(format!(
+                "`{}` returns {} values at this specialization but its element \
+                 cannot be rebuilt from leaves (a nullable `nobox` element, whose \
+                 presence leaf pairs with no field). Mechanism I of \
+                 docs/nobox-case-matrix.md.",
+                func.name, shape.slot_count
+            )));
+        }
+    };
+    let elem_cell = dests[1];
+    let leaf_count = plan.leaf_count();
+    if leaf_count + 1 != shape.slot_count {
+        return Err(CompilerError::new_no_location(format!(
+            "`{}`: `next` returns {} values but its element has {} leaves -- the \
+             rebuild is positional over those leaves, so repacking a mismatched \
+             pair would write one leaf's value into another field",
+            func.name, shape.slot_count, leaf_count
+        )));
+    }
+
+    // The call keeps `ok` and gains one fresh cell per leaf; the element cell is
+    // no longer a destination, it is what the repack stores into.
+    let leaf_cells: Vec<Idx<Cell>> = (0..leaf_count).map(|_| func.new_cell(None)).collect();
+    let mut new_dests = vec![dests[0]];
+    new_dests.extend(leaf_cells.iter().copied());
+    if let Inst::CallMulti { dests, .. } = &mut func.insts[call] {
+        *dests = new_dests;
+    }
+
+    let mut tail: Vec<Idx<Inst>> = Vec::new();
+    let mut taken = 0usize;
+    let packed = emit_elem_rebuild(func, plan, &leaf_cells, &mut taken, &mut tail);
+    let store = func.insts.alloc(Inst::Store { cell: elem_cell, value: packed });
+
+    // Inserted immediately after the call, in its own block: the element cell must
+    // hold the rebuilt value before the `ok` branch reads it.
+    tail.push(store);
+    for (_, block) in func.blocks.iter_mut() {
+        if let Some(at) = block.insts.iter().position(|i| *i == call) {
+            block.insts.splice(at + 1..at + 1, tail);
+            return Ok(());
+        }
+    }
+    Err(CompilerError::new_no_location(format!(
+        "internal: substituted `next` call in `{}` is not in any block",
+        func.name
+    )))
+}
+
+/// Emit the rebuild of one element from `cells`, consuming them left to right,
+/// appending every inst it creates to `tail` in evaluation order. Returns the
+/// value the element cell should hold.
+///
+/// The rebuild is a TRANSIENT in every arm: copy-prop forwards a field read of a
+/// `MakeValueStruct` and a `TupleIndex` of a `MakeTuple` to the construction
+/// operand, so the aggregates die in DCE and the `nobox` guarantee still holds
+/// over the emitted body.
+fn emit_elem_rebuild(
+    func: &mut MirFunc,
+    plan: &ElemRebuild,
+    cells: &[Idx<Cell>],
+    taken: &mut usize,
+    tail: &mut Vec<Idx<Inst>>,
+) -> Idx<Inst> {
+    match plan {
+        ElemRebuild::Passthrough => {
+            let l = func.insts.alloc(Inst::Load(cells[*taken]));
+            *taken += 1;
+            tail.push(l);
+            l
+        }
+        ElemRebuild::Value(name, fields) => {
+            let mut fs = Vec::with_capacity(fields.len());
+            for f in fields {
+                let l = func.insts.alloc(Inst::Load(cells[*taken]));
+                *taken += 1;
+                tail.push(l);
+                fs.push((*f, l));
+            }
+            let packed = func.insts.alloc(Inst::MakeValueStruct { name: *name, fields: fs });
+            tail.push(packed);
+            packed
+        }
+        ElemRebuild::Tuple(parts) => {
+            let mut vs = Vec::with_capacity(parts.len());
+            for p in parts {
+                vs.push(emit_elem_rebuild(func, p, cells, taken, tail));
+            }
+            let packed = func.insts.alloc(Inst::MakeTuple(vs));
+            tail.push(packed);
+            packed
+        }
+    }
 }
 
 /// Import the cloned callee body's `spec_bindings` into the caller (keys remapped
@@ -714,18 +922,33 @@ fn import_spec_bindings(
             func.spec_bindings.insert(new_id, key.clone());
         }
     }
+    // The callee's instruction spans come across with its body, so a rejection
+    // raised after inlining still points at the construct in the CALLEE's source
+    // rather than at the call site that absorbed it.
+    for (old_id, span) in callee.inst_spans.iter() {
+        if let Some(&new_id) = inst_map.get(&old_id) {
+            func.inst_spans.insert(new_id, *span);
+        }
+    }
 }
 
 /// Splice candidate `cand` into `func` at `site`, removing the call. Returns the
 /// new top-level (reachable) blocks the splice added, for the driver to fold into
 /// its top-level set (straight adds none).
-fn splice(func: &mut MirFunc, site: Site, cand: &CalleeBody) -> Result<Vec<Idx<Block>>, CompilerError> {
+fn splice(
+    func: &mut MirFunc,
+    site: Site,
+    cand: &CalleeBody,
+    ws: &Workspace,
+    caller_inf: Option<&BodyInference>,
+    caller_subst: &SpecSubst,
+) -> Result<Vec<Idx<Block>>, CompilerError> {
     match cand.kind {
         Kind::Straight => {
-            splice_straight(func, site, cand)?;
+            splice_straight(func, site, cand, ws, caller_inf, caller_subst)?;
             Ok(Vec::new())
         }
-        Kind::General => splice_general(func, site, cand),
+        Kind::General => splice_general(func, site, cand, ws, caller_inf, caller_subst),
     }
 }
 
@@ -733,7 +956,14 @@ fn splice(func: &mut MirFunc, site: Site, cand: &CalleeBody) -> Result<Vec<Idx<B
 /// insts into the caller block in place of the call; no new blocks (the callee
 /// is lambda-free, so its insts reference no block). The caller block keeps its
 /// own terminator.
-fn splice_straight(func: &mut MirFunc, site: Site, cand: &CalleeBody) -> Result<(), CompilerError> {
+fn splice_straight(
+    func: &mut MirFunc,
+    site: Site,
+    cand: &CalleeBody,
+    ws: &Workspace,
+    caller_inf: Option<&BodyInference>,
+    caller_subst: &SpecSubst,
+) -> Result<(), CompilerError> {
     let callee = &cand.func;
     let (bid, idx, args) = match &site {
         Site::Single { bid, idx, args, .. } | Site::Multi { bid, idx, args, .. } => (*bid, *idx, args.clone()),
@@ -741,7 +971,15 @@ fn splice_straight(func: &mut MirFunc, site: Site, cand: &CalleeBody) -> Result<
     let site_tree = func.bound_trees.remove(&site.call_id());
     let (overrides, coalesced) = coalesce_overrides(func, cand, &args);
     let (inst_map, cell_map) = clone_cells_insts(func, callee, &overrides);
-    resolve_cloned_bound_calls(func, callee, &inst_map, site_tree.as_ref())?;
+    resolve_cloned_bound_calls(
+        func,
+        callee,
+        &inst_map,
+        site_tree.as_ref(),
+        ws,
+        caller_inf,
+        caller_subst,
+    )?;
     import_spec_bindings(func, callee, &inst_map);
 
     // Arg -> param-cell stores (coalesced params are aliased to the caller cell,
@@ -804,7 +1042,14 @@ fn splice_straight(func: &mut MirFunc, site: Site, cand: &CalleeBody) -> Result<
 /// at the call; the prefix arg-stores + `Goto` the cloned entry; a continuation
 /// block holds the post-call tail. Each cloned `Return` binds its values and
 /// `Goto`s the continuation.
-fn splice_general(func: &mut MirFunc, site: Site, cand: &CalleeBody) -> Result<Vec<Idx<Block>>, CompilerError> {
+fn splice_general(
+    func: &mut MirFunc,
+    site: Site,
+    cand: &CalleeBody,
+    ws: &Workspace,
+    caller_inf: Option<&BodyInference>,
+    caller_subst: &SpecSubst,
+) -> Result<Vec<Idx<Block>>, CompilerError> {
     let callee = &cand.func;
     let (bid, idx, args) = match &site {
         Site::Single { bid, idx, args, .. } | Site::Multi { bid, idx, args, .. } => (*bid, *idx, args.clone()),
@@ -812,7 +1057,15 @@ fn splice_general(func: &mut MirFunc, site: Site, cand: &CalleeBody) -> Result<V
     let site_tree = func.bound_trees.remove(&site.call_id());
     let (overrides, coalesced) = coalesce_overrides(func, cand, &args);
     let (inst_map, cell_map, block_map) = clone_all(func, callee, &overrides);
-    resolve_cloned_bound_calls(func, callee, &inst_map, site_tree.as_ref())?;
+    resolve_cloned_bound_calls(
+        func,
+        callee,
+        &inst_map,
+        site_tree.as_ref(),
+        ws,
+        caller_inf,
+        caller_subst,
+    )?;
     import_spec_bindings(func, callee, &inst_map);
     let entry_clone = block_map[&callee.entry];
 
@@ -905,26 +1158,6 @@ fn splice_general(func: &mut MirFunc, site: Site, cand: &CalleeBody) -> Result<V
 /// each, including ones the inlined bodies themselves introduced). These are the
 /// caller chunk's INLINE codegen dependencies: incremental emit must re-emit
 /// `func` when any of them change (`docs/skull-incremental-emit-plan.md`).
-/// Canonicalize a call to a zero-arg `inline(lua)` fn whose whole body is
-/// `return nil` (the `phantom()` shape) into `Const(Nil)`. `inline(lua)` bodies
-/// never splice, so without this the residual call is an opaque non-ctor store
-/// that blocks SROA from splitting iterator element cells -- the done-path
-/// `(false, phantom())` store must read as a plain nil for pair-element tuples
-/// to scalarize.
-fn fold_nil_body_calls(ws: &Workspace, func: &mut MirFunc) {
-    let ids: Vec<Idx<Inst>> = func.insts.iter().map(|(i, _)| i).collect();
-    for i in ids {
-        let Inst::Call { func: fref, args } = &func.insts[i] else { continue };
-        if !args.is_empty() {
-            continue;
-        }
-        let f = &ws.module(fref.module).functions[fref.func];
-        if f.inline_body.is_some_and(|(_, b)| b.trim() == "return nil") {
-            func.insts[i] = Inst::Const(Lit::Nil);
-        }
-    }
-}
-
 pub fn inline_functions(
     ws: &Workspace,
     scx: &ScalarCtx,
@@ -932,12 +1165,26 @@ pub fn inline_functions(
     func: &mut MirFunc,
     cache: &mut InlineCache,
 ) -> Result<(HashSet<FuncRef>, Vec<SpliceRecord>), CompilerError> {
+    inline_functions_with_subst(ws, scx, self_ref, func, cache, &SpecSubst::new())
+}
+
+pub fn inline_functions_with_subst(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    self_ref: FuncRef,
+    func: &mut MirFunc,
+    cache: &mut InlineCache,
+    caller_subst: &SpecSubst,
+) -> Result<(HashSet<FuncRef>, Vec<SpliceRecord>), CompilerError> {
     let mut spliced = HashSet::default();
     let mut records: Vec<SpliceRecord> = Vec::new();
     // Kill-switch for perf attribution / bisecting a suspected inline bug.
     if std::env::var("SKULL_INLINE_OFF").is_ok() {
         return Ok((spliced, records));
     }
+    let caller_inf = ws
+        .inference(self_ref.module)
+        .and_then(|result| result.per_fn.get(&BodyOwner::Function(self_ref.func)));
     // The caller's top-level blocks (excludes closure sub-CFGs), maintained
     // incrementally so neither find_site nor the loop recomputes reachability.
     let mut top: HashSet<Idx<Block>> = top_level_blocks(func).into_iter().collect();
@@ -966,14 +1213,12 @@ pub fn inline_functions(
             forced: cand.forced,
             callee_insts: cand.insts,
         });
-        let added = splice(func, site, cand)?;
+        let added = splice(func, site, cand, ws, caller_inf, caller_subst)?;
         top.extend(added);
         spliced.insert(fref);
         resume = Some(pos);
         budget -= 1;
     }
-    // After splicing: spliced bodies carry the callees' phantom() calls.
-    fold_nil_body_calls(ws, func);
     Ok((spliced, records))
 }
 
@@ -1009,6 +1254,25 @@ pub fn validate_no_residual_bound_calls(
                 Inst::Call { func, .. } | Inst::CallMulti { func, .. } => {
                     let callee = &ws.module(func.module).functions[func.func];
                     if fn_has_bounds(callee) {
+                        // Stage-0e: this rejection IS the ablation's
+                        // unsupported-surface population, and it fires from
+                        // production's own check rather than from
+                        // `ablation_decline` -- so record it here or the
+                        // taxonomy would report zero for the category with the
+                        // largest real membership.
+                        skull_mir::ablation::record(
+                            skull_mir::ablation::FatalCategory::UnsupportedSurface,
+                            callee.name.as_str(),
+                            f.name.as_str(),
+                            // The CALL's span. `callee.name_span` collapsed
+                            // every site of one bounded callee onto its
+                            // declaration, so the census reported 27 declaration
+                            // spans as though they were call sites.
+                            mf.inst_spans.get(iid).copied().unwrap_or(callee.name_span),
+                            "an `Iterator`-bounded body has no standalone emission: it exists \
+                             only as an inline splice, so with inlining disabled the call has \
+                             no concrete callee at all (plan S 12)",
+                        );
                         return Err(CompilerError::new_no_location(format!(
                             "`{}` calls `Iterator`-bounded `{}` in a context that cannot inline \
                              it (bounded fns have no standalone emission -- iterator combinators \

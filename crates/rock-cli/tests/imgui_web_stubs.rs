@@ -250,6 +250,18 @@ fn push_param(params: &mut Vec<(String, String)>, raw: &str, owner: &str) {
 /// The stub body for a return type. Every imgui bridge is a widget or a draw
 /// call, so "did not happen" is the whole contract; a value-returning widget
 /// gives back the neutral value and a `(bool, T)` editor echoes its input.
+/// The leaf suffixes `@scalar_abi` splats a value struct into, or None for a
+/// scalar that crosses whole. Panicking on an unknown value type is deliberate:
+/// a new one silently echoing a boxed struct is the drift this generator exists
+/// to prevent.
+fn value_leaves(ty: &str) -> Option<&'static [&'static str]> {
+    match ty {
+        "Vec2" => Some(&["x", "y"]),
+        "Color" => Some(&["r", "g", "b", "a"]),
+        _ => None,
+    }
+}
+
 fn stub_body(d: &Decl) -> String {
     let ret = d.ret.as_str();
     if ret.is_empty() {
@@ -277,13 +289,29 @@ fn stub_body(d: &Decl) -> String {
              the echo convention (value is the second parameter) no longer holds",
             d.name, parts[1]
         );
-        return format!("return [false, {vname}];");
+        // Multi-value returns use the scratch ABI, never an array
+        // (docs/js-nobox-return-abi-plan.md). Under `@scalar_abi` the value
+        // param arrives already splat into leaves, so the echo has to publish
+        // those leaves rather than a struct the body never received.
+        let echo = match (d.annotations.contains("scalar_abi"), value_leaves(vty)) {
+            (true, Some(leaves)) => {
+                leaves.iter().map(|l| format!("{vname}__{l}")).collect::<Vec<_>>().join(", ")
+            }
+            _ => vname.to_string(),
+        };
+        return format!("return __rock_publish(false, {echo});");
+    }
+    if let (true, Some(leaves)) = (d.annotations.contains("scalar_abi"), value_leaves(ret)) {
+        let zeros = vec!["0"; leaves.len()].join(", ");
+        return format!("return __rock_publish({zeros});");
     }
     match ret {
         "bool" => "return false;".to_string(),
         "int" | "float" => "return 0;".to_string(),
         "Vec2" => "return { __ty: 'Vec2', x: 0, y: 0 };".to_string(),
-        "string" => "return \"\";".to_string(),
+        // Single-quoted: the body is emitted INSIDE a Rock `"..."` literal, so a
+        // double quote here closes it and the file stops parsing.
+        "string" => "return '';".to_string(),
         other => panic!(
             "imgui.rock: `{}` returns `{other}`, which has no known neutral stub value; \
              teach the generator or give the bridge a real JS body elsewhere",

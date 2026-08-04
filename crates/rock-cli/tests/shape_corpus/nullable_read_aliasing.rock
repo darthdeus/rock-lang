@@ -1,0 +1,44 @@
+// SHAPE: nullable x whole-value-read x field-root -- one of the dangerous
+// triples. A whole-value read of a NULLABLE value field must COPY, exactly as
+// the non-nullable read does; nullability must not be observable through the
+// copy invariant (docs/value-semantics-axes.md: "a whole-value use copies").
+//
+// LIVE BUG. `value_struct_of` (skull-mir/src/lower.rs) declines a nullable
+// expression by an explicit guard, so the copy-out arm is skipped and both names
+// bind the same cdata box; a later refined leaf write is visible through both.
+// This file asserts the CORRECT answers, so it FAILS today -- that is the point:
+// the harness classifies it MISCOMPILE. When the presence-aware copy-out lands,
+// the case's expected bucket in `shape_oracle.rs` flips to CORRECT and nothing
+// in this file changes.
+//
+// Sibling: `tests/value_nullable_read_aliasing.rock` pins the same shape
+// INVERTED (asserting today's wrong answer) so the repo suite stays green.
+//
+// Corpus case: `nullable_read_aliasing`. Expected bucket: MISCOMPILE.
+
+value Pt { x: int, y: int }
+
+struct NonNull1 { p: Pt }
+struct NonNull2 { p: Pt }
+struct Nullable1 { p: Pt? }
+struct Nullable2 { p: Pt? }
+
+// CONTROL -- the non-nullable read copies, and this passes today.
+@test(output = "b=99 a=1")
+fn a_non_nullable_field_read_copies() {
+    let a = NonNull1 { p: Pt { x: 1, y: 2 } }
+    let b = NonNull2 { p: a.p }
+    b.p.x = 99
+    print("b={b.p.x} a={a.p.x}")
+}
+
+// The bug: nullability is the only difference from the control above.
+@test(output = "b=99 a=1")
+fn a_nullable_field_read_copies() {
+    let a = Nullable1 { p: Pt { x: 1, y: 2 } }
+    let b = Nullable2 { p: a.p }
+    if b.p != null && a.p != null {
+        b.p.x = 99
+        print("b={b.p.x} a={a.p.x}")
+    }
+}

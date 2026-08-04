@@ -5,7 +5,7 @@ use bone_lints::{filter_suppressed, unused_vars, UnusedVar};
 use bone_semantic::prelude::*;
 
 fn parse(src: &str) -> skull_parser::Ast {
-    skull_parser::parse_module(src, Ustr::from("<unused_var>")).expect("parse")
+    skull_parser::parse_module_clean(src, Ustr::from("<unused_var>")).expect("parse")
 }
 
 fn findings(src: &str) -> Vec<UnusedVar> {

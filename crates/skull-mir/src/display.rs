@@ -75,6 +75,7 @@ fn fmt_inst(
             .join(", ")
     };
     match inst {
+        Inst::FfiViewCast { cty, ptr } => format!("ffi_view_cast {cty}* r{}", raw(*ptr)),
         Inst::Const(l) => format!("const {}", fmt_lit(l)),
         Inst::Global(g) => format!("global {g}"),
         Inst::Load(c) => format!("load c{}", raw(*c)),
@@ -150,6 +151,20 @@ fn fmt_inst(
 
         Inst::MakeTuple(vs) => format!("tuple [{}]", list(vs)),
         Inst::MakeVec(vs) => format!("vec [{}]", list(vs)),
+        Inst::MakeVecColumns {
+            elem,
+            columns,
+            len,
+            capacity,
+        } => format!(
+            "vec.columns {elem} len={len} cap=v{} {{{}}}",
+            num[capacity],
+            columns
+                .iter()
+                .map(|(name, vs)| format!("{name}: [{}]", list(vs)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
         Inst::MakeStruct { ty, fields } => {
             let fs = fields
                 .iter()
@@ -193,6 +208,9 @@ fn fmt_inst(
             format!("index.{kind:?} v{}[v{}]", v(*base), v(*index))
         }
         Inst::Len { base, kind } => format!("len.{kind:?} v{}", v(*base)),
+        Inst::VecCheckedIndex { vec, index } => {
+            format!("vec_checked_index v{}, v{}", v(*vec), v(*index))
+        }
         Inst::FfiNewArray { ctype, count } => format!("ffi_new_array {ctype}[?], v{}", v(*count)),
 
         Inst::Store { cell, value } => format!("store c{}, v{}", raw(*cell), v(*value)),
@@ -219,6 +237,11 @@ fn fmt_inst(
             let parts: Vec<String> =
                 fields.iter().map(|(fname, f)| format!("{fname}: v{}", v(*f))).collect();
             format!("{name}_ct({})", parts.join(", "))
+        }
+        Inst::MaterializeValueStruct { name, fields } => {
+            let parts: Vec<String> =
+                fields.iter().map(|(fname, f)| format!("{fname}: v{}", v(*f))).collect();
+            format!("materialize {name}_ct({})", parts.join(", "))
         }
         Inst::CoroHook { kind, lambda } => {
             format!("coro_hook {} v{}", kind.slot(), v(*lambda))

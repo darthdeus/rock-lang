@@ -1,0 +1,21 @@
+// SHAPE: fn-value x field-call -- one of the dangerous triples. A fn value
+// stored in a struct field and called STRAIGHT off the field, with a `nobox`
+// value argument.
+//
+// In-tree verdict: LOUD REJECT at the argument. The discriminant is the CALL
+// SHAPE, not the storage: `h.cb(arg)` rejects while `let f = h.cb; f(arg)`
+// emits and runs (the sibling case `fn_value_off_field_bound.rock`). Zero
+// in-tree instances by luck -- the one real consumer binds through
+// `?? .. .unwrap()` first.
+//
+// Corpus case: `fn_value_off_field`. Expected bucket: LOUD REJECT.
+
+nobox value NV { x: float, y: float }
+
+struct Handler { cb: (NV) -> float }
+
+@test(output = "3")
+fn a_fn_value_called_off_a_field() {
+    let h = Handler { cb: (a) => a.x }
+    print("{h.cb(NV { x: 3.0, y: 0.0 })}")
+}
