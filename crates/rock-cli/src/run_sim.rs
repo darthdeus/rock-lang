@@ -248,12 +248,27 @@ pub fn do_run_sim_opts(backend: crate::Backend, project: &str, sim_name: &str, q
 /// named entries each get their own via separate calls.
 struct SimArtifacts {
     out_dir: TempDir,
+    /// Whether to hash `$OUT` into an artifact manifest when the entry
+    /// finishes. OFF for ordinary suite runs: the walk reads every produced
+    /// byte, which for a game writing videos is exactly the cost this whole
+    /// plan exists to remove, and it would happen under the reporting lock.
+    /// Only the differential oracle needs the manifest.
+    record_manifest: bool,
 }
 
 impl SimArtifacts {
     fn new() -> Result<Self> {
+        Self::with_manifest(false)
+    }
+
+    fn recording() -> Result<Self> {
+        Self::with_manifest(true)
+    }
+
+    fn with_manifest(record_manifest: bool) -> Result<Self> {
         Ok(Self {
             out_dir: TempDir::new().context("creating sim tempdir")?,
+            record_manifest,
         })
     }
 
@@ -273,7 +288,17 @@ impl SimArtifacts {
     /// not what survived teardown.
     fn finish_with(self, summary: &mut SimSummary, process: impl FnOnce(&mut SimSummary)) {
         process(summary);
-        summary.artifacts = crate::sim_record::manifest_of_dir(self.out_dir.path());
+        if self.record_manifest {
+            // Fail closed: a manifest that quietly dropped a file would let two
+            // runs agree about evidence neither of them collected.
+            match crate::sim_record::manifest_of_dir(self.out_dir.path()) {
+                Ok(manifest) => summary.artifacts = manifest,
+                Err(e) => summary.errors.push(SiteMessage {
+                    message: format!("artifact manifest for `{}` failed: {e:#}", self.out_dir.path().display()),
+                    site: String::new(),
+                }),
+            }
+        }
         for path in std::mem::take(&mut summary.cleanup_paths) {
             let _ = std::fs::remove_file(path);
         }
@@ -776,43 +801,126 @@ struct WorkerPart {
 #[derive(Default)]
 struct EntryStream {
     started: bool,
+    /// Saw a matching `entry_end`. False for the entry a crashed or killed
+    /// worker died inside.
+    terminated: bool,
     sim: Vec<String>,
-    raw: Vec<String>,
+    /// Every raw line attributed to this entry, including the boot and
+    /// teardown noise that falls outside the envelope. This is the debugging
+    /// stream, kept as it was before the envelope existed.
+    raw_all: Vec<String>,
+    /// Raw lines emitted strictly BETWEEN this entry's start and end. Boot and
+    /// teardown are excluded, so the two sides of a differential see the same
+    /// window and this can be compared.
+    raw_in_entry: Vec<String>,
 }
 
-/// Split a worker's stderr by the per-entry envelope.
+/// Split a worker's stderr by the per-entry envelope, validating the protocol
+/// strictly.
 ///
-/// Lines outside any envelope (process boot, teardown) are attributed to the
-/// most recently started entry, which is where a single-entry run has always
-/// put them. An `entry_start` whose sequence is missing or out of range is a
-/// protocol violation and rejected: guessing an entry would file one sim's
-/// failures under another's name.
-fn split_worker_stream(lines: &[String], n: usize) -> Result<Vec<EntryStream>> {
+/// Entries must open and close in queue order, exactly once each: a start with
+/// the wrong sequence, a start while another entry is open, an end that does
+/// not match the open entry's name and sequence, or a structured `__SIM__`
+/// operation outside any envelope are all rejected. Attributing a stray
+/// operation to a neighbour would file one sim's failures under another's name,
+/// which is the one mistake this whole layer exists to prevent.
+///
+/// The single tolerated gap is a final entry with no `entry_end`: that is what
+/// a crashed or timed-out worker leaves behind, and it is recorded as
+/// `terminated == false` rather than accepted as a clean close. Raw (non-
+/// `__SIM__`) lines outside the envelope are ordinary boot/teardown logging and
+/// are attributed to the most recently started entry for debugging only.
+fn split_worker_stream(lines: &[String], parts: &[WorkerPart]) -> Result<Vec<EntryStream>> {
+    let n = parts.len();
     let mut out: Vec<EntryStream> = (0..n).map(|_| EntryStream::default()).collect();
-    let mut current: Option<usize> = None;
-    let mut last = 0usize;
+    let mut open: Option<usize> = None;
+    let mut next_expected = 0usize;
+    // Where raw lines land while no entry is open: the entry that just closed,
+    // or entry 0 before anything has started.
+    let mut attribution = 0usize;
+
     for line in lines {
         let Some(rest) = line.strip_prefix("__SIM__ ") else {
-            out[current.unwrap_or(last)].raw.push(line.clone());
+            out[attribution].raw_all.push(line.clone());
+            if open.is_some() {
+                out[attribution].raw_in_entry.push(line.clone());
+            }
             continue;
         };
-        match extract_str_field(rest, "op").as_deref() {
-            Some("entry_start") => {
-                let seq = extract_raw_field(rest, "seq")
-                    .and_then(|s| s.parse::<usize>().ok())
-                    .filter(|s| *s < n)
-                    .ok_or_else(|| {
-                        anyhow!("worker sent an entry_start with no usable seq (n={n}): {line}")
-                    })?;
-                current = Some(seq);
-                last = seq;
+        let op = extract_str_field(rest, "op").unwrap_or_default();
+        match op.as_str() {
+            "entry_start" => {
+                let seq = envelope_seq(rest, line)?;
+                if let Some(live) = open {
+                    return Err(anyhow!(
+                        "worker started entry {seq} while entry {live} (`{}`) was still open: {line}",
+                        parts[live].name
+                    ));
+                }
+                if seq != next_expected {
+                    return Err(anyhow!(
+                        "worker started entry {seq} out of order (expected {next_expected}): {line}"
+                    ));
+                }
+                envelope_name_matches(rest, &parts[seq].name, line)?;
+                open = Some(seq);
+                attribution = seq;
+                next_expected = seq + 1;
                 out[seq].started = true;
             }
-            Some("entry_end") => current = None,
-            _ => out[current.unwrap_or(last)].sim.push(line.clone()),
+            "entry_end" => {
+                let seq = envelope_seq(rest, line)?;
+                let Some(live) = open else {
+                    return Err(anyhow!("worker ended entry {seq} with no entry open: {line}"));
+                };
+                if seq != live {
+                    return Err(anyhow!(
+                        "worker ended entry {seq} while entry {live} (`{}`) was open: {line}",
+                        parts[live].name
+                    ));
+                }
+                envelope_name_matches(rest, &parts[live].name, line)?;
+                out[live].terminated = true;
+                open = None;
+            }
+            _ => {
+                let Some(live) = open else {
+                    return Err(anyhow!(
+                        "worker emitted a `{op}` operation outside any entry envelope: {line}"
+                    ));
+                };
+                out[live].sim.push(line.clone());
+            }
+        }
+    }
+
+    // An entry left open is only explicable as the one the process died in, so
+    // it has to be the last one that started.
+    if let Some(live) = open {
+        if live + 1 != next_expected || next_expected != out.iter().filter(|s| s.started).count() {
+            return Err(anyhow!(
+                "worker left entry {live} (`{}`) open but started later entries too",
+                parts[live].name
+            ));
         }
     }
     Ok(out)
+}
+
+fn envelope_seq(rest: &str, line: &str) -> Result<usize> {
+    extract_raw_field(rest, "seq")
+        .and_then(|s| s.parse::<usize>().ok())
+        .ok_or_else(|| anyhow!("worker sent an entry envelope with no usable seq: {line}"))
+}
+
+fn envelope_name_matches(rest: &str, expected: &str, line: &str) -> Result<()> {
+    match extract_str_field(rest, "name") {
+        Some(name) if name == expected => Ok(()),
+        Some(name) => Err(anyhow!(
+            "worker entry envelope names `{name}` where the queue has `{expected}`: {line}"
+        )),
+        None => Err(anyhow!("worker sent an entry envelope with no name: {line}")),
+    }
 }
 
 /// Spawn ONE luajit process that runs `parts` in order and demux its side
@@ -1121,7 +1229,7 @@ fn run_worker(
     let stdout_str = String::from_utf8_lossy(&stdout_buf_locked).to_string();
     drop(stdout_buf_locked);
 
-    let streams = split_worker_stream(&collected, parts.len())?;
+    let streams = split_worker_stream(&collected, parts)?;
     // Process-level outcomes belong to the entry that was live when they
     // happened: the LAST one that started. For a single-entry worker that is
     // entry 0, exactly as before.
@@ -1134,6 +1242,21 @@ fn run_worker(
             summary.errors.push(SiteMessage {
                 message: format!(
                     "sim `{}` never started: the worker process ended during an earlier entry",
+                    part.name
+                ),
+                site: String::new(),
+            });
+        }
+        summary.entry_diagnostics =
+            crate::sim_record::normalize_diagnostics(&stream.raw_in_entry, &part.out_dir);
+        // A started entry with no `entry_end` is only explicable as the one a
+        // crashed or killed worker died inside. Anywhere else it means the
+        // envelope was lost, and a record built from a half-seen stream must
+        // not read as a clean result.
+        if stream.started && !stream.terminated && status.success() && !timed_out {
+            summary.errors.push(SiteMessage {
+                message: format!(
+                    "sim `{}` never emitted its entry_end although the worker exited cleanly",
                     part.name
                 ),
                 site: String::new(),
@@ -1169,7 +1292,7 @@ fn run_worker(
             // silently loses every game-side diagnostic that a serial run
             // prints.
             let mut diag = String::new();
-            for line in &stream.raw {
+            for line in &stream.raw_all {
                 diag.push_str(line);
                 diag.push('\n');
             }
@@ -1272,6 +1395,7 @@ fn record_of(name: &str, seq: usize, summary: SimSummary) -> crate::sim_record::
         timed_out: summary.timed_out,
         exit_code: summary.process_failure_code,
         diagnostics: summary.diagnostics,
+        entry_diagnostics: summary.entry_diagnostics,
         artifacts: summary.artifacts,
     }
 }
@@ -1300,7 +1424,7 @@ fn run_entries(
     let mut part_counts = Vec::with_capacity(entry_specs.len());
     let mut parts: Vec<WorkerPart> = Vec::new();
     for spec in entry_specs {
-        let entry_artifacts = SimArtifacts::new()?;
+        let entry_artifacts = SimArtifacts::recording()?;
         let chain = parse_sim_chain(spec);
         if chain.is_empty() {
             return Err(anyhow!("sim got an empty sim name"));
@@ -1847,6 +1971,9 @@ struct SimSummary {
     /// Child diagnostics retained by a buffered (concurrent) run, emitted by
     /// the caller inside the record lock. Empty when the run wrote them live.
     diagnostics: String,
+    /// Normalized child stderr from inside this entry's envelope. Comparable
+    /// across runs, unlike `diagnostics`, which carries boot/teardown noise.
+    entry_diagnostics: String,
     /// What the entry left under its `$OUT`, keyed by relative path. Captured
     /// by `SimArtifacts::finish_with` while the directory is still live.
     artifacts: std::collections::BTreeMap<String, crate::sim_record::ArtifactEntry>,
@@ -1867,6 +1994,7 @@ impl SimSummary {
         self.video_match_assertions.extend(other.video_match_assertions);
         self.cleanup_paths.extend(other.cleanup_paths);
         self.diagnostics.push_str(&other.diagnostics);
+        self.entry_diagnostics.push_str(&other.entry_diagnostics);
         self.artifacts.extend(other.artifacts);
         self.timed_out = self.timed_out || other.timed_out;
         if other.process_failure_code.is_some() {
@@ -2290,6 +2418,156 @@ mod tests {
         });
 
         assert!(!out_path.exists(), "$OUT must be removed after processing");
+    }
+
+    fn worker_parts(names: &[&str]) -> Vec<WorkerPart> {
+        names
+            .iter()
+            .map(|n| WorkerPart {
+                name: (*n).to_string(),
+                out_dir: PathBuf::from("/tmp/out"),
+                frame_budget: 600,
+                env: Vec::new(),
+            })
+            .collect()
+    }
+
+    fn lines(raw: &[&str]) -> Vec<String> {
+        raw.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn start(seq: usize, name: &str) -> String {
+        format!(r#"__SIM__ {{"op":"entry_start","name":"{name}","seq":{seq}}}"#)
+    }
+
+    fn end(seq: usize, name: &str) -> String {
+        format!(r#"__SIM__ {{"op":"entry_end","name":"{name}","seq":{seq}}}"#)
+    }
+
+    fn expect_ok(msg: &str) -> String {
+        format!(r#"__SIM__ {{"op":"expect_ok","message":"{msg}","site":"f.rock:1"}}"#)
+    }
+
+    /// The whole point of the envelope: one sim's operations may never be filed
+    /// under another's name, and boot/teardown logging is not part of an entry.
+    #[test]
+    fn the_envelope_partitions_operations_and_in_entry_logging() {
+        let parts = worker_parts(&["a", "b"]);
+        let stream = vec![
+            "[   0.1s INFO ] booting".to_string(),
+            start(0, "a"),
+            "[   0.2s INFO ] inside a".to_string(),
+            expect_ok("from a"),
+            end(0, "a"),
+            "[   0.3s INFO ] between entries".to_string(),
+            start(1, "b"),
+            expect_ok("from b"),
+            end(1, "b"),
+            "[   0.4s INFO ] teardown".to_string(),
+        ];
+
+        let out = split_worker_stream(&stream, &parts).expect("well-formed stream");
+        assert_eq!(out[0].sim, vec![expect_ok("from a")]);
+        assert_eq!(out[1].sim, vec![expect_ok("from b")]);
+        assert!(out[0].started && out[0].terminated);
+        assert!(out[1].started && out[1].terminated);
+
+        // In-entry logging excludes boot, teardown and the gap between entries,
+        // so the two sides of a differential look at the same window.
+        assert_eq!(out[0].raw_in_entry, vec!["[   0.2s INFO ] inside a".to_string()]);
+        assert!(out[1].raw_in_entry.is_empty());
+        // The debugging stream still keeps everything.
+        assert!(out[0].raw_all.iter().any(|l| l.contains("booting")));
+        assert!(out[1].raw_all.iter().any(|l| l.contains("teardown")));
+    }
+
+    /// A worker killed mid-entry leaves its last entry open. That is the ONE
+    /// tolerated gap, and it is recorded rather than read as a clean close.
+    #[test]
+    fn a_killed_worker_leaves_its_last_entry_unterminated() {
+        let parts = worker_parts(&["a", "b"]);
+        let stream = vec![start(0, "a"), end(0, "a"), start(1, "b"), expect_ok("partial")];
+
+        let out = split_worker_stream(&stream, &parts).expect("a truncated stream is not malformed");
+        assert!(out[0].terminated);
+        assert!(out[1].started && !out[1].terminated);
+        assert_eq!(out[1].sim, vec![expect_ok("partial")]);
+    }
+
+    /// Every other shape is a protocol violation. Attributing a stray operation
+    /// to a neighbour is precisely the failure this layer exists to prevent, so
+    /// none of these may be quietly absorbed.
+    #[test]
+    fn malformed_envelopes_are_rejected_not_guessed_at() {
+        let parts = worker_parts(&["a", "b"]);
+        let cases: Vec<(&str, Vec<String>)> = vec![
+            ("a second start while one is open", vec![start(0, "a"), start(1, "b")]),
+            ("a repeated start", vec![start(0, "a"), end(0, "a"), start(0, "a")]),
+            ("an out-of-order start", vec![start(1, "b")]),
+            ("an end with no entry open", vec![end(0, "a")]),
+            (
+                "an end whose seq is not the open entry",
+                vec![start(0, "a"), end(1, "b")],
+            ),
+            (
+                "an end whose name is not the open entry",
+                vec![start(0, "a"), end(0, "b")],
+            ),
+            (
+                "a start whose name is not the queued sim",
+                vec![start(0, "wrong")],
+            ),
+            (
+                "a start with no seq",
+                lines(&[r#"__SIM__ {"op":"entry_start","name":"a"}"#]),
+            ),
+            (
+                "a start with no name",
+                lines(&[r#"__SIM__ {"op":"entry_start","seq":0}"#]),
+            ),
+            ("an operation before any entry", vec![expect_ok("orphan")]),
+            (
+                "an operation between entries",
+                vec![start(0, "a"), end(0, "a"), expect_ok("orphan")],
+            ),
+            (
+                "an operation after the last entry",
+                vec![
+                    start(0, "a"),
+                    end(0, "a"),
+                    start(1, "b"),
+                    end(1, "b"),
+                    expect_ok("orphan"),
+                ],
+            ),
+        ];
+
+        for (what, stream) in cases {
+            assert!(
+                split_worker_stream(&stream, &parts).is_err(),
+                "{what} was accepted; a stray op would land on the wrong sim"
+            );
+        }
+    }
+
+    /// Hashing `$OUT` reads every byte a sim produced -- for a game writing
+    /// video that is exactly the cost this plan exists to remove, and in a
+    /// parallel suite it would happen under the reporting lock. Only the
+    /// differential oracle asks for a manifest.
+    #[test]
+    fn ordinary_runs_do_not_hash_their_out_directory() {
+        for (recording, expected) in [(false, 0), (true, 1)] {
+            let artifacts = SimArtifacts::with_manifest(recording).expect("sim artifacts");
+            std::fs::write(artifacts.path().join("produced.bin"), "bytes").expect("write");
+            let mut summary = SimSummary::default();
+            artifacts.finish_with(&mut summary, |_| {});
+            assert_eq!(
+                summary.artifacts.len(),
+                expected,
+                "record_manifest={recording} produced the wrong manifest"
+            );
+            assert!(summary.errors.is_empty(), "{:?}", summary.errors.len());
+        }
     }
 
     #[test]

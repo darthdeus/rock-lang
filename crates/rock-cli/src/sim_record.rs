@@ -28,6 +28,7 @@ pub const COMPARED_ARMS: &[&str] = &[
     "saw_stop",
     "timed_out",
     "exit_code",
+    "entry_diagnostics",
     "artifacts",
 ];
 
@@ -56,11 +57,17 @@ pub struct SimRecord {
     /// `None` when the process exited 0. A worker's exit status is attributed
     /// to the last entry that started, which is where the process died.
     pub exit_code: Option<i32>,
-    /// Child stderr and runner warnings retained for this entry. RECORDED but
-    /// deliberately NOT a compared arm: a worker's first entry legitimately
-    /// carries the process boot log that later entries do not. Logger dedup is
-    /// its own state class with its own fixture, listed under B1/B3.
+    /// Everything the child wrote for this entry, boot and teardown noise
+    /// included. The debugging stream: RECORDED but not compared, because a
+    /// worker's first entry legitimately carries a process boot log that later
+    /// entries do not.
     pub diagnostics: String,
+    /// The child's own stderr emitted strictly BETWEEN this entry's start and
+    /// end, normalized by [`normalize_diagnostics`]. This IS compared: it is
+    /// the only place a warning suppressed by a predecessor's logger-dedup
+    /// state becomes visible, and dedup is exactly a state class the worker
+    /// must reset.
+    pub entry_diagnostics: String,
     pub artifacts: BTreeMap<String, ArtifactEntry>,
 }
 
@@ -201,6 +208,16 @@ pub fn compare(isolated: &SimRecord, worker: &SimRecord) -> Comparison {
         });
     }
 
+    let iso_diag: Vec<&str> = isolated.entry_diagnostics.lines().collect();
+    let wrk_diag: Vec<&str> = worker.entry_diagnostics.lines().collect();
+    arm("entry_diagnostics", iso_diag.len() + wrk_diag.len());
+    if iso_diag != wrk_diag {
+        differences.push(Difference {
+            arm: "entry_diagnostics",
+            detail: format!("isolated {iso_diag:?} vs worker {wrk_diag:?}"),
+        });
+    }
+
     let mut paths: Vec<&String> = isolated.artifacts.keys().chain(worker.artifacts.keys()).collect();
     paths.sort();
     paths.dedup();
@@ -235,15 +252,24 @@ pub fn compare(isolated: &SimRecord, worker: &SimRecord) -> Comparison {
 /// Called while the entry's `$OUT` is still live -- after deferred artifact
 /// processing (video assertions), before `cleanup_path` removals -- so it sees
 /// what the entry actually produced rather than what survived teardown.
-pub fn manifest_of_dir(dir: &Path) -> BTreeMap<String, ArtifactEntry> {
+///
+/// Fails CLOSED. A skipped directory entry or an unreadable file would drop
+/// evidence from the manifest, and two runs that both dropped the same evidence
+/// compare equal -- the manifest would then certify an equivalence it never
+/// measured. Every failure is an error instead.
+pub fn manifest_of_dir(dir: &Path) -> anyhow::Result<BTreeMap<String, ArtifactEntry>> {
     let mut out = BTreeMap::new();
     for entry in walkdir::WalkDir::new(dir).sort_by_file_name() {
-        let Ok(entry) = entry else { continue };
+        let entry = entry
+            .map_err(|e| anyhow::anyhow!("walking `{}` for the artifact manifest: {e}", dir.display()))?;
         if !entry.file_type().is_file() {
             continue;
         }
-        let Ok(rel) = entry.path().strip_prefix(dir) else { continue };
-        let Ok(bytes) = std::fs::read(entry.path()) else { continue };
+        let rel = entry.path().strip_prefix(dir).map_err(|e| {
+            anyhow::anyhow!("`{}` is not under `{}`: {e}", entry.path().display(), dir.display())
+        })?;
+        let bytes = std::fs::read(entry.path())
+            .map_err(|e| anyhow::anyhow!("reading `{}` for the artifact manifest: {e}", entry.path().display()))?;
         let mut hasher = rustc_hash::FxHasher::default();
         bytes.hash(&mut hasher);
         out.insert(
@@ -251,7 +277,53 @@ pub fn manifest_of_dir(dir: &Path) -> BTreeMap<String, ArtifactEntry> {
             ArtifactEntry { len: bytes.len() as u64, digest: hasher.finish() },
         );
     }
-    out
+    Ok(out)
+}
+
+/// Normalize one entry's raw child stderr so two runs of the same sim produce
+/// the same text.
+///
+/// Removes the leading `[   0.123s LEVEL ]` stamp, rewrites the entry's `$OUT`
+/// path to a literal `$OUT`, and collapses digit runs to `#`. What survives is
+/// WHICH log records the entry emitted, in order -- which is the property a
+/// per-entry logger reset owes, without the wall-clock timings and frame
+/// numbers that legitimately differ run to run.
+pub fn normalize_diagnostics(lines: &[String], out_dir: &Path) -> String {
+    let out_str = out_dir.to_string_lossy().to_string();
+    let mut result = String::new();
+    for line in lines {
+        let body = strip_log_stamp(line);
+        let body = if out_str.is_empty() { body.to_string() } else { body.replace(&out_str, "$OUT") };
+        let mut normalized = String::with_capacity(body.len());
+        let mut in_number = false;
+        for c in body.chars() {
+            if c.is_ascii_digit() {
+                if !in_number {
+                    normalized.push('#');
+                    in_number = true;
+                }
+            } else {
+                in_number = false;
+                normalized.push(c);
+            }
+        }
+        result.push_str(normalized.trim_end());
+        result.push('\n');
+    }
+    result
+}
+
+/// Drop a `[   0.123s INFO ]` style stamp, keeping the rest of the line.
+fn strip_log_stamp(line: &str) -> &str {
+    let Some(rest) = line.strip_prefix('[') else { return line };
+    let Some(close) = rest.find(']') else { return line };
+    let stamp = &rest[..close];
+    // Only a real stamp: it always carries the elapsed-seconds marker. A game
+    // line that merely starts with `[CATEGORY]` must survive untouched.
+    if !stamp.contains('s') || !stamp.chars().any(|c| c.is_ascii_digit()) {
+        return line;
+    }
+    rest[close + 1..].trim_start()
 }
 
 #[cfg(test)]
@@ -283,6 +355,110 @@ mod tests {
             let _ = c.population(arm);
         }
         assert!(c.population("expects_pass") > 0, "this record does assert something");
+    }
+
+    /// Every arm must both be CENSUSED and actually COMPARED. The census alone
+    /// only catches deleting an arm outright; disabling its comparison while
+    /// leaving `arm(...)` in place would stay green without this. One synthetic
+    /// mutation per arm, each differing from the baseline in that arm only.
+    #[test]
+    fn every_arm_reports_a_disagreement_confined_to_itself() {
+        let mutations: Vec<(&str, fn(&mut SimRecord))> = vec![
+            // `verdict` is derived, so the only way to move it alone is via a
+            // field no other arm reads -- there is none, so it is driven here
+            // by saw_stop and asserted together with it below.
+            ("expects_pass", |r| r.expects_pass = vec![msg("f:1", "different")]),
+            ("expects_fail", |r| r.expects_fail = vec![msg("f:2", "boom")]),
+            ("errors", |r| r.errors = vec![msg("f:3", "runner error")]),
+            ("saw_stop", |r| r.saw_stop = false),
+            ("timed_out", |r| r.timed_out = true),
+            ("exit_code", |r| r.exit_code = Some(3)),
+            ("entry_diagnostics", |r| r.entry_diagnostics = "[MAG] a warning\n".into()),
+            ("artifacts", |r| {
+                r.artifacts.insert("f.txt".into(), ArtifactEntry { len: 1, digest: 1 });
+            }),
+        ];
+
+        for (arm, mutate) in mutations {
+            let mut worker = passing("x");
+            mutate(&mut worker);
+            let c = compare(&passing("x"), &worker);
+            assert!(
+                c.differs_on(arm),
+                "arm `{arm}` is censused but not compared: a record differing only in \
+                 `{arm}` reported {:?}",
+                c.differences.iter().map(|d| d.arm).collect::<Vec<_>>()
+            );
+            assert!(
+                c.population(arm) > 0,
+                "arm `{arm}` reported a disagreement over an empty population"
+            );
+        }
+    }
+
+    /// `verdict` is derived from the other fields, so it cannot be moved on its
+    /// own; what it owes is that it MOVES at all when the outcome changes.
+    #[test]
+    fn verdict_disagrees_whenever_the_outcome_does() {
+        for mutate in [
+            (|r: &mut SimRecord| r.saw_stop = false) as fn(&mut SimRecord),
+            |r: &mut SimRecord| r.timed_out = true,
+            |r: &mut SimRecord| r.exit_code = Some(1),
+            |r: &mut SimRecord| r.expects_fail = vec![msg("f:2", "boom")],
+            |r: &mut SimRecord| r.errors = vec![msg("f:3", "err")],
+        ] {
+            let mut worker = passing("x");
+            mutate(&mut worker);
+            let c = compare(&passing("x"), &worker);
+            assert!(c.differs_on("verdict"), "verdict stayed put: {}", c.report());
+        }
+    }
+
+    #[test]
+    fn normalized_diagnostics_drop_timing_but_keep_which_records_fired() {
+        let out = Path::new("/tmp/sim-abc123");
+        let a = normalize_diagnostics(
+            &[
+                "[   0.789s WARN ] [MAG] gate 0: no member spawners".to_string(),
+                "[   1.004s INFO ] wrote /tmp/sim-abc123/count.txt".to_string(),
+            ],
+            out,
+        );
+        let b = normalize_diagnostics(
+            &[
+                // Same records, different elapsed times and a different count.
+                "[  12.010s WARN ] [MAG] gate 7: no member spawners".to_string(),
+                "[  13.900s INFO ] wrote /tmp/sim-abc123/count.txt".to_string(),
+            ],
+            out,
+        );
+        assert_eq!(a, b, "timings and counters must not create false differences");
+        assert!(a.contains("$OUT/count.txt"), "the tempdir path is rewritten: {a}");
+
+        // But a record that did not fire at all is still a difference -- that is
+        // the logger-dedup signal the arm exists for.
+        let suppressed = normalize_diagnostics(
+            &["[   1.004s INFO ] wrote /tmp/sim-abc123/count.txt".to_string()],
+            out,
+        );
+        assert_ne!(a, suppressed);
+    }
+
+    #[test]
+    fn a_bare_category_prefix_is_not_mistaken_for_a_log_stamp() {
+        // `[MAG] ...` has no elapsed-seconds field; stripping it would erase
+        // the category the dedup arm needs to tell records apart.
+        let kept = normalize_diagnostics(&["[MAG] gate: no spawners".to_string()], Path::new(""));
+        assert_eq!(kept, "[MAG] gate: no spawners\n");
+    }
+
+    #[test]
+    fn a_manifest_over_an_unreadable_directory_is_an_error_not_an_empty_map() {
+        let missing = Path::new("/nonexistent-rock-sim-out-dir-for-tests");
+        assert!(
+            manifest_of_dir(missing).is_err(),
+            "a manifest that cannot be collected must not read as `produced nothing`"
+        );
     }
 
     #[test]
@@ -339,14 +515,14 @@ mod tests {
         std::fs::write(dir.path().join("a.txt"), "one").expect("write");
         std::fs::write(dir.path().join("nested/b.txt"), "two").expect("write");
 
-        let first = manifest_of_dir(dir.path());
+        let first = manifest_of_dir(dir.path()).expect("manifest");
         assert_eq!(
             first.keys().cloned().collect::<Vec<_>>(),
             vec!["a.txt".to_string(), "nested/b.txt".to_string()]
         );
 
         std::fs::write(dir.path().join("a.txt"), "ONE").expect("rewrite");
-        let second = manifest_of_dir(dir.path());
+        let second = manifest_of_dir(dir.path()).expect("manifest");
         assert_eq!(first["nested/b.txt"], second["nested/b.txt"]);
         assert_ne!(
             first["a.txt"], second["a.txt"],

@@ -23,7 +23,9 @@ use rock_cli::Backend;
 /// reason. `errors` counts runner/sim `error` ops, and every op that emits one
 /// also fails its sim -- a fixture built to populate it would be a permanently
 /// red entry in `rock sim testbed`. Its comparator arm is still mutation-
-/// guarded: `Comparison::population` panics when an arm is missing entirely.
+/// guarded twice over: `Comparison::population` panics when an arm is missing
+/// entirely, and `sim_record`'s synthetic per-arm tests fail when an arm is
+/// censused but no longer compared.
 const ARMS_WITHOUT_A_FIXTURE: &[&str] = &["errors"];
 
 fn differential(predecessors: &[&str], target: &str) -> (SimRecord, SimRecord) {
@@ -148,25 +150,123 @@ fn a_leaked_global_still_reaches_the_next_entry() {
     );
 }
 
-/// Mutation guard for the comparator itself: every arm must be present, and
-/// every arm a fixture can populate must have compared a non-zero population.
-/// Deleting an arm from `compare` makes `population` panic here; leaving an arm
-/// in but never exercising it fails the denominator assert.
+/// SENTINEL -- the RNG stream position is process-global, so a predecessor's
+/// draws move the probe's. Both entries still PASS their own assertions: the
+/// leak reaches the record only through the produced file's contents, which is
+/// why the manifest hashes bytes rather than listing names.
+///
+/// FLIP WHEN FIXED: becomes `assert_equivalent` when the checkpoint restores
+/// RNG state.
 #[test]
-fn every_comparator_arm_is_present_and_exercised() {
-    // The leak differential is the widest one: it is the only fixture that
-    // populates `expects_fail`, and it populates every other arm too.
-    let (isolated, worker) = differential(&["b0_leak_seed"], "b0_leak_probe");
+fn the_rng_stream_position_still_leaks_into_the_next_entry() {
+    let (isolated, worker) = differential(&["b0_rng_seed"], "b0_rng_probe");
     let c = compare(&isolated, &worker);
 
+    assert!(
+        c.differs_on("artifacts"),
+        "the worker no longer leaks RNG position -- flip this sentinel:\n{}",
+        c.report()
+    );
+    assert_eq!(
+        isolated.verdict(),
+        worker.verdict(),
+        "both sides pass their own expects; only the drawn value moved"
+    );
+    assert_ne!(isolated.artifacts["draw.txt"], worker.artifacts["draw.txt"]);
+}
+
+/// SENTINEL -- a `static` local in an ordinarily-called function. Skull records
+/// this one's cell and done flag in `__rock_known_globals`, so it is the case a
+/// checkpoint registry can already see.
+///
+/// FLIP WHEN FIXED: becomes `assert_equivalent` when statics are restored.
+#[test]
+fn a_called_function_static_still_leaks_into_the_next_entry() {
+    let (isolated, worker) = differential(&["b0_static_called_seed"], "b0_static_called_probe");
+    let c = compare(&isolated, &worker);
+
+    assert!(!c.is_equivalent(), "the called-function static no longer leaks -- flip this sentinel");
+    for arm in ["verdict", "expects_fail", "artifacts"] {
+        assert!(c.differs_on(arm), "expected a `{arm}` difference:\n{}", c.report());
+    }
+}
+
+/// SENTINEL -- the same state class reached through INLINED call sites, where
+/// the cell is read and written directly in the caller's body rather than
+/// through a call. Kept separate from its called-function sibling because a
+/// registry built from emitted bodies treats the two differently.
+///
+/// FLIP WHEN FIXED: becomes `assert_equivalent` when statics are restored.
+#[test]
+fn an_inlined_static_still_leaks_into_the_next_entry() {
+    let (isolated, worker) = differential(&["b0_static_inlined_seed"], "b0_static_inlined_probe");
+    let c = compare(&isolated, &worker);
+
+    assert!(!c.is_equivalent(), "the inlined static no longer leaks -- flip this sentinel");
+    for arm in ["verdict", "expects_fail", "artifacts"] {
+        assert!(c.differs_on(arm), "expected a `{arm}` difference:\n{}", c.report());
+    }
+}
+
+/// SENTINEL -- and the reason the `entry_diagnostics` arm exists. `log_once`
+/// dedups per call site in a process-global table, so a predecessor that logged
+/// through the same helper SUPPRESSES the probe's warning entirely. No other
+/// arm can see this: the sim passes, writes nothing, and exits cleanly.
+///
+/// FLIP WHEN FIXED: becomes `assert_equivalent` when the boundary clears logger
+/// dedup/throttle state.
+#[test]
+fn logger_dedup_still_suppresses_the_next_entrys_warning() {
+    let (isolated, worker) = differential(&["b0_dedup_seed"], "b0_dedup_probe");
+    let c = compare(&isolated, &worker);
+
+    assert!(
+        c.differs_on("entry_diagnostics"),
+        "the worker no longer suppresses a repeated warning -- flip this sentinel:\n{}",
+        c.report()
+    );
+    assert!(
+        isolated.entry_diagnostics.contains("b#") || isolated.entry_diagnostics.contains("dedup"),
+        "the isolated run must actually emit the warning: {:?}",
+        isolated.entry_diagnostics
+    );
+    assert_eq!(
+        isolated.verdict(),
+        worker.verdict(),
+        "a suppressed warning changes no verdict -- that is what makes it invisible elsewhere"
+    );
+}
+
+/// Mutation guard for the comparator itself: every arm must be present, and
+/// every arm a fixture can populate must have compared a non-zero population
+/// in at least one fixture. Deleting an arm from `compare` makes `population`
+/// panic here; leaving an arm in but never exercising it fails the denominator
+/// assert.
+#[test]
+fn every_comparator_arm_is_present_and_exercised() {
+    // No single fixture reaches every arm: the leak differential is the only
+    // one populating `expects_fail`, and only the dedup one logs inside its
+    // entry envelope. The denominator is the union.
+    let comparisons = [
+        {
+            let (i, w) = differential(&["b0_leak_seed"], "b0_leak_probe");
+            compare(&i, &w)
+        },
+        {
+            let (i, w) = differential(&["b0_dedup_seed"], "b0_dedup_probe");
+            compare(&i, &w)
+        },
+    ];
+
     for arm in COMPARED_ARMS {
-        let population = c.population(arm);
+        let population: usize = comparisons.iter().map(|c| c.population(arm)).max().unwrap_or(0);
         if ARMS_WITHOUT_A_FIXTURE.contains(arm) {
             assert_eq!(population, 0, "`{arm}` is documented as having no fixture");
             continue;
         }
-        assert!(population > 0, "arm `{arm}` compared an empty population");
+        assert!(population > 0, "arm `{arm}` compared an empty population in every fixture");
     }
+    let (isolated, worker) = differential(&["b0_leak_seed"], "b0_leak_probe");
     assert!(
         isolated.errors.is_empty() && worker.errors.is_empty(),
         "the zero `errors` denominator has to be a real zero, not an unread field"
