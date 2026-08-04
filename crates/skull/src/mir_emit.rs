@@ -1904,10 +1904,20 @@ fn assemble(
     let mut seen_static: FxHashSet<Ustr> = FxHashSet::default();
     let mut static_resets = String::new();
     let mut static_regs = String::new();
+    // The worker boot checkpoint's view (`docs/sim-speed-plan.md` B1): cell ->
+    // done flag, stated rather than re-derived from a name suffix the way
+    // `__rock_known_globals`' flat name->key listing would force.
+    let mut static_pairs = String::new();
     for sc in &all_statics {
         if !seen_static.insert(sc.cell) {
             continue;
         }
+        let _ = write!(
+            static_pairs,
+            "[{:?}] = {:?},",
+            sc.cell.as_str(),
+            sc.done_flag.as_str()
+        );
         let key = static_cell_key(sc);
         let _ = write!(
             static_resets,
@@ -1932,6 +1942,13 @@ fn assemble(
     out.push_str("_G.__rock_known_globals = {");
     out.push_str(&known_globals);
     out.push_str(&static_regs);
+    out.push_str("}\n");
+    // Unconditional, an empty table included: a per-build registry that is only
+    // assigned when non-empty leaves the PREVIOUS build's table live across a
+    // hot reload, and a checkpoint would then restore cells this build does not
+    // have (`docs/backends.md`, skull codegen invariants).
+    out.push_str("_G.__ROCK_STATICS = {");
+    out.push_str(&static_pairs);
     out.push_str("}\n");
 
     // Decorator APPLICATIONS (after global inits so a deco body can push a global).

@@ -57,6 +57,26 @@ fn registered_cells(lua: &str) -> BTreeSet<String> {
     out
 }
 
+/// The `__ROCK_STATICS` table as cell -> done flag, or `None` when the emitted
+/// program does not assign it at all.
+fn static_registry(lua: &str) -> Option<std::collections::BTreeMap<String, String>> {
+    let start = lua.find("_G.__ROCK_STATICS = {")?;
+    let rest = &lua[start..];
+    let end = rest.find("}\n")?;
+    let body = &rest[..end];
+    let mut out = std::collections::BTreeMap::new();
+    for (i, _) in body.match_indices("[\"") {
+        let rest = &body[i + 2..];
+        let key_end = rest.find('"').expect("a quoted cell name");
+        let key = rest[..key_end].to_string();
+        let after = &rest[key_end..];
+        let vstart = after.find("= \"").expect("a quoted done flag") + 3;
+        let vend = after[vstart..].find('"').expect("a closed done flag");
+        out.insert(key, after[vstart..vstart + vend].to_string());
+    }
+    Some(out)
+}
+
 fn assert_every_live_cell_is_registered(lua: &str, what: &str) {
     let live = live_cells(lua);
     let registered = registered_cells(lua);
@@ -213,4 +233,63 @@ fn main() { RESULT = use_it(V2 { x: 1.0, y: 2.0 }) }
         live_cells(&lua)
     );
     assert_every_live_cell_is_registered(&lua, "a specialized generic's static");
+}
+
+/// The registry the worker boot checkpoint reads (`docs/sim-speed-plan.md` B1).
+///
+/// `__rock_known_globals` is keyed for hot reload's purposes: it maps a NAME to
+/// a type/init key and lists a cell and its done flag as two unrelated entries,
+/// so a consumer wanting "the statics, each with its done flag" has to
+/// re-derive the pairing from a name suffix. `__ROCK_STATICS` states it
+/// directly: cell -> done flag.
+///
+/// It is assigned UNCONDITIONALLY, an empty table included. A per-build
+/// registry that is only assigned when non-empty leaves the previous build's
+/// table in place across a hot reload, which is the skull codegen invariant in
+/// `docs/backends.md`.
+#[test]
+fn the_static_registry_pairs_every_cell_with_its_done_flag() {
+    let lua = emit_module(
+        r#"
+global RESULT: int = 0
+fn hits() -> int {
+    static n = 0
+    n = n + 1
+    return n
+}
+fn tally<I: Iterator<int>>(it: I) -> int {
+    static calls = 0
+    calls = calls + 1
+    let m = 0
+    for x in it { m = m + x }
+    return m + calls
+}
+fn main() { RESULT = hits() + tally([1, 2].iter()) }
+"#,
+    );
+    let pairs = static_registry(&lua).expect("__ROCK_STATICS must be emitted");
+    let live: BTreeSet<String> = live_cells(&lua);
+    assert!(live.len() >= 2, "the fixture must reach both owners: {live:?}");
+    assert_eq!(
+        pairs.keys().cloned().collect::<BTreeSet<String>>(),
+        live,
+        "the registry must name exactly the cells the program uses"
+    );
+    for (cell, done) in &pairs {
+        assert_eq!(done, &format!("{cell}__done"), "each cell carries its own done flag");
+        assert!(
+            lua.contains(done.as_str()),
+            "the done flag `{done}` must be a name the emitted program actually uses"
+        );
+    }
+}
+
+/// A program with no statics still assigns the table. Without this, a reload
+/// would inherit the previous build's registry and the checkpoint would restore
+/// cells this build does not have.
+#[test]
+fn a_program_with_no_statics_still_assigns_an_empty_registry() {
+    let lua = emit_module("global RESULT: int = 0\nfn main() { RESULT = 1 }\n");
+    let pairs = static_registry(&lua).expect("__ROCK_STATICS must be emitted even when empty");
+    assert!(pairs.is_empty(), "no statics, so the table is empty -- but present: {pairs:?}");
 }
