@@ -1141,22 +1141,83 @@ struct EntryStream {
 /// `__SIM__`) lines outside the envelope are ordinary boot/teardown logging and
 /// are attributed to the most recently started entry for debugging only.
 fn split_worker_stream(lines: &[String], parts: &[WorkerPart]) -> Result<Vec<EntryStream>> {
-    let n = parts.len();
-    let mut out: Vec<EntryStream> = (0..n).map(|_| EntryStream::default()).collect();
-    let mut open: Option<usize> = None;
-    let mut next_expected = 0usize;
+    let mut out: Vec<EntryStream> = (0..parts.len()).map(|_| EntryStream::default()).collect();
+    let mut tracker = EnvelopeTracker::for_parts(parts);
     // Where raw lines land while no entry is open: the entry that just closed,
     // or entry 0 before anything has started.
     let mut attribution = 0usize;
 
     for line in lines {
-        let Some(rest) = line.strip_prefix("__SIM__ ") else {
-            out[attribution].raw_all.push(line.clone());
-            if open.is_some() {
-                out[attribution].raw_in_entry.push(line.clone());
+        match tracker.observe(line)? {
+            EnvelopeStep::Raw { in_entry } => {
+                out[attribution].raw_all.push(line.clone());
+                if in_entry {
+                    out[attribution].raw_in_entry.push(line.clone());
+                }
             }
-            continue;
+            EnvelopeStep::Started(seq) => {
+                attribution = seq;
+                out[seq].started = true;
+            }
+            EnvelopeStep::Ended(seq) => out[seq].terminated = true,
+            EnvelopeStep::Op(live) => out[live].sim.push(line.clone()),
+        }
+    }
+
+    // An entry left open is only explicable as the one the process died in, so
+    // it has to be the last one that started.
+    if let Some(live) = tracker.open {
+        if live + 1 != tracker.next_expected
+            || tracker.next_expected != out.iter().filter(|s| s.started).count()
+        {
+            return Err(anyhow!(
+                "worker left entry {live} (`{}`) open but started later entries too",
+                parts[live].name
+            ));
+        }
+    }
+    Ok(out)
+}
+
+/// The ONE interpretation of the per-entry envelope, driven a line at a time.
+/// `split_worker_stream` uses it after the child exits to demux the stream,
+/// and the live stderr reader uses it to decide when the wall-clock deadline
+/// anchor may reset -- so a line the demux would reject can never buy a wedged
+/// child more time. An unvalidated `entry_start` reset was exactly that hole:
+/// a sim flooding bogus starts from inside one tick evaded the only bound
+/// that can kill it.
+struct EnvelopeTracker {
+    names: Vec<String>,
+    open: Option<usize>,
+    next_expected: usize,
+}
+
+/// What one observed line meant to the envelope.
+enum EnvelopeStep {
+    /// A valid `entry_start` for the expected next entry -- the only step the
+    /// deadline anchor may reset on.
+    Started(usize),
+    Ended(usize),
+    /// A structured operation inside the open entry.
+    Op(usize),
+    /// A non-`__SIM__` line; `in_entry` says whether an envelope was open.
+    Raw { in_entry: bool },
+}
+
+impl EnvelopeTracker {
+    fn for_parts(parts: &[WorkerPart]) -> Self {
+        Self {
+            names: parts.iter().map(|p| p.name.clone()).collect(),
+            open: None,
+            next_expected: 0,
+        }
+    }
+
+    fn observe(&mut self, line: &str) -> Result<EnvelopeStep> {
+        let Some(rest) = line.strip_prefix("__SIM__ ") else {
+            return Ok(EnvelopeStep::Raw { in_entry: self.open.is_some() });
         };
+        let n = self.names.len();
         let op = extract_str_field(rest, "op").unwrap_or_default();
         match op.as_str() {
             "entry_start" => {
@@ -1169,60 +1230,48 @@ fn split_worker_stream(lines: &[String], parts: &[WorkerPart]) -> Result<Vec<Ent
                         "worker started entry {seq} but the queue has only {n} entries: {line}"
                     ));
                 }
-                if let Some(live) = open {
+                if let Some(live) = self.open {
                     return Err(anyhow!(
                         "worker started entry {seq} while entry {live} (`{}`) was still open: {line}",
-                        parts[live].name
+                        self.names[live]
                     ));
                 }
-                if seq != next_expected {
+                if seq != self.next_expected {
                     return Err(anyhow!(
-                        "worker started entry {seq} out of order (expected {next_expected}): {line}"
+                        "worker started entry {seq} out of order (expected {}): {line}",
+                        self.next_expected
                     ));
                 }
-                envelope_name_matches(rest, &parts[seq].name, line)?;
-                open = Some(seq);
-                attribution = seq;
-                next_expected = seq + 1;
-                out[seq].started = true;
+                envelope_name_matches(rest, &self.names[seq], line)?;
+                self.open = Some(seq);
+                self.next_expected = seq + 1;
+                Ok(EnvelopeStep::Started(seq))
             }
             "entry_end" => {
                 let seq = envelope_seq(rest, line)?;
-                let Some(live) = open else {
+                let Some(live) = self.open else {
                     return Err(anyhow!("worker ended entry {seq} with no entry open: {line}"));
                 };
                 if seq != live {
                     return Err(anyhow!(
                         "worker ended entry {seq} while entry {live} (`{}`) was open: {line}",
-                        parts[live].name
+                        self.names[live]
                     ));
                 }
-                envelope_name_matches(rest, &parts[live].name, line)?;
-                out[live].terminated = true;
-                open = None;
+                envelope_name_matches(rest, &self.names[live], line)?;
+                self.open = None;
+                Ok(EnvelopeStep::Ended(live))
             }
             _ => {
-                let Some(live) = open else {
+                let Some(live) = self.open else {
                     return Err(anyhow!(
                         "worker emitted a `{op}` operation outside any entry envelope: {line}"
                     ));
                 };
-                out[live].sim.push(line.clone());
+                Ok(EnvelopeStep::Op(live))
             }
         }
     }
-
-    // An entry left open is only explicable as the one the process died in, so
-    // it has to be the last one that started.
-    if let Some(live) = open {
-        if live + 1 != next_expected || next_expected != out.iter().filter(|s| s.started).count() {
-            return Err(anyhow!(
-                "worker left entry {live} (`{}`) open but started later entries too",
-                parts[live].name
-            ));
-        }
-    }
-    Ok(out)
 }
 
 fn envelope_seq(rest: &str, line: &str) -> Result<usize> {
@@ -1403,6 +1452,13 @@ fn run_worker(
     let stderr_thread = {
         let lines = Arc::clone(&stderr_lines);
         let anchor = Arc::clone(&deadline_anchor);
+        // The SAME strict envelope the post-exit demux applies, driven live:
+        // the anchor resets only on a start the demux would accept, so a line
+        // it would reject cannot buy a wedged child more time. On the first
+        // violation the tracker is poisoned and no later line resets --
+        // fail closed; the violation itself is reported after the exit by
+        // `split_worker_stream` running the same interpretation.
+        let mut envelope = Some(EnvelopeTracker::for_parts(parts));
         // Buffered runs must not write anything from this thread: several
         // children are live, so a direct write here interleaves into the middle
         // of another sim's locked record. The lines are retained and handed
@@ -1416,11 +1472,15 @@ fn run_worker(
                     Ok(line) => line,
                     Err(e) => return Some(format!("error reading game stderr: {e}")),
                 };
-                if let Some(rest) = line.strip_prefix("__SIM__ ") {
-                    let op = extract_str_field(rest, "op");
-                    if op.as_deref() == Some("entry_start") {
+                match envelope.as_mut().map(|t| t.observe(&line)) {
+                    Some(Ok(EnvelopeStep::Started(_))) => {
                         *anchor.lock().unwrap() = std::time::Instant::now();
                     }
+                    Some(Err(_)) => envelope = None,
+                    _ => {}
+                }
+                if let Some(rest) = line.strip_prefix("__SIM__ ") {
+                    let op = extract_str_field(rest, "op");
                     if op.as_deref() == Some("reload_edit") {
                         // Send failure = the wait loop already reaped the child;
                         // the edit can't apply, which the sim's own wait_for
@@ -3069,6 +3129,47 @@ mod tests {
 
     fn lines(raw: &[&str]) -> Vec<String> {
         raw.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The deadline anchor resets ONLY on `EnvelopeStep::Started`, so the
+    /// tracker's classification IS the guard's admission: a start the demux
+    /// would reject -- malformed, out of order, duplicate, while another
+    /// entry is open, or past the queue -- must not read as Started, and
+    /// after any violation the live reader stops consulting the tracker
+    /// entirely. A valid next start, and only that, is Started.
+    #[test]
+    fn only_an_accepted_entry_start_reads_as_started() {
+        let parts = worker_parts(&["a", "b"]);
+        let started = |t: &mut EnvelopeTracker, line: &str| {
+            matches!(t.observe(line), Ok(EnvelopeStep::Started(_)))
+        };
+
+        let mut t = EnvelopeTracker::for_parts(&parts);
+        assert!(started(&mut t, &start(0, "a")), "the expected first start is Started");
+
+        // Inside the open entry, every start shape refuses: the wedged-sim
+        // evasion is exactly a start emitted while its own entry is open.
+        assert!(t.observe(r#"__SIM__ {"op":"entry_start"}"#).is_err(), "malformed: no seq");
+        // A fresh tracker still refuses the malformed shape with nothing open.
+        assert!(
+            EnvelopeTracker::for_parts(&parts)
+                .observe(r#"__SIM__ {"op":"entry_start"}"#)
+                .is_err(),
+            "malformed: no seq, no entry open"
+        );
+        assert!(t.observe(&start(0, "a")).is_err(), "duplicate of the open entry");
+        assert!(t.observe(&start(1, "b")).is_err(), "the next entry cannot start while one is open");
+
+        assert!(matches!(t.observe(&end(0, "a")), Ok(EnvelopeStep::Ended(0))));
+        assert!(t.observe(&start(0, "a")).is_err(), "a closed entry cannot restart");
+        assert!(started(&mut t, &start(1, "b")), "the valid NEXT start is Started");
+        assert!(matches!(t.observe(&end(1, "b")), Ok(EnvelopeStep::Ended(1))));
+        assert!(t.observe(&start(2, "c")).is_err(), "past the end of the queue");
+
+        let mut t = EnvelopeTracker::for_parts(&parts);
+        assert!(t.observe(&start(1, "b")).is_err(), "out of order: entry 1 before entry 0");
+        let mut t = EnvelopeTracker::for_parts(&parts);
+        assert!(t.observe(&start(0, "b")).is_err(), "wrong name for the seq");
     }
 
     fn start(seq: usize, name: &str) -> String {
