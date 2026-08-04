@@ -237,6 +237,67 @@ fn logger_dedup_still_suppresses_the_next_entrys_warning() {
     );
 }
 
+/// SENTINEL -- engine configuration. `TIME_SCALE` is a Stone global outside
+/// replay's six-global predicate, so nothing in the existing restore surface
+/// puts it back, and the runner multiplies the sim's fixed dt by it: the probe
+/// inherits both the scale and a quarter-speed frame.
+///
+/// FLIP WHEN FIXED: becomes `assert_equivalent` once the boot checkpoint
+/// restores engine configuration, in the same commit as the fix.
+#[test]
+fn leaked_engine_configuration_still_reaches_the_next_entry() {
+    let (isolated, worker) = differential(&["b0_config_seed"], "b0_config_probe");
+    let c = compare(&isolated, &worker);
+
+    assert!(
+        !c.is_equivalent(),
+        "the worker no longer leaks TIME_SCALE -- land the reset and flip this \
+         sentinel to assert_equivalent"
+    );
+    for arm in ["verdict", "expects_pass", "expects_fail", "artifacts"] {
+        assert!(c.differs_on(arm), "expected a `{arm}` difference:\n{}", c.report());
+    }
+    assert_eq!(isolated.verdict(), "PASS", "the probe passes in a fresh process");
+    assert_eq!(worker.verdict(), "FAIL", "and fails after a predecessor");
+    // The inherited scale is not merely a stale number: it changes the dt the
+    // probe's own frame advances, which is the reason this class matters.
+    assert!(
+        worker
+            .expects_fail
+            .iter()
+            .any(|m| m.message.contains("one frame advances a full fixed dt")),
+        "the leak must reach game time, not only the scale field: {:?}",
+        worker.expects_fail
+    );
+    assert_ne!(isolated.artifacts["scale.txt"], worker.artifacts["scale.txt"]);
+}
+
+/// SENTINEL -- input edges. A body that stops mid-hold leaves `keys_down` set,
+/// and `input_end_frame` copies it forward every frame afterwards, so the next
+/// entry starts with a key held that it never pressed.
+///
+/// FLIP WHEN FIXED: becomes `assert_equivalent` once the boot checkpoint
+/// restores the input maps.
+#[test]
+fn a_held_key_still_reaches_the_next_entry() {
+    let (isolated, worker) = differential(&["b0_input_seed"], "b0_input_probe");
+    let c = compare(&isolated, &worker);
+
+    assert!(
+        !c.is_equivalent(),
+        "the worker no longer leaks a held key -- flip this sentinel to \
+         assert_equivalent"
+    );
+    for arm in ["verdict", "expects_pass", "expects_fail", "artifacts"] {
+        assert!(c.differs_on(arm), "expected a `{arm}` difference:\n{}", c.report());
+    }
+    assert_eq!(isolated.verdict(), "PASS");
+    assert_eq!(worker.verdict(), "FAIL");
+    // Same length, different bytes: a name-only manifest would call these equal.
+    assert_eq!(isolated.artifacts["hold.txt"].len, worker.artifacts["hold.txt"].len);
+    assert_ne!(isolated.artifacts["hold.txt"], worker.artifacts["hold.txt"]);
+}
+
 /// Mutation guard for the comparator itself: every arm must be present, and
 /// every arm a fixture can populate must have compared a non-zero population
 /// in at least one fixture. Deleting an arm from `compare` makes `population`
