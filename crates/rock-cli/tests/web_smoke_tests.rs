@@ -210,6 +210,31 @@ fn web_sampling_nearest_and_linear() {
     assert_not_blank(&shot, "the three sampling quads");
 }
 
+// Arc C box 5, WebGL2 leg. Caller-owned rect batches and immediate draws bind
+// their own sampler instead of inheriting the unit's, asserted through the same
+// Rock-side verdict the native sim reads. See
+// games/testbed/default_sampling.rock.
+#[test]
+fn web_default_sampling() {
+    let Some((_dir, shot)) = run_cdp(
+        "games/testbed",
+        "web_default_sampling",
+        &[
+            "--frames",
+            "10",
+            "--setup-expr",
+            "__G.DEFAULT_SAMPLING_REQUEST = true",
+            "--expect",
+            "__G.DEFAULT_SAMPLING_VERDICT",
+            "--value",
+            "PASS",
+        ],
+    ) else {
+        return;
+    };
+    assert_not_blank(&shot, "the rect-batch and immediate quads");
+}
+
 // mag in real headless Chrome, CDP-driven: the virtual-time screenshot path
 // deterministically races mag's first present (~175 MB preload; frame 1 does
 // every shader compile + texture upload under swiftshader), so the driver
