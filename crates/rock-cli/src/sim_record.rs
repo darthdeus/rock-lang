@@ -306,65 +306,40 @@ pub fn normalize_diagnostics(lines: &[String], out_dir: &Path) -> String {
     result
 }
 
-/// Remove a `[   0.123s INFO ]` logger stamp, or return the line untouched.
+/// The five level tags `rock_log` emits, each exactly five characters
+/// (`crates/rock-log/src/lib.rs`, `level_tag`). WARN and INFO are space-padded
+/// to that width, which is why the closing bracket can look detached.
+const LOG_LEVEL_TAGS: [&str; 5] = ["ERROR", "WARN ", "INFO ", "DEBUG", "TRACE"];
+
+/// Remove a `rock_log` stamp, or return the line untouched.
 ///
-/// Parsed exactly -- elapsed seconds, `s`, a level word, `]` -- rather than
-/// sniffed. A loose match would eat a game's own `[CATEGORY] ...` prefix and
-/// erase the category this arm needs to tell records apart.
+/// Matches the emitter's grammar exactly -- `[{:>8.3}s {}] ` -- rather than
+/// sniffing for something bracketed: leading padding, at least one integer
+/// digit, a point, EXACTLY three fractional digits, `s`, one space, one of
+/// [`LOG_LEVEL_TAGS`], and `]`. A loose match eats a game's own bracketed
+/// prefix and erases the category this arm needs to tell records apart -- a
+/// line like `[1.23s SCORE] result` is game output, not a log stamp, and both
+/// its fractional precision and its tag say so.
 fn strip_log_stamp(line: &str) -> &str {
     let Some(rest) = line.strip_prefix('[') else { return line };
-    let mut c = rest.chars().peekable();
-    let mut consumed = 0usize;
-    let take = |c: &mut std::iter::Peekable<std::str::Chars>, consumed: &mut usize| {
-        let ch = c.next();
-        if let Some(ch) = ch {
-            *consumed += ch.len_utf8();
-        }
-        ch
+    let padded = rest.trim_start_matches(' ');
+    let int_digits = padded
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(padded.len());
+    if int_digits == 0 {
+        return line;
+    }
+    let Some(frac) = padded[int_digits..].strip_prefix('.') else { return line };
+    if frac.len() < 3 || !frac.as_bytes()[..3].iter().all(u8::is_ascii_digit) {
+        return line;
+    }
+    // A fourth fractional digit fails this, which is what pins "exactly three".
+    let Some(tail) = frac[3..].strip_prefix("s ") else { return line };
+    let Some(tail) = LOG_LEVEL_TAGS.iter().find_map(|tag| tail.strip_prefix(tag)) else {
+        return line;
     };
-
-    while c.peek() == Some(&' ') {
-        take(&mut c, &mut consumed);
-    }
-    // <digits> "." <digits> "s"
-    let mut digits = 0;
-    while c.peek().is_some_and(|ch| ch.is_ascii_digit()) {
-        take(&mut c, &mut consumed);
-        digits += 1;
-    }
-    if digits == 0 || take(&mut c, &mut consumed) != Some('.') {
-        return line;
-    }
-    let mut frac = 0;
-    while c.peek().is_some_and(|ch| ch.is_ascii_digit()) {
-        take(&mut c, &mut consumed);
-        frac += 1;
-    }
-    if frac == 0 || take(&mut c, &mut consumed) != Some('s') {
-        return line;
-    }
-    if take(&mut c, &mut consumed) != Some(' ') {
-        return line;
-    }
-    while c.peek() == Some(&' ') {
-        take(&mut c, &mut consumed);
-    }
-    // A level word, then optional padding, then the closing bracket.
-    let mut level = 0;
-    while c.peek().is_some_and(|ch| ch.is_ascii_uppercase()) {
-        take(&mut c, &mut consumed);
-        level += 1;
-    }
-    if level == 0 {
-        return line;
-    }
-    while c.peek() == Some(&' ') {
-        take(&mut c, &mut consumed);
-    }
-    if take(&mut c, &mut consumed) != Some(']') {
-        return line;
-    }
-    rest[consumed..].trim_start()
+    let Some(body) = tail.strip_prefix(']') else { return line };
+    body.strip_prefix(' ').unwrap_or(body)
 }
 
 #[cfg(test)]
@@ -493,6 +468,59 @@ mod tests {
             out,
         );
         assert_ne!(zero, seven, "`gate 0` and `gate 7` are not the same record");
+    }
+
+    /// Every shape `rock_log` actually emits must lose its stamp and keep the
+    /// rest -- including the padded `WARN `/`INFO ` tags, whose padding makes
+    /// the closing bracket look detached.
+    #[test]
+    fn every_real_log_stamp_is_stripped() {
+        let out = Path::new("");
+        for (line, expected) in [
+            ("[   0.789s INFO ] [MAG] hi", "[MAG] hi"),
+            ("[   1.296s ERROR] [SLOWFRAME] frame 60 took 69.7ms", "[SLOWFRAME] frame 60 took 69.7ms"),
+            ("[   0.001s WARN ] [SIM] careful", "[SIM] careful"),
+            ("[  12.500s DEBUG] [ENGINE] x", "[ENGINE] x"),
+            ("[1234.567s TRACE] no padding, wide number", "no padding, wide number"),
+            ("[   0.000s INFO ] ", ""),
+        ] {
+            assert_eq!(
+                normalize_diagnostics(&[line.to_string()], out),
+                format!("{expected}\n"),
+                "`{line}` is a real logger stamp and must be stripped"
+            );
+        }
+    }
+
+    /// The stamp is parsed, not sniffed. Everything here merely RESEMBLES one,
+    /// and erasing any of it would destroy game output -- `[1.23s SCORE]` is
+    /// the canonical trap: bracketed, numeric, ends in `s`, and is not a log
+    /// record. Both its fractional precision and its tag rule it out.
+    #[test]
+    fn only_a_real_log_stamp_is_stripped() {
+        let out = Path::new("");
+        for line in [
+            "[MAG] gate: no spawners",
+            "[1.23s SCORE] result",
+            "[   0.789s SCORE] a well-formed time with a tag we never emit",
+            "[   0.789s Info ] the tags are upper case",
+            "[   0.78s INFO ] two fractional digits",
+            "[   0.7891s INFO ] four fractional digits",
+            "[   0.789 INFO ] no seconds marker",
+            "[   0.789sINFO ] no space after the seconds",
+            "[   0.789s INFO] the tag is padded, so this is one char short",
+            "[   .789s INFO ] no integer digits",
+            "[   0.789s] no level at all",
+            "[0.5] a bracketed number that is not a stamp",
+            "not bracketed at all",
+            "",
+        ] {
+            assert_eq!(
+                normalize_diagnostics(&[line.to_string()], out),
+                format!("{line}\n"),
+                "`{line}` is not a logger stamp and must survive intact"
+            );
+        }
     }
 
     /// A record that did not fire at all is the logger-dedup signal.
