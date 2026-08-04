@@ -491,6 +491,150 @@ pub fn uniform_block(ws: &Workspace, struct_name: Ustr) -> Result<UniformBlockPl
     Ok(UniformBlockPlan { struct_name, members, size })
 }
 
+/// One `UniformArray<T>` member as DECLARED: the shader entry's `@size(N)` param.
+/// Offsets are the layout's answer, not the caller's, so they are absent here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ArrayMemberDecl {
+    pub name: Ustr,
+    pub elem: WireKind,
+    pub capacity: u32,
+}
+
+/// One laid-out array member of an array block.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArrayMember {
+    pub name: Ustr,
+    pub elem: WireKind,
+    pub capacity: u32,
+    pub offset: u32,
+    /// std140 array stride: the element's base alignment rounded up to 16. That
+    /// is 16 for every kind an array may hold, so it is recorded rather than
+    /// assumed — a backend that gains a wider element kind reads this, and the
+    /// scalar-array waste (a `float[16]` costing 256 bytes) is visible in it.
+    pub stride: u32,
+}
+
+/// A stage's ARRAY block: the `UniformArray<T>` params of one shader entry, laid
+/// out std140 at their own binding.
+///
+/// Deliberately NOT members of [`UniformBlockPlan`]. That type's contract carries
+/// a value-struct producer — `lower::shape::uniform_block_checked` requires its
+/// `leaf_paths()` to equal `value_leaf_paths` over the same struct, matched by
+/// position — and an array member emits leaves no value struct can produce. One
+/// std140 authority (the [`WireKind`] rules and `round_up` below), two producers.
+///
+/// Separate from the scalar block PHYSICALLY too, not just as a type: the scalar
+/// group changes per draw while arrays change per activation, so sharing one
+/// buffer would force either a per-draw copy of the whole array payload or
+/// partial-update state. See `docs/shader-binding-layout-plan.md`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UniformArrayBlockPlan {
+    pub block_name: Ustr,
+    pub members: Vec<ArrayMember>,
+    /// Total size, rounded up to 16. Already a multiple of 16 given every
+    /// member's stride is, but rounded for the same reason the scalar block is.
+    pub size: u32,
+}
+
+impl UniformArrayBlockPlan {
+    /// A stable identity for this block's LAYOUT, the array lane's twin of
+    /// [`UniformBlockPlan::fingerprint`] and folded to 53 bits for the same
+    /// reason: it is emitted as a plain numeric literal, and LuaJIT and JS
+    /// represent integers exactly only that far.
+    ///
+    /// Seeded differently from the scalar fingerprint so an array block and a
+    /// scalar block cannot hash alike — they are independent bindings uploaded
+    /// separately, and a bind that compared the wrong one would accept a
+    /// mismatched buffer.
+    pub fn fingerprint(&self) -> u64 {
+        let mut h = fnv1a(0xa5a5_5a5a_c3c3_3c3c, self.block_name.as_bytes());
+        for m in &self.members {
+            h = fnv1a(h, m.name.as_bytes());
+            h = fnv1a(h, &[m.elem as u8]);
+            h = fnv1a(h, &m.offset.to_le_bytes());
+            h = fnv1a(h, &m.capacity.to_le_bytes());
+            h = fnv1a(h, &m.stride.to_le_bytes());
+        }
+        let h = fnv1a(h, &self.size.to_le_bytes());
+        (h ^ (h >> 53)) & ((1 << 53) - 1)
+    }
+}
+
+/// Lay out one stage's `UniformArray<T>` params as a std140 array block.
+///
+/// The admitted element kinds are exactly the set the GLSL emitter admits
+/// (`array_elem_kind` there): float, int, Vec2, Vec4. `Vec3` is refused because
+/// its base alignment is 16 while its size is 12, so an array of them is neither
+/// tightly packed nor stride-12; `Mat4` and `bool` are simply not offered yet.
+/// Both sides refusing the same set is what stops the layout and the declaration
+/// drifting into disagreeing about what an array may hold.
+pub fn uniform_array_block(
+    block_name: Ustr,
+    decls: &[ArrayMemberDecl],
+) -> Result<UniformArrayBlockPlan, CompilerError> {
+    if decls.is_empty() {
+        return Err(CompilerError::new_no_location(format!(
+            "uniform array block: `{block_name}` has no members -- an empty block binds nothing"
+        )));
+    }
+
+    let mut members = Vec::with_capacity(decls.len());
+    let mut offset = 0u32;
+
+    for d in decls {
+        let stride = match d.elem {
+            WireKind::F32 | WireKind::I32 | WireKind::F32x2 | WireKind::F32x4 => {
+                // An array's stride is its element's base alignment rounded up
+                // to 16. Every kind here rounds to 16; computed rather than
+                // written as a literal so a new kind cannot inherit it silently.
+                round_up(d.elem.align(), 16)
+            }
+            WireKind::F32x3 | WireKind::Mat4 | WireKind::Bool32 => {
+                let name = match d.elem {
+                    WireKind::F32x3 => "Vec3",
+                    WireKind::Mat4 => "Mat4",
+                    _ => "bool",
+                };
+                return Err(CompilerError::new_no_location(format!(
+                    "uniform array block: `{block_name}` member `{}` has element type `{name}`, \
+                     which a uniform array may not hold (allowed: float, int, Vec2, Vec4)",
+                    d.name
+                )));
+            }
+        };
+        if d.capacity == 0 {
+            return Err(CompilerError::new_no_location(format!(
+                "uniform array block: `{block_name}` member `{}` has capacity 0 -- `@size(N)` \
+                 declares how many elements the shader may index, so 0 declares an array nothing \
+                 can read",
+                d.name
+            )));
+        }
+
+        offset = round_up(offset, stride);
+        members.push(ArrayMember {
+            name: d.name,
+            elem: d.elem,
+            capacity: d.capacity,
+            offset,
+            stride,
+        });
+        offset += d.capacity * stride;
+    }
+
+    let size = round_up(offset, 16);
+    if size > GLES3_MAX_UNIFORM_BLOCK_SIZE {
+        return Err(CompilerError::new_no_location(format!(
+            "uniform array block: `{block_name}` needs {size} std140 bytes, over the \
+             {GLES3_MAX_UNIFORM_BLOCK_SIZE} an ES 3.0 driver is required to offer. Array stride is \
+             16 for every element kind, so a `@size(N)` array costs `N * 16` whatever it holds -- \
+             the budget is per BLOCK, and this one is the arrays alone"
+        )));
+    }
+
+    Ok(UniformArrayBlockPlan { block_name, members, size })
+}
+
 /// The ES 3.0 guaranteed minimum for `MAX_UNIFORM_BLOCK_SIZE` (ES 3.0 spec table
 /// 6.31), and the budget a block is held to.
 ///
