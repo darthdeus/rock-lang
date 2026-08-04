@@ -54,7 +54,7 @@ fn concurrent_sim_invocations_do_not_share_compiled_output() {
         .current_dir(&root)
         .args(["sim", VICTIM_PROJECT, VICTIM_SIM])
         .env("ROCK_SIM_SPAWN_BARRIER", &gate)
-        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .env("ROCK_SIM_TIMEOUT_SECS", "60")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -65,7 +65,7 @@ fn concurrent_sim_invocations_do_not_share_compiled_output() {
     let other = Command::new(&rock)
         .current_dir(&root)
         .args(["sim", OTHER_PROJECT, OTHER_SIM])
-        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .env("ROCK_SIM_TIMEOUT_SECS", "60")
         .output()
         .expect("run other invocation");
     assert!(

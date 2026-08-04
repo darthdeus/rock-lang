@@ -30,6 +30,10 @@ mod texture_slot_gate;
 mod skull_overlay_wipe;
 #[path = "sim_concurrent_invocations.rs"]
 mod sim_concurrent_invocations;
+#[path = "sim_worker_differential.rs"]
+mod sim_worker_differential;
+#[path = "sim_reload_lane_drain.rs"]
+mod sim_reload_lane_drain;
 #[path = "web_smoke_tests.rs"]
 mod web_smoke_tests;
 

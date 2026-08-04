@@ -357,6 +357,7 @@ impl CommandContext {
                 &names,
                 self.args.quiet,
                 self.args.update_snapshots,
+                self.args.jobs,
             )
         }
     }
