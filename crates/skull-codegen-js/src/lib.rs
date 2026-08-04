@@ -1140,10 +1140,18 @@ function stone_get_canvas_texture(h) { var c = __SW.canvases[h]; return c ? c.te
 function stone_get_canvas_depth_texture(h) { var c = __SW.canvases[h]; return c ? (c.depthTex || 0) : 0; }
 // Sub-rect of the bound target, logical top-left px -> GL bottom-origin.
 // Reset by re-binding the target, same contract as the native side.
+//
+// The default framebuffer is BACKING pixels while the caller's rect is logical,
+// so it scales by dpr; a canvas is its own pixels and is 1:1. Same split
+// `stone_set_canvas` makes, and the same one the native side makes between
+// drawable and window size. Passing logical straight through would put the rect
+// at 1/dpr size and the wrong place on any dpr != 1 display.
 function stone_set_viewport_rect(x, y, w, h) {
   if (w <= 0 || h <= 0) { __sw_log_once("stone_set_viewport_rect: empty rect"); return; }
+  var s = __SW.boundCanvas !== 0 ? 1 : __SW.dpr;
   var wh = __sw_target_size();
-  __SW.gl.viewport(x, wh[1] - y - h, w, h);
+  var gw = Math.round(w * s), gh = Math.round(h * s);
+  __SW.gl.viewport(Math.round(x * s), wh[1] - Math.round(y * s) - gh, gw, gh);
 }
 // mode: 0 = nearest, 1 = linear. Integer formats refuse -- a linear-filtered
 // integer texture samples zero.
