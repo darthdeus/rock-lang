@@ -331,6 +331,53 @@ fn a_task_left_live_at_stop_sim_still_ticks_in_the_next_entry() {
     assert_ne!(isolated.artifacts["ticks.txt"], worker.artifacts["ticks.txt"]);
 }
 
+/// SENTINEL -- a native resource. Subprocesses are the one native class the
+/// runtime exposes an honest observer for: handles are 1-based registry slots
+/// (`stone-rs/src/proc.rs`) and `stone_proc_alive` answers per handle, so the
+/// fixture compares handle SETS. A count could not see this at all -- the
+/// registry reuses a freed slot, so the freed and the leaked case have the same
+/// count.
+///
+/// Both views must move: the probe finds a live handle it never spawned, AND
+/// its own spawn is pushed off the first slot the predecessor is still holding.
+///
+/// FLIP WHEN FIXED: becomes `assert_equivalent` when the boundary tears down
+/// per-entry native resources (`docs/sim-speed-plan.md` B3).
+#[test]
+fn a_subprocess_still_outlives_the_entry_that_spawned_it() {
+    let (isolated, worker) = differential(&["b0_proc_seed"], "b0_proc_probe");
+    let c = compare(&isolated, &worker);
+
+    assert!(
+        !c.is_equivalent(),
+        "the worker no longer inherits a live subprocess -- land the teardown \
+         and flip this sentinel to assert_equivalent"
+    );
+    for arm in ["verdict", "expects_pass", "expects_fail", "artifacts"] {
+        assert!(c.differs_on(arm), "expected a `{arm}` difference:\n{}", c.report());
+    }
+    assert_eq!(isolated.verdict(), "PASS", "a fresh process inherits nothing");
+    assert_eq!(worker.verdict(), "FAIL");
+
+    for view in [
+        "no subprocess from a predecessor is live in this entry",
+        "this entry's own subprocess takes the first registry slot",
+    ] {
+        assert!(
+            worker.expects_fail.iter().any(|m| m.message.contains(view)),
+            "the `{view}` view did not fire, so only one of the two independent \
+             observations is evidence: {:?}",
+            worker.expects_fail
+        );
+    }
+    // The isolated run has to have taken the same measurement and found it
+    // empty -- otherwise the probe never looked.
+    assert_eq!(
+        isolated.artifacts["procs.txt"].len, 2,
+        "the isolated live-handle set must be the empty `[]`, not unwritten"
+    );
+}
+
 /// Mutation guard for the comparator itself: every arm must be present, and
 /// every arm a fixture can populate must have compared a non-zero population
 /// in at least one fixture. Deleting an arm from `compare` makes `population`
