@@ -112,6 +112,15 @@ fn cell_name<T>(cell: Idx<T>) -> String {
     format!("c{}", raw(cell))
 }
 
+/// The compiler-owned temp holding publisher argument `i` while the remaining
+/// arguments evaluate. In the shared `__rock_` global space and outside the
+/// reserved body namespace, like [`ret_slot`]; a body naming one rejects.
+const PUBLISH_TEMP: &str = "__rock_lane";
+
+fn publish_temp(i: usize) -> String {
+    format!("{PUBLISH_TEMP}{i}")
+}
+
 /// Secondary return register `i` (1-based; leaf 0 rides the ordinary JS return
 /// value). Module scope, not body-local, so it is outside the reserved
 /// `r<N>`/`v<N>`/`c<N>` body namespace and cannot shadow a user global -- the
@@ -266,6 +275,12 @@ fn ident_positions(code: &str, name: &str) -> Vec<usize> {
 /// bank access. A single-lane body returns ordinarily and may use neither.
 fn lower_publisher(body: &str, lanes: usize, name: &str) -> Result<String, CompilerError> {
     let code = code_only(body);
+    if code.contains(PUBLISH_TEMP) {
+        return Err(err(format!(
+            "`inline(js)` body of `{name}` names `{PUBLISH_TEMP}N`, which is compiler-owned: \
+             the publisher lowering evaluates its arguments into those temps"
+        )));
+    }
     if code.contains("__rock_ret") {
         return Err(err(format!(
             "`inline(js)` body of `{name}` touches the scratch bank directly; a multi-lane \
@@ -351,15 +366,28 @@ fn lower_publisher(body: &str, lanes: usize, name: &str) -> Result<String, Compi
             args.len()
         )));
     }
-    // Leaf 0 rides the ordinary return; lanes 1..N ride the bank, published
-    // together at the real return -- after every potentially-throwing leaf
-    // expression, which is what makes a throwing callee leave stale lanes unread.
+    // ORDER IS PART OF THE CONTRACT. `__rock_publish(f(), g())` is an ordinary
+    // JS call expression, so its arguments evaluate left to right; assigning
+    // lane 1 from `g()` first would run `g` before `f` and publish a lane
+    // before `f` had a chance to throw. Every argument is therefore evaluated,
+    // IN ORDER, into compiler-owned temps, and only then does anything reach
+    // the bank -- which is also what makes a throwing publisher leave no lane
+    // behind for the caller (which never captures) to see later.
     let prefix = &body[..return_at];
     let mut lowered = String::from(prefix);
-    for (i, a) in args.iter().enumerate().skip(1) {
-        lowered.push_str(&format!("{} = {a}; ", ret_slot(i)));
+    let temps: Vec<String> = (0..args.len()).map(publish_temp).collect();
+    lowered.push_str("var ");
+    for (i, (t, a)) in temps.iter().zip(args.iter()).enumerate() {
+        if i > 0 {
+            lowered.push_str(", ");
+        }
+        lowered.push_str(&format!("{t} = {a}"));
     }
-    lowered.push_str(&format!("return {};", args[0]));
+    lowered.push_str("; ");
+    for (i, t) in temps.iter().enumerate().skip(1) {
+        lowered.push_str(&format!("{} = {t}; ", ret_slot(i)));
+    }
+    lowered.push_str(&format!("return {};", temps[0]));
     Ok(lowered)
 }
 

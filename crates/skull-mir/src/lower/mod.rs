@@ -438,6 +438,12 @@ pub fn scalar_abi_param_leaf_widths(
 /// its own slot, a `nobox` element splatting into its leaves) and a bare
 /// `nobox` value return under the scalar ABI.
 ///
+/// **Answered for the DECLARED signature**, under an empty substitution -- the
+/// only shape GLSL/JS lowering can ask about today. A caller holding concrete
+/// instances must therefore ask this only of an instance whose substitution is
+/// empty; for a generic one the declared return is not the shape the artifact
+/// carries, and `ArtifactView::publisher_lanes` records it as unknown instead.
+///
 /// This is what a JS multi-lane publisher's arity comes from
 /// (`docs/boundary-contracts.md` 1.2, plan S 13b): leaf 0 rides the ordinary
 /// JS `return`, lanes 1..N ride the module-scope scratch bank. Derived from the

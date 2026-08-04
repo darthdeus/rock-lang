@@ -17,7 +17,7 @@ use std::sync::LazyLock;
 use bone_semantic::inference::Workspace;
 use skull::artifact::{self, ArtifactRequest};
 use skull::instance_graph::{self, InstanceGraph};
-use skull::shader_artifact::{self, ShaderArtifactRequest, ShaderRejection};
+use skull::shader_artifact::{self, ShaderArtifactRequest, ShaderProgram, ShaderRejection};
 use skull::target_projection::{
     JAVASCRIPT_WEB, LUAJIT_DESKTOP, LUAJIT_IOS, NATIVE_C64_DESKTOP,
 };
@@ -44,16 +44,16 @@ fn graph_for(ws: &Workspace) -> (InstanceGraph, Vec<skull_mir::mir::FuncRef>) {
     (instance_graph::build(ws, roots.clone(), false), roots)
 }
 
-/// The shader ROOTS production hands over: the `rock_shader` pairs, from
+/// The shader PROGRAMS production hands over: the `rock_shader` pairs, from
 /// `skull_mir`'s own collector. An input, exactly like the CPU artifact's
 /// emission roots -- the view never re-derives them.
-fn shader_roots(ws: &Workspace) -> Vec<skull_mir::mir::FuncRef> {
-    let mut out = Vec::new();
-    for pair in skull_mir::lower::collect_shader_collection(ws).expect("shader pairs").pairs {
-        out.extend(pair.vert);
-        out.push(pair.frag);
-    }
-    out
+fn shader_roots(ws: &Workspace) -> Vec<ShaderProgram> {
+    skull_mir::lower::collect_shader_collection(ws)
+        .expect("shader pairs")
+        .pairs
+        .into_iter()
+        .map(|p| ShaderProgram { vert: p.vert, frag: p.frag })
+        .collect()
 }
 
 fn names(ws: &Workspace, set: impl IntoIterator<Item = skull::instance_graph::Instance>) -> Vec<String> {
@@ -90,7 +90,7 @@ fn the_shader_view_carries_the_typed_profile_from_the_axis() {
     let view = shader_artifact::realize_shader(
         &ws,
         &g,
-        &ShaderArtifactRequest { spec: LUAJIT_DESKTOP, roots: &roots },
+        &ShaderArtifactRequest { spec: LUAJIT_DESKTOP, programs: &roots },
     )
     .expect("a target with a GLSL axis packages a shader artifact");
     assert_eq!(view.profile, skull_codegen_glsl::GlslProfile::Core330);
@@ -105,7 +105,7 @@ fn the_shader_view_carries_the_typed_profile_from_the_axis() {
         ..LUAJIT_DESKTOP
     };
     let es_view =
-        shader_artifact::realize_shader(&ws, &g, &ShaderArtifactRequest { spec: es, roots: &roots })
+        shader_artifact::realize_shader(&ws, &g, &ShaderArtifactRequest { spec: es, programs: &roots })
             .expect("shader artifact");
     assert_eq!(es_view.profile, skull_codegen_glsl::GlslProfile::Es300);
     assert_eq!(
@@ -119,7 +119,7 @@ fn the_shader_view_carries_the_typed_profile_from_the_axis() {
     assert!(shader_artifact::realize_shader(
         &ws,
         &g,
-        &ShaderArtifactRequest { spec: NATIVE_C64_DESKTOP, roots: &roots }
+        &ShaderArtifactRequest { spec: NATIVE_C64_DESKTOP, programs: &roots }
     )
     .is_none());
 }
@@ -134,7 +134,7 @@ fn the_shader_view_retains_the_helpers_its_entries_reach() {
     let view = shader_artifact::realize_shader(
         &ws,
         &g,
-        &ShaderArtifactRequest { spec: LUAJIT_DESKTOP, roots: &shader_roots(&ws) },
+        &ShaderArtifactRequest { spec: LUAJIT_DESKTOP, programs: &shader_roots(&ws) },
     )
     .expect("shader artifact");
 
@@ -200,7 +200,7 @@ fn main() { let key = rock_shader(rec_frag) }
     let view = shader_artifact::realize_shader(
         &ws,
         &g,
-        &ShaderArtifactRequest { spec: LUAJIT_DESKTOP, roots: &shader_roots(&ws) },
+        &ShaderArtifactRequest { spec: LUAJIT_DESKTOP, programs: &shader_roots(&ws) },
     )
     .expect("shader artifact");
 
@@ -215,13 +215,24 @@ fn main() { let key = rock_shader(rec_frag) }
         "expected exactly the `rec_helper` cycle: {:?}",
         view.render_rejections(&ws)
     );
+    // The rejection is filed against the ENTRY -- the GLSL pass runs per entry,
+    // exactly as emission does -- and NAMES the recursive helper in the
+    // emitter's own message and span.
     assert_eq!(
         ws.module(recursions[0].instance.func.module).functions
             [recursions[0].instance.func.func]
             .name
             .as_str(),
-        "rec_helper"
+        "rec_frag"
     );
+    assert!(
+        recursions[0].message.contains("rec_helper")
+            && recursions[0].message.contains("recursion"),
+        "the rejection lost the emitter's diagnostic: {}",
+        recursions[0].message
+    );
+    assert!(view.disagreements.is_empty(), "{:?}", view.disagreements);
+    assert!(view.entries_checked > 0, "no entry was checked, so the kind says nothing");
     assert!(
         !instance_graph::is_spanless(&recursions[0].span),
         "the recursion rejection carries no source span"
@@ -245,7 +256,7 @@ fn main() { let key = rock_shader(rec_frag) }
     let ok = shader_artifact::realize_shader(
         &ws2,
         &g2,
-        &ShaderArtifactRequest { spec: LUAJIT_DESKTOP, roots: &shader_roots(&ws2) },
+        &ShaderArtifactRequest { spec: LUAJIT_DESKTOP, programs: &shader_roots(&ws2) },
     )
     .expect("shader artifact");
     assert!(
@@ -277,14 +288,14 @@ fn main() { let key = rock_shader(tier_frag) }
     let view = shader_artifact::realize_shader(
         &ws,
         &g,
-        &ShaderArtifactRequest { spec: LUAJIT_DESKTOP, roots: &shader_roots(&ws) },
+        &ShaderArtifactRequest { spec: LUAJIT_DESKTOP, programs: &shader_roots(&ws) },
     )
     .expect("shader artifact");
 
     let profile: Vec<&ShaderRejection> = view
         .rejections
         .iter()
-        .filter(|r| matches!(r.kind, shader_artifact::ShaderRejectionKind::Profile(_)))
+        .filter(|r| matches!(r.kind, shader_artifact::ShaderRejectionKind::Profile))
         .collect();
     assert_eq!(
         profile.len(),
@@ -318,7 +329,7 @@ fn main() { let key = rock_shader(uniform_frag) }
     let entry = shader_artifact::realize_shader(
         &ws3,
         &g3,
-        &ShaderArtifactRequest { spec: LUAJIT_DESKTOP, roots: &shader_roots(&ws3) },
+        &ShaderArtifactRequest { spec: LUAJIT_DESKTOP, programs: &shader_roots(&ws3) },
     )
     .expect("shader artifact");
     assert!(!entry.roots.is_empty(), "the uniform fixture registered no entry");
@@ -334,7 +345,7 @@ fn main() { let key = rock_shader(uniform_frag) }
     let ok = shader_artifact::realize_shader(
         &ws2,
         &g2,
-        &ShaderArtifactRequest { spec: LUAJIT_DESKTOP, roots: &shader_roots(&ws2) },
+        &ShaderArtifactRequest { spec: LUAJIT_DESKTOP, programs: &shader_roots(&ws2) },
     )
     .expect("shader artifact");
     assert!(ok.rejections.is_empty(), "{:?}", ok.render_rejections(&ws2));
@@ -350,7 +361,7 @@ fn platform_does_not_change_the_shader_artifact() {
     let (g, _) = graph_for(&ws);
     let roots = shader_roots(&ws);
     let of = |spec| {
-        shader_artifact::realize_shader(&ws, &g, &ShaderArtifactRequest { spec, roots: &roots })
+        shader_artifact::realize_shader(&ws, &g, &ShaderArtifactRequest { spec, programs: &roots })
             .expect("shader artifact")
     };
     let desktop = of(LUAJIT_DESKTOP);
@@ -361,4 +372,161 @@ fn platform_does_not_change_the_shader_artifact() {
     assert_eq!(desktop.roots, ios.roots);
     assert_eq!(desktop.helpers, ios.helpers);
     assert_eq!(desktop.helpers, web.helpers);
+}
+
+/// **The view runs emission's pass, not a summary of it.** A helper whose
+/// SIGNATURE is tier 0 and whose BODY is not (a string literal), and a helper
+/// with a foreign body and no GLSL mapping, both compile as far as any
+/// signature check can see -- and both are refused by `emit_shader_entry`.
+/// A view that only checked signatures reported them clean.
+#[test]
+fn a_body_the_emitter_refuses_is_refused_by_the_view() {
+    let cases: [(&str, &str); 2] = [
+        (
+            r#"
+@pure fn stringy_body(x: float) -> float {
+    let s = "not tier 0"
+    return x
+}
+
+@shader(fragment)
+fn body_frag(uTexture: Sampler2D, tc: Vec2) -> Vec4 {
+    let d = stringy_body(tc.x)
+    return v(d, d, d, 1.0)
+}
+
+fn main() { let key = rock_shader(body_frag) }
+"#,
+            "string",
+        ),
+        (
+            r#"
+inline(lua) fn lua_only_helper(x: float) -> float = "return x * 2"
+
+@shader(fragment)
+fn foreign_frag(uTexture: Sampler2D, tc: Vec2) -> Vec4 {
+    let d = lua_only_helper(tc.x)
+    return v(d, d, d, 1.0)
+}
+
+fn main() { let key = rock_shader(foreign_frag) }
+"#,
+            "no emittable body",
+        ),
+    ];
+    for (src, needle) in cases {
+        let ws = check(src);
+        let (g, _) = graph_for(&ws);
+        let view = shader_artifact::realize_shader(
+            &ws,
+            &g,
+            &ShaderArtifactRequest { spec: LUAJIT_DESKTOP, programs: &shader_roots(&ws) },
+        )
+        .expect("shader artifact");
+        assert!(view.entries_checked > 0, "no entry was checked at all");
+        let msgs = view.render_rejections(&ws);
+        assert_eq!(msgs.len(), 1, "expected exactly one rejection, got {msgs:?}");
+        assert!(
+            msgs[0].contains(needle),
+            "the rejection is not the emitter's own ({needle}): {msgs:?}"
+        );
+    }
+}
+
+/// **A declaration-based check may not answer for a generic instance.** GLSL
+/// lowering takes no substitution, so a generic helper's declaration is not the
+/// shape any artifact packages. The view records it as unchecked rather than
+/// validating the wrong thing -- and the concrete control shows the bucket is
+/// not simply where everything lands.
+#[test]
+fn a_generic_shader_instance_is_recorded_unchecked_rather_than_validated() {
+    let ws = check(
+        r#"
+@pure fn twice<T>(x: T) -> T { return x }
+@pure fn concrete_helper(x: float) -> float { return x * 2.0 }
+
+@shader(fragment)
+fn generic_frag(uTexture: Sampler2D, tc: Vec2) -> Vec4 {
+    let d = concrete_helper(twice(tc.x))
+    return v(d, d, d, 1.0)
+}
+
+fn main() { let key = rock_shader(generic_frag) }
+"#,
+    );
+    let (g, _) = graph_for(&ws);
+    let view = shader_artifact::realize_shader(
+        &ws,
+        &g,
+        &ShaderArtifactRequest { spec: LUAJIT_DESKTOP, programs: &shader_roots(&ws) },
+    )
+    .expect("shader artifact");
+
+    let unchecked = names(&ws, view.unchecked_generic.iter().cloned());
+    assert!(
+        unchecked.iter().any(|n| n == "twice"),
+        "a generic helper instance was not recorded as unchecked: {unchecked:?}"
+    );
+    // CONTROL: the concrete helper is NOT in that bucket, so it is not simply
+    // collecting every retained instance.
+    assert!(
+        !unchecked.iter().any(|n| n == "concrete_helper"),
+        "a concrete instance was recorded as unchecked: {unchecked:?}"
+    );
+    assert!(view.entries_checked > 0, "the concrete entry was not checked");
+}
+
+/// **A PIPELINE fragment is not a standalone entry.** Its signature carries the
+/// vertex stage's varyings value, which `classify_entry` refuses outright --
+/// so a view given a flat root list rather than the registered PAIRS asks the
+/// wrong question and rejects every A2 shader this repo ships (543 corpus
+/// rejections, measured, before the request carried programs).
+#[test]
+fn an_a2_pipeline_is_checked_as_a_pair_not_as_two_entries() {
+    let ws = check(
+        r#"
+value QuadVert { aPos: Vec2, aTexCoord: Vec2 }
+value PipeU    { uProjection: Mat4 }
+value PipeVary { position: Vec4, TexCoord: Vec2 }
+
+struct PipeTex { uTexture: Sampler2D }
+
+@shader(vertex)
+fn pipe_vert(@attr a: QuadVert, @uniform u: PipeU) -> PipeVary {
+    let clip = u.uProjection * Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 }
+    return PipeVary { position: clip, TexCoord: a.aTexCoord }
+}
+
+@shader(fragment)
+fn pipe_frag(vary: PipeVary, @textures t: PipeTex) -> Vec4 {
+    return texture(t.uTexture, vary.TexCoord)
+}
+
+global PIPE_KEY: string = rock_shader(pipe_vert, pipe_frag)
+
+fn main() { print("{PIPE_KEY}") }
+"#,
+    );
+    let (g, _) = graph_for(&ws);
+    let programs = shader_roots(&ws);
+    assert_eq!(programs.len(), 1, "the fixture registered {} programs", programs.len());
+    assert!(programs[0].vert.is_some(), "the fixture is not a PAIR, so it tests nothing");
+
+    let view = shader_artifact::realize_shader(
+        &ws,
+        &g,
+        &ShaderArtifactRequest { spec: LUAJIT_DESKTOP, programs: &programs },
+    )
+    .expect("shader artifact");
+    assert_eq!(view.entries_checked, 1, "the pair was not checked");
+    assert!(
+        view.rejections.is_empty(),
+        "a real A2 pipeline was rejected: {:?}",
+        view.render_rejections(&ws)
+    );
+    // Both stages are packaged, and the vertex one is a root rather than a
+    // helper: a pair is two entries of one program.
+    let root_names = names(&ws, view.roots.iter().cloned());
+    assert!(root_names.iter().any(|n| n == "pipe_vert"), "{root_names:?}");
+    assert!(root_names.iter().any(|n| n == "pipe_frag"), "{root_names:?}");
 }

@@ -1840,6 +1840,66 @@ pub struct ShaderEmission {
     pub uniform_blocks: Vec<UniformBlockPlan>,
 }
 
+/// **Everything the emission walk asks of one shader ENTRY**, without emitting:
+/// the stage classification of its own signature, its body's lowering and
+/// tier-0 profile pass, the same [`Reach`] walk over its callees (which is what
+/// rejects recursion, a foreign body with no GLSL mapping, and a helper outside
+/// tier 0), and the stage-specific builtin validation over the resulting set.
+///
+/// Published for the mono SHADER ARTIFACT VIEW, which must not be able to admit
+/// what emission refuses. It is emission's own pass, not a summary of it: the
+/// only thing left out below this point is the GLSL text itself.
+///
+/// Declaration-based, like the rest of GLSL lowering today -- `lower_function`
+/// takes no substitution -- so a caller holding concrete instances must not
+/// hand this a generic declaration and read the answer as concrete.
+pub fn check_entry_profile(ws: &Workspace, fref: FuncRef) -> Result<(), CompilerError> {
+    let scx = ScalarCtx::new_values_first_class(ws);
+    let f = &ws.module(fref.module).functions[fref.func];
+    let stage = match shader_stage(f) {
+        Some("fragment") => Stage::Fragment,
+        Some("vertex") => Stage::Vertex,
+        Some(other) => {
+            return Err(err(
+                f.name_span,
+                format!("shader entry: @shader({other}) is not supported yet"),
+            ))
+        }
+        None => {
+            return Err(err(
+                f.name_span,
+                format!("shader entry: `{}` has no @shader(..) annotation", f.name),
+            ))
+        }
+    };
+    // The entry's signature is validated by its STAGE classification, never by
+    // the fn-library tier-0 leaf check: an `@uniform` block param is legal here
+    // and is not a tier-0 leaf.
+    match stage {
+        Stage::Fragment => {
+            classify_entry(ws, f)?;
+        }
+        Stage::Vertex => {
+            classify_vertex(ws, f)?;
+        }
+    }
+    let mf = lower_function(ws, &scx, fref.module, fref.func).map_err(|e| {
+        err(f.name_span, format!("shader profile: `{}` cannot lower for GLSL: {}", f.name, e.message))
+    })?;
+    let mut callees: Vec<FuncRef> = Vec::new();
+    profile_body(f, &mf, &mut callees)?;
+    let mut reach = Reach::new(ws, &scx);
+    reach.entry = Some(fref);
+    reach.seeds = callees;
+    reach.walk()?;
+    reject_stage_violations(
+        ws,
+        stage,
+        reach.bodies.values().chain(std::iter::once(&mf)),
+        f.name_span,
+    )
+}
+
 pub fn emit_shader_entry_with_dependencies(
     ws: &Workspace,
     mid: ModuleId,
@@ -2800,6 +2860,53 @@ pub fn emit_shader_pipeline(
         ws, mid, vert_root, frag_root, profile,
     )?
     .source)
+}
+
+/// The PIPELINE counterpart of [`check_entry_profile`]: everything
+/// `emit_shader_pipeline` asks of a `(vertex, fragment)` pair before it writes
+/// GLSL -- both stage annotations, the vertex shape and its varyings, the
+/// fragment classified AGAINST those varyings (not as a standalone entry, where
+/// a varyings param has no meaning), the cross-stage collision and `@engine`
+/// group checks, and each stage's own lowering + tier-0 + reachability +
+/// stage-builtin pass.
+///
+/// A pipeline fragment is NOT checkable as a single entry: `classify_entry`
+/// refuses its varyings param outright, which is why the mono view must be
+/// given the PAIRS production registers rather than a flat root list.
+pub fn check_pipeline_profile(
+    ws: &Workspace,
+    vfref: FuncRef,
+    ffref: FuncRef,
+) -> Result<(), CompilerError> {
+    let scx = ScalarCtx::new_values_first_class(ws);
+    let vf = &ws.module(vfref.module).functions[vfref.func];
+    let ff = &ws.module(ffref.module).functions[ffref.func];
+    if shader_stage(vf) != Some("vertex") {
+        return Err(err(
+            vf.name_span,
+            format!("shader pipeline: the vertex root `{}` must carry @shader(vertex)", vf.name),
+        ));
+    }
+    if shader_stage(ff) != Some("fragment") {
+        return Err(err(
+            ff.name_span,
+            format!("shader pipeline: the fragment root `{}` must carry @shader(fragment)", ff.name),
+        ));
+    }
+    let vshape = classify_vertex(ws, vf)?;
+    let varyings = classify_varyings(ws, vshape.varyings_ty, vf.name_span)?;
+    let fshape = classify_pipeline_fragment(ws, ff, vshape.varyings_ty)?;
+    check_pipeline_collisions(&vshape, &varyings, &fshape, vf.name_span)?;
+    if let (Some(v), Some(f)) = (vshape.engine_group, fshape.engine_group) {
+        if v != f {
+            return Err(err(vf.name_span, format!(
+                "shader pipeline: the stages declare different @engine groups (`{v}` and `{f}`) -- the engine block is one per program"
+            )));
+        }
+    }
+    lower_reach_helpers(ws, &scx, vfref, Stage::Vertex)?;
+    lower_reach_helpers(ws, &scx, ffref, Stage::Fragment)?;
+    Ok(())
 }
 
 pub fn emit_shader_pipeline_with_dependencies(

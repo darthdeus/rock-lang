@@ -1435,8 +1435,11 @@ fn main() { let n = bound_probe(1) + host_probe(2) }
     assert!(bound.boundaries.contains_key(&inst));
     assert!(!bound.instances.contains(&inst));
 
-    // The declaration's OWN body wins where it has one: binding everything must
-    // not make the artifact stop emitting an `inline(js)` sibling.
+    // A BINDING WINS OVER THE DECLARATION'S OWN BODY, because that is what the
+    // emitter does: `skull_codegen_js`'s callee walk skips a host-bound callee
+    // before it reaches the co-emit branches, so the body is never emitted.
+    // Classifying by the body instead would have the artifact traverse a Rock
+    // body emission never emits -- `map_new` is exactly that shape.
     let lua = artifact::realize(
         &ws,
         &g,
@@ -1446,10 +1449,73 @@ fn main() { let n = bound_probe(1) + host_probe(2) }
     );
     assert_eq!(
         kind(&lua, "bound_probe"),
+        Some(artifact::Realization::HostBinding),
+        "the artifact emitted a body its own binding replaces"
+    );
+    // CONTROL: without the bindings the same declaration IS its own body, so
+    // the answer above is the BINDING's and not the declaration's.
+    let unbound_lua = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
+    assert_eq!(
+        kind(&unbound_lua, "bound_probe"),
         Some(artifact::Realization::ForeignBody(
             skull::instance_graph::BoundaryClass::InlineBody
-        )),
-        "a host binding displaced a body the artifact actually emits"
+        ))
+    );
+}
+
+/// A host-bound declaration with a ROCK body is not traversed. `map_new` is
+/// pure Rock (`transmute(table_new())`) and the JS backend renders it as
+/// `new Map()`, skipping its co-emission -- so a view that classified it by its
+/// body would walk into callees this artifact never emits.
+#[test]
+fn a_host_bound_rock_body_is_a_boundary_and_is_not_traversed() {
+    let ws = check(
+        r#"
+fn rock_bound(x: int) -> int { return rock_bound_callee(x) }
+fn rock_bound_callee(x: int) -> int { return x + 1 }
+fn main() { let n = rock_bound(1) }
+"#,
+    );
+    let (g, all_roots) = graph_for(&ws);
+    let roots: Vec<skull_mir::mir::FuncRef> = all_roots
+        .iter()
+        .copied()
+        .filter(|r| ws.module(r.module).functions[r.func].name.as_str() == "main")
+        .collect();
+    struct BindsRockBound;
+    impl artifact::HostBindings for BindsRockBound {
+        fn supplies(&self, _ws: &Workspace, f: &bone_semantic::hir::Function) -> bool {
+            f.name.as_str() == "rock_bound"
+        }
+        fn describe(&self) -> &'static str {
+            "binds-rock-bound"
+        }
+    }
+    let named = |view: &artifact::ArtifactView, name: &str| {
+        view.realization
+            .iter()
+            .find(|(i, _)| ws.module(i.func.module).functions[i.func.func].name.as_str() == name)
+            .map(|(_, r)| r.kind)
+    };
+
+    // CONTROL first: unbound, it is a Rock body and its callee is reached.
+    let plain = artifact::realize(&ws, &g, &ArtifactRequest::new(JAVASCRIPT_WEB, &roots));
+    assert_eq!(named(&plain, "rock_bound"), Some(artifact::Realization::RockBody));
+    assert_eq!(named(&plain, "rock_bound_callee"), Some(artifact::Realization::RockBody));
+
+    let bindings = BindsRockBound;
+    let bound = artifact::realize(
+        &ws,
+        &g,
+        &ArtifactRequest::new(JAVASCRIPT_WEB, &roots).with_mappings(
+            ArtifactMappings::for_backend(FnBackend::Js).with_host_bindings(&bindings),
+        ),
+    );
+    assert_eq!(named(&bound, "rock_bound"), Some(artifact::Realization::HostBinding));
+    assert_eq!(
+        named(&bound, "rock_bound_callee"),
+        None,
+        "the walk entered a body the artifact's own binding replaces"
     );
 }
 

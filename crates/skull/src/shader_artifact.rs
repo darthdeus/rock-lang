@@ -34,13 +34,26 @@ use skull_parser::Span;
 use crate::instance_graph::{DeclKey, Instance, InstanceGraph, SiteOutcome};
 use crate::target_projection::{ShaderTargetSpec, TargetSpec};
 
+/// One registered shader program: a `(vertex, fragment)` pair, or the
+/// single-argument fullscreen form whose vertex stage the compiler supplies.
+///
+/// PAIRS, not a flat root list. A pipeline fragment's signature is classified
+/// against its vertex stage's varyings type -- as a standalone entry the same
+/// signature is refused outright -- so a view holding only the fragment could
+/// not ask GLSL the question emission asks.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ShaderProgram {
+    pub vert: Option<FuncRef>,
+    pub frag: FuncRef,
+}
+
 /// Everything one shader artifact view is taken through.
 pub struct ShaderArtifactRequest<'a> {
     pub spec: TargetSpec,
-    /// The shader ENTRIES, an input exactly like the CPU artifact's emission
+    /// The shader PROGRAMS, an input exactly like the CPU artifact's emission
     /// roots. Production reads them from `skull_mir::lower`'s `rock_shader`
     /// collector; the view never re-derives them.
-    pub roots: &'a [FuncRef],
+    pub programs: &'a [ShaderProgram],
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -48,16 +61,22 @@ pub enum ShaderRejectionKind {
     /// A cycle among retained shader instances. GLSL has no call stack, so this
     /// is a rejection and not a cost.
     Recursion,
-    /// The strict tier-0 pass refused this declaration's signature.
-    Profile(String),
+    /// Anything else the strict pass refused: a signature outside tier 0, a
+    /// body that cannot lower, a foreign body with no GLSL mapping, a
+    /// wrong-stage builtin.
+    Profile,
 }
 
 /// One retained shader instance this artifact cannot package, with the span the
 /// diagnostic attaches to at the Stage-3 cutover.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ShaderRejection {
+    /// The ENTRY the GLSL pass refused. Its own signature, its body, or
+    /// anything it reaches -- `message` and `span` name which.
     pub instance: Instance,
     pub kind: ShaderRejectionKind,
+    /// The emitter's own diagnostic, verbatim.
+    pub message: String,
     pub span: Span,
 }
 
@@ -73,6 +92,17 @@ pub struct ShaderArtifactView {
     /// emitted as a definition -- `skull_codegen_glsl`'s own leaf rule.
     pub builtins: BTreeSet<Instance>,
     pub rejections: Vec<ShaderRejection>,
+    /// Retained instances the declaration-based GLSL passes cannot answer for:
+    /// their substitution is not empty, so the declaration is not the shape the
+    /// artifact packages. Reported, never silently validated.
+    pub unchecked_generic: BTreeSet<Instance>,
+    /// Where the structural cycle finding and the GLSL pass disagree. Both
+    /// answer "is this recursive"; keeping the comparison is what makes the
+    /// typed `Recursion` kind evidence rather than a second opinion.
+    pub disagreements: Vec<String>,
+    /// Entries the GLSL pass actually ran over -- the denominator for
+    /// `rejections`.
+    pub entries_checked: usize,
     /// Call sites the retention walk traversed -- the denominator for
     /// `rejections`, so zero rejections over zero sites cannot read as clean.
     pub sites_walked: usize,
@@ -90,12 +120,7 @@ impl ShaderArtifactView {
             .iter()
             .map(|r| {
                 let f = &ws.module(r.instance.func.module).functions[r.instance.func.func];
-                match &r.kind {
-                    ShaderRejectionKind::Recursion => {
-                        format!("`{}`: recursion is not allowed on GLSL", f.name)
-                    }
-                    ShaderRejectionKind::Profile(m) => format!("`{}`: {m}", f.name),
-                }
+                format!("`{}`: {}", f.name, r.message)
             })
             .collect()
     }
@@ -119,9 +144,10 @@ pub fn realize_shader(
     };
 
     let root_decls: BTreeSet<DeclKey> = req
-        .roots
+        .programs
         .iter()
-        .map(|r| DeclKey(skull_mir::lower::canonical_variant(ws, *r)))
+        .flat_map(|p| p.vert.into_iter().chain(std::iter::once(p.frag)))
+        .map(|r| DeclKey(skull_mir::lower::canonical_variant(ws, r)))
         .collect();
     let roots: BTreeSet<Instance> =
         g.instances.iter().filter(|i| root_decls.contains(&DeclKey(i.func))).cloned().collect();
@@ -153,61 +179,161 @@ pub fn realize_shader(
         }
     }
 
-    let mut rejections: Vec<ShaderRejection> = Vec::new();
-    rejections.extend(recursion_rejections(&roots, &edges));
-    // The strict tier-0 pass, over the HELPERS this artifact retains -- GLSL's
-    // own function, so the view cannot admit a signature the emitter refuses.
+    // THE PROFILE PASS IS EMISSION'S OWN, run per ENTRY.
+    // `check_entry_profile` is the whole of what `emit_shader_entry` does
+    // before it writes GLSL: stage classification of the entry's signature (an
+    // `@uniform` block param is legal there and is NOT a tier-0 leaf -- asking
+    // the fn-library check of an entry rejected 1,539 real shaders), the
+    // entry's own lowering and tier-0 body pass, the same `Reach` walk over its
+    // callees (which rejects recursion, a foreign body with no GLSL mapping and
+    // a helper outside tier 0), and the stage-specific builtin validation.
+    // A summary of those checks written here could disagree with the emitter;
+    // this cannot.
     //
-    // Not over the ENTRIES: an entry's signature is classified by stage
-    // (`classify_entry` / `classify_vertex`), where an `@uniform` struct param
-    // is legal and a tier-0 leaf is not the question. Asking the library check
-    // there reported 1,539 corpus rejections, every one a real shader this
-    // repo ships (`bloom_blur_frag`'s `BloomBlurU`).
-    for i in helpers.iter() {
-        let f = &ws.module(i.func.module).functions[i.func.func];
-        if let Err(e) = skull_codegen_glsl::check_tier0_signature(ws, f) {
-            rejections.push(ShaderRejection {
-                instance: i.clone(),
-                kind: ShaderRejectionKind::Profile(e.message),
-                span: f.name_span,
-            });
+    // What the walk above still owns is PACKAGING -- which concrete instances
+    // this artifact carries -- and the structural cycle finding that TYPES a
+    // failure as recursion. The two are cross-checked rather than trusted: a
+    // cycle the emitter accepts, or an emitter recursion rejection over an
+    // acyclic retained relation, is a recorded `disagreements` entry.
+    let cyclic = cyclic_instances(&roots, &edges);
+    let mut rejections: Vec<ShaderRejection> = Vec::new();
+    let mut disagreements: Vec<String> = Vec::new();
+    let mut checked = 0usize;
+    for program in req.programs {
+        // The PROGRAM's instances -- the fragment entry, and the vertex stage
+        // when the pair has one.
+        let Some(root) = roots.iter().find(|i| DeclKey(i.func) == DeclKey(
+            skull_mir::lower::canonical_variant(ws, program.frag),
+        )) else {
+            continue;
+        };
+        // DECLARATION-BASED, so it is asked only of a concrete instance. GLSL
+        // lowering takes no substitution today, so handing it a generic
+        // declaration would validate a shape no instance has -- see
+        // `unchecked_generic`.
+        if !substitution_is_empty(g, root)
+            || program.vert.is_some_and(|v| {
+                roots
+                    .iter()
+                    .find(|i| DeclKey(i.func) == DeclKey(skull_mir::lower::canonical_variant(ws, v)))
+                    .is_none_or(|i| !substitution_is_empty(g, i))
+            })
+        {
+            continue;
+        }
+        checked += 1;
+        let entry_cycle = cyclic.contains(root)
+            || reaches_cycle(root, &edges, &cyclic);
+        let outcome = match program.vert {
+            Some(v) => skull_codegen_glsl::check_pipeline_profile(ws, v, program.frag),
+            None => skull_codegen_glsl::check_entry_profile(ws, program.frag),
+        };
+        match outcome {
+            Ok(()) => {
+                if entry_cycle {
+                    disagreements.push(format!(
+                        "`{}`: the retained instance relation has a cycle the GLSL pass accepted",
+                        ws.module(root.func.module).functions[root.func.func].name
+                    ));
+                }
+            }
+            Err(e) => {
+                let f = &ws.module(root.func.module).functions[root.func.func];
+                let span = e.labels.first().map(|l| l.span).unwrap_or(f.name_span);
+                let kind = if entry_cycle {
+                    ShaderRejectionKind::Recursion
+                } else {
+                    ShaderRejectionKind::Profile
+                };
+                if entry_cycle && !e.message.contains("recursion") {
+                    disagreements.push(format!(
+                        "`{}`: cyclic retained relation, but the GLSL pass rejected it as: {}",
+                        f.name, e.message
+                    ));
+                }
+                rejections.push(ShaderRejection {
+                    instance: root.clone(),
+                    kind,
+                    message: e.message.clone(),
+                    span,
+                });
+            }
         }
     }
+    // Retained shader instances the declaration-based pass above cannot answer
+    // for. Reported rather than skipped silently: a generic helper validated
+    // against its generic declaration is a verdict about a shape no artifact
+    // packages, which is exactly what an instance view exists to avoid.
+    let unchecked_generic: BTreeSet<Instance> = roots
+        .iter()
+        .chain(helpers.iter())
+        .filter(|i| !substitution_is_empty(g, i))
+        .cloned()
+        .collect();
 
-    Some(ShaderArtifactView { profile, roots, helpers, builtins, rejections, sites_walked })
+    Some(ShaderArtifactView {
+        profile,
+        roots,
+        helpers,
+        builtins,
+        rejections,
+        unchecked_generic,
+        disagreements,
+        entries_checked: checked,
+        sites_walked,
+    })
 }
 
-/// Cycles in the RETAINED shader call graph, one rejection per instance that
-/// reaches itself.
+/// Whether this instance's substitution is empty -- i.e. the declaration IS the
+/// concrete shape. The declaration-based GLSL passes are exact only here.
+fn substitution_is_empty(g: &InstanceGraph, i: &Instance) -> bool {
+    i.args.is_empty() && g.substitutions.get(i).map(|s| s.is_empty()).unwrap_or(true)
+}
+
+/// Whether `root` reaches any instance on a cycle.
+fn reaches_cycle(
+    root: &Instance,
+    edges: &BTreeMap<Instance, Vec<(Instance, Span)>>,
+    cyclic: &BTreeSet<Instance>,
+) -> bool {
+    let mut seen: BTreeSet<&Instance> = BTreeSet::new();
+    let mut queue: VecDeque<&Instance> = VecDeque::new();
+    queue.push_back(root);
+    while let Some(n) = queue.pop_front() {
+        if cyclic.contains(n) {
+            return true;
+        }
+        for (callee, _) in edges.get(n).into_iter().flatten() {
+            if seen.insert(callee) {
+                queue.push_back(callee);
+            }
+        }
+    }
+    false
+}
+
+/// Instances on a cycle in the RETAINED shader call relation.
 ///
 /// Over the recorded edges, not a second resolution of the program: the walk
 /// above already asked what each site calls, and this only asks whether that
-/// relation has a cycle -- which is the property GLSL cannot compile.
-fn recursion_rejections(
+/// relation has a cycle. It does not decide the artifact's verdict --
+/// `check_entry_profile` does -- it TYPES one, and the two are compared.
+fn cyclic_instances(
     roots: &BTreeSet<Instance>,
     edges: &BTreeMap<Instance, Vec<(Instance, Span)>>,
-) -> Vec<ShaderRejection> {
-    let mut out: Vec<ShaderRejection> = Vec::new();
+) -> BTreeSet<Instance> {
+    let mut out: BTreeSet<Instance> = BTreeSet::new();
     let mut done: BTreeSet<Instance> = BTreeSet::new();
-    let mut reported: BTreeSet<Instance> = BTreeSet::new();
-    // Iterative DFS with an explicit path, so the SPAN reported is the call
-    // edge that closed the cycle rather than a declaration's own name.
     for root in roots {
         let mut path: Vec<(Instance, usize)> = vec![(root.clone(), 0)];
         let mut on_path: BTreeSet<Instance> = [root.clone()].into_iter().collect();
         while let Some((node, idx)) = path.pop() {
             let next = edges.get(&node).and_then(|es| es.get(idx)).cloned();
             match next {
-                Some((callee, span)) => {
+                Some((callee, _)) => {
                     path.push((node, idx + 1));
                     if on_path.contains(&callee) {
-                        if reported.insert(callee.clone()) {
-                            out.push(ShaderRejection {
-                                instance: callee,
-                                kind: ShaderRejectionKind::Recursion,
-                                span,
-                            });
-                        }
+                        out.insert(callee);
                         continue;
                     }
                     if done.contains(&callee) {

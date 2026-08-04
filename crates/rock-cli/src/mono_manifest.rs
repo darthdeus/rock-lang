@@ -69,6 +69,7 @@ struct ArtifactTotals {
     foreign_bodies: usize,
     multi_lane_publishers: usize,
     widest_result_lanes: usize,
+    lanes_unknown: usize,
     deferred: Vec<&'static str>,
 }
 
@@ -403,6 +404,7 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
                         foreign_bodies: 0,
                         multi_lane_publishers: 0,
                         widest_result_lanes: 0,
+                        lanes_unknown: 0,
                         deferred: c.deferred.clone(),
                     });
                     e.instances += c.instances;
@@ -420,6 +422,7 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
                     e.severed += c.severed;
                     e.foreign_bodies += c.foreign_bodies;
                     e.multi_lane_publishers += c.multi_lane_publishers;
+                    e.lanes_unknown += c.lanes_unknown;
                     e.widest_result_lanes = e.widest_result_lanes.max(c.widest_result_lanes);
                     for (k, v) in &c.severed_by_cause {
                         *e.severed_by_cause.entry(*k).or_insert(0) += v;
@@ -1109,8 +1112,12 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     println!();
     for (name, a) in &art_rows {
         println!(
-            "- `{name}`: **{}** foreign bodies, **{}** multi-lane publishers, widest wire **{}**",
-            a.foreign_bodies, a.multi_lane_publishers, a.widest_result_lanes
+            "- `{name}`: **{}** foreign bodies with a stated wire, **{}** multi-lane publishers, \
+             widest wire **{}**, **{}** whose generic substitution leaves the wire unstated",
+            a.foreign_bodies,
+            a.multi_lane_publishers,
+            a.widest_result_lanes,
+            a.lanes_unknown
         );
     }
     println!();
@@ -1136,10 +1143,19 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
         shader_totals.sites_walked
     );
     println!(
-        "- rejections: recursion **{}**, tier-0 profile **{}**; artifacts packaging a profile \
-         other than `Core330`: **{}**",
+        "- shader PROGRAMS the GLSL pass (emission's own `check_entry_profile` / \
+         `check_pipeline_profile`) actually ran over: \
+         **{}**; rejections: recursion **{}**, profile **{}**; structural-vs-emitter \
+         disagreements: **{}**",
+        shader_totals.entries_checked,
         shader_totals.recursion_rejections,
         shader_totals.profile_rejections,
+        shader_totals.disagreements
+    );
+    println!(
+        "- retained shader instances the DECLARATION-based pass cannot answer for (non-empty \
+         substitution): **{}**; artifacts packaging a profile other than `Core330`: **{}**",
+        shader_totals.unchecked_generic,
         shader_totals.non_core330
     );
     for x in &shader_totals.examples {
@@ -1315,6 +1331,9 @@ struct ShaderStats {
     sites_walked: usize,
     recursion_rejections: usize,
     profile_rejections: usize,
+    entries_checked: usize,
+    unchecked_generic: usize,
+    disagreements: usize,
     non_core330: usize,
     examples: Vec<String>,
 }
@@ -1329,6 +1348,9 @@ impl ShaderStats {
         self.sites_walked += o.sites_walked;
         self.recursion_rejections += o.recursion_rejections;
         self.profile_rejections += o.profile_rejections;
+        self.entries_checked += o.entries_checked;
+        self.unchecked_generic += o.unchecked_generic;
+        self.disagreements += o.disagreements;
         self.non_core330 += o.non_core330;
         for x in &o.examples {
             if self.examples.len() < 10 {
@@ -1585,12 +1607,12 @@ fn one_project(
     // `rock_shader` entries production registers plus the helpers they reach.
     // Roots come from `skull_mir`'s own collector -- an input, exactly like the
     // CPU emission roots.
-    let shader_roots: Vec<skull_mir::mir::FuncRef> =
+    let shader_programs: Vec<skull::shader_artifact::ShaderProgram> =
         skull_mir::lower::collect_shader_collection(&ws)
             .map(|c| {
                 c.pairs
                     .into_iter()
-                    .flat_map(|p| p.vert.into_iter().chain(std::iter::once(p.frag)))
+                    .map(|p| skull::shader_artifact::ShaderProgram { vert: p.vert, frag: p.frag })
                     .collect()
             })
             .unwrap_or_default();
@@ -1599,7 +1621,10 @@ fn one_project(
         let Some(sv) = skull::shader_artifact::realize_shader(
             &ws,
             &g,
-            &skull::shader_artifact::ShaderArtifactRequest { spec: *spec, roots: &shader_roots },
+            &skull::shader_artifact::ShaderArtifactRequest {
+                spec: *spec,
+                programs: &shader_programs,
+            },
         ) else {
             shader_stats.targets_without_shader += 1;
             continue;
@@ -1609,12 +1634,18 @@ fn one_project(
         shader_stats.helpers += sv.helpers.len();
         shader_stats.builtins += sv.builtins.len();
         shader_stats.sites_walked += sv.sites_walked;
+        shader_stats.entries_checked += sv.entries_checked;
+        shader_stats.unchecked_generic += sv.unchecked_generic.len();
+        shader_stats.disagreements += sv.disagreements.len();
+        for x in sv.disagreements.iter().take(2) {
+            shader_stats.examples.push(format!("`{}` DISAGREEMENT {x}", spec.name));
+        }
         for r in &sv.rejections {
             match r.kind {
                 skull::shader_artifact::ShaderRejectionKind::Recursion => {
                     shader_stats.recursion_rejections += 1
                 }
-                skull::shader_artifact::ShaderRejectionKind::Profile(_) => {
+                skull::shader_artifact::ShaderRejectionKind::Profile => {
                     shader_stats.profile_rejections += 1
                 }
             }

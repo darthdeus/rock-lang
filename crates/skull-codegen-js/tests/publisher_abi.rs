@@ -219,3 +219,57 @@ fn main() { let x = scalar_bank(1.0) }
         "scratch bank",
     );
 }
+
+/// **The publisher may not reorder its arguments.** `__rock_publish(f(), g())`
+/// is an ordinary JS call expression in source order, so lowering it to
+/// `__rock_ret1 = g(); return f();` runs `g` first -- a visible change of
+/// effects -- and writes a lane before every argument has finished, so a throw
+/// in `f()` leaves a published lane behind.
+///
+/// Both properties are one shape: every argument is evaluated, in order, into
+/// reserved temps BEFORE any lane is written. The effects half is executed in
+/// `tests/js_nobox_return_abi.rock`; the throw half is a shape assertion,
+/// because a caller cannot observe an unwritten lane without reading the bank,
+/// which hand-written JS may not do.
+#[test]
+fn a_publisher_evaluates_its_arguments_in_order_before_writing_a_lane() {
+    let js = emit(
+        r#"
+inline(js) fn ordered(v: float) -> (bool, float) = "return __rock_publish(first(v), second(v));"
+fn main() { let (a, b) = ordered(1.0) }
+"#,
+        "main",
+    );
+    let body = js
+        .lines()
+        .find(|l| l.contains("first(v)"))
+        .unwrap_or_else(|| panic!("the publisher body is missing:\n{js}"));
+    let first_at = body.find("first(v)").expect("first");
+    let second_at = body.find("second(v)").expect("second");
+    assert!(
+        first_at < second_at,
+        "the publisher swapped its arguments' evaluation order:\n{body}"
+    );
+    let lane_at = body.find("__rock_ret1 =").expect("lane 1 write");
+    assert!(
+        second_at < lane_at,
+        "a lane was written before every argument had been evaluated, so a throwing \
+         argument leaves a published lane behind:\n{body}"
+    );
+    let return_at = body.rfind("return ").expect("return");
+    assert!(lane_at < return_at, "the lane write must precede the return:\n{body}");
+}
+
+/// The temps are compiler-owned, so a body naming one rejects rather than
+/// silently colliding with the lowering.
+#[test]
+fn a_body_may_not_name_the_publisher_temps() {
+    reject(
+        r#"
+inline(js) fn collides(v: float) -> (bool, float) = "var __rock_lane0 = v; return __rock_publish(false, v);"
+fn main() { let (a, b) = collides(1.0) }
+"#,
+        "main",
+        "compiler-owned",
+    );
+}

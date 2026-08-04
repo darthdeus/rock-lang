@@ -419,6 +419,10 @@ pub struct ArtifactCensus {
     pub foreign_bodies: usize,
     pub multi_lane_publishers: usize,
     pub widest_result_lanes: usize,
+    /// Foreign bodies whose result wire the declaration-based oracle cannot
+    /// state. The denominator's other half: `foreign_bodies` counts only what
+    /// was actually answered.
+    pub lanes_unknown: usize,
     /// Deferred obligations, carried from the target spec.
     pub deferred: Vec<&'static str>,
 }
@@ -464,6 +468,10 @@ pub struct ArtifactView {
     /// Derived from `skull_mir::lower::result_lane_count`, the ABI policy every
     /// definition and call site already reads.
     pub publisher_lanes: BTreeMap<Instance, usize>,
+    /// Retained foreign bodies whose lanes the DECLARATION-based oracle cannot
+    /// answer for: their substitution is not empty, so the declared return is
+    /// not the shape this artifact carries. Reported, never guessed.
+    pub publisher_lanes_unknown: BTreeSet<Instance>,
     /// The shared population this view was taken over -- the denominator.
     pub shared_instances: usize,
     pub deferred: Vec<&'static str>,
@@ -484,6 +492,7 @@ impl ArtifactView {
             && self.inline_deps == other.inline_deps
             && self.unresolved_inline_deps == other.unresolved_inline_deps
             && self.publisher_lanes == other.publisher_lanes
+            && self.publisher_lanes_unknown == other.publisher_lanes_unknown
             && self.shared_instances == other.shared_instances
             && self.deferred == other.deferred
     }
@@ -527,6 +536,7 @@ impl ArtifactView {
             foreign_bodies: self.publisher_lanes.len(),
             multi_lane_publishers: self.publisher_lanes.values().filter(|n| **n > 1).count(),
             widest_result_lanes: self.publisher_lanes.values().copied().max().unwrap_or(0),
+            lanes_unknown: self.publisher_lanes_unknown.len(),
             deferred: self.deferred.clone(),
             ..Default::default()
         };
@@ -657,25 +667,35 @@ fn realize_decl(
     target: &CpuTargetSpec,
     mappings: &ArtifactMappings<'_>,
 ) -> Result<Realized, Unrealizable> {
-    // THE BODY-INDEPENDENT RUNGS, first. Both answer without emitting any
-    // declaration's body, so "which backend wrote the source body" has no
-    // consumer -- and asking for a sibling ahead of them rejects work the
-    // artifact actually performs. Measured on the JS corpus: `nb_get` (1,127
-    // sites) is mapped by `JsIntrinsics` and `rock_shader` is expanded at MIR
-    // lowering, and both were `foreign-to-artifact` because the sibling
-    // question came first.
+    // THE BODY-INDEPENDENT RUNGS, first, and IN THE EMITTER'S OWN ORDER. Each
+    // answers without emitting any declaration's body, so "which backend wrote
+    // the source body" has no consumer -- and asking for a sibling ahead of
+    // them rejects work the artifact actually performs. Measured on the JS
+    // corpus: `nb_get` (1,127 sites) is mapped by `JsIntrinsics` and
+    // `rock_shader` is expanded at MIR lowering, and both were
+    // `foreign-to-artifact` because the sibling question came first.
     //
-    // This is `skull_mir::intrinsics`' own order -- backend mapping > portable
-    // fallback > reject -- with the portable rung left below, where it belongs:
-    // a fallback IS a Rock body, so it needs the declaration that holds one.
+    // The ORDER is not a preference either. `skull_codegen_js`'s callee walk
+    // skips a host-bound callee BEFORE it reaches the `inline(js)` co-emit and
+    // plain-Rock branches, and `render_call` reaches for a host template before
+    // the intrinsic table -- so a host binding wins over the declaration's own
+    // body, whatever that body is. `map_new` is the case that makes this
+    // load-bearing: it is a PURE ROCK body the JS backend renders as
+    // `new Map()`, so classifying it by its body would have the artifact
+    // traverse a body emission never emits. The portable-fallback rung stays
+    // below with the selected declaration, because a fallback IS a Rock body.
     let rep_f = &ws.module(rep.module).functions[rep.func];
-    if intrinsics::is_intrinsic(rep_f) && supports(target, BoundaryClass::Intrinsic) {
-        if intrinsics::expand_kind(rep_f).is_some() {
-            return Ok(Realized { decl: rep, kind: Realization::CompileTimeExpansion });
-        }
-        if mappings.maps(rep_f) {
-            return Ok(Realized { decl: rep, kind: Realization::NativeMapping });
-        }
+    if intrinsics::expand_kind(rep_f).is_some() && supports(target, BoundaryClass::Intrinsic) {
+        return Ok(Realized { decl: rep, kind: Realization::CompileTimeExpansion });
+    }
+    if mappings.binds(ws, rep_f) {
+        return Ok(Realized { decl: rep, kind: Realization::HostBinding });
+    }
+    if intrinsics::is_intrinsic(rep_f)
+        && supports(target, BoundaryClass::Intrinsic)
+        && mappings.maps(rep_f)
+    {
+        return Ok(Realized { decl: rep, kind: Realization::NativeMapping });
     }
 
     // SIBLING SELECTION, and this is the only place it happens. `rep` is the
@@ -704,25 +724,11 @@ fn realize_decl(
             }
         }
     };
-    let realized = selected.and_then(|decl| {
+    selected.and_then(|decl| {
         let f = &ws.module(decl.module).functions[decl.func];
         realize_body(ws, decl, f, erased, target, mappings)
             .map(|kind| Realized { decl, kind })
-    });
-    // THE LAST RUNG: no declared body serves this artifact, and the artifact
-    // supplies this declaration itself. Asked after selection AND after the
-    // selected body, so a real sibling still wins -- binding a name must not
-    // stop the artifact from emitting a body it has.
-    match realized {
-        Ok(r) => Ok(r),
-        Err(cause) => {
-            if mappings.binds(ws, rep_f) {
-                Ok(Realized { decl: rep, kind: Realization::HostBinding })
-            } else {
-                Err(cause)
-            }
-        }
-    }
+    })
 }
 
 /// How the SELECTED declaration is supplied. Split from the selection above so
@@ -998,18 +1004,34 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         .execution
         .backend
         .map(|b| skull_mir::lower::ScalarCtx::new(ws).with_target(b));
-    let publisher_lanes: BTreeMap<Instance, usize> = match &scx {
-        Some(scx) => realization
-            .iter()
-            .filter(|(_, r)| matches!(r.kind, Realization::ForeignBody(BoundaryClass::InlineBody)))
-            .map(|(i, r)| (i.clone(), skull_mir::lower::result_lane_count(ws, scx, r.decl)))
-            .collect(),
-        None => BTreeMap::new(),
-    };
+    // ...and only of an instance whose substitution is EMPTY. The oracle
+    // answers for the DECLARED signature, so a generic boundary's lanes are not
+    // knowable from its declaration -- recorded as unknown rather than answered
+    // with the wrong shape. There is no corpus population today (0 corpus-wide);
+    // Option C makes generic boundaries live, and this is where the instance
+    // substitution has to arrive.
+    let mut publisher_lanes: BTreeMap<Instance, usize> = BTreeMap::new();
+    let mut publisher_lanes_unknown: BTreeSet<Instance> = BTreeSet::new();
+    if let Some(scx) = &scx {
+        for (i, r) in &realization {
+            if !matches!(r.kind, Realization::ForeignBody(BoundaryClass::InlineBody)) {
+                continue;
+            }
+            let concrete =
+                i.args.is_empty() && g.substitutions.get(i).map(|s| s.is_empty()).unwrap_or(true);
+            if concrete {
+                publisher_lanes
+                    .insert(i.clone(), skull_mir::lower::result_lane_count(ws, scx, r.decl));
+            } else {
+                publisher_lanes_unknown.insert(i.clone());
+            }
+        }
+    }
 
     ArtifactView {
         shared_instances: g.instances.len(),
         publisher_lanes,
+        publisher_lanes_unknown,
         // An execution-axis question too: every obligation it names is about
         // memory, coroutines, widths or foreign symbols. A shader-derived
         // deferral would be a separate list on a separate axis.
