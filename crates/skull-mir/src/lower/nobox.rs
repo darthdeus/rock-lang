@@ -193,6 +193,66 @@ impl Builder<'_> {
         Ok(())
     }
 
+    /// The constructor MIRROR of [`Self::reject_column_container_opaque_args`]
+    /// (`docs/boundary-contracts.md` 2.4): an opaque body whose declared RETURN
+    /// is a container builds that container's physical form BY HAND, so it can
+    /// mint boxed storage for a result the caller will read as columns.
+    ///
+    /// Measured, with `vec_new`'s column route removed: the boxed body ran and
+    /// the caller's column read died on nil. Nothing rejected -- the argument
+    /// rule cannot see a return.
+    ///
+    /// The stdlib constructors are exempt BY CONSTRUCTION, like every other
+    /// routed name: `lower_call` replaces them and returns before this runs.
+    pub(crate) fn reject_column_container_opaque_return(
+        &self,
+        e: Idx<Expr>,
+        func: FuncRef,
+    ) -> Result<(), CompilerError> {
+        let callee = &self.ws.module(func.module).functions[func.func];
+        if callee.inline_body.is_none() && !callee.is_extern {
+            return Ok(());
+        }
+        let name = callee.name;
+        let Some(ret) = callee.return_ty else { return Ok(()) };
+        // Raw, for the same reason the parameter side is raw: this is the
+        // CALLEE's declaration, and the enclosing substitution is the caller's.
+        let Some(TypeExpr::App { ctor, .. }) = self.raw_ty_node(ret) else {
+            return Ok(());
+        };
+        // The RESULT's concrete element is the call expression's own type.
+        let found = match ctor {
+            TypeCtor::Array => {
+                self.vec_column_elem_of(e)?.map(|el| (format!("[{}]", el.name), "`_data`"))
+            }
+            TypeCtor::Map => self
+                .map_column_value_of(e)?
+                .map(|el| (format!("Map<_, {}>", el.name), "a bare key table")),
+            TypeCtor::Nominal(c) if crate::lower::shape::is_nominal_container(c) => {
+                self.nominal_container_elem(e)?.and_then(|elem| {
+                    crate::lower::shape::opaque_container_hazard(
+                        self.ws,
+                        self.scx.target,
+                        c,
+                        elem,
+                    )
+                    .map(|physical| (format!("{c}<{elem}>"), physical))
+                })
+            }
+            TypeCtor::Nominal(_) => None,
+        };
+        let Some((rendered, physical)) = found else { return Ok(()) };
+        Err(CompilerError::new_with_label(
+            self.body.expr_spans[e],
+            format!(
+                "opaque body boundary `{name}` cannot BUILD column-stored \
+                 `{rendered}` (an inline/extern body hand-builds {physical}, which \
+                 a column-planned result does not have; return `any` if the body \
+                 builds the column layout itself, else use a boxed element type)"
+            ),
+        ))
+    }
+
     /// The type CONSTRUCTOR the callee's parameter `i` declares, resolved
     /// through THIS CALL's generic bindings.
     ///

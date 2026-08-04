@@ -643,6 +643,7 @@ impl Builder<'_> {
         let Some(scalar_abi) = scalar_abi else {
             self.reject_nobox_boxed_call_args(func, arg_idxs)?;
             self.reject_column_container_opaque_args(e, func, arg_idxs)?;
+            self.reject_column_container_opaque_return(e, func)?;
             let args = if any_named {
                 self.reorder_named_args(arg_idxs, func)?
             } else {

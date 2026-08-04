@@ -65,3 +65,77 @@ fn an_arena_at_a_boxed_element_is_admitted() {
         "a boxed element keeps `data._data`, so the same body stays valid"
     );
 }
+
+/// The CONSTRUCTOR mirror (2.4): an opaque body whose declared RETURN is a
+/// container hand-builds its physical form, so it can mint boxed storage for a
+/// column-planned result. The argument rule cannot see a return.
+const CTOR_RETURNS_COLUMN_VEC: &str = r#"
+value G { x: float, y: float }
+
+@nomangle inline(lua) fn make() -> [G] = """
+    return {_data = {}, len = 0, __ty = "Vec"}
+"""
+
+fn main() {
+    let xs: [G] = make()
+    print("{xs.len}")
+}
+"#;
+
+/// Bounds it on the ELEMENT: the identical body is CORRECT at a boxed element,
+/// which is what the boxed representation is.
+const CTOR_RETURNS_BOXED_VEC: &str = r#"
+struct B { s: string }
+
+@nomangle inline(lua) fn make() -> [B] = """
+    return {_data = {}, len = 0, __ty = "Vec"}
+"""
+
+fn main() {
+    let xs: [B] = make()
+    print("{xs.len}")
+}
+"#;
+
+/// The stdlib constructors are exempt BY CONSTRUCTION (routed at
+/// `call.rs:172-201`) and must keep minting COLUMN storage for a column
+/// element. Measured with `vec_new`'s route removed: it minted boxed storage
+/// and the caller's column read died on nil, with nothing rejecting -- which is
+/// the gap the mirror clause closes.
+const STDLIB_CTORS_STILL_ROUTE: &str = r#"
+value G { x: float, y: float }
+
+fn main() {
+    let a: [G] = vec_new()
+    a.push(G { x: 1.0, y: 2.0 })
+    let b: [G] = vec_new_with_capacity(4)
+    b.push(G { x: 3.0, y: 4.0 })
+    let m: Map<string, G> = map_new()
+    m["k"] = G { x: 5.0, y: 6.0 }
+    print("{a[0].x}{b[0].x}{m[\"k\"].x}")
+}
+"#;
+
+#[test]
+fn an_opaque_body_returning_a_column_vec_rejects() {
+    let msg = lua_outcome(CTOR_RETURNS_COLUMN_VEC).expect_err("must reject");
+    assert!(
+        msg.contains("cannot BUILD column-stored `[G]`") && msg.contains("make"),
+        "got: {msg}"
+    );
+}
+
+#[test]
+fn an_opaque_body_returning_a_boxed_vec_is_admitted() {
+    assert!(lua_outcome(CTOR_RETURNS_BOXED_VEC).is_ok());
+}
+
+#[test]
+fn the_stdlib_constructors_still_mint_column_storage() {
+    let lua = crate::common::try_emit_module(STDLIB_CTORS_STILL_ROUTE).expect("must emit");
+    assert_eq!(
+        crate::common::run_luajit(&format!("{lua}\nmain()\n"), "ctor_symmetry"),
+        "135",
+        "the three constructors mint COLUMN storage, so each leaf reads back"
+    );
+}
