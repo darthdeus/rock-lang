@@ -31,17 +31,25 @@ use std::process::Command;
 /// `indices` is what `getUniformIndices` reports per member (`None` = inactive),
 /// `driver` what `getActiveUniforms` reports for the offsets, and `plan` the
 /// offsets the compiler computed.
-fn check(indices: &[Option<i32>], driver: &[i32], plan: &[i32]) -> Option<bool> {
-    check_with(indices, driver, plan, false)
+struct Answer {
+    ok: bool,
+    /// The indices `getActiveUniforms` was actually handed.
+    asked: Vec<i64>,
 }
 
-/// `no_layout` sets the stub's `__rockNoUniformLayout` self-declaration.
+fn check(indices: &[Option<i32>], driver: &[i32], plan: &[i32]) -> Option<bool> {
+    check_with(indices, driver, plan, false, false).map(|a| a.ok)
+}
+
+/// The full driver: `*_query_fails` make the corresponding WebGL call return
+/// `null`, which is what a real context does when the query generates an error.
 fn check_with(
     indices: &[Option<i32>],
     driver: &[i32],
     plan: &[i32],
-    no_layout: bool,
-) -> Option<bool> {
+    index_query_fails: bool,
+    offset_query_fails: bool,
+) -> Option<Answer> {
     if Command::new("node").arg("--version").output().map(|o| !o.status.success()).unwrap_or(true) {
         eprintln!("SKIP web_uniform_block_layout_check: node not on PATH");
         return None;
@@ -74,24 +82,30 @@ fn check_with(
 var INVALID = 0xFFFFFFFF;
 var logs = [];
 function __sw_log_once(m) {{ logs.push(m); }}
+var asked = null;
 var gl = {{
-  __rockNoUniformLayout: {no_layout},
   INVALID_INDEX: INVALID,
   UNIFORM_BLOCK_DATA_SIZE: 1,
   UNIFORM_OFFSET: 2,
   getUniformBlockIndex: function () {{ return 7; }},
   getActiveUniformBlockParameter: function () {{ return 16; }},
-  getUniformIndices: function () {{ return [{js_indices}]; }},
-  getActiveUniforms: function () {{ return [{js_driver}]; }},
+  getUniformIndices: function () {{ return {js_index_result}; }},
+  getActiveUniforms: function (prog, indices) {{
+    // Recorded so the test can assert an INACTIVE index was never handed over:
+    // WebGL 2 fails the whole query on a bad index and returns null.
+    asked = Array.prototype.slice.call(indices);
+    return {js_offset_result};
+  }},
 }};
 var __SW = {{ gl: gl, shaders: {{ 1: {{ prog: {{}} }} }} }};
 {func}
 var answer = stone_shader_check_uniform_block_layout(
   1, "Blk", {blob:?}, 0, [{js_plan}], {count}, 4096);
-console.log(JSON.stringify({{ answer: answer, logs: logs }}));
+console.log(JSON.stringify({{ answer: answer, logs: logs, asked: asked }}));
 "#,
         count = indices.len(),
-        no_layout = no_layout
+        js_index_result = if index_query_fails { "null".to_string() } else { format!("[{js_indices}]") },
+        js_offset_result = if offset_query_fails { "null".to_string() } else { format!("[{js_driver}]") },
     );
 
     // Unique per CALL: `cargo test` runs these on threads of one process, so a
@@ -112,7 +126,18 @@ console.log(JSON.stringify({{ answer: answer, logs: logs }}));
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
     let _ = std::fs::remove_dir_all(&dir);
     assert!(out.status.success(), "node failed:\n{stdout}\n{stderr}");
-    Some(stdout.contains("\"answer\":true"))
+    let asked = stdout
+        .split("\"asked\":")
+        .nth(1)
+        .and_then(|t| t.split(']').next())
+        .map(|t| {
+            t.trim_start_matches('[')
+                .split(',')
+                .filter_map(|n| n.trim().parse::<i64>().ok())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Some(Answer { ok: stdout.contains("\"answer\":true"), asked })
 }
 
 /// The defect. Every member inactive -> zero comparisons -> must NOT pass.
@@ -150,29 +175,50 @@ fn a_block_whose_active_member_disagrees_is_rejected() {
 /// case, and the ones that ARE active are compared.
 #[test]
 fn a_partially_active_block_is_still_checked() {
-    let Some(pass) = check(&[Some(0), None, Some(2)], &[0, 0, 512], &[0, 256, 512]) else { return };
+    // The driver reply is indexed by position in the ACTIVE list, not in
+    // `members`: two entries here for members 0 and 2, with member 1 skipped.
+    // Reading it positionally against `members` is the defect this pairs with --
+    // it would compare member 2's offset against member 1's plan entry.
+    let Some(pass) = check(&[Some(0), None, Some(2)], &[0, 512], &[0, 256, 512]) else { return };
     assert!(pass, "the active members agree, so a partially-optimized block passes");
 
-    let Some(fail) = check(&[Some(0), None, Some(2)], &[0, 0, 999], &[0, 256, 512]) else { return };
+    let Some(fail) = check(&[Some(0), None, Some(2)], &[0, 999], &[0, 256, 512]) else { return };
     assert!(!fail, "an ACTIVE member that disagrees still rejects when a sibling was skipped");
 }
 
-/// The escape hatch is for a context that DECLARES it models no layout, and
-/// only for one. Without the declaration the same zero-population answer is a
-/// rejection -- otherwise the hatch would be the vacuous pass wearing a name.
+/// An INACTIVE index must never reach `getActiveUniforms`.
+///
+/// WebGL 2 fails the WHOLE query on a bad index and returns null for every
+/// entry, so passing the unfiltered list means one optimized-out member takes
+/// down the answer for every member beside it. The native sibling filters first
+/// and maps the reply back by position; this asserts the web tier does too.
 #[test]
-fn only_a_self_declared_non_oracle_may_skip_verification() {
-    let Some(declared) = check_with(&[None, None, None], &[0, 0, 0], &[0, 256, 512], true) else {
+fn only_active_indices_are_queried_for_offsets() {
+    let Some(a) = check_with(&[Some(4), None, Some(6)], &[0, 512], &[0, 256, 512], false, false)
+    else {
         return;
     };
-    assert!(declared, "a context that declares it models no std140 layout is not a failure");
-
-    let Some(undeclared) = check_with(&[None, None, None], &[0, 0, 0], &[0, 256, 512], false) else {
-        return;
-    };
-    assert!(
-        !undeclared,
-        "the SAME zero-population answer from a context that did NOT declare itself must still \
-         reject -- a real driver never carries the flag"
+    assert_eq!(
+        a.asked,
+        vec![4, 6],
+        "the inactive member must be filtered out before the offset query, not passed as INVALID_INDEX"
     );
+    assert!(a.ok, "and the surviving members must still be compared against THEIR own plan offsets");
+}
+
+/// A failed query is a rejection, not a pass. Both WebGL calls here return null
+/// on error, and `null[i]` is `undefined` -- which compares unequal to every
+/// offset, so the disagreement path would report a bogus mismatch, while a
+/// zero-length reply would sail through as a vacuous true.
+#[test]
+fn a_null_query_result_is_rejected() {
+    let Some(a) = check_with(&[Some(0), Some(1)], &[0, 256], &[0, 256], true, false) else {
+        return;
+    };
+    assert!(!a.ok, "a null getUniformIndices result must reject");
+
+    let Some(b) = check_with(&[Some(0), Some(1)], &[0, 256], &[0, 256], false, true) else {
+        return;
+    };
+    assert!(!b.ok, "a null getActiveUniforms result must reject");
 }

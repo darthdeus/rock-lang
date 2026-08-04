@@ -243,6 +243,82 @@ fn web_pass_sampling() {
     };
 }
 
+// mag's UNIFORM BLOCKS, in a real WebGL2 context, against a real driver.
+//
+// The sprite program's array block (binding 4) is the subject. Nothing else
+// reaches it in a browser: `just t`'s fake-GL harness records call shapes and
+// STUBS the layout check outright, because that stub models no std140 layout --
+// so it can say the block was bound, never that the driver agrees with the
+// offsets the compiler planned, and never that anything filled it.
+//
+// `stone_unfilled_uniform_block_count` is the same draw-time gate that caught
+// the half-finished port natively: it stamps a block at each real draw and at
+// each upload, and reports any block drawn with but never filled. Zero after 30
+// real frames means every declared block -- both array blocks among them -- was
+// filled before it was drawn with, on a driver that computed its own offsets.
+//
+// Separate from `web_chrome_screenshot_and_click_pick_mag` deliberately. That
+// one fails on its click-pick step (`docs/known-failing-tests.md`), and a red
+// gate cannot certify anything underneath it -- an unfilled block would hide
+// inside a failure the suite already tolerates.
+#[test]
+fn web_chrome_mag_uniform_blocks_are_filled() {
+    let Some(_) = run_cdp(
+        "mag",
+        "web_chrome_mag_uniform_blocks_are_filled",
+        &[
+            "--frames",
+            "30",
+            // A COUNT, not a boolean: "0" distinguishes "every block was filled"
+            // from a predicate that could read true for a build with no blocks
+            // at all. The registration itself is asserted below.
+            "--expect",
+            "String(stone_unfilled_uniform_block_count())",
+            "--value",
+            "0",
+        ],
+    ) else {
+        return;
+    };
+}
+
+// The denominator for the test above: mag really did register uniform blocks in
+// the browser. Without it, an unfilled count of zero is equally consistent with
+// a build whose shaders all failed to register -- zero over zero.
+//
+// The ARRAY binding is named explicitly rather than counting blocks in total: a
+// non-zero total is satisfied by the scalar blocks alone, and would read the
+// same with the array lane entirely absent.
+//
+// Asked through the engine's own accessor, which answers non-null exactly when
+// the program registered a block at that binding -- so this is the published
+// registration, not a re-derivation of it. Registration is transactional and
+// only publishes on success, which means a driver that rejected the bind or
+// disagreed with the layout leaves nothing here.
+//
+// The `_opt` suffix is the mangled `-> ArrayBlockWriter?`. If mangling changes
+// this fails loudly rather than silently probing `undefined != null`, which is
+// why the answer is compared against a string instead of coerced to a boolean.
+#[test]
+fn web_chrome_mag_registers_its_array_blocks() {
+    let Some(_) = run_cdp(
+        "mag",
+        "web_chrome_mag_registers_its_array_blocks",
+        &[
+            "--frames",
+            "30",
+            "--expect",
+            "String(typeof array_block_begin_string_int_ret_ArrayBlockWriter_opt) + \":\" + \
+             String(array_block_begin_string_int_ret_ArrayBlockWriter_opt(\
+             \"sprite_batch_vert+sprite_batch_frag\", 4) != null)",
+            "--value",
+            "function:true",
+        ],
+    ) else {
+        return;
+    };
+}
+
 #[test]
 fn web_chrome_screenshot_and_click_pick_mag() {
     let Some((_dir, shot)) = run_cdp(

@@ -1656,21 +1656,26 @@ function stone_shader_check_uniform_block_layout(h, name, names, names_len, offs
     return false;
   }
   var indices = gl.getUniformIndices(sh.prog, members);
-  var driver = gl.getActiveUniforms(sh.prog, indices, gl.UNIFORM_OFFSET);
-  var ok = true;
-  var active = 0;
-  for (var i = 0; i < members.length; i++) {
-    // An INACTIVE member is optimized out and reports no index: skipped, not
-    // failed. The check is a PARTIAL oracle for that reason.
-    if (indices[i] === gl.INVALID_INDEX || indices[i] == null) continue;
-    active++;
-    if (driver[i] !== offsets[i]) {
-      __sw_log_once("check_uniform_block_layout: `" + name + "`.`" + members[i] + "` is at " + driver[i] + ", the plan says " + offsets[i]);
-      ok = false;
-    }
+  if (!indices) {
+    __sw_log_once("check_uniform_block_layout: `" + name + "` uniform-index query failed");
+    return false;
   }
-  // ZERO comparisons is not a pass. Every member skipped means the loop above
-  // examined nothing and `ok` is still its initial true -- a gate arm with no
+  // Only the ACTIVE indices are queried. An inactive member is optimized out
+  // and reports INVALID_INDEX; passing that straight to `getActiveUniforms`
+  // makes the query generate an error, and WebGL 2 returns NULL for the whole
+  // call rather than a per-entry blank (Khronos WebGL 2 spec, 3.7.5). So one
+  // optimized-out member would take down the answer for every member beside it.
+  // `map` carries each surviving index back to the member it came from, since
+  // the driver's reply is now indexed by position in `active`, not in `members`.
+  // The native sibling filters the same way.
+  var active = [], map = [];
+  for (var i = 0; i < members.length; i++) {
+    if (indices[i] === gl.INVALID_INDEX || indices[i] == null) continue;
+    active.push(indices[i]);
+    map.push(i);
+  }
+  // ZERO comparisons is not a pass. Every member skipped means the loop below
+  // runs zero times and returns its initial true -- a gate arm with no
   // population, reporting success for a block it never looked at. The native
   // sibling rejects here for the same reason, and the two must agree or the web
   // tier silently accepts what the desktop one refuses.
@@ -1679,19 +1684,21 @@ function stone_shader_check_uniform_block_layout(h, name, names, names_len, offs
   // `name[0]`, and if that spelling ever regresses to the bare name, EVERY
   // member misses at once -- so the block where this matters most is exactly
   // the one where the skip stops being partial coverage.
-  //
-  // A context that models no std140 layout at all declares itself, because
-  // "asked a driver and it reported nothing" and "there is no driver to ask"
-  // are different answers and only the first is a failure. The declaration is
-  // the STUB's, it is logged every run so a silent skip is impossible, and no
-  // real WebGL context carries it.
-  if (active === 0) {
-    if (gl.__rockNoUniformLayout) {
-      __sw_log_once("check_uniform_block_layout: `" + name + "` NOT VERIFIED -- this GL context models no std140 layout");
-      return true;
-    }
+  if (active.length === 0) {
     __sw_log_once("check_uniform_block_layout: `" + name + "` has no active members -- nothing to verify");
     return false;
+  }
+  var driver = gl.getActiveUniforms(sh.prog, active, gl.UNIFORM_OFFSET);
+  if (!driver) {
+    __sw_log_once("check_uniform_block_layout: `" + name + "` uniform-offset query failed");
+    return false;
+  }
+  var ok = true;
+  for (var a = 0; a < map.length; a++) {
+    if (driver[a] !== offsets[map[a]]) {
+      __sw_log_once("check_uniform_block_layout: `" + name + "`.`" + members[map[a]] + "` is at " + driver[a] + ", the plan says " + offsets[map[a]]);
+      ok = false;
+    }
   }
   return ok;
 }
