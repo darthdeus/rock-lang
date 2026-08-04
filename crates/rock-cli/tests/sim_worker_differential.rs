@@ -615,3 +615,83 @@ fn every_comparator_arm_is_present_and_exercised() {
         "the zero `errors` denominator has to be a real zero, not an unread field"
     );
 }
+
+/// `--workers` scheduling is POSITIONAL: naming one sim twice is two entries,
+/// both of which must run and both of which must land a result. Keying results
+/// by spec spelling ran both and then reported the second as never scheduled.
+/// Driven through the CLI because `run_specs_worker_mode` is the layer that
+/// places results, and the tally line is what a user reads.
+#[test]
+fn a_duplicated_spec_runs_and_reports_twice_in_worker_mode() {
+    let mut rock = std::env::current_exe().expect("test exe");
+    rock.pop();
+    if rock.ends_with("deps") {
+        rock.pop();
+    }
+    let rock = rock.join("rock");
+    assert!(rock.exists(), "rock binary not built at {}", rock.display());
+
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("workspace root")
+        .to_path_buf();
+
+    let out = std::process::Command::new(&rock)
+        .current_dir(&root)
+        .args(["sim", "testbed", "b0_leak_probe", "b0_leak_probe", "--workers"])
+        .output()
+        .expect("run rock sim --workers");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert!(
+        out.status.success(),
+        "a duplicated spec must not fail the invocation:\n{stdout}\n{stderr}"
+    );
+    assert!(
+        stdout.contains("[sim] 2/2 sims passed"),
+        "both occurrences must be accounted for:\n{stdout}"
+    );
+    // Per-entry records are the command's result on stderr; the tally is stdout.
+    assert_eq!(
+        stderr.matches("b0_leak_probe: PASS").count(),
+        2,
+        "each occurrence owns its own record:\n{stderr}"
+    );
+}
+
+/// The wall-clock timeout is the WEDGED-CHILD guard, so it bounds an entry,
+/// not the worker process: a queue of individually healthy entries must not
+/// fail whichever one happens to be running when their sum crosses it.
+#[test]
+fn the_wall_clock_deadline_is_per_entry_not_per_worker() {
+    const VAR: &str = "ROCK_SIM_TIMEOUT_SECS";
+    struct Restore(Option<String>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            // SAFETY: the heavy harness runs single-threaded (--test-threads=1).
+            unsafe {
+                match &self.0 {
+                    Some(v) => std::env::set_var(VAR, v),
+                    None => std::env::remove_var(VAR),
+                }
+            }
+        }
+    }
+    let _restore = Restore(std::env::var(VAR).ok());
+    // Each entry sleeps 4s; three of them plus boot cannot fit in 12s, while
+    // every single entry fits with room to spare.
+    unsafe { std::env::set_var(VAR, "12") };
+
+    let records = run_worker_suite(Backend::Skull, "testbed", &vec!["b2_slow_entry".to_string(); 3])
+        .expect("the suite call itself must not error");
+    assert_eq!(records.len(), 3);
+    for (i, record) in records.iter().enumerate() {
+        assert!(
+            !record.timed_out,
+            "entry {i} was inside its own deadline: {record:?}"
+        );
+        assert_eq!(record.verdict(), "PASS", "entry {i}: {record:?}");
+    }
+}

@@ -45,6 +45,9 @@ fn frame_budget_for(sim_name: &str, env_pairs: &[(String, String)]) -> Result<us
 /// driver stall -- where `FRAME_COUNT` can never be reached and so can never
 /// fire. Neither bound subsumes the other.
 ///
+/// It bounds ONE entry: boot up to the first `entry_start`, then each entry
+/// from its own start. A worker's queued entries never accumulate against it.
+///
 /// Deliberately generous, because it is a wedge detector and not a deadline.
 /// Per-child wall time rises sharply under `--jobs` (render-heavy mag sims have
 /// been measured taking 15 s for a single frame with four children live), and a
@@ -779,7 +782,9 @@ fn run_specs_worker_mode(
     }
 
     let (groups, isolated) = group_worker_specs(specs, env_by_wire);
-    let mut by_spec: HashMap<String, SimSummary> = HashMap::new();
+    // One slot per spec POSITION: the same sim can be named twice, and each
+    // occurrence is its own entry with its own result.
+    let mut slots: Vec<Option<SimSummary>> = specs.iter().map(|_| None).collect();
 
     let report = |spec: &str, summary: &SimSummary| {
         if !quiet {
@@ -794,15 +799,25 @@ fn run_specs_worker_mode(
         if !quiet && group.len() > 1 {
             println!("[sim] worker: {} entries share one booted process", group.len());
         }
-        for (spec, summary) in
-            run_specs_recovering(project, output, env_by_wire, group, update_snapshots, false)?
-        {
+        let group_specs: Vec<String> = group.iter().map(|&i| specs[i].clone()).collect();
+        // `run_specs_recovering` is positional, so its results line up with
+        // `group_specs` and therefore with `group`'s indices.
+        let results = run_specs_recovering(
+            project,
+            output,
+            env_by_wire,
+            &group_specs,
+            update_snapshots,
+            false,
+        )?;
+        for (&i, (spec, summary)) in group.iter().zip(results) {
             report(&spec, &summary);
-            by_spec.insert(spec, summary);
+            slots[i] = Some(summary);
         }
     }
 
-    for (spec, reason) in &isolated {
+    for &(i, ref reason) in &isolated {
+        let spec = &specs[i];
         if !quiet {
             println!("[sim] {spec}: isolated ({reason})");
         }
@@ -819,15 +834,14 @@ fn run_specs_worker_mode(
             Some(&mut *stone),
         )?;
         report(spec, &summary);
-        by_spec.insert(spec.clone(), summary);
+        slots[i] = Some(summary);
     }
 
     specs
         .iter()
-        .map(|spec| {
-            let summary = by_spec
-                .remove(spec)
-                .ok_or_else(|| anyhow!("sim `{spec}` was never scheduled"))?;
+        .zip(slots)
+        .map(|(spec, slot)| {
+            let summary = slot.ok_or_else(|| anyhow!("sim `{spec}` was never scheduled"))?;
             Ok((spec.clone(), summary))
         })
         .collect()
@@ -1014,6 +1028,11 @@ pub fn exec_mode(isolated: bool, workers: bool) -> SimExecMode {
 /// a silently isolated entry would read as a worker result.
 fn worker_ineligibility(spec: &str, env_by_wire: &HashMap<String, Vec<(String, String)>>) -> Option<String> {
     let parts = parse_sim_chain(spec);
+    // A spec with no parts has nothing to agree on; the isolated path rejects
+    // it with the runner's one "empty sim name" error.
+    if parts.is_empty() {
+        return Some("empty sim name".to_string());
+    }
     for part in &parts {
         let env = env_by_wire.get(*part).map_or(&[][..], |v| v);
         if is_reload_lane(env) {
@@ -1048,23 +1067,30 @@ fn worker_ineligibility(spec: &str, env_by_wire: &HashMap<String, Vec<(String, S
 /// Partition entry specs for worker mode: groups of specs sharing a boot
 /// signature (in first-appearance order, each group keeping registry order)
 /// plus the isolated remainder, each with its reason.
+///
+/// Everything is carried as an INDEX into `specs`, never as the spec spelling:
+/// a suite may name the same sim twice, and those are two entries that each
+/// need scheduling and each own a result.
 #[allow(clippy::type_complexity)]
 fn group_worker_specs(
     specs: &[String],
     env_by_wire: &HashMap<String, Vec<(String, String)>>,
-) -> (Vec<Vec<String>>, Vec<(String, String)>) {
-    let mut groups: Vec<(Vec<(String, String)>, Vec<String>)> = Vec::new();
-    let mut isolated: Vec<(String, String)> = Vec::new();
-    for spec in specs {
+) -> (Vec<Vec<usize>>, Vec<(usize, String)>) {
+    let mut groups: Vec<(Vec<(String, String)>, Vec<usize>)> = Vec::new();
+    let mut isolated: Vec<(usize, String)> = Vec::new();
+    for (i, spec) in specs.iter().enumerate() {
         if let Some(reason) = worker_ineligibility(spec, env_by_wire) {
-            isolated.push((spec.clone(), reason));
+            isolated.push((i, reason));
             continue;
         }
-        let sig =
-            boot_signature(env_by_wire.get(parse_sim_chain(spec)[0]).map_or(&[][..], |v| v));
+        let head = parse_sim_chain(spec)
+            .first()
+            .copied()
+            .expect("an empty chain is classified ineligible above");
+        let sig = boot_signature(env_by_wire.get(head).map_or(&[][..], |v| v));
         match groups.iter_mut().find(|(s, _)| *s == sig) {
-            Some((_, members)) => members.push(spec.clone()),
-            None => groups.push((sig, vec![spec.clone()])),
+            Some((_, members)) => members.push(i),
+            None => groups.push((sig, vec![i])),
         }
     }
     (groups.into_iter().map(|(_, members)| members).collect(), isolated)
@@ -1220,9 +1246,10 @@ fn envelope_name_matches(rest: &str, expected: &str, line: &str) -> Result<()> {
 ///
 /// A single-part call is the ordinary fresh-process sim: the queue mechanism is
 /// the same one, so there is no second lifecycle to keep in step. More than one
-/// part means the entries share a booted process with NO state reset between
-/// them yet (`docs/sim-speed-plan.md` B1/B3) -- that is the condition the
-/// differential oracle exists to measure, not a supported way to run a suite.
+/// part means the entries share a booted process, with the child checkpointing
+/// at boot and restoring that image at every entry boundary
+/// (`sim_worker_restore_boot`); the native half B3 owes is what the remaining
+/// differential sentinels pin.
 fn run_worker(
     project: &str,
     parts: &[WorkerPart],
@@ -1365,12 +1392,17 @@ fn run_worker(
     // after the child exits which is useless feedback for a 30s sim.
     let stderr_lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let stdout_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    // What the wall-clock deadline is measured from: the spawn until the first
+    // entry opens, then each `entry_start`. The bound is a wedge detector for
+    // ONE entry, so a queue of healthy entries must not accumulate against it.
+    let deadline_anchor = Arc::new(Mutex::new(std::time::Instant::now()));
     // Mid-sim reload_edit ops flow stderr-thread -> wait-loop, which owns the
     // (single-threaded) SkullStone and services them between try_wait polls.
     let (reload_tx, reload_rx) = mpsc::channel::<ReloadEditReq>();
 
     let stderr_thread = {
         let lines = Arc::clone(&stderr_lines);
+        let anchor = Arc::clone(&deadline_anchor);
         // Buffered runs must not write anything from this thread: several
         // children are live, so a direct write here interleaves into the middle
         // of another sim's locked record. The lines are retained and handed
@@ -1385,7 +1417,11 @@ fn run_worker(
                     Err(e) => return Some(format!("error reading game stderr: {e}")),
                 };
                 if let Some(rest) = line.strip_prefix("__SIM__ ") {
-                    if extract_str_field(rest, "op").as_deref() == Some("reload_edit") {
+                    let op = extract_str_field(rest, "op");
+                    if op.as_deref() == Some("entry_start") {
+                        *anchor.lock().unwrap() = std::time::Instant::now();
+                    }
+                    if op.as_deref() == Some("reload_edit") {
                         // Send failure = the wait loop already reaped the child;
                         // the edit can't apply, which the sim's own wait_for
                         // timeout (or the post-exit drain) surfaces.
@@ -1431,7 +1467,6 @@ fn run_worker(
     };
 
     let timeout = Duration::from_secs(sim_timeout_secs());
-    let start_time = std::time::Instant::now();
     let mut pristine: HashMap<String, String> = HashMap::new();
     let mut reload_errors: Vec<SiteMessage> = Vec::new();
     let mut stone = stone;
@@ -1439,7 +1474,8 @@ fn run_worker(
         match child.try_wait()? {
             Some(s) => break (s, false),
             None => {
-                if start_time.elapsed() > timeout {
+                let since_anchor = deadline_anchor.lock().unwrap().elapsed();
+                if since_anchor > timeout {
                     let _ = child.kill();
                     let s = child.wait()?;
                     break (s, true);
@@ -2923,20 +2959,39 @@ mod tests {
 
         // FRAME_COUNT is runner-owned, so plain_a and plain_b share a group;
         // fx_off's boot-consumed value is its own.
-        assert_eq!(groups, vec![specs(&["plain_a", "plain_b"]), specs(&["fx_off"])]);
+        assert_eq!(groups, vec![vec![0, 1], vec![2]]);
 
         assert_eq!(isolated.len(), 3);
-        assert_eq!(isolated[0].0, "reload");
+        assert_eq!(isolated[0].0, 3);
         assert!(isolated[0].1.contains("hot-reload"), "{}", isolated[0].1);
-        assert_eq!(isolated[1].0, "outref");
+        assert_eq!(isolated[1].0, 4);
         assert!(isolated[1].1.contains("$OUT"), "{}", isolated[1].1);
         assert!(
             !isolated[1].1.contains("hot-reload"),
             "the $OUT refusal must carry its OWN reason: {}",
             isolated[1].1
         );
-        assert_eq!(isolated[2].0, "machinery");
+        assert_eq!(isolated[2].0, 5);
         assert!(isolated[2].1.contains("SIM_WORKER_ISOLATED"), "{}", isolated[2].1);
+    }
+
+    /// A suite may name the same sim twice. Both occurrences are entries that
+    /// must be scheduled and must each own a result, so admission carries spec
+    /// POSITIONS -- keying by spelling collapses them into one.
+    #[test]
+    fn a_duplicated_spec_is_two_scheduled_entries() {
+        let wires = wires(&[("plain", &[]), ("reload", &[("STONE_HOT_RELOAD", "1")])]);
+
+        let (groups, isolated) =
+            group_worker_specs(&specs(&["plain", "plain", "reload", "reload"]), &wires);
+        assert_eq!(groups, vec![vec![0, 1]]);
+        assert_eq!(isolated.iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![2, 3]);
+
+        // Every position is scheduled exactly once, whatever it was named.
+        let mut seen: Vec<usize> =
+            groups.concat().into_iter().chain(isolated.iter().map(|(i, _)| *i)).collect();
+        seen.sort_unstable();
+        assert_eq!(seen, vec![0, 1, 2, 3]);
     }
 
     #[test]
@@ -2950,7 +3005,7 @@ mod tests {
 
         let (groups, isolated) =
             group_worker_specs(&specs(&["head,tail_same", "plain"]), &wires);
-        assert_eq!(groups, vec![specs(&["head,tail_same"]), specs(&["plain"])]);
+        assert_eq!(groups, vec![vec![0], vec![1]]);
         assert!(isolated.is_empty());
 
         let (groups, isolated) = group_worker_specs(&specs(&["head,tail_other"]), &wires);
@@ -2961,6 +3016,22 @@ mod tests {
             "a mixed chain must say why it stays isolated: {}",
             isolated[0].1
         );
+    }
+
+    /// An empty spec is a user error with an existing message, not a crash:
+    /// admission must classify it rather than index its first part.
+    #[test]
+    fn an_empty_spec_is_classified_not_indexed() {
+        let wires = wires(&[("plain", &[])]);
+
+        assert!(worker_ineligibility("", &wires).is_some());
+        assert!(worker_ineligibility(" , ", &wires).is_some());
+
+        let (groups, isolated) = group_worker_specs(&specs(&["plain", ""]), &wires);
+        assert_eq!(groups, vec![vec![0]]);
+        assert_eq!(isolated.len(), 1);
+        assert_eq!(isolated[0].0, 1);
+        assert!(isolated[0].1.contains("empty sim name"), "{}", isolated[0].1);
     }
 
     #[test]
