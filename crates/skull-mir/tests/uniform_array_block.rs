@@ -17,8 +17,26 @@
 //! Every expected number here is a LITERAL read off the std140 rules, never
 //! computed from the function under test.
 
-use skull_mir::gpu_layout::{uniform_array_block, ArrayMemberDecl, WireKind};
+use std::sync::LazyLock;
+
+use skull_mir::gpu_layout::{uniform_array_block, uniform_block, ArrayMemberDecl, WireKind};
 use ustr::Ustr;
+
+static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
+    rock_host::stdlib_loader::stdlib_files()
+        .iter()
+        .map(|f| {
+            let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());
+            skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
+        })
+        .collect()
+});
+
+fn ws_of(src: &str) -> bone_semantic::inference::Workspace {
+    let mut modules = STDLIB.clone();
+    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
+    bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass")
+}
 
 fn decl(name: &str, elem: WireKind, capacity: u32) -> ArrayMemberDecl {
     ArrayMemberDecl { name: Ustr::from(name), elem, capacity }
@@ -194,16 +212,88 @@ fn the_fingerprint_separates_same_size_layouts() {
     assert!(a.fingerprint() < (1u64 << 53));
 }
 
-/// An array block's fingerprint must not collide with a SCALAR block's over the
-/// same name -- they are separate bindings uploaded independently, and a bind
-/// comparing the wrong one would accept a mismatched buffer.
+/// An array block's fingerprint must not collide with a SCALAR block's. They are
+/// separate bindings uploaded independently, so a bind that compared one against
+/// the other would accept a mismatched buffer.
+///
+/// The two are made as alike as the types allow -- same block name, same single
+/// member name, same element kind, same offset 0, same 16-byte size -- so the
+/// premise assertions below are what make the inequality mean something.
+///
+/// This pins the OUTCOME, not a mechanism, and the separation is
+/// over-determined: the array hash uses a different seed AND folds in capacity
+/// and stride, which the scalar hash has nothing to fold. Measured -- giving both
+/// the same seed leaves this test green, so it is not a test of the seed. Two
+/// independent reasons is deliberate for a value a bind compares before trusting
+/// a buffer, but do not read a pass here as evidence the seed is doing work.
 #[test]
 fn an_array_block_fingerprint_differs_from_a_scalar_blocks() {
+    let ws = ws_of("value Shared { m0: Vec4 }");
+    let scalar = uniform_block(&ws, Ustr::from("Shared")).expect("scalar plan");
     let arrays =
         uniform_array_block(Ustr::from("Shared"), &[decl("m0", WireKind::F32x4, 1)]).unwrap();
+
+    // The premise: everything a fingerprint could key on agrees.
+    assert_eq!(scalar.size, arrays.size, "both 16 bytes");
+    assert_eq!(scalar.struct_name, arrays.block_name, "both named Shared");
+    assert_eq!(scalar.members[0].name, arrays.members[0].name, "both member m0");
+    assert_eq!(scalar.members[0].offset, arrays.members[0].offset, "both at 0");
+    assert_eq!(scalar.members[0].kind, arrays.members[0].elem, "both Vec4");
+
     assert_ne!(
+        scalar.fingerprint(),
         arrays.fingerprint(),
-        0,
-        "a zero fingerprint would compare equal to an unset one"
+        "an array block and a scalar block of identical shape must not hash alike"
     );
+    assert!(arrays.fingerprint() < (1u64 << 53));
+}
+
+// -- Capacity arithmetic cannot be trusted to u32.
+//
+// `capacity * stride` is attacker-shaped input: `@size(N)` is whatever the source
+// says. At stride 16 the product reaches u32::MAX at capacity 2^28, so a u32
+// multiply either panics (debug overflow checks) or WRAPS -- and a wrap lands on
+// a small size that passes the budget check, which is the one thing this
+// function exists to enforce. Both are rejections that must arrive as
+// diagnostics.
+
+/// Exactly the wrap point: 2^28 * 16 == 2^32, which is 0 in u32.
+#[test]
+fn a_capacity_at_the_u32_wrap_point_is_rejected() {
+    let e = uniform_array_block(Ustr::from("arrays"), &[decl("a", WireKind::F32x4, 1 << 28)])
+        .expect_err("2^28 * 16 wraps to 0 in u32 and would pass the budget");
+    assert!(
+        e.message.contains("16384"),
+        "must reject against the budget, not wrap past it: {}",
+        e.message
+    );
+}
+
+#[test]
+fn the_largest_possible_capacity_is_rejected() {
+    let e = uniform_array_block(Ustr::from("arrays"), &[decl("a", WireKind::F32x4, u32::MAX)])
+        .expect_err("u32::MAX elements is not a block");
+    assert!(e.message.contains("16384"), "{}", e.message);
+}
+
+/// The sum across members can overflow even when each member alone does not.
+#[test]
+fn a_capacity_sum_that_would_overflow_is_rejected() {
+    let big = (1u32 << 27) + 1;
+    let e = uniform_array_block(
+        Ustr::from("arrays"),
+        &[decl("a", WireKind::F32x4, big), decl("b", WireKind::F32x4, big)],
+    )
+    .expect_err("the two together exceed u32 at stride 16");
+    assert!(e.message.contains("16384"), "{}", e.message);
+}
+
+/// The largest capacity that DOES fit, so the rejections above are a boundary and
+/// not a blanket refusal of anything large: one Vec4 array at 1024 elements is
+/// exactly 16384.
+#[test]
+fn the_largest_fitting_single_array_is_accepted() {
+    let p = uniform_array_block(Ustr::from("arrays"), &[decl("a", WireKind::F32x4, 1024)])
+        .expect("1024 * 16 = 16384, exactly the guarantee");
+    assert_eq!(p.size, 16384);
 }

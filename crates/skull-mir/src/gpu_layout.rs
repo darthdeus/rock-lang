@@ -560,6 +560,21 @@ impl UniformArrayBlockPlan {
     }
 }
 
+fn round_up_u64(v: u64, align: u64) -> u64 {
+    (v + align - 1) / align * align
+}
+
+/// The over-budget rejection, shared so every path that can produce an
+/// unrepresentable size reports the same way rather than one of them truncating.
+fn oversized(block_name: Ustr, size: u64) -> CompilerError {
+    CompilerError::new_no_location(format!(
+        "uniform array block: `{block_name}` needs {size} std140 bytes, over the \
+         {GLES3_MAX_UNIFORM_BLOCK_SIZE} an ES 3.0 driver is required to offer. Array stride is 16 \
+         for every element kind, so a `@size(N)` array costs `N * 16` whatever it holds -- the \
+         budget is per BLOCK, and this one is the arrays alone"
+    ))
+}
+
 /// Lay out one stage's `UniformArray<T>` params as a std140 array block.
 ///
 /// The admitted element kinds are exactly the set the GLSL emitter admits
@@ -579,7 +594,7 @@ pub fn uniform_array_block(
     }
 
     let mut members = Vec::with_capacity(decls.len());
-    let mut offset = 0u32;
+    let mut offset = 0u64;
 
     for d in decls {
         let stride = match d.elem {
@@ -611,27 +626,34 @@ pub fn uniform_array_block(
             )));
         }
 
-        offset = round_up(offset, stride);
+        // u64 throughout, and the budget is checked BEFORE anything narrows.
+        // `capacity` is whatever `@size(N)` says, so `capacity * stride` is
+        // source-controlled: in u32 it panics under overflow checks and WRAPS
+        // without them, and a wrap lands on a small size that passes the budget
+        // -- evading the one thing this function enforces.
+        offset = round_up_u64(offset, stride as u64);
+        let member_offset = u32::try_from(offset).map_err(|_| oversized(block_name, offset))?;
         members.push(ArrayMember {
             name: d.name,
             elem: d.elem,
             capacity: d.capacity,
-            offset,
+            offset: member_offset,
             stride,
         });
-        offset += d.capacity * stride;
+        offset += d.capacity as u64 * stride as u64;
+        if offset > GLES3_MAX_UNIFORM_BLOCK_SIZE as u64 {
+            return Err(oversized(block_name, round_up_u64(offset, 16)));
+        }
     }
 
-    let size = round_up(offset, 16);
-    if size > GLES3_MAX_UNIFORM_BLOCK_SIZE {
-        return Err(CompilerError::new_no_location(format!(
-            "uniform array block: `{block_name}` needs {size} std140 bytes, over the \
-             {GLES3_MAX_UNIFORM_BLOCK_SIZE} an ES 3.0 driver is required to offer. Array stride is \
-             16 for every element kind, so a `@size(N)` array costs `N * 16` whatever it holds -- \
-             the budget is per BLOCK, and this one is the arrays alone"
-        )));
+    let size = round_up_u64(offset, 16);
+    if size > GLES3_MAX_UNIFORM_BLOCK_SIZE as u64 {
+        return Err(oversized(block_name, size));
     }
 
+    // Unreachable given the check above, but narrowing is where a wrap would
+    // hide, so it rejects rather than truncating.
+    let size = u32::try_from(size).map_err(|_| oversized(block_name, size))?;
     Ok(UniformArrayBlockPlan { block_name, members, size })
 }
 
