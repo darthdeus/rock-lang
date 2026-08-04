@@ -1770,8 +1770,16 @@ inline(lua) fn table_new_with_size(size: int) -> any = """
 
 @inline inline(lua) fn table_remove(t: any, key: any) -> any = "table.remove(t, key)"
 
-// Global constants
-global PI: float = 3.141592653589793
+// Global constants. `const` (not `global`): bone enforces these read-only, which
+// is also what lets a shader body fold them -- a mutable `global` has no GLSL
+// lowering (docs/shaders.md).
+const PI: float = 3.141592653589793
+const TAU: float = 6.283185307179586
+const TWO_PI: float = TAU
+const HALF_PI: float = 1.5707963267948966
+const QTR_PI: float = 0.7853981633974483
+const PHI: float = 1.618033988749895
+const EPSILON: float = 0.0000001
 
 // Assert function overloads are defined earlier in the file to avoid duplicates
 

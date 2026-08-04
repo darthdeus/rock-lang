@@ -28,6 +28,8 @@ mod uniform_block_gate;
 mod texture_slot_gate;
 #[path = "skull_overlay_wipe.rs"]
 mod skull_overlay_wipe;
+#[path = "sim_concurrent_invocations.rs"]
+mod sim_concurrent_invocations;
 #[path = "web_smoke_tests.rs"]
 mod web_smoke_tests;
 
