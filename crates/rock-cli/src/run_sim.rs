@@ -19,9 +19,26 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 use tempfile::TempDir;
 
-/// Frame budget. Sims terminate naturally via the runner's `sim_done`
-/// check; this is the upper bound for runaway / hung body.
+/// Frame budget for a sim that declares none. Sims terminate naturally via the
+/// runner's `sim_done` check; this is the upper bound for a runaway / hung
+/// body. A sim overrides it with `@sim_env("FRAME_COUNT", "<n>")`, which is a
+/// PER-ENTRY value: `sim_start_entry` republishes it at every entry boundary
+/// and the entry plan carries it, so entries with different budgets can share
+/// one worker process.
 const DEFAULT_FRAME_BUDGET: usize = 600;
+
+/// The budget one entry runs on: its own `@sim_env("FRAME_COUNT", ...)`, or the
+/// default. Rejects a value that is not a positive integer rather than falling
+/// back -- a sim asking for a bound the runner silently replaces would be
+/// guarded by a number nobody wrote.
+fn frame_budget_for(sim_name: &str, env_pairs: &[(String, String)]) -> Result<usize> {
+    let Some((_, raw)) = env_pairs.iter().find(|(k, _)| k == "FRAME_COUNT") else {
+        return Ok(DEFAULT_FRAME_BUDGET);
+    };
+    raw.parse::<usize>().ok().filter(|n| *n > 0).ok_or_else(|| {
+        anyhow!("sim `{sim_name}` declares @sim_env(\"FRAME_COUNT\", \"{raw}\"), which is not a positive integer")
+    })
+}
 /// Wall-clock timeout. An INDEPENDENT bound, not a backstop for the frame
 /// budget: it is the only thing that catches a child which never advances a
 /// frame at all -- an infinite loop inside one tick, a blocked FFI call, a
@@ -205,7 +222,7 @@ pub fn do_run_sim_opts(backend: crate::Backend, project: &str, sim_name: &str, q
 
     if summary.timed_out {
         return Err(anyhow!(
-            "sim `{sim_name}` timed out after {}s (frame budget {DEFAULT_FRAME_BUDGET}); \
+            "sim `{sim_name}` timed out after {}s (wall clock, not its frame budget); \
              override with ROCK_SIM_TIMEOUT_SECS",
             sim_timeout_secs()
         ));
@@ -786,6 +803,26 @@ fn writes_live(buffered: bool) -> bool {
     !buffered
 }
 
+/// `@sim_env` keys the runner owns per entry, so they are NOT part of the boot
+/// signature two entries must agree on to share a process.
+///
+/// `FRAME_COUNT` is the only one today: it is the entry's runaway bound,
+/// carried in the entry plan and republished by `sim_start_entry` at every
+/// boundary. `SIM_DT` and `SIM_SKIP_RENDER` are read ONCE during boot
+/// (`runner_load_sim_entries`), so they are still boot signature until the
+/// worker applies them per entry.
+const RUNNER_OWNED_ENV_KEYS: &[&str] = &["FRAME_COUNT"];
+
+/// The part of a sim's `@sim_env` that is consumed during global init, engine
+/// init and `@init` -- what a shared process cannot vary between entries.
+fn boot_signature(env_pairs: &[(String, String)]) -> Vec<(String, String)> {
+    env_pairs
+        .iter()
+        .filter(|(k, _)| !RUNNER_OWNED_ENV_KEYS.contains(&k.as_str()))
+        .cloned()
+        .collect()
+}
+
 /// One queued sim body. A worker child runs these in order in ONE process;
 /// the parts of a comma-chain share an `out_dir`, distinct entries do not.
 #[derive(Clone)]
@@ -970,7 +1007,7 @@ fn run_worker(
             ));
         }
         for p in &parts[1..] {
-            if p.env != first.env {
+            if boot_signature(&p.env) != boot_signature(&first.env) {
                 return Err(anyhow!(
                     "sims `{}` and `{}` have different @sim_env boot signatures and \
                      cannot share one worker process",
@@ -1389,7 +1426,7 @@ fn run_one_sim(
     let part = WorkerPart {
         name: sim_part.to_string(),
         out_dir: out_path.to_path_buf(),
-        frame_budget: DEFAULT_FRAME_BUDGET,
+        frame_budget: frame_budget_for(sim_part, env_pairs)?,
         env: env_pairs.to_vec(),
     };
     let mut summaries = run_worker(
@@ -1452,11 +1489,12 @@ fn run_entries(
         }
         part_counts.push(chain.len());
         for name in chain {
+            let env = env_by_wire.get(name).cloned().unwrap_or_default();
             parts.push(WorkerPart {
                 name: name.to_string(),
                 out_dir: entry_artifacts.path().to_path_buf(),
-                frame_budget: DEFAULT_FRAME_BUDGET,
-                env: env_by_wire.get(name).cloned().unwrap_or_default(),
+                frame_budget: frame_budget_for(name, &env)?,
+                env,
             });
         }
         artifacts.push(entry_artifacts);
@@ -2418,6 +2456,50 @@ mod tests {
         assert!(matches!(r, SnapResult::Pass), "matching value passes; got {r:?}");
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn a_declared_frame_count_is_the_entrys_budget() {
+        assert_eq!(frame_budget_for("s", &env(&[])).expect("default"), DEFAULT_FRAME_BUDGET);
+        assert_eq!(frame_budget_for("s", &env(&[("FRAME_COUNT", "90")])).expect("declared"), 90);
+        // The two watchdog sims in testbed declare this; a runner that quietly
+        // capped them at the default would guard them with a bound nobody wrote.
+        assert_eq!(
+            frame_budget_for("s", &env(&[("FRAME_COUNT", "100000")])).expect("declared"),
+            100000
+        );
+        // Other keys are not budgets.
+        assert_eq!(
+            frame_budget_for("s", &env(&[("STONE_FX_OFF", "1")])).expect("default"),
+            DEFAULT_FRAME_BUDGET
+        );
+    }
+
+    #[test]
+    fn an_unusable_frame_count_is_rejected_not_defaulted() {
+        for bad in ["abc", "", "0", "-5", "12.5"] {
+            assert!(
+                frame_budget_for("s", &env(&[("FRAME_COUNT", bad)])).is_err(),
+                "`FRAME_COUNT={bad}` must reject rather than silently become the default"
+            );
+        }
+    }
+
+    #[test]
+    fn the_boot_signature_excludes_only_runner_owned_keys() {
+        let a = env(&[("FRAME_COUNT", "90"), ("STONE_FX_OFF", "1")]);
+        let b = env(&[("FRAME_COUNT", "40"), ("STONE_FX_OFF", "1")]);
+        assert_eq!(boot_signature(&a), boot_signature(&b), "the budget is per entry");
+
+        let c = env(&[("FRAME_COUNT", "90"), ("STONE_FX_OFF", "0")]);
+        assert_ne!(boot_signature(&a), boot_signature(&c), "a boot-consumed value is not");
+        // SIM_DT and SIM_SKIP_RENDER are read once during boot, so they stay in.
+        let d = env(&[("SIM_DT", "0.1")]);
+        assert_eq!(boot_signature(&d), d);
     }
 
     #[test]

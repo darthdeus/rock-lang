@@ -378,6 +378,43 @@ fn a_subprocess_still_outlives_the_entry_that_spawned_it() {
     );
 }
 
+/// A non-default frame budget is per ENTRY, not per process: the budget an
+/// entry runs on is the one ITS sim declared, and it is measured from that
+/// entry's start frame.
+///
+/// The two fixtures declare DIFFERENT budgets on purpose -- a queue that served
+/// only one value would fail whichever it dropped -- and the predecessor burns
+/// most of its own before the probe starts, so a process-wide bound would kill
+/// the probe partway and cost it its later expects and its `stop_sim()`.
+#[test]
+fn a_declared_frame_budget_belongs_to_its_entry() {
+    let (isolated, worker) = differential(&["b0_budget_pred"], "b0_budget_probe");
+    let c = compare(&isolated, &worker);
+    assert_equivalent("b0_budget_probe", &c);
+
+    for (label, record) in [("isolated", &isolated), ("worker", &worker)] {
+        assert!(record.saw_stop, "{label}: the entry was cut short of stop_sim()");
+        assert!(
+            record
+                .expects_pass
+                .iter()
+                .any(|m| m.message.contains("kept its own budget through to the end")),
+            "{label}: the probe never reached its post-budget frames, so agreement \
+             proves nothing: {:?}",
+            record.expects_pass
+        );
+    }
+    // The declared value, not just "a budget": 90 is the probe's, 40 the
+    // predecessor's, 600 the default nobody here asked for.
+    assert_eq!(
+        worker.artifacts["budget.txt"].len,
+        2,
+        "the entry reports a two-digit budget, so neither 600 nor an empty read"
+    );
+    assert_eq!(isolated.artifacts["budget.txt"], worker.artifacts["budget.txt"]);
+    assert!(c.population("expects_pass") > 0);
+}
+
 /// Mutation guard for the comparator itself: every arm must be present, and
 /// every arm a fixture can populate must have compared a non-zero population
 /// in at least one fixture. Deleting an arm from `compare` makes `population`
