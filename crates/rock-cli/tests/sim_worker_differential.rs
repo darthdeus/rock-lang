@@ -17,7 +17,7 @@
 //! `games/testbed/tests/sims/b0_*.rock` file, so a failure in one cannot mask
 //! the next.
 
-use rock_cli::run_sim::{run_differential, DifferentialPlan};
+use rock_cli::run_sim::{run_differential, run_worker_suite, DifferentialPlan};
 use rock_cli::sim_record::{compare, Comparison, SimRecord, COMPARED_ARMS};
 use rock_cli::Backend;
 
@@ -454,6 +454,110 @@ fn a_dropped_definitions_static_resets_at_the_entry_boundary() {
         "the probe writes its one-digit count, so the fresh cell was measured"
     );
     assert_eq!(isolated.artifacts["calls.txt"], worker.artifacts["calls.txt"]);
+}
+
+/// A predecessor the entry budget CUT -- its coroutine still suspended, a
+/// global dirtied -- is abandoned and restored over like any finished one. The
+/// wedge only wedges when chained behind its marker-writing head, so the suite
+/// sees both fixtures pass standalone.
+#[test]
+fn a_budget_cut_predecessor_still_restores_boot() {
+    let (isolated, worker) = differential(&["b2_wedge_head,b2_wedge_tail"], "b0_leak_probe");
+    let c = compare(&isolated, &worker);
+    assert_equivalent("b0_leak_probe after a wedged predecessor", &c);
+
+    assert_eq!(isolated.verdict(), "PASS", "the probe passes in a fresh process");
+    assert!(c.population("expects_pass") > 0, "the fixture asserted nothing");
+    assert_eq!(
+        worker.artifacts["count.txt"].len, 1,
+        "the probe wrote the counter it read, so the fresh zero was measured"
+    );
+    assert_eq!(isolated.artifacts["count.txt"], worker.artifacts["count.txt"]);
+}
+
+/// Failure containment (`docs/sim-speed-plan.md` B2): a worker that DIES
+/// mid-queue loses only the entry it died inside; every unstarted entry reruns
+/// in a fresh worker of the same boot signature and behaves as it does alone.
+/// The crash only fires when chained behind its marker-writing head, so the
+/// suite sees both fixtures pass standalone.
+#[test]
+fn a_crashed_worker_recovers_its_unstarted_entries() {
+    let records = run_worker_suite(
+        Backend::Skull,
+        "testbed",
+        &["b2_crash_head,b2_crash_tail".to_string(), "b0_leak_probe".to_string()],
+    )
+    .expect("the suite call itself must not error: the crash is an entry failure");
+    assert_eq!(records.len(), 2, "one record per entry spec");
+
+    let crashed = &records[0];
+    assert_eq!(
+        crashed.exit_code,
+        Some(7),
+        "the crash belongs to the entry the worker died inside: {crashed:?}"
+    );
+    assert_eq!(crashed.verdict(), "FAIL");
+
+    let probe = &records[1];
+    assert!(
+        probe.errors.is_empty(),
+        "recovery must rerun the unstarted entry, not record it as never started: {:?}",
+        probe.errors
+    );
+    assert_eq!(probe.verdict(), "PASS", "the recovered entry behaves as it does alone");
+    assert!(probe.saw_stop);
+    assert!(
+        probe
+            .expects_pass
+            .iter()
+            .any(|m| m.message.contains("a counter no predecessor touched")),
+        "the recovered entry must have run on a fresh world: {:?}",
+        probe.expects_pass
+    );
+    assert_eq!(
+        probe.artifacts["count.txt"].len, 1,
+        "the recovered entry produced its artifact under its own $OUT"
+    );
+}
+
+/// An entry that REPLACES the boot checkpoint mid-run (the checkpoint-
+/// machinery sims do this by design) must not have its mid-entry image
+/// silently restored into the next entry -- that was observed as a corruption
+/// cascade across every later entry in the queue. The boundary refuses with
+/// its reason and the worker dies there; recovery then reruns the unstarted
+/// entries fresh, so the damage is contained to the entry that caused it.
+#[test]
+fn a_replaced_boot_checkpoint_is_refused_not_restored() {
+    // Both sims carry the SIM_WORKER_ISOLATED marker, so worker-mode GROUPING
+    // never queues them -- this drives the raw queue surface underneath it,
+    // which is exactly where an unforeseen mid-entry take would land.
+    let records = run_worker_suite(
+        Backend::Skull,
+        "testbed",
+        &["b1_checkpoint_take_succeeds".to_string(), "b1_checkpoint_membership".to_string()],
+    )
+    .expect("the suite call itself must not error: the refusal is an entry failure");
+    assert_eq!(records.len(), 2);
+
+    let corruptor = &records[0];
+    assert!(
+        corruptor
+            .errors
+            .iter()
+            .any(|m| m.message.contains("boot checkpoint was replaced")),
+        "the boundary must name the refusal, not restore a mid-entry image: {:?}",
+        corruptor.errors
+    );
+    assert_eq!(corruptor.verdict(), "FAIL");
+
+    let probe = &records[1];
+    assert!(probe.errors.is_empty(), "recovery reruns the probe fresh: {:?}", probe.errors);
+    assert_eq!(
+        probe.verdict(),
+        "PASS",
+        "the recovered entry behaves as it does alone (its own machinery asserts \
+         hold only in a fresh process): {probe:?}"
+    );
 }
 
 /// Mutation guard for the comparator itself: every arm must be present, and

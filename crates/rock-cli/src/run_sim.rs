@@ -413,9 +413,11 @@ pub fn do_run_named_sims(
     quiet: bool,
     update_snapshots: bool,
     jobs: Option<usize>,
+    mode: SimExecMode,
 ) -> Result<()> {
     // One name: identical to the classic single-run path (full detail). There
-    // is nothing to overlap, so `--jobs` does not apply.
+    // is nothing to overlap, so `--jobs` does not apply -- nor `--workers`,
+    // since a one-entry queue takes no checkpoint either way.
     if names.len() == 1 {
         return do_run_sim_opts(backend, project, &names[0], quiet, update_snapshots);
     }
@@ -430,6 +432,41 @@ pub fn do_run_named_sims(
     let (_, env_by_wire, mut stone) =
         compile_sims(backend, project_path, PathBuf::from(&output))?;
     sim_spawn_barrier();
+
+    if mode == SimExecMode::Workers {
+        let results = run_specs_worker_mode(
+            &project,
+            &output,
+            &env_by_wire,
+            names,
+            quiet,
+            update_snapshots,
+            &mut stone,
+        )?;
+        let mut passed = 0usize;
+        let mut failed: Vec<String> = Vec::new();
+        for (name, summary) in &results {
+            if entry_passed(summary) {
+                passed += 1;
+            } else {
+                failed.push(name.clone());
+            }
+        }
+        let suffix = if failed.is_empty() {
+            String::new()
+        } else {
+            format!(" -- FAILED: {}", failed.join(", "))
+        };
+        println!("[sim] {passed}/{} sims passed{suffix}", names.len());
+        if !failed.is_empty() {
+            return Err(anyhow!(
+                "{} of {} named sims failed in `{project}`",
+                failed.len(),
+                names.len()
+            ));
+        }
+        return Ok(());
+    }
 
     let jobs = resolve_jobs(jobs, update_snapshots);
 
@@ -540,6 +577,7 @@ pub fn do_run_all_sims(
     quiet: bool,
     update_snapshots: bool,
     jobs: Option<usize>,
+    mode: SimExecMode,
 ) -> Result<()> {
     rock_host::project::ensure_workspace_root()?;
 
@@ -554,6 +592,44 @@ pub fn do_run_all_sims(
     sim_spawn_barrier();
     if wire_names.is_empty() {
         return Err(anyhow!("no @sim coroutines found in project `{project}`"));
+    }
+
+    if mode == SimExecMode::Workers {
+        let results = run_specs_worker_mode(
+            &project,
+            &output,
+            &env_by_wire,
+            &wire_names,
+            quiet,
+            update_snapshots,
+            &mut stone,
+        )?;
+        let mut passed = 0usize;
+        let mut failed: Vec<String> = Vec::new();
+        for (name, summary) in &results {
+            if entry_passed(summary) {
+                passed += 1;
+            } else {
+                failed.push(name.clone());
+            }
+        }
+        let suffix = if failed.is_empty() {
+            String::new()
+        } else {
+            format!(" -- FAILED: {}", failed.join(", "))
+        };
+        println!(
+            "[sim] {project} suite: {passed}/{} sims passed{suffix}",
+            wire_names.len()
+        );
+        if !failed.is_empty() {
+            return Err(anyhow!(
+                "{} of {} sims failed in `{project}`",
+                failed.len(),
+                wire_names.len()
+            ));
+        }
+        return Ok(());
     }
 
     let jobs = resolve_jobs(jobs, update_snapshots);
@@ -672,6 +748,89 @@ pub fn do_run_all_sims(
         ));
     }
     Ok(())
+}
+
+/// Worker-mode execution for a list of entry specs (`--workers`): eligible
+/// specs grouped by boot signature run in shared boot-checkpoint workers with
+/// recovery; the ineligible remainder runs isolated, each with its REPORTED
+/// reason. Serial throughout -- worker composition with the Phase A scheduler
+/// is B5. Returns one summary per spec, in spec order.
+fn run_specs_worker_mode(
+    project: &str,
+    output: &str,
+    env_by_wire: &HashMap<String, Vec<(String, String)>>,
+    specs: &[String],
+    quiet: bool,
+    update_snapshots: bool,
+    stone: &mut crate::skull_backend::SkullStone,
+) -> Result<Vec<(String, SimSummary)>> {
+    if cfg!(windows) {
+        return Err(anyhow!(
+            "--workers is not available on Windows: the per-entry environment reaches \
+             only the CRT view, so a native reader using the Win32 environment block \
+             would see the previous entry's $OUT"
+        ));
+    }
+    if update_snapshots {
+        return Err(anyhow!(
+            "--workers cannot rewrite snapshot baselines: the runner does not yet prove \
+             every destination path is unique. Run --update-snapshots isolated."
+        ));
+    }
+
+    let (groups, isolated) = group_worker_specs(specs, env_by_wire);
+    let mut by_spec: HashMap<String, SimSummary> = HashMap::new();
+
+    let report = |spec: &str, summary: &SimSummary| {
+        if !quiet {
+            if !summary.diagnostics.is_empty() {
+                eprint!("{}", summary.diagnostics);
+            }
+            summary.print(spec, false);
+        }
+    };
+
+    for group in &groups {
+        if !quiet && group.len() > 1 {
+            println!("[sim] worker: {} entries share one booted process", group.len());
+        }
+        for (spec, summary) in
+            run_specs_recovering(project, output, env_by_wire, group, update_snapshots, false)?
+        {
+            report(&spec, &summary);
+            by_spec.insert(spec, summary);
+        }
+    }
+
+    for (spec, reason) in &isolated {
+        if !quiet {
+            println!("[sim] {spec}: isolated ({reason})");
+        }
+        // `run_named_entry` gates session access per part, so only reload
+        // parts ever see the SkullStone -- and everything here is serial.
+        let (_, summary) = run_named_entry(
+            project,
+            spec,
+            quiet,
+            true,
+            update_snapshots,
+            output,
+            env_by_wire,
+            Some(&mut *stone),
+        )?;
+        report(spec, &summary);
+        by_spec.insert(spec.clone(), summary);
+    }
+
+    specs
+        .iter()
+        .map(|spec| {
+            let summary = by_spec
+                .remove(spec)
+                .ok_or_else(|| anyhow!("sim `{spec}` was never scheduled"))?;
+            Ok((spec.clone(), summary))
+        })
+        .collect()
 }
 
 /// A mid-sim `reload_edit` request parsed off the `__SIM__` side channel
@@ -815,12 +974,100 @@ const RUNNER_OWNED_ENV_KEYS: &[&str] = &["FRAME_COUNT"];
 
 /// The part of a sim's `@sim_env` that is consumed during global init, engine
 /// init and `@init` -- what a shared process cannot vary between entries.
+///
+/// Canonical (stable-sorted by key) so declaration order does not split a
+/// group: two sims agreeing on the same pairs share a signature however they
+/// spelled them. The sort is stable, so a duplicated key keeps its last-wins
+/// application order and a genuine effective difference still refuses.
 fn boot_signature(env_pairs: &[(String, String)]) -> Vec<(String, String)> {
-    env_pairs
+    let mut sig: Vec<(String, String)> = env_pairs
         .iter()
         .filter(|(k, _)| !RUNNER_OWNED_ENV_KEYS.contains(&k.as_str()))
         .cloned()
-        .collect()
+        .collect();
+    sig.sort_by(|a, b| a.0.cmp(&b.0));
+    sig
+}
+
+/// How `rock sim` maps entries to processes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SimExecMode {
+    /// One fresh process per entry: the permanent reference oracle, and (until
+    /// B3/B4 land) the default.
+    Isolated,
+    /// Boot-checkpoint workers: eligible entries grouped by boot signature
+    /// share one booted process with the restore boundary between them.
+    Workers,
+}
+
+/// Resolve the two CLI flags. clap already rejects the combination.
+pub fn exec_mode(isolated: bool, workers: bool) -> SimExecMode {
+    debug_assert!(!(isolated && workers));
+    if workers {
+        SimExecMode::Workers
+    } else {
+        SimExecMode::Isolated
+    }
+}
+
+/// Why an entry cannot join a shared worker process. The reason is REPORTED --
+/// a silently isolated entry would read as a worker result.
+fn worker_ineligibility(spec: &str, env_by_wire: &HashMap<String, Vec<(String, String)>>) -> Option<String> {
+    let parts = parse_sim_chain(spec);
+    for part in &parts {
+        let env = env_by_wire.get(*part).map_or(&[][..], |v| v);
+        if is_reload_lane(env) {
+            return Some("hot-reload lane: mutates the one session and overlay".to_string());
+        }
+        // The explicit opt-out, for sims that operate process-global machinery
+        // a shared worker cannot fence -- the checkpoint-machinery fixtures
+        // declare it because they replace the very image the boundary restores.
+        if env.iter().any(|(k, v)| k == "SIM_WORKER_ISOLATED" && v != "0") {
+            return Some("declares @sim_env(SIM_WORKER_ISOLATED)".to_string());
+        }
+        if let Some((k, v)) = env.iter().find(|(_, v)| v.contains("$OUT")) {
+            return Some(format!(
+                "@sim_env(\"{k}\", \"{v}\") interpolates $OUT, which resolves before the process starts"
+            ));
+        }
+    }
+    // A chain's parts run as consecutive entries of one queue, so they must
+    // agree with each other exactly as distinct entries must.
+    let first_sig = boot_signature(env_by_wire.get(parts[0]).map_or(&[][..], |v| v));
+    for part in &parts[1..] {
+        if boot_signature(env_by_wire.get(*part).map_or(&[][..], |v| v)) != first_sig {
+            return Some(format!(
+                "chain parts `{}` and `{part}` disagree on their @sim_env boot signature",
+                parts[0]
+            ));
+        }
+    }
+    None
+}
+
+/// Partition entry specs for worker mode: groups of specs sharing a boot
+/// signature (in first-appearance order, each group keeping registry order)
+/// plus the isolated remainder, each with its reason.
+#[allow(clippy::type_complexity)]
+fn group_worker_specs(
+    specs: &[String],
+    env_by_wire: &HashMap<String, Vec<(String, String)>>,
+) -> (Vec<Vec<String>>, Vec<(String, String)>) {
+    let mut groups: Vec<(Vec<(String, String)>, Vec<String>)> = Vec::new();
+    let mut isolated: Vec<(String, String)> = Vec::new();
+    for spec in specs {
+        if let Some(reason) = worker_ineligibility(spec, env_by_wire) {
+            isolated.push((spec.clone(), reason));
+            continue;
+        }
+        let sig =
+            boot_signature(env_by_wire.get(parse_sim_chain(spec)[0]).map_or(&[][..], |v| v));
+        match groups.iter_mut().find(|(s, _)| *s == sig) {
+            Some((_, members)) => members.push(spec.clone()),
+            None => groups.push((sig, vec![spec.clone()])),
+        }
+    }
+    (groups.into_iter().map(|(_, members)| members).collect(), isolated)
 }
 
 /// One queued sim body. A worker child runs these in order in ONE process;
@@ -1297,6 +1544,7 @@ fn run_worker(
     for (i, (part, stream)) in parts.iter().zip(streams.iter()).enumerate() {
         let mut summary = SimSummary::from_stderr(&stream.sim.join("\n"));
         if !stream.started {
+            summary.never_started = true;
             summary.errors.push(SiteMessage {
                 message: format!(
                     "sim `{}` never started: the worker process ended during an earlier entry",
@@ -1532,6 +1780,133 @@ fn run_entries(
         records.push(record_of(spec, seq, merged));
     }
     Ok(records)
+}
+
+/// One queued entry spec (a name or a comma-chain) with its `$OUT` and parts,
+/// built once so recovery rounds rerun the SAME plan against the same
+/// directories.
+struct SpecPlan {
+    spec: String,
+    artifacts: Option<SimArtifacts>,
+    parts: Vec<WorkerPart>,
+}
+
+/// Run `entry_specs` in ONE boot-checkpoint worker, with failure containment:
+/// when the worker dies (crash, kill, timeout), the entry it died inside keeps
+/// its failure record and every UNSTARTED entry reruns in a fresh worker of
+/// the same boot signature. Containment, not a state reset claim -- the
+/// in-child boundary owns the reset.
+///
+/// The caller has already grouped `entry_specs` by boot signature;
+/// `run_worker` still refuses a mixed queue, so a grouping bug is loud.
+fn run_specs_recovering(
+    project: &str,
+    output: &str,
+    env_by_wire: &HashMap<String, Vec<(String, String)>>,
+    entry_specs: &[String],
+    update_snapshots: bool,
+    record_manifest: bool,
+) -> Result<Vec<(String, SimSummary)>> {
+    let mut plans = Vec::with_capacity(entry_specs.len());
+    for spec in entry_specs {
+        let artifacts = SimArtifacts::with_manifest(record_manifest)?;
+        let chain = parse_sim_chain(spec);
+        if chain.is_empty() {
+            return Err(anyhow!("sim got an empty sim name"));
+        }
+        let parts = chain
+            .iter()
+            .map(|name| {
+                let env = env_by_wire.get(*name).cloned().unwrap_or_default();
+                Ok(WorkerPart {
+                    name: name.to_string(),
+                    out_dir: artifacts.path().to_path_buf(),
+                    frame_budget: frame_budget_for(name, &env)?,
+                    env,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        plans.push(SpecPlan { spec: spec.clone(), artifacts: Some(artifacts), parts });
+    }
+
+    let mut done: Vec<(String, SimSummary)> = Vec::new();
+    let mut base = 0usize;
+    while base < plans.len() {
+        let parts: Vec<WorkerPart> =
+            plans[base..].iter().flat_map(|p| p.parts.iter().cloned()).collect();
+        let summaries =
+            run_worker(project, &parts, false, true, update_snapshots, output, None)?;
+
+        // Reassemble per spec and decide how far this round got. Specs whose
+        // parts all started are final; the first spec with an unstarted part is
+        // where the process died IF any of its parts started (a half-run chain
+        // keeps its failure record). A fully-unstarted first spec means the
+        // worker died during boot: its record carries the process failure, so
+        // it is final too -- which is also the progress guarantee, since every
+        // round finalizes at least one spec.
+        let mut merged: Vec<(SimSummary, bool)> = Vec::new();
+        let mut it = summaries.into_iter();
+        for plan in &plans[base..] {
+            let part_summaries: Vec<SimSummary> = it.by_ref().take(plan.parts.len()).collect();
+            let any_unstarted = part_summaries.iter().any(|s| s.never_started);
+            let any_started = part_summaries.iter().any(|s| !s.never_started);
+            let mut m = SimSummary::default();
+            for s in part_summaries {
+                m.merge(s);
+            }
+            merged.push((m, any_unstarted && !any_started));
+            if any_unstarted {
+                break;
+            }
+        }
+
+        let finals = match merged.iter().position(|(m, _)| m.never_started) {
+            None => merged.len(),
+            // Died inside a started spec (or during boot for spec 0): that
+            // spec's record is final. A fully-unstarted later spec reruns.
+            Some(i) if merged[i].1 && i > 0 => i,
+            Some(i) => i + 1,
+        };
+        debug_assert!(finals >= 1, "a recovery round must finalize at least one spec");
+
+        for (offset, (mut summary, _)) in merged.into_iter().take(finals).enumerate() {
+            let plan = &mut plans[base + offset];
+            let artifacts = plan
+                .artifacts
+                .take()
+                .expect("a spec is finalized exactly once");
+            artifacts.finish(&mut summary);
+            done.push((plan.spec.clone(), summary));
+        }
+        base += finals;
+    }
+    Ok(done)
+}
+
+/// Test-facing surface for the recovering worker queue: compile, run
+/// `entry_specs` in one worker (with recovery), and return a structured record
+/// per spec, artifact manifest included.
+pub fn run_worker_suite(
+    backend: crate::Backend,
+    project: &str,
+    entry_specs: &[String],
+) -> Result<Vec<crate::sim_record::SimRecord>> {
+    rock_host::project::ensure_workspace_root()?;
+    let project_path = rock_host::project::resolve_project_dir(project)?;
+    let project = project_path.to_string_lossy().into_owned();
+    rock_host::engine_build::build_engine_libs(&project)?;
+
+    let out_dir = sim_output_dir()?;
+    let output = out_dir.path().to_string_lossy().into_owned();
+    let (_, env_by_wire, _stone) = compile_sims(backend, project_path, PathBuf::from(&output))?;
+
+    let results =
+        run_specs_recovering(&project, &output, &env_by_wire, entry_specs, false, true)?;
+    Ok(results
+        .into_iter()
+        .enumerate()
+        .map(|(seq, (spec, summary))| record_of(&spec, seq, summary))
+        .collect())
 }
 
 /// What to compare: `target` run alone in a fresh process against `target` run
@@ -2036,6 +2411,10 @@ struct SimSummary {
     /// What the entry left under its `$OUT`, keyed by relative path. Captured
     /// by `SimArtifacts::finish_with` while the directory is still live.
     artifacts: std::collections::BTreeMap<String, crate::sim_record::ArtifactEntry>,
+    /// The worker process died before this entry's envelope ever opened. The
+    /// recovery loop reruns such entries in a fresh worker; every other caller
+    /// keeps the error record this flag rides beside.
+    never_started: bool,
 }
 
 impl SimSummary {
@@ -2059,6 +2438,7 @@ impl SimSummary {
         if other.process_failure_code.is_some() {
             self.process_failure_code = other.process_failure_code;
         }
+        self.never_started = self.never_started || other.never_started;
     }
 }
 
@@ -2500,6 +2880,87 @@ mod tests {
         // SIM_DT and SIM_SKIP_RENDER are read once during boot, so they stay in.
         let d = env(&[("SIM_DT", "0.1")]);
         assert_eq!(boot_signature(&d), d);
+    }
+
+    #[test]
+    fn the_boot_signature_is_declaration_order_independent() {
+        let a = env(&[("STONE_FX_OFF", "1"), ("SIM_DT", "0.1")]);
+        let b = env(&[("SIM_DT", "0.1"), ("STONE_FX_OFF", "1")]);
+        assert_eq!(boot_signature(&a), boot_signature(&b), "same pairs, either spelling");
+
+        // The sort is stable, so a duplicated key keeps last-wins order and a
+        // genuine effective difference still refuses.
+        let dup_a = env(&[("K", "1"), ("K", "2")]);
+        let dup_b = env(&[("K", "2"), ("K", "1")]);
+        assert_ne!(boot_signature(&dup_a), boot_signature(&dup_b));
+    }
+
+    fn wires(entries: &[(&str, &[(&str, &str)])]) -> HashMap<String, Vec<(String, String)>> {
+        entries
+            .iter()
+            .map(|(name, pairs)| (name.to_string(), env(pairs)))
+            .collect()
+    }
+
+    fn specs(names: &[&str]) -> Vec<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn worker_grouping_shares_a_signature_and_isolates_with_reasons() {
+        let wires = wires(&[
+            ("plain_a", &[]),
+            ("plain_b", &[("FRAME_COUNT", "40")]),
+            ("fx_off", &[("STONE_FX_OFF", "1")]),
+            ("reload", &[("STONE_HOT_RELOAD", "1")]),
+            ("outref", &[("SESSION", "$OUT/resume.json")]),
+            ("machinery", &[("SIM_WORKER_ISOLATED", "1")]),
+        ]);
+        let (groups, isolated) = group_worker_specs(
+            &specs(&["plain_a", "plain_b", "fx_off", "reload", "outref", "machinery"]),
+            &wires,
+        );
+
+        // FRAME_COUNT is runner-owned, so plain_a and plain_b share a group;
+        // fx_off's boot-consumed value is its own.
+        assert_eq!(groups, vec![specs(&["plain_a", "plain_b"]), specs(&["fx_off"])]);
+
+        assert_eq!(isolated.len(), 3);
+        assert_eq!(isolated[0].0, "reload");
+        assert!(isolated[0].1.contains("hot-reload"), "{}", isolated[0].1);
+        assert_eq!(isolated[1].0, "outref");
+        assert!(isolated[1].1.contains("$OUT"), "{}", isolated[1].1);
+        assert!(
+            !isolated[1].1.contains("hot-reload"),
+            "the $OUT refusal must carry its OWN reason: {}",
+            isolated[1].1
+        );
+        assert_eq!(isolated[2].0, "machinery");
+        assert!(isolated[2].1.contains("SIM_WORKER_ISOLATED"), "{}", isolated[2].1);
+    }
+
+    #[test]
+    fn a_chain_groups_by_its_parts_and_disagreeing_parts_isolate() {
+        let wires = wires(&[
+            ("head", &[("STONE_FX_OFF", "1")]),
+            ("tail_same", &[("STONE_FX_OFF", "1"), ("FRAME_COUNT", "30")]),
+            ("tail_other", &[("STONE_FX_OFF", "0")]),
+            ("plain", &[]),
+        ]);
+
+        let (groups, isolated) =
+            group_worker_specs(&specs(&["head,tail_same", "plain"]), &wires);
+        assert_eq!(groups, vec![specs(&["head,tail_same"]), specs(&["plain"])]);
+        assert!(isolated.is_empty());
+
+        let (groups, isolated) = group_worker_specs(&specs(&["head,tail_other"]), &wires);
+        assert!(groups.is_empty());
+        assert_eq!(isolated.len(), 1);
+        assert!(
+            isolated[0].1.contains("disagree"),
+            "a mixed chain must say why it stays isolated: {}",
+            isolated[0].1
+        );
     }
 
     #[test]

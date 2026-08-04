@@ -344,6 +344,7 @@ impl CommandContext {
                 self.args.quiet,
                 self.args.update_snapshots,
                 self.args.jobs,
+                crate::run_sim::exec_mode(self.args.isolated, self.args.workers),
             )
         } else {
             // files[0] = project, files[1..] = one or more sim names. One name
@@ -358,6 +359,7 @@ impl CommandContext {
                 self.args.quiet,
                 self.args.update_snapshots,
                 self.args.jobs,
+                crate::run_sim::exec_mode(self.args.isolated, self.args.workers),
             )
         }
     }
