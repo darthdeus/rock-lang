@@ -415,6 +415,76 @@ fn a_declared_frame_budget_belongs_to_its_entry() {
     assert!(c.population("expects_pass") > 0);
 }
 
+/// Boot-signature admission, side one: entries that AGREE on a non-default
+/// boot value share one worker and the target behaves as it does alone.
+///
+/// The value is `SIM_SKIP_RENDER`, latched once by `runner_load_sim_entries`
+/// before the queue starts, so nothing per-entry could stand in for it -- and
+/// the probe asserts the latch actually moved off its default, so agreement is
+/// not two runs of an unread variable.
+#[test]
+fn a_compatible_boot_signature_reaches_the_shared_worker() {
+    let (isolated, worker) = differential(&["b0_env_pred"], "b0_env_probe");
+    let c = compare(&isolated, &worker);
+    assert_equivalent("b0_env_probe", &c);
+
+    for (label, record) in [("isolated", &isolated), ("worker", &worker)] {
+        assert!(
+            record
+                .expects_pass
+                .iter()
+                .any(|m| m.message.contains("boot latched it, away from its default")),
+            "{label}: the boot value never took effect, so this compared nothing: {:?}",
+            record.expects_pass
+        );
+    }
+    assert_eq!(worker.artifacts["env.txt"].len, 1, "the entry read the declared `0`");
+    assert_eq!(isolated.artifacts["env.txt"], worker.artifacts["env.txt"]);
+    assert!(c.population("artifacts") > 0);
+}
+
+/// Boot-signature admission, side two: an entry that DISAGREES on a
+/// boot-consumed value is refused, naming both sims and the reason -- never
+/// run in a process booted with the other value.
+#[test]
+fn an_incompatible_boot_signature_is_refused_with_its_reason() {
+    let plan = DifferentialPlan {
+        predecessors: vec!["b0_env_conflict".to_string()],
+        target: "b0_env_probe".to_string(),
+    };
+    let err = run_differential(Backend::Skull, "testbed", &plan)
+        .expect_err("a worker must not serve two different boot signatures");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("boot signatures") && msg.contains("b0_env_conflict") && msg.contains("b0_env_probe"),
+        "the refusal must say which sims and why, got: {msg}"
+    );
+}
+
+/// The other admission arm, with its own distinct reason: `$OUT` in a value is
+/// resolved before the process starts, so it cannot follow a per-entry `$OUT`.
+/// These two entries AGREE on their signature, so this is not the check above
+/// firing under another name.
+#[test]
+fn an_out_interpolating_env_is_refused_with_its_own_reason() {
+    let plan = DifferentialPlan {
+        predecessors: vec!["b0_env_outref_head".to_string()],
+        target: "b0_env_outref_tail".to_string(),
+    };
+    let err = run_differential(Backend::Skull, "testbed", &plan)
+        .expect_err("a worker cannot give one process two different $OUT-derived values");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("B0_ENV_SESSION") && msg.contains("$OUT"),
+        "the refusal must name the offending pair and the reason, got: {msg}"
+    );
+    assert!(
+        !msg.contains("boot signatures"),
+        "these entries agree on their signature; a signature refusal here would mean \
+         the fixture never reached the $OUT check: {msg}"
+    );
+}
+
 /// Mutation guard for the comparator itself: every arm must be present, and
 /// every arm a fixture can populate must have compared a non-zero population
 /// in at least one fixture. Deleting an arm from `compare` makes `population`
