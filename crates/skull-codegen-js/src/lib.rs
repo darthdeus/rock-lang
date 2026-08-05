@@ -880,6 +880,22 @@ function stone_create_window_ex(title, x, y, width, height, display, resizable, 
   return { __sw_window: true };
 }
 
+function __sw_sync_canvas_size() {
+  var canvas = __SW.canvas;
+  if (!canvas || typeof window === "undefined") return;
+  var rect = canvas.getBoundingClientRect();
+  var logicalW = Math.max(1, Math.round(rect.width));
+  var logicalH = Math.max(1, Math.round(rect.height));
+  var dpr = window.devicePixelRatio || 1;
+  var drawableW = Math.round(logicalW * dpr);
+  var drawableH = Math.round(logicalH * dpr);
+  if (__SW.logicalW === logicalW && __SW.logicalH === logicalH && __SW.dpr === dpr
+      && canvas.width === drawableW && canvas.height === drawableH) return;
+  __SW.logicalW = logicalW; __SW.logicalH = logicalH; __SW.dpr = dpr;
+  canvas.width = drawableW; canvas.height = drawableH;
+  __SW.resized = true;
+}
+
 // --- events / input ---
 function stone_poll_event(ev) {
   var q = __SW.events;
@@ -1799,22 +1815,17 @@ function stone_draw_fullscreen_quad() {
 
 // --- text: canvas2d glyph atlas (MC, docs/stone-web-plan.md § text) ---
 // The boot preload registered each shipped TTF as a FontFace; the bake here
-// is synchronous canvas2d against that family. Eager + immutable, mirroring
-// native: all of ASCII 32..126 bakes once at stone_load_font (16 glyphs/row,
-// text.rs:261), no lazy glyphs, no mid-frame atlas mutation. Atlas pixels are
+// is synchronous canvas2d against that family. All of ASCII 32..126 bakes as
+// one 16-glyph-wide atlas; density changes explicitly rebake into the same
+// texture handle. Atlas pixels are
 // coverage-RGBA (r=g=b=a=coverage, built from the canvas ALPHA channel --
 // raw white fillText would give (1,1,1,cov), wrong rgb under tinting).
 // Metric bit-parity with fontdue is a NON-goal; invariants only.
 function __sw_font_path_key(path) { return String(path).replace(/^\.?\//, ""); }
-function stone_load_font(path, pixelSize) {
-  // The node fake-GL env has no DOM/canvas2d: fall back to a glyphless font
-  // (id, atlas = white pixel) so the boot's font gate passes headlessly.
+function __sw_bake_font(path, pixelSize, existingAtlas) {
   if (globalThis.__STONE_WEB_FAKE_ENV || typeof document === "undefined") {
     __sw_log_once("stone_load_font: no canvas2d in this environment -- glyphless fallback font");
-    __SW.fonts = __SW.fonts || {};
-    var fid0 = (__SW.nextFont = (__SW.nextFont || 0) + 1);
-    __SW.fonts[fid0] = { em: pixelSize, atlas: 0, glyphs: {}, maxH: pixelSize, fake: true };
-    return fid0;
+    return { em: pixelSize, atlas: existingAtlas || 0, glyphs: {}, maxH: pixelSize, fake: true, sourcePath: path };
   }
   var fams = __SW.fontFamilies || {};
   var fam = fams[__sw_font_path_key(path)];
@@ -1824,7 +1835,7 @@ function stone_load_font(path, pixelSize) {
   }
   if (!fam) {
     __sw_log_once("stone_load_font: no fonts were preloaded; text will not render");
-    return 0;
+    return null;
   }
 
   var mcanvas = document.createElement("canvas");
@@ -1888,7 +1899,7 @@ function stone_load_font(path, pixelSize) {
     rgba[p * 4] = cov; rgba[p * 4 + 1] = cov; rgba[p * 4 + 2] = cov; rgba[p * 4 + 3] = cov;
   }
   var gl = __SW.gl;
-  var texHandle = __sw_new_texture();
+  var texHandle = existingAtlas || __sw_new_texture();
   gl.bindTexture(gl.TEXTURE_2D, __SW.textures[texHandle]);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, aw, ah, 0, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
   var filter = gl.NEAREST; // sampling is per-draw sampler state (Font.sampling)
@@ -1896,14 +1907,40 @@ function stone_load_font(path, pixelSize) {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  __SW.imageSizes[texHandle] = { w: aw, h: ah };
+
+  return { em: pixelSize, atlas: texHandle, glyphs: glyphs, maxH: maxH, sourcePath: path };
+}
+
+function stone_load_font(path, pixelSize) {
+  var baked = __sw_bake_font(path, pixelSize, 0);
+  if (!baked) return 0;
 
   __SW.fonts = __SW.fonts || {};
   var fid = (__SW.nextFont = (__SW.nextFont || 0) + 1);
-  __SW.fonts[fid] = { em: pixelSize, atlas: texHandle, glyphs: glyphs, maxH: maxH };
-  console.log("[STONE-WEB] font atlas baked: " + infos.length + " glyphs @ " + pixelSize + "px (" + aw + "x" + ah + ")");
+  __SW.fonts[fid] = baked;
+  console.log("[STONE-WEB] font atlas baked @ " + pixelSize + "px");
   return fid;
 }
 function __sw_font(fontId) { return (__SW.fonts || {})[fontId]; }
+function stone_reload_font(fontId, path, pixelSize) {
+  var old = __sw_font(fontId);
+  if (!old || pixelSize < 1) return false;
+  var baked = __sw_bake_font(path, pixelSize, old.atlas);
+  if (!baked) return false;
+  __SW.fonts[fontId] = baked;
+  console.log("[STONE-WEB] font atlas rebaked @ " + pixelSize + "px");
+  return true;
+}
+function stone_resize_font(fontId, pixelSize) {
+  var old = __sw_font(fontId);
+  if (!old || pixelSize < 1) return false;
+  var baked = __sw_bake_font(old.sourcePath, pixelSize, old.atlas);
+  if (!baked) return false;
+  __SW.fonts[fontId] = baked;
+  console.log("[STONE-WEB] font atlas rebaked @ " + pixelSize + "px");
+  return true;
+}
 // 0 when the font has no atlas, matching stone-rs. Returning the WHITE PIXEL's
 // handle instead made the atlas share an identity with it, so a font declaring
 // Linear re-declared the shared white pixel for every other draw.
@@ -2395,6 +2432,7 @@ function __rock_web_arm_raf(frameFn) {
   if (fake && fake.driveFrames) return; // harness drives frames itself
   function tick() {
     __SW.frames = (__SW.frames | 0) + 1; // driver-observable frame count (CDP smoke)
+    __sw_sync_canvas_size();
     var running = true;
     try { running = frameFn(); }
     catch (e) { console.error("[STONE-WEB] frame error:", e); running = false; }

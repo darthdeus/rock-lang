@@ -235,6 +235,29 @@ fn web_default_sampling() {
     assert_not_blank(&shot, "the rect-batch and immediate quads");
 }
 
+#[test]
+fn web_font_density_resize() {
+    let Some((_dir, shot)) = run_cdp(
+        "games/testbed",
+        "web_font_density_resize",
+        &[
+            "--frames",
+            "10",
+            "--resize-dpr",
+            "2",
+            "--setup-expr",
+            "__G.FONT_DENSITY_REQUEST = true",
+            "--expect",
+            "__G.FONT_DENSITY_VERDICT",
+            "--value",
+            "PASS",
+        ],
+    ) else {
+        return;
+    };
+    assert_not_blank(&shot, "the density-aware font fixture");
+}
+
 // mag in real headless Chrome, CDP-driven: the virtual-time screenshot path
 // deterministically races mag's first present (~175 MB preload; frame 1 does
 // every shader compile + texture upload under swiftshader), so the driver
