@@ -326,21 +326,41 @@ fn extern_ret(
 ) -> Result<ExternRet, CompilerError> {
     use bone_semantic::hir::{BuiltinTy, TypeCtor, TypeExpr};
     let Some(ty) = f.return_ty else { return Ok(ExternRet::None) };
-    let (mid, idx) = ty.unwrap_in_mod(f.name_span)?;
-    let module = ws.modules.get(mid.index()).ok_or_else(|| {
+    let unrealizable = |what: &str| {
         CompilerError::new_with_label(
             f.name_span,
             format!(
-                "extern `{}` declares a return type in an unknown module, so its \
-                 wrapper cannot be given the declared representation",
+                "extern `{}` returns {what}, which has no C representation: the wrapper \
+                 cannot know what the callee hands back or how to give it the declared \
+                 Rock type. Declare a concrete return type.",
                 f.name
             ),
         )
-    })?;
+    };
+    // A declared signature lives in its own module's arena, so both of these are
+    // internal invariants rather than source-reachable shapes -- stated as
+    // rejections because the alternative is emitting a wrapper whose return
+    // representation the compiler has just admitted it cannot determine.
+    let (mid, idx) = match ty {
+        bone_semantic::prelude::TyId::Static(mid, idx) => (mid, idx),
+        bone_semantic::prelude::TyId::Local(_) => return Err(unrealizable("a body-local type")),
+    };
+    let module = ws
+        .modules
+        .get(mid.index())
+        .ok_or_else(|| unrealizable("a type from a module not in the workspace"))?;
     Ok(match module.ty_arena[idx] {
         TypeExpr::Builtin(BuiltinTy::Int) => ExternRet::Int,
         TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } if crate::is_value_struct(ws, name) => {
             ExternRet::ValueStruct(name.as_str().to_string())
+        }
+        // Source-reachable and previously silent: `extern(ffi, "l") fn f<T>() -> T`
+        // emitted a passthrough wrapper. Nothing about `T` says whether the C
+        // callee returns a number, a boxed 64-bit integer or a struct, so there
+        // is no representation to give it -- the same fail-open this classifier
+        // exists to close, one type constructor over.
+        TypeExpr::Generic(_, n) | TypeExpr::Infer(_, n) => {
+            return Err(unrealizable(&format!("the generic parameter `{n}`")))
         }
         _ => ExternRet::AsIs,
     })
@@ -1790,30 +1810,27 @@ fn assemble(
                 if let Some(lib) = f.ffi_lib {
                     let nm = f.name.as_str();
                     let params = f.param_decls.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ");
-                    match extern_ret(ws, f)? {
+                    let body = match extern_ret(ws, f)? {
+                        // Returns an OWNING copy, never `__out[0]`. LuaJIT does
+                        // not keep the parent array alive through a reference
+                        // into it, so handing one back is a use-after-free that
+                        // reads fine until the memory is reused
+                        // (`tests/extern_value_return_ownership.rs`).
                         ExternRet::ValueStruct(sname) => {
-                            let call_args = if params.is_empty() { "__out".to_string() } else { format!("__out, {params}") };
-                            // Returns an OWNING copy, never `__out[0]`. LuaJIT does
-                            // not keep the parent array alive through a reference
-                            // into it, so handing one back is a use-after-free that
-                            // reads fine until the memory is reused
-                            // (`tests/extern_value_return_ownership.rs`).
-                            let _ = writeln!(
-                                out,
-                                "function {nm}({params})\n  local __out = ffi.new(\"{sname}[1]\")\n  {lib}.{nm}({call_args})\n  return ffi.new(\"{sname}\", __out[0])\nend"
-                            );
-                        }
-                        kind => {
-                            let call = format!("{lib}.{nm}({params})");
-                            let body = match kind {
-                                ExternRet::Int => format!("  return tonumber({call})"),
-                                ExternRet::AsIs => format!("  return {call}"),
-                                ExternRet::None => format!("  {call}"),
-                                ExternRet::ValueStruct(_) => unreachable!("handled above"),
+                            let call_args = if params.is_empty() {
+                                "__out".to_string()
+                            } else {
+                                format!("__out, {params}")
                             };
-                            let _ = writeln!(out, "function {nm}({params})\n{body}\nend");
+                            format!(
+                                "  local __out = ffi.new(\"{sname}[1]\")\n  {lib}.{nm}({call_args})\n  return ffi.new(\"{sname}\", __out[0])"
+                            )
                         }
-                    }
+                        ExternRet::Int => format!("  return tonumber({lib}.{nm}({params}))"),
+                        ExternRet::AsIs => format!("  return {lib}.{nm}({params})"),
+                        ExternRet::None => format!("  {lib}.{nm}({params})"),
+                    };
+                    let _ = writeln!(out, "function {nm}({params})\n{body}\nend");
                 }
                 continue;
             }
