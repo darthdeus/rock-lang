@@ -611,6 +611,27 @@ fn a_predecessors_native_resource_does_not_reach_the_next_entry() {
     assert!(c.population("expects_pass") > 0, "the fixture asserted nothing");
 }
 
+/// `stop_sim`'s three implicit invariants are process-lifetime state -- two
+/// growing atomics and a set of sticky per-block marks -- so in a worker they
+/// charged an entry with its predecessors' failures. A fresh process charges an
+/// entry with boot's failures plus its own, and that is what the worker must
+/// charge too.
+///
+/// The injection is real: `stone_create_shader` on a source that cannot compile
+/// drives the same reporting path a broken game shader does. It is chained-only
+/// so `rock sim testbed` stays green -- the same escape the `expects_fail`
+/// denominator uses.
+#[test]
+fn a_predecessors_shader_failure_is_not_charged_to_the_next_entry() {
+    let (isolated, worker) =
+        differential(&["b3_diag_head,b3_diag_injector"], "b3_diag_probe");
+    let c = compare(&isolated, &worker);
+    assert_equivalent("b3_diag_probe after an injected shader failure", &c);
+    assert_eq!(isolated.verdict(), "PASS", "the probe passes in a fresh process");
+    assert_eq!(worker.verdict(), "PASS", "and behind a predecessor that failed a compile");
+    assert!(c.population("expects_pass") > 0, "the fixture asserted nothing");
+}
+
 /// The other direction, which no teardown can fix: an entry that DESTROYED a
 /// boot-owned native resource leaves the restored globals naming a handle whose
 /// GL object is gone, and the first draw through one is a GL error. Such an
