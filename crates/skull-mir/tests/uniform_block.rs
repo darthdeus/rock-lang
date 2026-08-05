@@ -482,8 +482,7 @@ fn a_block_over_the_gles_limit_is_rejected() {
 /// A sampler cannot live in a uniform buffer on any API, and the mistake is a
 /// plausible one: the author wrote the texture beside the scalars. The generic
 /// "no std140 form here" answer is true and unhelpful, so the ONE classifier
-/// carries the hint. It lives here rather than in a caller's own walk -- a
-/// second pass that rejected first is what this oracle replaced.
+/// carries the hint rather than a caller's own walk.
 #[test]
 fn a_sampler_in_a_uniform_group_names_the_fix() {
     let ws = ws_of("value BadU { tint: Vec4, tex: Sampler2D }\nfn main() {}");

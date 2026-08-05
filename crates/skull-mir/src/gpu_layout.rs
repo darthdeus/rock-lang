@@ -456,10 +456,8 @@ pub fn uniform_block(ws: &Workspace, struct_name: Ustr) -> Result<UniformBlockPl
 /// places -- the logical half of a group, and the input a target lays out.
 ///
 /// This is where the Workspace is read; [`std140_block`] never touches it, so a
-/// layout is a function of the member list alone. That is what makes a
-/// perturbed member list produce a perturbed layout rather than the original
-/// struct's, and what lets a second target lay the same members out its own
-/// way.
+/// layout is a function of the member list alone -- which is what lets a second
+/// target lay the same members out its own way.
 pub fn uniform_group_members(
     ws: &Workspace,
     struct_name: Ustr,
@@ -498,8 +496,6 @@ pub fn uniform_group_members(
                 .unwrap_or_else(|| "that type".to_string());
             // A sampler is the one non-wire field with an obvious fix, and
             // putting the texture beside the scalars is a plausible mistake.
-            // The hint lives HERE so the single classifier keeps it -- a
-            // caller's own pre-pass is what this replaced.
             if matches!(ty_name.as_str(), "Sampler2D" | "ISampler2D") {
                 return Err(err(
                     fd.span,
