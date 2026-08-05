@@ -793,8 +793,11 @@ pub fn do_run_all_sims(
 /// second worker lifecycle:
 ///
 /// - a boot-signature group splits into at most `jobs` CONTIGUOUS lanes, so a
-///   process still serves exactly one canonical signature and an entry keeps
-///   the same kind of predecessor it would have had serially;
+///   process still serves exactly one canonical signature and the entries in a
+///   lane keep their requested ORDER. Splitting does change predecessors: each
+///   lane's head now starts a fresh worker where serially it would have
+///   followed someone, so `--jobs` trades boundary crossings for wall time.
+///   That is why `--multi-order` does not split (see [`run_worker_arm`]);
 /// - a lane is a whole `run_specs_recovering` queue, so recovery, the
 ///   checkpoint-identity guard and the per-entry deadline are unchanged, and a
 ///   worker death in one lane cannot reach another;

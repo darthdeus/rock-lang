@@ -292,42 +292,58 @@ fn render_default_lit(body: &bone_semantic::hir::Body, e: Idx<Expr>) -> Option<S
     }
 }
 
-/// Whether an extern's declared return is a Rock `int`. Drives the numeric
-/// coercion in the extern wrapper: LuaJIT hands back a BOXED cdata for a 64-bit
-/// integer return (`uint64_t`, `int64_t`), so without this the wrapper returns a
-/// cdata where the declaration says number. The compiler cannot read the C
-/// signature -- the `ffi.cdef` is inside an opaque `inline(lua)` body -- so the
-/// declaration is the only contract there is, and it is enforced rather than
-/// assumed. A cdata leaking through is not a cosmetic difference: LuaJIT keys a
-/// table by cdata IDENTITY, so a handle used as a `Map<int, V>` key only ever
-/// hits on the box that was inserted (`b1_ffi_handle.rock`).
-fn extern_ret_is_int(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> bool {
-    use bone_semantic::hir::{BuiltinTy, TypeExpr};
-    let te = match ty {
-        bone_semantic::prelude::TyId::Static(mid, idx) => match ws.modules.get(mid.index()) {
-            Some(m) => m.ty_arena[idx],
-            None => return false,
-        },
-        bone_semantic::prelude::TyId::Local(_) => return false,
-    };
-    matches!(te, TypeExpr::Builtin(BuiltinTy::Int))
+/// What an `extern(ffi)` wrapper does with the callee's return, decided ONCE
+/// from the declared Rock type.
+///
+/// The `ffi.cdef` lives inside an opaque `inline(lua)` body, so the declaration
+/// is the only contract the compiler has -- which is exactly why an unresolvable
+/// declared type is a hard error here and not a default. Falling back to
+/// "return it as-is" would silently reproduce the boxed-handle bug this
+/// classification exists to prevent, and would do it precisely where the
+/// compiler has admitted it does not know what the type is.
+#[derive(Debug)]
+enum ExternRet {
+    /// No return value.
+    None,
+    /// Rock `int`. LuaJIT hands back a BOXED cdata for a 64-bit C integer
+    /// (`uint64_t`, `int64_t`), so the wrapper coerces to a number. A cdata
+    /// leaking through is not cosmetic: LuaJIT keys a table by cdata IDENTITY,
+    /// so a handle used as a `Map<int, V>` key only ever hits on the box that
+    /// was inserted (`b1_ffi_handle.rock`).
+    Int,
+    /// A `value` struct returned BY VALUE; the C ABI is then
+    /// `void f(T* out, ..)`, so the wrapper bridges an out-param.
+    ValueStruct(String),
+    /// Everything else crosses as the callee produced it: LuaJIT already hands
+    /// back a Lua value for `bool`, `float`/`double` and a string, and a
+    /// pointer return is declared `Ptr<T>` and stays a cdata by design.
+    AsIs,
 }
 
-/// The value-struct name an extern returns BY VALUE (the C ABI is then
-/// `void f(T* out, ..)`), or `None` if the return isn't a value struct. Drives
-/// the out-param bridge in the extern wrapper.
-fn extern_ret_value_struct(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> Option<String> {
-    use bone_semantic::hir::{TypeCtor, TypeExpr};
-    let te = match ty {
-        bone_semantic::prelude::TyId::Static(mid, idx) => ws.modules.get(mid.index())?.ty_arena[idx],
-        bone_semantic::prelude::TyId::Local(_) => return None,
-    };
-    match te {
+fn extern_ret(
+    ws: &Workspace,
+    f: &bone_semantic::hir::Function,
+) -> Result<ExternRet, CompilerError> {
+    use bone_semantic::hir::{BuiltinTy, TypeCtor, TypeExpr};
+    let Some(ty) = f.return_ty else { return Ok(ExternRet::None) };
+    let (mid, idx) = ty.unwrap_in_mod(f.name_span)?;
+    let module = ws.modules.get(mid.index()).ok_or_else(|| {
+        CompilerError::new_with_label(
+            f.name_span,
+            format!(
+                "extern `{}` declares a return type in an unknown module, so its \
+                 wrapper cannot be given the declared representation",
+                f.name
+            ),
+        )
+    })?;
+    Ok(match module.ty_arena[idx] {
+        TypeExpr::Builtin(BuiltinTy::Int) => ExternRet::Int,
         TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } if crate::is_value_struct(ws, name) => {
-            Some(name.as_str().to_string())
+            ExternRet::ValueStruct(name.as_str().to_string())
         }
-        _ => None,
-    }
+        _ => ExternRet::AsIs,
+    })
 }
 
 /// The assembled new-path program plus the parity gap.
@@ -1774,8 +1790,8 @@ fn assemble(
                 if let Some(lib) = f.ffi_lib {
                     let nm = f.name.as_str();
                     let params = f.param_decls.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ");
-                    match f.return_ty.and_then(|t| extern_ret_value_struct(ws, t)) {
-                        Some(sname) => {
+                    match extern_ret(ws, f)? {
+                        ExternRet::ValueStruct(sname) => {
                             let call_args = if params.is_empty() { "__out".to_string() } else { format!("__out, {params}") };
                             // Returns an OWNING copy, never `__out[0]`. LuaJIT does
                             // not keep the parent array alive through a reference
@@ -1787,14 +1803,13 @@ fn assemble(
                                 "function {nm}({params})\n  local __out = ffi.new(\"{sname}[1]\")\n  {lib}.{nm}({call_args})\n  return ffi.new(\"{sname}\", __out[0])\nend"
                             );
                         }
-                        None => {
+                        kind => {
                             let call = format!("{lib}.{nm}({params})");
-                            let body = match f.return_ty {
-                                Some(t) if extern_ret_is_int(ws, t) => {
-                                    format!("  return tonumber({call})")
-                                }
-                                Some(_) => format!("  return {call}"),
-                                None => format!("  {call}"),
+                            let body = match kind {
+                                ExternRet::Int => format!("  return tonumber({call})"),
+                                ExternRet::AsIs => format!("  return {call}"),
+                                ExternRet::None => format!("  {call}"),
+                                ExternRet::ValueStruct(_) => unreachable!("handled above"),
                             };
                             let _ = writeln!(out, "function {nm}({params})\n{body}\nend");
                         }

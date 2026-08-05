@@ -221,18 +221,10 @@ fn replay_reproduces_dump_state_byte_identical() {
     strip_diagnostics(&mut record_dump);
     strip_diagnostics(&mut replay_dump);
 
-    // SENTINEL (docs/test-sentinels.md): the two dumps differ TODAY, and only in
-    // native resource ids -- a replay run compiles a different number of shaders
-    // before each watcher entry, so `stone.WATCHER.shaders.*.shader` is offset by
-    // 1..3. That was invisible while dump-state rendered every handle as
-    // `"<cdata>"`. Flip this arm to an equality when replay reproduces resource
-    // allocation order; the assertion below is the real contract and stays.
-    assert_ne!(
-        record_dump, replay_dump,
-        "replay now agrees on native resource ids too -- delete this arm and the \
-         strip below, and assert the dumps equal outright"
-    );
-
+    // Native resource ids are process-local allocation identity, not state, and
+    // two processes are free to agree or disagree on them. The exclusion is
+    // therefore unconditional -- an arm asserting the raw dumps DIFFER would be
+    // pinning a coincidence, not a property.
     let stripped = crate::stone_harness::strip_native_handles(&mut record_dump)
         + crate::stone_harness::strip_native_handles(&mut replay_dump);
     assert!(stripped > 0, "the dumps carried no native handle to exclude");

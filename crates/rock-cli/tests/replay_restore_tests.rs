@@ -9,6 +9,11 @@
 //! `c <tick> <name> <hash>` checkpoint names via `sim_state_names`); we compare
 //! those globals, not a duplicated Rust exclusion list.
 //!
+//! WHICH globals is engine-owned. Which LEAVES inside one are state is not, and
+//! `strip_native_handles` is a duplicated test-only policy standing in for a
+//! classification the engine does not express yet -- see its own doc for the
+//! mechanism that should replace it.
+//!
 //! Intended Phase-B hooks (do NOT exist yet -- that is why this is RED and
 //! #[ignore]d so it never gates `just t`): `STONE_SNAPSHOT_AT_TICK=T` captures a
 //! keyframe; `STONE_RESTORE_AT_TICK=U` restores the most recent keyframe. With
@@ -119,10 +124,11 @@ fn restore_returns_to_snapshot_tick_state() {
 
 /// Assert every sim-state global (`sim`) in `got` matches `want`, and at least
 /// one was compared.
-/// A resource id is process-local allocation identity, not sim state: these two
-/// dumps come from two `rock frame` processes that created a different number of
-/// images and meshes on the way to the tick they report. See
-/// `stone_harness::strip_native_handles` for why that only became visible now.
+///
+/// Resource ids are excluded: they are process-local allocation identity, and
+/// these two dumps come from two `rock frame` processes that created a different
+/// number of images and meshes on the way to the tick they report. The exclusion
+/// is a stand-in -- see `stone_harness::strip_native_handles`.
 fn assert_sim_state_matches(
     got: &serde_json::Value,
     want: &serde_json::Value,
