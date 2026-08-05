@@ -349,3 +349,48 @@ fn rock_binary_path() -> PathBuf {
     p.push("rock");
     p
 }
+
+/// Native resource IDENTITY in a `--dump-state` dump, by the `__ty` of the
+/// wrapper that carries it.
+///
+/// A GL/image/mesh id is a process-local allocation counter, not simulation
+/// state: two processes that simulate identically still mint their ids in
+/// whatever order they happened to create resources. Dump-state used to render
+/// every one of these as the string `"<cdata>"`, because a Stone handle crossed
+/// `extern(ffi) -> int` as a boxed `uint64_t` -- so a comparison over two dumps
+/// was blind to the whole class. It is a Rock number now, which is what makes
+/// the difference visible at all.
+///
+/// The list is by `__ty` and not by field spelling: `data`, `image`, `handle`
+/// and `shader` are ordinary names that a game may use for ordinary state.
+pub fn strip_native_handles(v: &mut serde_json::Value) -> usize {
+    fn go(v: &mut serde_json::Value, n: &mut usize) {
+        match v {
+            serde_json::Value::Object(obj) => {
+                let fields: &[&str] = match obj.get("__ty").and_then(|t| t.as_str()) {
+                    Some("WatcherShader") => &["shader"],
+                    Some("CpuImage") => &["data", "image"],
+                    Some("GpuMesh") => &["handle"],
+                    _ => &[],
+                };
+                for f in fields {
+                    if obj.remove(*f).is_some() {
+                        *n += 1;
+                    }
+                }
+                for (_, child) in obj.iter_mut() {
+                    go(child, n);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for child in items {
+                    go(child, n);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut n = 0;
+    go(v, &mut n);
+    n
+}

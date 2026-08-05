@@ -220,10 +220,26 @@ fn replay_reproduces_dump_state_byte_identical() {
     let mut replay_dump = run_frame(game, frames, &["--replay", &log_s]);
     strip_diagnostics(&mut record_dump);
     strip_diagnostics(&mut replay_dump);
+
+    // SENTINEL (docs/test-sentinels.md): the two dumps differ TODAY, and only in
+    // native resource ids -- a replay run compiles a different number of shaders
+    // before each watcher entry, so `stone.WATCHER.shaders.*.shader` is offset by
+    // 1..3. That was invisible while dump-state rendered every handle as
+    // `"<cdata>"`. Flip this arm to an equality when replay reproduces resource
+    // allocation order; the assertion below is the real contract and stays.
+    assert_ne!(
+        record_dump, replay_dump,
+        "replay now agrees on native resource ids too -- delete this arm and the \
+         strip below, and assert the dumps equal outright"
+    );
+
+    let stripped = crate::stone_harness::strip_native_handles(&mut record_dump)
+        + crate::stone_harness::strip_native_handles(&mut replay_dump);
+    assert!(stripped > 0, "the dumps carried no native handle to exclude");
     assert_eq!(
         record_dump, replay_dump,
         "replay must reproduce the recorded run's state byte-for-byte \
-         (diagnostics excluded)"
+         (diagnostics and process-local resource ids excluded)"
     );
 }
 

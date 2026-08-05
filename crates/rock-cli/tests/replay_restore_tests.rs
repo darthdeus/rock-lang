@@ -119,6 +119,10 @@ fn restore_returns_to_snapshot_tick_state() {
 
 /// Assert every sim-state global (`sim`) in `got` matches `want`, and at least
 /// one was compared.
+/// A resource id is process-local allocation identity, not sim state: these two
+/// dumps come from two `rock frame` processes that created a different number of
+/// images and meshes on the way to the tick they report. See
+/// `stone_harness::strip_native_handles` for why that only became visible now.
 fn assert_sim_state_matches(
     got: &serde_json::Value,
     want: &serde_json::Value,
@@ -126,17 +130,24 @@ fn assert_sim_state_matches(
     label: &str,
 ) {
     let mut compared = 0;
+    let mut stripped = 0;
     for (pkg, globals) in got.as_object().expect("dump object") {
         let want_pkg = &want[pkg];
         for (name, val) in globals.as_object().expect("pkg object") {
             if !sim.contains(name) {
                 continue;
             }
-            assert_eq!(val, &want_pkg[name], "sim-state {pkg}.{name} must match {label}");
+            let (mut a, mut b) = (val.clone(), want_pkg[name].clone());
+            stripped += crate::stone_harness::strip_native_handles(&mut a);
+            stripped += crate::stone_harness::strip_native_handles(&mut b);
+            assert_eq!(a, b, "sim-state {pkg}.{name} must match {label}");
             compared += 1;
         }
     }
     assert!(compared > 0, "must compare at least one sim-state global");
+    // The denominator for the exclusion: it removed something, so a green here
+    // is not "there were no handles to disagree about".
+    assert!(stripped > 0, "no sim-state global carried a native resource id");
 }
 
 /// P4 item 2: scrub to an ARBITRARY earlier tick. Cadence keyframes (every
