@@ -19,7 +19,7 @@
 
 use skull_codegen_glsl::{GlslProfile, ShaderAbiPlan};
 use skull_mir::gpu_layout::WireKind;
-use skull_mir::shader_ir::{ShaderInterfacePlan, UniformRole};
+use skull_mir::shader_ir::{ShaderInterfacePlan, ShaderStage as IrStage, UniformRole};
 use std::sync::LazyLock;
 use ustr::Ustr;
 
@@ -186,7 +186,6 @@ fn a_second_target_derives_a_different_physical_layout_from_the_same_interface()
     // ---- The IR is the program's real bodies, per stage, and its declaration
     // set is what a reload watches. A second backend renders THESE.
     assert_eq!(em.ir.stages.len(), 2, "a pipeline publishes two stages of IR");
-    assert_eq!(em.ir.stages[0].entry.fref, em.ir.stages[0].entry.fref);
     let names: Vec<&str> = em
         .ir
         .stages
@@ -194,15 +193,33 @@ fn a_second_target_derives_a_different_physical_layout_from_the_same_interface()
         .map(|s| ws.module(s.entry.fref.module).functions[s.entry.fref.func].name.as_str())
         .collect();
     assert_eq!(names, vec!["hv", "hf"], "the IR's stages are not the program's entries");
-    assert!(
-        em.ir.declarations().len() >= 2,
-        "the IR reports no declarations to reload: {:?}",
-        em.ir.declarations().len()
+    // The stages carry their own kind, and the vertex stage's body really is
+    // the vertex entry's -- not a clone of the fragment stage's.
+    assert_eq!(
+        em.ir.stages.iter().map(|s| s.stage).collect::<Vec<_>>(),
+        vec![IrStage::Vertex, IrStage::Fragment]
     );
+    assert_ne!(
+        em.ir.stages[0].entry.fref, em.ir.stages[1].entry.fref,
+        "both stages published the same entry instance"
+    );
+    assert_ne!(
+        em.ir.stages[0].body.blocks.len() + em.ir.stages[0].body.insts.len(),
+        0,
+        "the vertex stage published an empty body"
+    );
+    // The reload set is exactly the program's distinct declarations -- the two
+    // entries here, deduped across stages rather than concatenated.
+    let decls = em.ir.declarations();
+    let mut unique = decls.clone();
+    unique.sort_by_key(|f| (f.module.raw(), f.func.into_raw().into_u32()));
+    unique.dedup();
+    assert_eq!(decls.len(), unique.len(), "the reload set repeats a declaration: {decls:?}");
+    assert!(decls.len() >= 2, "the IR reports no declarations to reload: {decls:?}");
 
     // ---- The INTERFACE itself names nothing physical. A round trip through a
     // second derivation cannot change it, because it was never asked.
-    let regenerated = ShaderAbiPlan::glsl(&ws, iface, Default::default())
+    let regenerated = ShaderAbiPlan::glsl(iface, Default::default())
         .expect("the interface plan is sufficient to rebuild the GLSL ABI");
     assert_eq!(
         regenerated.texture_units, glsl.texture_units,
@@ -245,4 +262,177 @@ fn the_interface_plan_names_nothing_physical() {
             "the interface plan names `{banned}`, which is a target's answer:\n{rendered}"
         );
     }
+}
+
+/// **The ABI lays out the INTERFACE's members, not the struct they came from.**
+///
+/// The strongest available statement that the split is an ownership boundary
+/// and not a projection: perturb a member's kind in the interface plan alone --
+/// touching no source, no `Workspace`, no struct -- and the derived std140
+/// layout must move. If `ShaderAbiPlan::glsl` re-read the declaring struct, the
+/// perturbed plan would produce the ORIGINAL layout and this is the only test
+/// that can see it.
+#[test]
+fn perturbing_an_interface_member_moves_the_derived_layout() {
+    let (ws, mid) = workspace(PIPELINE);
+    let em = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
+        &ws, mid, "hv", "hf", GlslProfile::Core330,
+    )
+    .expect("the fixture must emit");
+    // Dropped before the layout below is derived: `ShaderAbiPlan::glsl` does
+    // not take a `Workspace` at all, so this is a statement about the signature
+    // rather than about discipline.
+    drop(ws);
+
+    let engine_of = |p: &skull_codegen_glsl::ShaderAbiPlan| {
+        p.uniform_blocks
+            .iter()
+            .find(|(_, b)| b.struct_name.as_str() == "EngineU")
+            .map(|(_, b)| (b.size, b.members.iter().map(|m| (m.name, m.offset)).collect::<Vec<_>>()))
+            .expect("the engine block")
+    };
+    let before = engine_of(&em.abi);
+
+    // The DENOMINATOR: `EngineU` is `{ time: float, resolution: Vec2 }`, so
+    // std140 puts `resolution` at 8 (align 8 after a 4-byte float). Widening
+    // `time` to a Vec4 must push it, and a re-read of the struct cannot.
+    assert_eq!(before.1.len(), 2, "the engine group lost a member: {before:?}");
+    assert_eq!(before.1[0], (Ustr::from("time"), 0));
+    assert_eq!(before.1[1], (Ustr::from("resolution"), 8));
+
+    let mut perturbed = em.interface.clone();
+    let g = perturbed
+        .uniform_groups
+        .iter_mut()
+        .find(|g| g.struct_name.as_str() == "EngineU")
+        .expect("the engine group");
+    assert_eq!(g.members[0].1, WireKind::F32, "the fixture's first member is not the float");
+    g.members[0].1 = WireKind::F32x4;
+
+    let after = engine_of(
+        &ShaderAbiPlan::glsl(&perturbed, Default::default())
+            .expect("the perturbed interface must lay out"),
+    );
+    assert_ne!(
+        before, after,
+        "the derived layout ignored the perturbed member, so it was read from the struct"
+    );
+    assert_eq!(
+        after.1[1],
+        (Ustr::from("resolution"), 16),
+        "the widened member did not push its neighbour: {after:?}"
+    );
+}
+
+/// **A BARE sampler is a logical resource too, and it is not a compiler slot.**
+///
+/// A loose `Sampler2D` param keeps a CPU-assigned unit, while a `@textures`
+/// group member gets a compiler-assigned one -- so the interface must carry
+/// both and keep them apart, or the engine cannot tell which units it owns.
+/// Mixing the two in ONE program is refused (`logical_textures`), which is why
+/// the bare case needs its own fixture rather than an extra param above.
+#[test]
+fn a_bare_sampler_reaches_the_interface_and_takes_no_compiler_unit() {
+    let src = r#"
+@shader(fragment)
+fn bare_frag(uTexture: Sampler2D, tc: Vec2) -> Vec4 {
+    return texture(uTexture, tc)
+}
+fn main() { let k = rock_shader(bare_frag) }
+"#;
+    let (ws, mid) = workspace(src);
+    let em = skull_codegen_glsl::emit_shader_entry_with_dependencies(
+        &ws, mid, "bare_frag", GlslProfile::Core330,
+    )
+    .expect("a bare sampler entry must emit");
+
+    // It IS in the interface, with its kind.
+    assert_eq!(
+        em.interface.bare_samplers,
+        vec![(Ustr::from("uTexture"), skull_mir::gpu_layout::SamplerKind::Float)],
+        "a bare sampler is missing from the interface"
+    );
+    // ...and it takes NO compiler-assigned unit: the group is what those come
+    // from, and there is no group here.
+    assert!(em.interface.textures.is_none(), "a bare sampler invented a @textures group");
+    assert!(
+        em.abi.texture_units.is_empty(),
+        "a bare sampler was given a compiler slot: {:?}",
+        em.abi.texture_units
+    );
+    // The declaration still reaches GLSL, from the interface.
+    assert!(em.source.contains("uniform sampler2D uTexture;"), "{}", em.source);
+
+    // CONTROL: a GROUPED sampler does take a unit, so the emptiness above is
+    // about bareness and not about samplers being absent from the ABI.
+    let grouped = r#"
+struct Tex { atlas: Sampler2D }
+@shader(fragment)
+fn grouped_frag(@textures t: Tex, tc: Vec2) -> Vec4 {
+    return texture(t.atlas, tc)
+}
+fn main() { let k = rock_shader(grouped_frag) }
+"#;
+    let (ws2, mid2) = workspace(grouped);
+    let em2 = skull_codegen_glsl::emit_shader_entry_with_dependencies(
+        &ws2, mid2, "grouped_frag", GlslProfile::Core330,
+    )
+    .expect("a grouped sampler entry must emit");
+    assert_eq!(em2.abi.texture_units, vec![Ustr::from("atlas")]);
+    assert!(em2.interface.bare_samplers.is_empty());
+}
+
+/// **Attribute LOCATIONS are the target's answer.** The hostile target numbers
+/// them backwards from the same interface, and GLSL's emitted
+/// `layout (location = N)` must come from the ABI plan rather than from a
+/// second walk -- otherwise the two could disagree and only the driver notices.
+#[test]
+fn a_second_target_numbers_attribute_locations_differently() {
+    let (ws, mid) = workspace(PIPELINE);
+    let em = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
+        &ws, mid, "hv", "hf", GlslProfile::Core330,
+    )
+    .expect("the fixture must emit");
+
+    // DENOMINATOR: four attributes across two input structs.
+    let n = em.interface.vertex_inputs.iter().map(|i| i.attrs.len()).sum::<usize>();
+    assert_eq!(n, 4, "the fixture lost attributes: {:?}", em.interface.vertex_inputs);
+    assert_eq!(em.abi.attribute_locations.len(), n);
+
+    // GLSL numbers them in declaration order, continuing across structs.
+    assert_eq!(
+        em.abi.attribute_locations,
+        vec![
+            (Ustr::from("pos"), 0),
+            (Ustr::from("texcoord"), 1),
+            (Ustr::from("shift"), 2),
+            (Ustr::from("inst_tint"), 3),
+        ]
+    );
+    // ...and every one of them is what the EMITTED declaration says, so the
+    // ABI plan and the GLSL text cannot drift.
+    for (name, loc) in &em.abi.attribute_locations {
+        assert!(
+            em.source.contains(&format!("layout (location = {loc}) in ")),
+            "no emitted attribute at location {loc} (for `{name}`):\n{}",
+            em.source
+        );
+        assert!(em.source.contains(&format!(" {name};")), "`{name}` is not declared");
+    }
+
+    // The hostile target numbers them backwards from the SAME interface.
+    let hostile: Vec<(Ustr, u32)> = {
+        let mut flat: Vec<Ustr> = em
+            .interface
+            .vertex_inputs
+            .iter()
+            .flat_map(|i| i.attrs.iter().map(|(n, _)| *n))
+            .collect();
+        flat.reverse();
+        flat.iter().enumerate().map(|(i, n)| (*n, i as u32)).collect()
+    };
+    assert_ne!(
+        em.abi.attribute_locations, hostile,
+        "both targets numbered attributes alike, so the interface plan decided it"
+    );
 }

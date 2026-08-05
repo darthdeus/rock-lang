@@ -443,6 +443,27 @@ pub fn wire_kind(ws: &Workspace, ty: TyId) -> Option<WireKind> {
 /// Field order is member order, the same contract `@attr` uses for locations
 /// and `@textures` for slots.
 pub fn uniform_block(ws: &Workspace, struct_name: Ustr) -> Result<UniformBlockPlan, CompilerError> {
+    // The declaring struct's own span, so an over-budget block still points at
+    // the declaration rather than becoming location-free.
+    let span = ws
+        .struct_by_name
+        .get(&struct_name)
+        .map(|sid| ws.modules[sid.module.index()].structs[sid.def].name_span);
+    std140_block(struct_name, &uniform_group_members(ws, struct_name)?, span)
+}
+
+/// A uniform group's members in declaration order, with neutral kinds and NO
+/// places -- the logical half of a group, and the input a target lays out.
+///
+/// This is where the Workspace is read; [`std140_block`] never touches it, so a
+/// layout is a function of the member list alone. That is what makes a
+/// perturbed member list produce a perturbed layout rather than the original
+/// struct's, and what lets a second target lay the same members out its own
+/// way.
+pub fn uniform_group_members(
+    ws: &Workspace,
+    struct_name: Ustr,
+) -> Result<Vec<(Ustr, WireKind)>, CompilerError> {
     let Some(&sid) = ws.struct_by_name.get(&struct_name) else {
         return Err(CompilerError::new_no_location(format!(
             "uniform block: no struct named `{struct_name}`"
@@ -467,8 +488,6 @@ pub fn uniform_block(ws: &Workspace, struct_name: Ustr) -> Result<UniformBlockPl
     }
 
     let mut members = Vec::with_capacity(sd.fields.len());
-    let mut offset = 0u32;
-
     for fd in &sd.fields {
         let Some(kind) = wire_kind(ws, fd.ty) else {
             let ty_name = ty_expr(ws, fd.ty)
@@ -487,9 +506,34 @@ pub fn uniform_block(ws: &Workspace, struct_name: Ustr) -> Result<UniformBlockPl
                 ),
             ));
         };
+        members.push((fd.name, kind));
+    }
+    Ok(members)
+}
+
+/// **The std140 layout of a member list.** GL's physical answer, and a pure
+/// function of `members` -- no Workspace, no struct lookup.
+///
+/// `span` anchors the over-budget rejection when the caller has one; without it
+/// the error is location-free rather than pointing at an unrelated declaration.
+pub fn std140_block(
+    struct_name: Ustr,
+    members: &[(Ustr, WireKind)],
+    span: Option<Span>,
+) -> Result<UniformBlockPlan, CompilerError> {
+    if members.is_empty() {
+        let msg = format!("uniform block: `{struct_name}` has no members -- an empty block binds nothing");
+        return Err(match span {
+            Some(sp) => err(sp, msg),
+            None => CompilerError::new_no_location(msg),
+        });
+    }
+    let mut out = Vec::with_capacity(members.len());
+    let mut offset = 0u32;
+    for &(name, kind) in members {
         offset = round_up(offset, kind.align());
-        members.push(BlockMember {
-            name: fd.name,
+        out.push(BlockMember {
+            name,
             kind,
             offset,
             matrix_stride: matches!(kind, WireKind::Mat4).then_some(16),
@@ -499,19 +543,20 @@ pub fn uniform_block(ws: &Workspace, struct_name: Ustr) -> Result<UniformBlockPl
 
     let size = round_up(offset, 16);
     if size > GLES3_MAX_UNIFORM_BLOCK_SIZE {
-        return Err(err(
-            sd.name_span,
-            format!(
-                "uniform block: `{struct_name}` needs {size} std140 bytes, over the {GLES3_MAX_UNIFORM_BLOCK_SIZE} \
-                 an ES 3.0 driver is required to offer. The GLSL profile follows the runtime GL \
-                 context, so this has to fit the tightest target the program can land on -- and \
-                 nothing downstream would catch it, because `shader-validate`'s 300es leg links \
-                 against the host driver's own (much larger) limit"
-            ),
-        ));
+        let msg = format!(
+            "uniform block: `{struct_name}` needs {size} std140 bytes, over the {GLES3_MAX_UNIFORM_BLOCK_SIZE} \
+             an ES 3.0 driver is required to offer. The GLSL profile follows the runtime GL \
+             context, so this has to fit the tightest target the program can land on -- and \
+             nothing downstream would catch it, because `shader-validate`'s 300es leg links \
+             against the host driver's own (much larger) limit"
+        );
+        return Err(match span {
+            Some(sp) => err(sp, msg),
+            None => CompilerError::new_no_location(msg),
+        });
     }
 
-    Ok(UniformBlockPlan { struct_name, members, size })
+    Ok(UniformBlockPlan { struct_name, members: out, size })
 }
 
 /// One `UniformArray<T>` member as DECLARED: the shader entry's `@size(N)` param.

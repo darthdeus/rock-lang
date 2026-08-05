@@ -30,13 +30,13 @@ use skull_codegen_lua::mangle_fn;
 use skull_mir::cfg::reverse_postorder;
 use skull_mir::gpu_layout::{
     ArrayMemberDecl, AttrKind, SamplerKind, UniformArrayBlockPlan, UniformBlockPlan, WireKind,
-    texture_slots, uniform_array_block, uniform_block, vertex_attrs,
+    texture_slots, uniform_array_block, vertex_attrs,
 };
 use skull_mir::intrinsics::{Emission, IntrinsicEntry, IntrinsicTable};
 use skull_mir::lower::{lower_function_spec, ScalarCtx, SpecSubst};
 use skull_mir::monoty::{MonoCtor, MonoTy};
 use skull_mir::shader_ir::{
-    ShaderIR, ShaderStageIr,
+    FragmentOutput, ShaderIR, ShaderStageIr,
     LogicalArrayGroup, LogicalTextureGroup, LogicalUniformGroup, LogicalVarying,
     LogicalVertexInput, ShaderInstance, ShaderInterfacePlan, ShaderStage as IrStage, UniformRole,
     VertexRate,
@@ -743,6 +743,22 @@ fn callee_inst_at(
                  has no concrete shape to emit it at. A GPU has no boxed representation for an \
                  unreified generic, so this cannot fall back to the declaration",
                 cf.name
+            ),
+        ));
+    }
+    // The key is POSITIONAL against the declared generics, so a different
+    // length names another function's instantiation. `spec_subst_from_key` zips
+    // the two and would silently drop the tail or substitute a prefix.
+    if key.len() != cf.generics.len() {
+        return Err(err(
+            span,
+            format!(
+                "shader profile: the call to generic `{}` recorded {} type argument(s) for {} \
+                 declared generic(s) -- the instantiation is positional, so a key of another \
+                 length is not this callee's",
+                cf.name,
+                key.len(),
+                cf.generics.len()
             ),
         ));
     }
@@ -1961,7 +1977,7 @@ struct EntryShape {
     /// reads). Names are collision-checked unique across all global structs.
     uniform_fields: Vec<(Ustr, GlslTy)>,
     /// Sampler params: (param index, name). Also dropped, read as bare globals.
-    samplers: Vec<(usize, Ustr, GlslTy)>,
+    samplers: Vec<(usize, Ustr, SamplerKind)>,
     /// `UniformArray<T>` param indices. Dropped from the signature and referenced
     /// by name (via `at()` -> indexing); NOT tier-0-typed, so they are skipped
     /// when typing param cells.
@@ -2008,7 +2024,7 @@ fn classify_entry(ws: &Workspace, f: &Function) -> Result<EntryShape, CompilerEr
     let span = f.name_span;
     let mut uniform_param = None;
     let mut uniform_fields: Vec<(Ustr, GlslTy)> = Vec::new();
-    let mut samplers: Vec<(usize, Ustr, GlslTy)> = Vec::new();
+    let mut samplers: Vec<(usize, Ustr, SamplerKind)> = Vec::new();
     let mut tc = None;
     let mut texture_params: Vec<usize> = Vec::new();
     let mut texture_group: Option<Ustr> = None;
@@ -2025,7 +2041,7 @@ fn classify_entry(ws: &Workspace, f: &Function) -> Result<EntryShape, CompilerEr
             continue;
         }
         match glsl_ty(ws, &SpecSubst::default(), pd.ty, span, "parameter") {
-            Ok(t) if t.is_sampler() => samplers.push((i, pd.name, t)),
+            Ok(t) if t.is_sampler() => samplers.push((i, pd.name, sampler_kind_of(t))),
             Ok(GlslTy::Vec2) => {
                 if tc.is_some() {
                     return Err(err(span, "shader entry: exactly one Vec2 param (the fullscreen TexCoord varying) is allowed"));
@@ -2244,22 +2260,132 @@ fn wire_kind_of(t: GlslTy) -> WireKind {
     }
 }
 
+/// A stage's own uniform members plus the program's `@engine` members, spelled
+/// for GLSL -- what a body needs to type a bare-global read.
+///
+/// From the INTERFACE. The shapes carried a second GLSL-typed copy of the same
+/// fields, which is the drift this split exists to remove.
+fn stage_uniform_fields(
+    iface: &ShaderInterfacePlan,
+    stage: IrStage,
+) -> Vec<(Ustr, GlslTy)> {
+    iface
+        .uniform_group(UniformRole::Engine)
+        .into_iter()
+        .chain(iface.uniform_group(UniformRole::Stage(stage)))
+        .flat_map(|g| g.members.iter().map(|(n, k)| (*n, wire_glsl(*k))))
+        .collect()
+}
+
+/// The stage's OWN uniform members (no `@engine`), for the loose-uniform form
+/// a stage without a block takes.
+fn stage_own_uniforms(iface: &ShaderInterfacePlan, stage: IrStage) -> Vec<(Ustr, GlslTy)> {
+    iface
+        .uniform_group(UniformRole::Stage(stage))
+        .map(|g| g.members.iter().map(|(n, k)| (*n, wire_glsl(*k))).collect())
+        .unwrap_or_default()
+}
+
+/// The varyings a program passes between stages, spelled for GLSL. Names,
+/// kinds and `@flat` come from the INTERFACE; only the spelling is this
+/// target's.
+fn interface_varyings(iface: &ShaderInterfacePlan) -> Vec<(Ustr, GlslTy, bool)> {
+    iface.varyings.iter().map(|v| (v.name, wire_glsl(v.kind), v.flat)).collect()
+}
+
+/// The fragment stage's MRT outputs, or `None` for the single implicit one.
+fn interface_mrt_outputs(iface: &ShaderInterfacePlan) -> Option<Vec<(Ustr, GlslTy)>> {
+    match &iface.fragment_output {
+        FragmentOutput::Mrt(outs) => {
+            Some(outs.iter().map(|(n, k)| (*n, wire_glsl(*k))).collect())
+        }
+        FragmentOutput::Single(_) | FragmentOutput::None => None,
+    }
+}
+
+/// A neutral wire kind spelled as a GLSL type. The inverse of `wire_kind_of`,
+/// and the only place the interface's vocabulary becomes GLSL's.
+fn wire_glsl(k: WireKind) -> GlslTy {
+    match k {
+        WireKind::F32 => GlslTy::Float,
+        WireKind::I32 => GlslTy::Int,
+        WireKind::Bool32 => GlslTy::Bool,
+        WireKind::F32x2 => GlslTy::Vec2,
+        WireKind::F32x3 => GlslTy::Vec3,
+        WireKind::F32x4 => GlslTy::Vec4,
+        WireKind::Mat4 => GlslTy::Mat4,
+    }
+}
+
+/// Every sampler a program declares, in DECLARATION order: the `@textures`
+/// group's members in the ABI's unit order first, then the bare ones.
+///
+/// One list, from the interface plus the target's unit assignment, so the
+/// emitted declarations cannot name a sampler the ABI does not know about or
+/// omit one it does.
+fn sampler_declarations(
+    iface: &ShaderInterfacePlan,
+    abi: &ShaderAbiPlan,
+) -> Vec<(Ustr, SamplerKind)> {
+    let grouped = iface.textures.as_ref();
+    let mut out: Vec<(Ustr, SamplerKind)> = abi
+        .texture_units
+        .iter()
+        .filter_map(|u| {
+            grouped.and_then(|g| g.samplers.iter().find(|(n, _)| n == u)).map(|(n, k)| (*n, *k))
+        })
+        .collect();
+    out.extend(iface.bare_samplers.iter().copied());
+    out
+}
+
+/// Every vertex attribute's emitted declaration: its name and neutral kind from
+/// the INTERFACE, its location from the target's ABI plan. Two sources, each
+/// answering the half it owns, and neither re-walking the other.
+fn attribute_declarations(
+    iface: &ShaderInterfacePlan,
+    abi: &ShaderAbiPlan,
+) -> Vec<(Ustr, GlslTy, u32)> {
+    iface
+        .vertex_inputs
+        .iter()
+        .flat_map(|i| i.attrs.iter())
+        .filter_map(|(n, k)| {
+            abi.attribute_locations
+                .iter()
+                .find(|(an, _)| an == n)
+                .map(|(_, loc)| (*n, attr_glsl_ty(*k), *loc))
+        })
+        .collect()
+}
+
+/// The samplers that are NOT part of a `@textures` group -- loose params whose
+/// unit the CPU picks. `has_bare_sampler` answers whether any exist (a
+/// rejection when a group is also present); this is the list itself.
+fn bare_sampler_list(
+    samplers: &[(usize, Ustr, SamplerKind)],
+    grouped_params: &[usize],
+) -> Vec<(Ustr, SamplerKind)> {
+    samplers
+        .iter()
+        .filter(|(i, _, _)| !grouped_params.contains(i))
+        .map(|(_, n, k)| (*n, *k))
+        .collect()
+}
+
 /// The neutral member list of a uniform group.
 ///
-/// Projected from `gpu_layout::uniform_block` -- ONE derivation, whose byte
-/// offsets the interface discards and the ABI keeps. Classifying members a
-/// second time here would be free to disagree with the packer about a kind.
+/// `gpu_layout::uniform_group_members` is the ONE classifier -- the same one
+/// `uniform_block` reads before laying anything out, so the interface and the
+/// CPU packer cannot disagree about a kind. Places come later, from
+/// `std140_block`, over exactly these members.
 fn logical_members(
     ws: &Workspace,
     struct_name: Ustr,
     span: Span,
 ) -> Result<Vec<(Ustr, WireKind)>, CompilerError> {
-    Ok(uniform_block(ws, struct_name)
-        .map_err(|e| err(span, e.message))?
-        .members
-        .iter()
-        .map(|m| (m.name, m.kind))
-        .collect())
+    skull_mir::gpu_layout::uniform_group_members(ws, struct_name)
+        .map_err(|e| err(span, e.message))
 }
 
 fn logical_uniform_group(
@@ -2338,8 +2464,10 @@ pub struct ShaderAbiPlan {
 
 impl ShaderAbiPlan {
     /// GLSL's answer to `iface`.
+    /// Takes NO `Workspace`. The layout is a function of `iface` alone, which
+    /// is what makes a perturbed interface produce a perturbed layout instead
+    /// of quietly re-deriving the declaring struct's.
     pub fn glsl(
-        ws: &Workspace,
         iface: &ShaderInterfacePlan,
         span: Span,
     ) -> Result<Self, CompilerError> {
@@ -2348,9 +2476,14 @@ impl ShaderAbiPlan {
             UniformRole::Stage(IrStage::Vertex) => UNIFORM_BLOCK_BINDING_VERTEX,
             UniformRole::Stage(IrStage::Fragment) => UNIFORM_BLOCK_BINDING_FRAGMENT,
         };
+        // std140 over the INTERFACE's members. The Workspace is not read here:
+        // a layout is a function of the member list, which is what lets a
+        // perturbed interface produce a perturbed layout and a second target
+        // lay the same members out its own way.
         let mut uniform_blocks: Vec<(u32, UniformBlockPlan)> = Vec::new();
         for g in &iface.uniform_groups {
-            let plan = uniform_block(ws, g.struct_name).map_err(|e| err(span, e.message))?;
+            let plan = skull_mir::gpu_layout::std140_block(g.struct_name, &g.members, Some(span))
+                .map_err(|e| err(span, e.message))?;
             uniform_blocks.push((binding(g.role), plan));
         }
         uniform_blocks.sort_by_key(|(b, _)| *b);
@@ -2562,12 +2695,15 @@ fn plan_shader_entry(
             has_bare_sampler(&shape.samplers, &shape.global_params),
             f.name_span,
         )?,
+        bare_samplers: bare_sampler_list(&shape.samplers, &shape.global_params),
+        // A1's entry returns one colour; MRT is an A2 feature.
+        fragment_output: FragmentOutput::Single(WireKind::F32x4),
         // A1 has no vertex stage of its own (it rides the fullscreen quad), and
         // `classify_entry` refuses a `UniformArray` param outright -- arrays are
         // an A2 feature, so these are absences rather than omissions.
         ..Default::default()
     };
-    let abi = ShaderAbiPlan::glsl(ws, &interface, f.name_span)?;
+    let abi = ShaderAbiPlan::glsl(&interface, f.name_span)?;
     Ok(EntryPlan { fref, shape, stage, interface, abi })
 }
 
@@ -2612,9 +2748,10 @@ fn render_shader_entry(
         px.push_str(&uniform_block_decl(block));
     }
     // Samplers are opaque: GLSL forbids them inside a uniform block, so they
-    // stay loose beside it and bind by unit (`@textures` / ShaderEmission).
-    for (_, n, t) in &shape.samplers {
-        px.push_str(&format!("uniform {} {};\n", t.uniform_decl(), n));
+    // stay loose beside it and bind by unit. Declared from the INTERFACE -- the
+    // grouped ones in the ABI's unit order, then the bare ones.
+    for (n, k) in sampler_declarations(&plan.interface, &plan.abi) {
+        px.push_str(&format!("uniform {} {};\n", sampler_glsl_ty(k).uniform_decl(), n));
     }
     px.push('\n');
     px.push_str(&plan.stage.render_helpers(ws)?);
@@ -2663,16 +2800,11 @@ struct VertexShape {
     /// Attribute struct param indices, in location-assignment order (per-vertex
     /// `@attr` first, then `@instance` -- the numbering continues).
     attr_params: Vec<usize>,
-    /// Attribute fields in location order: (name, GLSL type, location).
-    ///
-    /// All three come from `gpu_layout::vertex_attrs` -- this is a view of the
-    /// artifact, not a second classification of the same struct. The type is
-    /// its `AttrKind` spelled for GLSL; the location is recorded there rather
-    /// than invented as an enumerate() index while printing, which assumes one
-    /// location per field and so breaks on a multi-location type (mat4).
-    attrs: Vec<(Ustr, GlslTy, u32)>,
-    /// The same attribute structs in the same order, in the NEUTRAL vocabulary
-    /// and with no locations: the interface plan's half of the walk above.
+    /// The attribute structs in location-assignment order, in the NEUTRAL
+    /// vocabulary. THE classification -- a GLSL-typed copy with baked locations
+    /// stood beside it and was free to disagree with the ABI plan about both.
+    /// Locations come from `ShaderAbiPlan::attribute_locations`; the spelling
+    /// from `attr_glsl_ty` at the point of emission.
     inputs: Vec<LogicalVertexInput>,
     /// `@uniform` struct param indices (at most one).
     uniform_params: Vec<usize>,
@@ -2687,18 +2819,13 @@ struct VertexShape {
     /// its lifetime is the pass rather than the draw, and it binds at index 0 so
     /// both stages of a program name the same block.
     engine_group: Option<Ustr>,
-    /// The `@engine` group's fields, declaration order. Kept apart from
-    /// `uniforms` because the two become DIFFERENT blocks.
-    engine_uniforms: Vec<(Ustr, GlslTy)>,
     /// `@textures` group param indices -- see the field of the same name on
     /// `FragShape`. Vertex texture fetch is legal in GL 3.3 / GLES 3.0.
     texture_params: Vec<usize>,
     /// The `@textures` group's struct name, if the stage declares one.
     texture_group: Option<Ustr>,
-    /// Uniform fields, declaration order.
-    uniforms: Vec<(Ustr, GlslTy)>,
     /// Sampler params (rare in vertex, but legal).
-    samplers: Vec<(usize, Ustr, GlslTy)>,
+    samplers: Vec<(usize, Ustr, SamplerKind)>,
     /// `UniformArray<T>` params, declaration order -- the array block's members.
     arrays: Vec<ArrayParam>,
     /// The varyings value-struct return type.
@@ -2707,8 +2834,10 @@ struct VertexShape {
 
 /// A classified varyings value struct.
 struct VaryingsShape {
-    /// Varyings EXCLUDING `position`: (name, type, `@flat`).
-    varyings: Vec<(Ustr, GlslTy, bool)>,
+    /// Varyings EXCLUDING `position`, in the NEUTRAL vocabulary. This IS the
+    /// interface's list -- not a GLSL-typed copy of it -- so there is nothing
+    /// for the two to disagree about.
+    varyings: Vec<LogicalVarying>,
 }
 
 /// A classified pipeline `@shader(fragment)` entry (varyings-consuming form).
@@ -2723,25 +2852,21 @@ struct FragShape {
     engine_params: Vec<usize>,
     /// The `@engine` group's struct name, if the stage declares one.
     engine_group: Option<Ustr>,
-    /// The `@engine` group's fields, declaration order.
-    engine_uniforms: Vec<(Ustr, GlslTy)>,
     /// `@textures` group param indices. Their fields are already expanded into
     /// `samplers`; the params themselves render as bare globals like a uniform
     /// struct, so they belong in `global_params`.
     texture_params: Vec<usize>,
     /// The `@textures` group's struct name, if the stage declares one.
     texture_group: Option<Ustr>,
-    uniforms: Vec<(Ustr, GlslTy)>,
-    samplers: Vec<(usize, Ustr, GlslTy)>,
+    samplers: Vec<(usize, Ustr, SamplerKind)>,
     /// `UniformArray<T>` params, declaration order -- the array block's members.
     arrays: Vec<ArrayParam>,
-    /// MRT outputs: `Some` when the entry returns a value struct of Vec4/int
-    /// fields -> one `layout(location=N) out <ty> <field>` per field, in
-    /// declaration order. `None` = the single implicit `FragColor` output.
-    outputs: Option<Vec<(Ustr, GlslTy)>>,
-    /// Single-output type (Vec4, or Int for an R32I-only target). Vec4 when
-    /// `outputs` is `Some` (unused there).
-    single_out: GlslTy,
+    /// How the stage's colour output is shaped, in the NEUTRAL vocabulary:
+    /// `Mrt` when the entry returns a value struct (one
+    /// `layout(location=N) out <ty> <field>` per field, declaration order),
+    /// `Single` for the implicit `FragColor` (`I32` for an R32I-only target).
+    /// This IS the interface's answer, not a GLSL-typed copy of it.
+    output: FragmentOutput,
 }
 
 fn has_anno(annos: &[bone_semantic::hir::Annotation], name: &str) -> bool {
@@ -2842,19 +2967,6 @@ fn classify_array_param(
     }))
 }
 
-/// The array block for one stage, or `None` when the stage declares no arrays.
-/// An empty block binds nothing, so the absence stays an absence.
-fn stage_array_block(
-    entry: Ustr,
-    arrays: &[ArrayParam],
-) -> Result<Option<UniformArrayBlockPlan>, CompilerError> {
-    if arrays.is_empty() {
-        return Ok(None);
-    }
-    let decls: Vec<ArrayMemberDecl> = arrays.iter().map(|a| a.decl).collect();
-    uniform_array_block(array_block_name(entry), &decls).map(Some)
-}
-
 /// The `layout(std140) uniform <Blk> { T name[N]; .. };` declaration for an
 /// array block.
 ///
@@ -2934,11 +3046,21 @@ fn struct_gl_fields(ws: &Workspace, ty: TyId, span: Span, what: &str) -> Result<
 
 /// Samplers that are NOT part of a `@textures` group -- bare params, still
 /// bound by name and a hand-assigned unit on the CPU side.
-fn has_bare_sampler(samplers: &[(usize, Ustr, GlslTy)], texture_params: &[usize]) -> bool {
+fn has_bare_sampler(samplers: &[(usize, Ustr, SamplerKind)], texture_params: &[usize]) -> bool {
     samplers.iter().any(|(i, _, _)| !texture_params.contains(i))
 }
 
 /// How this backend spells a `SamplerKind`.
+/// The neutral kind of a tier-0 sampler type. The inverse of
+/// [`sampler_glsl_ty`], and the point where a declared sampler param leaves
+/// GLSL's vocabulary for the interface's.
+fn sampler_kind_of(t: GlslTy) -> SamplerKind {
+    match t {
+        GlslTy::ISampler2D => SamplerKind::Int,
+        _ => SamplerKind::Float,
+    }
+}
+
 fn sampler_glsl_ty(k: SamplerKind) -> GlslTy {
     match k {
         SamplerKind::Float => GlslTy::Sampler2D,
@@ -2956,11 +3078,11 @@ fn texture_group_samplers(
     param_index: usize,
     span: Span,
     stage: &str,
-) -> Result<Vec<(usize, Ustr, GlslTy)>, CompilerError> {
+) -> Result<Vec<(usize, Ustr, SamplerKind)>, CompilerError> {
     let sname = nominal_name(ws, ty)
         .ok_or_else(|| err(span, format!("shader {stage}: an @textures param must be a struct")))?;
     let ts = texture_slots(ws, sname).map_err(|e| err(span, e.message))?;
-    Ok(ts.slots.iter().map(|s| (param_index, s.name, sampler_glsl_ty(s.kind))).collect())
+    Ok(ts.slots.iter().map(|s| (param_index, s.name, s.kind)).collect())
 }
 
 /// Every param role, so a check that means "all the others" cannot go stale by
@@ -3029,7 +3151,7 @@ fn classify_vertex(ws: &Workspace, f: &Function) -> Result<VertexShape, Compiler
             continue;
         }
         match glsl_ty(ws, &SpecSubst::default(), pd.ty, span, "parameter") {
-            Ok(t) if t.is_sampler() => samplers.push((i, pd.name, t)),
+            Ok(t) if t.is_sampler() => samplers.push((i, pd.name, sampler_kind_of(t))),
             Ok(other) => {
                 return Err(err(span, format!(
                     "shader vertex: param `{}` ({}) must be an @attr/@instance/@uniform value struct or a Sampler2D",
@@ -3064,11 +3186,9 @@ fn classify_vertex(ws: &Workspace, f: &Function) -> Result<VertexShape, Compiler
         return Err(err(span, "shader vertex: at most one @engine struct param is allowed -- it is one engine-owned block"));
     }
     let mut attr_params = Vec::new();
-    let mut attrs = Vec::new();
     let mut inputs: Vec<LogicalVertexInput> = Vec::new();
-    // One numbering across ALL attribute structs: @attr params first, then
-    // @instance, locations continuing (bitgun grass: quad 0..1, instance 2..5).
-    let mut next_location: u32 = 0;
+    // @attr params first, then @instance -- the ORDER locations are assigned
+    // in, which is all the classification owns; the numbers are the ABI's.
     let instanced_from = per_vertex.len();
     for (n, &i) in per_vertex.iter().chain(instanced.iter()).enumerate() {
         attr_params.push(i);
@@ -3084,23 +3204,11 @@ fn classify_vertex(ws: &Workspace, f: &Function) -> Result<VertexShape, Compiler
         let sname = nominal_name(ws, f.param_decls[i].ty)
             .ok_or_else(|| err(span, "shader vertex: attribute param must be a value struct"))?;
         let va = vertex_attrs(ws, sname).map_err(|e| err(span, e.message))?;
-        for a in &va.attrs {
-            attrs.push((a.name, attr_glsl_ty(a.kind), next_location + a.location));
-        }
         inputs.push(LogicalVertexInput {
             struct_name: sname,
             rate: if n < instanced_from { VertexRate::PerVertex } else { VertexRate::PerInstance },
             attrs: va.attrs.iter().map(|a| (a.name, a.kind)).collect(),
         });
-        next_location += va.attrs.len() as u32;
-    }
-    let mut uniforms = Vec::new();
-    for &i in &uniform_params {
-        uniforms.extend(struct_gl_fields(ws, f.param_decls[i].ty, span, "uniform")?);
-    }
-    let mut engine_uniforms = Vec::new();
-    for &i in &engine_params {
-        engine_uniforms.extend(struct_gl_fields(ws, f.param_decls[i].ty, span, "engine uniform")?);
     }
     let varyings_ty = f
         .return_ty
@@ -3109,14 +3217,11 @@ fn classify_vertex(ws: &Workspace, f: &Function) -> Result<VertexShape, Compiler
         uniform_group,
         engine_params,
         engine_group,
-        engine_uniforms,
         attr_params,
-        attrs,
         inputs,
         uniform_params,
         texture_params,
         texture_group,
-        uniforms,
         samplers,
         arrays,
         varyings_ty,
@@ -3133,6 +3238,7 @@ fn classify_varyings(ws: &Workspace, ty: TyId, span: Span) -> Result<VaryingsSha
     let mut varyings = Vec::new();
     for fd in &sd.fields {
         let fty = glsl_ty(ws, &SpecSubst::default(), fd.ty, span, &format!("varying `{}`", fd.name))?;
+        let kind = wire_kind_of(fty);
         if fty == GlslTy::Bvec3 {
             return Err(err(span, format!("shader: varying `{}` cannot be a bvec3 (GLSL forbids bool-vector interpolants) -- bvec3 is local/temp only", fd.name)));
         }
@@ -3157,7 +3263,7 @@ fn classify_varyings(ws: &Workspace, ty: TyId, span: Span) -> Result<VaryingsSha
                 fd.name
             )));
         }
-        varyings.push((fd.name, fty, flat));
+        varyings.push(LogicalVarying { name: fd.name, kind, flat });
     }
     if !has_position {
         return Err(err(span, "shader: the varyings struct must have a `position: Vec4` field (it becomes gl_Position)"));
@@ -3183,7 +3289,6 @@ fn classify_pipeline_fragment(ws: &Workspace, f: &Function, vert_varyings_ty: Ty
     let mut uniform_group: Option<Ustr> = None;
     let mut engine_group: Option<Ustr> = None;
     let mut engine_params: Vec<usize> = Vec::new();
-    let mut engine_uniforms: Vec<(Ustr, GlslTy)> = Vec::new();
     for (i, pd) in f.param_decls.iter().enumerate().skip(1) {
         if let Some(a) = classify_array_param(ws, pd, i, span, "fragment")? {
             arrays.push(a);
@@ -3200,7 +3305,7 @@ fn classify_pipeline_fragment(ws: &Workspace, f: &Function, vert_varyings_ty: Ty
             continue;
         }
         match glsl_ty(ws, &SpecSubst::default(), pd.ty, span, "parameter") {
-            Ok(t) if t.is_sampler() => samplers.push((i, pd.name, t)),
+            Ok(t) if t.is_sampler() => samplers.push((i, pd.name, sampler_kind_of(t))),
             Ok(other) => {
                 return Err(err(span, format!("shader fragment: param `{}` ({}) must be @uniform or a Sampler2D", pd.name, other.name())));
             }
@@ -3209,7 +3314,11 @@ fn classify_pipeline_fragment(ws: &Workspace, f: &Function, vert_varyings_ty: Ty
                     if has_anno(&pd.annotations, "uniform") {
                         return Err(err(span, format!("shader fragment: param `{}` has conflicting role markers", pd.name)));
                     }
-                    engine_uniforms.extend(struct_gl_fields(ws, pd.ty, span, "engine uniform")?);
+                    // The group's fields are validated where they become the
+                    // interface's members (`uniform_group_members`), which is
+                    // the std140 question. A `glsl_ty` pass here was a weaker
+                    // restatement -- it admits Sampler2D and Bvec3, which no
+                    // uniform block can pack.
                     engine_group = nominal_name(ws, pd.ty);
                     engine_params.push(i);
                 } else {
@@ -3233,9 +3342,9 @@ fn classify_pipeline_fragment(ws: &Workspace, f: &Function, vert_varyings_ty: Ty
     // target, e.g. the silhouette mask), OR a value struct of Vec4/int fields
     // (MRT -- one `layout(location=N) out <ty> <field>` per field, in order;
     // int fields feed R32I attachments).
-    let (outputs, single_out) = match f.return_ty.map(|rt| (rt, glsl_ty(ws, &SpecSubst::default(), rt, span, "return"))) {
-        Some((_, Ok(GlslTy::Vec4))) => (None, GlslTy::Vec4),
-        Some((_, Ok(GlslTy::Int))) => (None, GlslTy::Int),
+    let output = match f.return_ty.map(|rt| (rt, glsl_ty(ws, &SpecSubst::default(), rt, span, "return"))) {
+        Some((_, Ok(GlslTy::Vec4))) => FragmentOutput::Single(WireKind::F32x4),
+        Some((_, Ok(GlslTy::Int))) => FragmentOutput::Single(WireKind::I32),
         Some((rt, Err(_))) => {
             let sd = struct_def_of(ws, rt).ok_or_else(|| {
                 err(span, "shader fragment: the return type must be Vec4 (FragColor), int (an integer id target), or a value struct of Vec4/int fields (MRT outputs)")
@@ -3249,12 +3358,12 @@ fn classify_pipeline_fragment(ws: &Workspace, f: &Function, vert_varyings_ty: Ty
                         fd.name, fty.name()
                     )));
                 }
-                outs.push((fd.name, fty));
+                outs.push((fd.name, wire_kind_of(fty)));
             }
             if outs.is_empty() {
                 return Err(err(span, "shader fragment: the MRT output struct must have at least one field"));
             }
-            (Some(outs), GlslTy::Vec4)
+            FragmentOutput::Mrt(outs)
         }
         _ => return Err(err(span, "shader fragment: the return type must be Vec4 (FragColor), int (an integer id target), or a value struct of Vec4/int fields (MRT outputs)")),
     };
@@ -3262,16 +3371,13 @@ fn classify_pipeline_fragment(ws: &Workspace, f: &Function, vert_varyings_ty: Ty
         uniform_group,
         engine_params,
         engine_group,
-        engine_uniforms,
         varyings_param: 0,
         uniform_params,
         texture_params,
         texture_group,
-        uniforms,
         samplers,
         arrays,
-        outputs,
-        single_out,
+        output,
     })
 }
 
@@ -3320,11 +3426,16 @@ fn emit_vertex_stage(
     ws: &Workspace,
     stage: &StagePlan,
     v: &VertexShape,
-    varyings: &VaryingsShape,
-    vert_block: Option<&UniformBlockPlan>,
-    engine_block: Option<&UniformBlockPlan>,
-    array_block: Option<&UniformArrayBlockPlan>,
+    iface: &ShaderInterfacePlan,
+    abi: &ShaderAbiPlan,
 ) -> Result<(String, Vec<FuncRef>), CompilerError> {
+    let vert_block = abi.block_at(UNIFORM_BLOCK_BINDING_VERTEX);
+    let engine_block = abi.block_at(UNIFORM_BLOCK_BINDING_ENGINE);
+    let array_block = abi
+        .uniform_array_blocks
+        .iter()
+        .find(|(b, _)| *b == UNIFORM_BLOCK_BINDING_VERTEX_ARRAYS)
+        .map(|(_, p)| p);
     let shape = EntryShape {
         global_params: v
             .attr_params
@@ -3334,12 +3445,14 @@ fn emit_vertex_stage(
             .chain(v.uniform_params.iter().copied())
             .chain(v.texture_params.iter().copied())
             .collect(),
-        uniform_fields: v
-            .attrs
+        // Body-level typing of bare-global reads. Attribute types come from the
+        // INTERFACE, spelled here -- `GlslTy` is the emitter's own working type
+        // for body cells and does not travel back upward.
+        uniform_fields: iface
+            .vertex_inputs
             .iter()
-            .map(|&(n, t, _)| (n, t))
-            .chain(v.engine_uniforms.iter().copied())
-            .chain(v.uniforms.iter().copied())
+            .flat_map(|i| i.attrs.iter().map(|(n, k)| (*n, attr_glsl_ty(*k))))
+            .chain(stage_uniform_fields(iface, IrStage::Vertex))
             .collect(),
         samplers: v.samplers.clone(),
         arrays: v.arrays.iter().map(|a| a.param).collect(),
@@ -3347,14 +3460,15 @@ fn emit_vertex_stage(
         // A2 keeps loose uniforms until the second slice.
         uniform_group: None,
         main_out: Some(MainOut {
-            fields: varyings.varyings.iter().map(|&(n, t, _)| (n, t)).collect(),
+            fields: iface.varyings.iter().map(|v| (v.name, wire_glsl(v.kind))).collect(),
             position_is_gl: true,
         }),
     };
     let (mf, helpers, dependencies) = (&stage.ir.body, stage.render_helpers(ws)?, stage.dependencies());
 
     let mut out = String::new();
-    for (n, t, loc) in &v.attrs {
+    for (n, t, loc) in attribute_declarations(iface, abi) {
+        let (n, t, loc) = (&n, &t, &loc);
         out.push_str(&format!("layout (location = {loc}) in {} {};\n", t.name(), n));
     }
     out.push('\n');
@@ -3367,7 +3481,7 @@ fn emit_vertex_stage(
         Some(plan) => out.push_str(&uniform_block_decl(plan)),
         // No block for this stage -> the group's fields stay loose uniforms.
         None => {
-            for (n, t) in &v.uniforms {
+            for (n, t) in stage_own_uniforms(iface, IrStage::Vertex) {
                 out.push_str(&format!("uniform {} {};\n", t.name(), n));
             }
         }
@@ -3378,10 +3492,15 @@ fn emit_vertex_stage(
     if let Some(plan) = array_block {
         out.push_str(&uniform_array_block_decl(plan));
     }
-    if vert_block.is_some() || engine_block.is_some() || !v.uniforms.is_empty() || !v.arrays.is_empty() {
+    if vert_block.is_some()
+        || engine_block.is_some()
+        || !stage_own_uniforms(iface, IrStage::Vertex).is_empty()
+        || !v.arrays.is_empty()
+    {
         out.push('\n');
     }
-    for (n, t, flat) in &varyings.varyings {
+    for (n, t, flat) in interface_varyings(iface) {
+        let (n, t, flat) = (&n, &t, &flat);
         let q = if *flat { "flat " } else { "" };
         out.push_str(&format!("{q}out {} {};\n", t.name(), n));
     }
@@ -3395,16 +3514,21 @@ fn emit_fragment_stage(
     ws: &Workspace,
     stage: &StagePlan,
     fs: &FragShape,
-    varyings: &VaryingsShape,
-    frag_block: Option<&UniformBlockPlan>,
-    engine_block: Option<&UniformBlockPlan>,
-    array_block: Option<&UniformArrayBlockPlan>,
+    iface: &ShaderInterfacePlan,
+    abi: &ShaderAbiPlan,
 ) -> Result<(String, Vec<FuncRef>), CompilerError> {
+    let frag_block = abi.block_at(UNIFORM_BLOCK_BINDING_FRAGMENT);
+    let engine_block = abi.block_at(UNIFORM_BLOCK_BINDING_ENGINE);
+    let array_block = abi
+        .uniform_array_blocks
+        .iter()
+        .find(|(b, _)| *b == UNIFORM_BLOCK_BINDING_FRAGMENT_ARRAYS)
+        .map(|(_, p)| p);
     let fref = stage.ir.entry.fref;
     // MRT: the entry is emitted as `void main()` destructuring its returned
     // output struct into the `layout(location=N) out` globals (like the vertex
     // varyings path). Single-output keeps the `vec4 <fn>()` + wrapper form.
-    let main_out = fs.outputs.as_ref().map(|outs| MainOut {
+    let main_out = interface_mrt_outputs(iface).as_ref().map(|outs| MainOut {
         fields: outs.iter().copied().collect(),
         position_is_gl: false,
     });
@@ -3414,12 +3538,11 @@ fn emit_fragment_stage(
             .chain(fs.uniform_params.iter().copied())
             .chain(fs.texture_params.iter().copied())
             .collect(),
-        uniform_fields: varyings
+        uniform_fields: iface
             .varyings
             .iter()
-            .map(|&(n, t, _)| (n, t))
-            .chain(fs.engine_uniforms.iter().copied())
-            .chain(fs.uniforms.iter().copied())
+            .map(|v| (v.name, wire_glsl(v.kind)))
+            .chain(stage_uniform_fields(iface, IrStage::Fragment))
             .collect(),
         samplers: fs.samplers.clone(),
         arrays: fs.arrays.iter().map(|a| a.param).collect(),
@@ -3431,12 +3554,20 @@ fn emit_fragment_stage(
     let (mf, helpers, dependencies) = (&stage.ir.body, stage.render_helpers(ws)?, stage.dependencies());
 
     let mut out = String::new();
-    for (n, t, flat) in &varyings.varyings {
+    for (n, t, flat) in interface_varyings(iface) {
+        let (n, t, flat) = (&n, &t, &flat);
         let q = if *flat { "flat " } else { "" };
         out.push_str(&format!("{q}in {} {};\n", t.name(), n));
     }
-    match &fs.outputs {
-        None => out.push_str(&format!("out {} FragColor;\n\n", fs.single_out.name())),
+    match &interface_mrt_outputs(iface) {
+        None => out.push_str(&format!(
+            "out {} FragColor;\n\n",
+            match iface.fragment_output {
+                FragmentOutput::Single(k) => wire_glsl(k),
+                _ => GlslTy::Vec4,
+            }
+            .name()
+        )),
         Some(outs) => {
             for (loc, (n, t)) in outs.iter().enumerate() {
                 out.push_str(&format!("layout(location = {loc}) out {} {n};\n", t.name()));
@@ -3451,7 +3582,7 @@ fn emit_fragment_stage(
     match frag_block {
         Some(plan) => out.push_str(&uniform_block_decl(plan)),
         None => {
-            for (n, t) in &fs.uniforms {
+            for (n, t) in stage_own_uniforms(iface, IrStage::Fragment) {
                 out.push_str(&format!("uniform {} {};\n", t.name(), n));
             }
         }
@@ -3461,14 +3592,14 @@ fn emit_fragment_stage(
         out.push_str(&uniform_array_block_decl(plan));
     }
     for (_, n, t) in &fs.samplers {
-        out.push_str(&format!("uniform {} {};\n", t.uniform_decl(), n));
+        out.push_str(&format!("uniform {} {};\n", sampler_glsl_ty(*t).uniform_decl(), n));
     }
     out.push('\n');
     out.push_str(&helpers);
     out.push_str(&emit_fn_def_with(ws, &stage.ir.entry, mf, Some(&shape))?);
     // Single-output: the entry fn returns Vec4; main() forwards it to FragColor.
     // MRT: the entry IS `void main()` (destructured), so no wrapper.
-    if fs.outputs.is_none() {
+    if !matches!(iface.fragment_output, FragmentOutput::Mrt(_)) {
         out.push('\n');
         out.push_str(&format!(
             "void main() {{\n  FragColor = {}();\n}}\n",
@@ -3496,11 +3627,15 @@ fn emit_fragment_stage(
 /// Taken from the PLAN rather than from both shapes' `engine_uniforms`: the
 /// engine block is declared in both stages but is ONE block, so listing it per
 /// stage would collide with itself.
+/// Reject two interface names that would land in GLSL's ONE cross-stage
+/// namespace.
+///
+/// Censuses the INTERFACE, which is what makes the list complete by
+/// construction: every name a program declares is in there exactly once, so a
+/// role added to the interface joins this check by existing rather than by
+/// someone remembering to chain it.
 fn check_pipeline_collisions(
-    v: &VertexShape,
-    varyings: &VaryingsShape,
-    fs: &FragShape,
-    engine_plan: Option<&UniformBlockPlan>,
+    iface: &ShaderInterfacePlan,
     span: Span,
 ) -> Result<(), CompilerError> {
     // gl_Position is always reserved. `FragColor` is reserved only for the
@@ -3508,22 +3643,22 @@ fn check_pipeline_collisions(
     // of which may itself be `FragColor`), so they go through the collision check
     // like any other name rather than being pre-seeded.
     let mut seen: HashSet<Ustr> = [Ustr::from("gl_Position")].into_iter().collect();
-    if fs.outputs.is_none() {
+    if !matches!(iface.fragment_output, FragmentOutput::Mrt(_)) {
         seen.insert(Ustr::from("FragColor"));
     }
-    let mrt_outputs = fs.outputs.iter().flatten().map(|&(n, _)| n);
-    let engine_members: Vec<Ustr> =
-        engine_plan.map(|p| p.members.iter().map(|m| m.name).collect()).unwrap_or_default();
-    let names = v.attrs.iter().map(|&(n, _, _)| n)
-        .chain(v.uniforms.iter().map(|&(n, _)| n))
-        .chain(v.samplers.iter().map(|&(_, n, _)| n))
-        .chain(v.arrays.iter().map(|a| a.decl.name))
-        .chain(varyings.varyings.iter().map(|&(n, _, _)| n))
-        .chain(fs.uniforms.iter().map(|&(n, _)| n))
-        .chain(fs.samplers.iter().map(|&(_, n, _)| n))
-        .chain(fs.arrays.iter().map(|a| a.decl.name))
-        .chain(mrt_outputs)
-        .chain(engine_members);
+    let names = iface
+        .vertex_inputs
+        .iter()
+        .flat_map(|i| i.attrs.iter().map(|(n, _)| *n))
+        .chain(iface.uniform_groups.iter().flat_map(|g| g.members.iter().map(|(n, _)| *n)))
+        .chain(iface.array_groups.iter().flat_map(|g| g.members.iter().map(|m| m.name)))
+        .chain(iface.varyings.iter().map(|v| v.name))
+        .chain(iface.textures.iter().flat_map(|t| t.samplers.iter().map(|(n, _)| *n)))
+        .chain(iface.bare_samplers.iter().map(|(n, _)| *n))
+        .chain(match &iface.fragment_output {
+            FragmentOutput::Mrt(outs) => outs.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
+            _ => Vec::new(),
+        });
     for n in names {
         if !seen.insert(n) {
             return Err(err(span, format!("shader pipeline: name `{n}` would collide (attributes, uniforms, engine-block members, varyings, samplers and reserved names share one GLSL namespace across both stages)")));
@@ -3542,9 +3677,9 @@ fn check_pipeline_collisions(
 /// <same>` declarations, which is a link error carrying no Rock span. Minting a
 /// different name instead is the fallback this repo does not take -- the
 /// compiler's job is to refuse the program.
-fn check_block_name_collisions(
-    scalar: [Option<&UniformBlockPlan>; 3],
-    arrays: [Option<&UniformArrayBlockPlan>; 2],
+fn check_block_name_collisions<'a>(
+    scalar: impl Iterator<Item = &'a UniformBlockPlan>,
+    arrays: impl Iterator<Item = &'a UniformArrayBlockPlan>,
     span: Span,
 ) -> Result<(), CompilerError> {
     let mut seen: HashSet<Ustr> = HashSet::default();
@@ -3552,12 +3687,10 @@ fn check_block_name_collisions(
     // scalar list is deduped by identity before the census rather than after --
     // otherwise it collides with itself.
     let names = scalar
-        .into_iter()
-        .flatten()
         .map(|p| p.struct_name)
         .collect::<HashSet<_>>()
         .into_iter()
-        .chain(arrays.into_iter().flatten().map(|p| p.block_name));
+        .chain(arrays.map(|p| p.block_name));
     for n in names {
         if !seen.insert(n) {
             return Err(err(span, format!(
@@ -3602,7 +3735,6 @@ pub fn emit_shader_pipeline(
 /// renders it.
 struct PipelinePlan {
     vshape: VertexShape,
-    varyings: VaryingsShape,
     fshape: FragShape,
     vert: StagePlan,
     frag: StagePlan,
@@ -3611,16 +3743,6 @@ struct PipelinePlan {
     interface: ShaderInterfacePlan,
     /// GLSL's physical answer to `interface`.
     abi: ShaderAbiPlan,
-}
-
-impl PipelinePlan {
-    fn block(&self, binding: u32) -> Option<&UniformBlockPlan> {
-        self.abi.block_at(binding)
-    }
-
-    fn array_block(&self, binding: u32) -> Option<&UniformArrayBlockPlan> {
-        self.abi.uniform_array_blocks.iter().find(|(b, _)| *b == binding).map(|(_, p)| p)
-    }
 }
 
 fn plan_shader_pipeline(
@@ -3688,11 +3810,6 @@ fn plan_shader_pipeline(
     let engine_logical = engine_group
         .map(|g| logical_uniform_group(ws, UniformRole::Engine, g, vf.name_span))
         .transpose()?;
-    // The engine block's std140 plan is needed BELOW, by the cross-stage
-    // collision census, before the whole ABI plan exists.
-    let engine_block = engine_group
-        .map(|g| uniform_block(ws, g).map_err(|e| err(vf.name_span, e.message)))
-        .transpose()?;
 
     // One array block per stage that declares `@size(N)` params, at its own
     // reserved binding. Built from the SAME std140 authority as the scalar
@@ -3700,32 +3817,9 @@ fn plan_shader_pipeline(
     // host's offsets cannot come from two different answers.
     let vert_array_group = logical_array_group(IrStage::Vertex, vf.name, &vshape.arrays);
     let frag_array_group = logical_array_group(IrStage::Fragment, ff.name, &fshape.arrays);
-    let vert_array_block = stage_array_block(vf.name, &vshape.arrays)?;
-    let frag_array_block = stage_array_block(ff.name, &fshape.arrays)?;
 
-    // Runs AFTER the block plans, because the `@engine` members it censuses come
-    // from the PLAN -- one list, though the block is declared in both stages.
-    check_pipeline_collisions(&vshape, &varyings, &fshape, engine_block.as_ref(), vf.name_span)?;
-    let vert_block = vert_group
-        .as_ref()
-        .map(|g| uniform_block(ws, g.struct_name).map_err(|e| err(vf.name_span, e.message)))
-        .transpose()?;
-    let frag_block = frag_group
-        .as_ref()
-        .map(|g| uniform_block(ws, g.struct_name).map_err(|e| err(ff.name_span, e.message)))
-        .transpose()?;
-    check_block_name_collisions(
-        [vert_block.as_ref(), frag_block.as_ref(), engine_block.as_ref()],
-        [vert_array_block.as_ref(), frag_array_block.as_ref()],
-        vf.name_span,
-    )?;
-
-    let vert = plan_stage(ws, scx, vfref, Stage::Vertex)?;
-    let frag = plan_stage(ws, scx, ffref, Stage::Fragment)?;
-    reject_position_read(ws, &frag.ir.body, frag.ir.body.params[fshape.varyings_param], ff.name_span)?;
-
-    // Unlike `@uniform` -- one block per STAGE -- `@textures` is one group per
-    // PROGRAM, since texture units are program-scoped.
+    // `@textures` is one group per PROGRAM (texture units are program-scoped),
+    // unlike `@uniform`, which is one block per STAGE.
     let group = match (vshape.texture_group, fshape.texture_group) {
         (Some(v), Some(f)) if v != f => {
             return Err(err(vf.name_span, format!(
@@ -3738,31 +3832,35 @@ fn plan_shader_pipeline(
         || has_bare_sampler(&fshape.samplers, &fshape.texture_params);
     let textures = logical_textures(ws, group, bare, vf.name_span)?;
 
+    // THE program's logical interface. Everything downstream -- the name
+    // census, the ABI plan and every emitted declaration -- reads this.
     let interface = ShaderInterfacePlan {
         stages: vec![IrStage::Vertex, IrStage::Fragment],
         vertex_inputs: vshape.inputs.clone(),
-        varyings: varyings
-            .varyings
-            .iter()
-            .map(|(n, t, flat)| LogicalVarying { name: *n, kind: wire_kind_of(*t), flat: *flat })
-            .collect(),
-        outputs: fshape
-            .outputs
-            .iter()
-            .flatten()
-            .map(|(n, t)| (*n, wire_kind_of(*t)))
-            .collect(),
-        uniform_groups: engine_logical
+        varyings: varyings.varyings.clone(),
+        fragment_output: fshape.output.clone(),
+        bare_samplers: bare_sampler_list(&vshape.samplers, &vshape.texture_params)
             .into_iter()
-            .chain(vert_group)
-            .chain(frag_group)
+            .chain(bare_sampler_list(&fshape.samplers, &fshape.texture_params))
             .collect(),
+        uniform_groups: engine_logical.into_iter().chain(vert_group).chain(frag_group).collect(),
         array_groups: vert_array_group.into_iter().chain(frag_array_group).collect(),
         textures,
     };
-    let abi = ShaderAbiPlan::glsl(ws, &interface, vf.name_span)?;
 
-    Ok(PipelinePlan { vshape, varyings, fshape, vert, frag, interface, abi })
+    check_pipeline_collisions(&interface, vf.name_span)?;
+    let abi = ShaderAbiPlan::glsl(&interface, vf.name_span)?;
+    check_block_name_collisions(
+        abi.uniform_blocks.iter().map(|(_, p)| p),
+        abi.uniform_array_blocks.iter().map(|(_, p)| p),
+        vf.name_span,
+    )?;
+
+    let vert = plan_stage(ws, scx, vfref, Stage::Vertex)?;
+    let frag = plan_stage(ws, scx, ffref, Stage::Fragment)?;
+    reject_position_read(ws, &frag.ir.body, frag.ir.body.params[fshape.varyings_param], ff.name_span)?;
+
+    Ok(PipelinePlan { vshape, fshape, vert, frag, interface, abi })
 }
 
 /// The PIPELINE counterpart of [`check_entry_profile`]: emission's own
@@ -3803,19 +3901,15 @@ fn render_shader_pipeline(
         ws,
         &plan.vert,
         &plan.vshape,
-        &plan.varyings,
-        plan.block(UNIFORM_BLOCK_BINDING_VERTEX),
-        plan.block(UNIFORM_BLOCK_BINDING_ENGINE),
-        plan.array_block(UNIFORM_BLOCK_BINDING_VERTEX_ARRAYS),
+        &plan.interface,
+        &plan.abi,
     )?;
     let (pixel_block, pixel_dependencies) = emit_fragment_stage(
         ws,
         &plan.frag,
         &plan.fshape,
-        &plan.varyings,
-        plan.block(UNIFORM_BLOCK_BINDING_FRAGMENT),
-        plan.block(UNIFORM_BLOCK_BINDING_ENGINE),
-        plan.array_block(UNIFORM_BLOCK_BINDING_FRAGMENT_ARRAYS),
+        &plan.interface,
+        &plan.abi,
     )?;
 
     let (version, precision) = profile_header(profile);
@@ -4127,6 +4221,54 @@ mod assertion_flip_tests {
         let out = emit_fn_def(&ws, &ShaderInstance::plain(fref), &mf)
             .expect("a non-generic callee must be admitted with no record");
         assert!(out.contains("doubled_float_ret_float("), "{out}");
+    }
+
+    /// **A key of the WRONG ARITY rejects.**
+    ///
+    /// The key is positional against the callee's declared generics, so a key
+    /// of a different length names a different function's instantiation.
+    /// `spec_subst_from_key` zips the two, which silently drops the tail and
+    /// substitutes the head -- a body emitted at a shape nobody asked for, with
+    /// no complaint. Length is checked, not assumed.
+    ///
+    /// Both directions, and the SHORT case is non-empty on purpose: an empty
+    /// key is already refused as "no recorded instantiation", so a `vec![]`
+    /// fixture would pass against the missing length check and prove nothing.
+    /// That is why the callee declares TWO generics.
+    #[test]
+    fn a_generic_callee_with_a_wrong_arity_key_rejects() {
+        use skull_mir::monoty::MonoTy;
+        let (ws, mid) = build_ws(
+            "@pure fn pick<A, B>(a: A, b: B) -> A { return a }\n\
+             @pure fn caller(x: float) -> float { return pick(x, 1) }",
+        );
+        let scx = ScalarCtx::new_values_first_class(&ws);
+        let fref = resolve_root(&ws, mid, "caller").expect("root");
+        let base = lower_function_spec(&ws, &scx, fref.module, fref.func, &SpecSubst::default())
+            .expect("lower");
+
+        // CONTROL: the recorded key has the declared arity, and the body emits.
+        let iid = *base.spec_bindings.keys().next().expect("a recorded instantiation");
+        assert_eq!(base.spec_bindings[&iid].len(), 2, "the callee declares two generics");
+        emit_fn_def(&ws, &ShaderInstance::plain(fref), &base)
+            .expect("the fixture must emit with a well-formed key");
+
+        for (label, key) in [
+            ("too long", vec![Some(MonoTy::Float), Some(MonoTy::Int), Some(MonoTy::Int)]),
+            // Non-empty and short: the case an `is_empty` check cannot see.
+            ("too short", vec![Some(MonoTy::Float)]),
+        ] {
+            let mut mf = base.clone();
+            mf.spec_bindings.insert(iid, key);
+            let msg = emit_fn_def(&ws, &ShaderInstance::plain(fref), &mf)
+                .err()
+                .unwrap_or_else(|| panic!("a {label} key must reject"))
+                .message;
+            assert!(
+                msg.contains("generic") && msg.contains("pick"),
+                "the {label} rejection does not name the callee: {msg}"
+            );
+        }
     }
 
     /// **A generic callee whose key is PARTIAL rejects too.** A `None` slot is

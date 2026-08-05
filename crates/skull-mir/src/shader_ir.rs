@@ -97,10 +97,20 @@ pub struct ShaderStageIr {
 impl ShaderStageIr {
     /// The DECLARATIONS this stage's bodies came from -- what a file watcher
     /// reloads. Two instances of one generic helper share one declaration.
+    ///
+    /// Deduped by SET, not by `Vec::dedup`: emission order interleaves a
+    /// generic helper's instantiations with whatever each of them reached, so
+    /// the repeats are not neighbours and an adjacent-only dedup left them in.
+    /// Emission ORDER is preserved for the survivors, because a reload list
+    /// that reordered itself run to run is a diff for no reason.
     pub fn declarations(&self) -> Vec<FuncRef> {
-        let mut out: Vec<FuncRef> = self.order.iter().map(|i| i.fref).collect();
-        out.push(self.entry.fref);
-        out.dedup();
+        let mut seen: rustc_hash::FxHashSet<(u32, u32)> = rustc_hash::FxHashSet::default();
+        let mut out = Vec::new();
+        for f in self.order.iter().map(|i| i.fref).chain(std::iter::once(self.entry.fref)) {
+            if seen.insert((f.module.raw(), f.func.into_raw().into_u32())) {
+                out.push(f);
+            }
+        }
         out
     }
 }
@@ -118,10 +128,15 @@ pub struct ShaderIR {
 
 impl ShaderIR {
     /// Every DECLARATION the program's bodies came from -- the hot-reload set.
+    /// Deduped across stages: a helper both stages reach is one file to reload.
     pub fn declarations(&self) -> Vec<FuncRef> {
-        let mut out: Vec<FuncRef> = self.stages.iter().flat_map(|s| s.declarations()).collect();
-        out.sort_by_key(|f| (f.module.raw(), f.func.into_raw().into_u32()));
-        out.dedup();
+        let mut seen: rustc_hash::FxHashSet<(u32, u32)> = rustc_hash::FxHashSet::default();
+        let mut out = Vec::new();
+        for f in self.stages.iter().flat_map(|s| s.declarations()) {
+            if seen.insert((f.module.raw(), f.func.into_raw().into_u32())) {
+                out.push(f);
+            }
+        }
         out
     }
 }
@@ -159,8 +174,10 @@ pub struct LogicalArrayGroup {
     pub members: Vec<ArrayMemberDecl>,
 }
 
-/// The program's samplers, in the order the group declares them. ORDER is
-/// logical; the unit each one lands on is the target's answer.
+/// The program's `@textures` group: its samplers in the order the group
+/// declares them. ORDER is logical; the unit each one lands on is the target's
+/// answer, and it is COMPILER-assigned -- which is the whole difference from a
+/// bare sampler ([`ShaderInterfacePlan::bare_samplers`]).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct LogicalTextureGroup {
     pub struct_name: Option<Ustr>,
@@ -205,12 +222,32 @@ pub struct ShaderInterfacePlan {
     pub stages: Vec<ShaderStage>,
     pub vertex_inputs: Vec<LogicalVertexInput>,
     pub varyings: Vec<LogicalVarying>,
-    /// Fragment outputs in declaration order, or empty for the single implicit
-    /// colour output.
-    pub outputs: Vec<(Ustr, WireKind)>,
     pub uniform_groups: Vec<LogicalUniformGroup>,
     pub array_groups: Vec<LogicalArrayGroup>,
     pub textures: Option<LogicalTextureGroup>,
+    /// Loose `Sampler2D` params, outside any `@textures` group.
+    ///
+    /// Kept APART from `textures` because the difference is not cosmetic: a
+    /// grouped sampler's unit is compiler-assigned and published in the ABI
+    /// plan, while a bare one keeps a unit the CPU picked. Folding them into
+    /// one list would tell the engine it owns units it does not. A program may
+    /// not mix the two, which is a rejection rather than a precedence.
+    pub bare_samplers: Vec<(Ustr, SamplerKind)>,
+    /// How the fragment stage's colour output is shaped.
+    pub fragment_output: FragmentOutput,
+}
+
+/// The fragment stage's output shape.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub enum FragmentOutput {
+    /// One implicit colour output of this kind. `F32x4` is the ordinary case;
+    /// an integer target (R32I picking) returns `I32`.
+    Single(WireKind),
+    /// MRT: one named output per field, in declaration order.
+    Mrt(Vec<(Ustr, WireKind)>),
+    /// The stage has no colour output of its own (a vertex-only interface).
+    #[default]
+    None,
 }
 
 impl ShaderInterfacePlan {
