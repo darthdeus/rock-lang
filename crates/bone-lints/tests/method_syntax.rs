@@ -26,8 +26,11 @@ fn methods(src: &str) -> Vec<String> {
 }
 
 fn methods_ignoring(src: &str, ignore: impl IntoIterator<Item = Ustr>) -> Vec<String> {
-    let opts = LintOptions::only(["method_syntax".to_string()]).ignoring_types(ignore);
-    findings_with(src, &opts).iter().map(|f| f.error.message.clone()).collect()
+    messages(src, &LintOptions::only(["method_syntax".to_string()]).ignoring_types(ignore))
+}
+
+fn messages(src: &str, opts: &LintOptions) -> Vec<String> {
+    findings_with(src, opts).iter().map(|f| f.error.message.clone()).collect()
 }
 
 const MOB: &str = "struct Mob { hp: int }\n";
@@ -176,6 +179,33 @@ fn an_ignored_receiver_type_drops_out_of_the_sweep() {
 
     let none = methods_ignoring(&src, [Ustr::from("Color"), Ustr::from("Mob")]);
     assert!(none.is_empty(), "{none:?}");
+}
+
+#[test]
+fn only_types_is_the_whitelist_form_of_the_same_knob() {
+    let src = format!(
+        "{MOB}struct Color {{ r: int }}\n{DAMAGE}fn tint(c: Color, n: int) -> int {{ n }}\n{CALL_MAIN}"
+    );
+    let opts = LintOptions::only(["method_syntax".to_string()])
+        .over_types([Ustr::from("Color")]);
+    let msgs = messages(&src, &opts);
+    assert_eq!(msgs.len(), 1, "{msgs:?}");
+    assert!(msgs[0].contains("fn Color.tint"), "{}", msgs[0]);
+}
+
+#[test]
+fn ignore_subtracts_from_the_whitelist() {
+    // Both knobs at once: the whitelist picks the working set, the ignore list
+    // takes a type back out of it without rewriting the whitelist.
+    let src = format!(
+        "{MOB}struct Color {{ r: int }}\n{DAMAGE}fn tint(c: Color, n: int) -> int {{ n }}\n{CALL_MAIN}"
+    );
+    let opts = LintOptions::only(["method_syntax".to_string()])
+        .over_types([Ustr::from("Color"), Ustr::from("Mob")])
+        .ignoring_types([Ustr::from("Color")]);
+    let msgs = messages(&src, &opts);
+    assert_eq!(msgs.len(), 1, "{msgs:?}");
+    assert!(msgs[0].contains("fn Mob.damage"), "{}", msgs[0]);
 }
 
 #[test]

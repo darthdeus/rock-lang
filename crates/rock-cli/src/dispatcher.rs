@@ -690,6 +690,7 @@ impl CommandContext {
             return crate::lint_cmd::do_lint(
                 &path,
                 self.args.lints.as_deref(),
+                self.args.only_types.as_deref(),
                 self.args.ignore_types.as_deref(),
             );
         }

@@ -14,7 +14,12 @@ use std::path::{Path, PathBuf};
 /// keeps `tests/` sources: a sim is code the author maintains, and `@sim` /
 /// `@test` decorators are reachability roots, so dropping them would report
 /// their callees as dead.
-pub fn do_lint(path: &str, lints: Option<&str>, ignore_types: Option<&str>) -> Result<()> {
+pub fn do_lint(
+    path: &str,
+    lints: Option<&str>,
+    only_types: Option<&str>,
+    ignore_types: Option<&str>,
+) -> Result<()> {
     let sel = match lints {
         // A typo would run nothing and report success, so an unknown name is a
         // rejection, not a silent no-op.
@@ -34,14 +39,12 @@ pub fn do_lint(path: &str, lints: Option<&str>, ignore_types: Option<&str>) -> R
         }
         None => bone_lints::LintOptions::default(),
     };
-    let ignored: Vec<ustr::Ustr> = ignore_types
-        .into_iter()
-        .flat_map(|list| list.split(','))
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(ustr::Ustr::from)
-        .collect();
-    let sel = sel.ignoring_types(ignored.iter().copied());
+    let only = type_names(only_types);
+    let ignored = type_names(ignore_types);
+    let mut sel = sel.ignoring_types(ignored.iter().copied());
+    if only_types.is_some() {
+        sel = sel.over_types(only.iter().copied());
+    }
     let p = Path::new(path);
     let (ws, sources, root) = if p.is_dir() {
         let sources = crate::unified_compile::discover_sources(
@@ -70,18 +73,21 @@ pub fn do_lint(path: &str, lints: Option<&str>, ignore_types: Option<&str>) -> R
         (ws, single_source(path, &src), root)
     };
 
-    // Fails OPEN: a misspelled entry filters nothing, so the type keeps showing
-    // up and the flag reads as broken. Name it rather than reject -- narrowing
-    // an exploratory sweep is not worth a failed run.
-    if !ignored.is_empty() {
-        let unknown = bone_lints::unknown_type_names(
-            &ws,
-            &lint_pass::warm_modules(&ws, &sources),
-            &ignored,
-        );
-        if !unknown.is_empty() {
+    // The two lists fail in opposite directions, so a bad name is handled in
+    // opposite ways. `--only-types` fails CLOSED: a typo drops the type from
+    // the sweep and the run reports a project that looks converted, so it
+    // rejects. `--ignore-types` fails OPEN: a typo filters nothing and the type
+    // keeps appearing, which is visible -- naming it beats failing the run.
+    if !only.is_empty() || !ignored.is_empty() {
+        let warm = lint_pass::warm_modules(&ws, &sources);
+        let unknown_only = bone_lints::unknown_type_names(&ws, &warm, &only);
+        if !unknown_only.is_empty() {
+            anyhow::bail!("--only-types names no type in this project: {}", join(&unknown_only));
+        }
+        let unknown_ignored = bone_lints::unknown_type_names(&ws, &warm, &ignored);
+        if !unknown_ignored.is_empty() {
             log::warn!(target: "LINT", "--ignore-types names no type in this project: {}",
-                unknown.iter().map(|u| u.as_str()).collect::<Vec<_>>().join(", "));
+                join(&unknown_ignored));
         }
     }
 
@@ -112,6 +118,20 @@ pub fn do_lint(path: &str, lints: Option<&str>, ignore_types: Option<&str>) -> R
         anyhow::bail!("{errors} lint error(s)");
     }
     Ok(())
+}
+
+/// A comma-separated `--only-types` / `--ignore-types` list.
+fn type_names(list: Option<&str>) -> Vec<ustr::Ustr> {
+    list.into_iter()
+        .flat_map(|l| l.split(','))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ustr::Ustr::from)
+        .collect()
+}
+
+fn join(names: &[ustr::Ustr]) -> String {
+    names.iter().map(|u| u.as_str()).collect::<Vec<_>>().join(", ")
 }
 
 /// `8 unused_var, 4 unused_fn`, most frequent first.

@@ -147,6 +147,7 @@ pub const OPT_IN_LINTS: &[&str] = &[METHOD_SYNTAX];
 #[derive(Clone, Debug, Default)]
 pub struct LintOptions {
     only: Option<Vec<String>>,
+    only_types: Option<FxHashSet<Ustr>>,
     ignore_types: FxHashSet<Ustr>,
 }
 
@@ -167,8 +168,23 @@ impl LintOptions {
         self
     }
 
+    /// Restrict `method_syntax` to these receiver types -- the whitelist form
+    /// of the same knob, for working one type at a time rather than subtracting
+    /// the rest. Composes with [`LintOptions::ignoring_types`], which subtracts
+    /// from whatever this leaves.
+    pub fn over_types(mut self, names: impl IntoIterator<Item = Ustr>) -> Self {
+        self.only_types = Some(names.into_iter().collect());
+        self
+    }
+
     pub fn ignored_types(&self) -> &FxHashSet<Ustr> {
         &self.ignore_types
+    }
+
+    /// Whether `method_syntax` may report over receiver type `name`.
+    pub fn covers_type(&self, name: Ustr) -> bool {
+        self.only_types.as_ref().is_none_or(|only| only.contains(&name))
+            && !self.ignore_types.contains(&name)
     }
 
     pub fn enabled(&self, lint: &str) -> bool {
@@ -373,7 +389,7 @@ pub fn lint_workspace(
     let variants = enum_variant_names(ws, warm);
     let types = if sel.enabled(METHOD_SYNTAX) {
         let mut names = nominal_type_names(ws, warm);
-        names.retain(|n| !sel.ignored_types().contains(n));
+        names.retain(|&n| sel.covers_type(n));
         names
     } else {
         FxHashSet::default()

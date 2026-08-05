@@ -223,18 +223,23 @@ fn an_unknown_lint_name_is_rejected_rather_than_running_nothing() {
     assert!(stderr(&out).contains("unknown lint(s): method_sytnax"), "{}", stderr(&out));
 }
 
+/// A project with two candidate receivers, one fn over each.
+fn two_type_project(dir: &Path) {
+    std::fs::write(dir.join("stick.toml"), "[package]\nname = \"methodee\"\n").unwrap();
+    std::fs::write(
+        dir.join("main.rock"),
+        "struct Mob { hp: int }\nstruct Color { r: int }\n\nfn damage(m: Mob, n: int) {\n    m.hp -= n\n}\n\nfn tint(c: Color, n: int) -> int {\n    n\n}\n\nfn main() {\n    let mob = Mob { hp: 3 }\n    damage(mob, 1)\n    let _ = tint(Color { r: 1 }, 2)\n}\n",
+    )
+    .unwrap();
+}
+
 #[test]
 fn ignore_types_narrows_the_sweep_and_names_a_miss() {
     // Converting happens one type at a time, so the sweep narrows from the
     // invocation. A misspelled entry fails OPEN -- the type keeps showing up --
     // so it is named rather than silently ignored.
     let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("stick.toml"), "[package]\nname = \"methodee\"\n").unwrap();
-    std::fs::write(
-        dir.path().join("main.rock"),
-        "struct Mob { hp: int }\nstruct Color { r: int }\n\nfn damage(m: Mob, n: int) {\n    m.hp -= n\n}\n\nfn tint(c: Color, n: int) -> int {\n    n\n}\n\nfn main() {\n    let mob = Mob { hp: 3 }\n    damage(mob, 1)\n    let _ = tint(Color { r: 1 }, 2)\n}\n",
-    )
-    .unwrap();
+    two_type_project(dir.path());
     let path = dir.path().to_str().unwrap();
 
     let all = stderr(&run(&["lint", path, "--lints=method_syntax"]));
@@ -248,4 +253,34 @@ fn ignore_types_narrows_the_sweep_and_names_a_miss() {
     let typo =
         stderr(&run(&["lint", path, "--lints=method_syntax", "--ignore-types=Color,Colour"]));
     assert!(typo.contains("names no type in this project: Colour"), "{typo}");
+}
+
+#[test]
+fn only_types_whitelists_and_rejects_a_miss() {
+    // The whitelist fails CLOSED -- a typo drops the type from the sweep and
+    // the run reports a project that looks converted -- so unlike
+    // `--ignore-types` an unknown name is a rejection.
+    let dir = tempfile::tempdir().unwrap();
+    two_type_project(dir.path());
+    let path = dir.path().to_str().unwrap();
+
+    let only = stderr(&run(&["lint", path, "--lints=method_syntax", "--only-types=Color"]));
+    assert!(only.contains("1 method_syntax"), "{only}");
+    assert!(only.contains("fn Color.tint"), "{only}");
+
+    // The lists compose: the whitelist picks the working set, the ignore list
+    // takes one back out of it.
+    let both = stderr(&run(&[
+        "lint",
+        path,
+        "--lints=method_syntax",
+        "--only-types=Color,Mob",
+        "--ignore-types=Color",
+    ]));
+    assert!(both.contains("1 method_syntax"), "{both}");
+    assert!(both.contains("fn Mob.damage"), "{both}");
+
+    let typo = run(&["lint", path, "--lints=method_syntax", "--only-types=Colour"]);
+    assert!(!typo.status.success(), "a typo'd whitelist must not report a converted project");
+    assert!(stderr(&typo).contains("--only-types names no type"), "{}", stderr(&typo));
 }

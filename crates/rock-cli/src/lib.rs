@@ -577,9 +577,12 @@ pub struct Args {
     /// catalog is not the author's to narrow per invocation.
     pub lints: Option<String>,
 
-    /// `rock lint --ignore-types=Color,Vec2`: type names `method_syntax` drops
-    /// from its candidate receivers. A conversion happens one type at a time,
-    /// so the sweep has to narrow from the invocation.
+    /// `rock lint --only-types=Mob,Item` / `--ignore-types=Color,Vec2`: the
+    /// receiver types `method_syntax` sweeps, as a whitelist and a blocklist. A
+    /// conversion happens one type at a time, so the sweep has to narrow from
+    /// the invocation; `--ignore-types` subtracts from whatever `--only-types`
+    /// leaves.
+    pub only_types: Option<String>,
     pub ignore_types: Option<String>,
 
     /// `rock lint --union <lib>`: judge a library's reachability against every
@@ -710,6 +713,8 @@ impl Args {
                 .help("Report build lint warnings/advice as a one-line count instead of rendering each. Error-severity lints always render in full."))
             .arg(Arg::new("lints").long("lints")
                 .help("For `rock lint <path>`: run ONLY the named lints (comma-separated), including opt-in ones a build never runs. `--lints=method_syntax` is how a migration lint is surfaced."))
+            .arg(Arg::new("only-types").long("only-types")
+                .help("For `rock lint --lints=method_syntax`: comma-separated type names to sweep, to the exclusion of every other (--only-types=Mob,Item). A name that is no type in the project rejects."))
             .arg(Arg::new("ignore-types").long("ignore-types")
                 .help("For `rock lint --lints=method_syntax`: comma-separated type names to drop from the sweep (--ignore-types=Color,Vec2). A name that is no type in the project is reported."))
             .arg(Arg::new("union").long("union").action(ArgAction::SetTrue)
@@ -775,6 +780,7 @@ impl Args {
             no_lints: m.get_flag("no-lints"),
             lint_summary: m.get_flag("lint-summary"),
             lints: m.get_one::<String>("lints").cloned(),
+            only_types: m.get_one::<String>("only-types").cloned(),
             ignore_types: m.get_one::<String>("ignore-types").cloned(),
             union: m.get_flag("union"),
             consumers: m.get_one::<String>("consumers").cloned(),
