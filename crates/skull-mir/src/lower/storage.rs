@@ -973,6 +973,16 @@ impl Builder<'_> {
     /// The columns are read only in the present arm -- at a missing key the slot
     /// is -1 and indexing `data` would fault, and a freed slot still holds stale
     /// leaves that must not be observable.
+    ///
+    /// Which repr the miss arm has to produce is decided by how `V?` is
+    /// represented OUTSIDE this expression, and that is `is_nobox_struct` -- the
+    /// one predicate every representation decision reaches. Column ELIGIBILITY
+    /// is a storage rule (`vec_column_elem`) and says nothing about it: an
+    /// unmarked `value` struct is stored in columns here and is a boxed
+    /// nil-or-cdata everywhere else. So an unmarked V builds its ctor INSIDE the
+    /// present arm and misses as a plain `nil`; handing its boxed consumers the
+    /// tagged Group instead makes them pack a ctor after the join, over the miss
+    /// arm's nil leaves.
     pub(crate) fn map_column_get_repr(
         &mut self,
         m: Idx<Inst>,
@@ -980,13 +990,13 @@ impl Builder<'_> {
         elem: ColumnElem,
     ) -> Result<ValueRepr, CompilerError> {
         let shape = self.column_shape(elem)?;
+        let unboxed = self.is_nobox_struct(elem.name);
         let slot = self.call_spine("__map_col_slot_of", vec![m, key])?;
         let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
         let present = self.emit_cur(Inst::IntGeq(slot, zero));
-        let leaf_cells: Vec<Idx<Cell>> = value_leaf_paths(&shape)
-            .iter()
-            .map(|_| self.f.new_cell(None))
-            .collect();
+        let cell_count = if unboxed { value_leaf_paths(&shape).len() } else { 1 };
+        let cells: Vec<Idx<Cell>> =
+            (0..cell_count).map(|_| self.f.new_cell(None)).collect();
         let hit = self.f.new_block();
         let miss = self.f.new_block();
         let join = self.f.new_block();
@@ -997,22 +1007,27 @@ impl Builder<'_> {
         self.cur = hit;
         let data = self.map_col_data(m);
         let found = self.column_element_repr(data, slot, elem)?;
-        let leaves = self.repr_to_leaves(&found, &shape);
-        for (cell, leaf) in leaf_cells.iter().zip(leaves) {
-            self.emit_cur(Inst::Store { cell: *cell, value: leaf });
+        let stored: Vec<Idx<Inst>> = if unboxed {
+            self.repr_to_leaves(&found, &shape)
+        } else {
+            vec![self.pack(found)]
+        };
+        for (cell, value) in cells.iter().zip(stored) {
+            self.emit_cur(Inst::Store { cell: *cell, value });
         }
         self.f.set_term(self.cur, Term::Goto(join));
         self.cur = miss;
         let nil = self.emit_cur(Inst::Const(Lit::Nil));
-        for cell in &leaf_cells {
+        for cell in &cells {
             self.emit_cur(Inst::Store { cell: *cell, value: nil });
         }
         self.f.set_term(self.cur, Term::Goto(join));
         self.cur = join;
-        let loaded: Vec<Idx<Inst>> = leaf_cells
-            .iter()
-            .map(|c| self.emit_cur(Inst::Load(*c)))
-            .collect();
+        let loaded: Vec<Idx<Inst>> =
+            cells.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
+        if !unboxed {
+            return Ok(ValueRepr::Scalar(loaded[0]));
+        }
         let mut idx = 0;
         let inner = self.rebuild_from_leaves(&shape, &loaded, &mut idx);
         Ok(match inner {

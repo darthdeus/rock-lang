@@ -365,8 +365,9 @@ impl MonoTyReason {
 /// bound -- real types nest nowhere near this.
 pub const MAX_DEPTH: u32 = 64;
 
-/// Callee generic `VarId` -> its concrete logical type. The `SpecSubst` analog,
-/// over total types.
+/// Callee generic `VarId` -> its concrete logical type. An instance's own
+/// bindings, and what specialized lowering reads as
+/// [`crate::lower::SpecSubst`] -- one type, not two spellings of it.
 pub type MonoSubst = FxHashMap<VarId, MonoTy>;
 
 /// The `VarId` a declared generic's `TyId` names, for building a [`MonoSubst`]

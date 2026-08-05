@@ -178,7 +178,7 @@ fn max_multi_wire(bodies: &[&MirFunc]) -> usize {
 /// The opaque half used to be a substring scan for `__rock_retN`, which made
 /// the transport whatever the string happened to say: a body could publish past
 /// its own declared wire, or name a slot in a comment and widen the bank.
-/// `skull_mir::lower::result_lane_count` is the same ABI policy every
+/// `BackendFnAbiPlan::result_lanes` is the same ABI policy every
 /// definition and call site reads, so a publisher and the caller capturing it
 /// cannot disagree (`docs/boundary-contracts.md` 1.2).
 fn max_published_lanes(
@@ -194,7 +194,7 @@ fn max_published_lanes(
                 Some((bone_semantic::hir::FnBackend::Js, _))
             )
         })
-        .map(|fr| skull_mir::lower::result_lane_count(ws, scx, *fr))
+        .map(|fr| skull_mir::lower::BackendFnAbiPlan::for_declaration(ws, scx, *fr).result_lanes)
         .max()
         .unwrap_or(0)
 }
@@ -3140,7 +3140,8 @@ fn emit_inline_js_fn(
     // A @scalar_abi fn's value-struct params explode into their
     // `<name>__<leaf>` scalars, same as the lua path, so the exploded call
     // sites and the raw body's leaf names agree.
-    let params = match skull_mir::lower::scalar_abi_lua_param_names(ws, scx, fr) {
+    let abi = skull_mir::lower::BackendFnAbiPlan::for_declaration(ws, scx, fr);
+    let params = match &abi.lua_param_names {
         Some(names) => names.join(", "),
         None => f
             .param_decls
@@ -3155,7 +3156,7 @@ fn emit_inline_js_fn(
     };
     // The publisher contract, checked and lowered against the declaration's
     // own concrete result ABI.
-    let src = lower_publisher(&src, skull_mir::lower::result_lane_count(ws, scx, fr), f.name.as_str())?;
+    let src = lower_publisher(&src, abi.result_lanes, f.name.as_str())?;
     Ok(format!("function {js_name}({params}) {{\n{src}\n}}\n"))
 }
 
@@ -4941,7 +4942,7 @@ fn required_arg_count(
         .unwrap_or_default();
     // Scalar ABI: a defaulted value-struct param explodes to N leaf slots and
     // all N are omittable together -- subtract per-param LEAF widths, not 1.
-    if let Some(widths) = skull_mir::lower::scalar_abi_param_leaf_widths(ws, scx, fr) {
+    if let Some(widths) = skull_mir::lower::BackendFnAbiPlan::for_declaration(ws, scx, fr).param_leaf_widths {
         let omittable: usize = widths
             .iter()
             .zip(defaults.iter().chain(std::iter::repeat(&false)))

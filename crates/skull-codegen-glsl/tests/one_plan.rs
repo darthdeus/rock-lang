@@ -23,14 +23,14 @@ static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         .iter()
         .map(|f| {
             let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());
-            skull_parser::parse_module(f.contents, id).expect("stdlib parse")
+            skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
         })
         .collect()
 });
 
 fn workspace(src: &str) -> (bone_semantic::inference::Workspace, bone_semantic::prelude::ModuleId) {
     let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module(src, Ustr::from("<test>")).expect("parse"));
+    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
     (ws, mid)
@@ -294,3 +294,120 @@ fn good_pipe_frag(vary: PipeVary, @textures t: PipeTex) -> Vec4 {
     assert_eq!(answers.0, Ok(()), "a valid A2 pipeline was refused by the check");
     assert_agree("valid pipeline", answers);
 }
+
+/// The ES 3.0 block budget is enforced on the REAL entry path, and the check and
+/// the emitter answer identically -- the whole point of one plan.
+///
+/// Population matters here: this repo's live blocks are all a few hundred bytes,
+/// so a budget check could sit dead forever and look fine. `@uniform` groups get
+/// far bigger the moment uniform ARRAYS move inside a block (backlog 4b), which
+/// is what this guards. Both sides of the boundary are driven, because the
+/// rejecting side alone cannot show the check admits anything.
+#[test]
+fn the_gles_block_budget_is_enforced_where_shaders_are_planned() {
+    // Mat4 is 64 std140 bytes, the densest member a block can hold.
+    let src = |n: usize| {
+        let fields: Vec<String> = (0..n).map(|i| format!("m{i}: Mat4")).collect();
+        format!(
+            "value BigU {{ {} }}\n\n\
+             @shader(fragment)\n\
+             fn big_frag(@uniform u: BigU, tc: Vec2) -> Vec4 {{\n\
+             \x20   let _ = tc\n\
+             \x20   return u.m0 * Vec4 {{ x: 1.0, y: 0.0, z: 0.0, w: 1.0 }}\n\
+             }}\n",
+            fields.join(", ")
+        )
+    };
+
+    let at_limit = entry_answers(&src(256), "big_frag");
+    assert_eq!(at_limit.0, Ok(()), "16384 bytes is the budget, not over it");
+    assert_agree("block exactly at the ES 3.0 budget", at_limit);
+
+    let over = entry_answers(&src(257), "big_frag");
+    let msg = over.0.clone().expect_err("16448 bytes must be refused");
+    assert!(
+        msg.contains("16448") && msg.contains("16384"),
+        "the rejection must name the size and the budget, got: {msg}"
+    );
+    assert_agree("block over the ES 3.0 budget", over);
+}
+
+/// **A generic helper is checked and emitted at each INSTANTIATION.**
+///
+/// GLSL has no boxed representation, so a declared `T` is not a shape any
+/// program can carry: the declaration-based pass rejected `passthrough` as
+/// "not tier 0" and was right about the declaration and silent about the two
+/// bodies the program actually needs. Under the instance substitutions both
+/// are tier 0, and they are two GLSL functions -- `float` and `int` are not one
+/// definition.
+///
+/// The DENOMINATOR is asserted: two distinct specialized definitions must
+/// appear. A test that only asserted "it emits" would pass on one.
+#[test]
+fn a_generic_helper_is_emitted_once_per_instantiation() {
+    let src = r#"
+@pure fn passthrough<T>(x: T) -> T { return x }
+@pure fn concrete_helper(x: float) -> float { return x * 2.0 }
+@shader(fragment)
+fn generic_frag(uTexture: Sampler2D, tc: Vec2) -> Vec4 {
+    let d = concrete_helper(passthrough(tc.x))
+    let n = passthrough(3)
+    return v(d, d, d, float(n))
+}
+fn main() { let a = rock_shader(generic_frag) }
+"#;
+    assert_agree("a generic helper at two instantiations", entry_answers(src, "generic_frag"));
+
+    let (ws, mid) = workspace(src);
+    let out = skull_codegen_glsl::emit_shader_entry(&ws, mid, "generic_frag", GlslProfile::Core330)
+        .expect("a concretely instantiated generic helper must emit");
+
+    let defs: Vec<&str> = out
+        .lines()
+        .filter(|l| l.starts_with("float passthrough") || l.starts_with("int passthrough"))
+        .collect();
+    assert_eq!(
+        defs.len(),
+        2,
+        "the two instantiations did not become two definitions: {defs:?}\n{out}"
+    );
+    assert!(defs.iter().any(|d| d.starts_with("float passthrough")), "{defs:?}");
+    assert!(defs.iter().any(|d| d.starts_with("int passthrough")), "{defs:?}");
+    // Each definition's own name is what its call site spells -- a specialized
+    // callee and its definition cannot disagree, because both come off the key
+    // lowering recorded at the site.
+    for d in &defs {
+        let name = d.split_whitespace().nth(1).unwrap().split('(').next().unwrap();
+        assert!(out.contains(&format!("{name}(")), "no call reaches `{name}`:\n{out}");
+    }
+    // CONTROL: the NON-generic helper keeps its ordinary mangled name with no
+    // instantiation suffix, which is what makes a program with no generics
+    // byte-identical to the pre-instance emission.
+    assert!(out.contains("float concrete_helper_float_ret_float(float "), "{out}");
+    assert!(!out.contains("concrete_helper_float_ret_float_spec"), "{out}");
+}
+
+/// **A generic helper bound to a non-tier-0 type is still rejected**, and the
+/// rejection names the binding rather than the declaration. The nearest control
+/// to the test above: it is the same helper, the same call shape, and only the
+/// instantiation differs -- so "generics are accepted now" cannot pass here.
+#[test]
+fn a_generic_helper_bound_outside_tier_0_is_rejected_by_its_binding() {
+    let src = r#"
+@pure fn passthrough<T>(x: T) -> T { return x }
+@shader(fragment)
+fn bad_frag(uTexture: Sampler2D, tc: Vec2) -> Vec4 {
+    let s = passthrough("nope")
+    return v(tc.x, 0.0, 0.0, 1.0)
+}
+fn main() { let a = rock_shader(bad_frag) }
+"#;
+    let (checked, emitted) = entry_answers(src, "bad_frag");
+    assert_eq!(checked, emitted, "the check and the emitter disagreed");
+    let msg = checked.expect_err("a string-bound generic helper must reject");
+    assert!(
+        msg.contains("string"),
+        "the rejection does not name the BINDING that made it non-tier-0: {msg}"
+    );
+}
+

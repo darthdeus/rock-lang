@@ -1165,7 +1165,7 @@ pub fn inline_functions(
     func: &mut MirFunc,
     cache: &mut InlineCache,
 ) -> Result<(HashSet<FuncRef>, Vec<SpliceRecord>), CompilerError> {
-    inline_functions_with_subst(ws, scx, self_ref, func, cache, &SpecSubst::new())
+    inline_functions_with_subst(ws, scx, self_ref, func, cache, &SpecSubst::default())
 }
 
 pub fn inline_functions_with_subst(

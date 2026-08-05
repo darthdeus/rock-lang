@@ -1552,19 +1552,14 @@ fn main() {
         "a width was stated from the declaration for an instance with no substitution record"
     );
     assert!(
-        after.publisher_lanes_unknown.contains(&inst),
-        "the instance left the stated population without joining the unknown one"
-    );
-    assert!(
         after.missing_substitutions.contains(&inst),
         "the missing record produced no explicit finding"
     );
     assert_eq!(after.census().missing_substitutions, 1);
-    // The population is CONSERVED, not lost: `foreign_bodies` counts only what
-    // was answered, so the instance moves from that half of the denominator to
-    // `lanes_unknown` rather than disappearing from both.
+    // `foreign_bodies` counts what was answered, so the instance leaves it --
+    // and the ONLY thing that can take it out is the missing record, which is
+    // the finding asserted above.
     assert_eq!(after.census().foreign_bodies + 1, before.census().foreign_bodies);
-    assert_eq!(after.census().lanes_unknown, before.census().lanes_unknown + 1);
 }
 
 /// **The JS view's reachable `inline(js)` population, with its publisher
@@ -1635,4 +1630,71 @@ fn main() {
         }),
         "the luajit artifact claimed a JS-only body's result wire"
     );
+}
+
+/// **A generic foreign body's publisher width comes from its INSTANCE.**
+///
+/// The declaration says `-> T`, which is one boxed slot on every wire it could
+/// name; the two instances below put a different number of values on the wire
+/// (`(bool, float)` splats to two lanes, `int` rides one). A declaration-based
+/// oracle can answer neither, so it reported both unstated -- correct, and not
+/// a width. `publisher_lanes` is keyed by INSTANCE, so the two answers coexist,
+/// which is the property a per-declaration plan structurally cannot hold.
+///
+/// The `int` arm is the scalar/boxed admission control: it must reach the
+/// stated population at width 1 rather than being excluded alongside the
+/// tuple, or "the generic was answered" and "generics are skipped" look alike.
+#[test]
+fn a_generic_foreign_body_takes_its_publisher_width_from_its_instance() {
+    let ws = check(
+        r#"
+inline(js) fn wired<T>(v: T) -> T = "return v;"
+fn main() {
+    let pair = wired((true, 1.0))
+    let one = wired(7)
+}
+"#,
+    );
+    let (g, all_roots) = graph_for(&ws);
+    let roots: Vec<skull_mir::mir::FuncRef> = all_roots
+        .iter()
+        .copied()
+        .filter(|r| ws.module(r.module).functions[r.func].name.as_str() == "main")
+        .collect();
+    let js = artifact::realize(&ws, &g, &ArtifactRequest::new(JAVASCRIPT_WEB, &roots));
+
+    // Keyed by the instance's own type argument, so the assertion names WHICH
+    // instantiation got which width rather than only that two numbers appeared.
+    let widths: std::collections::BTreeMap<String, usize> = js
+        .publisher_lanes
+        .iter()
+        .filter(|(i, _)| {
+            ws.module(i.func.module).functions[i.func.func].name.as_str() == "wired"
+        })
+        .map(|(i, n)| (g.arena.render(i.args[0]), *n))
+        .collect();
+
+    // The DENOMINATOR: the fixture has a real generic population, so a zero
+    // below would be an unanswered question and not a clean one.
+    let generic_instances = js
+        .realization
+        .keys()
+        .filter(|i| {
+            ws.module(i.func.module).functions[i.func.func].name.as_str() == "wired"
+        })
+        .count();
+    assert_eq!(generic_instances, 2, "the fixture lost one of its two instantiations");
+
+    assert_eq!(
+        widths,
+        [("(bool, float)".to_string(), 2usize), ("int".to_string(), 1usize)]
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>(),
+        "the two instances of one generic foreign body did not state their own widths"
+    );
+    assert!(
+        js.missing_substitutions.is_empty(),
+        "a generic instance went unanswered for a reason other than its own width"
+    );
+    assert_eq!(js.census().widest_result_lanes, 2);
 }

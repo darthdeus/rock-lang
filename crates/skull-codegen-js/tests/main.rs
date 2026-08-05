@@ -24,6 +24,8 @@ mod inline_pipeline;
 mod inspect;
 #[path = "lambda.rs"]
 mod lambda;
+#[path = "web_uniform_block_layout_check.rs"]
+mod web_uniform_block_layout_check;
 #[path = "web_canvas_active_extent.rs"]
 mod web_canvas_active_extent;
 #[path = "web_canvas_resize_gate.rs"]
@@ -44,6 +46,9 @@ mod misc_intrinsics;
 mod module_globals;
 #[path = "multi_rejection.rs"]
 mod multi_rejection;
+
+#[path = "opaque_container_axes_js.rs"]
+mod opaque_container_axes_js;
 #[path = "multivalue.rs"]
 mod multivalue;
 #[path = "nb_differential.rs"]

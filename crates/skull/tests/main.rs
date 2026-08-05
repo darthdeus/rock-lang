@@ -54,6 +54,21 @@ mod generic_coroutine_column_param_sentinel;
 mod hole_runtime_error;
 #[path = "incremental_emit.rs"]
 mod incremental_emit;
+#[path = "opaque_declared_type_reach.rs"]
+mod opaque_declared_type_reach;
+
+#[path = "opaque_container_axes.rs"]
+mod opaque_container_axes;
+
+#[path = "repr_opaque_param.rs"]
+mod repr_opaque_param;
+
+#[path = "vec_push_column_route.rs"]
+mod vec_push_column_route;
+
+#[path = "inline_body_column_map_param.rs"]
+mod inline_body_column_map_param;
+
 #[path = "inline_lua_column_container_param_sentinel.rs"]
 mod inline_lua_column_container_param_sentinel;
 #[path = "inline_value_specialization.rs"]

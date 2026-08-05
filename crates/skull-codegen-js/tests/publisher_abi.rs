@@ -10,7 +10,7 @@
 //!
 //! The signed contract replaces both: exactly one final top-level
 //! `return __rock_publish(...)`, its arity taken from the concrete result ABI
-//! (`skull_mir::lower::result_lane_count`), direct bank access rejected. These
+//! (`skull_mir::lower::BackendFnAbiPlan::result_lanes`), direct bank access rejected. These
 //! tests are the two halves -- the ABI is the sizing oracle, and the lexical
 //! validator refuses every disagreeing shape.
 
@@ -62,7 +62,12 @@ fn lanes(src: &str, name: &str) -> usize {
         .find(|(_, f)| f.name.as_str() == name)
         .map(|(fid, _)| fid)
         .expect("fn");
-    skull_mir::lower::result_lane_count(&ws, &scx, FuncRef { module: mid, func: fid })
+    skull_mir::lower::BackendFnAbiPlan::for_declaration(
+        &ws,
+        &scx,
+        FuncRef { module: mid, func: fid },
+    )
+    .result_lanes
 }
 
 /// The LEGACY sizing, reproduced here as a SEPARATE structure: the widest

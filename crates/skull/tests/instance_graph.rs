@@ -1588,33 +1588,129 @@ fn synthesized_targets_belong_to_the_runtime_catalogue() {
 /// instance of it exists -- which is how a name that later calls fully
 /// instantiated went on reading as having no concrete body at all. Both halves
 /// are asserted here: the count is visible, and the hole does not close.
+///
+/// The fixture DECLARES its own `@nomangle` generic rather than borrowing a
+/// stdlib one. A stdlib name is a live entry in the obligation matrix, so
+/// closing that entry silently disarms this test while it stays green -- which
+/// is what happened when `vec_push`'s last opaque caller was removed and its
+/// `@nomangle` dropped. A declaration the test owns cannot be closed out from
+/// under it.
 #[test]
 fn a_root_with_instances_reports_them_and_stays_a_hole() {
     let (ws, g) = graph_of(
         r#"
+@nomangle fn keep<T>(x: T) -> T { return x }
 fn main() {
-    let xs: [int] = []
-    xs.push(1)
-    let ys: [string] = []
-    ys.push("a")
+    let a = keep(1)
+    let b = keep("s")
 }
 "#,
     );
     let hole = g
         .uninstantiated_roots
-        .get("vec_push")
-        .unwrap_or_else(|| panic!("`vec_push` is not a root: {:?}", g.uninstantiated_roots.keys()));
-    assert!(hole.generic_root, "`vec_push` was recorded under the wrong cause: {hole:?}");
+        .get("keep")
+        .unwrap_or_else(|| panic!("`keep` is not a root: {:?}", g.uninstantiated_roots.keys()));
+    assert!(hole.generic_root, "`keep` was recorded under the wrong cause: {hole:?}");
     assert!(
         hole.instances >= 2,
-        "`vec_push` is called at two element types but reports {} instances",
+        "`keep` is called at two type arguments but reports {} instances",
         hole.instances
     );
     assert!(
-        g.closure(&ws).uninstantiated_roots.contains("vec_push"),
+        g.closure(&ws).uninstantiated_roots.contains("keep"),
         "a root with instances stopped counting as a hole -- the falsely-green reading"
     );
-    assert!(!g.closure(&ws).is_closed(), "the corpus hole vanished from the closure gate");
+    assert!(!g.closure(&ws).is_closed(), "the fixture hole vanished from the closure gate");
+}
+
+/// The narrowing in `generic_root_obligation`, both sides. A generic emission
+/// root whose emitted symbol is MANGLED carries no bare-name obligation --
+/// opaque text cannot spell a mangling the compiler owns -- while the same
+/// declaration with `@nomangle` does.
+///
+/// Both arms come from ONE source differing only in the annotation, so a
+/// difference cannot be an artifact of two fixtures.
+#[test]
+fn only_a_bare_symbol_carries_a_bare_name_obligation() {
+    let src = |anno: &str| {
+        format!(
+            r#"
+{anno} fn keep<T>(x: T) -> T {{ return x }}
+fn main() {{ let a = keep(1) }}
+"#
+        )
+    };
+    let (_, bare) = graph_of(&src("@nomangle"));
+    assert!(
+        bare.uninstantiated_roots.contains_key("keep"),
+        "a `@nomangle` generic root IS a bare-name obligation: {:?}",
+        bare.uninstantiated_roots.keys()
+    );
+
+    let (_, mangled) = graph_of(&src(""));
+    let excused: Vec<&String> = mangled
+        .excused_generic_roots
+        .get("mangled")
+        .map(|s| s.iter().collect())
+        .unwrap_or_default();
+    assert!(
+        excused.iter().any(|n| n.starts_with("keep_")),
+        "the mangled twin must be EXCUSED, not silently absent: {excused:?}"
+    );
+    assert!(
+        !mangled.uninstantiated_roots.keys().any(|n| n.starts_with("keep")),
+        "a mangled generic root is not an obligation: {:?}",
+        mangled.uninstantiated_roots.keys()
+    );
+}
+
+/// The `stdlib-funcref` excusal is a DECLARATION property, never a name one.
+/// `ERASED_RUNTIME_ENTRIES` holds NAMES, and membership alone is a proxy for
+/// "this is the entry `stdlib_funcref` resolves to" -- a weaker question. A user
+/// `@nomangle` generic sharing a catalogue name is not that entry.
+///
+/// A/B on exactly that, one fixture differing only by the shadowing overload.
+/// Without it the stdlib's `__rock_col_sort` is excused; with it the resolver
+/// is ambiguous -- what `stdlib_funcref` itself rejects on -- so nothing is
+/// excused and the obligation stands.
+#[test]
+fn the_funcref_excusal_follows_the_declaration_not_the_name() {
+    let (_, plain) = graph_of("fn main() { }");
+    assert!(
+        plain
+            .excused_generic_roots
+            .get("stdlib-funcref")
+            .is_some_and(|s| s.contains("__rock_col_sort")),
+        "the stdlib's own `__rock_col_sort` IS the entry `stdlib_funcref` resolves \
+         to, so it must be excused: {:?}",
+        plain.excused_generic_roots
+    );
+    assert!(
+        !plain.uninstantiated_roots.contains_key("__rock_col_sort"),
+        "...and therefore not an obligation: {:?}",
+        plain.uninstantiated_roots.keys()
+    );
+
+    let (_, shadowed) = graph_of(
+        r#"
+@nomangle fn __rock_col_sort<T>(x: T) -> int { return 1 }
+fn main() { }
+"#,
+    );
+    assert!(
+        shadowed.uninstantiated_roots.contains_key("__rock_col_sort"),
+        "a same-name overload makes the entry unresolvable, so the obligation \
+         returns rather than riding the catalogue name: excused={:?}",
+        shadowed.excused_generic_roots
+    );
+    assert!(
+        !shadowed
+            .excused_generic_roots
+            .get("stdlib-funcref")
+            .is_some_and(|s| s.contains("__rock_col_sort")),
+        "nothing may be excused under a name the resolver cannot decide: {:?}",
+        shadowed.excused_generic_roots
+    );
 }
 
 /// The OTHER cause: a call from an always-emitted body (here a global

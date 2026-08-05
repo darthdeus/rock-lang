@@ -405,6 +405,11 @@ pub struct InstanceGraph {
     /// here, BY CAUSE. See [`RootHole`]: one set carrying several different
     /// facts could only ever be read as the weakest of them.
     pub uninstantiated_roots: BTreeMap<String, RootHole>,
+    /// Generic emission roots the narrowing in [`generic_root_obligation`] ruled
+    /// out, keyed by the reason. Recorded, not dropped: the population a check
+    /// EXCLUDED is the only way to tell a narrowed gate from a dead one, and a
+    /// filter whose rejects are invisible reads as "there were none".
+    pub excused_generic_roots: BTreeMap<&'static str, BTreeSet<String>>,
     /// Instances whose expansion was cut by [`MAX_INSTANTIATION_DEPTH`].
     pub depth_capped: Vec<Instance>,
     /// Instances whose Rock body the walk actually entered and enumerated the
@@ -575,6 +580,50 @@ pub const ERASED_RUNTIME_ENTRIES: &[&str] = &[
     "__rock_vec_column_elements",
     "table_len",
 ];
+
+/// Why a generic emission root carries no uncovered bare-name obligation, or
+/// `None` when it does.
+///
+/// The obligation is "exist under a BARE name that opaque target text can call"
+/// (`docs/boundary-contracts.md` 1.2, 1.4), so it is a property of the EMITTED
+/// SYMBOL, not of genericity. Two things discharge it, and both are enforced
+/// rather than promised:
+///
+/// - **mangled**: under ALWAYS-MANGLE the emitted symbol is
+///   `name_param_ret_result`, which no opaque body can spell -- a Lua string
+///   naming it would have to restate a mangling the compiler owns, and a
+///   mangling change would break it silently. The obligation exists only for the
+///   [`skull_mir::mangle::is_exempt`] set, which is exactly the set of
+///   declarations whose emitted symbol IS their source name.
+/// - **stdlib-funcref**: the [`ERASED_RUNTIME_ENTRIES`] catalogue is reached
+///   through `Builder::stdlib_funcref`, which REJECTS at compile time when the
+///   stdlib has no body serving the active target. Existence-per-target is the
+///   contract, and it is checked, not asserted (1.4).
+///
+/// The catalogue is a set of NAMES, and a name is not a declaration. Membership
+/// alone is a PROXY for "this is the entry the compiler resolves to", and a
+/// weaker question than the one being asked: a user `@nomangle` generic sharing
+/// a catalogue name is not that entry, and excusing it would falsely close a
+/// program. So the excusal asks the same resolver `stdlib_funcref` does
+/// ([`stdlib_entry_representative`]) and excuses only the declaration it
+/// selects. When that resolver is ambiguous -- exactly what `stdlib_funcref`
+/// itself rejects on -- nothing is excused and the obligation stands.
+///
+/// Deliberately NOT a discharge: having concrete instances from Rock call
+/// sites. Those cover the call sites and not the bare-name entry, which is the
+/// falsely-green reading [`RootHole`] exists to prevent.
+fn generic_root_obligation(ws: &Workspace, r: FuncRef, f: &Function) -> Option<&'static str> {
+    if !skull_mir::mangle::is_exempt(f) {
+        return Some("mangled");
+    }
+    // `r` is already canonicalized by `build`, so this compares like for like.
+    if ERASED_RUNTIME_ENTRIES.contains(&f.name.as_str())
+        && stdlib_entry_representative(ws, f.name.as_str()) == Some(r)
+    {
+        return Some("stdlib-funcref");
+    }
+    None
+}
 
 /// Polymorphic recursion (`f<T> -> f<[T]>`) does not terminate under
 /// demand-driven instantiation (plan S 7). The cap turns divergence into a
@@ -884,6 +933,10 @@ impl InstanceGraph {
     /// instantiates.
     fn record_generic_root(&mut self, name: String) {
         self.uninstantiated_roots.entry(name).or_default().generic_root = true;
+    }
+
+    fn excuse_generic_root(&mut self, reason: &'static str, name: String) {
+        self.excused_generic_roots.entry(reason).or_default().insert(name);
     }
 
     /// A call from an always-emitted body whose instantiation failed. There is
@@ -1232,6 +1285,7 @@ pub fn build(ws: &Workspace, roots: Vec<FuncRef>, perturb: bool) -> InstanceGrap
         unresolved: Vec::new(),
         rejections: Vec::new(),
         uninstantiated_roots: BTreeMap::new(),
+        excused_generic_roots: BTreeMap::new(),
         depth_capped: Vec::new(),
         expanded: BTreeSet::new(),
         boundaries: BTreeMap::new(),
@@ -1261,7 +1315,10 @@ pub fn build(ws: &Workspace, roots: Vec<FuncRef>, perturb: bool) -> InstanceGrap
     for r in roots {
         let f = &ws.module(r.module).functions[r.func];
         if !f.generics.is_empty() {
-            g.record_generic_root(mangle_fn(ws, f));
+            match generic_root_obligation(ws, r, f) {
+                Some(reason) => g.excuse_generic_root(reason, mangle_fn(ws, f)),
+                None => g.record_generic_root(mangle_fn(ws, f)),
+            }
             continue;
         }
         let inst = Instance { func: r, args: Vec::new() };

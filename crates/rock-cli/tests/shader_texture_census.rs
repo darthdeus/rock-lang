@@ -154,6 +154,8 @@ const EXPECTED: &[(&str, &str, &str)] = &[
     ("outline_detect_vert+outline_detect_frag", "target_mask", "slot 0"),
     ("outline_detect_vert+outline_detect_frag", "visible_id", "slot 1"),
     ("outline_target_vert+outline_target_frag", "uTexture", "slot 0"),
+    ("pass_pair_frag", "tex_a", "slot 0"),
+    ("pass_pair_frag", "tex_b", "slot 1"),
     ("present_frag", "src_tex", "slot 0"),
     ("sprite_basic_vert+sprite_basic_frag", "uTexture", "slot 0"),
     ("sprite_batch_vert+sprite_batch_frag", "uGlowTex", "slot 2"),

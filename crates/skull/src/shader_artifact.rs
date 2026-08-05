@@ -92,18 +92,10 @@ pub struct ShaderArtifactView {
     /// emitted as a definition -- `skull_codegen_glsl`'s own leaf rule.
     pub builtins: BTreeSet<Instance>,
     pub rejections: Vec<ShaderRejection>,
-    /// Retained instances the declaration-based GLSL passes cannot answer for:
-    /// their substitution is not empty, so the declaration is not the shape the
-    /// artifact packages. Reported, never silently validated -- and the PROGRAM
-    /// that reaches one is not validated either (see `programs_unchecked`).
-    /// Entries and reachable HELPERS both: `check_entry_profile` lowers the
-    /// helpers too, so a concrete entry over a generic helper still gets a
-    /// verdict about a shape nothing packages.
-    pub unchecked_generic: BTreeSet<Instance>,
     /// **An invariant finding.** Retained shader instances the shared graph
     /// holds no substitution record for. Not "concrete by default": a missing
     /// record means a producer bypassed `reach`'s recorder, and a program that
-    /// reaches one is excluded from validation exactly as a generic one is.
+    /// reaches one is excluded from validation.
     pub missing_substitutions: BTreeSet<Instance>,
     /// Where the structural cycle finding and the GLSL pass disagree. Both
     /// answer "is this recursive"; keeping the comparison is what makes the
@@ -112,8 +104,9 @@ pub struct ShaderArtifactView {
     /// PROGRAMS the GLSL pass actually ran over -- the denominator for
     /// `rejections`.
     pub entries_checked: usize,
-    /// Programs excluded from that denominator because their retained set is
-    /// not answerable by a declaration-based pass. `entries_checked +
+    /// Programs excluded from that denominator because the graph holds no
+    /// substitution for something under them -- an invariant break, and the
+    /// only remaining reason a program goes unchecked. `entries_checked +
     /// programs_unchecked == programs`, so a zero rejection count cannot hide
     /// a population that was never asked.
     pub programs_unchecked: usize,
@@ -215,7 +208,6 @@ pub fn realize_shader(
     let mut rejections: Vec<ShaderRejection> = Vec::new();
     let mut disagreements: Vec<String> = Vec::new();
     let mut checked = 0usize;
-    let mut unchecked_generic: BTreeSet<Instance> = BTreeSet::new();
     let mut missing_substitutions: BTreeSet<Instance> = BTreeSet::new();
     let mut programs_unchecked = 0usize;
     for program in req.programs {
@@ -240,25 +232,18 @@ pub fn realize_shader(
         }
 
         // THE COMPLETE RETAINED SET FOR THIS PROGRAM, not just its entries.
-        // `check_entry_profile` lowers and walks the entry's HELPERS too, and
-        // GLSL lowering takes no substitution -- so one generic helper anywhere
-        // under the program makes the declaration-based verdict a statement
-        // about a shape no artifact packages. The program is recorded unchecked
-        // and the pass is not run: a verdict it cannot answer is not evidence,
-        // and it may not enter the `entries_checked` denominator either.
+        // A GENERIC instance is answerable now: GLSL lowers each one under the
+        // instantiation the call site recorded, so `passthrough<float>` and
+        // `passthrough<int>` are two checked, emitted definitions. What is still
+        // unanswerable is a MISSING record -- the graph being incomplete is not
+        // a shape, and a program reaching one may not enter the
+        // `entries_checked` denominator.
         let retained = reachable_from(&program_roots, &edges);
         let mut answerable = true;
         for i in &retained {
-            match g.concreteness(i) {
-                Concreteness::Concrete => {}
-                Concreteness::Generic => {
-                    unchecked_generic.insert(i.clone());
-                    answerable = false;
-                }
-                Concreteness::Missing => {
-                    missing_substitutions.insert(i.clone());
-                    answerable = false;
-                }
+            if g.concreteness(i) == Concreteness::Missing {
+                missing_substitutions.insert(i.clone());
+                answerable = false;
             }
         }
         if !answerable {
@@ -306,21 +291,15 @@ pub fn realize_shader(
         }
     }
 
-    // ...and the same classification over the WHOLE retained set, so an
+    // ...and the same invariant check over the WHOLE retained set, so an
     // instance no registered program's walk reached (a second instantiation of
     // an entry declaration) is still reported rather than silently absent. The
     // per-program loop above decides what gets VALIDATED; this decides what
     // gets REPORTED, and the reported set is the larger of the two by
     // construction.
     for i in roots.iter().chain(helpers.iter()) {
-        match g.concreteness(i) {
-            Concreteness::Concrete => {}
-            Concreteness::Generic => {
-                unchecked_generic.insert(i.clone());
-            }
-            Concreteness::Missing => {
-                missing_substitutions.insert(i.clone());
-            }
+        if g.concreteness(i) == Concreteness::Missing {
+            missing_substitutions.insert(i.clone());
         }
     }
 
@@ -330,7 +309,6 @@ pub fn realize_shader(
         helpers,
         builtins,
         rejections,
-        unchecked_generic,
         missing_substitutions,
         disagreements,
         entries_checked: checked,

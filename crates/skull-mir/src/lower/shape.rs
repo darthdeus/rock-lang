@@ -1443,6 +1443,62 @@ pub(crate) fn spec_key_has_target_storage(
     })
 }
 
+/// The physical form an opaque body would WRONGLY assume for a container
+/// parameter, or `None` when the boxed assumption still holds.
+///
+/// One oracle for every container constructor 2.4 names
+/// (`docs/boundary-contracts.md`), so the rejection rule cannot drift from the
+/// storage lowering actually selects -- it composes exactly the two predicates
+/// [`spec_key_has_target_storage`] does, for the same reason.
+///
+/// The split is not stylistic:
+///
+/// - `[E]`/`Vec<E>` is per-leaf column arrays with no `_data`, and `Map<K, E>`
+///   at a column-eligible `E` is a spine wrapper rather than a bare key table.
+///
+/// - `Arena<E>`'s `data` IS a column vec at a column-eligible `E`, on every
+///   target, so an opaque body's `a.data._data` is nil everywhere.
+/// - `FlatVec<E>` and `NativeBuffer<E>` are `{ptr, len}` over C storage. On
+///   luajit `ptr` is an `E*`, so `ptr[i]` is an element REFERENCE and the body
+///   is right; JS backs them with flat slots, where `ptr[i]` is a leaf. Hence a
+///   JS-only rejection, the same asymmetry the spec-key trigger already makes.
+/// The nominal container constructors 2.4 covers. Asked BEFORE the element is
+/// resolved: reading a concrete type is not free of consequence -- `concrete_ty`
+/// reports "bone typed no expression here" as an error -- so a `Sampler2D`
+/// parameter must never be asked in the first place.
+pub fn is_nominal_container(name: Ustr) -> bool {
+    matches!(name.as_str(), "Arena" | "FlatVec" | "NativeBuffer")
+}
+
+/// The name [`opaque_container_hazard`] knows a builtin container by.
+pub const VEC_CONTAINER: &str = "Vec";
+pub const MAP_CONTAINER: &str = "Map";
+
+pub fn opaque_container_hazard(
+    ws: &Workspace,
+    target: bone_semantic::hir::FnBackend,
+    container: Ustr,
+    elem: Ustr,
+    nullable: bool,
+) -> Option<&'static str> {
+    let js = target == bone_semantic::hir::FnBackend::Js;
+    // The element's own nullability, NOT either flavour.
+    // [`spec_key_has_target_storage`] may over-approximate -- an extra
+    // specialized copy costs nothing -- and a REJECTION may not: an unmarked
+    // `[BV2?]` is a boxed vec while its non-nullable twin `[BV2]` is columns.
+    let columns =
+        vec_column_elem(ws, elem, nullable).is_some() && columns_available(ws, target, elem);
+    match container.as_str() {
+        "Vec" if columns => Some("`_data`"),
+        "Map" if columns => Some("a bare key table"),
+        "Arena" if columns => Some("`data._data`"),
+        "FlatVec" | "NativeBuffer" if js && leaf_addr_plan(ws, elem).is_ok() => {
+            Some("a per-element view over `ptr`")
+        }
+        _ => None,
+    }
+}
+
 /// Whether `[elem]` takes column storage when lowering for `target`.
 ///
 /// Every target now serves columns, so this is unconditional. It survives as a
@@ -1464,7 +1520,12 @@ pub type SpecKey = Vec<Option<MonoTy>>;
 
 /// Callee generic `VarId` -> its concrete type tree, for specialized lowering.
 /// Only the reified generics appear; a `None` in the [`SpecKey`] is absent here.
-pub type SpecSubst = std::collections::HashMap<bone_semantic::hir::VarId, MonoTy>;
+///
+/// THE SAME TYPE as [`crate::monoty::MonoSubst`], which is what an instance of
+/// the mono graph carries. One substitution vocabulary, so an instance's own
+/// bindings drive lowering and the ABI plan directly rather than through a
+/// conversion that could lose or reorder them.
+pub type SpecSubst = crate::monoty::MonoSubst;
 
 /// The root `TypeExpr` a substituted generic resolves to. Nested arguments stay
 /// in [`SpecSubst`] for recursive call specialization; the synthesized root has
@@ -1628,6 +1689,7 @@ pub(crate) fn compute_call_spec(
     func: FuncRef,
     enclosing: &SpecSubst,
     target: bone_semantic::hir::FnBackend,
+    total: bool,
 ) -> Result<Option<(SpecKey, SpecSubst)>, CompilerError> {
     let f = &ws.module(func.module).functions[func.func];
     if f.generics.is_empty() {
@@ -1656,10 +1718,15 @@ pub(crate) fn compute_call_spec(
             ),
         ));
     };
-    let Some((key, subst)) = compute_spec_from_bindings(ws, inf, func, bindings, enclosing)?
+    let Some((key, subst)) = compute_spec_from_bindings(ws, inf, func, bindings, enclosing, total)?
     else {
         return Ok(None);
     };
+    // A total-specialization target has no shared body to decline to, so the
+    // optimization gates below do not apply to it.
+    if total {
+        return Ok(Some((key, subst)));
+    }
     // `@inline`/`@pure` is the OPT-IN gate: those callees specialize for speed, and
     // whether it happens is the author's call.
     //
@@ -1834,6 +1901,7 @@ pub(crate) fn compute_spec_from_bindings(
     func: FuncRef,
     bindings: &[TyId],
     enclosing: &SpecSubst,
+    total: bool,
 ) -> Result<Option<(SpecKey, SpecSubst)>, CompilerError> {
     let f = &ws.module(func.module).functions[func.func];
     if bindings.len() != f.generics.len() {
@@ -1848,7 +1916,7 @@ pub(crate) fn compute_spec_from_bindings(
         ));
     }
     let mut key: SpecKey = Vec::with_capacity(bindings.len());
-    let mut subst = SpecSubst::new();
+    let mut subst = SpecSubst::default();
     let mut any_value = false;
     let mut complete = true;
     for (g, b) in f.generics.iter().zip(bindings) {
@@ -1872,6 +1940,13 @@ pub(crate) fn compute_spec_from_bindings(
                 complete = false;
             }
         }
+    }
+    // A target with NO shared generic body needs every complete key: there is
+    // no boxed representation on a GPU for an unreified `T` to take, so a
+    // partial answer is not a slower lowering, it is no lowering. Same rule the
+    // Stage-0e ablation applies workspace-wide, asked per lowering.
+    if total {
+        return Ok(complete.then_some((key, subst)));
     }
     // Stage-0e: `any_value` is the conditional trigger -- specialize only when
     // some binding names a value struct. Totality has no such condition, so the
@@ -1913,7 +1988,7 @@ pub fn spec_key_from_next_generics(
         let Some(bound) = next_generics.get(&var).copied() else { return Ok(None) };
         bindings.push(bound);
     }
-    Ok(compute_spec_from_bindings(ws, inf, func, &bindings, enclosing)?.map(|(key, _)| key))
+    Ok(compute_spec_from_bindings(ws, inf, func, &bindings, enclosing, false)?.map(|(key, _)| key))
 }
 
 /// [`ablation_decline`] for the for-protocol `next` witness, whose bindings come
@@ -1963,7 +2038,7 @@ pub(crate) fn ablation_next_decline(
 /// empty subst (the shared snapshot).
 pub fn spec_subst_from_key(ws: &Workspace, fref: FuncRef, key: &SpecKey) -> SpecSubst {
     let f = &ws.module(fref.module).functions[fref.func];
-    let mut subst = SpecSubst::new();
+    let mut subst = SpecSubst::default();
     for (g, ty) in f.generics.iter().zip(key) {
         if let (Some(TypeExpr::Generic(var, _)), Some(reified)) = (static_ty(ws, *g), ty) {
             subst.insert(var, reified.clone());

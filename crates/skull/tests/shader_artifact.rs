@@ -433,20 +433,16 @@ fn main() { let key = rock_shader(foreign_frag) }
     }
 }
 
-/// **A declaration-based check may not answer for a generic instance, and that
-/// is a property of the whole PROGRAM, not just its entry.**
+/// **A generic helper is CHECKED and EMITTED under its instantiation, and its
+/// program joins the validated denominator.**
 ///
-/// GLSL lowering takes no substitution, so a generic declaration is not the
-/// shape any artifact packages. `check_entry_profile` lowers and walks the
-/// entry's HELPERS as well as the entry, so a concrete entry over a generic
-/// helper still produces a verdict about a body no instance has. The program is
-/// recorded unchecked and the pass is not run.
-///
-/// The generic helper is called at TWO different types so it cannot be read as
-/// an inlineable one-off, and the fixture carries a NEIGHBOURING fully concrete
-/// program so the exclusion is not simply "nothing is checked".
+/// GLSL lowers each instance under the substitution the call site recorded, so
+/// `passthrough<float>` and `passthrough<int>` are two tier-0 bodies rather
+/// than one un-answerable declaration. The generic population is asserted
+/// first: this fixture calls the helper at TWO types under one program, so a
+/// green here cannot be a zero denominator.
 #[test]
-fn a_program_reaching_a_generic_helper_is_not_declaration_validated() {
+fn a_program_reaching_a_generic_helper_is_validated_at_its_instantiations() {
     let ws = check(
         r#"
 @pure fn passthrough<T>(x: T) -> T { return x }
@@ -481,67 +477,48 @@ fn main() {
     )
     .expect("shader artifact");
 
-    // The helper instance is recorded unchecked.
-    let unchecked = names(&ws, view.unchecked_generic.iter().cloned());
-    assert!(
-        unchecked.iter().any(|n| n == "passthrough"),
-        "a generic helper instance was not recorded as unchecked: {unchecked:?}"
+    // THE DENOMINATOR. Two packaged instances of one generic declaration, both
+    // with a non-empty substitution -- so the checked count below is measured
+    // over a real generic population and not over an empty one.
+    let generic_insts: Vec<&skull::instance_graph::Instance> = view
+        .packaged()
+        .filter(|i| {
+            ws.module(i.func.module).functions[i.func.func].name.as_str() == "passthrough"
+        })
+        .collect();
+    assert_eq!(
+        generic_insts.len(),
+        2,
+        "the fixture lost its generic population: {:?}",
+        names(&ws, view.packaged().cloned())
     );
-    // CONTROL: the concrete helper is NOT in that bucket, so it is not simply
-    // collecting every retained instance.
-    assert!(
-        !unchecked.iter().any(|n| n == "concrete_helper"),
-        "a concrete instance was recorded as unchecked: {unchecked:?}"
-    );
+    for i in &generic_insts {
+        assert!(
+            !g.substitutions.get(i).expect("a recorded substitution").is_empty(),
+            "a `passthrough` instance carries an EMPTY substitution, so it is not generic"
+        );
+    }
 
-    // The PROGRAM that reaches it is excluded from the checked denominator, and
-    // the partition accounts for every registered program.
+    // Both programs are validated: nothing is excluded, and the partition still
+    // accounts for every registered program.
     assert_eq!(view.programs, 2);
     assert_eq!(
-        view.entries_checked, 1,
-        "the generic-helper program was declaration-validated anyway"
+        view.entries_checked, 2,
+        "the generic-helper program was excluded rather than checked at its instantiations"
     );
-    assert_eq!(view.programs_unchecked, 1);
+    assert_eq!(view.programs_unchecked, 0);
     assert_eq!(view.entries_checked + view.programs_unchecked, view.programs);
-
-    // Nothing was recorded FOR it: no rejection, and no agreement/disagreement
-    // either -- a pass that cannot answer produces neither verdict.
     assert!(
         view.rejections.is_empty(),
-        "a program that was never checked produced a rejection: {:?}",
+        "a concretely instantiated generic helper was rejected: {:?}",
         view.render_rejections(&ws)
     );
-    assert!(
-        view.disagreements.is_empty(),
-        "a program that was never checked produced a disagreement: {:?}",
-        view.disagreements
-    );
+    assert!(view.disagreements.is_empty(), "{:?}", view.disagreements);
+    assert!(view.missing_substitutions.is_empty());
 
-    // ...and the NEIGHBOURING fully concrete program still is checked: both
-    // entries are packaged, and the concrete one is the single checked program.
     let root_names = names(&ws, view.roots.iter().cloned());
     assert!(root_names.iter().any(|n| n == "generic_frag"), "{root_names:?}");
     assert!(root_names.iter().any(|n| n == "concrete_frag"), "{root_names:?}");
-
-    // CONTROL: with the generic program removed, the remaining one is checked,
-    // so `entries_checked == 1` above is the concrete program and not an
-    // accident of counting.
-    let concrete_only: Vec<ShaderProgram> = programs
-        .iter()
-        .copied()
-        .filter(|p| {
-            ws.module(p.frag.module).functions[p.frag.func].name.as_str() == "concrete_frag"
-        })
-        .collect();
-    let solo = shader_artifact::realize_shader(
-        &ws,
-        &g,
-        &ShaderArtifactRequest { spec: LUAJIT_DESKTOP, programs: &concrete_only },
-    )
-    .expect("shader artifact");
-    assert_eq!(solo.entries_checked, 1);
-    assert_eq!(solo.programs_unchecked, 0);
-    assert!(solo.unchecked_generic.is_empty(), "{:?}", names(&ws, solo.unchecked_generic.iter().cloned()));
 }
 
 /// **A missing substitution record fails CLOSED.** `reach` records a
@@ -592,10 +569,6 @@ fn a_missing_substitution_record_is_a_finding_not_a_concrete_shape() {
         after.missing_substitutions.contains(&entry),
         "the missing record produced no finding: {:?}",
         names(&ws, after.missing_substitutions.iter().cloned())
-    );
-    assert!(
-        !after.unchecked_generic.contains(&entry),
-        "a missing record was reported as a known-generic instance"
     );
 }
 

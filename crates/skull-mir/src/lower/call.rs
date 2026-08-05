@@ -440,7 +440,15 @@ impl Builder<'_> {
         func: FuncRef,
     ) -> Result<Option<(SpecKey, SpecSubst)>, CompilerError> {
         let Some(inf) = self.inf else { return Ok(None) };
-        let spec = compute_call_spec(self.ws, inf, e, func, self.spec_subst, self.scx.target)?;
+        let spec = compute_call_spec(
+            self.ws,
+            inf,
+            e,
+            func,
+            self.spec_subst,
+            self.scx.target,
+            self.scx.total_specialization(),
+        )?;
         // Stage-0e census. Recorded HERE rather than inside `compute_call_spec`
         // because the classification needs no context and the record needs the
         // caller's name and the call's span, which only the Builder has.
@@ -516,7 +524,11 @@ impl Builder<'_> {
         func: FuncRef,
     ) -> Result<Option<(SpecKey, SpecSubst)>, CompilerError> {
         Ok(self.call_spec(e, func)?.filter(|(k, _)| {
-            !self.in_unspliced_ctx || spec_key_has_target_storage(self.ws, k, self.scx.target)
+            // A total-specialization target has no shared body to fall back to,
+            // so the unspliced-context narrowing does not apply.
+            self.scx.total_specialization()
+                || !self.in_unspliced_ctx
+                || spec_key_has_target_storage(self.ws, k, self.scx.target)
         }))
     }
 
@@ -540,7 +552,7 @@ impl Builder<'_> {
         func: FuncRef,
     ) -> Result<Option<TupleRetShape>, CompilerError> {
         let spec = self.call_spec_for_target(e, func)?;
-        let empty = SpecSubst::new();
+        let empty = SpecSubst::default();
         let subst = spec.as_ref().map_or(&empty, |(_, s)| s);
         let Some(ret) = self.ws.module(func.module).functions[func.func].return_ty else {
             return Ok(None);
@@ -637,12 +649,12 @@ impl Builder<'_> {
         {
             return Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))));
         }
-        let empty_subst = SpecSubst::new();
+        let empty_subst = SpecSubst::default();
         let subst = spec.as_ref().map_or(&empty_subst, |(_, s)| s);
         let scalar_abi = fn_scalar_abi_spec(self.ws, self.scx, func, subst);
         let Some(scalar_abi) = scalar_abi else {
             self.reject_nobox_boxed_call_args(func, arg_idxs)?;
-            self.reject_column_container_opaque_args(func, arg_idxs)?;
+            self.reject_column_container_opaque_slots(e, func)?;
             let args = if any_named {
                 self.reorder_named_args(arg_idxs, func)?
             } else {

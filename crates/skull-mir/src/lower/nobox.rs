@@ -106,40 +106,268 @@ impl Builder<'_> {
     /// column-eligible on the same terms and fails identically. The element type
     /// is the discriminant -- a boxed `[int]` keeps `_data` and is fine.
     ///
-    /// Keyed on the DECLARED PARAM type, not the argument's. A param spelled
-    /// `[T]` states that the body expects the vec representation, and a column
-    /// vec is not one. A param spelled `any` states the opposite -- it claims no
-    /// representation at all -- and the column-introspection probes that read
-    /// `v["@vec"]` deliberately take `any`, so keying on the argument would
-    /// reject the bodies that handle columns CORRECTLY.
-    pub(crate) fn reject_column_container_opaque_args(
+    /// Keyed on the DECLARED SEMANTIC param type under the concrete
+    /// substitution, not the argument's (`docs/boundary-contracts.md` 2.4). A
+    /// param spelled `[T]` or `Map<K, V>` states that the body expects that
+    /// container's boxed representation, and a column-stored one is not it. A
+    /// param spelled `any` states the opposite -- it claims no representation at
+    /// all -- and the column-introspection probes that read `v["@vec"]`
+    /// deliberately take `any`, so keying on the argument would reject the
+    /// bodies that handle columns CORRECTLY.
+    ///
+    /// A method's IMPLICIT receiver is such a declared type: it is `param_decls`
+    /// slot 0 and carries the semantic `Map<K, V>` though the source writes no
+    /// type for it. Reading the written syntax instead would miss every method.
+    ///
+    /// The intercepted stdlib names are exempt BY CONSTRUCTION, not by an
+    /// exception here: `lower_call` replaces them and returns before this check
+    /// is reached.
+    pub(crate) fn reject_column_container_opaque_slots(
         &self,
+        e: Idx<Expr>,
         func: FuncRef,
-        args: &[Idx<Expr>],
     ) -> Result<(), CompilerError> {
         let callee = &self.ws.module(func.module).functions[func.func];
         if callee.inline_body.is_none() && !callee.is_extern {
             return Ok(());
         }
         let name = callee.name;
-        for (i, &arg) in args.iter().enumerate() {
-            let Some(pty) = self.param_ty(func, i) else { continue };
-            let Some(TypeExpr::App { ctor: TypeCtor::Array, .. }) = self.ty_node(pty) else {
+        let params = callee.param_decls.len();
+        let ret = callee.return_ty;
+        for i in 0..params {
+            // `@repr(opaque)` is keyed to the DECLARED index, so it follows the
+            // signature rather than the call's argument order. PER PARAMETER: a
+            // waiver on one must not disarm the call, which is what
+            // `vec_push(sink, @repr(opaque) item)` needs.
+            if self.param_is_repr_opaque(func, i) {
+                continue;
+            }
+            let Some(ty) = self.param_ty(func, i) else { continue };
+            if let Some((rendered, physical)) = self.declared_slot_hazard(e, func, ty)? {
+                return Err(CompilerError::new_with_label(
+                    self.body.expr_spans[e],
+                    format!(
+                        "column-stored `{rendered}` cannot cross opaque body boundary \
+                         `{name}` (an inline/extern body sees per-leaf columns, not \
+                         {physical}; take `any` if the body reads the column layout \
+                         itself, else use a boxed element type)"
+                    ),
+                ));
+            }
+        }
+        // The constructor mirror: an opaque body whose RETURN is a container
+        // builds that physical form BY HAND, so it can mint boxed storage for a
+        // column-planned result.
+        let Some(ret) = ret else { return Ok(()) };
+        let Some((rendered, physical)) = self.declared_slot_hazard(e, func, ret)? else {
+            return Ok(());
+        };
+        Err(CompilerError::new_with_label(
+            self.body.expr_spans[e],
+            format!(
+                "opaque body boundary `{name}` cannot BUILD column-stored \
+                 `{rendered}` (an inline/extern body hand-builds {physical}, which \
+                 a column-planned result does not have; return `any` if the body \
+                 builds the column layout itself, else use a boxed element type)"
+            ),
+        ))
+    }
+
+    /// The hazard a callee's DECLARED type carries at this call, or `None`.
+    ///
+    /// It converts the declared type to a CONCRETE one and asks the same
+    /// storage oracles the routing asks (`vec_column_elem_mono`,
+    /// `map_column_value_mono`, `opaque_container_hazard`). It never walks the
+    /// argument list: arguments are in the CALLER's order, so pairing them with
+    /// parameter indices is wrong the moment a call names its arguments, and a
+    /// defaulted or spread slot has no argument expression to pair with at all.
+    ///
+    /// It goes through `MonoTy` rather than walking `TypeExpr`, because that is
+    /// what carries NULLABILITY: a generic bound to `E?` substitutes to its
+    /// PAYLOAD (a `Nullable` node needs an arena index), and an unmarked
+    /// nullable element is a BOXED vec while its non-nullable twin is columns
+    /// (`nullable_generic_binding_sroa`).
+    fn declared_slot_hazard(
+        &self,
+        e: Idx<Expr>,
+        func: FuncRef,
+        ty: TyId,
+    ) -> Result<Option<(String, &'static str)>, CompilerError> {
+        let Some(mono) = self.declared_slot_mono(e, func, ty)? else { return Ok(None) };
+        use crate::lower::shape::{map_column_value_mono, vec_column_elem_mono};
+        if let Some(el) = vec_column_elem_mono(self.ws, self.scx.target, &mono) {
+            return Ok(Some((format!("[{}]", el.name), "`_data`")));
+        }
+        if let Some(el) = map_column_value_mono(self.ws, self.scx.target, &mono) {
+            return Ok(Some((format!("Map<_, {}>", el.name), "a bare key table")));
+        }
+        let crate::monoty::MonoTy::App { ctor: crate::monoty::MonoCtor::Nominal(c), params } =
+            &mono
+        else {
+            return Ok(None);
+        };
+        if !crate::lower::shape::is_nominal_container(*c) {
+            return Ok(None);
+        }
+        let [only] = params.as_slice() else { return Ok(None) };
+        let (payload, nullable) = only.peel_nullable();
+        let Some(elem) = payload.nominal() else { return Ok(None) };
+        Ok(
+            crate::lower::shape::opaque_container_hazard(
+                self.ws,
+                self.scx.target,
+                *c,
+                elem,
+                nullable,
+            )
+            .map(|physical| (format!("{c}<{elem}>"), physical)),
+        )
+    }
+
+    /// A callee-declared type as a CONCRETE type at this call site.
+    ///
+    /// Two substitutions compose. The callee's own generics bind from bone's
+    /// `call_generic_bindings`; the types they bind TO belong to the caller and
+    /// may name the CALLER's generics, which only the enclosing `SpecSubst`
+    /// resolves. So each binding is converted under the enclosing substitution
+    /// first, and the declared slot is then converted under the result.
+    ///
+    /// The substitution is deliberately PARTIAL. A generic the call never pins
+    /// is skipped rather than abandoning the call, because it may have nothing
+    /// to do with the slot being asked about -- `fn probe<T, U>(sink: [T])`
+    /// determines `sink` whether or not `U` is ever bound, and abandoning the
+    /// call let an unrelated variable disarm the rule.
+    ///
+    /// Two reasons are out of scope BY DECISION, matching `concrete_ty` arm for
+    /// arm so the two cannot disagree: `UnboundGeneric` is the shared generic
+    /// body Stage 2 owns, and `UnresolvedInfer` is the S 0h decided rejection
+    /// the instance graph already records and Stage 3 raises. The rest --
+    /// recovery poison, a `TyId` naming no node, a cyclic substitution chain,
+    /// missing inference -- refuse the call with its span rather than picking a
+    /// representation from a failure.
+    fn declared_slot_mono(
+        &self,
+        e: Idx<Expr>,
+        func: FuncRef,
+        ty: TyId,
+    ) -> Result<Option<crate::monoty::MonoTy>, CompilerError> {
+        use crate::monoty::MonoTyReason as R;
+        let f = &self.ws.module(func.module).functions[func.func];
+        let refuse = |what: String| {
+            CompilerError::new_with_label(
+                self.body.expr_spans[e],
+                format!(
+                    "cannot decide the representation contract of opaque callee \
+                     `{}`: {what}. The call is refused rather than admitted.",
+                    f.name
+                ),
+            )
+        };
+        let inf = self
+            .inf
+            .ok_or_else(|| refuse("this body has no inference".into()))?;
+        let mut subst = self.spec_subst.clone();
+        // Why a generic could NOT be converted, kept per name rather than acted
+        // on here: a generic the slot does not mention is none of its business,
+        // and rejecting in this loop would let an unrelated variable disarm the
+        // rule. The reason is consulted only if the slot turns out to need it.
+        let mut unconverted: Vec<(Ustr, &'static str)> = Vec::new();
+        for (i, g) in f.generics.iter().enumerate() {
+            let Some(TypeExpr::Generic(var, name)) = self.raw_ty_node(*g) else { continue };
+            let Some(bound) = self.callee_binding_at(e, func, i)? else {
+                unconverted.push((name, "no recorded binding"));
                 continue;
             };
-            let Some(elem) = self.vec_column_elem_of(arg)? else { continue };
-            return Err(CompilerError::new_with_label(
-                self.body.expr_spans[arg],
-                format!(
-                    "column-stored `[{}]` cannot cross opaque body boundary `{name}` \
-                     (an inline/extern body has no `_data`; take `any` if the body \
-                     reads the column layout itself, else use a boxed element type)",
-                    elem.name
-                ),
-            ));
+            match crate::monoty::convert(self.ws, inf, bound, &self.spec_subst) {
+                Ok(m) => {
+                    subst.insert(var, m);
+                }
+                // `UnresolvedInfer` is the S 0h DECIDED rejection (a type
+                // argument no constraint reaches), already recorded by the
+                // instance graph as `UnconstrainedTypeVar` and landing with
+                // Stage 3. Raising it here too would reject it twice on two
+                // schedules -- measured: `tests/vec_sort_test.rock`.
+                // `concrete_ty` answers `None` for it for the same reason.
+                Err(R::UnboundGeneric(_)) | Err(R::UnresolvedInfer(_)) => {}
+                Err(r) => unconverted.push((name, r.bucket())),
+            }
         }
-        Ok(())
+        match crate::monoty::convert(self.ws, inf, ty, &subst) {
+            Ok(m) => Ok(Some(m)),
+            Err(R::UnboundGeneric(missing)) => {
+                // The slot needs a generic that did not convert. If it failed for
+                // a reason other than being unbound, that reason is the answer --
+                // reporting "out of scope" here would hide unfinished inference
+                // behind the Stage-2 exemption.
+                match unconverted.iter().find(|(n, _)| *n == missing) {
+                    Some((_, why)) => Err(refuse(format!(
+                        "the slot needs generic `{missing}`, which resolves to {why}"
+                    ))),
+                    // Genuinely still generic: the shared generic body, which
+                    // Stage 2 owns and this rule does not answer for.
+                    None => Ok(None),
+                }
+            }
+            Err(R::UnresolvedInfer(_)) => Ok(None),
+            Err(r) => Err(refuse(format!("the slot resolves to {}", r.bucket()))),
+        }
     }
+
+    /// What this call binds a CALLEE generic to. Fails CLOSED: a generic whose
+    /// binding cannot be resolved is a slot whose representation is unknown,
+    /// and admitting it is how the silent wrong answer gets back in.
+    fn callee_binding_at(
+        &self,
+        e: Idx<Expr>,
+        func: FuncRef,
+        at: usize,
+    ) -> Result<Option<TyId>, CompilerError> {
+        let f = &self.ws.module(func.module).functions[func.func];
+        let refuse = |what: String| {
+            CompilerError::new_with_label(
+                self.body.expr_spans[e],
+                format!(
+                    "internal: cannot resolve a generic of opaque callee `{}`: {what}. \
+                     Its representation contract cannot be checked, so the call is \
+                     refused rather than admitted.",
+                    f.name
+                ),
+            )
+        };
+        let inf = self.inf.ok_or_else(|| refuse("this body has no inference".into()))?;
+        let Some(bindings) = inf.call_generic_bindings.get(&e) else {
+            // Not every opaque callee is generic; only a generic one owes a
+            // binding list. A non-generic callee reaching here has no `var` to
+            // resolve in the first place.
+            return if f.generics.is_empty() {
+                Ok(None)
+            } else {
+                Err(refuse("inference recorded no generic bindings for this call".into()))
+            };
+        };
+        if bindings.len() != f.generics.len() {
+            return Err(refuse(format!(
+                "the call supplied {} binding(s) for {} declared generic(s)",
+                bindings.len(),
+                f.generics.len()
+            )));
+        }
+        Ok(bindings.get(at).copied())
+    }
+
+    /// Whether parameter `i` of `func` carries the `@repr(opaque)` contract.
+    ///
+    /// Read off `ParamDecl::annotations`, the declaration -- never off the
+    /// call. The registry (`bone_core::annotations`) has already checked the
+    /// kind and that the enclosing fn is an opaque boundary, so reaching here
+    /// with the name present means the contract is valid.
+    fn param_is_repr_opaque(&self, func: FuncRef, i: usize) -> bool {
+        self.ws.module(func.module).functions[func.func]
+            .param_decls
+            .get(i)
+            .is_some_and(|pd| pd.annotations.iter().any(|a| a.name.name == "repr"))
+    }
+
 
     /// A fn taken BY VALUE must have the ABI an indirect caller can derive.
     ///
@@ -417,7 +645,7 @@ impl Builder<'_> {
             let Some(overloads) = self.ws.functions_by_name.get(name) else { continue };
             let incompatible = overloads.iter().any(|(mid, fid)| {
                 let fref = FuncRef { module: *mid, func: *fid };
-                let expected = fn_nobox_abi_spec(self.ws, fref, &SpecSubst::new());
+                let expected = fn_nobox_abi_spec(self.ws, fref, &SpecSubst::default());
                 expected.is_some() && fn_scalar_abi(self.ws, self.scx, fref) != expected
             });
             if incompatible {

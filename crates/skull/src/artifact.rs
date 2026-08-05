@@ -408,10 +408,6 @@ pub struct ArtifactCensus {
     pub foreign_bodies: usize,
     pub multi_lane_publishers: usize,
     pub widest_result_lanes: usize,
-    /// Foreign bodies whose result wire the declaration-based oracle cannot
-    /// state. The denominator's other half: `foreign_bodies` counts only what
-    /// was actually answered.
-    pub lanes_unknown: usize,
     /// Retained instances with no substitution record in the shared graph. An
     /// invariant finding; 0 is the only acceptable value.
     pub missing_substitutions: usize,
@@ -457,20 +453,18 @@ pub struct ArtifactView {
     /// retains a multi-lane `inline(js)` body states the lane count here rather
     /// than leaving emission to read it out of the body text.
     ///
-    /// Derived from `skull_mir::lower::result_lane_count`, the ABI policy every
-    /// definition and call site already reads.
+    /// Derived from `skull_mir::lower::BackendFnAbiPlan`, built under the
+    /// instance's own substitution -- the ABI policy every definition and call
+    /// site already reads, asked of the shape this artifact actually carries.
     pub publisher_lanes: BTreeMap<Instance, usize>,
-    /// Retained foreign bodies whose lanes the DECLARATION-based oracle cannot
-    /// answer for: their substitution is not empty, so the declared return is
-    /// not the shape this artifact carries. Reported, never guessed.
-    pub publisher_lanes_unknown: BTreeSet<Instance>,
     /// **An invariant finding, not an unknown.** Retained instances the shared
     /// graph holds no substitution record for at all. `reach` records one for
     /// every instance it reaches, roots included, so an absent record means a
     /// producer bypassed the recorder -- and until it is explained, nothing may
-    /// read the declaration as the instance's shape. Kept apart from
-    /// `publisher_lanes_unknown` because "generic, so the declaration cannot
-    /// answer" and "the graph is incomplete" are different findings.
+    /// read a shape for the instance at all. This is the ONLY way a retained
+    /// foreign body can go without a stated wire: there is no "generic, so the
+    /// declaration cannot answer" population any more, because the width is
+    /// built from the instance's substitution rather than from the declaration.
     pub missing_substitutions: BTreeSet<Instance>,
     /// The shared population this view was taken over -- the denominator.
     pub shared_instances: usize,
@@ -492,7 +486,6 @@ impl ArtifactView {
             && self.inline_deps == other.inline_deps
             && self.unresolved_inline_deps == other.unresolved_inline_deps
             && self.publisher_lanes == other.publisher_lanes
-            && self.publisher_lanes_unknown == other.publisher_lanes_unknown
             && self.missing_substitutions == other.missing_substitutions
             && self.shared_instances == other.shared_instances
             && self.deferred == other.deferred
@@ -537,7 +530,6 @@ impl ArtifactView {
             foreign_bodies: self.publisher_lanes.len(),
             multi_lane_publishers: self.publisher_lanes.values().filter(|n| **n > 1).count(),
             widest_result_lanes: self.publisher_lanes.values().copied().max().unwrap_or(0),
-            lanes_unknown: self.publisher_lanes_unknown.len(),
             missing_substitutions: self.missing_substitutions.len(),
             deferred: self.deferred.clone(),
             ..Default::default()
@@ -1009,31 +1001,25 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         .execution
         .backend
         .map(|b| skull_mir::lower::ScalarCtx::new(ws).with_target(b));
-    // ...and only of an instance whose substitution is EMPTY. The oracle
-    // answers for the DECLARED signature, so a generic boundary's lanes are not
-    // knowable from its declaration -- recorded as unknown rather than answered
-    // with the wrong shape. There is no corpus population today (0 corpus-wide);
-    // Option C makes generic boundaries live, and this is where the instance
-    // substitution has to arrive.
+    // ...under THAT INSTANCE's own substitution, which is what makes the width
+    // a property of the instance and not of the declaration: `-> T` is one
+    // boxed slot on the declaration and two lanes at `T = (bool, float)`, and
+    // `publisher_lanes` is keyed by instance so both answers coexist.
+    //
+    // The only thing that can leave an instance unanswered is the graph having
+    // no record at all -- an invariant finding, below. There is no "generic, so
+    // unknown" arm to be in.
     let mut publisher_lanes: BTreeMap<Instance, usize> = BTreeMap::new();
-    let mut publisher_lanes_unknown: BTreeSet<Instance> = BTreeSet::new();
     if let Some(scx) = &scx {
         for (i, r) in &realization {
             if !matches!(r.kind, Realization::ForeignBody(BoundaryClass::InlineBody)) {
                 continue;
             }
-            match g.concreteness(i) {
-                Concreteness::Concrete => {
-                    publisher_lanes
-                        .insert(i.clone(), skull_mir::lower::result_lane_count(ws, scx, r.decl));
-                }
-                // Generic OR missing: the declaration is not known to be the
-                // shape, so no width is stated. The two are told apart by
-                // `missing_substitutions` below rather than by guessing here.
-                Concreteness::Generic | Concreteness::Missing => {
-                    publisher_lanes_unknown.insert(i.clone());
-                }
-            }
+            let Some(subst) = g.substitutions.get(i) else { continue };
+            publisher_lanes.insert(
+                i.clone(),
+                skull_mir::lower::BackendFnAbiPlan::build(ws, scx, r.decl, subst).result_lanes,
+            );
         }
     }
 
@@ -1050,7 +1036,6 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     ArtifactView {
         shared_instances: g.instances.len(),
         publisher_lanes,
-        publisher_lanes_unknown,
         missing_substitutions,
         // An execution-axis question too: every obligation it names is about
         // memory, coroutines, widths or foreign symbols. A shader-derived

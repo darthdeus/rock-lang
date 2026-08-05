@@ -29,10 +29,13 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use skull_codegen_lua::mangle_fn;
 use skull_mir::cfg::reverse_postorder;
 use skull_mir::gpu_layout::{
-    AttrKind, SamplerKind, UniformBlockPlan, WireKind, texture_slots, uniform_block, vertex_attrs,
+    ArrayMemberDecl, AttrKind, SamplerKind, UniformArrayBlockPlan, UniformBlockPlan, WireKind,
+    texture_slots, uniform_array_block, uniform_block, vertex_attrs,
 };
 use skull_mir::intrinsics::{Emission, IntrinsicEntry, IntrinsicTable};
-use skull_mir::lower::{lower_function, ScalarCtx};
+use skull_mir::lower::{lower_function_spec, spec_subst_from_key, ScalarCtx, SpecKey, SpecSubst};
+use skull_mir::mangle::spec_fn_name;
+use skull_mir::monoty::{MonoCtor, MonoTy};
 use skull_mir::mir::*;
 use skull_parser::CompilerError;
 use structure::{LoopRegion, Structure};
@@ -101,23 +104,67 @@ fn ty_expr(ws: &Workspace, ty: TyId) -> Option<TypeExpr> {
     }
 }
 
-/// Render a declared Rock type to its tier-0 GLSL type, or reject.
-fn glsl_ty(ws: &Workspace, ty: TyId, span: Span, what: &str) -> Result<GlslTy, CompilerError> {
+/// The tier-0 GLSL type of a nominal, or `None`.
+fn nominal_glsl_ty(n: &str) -> Option<GlslTy> {
+    match n {
+        "Vec2" => Some(GlslTy::Vec2),
+        "Vec3" => Some(GlslTy::Vec3),
+        "Vec4" => Some(GlslTy::Vec4),
+        "Bvec3" => Some(GlslTy::Bvec3),
+        "Mat4" => Some(GlslTy::Mat4),
+        "Sampler2D" => Some(GlslTy::Sampler2D),
+        "ISampler2D" => Some(GlslTy::ISampler2D),
+        _ => None,
+    }
+}
+
+/// The tier-0 GLSL type of a concrete logical type -- the shape a generic is
+/// BOUND to at the instance being emitted. Same tier-0 admission as the
+/// declared-type path, asked of `MonoTy` instead of `TypeExpr`.
+fn mono_glsl_ty(t: &MonoTy) -> Option<GlslTy> {
+    match t {
+        MonoTy::Float => Some(GlslTy::Float),
+        MonoTy::Int => Some(GlslTy::Int),
+        MonoTy::Bool => Some(GlslTy::Bool),
+        MonoTy::App { ctor: MonoCtor::Nominal(n), .. } => nominal_glsl_ty(n.as_str()),
+        _ => None,
+    }
+}
+
+/// Render a Rock type to its tier-0 GLSL type UNDER `subst`, or reject.
+///
+/// A declared `T` has no GLSL type; the instance's binding for `T` does. This
+/// is why the same helper is tier 0 at `T = float` and rejected at `T = string`
+/// -- a verdict about the declaration is a verdict about neither.
+fn glsl_ty(
+    ws: &Workspace,
+    subst: &SpecSubst,
+    ty: TyId,
+    span: Span,
+    what: &str,
+) -> Result<GlslTy, CompilerError> {
+    let reject = || {
+        err(span, format!("shader profile: {what} type is not tier 0 (only float/int/bool/Vec2/Vec3/Vec4)"))
+    };
     match ty_expr(ws, ty) {
         Some(TypeExpr::Builtin(BuiltinTy::Float)) => Ok(GlslTy::Float),
         Some(TypeExpr::Builtin(BuiltinTy::Int)) => Ok(GlslTy::Int),
         Some(TypeExpr::Builtin(BuiltinTy::Bool)) => Ok(GlslTy::Bool),
-        Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. }) => match n.as_str() {
-            "Vec2" => Ok(GlslTy::Vec2),
-            "Vec3" => Ok(GlslTy::Vec3),
-            "Vec4" => Ok(GlslTy::Vec4),
-            "Bvec3" => Ok(GlslTy::Bvec3),
-            "Mat4" => Ok(GlslTy::Mat4),
-            "Sampler2D" => Ok(GlslTy::Sampler2D),
-            "ISampler2D" => Ok(GlslTy::ISampler2D),
-            other => Err(err(span, format!("shader profile: {what} type `{other}` is not tier 0 (only float/int/bool/Vec2/Vec3/Vec4)"))),
+        Some(TypeExpr::Generic(var, name)) => match subst.get(&var) {
+            Some(bound) => mono_glsl_ty(bound).ok_or_else(|| {
+                err(span, format!(
+                    "shader profile: {what} type `{name}` is bound to `{}`, which is not tier 0 \
+                     (only float/int/bool/Vec2/Vec3/Vec4)",
+                    bound.render()
+                ))
+            }),
+            None => Err(reject()),
         },
-        _ => Err(err(span, format!("shader profile: {what} type is not tier 0 (only float/int/bool/Vec2/Vec3/Vec4)"))),
+        Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. }) => nominal_glsl_ty(n.as_str())
+            .ok_or_else(|| err(span, format!(
+                "shader profile: {what} type `{n}` is not tier 0 (only float/int/bool/Vec2/Vec3/Vec4)"
+            ))),
+        _ => Err(reject()),
     }
 }
 
@@ -220,15 +267,47 @@ fn render_const_lit(lit: &Lit) -> Option<String> {
 /// has no call stack for it). Unlike the JS policy this walks bare `FuncRef`s --
 /// there is no second node kind and nothing to register per edge, so the leaf
 /// test lives on the node.
+/// **One shader INSTANCE**: a declaration plus the instantiation the caller
+/// reached it at. The reachability node, the body key and the emitted name all
+/// come off this one value, so two instantiations of one generic helper are two
+/// GLSL functions and cannot be confused for one.
+///
+/// An all-`None` key is the non-generic case and keeps the declaration's own
+/// name ([`spec_fn_name`] returns `None` for it), which is what makes a program
+/// with no generics byte-identical to the pre-instance emission.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+struct ShaderInst {
+    fref: FuncRef,
+    key: SpecKey,
+}
+
+impl ShaderInst {
+    /// The declaration's own shape -- an entry, or a helper reached with no
+    /// instantiation.
+    fn plain(fref: FuncRef) -> Self {
+        ShaderInst { fref, key: Vec::new() }
+    }
+
+    fn subst(&self, ws: &Workspace) -> SpecSubst {
+        spec_subst_from_key(ws, self.fref, &self.key)
+    }
+
+    /// What GLSL calls this instance.
+    fn glsl_name(&self, ws: &Workspace) -> String {
+        let f = &ws.module(self.fref.module).functions[self.fref.func];
+        spec_fn_name(ws, f, &self.key).unwrap_or_else(|| mangle_fn(ws, f))
+    }
+}
+
 struct Reach<'a> {
     ws: &'a Workspace,
     scx: &'a ScalarCtx,
-    /// Lowered MIR of every emittable (non-intrinsic) reachable fn, keyed by ref.
-    bodies: HashMap<FuncRef, MirFunc>,
+    /// Lowered MIR of every emittable (non-intrinsic) reachable instance.
+    bodies: HashMap<ShaderInst, MirFunc>,
     /// Where the search starts, and the entry already on the path (see
     /// `initially_in_progress`).
-    seeds: Vec<FuncRef>,
-    entry: Option<FuncRef>,
+    seeds: Vec<ShaderInst>,
+    entry: Option<ShaderInst>,
 }
 
 impl<'a> Reach<'a> {
@@ -236,17 +315,18 @@ impl<'a> Reach<'a> {
         Reach { ws, scx, bodies: HashMap::default(), seeds: Vec::new(), entry: None }
     }
 
-    /// Expand `seeds` and return the emittable fns in post-order (callees before
-    /// callers -- GLSL emits straight from this and has no forward declarations).
-    fn walk(&mut self) -> Result<Vec<FuncRef>, CompilerError> {
+    /// Expand `seeds` and return the emittable instances in post-order (callees
+    /// before callers -- GLSL emits straight from this and has no forward
+    /// declarations).
+    fn walk(&mut self) -> Result<Vec<ShaderInst>, CompilerError> {
         skull_mir::reach::walk(self)
     }
 }
 
 impl skull_mir::reach::ReachPolicy for Reach<'_> {
-    type Node = FuncRef;
+    type Node = ShaderInst;
 
-    fn roots(&mut self) -> Result<Vec<FuncRef>, CompilerError> {
+    fn roots(&mut self) -> Result<Vec<ShaderInst>, CompilerError> {
         Ok(std::mem::take(&mut self.seeds))
     }
 
@@ -254,12 +334,16 @@ impl skull_mir::reach::ReachPolicy for Reach<'_> {
     /// seeds the driver with its callees -- so a callee calling back into the
     /// entry is recursion, and the driver can only see that if the entry counts
     /// as already on the path.
-    fn initially_in_progress(&mut self) -> Vec<FuncRef> {
-        self.entry.into_iter().collect()
+    ///
+    /// Recursion is per INSTANCE: one instantiation of a generic helper reaching
+    /// a DIFFERENT instantiation of itself is a diverging chain, not a cycle,
+    /// and the mono graph classifies it the same way (plan S 7).
+    fn initially_in_progress(&mut self) -> Vec<ShaderInst> {
+        self.entry.clone().into_iter().collect()
     }
 
-    fn is_leaf(&mut self, fref: FuncRef) -> Result<bool, CompilerError> {
-        let f = &self.ws.module(fref.module).functions[fref.func];
+    fn is_leaf(&mut self, inst: ShaderInst) -> Result<bool, CompilerError> {
+        let f = &self.ws.module(inst.fref.module).functions[inst.fref.func];
         // An intrinsic mapping OR a Vec operator is rendered inline at call sites
         // (a native builtin / infix op), never emitted as a GLSL definition, never
         // walked -- so it's a reachability leaf.
@@ -278,40 +362,51 @@ impl skull_mir::reach::ReachPolicy for Reach<'_> {
         Ok(false)
     }
 
-    fn on_cycle(&mut self, fref: FuncRef) -> Result<(), CompilerError> {
-        let f = &self.ws.module(fref.module).functions[fref.func];
+    fn on_cycle(&mut self, inst: ShaderInst) -> Result<(), CompilerError> {
+        let f = &self.ws.module(inst.fref.module).functions[inst.fref.func];
         Err(err(
             f.name_span,
             format!("shader profile: recursion through `{}` is not allowed on GLSL", f.name),
         ))
     }
 
-    fn visit(&mut self, fref: FuncRef) -> Result<Vec<FuncRef>, CompilerError> {
-        let f = &self.ws.module(fref.module).functions[fref.func];
-        // Signature must be tier 0.
-        check_tier0_signature(self.ws, f)?;
+    fn visit(&mut self, inst: ShaderInst) -> Result<Vec<ShaderInst>, CompilerError> {
+        let f = &self.ws.module(inst.fref.module).functions[inst.fref.func];
+        let subst = inst.subst(self.ws);
+        // Signature must be tier 0 UNDER this instantiation.
+        check_tier0_signature_spec(self.ws, &subst, f)?;
         // Lower to MIR (values-first-class) and profile-check the body.
-        let mf = lower_function(self.ws, self.scx, fref.module, fref.func).map_err(|e| {
-            err(f.name_span, format!("shader profile: `{}` cannot lower for GLSL: {}", f.name, e.message))
-        })?;
-        let mut callees: Vec<FuncRef> = Vec::new();
+        let mf = lower_function_spec(self.ws, self.scx, inst.fref.module, inst.fref.func, &subst)
+            .map_err(|e| {
+                err(f.name_span, format!("shader profile: `{}` cannot lower for GLSL: {}", f.name, e.message))
+            })?;
+        let mut callees: Vec<ShaderInst> = Vec::new();
         profile_body(self.ws, f, &mf, &mut callees)?;
-        self.bodies.insert(fref, mf);
+        self.bodies.insert(inst, mf);
         Ok(callees)
     }
 }
 
-/// Reject a signature whose params/return aren't tier 0.
+/// Reject a signature whose params/return aren't tier 0, as DECLARED.
 ///
 /// Public because the mono SHADER ARTIFACT VIEW asks it of what a target
 /// packages: the same function the emission walk runs, so a view cannot admit
-/// a signature emission refuses.
+/// a signature emission refuses. A generic declaration is answered under its
+/// instantiation instead -- see [`check_tier0_signature_spec`].
 pub fn check_tier0_signature(ws: &Workspace, f: &Function) -> Result<(), CompilerError> {
+    check_tier0_signature_spec(ws, &SpecSubst::default(), f)
+}
+
+fn check_tier0_signature_spec(
+    ws: &Workspace,
+    subst: &SpecSubst,
+    f: &Function,
+) -> Result<(), CompilerError> {
     for pd in &f.param_decls {
-        glsl_ty(ws, pd.ty, f.name_span, &format!("parameter `{}`", pd.name))?;
+        glsl_ty(ws, subst, pd.ty, f.name_span, &format!("parameter `{}`", pd.name))?;
     }
     if let Some(rt) = f.return_ty {
-        if glsl_ty(ws, rt, f.name_span, "return")?.is_sampler() {
+        if glsl_ty(ws, subst, rt, f.name_span, "return")?.is_sampler() {
             return Err(err(f.name_span, "shader profile: a sampler cannot be returned (GLSL forbids sampler locals/returns)"));
         }
     }
@@ -319,17 +414,24 @@ pub fn check_tier0_signature(ws: &Workspace, f: &Function) -> Result<(), Compile
 }
 
 /// Walk a fn's MIR, rejecting any non-tier-0 instruction and collecting the
-/// [`FuncRef`]s it calls directly.
+/// INSTANCES it calls directly.
+///
+/// The callee's instantiation is the one lowering already recorded at the call
+/// (`MirFunc::spec_bindings`) -- the same record the Lua and JS backends read,
+/// so GLSL cannot disagree with them about which body a call names.
 fn profile_body(
     ws: &Workspace,
     f: &Function,
     mf: &MirFunc,
-    callees: &mut Vec<FuncRef>,
+    callees: &mut Vec<ShaderInst>,
 ) -> Result<(), CompilerError> {
     let span = f.name_span;
-    for (_, inst) in mf.insts.iter() {
+    for (iid, inst) in mf.insts.iter() {
         match inst {
-            Inst::Call { func, .. } => callees.push(*func),
+            Inst::Call { func, .. } => callees.push(ShaderInst {
+                fref: *func,
+                key: mf.spec_bindings.get(&iid).cloned().unwrap_or_default(),
+            }),
             // A `const` global folds to its literal at the use site; a mutable
             // `global` is runtime state with no GLSL equivalent.
             Inst::Global(name) => {
@@ -605,6 +707,19 @@ struct FnEmit<'a> {
     /// The fn's name span -- body-level emit errors anchor here (MIR insts carry
     /// no spans, so per-expression precision is not available).
     fn_span: Span,
+    /// The INSTANCE being emitted: this body's own generic bindings. Every
+    /// declared type it renders resolves through this, so `T` is `float` here
+    /// and `int` in the sibling instance of the same declaration.
+    subst: SpecSubst,
+}
+
+impl FnEmit<'_> {
+    /// The instantiation the call at `iid` reaches its callee at, exactly as
+    /// lowering recorded it. The callee's own signature types resolve through
+    /// this, and its emitted name comes off the same key.
+    fn callee_inst(&self, iid: Idx<Inst>, func: FuncRef) -> ShaderInst {
+        ShaderInst { fref: func, key: self.f.spec_bindings.get(&iid).cloned().unwrap_or_default() }
+    }
 }
 
 /// A `void main()` entry that destructures its terminal `return <struct
@@ -637,13 +752,13 @@ struct LoopCtx {
     brk: Option<Idx<Block>>,
 }
 
-/// Emit `<ret> <name>(<params>) { <body> }` for one lowered fn.
+/// Emit `<ret> <name>(<params>) { <body> }` for one lowered INSTANCE.
 fn emit_fn_def(
     ws: &Workspace,
-    fref: FuncRef,
+    inst: &ShaderInst,
     mf: &MirFunc,
 ) -> Result<String, CompilerError> {
-    emit_fn_def_with(ws, fref, mf, None)
+    emit_fn_def_with(ws, inst, mf, None)
 }
 
 /// [`emit_fn_def`], optionally in ENTRY mode: the uniform-struct and sampler
@@ -651,10 +766,12 @@ fn emit_fn_def(
 /// uniform globals) and the fn keeps its bare Rock name.
 fn emit_fn_def_with(
     ws: &Workspace,
-    fref: FuncRef,
+    inst: &ShaderInst,
     mf: &MirFunc,
     entry: Option<&EntryShape>,
 ) -> Result<String, CompilerError> {
+    let fref = inst.fref;
+    let subst = inst.subst(ws);
     let f = &ws.module(fref.module).functions[fref.func];
     let emits_main = entry.is_some_and(|s| s.main_out.is_some());
     let name = if emits_main {
@@ -662,7 +779,7 @@ fn emit_fn_def_with(
     } else if entry.is_some() {
         f.name.as_str().to_string()
     } else {
-        mangle_fn(ws, f)
+        inst.glsl_name(ws)
     };
     // A `void main()` entry destructures its returned struct into globals
     // (gl_Position + varyings, or MRT outs) -- no signature return type.
@@ -670,7 +787,7 @@ fn emit_fn_def_with(
         None
     } else {
         match f.return_ty {
-            Some(rt) => Some(glsl_ty(ws, rt, f.name_span, "return")?),
+            Some(rt) => Some(glsl_ty(ws, &subst, rt, f.name_span, "return")?),
             None => None,
         }
     };
@@ -716,6 +833,7 @@ fn emit_fn_def_with(
         folded_bound: HashMap::default(),
         main_out: entry.and_then(|s| s.main_out.clone()),
         fn_span: f.name_span,
+        subst: subst.clone(),
     };
     e.assign_cell_names();
     // Global-base struct params + samplers + uniform arrays are dropped from the
@@ -742,7 +860,7 @@ fn emit_fn_def_with(
         if struct_params.contains(&i) {
             continue;
         }
-        let ty = glsl_ty(ws, f.param_decls[i].ty, f.name_span, "parameter")?;
+        let ty = glsl_ty(ws, &subst, f.param_decls[i].ty, f.name_span, "parameter")?;
         e.cell_ty.insert(c, ty);
     }
     e.compute_cell_types();
@@ -828,7 +946,7 @@ impl FnEmit<'_> {
                 continue;
             }
             if let Some(ty) = cell.ty {
-                if let Ok(g) = glsl_ty(self.ws, ty, Span::default(), "local") {
+                if let Ok(g) = glsl_ty(self.ws, &self.subst, ty, Span::default(), "local") {
                     self.cell_ty.insert(cid, g);
                 }
             }
@@ -1066,7 +1184,8 @@ impl FnEmit<'_> {
             }
             Inst::Call { func, args } => {
                 let cf = &self.ws.module(func.module).functions[func.func];
-                match cf.return_ty.and_then(|rt| glsl_ty(self.ws, rt, cf.name_span, "return").ok()) {
+                let csub = self.callee_inst(iid, *func).subst(self.ws);
+                match cf.return_ty.and_then(|rt| glsl_ty(self.ws, &csub, rt, cf.name_span, "return").ok()) {
                     Some(t) => t,
                     // Generic-return genType builtins (min<T>/max<T>/clamp/abs):
                     // GLSL's result type is the argument type. Load-bearing under
@@ -1220,20 +1339,31 @@ impl FnEmit<'_> {
                     fields.iter().map(|(_, v)| self.render_val_t(*v, comp_ty)).collect();
                 format!("{ctor}({})", args?.join(", "))
             }
-            Inst::Call { func, args } => self.render_call(*func, args)?,
+            Inst::Call { func, args } => self.render_call(iid, *func, args)?,
             other => return Err(err(self.span(), format!("shader profile: cannot render {} as a GLSL expression", inst_kind(other)))),
         })
     }
 
-    fn render_call(&self, func: FuncRef, args: &[Idx<Inst>]) -> Result<String, CompilerError> {
+    /// Render a direct call. `iid` names the call SITE, which is where the
+    /// callee's instantiation is recorded -- both the emitted name and every
+    /// declared param/return type resolve through it, so a specialized callee
+    /// and its definition cannot disagree.
+    fn render_call(
+        &self,
+        iid: Idx<Inst>,
+        func: FuncRef,
+        args: &[Idx<Inst>],
+    ) -> Result<String, CompilerError> {
         let cf = &self.ws.module(func.module).functions[func.func];
+        let callee = self.callee_inst(iid, func);
+        let csub = callee.subst(self.ws);
         let name = cf.name.as_str();
         // A non-scalar `__op_*` call is a Vec operator -> native infix. An int
         // operand (`*(Vec2, int)`) is cast to float (GLSL has no vec*int).
         if let Some(sym) = vec_op_symbol(name) {
             if args.len() == 2 {
                 let render_operand = |i: usize, e: &Self| -> Result<String, CompilerError> {
-                    let pt = glsl_ty(e.ws, cf.param_decls[i].ty, cf.name_span, "operand")?;
+                    let pt = glsl_ty(e.ws, &csub, cf.param_decls[i].ty, cf.name_span, "operand")?;
                     let s = e.render_val(args[i])?;
                     Ok(if pt == GlslTy::Int { format!("float({s})") } else { s })
                 };
@@ -1243,7 +1373,7 @@ impl FnEmit<'_> {
         // Args render against the declared param type where it maps to GLSL
         // (a generic param, e.g. `min<T>`, doesn't -- those render plain).
         let arg_t = |i: usize, a: Idx<Inst>, e: &Self| -> Result<String, CompilerError> {
-            match cf.param_decls.get(i).and_then(|p| glsl_ty(e.ws, p.ty, cf.name_span, "arg").ok()) {
+            match cf.param_decls.get(i).and_then(|p| glsl_ty(e.ws, &csub, p.ty, cf.name_span, "arg").ok()) {
                 Some(want) => e.render_val_t(a, want),
                 None => e.render_val(a),
             }
@@ -1256,7 +1386,7 @@ impl FnEmit<'_> {
         if name == "v"
             && cf.param_decls.iter().any(|p| {
                 matches!(
-                    glsl_ty(self.ws, p.ty, cf.name_span, "ctor param").ok(),
+                    glsl_ty(self.ws, &csub, p.ty, cf.name_span, "ctor param").ok(),
                     Some(GlslTy::Vec2 | GlslTy::Vec3 | GlslTy::Vec4)
                 )
             })
@@ -1264,7 +1394,7 @@ impl FnEmit<'_> {
             let n: usize = cf
                 .param_decls
                 .iter()
-                .map(|p| match glsl_ty(self.ws, p.ty, cf.name_span, "ctor param").ok() {
+                .map(|p| match glsl_ty(self.ws, &csub, p.ty, cf.name_span, "ctor param").ok() {
                     Some(GlslTy::Vec2) => 2,
                     Some(GlslTy::Vec3) => 3,
                     Some(GlslTy::Vec4) => 4,
@@ -1293,8 +1423,8 @@ impl FnEmit<'_> {
             }
             return Ok(s);
         }
-        // An emittable user fn -> a plain call to its (mangled) GLSL name.
-        let gname = mangle_fn(self.ws, cf);
+        // An emittable user fn -> a plain call to THIS INSTANCE's GLSL name.
+        let gname = callee.glsl_name(self.ws);
         let rargs: Result<Vec<String>, CompilerError> =
             args.iter().enumerate().map(|(i, a)| arg_t(i, *a, self)).collect();
         Ok(format!("{gname}({})", rargs?.join(", ")))
@@ -1470,7 +1600,7 @@ impl FnEmit<'_> {
                 Inst::Call { func, args } => {
                     let cf = &self.ws.module(func.module).functions[func.func];
                     if cf.return_ty.is_none() {
-                        Some(format!("{};", self.render_call(*func, args)?))
+                        Some(format!("{};", self.render_call(iid, *func, args)?))
                     } else {
                         None
                     }
@@ -1740,7 +1870,7 @@ pub fn emit_shader_library(
 
     let mut reach = Reach::new(ws, &scx);
     for r in roots {
-        reach.seeds.push(resolve_root(ws, mid, r)?);
+        reach.seeds.push(ShaderInst::plain(resolve_root(ws, mid, r)?));
     }
     let order = reach.walk()?;
 
@@ -1761,12 +1891,12 @@ pub fn emit_shader_library(
     if !out.is_empty() {
         out.push('\n');
     }
-    for (i, &fref) in order.iter().enumerate() {
+    for (i, fref) in order.iter().enumerate() {
         if i > 0 {
             out.push('\n');
         }
         let mf = &reach.bodies[&fref];
-        out.push_str(&emit_fn_def(ws, fref, mf)?);
+        out.push_str(&emit_fn_def(ws, &fref, mf)?);
     }
     Ok(out)
 }
@@ -1846,7 +1976,7 @@ fn classify_entry(ws: &Workspace, f: &Function) -> Result<EntryShape, CompilerEr
             texture_params.push(i);
             continue;
         }
-        match glsl_ty(ws, pd.ty, span, "parameter") {
+        match glsl_ty(ws, &SpecSubst::default(), pd.ty, span, "parameter") {
             Ok(t) if t.is_sampler() => samplers.push((i, pd.name, t)),
             Ok(GlslTy::Vec2) => {
                 if tc.is_some() {
@@ -1877,7 +2007,8 @@ fn classify_entry(ws: &Workspace, f: &Function) -> Result<EntryShape, CompilerEr
                 }
                 let sd = &ws.modules[sid.module.index()].structs[sid.def];
                 for fd in &sd.fields {
-                    let fty = glsl_ty(ws, fd.ty, span, &format!("uniform field `{}`", fd.name))?;
+                    let fty =
+                        glsl_ty(ws, &SpecSubst::default(), fd.ty, span, &format!("uniform field `{}`", fd.name))?;
                     if fty.is_sampler() {
                         return Err(err(span, format!("shader entry: uniform field `{}` cannot be a sampler -- pass samplers as fn params", fd.name)));
                     }
@@ -1891,7 +2022,7 @@ fn classify_entry(ws: &Workspace, f: &Function) -> Result<EntryShape, CompilerEr
     if tc.is_none() {
         return Err(err(span, "shader entry: a Vec2 param (the fullscreen TexCoord varying) is required"));
     }
-    match f.return_ty.map(|rt| glsl_ty(ws, rt, span, "return")) {
+    match f.return_ty.map(|rt| glsl_ty(ws, &SpecSubst::default(), rt, span, "return")) {
         Some(Ok(GlslTy::Vec4)) => {}
         _ => return Err(err(span, "shader entry: the return type must be Vec4 (FragColor)")),
     }
@@ -1955,15 +2086,123 @@ pub struct ShaderEmission {
     /// The single authority for each block's bytes: the GLSL declaration, the
     /// CPU packer and the link-time driver assertion all read it.
     pub uniform_blocks: Vec<(u32, UniformBlockPlan)>,
+    /// The program's `UniformArray<T>` blocks, each paired with its BINDING
+    /// INDEX -- one per stage that declares `@size(N)` params, empty otherwise.
+    ///
+    /// A SEPARATE block from the stage's scalar group, and separate for a
+    /// LIFETIME reason rather than a typing one: `SpriteFragU` changes per DRAW
+    /// while the light arrays change per ACTIVATION, so one combined block would
+    /// force either a 1.8 KB copy into every batch or partial-update state --
+    /// and "a block is uploaded WHOLE" is the invariant that deleted a leak
+    /// class. Two blocks keep whole-block uploads and independent fingerprints.
+    pub uniform_array_blocks: Vec<(u32, UniformArrayBlockPlan)>,
+}
+
+/// A program's uniform blocks -- scalar AND array -- flattened into the
+/// PARALLEL LISTS the registration call carries.
+///
+/// One entry per block in `names`/`bindings`/`sizes`/`fingerprints`/`counts`,
+/// with the members of every block concatenated into the `member_*` lists and
+/// `counts[i]` saying how many belong to block `i`. A hand-written driver never
+/// has to nest, which is why the shape is this and not a table.
+///
+/// **Built once, read by both hosts.** The Lua and JS registration lines are
+/// written by different emitters, and a second flattener is how the two would
+/// come to disagree about member order -- the offsets the host packs against
+/// are positional, so a divergence there is silent wrong bytes rather than an
+/// error.
+///
+/// Array blocks are appended AFTER the scalar ones. They travel the same wire
+/// deliberately: a block is a block to the driver -- bind, verify against the
+/// plan, allocate scratch, upload whole -- and giving arrays their own
+/// registration call would split a registration that has to be transactional.
+/// The three per-member lists are what tells them apart:
+///
+/// - `member_kinds` is the [`WireKind::code`] of every member, array or not;
+/// - `member_capacities` is `0` for a scalar member and `N` for a `@size(N)`
+///   array -- so "how many elements may be written here" answers "is this an
+///   array" without a separate flag;
+/// - `member_strides` is `0` for a scalar member and the std140 array stride
+///   otherwise. Sent rather than re-derived host-side: it is 16 for every kind
+///   an array may hold today, and a host that recomputed it would be a second
+///   layout authority the moment that stops being true.
+#[derive(Debug, Default)]
+pub struct BlockWire<'a> {
+    pub names: Vec<&'a str>,
+    pub bindings: Vec<i64>,
+    pub sizes: Vec<i64>,
+    pub fingerprints: Vec<i64>,
+    pub counts: Vec<i64>,
+    pub member_names: Vec<&'a str>,
+    pub member_offsets: Vec<i64>,
+    pub member_kinds: Vec<i64>,
+    pub member_capacities: Vec<i64>,
+    pub member_strides: Vec<i64>,
+}
+
+impl<'a> BlockWire<'a> {
+    pub fn of(
+        scalar: impl Iterator<Item = &'a (u32, UniformBlockPlan)>,
+        arrays: impl Iterator<Item = &'a (u32, UniformArrayBlockPlan)>,
+    ) -> Self {
+        let mut w = BlockWire::default();
+        for (binding, p) in scalar {
+            w.names.push(p.struct_name.as_str());
+            w.bindings.push(*binding as i64);
+            w.sizes.push(p.size as i64);
+            w.fingerprints.push(p.fingerprint() as i64);
+            w.counts.push(p.members.len() as i64);
+            for m in &p.members {
+                w.member_names.push(m.name.as_str());
+                w.member_offsets.push(m.offset as i64);
+                w.member_kinds.push(m.kind.code() as i64);
+                // A scalar member takes no array payload, and the host's push
+                // verbs reject a capacity-0 target rather than writing one
+                // element into it.
+                w.member_capacities.push(0);
+                w.member_strides.push(0);
+            }
+        }
+        for (binding, p) in arrays {
+            w.names.push(p.block_name.as_str());
+            w.bindings.push(*binding as i64);
+            w.sizes.push(p.size as i64);
+            w.fingerprints.push(p.fingerprint() as i64);
+            w.counts.push(p.members.len() as i64);
+            for m in &p.members {
+                w.member_names.push(m.name.as_str());
+                w.member_offsets.push(m.offset as i64);
+                w.member_kinds.push(m.elem.code() as i64);
+                w.member_capacities.push(m.capacity as i64);
+                w.member_strides.push(m.stride as i64);
+            }
+        }
+        w
+    }
 }
 
 /// Uniform block binding indices, assigned by param ROLE so the slot is
 /// structural rather than a consequence of how many groups a program declares.
 /// Slot 0 is RESERVED for `@engine` whether or not the program has one, which is
 /// what lets the engine reject a foreign block there at registration.
+///
+/// The array slots are reserved on the same terms. ES 3.0 guarantees 12 uniform
+/// blocks per stage and 24 combined, so five reserved indices are affordable.
 pub const UNIFORM_BLOCK_BINDING_ENGINE: u32 = 0;
 pub const UNIFORM_BLOCK_BINDING_VERTEX: u32 = 1;
 pub const UNIFORM_BLOCK_BINDING_FRAGMENT: u32 = 2;
+pub const UNIFORM_BLOCK_BINDING_VERTEX_ARRAYS: u32 = 3;
+pub const UNIFORM_BLOCK_BINDING_FRAGMENT_ARRAYS: u32 = 4;
+
+/// The GLSL block name for a stage's array block, minted from the stage entry.
+///
+/// Deterministic and per-STAGE: the two entries of a pipeline always have
+/// different names, so a program's two array blocks cannot collide with each
+/// other. A collision with a user's `@uniform` group name is possible and is
+/// rejected (`check_block_name_collisions`), never renamed around.
+fn array_block_name(entry: Ustr) -> Ustr {
+    Ustr::from(&format!("{entry}_Arrays"))
+}
 
 /// **One stage's validated plan**: its lowered body, the emittable helpers it
 /// reaches in emission order, and the prelude flags those bodies imply.
@@ -1974,11 +2213,15 @@ pub const UNIFORM_BLOCK_BINDING_FRAGMENT: u32 = 2;
 /// and the stage-specific builtin validation. Rendering reads it and cannot
 /// reach a different verdict, because there is nothing left to decide.
 struct StagePlan {
-    fref: FuncRef,
+    /// The stage ENTRY, as an instance. A registered entry is a root and carries
+    /// no instantiation of its own; its HELPERS do.
+    entry: ShaderInst,
     mf: MirFunc,
-    /// Emittable helpers in post-order (callees before callers).
-    order: Vec<FuncRef>,
-    bodies: HashMap<FuncRef, MirFunc>,
+    /// Emittable helper INSTANCES in post-order (callees before callers). Two
+    /// instantiations of one generic helper are two entries here and two GLSL
+    /// definitions.
+    order: Vec<ShaderInst>,
+    bodies: HashMap<ShaderInst, MirFunc>,
     uses_idiv: bool,
     uses_imod: bool,
 }
@@ -1993,18 +2236,20 @@ impl StagePlan {
             out.push_str(&prelude);
             out.push('\n');
         }
-        for &href in &self.order {
-            out.push_str(&emit_fn_def(ws, href, &self.bodies[&href])?);
+        for href in &self.order {
+            out.push_str(&emit_fn_def(ws, href, &self.bodies[href])?);
             out.push('\n');
         }
         Ok(out)
     }
 
     /// The stage's helpers plus the stage entry itself -- the hot-reload
-    /// dependency set.
+    /// dependency set. DECLARATIONS: a reload watches source files, and two
+    /// instances of one generic helper share one.
     fn dependencies(&self) -> Vec<FuncRef> {
-        let mut deps = self.order.clone();
-        deps.push(self.fref);
+        let mut deps: Vec<FuncRef> = self.order.iter().map(|i| i.fref).collect();
+        deps.push(self.entry.fref);
+        deps.dedup();
         deps
     }
 }
@@ -2016,15 +2261,16 @@ fn plan_stage(
     stage: Stage,
 ) -> Result<StagePlan, CompilerError> {
     let f = &ws.module(fref.module).functions[fref.func];
-    let mf = lower_function(ws, scx, fref.module, fref.func).map_err(|e| {
+    let entry = ShaderInst::plain(fref);
+    let mf = lower_function_spec(ws, scx, fref.module, fref.func, &entry.subst(ws)).map_err(|e| {
         err(f.name_span, format!("shader profile: `{}` cannot lower for GLSL: {}", f.name, e.message))
     })?;
-    let mut callees: Vec<FuncRef> = Vec::new();
+    let mut callees: Vec<ShaderInst> = Vec::new();
     profile_body(ws, f, &mf, &mut callees)?;
 
     let mut reach = Reach::new(ws, scx);
     // The entry is lowered above; a callee calling back into it is recursion.
-    reach.entry = Some(fref);
+    reach.entry = Some(entry.clone());
     reach.seeds = callees;
     let order = reach.walk()?;
 
@@ -2040,7 +2286,7 @@ fn plan_stage(
             }
         }
     }
-    Ok(StagePlan { fref, mf, order, bodies: reach.bodies, uses_idiv, uses_imod })
+    Ok(StagePlan { entry, mf, order, bodies: reach.bodies, uses_idiv, uses_imod })
 }
 
 /// **The one validated plan for a single-entry (A1) shader program.**
@@ -2146,7 +2392,7 @@ fn render_shader_entry(
     }
     px.push('\n');
     px.push_str(&plan.stage.render_helpers(ws)?);
-    px.push_str(&emit_fn_def_with(ws, plan.fref, &plan.stage.mf, Some(shape))?);
+    px.push_str(&emit_fn_def_with(ws, &plan.stage.entry, &plan.stage.mf, Some(shape))?);
     px.push('\n');
     px.push_str(&format!("void main() {{\n  FragColor = {}(TexCoord);\n}}\n", f.name));
 
@@ -2167,6 +2413,10 @@ fn render_shader_entry(
             .cloned()
             .map(|p| (UNIFORM_BLOCK_BINDING_FRAGMENT, p))
             .collect(),
+        // A1 has none: `classify_entry` refuses a `UniformArray` param outright
+        // (it is not a tier-0 leaf and carries no role), so arrays are an A2
+        // pipeline feature and this is an absence rather than an omission.
+        uniform_array_blocks: Vec::new(),
     })
 }
 
@@ -2228,8 +2478,8 @@ struct VertexShape {
     uniforms: Vec<(Ustr, GlslTy)>,
     /// Sampler params (rare in vertex, but legal).
     samplers: Vec<(usize, Ustr, GlslTy)>,
-    /// `UniformArray<T>` params: (index, name, element type, @size capacity).
-    arrays: Vec<(usize, Ustr, GlslTy, i64)>,
+    /// `UniformArray<T>` params, declaration order -- the array block's members.
+    arrays: Vec<ArrayParam>,
     /// The varyings value-struct return type.
     varyings_ty: TyId,
 }
@@ -2262,8 +2512,8 @@ struct FragShape {
     texture_group: Option<Ustr>,
     uniforms: Vec<(Ustr, GlslTy)>,
     samplers: Vec<(usize, Ustr, GlslTy)>,
-    /// `UniformArray<T>` params: (index, name, element type, @size capacity).
-    arrays: Vec<(usize, Ustr, GlslTy, i64)>,
+    /// `UniformArray<T>` params, declaration order -- the array block's members.
+    arrays: Vec<ArrayParam>,
     /// MRT outputs: `Some` when the entry returns a value struct of Vec4/int
     /// fields -> one `layout(location=N) out <ty> <field>` per field, in
     /// declaration order. `None` = the single implicit `FragColor` output.
@@ -2290,10 +2540,17 @@ fn anno_int(annos: &[bone_semantic::hir::Annotation], name: &str) -> Option<i64>
         })
 }
 
-/// The element type of a `UniformArray<T>`-typed param, or `None` when the type
-/// is not the uniform-array phantom. Elements are the corpus set (decision 3):
-/// float, int, Vec2, Vec4.
-fn uniform_array_elem(ws: &Workspace, ty: TyId, span: Span) -> Result<Option<GlslTy>, CompilerError> {
+/// The element WIRE KIND of a `UniformArray<T>`-typed param, or `None` when the
+/// type is not the uniform-array phantom.
+///
+/// A wire kind and not a [`GlslTy`], because the array block's DECLARATION is
+/// rendered from the layout plan: classifying the element here as a GLSL type
+/// too would make the emitter a second authority on what an array holds, free to
+/// disagree with the one that computed the offsets. Which kinds are ADMITTED is
+/// likewise `uniform_array_block`'s answer, not this function's -- it rejects
+/// `Vec3`/`Mat4`/`bool` with a span, so re-stating the set here would be the same
+/// drift one level down.
+fn uniform_array_elem(ws: &Workspace, ty: TyId, span: Span) -> Result<Option<WireKind>, CompilerError> {
     let Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), params }) = ty_expr(ws, ty) else {
         return Ok(None);
     };
@@ -2303,13 +2560,96 @@ fn uniform_array_elem(ws: &Workspace, ty: TyId, span: Span) -> Result<Option<Gls
     let Some(first) = params.into_iter().next() else {
         return Err(err(span, "shader: UniformArray needs an element type argument"));
     };
-    match glsl_ty(ws, ty.with_idx(first), span, "uniform-array element")? {
-        t @ (GlslTy::Float | GlslTy::Int | GlslTy::Vec2 | GlslTy::Vec4) => Ok(Some(t)),
-        other => Err(err(span, format!(
-            "shader: UniformArray element type `{}` is not supported (allowed: float, int, Vec2, Vec4)",
-            other.name()
-        ))),
+    let ety = ty.with_idx(first);
+    if let Some(k) = skull_mir::gpu_layout::wire_kind(ws, ety) {
+        return Ok(Some(k));
     }
+    // The element has no std140 form. Naming it needs its GLSL spelling, and
+    // when THAT fails too the right diagnostic is the one `glsl_ty` produced --
+    // it knows why the type is unusable, and this function does not. Replacing
+    // it with a fabricated `?` would discard the compiler's own information at
+    // exactly the point the author needs it.
+    let name = glsl_ty(ws, &SpecSubst::default(), ety, span, "uniform-array element")?;
+    Err(err(span, format!(
+        "shader: UniformArray element type `{}` has no std140 form (allowed: float, int, Vec2, Vec4)",
+        name.name()
+    )))
+}
+
+/// One classified `UniformArray<T>` param: where it sits in the entry's
+/// signature (so it can be dropped from the emitted one) and its DECLARATION for
+/// the layout planner.
+struct ArrayParam {
+    param: usize,
+    decl: ArrayMemberDecl,
+}
+
+/// Classify param `i` as an array member, or `None` when it is not one.
+///
+/// The `@size` ANNOTATION's span travels on the decl and is what every layout
+/// rejection is reported at. `ParamDecl` carries no span of its own (that is
+/// bone's, and off limits), and the annotation is both present on every array
+/// param by construction and the exact thing an author edits to fix a capacity
+/// or budget rejection.
+fn classify_array_param(
+    ws: &Workspace,
+    pd: &bone_semantic::hir::ParamDecl,
+    i: usize,
+    span: Span,
+    stage: &str,
+) -> Result<Option<ArrayParam>, CompilerError> {
+    let Some(elem) = uniform_array_elem(ws, pd.ty, span)? else { return Ok(None) };
+    let anno = pd.annotations.iter().find(|a| a.name.name.as_str() == "size").ok_or_else(|| {
+        err(span, format!(
+            "shader {stage}: uniform-array param `{}` needs @size(N) (the declared GLSL array capacity)",
+            pd.name
+        ))
+    })?;
+    let n = anno_int(&pd.annotations, "size").expect("@size arity/type is registry-validated");
+    // `N` is source-controlled, so it reaches the layout as a `u32` only through
+    // a rejection: a negative or absurd literal must not wrap into a small
+    // capacity that then passes the very budget check it should fail.
+    let capacity = u32::try_from(n).map_err(|_| {
+        CompilerError::new_with_label(anno.span, format!(
+            "shader {stage}: uniform-array param `{}` has @size({n}), which is not a usable element count",
+            pd.name
+        ))
+    })?;
+    Ok(Some(ArrayParam {
+        param: i,
+        decl: ArrayMemberDecl { name: pd.name, elem, capacity, span: anno.span },
+    }))
+}
+
+/// The array block for one stage, or `None` when the stage declares no arrays.
+/// An empty block binds nothing, so the absence stays an absence.
+fn stage_array_block(
+    entry: Ustr,
+    arrays: &[ArrayParam],
+) -> Result<Option<UniformArrayBlockPlan>, CompilerError> {
+    if arrays.is_empty() {
+        return Ok(None);
+    }
+    let decls: Vec<ArrayMemberDecl> = arrays.iter().map(|a| a.decl).collect();
+    uniform_array_block(array_block_name(entry), &decls).map(Some)
+}
+
+/// The `layout(std140) uniform <Blk> { T name[N]; .. };` declaration for an
+/// array block.
+///
+/// Every line comes from the PLAN -- element kind through [`wire_glsl_ty`], the
+/// same function the scalar declaration uses, and capacity from the member the
+/// offsets were computed for. The emitter deliberately holds no `GlslTy` for an
+/// array element: a second classification of the same param is exactly how a
+/// declaration and a layout drift into disagreeing, and "one layout authority"
+/// would stop being true the moment it existed.
+fn uniform_array_block_decl(plan: &UniformArrayBlockPlan) -> String {
+    let mut s = format!("layout(std140) uniform {} {{\n", plan.block_name);
+    for m in &plan.members {
+        s.push_str(&format!("    {} {}[{}];\n", wire_glsl_ty(m.elem), m.name, m.capacity));
+    }
+    s.push_str("};\n");
+    s
 }
 
 /// The [`StructDef`] behind a nominal type, if any.
@@ -2359,7 +2699,7 @@ fn struct_gl_fields(ws: &Workspace, ty: TyId, span: Span, what: &str) -> Result<
         .ok_or_else(|| err(span, format!("shader: {what} must be a value struct")))?;
     let mut out = Vec::new();
     for fd in &sd.fields {
-        let fty = glsl_ty(ws, fd.ty, span, &format!("{what} field `{}`", fd.name))?;
+        let fty = glsl_ty(ws, &SpecSubst::default(), fd.ty, span, &format!("{what} field `{}`", fd.name))?;
         if fty.is_sampler() {
             return Err(err(span, format!("shader: {what} field `{}` cannot be a sampler -- pass samplers as fn params", fd.name)));
         }
@@ -2476,12 +2816,8 @@ fn classify_vertex(ws: &Workspace, f: &Function) -> Result<VertexShape, Compiler
     let mut engine_group: Option<Ustr> = None;
     let mut engine_params: Vec<usize> = Vec::new();
     for (i, pd) in f.param_decls.iter().enumerate() {
-        if let Some(elem) = uniform_array_elem(ws, pd.ty, span)? {
-            let n = anno_int(&pd.annotations, "size").ok_or_else(|| err(span, format!(
-                "shader vertex: uniform-array param `{}` needs @size(N) (the declared GLSL array capacity)",
-                pd.name
-            )))?;
-            arrays.push((i, pd.name, elem, n));
+        if let Some(a) = classify_array_param(ws, pd, i, span, "vertex")? {
+            arrays.push(a);
             continue;
         }
         if has_anno(&pd.annotations, "textures") {
@@ -2494,7 +2830,7 @@ fn classify_vertex(ws: &Workspace, f: &Function) -> Result<VertexShape, Compiler
             texture_params.push(i);
             continue;
         }
-        match glsl_ty(ws, pd.ty, span, "parameter") {
+        match glsl_ty(ws, &SpecSubst::default(), pd.ty, span, "parameter") {
             Ok(t) if t.is_sampler() => samplers.push((i, pd.name, t)),
             Ok(other) => {
                 return Err(err(span, format!(
@@ -2590,7 +2926,7 @@ fn classify_varyings(ws: &Workspace, ty: TyId, span: Span) -> Result<VaryingsSha
     let mut has_position = false;
     let mut varyings = Vec::new();
     for fd in &sd.fields {
-        let fty = glsl_ty(ws, fd.ty, span, &format!("varying `{}`", fd.name))?;
+        let fty = glsl_ty(ws, &SpecSubst::default(), fd.ty, span, &format!("varying `{}`", fd.name))?;
         if fty == GlslTy::Bvec3 {
             return Err(err(span, format!("shader: varying `{}` cannot be a bvec3 (GLSL forbids bool-vector interpolants) -- bvec3 is local/temp only", fd.name)));
         }
@@ -2643,12 +2979,8 @@ fn classify_pipeline_fragment(ws: &Workspace, f: &Function, vert_varyings_ty: Ty
     let mut engine_params: Vec<usize> = Vec::new();
     let mut engine_uniforms: Vec<(Ustr, GlslTy)> = Vec::new();
     for (i, pd) in f.param_decls.iter().enumerate().skip(1) {
-        if let Some(elem) = uniform_array_elem(ws, pd.ty, span)? {
-            let n = anno_int(&pd.annotations, "size").ok_or_else(|| err(span, format!(
-                "shader fragment: uniform-array param `{}` needs @size(N) (the declared GLSL array capacity)",
-                pd.name
-            )))?;
-            arrays.push((i, pd.name, elem, n));
+        if let Some(a) = classify_array_param(ws, pd, i, span, "fragment")? {
+            arrays.push(a);
             continue;
         }
         if has_anno(&pd.annotations, "textures") {
@@ -2661,7 +2993,7 @@ fn classify_pipeline_fragment(ws: &Workspace, f: &Function, vert_varyings_ty: Ty
             texture_params.push(i);
             continue;
         }
-        match glsl_ty(ws, pd.ty, span, "parameter") {
+        match glsl_ty(ws, &SpecSubst::default(), pd.ty, span, "parameter") {
             Ok(t) if t.is_sampler() => samplers.push((i, pd.name, t)),
             Ok(other) => {
                 return Err(err(span, format!("shader fragment: param `{}` ({}) must be @uniform or a Sampler2D", pd.name, other.name())));
@@ -2695,7 +3027,7 @@ fn classify_pipeline_fragment(ws: &Workspace, f: &Function, vert_varyings_ty: Ty
     // target, e.g. the silhouette mask), OR a value struct of Vec4/int fields
     // (MRT -- one `layout(location=N) out <ty> <field>` per field, in order;
     // int fields feed R32I attachments).
-    let (outputs, single_out) = match f.return_ty.map(|rt| (rt, glsl_ty(ws, rt, span, "return"))) {
+    let (outputs, single_out) = match f.return_ty.map(|rt| (rt, glsl_ty(ws, &SpecSubst::default(), rt, span, "return"))) {
         Some((_, Ok(GlslTy::Vec4))) => (None, GlslTy::Vec4),
         Some((_, Ok(GlslTy::Int))) => (None, GlslTy::Int),
         Some((rt, Err(_))) => {
@@ -2704,7 +3036,7 @@ fn classify_pipeline_fragment(ws: &Workspace, f: &Function, vert_varyings_ty: Ty
             })?;
             let mut outs = Vec::new();
             for fd in &sd.fields {
-                let fty = glsl_ty(ws, fd.ty, span, &format!("MRT output `{}`", fd.name))?;
+                let fty = glsl_ty(ws, &SpecSubst::default(), fd.ty, span, &format!("MRT output `{}`", fd.name))?;
                 if fty != GlslTy::Vec4 && fty != GlslTy::Int {
                     return Err(err(span, format!(
                         "shader fragment: MRT output `{}` ({}) must be Vec4 or int (each output is a `layout(location=N) out <ty>`)",
@@ -2785,8 +3117,8 @@ fn emit_vertex_stage(
     varyings: &VaryingsShape,
     vert_block: Option<&UniformBlockPlan>,
     engine_block: Option<&UniformBlockPlan>,
+    array_block: Option<&UniformArrayBlockPlan>,
 ) -> Result<(String, Vec<FuncRef>), CompilerError> {
-    let fref = stage.fref;
     let shape = EntryShape {
         global_params: v
             .attr_params
@@ -2804,7 +3136,7 @@ fn emit_vertex_stage(
             .chain(v.uniforms.iter().copied())
             .collect(),
         samplers: v.samplers.clone(),
-        arrays: v.arrays.iter().map(|&(i, ..)| i).collect(),
+        arrays: v.arrays.iter().map(|a| a.param).collect(),
         texture_group: v.texture_group,
         // A2 keeps loose uniforms until the second slice.
         uniform_group: None,
@@ -2834,11 +3166,11 @@ fn emit_vertex_stage(
             }
         }
     }
-    // `UniformArray<T>` stays LOOSE either way: it is a param-only phantom, and
-    // moving an array inside a block needs a host payload model that does not
-    // exist yet.
-    for (_, n, t, cap) in &v.arrays {
-        out.push_str(&format!("uniform {} {}[{cap}];\n", t.name(), n));
+    // The stage's `@size(N)` params, as ONE std140 block at their own reserved
+    // binding. Separate from the scalar block above because their LIFETIME is:
+    // arrays change per activation, the scalar group per draw.
+    if let Some(plan) = array_block {
+        out.push_str(&uniform_array_block_decl(plan));
     }
     if vert_block.is_some() || engine_block.is_some() || !v.uniforms.is_empty() || !v.arrays.is_empty() {
         out.push('\n');
@@ -2849,7 +3181,7 @@ fn emit_vertex_stage(
     }
     out.push('\n');
     out.push_str(&helpers);
-    out.push_str(&emit_fn_def_with(ws, fref, mf, Some(&shape))?);
+    out.push_str(&emit_fn_def_with(ws, &stage.entry, mf, Some(&shape))?);
     Ok((out, dependencies))
 }
 
@@ -2860,8 +3192,9 @@ fn emit_fragment_stage(
     varyings: &VaryingsShape,
     frag_block: Option<&UniformBlockPlan>,
     engine_block: Option<&UniformBlockPlan>,
+    array_block: Option<&UniformArrayBlockPlan>,
 ) -> Result<(String, Vec<FuncRef>), CompilerError> {
-    let fref = stage.fref;
+    let fref = stage.entry.fref;
     // MRT: the entry is emitted as `void main()` destructuring its returned
     // output struct into the `layout(location=N) out` globals (like the vertex
     // varyings path). Single-output keeps the `vec4 <fn>()` + wrapper form.
@@ -2883,7 +3216,7 @@ fn emit_fragment_stage(
             .chain(fs.uniforms.iter().copied())
             .collect(),
         samplers: fs.samplers.clone(),
-        arrays: fs.arrays.iter().map(|&(i, ..)| i).collect(),
+        arrays: fs.arrays.iter().map(|a| a.param).collect(),
         main_out,
         texture_group: fs.texture_group,
         // A2 keeps loose uniforms until the second slice.
@@ -2917,16 +3250,16 @@ fn emit_fragment_stage(
             }
         }
     }
-    // Loose for the same reason as the vertex stage's arrays.
-    for (_, n, t, cap) in &fs.arrays {
-        out.push_str(&format!("uniform {} {}[{cap}];\n", t.name(), n));
+    // The fragment stage's array block -- see the vertex stage.
+    if let Some(plan) = array_block {
+        out.push_str(&uniform_array_block_decl(plan));
     }
     for (_, n, t) in &fs.samplers {
         out.push_str(&format!("uniform {} {};\n", t.uniform_decl(), n));
     }
     out.push('\n');
     out.push_str(&helpers);
-    out.push_str(&emit_fn_def_with(ws, fref, mf, Some(&shape))?);
+    out.push_str(&emit_fn_def_with(ws, &stage.entry, mf, Some(&shape))?);
     // Single-output: the entry fn returns Vec4; main() forwards it to FragColor.
     // MRT: the entry IS `void main()` (destructured), so no wrapper.
     if fs.outputs.is_none() {
@@ -2978,16 +3311,52 @@ fn check_pipeline_collisions(
     let names = v.attrs.iter().map(|&(n, _, _)| n)
         .chain(v.uniforms.iter().map(|&(n, _)| n))
         .chain(v.samplers.iter().map(|&(_, n, _)| n))
-        .chain(v.arrays.iter().map(|&(_, n, ..)| n))
+        .chain(v.arrays.iter().map(|a| a.decl.name))
         .chain(varyings.varyings.iter().map(|&(n, _, _)| n))
         .chain(fs.uniforms.iter().map(|&(n, _)| n))
         .chain(fs.samplers.iter().map(|&(_, n, _)| n))
-        .chain(fs.arrays.iter().map(|&(_, n, ..)| n))
+        .chain(fs.arrays.iter().map(|a| a.decl.name))
         .chain(mrt_outputs)
         .chain(engine_members);
     for n in names {
         if !seen.insert(n) {
             return Err(err(span, format!("shader pipeline: name `{n}` would collide (attributes, uniforms, engine-block members, varyings, samplers and reserved names share one GLSL namespace across both stages)")));
+        }
+    }
+    Ok(())
+}
+
+/// Reject two blocks of one program sharing a BLOCK name.
+///
+/// Block names are their own GLSL namespace -- distinct from the member names
+/// `check_pipeline_collisions` censuses, which is why this is a second check and
+/// not a line in that one. It matters because an array block's name is MINTED
+/// (`<entry>_Arrays`) rather than written by the author: a user struct that
+/// happens to spell it would otherwise produce two `layout(std140) uniform
+/// <same>` declarations, which is a link error carrying no Rock span. Minting a
+/// different name instead is the fallback this repo does not take -- the
+/// compiler's job is to refuse the program.
+fn check_block_name_collisions(
+    scalar: [Option<&UniformBlockPlan>; 3],
+    arrays: [Option<&UniformArrayBlockPlan>; 2],
+    span: Span,
+) -> Result<(), CompilerError> {
+    let mut seen: HashSet<Ustr> = HashSet::default();
+    // The engine block is declared in BOTH stages but is ONE block, so the
+    // scalar list is deduped by identity before the census rather than after --
+    // otherwise it collides with itself.
+    let names = scalar
+        .into_iter()
+        .flatten()
+        .map(|p| p.struct_name)
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .chain(arrays.into_iter().flatten().map(|p| p.block_name));
+    for n in names {
+        if !seen.insert(n) {
+            return Err(err(span, format!(
+                "shader pipeline: uniform block name `{n}` is declared twice -- a stage's array block is named `<entry>_Arrays`, so a @uniform group of that name collides with it"
+            )));
         }
     }
     Ok(())
@@ -3037,6 +3406,8 @@ struct PipelinePlan {
     vert_block: Option<UniformBlockPlan>,
     frag_block: Option<UniformBlockPlan>,
     engine_block: Option<UniformBlockPlan>,
+    vert_array_block: Option<UniformArrayBlockPlan>,
+    frag_array_block: Option<UniformArrayBlockPlan>,
     texture_slots: Vec<Ustr>,
 }
 
@@ -3106,9 +3477,21 @@ fn plan_shader_pipeline(
         .map(|g| uniform_block(ws, g).map_err(|e| err(vf.name_span, e.message)))
         .transpose()?;
 
+    // One array block per stage that declares `@size(N)` params, at its own
+    // reserved binding. Built from the SAME std140 authority as the scalar
+    // blocks above and refusing the same element set, so the declaration and the
+    // host's offsets cannot come from two different answers.
+    let vert_array_block = stage_array_block(vf.name, &vshape.arrays)?;
+    let frag_array_block = stage_array_block(ff.name, &fshape.arrays)?;
+
     // Runs AFTER the block plans, because the `@engine` members it censuses come
     // from the PLAN -- one list, though the block is declared in both stages.
     check_pipeline_collisions(&vshape, &varyings, &fshape, engine_block.as_ref(), vf.name_span)?;
+    check_block_name_collisions(
+        [vert_block.as_ref(), frag_block.as_ref(), engine_block.as_ref()],
+        [vert_array_block.as_ref(), frag_array_block.as_ref()],
+        vf.name_span,
+    )?;
 
     let vert = plan_stage(ws, scx, vfref, Stage::Vertex)?;
     let frag = plan_stage(ws, scx, ffref, Stage::Fragment)?;
@@ -3137,6 +3520,8 @@ fn plan_shader_pipeline(
         vert_block,
         frag_block,
         engine_block,
+        vert_array_block,
+        frag_array_block,
         texture_slots,
     })
 }
@@ -3182,6 +3567,7 @@ fn render_shader_pipeline(
         &plan.varyings,
         plan.vert_block.as_ref(),
         plan.engine_block.as_ref(),
+        plan.vert_array_block.as_ref(),
     )?;
     let (pixel_block, pixel_dependencies) = emit_fragment_stage(
         ws,
@@ -3190,6 +3576,7 @@ fn render_shader_pipeline(
         &plan.varyings,
         plan.frag_block.as_ref(),
         plan.engine_block.as_ref(),
+        plan.frag_array_block.as_ref(),
     )?;
 
     let (version, precision) = profile_header(profile);
@@ -3218,6 +3605,18 @@ fn render_shader_pipeline(
             .map(|p| (UNIFORM_BLOCK_BINDING_ENGINE, p))
             .chain(plan.vert_block.iter().cloned().map(|p| (UNIFORM_BLOCK_BINDING_VERTEX, p)))
             .chain(plan.frag_block.iter().cloned().map(|p| (UNIFORM_BLOCK_BINDING_FRAGMENT, p)))
+            .collect(),
+        uniform_array_blocks: plan
+            .vert_array_block
+            .iter()
+            .cloned()
+            .map(|p| (UNIFORM_BLOCK_BINDING_VERTEX_ARRAYS, p))
+            .chain(
+                plan.frag_array_block
+                    .iter()
+                    .cloned()
+                    .map(|p| (UNIFORM_BLOCK_BINDING_FRAGMENT_ARRAYS, p)),
+            )
             .collect(),
     })
 }
@@ -3311,7 +3710,7 @@ pub fn emit_value_test(
             "value test: the root fn must take no parameters (a @test fn)",
         ));
     }
-    let ret = match f.return_ty.map(|rt| glsl_ty(ws, rt, f.name_span, "return")) {
+    let ret = match f.return_ty.map(|rt| glsl_ty(ws, &SpecSubst::default(), rt, f.name_span, "return")) {
         Some(Ok(GlslTy::Int)) => ValueTestRet::Int,
         Some(Ok(GlslTy::Float)) => ValueTestRet::Float,
         Some(Ok(GlslTy::Bool)) => ValueTestRet::Bool,
@@ -3414,7 +3813,9 @@ mod assertion_flip_tests {
         let (ws, mid) = build_ws("@pure fn f(i: int) -> float { return i }");
         let scx = ScalarCtx::new_values_first_class(&ws);
         let fref = resolve_root(&ws, mid, "f").expect("root");
-        let mut mf = lower_function(&ws, &scx, fref.module, fref.func).expect("lower");
+        let mut mf =
+            lower_function_spec(&ws, &scx, fref.module, fref.func, &SpecSubst::default())
+                .expect("lower");
 
         // The coercion is present today (regression pin for the return sink).
         assert!(
@@ -3437,7 +3838,7 @@ mod assertion_flip_tests {
             }
         }
 
-        let r = emit_fn_def(&ws, fref, &mf);
+        let r = emit_fn_def(&ws, &ShaderInst::plain(fref), &mf);
         let msg = r.expect_err("a missed int->float sink must be a hard emit error").message;
         assert!(msg.contains("missed lowering sink"), "unexpected error: {msg}");
     }

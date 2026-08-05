@@ -969,8 +969,6 @@ function stone_draw_mesh(data, count, stride, attr_sizes, attr_count, tex) {
   if (t) {
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, t);
-    var lt = __sw_uloc(sh, "uTexture");
-    if (lt) gl.uniform1i(lt, 0);
     if (__SW.unitInt) __SW.unitInt[0] = false;
     textureBound = true;
   }
@@ -1112,6 +1110,14 @@ function stone_sampler_bound(unit) {
   var bound = gl.getParameter(gl.SAMPLER_BINDING);
   gl.activeTexture(gl.TEXTURE0);
   return !!bound;
+}
+// Every unit glActiveTexture can select -- the twin of stone-rs's
+// stone_max_texture_units, and 0 with no context so a scan's denominator
+// assertion fails instead of its loop silently emptying.
+function stone_max_texture_units() {
+  var gl = __SW.gl;
+  if (!gl) return 0;
+  return gl.getParameter(gl.MAX_COMBINED_TEXTURE_IMAGE_UNITS) | 0;
 }
 // Immutable sampler objects, one per (filter, wrap) pair, created once and
 // never mutated -- the twin of stone-rs's SAMPLERS. `image` selects the wrap
@@ -1690,14 +1696,47 @@ function stone_shader_check_uniform_block_layout(h, name, names, names_len, offs
     return false;
   }
   var indices = gl.getUniformIndices(sh.prog, members);
-  var driver = gl.getActiveUniforms(sh.prog, indices, gl.UNIFORM_OFFSET);
-  var ok = true;
+  if (!indices) {
+    __sw_log_once("check_uniform_block_layout: `" + name + "` uniform-index query failed");
+    return false;
+  }
+  // Only the ACTIVE indices are queried. An inactive member is optimized out
+  // and reports INVALID_INDEX; passing that straight to `getActiveUniforms`
+  // makes the query generate an error, and WebGL 2 returns NULL for the whole
+  // call rather than a per-entry blank (Khronos WebGL 2 spec, 3.7.5). So one
+  // optimized-out member would take down the answer for every member beside it.
+  // `map` carries each surviving index back to the member it came from, since
+  // the driver's reply is now indexed by position in `active`, not in `members`.
+  // The native sibling filters the same way.
+  var active = [], map = [];
   for (var i = 0; i < members.length; i++) {
-    // An INACTIVE member is optimized out and reports no index: skipped, not
-    // failed. The check is a PARTIAL oracle for that reason.
     if (indices[i] === gl.INVALID_INDEX || indices[i] == null) continue;
-    if (driver[i] !== offsets[i]) {
-      __sw_log_once("check_uniform_block_layout: `" + name + "`.`" + members[i] + "` is at " + driver[i] + ", the plan says " + offsets[i]);
+    active.push(indices[i]);
+    map.push(i);
+  }
+  // ZERO comparisons is not a pass. Every member skipped means the loop below
+  // runs zero times and returns its initial true -- a gate arm with no
+  // population, reporting success for a block it never looked at. The native
+  // sibling rejects here for the same reason, and the two must agree or the web
+  // tier silently accepts what the desktop one refuses.
+  //
+  // The case that makes it load-bearing: an ARRAY block is queried as
+  // `name[0]`, and if that spelling ever regresses to the bare name, EVERY
+  // member misses at once -- so the block where this matters most is exactly
+  // the one where the skip stops being partial coverage.
+  if (active.length === 0) {
+    __sw_log_once("check_uniform_block_layout: `" + name + "` has no active members -- nothing to verify");
+    return false;
+  }
+  var driver = gl.getActiveUniforms(sh.prog, active, gl.UNIFORM_OFFSET);
+  if (!driver) {
+    __sw_log_once("check_uniform_block_layout: `" + name + "` uniform-offset query failed");
+    return false;
+  }
+  var ok = true;
+  for (var a = 0; a < map.length; a++) {
+    if (driver[a] !== offsets[map[a]]) {
+      __sw_log_once("check_uniform_block_layout: `" + name + "`.`" + members[map[a]] + "` is at " + driver[a] + ", the plan says " + offsets[map[a]]);
       ok = false;
     }
   }
@@ -2072,10 +2111,6 @@ function __sw_bytes_to_string(b) {
 // --- camera state / immediate sprite path (MB: batches only; the immediate
 // sprite quad lands with the MD canvas-present blit) ---
 function stone_current_shader_bound() { return __SW.curShader !== 0; }
-function stone_sprite_begin(shader) { if (shader) stone_set_shader(shader); }
-function stone_sprite_draw(shader, handle, x, y, w, h, sx, sy, sw, sh, rot, scx, scy, r, g, b, a) {
-  __sw_log_once("stone_sprite_draw: immediate sprite path not implemented on web yet");
-}
 // The canvas-present blit (sparkle trail et al): a rotated textured quad in
 // pixel space through the bound program, else the passed basic-sprite handle
 // with default uniforms -- mirrors sprite.rs stone_sprite_draw_texture
@@ -2109,7 +2144,6 @@ function stone_sprite_draw_texture(shader, tex, tw, th, x, y, w, h, sx, sy, sw, 
   ]);
   gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_2D, t);
-  var ltx = __sw_uloc(sh2, "uTexture"); if (ltx) gl.uniform1i(ltx, 0);
   gl.bindBuffer(gl.ARRAY_BUFFER, __SW.meshVbo);
   gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STREAM_DRAW);
   gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 32, 0);

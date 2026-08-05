@@ -266,8 +266,8 @@ fn web_font_density_resize() {
 // MRT FragId write -> R32I attachment -> async PBO readback -> SELECTION ->
 // `last_click_target == ClickTarget::Player` -- and captures the screenshot
 // for the non-blank color bar.
-// Arc C box 4, WebGL2 leg. One canvas bound twice in a single pass -- unit 1
-// nearest, unit 2 linear -- with the verdict computed in Rock so both backends
+// Arc C box 4, WebGL2 leg. One canvas bound twice in a single pass -- slot 0
+// nearest, slot 1 linear -- with the verdict computed in Rock so both backends
 // assert identical claims. See games/testbed/pass_sampling.rock.
 #[test]
 fn web_pass_sampling() {
@@ -285,6 +285,62 @@ fn web_pass_sampling() {
             "__G.PASS_SAMPLING_VERDICT",
             "--value",
             "PASS",
+        ],
+    ) else {
+        return;
+    };
+}
+
+// mag's ARRAY BLOCK, in a real WebGL2 context, against a real driver.
+//
+// Nothing else reaches it in a browser: `just t`'s fake-GL harness records call
+// shapes and STUBS the layout check outright, because that stub models no std140
+// layout -- so it can say a block was bound, never that a driver agrees with the
+// offsets the compiler planned, and never that anything filled it. Passing here
+// is also the only confirmation that an array member's `name[0]` query resolves
+// on a real driver: registration is transactional and publishes nothing when the
+// layout check fails.
+//
+// **`unfilled == 0` alone proves nothing**, which is the trap this shape exists
+// to avoid. That counter reports blocks DRAWN WITH but never filled; a block
+// nobody draws is never stamped `drawn` and so can never contribute, and a build
+// that registered binding 4 and never rendered through it reads zero and looks
+// clean. `registered` and `drawn` are its denominators.
+//
+// All four numbers come from ONE run, so they describe the same frames. Split
+// across two runs they would rebuild and re-render mag twice -- real cost
+// against a full profile that already has contention timeouts -- while letting
+// the premises drift apart.
+//
+// Read out of `__SW`, the JS runtime's OWN per-block record, which is the state
+// the gate itself consults rather than a re-derivation of it.
+//
+// Separate from `web_chrome_screenshot_and_click_pick_mag` deliberately. That
+// one is red (`docs/known-failing-tests.md`), and an already-red gate cannot
+// certify anything underneath it -- an unfilled block would hide inside a
+// failure the suite already tolerates.
+#[test]
+fn web_chrome_mag_array_block_is_registered_drawn_and_filled() {
+    let Some(_) = run_cdp(
+        "mag",
+        "web_chrome_mag_array_block_is_registered_drawn_and_filled",
+        &[
+            "--frames",
+            "30",
+            // The two premises report as booleans and the two failure counts as
+            // NUMBERS, so a mismatch names which one broke and by how much
+            // rather than collapsing to `false`.
+            "--expect",
+            "(function(){var reg=0,drawn=0,unfilled=0,S=__SW.shaders;\
+             for (var h in S) { var sh=S[h]; if(!sh||!sh.blocks) continue;\
+             for (var i=0;i<sh.blocks.length;i++){ var b=sh.blocks[i];\
+             if(!b||b.binding!==4) continue; reg++;\
+             if(b.drawn) drawn++; if(b.drawn&&!b.uploaded) unfilled++; } }\
+             return (reg>0)+\":\"+(drawn>0)+\":\"+unfilled+\":\"+\
+             stone_unfilled_uniform_block_count();})()",
+            // registered : drawn : unfilled-at-binding-4 : unfilled-anywhere
+            "--value",
+            "true:true:0:0",
         ],
     ) else {
         return;
