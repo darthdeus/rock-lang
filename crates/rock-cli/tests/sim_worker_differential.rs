@@ -237,8 +237,9 @@ fn a_throttled_sites_last_fire_does_not_reach_the_next_entry() {
 /// `__stone_log_now_override` from engine `time` only on the following frame,
 /// while `sim_start_entry` ends in `run(handle)` -- so an entry's opening
 /// statements see its predecessor's clock, and a site with a real boot stamp
-/// then measures against it. A fresh process has run no frame at that point, so
-/// boot's nil is the agreeing value.
+/// then measures against it. `sim_publish_log_clock` sets the clock from engine
+/// `time` at both points instead -- leaving it unset falls back to `os.clock()`,
+/// which climbs across entries.
 #[test]
 fn the_throttle_clock_does_not_reach_the_next_entry() {
     let (isolated, worker) = differential(&["b0_clock_seed"], "b0_clock_probe");
