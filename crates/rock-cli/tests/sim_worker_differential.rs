@@ -676,6 +676,13 @@ fn an_entry_that_destroyed_boots_native_world_keeps_its_record_and_ends_its_work
         "the entry ran EXACTLY ONCE: it completed before the boundary could know, \
          so rerunning it would repeat its side effects"
     );
+    assert!(
+        seed.artifacts.contains_key("shutdown.txt"),
+        "the worker left through the ORDINARY exit, so `@shutdown` systems, \
+         `replay_finish` and engine teardown ran -- an `os_exit` would skip all \
+         of it and `runs.txt`, written mid-entry, could not tell: {:?}",
+        artifact_names(seed)
+    );
 
     let (probe, probe_crossed) = &records[2];
     assert!(
@@ -695,6 +702,43 @@ fn an_entry_that_destroyed_boots_native_world_keeps_its_record_and_ends_its_work
             .any(|m| m.message.contains("GL errors")),
         "the worker-only GL error class is what this boundary closes: {:?}",
         probe.expects_fail
+    );
+}
+
+/// The AUDIO classes, which live in bitgun because they need a decodable asset
+/// -- testbed ships none, and `stone_load_sound` answers 0 for a missing file.
+///
+/// The load-bearing assertion is the SUCCESSOR's provenance. A boundary that
+/// destroyed what the seed left lets the worker continue, so the probe follows
+/// a predecessor; one that could not ends the worker, and the probe restarts
+/// fresh with no predecessor at all. The probe's own assertions cannot tell
+/// those apart -- it passes either way -- which is exactly the trap a
+/// leak fixture falls into once containment exists.
+#[test]
+fn a_predecessors_voice_and_sound_do_not_reach_the_next_entry() {
+    let records = run_worker_suite(
+        Backend::Skull,
+        "bitgun",
+        &["b3_voice_leak_seed".to_string(), "b3_voice_leak_probe".to_string()],
+    )
+    .expect("the suite call itself must not error");
+    assert_eq!(records.len(), 2);
+
+    let (seed, _) = &records[0];
+    assert_eq!(seed.verdict(), "PASS", "the seed leaves its voice live on purpose: {seed:?}");
+
+    let (probe, probe_crossed) = &records[1];
+    assert_eq!(probe.verdict(), "PASS", "the successor inherits boot's audio world: {probe:?}");
+    assert!(
+        probe_crossed,
+        "the boundary DESTROYED what the seed left, so the worker carried on and \
+         this entry followed a predecessor -- a teardown that could not would have \
+         ended the worker and restarted this entry fresh, and its own assertions \
+         would still pass"
+    );
+    assert!(
+        !probe.expects_pass.is_empty(),
+        "the probe asserted nothing: {probe:?}"
     );
 }
 
