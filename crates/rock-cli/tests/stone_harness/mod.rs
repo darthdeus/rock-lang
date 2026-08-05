@@ -350,112 +350,26 @@ fn rock_binary_path() -> PathBuf {
     p
 }
 
-/// Native resource IDENTITY in a `--dump-state` dump, by the `__ty` of the
-/// wrapper that carries it.
+/// How many host-projection leaves a `--dump-state` dump carries.
 ///
-/// A GL/image/mesh id is a process-local allocation counter, not simulation
-/// state: two processes that simulate identically still mint their ids in
-/// whatever order they happened to create resources. Dump-state used to render
-/// every one of these as the string `"<cdata>"`, because a Stone handle crossed
-/// `extern(ffi) -> int` as a boxed `uint64_t` -- so a comparison over two dumps
-/// was blind to the whole class. It is a Rock number now, which is what makes
-/// the difference visible at all.
+/// The CLASSIFICATION is the engine's (`stone/engine/host_projection.rock`):
+/// a field whose declared type is a handle newtype is serialized as
+/// `"<host_projection>"`, or as `"<host_projection:<digest>>"` when the thing
+/// it names has logical content of its own -- a CPU image's pixels. So a dump
+/// is already free of process-local allocation identity when it reaches a
+/// comparison here, and this only counts the markers, as the DENOMINATOR: a
+/// green comparison is evidence only when there was something to exclude.
 ///
-/// The list is by `__ty` and not by field spelling: `data`, `image`, `handle`
-/// and `shader` are ordinary names that a game may use for ordinary state.
-///
-/// This is a DUPLICATED, TEST-ONLY policy and should not survive. The engine
-/// owns which GLOBALS are sim state (`__replay_is_sim_state`) but expresses
-/// nothing about which LEAVES inside one are host-projection identity, so this
-/// list can drift from the engine silently, and it hides a `CpuImage`'s pixels
-/// without anyone having decided whether those are logical state or a
-/// reconstructible host projection.
-///
-/// The replacement is already half-present in the source: `CpuImage.data` and
-/// `.image` are declared `ImageData`/`Image` and `WatcherShader.shader` is
-/// `ShaderId` -- engine handle newtypes the reflection type table already
-/// carries. A serializer rule keyed on those types would be the one canonical
-/// classification. `GpuMesh.handle` is a raw `int` and has no newtype to be
-/// keyed on, so closing this means giving it one. Tracked in
-/// `docs/parked/sims.md` under B3's HostProjection scope.
-pub fn strip_native_handles(v: &mut serde_json::Value) -> usize {
-    fn go(v: &mut serde_json::Value, n: &mut usize) {
-        match v {
-            serde_json::Value::Object(obj) => {
-                let fields: &[&str] = match obj.get("__ty").and_then(|t| t.as_str()) {
-                    Some("WatcherShader") => &["shader"],
-                    Some("CpuImage") => &["data", "image"],
-                    Some("GpuMesh") => &["handle"],
-                    _ => &[],
-                };
-                for f in fields {
-                    if obj.remove(*f).is_some() {
-                        *n += 1;
-                    }
-                }
-                for (_, child) in obj.iter_mut() {
-                    go(child, n);
-                }
-            }
-            serde_json::Value::Array(items) => {
-                for child in items {
-                    go(child, n);
-                }
-            }
-            _ => {}
-        }
-    }
-    let mut n = 0;
-    go(v, &mut n);
-    n
-}
-
-#[cfg(test)]
-mod strip_native_handles_tests {
-    use super::strip_native_handles;
-    use serde_json::json;
-
-    fn dump(shader: u64, image: u64, mesh: u64, hp: u64) -> serde_json::Value {
-        json!({
-            "stone": { "WATCHER": { "shaders": {
-                "blit_frag": { "__ty": "WatcherShader", "file": "blit_frag", "shader": shader }
-            }}},
-            "gameproject": {
-                "CANVAS": { "__ty": "CanvasBlock", "dirty": true,
-                    "blood": { "__ty": "CpuImage", "data": 7, "image": image },
-                    "mesh": { "__ty": "GpuMesh", "handle": mesh, "vert_count": 4 } },
-                "PLAYER": { "__ty": "Player", "hp": hp, "handle": 99 }
-            }
-        })
-    }
-
-    /// Both sides of the exclusion, which is the whole point of it. Two dumps
-    /// that agree on every logical field must compare equal however their
-    /// resource ids were allocated -- and a dump that differs in an actual
-    /// logical field must still differ afterwards, or the projection is just
-    /// deleting evidence.
-    #[test]
-    fn resource_ids_are_excluded_and_logical_state_is_not() {
-        let (mut a, mut b) = (dump(4, 106, 45, 100), dump(13, 326, 155, 100));
-        assert_ne!(a, b, "the fixture must start out disagreeing on the ids");
-        // 4: the watcher's `shader`, `CpuImage.data` + `.image`, `GpuMesh.handle`.
-        assert_eq!(strip_native_handles(&mut a), 4);
-        assert_eq!(strip_native_handles(&mut b), 4);
-        assert_eq!(a, b, "differing resource ids alone must compare equal");
-
-        let (mut c, mut d) = (dump(4, 106, 45, 100), dump(4, 106, 45, 101));
-        strip_native_handles(&mut c);
-        strip_native_handles(&mut d);
-        assert_ne!(c, d, "a logical field must survive the exclusion");
-    }
-
-    /// The list is by the wrapper's `__ty`, never by field spelling: `handle`
-    /// on an ordinary struct is ordinary state. Without this, the arm above
-    /// could pass by deleting every field with a resource-sounding name.
-    #[test]
-    fn a_field_named_like_a_handle_on_an_ordinary_type_survives() {
-        let mut v = dump(4, 106, 45, 100);
-        strip_native_handles(&mut v);
-        assert_eq!(v["gameproject"]["PLAYER"]["handle"], json!(99));
+/// It replaced a test-only policy keyed on a wrapper's `__ty` plus a field
+/// spelling, which could drift from the engine silently and which deleted a
+/// `CpuImage`'s pixels along with its handle. The controls for the
+/// classification itself live in `games/testbed/tests/sims/b3_host_projection.rock`,
+/// where they can drive the real serializer.
+pub fn count_host_projections(v: &serde_json::Value) -> usize {
+    match v {
+        serde_json::Value::String(s) => usize::from(s.starts_with("<host_projection")),
+        serde_json::Value::Object(obj) => obj.values().map(count_host_projections).sum(),
+        serde_json::Value::Array(items) => items.iter().map(count_host_projections).sum(),
+        _ => 0,
     }
 }

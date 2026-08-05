@@ -9,10 +9,10 @@
 //! `c <tick> <name> <hash>` checkpoint names via `sim_state_names`); we compare
 //! those globals, not a duplicated Rust exclusion list.
 //!
-//! WHICH globals is engine-owned. Which LEAVES inside one are state is not, and
-//! `strip_native_handles` is a duplicated test-only policy standing in for a
-//! classification the engine does not express yet -- see its own doc for the
-//! mechanism that should replace it.
+//! WHICH globals is engine-owned, and so is which LEAVES inside one are the
+//! host's realization rather than the state: a field whose declared type is a
+//! handle newtype serializes as a host projection
+//! (`stone/engine/host_projection.rock`). Nothing here duplicates that.
 //!
 //! Intended Phase-B hooks (do NOT exist yet -- that is why this is RED and
 //! #[ignore]d so it never gates `just t`): `STONE_SNAPSHOT_AT_TICK=T` captures a
@@ -125,10 +125,11 @@ fn restore_returns_to_snapshot_tick_state() {
 /// Assert every sim-state global (`sim`) in `got` matches `want`, and at least
 /// one was compared.
 ///
-/// Resource ids are excluded: they are process-local allocation identity, and
-/// these two dumps come from two `rock frame` processes that created a different
-/// number of images and meshes on the way to the tick they report. The exclusion
-/// is a stand-in -- see `stone_harness::strip_native_handles`.
+/// Resource ids are excluded by the engine's serializer, which renders a leaf
+/// whose declared type is a handle newtype as a host projection
+/// (`stone/engine/host_projection.rock`): these two dumps come from two `rock
+/// frame` processes that created a different number of images and meshes on the
+/// way to the tick they report. The count here is the exclusion's denominator.
 fn assert_sim_state_matches(
     got: &serde_json::Value,
     want: &serde_json::Value,
@@ -143,17 +144,17 @@ fn assert_sim_state_matches(
             if !sim.contains(name) {
                 continue;
             }
-            let (mut a, mut b) = (val.clone(), want_pkg[name].clone());
-            stripped += crate::stone_harness::strip_native_handles(&mut a);
-            stripped += crate::stone_harness::strip_native_handles(&mut b);
+            let (a, b) = (val.clone(), want_pkg[name].clone());
+            stripped += crate::stone_harness::count_host_projections(&a);
+            stripped += crate::stone_harness::count_host_projections(&b);
             assert_eq!(a, b, "sim-state {pkg}.{name} must match {label}");
             compared += 1;
         }
     }
     assert!(compared > 0, "must compare at least one sim-state global");
-    // The denominator for the exclusion: it removed something, so a green here
-    // is not "there were no handles to disagree about".
-    assert!(stripped > 0, "no sim-state global carried a native resource id");
+    // The denominator for the exclusion: there WAS something to exclude, so a
+    // green here is not "there were no handles to disagree about".
+    assert!(stripped > 0, "no sim-state global carried a host-projection leaf");
 }
 
 /// P4 item 2: scrub to an ARBITRARY earlier tick. Cadence keyframes (every

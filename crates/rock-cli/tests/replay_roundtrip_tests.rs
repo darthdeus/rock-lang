@@ -222,12 +222,15 @@ fn replay_reproduces_dump_state_byte_identical() {
     strip_diagnostics(&mut replay_dump);
 
     // Native resource ids are process-local allocation identity, not state, and
-    // two processes are free to agree or disagree on them. The exclusion is
-    // therefore unconditional -- an arm asserting the raw dumps DIFFER would be
-    // pinning a coincidence, not a property.
-    let stripped = crate::stone_harness::strip_native_handles(&mut record_dump)
-        + crate::stone_harness::strip_native_handles(&mut replay_dump);
-    assert!(stripped > 0, "the dumps carried no native handle to exclude");
+    // two processes are free to agree or disagree on them. The engine's
+    // serializer already renders those leaves as host projections
+    // (`stone/engine/host_projection.rock`); counting them here is the
+    // DENOMINATOR, so a green comparison cannot mean "there was nothing to
+    // exclude". An arm asserting the raw dumps DIFFER would be pinning a
+    // coincidence, not a property.
+    let projections = crate::stone_harness::count_host_projections(&record_dump)
+        + crate::stone_harness::count_host_projections(&replay_dump);
+    assert!(projections > 0, "the dumps carried no host-projection leaf");
     assert_eq!(
         record_dump, replay_dump,
         "replay must reproduce the recorded run's state byte-for-byte \
