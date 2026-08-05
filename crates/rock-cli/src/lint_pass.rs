@@ -154,6 +154,19 @@ pub fn findings(
     root: &Path,
     scope: Scope,
 ) -> Vec<bone_lints::Finding> {
+    findings_with(ws, sources, root, scope, &bone_lints::LintSelection::default())
+}
+
+/// [`findings`] for an explicit lint selection. `rock lint --lints=<names>`
+/// only: a BUILD always runs the default tier, so no invocation flag can drop
+/// a lint the compiler considers non-optional.
+pub fn findings_with(
+    ws: &Workspace,
+    sources: &SourceFiles,
+    root: &Path,
+    scope: Scope,
+    sel: &bone_lints::LintSelection,
+) -> Vec<bone_lints::Finding> {
     let texts = source_texts(sources);
     let warm = warm_module_ids(ws, &texts);
     let is_bin =
@@ -172,7 +185,7 @@ pub fn findings(
         .filter(|(file, _)| Path::new(file.as_str()).starts_with(&owned))
         .map(|(&file, text)| (file, text.as_str()))
         .collect();
-    bone_lints::lint_workspace(ws, &warm, is_bin, &report)
+    bone_lints::lint_workspace(ws, &warm, is_bin, &report, sel)
 }
 
 /// `12 lint warnings (8 unused_var, 4 unused_fn) -- run `rock lint <root>` for detail`.

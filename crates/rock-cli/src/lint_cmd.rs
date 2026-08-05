@@ -14,7 +14,26 @@ use std::path::{Path, PathBuf};
 /// keeps `tests/` sources: a sim is code the author maintains, and `@sim` /
 /// `@test` decorators are reachability roots, so dropping them would report
 /// their callees as dead.
-pub fn do_lint(path: &str) -> Result<()> {
+pub fn do_lint(path: &str, lints: Option<&str>) -> Result<()> {
+    let sel = match lints {
+        // A typo would run nothing and report success, so an unknown name is a
+        // rejection, not a silent no-op.
+        Some(list) => {
+            let sel = bone_lints::LintSelection::only(
+                list.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string),
+            );
+            let unknown = sel.unknown();
+            if !unknown.is_empty() {
+                anyhow::bail!(
+                    "unknown lint(s): {} -- known: {}",
+                    unknown.join(", "),
+                    bone_lints::KNOWN_LINTS.join(", ")
+                );
+            }
+            sel
+        }
+        None => bone_lints::LintSelection::default(),
+    };
     let p = Path::new(path);
     let (ws, sources, root) = if p.is_dir() {
         let sources = crate::unified_compile::discover_sources(
@@ -43,7 +62,7 @@ pub fn do_lint(path: &str) -> Result<()> {
         (ws, single_source(path, &src), root)
     };
 
-    let findings = lint_pass::findings(&ws, &sources, &root, Scope::WholeProject);
+    let findings = lint_pass::findings_with(&ws, &sources, &root, Scope::WholeProject, &sel);
     if findings.is_empty() {
         log::info!(target: "LINT", "{}: no findings", path);
         return Ok(());

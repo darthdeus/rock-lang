@@ -183,3 +183,42 @@ fn union_names_the_consumers_it_could_not_analyze() {
     let err = stderr(&out);
     assert!(err.contains("game_c"), "an unanalyzable consumer must be named: {err}");
 }
+
+/// A project whose `main.rock` declares one prefix-form fn over a user struct.
+fn method_project(dir: &Path) {
+    std::fs::write(dir.join("stick.toml"), "[package]\nname = \"methodee\"\n").unwrap();
+    std::fs::write(
+        dir.join("main.rock"),
+        "struct Mob { hp: int }\n\nfn damage(m: Mob, n: int) {\n    m.hp -= n\n}\n\nfn main() {\n    let mob = Mob { hp: 3 }\n    damage(mob, 1)\n}\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn method_syntax_is_off_until_the_invocation_names_it() {
+    // The opt-in contract end to end: a migration lint reaches the author only
+    // through `--lints=`, so a build and a bare `rock lint` stay quiet while a
+    // project is converted a file at a time.
+    let dir = tempfile::tempdir().unwrap();
+    method_project(dir.path());
+    let path = dir.path().to_str().unwrap();
+
+    let bare = stderr(&run(&["lint", path]));
+    assert!(!bare.contains("method_syntax"), "bare `rock lint` must not run it: {bare}");
+
+    let out = run(&["lint", path, "--lints=method_syntax"]);
+    let err = stderr(&out);
+    assert!(out.status.success(), "{err}");
+    assert!(err.contains("declare it as `fn Mob.damage(m, n: int)`"), "{err}");
+    assert!(err.contains("1 method_syntax"), "the tally names the lint: {err}");
+    assert!(!err.contains("unused"), "a selection silences every other lint: {err}");
+}
+
+#[test]
+fn an_unknown_lint_name_is_rejected_rather_than_running_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    method_project(dir.path());
+    let out = run(&["lint", dir.path().to_str().unwrap(), "--lints=method_sytnax"]);
+    assert!(!out.status.success(), "a typo must not report a clean project");
+    assert!(stderr(&out).contains("unknown lint(s): method_sytnax"), "{}", stderr(&out));
+}

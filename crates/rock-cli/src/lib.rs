@@ -571,6 +571,12 @@ pub struct Args {
     pub no_lints: bool,
     pub lint_summary: bool,
 
+    /// `rock lint --lints=a,b`: run exactly these lints instead of the default
+    /// tier. The only way to reach an opt-in lint (`bone_lints::OPT_IN_LINTS`),
+    /// which a build and the LSP never run. `rock lint` only -- a build's
+    /// catalog is not the author's to narrow per invocation.
+    pub lints: Option<String>,
+
     /// `rock lint --union <lib>`: judge a library's reachability against every
     /// consumer in the repo at once, reporting only what none of them reach.
     pub union: bool,
@@ -697,6 +703,8 @@ impl Args {
                 .help("Drop lint warnings/advice from build output. Error-severity lints still run and still fail the build."))
             .arg(Arg::new("lint-summary").long("lint-summary").action(ArgAction::SetTrue)
                 .help("Report build lint warnings/advice as a one-line count instead of rendering each. Error-severity lints always render in full."))
+            .arg(Arg::new("lints").long("lints")
+                .help("For `rock lint <path>`: run ONLY the named lints (comma-separated), including opt-in ones a build never runs. `--lints=method_syntax` is how a migration lint is surfaced."))
             .arg(Arg::new("union").long("union").action(ArgAction::SetTrue)
                 .help("For `rock lint <lib>`: judge a library's reachability against every consumer in the repo at once, reporting only functions that NONE of them reach. The only sound way to run unused_fn on a lib."))
             .arg(Arg::new("consumers").long("consumers")
@@ -759,6 +767,7 @@ impl Args {
             package: m.get_flag("package"),
             no_lints: m.get_flag("no-lints"),
             lint_summary: m.get_flag("lint-summary"),
+            lints: m.get_one::<String>("lints").cloned(),
             union: m.get_flag("union"),
             consumers: m.get_one::<String>("consumers").cloned(),
             // Backend selection. An explicit `--backend` flag wins; otherwise an
