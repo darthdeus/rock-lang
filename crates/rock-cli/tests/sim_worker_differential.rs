@@ -232,6 +232,32 @@ fn a_throttled_sites_last_fire_does_not_reach_the_next_entry() {
     }
 }
 
+/// The clock the throttle stamps are measured AGAINST, which is a third fixture
+/// and not a variant of the second. `frame_core_pre_update` restamps
+/// `__stone_log_now_override` from engine `time` only on the following frame,
+/// while `sim_start_entry` ends in `run(handle)` -- so an entry's opening
+/// statements see its predecessor's clock, and a site with a real boot stamp
+/// then measures against it. A fresh process has run no frame at that point, so
+/// boot's nil is the agreeing value.
+#[test]
+fn the_throttle_clock_does_not_reach_the_next_entry() {
+    let (isolated, worker) = differential(&["b0_clock_seed"], "b0_clock_probe");
+    let c = compare(&isolated, &worker);
+    assert_equivalent("b0_clock_probe", &c);
+
+    // The fixture is only meaningful while the site is SUPPRESSED on both
+    // sides: a leaked clock is what makes it fire, so agreement over two
+    // firings would mean the boot stamp never landed.
+    for (label, record) in [("isolated", &isolated), ("worker", &worker)] {
+        assert!(
+            !record.entry_diagnostics.contains("b0 clock fixture warning"),
+            "{label}: the throttled site fired inside the entry, so the boot stamp \
+             it must be measured against was missing: {:?}",
+            record.entry_diagnostics
+        );
+    }
+}
+
 /// Engine configuration restores at the boundary. `TIME_SCALE` is a Stone
 /// global outside replay's six-global predicate; the checkpoint's membership is
 /// the whole registry, so the probe sees real time -- in the scale field AND in
@@ -497,6 +523,7 @@ fn a_crashed_worker_recovers_its_unstarted_entries() {
     )
     .expect("the suite call itself must not error: the crash is an entry failure");
     assert_eq!(records.len(), 2, "one record per entry spec");
+    let records: Vec<SimRecord> = records.into_iter().map(|(r, _)| r).collect();
 
     let crashed = &records[0];
     assert_eq!(
@@ -546,6 +573,7 @@ fn a_replaced_boot_checkpoint_is_refused_not_restored() {
     )
     .expect("the suite call itself must not error: the refusal is an entry failure");
     assert_eq!(records.len(), 2);
+    let records: Vec<SimRecord> = records.into_iter().map(|(r, _)| r).collect();
 
     let corruptor = &records[0];
     assert!(
@@ -669,6 +697,55 @@ fn a_duplicated_spec_runs_and_reports_twice_in_worker_mode() {
     );
 }
 
+/// PROVENANCE, which is what the `--multi-order` gate's denominator rests on:
+/// only an entry that actually followed another one inside one process can be
+/// evidence that a restore boundary works. An entry that ran first had no
+/// predecessor's world to inherit, so its agreement with a fresh process is
+/// agreement between two fresh processes.
+///
+/// Both classifications are pinned, because getting either wrong silently
+/// changes what the gate certifies: a healthy queue's successors must count,
+/// and an entry that RECOVERED into a fresh worker must not -- recovery is
+/// exactly the case where queue position lies about what happened.
+#[test]
+fn only_an_entry_that_followed_a_predecessor_counts_as_evidence() {
+    let healthy = run_worker_suite(
+        Backend::Skull,
+        "testbed",
+        &["b0_leak_seed".to_string(), "b0_leak_probe".to_string(), "b0_rng_probe".to_string()],
+    )
+    .expect("the healthy queue must run");
+    assert_eq!(
+        healthy.iter().map(|(_, crossed)| *crossed).collect::<Vec<_>>(),
+        vec![false, true, true],
+        "in one healthy worker only the first entry lacks a predecessor"
+    );
+    for (record, _) in &healthy {
+        assert_eq!(record.verdict(), "PASS", "the queue must be healthy: {record:?}");
+    }
+
+    // The crash kills the worker inside entry 0, so `b0_leak_probe` never
+    // started and is rerun in a FRESH worker -- where it is first, with no
+    // predecessor, however late its queue position is.
+    let recovered = run_worker_suite(
+        Backend::Skull,
+        "testbed",
+        &["b2_crash_head,b2_crash_tail".to_string(), "b0_leak_probe".to_string()],
+    )
+    .expect("the suite call itself must not error: the crash is an entry failure");
+    assert_eq!(
+        recovered.iter().map(|(_, crossed)| *crossed).collect::<Vec<_>>(),
+        vec![false, false],
+        "the recovered entry restarted a worker, so it followed nobody -- position \
+         alone would have called it a successor"
+    );
+    assert_eq!(
+        recovered[1].0.verdict(),
+        "PASS",
+        "the recovered entry still ran; it is just not evidence about a boundary"
+    );
+}
+
 /// The wall-clock timeout is the WEDGED-CHILD guard, so it bounds an entry,
 /// not the worker process: a queue of individually healthy entries must not
 /// fail whichever one happens to be running when their sum crosses it.
@@ -695,6 +772,7 @@ fn the_wall_clock_deadline_is_per_entry_not_per_worker() {
     let records = run_worker_suite(Backend::Skull, "testbed", &vec!["b2_slow_entry".to_string(); 3])
         .expect("the suite call itself must not error");
     assert_eq!(records.len(), 3);
+    let records: Vec<SimRecord> = records.into_iter().map(|(r, _)| r).collect();
     for (i, record) in records.iter().enumerate() {
         assert!(
             !record.timed_out,

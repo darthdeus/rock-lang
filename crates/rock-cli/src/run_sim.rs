@@ -2006,6 +2006,12 @@ fn run_specs_recovering(
 /// Test-facing surface for the recovering worker queue: compile, run
 /// `entry_specs` in one worker (with recovery), and return a structured record
 /// per spec, artifact manifest included.
+///
+/// The flag beside each record is PROVENANCE: true when that spec actually
+/// followed another one inside the same process, and so is the only kind of
+/// record that can be evidence about a restore boundary. Recovery makes this
+/// unanswerable from queue position, since a rerun spec starts its fresh worker
+/// with no predecessor.
 /// The shuffled arm's permutation. Deterministic by construction: an order that
 /// varies per run makes a divergence unreproducible and a green run unrepeatable,
 /// which is the opposite of what a gate is for. One fixed seed, Fisher-Yates.
@@ -2053,7 +2059,8 @@ fn run_worker_arm(
     // Ineligible entries run in a fresh process, so they cross no boundary --
     // they are still COMPARED (a difference here is a real one), they just
     // cannot be evidence that a restore put the world back.
-    for (i, _reason) in isolated {
+    for (i, reason) in isolated {
+        println!("[multi-order]   isolated: {} -- {reason}", ordered[i]);
         let mut records = run_entries(
             project,
             output,
@@ -2226,7 +2233,7 @@ pub fn run_worker_suite(
     backend: crate::Backend,
     project: &str,
     entry_specs: &[String],
-) -> Result<Vec<crate::sim_record::SimRecord>> {
+) -> Result<Vec<(crate::sim_record::SimRecord, bool)>> {
     rock_host::project::ensure_workspace_root()?;
     let project_path = rock_host::project::resolve_project_dir(project)?;
     let project = project_path.to_string_lossy().into_owned();
@@ -2241,7 +2248,7 @@ pub fn run_worker_suite(
     Ok(results
         .into_iter()
         .enumerate()
-        .map(|(seq, (spec, summary, _crossed))| record_of(&spec, seq, summary))
+        .map(|(seq, (spec, summary, crossed))| (record_of(&spec, seq, summary), crossed))
         .collect())
 }
 
