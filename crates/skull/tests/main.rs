@@ -36,6 +36,8 @@ mod enum_scalarize;
 mod env_param_shadow;
 #[path = "env_record_hoist.rs"]
 mod env_record_hoist;
+#[path = "extern_return_representation.rs"]
+mod extern_return_representation;
 #[path = "extern_value_return_ownership.rs"]
 mod extern_value_return_ownership;
 #[path = "flat_vec_value_shape.rs"]
