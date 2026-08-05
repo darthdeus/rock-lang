@@ -292,6 +292,27 @@ fn render_default_lit(body: &bone_semantic::hir::Body, e: Idx<Expr>) -> Option<S
     }
 }
 
+/// Whether an extern's declared return is a Rock `int`. Drives the numeric
+/// coercion in the extern wrapper: LuaJIT hands back a BOXED cdata for a 64-bit
+/// integer return (`uint64_t`, `int64_t`), so without this the wrapper returns a
+/// cdata where the declaration says number. The compiler cannot read the C
+/// signature -- the `ffi.cdef` is inside an opaque `inline(lua)` body -- so the
+/// declaration is the only contract there is, and it is enforced rather than
+/// assumed. A cdata leaking through is not a cosmetic difference: LuaJIT keys a
+/// table by cdata IDENTITY, so a handle used as a `Map<int, V>` key only ever
+/// hits on the box that was inserted (`b1_ffi_handle.rock`).
+fn extern_ret_is_int(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> bool {
+    use bone_semantic::hir::{BuiltinTy, TypeExpr};
+    let te = match ty {
+        bone_semantic::prelude::TyId::Static(mid, idx) => match ws.modules.get(mid.index()) {
+            Some(m) => m.ty_arena[idx],
+            None => return false,
+        },
+        bone_semantic::prelude::TyId::Local(_) => return false,
+    };
+    matches!(te, TypeExpr::Builtin(BuiltinTy::Int))
+}
+
 /// The value-struct name an extern returns BY VALUE (the C ABI is then
 /// `void f(T* out, ..)`), or `None` if the return isn't a value struct. Drives
 /// the out-param bridge in the extern wrapper.
@@ -1767,8 +1788,15 @@ fn assemble(
                             );
                         }
                         None => {
-                            let ret = if f.return_ty.is_some() { "return " } else { "" };
-                            let _ = writeln!(out, "function {nm}({params})\n  {ret}{lib}.{nm}({params})\nend");
+                            let call = format!("{lib}.{nm}({params})");
+                            let body = match f.return_ty {
+                                Some(t) if extern_ret_is_int(ws, t) => {
+                                    format!("  return tonumber({call})")
+                                }
+                                Some(_) => format!("  return {call}"),
+                                None => format!("  {call}"),
+                            };
+                            let _ = writeln!(out, "function {nm}({params})\n{body}\nend");
                         }
                     }
                 }
