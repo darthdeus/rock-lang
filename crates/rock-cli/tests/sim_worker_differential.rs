@@ -634,25 +634,42 @@ fn a_predecessors_shader_failure_is_not_charged_to_the_next_entry() {
 
 /// The other direction, which no teardown can fix: an entry that DESTROYED a
 /// boot-owned native resource leaves the restored globals naming a handle whose
-/// GL object is gone, and the first draw through one is a GL error. Such an
-/// entry is not worker-eligible -- the boundary names what is missing, the
-/// parent reruns the entry alone, and the record that survives is the
-/// fresh-process one.
+/// GL object is gone, and the first draw through one is a GL error. The
+/// boundary names what is missing and ends the worker -- but the entry itself
+/// ran to completion before that was knowable, so its record is kept (it
+/// followed a predecessor, which is what makes it evidence) and only its
+/// unstarted successors restart in a fresh worker.
 #[test]
-fn an_entry_that_destroyed_boots_native_world_reruns_in_a_fresh_process() {
+fn an_entry_that_destroyed_boots_native_world_keeps_its_record_and_ends_its_worker() {
+    // The head is not decoration. As entry ZERO the seed would have followed no
+    // predecessor, so its record could not be boundary evidence whatever the
+    // boundary did, and the provenance assertion below would pass vacuously.
     let records = run_worker_suite(
         Backend::Skull,
         "testbed",
-        &["b3_canvas_seed".to_string(), "b3_canvas_probe".to_string()],
+        &[
+            "b3_canvas_head".to_string(),
+            "b3_canvas_seed".to_string(),
+            "b3_canvas_probe".to_string(),
+        ],
     )
     .expect("the suite call itself must not error: ineligibility is a scheduling fact");
-    assert_eq!(records.len(), 2, "one record per entry spec");
+    assert_eq!(records.len(), 3, "one record per entry spec");
 
-    let (seed, _) = &records[0];
+    let (head, head_crossed) = &records[0];
+    assert_eq!(head.verdict(), "PASS", "the head runs normally: {head:?}");
+    assert!(!head_crossed, "entry zero follows nothing");
+
+    let (seed, seed_crossed) = &records[1];
     assert_eq!(
         seed.verdict(),
         "PASS",
         "ending the worker is a scheduling fact, not the entry's failure: {seed:?}"
+    );
+    assert!(
+        seed_crossed,
+        "the entry FOLLOWED a predecessor and its record is kept, so it stays \
+         boundary evidence rather than being thrown away for a fresh-process one"
     );
     assert_eq!(
         seed.artifacts["runs.txt"].len, 1,
@@ -660,7 +677,12 @@ fn an_entry_that_destroyed_boots_native_world_reruns_in_a_fresh_process() {
          so rerunning it would repeat its side effects"
     );
 
-    let (probe, _) = &records[1];
+    let (probe, probe_crossed) = &records[2];
+    assert!(
+        !probe_crossed,
+        "the successor restarts in a FRESH worker, so it follows nothing and \
+         cannot certify a restore"
+    );
     assert_eq!(
         probe.verdict(),
         "PASS",
