@@ -3,7 +3,7 @@
 //! (`fn Mob.damage(m, n: int)`). Opt-in, so a project can be converted a file at
 //! a time instead of in one sweep. Harness mirrors catalog.rs.
 
-use bone_lints::{Finding, LintSelection, lint_workspace};
+use bone_lints::{Finding, LintOptions, lint_workspace};
 use bone_semantic::prelude::*;
 
 const FILE: &str = "<method_syntax>";
@@ -12,7 +12,7 @@ fn parse(src: &str) -> skull_parser::Ast {
     skull_parser::parse_module_clean(src, Ustr::from(FILE)).expect("parse")
 }
 
-fn findings_with(src: &str, sel: &LintSelection) -> Vec<Finding> {
+fn findings_with(src: &str, sel: &LintOptions) -> Vec<Finding> {
     let ws = semantic_pass(&mut [parse(src)]).expect("clean program typechecks");
     let mut sources = FxHashMap::default();
     sources.insert(Ustr::from(FILE), src);
@@ -22,10 +22,12 @@ fn findings_with(src: &str, sel: &LintSelection) -> Vec<Finding> {
 /// The lint on its own: `--lints=method_syntax`, so no other lint's findings
 /// can be mistaken for this one's.
 fn methods(src: &str) -> Vec<String> {
-    findings_with(src, &LintSelection::only(["method_syntax".to_string()]))
-        .iter()
-        .map(|f| f.error.message.clone())
-        .collect()
+    methods_ignoring(src, [])
+}
+
+fn methods_ignoring(src: &str, ignore: impl IntoIterator<Item = Ustr>) -> Vec<String> {
+    let opts = LintOptions::only(["method_syntax".to_string()]).ignoring_types(ignore);
+    findings_with(src, &opts).iter().map(|f| f.error.message.clone()).collect()
 }
 
 const MOB: &str = "struct Mob { hp: int }\n";
@@ -87,7 +89,7 @@ fn off_unless_the_invocation_asks_for_it() {
     // existing declaration, so a build, the LSP, and a bare `rock lint` must
     // not carry it.
     let src = format!("{MOB}{DAMAGE}{CALL_MAIN}");
-    let default_tier = findings_with(&src, &LintSelection::default());
+    let default_tier = findings_with(&src, &LintOptions::default());
     assert!(
         default_tier.iter().all(|f| f.lint != "method_syntax"),
         "{:?}",
@@ -100,9 +102,9 @@ fn an_explicit_selection_runs_only_the_named_lints() {
     // `--lints=` is a focus flag: naming one lint silences the rest, which is
     // what makes a migration sweep readable.
     let src = "fn main() {\n    let unread = 5\n}";
-    let sel = LintSelection::only(["method_syntax".to_string()]);
+    let sel = LintOptions::only(["method_syntax".to_string()]);
     assert!(findings_with(src, &sel).is_empty());
-    let default_tier = findings_with(src, &LintSelection::default());
+    let default_tier = findings_with(src, &LintOptions::default());
     assert_eq!(default_tier.len(), 1, "unused_var still fires by default");
 }
 
@@ -143,7 +145,7 @@ fn a_receiver_declared_in_a_warm_module_is_not_the_authors_to_convert() {
     let ws = semantic_pass(&mut asts).expect("typechecks");
     let mut sources = FxHashMap::default();
     sources.insert(Ustr::from(FILE), game);
-    let sel = LintSelection::only(["method_syntax".to_string()]);
+    let sel = LintOptions::only(["method_syntax".to_string()]);
     let cold = lint_workspace(&ws, &FxHashSet::default(), true, &sources, &sel);
     assert_eq!(cold.len(), 1, "both modules cold: Sprite is a user type -- {cold:?}");
 
@@ -158,7 +160,39 @@ fn a_receiver_declared_in_a_warm_module_is_not_the_authors_to_convert() {
 }
 
 #[test]
+fn an_ignored_receiver_type_drops_out_of_the_sweep() {
+    // The iteration knob: a project converts by type, so the types already
+    // handled (or deliberately left alone) come off the list without touching
+    // the source.
+    let src = format!(
+        "{MOB}struct Color {{ r: int }}\n{DAMAGE}fn tint(c: Color, n: int) -> int {{ n }}\n{CALL_MAIN}"
+    );
+    let all = methods_ignoring(&src, []);
+    assert_eq!(all.len(), 2, "both candidates without an ignore list: {all:?}");
+
+    let kept = methods_ignoring(&src, [Ustr::from("Color")]);
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert!(kept[0].contains("fn Mob.damage"), "{}", kept[0]);
+
+    let none = methods_ignoring(&src, [Ustr::from("Color"), Ustr::from("Mob")]);
+    assert!(none.is_empty(), "{none:?}");
+}
+
+#[test]
+fn an_ignored_name_that_is_no_type_is_reported_back() {
+    // A typo'd ignore silently fails OPEN (the type keeps showing up), which
+    // reads as the flag not working. Name it instead.
+    let src = format!("{MOB}{DAMAGE}{CALL_MAIN}");
+    let ws = semantic_pass(&mut [parse(&src)]).expect("typechecks");
+    let names = [Ustr::from("Mob"), Ustr::from("Colour")];
+    assert_eq!(
+        bone_lints::unknown_type_names(&ws, &FxHashSet::default(), &names),
+        vec![Ustr::from("Colour")]
+    );
+}
+
+#[test]
 fn unknown_lint_names_are_reported_back() {
-    let sel = LintSelection::only(["method_sytnax".to_string(), "unused_var".to_string()]);
+    let sel = LintOptions::only(["method_sytnax".to_string(), "unused_var".to_string()]);
     assert_eq!(sel.unknown(), vec!["method_sytnax"]);
 }

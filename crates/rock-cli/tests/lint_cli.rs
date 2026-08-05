@@ -222,3 +222,30 @@ fn an_unknown_lint_name_is_rejected_rather_than_running_nothing() {
     assert!(!out.status.success(), "a typo must not report a clean project");
     assert!(stderr(&out).contains("unknown lint(s): method_sytnax"), "{}", stderr(&out));
 }
+
+#[test]
+fn ignore_types_narrows_the_sweep_and_names_a_miss() {
+    // Converting happens one type at a time, so the sweep narrows from the
+    // invocation. A misspelled entry fails OPEN -- the type keeps showing up --
+    // so it is named rather than silently ignored.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("stick.toml"), "[package]\nname = \"methodee\"\n").unwrap();
+    std::fs::write(
+        dir.path().join("main.rock"),
+        "struct Mob { hp: int }\nstruct Color { r: int }\n\nfn damage(m: Mob, n: int) {\n    m.hp -= n\n}\n\nfn tint(c: Color, n: int) -> int {\n    n\n}\n\nfn main() {\n    let mob = Mob { hp: 3 }\n    damage(mob, 1)\n    let _ = tint(Color { r: 1 }, 2)\n}\n",
+    )
+    .unwrap();
+    let path = dir.path().to_str().unwrap();
+
+    let all = stderr(&run(&["lint", path, "--lints=method_syntax"]));
+    assert!(all.contains("2 method_syntax"), "{all}");
+
+    let narrowed = stderr(&run(&["lint", path, "--lints=method_syntax", "--ignore-types=Color"]));
+    assert!(narrowed.contains("1 method_syntax"), "{narrowed}");
+    assert!(narrowed.contains("fn Mob.damage"), "{narrowed}");
+    assert!(!narrowed.contains("fn Color.tint"), "{narrowed}");
+
+    let typo =
+        stderr(&run(&["lint", path, "--lints=method_syntax", "--ignore-types=Color,Colour"]));
+    assert!(typo.contains("names no type in this project: Colour"), "{typo}");
+}

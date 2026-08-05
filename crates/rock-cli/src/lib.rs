@@ -577,6 +577,11 @@ pub struct Args {
     /// catalog is not the author's to narrow per invocation.
     pub lints: Option<String>,
 
+    /// `rock lint --ignore-types=Color,Vec2`: type names `method_syntax` drops
+    /// from its candidate receivers. A conversion happens one type at a time,
+    /// so the sweep has to narrow from the invocation.
+    pub ignore_types: Option<String>,
+
     /// `rock lint --union <lib>`: judge a library's reachability against every
     /// consumer in the repo at once, reporting only what none of them reach.
     pub union: bool,
@@ -705,6 +710,8 @@ impl Args {
                 .help("Report build lint warnings/advice as a one-line count instead of rendering each. Error-severity lints always render in full."))
             .arg(Arg::new("lints").long("lints")
                 .help("For `rock lint <path>`: run ONLY the named lints (comma-separated), including opt-in ones a build never runs. `--lints=method_syntax` is how a migration lint is surfaced."))
+            .arg(Arg::new("ignore-types").long("ignore-types")
+                .help("For `rock lint --lints=method_syntax`: comma-separated type names to drop from the sweep (--ignore-types=Color,Vec2). A name that is no type in the project is reported."))
             .arg(Arg::new("union").long("union").action(ArgAction::SetTrue)
                 .help("For `rock lint <lib>`: judge a library's reachability against every consumer in the repo at once, reporting only functions that NONE of them reach. The only sound way to run unused_fn on a lib."))
             .arg(Arg::new("consumers").long("consumers")
@@ -768,6 +775,7 @@ impl Args {
             no_lints: m.get_flag("no-lints"),
             lint_summary: m.get_flag("lint-summary"),
             lints: m.get_one::<String>("lints").cloned(),
+            ignore_types: m.get_one::<String>("ignore-types").cloned(),
             union: m.get_flag("union"),
             consumers: m.get_one::<String>("consumers").cloned(),
             // Backend selection. An explicit `--backend` flag wins; otherwise an

@@ -137,23 +137,38 @@ pub const KNOWN_LINTS: &[&str] = &[
 /// quiet the whole time.
 pub const OPT_IN_LINTS: &[&str] = &[METHOD_SYNTAX];
 
-/// Which lints an invocation runs. The default tier is the catalog minus
-/// [`OPT_IN_LINTS`]; [`LintSelection::only`] runs exactly the named set,
-/// opt-in ones included, and silences everything else.
+/// What an invocation asks of the lint engine: which lints run, and the knobs
+/// the lints themselves take. The default tier is the catalog minus
+/// [`OPT_IN_LINTS`]; [`LintOptions::only`] runs exactly the named set, opt-in
+/// ones included, and silences everything else.
 ///
 /// This gates COMPUTATION, not just output: a silenced lint's analysis never
 /// runs, so an opt-in lint costs a build nothing.
 #[derive(Clone, Debug, Default)]
-pub struct LintSelection {
+pub struct LintOptions {
     only: Option<Vec<String>>,
+    ignore_types: FxHashSet<Ustr>,
 }
 
-impl LintSelection {
+impl LintOptions {
     /// Run exactly `names`. Names that aren't in [`KNOWN_LINTS`] are kept so a
-    /// caller can reject a typo through [`LintSelection::unknown`] -- silently
+    /// caller can reject a typo through [`LintOptions::unknown`] -- silently
     /// dropping one would run nothing and report success.
     pub fn only(names: impl IntoIterator<Item = String>) -> Self {
-        LintSelection { only: Some(names.into_iter().collect()) }
+        LintOptions { only: Some(names.into_iter().collect()), ..Default::default() }
+    }
+
+    /// Drop these types from `method_syntax`'s candidate receivers. A project
+    /// converts one type at a time, so the sweep has to be narrowable from the
+    /// invocation -- the alternative is an `allow` comment on every call site of
+    /// a type the author is not converting today.
+    pub fn ignoring_types(mut self, names: impl IntoIterator<Item = Ustr>) -> Self {
+        self.ignore_types = names.into_iter().collect();
+        self
+    }
+
+    pub fn ignored_types(&self) -> &FxHashSet<Ustr> {
+        &self.ignore_types
     }
 
     pub fn enabled(&self, lint: &str) -> bool {
@@ -217,7 +232,7 @@ pub fn flat_findings(
         warm,
         mid,
         src,
-        &LintSelection::default(),
+        &LintOptions::default(),
         &FxHashSet::default(),
     )
 }
@@ -232,7 +247,7 @@ fn flat_findings_with(
     warm: &FxHashSet<ModuleId>,
     mid: ModuleId,
     src: &str,
-    sel: &LintSelection,
+    sel: &LintOptions,
     types: &FxHashSet<Ustr>,
 ) -> Vec<Finding> {
     if warm.contains(&mid) {
@@ -266,7 +281,7 @@ pub fn inference_findings(
     mid: ModuleId,
     src: &str,
 ) -> Vec<Finding> {
-    inference_findings_with(ws, warm, mid, src, &LintSelection::default())
+    inference_findings_with(ws, warm, mid, src, &LintOptions::default())
 }
 
 fn inference_findings_with(
@@ -274,7 +289,7 @@ fn inference_findings_with(
     warm: &FxHashSet<ModuleId>,
     mid: ModuleId,
     src: &str,
-    sel: &LintSelection,
+    sel: &LintOptions,
 ) -> Vec<Finding> {
     if warm.contains(&mid) || !sel.enabled(TRANSMUTE_OF_NULLABLE) {
         return Vec::new();
@@ -303,14 +318,14 @@ pub fn workspace_findings_by_file(
     warm: &FxHashSet<ModuleId>,
     is_bin: bool,
 ) -> FxHashMap<Ustr, Vec<Finding>> {
-    workspace_findings_by_file_with(ws, warm, is_bin, &LintSelection::default())
+    workspace_findings_by_file_with(ws, warm, is_bin, &LintOptions::default())
 }
 
 fn workspace_findings_by_file_with(
     ws: &Workspace,
     warm: &FxHashSet<ModuleId>,
     is_bin: bool,
-    sel: &LintSelection,
+    sel: &LintOptions,
 ) -> FxHashMap<Ustr, Vec<Finding>> {
     let mut out: FxHashMap<Ustr, Vec<Finding>> = FxHashMap::default();
     if is_bin && sel.enabled(UNUSED_FN) {
@@ -344,7 +359,7 @@ fn workspace_findings_by_file_with(
 /// is also what keeps the pass off the compile hot path: a dependency's bodies
 /// are never walked for the per-body lints.
 ///
-/// `sel` selects the tier: [`LintSelection::default`] is what a build and the
+/// `sel` selects the tier: [`LintOptions::default`] is what a build and the
 /// LSP run (the catalog minus [`OPT_IN_LINTS`]); `rock lint --lints=<names>`
 /// runs exactly what it names.
 pub fn lint_workspace(
@@ -352,12 +367,14 @@ pub fn lint_workspace(
     warm: &FxHashSet<ModuleId>,
     is_bin: bool,
     sources: &FxHashMap<Ustr, &str>,
-    sel: &LintSelection,
+    sel: &LintOptions,
 ) -> Vec<Finding> {
     let mut by_file = workspace_findings_by_file_with(ws, warm, is_bin, sel);
     let variants = enum_variant_names(ws, warm);
     let types = if sel.enabled(METHOD_SYNTAX) {
-        nominal_type_names(ws, warm)
+        let mut names = nominal_type_names(ws, warm);
+        names.retain(|n| !sel.ignored_types().contains(n));
+        names
     } else {
         FxHashSet::default()
     };
@@ -1277,7 +1294,10 @@ fn spelled_at(src: &str, name: Ustr, name_span: Span) -> bool {
 /// cannot, since the only thing between `fn` and the name is whitespace.
 fn written_as_method(src: &str, fn_span: Span, name_span: Span) -> bool {
     let (start, end) = (fn_span.offset_range.0, name_span.offset_range.0);
-    if end > src.len() || start > end || !src.is_char_boundary(start) || !src.is_char_boundary(end) {
+    if end > src.len() || start > end {
+        return false;
+    }
+    if !src.is_char_boundary(start) || !src.is_char_boundary(end) {
         return false;
     }
     src[start..end].trim_end().ends_with('.')
@@ -1287,6 +1307,18 @@ fn written_as_method(src: &str, fn_span: Span, name_span: Span) -> bool {
 /// newtypes. `Vec`/`Map` are not here -- they lower to their own type
 /// constructors, never `Nominal` -- so a container param can't reach the lint
 /// through this set either.
+/// The names in `names` that no user module declares as a type. An ignore list
+/// fails OPEN -- a misspelled entry filters nothing and the type keeps showing
+/// up, which reads as the flag not working -- so the caller names them.
+pub fn unknown_type_names(
+    ws: &Workspace,
+    warm: &FxHashSet<ModuleId>,
+    names: &[Ustr],
+) -> Vec<Ustr> {
+    let known = nominal_type_names(ws, warm);
+    names.iter().copied().filter(|n| !known.contains(n)).collect()
+}
+
 pub fn nominal_type_names(ws: &Workspace, warm: &FxHashSet<ModuleId>) -> FxHashSet<Ustr> {
     let mut out = FxHashSet::default();
     for m in user_modules(ws, warm) {

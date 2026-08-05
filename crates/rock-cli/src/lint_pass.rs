@@ -154,7 +154,7 @@ pub fn findings(
     root: &Path,
     scope: Scope,
 ) -> Vec<bone_lints::Finding> {
-    findings_with(ws, sources, root, scope, &bone_lints::LintSelection::default())
+    findings_with(ws, sources, root, scope, &bone_lints::LintOptions::default())
 }
 
 /// [`findings`] for an explicit lint selection. `rock lint --lints=<names>`
@@ -165,7 +165,7 @@ pub fn findings_with(
     sources: &SourceFiles,
     root: &Path,
     scope: Scope,
-    sel: &bone_lints::LintSelection,
+    sel: &bone_lints::LintOptions,
 ) -> Vec<bone_lints::Finding> {
     let texts = source_texts(sources);
     let warm = warm_module_ids(ws, &texts);
@@ -238,6 +238,13 @@ pub fn unused_fns_under(
         );
     }
     out
+}
+
+/// The modules of `ws` this build does not own -- [`warm_module_ids`] for a
+/// caller holding only the `SourceFiles`. `rock lint` needs it to validate
+/// `--ignore-types` against the project's own type names.
+pub fn warm_modules(ws: &Workspace, sources: &SourceFiles) -> FxHashSet<ModuleId> {
+    warm_module_ids(ws, &source_texts(sources))
 }
 
 fn warm_module_ids(ws: &Workspace, texts: &FxHashMap<Ustr, String>) -> FxHashSet<ModuleId> {
