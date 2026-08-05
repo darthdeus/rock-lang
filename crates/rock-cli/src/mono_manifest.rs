@@ -1143,8 +1143,12 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     println!(
         "The result wire of every foreign body an artifact emits, from the concrete result ABI \
          (`skull_mir::lower::BackendFnAbiPlan`, built under THAT INSTANCE's substitution) rather \
-         than from the body text or from the declaration. A multi-lane body publishes through one \
-         final `return __rock_publish(..)` whose arity is this number."
+         than from the body text or from the declaration. On JS a multi-lane body publishes \
+         through one final `return __rock_publish(..)` whose arity is this number; luajit carries \
+         the same lanes on native multi-return and needs no publisher. Emission still asks the \
+         DECLARATION -- it writes one shared body per declaration until the Stage-3 cutover -- so \
+         this per-instance reading is the artifact view's, and the two agree wherever the \
+         substitution is empty."
     );
     println!();
     for (name, a) in &art_rows {

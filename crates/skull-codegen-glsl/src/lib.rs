@@ -428,10 +428,9 @@ fn profile_body(
     let span = f.name_span;
     for (iid, inst) in mf.insts.iter() {
         match inst {
-            Inst::Call { func, .. } => callees.push(ShaderInst {
-                fref: *func,
-                key: mf.spec_bindings.get(&iid).cloned().unwrap_or_default(),
-            }),
+            Inst::Call { func, .. } => {
+                callees.push(callee_inst_at(ws, mf, iid, *func, span)?)
+            }
             // A `const` global folds to its literal at the use site; a mutable
             // `global` is runtime state with no GLSL equivalent.
             Inst::Global(name) => {
@@ -711,15 +710,74 @@ struct FnEmit<'a> {
     /// declared type it renders resolves through this, so `T` is `float` here
     /// and `int` in the sibling instance of the same declaration.
     subst: SpecSubst,
+    /// Every direct call in this body, resolved to its callee INSTANCE by
+    /// [`callee_inst_at`]. Built once so the name a call renders and the type
+    /// its result takes come from one answer.
+    callee_insts: HashMap<Idx<Inst>, ShaderInst>,
 }
 
 impl FnEmit<'_> {
-    /// The instantiation the call at `iid` reaches its callee at, exactly as
-    /// lowering recorded it. The callee's own signature types resolve through
-    /// this, and its emitted name comes off the same key.
-    fn callee_inst(&self, iid: Idx<Inst>, func: FuncRef) -> ShaderInst {
-        ShaderInst { fref: func, key: self.f.spec_bindings.get(&iid).cloned().unwrap_or_default() }
+    /// The instantiation the call at `iid` reaches its callee at.
+    ///
+    /// A LOOKUP, not a second derivation: [`callee_inst_at`] resolved and
+    /// validated every call site before this body could reach emission, and
+    /// `emit_fn_def_with` recorded the answers. A miss is compiler state --
+    /// the map is built from the same `mf.insts` walk this renders from.
+    fn callee_inst(&self, iid: Idx<Inst>) -> &ShaderInst {
+        self.callee_insts.get(&iid).expect(
+            "every Call in this body was resolved by `callee_inst_at` before emission",
+        )
     }
+}
+
+/// **The one resolver of a call site's callee instance, and it FAILS CLOSED.**
+///
+/// `MirFunc::spec_bindings` holds the instantiation lowering recorded at each
+/// call. Reading an absent entry as "no instantiation" is only correct for a
+/// callee that HAS no generics; for a generic one it silently substitutes the
+/// declaration's shape, which on GLSL means emitting or typing a body no
+/// instance has. So an absent or PARTIAL key for an emitted generic callee is
+/// a rejection with the caller's span, never a fallback.
+///
+/// A callee that renders inline is exempt and is the reason the rule is not
+/// simply "generic implies key": `min<T>`, `max<T>`, `clamp` and `v(..)` are
+/// generic declarations that GLSL spells as native builtins at the call site,
+/// so they are never emitted as definitions and their key is never consulted.
+fn callee_inst_at(
+    ws: &Workspace,
+    mf: &MirFunc,
+    iid: Idx<Inst>,
+    func: FuncRef,
+    span: Span,
+) -> Result<ShaderInst, CompilerError> {
+    let cf = &ws.module(func.module).functions[func.func];
+    let key = mf.spec_bindings.get(&iid).cloned().unwrap_or_default();
+    if renders_inline(cf) || cf.generics.is_empty() {
+        return Ok(ShaderInst { fref: func, key });
+    }
+    if key.is_empty() {
+        return Err(err(
+            span,
+            format!(
+                "shader profile: the call to generic `{}` has no recorded instantiation, so GLSL \
+                 has no concrete shape to emit it at. A GPU has no boxed representation for an \
+                 unreified generic, so this cannot fall back to the declaration",
+                cf.name
+            ),
+        ));
+    }
+    if let Some(i) = key.iter().position(Option::is_none) {
+        let g = cf.generics.get(i).map_or_else(|| format!("#{i}"), |_| format!("#{i}"));
+        return Err(err(
+            span,
+            format!(
+                "shader profile: the call to generic `{}` left type parameter {g} uninstantiated, \
+                 so GLSL has no concrete shape to emit it at",
+                cf.name
+            ),
+        ));
+    }
+    Ok(ShaderInst { fref: func, key })
 }
 
 /// A `void main()` entry that destructures its terminal `return <struct
@@ -793,6 +851,15 @@ fn emit_fn_def_with(
     };
     let ret = ret_ty.map_or("void", |t| t.name());
 
+    // Resolve and VALIDATE every call site before anything renders, so the
+    // emitter reads one answer rather than re-deriving it per use.
+    let mut callee_insts: HashMap<Idx<Inst>, ShaderInst> = HashMap::default();
+    for (iid, inst) in mf.insts.iter() {
+        if let Inst::Call { func, .. } = inst {
+            callee_insts.insert(iid, callee_inst_at(ws, mf, iid, *func, f.name_span)?);
+        }
+    }
+
     let st = structure::analyze(mf);
     let mut counted = HashMap::default();
     let mut general = HashMap::default();
@@ -834,6 +901,7 @@ fn emit_fn_def_with(
         main_out: entry.and_then(|s| s.main_out.clone()),
         fn_span: f.name_span,
         subst: subst.clone(),
+        callee_insts,
     };
     e.assign_cell_names();
     // Global-base struct params + samplers + uniform arrays are dropped from the
@@ -1184,7 +1252,7 @@ impl FnEmit<'_> {
             }
             Inst::Call { func, args } => {
                 let cf = &self.ws.module(func.module).functions[func.func];
-                let csub = self.callee_inst(iid, *func).subst(self.ws);
+                let csub = self.callee_inst(iid).subst(self.ws);
                 match cf.return_ty.and_then(|rt| glsl_ty(self.ws, &csub, rt, cf.name_span, "return").ok()) {
                     Some(t) => t,
                     // Generic-return genType builtins (min<T>/max<T>/clamp/abs):
@@ -1355,7 +1423,7 @@ impl FnEmit<'_> {
         args: &[Idx<Inst>],
     ) -> Result<String, CompilerError> {
         let cf = &self.ws.module(func.module).functions[func.func];
-        let callee = self.callee_inst(iid, func);
+        let callee = self.callee_inst(iid);
         let csub = callee.subst(self.ws);
         let name = cf.name.as_str();
         // A non-scalar `__op_*` call is a Vec operator -> native infix. An int
@@ -3841,6 +3909,96 @@ mod assertion_flip_tests {
         let r = emit_fn_def(&ws, &ShaderInst::plain(fref), &mf);
         let msg = r.expect_err("a missed int->float sink must be a hard emit error").message;
         assert!(msg.contains("missed lowering sink"), "unexpected error: {msg}");
+    }
+
+    /// **A generic callee with no recorded instantiation is a REJECTION.**
+    ///
+    /// Reading an absent `spec_bindings` entry as "no instantiation" is right
+    /// for a callee that has no generics and wrong for one that does: it
+    /// silently substitutes the declaration's shape, which GLSL has no boxed
+    /// representation for. Removing the record must reject with a span, never
+    /// emit against the declaration.
+    ///
+    /// The CONTROL is asserted first: with the record present the same body
+    /// emits and names the specialized callee, so the rejection below measures
+    /// the missing record and not an unemittable fixture.
+    #[test]
+    fn a_generic_callee_with_no_recorded_instantiation_rejects() {
+        let (ws, mid) = build_ws(
+            "@pure fn passthrough<T>(x: T) -> T { return x }\n             @pure fn caller(x: float) -> float { return passthrough(x) }",
+        );
+        let scx = ScalarCtx::new_values_first_class(&ws);
+        let fref = resolve_root(&ws, mid, "caller").expect("root");
+        let mut mf =
+            lower_function_spec(&ws, &scx, fref.module, fref.func, &SpecSubst::default())
+                .expect("lower");
+
+        // CONTROL: the record exists and the body emits against it.
+        assert_eq!(mf.spec_bindings.len(), 1, "the fixture recorded no instantiation to remove");
+        let ok = emit_fn_def(&ws, &ShaderInst::plain(fref), &mf)
+            .expect("the body emits with its instantiation recorded");
+        assert!(ok.contains("passthrough_T_ret_T_spec_p_float("), "{ok}");
+
+        // Remove exactly the record, change nothing else.
+        mf.spec_bindings.clear();
+        let msg = emit_fn_def(&ws, &ShaderInst::plain(fref), &mf)
+            .expect_err("a generic callee with no instantiation must reject")
+            .message;
+        assert!(
+            msg.contains("no recorded instantiation") && msg.contains("passthrough"),
+            "the rejection does not name the callee or the cause: {msg}"
+        );
+    }
+
+    /// **ADMISSION CONTROL for the rule above.** A callee that declares no
+    /// generics has no record to miss, so it must pass the same gate and emit.
+    /// Without this the rejection and "GLSL stopped emitting calls" look alike.
+    #[test]
+    fn a_nongeneric_callee_needs_no_recorded_instantiation() {
+        let (ws, mid) = build_ws(
+            "@pure fn doubled(x: float) -> float { return x * 2.0 }\n             @pure fn caller(x: float) -> float { return doubled(x) }",
+        );
+        let scx = ScalarCtx::new_values_first_class(&ws);
+        let fref = resolve_root(&ws, mid, "caller").expect("root");
+        let mf = lower_function_spec(&ws, &scx, fref.module, fref.func, &SpecSubst::default())
+            .expect("lower");
+
+        // The fixture really does exercise the gate: a call is present, and it
+        // carries NO record -- which is the input the generic arm rejects.
+        assert!(
+            mf.insts.iter().any(|(_, i)| matches!(i, Inst::Call { .. })),
+            "the fixture has no call to admit"
+        );
+        assert!(mf.spec_bindings.is_empty(), "a non-generic callee recorded an instantiation");
+
+        let out = emit_fn_def(&ws, &ShaderInst::plain(fref), &mf)
+            .expect("a non-generic callee must be admitted with no record");
+        assert!(out.contains("doubled_float_ret_float("), "{out}");
+    }
+
+    /// **A generic callee whose key is PARTIAL rejects too.** A `None` slot is
+    /// a generic that did not reify, so the key names the shared body -- the
+    /// same fallback as an absent record, reached a different way.
+    #[test]
+    fn a_partially_instantiated_generic_callee_rejects() {
+        let (ws, mid) = build_ws(
+            "@pure fn passthrough<T>(x: T) -> T { return x }\n             @pure fn caller(x: float) -> float { return passthrough(x) }",
+        );
+        let scx = ScalarCtx::new_values_first_class(&ws);
+        let fref = resolve_root(&ws, mid, "caller").expect("root");
+        let mut mf =
+            lower_function_spec(&ws, &scx, fref.module, fref.func, &SpecSubst::default())
+                .expect("lower");
+
+        let iid = *mf.spec_bindings.keys().next().expect("a recorded instantiation");
+        mf.spec_bindings.insert(iid, vec![None]);
+        let msg = emit_fn_def(&ws, &ShaderInst::plain(fref), &mf)
+            .expect_err("a partial key must reject")
+            .message;
+        assert!(
+            msg.contains("uninstantiated") && msg.contains("passthrough"),
+            "unexpected rejection: {msg}"
+        );
     }
 }
 

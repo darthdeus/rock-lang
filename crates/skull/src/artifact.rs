@@ -454,8 +454,14 @@ pub struct ArtifactView {
     /// than leaving emission to read it out of the body text.
     ///
     /// Derived from `skull_mir::lower::BackendFnAbiPlan`, built under the
-    /// instance's own substitution -- the ABI policy every definition and call
-    /// site already reads, asked of the shape this artifact actually carries.
+    /// instance's own substitution -- the same `fn_scalar_abi` /
+    /// `tuple_ret_shape` policy definitions and call sites read, asked of the
+    /// shape this artifact actually carries.
+    ///
+    /// Recorded for EVERY artifact, including luajit, even though only the JS
+    /// publisher needs the number spelled out: the width is a property of the
+    /// wire, and luajit carrying it on native multi-return is that backend's
+    /// answer to it rather than an absence of one.
     pub publisher_lanes: BTreeMap<Instance, usize>,
     /// **An invariant finding, not an unknown.** Retained instances the shared
     /// graph holds no substitution record for at all. `reach` records one for

@@ -411,22 +411,36 @@ impl NestedFn {
     }
 }
 
-/// **THE backend ABI of one function INSTANCE** (plan S 13, Stage 3).
+/// **The backend ABI of one function instance** (plan S 13, Stage 3).
 ///
-/// One object, built once from a declaration and *that instance's own*
-/// substitution, holding every physical fact a definition or a call route needs
-/// about the wire: the emitted parameter spelling, the per-declared-param leaf
-/// widths an arity guard subtracts, and the RESULT LANES a JS publisher's arity
-/// comes from. Three independent oracles stood here before; a publisher and the
-/// caller capturing it could only agree by all three being asked the same
-/// question, which nothing enforced.
+/// One object over the three facts the FOREIGN-BODY boundary needs -- the
+/// emitted parameter spelling, the per-declared-param leaf widths, and the
+/// result-wire width -- built once from a declaration and a substitution.
+/// Three independent oracles stood here before, each re-deriving
+/// [`fn_scalar_abi_spec`] for itself, so a publisher and the caller capturing
+/// it could only agree by all three being asked the same question.
+///
+/// **Scope, precisely.** This is not yet the object every definition and call
+/// route consumes; plan Stage 3 is what makes it that. Today:
+///
+/// - `lua_param_names` is read by luajit's `inline(lua)` emission
+///   (`skull::mir_emit`), the JS backend's `inline(js)` emission
+///   (`skull_codegen_js::emit`) and [`scalar_abi_param_collisions`]. Ordinary
+///   Rock bodies emit positional cells and never consult it.
+/// - `param_leaf_widths` is read by the JS arity guard alone.
+/// - `result_lanes` is read by the JS publisher and its scratch bank. **Lua
+///   does not read it** -- luajit carries several results on native
+///   multi-return, so there is no width for it to state (plan S 13a).
+/// - Only `skull::artifact` builds it PER INSTANCE. Every emission consumer
+///   goes through [`Self::for_declaration`], because pre-cutover emission
+///   still writes one shared body per declaration.
 ///
 /// The substitution is an instance's [`crate::monoty::MonoSubst`], so a generic
-/// body instantiated at a multi-lane result states *that* width. `T` is one
-/// boxed slot on the declaration and two lanes at `T = (bool, float)`; a
-/// per-declaration answer is not a narrower answer, it is a different question.
-/// [`Self::for_declaration`] is the empty-substitution case -- the shared
-/// generic snapshot pre-cutover emission still writes.
+/// body instantiated at a multi-lane result states *that* width: `T` is one
+/// boxed slot on the declaration and two lanes at `T = (bool, float)`. A
+/// per-declaration answer is not a narrower answer, it is a different
+/// question -- which is why the artifact view asks per instance and emission,
+/// which has only the declaration to emit, asks for the declaration.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BackendFnAbiPlan {
     pub decl: FuncRef,
@@ -435,13 +449,18 @@ pub struct BackendFnAbiPlan {
     /// its own slot, a `nobox` element into its leaves) and a bare `nobox`
     /// value return under the scalar ABI.
     ///
-    /// Plan S 13b: leaf 0 rides the ordinary JS `return`, lanes 1..N ride the
-    /// module-scope scratch bank (`docs/boundary-contracts.md` 1.2). Derived
-    /// from the same [`fn_scalar_abi_spec`] policy and [`tuple_ret_shape`] the
-    /// definition and every call site read, which a textual scan of the opaque
-    /// body for `__rock_retN` could not be.
+    /// **A JS transport fact.** Plan S 13b: leaf 0 rides the ordinary JS
+    /// `return`, lanes 1..N ride the module-scope scratch bank
+    /// (`docs/boundary-contracts.md` 1.2). Luajit has native multi-return and
+    /// consults nothing here; the artifact view still records the width for
+    /// every artifact, because it is a property of the wire rather than of the
+    /// backend that happens to need it spelled out.
+    ///
+    /// Derived from the same [`fn_scalar_abi_spec`] policy and
+    /// [`tuple_ret_shape`] the definition and every call site read, which a
+    /// textual scan of the opaque body for `__rock_retN` could not be.
     pub result_lanes: usize,
-    /// Depth-first leaf names for a scalar-ABI foreign body (`@scalar_abi`):
+    /// Depth-first leaf names for a scalar-ABI FOREIGN body (`@scalar_abi`):
     /// each value param expands to `<base>__<leaf>`, the names the hand-written
     /// body references; other params keep their name. `None` when this instance
     /// does not use the scalar ABI, and the caller emits the plain list. The

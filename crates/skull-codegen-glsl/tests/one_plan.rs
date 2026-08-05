@@ -373,13 +373,33 @@ fn main() { let a = rock_shader(generic_frag) }
     );
     assert!(defs.iter().any(|d| d.starts_with("float passthrough")), "{defs:?}");
     assert!(defs.iter().any(|d| d.starts_with("int passthrough")), "{defs:?}");
-    // Each definition's own name is what its call site spells -- a specialized
+    // Each definition's own name is what its CALL SITE spells -- a specialized
     // callee and its definition cannot disagree, because both come off the key
     // lowering recorded at the site.
+    //
+    // Asserted against the ENTRY's body, not against the whole file: a
+    // definition line contains its own name, so `out.contains(name)` is true
+    // for any name that was emitted at all and proves nothing about a call.
+    let entry_body = {
+        let start = out.find("vec4 generic_frag(").expect("the entry definition");
+        let rest = &out[start..];
+        let end = rest.find("\n}\n").expect("the entry's closing brace");
+        &rest[..end]
+    };
     for d in &defs {
         let name = d.split_whitespace().nth(1).unwrap().split('(').next().unwrap();
-        assert!(out.contains(&format!("{name}(")), "no call reaches `{name}`:\n{out}");
+        assert!(
+            entry_body.contains(&format!("{name}(")),
+            "the entry body calls no `{name}`:\n{entry_body}"
+        );
     }
+    // ...and the SHARED spelling appears nowhere: a bare `passthrough(` call
+    // would mean a call site fell back to the declaration while the
+    // definitions specialized.
+    assert!(
+        !out.contains(" passthrough(") && !out.contains("=passthrough("),
+        "a call reached the unspecialized `passthrough`:\n{out}"
+    );
     // CONTROL: the NON-generic helper keeps its ordinary mangled name with no
     // instantiation suffix, which is what makes a program with no generics
     // byte-identical to the pre-instance emission.
@@ -410,4 +430,3 @@ fn main() { let a = rock_shader(bad_frag) }
         "the rejection does not name the BINDING that made it non-tier-0: {msg}"
     );
 }
-
