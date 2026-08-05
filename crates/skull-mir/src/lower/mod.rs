@@ -197,6 +197,15 @@ pub struct ScalarCtx {
     /// (`docs/shaders.md` finding 5). The toggle is contained in
     /// [`fn_scalar_abi`], which definitions and direct calls both consult.
     values_first_class: bool,
+    /// When set, EVERY complete generic instantiation reifies -- the conditional
+    /// `any_value` trigger and the unspliced-context narrowing are both off.
+    ///
+    /// Not an optimization dial. It is set for a target that has no shared
+    /// generic body to decline to: GLSL has no boxed representation an unreified
+    /// `T` could take, so a declined key is not a slower lowering but no
+    /// lowering at all. The CPU backends keep the conditional trigger until
+    /// Stage 4 deletes it.
+    total_specialization: bool,
     /// The codegen backend this lowering feeds. Drives backend-variant selection
     /// at every resolved call ([`Builder::resolve_funcref`]): `Lua` rejects a
     /// call whose only binding is a JS decl; `Js` swaps a call to its JS sibling
@@ -245,6 +254,7 @@ impl ScalarCtx {
             per_body,
             ref_counts,
             values_first_class: false,
+            total_specialization: false,
             target: bone_semantic::hir::FnBackend::Lua,
         }
     }
@@ -263,8 +273,15 @@ impl ScalarCtx {
     pub fn new_values_first_class(ws: &Workspace) -> Self {
         let mut scx = Self::new(ws);
         scx.values_first_class = true;
+        scx.total_specialization = true;
         scx.target = bone_semantic::hir::FnBackend::Any;
         scx
+    }
+
+    /// Whether this lowering reifies EVERY complete instantiation
+    /// ([`total_specialization`]).
+    pub fn total_specialization(&self) -> bool {
+        self.total_specialization
     }
 
     /// Incrementally fold one re-inferred body's value-reference contribution into
@@ -2169,7 +2186,7 @@ pub fn generic_coroutine_column_reject(
             }
             let Some(bindings) = inf.call_generic_bindings.get(c) else { continue };
             let Some((key, _)) =
-                compute_spec_from_bindings(ws, inf, fref, bindings, &SpecSubst::default())?
+                compute_spec_from_bindings(ws, inf, fref, bindings, &SpecSubst::default(), false)?
             else {
                 continue;
             };
@@ -2269,7 +2286,7 @@ pub fn native_buffer_alloc_reject(ws: &Workspace, mid: ModuleId) -> Option<(Stri
             let resolves = if !owner_inlined {
                 false
             } else {
-                let spec = match compute_call_spec(ws, inf, c, fref, &SpecSubst::default(), LUA) {
+                let spec = match compute_call_spec(ws, inf, c, fref, &SpecSubst::default(), LUA, false) {
                     Ok(spec) => spec,
                     // This pass reads the same instantiation lowering does, so a
                     // compiler-state rejection is its answer too rather than
@@ -2920,7 +2937,7 @@ pub(crate) mod shape_census_support {
         calls.sort_by_key(|(e, _)| **e);
         for (e, (m, f)) in calls {
             let func = FuncRef { module: *m, func: *f };
-            match compute_call_spec(ws, inf, *e, func, &empty, target) {
+            match compute_call_spec(ws, inf, *e, func, &empty, target, false) {
                 Ok(Some((key, _))) => out.push((func, key)),
                 Ok(None) => {}
                 Err(_) => rejected += 1,

@@ -440,7 +440,15 @@ impl Builder<'_> {
         func: FuncRef,
     ) -> Result<Option<(SpecKey, SpecSubst)>, CompilerError> {
         let Some(inf) = self.inf else { return Ok(None) };
-        let spec = compute_call_spec(self.ws, inf, e, func, self.spec_subst, self.scx.target)?;
+        let spec = compute_call_spec(
+            self.ws,
+            inf,
+            e,
+            func,
+            self.spec_subst,
+            self.scx.target,
+            self.scx.total_specialization(),
+        )?;
         // Stage-0e census. Recorded HERE rather than inside `compute_call_spec`
         // because the classification needs no context and the record needs the
         // caller's name and the call's span, which only the Builder has.
@@ -516,7 +524,11 @@ impl Builder<'_> {
         func: FuncRef,
     ) -> Result<Option<(SpecKey, SpecSubst)>, CompilerError> {
         Ok(self.call_spec(e, func)?.filter(|(k, _)| {
-            !self.in_unspliced_ctx || spec_key_has_target_storage(self.ws, k, self.scx.target)
+            // A total-specialization target has no shared body to fall back to,
+            // so the unspliced-context narrowing does not apply.
+            self.scx.total_specialization()
+                || !self.in_unspliced_ctx
+                || spec_key_has_target_storage(self.ws, k, self.scx.target)
         }))
     }
 

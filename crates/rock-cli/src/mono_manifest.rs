@@ -1193,10 +1193,10 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
         shader_totals.disagreements
     );
     println!(
-        "- retained shader instances the DECLARATION-based pass cannot answer for (non-empty \
-         substitution): **{}**; with NO substitution record at all (an invariant finding, must \
-         be 0): **{}**; artifacts packaging a profile other than `Core330`: **{}**",
-        shader_totals.unchecked_generic,
+        "- retained shader instances with NO substitution record at all (an invariant finding, \
+         must be 0 -- and the only thing that can leave a program unchecked, since a generic \
+         instance is checked and emitted under its own instantiation): **{}**; artifacts \
+         packaging a profile other than `Core330`: **{}**",
         shader_totals.missing_substitutions,
         shader_totals.non_core330
     );
@@ -1377,7 +1377,6 @@ struct ShaderStats {
     entries_checked: usize,
     programs_unchecked: usize,
     programs: usize,
-    unchecked_generic: usize,
     missing_substitutions: usize,
     disagreements: usize,
     non_core330: usize,
@@ -1397,7 +1396,6 @@ impl ShaderStats {
         self.entries_checked += o.entries_checked;
         self.programs_unchecked += o.programs_unchecked;
         self.programs += o.programs;
-        self.unchecked_generic += o.unchecked_generic;
         self.missing_substitutions += o.missing_substitutions;
         self.disagreements += o.disagreements;
         self.non_core330 += o.non_core330;
@@ -1666,7 +1664,6 @@ fn one_project(
         shader_stats.entries_checked += sv.entries_checked;
         shader_stats.programs_unchecked += sv.programs_unchecked;
         shader_stats.programs += sv.programs;
-        shader_stats.unchecked_generic += sv.unchecked_generic.len();
         shader_stats.missing_substitutions += sv.missing_substitutions.len();
         shader_stats.disagreements += sv.disagreements.len();
         for x in sv.disagreements.iter().take(2) {

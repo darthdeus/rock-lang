@@ -331,3 +331,83 @@ fn the_gles_block_budget_is_enforced_where_shaders_are_planned() {
     );
     assert_agree("block over the ES 3.0 budget", over);
 }
+
+/// **A generic helper is checked and emitted at each INSTANTIATION.**
+///
+/// GLSL has no boxed representation, so a declared `T` is not a shape any
+/// program can carry: the declaration-based pass rejected `passthrough` as
+/// "not tier 0" and was right about the declaration and silent about the two
+/// bodies the program actually needs. Under the instance substitutions both
+/// are tier 0, and they are two GLSL functions -- `float` and `int` are not one
+/// definition.
+///
+/// The DENOMINATOR is asserted: two distinct specialized definitions must
+/// appear. A test that only asserted "it emits" would pass on one.
+#[test]
+fn a_generic_helper_is_emitted_once_per_instantiation() {
+    let src = r#"
+@pure fn passthrough<T>(x: T) -> T { return x }
+@pure fn concrete_helper(x: float) -> float { return x * 2.0 }
+@shader(fragment)
+fn generic_frag(uTexture: Sampler2D, tc: Vec2) -> Vec4 {
+    let d = concrete_helper(passthrough(tc.x))
+    let n = passthrough(3)
+    return v(d, d, d, float(n))
+}
+fn main() { let a = rock_shader(generic_frag) }
+"#;
+    assert_agree("a generic helper at two instantiations", entry_answers(src, "generic_frag"));
+
+    let (ws, mid) = workspace(src);
+    let out = skull_codegen_glsl::emit_shader_entry(&ws, mid, "generic_frag", GlslProfile::Core330)
+        .expect("a concretely instantiated generic helper must emit");
+
+    let defs: Vec<&str> = out
+        .lines()
+        .filter(|l| l.starts_with("float passthrough") || l.starts_with("int passthrough"))
+        .collect();
+    assert_eq!(
+        defs.len(),
+        2,
+        "the two instantiations did not become two definitions: {defs:?}\n{out}"
+    );
+    assert!(defs.iter().any(|d| d.starts_with("float passthrough")), "{defs:?}");
+    assert!(defs.iter().any(|d| d.starts_with("int passthrough")), "{defs:?}");
+    // Each definition's own name is what its call site spells -- a specialized
+    // callee and its definition cannot disagree, because both come off the key
+    // lowering recorded at the site.
+    for d in &defs {
+        let name = d.split_whitespace().nth(1).unwrap().split('(').next().unwrap();
+        assert!(out.contains(&format!("{name}(")), "no call reaches `{name}`:\n{out}");
+    }
+    // CONTROL: the NON-generic helper keeps its ordinary mangled name with no
+    // instantiation suffix, which is what makes a program with no generics
+    // byte-identical to the pre-instance emission.
+    assert!(out.contains("float concrete_helper_float_ret_float(float "), "{out}");
+    assert!(!out.contains("concrete_helper_float_ret_float_spec"), "{out}");
+}
+
+/// **A generic helper bound to a non-tier-0 type is still rejected**, and the
+/// rejection names the binding rather than the declaration. The nearest control
+/// to the test above: it is the same helper, the same call shape, and only the
+/// instantiation differs -- so "generics are accepted now" cannot pass here.
+#[test]
+fn a_generic_helper_bound_outside_tier_0_is_rejected_by_its_binding() {
+    let src = r#"
+@pure fn passthrough<T>(x: T) -> T { return x }
+@shader(fragment)
+fn bad_frag(uTexture: Sampler2D, tc: Vec2) -> Vec4 {
+    let s = passthrough("nope")
+    return v(tc.x, 0.0, 0.0, 1.0)
+}
+fn main() { let a = rock_shader(bad_frag) }
+"#;
+    let (checked, emitted) = entry_answers(src, "bad_frag");
+    assert_eq!(checked, emitted, "the check and the emitter disagreed");
+    let msg = checked.expect_err("a string-bound generic helper must reject");
+    assert!(
+        msg.contains("string"),
+        "the rejection does not name the BINDING that made it non-tier-0: {msg}"
+    );
+}
+

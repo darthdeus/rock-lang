@@ -1689,6 +1689,7 @@ pub(crate) fn compute_call_spec(
     func: FuncRef,
     enclosing: &SpecSubst,
     target: bone_semantic::hir::FnBackend,
+    total: bool,
 ) -> Result<Option<(SpecKey, SpecSubst)>, CompilerError> {
     let f = &ws.module(func.module).functions[func.func];
     if f.generics.is_empty() {
@@ -1717,10 +1718,15 @@ pub(crate) fn compute_call_spec(
             ),
         ));
     };
-    let Some((key, subst)) = compute_spec_from_bindings(ws, inf, func, bindings, enclosing)?
+    let Some((key, subst)) = compute_spec_from_bindings(ws, inf, func, bindings, enclosing, total)?
     else {
         return Ok(None);
     };
+    // A total-specialization target has no shared body to decline to, so the
+    // optimization gates below do not apply to it.
+    if total {
+        return Ok(Some((key, subst)));
+    }
     // `@inline`/`@pure` is the OPT-IN gate: those callees specialize for speed, and
     // whether it happens is the author's call.
     //
@@ -1895,6 +1901,7 @@ pub(crate) fn compute_spec_from_bindings(
     func: FuncRef,
     bindings: &[TyId],
     enclosing: &SpecSubst,
+    total: bool,
 ) -> Result<Option<(SpecKey, SpecSubst)>, CompilerError> {
     let f = &ws.module(func.module).functions[func.func];
     if bindings.len() != f.generics.len() {
@@ -1933,6 +1940,13 @@ pub(crate) fn compute_spec_from_bindings(
                 complete = false;
             }
         }
+    }
+    // A target with NO shared generic body needs every complete key: there is
+    // no boxed representation on a GPU for an unreified `T` to take, so a
+    // partial answer is not a slower lowering, it is no lowering. Same rule the
+    // Stage-0e ablation applies workspace-wide, asked per lowering.
+    if total {
+        return Ok(complete.then_some((key, subst)));
     }
     // Stage-0e: `any_value` is the conditional trigger -- specialize only when
     // some binding names a value struct. Totality has no such condition, so the
@@ -1974,7 +1988,7 @@ pub fn spec_key_from_next_generics(
         let Some(bound) = next_generics.get(&var).copied() else { return Ok(None) };
         bindings.push(bound);
     }
-    Ok(compute_spec_from_bindings(ws, inf, func, &bindings, enclosing)?.map(|(key, _)| key))
+    Ok(compute_spec_from_bindings(ws, inf, func, &bindings, enclosing, false)?.map(|(key, _)| key))
 }
 
 /// [`ablation_decline`] for the for-protocol `next` witness, whose bindings come
