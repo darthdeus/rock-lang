@@ -23,7 +23,6 @@
 //! The shipped runtime source is executed, not a copy of it.
 
 use std::io::Write as _;
-use std::process::Command;
 
 /// Run `stone_shader_check_uniform_block_layout` out of the real
 /// `JS_WEB_RUNTIME` against a stub GL, and return what it answered.
@@ -50,7 +49,7 @@ fn check_with(
     index_query_fails: bool,
     offset_query_fails: bool,
 ) -> Option<Answer> {
-    if Command::new("node").arg("--version").output().map(|o| !o.status.success()).unwrap_or(true) {
+    if crate::common::node().arg("--version").output().map(|o| !o.status.success()).unwrap_or(true) {
         eprintln!("SKIP web_uniform_block_layout_check: node not on PATH");
         return None;
     }
@@ -121,7 +120,7 @@ console.log(JSON.stringify({{ answer: answer, logs: logs, asked: asked }}));
     let mut f = std::fs::File::create(&path).expect("write driver");
     f.write_all(driver_js.as_bytes()).expect("write driver");
 
-    let out = Command::new("node").arg(&path).output().expect("spawn node");
+    let out = crate::common::node().arg(&path).output().expect("spawn node");
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
     let _ = std::fs::remove_dir_all(&dir);

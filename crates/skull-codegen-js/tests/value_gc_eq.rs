@@ -11,14 +11,12 @@
 //! `diff_ref_equal_contents_ne` -- equal-CONTENTS but different-identity Vec
 //! fields compare != (the divergence from a reference struct's contents-walk).
 
-use std::process::Command;
-
 use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::FuncRef;
 use crate::common::ws_with;
 
 fn node_available() -> bool {
-    Command::new("node").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+    crate::common::node().arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
 }
 
 fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<String, String> {
@@ -53,7 +51,7 @@ fn eval_int(src: &str, root: &str, expect: i64) {
     let ws = ws_with(src);
     let js = emit_closure(&ws, root).unwrap_or_else(|e| panic!("emit `{root}`: {e}"));
     let program = format!("{}\n{js}\nconsole.log({root}());", preamble());
-    let out = Command::new("node").arg("-e").arg(&program).output().expect("spawn node");
+    let out = crate::common::node().arg("-e").arg(&program).output().expect("spawn node");
     assert!(
         out.status.success(),
         "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",

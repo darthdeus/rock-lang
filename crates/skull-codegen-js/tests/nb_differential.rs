@@ -10,8 +10,6 @@
 //!
 //! Gated on `node` AND `luajit` being present -- absent, skip WITH A LOG.
 
-use std::process::Command;
-
 use bone_semantic::inference::Workspace;
 use skull_codegen_js::JS_NB_CHECK_SHIMS;
 use skull_mir::lower::ScalarCtx;
@@ -107,7 +105,7 @@ const VALUE_CASES: &[(&str, Tok)] = &[
 const ERROR_CASES: &[&str] = &["test_nb_oob_read", "test_nb_oob_read_neg", "test_nb_oob_write"];
 
 fn tool_available(tool: &str, arg: &str) -> bool {
-    Command::new(tool).arg(arg).output().map(|o| o.status.success()).unwrap_or(false)
+    crate::common::tool(tool).arg(arg).output().map(|o| o.status.success()).unwrap_or(false)
 }
 
 fn both_backends_available(test: &str) -> bool {
@@ -175,7 +173,7 @@ fn emit_lua_program(ws: &Workspace) -> String {
 }
 
 fn run_tool(tool: &str, path: &std::path::Path) -> std::process::Output {
-    Command::new(tool).arg(path).output().unwrap_or_else(|e| panic!("spawn {tool}: {e}"))
+    crate::common::tool(tool).arg(path).output().unwrap_or_else(|e| panic!("spawn {tool}: {e}"))
 }
 
 fn write_temp(tag: &str, ext: &str, contents: &str) -> std::path::PathBuf {

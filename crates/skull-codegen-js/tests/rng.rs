@@ -4,12 +4,10 @@
 //! refactor of the prelude can't silently shift it. Runs the ACTUAL prelude
 //! const under node, node-gated with a skip-log (never a silent pass).
 
-use std::process::Command;
-
 use skull_codegen_js::JS_RNG_RUNTIME;
 
 fn node_available() -> bool {
-    Command::new("node")
+    crate::common::node()
         .arg("--version")
         .output()
         .map(|o| o.status.success())
@@ -19,7 +17,7 @@ fn node_available() -> bool {
 /// Run the RNG prelude + `body`, return trimmed stdout.
 fn node_run(body: &str) -> String {
     let program = format!("{JS_RNG_RUNTIME}\n{body}");
-    let out = Command::new("node")
+    let out = crate::common::node()
         .arg("-e")
         .arg(&program)
         .output()

@@ -39,7 +39,7 @@ fn global(
 }
 
 fn node(source: &str) -> String {
-    let output = std::process::Command::new("node")
+    let output = crate::common::node()
         .args(["-e", source])
         .output()
         .expect("node");
