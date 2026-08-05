@@ -81,6 +81,7 @@ impl ShaderInstance {
 }
 
 /// One stage's lowered bodies, in emission order.
+#[derive(Clone)]
 pub struct ShaderStageIr {
     pub stage: ShaderStage,
     pub entry: ShaderInstance,
@@ -104,9 +105,25 @@ impl ShaderStageIr {
     }
 }
 
-/// A program's concrete bodies, per stage.
+/// **A program's concrete bodies, per stage** -- what its instances lower TO.
+///
+/// The half of a shader program a non-GLSL backend needs beside
+/// [`ShaderInterfacePlan`]: typed MIR under each instance's own substitution,
+/// in emission order, with no target in it. Published on an emission so a
+/// second backend renders these rather than re-walking the entry.
+#[derive(Clone)]
 pub struct ShaderIR {
     pub stages: Vec<ShaderStageIr>,
+}
+
+impl ShaderIR {
+    /// Every DECLARATION the program's bodies came from -- the hot-reload set.
+    pub fn declarations(&self) -> Vec<FuncRef> {
+        let mut out: Vec<FuncRef> = self.stages.iter().flat_map(|s| s.declarations()).collect();
+        out.sort_by_key(|f| (f.module.raw(), f.func.into_raw().into_u32()));
+        out.dedup();
+        out
+    }
 }
 
 /// Why a uniform group exists, which is what decides where a target puts it.

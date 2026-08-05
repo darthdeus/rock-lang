@@ -36,6 +36,7 @@ use skull_mir::intrinsics::{Emission, IntrinsicEntry, IntrinsicTable};
 use skull_mir::lower::{lower_function_spec, ScalarCtx, SpecSubst};
 use skull_mir::monoty::{MonoCtor, MonoTy};
 use skull_mir::shader_ir::{
+    ShaderIR, ShaderStageIr,
     LogicalArrayGroup, LogicalTextureGroup, LogicalUniformGroup, LogicalVarying,
     LogicalVertexInput, ShaderInstance, ShaderInterfacePlan, ShaderStage as IrStage, UniformRole,
     VertexRate,
@@ -2114,6 +2115,10 @@ pub struct ShaderEmission {
     /// texture units. The engine binds against THIS -- it never parses `source`
     /// and never recomputes a layout.
     pub abi: ShaderAbiPlan,
+    /// The program's concrete bodies, per stage. Target-neutral: a second
+    /// backend renders these under the same interface rather than re-walking
+    /// the entry and re-deciding what the program packages.
+    pub ir: ShaderIR,
 }
 
 
@@ -2419,15 +2424,12 @@ fn array_block_name(entry: Ustr) -> Ustr {
 /// and the stage-specific builtin validation. Rendering reads it and cannot
 /// reach a different verdict, because there is nothing left to decide.
 struct StagePlan {
-    /// The stage ENTRY, as an instance. A registered entry is a root and carries
-    /// no instantiation of its own; its HELPERS do.
-    entry: ShaderInstance,
-    mf: MirFunc,
-    /// Emittable helper INSTANCES in post-order (callees before callers). Two
-    /// instantiations of one generic helper are two entries here and two GLSL
-    /// definitions.
-    order: Vec<ShaderInstance>,
-    bodies: HashMap<ShaderInstance, MirFunc>,
+    /// The stage's concrete bodies -- target-neutral, and the only part of this
+    /// plan a non-GLSL backend would want.
+    ir: ShaderStageIr,
+    /// GLSL-only: whether the reachable bodies need the int div/mod prelude.
+    /// GLSL has no integer `/` and `%` with Rock's semantics, which is a
+    /// property of this target and not of the bodies.
     uses_idiv: bool,
     uses_imod: bool,
 }
@@ -2442,8 +2444,8 @@ impl StagePlan {
             out.push_str(&prelude);
             out.push('\n');
         }
-        for href in &self.order {
-            out.push_str(&emit_fn_def(ws, href, &self.bodies[href])?);
+        for href in &self.ir.order {
+            out.push_str(&emit_fn_def(ws, href, &self.ir.bodies[href])?);
             out.push('\n');
         }
         Ok(out)
@@ -2453,10 +2455,7 @@ impl StagePlan {
     /// dependency set. DECLARATIONS: a reload watches source files, and two
     /// instances of one generic helper share one.
     fn dependencies(&self) -> Vec<FuncRef> {
-        let mut deps: Vec<FuncRef> = self.order.iter().map(|i| i.fref).collect();
-        deps.push(self.entry.fref);
-        deps.dedup();
-        deps
+        self.ir.declarations()
     }
 }
 
@@ -2481,6 +2480,10 @@ fn plan_stage(
     let order = reach.walk()?;
 
     reject_stage_violations(ws, stage, reach.bodies.values().chain(std::iter::once(&mf)), f.name_span)?;
+    let ir_stage = match stage {
+        Stage::Vertex => IrStage::Vertex,
+        Stage::Fragment => IrStage::Fragment,
+    };
 
     let (mut uses_idiv, mut uses_imod) = (false, false);
     for body in reach.bodies.values().chain(std::iter::once(&mf)) {
@@ -2492,7 +2495,11 @@ fn plan_stage(
             }
         }
     }
-    Ok(StagePlan { entry, mf, order, bodies: reach.bodies, uses_idiv, uses_imod })
+    Ok(StagePlan {
+        ir: ShaderStageIr { stage: ir_stage, entry, body: mf, order, bodies: reach.bodies },
+        uses_idiv,
+        uses_imod,
+    })
 }
 
 /// **The one validated plan for a single-entry (A1) shader program.**
@@ -2611,7 +2618,7 @@ fn render_shader_entry(
     }
     px.push('\n');
     px.push_str(&plan.stage.render_helpers(ws)?);
-    px.push_str(&emit_fn_def_with(ws, &plan.stage.entry, &plan.stage.mf, Some(shape))?);
+    px.push_str(&emit_fn_def_with(ws, &plan.stage.ir.entry, &plan.stage.ir.body, Some(shape))?);
     px.push('\n');
     px.push_str(&format!("void main() {{\n  FragColor = {}(TexCoord);\n}}\n", f.name));
 
@@ -2627,6 +2634,7 @@ fn render_shader_entry(
         dependencies: plan.stage.dependencies(),
         interface: plan.interface.clone(),
         abi: plan.abi.clone(),
+        ir: ShaderIR { stages: vec![plan.stage.ir.clone()] },
     })
 }
 
@@ -3343,7 +3351,7 @@ fn emit_vertex_stage(
             position_is_gl: true,
         }),
     };
-    let (mf, helpers, dependencies) = (&stage.mf, stage.render_helpers(ws)?, stage.dependencies());
+    let (mf, helpers, dependencies) = (&stage.ir.body, stage.render_helpers(ws)?, stage.dependencies());
 
     let mut out = String::new();
     for (n, t, loc) in &v.attrs {
@@ -3379,7 +3387,7 @@ fn emit_vertex_stage(
     }
     out.push('\n');
     out.push_str(&helpers);
-    out.push_str(&emit_fn_def_with(ws, &stage.entry, mf, Some(&shape))?);
+    out.push_str(&emit_fn_def_with(ws, &stage.ir.entry, mf, Some(&shape))?);
     Ok((out, dependencies))
 }
 
@@ -3392,7 +3400,7 @@ fn emit_fragment_stage(
     engine_block: Option<&UniformBlockPlan>,
     array_block: Option<&UniformArrayBlockPlan>,
 ) -> Result<(String, Vec<FuncRef>), CompilerError> {
-    let fref = stage.entry.fref;
+    let fref = stage.ir.entry.fref;
     // MRT: the entry is emitted as `void main()` destructuring its returned
     // output struct into the `layout(location=N) out` globals (like the vertex
     // varyings path). Single-output keeps the `vec4 <fn>()` + wrapper form.
@@ -3420,7 +3428,7 @@ fn emit_fragment_stage(
         // A2 keeps loose uniforms until the second slice.
         uniform_group: None,
     };
-    let (mf, helpers, dependencies) = (&stage.mf, stage.render_helpers(ws)?, stage.dependencies());
+    let (mf, helpers, dependencies) = (&stage.ir.body, stage.render_helpers(ws)?, stage.dependencies());
 
     let mut out = String::new();
     for (n, t, flat) in &varyings.varyings {
@@ -3457,7 +3465,7 @@ fn emit_fragment_stage(
     }
     out.push('\n');
     out.push_str(&helpers);
-    out.push_str(&emit_fn_def_with(ws, &stage.entry, mf, Some(&shape))?);
+    out.push_str(&emit_fn_def_with(ws, &stage.ir.entry, mf, Some(&shape))?);
     // Single-output: the entry fn returns Vec4; main() forwards it to FragColor.
     // MRT: the entry IS `void main()` (destructured), so no wrapper.
     if fs.outputs.is_none() {
@@ -3714,7 +3722,7 @@ fn plan_shader_pipeline(
 
     let vert = plan_stage(ws, scx, vfref, Stage::Vertex)?;
     let frag = plan_stage(ws, scx, ffref, Stage::Fragment)?;
-    reject_position_read(ws, &frag.mf, frag.mf.params[fshape.varyings_param], ff.name_span)?;
+    reject_position_read(ws, &frag.ir.body, frag.ir.body.params[fshape.varyings_param], ff.name_span)?;
 
     // Unlike `@uniform` -- one block per STAGE -- `@textures` is one group per
     // PROGRAM, since texture units are program-scoped.
@@ -3830,6 +3838,7 @@ fn render_shader_pipeline(
         dependencies,
         interface: plan.interface.clone(),
         abi: plan.abi.clone(),
+        ir: ShaderIR { stages: vec![plan.vert.ir.clone(), plan.frag.ir.clone()] },
     })
 }
 

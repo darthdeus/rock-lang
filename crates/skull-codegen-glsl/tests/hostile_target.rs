@@ -183,6 +183,23 @@ fn a_second_target_derives_a_different_physical_layout_from_the_same_interface()
         "both targets packed identically, so std140 is not GLSL's own answer"
     );
 
+    // ---- The IR is the program's real bodies, per stage, and its declaration
+    // set is what a reload watches. A second backend renders THESE.
+    assert_eq!(em.ir.stages.len(), 2, "a pipeline publishes two stages of IR");
+    assert_eq!(em.ir.stages[0].entry.fref, em.ir.stages[0].entry.fref);
+    let names: Vec<&str> = em
+        .ir
+        .stages
+        .iter()
+        .map(|s| ws.module(s.entry.fref.module).functions[s.entry.fref.func].name.as_str())
+        .collect();
+    assert_eq!(names, vec!["hv", "hf"], "the IR's stages are not the program's entries");
+    assert!(
+        em.ir.declarations().len() >= 2,
+        "the IR reports no declarations to reload: {:?}",
+        em.ir.declarations().len()
+    );
+
     // ---- The INTERFACE itself names nothing physical. A round trip through a
     // second derivation cannot change it, because it was never asked.
     let regenerated = ShaderAbiPlan::glsl(&ws, iface, Default::default())
