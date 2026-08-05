@@ -320,24 +320,63 @@ enum ExternRet {
     AsIs,
 }
 
-/// A backstop only. Termination is decided by [`extern_ret`]'s visited set --
-/// this bounds a chain whose repeats the visited set cannot recognize because
-/// two syntactically identical arguments live in different arenas and so carry
-/// different `TyId`s. No source-written alias chain approaches it.
-const MAX_NEWTYPE_STEPS: usize = 256;
+/// Hard backstop on the alias walk and on normalizing one argument. Termination
+/// is decided by the visited set below; this only bounds a pathological
+/// declaration the normal form cannot summarize.
+const MAX_ALIAS_STEPS: usize = 256;
 
-/// A newtype application's generic arguments, already resolved through the
-/// substitution in force where the application was written.
-type NewtypeArgs = Vec<bone_semantic::prelude::TyId>;
+/// A type together with the environment its generics resolve in.
+///
+/// A flat `VarId -> TyId` map cannot express this, and the shape that breaks it
+/// is ordinary:
+///
+/// ```text
+/// newtype Pair<T>(T)
+/// newtype Outer<T>(Pair<Pair<T>>)
+/// extern(ffi, "m") fn f() -> Outer<int>
+/// ```
+///
+/// Following `Outer` binds its `T` to `int` and lands on `Pair<Pair<T>>`. The
+/// argument then handed to the inner `Pair` is `Pair<T>` -- a type that mentions
+/// `Outer`'s `T`, which only the environment in force where that argument was
+/// WRITTEN can bind. A map that is replaced at each alias loses it and the walk
+/// ends up rejecting a concrete type as unbound.
+///
+/// It also settles generic IDENTITY without qualifying it: `VarId`s are
+/// allocated per module, but a newtype's representation can only mention its own
+/// declaration's parameters, so the environment a variable is looked up in is
+/// always the one built from the declaration that owns it. Two modules reusing a
+/// numeric id never meet.
+#[derive(Clone, Copy)]
+struct TyClosure {
+    ty: bone_semantic::prelude::TyId,
+    /// Index into the environment arena; 0 is the empty environment.
+    env: usize,
+}
+
+/// A type with its arenas and environments resolved away, so two instantiations
+/// can be compared for equality. The cycle key is built from this rather than
+/// from raw `TyId`s: equal types written in different modules live in different
+/// arenas and carry different ids, which no amount of shallow substitution fixes.
+#[derive(Clone, PartialEq, Eq)]
+enum NormalTy {
+    Prim(&'static str),
+    Nominal(ustr::Ustr, Vec<NormalTy>),
+    Unbound(ustr::Ustr),
+    /// Anything the boundary does not need to tell apart (a function type, a
+    /// tuple, an array); distinct from every nominal, which is all the cycle key
+    /// asks of it.
+    Opaque,
+}
 
 fn extern_ret(
     ws: &Workspace,
     f: &bone_semantic::hir::Function,
 ) -> Result<ExternRet, CompilerError> {
-    use bone_semantic::hir::{BuiltinTy, TypeCtor, TypeExpr};
-    use bone_semantic::prelude::TyId;
+    use bone_semantic::hir::{BuiltinTy, TypeCtor, TypeExpr, VarId};
+    use bone_semantic::prelude::{NewtypeId, TyId};
 
-    let Some(ty) = f.return_ty else { return Ok(ExternRet::None) };
+    let Some(ret) = f.return_ty else { return Ok(ExternRet::None) };
     let unrealizable = |what: &str| {
         CompilerError::new_with_label(
             f.name_span,
@@ -350,11 +389,12 @@ fn extern_ret(
         )
     };
     // A declared signature lives in its own module's arena, so a non-static
-    // `TyId` and a module outside the workspace are internal invariants rather
-    // than source-reachable shapes -- stated as rejections because the
-    // alternative is emitting a wrapper whose return representation the compiler
-    // has just admitted it cannot determine.
-    let resolve = |ty: TyId| -> Result<(TyId, TypeExpr), CompilerError> {
+    // `TyId`, a module outside the workspace and a stale index are internal
+    // invariants rather than source-reachable shapes -- stated as rejections
+    // because the alternative is emitting a wrapper whose return representation
+    // the compiler has just admitted it cannot determine. `Arena` indexes
+    // unchecked, so the bound is taken here instead of panicking in the emitter.
+    let node = |ty: TyId| -> Result<TypeExpr, CompilerError> {
         let TyId::Static(mid, idx) = ty else {
             return Err(unrealizable("a body-local type"));
         };
@@ -362,48 +402,90 @@ fn extern_ret(
             .modules
             .get(mid.index())
             .ok_or_else(|| unrealizable("a type from a module not in the workspace"))?;
-        // `Arena` indexes unchecked; a stale index is an internal invariant, so
-        // it is bounded here rather than allowed to panic in the emitter.
         if idx.into_raw().into_u32() as usize >= module.ty_arena.len() {
             return Err(unrealizable("a type index its module does not contain"));
         }
-        Ok((ty, module.ty_arena[idx]))
+        Ok(module.ty_arena[idx])
     };
-    // A generic parameter is only unrealizable when nothing BOUND it. Inside
-    // `Boxed<int>` the declaration's `T` is bound to `int` by the application,
-    // which is the whole reason a substitution is carried rather than the
-    // declaration's own `wrapped` being read directly.
-    let substituted = |mut ty: TyId, subst: &[(bone_semantic::hir::VarId, TyId)]| -> Result<TyId, CompilerError> {
-        for _ in 0..MAX_NEWTYPE_STEPS {
-            let (_, te) = resolve(ty)?;
+    let newtype_def = |name: ustr::Ustr| -> Result<(NewtypeId, Vec<TyId>, TyId), CompilerError> {
+        let nid = *ws
+            .newtypes_by_name
+            .get(&name)
+            .ok_or_else(|| unrealizable("a newtype the workspace lost"))?;
+        let owner = ws
+            .modules
+            .get(nid.module.index())
+            .filter(|m| (nid.def.into_raw().into_u32() as usize) < m.newtypes.len())
+            .ok_or_else(|| unrealizable("a newtype whose definition is missing"))?;
+        let def = &owner.newtypes[nid.def];
+        Ok((nid, def.generics.clone(), def.wrapped))
+    };
+
+    // Environment arena. Index 0 is empty; a newtype application pushes exactly
+    // its own declaration's bindings, each one a CLOSURE over the environment the
+    // argument was written in.
+    let mut envs: Vec<Vec<(VarId, TyClosure)>> = vec![Vec::new()];
+
+    // Follow bound generics until the head is something else. An unresolved
+    // generic comes back as itself, and the caller decides that is unbound.
+    let whnf = |envs: &Vec<Vec<(VarId, TyClosure)>>,
+                mut c: TyClosure|
+     -> Result<(TyClosure, TypeExpr), CompilerError> {
+        for _ in 0..MAX_ALIAS_STEPS {
+            let te = node(c.ty)?;
             let var = match te {
                 TypeExpr::Generic(v, _) | TypeExpr::Infer(v, _) => v,
-                _ => return Ok(ty),
+                _ => return Ok((c, te)),
             };
-            match subst.iter().find(|(v, _)| *v == var) {
-                Some((_, bound)) => ty = *bound,
-                None => return Ok(ty),
+            match envs[c.env].iter().find(|(v, _)| *v == var) {
+                Some((_, bound)) => c = *bound,
+                None => return Ok((c, te)),
             }
         }
-        Err(unrealizable("a generic substitution that does not settle"))
+        Err(unrealizable("a generic binding that does not settle"))
     };
 
-    // A newtype is a representation ALIAS, not a distinct C type: `newtype
-    // Handle(int)` is an `int` at the boundary and needs exactly the coercion an
-    // `int` needs. Following it is what keeps the typed declaration -- the shape
-    // B3 wants for handles -- from being the loophole that reintroduces a boxed
-    // cdata.
-    //
-    // `newtype A(B); newtype B(A)` compiles, so the walk must terminate on its
-    // own. The visited key is the newtype together with its RESOLVED arguments,
-    // not the newtype alone: `newtype Pair<T>(T)` reached as `Pair<Pair<int>>`
-    // legitimately visits `Pair` twice, with different arguments each time.
-    let mut ty = ty;
-    let mut subst: Vec<(bone_semantic::hir::VarId, TyId)> = Vec::new();
-    let mut visited: Vec<(bone_semantic::prelude::NewtypeId, NewtypeArgs)> = Vec::new();
+    fn normal_form(
+        node: &dyn Fn(bone_semantic::prelude::TyId) -> Result<bone_semantic::hir::TypeExpr, CompilerError>,
+        whnf: &dyn Fn(&Vec<Vec<(bone_semantic::hir::VarId, TyClosure)>>, TyClosure) -> Result<(TyClosure, bone_semantic::hir::TypeExpr), CompilerError>,
+        envs: &Vec<Vec<(bone_semantic::hir::VarId, TyClosure)>>,
+        c: TyClosure,
+        fuel: usize,
+    ) -> Result<NormalTy, CompilerError> {
+        use bone_semantic::hir::{BuiltinTy, TypeCtor, TypeExpr};
+        if fuel == 0 {
+            return Ok(NormalTy::Opaque);
+        }
+        let (c, te) = whnf(envs, c)?;
+        Ok(match te {
+            TypeExpr::Builtin(BuiltinTy::Int) => NormalTy::Prim("int"),
+            TypeExpr::Builtin(BuiltinTy::Float) => NormalTy::Prim("float"),
+            TypeExpr::Builtin(BuiltinTy::Bool) => NormalTy::Prim("bool"),
+            TypeExpr::Builtin(BuiltinTy::String) => NormalTy::Prim("string"),
+            TypeExpr::Generic(_, n) | TypeExpr::Infer(_, n) => NormalTy::Unbound(n),
+            TypeExpr::App { ctor: TypeCtor::Nominal(name), params } => {
+                let mut args = Vec::new();
+                for p in params {
+                    args.push(normal_form(
+                        node,
+                        whnf,
+                        envs,
+                        TyClosure { ty: c.ty.with_idx(p), env: c.env },
+                        fuel - 1,
+                    )?);
+                }
+                let _ = node;
+                NormalTy::Nominal(name, args)
+            }
+            _ => NormalTy::Opaque,
+        })
+    }
 
-    for _ in 0..MAX_NEWTYPE_STEPS {
-        let (here, te) = resolve(substituted(ty, &subst)?)?;
+    let mut cur = TyClosure { ty: ret, env: 0 };
+    let mut visited: Vec<(NewtypeId, Vec<NormalTy>)> = Vec::new();
+
+    for _ in 0..MAX_ALIAS_STEPS {
+        let (here, te) = whnf(&envs, cur)?;
         match te {
             TypeExpr::Builtin(BuiltinTy::Int) => return Ok(ExternRet::Int),
             TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } if crate::is_value_struct(ws, name) => {
@@ -412,40 +494,38 @@ fn extern_ret(
             TypeExpr::App { ctor: TypeCtor::Nominal(name), params }
                 if ws.newtypes_by_name.contains_key(&name) =>
             {
-                let nid = *ws
-                    .newtypes_by_name
-                    .get(&name)
-                    .ok_or_else(|| unrealizable("a newtype the workspace lost"))?;
-                let owner = ws
-                    .modules
-                    .get(nid.module.index())
-                    .filter(|m| (nid.def.into_raw().into_u32() as usize) < m.newtypes.len())
-                    .ok_or_else(|| unrealizable("a newtype whose definition is missing"))?;
-                let def = &owner.newtypes[nid.def];
-
-                let args: NewtypeArgs = params
+                let (nid, generics, wrapped) = newtype_def(name)?;
+                // Arguments are captured, never eagerly resolved: each keeps the
+                // environment it was written in, which is what makes nesting
+                // compose.
+                let args: Vec<TyClosure> = params
                     .into_iter()
-                    .map(|p| substituted(here.with_idx(p), &subst))
-                    .collect::<Result<_, _>>()?;
-                if visited.contains(&(nid, args.clone())) {
+                    .map(|p| TyClosure { ty: here.ty.with_idx(p), env: here.env })
+                    .collect();
+
+                let key = args
+                    .iter()
+                    .map(|a| normal_form(&node, &whnf, &envs, *a, MAX_ALIAS_STEPS))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if visited.iter().any(|(n, k)| *n == nid && *k == key) {
                     return Err(unrealizable("a newtype whose representation contains itself"));
                 }
-                visited.push((nid, args.clone()));
+                visited.push((nid, key));
 
-                let mut next: Vec<(bone_semantic::hir::VarId, TyId)> = Vec::new();
-                for (g, a) in def.generics.iter().zip(args) {
-                    if let (_, TypeExpr::Generic(v, _) | TypeExpr::Infer(v, _)) = resolve(*g)? {
-                        next.push((v, a));
+                let mut binds: Vec<(VarId, TyClosure)> = Vec::new();
+                for (g, a) in generics.iter().zip(args) {
+                    if let TypeExpr::Generic(v, _) | TypeExpr::Infer(v, _) = node(*g)? {
+                        binds.push((v, a));
                     }
                 }
-                subst = next;
-                ty = def.wrapped;
+                envs.push(binds);
+                cur = TyClosure { ty: wrapped, env: envs.len() - 1 };
             }
-            // Source-reachable and previously silent: `extern(ffi, "l") fn f<T>() -> T`
-            // emitted a passthrough wrapper. Nothing about an UNBOUND `T` says whether
-            // the C callee returns a number, a boxed 64-bit integer or a struct, so
-            // there is no representation to give it -- the same fail-open this
-            // classifier exists to close, one type constructor over.
+            // `whnf` already followed every binding, so a generic here is one
+            // nothing bound. Nothing about it says whether the C callee returns a
+            // number, a boxed 64-bit integer or a struct, so there is no
+            // representation to give it -- the same fail-open this classifier
+            // exists to close, one type constructor over.
             TypeExpr::Generic(_, n) | TypeExpr::Infer(_, n) => {
                 return Err(unrealizable(&format!("the unbound generic parameter `{n}`")))
             }
