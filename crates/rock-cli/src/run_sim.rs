@@ -2114,12 +2114,34 @@ fn run_specs_recovering(
 
         for (offset, (mut summary, _)) in merged.into_iter().take(finals).enumerate() {
             let plan = &mut plans[base + offset];
+            // An entry the native reset boundary could not return is not
+            // worker-eligible: rerun it ALONE, so its record is the one a fresh
+            // process produces, and report why. A single-spec queue takes no
+            // boot checkpoint, so the boundary it tripped is not even reached --
+            // which is also why this cannot loop.
+            let mut provenance = offset > 0;
+            if let Some(reason) = summary.worker_ineligible.take() {
+                eprintln!(
+                    "{} `{}` reran in a fresh process: {}",
+                    "[sim]".yellow(),
+                    plan.spec,
+                    reason
+                );
+                let reran =
+                    run_worker(project, &plan.parts, false, true, update_snapshots, output, None)?;
+                let mut m = SimSummary::default();
+                for part in reran {
+                    m.merge(part);
+                }
+                summary = m;
+                provenance = false;
+            }
             let artifacts = plan
                 .artifacts
                 .take()
                 .expect("a spec is finalized exactly once");
             artifacts.finish(&mut summary);
-            done.push((plan.spec.clone(), summary, offset > 0));
+            done.push((plan.spec.clone(), summary, provenance));
         }
         base += finals;
     }
@@ -2887,6 +2909,12 @@ struct SimSummary {
     /// recovery loop reruns such entries in a fresh worker; every other caller
     /// keeps the error record this flag rides beside.
     never_started: bool,
+    /// Why this entry could not run as anything but the first entry of a
+    /// process: the native reset boundary found a resource it could neither
+    /// destroy nor return (`stone/engine/sim_native.rock`). The recovery loop
+    /// reruns the entry ALONE and reports the reason, so the record that
+    /// survives is the fresh-process one.
+    worker_ineligible: Option<String>,
 }
 
 impl SimSummary {
@@ -2911,6 +2939,9 @@ impl SimSummary {
             self.process_failure_code = other.process_failure_code;
         }
         self.never_started = self.never_started || other.never_started;
+        if other.worker_ineligible.is_some() {
+            self.worker_ineligible = other.worker_ineligible;
+        }
     }
 }
 
@@ -2971,6 +3002,10 @@ impl SimSummary {
                     s.errors.push(SiteMessage { message, site });
                 }
                 "stop" => s.saw_stop = true,
+                "worker_ineligible" => {
+                    s.worker_ineligible =
+                        Some(extract_str_field(rest, "message").unwrap_or_default());
+                }
                 "snapshot" => {
                     let name = extract_str_field(rest, "name").unwrap_or_default();
                     let value_json = extract_raw_field(rest, "value").unwrap_or_else(|| "null".into());

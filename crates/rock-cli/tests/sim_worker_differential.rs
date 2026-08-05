@@ -597,6 +597,64 @@ fn a_replaced_boot_checkpoint_is_refused_not_restored() {
     );
 }
 
+/// A native resource an entry CREATED does not reach its successor
+/// (`docs/sim-speed-plan.md` B3). The Lua checkpoint cannot see a GL texture or
+/// an FBO, so the boundary tears the native world back down to the exact
+/// handle set boot published -- and the fixture reads that set two independent
+/// ways, the ledger's own diff and the monotonic id its own canvas is handed.
+#[test]
+fn a_predecessors_native_resource_does_not_reach_the_next_entry() {
+    let (isolated, worker) = differential(&["b3_leak_seed"], "b3_leak_probe");
+    let c = compare(&isolated, &worker);
+    assert_equivalent("b3_leak_probe", &c);
+    assert_eq!(isolated.verdict(), "PASS", "the probe passes in a fresh process");
+    assert!(c.population("expects_pass") > 0, "the fixture asserted nothing");
+}
+
+/// The other direction, which no teardown can fix: an entry that DESTROYED a
+/// boot-owned native resource leaves the restored globals naming a handle whose
+/// GL object is gone, and the first draw through one is a GL error. Such an
+/// entry is not worker-eligible -- the boundary names what is missing, the
+/// parent reruns the entry alone, and the record that survives is the
+/// fresh-process one.
+#[test]
+fn an_entry_that_destroyed_boots_native_world_reruns_in_a_fresh_process() {
+    let records = run_worker_suite(
+        Backend::Skull,
+        "testbed",
+        &["b3_canvas_seed".to_string(), "b3_canvas_probe".to_string()],
+    )
+    .expect("the suite call itself must not error: ineligibility is a scheduling fact");
+    assert_eq!(records.len(), 2, "one record per entry spec");
+
+    let (seed, seed_crossed) = &records[0];
+    assert_eq!(
+        seed.verdict(),
+        "PASS",
+        "the rerun record is the fresh-process one, so the entry is not charged \
+         with a failure an isolated run would not have given it: {seed:?}"
+    );
+    assert!(
+        !seed_crossed,
+        "an entry that reran alone followed no predecessor and cannot be restore evidence"
+    );
+
+    let (probe, _) = &records[1];
+    assert_eq!(
+        probe.verdict(),
+        "PASS",
+        "the successor renders through boot's canvases, not through destroyed ones: {probe:?}"
+    );
+    assert!(
+        !probe
+            .expects_fail
+            .iter()
+            .any(|m| m.message.contains("GL errors")),
+        "the worker-only GL error class is what this boundary closes: {:?}",
+        probe.expects_fail
+    );
+}
+
 /// Mutation guard for the comparator itself: every arm must be present, and
 /// every arm a fixture can populate must have compared a non-zero population
 /// in at least one fixture. Deleting an arm from `compare` makes `population`
