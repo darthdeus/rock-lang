@@ -69,10 +69,10 @@ struct ArtifactTotals {
     foreign_bodies: usize,
     multi_lane_publishers: usize,
     widest_result_lanes: usize,
-    lanes_unknown: usize,
     /// Retained instances with NO substitution record in the shared graph. An
-    /// invariant finding, reported apart from `lanes_unknown`: "generic, so the
-    /// declaration cannot answer" and "the graph is incomplete" are different.
+    /// invariant finding, and the ONLY way a retained foreign body goes without
+    /// a stated wire: the width is built from the instance's substitution, so
+    /// being generic is not a reason to be unanswered.
     missing_substitutions: usize,
     deferred: Vec<&'static str>,
 }
@@ -413,7 +413,6 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
                         foreign_bodies: 0,
                         multi_lane_publishers: 0,
                         widest_result_lanes: 0,
-                        lanes_unknown: 0,
                         missing_substitutions: 0,
                         deferred: c.deferred.clone(),
                     });
@@ -432,7 +431,6 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
                     e.severed += c.severed;
                     e.foreign_bodies += c.foreign_bodies;
                     e.multi_lane_publishers += c.multi_lane_publishers;
-                    e.lanes_unknown += c.lanes_unknown;
                     e.missing_substitutions += c.missing_substitutions;
                     e.widest_result_lanes = e.widest_result_lanes.max(c.widest_result_lanes);
                     for (k, v) in &c.severed_by_cause {
@@ -1144,19 +1142,19 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     println!();
     println!(
         "The result wire of every foreign body an artifact emits, from the concrete result ABI \
-         (`skull_mir::lower::result_lane_count`) rather than from the body text. A multi-lane \
-         body publishes through one final `return __rock_publish(..)` whose arity is this number."
+         (`skull_mir::lower::BackendFnAbiPlan`, built under THAT INSTANCE's substitution) rather \
+         than from the body text or from the declaration. A multi-lane body publishes through one \
+         final `return __rock_publish(..)` whose arity is this number."
     );
     println!();
     for (name, a) in &art_rows {
         println!(
             "- `{name}`: **{}** foreign bodies with a stated wire, **{}** multi-lane publishers, \
-             widest wire **{}**, **{}** whose generic substitution leaves the wire unstated, \
-             **{}** retained instances with no substitution record at all (must be 0)",
+             widest wire **{}**, **{}** retained instances with no substitution record at all \
+             (must be 0 -- and the only way a wire goes unstated)",
             a.foreign_bodies,
             a.multi_lane_publishers,
             a.widest_result_lanes,
-            a.lanes_unknown,
             a.missing_substitutions
         );
     }

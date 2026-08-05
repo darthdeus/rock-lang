@@ -1520,7 +1520,12 @@ pub type SpecKey = Vec<Option<MonoTy>>;
 
 /// Callee generic `VarId` -> its concrete type tree, for specialized lowering.
 /// Only the reified generics appear; a `None` in the [`SpecKey`] is absent here.
-pub type SpecSubst = std::collections::HashMap<bone_semantic::hir::VarId, MonoTy>;
+///
+/// THE SAME TYPE as [`crate::monoty::MonoSubst`], which is what an instance of
+/// the mono graph carries. One substitution vocabulary, so an instance's own
+/// bindings drive lowering and the ABI plan directly rather than through a
+/// conversion that could lose or reorder them.
+pub type SpecSubst = crate::monoty::MonoSubst;
 
 /// The root `TypeExpr` a substituted generic resolves to. Nested arguments stay
 /// in [`SpecSubst`] for recursive call specialization; the synthesized root has
@@ -1904,7 +1909,7 @@ pub(crate) fn compute_spec_from_bindings(
         ));
     }
     let mut key: SpecKey = Vec::with_capacity(bindings.len());
-    let mut subst = SpecSubst::new();
+    let mut subst = SpecSubst::default();
     let mut any_value = false;
     let mut complete = true;
     for (g, b) in f.generics.iter().zip(bindings) {
@@ -2019,7 +2024,7 @@ pub(crate) fn ablation_next_decline(
 /// empty subst (the shared snapshot).
 pub fn spec_subst_from_key(ws: &Workspace, fref: FuncRef, key: &SpecKey) -> SpecSubst {
     let f = &ws.module(fref.module).functions[fref.func];
-    let mut subst = SpecSubst::new();
+    let mut subst = SpecSubst::default();
     for (g, ty) in f.generics.iter().zip(key) {
         if let (Some(TypeExpr::Generic(var, _)), Some(reified)) = (static_ty(ws, *g), ty) {
             subst.insert(var, reified.clone());

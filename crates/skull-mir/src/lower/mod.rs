@@ -317,7 +317,7 @@ struct FnScalarAbi {
 /// Address-taken Rock bodies narrow to the `nobox` shapes an indirect caller can
 /// derive from the fn type; direct-only bodies may scalarize every eligible value.
 fn fn_scalar_abi(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef) -> Option<FnScalarAbi> {
-    fn_scalar_abi_spec(ws, scx, fref, &SpecSubst::new())
+    fn_scalar_abi_spec(ws, scx, fref, &SpecSubst::default())
 }
 
 fn fn_nobox_abi_spec(
@@ -394,72 +394,83 @@ impl NestedFn {
     }
 }
 
-/// The Lua parameter-name list for a scalar-ABI `inline(lua)` fn (`@scalar_abi`):
-/// each value param expands to its depth-first leaf names `<base>__<leaf>` (the
-/// names the hand-written body references), non-value params keep their name.
-/// `None` if the fn doesn't use the scalar ABI (the caller emits the plain list).
-/// The leaf ORDER matches `repr_to_leaves`, so def params line up with the
-/// callsite splat positionally.
-pub fn scalar_abi_lua_param_names(
-    ws: &Workspace,
-    scx: &ScalarCtx,
-    fref: FuncRef,
-) -> Option<Vec<String>> {
-    let abi = fn_scalar_abi(ws, scx, fref)?;
-    let f = &ws.module(fref.module).functions[fref.func];
-    let mut names = Vec::new();
-    for (pd, slot) in f.param_decls.iter().zip(abi.param_shapes) {
-        slot_param_names(pd.name.as_str(), &slot, &mut names);
-    }
-    Some(names)
+/// **THE backend ABI of one function INSTANCE** (plan S 13, Stage 3).
+///
+/// One object, built once from a declaration and *that instance's own*
+/// substitution, holding every physical fact a definition or a call route needs
+/// about the wire: the emitted parameter spelling, the per-declared-param leaf
+/// widths an arity guard subtracts, and the RESULT LANES a JS publisher's arity
+/// comes from. Three independent oracles stood here before; a publisher and the
+/// caller capturing it could only agree by all three being asked the same
+/// question, which nothing enforced.
+///
+/// The substitution is an instance's [`crate::monoty::MonoSubst`], so a generic
+/// body instantiated at a multi-lane result states *that* width. `T` is one
+/// boxed slot on the declaration and two lanes at `T = (bool, float)`; a
+/// per-declaration answer is not a narrower answer, it is a different question.
+/// [`Self::for_declaration`] is the empty-substitution case -- the shared
+/// generic snapshot pre-cutover emission still writes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BackendFnAbiPlan {
+    pub decl: FuncRef,
+    /// Physical values on the result wire: 0 with no return, 1 for an ordinary
+    /// one, more for the two shapes that splat -- a tuple return (each element
+    /// its own slot, a `nobox` element into its leaves) and a bare `nobox`
+    /// value return under the scalar ABI.
+    ///
+    /// Plan S 13b: leaf 0 rides the ordinary JS `return`, lanes 1..N ride the
+    /// module-scope scratch bank (`docs/boundary-contracts.md` 1.2). Derived
+    /// from the same [`fn_scalar_abi_spec`] policy and [`tuple_ret_shape`] the
+    /// definition and every call site read, which a textual scan of the opaque
+    /// body for `__rock_retN` could not be.
+    pub result_lanes: usize,
+    /// Depth-first leaf names for a scalar-ABI foreign body (`@scalar_abi`):
+    /// each value param expands to `<base>__<leaf>`, the names the hand-written
+    /// body references; other params keep their name. `None` when this instance
+    /// does not use the scalar ABI, and the caller emits the plain list. The
+    /// leaf ORDER matches `repr_to_leaves`, so def params line up with the
+    /// callsite splat positionally.
+    pub lua_param_names: Option<Vec<String>>,
+    /// Per-DECLARED-param leaf width (a value-struct param's flattened leaf
+    /// count, 1 otherwise). Per declared param rather than per slot so a
+    /// defaulted value-struct param counts as its whole leaf group.
+    pub param_leaf_widths: Option<Vec<usize>>,
 }
 
-/// Per-declared-param LEAF width under the scalar ABI (a value-struct param's
-/// flattened leaf count, 1 for everything else); `None` when `fref` does not
-/// use the scalar ABI. Pairs with `scalar_abi_lua_param_names` -- the JS arity
-/// guard needs widths per DECLARED param so a defaulted value-struct param
-/// counts as its whole leaf group, not one slot.
-pub fn scalar_abi_param_leaf_widths(
-    ws: &Workspace,
-    scx: &ScalarCtx,
-    fref: FuncRef,
-) -> Option<Vec<usize>> {
-    let abi = fn_scalar_abi(ws, scx, fref)?;
-    Some(
-        abi.param_shapes.iter().map(RetSlot::slot_count).collect(),
-    )
-}
-
-/// The physical RESULT LANES of `fref`'s declared return: how many values the
-/// call wire carries.
-///
-/// 0 for a fn with no return, 1 for an ordinary one, and more for the two
-/// shapes that put several values on the wire -- a tuple return (each element
-/// its own slot, a `nobox` element splatting into its leaves) and a bare
-/// `nobox` value return under the scalar ABI.
-///
-/// **Answered for the DECLARED signature**, under an empty substitution -- the
-/// only shape GLSL/JS lowering can ask about today. A caller holding concrete
-/// instances must therefore ask this only of an instance whose substitution is
-/// empty; for a generic one the declared return is not the shape the artifact
-/// carries, and `ArtifactView::publisher_lanes` records it as unknown instead.
-///
-/// This is what a JS multi-lane publisher's arity comes from
-/// (`docs/boundary-contracts.md` 1.2, plan S 13b): leaf 0 rides the ordinary
-/// JS `return`, lanes 1..N ride the module-scope scratch bank. Derived from the
-/// same [`fn_scalar_abi`] policy and [`tuple_ret_shape`] every definition and
-/// call site read, so a publisher cannot disagree with the wire its own callers
-/// capture -- which is exactly what a textual scan of the opaque body for
-/// `__rock_retN` could not guarantee.
-pub fn result_lane_count(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef) -> usize {
-    let f = &ws.module(fref.module).functions[fref.func];
-    let Some(ret) = f.return_ty else { return 0 };
-    if let Some(shape) = shape::tuple_ret_shape(ws, &SpecSubst::new(), ret) {
-        return shape.slot_count();
+impl BackendFnAbiPlan {
+    pub fn build(
+        ws: &Workspace,
+        scx: &ScalarCtx,
+        decl: FuncRef,
+        subst: &SpecSubst,
+    ) -> Self {
+        let f = &ws.module(decl.module).functions[decl.func];
+        let abi = fn_scalar_abi_spec(ws, scx, decl, subst);
+        let result_lanes = match f.return_ty {
+            None => 0,
+            Some(ret) => match shape::tuple_ret_shape(ws, subst, ret) {
+                Some(shape) => shape.slot_count(),
+                None => match abi.as_ref().and_then(|a| a.ret_shape.as_ref()) {
+                    Some(vs) => vs.leaf_count(),
+                    None => 1,
+                },
+            },
+        };
+        let lua_param_names = abi.as_ref().map(|a| {
+            let mut names = Vec::new();
+            for (pd, slot) in f.param_decls.iter().zip(a.param_shapes.iter()) {
+                slot_param_names(pd.name.as_str(), slot, &mut names);
+            }
+            names
+        });
+        let param_leaf_widths =
+            abi.as_ref().map(|a| a.param_shapes.iter().map(RetSlot::slot_count).collect());
+        Self { decl, result_lanes, lua_param_names, param_leaf_widths }
     }
-    match fn_scalar_abi(ws, scx, fref).and_then(|abi| abi.ret_shape) {
-        Some(vs) => vs.leaf_count(),
-        None => 1,
+
+    /// The declaration's own shape -- the empty-substitution instance.
+    pub fn for_declaration(ws: &Workspace, scx: &ScalarCtx, decl: FuncRef) -> Self {
+        Self::build(ws, scx, decl, &SpecSubst::default())
     }
 }
 
@@ -498,7 +509,7 @@ pub fn scalar_abi_param_collisions(
     if f.inline_body.is_none() {
         return Vec::new();
     }
-    let Some(names) = scalar_abi_lua_param_names(ws, scx, fref) else {
+    let Some(names) = BackendFnAbiPlan::for_declaration(ws, scx, fref).lua_param_names else {
         return Vec::new();
     };
     let origins = scalar_abi_param_origins(ws, scx, fref);
@@ -1061,7 +1072,7 @@ pub fn lower_function(
     mid: ModuleId,
     fid: Idx<Function>,
 ) -> Result<MirFunc, CompilerError> {
-    lower_function_spec(ws, scx, mid, fid, &SpecSubst::new())
+    lower_function_spec(ws, scx, mid, fid, &SpecSubst::default())
 }
 
 /// Lower `fref` with a per-instantiation generic substitution (`docs/flatvec-plan.md`,
@@ -1183,7 +1194,7 @@ pub fn lower_global(
         .and_then(|ir| ir.per_fn.get(&BodyOwner::Global(gid)));
     let f = MirFunc::new(name);
     let cur = f.entry();
-    let empty_subst = SpecSubst::new();
+    let empty_subst = SpecSubst::default();
     let mut b = Builder {
         ws,
         scx,
@@ -1255,7 +1266,7 @@ pub fn lower_decorator(
         .ok_or_else(|| gap("decorator body has no target binding"))?;
     let f = MirFunc::new(name);
     let cur = f.entry();
-    let empty_subst = SpecSubst::new();
+    let empty_subst = SpecSubst::default();
     let mut b = Builder {
         ws,
         scx,
@@ -2041,7 +2052,7 @@ fn fn_opaque_intrinsic_transitive(
     for (c, resolved) in inf.resolved_overload_calls.iter() {
         let callee = FuncRef { module: resolved.0, func: resolved.1 };
         let Some(bindings) = inf.call_generic_bindings.get(c) else { continue };
-        let empty = SpecSubst::new();
+        let empty = SpecSubst::default();
         if bindings.iter().all(|&b| reify_type(ws, inf, b, &empty).is_some()) {
             continue;
         }
@@ -2158,7 +2169,7 @@ pub fn generic_coroutine_column_reject(
             }
             let Some(bindings) = inf.call_generic_bindings.get(c) else { continue };
             let Some((key, _)) =
-                compute_spec_from_bindings(ws, inf, fref, bindings, &SpecSubst::new())?
+                compute_spec_from_bindings(ws, inf, fref, bindings, &SpecSubst::default())?
             else {
                 continue;
             };
@@ -2258,7 +2269,7 @@ pub fn native_buffer_alloc_reject(ws: &Workspace, mid: ModuleId) -> Option<(Stri
             let resolves = if !owner_inlined {
                 false
             } else {
-                let spec = match compute_call_spec(ws, inf, c, fref, &SpecSubst::new(), LUA) {
+                let spec = match compute_call_spec(ws, inf, c, fref, &SpecSubst::default(), LUA) {
                     Ok(spec) => spec,
                     // This pass reads the same instantiation lowering does, so a
                     // compiler-state rejection is its answer too rather than
@@ -2902,7 +2913,7 @@ pub(crate) mod shape_census_support {
         target: FnBackend,
     ) -> (Vec<(FuncRef, SpecKey)>, usize) {
         // caller is supplied by the census; this returns callee-side data only
-        let empty = SpecSubst::new();
+        let empty = SpecSubst::default();
         let mut out = Vec::new();
         let mut rejected = 0usize;
         let mut calls: Vec<_> = inf.resolved_overload_calls.iter().collect();

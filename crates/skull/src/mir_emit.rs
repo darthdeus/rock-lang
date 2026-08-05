@@ -1773,7 +1773,9 @@ fn assemble(
                 // value-returning bodyless-`return` and prepending default fills.
                 // (Js inline bodies were skipped above via the backend guard.)
                 let name = mangle_fn(ws, f);
-                let params = match skull_mir::lower::scalar_abi_lua_param_names(ws, scx, self_ref) {
+                let params = match skull_mir::lower::BackendFnAbiPlan::for_declaration(ws, scx, self_ref)
+                    .lua_param_names
+                {
                     Some(names) => names.join(", "),
                     None => f.param_decls.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", "),
                 };

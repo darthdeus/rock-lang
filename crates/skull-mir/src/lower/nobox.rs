@@ -645,7 +645,7 @@ impl Builder<'_> {
             let Some(overloads) = self.ws.functions_by_name.get(name) else { continue };
             let incompatible = overloads.iter().any(|(mid, fid)| {
                 let fref = FuncRef { module: *mid, func: *fid };
-                let expected = fn_nobox_abi_spec(self.ws, fref, &SpecSubst::new());
+                let expected = fn_nobox_abi_spec(self.ws, fref, &SpecSubst::default());
                 expected.is_some() && fn_scalar_abi(self.ws, self.scx, fref) != expected
             });
             if incompatible {

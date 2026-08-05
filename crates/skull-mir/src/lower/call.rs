@@ -540,7 +540,7 @@ impl Builder<'_> {
         func: FuncRef,
     ) -> Result<Option<TupleRetShape>, CompilerError> {
         let spec = self.call_spec_for_target(e, func)?;
-        let empty = SpecSubst::new();
+        let empty = SpecSubst::default();
         let subst = spec.as_ref().map_or(&empty, |(_, s)| s);
         let Some(ret) = self.ws.module(func.module).functions[func.func].return_ty else {
             return Ok(None);
@@ -637,7 +637,7 @@ impl Builder<'_> {
         {
             return Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))));
         }
-        let empty_subst = SpecSubst::new();
+        let empty_subst = SpecSubst::default();
         let subst = spec.as_ref().map_or(&empty_subst, |(_, s)| s);
         let scalar_abi = fn_scalar_abi_spec(self.ws, self.scx, func, subst);
         let Some(scalar_abi) = scalar_abi else {
