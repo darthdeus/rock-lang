@@ -1595,14 +1595,14 @@ fn shader_registration_lines(ws: &Workspace) -> Result<ShaderRegistrations, Comp
         dependencies.extend(emission.dependencies);
         // Slot order is the engine's whole view of texture binding: it points
         // each sampler at its unit once at link time, then binds by slot.
-        let slot_names: Vec<&str> = emission.texture_slots.iter().map(|n| n.as_str()).collect();
+        let slot_names: Vec<&str> = emission.abi.texture_units.iter().map(|n| n.as_str()).collect();
         // The `@uniform` blocks' std140 layouts, in binding order: A1 has at
         // most one, an A2 pipeline has one per stage. Carried as PARALLEL FLAT
         // lists -- one entry per block, plus the members concatenated with a
         // per-block count -- so a hand-written driver never nests. A program
         // with no group sends empty lists, which are still arguments; a short
         // call is what rock-cli/tests/shader_register_arity_gate.rs catches.
-        let w = skull_codegen_glsl::BlockWire::of(emission.uniform_blocks.iter(), emission.uniform_array_blocks.iter());
+        let w = skull_codegen_glsl::BlockWire::of(emission.abi.uniform_blocks.iter(), emission.abi.uniform_array_blocks.iter());
         let _ = writeln!(
             out,
             "__rock_shader_register({:?}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
