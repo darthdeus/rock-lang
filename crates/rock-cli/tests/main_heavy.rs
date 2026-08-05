@@ -22,6 +22,8 @@ mod replay_timeline_tests;
 mod replay_window_tests;
 #[path = "frame_error_gate.rs"]
 mod frame_error_gate;
+#[path = "rich_text_reject_gate.rs"]
+mod rich_text_reject_gate;
 #[path = "shader_failure_gate.rs"]
 mod shader_failure_gate;
 #[path = "uniform_block_gate.rs"]

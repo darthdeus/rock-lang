@@ -2020,19 +2020,22 @@ function stone_get_glyph_info_for(fontId, ch, out) {
 // Shim-side measure, from the shim's OWN advances (native-formula drift is
 // the bug class this avoids): width = max line sum(advance)*scale; height
 // single-line = max glyph height*scale, multi-line adds (lines-1)*em*1.2.
+// The glyph max is over THIS TEXT's glyphs, as stone-rs `stone_measure_text`
+// takes it -- the font-wide maximum is a different number and made web plain
+// text sit lower than native for the same string.
 function stone_measure_text_js(fontId, text, scale) {
   var f = __sw_font(fontId);
   if (!f) return [0, 0];
   var s = String(text);
-  var lines = 1, w = 0, lineW = 0;
+  var lines = 1, w = 0, lineW = 0, maxH = 0;
   for (var i = 0; i < s.length; i++) {
     if (s[i] === "\n") { lines++; if (lineW > w) w = lineW; lineW = 0; continue; }
     var g = f.glyphs[s.charCodeAt(i)];
-    if (g) lineW += g[8];
+    if (g) { lineW += g[8]; if (g[5] > maxH) maxH = g[5]; }
   }
   if (lineW > w) w = lineW;
-  var h = f.maxH * Math.abs(scale);
-  if (lines > 1) h = (lines - 1) * f.em * Math.abs(scale) * 1.2 + f.maxH * Math.abs(scale);
+  var h = maxH * Math.abs(scale);
+  if (lines > 1) h = (lines - 1) * f.em * Math.abs(scale) * 1.2 + maxH * Math.abs(scale);
   return [w * scale, h];
 }
 // Baseline = max TOP-based bearing_y over the text's glyphs, * |scale|.

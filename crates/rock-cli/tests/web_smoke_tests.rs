@@ -235,6 +235,38 @@ fn web_default_sampling() {
     assert_not_blank(&shot, "the rect-batch and immediate quads");
 }
 
+// Arc 1 of the rich-text plan, WebGL2 leg. The same fixture the native sim
+// drives (games/testbed/rich_text.rock, sim rich_text_spans): colored spans
+// through one atlas and one batch, with the vertex-level structural claims and
+// the two-colour pixel readback both computed in Rock so the two backends
+// assert identical claims. Fake GL cannot stand in here -- its fallback font is
+// glyphless, so every glyph population would be zero over zero.
+#[test]
+fn web_rich_text_spans() {
+    let Some((_dir, shot)) = run_cdp(
+        "games/testbed",
+        "web_rich_text_spans",
+        &[
+            "--frames",
+            "30",
+            // The fixture walks 12 structural steps at one per frame, then
+            // needs the plate presented and the probe read back. The default
+            // 10-frame settle questions it mid-walk.
+            "--settle-frames",
+            "40",
+            "--setup-expr",
+            "__G.RICH_REQUEST = true",
+            "--expect",
+            "__G.RICH_VERDICT",
+            "--value",
+            "PASS",
+        ],
+    ) else {
+        return;
+    };
+    assert_not_blank(&shot, "the two-colour rich-text line");
+}
+
 #[test]
 fn web_font_density_resize() {
     let Some((_dir, shot)) = run_cdp(
