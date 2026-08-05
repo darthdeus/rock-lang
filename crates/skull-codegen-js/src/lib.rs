@@ -2045,10 +2045,6 @@ function __sw_bytes_to_string(b) {
 // --- camera state / immediate sprite path (MB: batches only; the immediate
 // sprite quad lands with the MD canvas-present blit) ---
 function stone_current_shader_bound() { return __SW.curShader !== 0; }
-function stone_sprite_begin(shader) { if (shader) stone_set_shader(shader); }
-function stone_sprite_draw(shader, handle, x, y, w, h, sx, sy, sw, sh, rot, scx, scy, r, g, b, a) {
-  __sw_log_once("stone_sprite_draw: immediate sprite path not implemented on web yet");
-}
 // The canvas-present blit (sparkle trail et al): a rotated textured quad in
 // pixel space through the bound program, else the passed basic-sprite handle
 // with default uniforms -- mirrors sprite.rs stone_sprite_draw_texture
