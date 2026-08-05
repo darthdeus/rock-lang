@@ -923,7 +923,7 @@ fn enum_cdata_defs(ws: &Workspace) -> String {
 
 /// Attach an `ffi.metatype` to each cdata-eligible ENUM ctype giving it value
 /// `__eq` (compare `__tag` + `_0`, so two distinct `<Enum>_ct` cdata with equal
-/// fields are `==`, and they hash by value as Map keys) and a `__tostring` that
+/// fields are `==`) and a `__tostring` that
 /// renders `<Enum>::<Variant>` from a baked names table -- static reflection, no
 /// runtime engine. Without `__eq`, LuaJIT compares struct cdata by identity, so an
 /// ESCAPING enum (stored in `[Enum]`, a Map, ...) mis-compares. Name-sorted.
@@ -1118,17 +1118,38 @@ fn enum_runtime_defs(ws: &Workspace) -> String {
     out
 }
 
-/// Register a per-value-struct `inspect`/`copy`/`name` closure into
-/// `_G.__ROCK_C_STRUCT`, which the stdlib `inspect` consults to render a value
-/// cdata structurally (`ffi.istype(info.name, obj)` -> `info.inspect(obj)`)
-/// rather than printing its address. Without this a `"{v}"` interpoland on a
-/// value struct renders `cdata<struct N>: 0x...`. Mirrors
-/// rock-codegen/src/backend/lua/structs.rs. Gated by `emitted` — exactly the
-/// structs `value_struct_defs` declared a ctype for, so `ffi.istype` never
-/// names an undefined type.
+/// Register an `inspect`/`copy`/`name` closure into `_G.__ROCK_C_STRUCT` for
+/// every value cdata the compiler mints. That registry is what a consumer asks
+/// "what is this cdata, and how do I copy it": the stdlib `inspect` renders it
+/// structurally (`ffi.istype(info.name, obj)` -> `info.inspect(obj)`) instead of
+/// printing an address, `deepcopy` copies it instead of SHARING it, and the sim
+/// checkpoint census classifies it as `value_cdata` instead of refusing it as
+/// unmodelled. Mirrors rock-codegen/src/backend/lua/structs.rs.
+///
+/// Two producers, one registry. `value` structs are gated by `emitted` — exactly
+/// the structs `value_struct_defs` declared a ctype for, so `ffi.istype` never
+/// names an undefined type. A cdata-eligible enum ([`enum_cdata_defs`]) is the
+/// same layout tier: a typedef'd anonymous struct `{ int __tag; <slots> }`
+/// copied through its own `<Enum>_ct`. Its `inspect` delegates to `tostring`,
+/// which reaches the metatype `__tostring` [`enum_cdata_metatypes`] emitted --
+/// the enum's rendering has one source, not two that can drift.
 fn c_struct_inspect_defs(ws: &Workspace, emitted: &rustc_hash::FxHashSet<ustr::Ustr>) -> String {
     let mut out = String::new();
     {
+        let mut enums: Vec<ustr::Ustr> = ws.enums_by_name.keys().copied().collect();
+        enums.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        for name in enums {
+            let Some(shape) = skull_mir::lower::enum_value_shape(ws, name) else {
+                continue;
+            };
+            let copy_args: Vec<String> =
+                shape.field_names().iter().map(|f| format!("v.{f}")).collect();
+            out.push_str(&format!(
+                "_G.__ROCK_C_STRUCT[\"{name}\"] = {{ inspect = function(v)\n  return tostring(v)\n\
+                 end, copy = function(v)\n  return {name}_ct({})\nend, name = \"{name}\" }}\n",
+                copy_args.join(", ")
+            ));
+        }
         for s in canonical_value_structs(ws) {
             if !emitted.contains(&s.name) {
                 continue;
