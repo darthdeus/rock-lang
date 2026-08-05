@@ -810,7 +810,7 @@ fn run_specs_worker_mode(
             update_snapshots,
             false,
         )?;
-        for (&i, (spec, summary)) in group.iter().zip(results) {
+        for (&i, (spec, summary, _crossed)) in group.iter().zip(results) {
             report(&spec, &summary);
             slots[i] = Some(summary);
         }
@@ -1922,7 +1922,7 @@ fn run_specs_recovering(
     entry_specs: &[String],
     update_snapshots: bool,
     record_manifest: bool,
-) -> Result<Vec<(String, SimSummary)>> {
+) -> Result<Vec<(String, SimSummary, bool)>> {
     let mut plans = Vec::with_capacity(entry_specs.len());
     for spec in entry_specs {
         let artifacts = SimArtifacts::with_manifest(record_manifest)?;
@@ -1945,7 +1945,11 @@ fn run_specs_recovering(
         plans.push(SpecPlan { spec: spec.clone(), artifacts: Some(artifacts), parts });
     }
 
-    let mut done: Vec<(String, SimSummary)> = Vec::new();
+    // The third field is PROVENANCE: did this spec actually follow another one
+    // inside the same process? Position in the queue cannot answer that, because
+    // recovery reruns unstarted specs in a fresh worker where they start over at
+    // offset 0. Only the round that produced the record knows.
+    let mut done: Vec<(String, SimSummary, bool)> = Vec::new();
     let mut base = 0usize;
     while base < plans.len() {
         let parts: Vec<WorkerPart> =
@@ -1992,7 +1996,7 @@ fn run_specs_recovering(
                 .take()
                 .expect("a spec is finalized exactly once");
             artifacts.finish(&mut summary);
-            done.push((plan.spec.clone(), summary));
+            done.push((plan.spec.clone(), summary, offset > 0));
         }
         base += finals;
     }
@@ -2028,9 +2032,9 @@ fn run_worker_arm(
     output: &str,
     env_by_wire: &HashMap<String, Vec<(String, String)>>,
     ordered: &[String],
-) -> Result<Vec<crate::sim_record::SimRecord>> {
+) -> Result<Vec<(crate::sim_record::SimRecord, bool)>> {
     let (groups, isolated) = group_worker_specs(ordered, env_by_wire);
-    let mut out: Vec<Option<crate::sim_record::SimRecord>> = vec![None; ordered.len()];
+    let mut out: Vec<Option<(crate::sim_record::SimRecord, bool)>> = vec![None; ordered.len()];
 
     for members in groups {
         let specs: Vec<String> = members.iter().map(|&i| ordered[i].clone()).collect();
@@ -2042,10 +2046,13 @@ fn run_worker_arm(
                 members.len()
             ));
         }
-        for (k, (spec, summary)) in results.into_iter().enumerate() {
-            out[members[k]] = Some(record_of(&spec, members[k], summary));
+        for (k, (spec, summary, crossed)) in results.into_iter().enumerate() {
+            out[members[k]] = Some((record_of(&spec, members[k], summary), crossed));
         }
     }
+    // Ineligible entries run in a fresh process, so they cross no boundary --
+    // they are still COMPARED (a difference here is a real one), they just
+    // cannot be evidence that a restore put the world back.
     for (i, _reason) in isolated {
         let mut records = run_entries(
             project,
@@ -2054,7 +2061,7 @@ fn run_worker_arm(
             std::slice::from_ref(&ordered[i]),
             Grouping::PerPart,
         )?;
-        out[i] = Some(records.remove(0));
+        out[i] = Some((records.remove(0), false));
     }
 
     out.into_iter()
@@ -2126,24 +2133,48 @@ pub fn run_multi_order_gate(backend: crate::Backend, project: &str) -> Result<()
     let mut totals: BTreeMap<&'static str, usize> =
         COMPARED_ARMS.iter().map(|a| (*a, 0usize)).collect();
     let mut diverged: Vec<String> = Vec::new();
+    let (mut crossed_n, mut fresh_n) = (0usize, 0usize);
 
     for (label, order) in &arms {
         println!("[multi-order] {label} arm");
         let ordered: Vec<String> = order.iter().map(|&i| wire_names[i].clone()).collect();
         let records = run_worker_arm(&project, &output, &env_by_wire, &ordered)?;
-        for (pos, record) in records.iter().enumerate() {
+        for (pos, (record, crossed)) in records.iter().enumerate() {
             let name = &ordered[pos];
             let Some(expected) = reference_at.get(name.as_str()) else {
                 return Err(anyhow!("`{name}` has no reference record"));
             };
             let c = compare(expected, record);
-            for a in COMPARED_ARMS {
-                *totals.get_mut(a).expect("totals is keyed by COMPARED_ARMS") += c.population(a);
+            // EVERY comparison decides divergence -- a difference is a
+            // difference wherever it appears. Only a boundary-crossing entry
+            // feeds the DENOMINATOR: an entry that ran first in its process, or
+            // ran isolated, never had a predecessor's world to inherit, so its
+            // agreement with a fresh process is agreement between two fresh
+            // processes and cannot certify that a restore works.
+            if *crossed {
+                crossed_n += 1;
+                for a in COMPARED_ARMS {
+                    *totals.get_mut(a).expect("totals is keyed by COMPARED_ARMS") +=
+                        c.population(a);
+                }
+            } else {
+                fresh_n += 1;
             }
             if !c.is_equivalent() {
                 diverged.push(format!("[{label}] {name}\n{}", c.report()));
             }
         }
+    }
+    println!(
+        "[multi-order] {crossed_n} comparisons followed a predecessor in one process and are \
+         the evidence; {fresh_n} ran first in their process or isolated and are compared but \
+         not counted"
+    );
+    if crossed_n == 0 {
+        return Err(anyhow!(
+            "no entry followed a predecessor in one process, so nothing here is evidence \
+             about a restore boundary"
+        ));
     }
 
     // A comparison that found nothing is only evidence when each arm had
@@ -2210,7 +2241,7 @@ pub fn run_worker_suite(
     Ok(results
         .into_iter()
         .enumerate()
-        .map(|(seq, (spec, summary))| record_of(&spec, seq, summary))
+        .map(|(seq, (spec, summary, _crossed))| record_of(&spec, seq, summary))
         .collect())
 }
 

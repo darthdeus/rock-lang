@@ -300,54 +300,10 @@ pub fn normalize_diagnostics(lines: &[String], out_dir: &Path) -> String {
         } else {
             &body.replace(&out_str, "$OUT")
         };
-        result.push_str(mask_durations(body.trim_end()).trim_end());
+        result.push_str(body.trim_end());
         result.push('\n');
     }
     result
-}
-
-/// Units that make the number in front of them a MEASUREMENT rather than state.
-/// Deliberately not `s`, which ends too many ordinary words to be decidable, and
-/// deliberately not a bare number: message digits are PRESERVED on purpose --
-/// frame counters, entity ids and resource handles are exactly the leaked state
-/// this arm exists to see. A duration is the one class that cannot be evidence,
-/// because two runs of identical work legitimately differ in it.
-const DURATION_UNITS: [&str; 3] = ["ms", "us", "ns"];
-
-/// Replace `<number><duration unit>` with `<dur><unit>`. Two runs of the same
-/// sim doing the same work report different microseconds, so an unmasked
-/// duration makes every timing log a false divergence -- observed on
-/// `[HOT RELOAD] time dofile: 0.87ms | total: 22.34ms` at corpus scale.
-fn mask_durations(line: &str) -> String {
-    let b = line.as_bytes();
-    let mut out = String::with_capacity(line.len());
-    let mut i = 0;
-    while i < b.len() {
-        // A number only starts where an identifier could not be continuing, so
-        // `frame2ms` keeps its digits.
-        let boundary = i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_');
-        if !boundary || !b[i].is_ascii_digit() {
-            out.push(b[i] as char);
-            i += 1;
-            continue;
-        }
-        let mut j = i;
-        while j < b.len() && (b[j].is_ascii_digit() || b[j] == b'.') {
-            j += 1;
-        }
-        match DURATION_UNITS.iter().find(|u| line[j..].starts_with(**u)) {
-            Some(unit) => {
-                out.push_str("<dur>");
-                out.push_str(unit);
-                i = j + unit.len();
-            }
-            None => {
-                out.push_str(&line[i..j]);
-                i = j;
-            }
-        }
-    }
-    out
 }
 
 /// The five level tags `rock_log` emits, each exactly five characters
@@ -411,30 +367,6 @@ mod tests {
 
     fn msg(site: &str, message: &str) -> SiteMessage {
         SiteMessage { message: message.into(), site: site.into() }
-    }
-
-    /// Both sides of the masking decision. The rejections matter more than the
-    /// acceptances: preserving message digits is the whole reason
-    /// `entry_diagnostics` can see leaked state, so a mask that ate an entity
-    /// id or a frame counter would make the arm agree about anything.
-    #[test]
-    fn only_a_number_carrying_a_duration_unit_is_masked() {
-        for (input, want) in [
-            ("time dofile: 0.8704ms | total: 22.3374ms", "time dofile: <dur>ms | total: <dur>ms"),
-            ("incremental reload: 0.0238ms", "incremental reload: <dur>ms"),
-            ("took 500us", "took <dur>us"),
-            ("took 12ns", "took <dur>ns"),
-            // Preserved: the leaked-state classes this arm is for.
-            ("entity 4271 died on frame 90", "entity 4271 died on frame 90"),
-            ("handle 3 of 8", "handle 3 of 8"),
-            ("scale 1.5 at 60 fps", "scale 1.5 at 60 fps"),
-            // A unit that only looks like one because an identifier ends there.
-            ("frame2ms advanced", "frame2ms advanced"),
-            // `s` is not a unit here: too many words end in it to be decidable.
-            ("waited 3s", "waited 3s"),
-        ] {
-            assert_eq!(mask_durations(input), want, "masking {input:?}");
-        }
     }
 
     fn passing(name: &str) -> SimRecord {
@@ -565,9 +497,7 @@ mod tests {
         let out = Path::new("");
         for (line, expected) in [
             ("[   0.789s INFO ] [MAG] hi", "[MAG] hi"),
-            // The frame number survives, the duration does not: see
-            // `only_a_number_carrying_a_duration_unit_is_masked`.
-            ("[   1.296s ERROR] [SLOWFRAME] frame 60 took 69.7ms", "[SLOWFRAME] frame 60 took <dur>ms"),
+            ("[   1.296s ERROR] [SLOWFRAME] frame 60 took 69.7ms", "[SLOWFRAME] frame 60 took 69.7ms"),
             ("[   0.001s WARN ] [SIM] careful", "[SIM] careful"),
             ("[  12.500s DEBUG] [ENGINE] x", "[ENGINE] x"),
             ("[1234.567s TRACE] no padding, wide number", "no padding, wide number"),
