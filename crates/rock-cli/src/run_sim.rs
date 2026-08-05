@@ -305,6 +305,23 @@ impl SimArtifacts {
         self.out_dir.path()
     }
 
+    /// Empty `$OUT` so a rerun of the same spec produces its artifacts from
+    /// nothing, the way a first run does. Without it the manifest would be the
+    /// UNION of the abandoned attempt and the rerun, so a file the rerun did
+    /// not write could still be reported as its output.
+    fn clear(&self) -> Result<()> {
+        for entry in std::fs::read_dir(self.path()).context("reading sim tempdir")? {
+            let path = entry.context("reading sim tempdir entry")?.path();
+            if path.is_dir() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            }
+            .with_context(|| format!("clearing {}", path.display()))?;
+        }
+        Ok(())
+    }
+
     fn finish(self, summary: &mut SimSummary) {
         self.finish_with(summary, process_video_assertions);
     }
@@ -2127,6 +2144,10 @@ fn run_specs_recovering(
                     plan.spec,
                     reason
                 );
+                plan.artifacts
+                    .as_ref()
+                    .expect("a spec is finalized exactly once")
+                    .clear()?;
                 let reran =
                     run_worker(project, &plan.parts, false, true, update_snapshots, output, None)?;
                 let mut m = SimSummary::default();
