@@ -705,9 +705,9 @@ var __SW = {
   // one handle space for images AND canvas textures: handle -> WebGLTexture
   textures: {}, nextTex: 1, whiteImage: 0,
   // images: boot decodes path -> ImageBitmap (no GL yet); stone_load_image
-  // creates the GL texture lazily+synchronously (GL exists by @init) and caches
-  // path -> handle; handle -> {w,h} feeds get_image_size.
-  imageBitmaps: {}, imageHandles: {}, imageSizes: {},
+  // creates the GL texture lazily+synchronously (GL exists by @init).
+  // handle -> {w,h} feeds get_image_size.
+  imageBitmaps: {}, imageSizes: {},
   imageData: {}, nextImageData: 0, imageRepeat: {}, samplers: {},
   canvases: {}, nextCanvas: 1, boundCanvas: 0, // 0 = default framebuffer
   shaders: {}, nextShader: 1, curShader: 0,
@@ -1035,21 +1035,30 @@ function stone_get_image_size(img, pw, ph) {
   pw[0] = 1; ph[0] = 1; // white fallback / canvas texture default
 }
 
+// 0 = NEAREST, 1 = LINEAR. Anything else is a caller bug, not a default:
+// silently picking one filter is invisible until it magnifies. Twin of
+// stone-rs's gl_filter_for.
+function __sw_gl_filter(mode) {
+  var gl = __SW.gl;
+  if (mode === 0) return gl.NEAREST;
+  if (mode === 1) return gl.LINEAR;
+  throw new Error("unknown texture filter mode " + mode);
+}
 // Sync texture creation from a boot-decoded ImageBitmap (handle IS the texture,
 // js_ffi.rock:stone_get_image_texture identity). A registry miss is LOUD and
-// non-fatal -- returns the white pixel so image_set_wrap/get_image_size/draws
-// stay valid (the node fake-GL env has no fetch, so every load hits this rung).
+// returns 0, the same failure value stone-rs returns: handing back the WHITE
+// PIXEL's handle would attach the missing asset's declared filter to the shared
+// white pixel, so one absent Linear asset re-filtered every draw that uses it.
+// (The node fake-GL env has no fetch, so every load hits this rung.)
 function stone_load_image(path, filterMode) {
-  var cached = __SW.imageHandles[path];
-  if (cached !== undefined) return cached;
   var bmp = __SW.imageBitmaps[path];
   if (bmp === undefined) {
-    __sw_log_once("stone_load_image: no preloaded image for " + path + " (white fallback)");
-    return stone_get_white_image();
+    __sw_log_once("stone_load_image: no preloaded image for " + path);
+    return 0;
   }
   var gl = __SW.gl;
   var h = __sw_new_texture();
-  var filt = (filterMode === 0) ? gl.NEAREST : gl.LINEAR;
+  var filt = __sw_gl_filter(filterMode);
   gl.bindTexture(gl.TEXTURE_2D, __SW.textures[h]);
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bmp);
@@ -1057,7 +1066,6 @@ function stone_load_image(path, filterMode) {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filt);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  __SW.imageHandles[path] = h;
   __SW.imageSizes[h] = { w: bmp.width, h: bmp.height };
   return h;
 }
@@ -1113,7 +1121,7 @@ function stone_unload_image(h) {
   if (t && __SW.gl) __SW.gl.deleteTexture(t);
   delete __SW.textures[h];
   delete __SW.imageSizes[h];
-  for (var p in __SW.imageHandles) { if (__SW.imageHandles[p] === h) delete __SW.imageHandles[p]; }
+  delete __SW.imageRepeat[h];
 }
 function stone_reload_image(h, path) { return false; }
 // CPU-side pixel buffers (image_data.rs's twin). These were stubs returning 0,
@@ -1174,7 +1182,7 @@ function __sw_upload_image_data(h, d, fm) {
   gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, d.w, d.h, 0, gl.RGBA, gl.UNSIGNED_BYTE, d.px);
   if (fm >= 0) {
-    var filt = (fm === 1) ? gl.LINEAR : gl.NEAREST;
+    var filt = __sw_gl_filter(fm);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filt);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filt);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -1896,9 +1904,12 @@ function stone_load_font(path, pixelSize) {
   return fid;
 }
 function __sw_font(fontId) { return (__SW.fonts || {})[fontId]; }
+// 0 when the font has no atlas, matching stone-rs. Returning the WHITE PIXEL's
+// handle instead made the atlas share an identity with it, so a font declaring
+// Linear re-declared the shared white pixel for every other draw.
 function stone_get_font_atlas_image_for(fontId) {
   var f = __sw_font(fontId);
-  return f && f.atlas ? f.atlas : stone_get_white_image();
+  return f && f.atlas ? f.atlas : 0;
 }
 function stone_get_font_pixel_size_for(fontId) {
   var f = __sw_font(fontId);
@@ -2328,7 +2339,20 @@ function stone_set_fullscreen(mode) {
 // the font path then falls back exactly like native's embedded-fallback rung.
 function __rock_web_boot(mainFn) {
   var pre = typeof __ROCK_WEB_PRELOAD !== "undefined" ? __ROCK_WEB_PRELOAD : [];
-  if (globalThis.__STONE_WEB_FAKE_ENV || typeof fetch === "undefined" || pre.length === 0) {
+  var fakeEnv = globalThis.__STONE_WEB_FAKE_ENV;
+  // The node fake-GL smoke has no fetch, so nothing decodes and every load
+  // would be a genuine miss -- the smoke would measure the missing-asset path
+  // instead of the game. It opts into a 1x1 stub for the MANIFEST's images
+  // only: the fake GL ignores pixel content, and a path absent from the
+  // manifest still misses, so this cannot hide a bad asset path.
+  if (fakeEnv && fakeEnv.stubPreloadedImages) {
+    for (var pi = 0; pi < pre.length; pi++) {
+      if (/\.(png|jpe?g|gif|bmp|webp)$/i.test(pre[pi])) {
+        __SW.imageBitmaps[pre[pi]] = { width: 1, height: 1 };
+      }
+    }
+  }
+  if (fakeEnv || typeof fetch === "undefined" || pre.length === 0) {
     if (mainFn) mainFn();
     return;
   }
@@ -2348,7 +2372,7 @@ function __rock_web_boot(mainFn) {
       }
       // Decode images to ImageBitmaps now (no GL context yet); stone_load_image
       // uploads the GL texture lazily at @init. A per-image decode failure is
-      // loud but non-fatal -- that path falls back to the white pixel at load.
+      // loud but non-fatal -- that path returns handle 0 at load.
       if (/\.(png|jpe?g|gif|bmp|webp)$/i.test(path) && typeof createImageBitmap !== "undefined") {
         return createImageBitmap(new Blob([buf])).then(function (bmp) {
           __SW.imageBitmaps[path] = bmp;
