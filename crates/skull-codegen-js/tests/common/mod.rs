@@ -5,6 +5,30 @@
 
 use skull_mir::lower::{lower_function, ScalarCtx};
 
+/// Every `node` spawn in this crate's tests goes through here.
+///
+/// `console.log` of a NUMBER is formatted by `util.inspect`, which colours it,
+/// and `FORCE_COLOR` forces that on even when stdout is a pipe. A harness that
+/// parses stdout then receives `"\x1b[33m9901\x1b[39m"` and fails to read an
+/// int -- the value is right, the bytes are not.
+///
+/// **`NO_COLOR` alone does not work**: node ignores it whenever `FORCE_COLOR`
+/// is set, and says so on stderr. The variable has to be REMOVED, so a fix that
+/// only sets `NO_COLOR` reads correctly and does nothing.
+pub fn node() -> std::process::Command {
+    tool("node")
+}
+
+/// Same scrub, for a tool named by a variable rather than a literal.
+/// `nb_differential` and `number_format` run one fixture through BOTH `node`
+/// and `luajit` and compare the printed tokens, so they reach a spawn this way
+/// and a literal-matching sweep misses them.
+pub fn tool(name: &str) -> std::process::Command {
+    let mut cmd = std::process::Command::new(name);
+    cmd.env_remove("FORCE_COLOR").env("NO_COLOR", "1");
+    cmd
+}
+
 /// Build the stdlib workspace (parse + semantic pass).
 pub fn stdlib_ws() -> bone_semantic::inference::Workspace {
     ws_with("fn main() {}")
