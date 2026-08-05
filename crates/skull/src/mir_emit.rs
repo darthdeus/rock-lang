@@ -320,15 +320,23 @@ enum ExternRet {
     AsIs,
 }
 
-/// Depth bound for following `newtype` aliases to their representation. A
-/// cycle is a typechecker rejection, not something the emitter should hang on.
-const MAX_NEWTYPE_DEPTH: usize = 32;
+/// A backstop only. Termination is decided by [`extern_ret`]'s visited set --
+/// this bounds a chain whose repeats the visited set cannot recognize because
+/// two syntactically identical arguments live in different arenas and so carry
+/// different `TyId`s. No source-written alias chain approaches it.
+const MAX_NEWTYPE_STEPS: usize = 256;
+
+/// A newtype application's generic arguments, already resolved through the
+/// substitution in force where the application was written.
+type NewtypeArgs = Vec<bone_semantic::prelude::TyId>;
 
 fn extern_ret(
     ws: &Workspace,
     f: &bone_semantic::hir::Function,
 ) -> Result<ExternRet, CompilerError> {
     use bone_semantic::hir::{BuiltinTy, TypeCtor, TypeExpr};
+    use bone_semantic::prelude::TyId;
+
     let Some(ty) = f.return_ty else { return Ok(ExternRet::None) };
     let unrealizable = |what: &str| {
         CompilerError::new_with_label(
@@ -341,53 +349,110 @@ fn extern_ret(
             ),
         )
     };
-    // A newtype is a REPRESENTATION alias, not a distinct C type: `newtype
-    // Handle(int)` is an `int` at the boundary and needs exactly the coercion an
-    // `int` needs. Following it is what keeps the typed declaration -- the shape
-    // B3 wants for handles -- from being the loophole that reintroduces a boxed
-    // cdata. Bounded so a newtype cycle cannot spin the emitter.
-    let mut ty = ty;
-    for _ in 0..MAX_NEWTYPE_DEPTH {
-        // A declared signature lives in its own module's arena, so both of these
-        // are internal invariants rather than source-reachable shapes -- stated
-        // as rejections because the alternative is emitting a wrapper whose
-        // return representation the compiler has just admitted it cannot
-        // determine.
-        let (mid, idx) = match ty {
-            bone_semantic::prelude::TyId::Static(mid, idx) => (mid, idx),
-            bone_semantic::prelude::TyId::Local(_) => return Err(unrealizable("a body-local type")),
+    // A declared signature lives in its own module's arena, so a non-static
+    // `TyId` and a module outside the workspace are internal invariants rather
+    // than source-reachable shapes -- stated as rejections because the
+    // alternative is emitting a wrapper whose return representation the compiler
+    // has just admitted it cannot determine.
+    let resolve = |ty: TyId| -> Result<(TyId, TypeExpr), CompilerError> {
+        let TyId::Static(mid, idx) = ty else {
+            return Err(unrealizable("a body-local type"));
         };
         let module = ws
             .modules
             .get(mid.index())
             .ok_or_else(|| unrealizable("a type from a module not in the workspace"))?;
-        return Ok(match module.ty_arena[idx] {
-            TypeExpr::Builtin(BuiltinTy::Int) => ExternRet::Int,
-            TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }
-                if crate::is_value_struct(ws, name) =>
-            {
-                ExternRet::ValueStruct(name.as_str().to_string())
+        // `Arena` indexes unchecked; a stale index is an internal invariant, so
+        // it is bounded here rather than allowed to panic in the emitter.
+        if idx.into_raw().into_u32() as usize >= module.ty_arena.len() {
+            return Err(unrealizable("a type index its module does not contain"));
+        }
+        Ok((ty, module.ty_arena[idx]))
+    };
+    // A generic parameter is only unrealizable when nothing BOUND it. Inside
+    // `Boxed<int>` the declaration's `T` is bound to `int` by the application,
+    // which is the whole reason a substitution is carried rather than the
+    // declaration's own `wrapped` being read directly.
+    let substituted = |mut ty: TyId, subst: &[(bone_semantic::hir::VarId, TyId)]| -> Result<TyId, CompilerError> {
+        for _ in 0..MAX_NEWTYPE_STEPS {
+            let (_, te) = resolve(ty)?;
+            let var = match te {
+                TypeExpr::Generic(v, _) | TypeExpr::Infer(v, _) => v,
+                _ => return Ok(ty),
+            };
+            match subst.iter().find(|(v, _)| *v == var) {
+                Some((_, bound)) => ty = *bound,
+                None => return Ok(ty),
             }
-            TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }
+        }
+        Err(unrealizable("a generic substitution that does not settle"))
+    };
+
+    // A newtype is a representation ALIAS, not a distinct C type: `newtype
+    // Handle(int)` is an `int` at the boundary and needs exactly the coercion an
+    // `int` needs. Following it is what keeps the typed declaration -- the shape
+    // B3 wants for handles -- from being the loophole that reintroduces a boxed
+    // cdata.
+    //
+    // `newtype A(B); newtype B(A)` compiles, so the walk must terminate on its
+    // own. The visited key is the newtype together with its RESOLVED arguments,
+    // not the newtype alone: `newtype Pair<T>(T)` reached as `Pair<Pair<int>>`
+    // legitimately visits `Pair` twice, with different arguments each time.
+    let mut ty = ty;
+    let mut subst: Vec<(bone_semantic::hir::VarId, TyId)> = Vec::new();
+    let mut visited: Vec<(bone_semantic::prelude::NewtypeId, NewtypeArgs)> = Vec::new();
+
+    for _ in 0..MAX_NEWTYPE_STEPS {
+        let (here, te) = resolve(substituted(ty, &subst)?)?;
+        match te {
+            TypeExpr::Builtin(BuiltinTy::Int) => return Ok(ExternRet::Int),
+            TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } if crate::is_value_struct(ws, name) => {
+                return Ok(ExternRet::ValueStruct(name.as_str().to_string()))
+            }
+            TypeExpr::App { ctor: TypeCtor::Nominal(name), params }
                 if ws.newtypes_by_name.contains_key(&name) =>
             {
-                let nid = ws.newtypes_by_name[&name];
-                ty = ws.modules[nid.module.index()].newtypes[nid.def].wrapped;
-                continue;
+                let nid = *ws
+                    .newtypes_by_name
+                    .get(&name)
+                    .ok_or_else(|| unrealizable("a newtype the workspace lost"))?;
+                let owner = ws
+                    .modules
+                    .get(nid.module.index())
+                    .filter(|m| (nid.def.into_raw().into_u32() as usize) < m.newtypes.len())
+                    .ok_or_else(|| unrealizable("a newtype whose definition is missing"))?;
+                let def = &owner.newtypes[nid.def];
+
+                let args: NewtypeArgs = params
+                    .into_iter()
+                    .map(|p| substituted(here.with_idx(p), &subst))
+                    .collect::<Result<_, _>>()?;
+                if visited.contains(&(nid, args.clone())) {
+                    return Err(unrealizable("a newtype whose representation contains itself"));
+                }
+                visited.push((nid, args.clone()));
+
+                let mut next: Vec<(bone_semantic::hir::VarId, TyId)> = Vec::new();
+                for (g, a) in def.generics.iter().zip(args) {
+                    if let (_, TypeExpr::Generic(v, _) | TypeExpr::Infer(v, _)) = resolve(*g)? {
+                        next.push((v, a));
+                    }
+                }
+                subst = next;
+                ty = def.wrapped;
             }
             // Source-reachable and previously silent: `extern(ffi, "l") fn f<T>() -> T`
-            // emitted a passthrough wrapper. Nothing about `T` says whether the C
-            // callee returns a number, a boxed 64-bit integer or a struct, so there
-            // is no representation to give it -- the same fail-open this classifier
-            // exists to close, one type constructor over. A newtype OVER a generic
-            // lands here too, through the loop above.
+            // emitted a passthrough wrapper. Nothing about an UNBOUND `T` says whether
+            // the C callee returns a number, a boxed 64-bit integer or a struct, so
+            // there is no representation to give it -- the same fail-open this
+            // classifier exists to close, one type constructor over.
             TypeExpr::Generic(_, n) | TypeExpr::Infer(_, n) => {
-                return Err(unrealizable(&format!("the generic parameter `{n}`")))
+                return Err(unrealizable(&format!("the unbound generic parameter `{n}`")))
             }
-            _ => ExternRet::AsIs,
-        });
+            _ => return Ok(ExternRet::AsIs),
+        }
     }
-    Err(unrealizable("a newtype chain that does not bottom out"))
+    Err(unrealizable("an alias chain that does not bottom out"))
 }
 
 /// The assembled new-path program plus the parity gap.

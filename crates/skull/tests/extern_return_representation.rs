@@ -23,11 +23,19 @@ newtype Handle(int)
 newtype Ratio(float)
 newtype Flag(bool)
 newtype Alias(Handle)
+newtype Boxed<T>(T)
+newtype Pair<T>(T)
+newtype Deep(Pair<Pair<int>>)
+newtype Wrap<T>(Boxed<T>)
 
 extern(ffi, "m") fn ret_int() -> int
 extern(ffi, "m") fn ret_handle() -> Handle
 extern(ffi, "m") fn ret_alias() -> Alias
+extern(ffi, "m") fn ret_boxed() -> Boxed<int>
+extern(ffi, "m") fn ret_deep() -> Deep
+extern(ffi, "m") fn ret_wrap() -> Wrap<int>
 extern(ffi, "m") fn ret_ratio() -> Ratio
+extern(ffi, "m") fn ret_boxed_float() -> Boxed<float>
 extern(ffi, "m") fn ret_flag() -> Flag
 extern(ffi, "m") fn ret_void()
 
@@ -49,59 +57,86 @@ fn wrapper(lua: &str, name: &str) -> String {
     body
 }
 
-/// Both sides, which is what makes either one evidence: the types whose C
+fn reject(src: &str) -> String {
+    let err = crate::common::try_emit_module(src)
+        .expect_err("this return has no C representation to give");
+    format!("{err:?}")
+}
+
+/// Both sides, which is what makes either one evidence: the declarations whose C
 /// representation can arrive boxed are coerced, and the ones that cannot are
 /// left alone rather than paying for a conversion that means nothing.
+///
+/// A newtype APPLICATION substitutes: `Boxed<int>` is an `int` and
+/// `Boxed<float>` is a `float`, from the same declaration. Reading the
+/// declaration's own `T` without the argument would either reject valid source
+/// or coerce a float.
 #[test]
-fn an_int_return_is_coerced_through_any_newtype_alias() {
+fn an_int_representation_is_coerced_through_every_alias_shape() {
     let lua = emit_module(SRC);
 
-    for name in ["ret_int", "ret_handle", "ret_alias"] {
+    for name in ["ret_int", "ret_handle", "ret_alias", "ret_boxed", "ret_deep", "ret_wrap"] {
         let w = wrapper(&lua, name);
         assert!(
             w.contains(&format!("return tonumber(m.{name}(")),
-            "`{name}` declares an int representation, so its return must be a Rock \
-             number and not whatever the C ABI handed back:\n{w}"
+            "`{name}` bottoms out at an int representation, so its return must be a \
+             Rock number and not whatever the C ABI handed back:\n{w}"
         );
     }
 
     // `float` and `bool` never arrive as cdata from LuaJIT, so coercing them
     // would be cost with no property behind it -- and a blanket `tonumber` would
-    // silently turn a `bool` return into 1/0.
-    for name in ["ret_ratio", "ret_flag"] {
+    // silently turn a `bool` return into 1/0. `ret_boxed_float` is the arm that
+    // separates "substitutes correctly" from "coerces every newtype".
+    for name in ["ret_ratio", "ret_boxed_float", "ret_flag"] {
         let w = wrapper(&lua, name);
         assert!(
             w.contains(&format!("return m.{name}(")) && !w.contains("tonumber"),
-            "`{name}` wraps a representation LuaJIT already hands back as a Lua \
-             value; it must cross unchanged:\n{w}"
+            "`{name}` bottoms out at a representation LuaJIT already hands back as a \
+             Lua value; it must cross unchanged:\n{w}"
         );
     }
 
     let w = wrapper(&lua, "ret_void");
+    assert!(!w.contains("return"), "a void extern returns nothing:\n{w}");
+}
+
+/// A generic is unrealizable only when nothing BOUND it. `Boxed<T>` on a generic
+/// extern has no argument to substitute, so it lands on the same rejection a
+/// bare `-> T` gets -- and this is the arm that keeps the substitution from
+/// being an unconditional "assume it resolves".
+#[test]
+fn an_unbound_generic_representation_rejects() {
+    let msg = reject(
+        r#"
+newtype Boxed<T>(T)
+extern(ffi, "m") fn ret_open<T>() -> Boxed<T>
+fn main() { print("x") }
+"#,
+    );
     assert!(
-        !w.contains("return"),
-        "a void extern returns nothing:\n{w}"
+        msg.contains("ret_open") && msg.contains("unbound generic parameter"),
+        "an unbound generic must reject however it is wrapped, got:\n{msg}"
     );
 }
 
-/// A newtype whose representation is a generic parameter has no C
-/// representation either, so following the alias must arrive at the same
-/// rejection a bare `-> T` gets. Pinned here rather than only in
-/// `tests/errors/extern_ffi_generic_return.rock.err`, because that file covers
-/// the DIRECT spelling and this is the one that arrives through the new
-/// alias-following loop.
+/// `newtype A(B); newtype B(A)` COMPILES, so the alias walk has to terminate on
+/// its own rather than trusting the typechecker to have refused the shape.
+/// Termination is by visited identity and not by a step cap, which is why
+/// `ret_deep` above -- `Pair<Pair<int>>`, legitimately visiting `Pair` twice
+/// with different arguments -- still resolves.
 #[test]
-fn a_newtype_over_a_generic_has_no_representation_either() {
-    let src = r#"
-newtype Boxed<T>(T)
-extern(ffi, "m") fn ret_boxed() -> Boxed<int>
+fn a_self_referential_alias_rejects_instead_of_spinning() {
+    let msg = reject(
+        r#"
+newtype A(B)
+newtype B(A)
+extern(ffi, "m") fn ret_cycle() -> A
 fn main() { print("x") }
-"#;
-    let err = crate::common::try_emit_module(src)
-        .expect_err("a newtype over a generic has no C representation to give");
-    let msg = format!("{err:?}");
+"#,
+    );
     assert!(
-        msg.contains("ret_boxed") && msg.contains("generic parameter"),
-        "a newtype over a generic must reject like a bare generic return, got:\n{msg}"
+        msg.contains("ret_cycle") && msg.contains("contains itself"),
+        "a newtype cycle must reject as a cycle, got:\n{msg}"
     );
 }
