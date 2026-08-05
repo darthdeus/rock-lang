@@ -305,23 +305,6 @@ impl SimArtifacts {
         self.out_dir.path()
     }
 
-    /// Empty `$OUT` so a rerun of the same spec produces its artifacts from
-    /// nothing, the way a first run does. Without it the manifest would be the
-    /// UNION of the abandoned attempt and the rerun, so a file the rerun did
-    /// not write could still be reported as its output.
-    fn clear(&self) -> Result<()> {
-        for entry in std::fs::read_dir(self.path()).context("reading sim tempdir")? {
-            let path = entry.context("reading sim tempdir entry")?.path();
-            if path.is_dir() {
-                std::fs::remove_dir_all(&path)
-            } else {
-                std::fs::remove_file(&path)
-            }
-            .with_context(|| format!("clearing {}", path.display()))?;
-        }
-        Ok(())
-    }
-
     fn finish(self, summary: &mut SimSummary) {
         self.finish_with(summary, process_video_assertions);
     }
@@ -2131,31 +2114,22 @@ fn run_specs_recovering(
 
         for (offset, (mut summary, _)) in merged.into_iter().take(finals).enumerate() {
             let plan = &mut plans[base + offset];
-            // An entry the native reset boundary could not return is not
-            // worker-eligible: rerun it ALONE, so its record is the one a fresh
-            // process produces, and report why. A single-spec queue takes no
-            // boot checkpoint, so the boundary it tripped is not even reached --
-            // which is also why this cannot loop.
-            let mut provenance = offset > 0;
+            // An entry the native reset boundary could not return ENDS its
+            // worker, but its own record stands: it ran to completion inside a
+            // closed envelope, and it followed a predecessor, so it is real
+            // boundary evidence. Rerunning it would execute it twice and repeat
+            // whatever external side effects it had. Only its unstarted
+            // successors need a fresh worker, which the recovery loop already
+            // does for them. The reason is REPORTED so the entry is not a
+            // silently slower one.
+            let provenance = offset > 0;
             if let Some(reason) = summary.worker_ineligible.take() {
                 eprintln!(
-                    "{} `{}` reran in a fresh process: {}",
+                    "{} `{}` ended its worker: {}",
                     "[sim]".yellow(),
                     plan.spec,
                     reason
                 );
-                plan.artifacts
-                    .as_ref()
-                    .expect("a spec is finalized exactly once")
-                    .clear()?;
-                let reran =
-                    run_worker(project, &plan.parts, false, true, update_snapshots, output, None)?;
-                let mut m = SimSummary::default();
-                for part in reran {
-                    m.merge(part);
-                }
-                summary = m;
-                provenance = false;
             }
             let artifacts = plan
                 .artifacts

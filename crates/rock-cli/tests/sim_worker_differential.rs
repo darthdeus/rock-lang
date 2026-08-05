@@ -648,16 +648,16 @@ fn an_entry_that_destroyed_boots_native_world_reruns_in_a_fresh_process() {
     .expect("the suite call itself must not error: ineligibility is a scheduling fact");
     assert_eq!(records.len(), 2, "one record per entry spec");
 
-    let (seed, seed_crossed) = &records[0];
+    let (seed, _) = &records[0];
     assert_eq!(
         seed.verdict(),
         "PASS",
-        "the rerun record is the fresh-process one, so the entry is not charged \
-         with a failure an isolated run would not have given it: {seed:?}"
+        "ending the worker is a scheduling fact, not the entry's failure: {seed:?}"
     );
-    assert!(
-        !seed_crossed,
-        "an entry that reran alone followed no predecessor and cannot be restore evidence"
+    assert_eq!(
+        seed.artifacts["runs.txt"].len, 1,
+        "the entry ran EXACTLY ONCE: it completed before the boundary could know, \
+         so rerunning it would repeat its side effects"
     );
 
     let (probe, _) = &records[1];
