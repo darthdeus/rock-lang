@@ -697,6 +697,9 @@ var __ROCK_WEB_ASSETS = (typeof globalThis.__ROCK_WEB_ASSETS === "object" && glo
 var __SW = {
   gl: null, canvas: null,
   logicalW: 0, logicalH: 0, dpr: 1,
+  // GameConfig.resizable, carried from stone_create_window_ex: decides whether
+  // the drawable buffer follows the container (see __sw_sync_canvas_size).
+  resizable: false,
   initialized: false, quitReq: false, resized: false,
   events: [], mouseX: 0, mouseY: 0,
   // Polled input state (stone_is_key_down / _is_mouse_button_down): keyed by the
@@ -822,6 +825,7 @@ function stone_get_backend_name_js() { return "stone-web"; }
 
 function stone_create_window_ex(title, x, y, width, height, display, resizable, fullscreen) {
   if (fullscreen) { __sw_log_once("stone_create_window_ex: fullscreen=" + fullscreen + " ignored; the browser only enters fullscreen from a user gesture, so the canvas boots windowed"); }
+  __SW.resizable = !!resizable;
   var fake = globalThis.__STONE_WEB_FAKE_ENV;
   if (fake) {
     __SW.gl = fake.gl;
@@ -880,12 +884,26 @@ function stone_create_window_ex(title, x, y, width, height, display, resizable, 
   return { __sw_window: true };
 }
 
+// Per-rAF: keep the drawable buffer at logical-extent x dpr.
+//
+// Only a RESIZABLE game takes its logical extent from the container. A
+// non-resizable one is authored in absolute pixels (games/sample-game-b,
+// games/sample-game lay out against a literal 1280x720) and a responsive
+// container would otherwise move screen_size() out from under it every frame.
+//
+// dpr is tracked for both: density changes the buffer's resolution, not the
+// logical extent games measure against, so honoring it costs a non-resizable
+// game nothing and is what keeps the output-density font atlas correct on HiDPI.
 function __sw_sync_canvas_size() {
   var canvas = __SW.canvas;
   if (!canvas || typeof window === "undefined") return;
-  var rect = canvas.getBoundingClientRect();
-  var logicalW = Math.max(1, Math.round(rect.width));
-  var logicalH = Math.max(1, Math.round(rect.height));
+  var logicalW = __SW.logicalW;
+  var logicalH = __SW.logicalH;
+  if (__SW.resizable) {
+    var rect = canvas.getBoundingClientRect();
+    logicalW = Math.max(1, Math.round(rect.width));
+    logicalH = Math.max(1, Math.round(rect.height));
+  }
   var dpr = window.devicePixelRatio || 1;
   var drawableW = Math.round(logicalW * dpr);
   var drawableH = Math.round(logicalH * dpr);
