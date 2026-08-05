@@ -2343,6 +2343,174 @@ fn wire_glsl(k: WireKind) -> GlslTy {
     }
 }
 
+/// **The whole GLSL ABI plan checked against the interface it claims to
+/// answer**, before any stage looks at it.
+///
+/// Presence at a binding is not identity. A block of the right shape at the
+/// right index still emits the wrong declarations if it is a DIFFERENT group's
+/// -- swap the fragment block for the engine one and every per-binding check
+/// still passes while the emitted members no longer match the interface. So
+/// this compares the block's own name and its complete member list, and it
+/// runs over the PROGRAM rather than per stage, because an unknown binding
+/// belongs to no stage and would otherwise be nobody's to reject.
+fn validate_abi(
+    iface: &ShaderInterfacePlan,
+    abi: &ShaderAbiPlan,
+    span: Span,
+) -> Result<(), CompilerError> {
+    // --- scalar blocks: exactly the interface's groups, at their own bindings.
+    let mut expected: Vec<(u32, &LogicalUniformGroup)> = iface
+        .uniform_groups
+        .iter()
+        .map(|g| (ShaderAbiPlan::binding_of(g.role), g))
+        .collect();
+    expected.sort_by_key(|(b, _)| *b);
+    let mut seen: HashSet<u32> = HashSet::default();
+    for (b, plan) in &abi.uniform_blocks {
+        if !seen.insert(*b) {
+            return Err(err(span, format!(
+                "internal: the GLSL ABI plan holds more than one uniform block at binding {b}"
+            )));
+        }
+        let Some((_, g)) = expected.iter().find(|(eb, _)| eb == b) else {
+            return Err(err(span, format!(
+                "internal: the GLSL ABI plan holds a uniform block at binding {b}, which no \
+                 interface group claims"
+            )));
+        };
+        if plan.struct_name != g.struct_name {
+            return Err(err(span, format!(
+                "internal: binding {b} holds block `{}` but the interface's group there is `{}`",
+                plan.struct_name, g.struct_name
+            )));
+        }
+        let laid: Vec<(Ustr, WireKind)> = plan.members.iter().map(|m| (m.name, m.kind)).collect();
+        if laid != g.members {
+            return Err(err(span, format!(
+                "internal: block `{}` at binding {b} was laid out over {laid:?}, but the \
+                 interface declares {:?}",
+                plan.struct_name, g.members
+            )));
+        }
+    }
+    for (b, g) in &expected {
+        if !seen.contains(b) {
+            return Err(err(span, format!(
+                "internal: the interface declares group `{}` at binding {b}, which the GLSL ABI \
+                 plan has no block for -- its members would be referenced without being declared",
+                g.struct_name
+            )));
+        }
+    }
+
+    // --- array blocks: same rule, including each member's CAPACITY, which is
+    // what an `@size(N)` change moves and what a name check alone would miss.
+    let mut expected_arrays: Vec<(u32, &LogicalArrayGroup)> = iface
+        .array_groups
+        .iter()
+        .map(|g| (ShaderAbiPlan::array_binding_of(g.stage), g))
+        .collect();
+    expected_arrays.sort_by_key(|(b, _)| *b);
+    let mut seen_arrays: HashSet<u32> = HashSet::default();
+    for (b, plan) in &abi.uniform_array_blocks {
+        if !seen_arrays.insert(*b) {
+            return Err(err(span, format!(
+                "internal: the GLSL ABI plan holds more than one array block at binding {b}"
+            )));
+        }
+        let Some((_, g)) = expected_arrays.iter().find(|(eb, _)| eb == b) else {
+            return Err(err(span, format!(
+                "internal: the GLSL ABI plan holds an array block at binding {b}, which no \
+                 interface group claims"
+            )));
+        };
+        if plan.block_name != array_block_name(g.owner) {
+            return Err(err(span, format!(
+                "internal: binding {b} holds array block `{}`, but the interface's group there \
+                 is owned by `{}`",
+                plan.block_name, g.owner
+            )));
+        }
+        let laid: Vec<(Ustr, WireKind, u32)> =
+            plan.members.iter().map(|m| (m.name, m.elem, m.capacity)).collect();
+        let want: Vec<(Ustr, WireKind, u32)> =
+            g.members.iter().map(|m| (m.name, m.elem, m.capacity)).collect();
+        if laid != want {
+            return Err(err(span, format!(
+                "internal: array block `{}` was laid out over {laid:?}, but the interface \
+                 declares {want:?}",
+                plan.block_name
+            )));
+        }
+    }
+    for (b, g) in &expected_arrays {
+        if !seen_arrays.contains(b) {
+            return Err(err(span, format!(
+                "internal: the interface declares an array group owned by `{}` at binding {b}, \
+                 which the GLSL ABI plan has no block for",
+                g.owner
+            )));
+        }
+    }
+
+    // --- attribute locations: a bijection on names AND non-overlapping
+    // location RANGES. Two attributes at one location is a silent aliasing
+    // that a name bijection alone accepts.
+    let attrs: Vec<(Ustr, AttrKind)> =
+        iface.vertex_inputs.iter().flat_map(|i| i.attrs.iter().copied()).collect();
+    if attrs.len() != abi.attribute_locations.len() {
+        return Err(err(span, format!(
+            "internal: the interface declares {} vertex attribute(s) and the GLSL ABI plan \
+             assigns {} location(s)",
+            attrs.len(),
+            abi.attribute_locations.len()
+        )));
+    }
+    let mut occupied: HashMap<u32, Ustr> = HashMap::default();
+    for (name, kind) in &attrs {
+        let Some((_, loc)) = abi.attribute_locations.iter().find(|(an, _)| an == name) else {
+            return Err(err(span, format!(
+                "internal: vertex attribute `{name}` has no location in the GLSL ABI plan"
+            )));
+        };
+        for slot in *loc..*loc + attr_location_span(*kind) {
+            if let Some(other) = occupied.insert(slot, *name) {
+                return Err(err(span, format!(
+                    "internal: vertex attributes `{other}` and `{name}` both occupy location \
+                     {slot}"
+                )));
+            }
+        }
+    }
+
+    // --- texture units: the same bijection the stage join needs, checked once
+    // for the program so an unused stage cannot leave it unasked.
+    let group = iface.sampler_names();
+    let mut units: HashSet<Ustr> = HashSet::default();
+    for u in &abi.texture_units {
+        if !units.insert(*u) {
+            return Err(err(span, format!(
+                "internal: the GLSL ABI plan assigns sampler `{u}` more than one unit"
+            )));
+        }
+        if !group.contains(u) {
+            return Err(err(span, format!(
+                "internal: the GLSL ABI plan assigns a unit to `{u}`, which the interface's \
+                 @textures group does not name"
+            )));
+        }
+    }
+    for n in &group {
+        if !units.contains(n) {
+            return Err(err(span, format!(
+                "internal: the interface's @textures group names `{n}`, which the GLSL ABI plan \
+                 gives no unit -- it would be referenced without being declared"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// **One stage's resolved ABI**: every physical entry the interface says this
 /// stage has, and nothing else.
 ///
@@ -2449,10 +2617,13 @@ fn resolve_stage_abi<'a>(
     stage: IrStage,
     span: Span,
 ) -> Result<StageAbi<'a>, CompilerError> {
-    let (own, arrays) = match stage {
-        IrStage::Vertex => (UNIFORM_BLOCK_BINDING_VERTEX, UNIFORM_BLOCK_BINDING_VERTEX_ARRAYS),
-        IrStage::Fragment => (UNIFORM_BLOCK_BINDING_FRAGMENT, UNIFORM_BLOCK_BINDING_FRAGMENT_ARRAYS),
-    };
+    // `validate_abi` has already established the two plans agree program-wide;
+    // this projects the stage's slice of that agreement.
+    validate_abi(iface, abi, span)?;
+    let (own, arrays) = (
+        ShaderAbiPlan::binding_of(UniformRole::Stage(stage)),
+        ShaderAbiPlan::array_binding_of(stage),
+    );
     Ok(StageAbi {
         uniform_block: require_block(
             &abi.uniform_blocks,
@@ -2625,15 +2796,29 @@ impl ShaderAbiPlan {
     /// Takes NO `Workspace`. The layout is a function of `iface` alone, which
     /// is what makes a perturbed interface produce a perturbed layout instead
     /// of quietly re-deriving the declaring struct's.
+    /// The binding a uniform group's ROLE takes. One oracle, so the layout and
+    /// the validation below cannot disagree about where a group belongs.
+    fn binding_of(role: UniformRole) -> u32 {
+        match role {
+            UniformRole::Engine => UNIFORM_BLOCK_BINDING_ENGINE,
+            UniformRole::Stage(IrStage::Vertex) => UNIFORM_BLOCK_BINDING_VERTEX,
+            UniformRole::Stage(IrStage::Fragment) => UNIFORM_BLOCK_BINDING_FRAGMENT,
+        }
+    }
+
+    /// The binding a stage's array block takes.
+    fn array_binding_of(stage: IrStage) -> u32 {
+        match stage {
+            IrStage::Vertex => UNIFORM_BLOCK_BINDING_VERTEX_ARRAYS,
+            IrStage::Fragment => UNIFORM_BLOCK_BINDING_FRAGMENT_ARRAYS,
+        }
+    }
+
     pub fn glsl(
         iface: &ShaderInterfacePlan,
         span: Span,
     ) -> Result<Self, CompilerError> {
-        let binding = |role: UniformRole| match role {
-            UniformRole::Engine => UNIFORM_BLOCK_BINDING_ENGINE,
-            UniformRole::Stage(IrStage::Vertex) => UNIFORM_BLOCK_BINDING_VERTEX,
-            UniformRole::Stage(IrStage::Fragment) => UNIFORM_BLOCK_BINDING_FRAGMENT,
-        };
+        let binding = Self::binding_of;
         // std140 over the INTERFACE's members. The Workspace is not read here:
         // a layout is a function of the member list, which is what lets a
         // perturbed interface produce a perturbed layout and a second target
@@ -2648,10 +2833,7 @@ impl ShaderAbiPlan {
 
         let mut uniform_array_blocks: Vec<(u32, UniformArrayBlockPlan)> = Vec::new();
         for g in &iface.array_groups {
-            let b = match g.stage {
-                IrStage::Vertex => UNIFORM_BLOCK_BINDING_VERTEX_ARRAYS,
-                IrStage::Fragment => UNIFORM_BLOCK_BINDING_FRAGMENT_ARRAYS,
-            };
+            let b = Self::array_binding_of(g.stage);
             uniform_array_blocks
                 .push((b, uniform_array_block(array_block_name(g.owner), &g.members)?));
         }
@@ -2907,18 +3089,24 @@ fn render_shader_entry(
     let f = &ws.module(plan.fref.module).functions[plan.fref.func];
     let shape = &plan.shape;
 
+    // A1 goes through the SAME resolver A2 does. Rendering every ABI block
+    // directly would emit one the interface never claimed, which is exactly
+    // what the program-wide validation exists to refuse.
+    let resolved = resolve_stage_abi(&plan.interface, &plan.abi, IrStage::Fragment, f.name_span)?;
+
     let mut px = String::new();
     px.push_str("in vec2 TexCoord;\nout vec4 FragColor;\n\n");
-    for (_, block) in &plan.abi.uniform_blocks {
+    if let Some(block) = resolved.engine_block {
+        px.push_str(&uniform_block_decl(block));
+    }
+    if let Some(block) = resolved.uniform_block {
         px.push_str(&uniform_block_decl(block));
     }
     // Samplers are opaque: GLSL forbids them inside a uniform block, so they
     // stay loose beside it and bind by unit. Declared from the INTERFACE -- the
     // grouped ones in the ABI's unit order, then the bare ones.
-    for (n, k) in
-        stage_sampler_declarations(&plan.interface, &plan.abi, IrStage::Fragment, f.name_span)?
-    {
-        px.push_str(&format!("uniform {} {};\n", sampler_glsl_ty(k).uniform_decl(), n));
+    for (n, k) in &resolved.samplers {
+        px.push_str(&format!("uniform {} {};\n", sampler_glsl_ty(*k).uniform_decl(), n));
     }
     px.push('\n');
     px.push_str(&plan.stage.render_helpers(ws)?);
@@ -4387,20 +4575,13 @@ mod assertion_flip_tests {
         assert!(out.contains("doubled_float_ret_float("), "{out}");
     }
 
-    /// **Every interface/ABI join REJECTS rather than dropping a declaration.**
-    ///
-    /// Each arm perturbs one physical entry of an otherwise valid plan. A
-    /// dropped declaration is a driver compile error with no compiler
-    /// diagnostic, so "omit it and carry on" is the one behaviour that must be
-    /// impossible.
-    ///
-    /// The CONTROL is asserted first and again per arm: the unperturbed plan
-    /// resolves, so each rejection measures the perturbation.
-    #[test]
-    fn a_stage_abi_join_rejects_missing_extra_and_duplicate_entries() {
-        use skull_mir::shader_ir::{LogicalUniformGroup, UniformRole};
-
-        let iface = ShaderInterfacePlan {
+    /// A fragment-only interface with an engine group, a stage group, an array
+    /// group and two samplers -- one of every physical entry, so each arm below
+    /// perturbs exactly one of them.
+    fn abi_fixture() -> ShaderInterfacePlan {
+        use skull_mir::gpu_layout::ArrayMemberDecl;
+        use skull_mir::shader_ir::{LogicalArrayGroup, LogicalTextureGroup, LogicalUniformGroup};
+        ShaderInterfacePlan {
             stages: vec![IrStage::Fragment],
             uniform_groups: vec![
                 LogicalUniformGroup {
@@ -4414,95 +4595,16 @@ mod assertion_flip_tests {
                     members: vec![(Ustr::from("cutoff"), WireKind::F32)],
                 },
             ],
-            textures: Some(skull_mir::shader_ir::LogicalTextureGroup {
-                struct_name: Some(Ustr::from("Tex")),
-                samplers: vec![
-                    (Ustr::from("a"), SamplerKind::Float),
-                    (Ustr::from("b"), SamplerKind::Float),
-                ],
-                stages: vec![IrStage::Fragment],
-            }),
-            ..Default::default()
-        };
-        let abi = ShaderAbiPlan::glsl(&iface, Span::default()).expect("the fixture must lay out");
-
-        // CONTROL: the unperturbed pair resolves, with both blocks and both
-        // samplers present.
-        let ok = resolve_stage_abi(&iface, &abi, IrStage::Fragment, Span::default())
-            .expect("the unperturbed plan must resolve");
-        assert!(ok.uniform_block.is_some() && ok.engine_block.is_some());
-        assert_eq!(ok.samplers.len(), 2);
-
-        let reject = |a: &ShaderAbiPlan, what: &str| -> String {
-            resolve_stage_abi(&iface, a, IrStage::Fragment, Span::default())
-                .err()
-                .unwrap_or_else(|| panic!("{what} must reject"))
-                .message
-        };
-
-        // MISSING stage block: its members would be referenced undeclared.
-        let mut missing = abi.clone();
-        missing.uniform_blocks.retain(|(b, _)| *b != UNIFORM_BLOCK_BINDING_FRAGMENT);
-        assert!(
-            reject(&missing, "a missing stage block").contains("has none at binding"),
-            "{}",
-            reject(&missing, "a missing stage block")
-        );
-
-        // MISSING engine block, which the old code omitted silently.
-        let mut no_engine = abi.clone();
-        no_engine.uniform_blocks.retain(|(b, _)| *b != UNIFORM_BLOCK_BINDING_ENGINE);
-        assert!(reject(&no_engine, "a missing @engine block").contains("@engine block"));
-
-        // EXTRA block the interface never declared.
-        let mut extra = abi.clone();
-        let dup = extra.uniform_blocks[0].1.clone();
-        extra.uniform_blocks.push((UNIFORM_BLOCK_BINDING_VERTEX_ARRAYS + 9, dup));
-        // ...at a binding this stage does not consult, so the stage join is
-        // silent about it; the one it DOES consult is the array binding.
-        let mut extra_array = abi.clone();
-        extra_array.uniform_array_blocks.push((
-            UNIFORM_BLOCK_BINDING_FRAGMENT_ARRAYS,
-            skull_mir::gpu_layout::uniform_array_block(
-                Ustr::from("Bogus"),
-                &[skull_mir::gpu_layout::ArrayMemberDecl {
-                    name: Ustr::from("x"),
+            array_groups: vec![LogicalArrayGroup {
+                stage: IrStage::Fragment,
+                owner: Ustr::from("ff"),
+                members: vec![ArrayMemberDecl {
+                    name: Ustr::from("lights"),
                     elem: WireKind::F32x4,
-                    capacity: 1,
+                    capacity: 4,
                     span: Span::default(),
                 }],
-            )
-            .expect("array block"),
-        ));
-        assert!(
-            reject(&extra_array, "an extra array block").contains("does not declare"),
-            "{}",
-            reject(&extra_array, "an extra array block")
-        );
-
-        // DUPLICATE block at one binding.
-        let mut twice = abi.clone();
-        let d = twice
-            .uniform_blocks
-            .iter()
-            .find(|(b, _)| *b == UNIFORM_BLOCK_BINDING_FRAGMENT)
-            .cloned()
-            .expect("the stage block");
-        twice.uniform_blocks.push(d);
-        assert!(reject(&twice, "a duplicated block").contains("more than one"));
-    }
-
-    /// **The sampler join is a BIJECTION, not length plus membership.**
-    ///
-    /// `[a, a]` against an interface naming `[a, b]` has the right length and
-    /// every element is a member -- and it declares `a` twice while `b` is
-    /// never declared at all. Both halves get their own arm.
-    #[test]
-    fn the_sampler_join_rejects_a_duplicated_unit() {
-        use skull_mir::shader_ir::LogicalTextureGroup;
-
-        let iface = ShaderInterfacePlan {
-            stages: vec![IrStage::Fragment],
+            }],
             textures: Some(LogicalTextureGroup {
                 struct_name: Some(Ustr::from("Tex")),
                 samplers: vec![
@@ -4512,11 +4614,116 @@ mod assertion_flip_tests {
                 stages: vec![IrStage::Fragment],
             }),
             ..Default::default()
+        }
+    }
+
+    /// **The ABI is validated against the interface it claims to answer, and a
+    /// dropped declaration is impossible.**
+    ///
+    /// Each arm perturbs ONE physical entry. A missing declaration surfaces as
+    /// a driver compile error with no compiler diagnostic, so "omit it and
+    /// carry on" is the one behaviour that must not exist.
+    #[test]
+    fn the_abi_validation_rejects_every_disagreement_with_the_interface() {
+        let iface = abi_fixture();
+        let abi = ShaderAbiPlan::glsl(&iface, Span::default()).expect("the fixture must lay out");
+
+        // CONTROL: the unperturbed pair validates and resolves with every entry
+        // present, so each rejection below measures its perturbation.
+        validate_abi(&iface, &abi, Span::default()).expect("the unperturbed plan must validate");
+        let ok = resolve_stage_abi(&iface, &abi, IrStage::Fragment, Span::default())
+            .expect("the unperturbed plan must resolve");
+        assert!(ok.uniform_block.is_some() && ok.engine_block.is_some());
+        assert!(ok.array_block.is_some());
+        assert_eq!(ok.samplers.len(), 2);
+
+        let reject = |a: &ShaderAbiPlan, what: &str| -> String {
+            validate_abi(&iface, a, Span::default())
+                .err()
+                .unwrap_or_else(|| panic!("{what} must reject"))
+                .message
         };
+
+        // MISSING stage block.
+        let mut m = abi.clone();
+        m.uniform_blocks.retain(|(b, _)| *b != UNIFORM_BLOCK_BINDING_FRAGMENT);
+        assert!(reject(&m, "a missing stage block").contains("has no block for"));
+
+        // MISSING @engine block -- silently omitted before.
+        let mut m = abi.clone();
+        m.uniform_blocks.retain(|(b, _)| *b != UNIFORM_BLOCK_BINDING_ENGINE);
+        assert!(reject(&m, "a missing @engine block").contains("EngineU"));
+
+        // MISSING array block, over an interface that DOES declare one -- the
+        // arm a fixture without an array group cannot reach.
+        let mut m = abi.clone();
+        m.uniform_array_blocks.clear();
+        assert!(reject(&m, "a missing array block").contains("array group"));
+
+        // WRONG BLOCK at the right binding: presence is not identity. The
+        // engine block sits at binding 2, so every per-binding presence check
+        // passes while the emitted members are another group's.
+        let mut m = abi.clone();
+        let engine = m
+            .uniform_blocks
+            .iter()
+            .find(|(b, _)| *b == UNIFORM_BLOCK_BINDING_ENGINE)
+            .map(|(_, p)| p.clone())
+            .expect("the engine block");
+        for (b, p) in m.uniform_blocks.iter_mut() {
+            if *b == UNIFORM_BLOCK_BINDING_FRAGMENT {
+                *p = engine.clone();
+            }
+        }
+        let msg = reject(&m, "a foreign block at the right binding");
+        assert!(msg.contains("EngineU") && msg.contains("FragU"), "{msg}");
+
+        // WRONG MEMBERS in the right block: the name matches and the layout
+        // does not.
+        let mut m = abi.clone();
+        for (b, p) in m.uniform_blocks.iter_mut() {
+            if *b == UNIFORM_BLOCK_BINDING_FRAGMENT {
+                p.members[0].name = Ustr::from("renamed");
+            }
+        }
+        assert!(reject(&m, "a renamed member").contains("but the interface declares"));
+
+        // WRONG CAPACITY in an array block -- what an `@size(N)` change moves,
+        // and what a block-name check alone cannot see.
+        let mut m = abi.clone();
+        m.uniform_array_blocks[0].1.members[0].capacity = 8;
+        assert!(reject(&m, "a changed array capacity").contains("interface declares"));
+
+        // UNKNOWN binding: no interface group claims it, and it belongs to no
+        // stage, so only a program-wide check can refuse it.
+        let mut m = abi.clone();
+        m.uniform_blocks.push((17, engine.clone()));
+        assert!(reject(&m, "an unknown binding").contains("which no"));
+
+        // DUPLICATE binding.
+        let mut m = abi.clone();
+        let d = m
+            .uniform_blocks
+            .iter()
+            .find(|(b, _)| *b == UNIFORM_BLOCK_BINDING_FRAGMENT)
+            .cloned()
+            .expect("the stage block");
+        m.uniform_blocks.push(d);
+        assert!(reject(&m, "a duplicated block").contains("more than one"));
+    }
+
+    /// **The sampler join is a BIJECTION**, in all three directions: a
+    /// duplicated unit, a unit for a sampler the group does not name, and a
+    /// named sampler with no unit.
+    ///
+    /// `[a, a]` against an interface naming `[a, b]` has the right length and
+    /// every element is a member -- and it declares `a` twice while `b` is
+    /// never declared at all.
+    #[test]
+    fn the_sampler_join_is_a_bijection() {
+        let iface = abi_fixture();
         let abi = ShaderAbiPlan::glsl(&iface, Span::default()).expect("lay out");
         assert_eq!(abi.texture_units, vec![Ustr::from("a"), Ustr::from("b")]);
-
-        // CONTROL: both samplers resolve.
         assert_eq!(
             stage_sampler_declarations(&iface, &abi, IrStage::Fragment, Span::default())
                 .expect("the unperturbed join must resolve")
@@ -4524,23 +4731,84 @@ mod assertion_flip_tests {
             2
         );
 
-        // Same LENGTH, every element a MEMBER, and still wrong.
-        let mut dup = abi.clone();
-        dup.texture_units = vec![Ustr::from("a"), Ustr::from("a")];
-        let msg = stage_sampler_declarations(&iface, &dup, IrStage::Fragment, Span::default())
-            .err()
-            .expect("a duplicated unit must reject")
-            .message;
-        assert!(msg.contains("more than one unit"), "{msg}");
+        let reject = |units: Vec<Ustr>, what: &str| -> String {
+            let mut a = abi.clone();
+            a.texture_units = units;
+            validate_abi(&iface, &a, Span::default())
+                .err()
+                .unwrap_or_else(|| panic!("{what} must reject"))
+                .message
+        };
+        assert!(reject(vec![Ustr::from("a"), Ustr::from("a")], "a duplicated unit")
+            .contains("more than one unit"));
+        assert!(reject(vec![Ustr::from("a"), Ustr::from("zzz")], "an alien unit")
+            .contains("does not name"));
+        // The MISSING branch: fewer units than the group names.
+        assert!(reject(vec![Ustr::from("a")], "a sampler with no unit").contains("gives no unit"));
+    }
 
-        // ...and a unit for a sampler the group does not name.
-        let mut alien = abi.clone();
-        alien.texture_units = vec![Ustr::from("a"), Ustr::from("zzz")];
-        let msg = stage_sampler_declarations(&iface, &alien, IrStage::Fragment, Span::default())
+    /// **Two attributes may not share a location.** A bijection on NAMES
+    /// accepts `[(a, 0), (b, 0)]`, which aliases one buffer slot onto two
+    /// inputs and is invisible until the geometry is wrong.
+    #[test]
+    fn overlapping_attribute_locations_reject() {
+        use skull_mir::gpu_layout::AttrKind;
+        use skull_mir::shader_ir::{LogicalVertexInput, VertexRate};
+        let iface = ShaderInterfacePlan {
+            stages: vec![IrStage::Vertex],
+            vertex_inputs: vec![LogicalVertexInput {
+                struct_name: Ustr::from("V"),
+                rate: VertexRate::PerVertex,
+                attrs: vec![
+                    (Ustr::from("a"), AttrKind::F32x2),
+                    (Ustr::from("b"), AttrKind::F32x2),
+                ],
+            }],
+            ..Default::default()
+        };
+        let abi = ShaderAbiPlan::glsl(&iface, Span::default()).expect("lay out");
+        // CONTROL: distinct locations validate.
+        assert_eq!(abi.attribute_locations, vec![(Ustr::from("a"), 0), (Ustr::from("b"), 1)]);
+        validate_abi(&iface, &abi, Span::default()).expect("distinct locations must validate");
+
+        let mut overlap = abi.clone();
+        overlap.attribute_locations = vec![(Ustr::from("a"), 0), (Ustr::from("b"), 0)];
+        let msg = validate_abi(&iface, &overlap, Span::default())
             .err()
-            .expect("an alien unit must reject")
+            .expect("overlapping locations must reject")
             .message;
-        assert!(msg.contains("does not name"), "{msg}");
+        assert!(msg.contains("both occupy location"), "{msg}");
+    }
+
+    /// **A fragment stage with no declared colour output rejects**, rather than
+    /// having a `vec4` invented for an inconsistent plan.
+    #[test]
+    fn a_fragment_stage_with_no_declared_output_rejects() {
+        use skull_mir::shader_ir::FragmentOutput;
+        let (ws, mid) = build_ws(
+            "value Vary { position: Vec4, uv: Vec2 }\n\
+             value QuadVert { pos: Vec2, texcoord: Vec2 }\n\
+             @shader(vertex)\n\
+             fn ov(@attr a: QuadVert) -> Vary { return Vary { position: v(a.pos.x, a.pos.y, 0.0, 1.0), uv: a.texcoord } }\n\
+             @shader(fragment)\n\
+             fn of(vary: Vary) -> Vec4 { return v(vary.uv.x, 0.0, 0.0, 1.0) }\n\
+             fn main() { let k = rock_shader(ov, of) }",
+        );
+        let scx = ScalarCtx::new_values_first_class(&ws);
+        let vf = resolve_root(&ws, mid, "ov").expect("root");
+        let ff = resolve_root(&ws, mid, "of").expect("root");
+        let mut plan = plan_shader_pipeline(&ws, &scx, vf, ff).expect("the fixture must plan");
+
+        // CONTROL: it renders with the output declared.
+        assert!(matches!(plan.interface.fragment_output, FragmentOutput::Single(_)));
+        render_shader_pipeline(&ws, &plan, GlslProfile::Core330).expect("the control must render");
+
+        plan.interface.fragment_output = FragmentOutput::None;
+        let msg = render_shader_pipeline(&ws, &plan, GlslProfile::Core330)
+            .err()
+            .expect("a fragment stage with no output must reject")
+            .message;
+        assert!(msg.contains("no fragment output"), "{msg}");
     }
 
     /// **A key of the WRONG ARITY rejects.**

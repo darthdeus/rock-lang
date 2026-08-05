@@ -496,6 +496,21 @@ pub fn uniform_group_members(
                     _ => None,
                 })
                 .unwrap_or_else(|| "that type".to_string());
+            // A sampler is the one non-wire field with an obvious fix, and
+            // putting the texture beside the scalars is a plausible mistake.
+            // The hint lives HERE so the single classifier keeps it -- a
+            // caller's own pre-pass is what this replaced.
+            if matches!(ty_name.as_str(), "Sampler2D" | "ISampler2D") {
+                return Err(err(
+                    fd.span,
+                    format!(
+                        "uniform block: `{struct_name}` field `{}` is a sampler, which cannot \
+                         live in a uniform buffer on any API -- pass it as an fn param instead \
+                         (`@textures` groups it and assigns the unit)",
+                        fd.name
+                    ),
+                ));
+            }
             return Err(err(
                 fd.span,
                 format!(
