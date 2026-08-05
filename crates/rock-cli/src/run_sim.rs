@@ -123,6 +123,15 @@ fn sim_spawn_barrier() {
     }
 }
 
+/// Parent-side child lifecycle trace, enabled by `ROCK_SIM_LIFECYCLE_LOG`.
+///
+/// Two granularities, because they answer different questions. `start`/`end`
+/// bracket an ENTRY and are written for every part a child was handed, at spawn
+/// and at exit -- which is what the exclusive-lane property is about ("was any
+/// other entry in flight"). `proc_start`/`proc_end` bracket the PROCESS, keyed
+/// by its comma-joined label. A worker is handed a whole queue at once, so its
+/// entries all read live from spawn to exit; only the process events can say how
+/// many booted workers were alive at the same moment, which is the B5 property.
 fn record_sim_lifecycle(event: &str, sim_name: &str) {
     let Some(path) = std::env::var_os("ROCK_SIM_LIFECYCLE_LOG") else {
         return;
@@ -444,6 +453,7 @@ pub fn do_run_named_sims(
             names,
             quiet,
             update_snapshots,
+            jobs,
             &mut stone,
         )?;
         let mut passed = 0usize;
@@ -574,6 +584,41 @@ pub fn do_run_named_sims(
 /// tally. Returns Err (non-zero exit) if any sim failed. Distinct sims
 /// don't chain, so each gets its own `OUT`; use the comma form for
 /// multi-start chains.
+/// The one bounded scheduler. `task` is claimed by index off a shared cursor,
+/// so a task runs exactly once on at most `jobs` OS threads at a time, and the
+/// serial path is the same call with `jobs == 1` rather than a second code path
+/// that could drift from it. Results come back keyed by index; the CALLER
+/// decides the reporting order, because completion order is not deterministic.
+///
+/// Both fan-outs go through here: Phase A's fresh-process children
+/// ([`do_run_all_sims`]) and Phase B's boot-checkpoint worker lanes
+/// ([`run_specs_worker_mode`]).
+fn run_bounded<T, F>(jobs: usize, n: usize, task: F) -> Vec<(usize, Result<T>)>
+where
+    F: Fn(usize) -> Result<T> + Sync,
+    T: Send,
+{
+    if jobs <= 1 || n <= 1 {
+        return (0..n).map(|i| (i, task(i))).collect();
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let collected: Mutex<Vec<(usize, Result<T>)>> = Mutex::new(Vec::new());
+    let lanes = jobs.min(n);
+    std::thread::scope(|scope| {
+        for _ in 0..lanes {
+            scope.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if i >= n {
+                    break;
+                }
+                let r = task(i);
+                collected.lock().unwrap().push((i, r));
+            });
+        }
+    });
+    collected.into_inner().expect("no lane panicked while holding the results lock")
+}
+
 pub fn do_run_all_sims(
     backend: crate::Backend,
     project: &str,
@@ -605,6 +650,7 @@ pub fn do_run_all_sims(
             &wire_names,
             quiet,
             update_snapshots,
+            jobs,
             &mut stone,
         )?;
         let mut passed = 0usize;
@@ -688,25 +734,9 @@ pub fn do_run_all_sims(
         Ok(summary)
     };
 
-    if jobs > 1 && ordinary_idx.len() > 1 {
-        let next = std::sync::atomic::AtomicUsize::new(0);
-        let collected: Mutex<Vec<(usize, Result<SimSummary>)>> = Mutex::new(Vec::new());
-        let workers = jobs.min(ordinary_idx.len());
-        std::thread::scope(|scope| {
-            for _ in 0..workers {
-                scope.spawn(|| loop {
-                    let slot = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    let Some(&i) = ordinary_idx.get(slot) else { break };
-                    let r = run_at(i, None);
-                    collected.lock().unwrap().push((i, r));
-                });
-            }
-        });
-        summaries.extend(collected.into_inner().unwrap());
-    } else {
-        for &i in &ordinary_idx {
-            summaries.insert(i, run_at(i, None));
-        }
+    for (slot, r) in run_bounded(jobs, ordinary_idx.len(), |slot| run_at(ordinary_idx[slot], None))
+    {
+        summaries.insert(ordinary_idx[slot], r);
     }
 
     // Reload lane, strictly after the pool has drained.
@@ -756,8 +786,28 @@ pub fn do_run_all_sims(
 /// Worker-mode execution for a list of entry specs (`--workers`): eligible
 /// specs grouped by boot signature run in shared boot-checkpoint workers with
 /// recovery; the ineligible remainder runs isolated, each with its REPORTED
-/// reason. Serial throughout -- worker composition with the Phase A scheduler
-/// is B5. Returns one summary per spec, in spec order.
+/// reason.
+///
+/// B5 is the composition of Phase B's worker with Phase A's bounded scheduler,
+/// and it is a LANE PLAN handed to [`run_bounded`], not a second scheduler or a
+/// second worker lifecycle:
+///
+/// - a boot-signature group splits into at most `jobs` CONTIGUOUS lanes, so a
+///   process still serves exactly one canonical signature and an entry keeps
+///   the same kind of predecessor it would have had serially;
+/// - a lane is a whole `run_specs_recovering` queue, so recovery, the
+///   checkpoint-identity guard and the per-entry deadline are unchanged, and a
+///   worker death in one lane cannot reach another;
+/// - the unit of parallelism is the ENTRY (a whole comma-chain), never a chain
+///   part: a lane holds spec POSITIONS and `run_specs_recovering` expands each
+///   into its parts in order, sharing one `$OUT`;
+/// - an isolated entry that does not need the compile session rides the same
+///   pool; the hot-reload lane runs strictly AFTER the pool drains, because it
+///   mutates the one session and the one overlay;
+/// - reporting is deferred to spec order. Completion order is not
+///   deterministic, and a record has to be emitted whole.
+///
+/// Returns one summary per spec, in spec order.
 fn run_specs_worker_mode(
     project: &str,
     output: &str,
@@ -765,6 +815,7 @@ fn run_specs_worker_mode(
     specs: &[String],
     quiet: bool,
     update_snapshots: bool,
+    jobs: Option<usize>,
     stone: &mut crate::skull_backend::SkullStone,
 ) -> Result<Vec<(String, SimSummary)>> {
     if cfg!(windows) {
@@ -781,51 +832,106 @@ fn run_specs_worker_mode(
         ));
     }
 
+    let jobs = resolve_jobs(jobs, update_snapshots);
     let (groups, isolated) = group_worker_specs(specs, env_by_wire);
     // One slot per spec POSITION: the same sim can be named twice, and each
     // occurrence is its own entry with its own result.
     let mut slots: Vec<Option<SimSummary>> = specs.iter().map(|_| None).collect();
 
-    let report = |spec: &str, summary: &SimSummary| {
-        if !quiet {
-            if !summary.diagnostics.is_empty() {
-                eprint!("{}", summary.diagnostics);
-            }
-            summary.print(spec, false);
-        }
-    };
-
+    // The lane plan. A group splits into contiguous blocks so the entries a
+    // worker serves stay in their requested order; splitting round-robin would
+    // reshuffle every predecessor for no gain.
+    let mut lanes: Vec<Vec<usize>> = Vec::new();
     for group in &groups {
-        if !quiet && group.len() > 1 {
-            println!("[sim] worker: {} entries share one booted process", group.len());
+        let blocks = jobs.min(group.len()).max(1);
+        for b in 0..blocks {
+            let lo = group.len() * b / blocks;
+            let hi = group.len() * (b + 1) / blocks;
+            if lo < hi {
+                lanes.push(group[lo..hi].to_vec());
+            }
         }
-        let group_specs: Vec<String> = group.iter().map(|&i| specs[i].clone()).collect();
-        // `run_specs_recovering` is positional, so its results line up with
-        // `group_specs` and therefore with `group`'s indices.
-        let results = run_specs_recovering(
-            project,
-            output,
-            env_by_wire,
-            &group_specs,
-            update_snapshots,
-            false,
-        )?;
-        for (&i, (spec, summary, _crossed)) in group.iter().zip(results) {
-            report(&spec, &summary);
-            slots[i] = Some(summary);
+    }
+    // An isolated entry needs the compile SESSION only when it opted into the
+    // hot-reload lane; everything else isolated is an ordinary fresh process
+    // and can overlap. `worker_ineligibility` has other reasons (a `$OUT`-
+    // interpolating env, disagreeing chain parts, `SIM_WORKER_ISOLATED`) and
+    // none of them touch the session.
+    let (exclusive, poolable): (Vec<_>, Vec<_>) = isolated.into_iter().partition(|(i, _)| {
+        parse_sim_chain(&specs[*i])
+            .iter()
+            .any(|p| is_reload_lane(env_by_wire.get(*p).map_or(&[][..], |v| v)))
+    });
+
+    if !quiet {
+        for lane in &lanes {
+            if lane.len() > 1 {
+                println!("[sim] worker: {} entries share one booted process", lane.len());
+            }
+        }
+        for (i, reason) in poolable.iter().chain(exclusive.iter()) {
+            println!("[sim] {}: isolated ({reason})", specs[*i]);
         }
     }
 
-    for &(i, ref reason) in &isolated {
-        let spec = &specs[i];
-        if !quiet {
-            println!("[sim] {spec}: isolated ({reason})");
+    // One pool over both kinds of work: a recovering worker queue, and an
+    // isolated entry that needs no session.
+    #[derive(Clone, Copy)]
+    enum Lane<'a> {
+        Worker(&'a [usize]),
+        Isolated(usize),
+    }
+    let work: Vec<Lane> = lanes
+        .iter()
+        .map(|l| Lane::Worker(l.as_slice()))
+        .chain(poolable.iter().map(|(i, _)| Lane::Isolated(*i)))
+        .collect();
+
+    let mut collected: Vec<(usize, SimSummary)> = Vec::new();
+    for (_, r) in run_bounded(jobs, work.len(), |w| match work[w] {
+        Lane::Worker(lane) => {
+            let lane_specs: Vec<String> = lane.iter().map(|&i| specs[i].clone()).collect();
+            // `run_specs_recovering` is positional, so its results line up with
+            // `lane_specs` and therefore with `lane`'s indices.
+            let results = run_specs_recovering(
+                project,
+                output,
+                env_by_wire,
+                &lane_specs,
+                update_snapshots,
+                false,
+            )?;
+            if results.len() != lane.len() {
+                return Err(anyhow!(
+                    "worker lane returned {} results for {} specs",
+                    results.len(),
+                    lane.len()
+                ));
+            }
+            Ok(lane
+                .iter()
+                .zip(results)
+                .map(|(&i, (_, summary, _crossed))| (i, summary))
+                .collect::<Vec<_>>())
         }
-        // `run_named_entry` gates session access per part, so only reload
-        // parts ever see the SkullStone -- and everything here is serial.
+        Lane::Isolated(i) => {
+            let (_, summary) =
+                run_named_entry(project, &specs[i], quiet, true, update_snapshots, output, env_by_wire, None)?;
+            Ok(vec![(i, summary)])
+        }
+    }) {
+        collected.extend(r?);
+    }
+    for (i, summary) in collected {
+        slots[i] = Some(summary);
+    }
+
+    // The hot-reload lane, strictly after the pool has drained: it mutates the
+    // one `SkullStone` session and the one `incremental.lua` overlay.
+    for &(i, _) in &exclusive {
         let (_, summary) = run_named_entry(
             project,
-            spec,
+            &specs[i],
             quiet,
             true,
             update_snapshots,
@@ -833,8 +939,20 @@ fn run_specs_worker_mode(
             env_by_wire,
             Some(&mut *stone),
         )?;
-        report(spec, &summary);
         slots[i] = Some(summary);
+    }
+
+    // Records are emitted in SPEC order, whole. Completion order under a pool is
+    // not deterministic, and a record's diagnostics have to land with it.
+    if !quiet {
+        for (spec, slot) in specs.iter().zip(slots.iter()) {
+            if let Some(summary) = slot {
+                if !summary.diagnostics.is_empty() {
+                    eprint!("{}", summary.diagnostics);
+                }
+                summary.print(spec, false);
+            }
+        }
     }
 
     specs
@@ -1457,6 +1575,7 @@ fn run_worker(
 
     let label = parts.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(",");
     let mut child = cmd.spawn()?;
+    record_sim_lifecycle("proc_start", &label);
     for p in parts {
         record_sim_lifecycle("start", &p.name);
     }
@@ -1639,6 +1758,7 @@ fn run_worker(
     for p in parts {
         record_sim_lifecycle("end", &p.name);
     }
+    record_sim_lifecycle("proc_end", &label);
     if writes_live(buffered) {
         for message in &reader_diagnostics {
             log::warn!(target: "SIM", "{message}");
@@ -2027,9 +2147,15 @@ fn fixed_shuffle(n: usize) -> Vec<usize> {
     idx
 }
 
-/// Run `ordered` the way `--workers` schedules it -- eligible specs grouped by
+/// Run `ordered` the way `--workers` GROUPS it -- eligible specs grouped by
 /// boot signature into shared recovering workers, the remainder isolated -- and
 /// return a record per spec, aligned to `ordered`.
+///
+/// Deliberately one worker per signature, where `--workers` splits a group into
+/// `--jobs` lanes (B5): a lane split can only reduce how many entries actually
+/// follow a predecessor in one process, and that population is this gate's
+/// denominator. Nothing about what a worker does at a boundary differs between
+/// the two.
 ///
 /// Results are carried by INDEX, never by spec spelling: a corpus may name the
 /// same sim twice and those are two entries with two results.

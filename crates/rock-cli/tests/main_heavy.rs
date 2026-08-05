@@ -32,5 +32,7 @@ mod sim_concurrent_invocations;
 mod sim_worker_differential;
 #[path = "sim_reload_lane_drain.rs"]
 mod sim_reload_lane_drain;
+#[path = "sim_worker_pool.rs"]
+mod sim_worker_pool;
 #[path = "web_smoke_tests.rs"]
 mod web_smoke_tests;
