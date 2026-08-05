@@ -348,8 +348,16 @@ fn main() { let k = rock_shader(bare_frag) }
 
     // It IS in the interface, with its kind.
     assert_eq!(
-        em.interface.bare_samplers,
-        vec![(Ustr::from("uTexture"), skull_mir::gpu_layout::SamplerKind::Float)],
+        em.interface
+            .bare_samplers
+            .iter()
+            .map(|s| (s.name, s.kind, s.stage))
+            .collect::<Vec<_>>(),
+        vec![(
+            Ustr::from("uTexture"),
+            skull_mir::gpu_layout::SamplerKind::Float,
+            IrStage::Fragment
+        )],
         "a bare sampler is missing from the interface"
     );
     // ...and it takes NO compiler-assigned unit: the group is what those come
@@ -409,15 +417,25 @@ fn a_second_target_numbers_attribute_locations_differently() {
             (Ustr::from("inst_tint"), 3),
         ]
     );
-    // ...and every one of them is what the EMITTED declaration says, so the
-    // ABI plan and the GLSL text cannot drift.
-    for (name, loc) in &em.abi.attribute_locations {
-        assert!(
-            em.source.contains(&format!("layout (location = {loc}) in ")),
-            "no emitted attribute at location {loc} (for `{name}`):\n{}",
-            em.source
-        );
-        assert!(em.source.contains(&format!(" {name};")), "`{name}` is not declared");
+    // ...and each COMPLETE declaration line is emitted: name, type and location
+    // together. Checking that each location occurs somewhere and each name
+    // occurs somewhere survives a permuted mapping, which is exactly the drift
+    // this is meant to catch.
+    let expect = |name: &str, ty: &str, loc: u32| {
+        let line = format!("layout (location = {loc}) in {ty} {name};");
+        assert!(em.source.contains(&line), "missing declaration `{line}`:\n{}", em.source);
+    };
+    expect("pos", "vec2", 0);
+    expect("texcoord", "vec2", 1);
+    expect("shift", "vec2", 2);
+    expect("inst_tint", "vec4", 3);
+    // The pairing is what is asserted, so a SWAPPED pair must not be present.
+    for bad in [
+        "layout (location = 0) in vec2 texcoord;",
+        "layout (location = 1) in vec2 pos;",
+        "layout (location = 3) in vec2 shift;",
+    ] {
+        assert!(!em.source.contains(bad), "a permuted declaration `{bad}` is present");
     }
 
     // The hostile target numbers them backwards from the SAME interface.
@@ -435,4 +453,57 @@ fn a_second_target_numbers_attribute_locations_differently() {
         em.abi.attribute_locations, hostile,
         "both targets numbered attributes alike, so the interface plan decided it"
     );
+}
+
+/// **A sampler is declared in every stage that USES it.**
+///
+/// `@textures` is one group per PROGRAM, but the GLSL declaration is per
+/// STAGE: each stage's `#ifdef` block is its own translation unit, so a stage
+/// that samples needs the `uniform sampler2D` in its own section. Vertex
+/// texture fetch is legal in GL 3.3 / GLES 3.0, and the vertex stage was
+/// emitting a reference to an identifier it never declared.
+///
+/// The fixture has BOTH stages sampling the same group, so the assertion is
+/// about per-stage declaration rather than about the group existing.
+#[test]
+fn a_sampler_is_declared_in_each_stage_that_uses_it() {
+    let src = r#"
+value QuadVert { pos: Vec2, texcoord: Vec2 }
+struct Tex { height: Sampler2D }
+value Vary { position: Vec4, uv: Vec2 }
+
+@shader(vertex)
+fn tv(@attr a: QuadVert, @textures t: Tex) -> Vary {
+    let h = texture(t.height, a.texcoord)
+    return Vary { position: v(a.pos.x, a.pos.y + h.r, 0.0, 1.0), uv: a.texcoord }
+}
+
+@shader(fragment)
+fn tf(vary: Vary, @textures t: Tex) -> Vec4 {
+    return texture(t.height, vary.uv)
+}
+
+fn main() { let k = rock_shader(tv, tf) }
+"#;
+    let (ws, mid) = workspace(src);
+    let em = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
+        &ws, mid, "tv", "tf", GlslProfile::Core330,
+    )
+    .expect("a pipeline sampling in both stages must emit");
+
+    // The DENOMINATOR: one group, one sampler, used by two stages.
+    assert_eq!(em.abi.texture_units, vec![Ustr::from("height")]);
+
+    // Each stage's own section must DECLARE it, not just reference it.
+    let (vert, frag) = {
+        let v = em.source.find("#ifdef VERTEX").expect("a vertex section");
+        let p = em.source.find("#ifdef PIXEL").expect("a pixel section");
+        if v < p { (&em.source[v..p], &em.source[p..]) } else { (&em.source[v..], &em.source[p..v]) }
+    };
+    for (label, section) in [("vertex", vert), ("fragment", frag)] {
+        assert!(
+            section.contains("uniform sampler2D height;"),
+            "the {label} stage references `height` without declaring it:\n{section}"
+        );
+    }
 }

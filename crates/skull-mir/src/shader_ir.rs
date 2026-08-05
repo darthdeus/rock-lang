@@ -178,10 +178,24 @@ pub struct LogicalArrayGroup {
 /// declares them. ORDER is logical; the unit each one lands on is the target's
 /// answer, and it is COMPILER-assigned -- which is the whole difference from a
 /// bare sampler ([`ShaderInterfacePlan::bare_samplers`]).
+///
+/// `stages` is which stages READ the group. One group per program, but a
+/// resource is declared per stage on every target with separate stage units,
+/// so "the program has it" is not enough to emit from -- a stage that samples
+/// and was not listed emits a reference to an identifier it never declared.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct LogicalTextureGroup {
     pub struct_name: Option<Ustr>,
     pub samplers: Vec<(Ustr, SamplerKind)>,
+    pub stages: Vec<ShaderStage>,
+}
+
+/// A loose sampler and the stage that declares it.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct LogicalSampler {
+    pub name: Ustr,
+    pub kind: SamplerKind,
+    pub stage: ShaderStage,
 }
 
 /// How often a vertex input advances.
@@ -225,14 +239,15 @@ pub struct ShaderInterfacePlan {
     pub uniform_groups: Vec<LogicalUniformGroup>,
     pub array_groups: Vec<LogicalArrayGroup>,
     pub textures: Option<LogicalTextureGroup>,
-    /// Loose `Sampler2D` params, outside any `@textures` group.
+    /// Loose `Sampler2D` params, outside any `@textures` group, each with the
+    /// stage that declares it.
     ///
     /// Kept APART from `textures` because the difference is not cosmetic: a
     /// grouped sampler's unit is compiler-assigned and published in the ABI
     /// plan, while a bare one keeps a unit the CPU picked. Folding them into
     /// one list would tell the engine it owns units it does not. A program may
     /// not mix the two, which is a rejection rather than a precedence.
-    pub bare_samplers: Vec<(Ustr, SamplerKind)>,
+    pub bare_samplers: Vec<LogicalSampler>,
     /// How the fragment stage's colour output is shaped.
     pub fragment_output: FragmentOutput,
 }
@@ -263,5 +278,21 @@ impl ShaderInterfacePlan {
     /// assigns units in. Empty when the program declares no group.
     pub fn sampler_names(&self) -> Vec<Ustr> {
         self.textures.as_ref().map(|t| t.samplers.iter().map(|(n, _)| *n).collect()).unwrap_or_default()
+    }
+
+    /// Every sampler `stage` reads, grouped ones first (in group order), then
+    /// its bare ones. THE per-stage resource list: a stage declares exactly
+    /// this, and types its bare-global reads from exactly this.
+    pub fn stage_samplers(&self, stage: ShaderStage) -> Vec<(Ustr, SamplerKind)> {
+        let mut out: Vec<(Ustr, SamplerKind)> = self
+            .textures
+            .iter()
+            .filter(|t| t.stages.contains(&stage))
+            .flat_map(|t| t.samplers.iter().copied())
+            .collect();
+        out.extend(
+            self.bare_samplers.iter().filter(|s| s.stage == stage).map(|s| (s.name, s.kind)),
+        );
+        out
     }
 }

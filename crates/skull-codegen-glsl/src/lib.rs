@@ -36,7 +36,7 @@ use skull_mir::intrinsics::{Emission, IntrinsicEntry, IntrinsicTable};
 use skull_mir::lower::{lower_function_spec, ScalarCtx, SpecSubst};
 use skull_mir::monoty::{MonoCtor, MonoTy};
 use skull_mir::shader_ir::{
-    FragmentOutput, ShaderIR, ShaderStageIr,
+    FragmentOutput, LogicalSampler, ShaderIR, ShaderStageIr,
     LogicalArrayGroup, LogicalTextureGroup, LogicalUniformGroup, LogicalVarying,
     LogicalVertexInput, ShaderInstance, ShaderInterfacePlan, ShaderStage as IrStage, UniformRole,
     VertexRate,
@@ -907,7 +907,7 @@ fn emit_fn_def_with(
             s.global_params
                 .iter()
                 .copied()
-                .chain(s.samplers.iter().map(|&(i, _, _)| i))
+                .chain(s.sampler_params.iter().copied())
                 .chain(s.arrays.iter().copied())
                 .collect()
         })
@@ -1976,8 +1976,11 @@ struct EntryShape {
     /// Combined global field name -> GLSL type (for `ty_of` on bare-global
     /// reads). Names are collision-checked unique across all global structs.
     uniform_fields: Vec<(Ustr, GlslTy)>,
-    /// Sampler params: (param index, name). Also dropped, read as bare globals.
-    samplers: Vec<(usize, Ustr, SamplerKind)>,
+    /// Sampler param INDICES, dropped from the emitted signature and read as
+    /// bare globals. Indices only: which samplers exist and what kind they are
+    /// is the interface's answer, and a second copy here is what let the vertex
+    /// stage reference a sampler it never declared.
+    sampler_params: Vec<usize>,
     /// `UniformArray<T>` param indices. Dropped from the signature and referenced
     /// by name (via `at()` -> indexing); NOT tier-0-typed, so they are skipped
     /// when typing param cells.
@@ -1985,14 +1988,6 @@ struct EntryShape {
     /// `void main()` mode: presence switches emission to `void main()` with a
     /// return-struct destructure (vertex varyings, or MRT fragment outputs).
     main_out: Option<MainOut>,
-    /// The `@textures` group's struct name for this stage, if any. Carried so
-    /// the emission API can hand the engine the slot order.
-    texture_group: Option<Ustr>,
-    /// The `@uniform` group's struct name for this stage, if any. The block
-    /// DECLARATION and its byte layout both come from this via
-    /// [`skull_mir::gpu_layout::uniform_block`], so `uniform_fields` types the
-    /// bare-global reads and never states the layout.
-    uniform_group: Option<Ustr>,
 }
 
 /// The default fullscreen vertex stage -- identical to the hand-written
@@ -2017,10 +2012,22 @@ fn nominal_name(ws: &Workspace, ty: TyId) -> Option<Ustr> {
     }
 }
 
+/// A1's own classification: param roles and group names, in the neutral
+/// vocabulary. The body-emission view ([`EntryShape`]) is derived from the
+/// completed INTERFACE afterwards, exactly as A2's is -- building it here
+/// would be a second uniform classification beside `uniform_group_members`.
+struct EntryClass {
+    global_params: Vec<usize>,
+    sampler_params: Vec<usize>,
+    samplers: Vec<(usize, Ustr, SamplerKind)>,
+    texture_group: Option<Ustr>,
+    uniform_group: Option<Ustr>,
+}
+
 /// Classify an entry fn's params against the A1 contract: at most one uniform
 /// value struct (every field tier 0), any number of `Sampler2D`, exactly one
 /// `Vec2` (the fullscreen TexCoord varying); return `Vec4`.
-fn classify_entry(ws: &Workspace, f: &Function) -> Result<EntryShape, CompilerError> {
+fn classify_entry(ws: &Workspace, f: &Function) -> Result<EntryClass, CompilerError> {
     let span = f.name_span;
     let mut uniform_param = None;
     let mut uniform_fields: Vec<(Ustr, GlslTy)> = Vec::new();
@@ -2098,15 +2105,29 @@ fn classify_entry(ws: &Workspace, f: &Function) -> Result<EntryShape, CompilerEr
             return Err(err(span, format!("shader entry: uniform name `{name}` would collide (fields, samplers, TexCoord and FragColor share the GLSL global namespace)")));
         }
     }
-    Ok(EntryShape {
+    Ok(EntryClass {
         global_params: uniform_param.into_iter().chain(texture_params).collect(),
-        uniform_fields,
+        sampler_params: samplers.iter().map(|&(i, _, _)| i).collect(),
         samplers,
-        arrays: Vec::new(),
-        main_out: None,
         texture_group,
         uniform_group,
     })
+}
+
+/// A1's body-emission view, derived from its completed interface.
+///
+/// The uniform field types come from `iface`, which got them from
+/// `uniform_group_members` -- the same classifier the std140 packer reads. The
+/// `glsl_ty` walk that used to fill this in was a second classification of the
+/// same struct.
+fn entry_shape(class: &EntryClass, iface: &ShaderInterfacePlan) -> EntryShape {
+    EntryShape {
+        global_params: class.global_params.clone(),
+        uniform_fields: stage_uniform_fields(iface, IrStage::Fragment),
+        sampler_params: class.sampler_params.clone(),
+        arrays: Vec::new(),
+        main_out: None,
+    }
 }
 
 /// Emit a COMPLETE single-file shader for one `@shader(fragment)` root: the
@@ -2317,46 +2338,86 @@ fn wire_glsl(k: WireKind) -> GlslTy {
     }
 }
 
-/// Every sampler a program declares, in DECLARATION order: the `@textures`
-/// group's members in the ABI's unit order first, then the bare ones.
+/// The samplers ONE STAGE declares, paired with the unit the target assigned.
 ///
-/// One list, from the interface plus the target's unit assignment, so the
-/// emitted declarations cannot name a sampler the ABI does not know about or
-/// omit one it does.
-fn sampler_declarations(
+/// The join FAILS CLOSED. A `filter_map` here silently dropped a declaration
+/// when a name was missing from the ABI plan -- the shader then referenced an
+/// identifier it never declared, which surfaces as a driver compile error with
+/// no compiler diagnostic at all. Every grouped sampler this stage reads must
+/// have exactly one unit, and the ABI must hold no unit this program's group
+/// does not name.
+fn stage_sampler_declarations(
     iface: &ShaderInterfacePlan,
     abi: &ShaderAbiPlan,
-) -> Vec<(Ustr, SamplerKind)> {
-    let grouped = iface.textures.as_ref();
-    let mut out: Vec<(Ustr, SamplerKind)> = abi
-        .texture_units
+    stage: IrStage,
+    span: Span,
+) -> Result<Vec<(Ustr, SamplerKind)>, CompilerError> {
+    let grouped: Vec<(Ustr, SamplerKind)> = iface
+        .textures
         .iter()
-        .filter_map(|u| {
-            grouped.and_then(|g| g.samplers.iter().find(|(n, _)| n == u)).map(|(n, k)| (*n, *k))
-        })
+        .filter(|t| t.stages.contains(&stage))
+        .flat_map(|t| t.samplers.iter().copied())
         .collect();
-    out.extend(iface.bare_samplers.iter().copied());
-    out
+    // Every unit the ABI published belongs to the program's group, whichever
+    // stage reads it -- so the bijection is checked against the GROUP, not
+    // against this stage's slice of it.
+    let all_grouped: Vec<Ustr> = iface.sampler_names();
+    if abi.texture_units.len() != all_grouped.len()
+        || abi.texture_units.iter().any(|u| !all_grouped.contains(u))
+    {
+        return Err(err(span, format!(
+            "internal: the GLSL ABI plan assigns units {:?} but the interface's @textures group \
+             names {all_grouped:?} -- a sampler with no unit would be referenced without being \
+             declared",
+            abi.texture_units
+        )));
+    }
+    // ...and in the group's own order, which is unit order.
+    let mut out: Vec<(Ustr, SamplerKind)> = Vec::new();
+    for u in &abi.texture_units {
+        if let Some(s) = grouped.iter().find(|(n, _)| n == u) {
+            out.push(*s);
+        }
+    }
+    out.extend(
+        iface.bare_samplers.iter().filter(|s| s.stage == stage).map(|s| (s.name, s.kind)),
+    );
+    Ok(out)
 }
 
 /// Every vertex attribute's emitted declaration: its name and neutral kind from
-/// the INTERFACE, its location from the target's ABI plan. Two sources, each
-/// answering the half it owns, and neither re-walking the other.
+/// the INTERFACE, its location from the target's ABI plan.
+///
+/// The join FAILS CLOSED, for the same reason as the samplers above: a
+/// `filter_map` dropped an attribute whose name the ABI did not hold, and a
+/// missing `in` declaration is a driver error rather than a compiler one. The
+/// two sides must be a bijection on names.
 fn attribute_declarations(
     iface: &ShaderInterfacePlan,
     abi: &ShaderAbiPlan,
-) -> Vec<(Ustr, GlslTy, u32)> {
-    iface
-        .vertex_inputs
-        .iter()
-        .flat_map(|i| i.attrs.iter())
-        .filter_map(|(n, k)| {
-            abi.attribute_locations
-                .iter()
-                .find(|(an, _)| an == n)
-                .map(|(_, loc)| (*n, attr_glsl_ty(*k), *loc))
-        })
-        .collect()
+    span: Span,
+) -> Result<Vec<(Ustr, GlslTy, u32)>, CompilerError> {
+    let attrs: Vec<(Ustr, AttrKind)> =
+        iface.vertex_inputs.iter().flat_map(|i| i.attrs.iter().copied()).collect();
+    if attrs.len() != abi.attribute_locations.len() {
+        return Err(err(span, format!(
+            "internal: the interface declares {} vertex attribute(s) and the GLSL ABI plan \
+             assigns {} location(s)",
+            attrs.len(),
+            abi.attribute_locations.len()
+        )));
+    }
+    let mut out = Vec::with_capacity(attrs.len());
+    for (n, k) in &attrs {
+        let Some((_, loc)) = abi.attribute_locations.iter().find(|(an, _)| an == n) else {
+            return Err(err(span, format!(
+                "internal: vertex attribute `{n}` has no location in the GLSL ABI plan -- it \
+                 would be referenced without being declared"
+            )));
+        };
+        out.push((*n, attr_glsl_ty(*k), *loc));
+    }
+    Ok(out)
 }
 
 /// The samplers that are NOT part of a `@textures` group -- loose params whose
@@ -2365,11 +2426,12 @@ fn attribute_declarations(
 fn bare_sampler_list(
     samplers: &[(usize, Ustr, SamplerKind)],
     grouped_params: &[usize],
-) -> Vec<(Ustr, SamplerKind)> {
+    stage: IrStage,
+) -> Vec<LogicalSampler> {
     samplers
         .iter()
         .filter(|(i, _, _)| !grouped_params.contains(i))
-        .map(|(_, n, k)| (*n, *k))
+        .map(|(_, n, k)| LogicalSampler { name: *n, kind: *k, stage })
         .collect()
 }
 
@@ -2405,6 +2467,7 @@ fn logical_textures(
     ws: &Workspace,
     group: Option<Ustr>,
     has_bare_sampler: bool,
+    stages: Vec<IrStage>,
     span: Span,
 ) -> Result<Option<LogicalTextureGroup>, CompilerError> {
     let Some(g) = group else { return Ok(None) };
@@ -2417,6 +2480,7 @@ fn logical_textures(
     Ok(Some(LogicalTextureGroup {
         struct_name: Some(g),
         samplers: ts.slots.iter().map(|s| (s.name, s.kind)).collect(),
+        stages,
     }))
 }
 
@@ -2679,11 +2743,11 @@ fn plan_shader_entry(
     // the fn-library tier-0 leaf check: an `@uniform` block param is legal here
     // and is not a tier-0 leaf (asking the library check of an entry rejected
     // 1,539 real shaders).
-    let shape = classify_entry(ws, f)?;
+    let class = classify_entry(ws, f)?;
     let stage = plan_stage(ws, scx, fref, Stage::Fragment)?;
     let interface = ShaderInterfacePlan {
         stages: vec![IrStage::Fragment],
-        uniform_groups: shape
+        uniform_groups: class
             .uniform_group
             .map(|g| logical_uniform_group(ws, UniformRole::Stage(IrStage::Fragment), g, f.name_span))
             .transpose()?
@@ -2691,11 +2755,16 @@ fn plan_shader_entry(
             .collect(),
         textures: logical_textures(
             ws,
-            shape.texture_group,
-            has_bare_sampler(&shape.samplers, &shape.global_params),
+            class.texture_group,
+            has_bare_sampler(&class.samplers, &class.global_params),
+            vec![IrStage::Fragment],
             f.name_span,
         )?,
-        bare_samplers: bare_sampler_list(&shape.samplers, &shape.global_params),
+        bare_samplers: bare_sampler_list(
+            &class.samplers,
+            &class.global_params,
+            IrStage::Fragment,
+        ),
         // A1's entry returns one colour; MRT is an A2 feature.
         fragment_output: FragmentOutput::Single(WireKind::F32x4),
         // A1 has no vertex stage of its own (it rides the fullscreen quad), and
@@ -2704,6 +2773,7 @@ fn plan_shader_entry(
         ..Default::default()
     };
     let abi = ShaderAbiPlan::glsl(&interface, f.name_span)?;
+    let shape = entry_shape(&class, &interface);
     Ok(EntryPlan { fref, shape, stage, interface, abi })
 }
 
@@ -2750,7 +2820,9 @@ fn render_shader_entry(
     // Samplers are opaque: GLSL forbids them inside a uniform block, so they
     // stay loose beside it and bind by unit. Declared from the INTERFACE -- the
     // grouped ones in the ABI's unit order, then the bare ones.
-    for (n, k) in sampler_declarations(&plan.interface, &plan.abi) {
+    for (n, k) in
+        stage_sampler_declarations(&plan.interface, &plan.abi, IrStage::Fragment, f.name_span)?
+    {
         px.push_str(&format!("uniform {} {};\n", sampler_glsl_ty(k).uniform_decl(), n));
     }
     px.push('\n');
@@ -3429,6 +3501,7 @@ fn emit_vertex_stage(
     iface: &ShaderInterfacePlan,
     abi: &ShaderAbiPlan,
 ) -> Result<(String, Vec<FuncRef>), CompilerError> {
+    let span = ws.module(stage.ir.entry.fref.module).functions[stage.ir.entry.fref.func].name_span;
     let vert_block = abi.block_at(UNIFORM_BLOCK_BINDING_VERTEX);
     let engine_block = abi.block_at(UNIFORM_BLOCK_BINDING_ENGINE);
     let array_block = abi
@@ -3454,11 +3527,8 @@ fn emit_vertex_stage(
             .flat_map(|i| i.attrs.iter().map(|(n, k)| (*n, attr_glsl_ty(*k))))
             .chain(stage_uniform_fields(iface, IrStage::Vertex))
             .collect(),
-        samplers: v.samplers.clone(),
+        sampler_params: v.samplers.iter().map(|&(i, _, _)| i).collect(),
         arrays: v.arrays.iter().map(|a| a.param).collect(),
-        texture_group: v.texture_group,
-        // A2 keeps loose uniforms until the second slice.
-        uniform_group: None,
         main_out: Some(MainOut {
             fields: iface.varyings.iter().map(|v| (v.name, wire_glsl(v.kind))).collect(),
             position_is_gl: true,
@@ -3467,7 +3537,7 @@ fn emit_vertex_stage(
     let (mf, helpers, dependencies) = (&stage.ir.body, stage.render_helpers(ws)?, stage.dependencies());
 
     let mut out = String::new();
-    for (n, t, loc) in attribute_declarations(iface, abi) {
+    for (n, t, loc) in attribute_declarations(iface, abi, span)? {
         let (n, t, loc) = (&n, &t, &loc);
         out.push_str(&format!("layout (location = {loc}) in {} {};\n", t.name(), n));
     }
@@ -3491,6 +3561,13 @@ fn emit_vertex_stage(
     // arrays change per activation, the scalar group per draw.
     if let Some(plan) = array_block {
         out.push_str(&uniform_array_block_decl(plan));
+    }
+    // Samplers are opaque and cannot live in a uniform block, so each stage
+    // declares the ones IT reads. Vertex texture fetch is legal in GL 3.3 /
+    // GLES 3.0, and a stage that samples without declaring emits a reference to
+    // an identifier the driver has never seen.
+    for (n, t) in stage_sampler_declarations(iface, abi, IrStage::Vertex, span)? {
+        out.push_str(&format!("uniform {} {};\n", sampler_glsl_ty(t).uniform_decl(), n));
     }
     if vert_block.is_some()
         || engine_block.is_some()
@@ -3517,6 +3594,7 @@ fn emit_fragment_stage(
     iface: &ShaderInterfacePlan,
     abi: &ShaderAbiPlan,
 ) -> Result<(String, Vec<FuncRef>), CompilerError> {
+    let span = ws.module(stage.ir.entry.fref.module).functions[stage.ir.entry.fref.func].name_span;
     let frag_block = abi.block_at(UNIFORM_BLOCK_BINDING_FRAGMENT);
     let engine_block = abi.block_at(UNIFORM_BLOCK_BINDING_ENGINE);
     let array_block = abi
@@ -3544,12 +3622,9 @@ fn emit_fragment_stage(
             .map(|v| (v.name, wire_glsl(v.kind)))
             .chain(stage_uniform_fields(iface, IrStage::Fragment))
             .collect(),
-        samplers: fs.samplers.clone(),
+        sampler_params: fs.samplers.iter().map(|&(i, _, _)| i).collect(),
         arrays: fs.arrays.iter().map(|a| a.param).collect(),
         main_out,
-        texture_group: fs.texture_group,
-        // A2 keeps loose uniforms until the second slice.
-        uniform_group: None,
     };
     let (mf, helpers, dependencies) = (&stage.ir.body, stage.render_helpers(ws)?, stage.dependencies());
 
@@ -3591,8 +3666,8 @@ fn emit_fragment_stage(
     if let Some(plan) = array_block {
         out.push_str(&uniform_array_block_decl(plan));
     }
-    for (_, n, t) in &fs.samplers {
-        out.push_str(&format!("uniform {} {};\n", sampler_glsl_ty(*t).uniform_decl(), n));
+    for (n, t) in stage_sampler_declarations(iface, abi, IrStage::Fragment, span)? {
+        out.push_str(&format!("uniform {} {};\n", sampler_glsl_ty(t).uniform_decl(), n));
     }
     out.push('\n');
     out.push_str(&helpers);
@@ -3654,7 +3729,7 @@ fn check_pipeline_collisions(
         .chain(iface.array_groups.iter().flat_map(|g| g.members.iter().map(|m| m.name)))
         .chain(iface.varyings.iter().map(|v| v.name))
         .chain(iface.textures.iter().flat_map(|t| t.samplers.iter().map(|(n, _)| *n)))
-        .chain(iface.bare_samplers.iter().map(|(n, _)| *n))
+        .chain(iface.bare_samplers.iter().map(|s| s.name))
         .chain(match &iface.fragment_output {
             FragmentOutput::Mrt(outs) => outs.iter().map(|(n, _)| *n).collect::<Vec<_>>(),
             _ => Vec::new(),
@@ -3830,7 +3905,17 @@ fn plan_shader_pipeline(
     };
     let bare = has_bare_sampler(&vshape.samplers, &vshape.texture_params)
         || has_bare_sampler(&fshape.samplers, &fshape.texture_params);
-    let textures = logical_textures(ws, group, bare, vf.name_span)?;
+    // WHICH stages read the group -- a stage that samples must declare the
+    // sampler in its own section, so "the program has one" cannot drive
+    // emission.
+    let group_stages: Vec<IrStage> = [
+        vshape.texture_group.is_some().then_some(IrStage::Vertex),
+        fshape.texture_group.is_some().then_some(IrStage::Fragment),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let textures = logical_textures(ws, group, bare, group_stages, vf.name_span)?;
 
     // THE program's logical interface. Everything downstream -- the name
     // census, the ABI plan and every emitted declaration -- reads this.
@@ -3839,10 +3924,14 @@ fn plan_shader_pipeline(
         vertex_inputs: vshape.inputs.clone(),
         varyings: varyings.varyings.clone(),
         fragment_output: fshape.output.clone(),
-        bare_samplers: bare_sampler_list(&vshape.samplers, &vshape.texture_params)
-            .into_iter()
-            .chain(bare_sampler_list(&fshape.samplers, &fshape.texture_params))
-            .collect(),
+        bare_samplers: bare_sampler_list(
+            &vshape.samplers,
+            &vshape.texture_params,
+            IrStage::Vertex,
+        )
+        .into_iter()
+        .chain(bare_sampler_list(&fshape.samplers, &fshape.texture_params, IrStage::Fragment))
+        .collect(),
         uniform_groups: engine_logical.into_iter().chain(vert_group).chain(frag_group).collect(),
         array_groups: vert_array_group.into_iter().chain(frag_array_group).collect(),
         textures,
