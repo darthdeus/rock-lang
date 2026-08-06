@@ -216,6 +216,7 @@ impl Builder<'_> {
             fn_name_span: None,
             cur_span: None,
             cur_expr: None,
+            sites_suppressed: false,
             cur_op: crate::site::SiteOp::DirectCall,
             site_owner: self.site_owner.clone(),
             group_binds: HashMap::new(),

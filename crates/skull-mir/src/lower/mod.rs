@@ -1180,6 +1180,7 @@ pub fn lower_function_spec(
         fn_name_span: Some(func.name_span),
         cur_span: None,
         cur_expr: None,
+        sites_suppressed: false,
         cur_op: crate::site::SiteOp::DirectCall,
         site_owner: Some(crate::site::OwnerInstance {
             func: self_ref,
@@ -1261,6 +1262,7 @@ pub fn lower_global(
         fn_name_span: None,
         cur_span: None,
         cur_expr: None,
+        sites_suppressed: false,
         cur_op: crate::site::SiteOp::DirectCall,
         site_owner: None,
         group_binds: HashMap::new(),
@@ -1336,6 +1338,7 @@ pub fn lower_decorator(
         fn_name_span: None,
         cur_span: None,
         cur_expr: None,
+        sites_suppressed: false,
         cur_op: crate::site::SiteOp::DirectCall,
         site_owner: None,
         group_binds: HashMap::new(),
@@ -1438,6 +1441,9 @@ struct Builder<'a> {
     /// `None` only outside any expression (a fn prologue), which is the
     /// exclusion the site census reports by cause.
     cur_expr: Option<Idx<Expr>>,
+    /// Whether [`Builder::emit_cur`] may stamp a site. Set while lowering a body
+    /// whose expression arena is not the one `site_owner`'s sites are keyed in.
+    sites_suppressed: bool,
     /// The concrete INSTANCE being lowered, which OWNS every site recorded from
     /// this builder: the declaration plus the substitution it is lowered under.
     /// `None` for the always-emitted units -- a global initializer and a
@@ -1529,7 +1535,7 @@ impl Builder<'_> {
         //
         // Not yet total: a call emitted outside any expression carries no site,
         // reported by `skull::site_join::census` rather than assumed away.
-        if is_call {
+        if is_call && !self.sites_suppressed {
             if let (Some(owner), Some(expr)) = (self.site_owner.clone(), self.cur_expr) {
                 let owner = crate::site::intern_owner(&mut self.f.site_owners, owner);
                 self.f.call_sites.insert(
@@ -1542,6 +1548,42 @@ impl Builder<'_> {
             }
         }
         id
+    }
+
+    /// Lower `f` with the site EXPRESSION overridden, restoring it after.
+    ///
+    /// The symmetric half of [`Self::with_site_op`]. Most calls inherit the
+    /// cursor `lower_expr`/`lower_expr_repr` install, but a PLACE expression is
+    /// never lowered as a value -- `lower_assign_effect` dispatches on
+    /// `expr_arena[target]` directly -- so the calls its arms synthesize had no
+    /// cursor at all in statement position, and the enclosing one in value
+    /// position. Both are wrong against a walk that keys those obligations on
+    /// the `Expr::Index` node itself.
+    fn with_site_expr<T>(&mut self, expr: Idx<Expr>, f: impl FnOnce(&mut Self) -> T) -> T {
+        let outer = self.cur_expr.replace(expr);
+        let out = f(self);
+        self.cur_expr = outer;
+        out
+    }
+
+    /// Lower `f` with site stamping SUPPRESSED, restoring it after.
+    ///
+    /// For a body whose expression arena is not the one sites are keyed in: a
+    /// struct-default initializer is lowered from `BodyOwner::StructDefaults`
+    /// while `site_owner` still names the enclosing function, so an index from
+    /// that arena would be read against the owner's. Stamping nothing makes such
+    /// a call a reported `no-site`; stamping it can JOIN through whatever
+    /// expression happens to sit at that index in the other arena, which reads
+    /// as a plausible answer rather than as a hole.
+    ///
+    /// A flag rather than clearing `cur_expr`, because the nested `lower_expr`
+    /// installs the foreign index itself -- so clearing the cursor at the
+    /// boundary is undone by the very call it needs to guard.
+    fn without_sites<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        let outer = std::mem::replace(&mut self.sites_suppressed, true);
+        let out = f(self);
+        self.sites_suppressed = outer;
+        out
     }
 
     /// Lower `f` with the site OPERATION overridden, restoring it after. The

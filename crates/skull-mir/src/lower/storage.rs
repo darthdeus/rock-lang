@@ -43,7 +43,9 @@ impl Builder<'_> {
                     }
                     let (b, _) = self.lower_index_base(ib)?;
                     let i = self.lower_expr(index)?;
-                    let checked = self.nb_checked_index(b, i)?;
+                    // `cur` is the `Expr::Index` node this bounds check belongs
+                    // to -- not the outer field access the assignment targets.
+                    let checked = self.with_site_expr(cur, |s| s.nb_checked_index(b, i))?;
                     segs.reverse();
                     let path =
                         segs.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(".");
@@ -788,6 +790,16 @@ impl Builder<'_> {
     /// column-stored Vec — the shape that has no element slot to serve as a
     /// place base.
     pub(crate) fn column_index_place(
+        &mut self,
+        e: Idx<Expr>,
+    ) -> Result<Option<(Idx<Inst>, Idx<Inst>, ColumnElem)>, CompilerError> {
+        // Reached from a PLACE path, which never lowers `e` as a value, so the
+        // cursor names whatever encloses the assignment. The walk keys this
+        // obligation on `e` itself.
+        self.with_site_expr(e, |s| s.column_index_place_at(e))
+    }
+
+    fn column_index_place_at(
         &mut self,
         e: Idx<Expr>,
     ) -> Result<Option<(Idx<Inst>, Idx<Inst>, ColumnElem)>, CompilerError> {

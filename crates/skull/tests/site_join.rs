@@ -1034,3 +1034,94 @@ fn main() { print("{take(add_one)}") }
          check has nothing to compare against"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Place expressions
+// ---------------------------------------------------------------------------
+
+/// A synthesized call under an INDEX WRITE carries the `Expr::Index` node.
+///
+/// A place expression is never lowered as a value -- `lower_assign_effect`
+/// dispatches on `expr_arena[target]` directly -- so nothing installed the site
+/// cursor for it: in statement position the cursor was absent entirely and in
+/// value position it named the enclosing assignment. The bounds check the write
+/// synthesizes was therefore siteless (bitgun: 61 `__nb_checked_index`), while
+/// the walk keys that obligation on the `Expr::Index` node itself.
+///
+/// The READ side is the control: it goes through `lower_expr_repr` and always
+/// carried its site, so a fixture that only read would pass either way.
+#[test]
+fn a_bounds_check_under_an_index_write_carries_the_index_expression() {
+    let c = census_of(
+        r#"
+value V2 { x: float, y: float }
+
+fn fill(buf: NativeBuffer<V2>, n: int) {
+    let i = 0
+    while i < n {
+        buf[i] = V2 { x: 1.0, y: 2.0 }
+        i = i + 1
+    }
+}
+
+fn main() {
+    let b = NativeBuffer<V2>(4)
+    fill(b, 4)
+    print("{b[0].x}")
+}
+"#,
+    );
+    assert!(c.accounts(), "accounting identity broken: {c:?}");
+    assert_eq!(
+        c.unjoined.get(&Unjoined::NoSite).copied().unwrap_or(0),
+        0,
+        "a call under an index write carries no site: {c:?}"
+    );
+    assert_eq!(
+        c.unjoined.get(&Unjoined::SiteNotInBody).copied().unwrap_or(0),
+        0,
+        "a call under an index write was stamped with an expression the body has no \
+         obligation at -- the enclosing assignment rather than the index: {c:?}"
+    );
+    // The write must actually have happened, or neither zero means anything.
+    assert!(c.joined > 0, "the fixture joined nothing: {c:?}");
+}
+
+/// A call synthesized inside a STRUCT-DEFAULT initializer is stamped with
+/// NOTHING, and that is the fail-closed answer rather than a gap.
+///
+/// `with_struct_default` installs the `BodyOwner::StructDefaults` arena but does
+/// NOT swap `site_owner`, so an `Idx<Expr>` from that arena would be read
+/// against the enclosing function's. When the index happens to be in range it
+/// joins through whatever expression sits there -- a plausible wrong answer,
+/// which is worse than a hole. Suppressing the stamp makes it a reported
+/// `no-site` instead.
+///
+/// The control is that the enclosing body's OWN calls still carry sites: the
+/// suppression is scoped to the foreign arena, not switched on for the function.
+#[test]
+fn a_call_in_a_struct_default_is_not_stamped_against_the_owners_arena() {
+    let c = census_of(
+        r#"
+fn seed() -> int { return 7 }
+
+struct Cfg {
+    n: int = seed(),
+    m: int,
+}
+
+fn main() {
+    let c = Cfg { m: 1 }
+    print("{c.n + c.m}")
+}
+"#,
+    );
+    assert!(c.accounts(), "accounting identity broken: {c:?}");
+    // The default's `seed()` call is unattributed BY DESIGN.
+    assert!(
+        c.unjoined.get(&Unjoined::NoSite).copied().unwrap_or(0) > 0,
+        "the struct-default call was stamped against the owner's arena: {c:?}"
+    );
+    // CONTROL: the enclosing body's own calls are unaffected.
+    assert!(c.joined > 0, "suppression leaked to the enclosing body: {c:?}");
+}

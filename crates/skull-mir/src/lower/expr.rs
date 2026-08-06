@@ -702,33 +702,40 @@ impl Builder<'_> {
                     value: v,
                 });
             }
-            Expr::Index { base, index } => {
-                let (b, kind) = self.lower_index_base(base)?;
-                let i = self.lower_expr(index)?;
+            // `target` IS the `Expr::Index` node, and that is the expression
+            // the graph walk keys this arm's synthesized obligations on
+            // (`INDEX_TRIGGERED`). The place expression is never lowered as a
+            // value, so nothing else installs it: in statement position the
+            // cursor is absent entirely and in value position it names the
+            // enclosing assignment.
+            Expr::Index { base, index } => self.with_site_expr(target, |s| {
+                let (b, kind) = s.lower_index_base(base)?;
+                let i = s.lower_expr(index)?;
                 // Column storage has no element slot: the write goes leaf-wise
                 // into K columns, so the value is consumed as a repr and never
                 // boxed. Mirrors `column_element_repr` on the read side.
                 if let ContainerKind::VecValueColumns(elem) = kind {
-                    return self.column_element_store(b, i, value, elem);
+                    return s.column_element_store(b, i, value, elem);
                 }
                 // A column-stored Map has no slot at the key either: the write
                 // goes through the spine to a slot, then leaf-wise into `data`.
-                if let Some(elem) = self.map_column_value_of(base)? {
-                    return self.map_column_store(b, i, value, elem);
+                if let Some(elem) = s.map_column_value_of(base)? {
+                    return s.map_column_store(b, i, value, elem);
                 }
                 if let ContainerKind::NativeBufferValue(elem) = kind {
-                    if self.is_leaf_addressed(elem) {
-                        return self.nb_leaf_element_store(b, i, value, elem);
+                    if s.is_leaf_addressed(elem) {
+                        return s.nb_leaf_element_store(b, i, value, elem);
                     }
                 }
-                let v = self.lower_expr(value)?;
-                self.emit_cur(Inst::StoreIndex {
+                let v = s.lower_expr(value)?;
+                s.emit_cur(Inst::StoreIndex {
                     base: b,
                     index: i,
                     value: v,
                     kind,
                 });
-            }
+                Ok(())
+            })?,
             Expr::Global(_) if self.nobox_global_place(target).is_some() => {
                 let (leaves, shape) =
                     self.nobox_global_place(target).expect("guard matched");

@@ -393,7 +393,13 @@ impl Builder<'_> {
         let saved_inf = self.inf;
         self.body = defaults_body;
         self.inf = defaults_inf;
-        let result = f(self, def_expr);
+        // `site_owner` is NOT swapped -- the sites still belong to the enclosing
+        // function instance -- so an `Idx<Expr>` from THIS arena would be read
+        // against the owner's. Stamping nothing makes such a call a reported
+        // `no-site`; stamping it can join through whatever expression happens to
+        // sit at that index in the other arena, which reads as a plausible
+        // answer rather than as a hole.
+        let result = self.without_sites(|s| f(s, def_expr));
         self.body = saved_body;
         self.inf = saved_inf;
         result
