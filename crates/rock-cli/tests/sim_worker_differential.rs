@@ -705,8 +705,8 @@ fn an_entry_that_destroyed_boots_native_world_keeps_its_record_and_ends_its_work
     );
 }
 
-/// The AUDIO classes, which live in bitgun because they need a decodable asset
-/// -- testbed ships none, and `stone_load_sound` answers 0 for a missing file.
+/// A voice on Bitgun's boot-owned sound, which cannot be covered by sound
+/// teardown and therefore exercises the voice destructor itself.
 ///
 /// The load-bearing assertion is the SUCCESSOR's provenance. A boundary that
 /// destroyed what the seed left lets the worker continue, so the probe follows
@@ -715,7 +715,7 @@ fn an_entry_that_destroyed_boots_native_world_keeps_its_record_and_ends_its_work
 /// those apart -- it passes either way -- which is exactly the trap a
 /// leak fixture falls into once containment exists.
 #[test]
-fn a_predecessors_voice_and_sound_do_not_reach_the_next_entry() {
+fn a_predecessors_voice_on_a_boot_sound_does_not_reach_the_next_entry() {
     let records = run_worker_suite(
         Backend::Skull,
         "bitgun",
