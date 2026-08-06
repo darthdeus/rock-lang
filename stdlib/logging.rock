@@ -265,6 +265,10 @@ macro log_wall_clock_throttled(category: expr, msg: expr, interval_sec: expr) {
 @nomangle inline(lua) fn log_reset_dedup() = """
     __stone_log_dedup = {}
     __stone_log_throttle = {}
+    __stone_log_counts = {}
+    __stone_log_sites = {}
+    __stone_log_wall = {}
+    __stone_log_summary_done = false
 """
 
 // Number of unique sites currently remembered by log_once. Used in tests.

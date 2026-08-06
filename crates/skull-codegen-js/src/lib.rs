@@ -576,6 +576,10 @@ function _log_throttled_with_now_impl(now_sec, category, msg, interval_sec, site
   if (0 > __G.__stone_log_level) return;
   __stone_log_counts[site] = (__stone_log_counts[site] || 0) + 1;
   __stone_log_sites[site] = (category || "") + "|" + msg;
+  // `= nil` in the luajit sibling, which removes the key; keep the two tables
+  // the same shape rather than storing a false.
+  if (wall_clock) __stone_log_wall[site] = true;
+  else delete __stone_log_wall[site];
   var last = __stone_log_throttle[site];
   if (last != null && (now_sec - last) < interval_sec) return;
   __stone_log_throttle[site] = now_sec;
