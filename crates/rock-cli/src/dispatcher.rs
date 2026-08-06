@@ -335,8 +335,14 @@ impl CommandContext {
             crate::run_sim::do_list_sims(backend, project)
         } else if self.args.files.is_empty() {
             anyhow::bail!("sim needs a project: rock sim <project> [name]");
-        } else if self.args.files.len() == 1 && self.args.multi_order {
-            crate::run_sim::run_multi_order_gate(backend, &self.args.files[0])
+        } else if self.args.multi_order {
+            // `files[1..]` narrows the CORPUS to those sims and changes nothing
+            // else about the gate; empty means the whole registry.
+            crate::run_sim::run_multi_order_gate(
+                backend,
+                &self.args.files[0],
+                &self.args.files[1..],
+            )
         } else if self.args.files.len() == 1 {
             // No name: run the whole suite.
             let project = &self.args.files[0];

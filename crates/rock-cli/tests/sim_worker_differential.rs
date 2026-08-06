@@ -1174,6 +1174,107 @@ fn only_an_entry_that_followed_a_predecessor_counts_as_evidence() {
     );
 }
 
+/// Run `rock` and return `(exit_ok, stdout, stderr)` WITHOUT asserting on the
+/// exit code. The multi-order gate deliberately exits nonzero on a corpus that
+/// cannot populate every arm, and that refusal is part of what is under test.
+fn run_rock_status(args: &[&str]) -> (bool, String, String) {
+    let mut rock = std::env::current_exe().expect("test exe");
+    rock.pop();
+    if rock.ends_with("deps") {
+        rock.pop();
+    }
+    let rock = rock.join("rock");
+    assert!(rock.exists(), "rock binary not built at {}", rock.display());
+
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("workspace root")
+        .to_path_buf();
+
+    let out = std::process::Command::new(&rock)
+        .current_dir(&root)
+        .args(args)
+        .output()
+        .unwrap_or_else(|e| panic!("run rock {args:?}: {e}"));
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// `[multi-order] <n> comparisons followed a predecessor ...` -> `n`.
+fn boundary_crossings(stdout: &str) -> usize {
+    let line = stdout
+        .lines()
+        .find(|l| l.contains("comparisons followed a predecessor"))
+        .unwrap_or_else(|| panic!("the gate never reported its provenance split:\n{stdout}"));
+    line.split_whitespace()
+        .find_map(|w| w.parse::<usize>().ok())
+        .unwrap_or_else(|| panic!("no count in `{line}`"))
+}
+
+/// A NAMED subset is the same gate over a smaller corpus, and the property that
+/// makes that true is the boundary-crossing count.
+///
+/// A subset that quietly ran its sims isolated -- or that narrowed the corpus
+/// only after the arms were scheduled -- would still print three arms and still
+/// agree with the reference, because two fresh processes agree with each other.
+/// Only a non-zero boundary-crossing population says a restore was exercised at
+/// all, which is why that is what this asserts. The count is exact: two eligible
+/// sims share one worker per arm, so the second entry crosses and the first does
+/// not, three times over.
+///
+/// testbed passes everything standalone, so `expects_fail` and `errors` have no
+/// population and the gate REFUSES for that reason -- asserted here rather than
+/// worked around, because it proves the empty-arm rule still governs a subset.
+/// That refusal is not a divergence, and this pins the difference.
+#[test]
+fn a_named_subset_is_the_same_gate_and_still_crosses_a_worker_boundary() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "testbed",
+        "--multi-order",
+        "b0_leak_seed",
+        "b0_leak_probe",
+    ]);
+
+    assert!(
+        stdout.contains("[multi-order] 2 sims"),
+        "the corpus must be the two named sims, not the whole registry:\n{stdout}"
+    );
+    assert_eq!(
+        boundary_crossings(&stdout),
+        3,
+        "one worker per arm over two eligible sims crosses exactly once per arm:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("diverged from the isolated reference"),
+        "the subset must agree with its own fresh-process references:\n{stdout}"
+    );
+    assert!(
+        !ok && stderr.contains("compared an empty population"),
+        "testbed cannot populate expects_fail/errors, so the gate must refuse for \
+         THAT reason rather than report a green it did not measure:\n{stderr}"
+    );
+}
+
+/// The refusals that keep a subset from silently measuring less than it was
+/// asked to. Each is the CLI surface of a `select_gate_corpus` unit test.
+#[test]
+fn a_subset_refuses_a_name_it_cannot_measure() {
+    let (ok, _, stderr) =
+        run_rock_status(&["sim", "testbed", "--multi-order", "b0_leak_seed", "no_such_sim"]);
+    assert!(!ok, "an unknown name must not run the gate over the ones that matched");
+    assert!(stderr.contains("no_such_sim"), "the refusal names the offender:\n{stderr}");
+
+    let (ok, _, stderr) =
+        run_rock_status(&["sim", "testbed", "--multi-order", "b0_leak_seed", "b0_leak_seed"]);
+    assert!(!ok, "a repeated name has one reference record and must refuse");
+    assert!(stderr.contains("b0_leak_seed"), "the refusal names the offender:\n{stderr}");
+}
+
 /// The wall-clock timeout is the WEDGED-CHILD guard, so it bounds an entry,
 /// not the worker process: a queue of individually healthy entries must not
 /// fail whichever one happens to be running when their sum crosses it.

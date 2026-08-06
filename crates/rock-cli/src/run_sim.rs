@@ -2260,7 +2260,75 @@ fn run_worker_arm(
 /// The reference is per SIM, taken once in one fresh process each, which is the
 /// permanent `--isolated` oracle -- not a second worker arm, and not the
 /// previous arm's result.
-pub fn run_multi_order_gate(backend: crate::Backend, project: &str) -> Result<()> {
+/// The corpus one `--multi-order` invocation measures: the whole registry, or
+/// the named subset of it in REGISTRY ORDER, which is what the "registry" arm
+/// means and what makes the reverse arm its reverse.
+///
+/// Every refusal here is loud, because each one would otherwise silently shrink
+/// the corpus and a gate that measured less than it was asked to would still
+/// print a green:
+///
+/// - an unknown name is a typo, and dropping it would run the gate over the
+///   sims that happened to match;
+/// - a REPEATED name has one reference record and two worker records, so the
+///   second comparison would be scored against a reference that is not its own;
+/// - a `a,b` comma-chain is a different unit -- chain parts share one `$OUT`
+///   and are one entry -- so it cannot name a corpus member.
+fn select_gate_corpus(registry: &[String], selected: &[String]) -> Result<Vec<String>> {
+    if selected.is_empty() {
+        return Ok(registry.to_vec());
+    }
+    let mut wanted: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    let (mut unknown, mut repeated, mut chained) = (Vec::new(), Vec::new(), Vec::new());
+    for name in selected {
+        if name.contains(',') {
+            chained.push(name.as_str());
+        } else if !registry.iter().any(|r| r == name) {
+            unknown.push(name.as_str());
+        } else if !wanted.insert(name.as_str()) {
+            repeated.push(name.as_str());
+        }
+    }
+    if !chained.is_empty() {
+        return Err(anyhow!(
+            "`--multi-order` takes sim NAMES, not comma-chains: {}. A chain's parts share one \
+             $OUT and run as a single entry, so a chain cannot be a member of the compared \
+             corpus.",
+            chained.join(", ")
+        ));
+    }
+    if !unknown.is_empty() {
+        return Err(anyhow!(
+            "no sim named {} (try `rock sim --list <project>`); refusing to run this gate over \
+             the names that did match",
+            unknown.join(", ")
+        ));
+    }
+    if !repeated.is_empty() {
+        return Err(anyhow!(
+            "{} named more than once. Each sim has ONE reference record, so a repeat would be \
+             compared against a reference that is not its own.",
+            repeated.join(", ")
+        ));
+    }
+    Ok(registry.iter().filter(|r| wanted.contains(r.as_str())).cloned().collect())
+}
+
+/// `selected` empty means the whole corpus. A non-empty `selected` runs the SAME
+/// four arms over just those sims, in registry order, so a divergence already
+/// isolated to a predecessor/target pair can be re-measured in seconds instead
+/// of re-running 262 sims. It narrows the CORPUS and nothing else: provenance,
+/// the boundary-crossing denominator, the empty-arm refusal and the scheduling
+/// are the whole-corpus ones, so a subset run is the same gate over less.
+///
+/// A subset cannot DISCOVER a divergence class the way the full corpus can --
+/// it fixes which predecessors exist -- so it confirms a class already isolated
+/// rather than replacing the arc checkpoint.
+pub fn run_multi_order_gate(
+    backend: crate::Backend,
+    project: &str,
+    selected: &[String],
+) -> Result<()> {
     use crate::sim_record::{compare, COMPARED_ARMS};
 
     rock_host::project::ensure_workspace_root()?;
@@ -2280,6 +2348,11 @@ pub fn run_multi_order_gate(backend: crate::Backend, project: &str) -> Result<()
     // the worker's. They also never reach a worker (`worker_ineligibility`
     // classifies the reload lane), so excluding them removes nothing this gate
     // could have decided.
+    //
+    // Selection happens BEFORE that partition so an explicitly named reload sim
+    // is reported as excluded rather than silently missing from a corpus the
+    // caller wrote out by hand.
+    let wire_names = select_gate_corpus(&wire_names, selected)?;
     let (wire_names, excluded): (Vec<String>, Vec<String>) = wire_names
         .into_iter()
         .partition(|name| !is_reload_lane(env_by_wire.get(name).map_or(&[][..], |v| v)));
@@ -3217,6 +3290,59 @@ fn extract_raw_field(json: &str, key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn corpus() -> Vec<String> {
+        ["a_first", "b_second", "c_third"].iter().map(|s| s.to_string()).collect()
+    }
+
+    fn pick(names: &[&str]) -> Result<Vec<String>> {
+        let selected: Vec<String> = names.iter().map(|s| s.to_string()).collect();
+        select_gate_corpus(&corpus(), &selected)
+    }
+
+    /// No names is the whole registry, which is the arc-checkpoint form.
+    #[test]
+    fn an_empty_selection_is_the_whole_corpus() {
+        assert_eq!(pick(&[]).expect("whole corpus"), corpus());
+    }
+
+    /// REGISTRY order, not the order the caller typed -- that is what the
+    /// "registry" arm means, and what makes the "reverse" arm its reverse. A
+    /// subset that honoured argv order would silently rename its own arms.
+    #[test]
+    fn a_selection_keeps_registry_order_whatever_order_it_was_typed_in() {
+        assert_eq!(pick(&["c_third", "a_first"]).expect("subset"), vec!["a_first", "c_third"]);
+    }
+
+    /// Each refusal below would otherwise shrink the corpus silently, and a
+    /// gate that measured less than it was asked to would still print a green.
+    #[test]
+    fn an_unknown_name_refuses_instead_of_running_the_ones_that_matched() {
+        let err = pick(&["a_first", "typo_here"]).expect_err("unknown name must refuse");
+        assert!(err.to_string().contains("typo_here"), "names the offender: {err}");
+    }
+
+    #[test]
+    fn a_repeated_name_refuses_because_it_has_only_one_reference_record() {
+        let err = pick(&["a_first", "a_first"]).expect_err("repeat must refuse");
+        assert!(err.to_string().contains("a_first"), "names the offender: {err}");
+    }
+
+    /// Asserts the chain-SPECIFIC reason, not merely that something refused.
+    /// A chain name is also absent from the registry, so with this arm deleted
+    /// it falls through to the unknown-name refusal, which names the offender
+    /// too -- an "it refused" assertion passes either way and cannot tell the
+    /// two apart. Mutation-proven only in this form.
+    #[test]
+    fn a_comma_chain_is_refused_for_being_a_chain_not_for_being_unknown() {
+        let err = pick(&["a_first,b_second"]).expect_err("chain must refuse");
+        let msg = err.to_string();
+        assert!(msg.contains("a_first,b_second"), "names the offender: {err}");
+        assert!(
+            msg.contains("comma-chains") && msg.contains("$OUT"),
+            "must refuse it for being a chain, not for being an unknown name: {err}"
+        );
+    }
 
     /// A MISSING image golden used to bootstrap itself from the current frame
     /// and count as a passing expect, so a sim whose goldens are untracked
