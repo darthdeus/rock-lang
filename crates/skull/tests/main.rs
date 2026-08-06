@@ -83,6 +83,8 @@ mod site_join;
 mod dispatched_sites;
 #[path = "site_domain.rs"]
 mod site_domain;
+#[path = "logical_instance_identity.rs"]
+mod logical_instance_identity;
 #[path = "artifact_view.rs"]
 mod artifact_view;
 

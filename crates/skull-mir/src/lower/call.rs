@@ -463,6 +463,28 @@ impl Builder<'_> {
         }
     }
 
+    /// The concrete instance a call at `e` to `func` names -- the IDENTITY
+    /// record, computed beside the delivery decision and independent of it.
+    ///
+    /// The ONE lowering-side entry to
+    /// [`crate::lower::shape::callee_instance_subst`]. Every emission shape
+    /// asks here and hands the answer to [`Self::record_call`]; a per-shape
+    /// call to the oracle is exactly where one shape forgot it --
+    /// `scalar_ufcs_call_repr` never recorded anything, so `x?.get()` on a
+    /// scalar-ABI receiver had a graph instance and no claim.
+    pub(crate) fn callee_instance_for(
+        &self,
+        e: Idx<Expr>,
+        func: FuncRef,
+    ) -> Result<Option<crate::monoty::MonoSubst>, CompilerError> {
+        match self.inf {
+            Some(inf) => {
+                crate::lower::shape::callee_instance_subst(self.ws, inf, e, func, self.spec_subst)
+            }
+            None => Ok(None),
+        }
+    }
+
     pub(crate) fn call_spec(
         &self,
         e: Idx<Expr>,
@@ -668,16 +690,7 @@ impl Builder<'_> {
         // IDENTITY, computed beside the delivery decision and independent of it.
         // A call the policy declines to specialize still names exactly one
         // concrete instance, and this is where it says which.
-        let callee_inst = match self.inf {
-            Some(inf) => crate::lower::shape::callee_instance_subst(
-                self.ws,
-                inf,
-                e,
-                func,
-                self.spec_subst,
-            )?,
-            None => None,
-        };
+        let callee_inst = self.callee_instance_for(e, func)?;
         let ret_tuple = self.call_ret_tuple_shape(e, func)?;
         if let Some(shape) = &ret_tuple {
             self.reject_nobox_opaque_tuple_return(e, func, shape)?;
@@ -868,11 +881,13 @@ impl Builder<'_> {
     /// away when `?.` stopped packing.
     pub(crate) fn scalar_ufcs_call_repr(
         &mut self,
+        e: Idx<Expr>,
         func: FuncRef,
         recv: Idx<Inst>,
         arg_idxs: &[Idx<Expr>],
         abi: &FnScalarAbi,
     ) -> Result<ValueRepr, CompilerError> {
+        let callee_inst = self.callee_instance_for(e, func)?;
         let mut argv = Vec::new();
         // The RECEIVER arrives already lowered, so it cannot go through
         // `arg_values_for_slot`; a tuple receiver has no UFCS spelling, so
@@ -892,13 +907,19 @@ impl Builder<'_> {
             Some(shape) => {
                 let n = shape.leaf_count();
                 let dests: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
-                self.emit_cur(Inst::CallMulti { dests: dests.clone(), func, args: argv });
+                let call =
+                    self.emit_cur(Inst::CallMulti { dests: dests.clone(), func, args: argv });
+                self.record_call(call, func, None, None, callee_inst);
                 let leaves: Vec<Idx<Inst>> =
                     dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
                 let mut idx = 0;
                 Ok(self.rebuild_from_leaves(&shape, &leaves, &mut idx))
             }
-            None => Ok(ValueRepr::Scalar(self.emit_cur(Inst::Call { func, args: argv }))),
+            None => {
+                let call = self.emit_cur(Inst::Call { func, args: argv });
+                self.record_call(call, func, None, None, callee_inst);
+                Ok(ValueRepr::Scalar(call))
+            }
         }
     }
 

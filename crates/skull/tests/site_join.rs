@@ -16,6 +16,10 @@ use skull_mir::mir::{Inst, MirFunc};
 use skull_mir::site::{Site, SiteDomain, SiteOp};
 use ustr::Ustr;
 
+/// The backend the census lowers for; `check_callee` asks the emitter's own
+/// declaration selection, so the comparison needs to know which target.
+const LUA: bone_semantic::hir::FnBackend = bone_semantic::hir::FnBackend::Lua;
+
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
     rock_host::stdlib_loader::stdlib_files()
         .iter()
@@ -436,24 +440,24 @@ fn main() {
 
     // Matched: the instance and its OWN claim.
     assert_eq!(
-        skull::site_join::check_callee(&ws, &g, &rock(insts[0]), fref, Some(&c0)),
+        skull::site_join::check_callee(&ws, &g, &rock(insts[0]), fref, Some(&c0), LUA),
         skull::site_join::CalleeCheck::Instance,
         "an instance did not verify against its own claim"
     );
     assert_eq!(
-        skull::site_join::check_callee(&ws, &g, &rock(insts[1]), fref, Some(&c1)),
+        skull::site_join::check_callee(&ws, &g, &rock(insts[1]), fref, Some(&c1), LUA),
         skull::site_join::CalleeCheck::Instance
     );
     // SWAPPED: same FuncRef, other instantiation. A declaration-only comparison
     // returns agreement here; the instance comparison must not.
     assert_eq!(
-        skull::site_join::check_callee(&ws, &g, &rock(insts[0]), fref, Some(&c1)),
+        skull::site_join::check_callee(&ws, &g, &rock(insts[0]), fref, Some(&c1), LUA),
         skull::site_join::CalleeCheck::InstanceMismatch,
         "two instantiations of one declaration compared equal -- the comparison is \
          declaration-level, not instance-level"
     );
     assert_eq!(
-        skull::site_join::check_callee(&ws, &g, &rock(insts[1]), fref, Some(&c0)),
+        skull::site_join::check_callee(&ws, &g, &rock(insts[1]), fref, Some(&c0), LUA),
         skull::site_join::CalleeCheck::InstanceMismatch
     );
 }
@@ -481,12 +485,12 @@ fn main() { print("{one(1)} {two(2)}") }
     let two = find("two");
     assert_ne!(one.func, two.func, "the fixture must give two declarations");
     assert_eq!(
-        skull::site_join::check_callee(&ws, &g, &rock(&one), one.func, None),
+        skull::site_join::check_callee(&ws, &g, &rock(&one), one.func, None, LUA),
         skull::site_join::CalleeCheck::NonGeneric,
         "a non-generic callee against its own declaration must verify"
     );
     assert_eq!(
-        skull::site_join::check_callee(&ws, &g, &rock(&one), two.func, None),
+        skull::site_join::check_callee(&ws, &g, &rock(&one), two.func, None, LUA),
         skull::site_join::CalleeCheck::DeclMismatch,
         "a callee resolved to another declaration was accepted"
     );
@@ -524,7 +528,7 @@ fn main() { print("{pair(1, 2.0)} {other(1, 2.0)}") }
     );
 
     let check = |c: Option<&skull_mir::site::OwnerInstance>| {
-        skull::site_join::check_callee(&ws, &g, &rock(&inst), inst.func, c)
+        skull::site_join::check_callee(&ws, &g, &rock(&inst), inst.func, c, LUA)
     };
 
     // ADMISSION CONTROL: the instance's own recorded substitution verifies.
@@ -595,7 +599,7 @@ fn main() {
 
     let boundary = skull::concrete_body::Callee::Boundary(inst.clone(), class);
     assert_eq!(
-        skull::site_join::check_callee(&ws, &g, &boundary, inst.func, None),
+        skull::site_join::check_callee(&ws, &g, &boundary, inst.func, None, LUA),
         skull::site_join::CalleeCheck::Boundary(class),
         "a generic boundary was asked for a Rock instantiation it cannot have"
     );
@@ -603,7 +607,7 @@ fn main() {
     // record. Without this the arm above would read as "generic callees are
     // exempt", which is the opposite of what it says.
     assert_eq!(
-        skull::site_join::check_callee(&ws, &g, &rock(&inst), inst.func, None),
+        skull::site_join::check_callee(&ws, &g, &rock(&inst), inst.func, None, LUA),
         skull::site_join::CalleeCheck::NoInstance,
         "the boundary exemption leaked to the Rock arm"
     );
@@ -630,7 +634,7 @@ fn main() { print("{ident(1)}") }
     let claim = instance_claim(&g, &inst);
     // Control: with the substitution present, the claim verifies.
     assert_eq!(
-        skull::site_join::check_callee(&ws, &g, &rock(&inst), inst.func, Some(&claim)),
+        skull::site_join::check_callee(&ws, &g, &rock(&inst), inst.func, Some(&claim), LUA),
         skull::site_join::CalleeCheck::Instance
     );
     // Remove ONLY the resolved instance's record -- the call still carries the
@@ -638,7 +642,7 @@ fn main() { print("{ident(1)}") }
     let removed = g.substitutions.remove(&inst);
     assert!(removed.is_some(), "nothing was removed, so the arm below is untested");
     assert_eq!(
-        skull::site_join::check_callee(&ws, &g, &rock(&inst), inst.func, Some(&claim)),
+        skull::site_join::check_callee(&ws, &g, &rock(&inst), inst.func, Some(&claim), LUA),
         skull::site_join::CalleeCheck::ResolvedUnrecorded,
         "a resolved instance with no recorded substitution was treated as agreement"
     );
@@ -1110,7 +1114,7 @@ fn main() { print("{apply(add_one, 1)}") }
     );
 
     // CONTROL: unmodified, the mint is in the denominator and it JOINS.
-    let before = skull::site_join::measure_prepared_body(&ws, &g, &bodies, &main_inst, &mf);
+    let before = skull::site_join::measure_prepared_body(&ws, &ScalarCtx::new(&ws), &g, &bodies, &main_inst, &mf);
     assert_eq!(before.symbol_mints, 1, "the mint left the denominator: {before:?}");
     assert_eq!(
         before.joined_by_op.get("fn-value").copied().unwrap_or(0),
@@ -1135,7 +1139,7 @@ fn main() { print("{apply(add_one, 1)}") }
     assert_ne!(alien, recorded, "the alien must differ, or the swap is a no-op");
     mf.fn_value_symbols.insert(mint, alien);
 
-    let after = skull::site_join::measure_prepared_body(&ws, &g, &bodies, &main_inst, &mf);
+    let after = skull::site_join::measure_prepared_body(&ws, &ScalarCtx::new(&ws), &g, &bodies, &main_inst, &mf);
     // The mint is still EXAMINED -- a corrupted record must not drop out of the
     // denominator, which would look like agreement.
     assert_eq!(

@@ -265,6 +265,14 @@ impl ScalarCtx {
     }
 
     /// Set the codegen backend this lowering feeds (see [`target`]).
+    /// The backend this context lowers for. Read by consumers that must ask the
+    /// EMITTER's own declaration selection rather than restate it -- the site
+    /// join compares a target-selected sibling against the target-neutral
+    /// graph's representative through `backend_variant`.
+    pub fn target(&self) -> bone_semantic::hir::FnBackend {
+        self.target
+    }
+
     pub fn with_target(mut self, target: bone_semantic::hir::FnBackend) -> Self {
         self.target = target;
         self

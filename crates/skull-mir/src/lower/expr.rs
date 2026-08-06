@@ -1013,7 +1013,7 @@ impl Builder<'_> {
             if let Some(abi) = fn_scalar_abi(self.ws, self.scx, func) {
                 // Scalar-ABI callee: splat the value receiver + value args into
                 // leaves (a value return packs to the single safe-nav result).
-                return self.scalar_ufcs_call_repr(func, recv, &arg_idxs, &abi)
+                return self.scalar_ufcs_call_repr(e, func, recv, &arg_idxs, &abi)
             } else {
                 let mut argv = vec![recv];
                 for a in arg_idxs {
@@ -1030,16 +1030,7 @@ impl Builder<'_> {
                             || spec_key_has_target_storage(self.ws, k, self.scx.target)
                     })
                     .map(|(k, _)| k);
-                let callee_inst = match self.inf {
-                    Some(inf) => crate::lower::shape::callee_instance_subst(
-                        self.ws,
-                        inf,
-                        e,
-                        func,
-                        self.spec_subst,
-                    )?,
-                    None => None,
-                };
+                let callee_inst = self.callee_instance_for(e, func)?;
                 // A tuple-returning method splats N values, and they are handed on
                 // UNPACKED: the per-slot join stores them slot-wise, so packing
                 // here would box a `nobox` element the wire just kept unboxed.

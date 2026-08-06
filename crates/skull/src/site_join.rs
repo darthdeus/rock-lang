@@ -634,6 +634,7 @@ fn has_lowered_body(ws: &Workspace, fref: skull_mir::mir::FuncRef) -> bool {
 /// measured at.
 pub fn measure_prepared_body(
     ws: &Workspace,
+    scx: &ScalarCtx,
     g: &InstanceGraph,
     bodies: &ConcreteBodies,
     inst: &Instance,
@@ -642,7 +643,7 @@ pub fn measure_prepared_body(
     let mut c = SiteJoinCensus::default();
     let ix = owner_index(g);
     let mangled = mangled_symbols(ws);
-    measure_body_into(ws, &mut c, g, &ix, bodies, &mangled, inst, mf, true);
+    measure_body_into(ws, scx.target(), &mut c, g, &ix, bodies, &mangled, inst, mf, true);
     c
 }
 
@@ -656,6 +657,7 @@ pub fn measure_prepared_body(
 /// `reachable_call_rows`.
 fn measure_body_into(
     ws: &Workspace,
+    target_backend: bone_semantic::hir::FnBackend,
     c: &mut SiteJoinCensus,
     g: &InstanceGraph,
     ix: &HashMap<skull_mir::mir::FuncRef, Vec<(MonoSubst, Instance)>>,
@@ -675,7 +677,8 @@ fn measure_body_into(
         if row.is_mint {
             c.symbol_mints += 1;
         }
-        let (cause, op, note) = classify(ws, c, g, mf, ix, bodies, inst, &row, detail);
+        let (cause, op, note) =
+            classify(ws, target_backend, c, g, mf, ix, bodies, inst, &row, detail);
         *c.examined_by_op.entry(op).or_insert(0) += 1;
         if detail && (cause.is_some() || row.target.is_none()) {
             let span = mf
@@ -837,7 +840,7 @@ pub fn census_detailed(
             skip(&mut c, BodySkip::PrepareFailed);
             continue;
         }
-        measure_body_into(ws, &mut c, g, &ix, bodies, mangled, inst, &mf, detail);
+        measure_body_into(ws, scx.target(), &mut c, g, &ix, bodies, mangled, inst, &mf, detail);
     }
     c
 }
@@ -912,10 +915,25 @@ pub fn check_callee(
     callee: &Callee,
     target: skull_mir::mir::FuncRef,
     call_inst: Option<&OwnerInstance>,
+    target_backend: bone_semantic::hir::FnBackend,
 ) -> CalleeCheck {
     let callee_inst = callee.instance();
+    // The graph is TARGET-NEUTRAL: it records bone's collapsed group
+    // REPRESENTATIVE, while MIR calls the sibling serving the backend being
+    // lowered. Raw `FuncRef` equality reports a CORRECT cross-backend selection
+    // as a mismatch -- `games/sample-game`'s `inline(lua) file_append`
+    // overriding the engine's portable `@nomangle` one is the corpus's single
+    // case. So the comparison asks the emitter's OWN selection rule, the same
+    // `backend_variant` `artifact::realize_decl` reaches for; a same-name
+    // same-signature pair with a REPEATED backend is not a variant group at all
+    // (bone refuses it), so it still mismatches.
     if callee_inst.func != target {
-        return CalleeCheck::DeclMismatch;
+        let name = ws.module(callee_inst.func.module).functions[callee_inst.func.func].name;
+        let selected =
+            skull_mir::lower::backend_variant(ws, name, callee_inst.func, target_backend);
+        if !matches!(selected, Ok(f) if f == target) {
+            return CalleeCheck::DeclMismatch;
+        }
     }
     // A BOUNDARY is verified as a boundary, not by reconstructing a Rock
     // instantiation it does not have. An opaque body -- `inline(lua)`,
@@ -980,6 +998,7 @@ pub fn check_callee(
 ///   specialization indistinguishable from an uninferred callee.
 fn classify(
     ws: &Workspace,
+    target_backend: bone_semantic::hir::FnBackend,
     c: &mut SiteJoinCensus,
     g: &InstanceGraph,
     mf: &MirFunc,
@@ -1062,7 +1081,7 @@ fn classify(
     // Every remaining row is a DIRECT call: the indirect branch returned above.
     let target = row.target.expect("indirect calls are decided before the site lookup");
 
-    match check_callee(ws, g, callee, target, row.callee_inst.as_ref()).outcome() {
+    match check_callee(ws, g, callee, target, row.callee_inst.as_ref(), target_backend).outcome() {
         Err(cause) => {
             let note = if detail {
                 format!("resolved={}", g.identity(ws, callee_inst))
