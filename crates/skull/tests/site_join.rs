@@ -350,6 +350,24 @@ fn a_call_filed_under_the_wrong_operation_fails_accounting() {
         "only one side of the misfiling was reported: {failures:?}"
     );
 
+    // An operation that DISAPPEARS from every histogram leaves the pointwise
+    // union with no key for it, so pointwise alone cannot see it. The global
+    // sums are what catch it, which is why both are kept.
+    let mut vanished = c.clone();
+    vanished.examined_by_op.remove("synthesized");
+    vanished.joined_by_op.remove("synthesized");
+    vanished.unjoined_by_op.remove("synthesized");
+    vanished.admitted_indirect_by_op.remove("synthesized");
+    let vf = vanished.accounting_failures();
+    assert!(
+        vf.iter().any(|f| f.contains("examined-by-op")),
+        "an operation vanished from every histogram and accounting passed: {vf:?}"
+    );
+    assert!(
+        vf.iter().any(|f| f.contains("unjoined-by-op")),
+        "only the examined side of the vanishing was reported: {vf:?}"
+    );
+
     // And the CONSISTENT relabel (both sides moved) is not a miscount, so it
     // must pass -- otherwise this arm would fire on any renaming.
     let mut relabelled = c.clone();
@@ -472,9 +490,9 @@ fn main() { print("{one(1)} {two(2)}") }
 ///
 /// Key arity is POSITIONAL, and a wrong-length key has already been a real bug
 /// on this branch -- it names another function's instantiation rather than
-/// nothing -- so too-short and too-long are covered beside the partial case.
-/// The too-short fixture is deliberately NON-EMPTY: the empty case is the
-/// "no key" answer and is tested separately.
+/// nothing -- so too-short, too-long and EMPTY join the partial case. The
+/// too-short fixture is deliberately non-empty, because an empty key is a
+/// different input from an absent one and both are covered.
 #[test]
 fn a_generic_callee_key_that_names_no_instance_is_unverified() {
     let (ws, g) = graph_of(
@@ -491,17 +509,37 @@ fn main() { print("{pair(1, 2.0)}") }
         .clone();
     let generics = ws.module(inst.func.module).functions[inst.func.func].generics.len();
     assert_eq!(generics, 2, "fixture must declare two generics");
-    let bindings: Vec<skull_mir::monoty::MonoTy> =
-        g.substitutions[&inst].values().cloned().collect();
-    assert_eq!(bindings.len(), 2, "two bindings recorded: {bindings:?}");
 
     let check = |k: Option<&skull_mir::lower::SpecKey>| {
         skull::site_join::check_callee(&ws, &g, &inst, inst.func, k)
     };
+
+    // ADMISSION CONTROL, built INDEPENDENTLY: the key is laid out in
+    // declaration-generic order from the graph's own substitution
+    // (`spec_key_from_subst`), never by asking the oracle which candidate it
+    // likes. A key the oracle helped choose would make the rejections below
+    // circular.
+    let good = skull_mir::lower::spec_key_from_subst(&ws, inst.func, &g.substitutions[&inst]);
+    assert_eq!(good.len(), generics, "independent key has one slot per generic: {good:?}");
+    assert!(good.iter().all(Option::is_some), "independent key is complete: {good:?}");
+    assert_eq!(
+        check(Some(&good)),
+        skull::site_join::CalleeCheck::Instance,
+        "the independently-built correct key did not verify, so the rejections below \
+         prove nothing about key shape"
+    );
+
+    let bindings: Vec<skull_mir::monoty::MonoTy> =
+        good.iter().map(|b| b.clone().expect("complete")).collect();
+
     // No key at all.
     assert_eq!(check(None), skull::site_join::CalleeCheck::NoKey);
-    // TOO SHORT, and non-empty on purpose: one slot for a two-generic
-    // declaration still positionally names a different instantiation.
+    // A PRESENT but EMPTY key is a different input from an absent one: it has
+    // the wrong arity for a two-generic declaration.
+    let empty: skull_mir::lower::SpecKey = Vec::new();
+    assert_eq!(check(Some(&empty)), skull::site_join::CalleeCheck::KeyArity);
+    // TOO SHORT, non-empty: one slot for a two-generic declaration still
+    // positionally names a different instantiation.
     let short: skull_mir::lower::SpecKey = vec![Some(bindings[0].clone())];
     assert_eq!(check(Some(&short)), skull::site_join::CalleeCheck::KeyArity);
     // TOO LONG.
@@ -514,32 +552,40 @@ fn main() { print("{pair(1, 2.0)}") }
     // Right length, holds a `None`.
     let partial: skull_mir::lower::SpecKey = vec![Some(bindings[0].clone()), None];
     assert_eq!(check(Some(&partial)), skull::site_join::CalleeCheck::PartialKey);
-    // And the admission control: the CORRECT key verifies, so the rejections
-    // above are about the key rather than about this fixture never verifying.
-    let good: skull_mir::lower::SpecKey = {
-        let f = &ws.module(inst.func.module).functions[inst.func.func];
-        let subst = &g.substitutions[&inst];
-        let mut k: skull_mir::lower::SpecKey = Vec::new();
-        for _ in 0..f.generics.len() {
-            k.push(None);
-        }
-        // Recover the positional order through the same mapping the compiler
-        // uses, by trying each candidate assignment against the oracle.
-        for a in subst.values() {
-            for b in subst.values() {
-                let cand: skull_mir::lower::SpecKey = vec![Some(a.clone()), Some(b.clone())];
-                if check(Some(&cand)) == skull::site_join::CalleeCheck::Instance {
-                    k = cand;
-                }
-            }
-        }
-        k
-    };
+}
+
+/// `callee-resolved-unrecorded` is 0 over the corpus, and a zero is only
+/// evidence if the bucket CAN become non-zero. Drop the resolved instance's
+/// substitution from a cloned graph and the correct key must stop verifying --
+/// there is nothing left to compare it against.
+#[test]
+fn a_resolved_instance_without_a_substitution_is_unrecorded() {
+    let (ws, mut g) = graph_of(
+        r#"
+fn ident<T>(x: T) -> T { return x }
+fn main() { print("{ident(1)}") }
+"#,
+    );
+    let inst = g
+        .substitutions
+        .keys()
+        .find(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "ident")
+        .expect("instance")
+        .clone();
+    let key = skull_mir::lower::spec_key_from_subst(&ws, inst.func, &g.substitutions[&inst]);
+    // Control: with the substitution present, the key verifies.
     assert_eq!(
-        check(Some(&good)),
-        skull::site_join::CalleeCheck::Instance,
-        "no assignment of the recorded bindings verified, so the rejections above \
-         prove nothing about key shape"
+        skull::site_join::check_callee(&ws, &g, &inst, inst.func, Some(&key)),
+        skull::site_join::CalleeCheck::Instance
+    );
+    // Remove ONLY the resolved instance's record -- the call still carries the
+    // same complete key, so nothing about the CALL changed.
+    let removed = g.substitutions.remove(&inst);
+    assert!(removed.is_some(), "nothing was removed, so the arm below is untested");
+    assert_eq!(
+        skull::site_join::check_callee(&ws, &g, &inst, inst.func, Some(&key)),
+        skull::site_join::CalleeCheck::ResolvedUnrecorded,
+        "a resolved instance with no recorded substitution was treated as agreement"
     );
 }
 

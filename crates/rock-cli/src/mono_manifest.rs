@@ -651,7 +651,8 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
         let failures = site_join.accounting_failures();
         println!(
             "accounting ({} joined + {} indirect + {unjoined_total} unjoined == {} examined, \
-             plus the verification and POINTWISE per-operation identities): **{}**",
+             plus the verification identities, the global per-operation sums and the \
+             POINTWISE per-operation identity): **{}**",
             site_join.joined,
             site_join.admitted_indirect,
             site_join.call_insts,

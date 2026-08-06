@@ -231,9 +231,38 @@ impl SiteJoinCensus {
                 self.joined_rock, self.joined_boundary, self.joined
             ));
         }
+        // GLOBAL sums, kept ALONGSIDE the pointwise check below rather than
+        // replaced by it. Pointwise iterates the union of keys the histograms
+        // mention, so an operation that vanishes from ALL of them contributes
+        // no key, and its absence is invisible to a pointwise check while the
+        // main counters stay non-zero.
+        let examined_ops: usize = self.examined_by_op.values().sum();
+        if examined_ops != self.call_insts {
+            out.push(format!("examined-by-op {examined_ops} != examined {}", self.call_insts));
+        }
+        let joined_ops: usize = self.joined_by_op.values().sum();
+        if joined_ops != self.joined {
+            out.push(format!("joined-by-op {joined_ops} != joined {}", self.joined));
+        }
+        let unjoined_ops: usize = self.unjoined_by_op.values().sum();
+        if unjoined_ops != self.unjoined_total() {
+            out.push(format!(
+                "unjoined-by-op {unjoined_ops} != unjoined {}",
+                self.unjoined_total()
+            ));
+        }
+        let indirect_ops: usize = self.admitted_indirect_by_op.values().sum();
+        if indirect_ops != self.admitted_indirect {
+            out.push(format!(
+                "indirect-by-op {indirect_ops} != indirect {}",
+                self.admitted_indirect
+            ));
+        }
+
         // POINTWISE, over the union of every operation key any histogram
-        // mentions. A globally balanced set of histograms still hides a call
-        // filed under the wrong operation -- one bucket over, another under.
+        // mentions. The global sums above cannot see a call filed under the
+        // WRONG operation -- one bucket over, another under -- and this cannot
+        // see an operation missing from every histogram. Both are needed.
         let mut ops: std::collections::BTreeSet<&'static str> = std::collections::BTreeSet::new();
         ops.extend(self.examined_by_op.keys().copied());
         ops.extend(self.joined_by_op.keys().copied());
@@ -593,9 +622,12 @@ pub fn check_callee(
 /// - declaration agrees, is generic, and the call carries a COMPLETE
 ///   instantiation key -> reconstruct its substitution and compare against the
 ///   resolved instance's own;
-/// - declaration agrees, is generic, and the key is absent or partial -> the
-///   instance cannot be reconstructed, so the match is UNVERIFIED, never a
-///   silent success.
+/// - declaration agrees, is generic, and the instance cannot be reconstructed
+///   -> UNVERIFIED, never a silent success, under the cause that applies: no
+///   key at all, a key of the wrong ARITY (positional, so a wrong length names
+///   another function's instantiation), a right-length key holding a `None`,
+///   or a resolved instance the GRAPH has no substitution for. Four causes,
+///   because only one of them is conditional specialization.
 fn classify(
     ws: &Workspace,
     c: &mut SiteJoinCensus,

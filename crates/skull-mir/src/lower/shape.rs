@@ -2036,6 +2036,24 @@ pub(crate) fn ablation_next_decline(
 /// arena-free key in its cache; this re-pairs it with the callee's generic
 /// `VarId`s to drive [`lower_function_spec`]. An empty / all-`None` key yields an
 /// empty subst (the shared snapshot).
+/// The inverse of [`spec_subst_from_key`]: a substitution laid back out in
+/// DECLARATION-GENERIC order.
+///
+/// The key is positional, so recovering it from a `VarId`-keyed substitution
+/// has to walk the declaration's own generics rather than the map's iteration
+/// order. A slot is `None` when the substitution binds nothing for that
+/// generic, which is exactly the partial key the join refuses.
+pub fn spec_key_from_subst(ws: &Workspace, fref: FuncRef, subst: &SpecSubst) -> SpecKey {
+    let f = &ws.module(fref.module).functions[fref.func];
+    f.generics
+        .iter()
+        .map(|g| match static_ty(ws, *g) {
+            Some(TypeExpr::Generic(var, _)) => subst.get(&var).cloned(),
+            _ => None,
+        })
+        .collect()
+}
+
 pub fn spec_subst_from_key(ws: &Workspace, fref: FuncRef, key: &SpecKey) -> SpecSubst {
     let f = &ws.module(fref.module).functions[fref.func];
     let mut subst = SpecSubst::default();
