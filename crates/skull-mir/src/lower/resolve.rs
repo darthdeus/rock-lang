@@ -967,22 +967,6 @@ impl Builder<'_> {
         self.yield_delegate_exit(sub)
     }
 
-    /// Resolve an operator-helper stdlib fn (`__op_eq`/`__op_ne`) bone registers
-    /// under several synthetic overload entries — all the SAME `@nomangle`
-    /// inline(lua) body mangling to the bare name, so any resolves identically.
-    /// Picks the first (the genuine source def); deterministic by parse order.
-    pub(crate) fn resolve_op_helper(&self, name: &str) -> Result<FuncRef, CompilerError> {
-        match self
-            .ws
-            .functions_by_name
-            .get(&Ustr::from(name))
-            .and_then(|l| l.first())
-        {
-            Some((module, func)) => Ok(FuncRef { module: *module, func: *func }),
-            None => Err(gap(format!("operator helper `{name}` not found"))),
-        }
-    }
-
     /// Resolve a global function by surface name to a [`FuncRef`], requiring a
     /// single workspace-wide definition (the `@nomangle` stdlib interp helpers —
     /// `__rock_format_float`, `inspect` — are unique, so they resolve here).

@@ -5,52 +5,18 @@ use super::*;
 use crate::monoty::MonoTy;
 
 impl Builder<'_> {
-    /// Whether `e`'s static type is an enum ALL of whose variants are unit (no
-    /// payload). Those variants lower to interned singleton globals — reference-
-    /// equal across uses — so `==`/`!=` is native Lua `==`/`~=`, not the dynamic
-    /// `__op_eq` (type()/pairs()) walk (static-over-dynamic; trace-friendly).
-    pub(crate) fn is_payloadless_enum(&self, e: Idx<Expr>) -> bool {
-        let Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) = self.expr_ty(e) else {
-            return false;
-        };
-        let Some(eid) = self.ws.enums_by_name.get(&name) else {
-            return false;
-        };
-        let ed = &self.ws.modules[eid.module.index()].enums[eid.def];
-        ed.variants.iter().all(|v| matches!(v.payload, bone_semantic::hir::VariantPayload::Unit))
-    }
-
     pub(crate) fn is_null_lit(&self, e: Idx<Expr>) -> bool {
-        matches!(self.body.expr_arena[e], Expr::Null)
+        self.dispatch().is_null_lit(e)
     }
 
     /// Whether `e`'s type is `T?` (a `Nullable`, chasing `Infer` but NOT peeling
     /// the `Nullable` like `expr_ty` does). Drives the `if let` nil-guard.
     pub(crate) fn expr_is_nullable(&self, e: Idx<Expr>) -> bool {
-        self.inf
-            .and_then(|i| i.expr_types.get(e).copied())
-            .map(|ty| self.is_nullable_ty(ty))
-            .unwrap_or(false)
+        self.dispatch().expr_is_nullable(e)
     }
 
     pub(crate) fn is_nullable_ty(&self, ty: TyId) -> bool {
-        // A generic bound to `E?` is nullable, and `ty_node` cannot say so: it
-        // substitutes the PAYLOAD (a `Nullable` node needs an arena index).
-        // Read the raw node first, before that substitution erases the `?`.
-        if let Some(TypeExpr::Generic(var, _)) = self.raw_ty_node(ty) {
-            if let Some(b) = self.spec_subst.get(&var) {
-                return b.peel_nullable().1;
-            }
-        }
-        match self.ty_node(ty) {
-            Some(TypeExpr::Nullable(_)) => true,
-            Some(TypeExpr::Infer(var, _)) => self
-                .inf
-                .and_then(|i| i.substitutions.get(var))
-                .map(|s| self.is_nullable_ty(s))
-                .unwrap_or(false),
-            _ => false,
-        }
+        self.dispatch().is_nullable_ty(ty)
     }
 
     /// The declared field names of a call-site spread operand `..op`, in struct
@@ -201,8 +167,7 @@ impl Builder<'_> {
     /// The resolved type of an expression (chasing `Infer` vars + peeling
     /// `Nullable`), or `None` when inference is absent/unsolved.
     pub(crate) fn expr_ty(&self, e: Idx<Expr>) -> Option<TypeExpr> {
-        let ty = *self.inf?.expr_types.get(e)?;
-        self.resolve_ty(ty)
+        self.dispatch().expr_ty(e)
     }
 
     /// `Some` iff `e`'s inferred type is a (non-nullable) tuple. Used to route a
@@ -499,68 +464,25 @@ impl Builder<'_> {
     }
 
     pub(crate) fn resolve_ty(&self, ty: TyId) -> Option<TypeExpr> {
-        let te = self.ty_node(ty)?;
-        match te {
-            TypeExpr::Infer(var, _) => {
-                let solved = self.inf?.substitutions.get(var)?;
-                self.resolve_ty(solved)
-            }
-            TypeExpr::Nullable(inner) => self.resolve_ty(ty.with_idx(inner)),
-            other => Some(other),
-        }
+        self.dispatch().resolve_ty(ty)
     }
 
     /// The stored type node, WITHOUT the specialization substitution -- the only
     /// place a generic's own identity is still visible, which is what
     /// [`Self::is_nullable_ty`] needs (the substitution answers with the payload).
     pub(crate) fn raw_ty_node(&self, ty: TyId) -> Option<TypeExpr> {
-        Some(match ty {
-            TyId::Static(mid, idx) => self.ws.module(mid).ty_arena[idx],
-            TyId::Local(idx) => self.inf?.ty_arena[idx],
-        })
+        self.dispatch().raw_ty_node(ty)
     }
 
     pub(crate) fn ty_node(&self, ty: TyId) -> Option<TypeExpr> {
-        let node = self.raw_ty_node(ty)?;
-        // In a specialized instantiation, a generic param resolves to its concrete
-        // type so all downstream type-driven lowering (field projection, container
-        // element, scalar shape) sees the real type.
-        //
-        // The substituted node is LOSSY and the binding is NOT restricted to
-        // leaves: 29.6% of substituted reads carry a tuple, a nullable, or an
-        // application with arguments (`Vec<Vec2>`, `Shape<Entity<Prefab>?>`),
-        // whose children `mono_type_node` erases to `new_empty()` -- measured in
-        // `docs/mono-adapter-census.md`. What holds is narrower and is the reason
-        // this is sound: every consumer that fires reads a CONSTRUCTOR or a
-        // NOMINAL from the answer, and the one site that would index an erased
-        // parameter range (`vec_column_elem_of`'s container read) is not reached.
-        // Adding a consumer that reads a substituted application's arguments, or
-        // a tuple's slots, breaks that -- read the binding directly instead, as
-        // `tyid_tuple_ret_shape` and `body_ret_slot` do.
-        if let TypeExpr::Generic(var, _) = node {
-            // A tuple binding has no node to stand for it, and answers `None`.
-            // Falling through to the generic is exactly what this saw before
-            // tuples reified at all, so no consumer changes behaviour; the ones
-            // that need a tuple's slots read the binding through
-            // `mono_ret_slot` instead.
-            if let Some(sub) = self.spec_subst.get(&var).and_then(mono_type_node) {
-                return Some(sub);
-            }
-        }
-        Some(node)
+        self.dispatch().ty_node(ty)
     }
 
     /// The final `TyId` after chasing `Infer` substitutions (NOT peeling
     /// `Nullable` -- unlike `resolve_ty`, this keeps the `TyId` so its App params
     /// can be indexed in the correct arena via `with_idx`).
     pub(crate) fn resolve_tyid(&self, ty: TyId) -> Option<TyId> {
-        match self.ty_node(ty)? {
-            TypeExpr::Infer(var, _) => {
-                let solved = self.inf?.substitutions.get(var)?;
-                self.resolve_tyid(solved)
-            }
-            _ => Some(ty),
-        }
+        self.dispatch().resolve_tyid(ty)
     }
 
     /// The `EnumFlatShape` of `Y` when `e`'s type is `Coroutine<Y, ..>` and `Y` is

@@ -1440,16 +1440,39 @@ fn walk_body_edges(
                 ),
             });
         }
-        for GeneratedSite { expr: e, name } in sites {
+        // The two families are resolved through the same lookup and recorded as
+        // the same edge kind. They differ in ONE way and it is deliberate: a
+        // named runtime entry joins `erased_entries` (it exists only because
+        // lowering names it), while a conditional dispatch arm calls an
+        // ORDINARY stdlib declaration whose own boundary class already answers
+        // for it -- filing `inspect` as an erased runtime entry would relabel a
+        // real `inline(lua)` body.
+        let dispatched = dispatched_sites(ws, inf, body, subst)
+            .into_iter()
+            .map(|(site, name)| (site, name, false));
+        let generated = sites
+            .into_iter()
+            .map(|GeneratedSite { expr, name }| {
+                (Site { expr, op: SiteOp::Synthesized(name) }, name, true)
+            })
+            .chain(dispatched);
+        for (site, name, erased) in generated {
+            let e = site.expr;
             let span = body.expr_spans.get(e).copied().unwrap_or_else(Span::unknown);
-            let site = Site { expr: e, op: SiteOp::Synthesized(name) };
-            match stdlib_entry_representative(ws, name) {
+            let resolved = if erased {
+                stdlib_entry_representative(ws, name)
+            } else {
+                skull_mir::lower::dispatched_callee_decl(ws, name)
+            };
+            match resolved {
                 Some(callee) => {
                     record_call(
                         g, work, ws, inf, from, subst, depth, callee, None,
                         EdgeKind::CompilerGenerated, span, site,
                     );
-                    g.erased_entries.insert(name.to_string());
+                    if erased {
+                        g.erased_entries.insert(name.to_string());
+                    }
                 }
                 None => {
                     g.record_site(
@@ -2289,6 +2312,55 @@ fn compiler_generated_sites(
         }
     }
     out.sort_by_key(|s| (s.expr, s.name));
+    out
+}
+
+/// Every callee obligation a CONDITIONALLY-synthesized call carries in this
+/// body, under this instance's substitution.
+///
+/// The two constructs -- an interpolation hole and `==`/`!=` -- name no callee,
+/// so [`COMPILER_GENERATED_TRIGGERS`]' name key cannot reach them. Neither does
+/// this function decide anything: it asks `skull_mir::lower::dispatch`, the
+/// same plan lowering RENDERS, so the walk cannot be weaker than the pass.
+fn dispatched_sites(
+    ws: &Workspace,
+    inf: &BodyInference,
+    body: &bone_semantic::hir::Body,
+    subst: &MonoSubst,
+) -> Vec<(Site, &'static str)> {
+    use bone_semantic::hir::{BinOp, Expr as E, InterpPart};
+    let dcx = skull_mir::lower::DispatchCtx {
+        ws,
+        inf: Some(inf),
+        body,
+        subst,
+        values_first_class: false,
+    };
+    let mut out: Vec<(Site, &'static str)> = Vec::new();
+    for (e, expr) in body.expr_arena.iter() {
+        match expr {
+            E::InterpolatedString(parts) => {
+                for p in *parts {
+                    let InterpPart::Value { expr: hole, spec } = &body.interp_part_arena[p] else {
+                        continue;
+                    };
+                    for (path, name) in dcx.hole_plan(*hole, spec.as_ref()).obligations() {
+                        out.push((Site { expr: *hole, op: SiteOp::Dispatched { name, path } }, name));
+                    }
+                }
+            }
+            E::BinOp { op: op @ (BinOp::Eq | BinOp::NotEq), lhs, rhs } => {
+                if let Some(name) = dcx.eq_route(*lhs, *rhs).synthesized_callee(*op) {
+                    out.push((
+                        Site { expr: e, op: SiteOp::Dispatched { name, path: Vec::new() } },
+                        name,
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+    out.sort();
     out
 }
 

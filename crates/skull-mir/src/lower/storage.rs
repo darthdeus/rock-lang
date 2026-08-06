@@ -904,6 +904,26 @@ impl Builder<'_> {
         }))
     }
 
+    /// A call synthesized on a CONDITIONAL dispatch arm -- an interpolation
+    /// hole's render or structural equality (`skull_mir::lower::dispatch`).
+    ///
+    /// Separate from [`Self::call_spine`] because the site identity differs:
+    /// these live at an expression that names no callee, so several of them can
+    /// share one expression AND one name (a nobox value renders per leaf field)
+    /// and the `path` is what keeps them apart.
+    pub(crate) fn dispatched_call(
+        &mut self,
+        name: &'static str,
+        path: Vec<u32>,
+        args: Vec<Idx<Inst>>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let func = super::dispatch::dispatched_callee_decl(self.ws, name)
+            .ok_or_else(|| gap(format!("dispatch helper `{name}` is missing or ambiguous")))?;
+        Ok(self.with_site_op(crate::site::SiteOp::Dispatched { name, path }, |b| {
+            b.emit_cur(Inst::Call { func, args })
+        }))
+    }
+
     /// `m[k] = v` into a column-stored Map: take (or allocate) the key's slot,
     /// then store leaf-wise into `data`'s columns. The value never materializes.
     ///

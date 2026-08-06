@@ -206,7 +206,14 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     let mut shader_totals = ShaderStats::default();
 
     for dir in &projects {
-        let name = dir.strip_prefix(&root).unwrap_or(dir).display().to_string();
+        // `root` may BE the project, in which case the stripped path is empty and
+        // every dump artifact would be written to the directory itself.
+        let rel = dir.strip_prefix(&root).unwrap_or(dir).display().to_string();
+        let name = if rel.is_empty() {
+            dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+        } else {
+            rel
+        };
         match one_project(dir, &name, &root, dump.map(|d| (d, name.as_str()))) {
             Ok(p) => {
                 for (k, v) in &p.hist {

@@ -592,7 +592,10 @@ fn callee_tables(
             SiteOp::FnValue => {
                 body.fn_values.insert(site.expr, callee);
             }
-            SiteOp::Synthesized(_) => {
+            // Both synthesized families share one table: they are keyed by the
+            // whole `Site`, so a named runtime entry and a conditional dispatch
+            // arm at one expression stay distinct without a second map.
+            SiteOp::Synthesized(_) | SiteOp::Dispatched { .. } => {
                 body.synthesized_calls.insert(site.clone(), callee);
             }
             SiteOp::ForIter => {

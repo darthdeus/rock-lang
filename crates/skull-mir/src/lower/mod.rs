@@ -68,6 +68,11 @@ pub use shape::*;
 /// widening to make the split.
 mod call;
 mod control;
+mod dispatch;
+pub use dispatch::{
+    dispatched_callee_decl, dispatched_callee_decls,
+    DispatchCtx, EqRoute, FormatPlan, HolePlan, StringifyRoute, StructuralRender,
+};
 mod embed;
 mod expr;
 mod flat;
@@ -1558,6 +1563,20 @@ impl Builder<'_> {
             }
         }
         id
+    }
+
+    /// The shared type/dispatch context this builder resolves through. Every
+    /// predicate below is a delegate: `DispatchCtx` is the one implementation,
+    /// so the instance walk asking the same question cannot get a second answer
+    /// (`skull_mir::lower::dispatch`).
+    pub(crate) fn dispatch(&self) -> dispatch::DispatchCtx<'_> {
+        dispatch::DispatchCtx {
+            ws: self.ws,
+            inf: self.inf,
+            body: self.body,
+            subst: self.spec_subst,
+            values_first_class: self.scx.values_first_class,
+        }
     }
 
     /// Lower `f` with the site EXPRESSION overridden, restoring it after.

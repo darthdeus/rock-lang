@@ -49,6 +49,16 @@ pub enum SiteOp {
     /// A call lowering synthesizes, named EXACTLY -- see
     /// `skull::instance_graph::COMPILER_GENERATED_TRIGGERS`.
     Synthesized(&'static str),
+    /// A call synthesized on a CONDITIONAL arm of a construct that names no
+    /// callee at all: an interpolation hole's render, a format spec's helpers,
+    /// or structural equality. The plan both lowering and the walk read is
+    /// `skull_mir::lower::dispatch`.
+    ///
+    /// `path` is not decoration. One hole can carry several obligations with
+    /// ONE name: a nobox value renders one call per leaf FIELD, and the field
+    /// index chain is what keeps them distinct. An empty path is the hole
+    /// itself.
+    Dispatched { name: &'static str, path: Vec<u32> },
 }
 
 impl SiteOp {
@@ -61,6 +71,7 @@ impl SiteOp {
             Self::ImplicitIter => "implicit-iter",
             Self::BoundNext(_) => "bound-next",
             Self::Synthesized(_) => "synthesized",
+            Self::Dispatched { .. } => "dispatched",
         }
     }
 }
