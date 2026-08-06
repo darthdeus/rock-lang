@@ -586,6 +586,24 @@ value Entity<T> {
     _generation: int,
 }
 
+// A WEAK handle naming one Scene incarnation in the Session Scene registry
+// (`stdlib/scene.rock`). `T` is the Scene's root state type and is phantom:
+// the authoritative root lives in the registry, so the handle keeps nothing
+// alive and dies with the incarnation it names. Equality is identity equality
+// over `_scene_id`.
+value Scene<T> {
+    _scene_id: int,
+}
+
+// The construction-time capability for one Scene: it can create Arenas owned by
+// that Scene, and only while the Scene's registry entry is still Building. It is
+// not a Scene handle, a scheduler, or a borrow scope, and a copy that escapes
+// construction is inert -- Scene IDs are never reused, so the entry it names can
+// only ever move forward to Live or Dead.
+value SceneBuilder {
+    _scene_id: int,
+}
+
 // ============================================================================
 // Type System Runtime
 // ============================================================================

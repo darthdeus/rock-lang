@@ -12,7 +12,7 @@ pub struct StdlibFile {
 /// `strings.rock` (portable string algorithms) and `json.rock` build on it.
 /// `js.rock` holds JS-backend bodies for stdlib fns defined in the others, and
 /// is LAST so adding one shifts no `__SITE__` line in a lua-emitting file.
-const STDLIB_NAMES: &[&str] = &["unified.rock", "logging.rock", "vec.rock", "mat.rock", "arena.rock", "strings.rock", "json.rock", "shader.rock", "js.rock"];
+const STDLIB_NAMES: &[&str] = &["unified.rock", "logging.rock", "vec.rock", "mat.rock", "arena.rock", "scene.rock", "strings.rock", "json.rock", "shader.rock", "js.rock"];
 
 /// Directory the stdlib `.rock` files are read from at RUNTIME (not embedded).
 /// `ROCK_STDLIB_DIR` overrides; otherwise it's the repo's `stdlib/`, resolved

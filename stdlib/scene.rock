@@ -1,0 +1,196 @@
+// Scene<T>: one independently disposable state root inside the Session -- a
+// dungeon room, loaded level, editor document, preview viewport. `Scene` and
+// `SceneBuilder` are declared in unified.rock with the other early type decls.
+//
+// Design and the phase this implements: `docs/scene-system-plan.md` P2.
+//
+// Two facts shape everything below.
+//
+// Ownership is a Scene concern but LOOKUP is flat, exactly as it is for Arenas:
+// `_scene_id` indexes the parallel registry columns directly. A Scene owns the
+// LIST of Arena IDs it created, which is what teardown needs; nothing walks
+// Session -> Scene -> Arena to resolve a row.
+//
+// Destruction is two steps. `scene_close` is a REQUEST: it hides the Scene from
+// lookup at once and refuses a second request, but the rows stay live so nothing
+// is pulled out from under an update or draw that is already holding them.
+// `scene_drain_closed` is the physical teardown, and the runner calls it at one
+// end-of-frame safe point (`frame_core_end`) after every consumer has returned.
+
+// The Session root, the owner ID every `arena_new()` Arena already carries. It
+// is not a Scene and is never published; it exists here so the registry stays
+// dense from index 0.
+const __SCENE_RESERVED: int = 0
+const __SCENE_BUILDING: int = 1
+const __SCENE_LIVE: int = 2
+const __SCENE_CLOSING: int = 3
+const __SCENE_DEAD: int = 4
+
+// The Session Scene registry: parallel columns indexed by Scene ID.
+//
+// `__SCENE_ROOTS` holds the typed root behind an any-compatible slot, published
+// only at the moment construction succeeds -- a Building entry's root is null,
+// so an unfinished Scene has nothing to look up even if its ID leaks.
+//
+// IDs are monotonic and never reused, which is what stops an escaped handle from
+// resolving into whatever is created next.
+global __SCENE_ROOTS: [any?] = []
+global __SCENE_STATES: [int] = []
+global __SCENE_ARENA_IDS: [[int]] = []
+global __SCENE_NEXT_ID: int = 0
+
+// Staging for the safe-point drain, not a second ownership system: every entry
+// here is a Scene whose registry state is already Closing.
+global __SCENE_PENDING_CLOSE: [int] = []
+
+fn __scene_state(scene_id: int) -> int {
+    let st = __SCENE_STATES.get(scene_id)
+    if is_null(st) { return __SCENE_DEAD }
+    return st.unwrap()
+}
+
+// THE physical resolution oracle: non-generic, so the element type is recovered
+// by the typed wrapper below rather than inferred at the call site. A Building,
+// Closing or dead Scene answers null -- close takes effect for lookup
+// immediately, whatever the drain has done yet.
+fn __scene_root_any(scene_id: int) -> any? {
+    if __scene_state(scene_id) != __SCENE_LIVE { return null }
+    let slot = __SCENE_ROOTS.get(scene_id)
+    if is_null(slot) { return null }
+    return slot.unwrap()
+}
+
+fn Scene<T>.get(scene) -> T? {
+    let boxed = __scene_root_any(scene._scene_id)
+    if is_null(boxed) { return null }
+    let root: T = cast(boxed.unwrap())
+    return root
+}
+
+fn Scene<T>.is_live(scene) -> bool {
+    return __scene_state(scene._scene_id) == __SCENE_LIVE
+}
+
+fn __scene_reserve() -> int {
+    if __SCENE_NEXT_ID == 0 {
+        let root_arenas: [int] = []
+        vec_push(__SCENE_ROOTS, null)
+        vec_push(__SCENE_STATES, __SCENE_RESERVED)
+        vec_push(__SCENE_ARENA_IDS, root_arenas)
+        __SCENE_NEXT_ID = 1
+    }
+    let id = __SCENE_NEXT_ID
+    assert(id == vec_len(__SCENE_STATES), "Scene registry is not dense at id {id}")
+    __SCENE_NEXT_ID = id + 1
+    let owned: [int] = []
+    vec_push(__SCENE_ROOTS, null)
+    vec_push(__SCENE_STATES, __SCENE_BUILDING)
+    vec_push(__SCENE_ARENA_IDS, owned)
+    return id
+}
+
+// Releases everything one incarnation owns and marks it dead. Each owned Arena
+// is retired through the ordinary Arena primitive, and one a caller already
+// destroyed reports false and is stepped over -- the loop releases what it owns,
+// not what it assumes.
+fn __scene_retire(scene_id: int) {
+    let owned = __SCENE_ARENA_IDS[scene_id]
+    for i in 0..vec_len(owned) {
+        __arena_destroy_id(scene_id, owned[i])
+    }
+    let empty: [int] = []
+    __SCENE_ARENA_IDS.set(scene_id, empty)
+    __SCENE_ROOTS.set(scene_id, null)
+    __SCENE_STATES.set(scene_id, __SCENE_DEAD)
+}
+
+// Transactional construction. The Scene's identity exists before its Arenas do,
+// so `build` can attach them explicitly; a null result aborts, retiring every
+// attached Arena and publishing nothing. The ID is consumed either way.
+//
+// Failure is the callback returning null, not a caught runtime error: a `pcall`
+// around user code would swallow exactly the failures that must propagate.
+fn scene_create<T>(build: fn(SceneBuilder) -> T?) -> Scene<T>? {
+    let id = __scene_reserve()
+    let root = build(SceneBuilder { _scene_id: id })
+    if is_null(root) {
+        __scene_retire(id)
+        return null
+    }
+    let published: any = root.unwrap()
+    __SCENE_ROOTS.set(id, published)
+    __SCENE_STATES.set(id, __SCENE_LIVE)
+    return Scene { _scene_id: id }
+}
+
+// The builder's one capability, and it is gated on the Building state rather
+// than on holding the builder: a copy that outlived construction names an entry
+// that is Live or Dead, and rejects here. A write that silently did nothing
+// could not be told from one that worked.
+fn SceneBuilder.arena<T>(builder) -> Arena<T> {
+    let scene_id = builder._scene_id
+    assert(__scene_state(scene_id) == __SCENE_BUILDING,
+        "SceneBuilder for scene {scene_id} is no longer constructing (its Scene published or aborted)")
+    let arena: Arena<T> = __arena_new_owned(scene_id)
+    vec_push(__SCENE_ARENA_IDS[scene_id], arena._arena_id)
+    return arena
+}
+
+// Requests closure. True on the first call for a live Scene, false for a repeat
+// or a dead handle, so a caller can tell which close was theirs. Lookup stops
+// resolving immediately; the rows die at the next safe-point drain.
+fn scene_close<T>(scene: Scene<T>) -> bool {
+    let id = scene._scene_id
+    if __scene_state(id) != __SCENE_LIVE { return false }
+    __SCENE_STATES.set(id, __SCENE_CLOSING)
+    vec_push(__SCENE_PENDING_CLOSE, id)
+    return true
+}
+
+// The safe point: physically retires every Scene closed since the last drain and
+// returns how many. Called by the runner at `frame_core_end`, after every update
+// and draw consumer has returned.
+fn scene_drain_closed() -> int {
+    let pending = __SCENE_PENDING_CLOSE
+    if vec_len(pending) == 0 { return 0 }
+    let fresh: [int] = []
+    __SCENE_PENDING_CLOSE = fresh
+    let drained = 0
+    for i in 0..vec_len(pending) {
+        let id = pending[i]
+        if __scene_state(id) == __SCENE_CLOSING {
+            __scene_retire(id)
+            drained += 1
+        }
+    }
+    return drained
+}
+
+// How many Scene incarnations the registry currently resolves. Closing Scenes
+// are excluded: they are already invisible to lookup.
+fn scene_live_count() -> int {
+    let live = 0
+    for i in 0..vec_len(__SCENE_STATES) {
+        if __SCENE_STATES[i] == __SCENE_LIVE { live += 1 }
+    }
+    return live
+}
+
+// The exact population the next drain will retire.
+fn scene_pending_close_count() -> int {
+    return vec_len(__SCENE_PENDING_CLOSE)
+}
+
+// How many Arena incarnations this Scene still owns backing for. The identity
+// control beside `scene_live_count`: a flat Scene count cannot see an Arena that
+// outlived its owner.
+fn scene_arena_count<T>(scene: Scene<T>) -> int {
+    let id = scene._scene_id
+    if __scene_state(id) == __SCENE_DEAD { return 0 }
+    let owned = __SCENE_ARENA_IDS[id]
+    let live = 0
+    for i in 0..vec_len(owned) {
+        if !is_null(__arena_store_any(id, owned[i])) { live += 1 }
+    }
+    return live
+}

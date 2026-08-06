@@ -104,7 +104,15 @@ fn __arena_store_or_dead<T>(arena: Arena<T>) -> ArenaStore<T> {
     return boxed.unwrap()
 }
 
+// An Arena owned by the Session root. Scene-owned Arenas come from
+// `SceneBuilder.arena()` (`stdlib/scene.rock`), which is the same registry and
+// the same creation path with a different owner ID -- not a second Arena
+// implementation.
 fn arena_new<T>() -> Arena<T> {
+    return __arena_new_owned(__ARENA_SESSION_ROOT)
+}
+
+fn __arena_new_owned<T>(scene_id: int) -> Arena<T> {
     let id = __ARENA_NEXT_ID
     assert(id == vec_len(__ARENA_STORES), "Arena registry is not dense at id {id}")
     __ARENA_NEXT_ID = id + 1
@@ -113,16 +121,22 @@ fn arena_new<T>() -> Arena<T> {
         occupied_count: 0, next_generation: 0,
     }
     vec_push(__ARENA_STORES, store)
-    vec_push(__ARENA_SCENE_IDS, __ARENA_SESSION_ROOT)
-    return Arena { _scene_id: __ARENA_SESSION_ROOT, _arena_id: id }
+    vec_push(__ARENA_SCENE_IDS, scene_id)
+    return Arena { _scene_id: scene_id, _arena_id: id }
 }
 
 // Retires one Arena incarnation, releasing its rows. True on the first call,
 // false for a handle that was already dead -- so a caller can tell which
 // destruction was theirs. The ID stays consumed.
 fn arena_destroy<T>(arena: Arena<T>) -> bool {
-    if is_null(__arena_store_any(arena._scene_id, arena._arena_id)) { return false }
-    __ARENA_STORES.set(arena._arena_id, null)
+    return __arena_destroy_id(arena._scene_id, arena._arena_id)
+}
+
+// The element-type-free half, for Scene teardown: a Scene owns Arena IDs, not
+// typed handles, so the drain cannot spell `Arena<T>` for each one.
+fn __arena_destroy_id(scene_id: int, arena_id: int) -> bool {
+    if is_null(__arena_store_any(scene_id, arena_id)) { return false }
+    __ARENA_STORES.set(arena_id, null)
     return true
 }
 
