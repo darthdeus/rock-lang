@@ -1021,6 +1021,16 @@ impl Builder<'_> {
                             || spec_key_has_target_storage(self.ws, k, self.scx.target)
                     })
                     .map(|(k, _)| k);
+                let callee_inst = match self.inf {
+                    Some(inf) => crate::lower::shape::callee_instance_subst(
+                        self.ws,
+                        inf,
+                        e,
+                        func,
+                        self.spec_subst,
+                    )?,
+                    None => None,
+                };
                 // A tuple-returning method splats N values, and they are handed on
                 // UNPACKED: the per-slot join stores them slot-wise, so packing
                 // here would box a `nobox` element the wire just kept unboxed.
@@ -1030,13 +1040,13 @@ impl Builder<'_> {
                 let ret_ty = self.ws.module(func.module).functions[func.func].return_ty;
                 match ret_ty.and_then(|t| tuple_ret_shape(self.ws, self.spec_subst, t)) {
                     Some(shape) => {
-                        return Ok(self.emit_tuple_call_tree(func, argv, &shape, None, key));
+                        return Ok(self.emit_tuple_call_tree(
+                            func, argv, &shape, None, key, callee_inst,
+                        ));
                     }
                     None => {
                         let call = self.emit_cur(Inst::Call { func, args: argv });
-                        if let Some(k) = key {
-                            self.f.spec_bindings.insert(call, k);
-                        }
+                        self.record_call(call, func, None, key, callee_inst);
                         call
                     }
                 }

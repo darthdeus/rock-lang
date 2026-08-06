@@ -435,6 +435,34 @@ impl Builder<'_> {
     /// keeps the shared generic snapshot (byte-identical). Eligibility is a subset
     /// of the inliner's `classify` (not extern / lua / coroutine) so a specialized
     /// splice always resolves; a residual case falls to the site-aware rejection.
+    /// Attach everything a lowered direct call carries besides its operands: the
+    /// bound-conformance tree, the delivery key, and the callee's concrete
+    /// INSTANCE.
+    ///
+    /// One helper rather than the four copies this replaced -- the identity
+    /// record has to reach every emission shape (scalar, multi, tuple), and a
+    /// per-shape copy is exactly where one of them would be forgotten.
+    pub(crate) fn record_call(
+        &mut self,
+        call: Idx<Inst>,
+        func: FuncRef,
+        tree: Option<bone_semantic::prelude::BoundTree>,
+        key: Option<SpecKey>,
+        inst: Option<crate::monoty::MonoSubst>,
+    ) {
+        if let Some(t) = tree {
+            self.f.bound_trees.insert(call, t);
+        }
+        if let Some(k) = key {
+            self.f.spec_bindings.insert(call, k);
+        }
+        if let Some(subst) = inst {
+            self.f
+                .callee_instances
+                .insert(call, crate::site::OwnerInstance { func, subst });
+        }
+    }
+
     pub(crate) fn call_spec(
         &self,
         e: Idx<Expr>,
@@ -637,6 +665,19 @@ impl Builder<'_> {
         // the specialized body still differs (e.g. a `native_buffer_alloc<T>` ctype
         // resolves) though the param/return ABI is unchanged.
         let key = spec.as_ref().map(|(k, _)| k.clone());
+        // IDENTITY, computed beside the delivery decision and independent of it.
+        // A call the policy declines to specialize still names exactly one
+        // concrete instance, and this is where it says which.
+        let callee_inst = match self.inf {
+            Some(inf) => crate::lower::shape::callee_instance_subst(
+                self.ws,
+                inf,
+                e,
+                func,
+                self.spec_subst,
+            )?,
+            None => None,
+        };
         let ret_tuple = self.call_ret_tuple_shape(e, func)?;
         if let Some(shape) = &ret_tuple {
             self.reject_nobox_opaque_tuple_return(e, func, shape)?;
@@ -676,15 +717,10 @@ impl Builder<'_> {
             // day a `@gpu_only` intrinsic returns a tuple.
             self.authorize_gpu_boundary_boxes(&func, &args);
             if let Some(shape) = &ret_tuple {
-                return Ok(self.emit_tuple_call_tree(func, args, shape, tree, key));
+                return Ok(self.emit_tuple_call_tree(func, args, shape, tree, key, callee_inst));
             }
             let call = self.emit_cur(Inst::Call { func, args });
-            if let Some(t) = tree {
-                self.f.bound_trees.insert(call, t);
-            }
-            if let Some(k) = key {
-                self.f.spec_bindings.insert(call, k);
-            }
+            self.record_call(call, func, tree, key, callee_inst);
             return Ok(ValueRepr::Scalar(call));
         };
         let args = self.scalar_call_args(
@@ -700,27 +736,17 @@ impl Builder<'_> {
                 let n = shape.leaf_count();
                 let dests: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
                 let call = self.emit_cur(Inst::CallMulti { dests: dests.clone(), func, args });
-                if let Some(t) = tree {
-                    self.f.bound_trees.insert(call, t);
-                }
-                if let Some(k) = key {
-                    self.f.spec_bindings.insert(call, k);
-                }
+                self.record_call(call, func, tree, key, callee_inst);
                 let leaves: Vec<Idx<Inst>> =
                     dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
                 let mut idx = 0;
                 Ok(self.rebuild_from_leaves(&shape, &leaves, &mut idx))
             }
             None => match &ret_tuple {
-                Some(shape) => Ok(self.emit_tuple_call_tree(func, args, shape, tree, key)),
+                Some(shape) => Ok(self.emit_tuple_call_tree(func, args, shape, tree, key, callee_inst)),
                 None => {
                     let call = self.emit_cur(Inst::Call { func, args });
-                    if let Some(t) = tree {
-                        self.f.bound_trees.insert(call, t);
-                    }
-                    if let Some(k) = key {
-                        self.f.spec_bindings.insert(call, k);
-                    }
+                    self.record_call(call, func, tree, key, callee_inst);
                     Ok(ValueRepr::Scalar(call))
                 }
             },
@@ -749,16 +775,12 @@ impl Builder<'_> {
         shape: &TupleRetShape,
         tree: Option<bone_semantic::prelude::BoundTree>,
         key: Option<SpecKey>,
+        callee_inst: Option<crate::monoty::MonoSubst>,
     ) -> ValueRepr {
         let dests: Vec<Idx<Cell>> =
             (0..shape.slot_count()).map(|_| self.f.new_cell(None)).collect();
         let call = self.emit_cur(Inst::CallMulti { dests: dests.clone(), func, args });
-        if let Some(t) = tree {
-            self.f.bound_trees.insert(call, t);
-        }
-        if let Some(k) = key {
-            self.f.spec_bindings.insert(call, k);
-        }
+        self.record_call(call, func, tree, key, callee_inst);
         let loads: Vec<Idx<Inst>> = dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
         self.tuple_result(shape, &loads)
     }

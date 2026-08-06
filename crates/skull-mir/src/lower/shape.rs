@@ -1682,6 +1682,36 @@ pub(crate) fn reify_type(
 /// inference that recorded the bindings disagree. The synthesized `for`-protocol
 /// `next` is not caught by that: it carries `next_generics` and never reaches
 /// this function ([`spec_key_from_next_generics`] is its entry).
+/// The CONCRETE INSTANCE a generic direct call targets, independent of whether
+/// the lowerer chooses to deliver a specialized body for it.
+///
+/// [`compute_call_spec`] answers a POLICY question -- is a specialized snapshot
+/// worth splicing here -- and returns `None` when the answer is no. Reading that
+/// `None` as "the callee instance is unknown" is what made a declined
+/// specialization indistinguishable from a call whose instantiation was never
+/// inferred. This answers the IDENTITY question, which has no policy in it: the
+/// call's own bindings, reified under the enclosing substitution.
+///
+/// `None` means the instantiation is genuinely not complete here -- a callee
+/// with no generics, or one whose bindings do not all reify (a caller-generic
+/// slot inside a shared body).
+pub(crate) fn callee_instance_subst(
+    ws: &Workspace,
+    inf: &BodyInference,
+    e: Idx<Expr>,
+    func: FuncRef,
+    enclosing: &SpecSubst,
+) -> Result<Option<SpecSubst>, CompilerError> {
+    let f = &ws.module(func.module).functions[func.func];
+    if f.generics.is_empty() {
+        return Ok(None);
+    }
+    let Some(bindings) = inf.call_generic_bindings.get(&e) else { return Ok(None) };
+    // `total` is the identity mode: it reifies every complete instantiation and
+    // applies none of the storage/opt-in gates, which are about delivery.
+    Ok(compute_spec_from_bindings(ws, inf, func, bindings, enclosing, true)?.map(|(_, s)| s))
+}
+
 pub(crate) fn compute_call_spec(
     ws: &Workspace,
     inf: &BodyInference,

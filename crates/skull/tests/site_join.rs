@@ -46,14 +46,19 @@ fn census_of(src: &str) -> SiteJoinCensus {
     site_join::census(&ws, &scx, &g, &bodies)
 }
 
-fn instance_key(
+fn instance_claim(
     g: &InstanceGraph,
     inst: &skull::instance_graph::Instance,
-) -> skull_mir::lower::SpecKey {
-    inst.args
-        .iter()
-        .map(|id| Some(g.arena.get(*id).clone()))
-        .collect()
+) -> skull_mir::site::OwnerInstance {
+    skull_mir::site::OwnerInstance {
+        func: inst.func,
+        subst: g.substitutions.get(inst).expect("instance has a substitution").clone(),
+    }
+}
+
+/// A `Callee::Rock` over `inst`, the arm an ordinary Rock call resolves to.
+fn rock(inst: &skull::instance_graph::Instance) -> skull::concrete_body::Callee {
+    skull::concrete_body::Callee::Rock(inst.clone())
 }
 
 /// Lower the `<test>` module's fn named `name` and run the SAME transform
@@ -422,36 +427,34 @@ fn main() {
     let fref = insts[0].func;
     assert_eq!(insts[1].func, fref, "the two instances must share a FuncRef to be a control");
 
-    // Build each key from its instance's declaration-ordered arguments, not a
-    // hand-written type. `spec_subst_from_key` then recovers the declaration's
-    // VarId, independently of the candidate-selection oracle under test.
-    let k0 = instance_key(&g, insts[0]);
-    let k1 = instance_key(&g, insts[1]);
-    assert_eq!(k0.len(), 1, "fixture has one generic: {k0:?}");
-    assert_eq!(k1.len(), 1, "fixture has one generic: {k1:?}");
-    assert!(k0.iter().all(Option::is_some) && k1.iter().all(Option::is_some), "keys must be complete");
-    assert_ne!(k0, k1, "the two keys must differ, or the swap below is a no-op");
+    // Each claim comes from its instance's OWN recorded substitution, never from
+    // asking the oracle under test which candidate it likes.
+    let c0 = instance_claim(&g, insts[0]);
+    let c1 = instance_claim(&g, insts[1]);
+    assert_eq!(c0.subst.len(), 1, "fixture has one generic: {c0:?}");
+    assert_eq!(c1.subst.len(), 1, "fixture has one generic: {c1:?}");
+    assert_ne!(c0.subst, c1.subst, "the two claims must differ, or the swap below is a no-op");
 
-    // Matched: the instance and its OWN key.
+    // Matched: the instance and its OWN claim.
     assert_eq!(
-        skull::site_join::check_callee(&ws, &g, insts[0], fref, Some(&k0)),
+        skull::site_join::check_callee(&ws, &g, &rock(insts[0]), fref, Some(&c0)),
         skull::site_join::CalleeCheck::Instance,
-        "an instance did not verify against its own key"
+        "an instance did not verify against its own claim"
     );
     assert_eq!(
-        skull::site_join::check_callee(&ws, &g, insts[1], fref, Some(&k1)),
+        skull::site_join::check_callee(&ws, &g, &rock(insts[1]), fref, Some(&c1)),
         skull::site_join::CalleeCheck::Instance
     );
     // SWAPPED: same FuncRef, other instantiation. A declaration-only comparison
     // returns agreement here; the instance comparison must not.
     assert_eq!(
-        skull::site_join::check_callee(&ws, &g, insts[0], fref, Some(&k1)),
+        skull::site_join::check_callee(&ws, &g, &rock(insts[0]), fref, Some(&c1)),
         skull::site_join::CalleeCheck::InstanceMismatch,
         "two instantiations of one declaration compared equal -- the comparison is \
          declaration-level, not instance-level"
     );
     assert_eq!(
-        skull::site_join::check_callee(&ws, &g, insts[1], fref, Some(&k0)),
+        skull::site_join::check_callee(&ws, &g, &rock(insts[1]), fref, Some(&c0)),
         skull::site_join::CalleeCheck::InstanceMismatch
     );
 }
@@ -479,83 +482,132 @@ fn main() { print("{one(1)} {two(2)}") }
     let two = find("two");
     assert_ne!(one.func, two.func, "the fixture must give two declarations");
     assert_eq!(
-        skull::site_join::check_callee(&ws, &g, &one, one.func, None),
+        skull::site_join::check_callee(&ws, &g, &rock(&one), one.func, None),
         skull::site_join::CalleeCheck::NonGeneric,
         "a non-generic callee against its own declaration must verify"
     );
     assert_eq!(
-        skull::site_join::check_callee(&ws, &g, &one, two.func, None),
+        skull::site_join::check_callee(&ws, &g, &rock(&one), two.func, None),
         skull::site_join::CalleeCheck::DeclMismatch,
         "a callee resolved to another declaration was accepted"
     );
 }
 
-/// A generic callee whose key cannot name an instance is UNVERIFIED, and each
-/// way of failing is its own answer.
+/// A generic callee whose call recorded NO concrete instance is UNVERIFIED, and
+/// one whose record names another declaration is an invariant break -- kept
+/// apart because only the first can be a consequence of policy.
 ///
-/// Key arity is POSITIONAL, and a wrong-length key has already been a real bug
-/// on this branch -- it names another function's instantiation rather than
-/// nothing -- so too-short, too-long and EMPTY join the partial case. The
-/// too-short fixture is deliberately non-empty, because an empty key is a
-/// different input from an absent one and both are covered.
+/// The admission control is built INDEPENDENTLY, from the graph's own recorded
+/// substitution, so the rejections are not circular.
 #[test]
-fn a_generic_callee_key_that_names_no_instance_is_unverified() {
+fn a_generic_callee_without_a_recorded_instance_is_unverified() {
     let (ws, g) = graph_of(
         r#"
 fn pair<A, B>(a: A, b: B) -> A { return a }
-fn main() { print("{pair(1, 2.0)}") }
+fn other<A, B>(a: A, b: B) -> B { return b }
+fn main() { print("{pair(1, 2.0)} {other(1, 2.0)}") }
 "#,
     );
-    let inst = g
-        .substitutions
-        .keys()
-        .find(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "pair")
-        .expect("instance")
-        .clone();
-    let generics = ws.module(inst.func.module).functions[inst.func.func].generics.len();
-    assert_eq!(generics, 2, "fixture must declare two generics");
+    let find = |n: &str| {
+        g.substitutions
+            .keys()
+            .find(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == n)
+            .unwrap_or_else(|| panic!("no `{n}` instance"))
+            .clone()
+    };
+    let inst = find("pair");
+    let alien = find("other");
+    assert_ne!(inst.func, alien.func, "the two declarations must differ");
+    assert_eq!(
+        ws.module(inst.func.module).functions[inst.func.func].generics.len(),
+        2,
+        "fixture must declare two generics"
+    );
 
-    let check = |k: Option<&skull_mir::lower::SpecKey>| {
-        skull::site_join::check_callee(&ws, &g, &inst, inst.func, k)
+    let check = |c: Option<&skull_mir::site::OwnerInstance>| {
+        skull::site_join::check_callee(&ws, &g, &rock(&inst), inst.func, c)
     };
 
-    // ADMISSION CONTROL, built INDEPENDENTLY: the key is laid out in
-    // declaration-generic order from the graph's own `Instance.args`, never by
-    // asking the oracle which candidate it likes. A key the oracle helped choose
-    // would make the rejections below circular.
-    let good = instance_key(&g, &inst);
-    assert_eq!(good.len(), generics, "independent key has one slot per generic: {good:?}");
-    assert!(good.iter().all(Option::is_some), "independent key is complete: {good:?}");
+    // ADMISSION CONTROL: the instance's own recorded substitution verifies.
+    let good = instance_claim(&g, &inst);
+    assert_eq!(good.subst.len(), 2, "one entry per generic: {good:?}");
     assert_eq!(
         check(Some(&good)),
         skull::site_join::CalleeCheck::Instance,
-        "the independently-built correct key did not verify, so the rejections below \
-         prove nothing about key shape"
+        "the independently-built correct claim did not verify, so the rejections below \
+         prove nothing"
     );
 
-    let bindings: Vec<skull_mir::monoty::MonoTy> =
-        good.iter().map(|b| b.clone().expect("complete")).collect();
+    // No record at all -- the population conditional specialization used to own.
+    assert_eq!(check(None), skull::site_join::CalleeCheck::NoInstance);
 
-    // No key at all.
-    assert_eq!(check(None), skull::site_join::CalleeCheck::NoKey);
-    // A PRESENT but EMPTY key is a different input from an absent one: it has
-    // the wrong arity for a two-generic declaration.
-    let empty: skull_mir::lower::SpecKey = Vec::new();
-    assert_eq!(check(Some(&empty)), skull::site_join::CalleeCheck::KeyArity);
-    // TOO SHORT, non-empty: one slot for a two-generic declaration still
-    // positionally names a different instantiation.
-    let short: skull_mir::lower::SpecKey = vec![Some(bindings[0].clone())];
-    assert_eq!(check(Some(&short)), skull::site_join::CalleeCheck::KeyArity);
-    // TOO LONG.
-    let long: skull_mir::lower::SpecKey = vec![
-        Some(bindings[0].clone()),
-        Some(bindings[1].clone()),
-        Some(bindings[0].clone()),
-    ];
-    assert_eq!(check(Some(&long)), skull::site_join::CalleeCheck::KeyArity);
-    // Right length, holds a `None`.
-    let partial: skull_mir::lower::SpecKey = vec![Some(bindings[0].clone()), None];
-    assert_eq!(check(Some(&partial)), skull::site_join::CalleeCheck::PartialKey);
+    // A record naming ANOTHER declaration. Not a policy outcome: the record is
+    // written beside the call it belongs to, so this can only be a recorder bug.
+    let wrong_decl = skull_mir::site::OwnerInstance {
+        func: alien.func,
+        subst: good.subst.clone(),
+    };
+    assert_eq!(check(Some(&wrong_decl)), skull::site_join::CalleeCheck::ClaimDeclMismatch);
+
+    // Right declaration, WRONG substitution: a partial one names no instance.
+    let mut partial = good.clone();
+    let first = *partial.subst.keys().next().expect("non-empty");
+    partial.subst.remove(&first);
+    assert_eq!(check(Some(&partial)), skull::site_join::CalleeCheck::InstanceMismatch);
+}
+
+/// A BOUNDARY callee is verified as a boundary, not by reconstructing a Rock
+/// instantiation it does not have. An opaque body is emitted once per
+/// declaration and target, so its generic arguments do not participate in the
+/// symbol emission spells -- and demanding a Rock instance record for one
+/// reported the absence as an unverified call (bitgun: 215 sites).
+///
+/// The control is the Rock arm over the SAME instance: it still demands the
+/// record, so this is not a blanket exemption for generic callees.
+#[test]
+fn a_generic_boundary_callee_verifies_as_a_boundary() {
+    let (ws, g) = graph_of(
+        r#"
+fn main() {
+    let v: [int] = []
+    v.push(1)
+    print("{v.len()}")
+}
+"#,
+    );
+    let mut g = g;
+    let bodies = skull::concrete_body::build(&ws, &mut g);
+    // Taken from the CALLEE TABLES rather than from a name: what makes this a
+    // boundary is how the walk resolved it, and a generic declaration is what
+    // makes the fixture non-vacuous.
+    let (inst, class) = bodies
+        .bodies
+        .values()
+        .flat_map(|b| b.callees())
+        .find_map(|(_, c)| match c {
+            skull::concrete_body::Callee::Boundary(i, cl)
+                if !ws.module(i.func.module).functions[i.func.func].generics.is_empty() =>
+            {
+                Some((i.clone(), *cl))
+            }
+            _ => None,
+        })
+        .expect("the fixture must reach a GENERIC boundary, or it proves nothing");
+
+    let boundary = skull::concrete_body::Callee::Boundary(inst.clone(), class);
+    assert_eq!(
+        skull::site_join::check_callee(&ws, &g, &boundary, inst.func, None),
+        skull::site_join::CalleeCheck::Boundary(class),
+        "a generic boundary was asked for a Rock instantiation it cannot have"
+    );
+    // CONTROL: the same generic instance as a ROCK callee still demands the
+    // record. Without this the arm above would read as "generic callees are
+    // exempt", which is the opposite of what it says.
+    assert_eq!(
+        skull::site_join::check_callee(&ws, &g, &rock(&inst), inst.func, None),
+        skull::site_join::CalleeCheck::NoInstance,
+        "the boundary exemption leaked to the Rock arm"
+    );
 }
 
 /// `callee-resolved-unrecorded` is 0 over the corpus, and a zero is only
@@ -576,18 +628,18 @@ fn main() { print("{ident(1)}") }
         .find(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "ident")
         .expect("instance")
         .clone();
-    let key = instance_key(&g, &inst);
-    // Control: with the substitution present, the key verifies.
+    let claim = instance_claim(&g, &inst);
+    // Control: with the substitution present, the claim verifies.
     assert_eq!(
-        skull::site_join::check_callee(&ws, &g, &inst, inst.func, Some(&key)),
+        skull::site_join::check_callee(&ws, &g, &rock(&inst), inst.func, Some(&claim)),
         skull::site_join::CalleeCheck::Instance
     );
     // Remove ONLY the resolved instance's record -- the call still carries the
-    // same complete key, so nothing about the CALL changed.
+    // same complete claim, so nothing about the CALL changed.
     let removed = g.substitutions.remove(&inst);
     assert!(removed.is_some(), "nothing was removed, so the arm below is untested");
     assert_eq!(
-        skull::site_join::check_callee(&ws, &g, &inst, inst.func, Some(&key)),
+        skull::site_join::check_callee(&ws, &g, &rock(&inst), inst.func, Some(&claim)),
         skull::site_join::CalleeCheck::ResolvedUnrecorded,
         "a resolved instance with no recorded substitution was treated as agreement"
     );

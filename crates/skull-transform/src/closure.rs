@@ -412,6 +412,7 @@ pub fn convert_closures_framed(
             // keyed to insts whose only reachable home is now this body, so
             // dropping them would strand their site identity here.
             call_sites: mf.call_sites.clone(),
+            callee_instances: mf.callee_instances.clone(),
             fn_value_symbols: mf.fn_value_symbols.clone(),
             hoisted_fn_globals: mf.hoisted_fn_globals.clone(),
             // The owner table comes across with the entries that index it;

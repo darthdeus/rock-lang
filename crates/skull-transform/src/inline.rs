@@ -922,6 +922,13 @@ fn import_spec_bindings(
             func.spec_bindings.insert(new_id, key.clone());
         }
     }
+    // The IDENTITY record travels with the body for the same reason the site
+    // does: a spliced call still targets the instance the callee body named.
+    for (old_id, inst) in &callee.callee_instances {
+        if let Some(&new_id) = inst_map.get(old_id) {
+            func.callee_instances.insert(new_id, inst.clone());
+        }
+    }
     // A minted fn-value symbol travels with the body that mints it: the callee's
     // `let f = adder` is still a reference to `adder` after the splice, and the
     // census joins it there. Dropping it would leave a spelled callee symbol in

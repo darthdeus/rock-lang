@@ -622,8 +622,12 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
         println!(
             "- of the joined: **{}** verified to the full concrete INSTANCE (generic args \
              compared), **{}** non-generic (one instance, so the declaration match IS the \
-             instance match). Every join verifies an instance.",
-            site_join.joined_instance_verified, site_join.joined_non_generic
+             instance match), **{}** BOUNDARY (verified as a `BoundaryId` -- declaration, \
+             class, target and spelling; a boundary has no Rock instantiation to compare). \
+             Every join verifies an identity.",
+            site_join.joined_instance_verified,
+            site_join.joined_non_generic,
+            site_join.joined_boundary_verified
         );
         println!(
             "- **{}** INDIRECT calls admitted as the permanent NON-DIRECT class: emission \

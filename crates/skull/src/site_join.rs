@@ -77,18 +77,15 @@ pub enum Unjoined {
     /// not have. Two instantiations of one generic declaration are exactly the
     /// distinction Stage 3 needs, and a declaration-level check cannot see it.
     CalleeInstanceMismatch,
-    /// Generic callee, and the call carries NO instantiation key at all. The
-    /// lowerer records one only when it specializes, so this is the population
-    /// conditional specialization is responsible for.
-    CalleeNoKey,
-    /// Generic callee whose key has the wrong number of slots for the
-    /// declaration's generics. Key arity is POSITIONAL, so a wrong-length key
-    /// names another function's instantiation -- kept apart from a missing key
-    /// because it is an invariant break, not a consequence of policy.
-    CalleeKeyArity,
-    /// Generic callee whose key is the right length but holds a `None` slot, so
-    /// it names no instance.
-    CalleePartialKey,
+    /// Generic Rock callee for which the call recorded NO concrete instance.
+    /// The identity record covers every COMPLETE instantiation, so this is a
+    /// call whose bindings do not all reify here -- a caller-generic slot inside
+    /// a body that is itself still generic.
+    CalleeNoInstance,
+    /// The recorded instance names a different DECLARATION than the call
+    /// targets. An invariant break in the recorder, kept apart from a missing
+    /// record because it cannot be a consequence of policy.
+    CalleeClaimDeclMismatch,
     /// The resolved instance itself has no substitution recorded in the graph,
     /// so there is nothing to compare the reconstructed one against. An
     /// invariant finding about the GRAPH, not about the call.
@@ -108,9 +105,8 @@ impl Unjoined {
             Self::SiteNotInBody => "site-not-in-body",
             Self::CalleeMismatch => "callee-decl-mismatch",
             Self::CalleeInstanceMismatch => "callee-instance-mismatch",
-            Self::CalleeNoKey => "callee-no-key",
-            Self::CalleeKeyArity => "callee-key-arity",
-            Self::CalleePartialKey => "callee-partial-key",
+            Self::CalleeNoInstance => "callee-no-instance",
+            Self::CalleeClaimDeclMismatch => "callee-claim-decl-mismatch",
             Self::CalleeResolvedUnrecorded => "callee-resolved-unrecorded",
             Self::UnstampedForm => "unstamped-form",
         }
@@ -176,6 +172,11 @@ pub struct SiteJoinCensus {
     /// instance and the declaration match IS the instance match. Verified, but
     /// counted apart because it says nothing about generic arguments.
     pub joined_non_generic: usize,
+    /// Joined calls to a BOUNDARY, verified as a `BoundaryId`: declaration plus
+    /// class, which is the whole of a boundary's identity on this side. Counted
+    /// apart because it says nothing about Rock generic arguments -- a boundary
+    /// has none to say anything about.
+    pub joined_boundary_verified: usize,
     /// INDIRECT calls: admitted, but NOT joined. `Inst::CallValue` names a
     /// function value, so there is no declaration to compare the resolved
     /// instance against. Their own population, so "every join verifies the
@@ -237,11 +238,24 @@ impl SiteJoinCensus {
                 self.call_insts
             ));
         }
-        let verified = self.joined_instance_verified + self.joined_non_generic;
+        let verified =
+            self.joined_instance_verified + self.joined_non_generic + self.joined_boundary_verified;
         if verified != self.joined {
             out.push(format!(
-                "instance-verified {} + non-generic {} != joined {}",
-                self.joined_instance_verified, self.joined_non_generic, self.joined
+                "instance-verified {} + non-generic {} + boundary {} != joined {}",
+                self.joined_instance_verified,
+                self.joined_non_generic,
+                self.joined_boundary_verified,
+                self.joined
+            ));
+        }
+        // The boundary count taken from the CALLEE ARM and the one taken from
+        // the check's VERDICT must agree: a `check_callee` that answered
+        // `NonGeneric` for a boundary would still balance every sum above.
+        if self.joined_boundary_verified != self.joined_boundary {
+            out.push(format!(
+                "boundary-verified {} != boundary callees {}",
+                self.joined_boundary_verified, self.joined_boundary
             ));
         }
         if self.joined_rock + self.joined_boundary != self.joined {
@@ -336,6 +350,7 @@ impl SiteJoinCensus {
         self.joined_spliced += other.joined_spliced;
         self.joined_instance_verified += other.joined_instance_verified;
         self.joined_non_generic += other.joined_non_generic;
+        self.joined_boundary_verified += other.joined_boundary_verified;
         self.admitted_indirect += other.admitted_indirect;
         for (k, v) in &other.admitted_indirect_by_op {
             *self.admitted_indirect_by_op.entry(k).or_insert(0) += v;
@@ -476,6 +491,11 @@ struct CallRow {
     /// what makes the comparison instance-level rather than declaration-level.
     /// `None` when the lowerer recorded none.
     spec_key: Option<skull_mir::lower::SpecKey>,
+    /// The call's own claim about WHICH concrete instance it targets
+    /// (`MirFunc::callee_instances`). This is the identity record, recorded for
+    /// every complete instantiation regardless of what the specialization
+    /// POLICY decided, so it is what the comparison reads.
+    callee_inst: Option<OwnerInstance>,
     /// For an indirect call, what produced the callee operand. `None` for a
     /// direct call.
     producer: Option<IndirectProducer>,
@@ -516,6 +536,7 @@ fn reachable_call_rows(mf: &MirFunc, out: &mut Vec<CallRow>) {
                 site: mf.call_sites.get(&id).cloned(),
                 target,
                 spec_key: mf.spec_bindings.get(&id).cloned(),
+                callee_inst: mf.callee_instances.get(&id).cloned(),
                 producer,
                 unstamped_form,
             });
@@ -682,9 +703,11 @@ pub fn census_detailed(
                         format!("{}/{}g", f.name, f.generics.len())
                     })
                     .unwrap_or_else(|| "<indirect>".into());
-                let key = match &row.spec_key {
-                    None => "nokey".to_string(),
-                    Some(k) => format!("key{}", k.len()),
+                let key = match (&row.spec_key, &row.callee_inst) {
+                    (None, None) => "nokey/noinst".to_string(),
+                    (Some(k), None) => format!("key{}/noinst", k.len()),
+                    (None, Some(i)) => format!("nokey/inst{}", i.subst.len()),
+                    (Some(k), Some(i)) => format!("key{}/inst{}", k.len(), i.subst.len()),
                 };
                 c.rows.push(format!(
                     "{}\t{op}\t{span}\towner={owner}\ttarget={target}\t{key}\tin={}\t{note}",
@@ -742,6 +765,11 @@ pub fn census_detailed(
 pub enum CalleeCheck {
     /// Declaration AND concrete instantiation agree.
     Instance,
+    /// The callee is a BOUNDARY: the declaration agrees and the boundary's
+    /// identity is its declaration, class, target and spelling rather than a
+    /// Rock instantiation. Counted apart from `NonGeneric` because a boundary
+    /// CAN be generic -- what it cannot have is a Rock body per instantiation.
+    Boundary(crate::instance_graph::BoundaryClass),
     /// Declaration agrees and the callee is non-generic, so it has exactly one
     /// instance and there are no arguments to compare.
     NonGeneric,
@@ -749,12 +777,11 @@ pub enum CalleeCheck {
     DeclMismatch,
     /// Declarations agree, the callee is generic, and the instantiations differ.
     InstanceMismatch,
-    /// Generic callee, no instantiation key at all.
-    NoKey,
-    /// Generic callee, key length != the declaration's generic count.
-    KeyArity,
-    /// Generic callee, right-length key holding a `None`.
-    PartialKey,
+    /// Generic callee, and the call recorded no concrete instance at all.
+    NoInstance,
+    /// The recorded instance names a DIFFERENT declaration than the call
+    /// targets.
+    ClaimDeclMismatch,
     /// The resolved instance has no substitution recorded in the graph.
     ResolvedUnrecorded,
 }
@@ -767,11 +794,11 @@ impl CalleeCheck {
         match self {
             Self::Instance => Ok(Verified::Instance),
             Self::NonGeneric => Ok(Verified::NonGeneric),
+            Self::Boundary(_) => Ok(Verified::Boundary),
             Self::DeclMismatch => Err(Unjoined::CalleeMismatch),
             Self::InstanceMismatch => Err(Unjoined::CalleeInstanceMismatch),
-            Self::NoKey => Err(Unjoined::CalleeNoKey),
-            Self::KeyArity => Err(Unjoined::CalleeKeyArity),
-            Self::PartialKey => Err(Unjoined::CalleePartialKey),
+            Self::NoInstance => Err(Unjoined::CalleeNoInstance),
+            Self::ClaimDeclMismatch => Err(Unjoined::CalleeClaimDeclMismatch),
             Self::ResolvedUnrecorded => Err(Unjoined::CalleeResolvedUnrecorded),
         }
     }
@@ -784,6 +811,9 @@ pub enum Verified {
     Instance,
     /// Non-generic callee: one instance, nothing to compare.
     NonGeneric,
+    /// A boundary: verified as a `BoundaryId`, whose identity carries no Rock
+    /// instantiation.
+    Boundary,
 }
 
 /// **THE callee comparison**, extracted so it can be tested directly against a
@@ -797,12 +827,27 @@ pub enum Verified {
 pub fn check_callee(
     ws: &Workspace,
     g: &InstanceGraph,
-    callee_inst: &Instance,
+    callee: &Callee,
     target: skull_mir::mir::FuncRef,
-    spec_key: Option<&skull_mir::lower::SpecKey>,
+    call_inst: Option<&OwnerInstance>,
 ) -> CalleeCheck {
+    let callee_inst = callee.instance();
     if callee_inst.func != target {
         return CalleeCheck::DeclMismatch;
+    }
+    // A BOUNDARY is verified as a boundary, not by reconstructing a Rock
+    // instantiation it does not have. An opaque body -- `inline(lua)`,
+    // `inline(js)`, `extern` -- is emitted once per declaration and target, so
+    // its generic arguments do not participate in the symbol emission spells;
+    // demanding a `SpecKey` for one asked a Rock question of a non-Rock callee
+    // and reported the absence as `callee-no-key` (bitgun: 215 sites over 18
+    // declarations, `__vec_data_get`, `transmute`, `phantom` among them).
+    //
+    // The identity that IS load-bearing for it -- declaration, class, target,
+    // spelling -- is the `BoundaryId` the ARTIFACT mints, and the declaration
+    // and class are what this side can see.
+    if let Callee::Boundary(_, class) = callee {
+        return CalleeCheck::Boundary(*class);
     }
     let generics = ws.module(target.module).functions[target.func].generics.len();
     if generics == 0 {
@@ -811,16 +856,18 @@ pub fn check_callee(
     // A complete key has one reified entry per declared generic. Each way of
     // falling short is its own answer: they have different causes and only one
     // of them is conditional specialization.
-    let Some(key) = spec_key else { return CalleeCheck::NoKey };
-    if key.len() != generics {
-        return CalleeCheck::KeyArity;
+    // The call's OWN claim, in the graph's vocabulary. Not the `SpecKey`: that
+    // is the delivery record, present only where the policy chose to specialize,
+    // so reading it as identity made a DECLINED specialization look exactly like
+    // an uninferred callee.
+    let Some(claim) = call_inst else { return CalleeCheck::NoInstance };
+    // A claim for another declaration is an invariant break, not a policy
+    // consequence -- the record is written beside the call it belongs to.
+    if claim.func != target {
+        return CalleeCheck::ClaimDeclMismatch;
     }
-    if key.iter().any(Option::is_none) {
-        return CalleeCheck::PartialKey;
-    }
-    let call_subst = skull_mir::lower::spec_subst_from_key(ws, target, key);
     match g.substitutions.get(callee_inst) {
-        Some(resolved) if *resolved == call_subst => CalleeCheck::Instance,
+        Some(resolved) if *resolved == claim.subst => CalleeCheck::Instance,
         Some(_) => CalleeCheck::InstanceMismatch,
         None => CalleeCheck::ResolvedUnrecorded,
     }
@@ -931,7 +978,7 @@ fn classify(
     // Every remaining row is a DIRECT call: the indirect branch returned above.
     let target = row.target.expect("indirect calls are decided before the site lookup");
 
-    match check_callee(ws, g, callee_inst, target, row.spec_key.as_ref()).outcome() {
+    match check_callee(ws, g, callee, target, row.callee_inst.as_ref()).outcome() {
         Err(cause) => {
             let note = if detail {
                 format!("resolved={}", g.identity(ws, callee_inst))
@@ -946,6 +993,7 @@ fn classify(
             match kind {
                 Verified::Instance => c.joined_instance_verified += 1,
                 Verified::NonGeneric => c.joined_non_generic += 1,
+                Verified::Boundary => c.joined_boundary_verified += 1,
             }
             match callee {
                 Callee::Rock(_) => c.joined_rock += 1,

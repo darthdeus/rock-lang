@@ -702,6 +702,19 @@ pub struct MirFunc {
     /// snapshot; a surviving (un-spliced) entry is a hard site-aware rejection
     /// (its args are splatted, so the shared generic body cannot serve it).
     pub spec_bindings: bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::lower::SpecKey>,
+    /// Per call inst: the CONCRETE INSTANCE it targets -- the callee declaration
+    /// plus the substitution its own instantiation resolves to, in the same
+    /// `MonoSubst` vocabulary the instance graph records per instance.
+    ///
+    /// Separate from [`Self::spec_bindings`], and deliberately so: that map is
+    /// the DELIVERY record (which calls the lowerer chose to serve with a
+    /// specialized snapshot) and is therefore a policy artifact. This is
+    /// IDENTITY, recorded for every complete instantiation regardless of what
+    /// the policy decided, so a call that keeps the shared body still states
+    /// which instance it means. Reading the delivery record as identity is what
+    /// made a declined specialization indistinguishable from an unknown callee.
+    pub callee_instances:
+        bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::site::OwnerInstance>,
     /// Placeholder [`Inst::CallBoundMulti`]s whose element the LOWERING already
     /// split into leaf cells: `dests` is sized to the real return arity and the
     /// loop pattern is bound to the leaves, so the splice must leave both alone.
@@ -783,6 +796,7 @@ impl MirFunc {
             nested_fns: Vec::new(),
             inst_spans: Default::default(),
             call_sites: Default::default(),
+            callee_instances: Default::default(),
             fn_value_symbols: Default::default(),
             hoisted_fn_globals: Vec::new(),
             site_owners: Vec::new(),
