@@ -14,7 +14,7 @@
 // Destruction is two steps. `scene_close` is a REQUEST: it hides the Scene from
 // lookup at once and refuses a second request, but the rows stay live so nothing
 // is pulled out from under an update or draw that is already holding them.
-// `scene_drain_closed` is the physical teardown, and the runner calls it at one
+// `__scene_drain_closed` is the physical teardown, and the runner calls it at one
 // end-of-frame safe point (`frame_core_end`) after every consumer has returned.
 
 // The Session root, the owner ID every `arena_new()` Arena already carries. It
@@ -148,9 +148,15 @@ fn scene_close<T>(scene: Scene<T>) -> bool {
 }
 
 // The safe point: physically retires every Scene closed since the last drain and
-// returns how many. Called by the runner at `frame_core_end`, after every update
-// and draw consumer has returned.
-fn scene_drain_closed() -> int {
+// returns how many.
+//
+// INTERNAL, and the underscore is load-bearing. The runner owns the one call, at
+// `frame_core_end`, after every update and draw consumer has returned; a system
+// calling it mid-frame would invalidate rows a caller further up the stack is
+// still holding, which is exactly the guarantee the close/drain split exists to
+// give. Ordinary code uses `scene_close`. Tests drive this directly on purpose,
+// to observe the drain without waiting a frame.
+fn __scene_drain_closed() -> int {
     let pending = __SCENE_PENDING_CLOSE
     if vec_len(pending) == 0 { return 0 }
     let fresh: [int] = []
