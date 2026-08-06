@@ -327,7 +327,7 @@ fn a_call_filed_under_the_wrong_operation_fails_accounting() {
     use skull::site_join::{SiteJoinCensus, Unjoined};
 
     let mut c = SiteJoinCensus::default();
-    c.call_insts = 2;
+    c.obligations_examined = 2;
     c.joined = 1;
     c.joined_non_generic = 1;
     c.joined_rock = 1;
@@ -351,7 +351,7 @@ fn a_call_filed_under_the_wrong_operation_fails_accounting() {
     let mut bad = c.clone();
     bad.joined_by_op.clear();
     bad.joined_by_op.insert("synthesized", 1);
-    assert_eq!(bad.examined_by_op.values().sum::<usize>(), bad.call_insts);
+    assert_eq!(bad.examined_by_op.values().sum::<usize>(), bad.obligations_examined);
     assert_eq!(bad.joined_by_op.values().sum::<usize>(), bad.joined);
     assert_eq!(bad.unjoined_by_op.values().sum::<usize>(), bad.unjoined_total());
     let failures = bad.accounting_failures();
@@ -775,11 +775,11 @@ fn main() {
 }
 "#,
     );
-    assert!(c.call_insts > 0, "no calls examined");
+    assert!(c.obligations_examined > 0, "no calls examined");
     assert!(c.accounts(), "accounting identity broken: {c:?}");
     assert_eq!(
         c.joined + c.unjoined_total(),
-        c.call_insts,
+        c.obligations_examined,
         "a call is neither joined nor given a cause"
     );
 }
@@ -1065,23 +1065,37 @@ fn main() {
     );
 }
 
-/// The mint's RECORD is compared, not merely present: a record naming a
-/// different function must be refused.
+/// The mint's RECORD is compared BY THE CENSUS, not merely present: a record
+/// naming a different function becomes a `callee-decl-mismatch` in the bucket,
+/// while the mint stays in the denominator.
 ///
-/// One side only -- the recorded declaration is perturbed while the emitted
+/// Asserted through `measure_prepared_body`, the same classifier production
+/// runs, rather than by calling `check_callee` directly -- that would prove the
+/// declaration comparison (already covered by
+/// [`a_different_declaration_is_a_decl_mismatch`]) and NOT that a corrupted
+/// record travels through `reachable_call_rows` into a census bucket.
+///
+/// One side only: the recorded declaration is perturbed while the emitted
 /// instruction, its site and the graph are untouched, so the graph still
-/// resolves the mint to the function the source actually named. Perturbing the
-/// source instead would move both sides and could not fail.
+/// resolves the mint to the function the source named. Perturbing the source
+/// instead would move both sides and could not fail.
 #[test]
-fn a_mint_recording_the_wrong_function_is_a_decl_mismatch() {
-    let ws = check(
-        r#"
+fn a_mint_recording_the_wrong_function_is_a_census_mismatch() {
+    let src = r#"
 fn add_one(x: int) -> int { return x + 1 }
 fn add_two(x: int) -> int { return x + 2 }
 fn apply(f: fn(int) -> int, x: int) -> int { return f(x) }
 fn main() { print("{apply(add_one, 1)}") }
-"#,
-    );
+"#;
+    let (ws, mut g) = graph_of(src);
+    let bodies = skull::concrete_body::build(&ws, &mut g);
+    let main_inst = g
+        .expanded
+        .iter()
+        .find(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "main")
+        .expect("`main` instance")
+        .clone();
+
     let mut mf = prepared_body(&ws, "main");
     let mint = *mf
         .fn_value_symbols
@@ -1093,6 +1107,20 @@ fn main() { print("{apply(add_one, 1)}") }
         ws.module(recorded.module).functions[recorded.func].name.as_str(),
         "add_one",
         "the fixture recorded the wrong function before any mutation"
+    );
+
+    // CONTROL: unmodified, the mint is in the denominator and it JOINS.
+    let before = skull::site_join::measure_prepared_body(&ws, &g, &bodies, &main_inst, &mf);
+    assert_eq!(before.symbol_mints, 1, "the mint left the denominator: {before:?}");
+    assert_eq!(
+        before.joined_by_op.get("fn-value").copied().unwrap_or(0),
+        1,
+        "the correct record did not join, so the mismatch below proves nothing: {before:?}"
+    );
+    assert_eq!(
+        before.unjoined.get(&Unjoined::CalleeMismatch).copied().unwrap_or(0),
+        0,
+        "the control already mismatches: {before:?}"
     );
 
     // The ALIEN declaration, taken from the workspace rather than invented.
@@ -1107,37 +1135,29 @@ fn main() { print("{apply(add_one, 1)}") }
     assert_ne!(alien, recorded, "the alien must differ, or the swap is a no-op");
     mf.fn_value_symbols.insert(mint, alien);
 
-    // The graph still resolves the mint's site to `add_one`, so the comparison
-    // has two disagreeing sides.
-    let (ws2, mut g) = graph_of(
-        r#"
-fn add_one(x: int) -> int { return x + 1 }
-fn add_two(x: int) -> int { return x + 2 }
-fn apply(f: fn(int) -> int, x: int) -> int { return f(x) }
-fn main() { print("{apply(add_one, 1)}") }
-"#,
-    );
-    let bodies = skull::concrete_body::build(&ws2, &mut g);
-    let resolved = bodies
-        .bodies
-        .values()
-        .flat_map(|b| b.fn_values.values())
-        .find(|c| ws2.module(c.instance().func.module).functions[c.instance().func.func]
-            .name
-            .as_str()
-            == "add_one")
-        .expect("the graph must resolve the mint to `add_one`");
+    let after = skull::site_join::measure_prepared_body(&ws, &g, &bodies, &main_inst, &mf);
+    // The mint is still EXAMINED -- a corrupted record must not drop out of the
+    // denominator, which would look like agreement.
     assert_eq!(
-        skull::site_join::check_callee(&ws2, &g, resolved, alien, None),
-        skull::site_join::CalleeCheck::DeclMismatch,
-        "a mint recording another function was accepted"
+        after.symbol_mints, before.symbol_mints,
+        "the corrupted mint left the denominator instead of failing: {after:?}"
     );
-    // CONTROL: the function the source actually named still verifies.
     assert_eq!(
-        skull::site_join::check_callee(&ws2, &g, resolved, resolved.instance().func, None),
-        skull::site_join::CalleeCheck::NonGeneric,
-        "the correct declaration stopped verifying, so the rejection proves nothing"
+        after.examined_by_op.get("fn-value").copied().unwrap_or(0),
+        1,
+        "the corrupted mint was examined under another operation: {after:?}"
     );
+    assert_eq!(
+        after.unjoined.get(&Unjoined::CalleeMismatch).copied().unwrap_or(0),
+        1,
+        "a mint recording another function was accepted by the census: {after:?}"
+    );
+    assert_eq!(
+        after.joined_by_op.get("fn-value").copied().unwrap_or(0),
+        0,
+        "the corrupted mint still joined: {after:?}"
+    );
+    assert!(after.accounts(), "accounting identity broken: {after:?}");
 }
 
 // ---------------------------------------------------------------------------

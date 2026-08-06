@@ -159,11 +159,14 @@ pub struct SiteJoinCensus {
     /// Expanded instances that contributed no calls, by cause. Reported rather
     /// than skipped: a shrinking denominator flatters every ratio.
     pub bodies_skipped: BTreeMap<BodySkip, usize>,
-    /// REACHABLE callee obligations examined. The denominator: call
-    /// instructions PLUS fn-value symbol mints.
-    pub call_insts: usize,
-    /// How many of [`Self::call_insts`] are fn-value symbol MINTS rather than
-    /// calls. Stated so the denominator's composition is not a guess.
+    /// REACHABLE callee obligations examined. THE DENOMINATOR, and it is not
+    /// call instructions alone: a fn-value symbol MINT is an obligation too, and
+    /// naming this `obligations_examined` while counting mints in it was a number that
+    /// described itself wrongly.
+    pub obligations_examined: usize,
+    /// How many of [`Self::obligations_examined`] are fn-value symbol MINTS. The
+    /// rest are call instructions, so the composition is stated rather than
+    /// inferred.
     pub symbol_mints: usize,
     /// Call instructions that joined to exactly one callee.
     pub joined: usize,
@@ -241,13 +244,13 @@ impl SiteJoinCensus {
     pub fn accounting_failures(&self) -> Vec<String> {
         let mut out = Vec::new();
         let total = self.joined + self.admitted_indirect + self.unjoined_total();
-        if total != self.call_insts {
+        if total != self.obligations_examined {
             out.push(format!(
-                "joined {} + admitted-indirect {} + unjoined {} != examined {}",
+                "joined {} + admitted-indirect {} + unjoined {} != obligations examined {}",
                 self.joined,
                 self.admitted_indirect,
                 self.unjoined_total(),
-                self.call_insts
+                self.obligations_examined
             ));
         }
         let verified =
@@ -282,8 +285,8 @@ impl SiteJoinCensus {
         // no key, and its absence is invisible to a pointwise check while the
         // main counters stay non-zero.
         let examined_ops: usize = self.examined_by_op.values().sum();
-        if examined_ops != self.call_insts {
-            out.push(format!("examined-by-op {examined_ops} != examined {}", self.call_insts));
+        if examined_ops != self.obligations_examined {
+            out.push(format!("examined-by-op {examined_ops} != obligations examined {}", self.obligations_examined));
         }
         let joined_ops: usize = self.joined_by_op.values().sum();
         if joined_ops != self.joined {
@@ -355,7 +358,7 @@ impl SiteJoinCensus {
 
     pub fn merge(&mut self, other: &SiteJoinCensus) {
         self.bodies_measured += other.bodies_measured;
-        self.call_insts += other.call_insts;
+        self.obligations_examined += other.obligations_examined;
         self.joined += other.joined;
         self.joined_rock += other.joined_rock;
         self.joined_boundary += other.joined_boundary;
@@ -597,6 +600,16 @@ fn reachable_call_rows(mf: &MirFunc, out: &mut Vec<CallRow>) {
 ///
 /// Built from `InstanceGraph::substitutions`, which is the graph's own record,
 /// so this is a lookup rather than a second derivation of instance identity.
+/// Every symbol the workspace mints for a function -- the second view
+/// `unrecorded_symbol_operands` compares an indirect operand's NAME against.
+fn mangled_symbols(ws: &Workspace) -> std::collections::HashSet<ustr::Ustr> {
+    ws.modules
+        .iter()
+        .flat_map(|m| m.functions.iter().map(|(_, f)| f))
+        .map(|f| ustr::Ustr::from(&skull_mir::mangle::mangle_fn(ws, f)))
+        .collect()
+}
+
 fn owner_index(g: &InstanceGraph) -> HashMap<skull_mir::mir::FuncRef, Vec<(MonoSubst, Instance)>> {
     let mut ix: HashMap<skull_mir::mir::FuncRef, Vec<(MonoSubst, Instance)>> = HashMap::new();
     for (inst, subst) in &g.substitutions {
@@ -627,6 +640,144 @@ fn has_lowered_body(ws: &Workspace, fref: skull_mir::mir::FuncRef) -> bool {
             .contains_key(&bone_semantic::hir::BodyOwner::Function(fref.func))
 }
 
+/// Measure ONE already-prepared body, over the same classifier production runs.
+///
+/// The census lowers its bodies internally, so a test cannot otherwise put a
+/// body whose recorded facts have been PERTURBED in front of it -- and a
+/// mutation that stops at [`check_callee`] proves the comparison rather than
+/// that the corrupted record travels through `reachable_call_rows` and lands in
+/// a census bucket. `mf` must already be through
+/// [`crate::mir_emit::prepare_instance_body`], which is the phase the join is
+/// measured at.
+pub fn measure_prepared_body(
+    ws: &Workspace,
+    g: &InstanceGraph,
+    bodies: &ConcreteBodies,
+    inst: &Instance,
+    mf: &MirFunc,
+) -> SiteJoinCensus {
+    let mut c = SiteJoinCensus::default();
+    let ix = owner_index(g);
+    let mangled = mangled_symbols(ws);
+    measure_body_into(ws, &mut c, g, &ix, bodies, &mangled, inst, mf, true);
+    c
+}
+
+/// Measure ONE already-prepared body into `c`, exactly as [`census_detailed`]
+/// measures each of its own.
+///
+/// Extracted because the census LOWERS its bodies internally, so nothing could
+/// otherwise observe what the classifier does to a body whose recorded facts
+/// have been perturbed. A mutation that stops at [`check_callee`] proves the
+/// comparison and not that the corrupted record reaches it through
+/// `reachable_call_rows`.
+fn measure_body_into(
+    ws: &Workspace,
+    c: &mut SiteJoinCensus,
+    g: &InstanceGraph,
+    ix: &HashMap<skull_mir::mir::FuncRef, Vec<(MonoSubst, Instance)>>,
+    bodies: &ConcreteBodies,
+    mangled: &std::collections::HashSet<ustr::Ustr>,
+    inst: &Instance,
+    mf: &MirFunc,
+    detail: bool,
+) {
+    c.bodies_measured += 1;
+
+    let mut rows: Vec<CallRow> = Vec::new();
+    reachable_call_rows(mf, &mut rows);
+    c.indirect_unrecorded_symbol += unrecorded_symbol_operands(mf, mangled);
+    for row in rows {
+        c.obligations_examined += 1;
+        if row.is_mint {
+            c.symbol_mints += 1;
+        }
+        let (cause, op, note) = classify(ws, c, g, mf, ix, bodies, inst, &row, detail);
+        *c.examined_by_op.entry(op).or_insert(0) += 1;
+        if detail && (cause.is_some() || row.target.is_none()) {
+            let span = mf
+                .inst_spans
+                .get(row.inst)
+                .map(|s| format!("{}:{}", s.file.as_str(), s.line_range.0 + 1))
+                .unwrap_or_else(|| "<no span>".into());
+            let owner = row
+                .site
+                .as_ref()
+                .and_then(|cs| mf.site_owners.get(cs.owner.0 as usize))
+                .map(|o| {
+                    format!(
+                        "{}/{}",
+                        ws.module(o.func.module).functions[o.func.func].name,
+                        if o.subst.is_empty() {
+                            "EMPTY".to_string()
+                        } else {
+                            o.subst.len().to_string()
+                        }
+                    )
+                })
+                .unwrap_or_else(|| "<none>".into());
+            let target = row
+                .target
+                .map(|t| {
+                    let f = &ws.module(t.module).functions[t.func];
+                    format!("{}/{}g", f.name, f.generics.len())
+                })
+                .unwrap_or_else(|| "<indirect>".into());
+            let key = match (&row.spec_key, &row.callee_inst) {
+                (None, None) => "nokey/noinst".to_string(),
+                (Some(k), None) => format!("key{}/noinst", k.len()),
+                (None, Some(i)) => format!("nokey/inst{}", i.subst.len()),
+                (Some(k), Some(i)) => format!("key{}/inst{}", k.len(), i.subst.len()),
+            };
+            c.rows.push(format!(
+                "{}\t{op}\t{span}\towner={owner}\ttarget={target}\t{key}\tin={}\t{note}",
+                cause.map(Unjoined::label).unwrap_or("admitted-indirect"),
+                g.identity(ws, inst),
+            ));
+        }
+        let cs = &row.site;
+        if let Some(cause) = cause {
+            *c.unjoined.entry(cause).or_insert(0) += 1;
+            *c.unjoined_by_op.entry(op).or_insert(0) += 1;
+            let per_cause = c.examples.iter().filter(|e| e.starts_with(cause.label())).count();
+            if per_cause < 3 {
+                let target_name = row
+                    .target
+                    .map(|t| ws.module(t.module).functions[t.func].name.to_string())
+                    .unwrap_or_else(|| "<indirect>".into());
+                let detail = match &cs {
+                    Some(cs) => {
+                        let owner = mf.site_owners.get(cs.owner.0 as usize).map(|o| {
+                            let f = &ws.module(o.func.module).functions[o.func.func];
+                            format!(
+                                "owner `{}` subst {}",
+                                f.name,
+                                if o.subst.is_empty() {
+                                    "EMPTY".to_string()
+                                } else {
+                                    format!("{}", o.subst.len())
+                                }
+                            )
+                        });
+                        format!(
+                            "{:?} op {} ({})",
+                            cs.site.expr,
+                            cs.site.op.name(),
+                            owner.unwrap_or_else(|| "<owner missing>".into())
+                        )
+                    }
+                    None => "<no site>".to_string(),
+                };
+                c.examples.push(format!(
+                    "{} in `{}`: {detail} -> target `{target_name}`",
+                    cause.label(),
+                    g.identity(ws, inst),
+                ));
+            }
+        }
+    }
+}
+
 /// Measure the join over `g`'s expanded instances, at the phase emission
 /// consumes.
 pub fn census(
@@ -653,14 +804,7 @@ pub fn census_detailed(
 ) -> SiteJoinCensus {
     let mut c = SiteJoinCensus::default();
     let ix = owner_index(g);
-    // Every symbol the workspace mints for a function -- the second view the
-    // fail-open check above compares against.
-    let mangled: std::collections::HashSet<ustr::Ustr> = ws
-        .modules
-        .iter()
-        .flat_map(|m| m.functions.iter().map(|(_, f)| f))
-        .map(|f| ustr::Ustr::from(&skull_mir::mangle::mangle_fn(ws, f)))
-        .collect();
+    let mangled = mangled_symbols(ws);
     let mangled = &mangled;
     let mut cache = skull_transform::InlineCache::default();
 
@@ -710,100 +854,7 @@ pub fn census_detailed(
             skip(&mut c, BodySkip::PrepareFailed);
             continue;
         }
-        c.bodies_measured += 1;
-
-        let mut rows: Vec<CallRow> = Vec::new();
-        reachable_call_rows(&mf, &mut rows);
-        c.indirect_unrecorded_symbol += unrecorded_symbol_operands(&mf, mangled);
-        for row in rows {
-            c.call_insts += 1;
-            if row.is_mint {
-                c.symbol_mints += 1;
-            }
-            let (cause, op, note) = classify(ws, &mut c, g, &mf, &ix, bodies, inst, &row, detail);
-            *c.examined_by_op.entry(op).or_insert(0) += 1;
-            if detail && (cause.is_some() || row.target.is_none()) {
-                let span = mf
-                    .inst_spans
-                    .get(row.inst)
-                    .map(|s| format!("{}:{}", s.file.as_str(), s.line_range.0 + 1))
-                    .unwrap_or_else(|| "<no span>".into());
-                let owner = row
-                    .site
-                    .as_ref()
-                    .and_then(|cs| mf.site_owners.get(cs.owner.0 as usize))
-                    .map(|o| {
-                        format!(
-                            "{}/{}",
-                            ws.module(o.func.module).functions[o.func.func].name,
-                            if o.subst.is_empty() {
-                                "EMPTY".to_string()
-                            } else {
-                                o.subst.len().to_string()
-                            }
-                        )
-                    })
-                    .unwrap_or_else(|| "<none>".into());
-                let target = row
-                    .target
-                    .map(|t| {
-                        let f = &ws.module(t.module).functions[t.func];
-                        format!("{}/{}g", f.name, f.generics.len())
-                    })
-                    .unwrap_or_else(|| "<indirect>".into());
-                let key = match (&row.spec_key, &row.callee_inst) {
-                    (None, None) => "nokey/noinst".to_string(),
-                    (Some(k), None) => format!("key{}/noinst", k.len()),
-                    (None, Some(i)) => format!("nokey/inst{}", i.subst.len()),
-                    (Some(k), Some(i)) => format!("key{}/inst{}", k.len(), i.subst.len()),
-                };
-                c.rows.push(format!(
-                    "{}\t{op}\t{span}\towner={owner}\ttarget={target}\t{key}\tin={}\t{note}",
-                    cause.map(Unjoined::label).unwrap_or("admitted-indirect"),
-                    g.identity(ws, inst),
-                ));
-            }
-            let cs = &row.site;
-            if let Some(cause) = cause {
-                *c.unjoined.entry(cause).or_insert(0) += 1;
-                *c.unjoined_by_op.entry(op).or_insert(0) += 1;
-                let per_cause = c.examples.iter().filter(|e| e.starts_with(cause.label())).count();
-                if per_cause < 3 {
-                    let target_name = row
-                        .target
-                        .map(|t| ws.module(t.module).functions[t.func].name.to_string())
-                        .unwrap_or_else(|| "<indirect>".into());
-                    let detail = match &cs {
-                        Some(cs) => {
-                            let owner = mf.site_owners.get(cs.owner.0 as usize).map(|o| {
-                                let f = &ws.module(o.func.module).functions[o.func.func];
-                                format!(
-                                    "owner `{}` subst {}",
-                                    f.name,
-                                    if o.subst.is_empty() {
-                                        "EMPTY".to_string()
-                                    } else {
-                                        format!("{}", o.subst.len())
-                                    }
-                                )
-                            });
-                            format!(
-                                "{:?} op {} ({})",
-                                cs.site.expr,
-                                cs.site.op.name(),
-                                owner.unwrap_or_else(|| "<owner missing>".into())
-                            )
-                        }
-                        None => "<no site>".to_string(),
-                    };
-                    c.examples.push(format!(
-                        "{} in `{}`: {detail} -> target `{target_name}`",
-                        cause.label(),
-                        g.identity(ws, inst),
-                    ));
-                }
-            }
-        }
+        measure_body_into(ws, &mut c, g, &ix, bodies, mangled, inst, &mf, detail);
     }
     c
 }

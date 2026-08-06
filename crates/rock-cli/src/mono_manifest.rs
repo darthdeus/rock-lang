@@ -608,14 +608,13 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
             println!();
         }
         println!(
-            "- reachable call instructions examined (the DENOMINATOR): **{}**",
-            site_join.call_insts
-        );
-        println!(
-            "  of which **{}** are fn-value SYMBOL MINTS rather than calls -- the one place a \
-             callee declaration becomes a spelled value, and the only thing an indirect call \
-             through it could name wrongly. A mint that is PASSED or STORED rather than called \
-             in place is verified nowhere else.",
+            "- reachable callee OBLIGATIONS examined (the DENOMINATOR): **{}** -- **{}** call \
+             instructions plus **{}** fn-value SYMBOL MINTS. A mint is the one place a callee \
+             declaration becomes a spelled value, and the only thing an indirect call through \
+             it could name wrongly; one that is PASSED or STORED rather than called in place \
+             is verified nowhere else.",
+            site_join.obligations_examined,
+            site_join.obligations_examined - site_join.symbol_mints,
             site_join.symbol_mints
         );
         println!(
@@ -685,7 +684,7 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
              POINTWISE per-operation identity): **{}**",
             site_join.joined,
             site_join.admitted_indirect,
-            site_join.call_insts,
+            site_join.obligations_examined,
             if failures.is_empty() { "yes".to_string() } else { format!("NO -- {failures:?}") }
         );
         println!();
