@@ -283,18 +283,27 @@ pub fn manifest_of_dir(dir: &Path) -> anyhow::Result<BTreeMap<String, ArtifactEn
 /// Normalize one entry's raw child stderr so two runs of the same sim produce
 /// the same text.
 ///
-/// Two rewrites only: the logger's leading `[   0.123s LEVEL ]` timestamp is
-/// removed, and the entry's `$OUT` path becomes a literal `$OUT`. Everything
-/// else -- including every digit in the message -- is preserved. Numbers in a
-/// log record are frame counters, entity ids, resource handles and error
-/// payloads, which is to say they are exactly the leaked state this arm exists
-/// to catch; a run whose warning says `gate 7` where the reference says
-/// `gate 0` has diverged.
+/// Two rewrites and one drop. The logger's leading `[   0.123s LEVEL ]`
+/// timestamp is removed and the entry's `$OUT` path becomes a literal `$OUT`;
+/// a record DECLARED a wall-clock measurement at its log site
+/// (`rock_log::WALL_CLOCK_MARK`) is dropped whole. Everything else --
+/// including every digit in the message -- is preserved. Numbers in a log
+/// record are frame counters, entity ids, resource handles and error payloads,
+/// which is to say they are exactly the leaked state this arm exists to catch;
+/// a run whose warning says `gate 7` where the reference says `gate 0` has
+/// diverged.
+///
+/// The drop is by DECLARATION, never by text. Keying on an `ms` suffix instead
+/// would make `cooldown 100ms` compare equal to `cooldown 200ms`, trading a
+/// false positive for a false negative.
 pub fn normalize_diagnostics(lines: &[String], out_dir: &Path) -> String {
     let out_str = out_dir.to_string_lossy().to_string();
     let mut result = String::new();
     for line in lines {
-        let body = strip_log_stamp(line);
+        let (body, wall_clock) = strip_log_stamp(line);
+        if wall_clock {
+            continue;
+        }
         let body = if out_str.is_empty() {
             body
         } else {
@@ -313,18 +322,26 @@ const LOG_LEVEL_TAGS: [&str; 5] = ["ERROR", "WARN ", "INFO ", "DEBUG", "TRACE"];
 const LOG_TIME_WIDTH: usize = 8;
 const LOG_TIME_PRECISION: usize = 3;
 
-/// Remove a `rock_log` stamp, or return the line untouched.
+/// Remove a `rock_log` stamp, reporting whether the record declared itself a
+/// wall-clock measurement; a line that is not a log record comes back
+/// untouched and undeclared.
 ///
-/// Matches the emitter's grammar exactly -- `[{:>8.3}s {}] ` -- rather than
-/// sniffing for something bracketed: leading padding, at least one integer
-/// digit, a point, EXACTLY three fractional digits, `s`, one space, one of
-/// [`LOG_LEVEL_TAGS`], and `]`. A loose match eats a game's own bracketed
+/// Matches the emitter's grammar exactly -- `[{:>8.3}s {}]{sep}` -- rather
+/// than sniffing for something bracketed: leading padding, at least one
+/// integer digit, a point, EXACTLY three fractional digits, `s`, one space,
+/// one of [`LOG_LEVEL_TAGS`], `]`, and a separator that is either a space or
+/// [`rock_log::WALL_CLOCK_MARK`]. A loose match eats a game's own bracketed
 /// prefix and erases the category this arm needs to tell records apart -- a
 /// line like `[1.23s SCORE] result` is game output, not a log stamp, and both
 /// its fractional precision and its tag say so.
-fn strip_log_stamp(line: &str) -> &str {
+///
+/// The grammar is RESERVED PROTOCOL, not a proof of origin: a `print()` that
+/// reproduces it byte for byte is read as a log record here, which was already
+/// true of the stamp before the declaration joined it. Strictness buys
+/// accident-resistance, not forgery-resistance.
+fn strip_log_stamp(line: &str) -> (&str, bool) {
     let Some(rest) = line.strip_prefix('[') else {
-        return line;
+        return (line, false);
     };
     let padded = rest.trim_start_matches(' ');
     let padding = rest.len() - padded.len();
@@ -332,33 +349,39 @@ fn strip_log_stamp(line: &str) -> &str {
         .find(|c: char| !c.is_ascii_digit())
         .unwrap_or(padded.len());
     if int_digits == 0 {
-        return line;
+        return (line, false);
     }
     let Some(frac) = padded[int_digits..].strip_prefix('.') else {
-        return line;
+        return (line, false);
     };
     if frac.len() < LOG_TIME_PRECISION
         || !frac.as_bytes()[..LOG_TIME_PRECISION]
             .iter()
             .all(u8::is_ascii_digit)
     {
-        return line;
+        return (line, false);
     }
     let number_width = int_digits + 1 + LOG_TIME_PRECISION;
     if padding != LOG_TIME_WIDTH.saturating_sub(number_width) {
-        return line;
+        return (line, false);
     }
     // A fourth fractional digit fails this, which is what pins the precision.
     let Some(tail) = frac[LOG_TIME_PRECISION..].strip_prefix("s ") else {
-        return line;
+        return (line, false);
     };
     let Some(tail) = LOG_LEVEL_TAGS.iter().find_map(|tag| tail.strip_prefix(tag)) else {
-        return line;
+        return (line, false);
     };
-    let Some(body) = tail.strip_prefix("] ") else {
-        return line;
+    let Some(tail) = tail.strip_prefix(']') else {
+        return (line, false);
     };
-    body
+    match tail.strip_prefix(rock_log::WALL_CLOCK_MARK) {
+        Some(body) => (body, true),
+        None => match tail.strip_prefix(' ') {
+            Some(body) => (body, false),
+            None => (line, false),
+        },
+    }
 }
 
 #[cfg(test)]
@@ -541,6 +564,76 @@ mod tests {
                 normalize_diagnostics(&[line.to_string()], out),
                 format!("{line}\n"),
                 "`{line}` is not a logger stamp and must survive intact"
+            );
+        }
+    }
+
+    /// A record DECLARED a wall-clock measurement at its log site is dropped
+    /// whole: both its duration and the frame counter it names are properties
+    /// of when the process happened to run, and the record's very presence is
+    /// too -- a slow frame is slow in one run and not the other.
+    #[test]
+    fn a_declared_wall_clock_record_is_dropped_by_its_declaration() {
+        let out = Path::new("");
+        let first = normalize_diagnostics(
+            &[
+                "[   1.296s ERROR]~[SLOWFRAME] frame 1 took 69.7ms".to_string(),
+                "[   1.300s INFO ] [MAG] gate 0: no member spawners".to_string(),
+            ],
+            out,
+        );
+        let second = normalize_diagnostics(
+            &[
+                "[  91.004s ERROR]~[SLOWFRAME] frame 4479 took 12.1ms".to_string(),
+                "[  91.010s INFO ] [MAG] gate 0: no member spawners".to_string(),
+            ],
+            out,
+        );
+        assert_eq!(first, second, "a declared wall-clock record must not create a difference");
+        assert!(
+            !first.contains("SLOWFRAME"),
+            "the declared record is dropped, not rewritten: {first}"
+        );
+        assert!(first.contains("gate 0"), "the undeclared record survives: {first}");
+    }
+
+    /// The counterpart control: dropping is by DECLARATION, never by text. A
+    /// duration in an ordinary record is gameplay data -- `cooldown 100ms` and
+    /// `cooldown 200ms` are two different states -- and stays compared.
+    #[test]
+    fn an_undeclared_duration_is_still_compared() {
+        let out = Path::new("");
+        let hundred = normalize_diagnostics(
+            &["[   0.789s INFO ] [MAG] cooldown 100ms".to_string()],
+            out,
+        );
+        let two_hundred = normalize_diagnostics(
+            &["[   0.789s INFO ] [MAG] cooldown 200ms".to_string()],
+            out,
+        );
+        assert_ne!(hundred, two_hundred, "an undeclared duration is gameplay text");
+        assert!(hundred.contains("cooldown 100ms"), "{hundred}");
+    }
+
+    /// The declaration is part of the emitter's stamp grammar: everything here
+    /// carries the marker character without a valid stamp in front of it and
+    /// must survive intact. This pins accident-resistance -- a line that merely
+    /// resembles a stamp is not one. It does not pin forgery-resistance: an
+    /// exact stamp IS the protocol, whoever printed it.
+    #[test]
+    fn only_a_real_declaration_drops_a_record() {
+        let out = Path::new("");
+        for line in [
+            "~[SLOWFRAME] frame 60 took 69.7ms",
+            "[MAG]~ tilde in game output",
+            "[   0.789s SCORE]~[MAG] a tag we never emit",
+            "[   0.78s INFO ]~[MAG] two fractional digits",
+            "[0.5]~ a bracketed number that is not a stamp",
+        ] {
+            assert_eq!(
+                normalize_diagnostics(&[line.to_string()], out),
+                format!("{line}\n"),
+                "`{line}` does not carry a real declaration and must survive"
             );
         }
     }

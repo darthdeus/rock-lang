@@ -1457,6 +1457,7 @@ fn run_worker(
     buffered: bool,
     update_snapshots: bool,
     output: &str,
+    recording: bool,
     stone: Option<&mut crate::skull_backend::SkullStone>,
 ) -> Result<Vec<SimSummary>> {
     let Some(first) = parts.first() else {
@@ -1560,6 +1561,19 @@ fn run_worker(
         // `@sim_env("ROCK_TEST_SEED", ...)` in a sim still overrides
         // because `preset_env` is layered after this baseline.
         .env("ROCK_TEST_SEED", "42")
+        // Renders every `wall_clock_ms(..)` value as a fixed token, but ONLY
+        // for a run whose records get compared: two runs of the same sim cannot
+        // agree on a duration, and the records carrying one also carry facts
+        // that must stay compared. An ordinary run keeps the real numbers --
+        // masking them would turn the editor's timing logs into noise and would
+        // change what a sim's own artifacts contain. Same flag as
+        // `SimArtifacts::record_manifest`, threaded from the same source, and
+        // overridable per sim through `@sim_env` like the seed above.
+        .envs(
+            recording
+                .then_some(("ROCK_MASK_WALL_CLOCK", "1"))
+                .into_iter(),
+        )
         .envs(preset_env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .env("FPS_LOG", "0")
         .stdout(Stdio::piped())
@@ -1923,6 +1937,9 @@ fn run_one_sim(
         buffered,
         update_snapshots,
         output,
+        // Both callers build their `$OUT` from a non-recording `SimArtifacts`,
+        // so no record from here is ever compared.
+        false,
         stone,
     )?;
     Ok(summaries.remove(0))
@@ -1990,7 +2007,7 @@ fn run_entries(
     // Not quiet, but buffered: nothing is written live (several entries share
     // one stream), and every diagnostic is retained into its record instead.
     let summaries = match grouping {
-        Grouping::Shared => run_worker(project, &parts, false, true, false, output, None)?,
+        Grouping::Shared => run_worker(project, &parts, false, true, false, output, true, None)?,
         Grouping::PerPart => {
             let mut out = Vec::with_capacity(parts.len());
             for part in &parts {
@@ -2001,6 +2018,7 @@ fn run_entries(
                     true,
                     false,
                     output,
+                    true,
                     None,
                 )?);
             }
@@ -2078,7 +2096,7 @@ fn run_specs_recovering(
         let parts: Vec<WorkerPart> =
             plans[base..].iter().flat_map(|p| p.parts.iter().cloned()).collect();
         let summaries =
-            run_worker(project, &parts, false, true, update_snapshots, output, None)?;
+            run_worker(project, &parts, false, true, update_snapshots, output, record_manifest, None)?;
 
         // Reassemble per spec and decide how far this round got. Specs whose
         // parts all started are final; the first spec with an unstarted part is

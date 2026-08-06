@@ -291,6 +291,102 @@ fn engine_configuration_resets_at_the_entry_boundary() {
 fn a_held_key_does_not_reach_the_next_entry() {
     let (isolated, worker) = differential(&["b0_input_seed"], "b0_input_probe");
     let c = compare(&isolated, &worker);
+    }
+}
+
+/// A record whose content is a wall-clock measurement is DECLARED as one at
+/// its log site, and the arm drops it by that declaration -- never by finding
+/// an `ms` in the text, which would make `cooldown 100ms` compare equal to
+/// `cooldown 200ms`.
+///
+/// The probe reads the engine clock, which the boundary does not restore, so
+/// all three of its records carry a number that really does differ between a
+/// fresh process and a worker's second entry. Equivalence here is therefore
+/// evidence about the declarations and not about a fixture with nothing to
+/// disagree on -- confirmed by mutation: dropping any one declaration makes
+/// this red.
+#[test]
+fn a_declared_wall_clock_record_does_not_diverge_but_its_neighbours_still_compare() {
+    let (isolated, worker) = differential(&["b0_wall_clock_seed"], "b0_wall_clock_probe");
+    let c = compare(&isolated, &worker);
+    assert_equivalent("b0_wall_clock_probe", &c);
+
+    for (label, record) in [("isolated", &isolated), ("worker", &worker)] {
+        // Both declared forms must have FIRED -- agreement over a record that
+        // was never emitted is agreement over nothing -- and must be absent
+        // from the compared text.
+        for declared in ["b0 wall-clock record at", "b0 wall-clock throttled record at"] {
+            assert!(
+                record.diagnostics.contains(declared),
+                "{label}: `{declared}` never fired, so its exclusion proves nothing: {:?}",
+                record.diagnostics
+            );
+            assert!(
+                !record.entry_diagnostics.contains(declared),
+                "{label}: `{declared}` is declared wall-clock and must not be compared: {:?}",
+                record.entry_diagnostics
+            );
+        }
+
+        // The mixed record survives whole, minus the one declared value.
+        assert!(
+            record.entry_diagnostics.contains("b0 mixed record: cooldown 100ms, elapsed <ms>"),
+            "{label}: the undeclared duration and the masked one must share the line: {:?}",
+            record.entry_diagnostics
+        );
+    }
+    assert!(
+        c.population("entry_diagnostics") > 0,
+        "the arm compared nothing, so the surviving record was never checked"
+    );
+}
+
+/// The value declaration is scoped to runs whose records are COMPARED. An
+/// ordinary `rock sim` run keeps the real measurement -- masking it would turn
+/// the editor's timing logs into noise and would change what a sim's own
+/// artifacts contain, for a comparison nobody is making.
+///
+/// Both modes are asserted here because either alone is half a control: the
+/// differential test above proves the mask is on where records are compared,
+/// and this proves it is off where they are not.
+#[test]
+fn the_value_mask_is_on_only_where_records_are_compared() {
+    let mut rock = std::env::current_exe().expect("test exe");
+    rock.pop();
+    if rock.ends_with("deps") {
+        rock.pop();
+    }
+    let rock = rock.join("rock");
+    assert!(rock.exists(), "rock binary not built at {}", rock.display());
+
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("workspace root")
+        .to_path_buf();
+
+    for mode in [vec!["sim", "testbed", "b0_wall_clock_probe"],
+                 vec!["sim", "testbed", "b0_wall_clock_seed", "b0_wall_clock_probe", "--workers"]] {
+        let out = std::process::Command::new(&rock)
+            .current_dir(&root)
+            .args(&mode)
+            .output()
+            .unwrap_or_else(|e| panic!("run rock {mode:?}: {e}"));
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{mode:?} failed:\n{stderr}");
+
+        let mixed = stderr
+            .lines()
+            .find(|l| l.contains("b0 mixed record:"))
+            .unwrap_or_else(|| panic!("{mode:?} emitted no mixed record:\n{stderr}"));
+        assert!(
+            !mixed.contains("<ms>"),
+            "{mode:?} is not a compared run, so it must keep the measurement: {mixed}"
+        );
+        assert!(
+            mixed.contains("cooldown 100ms, elapsed ") && mixed.ends_with("ms"),
+            "{mode:?} must render a real duration: {mixed}"
+        );
     assert_equivalent("b0_input_probe", &c);
 
     assert_eq!(isolated.verdict(), "PASS", "the probe passes in a fresh process");

@@ -537,14 +537,19 @@ pub const JS_LOG_RUNTIME: &str = r#"
 function __stone_log_init() {
   if (__G.__stone_log_level == null || __G.__stone_log_level < 0) __G.__stone_log_level = 2;
 }
-function __stone_emit(level, category, msg) {
+function __stone_emit(level, category, msg, wall_clock) {
   if (category && category.length > 0) print("[" + category + "] " + msg);
   else print(msg);
 }
 function __stone_log(level, category, msg) {
   __stone_log_init();
   if (level > __G.__stone_log_level) return;
-  __stone_emit(level, category, msg);
+  __stone_emit(level, category, msg, false);
+}
+function __stone_log_wall_clock(level, category, msg) {
+  __stone_log_init();
+  if (level > __G.__stone_log_level) return;
+  __stone_emit(level, category, msg, true);
 }
 function log_set_level(level) { __G.__stone_log_level = level; }
 // `__stone_log_dedup` holds a COUNT, not a flag: `log_suppression_summary`
@@ -555,6 +560,7 @@ var __stone_log_counts = {};
 var __stone_log_sites = {};
 var __stone_log_summary_done = false;
 var __stone_log_throttle = {};
+var __stone_log_wall = {};
 var __stone_log_now_override = null;
 function _log_once_impl(category, msg, site) {
   __stone_log_init();
@@ -563,9 +569,9 @@ function _log_once_impl(category, msg, site) {
   __stone_log_dedup[site] = n;
   __stone_log_sites[site] = (category || "") + "|" + msg;
   if (n > 1) return;
-  __stone_emit(0, category, msg);
+  __stone_emit(0, category, msg, false);
 }
-function _log_throttled_with_now_impl(now_sec, category, msg, interval_sec, site) {
+function _log_throttled_with_now_impl(now_sec, category, msg, interval_sec, site, wall_clock) {
   __stone_log_init();
   if (0 > __G.__stone_log_level) return;
   __stone_log_counts[site] = (__stone_log_counts[site] || 0) + 1;
@@ -573,7 +579,7 @@ function _log_throttled_with_now_impl(now_sec, category, msg, interval_sec, site
   var last = __stone_log_throttle[site];
   if (last != null && (now_sec - last) < interval_sec) return;
   __stone_log_throttle[site] = now_sec;
-  __stone_emit(0, category, msg);
+  __stone_emit(0, category, msg, wall_clock);
 }
 // Ties order differently from the luajit sibling (JS sort is stable, table.sort
 // is not); the counts themselves match.
@@ -598,7 +604,8 @@ function log_suppression_summary() {
     var rec = __stone_log_sites[r.site] || "|";
     var bar = rec.indexOf("|");
     __stone_emit(0, rec.slice(0, bar),
-      "suppressed x" + r.n + " at " + r.site + ": " + rec.slice(bar + 1));
+      "suppressed x" + r.n + " at " + r.site + ": " + rec.slice(bar + 1),
+      __stone_log_wall[r.site] === true);
   }
 }
 function stone_log_set_now(now_sec) { __stone_log_now_override = now_sec; }
@@ -607,11 +614,11 @@ function __stone_log_now() {
   if (__stone_log_now_override != null) return __stone_log_now_override;
   return Date.now() / 1000;
 }
-function _log_throttled_impl(category, msg, interval_sec, site) {
-  _log_throttled_with_now_impl(__stone_log_now(), category, msg, interval_sec, site);
+function _log_throttled_impl(category, msg, interval_sec, site, wall_clock) {
+  _log_throttled_with_now_impl(__stone_log_now(), category, msg, interval_sec, site, wall_clock);
 }
 function log_reset_dedup() {
-  __stone_log_dedup = {}; __stone_log_throttle = {};
+  __stone_log_dedup = {}; __stone_log_throttle = {}; __stone_log_wall = {};
   __stone_log_counts = {}; __stone_log_sites = {}; __stone_log_summary_done = false;
 }
 function log_dedup_count() { return Object.keys(__stone_log_dedup).length; }
