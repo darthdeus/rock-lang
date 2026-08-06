@@ -17,6 +17,15 @@
 //! the check and is not published, so a later consumer holding `Box<int>` has
 //! no way to say "inference variable N is this struct's generic 0" and resolve
 //! it. That, not "bone leaves it unsolved", is what the cut needs.
+//!
+//! There is deliberately NO bone-level sentinel for that absence here. A test
+//! that reads today's `BodyInference` can only assert a structural zero over
+//! fields that already exist, which stays green forever no matter what a future
+//! recording adds -- it would be a gate with no population, not a sentinel. The
+//! RED for it has to come after the intended recording/query seam exists and
+//! returns empty, and that seam is in bone, which is author-owned. The CURRENT
+//! symptom is guarded end-to-end by
+//! `site_domain::a_generic_structs_field_default_names_no_instance_sentinel`.
 
 use std::sync::LazyLock;
 
@@ -34,15 +43,21 @@ static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         .collect()
 });
 
+/// `echo`'s default is a SIBLING REFERENCE to `value`, which is what exposes
+/// the substituted DECLARED field type to a test. Without it the only thing
+/// reachable is `seed()`'s own return type -- which bone builds FROM the call's
+/// generic binding (`calls.rs`'s `substitute(ret_ty, &subs)`) before the field
+/// coercion runs, so comparing the two compares the call with itself and stays
+/// green with the coercion deleted. Measured: it did.
 const SRC: &str = r#"
 fn seed<T>() -> T? { return null }
 
-struct Box<T> { value: T? = seed() }
+struct Box<T> { value: T? = seed(), echo: T? = .value }
 
 fn main() {
     let a: Box<int> = Box {}
     let b: Box<string> = Box {}
-    print("{a.value} {b.value}")
+    print("{a.value} {a.echo} {b.value}")
 }
 "#;
 
@@ -109,10 +124,18 @@ fn defaults_inference(ws: &Workspace) -> (bone_semantic::prelude::ModuleId, &Bod
 /// The initializer's generic and the FIELD's declared type land in ONE symbolic
 /// inference class.
 ///
-/// This is the half that is already correct, and it is asserted first because
-/// the missing half below is only meaningful against it: if these were two
-/// classes, the fix would be in `coerce`/`unify` and nowhere near the site
-/// domain.
+/// This is the half that already works, and it is asserted because the missing
+/// half is only meaningful against it: if these were two classes, the fix would
+/// be in `coerce`/`unify` and nowhere near the site domain.
+///
+/// The comparison is the SIBLING REFERENCE's type against the CALL's generic
+/// binding. `seed()`'s own return type is not usable here -- bone substitutes it
+/// from that same binding before the field coercion runs, so comparing the two
+/// is comparing the call with itself. `.value` reads `value`'s substituted
+/// DECLARED type instead, so the two sides only agree if `coerce` actually
+/// linked them. Mutation-verified: deleting the coercion in
+/// `check_struct_defaults` turns this red, and turned the previous version of
+/// this test green.
 #[test]
 fn a_generic_field_default_and_its_declared_type_share_one_inference_class() {
     let ws = check(SRC);
@@ -125,83 +148,39 @@ fn a_generic_field_default_and_its_declared_type_share_one_inference_class() {
         .map(|(i, _)| i)
         .expect("Box");
     let body = &ws.module(mid).bodies[&BodyOwner::StructDefaults(sidx)];
-    let dexpr = *body.field_defaults.get(&Ustr::from("value")).expect("value has a default");
+    let value_default =
+        *body.field_defaults.get(&Ustr::from("value")).expect("`value` has a default");
+    let echo_default =
+        *body.field_defaults.get(&Ustr::from("echo")).expect("`echo` has a default");
 
-    // The default expression's own type -- `seed()`'s return, i.e. `T?`.
-    let dty = *inf.expr_types.get(dexpr).expect("the default is typed");
-    // And the binding the CALL recorded for `seed`'s generic.
+    // The fixture must really be a sibling reference, or it reads some other
+    // expression's type and proves nothing about the declared field type.
+    assert!(
+        matches!(body.expr_arena[echo_default], bone_semantic::hir::Expr::SiblingRef(n) if n.as_str() == "value"),
+        "`echo`'s default is not a sibling reference: {:?}",
+        body.expr_arena[echo_default]
+    );
+
+    // `value`'s SUBSTITUTED declared type, reached through the sibling ref.
+    let declared = *inf.expr_types.get(echo_default).expect("the sibling ref is typed");
+    // The binding the CALL recorded for `seed`'s own generic.
     let binding = inf
         .call_generic_bindings
-        .get(&dexpr)
+        .get(&value_default)
         .and_then(|b| b.first().copied())
         .expect("the call records a binding for `seed`'s generic");
 
-    let d_var = unresolved_var(&ws, inf, dty);
+    let d_var = unresolved_var(&ws, inf, declared);
     let b_var = unresolved_var(&ws, inf, binding);
     assert!(
         d_var.is_some() && b_var.is_some(),
-        "one of the two resolved to a concrete type, so this fixture is not the \
-         generic case any more: default={d_var:?} binding={b_var:?}"
+        "one side resolved to a concrete type, so this fixture is not the \
+         generic case any more: declared={d_var:?} binding={b_var:?}"
     );
     assert_eq!(
         d_var, b_var,
         "the initializer's generic and the field's declared type are in TWO \
-         inference classes -- `coerce` did not unify them, and the gap is in \
+         inference classes -- `coerce` did not link them, and the gap is in \
          bone-inference rather than in the site domain"
-    );
-}
-
-/// PINNED: the inference class above has NO published relation to the struct's
-/// declared generic SLOT.
-///
-/// `instantiate_generics` builds `VarId(T) -> Infer(N)` and returns it to
-/// `check_struct_defaults`, which uses it and drops it. Nothing in
-/// `BodyInference` maps `Infer(N)` back to "generic 0 of `Box`", so a consumer
-/// holding the literal's `Box<int>` cannot resolve the default's type -- which
-/// is exactly what instance-owned emission needs in order to name one concrete
-/// callee per injection.
-///
-/// The assertion is the ABSENCE, stated over the struct's declared generics so
-/// the zero has a denominator. **When this goes red the relation was
-/// published**: replace it with the positive form -- for each declared generic
-/// slot, the inference variable it was instantiated to -- and then key
-/// `SiteDomain::StructDefaults` on the literal's concrete arguments.
-#[test]
-fn the_defaults_inference_class_has_no_link_to_the_structs_generic_slot_sentinel() {
-    let ws = check(SRC);
-    let (mid, inf) = defaults_inference(&ws);
-    let sidx = ws
-        .module(mid)
-        .structs
-        .iter()
-        .find(|(_, s)| s.name.as_str() == "Box")
-        .map(|(i, _)| i)
-        .expect("Box");
-    let generics = ws.module(mid).structs[sidx].generics.clone();
-    assert_eq!(generics.len(), 1, "the fixture's struct declares one generic");
-
-    // Every declared generic, asked of the DEFAULTS body's inference: does any
-    // of them resolve to something the body can name?
-    let mut linked = 0usize;
-    for g in &generics {
-        // The declared generic is a `Static` `Generic` node. In the defaults
-        // body it was replaced by a fresh inference variable, and the map that
-        // did so is not published -- so reading the declared slot here gives
-        // back the generic itself, with nothing tying it to that variable.
-        let node = match resolve(&ws, inf, *g) {
-            TyId::Static(m, idx) => ws.module(m).ty_arena[idx],
-            TyId::Local(idx) => inf.ty_arena[idx],
-        };
-        if !matches!(node, TypeExpr::Generic(..)) {
-            linked += 1;
-        }
-    }
-    assert_eq!(
-        linked, 0,
-        "PINNED BEHAVIOR (BUG): {linked} of {} declared generic(s) now resolve \
-         to the defaults body's inference class. The relation is published -- \
-         flip this to the positive form and key the site domain on the \
-         literal's concrete arguments.",
-        generics.len()
     );
 }

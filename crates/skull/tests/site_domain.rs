@@ -347,10 +347,10 @@ fn main() { let c = Cfg { m: 1 } print("{c.a + c.m}") }
 ///   `struct_default_generic_relation.rs`.
 /// - what is missing is a durable relation from that class back to the
 ///   struct's declared generic SLOT: the map is local to the check and is not
-///   published, so a consumer holding `Box<int>` cannot resolve it. That is
-///   why carrying the struct's substitution into the defaults body does NOT
-///   fix this (tried, measured, still red): there is no `Generic` node left to
-///   substitute, only an inference variable nothing can name.
+///   published, so a consumer holding `Box<int>` cannot resolve it. Carrying
+///   the struct's substitution into the defaults body therefore cannot fix
+///   this -- there is no `Generic` node left to substitute, only an inference
+///   variable nothing can name.
 /// - so `monoty::convert` answers `unresolved-infer`, lowering emits a call to
 ///   the SHARED generic body (`seed_ret_T_opt`) for both literals, and the walk
 ///   records an obligation it cannot resolve and reports a
@@ -431,8 +431,9 @@ fn main() {
     assert_eq!(
         unconstrained, 1,
         "PINNED BEHAVIOR (BUG): a legal generic-struct default is reported as \
-         an unconstrained type variable. If this is now 0, bone solves the \
-         initializer's generic -- flip to 0."
+         an unconstrained type variable. If this is now 0, the defaults \
+         inference class became resolvable from the literal's arguments -- flip \
+         to 0."
     );
 }
 
@@ -458,7 +459,7 @@ fn main() {
     let p = Plain {}
     let a: Box<int> = Box {}
     let b: Box<string> = Box {}
-    print("{p.n + a.n + b.n}")
+    if p.n + a.n + b.n > 0 { print("ok") }
 }
 "#;
     let ws = check(src);
@@ -501,13 +502,35 @@ fn main() {
          `Box`), got {recorded:?}"
     );
 
-    // Only now is the zero a statement about those obligations.
+    // Only now is a zero a statement about those obligations -- and it is
+    // asserted across EVERY unjoined cause, not just the two that this defect
+    // happened to produce. Rejecting `site-not-in-body` alone leaves a test
+    // named "still joins" green when the same calls become `callee-mismatch`
+    // or `callee-no-instance` instead.
     let c = census_of(src);
     assert!(c.accounts(), "accounting identity broken: {c:?}");
-    assert_eq!(
-        unjoined(&c, Unjoined::SiteNotInBody),
-        0,
-        "a struct default whose callee is NON-generic must still join: {c:?}"
+    // EVERY cause except the one named. `owner-not-an-instance` is the shared
+    // generic splice -- Cut C+D's own population, present in the stdlib bodies
+    // this census also walks -- so it is diffed against by name rather than
+    // silently included, per the already-red-baseline rule. Any OTHER cause
+    // appearing means a defaults obligation stopped joining, which is what a
+    // `site-not-in-body`-only assertion would have missed.
+    let unexpected: Vec<(&Unjoined, &usize)> = c
+        .unjoined
+        .iter()
+        .filter(|(cause, n)| **n > 0 && **cause != Unjoined::OwnerNotAnInstance)
+        .collect();
+    assert!(
+        unexpected.is_empty(),
+        "a struct default whose callee is NON-generic must JOIN, under every \
+         cause and not merely be stamped: {unexpected:?}"
     );
-    assert_eq!(unjoined(&c, Unjoined::NoSite), 0, "{c:?}");
+    // And the joins are the ones expected: three `tick()` calls, each
+    // non-generic, so the declaration match IS the instance match.
+    assert!(
+        c.joined_non_generic >= 3,
+        "expected at least the three `tick()` injections among the non-generic \
+         joins, got {}: {c:?}",
+        c.joined_non_generic
+    );
 }
