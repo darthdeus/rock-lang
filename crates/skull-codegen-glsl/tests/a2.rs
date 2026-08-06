@@ -1127,7 +1127,7 @@ fn emission_reports_texture_slots_in_order() {
         &ws, mid, "vs", "fs", GlslProfile::Core330,
     )
     .expect("must emit");
-    let names: Vec<String> = e.texture_slots.iter().map(|n| n.to_string()).collect();
+    let names: Vec<String> = e.abi.texture_units.iter().map(|n| n.to_string()).collect();
     assert_eq!(names, vec!["uTexture", "mask_tex", "shadowmap_tex"]);
 }
 
@@ -1140,7 +1140,7 @@ fn emission_reports_no_slots_without_a_group() {
         &ws, mid, "ui_vert", "ui_frag", GlslProfile::Core330,
     )
     .expect("must emit");
-    assert!(e.texture_slots.is_empty(), "got {:?}", e.texture_slots);
+    assert!(e.abi.texture_units.is_empty(), "got {:?}", e.abi.texture_units);
 }
 
 // --- @engine: the engine-owned block at binding 0 ----------------------------
@@ -1214,7 +1214,7 @@ fn engine_block_binds_at_index_zero() {
     let em = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(&ws, mid, "e_vert", "e_frag", GlslProfile::Core330)
         .expect("emit");
     let bound: Vec<(u32, &str)> =
-        em.uniform_blocks.iter().map(|(b, p)| (*b, p.struct_name.as_str())).collect();
+        em.abi.uniform_blocks.iter().map(|(b, p)| (*b, p.struct_name.as_str())).collect();
     assert_eq!(bound, vec![(0, "EngineU"), (1, "GrassVertU"), (2, "UiFragU")], "role -> binding");
 }
 
@@ -1398,7 +1398,7 @@ fn a_program_without_an_engine_group_leaves_slot_zero_empty() {
     )
     .expect("emit");
     let bound: Vec<(u32, &str)> =
-        em.uniform_blocks.iter().map(|(b, p)| (*b, p.struct_name.as_str())).collect();
+        em.abi.uniform_blocks.iter().map(|(b, p)| (*b, p.struct_name.as_str())).collect();
     assert_eq!(bound, vec![(1, "UiVertU"), (2, "UiFragU")], "role -> binding");
-    assert!(!em.uniform_blocks.iter().any(|(b, _)| *b == 0), "slot 0 is the engine's");
+    assert!(!em.abi.uniform_blocks.iter().any(|(b, _)| *b == 0), "slot 0 is the engine's");
 }

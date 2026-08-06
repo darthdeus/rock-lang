@@ -109,10 +109,7 @@ impl Builder<'_> {
     /// Whether `e`'s inferred type is a flat enum (`expr_ty` peels `Nullable`, so
     /// this is true for both `E` and `E?`).
     pub(crate) fn expr_is_flat_enum(&self, e: Idx<Expr>) -> bool {
-        matches!(
-            self.expr_ty(e),
-            Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. }) if flat_enum_shape(self.ws, n).is_some()
-        )
+        self.dispatch().expr_is_flat_enum(e)
     }
 
     /// The flat-enum `ValueShape` of `e`'s (non-nullable) inferred type, else `None`

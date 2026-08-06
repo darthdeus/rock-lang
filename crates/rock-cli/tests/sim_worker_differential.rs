@@ -1174,6 +1174,216 @@ fn only_an_entry_that_followed_a_predecessor_counts_as_evidence() {
     );
 }
 
+/// A boot world whose canvas contents are NOT creation's cannot be returned by
+/// clearing, so it is refused from a worker rather than silently zeroed.
+///
+/// This is the premise the whole contents reset rests on. `tex_image_2d(.., None)`
+/// allocates without specifying contents, so creation now CLEARS explicitly and
+/// the boundary restores to that defined state -- which is only sound while boot
+/// itself has not painted over it. `b3_cc_paint_at_boot` makes `@init` paint one,
+/// and the worker must say so instead of installing blank where boot's
+/// projection was white.
+///
+/// The pixel value cannot be the assertion: boot's white survives in a fresh
+/// process AND in a worker that never cleared it, so the probe agrees either
+/// way. The REASON is the observable, and no entry may cross a boundary.
+#[test]
+fn a_boot_painted_canvas_is_refused_from_a_worker() {
+    let records = run_worker_suite(
+        Backend::Skull,
+        "testbed",
+        &["b3_cc_painted_head".to_string(), "b3_cc_painted_probe".to_string()],
+    )
+    .expect("the suite call itself must not error: ineligibility is a scheduling fact");
+    assert_eq!(records.len(), 2, "one record per entry spec");
+
+    for (record, crossed) in &records {
+        assert_eq!(
+            record.verdict(),
+            "PASS",
+            "refusing the boot world is a scheduling fact, not a failure: {record:?}"
+        );
+        assert!(
+            !crossed,
+            "no entry may inherit a boot world whose canvas contents cannot be \
+             reconstructed -- every one of these must have restarted fresh"
+        );
+    }
+
+    // TWO names: a one-entry queue takes no checkpoint and never reaches a
+    // boundary, so it would report nothing and this assertion would be about
+    // the wrong thing. The handle NUMBER is deliberately not asserted -- ids are
+    // monotonic per process, so pinning one pins a coincidence of allocation
+    // order.
+    let (_, out, err) = run_rock_status(&[
+        "sim",
+        "testbed",
+        "--multi-order",
+        "b3_cc_painted_head",
+        "b3_cc_painted_probe",
+    ]);
+    let reason = format!("{out}{err}");
+    assert!(
+        reason.contains("boot painted canvases whose contents cannot be reconstructed"),
+        "the refusal must name its reason, so an ineligible boot world is a \
+         reported fact rather than a silently slower suite:\n{reason}"
+    );
+}
+
+/// The DEFAULT mode is the hybrid: render-skipped entries share a
+/// boot-checkpoint worker, entries that render get a fresh process with a
+/// reported reason.
+///
+/// Both populations are asserted non-empty. A split that admitted everything,
+/// or that admitted nothing, would satisfy a test that only looked at one side
+/// -- and "nothing was admitted" is exactly what a silently broken predicate
+/// produces while every sim still passes.
+#[test]
+fn the_default_mode_admits_render_skipped_sims_and_isolates_rendered_ones() {
+    // `b3_cc_head`/`b3_cc_seed` declare no SIM_SKIP_RENDER, so they are
+    // render-skipped; `canvas_create_preserves_color_mask` declares
+    // SIM_SKIP_RENDER=0 and renders.
+    // `-j 1` because a signature group splits into at most `--jobs` CONTIGUOUS
+    // lanes and each lane's head starts its own worker (B5) -- at the default
+    // -j 4 these two eligible entries land in two lanes and both boot, which
+    // says nothing about whether they were ADMITTED. One lane makes "shared a
+    // process" observable.
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "testbed",
+        "-j",
+        "1",
+        "b3_cc_head",
+        "b3_cc_seed",
+        "canvas_create_preserves_color_mask",
+    ]);
+    let all = format!("{stdout}{stderr}");
+    assert!(ok, "the default mode must run these three green:\n{all}");
+
+    // The rendered one is isolated, and says why.
+    assert!(
+        all.contains("canvas_create_preserves_color_mask` runs isolated")
+            || all.contains("renders (SIM_SKIP_RENDER=0)"),
+        "a rendered sim must be isolated WITH ITS REASON -- a silently isolated \
+         entry reads as a worker result:\n{all}"
+    );
+
+    // ... and the render-skipped ones really did share a process. Two entries
+    // in one worker boot it once, so exactly one of them reports the engine
+    // banner a fresh process prints.
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert!(
+        boots >= 2,
+        "the rendered sim needs its own process, so at least two boots: {boots}\n{all}"
+    );
+    assert!(
+        boots < 3,
+        "the two render-skipped entries must SHARE a worker rather than each \
+         booting -- {boots} boots means the default admitted nothing:\n{all}"
+    );
+}
+
+/// Run `rock` and return `(exit_ok, stdout, stderr)` WITHOUT asserting on the
+/// exit code. The multi-order gate deliberately exits nonzero on a corpus that
+/// cannot populate every arm, and that refusal is part of what is under test.
+fn run_rock_status(args: &[&str]) -> (bool, String, String) {
+    let mut rock = std::env::current_exe().expect("test exe");
+    rock.pop();
+    if rock.ends_with("deps") {
+        rock.pop();
+    }
+    let rock = rock.join("rock");
+    assert!(rock.exists(), "rock binary not built at {}", rock.display());
+
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("workspace root")
+        .to_path_buf();
+
+    let out = std::process::Command::new(&rock)
+        .current_dir(&root)
+        .args(args)
+        .output()
+        .unwrap_or_else(|e| panic!("run rock {args:?}: {e}"));
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// `[multi-order] <n> comparisons followed a predecessor ...` -> `n`.
+fn boundary_crossings(stdout: &str) -> usize {
+    let line = stdout
+        .lines()
+        .find(|l| l.contains("comparisons followed a predecessor"))
+        .unwrap_or_else(|| panic!("the gate never reported its provenance split:\n{stdout}"));
+    line.split_whitespace()
+        .find_map(|w| w.parse::<usize>().ok())
+        .unwrap_or_else(|| panic!("no count in `{line}`"))
+}
+
+/// A NAMED subset is the same gate over a smaller corpus, and the property that
+/// makes that true is the boundary-crossing count.
+///
+/// A subset that quietly ran its sims isolated -- or that narrowed the corpus
+/// only after the arms were scheduled -- would still print three arms and still
+/// agree with the reference, because two fresh processes agree with each other.
+/// Only a non-zero boundary-crossing population says a restore was exercised at
+/// all, which is why that is what this asserts. The count is exact: two eligible
+/// sims share one worker per arm, so the second entry crosses and the first does
+/// not, three times over.
+///
+/// An equivalent subset must EXIT ZERO. testbed passes everything standalone,
+/// so `expects_fail`/`errors` have no population -- which is a hole in a
+/// whole-corpus gate and means nothing here, because the caller picked this
+/// pair to re-measure one class, not to populate every arm. Refusing over it
+/// would make the iteration gate unusable as an iteration gate.
+#[test]
+fn a_named_subset_is_the_same_gate_and_still_crosses_a_worker_boundary() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "testbed",
+        "--multi-order",
+        "b0_leak_seed",
+        "b0_leak_probe",
+    ]);
+
+    assert!(
+        stdout.contains("[multi-order] 2 sims"),
+        "the corpus must be the two named sims, not the whole registry:\n{stdout}"
+    );
+    assert_eq!(
+        boundary_crossings(&stdout),
+        3,
+        "one worker per arm over two eligible sims crosses exactly once per arm:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("diverged from the isolated reference"),
+        "the subset must agree with its own fresh-process references:\n{stdout}"
+    );
+    assert!(
+        ok,
+        "an equivalent subset is the iteration gate and must exit zero:\n{stdout}\n{stderr}"
+    );
+}
+
+/// The refusals that keep a subset from silently measuring less than it was
+/// asked to. Each is the CLI surface of a `select_gate_corpus` unit test.
+#[test]
+fn a_subset_refuses_a_name_it_cannot_measure() {
+    let (ok, _, stderr) =
+        run_rock_status(&["sim", "testbed", "--multi-order", "b0_leak_seed", "no_such_sim"]);
+    assert!(!ok, "an unknown name must not run the gate over the ones that matched");
+    assert!(stderr.contains("no_such_sim"), "the refusal names the offender:\n{stderr}");
+
+    let (ok, _, stderr) =
+        run_rock_status(&["sim", "testbed", "--multi-order", "b0_leak_seed", "b0_leak_seed"]);
+    assert!(!ok, "a repeated name has one reference record and must refuse");
+    assert!(stderr.contains("b0_leak_seed"), "the refusal names the offender:\n{stderr}");
+}
+
 /// The wall-clock timeout is the WEDGED-CHILD guard, so it bounds an entry,
 /// not the worker process: a queue of individually healthy entries must not
 /// fail whichever one happens to be running when their sum crosses it.

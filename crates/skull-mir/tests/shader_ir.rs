@@ -1,0 +1,117 @@
+//! The target-neutral shader spine's own invariants.
+//!
+//! These are properties of `skull_mir::shader_ir` alone -- no workspace, no
+//! backend -- so a defect here is a defect in the spine rather than in GLSL's
+//! use of it.
+
+use comfy_la_arena::Idx;
+use skull_mir::gpu_layout::WireKind;
+use skull_mir::mir::FuncRef;
+use skull_mir::shader_ir::{
+    LogicalUniformGroup, ShaderIR, ShaderInstance, ShaderInterfacePlan, ShaderStage,
+    ShaderStageIr, UniformRole,
+};
+use ustr::Ustr;
+
+fn fref(module: u32, func: u32) -> FuncRef {
+    FuncRef {
+        module: bone_semantic::prelude::ModuleId::new(module),
+        func: Idx::from_raw(func.into()),
+    }
+}
+
+fn inst(module: u32, func: u32, tag: Option<skull_mir::monoty::MonoTy>) -> ShaderInstance {
+    ShaderInstance { fref: fref(module, func), key: vec![tag] }
+}
+
+fn stage_ir(entry: ShaderInstance, order: Vec<ShaderInstance>) -> ShaderStageIr {
+    ShaderStageIr {
+        stage: ShaderStage::Fragment,
+        entry,
+        body: skull_mir::mir::MirFunc::new(Ustr::from("entry")),
+        order,
+        bodies: Default::default(),
+    }
+}
+
+/// **The reload set dedups NONADJACENT repeats.**
+///
+/// Two instantiations of one generic helper are two entries in `order`, and
+/// emission order interleaves them with whatever each reached -- so the same
+/// declaration appears at positions that are not neighbours. A bare `dedup()`
+/// only collapses adjacent runs, so it silently reported one declaration twice
+/// and a file watcher would have rebuilt it twice.
+///
+/// The fixture is deliberately NONADJACENT: `helper` at 0 and 2 with a
+/// different declaration between them. An adjacent-only fixture passes against
+/// the broken form and proves nothing.
+#[test]
+fn a_stage_reload_set_dedups_a_nonadjacent_repeat() {
+    use skull_mir::monoty::MonoTy;
+    let helper = fref(0, 7);
+    let other = fref(0, 9);
+    let entry = fref(0, 1);
+
+    let ir = stage_ir(
+        ShaderInstance::plain(entry),
+        vec![
+            inst(0, 7, Some(MonoTy::Float)),
+            inst(0, 9, None),
+            // The SAME declaration as position 0, a different instantiation,
+            // and not adjacent to it.
+            inst(0, 7, Some(MonoTy::Int)),
+        ],
+    );
+
+    // The denominator: the order really does hold the repeat this is about.
+    assert_eq!(ir.order.len(), 3);
+    assert_eq!(ir.order.iter().filter(|i| i.fref == helper).count(), 2);
+
+    let decls = ir.declarations();
+    assert_eq!(
+        decls.iter().filter(|f| **f == helper).count(),
+        1,
+        "a nonadjacent repeat of one declaration survived dedup: {decls:?}"
+    );
+    assert_eq!(decls.len(), 3, "entry + two distinct helper declarations: {decls:?}");
+    assert!(decls.contains(&other) && decls.contains(&entry));
+}
+
+/// The program-level set has the same obligation across STAGES: a helper both
+/// stages reach is one declaration to reload, and the two stages' orders are
+/// concatenated rather than merged.
+#[test]
+fn a_program_reload_set_dedups_across_stages() {
+    use skull_mir::monoty::MonoTy;
+    let shared = fref(0, 7);
+    let vert = stage_ir(ShaderInstance::plain(fref(0, 1)), vec![inst(0, 7, Some(MonoTy::Float))]);
+    let mut frag = stage_ir(ShaderInstance::plain(fref(0, 2)), vec![inst(0, 7, Some(MonoTy::Int))]);
+    frag.stage = ShaderStage::Fragment;
+    let ir = ShaderIR { stages: vec![vert, frag] };
+
+    let decls = ir.declarations();
+    assert_eq!(
+        decls.iter().filter(|f| **f == shared).count(),
+        1,
+        "a helper both stages reach is listed twice: {decls:?}"
+    );
+    assert_eq!(decls.len(), 3, "two entries + one shared helper: {decls:?}");
+}
+
+/// **The interface plan's member list is the layout INPUT.** A guard on the
+/// shape rather than on a number: perturbing a member's kind must be visible
+/// in the plan itself, so a layout derived from it cannot be identical.
+#[test]
+fn perturbing_an_interface_member_changes_the_interface() {
+    let base = ShaderInterfacePlan {
+        uniform_groups: vec![LogicalUniformGroup {
+            role: UniformRole::Stage(ShaderStage::Fragment),
+            struct_name: Ustr::from("U"),
+            members: vec![(Ustr::from("a"), WireKind::F32), (Ustr::from("b"), WireKind::F32x4)],
+        }],
+        ..Default::default()
+    };
+    let mut widened = base.clone();
+    widened.uniform_groups[0].members[0].1 = WireKind::F32x4;
+    assert_ne!(base, widened, "the interface plan does not distinguish its own members");
+}

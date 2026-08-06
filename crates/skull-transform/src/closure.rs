@@ -289,7 +289,14 @@ pub fn convert_closures_framed(
                     let child = lambda_sid[&id];
                     let caps = &captures_sorted[&child];
                     if caps.is_empty() {
-                        mf.insts[id] = Inst::Global(hoisted_name[&child]);
+                        let hoisted = hoisted_name[&child];
+                        // A capture-free lambda becomes a top-level fn of THIS
+                        // body's own output, so the name it is now called
+                        // through is not a callee declaration's symbol.
+                        if !mf.hoisted_fn_globals.contains(&hoisted) {
+                            mf.hoisted_fn_globals.push(hoisted);
+                        }
+                        mf.insts[id] = Inst::Global(hoisted);
                         new.push(id);
                         continue;
                     }
@@ -400,6 +407,17 @@ pub fn convert_closures_framed(
             // Same arena clone, same `Idx` space: the parent's spans address the
             // instructions this body now owns.
             inst_spans: mf.inst_spans.clone(),
+            // Same arena clone, same `Idx` space -- and the same reason the
+            // `spec_bindings` above come across: this lambda's own calls are
+            // keyed to insts whose only reachable home is now this body, so
+            // dropping them would strand their site identity here.
+            call_sites: mf.call_sites.clone(),
+            callee_instances: mf.callee_instances.clone(),
+            fn_value_symbols: mf.fn_value_symbols.clone(),
+            hoisted_fn_globals: mf.hoisted_fn_globals.clone(),
+            // The owner table comes across with the entries that index it;
+            // cloning one without the other would repoint every site.
+            site_owners: mf.site_owners.clone(),
         });
     }
     // APPEND, don't overwrite: lowering already hoisted the enclosing fn's named

@@ -476,3 +476,32 @@ fn a_block_over_the_gles_limit_is_rejected() {
         "the rejection must state both the size and the budget it broke, got: {m}"
     );
 }
+
+/// **A sampler field in a uniform group names the fix.**
+///
+/// A sampler cannot live in a uniform buffer on any API, and the mistake is a
+/// plausible one: the author wrote the texture beside the scalars. The generic
+/// "no std140 form here" answer is true and unhelpful, so the ONE classifier
+/// carries the hint rather than a caller's own walk.
+#[test]
+fn a_sampler_in_a_uniform_group_names_the_fix() {
+    let ws = ws_of("value BadU { tint: Vec4, tex: Sampler2D }\nfn main() {}");
+    let msg = skull_mir::gpu_layout::uniform_group_members(&ws, ustr::Ustr::from("BadU"))
+        .err()
+        .expect("a sampler field must reject")
+        .message;
+    assert!(
+        msg.contains("sampler") && msg.contains("fn param"),
+        "the rejection does not name the fix: {msg}"
+    );
+
+    // CONTROL: the same group without the sampler classifies, so the message
+    // above is about the field and not about the group being unreadable.
+    let ok = ws_of("value GoodU { tint: Vec4 }\nfn main() {}");
+    assert_eq!(
+        skull_mir::gpu_layout::uniform_group_members(&ok, ustr::Ustr::from("GoodU"))
+            .expect("a scalar group classifies")
+            .len(),
+        1
+    );
+}

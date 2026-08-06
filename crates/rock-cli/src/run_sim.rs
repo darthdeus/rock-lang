@@ -445,7 +445,7 @@ pub fn do_run_named_sims(
         compile_sims(backend, project_path, PathBuf::from(&output))?;
     sim_spawn_barrier();
 
-    if mode == SimExecMode::Workers {
+    if mode != SimExecMode::Isolated {
         let results = run_specs_worker_mode(
             &project,
             &output,
@@ -455,6 +455,7 @@ pub fn do_run_named_sims(
             update_snapshots,
             jobs,
             &mut stone,
+            mode,
         )?;
         let mut passed = 0usize;
         let mut failed: Vec<String> = Vec::new();
@@ -642,7 +643,7 @@ pub fn do_run_all_sims(
         return Err(anyhow!("no @sim coroutines found in project `{project}`"));
     }
 
-    if mode == SimExecMode::Workers {
+    if mode != SimExecMode::Isolated {
         let results = run_specs_worker_mode(
             &project,
             &output,
@@ -652,6 +653,7 @@ pub fn do_run_all_sims(
             update_snapshots,
             jobs,
             &mut stone,
+            mode,
         )?;
         let mut passed = 0usize;
         let mut failed: Vec<String> = Vec::new();
@@ -820,6 +822,7 @@ fn run_specs_worker_mode(
     update_snapshots: bool,
     jobs: Option<usize>,
     stone: &mut crate::skull_backend::SkullStone,
+    mode: SimExecMode,
 ) -> Result<Vec<(String, SimSummary)>> {
     if cfg!(windows) {
         return Err(anyhow!(
@@ -836,7 +839,7 @@ fn run_specs_worker_mode(
     }
 
     let jobs = resolve_jobs(jobs, update_snapshots);
-    let (groups, isolated) = group_worker_specs(specs, env_by_wire);
+    let (groups, isolated) = group_worker_specs(specs, env_by_wire, mode);
     // One slot per spec POSITION: the same sim can be named twice, and each
     // occurrence is its own entry with its own result.
     let mut slots: Vec<Option<SimSummary>> = specs.iter().map(|_| None).collect();
@@ -1131,27 +1134,59 @@ fn boot_signature(env_pairs: &[(String, String)]) -> Vec<(String, String)> {
 /// How `rock sim` maps entries to processes.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SimExecMode {
-    /// One fresh process per entry: the permanent reference oracle, and (until
-    /// B3/B4 land) the default.
+    /// One fresh process per entry: the permanent reference oracle, and what
+    /// `--isolated` selects. Never inferred -- it is always the caller's word.
     Isolated,
-    /// Boot-checkpoint workers: eligible entries grouped by boot signature
-    /// share one booted process with the restore boundary between them.
+    /// Boot-checkpoint workers for everything eligible, RENDERED SIMS INCLUDED.
+    /// The explicit force/diagnostic spelling (`--workers`): it is how a
+    /// rendered sim gets measured in a worker at all, which the differential
+    /// and the multi-order gate both need.
     Workers,
+    /// The DEFAULT. Render-skipped entries go to boot-checkpoint workers;
+    /// entries that render run in fresh processes with a REPORTED reason.
+    ///
+    /// The split is drawn where the evidence is. On the merged mag corpus every
+    /// divergence among boundary-crossing comparisons belonged to a sim that
+    /// renders, and the one render-skipped sim that diverged did so on a
+    /// NON-crossing comparison from an intermittent log record -- fresh-process
+    /// nondeterminism, which isolating it would not cure.
+    Hybrid,
 }
 
 /// Resolve the two CLI flags. clap already rejects the combination.
 pub fn exec_mode(isolated: bool, workers: bool) -> SimExecMode {
     debug_assert!(!(isolated && workers));
-    if workers {
-        SimExecMode::Workers
-    } else {
-        SimExecMode::Isolated
+    match (isolated, workers) {
+        (true, _) => SimExecMode::Isolated,
+        (_, true) => SimExecMode::Workers,
+        _ => SimExecMode::Hybrid,
     }
+}
+
+/// Whether an entry RENDERS, from the effective `SIM_SKIP_RENDER` value.
+///
+/// Read last-wins off the resolved pairs, never from the source annotations:
+/// `@sim_render` is lowered to `SIM_SKIP_RENDER=0` before an explicit
+/// `@sim_env` is appended (`skull_backend::collect_skull_sims`), so a sim
+/// carrying both is whatever it says LAST. Classifying on the annotations would
+/// disagree with the value the child actually boots with.
+///
+/// A sim declaring nothing does not render: draw systems are skipped by default
+/// under the harness.
+fn entry_renders(env: &[(String, String)]) -> bool {
+    env.iter()
+        .filter(|(k, _)| k == "SIM_SKIP_RENDER")
+        .next_back()
+        .is_some_and(|(_, v)| v == "0")
 }
 
 /// Why an entry cannot join a shared worker process. The reason is REPORTED --
 /// a silently isolated entry would read as a worker result.
-fn worker_ineligibility(spec: &str, env_by_wire: &HashMap<String, Vec<(String, String)>>) -> Option<String> {
+fn worker_ineligibility(
+    spec: &str,
+    env_by_wire: &HashMap<String, Vec<(String, String)>>,
+    mode: SimExecMode,
+) -> Option<String> {
     let parts = parse_sim_chain(spec);
     // A spec with no parts has nothing to agree on; the isolated path rejects
     // it with the runner's one "empty sim name" error.
@@ -1172,6 +1207,21 @@ fn worker_ineligibility(spec: &str, env_by_wire: &HashMap<String, Vec<(String, S
         if let Some((k, v)) = env.iter().find(|(_, v)| v.contains("$OUT")) {
             return Some(format!(
                 "@sim_env(\"{k}\", \"{v}\") interpolates $OUT, which resolves before the process starts"
+            ));
+        }
+        // The hybrid default's one extra rule. ANY rendered part isolates the
+        // whole chain: a chain runs as consecutive entries of one queue, so a
+        // rendered part would render inside a worker however the other parts
+        // are classified.
+        //
+        // `--workers` deliberately does NOT apply it. That mode exists to
+        // measure rendered sims in a worker, which is what the differential and
+        // the multi-order gate are for; a rule that isolated them there would
+        // make the gate unable to see the class it was built to see.
+        if mode == SimExecMode::Hybrid && entry_renders(env) {
+            return Some(format!(
+                "`{part}` renders (SIM_SKIP_RENDER=0); rendered sims run isolated by \
+                 default -- use --workers to measure one in a worker"
             ));
         }
     }
@@ -1200,11 +1250,12 @@ fn worker_ineligibility(spec: &str, env_by_wire: &HashMap<String, Vec<(String, S
 fn group_worker_specs(
     specs: &[String],
     env_by_wire: &HashMap<String, Vec<(String, String)>>,
+    mode: SimExecMode,
 ) -> (Vec<Vec<usize>>, Vec<(usize, String)>) {
     let mut groups: Vec<(Vec<(String, String)>, Vec<usize>)> = Vec::new();
     let mut isolated: Vec<(usize, String)> = Vec::new();
     for (i, spec) in specs.iter().enumerate() {
-        if let Some(reason) = worker_ineligibility(spec, env_by_wire) {
+        if let Some(reason) = worker_ineligibility(spec, env_by_wire, mode) {
             isolated.push((i, reason));
             continue;
         }
@@ -2209,7 +2260,10 @@ fn run_worker_arm(
     env_by_wire: &HashMap<String, Vec<(String, String)>>,
     ordered: &[String],
 ) -> Result<Vec<(crate::sim_record::SimRecord, bool)>> {
-    let (groups, isolated) = group_worker_specs(ordered, env_by_wire);
+    // The GATE measures rendered sims in workers on purpose: the hybrid
+    // default isolates them, and a gate that inherited that rule could never
+    // see the class it exists to watch.
+    let (groups, isolated) = group_worker_specs(ordered, env_by_wire, SimExecMode::Workers);
     let mut out: Vec<Option<(crate::sim_record::SimRecord, bool)>> = vec![None; ordered.len()];
 
     for members in groups {
@@ -2260,7 +2314,112 @@ fn run_worker_arm(
 /// The reference is per SIM, taken once in one fresh process each, which is the
 /// permanent `--isolated` oracle -- not a second worker arm, and not the
 /// previous arm's result.
-pub fn run_multi_order_gate(backend: crate::Backend, project: &str) -> Result<()> {
+/// Arms no corpus in this tree can populate, so an empty one is the documented
+/// permanent state rather than a hole the gate should refuse over.
+///
+/// `errors` counts runner/sim `error` ops, and every op that emits one also
+/// FAILS its sim -- a fixture built to populate it would be a permanently red
+/// entry in `rock sim testbed`, and mag's known reds fail expects rather than
+/// erroring. The arm is still guarded twice over: `Comparison::population`
+/// panics on an arm that is absent rather than reading as "nothing to see", and
+/// `sim_record`'s synthetic per-arm tests fail when an arm is censused but no
+/// longer compared. Encoded here so that "permanently empty" is a stated
+/// exception with a reason, not a gate everyone learns to ignore.
+const ARMS_WITHOUT_A_CORPUS: &[&str] = &["errors"];
+
+/// Whether an empty comparison arm should stop the gate, given which arms came
+/// back empty and whether this run measured a named SUBSET.
+///
+/// Over the whole corpus an empty arm is a hole: the gate would be reporting a
+/// green over something it never compared. Over a subset it is expected -- the
+/// caller picked two sims to re-measure one class, and whether that pair
+/// happens to fail an expect is unrelated to why it was picked. A subset's
+/// evidence requirement is the boundary-crossing population instead, which is
+/// checked separately and is what a subset can actually be wrong about.
+fn population_refusal(empty: &[&str], subset: bool) -> Option<String> {
+    if subset {
+        return None;
+    }
+    let unexpected: Vec<&str> =
+        empty.iter().copied().filter(|a| !ARMS_WITHOUT_A_CORPUS.contains(a)).collect();
+    if unexpected.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "these arms compared an empty population, so their agreement is evidence of nothing: {}",
+        unexpected.join(", ")
+    ))
+}
+
+/// The corpus one `--multi-order` invocation measures: the whole registry, or
+/// the named subset of it in REGISTRY ORDER, which is what the "registry" arm
+/// means and what makes the reverse arm its reverse.
+///
+/// Every refusal here is loud, because each one would otherwise silently shrink
+/// the corpus and a gate that measured less than it was asked to would still
+/// print a green:
+///
+/// - an unknown name is a typo, and dropping it would run the gate over the
+///   sims that happened to match;
+/// - a REPEATED name has one reference record and two worker records, so the
+///   second comparison would be scored against a reference that is not its own;
+/// - a `a,b` comma-chain is a different unit -- chain parts share one `$OUT`
+///   and are one entry -- so it cannot name a corpus member.
+fn select_gate_corpus(registry: &[String], selected: &[String]) -> Result<Vec<String>> {
+    if selected.is_empty() {
+        return Ok(registry.to_vec());
+    }
+    let mut wanted: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    let (mut unknown, mut repeated, mut chained) = (Vec::new(), Vec::new(), Vec::new());
+    for name in selected {
+        if name.contains(',') {
+            chained.push(name.as_str());
+        } else if !registry.iter().any(|r| r == name) {
+            unknown.push(name.as_str());
+        } else if !wanted.insert(name.as_str()) {
+            repeated.push(name.as_str());
+        }
+    }
+    if !chained.is_empty() {
+        return Err(anyhow!(
+            "`--multi-order` takes sim NAMES, not comma-chains: {}. A chain's parts share one \
+             $OUT and run as a single entry, so a chain cannot be a member of the compared \
+             corpus.",
+            chained.join(", ")
+        ));
+    }
+    if !unknown.is_empty() {
+        return Err(anyhow!(
+            "no sim named {} (try `rock sim --list <project>`); refusing to run this gate over \
+             the names that did match",
+            unknown.join(", ")
+        ));
+    }
+    if !repeated.is_empty() {
+        return Err(anyhow!(
+            "{} named more than once. Each sim has ONE reference record, so a repeat would be \
+             compared against a reference that is not its own.",
+            repeated.join(", ")
+        ));
+    }
+    Ok(registry.iter().filter(|r| wanted.contains(r.as_str())).cloned().collect())
+}
+
+/// `selected` empty means the whole corpus. A non-empty `selected` runs the SAME
+/// four arms over just those sims, in registry order, so a divergence already
+/// isolated to a predecessor/target pair can be re-measured in seconds instead
+/// of re-running 262 sims. It narrows the CORPUS and nothing else: provenance,
+/// the boundary-crossing denominator, the empty-arm refusal and the scheduling
+/// are the whole-corpus ones, so a subset run is the same gate over less.
+///
+/// A subset cannot DISCOVER a divergence class the way the full corpus can --
+/// it fixes which predecessors exist -- so it confirms a class already isolated
+/// rather than replacing the arc checkpoint.
+pub fn run_multi_order_gate(
+    backend: crate::Backend,
+    project: &str,
+    selected: &[String],
+) -> Result<()> {
     use crate::sim_record::{compare, COMPARED_ARMS};
 
     rock_host::project::ensure_workspace_root()?;
@@ -2280,6 +2439,11 @@ pub fn run_multi_order_gate(backend: crate::Backend, project: &str) -> Result<()
     // the worker's. They also never reach a worker (`worker_ineligibility`
     // classifies the reload lane), so excluding them removes nothing this gate
     // could have decided.
+    //
+    // Selection happens BEFORE that partition so an explicitly named reload sim
+    // is reported as excluded rather than silently missing from a corpus the
+    // caller wrote out by hand.
+    let wire_names = select_gate_corpus(&wire_names, selected)?;
     let (wire_names, excluded): (Vec<String>, Vec<String>) = wire_names
         .into_iter()
         .partition(|name| !is_reload_lane(env_by_wire.get(name).map_or(&[][..], |v| v)));
@@ -2379,18 +2543,24 @@ pub fn run_multi_order_gate(backend: crate::Backend, project: &str) -> Result<()
             n * arms.len()
         ));
     }
-    if !empty.is_empty() {
-        // Not a fudge factor to relax: `expects_fail` and `errors` populate only
-        // from sims that FAIL, so a corpus where everything passes standalone
-        // cannot certify them and this gate must say so rather than report a
-        // green it did not measure. mag carries known-red sims and populates
-        // both; testbed does not, which is why testbed validates the mechanism
-        // and mag is the gate.
-        return Err(anyhow!(
-            "these arms compared an empty population, so their agreement is evidence of \
-             nothing: {}",
-            empty.join(", ")
-        ));
+    // An empty arm is REPORTED in both forms, and what it means differs.
+    //
+    // Over the whole corpus it is a hole in the gate: `expects_fail` populates
+    // only from sims that FAIL, so a corpus where everything passes standalone
+    // cannot certify that arm, and the gate must say so rather than report a
+    // green it did not measure. mag carries known-red sims and populates it;
+    // testbed does not, which is why testbed validates the mechanism and mag is
+    // the gate. Not a fudge factor to relax.
+    //
+    // Over a NAMED SUBSET it means nothing at all. The caller chose two sims to
+    // re-measure one class; whether that pair happens to fail an expect or
+    // write an artifact is unrelated to what they were selected for, and
+    // failing on it would make an equivalent pair exit nonzero and be unusable
+    // as an iteration gate. The subset's evidence requirement is the
+    // boundary-crossing population, which is enforced above and is the thing a
+    // subset can actually be wrong about.
+    if let Some(reason) = population_refusal(&empty, !selected.is_empty()) {
+        return Err(anyhow!(reason));
     }
     println!(
         "[multi-order] {} comparisons equivalent to the isolated reference",
@@ -3218,6 +3388,162 @@ fn extract_raw_field(json: &str, key: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    fn corpus() -> Vec<String> {
+        ["a_first", "b_second", "c_third"].iter().map(|s| s.to_string()).collect()
+    }
+
+    fn pick(names: &[&str]) -> Result<Vec<String>> {
+        let selected: Vec<String> = names.iter().map(|s| s.to_string()).collect();
+        select_gate_corpus(&corpus(), &selected)
+    }
+
+    /// The hybrid split reads the EFFECTIVE value, last-wins. `@sim_render` is
+    /// lowered to `SIM_SKIP_RENDER=0` before an explicit `@sim_env` is appended,
+    /// so a sim carrying both is whatever it says last -- and that is the value
+    /// its child actually boots with.
+    #[test]
+    fn rendering_is_the_effective_last_wins_value() {
+        let pair = |k: &str, v: &str| (k.to_string(), v.to_string());
+        assert!(!entry_renders(&[]), "declaring nothing does not render");
+        assert!(entry_renders(&[pair("SIM_SKIP_RENDER", "0")]), "@sim_render sugar");
+        assert!(!entry_renders(&[pair("SIM_SKIP_RENDER", "1")]), "explicit skip");
+        // `@sim_render` then an explicit override, in lowering order.
+        assert!(
+            !entry_renders(&[pair("SIM_SKIP_RENDER", "0"), pair("SIM_SKIP_RENDER", "1")]),
+            "a later explicit @sim_env overrides the @sim_render sugar"
+        );
+        assert!(
+            entry_renders(&[pair("SIM_SKIP_RENDER", "1"), pair("SIM_SKIP_RENDER", "0")]),
+            "... and the other way round"
+        );
+        assert!(!entry_renders(&[pair("MAG_FORCE_VFX", "1")]), "an unrelated key is not it");
+    }
+
+    /// The default isolates a rendered entry and admits a render-skipped one,
+    /// and BOTH populations are non-empty -- a split that admitted everything,
+    /// or nothing, would be reported the same way by a test that only checked
+    /// one side.
+    #[test]
+    fn the_hybrid_default_splits_rendered_from_render_skipped() {
+        let mut wires: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        wires.insert("logic".to_string(), vec![]);
+        wires.insert(
+            "pixel".to_string(),
+            vec![("SIM_SKIP_RENDER".to_string(), "0".to_string())],
+        );
+        let specs = vec!["logic".to_string(), "pixel".to_string()];
+
+        let (groups, isolated) = group_worker_specs(&specs, &wires, SimExecMode::Hybrid);
+        assert_eq!(groups.len(), 1, "the render-skipped entry is admitted: {groups:?}");
+        assert_eq!(groups[0], vec![0], "and it is the logic one");
+        assert_eq!(isolated.len(), 1, "the rendered entry is isolated: {isolated:?}");
+        assert_eq!(isolated[0].0, 1);
+        assert!(
+            isolated[0].1.contains("renders"),
+            "with a REPORTED reason, since a silently isolated entry reads as a \
+             worker result: {}",
+            isolated[0].1
+        );
+
+        // `--workers` is the force/diagnostic spelling and must still admit the
+        // rendered one, or the differential and multi-order gates could never
+        // measure the class they exist for.
+        let (groups, isolated) = group_worker_specs(&specs, &wires, SimExecMode::Workers);
+        assert_eq!(isolated.len(), 0, "--workers admits rendered sims: {isolated:?}");
+        assert_eq!(groups.iter().map(Vec::len).sum::<usize>(), 2);
+    }
+
+    /// ANY rendered part isolates the whole chain: a chain runs as consecutive
+    /// entries of ONE queue, so a rendered part renders inside the worker
+    /// however its neighbours are classified.
+    #[test]
+    fn one_rendered_part_isolates_its_whole_chain() {
+        let mut wires: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        wires.insert("head".to_string(), vec![]);
+        wires.insert(
+            "tail".to_string(),
+            vec![("SIM_SKIP_RENDER".to_string(), "0".to_string())],
+        );
+        let (groups, isolated) =
+            group_worker_specs(&["head,tail".to_string()], &wires, SimExecMode::Hybrid);
+        assert!(groups.is_empty(), "the chain cannot be admitted: {groups:?}");
+        assert_eq!(isolated.len(), 1);
+        assert!(isolated[0].1.contains("tail"), "names the rendered part: {}", isolated[0].1);
+    }
+
+    /// A hole in the full-corpus gate stops it: the run would otherwise print a
+    /// green over an arm it never compared.
+    #[test]
+    fn the_full_corpus_refuses_an_arm_it_could_not_populate() {
+        let reason = population_refusal(&["expects_fail"], false).expect("must refuse");
+        assert!(reason.contains("expects_fail"), "names the arm: {reason}");
+    }
+
+    /// `errors` is the one arm no corpus in this tree can populate -- every op
+    /// that emits an `error` also fails its sim -- so it is a stated permanent
+    /// exception rather than a gate everyone learns to ignore.
+    #[test]
+    fn a_permanently_unpopulatable_arm_is_not_a_hole() {
+        assert!(population_refusal(&["errors"], false).is_none());
+        // ... and it does not launder a real hole reported beside it.
+        let reason = population_refusal(&["errors", "expects_fail"], false).expect("must refuse");
+        assert!(reason.contains("expects_fail"), "names the real hole: {reason}");
+        assert!(!reason.contains("errors"), "does not name the exception: {reason}");
+    }
+
+    /// A subset is chosen to re-measure ONE class. Whether that pair happens to
+    /// fail an expect or write an artifact is unrelated to why it was picked,
+    /// and refusing over it would make an equivalent pair exit nonzero -- which
+    /// is exactly the iteration gate this form exists to be.
+    #[test]
+    fn a_named_subset_is_not_refused_for_an_empty_population() {
+        assert!(population_refusal(&["expects_fail", "artifacts", "errors"], true).is_none());
+    }
+
+    /// No names is the whole registry, which is the arc-checkpoint form.
+    #[test]
+    fn an_empty_selection_is_the_whole_corpus() {
+        assert_eq!(pick(&[]).expect("whole corpus"), corpus());
+    }
+
+    /// REGISTRY order, not the order the caller typed -- that is what the
+    /// "registry" arm means, and what makes the "reverse" arm its reverse. A
+    /// subset that honoured argv order would silently rename its own arms.
+    #[test]
+    fn a_selection_keeps_registry_order_whatever_order_it_was_typed_in() {
+        assert_eq!(pick(&["c_third", "a_first"]).expect("subset"), vec!["a_first", "c_third"]);
+    }
+
+    /// Each refusal below would otherwise shrink the corpus silently, and a
+    /// gate that measured less than it was asked to would still print a green.
+    #[test]
+    fn an_unknown_name_refuses_instead_of_running_the_ones_that_matched() {
+        let err = pick(&["a_first", "typo_here"]).expect_err("unknown name must refuse");
+        assert!(err.to_string().contains("typo_here"), "names the offender: {err}");
+    }
+
+    #[test]
+    fn a_repeated_name_refuses_because_it_has_only_one_reference_record() {
+        let err = pick(&["a_first", "a_first"]).expect_err("repeat must refuse");
+        assert!(err.to_string().contains("a_first"), "names the offender: {err}");
+    }
+
+    /// Asserts the chain-SPECIFIC reason, not merely that something refused.
+    /// A chain name is also absent from the registry, so with this arm deleted
+    /// it falls through to the unknown-name refusal, which names the offender
+    /// too -- an "it refused" assertion passes either way and cannot tell the
+    /// two apart. Mutation-proven only in this form.
+    #[test]
+    fn a_comma_chain_is_refused_for_being_a_chain_not_for_being_unknown() {
+        let err = pick(&["a_first,b_second"]).expect_err("chain must refuse");
+        let msg = err.to_string();
+        assert!(msg.contains("a_first,b_second"), "names the offender: {err}");
+        assert!(
+            msg.contains("comma-chains") && msg.contains("$OUT"),
+            "must refuse it for being a chain, not for being an unknown name: {err}"
+        );
+    }
+
     /// A MISSING image golden used to bootstrap itself from the current frame
     /// and count as a passing expect, so a sim whose goldens are untracked
     /// (`mag/tests/sims/vfx_capture.snap/`, gitignored as display-specific)
@@ -3445,6 +3771,7 @@ mod tests {
         let (groups, isolated) = group_worker_specs(
             &specs(&["plain_a", "plain_b", "fx_off", "reload", "outref", "machinery"]),
             &wires,
+            SimExecMode::Workers,
         );
 
         // FRAME_COUNT is runner-owned, so plain_a and plain_b share a group;
@@ -3473,7 +3800,7 @@ mod tests {
         let wires = wires(&[("plain", &[]), ("reload", &[("STONE_HOT_RELOAD", "1")])]);
 
         let (groups, isolated) =
-            group_worker_specs(&specs(&["plain", "plain", "reload", "reload"]), &wires);
+            group_worker_specs(&specs(&["plain", "plain", "reload", "reload"]), &wires, SimExecMode::Workers);
         assert_eq!(groups, vec![vec![0, 1]]);
         assert_eq!(isolated.iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![2, 3]);
 
@@ -3494,11 +3821,11 @@ mod tests {
         ]);
 
         let (groups, isolated) =
-            group_worker_specs(&specs(&["head,tail_same", "plain"]), &wires);
+            group_worker_specs(&specs(&["head,tail_same", "plain"]), &wires, SimExecMode::Workers);
         assert_eq!(groups, vec![vec![0], vec![1]]);
         assert!(isolated.is_empty());
 
-        let (groups, isolated) = group_worker_specs(&specs(&["head,tail_other"]), &wires);
+        let (groups, isolated) = group_worker_specs(&specs(&["head,tail_other"]), &wires, SimExecMode::Workers);
         assert!(groups.is_empty());
         assert_eq!(isolated.len(), 1);
         assert!(
@@ -3514,10 +3841,10 @@ mod tests {
     fn an_empty_spec_is_classified_not_indexed() {
         let wires = wires(&[("plain", &[])]);
 
-        assert!(worker_ineligibility("", &wires).is_some());
-        assert!(worker_ineligibility(" , ", &wires).is_some());
+        assert!(worker_ineligibility("", &wires, SimExecMode::Workers).is_some());
+        assert!(worker_ineligibility(" , ", &wires, SimExecMode::Workers).is_some());
 
-        let (groups, isolated) = group_worker_specs(&specs(&["plain", ""]), &wires);
+        let (groups, isolated) = group_worker_specs(&specs(&["plain", ""]), &wires, SimExecMode::Workers);
         assert_eq!(groups, vec![vec![0]]);
         assert_eq!(isolated.len(), 1);
         assert_eq!(isolated[0].0, 1);

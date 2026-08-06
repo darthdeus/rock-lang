@@ -176,21 +176,17 @@ impl Builder<'_> {
                         });
                     }
                 }
-                let scalar = self.eq_is_scalar(lhs)
-                    || self.eq_is_scalar(rhs)
-                    || self.is_null_lit(lhs)
-                    || self.is_null_lit(rhs);
+                // Non-scalar equality is STRUCTURAL, not Lua reference
+                // equality: it routes through the stdlib `__op_eq`/`__op_ne`,
+                // which walk fields via `pairs()` (cdata value structs hit the
+                // `==` primitive fast path = byte-value compare). Which of the
+                // two it is comes from the ONE dispatch oracle the instance
+                // walk reads, not from a second reading of the operand types.
+                let route = self.dispatch().eq_route(lhs, rhs);
                 let lv = self.lower_expr(lhs)?;
                 let rv = self.lower_expr(rhs)?;
-                if !scalar {
-                    // Non-scalar equality is STRUCTURAL, not Lua reference
-                    // equality: route through the stdlib `__op_eq`/`__op_ne`,
-                    // which walk fields structurally via `pairs()` (cdata value
-                    // structs hit the `==` primitive fast path = byte-value
-                    // compare).
-                    let name = if matches!(op, BinOp::Eq) { "__op_eq" } else { "__op_ne" };
-                    let func = self.resolve_op_helper(name)?;
-                    return Ok(self.emit_cur(Inst::Call { func, args: vec![lv, rv] }));
+                if let Some(name) = route.synthesized_callee(op) {
+                    return self.dispatched_call(name, Vec::new(), vec![lv, rv]);
                 }
                 // Mixed `float == int` promotes the int side (untyped `Eq` renders a
                 // single `==`; both operands must arrive same-typed for GLSL).

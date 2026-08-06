@@ -141,6 +141,20 @@ impl Builder<'_> {
     /// `Group`); everything else is a `Scalar`. The ABI boundaries
     /// (params/returns/call args) consume this to splat without a cdata round-trip.
     pub(crate) fn lower_expr_repr(&mut self, e: Idx<Expr>) -> Result<ValueRepr, CompilerError> {
+        // The unboxed route is a SECOND entry into expression lowering, so it
+        // narrows the source cursor exactly as [`Self::lower_expr`] does. Without
+        // this a scalar-ABI argument's own calls are stamped with the ENCLOSING
+        // expression -- `mote_value_noise(v(..))` filed the `v` call under the
+        // `mote_value_noise` site, which then selected the wrong callee.
+        let outer = self.cur_span.replace(self.body.expr_spans[e]);
+        let outer_expr = self.cur_expr.replace(e);
+        let out = self.lower_expr_repr_inner(e);
+        self.cur_span = outer;
+        self.cur_expr = outer_expr;
+        out
+    }
+
+    fn lower_expr_repr_inner(&mut self, e: Idx<Expr>) -> Result<ValueRepr, CompilerError> {
         // Probed ahead of the match rather than in a guard: the wire-shape oracle
         // is fallible, and a guard cannot propagate. Ordered after the `nobox`
         // coalesce below, which is the narrower case.
@@ -951,22 +965,6 @@ impl Builder<'_> {
 
         self.cur = exit;
         self.yield_delegate_exit(sub)
-    }
-
-    /// Resolve an operator-helper stdlib fn (`__op_eq`/`__op_ne`) bone registers
-    /// under several synthetic overload entries — all the SAME `@nomangle`
-    /// inline(lua) body mangling to the bare name, so any resolves identically.
-    /// Picks the first (the genuine source def); deterministic by parse order.
-    pub(crate) fn resolve_op_helper(&self, name: &str) -> Result<FuncRef, CompilerError> {
-        match self
-            .ws
-            .functions_by_name
-            .get(&Ustr::from(name))
-            .and_then(|l| l.first())
-        {
-            Some((module, func)) => Ok(FuncRef { module: *module, func: *func }),
-            None => Err(gap(format!("operator helper `{name}` not found"))),
-        }
     }
 
     /// Resolve a global function by surface name to a [`FuncRef`], requiring a

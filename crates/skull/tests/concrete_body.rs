@@ -501,10 +501,10 @@ fn one_generic_body_names_a_different_callee_per_instance() {
         bodies.bodies.keys().filter(|i| g.identity(&ws, i).starts_with("wrap")).collect();
     assert_eq!(wraps.len(), 2, "expected two `wrap` instances, got {wraps:?}");
     let (a, b) = (&bodies.bodies[wraps[0]], &bodies.bodies[wraps[1]]);
-    let shared: Vec<(Idx<Expr>, &Callee, &Callee)> = a
+    let shared: Vec<(skull::instance_graph::Site, &Callee, &Callee)> = a
         .direct_calls
         .iter()
-        .filter_map(|(e, x)| b.direct_calls.get(e).map(|y| (*e, x, y)))
+        .filter_map(|(s, x)| b.direct_calls.get(s).map(|y| (s.clone(), x, y)))
         .collect();
     assert!(!shared.is_empty(), "the two `wrap` bodies share no call site");
     let named: Vec<(String, String)> = shared
