@@ -767,6 +767,17 @@ pub struct MirFunc {
     /// declaration's, which is what separates them from
     /// [`Self::fn_value_symbols`].
     pub hoisted_fn_globals: Vec<Ustr>,
+    /// Calls lowered while the expression arena was NOT the one this body's
+    /// sites are keyed in -- today, a struct-default initializer, lowered from
+    /// `BodyOwner::StructDefaults` while `site_owner` still names the enclosing
+    /// function.
+    ///
+    /// They carry no site on purpose: an index from the other arena would be
+    /// read against this one and could join through whatever expression sits
+    /// there. Recorded rather than merely suppressed so the census reports them
+    /// as their own cause with a stated obligation, instead of as
+    /// indistinguishable from a call lowering simply forgot to stamp.
+    pub foreign_arena_calls: bone_semantic::prelude::FxHashSet<Idx<Inst>>,
     /// The owner instances [`Self::call_sites`] refers to, interned. Index 0 is
     /// this body's own owner when it has one; inlining appends the spliced
     /// callee's owner and remaps its entries, so a body holds one entry per
@@ -799,6 +810,7 @@ impl MirFunc {
             callee_instances: Default::default(),
             fn_value_symbols: Default::default(),
             hoisted_fn_globals: Vec::new(),
+            foreign_arena_calls: Default::default(),
             site_owners: Vec::new(),
         }
     }

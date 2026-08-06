@@ -99,7 +99,9 @@ impl Builder<'_> {
                     self.reject_fn_value_abi_mismatch(e, fref)?;
                 }
                 let sym = self.fn_value_symbol(e, name)?;
-                let id = self.emit_cur(Inst::Global(Ustr::from(sym.as_str())));
+                let id = self.with_site_op(crate::site::SiteOp::FnValue, |b| {
+                    b.emit_cur(Inst::Global(Ustr::from(sym.as_str())))
+                });
                 // The one place a callee DECLARATION becomes a spelled value.
                 // Recorded here rather than recovered downstream from the name:
                 // `Inst::Global` is also a module global and a `static` cell,

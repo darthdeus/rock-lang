@@ -1535,7 +1535,17 @@ impl Builder<'_> {
         //
         // Not yet total: a call emitted outside any expression carries no site,
         // reported by `skull::site_join::census` rather than assumed away.
-        if is_call && !self.sites_suppressed {
+        // A fn-value MINT is stamped too. It is not a call, but it is a callee
+        // OBLIGATION -- the one place a declaration becomes a spelled value --
+        // and the graph records it at the same `Site { expr, FnValue }`. Keyed
+        // on the operation rather than on the instruction, because
+        // `Inst::Global` is also a module global and a `static` cell and those
+        // name no callee.
+        let is_mint = self.cur_op == crate::site::SiteOp::FnValue;
+        if (is_call || is_mint) && self.sites_suppressed {
+            self.f.foreign_arena_calls.insert(id);
+        }
+        if (is_call || is_mint) && !self.sites_suppressed {
             if let (Some(owner), Some(expr)) = (self.site_owner.clone(), self.cur_expr) {
                 let owner = crate::site::intern_owner(&mut self.f.site_owners, owner);
                 self.f.call_sites.insert(

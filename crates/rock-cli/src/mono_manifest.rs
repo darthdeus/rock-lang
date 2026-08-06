@@ -612,6 +612,13 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
             site_join.call_insts
         );
         println!(
+            "  of which **{}** are fn-value SYMBOL MINTS rather than calls -- the one place a \
+             callee declaration becomes a spelled value, and the only thing an indirect call \
+             through it could name wrongly. A mint that is PASSED or STORED rather than called \
+             in place is verified nowhere else.",
+            site_join.symbol_mints
+        );
+        println!(
             "- joined to exactly one callee: **{}** ({} Rock, {} boundary); of those, **{}** are \
              SPLICED calls joined through the callee instance's own body",
             site_join.joined,

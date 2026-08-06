@@ -4,9 +4,9 @@
 //! call" from the graph's own resolution rather than by resolving again. That
 //! needs a join key, and `MirFunc::call_sites` is it: lowering stamps a call
 //! form with the [`skull_mir::site::CallSite`] it came from, and the walk
-//! recorded what each site resolved to. Not EVERY form -- `CallBoundMulti` is
-//! not stamped at all, and is counted here under `unstamped-form` rather than
-//! left outside the population.
+//! recorded what each site resolved to -- every call FORM, `CallBoundMulti`
+//! included, plus the fn-value symbol MINTS, which are callee obligations even
+//! though they are not calls.
 //!
 //! **The phase is POST-TRANSFORM, and that is load-bearing.** Emission renders
 //! the body that comes out of [`crate::mir_emit::prepare_instance_body`] --
@@ -54,6 +54,17 @@ use crate::instance_graph::{Instance, InstanceGraph};
 pub enum Unjoined {
     /// The call carries no site: it was emitted outside any expression.
     NoSite,
+    /// The call was lowered while the expression arena was NOT the one this
+    /// body's sites are keyed in (`MirFunc::foreign_arena_calls`) -- a
+    /// struct-default initializer, whose `BodyOwner::StructDefaults` arena is
+    /// installed while `site_owner` still names the enclosing function.
+    ///
+    /// Stamping nothing is FAIL-CLOSED, not final: an index from the other arena
+    /// could join through whatever expression sits at it here. The real identity
+    /// needs a body/arena DOMAIN in `Site` -- `BodyOwner` plus expression plus
+    /// operation -- shared by the graph and lowering, and it must exist before
+    /// emission consumes the join.
+    ForeignArena,
     /// The call's site names an owner index the body's owner table does not
     /// have. A splice that failed to re-intern its owner lands here rather than
     /// silently reading the caller's entry 0.
@@ -96,6 +107,7 @@ impl Unjoined {
     pub fn label(self) -> &'static str {
         match self {
             Self::NoSite => "no-site",
+            Self::ForeignArena => "foreign-arena",
             Self::OwnerNotInTable => "owner-not-in-table",
             Self::OwnerNotAnInstance => "owner-not-an-instance",
             Self::NoBody => "no-body",
@@ -147,8 +159,12 @@ pub struct SiteJoinCensus {
     /// Expanded instances that contributed no calls, by cause. Reported rather
     /// than skipped: a shrinking denominator flatters every ratio.
     pub bodies_skipped: BTreeMap<BodySkip, usize>,
-    /// REACHABLE call instructions examined. The denominator.
+    /// REACHABLE callee obligations examined. The denominator: call
+    /// instructions PLUS fn-value symbol mints.
     pub call_insts: usize,
+    /// How many of [`Self::call_insts`] are fn-value symbol MINTS rather than
+    /// calls. Stated so the denominator's composition is not a guess.
+    pub symbol_mints: usize,
     /// Call instructions that joined to exactly one callee.
     pub joined: usize,
     /// Joined calls by what they resolved to, so the join is not satisfied
@@ -346,6 +362,7 @@ impl SiteJoinCensus {
         self.joined_spliced += other.joined_spliced;
         self.joined_instance_verified += other.joined_instance_verified;
         self.joined_non_generic += other.joined_non_generic;
+        self.symbol_mints += other.symbol_mints;
         self.joined_boundary_verified += other.joined_boundary_verified;
         self.admitted_indirect += other.admitted_indirect;
         for (k, v) in &other.admitted_indirect_by_op {
@@ -503,6 +520,11 @@ struct CallRow {
     /// For an indirect call, what produced the callee operand. `None` for a
     /// direct call.
     producer: Option<IndirectProducer>,
+    /// Whether this row is a fn-value SYMBOL MINT rather than a call.
+    is_mint: bool,
+    /// Whether lowering deliberately withheld a site because the expression
+    /// arena was not this body's.
+    foreign_arena: bool,
 }
 
 /// Every REACHABLE call instruction in `mf` and its nested (hoisted) bodies.
@@ -513,6 +535,24 @@ struct CallRow {
 fn reachable_call_rows(mf: &MirFunc, out: &mut Vec<CallRow>) {
     for b in skull_mir::cfg::reachable_blocks_from(mf, mf.entry) {
         for &id in &mf.blocks[b].insts {
+            // A fn-value MINT is a callee obligation in the denominator, not a
+            // call: it is the one place a declaration becomes a spelled value,
+            // and an indirect call through it spells nothing of its own. If it
+            // did not join here, a mint that is PASSED or STORED rather than
+            // called in place would be verified nowhere at all.
+            if let Some(fref) = mf.fn_value_symbols.get(&id) {
+                out.push(CallRow {
+                    inst: id,
+                    site: mf.call_sites.get(&id).cloned(),
+                    target: Some(*fref),
+                    spec_key: None,
+                    callee_inst: mf.callee_instances.get(&id).cloned(),
+                    producer: None,
+                    is_mint: true,
+                    foreign_arena: mf.foreign_arena_calls.contains(&id),
+                });
+                continue;
+            }
             let mut producer = None;
             let target = match &mf.insts[id] {
                 Inst::Call { func, .. } | Inst::CallMulti { func, .. } => Some(*func),
@@ -542,6 +582,8 @@ fn reachable_call_rows(mf: &MirFunc, out: &mut Vec<CallRow>) {
                 spec_key: mf.spec_bindings.get(&id).cloned(),
                 callee_inst: mf.callee_instances.get(&id).cloned(),
                 producer,
+                is_mint: false,
+                foreign_arena: mf.foreign_arena_calls.contains(&id),
             });
         }
     }
@@ -675,6 +717,9 @@ pub fn census_detailed(
         c.indirect_unrecorded_symbol += unrecorded_symbol_operands(&mf, mangled);
         for row in rows {
             c.call_insts += 1;
+            if row.is_mint {
+                c.symbol_mints += 1;
+            }
             let (cause, op, note) = classify(ws, &mut c, g, &mf, &ix, bodies, inst, &row, detail);
             *c.examined_by_op.entry(op).or_insert(0) += 1;
             if detail && (cause.is_some() || row.target.is_none()) {
@@ -888,15 +933,17 @@ pub fn check_callee(
 /// - declaration disagrees -> [`Unjoined::CalleeMismatch`];
 /// - declaration agrees and is NON-GENERIC -> one instance exists, so the
 ///   declaration match IS the instance match (counted apart);
-/// - declaration agrees, is generic, and the call carries a COMPLETE
-///   instantiation key -> reconstruct its substitution and compare against the
-///   resolved instance's own;
-/// - declaration agrees, is generic, and the instance cannot be reconstructed
-///   -> UNVERIFIED, never a silent success, under the cause that applies: no
-///   key at all, a key of the wrong ARITY (positional, so a wrong length names
-///   another function's instantiation), a right-length key holding a `None`,
-///   or a resolved instance the GRAPH has no substitution for. Four causes,
-///   because only one of them is conditional specialization.
+/// - the callee is a BOUNDARY -> verified as a `BoundaryId`, whose identity is
+///   its declaration, class, target and spelling rather than a Rock
+///   instantiation;
+/// - declaration agrees, is generic, and the call RECORDED its concrete
+///   instance (`MirFunc::callee_instances`) -> compare that substitution against
+///   the resolved instance's own;
+/// - declaration agrees, is generic, and no instance was recorded, or the
+///   record names another declaration -> UNVERIFIED, never a silent success,
+///   under the cause that applies. The record is the IDENTITY one, not the
+///   `SpecKey` delivery record: reading delivery as identity made a declined
+///   specialization indistinguishable from an uninferred callee.
 fn classify(
     ws: &Workspace,
     c: &mut SiteJoinCensus,
@@ -929,7 +976,10 @@ fn classify(
         let note = if detail { format!("producer={}", producer.label()) } else { none };
         return (None, op, note);
     }
-    let Some(cs) = &row.site else { return (Some(Unjoined::NoSite), "<none>", none) };
+    let Some(cs) = &row.site else {
+        let cause = if row.foreign_arena { Unjoined::ForeignArena } else { Unjoined::NoSite };
+        return (Some(cause), "<none>", none);
+    };
     let op = cs.site.op.name();
     let Some(owner) = mf.site_owners.get(cs.owner.0 as usize) else {
         return (Some(Unjoined::OwnerNotInTable), op, none);

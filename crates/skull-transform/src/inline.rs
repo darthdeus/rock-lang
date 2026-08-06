@@ -944,6 +944,11 @@ fn import_spec_bindings(
             func.hoisted_fn_globals.push(*n);
         }
     }
+    for old_id in &callee.foreign_arena_calls {
+        if let Some(&new_id) = inst_map.get(old_id) {
+            func.foreign_arena_calls.insert(new_id);
+        }
+    }
     // The callee's instruction spans come across with its body, so a rejection
     // raised after inlining still points at the construct in the CALLEE's source
     // rather than at the call site that absorbed it.

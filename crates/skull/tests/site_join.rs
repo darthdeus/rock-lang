@@ -1011,27 +1011,132 @@ fn main() { print("{apply(add_one, 3)}") }
     );
 }
 
-/// The other side of that admission: a function used as a VALUE mints a
-/// workspace symbol, and the mint is RECORDED (`MirFunc::fn_value_symbols`) so
-/// it is not swept into the permanent class. Without the record the operand
-/// would be an unremarkable `Inst::Global` and the census would call it a
-/// runtime value -- which is exactly what `indirect_unrecorded_symbol` refuses.
+/// A fn-value SYMBOL MINT joins against `ConcreteBody::fn_values`, including
+/// when it is PASSED or STORED rather than called in place.
+///
+/// The mint is the one place a callee declaration becomes a spelled value, so it
+/// is the only thing an indirect call through it could name wrongly. Verifying
+/// it only where the minted `Inst::Global` is directly the operand of a
+/// `CallValue` leaves every passed or stored mint verified NOWHERE -- it is
+/// classified as a runtime value at the call and never compared with the graph's
+/// `FnValue` obligation at the mint.
+///
+/// Three shapes in one fixture, each reaching the mint by a different route:
+/// called in place, passed as an argument, stored in a local.
 #[test]
-fn a_function_used_as_a_value_records_its_minted_symbol() {
+fn a_fn_value_symbol_mint_joins_against_the_graphs_obligation() {
+    let c = census_of(
+        r#"
+fn add_one(x: int) -> int { return x + 1 }
+fn add_two(x: int) -> int { return x + 2 }
+fn add_three(x: int) -> int { return x + 3 }
+
+fn apply(f: fn(int) -> int, x: int) -> int { return f(x) }
+
+fn main() {
+    // PASSED as an argument: the mint never becomes a CallValue operand here.
+    let a = apply(add_one, 1)
+    // STORED in a local first, then called through the cell.
+    let g = add_two
+    let b = g(2)
+    // Called through a local bound directly from the mint.
+    let h = add_three
+    let d = apply(h, 3)
+    print("{a} {b} {d}")
+}
+"#,
+    );
+    assert!(c.accounts(), "accounting identity broken: {c:?}");
+    // The DENOMINATOR must contain them, or every assertion below is vacuous.
+    assert!(
+        c.symbol_mints >= 3,
+        "the fixture minted fewer than its three fn values, so the join is untested: {c:?}"
+    );
+    // Every mint joined: none fell into an unjoined cause.
+    let mint_op_examined = c.examined_by_op.get("fn-value").copied().unwrap_or(0);
+    let mint_op_joined = c.joined_by_op.get("fn-value").copied().unwrap_or(0);
+    assert_eq!(
+        mint_op_examined, c.symbol_mints,
+        "a mint was examined under an operation other than `fn-value`: {c:?}"
+    );
+    assert_eq!(
+        mint_op_joined, mint_op_examined,
+        "a fn-value mint did not join against the graph's `FnValue` obligation: {c:?}"
+    );
+}
+
+/// The mint's RECORD is compared, not merely present: a record naming a
+/// different function must be refused.
+///
+/// One side only -- the recorded declaration is perturbed while the emitted
+/// instruction, its site and the graph are untouched, so the graph still
+/// resolves the mint to the function the source actually named. Perturbing the
+/// source instead would move both sides and could not fail.
+#[test]
+fn a_mint_recording_the_wrong_function_is_a_decl_mismatch() {
     let ws = check(
         r#"
 fn add_one(x: int) -> int { return x + 1 }
-fn take(f: fn(int) -> int) -> int { return f(1) }
-fn main() { print("{take(add_one)}") }
+fn add_two(x: int) -> int { return x + 2 }
+fn apply(f: fn(int) -> int, x: int) -> int { return f(x) }
+fn main() { print("{apply(add_one, 1)}") }
 "#,
     );
-    let mf = prepared_body(&ws, "main");
-    let minted: usize = mf.fn_value_symbols.len()
-        + mf.nested_fns.iter().map(|n| n.fn_value_symbols.len()).sum::<usize>();
-    assert!(
-        minted > 0,
-        "`add_one` used as a value minted no recorded symbol, so the fail-open \
-         check has nothing to compare against"
+    let mut mf = prepared_body(&ws, "main");
+    let mint = *mf
+        .fn_value_symbols
+        .keys()
+        .next()
+        .expect("`add_one` used as a value minted no recorded symbol");
+    let recorded = mf.fn_value_symbols[&mint];
+    assert_eq!(
+        ws.module(recorded.module).functions[recorded.func].name.as_str(),
+        "add_one",
+        "the fixture recorded the wrong function before any mutation"
+    );
+
+    // The ALIEN declaration, taken from the workspace rather than invented.
+    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    let (fid, _) = ws
+        .module(mid)
+        .functions
+        .iter()
+        .find(|(_, f)| f.name.as_str() == "add_two")
+        .expect("`add_two`");
+    let alien = skull_mir::mir::FuncRef { module: mid, func: fid };
+    assert_ne!(alien, recorded, "the alien must differ, or the swap is a no-op");
+    mf.fn_value_symbols.insert(mint, alien);
+
+    // The graph still resolves the mint's site to `add_one`, so the comparison
+    // has two disagreeing sides.
+    let (ws2, mut g) = graph_of(
+        r#"
+fn add_one(x: int) -> int { return x + 1 }
+fn add_two(x: int) -> int { return x + 2 }
+fn apply(f: fn(int) -> int, x: int) -> int { return f(x) }
+fn main() { print("{apply(add_one, 1)}") }
+"#,
+    );
+    let bodies = skull::concrete_body::build(&ws2, &mut g);
+    let resolved = bodies
+        .bodies
+        .values()
+        .flat_map(|b| b.fn_values.values())
+        .find(|c| ws2.module(c.instance().func.module).functions[c.instance().func.func]
+            .name
+            .as_str()
+            == "add_one")
+        .expect("the graph must resolve the mint to `add_one`");
+    assert_eq!(
+        skull::site_join::check_callee(&ws2, &g, resolved, alien, None),
+        skull::site_join::CalleeCheck::DeclMismatch,
+        "a mint recording another function was accepted"
+    );
+    // CONTROL: the function the source actually named still verifies.
+    assert_eq!(
+        skull::site_join::check_callee(&ws2, &g, resolved, resolved.instance().func, None),
+        skull::site_join::CalleeCheck::NonGeneric,
+        "the correct declaration stopped verifying, so the rejection proves nothing"
     );
 }
 
@@ -1117,10 +1222,17 @@ fn main() {
 "#,
     );
     assert!(c.accounts(), "accounting identity broken: {c:?}");
-    // The default's `seed()` call is unattributed BY DESIGN.
+    // The default's `seed()` call is unattributed BY DESIGN, under its OWN
+    // cause -- not `no-site`, which would make it indistinguishable from a call
+    // lowering simply forgot to stamp.
     assert!(
-        c.unjoined.get(&Unjoined::NoSite).copied().unwrap_or(0) > 0,
+        c.unjoined.get(&Unjoined::ForeignArena).copied().unwrap_or(0) > 0,
         "the struct-default call was stamped against the owner's arena: {c:?}"
+    );
+    assert_eq!(
+        c.unjoined.get(&Unjoined::NoSite).copied().unwrap_or(0),
+        0,
+        "a foreign-arena call was filed as an ordinary missing stamp: {c:?}"
     );
     // CONTROL: the enclosing body's own calls are unaffected.
     assert!(c.joined > 0, "suppression leaked to the enclosing body: {c:?}");
