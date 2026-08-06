@@ -322,39 +322,102 @@ fn main() { print("{portable("x")}") }
     );
 }
 
-/// TWO declarations of one name and one rendered signature that the language
-/// does NOT group -- a repeated backend -- stay distinct.
+/// TWO declarations sharing ONE NAME and ONE RENDERED SIGNATURE that the
+/// language does NOT group stay distinct AT THE CONSUMER.
 ///
-/// `backend_variant_group` refuses a repeated backend, so each declaration is
-/// its own group and neither is a sibling of the other. Asserted on the
-/// selector rather than through a program, because bone rejects the ambiguous
-/// CALL before a census could see it: what is being pinned is that the
-/// comparison the join makes cannot be satisfied by name and signature alone.
+/// This drives `check_callee` itself, not just the grouping oracle, and the
+/// pair is deliberately name-and-signature IDENTICAL: a join that became
+/// permissive by name, or by rendered signature, would accept the wrong callee
+/// while a test of `backend_variant_group` alone stayed green. Two
+/// `inline(lua)` declarations of one signature are a REPEATED backend, which
+/// bone refuses to collapse, so neither is a sibling of the other.
+///
+/// Synthetic because bone rejects the ambiguous CALL before a census could
+/// reach it -- the instances are built directly and fed to the comparison.
 #[test]
-fn a_repeated_backend_pair_is_not_one_declaration() {
+fn a_declaration_the_language_does_not_group_is_refused_by_the_join() {
     let ws = check(
         r#"
 inline(lua) fn twice(a: string) -> bool = """
     return a == ""
 """
+inline(lua) fn twice(a: string) -> bool = """
+    return a ~= ""
+"""
+
+fn main() { print("x") }
 "#,
     );
+    let g = graph_of(&ws);
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
-    let (fid, _) = ws
+    let decls: Vec<skull_mir::mir::FuncRef> = ws
         .module(mid)
         .functions
         .iter()
-        .find(|(_, f)| f.name.as_str() == "twice")
-        .expect("twice");
-    let mine = skull_mir::mir::FuncRef { module: mid, func: fid };
-    // The stdlib's `__op_eq` overload set is the repeated-backend population
-    // this repo actually has: six declarations, five of them `Lua`. None of
-    // them groups with another, so each is its own representative.
+        .filter(|(_, f)| f.name.as_str() == "twice")
+        .map(|(fid, _)| skull_mir::mir::FuncRef { module: mid, func: fid })
+        .collect();
+    assert_eq!(
+        decls.len(),
+        2,
+        "the fixture needs two same-name same-signature declarations: {decls:?}"
+    );
+    // Neither groups with the other, which is what makes them two callees.
+    for r in &decls {
+        assert_eq!(skull_mir::lower::backend_variant_group(&ws, *r), vec![*r]);
+    }
+    let inst = |r: skull_mir::mir::FuncRef| skull::instance_graph::Instance {
+        func: r,
+        args: Vec::new(),
+    };
+    let lua = bone_semantic::hir::FnBackend::Lua;
+
+    // CONTROL: an exact match joins, or the refusal below proves nothing.
+    assert_eq!(
+        skull::site_join::check_callee(
+            &ws,
+            &g,
+            &skull::concrete_body::Callee::Rock(inst(decls[0])),
+            decls[0],
+            None,
+            lua,
+        )
+        .outcome(),
+        Ok(skull::site_join::Verified::NonGeneric),
+    );
+
+    // The defect: the FIRST declaration's instance offered for a call that
+    // targets the SECOND. Same name, same rendered signature, different body.
+    assert_eq!(
+        skull::site_join::check_callee(
+            &ws,
+            &g,
+            &skull::concrete_body::Callee::Rock(inst(decls[0])),
+            decls[1],
+            None,
+            lua,
+        )
+        .outcome(),
+        Err(Unjoined::CalleeMismatch),
+        "a declaration the language does not group was accepted as the callee"
+    );
+}
+
+/// The repeated-backend population this repo actually has, asserted on the
+/// grouping oracle the consumer above delegates to.
+///
+/// `__op_eq` has six declarations, five of them `Lua`. bone refuses a repeated
+/// backend, so none of them groups with another -- which is what makes the
+/// consumer's refusal reachable for a real overload set rather than only for
+/// the synthetic pair.
+#[test]
+fn a_repeated_backend_pair_is_not_one_declaration() {
+    let ws = check("fn main() { print(\"x\") }");
+    let all = ws.functions_by_name.get(&Ustr::from("__op_eq")).expect("declared");
+    assert!(all.len() > 2, "the repeated-backend population is the point: {}", all.len());
     let ops = skull_mir::lower::dispatched_callee_decls(&ws, "__op_eq");
     assert_eq!(ops.len(), 1, "the callable `__op_eq` is unique: {ops:?}");
-    let all = ws.functions_by_name.get(&Ustr::from("__op_eq")).expect("declared").len();
-    assert!(all > 2, "the repeated-backend population is the point: {all}");
-    for &(m, f) in ws.functions_by_name.get(&Ustr::from("__op_eq")).unwrap() {
+    for &(m, f) in all.iter() {
         let r = skull_mir::mir::FuncRef { module: m, func: f };
         let group = skull_mir::lower::backend_variant_group(&ws, r);
         assert_eq!(
@@ -363,6 +426,4 @@ inline(lua) fn twice(a: string) -> bool = """
             "a repeated-backend declaration was grouped with a sibling: {group:?}"
         );
     }
-    // CONTROL: the selector still answers for a declaration with no siblings.
-    assert_eq!(skull_mir::lower::canonical_variant(&ws, mine), mine);
 }

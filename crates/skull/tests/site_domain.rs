@@ -323,3 +323,139 @@ fn main() { let c = Cfg { m: 1 } print("{c.a + c.m}") }
         "{residue} of {examined} defaults-body expressions belong to no field subtree"
     );
 }
+
+// ---------------------------------------------------------------------------
+// PINNED BUG: a generic struct's field default names no instance
+// ---------------------------------------------------------------------------
+
+/// PINNED BUG. A generic struct's field DEFAULT is injected once per literal,
+/// but the injections are indistinguishable and neither of them names a
+/// concrete instance.
+///
+/// `struct Box<T> { value: T? = seed() }` with `let a: Box<int> = Box {}` and
+/// `let b: Box<string> = Box {}` is a legal program that compiles and runs. Two
+/// `seed()` call instructions reach MIR. What SHOULD happen is that each names
+/// its own instance -- `seed<int>` and `seed<string>` -- and joins.
+///
+/// What happens today, measured rather than assumed:
+///
+/// - bone leaves the callee's type variable UNSOLVED inside the
+///   `BodyOwner::StructDefaults` body. The field's declared type `T?` does not
+///   propagate to the initializer's generic, so `monoty::convert` answers
+///   `unresolved-infer` -- there is no `Generic` node for the struct's `T` to
+///   substitute, which is why carrying the struct's substitution into the
+///   defaults body does NOT fix this (tried, measured, still red).
+/// - lowering therefore emits a call to the SHARED generic body
+///   (`seed_ret_T_opt`), for both literals.
+/// - the walk records an obligation it cannot resolve, and reports a
+///   `UnconstrainedTypeVar` rejection against a legal program.
+/// - `SiteDomain::StructDefaults` keys on the struct DECLARATION, so both
+///   injections collapse onto one obligation and the census reports two
+///   `site-not-in-body` rows.
+///
+/// The inference gap is `bone-inference`'s, which is author-owned, so this is
+/// pinned rather than fixed. It is a REAL prerequisite for the instance-owned
+/// emission cut: that cut requires every direct call to name exactly one
+/// concrete instance, and here none is determined.
+///
+/// **When this goes red the gap closed.** Flip every assertion below to its
+/// stated correct form -- 0 `site-not-in-body`, 0 rejections, and two DISTINCT
+/// `SiteDomain::StructDefaults` args -- in the same commit as the fix.
+#[test]
+fn a_generic_structs_field_default_names_no_instance_sentinel() {
+    let src = r#"
+fn seed<T>() -> T? { return null }
+
+struct Box<T> { value: T? = seed() }
+
+fn main() {
+    let a: Box<int> = Box {}
+    let b: Box<string> = Box {}
+    print("{a.value} {b.value}")
+}
+"#;
+    let ws = check(src);
+
+    // The population: BOTH literals really do inject a call, so the counts
+    // below are over two obligations rather than over an empty space.
+    let stamped = stamped_domains(&ws, "main");
+    let defaults: Vec<&(SiteDomain, u32)> = stamped
+        .iter()
+        .filter(|(d, _)| matches!(d, SiteDomain::StructDefaults { .. }))
+        .collect();
+    assert_eq!(
+        defaults.len(),
+        2,
+        "the fixture must inject the default twice, else nothing below is \
+         measured over the defect: {stamped:?}"
+    );
+
+    // PINNED (BUG): the two injections carry the SAME site, because the domain
+    // keys on the struct declaration and not on its instantiation. CORRECT
+    // would be `assert_ne!` -- `Box<int>` and `Box<string>` are two
+    // instantiations of one defaults body.
+    assert_eq!(
+        defaults[0], defaults[1],
+        "PINNED BEHAVIOR (BUG): two instantiations of one generic struct's \
+         defaults share one site. If these now differ, the domain became \
+         instance-aware -- flip to assert_ne! and expect two obligations."
+    );
+
+    let c = census_of(src);
+    assert!(c.accounts(), "accounting identity broken: {c:?}");
+    // PINNED (BUG): CORRECT would be 0. Both calls reach MIR with no obligation
+    // the walk can resolve for them.
+    assert_eq!(
+        unjoined(&c, Unjoined::SiteNotInBody),
+        2,
+        "PINNED BEHAVIOR (BUG): a generic struct default's calls do not join. \
+         If this is now 0, the instantiation is decided -- flip to 0."
+    );
+
+    // PINNED (BUG): the walk rejects a LEGAL program. CORRECT would be 0
+    // rejections.
+    let g = graph_of(&ws);
+    let unconstrained = g
+        .rejections
+        .iter()
+        .filter(|r| {
+            matches!(r.kind, skull::instance_graph::RejectionKind::UnconstrainedTypeVar)
+        })
+        .count();
+    assert_eq!(
+        unconstrained, 1,
+        "PINNED BEHAVIOR (BUG): a legal generic-struct default is reported as \
+         an unconstrained type variable. If this is now 0, bone solves the \
+         initializer's generic -- flip to 0."
+    );
+}
+
+/// CONTROL for the sentinel above: a NON-generic struct's default joins, and a
+/// generic struct whose default calls a NON-generic function also joins.
+///
+/// Without this the sentinel could pass because struct defaults are broken in
+/// general rather than because the GENERIC instantiation is undetermined.
+#[test]
+fn a_generic_structs_default_calling_a_non_generic_fn_still_joins() {
+    let src = r#"
+fn tick() -> int { return 1 }
+
+struct Plain { n: int = tick() }
+struct Box<T> { n: int = tick() }
+
+fn main() {
+    let p = Plain {}
+    let a: Box<int> = Box {}
+    let b: Box<string> = Box {}
+    print("{p.n + a.n + b.n}")
+}
+"#;
+    let c = census_of(src);
+    assert!(c.accounts(), "accounting identity broken: {c:?}");
+    assert!(c.joined > 0, "the fixture joined nothing: {c:?}");
+    assert_eq!(
+        unjoined(&c, Unjoined::SiteNotInBody),
+        0,
+        "a struct default whose callee is NON-generic must still join: {c:?}"
+    );
+}

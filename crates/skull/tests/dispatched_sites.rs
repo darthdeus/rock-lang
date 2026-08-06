@@ -286,6 +286,76 @@ fn main() { print(show_p(P { x: 1, y: 2 })) print(show_f(1.5)) }
     assert_dispatched_population(&census_of(src), 2);
 }
 
+/// The `%` and `b` conversions and the GROUPING separator each call their own
+/// stdlib helper, and each is paired with the nearest spec that calls nothing.
+///
+/// None of the three has any population in the 26-project corpus, so this is
+/// the only evidence they are covered at all. They are separate arms of
+/// `FormatPlan`, not one repeated: `special` replaces the printf conversion
+/// while `grouping` wraps whatever the conversion produced, and `needs_pad`
+/// then depends on both.
+#[test]
+fn the_percent_binary_and_grouping_helpers_join_and_their_controls_do_not() {
+    let src = r#"
+fn pct(x: float) -> string { return "{x:%}" }
+fn pct_plain(x: float) -> string { return "{x:f}" }
+fn bin(x: int) -> string { return "{x:b}" }
+fn bin_plain(x: int) -> string { return "{x:x}" }
+fn grouped(x: int) -> string { return "{x:,}" }
+fn grouped_plain(x: int) -> string { return "{x:d}" }
+fn main() {
+    print(pct(0.5)) print(pct_plain(0.5))
+    print(bin(5)) print(bin_plain(5))
+    print(grouped(1000)) print(grouped_plain(1000))
+}
+"#;
+    let ws = check(src);
+    let empty: Vec<&'static str> = Vec::new();
+
+    assert_eq!(dispatched_in(&ws, "pct"), vec!["__rock_fmt_percent"]);
+    assert_eq!(walk_dispatched_in(&ws, "pct"), vec!["__rock_fmt_percent"]);
+    assert_eq!(dispatched_in(&ws, "pct_plain"), empty, "a plain `f` calls nothing");
+    assert_eq!(walk_dispatched_in(&ws, "pct_plain"), empty);
+
+    assert_eq!(dispatched_in(&ws, "bin"), vec!["__rock_fmt_binary"]);
+    assert_eq!(walk_dispatched_in(&ws, "bin"), vec!["__rock_fmt_binary"]);
+    assert_eq!(dispatched_in(&ws, "bin_plain"), empty, "a plain `x` calls nothing");
+    assert_eq!(walk_dispatched_in(&ws, "bin_plain"), empty);
+
+    assert_eq!(dispatched_in(&ws, "grouped"), vec!["__rock_fmt_grouping"]);
+    assert_eq!(walk_dispatched_in(&ws, "grouped"), vec!["__rock_fmt_grouping"]);
+    assert_eq!(dispatched_in(&ws, "grouped_plain"), empty, "a plain `d` calls nothing");
+    assert_eq!(walk_dispatched_in(&ws, "grouped_plain"), empty);
+
+    assert_dispatched_population(&census_of(src), 3);
+}
+
+/// GROUPING plus a WIDTH pads as well, and grouping alone does not.
+///
+/// `needs_pad` is a function of the grouping and the width together, so a
+/// fixture with only one of them cannot distinguish "pad is called" from "pad
+/// is never called".
+#[test]
+fn grouping_with_a_width_also_pads_and_grouping_alone_does_not() {
+    let ws = check(
+        r#"
+fn wide(x: int) -> string { return "{x:10,}" }
+fn narrow(x: int) -> string { return "{x:,}" }
+fn main() { print(wide(1000)) print(narrow(1000)) }
+"#,
+    );
+    assert_eq!(
+        dispatched_in(&ws, "wide"),
+        vec!["__rock_fmt_grouping", "__rock_fmt_pad"]
+    );
+    assert_eq!(
+        walk_dispatched_in(&ws, "wide"),
+        vec!["__rock_fmt_grouping", "__rock_fmt_pad"]
+    );
+    assert_eq!(dispatched_in(&ws, "narrow"), vec!["__rock_fmt_grouping"]);
+    assert_eq!(walk_dispatched_in(&ws, "narrow"), vec!["__rock_fmt_grouping"]);
+}
+
 // ---------------------------------------------------------------------------
 // Equality: the structural arm against its nearest primitive controls
 // ---------------------------------------------------------------------------
