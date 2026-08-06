@@ -29,7 +29,7 @@ impl Builder<'_> {
         if let Callee::Unresolved { name, .. } = callee {
             if matches!(name.as_str(), "inspect" | "inspect_formatted") {
                 if let Some(&arg) = arg_idxs.first() {
-                    if let Some(elem) = self.vec_column_elem_of(arg) {
+                    if let Some(elem) = self.vec_column_elem_of(arg)? {
                         if self.is_nobox_struct(elem.name) {
                             return Err(CompilerError::new_with_label(
                                 self.body.expr_spans[e],
@@ -143,7 +143,7 @@ impl Builder<'_> {
         if let Callee::Unresolved { name, .. } = callee {
             if matches!(name.as_str(), "push" | "vec_push") {
                 if let [recv, item] = arg_idxs[..] {
-                    if let Some(elem) = self.vec_column_elem_of(recv) {
+                    if let Some(elem) = self.vec_column_elem_of(recv)? {
                         return self.column_push(recv, item, elem);
                     }
                 }
@@ -170,13 +170,13 @@ impl Builder<'_> {
             // the opaque body would hand back a `_data` table that every later
             // column access then indexes as nil.
             if name.as_str() == "__vec_data_alloc" && arg_idxs.len() == 1 {
-                if let Some(elem) = self.vec_column_elem_of(e) {
+                if let Some(elem) = self.vec_column_elem_of(e)? {
                     let capacity = self.lower_expr(arg_idxs[0])?;
                     return Ok(ValueRepr::Scalar(self.empty_column_vec(elem, capacity)?));
                 }
             }
             if name.as_str() == "vec_new" && arg_idxs.is_empty() {
-                if let Some(elem) = self.vec_column_elem_of(e) {
+                if let Some(elem) = self.vec_column_elem_of(e)? {
                     let capacity = self.emit_cur(Inst::Const(Lit::Int(0)));
                     return Ok(ValueRepr::Scalar(self.empty_column_vec(elem, capacity)?));
                 }
@@ -194,12 +194,12 @@ impl Builder<'_> {
             // `map_new()` is the Map's `vec_new`: its value type comes from the
             // CALL's own type, so it cannot be read off an argument.
             if name.as_str() == "map_new" && arg_idxs.is_empty() {
-                if let Some(elem) = self.map_column_value_of(e) {
+                if let Some(elem) = self.map_column_value_of(e)? {
                     return Ok(ValueRepr::Scalar(self.empty_column_map(elem)?));
                 }
             }
             if name.as_str() == "__rock_vec_from_lua_array" {
-                if let ([raw, len], Some(elem)) = (&arg_idxs[..], self.vec_column_elem_of(e)) {
+                if let ([raw, len], Some(elem)) = (&arg_idxs[..], self.vec_column_elem_of(e)?) {
                     let raw = self.lower_expr(*raw)?;
                     let len = self.lower_expr(*len)?;
                     return Ok(ValueRepr::Scalar(
@@ -440,7 +440,15 @@ impl Builder<'_> {
         func: FuncRef,
     ) -> Result<Option<(SpecKey, SpecSubst)>, CompilerError> {
         let Some(inf) = self.inf else { return Ok(None) };
-        let spec = compute_call_spec(self.ws, inf, e, func, self.spec_subst, self.scx.target)?;
+        let spec = compute_call_spec(
+            self.ws,
+            inf,
+            e,
+            func,
+            self.spec_subst,
+            self.scx.target,
+            self.scx.total_specialization(),
+        )?;
         // Stage-0e census. Recorded HERE rather than inside `compute_call_spec`
         // because the classification needs no context and the record needs the
         // caller's name and the call's span, which only the Builder has.
@@ -468,7 +476,7 @@ impl Builder<'_> {
                 if let Some(d) = key
                     .iter()
                     .flatten()
-                    .map(crate::lower::shape::reified_depth)
+                    .map(crate::lower::shape::growth_depth)
                     .max()
                     .filter(|d| *d > crate::lower::shape::ABLATION_GROWTH_DEPTH)
                 {
@@ -516,7 +524,11 @@ impl Builder<'_> {
         func: FuncRef,
     ) -> Result<Option<(SpecKey, SpecSubst)>, CompilerError> {
         Ok(self.call_spec(e, func)?.filter(|(k, _)| {
-            !self.in_unspliced_ctx || spec_key_has_target_storage(self.ws, k, self.scx.target)
+            // A total-specialization target has no shared body to fall back to,
+            // so the unspliced-context narrowing does not apply.
+            self.scx.total_specialization()
+                || !self.in_unspliced_ctx
+                || spec_key_has_target_storage(self.ws, k, self.scx.target)
         }))
     }
 
@@ -540,7 +552,7 @@ impl Builder<'_> {
         func: FuncRef,
     ) -> Result<Option<TupleRetShape>, CompilerError> {
         let spec = self.call_spec_for_target(e, func)?;
-        let empty = SpecSubst::new();
+        let empty = SpecSubst::default();
         let subst = spec.as_ref().map_or(&empty, |(_, s)| s);
         let Some(ret) = self.ws.module(func.module).functions[func.func].return_ty else {
             return Ok(None);
@@ -637,12 +649,12 @@ impl Builder<'_> {
         {
             return Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))));
         }
-        let empty_subst = SpecSubst::new();
+        let empty_subst = SpecSubst::default();
         let subst = spec.as_ref().map_or(&empty_subst, |(_, s)| s);
         let scalar_abi = fn_scalar_abi_spec(self.ws, self.scx, func, subst);
         let Some(scalar_abi) = scalar_abi else {
             self.reject_nobox_boxed_call_args(func, arg_idxs)?;
-            self.reject_column_container_opaque_args(func, arg_idxs)?;
+            self.reject_column_container_opaque_slots(e, func)?;
             let args = if any_named {
                 self.reorder_named_args(arg_idxs, func)?
             } else {
@@ -914,24 +926,32 @@ impl Builder<'_> {
             // literal operand is elided) and place each into its param slot.
             if self.body.spread_args.contains(&a) {
                 for (fname, r) in self.spread_field_reprs(a)? {
-                    if let Some(pidx) = param_names.iter().position(|p| *p == fname) {
-                        slots[pidx] = Some(r);
-                    }
+                    let pidx = param_names.iter().position(|p| *p == fname).ok_or_else(|| {
+                        gap(format!("spread field `{fname}` matches no parameter"))
+                    })?;
+                    slots[pidx] = Some(r);
                 }
                 continue;
             }
             let r = self.lower_expr_repr(a)?;
             let pidx = match self.body.arg_names.get(&a) {
-                Some(nm) => param_names.iter().position(|p| p == nm).unwrap_or(next_pos),
+                Some(nm) => param_names
+                    .iter()
+                    .position(|p| p == nm)
+                    .ok_or_else(|| gap(format!("named argument `{nm}` matches no parameter")))?,
                 None => {
                     let i = next_pos;
                     next_pos += 1;
                     i
                 }
             };
-            if pidx < slots.len() {
-                slots[pidx] = Some(r);
+            if pidx >= slots.len() {
+                return Err(gap(format!(
+                    "argument lands in slot {pidx} of {} parameters",
+                    slots.len()
+                )));
             }
+            slots[pidx] = Some(r);
         }
         let hi = slots.iter().rposition(|s| s.is_some()).map_or(0, |i| i + 1);
         let mut out = Vec::new();
@@ -1084,7 +1104,11 @@ impl Builder<'_> {
             .into_iter()
             .enumerate()
             .map(|(i, p)| {
-                let fname = names.get(i).copied().unwrap_or(name);
+                // A Group's parts are the nominal's declared fields, so the two
+                // always line up. Naming a part after its STRUCT instead would
+                // emit a ctor field the type does not have, and duplicate it for
+                // every part -- fabricated identity, not a usable fallback.
+                let fname = *names.get(i).expect("a Group's parts are its nominal's declared fields");
                 (fname, self.pack(p))
             })
             .collect();

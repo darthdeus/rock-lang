@@ -47,6 +47,10 @@ pub const JS_INTRINSICS: &[(&str, usize, &str)] = &[
     ("round", 1, "Math.floor($1 + 0.5)"),
     ("sign", 1, "Math.sign($1)"),
     ("fract", 1, "($1 - Math.floor($1))"),
+    // Reference identity (stdlib `same_ref`). `===` on two objects is JS
+    // identity, the same question luajit's `rawequal` answers; on primitives
+    // both reduce to value equality, which is also what identity means there.
+    ("same_ref", 2, "($1 === $2)"),
     // IEEE non-finite predicates (docs/shaders.md bvec tier). isinf excludes NaN
     // (a NaN is neither finite nor infinite). any/greater_than/to_vec3 co-emit
     // their portable Rock bodies -- no JS row.
@@ -530,7 +534,10 @@ function deepcopy(obj) { return __rock_deepcopy_value(obj, new Map()); }
 /// / `_log_throttled_*_impl`) route here. `__stone_emit`'s no-sink fallback is
 /// `print("[cat] msg")`, so lines land in the same per-test buffer as `print`.
 /// The one Rock global (`__stone_log_level`) lives in `__G` (unified with the
-/// module-globals path); dedup/throttle/now are bare vars (never Rock globals).
+/// module-globals path); dedup/throttle/counts/sites/now are bare vars (never
+/// Rock globals). `_log_once_impl` COUNTS rather than flagging, and the throttle
+/// impl records its own counts, because `log_suppression_summary` reports the
+/// totals -- a boolean dedup cannot answer "this site fired 38k times".
 /// `__stone_log_now` uses `Date.now()` as the os.clock() analog (the fallback
 /// test uses a huge interval, so the absolute value never matters).
 pub const JS_LOG_RUNTIME: &str = r#"
@@ -555,6 +562,9 @@ var __stone_log_counts = {};
 var __stone_log_sites = {};
 var __stone_log_summary_done = false;
 var __stone_log_throttle = {};
+var __stone_log_counts = {};
+var __stone_log_sites = {};
+var __stone_log_summary_done = false;
 var __stone_log_now_override = null;
 function _log_once_impl(category, msg, site) {
   __stone_log_init();
@@ -687,18 +697,21 @@ var __ROCK_WEB_ASSETS = (typeof globalThis.__ROCK_WEB_ASSETS === "object" && glo
 var __SW = {
   gl: null, canvas: null,
   logicalW: 0, logicalH: 0, dpr: 1,
+  // GameConfig.resizable, carried from stone_create_window_ex: decides whether
+  // the drawable buffer follows the container (see __sw_sync_canvas_size).
+  resizable: false,
   initialized: false, quitReq: false, resized: false,
   events: [], mouseX: 0, mouseY: 0,
   // Polled input state (stone_is_key_down / _is_mouse_button_down): keyed by the
   // SDL key STRING (sdl_keycode_to_string vocabulary) and 1-based button index.
   keysDown: {}, mouseButtons: {},
-  texFilter: 0, // 0 nearest, 1 linear
   // one handle space for images AND canvas textures: handle -> WebGLTexture
   textures: {}, nextTex: 1, whiteImage: 0,
   // images: boot decodes path -> ImageBitmap (no GL yet); stone_load_image
-  // creates the GL texture lazily+synchronously (GL exists by @init) and caches
-  // path -> handle; handle -> {w,h} feeds get_image_size.
-  imageBitmaps: {}, imageHandles: {}, imageSizes: {},
+  // creates the GL texture lazily+synchronously (GL exists by @init).
+  // handle -> {w,h} feeds get_image_size.
+  imageBitmaps: {}, imageSizes: {},
+  imageData: {}, nextImageData: 0, imageRepeat: {}, samplers: {},
   canvases: {}, nextCanvas: 1, boundCanvas: 0, // 0 = default framebuffer
   shaders: {}, nextShader: 1, curShader: 0,
   meshVbo: null, // shared STREAM_DRAW vertex buffer
@@ -812,6 +825,7 @@ function stone_get_backend_name_js() { return "stone-web"; }
 
 function stone_create_window_ex(title, x, y, width, height, display, resizable, fullscreen) {
   if (fullscreen) { __sw_log_once("stone_create_window_ex: fullscreen=" + fullscreen + " ignored; the browser only enters fullscreen from a user gesture, so the canvas boots windowed"); }
+  __SW.resizable = !!resizable;
   var fake = globalThis.__STONE_WEB_FAKE_ENV;
   if (fake) {
     __SW.gl = fake.gl;
@@ -870,6 +884,36 @@ function stone_create_window_ex(title, x, y, width, height, display, resizable, 
   return { __sw_window: true };
 }
 
+// Per-rAF: keep the drawable buffer at logical-extent x dpr.
+//
+// Only a RESIZABLE game takes its logical extent from the container. A
+// non-resizable one is authored in absolute pixels (games/sample-game-b,
+// games/sample-game lay out against a literal 1280x720) and a responsive
+// container would otherwise move screen_size() out from under it every frame.
+//
+// dpr is tracked for both: density changes the buffer's resolution, not the
+// logical extent games measure against, so honoring it costs a non-resizable
+// game nothing and is what keeps the output-density font atlas correct on HiDPI.
+function __sw_sync_canvas_size() {
+  var canvas = __SW.canvas;
+  if (!canvas || typeof window === "undefined") return;
+  var logicalW = __SW.logicalW;
+  var logicalH = __SW.logicalH;
+  if (__SW.resizable) {
+    var rect = canvas.getBoundingClientRect();
+    logicalW = Math.max(1, Math.round(rect.width));
+    logicalH = Math.max(1, Math.round(rect.height));
+  }
+  var dpr = window.devicePixelRatio || 1;
+  var drawableW = Math.round(logicalW * dpr);
+  var drawableH = Math.round(logicalH * dpr);
+  if (__SW.logicalW === logicalW && __SW.logicalH === logicalH && __SW.dpr === dpr
+      && canvas.width === drawableW && canvas.height === drawableH) return;
+  __SW.logicalW = logicalW; __SW.logicalH = logicalH; __SW.dpr = dpr;
+  canvas.width = drawableW; canvas.height = drawableH;
+  __SW.resized = true;
+}
+
 // --- events / input ---
 function stone_poll_event(ev) {
   var q = __SW.events;
@@ -894,7 +938,6 @@ function stone_get_dpi_scale() { return __SW.dpr; }
 function stone_take_window_resized() { var r = __SW.resized; __SW.resized = false; return r; }
 function stone_gl_finish() { if (__SW.gl && __SW.gl.finish) __SW.gl.finish(); }
 function stone_gl_flush() { if (__SW.gl && __SW.gl.flush) __SW.gl.flush(); }
-function stone_set_default_texture_filter(f) { __SW.texFilter = f; }
 
 // --- sprite system / mesh draw ---
 function stone_sprite_init() {
@@ -910,23 +953,24 @@ function stone_sprite_init() {
 // The layout is the CALLER's, same contract as the native stone_draw_mesh:
 // component counts in location order, offsets accumulated from them. Nothing
 // here states the sprite vertex; the Rock `Vertex` struct owns it and the
-// caller derives both numbers from it. Fails closed if no program bound.
+// caller derives both numbers from it. Returns -1 for no draw, 0 for an
+// untextured draw, and 1 when the texture was bound.
 function stone_draw_mesh(data, count, stride, attr_sizes, attr_count, tex) {
   var gl = __SW.gl;
-  if (!gl || count <= 0) return;
+  if (!gl || count <= 0) return -1;
   var sh = __SW.shaders[__SW.curShader];
   if (!sh) {
     __sw_log_once("stone_draw_mesh: no shader bound; skipping");
-    return;
+    return -1;
   }
   gl.useProgram(sh.prog);
   var t = __SW.textures[tex];
+  var textureBound = false;
   if (t) {
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, t);
-    var lt = __sw_uloc(sh, "uTexture");
-    if (lt) gl.uniform1i(lt, 0);
     if (__SW.unitInt) __SW.unitInt[0] = false;
+    textureBound = true;
   }
   __sw_fix_stale_int_units(gl, sh);
   gl.bindBuffer(gl.ARRAY_BUFFER, __SW.meshVbo);
@@ -936,13 +980,13 @@ function stone_draw_mesh(data, count, stride, attr_sizes, attr_count, tex) {
     var n = attr_sizes[i];
     if (n < 1 || n > 4) {
       __sw_log_once("stone_draw_mesh: attr sizes must be 1..4, got " + n);
-      return;
+      return -1;
     }
     sum += n;
   }
   if (sum !== stride) {
     __sw_log_once("stone_draw_mesh: attr sizes sum to " + sum + " but stride is " + stride);
-    return;
+    return -1;
   }
   var sb = stride * 4;
   var off = 0;
@@ -952,9 +996,10 @@ function stone_draw_mesh(data, count, stride, attr_sizes, attr_count, tex) {
     off += attr_sizes[i];
   }
   gl.drawArrays(gl.TRIANGLES, 0, count);
+  __sw_mark_drawn(sh);
+  return textureBound ? 1 : 0;
 }
 
-var __SW_IDENTITY = new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]);
 var __sw_logged = {};
 function __sw_log_once(msg) {
   if (__sw_logged[msg]) return;
@@ -962,10 +1007,16 @@ function __sw_log_once(msg) {
   console.error("[STONE-WEB] " + msg);
 }
 
+function stone_set_canvas_active(h, w, hh) {
+  var c = __SW.canvases[h];
+  if (!c) return;
+  c.activeW = Math.min(Math.max(w, 1), c.w);
+  c.activeH = Math.min(Math.max(hh, 1), c.h);
+}
 function __sw_target_size() {
   if (__SW.boundCanvas !== 0) {
     var c = __SW.canvases[__SW.boundCanvas];
-    if (c) return [c.w, c.h];
+    if (c) return [c.activeW || c.w, c.activeH || c.h];
   }
   return [Math.round(__SW.logicalW * __SW.dpr), Math.round(__SW.logicalH * __SW.dpr)];
 }
@@ -976,26 +1027,20 @@ function __sw_target_size() {
 function __sw_ortho_size() {
   if (__SW.boundCanvas !== 0) {
     var c = __SW.canvases[__SW.boundCanvas];
-    if (c) return [c.w, c.h];
+    // ACTIVE, not capacity: binding viewports and scissors to the active rect
+    // and the ortho has to describe that same rectangle, or the world projects
+    // to one place and rasterizes at another (stone-rs reports the active
+    // extent as CURRENT_TARGET_SIZE for exactly this reason).
+    if (c) return [c.activeW || c.w, c.activeH || c.h];
   }
   return [__SW.logicalW, __SW.logicalH];
 }
 
-// Ortho uProjection (2/w, -2/h Y-down, sized to the bound target), uView =
-// translate(ox*scale, oy*scale)*scale, uTransform identity (sprite.rs:223-282).
-function stone_set_camera(shader, ox, oy, scale) {
-  var gl = __SW.gl, sh = __SW.shaders[shader];
-  if (!gl || !sh) return;
-  var wh = __sw_ortho_size(), w = wh[0], h = wh[1];
-  var proj = new Float32Array([2/w,0,0,0, 0,-2/h,0,0, 0,0,-1,0, -1,1,0,1]);
-  var view = new Float32Array([scale,0,0,0, 0,scale,0,0, 0,0,1,0, ox*scale,oy*scale,0,1]);
-  var prev = __SW.curShader;
-  gl.useProgram(sh.prog);
-  var lp = __sw_uloc(sh, "uProjection"); if (lp) gl.uniformMatrix4fv(lp, false, proj);
-  var lv = __sw_uloc(sh, "uView"); if (lv) gl.uniformMatrix4fv(lv, false, view);
-  if (prev !== 0 && __SW.shaders[prev]) gl.useProgram(__SW.shaders[prev].prog);
-}
-function stone_reset_camera(shader) { stone_set_camera(shader, 0, 0, 1.0); }
+// The camera matrices are built in Rock and arrive in the ENGINE block at
+// binding 0, so there is no camera math here any more -- only the bound
+// target's size, which Rock derives its ortho from.
+function stone_current_target_width() { return __sw_ortho_size()[0]; }
+function stone_current_target_height() { return __sw_ortho_size()[1]; }
 
 // --- textures / images ---
 function __sw_new_texture() {
@@ -1022,21 +1067,30 @@ function stone_get_image_size(img, pw, ph) {
   pw[0] = 1; ph[0] = 1; // white fallback / canvas texture default
 }
 
+// 0 = NEAREST, 1 = LINEAR. Anything else is a caller bug, not a default:
+// silently picking one filter is invisible until it magnifies. Twin of
+// stone-rs's gl_filter_for.
+function __sw_gl_filter(mode) {
+  var gl = __SW.gl;
+  if (mode === 0) return gl.NEAREST;
+  if (mode === 1) return gl.LINEAR;
+  throw new Error("unknown texture filter mode " + mode);
+}
 // Sync texture creation from a boot-decoded ImageBitmap (handle IS the texture,
 // js_ffi.rock:stone_get_image_texture identity). A registry miss is LOUD and
-// non-fatal -- returns the white pixel so image_set_wrap/get_image_size/draws
-// stay valid (the node fake-GL env has no fetch, so every load hits this rung).
+// returns 0, the same failure value stone-rs returns: handing back the WHITE
+// PIXEL's handle would attach the missing asset's declared filter to the shared
+// white pixel, so one absent Linear asset re-filtered every draw that uses it.
+// (The node fake-GL env has no fetch, so every load hits this rung.)
 function stone_load_image(path, filterMode) {
-  var cached = __SW.imageHandles[path];
-  if (cached !== undefined) return cached;
   var bmp = __SW.imageBitmaps[path];
   if (bmp === undefined) {
-    __sw_log_once("stone_load_image: no preloaded image for " + path + " (white fallback)");
-    return stone_get_white_image();
+    __sw_log_once("stone_load_image: no preloaded image for " + path);
+    return 0;
   }
   var gl = __SW.gl;
   var h = __sw_new_texture();
-  var filt = (filterMode === 0) ? gl.NEAREST : gl.LINEAR;
+  var filt = __sw_gl_filter(filterMode);
   gl.bindTexture(gl.TEXTURE_2D, __SW.textures[h]);
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bmp);
@@ -1044,13 +1098,58 @@ function stone_load_image(path, filterMode) {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filt);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  __SW.imageHandles[path] = h;
   __SW.imageSizes[h] = { w: bmp.width, h: bmp.height };
   return h;
+}
+// Whether a sampler is bound on `unit` -- the twin of stone-rs's
+// stone_sampler_bound. See the note there; the sampler_release sim pins it.
+function stone_sampler_bound(unit) {
+  var gl = __SW.gl;
+  if (!gl || unit < 0) return false;
+  gl.activeTexture(gl.TEXTURE0 + unit);
+  var bound = gl.getParameter(gl.SAMPLER_BINDING);
+  gl.activeTexture(gl.TEXTURE0);
+  return !!bound;
+}
+// Every unit glActiveTexture can select -- the twin of stone-rs's
+// stone_max_texture_units, and 0 with no context so a scan's denominator
+// assertion fails instead of its loop silently emptying.
+function stone_max_texture_units() {
+  var gl = __SW.gl;
+  if (!gl) return 0;
+  return gl.getParameter(gl.MAX_COMBINED_TEXTURE_IMAGE_UNITS) | 0;
+}
+// Immutable sampler objects, one per (filter, wrap) pair, created once and
+// never mutated -- the twin of stone-rs's SAMPLERS. `image` selects the wrap
+// half: a bound sampler overrides the texture's own wrap, so one that disagrees
+// would silently clamp a REPEAT texture (trails); pass 0 for a canvas, whose
+// texture is always CLAMP_TO_EDGE. mode < 0 releases `unit` back to
+// texture-object filtering, which the paths that bind a texture without coming
+// through here still use.
+function stone_bind_sampler(unit, mode, image) {
+  var gl = __SW.gl;
+  if (!gl || unit < 0) return;
+  if (mode < 0) { gl.bindSampler(unit, null); return; }
+  var repeat = __SW.imageRepeat[image] ? 1 : 0;
+  var filt = (mode === 1) ? 1 : 0;
+  var key = filt + ":" + repeat;
+  var s = __SW.samplers[key];
+  if (!s) {
+    s = gl.createSampler();
+    var f = filt ? gl.LINEAR : gl.NEAREST;
+    var w = repeat ? gl.REPEAT : gl.CLAMP_TO_EDGE;
+    gl.samplerParameteri(s, gl.TEXTURE_MIN_FILTER, f);
+    gl.samplerParameteri(s, gl.TEXTURE_MAG_FILTER, f);
+    gl.samplerParameteri(s, gl.TEXTURE_WRAP_S, w);
+    gl.samplerParameteri(s, gl.TEXTURE_WRAP_T, w);
+    __SW.samplers[key] = s;
+  }
+  gl.bindSampler(unit, s);
 }
 function stone_image_set_wrap(h, repeat) {
   var gl = __SW.gl, t = __SW.textures[h];
   if (!t) return false;
+  __SW.imageRepeat[h] = !!repeat;
   var mode = repeat ? gl.REPEAT : gl.CLAMP_TO_EDGE;
   gl.bindTexture(gl.TEXTURE_2D, t);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, mode);
@@ -1062,7 +1161,101 @@ function stone_unload_image(h) {
   if (t && __SW.gl) __SW.gl.deleteTexture(t);
   delete __SW.textures[h];
   delete __SW.imageSizes[h];
-  for (var p in __SW.imageHandles) { if (__SW.imageHandles[p] === h) delete __SW.imageHandles[p]; }
+  delete __SW.imageRepeat[h];
+}
+function stone_reload_image(h, path) { return false; }
+// CPU-side pixel buffers (image_data.rs's twin). These were stubs returning 0,
+// which is the worst shape available: a caller got a handle-shaped 0, uploaded
+// it, and silently drew the white fallback with no log line anywhere. A real
+// buffer is a few lines; the codec-backed PNG entry points below stay
+// unimplemented and say so once.
+function __sw_byte(v) { v = Math.round(v * 255); return v < 0 ? 0 : v > 255 ? 255 : v; }
+function stone_create_image_data(w, h) {
+  if (w <= 0 || h <= 0) return 0;
+  var id = ++__SW.nextImageData;
+  __SW.imageData[id] = { w: w, h: h, px: new Uint8Array(w * h * 4) };
+  return id;
+}
+function stone_destroy_image_data(h) { delete __SW.imageData[h]; }
+function stone_image_data_clone(src) {
+  var s = __SW.imageData[src];
+  if (!s) return 0;
+  var id = stone_create_image_data(s.w, s.h);
+  if (id) __SW.imageData[id].px.set(s.px);
+  return id;
+}
+function stone_image_data_copy_into(dst, src) {
+  var d = __SW.imageData[dst], s = __SW.imageData[src];
+  if (!d || !s || d.w !== s.w || d.h !== s.h) return false;
+  d.px.set(s.px);
+  return true;
+}
+function stone_image_data_set_pixel(h, x, y, r, g, b, a) {
+  var d = __SW.imageData[h];
+  if (!d || x < 0 || y < 0 || x >= d.w || y >= d.h) return;
+  var o = (y * d.w + x) * 4;
+  d.px[o] = __sw_byte(r); d.px[o + 1] = __sw_byte(g);
+  d.px[o + 2] = __sw_byte(b); d.px[o + 3] = __sw_byte(a);
+}
+function stone_image_data_get_pixel(h, x, y, pr, pg, pb, pa) {
+  var d = __SW.imageData[h];
+  if (!d || x < 0 || y < 0 || x >= d.w || y >= d.h) {
+    pr[0] = 0; pg[0] = 0; pb[0] = 0; pa[0] = 0;
+    return;
+  }
+  var o = (y * d.w + x) * 4;
+  pr[0] = d.px[o] / 255; pg[0] = d.px[o + 1] / 255;
+  pb[0] = d.px[o + 2] / 255; pa[0] = d.px[o + 3] / 255;
+}
+function stone_image_data_fill_rgba(h, rgba, n) {
+  var d = __SW.imageData[h];
+  if (!d || !rgba) return;
+  var len = Math.min(n * 4, d.px.length, rgba.length);
+  d.px.set(rgba.subarray(0, len));
+}
+// fm < 0 leaves the sampler state alone -- an in-place update must not silently
+// reset the filter the texture was created with.
+function __sw_upload_image_data(h, d, fm) {
+  var gl = __SW.gl;
+  gl.bindTexture(gl.TEXTURE_2D, __SW.textures[h]);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, d.w, d.h, 0, gl.RGBA, gl.UNSIGNED_BYTE, d.px);
+  if (fm >= 0) {
+    var filt = __sw_gl_filter(fm);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filt);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filt);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  }
+  __SW.imageSizes[h] = { w: d.w, h: d.h };
+}
+function stone_new_image_from_data(dh, fm) {
+  var d = __SW.imageData[dh];
+  if (!d) { __sw_log_once("stone_new_image_from_data: no ImageData " + dh); return 0; }
+  var h = __sw_new_texture();
+  __sw_upload_image_data(h, d, fm);
+  return h;
+}
+function stone_image_update_from_data(ih, dh) {
+  var d = __SW.imageData[dh];
+  if (!d || !__SW.textures[ih]) return false;
+  var s = __SW.imageSizes[ih];
+  if (s && (s.w !== d.w || s.h !== d.h)) return false;
+  __sw_upload_image_data(ih, d, -1);
+  return true;
+}
+function stone_image_data_load_png(path) {
+  __sw_log_once("stone_image_data_load_png unimplemented on the web (" + path + ")");
+  return 0;
+}
+function stone_image_data_save_png(h, path) {
+  __sw_log_once("stone_image_data_save_png unimplemented on the web (" + path + ")");
+  return false;
+}
+function stone_save_png_rgba8(path, w, h, pixels) {
+  __sw_log_once("stone_save_png_rgba8 unimplemented on the web (" + path + ")");
+  return false;
 }
 
 // --- canvases (FBOs) ---
@@ -1079,25 +1272,42 @@ function stone_create_canvas(w, h, format, depth) {
   else if (format === 3) { internal = gl.R32I; fmt = gl.RED_INTEGER; type = gl.INT; }
   gl.texImage2D(gl.TEXTURE_2D, 0, internal, w, h, 0, fmt, type, null);
   if (format === 3) (__SW.intTextures = __SW.intTextures || {})[texHandle] = true;
-  var filter = (__SW.texFilter === 1 && format !== 3) ? gl.LINEAR : gl.NEAREST;
+  // Sampling is per-draw sampler state; the texture object's own filter is
+  // never observed by a sampled bind.
+  var filter = gl.NEAREST;
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
   gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
-  var rb = null;
+  // The depth attachment is a TEXTURE, not a renderbuffer, so the
+  // depth-visualize overlay can sample the world pass's own depth. It goes in
+  // the same __SW.textures registry as any other texture, which is what lets
+  // stone_bind_texture_to_unit take it.
+  var depthTexHandle = 0;
   if (depth) {
-    rb = gl.createRenderbuffer();
-    gl.bindRenderbuffer(gl.RENDERBUFFER, rb);
-    gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, w, h);
-    gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, rb);
+    depthTexHandle = __sw_new_texture();
+    gl.bindTexture(gl.TEXTURE_2D, __SW.textures[depthTexHandle]);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.DEPTH_COMPONENT24, w, h, 0,
+                  gl.DEPTH_COMPONENT, gl.UNSIGNED_INT, null);
+    // Depth textures are not filterable and carry no mips: the default MIPMAP
+    // min filter makes them INCOMPLETE, and every sample reads black -- which
+    // is indistinguishable from "near".
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_COMPARE_MODE, gl.NONE);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D,
+                            __SW.textures[depthTexHandle], 0);
   }
   var ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   if (!ok) { __sw_log_once("stone_create_canvas: incomplete FBO (format " + format + ")"); }
   var handle = __SW.nextCanvas++;
-  __SW.canvases[handle] = { fbo: fbo, tex: texHandle, w: w, h: h, format: format };
+  __SW.canvases[handle] = { fbo: fbo, tex: texHandle, depthTex: depthTexHandle, w: w, h: h, format: format };
   return handle;
 }
 function stone_destroy_canvas(h) {
@@ -1107,6 +1317,10 @@ function stone_destroy_canvas(h) {
   gl.deleteFramebuffer(c.fbo);
   gl.deleteTexture(__SW.textures[c.tex]);
   delete __SW.textures[c.tex];
+  if (c.depthTex) {
+    gl.deleteTexture(__SW.textures[c.depthTex]);
+    delete __SW.textures[c.depthTex];
+  }
   delete __SW.canvases[h];
 }
 function stone_set_canvas(h) {
@@ -1122,8 +1336,33 @@ function stone_set_canvas(h) {
   }
   var wh = __sw_target_size();
   gl.viewport(0, 0, wh[0], wh[1]);
+  // glClear ignores the viewport but respects the scissor, so the scissor is
+  // what keeps a clear (and any overdraw) off the inactive margin.
+  var cc = __SW.boundCanvas !== 0 ? __SW.canvases[__SW.boundCanvas] : null;
+  if (cc && (wh[0] < cc.w || wh[1] < cc.h)) {
+    gl.enable(gl.SCISSOR_TEST);
+    gl.scissor(0, 0, wh[0], wh[1]);
+  } else {
+    gl.disable(gl.SCISSOR_TEST);
+  }
 }
 function stone_get_canvas_texture(h) { var c = __SW.canvases[h]; return c ? c.tex : 0; }
+function stone_get_canvas_depth_texture(h) { var c = __SW.canvases[h]; return c ? (c.depthTex || 0) : 0; }
+// Sub-rect of the bound target, logical top-left px -> GL bottom-origin.
+// Reset by re-binding the target, same contract as the native side.
+//
+// The default framebuffer is BACKING pixels while the caller's rect is logical,
+// so it scales by dpr; a canvas is its own pixels and is 1:1. Same split
+// `stone_set_canvas` makes, and the same one the native side makes between
+// drawable and window size. Passing logical straight through would put the rect
+// at 1/dpr size and the wrong place on any dpr != 1 display.
+function stone_set_viewport_rect(x, y, w, h) {
+  if (w <= 0 || h <= 0) { __sw_log_once("stone_set_viewport_rect: empty rect"); return; }
+  var s = __SW.boundCanvas !== 0 ? 1 : __SW.dpr;
+  var wh = __sw_target_size();
+  var gw = Math.round(w * s), gh = Math.round(h * s);
+  __SW.gl.viewport(Math.round(x * s), wh[1] - Math.round(y * s) - gh, gw, gh);
+}
 // mode: 0 = nearest, 1 = linear. Integer formats refuse -- a linear-filtered
 // integer texture samples zero.
 function stone_set_canvas_filter(h, mode) {
@@ -1297,9 +1536,18 @@ function stone_create_shader_from_combined(src) {
   __SW.shaders[h] = { prog: prog, ulocs: {}, floatSamplers: floatSamplers, samplerUnits: {} };
   return h;
 }
+// Owns the program's WHOLE resource set, mirroring the native side. A rejected
+// registration candidate is destroyed mid-registration, so it may already have
+// bound blocks and allocated their buffers; deleting only the program leaked one
+// buffer per block per reload.
 function stone_destroy_shader(h) {
   var sh = __SW.shaders[h];
   if (!sh) return;
+  if (sh.blocks) {
+    for (var i = 0; i < sh.blocks.length; i++) {
+      if (sh.blocks[i]) __SW.gl.deleteBuffer(sh.blocks[i].buffer);
+    }
+  }
   __SW.gl.deleteProgram(sh.prog);
   delete __SW.shaders[h];
 }
@@ -1324,10 +1572,67 @@ function __sw_bind_blocks(h) {
   if (!gl || !sh || !sh.blocks) return;
   for (var i = 0; i < sh.blocks.length; i++) {
     var b = sh.blocks[i];
-    if (b) gl.bindBufferBase(gl.UNIFORM_BUFFER, b.binding, b.buffer);
+    if (b) { gl.bindBufferBase(gl.UNIFORM_BUFFER, b.binding, b.buffer); }
   }
 }
-function stone_shader_bind_uniform_block(h, name, binding, size, fingerprint) {
+// Stamped at each draw with the SHADER THAT DRAW WENT THROUGH, not at bind and
+// not from `curShader`: `stone_sprite_draw_texture` falls back to a passed
+// handle when nothing is current, and a curShader-based stamp cannot see it.
+function __sw_mark_drawn(sh) {
+  if (!sh || !sh.blocks) return;
+  for (var i = 0; i < sh.blocks.length; i++) {
+    if (sh.blocks[i]) sh.blocks[i].drawn = true;
+  }
+}
+// A block whose program is drawn with but which nothing ever fills reads zeroes
+// in the shader, silently. Both flags are sticky, so this fires only for a block
+// never filled across the whole run.
+function __sw_report_unfilled_blocks() {
+  var shaders = __SW.shaders;
+  for (var h in shaders) {
+    var sh = shaders[h];
+    if (!sh || !sh.blocks) continue;
+    for (var i = 0; i < sh.blocks.length; i++) {
+      var b = sh.blocks[i];
+      if (!b || b.uploaded || !b.drawn || b.reported) continue;
+      b.reported = true;
+      __sw_log_once("shader `" + b.key + "` was drawn with but nothing ever filled its uniform block `" +
+        b.name + "` (binding " + b.binding + ") -- it is reading zeroes.");
+    }
+  }
+}
+function stone_unfilled_uniform_block_count() {
+  var n = 0, shaders = __SW.shaders;
+  for (var h in shaders) {
+    var sh = shaders[h];
+    if (!sh || !sh.blocks) continue;
+    for (var i = 0; i < sh.blocks.length; i++) {
+      var b = sh.blocks[i];
+      if (b && b.drawn && !b.uploaded) n++;
+    }
+  }
+  return n;
+}
+function stone_uniform_block_buffer_count() {
+  var n = 0;
+  for (var k in __SW.shaders) {
+    var sh = __SW.shaders[k];
+    if (sh && sh.blocks) for (var i = 0; i < sh.blocks.length; i++) if (sh.blocks[i]) n++;
+  }
+  return n;
+}
+// The JS runtime keys blocks off the shader record itself, so there is no
+// second registry to go stale -- reported as the same number the Rock-side view
+// computes, which keeps the cross-view arm meaningful on both tiers.
+function stone_block_program_count() {
+  var n = 0;
+  for (var k in __SW.shaders) {
+    var sh = __SW.shaders[k];
+    if (sh && sh.blocks && sh.blocks.length) n++;
+  }
+  return n;
+}
+function stone_shader_bind_uniform_block(h, key, name, binding, size, fingerprint) {
   var gl = __SW.gl, sh = __SW.shaders[h];
   if (!gl || !sh) { __sw_log_once("bind_uniform_block: no shader " + h); return false; }
   if (!name || size <= 0) { __sw_log_once("bind_uniform_block: null name or non-positive size " + size); return false; }
@@ -1348,7 +1653,7 @@ function stone_shader_bind_uniform_block(h, name, binding, size, fingerprint) {
   // program's stale tail is dropped, since registration walks bindings from 0.
   if (binding < sh.blocks.length && sh.blocks[binding]) gl.deleteBuffer(sh.blocks[binding].buffer);
   sh.blocks.length = binding;
-  sh.blocks[binding] = { buffer: buf, size: size, binding: binding, fingerprint: fingerprint };
+  sh.blocks[binding] = { buffer: buf, size: size, binding: binding, fingerprint: fingerprint, key: key, name: name, uploaded: false, drawn: false, reported: false };
   return true;
 }
 function stone_shader_upload_uniform_block(h, data, size, fingerprint) {
@@ -1369,6 +1674,7 @@ function stone_shader_upload_uniform_block(h, data, size, fingerprint) {
   gl.bindBuffer(gl.UNIFORM_BUFFER, b.buffer);
   gl.bufferSubData(gl.UNIFORM_BUFFER, 0, data.subarray ? data.subarray(0, size) : data);
   gl.bindBuffer(gl.UNIFORM_BUFFER, null);
+  b.uploaded = true;
   return true;
 }
 function stone_shader_check_uniform_block_layout(h, name, names, names_len, offsets, count, plan_size) {
@@ -1390,14 +1696,47 @@ function stone_shader_check_uniform_block_layout(h, name, names, names_len, offs
     return false;
   }
   var indices = gl.getUniformIndices(sh.prog, members);
-  var driver = gl.getActiveUniforms(sh.prog, indices, gl.UNIFORM_OFFSET);
-  var ok = true;
+  if (!indices) {
+    __sw_log_once("check_uniform_block_layout: `" + name + "` uniform-index query failed");
+    return false;
+  }
+  // Only the ACTIVE indices are queried. An inactive member is optimized out
+  // and reports INVALID_INDEX; passing that straight to `getActiveUniforms`
+  // makes the query generate an error, and WebGL 2 returns NULL for the whole
+  // call rather than a per-entry blank (Khronos WebGL 2 spec, 3.7.5). So one
+  // optimized-out member would take down the answer for every member beside it.
+  // `map` carries each surviving index back to the member it came from, since
+  // the driver's reply is now indexed by position in `active`, not in `members`.
+  // The native sibling filters the same way.
+  var active = [], map = [];
   for (var i = 0; i < members.length; i++) {
-    // An INACTIVE member is optimized out and reports no index: skipped, not
-    // failed. The check is a PARTIAL oracle for that reason.
     if (indices[i] === gl.INVALID_INDEX || indices[i] == null) continue;
-    if (driver[i] !== offsets[i]) {
-      __sw_log_once("check_uniform_block_layout: `" + name + "`.`" + members[i] + "` is at " + driver[i] + ", the plan says " + offsets[i]);
+    active.push(indices[i]);
+    map.push(i);
+  }
+  // ZERO comparisons is not a pass. Every member skipped means the loop below
+  // runs zero times and returns its initial true -- a gate arm with no
+  // population, reporting success for a block it never looked at. The native
+  // sibling rejects here for the same reason, and the two must agree or the web
+  // tier silently accepts what the desktop one refuses.
+  //
+  // The case that makes it load-bearing: an ARRAY block is queried as
+  // `name[0]`, and if that spelling ever regresses to the bare name, EVERY
+  // member misses at once -- so the block where this matters most is exactly
+  // the one where the skip stops being partial coverage.
+  if (active.length === 0) {
+    __sw_log_once("check_uniform_block_layout: `" + name + "` has no active members -- nothing to verify");
+    return false;
+  }
+  var driver = gl.getActiveUniforms(sh.prog, active, gl.UNIFORM_OFFSET);
+  if (!driver) {
+    __sw_log_once("check_uniform_block_layout: `" + name + "` uniform-offset query failed");
+    return false;
+  }
+  var ok = true;
+  for (var a = 0; a < map.length; a++) {
+    if (driver[a] !== offsets[map[a]]) {
+      __sw_log_once("check_uniform_block_layout: `" + name + "`.`" + members[map[a]] + "` is at " + driver[a] + ", the plan says " + offsets[map[a]]);
       ok = false;
     }
   }
@@ -1442,11 +1781,12 @@ function stone_shader_set_vec4_array(h, name, values, count) {
 }
 function stone_bind_texture_to_unit(tex, unit) {
   var gl = __SW.gl, t = __SW.textures[tex];
-  if (!gl || !t) return;
+  if (!gl || !t || unit < 0) return 0;
   gl.activeTexture(gl.TEXTURE0 + unit);
   gl.bindTexture(gl.TEXTURE_2D, t);
   gl.activeTexture(gl.TEXTURE0);
   (__SW.unitInt = __SW.unitInt || {})[unit] = !!(__SW.intTextures && __SW.intTextures[tex]);
+  return 1;
 }
 
 // WebGL2 (unlike desktop GL) makes ANY draw INVALID_OPERATION when an active
@@ -1479,6 +1819,11 @@ function __sw_fix_stale_int_units(gl, sh) {
 // mirrored-window class can't recur.
 var __sw_fsq_identity = null;
 var __sw_fsq_present = null;
+var __sw_fsq_scaled = null;
+var __sw_fsq_uv = [1, 1];
+function stone_set_fullscreen_uv_scale(sx, sy) {
+  __sw_fsq_uv = [Math.max(sx, 0), Math.max(sy, 0)];
+}
 function __sw_fsq_buffer(gl, flipped) {
   var b = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, b);
@@ -1499,7 +1844,21 @@ function stone_draw_fullscreen_quad() {
   }
   gl.useProgram(sh.prog);
   __sw_fix_stale_int_units(gl, sh);
-  gl.bindBuffer(gl.ARRAY_BUFFER, __SW.boundCanvas === 0 ? __sw_fsq_present : __sw_fsq_identity);
+  var sx = __sw_fsq_uv[0], sy = __sw_fsq_uv[1];
+  if (sx === 1 && sy === 1) {
+    gl.bindBuffer(gl.ARRAY_BUFFER, __SW.boundCanvas === 0 ? __sw_fsq_present : __sw_fsq_identity);
+  } else {
+    // Re-specify the scaled quad; six vertices, and it reaches custom vertex
+    // stages the way a uniform would not.
+    if (!__sw_fsq_scaled) __sw_fsq_scaled = gl.createBuffer();
+    var flipped = __SW.boundCanvas === 0;
+    var v0 = flipped ? 1 : 0, v1 = flipped ? 0 : 1;
+    gl.bindBuffer(gl.ARRAY_BUFFER, __sw_fsq_scaled);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+      -1, -1, 0, v0 * sy,  1, -1, sx, v0 * sy,  1, 1, sx, v1 * sy,
+      -1, -1, 0, v0 * sy,  1, 1, sx, v1 * sy,  -1, 1, 0, v1 * sy,
+    ]), gl.DYNAMIC_DRAW);
+  }
   gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 16, 0);
   gl.enableVertexAttribArray(0);
   gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 16, 8);
@@ -1508,26 +1867,22 @@ function stone_draw_fullscreen_quad() {
   gl.disableVertexAttribArray(3);
   gl.disableVertexAttribArray(4);
   gl.drawArrays(gl.TRIANGLES, 0, 6);
+  __sw_mark_drawn(sh);
 }
 
 // --- text: canvas2d glyph atlas (MC, docs/stone-web-plan.md § text) ---
 // The boot preload registered each shipped TTF as a FontFace; the bake here
-// is synchronous canvas2d against that family. Eager + immutable, mirroring
-// native: all of ASCII 32..126 bakes once at stone_load_font (16 glyphs/row,
-// text.rs:261), no lazy glyphs, no mid-frame atlas mutation. Atlas pixels are
+// is synchronous canvas2d against that family. All of ASCII 32..126 bakes as
+// one 16-glyph-wide atlas; density changes explicitly rebake into the same
+// texture handle. Atlas pixels are
 // coverage-RGBA (r=g=b=a=coverage, built from the canvas ALPHA channel --
 // raw white fillText would give (1,1,1,cov), wrong rgb under tinting).
 // Metric bit-parity with fontdue is a NON-goal; invariants only.
 function __sw_font_path_key(path) { return String(path).replace(/^\.?\//, ""); }
-function stone_load_font(path, pixelSize) {
-  // The node fake-GL env has no DOM/canvas2d: fall back to a glyphless font
-  // (id, atlas = white pixel) so the boot's font gate passes headlessly.
+function __sw_bake_font(path, pixelSize, existingAtlas) {
   if (globalThis.__STONE_WEB_FAKE_ENV || typeof document === "undefined") {
     __sw_log_once("stone_load_font: no canvas2d in this environment -- glyphless fallback font");
-    __SW.fonts = __SW.fonts || {};
-    var fid0 = (__SW.nextFont = (__SW.nextFont || 0) + 1);
-    __SW.fonts[fid0] = { em: pixelSize, atlas: 0, glyphs: {}, maxH: pixelSize, fake: true };
-    return fid0;
+    return { em: pixelSize, atlas: existingAtlas || 0, glyphs: {}, maxH: pixelSize, fake: true, sourcePath: path };
   }
   var fams = __SW.fontFamilies || {};
   var fam = fams[__sw_font_path_key(path)];
@@ -1537,7 +1892,7 @@ function stone_load_font(path, pixelSize) {
   }
   if (!fam) {
     __sw_log_once("stone_load_font: no fonts were preloaded; text will not render");
-    return 0;
+    return null;
   }
 
   var mcanvas = document.createElement("canvas");
@@ -1601,25 +1956,54 @@ function stone_load_font(path, pixelSize) {
     rgba[p * 4] = cov; rgba[p * 4 + 1] = cov; rgba[p * 4 + 2] = cov; rgba[p * 4 + 3] = cov;
   }
   var gl = __SW.gl;
-  var texHandle = __sw_new_texture();
+  var texHandle = existingAtlas || __sw_new_texture();
   gl.bindTexture(gl.TEXTURE_2D, __SW.textures[texHandle]);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, aw, ah, 0, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
-  var filter = __SW.texFilter === 1 ? gl.LINEAR : gl.NEAREST;
+  var filter = gl.NEAREST; // sampling is per-draw sampler state (Font.sampling)
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  __SW.imageSizes[texHandle] = { w: aw, h: ah };
+
+  return { em: pixelSize, atlas: texHandle, glyphs: glyphs, maxH: maxH, sourcePath: path };
+}
+
+function stone_load_font(path, pixelSize) {
+  var baked = __sw_bake_font(path, pixelSize, 0);
+  if (!baked) return 0;
 
   __SW.fonts = __SW.fonts || {};
   var fid = (__SW.nextFont = (__SW.nextFont || 0) + 1);
-  __SW.fonts[fid] = { em: pixelSize, atlas: texHandle, glyphs: glyphs, maxH: maxH };
-  console.log("[STONE-WEB] font atlas baked: " + infos.length + " glyphs @ " + pixelSize + "px (" + aw + "x" + ah + ")");
+  __SW.fonts[fid] = baked;
+  console.log("[STONE-WEB] font atlas baked @ " + pixelSize + "px");
   return fid;
 }
 function __sw_font(fontId) { return (__SW.fonts || {})[fontId]; }
+function stone_reload_font(fontId, path, pixelSize) {
+  var old = __sw_font(fontId);
+  if (!old || pixelSize < 1) return false;
+  var baked = __sw_bake_font(path, pixelSize, old.atlas);
+  if (!baked) return false;
+  __SW.fonts[fontId] = baked;
+  console.log("[STONE-WEB] font atlas rebaked @ " + pixelSize + "px");
+  return true;
+}
+function stone_resize_font(fontId, pixelSize) {
+  var old = __sw_font(fontId);
+  if (!old || pixelSize < 1) return false;
+  var baked = __sw_bake_font(old.sourcePath, pixelSize, old.atlas);
+  if (!baked) return false;
+  __SW.fonts[fontId] = baked;
+  console.log("[STONE-WEB] font atlas rebaked @ " + pixelSize + "px");
+  return true;
+}
+// 0 when the font has no atlas, matching stone-rs. Returning the WHITE PIXEL's
+// handle instead made the atlas share an identity with it, so a font declaring
+// Linear re-declared the shared white pixel for every other draw.
 function stone_get_font_atlas_image_for(fontId) {
   var f = __sw_font(fontId);
-  return f && f.atlas ? f.atlas : stone_get_white_image();
+  return f && f.atlas ? f.atlas : 0;
 }
 function stone_get_font_pixel_size_for(fontId) {
   var f = __sw_font(fontId);
@@ -1726,13 +2110,7 @@ function __sw_bytes_to_string(b) {
 
 // --- camera state / immediate sprite path (MB: batches only; the immediate
 // sprite quad lands with the MD canvas-present blit) ---
-var __sw_cameraActive = false;
-function stone_is_camera_active() { return __sw_cameraActive; }
 function stone_current_shader_bound() { return __SW.curShader !== 0; }
-function stone_sprite_begin(shader) { if (shader) stone_set_shader(shader); }
-function stone_sprite_draw(shader, handle, x, y, w, h, sx, sy, sw, sh, rot, scx, scy, r, g, b, a) {
-  __sw_log_once("stone_sprite_draw: immediate sprite path not implemented on web yet");
-}
 // The canvas-present blit (sparkle trail et al): a rotated textured quad in
 // pixel space through the bound program, else the passed basic-sprite handle
 // with default uniforms -- mirrors sprite.rs stone_sprite_draw_texture
@@ -1764,17 +2142,8 @@ function stone_sprite_draw_texture(shader, tex, tw, th, x, y, w, h, sx, sy, sw, 
     px[2], py[2], u1, v1, r, g, b, a,
     px[3], py[3], u0, v1, r, g, b, a,
   ]);
-  if (cur === 0) {
-    // Standalone caller: bound-target pixel ortho + identity view/transform
-    // (native set_default_sprite_uniforms).
-    var wh = __sw_ortho_size();
-    var proj = new Float32Array([2 / wh[0], 0, 0, 0, 0, -2 / wh[1], 0, 0, 0, 0, -1, 0, -1, 1, 0, 1]);
-    var lp = __sw_uloc(sh2, "uProjection"); if (lp) gl.uniformMatrix4fv(lp, false, proj);
-    var lv = __sw_uloc(sh2, "uView"); if (lv) gl.uniformMatrix4fv(lv, false, __SW_IDENTITY);
-  }
   gl.activeTexture(gl.TEXTURE0);
   gl.bindTexture(gl.TEXTURE_2D, t);
-  var ltx = __sw_uloc(sh2, "uTexture"); if (ltx) gl.uniform1i(ltx, 0);
   gl.bindBuffer(gl.ARRAY_BUFFER, __SW.meshVbo);
   gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STREAM_DRAW);
   gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 32, 0);
@@ -1786,6 +2155,7 @@ function stone_sprite_draw_texture(shader, tex, tw, th, x, y, w, h, sx, sy, sw, 
   gl.disableVertexAttribArray(3);
   gl.disableVertexAttribArray(4);
   gl.drawArrays(gl.TRIANGLES, 0, 6);
+  __sw_mark_drawn(sh2);
 }
 
 // --- audio (WebAudio; silent no-op in a no-AudioContext env) ---
@@ -1899,14 +2269,56 @@ function __sw_read_shape(gl, c) {
 function stone_read_canvas_pixel(h, x, y) {
   var gl = __SW.gl;
   var c = __SW.canvases[h];
-  if (!c || x < 0 || y < 0 || x >= c.w || y >= c.h) return 0;
+  if (!c) return 0;
+  // Bounds-check and flip against the ACTIVE image, not the backing texture
+  // (stone-rs canvas.rs does the same): a scene target is allocated at
+  // capacity and rendered into its active rect, which is anchored at the GL
+  // origin, so the top-left row converts against the active height.
+  var aw = c.activeW || c.w, ah = c.activeH || c.h;
+  if (x < 0 || y < 0 || x >= aw || y >= ah) return 0;
   var shape = __sw_read_shape(gl, c);
   gl.bindFramebuffer(gl.FRAMEBUFFER, c.fbo);
   gl.finish();
-  gl.readPixels(x, c.h - 1 - y, 1, 1, shape.fmt, shape.type, shape.view);
+  gl.readPixels(x, ah - 1 - y, 1, 1, shape.fmt, shape.type, shape.view);
   var prev = __SW.canvases[__SW.boundCanvas];
   gl.bindFramebuffer(gl.FRAMEBUFFER, prev ? prev.fbo : null);
   return shape.get(shape.view);
+}
+// Read a w*h RGBA8 rect of the WINDOW into `out` in top-left coordinates --
+// the twin of canvas.rs's stone_read_window_rect, and what WindowProbe runs
+// on. Default framebuffer, so it is the DRAWABLE that bounds and flips it, not
+// the logical size: the probe addresses window pixels exactly as native does.
+function stone_read_window_rect(x, y, w, h, out) {
+  var gl = __SW.gl;
+  if (!gl || !out || w <= 0 || h <= 0) return;
+  // The engine's window space is LOGICAL here -- the default framebuffer is
+  // driven in CSS pixels (the hidpi ortho gate) while readPixels addresses the
+  // backing store, so headless Chrome at deviceScaleFactor 1.5 reads 1920x1080
+  // for a window the engine calls 1280x720. Native has no such split; at dpr 1
+  // this reduces to a plain read.
+  var bw = gl.drawingBufferWidth, bh = gl.drawingBufferHeight;
+  var sx = bw / (__SW.logicalW || bw), sy = bh / (__SW.logicalH || bh);
+  var rx = Math.round(x * sx), ry = Math.round(y * sy);
+  var rw = Math.max(1, Math.round(w * sx)), rh = Math.max(1, Math.round(h * sy));
+  if (rx < 0 || ry < 0 || rx + rw > bw || ry + rh > bh) return;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.pixelStorei(gl.PACK_ALIGNMENT, 1);
+  var buf = new Uint8Array(rw * rh * 4);
+  gl.readPixels(rx, bh - ry - rh, rw, rh, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+  // Bottom-up device pixels -> top-down window pixels, POINT-sampled. A probe
+  // reports what a window pixel shows; averaging would smear exactly the hard
+  // steps probes exist to measure.
+  for (var r = 0; r < h; r++) {
+    var srow = rh - 1 - Math.min(rh - 1, Math.round(r * sy));
+    for (var c = 0; c < w; c++) {
+      var si = (srow * rw + Math.min(rw - 1, Math.round(c * sx))) * 4;
+      var di = (r * w + c) * 4;
+      out[di] = buf[si]; out[di + 1] = buf[si + 1];
+      out[di + 2] = buf[si + 2]; out[di + 3] = buf[si + 3];
+    }
+  }
+  var prev = __SW.canvases[__SW.boundCanvas];
+  gl.bindFramebuffer(gl.FRAMEBUFFER, prev ? prev.fbo : null);
 }
 // WebGL2 has no DEPTH_COMPONENT readPixels at all (the GLES rule) -- far plane.
 function stone_read_depth_pixel(h, x, y) {
@@ -1962,7 +2374,8 @@ function stone_pixel_readback_submit(id, canvasH, x, y) {
     s.stagingPrimed = false;
   }
   var c = __SW.canvases[canvasH];
-  var ok = !!c && x >= 0 && y >= 0 && x < c.w && y < c.h;
+  var aw = c ? (c.activeW || c.w) : 0, ah = c ? (c.activeH || c.h) : 0;
+  var ok = !!c && x >= 0 && y >= 0 && x < aw && y < ah;
   if (ok && s.depth) {
     __sw_log_once("depth pixel readback unsupported on WebGL2; returning far plane");
     ok = false;
@@ -1973,7 +2386,7 @@ function stone_pixel_readback_submit(id, canvasH, x, y) {
   gl.bindFramebuffer(gl.READ_FRAMEBUFFER, c.fbo);
   gl.bindBuffer(gl.PIXEL_PACK_BUFFER, s.pbos[s.stagingIdx]);
   gl.pixelStorei(gl.PACK_ALIGNMENT, 1);
-  gl.readPixels(x, c.h - 1 - y, 1, 1, shape.fmt, shape.type, 0);
+  gl.readPixels(x, ah - 1 - y, 1, 1, shape.fmt, shape.type, 0);
   gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
   if (s.fences[s.stagingIdx]) gl.deleteSync(s.fences[s.stagingIdx]);
   s.fences[s.stagingIdx] = gl.fenceSync ? gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0) : null;
@@ -2015,7 +2428,20 @@ function stone_set_fullscreen(mode) {
 // the font path then falls back exactly like native's embedded-fallback rung.
 function __rock_web_boot(mainFn) {
   var pre = typeof __ROCK_WEB_PRELOAD !== "undefined" ? __ROCK_WEB_PRELOAD : [];
-  if (globalThis.__STONE_WEB_FAKE_ENV || typeof fetch === "undefined" || pre.length === 0) {
+  var fakeEnv = globalThis.__STONE_WEB_FAKE_ENV;
+  // The node fake-GL smoke has no fetch, so nothing decodes and every load
+  // would be a genuine miss -- the smoke would measure the missing-asset path
+  // instead of the game. It opts into a 1x1 stub for the MANIFEST's images
+  // only: the fake GL ignores pixel content, and a path absent from the
+  // manifest still misses, so this cannot hide a bad asset path.
+  if (fakeEnv && fakeEnv.stubPreloadedImages) {
+    for (var pi = 0; pi < pre.length; pi++) {
+      if (/\.(png|jpe?g|gif|bmp|webp)$/i.test(pre[pi])) {
+        __SW.imageBitmaps[pre[pi]] = { width: 1, height: 1 };
+      }
+    }
+  }
+  if (fakeEnv || typeof fetch === "undefined" || pre.length === 0) {
     if (mainFn) mainFn();
     return;
   }
@@ -2035,7 +2461,7 @@ function __rock_web_boot(mainFn) {
       }
       // Decode images to ImageBitmaps now (no GL context yet); stone_load_image
       // uploads the GL texture lazily at @init. A per-image decode failure is
-      // loud but non-fatal -- that path falls back to the white pixel at load.
+      // loud but non-fatal -- that path returns handle 0 at load.
       if (/\.(png|jpe?g|gif|bmp|webp)$/i.test(path) && typeof createImageBitmap !== "undefined") {
         return createImageBitmap(new Blob([buf])).then(function (bmp) {
           __SW.imageBitmaps[path] = bmp;
@@ -2058,6 +2484,7 @@ function __rock_web_arm_raf(frameFn) {
   if (fake && fake.driveFrames) return; // harness drives frames itself
   function tick() {
     __SW.frames = (__SW.frames | 0) + 1; // driver-observable frame count (CDP smoke)
+    __sw_sync_canvas_size();
     var running = true;
     try { running = frameFn(); }
     catch (e) { console.error("[STONE-WEB] frame error:", e); running = false; }
@@ -2373,6 +2800,25 @@ impl IntrinsicTable for JsIntrinsics {
             .iter()
             .map(|(name, arity, _)| IntrinsicEntry { name, arity: *arity })
             .collect()
+    }
+}
+
+/// The JS backend's realization oracle, as the artifact seam.
+///
+/// A zero-sized handle over [`emit::js_supply`] -- the SAME function
+/// `render_call` and `discover_callees` branch on. `skull::artifact` cannot
+/// depend on this crate (the backend is driven from `rock-cli`), so the view
+/// takes the oracle through
+/// [`skull_mir::intrinsics::BackendRealization`]; what it carries is the
+/// behavior, not a description of it.
+pub struct JsBackendRealization;
+
+impl skull_mir::intrinsics::BackendRealization for JsBackendRealization {
+    fn backend(&self) -> &'static str {
+        "js"
+    }
+    fn supplies(&self, ws: &bone_semantic::inference::Workspace, f: &Function) -> bool {
+        emit::js_supply(ws, f).is_some()
     }
 }
 

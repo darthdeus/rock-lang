@@ -15,6 +15,8 @@ use bone_semantic::inference::Workspace;
 use comfy_la_arena::{Idx, IdxRange};
 use ustr::Ustr;
 
+use crate::monoty::{MonoCtor, MonoTy};
+
 pub fn value_struct_all_float_leaf_count(ws: &Workspace, name: Ustr) -> Option<usize> {
     all_float_leaf_count_rec(ws, name, &mut Vec::new())
 }
@@ -123,6 +125,56 @@ pub fn vec_column_elem(ws: &Workspace, name: Ustr, nullable: bool) -> Option<Ust
     let paths = value_leaf_paths(&shape);
     let columns = paths.len() + usize::from(nullable);
     (columns <= MAX_COLUMN_LEAVES && !paths.iter().any(|p| p.as_str() == "len")).then_some(name)
+}
+
+/// Column eligibility for a `[E]`, decided on the CONCRETE type.
+///
+/// **The one oracle.** `Builder::vec_column_elem_of` is a thin caller of this,
+/// and the instance graph calls it directly -- it holds no `Builder` and no
+/// `SpecSubst`, so before the extraction it could not ask at all. The decision
+/// no longer runs through the lossy `TypeExpr` adapter on either side.
+///
+/// A nullable element columnizes only when its payload is `nobox`: for an
+/// unmarked value struct the boxed element is a legal representation that
+/// already works, while columnizing it would route the materializing helpers
+/// (`__rock_col_sort`, `to_lua_array`, serialization) at a shape they have no
+/// presence concept for. The mark is what forbids the box, so the mark is what
+/// obliges the presence column.
+///
+/// Nullability is read STRUCTURALLY here, which is why a spelled-out `[E?]` and
+/// a generic bound to `E?` cannot answer differently: both are one `MonoTy`.
+pub fn vec_column_elem_mono(
+    ws: &Workspace,
+    target: bone_semantic::hir::FnBackend,
+    ty: &MonoTy,
+) -> Option<ColumnElem> {
+    let MonoTy::App { ctor: MonoCtor::Array, params } = ty else { return None };
+    let (elem, nullable) = params.first()?.peel_nullable();
+    let en = elem.nominal()?;
+    if nullable && !is_nobox_nominal(ws, en) {
+        return None;
+    }
+    vec_column_elem(ws, en, nullable)
+        .filter(|&name| columns_available(ws, target, name))
+        .map(|name| ColumnElem { name, nullable })
+}
+
+/// The `Map<K, V>` sibling of [`vec_column_elem_mono`].
+///
+/// `Map<K, P?>` is column-stored too and, unlike `[P?]`, needs no presence
+/// column: an absent value collapses to key REMOVAL, because a bare Map already
+/// cannot tell an absent key from a key holding null. The KEY is deliberately
+/// not consulted -- a value-struct key rejects upstream (LuaJIT hashes cdata by
+/// pointer), and the spine stores whatever key the boxed representation stored.
+pub fn map_column_value_mono(
+    ws: &Workspace,
+    _target: bone_semantic::hir::FnBackend,
+    ty: &MonoTy,
+) -> Option<ColumnElem> {
+    let MonoTy::App { ctor: MonoCtor::Map, params } = ty else { return None };
+    let (val, _) = params.get(1)?.peel_nullable();
+    let vn = val.nominal()?;
+    vec_column_elem(ws, vn, false).map(|name| ColumnElem { name, nullable: false })
 }
 
 /// The column KEYS of `shape`, presence first when the element type is nullable.
@@ -1312,57 +1364,32 @@ pub fn nobox_global_accessor_shape(ws: &Workspace, ty: TyId) -> Option<NoboxGlob
     })
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum ReifiedCtor {
-    Array,
-    Map,
-    Nominal(Ustr),
-}
-
-/// An arena-free concrete type binding for a generic param at a specialized
-/// call site. It keys cross-body snapshots without retaining caller-arena
-/// `TyId`s, and preserves nested arguments such as `VecIter<Vec2>`.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub enum ReifiedType {
-    Prim(&'static str),
-    App {
-        ctor: ReifiedCtor,
-        params: Vec<ReifiedType>,
-    },
-    /// A generic bound to `E?`. Distinct from `App` because nullability decides
-    /// the STORAGE of the binding (a nullable column element leads with a
-    /// presence column, a nullable `nobox` signature slot with a presence leaf),
-    /// and a binding that dropped the `?` would specialize a body to the wrong
-    /// arity rather than merely to a slower one.
-    Nullable(Box<ReifiedType>),
-    /// A generic bound to a TUPLE (`zip`'s `(A, B)`, `enumerate`'s `(int, T)`).
-    /// Its own variant rather than an `App`, because a tuple has no nominal and
-    /// its slots decide an ARITY: a body specialized at `(Vec2?, int)` returns
-    /// four values where one at `(Vec2, int)` returns three.
-    ///
-    /// This is the one binding [`reified_type_node`] cannot answer -- a
-    /// `TypeExpr::Tuple` holds an arena range and there is no arena here to mint
-    /// one. Consumers that need the slots read the binding DIRECTLY
-    /// ([`reified_ret_slot`]); `ty_node` keeps returning the generic, exactly as
-    /// it did when the binding did not reify at all.
-    Tuple(Vec<ReifiedType>),
-}
-
-/// Structural depth of an instantiation type. Polymorphic recursion
-/// (`f<T> -> f<[T]>`) is exactly type GROWTH, so depth is its observable and a
-/// plain tree walk is the whole detector -- no instantiation-graph machinery.
+/// Structural depth of an instantiation type, counting a leaf as 1. Polymorphic
+/// recursion (`f<T> -> f<[T]>`) is exactly type GROWTH, so depth is its
+/// observable and a plain tree walk is the whole detector -- no
+/// instantiation-graph machinery.
 ///
-/// The same quantity `MonoArena::depth` computes for the Stage-0d shadow graph,
-/// on the other representation. Both cap on the depth of the TYPE rather than on
-/// a path length, for the reason recorded there: a path length is a property of
-/// how the walk arrived, so capping on it makes membership depend on discovery
+/// A CONSTRUCTOR counts, so a parameterless nominal is 1 and `Vec<Vec2>` is 2 --
+/// unlike [`MonoTy::depth`], which measures nesting alone. Both cap on the depth
+/// of the TYPE rather than on a path length: a path length is a property of how
+/// the walk arrived, so capping on it makes membership depend on discovery
 /// order.
-pub fn reified_depth(t: &ReifiedType) -> u32 {
+pub fn growth_depth(t: &MonoTy) -> u32 {
     match t {
-        ReifiedType::Prim(_) => 1,
-        ReifiedType::Nullable(inner) => 1 + reified_depth(inner),
-        ReifiedType::App { params, .. } | ReifiedType::Tuple(params) => {
-            1 + params.iter().map(reified_depth).max().unwrap_or(0)
+        MonoTy::Int
+        | MonoTy::Float
+        | MonoTy::Bool
+        | MonoTy::String
+        | MonoTy::Any
+        | MonoTy::Unit
+        | MonoTy::Never => 1,
+        MonoTy::Nullable(inner) => 1 + growth_depth(inner),
+        MonoTy::App { params, .. } => {
+            1 + params.iter().map(growth_depth).max().unwrap_or(0)
+        }
+        MonoTy::Tuple(parts) => 1 + parts.iter().map(growth_depth).max().unwrap_or(0),
+        MonoTy::Function { params, ret } => {
+            1 + params.iter().map(growth_depth).chain([growth_depth(ret)]).max().unwrap_or(0)
         }
     }
 }
@@ -1374,39 +1401,6 @@ pub fn reified_depth(t: &ReifiedType) -> u32 {
 /// rather than an ordinarily nested container. It is a REPORTING threshold in a
 /// diagnostic mode, never a limit on what compiles.
 pub const ABLATION_GROWTH_DEPTH: u32 = 8;
-
-impl ReifiedType {
-    /// The bound NOMINAL, and `None` for a nullable binding on purpose: every
-    /// caller of this asks "is this generic exactly this struct", and a
-    /// presence-carrying binding is not. The presence-aware callers peel with
-    /// [`Self::peel_nullable`] and handle the flag explicitly.
-    pub(crate) fn nominal(&self) -> Option<Ustr> {
-        match self {
-            Self::App { ctor: ReifiedCtor::Nominal(name), .. } => Some(*name),
-            _ => None,
-        }
-    }
-
-    /// `(payload, nullable)` -- the binding with its `?` stripped.
-    pub(crate) fn peel_nullable(&self) -> (&ReifiedType, bool) {
-        match self {
-            Self::Nullable(inner) => (inner.as_ref(), true),
-            other => (other, false),
-        }
-    }
-
-    pub(crate) fn any_nominal(&self, pred: &impl Fn(Ustr) -> bool) -> bool {
-        match self {
-            Self::Prim(_) => false,
-            Self::Nullable(inner) => inner.any_nominal(pred),
-            Self::Tuple(parts) => parts.iter().any(|part| part.any_nominal(pred)),
-            Self::App { ctor, params } => {
-                matches!(ctor, ReifiedCtor::Nominal(name) if pred(*name))
-                    || params.iter().any(|param| param.any_nominal(pred))
-            }
-        }
-    }
-}
 
 /// Whether any generic in `key` binds a type whose STORAGE the shared generic
 /// body cannot serve -- i.e. whether specializing is a CORRECTNESS requirement
@@ -1449,6 +1443,62 @@ pub(crate) fn spec_key_has_target_storage(
     })
 }
 
+/// The physical form an opaque body would WRONGLY assume for a container
+/// parameter, or `None` when the boxed assumption still holds.
+///
+/// One oracle for every container constructor 2.4 names
+/// (`docs/boundary-contracts.md`), so the rejection rule cannot drift from the
+/// storage lowering actually selects -- it composes exactly the two predicates
+/// [`spec_key_has_target_storage`] does, for the same reason.
+///
+/// The split is not stylistic:
+///
+/// - `[E]`/`Vec<E>` is per-leaf column arrays with no `_data`, and `Map<K, E>`
+///   at a column-eligible `E` is a spine wrapper rather than a bare key table.
+///
+/// - `Arena<E>`'s `data` IS a column vec at a column-eligible `E`, on every
+///   target, so an opaque body's `a.data._data` is nil everywhere.
+/// - `FlatVec<E>` and `NativeBuffer<E>` are `{ptr, len}` over C storage. On
+///   luajit `ptr` is an `E*`, so `ptr[i]` is an element REFERENCE and the body
+///   is right; JS backs them with flat slots, where `ptr[i]` is a leaf. Hence a
+///   JS-only rejection, the same asymmetry the spec-key trigger already makes.
+/// The nominal container constructors 2.4 covers. Asked BEFORE the element is
+/// resolved: reading a concrete type is not free of consequence -- `concrete_ty`
+/// reports "bone typed no expression here" as an error -- so a `Sampler2D`
+/// parameter must never be asked in the first place.
+pub fn is_nominal_container(name: Ustr) -> bool {
+    matches!(name.as_str(), "Arena" | "FlatVec" | "NativeBuffer")
+}
+
+/// The name [`opaque_container_hazard`] knows a builtin container by.
+pub const VEC_CONTAINER: &str = "Vec";
+pub const MAP_CONTAINER: &str = "Map";
+
+pub fn opaque_container_hazard(
+    ws: &Workspace,
+    target: bone_semantic::hir::FnBackend,
+    container: Ustr,
+    elem: Ustr,
+    nullable: bool,
+) -> Option<&'static str> {
+    let js = target == bone_semantic::hir::FnBackend::Js;
+    // The element's own nullability, NOT either flavour.
+    // [`spec_key_has_target_storage`] may over-approximate -- an extra
+    // specialized copy costs nothing -- and a REJECTION may not: an unmarked
+    // `[BV2?]` is a boxed vec while its non-nullable twin `[BV2]` is columns.
+    let columns =
+        vec_column_elem(ws, elem, nullable).is_some() && columns_available(ws, target, elem);
+    match container.as_str() {
+        "Vec" if columns => Some("`_data`"),
+        "Map" if columns => Some("a bare key table"),
+        "Arena" if columns => Some("`data._data`"),
+        "FlatVec" | "NativeBuffer" if js && leaf_addr_plan(ws, elem).is_ok() => {
+            Some("a per-element view over `ptr`")
+        }
+        _ => None,
+    }
+}
+
 /// Whether `[elem]` takes column storage when lowering for `target`.
 ///
 /// Every target now serves columns, so this is unconditional. It survives as a
@@ -1466,11 +1516,16 @@ pub(crate) fn columns_available(
 /// A callee's per-generic instantiation at one call site, in declaration order.
 /// `None` = that generic did not reify (no specialization for it).
 /// The snapshot cache key alongside the `FuncRef`.
-pub type SpecKey = Vec<Option<ReifiedType>>;
+pub type SpecKey = Vec<Option<MonoTy>>;
 
 /// Callee generic `VarId` -> its concrete type tree, for specialized lowering.
 /// Only the reified generics appear; a `None` in the [`SpecKey`] is absent here.
-pub type SpecSubst = std::collections::HashMap<bone_semantic::hir::VarId, ReifiedType>;
+///
+/// THE SAME TYPE as [`crate::monoty::MonoSubst`], which is what an instance of
+/// the mono graph carries. One substitution vocabulary, so an instance's own
+/// bindings drive lowering and the ABI plan directly rather than through a
+/// conversion that could lose or reorder them.
+pub type SpecSubst = crate::monoty::MonoSubst;
 
 /// The root `TypeExpr` a substituted generic resolves to. Nested arguments stay
 /// in [`SpecSubst`] for recursive call specialization; the synthesized root has
@@ -1490,23 +1545,28 @@ pub type SpecSubst = std::collections::HashMap<bone_semantic::hir::VarId, Reifie
 /// 0-slot tuple and `unit_ty` would read the binding as unit, both silently. The
 /// caller falls back to the unsubstituted generic, which is exactly what it saw
 /// before tuples reified at all; the consumers that need a tuple's slots read
-/// the binding directly through [`reified_ret_slot`].
-pub(crate) fn reified_type_node(ty: &ReifiedType) -> Option<TypeExpr> {
+/// the binding directly through [`mono_ret_slot`].
+///
+/// The constructors [`reify_type`] declines to admit answer `None` on the same
+/// terms, and for the same reason: they reach a SpecKey slot through no route
+/// today, and inventing a node for one would be a guess.
+pub(crate) fn mono_type_node(ty: &MonoTy) -> Option<TypeExpr> {
     Some(match ty {
-        ReifiedType::Nullable(inner) => return reified_type_node(inner),
-        ReifiedType::Tuple(_) => return None,
-        ReifiedType::App { ctor, .. } => TypeExpr::App {
+        MonoTy::Nullable(inner) => return mono_type_node(inner),
+        MonoTy::Tuple(_) => return None,
+        MonoTy::Any | MonoTy::Unit | MonoTy::Never | MonoTy::Function { .. } => return None,
+        MonoTy::App { ctor, .. } => TypeExpr::App {
             ctor: match ctor {
-                ReifiedCtor::Array => TypeCtor::Array,
-                ReifiedCtor::Map => TypeCtor::Map,
-                ReifiedCtor::Nominal(name) => TypeCtor::Nominal(*name),
+                MonoCtor::Array => TypeCtor::Array,
+                MonoCtor::Map => TypeCtor::Map,
+                MonoCtor::Nominal(name) => TypeCtor::Nominal(*name),
             },
             params: IdxRange::new_empty(),
         },
-        ReifiedType::Prim("int") => TypeExpr::Builtin(BuiltinTy::Int),
-        ReifiedType::Prim("float") => TypeExpr::Builtin(BuiltinTy::Float),
-        ReifiedType::Prim("bool") => TypeExpr::Builtin(BuiltinTy::Bool),
-        ReifiedType::Prim(_) => TypeExpr::Builtin(BuiltinTy::Error),
+        MonoTy::Int => TypeExpr::Builtin(BuiltinTy::Int),
+        MonoTy::Float => TypeExpr::Builtin(BuiltinTy::Float),
+        MonoTy::Bool => TypeExpr::Builtin(BuiltinTy::Bool),
+        MonoTy::String => TypeExpr::Builtin(BuiltinTy::String),
     })
 }
 
@@ -1517,14 +1577,14 @@ pub(crate) fn reified_type_node(ty: &ReifiedType) -> Option<TypeExpr> {
 /// policy exactly -- only a `nobox` nominal splats, and a nullable one takes the
 /// nullable shape -- so a tuple slot answers the same as the spelled-out type in
 /// that position would.
-pub(crate) fn reified_ret_slot(ws: &Workspace, ty: &ReifiedType) -> RetSlot {
-    if let ReifiedType::Tuple(parts) = ty {
+pub(crate) fn mono_ret_slot(ws: &Workspace, ty: &MonoTy) -> RetSlot {
+    if let MonoTy::Tuple(parts) = ty {
         // The same collapse [`ret_slot`] makes: a tuple no part of which splats
         // is the pre-existing boxed ABI, so it occupies ONE slot. Without it the
         // two oracles disagree on a NESTED tuple -- the generic side counted an
         // inner `(Entity<T>, T)` as two wire values while the concrete callee
         // returned it as one box.
-        let shape = reified_tuple_shape(ws, parts);
+        let shape = mono_tuple_shape(ws, parts);
         return if shape.splats() { RetSlot::Nested(shape) } else { RetSlot::Opaque };
     }
     let (payload, nullable) = ty.peel_nullable();
@@ -1540,40 +1600,54 @@ pub(crate) fn reified_ret_slot(ws: &Workspace, ty: &ReifiedType) -> RetSlot {
 }
 
 /// The per-part slots of a reified tuple, WITHOUT the collapse
-/// [`reified_ret_slot`] applies. Read where the tuple's arity is the question --
+/// [`mono_ret_slot`] applies. Read where the tuple's arity is the question --
 /// a destructure, a `next`'s `(bool, E)` -- rather than what slot it occupies.
-pub(crate) fn reified_tuple_shape(ws: &Workspace, parts: &[ReifiedType]) -> TupleRetShape {
-    let slots = parts.iter().map(|part| reified_ret_slot(ws, part)).collect();
+pub(crate) fn mono_tuple_shape(ws: &Workspace, parts: &[MonoTy]) -> TupleRetShape {
+    let slots = parts.iter().map(|part| mono_ret_slot(ws, part)).collect();
     TupleRetShape { slots, nullable: false }
 }
 
+/// The concrete binding for `ty` under `enclosing`, or `None` when the
+/// CONDITIONAL specialization mechanism does not admit one.
+///
+/// The type tree is total ([`MonoTy`]); the admission is not, and that is the
+/// whole of what `None` means here. `any`, unit, `never` and function types are
+/// valid logical types this declines to key on, so their generics ride a shared
+/// body rather than a specialized copy -- the conditional-specialization policy
+/// plan S 2a measures and Stage 4 deletes outright, once the instance graph
+/// makes every instantiation concrete. Deciding it HERE, in one place, is what
+/// keeps it from living inside the type tree as a representational hole.
+///
+/// A genuine compiler state (an unresolvable `TyId`, an unbound generic) is also
+/// `None`; [`ablation_partial_key_decline`] is the discriminant that tells the
+/// two apart, because they call for opposite repairs.
 pub(crate) fn reify_type(
     ws: &Workspace,
     inf: &BodyInference,
     ty: TyId,
     enclosing: &SpecSubst,
-) -> Option<ReifiedType> {
+) -> Option<MonoTy> {
     let ty = resolve_tyid(ws, inf, ty)?;
     match ty_node(ws, inf, ty)? {
-        TypeExpr::Builtin(BuiltinTy::Int) => Some(ReifiedType::Prim("int")),
-        TypeExpr::Builtin(BuiltinTy::Float) => Some(ReifiedType::Prim("float")),
-        TypeExpr::Builtin(BuiltinTy::Bool) => Some(ReifiedType::Prim("bool")),
+        TypeExpr::Builtin(BuiltinTy::Int) => Some(MonoTy::Int),
+        TypeExpr::Builtin(BuiltinTy::Float) => Some(MonoTy::Float),
+        TypeExpr::Builtin(BuiltinTy::Bool) => Some(MonoTy::Bool),
         // A string leaf is opaque to every shape decision, but it still has to
         // REIFY: a tuple reifies only when all its parts do, so leaving this out
         // made `(T, string)` unreifiable and the substitution then had no entry
         // for the generic bound to it -- which is the one thing `ty_node` cannot
         // answer. It cannot widen specialization on its own (`any_value` gates
         // that on a value-struct leaf, which a prim is not).
-        TypeExpr::Builtin(BuiltinTy::String) => Some(ReifiedType::Prim("string")),
+        TypeExpr::Builtin(BuiltinTy::String) => Some(MonoTy::String),
         TypeExpr::Generic(var, _) => enclosing.get(&var).cloned(),
         TypeExpr::Tuple { elements } => {
             let parts = elements
                 .into_iter()
                 .map(|el| reify_type(ws, inf, ty.with_idx(el), enclosing))
                 .collect::<Option<Vec<_>>>()?;
-            Some(ReifiedType::Tuple(parts))
+            Some(MonoTy::Tuple(parts))
         }
-        TypeExpr::Nullable(inner) => Some(ReifiedType::Nullable(Box::new(reify_type(
+        TypeExpr::Nullable(inner) => Some(MonoTy::Nullable(Box::new(reify_type(
             ws,
             inf,
             ty.with_idx(inner),
@@ -1581,15 +1655,15 @@ pub(crate) fn reify_type(
         )?))),
         TypeExpr::App { ctor, params } => {
             let ctor = match ctor {
-                TypeCtor::Array => ReifiedCtor::Array,
-                TypeCtor::Map => ReifiedCtor::Map,
-                TypeCtor::Nominal(name) => ReifiedCtor::Nominal(name),
+                TypeCtor::Array => MonoCtor::Array,
+                TypeCtor::Map => MonoCtor::Map,
+                TypeCtor::Nominal(name) => MonoCtor::Nominal(name),
             };
             let params = params
                 .into_iter()
                 .map(|param| reify_type(ws, inf, ty.with_idx(param), enclosing))
                 .collect::<Option<Vec<_>>>()?;
-            Some(ReifiedType::App { ctor, params })
+            Some(MonoTy::App { ctor, params })
         }
         _ => None,
     }
@@ -1615,6 +1689,7 @@ pub(crate) fn compute_call_spec(
     func: FuncRef,
     enclosing: &SpecSubst,
     target: bone_semantic::hir::FnBackend,
+    total: bool,
 ) -> Result<Option<(SpecKey, SpecSubst)>, CompilerError> {
     let f = &ws.module(func.module).functions[func.func];
     if f.generics.is_empty() {
@@ -1643,10 +1718,15 @@ pub(crate) fn compute_call_spec(
             ),
         ));
     };
-    let Some((key, subst)) = compute_spec_from_bindings(ws, inf, func, bindings, enclosing)?
+    let Some((key, subst)) = compute_spec_from_bindings(ws, inf, func, bindings, enclosing, total)?
     else {
         return Ok(None);
     };
+    // A total-specialization target has no shared body to decline to, so the
+    // optimization gates below do not apply to it.
+    if total {
+        return Ok(Some((key, subst)));
+    }
     // `@inline`/`@pure` is the OPT-IN gate: those callees specialize for speed, and
     // whether it happens is the author's call.
     //
@@ -1752,17 +1832,16 @@ pub(crate) fn ablation_decline(
 /// Why a binding list cannot produce a COMPLETE [`SpecKey`] -- or `None` when
 /// every slot reifies and the key names exactly one instantiation.
 ///
-/// A slot `reify_type` answers `None` for is not one thing. [`ReifiedType`] is
-/// PARTIAL (plan S 2a): it has no arm for valid `any`, unit, never or function
+/// A slot `reify_type` answers `None` for is not one thing. Its admission is
+/// PARTIAL (plan S 2a): it declines valid `any`, unit, never and function
 /// types, and it also answers `None` for genuine compiler states. Reporting both
 /// as "the graph is missing a record" sends Stage 2 to add a record for a call
 /// whose record already exists, and hides that the defect is the KEY.
 ///
-/// [`crate::monoty::MonoArena`] is the total converter, so it is the
-/// discriminant: a slot it CAN convert is a valid type the current identity
-/// mechanism has no name for (plan S 2b, "valid type absent from `ReifiedType`
-/// -> TOTAL `MonoTy`; never a fallback"), and one it cannot carries its own
-/// reason.
+/// [`crate::monoty::convert`] is total, so it is the discriminant: a binding it
+/// CAN convert is a valid type the current identity mechanism has no name for
+/// (plan S 2b, "valid type absent from the key -> TOTAL `MonoTy`; never a
+/// fallback"), and one it cannot carries its own reason.
 pub(crate) fn ablation_partial_key_decline(
     ws: &Workspace,
     inf: &BodyInference,
@@ -1770,19 +1849,17 @@ pub(crate) fn ablation_partial_key_decline(
     enclosing: &SpecSubst,
 ) -> Option<(crate::ablation::FatalCategory, String)> {
     use crate::ablation::FatalCategory as C;
-    use crate::monoty::{MonoArena, MonoSubst, MonoTyReason};
+    use crate::monoty::{MonoSubst, MonoTyReason};
     let b = *bindings.iter().find(|b| reify_type(ws, inf, **b, enclosing).is_none())?;
-    let mut arena = MonoArena::new();
-    let subst: MonoSubst =
-        enclosing.iter().map(|(v, t)| (*v, arena.intern_reified(t))).collect();
-    Some(match arena.convert(ws, inf, b, &subst) {
-        Ok(id) => (
+    let subst: MonoSubst = enclosing.iter().map(|(v, t)| (*v, t.clone())).collect();
+    Some(match crate::monoty::convert(ws, inf, b, &subst) {
+        Ok(ty) => (
             C::UnsupportedSurface,
             format!(
-                "a binding of `{}` is a VALID type that `ReifiedType` cannot represent \
+                "a binding of `{}` is a VALID type that specialization does not admit \
                  (plan S 2a), so its key slot is `None`: the call would ride a PARTIAL key \
                  naming a family of instantiations rather than one",
-                arena.render(id)
+                ty.render()
             ),
         ),
         // The enclosing instance never named this generic, so the caller itself
@@ -1824,6 +1901,7 @@ pub(crate) fn compute_spec_from_bindings(
     func: FuncRef,
     bindings: &[TyId],
     enclosing: &SpecSubst,
+    total: bool,
 ) -> Result<Option<(SpecKey, SpecSubst)>, CompilerError> {
     let f = &ws.module(func.module).functions[func.func];
     if bindings.len() != f.generics.len() {
@@ -1838,7 +1916,7 @@ pub(crate) fn compute_spec_from_bindings(
         ));
     }
     let mut key: SpecKey = Vec::with_capacity(bindings.len());
-    let mut subst = SpecSubst::new();
+    let mut subst = SpecSubst::default();
     let mut any_value = false;
     let mut complete = true;
     for (g, b) in f.generics.iter().zip(bindings) {
@@ -1862,6 +1940,13 @@ pub(crate) fn compute_spec_from_bindings(
                 complete = false;
             }
         }
+    }
+    // A target with NO shared generic body needs every complete key: there is
+    // no boxed representation on a GPU for an unreified `T` to take, so a
+    // partial answer is not a slower lowering, it is no lowering. Same rule the
+    // Stage-0e ablation applies workspace-wide, asked per lowering.
+    if total {
+        return Ok(complete.then_some((key, subst)));
     }
     // Stage-0e: `any_value` is the conditional trigger -- specialize only when
     // some binding names a value struct. Totality has no such condition, so the
@@ -1903,7 +1988,7 @@ pub fn spec_key_from_next_generics(
         let Some(bound) = next_generics.get(&var).copied() else { return Ok(None) };
         bindings.push(bound);
     }
-    Ok(compute_spec_from_bindings(ws, inf, func, &bindings, enclosing)?.map(|(key, _)| key))
+    Ok(compute_spec_from_bindings(ws, inf, func, &bindings, enclosing, false)?.map(|(key, _)| key))
 }
 
 /// [`ablation_decline`] for the for-protocol `next` witness, whose bindings come
@@ -1953,7 +2038,7 @@ pub(crate) fn ablation_next_decline(
 /// empty subst (the shared snapshot).
 pub fn spec_subst_from_key(ws: &Workspace, fref: FuncRef, key: &SpecKey) -> SpecSubst {
     let f = &ws.module(fref.module).functions[fref.func];
-    let mut subst = SpecSubst::new();
+    let mut subst = SpecSubst::default();
     for (g, ty) in f.generics.iter().zip(key) {
         if let (Some(TypeExpr::Generic(var, _)), Some(reified)) = (static_ty(ws, *g), ty) {
             subst.insert(var, reified.clone());
@@ -2073,12 +2158,12 @@ impl TupleRetShape {
 /// entry point: `TupleRetShape::nullable` is set here and nowhere else.
 pub(crate) fn tuple_ret_shape(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> Option<TupleRetShape> {
     // A generic bound to a tuple has no type node to read (see
-    // `reified_type_node`), so its slots come off the binding itself. Only here:
+    // `mono_type_node`), so its slots come off the binding itself. Only here:
     // this is the sole consumer that needs a tuple's arity, and answering it
     // from the binding keeps `ty_node` honest about what it cannot mint.
     if let Some(TypeExpr::Generic(var, _)) = static_ty(ws, ty) {
-        if let Some(ReifiedType::Tuple(parts)) = subst.get(&var) {
-            return Some(reified_tuple_shape(ws, parts));
+        if let Some(MonoTy::Tuple(parts)) = subst.get(&var) {
+            return Some(mono_tuple_shape(ws, parts));
         }
     }
     let (elem_ty, elements, nullable) = match static_ty(ws, ty)? {
@@ -2746,4 +2831,37 @@ pub fn coroutine_yield_channel(ws: &Workspace, return_ty: TyId) -> Option<YieldC
 /// positional, then record leaves -- `value_shape` leaf order).
 pub fn yield_slot(i: usize) -> Ustr {
     Ustr::from(format!("__y{i}").as_str())
+}
+
+#[cfg(test)]
+mod adapter_tests {
+    use super::*;
+
+    /// A primitive binding's node is that primitive. `string` in particular is
+    /// NOT the recovery builtin: recovery poison means "inference failed", and
+    /// answering it for a valid `string` hands every consumer a type that names
+    /// no value. The other three are here as the controls that say this test is
+    /// about the mapping rather than about one arm.
+    #[test]
+    fn a_primitive_binding_maps_to_its_own_builtin() {
+        for (bound, want) in [
+            (MonoTy::Int, BuiltinTy::Int),
+            (MonoTy::Float, BuiltinTy::Float),
+            (MonoTy::Bool, BuiltinTy::Bool),
+            (MonoTy::String, BuiltinTy::String),
+        ] {
+            assert_eq!(
+                mono_type_node(&bound),
+                Some(TypeExpr::Builtin(want)),
+                "{bound:?} must substitute to its own builtin"
+            );
+        }
+        assert!(
+            !matches!(
+                mono_type_node(&MonoTy::String),
+                Some(TypeExpr::Builtin(BuiltinTy::Error))
+            ),
+            "a valid `string` binding must never be spelled as recovery poison"
+        );
+    }
 }

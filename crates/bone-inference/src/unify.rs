@@ -501,6 +501,37 @@ pub(crate) fn types_equal(gamma: &Gamma, a: TyId, b: TyId) -> bool {
     }
 }
 
+/// Whether `ty` still holds an unbound inference variable anywhere in its tree.
+/// Pure: reads the substitution store without writing to it, so a caller can ask
+/// whether a type stands on its own before deciding to admit it.
+pub(crate) fn has_unbound_infer(gamma: &Gamma, ty: TyId) -> bool {
+    match *gamma.get(ty) {
+        TypeExpr::Infer(v, _) => match gamma.out.substitutions.get(v) {
+            Some(next) => has_unbound_infer(gamma, next),
+            None => true,
+        },
+
+        TypeExpr::Builtin(_) | TypeExpr::Generic(..) => false,
+
+        TypeExpr::Nullable(inner) => has_unbound_infer(gamma, ty.with_idx(inner)),
+
+        TypeExpr::App { params, .. } => params
+            .into_iter()
+            .any(|p| has_unbound_infer(gamma, ty.with_idx(p))),
+
+        TypeExpr::Tuple { elements } => elements
+            .into_iter()
+            .any(|e| has_unbound_infer(gamma, ty.with_idx(e))),
+
+        TypeExpr::Function { params, ret } => {
+            has_unbound_infer(gamma, ty.with_idx(ret))
+                || params
+                    .into_iter()
+                    .any(|p| has_unbound_infer(gamma, ty.with_idx(p)))
+        }
+    }
+}
+
 pub fn coerce(gamma: &mut Gamma, from: TyId, to: TyId, span: Span) -> Result<(), CompilerError> {
     let from_r = resolve(gamma, from, span);
     let to_r = resolve(gamma, to, span);

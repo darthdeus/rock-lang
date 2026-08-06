@@ -512,6 +512,9 @@ pub struct Args {
     pub no_timeout: bool,
     pub dump_state: bool,
     pub update_snapshots: bool,
+    /// For `rock sim`: how many sim children may run at once. `None` uses the
+    /// conservative default in `run_sim::resolve_jobs`.
+    pub jobs: Option<usize>,
 
     /// For `rock frame`: record per-tick input + dt to this replay log
     /// (docs/replay-scrub-plan.md). Mutually exclusive with `--replay`.
@@ -567,6 +570,20 @@ pub struct Args {
     /// `Error`-severity findings render and fail the build under both.
     pub no_lints: bool,
     pub lint_summary: bool,
+
+    /// `rock lint --lints=a,b`: run exactly these lints instead of the default
+    /// tier. The only way to reach an opt-in lint (`bone_lints::OPT_IN_LINTS`),
+    /// which a build and the LSP never run. `rock lint` only -- a build's
+    /// catalog is not the author's to narrow per invocation.
+    pub lints: Option<String>,
+
+    /// `rock lint --only-types=Mob,Item` / `--ignore-types=Color,Vec2`: the
+    /// receiver types `method_syntax` sweeps, as a whitelist and a blocklist. A
+    /// conversion happens one type at a time, so the sweep has to narrow from
+    /// the invocation; `--ignore-types` subtracts from whatever `--only-types`
+    /// leaves.
+    pub only_types: Option<String>,
+    pub ignore_types: Option<String>,
 
     /// `rock lint --union <lib>`: judge a library's reachability against every
     /// consumer in the repo at once, reporting only what none of them reach.
@@ -663,6 +680,9 @@ impl Args {
                 .help("Dump all global state as JSON after the last frame (for AI/human diagnostics)"))
             .arg(Arg::new("update-snapshots").long("update-snapshots").action(ArgAction::SetTrue)
                 .help("For `rock sim`: rewrite snapshot baselines instead of diffing."))
+            .arg(Arg::new("jobs").long("jobs").short('j').value_name("N")
+                .value_parser(clap::value_parser!(usize))
+                .help("For `rock sim`: run up to N sim children concurrently (default 4, 1 = serial)."))
             .arg(Arg::new("record").long("record").value_name("FILE")
                 .help("For `rock frame`: record per-tick input + dt to FILE (a replay log). Replay it with --replay."))
             .arg(Arg::new("replay").long("replay").value_name("FILE")
@@ -691,6 +711,12 @@ impl Args {
                 .help("Drop lint warnings/advice from build output. Error-severity lints still run and still fail the build."))
             .arg(Arg::new("lint-summary").long("lint-summary").action(ArgAction::SetTrue)
                 .help("Report build lint warnings/advice as a one-line count instead of rendering each. Error-severity lints always render in full."))
+            .arg(Arg::new("lints").long("lints")
+                .help("For `rock lint <path>`: run ONLY the named lints (comma-separated), including opt-in ones a build never runs. `--lints=method_syntax` is how a migration lint is surfaced."))
+            .arg(Arg::new("only-types").long("only-types")
+                .help("For `rock lint --lints=method_syntax`: comma-separated type names to sweep, to the exclusion of every other (--only-types=Mob,Item). A name that is no type in the project rejects."))
+            .arg(Arg::new("ignore-types").long("ignore-types")
+                .help("For `rock lint --lints=method_syntax`: comma-separated type names to drop from the sweep (--ignore-types=Color,Vec2). A name that is no type in the project is reported."))
             .arg(Arg::new("union").long("union").action(ArgAction::SetTrue)
                 .help("For `rock lint <lib>`: judge a library's reachability against every consumer in the repo at once, reporting only functions that NONE of them reach. The only sound way to run unused_fn on a lib."))
             .arg(Arg::new("consumers").long("consumers")
@@ -738,6 +764,7 @@ impl Args {
             no_timeout: m.get_flag("no-timeout"),
             dump_state: m.get_flag("dump-state"),
             update_snapshots: m.get_flag("update-snapshots"),
+            jobs: m.get_one::<usize>("jobs").copied(),
             record: m.get_one::<String>("record").cloned(),
             replay: m.get_one::<String>("replay").cloned(),
             checkpoint_interval: m.get_one::<usize>("checkpoint-interval").copied(),
@@ -752,6 +779,9 @@ impl Args {
             package: m.get_flag("package"),
             no_lints: m.get_flag("no-lints"),
             lint_summary: m.get_flag("lint-summary"),
+            lints: m.get_one::<String>("lints").cloned(),
+            only_types: m.get_one::<String>("only-types").cloned(),
+            ignore_types: m.get_one::<String>("ignore-types").cloned(),
             union: m.get_flag("union"),
             consumers: m.get_one::<String>("consumers").cloned(),
             // Backend selection. An explicit `--backend` flag wins; otherwise an

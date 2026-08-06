@@ -1,32 +1,34 @@
-//! Synthetic target projections (`docs/monomorphization-plan.md` S 0c final
-//! bullet, S 0d projection bullet, S 20g.1).
+//! The TARGET SPECS an artifact view is taken through
+//! (`docs/monomorphization-plan.md` S 0c final bullet, S 20a, S 20g.1).
 //!
-//! A projection reads an already-built [`InstanceGraph`] and classifies it for a
-//! target: which roots survive, which boundaries that target can supply, and
-//! which ABI/ownership obligations it defers to a later stage. It **may not**
-//! discover instances, rebuild the graph, or touch a logical key -- plan S 20g.1
-//! asks precisely whether identity survives realization differing, so a
-//! projection that recomputed identity would answer its own question.
+//! **Three independent axes, not a target enum** (plan S 20a). The variants a
+//! flat enum would grow -- `LuaDesktop`, `LuaIos`, `JsWeb`, `CAndroid`,
+//! `WasmWasi` -- are cross products of things that vary separately:
+//! [`PlatformSpec`] is where an artifact RUNS, [`ExecutionTargetSpec`] is what
+//! emits and executes its CPU code, and [`ShaderTargetSpec`] is what is packaged
+//! beside it. [`TargetSpec`] holds one of each, so a new target is a
+//! COMBINATION, not a match arm in every consumer.
 //!
-//! That constraint is the whole design: [`project`] takes `&InstanceGraph` and
-//! returns counts. It has no `&mut`, so it *cannot* change what it measures.
+//! **Shader packaging cannot affect CPU realization.** Artifact admission takes
+//! [`CpuTargetSpec`] -- platform plus execution -- because host capabilities
+//! affect available boundaries. It cannot inspect the optional shader target.
+//! `shader_packaging_does_not_decide_cpu_realization` measures that separation.
 //!
-//! **Structured capabilities, not a target enum** (plan S 20a). The variants a
-//! flat enum would grow -- `LuaDesktop`, `JsWeb`, `CAndroid`, `WasmWeb` -- are
-//! cross products of independent axes. [`ExecutionTargetSpec`] carries the axes
-//! as fields so a new target is a fixture, not a match arm in every consumer.
+//! The COUNT-ONLY projection this module used to return is gone. Counting
+//! `g.boundaries` answered a symbol-keyed question -- two `@nomangle` backend
+//! siblings share one entry there -- and a count cannot say WHICH declaration a
+//! target keeps, which is the only form in which "identity survives
+//! realization differing" is checkable. `crate::artifact::realize` returns the
+//! realized sets instead; this module keeps the specs and the two per-target
+//! predicates they answer.
 
-use std::collections::BTreeMap;
-
-use bone_semantic::inference::Workspace;
-
-use crate::instance_graph::{BoundaryClass, InstanceGraph};
+use crate::instance_graph::BoundaryClass;
 
 /// What a target can supply. Each field is a question some boundary class or
 /// ABI decision actually asks; none is a target NAME.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Capabilities {
-    /// Can call a foreign C symbol -- decides `extern` (S 1.1).
+    /// Can issue a foreign C call. The platform must also expose host symbols.
     pub foreign_symbols: bool,
     /// Has a verbatim-body backend of this flavour -- decides `inline(..)`
     /// (S 1.2).
@@ -43,18 +45,121 @@ pub struct Capabilities {
     pub float64: bool,
 }
 
-/// One execution target's identity and capabilities (plan S 20a's
-/// `ExecutionTargetSpec`, reduced to the fields Stage 0 can actually consume).
+/// One EXECUTION backend's identity and capabilities (plan S 20a's
+/// `ExecutionTargetSpec`, reduced to the fields Stage 2 can actually consume).
+///
+/// This is one axis of a [`TargetSpec`], not the whole target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExecutionTargetSpec {
-    pub name: &'static str,
+    pub kind: ExecutionBackend,
     pub pointer_width: u8,
+    /// The `FnBackend` whose declarations this artifact emits, when it has one.
+    /// `None` is a target with no Rock-level backend of its own: it realizes
+    /// the PORTABLE subset and no verbatim body at all.
+    pub backend: Option<bone_semantic::hir::FnBackend>,
     pub caps: Capabilities,
 }
 
-/// The luajit artifact.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExecutionBackend {
+    LuaJit,
+    JavaScript,
+    NativeC,
+    WebAssembly,
+}
+
+/// Where an artifact RUNS. An axis of its own: one execution backend is
+/// packaged for several platforms (luajit on desktop AND on iOS), and one
+/// platform hosts several backends (the web runs JavaScript and WebAssembly).
+///
+/// Plan S 20a's detailed payloads (os/arch, browser limits, API level) remain
+/// demand-driven. Host-symbol availability is already live in artifact
+/// admission, so platform is not decorative.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlatformKind {
+    Desktop,
+    Web,
+    Ios,
+    Android,
+    Wasi,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlatformCapabilities {
+    /// The host exposes symbols an execution backend capable of foreign calls
+    /// can bind. Browser and WASI artifacts require declared imports instead.
+    pub host_symbols: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlatformSpec {
+    pub kind: PlatformKind,
+    pub caps: PlatformCapabilities,
+}
+
+/// What is packaged BESIDE the CPU artifact. Optional, because a target may
+/// have no GPU route at all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShaderTargetSpec {
+    Glsl(skull_codegen_glsl::GlslProfile),
+    SpirV,
+    Wgsl,
+    Msl,
+}
+
+/// One artifact's target: plan S 20a's `TargetSpec`.
+///
+/// Three fields, three axes. Composing a new one is a `TargetSpec { .. }`
+/// literal, which is what keeps this from becoming the cross-product enum.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TargetSpec {
+    /// DISPLAY ONLY -- the label a report puts on this combination. It is not
+    /// an identity: two `TargetSpec`s with equal axes and different names
+    /// realize identically, which `an_artifact_name_decides_nothing` asserts.
+    pub name: &'static str,
+    pub platform: PlatformSpec,
+    pub execution: ExecutionTargetSpec,
+    pub shader: Option<ShaderTargetSpec>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CpuTargetSpec {
+    pub platform: PlatformSpec,
+    pub execution: ExecutionTargetSpec,
+}
+
+impl TargetSpec {
+    pub fn cpu(self) -> CpuTargetSpec {
+        CpuTargetSpec { platform: self.platform, execution: self.execution }
+    }
+}
+
+// --- the axes, declared once each and shared by the combinations below -------
+
+pub const DESKTOP: PlatformSpec = PlatformSpec {
+    kind: PlatformKind::Desktop,
+    caps: PlatformCapabilities { host_symbols: true },
+};
+pub const WEB: PlatformSpec = PlatformSpec {
+    kind: PlatformKind::Web,
+    caps: PlatformCapabilities { host_symbols: false },
+};
+pub const IOS: PlatformSpec = PlatformSpec {
+    kind: PlatformKind::Ios,
+    caps: PlatformCapabilities { host_symbols: true },
+};
+pub const WASI: PlatformSpec = PlatformSpec {
+    kind: PlatformKind::Wasi,
+    caps: PlatformCapabilities { host_symbols: false },
+};
+
+pub const GLSL_330: ShaderTargetSpec =
+    ShaderTargetSpec::Glsl(skull_codegen_glsl::GlslProfile::Core330);
+
+/// The luajit execution backend.
 pub const LUAJIT: ExecutionTargetSpec = ExecutionTargetSpec {
-    name: "luajit",
+    kind: ExecutionBackend::LuaJit,
+    backend: Some(bone_semantic::hir::FnBackend::Lua),
     pointer_width: 64,
     caps: Capabilities {
         foreign_symbols: true,
@@ -66,9 +171,10 @@ pub const LUAJIT: ExecutionTargetSpec = ExecutionTargetSpec {
     },
 };
 
-/// The browser artifact.
+/// The browser execution backend.
 pub const JAVASCRIPT: ExecutionTargetSpec = ExecutionTargetSpec {
-    name: "javascript",
+    kind: ExecutionBackend::JavaScript,
+    backend: Some(bone_semantic::hir::FnBackend::Js),
     pointer_width: 64,
     caps: Capabilities {
         foreign_symbols: false,
@@ -82,9 +188,10 @@ pub const JAVASCRIPT: ExecutionTargetSpec = ExecutionTargetSpec {
 
 /// Deliberately hostile synthetic fixture: 16-bit pointers, no GC, no
 /// suspendable frame, 32-bit floats. It exists to be maximally UNLIKE the two
-/// real targets while sharing their logical graph.
+/// real backends while sharing their logical graph.
 pub const NATIVE_C64: ExecutionTargetSpec = ExecutionTargetSpec {
-    name: "native-c64",
+    kind: ExecutionBackend::NativeC,
+    backend: None,
     pointer_width: 16,
     caps: Capabilities {
         foreign_symbols: true,
@@ -100,7 +207,8 @@ pub const NATIVE_C64: ExecutionTargetSpec = ExecutionTargetSpec {
 /// instantiation, not a `dlopen` the compiler can assume, so `foreign_symbols`
 /// is false -- an `extern` needs an import entry the artifact must carry.
 pub const WASM32: ExecutionTargetSpec = ExecutionTargetSpec {
-    name: "wasm32",
+    kind: ExecutionBackend::WebAssembly,
+    backend: None,
     pointer_width: 32,
     caps: Capabilities {
         foreign_symbols: false,
@@ -112,27 +220,44 @@ pub const WASM32: ExecutionTargetSpec = ExecutionTargetSpec {
     },
 };
 
-pub const ALL: &[ExecutionTargetSpec] = &[LUAJIT, JAVASCRIPT, NATIVE_C64, WASM32];
+// --- the combinations --------------------------------------------------------
+//
+// Each is a literal over the axes above. In-game GLSL is packaged as Core330 on
+// every platform; the runtime GL context performs the GLES header adaptation.
 
-/// One target's view of a graph it did not build.
-#[derive(Clone, Debug)]
-pub struct Projection {
-    pub target: &'static str,
-    /// Logical instances. Identical across every projection BY CONSTRUCTION --
-    /// see the module docs -- and asserted anyway, because "by construction" is
-    /// a claim about code that can be edited.
-    pub instances: usize,
-    /// Digest of the rendered manifest. The property under test.
-    pub manifest_digest: u64,
-    pub boundaries_total: usize,
-    pub boundaries_available: usize,
-    /// Unsupported boundaries by class. Each is plan S 10's `Invalid boundary`
-    /// outcome on this target: a spanned rejection, never a stub.
-    pub unsupported_by_class: BTreeMap<&'static str, usize>,
-    /// Obligations this target defers to a later stage. Deferred is not
-    /// unknown: each names the plan section that owns it.
-    pub deferred: Vec<&'static str>,
-}
+pub const LUAJIT_DESKTOP: TargetSpec = TargetSpec {
+    name: "luajit-desktop",
+    platform: DESKTOP,
+    execution: LUAJIT,
+    shader: Some(GLSL_330),
+};
+
+pub const LUAJIT_IOS: TargetSpec = TargetSpec {
+    name: "luajit-ios",
+    platform: IOS,
+    execution: LUAJIT,
+    shader: Some(GLSL_330),
+};
+
+pub const JAVASCRIPT_WEB: TargetSpec = TargetSpec {
+    name: "javascript-web",
+    platform: WEB,
+    execution: JAVASCRIPT,
+    shader: Some(GLSL_330),
+};
+
+pub const NATIVE_C64_DESKTOP: TargetSpec = TargetSpec {
+    name: "native-c64-desktop",
+    platform: DESKTOP,
+    execution: NATIVE_C64,
+    shader: None,
+};
+
+pub const WASM32_WASI: TargetSpec =
+    TargetSpec { name: "wasm32-wasi", platform: WASI, execution: WASM32, shader: None };
+
+pub const ALL: &[TargetSpec] =
+    &[LUAJIT_DESKTOP, LUAJIT_IOS, JAVASCRIPT_WEB, NATIVE_C64_DESKTOP, WASM32_WASI];
 
 /// Can `target` supply this boundary class?
 ///
@@ -140,28 +265,22 @@ pub struct Projection {
 /// contract is that the entry exists for EVERY target skull emits, and the
 /// compile-time rejection in `stdlib_funcref` is what enforces it. A projection
 /// that let one be unavailable would be asserting the opposite of the contract.
-fn supports(caps: &Capabilities, class: BoundaryClass) -> bool {
+pub fn supports(target: &CpuTargetSpec, class: BoundaryClass) -> bool {
     match class {
-        BoundaryClass::Extern => caps.foreign_symbols,
-        BoundaryClass::InlineBody => caps.inline_lua || caps.inline_js,
+        BoundaryClass::Extern => {
+            target.execution.caps.foreign_symbols && target.platform.caps.host_symbols
+        }
+        BoundaryClass::InlineBody => {
+            target.execution.caps.inline_lua || target.execution.caps.inline_js
+        }
         BoundaryClass::Intrinsic => true,
         BoundaryClass::ErasedRuntimeEntry => true,
     }
 }
 
-/// Project `g` through `spec`. Read-only in the type system, not just by
-/// convention: `g` is `&`, so no discovery can happen here.
-pub fn project(ws: &Workspace, g: &InstanceGraph, spec: ExecutionTargetSpec) -> Projection {
-    let mut unsupported_by_class: BTreeMap<&'static str, usize> = BTreeMap::new();
-    let mut available = 0usize;
-    for b in g.boundaries.values() {
-        if supports(&spec.caps, b.class) {
-            available += 1;
-        } else {
-            *unsupported_by_class.entry(b.class.name()).or_insert(0) += 1;
-        }
-    }
-
+/// The obligations `spec` defers to a later stage. Deferred is not unknown:
+/// each names the plan section that owns it.
+pub fn deferred_for(spec: &ExecutionTargetSpec) -> Vec<&'static str> {
     let mut deferred = Vec::new();
     if !spec.caps.garbage_collected {
         deferred.push("ownership realization: retain/release + cycle policy (plan S 20c)");
@@ -178,14 +297,5 @@ pub fn project(ws: &Workspace, g: &InstanceGraph, spec: ExecutionTargetSpec) -> 
     if !spec.caps.foreign_symbols {
         deferred.push("`extern` needs a declared import entry rather than a host lookup");
     }
-
-    Projection {
-        target: spec.name,
-        instances: g.instances.len(),
-        manifest_digest: crate::instance_graph::manifest_digest(ws, g),
-        boundaries_total: g.boundaries.len(),
-        boundaries_available: available,
-        unsupported_by_class,
-        deferred,
-    }
+    deferred
 }

@@ -383,6 +383,27 @@ impl Builder<'_> {
             return Ok(());
         }
         let slots = self.repr_to_slot_values(value, shape);
+        self.store_slots_and_join(results, &slots, join)
+    }
+
+    /// [`Self::store_repr_and_join`] for an arm whose slots are already in hand
+    /// rather than still a repr -- a `??` lhs, whose slots were read before the
+    /// branch.
+    ///
+    /// The guard is here and not only at the caller because that is the whole
+    /// point of the split: a diverged arm has nothing to store, and every
+    /// hand-rolled copy of this loop so far dropped it. `?? return x` splatted
+    /// leaves off a nil and emitted `(nil).x` in front of the divergence
+    /// (`6132c8c2e`).
+    pub(crate) fn store_slots_and_join(
+        &mut self,
+        results: &[Idx<Cell>],
+        slots: &[Idx<Inst>],
+        join: Idx<Block>,
+    ) -> Result<(), CompilerError> {
+        if !self.is_open() {
+            return Ok(());
+        }
         if results.len() != slots.len() {
             return Err(gap(format!(
                 "aggregate join produced {} slots for {} result cells",
@@ -390,7 +411,7 @@ impl Builder<'_> {
                 results.len()
             )));
         }
-        for (&cell, value) in results.iter().zip(slots) {
+        for (&cell, &value) in results.iter().zip(slots) {
             self.emit_cur(Inst::Store { cell, value });
         }
         self.f.set_term(self.cur, Term::Goto(join));

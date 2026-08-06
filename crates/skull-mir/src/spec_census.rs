@@ -4,23 +4,23 @@
 //! appears in the complete graph, and every additional graph edge is
 //! classified").
 //!
-//! Lives in `skull-mir` because `compute_call_spec` and `ReifiedType` are
-//! internal to `lower::shape`; this exposes the RESULT rendered as strings
-//! rather than widening that module. The rendering matches
-//! [`MonoArena::render`](crate::monoty::MonoArena::render) exactly, so the two
-//! sides are comparable without either learning the other's type tree.
+//! Lives in `skull-mir` because `compute_call_spec` is internal to
+//! `lower::shape`; this exposes the RESULT encoded as strings rather than
+//! widening that module. The encoding is
+//! [`MonoTy::canonical`](crate::monoty::MonoTy::canonical), which is
+//! unambiguous, so the two sides are comparable and no pretty-printing
+//! ambiguity can match two different types to each other.
 //!
-//! A `None` slot is the partial key's erasure: `reify_type` answered nothing for
-//! that generic (valid `any`, unit, never or function type, plus tuples that
-//! reify but whose node cannot). It is rendered as `None` and treated as a
-//! WILDCARD when reconciling -- the shadow side is total, so it always has a
+//! A `None` slot is the partial key's erasure: `reify_type` declined to admit
+//! that generic (a valid `any`, unit, never or function type). It is treated as
+//! a WILDCARD when reconciling -- the shadow side is total, so it always has a
 //! concrete type where this side has a hole.
 
 use bone_semantic::hir::{BodyOwner, FnBackend};
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
 
-use crate::lower::shape_census_support::{render_reified, specializations_in_body};
+use crate::lower::shape_census_support::specializations_in_body;
 use crate::mir::FuncRef;
 
 /// One specialization today's `compute_call_spec` decides to perform.
@@ -83,7 +83,7 @@ pub fn today_specializations(ws: &Workspace, target: FnBackend) -> (Vec<TodaySpe
                 out.push(TodaySpec {
                     caller,
                     func,
-                    slots: key.iter().map(|s| s.as_ref().map(render_reified)).collect(),
+                    slots: key.iter().map(|s| s.as_ref().map(crate::monoty::MonoTy::canonical)).collect(),
                 });
             }
         }

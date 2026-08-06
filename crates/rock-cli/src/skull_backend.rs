@@ -2530,4 +2530,3 @@ impl SkullStone {
         Ok(())
     }
 }
-

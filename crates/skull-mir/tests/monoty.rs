@@ -1,9 +1,9 @@
 //! Stage 0c properties for the total logical type (`docs/monomorphization-plan.md`
 //! S 0c, S 15a, S 20g.2/3/4).
 //!
-//! The generated composition is the load-bearing one: `ReifiedType` grew a
-//! `string` arm one observed symptom at a time (plan S 19b), and handwritten
-//! examples are exactly what let that happen. Every constructor is composed to a
+//! The generated composition is the load-bearing one: the partial tree MonoTy
+//! replaced grew a `string` arm one observed symptom at a time (plan S 19b), and
+//! handwritten examples are exactly what let that happen. Every constructor is composed to a
 //! bounded depth here so a missing arm is found by the test rather than by a
 //! miscompile.
 
@@ -64,8 +64,8 @@ fn convert_module(
 // -- totality --------------------------------------------------------------
 
 /// A body naming every valid constructor converts with ZERO failures. The
-/// `unit`, `any`, `never` and `fn` arms are the ones `ReifiedType` answers
-/// `None` for, so this is the direct falsification of the partial tree.
+/// `unit`, `any`, `never` and `fn` arms are the ones the partial tree answered
+/// `None` for, so this is the direct falsification of it.
 #[test]
 fn every_valid_constructor_converts() {
     let (ws, mid) = check(
@@ -98,7 +98,7 @@ fn main() {
     }
     assert!(
         ok.iter().any(|r| r.starts_with("fn(")),
-        "no function type converted -- the `Function` arm is what ReifiedType lacks"
+        "no function type converted -- the `Function` arm is what the partial tree lacked"
     );
 }
 
@@ -173,7 +173,7 @@ fn a_bound_generic_converts_to_its_binding() {
     let var = skull_mir::monoty::generic_var_of(&ws, inf, generic)
         .expect("the declared generic is a Generic node");
     let mut subst = MonoSubst::default();
-    subst.insert(var, int);
+    subst.insert(var, MonoTy::Int);
     let got = a.convert(&ws, inf, generic, &subst).expect("bound generic converts");
     assert_eq!(got, int);
 }
@@ -200,8 +200,8 @@ fn same_shape_nominals_stay_distinct() {
     assert_ne!(a.structural_hash(vec2), a.structural_hash(point));
 
     // ...and the container over each stays distinct too.
-    let v1 = a.intern(MonoTy::App { ctor: MonoCtor::Array, params: vec![vec2] });
-    let v2 = a.intern(MonoTy::App { ctor: MonoCtor::Array, params: vec![point] });
+    let v1 = a.app(MonoCtor::Array, &[vec2]);
+    let v2 = a.app(MonoCtor::Array, &[point]);
     assert_ne!(v1, v2);
     let _ = f;
 }
@@ -215,13 +215,13 @@ fn structural_equality_is_the_identity() {
     assert_eq!(i1, i2, "interning must share");
 
     let f = a.intern(MonoTy::Float);
-    let nullable_int = a.intern(MonoTy::Nullable(i1));
-    let tup_if = a.intern(MonoTy::Tuple(vec![i1, f]));
-    let tup_fi = a.intern(MonoTy::Tuple(vec![f, i1]));
-    let vec_int = a.intern(MonoTy::App { ctor: MonoCtor::Array, params: vec![i1] });
-    let map_int = a.intern(MonoTy::App { ctor: MonoCtor::Map, params: vec![i1] });
-    let fn_i_f = a.intern(MonoTy::Function { params: vec![i1], ret: f });
-    let fn_f_i = a.intern(MonoTy::Function { params: vec![f], ret: i1 });
+    let nullable_int = a.nullable(i1);
+    let tup_if = a.tuple(&[i1, f]);
+    let tup_fi = a.tuple(&[f, i1]);
+    let vec_int = a.app(MonoCtor::Array, &[i1]);
+    let map_int = a.app(MonoCtor::Map, &[i1]);
+    let fn_i_f = a.function(&[i1], f);
+    let fn_f_i = a.function(&[f], i1);
 
     let all = [i1, f, nullable_int, tup_if, tup_fi, vec_int, map_int, fn_i_f, fn_f_i];
     for (x, a_id) in all.iter().enumerate() {
@@ -236,6 +236,58 @@ fn structural_equality_is_the_identity() {
     assert_ne!(a.render(fn_i_f), a.render(fn_f_i));
 }
 
+/// The adversarial pairs a COMPOSED generator does not reach, because each pair
+/// needs two specific constructors nested a specific way round. Every pair here
+/// is two genuinely distinct logical types whose cross-process identity must
+/// differ; interning separates them by construction, so the load-bearing
+/// assertion is the one on the identity STRING and its hash.
+#[test]
+fn distinct_types_cannot_share_a_cross_process_identity() {
+    let mut a = MonoArena::new();
+    let int = a.intern(MonoTy::Int);
+    let nullable_int = a.nullable(int);
+
+    // `(fn(int) -> int)?` vs `fn(int) -> int?`. A postfix `?` on an unbracketed
+    // arrow type is the ambiguity: both spell "fn(int) -> int" then "?".
+    let fn_i_i = a.function(&[int], int);
+    let nullable_fn = a.nullable(fn_i_i);
+    let fn_i_nullable = a.function(&[int], nullable_int);
+
+    // `(int)` the one-tuple vs `int` in brackets -- and the same one round of
+    // nesting further out, which is where a naive bracket fix collides again.
+    let tuple_1 = a.tuple(&[int]);
+    let tuple_1_fn = a.tuple(&[fn_i_i]);
+    let nullable_tuple_1_fn = a.nullable(tuple_1_fn);
+
+    // A NOMINAL that happens to be spelled like a builtin container ctor is a
+    // different type from the ctor itself.
+    let vec_int = a.app(MonoCtor::Array, &[int]);
+    let nominal_vec_int = a.app(MonoCtor::Nominal(Ustr::from("Vec")), &[int]);
+    let map_int = a.app(MonoCtor::Map, &[int]);
+    let nominal_map_int = a.app(MonoCtor::Nominal(Ustr::from("Map")), &[int]);
+
+    let pairs = [
+        ("nullable fn vs fn returning nullable", nullable_fn, fn_i_nullable),
+        ("nullable tuple-of-fn vs nullable fn", nullable_tuple_1_fn, nullable_fn),
+        ("one-tuple vs its element", tuple_1, int),
+        ("Vec ctor vs a nominal named Vec", vec_int, nominal_vec_int),
+        ("Map ctor vs a nominal named Map", map_int, nominal_map_int),
+    ];
+    for (what, x, y) in pairs {
+        assert_ne!(x, y, "{what}: interning merged two distinct types");
+        assert_ne!(
+            a.canonical(x),
+            a.canonical(y),
+            "{what}: two distinct types share one canonical identity"
+        );
+        assert_ne!(
+            a.structural_hash(x),
+            a.structural_hash(y),
+            "{what}: two distinct types share one structural hash"
+        );
+    }
+}
+
 // -- order independence (S 20g.4) ------------------------------------------
 
 /// Insertion order changes the integer ids and NOTHING else. Built here as two
@@ -246,8 +298,8 @@ fn insertion_order_does_not_affect_identity() {
     let mut a = MonoArena::new();
     let ai = a.intern(MonoTy::Int);
     let af = a.intern(MonoTy::Float);
-    let at = a.intern(MonoTy::Tuple(vec![ai, af]));
-    let acomposite = a.intern(MonoTy::App { ctor: MonoCtor::Array, params: vec![at] });
+    let at = a.tuple(&[ai, af]);
+    let acomposite = a.app(MonoCtor::Array, &[at]);
 
     // Arena B: a pile of unrelated types first, then the same composite, so the
     // ids cannot line up.
@@ -258,8 +310,8 @@ fn insertion_order_does_not_affect_identity() {
     b.intern(MonoTy::Never);
     let bf = b.intern(MonoTy::Float);
     let bi = b.intern(MonoTy::Int);
-    let bt = b.intern(MonoTy::Tuple(vec![bi, bf]));
-    let bcomposite = b.intern(MonoTy::App { ctor: MonoCtor::Array, params: vec![bt] });
+    let bt = b.tuple(&[bi, bf]);
+    let bcomposite = b.app(MonoCtor::Array, &[bt]);
 
     assert_ne!(
         acomposite.index(),
@@ -286,10 +338,7 @@ fn generated_composition_to_depth_three_is_total() {
             a.intern(MonoTy::Any),
             a.intern(MonoTy::Unit),
             a.intern(MonoTy::Never),
-            a.intern(MonoTy::App {
-                ctor: MonoCtor::Nominal(Ustr::from("Vec2")),
-                params: vec![],
-            }),
+            a.app(MonoCtor::Nominal(Ustr::from("Vec2")), &[]),
         ]
     }
 
@@ -300,19 +349,16 @@ fn generated_composition_to_depth_three_is_total() {
     ) -> Vec<skull_mir::monoty::MonoTyId> {
         let mut out = Vec::new();
         for &k in kids {
-            out.push(a.intern(MonoTy::Nullable(k)));
-            out.push(a.intern(MonoTy::App { ctor: MonoCtor::Array, params: vec![k] }));
-            out.push(a.intern(MonoTy::Function { params: vec![k], ret: k }));
+            out.push(a.nullable(k));
+            out.push(a.app(MonoCtor::Array, &[k]));
+            out.push(a.function(&[k], k));
         }
         for &x in kids.iter().take(4) {
             for &y in kids.iter().take(4) {
-                out.push(a.intern(MonoTy::Tuple(vec![x, y])));
-                out.push(a.intern(MonoTy::App { ctor: MonoCtor::Map, params: vec![x, y] }));
-                out.push(a.intern(MonoTy::App {
-                    ctor: MonoCtor::Nominal(Ustr::from("Pair")),
-                    params: vec![x, y],
-                }));
-                out.push(a.intern(MonoTy::Function { params: vec![x, y], ret: x }));
+                out.push(a.tuple(&[x, y]));
+                out.push(a.app(MonoCtor::Map, &[x, y]));
+                out.push(a.app(MonoCtor::Nominal(Ustr::from("Pair")), &[x, y]));
+                out.push(a.function(&[x, y], x));
             }
         }
         out
@@ -326,15 +372,18 @@ fn generated_composition_to_depth_three_is_total() {
         every.extend(level.iter().copied());
     }
 
-    // Every generated type renders, and the rendering round-trips to the same
-    // id through the arena -- i.e. rendering is injective over what we built.
+    // Every generated type has a non-empty display spelling, and its CANONICAL
+    // encoding round-trips to the same id -- i.e. the identity is injective over
+    // what we built. The display spelling is deliberately not asserted injective:
+    // it is a pretty type syntax, and `distinct_types_cannot_share_a_cross_process_identity`
+    // pins the pairs where it collides.
     let mut seen: std::collections::HashMap<String, skull_mir::monoty::MonoTyId> =
         std::collections::HashMap::new();
     for id in &every {
-        let r = a.render(*id);
-        assert!(!r.is_empty(), "a generated type rendered empty");
-        if let Some(prev) = seen.insert(r.clone(), *id) {
-            assert_eq!(prev, *id, "two distinct ids rendered identically: `{r}`");
+        assert!(!a.render(*id).is_empty(), "a generated type displayed empty");
+        let c = a.canonical(*id);
+        if let Some(prev) = seen.insert(c.clone(), *id) {
+            assert_eq!(prev, *id, "two distinct ids share one canonical encoding: `{c}`");
         }
     }
     // Every constructor must actually appear -- a count alone would pass while
@@ -363,7 +412,7 @@ fn generated_composition_to_depth_three_is_total() {
     assert_eq!(
         seen.len(),
         every.iter().copied().collect::<std::collections::HashSet<_>>().len(),
-        "rendering is not injective over the generated set"
+        "the canonical encoding is not injective over the generated set"
     );
 }
 

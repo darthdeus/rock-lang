@@ -83,8 +83,8 @@ fn web_fake_gl_smoke_chess() {
 }
 
 // mag (v2 tier) in the node fake-GL env: boots through global init, the whole
-// @init image-load phase (no fetch -> every stone_load_image takes the loud
-// white-pixel fallback rung), and runs 10 full frames of the world render.
+// @init image-load phase (no fetch, so the harness stubs a 1x1 bitmap for each
+// path in the preload manifest), and runs 10 full frames of the world render.
 #[test]
 fn web_fake_gl_smoke_mag() {
     run_fake_gl_smoke("mag");

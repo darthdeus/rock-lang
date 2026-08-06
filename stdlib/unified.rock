@@ -801,6 +801,18 @@ deco init on_reload {
     return not __op_eq(a, b)
 """
 
+// Reference identity -- "are these the same object", which `==` cannot answer.
+// `__op_eq` above is STRUCTURAL for every reference type: it walks fields, so
+// two independently-created structs (including two distinct coroutines) with
+// equal contents compare equal. Callers that mean identity -- "is this still
+// the same task the slot held", "is this the same batch pool" -- need this.
+//
+// `@native_required`: identity is not expressible as a portable Rock body, so a
+// backend with no mapping must fail loudly rather than silently fall back to a
+// structural walk that answers a different question.
+@intrinsic @native_required @pure @inline
+inline(lua) fn same_ref(a: any, b: any) -> bool = "rawequal(a, b)"
+
 // Tag a newly-created struct table with its type. Emitted by structs.rs for
 // every struct literal in user code. `__ty` is the single, direct type marker
 // (same scheme as Vec and every other value) -- `__rock_get_type` reads it,
@@ -1023,20 +1035,26 @@ fn assert_null<T>(value: T?, message: string = "Expected null value") {
 // regardless of origin. `__ty` is the lone type marker (`__rock_get_type` reads
 // it, the serializer checks `v.__ty == "Vec"`, methods resolve statically via
 // UFCS). See docs/skull-vec-representation-divergence.md.
-@nomangle inline(lua) fn vec_new<T>() -> [T] = """
+inline(lua) fn vec_new<T>() -> [T] = """
     return { _data = {}, len = 0, __ty = "Vec" }
 """
 
-// Bridges for inline(lua) callers that must work with the raw 1-indexed
-// backing array (handing it to a C/Lua API, or wrapping one built in raw
-// Lua). Keeps the `data` field name confined to stdlib.
-@nomangle inline(lua) fn __rock_vec_to_lua_array<T>(vec: [T]) -> any = """
+// Bridges between a `[T]` and the raw 1-indexed backing array, for Rock code
+// handing that array to a C/Lua API or wrapping one built in raw Lua. Keeps the
+// `_data` field name confined to stdlib, and the column routes intercept both
+// by Rock name (`storage.rs`, `call.rs`).
+//
+// Not `@nomangle`: no opaque body names these. They expose or mint the BOXED
+// `_data` layout, which is not a representation an opaque caller can be
+// promised (`docs/boundary-contracts.md` 2.3b), so their opaque consumers moved
+// to the Rock side rather than being given a contract.
+inline(lua) fn __rock_vec_to_lua_array<T>(vec: [T]) -> any = """
     local out = {}
     for i = 1, vec.len do out[i] = vec._data[i] end
     return out
 """
 
-@nomangle inline(lua) fn __rock_vec_from_lua_array<T>(arr: any, len: int) -> [T] = """
+inline(lua) fn __rock_vec_from_lua_array<T>(arr: any, len: int) -> [T] = """
     return { _data = arr, len = len, __ty = "Vec" }
 """
 
@@ -1045,7 +1063,12 @@ fn assert_null<T>(value: T?, message: string = "Expected null value") {
 // translated from the Rock equivalent
 // `{ vec.len = vec.len + 1; table_set(vec._data, vec.len, item) }`.
 // See docs/jit-fnew-codegen-investigation.md §"Fourth pass".
-@nomangle @inline inline(lua) fn vec_push<T>(vec: [T], item: T) = """
+// `vec` names the vec LAYOUT, so a column-stored receiver must not reach this
+// body -- `column_push` routes around it. `item` is stored and never indexed,
+// so it makes no layout claim and carries the contract that says so. It stays
+// spelled `T`: that is the inference edge giving `vec_new()` its element type,
+// and `any`/`any?` would sever it. See `docs/boundary-contracts.md` 2.4.
+@inline inline(lua) fn vec_push<T>(vec: [T], @repr(opaque) item: T) = """
     vec.len = vec.len + 1
     vec._data[vec.len] = item
 """
@@ -1188,47 +1211,54 @@ fn Map<K, V>.enumerate(collection) -> [(int, (K, V))] {
 // via unwrap_enumerate_expr and emits a direct numeric loop reading buf.ptr[i].
 // This overload only runs if enumerate(buf) is called from a non-for-loop
 // context (e.g. stored in a variable) — it materializes the tuples into a Vec.
-inline(lua) fn enumerate<T>(collection: NativeBuffer<T>) -> [(int, T)] = """
-    local out = vec_new()
-    local n = collection.len
-    local ptr = collection.ptr
-    for i = 0, n - 1 do
-        out.len = out.len + 1
-        out._data[out.len] = { i, ptr[i] }
-    end
+fn enumerate<T>(collection: NativeBuffer<T>) -> [(int, T)] {
+    let out: [(int, T)] = vec_new()
+    for i in 0..collection.len {
+        out.push((i, collection[i]))
+    }
     return out
-"""
+}
 
 // Sized NativeBuffer variants: type-checker stubs so `enumerate(buf)`
 // typechecks; the for-loop codegen intercepts and emits a direct numeric
 // loop, so the body is only reached if enumerate is called from a
 // non-for-loop context (rare). Macro-generated — one invocation per
 // phantom variant.
-inline(lua) fn enumerate(collection: NativeBufferU8) -> [(int, int)] = """
-    local out = vec_new(); local n = collection.len; local ptr = collection.ptr
-    for i = 0, n - 1 do out.len = out.len + 1; out._data[out.len] = { i, ptr[i] } end
+fn enumerate(collection: NativeBufferU8) -> [(int, int)] {
+    let out: [(int, int)] = vec_new()
+    for i in 0..collection.len {
+        out.push((i, collection[i]))
+    }
     return out
-"""
-inline(lua) fn enumerate(collection: NativeBufferI8) -> [(int, int)] = """
-    local out = vec_new(); local n = collection.len; local ptr = collection.ptr
-    for i = 0, n - 1 do out.len = out.len + 1; out._data[out.len] = { i, ptr[i] } end
+}
+fn enumerate(collection: NativeBufferI8) -> [(int, int)] {
+    let out: [(int, int)] = vec_new()
+    for i in 0..collection.len {
+        out.push((i, collection[i]))
+    }
     return out
-"""
-inline(lua) fn enumerate(collection: NativeBufferU16) -> [(int, int)] = """
-    local out = vec_new(); local n = collection.len; local ptr = collection.ptr
-    for i = 0, n - 1 do out.len = out.len + 1; out._data[out.len] = { i, ptr[i] } end
+}
+fn enumerate(collection: NativeBufferU16) -> [(int, int)] {
+    let out: [(int, int)] = vec_new()
+    for i in 0..collection.len {
+        out.push((i, collection[i]))
+    }
     return out
-"""
-inline(lua) fn enumerate(collection: NativeBufferI16) -> [(int, int)] = """
-    local out = vec_new(); local n = collection.len; local ptr = collection.ptr
-    for i = 0, n - 1 do out.len = out.len + 1; out._data[out.len] = { i, ptr[i] } end
+}
+fn enumerate(collection: NativeBufferI16) -> [(int, int)] {
+    let out: [(int, int)] = vec_new()
+    for i in 0..collection.len {
+        out.push((i, collection[i]))
+    }
     return out
-"""
-inline(lua) fn enumerate(collection: NativeBufferU32) -> [(int, int)] = """
-    local out = vec_new(); local n = collection.len; local ptr = collection.ptr
-    for i = 0, n - 1 do out.len = out.len + 1; out._data[out.len] = { i, ptr[i] } end
+}
+fn enumerate(collection: NativeBufferU32) -> [(int, int)] {
+    let out: [(int, int)] = vec_new()
+    for i in 0..collection.len {
+        out.push((i, collection[i]))
+    }
     return out
-"""
+}
 
 // rev() reverses any [T] into a new Vec.
 fn Vec<T>.rev(collection) -> [T] {
@@ -1363,7 +1393,11 @@ inline(js) fn float_to_int(value: float) -> int = "return Math.floor(value);"
     return copy
 """
 
-@nomangle inline(lua) fn deepcopy<T>(obj: T) -> T = """
+// Not `@nomangle`: nothing calls this by its bare name. `@nomangle` is what
+// creates a bare-name obligation for opaque text to call, and these are reached
+// only through ordinary Rock calls and the column intercept, which match the
+// Rock name rather than the emitted symbol.
+inline(lua) fn deepcopy<T>(obj: T) -> T = """
     return __rock_deepcopy_value(obj, {})
 """
 
@@ -1561,7 +1595,10 @@ inline(lua) fn table_new() -> any = """return {}"""
     o[f] = v
 """
 
-@inline inline(lua) fn table_unset(tbl: any, index: any) = """
+// Typed for the same reason the `__vec_data_*` receivers are: `any` claimed no
+// representation, so a missing column route fell through to the boxed body.
+// Both callers are Map methods (`remove`, `clear`).
+@inline inline(lua) fn table_unset<K, V>(tbl: Map<K, V>, index: K) = """
     tbl[index] = nil
 """
 
@@ -1570,9 +1607,17 @@ inline(lua) fn table_new() -> any = """return {}"""
 // `[i]` via the intrinsic map) so the shared pure-Rock Vec ops stop hard-coding
 // the Lua base. `@inline` so hot `vec_get` / drain callsites still splice with
 // no call frame.
-@nomangle @inline inline(lua) fn __vec_data_get(vec: any, index: int) -> any = "return vec._data[index + 1]"
-@nomangle @inline inline(lua) fn __vec_data_set(vec: any, index: int, value: any) = "vec._data[index + 1] = value"
-@nomangle @inline inline(lua) fn __vec_data_unset(vec: any, index: int) = "vec._data[index + 1] = nil"
+// The RECEIVER is typed so 2.4 can protect these: spelled `any` they claimed no
+// representation, and a missing column route fell through to the boxed body and
+// died at runtime on `_data` instead of rejecting. The VALUE stays `any` -- it
+// is stored opaquely. `docs/boundary-contracts.md` 2.3b.
+// Not `@nomangle`: nothing calls these by their bare name. `@nomangle` is what
+// creates a bare-name obligation for opaque text to call, and these are reached
+// only through ordinary Rock calls and the column intercept, which match the
+// Rock name rather than the emitted symbol.
+@inline inline(lua) fn __vec_data_get<T>(vec: [T], index: int) -> any = "return vec._data[index + 1]"
+@inline inline(lua) fn __vec_data_set<T>(vec: [T], index: int, value: any) = "vec._data[index + 1] = value"
+@inline inline(lua) fn __vec_data_unset<T>(vec: [T], index: int) = "vec._data[index + 1] = nil"
 
 // The COLD half of the same boundary. `get`/`set`/`unset` cover every op that
 // reaches storage one element at a time; these are the ops that touch the
@@ -1583,25 +1628,29 @@ inline(lua) fn table_new() -> any = """return {}"""
 //
 // Not `@inline`: these are cold (construction, clone, sort), so a call frame is
 // the right trade and splicing them into every caller is not.
-@nomangle inline(lua) fn __vec_data_alloc<T>(capacity: int) -> [T] = """
+// Not `@nomangle`: nothing calls this by its bare name. `@nomangle` is what
+// creates a bare-name obligation for opaque text to call, and these are reached
+// only through ordinary Rock calls and the column intercept, which match the
+// Rock name rather than the emitted symbol.
+inline(lua) fn __vec_data_alloc<T>(capacity: int) -> [T] = """
     local tbl = {}
     for i = 1, capacity do tbl[i] = false end
     return { _data = tbl, len = 0, __ty = "Vec" }
 """
 
-@nomangle inline(lua) fn __vec_data_capacity<T>(vec: [T]) -> int = "return #vec._data"
+inline(lua) fn __vec_data_capacity<T>(vec: [T]) -> int = "return #vec._data"
 
-@nomangle inline(lua) fn __vec_data_insert<T>(vec: [T], lua_index: int, value: T) = """
+inline(lua) fn __vec_data_insert<T>(vec: [T], lua_index: int, value: T) = """
     table.insert(vec._data, lua_index, value)
 """
 
-@nomangle inline(lua) fn __vec_data_clone<T>(vec: [T]) -> [T] = """
+inline(lua) fn __vec_data_clone<T>(vec: [T]) -> [T] = """
     local copy = {}
     for i = 1, #vec._data do copy[i] = vec._data[i] end
     return { _data = copy, len = vec.len, __ty = "Vec" }
 """
 
-@nomangle inline(lua) fn __vec_data_sort<T, K>(vec: [T], key_fn: fn(T) -> K) = """
+inline(lua) fn __vec_data_sort<T, K>(vec: [T], key_fn: fn(T) -> K) = """
     table.sort(vec._data, function(a, b)
         return key_fn(a) < key_fn(b)
     end)
@@ -1770,8 +1819,16 @@ inline(lua) fn table_new_with_size(size: int) -> any = """
 
 @inline inline(lua) fn table_remove(t: any, key: any) -> any = "table.remove(t, key)"
 
-// Global constants
-global PI: float = 3.141592653589793
+// Global constants. `const` (not `global`): bone enforces these read-only, which
+// is also what lets a shader body fold them -- a mutable `global` has no GLSL
+// lowering (docs/shaders.md).
+const PI: float = 3.141592653589793
+const TAU: float = 6.283185307179586
+const TWO_PI: float = TAU
+const HALF_PI: float = 1.5707963267948966
+const QTR_PI: float = 0.7853981633974483
+const PHI: float = 1.618033988749895
+const EPSILON: float = 0.0000001
 
 // Assert function overloads are defined earlier in the file to avoid duplicates
 
@@ -2164,7 +2221,9 @@ fn Map<K, V>.insert(map, key: K, value: V) {
     map[key] = value
 }
 
-@nomangle @inline inline(lua) fn Map<K, V>.get(map, key: K) -> V? = """
+// Not `@nomangle`: reached through ordinary Rock calls and the column
+// intercept, both of which match the Rock name rather than the emitted symbol.
+@inline inline(lua) fn Map<K, V>.get(map, key: K) -> V? = """
     return map[key]
 """
 
@@ -2243,6 +2302,14 @@ fn Map<K, V>.insert(map, key: K, value: V) {
     fi._data[fi.len] = s
     m.occupied_count = m.occupied_count - 1
     return s
+"""
+
+// The spine is a key -> slot dictionary, and a map key is DATA: it must never
+// collide with a name the host object model already defines. A Lua table
+// inherits nothing, so this is a bare table; the JS sibling needs a
+// null-prototype object (stdlib/js.rock). Pinned by tests/map_prototype_keys.rock.
+@nomangle inline(lua) fn __map_col_new_spine() -> any = """
+    return {}
 """
 
 @nomangle inline(lua) fn __map_col_len(m: any) -> int = """

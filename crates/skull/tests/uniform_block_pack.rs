@@ -9,7 +9,7 @@
 //! the divergence is visible as a skipped index rather than as a number that
 //! happens to agree.
 
-use crate::common::emit_module;
+use crate::common::{emit_module, run_luajit};
 
 /// `radius: float, direction: Vec2, resolution: float` -> std140 offsets
 /// 0, 8, 12, 16 -> element indices 0, 2, 3, 4. Index 1 is the four-byte hole
@@ -103,5 +103,172 @@ fn the_pack_is_stores_not_a_call_and_never_boxes() {
         !body.contains("BloomBlurU_lct") && !body.contains("BloomBlurU_ct"),
         "the group was boxed before packing -- the leaves must reach the store \
          unpacked:\n{body}"
+    );
+}
+
+/// A value with a nested `nobox` member, bound to a local inside a lambda and
+/// packed there. Shared by the assertion and control 1 so they cannot drift.
+const PROBE: &str = r#"
+value ProbeU {
+    scalar: float,
+    params: Vec2,
+}
+
+fn main() {
+    let body = () => {
+        let f = native_buffer_float(8)
+        let i = native_buffer_int(8)
+        let u = ProbeU { scalar: 1.0, params: v(5.0, 6.0) }
+        pack_uniform_block(f.ptr, i.ptr, u)
+        print(f[0])
+        print(f[2])
+        print(f[3])
+    }
+    body()
+}
+"#;
+
+/// A nested `nobox` member reaches the packer when the value is bound to a
+/// LOCAL inside a LAMBDA. The nested member is stored under its dotted leaf
+/// names, so the immediate `.params` read names no field cell; redirecting it
+/// to one anyway produced a load with no store, and the emitted body indexed a
+/// nil local. The three controls below each drop one leg of that shape.
+#[test]
+fn a_nested_member_survives_a_local_inside_a_lambda() {
+    let out = run_luajit(&format!("{}\nmain()\n", emit_module(PROBE)), "probe_lambda_local");
+    assert_eq!(out.split_whitespace().collect::<Vec<_>>(), ["1", "5", "6"]);
+}
+
+/// Control 1: the same lambda, same nested member, but the value goes STRAIGHT
+/// to the packer instead of through a local. Isolates the local.
+#[test]
+fn control_a_literal_packed_directly_inside_a_lambda() {
+    let src = PROBE.replace(
+        "let u = ProbeU { scalar: 1.0, params: v(5.0, 6.0) }\n        pack_uniform_block(f.ptr, i.ptr, u)",
+        "pack_uniform_block(f.ptr, i.ptr, ProbeU { scalar: 1.0, params: v(5.0, 6.0) })",
+    );
+    // A `.replace` that matched nothing yields the PROBE verbatim, and this
+    // control would then silently re-run the main case instead of its own.
+    assert_ne!(src, PROBE, "the control's substitution matched nothing");
+    let out = run_luajit(
+        &format!("{}\nmain()\n", emit_module(&src)),
+        "probe_lambda_literal",
+    );
+    assert_eq!(out.split_whitespace().collect::<Vec<_>>(), ["1", "5", "6"]);
+}
+
+/// Control 2: the same lambda AND the same local, with the nested `Vec2`
+/// replaced by the scalar fields it would peel to. Isolates the NESTING -- the
+/// leg the other controls both keep, so without it "all three legs" would be
+/// asserted rather than shown.
+#[test]
+fn control_a_flat_value_in_a_lambda_local() {
+    let out = run_luajit(
+        &format!(
+            "{}\nmain()\n",
+            emit_module(
+                r#"
+value FlatU {
+    scalar: float,
+    px: float,
+    py: float,
+}
+
+fn main() {
+    let body = () => {
+        let f = native_buffer_float(8)
+        let i = native_buffer_int(8)
+        let u = FlatU { scalar: 1.0, px: 5.0, py: 6.0 }
+        pack_uniform_block(f.ptr, i.ptr, u)
+        print(f[0])
+        print(f[1])
+        print(f[2])
+    }
+    body()
+}
+"#
+            )
+        ),
+        "probe_lambda_flat",
+    );
+    assert_eq!(out.split_whitespace().collect::<Vec<_>>(), ["1", "5", "6"]);
+}
+
+/// Control 3: the same local and the same nested member, but at function scope
+/// rather than in a lambda. Isolates the lambda.
+#[test]
+fn control_a_local_packed_at_function_scope() {
+    let out = run_luajit(
+        &format!("{}\nmain()\n", emit_module(
+            r#"
+value ProbeU {
+    scalar: float,
+    params: Vec2,
+}
+
+fn main() {
+    let f = native_buffer_float(8)
+    let i = native_buffer_int(8)
+    let u = ProbeU { scalar: 1.0, params: v(5.0, 6.0) }
+    pack_uniform_block(f.ptr, i.ptr, u)
+    print(f[0])
+    print(f[2])
+    print(f[3])
+}
+"#,
+        )),
+        "probe_fnscope_local",
+    );
+    assert_eq!(out.split_whitespace().collect::<Vec<_>>(), ["1", "5", "6"]);
+}
+
+/// `uniform_block_id(expr)` reads only its expression's TYPE -- it must never
+/// LOWER the expression. Load-bearing rather than incidental: it is what lets
+/// `set_uniform_block_if_present` name its value twice while evaluating it once
+/// (inside the found branch), which is what keeps a `SpriteFragU` off the
+/// sprite flush's hot path when the shader declares its own group instead.
+///
+/// Measured with an observable side effect rather than by reading the emit, so
+/// the property is pinned at runtime and not by a substring that could drift.
+#[test]
+fn the_fingerprint_never_evaluates_its_argument() {
+    let out = run_luajit(
+        &format!(
+            "{}\nmain()\n",
+            emit_module(
+                r#"
+value FpProbeU { a: float, b: float }
+
+global CALLS: int = 0
+
+fn make_probe() -> FpProbeU {
+    CALLS = CALLS + 1
+    return FpProbeU { a: 1.0, b: 2.0 }
+}
+
+fn main() {
+    let id = uniform_block_id(make_probe())
+    // Non-zero proves the intrinsic really produced this type's fingerprint,
+    // so a zero `CALLS` cannot be the whole call having been dropped.
+    print(id != 0)
+    print(CALLS)
+
+    // ... and the SAME constructor does run when it is actually packed, so the
+    // zero above is the fingerprint's doing and not an inert fixture.
+    let f = native_buffer_float(8)
+    let i = native_buffer_int(8)
+    pack_uniform_block(f.ptr, i.ptr, make_probe())
+    print(CALLS)
+}
+"#
+            )
+        ),
+        "fingerprint_no_eval",
+    );
+    assert_eq!(
+        out.split_whitespace().collect::<Vec<_>>(),
+        ["true", "0", "1"],
+        "expected a real fingerprint, ZERO constructor calls for it, and one \
+         call once the value is genuinely packed"
     );
 }

@@ -17,6 +17,7 @@ use skull_mir::intrinsics::{Emission, IntrinsicTable};
 use skull_mir::lower::SpecKey;
 use skull_mir::mir::{Block, Cell, ContainerKind, FuncRef, Inst, Lit, MirFunc, Term};
 use skull_parser::{CompilerError, Span};
+use ustr::Ustr;
 
 use crate::structure::{self, LoopRegion, Structure};
 use crate::{fill_template, JsIntrinsics};
@@ -112,6 +113,15 @@ fn cell_name<T>(cell: Idx<T>) -> String {
     format!("c{}", raw(cell))
 }
 
+/// The compiler-owned temp holding publisher argument `i` while the remaining
+/// arguments evaluate. In the shared `__rock_` global space and outside the
+/// reserved body namespace, like [`ret_slot`]; a body naming one rejects.
+const PUBLISH_TEMP: &str = "__rock_lane";
+
+fn publish_temp(i: usize) -> String {
+    format!("{PUBLISH_TEMP}{i}")
+}
+
 /// Secondary return register `i` (1-based; leaf 0 rides the ordinary JS return
 /// value). Module scope, not body-local, so it is outside the reserved
 /// `r<N>`/`v<N>`/`c<N>` body namespace and cannot shadow a user global -- the
@@ -135,13 +145,11 @@ fn ret_slot_decls(n: usize) -> String {
 /// multi-value `Term::Return` and every multi-value call's dests, nested fns
 /// included.
 ///
-/// MIR is not the only writer. An `inline(js)` body is an opaque STRING the
-/// emitter copies out verbatim, and the imgui stubs legitimately publish
-/// `__rock_ret1`/`__rock_ret2` by hand -- so the bank must be sized over those
-/// too, via [`max_hand_published_slot`]. Sizing from MIR alone was correct only
-/// while every such body stayed within the wire its own declared return implies,
-/// which nothing checked: the miss is silent, because the emitted program is
-/// sloppy-mode and an undeclared write just becomes an implicit global.
+/// MIR is not the only writer: an `inline(js)` body publishes its own lanes, so
+/// the bank is sized over [`max_published_lanes`] too. Both paths that assemble
+/// a program take that max -- sizing from MIR alone under-declares silently,
+/// because the emitted program is sloppy-mode and an undeclared write just
+/// becomes an implicit global.
 fn max_multi_wire(bodies: &[&MirFunc]) -> usize {
     fn of(mf: &MirFunc) -> usize {
         let mut n = 0usize;
@@ -163,28 +171,225 @@ fn max_multi_wire(bodies: &[&MirFunc]) -> usize {
     bodies.iter().map(|mf| of(mf)).max().unwrap_or(0)
 }
 
-/// The widest scratch slot any reachable `inline(js)` body writes by hand, as a
-/// wire width (`__rock_ret2` means a 3-leaf wire). Zero when none does.
+/// The widest wire any reachable `inline(js)` body PUBLISHES, from the concrete
+/// result ABI of each body's own declaration -- never from the body text.
 ///
-/// Textual on purpose: the body is a string, so there is nothing else to ask.
-/// It over-approximates -- a slot named in a comment or a string still counts --
-/// which costs one spare `var` and can never cost a missing declaration.
-fn max_hand_published_slot(ws: &Workspace, inline_js: &[FuncRef]) -> usize {
-    let mut hi = 0usize;
-    for fr in inline_js {
-        let f = &ws.module(fr.module).functions[fr.func];
-        let Some((bone_semantic::hir::FnBackend::Js, body)) = f.inline_body else { continue };
-        let s = body.as_str();
-        let mut rest = s;
-        while let Some(at) = rest.find("__rock_ret") {
-            rest = &rest[at + "__rock_ret".len()..];
-            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-            if let Ok(n) = digits.parse::<usize>() {
-                hi = hi.max(n + 1);
+/// The bank has two writers: MIR ([`max_multi_wire`]) and the opaque bodies.
+/// The opaque half used to be a substring scan for `__rock_retN`, which made
+/// the transport whatever the string happened to say: a body could publish past
+/// its own declared wire, or name a slot in a comment and widen the bank.
+/// `BackendFnAbiPlan::result_lanes` is the same ABI policy every
+/// definition and call site reads, so a publisher and the caller capturing it
+/// cannot disagree (`docs/boundary-contracts.md` 1.2).
+fn max_published_lanes(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    inline_js: &[FuncRef],
+) -> usize {
+    inline_js
+        .iter()
+        .filter(|fr| {
+            matches!(
+                ws.module(fr.module).functions[fr.func].inline_body,
+                Some((bone_semantic::hir::FnBackend::Js, _))
+            )
+        })
+        .map(|fr| skull_mir::lower::BackendFnAbiPlan::for_declaration(ws, scx, *fr).result_lanes)
+        .max()
+        .unwrap_or(0)
+}
+
+/// `body` with every comment and string/template literal replaced by spaces of
+/// the same length: byte offsets are preserved, so a lexical check can look at
+/// CODE only and still slice the original text.
+///
+/// Plain substring matching is not an oracle here -- a `__rock_ret1` inside a
+/// comment is not bank access, and a `,` inside a string is not an argument
+/// separator. An unrecognized shape must REJECT rather than be guessed at,
+/// which is what the caller does with what this returns.
+fn code_only(body: &str) -> String {
+    let b = body.as_bytes();
+    let mut out = vec![b' '; b.len()];
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'/' if i + 1 < b.len() && b[i + 1] == b'/' => {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if i + 1 < b.len() && b[i + 1] == b'*' => {
+                i += 2;
+                while i + 1 < b.len() && !(b[i] == b'*' && b[i + 1] == b'/') {
+                    i += 1;
+                }
+                i = (i + 2).min(b.len());
+            }
+            q @ (b'"' | b'\'' | b'`') => {
+                i += 1;
+                while i < b.len() && b[i] != q {
+                    i += if b[i] == b'\\' { 2 } else { 1 };
+                }
+                i += 1;
+            }
+            c => {
+                out[i] = c;
+                i += 1;
             }
         }
     }
-    hi
+    // Newlines survive blanking so line structure (and `//` termination) is
+    // unchanged for anything reading this back.
+    for (i, c) in body.bytes().enumerate() {
+        if c == b'\n' {
+            out[i] = b'\n';
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Identifier occurrences of `name` in `code` (word-bounded), as byte offsets.
+fn ident_positions(code: &str, name: &str) -> Vec<usize> {
+    let is_word = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'$';
+    let b = code.as_bytes();
+    let mut out = Vec::new();
+    let mut from = 0;
+    while let Some(rel) = code[from..].find(name) {
+        let at = from + rel;
+        from = at + name.len();
+        let before_ok = at == 0 || !is_word(b[at - 1]);
+        let after = at + name.len();
+        let after_ok = after >= b.len() || !is_word(b[after]);
+        if before_ok && after_ok {
+            out.push(at);
+        }
+    }
+    out
+}
+
+/// The lowered form of a multi-lane `inline(js)` body, or the reason its
+/// publisher does not match the contract.
+///
+/// The contract (`docs/boundary-contracts.md` 1.2, plan S 13b): a multi-lane
+/// body contains exactly one final top-level `return __rock_publish(...)` with
+/// one argument per ABI result lane, no second `return`, and no direct scratch
+/// bank access. A single-lane body returns ordinarily and may use neither.
+fn lower_publisher(body: &str, lanes: usize, name: &str) -> Result<String, CompilerError> {
+    let code = code_only(body);
+    if code.contains(PUBLISH_TEMP) {
+        return Err(err(format!(
+            "`inline(js)` body of `{name}` names `{PUBLISH_TEMP}N`, which is compiler-owned: \
+             the publisher lowering evaluates its arguments into those temps"
+        )));
+    }
+    if code.contains("__rock_ret") {
+        return Err(err(format!(
+            "`inline(js)` body of `{name}` touches the scratch bank directly; a multi-lane \
+             result publishes through one final `return __rock_publish(..)`"
+        )));
+    }
+    let publishes = ident_positions(&code, "__rock_publish");
+    let returns = ident_positions(&code, "return");
+    if lanes < 2 {
+        if !publishes.is_empty() {
+            return Err(err(format!(
+                "`inline(js)` body of `{name}` publishes to the scratch bank, but its result \
+                 ABI has {lanes} result lane -- an ordinary `return` carries it"
+            )));
+        }
+        return Ok(body.to_string());
+    }
+    let [publish_at] = publishes[..] else {
+        return Err(err(format!(
+            "`inline(js)` body of `{name}` has {lanes} result lanes and needs exactly one \
+             final `return __rock_publish(..)`; found {} occurrences of `__rock_publish`",
+            publishes.len()
+        )));
+    };
+    let [return_at] = returns[..] else {
+        return Err(err(format!(
+            "`inline(js)` body of `{name}` must have one final `return __rock_publish(..)` \
+             and no other `return`; found {} `return` statements",
+            returns.len()
+        )));
+    };
+    // `return` immediately followed by the publisher, and nothing but the call
+    // between them. A single-exit body by construction.
+    if return_at > publish_at || !code[return_at + "return".len()..publish_at].trim().is_empty() {
+        return Err(err(format!(
+            "`inline(js)` body of `{name}` must end with one final \
+             `return __rock_publish(..)`; its `return` does not name the publisher"
+        )));
+    }
+    let open = code[publish_at..].find('(').map(|r| publish_at + r).ok_or_else(|| {
+        err(format!("`inline(js)` body of `{name}`: `__rock_publish` is not a call"))
+    })?;
+    // Argument boundaries come from the BLANKED text (a comma inside a string is
+    // not a separator); the argument TEXT comes from the original body.
+    let mut depth = 0usize;
+    let mut splits: Vec<usize> = vec![open + 1];
+    let mut close = None;
+    for (i, c) in code[open..].char_indices() {
+        let at = open + i;
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(at);
+                    break;
+                }
+            }
+            ',' if depth == 1 => splits.push(at + 1),
+            _ => {}
+        }
+    }
+    let close = close.ok_or_else(|| {
+        err(format!("`inline(js)` body of `{name}`: unbalanced `__rock_publish(..)`"))
+    })?;
+    if !code[close + 1..].trim().trim_end_matches(';').trim().is_empty() {
+        return Err(err(format!(
+            "`inline(js)` body of `{name}`: the publisher must be the body's final statement"
+        )));
+    }
+    let mut args: Vec<&str> = Vec::new();
+    for (n, &start) in splits.iter().enumerate() {
+        let end = splits.get(n + 1).map(|next| next - 1).unwrap_or(close);
+        args.push(body[start..end].trim());
+    }
+    if args.len() == 1 && args[0].is_empty() {
+        args.clear();
+    }
+    if args.len() != lanes {
+        return Err(err(format!(
+            "`inline(js)` body of `{name}` publishes {} values, but its concrete result ABI \
+             has {lanes} result lanes",
+            args.len()
+        )));
+    }
+    // ORDER IS PART OF THE CONTRACT. `__rock_publish(f(), g())` is an ordinary
+    // JS call expression, so its arguments evaluate left to right; assigning
+    // lane 1 from `g()` first would run `g` before `f` and publish a lane
+    // before `f` had a chance to throw. Every argument is therefore evaluated,
+    // IN ORDER, into compiler-owned temps, and only then does anything reach
+    // the bank -- which is also what makes a throwing publisher leave no lane
+    // behind for the caller (which never captures) to see later.
+    let prefix = &body[..return_at];
+    let mut lowered = String::from(prefix);
+    let temps: Vec<String> = (0..args.len()).map(publish_temp).collect();
+    lowered.push_str("var ");
+    for (i, (t, a)) in temps.iter().zip(args.iter()).enumerate() {
+        if i > 0 {
+            lowered.push_str(", ");
+        }
+        lowered.push_str(&format!("{t} = {a}"));
+    }
+    lowered.push_str("; ");
+    for (i, t) in temps.iter().enumerate().skip(1) {
+        lowered.push_str(&format!("{} = {t}; ", ret_slot(i)));
+    }
+    lowered.push_str(&format!("return {};", temps[0]));
+    Ok(lowered)
 }
 
 /// A finite-float JS numeric literal, or a reject for inf/NaN (outside the
@@ -1476,6 +1681,21 @@ impl Emitter<'_> {
             // `(--1.5)`, which JS lexes as the `--` decrement operator.
             Inst::Neg(x) => format!("(- {})", self.render_val(*x)?),
             Inst::Not(x) => format!("(!{})", self.render_val(*x)?),
+            // Bitwise: luajit lowers these to `bit.*`, whose results are SIGNED
+            // 32-bit; JS `& | ^ ~ <<` are signed 32-bit too, and both sides
+            // coerce to int32 and mask the shift count to 5 bits, so those map
+            // straight across. `bit.rshift` is the LOGICAL shift, which is JS
+            // `>>>` -- but `>>>` yields an UNSIGNED 32-bit value, so `| 0`
+            // brings it back to the signed range luajit reports
+            // (`bit.rshift(-1, 0)` is -1, not 4294967295).
+            Inst::BitAnd(a, b) => bin(a, "&", b, self)?,
+            Inst::BitOr(a, b) => bin(a, "|", b, self)?,
+            Inst::BitXor(a, b) => bin(a, "^", b, self)?,
+            Inst::Shl(a, b) => bin(a, "<<", b, self)?,
+            Inst::Shr(a, b) => {
+                format!("(({} >>> {}) | 0)", self.render_val(*a)?, self.render_val(*b)?)
+            }
+            Inst::BitNot(x) => format!("(~{})", self.render_val(*x)?),
             // Identity on JS (all doubles), like codegen-lua on luajit.
             Inst::IntToFloat(x) => self.render_val(*x)?,
             // Rock float->int truncates toward -inf == floor.
@@ -1503,17 +1723,6 @@ impl Emitter<'_> {
                 let (a, b) = (self.render_val(*a)?, self.render_val(*b)?);
                 format!("((({a} % {b}) + {b}) % {b})")
             }
-            // LuaJIT's `bit` library and JS bitwise operators agree exactly:
-            // both coerce to int32, mask the shift count to 5 bits, and return
-            // a SIGNED 32-bit result. `Shr` is the one that needs help --
-            // `bit.rshift` shifts in zeros but renormalizes to signed, so JS
-            // needs the logical `>>>` plus a `| 0` to come back signed.
-            Inst::BitAnd(a, b) => bin(a, "&", b, self)?,
-            Inst::BitOr(a, b) => bin(a, "|", b, self)?,
-            Inst::BitXor(a, b) => bin(a, "^", b, self)?,
-            Inst::Shl(a, b) => bin(a, "<<", b, self)?,
-            Inst::Shr(a, b) => format!("(({} >>> {}) | 0)", self.render_val(*a)?, self.render_val(*b)?),
-            Inst::BitNot(x) => format!("(~{})", self.render_val(*x)?),
             Inst::Call { func, args } => self.render_call(iid, *func, args)?,
             // A capture-free hoisted closure: a bare reference to its top-level
             // fn (`convert_closures` emits `Inst::Global(<name>__lambda<k>)`).
@@ -2092,74 +2301,24 @@ impl Emitter<'_> {
         let rargs: Result<Vec<String>, CompilerError> =
             args.iter().map(|a| self.render_val(*a)).collect();
         let rargs = rargs?;
-        // The overloaded `get`/2 dispatches on its receiver: NativeBuffer via the
-        // intrinsic template (below), Map via the JS `Map.get` (miss -> undefined,
-        // which `== null` reads as nil), Vec co-emits its pure-Rock body. Any
-        // other receiver rejects rather than kinda-working.
-        // Only the BUILTIN Map (`TypeCtor::Map`) renders inline as `.get` -- a user
-        // struct named `Map` (a `Nominal`) with its own `get` fn is a plain callee
-        // and co-emits like any other. NativeBuffer falls to its intrinsic
-        // template; Vec and user receivers fall to the co-emit path.
-        if cf.name.as_str() == "get"
-            && cf.param_decls.len() == 2
-            && first_param_is_builtin_map(self.ws, cf)
-        {
-            return Ok(format!("{}.get({})", rargs[0], rargs[1]));
+        // THE ONE ORACLE. Everything this backend supplies itself -- the
+        // builtin-`Map` interceptions, the host globals, the hand-written
+        // templates and the `@intrinsic` table -- in one precedence, shared
+        // with `discover_callees` and with the mono artifact view. A callee it
+        // answers for is never co-emitted, whatever body the declaration has.
+        if let Some(supply) = js_supply(self.ws, cf) {
+            return Ok(render_supply(supply, &rargs, cf.param_decls.len()));
         }
-        // Host-bodied stdlib fns (extern / inline(lua)) with a hand-written JS
-        // binding: `print` (variadic -> the harness global), the fixed-arity
-        // templates (`tostring`, `__rock_format_float`).
-        if is_host_print(cf) {
-            return Ok(format!("print({})", rargs.join(", ")));
-        }
-        if is_host_put(cf) {
-            return Ok(format!("put({})", rargs.join(", ")));
-        }
-        // Logging dedup/throttle impls -> their JS runtime port, same name.
-        if is_host_log_fn(cf) {
-            return Ok(format!("{}({})", cf.name, rargs.join(", ")));
-        }
-        if let Some(tmpl) = host_fn_template(cf) {
-            // A defaulted trailing param (e.g. `string.find`'s `from = 0`) is not
-            // materialized into the call args, so a template `$N` for it would
-            // stay literal. Pad to the declared arity with `undefined`: JS reads
-            // an omitted arg as `undefined`, and for the templated fns that carry
-            // a default (`find` -> indexOf, whose `from` defaults to 0) that
-            // coincides with the Rock default. Fixed-arity templates are already
-            // full, so this is a no-op there.
-            let mut padded = rargs.clone();
-            while padded.len() < cf.param_decls.len() {
-                padded.push("undefined".to_string());
-            }
-            let refs: Vec<&str> = padded.iter().map(|s| s.as_str()).collect();
-            return Ok(fill_template(tmpl, &refs));
-        }
-        // `map_new` is pure Rock (`transmute(table_new())`) but must be a real JS
-        // `Map`, not a plain object -- a plain object coerces keys to strings, so
-        // Lua's 1 vs "1" distinction would be lost. Intercept it (and skip its
-        // co-emission in the closure walk).
-        if is_map_new(cf) {
-            return Ok("new Map()".to_string());
-        }
-        // Templates apply only to stdlib @intrinsic decls (`is_mapped_intrinsic`):
-        // a user fn sharing an entry's (name, arity) must co-emit, not become
-        // `Math.abs`.
-        match if is_mapped_intrinsic(cf) { JsIntrinsics.lookup(cf) } else { None } {
-            Some(Emission::Template(tmpl)) => {
-                let refs: Vec<&str> = rargs.iter().map(|s| s.as_str()).collect();
-                Ok(fill_template(tmpl, &refs))
-            }
-            _ => match self.callee_name(iid, func) {
-                Some(name) => Ok(format!("{name}({})", rargs.join(", "))),
-                None if self.mf.spec_bindings.contains_key(&iid) => Err(err(format!(
-                    "JS subset: no specialized body emitted for the `{}` instantiation at this call",
-                    cf.name
-                ))),
-                None => Err(err(format!(
-                    "JS subset: call to `{}` is not a mapped JS intrinsic",
-                    cf.name
-                ))),
-            },
+        match self.callee_name(iid, func) {
+            Some(name) => Ok(format!("{name}({})", rargs.join(", "))),
+            None if self.mf.spec_bindings.contains_key(&iid) => Err(err(format!(
+                "JS subset: no specialized body emitted for the `{}` instantiation at this call",
+                cf.name
+            ))),
+            None => Err(err(format!(
+                "JS subset: call to `{}` is not a mapped JS intrinsic",
+                cf.name
+            ))),
         }
     }
 }
@@ -2265,7 +2424,7 @@ pub fn emit_with_closure(
     out.push_str(&emit_inspect_ty(ws, &bodies)?);
     out.push_str(&emit_col_mat(ws, &bodies)?);
     out.push_str(&ret_slot_decls(
-        max_multi_wire(&bodies).max(max_hand_published_slot(ws, &st.inline_js)),
+        max_multi_wire(&bodies).max(max_published_lanes(ws, scx, &st.inline_js)),
     ));
     // Global initializers first (`function __ginit_<name>() {...}`), then the
     // load-time assignment lines in dependency order, then the fn defs. (The
@@ -2288,7 +2447,12 @@ pub fn emit_with_closure(
     out.push_str(&emit_spec_bodies(ws, &st, &hoisted, &mut rejections));
     combine_rejections(rejections)?;
     for fr in &st.inline_js {
-        out.push_str(&emit_inline_js_fn(ws, scx, *fr, st.names.get(fr).expect("emitted body has a name")));
+        out.push_str(&emit_inline_js_fn(
+            ws,
+            scx,
+            *fr,
+            st.names.get(fr).expect("emitted body has a name"),
+        )?);
     }
     Ok(out)
 }
@@ -2513,7 +2677,8 @@ fn build_program_core(
     let col_mat = emit_col_mat(ws, &bodies)?;
     out.push_str(&col_mat);
     stable.push_str(&col_mat);
-    let ret_slots = ret_slot_decls(max_multi_wire(&bodies));
+    let ret_slots =
+        ret_slot_decls(max_multi_wire(&bodies).max(max_published_lanes(ws, scx, &st.inline_js)));
     out.push_str(&ret_slots);
     stable.push_str(&ret_slots);
     // 1. deco def fns.
@@ -2545,9 +2710,14 @@ fn build_program_core(
     stable.push_str(&spec_bodies);
     // 2b. inline(js) fns, emitted verbatim.
     for fr in &st.inline_js {
-        let definition = emit_inline_js_fn(ws, scx, *fr, st.names.get(fr).expect("emitted body has a name"));
-        out.push_str(&definition);
-        stable.push_str(&definition);
+        let name = st.names.get(fr).expect("emitted body has a name");
+        match emit_inline_js_fn(ws, scx, *fr, name) {
+            Ok(definition) => {
+                out.push_str(&definition);
+                stable.push_str(&definition);
+            }
+            Err(e) => rejections.push((name.clone(), e)),
+        }
     }
     // 3. ginit def fns.
     let mut const_chunks = HashMap::new();
@@ -2810,7 +2980,7 @@ pub fn emit_overlay(
         let Some(rebind) = exact_inline_js(ws, "__rock_rebind_system") else {
             return Ok(JsReload::FullRequired);
         };
-        out.push_str(&emit_inline_js_fn(ws, scx, rebind, "__rock_rebind_system"));
+        out.push_str(&emit_inline_js_fn(ws, scx, rebind, "__rock_rebind_system")?);
         for fref in decorated {
             let function = &ws.module(fref.module).functions[fref.func];
             out.push_str(&format!(
@@ -2965,12 +3135,13 @@ fn emit_inline_js_fn(
     scx: &skull_mir::lower::ScalarCtx,
     fr: FuncRef,
     js_name: &str,
-) -> String {
+) -> Result<String, CompilerError> {
     let f = &ws.module(fr.module).functions[fr.func];
     // A @scalar_abi fn's value-struct params explode into their
     // `<name>__<leaf>` scalars, same as the lua path, so the exploded call
     // sites and the raw body's leaf names agree.
-    let params = match skull_mir::lower::scalar_abi_lua_param_names(ws, scx, fr) {
+    let abi = skull_mir::lower::BackendFnAbiPlan::for_declaration(ws, scx, fr);
+    let params = match &abi.lua_param_names {
         Some(names) => names.join(", "),
         None => f
             .param_decls
@@ -2983,7 +3154,10 @@ fn emit_inline_js_fn(
         Some((bone_semantic::hir::FnBackend::Js, s)) => s.to_string(),
         _ => String::new(),
     };
-    format!("function {js_name}({params}) {{\n{src}\n}}\n")
+    // The publisher contract, checked and lowered against the declaration's
+    // own concrete result ABI.
+    let src = lower_publisher(&src, abi.result_lanes, f.name.as_str())?;
+    Ok(format!("function {js_name}({params}) {{\n{src}\n}}\n"))
 }
 
 /// Drain the fn + ginit worklists: lower each queued fn (same per-body pipeline
@@ -3794,15 +3968,11 @@ fn discover_callees(
     let mut findings: Vec<CompilerError> = Vec::new();
     for callee in skull_mir::reach::call_targets(mf) {
         let cf = &ws.module(callee.module).functions[callee.func];
-        // Only the BUILTIN Map renders inline (skip its co-emission); NativeBuffer
-        // via the intrinsic table; Vec and user-struct `get` co-emit (fall through).
-        if cf.name.as_str() == "get"
-            && cf.param_decls.len() == 2
-            && first_param_is_builtin_map(ws, cf)
-        {
-            continue;
-        }
-        if is_mapped_intrinsic(cf) || is_host_mapped(cf) || is_map_new(cf) {
+        // THE ONE ORACLE, ahead of every body branch below -- the same call
+        // `render_call` makes. A callee the backend supplies itself has no
+        // definition to co-emit, and asking about its body first is how
+        // `map_new` (a pure Rock body rendered `new Map()`) got walked into.
+        if js_supply(ws, cf).is_some() {
             continue;
         }
         // `inline(js)`: co-emit its raw JS body verbatim (never MIR-lowered). The
@@ -4783,7 +4953,7 @@ fn required_arg_count(
         .unwrap_or_default();
     // Scalar ABI: a defaulted value-struct param explodes to N leaf slots and
     // all N are omittable together -- subtract per-param LEAF widths, not 1.
-    if let Some(widths) = skull_mir::lower::scalar_abi_param_leaf_widths(ws, scx, fr) {
+    if let Some(widths) = skull_mir::lower::BackendFnAbiPlan::for_declaration(ws, scx, fr).param_leaf_widths {
         let omittable: usize = widths
             .iter()
             .zip(defaults.iter().chain(std::iter::repeat(&false)))
@@ -4997,11 +5167,102 @@ fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
     }
 }
 
-/// A host-bodied fn the emitter renders directly (bypassing co-emission): the
-/// `print` global or one of the fixed-arity templates. Shared by `render_call`
-/// and the `emit_with_closure` callee walk so both agree on what NOT to reject.
-fn is_host_mapped(cf: &bone_semantic::hir::Function) -> bool {
-    is_host_print(cf) || is_host_put(cf) || is_host_log_fn(cf) || host_fn_template(cf).is_some()
+/// What the JS backend renders for a call it supplies ITSELF.
+///
+/// Two shapes, because the surface has two: a fixed-arity expression template,
+/// and a variadic host global no template can express.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum JsSupply {
+    /// A `$1..$n` expression template.
+    Template(&'static str),
+    /// A bare JS global, called with every rendered argument.
+    Global(Ustr),
+}
+
+/// **The one JS backend realization oracle**: how the JS backend supplies a
+/// callee ITSELF, ahead of any declared body, in the ONE precedence
+/// [`Emitter::render_call`] renders and [`discover_callees`] skips on.
+///
+/// Everything the backend supplies is here -- the builtin-`Map` receiver
+/// interceptions, the `print`/`put`/logging globals, the hand-written host
+/// templates, and the `@intrinsic` table -- because "how does this artifact
+/// supply this declaration" is ONE question. Splitting it produced answers that
+/// disagreed: `nb_get` (1,127 sites) is an `@intrinsic` template while
+/// `phantom` (2,433 sites) is a host template with no marker at all, and a
+/// consumer that knew about one severed the other.
+///
+/// **The ORDER is load-bearing, not a preference.** `map_new` is a PURE ROCK
+/// body rendered as `new Map()`, so anything that asks about the declaration's
+/// body first classifies it as a Rock body and walks into callees this backend
+/// never emits.
+///
+/// The mono artifact view reads this through
+/// [`crate::JsBackendRealization`], so its realization report is this emitter's
+/// behavior rather than a description of it.
+pub fn js_supply(ws: &Workspace, cf: &bone_semantic::hir::Function) -> Option<JsSupply> {
+    // The overloaded `get`/2 dispatches on its receiver: only the BUILTIN Map
+    // (`TypeCtor::Map`) renders inline as `.get` -- a user struct named `Map`
+    // with its own `get` fn is a plain callee and co-emits, and NativeBuffer
+    // falls to its intrinsic template below.
+    if is_builtin_map_get(ws, cf) {
+        return Some(JsSupply::Template("$1.get($2)"));
+    }
+    // Host-bodied stdlib fns (extern / inline(lua)) with a hand-written JS
+    // binding: `print` (variadic -> the harness global), `put` (raw write), the
+    // logging dedup/throttle runtime ports, and the fixed-arity templates.
+    if is_host_print(cf) {
+        return Some(JsSupply::Global(Ustr::from("print")));
+    }
+    if is_host_put(cf) {
+        return Some(JsSupply::Global(Ustr::from("put")));
+    }
+    if is_host_log_fn(cf) {
+        return Some(JsSupply::Global(cf.name));
+    }
+    if let Some(tmpl) = host_fn_template(cf) {
+        return Some(JsSupply::Template(tmpl));
+    }
+    // `map_new` is pure Rock (`transmute(table_new())`) but must be a real JS
+    // `Map`, not a plain object -- a plain object coerces keys to strings, so
+    // Lua's 1 vs "1" distinction would be lost.
+    if is_map_new(cf) {
+        return Some(JsSupply::Template("new Map()"));
+    }
+    // Templates apply only to stdlib @intrinsic decls: a user fn sharing an
+    // entry's (name, arity) must co-emit, not become `Math.abs`.
+    match if is_mapped_intrinsic(cf) { JsIntrinsics.lookup(cf) } else { None } {
+        Some(Emission::Template(tmpl)) => Some(JsSupply::Template(tmpl)),
+        _ => None,
+    }
+}
+
+/// Render one supplied call from its arguments.
+///
+/// A template is padded to the callee's DECLARED arity with `undefined`: a
+/// defaulted trailing param (e.g. `string.find`'s `from = 0`) is not
+/// materialized into the call args, so a `$N` for it would otherwise stay
+/// literal. JS reads an omitted arg as `undefined`, and for the templated fns
+/// that carry a default that coincides with the Rock default. A global is
+/// variadic and takes the arguments as they came.
+fn render_supply(supply: JsSupply, args: &[String], declared_arity: usize) -> String {
+    match supply {
+        JsSupply::Template(tmpl) => {
+            let mut padded: Vec<String> = args.to_vec();
+            while padded.len() < declared_arity {
+                padded.push("undefined".to_string());
+            }
+            let refs: Vec<&str> = padded.iter().map(|s| s.as_str()).collect();
+            fill_template(tmpl, &refs)
+        }
+        JsSupply::Global(name) => format!("{name}({})", args.join(", ")),
+    }
+}
+
+/// The overloaded `get`/2 on a builtin `Map` receiver, which renders as
+/// `.get(k)` rather than co-emitting. Factored out of `render_call` so
+/// [`host_binding`] and the call site cannot disagree.
+fn is_builtin_map_get(ws: &Workspace, cf: &bone_semantic::hir::Function) -> bool {
+    cf.name.as_str() == "get" && cf.param_decls.len() == 2 && first_param_is_builtin_map(ws, cf)
 }
 
 /// `map_new()`: pure Rock (`transmute(table_new())`), but intercepted to a real

@@ -626,14 +626,14 @@ fn content_type(path: &Path) -> &'static str {
 
 /// A `[string]` literal in the JS Vec repr. Unlike the Lua sibling
 /// (`skull_codegen_lua::lua_string_vec`) `_data` is 0-based.
-fn js_string_vec(items: &[ustr::Ustr]) -> String {
+fn js_string_vec<S: AsRef<str>>(items: &[S]) -> String {
     use std::fmt::Write as _;
     let mut out = String::from("{_data: [");
     for (i, s) in items.iter().enumerate() {
         if i > 0 {
             out.push_str(", ");
         }
-        out.push_str(&crate::js_test::js_str(s.as_str()));
+        out.push_str(&crate::js_test::js_str(s.as_ref()));
     }
     let _ = write!(out, "], len: {}, __ty: \"Vec\"}}", items.len());
     out
@@ -692,27 +692,26 @@ fn shader_register_lines_js(ws: &bone_semantic::inference::Workspace) -> Result<
         // Lua driver in skull/src/mir_emit.rs, which this mirrors. A SHORT call
         // is silent on JS (the missing argument reads `undefined`), which is
         // what rock-cli/tests/shader_register_arity_gate.rs exists to catch.
-        let blocks = &emission.uniform_blocks;
-        let names: Vec<ustr::Ustr> = blocks.iter().map(|p| p.struct_name).collect();
-        let sizes: Vec<i64> = blocks.iter().map(|p| p.size as i64).collect();
-        let fingerprints: Vec<i64> = blocks.iter().map(|p| p.fingerprint() as i64).collect();
-        let counts: Vec<i64> = blocks.iter().map(|p| p.members.len() as i64).collect();
-        let member_names: Vec<ustr::Ustr> =
-            blocks.iter().flat_map(|p| p.members.iter().map(|m| m.name)).collect();
-        let offsets: Vec<i64> =
-            blocks.iter().flat_map(|p| p.members.iter().map(|m| m.offset as i64)).collect();
+        let w = skull_codegen_glsl::BlockWire::of(
+            emission.uniform_blocks.iter(),
+            emission.uniform_array_blocks.iter(),
+        );
         let _ = writeln!(
             out,
-            "__rock_shader_register({}, {}, {}, {}, {}, {}, {}, {}, {});",
+            "__rock_shader_register({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {});",
             crate::js_test::js_str(&pair.key),
             crate::js_test::js_str(&emission.source),
             js_string_vec(&emission.texture_slots),
-            js_string_vec(&names),
-            js_int_vec(&sizes),
-            js_int_vec(&fingerprints),
-            js_int_vec(&counts),
-            js_string_vec(&member_names),
-            js_int_vec(&offsets),
+            js_string_vec(&w.names),
+            js_int_vec(&w.bindings),
+            js_int_vec(&w.sizes),
+            js_int_vec(&w.fingerprints),
+            js_int_vec(&w.counts),
+            js_string_vec(&w.member_names),
+            js_int_vec(&w.member_offsets),
+            js_int_vec(&w.member_kinds),
+            js_int_vec(&w.member_capacities),
+            js_int_vec(&w.member_strides),
         );
     }
     Ok(out)

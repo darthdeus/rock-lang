@@ -63,11 +63,53 @@ pub fn backend_variant(
     Err(NoServingBinding)
 }
 
+/// The backend-variant group representative of `rep` -- the declaration bone
+/// would have collapsed the group to, whichever member a caller happens to hold.
+///
+/// The inverse direction of [`backend_variant`]: that goes representative ->
+/// serving sibling for a target, this goes any member -> representative. A
+/// target-neutral consumer (`skull::instance_graph`) needs it for roots, which
+/// production hands it as raw declarations rather than as bone-resolved callees.
+///
+/// The preference order IS bone's `backend_rank` (`Any` < `Lua` < `Js`,
+/// `bone-inference/src/calls.rs`) and [`backend_variant_group`] owns the complete
+/// grouping rule, including bone's repeated-backend refusal.
+pub fn canonical_variant(ws: &Workspace, rep: FuncRef) -> FuncRef {
+    backend_variant_group(ws, rep)
+        .into_iter()
+        .min_by_key(|r| ws.module(r.module).functions[r.func].backend)
+        .expect("a variant group contains its requested member")
+}
+
+/// The backend-variant group containing `member`.
+///
+/// This is bone's complete collapse rule: same name and rendered parameter
+/// signature, with every backend distinct. A repeated backend is a genuine
+/// overload ambiguity, so no group exists and the member stays by itself.
+pub fn backend_variant_group(ws: &Workspace, member: FuncRef) -> Vec<FuncRef> {
+    let mf = &ws.module(member.module).functions[member.func];
+    let member_sig: Vec<String> =
+        mf.param_decls.iter().map(|p| ws.render(None, p.ty)).collect();
+    let Some(cands) = ws.functions_by_name.get(&mf.name) else { return vec![member] };
+    let mut group = Vec::new();
+    for &(mid, fid) in cands.iter() {
+        let f = &ws.module(mid).functions[fid];
+        if f.param_decls.len() != member_sig.len() {
+            continue;
+        }
+        if f.param_decls.iter().zip(&member_sig).all(|(p, r)| ws.render(None, p.ty) == *r) {
+            group.push(FuncRef { module: mid, func: fid });
+        }
+    }
+    let mut backends = std::collections::BTreeSet::new();
+    if group.iter().all(|r| backends.insert(ws.module(r.module).functions[r.func].backend)) {
+        group
+    } else {
+        vec![member]
+    }
+}
+
 /// A same-name, same-signature sibling of `rep` whose backend serves `target`.
-/// Signature match is param-type equality (rendered, inference-free) -- the
-/// same key bone's `collapse_backend_variants` groups on. The caller has
-/// already established the name has >=2 candidates, so `rep_sig` (a per-param
-/// render) is only built when a sibling could exist.
 pub fn sibling_variant(
     ws: &Workspace,
     rep: FuncRef,
@@ -75,15 +117,11 @@ pub fn sibling_variant(
     exact: bool,
 ) -> Option<FuncRef> {
     use bone_semantic::hir::FnBackend;
-    let rf = &ws.module(rep.module).functions[rep.func];
-    let name = rf.name;
-    let rep_sig: Vec<String> = rf.param_decls.iter().map(|p| ws.render(None, p.ty)).collect();
-    let cands = ws.functions_by_name.get(&name)?;
-    for &(mid, fid) in cands.iter() {
-        if mid == rep.module && fid == rep.func {
+    for candidate in backend_variant_group(ws, rep) {
+        if candidate == rep {
             continue;
         }
-        let f = &ws.module(mid).functions[fid];
+        let f = &ws.module(candidate.module).functions[candidate.func];
         let ok = if exact {
             f.backend == target
         } else {
@@ -92,12 +130,7 @@ pub fn sibling_variant(
         if !ok {
             continue;
         }
-        if f.param_decls.len() != rep_sig.len() {
-            continue;
-        }
-        if f.param_decls.iter().zip(&rep_sig).all(|(p, r)| ws.render(None, p.ty) == *r) {
-            return Some(FuncRef { module: mid, func: fid });
-        }
+        return Some(candidate);
     }
     None
 }
@@ -354,8 +387,8 @@ impl Builder<'_> {
             // element-type guard below: column storage has no element slot at
             // all, and inside a body specialized at `T = E?` the element type is
             // an unsubstituted generic that no type predicate can classify.
-            Expr::Index { base, index } if self.vec_column_elem_of(base).is_some() => {
-                let elem = self.vec_column_elem_of(base).expect("guard matched");
+            Expr::Index { base, index } if self.vec_column_elem_of(base)?.is_some() => {
+                let elem = self.vec_column_elem_of(base)?.expect("guard matched");
                 let (b, _) = self.lower_index_base(base)?;
                 let i = self.lower_expr(index)?;
                 self.column_element_repr(b, i, elem)
@@ -385,7 +418,7 @@ impl Builder<'_> {
                 // A column-stored Map reaches its leaves the same way, one
                 // indirection out: the spine resolves the key to a slot, and the
                 // slot indexes `data`'s columns.
-                if let Some(elem) = self.map_column_value_of(base) {
+                if let Some(elem) = self.map_column_value_of(base)? {
                     return self.map_column_index_repr(b, i, elem);
                 }
                 // Leaf addressing: no slot reference, no nested ctor -- each
@@ -463,23 +496,10 @@ impl Builder<'_> {
 
         self.cur = rhs_bb;
         let rhs_repr = self.lower_expr_repr(rhs)?;
-        // A diverging rhs (`?? return x`) yields no value: splatting it reads
-        // leaves off nil, which faults before the divergence it sits in front of.
-        if self.is_open() {
-            let rhs_leaves = self.repr_to_leaves(&rhs_repr, &shape);
-            for (&c, &value) in cells.iter().zip(&rhs_leaves) {
-                self.emit_cur(Inst::Store { cell: c, value });
-            }
-            self.f.set_term(self.cur, Term::Goto(join));
-        }
+        self.store_repr_and_join(&cells, &RetSlot::Leaves(shape.clone()), rhs_repr, join)?;
 
         self.cur = lhs_bb;
-        for (&c, &value) in cells.iter().zip(&lhs_values) {
-            self.emit_cur(Inst::Store { cell: c, value });
-        }
-        if self.is_open() {
-            self.f.set_term(self.cur, Term::Goto(join));
-        }
+        self.store_slots_and_join(&cells, &lhs_values, join)?;
 
         self.cur = join;
         let loads: Vec<Idx<Inst>> = cells.iter().map(|&c| self.emit_cur(Inst::Load(c))).collect();
@@ -523,24 +543,12 @@ impl Builder<'_> {
 
         self.cur = rhs_bb;
         let rhs_repr = self.lower_expr_repr(rhs)?;
-        // Same rule as the value twin: a diverging rhs has no slots to store.
-        if self.is_open() {
-            let rhs_slots = self.tuple_repr_to_slots(rhs_repr, &shape);
-            for (&c, &value) in cells.iter().zip(&rhs_slots) {
-                self.emit_cur(Inst::Store { cell: c, value });
-            }
-            self.f.set_term(self.cur, Term::Goto(join));
-        }
+        self.store_repr_and_join(&cells, &RetSlot::Nested(shape.clone()), rhs_repr, join)?;
 
         // The lhs slots were read before the branch, so their block dominates this
         // one -- the same reason the value twin can reuse its leaves here.
         self.cur = lhs_bb;
-        for (&c, &value) in cells.iter().zip(&lhs_values) {
-            self.emit_cur(Inst::Store { cell: c, value });
-        }
-        if self.is_open() {
-            self.f.set_term(self.cur, Term::Goto(join));
-        }
+        self.store_slots_and_join(&cells, &lhs_values, join)?;
 
         self.cur = join;
         let loads: Vec<Idx<Inst>> = cells.iter().map(|&c| self.emit_cur(Inst::Load(c))).collect();
@@ -645,32 +653,42 @@ impl Builder<'_> {
         for &a in arg_idxs {
             // Struct spread `..op`: decompose the operand into per-field values
             // (a struct-literal operand is elided) and place each into the param
-            // slot of the same name. bone verified every field matches a param;
+            // slot of the same name. bone verified every field matches a param,
+            // and an unmatched one rejects here rather than being dropped -- a
+            // silent skip would pass `nil` for that parameter instead;
             // a named arg after the spread overrides via last-write-wins.
             if self.body.spread_args.contains(&a) {
                 for (fname, fv) in self.spread_field_insts(a)? {
-                    if let Some(pidx) = param_names.iter().position(|p| *p == fname) {
-                        slots[pidx] = Some(fv);
-                    }
+                    let pidx = param_names.iter().position(|p| *p == fname).ok_or_else(|| {
+                        gap(format!("spread field `{fname}` matches no parameter"))
+                    })?;
+                    slots[pidx] = Some(fv);
                 }
                 continue;
             }
             let v = self.lower_expr(a)?;
             let pidx = match self.body.arg_names.get(&a) {
-                Some(nm) => param_names.iter().position(|p| p == nm).unwrap_or(next_pos),
+                Some(nm) => param_names
+                    .iter()
+                    .position(|p| p == nm)
+                    .ok_or_else(|| gap(format!("named argument `{nm}` matches no parameter")))?,
                 None => {
                     let i = next_pos;
                     next_pos += 1;
                     i
                 }
             };
-            if pidx < slots.len() {
-                let v = match self.param_ty(func, pidx) {
-                    Some(t) => self.coerced(v, a, t),
-                    None => v,
-                };
-                slots[pidx] = Some(v);
+            if pidx >= slots.len() {
+                return Err(gap(format!(
+                    "argument lands in slot {pidx} of {} parameters",
+                    slots.len()
+                )));
             }
+            let v = match self.param_ty(func, pidx) {
+                Some(t) => self.coerced(v, a, t),
+                None => v,
+            };
+            slots[pidx] = Some(v);
         }
         let hi = slots.iter().rposition(|s| s.is_some()).map_or(0, |i| i + 1);
         let mut out = Vec::with_capacity(hi);
