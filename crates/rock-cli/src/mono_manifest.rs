@@ -621,11 +621,15 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
         );
         println!(
             "- of the joined: **{}** verified to the full concrete INSTANCE (generic args \
-             compared), **{}** non-generic (one instance, so the declaration match is the \
-             instance match), **{}** indirect and uncheckable",
-            site_join.joined_instance_verified,
-            site_join.joined_non_generic,
-            site_join.joined_callee_unverifiable
+             compared), **{}** non-generic (one instance, so the declaration match IS the \
+             instance match). Every join verifies an instance.",
+            site_join.joined_instance_verified, site_join.joined_non_generic
+        );
+        println!(
+            "- **{}** INDIRECT calls admitted but not joined: a function value names no \
+             declaration to compare against (verifying them means tracing the value's \
+             producer)",
+            site_join.admitted_indirect
         );
         let unjoined_total = site_join.unjoined_total();
         println!("- unjoined: **{unjoined_total}**");
@@ -646,17 +650,23 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
         println!();
         let failures = site_join.accounting_failures();
         println!(
-            "accounting ({} joined + {unjoined_total} unjoined == {} examined, plus the \
-             verification and per-operation identities): **{}**",
+            "accounting ({} joined + {} indirect + {unjoined_total} unjoined == {} examined, \
+             plus the verification and POINTWISE per-operation identities): **{}**",
             site_join.joined,
+            site_join.admitted_indirect,
             site_join.call_insts,
             if failures.is_empty() { "yes".to_string() } else { format!("NO -- {failures:?}") }
         );
         println!();
-        println!("| examined by operation | count | joined |");
-        println!("|---|---:|---:|");
+        println!("| examined by operation | count | joined | indirect | unjoined |");
+        println!("|---|---:|---:|---:|---:|");
         for (k, v) in &site_join.examined_by_op {
-            println!("| `{k}` | {v} | {} |", site_join.joined_by_op.get(k).copied().unwrap_or(0));
+            println!(
+                "| `{k}` | {v} | {} | {} | {} |",
+                site_join.joined_by_op.get(k).copied().unwrap_or(0),
+                site_join.admitted_indirect_by_op.get(k).copied().unwrap_or(0),
+                site_join.unjoined_by_op.get(k).copied().unwrap_or(0)
+            );
         }
         if !site_join.examples.is_empty() {
             println!();

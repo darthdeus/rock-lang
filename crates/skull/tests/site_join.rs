@@ -302,6 +302,68 @@ fn main() { print("{build()}") }
     );
 }
 
+/// Pointwise operation accounting: a call filed under the WRONG operation must
+/// be caught, even though every global total still balances.
+///
+/// Built by hand rather than from a fixture, because the census is correct on
+/// real input -- the defect being guarded against is a future miscount, and the
+/// only way to test the guard is to hand it one.
+#[test]
+fn a_call_filed_under_the_wrong_operation_fails_accounting() {
+    use skull::site_join::{SiteJoinCensus, Unjoined};
+
+    let mut c = SiteJoinCensus::default();
+    c.call_insts = 2;
+    c.joined = 1;
+    c.joined_non_generic = 1;
+    c.joined_rock = 1;
+    c.unjoined.insert(Unjoined::NoSite, 1);
+    c.examined_by_op.insert("direct-call", 1);
+    c.examined_by_op.insert("synthesized", 1);
+    c.joined_by_op.insert("direct-call", 1);
+    c.unjoined_by_op.insert("synthesized", 1);
+    assert!(
+        c.accounting_failures().is_empty(),
+        "the consistent census must pass, or the failure below proves nothing: {:?}",
+        c.accounting_failures()
+    );
+
+    // Now MISFILE one call, on ONE side only: the join is recorded under
+    // `synthesized` though it was examined under `direct-call`. Every global
+    // total is unchanged -- examined 2, joined 1, unjoined 1, and all three
+    // histograms still sum to their populations -- so only a pointwise check
+    // can see it. (Swapping BOTH sides is a consistent relabel, not a
+    // miscount, and correctly passes.)
+    let mut bad = c.clone();
+    bad.joined_by_op.clear();
+    bad.joined_by_op.insert("synthesized", 1);
+    assert_eq!(bad.examined_by_op.values().sum::<usize>(), bad.call_insts);
+    assert_eq!(bad.joined_by_op.values().sum::<usize>(), bad.joined);
+    assert_eq!(bad.unjoined_by_op.values().sum::<usize>(), bad.unjoined_total());
+    let failures = bad.accounting_failures();
+    assert!(
+        failures.iter().any(|f| f.contains("operation `direct-call`")),
+        "a call filed under the wrong operation passed accounting: {failures:?}"
+    );
+    assert!(
+        failures.iter().any(|f| f.contains("operation `synthesized`")),
+        "only one side of the misfiling was reported: {failures:?}"
+    );
+
+    // And the CONSISTENT relabel (both sides moved) is not a miscount, so it
+    // must pass -- otherwise this arm would fire on any renaming.
+    let mut relabelled = c.clone();
+    relabelled.joined_by_op.clear();
+    relabelled.joined_by_op.insert("synthesized", 1);
+    relabelled.unjoined_by_op.clear();
+    relabelled.unjoined_by_op.insert("direct-call", 1);
+    assert!(
+        relabelled.accounting_failures().is_empty(),
+        "a consistent relabel was reported as a miscount: {:?}",
+        relabelled.accounting_failures()
+    );
+}
+
 /// PREMISE TEST for the callee comparison, and the control that DIES if the
 /// comparison is weakened back to declaration equality.
 ///
@@ -405,33 +467,79 @@ fn main() { print("{one(1)} {two(2)}") }
     );
 }
 
-/// A generic callee with NO complete key cannot be verified, and that must be
-/// reported rather than counted as agreement.
+/// A generic callee whose key cannot name an instance is UNVERIFIED, and each
+/// way of failing is its own answer.
+///
+/// Key arity is POSITIONAL, and a wrong-length key has already been a real bug
+/// on this branch -- it names another function's instantiation rather than
+/// nothing -- so too-short and too-long are covered beside the partial case.
+/// The too-short fixture is deliberately NON-EMPTY: the empty case is the
+/// "no key" answer and is tested separately.
 #[test]
-fn a_generic_callee_without_a_complete_key_is_unverified() {
+fn a_generic_callee_key_that_names_no_instance_is_unverified() {
     let (ws, g) = graph_of(
         r#"
-fn ident<T>(x: T) -> T { return x }
-fn main() { print("{ident(1)}") }
+fn pair<A, B>(a: A, b: B) -> A { return a }
+fn main() { print("{pair(1, 2.0)}") }
 "#,
     );
     let inst = g
         .substitutions
         .keys()
-        .find(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "ident")
+        .find(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "pair")
         .expect("instance")
         .clone();
+    let generics = ws.module(inst.func.module).functions[inst.func.func].generics.len();
+    assert_eq!(generics, 2, "fixture must declare two generics");
+    let bindings: Vec<skull_mir::monoty::MonoTy> =
+        g.substitutions[&inst].values().cloned().collect();
+    assert_eq!(bindings.len(), 2, "two bindings recorded: {bindings:?}");
+
+    let check = |k: Option<&skull_mir::lower::SpecKey>| {
+        skull::site_join::check_callee(&ws, &g, &inst, inst.func, k)
+    };
+    // No key at all.
+    assert_eq!(check(None), skull::site_join::CalleeCheck::NoKey);
+    // TOO SHORT, and non-empty on purpose: one slot for a two-generic
+    // declaration still positionally names a different instantiation.
+    let short: skull_mir::lower::SpecKey = vec![Some(bindings[0].clone())];
+    assert_eq!(check(Some(&short)), skull::site_join::CalleeCheck::KeyArity);
+    // TOO LONG.
+    let long: skull_mir::lower::SpecKey = vec![
+        Some(bindings[0].clone()),
+        Some(bindings[1].clone()),
+        Some(bindings[0].clone()),
+    ];
+    assert_eq!(check(Some(&long)), skull::site_join::CalleeCheck::KeyArity);
+    // Right length, holds a `None`.
+    let partial: skull_mir::lower::SpecKey = vec![Some(bindings[0].clone()), None];
+    assert_eq!(check(Some(&partial)), skull::site_join::CalleeCheck::PartialKey);
+    // And the admission control: the CORRECT key verifies, so the rejections
+    // above are about the key rather than about this fixture never verifying.
+    let good: skull_mir::lower::SpecKey = {
+        let f = &ws.module(inst.func.module).functions[inst.func.func];
+        let subst = &g.substitutions[&inst];
+        let mut k: skull_mir::lower::SpecKey = Vec::new();
+        for _ in 0..f.generics.len() {
+            k.push(None);
+        }
+        // Recover the positional order through the same mapping the compiler
+        // uses, by trying each candidate assignment against the oracle.
+        for a in subst.values() {
+            for b in subst.values() {
+                let cand: skull_mir::lower::SpecKey = vec![Some(a.clone()), Some(b.clone())];
+                if check(Some(&cand)) == skull::site_join::CalleeCheck::Instance {
+                    k = cand;
+                }
+            }
+        }
+        k
+    };
     assert_eq!(
-        skull::site_join::check_callee(&ws, &g, &inst, inst.func, None),
-        skull::site_join::CalleeCheck::InstanceUnverified,
-        "a generic callee with no key was treated as verified"
-    );
-    // A PARTIAL key is equally unverifiable -- it names no instance.
-    let partial: skull_mir::lower::SpecKey = vec![None];
-    assert_eq!(
-        skull::site_join::check_callee(&ws, &g, &inst, inst.func, Some(&partial)),
-        skull::site_join::CalleeCheck::InstanceUnverified,
-        "a partial key was treated as verified"
+        check(Some(&good)),
+        skull::site_join::CalleeCheck::Instance,
+        "no assignment of the recorded bindings verified, so the rejections above \
+         prove nothing about key shape"
     );
 }
 

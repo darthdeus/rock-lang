@@ -77,11 +77,22 @@ pub enum Unjoined {
     /// not have. Two instantiations of one generic declaration are exactly the
     /// distinction Stage 3 needs, and a declaration-level check cannot see it.
     CalleeInstanceMismatch,
-    /// The declaration agrees, the callee is GENERIC, and the call carries no
-    /// complete instantiation key -- so its instance cannot be reconstructed and
-    /// the match is unverified rather than verified. Not folded into a success:
-    /// an unverifiable comparison is not a passing one.
-    CalleeInstanceUnverified,
+    /// Generic callee, and the call carries NO instantiation key at all. The
+    /// lowerer records one only when it specializes, so this is the population
+    /// conditional specialization is responsible for.
+    CalleeNoKey,
+    /// Generic callee whose key has the wrong number of slots for the
+    /// declaration's generics. Key arity is POSITIONAL, so a wrong-length key
+    /// names another function's instantiation -- kept apart from a missing key
+    /// because it is an invariant break, not a consequence of policy.
+    CalleeKeyArity,
+    /// Generic callee whose key is the right length but holds a `None` slot, so
+    /// it names no instance.
+    CalleePartialKey,
+    /// The resolved instance itself has no substitution recorded in the graph,
+    /// so there is nothing to compare the reconstructed one against. An
+    /// invariant finding about the GRAPH, not about the call.
+    CalleeResolvedUnrecorded,
     /// A call form `Builder::emit_cur` does not stamp (`CallBoundMulti`), so it
     /// can carry no site at all.
     UnstampedForm,
@@ -97,7 +108,10 @@ impl Unjoined {
             Self::SiteNotInBody => "site-not-in-body",
             Self::CalleeMismatch => "callee-decl-mismatch",
             Self::CalleeInstanceMismatch => "callee-instance-mismatch",
-            Self::CalleeInstanceUnverified => "callee-instance-unverified",
+            Self::CalleeNoKey => "callee-no-key",
+            Self::CalleeKeyArity => "callee-key-arity",
+            Self::CalleePartialKey => "callee-partial-key",
+            Self::CalleeResolvedUnrecorded => "callee-resolved-unrecorded",
             Self::UnstampedForm => "unstamped-form",
         }
     }
@@ -162,10 +176,12 @@ pub struct SiteJoinCensus {
     /// instance and the declaration match IS the instance match. Verified, but
     /// counted apart because it says nothing about generic arguments.
     pub joined_non_generic: usize,
-    /// Joined calls whose target could not be checked at all: an indirect call
-    /// names a value, not a declaration. Reported so the verified buckets have
-    /// a stated complement rather than an implied one.
-    pub joined_callee_unverifiable: usize,
+    /// INDIRECT calls: admitted, but NOT joined. `Inst::CallValue` names a
+    /// function value, so there is no declaration to compare the resolved
+    /// instance against. Their own population, so "every join verifies the
+    /// concrete instance" stays true of `joined`.
+    pub admitted_indirect: usize,
+    pub admitted_indirect_by_op: BTreeMap<&'static str, usize>,
     /// Reachable calls examined, by site operation -- the denominator each
     /// per-operation claim is against.
     pub examined_by_op: BTreeMap<&'static str, usize>,
@@ -188,28 +204,25 @@ impl SiteJoinCensus {
     /// Every accounting identity, as named checks. A single
     /// `joined + unjoined == examined` is satisfied by counters that are
     /// internally inconsistent -- a call counted in two verification buckets,
-    /// or an operation histogram that describes a different population than the
-    /// one it is reported beside.
+    /// or an operation histogram that balances globally while individual
+    /// operations do not.
     pub fn accounting_failures(&self) -> Vec<String> {
         let mut out = Vec::new();
-        let total = self.joined + self.unjoined_total();
+        let total = self.joined + self.admitted_indirect + self.unjoined_total();
         if total != self.call_insts {
             out.push(format!(
-                "joined {} + unjoined {} != examined {}",
+                "joined {} + admitted-indirect {} + unjoined {} != examined {}",
                 self.joined,
+                self.admitted_indirect,
                 self.unjoined_total(),
                 self.call_insts
             ));
         }
-        let verified =
-            self.joined_instance_verified + self.joined_non_generic + self.joined_callee_unverifiable;
+        let verified = self.joined_instance_verified + self.joined_non_generic;
         if verified != self.joined {
             out.push(format!(
-                "instance-verified {} + non-generic {} + unverifiable {} != joined {}",
-                self.joined_instance_verified,
-                self.joined_non_generic,
-                self.joined_callee_unverifiable,
-                self.joined
+                "instance-verified {} + non-generic {} != joined {}",
+                self.joined_instance_verified, self.joined_non_generic, self.joined
             ));
         }
         if self.joined_rock + self.joined_boundary != self.joined {
@@ -218,23 +231,24 @@ impl SiteJoinCensus {
                 self.joined_rock, self.joined_boundary, self.joined
             ));
         }
-        let examined_ops: usize = self.examined_by_op.values().sum();
-        if examined_ops != self.call_insts {
-            out.push(format!(
-                "examined-by-op {examined_ops} != examined {}",
-                self.call_insts
-            ));
-        }
-        let joined_ops: usize = self.joined_by_op.values().sum();
-        if joined_ops != self.joined {
-            out.push(format!("joined-by-op {joined_ops} != joined {}", self.joined));
-        }
-        let unjoined_ops: usize = self.unjoined_by_op.values().sum();
-        if unjoined_ops != self.unjoined_total() {
-            out.push(format!(
-                "unjoined-by-op {unjoined_ops} != unjoined {}",
-                self.unjoined_total()
-            ));
+        // POINTWISE, over the union of every operation key any histogram
+        // mentions. A globally balanced set of histograms still hides a call
+        // filed under the wrong operation -- one bucket over, another under.
+        let mut ops: std::collections::BTreeSet<&'static str> = std::collections::BTreeSet::new();
+        ops.extend(self.examined_by_op.keys().copied());
+        ops.extend(self.joined_by_op.keys().copied());
+        ops.extend(self.unjoined_by_op.keys().copied());
+        ops.extend(self.admitted_indirect_by_op.keys().copied());
+        for op in ops {
+            let e = self.examined_by_op.get(op).copied().unwrap_or(0);
+            let j = self.joined_by_op.get(op).copied().unwrap_or(0);
+            let u = self.unjoined_by_op.get(op).copied().unwrap_or(0);
+            let a = self.admitted_indirect_by_op.get(op).copied().unwrap_or(0);
+            if e != j + u + a {
+                out.push(format!(
+                    "operation `{op}`: examined {e} != joined {j} + unjoined {u} + indirect {a}"
+                ));
+            }
         }
         out
     }
@@ -252,7 +266,10 @@ impl SiteJoinCensus {
         self.joined_spliced += other.joined_spliced;
         self.joined_instance_verified += other.joined_instance_verified;
         self.joined_non_generic += other.joined_non_generic;
-        self.joined_callee_unverifiable += other.joined_callee_unverifiable;
+        self.admitted_indirect += other.admitted_indirect;
+        for (k, v) in &other.admitted_indirect_by_op {
+            *self.admitted_indirect_by_op.entry(k).or_insert(0) += v;
+        }
         for (k, v) in &other.examined_by_op {
             *self.examined_by_op.entry(k).or_insert(0) += v;
         }
@@ -484,9 +501,41 @@ pub enum CalleeCheck {
     DeclMismatch,
     /// Declarations agree, the callee is generic, and the instantiations differ.
     InstanceMismatch,
-    /// Declarations agree, the callee is generic, and the call carries no
-    /// complete instantiation key -- so nothing can be concluded.
-    InstanceUnverified,
+    /// Generic callee, no instantiation key at all.
+    NoKey,
+    /// Generic callee, key length != the declaration's generic count.
+    KeyArity,
+    /// Generic callee, right-length key holding a `None`.
+    PartialKey,
+    /// The resolved instance has no substitution recorded in the graph.
+    ResolvedUnrecorded,
+}
+
+impl CalleeCheck {
+    /// The census bucket this verdict lands in. Total by construction: every
+    /// variant maps to a verified kind or a named rejection, so the caller
+    /// needs no catch-all.
+    pub fn outcome(self) -> Result<Verified, Unjoined> {
+        match self {
+            Self::Instance => Ok(Verified::Instance),
+            Self::NonGeneric => Ok(Verified::NonGeneric),
+            Self::DeclMismatch => Err(Unjoined::CalleeMismatch),
+            Self::InstanceMismatch => Err(Unjoined::CalleeInstanceMismatch),
+            Self::NoKey => Err(Unjoined::CalleeNoKey),
+            Self::KeyArity => Err(Unjoined::CalleeKeyArity),
+            Self::PartialKey => Err(Unjoined::CalleePartialKey),
+            Self::ResolvedUnrecorded => Err(Unjoined::CalleeResolvedUnrecorded),
+        }
+    }
+}
+
+/// A verdict that counts as a join.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Verified {
+    /// Generic arguments were compared.
+    Instance,
+    /// Non-generic callee: one instance, nothing to compare.
+    NonGeneric,
 }
 
 /// **THE callee comparison**, extracted so it can be tested directly against a
@@ -511,17 +560,21 @@ pub fn check_callee(
     if generics == 0 {
         return CalleeCheck::NonGeneric;
     }
-    // A complete key has one reified entry per declared generic. A partial key
-    // cannot name an instance, so it must not be read as agreement.
-    let Some(key) = spec_key.filter(|k| k.len() == generics && k.iter().all(Option::is_some))
-    else {
-        return CalleeCheck::InstanceUnverified;
-    };
+    // A complete key has one reified entry per declared generic. Each way of
+    // falling short is its own answer: they have different causes and only one
+    // of them is conditional specialization.
+    let Some(key) = spec_key else { return CalleeCheck::NoKey };
+    if key.len() != generics {
+        return CalleeCheck::KeyArity;
+    }
+    if key.iter().any(Option::is_none) {
+        return CalleeCheck::PartialKey;
+    }
     let call_subst = skull_mir::lower::spec_subst_from_key(ws, target, key);
     match g.substitutions.get(callee_inst) {
         Some(resolved) if *resolved == call_subst => CalleeCheck::Instance,
         Some(_) => CalleeCheck::InstanceMismatch,
-        None => CalleeCheck::InstanceUnverified,
+        None => CalleeCheck::ResolvedUnrecorded,
     }
 }
 
@@ -573,47 +626,40 @@ fn classify(
     };
     let callee_inst = callee.instance();
 
-    let verdict = match row.target {
-        None => CalleeCheck::NonGeneric, // placeholder; replaced below
-        Some(target) => check_callee(ws, g, callee_inst, target, row.spec_key.as_ref()),
-    };
-    if row.target.is_none() {
-        c.joined += 1;
-        *c.joined_by_op.entry(op).or_insert(0) += 1;
-        c.joined_callee_unverifiable += 1;
-        match callee {
-            Callee::Rock(_) => c.joined_rock += 1,
-            Callee::Boundary(..) => c.joined_boundary += 1,
-        }
-        if owner_inst != measured {
-            c.joined_spliced += 1;
-        }
+    // INDIRECT CALLS ARE NOT JOINS. `Inst::CallValue` names a function VALUE,
+    // not a declaration, so there is no target to compare the resolved instance
+    // against. Counting them as joined made "every join verifies the concrete
+    // instance" false for exactly those calls.
+    //
+    // They are admitted as their own population rather than rejected: the graph
+    // DOES resolve the `FnValue` site to an instance, so the obligation is
+    // recorded -- what is missing is a MIR-side target to confirm it. Verifying
+    // them means tracing the value's producer back to a `Global`/`Lambda` and
+    // checking ITS instance, which is real work and is named as such rather
+    // than assumed away.
+    let Some(target) = row.target else {
+        c.admitted_indirect += 1;
+        *c.admitted_indirect_by_op.entry(op).or_insert(0) += 1;
         return (None, op);
-    }
-    match verdict {
-        CalleeCheck::DeclMismatch => return (Some(Unjoined::CalleeMismatch), op),
-        CalleeCheck::InstanceMismatch => {
-            return (Some(Unjoined::CalleeInstanceMismatch), op)
-        }
-        CalleeCheck::InstanceUnverified => {
-            return (Some(Unjoined::CalleeInstanceUnverified), op)
-        }
-        CalleeCheck::Instance | CalleeCheck::NonGeneric => {}
-    }
+    };
 
-    c.joined += 1;
-    *c.joined_by_op.entry(op).or_insert(0) += 1;
-    match verdict {
-        CalleeCheck::Instance => c.joined_instance_verified += 1,
-        CalleeCheck::NonGeneric => c.joined_non_generic += 1,
-        _ => unreachable!("non-joining verdicts returned above"),
+    match check_callee(ws, g, callee_inst, target, row.spec_key.as_ref()).outcome() {
+        Err(cause) => (Some(cause), op),
+        Ok(kind) => {
+            c.joined += 1;
+            *c.joined_by_op.entry(op).or_insert(0) += 1;
+            match kind {
+                Verified::Instance => c.joined_instance_verified += 1,
+                Verified::NonGeneric => c.joined_non_generic += 1,
+            }
+            match callee {
+                Callee::Rock(_) => c.joined_rock += 1,
+                Callee::Boundary(..) => c.joined_boundary += 1,
+            }
+            if owner_inst != measured {
+                c.joined_spliced += 1;
+            }
+            (None, op)
+        }
     }
-    match callee {
-        Callee::Rock(_) => c.joined_rock += 1,
-        Callee::Boundary(..) => c.joined_boundary += 1,
-    }
-    if owner_inst != measured {
-        c.joined_spliced += 1;
-    }
-    (None, op)
 }
