@@ -223,61 +223,12 @@ pub struct Edge {
     pub span: Span,
 }
 
-/// WHICH operation of a body a callee was resolved for.
-///
-/// An [`Idx<Expr>`] alone is not a site identity: one `for` header carries both
-/// an `iter` and a `next` witness, one bounded call carries a whole conformance
-/// tree, and one column-Map index can emit two runtime entries. Each of those is
-/// a separate callee obligation at the same expression, so the operation is part
-/// of the key.
-///
-/// This exists so `ConcreteBody` can read the callee the WALK resolved instead
-/// of resolving one again. A second resolver could disagree with the graph, and
-/// correlating the two by span could not even detect that -- several of these
-/// share one span by construction.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
-pub enum SiteOp {
-    /// A call expression bone resolved (`resolved_overload_calls`).
-    DirectCall,
-    /// An `Expr::Global` naming a function, taken as a value.
-    FnValue,
-    /// The `for` head's `iter()` witness.
-    ForIter,
-    /// The `for` protocol's `next` witness, and the conformance path beneath it
-    /// (`BoundNext::sub`). Empty path is the outermost witness.
-    ForNext(Vec<usize>),
-    /// An iterable argument coerced through `iter()` at an `Iterator`-bounded
-    /// parameter.
-    ImplicitIter,
-    /// A witness from a bounded CALL's conformance tree, by path. Kept apart
-    /// from [`Self::ForNext`] because a `for` over a bounded call has both, at
-    /// the same expression and with the same paths.
-    BoundNext(Vec<usize>),
-    /// A call lowering synthesizes, named EXACTLY -- see
-    /// [`COMPILER_GENERATED_TRIGGERS`].
-    Synthesized(&'static str),
-}
-
-impl SiteOp {
-    pub fn name(&self) -> &'static str {
-        match self {
-            Self::DirectCall => "direct-call",
-            Self::FnValue => "fn-value",
-            Self::ForIter => "for-iter",
-            Self::ForNext(_) => "for-next",
-            Self::ImplicitIter => "implicit-iter",
-            Self::BoundNext(_) => "bound-next",
-            Self::Synthesized(_) => "synthesized",
-        }
-    }
-}
-
-/// One callee obligation of one body: an expression plus the operation at it.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Debug)]
-pub struct Site {
-    pub expr: Idx<bone_semantic::hir::Expr>,
-    pub op: SiteOp,
-}
+/// The neutral callee-obligation identity, owned by
+/// [`skull_mir::site`] -- the lowest crate MIR metadata, this graph and
+/// [`crate::concrete_body`] all share. Re-exported here so the graph's
+/// consumers keep one spelling; it is the SAME type MIR records, never a
+/// translation of it.
+pub use skull_mir::site::{Site, SiteOp};
 
 /// What the walk resolved a site to. `Failed` is kept in the SAME table as a
 /// success rather than only in [`InstanceGraph::unresolved`]: a consumer asking

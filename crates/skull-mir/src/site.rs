@@ -1,0 +1,89 @@
+//! **The neutral identity of one callee obligation** (plan S 9, Stage 3).
+//!
+//! An [`Idx<Expr>`] alone is not a site identity: one `for` header carries both
+//! an `iter` and a `next` witness, one bounded call carries a whole conformance
+//! tree, and one column-Map index can emit two runtime entries. Each of those
+//! is a separate callee obligation at the same expression, so the operation is
+//! part of the key.
+//!
+//! This type lives in `skull-mir` -- the lowest crate every consumer shares --
+//! precisely so there is ONE site vocabulary rather than two equivalent ones
+//! with a translation between them. Its consumers are:
+//!
+//! - `skull_mir::mir::MirFunc::call_sites`, the site a lowered call instruction
+//!   came from;
+//! - `skull::instance_graph::InstanceGraph::call_sites`, what the walk resolved
+//!   each site to;
+//! - `skull::concrete_body::ConcreteBody`'s callee tables, keyed by it.
+//!
+//! Those three must agree by CONSTRUCTION. Correlating them by span could not
+//! even detect a disagreement -- several of these share one span by
+//! construction, which is the whole reason the operation is in the key.
+
+use bone_semantic::hir::Expr;
+use bone_semantic::prelude::Idx;
+
+/// WHICH operation of a body a callee was resolved for.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum SiteOp {
+    /// A call expression bone resolved (`resolved_overload_calls`).
+    DirectCall,
+    /// An `Expr::Global` naming a function, taken as a value.
+    FnValue,
+    /// The `for` head's `iter()` witness.
+    ForIter,
+    /// The `for` protocol's `next` witness, and the conformance path beneath it
+    /// (`BoundNext::sub`). Empty path is the outermost witness.
+    ForNext(Vec<usize>),
+    /// An iterable argument coerced through `iter()` at an `Iterator`-bounded
+    /// parameter.
+    ImplicitIter,
+    /// A witness from a bounded CALL's conformance tree, by path. Kept apart
+    /// from [`Self::ForNext`] because a `for` over a bounded call has both, at
+    /// the same expression and with the same paths.
+    BoundNext(Vec<usize>),
+    /// A call lowering synthesizes, named EXACTLY -- see
+    /// `skull::instance_graph::COMPILER_GENERATED_TRIGGERS`.
+    Synthesized(&'static str),
+}
+
+impl SiteOp {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::DirectCall => "direct-call",
+            Self::FnValue => "fn-value",
+            Self::ForIter => "for-iter",
+            Self::ForNext(_) => "for-next",
+            Self::ImplicitIter => "implicit-iter",
+            Self::BoundNext(_) => "bound-next",
+            Self::Synthesized(_) => "synthesized",
+        }
+    }
+}
+
+/// One callee obligation of one body: an expression plus the operation at it.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct Site {
+    pub expr: Idx<Expr>,
+    pub op: SiteOp,
+}
+
+impl Site {
+    pub fn direct_call(expr: Idx<Expr>) -> Self {
+        Self { expr, op: SiteOp::DirectCall }
+    }
+}
+
+/// A [`Site`] plus the source body that OWNS it.
+///
+/// The owner is not redundant with the MirFunc the entry lives in. Inlining
+/// splices a callee's instructions into its caller, and those calls remain the
+/// CALLEE body's obligations -- their `Site` indexes the callee's expression
+/// arena and joins through the callee's `ConcreteBody`. A map keyed only by
+/// `Site` would silently mix two expression arenas in one body after the first
+/// splice, and every arena index would still look plausible.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct CallSite {
+    pub owner: crate::mir::FuncRef,
+    pub site: Site,
+}

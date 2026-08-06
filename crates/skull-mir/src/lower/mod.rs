@@ -1179,6 +1179,9 @@ pub fn lower_function_spec(
         ret_ty: func.return_ty,
         fn_name_span: Some(func.name_span),
         cur_span: None,
+        cur_expr: None,
+        cur_op: crate::site::SiteOp::DirectCall,
+        site_owner: Some(self_ref),
         group_binds: HashMap::new(),
         tuple_binds: HashMap::new(),
         static_cells: HashMap::new(),
@@ -1254,6 +1257,9 @@ pub fn lower_global(
         ret_ty: None,
         fn_name_span: None,
         cur_span: None,
+        cur_expr: None,
+        cur_op: crate::site::SiteOp::DirectCall,
+        site_owner: None,
         group_binds: HashMap::new(),
         tuple_binds: HashMap::new(),
         static_cells: HashMap::new(),
@@ -1326,6 +1332,9 @@ pub fn lower_decorator(
         ret_ty: None,
         fn_name_span: None,
         cur_span: None,
+        cur_expr: None,
+        cur_op: crate::site::SiteOp::DirectCall,
+        site_owner: None,
         group_binds: HashMap::new(),
         tuple_binds: HashMap::new(),
         static_cells: HashMap::new(),
@@ -1415,6 +1424,30 @@ struct Builder<'a> {
     /// [`MirFunc::inst_spans`] so the diagnostic points at the construct rather
     /// than at the enclosing fn.
     cur_span: Option<Span>,
+    /// The source EXPRESSION currently being lowered, maintained by
+    /// [`Builder::lower_expr`] exactly beside [`Self::cur_span`]. Together with
+    /// [`Self::cur_op`] this is the [`crate::site::Site`] every call
+    /// instruction emitted from here down is stamped with, so the identity is
+    /// recorded at ONE choke point ([`Builder::emit_cur`]) rather than at each
+    /// of the call-emitting sites -- a per-site record would make a MISSING one
+    /// indistinguishable from a legitimately siteless call.
+    ///
+    /// `None` only outside any expression (a fn prologue), which is the
+    /// exclusion the site census reports by cause.
+    cur_expr: Option<Idx<Expr>>,
+    /// The source FUNCTION being lowered, which OWNS every site recorded from
+    /// this builder. `None` for the always-emitted units -- a global
+    /// initializer and a decorator body are not functions and have no
+    /// `FuncRef`, so their calls carry no site and the census reports them
+    /// under that cause rather than losing them.
+    site_owner: Option<FuncRef>,
+    /// Which OPERATION of [`Self::cur_expr`] is being lowered. `DirectCall` is
+    /// the default because a call emitted while lowering an expression is that
+    /// expression's own call; the witness and synthesized routes override it
+    /// for their sub-lowering through [`Builder::with_site_op`], because one
+    /// expression carries several distinct callee obligations and they must
+    /// stay distinguishable.
+    cur_op: crate::site::SiteOp,
     /// A value PARAM binding -> (struct name, its leaf cells, shape). A read of
     /// the param reconstructs the unboxed `Group` from these; a field read
     /// projects a leaf directly (no cdata).
@@ -1468,11 +1501,47 @@ impl Builder<'_> {
     }
 
     fn emit_cur(&mut self, inst: Inst) -> Idx<Inst> {
+        let is_call = matches!(
+            inst,
+            Inst::Call { .. }
+                | Inst::CallMulti { .. }
+                | Inst::CallValue { .. }
+                | Inst::CallValueMulti { .. }
+        );
         let id = self.f.emit(self.cur, inst);
         if let Some(span) = self.cur_span {
             self.f.inst_spans.insert(id, span);
         }
+        // THE choke point for call-site identity: every call form entering the
+        // arena is stamped here, so totality is a property of this one branch
+        // rather than of 48 call-emitting sites each remembering to record.
+        if is_call {
+            if let (Some(owner), Some(expr)) = (self.site_owner, self.cur_expr) {
+                self.f.call_sites.insert(
+                    id,
+                    crate::site::CallSite {
+                        owner,
+                        site: crate::site::Site { expr, op: self.cur_op.clone() },
+                    },
+                );
+            }
+        }
         id
+    }
+
+    /// Lower `f` with the site OPERATION overridden, restoring it after. The
+    /// witness and synthesized routes emit calls that belong to the enclosing
+    /// expression but are NOT its own call, and a `for` head carries several at
+    /// one expression -- so the operation has to be scoped, not global.
+    fn with_site_op<T>(
+        &mut self,
+        op: crate::site::SiteOp,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let outer = std::mem::replace(&mut self.cur_op, op);
+        let out = f(self);
+        self.cur_op = outer;
+        out
     }
 
     /// Whether the current block is still open (no terminator set yet). A

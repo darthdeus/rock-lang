@@ -20,6 +20,7 @@ pub mod mir;
 pub mod monoty;
 pub mod reach;
 pub mod shader_ir;
+pub mod site;
 pub mod spec_census;
 pub mod verdict;
 pub mod vertex_plan;

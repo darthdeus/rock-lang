@@ -400,6 +400,11 @@ pub fn convert_closures_framed(
             // Same arena clone, same `Idx` space: the parent's spans address the
             // instructions this body now owns.
             inst_spans: mf.inst_spans.clone(),
+            // Same arena clone, same `Idx` space -- and the same reason the
+            // `spec_bindings` above come across: this lambda's own calls are
+            // keyed to insts whose only reachable home is now this body, so
+            // dropping them would strand their site identity here.
+            call_sites: mf.call_sites.clone(),
         });
     }
     // APPEND, don't overwrite: lowering already hoisted the enclosing fn's named

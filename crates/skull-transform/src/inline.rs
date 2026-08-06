@@ -930,6 +930,17 @@ fn import_spec_bindings(
             func.inst_spans.insert(new_id, *span);
         }
     }
+    // Site identity travels with the body for the same reason the spans do: a
+    // call spliced in from the callee is still THAT callee body's obligation,
+    // and its site keys into the callee instance's `ConcreteBody`, not the
+    // caller's. Dropping these would make every inlined call an unattributed
+    // one -- which the site census would report as an exclusion rather than as
+    // the silent loss it is.
+    for (old_id, site) in &callee.call_sites {
+        if let Some(&new_id) = inst_map.get(old_id) {
+            func.call_sites.insert(new_id, site.clone());
+        }
+    }
 }
 
 /// Splice candidate `cand` into `func` at `site`, removing the call. Returns the

@@ -183,7 +183,12 @@ impl Builder<'_> {
                         );
                     }
                 }
-                self.emit_cur(Inst::Call { func: iter_ref, args: vec![coll] })
+                // The `for` head's `iter` witness, not the head expression's
+                // own call: both live at one expression and share one span, so
+                // the operation is what keeps them distinguishable.
+                self.with_site_op(crate::site::SiteOp::ForIter, |b| {
+                    b.emit_cur(Inst::Call { func: iter_ref, args: vec![coll] })
+                })
             }
             None => coll,
         };
@@ -257,10 +262,14 @@ impl Builder<'_> {
                 // splices the SHARED generic snapshot, whose element access was
                 // lowered against the boxed representation -- which reads a
                 // `_data` that column storage does not have.
-                let call = self.emit_cur(Inst::CallMulti {
-                    dests: dests.clone(),
-                    func,
-                    args: vec![it_load],
+                // The `for` protocol's `next` witness -- the sibling of the
+                // `ForIter` above at the SAME expression.
+                let call = self.with_site_op(crate::site::SiteOp::ForNext(Vec::new()), |b| {
+                    b.emit_cur(Inst::CallMulti {
+                        dests: dests.clone(),
+                        func,
+                        args: vec![it_load],
+                    })
                 });
                 if !sub.is_empty() {
                     self.f.bound_trees.insert(call, sub.clone());

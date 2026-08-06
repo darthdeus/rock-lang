@@ -19,6 +19,7 @@ pub mod coroutine_emit;
 pub mod inline_stats;
 pub mod instance_graph;
 pub mod shader_artifact;
+pub mod site_join;
 pub mod target_projection;
 pub mod mir_emit;
 

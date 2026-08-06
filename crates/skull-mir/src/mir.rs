@@ -723,6 +723,21 @@ pub struct MirFunc {
     /// those. Keys are remapped on splice, like [`Self::spec_bindings`];
     /// transform-synthesized instructions simply have no entry.
     pub inst_spans: bone_semantic::prelude::ArenaMap<Idx<Inst>, bone_semantic::prelude::Span>,
+    /// **Which callee obligation of the source body each call instruction is**
+    /// (plan S 9, Stage 3). The join key between a lowered call and the callee
+    /// `skull::concrete_body::ConcreteBody` already resolved for that site, so
+    /// instance-driven emission can consume the graph's answer instead of
+    /// resolving one again.
+    ///
+    /// A span cannot serve as this key and never could: a `for` head's `iter`
+    /// and `next` live at one expression and share one span, so the OPERATION
+    /// is part of the identity (`crate::site::SiteOp`).
+    ///
+    /// Stamped at the single choke point [`crate::lower::Builder::emit_cur`]
+    /// for every call form, so a missing entry means the call was emitted
+    /// outside any expression rather than that a recording site was forgotten.
+    /// Keys are remapped on splice, like [`Self::spec_bindings`].
+    pub call_sites: bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::site::CallSite>,
 }
 
 impl MirFunc {
@@ -746,6 +761,7 @@ impl MirFunc {
             bound_next_split: Default::default(),
             nested_fns: Vec::new(),
             inst_spans: Default::default(),
+            call_sites: Default::default(),
         }
     }
 

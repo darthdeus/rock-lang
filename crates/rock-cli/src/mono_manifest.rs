@@ -145,6 +145,14 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     let mut bound_tree_disagreements = 0usize;
     let mut bound_tree_comparisons = 0usize;
     let mut bound_trees_recorded = 0usize;
+    let mut sj_lowered = 0usize;
+    let mut sj_unlowerable = 0usize;
+    let mut sj_call_insts = 0usize;
+    let mut sj_joined = 0usize;
+    let mut sj_joined_rock = 0usize;
+    let mut sj_joined_boundary = 0usize;
+    let mut sj_unjoined: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut sj_examples: Vec<String> = Vec::new();
     let mut body_count = 0usize;
     let mut body_expr_examined = 0usize;
     let mut body_binding_examined = 0usize;
@@ -294,6 +302,20 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
                         let e = map.entry(k).or_insert((0, 0));
                         e.0 += c.examined;
                         e.1 += c.spanless;
+                    }
+                }
+                sj_lowered += p.site_join.bodies_lowered;
+                sj_unlowerable += p.site_join.bodies_unlowerable;
+                sj_call_insts += p.site_join.call_insts;
+                sj_joined += p.site_join.joined;
+                sj_joined_rock += p.site_join.joined_rock;
+                sj_joined_boundary += p.site_join.joined_boundary;
+                for (k, v) in &p.site_join.unjoined {
+                    *sj_unjoined.entry(k.label()).or_insert(0) += v;
+                }
+                for e in &p.site_join.examples {
+                    if sj_examples.len() < 10 {
+                        sj_examples.push(e.clone());
                     }
                 }
                 body_count += p.body_census.bodies;
@@ -582,6 +604,47 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
         }
     }
     println!();
+
+    // The join instance-driven emission will consume: does every lowered call
+    // instruction resolve, through its recorded site, to exactly one callee the
+    // graph already decided? Reported with its denominator and with every
+    // exclusion named -- an unstated exclusion is how a broken join looks green.
+    {
+        println!("## MIR call -> `ConcreteBody` join");
+        println!();
+        println!(
+            "- bodies lowered (the SPACE): **{sj_lowered}**; expanded bodies that would not \
+             lower: **{sj_unlowerable}**"
+        );
+        println!("- call instructions examined (the DENOMINATOR): **{sj_call_insts}**");
+        println!(
+            "- joined to exactly one callee: **{sj_joined}** ({sj_joined_rock} Rock, \
+             {sj_joined_boundary} boundary)"
+        );
+        let unjoined_total: usize = sj_unjoined.values().sum();
+        println!("- unjoined: **{unjoined_total}**");
+        if unjoined_total > 0 {
+            println!();
+            println!("| cause | count |");
+            println!("|---|---:|");
+            for (k, v) in &sj_unjoined {
+                println!("| `{k}` | {v} |");
+            }
+        }
+        println!();
+        println!(
+            "accounting: {sj_joined} joined + {unjoined_total} unjoined == {sj_call_insts} \
+             examined: **{}**",
+            if sj_joined + unjoined_total == sj_call_insts { "yes" } else { "NO" }
+        );
+        if !sj_examples.is_empty() {
+            println!();
+            for e in &sj_examples {
+                println!("- {e}");
+            }
+        }
+        println!();
+    }
 
     // Plan S 0h's three decided rejections. Zero over the corpus is the
     // measurement the decisions were taken on; a non-zero count is a real
@@ -1285,6 +1348,8 @@ struct OneProject {
     storage_failures: BTreeMap<&'static str, usize>,
     inline_dep_names: std::collections::BTreeSet<String>,
     span_census: instance_graph::SpanCensus,
+    /// The MIR-call -> `ConcreteBody` join over this project's expanded set.
+    site_join: skull::site_join::SiteJoinCensus,
     rejections: BTreeMap<&'static str, usize>,
     rejection_examples: Vec<String>,
     reconciliation: instance_graph::Reconciliation,
@@ -1785,6 +1850,11 @@ fn one_project(
     // thing as an instance argument's.
     let bodies = skull::concrete_body::build(&ws, &mut g);
     let body_census = bodies.census();
+    // The MIR-call -> ConcreteBody join, over production's own expanded set.
+    let site_join = {
+        let scx = skull_mir::lower::ScalarCtx::new(&ws);
+        skull::site_join::census(&ws, &scx, &g, &bodies)
+    };
     let bodies_missing_for_expanded =
         g.expanded.iter().filter(|i| !bodies.bodies.contains_key(*i)).count();
     let body_free_examples: Vec<String> = bodies
@@ -1915,6 +1985,7 @@ fn one_project(
         callee_hole_examples,
         synthesized_approximated: g.synthesized_approximated,
         body_census,
+        site_join,
         bodies_missing_for_expanded,
         body_free_examples,
         body_untyped_examples,
