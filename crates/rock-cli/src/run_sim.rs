@@ -2260,6 +2260,43 @@ fn run_worker_arm(
 /// The reference is per SIM, taken once in one fresh process each, which is the
 /// permanent `--isolated` oracle -- not a second worker arm, and not the
 /// previous arm's result.
+/// Arms no corpus in this tree can populate, so an empty one is the documented
+/// permanent state rather than a hole the gate should refuse over.
+///
+/// `errors` counts runner/sim `error` ops, and every op that emits one also
+/// FAILS its sim -- a fixture built to populate it would be a permanently red
+/// entry in `rock sim testbed`, and mag's known reds fail expects rather than
+/// erroring. The arm is still guarded twice over: `Comparison::population`
+/// panics on an arm that is absent rather than reading as "nothing to see", and
+/// `sim_record`'s synthetic per-arm tests fail when an arm is censused but no
+/// longer compared. Encoded here so that "permanently empty" is a stated
+/// exception with a reason, not a gate everyone learns to ignore.
+const ARMS_WITHOUT_A_CORPUS: &[&str] = &["errors"];
+
+/// Whether an empty comparison arm should stop the gate, given which arms came
+/// back empty and whether this run measured a named SUBSET.
+///
+/// Over the whole corpus an empty arm is a hole: the gate would be reporting a
+/// green over something it never compared. Over a subset it is expected -- the
+/// caller picked two sims to re-measure one class, and whether that pair
+/// happens to fail an expect is unrelated to why it was picked. A subset's
+/// evidence requirement is the boundary-crossing population instead, which is
+/// checked separately and is what a subset can actually be wrong about.
+fn population_refusal(empty: &[&str], subset: bool) -> Option<String> {
+    if subset {
+        return None;
+    }
+    let unexpected: Vec<&str> =
+        empty.iter().copied().filter(|a| !ARMS_WITHOUT_A_CORPUS.contains(a)).collect();
+    if unexpected.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "these arms compared an empty population, so their agreement is evidence of nothing: {}",
+        unexpected.join(", ")
+    ))
+}
+
 /// The corpus one `--multi-order` invocation measures: the whole registry, or
 /// the named subset of it in REGISTRY ORDER, which is what the "registry" arm
 /// means and what makes the reverse arm its reverse.
@@ -2452,18 +2489,24 @@ pub fn run_multi_order_gate(
             n * arms.len()
         ));
     }
-    if !empty.is_empty() {
-        // Not a fudge factor to relax: `expects_fail` and `errors` populate only
-        // from sims that FAIL, so a corpus where everything passes standalone
-        // cannot certify them and this gate must say so rather than report a
-        // green it did not measure. mag carries known-red sims and populates
-        // both; testbed does not, which is why testbed validates the mechanism
-        // and mag is the gate.
-        return Err(anyhow!(
-            "these arms compared an empty population, so their agreement is evidence of \
-             nothing: {}",
-            empty.join(", ")
-        ));
+    // An empty arm is REPORTED in both forms, and what it means differs.
+    //
+    // Over the whole corpus it is a hole in the gate: `expects_fail` populates
+    // only from sims that FAIL, so a corpus where everything passes standalone
+    // cannot certify that arm, and the gate must say so rather than report a
+    // green it did not measure. mag carries known-red sims and populates it;
+    // testbed does not, which is why testbed validates the mechanism and mag is
+    // the gate. Not a fudge factor to relax.
+    //
+    // Over a NAMED SUBSET it means nothing at all. The caller chose two sims to
+    // re-measure one class; whether that pair happens to fail an expect or
+    // write an artifact is unrelated to what they were selected for, and
+    // failing on it would make an equivalent pair exit nonzero and be unusable
+    // as an iteration gate. The subset's evidence requirement is the
+    // boundary-crossing population, which is enforced above and is the thing a
+    // subset can actually be wrong about.
+    if let Some(reason) = population_refusal(&empty, !selected.is_empty()) {
+        return Err(anyhow!(reason));
     }
     println!(
         "[multi-order] {} comparisons equivalent to the isolated reference",
@@ -3298,6 +3341,35 @@ mod tests {
     fn pick(names: &[&str]) -> Result<Vec<String>> {
         let selected: Vec<String> = names.iter().map(|s| s.to_string()).collect();
         select_gate_corpus(&corpus(), &selected)
+    }
+
+    /// A hole in the full-corpus gate stops it: the run would otherwise print a
+    /// green over an arm it never compared.
+    #[test]
+    fn the_full_corpus_refuses_an_arm_it_could_not_populate() {
+        let reason = population_refusal(&["expects_fail"], false).expect("must refuse");
+        assert!(reason.contains("expects_fail"), "names the arm: {reason}");
+    }
+
+    /// `errors` is the one arm no corpus in this tree can populate -- every op
+    /// that emits an `error` also fails its sim -- so it is a stated permanent
+    /// exception rather than a gate everyone learns to ignore.
+    #[test]
+    fn a_permanently_unpopulatable_arm_is_not_a_hole() {
+        assert!(population_refusal(&["errors"], false).is_none());
+        // ... and it does not launder a real hole reported beside it.
+        let reason = population_refusal(&["errors", "expects_fail"], false).expect("must refuse");
+        assert!(reason.contains("expects_fail"), "names the real hole: {reason}");
+        assert!(!reason.contains("errors"), "does not name the exception: {reason}");
+    }
+
+    /// A subset is chosen to re-measure ONE class. Whether that pair happens to
+    /// fail an expect or write an artifact is unrelated to why it was picked,
+    /// and refusing over it would make an equivalent pair exit nonzero -- which
+    /// is exactly the iteration gate this form exists to be.
+    #[test]
+    fn a_named_subset_is_not_refused_for_an_empty_population() {
+        assert!(population_refusal(&["expects_fail", "artifacts", "errors"], true).is_none());
     }
 
     /// No names is the whole registry, which is the arc-checkpoint form.

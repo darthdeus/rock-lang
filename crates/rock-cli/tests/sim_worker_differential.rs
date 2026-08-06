@@ -1174,6 +1174,62 @@ fn only_an_entry_that_followed_a_predecessor_counts_as_evidence() {
     );
 }
 
+/// A boot world whose canvas contents are NOT creation's cannot be returned by
+/// clearing, so it is refused from a worker rather than silently zeroed.
+///
+/// This is the premise the whole contents reset rests on. `tex_image_2d(.., None)`
+/// allocates without specifying contents, so creation now CLEARS explicitly and
+/// the boundary restores to that defined state -- which is only sound while boot
+/// itself has not painted over it. `b3_cc_paint_at_boot` makes `@init` paint one,
+/// and the worker must say so instead of installing blank where boot's
+/// projection was white.
+///
+/// The pixel value cannot be the assertion: boot's white survives in a fresh
+/// process AND in a worker that never cleared it, so the probe agrees either
+/// way. The REASON is the observable, and no entry may cross a boundary.
+#[test]
+fn a_boot_painted_canvas_is_refused_from_a_worker() {
+    let records = run_worker_suite(
+        Backend::Skull,
+        "testbed",
+        &["b3_cc_painted_head".to_string(), "b3_cc_painted_probe".to_string()],
+    )
+    .expect("the suite call itself must not error: ineligibility is a scheduling fact");
+    assert_eq!(records.len(), 2, "one record per entry spec");
+
+    for (record, crossed) in &records {
+        assert_eq!(
+            record.verdict(),
+            "PASS",
+            "refusing the boot world is a scheduling fact, not a failure: {record:?}"
+        );
+        assert!(
+            !crossed,
+            "no entry may inherit a boot world whose canvas contents cannot be \
+             reconstructed -- every one of these must have restarted fresh"
+        );
+    }
+
+    // TWO names: a one-entry queue takes no checkpoint and never reaches a
+    // boundary, so it would report nothing and this assertion would be about
+    // the wrong thing. The handle NUMBER is deliberately not asserted -- ids are
+    // monotonic per process, so pinning one pins a coincidence of allocation
+    // order.
+    let (_, out, err) = run_rock_status(&[
+        "sim",
+        "testbed",
+        "--multi-order",
+        "b3_cc_painted_head",
+        "b3_cc_painted_probe",
+    ]);
+    let reason = format!("{out}{err}");
+    assert!(
+        reason.contains("boot painted canvases whose contents cannot be reconstructed"),
+        "the refusal must name its reason, so an ineligible boot world is a \
+         reported fact rather than a silently slower suite:\n{reason}"
+    );
+}
+
 /// Run `rock` and return `(exit_ok, stdout, stderr)` WITHOUT asserting on the
 /// exit code. The multi-order gate deliberately exits nonzero on a corpus that
 /// cannot populate every arm, and that refusal is part of what is under test.
@@ -1226,10 +1282,11 @@ fn boundary_crossings(stdout: &str) -> usize {
 /// sims share one worker per arm, so the second entry crosses and the first does
 /// not, three times over.
 ///
-/// testbed passes everything standalone, so `expects_fail` and `errors` have no
-/// population and the gate REFUSES for that reason -- asserted here rather than
-/// worked around, because it proves the empty-arm rule still governs a subset.
-/// That refusal is not a divergence, and this pins the difference.
+/// An equivalent subset must EXIT ZERO. testbed passes everything standalone,
+/// so `expects_fail`/`errors` have no population -- which is a hole in a
+/// whole-corpus gate and means nothing here, because the caller picked this
+/// pair to re-measure one class, not to populate every arm. Refusing over it
+/// would make the iteration gate unusable as an iteration gate.
 #[test]
 fn a_named_subset_is_the_same_gate_and_still_crosses_a_worker_boundary() {
     let (ok, stdout, stderr) = run_rock_status(&[
@@ -1254,9 +1311,8 @@ fn a_named_subset_is_the_same_gate_and_still_crosses_a_worker_boundary() {
         "the subset must agree with its own fresh-process references:\n{stdout}"
     );
     assert!(
-        !ok && stderr.contains("compared an empty population"),
-        "testbed cannot populate expects_fail/errors, so the gate must refuse for \
-         THAT reason rather than report a green it did not measure:\n{stderr}"
+        ok,
+        "an equivalent subset is the iteration gate and must exit zero:\n{stdout}\n{stderr}"
     );
 }
 
