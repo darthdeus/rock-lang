@@ -5,14 +5,12 @@
 //! `tests/js_sort.rock` cross-checks against luajit (tie order is unspecified,
 //! so only order-invariant properties are asserted).
 
-use std::process::Command;
-
 use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::FuncRef;
 use crate::common::ws_with;
 
 fn node_available() -> bool {
-    Command::new("node").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+    crate::common::node().arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
 }
 
 fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<String, String> {
@@ -40,7 +38,7 @@ fn eval_str(defs: &str, root: &str, expect: &str) {
         skull_codegen_js::JS_CALL_HELPER,
         skull_codegen_js::JS_STRING_RUNTIME,
     );
-    let out = Command::new("node").arg("-e").arg(&program).output().expect("spawn node");
+    let out = crate::common::node().arg("-e").arg(&program).output().expect("spawn node");
     assert!(
         out.status.success(),
         "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",

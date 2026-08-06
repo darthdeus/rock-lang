@@ -74,7 +74,7 @@ impl Builder<'_> {
         // User iterator protocol (bone recorded the resolution for this For):
         // desugar to `it = iter(coll); loop { (ok, ..) = next(it); !ok -> break }`.
         // Only populated for non-builtin collections, so this never shadows a
-        // builtin template. `iter_fn: None` = identity (the collection IS the
+        // builtin template. `iter: None` = identity (the collection IS the
         // iterator); a `CallerGeneric` next = placeholder in a bounded body.
         if let Some(info) = self.inf.and_then(|i| i.for_iter_protocol.get(&iter).cloned()) {
             return self.lower_for_user_iter(&vars, iter, body, &info);
@@ -111,7 +111,7 @@ impl Builder<'_> {
         if self.expr_is_flat_vec(iter) {
             return self.lower_for_array(vars, iter, body);
         }
-        match self.coll_kind(iter) {
+        match self.coll_kind(iter)? {
             // `for x in [T]` always arrives with `for_iter_protocol` populated
             // (bone routes Array to the stdlib VecIter protocol); reaching the
             // dispatch means bone and skull disagree -- reject, don't emit a
@@ -155,13 +155,13 @@ impl Builder<'_> {
         body: Idx<Expr>,
         info: &ForIterInfo,
     ) -> Result<(), CompilerError> {
-        let it_val = match info.iter_fn {
+        let it_val = match info.iter.as_ref().map(|w| w.func) {
             Some((m, f)) => {
                 // Stage-0e: the `iter` witness is emitted with NO spec binding,
-                // so a generic one always reaches the shared generic body. bone
-                // records `next_generics` for `next` and nothing for `iter_fn`,
-                // which is the S 0d finding -- a missing RECORD, not a missing
-                // binding at a call site.
+                // so a generic one still reaches the shared generic body here.
+                // bone now records the witness's own instantiation
+                // (`IterWitness::generics`), and the instance graph consumes it;
+                // EMISSION consumes it at the Stage-3 cutover, not before.
                 let iter_ref = FuncRef { module: m, func: f };
                 if crate::ablation::enabled() {
                     let cf = &self.ws.module(m).functions[f];
@@ -176,8 +176,9 @@ impl Builder<'_> {
                                 .copied()
                                 .unwrap_or(cf.name_span),
                             "the `for`-protocol `iter` witness has no instantiation record \
-                             anywhere: bone records `next_generics` for `next` and nothing \
-                             for `iter_fn`, and this call is emitted with no spec binding",
+                             in emission: the recorded `IterWitness::generics` is not \
+                             consumed here until the Stage-3 cutover, so this call is \
+                             emitted with no spec binding",
                         );
                     }
                 }
@@ -385,7 +386,7 @@ impl Builder<'_> {
         // The element type, when it is column-eligible: under bookkeeping SoA the
         // arena's `data` is an ordinary `[T]`, so at an all-scalar value `T` it is
         // COLUMN-stored and a bare `Index` would read a table that isn't there.
-        let column_elem = self.arena_column_elem_of(iter);
+        let column_elem = self.arena_column_elem_of(iter)?;
 
         // An Arena is a weak handle, so the columns come from its registry entry.
         // Resolved ONCE here, outside the counted loop: Scene ownership must not
@@ -465,7 +466,7 @@ impl Builder<'_> {
         // and the verifier rejects it by name rather than emitting a quiet box.
         let data = match column_elem {
             Some(elem) => {
-                let repr = self.column_element_repr(data, idx, ColumnElem::plain(elem))?;
+                let repr = self.column_element_repr(data, idx, elem)?;
                 self.pack(repr)
             }
             None => self.emit_cur(Inst::Index { base: data, index: idx, kind: ContainerKind::Vec }),
@@ -521,7 +522,7 @@ impl Builder<'_> {
         // A column-stored Map iterates its SPINE: the walk yields (key, slot),
         // and the value is read leaf-wise out of `data` at that slot. No element
         // table is touched, because none exists.
-        let col = self.map_column_value_of(iter);
+        let col = self.map_column_value_of(iter)?;
         let m = self.lower_expr(iter)?;
         let table = match col {
             Some(_) => self.emit_cur(Inst::Field { base: m, field: Ustr::from("spine") }),
@@ -690,7 +691,7 @@ impl Builder<'_> {
             },
             _ => None,
         };
-        let kind = self.coll_kind(coll);
+        let kind = self.coll_kind(coll)?;
         if kind == ContainerKind::Map {
             let (ib, xpat) = split.ok_or_else(|| gap("enumerate over Map with a single binding"))?;
             return self.lower_for_map_enumerate(ib, &xpat, coll, body);
@@ -784,7 +785,7 @@ impl Builder<'_> {
             let len = self.emit_cur(Inst::Field { base: fv, field: Ustr::from("len") });
             (kind, buf, len)
         } else {
-            let kind = self.coll_kind(iter);
+            let kind = self.coll_kind(iter)?;
             let arr_v = self.lower_expr(iter)?;
             let len_v = self.emit_cur(Inst::Len { base: arr_v, kind });
             (kind, arr_v, len_v)

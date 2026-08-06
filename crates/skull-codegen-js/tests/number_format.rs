@@ -6,8 +6,6 @@
 //! byte-compares stdout line by line -- luajit is the oracle, no hand-pinned
 //! expectations to rot. Gated on `node` AND `luajit`; absent, skip WITH A LOG.
 
-use std::process::Command;
-
 use bone_semantic::inference::Workspace;
 use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::FuncRef;
@@ -16,7 +14,7 @@ const FIXTURE: &str = include_str!("fixtures/number_format.rock");
 const FIXTURE_MOD: &str = "<number_format>";
 
 fn tool_available(tool: &str, arg: &str) -> bool {
-    Command::new(tool).arg(arg).output().map(|o| o.status.success()).unwrap_or(false)
+    crate::common::tool(tool).arg(arg).output().map(|o| o.status.success()).unwrap_or(false)
 }
 
 fn both_backends_available(test: &str) -> bool {
@@ -63,7 +61,7 @@ fn write_temp(tag: &str, ext: &str, contents: &str) -> std::path::PathBuf {
 
 fn run_lines(tool: &str, tag: &str, ext: &str, prog: &str) -> Vec<String> {
     let path = write_temp(tag, ext, prog);
-    let out = Command::new(tool).arg(&path).output().unwrap_or_else(|e| panic!("spawn {tool}: {e}"));
+    let out = crate::common::tool(tool).arg(&path).output().unwrap_or_else(|e| panic!("spawn {tool}: {e}"));
     let _ = std::fs::remove_file(&path);
     assert!(
         out.status.success(),

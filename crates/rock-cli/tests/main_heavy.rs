@@ -23,10 +23,14 @@ mod replay_roundtrip_tests;
 mod replay_timeline_tests;
 #[path = "replay_window_tests.rs"]
 mod replay_window_tests;
+#[path = "frame_error_gate.rs"]
+mod frame_error_gate;
 #[path = "shader_failure_gate.rs"]
 mod shader_failure_gate;
 #[path = "uniform_block_gate.rs"]
 mod uniform_block_gate;
+#[path = "texture_slot_gate.rs"]
+mod texture_slot_gate;
 #[path = "skull_overlay_wipe.rs"]
 mod skull_overlay_wipe;
 #[path = "sim_concurrent_invocations.rs"]
@@ -39,3 +43,6 @@ mod sim_reload_lane_drain;
 mod sim_worker_pool;
 #[path = "web_smoke_tests.rs"]
 mod web_smoke_tests;
+
+#[path = "shader_texture_census.rs"]
+mod shader_texture_census;

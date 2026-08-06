@@ -7,8 +7,6 @@
 //! Emitted-shape assertions alone cannot tell "flat" from "boxed and unboxed
 //! again", so the round-trips below RUN under node.
 
-use std::process::Command;
-
 use skull_mir::lower::{lower_function, ScalarCtx};
 use skull_mir::mir::FuncRef;
 
@@ -62,7 +60,7 @@ fn main() { let _ = unmarked() }
 "#;
 
 fn node_available() -> bool {
-    Command::new("node").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+    crate::common::node().arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
 }
 
 /// Whole-program JS for `name`: `push` is a stdlib callee, so emitting the root
@@ -127,7 +125,7 @@ fn eval_int(name: &str, expect: i64) {
         skull_codegen_js::JS_TABLE_PRIM,
         skull_codegen_js::JS_STRUCTURAL_EQ,
     );
-    let out = Command::new("node").arg("-e").arg(&program).output().expect("spawn node");
+    let out = crate::common::node().arg("-e").arg(&program).output().expect("spawn node");
     assert!(
         out.status.success(),
         "node failed for `{name}`:\n--- program ---\n{program}\n--- stderr ---\n{}",

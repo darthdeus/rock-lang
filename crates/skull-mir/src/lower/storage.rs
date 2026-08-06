@@ -406,24 +406,24 @@ impl Builder<'_> {
     ) -> Result<Option<ValueRepr>, CompilerError> {
         match (name, arg_idxs) {
             ("__vec_data_get", [recv, index]) => {
-                let Some(elem) = self.vec_column_elem_of(*recv) else { return Ok(None) };
+                let Some(elem) = self.vec_column_elem_of(*recv)? else { return Ok(None) };
                 let vec = self.lower_expr(*recv)?;
                 let i = self.lower_expr(*index)?;
                 Ok(Some(self.column_element_repr(vec, i, elem)?))
             }
             ("__vec_data_set", [recv, index, value]) => {
-                let Some(elem) = self.vec_column_elem_of(*recv) else { return Ok(None) };
+                let Some(elem) = self.vec_column_elem_of(*recv)? else { return Ok(None) };
                 let vec = self.lower_expr(*recv)?;
                 let i = self.lower_expr(*index)?;
                 self.column_element_store(vec, i, *value, elem)?;
                 Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)))))
             }
             ("__vec_data_unset", [recv, _index]) => {
-                let Some(_) = self.vec_column_elem_of(*recv) else { return Ok(None) };
+                let Some(_) = self.vec_column_elem_of(*recv)? else { return Ok(None) };
                 Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)))))
             }
             ("__vec_data_capacity", [recv]) => {
-                let Some(elem) = self.vec_column_elem_of(*recv) else { return Ok(None) };
+                let Some(elem) = self.vec_column_elem_of(*recv)? else { return Ok(None) };
                 let shape = self.column_shape(elem)?;
                 let vec = self.lower_expr(*recv)?;
                 let header = self.column_header(vec);
@@ -460,7 +460,7 @@ impl Builder<'_> {
             // Shift every column at the same slot, so they stay in lockstep. The
             // element is consumed as LEAVES, so the inserted value never boxes.
             ("__vec_data_insert", [recv, index, value]) => {
-                let Some(elem) = self.vec_column_elem_of(*recv) else { return Ok(None) };
+                let Some(elem) = self.vec_column_elem_of(*recv)? else { return Ok(None) };
                 let shape = self.column_shape(elem)?;
                 let paths = column_leaf_paths(&shape);
                 let vec = self.lower_expr(*recv)?;
@@ -485,7 +485,7 @@ impl Builder<'_> {
             // share a column with the original, or a later push would be seen by
             // both.
             ("__vec_data_clone", [recv]) => {
-                let Some(elem) = self.vec_column_elem_of(*recv) else { return Ok(None) };
+                let Some(elem) = self.vec_column_elem_of(*recv)? else { return Ok(None) };
                 let shape = self.column_shape(elem)?;
                 let paths = column_leaf_paths(&shape);
                 let vec = self.lower_expr(*recv)?;
@@ -529,7 +529,7 @@ impl Builder<'_> {
             // so the key applies with no element at all and the two forms split
             // here rather than at a box the mark would forbid.
             ("__vec_data_sort", [recv, key_fn]) => {
-                let Some(elem) = self.vec_column_elem_of(*recv) else { return Ok(None) };
+                let Some(elem) = self.vec_column_elem_of(*recv)? else { return Ok(None) };
                 let vec = self.lower_expr(*recv)?;
                 let k = self.lower_expr(*key_fn)?;
                 if !self.is_nobox_struct(elem.name) {
@@ -554,7 +554,7 @@ impl Builder<'_> {
                 }))))
             }
             ("__rock_vec_to_lua_array", [recv]) => {
-                let Some(elem) = self.vec_column_elem_of(*recv) else { return Ok(None) };
+                let Some(elem) = self.vec_column_elem_of(*recv)? else { return Ok(None) };
                 if self.is_nobox_struct(elem.name) {
                     return Err(CompilerError::new_with_label(
                         self.body.expr_spans[*recv],
@@ -620,7 +620,10 @@ impl Builder<'_> {
     pub(crate) fn empty_column_map(&mut self, elem: ColumnElem) -> Result<Idx<Inst>, CompilerError> {
         let zero_cap = self.emit_cur(Inst::Const(Lit::Int(0)));
         let data = self.empty_column_vec(elem, zero_cap)?;
-        let spine = self.emit_cur(Inst::MakeStruct { ty: None, fields: Vec::new() });
+        // Through the helper, not a bare `MakeStruct`: the spine's key space is
+        // user data and must not inherit host object-model names, which an
+        // object literal does on JS. See `__map_col_new_spine`.
+        let spine = self.call_spine("__map_col_new_spine", Vec::new())?;
         let free = self.emit_cur(Inst::MakeVec(Vec::new()));
         let count = self.emit_cur(Inst::Const(Lit::Int(0)));
         Ok(self.emit_cur(Inst::MakeStruct {
@@ -650,25 +653,25 @@ impl Builder<'_> {
     ) -> Result<Option<ValueRepr>, CompilerError> {
         match (name, arg_idxs) {
             ("get", [recv, key]) => {
-                let Some(elem) = self.map_column_value_of(*recv) else { return Ok(None) };
+                let Some(elem) = self.map_column_value_of(*recv)? else { return Ok(None) };
                 let m = self.lower_expr(*recv)?;
                 let k = self.lower_expr(*key)?;
                 Ok(Some(self.map_column_get_repr(m, k, elem)?))
             }
             ("table_unset", [recv, key]) => {
-                let Some(_) = self.map_column_value_of(*recv) else { return Ok(None) };
+                let Some(_) = self.map_column_value_of(*recv)? else { return Ok(None) };
                 let m = self.lower_expr(*recv)?;
                 let k = self.lower_expr(*key)?;
                 self.call_spine("__map_col_free", vec![m, k])?;
                 Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)))))
             }
             ("len" | "map_len", [recv]) => {
-                let Some(_) = self.map_column_value_of(*recv) else { return Ok(None) };
+                let Some(_) = self.map_column_value_of(*recv)? else { return Ok(None) };
                 let m = self.lower_expr(*recv)?;
                 Ok(Some(ValueRepr::Scalar(self.call_spine("__map_col_len", vec![m])?)))
             }
             ("contains", [recv, key]) => {
-                let Some(_) = self.map_column_value_of(*recv) else { return Ok(None) };
+                let Some(_) = self.map_column_value_of(*recv)? else { return Ok(None) };
                 let m = self.lower_expr(*recv)?;
                 let k = self.lower_expr(*key)?;
                 Ok(Some(ValueRepr::Scalar(
@@ -676,7 +679,7 @@ impl Builder<'_> {
                 )))
             }
             ("clear", [recv]) => {
-                let Some(_) = self.map_column_value_of(*recv) else { return Ok(None) };
+                let Some(_) = self.map_column_value_of(*recv)? else { return Ok(None) };
                 let m = self.lower_expr(*recv)?;
                 self.call_spine("__map_col_clear", vec![m])?;
                 Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)))))
@@ -812,7 +815,7 @@ impl Builder<'_> {
         // the spine turns the key into a slot, and the slot indexes `data`.
         // Without this a field write through `m[k]` takes a whole-element place
         // base, which the wrapper has no slot for.
-        if let Some(elem) = self.map_column_value_of(base) {
+        if let Some(elem) = self.map_column_value_of(base)? {
             let m = self.lower_expr(base)?;
             let k = self.lower_expr(index)?;
             let slot = self.call_spine("__map_col_slot_checked", vec![m, k])?;
@@ -820,7 +823,7 @@ impl Builder<'_> {
             let at = self.checked_column_index(data, slot);
             return Ok(Some((data, at, elem)));
         }
-        let Some(elem) = self.vec_column_elem_of(base) else {
+        let Some(elem) = self.vec_column_elem_of(base)? else {
             return Ok(None);
         };
         let vec = self.lower_expr(base)?;
@@ -970,6 +973,16 @@ impl Builder<'_> {
     /// The columns are read only in the present arm -- at a missing key the slot
     /// is -1 and indexing `data` would fault, and a freed slot still holds stale
     /// leaves that must not be observable.
+    ///
+    /// Which repr the miss arm has to produce is decided by how `V?` is
+    /// represented OUTSIDE this expression, and that is `is_nobox_struct` -- the
+    /// one predicate every representation decision reaches. Column ELIGIBILITY
+    /// is a storage rule (`vec_column_elem`) and says nothing about it: an
+    /// unmarked `value` struct is stored in columns here and is a boxed
+    /// nil-or-cdata everywhere else. So an unmarked V builds its ctor INSIDE the
+    /// present arm and misses as a plain `nil`; handing its boxed consumers the
+    /// tagged Group instead makes them pack a ctor after the join, over the miss
+    /// arm's nil leaves.
     pub(crate) fn map_column_get_repr(
         &mut self,
         m: Idx<Inst>,
@@ -977,13 +990,13 @@ impl Builder<'_> {
         elem: ColumnElem,
     ) -> Result<ValueRepr, CompilerError> {
         let shape = self.column_shape(elem)?;
+        let unboxed = self.is_nobox_struct(elem.name);
         let slot = self.call_spine("__map_col_slot_of", vec![m, key])?;
         let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
         let present = self.emit_cur(Inst::IntGeq(slot, zero));
-        let leaf_cells: Vec<Idx<Cell>> = value_leaf_paths(&shape)
-            .iter()
-            .map(|_| self.f.new_cell(None))
-            .collect();
+        let cell_count = if unboxed { value_leaf_paths(&shape).len() } else { 1 };
+        let cells: Vec<Idx<Cell>> =
+            (0..cell_count).map(|_| self.f.new_cell(None)).collect();
         let hit = self.f.new_block();
         let miss = self.f.new_block();
         let join = self.f.new_block();
@@ -994,22 +1007,27 @@ impl Builder<'_> {
         self.cur = hit;
         let data = self.map_col_data(m);
         let found = self.column_element_repr(data, slot, elem)?;
-        let leaves = self.repr_to_leaves(&found, &shape);
-        for (cell, leaf) in leaf_cells.iter().zip(leaves) {
-            self.emit_cur(Inst::Store { cell: *cell, value: leaf });
+        let stored: Vec<Idx<Inst>> = if unboxed {
+            self.repr_to_leaves(&found, &shape)
+        } else {
+            vec![self.pack(found)]
+        };
+        for (cell, value) in cells.iter().zip(stored) {
+            self.emit_cur(Inst::Store { cell: *cell, value });
         }
         self.f.set_term(self.cur, Term::Goto(join));
         self.cur = miss;
         let nil = self.emit_cur(Inst::Const(Lit::Nil));
-        for cell in &leaf_cells {
+        for cell in &cells {
             self.emit_cur(Inst::Store { cell: *cell, value: nil });
         }
         self.f.set_term(self.cur, Term::Goto(join));
         self.cur = join;
-        let loaded: Vec<Idx<Inst>> = leaf_cells
-            .iter()
-            .map(|c| self.emit_cur(Inst::Load(*c)))
-            .collect();
+        let loaded: Vec<Idx<Inst>> =
+            cells.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
+        if !unboxed {
+            return Ok(ValueRepr::Scalar(loaded[0]));
+        }
         let mut idx = 0;
         let inner = self.rebuild_from_leaves(&shape, &loaded, &mut idx);
         Ok(match inner {

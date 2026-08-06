@@ -135,6 +135,39 @@ fn validate_one(
             at(anno, pos, AnnoPos::Param)?;
             no_args(anno)
         }
+        // The parameter-level REPRESENTATION contract
+        // (`docs/boundary-contracts.md` 2.4). `opaque` states that the body
+        // makes no assumption about this parameter's physical form, so the
+        // column-container rejection skips it. It names a KIND rather than
+        // being nullary because the same slot is where a future `boxed` /
+        // `columns` contract belongs; an unrecognized kind rejects rather than
+        // reading as "some contract is in force".
+        //
+        // Whether the fn is an opaque boundary at all is checked where the
+        // param is built (`bone-lower`), which has the fn in hand; this table
+        // sees the annotation alone.
+        "repr" => {
+            at(anno, pos, AnnoPos::Param)?;
+            let kind = match &anno.args[..] {
+                [a] if a.name.is_none() => match &a.value {
+                    AnnoValue::Ident(k) => Some(k.name),
+                    _ => None,
+                },
+                _ => None,
+            };
+            match kind {
+                Some(k) if k.as_str() == "opaque" => Ok(()),
+                Some(k) => comp_error!(
+                    anno.span,
+                    "unknown `@repr` kind `{k}` -- the only kind is `opaque` \
+                     (docs/boundary-contracts.md 2.4)"
+                ),
+                None => comp_error!(
+                    anno.span,
+                    "`@repr` takes exactly one bare kind identifier: @repr(opaque)"
+                ),
+            }
+        }
         // GLSL entry input roles (docs/shaders.md): the value-struct param they
         // mark is per-vertex attribute data (`@attr`) or a uniform block
         // (`@uniform`). `@instance` is the per-instance attribute divisor.
@@ -156,6 +189,37 @@ fn validate_one(
             comp_error!(anno.span, "unknown annotation `@{name}` (registry: docs/annotations-design.md)");
         }
     }
+}
+
+/// `@repr(opaque)` waives a rule that exists ONLY for bodies the compiler
+/// cannot see into, so on a Rock body there is no assumption to waive and the
+/// annotation would be a claim nothing consults. Rejected there rather than
+/// ignored -- a reader must not be able to believe a contract is in force.
+///
+/// Separate from [`validate_annotations`] because it needs the enclosing fn,
+/// which the registry table deliberately does not see.
+pub fn validate_param_repr_against_body(
+    fn_name: Ustr,
+    param_decls: &[crate::hir::ParamDecl],
+    is_opaque_boundary: bool,
+) -> Result<(), CompilerError> {
+    if is_opaque_boundary {
+        return Ok(());
+    }
+    for pd in param_decls {
+        for anno in &pd.annotations {
+            if anno.name.name == "repr" {
+                comp_error!(
+                    anno.span,
+                    "`@repr(opaque)` applies to a parameter of an `inline(..)` or \
+                     `extern` boundary; `{fn_name}` has a Rock body, so the compiler \
+                     already knows the parameter's representation and there is no \
+                     assumption to waive"
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn at(anno: &Annotation, pos: AnnoPos, allowed: AnnoPos) -> Result<(), CompilerError> {

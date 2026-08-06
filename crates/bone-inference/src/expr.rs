@@ -471,16 +471,24 @@ pub fn infer_expr_used(
             resolve(gamma, inner_ty, c.body.expr_spans[*target])
         }
 
-        Expr::As { value, target } => {
-            let value_ty = infer_expr(c, gamma, *value)?;
+        Expr::As { value, target, kind } => {
+            let (value, kind) = (*value, *kind);
             let target = resolve(gamma, *target, expr_span);
-            // A bare `null` carries its own fresh var, and a cast types the
-            // surrounding expression only -- nothing else ever binds it. Tie it
-            // to the ascribed type so the literal has a concrete type too.
-            if matches!(c.body.expr_arena[*value], Expr::Null)
-                && matches!(gamma.get(target), TypeExpr::Nullable(_))
-            {
-                unify(gamma, value_ty, target, c.body.expr_spans[*value])?;
+            let value_span = c.body.expr_spans[value];
+            match kind {
+                // `::` is the operand's expected type, so it reaches the operand
+                // through the same route as a `let`/param/return hole -- which is
+                // also what binds a bare `null` and an unannotated lambda param.
+                AsKind::Ascribe => {
+                    let target_str = gamma.render(target);
+                    check_expr(c, gamma, value, target, value_span).map_err(|e| {
+                        e.with_label(expr_span, format!("`::` ascribes `{target_str}` here"))
+                    })?
+                }
+                AsKind::Cast => {
+                    let value_ty = infer_expr(c, gamma, value)?;
+                    check_cast(gamma, value_ty, target, expr_span)?;
+                }
             }
             target
         }
@@ -1859,6 +1867,88 @@ pub(crate) fn check_expr(
     }
 
     Ok(())
+}
+
+// The closed `as` conversion relation. A pair is admitted only if it is an
+// ordinary assignment-compatible one or one of the two explicit numeric
+// conversions; everything else is a spanned rejection, never a silent identity.
+//
+// `as` is not contextual: the target validates an already-inferred source, so
+// nothing here may bind an operand variable or discharge a constraint waiting on
+// one. That is `::`'s job.
+pub(crate) fn check_cast(
+    gamma: &mut Gamma,
+    from: TyId,
+    to: TyId,
+    span: Span,
+) -> Result<(), CompilerError> {
+    let from_r = resolve(gamma, from, span);
+    let to_r = resolve(gamma, to, span);
+
+    if has_unbound_infer(gamma, from_r) {
+        let (from_str, to_str) = (gamma.render(from_r), gamma.render(to_r));
+        return Err(CompilerError::new_with_label(
+            span,
+            format!(
+                "cannot convert `{from_str}` to `{to_str}` with `as`: the operand \
+                 is not fully inferred on its own, and `as` does not take types \
+                 from its target -- annotate the operand, or ascribe it with \
+                 `:: {to_str}`"
+            ),
+        ));
+    }
+
+    // The same rule on the other side. A `_` in the target is an inference hole,
+    // so there is no written type to validate against: the relation would pass
+    // vacuously and the surrounding expectation would then bind the hole, which
+    // is how `let s: string = 42 as _` laundered a rejected pair.
+    if has_unbound_infer(gamma, to_r) {
+        let (from_str, to_str) = (gamma.render(from_r), gamma.render(to_r));
+        return Err(CompilerError::new_with_label(
+            span,
+            format!(
+                "cannot convert `{from_str}` to `{to_str}` with `as`: the target \
+                 is not a written type, and `as` validates against one -- name \
+                 the target type, or ascribe with `::` to infer it from context"
+            ),
+        ));
+    }
+
+    // Explicit narrowing/widening between the two numeric builtins. `int -> float`
+    // is also assignment-compatible; `float -> int` is admitted ONLY here, which
+    // is what keeps it out of `::`.
+    if matches!(
+        (gamma.get(from_r), gamma.get(to_r)),
+        (
+            TypeExpr::Builtin(BuiltinTy::Int),
+            TypeExpr::Builtin(BuiltinTy::Float)
+        ) | (
+            TypeExpr::Builtin(BuiltinTy::Float),
+            TypeExpr::Builtin(BuiltinTy::Int)
+        )
+    ) {
+        return Ok(());
+    }
+
+    // `coerce` decides assignment compatibility by unifying, which records
+    // bindings. Ask it against a checkpoint and roll back whatever it wrote, so
+    // the answer is a classification and not inference evidence.
+    let snap = gamma.out.checkpoint();
+    let compatible = gamma.trial(|g| coerce(g, from_r, to_r, span).is_ok());
+    gamma.out.rollback_to(snap);
+    if compatible {
+        return Ok(());
+    }
+
+    let (from_str, to_str) = (gamma.render(from_r), gamma.render(to_r));
+    Err(CompilerError::new_with_label(
+        span,
+        format!(
+            "cannot convert `{from_str}` to `{to_str}` with `as`; \
+             `as` converts only between `int` and `float`, or where `{from_str}` \
+             is already assignable to `{to_str}`"
+        ),
+    ))
 }
 
 // Find the `/` (float division) responsible for a `float` value flowing into an

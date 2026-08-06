@@ -940,8 +940,9 @@ fn f(c0) {
             inf,
             e,
             spec_fn(&ws, mid, "id"),
-            &SpecSubst::new(),
+            &SpecSubst::default(),
             bone_semantic::hir::FnBackend::Lua,
+            false,
         )
         .expect_err("a generic callee with no recorded bindings must reject");
         assert!(err.message.contains("no recorded generic bindings"), "{}", err.message);
@@ -958,7 +959,8 @@ fn f(c0) {
             spec_inf(&ws, mid, "main"),
             spec_fn(&ws, mid, "id"),
             &[],
-            &SpecSubst::new(),
+            &SpecSubst::default(),
+            false,
         )
         .expect_err("0 bindings against a 1-generic callee must reject");
         assert!(err.message.contains("declares 1 generic"), "{}", err.message);
@@ -980,7 +982,8 @@ fn f(c0) {
             spec_inf(&ws, mid, "main"),
             fref,
             &[int_ty],
-            &SpecSubst::new(),
+            &SpecSubst::default(),
+            false,
         )
         .expect_err("a non-generic declared generic must reject");
         assert!(err.message.contains("is not a generic type variable"), "{}", err.message);
@@ -1025,7 +1028,7 @@ fn f(c0) {
             &inf2,
             e,
             spec_fn(&ws, mid, "id"),
-            &SpecSubst::new(),
+            &SpecSubst::default(),
         )
         .expect("a 0-binding list against a 1-generic callee must be classified");
         assert_eq!(category, crate::ablation::FatalCategory::CompilerInvariant, "{detail}");
@@ -1056,7 +1059,7 @@ fn f(c0) {
             .find(|(e, _)| inf.call_generic_bindings.contains_key(e))
             .expect("a call with recorded bindings");
         let (category, detail) =
-            crate::lower::shape::ablation_decline(&ws, inf, e, fref, &SpecSubst::new())
+            crate::lower::shape::ablation_decline(&ws, inf, e, fref, &SpecSubst::default())
                 .expect("a non-type-variable declared generic must be classified");
         assert_eq!(category, crate::ablation::FatalCategory::CompilerInvariant, "{detail}");
         assert!(detail.contains("not a generic type variable"), "{detail}");
@@ -1085,7 +1088,7 @@ fn f(c0) {
                 inf,
                 e,
                 spec_fn(&ws, mid, "id"),
-                &SpecSubst::new()
+                &SpecSubst::default()
             )
             .is_none(),
             "a well-formed generic call must not be classified as a fatal"

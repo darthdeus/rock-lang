@@ -7,16 +7,15 @@
 //! post-dom virtual exit, so the real return block stays the join instead of the
 //! chain double-walking it. The node-executed checks are the correctness oracle.
 
-use std::process::Command;
 use crate::common::{emit_user, ws_with};
 
 fn node_available() -> bool {
-    Command::new("node").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+    crate::common::node().arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
 }
 
 fn node_eval_int(defs: &str, call: &str) -> i64 {
     let program = format!("{defs}\nconsole.log({call});");
-    let out = Command::new("node").arg("-e").arg(&program).output().expect("spawn node");
+    let out = crate::common::node().arg("-e").arg(&program).output().expect("spawn node");
     assert!(
         out.status.success(),
         "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",

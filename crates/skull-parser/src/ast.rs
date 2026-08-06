@@ -513,7 +513,11 @@ pub struct Generic {
 /// Rock body / `extern` / `extern(ffi,..)` carries no explicit backend tag here);
 /// it exists so the HIR-side [`FnBackend`] the bone layer reuses can mark portable
 /// decls that any backend may emit.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// Declaration order is bone's `backend_rank` (`bone-inference/src/calls.rs`):
+/// `Any` < `Lua` < `Js`, the preference order a backend-variant group collapses
+/// to its representative by. `Ord` is derived from it so a key that includes a
+/// backend cannot introduce a second one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FnBackend {
     Any,
     Lua,
