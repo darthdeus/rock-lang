@@ -1132,15 +1132,10 @@ fn emit_specialized_callees(
                 continue;
             }
         };
-        if let Err(e) =
-            skull_transform::inline_functions_with_subst(ws, scx, fref, &mut mf, &mut cache, &subst)
-        {
+        if let Err(e) = prepare_instance_body(ws, scx, fref, &subst, &name, &mut mf, &mut cache) {
             reject(CompilerError::new_with_label(f.name_span, e.message));
             continue;
         }
-        skull_transform::cleanup_with_nobox(ws, &mut mf);
-        skull_transform::convert_closures(&mut mf, &name);
-        skull_transform::recover_counted_loops(ws, &mut mf);
         if let Err(r) = validate_emitted_body(ws, &mf, pending) {
             reject(r.into_error(f.name_span, &format!("cannot emit specialized `{name}`: ")));
             continue;
@@ -1151,6 +1146,33 @@ fn emit_specialized_callees(
     }
     errs.sort_by(|(a, _), (b, _)| a.cmp(b));
     errs.into_iter().map(|(_, e)| e).collect()
+}
+
+/// **THE transform sequence an instance body is emitted through.**
+///
+/// Extracted so `emit_specialized_callees` and `skull::site_join`'s census
+/// consume ONE sequence rather than two that agree today. The census's whole
+/// claim is about the body EMISSION sees, so a census that re-listed these
+/// passes would be free to drift into measuring a body no emitter renders --
+/// and the drift would look like a clean measurement.
+///
+/// Everything after this point is rendering: `validate_emitted_body`,
+/// `emit_named` and the nested-fn emission. Nothing here mints a name or
+/// touches a `CodegenCtx`, which is what lets a read-only consumer run it.
+pub fn prepare_instance_body(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    fref: FuncRef,
+    subst: &skull_mir::lower::SpecSubst,
+    name: &str,
+    mf: &mut skull_mir::mir::MirFunc,
+    cache: &mut skull_transform::InlineCache,
+) -> Result<(), CompilerError> {
+    skull_transform::inline_functions_with_subst(ws, scx, fref, mf, cache, subst)?;
+    skull_transform::cleanup_with_nobox(ws, mf);
+    skull_transform::convert_closures(mf, name);
+    skull_transform::recover_counted_loops(ws, mf);
+    Ok(())
 }
 
 /// Every rejection one assembly found, across all four kinds of emitted

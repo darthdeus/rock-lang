@@ -1181,7 +1181,10 @@ pub fn lower_function_spec(
         cur_span: None,
         cur_expr: None,
         cur_op: crate::site::SiteOp::DirectCall,
-        site_owner: Some(self_ref),
+        site_owner: Some(crate::site::OwnerInstance {
+            func: self_ref,
+            subst: subst.clone(),
+        }),
         group_binds: HashMap::new(),
         tuple_binds: HashMap::new(),
         static_cells: HashMap::new(),
@@ -1435,12 +1438,13 @@ struct Builder<'a> {
     /// `None` only outside any expression (a fn prologue), which is the
     /// exclusion the site census reports by cause.
     cur_expr: Option<Idx<Expr>>,
-    /// The source FUNCTION being lowered, which OWNS every site recorded from
-    /// this builder. `None` for the always-emitted units -- a global
-    /// initializer and a decorator body are not functions and have no
-    /// `FuncRef`, so their calls carry no site and the census reports them
-    /// under that cause rather than losing them.
-    site_owner: Option<FuncRef>,
+    /// The concrete INSTANCE being lowered, which OWNS every site recorded from
+    /// this builder: the declaration plus the substitution it is lowered under.
+    /// `None` for the always-emitted units -- a global initializer and a
+    /// decorator body are not functions and have no `FuncRef`, so their calls
+    /// carry no site and the census reports them under that cause rather than
+    /// losing them.
+    site_owner: Option<crate::site::OwnerInstance>,
     /// Which OPERATION of [`Self::cur_expr`] is being lowered. `DirectCall` is
     /// the default because a call emitted while lowering an expression is that
     /// expression's own call; the witness and synthesized routes override it
@@ -1513,10 +1517,15 @@ impl Builder<'_> {
             self.f.inst_spans.insert(id, span);
         }
         // THE choke point for call-site identity: every call form entering the
-        // arena is stamped here, so totality is a property of this one branch
-        // rather than of 48 call-emitting sites each remembering to record.
+        // arena is stamped here, so a missing stamp is a property of this ONE
+        // branch rather than of 48 call-emitting sites each remembering to
+        // record. Not yet total: a call emitted outside any expression carries
+        // no site (bitgun: 346), and `Inst::CallBoundMulti` is a call form this
+        // match does not cover at all. Both are reported by
+        // `skull::site_join::census` rather than assumed away.
         if is_call {
-            if let (Some(owner), Some(expr)) = (self.site_owner, self.cur_expr) {
+            if let (Some(owner), Some(expr)) = (self.site_owner.clone(), self.cur_expr) {
+                let owner = crate::site::intern_owner(&mut self.f.site_owners, owner);
                 self.f.call_sites.insert(
                     id,
                     crate::site::CallSite {

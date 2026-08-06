@@ -77,6 +77,8 @@ mod inline_value_specialization;
 mod instance_graph;
 #[path = "instance_owned_emission.rs"]
 mod instance_owned_emission;
+#[path = "site_join.rs"]
+mod site_join;
 #[path = "artifact_view.rs"]
 mod artifact_view;
 

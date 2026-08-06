@@ -738,6 +738,11 @@ pub struct MirFunc {
     /// outside any expression rather than that a recording site was forgotten.
     /// Keys are remapped on splice, like [`Self::spec_bindings`].
     pub call_sites: bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::site::CallSite>,
+    /// The owner instances [`Self::call_sites`] refers to, interned. Index 0 is
+    /// this body's own owner when it has one; inlining appends the spliced
+    /// callee's owner and remaps its entries, so a body holds one entry per
+    /// distinct instance whose calls it now contains.
+    pub site_owners: Vec<crate::site::OwnerInstance>,
 }
 
 impl MirFunc {
@@ -762,6 +767,7 @@ impl MirFunc {
             nested_fns: Vec::new(),
             inst_spans: Default::default(),
             call_sites: Default::default(),
+            site_owners: Vec::new(),
         }
     }
 

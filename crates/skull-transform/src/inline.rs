@@ -936,10 +936,25 @@ fn import_spec_bindings(
     // caller's. Dropping these would make every inlined call an unattributed
     // one -- which the site census would report as an exclusion rather than as
     // the silent loss it is.
-    for (old_id, site) in &callee.call_sites {
-        if let Some(&new_id) = inst_map.get(old_id) {
-            func.call_sites.insert(new_id, site.clone());
-        }
+    // Site identity travels with the body, and its OWNER travels with it: a
+    // spliced call is the CALLEE instance's obligation, so the owner is
+    // re-interned into the caller's table and the entry re-pointed. Copying the
+    // `OwnerRef` verbatim would silently reinterpret the callee's index in the
+    // caller's table -- index 0 there is the CALLER, so every spliced call
+    // would join through the wrong body while looking perfectly well-formed.
+    let mut owner_map: HashMap<u32, skull_mir::site::OwnerRef> = HashMap::default();
+    for (old_id, cs) in &callee.call_sites {
+        let Some(&new_id) = inst_map.get(old_id) else { continue };
+        let owner = match owner_map.get(&cs.owner.0) {
+            Some(&o) => o,
+            None => {
+                let Some(inst) = callee.site_owners.get(cs.owner.0 as usize) else { continue };
+                let o = skull_mir::site::intern_owner(&mut func.site_owners, inst.clone());
+                owner_map.insert(cs.owner.0, o);
+                o
+            }
+        };
+        func.call_sites.insert(new_id, skull_mir::site::CallSite { owner, site: cs.site.clone() });
     }
 }
 

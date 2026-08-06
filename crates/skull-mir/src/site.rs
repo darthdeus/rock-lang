@@ -16,9 +16,18 @@
 //!   each site to;
 //! - `skull::concrete_body::ConcreteBody`'s callee tables, keyed by it.
 //!
-//! Those three must agree by CONSTRUCTION. Correlating them by span could not
-//! even detect a disagreement -- several of these share one span by
-//! construction, which is the whole reason the operation is in the key.
+//! Those three are INTENDED to agree, and the agreement is measured rather than
+//! assumed: `skull::site_join::census` reports the join with every exclusion
+//! named, and it is not yet total (see that module for the live counts).
+//! Correlating them by span could not even detect a disagreement -- several of
+//! these share one span, which is the whole reason the operation is in the key.
+//!
+//! What IS established: the owner half is load-bearing, by mutation. Dropping
+//! it so a spliced call keeps the caller's owner slot made 9 bitgun calls join
+//! to the WRONG concrete body while still counting as joined, and collapsed the
+//! spliced population 936 -> 12. What is NOT yet established: the operation
+//! half changes only classification LABELS today, because every witness site is
+//! unjoined either way.
 
 use bone_semantic::hir::Expr;
 use bone_semantic::prelude::Idx;
@@ -74,7 +83,45 @@ impl Site {
     }
 }
 
-/// A [`Site`] plus the source body that OWNS it.
+/// The body that OWNS a set of sites: a declaration plus the substitution it
+/// was lowered under -- i.e. a concrete INSTANCE, in lowering's vocabulary.
+///
+/// The declaration alone is not enough. Inlining splices a *specialized*
+/// snapshot, so `identity<int>` and `identity<string>` can both be spliced into
+/// one caller; their sites index the same expression arena and would join
+/// through whichever instance was looked up first. The substitution is what
+/// makes the owner concrete, and it is the same `MonoSubst` the graph records
+/// per instance, so the two can be compared without a translation.
+#[derive(Clone, PartialEq, Debug)]
+pub struct OwnerInstance {
+    pub func: crate::mir::FuncRef,
+    pub subst: crate::monoty::MonoSubst,
+}
+
+/// An index into [`crate::mir::MirFunc::site_owners`].
+///
+/// Interned rather than stored inline because a substitution is a map: after
+/// inlining a body can hold thousands of sites over a handful of owners, and
+/// cloning the map per call site would dominate both memory and comparison.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct OwnerRef(pub u32);
+
+/// Find-or-append `owner` in an interning table, returning its [`OwnerRef`].
+///
+/// ONE oracle for both writers -- lowering, which interns the body's own owner,
+/// and the inliner, which interns a spliced callee's. Two find-or-push routines
+/// would be free to disagree about identity (a subst compared by pointer, a
+/// declaration compared without it) and the disagreement would surface as a
+/// call joining through the wrong instance, which reads as a plausible answer.
+pub fn intern_owner(table: &mut Vec<OwnerInstance>, owner: OwnerInstance) -> OwnerRef {
+    if let Some(i) = table.iter().position(|o| *o == owner) {
+        return OwnerRef(i as u32);
+    }
+    table.push(owner);
+    OwnerRef((table.len() - 1) as u32)
+}
+
+/// A [`Site`] plus the owner it belongs to.
 ///
 /// The owner is not redundant with the MirFunc the entry lives in. Inlining
 /// splices a callee's instructions into its caller, and those calls remain the
@@ -84,6 +131,6 @@ impl Site {
 /// splice, and every arena index would still look plausible.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct CallSite {
-    pub owner: crate::mir::FuncRef,
+    pub owner: OwnerRef,
     pub site: Site,
 }

@@ -145,14 +145,7 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     let mut bound_tree_disagreements = 0usize;
     let mut bound_tree_comparisons = 0usize;
     let mut bound_trees_recorded = 0usize;
-    let mut sj_lowered = 0usize;
-    let mut sj_unlowerable = 0usize;
-    let mut sj_call_insts = 0usize;
-    let mut sj_joined = 0usize;
-    let mut sj_joined_rock = 0usize;
-    let mut sj_joined_boundary = 0usize;
-    let mut sj_unjoined: BTreeMap<&'static str, usize> = BTreeMap::new();
-    let mut sj_examples: Vec<String> = Vec::new();
+    let mut site_join = skull::site_join::SiteJoinCensus::default();
     let mut body_count = 0usize;
     let mut body_expr_examined = 0usize;
     let mut body_binding_examined = 0usize;
@@ -304,20 +297,7 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
                         e.1 += c.spanless;
                     }
                 }
-                sj_lowered += p.site_join.bodies_lowered;
-                sj_unlowerable += p.site_join.bodies_unlowerable;
-                sj_call_insts += p.site_join.call_insts;
-                sj_joined += p.site_join.joined;
-                sj_joined_rock += p.site_join.joined_rock;
-                sj_joined_boundary += p.site_join.joined_boundary;
-                for (k, v) in &p.site_join.unjoined {
-                    *sj_unjoined.entry(k.label()).or_insert(0) += v;
-                }
-                for e in &p.site_join.examples {
-                    if sj_examples.len() < 10 {
-                        sj_examples.push(e.clone());
-                    }
-                }
+                site_join.merge(&p.site_join);
                 body_count += p.body_census.bodies;
                 body_expr_examined += p.body_census.expr_examined;
                 body_binding_examined += p.body_census.binding_examined;
@@ -613,33 +593,58 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
         println!("## MIR call -> `ConcreteBody` join");
         println!();
         println!(
-            "- bodies lowered (the SPACE): **{sj_lowered}**; expanded bodies that would not \
-             lower: **{sj_unlowerable}**"
+            "Phase: POST-TRANSFORM (`mir_emit::prepare_instance_body`), reachable blocks only \
+             -- the body emission renders."
         );
-        println!("- call instructions examined (the DENOMINATOR): **{sj_call_insts}**");
+        println!();
+        println!("- instance bodies measured (the SPACE): **{}**", site_join.bodies_measured);
+        if !site_join.bodies_skipped.is_empty() {
+            println!();
+            println!("| expanded instance not measured | count |");
+            println!("|---|---:|");
+            for (k, v) in &site_join.bodies_skipped {
+                println!("| `{}` | {v} |", k.label());
+            }
+            println!();
+        }
         println!(
-            "- joined to exactly one callee: **{sj_joined}** ({sj_joined_rock} Rock, \
-             {sj_joined_boundary} boundary)"
+            "- reachable call instructions examined (the DENOMINATOR): **{}**",
+            site_join.call_insts
         );
-        let unjoined_total: usize = sj_unjoined.values().sum();
+        println!(
+            "- joined to exactly one callee: **{}** ({} Rock, {} boundary); of those, **{}** are \
+             SPLICED calls joined through the callee instance's own body",
+            site_join.joined,
+            site_join.joined_rock,
+            site_join.joined_boundary,
+            site_join.joined_spliced
+        );
+        let unjoined_total = site_join.unjoined_total();
         println!("- unjoined: **{unjoined_total}**");
         if unjoined_total > 0 {
             println!();
             println!("| cause | count |");
             println!("|---|---:|");
-            for (k, v) in &sj_unjoined {
+            for (k, v) in &site_join.unjoined {
+                println!("| `{}` | {v} |", k.label());
+            }
+            println!();
+            println!("| unjoined by operation | count |");
+            println!("|---|---:|");
+            for (k, v) in &site_join.unjoined_by_op {
                 println!("| `{k}` | {v} |");
             }
         }
         println!();
         println!(
-            "accounting: {sj_joined} joined + {unjoined_total} unjoined == {sj_call_insts} \
-             examined: **{}**",
-            if sj_joined + unjoined_total == sj_call_insts { "yes" } else { "NO" }
+            "accounting: {} joined + {unjoined_total} unjoined == {} examined: **{}**",
+            site_join.joined,
+            site_join.call_insts,
+            if site_join.accounts() { "yes" } else { "NO" }
         );
-        if !sj_examples.is_empty() {
+        if !site_join.examples.is_empty() {
             println!();
-            for e in &sj_examples {
+            for e in &site_join.examples {
                 println!("- {e}");
             }
         }

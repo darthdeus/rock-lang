@@ -405,6 +405,9 @@ pub fn convert_closures_framed(
             // keyed to insts whose only reachable home is now this body, so
             // dropping them would strand their site identity here.
             call_sites: mf.call_sites.clone(),
+            // The owner table comes across with the entries that index it;
+            // cloning one without the other would repoint every site.
+            site_owners: mf.site_owners.clone(),
         });
     }
     // APPEND, don't overwrite: lowering already hoisted the enclosing fn's named
