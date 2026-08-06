@@ -15,10 +15,9 @@ impl Builder<'_> {
         // recorded the resolved `iter` fn; wrap the arg value in that call
         // (the call-arg analog of `lower_for_user_iter`'s `iter_fn`).
         if let Some(&(m, f)) = self.inf.and_then(|i| i.implicit_iter_args.get(&e)) {
-            return Ok(self.emit_cur(Inst::Call {
-                func: FuncRef { module: m, func: f },
-                args: vec![v],
-            }));
+            let iter_ref = FuncRef { module: m, func: f };
+            let args = self.iter_witness_args(iter_ref, ValueRepr::Scalar(v))?;
+            return Ok(self.emit_cur(Inst::Call { func: iter_ref, args }));
         }
         Ok(v)
     }

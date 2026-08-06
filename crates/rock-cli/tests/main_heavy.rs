@@ -2,6 +2,9 @@
 
 mod stone_harness;
 
+#[path = "arena_serialization_tests.rs"]
+mod arena_serialization_tests;
+
 #[path = "game_snapshot_tests.rs"]
 mod game_snapshot_tests;
 #[path = "perf_json_format_test.rs"]

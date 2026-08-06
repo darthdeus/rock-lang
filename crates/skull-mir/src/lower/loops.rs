@@ -155,7 +155,6 @@ impl Builder<'_> {
         body: Idx<Expr>,
         info: &ForIterInfo,
     ) -> Result<(), CompilerError> {
-        let coll = self.lower_expr(iter_expr)?;
         let it_val = match info.iter_fn {
             Some((m, f)) => {
                 // Stage-0e: the `iter` witness is emitted with NO spec binding,
@@ -182,9 +181,11 @@ impl Builder<'_> {
                         );
                     }
                 }
-                self.emit_cur(Inst::Call { func: iter_ref, args: vec![coll] })
+                let repr = self.lower_expr_repr(iter_expr)?;
+                let args = self.iter_witness_args(iter_ref, repr)?;
+                self.emit_cur(Inst::Call { func: iter_ref, args })
             }
-            None => coll,
+            None => self.lower_expr(iter_expr)?,
         };
         let it_cell = self.f.new_cell(Some(Ustr::from("__it")));
         self.emit_cur(Inst::Store { cell: it_cell, value: it_val });
@@ -386,10 +387,17 @@ impl Builder<'_> {
         // COLUMN-stored and a bare `Index` would read a table that isn't there.
         let column_elem = self.arena_column_elem_of(iter);
 
+        // An Arena is a weak handle, so the columns come from its registry entry.
+        // Resolved ONCE here, outside the counted loop: Scene ownership must not
+        // put a registry lookup in front of every row. A retired handle resolves
+        // to an empty store, which the `i < n` header exits immediately.
         let arena = self.lower_expr(iter)?;
-        let occupied = self.emit_cur(Inst::Field { base: arena, field: Ustr::from("occupied") });
-        let generations = self.emit_cur(Inst::Field { base: arena, field: Ustr::from("generations") });
-        let data = self.emit_cur(Inst::Field { base: arena, field: Ustr::from("data") });
+        let scene_id = self.emit_cur(Inst::Field { base: arena, field: Ustr::from("_scene_id") });
+        let arena_id = self.emit_cur(Inst::Field { base: arena, field: Ustr::from("_arena_id") });
+        let store = self.call_spine("__arena_store_or_empty", vec![scene_id, arena_id])?;
+        let occupied = self.emit_cur(Inst::Field { base: store, field: Ustr::from("occupied") });
+        let generations = self.emit_cur(Inst::Field { base: store, field: Ustr::from("generations") });
+        let data = self.emit_cur(Inst::Field { base: store, field: Ustr::from("data") });
         let n = self.emit_cur(Inst::Len { base: occupied, kind: ContainerKind::Vec });
         let i_cell = self.f.new_cell(None);
         self.f.mark_loop_binding(i_cell);
@@ -445,8 +453,9 @@ impl Builder<'_> {
         let entity = self.emit_cur(Inst::MakeValueStruct {
             name: Ustr::from("Entity"),
             fields: vec![
-                (Ustr::from("_arena"), arena),
-                (Ustr::from("_index"), idx),
+                (Ustr::from("_scene_id"), scene_id),
+                (Ustr::from("_arena_id"), arena_id),
+                (Ustr::from("_slot"), idx),
                 (Ustr::from("_generation"), e_gen),
             ],
         });
