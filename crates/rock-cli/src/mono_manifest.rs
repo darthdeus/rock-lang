@@ -620,9 +620,12 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
             site_join.joined_spliced
         );
         println!(
-            "- of the joined, **{}** had the resolved callee CHECKED against the FuncRef the call \
-             targets; **{}** are indirect and name no declaration to check",
-            site_join.joined_callee_verified, site_join.joined_callee_unverifiable
+            "- of the joined: **{}** verified to the full concrete INSTANCE (generic args \
+             compared), **{}** non-generic (one instance, so the declaration match is the \
+             instance match), **{}** indirect and uncheckable",
+            site_join.joined_instance_verified,
+            site_join.joined_non_generic,
+            site_join.joined_callee_unverifiable
         );
         let unjoined_total = site_join.unjoined_total();
         println!("- unjoined: **{unjoined_total}**");
@@ -641,12 +644,20 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
             }
         }
         println!();
+        let failures = site_join.accounting_failures();
         println!(
-            "accounting: {} joined + {unjoined_total} unjoined == {} examined: **{}**",
+            "accounting ({} joined + {unjoined_total} unjoined == {} examined, plus the \
+             verification and per-operation identities): **{}**",
             site_join.joined,
             site_join.call_insts,
-            if site_join.accounts() { "yes" } else { "NO" }
+            if failures.is_empty() { "yes".to_string() } else { format!("NO -- {failures:?}") }
         );
+        println!();
+        println!("| examined by operation | count | joined |");
+        println!("|---|---:|---:|");
+        for (k, v) in &site_join.examined_by_op {
+            println!("| `{k}` | {v} | {} |", site_join.joined_by_op.get(k).copied().unwrap_or(0));
+        }
         if !site_join.examples.is_empty() {
             println!();
             for e in &site_join.examples {

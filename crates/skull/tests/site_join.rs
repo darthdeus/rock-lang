@@ -276,22 +276,162 @@ fn build() -> int {
 fn main() { print("{build()}") }
 "#,
     );
-    assert!(c.accounts(), "accounting identity broken: {c:?}");
-    // The fixture must actually produce synthesized sites, or it proves nothing
-    // about the operation half.
-    let synthesized_unjoined = c.unjoined_by_op.get("synthesized").copied().unwrap_or(0);
+    assert!(c.accounts(), "accounting broken: {:?}", c.accounting_failures());
+    // THE DENOMINATOR: the fixture must actually produce synthesized sites, and
+    // they must actually JOIN. Without both, `mismatches == 0` below is
+    // satisfied by a body with no column operation in it at all.
+    let synth_examined = c.examined_by_op.get("synthesized").copied().unwrap_or(0);
+    let synth_joined = c.joined_by_op.get("synthesized").copied().unwrap_or(0);
     assert!(
-        c.joined > 0,
-        "nothing joined, so this cannot distinguish an operation failure: {c:?}"
+        synth_examined > 0,
+        "no synthesized site examined, so this proves nothing about the operation half: {c:?}"
     );
-    // No synthesized site may be a callee MISMATCH: that is the exact symptom of
-    // the operation being dropped.
-    let mismatches = c.unjoined.get(&Unjoined::CalleeMismatch).copied().unwrap_or(0);
+    assert!(
+        synth_joined > 0,
+        "synthesized sites were examined ({synth_examined}) but none joined: {c:?}"
+    );
+    // No call may resolve to a callee it does not target. That is the exact
+    // symptom of the operation being dropped: a runtime entry stamped
+    // `DirectCall` matches its source expression's callee instead.
+    let decl_mismatch = c.unjoined.get(&Unjoined::CalleeMismatch).copied().unwrap_or(0);
     assert_eq!(
-        mismatches, 0,
+        decl_mismatch, 0,
         "a call resolved to a callee it does not target -- the site operation is not \
          distinguishing synthesized runtime entries from their source call \
-         (synthesized unjoined = {synthesized_unjoined}): {c:?}"
+         (synthesized examined = {synth_examined}, joined = {synth_joined}): {c:?}"
+    );
+}
+
+/// PREMISE TEST for the callee comparison, and the control that DIES if the
+/// comparison is weakened back to declaration equality.
+///
+/// One generic declaration instantiated at two concrete types gives two
+/// instances with the SAME `FuncRef`. Feeding each instance the OTHER's key --
+/// FuncRef unchanged, generic arguments swapped -- must be an
+/// `InstanceMismatch`. Under a declaration-only comparison both would be
+/// accepted, which is exactly the defect this arm exists to catch.
+#[test]
+fn swapping_two_generic_keys_is_an_instance_mismatch() {
+    let (ws, g) = graph_of(
+        r#"
+fn ident<T>(x: T) -> T { return x }
+fn main() {
+    let a = ident(1)
+    let b = ident("s")
+    print("{a} {b}")
+}
+"#,
+    );
+    // The two `ident` instances, and the key that names each.
+    let insts: Vec<&skull::instance_graph::Instance> = g
+        .substitutions
+        .keys()
+        .filter(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "ident")
+        .collect();
+    assert_eq!(insts.len(), 2, "fixture must produce TWO instances of one declaration: {insts:?}");
+    let fref = insts[0].func;
+    assert_eq!(insts[1].func, fref, "the two instances must share a FuncRef to be a control");
+
+    // Build each instance's key from its own recorded substitution -- the real
+    // binding, not a hand-written type. `ident<T>` has one generic, so the key
+    // is one slot holding that instance's binding; `spec_subst_from_key` maps
+    // it back through the declaration's own generic, recovering the same VarId
+    // the graph recorded.
+    let key_of = |i: &skull::instance_graph::Instance| -> skull_mir::lower::SpecKey {
+        let subst = &g.substitutions[i];
+        assert_eq!(subst.len(), 1, "fixture has one generic: {subst:?}");
+        vec![subst.values().next().cloned()]
+    };
+    let k0 = key_of(insts[0]);
+    let k1 = key_of(insts[1]);
+    assert!(k0.iter().all(Option::is_some) && k1.iter().all(Option::is_some), "keys must be complete");
+    assert_ne!(k0, k1, "the two keys must differ, or the swap below is a no-op");
+
+    // Matched: the instance and its OWN key.
+    assert_eq!(
+        skull::site_join::check_callee(&ws, &g, insts[0], fref, Some(&k0)),
+        skull::site_join::CalleeCheck::Instance,
+        "an instance did not verify against its own key"
+    );
+    assert_eq!(
+        skull::site_join::check_callee(&ws, &g, insts[1], fref, Some(&k1)),
+        skull::site_join::CalleeCheck::Instance
+    );
+    // SWAPPED: same FuncRef, other instantiation. A declaration-only comparison
+    // returns agreement here; the instance comparison must not.
+    assert_eq!(
+        skull::site_join::check_callee(&ws, &g, insts[0], fref, Some(&k1)),
+        skull::site_join::CalleeCheck::InstanceMismatch,
+        "two instantiations of one declaration compared equal -- the comparison is \
+         declaration-level, not instance-level"
+    );
+    assert_eq!(
+        skull::site_join::check_callee(&ws, &g, insts[1], fref, Some(&k0)),
+        skull::site_join::CalleeCheck::InstanceMismatch
+    );
+}
+
+/// The DECLARATION half of the comparison, with the same shape: a callee
+/// instance whose FuncRef is not the call's target must be a `DeclMismatch`.
+/// Deleting the declaration check leaves this red.
+#[test]
+fn a_different_declaration_is_a_decl_mismatch() {
+    let (ws, g) = graph_of(
+        r#"
+fn one(x: int) -> int { return x }
+fn two(x: int) -> int { return x + 1 }
+fn main() { print("{one(1)} {two(2)}") }
+"#,
+    );
+    let find = |name: &str| -> skull::instance_graph::Instance {
+        g.substitutions
+            .keys()
+            .find(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == name)
+            .expect("instance")
+            .clone()
+    };
+    let one = find("one");
+    let two = find("two");
+    assert_ne!(one.func, two.func, "the fixture must give two declarations");
+    assert_eq!(
+        skull::site_join::check_callee(&ws, &g, &one, one.func, None),
+        skull::site_join::CalleeCheck::NonGeneric,
+        "a non-generic callee against its own declaration must verify"
+    );
+    assert_eq!(
+        skull::site_join::check_callee(&ws, &g, &one, two.func, None),
+        skull::site_join::CalleeCheck::DeclMismatch,
+        "a callee resolved to another declaration was accepted"
+    );
+}
+
+/// A generic callee with NO complete key cannot be verified, and that must be
+/// reported rather than counted as agreement.
+#[test]
+fn a_generic_callee_without_a_complete_key_is_unverified() {
+    let (ws, g) = graph_of(
+        r#"
+fn ident<T>(x: T) -> T { return x }
+fn main() { print("{ident(1)}") }
+"#,
+    );
+    let inst = g
+        .substitutions
+        .keys()
+        .find(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "ident")
+        .expect("instance")
+        .clone();
+    assert_eq!(
+        skull::site_join::check_callee(&ws, &g, &inst, inst.func, None),
+        skull::site_join::CalleeCheck::InstanceUnverified,
+        "a generic callee with no key was treated as verified"
+    );
+    // A PARTIAL key is equally unverifiable -- it names no instance.
+    let partial: skull_mir::lower::SpecKey = vec![None];
+    assert_eq!(
+        skull::site_join::check_callee(&ws, &g, &inst, inst.func, Some(&partial)),
+        skull::site_join::CalleeCheck::InstanceUnverified,
+        "a partial key was treated as verified"
     );
 }
 

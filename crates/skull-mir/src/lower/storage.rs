@@ -301,7 +301,7 @@ impl Builder<'_> {
         buf: Idx<Inst>,
         index: Idx<Inst>,
     ) -> Result<Idx<Inst>, CompilerError> {
-        self.call_runtime_entry("__nb_checked_index", vec![buf, index])
+        self.call_spine("__nb_checked_index", vec![buf, index])
     }
 
     pub(crate) fn column_element_repr(
@@ -436,7 +436,7 @@ impl Builder<'_> {
                             base: vec,
                             field: *path,
                         });
-                        self.call_runtime_entry("table_len", vec![col])?
+                        self.call_spine("table_len", vec![col])?
                     }
                     None => self.emit_cur(Inst::Field {
                         base: vec,
@@ -444,7 +444,7 @@ impl Builder<'_> {
                     }),
                 };
                 Ok(Some(ValueRepr::Scalar(
-                    self.call_runtime_entry("__rock_col_capacity", vec![reserved, physical])?,
+                    self.call_spine("__rock_col_capacity", vec![reserved, physical])?,
                 )))
             }
             // Shift every column at the same slot, so they stay in lockstep. The
@@ -466,7 +466,7 @@ impl Builder<'_> {
                 let len = self.emit_cur(Inst::Field { base: vec, field: Ustr::from("len") });
                 for (path, leaf) in paths.into_iter().zip(leaves) {
                     let col = self.emit_cur(Inst::Field { base: vec, field: path });
-                    self.call_runtime_entry("__rock_col_insert", vec![col, i, len, leaf])?;
+                    self.call_spine("__rock_col_insert", vec![col, i, len, leaf])?;
                 }
                 Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)))))
             }
@@ -486,7 +486,7 @@ impl Builder<'_> {
                 let len = self.emit_cur(Inst::Field { base: vec, field: Ustr::from("len") });
                 for path in paths {
                     let col = self.emit_cur(Inst::Field { base: vec, field: path });
-                    let copied = self.call_runtime_entry("__rock_col_copy", vec![col, len])?;
+                    let copied = self.call_spine("__rock_col_copy", vec![col, len])?;
                     fields.push((path, copied));
                 }
                 fields.push((Ustr::from("len"), len));
@@ -521,7 +521,7 @@ impl Builder<'_> {
                 let k = self.lower_expr(*key_fn)?;
                 if !self.is_nobox_struct(elem.name) {
                     return Ok(Some(ValueRepr::Scalar(
-                        self.call_runtime_entry("__rock_col_sort", vec![vec, k])?,
+                        self.call_spine("__rock_col_sort", vec![vec, k])?,
                     )));
                 }
                 let shape = self.column_shape(elem)?;
@@ -534,7 +534,7 @@ impl Builder<'_> {
                     .collect();
                 let paths = self.emit_cur(Inst::MakeTuple(paths));
                 Ok(Some(ValueRepr::Scalar(
-                    self.call_runtime_entry("__rock_col_sort_leaves", vec![vec, k, paths])?,
+                    self.call_spine("__rock_col_sort_leaves", vec![vec, k, paths])?,
                 )))
             }
             ("__rock_vec_to_lua_array", [recv]) => {
@@ -551,7 +551,7 @@ impl Builder<'_> {
                 }
                 let vec = self.lower_expr(*recv)?;
                 Ok(Some(ValueRepr::Scalar(
-                    self.call_runtime_entry("__rock_vec_column_elements", vec![vec])?,
+                    self.call_spine("__rock_vec_column_elements", vec![vec])?,
                 )))
             }
             _ => Ok(None),
@@ -870,28 +870,17 @@ impl Builder<'_> {
     }
 
 
-    /// A synthesized call to a named runtime entry, stamped with that name as
-    /// its site operation. Same rule as [`Self::call_spine`]: the call belongs
-    /// to the enclosing expression but is not that expression's own callee.
-    pub(crate) fn call_runtime_entry(
-        &mut self,
-        name: &'static str,
-        args: Vec<Idx<Inst>>,
-    ) -> Result<Idx<Inst>, CompilerError> {
-        let func = self.stdlib_funcref(name)?;
-        Ok(self.with_site_op(crate::site::SiteOp::Synthesized(name), |b| {
-            b.emit_cur(Inst::Call { func, args })
-        }))
-    }
-
-    /// A synthesized call to one of the scalar spine helpers. These are
-    /// non-generic by necessity -- `Inst::Call` carries no generic arguments, so
-    /// a generic Rock helper could never specialize here.
+    /// A synthesized call to a named runtime entry (`docs/boundary-contracts.md`
+    /// S 1.4): the column-storage spine helpers and the `NativeBuffer` bounds
+    /// check. Non-generic by necessity -- `Inst::Call` carries no generic
+    /// arguments, so a generic Rock helper could never specialize here.
     ///
-    /// `name` is `&'static str` because it IS the site's operation identity
-    /// (`SiteOp::Synthesized`): this call is not the source expression's own
-    /// call, and stamping it `DirectCall` makes it collide with the expression's
-    /// real callee. Every caller already passes a literal.
+    /// ONE entry point for every synthesized runtime call. `name` is
+    /// `&'static str` because it IS the site's operation identity
+    /// (`SiteOp::Synthesized`): the call belongs to the enclosing expression but
+    /// is not that expression's own callee, and stamping it `DirectCall` makes
+    /// it collide with the expression's real callee -- which the join then
+    /// reports as a callee mismatch. Every caller already passes a literal.
     pub(crate) fn call_spine(
         &mut self,
         name: &'static str,
