@@ -142,17 +142,19 @@ pub struct ConcreteIteratorOp {
 
 /// One instance's concrete type and callee tables.
 ///
-/// The callee tables are keyed by [`Site`] rather than by `Idx<Expr>` wherever
-/// one expression carries more than one callee obligation -- a `for` head has
-/// an `iter` and a `next`, a column-Map store emits a slot AND a free. Plan S 9
-/// writes `Map<ExprId, ..>`; an expression key there would silently keep one of
-/// them.
+/// EVERY callee table is keyed by [`Site`] rather than by `Idx<Expr>`. One
+/// expression can carry more than one callee obligation -- a `for` head has an
+/// `iter` and a `next`, a column-Map store emits a slot AND a free -- and an
+/// index is only meaningful against ONE arena, which a struct-default
+/// initializer's is not. Plan S 9 writes `Map<ExprId, ..>`; an expression key
+/// there silently keeps one of each pair and reads a foreign index against the
+/// owner's body.
 pub struct ConcreteBody {
     pub instance: Instance,
     pub expr_types: ArenaMap<Idx<Expr>, MonoTyId>,
     pub binding_types: ArenaMap<Idx<BindingInfo>, MonoTyId>,
-    pub direct_calls: BTreeMap<Idx<Expr>, Callee>,
-    pub fn_values: BTreeMap<Idx<Expr>, Callee>,
+    pub direct_calls: BTreeMap<Site, Callee>,
+    pub fn_values: BTreeMap<Site, Callee>,
     pub iterator_ops: BTreeMap<Site, ConcreteIteratorOp>,
     /// Calls no source expression contains. Not in `direct_calls`: the same
     /// expression can hold a source call and a synthesized one, and they are
@@ -164,11 +166,11 @@ impl ConcreteBody {
     /// Every callee this body names, with the site that named it.
     pub fn callees(&self) -> Vec<(Site, &Callee)> {
         let mut out: Vec<(Site, &Callee)> = Vec::new();
-        for (e, c) in &self.direct_calls {
-            out.push((Site { expr: *e, op: SiteOp::DirectCall }, c));
+        for (s, c) in &self.direct_calls {
+            out.push((s.clone(), c));
         }
-        for (e, c) in &self.fn_values {
-            out.push((Site { expr: *e, op: SiteOp::FnValue }, c));
+        for (s, c) in &self.fn_values {
+            out.push((s.clone(), c));
         }
         for (s, op) in &self.iterator_ops {
             out.push((s.clone(), &op.callee));
@@ -587,12 +589,15 @@ fn callee_tables(
         };
         match &site.op {
             SiteOp::DirectCall => {
-                body.direct_calls.insert(site.expr, callee);
+                body.direct_calls.insert(site.clone(), callee);
             }
             SiteOp::FnValue => {
-                body.fn_values.insert(site.expr, callee);
+                body.fn_values.insert(site.clone(), callee);
             }
-            SiteOp::Synthesized(_) => {
+            // Both synthesized families share one table: they are keyed by the
+            // whole `Site`, so a named runtime entry and a conditional dispatch
+            // arm at one expression stay distinct without a second map.
+            SiteOp::Synthesized(_) | SiteOp::Dispatched { .. } => {
                 body.synthesized_calls.insert(site.clone(), callee);
             }
             SiteOp::ForIter => {

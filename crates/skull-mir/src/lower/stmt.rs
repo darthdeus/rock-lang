@@ -215,6 +215,10 @@ impl Builder<'_> {
             ret_ty: None,
             fn_name_span: None,
             cur_span: None,
+            cur_expr: None,
+            cur_domain: crate::site::SiteDomain::Own,
+            cur_op: crate::site::SiteOp::DirectCall,
+            site_owner: self.site_owner.clone(),
             group_binds: HashMap::new(),
         tuple_binds: HashMap::new(),
             // In-scope statics + sibling nested fns are module-level, so the

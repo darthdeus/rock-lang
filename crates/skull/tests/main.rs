@@ -79,6 +79,18 @@ mod inline_lua_column_container_param_sentinel;
 mod inline_value_specialization;
 #[path = "instance_graph.rs"]
 mod instance_graph;
+#[path = "instance_owned_emission.rs"]
+mod instance_owned_emission;
+#[path = "site_join.rs"]
+mod site_join;
+#[path = "dispatched_sites.rs"]
+mod dispatched_sites;
+#[path = "site_domain.rs"]
+mod site_domain;
+#[path = "struct_default_generic_relation.rs"]
+mod struct_default_generic_relation;
+#[path = "logical_instance_identity.rs"]
+mod logical_instance_identity;
 #[path = "artifact_view.rs"]
 mod artifact_view;
 

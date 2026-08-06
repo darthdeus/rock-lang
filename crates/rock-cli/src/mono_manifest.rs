@@ -145,6 +145,7 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     let mut bound_tree_disagreements = 0usize;
     let mut bound_tree_comparisons = 0usize;
     let mut bound_trees_recorded = 0usize;
+    let mut site_join = skull::site_join::SiteJoinCensus::default();
     let mut body_count = 0usize;
     let mut body_expr_examined = 0usize;
     let mut body_binding_examined = 0usize;
@@ -205,7 +206,14 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     let mut shader_totals = ShaderStats::default();
 
     for dir in &projects {
-        let name = dir.strip_prefix(&root).unwrap_or(dir).display().to_string();
+        // `root` may BE the project, in which case the stripped path is empty and
+        // every dump artifact would be written to the directory itself.
+        let rel = dir.strip_prefix(&root).unwrap_or(dir).display().to_string();
+        let name = if rel.is_empty() {
+            dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+        } else {
+            rel
+        };
         match one_project(dir, &name, &root, dump.map(|d| (d, name.as_str()))) {
             Ok(p) => {
                 for (k, v) in &p.hist {
@@ -296,6 +304,7 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
                         e.1 += c.spanless;
                     }
                 }
+                site_join.merge(&p.site_join);
                 body_count += p.body_census.bodies;
                 body_expr_examined += p.body_census.expr_examined;
                 body_binding_examined += p.body_census.binding_examined;
@@ -582,6 +591,128 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
         }
     }
     println!();
+
+    // The join instance-driven emission will consume: does every lowered call
+    // instruction resolve, through its recorded site, to exactly one callee the
+    // graph already decided? Reported with its denominator and with every
+    // exclusion named -- an unstated exclusion is how a broken join looks green.
+    {
+        println!("## MIR call -> `ConcreteBody` join");
+        println!();
+        println!(
+            "Phase: POST-TRANSFORM (`mir_emit::prepare_instance_body`), reachable blocks only \
+             -- the body emission renders."
+        );
+        println!();
+        println!("- instance bodies measured (the SPACE): **{}**", site_join.bodies_measured);
+        if !site_join.bodies_skipped.is_empty() {
+            println!();
+            println!("| expanded instance not measured | count |");
+            println!("|---|---:|");
+            for (k, v) in &site_join.bodies_skipped {
+                println!("| `{}` | {v} |", k.label());
+            }
+            println!();
+        }
+        println!(
+            "- reachable callee OBLIGATIONS examined (the DENOMINATOR): **{}** -- **{}** call \
+             instructions plus **{}** fn-value SYMBOL MINTS. A mint is the one place a callee \
+             declaration becomes a spelled value, and the only thing an indirect call through \
+             it could name wrongly; one that is PASSED or STORED rather than called in place \
+             is verified nowhere else.",
+            site_join.obligations_examined,
+            site_join.obligations_examined - site_join.symbol_mints,
+            site_join.symbol_mints
+        );
+        println!(
+            "- joined to exactly one callee: **{}** ({} Rock, {} boundary); of those, **{}** are \
+             SPLICED calls joined through the callee instance's own body",
+            site_join.joined,
+            site_join.joined_rock,
+            site_join.joined_boundary,
+            site_join.joined_spliced
+        );
+        println!(
+            "- of the joined: **{}** verified to the full concrete INSTANCE (generic args \
+             compared), **{}** non-generic (one instance, so the declaration match IS the \
+             instance match), **{}** BOUNDARY (verified as a `BoundaryId` -- declaration, \
+             class, target and spelling; a boundary has no Rock instantiation to compare). \
+             Every join verifies an identity.",
+            site_join.joined_instance_verified,
+            site_join.joined_non_generic,
+            site_join.joined_boundary_verified
+        );
+        println!(
+            "- **{}** INDIRECT calls admitted as the permanent NON-DIRECT class: emission \
+             renders the callee OPERAND, so the call spells no symbol of its own and has no \
+             target it could name wrongly. A minted workspace-function symbol is not here -- \
+             it carries a target and joins like any direct call.",
+            site_join.admitted_indirect
+        );
+        println!();
+        println!("| indirect call form, by callee operand | count | admitted? |");
+        println!("|---|---:|---|");
+        for (k, v) in &site_join.indirect_forms_by_producer {
+            let admitted = if *k == skull::site_join::IndirectProducer::NamedFunction {
+                "no -- joined"
+            } else {
+                "yes"
+            };
+            println!("| `{}` | {v} | {admitted} |", k.label());
+        }
+        println!();
+        println!(
+            "- indirect operands SPELLING a workspace function symbol that neither record \
+             names (the fail-open the permanent class would otherwise hide, read from the \
+             emitted NAME rather than from the records): **{}**",
+            site_join.indirect_unrecorded_symbol
+        );
+        let unjoined_total = site_join.unjoined_total();
+        println!("- unjoined: **{unjoined_total}**");
+        if unjoined_total > 0 {
+            println!();
+            println!("| cause | count |");
+            println!("|---|---:|");
+            for (k, v) in &site_join.unjoined {
+                println!("| `{}` | {v} |", k.label());
+            }
+            println!();
+            println!("| unjoined by operation | count |");
+            println!("|---|---:|");
+            for (k, v) in &site_join.unjoined_by_op {
+                println!("| `{k}` | {v} |");
+            }
+        }
+        println!();
+        let failures = site_join.accounting_failures();
+        println!(
+            "accounting ({} joined + {} indirect + {unjoined_total} unjoined == {} examined, \
+             plus the verification identities, the global per-operation sums and the \
+             POINTWISE per-operation identity): **{}**",
+            site_join.joined,
+            site_join.admitted_indirect,
+            site_join.obligations_examined,
+            if failures.is_empty() { "yes".to_string() } else { format!("NO -- {failures:?}") }
+        );
+        println!();
+        println!("| examined by operation | count | joined | indirect | unjoined |");
+        println!("|---|---:|---:|---:|---:|");
+        for (k, v) in &site_join.examined_by_op {
+            println!(
+                "| `{k}` | {v} | {} | {} | {} |",
+                site_join.joined_by_op.get(k).copied().unwrap_or(0),
+                site_join.admitted_indirect_by_op.get(k).copied().unwrap_or(0),
+                site_join.unjoined_by_op.get(k).copied().unwrap_or(0)
+            );
+        }
+        if !site_join.examples.is_empty() {
+            println!();
+            for e in &site_join.examples {
+                println!("- {e}");
+            }
+        }
+        println!();
+    }
 
     // Plan S 0h's three decided rejections. Zero over the corpus is the
     // measurement the decisions were taken on; a non-zero count is a real
@@ -1143,8 +1274,12 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     println!(
         "The result wire of every foreign body an artifact emits, from the concrete result ABI \
          (`skull_mir::lower::BackendFnAbiPlan`, built under THAT INSTANCE's substitution) rather \
-         than from the body text or from the declaration. A multi-lane body publishes through one \
-         final `return __rock_publish(..)` whose arity is this number."
+         than from the body text or from the declaration. On JS a multi-lane body publishes \
+         through one final `return __rock_publish(..)` whose arity is this number; luajit carries \
+         the same lanes on native multi-return and needs no publisher. Emission still asks the \
+         DECLARATION -- it writes one shared body per declaration until the Stage-3 cutover -- so \
+         this per-instance reading is the artifact view's, and the two agree wherever the \
+         substitution is empty."
     );
     println!();
     for (name, a) in &art_rows {
@@ -1281,6 +1416,8 @@ struct OneProject {
     storage_failures: BTreeMap<&'static str, usize>,
     inline_dep_names: std::collections::BTreeSet<String>,
     span_census: instance_graph::SpanCensus,
+    /// The MIR-call -> `ConcreteBody` join over this project's expanded set.
+    site_join: skull::site_join::SiteJoinCensus,
     rejections: BTreeMap<&'static str, usize>,
     rejection_examples: Vec<String>,
     reconciliation: instance_graph::Reconciliation,
@@ -1413,6 +1550,20 @@ impl ShaderStats {
 /// Pseudo-files (`<bone-stdlib:...>`) have no prefix to strip and pass through.
 fn relativize(file: &str, root: &Path) -> String {
     Path::new(file).strip_prefix(root).map(|r| r.display().to_string()).unwrap_or_else(|_| file.to_string())
+}
+
+/// A join row with its span field relativized. The row is tab-separated and the
+/// span is field 2; splitting is exact rather than a substring replace, so a
+/// declaration whose name contains the root path cannot be rewritten too.
+fn relativize_row(row: &str, root: &Path) -> String {
+    let mut fields: Vec<&str> = row.split('\t').collect();
+    let relocated;
+    if let Some(span) = fields.get_mut(2) {
+        let (file, line) = span.rsplit_once(':').unwrap_or((span, ""));
+        relocated = format!("{}:{}", relativize(file, root), line);
+        *span = &relocated;
+    }
+    fields.join("\t")
 }
 
 fn one_project(
@@ -1781,6 +1932,24 @@ fn one_project(
     // thing as an instance argument's.
     let bodies = skull::concrete_body::build(&ws, &mut g);
     let body_census = bodies.census();
+    // The MIR-call -> ConcreteBody join, over production's own expanded set.
+    let site_join = {
+        let scx = skull_mir::lower::ScalarCtx::new(&ws);
+        skull::site_join::census_detailed(&ws, &scx, &g, &bodies, dump.is_some())
+    };
+    if let Some((path, name)) = dump {
+        // Every non-joined call, one row. The manifest's capped example list
+        // cannot attribute a population; this is what a per-cause claim about
+        // the join is checked against.
+        let stem = format!("{path}/{}", name.replace('/', "_"));
+        let join_text: String = site_join
+            .rows
+            .iter()
+            .map(|r| format!("{}\n", relativize_row(r, root)))
+            .collect();
+        std::fs::write(format!("{stem}.join"), join_text)
+            .map_err(|e| anyhow::anyhow!("writing {stem}.join: {e}"))?;
+    }
     let bodies_missing_for_expanded =
         g.expanded.iter().filter(|i| !bodies.bodies.contains_key(*i)).count();
     let body_free_examples: Vec<String> = bodies
@@ -1911,6 +2080,7 @@ fn one_project(
         callee_hole_examples,
         synthesized_approximated: g.synthesized_approximated,
         body_census,
+        site_join,
         bodies_missing_for_expanded,
         body_free_examples,
         body_untyped_examples,

@@ -78,7 +78,7 @@ fn census_over(projects: &[&str]) -> Vec<(String, String, String)> {
             .expect("emit");
 
             let slots: Vec<String> =
-                em.texture_slots.iter().map(|u| u.as_str().to_string()).collect();
+                em.abi.texture_units.iter().map(|u| u.as_str().to_string()).collect();
             for name in declared_samplers(&em.source) {
                 let kind = match slots.iter().position(|slot_name| slot_name == &name) {
                     Some(slot) => format!("slot {slot}"),

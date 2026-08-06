@@ -393,7 +393,13 @@ impl Builder<'_> {
         let saved_inf = self.inf;
         self.body = defaults_body;
         self.inf = defaults_inf;
-        let result = f(self, def_expr);
+        // `site_owner` is NOT swapped -- the sites still belong to the enclosing
+        // function INSTANCE -- but their `Idx<Expr>` now indexes THIS arena, so
+        // they are stamped in the struct's own domain. The walk records the same
+        // domain for the same defaults (`instance_graph::struct_default_edges`),
+        // which is what lets them join instead of being deliberately unstamped.
+        let domain = crate::site::SiteDomain::StructDefaults(sid.module, sid.def);
+        let result = self.in_domain(domain, |s| f(s, def_expr));
         self.body = saved_body;
         self.inf = saved_inf;
         result

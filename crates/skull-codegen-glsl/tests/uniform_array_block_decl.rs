@@ -64,8 +64,8 @@ fn emit_err(src: &str, vert: &str, frag: &str) -> String {
 
 /// The one block at `binding`, or a panic naming what was actually there.
 fn block_at(e: &ShaderEmission, binding: u32) -> &UniformArrayBlockPlan {
-    let found: Vec<u32> = e.uniform_array_blocks.iter().map(|(b, _)| *b).collect();
-    e.uniform_array_blocks
+    let found: Vec<u32> = e.abi.uniform_array_blocks.iter().map(|(b, _)| *b).collect();
+    e.abi.uniform_array_blocks
         .iter()
         .find(|(b, _)| *b == binding)
         .map(|(_, p)| p)
@@ -188,8 +188,8 @@ fn an_array_block_never_lands_on_a_scalar_blocks_binding() {
     // that means different things depending on what a program happens to declare
     // is not enforceable. Same rule one lane over.
     let e = emit(VERTEX_ARRAYS, "vt", "fr");
-    let scalar: Vec<u32> = e.uniform_blocks.iter().map(|(b, _)| *b).collect();
-    let arrays: Vec<u32> = e.uniform_array_blocks.iter().map(|(b, _)| *b).collect();
+    let scalar: Vec<u32> = e.abi.uniform_blocks.iter().map(|(b, _)| *b).collect();
+    let arrays: Vec<u32> = e.abi.uniform_array_blocks.iter().map(|(b, _)| *b).collect();
     for b in &arrays {
         assert!(!scalar.contains(b), "array binding {b} collides with a scalar block: {scalar:?}");
     }
@@ -213,7 +213,7 @@ fn both_stages_may_carry_arrays_and_get_distinct_blocks() {
     let e = emit(src, "vt", "fr");
     assert_eq!(block_at(&e, 3).block_name.as_str(), "vt_Arrays");
     assert_eq!(block_at(&e, 4).block_name.as_str(), "fr_Arrays");
-    assert_eq!(e.uniform_array_blocks.len(), 2);
+    assert_eq!(e.abi.uniform_array_blocks.len(), 2);
 }
 
 #[test]
@@ -222,9 +222,9 @@ fn a_stage_with_no_arrays_declares_no_array_block() {
     // than a zero-member block -- the same rule `uniform_array_block` enforces.
     let e = emit(FRAGMENT_ARRAYS, "vt", "fr");
     assert!(
-        e.uniform_array_blocks.iter().all(|(b, _)| *b == 4),
+        e.abi.uniform_array_blocks.iter().all(|(b, _)| *b == 4),
         "the vertex stage has no arrays and must contribute no block: {:?}",
-        e.uniform_array_blocks.iter().map(|(b, _)| *b).collect::<Vec<_>>()
+        e.abi.uniform_array_blocks.iter().map(|(b, _)| *b).collect::<Vec<_>>()
     );
 }
 

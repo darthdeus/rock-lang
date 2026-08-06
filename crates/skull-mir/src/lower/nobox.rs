@@ -555,24 +555,8 @@ impl Builder<'_> {
         }
     }
 
-    pub(crate) fn eq_is_scalar(&self, e: Idx<Expr>) -> bool {
-        matches!(
-            self.expr_ty(e),
-            Some(TypeExpr::Builtin(
-                BuiltinTy::Int | BuiltinTy::Float | BuiltinTy::Bool | BuiltinTy::String
-            ))
-        ) || self.is_payloadless_enum(e)
-    }
-
     pub(crate) fn nobox_value_name(&self, e: Idx<Expr>) -> Option<Ustr> {
-        let TypeExpr::App {
-            ctor: TypeCtor::Nominal(name),
-            ..
-        } = self.expr_ty(e)?
-        else {
-            return None;
-        };
-        self.is_nobox_struct(name).then_some(name)
+        self.dispatch().nobox_value_name(e)
     }
 
     /// Under `values_first_class` NOTHING is nobox: the flag says the target has no
@@ -589,13 +573,7 @@ impl Builder<'_> {
     /// `nobox_value_shape_of`, so gating the binding shape alone still emitted
     /// `shift__0`.
     pub(crate) fn is_nobox_struct(&self, name: Ustr) -> bool {
-        if self.scx.values_first_class {
-            return false;
-        }
-        self.ws
-            .struct_by_name
-            .get(&name)
-            .is_some_and(|sid| self.ws.modules[sid.module.index()].structs[sid.def].is_nobox)
+        self.dispatch().is_nobox_struct(name)
     }
 
     pub(crate) fn nobox_value_shape_of(&self, e: Idx<Expr>) -> Option<ValueShape> {

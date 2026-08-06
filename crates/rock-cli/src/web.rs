@@ -693,15 +693,15 @@ fn shader_register_lines_js(ws: &bone_semantic::inference::Workspace) -> Result<
         // is silent on JS (the missing argument reads `undefined`), which is
         // what rock-cli/tests/shader_register_arity_gate.rs exists to catch.
         let w = skull_codegen_glsl::BlockWire::of(
-            emission.uniform_blocks.iter(),
-            emission.uniform_array_blocks.iter(),
+            emission.abi.uniform_blocks.iter(),
+            emission.abi.uniform_array_blocks.iter(),
         );
         let _ = writeln!(
             out,
             "__rock_shader_register({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {});",
             crate::js_test::js_str(&pair.key),
             crate::js_test::js_str(&emission.source),
-            js_string_vec(&emission.texture_slots),
+            js_string_vec(&emission.abi.texture_units),
             js_string_vec(&w.names),
             js_int_vec(&w.bindings),
             js_int_vec(&w.sizes),

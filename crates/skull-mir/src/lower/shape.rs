@@ -1795,6 +1795,109 @@ pub(crate) fn reify_type(
 /// inference that recorded the bindings disagree. The synthesized `for`-protocol
 /// `next` is not caught by that: it carries `next_generics` and never reaches
 /// this function ([`spec_key_from_next_generics`] is its entry).
+/// The CONCRETE INSTANCE a generic direct call targets, independent of whether
+/// the lowerer chooses to deliver a specialized body for it.
+///
+/// [`compute_call_spec`] answers a POLICY question -- is a specialized snapshot
+/// worth splicing here -- and returns `None` when the answer is no. Reading that
+/// `None` as "the callee instance is unknown" is what made a declined
+/// specialization indistinguishable from a call whose instantiation was never
+/// inferred. This answers the IDENTITY question, which has no policy in it: the
+/// call's own bindings, reified under the enclosing substitution.
+///
+/// `None` means the instantiation is genuinely not complete here -- a callee
+/// with no generics, or one whose bindings do not all reify (a caller-generic
+/// slot inside a shared body).
+pub fn callee_instance_subst(
+    ws: &Workspace,
+    inf: &BodyInference,
+    e: Idx<Expr>,
+    func: FuncRef,
+    enclosing: &SpecSubst,
+) -> Result<Option<SpecSubst>, CompilerError> {
+    let f = &ws.module(func.module).functions[func.func];
+    if f.generics.is_empty() {
+        return Ok(None);
+    }
+    let Some(bindings) = inf.call_generic_bindings.get(&e) else { return Ok(None) };
+    instance_subst_from_bindings(ws, inf, func, bindings, enclosing)
+}
+
+/// The concrete instance a set of generic bindings resolves to.
+///
+/// IDENTITY, not delivery, and that is why it converts through
+/// [`crate::monoty::convert`] -- the one TOTAL logical-type oracle, and the same
+/// one `skull::instance_graph::instantiate` uses -- rather than through
+/// [`reify_type`], whose `_ => None` arm silently declines a function type.
+/// Six bitgun calls had a graph instance and no recorded claim because of it:
+/// `unwrap<fn()>`, `tick`/`start` over a coroutine payload, and `clear` over a
+/// `Map` of them. Two converters for one question is what let the record and
+/// the graph disagree while both looked complete.
+///
+/// The two UNCONSTRAINED reasons are legitimate `None`s, and they are exactly
+/// the pair `instance_graph::convert_fail` calls `Fail::Unconstrained`:
+/// `UnboundGeneric` means the enclosing body is a shared generic snapshot, so
+/// this call site decides no instantiation; `UnresolvedInfer` means no
+/// constraint reaches the slot at all, which plan S 0h decided to REJECT and
+/// deferred to the Stage-3 cutover -- rejecting it here instead would make it
+/// fatal ahead of that decision. Both are what the census's
+/// `callee-no-instance` counts. Every other reason is a compiler-state
+/// rejection carrying the callee's span: a recovery type, a missing node or a
+/// cyclic substitution chain is not a type the program is allowed to have
+/// reached here.
+pub(crate) fn instance_subst_from_bindings(
+    ws: &Workspace,
+    inf: &BodyInference,
+    func: FuncRef,
+    bindings: &[TyId],
+    enclosing: &SpecSubst,
+) -> Result<Option<SpecSubst>, CompilerError> {
+    use crate::monoty::MonoTyReason;
+    let f = &ws.module(func.module).functions[func.func];
+    if bindings.len() != f.generics.len() {
+        return Err(CompilerError::new_with_label(
+            f.name_span,
+            format!(
+                "internal: `{}` declares {} generic(s) but its call site supplied {} binding(s)",
+                f.name,
+                f.generics.len(),
+                bindings.len()
+            ),
+        ));
+    }
+    let mut subst = SpecSubst::default();
+    for (g, b) in f.generics.iter().zip(bindings) {
+        let Some(TypeExpr::Generic(var, _)) = ty_node(ws, inf, *g) else {
+            return Err(CompilerError::new_with_label(
+                f.name_span,
+                format!(
+                    "internal: declared generic of `{}` is not a generic type variable",
+                    f.name
+                ),
+            ));
+        };
+        match crate::monoty::convert(ws, inf, *b, enclosing) {
+            Ok(ty) => {
+                subst.insert(var, ty);
+            }
+            Err(MonoTyReason::UnboundGeneric(_) | MonoTyReason::UnresolvedInfer(_)) => {
+                return Ok(None)
+            }
+            Err(reason) => {
+                return Err(CompilerError::new_with_label(
+                    f.name_span,
+                    format!(
+                        "internal: a call to `{}` supplies a type argument that is not a logical                          type ({}), so the instance it names cannot be stated",
+                        f.name,
+                        reason.bucket()
+                    ),
+                ))
+            }
+        }
+    }
+    Ok(Some(subst))
+}
+
 pub(crate) fn compute_call_spec(
     ws: &Workspace,
     inf: &BodyInference,
@@ -2075,6 +2178,38 @@ pub(crate) fn compute_spec_from_bindings(
         return Ok(complete.then_some((key, subst)));
     }
     Ok(any_value.then_some((key, subst)))
+}
+
+/// The CONCRETE INSTANCE an iterator-protocol WITNESS resolves to, from the
+/// `VarId -> TyId` map bone recorded for it.
+///
+/// The identity sibling of [`spec_key_from_next_generics`], and the same
+/// separation [`callee_instance_subst`] makes for a direct call: that one stops
+/// at the delivery policy, this one answers which instance the witness means.
+/// One function serves both witnesses -- `IterWitness::generics` and
+/// `next_generics` are the same shape, and a second copy would be free to
+/// disagree about one of them.
+pub fn witness_instance_subst(
+    ws: &Workspace,
+    inf: &BodyInference,
+    func: FuncRef,
+    generics: &rustc_hash::FxHashMap<bone_semantic::hir::VarId, TyId>,
+    enclosing: &SpecSubst,
+) -> Result<Option<SpecSubst>, CompilerError> {
+    let f = &ws.module(func.module).functions[func.func];
+    if f.generics.is_empty() {
+        return Ok(None);
+    }
+    let mut bindings = Vec::with_capacity(f.generics.len());
+    for generic in &f.generics {
+        let Some(TypeExpr::Generic(var, _)) = ty_node(ws, inf, *generic) else { return Ok(None) };
+        // A generic the resolution left unbound leaves the instantiation
+        // INCOMPLETE, which the census reports as its own cause rather than
+        // being papered over with a default.
+        let Some(bound) = generics.get(&var).copied() else { return Ok(None) };
+        bindings.push(bound);
+    }
+    instance_subst_from_bindings(ws, inf, func, &bindings, enclosing)
 }
 
 pub fn spec_key_from_next_generics(

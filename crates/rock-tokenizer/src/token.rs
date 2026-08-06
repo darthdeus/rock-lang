@@ -261,7 +261,13 @@ impl TokenKind {
             Dot | Colon => left(51),
 
             Dollar => right(1),
-            DoubleQuestionMark => left(3),
+
+            // Above every assignment form (Assign 5, the compound assigns 9)
+            // and below `||` (13), matching C#. At 3 it sat BELOW Assign, so
+            // `x = a ?? b` parsed as `(x = a) ?? b`: the assignment's RHS is
+            // parsed at min_bp 5, `??` stopped it, and the outer loop then
+            // took the whole assignment as the coalesce's left operand.
+            DoubleQuestionMark => left(11),
 
             _ => None,
         }

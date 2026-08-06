@@ -68,6 +68,11 @@ pub use shape::*;
 /// widening to make the split.
 mod call;
 mod control;
+mod dispatch;
+pub use dispatch::{
+    dispatched_callee_decl, dispatched_callee_decls,
+    DispatchCtx, EqRoute, FormatPlan, HolePlan, StringifyRoute, StructuralRender,
+};
 mod embed;
 mod expr;
 mod flat;
@@ -260,6 +265,14 @@ impl ScalarCtx {
     }
 
     /// Set the codegen backend this lowering feeds (see [`target`]).
+    /// The backend this context lowers for. Read by consumers that must ask the
+    /// EMITTER's own declaration selection rather than restate it -- the site
+    /// join compares a target-selected sibling against the target-neutral
+    /// graph's representative through `backend_variant`.
+    pub fn target(&self) -> bone_semantic::hir::FnBackend {
+        self.target
+    }
+
     pub fn with_target(mut self, target: bone_semantic::hir::FnBackend) -> Self {
         self.target = target;
         self
@@ -411,22 +424,36 @@ impl NestedFn {
     }
 }
 
-/// **THE backend ABI of one function INSTANCE** (plan S 13, Stage 3).
+/// **The backend ABI of one function instance** (plan S 13, Stage 3).
 ///
-/// One object, built once from a declaration and *that instance's own*
-/// substitution, holding every physical fact a definition or a call route needs
-/// about the wire: the emitted parameter spelling, the per-declared-param leaf
-/// widths an arity guard subtracts, and the RESULT LANES a JS publisher's arity
-/// comes from. Three independent oracles stood here before; a publisher and the
-/// caller capturing it could only agree by all three being asked the same
-/// question, which nothing enforced.
+/// One object over the three facts the FOREIGN-BODY boundary needs -- the
+/// emitted parameter spelling, the per-declared-param leaf widths, and the
+/// result-wire width -- built once from a declaration and a substitution.
+/// Three independent oracles stood here before, each re-deriving
+/// [`fn_scalar_abi_spec`] for itself, so a publisher and the caller capturing
+/// it could only agree by all three being asked the same question.
+///
+/// **Scope, precisely.** This is not yet the object every definition and call
+/// route consumes; plan Stage 3 is what makes it that. Today:
+///
+/// - `lua_param_names` is read by luajit's `inline(lua)` emission
+///   (`skull::mir_emit`), the JS backend's `inline(js)` emission
+///   (`skull_codegen_js::emit`) and [`scalar_abi_param_collisions`]. Ordinary
+///   Rock bodies emit positional cells and never consult it.
+/// - `param_leaf_widths` is read by the JS arity guard alone.
+/// - `result_lanes` is read by the JS publisher and its scratch bank. **Lua
+///   does not read it** -- luajit carries several results on native
+///   multi-return, so there is no width for it to state (plan S 13a).
+/// - Only `skull::artifact` builds it PER INSTANCE. Every emission consumer
+///   goes through [`Self::for_declaration`], because pre-cutover emission
+///   still writes one shared body per declaration.
 ///
 /// The substitution is an instance's [`crate::monoty::MonoSubst`], so a generic
-/// body instantiated at a multi-lane result states *that* width. `T` is one
-/// boxed slot on the declaration and two lanes at `T = (bool, float)`; a
-/// per-declaration answer is not a narrower answer, it is a different question.
-/// [`Self::for_declaration`] is the empty-substitution case -- the shared
-/// generic snapshot pre-cutover emission still writes.
+/// body instantiated at a multi-lane result states *that* width: `T` is one
+/// boxed slot on the declaration and two lanes at `T = (bool, float)`. A
+/// per-declaration answer is not a narrower answer, it is a different
+/// question -- which is why the artifact view asks per instance and emission,
+/// which has only the declaration to emit, asks for the declaration.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BackendFnAbiPlan {
     pub decl: FuncRef,
@@ -435,13 +462,18 @@ pub struct BackendFnAbiPlan {
     /// its own slot, a `nobox` element into its leaves) and a bare `nobox`
     /// value return under the scalar ABI.
     ///
-    /// Plan S 13b: leaf 0 rides the ordinary JS `return`, lanes 1..N ride the
-    /// module-scope scratch bank (`docs/boundary-contracts.md` 1.2). Derived
-    /// from the same [`fn_scalar_abi_spec`] policy and [`tuple_ret_shape`] the
-    /// definition and every call site read, which a textual scan of the opaque
-    /// body for `__rock_retN` could not be.
+    /// **A JS transport fact.** Plan S 13b: leaf 0 rides the ordinary JS
+    /// `return`, lanes 1..N ride the module-scope scratch bank
+    /// (`docs/boundary-contracts.md` 1.2). Luajit has native multi-return and
+    /// consults nothing here; the artifact view still records the width for
+    /// every artifact, because it is a property of the wire rather than of the
+    /// backend that happens to need it spelled out.
+    ///
+    /// Derived from the same [`fn_scalar_abi_spec`] policy and
+    /// [`tuple_ret_shape`] the definition and every call site read, which a
+    /// textual scan of the opaque body for `__rock_retN` could not be.
     pub result_lanes: usize,
-    /// Depth-first leaf names for a scalar-ABI foreign body (`@scalar_abi`):
+    /// Depth-first leaf names for a scalar-ABI FOREIGN body (`@scalar_abi`):
     /// each value param expands to `<base>__<leaf>`, the names the hand-written
     /// body references; other params keep their name. `None` when this instance
     /// does not use the scalar ABI, and the caller emits the plain list. The
@@ -1160,6 +1192,13 @@ pub fn lower_function_spec(
         ret_ty: func.return_ty,
         fn_name_span: Some(func.name_span),
         cur_span: None,
+        cur_expr: None,
+        cur_domain: crate::site::SiteDomain::Own,
+        cur_op: crate::site::SiteOp::DirectCall,
+        site_owner: Some(crate::site::OwnerInstance {
+            func: self_ref,
+            subst: subst.clone(),
+        }),
         group_binds: HashMap::new(),
         tuple_binds: HashMap::new(),
         static_cells: HashMap::new(),
@@ -1235,6 +1274,10 @@ pub fn lower_global(
         ret_ty: None,
         fn_name_span: None,
         cur_span: None,
+        cur_expr: None,
+        cur_domain: crate::site::SiteDomain::Own,
+        cur_op: crate::site::SiteOp::DirectCall,
+        site_owner: None,
         group_binds: HashMap::new(),
         tuple_binds: HashMap::new(),
         static_cells: HashMap::new(),
@@ -1307,6 +1350,10 @@ pub fn lower_decorator(
         ret_ty: None,
         fn_name_span: None,
         cur_span: None,
+        cur_expr: None,
+        cur_domain: crate::site::SiteDomain::Own,
+        cur_op: crate::site::SiteOp::DirectCall,
+        site_owner: None,
         group_binds: HashMap::new(),
         tuple_binds: HashMap::new(),
         static_cells: HashMap::new(),
@@ -1396,6 +1443,37 @@ struct Builder<'a> {
     /// [`MirFunc::inst_spans`] so the diagnostic points at the construct rather
     /// than at the enclosing fn.
     cur_span: Option<Span>,
+    /// The source EXPRESSION currently being lowered, maintained by
+    /// [`Builder::lower_expr`] exactly beside [`Self::cur_span`]. Together with
+    /// [`Self::cur_op`] this is the [`crate::site::Site`] every call
+    /// instruction emitted from here down is stamped with, so the identity is
+    /// recorded at ONE choke point ([`Builder::emit_cur`]) rather than at each
+    /// of the call-emitting sites -- a per-site record would make a MISSING one
+    /// indistinguishable from a legitimately siteless call.
+    ///
+    /// `None` only outside any expression (a fn prologue), which is the
+    /// exclusion the site census reports by cause.
+    cur_expr: Option<Idx<Expr>>,
+    /// WHICH expression arena [`Self::cur_expr`] indexes. A struct-default
+    /// initializer is lowered from the declaring struct's `StructDefaults` body
+    /// into this CFG while `site_owner` still names the enclosing function, so
+    /// its index is only meaningful against THAT arena -- and the walk records
+    /// it under the same domain.
+    cur_domain: crate::site::SiteDomain,
+    /// The concrete INSTANCE being lowered, which OWNS every site recorded from
+    /// this builder: the declaration plus the substitution it is lowered under.
+    /// `None` for the always-emitted units -- a global initializer and a
+    /// decorator body are not functions and have no `FuncRef`, so their calls
+    /// carry no site and the census reports them under that cause rather than
+    /// losing them.
+    site_owner: Option<crate::site::OwnerInstance>,
+    /// Which OPERATION of [`Self::cur_expr`] is being lowered. `DirectCall` is
+    /// the default because a call emitted while lowering an expression is that
+    /// expression's own call; the witness and synthesized routes override it
+    /// for their sub-lowering through [`Builder::with_site_op`], because one
+    /// expression carries several distinct callee obligations and they must
+    /// stay distinguishable.
+    cur_op: crate::site::SiteOp,
     /// A value PARAM binding -> (struct name, its leaf cells, shape). A read of
     /// the param reconstructs the unboxed `Group` from these; a field read
     /// projects a leaf directly (no cdata).
@@ -1449,11 +1527,116 @@ impl Builder<'_> {
     }
 
     fn emit_cur(&mut self, inst: Inst) -> Idx<Inst> {
+        let is_call = matches!(
+            inst,
+            Inst::Call { .. }
+                | Inst::CallMulti { .. }
+                | Inst::CallValue { .. }
+                | Inst::CallValueMulti { .. }
+                | Inst::CallBoundMulti { .. }
+        );
         let id = self.f.emit(self.cur, inst);
         if let Some(span) = self.cur_span {
             self.f.inst_spans.insert(id, span);
         }
+        // THE choke point for call-site identity: every call FORM entering the
+        // arena is stamped here, so a missing stamp is a property of this ONE
+        // branch rather than of 48 call-emitting sites each remembering to
+        // record. `CallBoundMulti` is included: it is the `for` protocol's
+        // `next` witness on the caller-generic path, and its concrete sibling on
+        // the other arm carries a site, so leaving it out made the SAME source
+        // construct recorded or not depending on which arm it took. It is still
+        // a call a body may not carry into emission, which is a separate
+        // rejection.
+        //
+        // Not yet total: a call emitted outside any expression carries no site,
+        // reported by `skull::site_join::census` rather than assumed away.
+        // A fn-value MINT is stamped too. It is not a call, but it is a callee
+        // OBLIGATION -- the one place a declaration becomes a spelled value --
+        // and the graph records it at the same `Site { expr, FnValue }`. Keyed
+        // on the operation rather than on the instruction, because
+        // `Inst::Global` is also a module global and a `static` cell and those
+        // name no callee.
+        let is_mint = self.cur_op == crate::site::SiteOp::FnValue;
+        if is_call || is_mint {
+            if let (Some(owner), Some(expr)) = (self.site_owner.clone(), self.cur_expr) {
+                let owner = crate::site::intern_owner(&mut self.f.site_owners, owner);
+                self.f.call_sites.insert(
+                    id,
+                    crate::site::CallSite {
+                        owner,
+                        site: crate::site::Site {
+                            domain: self.cur_domain,
+                            expr,
+                            op: self.cur_op.clone(),
+                        },
+                    },
+                );
+            }
+        }
         id
+    }
+
+    /// The shared type/dispatch context this builder resolves through. Every
+    /// predicate below is a delegate: `DispatchCtx` is the one implementation,
+    /// so the instance walk asking the same question cannot get a second answer
+    /// (`skull_mir::lower::dispatch`).
+    pub(crate) fn dispatch(&self) -> dispatch::DispatchCtx<'_> {
+        dispatch::DispatchCtx {
+            ws: self.ws,
+            inf: self.inf,
+            body: self.body,
+            subst: self.spec_subst,
+            values_first_class: self.scx.values_first_class,
+        }
+    }
+
+    /// Lower `f` with the site EXPRESSION overridden, restoring it after.
+    ///
+    /// The symmetric half of [`Self::with_site_op`]. Most calls inherit the
+    /// cursor `lower_expr`/`lower_expr_repr` install, but a PLACE expression is
+    /// never lowered as a value -- `lower_assign_effect` dispatches on
+    /// `expr_arena[target]` directly -- so the calls its arms synthesize had no
+    /// cursor at all in statement position, and the enclosing one in value
+    /// position. Both are wrong against a walk that keys those obligations on
+    /// the `Expr::Index` node itself.
+    fn with_site_expr<T>(&mut self, expr: Idx<Expr>, f: impl FnOnce(&mut Self) -> T) -> T {
+        let outer = self.cur_expr.replace(expr);
+        let out = f(self);
+        self.cur_expr = outer;
+        out
+    }
+
+    /// Lower `f` with the site DOMAIN overridden, restoring it after.
+    ///
+    /// The third scoped half, beside the expression and the operation: a body
+    /// lowered from another arena keeps its own indices, and the domain is what
+    /// makes them readable. A flag rather than a cursor swap, because the nested
+    /// `lower_expr` installs the foreign index itself.
+    fn in_domain<T>(
+        &mut self,
+        domain: crate::site::SiteDomain,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let outer = std::mem::replace(&mut self.cur_domain, domain);
+        let out = f(self);
+        self.cur_domain = outer;
+        out
+    }
+
+    /// Lower `f` with the site OPERATION overridden, restoring it after. The
+    /// witness and synthesized routes emit calls that belong to the enclosing
+    /// expression but are NOT its own call, and a `for` head carries several at
+    /// one expression -- so the operation has to be scoped, not global.
+    fn with_site_op<T>(
+        &mut self,
+        op: crate::site::SiteOp,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let outer = std::mem::replace(&mut self.cur_op, op);
+        let out = f(self);
+        self.cur_op = outer;
+        out
     }
 
     /// Whether the current block is still open (no terminator set yet). A
