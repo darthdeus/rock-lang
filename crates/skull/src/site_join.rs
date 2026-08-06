@@ -182,6 +182,20 @@ pub struct SiteJoinCensus {
     /// concrete instance" stays true of `joined`.
     pub admitted_indirect: usize,
     pub admitted_indirect_by_op: BTreeMap<&'static str, usize>,
+    /// EVERY indirect call FORM by what produced its callee operand -- including
+    /// the `named-function` rows, which are not admitted but joined like direct
+    /// calls. So this is not the same population as `admitted_indirect`, and the
+    /// difference is an asserted identity rather than a discrepancy.
+    pub indirect_forms_by_producer: BTreeMap<IndirectProducer, usize>,
+    /// Indirect calls whose operand is an `Inst::Global` naming a symbol the
+    /// workspace mints for a function, yet which neither
+    /// `MirFunc::fn_value_symbols` nor `MirFunc::hoisted_fn_globals` recorded.
+    ///
+    /// The classifier reads the RECORDS; this reads the emitted NAME. Two
+    /// independent views of one fact, so a mint route that forgets to record
+    /// shows up here instead of silently becoming a `runtime-value` -- which is
+    /// precisely the fail-open the permanent class would otherwise hide.
+    pub indirect_unrecorded_symbol: usize,
     /// Reachable calls examined, by site operation -- the denominator each
     /// per-operation claim is against.
     pub examined_by_op: BTreeMap<&'static str, usize>,
@@ -194,6 +208,11 @@ pub struct SiteJoinCensus {
     pub unjoined_by_op: BTreeMap<&'static str, usize>,
     /// A few unjoined examples, for diagnosis. Never the whole finding.
     pub examples: Vec<String>,
+    /// EVERY non-joined call, one tab-separated row, when the caller asked for
+    /// detail. The capped `examples` above cannot attribute a population: three
+    /// rows of 1,102 say nothing about the other 1,099, and a hand count of the
+    /// emitted rows is not reproducible. Empty unless [`census_detailed`] ran.
+    pub rows: Vec<String>,
 }
 
 impl SiteJoinCensus {
@@ -251,6 +270,28 @@ impl SiteJoinCensus {
                 self.unjoined_total()
             ));
         }
+        // The producer census covers every indirect FORM, admitted or not, so it
+        // is deliberately a different population from `admitted_indirect` and
+        // the relationship between them is asserted rather than left to the
+        // reader. `named-function` rows carry a target and joined.
+        let admitted_producers: usize = self
+            .indirect_forms_by_producer
+            .iter()
+            .filter(|(k, _)| **k != IndirectProducer::NamedFunction)
+            .map(|(_, v)| *v)
+            .sum();
+        if admitted_producers != self.admitted_indirect {
+            out.push(format!(
+                "indirect forms minus named-function {admitted_producers} != admitted-indirect {}",
+                self.admitted_indirect
+            ));
+        }
+        if self.indirect_unrecorded_symbol != 0 {
+            out.push(format!(
+                "{} indirect operands spell a workspace function symbol neither record names",
+                self.indirect_unrecorded_symbol
+            ));
+        }
         let indirect_ops: usize = self.admitted_indirect_by_op.values().sum();
         if indirect_ops != self.admitted_indirect {
             out.push(format!(
@@ -299,6 +340,10 @@ impl SiteJoinCensus {
         for (k, v) in &other.admitted_indirect_by_op {
             *self.admitted_indirect_by_op.entry(k).or_insert(0) += v;
         }
+        for (k, v) in &other.indirect_forms_by_producer {
+            *self.indirect_forms_by_producer.entry(*k).or_insert(0) += v;
+        }
+        self.indirect_unrecorded_symbol += other.indirect_unrecorded_symbol;
         for (k, v) in &other.examined_by_op {
             *self.examined_by_op.entry(k).or_insert(0) += v;
         }
@@ -319,7 +364,99 @@ impl SiteJoinCensus {
                 self.examples.push(e.clone());
             }
         }
+        self.rows.extend(other.rows.iter().cloned());
     }
+}
+
+/// What produced the function VALUE an indirect call calls.
+///
+/// The distinction that matters is whether emission SPELLS anything. A direct
+/// call renders a symbol, so naming the wrong instance is possible and must be
+/// refused. An indirect call renders its callee operand -- `__rock_call(f, ..)`
+/// in JS, `f(..)` in Lua -- so the only way it can name a function at all is if
+/// the operand itself is a spelled one.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum IndirectProducer {
+    /// The operand is a minted workspace-function symbol
+    /// (`MirFunc::fn_value_symbols`). Emission spells that function's name, so
+    /// this call CAN name a wrong target and is NOT admitted here -- it joins.
+    NamedFunction,
+    /// The operand names a nested fn THIS body hoisted to top level
+    /// (`MirFunc::hoisted_fn_globals`). The symbol is the owning instance's own
+    /// output, minted by the same emission, so there is no callee declaration
+    /// for it to disagree with.
+    HoistedNestedFn,
+    /// The operand is a runtime value -- a cell load, a field, an element, a
+    /// fn-typed module global. It carries no declaration at all, so emission
+    /// renders the value and spells nothing. This is the permanent non-direct
+    /// class.
+    RuntimeValue,
+}
+
+impl IndirectProducer {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::NamedFunction => "named-function",
+            Self::HoistedNestedFn => "hoisted-nested-fn",
+            Self::RuntimeValue => "runtime-value",
+        }
+    }
+}
+
+/// Classify what an indirect call's callee operand was produced by.
+///
+/// Reads the MIR operand rather than the site record: the question is what
+/// EMISSION will render, and emission renders the operand.
+fn indirect_producer(
+    mf: &MirFunc,
+    callee: bone_semantic::prelude::Idx<Inst>,
+) -> (IndirectProducer, Option<skull_mir::mir::FuncRef>) {
+    if let Some(fref) = mf.fn_value_symbols.get(&callee) {
+        return (IndirectProducer::NamedFunction, Some(*fref));
+    }
+    match &mf.insts[callee] {
+        Inst::Global(n) if mf.hoisted_fn_globals.contains(n) => {
+            (IndirectProducer::HoistedNestedFn, None)
+        }
+        _ => (IndirectProducer::RuntimeValue, None),
+    }
+}
+
+/// Indirect-call operands that SPELL a workspace function symbol without either
+/// record naming them.
+///
+/// The classifier above reads the records; this reads the emitted name against
+/// the set of symbols the workspace mints. A mint route that forgets to record
+/// is invisible to the first view -- it just becomes another `runtime-value` --
+/// and this is the second view that makes it visible. It is a CHECK, never the
+/// classifier: a name is what emission writes, not what identity is.
+fn unrecorded_symbol_operands(
+    mf: &MirFunc,
+    mangled: &std::collections::HashSet<ustr::Ustr>,
+) -> usize {
+    let mut n = 0;
+    for b in skull_mir::cfg::reachable_blocks_from(mf, mf.entry) {
+        for &id in &mf.blocks[b].insts {
+            let callee = match &mf.insts[id] {
+                Inst::CallValue { callee, .. } | Inst::CallValueMulti { callee, .. } => *callee,
+                _ => continue,
+            };
+            if mf.fn_value_symbols.contains_key(&callee) {
+                continue;
+            }
+            let Inst::Global(sym) = &mf.insts[callee] else { continue };
+            if mf.hoisted_fn_globals.contains(sym) {
+                continue;
+            }
+            if mangled.contains(sym) {
+                n += 1;
+            }
+        }
+    }
+    for nf in &mf.nested_fns {
+        n += unrecorded_symbol_operands(nf, mangled);
+    }
+    n
 }
 
 /// What one reachable call instruction contributes to the census: the site
@@ -329,12 +466,19 @@ impl SiteJoinCensus {
 /// rather than a declaration, and for `CallBoundMulti`, whose target is a
 /// placeholder the inliner resolves.
 struct CallRow {
+    /// The instruction itself, so a row can carry the span lowering stamped on
+    /// it. Attribution by declaration name alone cannot separate two calls to
+    /// one function from two different source lines.
+    inst: bone_semantic::prelude::Idx<Inst>,
     site: Option<CallSite>,
     target: Option<skull_mir::mir::FuncRef>,
     /// The call's OWN instantiation key (`MirFunc::spec_bindings`), which is
     /// what makes the comparison instance-level rather than declaration-level.
     /// `None` when the lowerer recorded none.
     spec_key: Option<skull_mir::lower::SpecKey>,
+    /// For an indirect call, what produced the callee operand. `None` for a
+    /// direct call.
+    producer: Option<IndirectProducer>,
     /// A call form `Builder::emit_cur` does not stamp at all. Counted here so
     /// it is a NAMED exclusion rather than an invisible one -- it was outside
     /// the denominator entirely until it was measured.
@@ -349,9 +493,17 @@ struct CallRow {
 fn reachable_call_rows(mf: &MirFunc, out: &mut Vec<CallRow>) {
     for b in skull_mir::cfg::reachable_blocks_from(mf, mf.entry) {
         for &id in &mf.blocks[b].insts {
+            let mut producer = None;
             let (target, unstamped_form) = match &mf.insts[id] {
                 Inst::Call { func, .. } | Inst::CallMulti { func, .. } => (Some(*func), false),
-                Inst::CallValue { .. } | Inst::CallValueMulti { .. } => (None, false),
+                Inst::CallValue { callee, .. } | Inst::CallValueMulti { callee, .. } => {
+                    let (p, fref) = indirect_producer(mf, *callee);
+                    producer = Some(p);
+                    // A minted workspace symbol IS a target: it is spelled, so
+                    // it joins on the ordinary direct-call path rather than
+                    // being admitted on the strength of the call FORM.
+                    (fref, false)
+                }
                 // Emitted by a bounded loop and NOT stamped by `emit_cur`, so
                 // it can never carry a site. In the denominator regardless: a
                 // call form outside the population is a silent hole, not a
@@ -360,9 +512,11 @@ fn reachable_call_rows(mf: &MirFunc, out: &mut Vec<CallRow>) {
                 _ => continue,
             };
             out.push(CallRow {
+                inst: id,
                 site: mf.call_sites.get(&id).cloned(),
                 target,
                 spec_key: mf.spec_bindings.get(&id).cloned(),
+                producer,
                 unstamped_form,
             });
         }
@@ -415,8 +569,33 @@ pub fn census(
     g: &InstanceGraph,
     bodies: &ConcreteBodies,
 ) -> SiteJoinCensus {
+    census_detailed(ws, scx, g, bodies, false)
+}
+
+/// [`census`], optionally recording one row per non-joined call in
+/// [`SiteJoinCensus::rows`].
+///
+/// Detail is a parameter rather than always-on because the rows are per CALL
+/// and the corpus has hundreds of thousands; the manifest writes them only when
+/// asked for a dump directory.
+pub fn census_detailed(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    g: &InstanceGraph,
+    bodies: &ConcreteBodies,
+    detail: bool,
+) -> SiteJoinCensus {
     let mut c = SiteJoinCensus::default();
     let ix = owner_index(g);
+    // Every symbol the workspace mints for a function -- the second view the
+    // fail-open check above compares against.
+    let mangled: std::collections::HashSet<ustr::Ustr> = ws
+        .modules
+        .iter()
+        .flat_map(|m| m.functions.iter().map(|(_, f)| f))
+        .map(|f| ustr::Ustr::from(&skull_mir::mangle::mangle_fn(ws, f)))
+        .collect();
+    let mangled = &mangled;
     let mut cache = skull_transform::InlineCache::default();
 
     for inst in &g.expanded {
@@ -469,10 +648,50 @@ pub fn census(
 
         let mut rows: Vec<CallRow> = Vec::new();
         reachable_call_rows(&mf, &mut rows);
+        c.indirect_unrecorded_symbol += unrecorded_symbol_operands(&mf, mangled);
         for row in rows {
             c.call_insts += 1;
-            let (cause, op) = classify(ws, &mut c, g, &mf, &ix, bodies, inst, &row);
+            let (cause, op, note) = classify(ws, &mut c, g, &mf, &ix, bodies, inst, &row, detail);
             *c.examined_by_op.entry(op).or_insert(0) += 1;
+            if detail && (cause.is_some() || row.target.is_none()) {
+                let span = mf
+                    .inst_spans
+                    .get(row.inst)
+                    .map(|s| format!("{}:{}", s.file.as_str(), s.line_range.0 + 1))
+                    .unwrap_or_else(|| "<no span>".into());
+                let owner = row
+                    .site
+                    .as_ref()
+                    .and_then(|cs| mf.site_owners.get(cs.owner.0 as usize))
+                    .map(|o| {
+                        format!(
+                            "{}/{}",
+                            ws.module(o.func.module).functions[o.func.func].name,
+                            if o.subst.is_empty() {
+                                "EMPTY".to_string()
+                            } else {
+                                o.subst.len().to_string()
+                            }
+                        )
+                    })
+                    .unwrap_or_else(|| "<none>".into());
+                let target = row
+                    .target
+                    .map(|t| {
+                        let f = &ws.module(t.module).functions[t.func];
+                        format!("{}/{}g", f.name, f.generics.len())
+                    })
+                    .unwrap_or_else(|| "<indirect>".into());
+                let key = match &row.spec_key {
+                    None => "nokey".to_string(),
+                    Some(k) => format!("key{}", k.len()),
+                };
+                c.rows.push(format!(
+                    "{}\t{op}\t{span}\towner={owner}\ttarget={target}\t{key}\tin={}\t{note}",
+                    cause.map(Unjoined::label).unwrap_or("admitted-indirect"),
+                    g.identity(ws, inst),
+                ));
+            }
             let cs = &row.site;
             if let Some(cause) = cause {
                 *c.unjoined.entry(cause).or_insert(0) += 1;
@@ -637,24 +856,64 @@ fn classify(
     bodies: &ConcreteBodies,
     measured: &Instance,
     row: &CallRow,
-) -> (Option<Unjoined>, &'static str) {
+    detail: bool,
+) -> (Option<Unjoined>, &'static str, String) {
+    let none = String::new();
     if row.unstamped_form {
-        return (Some(Unjoined::UnstampedForm), "<unstamped>");
+        return (Some(Unjoined::UnstampedForm), "<unstamped>", none);
     }
-    let Some(cs) = &row.site else { return (Some(Unjoined::NoSite), "<none>") };
+    if let Some(producer) = row.producer {
+        *c.indirect_forms_by_producer.entry(producer).or_insert(0) += 1;
+    }
+    // AN INDIRECT CALL IS DECIDED FIRST, before any site or owner lookup.
+    // Nothing about it is looked up: emission renders the callee OPERAND, so
+    // whether the graph happened to record an obligation at this expression is
+    // not what makes the call safe -- what the operand is, is. Deciding it after
+    // the lookup filed 62 of bitgun's indirect calls under `site-not-in-body`,
+    // which named the wrong cause for all of them.
+    //
+    // A `named-function` operand is NOT here: it carries a `target`, so it left
+    // through the direct-call path above and joins like any other spelled call.
+    if row.target.is_none() {
+        let producer = row.producer.expect("a call with no target is an indirect form");
+        let op = row.site.as_ref().map(|cs| cs.site.op.name()).unwrap_or("<none>");
+        c.admitted_indirect += 1;
+        *c.admitted_indirect_by_op.entry(op).or_insert(0) += 1;
+        let note = if detail { format!("producer={}", producer.label()) } else { none };
+        return (None, op, note);
+    }
+    let Some(cs) = &row.site else { return (Some(Unjoined::NoSite), "<none>", none) };
     let op = cs.site.op.name();
     let Some(owner) = mf.site_owners.get(cs.owner.0 as usize) else {
-        return (Some(Unjoined::OwnerNotInTable), op);
+        return (Some(Unjoined::OwnerNotInTable), op, none);
     };
     let Some(owner_inst) = resolve_owner(ix, owner) else {
-        return (Some(Unjoined::OwnerNotAnInstance), op);
+        return (Some(Unjoined::OwnerNotAnInstance), op, none);
     };
     let Some(body) = bodies.bodies.get(owner_inst) else {
-        return (Some(Unjoined::NoBody), op);
+        return (Some(Unjoined::NoBody), op, none);
     };
     let resolved: BTreeMap<Site, &Callee> = body.callees().into_iter().collect();
+
     let Some(callee) = resolved.get(&cs.site) else {
-        return (Some(Unjoined::SiteNotInBody), op);
+        let note = if detail {
+            let mut same_expr: Vec<String> = resolved
+                .keys()
+                .filter(|s| s.expr == cs.site.expr)
+                .map(|s| s.op.name().to_string())
+                .collect();
+            same_expr.sort();
+            same_expr.dedup();
+            format!(
+                "expr={:?} ops_at_expr=[{}] body_sites={}",
+                cs.site.expr,
+                same_expr.join(","),
+                resolved.len()
+            )
+        } else {
+            none
+        };
+        return (Some(Unjoined::SiteNotInBody), op, note);
     };
     let callee_inst = callee.instance();
 
@@ -669,14 +928,18 @@ fn classify(
     // them means tracing the value's producer back to a `Global`/`Lambda` and
     // checking ITS instance, which is real work and is named as such rather
     // than assumed away.
-    let Some(target) = row.target else {
-        c.admitted_indirect += 1;
-        *c.admitted_indirect_by_op.entry(op).or_insert(0) += 1;
-        return (None, op);
-    };
+    // Every remaining row is a DIRECT call: the indirect branch returned above.
+    let target = row.target.expect("indirect calls are decided before the site lookup");
 
     match check_callee(ws, g, callee_inst, target, row.spec_key.as_ref()).outcome() {
-        Err(cause) => (Some(cause), op),
+        Err(cause) => {
+            let note = if detail {
+                format!("resolved={}", g.identity(ws, callee_inst))
+            } else {
+                none
+            };
+            (Some(cause), op, note)
+        }
         Ok(kind) => {
             c.joined += 1;
             *c.joined_by_op.entry(op).or_insert(0) += 1;
@@ -691,7 +954,7 @@ fn classify(
             if owner_inst != measured {
                 c.joined_spliced += 1;
             }
-            (None, op)
+            (None, op, none)
         }
     }
 }

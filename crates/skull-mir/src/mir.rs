@@ -738,6 +738,22 @@ pub struct MirFunc {
     /// outside any expression rather than that a recording site was forgotten.
     /// Keys are remapped on splice, like [`Self::spec_bindings`].
     pub call_sites: bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::site::CallSite>,
+    /// Instructions that MINT a workspace function's emitted SYMBOL as a value
+    /// (`let f = adder`, an `adder` argument, a `func: adder` field), and which
+    /// function each names.
+    ///
+    /// Recorded because an [`Inst::Global`] is not self-describing: the same
+    /// form reads a module global, a `static` cell and a hoisted nested fn, and
+    /// only this one carries a callee declaration. An indirect call through a
+    /// value spells nothing, so the only way a wrong function can be NAMED is
+    /// through one of these -- which makes it the population that has to join,
+    /// rather than the `CallValue` that consumes it.
+    pub fn_value_symbols: bone_semantic::prelude::FxHashMap<Idx<Inst>, FuncRef>,
+    /// The emitted names of nested fns THIS body hoists to top level. Their
+    /// symbols are the owning instance's own output rather than a callee
+    /// declaration's, which is what separates them from
+    /// [`Self::fn_value_symbols`].
+    pub hoisted_fn_globals: Vec<Ustr>,
     /// The owner instances [`Self::call_sites`] refers to, interned. Index 0 is
     /// this body's own owner when it has one; inlining appends the spliced
     /// callee's owner and remaps its entries, so a body holds one entry per
@@ -767,6 +783,8 @@ impl MirFunc {
             nested_fns: Vec::new(),
             inst_spans: Default::default(),
             call_sites: Default::default(),
+            fn_value_symbols: Default::default(),
+            hoisted_fn_globals: Vec::new(),
             site_owners: Vec::new(),
         }
     }

@@ -626,10 +626,29 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
             site_join.joined_instance_verified, site_join.joined_non_generic
         );
         println!(
-            "- **{}** INDIRECT calls admitted but not joined: a function value names no \
-             declaration to compare against (verifying them means tracing the value's \
-             producer)",
+            "- **{}** INDIRECT calls admitted as the permanent NON-DIRECT class: emission \
+             renders the callee OPERAND, so the call spells no symbol of its own and has no \
+             target it could name wrongly. A minted workspace-function symbol is not here -- \
+             it carries a target and joins like any direct call.",
             site_join.admitted_indirect
+        );
+        println!();
+        println!("| indirect call form, by callee operand | count | admitted? |");
+        println!("|---|---:|---|");
+        for (k, v) in &site_join.indirect_forms_by_producer {
+            let admitted = if *k == skull::site_join::IndirectProducer::NamedFunction {
+                "no -- joined"
+            } else {
+                "yes"
+            };
+            println!("| `{}` | {v} | {admitted} |", k.label());
+        }
+        println!();
+        println!(
+            "- indirect operands SPELLING a workspace function symbol that neither record \
+             names (the fail-open the permanent class would otherwise hide, read from the \
+             emitted NAME rather than from the records): **{}**",
+            site_join.indirect_unrecorded_symbol
         );
         let unjoined_total = site_join.unjoined_total();
         println!("- unjoined: **{unjoined_total}**");
@@ -1516,6 +1535,20 @@ fn relativize(file: &str, root: &Path) -> String {
     Path::new(file).strip_prefix(root).map(|r| r.display().to_string()).unwrap_or_else(|_| file.to_string())
 }
 
+/// A join row with its span field relativized. The row is tab-separated and the
+/// span is field 2; splitting is exact rather than a substring replace, so a
+/// declaration whose name contains the root path cannot be rewritten too.
+fn relativize_row(row: &str, root: &Path) -> String {
+    let mut fields: Vec<&str> = row.split('\t').collect();
+    let relocated;
+    if let Some(span) = fields.get_mut(2) {
+        let (file, line) = span.rsplit_once(':').unwrap_or((span, ""));
+        relocated = format!("{}:{}", relativize(file, root), line);
+        *span = &relocated;
+    }
+    fields.join("\t")
+}
+
 fn one_project(
     dir: &PathBuf,
     name: &str,
@@ -1885,8 +1918,21 @@ fn one_project(
     // The MIR-call -> ConcreteBody join, over production's own expanded set.
     let site_join = {
         let scx = skull_mir::lower::ScalarCtx::new(&ws);
-        skull::site_join::census(&ws, &scx, &g, &bodies)
+        skull::site_join::census_detailed(&ws, &scx, &g, &bodies, dump.is_some())
     };
+    if let Some((path, name)) = dump {
+        // Every non-joined call, one row. The manifest's capped example list
+        // cannot attribute a population; this is what a per-cause claim about
+        // the join is checked against.
+        let stem = format!("{path}/{}", name.replace('/', "_"));
+        let join_text: String = site_join
+            .rows
+            .iter()
+            .map(|r| format!("{}\n", relativize_row(r, root)))
+            .collect();
+        std::fs::write(format!("{stem}.join"), join_text)
+            .map_err(|e| anyhow::anyhow!("writing {stem}.join: {e}"))?;
+    }
     let bodies_missing_for_expanded =
         g.expanded.iter().filter(|i| !bodies.bodies.contains_key(*i)).count();
     let body_free_examples: Vec<String> = bodies

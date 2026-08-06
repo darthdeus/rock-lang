@@ -64,7 +64,9 @@ impl Builder<'_> {
             // A nested fn used as a value: reference the hoisted top-level fn by
             // name (a plain global read -- zero closure alloc).
             Expr::Var(b) if self.nested_fn_globals.contains_key(&raw(b)) => {
-                Ok(self.emit_cur(Inst::Global(self.nested_fn_globals[&raw(b)].hoisted)))
+                let hoisted = self.nested_fn_globals[&raw(b)].hoisted;
+                self.f.hoisted_fn_globals.push(hoisted);
+                Ok(self.emit_cur(Inst::Global(hoisted)))
             }
             // A whole-tuple use of a name bound to slot cells: rebuild and pack.
             // Packing a `nobox` element here is exactly how a whole-tuple escape
@@ -92,11 +94,20 @@ impl Builder<'_> {
                 if self.scx.target != bone_semantic::hir::FnBackend::Js
                     && self.ws.functions_by_name.contains_key(&name) =>
             {
-                if let Ok(fref) = self.resolve_funcref(e, name) {
+                let fref = self.resolve_funcref(e, name).ok();
+                if let Some(fref) = fref {
                     self.reject_fn_value_abi_mismatch(e, fref)?;
                 }
                 let sym = self.fn_value_symbol(e, name)?;
-                Ok(self.emit_cur(Inst::Global(Ustr::from(sym.as_str()))))
+                let id = self.emit_cur(Inst::Global(Ustr::from(sym.as_str())));
+                // The one place a callee DECLARATION becomes a spelled value.
+                // Recorded here rather than recovered downstream from the name:
+                // `Inst::Global` is also a module global and a `static` cell,
+                // and a name comparison could not tell them apart.
+                if let Some(fref) = fref {
+                    self.f.fn_value_symbols.insert(id, fref);
+                }
+                Ok(id)
             }
             // A global holding a value struct routes through the repr layer so a
             // whole-value read copies the box (a global is a mutable place).

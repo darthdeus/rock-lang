@@ -375,6 +375,7 @@ impl Builder<'_> {
                 // Under its scalar ABI (`nested_fn_abi`) value args splat to leaves
                 // and a value return arrives as leaves via `CallValueMulti`.
                 if let Some(abi) = self.nested_fn_globals.get(&raw(b)).cloned() {
+                    self.f.hoisted_fn_globals.push(abi.hoisted);
                     let g = self.emit_cur(Inst::Global(abi.hoisted));
                     let arg_vals =
                         self.slotted_call_args(&abi.param_names, &abi.param_shapes, &arg_idxs)?;

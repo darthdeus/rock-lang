@@ -141,6 +141,20 @@ impl Builder<'_> {
     /// `Group`); everything else is a `Scalar`. The ABI boundaries
     /// (params/returns/call args) consume this to splat without a cdata round-trip.
     pub(crate) fn lower_expr_repr(&mut self, e: Idx<Expr>) -> Result<ValueRepr, CompilerError> {
+        // The unboxed route is a SECOND entry into expression lowering, so it
+        // narrows the source cursor exactly as [`Self::lower_expr`] does. Without
+        // this a scalar-ABI argument's own calls are stamped with the ENCLOSING
+        // expression -- `mote_value_noise(v(..))` filed the `v` call under the
+        // `mote_value_noise` site, which then selected the wrong callee.
+        let outer = self.cur_span.replace(self.body.expr_spans[e]);
+        let outer_expr = self.cur_expr.replace(e);
+        let out = self.lower_expr_repr_inner(e);
+        self.cur_span = outer;
+        self.cur_expr = outer_expr;
+        out
+    }
+
+    fn lower_expr_repr_inner(&mut self, e: Idx<Expr>) -> Result<ValueRepr, CompilerError> {
         // Probed ahead of the match rather than in a guard: the wire-shape oracle
         // is fallible, and a guard cannot propagate. Ordered after the `nobox`
         // coalesce below, which is the narrower case.

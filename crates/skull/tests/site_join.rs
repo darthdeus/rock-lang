@@ -598,19 +598,21 @@ fn main() { print("{ident(1)}") }
 /// The SUBSTITUTION half of the owner, which the non-generic inlining control
 /// above cannot reach: one GENERIC `@inline` declaration instantiated at two
 /// concrete types in ONE caller. CORRECT behavior is two owner entries with
-/// distinct, non-empty substitutions, because both snapshots splice into the
+/// distinct, NON-EMPTY substitutions, because both snapshots splice into the
 /// same body and index the same expression arena -- the substitution is the
 /// only thing that tells their sites apart.
 ///
-/// TODAY both call sites splice the SAME shared generic snapshot, under the
-/// EMPTY substitution, so there is ONE `wrap` owner and it is not an instance
-/// at all. This is the minimal reproduction of the corpus's largest unjoined
-/// bucket (`owner-not-an-instance`), and it is exactly why instance-owned
-/// definition emission must not land first: a spliced generic call has no
-/// concrete owner to attribute it to.
+/// TODAY specialization is CONDITIONAL, and this fixture straddles the
+/// condition. `wrap<Vec2>` specializes (its element has value-struct storage,
+/// which is a correctness trigger rather than an optimization) and its owner is
+/// already concrete. `wrap<int>` does NOT: the lowerer keeps the shared generic
+/// snapshot and splices it under the EMPTY substitution, which is not any
+/// instance. That EMPTY entry is the minimal reproduction of the corpus's
+/// largest unjoined bucket (`owner-not-an-instance`), and it is why
+/// instance-owned definition emission must not land first.
 ///
-/// When specialization is total this goes red: assert two `wrap` owners, with
-/// distinct and non-empty substitutions.
+/// When specialization is total this goes red: the EMPTY entry becomes a second
+/// concrete substitution.
 #[test]
 fn an_inlined_generic_splices_one_shared_snapshot_sentinel() {
     let ws = check(
@@ -634,19 +636,27 @@ fn main() { print("{top()}") }
         .filter(|o| ws.module(o.func.module).functions[o.func.func].name.as_str() == "wrap")
         .map(|o| &o.subst)
         .collect();
-    // The fixture must actually splice `wrap`, or it pins nothing.
+    // The fixture must actually splice BOTH instantiations, or it pins nothing:
+    // a single entry would mean one of the two calls vanished.
     assert_eq!(
         wrap_substs.len(),
-        1,
-        "PINNED: both instantiations splice ONE shared snapshot. Two entries means \
-         specialization went total -- flip this test to assert distinct, non-empty \
-         substitutions. Got {wrap_substs:?}"
+        2,
+        "the fixture must splice both instantiations of `wrap`, got {wrap_substs:?}"
     );
-    assert!(
-        wrap_substs[0].is_empty(),
-        "PINNED: the spliced `wrap` carries the EMPTY substitution (the shared generic \
-         snapshot). A non-empty one means the splice is now instance-concrete -- flip \
-         this test."
+    let empty = wrap_substs.iter().filter(|s| s.is_empty()).count();
+    let concrete = wrap_substs.iter().filter(|s| !s.is_empty()).count();
+    // The CONTROL: the instantiation that already specializes. Without it the
+    // assertion below could pass because nothing specializes at all, which is a
+    // different defect wearing the same number.
+    assert_eq!(
+        concrete, 1,
+        "the value-struct instantiation must already be instance-concrete: {wrap_substs:?}"
+    );
+    assert_eq!(
+        empty, 1,
+        "PINNED: `wrap<int>` splices the SHARED generic snapshot under the EMPTY \
+         substitution. Zero here means specialization went total -- flip this test to \
+         assert two distinct non-empty substitutions."
     );
 }
 
@@ -752,4 +762,136 @@ fn main() { print("{use_both()}") }
     // refusal.
     let guessed = c.unjoined.get(&Unjoined::OwnerNotInTable).copied().unwrap_or(0);
     assert_eq!(guessed, 0, "an owner index escaped its table: {c:?}");
+}
+
+// ---------------------------------------------------------------------------
+// The site cursor, at both entries into expression lowering
+// ---------------------------------------------------------------------------
+
+/// A call in a SCALARIZED argument position carries its OWN expression.
+///
+/// `lower_expr_repr` is a second entry into expression lowering -- the value
+/// route the scalar ABI takes -- and it did not narrow the site cursor. Every
+/// call under an unboxed argument was therefore stamped with the ENCLOSING
+/// expression, so it selected the enclosing expression's callee: bitgun filed
+/// 138 calls as `callee-decl-mismatch` this way, `outer(inner(..))` naming
+/// `outer` from the `inner` call and the reverse.
+///
+/// The fixture uses a value struct so the argument takes the unboxed route --
+/// the boxed route already went through `lower_expr` and would pass either way.
+/// The control is the boxed sibling below.
+#[test]
+fn a_call_under_a_scalarized_argument_carries_its_own_expression() {
+    let c = census_of(
+        r#"
+value Pt { x: float, y: float }
+
+fn pt(x: float, y: float) -> Pt { return Pt { x: x, y: y } }
+fn len2(p: Pt) -> float { return p.x * p.x + p.y * p.y }
+
+fn main() {
+    print("{len2(pt(1.0, 2.0))}")
+}
+"#,
+    );
+    assert!(c.accounts(), "accounting identity broken: {c:?}");
+    // Both calls exist and both joined: `pt` must not be filed under `len2`'s
+    // expression, nor the reverse.
+    assert_eq!(
+        c.unjoined.get(&Unjoined::CalleeMismatch).copied().unwrap_or(0),
+        0,
+        "a nested call selected the enclosing expression's callee: {c:?}"
+    );
+    // A declaration mismatch of ZERO proves nothing if no nested call was
+    // examined at all, so the population is asserted in the same run.
+    assert!(
+        c.joined >= 2,
+        "the fixture examined too few joined calls to have exercised nesting: {c:?}"
+    );
+}
+
+/// The nearest valid admission control: the same nesting through a BOXED
+/// argument, which reaches lowering through `lower_expr` and always carried its
+/// own expression. Without this, the test above could pass because nesting
+/// stopped being lowered at all.
+#[test]
+fn a_call_under_a_boxed_argument_also_carries_its_own_expression() {
+    let c = census_of(
+        r#"
+fn inner(x: int) -> int { return x + 1 }
+fn outer(x: int) -> int { return x * 2 }
+
+fn main() {
+    print("{outer(inner(3))}")
+}
+"#,
+    );
+    assert!(c.accounts(), "accounting identity broken: {c:?}");
+    assert_eq!(
+        c.unjoined.get(&Unjoined::CalleeMismatch).copied().unwrap_or(0),
+        0,
+        "a nested call selected the enclosing expression's callee: {c:?}"
+    );
+    assert!(c.joined >= 2, "too few joined calls to have exercised nesting: {c:?}");
+}
+
+// ---------------------------------------------------------------------------
+// The indirect class
+// ---------------------------------------------------------------------------
+
+/// An indirect call through a RUNTIME VALUE is the permanent non-direct class,
+/// and it is admitted for a structural reason rather than by exhaustion:
+/// emission renders the callee OPERAND (`__rock_call(f, ..)` on JS, `f(..)` on
+/// Lua), so the call spells no symbol and has no target it could name wrongly.
+///
+/// The arm that keeps this from being a licence is
+/// `indirect_unrecorded_symbol`: it reads the emitted NAME rather than the
+/// records, so an operand that DOES spell a function is a finding here even
+/// though the classifier would have called it a runtime value.
+#[test]
+fn an_indirect_call_through_a_value_is_the_permanent_non_direct_class() {
+    let c = census_of(
+        r#"
+fn add_one(x: int) -> int { return x + 1 }
+
+fn apply(f: fn(int) -> int, x: int) -> int { return f(x) }
+
+fn main() { print("{apply(add_one, 3)}") }
+"#,
+    );
+    assert!(c.accounts(), "accounting identity broken: {c:?}");
+    let runtime = c
+        .indirect_forms_by_producer
+        .get(&skull::site_join::IndirectProducer::RuntimeValue)
+        .copied()
+        .unwrap_or(0);
+    assert!(runtime > 0, "no indirect call through a value was examined: {c:?}");
+    assert_eq!(
+        c.indirect_unrecorded_symbol, 0,
+        "an admitted indirect operand spells a workspace function symbol: {c:?}"
+    );
+}
+
+/// The other side of that admission: a function used as a VALUE mints a
+/// workspace symbol, and the mint is RECORDED (`MirFunc::fn_value_symbols`) so
+/// it is not swept into the permanent class. Without the record the operand
+/// would be an unremarkable `Inst::Global` and the census would call it a
+/// runtime value -- which is exactly what `indirect_unrecorded_symbol` refuses.
+#[test]
+fn a_function_used_as_a_value_records_its_minted_symbol() {
+    let ws = check(
+        r#"
+fn add_one(x: int) -> int { return x + 1 }
+fn take(f: fn(int) -> int) -> int { return f(1) }
+fn main() { print("{take(add_one)}") }
+"#,
+    );
+    let mf = prepared_body(&ws, "main");
+    let minted: usize = mf.fn_value_symbols.len()
+        + mf.nested_fns.iter().map(|n| n.fn_value_symbols.len()).sum::<usize>();
+    assert!(
+        minted > 0,
+        "`add_one` used as a value minted no recorded symbol, so the fail-open \
+         check has nothing to compare against"
+    );
 }

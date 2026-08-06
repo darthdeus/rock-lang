@@ -922,6 +922,21 @@ fn import_spec_bindings(
             func.spec_bindings.insert(new_id, key.clone());
         }
     }
+    // A minted fn-value symbol travels with the body that mints it: the callee's
+    // `let f = adder` is still a reference to `adder` after the splice, and the
+    // census joins it there. Dropping it would leave a spelled callee symbol in
+    // the caller with no recorded declaration -- exactly the fail-open the
+    // record exists to prevent.
+    for (old_id, fref) in &callee.fn_value_symbols {
+        if let Some(&new_id) = inst_map.get(old_id) {
+            func.fn_value_symbols.insert(new_id, *fref);
+        }
+    }
+    for n in &callee.hoisted_fn_globals {
+        if !func.hoisted_fn_globals.contains(n) {
+            func.hoisted_fn_globals.push(*n);
+        }
+    }
     // The callee's instruction spans come across with its body, so a rejection
     // raised after inlining still points at the construct in the CALLEE's source
     // rather than at the call site that absorbed it.
@@ -930,12 +945,6 @@ fn import_spec_bindings(
             func.inst_spans.insert(new_id, *span);
         }
     }
-    // Site identity travels with the body for the same reason the spans do: a
-    // call spliced in from the callee is still THAT callee body's obligation,
-    // and its site keys into the callee instance's `ConcreteBody`, not the
-    // caller's. Dropping these would make every inlined call an unattributed
-    // one -- which the site census would report as an exclusion rather than as
-    // the silent loss it is.
     // Site identity travels with the body, and its OWNER travels with it: a
     // spliced call is the CALLEE instance's obligation, so the owner is
     // re-interned into the caller's table and the entry re-pointed. Copying the
