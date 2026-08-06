@@ -461,11 +461,7 @@ struct Box<T> { n: int = tick() }
     // The fields WRITTEN: no default is injected, so no `tick()` call exists in
     // `main`. Every declaration is identical, so `tick` is an emission root in
     // both and the rest of the census is unchanged by construction.
-    //
-    // The written value is `tick()`'s OWN result. The two programs then compute
-    // the same condition and take the same branch, so the delta cannot pick up
-    // an obligation that exists only because constant propagation resolved one
-    // arm's `if` and not the other's.
+    // Match `tick()`'s result so both arms feed identical values into control flow.
     let written = format!(
         "{DECLS}
 fn main() {{
