@@ -138,6 +138,41 @@ fn a_predecessors_global_does_not_reach_the_next_entry() {
     assert_eq!(isolated.artifacts["count.txt"], worker.artifacts["count.txt"]);
 }
 
+/// A global that was NULL at boot is null again at the next entry.
+///
+/// Its own class, not a variant of `b0_leak_probe`: the image is keyed by
+/// member name and a nil value has no key, so a restore driven by the image
+/// cannot tell "boot had nil" from "not a member" -- while the frozen member
+/// set records it either way. A global with any other boot value has a key and
+/// is restored, which is why every existing fixture passed over this.
+///
+/// Found through mag's `reagents` (`docs/sim-speed-plan.md` B4): it asserts
+/// `reagent_context_spell() == null` and failed only after `spell_rows_focus`,
+/// which leaves the `SpellKind?` global `REG_HOVER_SPELL` set.
+#[test]
+fn a_global_that_was_null_at_boot_is_null_again_at_the_next_entry() {
+    let (isolated, worker) = differential(&["b0_null_global_seed"], "b0_null_global_probe");
+    let c = compare(&isolated, &worker);
+    assert_equivalent("b0_null_global_probe", &c);
+
+    assert_eq!(isolated.verdict(), "PASS", "the probe passes in a fresh process");
+    assert_eq!(worker.verdict(), "PASS", "and after a predecessor that set the global");
+    // Agreement over an unmade assertion would be agreement over nothing.
+    // (Membership is not asserted in the sim: a one-entry queue takes no
+    // checkpoint at all, so `sim_checkpoint_has` is false in the isolated arm
+    // by design and would diverge for a reason unrelated to the class.)
+    for (label, record) in [("isolated", &isolated), ("worker", &worker)] {
+        assert!(
+            record
+                .expects_pass
+                .iter()
+                .any(|m| m.message.contains("null again at the next entry")),
+            "{label}: the fixture never asserted the property: {:?}",
+            record.expects_pass
+        );
+    }
+}
+
 /// The checkpoint restores the RNG stream position, so the probe's first draw
 /// after a predecessor is the same one a fresh `ROCK_TEST_SEED=42` process
 /// makes. Only the produced file can see this class -- both sides pass their
@@ -259,41 +294,6 @@ fn the_throttle_clock_does_not_reach_the_next_entry() {
     }
 }
 
-/// Engine configuration restores at the boundary. `TIME_SCALE` is a Stone
-/// global outside replay's six-global predicate; the checkpoint's membership is
-/// the whole registry, so the probe sees real time -- in the scale field AND in
-/// the dt its own frame advances, which is the reason this class matters.
-#[test]
-fn engine_configuration_resets_at_the_entry_boundary() {
-    let (isolated, worker) = differential(&["b0_config_seed"], "b0_config_probe");
-    let c = compare(&isolated, &worker);
-    assert_equivalent("b0_config_probe", &c);
-
-    assert_eq!(isolated.verdict(), "PASS", "the probe passes in a fresh process");
-    for (label, record) in [("isolated", &isolated), ("worker", &worker)] {
-        assert!(
-            record
-                .expects_pass
-                .iter()
-                .any(|m| m.message.contains("one frame advances a full fixed dt")),
-            "{label}: the probe never measured game time, so agreement proves \
-             nothing about the dt the scale feeds: {:?}",
-            record.expects_pass
-        );
-    }
-    assert_eq!(isolated.artifacts["scale.txt"], worker.artifacts["scale.txt"]);
-}
-
-/// Input edges restore at the boundary: a predecessor that stopped mid-hold
-/// left `keys_down` set, and `input_end_frame` would roll it forward forever --
-/// the restored map starts the probe with nothing held and no release edge.
-#[test]
-fn a_held_key_does_not_reach_the_next_entry() {
-    let (isolated, worker) = differential(&["b0_input_seed"], "b0_input_probe");
-    let c = compare(&isolated, &worker);
-    }
-}
-
 /// A record whose content is a wall-clock measurement is DECLARED as one at
 /// its log site, and the arm drops it by that declaration -- never by finding
 /// an `ms` in the text, which would make `cooldown 100ms` compare equal to
@@ -387,6 +387,41 @@ fn the_value_mask_is_on_only_where_records_are_compared() {
             mixed.contains("cooldown 100ms, elapsed ") && mixed.ends_with("ms"),
             "{mode:?} must render a real duration: {mixed}"
         );
+    }
+}
+
+/// Engine configuration restores at the boundary. `TIME_SCALE` is a Stone
+/// global outside replay's six-global predicate; the checkpoint's membership is
+/// the whole registry, so the probe sees real time -- in the scale field AND in
+/// the dt its own frame advances, which is the reason this class matters.
+#[test]
+fn engine_configuration_resets_at_the_entry_boundary() {
+    let (isolated, worker) = differential(&["b0_config_seed"], "b0_config_probe");
+    let c = compare(&isolated, &worker);
+    assert_equivalent("b0_config_probe", &c);
+
+    assert_eq!(isolated.verdict(), "PASS", "the probe passes in a fresh process");
+    for (label, record) in [("isolated", &isolated), ("worker", &worker)] {
+        assert!(
+            record
+                .expects_pass
+                .iter()
+                .any(|m| m.message.contains("one frame advances a full fixed dt")),
+            "{label}: the probe never measured game time, so agreement proves \
+             nothing about the dt the scale feeds: {:?}",
+            record.expects_pass
+        );
+    }
+    assert_eq!(isolated.artifacts["scale.txt"], worker.artifacts["scale.txt"]);
+}
+
+/// Input edges restore at the boundary: a predecessor that stopped mid-hold
+/// left `keys_down` set, and `input_end_frame` would roll it forward forever --
+/// the restored map starts the probe with nothing held and no release edge.
+#[test]
+fn a_held_key_does_not_reach_the_next_entry() {
+    let (isolated, worker) = differential(&["b0_input_seed"], "b0_input_probe");
+    let c = compare(&isolated, &worker);
     assert_equivalent("b0_input_probe", &c);
 
     assert_eq!(isolated.verdict(), "PASS", "the probe passes in a fresh process");
