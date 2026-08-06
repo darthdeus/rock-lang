@@ -1185,7 +1185,7 @@ pub fn lower_function_spec(
         fn_name_span: Some(func.name_span),
         cur_span: None,
         cur_expr: None,
-        sites_suppressed: false,
+        cur_domain: crate::site::SiteDomain::Own,
         cur_op: crate::site::SiteOp::DirectCall,
         site_owner: Some(crate::site::OwnerInstance {
             func: self_ref,
@@ -1267,7 +1267,7 @@ pub fn lower_global(
         fn_name_span: None,
         cur_span: None,
         cur_expr: None,
-        sites_suppressed: false,
+        cur_domain: crate::site::SiteDomain::Own,
         cur_op: crate::site::SiteOp::DirectCall,
         site_owner: None,
         group_binds: HashMap::new(),
@@ -1343,7 +1343,7 @@ pub fn lower_decorator(
         fn_name_span: None,
         cur_span: None,
         cur_expr: None,
-        sites_suppressed: false,
+        cur_domain: crate::site::SiteDomain::Own,
         cur_op: crate::site::SiteOp::DirectCall,
         site_owner: None,
         group_binds: HashMap::new(),
@@ -1446,9 +1446,12 @@ struct Builder<'a> {
     /// `None` only outside any expression (a fn prologue), which is the
     /// exclusion the site census reports by cause.
     cur_expr: Option<Idx<Expr>>,
-    /// Whether [`Builder::emit_cur`] may stamp a site. Set while lowering a body
-    /// whose expression arena is not the one `site_owner`'s sites are keyed in.
-    sites_suppressed: bool,
+    /// WHICH expression arena [`Self::cur_expr`] indexes. A struct-default
+    /// initializer is lowered from the declaring struct's `StructDefaults` body
+    /// into this CFG while `site_owner` still names the enclosing function, so
+    /// its index is only meaningful against THAT arena -- and the walk records
+    /// it under the same domain.
+    cur_domain: crate::site::SiteDomain,
     /// The concrete INSTANCE being lowered, which OWNS every site recorded from
     /// this builder: the declaration plus the substitution it is lowered under.
     /// `None` for the always-emitted units -- a global initializer and a
@@ -1547,17 +1550,18 @@ impl Builder<'_> {
         // `Inst::Global` is also a module global and a `static` cell and those
         // name no callee.
         let is_mint = self.cur_op == crate::site::SiteOp::FnValue;
-        if (is_call || is_mint) && self.sites_suppressed {
-            self.f.foreign_arena_calls.insert(id);
-        }
-        if (is_call || is_mint) && !self.sites_suppressed {
+        if is_call || is_mint {
             if let (Some(owner), Some(expr)) = (self.site_owner.clone(), self.cur_expr) {
                 let owner = crate::site::intern_owner(&mut self.f.site_owners, owner);
                 self.f.call_sites.insert(
                     id,
                     crate::site::CallSite {
                         owner,
-                        site: crate::site::Site { expr, op: self.cur_op.clone() },
+                        site: crate::site::Site {
+                            domain: self.cur_domain,
+                            expr,
+                            op: self.cur_op.clone(),
+                        },
                     },
                 );
             }
@@ -1595,23 +1599,20 @@ impl Builder<'_> {
         out
     }
 
-    /// Lower `f` with site stamping SUPPRESSED, restoring it after.
+    /// Lower `f` with the site DOMAIN overridden, restoring it after.
     ///
-    /// For a body whose expression arena is not the one sites are keyed in: a
-    /// struct-default initializer is lowered from `BodyOwner::StructDefaults`
-    /// while `site_owner` still names the enclosing function, so an index from
-    /// that arena would be read against the owner's. Stamping nothing makes such
-    /// a call a reported `no-site`; stamping it can JOIN through whatever
-    /// expression happens to sit at that index in the other arena, which reads
-    /// as a plausible answer rather than as a hole.
-    ///
-    /// A flag rather than clearing `cur_expr`, because the nested `lower_expr`
-    /// installs the foreign index itself -- so clearing the cursor at the
-    /// boundary is undone by the very call it needs to guard.
-    fn without_sites<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
-        let outer = std::mem::replace(&mut self.sites_suppressed, true);
+    /// The third scoped half, beside the expression and the operation: a body
+    /// lowered from another arena keeps its own indices, and the domain is what
+    /// makes them readable. A flag rather than a cursor swap, because the nested
+    /// `lower_expr` installs the foreign index itself.
+    fn in_domain<T>(
+        &mut self,
+        domain: crate::site::SiteDomain,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let outer = std::mem::replace(&mut self.cur_domain, domain);
         let out = f(self);
-        self.sites_suppressed = outer;
+        self.cur_domain = outer;
         out
     }
 

@@ -81,6 +81,8 @@ mod instance_owned_emission;
 mod site_join;
 #[path = "dispatched_sites.rs"]
 mod dispatched_sites;
+#[path = "site_domain.rs"]
+mod site_domain;
 #[path = "artifact_view.rs"]
 mod artifact_view;
 

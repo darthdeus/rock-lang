@@ -76,16 +76,61 @@ impl SiteOp {
     }
 }
 
-/// One callee obligation of one body: an expression plus the operation at it.
+/// WHICH expression arena a [`Site`]'s index is meaningful against.
+///
+/// An `Idx<Expr>` names a slot in one body's arena and nothing else. Most sites
+/// index the owner instance's own body -- but a struct literal that omits a
+/// field lowers that field's DEFAULT initializer, which lives in the declaring
+/// struct's `BodyOwner::StructDefaults` body, in that struct's module, into the
+/// enclosing function's CFG. Its expression index means nothing against the
+/// owner's arena: read there it selects whatever happens to sit at that slot,
+/// which reads as a plausible answer rather than as a hole.
+///
+/// The domain is part of the KEY, not a flag beside it, so the two arenas
+/// cannot collide even when they hand out the same numeric index.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum SiteDomain {
+    /// The owner instance's own body.
+    Own,
+    /// A struct's field-default initializers, by declaring module and struct.
+    StructDefaults(bone_semantic::prelude::ModuleId, Idx<bone_semantic::hir::StructDef>),
+}
+
+impl SiteDomain {
+    /// A total order. `ModuleId` has none of its own, so the key is its index;
+    /// sites are sorted for reproducible reports, not for identity.
+    fn ord_key(&self) -> (u8, usize, u32) {
+        match self {
+            Self::Own => (0, 0, 0),
+            Self::StructDefaults(m, d) => (1, m.index(), d.into_raw().into_u32()),
+        }
+    }
+}
+
+impl Ord for SiteDomain {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.ord_key().cmp(&other.ord_key())
+    }
+}
+
+impl PartialOrd for SiteDomain {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// One callee obligation of one body: an expression IN A DOMAIN, plus the
+/// operation at it.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Site {
+    pub domain: SiteDomain,
     pub expr: Idx<Expr>,
     pub op: SiteOp,
 }
 
 impl Site {
     pub fn direct_call(expr: Idx<Expr>) -> Self {
-        Self { expr, op: SiteOp::DirectCall }
+        Self { domain: SiteDomain::Own, expr, op: SiteOp::DirectCall }
     }
 }
 

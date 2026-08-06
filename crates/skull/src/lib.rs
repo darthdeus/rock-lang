@@ -14,6 +14,7 @@
 //! `docs/skull-plan.md`.
 
 pub mod artifact;
+pub mod expr_subtree;
 pub mod concrete_body;
 pub mod coroutine_emit;
 pub mod inline_stats;

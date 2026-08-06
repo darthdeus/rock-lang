@@ -415,7 +415,6 @@ pub fn convert_closures_framed(
             callee_instances: mf.callee_instances.clone(),
             fn_value_symbols: mf.fn_value_symbols.clone(),
             hoisted_fn_globals: mf.hoisted_fn_globals.clone(),
-            foreign_arena_calls: mf.foreign_arena_calls.clone(),
             // The owner table comes across with the entries that index it;
             // cloning one without the other would repoint every site.
             site_owners: mf.site_owners.clone(),

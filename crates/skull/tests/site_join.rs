@@ -13,7 +13,7 @@ use skull::instance_graph::{self, InstanceGraph};
 use skull::site_join::{self, SiteJoinCensus, Unjoined};
 use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::{Inst, MirFunc};
-use skull_mir::site::{Site, SiteOp};
+use skull_mir::site::{Site, SiteDomain, SiteOp};
 use ustr::Ustr;
 
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
@@ -191,16 +191,16 @@ fn one_expression_under_different_operations_stays_distinct() {
     let mf = prepared_body(&ws, "main");
     let e = mf.call_sites.values().next().expect("main calls something").site.expr;
     let variants = [
-        Site { expr: e, op: SiteOp::DirectCall },
-        Site { expr: e, op: SiteOp::FnValue },
-        Site { expr: e, op: SiteOp::ForIter },
-        Site { expr: e, op: SiteOp::ForNext(vec![]) },
-        Site { expr: e, op: SiteOp::ForNext(vec![0]) },
-        Site { expr: e, op: SiteOp::BoundNext(vec![]) },
-        Site { expr: e, op: SiteOp::BoundNext(vec![0]) },
-        Site { expr: e, op: SiteOp::ImplicitIter },
-        Site { expr: e, op: SiteOp::Synthesized("__map_col_slot") },
-        Site { expr: e, op: SiteOp::Synthesized("__map_col_free") },
+        Site { domain: SiteDomain::Own, expr: e, op: SiteOp::DirectCall },
+        Site { domain: SiteDomain::Own, expr: e, op: SiteOp::FnValue },
+        Site { domain: SiteDomain::Own, expr: e, op: SiteOp::ForIter },
+        Site { domain: SiteDomain::Own, expr: e, op: SiteOp::ForNext(vec![]) },
+        Site { domain: SiteDomain::Own, expr: e, op: SiteOp::ForNext(vec![0]) },
+        Site { domain: SiteDomain::Own, expr: e, op: SiteOp::BoundNext(vec![]) },
+        Site { domain: SiteDomain::Own, expr: e, op: SiteOp::BoundNext(vec![0]) },
+        Site { domain: SiteDomain::Own, expr: e, op: SiteOp::ImplicitIter },
+        Site { domain: SiteDomain::Own, expr: e, op: SiteOp::Synthesized("__map_col_slot") },
+        Site { domain: SiteDomain::Own, expr: e, op: SiteOp::Synthesized("__map_col_free") },
     ];
     let mut set: std::collections::BTreeSet<&Site> = std::collections::BTreeSet::new();
     for v in &variants {
@@ -211,8 +211,8 @@ fn one_expression_under_different_operations_stays_distinct() {
     // arms: a `for` over a bounded call carries both, at one expression and
     // with the same path.
     assert_ne!(
-        Site { expr: e, op: SiteOp::ForNext(vec![0]) },
-        Site { expr: e, op: SiteOp::BoundNext(vec![0]) },
+        Site { domain: SiteDomain::Own, expr: e, op: SiteOp::ForNext(vec![0]) },
+        Site { domain: SiteDomain::Own, expr: e, op: SiteOp::BoundNext(vec![0]) },
     );
 }
 
@@ -1212,20 +1212,21 @@ fn main() {
     assert!(c.joined > 0, "the fixture joined nothing: {c:?}");
 }
 
-/// A call synthesized inside a STRUCT-DEFAULT initializer is stamped with
-/// NOTHING, and that is the fail-closed answer rather than a gap.
+/// A call inside a STRUCT-DEFAULT initializer JOINS, through its own arena.
 ///
-/// `with_struct_default` installs the `BodyOwner::StructDefaults` arena but does
-/// NOT swap `site_owner`, so an `Idx<Expr>` from that arena would be read
-/// against the enclosing function's. When the index happens to be in range it
+/// `with_struct_default` installs the declaring struct's
+/// `BodyOwner::StructDefaults` arena while `site_owner` still names the
+/// enclosing function, so the call's `Idx<Expr>` is only meaningful against
+/// THAT arena. `SiteDomain` is what states which one; before it existed the
+/// stamp was withheld entirely, because an index read against the owner's arena
 /// joins through whatever expression sits there -- a plausible wrong answer,
-/// which is worse than a hole. Suppressing the stamp makes it a reported
-/// `no-site` instead.
+/// which is worse than a hole.
 ///
-/// The control is that the enclosing body's OWN calls still carry sites: the
-/// suppression is scoped to the foreign arena, not switched on for the function.
+/// Both halves are asserted: the default's call joins, and the enclosing body's
+/// own calls still do. A domain that swallowed the whole function would satisfy
+/// neither.
 #[test]
-fn a_call_in_a_struct_default_is_not_stamped_against_the_owners_arena() {
+fn a_call_in_a_struct_default_joins_through_its_own_arena() {
     let c = census_of(
         r#"
 fn seed() -> int { return 7 }
@@ -1242,18 +1243,16 @@ fn main() {
 "#,
     );
     assert!(c.accounts(), "accounting identity broken: {c:?}");
-    // The default's `seed()` call is unattributed BY DESIGN, under its OWN
-    // cause -- not `no-site`, which would make it indistinguishable from a call
-    // lowering simply forgot to stamp.
-    assert!(
-        c.unjoined.get(&Unjoined::ForeignArena).copied().unwrap_or(0) > 0,
-        "the struct-default call was stamped against the owner's arena: {c:?}"
+    assert_eq!(
+        c.unjoined.get(&Unjoined::SiteNotInBody).copied().unwrap_or(0),
+        0,
+        "the struct-default call reached MIR with no obligation recorded: {c:?}"
     );
     assert_eq!(
         c.unjoined.get(&Unjoined::NoSite).copied().unwrap_or(0),
         0,
-        "a foreign-arena call was filed as an ordinary missing stamp: {c:?}"
+        "the struct-default call carries no site at all: {c:?}"
     );
     // CONTROL: the enclosing body's own calls are unaffected.
-    assert!(c.joined > 0, "suppression leaked to the enclosing body: {c:?}");
+    assert!(c.joined > 0, "the domain leaked to the enclosing body: {c:?}");
 }

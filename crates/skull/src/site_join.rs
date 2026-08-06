@@ -54,17 +54,6 @@ use crate::instance_graph::{Instance, InstanceGraph};
 pub enum Unjoined {
     /// The call carries no site: it was emitted outside any expression.
     NoSite,
-    /// The call was lowered while the expression arena was NOT the one this
-    /// body's sites are keyed in (`MirFunc::foreign_arena_calls`) -- a
-    /// struct-default initializer, whose `BodyOwner::StructDefaults` arena is
-    /// installed while `site_owner` still names the enclosing function.
-    ///
-    /// Stamping nothing is FAIL-CLOSED, not final: an index from the other arena
-    /// could join through whatever expression sits at it here. The real identity
-    /// needs a body/arena DOMAIN in `Site` -- `BodyOwner` plus expression plus
-    /// operation -- shared by the graph and lowering, and it must exist before
-    /// emission consumes the join.
-    ForeignArena,
     /// The call's site names an owner index the body's owner table does not
     /// have. A splice that failed to re-intern its owner lands here rather than
     /// silently reading the caller's entry 0.
@@ -107,7 +96,6 @@ impl Unjoined {
     pub fn label(self) -> &'static str {
         match self {
             Self::NoSite => "no-site",
-            Self::ForeignArena => "foreign-arena",
             Self::OwnerNotInTable => "owner-not-in-table",
             Self::OwnerNotAnInstance => "owner-not-an-instance",
             Self::NoBody => "no-body",
@@ -525,9 +513,6 @@ struct CallRow {
     producer: Option<IndirectProducer>,
     /// Whether this row is a fn-value SYMBOL MINT rather than a call.
     is_mint: bool,
-    /// Whether lowering deliberately withheld a site because the expression
-    /// arena was not this body's.
-    foreign_arena: bool,
 }
 
 /// Every REACHABLE call instruction in `mf` and its nested (hoisted) bodies.
@@ -552,7 +537,6 @@ fn reachable_call_rows(mf: &MirFunc, out: &mut Vec<CallRow>) {
                     callee_inst: mf.callee_instances.get(&id).cloned(),
                     producer: None,
                     is_mint: true,
-                    foreign_arena: mf.foreign_arena_calls.contains(&id),
                 });
                 continue;
             }
@@ -586,7 +570,6 @@ fn reachable_call_rows(mf: &MirFunc, out: &mut Vec<CallRow>) {
                 callee_inst: mf.callee_instances.get(&id).cloned(),
                 producer,
                 is_mint: false,
-                foreign_arena: mf.foreign_arena_calls.contains(&id),
             });
         }
     }
@@ -1028,7 +1011,7 @@ fn classify(
         return (None, op, note);
     }
     let Some(cs) = &row.site else {
-        let cause = if row.foreign_arena { Unjoined::ForeignArena } else { Unjoined::NoSite };
+        let cause = Unjoined::NoSite;
         return (Some(cause), "<none>", none);
     };
     let op = cs.site.op.name();
