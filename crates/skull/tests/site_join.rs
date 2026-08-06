@@ -46,6 +46,16 @@ fn census_of(src: &str) -> SiteJoinCensus {
     site_join::census(&ws, &scx, &g, &bodies)
 }
 
+fn instance_key(
+    g: &InstanceGraph,
+    inst: &skull::instance_graph::Instance,
+) -> skull_mir::lower::SpecKey {
+    inst.args
+        .iter()
+        .map(|id| Some(g.arena.get(*id).clone()))
+        .collect()
+}
+
 /// Lower the `<test>` module's fn named `name` and run the SAME transform
 /// sequence emission runs, so a test inspects the body emission renders.
 fn prepared_body(ws: &Workspace, name: &str) -> MirFunc {
@@ -412,18 +422,13 @@ fn main() {
     let fref = insts[0].func;
     assert_eq!(insts[1].func, fref, "the two instances must share a FuncRef to be a control");
 
-    // Build each instance's key from its own recorded substitution -- the real
-    // binding, not a hand-written type. `ident<T>` has one generic, so the key
-    // is one slot holding that instance's binding; `spec_subst_from_key` maps
-    // it back through the declaration's own generic, recovering the same VarId
-    // the graph recorded.
-    let key_of = |i: &skull::instance_graph::Instance| -> skull_mir::lower::SpecKey {
-        let subst = &g.substitutions[i];
-        assert_eq!(subst.len(), 1, "fixture has one generic: {subst:?}");
-        vec![subst.values().next().cloned()]
-    };
-    let k0 = key_of(insts[0]);
-    let k1 = key_of(insts[1]);
+    // Build each key from its instance's declaration-ordered arguments, not a
+    // hand-written type. `spec_subst_from_key` then recovers the declaration's
+    // VarId, independently of the candidate-selection oracle under test.
+    let k0 = instance_key(&g, insts[0]);
+    let k1 = instance_key(&g, insts[1]);
+    assert_eq!(k0.len(), 1, "fixture has one generic: {k0:?}");
+    assert_eq!(k1.len(), 1, "fixture has one generic: {k1:?}");
     assert!(k0.iter().all(Option::is_some) && k1.iter().all(Option::is_some), "keys must be complete");
     assert_ne!(k0, k1, "the two keys must differ, or the swap below is a no-op");
 
@@ -515,11 +520,10 @@ fn main() { print("{pair(1, 2.0)}") }
     };
 
     // ADMISSION CONTROL, built INDEPENDENTLY: the key is laid out in
-    // declaration-generic order from the graph's own substitution
-    // (`spec_key_from_subst`), never by asking the oracle which candidate it
-    // likes. A key the oracle helped choose would make the rejections below
-    // circular.
-    let good = skull_mir::lower::spec_key_from_subst(&ws, inst.func, &g.substitutions[&inst]);
+    // declaration-generic order from the graph's own `Instance.args`, never by
+    // asking the oracle which candidate it likes. A key the oracle helped choose
+    // would make the rejections below circular.
+    let good = instance_key(&g, &inst);
     assert_eq!(good.len(), generics, "independent key has one slot per generic: {good:?}");
     assert!(good.iter().all(Option::is_some), "independent key is complete: {good:?}");
     assert_eq!(
@@ -572,7 +576,7 @@ fn main() { print("{ident(1)}") }
         .find(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "ident")
         .expect("instance")
         .clone();
-    let key = skull_mir::lower::spec_key_from_subst(&ws, inst.func, &g.substitutions[&inst]);
+    let key = instance_key(&g, &inst);
     // Control: with the substitution present, the key verifies.
     assert_eq!(
         skull::site_join::check_callee(&ws, &g, &inst, inst.func, Some(&key)),
