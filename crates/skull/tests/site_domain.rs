@@ -438,37 +438,57 @@ fn main() {
 }
 
 /// CONTROL for the sentinel above: a struct default whose callee is NON-generic
-/// joins, asserted on its own POPULATION.
+/// joins, measured as a DELTA against the same program with the fields written.
 ///
 /// Without this the sentinel could pass because struct defaults are broken in
-/// general rather than because the GENERIC instantiation is undetermined. But
-/// "some call joined" and "`site-not-in-body` is 0" are both satisfiable
-/// without any defaults obligation existing at all -- `print` joins, and a zero
-/// survives the obligations vanishing from the census entirely. So the count of
-/// defaults-domain STAMPS and the matching `ConcreteBody` entries are asserted
-/// first, and dropping the default obligations turns this red.
+/// general rather than because the GENERIC instantiation is undetermined.
+///
+/// A delta rather than absolute counts, because the census walks every expanded
+/// instance including the stdlib's: a global "some non-generic call joined" is
+/// satisfied by calls this fixture never made, and filtering a cause out of the
+/// unjoined map hides an increase in it. The two programs differ in exactly one
+/// thing -- three injected `tick()` calls -- so the whole census must differ in
+/// exactly that: three more obligations, three more non-generic joins, and an
+/// unjoined map that is IDENTICAL, `owner-not-an-instance` included.
 #[test]
 fn a_generic_structs_default_calling_a_non_generic_fn_still_joins() {
-    let src = r#"
+    const DECLS: &str = r#"
 fn tick() -> int { return 1 }
 
 struct Plain { n: int = tick() }
 struct Box<T> { n: int = tick() }
-
-fn main() {
-    let p = Plain {}
-    let a: Box<int> = Box {}
-    let b: Box<string> = Box {}
-    if p.n + a.n + b.n > 0 { print("ok") }
-}
 "#;
-    let ws = check(src);
+    // The fields WRITTEN: no default is injected, so no `tick()` call exists in
+    // `main`. Every declaration is identical, so `tick` is an emission root in
+    // both and the rest of the census is unchanged by construction.
+    let written = format!(
+        "{DECLS}
+fn main() {{
+    let p = Plain {{ n: 0 }}
+    let a: Box<int> = Box {{ n: 0 }}
+    let b: Box<string> = Box {{ n: 0 }}
+    if p.n + a.n + b.n > 0 {{ print(\"ok\") }}
+}}
+"
+    );
+    // The fields OMITTED: three injections, one per literal.
+    let omitted = format!(
+        "{DECLS}
+fn main() {{
+    let p = Plain {{}}
+    let a: Box<int> = Box {{}}
+    let b: Box<string> = Box {{}}
+    if p.n + a.n + b.n > 0 {{ print(\"ok\") }}
+}}
+"
+    );
 
+    let ws = check(&omitted);
     // THE POPULATION, lowering side: three literals inject `tick()`.
     let stamped = stamped_domains(&ws, "main");
     let defaults: Vec<&(SiteDomain, u32)> = stamped
         .iter()
-        .filter(|(d, _)| matches!(d, SiteDomain::StructDefaults { .. }))
+        .filter(|(d, _)| matches!(d, SiteDomain::StructDefaults(..)))
         .collect();
     assert_eq!(
         defaults.len(),
@@ -476,61 +496,35 @@ fn main() {
         "expected three defaults-domain stamps in `main`, got {defaults:?}"
     );
 
-    // THE POPULATION, walk side: the same obligations exist in the body's own
-    // tables. A zero below means nothing if these are absent.
-    let mut g = graph_of(&ws);
-    let bodies = skull::concrete_body::build(&ws, &mut g);
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
-    let main = bodies
-        .bodies
-        .iter()
-        .find(|(i, _)| {
-            i.func.module == mid && ws.module(mid).functions[i.func.func].name.as_str() == "main"
-        })
-        .map(|(_, b)| b)
-        .expect("main has a concrete body");
-    let recorded: Vec<&Callee> = main
-        .direct_calls
-        .iter()
-        .filter(|(s, _)| matches!(s.domain, SiteDomain::StructDefaults { .. }))
-        .map(|(_, c)| c)
-        .collect();
-    assert_eq!(
-        recorded.len(),
-        2,
-        "expected an obligation per struct DECLARATION reached (`Plain` and \
-         `Box`), got {recorded:?}"
-    );
+    let base = census_of(&written);
+    let with_defaults = census_of(&omitted);
+    assert!(base.accounts() && with_defaults.accounts(), "accounting identity broken");
 
-    // Only now is a zero a statement about those obligations -- and it is
-    // asserted across EVERY unjoined cause, not just the two that this defect
-    // happened to produce. Rejecting `site-not-in-body` alone leaves a test
-    // named "still joins" green when the same calls become `callee-mismatch`
-    // or `callee-no-instance` instead.
-    let c = census_of(src);
-    assert!(c.accounts(), "accounting identity broken: {c:?}");
-    // EVERY cause except the one named. `owner-not-an-instance` is the shared
-    // generic splice -- Cut C+D's own population, present in the stdlib bodies
-    // this census also walks -- so it is diffed against by name rather than
-    // silently included, per the already-red-baseline rule. Any OTHER cause
-    // appearing means a defaults obligation stopped joining, which is what a
-    // `site-not-in-body`-only assertion would have missed.
-    let unexpected: Vec<(&Unjoined, &usize)> = c
-        .unjoined
-        .iter()
-        .filter(|(cause, n)| **n > 0 && **cause != Unjoined::OwnerNotAnInstance)
-        .collect();
-    assert!(
-        unexpected.is_empty(),
-        "a struct default whose callee is NON-generic must JOIN, under every \
-         cause and not merely be stamped: {unexpected:?}"
+    // The three injected calls are examined...
+    assert_eq!(
+        with_defaults.obligations_examined as i64 - base.obligations_examined as i64,
+        3,
+        "the injected calls did not reach the census as three obligations: \
+         {} vs {}",
+        base.obligations_examined,
+        with_defaults.obligations_examined
     );
-    // And the joins are the ones expected: three `tick()` calls, each
-    // non-generic, so the declaration match IS the instance match.
-    assert!(
-        c.joined_non_generic >= 3,
-        "expected at least the three `tick()` injections among the non-generic \
-         joins, got {}: {c:?}",
-        c.joined_non_generic
+    // ...and all three JOIN, as non-generic (one instance, so the declaration
+    // match IS the instance match).
+    assert_eq!(
+        with_defaults.joined_non_generic as i64 - base.joined_non_generic as i64,
+        3,
+        "the injected calls were examined but did not join non-generically: \
+         {} vs {}",
+        base.joined_non_generic,
+        with_defaults.joined_non_generic
+    );
+    // ...and NOTHING became unjoined, under any cause. Compared as whole maps,
+    // so an increase in `owner-not-an-instance` -- Cut C+D's own population,
+    // which both programs carry from the stdlib -- fails here rather than
+    // being filtered away.
+    assert_eq!(
+        with_defaults.unjoined, base.unjoined,
+        "injecting the defaults changed the unjoined population"
     );
 }

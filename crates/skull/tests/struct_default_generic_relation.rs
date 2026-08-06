@@ -1,9 +1,10 @@
 //! **What bone DOES record for a generic struct's field defaults, and what it
 //! does not** (plan S 9 / Stage 3, the C+D prerequisite).
 //!
-//! These tests are read-only about `bone-inference`. They exist because the
-//! obvious diagnosis of the generic struct-default gap is wrong, and a fix
-//! designed from the wrong diagnosis would be built in the wrong crate.
+//! Read-only about `bone-inference`. The generic struct-default gap looks like
+//! missing inference and is not, and a fix designed from that reading would be
+//! built in the wrong crate -- so what bone does and does not do is asserted
+//! here rather than assumed.
 //!
 //! `check_struct_defaults` DOES propagate the field's declared type into the
 //! initializer: it calls `instantiate_generics` on the struct's generics --
@@ -43,12 +44,12 @@ static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         .collect()
 });
 
-/// `echo`'s default is a SIBLING REFERENCE to `value`, which is what exposes
-/// the substituted DECLARED field type to a test. Without it the only thing
-/// reachable is `seed()`'s own return type -- which bone builds FROM the call's
-/// generic binding (`calls.rs`'s `substitute(ret_ty, &subs)`) before the field
-/// coercion runs, so comparing the two compares the call with itself and stays
-/// green with the coercion deleted. Measured: it did.
+/// `echo`'s default is a SIBLING REFERENCE to `value`: the only way to reach the
+/// substituted DECLARED field type. `seed()`'s own return type cannot serve --
+/// bone builds it FROM the call's generic binding (`calls.rs`'s
+/// `substitute(ret_ty, &subs)`) before the field coercion runs, so comparing
+/// those two compares the call with itself and holds whether or not the
+/// coercion exists.
 const SRC: &str = r#"
 fn seed<T>() -> T? { return null }
 
@@ -129,13 +130,9 @@ fn defaults_inference(ws: &Workspace) -> (bone_semantic::prelude::ModuleId, &Bod
 /// be in `coerce`/`unify` and nowhere near the site domain.
 ///
 /// The comparison is the SIBLING REFERENCE's type against the CALL's generic
-/// binding. `seed()`'s own return type is not usable here -- bone substitutes it
-/// from that same binding before the field coercion runs, so comparing the two
-/// is comparing the call with itself. `.value` reads `value`'s substituted
-/// DECLARED type instead, so the two sides only agree if `coerce` actually
-/// linked them. Mutation-verified: deleting the coercion in
-/// `check_struct_defaults` turns this red, and turned the previous version of
-/// this test green.
+/// binding. `.value` reads `value`'s substituted DECLARED type, so the two
+/// sides agree only if `coerce` linked them -- deleting the coercion in
+/// `check_struct_defaults` turns this red.
 #[test]
 fn a_generic_field_default_and_its_declared_type_share_one_inference_class() {
     let ws = check(SRC);
