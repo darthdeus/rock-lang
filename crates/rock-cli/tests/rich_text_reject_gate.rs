@@ -91,6 +91,33 @@ fn a_stale_font_handle_rejects_for_an_empty_sequence() {
     assert_rejects("empty_stale_font", "stale font handle");
 }
 
+/// Synthesis is DECLARED per face. Serving `Regular` for an undeclared bold
+/// would draw a line that measures right and reads wrong, and the family that
+/// asked for bold would never find out -- so an undeclared face rejects.
+#[test]
+fn an_undeclared_bold_face_rejects() {
+    assert_rejects("undeclared_bold", "declares no bold face");
+}
+
+#[test]
+fn an_undeclared_italic_face_rejects() {
+    assert_rejects("undeclared_italic", "declares no italic face");
+}
+
+/// Declaring one axis must not admit the combination.
+#[test]
+fn a_half_declared_bold_italic_face_rejects() {
+    assert_rejects("undeclared_bold_italic", "declares no bold-italic face");
+}
+
+/// Resolution happens for the WHOLE sequence before anything is measured or
+/// emitted, so an undeclared face in the last span cannot leave the earlier
+/// spans drawn.
+#[test]
+fn an_undeclared_face_in_a_later_span_rejects() {
+    assert_rejects("undeclared_late_span", "declares no italic face");
+}
+
 #[test]
 fn a_world_draw_list_rejects() {
     assert_rejects("dl_world", "only Output and Composite");

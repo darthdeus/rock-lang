@@ -249,9 +249,9 @@ fn web_rich_text_spans() {
         &[
             "--frames",
             "30",
-            // The fixture walks 12 structural steps at one per frame, then
-            // needs the plate presented and the probe read back. The default
-            // 10-frame settle questions it mid-walk.
+            // The fixture walks RT_PHASE_A_STEPS structural steps at one per
+            // frame, then needs the plate presented and the probe read back.
+            // The default 10-frame settle questions it mid-walk.
             "--settle-frames",
             "40",
             "--setup-expr",
