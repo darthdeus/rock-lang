@@ -1063,7 +1063,7 @@ fn emit_pass_nested_fns(ws: &Workspace, cg: &CodegenCtx, nested: &mut [MirFunc],
 /// regenerated inline (extern / `inline(lua)`). An `Iterator`-bounded fn is
 /// NEITHER: it exists only monomorphized-by-inlining at its call sites (its
 /// body holds placeholder bound-calls that have no standalone emission).
-fn is_cached_body(f: &bone_semantic::hir::Function) -> bool {
+pub fn is_cached_body(f: &bone_semantic::hir::Function) -> bool {
     !f.is_extern && f.inline_body.is_none() && !fn_has_bounds(f)
 }
 

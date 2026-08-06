@@ -22,25 +22,17 @@
 //! `filter_map`: an exclusion with an unstated denominator is indistinguishable
 //! from a join that quietly does not work.
 //!
-//! **The join FAILS CLOSED.** [`resolve_owner`] requires an exact
-//! `(declaration, substitution)` match against the graph's own record, so an
-//! owner the graph does not have becomes [`Unjoined::OwnerNotAnInstance`]
-//! rather than matching some other instance of the same declaration. That
-//! property is what makes the census safe to build emission on, and it is
-//! measured: mutating the inliner to keep the caller's owner slot on a spliced
-//! call made 9 bitgun calls join to the WRONG concrete body while still
-//! counting as joined.
+//! **The join FAILS CLOSED, and verifies the CALLEE.** [`resolve_owner`]
+//! demands an exact `(declaration, substitution)` match against the graph's own
+//! record, so an owner the graph does not have is reported rather than matched
+//! to another instance of the same declaration. And a site resolving is not
+//! enough: the resolved callee must equal the function the MIR call actually
+//! targets ([`Unjoined::CalleeMismatch`]), because a right site pointing at a
+//! wrong callee is the one failure instance-driven emission cannot tolerate.
 //!
-//! **It is NOT yet an oracle.** bitgun, at the time of writing: 2,086 bodies
-//! measured, 8,642 reachable calls, 6,721 joined (936 of them spliced), 1,921
-//! unjoined as 346 `no-site` + 1,102 `owner-not-an-instance` + 473
-//! `site-not-in-body`. The largest bucket is structural, not a bug here: the
-//! inliner splices the SHARED generic snapshot for a call the lowerer did not
-//! specialize (`vec_get` under an EMPTY substitution), and a shared generic
-//! body is not any instance. That closes when specialization becomes total, in
-//! the cut that makes definitions instance-owned -- until then a spliced
-//! generic call has no concrete owner to join through, which is precisely why
-//! instance-owned emission must not land first.
+//! It is NOT yet an oracle. Current populations, the mutation results and the
+//! structural blocker are recorded in `docs/parked/mono.md` -- a live number in
+//! a source comment goes stale silently.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -72,6 +64,15 @@ pub enum Unjoined {
     /// The body has no callee recorded at this site. This is the arm that goes
     /// non-zero when lowering synthesizes a call the graph walk does not model.
     SiteNotInBody,
+    /// The site resolved, but to a DIFFERENT function than the call actually
+    /// targets. Without this arm a wrong callee carrying a right site counts as
+    /// a join, which is the one failure mode instance-driven emission cannot
+    /// tolerate: the site is only useful if it selects the callee the emitted
+    /// code calls.
+    CalleeMismatch,
+    /// A call form `Builder::emit_cur` does not stamp (`CallBoundMulti`), so it
+    /// can carry no site at all.
+    UnstampedForm,
 }
 
 impl Unjoined {
@@ -82,6 +83,8 @@ impl Unjoined {
             Self::OwnerNotAnInstance => "owner-not-an-instance",
             Self::NoBody => "no-body",
             Self::SiteNotInBody => "site-not-in-body",
+            Self::CalleeMismatch => "callee-mismatch",
+            Self::UnstampedForm => "unstamped-form",
         }
     }
 }
@@ -136,6 +139,14 @@ pub struct SiteJoinCensus {
     /// in by inlining and joined through the callee instance's own body. A zero
     /// here over a corpus that inlines means the hard case is untested.
     pub joined_spliced: usize,
+    /// Joined calls whose resolved callee was CHECKED against the FuncRef the
+    /// MIR call actually targets, and agreed. The subset of `joined` that is
+    /// evidence about callee identity rather than only about site presence.
+    pub joined_callee_verified: usize,
+    /// Joined calls whose target could not be checked: an indirect call names a
+    /// value, not a declaration. Reported so `joined_callee_verified` has a
+    /// stated complement rather than an implied one.
+    pub joined_callee_unverifiable: usize,
     /// Unjoined calls, by cause.
     pub unjoined: BTreeMap<Unjoined, usize>,
     /// Unjoined calls broken down by the OPERATION they carry, so an unjoined
@@ -163,6 +174,8 @@ impl SiteJoinCensus {
         self.joined_rock += other.joined_rock;
         self.joined_boundary += other.joined_boundary;
         self.joined_spliced += other.joined_spliced;
+        self.joined_callee_verified += other.joined_callee_verified;
+        self.joined_callee_unverifiable += other.joined_callee_unverifiable;
         for (k, v) in &other.bodies_skipped {
             *self.bodies_skipped.entry(*k).or_insert(0) += v;
         }
@@ -180,28 +193,44 @@ impl SiteJoinCensus {
     }
 }
 
-/// Every REACHABLE call instruction in `mf` and its nested (hoisted) bodies,
-/// with whatever site was recorded for it.
+/// What one reachable call instruction contributes to the census: the site
+/// recorded for it (if any) and the FuncRef it actually targets.
+///
+/// `target` is `None` for an indirect call (`CallValue`), which names a value
+/// rather than a declaration, and for `CallBoundMulti`, whose target is a
+/// placeholder the inliner resolves.
+struct CallRow {
+    site: Option<CallSite>,
+    target: Option<skull_mir::mir::FuncRef>,
+    /// A call form `Builder::emit_cur` does not stamp at all. Counted here so
+    /// it is a NAMED exclusion rather than an invisible one -- it was outside
+    /// the denominator entirely until it was measured.
+    unstamped_form: bool,
+}
+
+/// Every REACHABLE call instruction in `mf` and its nested (hoisted) bodies.
 ///
 /// Nested fns are included because closure conversion splits them out of this
 /// body and they are emitted as its siblings, so their calls are part of the
 /// same instance's emitted output.
-fn reachable_call_sites(mf: &MirFunc, out: &mut Vec<Option<CallSite>>) {
+fn reachable_call_rows(mf: &MirFunc, out: &mut Vec<CallRow>) {
     for b in skull_mir::cfg::reachable_blocks_from(mf, mf.entry) {
         for &id in &mf.blocks[b].insts {
-            if matches!(
-                mf.insts[id],
-                Inst::Call { .. }
-                    | Inst::CallMulti { .. }
-                    | Inst::CallValue { .. }
-                    | Inst::CallValueMulti { .. }
-            ) {
-                out.push(mf.call_sites.get(&id).cloned());
-            }
+            let (target, unstamped_form) = match &mf.insts[id] {
+                Inst::Call { func, .. } | Inst::CallMulti { func, .. } => (Some(*func), false),
+                Inst::CallValue { .. } | Inst::CallValueMulti { .. } => (None, false),
+                // Emitted by a bounded loop and NOT stamped by `emit_cur`, so
+                // it can never carry a site. In the denominator regardless: a
+                // call form outside the population is a silent hole, not a
+                // clean measurement.
+                Inst::CallBoundMulti { .. } => (None, true),
+                _ => continue,
+            };
+            out.push(CallRow { site: mf.call_sites.get(&id).cloned(), target, unstamped_form });
         }
     }
     for nf in &mf.nested_fns {
-        reachable_call_sites(nf, out);
+        reachable_call_rows(nf, out);
     }
 }
 
@@ -225,15 +254,19 @@ fn resolve_owner<'a>(
     ix.get(&owner.func)?.iter().find(|(s, _)| *s == owner.subst).map(|(_, i)| i)
 }
 
-/// Whether skull lowers a body for this declaration at all. Mirrors the
-/// definition loop's own guards (`assemble`): an extern, an opaque body and an
-/// `Iterator`-bounded fn have no standalone lowered body to measure.
+/// Whether skull lowers a standalone body for this declaration at all.
+///
+/// Delegates to [`crate::mir_emit::is_cached_body`], the definition loop's OWN
+/// admission rule, plus the presence of a body to lower. A restatement of that
+/// rule here would be free to be weaker and silently drift, which is how the
+/// census would end up measuring a population emission does not have.
 fn has_lowered_body(ws: &Workspace, fref: skull_mir::mir::FuncRef) -> bool {
     let f = &ws.module(fref.module).functions[fref.func];
-    !f.is_extern
-        && f.inline_body.is_none()
-        && !f.generic_bounds.iter().any(Option::is_some)
-        && ws.module(fref.module).bodies.contains_key(&bone_semantic::hir::BodyOwner::Function(fref.func))
+    crate::mir_emit::is_cached_body(f)
+        && ws
+            .module(fref.module)
+            .bodies
+            .contains_key(&bone_semantic::hir::BodyOwner::Function(fref.func))
 }
 
 /// Measure the join over `g`'s expanded instances, at the phase emission
@@ -296,16 +329,21 @@ pub fn census(
         }
         c.bodies_measured += 1;
 
-        let mut sites: Vec<Option<CallSite>> = Vec::new();
-        reachable_call_sites(&mf, &mut sites);
-        for cs in sites {
+        let mut rows: Vec<CallRow> = Vec::new();
+        reachable_call_rows(&mf, &mut rows);
+        for row in rows {
             c.call_insts += 1;
-            let (cause, op) = classify(&mut c, &mf, &ix, bodies, inst, &cs);
+            let (cause, op) = classify(&mut c, &mf, &ix, bodies, inst, &row);
+            let cs = &row.site;
             if let Some(cause) = cause {
                 *c.unjoined.entry(cause).or_insert(0) += 1;
                 *c.unjoined_by_op.entry(op).or_insert(0) += 1;
                 let per_cause = c.examples.iter().filter(|e| e.starts_with(cause.label())).count();
                 if per_cause < 3 {
+                    let target_name = row
+                        .target
+                        .map(|t| ws.module(t.module).functions[t.func].name.to_string())
+                        .unwrap_or_else(|| "<indirect>".into());
                     let detail = match &cs {
                         Some(cs) => {
                             let owner = mf.site_owners.get(cs.owner.0 as usize).map(|o| {
@@ -330,7 +368,7 @@ pub fn census(
                         None => "<no site>".to_string(),
                     };
                     c.examples.push(format!(
-                        "{} in `{}`: {detail}",
+                        "{} in `{}`: {detail} -> target `{target_name}`",
                         cause.label(),
                         g.identity(ws, inst),
                     ));
@@ -343,15 +381,23 @@ pub fn census(
 
 /// Resolve one call instruction, counting a success into `c` and returning the
 /// cause plus the operation label when it does not join.
+///
+/// A join is only a join when the resolved callee AGREES with the function the
+/// call actually targets. Checking only that the site exists in the owner's
+/// tables would accept a right site pointing at a wrong callee, and that is the
+/// exact defect instance-driven emission would inherit.
 fn classify(
     c: &mut SiteJoinCensus,
     mf: &MirFunc,
     ix: &HashMap<skull_mir::mir::FuncRef, Vec<(MonoSubst, Instance)>>,
     bodies: &ConcreteBodies,
     measured: &Instance,
-    cs: &Option<CallSite>,
+    row: &CallRow,
 ) -> (Option<Unjoined>, &'static str) {
-    let Some(cs) = cs else { return (Some(Unjoined::NoSite), "<none>") };
+    if row.unstamped_form {
+        return (Some(Unjoined::UnstampedForm), "<unstamped>");
+    }
+    let Some(cs) = &row.site else { return (Some(Unjoined::NoSite), "<none>") };
     let op = cs.site.op.name();
     let Some(owner) = mf.site_owners.get(cs.owner.0 as usize) else {
         return (Some(Unjoined::OwnerNotInTable), op);
@@ -363,18 +409,27 @@ fn classify(
         return (Some(Unjoined::NoBody), op);
     };
     let resolved: BTreeMap<Site, &Callee> = body.callees().into_iter().collect();
-    match resolved.get(&cs.site) {
-        Some(callee) => {
-            c.joined += 1;
-            match callee {
-                Callee::Rock(_) => c.joined_rock += 1,
-                Callee::Boundary(..) => c.joined_boundary += 1,
-            }
-            if owner_inst != measured {
-                c.joined_spliced += 1;
-            }
-            (None, op)
+    let Some(callee) = resolved.get(&cs.site) else {
+        return (Some(Unjoined::SiteNotInBody), op);
+    };
+    // The identity check. `Callee::Rock` and `Callee::Boundary` both name an
+    // instance, and that instance's declaration is what the emitted call must
+    // target.
+    if let Some(target) = row.target {
+        if callee.instance().func != target {
+            return (Some(Unjoined::CalleeMismatch), op);
         }
-        None => (Some(Unjoined::SiteNotInBody), op),
+        c.joined_callee_verified += 1;
+    } else {
+        c.joined_callee_unverifiable += 1;
     }
+    c.joined += 1;
+    match callee {
+        Callee::Rock(_) => c.joined_rock += 1,
+        Callee::Boundary(..) => c.joined_boundary += 1,
+    }
+    if owner_inst != measured {
+        c.joined_spliced += 1;
+    }
+    (None, op)
 }

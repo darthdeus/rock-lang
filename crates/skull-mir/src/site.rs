@@ -16,18 +16,13 @@
 //!   each site to;
 //! - `skull::concrete_body::ConcreteBody`'s callee tables, keyed by it.
 //!
-//! Those three are INTENDED to agree, and the agreement is measured rather than
+//! Those three are INTENDED to agree, and the agreement is MEASURED rather than
 //! assumed: `skull::site_join::census` reports the join with every exclusion
-//! named, and it is not yet total (see that module for the live counts).
+//! named by cause. It is not yet total; the live populations and the blocker
+//! live in `docs/parked/mono.md`, not here.
+//!
 //! Correlating them by span could not even detect a disagreement -- several of
 //! these share one span, which is the whole reason the operation is in the key.
-//!
-//! What IS established: the owner half is load-bearing, by mutation. Dropping
-//! it so a spliced call keeps the caller's owner slot made 9 bitgun calls join
-//! to the WRONG concrete body while still counting as joined, and collapsed the
-//! spliced population 936 -> 12. What is NOT yet established: the operation
-//! half changes only classification LABELS today, because every witness site is
-//! unjoined either way.
 
 use bone_semantic::hir::Expr;
 use bone_semantic::prelude::Idx;

@@ -301,11 +301,7 @@ impl Builder<'_> {
         buf: Idx<Inst>,
         index: Idx<Inst>,
     ) -> Result<Idx<Inst>, CompilerError> {
-        let f = self.stdlib_funcref("__nb_checked_index")?;
-        Ok(self.emit_cur(Inst::Call {
-            func: f,
-            args: vec![buf, index],
-        }))
+        self.call_runtime_entry("__nb_checked_index", vec![buf, index])
     }
 
     pub(crate) fn column_element_repr(
@@ -440,22 +436,16 @@ impl Builder<'_> {
                             base: vec,
                             field: *path,
                         });
-                        let f = self.stdlib_funcref("table_len")?;
-                        self.emit_cur(Inst::Call {
-                            func: f,
-                            args: vec![col],
-                        })
+                        self.call_runtime_entry("table_len", vec![col])?
                     }
                     None => self.emit_cur(Inst::Field {
                         base: vec,
                         field: Ustr::from("len"),
                     }),
                 };
-                let f = self.stdlib_funcref("__rock_col_capacity")?;
-                Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::Call {
-                    func: f,
-                    args: vec![reserved, physical],
-                }))))
+                Ok(Some(ValueRepr::Scalar(
+                    self.call_runtime_entry("__rock_col_capacity", vec![reserved, physical])?,
+                )))
             }
             // Shift every column at the same slot, so they stay in lockstep. The
             // element is consumed as LEAVES, so the inserted value never boxes.
@@ -473,11 +463,10 @@ impl Builder<'_> {
                         elem.name
                     )));
                 }
-                let f = self.stdlib_funcref("__rock_col_insert")?;
                 let len = self.emit_cur(Inst::Field { base: vec, field: Ustr::from("len") });
                 for (path, leaf) in paths.into_iter().zip(leaves) {
                     let col = self.emit_cur(Inst::Field { base: vec, field: path });
-                    self.emit_cur(Inst::Call { func: f, args: vec![col, i, len, leaf] });
+                    self.call_runtime_entry("__rock_col_insert", vec![col, i, len, leaf])?;
                 }
                 Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil)))))
             }
@@ -489,7 +478,7 @@ impl Builder<'_> {
                 let shape = self.column_shape(elem)?;
                 let paths = column_leaf_paths(&shape);
                 let vec = self.lower_expr(*recv)?;
-                let f = self.stdlib_funcref("__rock_col_copy")?;
+
                 // Built as a `Vec`-tagged struct: `write_table_key` brackets a
                 // dotted leaf path, so the emitted table is the same shape
                 // `MakeVecColumns` writes for a literal.
@@ -497,10 +486,8 @@ impl Builder<'_> {
                 let len = self.emit_cur(Inst::Field { base: vec, field: Ustr::from("len") });
                 for path in paths {
                     let col = self.emit_cur(Inst::Field { base: vec, field: path });
-                    fields.push((
-                        path,
-                        self.emit_cur(Inst::Call { func: f, args: vec![col, len] }),
-                    ));
+                    let copied = self.call_runtime_entry("__rock_col_copy", vec![col, len])?;
+                    fields.push((path, copied));
                 }
                 fields.push((Ustr::from("len"), len));
                 let old_header = self.column_header(vec);
@@ -533,9 +520,8 @@ impl Builder<'_> {
                 let vec = self.lower_expr(*recv)?;
                 let k = self.lower_expr(*key_fn)?;
                 if !self.is_nobox_struct(elem.name) {
-                    let f = self.stdlib_funcref("__rock_col_sort")?;
                     return Ok(Some(ValueRepr::Scalar(
-                        self.emit_cur(Inst::Call { func: f, args: vec![vec, k] }),
+                        self.call_runtime_entry("__rock_col_sort", vec![vec, k])?,
                     )));
                 }
                 let shape = self.column_shape(elem)?;
@@ -547,11 +533,9 @@ impl Builder<'_> {
                     .map(|p| self.emit_cur(Inst::Const(Lit::Str(p))))
                     .collect();
                 let paths = self.emit_cur(Inst::MakeTuple(paths));
-                let f = self.stdlib_funcref("__rock_col_sort_leaves")?;
-                Ok(Some(ValueRepr::Scalar(self.emit_cur(Inst::Call {
-                    func: f,
-                    args: vec![vec, k, paths],
-                }))))
+                Ok(Some(ValueRepr::Scalar(
+                    self.call_runtime_entry("__rock_col_sort_leaves", vec![vec, k, paths])?,
+                )))
             }
             ("__rock_vec_to_lua_array", [recv]) => {
                 let Some(elem) = self.vec_column_elem_of(*recv)? else { return Ok(None) };
@@ -566,9 +550,8 @@ impl Builder<'_> {
                     ));
                 }
                 let vec = self.lower_expr(*recv)?;
-                let f = self.stdlib_funcref("__rock_vec_column_elements")?;
                 Ok(Some(ValueRepr::Scalar(
-                    self.emit_cur(Inst::Call { func: f, args: vec![vec] }),
+                    self.call_runtime_entry("__rock_vec_column_elements", vec![vec])?,
                 )))
             }
             _ => Ok(None),
@@ -886,16 +869,38 @@ impl Builder<'_> {
         self.column_element_store_repr(vec, index, &repr, elem)
     }
 
-    /// A synthesized call to one of the scalar spine helpers. These are
-    /// non-generic by necessity -- `Inst::Call` carries no generic arguments, so
-    /// a generic Rock helper could never specialize here.
-    pub(crate) fn call_spine(
+
+    /// A synthesized call to a named runtime entry, stamped with that name as
+    /// its site operation. Same rule as [`Self::call_spine`]: the call belongs
+    /// to the enclosing expression but is not that expression's own callee.
+    pub(crate) fn call_runtime_entry(
         &mut self,
-        name: &str,
+        name: &'static str,
         args: Vec<Idx<Inst>>,
     ) -> Result<Idx<Inst>, CompilerError> {
         let func = self.stdlib_funcref(name)?;
-        Ok(self.emit_cur(Inst::Call { func, args }))
+        Ok(self.with_site_op(crate::site::SiteOp::Synthesized(name), |b| {
+            b.emit_cur(Inst::Call { func, args })
+        }))
+    }
+
+    /// A synthesized call to one of the scalar spine helpers. These are
+    /// non-generic by necessity -- `Inst::Call` carries no generic arguments, so
+    /// a generic Rock helper could never specialize here.
+    ///
+    /// `name` is `&'static str` because it IS the site's operation identity
+    /// (`SiteOp::Synthesized`): this call is not the source expression's own
+    /// call, and stamping it `DirectCall` makes it collide with the expression's
+    /// real callee. Every caller already passes a literal.
+    pub(crate) fn call_spine(
+        &mut self,
+        name: &'static str,
+        args: Vec<Idx<Inst>>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        let func = self.stdlib_funcref(name)?;
+        Ok(self.with_site_op(crate::site::SiteOp::Synthesized(name), |b| {
+            b.emit_cur(Inst::Call { func, args })
+        }))
     }
 
     /// `m[k] = v` into a column-stored Map: take (or allocate) the key's slot,

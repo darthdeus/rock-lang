@@ -619,6 +619,11 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
             site_join.joined_boundary,
             site_join.joined_spliced
         );
+        println!(
+            "- of the joined, **{}** had the resolved callee CHECKED against the FuncRef the call \
+             targets; **{}** are indirect and name no declaration to check",
+            site_join.joined_callee_verified, site_join.joined_callee_unverifiable
+        );
         let unjoined_total = site_join.unjoined_total();
         println!("- unjoined: **{unjoined_total}**");
         if unjoined_total > 0 {

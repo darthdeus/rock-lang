@@ -76,6 +76,12 @@ fn sites(mf: &MirFunc) -> Vec<Site> {
     out
 }
 
+/// Reachable `CallBoundMulti`s -- the call form `emit_cur` does not stamp.
+fn count_bound_multi(mf: &MirFunc) -> usize {
+    mf.insts.iter().filter(|(_, i)| matches!(i, Inst::CallBoundMulti { .. })).count()
+        + mf.nested_fns.iter().map(count_bound_multi).sum::<usize>()
+}
+
 fn call_count(mf: &MirFunc) -> usize {
     mf.insts
         .iter()
@@ -136,7 +142,15 @@ fn sum_all<I: Iterator<int>>(it: I) -> int {
 fn main() { print("{sum_all(Counter { n: 0 })}") }
 "#,
     );
-    let mf = prepared_body(&ws, "main");
+    let mf = prepared_body(&ws, "sum_all");
+    // The fixture must actually CONTAIN the unstamped form. Without this the
+    // emptiness below is satisfied by any body with no bounded loop at all --
+    // the `print` call alone would do it -- and the sentinel pins nothing.
+    let bound_calls = count_bound_multi(&mf);
+    assert!(
+        bound_calls > 0,
+        "fixture emitted no `CallBoundMulti`, so it does not exercise the gap it pins"
+    );
     let s = sites(&mf);
     let witnesses: Vec<&Site> = s
         .iter()
@@ -150,9 +164,6 @@ fn main() { print("{sum_all(Counter { n: 0 })}") }
          `CallBoundMulti` recording gap is closed -- rewrite this test to assert the \
          iter/next pair shares one expression and stays distinct. Got {witnesses:?}"
     );
-    // The body IS lowered and DOES contain calls -- so the emptiness above is a
-    // classification gap, not an empty fixture.
-    assert!(!s.is_empty(), "fixture produced no sites at all, so it pins nothing");
 }
 
 /// The same expression reached under different operations stays distinct even
@@ -235,6 +246,110 @@ fn main() { print("{top(3)}") }
             mf.site_owners.len()
         );
     }
+}
+
+/// A synthesized column-storage call joins ONLY under its own operation.
+///
+/// A column-stored `Map` rewrites `m[k] = v` and `table_unset` into runtime
+/// entries (`__map_col_slot`, `__map_col_free`). Those calls live at the SAME
+/// expression as the source operation, so stamping them `DirectCall` makes them
+/// collide with that expression's real callee -- and the callee check then
+/// reports a mismatch rather than a join.
+///
+/// This is the control that dies when `SiteOp` is discarded: without the
+/// operation half these sites resolve to the source call's callee and disagree
+/// with the runtime entry they actually target.
+#[test]
+fn a_synthesized_column_call_joins_under_its_own_operation() {
+    let c = census_of(
+        r#"
+value Tile { a: float, b: float }
+
+fn build() -> int {
+    let m: Map<string, Tile> = map_new()
+    m["x"] = Tile { a: 1, b: 2 }
+    m["y"] = Tile { a: 3, b: 4 }
+    let n = len(m)
+    clear(m)
+    return n
+}
+fn main() { print("{build()}") }
+"#,
+    );
+    assert!(c.accounts(), "accounting identity broken: {c:?}");
+    // The fixture must actually produce synthesized sites, or it proves nothing
+    // about the operation half.
+    let synthesized_unjoined = c.unjoined_by_op.get("synthesized").copied().unwrap_or(0);
+    assert!(
+        c.joined > 0,
+        "nothing joined, so this cannot distinguish an operation failure: {c:?}"
+    );
+    // No synthesized site may be a callee MISMATCH: that is the exact symptom of
+    // the operation being dropped.
+    let mismatches = c.unjoined.get(&Unjoined::CalleeMismatch).copied().unwrap_or(0);
+    assert_eq!(
+        mismatches, 0,
+        "a call resolved to a callee it does not target -- the site operation is not \
+         distinguishing synthesized runtime entries from their source call \
+         (synthesized unjoined = {synthesized_unjoined}): {c:?}"
+    );
+}
+
+/// SENTINEL -- flip when specialization becomes total (mono Stage 3, cut C).
+///
+/// The SUBSTITUTION half of the owner, which the non-generic inlining control
+/// above cannot reach: one GENERIC `@inline` declaration instantiated at two
+/// concrete types in ONE caller. CORRECT behavior is two owner entries with
+/// distinct, non-empty substitutions, because both snapshots splice into the
+/// same body and index the same expression arena -- the substitution is the
+/// only thing that tells their sites apart.
+///
+/// TODAY both call sites splice the SAME shared generic snapshot, under the
+/// EMPTY substitution, so there is ONE `wrap` owner and it is not an instance
+/// at all. This is the minimal reproduction of the corpus's largest unjoined
+/// bucket (`owner-not-an-instance`), and it is exactly why instance-owned
+/// definition emission must not land first: a spliced generic call has no
+/// concrete owner to attribute it to.
+///
+/// When specialization is total this goes red: assert two `wrap` owners, with
+/// distinct and non-empty substitutions.
+#[test]
+fn an_inlined_generic_splices_one_shared_snapshot_sentinel() {
+    let ws = check(
+        r#"
+@inline
+fn wrap<T>(x: T) -> T { return id2(x) }
+fn id2<T>(x: T) -> T { return x }
+
+fn top() -> int {
+    let a = wrap(1)
+    let b = wrap(Vec2 { x: 1, y: 2 })
+    return a + int(b.x)
+}
+fn main() { print("{top()}") }
+"#,
+    );
+    let mf = prepared_body(&ws, "top");
+    let wrap_substs: Vec<&skull_mir::monoty::MonoSubst> = mf
+        .site_owners
+        .iter()
+        .filter(|o| ws.module(o.func.module).functions[o.func.func].name.as_str() == "wrap")
+        .map(|o| &o.subst)
+        .collect();
+    // The fixture must actually splice `wrap`, or it pins nothing.
+    assert_eq!(
+        wrap_substs.len(),
+        1,
+        "PINNED: both instantiations splice ONE shared snapshot. Two entries means \
+         specialization went total -- flip this test to assert distinct, non-empty \
+         substitutions. Got {wrap_substs:?}"
+    );
+    assert!(
+        wrap_substs[0].is_empty(),
+        "PINNED: the spliced `wrap` carries the EMPTY substitution (the shared generic \
+         snapshot). A non-empty one means the splice is now instance-concrete -- flip \
+         this test."
+    );
 }
 
 /// Every call instruction that survives to the emitted body carries a site.
@@ -327,9 +442,16 @@ fn use_both() -> int {
 fn main() { print("{use_both()}") }
 "#,
     );
-    // Whatever the counts, nothing may join through an owner the graph does not
-    // have: `owner-not-an-instance` is a refusal, never a silent match.
     assert!(c.accounts(), "accounting identity broken: {c:?}");
+    // The REFUSAL population must be non-zero, or this test passes without ever
+    // exercising a shared generic splice -- the exact thing it claims to cover.
+    let refused = c.unjoined.get(&Unjoined::OwnerNotAnInstance).copied().unwrap_or(0);
+    assert!(
+        refused > 0,
+        "no shared-generic splice was refused, so the fail-closed path is untested: {c:?}"
+    );
+    // And nothing may reach past the owner table: that would be a guess, not a
+    // refusal.
     let guessed = c.unjoined.get(&Unjoined::OwnerNotInTable).copied().unwrap_or(0);
     assert_eq!(guessed, 0, "an owner index escaped its table: {c:?}");
 }
