@@ -381,6 +381,24 @@ pub fn generic_var_of(ws: &Workspace, inf: &BodyInference, ty: TyId) -> Option<V
     }
 }
 
+/// The `VarId` an INFERENCE variable's `TyId` names, read straight out of the
+/// body's own arena.
+///
+/// The `Infer` twin of [`generic_var_of`], for the slots a struct's defaults
+/// body publishes. Deliberately does NOT chase `substitutions`: a slot that
+/// inference already solved is not a hole a caller may fill, and binding it
+/// would overwrite the solution.
+pub fn infer_var_of(inf: &BodyInference, ty: TyId) -> Option<VarId> {
+    let idx = match ty {
+        TyId::Local(idx) => idx,
+        TyId::Static(..) => return None,
+    };
+    match inf.ty_arena[idx] {
+        TypeExpr::Infer(var, _) => Some(var),
+        _ => None,
+    }
+}
+
 /// Interning arena. Structural equality is the interning key, so
 /// `a == b` iff the two types are equal.
 #[derive(Default, Debug)]
@@ -547,8 +565,24 @@ fn convert_at<S: std::hash::BuildHasher>(
             BuiltinTy::Error => return Err(MonoTyReason::RecoveryError),
         },
         TypeExpr::Infer(var, name) => {
-            let next = inf.substitutions.get(var).ok_or(MonoTyReason::UnresolvedInfer(name))?;
-            return convert_at(ws, inf, next, subst, depth + 1, bound);
+            // An unbound var the CALLER can answer. A struct's field default is
+            // checked with the struct's declared generics replaced by fresh
+            // inference vars, so the type an injection has to resolve is an
+            // `Infer`, not a `Generic` -- the caller binds those slots from the
+            // literal's arguments (`Builder::with_struct_default`).
+            //
+            // Safe to consult one map for both arms: `Gamma` mints inference
+            // vars from `lower_var_high_water` up, so a `VarId` is a declared
+            // generic or an inference var, never both.
+            match inf.substitutions.get(var) {
+                Some(next) => return convert_at(ws, inf, next, subst, depth + 1, bound),
+                None => {
+                    let bound_to =
+                        subst.get(&var).cloned().ok_or(MonoTyReason::UnresolvedInfer(name))?;
+                    *bound += 1;
+                    return Ok(bound_to);
+                }
+            }
         }
         TypeExpr::Generic(var, name) => {
             let bound_to = subst.get(&var).cloned().ok_or(MonoTyReason::UnboundGeneric(name))?;

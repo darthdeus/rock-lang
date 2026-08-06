@@ -1172,6 +1172,7 @@ pub fn lower_function_spec(
         ws,
         scx,
         spec_subst: subst,
+        struct_default_subst: None,
         generic_bounds: &func.generic_bounds,
         body,
         inf,
@@ -1255,6 +1256,7 @@ pub fn lower_global(
         ws,
         scx,
         spec_subst: &empty_subst,
+        struct_default_subst: None,
         generic_bounds: &[],
         body,
         inf,
@@ -1331,6 +1333,7 @@ pub fn lower_decorator(
         ws,
         scx,
         spec_subst: &empty_subst,
+        struct_default_subst: None,
         generic_bounds: &[],
         body,
         inf,
@@ -1383,6 +1386,18 @@ struct Builder<'a> {
     /// so type resolution (`type_of`/`native_buffer_alloc_ctype`/param shapes)
     /// sees the concrete type and the body scalarizes.
     spec_subst: &'a SpecSubst,
+    /// While a struct-default initializer is being lowered: the declaring
+    /// struct's generic slots bound to the LITERAL's concrete arguments,
+    /// REPLACING [`Self::spec_subst`] rather than extending it.
+    ///
+    /// It replaces because the two are keyed in different bodies. A defaults
+    /// body is a body of its own, and [`Builder::with_struct_default`] swaps
+    /// `body`/`inf` to it; the enclosing instance's substitution names the
+    /// enclosing fn's generics, which mean nothing there.
+    ///
+    /// Read through [`Self::subst`], never directly -- a reader that takes
+    /// `spec_subst` while this is set resolves against the wrong body.
+    struct_default_subst: Option<SpecSubst>,
     /// The enclosing fn's `generic_bounds`, parallel to its `generics`:
     /// `Some(elem)` where a generic is declared `I: Iterator<elem>`. THE declared
     /// source for a placeholder `next`'s element shape -- the call's inferred
@@ -1566,7 +1581,7 @@ impl Builder<'_> {
                     crate::site::CallSite {
                         owner,
                         site: crate::site::Site {
-                            domain: self.cur_domain,
+                            domain: self.cur_domain.clone(),
                             expr,
                             op: self.cur_op.clone(),
                         },
@@ -1581,12 +1596,21 @@ impl Builder<'_> {
     /// predicate below is a delegate: `DispatchCtx` is the one implementation,
     /// so the instance walk asking the same question cannot get a second answer
     /// (`skull_mir::lower::dispatch`).
+    /// The substitution in force: the struct-default override when one is
+    /// installed, else this instance's own.
+    ///
+    /// One oracle, because the two are keyed in DIFFERENT bodies -- see
+    /// [`Self::struct_default_subst`]. Every reader goes through here.
+    pub(crate) fn subst(&self) -> &SpecSubst {
+        self.struct_default_subst.as_ref().unwrap_or(self.spec_subst)
+    }
+
     pub(crate) fn dispatch(&self) -> dispatch::DispatchCtx<'_> {
         dispatch::DispatchCtx {
             ws: self.ws,
             inf: self.inf,
             body: self.body,
-            subst: self.spec_subst,
+            subst: self.subst(),
             values_first_class: self.scx.values_first_class,
         }
     }

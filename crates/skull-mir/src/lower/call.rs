@@ -479,7 +479,7 @@ impl Builder<'_> {
     ) -> Result<Option<crate::monoty::MonoSubst>, CompilerError> {
         match self.inf {
             Some(inf) => {
-                crate::lower::shape::callee_instance_subst(self.ws, inf, e, func, self.spec_subst)
+                crate::lower::shape::callee_instance_subst(self.ws, inf, e, func, self.subst())
             }
             None => Ok(None),
         }
@@ -496,7 +496,7 @@ impl Builder<'_> {
             inf,
             e,
             func,
-            self.spec_subst,
+            self.subst(),
             self.scx.target,
             self.scx.total_specialization(),
         )?;
@@ -551,7 +551,7 @@ impl Builder<'_> {
         }
         if crate::ablation::enabled() && spec.is_none() {
             if let Some((category, detail)) =
-                crate::lower::shape::ablation_decline(self.ws, inf, e, func, self.spec_subst)
+                crate::lower::shape::ablation_decline(self.ws, inf, e, func, self.subst())
             {
                 let callee = &self.ws.module(func.module).functions[func.func];
                 crate::ablation::record(
@@ -621,7 +621,7 @@ impl Builder<'_> {
         span: bone_semantic::prelude::Span,
     ) -> Result<Option<SpecKey>, CompilerError> {
         let Some(inf) = self.inf else { return Ok(None) };
-        let key = spec_key_from_next_generics(self.ws, inf, func, next_generics, self.spec_subst)?;
+        let key = spec_key_from_next_generics(self.ws, inf, func, next_generics, self.subst())?;
         let callee = &self.ws.module(func.module).functions[func.func];
         if crate::ablation::enabled() && !callee.generics.is_empty() {
             crate::ablation::note_examined();
@@ -631,7 +631,7 @@ impl Builder<'_> {
                     inf,
                     func,
                     next_generics,
-                    self.spec_subst,
+                    self.subst(),
                 ) {
                     crate::ablation::record(
                         category,

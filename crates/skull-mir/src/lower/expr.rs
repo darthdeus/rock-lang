@@ -1038,7 +1038,7 @@ impl Builder<'_> {
                 // the repr, and the join forwards that tag rather than minting
                 // `true` -- `a?.m()` is absent when either link is.
                 let ret_ty = self.ws.module(func.module).functions[func.func].return_ty;
-                match ret_ty.and_then(|t| tuple_ret_shape(self.ws, self.spec_subst, t)) {
+                match ret_ty.and_then(|t| tuple_ret_shape(self.ws, self.subst(), t)) {
                     Some(shape) => {
                         return Ok(self.emit_tuple_call_tree(
                             func, argv, &shape, None, key, callee_inst,

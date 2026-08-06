@@ -1298,7 +1298,7 @@ pub fn build(ws: &Workspace, roots: Vec<FuncRef>, perturb: bool) -> InstanceGrap
             let body = module.bodies.get(&owner);
             walk_body_edges(
                 &mut g, &mut work, ws, inf, body, None, &MonoSubst::default(), 0,
-                SiteDomain::Own, None,
+                &SiteDomain::Own, None,
             );
         }
     }
@@ -1328,7 +1328,7 @@ pub fn build(ws: &Workspace, roots: Vec<FuncRef>, perturb: bool) -> InstanceGrap
 
         walk_body_edges(
             &mut g, &mut work, ws, inf, Some(body), Some(&inst), &subst, depth,
-            SiteDomain::Own, None,
+            &SiteDomain::Own, None,
         );
         walk_struct_default_edges(&mut g, &mut work, ws, body, &inst, &subst, depth);
     }
@@ -1369,7 +1369,7 @@ fn walk_body_edges(
     // WHICH arena the sites recorded here index, and -- for a foreign one --
     // which of its expressions this owner actually reaches. `None` is the whole
     // body, which is what an own-domain walk always wants.
-    domain: SiteDomain,
+    domain: &SiteDomain,
     only: Option<&FxHashSet<Idx<bone_semantic::hir::Expr>>>,
 ) {
     let reached = |e: Idx<bone_semantic::hir::Expr>| only.is_none_or(|s| s.contains(&e));
@@ -1390,7 +1390,7 @@ fn walk_body_edges(
         let kind = if bindings.is_some() { EdgeKind::GenericCall } else { EdgeKind::DirectCall };
         if let Some(to) = record_call(
             g, work, ws, inf, from, subst, depth, callee, bindings, kind, span,
-            Site { domain, expr: e, op: SiteOp::DirectCall },
+            Site { domain: domain.clone(), expr: e, op: SiteOp::DirectCall },
         ) {
             resolved_calls.insert(e, to);
         }
@@ -1403,12 +1403,12 @@ fn walk_body_edges(
             if cf.generics.is_empty() {
                 record_call(
                     g, work, ws, inf, from, subst, depth, callee, None, EdgeKind::FnValue, span,
-                    Site { domain, expr: e, op: SiteOp::FnValue },
+                    Site { domain: domain.clone(), expr: e, op: SiteOp::FnValue },
                 );
             } else if let Some(from) = from {
                 g.record_site(
                     Some(from),
-                    Site { domain, expr: e, op: SiteOp::FnValue },
+                    Site { domain: domain.clone(), expr: e, op: SiteOp::FnValue },
                     SiteOutcome::Failed("generic-fn-value"),
                     span,
                 );
@@ -1471,7 +1471,7 @@ fn walk_body_edges(
         let generated = sites
             .into_iter()
             .map(|GeneratedSite { expr, name }| {
-                (Site { domain, expr, op: SiteOp::Synthesized(name) }, name, true)
+                (Site { domain: domain.clone(), expr, op: SiteOp::Synthesized(name) }, name, true)
             })
             .chain(dispatched)
             .filter(|(site, _, _)| reached(site.expr));
@@ -1520,7 +1520,7 @@ fn walk_body_edges(
         let span = body.and_then(|b| b.expr_spans.get(e).copied()).unwrap_or_else(Span::unknown);
         record_witness(
             g, work, ws, inf, from, subst, depth, witness, span, EdgeKind::ImplicitIter,
-            Site { domain, expr: e, op: SiteOp::ImplicitIter },
+            Site { domain: domain.clone(), expr: e, op: SiteOp::ImplicitIter },
         );
     }
 
@@ -1542,7 +1542,7 @@ fn walk_body_edges(
     bound_calls.sort_by_key(|(e, _)| *e);
     for (e, gidx) in bound_calls.into_iter().filter(|(e, _)| reached(*e)) {
         let span = body.and_then(|b| b.expr_spans.get(e).copied()).unwrap_or_else(Span::unknown);
-        let site = Site { domain, expr: e, op: SiteOp::DirectCall };
+        let site = Site { domain: domain.clone(), expr: e, op: SiteOp::DirectCall };
         let resolved = from
             .and_then(|i| g.bound_trees.get(i))
             .and_then(|tree| tree.next.get(&gidx))
@@ -1570,7 +1570,7 @@ fn walk_body_edges(
         if let Some(witness) = &info.iter {
             record_witness(
                 g, work, ws, inf, from, subst, depth, witness, span,
-                EdgeKind::IteratorIter, Site { domain, expr: e, op: SiteOp::ForIter },
+                EdgeKind::IteratorIter, Site { domain: domain.clone(), expr: e, op: SiteOp::ForIter },
             );
         }
         let _ = record_bound_next(
@@ -1841,27 +1841,51 @@ fn walk_struct_default_edges(
     depth: u32,
 ) {
     use bone_semantic::hir::Expr as E;
-    // One entry per (struct, omitted field) this instance reaches, deduplicated:
-    // two literals of one struct omitting one field are one obligation set.
-    // Keyed by module INDEX rather than `ModuleId`, which has no `Ord`; the
-    // `ModuleId` itself travels in the value so the domain keeps it.
+    // One entry per (struct, ARGUMENTS, omitted field) this instance reaches,
+    // deduplicated: two literals of one struct omitting one field are one
+    // obligation set, but `Box<int> {}` and `Box<string> {}` are two -- the
+    // initializers are shared text resolving different callees.
+    //
+    // Keyed by module INDEX rather than `ModuleId`, which has no `Ord`, and by
+    // the arguments' CANONICAL encoding, which is what identity keys on; the
+    // `ModuleId` and the arguments themselves travel in the value so the domain
+    // keeps them.
+    type Key = (usize, u32, Vec<String>);
     let mut omitted: BTreeMap<
-        (usize, u32),
-        (ModuleId, Idx<bone_semantic::hir::StructDef>, BTreeSet<ustr::Ustr>),
+        Key,
+        (
+            ModuleId,
+            Idx<bone_semantic::hir::StructDef>,
+            Vec<skull_mir::monoty::MonoTy>,
+            BTreeSet<ustr::Ustr>,
+        ),
     > = BTreeMap::new();
     // A DEFAULT can itself be a struct literal that omits a field --
     // `timers: MobTimers = MobTimers {}` inside `Mob`, whose own
     // `idle_timer = random_range(1, 4)` is the call two arenas down -- so the
     // scan is a worklist over bodies, not one pass over the instance's own.
-    let mut pending: Vec<(&Body, Option<FxHashSet<Idx<bone_semantic::hir::Expr>>>)> =
-        vec![(body, None)];
-    // How many omitted fields each struct was last scanned with. A second
-    // literal of one struct can omit a field the first wrote, so a set that
-    // GREW must be rescanned -- a plain visited-set would stop at the first
-    // literal and miss the sub-literals only the wider set reaches.
-    let mut scanned: BTreeMap<(usize, u32), usize> = BTreeMap::new();
-    while let Some((scan, reached)) = pending.pop() {
-        let mut fresh: Vec<(usize, u32)> = Vec::new();
+    //
+    // Each entry carries the inference and SUBSTITUTION in force for that body,
+    // exactly as `Builder::with_struct_default` nests them: a nested defaults
+    // body resolves under its own struct's slot bindings, not the outer one's.
+    let Some(top_inf) = ws.inference(inst.func.module).and_then(|ir| {
+        ir.per_fn.get(&BodyOwner::Function(inst.func.func))
+    }) else {
+        return;
+    };
+    let mut pending: Vec<(
+        &Body,
+        &BodyInference,
+        MonoSubst,
+        Option<FxHashSet<Idx<bone_semantic::hir::Expr>>>,
+    )> = vec![(body, top_inf, subst.clone(), None)];
+    // How many omitted fields each key was last scanned with. A second literal
+    // of one struct can omit a field the first wrote, so a set that GREW must be
+    // rescanned -- a plain visited-set would stop at the first literal and miss
+    // the sub-literals only the wider set reaches.
+    let mut scanned: BTreeMap<Key, usize> = BTreeMap::new();
+    while let Some((scan, scan_inf, scan_subst, reached)) = pending.pop() {
+        let mut fresh: Vec<Key> = Vec::new();
         for (e, expr) in scan.expr_arena.iter() {
             if reached.as_ref().is_some_and(|r| !r.contains(&e)) {
                 continue;
@@ -1873,38 +1897,58 @@ fn walk_struct_default_edges(
                 continue;
             }
             let Some(sid) = ws.struct_by_name.get(name) else { continue };
+            // The same oracle lowering stamps the domain with, INCLUDING its
+            // shared-body fallback -- a literal keyed one way here and the
+            // other way there would report a hole that is really a
+            // disagreement. A hard error records no obligation: lowering
+            // rejects that program outright, so there is nothing to join.
+            let generics = skull_mir::struct_defaults::declared_generics(ws, *sid);
+            let Ok(args) = skull_mir::struct_defaults::args_at(
+                ws, scan_inf, &scan_subst, e, *name, generics,
+            ) else {
+                continue;
+            };
+            let args = args.to_vec();
             let written: BTreeSet<ustr::Ustr> =
                 fields.clone().map(|f| scan.struct_lit_field_arena[f].name).collect();
             let decl = &ws.modules[sid.module.index()].structs[sid.def];
-            let key = (sid.module.index(), sid.def.into_raw().into_u32());
+            let key: Key = (
+                sid.module.index(),
+                sid.def.into_raw().into_u32(),
+                args.iter().map(|a| a.canonical()).collect(),
+            );
             for f in &decl.fields {
                 if !written.contains(&f.name) && f.has_default {
                     omitted
-                        .entry(key)
-                        .or_insert_with(|| (sid.module, sid.def, BTreeSet::new()))
-                        .2
+                        .entry(key.clone())
+                        .or_insert_with(|| (sid.module, sid.def, args.clone(), BTreeSet::new()))
+                        .3
                         .insert(f.name);
                 }
             }
-            let now = omitted.get(&key).map(|(_, _, f)| f.len()).unwrap_or(0);
-            if now > 0 && scanned.insert(key, now).unwrap_or(0) < now {
+            let now = omitted.get(&key).map(|(_, _, _, f)| f.len()).unwrap_or(0);
+            if now > 0 && scanned.insert(key.clone(), now).unwrap_or(0) < now {
                 fresh.push(key);
             }
         }
         for key in fresh {
-            let (module, def, fields) = &omitted[&key];
+            let (module, def, args, fields) = &omitted[&key];
             let owner = BodyOwner::StructDefaults(*def);
             let Some(defaults) = ws.modules[module.index()].bodies.get(&owner) else { continue };
+            let Some(dinf) = ws.inference(*module).and_then(|ir| ir.per_fn.get(&owner)) else {
+                continue;
+            };
             let mut sub: FxHashSet<Idx<bone_semantic::hir::Expr>> = FxHashSet::default();
             for f in fields {
                 let Some(root) = defaults.field_defaults.get(f) else { continue };
                 sub.extend(crate::expr_subtree::expr_subtree(defaults, *root));
             }
-            pending.push((defaults, Some(sub)));
+            let inner = skull_mir::struct_defaults::slot_subst(Some(dinf), args);
+            pending.push((defaults, dinf, inner, Some(sub)));
         }
     }
 
-    for (_, (module, def, fields)) in omitted {
+    for (_, (module, def, args, fields)) in omitted {
         let owner = BodyOwner::StructDefaults(def);
         let Some(defaults) = ws.modules[module.index()].bodies.get(&owner) else { continue };
         let Some(inf) = ws.inference(module).and_then(|ir| ir.per_fn.get(&owner)) else {
@@ -1915,6 +1959,9 @@ fn walk_struct_default_edges(
             let Some(root) = defaults.field_defaults.get(f) else { continue };
             reached.extend(crate::expr_subtree::expr_subtree(defaults, *root));
         }
+        // The initializers resolve under the STRUCT's slot bindings, not the
+        // enclosing instance's -- the two are keyed in different bodies.
+        let inner = skull_mir::struct_defaults::slot_subst(Some(inf), &args);
         walk_body_edges(
             g,
             work,
@@ -1922,9 +1969,9 @@ fn walk_struct_default_edges(
             inf,
             Some(defaults),
             Some(inst),
-            subst,
+            &inner,
             depth,
-            SiteDomain::StructDefaults(module, def),
+            &SiteDomain::StructDefaults(module, def, args),
             Some(&reached),
         );
     }
@@ -1949,10 +1996,10 @@ fn record_bound_next(
     kind: EdgeKind,
     expr: Idx<bone_semantic::hir::Expr>,
     root: BoundRoot,
-    domain: SiteDomain,
+    domain: &SiteDomain,
     path: &[usize],
 ) -> Option<InstanceBoundNext> {
-    let site = root.site(domain, expr, path.to_vec());
+    let site = root.site(domain.clone(), expr, path.to_vec());
     if let BoundNext::CallerGeneric(gidx) = next {
         let resolved = from
             .and_then(|i| g.bound_trees.get(i))
@@ -2063,7 +2110,7 @@ fn walk_bound_tree(
     span: Span,
     expr: Idx<bone_semantic::hir::Expr>,
     root: BoundRoot,
-    domain: SiteDomain,
+    domain: &SiteDomain,
     path: &[usize],
 ) -> InstanceBoundTree {
     let mut resolved = InstanceBoundTree::default();
@@ -2463,7 +2510,7 @@ fn dispatched_sites(
     inf: &BodyInference,
     body: &bone_semantic::hir::Body,
     subst: &MonoSubst,
-    domain: SiteDomain,
+    domain: &SiteDomain,
 ) -> Vec<(Site, &'static str)> {
     use bone_semantic::hir::{BinOp, Expr as E, InterpPart};
     let dcx = skull_mir::lower::DispatchCtx {
@@ -2483,7 +2530,7 @@ fn dispatched_sites(
                     };
                     for (path, name) in dcx.hole_plan(*hole, spec.as_ref()).obligations() {
                         out.push((
-                            Site { domain, expr: *hole, op: SiteOp::Dispatched { name, path } },
+                            Site { domain: domain.clone(), expr: *hole, op: SiteOp::Dispatched { name, path } },
                             name,
                         ));
                     }
@@ -2492,7 +2539,7 @@ fn dispatched_sites(
             E::BinOp { op: op @ (BinOp::Eq | BinOp::NotEq), lhs, rhs } => {
                 if let Some(name) = dcx.eq_route(*lhs, *rhs).synthesized_callee(*op) {
                     out.push((
-                        Site { domain, expr: e, op: SiteOp::Dispatched { name, path: Vec::new() } },
+                        Site { domain: domain.clone(), expr: e, op: SiteOp::Dispatched { name, path: Vec::new() } },
                         name,
                     ));
                 }

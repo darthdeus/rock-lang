@@ -35,6 +35,12 @@ fn check(src: &str) -> Workspace {
     bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass")
 }
 
+/// An instance's arguments as one string, for comparison and for a failure
+/// message that names what was found rather than an opaque id.
+fn render_args(g: &InstanceGraph, args: &[skull_mir::monoty::MonoTyId]) -> String {
+    args.iter().map(|a| g.arena.render(*a)).collect::<Vec<_>>().join(",")
+}
+
 fn graph_of(ws: &Workspace) -> InstanceGraph {
     let roots = instance_graph::emission_roots(ws, None);
     instance_graph::build(ws, roots, false)
@@ -71,7 +77,7 @@ fn prepared_body(ws: &Workspace, name: &str) -> MirFunc {
 fn stamped_domains(ws: &Workspace, name: &str) -> Vec<(SiteDomain, u32)> {
     fn walk(mf: &MirFunc, out: &mut Vec<(SiteDomain, u32)>) {
         for c in mf.call_sites.values() {
-            out.push((c.site.domain, c.site.expr.into_raw().into_u32()));
+            out.push((c.site.domain.clone(), c.site.expr.into_raw().into_u32()));
         }
         for nf in &mf.nested_fns {
             walk(nf, out);
@@ -328,47 +334,29 @@ fn main() { let c = Cfg { m: 1 } print("{c.a + c.m}") }
 // PINNED BUG: a generic struct's field default names no instance
 // ---------------------------------------------------------------------------
 
-/// PINNED BUG. A generic struct's field DEFAULT is injected once per literal,
-/// but the injections are indistinguishable and neither of them names a
-/// concrete instance.
+/// A generic struct's field DEFAULT names ONE concrete instance per literal.
 ///
 /// `struct Box<T> { value: T? = seed() }` with `let a: Box<int> = Box {}` and
-/// `let b: Box<string> = Box {}` is a legal program that compiles and runs. Two
-/// `seed()` call instructions reach MIR. What SHOULD happen is that each names
-/// its own instance -- `seed<int>` and `seed<string>` -- and joins.
+/// `let b: Box<string> = Box {}` injects the same initializer twice, and the
+/// two injections resolve `seed<int>` and `seed<string>`.
 ///
-/// What happens today, measured rather than assumed:
+/// Three things have to hold together for that, and each is asserted here
+/// because any one of them alone reads as success:
 ///
-/// - bone DOES propagate the field's declared type into the initializer.
-///   `check_struct_defaults` instantiates the struct's generics to FRESH
-///   inference variables, substitutes the field type through that map, and
-///   `coerce`s the default against it, so the callee's generic and the field's
-///   `T` end up in ONE symbolic inference class -- asserted in
-///   `struct_default_generic_relation.rs`.
-/// - what is missing is a durable relation from that class back to the
-///   struct's declared generic SLOT: the map is local to the check and is not
-///   published, so a consumer holding `Box<int>` cannot resolve it. Carrying
-///   the struct's substitution into the defaults body therefore cannot fix
-///   this -- there is no `Generic` node left to substitute, only an inference
-///   variable nothing can name.
-/// - so `monoty::convert` answers `unresolved-infer`, lowering emits a call to
-///   the SHARED generic body (`seed_ret_T_opt`) for both literals, and the walk
-///   records an obligation it cannot resolve and reports a
-///   `UnconstrainedTypeVar` rejection against a legal program.
-/// - `SiteDomain::StructDefaults` keys on the struct DECLARATION, so both
-///   injections collapse onto one obligation and the census reports two
-///   `site-not-in-body` rows.
+/// - bone publishes the fresh inference var each declared generic was
+///   instantiated to (`BodyInference::struct_default_generic_slots`), so the
+///   defaults body's open class can be named from outside -- the relation
+///   itself is asserted in `struct_default_generic_relation.rs`;
+/// - lowering binds those slots to the LITERAL's arguments, so
+///   `monoty::convert` resolves instead of answering `unresolved-infer`;
+/// - `SiteDomain::StructDefaults` carries the arguments, so the two injections
+///   are two obligations rather than one read twice.
 ///
-/// Publishing that relation is `bone-inference`'s, which is author-owned, so
-/// this is pinned rather than fixed. It is a REAL prerequisite for the
-/// instance-owned emission cut: that cut requires every direct call to name
-/// exactly one concrete instance, and here none is determined.
-///
-/// **When this goes red the gap closed.** Flip every assertion below to its
-/// stated correct form -- 0 `site-not-in-body`, 0 rejections, and two DISTINCT
-/// `SiteDomain::StructDefaults` args -- in the same commit as the fix.
+/// The last is why the ARGUMENTS are compared separately below: both injections
+/// lower one expression in one arena, so two domains that differ anywhere else
+/// would not be differing by instantiation.
 #[test]
-fn a_generic_structs_field_default_names_no_instance_sentinel() {
+fn a_generic_structs_field_default_names_its_own_instance() {
     let src = r#"
 fn seed<T>() -> T? { return null }
 
@@ -396,30 +384,69 @@ fn main() {
          measured over the defect: {stamped:?}"
     );
 
-    // PINNED (BUG): the two injections carry the SAME site, because the domain
-    // keys on the struct declaration and not on its instantiation. CORRECT
-    // would be `assert_ne!` -- `Box<int>` and `Box<string>` are two
-    // instantiations of one defaults body.
-    assert_eq!(
+    // The two injections carry DIFFERENT sites: the domain keys on the
+    // instantiation, so `Box<int>` and `Box<string>` are two obligations over
+    // one defaults body rather than one obligation read twice.
+    assert_ne!(
         defaults[0], defaults[1],
-        "PINNED BEHAVIOR (BUG): two instantiations of one generic struct's \
-         defaults share one site. If these now differ, the domain became \
-         instance-aware -- flip to assert_ne! and expect two obligations."
+        "two instantiations of one generic struct's defaults collapsed onto one \
+         site, so the second silently reads the first's callee"
     );
+
+    // And they differ in the ARGUMENTS, not merely in the expression index --
+    // both injections lower the same initializer expression, so a difference
+    // anywhere else would not be the instantiation.
+    let args: Vec<&Vec<skull_mir::monoty::MonoTy>> = defaults
+        .iter()
+        .map(|(d, _)| match d {
+            SiteDomain::StructDefaults(_, _, a) => a,
+            SiteDomain::Own => unreachable!("filtered above"),
+        })
+        .collect();
+    assert_eq!(defaults[0].1, defaults[1].1, "same initializer expression");
+    assert_ne!(args[0], args[1], "the domains differ somewhere other than the arguments");
 
     let c = census_of(src);
     assert!(c.accounts(), "accounting identity broken: {c:?}");
-    // PINNED (BUG): CORRECT would be 0. Both calls reach MIR with no obligation
-    // the walk can resolve for them.
     assert_eq!(
         unjoined(&c, Unjoined::SiteNotInBody),
-        2,
-        "PINNED BEHAVIOR (BUG): a generic struct default's calls do not join. \
-         If this is now 0, the instantiation is decided -- flip to 0."
+        0,
+        "a generic struct default's calls must join: {c:?}"
     );
 
-    // PINNED (BUG): the walk rejects a LEGAL program. CORRECT would be 0
-    // rejections.
+    // LOWERING's side: both calls named a concrete instantiation and it AGREED
+    // with the graph's. `joined_instance_verified` is the only arm that says so
+    // -- distinct sites are not the property, and two distinct sites both
+    // resolving the SHARED generic body satisfy every other assertion here.
+    // Measured: emptying lowering's slot substitution while leaving the domain
+    // key intact moves this 2 -> 0 and `CalleeNoInstance` 0 -> 2, and changes
+    // nothing else in the census.
+    assert_eq!(c.joined_instance_verified, 2, "{c:?}");
+    assert_eq!(unjoined(&c, Unjoined::CalleeNoInstance), 0, "{c:?}");
+
+    // THE WALK's side, which is a second derivation and can fail alone: two
+    // distinct concrete `seed` instances exist at all.
+    let g2 = graph_of(&check(src));
+    let seeds: Vec<&Vec<skull_mir::monoty::MonoTyId>> = g2
+        .instances
+        .iter()
+        .filter(|i| {
+            ws.module(i.func.module).functions[i.func.func].name.as_str() == "seed"
+        })
+        .map(|i| &i.args)
+        .collect();
+    assert_eq!(
+        seeds.len(),
+        2,
+        "expected `seed<int>` and `seed<string>`, got {}: {:?}",
+        seeds.len(),
+        seeds.iter().map(|a| render_args(&g2, a)).collect::<Vec<_>>()
+    );
+    let mut rendered: Vec<String> = seeds.iter().map(|a| render_args(&g2, a)).collect();
+    rendered.sort();
+    assert_eq!(rendered, vec!["int".to_string(), "string".to_string()]);
+
+    // The program is LEGAL, so the walk rejects nothing.
     let g = graph_of(&ws);
     let unconstrained = g
         .rejections
@@ -429,11 +456,10 @@ fn main() {
         })
         .count();
     assert_eq!(
-        unconstrained, 1,
-        "PINNED BEHAVIOR (BUG): a legal generic-struct default is reported as \
-         an unconstrained type variable. If this is now 0, the defaults \
-         inference class became resolvable from the literal's arguments -- flip \
-         to 0."
+        unconstrained, 0,
+        "a legal generic-struct default is reported as an unconstrained type \
+         variable: {:?}",
+        g.rejections
     );
 }
 
@@ -529,3 +555,4 @@ fn main() {{
         "injecting the defaults changed the unjoined population"
     );
 }
+

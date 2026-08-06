@@ -192,6 +192,7 @@ impl Builder<'_> {
             ws: self.ws,
             scx: self.scx,
             spec_subst: self.spec_subst,
+            struct_default_subst: self.struct_default_subst.clone(),
             generic_bounds: self.generic_bounds,
             body: self.body,
             inf: self.inf,

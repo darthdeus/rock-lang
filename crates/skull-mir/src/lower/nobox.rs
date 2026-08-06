@@ -266,7 +266,7 @@ impl Builder<'_> {
         let inf = self
             .inf
             .ok_or_else(|| refuse("this body has no inference".into()))?;
-        let mut subst = self.spec_subst.clone();
+        let mut subst = self.subst().clone();
         // Why a generic could NOT be converted, kept per name rather than acted
         // on here: a generic the slot does not mention is none of its business,
         // and rejecting in this loop would let an unrelated variable disarm the
@@ -278,7 +278,7 @@ impl Builder<'_> {
                 unconverted.push((name, "no recorded binding"));
                 continue;
             };
-            match crate::monoty::convert(self.ws, inf, bound, &self.spec_subst) {
+            match crate::monoty::convert(self.ws, inf, bound, &self.subst()) {
                 Ok(m) => {
                     subst.insert(var, m);
                 }

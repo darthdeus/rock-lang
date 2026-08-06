@@ -220,7 +220,7 @@ impl Builder<'_> {
                         inf,
                         iter_ref,
                         &w.generics,
-                        self.spec_subst,
+                        self.subst(),
                     )? {
                         self.f.callee_instances.insert(
                             call,
@@ -323,7 +323,7 @@ impl Builder<'_> {
                         inf,
                         func,
                         next_generics,
-                        self.spec_subst,
+                        self.subst(),
                     )? {
                         self.f
                             .callee_instances

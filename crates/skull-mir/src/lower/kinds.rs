@@ -35,7 +35,7 @@ impl Builder<'_> {
             // guarantee violation. An UNSUBSTITUTED generic stays boxed on
             // purpose -- the shared snapshot must keep the representation every
             // instantiation can read.
-            TypeExpr::Generic(var, _) => match self.spec_subst.get(&var) {
+            TypeExpr::Generic(var, _) => match self.subst().get(&var) {
                 Some(ty) => ty.nominal()?,
                 _ => return None,
             },
@@ -58,7 +58,7 @@ impl Builder<'_> {
         let elem = self.resolve_tyid(ty.with_idx(p))?;
         let en = match self.ty_node(elem)? {
             TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => n,
-            TypeExpr::Generic(var, _) => match self.spec_subst.get(&var) {
+            TypeExpr::Generic(var, _) => match self.subst().get(&var) {
                 Some(ty) => ty.nominal()?,
                 _ => return None,
             },
@@ -168,7 +168,7 @@ impl Builder<'_> {
                 "cannot decide container storage: bone typed no expression here".to_string(),
             ));
         };
-        match crate::monoty::convert(self.ws, inf, *ty, &self.spec_subst) {
+        match crate::monoty::convert(self.ws, inf, *ty, &self.subst()) {
             Ok(m) => Ok(Some(m)),
             Err(R::UnboundGeneric(_)) | Err(R::UnresolvedInfer(_)) => Ok(None),
             Err(r) => Err(CompilerError::new_with_label(
