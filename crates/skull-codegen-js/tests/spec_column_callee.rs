@@ -13,8 +13,6 @@
 //! the correct answer -- falling back to the boxed body died on
 //! `undefined._data`.
 
-use std::process::Command;
-
 use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::FuncRef;
 
@@ -46,7 +44,7 @@ fn main() { let _ = specialized() }
 "#;
 
 fn node_available() -> bool {
-    Command::new("node").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+    crate::common::node().arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
 }
 
 fn emit_js(name: &str) -> Result<String, String> {
@@ -114,7 +112,7 @@ fn a_specialized_column_call_round_trips_under_node() {
         skull_codegen_js::JS_CALL_HELPER,
         skull_codegen_js::JS_STRUCTURAL_EQ,
     );
-    let out = Command::new("node").arg("-e").arg(&program).output().expect("spawn node");
+    let out = crate::common::node().arg("-e").arg(&program).output().expect("spawn node");
     assert!(
         out.status.success(),
         "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",
@@ -148,7 +146,7 @@ fn a_column_sort_round_trips_on_js() {
         skull_codegen_js::JS_CALL_HELPER,
         skull_codegen_js::JS_STRUCTURAL_EQ,
     );
-    let out = Command::new("node").arg("-e").arg(&program).output().expect("spawn node");
+    let out = crate::common::node().arg("-e").arg(&program).output().expect("spawn node");
     assert!(
         out.status.success(),
         "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",

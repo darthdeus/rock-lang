@@ -697,6 +697,9 @@ var __ROCK_WEB_ASSETS = (typeof globalThis.__ROCK_WEB_ASSETS === "object" && glo
 var __SW = {
   gl: null, canvas: null,
   logicalW: 0, logicalH: 0, dpr: 1,
+  // GameConfig.resizable, carried from stone_create_window_ex: decides whether
+  // the drawable buffer follows the container (see __sw_sync_canvas_size).
+  resizable: false,
   initialized: false, quitReq: false, resized: false,
   events: [], mouseX: 0, mouseY: 0,
   // Polled input state (stone_is_key_down / _is_mouse_button_down): keyed by the
@@ -705,9 +708,9 @@ var __SW = {
   // one handle space for images AND canvas textures: handle -> WebGLTexture
   textures: {}, nextTex: 1, whiteImage: 0,
   // images: boot decodes path -> ImageBitmap (no GL yet); stone_load_image
-  // creates the GL texture lazily+synchronously (GL exists by @init) and caches
-  // path -> handle; handle -> {w,h} feeds get_image_size.
-  imageBitmaps: {}, imageHandles: {}, imageSizes: {},
+  // creates the GL texture lazily+synchronously (GL exists by @init).
+  // handle -> {w,h} feeds get_image_size.
+  imageBitmaps: {}, imageSizes: {},
   imageData: {}, nextImageData: 0, imageRepeat: {}, samplers: {},
   canvases: {}, nextCanvas: 1, boundCanvas: 0, // 0 = default framebuffer
   shaders: {}, nextShader: 1, curShader: 0,
@@ -822,6 +825,7 @@ function stone_get_backend_name_js() { return "stone-web"; }
 
 function stone_create_window_ex(title, x, y, width, height, display, resizable, fullscreen) {
   if (fullscreen) { __sw_log_once("stone_create_window_ex: fullscreen=" + fullscreen + " ignored; the browser only enters fullscreen from a user gesture, so the canvas boots windowed"); }
+  __SW.resizable = !!resizable;
   var fake = globalThis.__STONE_WEB_FAKE_ENV;
   if (fake) {
     __SW.gl = fake.gl;
@@ -878,6 +882,36 @@ function stone_create_window_ex(title, x, y, width, height, display, resizable, 
 
   __SW.initialized = true;
   return { __sw_window: true };
+}
+
+// Per-rAF: keep the drawable buffer at logical-extent x dpr.
+//
+// Only a RESIZABLE game takes its logical extent from the container. A
+// non-resizable one is authored in absolute pixels (games/sample-game-b,
+// games/sample-game lay out against a literal 1280x720) and a responsive
+// container would otherwise move screen_size() out from under it every frame.
+//
+// dpr is tracked for both: density changes the buffer's resolution, not the
+// logical extent games measure against, so honoring it costs a non-resizable
+// game nothing and is what keeps the output-density font atlas correct on HiDPI.
+function __sw_sync_canvas_size() {
+  var canvas = __SW.canvas;
+  if (!canvas || typeof window === "undefined") return;
+  var logicalW = __SW.logicalW;
+  var logicalH = __SW.logicalH;
+  if (__SW.resizable) {
+    var rect = canvas.getBoundingClientRect();
+    logicalW = Math.max(1, Math.round(rect.width));
+    logicalH = Math.max(1, Math.round(rect.height));
+  }
+  var dpr = window.devicePixelRatio || 1;
+  var drawableW = Math.round(logicalW * dpr);
+  var drawableH = Math.round(logicalH * dpr);
+  if (__SW.logicalW === logicalW && __SW.logicalH === logicalH && __SW.dpr === dpr
+      && canvas.width === drawableW && canvas.height === drawableH) return;
+  __SW.logicalW = logicalW; __SW.logicalH = logicalH; __SW.dpr = dpr;
+  canvas.width = drawableW; canvas.height = drawableH;
+  __SW.resized = true;
 }
 
 // --- events / input ---
@@ -1033,21 +1067,30 @@ function stone_get_image_size(img, pw, ph) {
   pw[0] = 1; ph[0] = 1; // white fallback / canvas texture default
 }
 
+// 0 = NEAREST, 1 = LINEAR. Anything else is a caller bug, not a default:
+// silently picking one filter is invisible until it magnifies. Twin of
+// stone-rs's gl_filter_for.
+function __sw_gl_filter(mode) {
+  var gl = __SW.gl;
+  if (mode === 0) return gl.NEAREST;
+  if (mode === 1) return gl.LINEAR;
+  throw new Error("unknown texture filter mode " + mode);
+}
 // Sync texture creation from a boot-decoded ImageBitmap (handle IS the texture,
 // js_ffi.rock:stone_get_image_texture identity). A registry miss is LOUD and
-// non-fatal -- returns the white pixel so image_set_wrap/get_image_size/draws
-// stay valid (the node fake-GL env has no fetch, so every load hits this rung).
+// returns 0, the same failure value stone-rs returns: handing back the WHITE
+// PIXEL's handle would attach the missing asset's declared filter to the shared
+// white pixel, so one absent Linear asset re-filtered every draw that uses it.
+// (The node fake-GL env has no fetch, so every load hits this rung.)
 function stone_load_image(path, filterMode) {
-  var cached = __SW.imageHandles[path];
-  if (cached !== undefined) return cached;
   var bmp = __SW.imageBitmaps[path];
   if (bmp === undefined) {
-    __sw_log_once("stone_load_image: no preloaded image for " + path + " (white fallback)");
-    return stone_get_white_image();
+    __sw_log_once("stone_load_image: no preloaded image for " + path);
+    return 0;
   }
   var gl = __SW.gl;
   var h = __sw_new_texture();
-  var filt = (filterMode === 0) ? gl.NEAREST : gl.LINEAR;
+  var filt = __sw_gl_filter(filterMode);
   gl.bindTexture(gl.TEXTURE_2D, __SW.textures[h]);
   gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, bmp);
@@ -1055,7 +1098,6 @@ function stone_load_image(path, filterMode) {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filt);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-  __SW.imageHandles[path] = h;
   __SW.imageSizes[h] = { w: bmp.width, h: bmp.height };
   return h;
 }
@@ -1119,7 +1161,7 @@ function stone_unload_image(h) {
   if (t && __SW.gl) __SW.gl.deleteTexture(t);
   delete __SW.textures[h];
   delete __SW.imageSizes[h];
-  for (var p in __SW.imageHandles) { if (__SW.imageHandles[p] === h) delete __SW.imageHandles[p]; }
+  delete __SW.imageRepeat[h];
 }
 function stone_reload_image(h, path) { return false; }
 // CPU-side pixel buffers (image_data.rs's twin). These were stubs returning 0,
@@ -1180,7 +1222,7 @@ function __sw_upload_image_data(h, d, fm) {
   gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, d.w, d.h, 0, gl.RGBA, gl.UNSIGNED_BYTE, d.px);
   if (fm >= 0) {
-    var filt = (fm === 1) ? gl.LINEAR : gl.NEAREST;
+    var filt = __sw_gl_filter(fm);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filt);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filt);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -1830,22 +1872,17 @@ function stone_draw_fullscreen_quad() {
 
 // --- text: canvas2d glyph atlas (MC, docs/stone-web-plan.md § text) ---
 // The boot preload registered each shipped TTF as a FontFace; the bake here
-// is synchronous canvas2d against that family. Eager + immutable, mirroring
-// native: all of ASCII 32..126 bakes once at stone_load_font (16 glyphs/row,
-// text.rs:261), no lazy glyphs, no mid-frame atlas mutation. Atlas pixels are
+// is synchronous canvas2d against that family. All of ASCII 32..126 bakes as
+// one 16-glyph-wide atlas; density changes explicitly rebake into the same
+// texture handle. Atlas pixels are
 // coverage-RGBA (r=g=b=a=coverage, built from the canvas ALPHA channel --
 // raw white fillText would give (1,1,1,cov), wrong rgb under tinting).
 // Metric bit-parity with fontdue is a NON-goal; invariants only.
 function __sw_font_path_key(path) { return String(path).replace(/^\.?\//, ""); }
-function stone_load_font(path, pixelSize) {
-  // The node fake-GL env has no DOM/canvas2d: fall back to a glyphless font
-  // (id, atlas = white pixel) so the boot's font gate passes headlessly.
+function __sw_bake_font(path, pixelSize, existingAtlas) {
   if (globalThis.__STONE_WEB_FAKE_ENV || typeof document === "undefined") {
     __sw_log_once("stone_load_font: no canvas2d in this environment -- glyphless fallback font");
-    __SW.fonts = __SW.fonts || {};
-    var fid0 = (__SW.nextFont = (__SW.nextFont || 0) + 1);
-    __SW.fonts[fid0] = { em: pixelSize, atlas: 0, glyphs: {}, maxH: pixelSize, fake: true };
-    return fid0;
+    return { em: pixelSize, atlas: existingAtlas || 0, glyphs: {}, maxH: pixelSize, fake: true, sourcePath: path };
   }
   var fams = __SW.fontFamilies || {};
   var fam = fams[__sw_font_path_key(path)];
@@ -1855,7 +1892,7 @@ function stone_load_font(path, pixelSize) {
   }
   if (!fam) {
     __sw_log_once("stone_load_font: no fonts were preloaded; text will not render");
-    return 0;
+    return null;
   }
 
   var mcanvas = document.createElement("canvas");
@@ -1919,7 +1956,7 @@ function stone_load_font(path, pixelSize) {
     rgba[p * 4] = cov; rgba[p * 4 + 1] = cov; rgba[p * 4 + 2] = cov; rgba[p * 4 + 3] = cov;
   }
   var gl = __SW.gl;
-  var texHandle = __sw_new_texture();
+  var texHandle = existingAtlas || __sw_new_texture();
   gl.bindTexture(gl.TEXTURE_2D, __SW.textures[texHandle]);
   gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, aw, ah, 0, gl.RGBA, gl.UNSIGNED_BYTE, rgba);
   var filter = gl.NEAREST; // sampling is per-draw sampler state (Font.sampling)
@@ -1927,17 +1964,46 @@ function stone_load_font(path, pixelSize) {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  __SW.imageSizes[texHandle] = { w: aw, h: ah };
+
+  return { em: pixelSize, atlas: texHandle, glyphs: glyphs, maxH: maxH, sourcePath: path };
+}
+
+function stone_load_font(path, pixelSize) {
+  var baked = __sw_bake_font(path, pixelSize, 0);
+  if (!baked) return 0;
 
   __SW.fonts = __SW.fonts || {};
   var fid = (__SW.nextFont = (__SW.nextFont || 0) + 1);
-  __SW.fonts[fid] = { em: pixelSize, atlas: texHandle, glyphs: glyphs, maxH: maxH };
-  console.log("[STONE-WEB] font atlas baked: " + infos.length + " glyphs @ " + pixelSize + "px (" + aw + "x" + ah + ")");
+  __SW.fonts[fid] = baked;
+  console.log("[STONE-WEB] font atlas baked @ " + pixelSize + "px");
   return fid;
 }
 function __sw_font(fontId) { return (__SW.fonts || {})[fontId]; }
+function stone_reload_font(fontId, path, pixelSize) {
+  var old = __sw_font(fontId);
+  if (!old || pixelSize < 1) return false;
+  var baked = __sw_bake_font(path, pixelSize, old.atlas);
+  if (!baked) return false;
+  __SW.fonts[fontId] = baked;
+  console.log("[STONE-WEB] font atlas rebaked @ " + pixelSize + "px");
+  return true;
+}
+function stone_resize_font(fontId, pixelSize) {
+  var old = __sw_font(fontId);
+  if (!old || pixelSize < 1) return false;
+  var baked = __sw_bake_font(old.sourcePath, pixelSize, old.atlas);
+  if (!baked) return false;
+  __SW.fonts[fontId] = baked;
+  console.log("[STONE-WEB] font atlas rebaked @ " + pixelSize + "px");
+  return true;
+}
+// 0 when the font has no atlas, matching stone-rs. Returning the WHITE PIXEL's
+// handle instead made the atlas share an identity with it, so a font declaring
+// Linear re-declared the shared white pixel for every other draw.
 function stone_get_font_atlas_image_for(fontId) {
   var f = __sw_font(fontId);
-  return f && f.atlas ? f.atlas : stone_get_white_image();
+  return f && f.atlas ? f.atlas : 0;
 }
 function stone_get_font_pixel_size_for(fontId) {
   var f = __sw_font(fontId);
@@ -2362,7 +2428,20 @@ function stone_set_fullscreen(mode) {
 // the font path then falls back exactly like native's embedded-fallback rung.
 function __rock_web_boot(mainFn) {
   var pre = typeof __ROCK_WEB_PRELOAD !== "undefined" ? __ROCK_WEB_PRELOAD : [];
-  if (globalThis.__STONE_WEB_FAKE_ENV || typeof fetch === "undefined" || pre.length === 0) {
+  var fakeEnv = globalThis.__STONE_WEB_FAKE_ENV;
+  // The node fake-GL smoke has no fetch, so nothing decodes and every load
+  // would be a genuine miss -- the smoke would measure the missing-asset path
+  // instead of the game. It opts into a 1x1 stub for the MANIFEST's images
+  // only: the fake GL ignores pixel content, and a path absent from the
+  // manifest still misses, so this cannot hide a bad asset path.
+  if (fakeEnv && fakeEnv.stubPreloadedImages) {
+    for (var pi = 0; pi < pre.length; pi++) {
+      if (/\.(png|jpe?g|gif|bmp|webp)$/i.test(pre[pi])) {
+        __SW.imageBitmaps[pre[pi]] = { width: 1, height: 1 };
+      }
+    }
+  }
+  if (fakeEnv || typeof fetch === "undefined" || pre.length === 0) {
     if (mainFn) mainFn();
     return;
   }
@@ -2382,7 +2461,7 @@ function __rock_web_boot(mainFn) {
       }
       // Decode images to ImageBitmaps now (no GL context yet); stone_load_image
       // uploads the GL texture lazily at @init. A per-image decode failure is
-      // loud but non-fatal -- that path falls back to the white pixel at load.
+      // loud but non-fatal -- that path returns handle 0 at load.
       if (/\.(png|jpe?g|gif|bmp|webp)$/i.test(path) && typeof createImageBitmap !== "undefined") {
         return createImageBitmap(new Blob([buf])).then(function (bmp) {
           __SW.imageBitmaps[path] = bmp;
@@ -2405,6 +2484,7 @@ function __rock_web_arm_raf(frameFn) {
   if (fake && fake.driveFrames) return; // harness drives frames itself
   function tick() {
     __SW.frames = (__SW.frames | 0) + 1; // driver-observable frame count (CDP smoke)
+    __sw_sync_canvas_size();
     var running = true;
     try { running = frameFn(); }
     catch (e) { console.error("[STONE-WEB] frame error:", e); running = false; }

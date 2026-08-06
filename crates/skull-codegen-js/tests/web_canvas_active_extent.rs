@@ -13,10 +13,8 @@
 //! than the active extent, so each one's bounds check and Y-flip are pinned
 //! independently of the game.
 
-use std::process::Command;
-
 fn node_available() -> bool {
-    Command::new("node").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+    crate::common::node().arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
 }
 
 const CAP_W: i32 = 1920;
@@ -53,7 +51,7 @@ process.stdout.write(JSON.stringify(out));
 "#,
         runtime = skull_codegen_js::JS_WEB_RUNTIME,
     );
-    let out = Command::new("node").arg("-e").arg(&program).output().expect("spawn node");
+    let out = crate::common::node().arg("-e").arg(&program).output().expect("spawn node");
     assert!(
         out.status.success(),
         "node failed:\n{}",

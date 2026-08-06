@@ -28,6 +28,8 @@ mod lambda;
 mod web_uniform_block_layout_check;
 #[path = "web_canvas_active_extent.rs"]
 mod web_canvas_active_extent;
+#[path = "web_canvas_resize_gate.rs"]
+mod web_canvas_resize_gate;
 #[path = "log_dedup.rs"]
 mod log_dedup;
 #[path = "loops.rs"]
