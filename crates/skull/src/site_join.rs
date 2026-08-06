@@ -90,9 +90,6 @@ pub enum Unjoined {
     /// so there is nothing to compare the reconstructed one against. An
     /// invariant finding about the GRAPH, not about the call.
     CalleeResolvedUnrecorded,
-    /// A call form `Builder::emit_cur` does not stamp (`CallBoundMulti`), so it
-    /// can carry no site at all.
-    UnstampedForm,
 }
 
 impl Unjoined {
@@ -108,7 +105,6 @@ impl Unjoined {
             Self::CalleeNoInstance => "callee-no-instance",
             Self::CalleeClaimDeclMismatch => "callee-claim-decl-mismatch",
             Self::CalleeResolvedUnrecorded => "callee-resolved-unrecorded",
-            Self::UnstampedForm => "unstamped-form",
         }
     }
 }
@@ -406,6 +402,13 @@ pub enum IndirectProducer {
     /// renders the value and spells nothing. This is the permanent non-direct
     /// class.
     RuntimeValue,
+    /// Not an operand at all: an `Inst::CallBoundMulti`, the `for` protocol's
+    /// `next` witness on the caller-generic path. It names no callee BY
+    /// CONSTRUCTION -- the concrete one is known only per instantiation, and the
+    /// inliner substitutes it from the site's `BoundTree` at the splice. A body
+    /// that still carries one may not be emitted at all, which is a separate
+    /// rejection and is why this can never reach a spelled symbol.
+    BoundPlaceholder,
 }
 
 impl IndirectProducer {
@@ -414,6 +417,7 @@ impl IndirectProducer {
             Self::NamedFunction => "named-function",
             Self::HoistedNestedFn => "hoisted-nested-fn",
             Self::RuntimeValue => "runtime-value",
+            Self::BoundPlaceholder => "bound-placeholder",
         }
     }
 }
@@ -499,10 +503,6 @@ struct CallRow {
     /// For an indirect call, what produced the callee operand. `None` for a
     /// direct call.
     producer: Option<IndirectProducer>,
-    /// A call form `Builder::emit_cur` does not stamp at all. Counted here so
-    /// it is a NAMED exclusion rather than an invisible one -- it was outside
-    /// the denominator entirely until it was measured.
-    unstamped_form: bool,
 }
 
 /// Every REACHABLE call instruction in `mf` and its nested (hoisted) bodies.
@@ -514,21 +514,25 @@ fn reachable_call_rows(mf: &MirFunc, out: &mut Vec<CallRow>) {
     for b in skull_mir::cfg::reachable_blocks_from(mf, mf.entry) {
         for &id in &mf.blocks[b].insts {
             let mut producer = None;
-            let (target, unstamped_form) = match &mf.insts[id] {
-                Inst::Call { func, .. } | Inst::CallMulti { func, .. } => (Some(*func), false),
+            let target = match &mf.insts[id] {
+                Inst::Call { func, .. } | Inst::CallMulti { func, .. } => Some(*func),
                 Inst::CallValue { callee, .. } | Inst::CallValueMulti { callee, .. } => {
                     let (p, fref) = indirect_producer(mf, *callee);
                     producer = Some(p);
                     // A minted workspace symbol IS a target: it is spelled, so
                     // it joins on the ordinary direct-call path rather than
                     // being admitted on the strength of the call FORM.
-                    (fref, false)
+                    fref
                 }
-                // Emitted by a bounded loop and NOT stamped by `emit_cur`, so
-                // it can never carry a site. In the denominator regardless: a
-                // call form outside the population is a silent hole, not a
-                // clean measurement.
-                Inst::CallBoundMulti { .. } => (None, true),
+                // The `for` protocol's `next` witness on the caller-generic
+                // path. It NAMES no callee -- the concrete one is only known per
+                // instantiation, and the inliner substitutes it at the splice --
+                // so it carries a site but no target, exactly like an indirect
+                // call, and is admitted under its own producer class.
+                Inst::CallBoundMulti { .. } => {
+                    producer = Some(IndirectProducer::BoundPlaceholder);
+                    None
+                }
                 _ => continue,
             };
             out.push(CallRow {
@@ -538,7 +542,6 @@ fn reachable_call_rows(mf: &MirFunc, out: &mut Vec<CallRow>) {
                 spec_key: mf.spec_bindings.get(&id).cloned(),
                 callee_inst: mf.callee_instances.get(&id).cloned(),
                 producer,
-                unstamped_form,
             });
         }
     }
@@ -906,9 +909,6 @@ fn classify(
     detail: bool,
 ) -> (Option<Unjoined>, &'static str, String) {
     let none = String::new();
-    if row.unstamped_form {
-        return (Some(Unjoined::UnstampedForm), "<unstamped>", none);
-    }
     if let Some(producer) = row.producer {
         *c.indirect_forms_by_producer.entry(producer).or_insert(0) += 1;
     }

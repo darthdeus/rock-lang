@@ -1994,6 +1994,38 @@ pub(crate) fn compute_spec_from_bindings(
     Ok(any_value.then_some((key, subst)))
 }
 
+/// The CONCRETE INSTANCE an iterator-protocol WITNESS resolves to, from the
+/// `VarId -> TyId` map bone recorded for it.
+///
+/// The identity sibling of [`spec_key_from_next_generics`], and the same
+/// separation [`callee_instance_subst`] makes for a direct call: that one stops
+/// at the delivery policy, this one answers which instance the witness means.
+/// One function serves both witnesses -- `IterWitness::generics` and
+/// `next_generics` are the same shape, and a second copy would be free to
+/// disagree about one of them.
+pub fn witness_instance_subst(
+    ws: &Workspace,
+    inf: &BodyInference,
+    func: FuncRef,
+    generics: &rustc_hash::FxHashMap<bone_semantic::hir::VarId, TyId>,
+    enclosing: &SpecSubst,
+) -> Result<Option<SpecSubst>, CompilerError> {
+    let f = &ws.module(func.module).functions[func.func];
+    if f.generics.is_empty() {
+        return Ok(None);
+    }
+    let mut bindings = Vec::with_capacity(f.generics.len());
+    for generic in &f.generics {
+        let Some(TypeExpr::Generic(var, _)) = ty_node(ws, inf, *generic) else { return Ok(None) };
+        // A generic the resolution left unbound leaves the instantiation
+        // INCOMPLETE, which the census reports as its own cause rather than
+        // being papered over with a default.
+        let Some(bound) = generics.get(&var).copied() else { return Ok(None) };
+        bindings.push(bound);
+    }
+    Ok(compute_spec_from_bindings(ws, inf, func, &bindings, enclosing, true)?.map(|(_, s)| s))
+}
+
 pub fn spec_key_from_next_generics(
     ws: &Workspace,
     inf: &BodyInference,

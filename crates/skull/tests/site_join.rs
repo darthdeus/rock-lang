@@ -117,27 +117,26 @@ fn call_count(mf: &MirFunc) -> usize {
 // Distinguishability
 // ---------------------------------------------------------------------------
 
-/// SENTINEL -- flip when `SiteOp` classification is completed (mono Stage 3
-/// cut B).
+/// A bounded loop's `next` witness reaches MIR RECORDED, on the caller-generic
+/// path as well as the concrete one.
 ///
-/// A `for` head's `iter` and `next` are the canonical same-span pair: two
-/// callee obligations at ONE expression carrying ONE span. The GOAL is that
-/// they reach MIR as two different sites, which is the whole reason `SiteOp`
-/// exists. That is proved at the KEY level by
-/// [`one_expression_under_different_operations_stays_distinct`] below.
+/// A `for` head's `iter` and `next` are the canonical same-span pair: two callee
+/// obligations at ONE expression carrying ONE span. That they stay distinct is
+/// proved at the KEY level by
+/// [`one_expression_under_different_operations_stays_distinct`]. This is the
+/// RECORDING half.
 ///
-/// It is NOT yet proved at the RECORDING level, and this pins why. A bounded
-/// generic's loop emits `Inst::CallBoundMulti`, which is not one of the four
-/// call forms `Builder::emit_cur` stamps, so no witness site reaches MIR here
-/// at all. The corpus does produce them (bitgun: 7 `for-iter`, 7 `for-next`),
-/// so the recording works on the `BoundNext::Concrete` path -- this fixture
-/// takes the `CallerGeneric` one and is the gap.
+/// It used to be a pinned gap. `Inst::CallBoundMulti` was not one of the call
+/// forms `Builder::emit_cur` stamps, so the SAME source construct was recorded
+/// or invisible depending on which arm of `BoundNext` it took -- concrete
+/// (recorded) or caller-generic (not). The form is stamped now.
 ///
-/// When `CallBoundMulti` joins the recorded forms this goes red: assert both
-/// witness populations non-empty, that they share an expression, and that they
-/// stay distinct.
+/// The placeholder names no callee by construction: the concrete `next` is known
+/// only per instantiation and the inliner substitutes it from the site's
+/// `BoundTree` at the splice. So it carries a SITE and no TARGET, and the census
+/// admits it under `bound-placeholder`.
 #[test]
-fn a_bounded_loops_witnesses_reach_mir_unrecorded_sentinel() {
+fn a_bounded_loops_witness_reaches_mir_recorded() {
     let ws = check(
         r#"
 struct Counter { n: int }
@@ -158,27 +157,27 @@ fn main() { print("{sum_all(Counter { n: 0 })}") }
 "#,
     );
     let mf = prepared_body(&ws, "sum_all");
-    // The fixture must actually CONTAIN the unstamped form. Without this the
-    // emptiness below is satisfied by any body with no bounded loop at all --
-    // the `print` call alone would do it -- and the sentinel pins nothing.
+    // The fixture must actually CONTAIN the form. Without this the assertion
+    // below is satisfied by any body with no bounded loop at all.
     let bound_calls = count_bound_multi(&mf);
     assert!(
         bound_calls > 0,
-        "fixture emitted no `CallBoundMulti`, so it does not exercise the gap it pins"
+        "fixture emitted no `CallBoundMulti`, so it does not exercise the recording it proves"
     );
     let s = sites(&mf);
     let witnesses: Vec<&Site> = s
         .iter()
-        .filter(|s| {
-            matches!(s.op, SiteOp::ForIter | SiteOp::ForNext(_) | SiteOp::BoundNext(_))
-        })
+        .filter(|s| matches!(s.op, SiteOp::ForNext(_)))
         .collect();
-    assert!(
-        witnesses.is_empty(),
-        "PINNED GAP: a witness site now reaches MIR through the bounded path. The \
-         `CallBoundMulti` recording gap is closed -- rewrite this test to assert the \
-         iter/next pair shares one expression and stays distinct. Got {witnesses:?}"
+    assert_eq!(
+        witnesses.len(),
+        bound_calls,
+        "every `CallBoundMulti` must carry a `for-next` site: {witnesses:?}"
     );
+    // And it is the `for` HEAD's expression -- the same one an `iter` witness
+    // would key on -- rather than an expression of its own.
+    let heads: std::collections::BTreeSet<_> = witnesses.iter().map(|w| w.expr).collect();
+    assert_eq!(heads.len(), 1, "one bounded loop, one head expression: {witnesses:?}");
 }
 
 /// The same expression reached under different operations stays distinct even
@@ -785,10 +784,98 @@ fn main() {
     );
 }
 
+/// The join FAILS CLOSED on an owner the graph does not have, proved WITHOUT
+/// depending on a defect being present.
+///
+/// Its sibling below witnesses the population today's conditional specializer
+/// actually produces. That one silently disarms the day specialization goes
+/// total -- the fixture stops producing a shared splice and the assertion has
+/// nothing to fire on. This one removes an instance's substitution from a cloned
+/// graph instead, so the arm can still be shown to fire once the defect is gone.
+#[test]
+fn an_owner_the_graph_does_not_have_is_refused() {
+    // The callee must be one that SPLICES with a concrete owner today, or there
+    // is no resolvable owner for the mutation to take away. `wrap<Vec2>` is
+    // that: `@inline` plus a value-struct instantiation, which specializes.
+    let src = r#"
+@inline
+fn wrap<T>(x: T) -> T { return id2(x) }
+fn id2<T>(x: T) -> T { return x }
+fn top() -> float {
+    let b = wrap(Vec2 { x: 1, y: 2 })
+    return b.x
+}
+fn main() { print("{top()}") }
+"#;
+    let (ws, mut g) = graph_of(src);
+    let bodies = skull::concrete_body::build(&ws, &mut g);
+    let scx = ScalarCtx::new(&ws);
+    // CONTROL: with every substitution present, nothing is refused for want of
+    // an owner. Without this the refusal below could be any other failure.
+    // CONTROL: the calls `main` owns all join before the mutation. The fixture's
+    // baseline is NOT zero -- the stdlib splices its own shared generics -- so
+    // the claim is about the DELTA, measured on one instance, not about the
+    // total.
+    let before = site_join::census(&ws, &scx, &g, &bodies);
+    assert!(before.joined > 0, "the control fixture joined nothing: {before:?}");
+    let refused_before =
+        before.unjoined.get(&Unjoined::OwnerNotAnInstance).copied().unwrap_or(0);
+
+    assert!(before.joined_spliced > 0, "nothing spliced, so no owner is at stake: {before:?}");
+
+    // Remove the SPLICED CALLEE's substitution -- one side only. `top`'s body is
+    // still lowered under its own unchanged substitution and still stamps the
+    // same owner on the spliced sites; all that is gone is the graph's ability
+    // to name that owner. Perturbing the MEASURED instance instead would move
+    // the recorded owner too, and a mutation applied to both sides of a
+    // comparison cannot fail it.
+    let victim = g
+        .substitutions
+        .keys()
+        .find(|i| {
+            ws.module(i.func.module).functions[i.func.func].name.as_str() == "wrap"
+                && !g.substitutions[i].is_empty()
+        })
+        .expect("`wrap` instance with a concrete substitution")
+        .clone();
+    let removed = g.substitutions.remove(&victim);
+    assert!(removed.is_some(), "nothing was removed, so the arm below is untested");
+
+    let after = site_join::census(&ws, &scx, &g, &bodies);
+    let refused_after =
+        after.unjoined.get(&Unjoined::OwnerNotAnInstance).copied().unwrap_or(0);
+    assert!(
+        refused_after > refused_before,
+        "removing the spliced callee's substitution refused nothing new ({refused_before} -> \
+         {refused_after}), so its calls were matched to something the graph cannot name"
+    );
+    assert!(after.joined < before.joined, "nothing stopped joining: {after:?}");
+    // The denominator DOES shrink -- the victim's own body can no longer be
+    // lowered -- and that shrink is REPORTED rather than silent, which is the
+    // property that keeps a falling denominator from flattering the ratio.
+    assert!(
+        after.bodies_skipped.contains_key(&skull::site_join::BodySkip::NoSubstitution),
+        "the victim's body vanished from the space without a recorded cause: {after:?}"
+    );
+    assert!(after.accounts(), "accounting identity broken under the mutation: {after:?}");
+    // And it REFUSED rather than reaching past the owner table.
+    assert_eq!(
+        after.unjoined.get(&Unjoined::OwnerNotInTable).copied().unwrap_or(0),
+        0,
+        "an owner index escaped its table: {after:?}"
+    );
+}
+
 /// A generic body the inliner splices as its SHARED snapshot has no concrete
 /// owner instance, and the join must REFUSE it rather than pick one of the
-/// declaration's instances. This is the property that makes the census safe to
-/// build instance-owned emission on: it fails closed.
+/// declaration's instances.
+///
+/// SENTINEL for the population: this is the minimal reproduction of the corpus's
+/// largest unjoined bucket (bitgun: 1,102 `owner-not-an-instance`). It goes red
+/// when specialization becomes total, and the fail-closed property it shares
+/// with the test above survives that in
+/// [`an_owner_the_graph_does_not_have_is_refused`], which does not need a defect
+/// to fire.
 #[test]
 fn a_shared_generic_splice_refuses_rather_than_guessing() {
     let c = census_of(

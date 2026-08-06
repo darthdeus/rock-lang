@@ -156,6 +156,27 @@ impl Builder<'_> {
         info: &ForIterInfo,
     ) -> Result<(), CompilerError> {
         let coll = self.lower_expr(iter_expr)?;
+        // The `for` protocol's witnesses belong to the HEAD expression, which is
+        // the key `inf.for_iter_protocol` -- and therefore the instance graph --
+        // records them under. The cursor was restored to the ENCLOSING construct
+        // when `lower_expr` returned above (and is absent entirely when the
+        // `for` is a statement), so both halves are set explicitly here rather
+        // than inherited from a cursor that names the wrong expression. Same
+        // reason `lower_expr` sets them for an implicit-iter coercion.
+        let outer_expr = self.cur_expr.replace(iter_expr);
+        let out = self.lower_for_user_iter_witnessed(vars, iter_expr, body, info, coll);
+        self.cur_expr = outer_expr;
+        out
+    }
+
+    fn lower_for_user_iter_witnessed(
+        &mut self,
+        vars: &BindingPattern,
+        iter_expr: Idx<Expr>,
+        body: Idx<Expr>,
+        info: &ForIterInfo,
+        coll: Idx<Inst>,
+    ) -> Result<(), CompilerError> {
         let it_val = match info.iter.as_ref().map(|w| w.func) {
             Some((m, f)) => {
                 // Stage-0e: the `iter` witness is emitted with NO spec binding,
@@ -186,9 +207,28 @@ impl Builder<'_> {
                 // The `for` head's `iter` witness, not the head expression's
                 // own call: both live at one expression and share one span, so
                 // the operation is what keeps them distinguishable.
-                self.with_site_op(crate::site::SiteOp::ForIter, |b| {
+                let call = self.with_site_op(crate::site::SiteOp::ForIter, |b| {
                     b.emit_cur(Inst::Call { func: iter_ref, args: vec![coll] })
-                })
+                });
+                // The Stage-3 cutover the note above described: bone records the
+                // witness's own instantiation and emission consumes it HERE, as
+                // identity. What it does NOT do is decide delivery -- the
+                // witness still reaches whatever body the specializer chose.
+                if let (Some(inf), Some(w)) = (self.inf, info.iter.as_ref()) {
+                    if let Some(subst) = crate::lower::shape::witness_instance_subst(
+                        self.ws,
+                        inf,
+                        iter_ref,
+                        &w.generics,
+                        self.spec_subst,
+                    )? {
+                        self.f.callee_instances.insert(
+                            call,
+                            crate::site::OwnerInstance { func: iter_ref, subst },
+                        );
+                    }
+                }
+                call
             }
             None => coll,
         };
@@ -254,7 +294,7 @@ impl Builder<'_> {
         let it_load = self.emit_cur(Inst::Load(it_cell));
         let dests: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
         match &info.next {
-            BoundNext::Concrete { func: (m, f), sub, .. } => {
+            BoundNext::Concrete { func: (m, f), sub, next_generics, .. } => {
                 let func = FuncRef { module: *m, func: *f };
                 // The synthesized `next` call has no expr to key
                 // `call_generic_bindings` by, so its instantiation comes from
@@ -277,12 +317,31 @@ impl Builder<'_> {
                 if let Some(key) = spec {
                     self.f.spec_bindings.insert(call, key);
                 }
+                if let Some(inf) = self.inf {
+                    if let Some(subst) = crate::lower::shape::witness_instance_subst(
+                        self.ws,
+                        inf,
+                        func,
+                        next_generics,
+                        self.spec_subst,
+                    )? {
+                        self.f
+                            .callee_instances
+                            .insert(call, crate::site::OwnerInstance { func, subst });
+                    }
+                }
             }
             BoundNext::CallerGeneric(gidx) => {
-                let call = self.emit_cur(Inst::CallBoundMulti {
-                    dests: dests.clone(),
-                    generic_idx: *gidx as u32,
-                    args: vec![it_load],
+                // The same `for`-protocol `next` obligation its concrete sibling
+                // above carries, at the same expression -- so it takes the same
+                // operation. Without it the witness is recorded on one arm and
+                // invisible on the other.
+                let call = self.with_site_op(crate::site::SiteOp::ForNext(Vec::new()), |b| {
+                    b.emit_cur(Inst::CallBoundMulti {
+                        dests: dests.clone(),
+                        generic_idx: *gidx as u32,
+                        args: vec![it_load],
+                    })
                 });
                 if ret_shape.splats() {
                     self.f.bound_next_split.insert(call);

@@ -1511,18 +1511,24 @@ impl Builder<'_> {
                 | Inst::CallMulti { .. }
                 | Inst::CallValue { .. }
                 | Inst::CallValueMulti { .. }
+                | Inst::CallBoundMulti { .. }
         );
         let id = self.f.emit(self.cur, inst);
         if let Some(span) = self.cur_span {
             self.f.inst_spans.insert(id, span);
         }
-        // THE choke point for call-site identity: every call form entering the
+        // THE choke point for call-site identity: every call FORM entering the
         // arena is stamped here, so a missing stamp is a property of this ONE
         // branch rather than of 48 call-emitting sites each remembering to
-        // record. Not yet total: a call emitted outside any expression carries
-        // no site (bitgun: 346), and `Inst::CallBoundMulti` is a call form this
-        // match does not cover at all. Both are reported by
-        // `skull::site_join::census` rather than assumed away.
+        // record. `CallBoundMulti` is included: it is the `for` protocol's
+        // `next` witness on the caller-generic path, and its concrete sibling on
+        // the other arm carries a site, so leaving it out made the SAME source
+        // construct recorded or not depending on which arm it took. It is still
+        // a call a body may not carry into emission, which is a separate
+        // rejection.
+        //
+        // Not yet total: a call emitted outside any expression carries no site,
+        // reported by `skull::site_join::census` rather than assumed away.
         if is_call {
             if let (Some(owner), Some(expr)) = (self.site_owner.clone(), self.cur_expr) {
                 let owner = crate::site::intern_owner(&mut self.f.site_owners, owner);
