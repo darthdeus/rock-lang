@@ -445,7 +445,7 @@ pub fn do_run_named_sims(
         compile_sims(backend, project_path, PathBuf::from(&output))?;
     sim_spawn_barrier();
 
-    if mode == SimExecMode::Workers {
+    if mode != SimExecMode::Isolated {
         let results = run_specs_worker_mode(
             &project,
             &output,
@@ -455,6 +455,7 @@ pub fn do_run_named_sims(
             update_snapshots,
             jobs,
             &mut stone,
+            mode,
         )?;
         let mut passed = 0usize;
         let mut failed: Vec<String> = Vec::new();
@@ -642,7 +643,7 @@ pub fn do_run_all_sims(
         return Err(anyhow!("no @sim coroutines found in project `{project}`"));
     }
 
-    if mode == SimExecMode::Workers {
+    if mode != SimExecMode::Isolated {
         let results = run_specs_worker_mode(
             &project,
             &output,
@@ -652,6 +653,7 @@ pub fn do_run_all_sims(
             update_snapshots,
             jobs,
             &mut stone,
+            mode,
         )?;
         let mut passed = 0usize;
         let mut failed: Vec<String> = Vec::new();
@@ -820,6 +822,7 @@ fn run_specs_worker_mode(
     update_snapshots: bool,
     jobs: Option<usize>,
     stone: &mut crate::skull_backend::SkullStone,
+    mode: SimExecMode,
 ) -> Result<Vec<(String, SimSummary)>> {
     if cfg!(windows) {
         return Err(anyhow!(
@@ -836,7 +839,7 @@ fn run_specs_worker_mode(
     }
 
     let jobs = resolve_jobs(jobs, update_snapshots);
-    let (groups, isolated) = group_worker_specs(specs, env_by_wire);
+    let (groups, isolated) = group_worker_specs(specs, env_by_wire, mode);
     // One slot per spec POSITION: the same sim can be named twice, and each
     // occurrence is its own entry with its own result.
     let mut slots: Vec<Option<SimSummary>> = specs.iter().map(|_| None).collect();
@@ -1131,27 +1134,59 @@ fn boot_signature(env_pairs: &[(String, String)]) -> Vec<(String, String)> {
 /// How `rock sim` maps entries to processes.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum SimExecMode {
-    /// One fresh process per entry: the permanent reference oracle, and (until
-    /// B3/B4 land) the default.
+    /// One fresh process per entry: the permanent reference oracle, and what
+    /// `--isolated` selects. Never inferred -- it is always the caller's word.
     Isolated,
-    /// Boot-checkpoint workers: eligible entries grouped by boot signature
-    /// share one booted process with the restore boundary between them.
+    /// Boot-checkpoint workers for everything eligible, RENDERED SIMS INCLUDED.
+    /// The explicit force/diagnostic spelling (`--workers`): it is how a
+    /// rendered sim gets measured in a worker at all, which the differential
+    /// and the multi-order gate both need.
     Workers,
+    /// The DEFAULT. Render-skipped entries go to boot-checkpoint workers;
+    /// entries that render run in fresh processes with a REPORTED reason.
+    ///
+    /// The split is drawn where the evidence is. On the merged mag corpus every
+    /// divergence among boundary-crossing comparisons belonged to a sim that
+    /// renders, and the one render-skipped sim that diverged did so on a
+    /// NON-crossing comparison from an intermittent log record -- fresh-process
+    /// nondeterminism, which isolating it would not cure.
+    Hybrid,
 }
 
 /// Resolve the two CLI flags. clap already rejects the combination.
 pub fn exec_mode(isolated: bool, workers: bool) -> SimExecMode {
     debug_assert!(!(isolated && workers));
-    if workers {
-        SimExecMode::Workers
-    } else {
-        SimExecMode::Isolated
+    match (isolated, workers) {
+        (true, _) => SimExecMode::Isolated,
+        (_, true) => SimExecMode::Workers,
+        _ => SimExecMode::Hybrid,
     }
+}
+
+/// Whether an entry RENDERS, from the effective `SIM_SKIP_RENDER` value.
+///
+/// Read last-wins off the resolved pairs, never from the source annotations:
+/// `@sim_render` is lowered to `SIM_SKIP_RENDER=0` before an explicit
+/// `@sim_env` is appended (`skull_backend::collect_skull_sims`), so a sim
+/// carrying both is whatever it says LAST. Classifying on the annotations would
+/// disagree with the value the child actually boots with.
+///
+/// A sim declaring nothing does not render: draw systems are skipped by default
+/// under the harness.
+fn entry_renders(env: &[(String, String)]) -> bool {
+    env.iter()
+        .filter(|(k, _)| k == "SIM_SKIP_RENDER")
+        .next_back()
+        .is_some_and(|(_, v)| v == "0")
 }
 
 /// Why an entry cannot join a shared worker process. The reason is REPORTED --
 /// a silently isolated entry would read as a worker result.
-fn worker_ineligibility(spec: &str, env_by_wire: &HashMap<String, Vec<(String, String)>>) -> Option<String> {
+fn worker_ineligibility(
+    spec: &str,
+    env_by_wire: &HashMap<String, Vec<(String, String)>>,
+    mode: SimExecMode,
+) -> Option<String> {
     let parts = parse_sim_chain(spec);
     // A spec with no parts has nothing to agree on; the isolated path rejects
     // it with the runner's one "empty sim name" error.
@@ -1172,6 +1207,21 @@ fn worker_ineligibility(spec: &str, env_by_wire: &HashMap<String, Vec<(String, S
         if let Some((k, v)) = env.iter().find(|(_, v)| v.contains("$OUT")) {
             return Some(format!(
                 "@sim_env(\"{k}\", \"{v}\") interpolates $OUT, which resolves before the process starts"
+            ));
+        }
+        // The hybrid default's one extra rule. ANY rendered part isolates the
+        // whole chain: a chain runs as consecutive entries of one queue, so a
+        // rendered part would render inside a worker however the other parts
+        // are classified.
+        //
+        // `--workers` deliberately does NOT apply it. That mode exists to
+        // measure rendered sims in a worker, which is what the differential and
+        // the multi-order gate are for; a rule that isolated them there would
+        // make the gate unable to see the class it was built to see.
+        if mode == SimExecMode::Hybrid && entry_renders(env) {
+            return Some(format!(
+                "`{part}` renders (SIM_SKIP_RENDER=0); rendered sims run isolated by \
+                 default -- use --workers to measure one in a worker"
             ));
         }
     }
@@ -1200,11 +1250,12 @@ fn worker_ineligibility(spec: &str, env_by_wire: &HashMap<String, Vec<(String, S
 fn group_worker_specs(
     specs: &[String],
     env_by_wire: &HashMap<String, Vec<(String, String)>>,
+    mode: SimExecMode,
 ) -> (Vec<Vec<usize>>, Vec<(usize, String)>) {
     let mut groups: Vec<(Vec<(String, String)>, Vec<usize>)> = Vec::new();
     let mut isolated: Vec<(usize, String)> = Vec::new();
     for (i, spec) in specs.iter().enumerate() {
-        if let Some(reason) = worker_ineligibility(spec, env_by_wire) {
+        if let Some(reason) = worker_ineligibility(spec, env_by_wire, mode) {
             isolated.push((i, reason));
             continue;
         }
@@ -2209,7 +2260,10 @@ fn run_worker_arm(
     env_by_wire: &HashMap<String, Vec<(String, String)>>,
     ordered: &[String],
 ) -> Result<Vec<(crate::sim_record::SimRecord, bool)>> {
-    let (groups, isolated) = group_worker_specs(ordered, env_by_wire);
+    // The GATE measures rendered sims in workers on purpose: the hybrid
+    // default isolates them, and a gate that inherited that rule could never
+    // see the class it exists to watch.
+    let (groups, isolated) = group_worker_specs(ordered, env_by_wire, SimExecMode::Workers);
     let mut out: Vec<Option<(crate::sim_record::SimRecord, bool)>> = vec![None; ordered.len()];
 
     for members in groups {
@@ -3343,6 +3397,80 @@ mod tests {
         select_gate_corpus(&corpus(), &selected)
     }
 
+    /// The hybrid split reads the EFFECTIVE value, last-wins. `@sim_render` is
+    /// lowered to `SIM_SKIP_RENDER=0` before an explicit `@sim_env` is appended,
+    /// so a sim carrying both is whatever it says last -- and that is the value
+    /// its child actually boots with.
+    #[test]
+    fn rendering_is_the_effective_last_wins_value() {
+        let pair = |k: &str, v: &str| (k.to_string(), v.to_string());
+        assert!(!entry_renders(&[]), "declaring nothing does not render");
+        assert!(entry_renders(&[pair("SIM_SKIP_RENDER", "0")]), "@sim_render sugar");
+        assert!(!entry_renders(&[pair("SIM_SKIP_RENDER", "1")]), "explicit skip");
+        // `@sim_render` then an explicit override, in lowering order.
+        assert!(
+            !entry_renders(&[pair("SIM_SKIP_RENDER", "0"), pair("SIM_SKIP_RENDER", "1")]),
+            "a later explicit @sim_env overrides the @sim_render sugar"
+        );
+        assert!(
+            entry_renders(&[pair("SIM_SKIP_RENDER", "1"), pair("SIM_SKIP_RENDER", "0")]),
+            "... and the other way round"
+        );
+        assert!(!entry_renders(&[pair("MAG_FORCE_VFX", "1")]), "an unrelated key is not it");
+    }
+
+    /// The default isolates a rendered entry and admits a render-skipped one,
+    /// and BOTH populations are non-empty -- a split that admitted everything,
+    /// or nothing, would be reported the same way by a test that only checked
+    /// one side.
+    #[test]
+    fn the_hybrid_default_splits_rendered_from_render_skipped() {
+        let mut wires: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        wires.insert("logic".to_string(), vec![]);
+        wires.insert(
+            "pixel".to_string(),
+            vec![("SIM_SKIP_RENDER".to_string(), "0".to_string())],
+        );
+        let specs = vec!["logic".to_string(), "pixel".to_string()];
+
+        let (groups, isolated) = group_worker_specs(&specs, &wires, SimExecMode::Hybrid);
+        assert_eq!(groups.len(), 1, "the render-skipped entry is admitted: {groups:?}");
+        assert_eq!(groups[0], vec![0], "and it is the logic one");
+        assert_eq!(isolated.len(), 1, "the rendered entry is isolated: {isolated:?}");
+        assert_eq!(isolated[0].0, 1);
+        assert!(
+            isolated[0].1.contains("renders"),
+            "with a REPORTED reason, since a silently isolated entry reads as a \
+             worker result: {}",
+            isolated[0].1
+        );
+
+        // `--workers` is the force/diagnostic spelling and must still admit the
+        // rendered one, or the differential and multi-order gates could never
+        // measure the class they exist for.
+        let (groups, isolated) = group_worker_specs(&specs, &wires, SimExecMode::Workers);
+        assert_eq!(isolated.len(), 0, "--workers admits rendered sims: {isolated:?}");
+        assert_eq!(groups.iter().map(Vec::len).sum::<usize>(), 2);
+    }
+
+    /// ANY rendered part isolates the whole chain: a chain runs as consecutive
+    /// entries of ONE queue, so a rendered part renders inside the worker
+    /// however its neighbours are classified.
+    #[test]
+    fn one_rendered_part_isolates_its_whole_chain() {
+        let mut wires: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        wires.insert("head".to_string(), vec![]);
+        wires.insert(
+            "tail".to_string(),
+            vec![("SIM_SKIP_RENDER".to_string(), "0".to_string())],
+        );
+        let (groups, isolated) =
+            group_worker_specs(&["head,tail".to_string()], &wires, SimExecMode::Hybrid);
+        assert!(groups.is_empty(), "the chain cannot be admitted: {groups:?}");
+        assert_eq!(isolated.len(), 1);
+        assert!(isolated[0].1.contains("tail"), "names the rendered part: {}", isolated[0].1);
+    }
+
     /// A hole in the full-corpus gate stops it: the run would otherwise print a
     /// green over an arm it never compared.
     #[test]
@@ -3643,6 +3771,7 @@ mod tests {
         let (groups, isolated) = group_worker_specs(
             &specs(&["plain_a", "plain_b", "fx_off", "reload", "outref", "machinery"]),
             &wires,
+            SimExecMode::Workers,
         );
 
         // FRAME_COUNT is runner-owned, so plain_a and plain_b share a group;
@@ -3671,7 +3800,7 @@ mod tests {
         let wires = wires(&[("plain", &[]), ("reload", &[("STONE_HOT_RELOAD", "1")])]);
 
         let (groups, isolated) =
-            group_worker_specs(&specs(&["plain", "plain", "reload", "reload"]), &wires);
+            group_worker_specs(&specs(&["plain", "plain", "reload", "reload"]), &wires, SimExecMode::Workers);
         assert_eq!(groups, vec![vec![0, 1]]);
         assert_eq!(isolated.iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![2, 3]);
 
@@ -3692,11 +3821,11 @@ mod tests {
         ]);
 
         let (groups, isolated) =
-            group_worker_specs(&specs(&["head,tail_same", "plain"]), &wires);
+            group_worker_specs(&specs(&["head,tail_same", "plain"]), &wires, SimExecMode::Workers);
         assert_eq!(groups, vec![vec![0], vec![1]]);
         assert!(isolated.is_empty());
 
-        let (groups, isolated) = group_worker_specs(&specs(&["head,tail_other"]), &wires);
+        let (groups, isolated) = group_worker_specs(&specs(&["head,tail_other"]), &wires, SimExecMode::Workers);
         assert!(groups.is_empty());
         assert_eq!(isolated.len(), 1);
         assert!(
@@ -3712,10 +3841,10 @@ mod tests {
     fn an_empty_spec_is_classified_not_indexed() {
         let wires = wires(&[("plain", &[])]);
 
-        assert!(worker_ineligibility("", &wires).is_some());
-        assert!(worker_ineligibility(" , ", &wires).is_some());
+        assert!(worker_ineligibility("", &wires, SimExecMode::Workers).is_some());
+        assert!(worker_ineligibility(" , ", &wires, SimExecMode::Workers).is_some());
 
-        let (groups, isolated) = group_worker_specs(&specs(&["plain", ""]), &wires);
+        let (groups, isolated) = group_worker_specs(&specs(&["plain", ""]), &wires, SimExecMode::Workers);
         assert_eq!(groups, vec![vec![0]]);
         assert_eq!(isolated.len(), 1);
         assert_eq!(isolated[0].0, 1);

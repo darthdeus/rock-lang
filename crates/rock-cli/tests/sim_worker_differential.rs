@@ -1230,6 +1230,59 @@ fn a_boot_painted_canvas_is_refused_from_a_worker() {
     );
 }
 
+/// The DEFAULT mode is the hybrid: render-skipped entries share a
+/// boot-checkpoint worker, entries that render get a fresh process with a
+/// reported reason.
+///
+/// Both populations are asserted non-empty. A split that admitted everything,
+/// or that admitted nothing, would satisfy a test that only looked at one side
+/// -- and "nothing was admitted" is exactly what a silently broken predicate
+/// produces while every sim still passes.
+#[test]
+fn the_default_mode_admits_render_skipped_sims_and_isolates_rendered_ones() {
+    // `b3_cc_head`/`b3_cc_seed` declare no SIM_SKIP_RENDER, so they are
+    // render-skipped; `canvas_create_preserves_color_mask` declares
+    // SIM_SKIP_RENDER=0 and renders.
+    // `-j 1` because a signature group splits into at most `--jobs` CONTIGUOUS
+    // lanes and each lane's head starts its own worker (B5) -- at the default
+    // -j 4 these two eligible entries land in two lanes and both boot, which
+    // says nothing about whether they were ADMITTED. One lane makes "shared a
+    // process" observable.
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "testbed",
+        "-j",
+        "1",
+        "b3_cc_head",
+        "b3_cc_seed",
+        "canvas_create_preserves_color_mask",
+    ]);
+    let all = format!("{stdout}{stderr}");
+    assert!(ok, "the default mode must run these three green:\n{all}");
+
+    // The rendered one is isolated, and says why.
+    assert!(
+        all.contains("canvas_create_preserves_color_mask` runs isolated")
+            || all.contains("renders (SIM_SKIP_RENDER=0)"),
+        "a rendered sim must be isolated WITH ITS REASON -- a silently isolated \
+         entry reads as a worker result:\n{all}"
+    );
+
+    // ... and the render-skipped ones really did share a process. Two entries
+    // in one worker boot it once, so exactly one of them reports the engine
+    // banner a fresh process prints.
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert!(
+        boots >= 2,
+        "the rendered sim needs its own process, so at least two boots: {boots}\n{all}"
+    );
+    assert!(
+        boots < 3,
+        "the two render-skipped entries must SHARE a worker rather than each \
+         booting -- {boots} boots means the default admitted nothing:\n{all}"
+    );
+}
+
 /// Run `rock` and return `(exit_ok, stdout, stderr)` WITHOUT asserting on the
 /// exit code. The multi-order gate deliberately exits nonzero on a corpus that
 /// cannot populate every arm, and that refusal is part of what is under test.
