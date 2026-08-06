@@ -181,3 +181,137 @@ fn a_generic_field_default_and_its_declared_type_share_one_inference_class() {
          bone-inference rather than in the site domain"
     );
 }
+
+/// The published relation NAMES that class: slot `i` of
+/// `struct_default_generic_slots` is the var the struct's declared generic `i`
+/// was instantiated to.
+///
+/// This is the half the test above exists to contrast with. Asserting the arity
+/// alone would pass on any vector of the right length, so the slot is compared
+/// against the class the sibling reference and the call binding already agree
+/// on -- if the recording published some other var, the two disagree.
+#[test]
+fn the_defaults_body_publishes_its_declared_generic_slots() {
+    let ws = check(SRC);
+    let (mid, inf) = defaults_inference(&ws);
+    let sidx = ws
+        .module(mid)
+        .structs
+        .iter()
+        .find(|(_, s)| s.name.as_str() == "Box")
+        .map(|(i, _)| i)
+        .expect("Box");
+    let def = &ws.module(mid).structs[sidx];
+
+    assert_eq!(
+        inf.struct_default_generic_slots.len(),
+        def.generics.len(),
+        "one slot per DECLARED generic, or a consumer cannot index by position"
+    );
+
+    let body = &ws.module(mid).bodies[&BodyOwner::StructDefaults(sidx)];
+    let value_default =
+        *body.field_defaults.get(&Ustr::from("value")).expect("`value` has a default");
+    let class = unresolved_var(
+        &ws,
+        inf,
+        *inf.call_generic_bindings
+            .get(&value_default)
+            .and_then(|b| b.first())
+            .expect("the call records a binding for `seed`'s generic"),
+    );
+    assert!(class.is_some(), "the fixture is no longer the generic case");
+
+    assert_eq!(
+        unresolved_var(&ws, inf, inf.struct_default_generic_slots[0]),
+        class,
+        "slot 0 is not the class `Box`'s `T` was instantiated to, so a consumer \
+         holding `Box<int>` would bind the wrong variable"
+    );
+}
+
+/// Two generics, and the slots are in DECLARATION order.
+///
+/// One generic cannot distinguish an ordered vector from a set, and the
+/// consumer indexes by position: a reversed recording binds `A` to `B`'s
+/// argument silently, since both slots are inference vars of the same shape.
+#[test]
+fn the_slots_are_in_declaration_order() {
+    const PAIR: &str = r#"
+fn seed<T>() -> T? { return null }
+
+struct Pair<A, B> { a: A? = seed(), b: B? = seed() }
+
+fn main() {
+    let p: Pair<int, string> = Pair {}
+    print("{p.a} {p.b}")
+}
+"#;
+    let ws = check(PAIR);
+    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    let sidx = ws
+        .module(mid)
+        .structs
+        .iter()
+        .find(|(_, s)| s.name.as_str() == "Pair")
+        .map(|(i, _)| i)
+        .expect("Pair");
+    let inf = ws
+        .inference(mid)
+        .and_then(|ir| ir.per_fn.get(&BodyOwner::StructDefaults(sidx)))
+        .expect("Pair has a defaults body inference");
+    let body = &ws.module(mid).bodies[&BodyOwner::StructDefaults(sidx)];
+
+    assert_eq!(inf.struct_default_generic_slots.len(), 2);
+
+    for (slot, field) in [(0usize, "a"), (1, "b")] {
+        let default = *body.field_defaults.get(&Ustr::from(field)).expect("default");
+        let class = unresolved_var(
+            &ws,
+            inf,
+            *inf.call_generic_bindings
+                .get(&default)
+                .and_then(|b| b.first())
+                .expect("binding"),
+        );
+        assert!(class.is_some(), "field `{field}` is no longer the generic case");
+        assert_eq!(
+            unresolved_var(&ws, inf, inf.struct_default_generic_slots[slot]),
+            class,
+            "slot {slot} does not match field `{field}`'s class -- the slots are \
+             not in declaration order"
+        );
+    }
+}
+
+/// A non-generic struct's defaults body publishes NO slots.
+///
+/// Without this the field could be populated unconditionally and every arm
+/// above would still pass; the consumer needs the empty case to mean "nothing
+/// to bind" rather than "not recorded yet".
+#[test]
+fn a_non_generic_structs_defaults_body_publishes_no_slots() {
+    const PLAIN: &str = r#"
+struct Plain { n: int = 3 }
+
+fn main() {
+    let p: Plain = Plain {}
+    print("{p.n}")
+}
+"#;
+    let ws = check(PLAIN);
+    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    let sidx = ws
+        .module(mid)
+        .structs
+        .iter()
+        .find(|(_, s)| s.name.as_str() == "Plain")
+        .map(|(i, _)| i)
+        .expect("Plain");
+    let inf = ws
+        .inference(mid)
+        .and_then(|ir| ir.per_fn.get(&BodyOwner::StructDefaults(sidx)))
+        .expect("Plain has a defaults body inference");
+
+    assert!(inf.struct_default_generic_slots.is_empty());
+}
