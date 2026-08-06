@@ -1100,12 +1100,16 @@ fn writes_live(buffered: bool) -> bool {
 /// `@sim_env` keys the runner owns per entry, so they are NOT part of the boot
 /// signature two entries must agree on to share a process.
 ///
-/// `FRAME_COUNT` is the only one today: it is the entry's runaway bound,
-/// carried in the entry plan and republished by `sim_start_entry` at every
-/// boundary. `SIM_DT` and `SIM_SKIP_RENDER` are read ONCE during boot
-/// (`runner_load_sim_entries`), so they are still boot signature until the
-/// worker applies them per entry.
-const RUNNER_OWNED_ENV_KEYS: &[&str] = &["FRAME_COUNT"];
+/// `FRAME_COUNT` is the entry's runaway bound, carried in the entry plan and
+/// republished by `sim_start_entry` at every boundary. `SIM_DT` and
+/// `SIM_SKIP_RENDER` are read ONCE during boot (`runner_load_sim_entries`), so
+/// they are still boot signature until the worker applies them per entry.
+///
+/// `ROCK_MASK_WALL_CLOCK` is owned outright: the runner publishes its own value
+/// after `preset_env`, so a declared one never reaches the child and cannot
+/// stand for a difference between two entries. Splitting a group on an inert
+/// value would isolate sims for nothing.
+const RUNNER_OWNED_ENV_KEYS: &[&str] = &["FRAME_COUNT", "ROCK_MASK_WALL_CLOCK"];
 
 /// The part of a sim's `@sim_env` that is consumed during global init, engine
 /// init and `@init` -- what a shared process cannot vary between entries.
@@ -1561,20 +1565,22 @@ fn run_worker(
         // `@sim_env("ROCK_TEST_SEED", ...)` in a sim still overrides
         // because `preset_env` is layered after this baseline.
         .env("ROCK_TEST_SEED", "42")
+        .envs(preset_env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         // Renders every `wall_clock_ms(..)` value as a fixed token, but ONLY
         // for a run whose records get compared: two runs of the same sim cannot
         // agree on a duration, and the records carrying one also carry facts
         // that must stay compared. An ordinary run keeps the real numbers --
         // masking them would turn the editor's timing logs into noise and would
         // change what a sim's own artifacts contain. Same flag as
-        // `SimArtifacts::record_manifest`, threaded from the same source, and
-        // overridable per sim through `@sim_env` like the seed above.
-        .envs(
-            recording
-                .then_some(("ROCK_MASK_WALL_CLOCK", "1"))
-                .into_iter(),
-        )
-        .envs(preset_env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        // `SimArtifacts::record_manifest`, threaded from the same source.
+        //
+        // Published AFTER `preset_env`, and an explicit "0" rather than an
+        // absence, because this variable is the HARNESS's on both sides. A
+        // fixture's `@sim_env` must not be able to unmask a compared run, and an
+        // inherited value must not be able to mask an ordinary one -- and
+        // `wall_clock_ms` latches it into a `static` on first read, so a
+        // per-entry override could not be honoured coherently anyway.
+        .env("ROCK_MASK_WALL_CLOCK", if recording { "1" } else { "0" })
         .env("FPS_LOG", "0")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

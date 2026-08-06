@@ -51,6 +51,35 @@ fn artifact_names(record: &SimRecord) -> Vec<String> {
     record.artifacts.keys().cloned().collect()
 }
 
+/// Run the real `rock` binary from the workspace root and return its stderr.
+/// `hostile_parent` puts `ROCK_MASK_WALL_CLOCK=1` in the PARENT environment,
+/// which is the route an inherited value takes into a child the runner spawns.
+fn run_rock(args: &[&str], hostile_parent: bool) -> String {
+    let mut rock = std::env::current_exe().expect("test exe");
+    rock.pop();
+    if rock.ends_with("deps") {
+        rock.pop();
+    }
+    let rock = rock.join("rock");
+    assert!(rock.exists(), "rock binary not built at {}", rock.display());
+
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("workspace root")
+        .to_path_buf();
+
+    let mut cmd = std::process::Command::new(&rock);
+    cmd.current_dir(&root).args(args);
+    if hostile_parent {
+        cmd.env("ROCK_MASK_WALL_CLOCK", "1");
+    }
+    let out = cmd.output().unwrap_or_else(|e| panic!("run rock {args:?}: {e}"));
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "{args:?} failed:\n{stderr}");
+    stderr
+}
+
 /// Distinct entries get distinct `$OUT`, in a worker as in a fresh process.
 #[test]
 fn a_worker_entry_gets_its_own_out_directory() {
@@ -351,29 +380,9 @@ fn a_declared_wall_clock_record_does_not_diverge_but_its_neighbours_still_compar
 /// and this proves it is off where they are not.
 #[test]
 fn the_value_mask_is_on_only_where_records_are_compared() {
-    let mut rock = std::env::current_exe().expect("test exe");
-    rock.pop();
-    if rock.ends_with("deps") {
-        rock.pop();
-    }
-    let rock = rock.join("rock");
-    assert!(rock.exists(), "rock binary not built at {}", rock.display());
-
-    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(std::path::Path::parent)
-        .expect("workspace root")
-        .to_path_buf();
-
     for mode in [vec!["sim", "testbed", "b0_wall_clock_probe"],
                  vec!["sim", "testbed", "b0_wall_clock_seed", "b0_wall_clock_probe", "--workers"]] {
-        let out = std::process::Command::new(&rock)
-            .current_dir(&root)
-            .args(&mode)
-            .output()
-            .unwrap_or_else(|e| panic!("run rock {mode:?}: {e}"));
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(out.status.success(), "{mode:?} failed:\n{stderr}");
+        let stderr = run_rock(&mode, false);
 
         let mixed = stderr
             .lines()
@@ -388,6 +397,148 @@ fn the_value_mask_is_on_only_where_records_are_compared() {
             "{mode:?} must render a real duration: {mixed}"
         );
     }
+}
+
+/// `ROCK_MASK_WALL_CLOCK` is the HARNESS's variable, and a compared run must
+/// stay masked however loudly a fixture asks for real numbers. The value is
+/// latched into a `static` on first read, so an entry-dependent override could
+/// not be honoured coherently even if it were wanted -- the first entry to read
+/// it would decide for the whole worker.
+///
+/// The declaring pair is the mutation subject: with the runner publishing the
+/// mask before a sim's `@sim_env`, this fixture's `"0"` wins and both sides
+/// render a real duration the boundary does not restore, so the records
+/// diverge.
+#[test]
+fn a_fixture_cannot_unmask_a_compared_run() {
+    let (isolated, worker) = differential(&["b0_wall_clock_unmask_seed"], "b0_wall_clock_unmask_probe");
+    let c = compare(&isolated, &worker);
+    assert_equivalent("b0_wall_clock_unmask_probe", &c);
+
+    for (label, record) in [("isolated", &isolated), ("worker", &worker)] {
+        assert!(
+            record.entry_diagnostics.contains("b0 mixed record: cooldown 100ms, elapsed <ms>"),
+            "{label}: the fixture's ROCK_MASK_WALL_CLOCK=0 must not reach a compared run: {:?}",
+            record.entry_diagnostics
+        );
+    }
+    assert!(
+        c.population("entry_diagnostics") > 0,
+        "the arm compared nothing, so the masked record was never checked"
+    );
+}
+
+/// The other direction, and the one an inherited environment can reach: an
+/// ordinary run keeps its measurements even when the PARENT environment or the
+/// fixture itself sets the mask. Neither is allowed to speak for the runner --
+/// masking an ordinary run would turn the editor's timing logs into noise and
+/// would change what a sim's own artifacts contain.
+///
+/// The two hostile sources get a test each rather than two arms of one, because
+/// they enter by different routes -- the fixture's value through `preset_env`,
+/// the parent's through `Command`'s inherited environment -- and a single test
+/// would stop at whichever failed first, hiding the other.
+///
+/// Both ordinary modes are checked: an isolated run and a `--workers` run whose
+/// records nobody compares.
+fn assert_ordinary_run_keeps_its_measurements(seed: &str, probe: &str, hostile_parent: bool) {
+    for workers in [false, true] {
+        // An isolated run needs only the probe; a worker run needs the
+        // predecessor that puts it behind a boundary.
+        let args = if workers {
+            vec!["sim", "testbed", seed, probe, "--workers"]
+        } else {
+            vec!["sim", "testbed", probe]
+        };
+
+        let stderr = run_rock(&args, hostile_parent);
+        let mixed = stderr
+            .lines()
+            .find(|l| l.contains("b0 mixed record:"))
+            .unwrap_or_else(|| panic!("{args:?} emitted no mixed record:\n{stderr}"));
+        assert!(
+            !mixed.contains("<ms>"),
+            "{args:?} (hostile_parent={hostile_parent}) is not a compared run, \
+             so it must keep the measurement: {mixed}"
+        );
+        assert!(
+            mixed.contains("cooldown 100ms, elapsed ") && mixed.ends_with("ms"),
+            "{args:?} (hostile_parent={hostile_parent}) must render a real duration: {mixed}"
+        );
+    }
+}
+
+#[test]
+fn an_ordinary_run_keeps_its_measurements_when_the_fixture_asks_to_mask() {
+    assert_ordinary_run_keeps_its_measurements(
+        "b0_wall_clock_mask_seed",
+        "b0_wall_clock_mask_probe",
+        false,
+    );
+}
+
+#[test]
+fn an_ordinary_run_keeps_its_measurements_when_the_parent_environment_masks() {
+    assert_ordinary_run_keeps_its_measurements(
+        "b0_wall_clock_seed",
+        "b0_wall_clock_probe",
+        true,
+    );
+}
+
+/// The Session Arena registry crosses the REAL worker boundary intact.
+///
+/// The b1 fixtures call `sim_checkpoint_take`/`sim_checkpoint_restore` directly
+/// and declare `SIM_WORKER_ISOLATED`, so they certify the registry IMAGE and
+/// nothing about `sim_worker_restore_boot` using it. This pair declares
+/// neither, so the probe runs as the second entry in the seed's process.
+///
+/// Provenance is asserted rather than assumed, because every way this fixture
+/// could fail to be evidence looks like a pass: a `SIM_WORKER_ISOLATED`
+/// declaration, a boot-signature refusal, or a recovery rerun would all put the
+/// probe in a fresh process, where its agreement with a fresh process is
+/// agreement between two fresh processes. Two independent signals say it did
+/// not: the entry's position in its queue, and the absence of the process boot
+/// log an entry that booted its own process necessarily carries.
+#[test]
+fn the_arena_registry_survives_the_real_worker_boundary() {
+    let (isolated, worker) = differential(&["b2_arena_boundary_seed"], "b2_arena_boundary_probe");
+    let c = compare(&isolated, &worker);
+    assert_equivalent("b2_arena_boundary_probe", &c);
+
+    assert_eq!(isolated.seq, 0, "the isolated arm is a one-entry queue");
+    assert!(
+        worker.seq > 0,
+        "the probe ran first in its process, so it crossed no boundary and \
+         certifies nothing about the restore"
+    );
+    assert!(
+        isolated.diagnostics.contains("Initialized successfully"),
+        "the isolated arm must carry the boot log of the process it booted: {:?}",
+        isolated.diagnostics
+    );
+    assert!(
+        !worker.diagnostics.contains("Initialized successfully"),
+        "the worker arm carries a process boot log, so it booted its own process \
+         rather than following the seed: {:?}",
+        worker.diagnostics
+    );
+
+    // The artifact is what makes agreement mean something: both sides emit
+    // PASS whatever the ids are, and only this compares the identities.
+    assert_eq!(
+        artifact_names(&worker),
+        vec!["arena_boundary.txt".to_string()],
+        "the probe's identity manifest is the compared evidence"
+    );
+    assert!(
+        c.population("artifacts") > 0,
+        "the artifact arm compared nothing, so the identities were never checked"
+    );
+    assert!(
+        c.population("expects_pass") > 0,
+        "the fixture asserted nothing"
+    );
 }
 
 /// Engine configuration restores at the boundary. `TIME_SCALE` is a Stone
