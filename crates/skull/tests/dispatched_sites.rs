@@ -232,7 +232,7 @@ fn main() { print(show(V { a: 1.0, b: 2.0, c: 3, s: "x" })) }
 /// A COMPOSITE hole synthesizes `inspect`; a transparent newtype in the same
 /// program synthesizes nothing (it renders `Name(<tostring inner>)`).
 ///
-/// `inspect` has no population anywhere in the 26-project corpus -- every real
+/// `inspect` has no population anywhere in the 28-project corpus -- every real
 /// interpolation of a struct goes through the nobox path -- so this fixture is
 /// the only evidence the route is covered at all.
 #[test]
@@ -289,7 +289,7 @@ fn main() { print(show_p(P { x: 1, y: 2 })) print(show_f(1.5)) }
 /// The `%` and `b` conversions and the GROUPING separator each call their own
 /// stdlib helper, and each is paired with the nearest spec that calls nothing.
 ///
-/// None of the three has any population in the 26-project corpus, so this is
+/// None of the three has any population in the 28-project corpus, so this is
 /// the only evidence they are covered at all. They are separate arms of
 /// `FormatPlan`, not one repeated: `special` replaces the printf conversion
 /// while `grouping` wraps whatever the conversion produced, and `needs_pad`
@@ -328,6 +328,49 @@ fn main() {
     assert_eq!(walk_dispatched_in(&ws, "grouped_plain"), empty);
 
     assert_dispatched_population(&census_of(src), 3);
+}
+
+/// A SPECIAL conversion plus a WIDTH pads as well, and the same conversion
+/// without a width does not.
+///
+/// `needs_pad` is `(grouping.is_some() || special_conv) && has_width`, so the
+/// `special_conv` disjunct needs its own width case: with only the grouping one
+/// below, deleting `|| special_conv` leaves every formatter test green.
+#[test]
+fn a_special_conversion_with_a_width_also_pads_and_without_one_does_not() {
+    let ws = check(
+        r#"
+fn pct_wide(x: float) -> string { return "{x:10%}" }
+fn pct_bare(x: float) -> string { return "{x:%}" }
+fn bin_wide(x: int) -> string { return "{x:10b}" }
+fn bin_bare(x: int) -> string { return "{x:b}" }
+fn main() {
+    print(pct_wide(0.5)) print(pct_bare(0.5))
+    print(bin_wide(5)) print(bin_bare(5))
+}
+"#,
+    );
+    assert_eq!(
+        dispatched_in(&ws, "pct_wide"),
+        vec!["__rock_fmt_pad", "__rock_fmt_percent"]
+    );
+    assert_eq!(
+        walk_dispatched_in(&ws, "pct_wide"),
+        vec!["__rock_fmt_pad", "__rock_fmt_percent"]
+    );
+    assert_eq!(dispatched_in(&ws, "pct_bare"), vec!["__rock_fmt_percent"]);
+    assert_eq!(walk_dispatched_in(&ws, "pct_bare"), vec!["__rock_fmt_percent"]);
+
+    assert_eq!(
+        dispatched_in(&ws, "bin_wide"),
+        vec!["__rock_fmt_binary", "__rock_fmt_pad"]
+    );
+    assert_eq!(
+        walk_dispatched_in(&ws, "bin_wide"),
+        vec!["__rock_fmt_binary", "__rock_fmt_pad"]
+    );
+    assert_eq!(dispatched_in(&ws, "bin_bare"), vec!["__rock_fmt_binary"]);
+    assert_eq!(walk_dispatched_in(&ws, "bin_bare"), vec!["__rock_fmt_binary"]);
 }
 
 /// GROUPING plus a WIDTH pads as well, and grouping alone does not.

@@ -339,24 +339,30 @@ fn main() { let c = Cfg { m: 1 } print("{c.a + c.m}") }
 ///
 /// What happens today, measured rather than assumed:
 ///
-/// - bone leaves the callee's type variable UNSOLVED inside the
-///   `BodyOwner::StructDefaults` body. The field's declared type `T?` does not
-///   propagate to the initializer's generic, so `monoty::convert` answers
-///   `unresolved-infer` -- there is no `Generic` node for the struct's `T` to
-///   substitute, which is why carrying the struct's substitution into the
-///   defaults body does NOT fix this (tried, measured, still red).
-/// - lowering therefore emits a call to the SHARED generic body
-///   (`seed_ret_T_opt`), for both literals.
-/// - the walk records an obligation it cannot resolve, and reports a
+/// - bone DOES propagate the field's declared type into the initializer.
+///   `check_struct_defaults` instantiates the struct's generics to FRESH
+///   inference variables, substitutes the field type through that map, and
+///   `coerce`s the default against it, so the callee's generic and the field's
+///   `T` end up in ONE symbolic inference class -- asserted in
+///   `struct_default_generic_relation.rs`.
+/// - what is missing is a durable relation from that class back to the
+///   struct's declared generic SLOT: the map is local to the check and is not
+///   published, so a consumer holding `Box<int>` cannot resolve it. That is
+///   why carrying the struct's substitution into the defaults body does NOT
+///   fix this (tried, measured, still red): there is no `Generic` node left to
+///   substitute, only an inference variable nothing can name.
+/// - so `monoty::convert` answers `unresolved-infer`, lowering emits a call to
+///   the SHARED generic body (`seed_ret_T_opt`) for both literals, and the walk
+///   records an obligation it cannot resolve and reports a
 ///   `UnconstrainedTypeVar` rejection against a legal program.
 /// - `SiteDomain::StructDefaults` keys on the struct DECLARATION, so both
 ///   injections collapse onto one obligation and the census reports two
 ///   `site-not-in-body` rows.
 ///
-/// The inference gap is `bone-inference`'s, which is author-owned, so this is
-/// pinned rather than fixed. It is a REAL prerequisite for the instance-owned
-/// emission cut: that cut requires every direct call to name exactly one
-/// concrete instance, and here none is determined.
+/// Publishing that relation is `bone-inference`'s, which is author-owned, so
+/// this is pinned rather than fixed. It is a REAL prerequisite for the
+/// instance-owned emission cut: that cut requires every direct call to name
+/// exactly one concrete instance, and here none is determined.
 ///
 /// **When this goes red the gap closed.** Flip every assertion below to its
 /// stated correct form -- 0 `site-not-in-body`, 0 rejections, and two DISTINCT
@@ -430,11 +436,16 @@ fn main() {
     );
 }
 
-/// CONTROL for the sentinel above: a NON-generic struct's default joins, and a
-/// generic struct whose default calls a NON-generic function also joins.
+/// CONTROL for the sentinel above: a struct default whose callee is NON-generic
+/// joins, asserted on its own POPULATION.
 ///
 /// Without this the sentinel could pass because struct defaults are broken in
-/// general rather than because the GENERIC instantiation is undetermined.
+/// general rather than because the GENERIC instantiation is undetermined. But
+/// "some call joined" and "`site-not-in-body` is 0" are both satisfiable
+/// without any defaults obligation existing at all -- `print` joins, and a zero
+/// survives the obligations vanishing from the census entirely. So the count of
+/// defaults-domain STAMPS and the matching `ConcreteBody` entries are asserted
+/// first, and dropping the default obligations turns this red.
 #[test]
 fn a_generic_structs_default_calling_a_non_generic_fn_still_joins() {
     let src = r#"
@@ -450,12 +461,53 @@ fn main() {
     print("{p.n + a.n + b.n}")
 }
 "#;
+    let ws = check(src);
+
+    // THE POPULATION, lowering side: three literals inject `tick()`.
+    let stamped = stamped_domains(&ws, "main");
+    let defaults: Vec<&(SiteDomain, u32)> = stamped
+        .iter()
+        .filter(|(d, _)| matches!(d, SiteDomain::StructDefaults { .. }))
+        .collect();
+    assert_eq!(
+        defaults.len(),
+        3,
+        "expected three defaults-domain stamps in `main`, got {defaults:?}"
+    );
+
+    // THE POPULATION, walk side: the same obligations exist in the body's own
+    // tables. A zero below means nothing if these are absent.
+    let mut g = graph_of(&ws);
+    let bodies = skull::concrete_body::build(&ws, &mut g);
+    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    let main = bodies
+        .bodies
+        .iter()
+        .find(|(i, _)| {
+            i.func.module == mid && ws.module(mid).functions[i.func.func].name.as_str() == "main"
+        })
+        .map(|(_, b)| b)
+        .expect("main has a concrete body");
+    let recorded: Vec<&Callee> = main
+        .direct_calls
+        .iter()
+        .filter(|(s, _)| matches!(s.domain, SiteDomain::StructDefaults { .. }))
+        .map(|(_, c)| c)
+        .collect();
+    assert_eq!(
+        recorded.len(),
+        2,
+        "expected an obligation per struct DECLARATION reached (`Plain` and \
+         `Box`), got {recorded:?}"
+    );
+
+    // Only now is the zero a statement about those obligations.
     let c = census_of(src);
     assert!(c.accounts(), "accounting identity broken: {c:?}");
-    assert!(c.joined > 0, "the fixture joined nothing: {c:?}");
     assert_eq!(
         unjoined(&c, Unjoined::SiteNotInBody),
         0,
         "a struct default whose callee is NON-generic must still join: {c:?}"
     );
+    assert_eq!(unjoined(&c, Unjoined::NoSite), 0, "{c:?}");
 }
