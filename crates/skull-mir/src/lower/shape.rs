@@ -2169,7 +2169,7 @@ pub(crate) fn ablation_next_decline(
 /// Rebuild the [`SpecSubst`] (callee generic `VarId` -> concrete type) for `fref`
 /// from a [`SpecKey`] (trees in declaration order). The inliner holds only the
 /// arena-free key in its cache; this re-pairs it with the callee's generic
-/// `VarId`s to drive [`lower_function_spec`]. An empty / all-`None` key yields an
+/// `VarId`s to drive [`lower_emitted_body`]. An empty / all-`None` key yields an
 /// empty subst (the shared snapshot).
 pub fn spec_subst_from_key(ws: &Workspace, fref: FuncRef, key: &SpecKey) -> SpecSubst {
     let f = &ws.module(fref.module).functions[fref.func];

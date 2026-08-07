@@ -62,6 +62,12 @@ fn serves_target(b: bone_semantic::hir::FnBackend, target: bone_semantic::hir::F
 mod shape;
 pub use shape::*;
 
+/// The backend ABI of one emitted body. The scalar-ABI POLICY lives inside and
+/// is private to it, so a definition and the call that targets it cannot reach
+/// it from two places.
+mod abi;
+pub use abi::{AbiSubject, BackendFnAbiPlan, EmittedBodyId};
+
 /// The `impl Builder` walk, split by topic. Each is a plain `impl Builder<'_>`
 /// block in a child module -- Rust allows the impl to be spread across the
 /// crate, and a child sees this module's private items, so nothing needed
@@ -199,8 +205,9 @@ pub struct ScalarCtx {
     /// keeps value structs as first-class single values (params/returns/args),
     /// never splatting them to leaf scalars. Used by the GLSL backend, where a
     /// `value` struct is a first-class `vecN`, not the luajit-shaped scalar leaves
-    /// (`docs/shaders.md` finding 5). The toggle is contained in
-    /// [`fn_scalar_abi`], which definitions and direct calls both consult.
+    /// (`docs/shaders.md` finding 5). The toggle is contained in the ABI
+    /// policy behind [`BackendFnAbiPlan`], which definitions and direct calls
+    /// both read.
     values_first_class: bool,
     /// When set, EVERY complete generic instantiation reifies -- the conditional
     /// `any_value` trigger and the unspliced-context narrowing are both off.
@@ -337,76 +344,9 @@ impl ScalarCtx {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct FnScalarAbi {
-    param_shapes: Vec<RetSlot>,
-    ret_shape: Option<ValueShape>,
-}
-
-/// The one ABI policy read by a top-level definition and every direct call.
-/// Address-taken Rock bodies narrow to the `nobox` shapes an indirect caller can
-/// derive from the fn type; direct-only bodies may scalarize every eligible value.
-fn fn_scalar_abi(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef) -> Option<FnScalarAbi> {
-    fn_scalar_abi_spec(ws, scx, fref, &SpecSubst::default())
-}
-
-fn fn_nobox_abi_spec(
-    ws: &Workspace,
-    fref: FuncRef,
-    subst: &SpecSubst,
-) -> Option<FnScalarAbi> {
-    let f = &ws.module(fref.module).functions[fref.func];
-    let param_shapes: Vec<RetSlot> = f
-        .param_decls
-        .iter()
-        .map(|pd| nobox_param_slot_spec(ws, subst, pd.ty))
-        .collect();
-    let ret_shape =
-        f.return_ty.and_then(|ty| nobox_declared_shape_spec(ws, subst, ty));
-    (ret_shape.is_some() || param_shapes.iter().any(RetSlot::splats))
-        .then_some(FnScalarAbi { param_shapes, ret_shape })
-}
-
-fn fn_scalar_abi_spec(
-    ws: &Workspace,
-    scx: &ScalarCtx,
-    fref: FuncRef,
-    subst: &SpecSubst,
-) -> Option<FnScalarAbi> {
-    if scx.values_first_class {
-        return None;
-    }
-    let f = &ws.module(fref.module).functions[fref.func];
-    if f.is_extern {
-        return None;
-    }
-    let has_scalar_abi = f.annotations.iter().any(|a| a.name.name.as_str() == "scalar_abi");
-    let nobox_only = if has_scalar_abi {
-        false
-    } else {
-        let name_is_fixed = f.annotations.iter().any(|a| match a.name.name.as_str() {
-            "nomangle" => subst.is_empty(),
-            "test" => true,
-            _ => false,
-        });
-        if f.inline_body.is_some() || f.name.as_str() == "main" || name_is_fixed {
-            return None;
-        }
-        scx.taken_by_ref.contains(&f.name)
-    };
-    if nobox_only {
-        return fn_nobox_abi_spec(ws, fref, subst);
-    }
-    let param_shapes: Vec<RetSlot> =
-        f.param_decls.iter().map(|pd| sig_param_slot_spec(ws, subst, pd.ty)).collect();
-    let ret_shape = f.return_ty.and_then(|ty| sig_value_shape_spec(ws, subst, ty));
-    (ret_shape.is_some() || param_shapes.iter().any(RetSlot::splats))
-        .then_some(FnScalarAbi { param_shapes, ret_shape })
-}
-
 /// A hoisted nested `fn`: the private top-level name it resolves to, and the
 /// value ABI its definition and every call site both read (so the two can never
-/// drift, the same single-gate discipline as [`fn_scalar_abi`]).
+/// drift, the same single-gate discipline as [`BackendFnAbiPlan`]).
 #[derive(Clone)]
 struct NestedFn {
     hoisted: Ustr,
@@ -421,105 +361,6 @@ struct NestedFn {
 impl NestedFn {
     fn uses_scalar_abi(&self) -> bool {
         self.ret_shape.is_some() || self.param_shapes.iter().any(RetSlot::splats)
-    }
-}
-
-/// **The backend ABI of one function instance** (plan S 13, Stage 3).
-///
-/// One object over the three facts the FOREIGN-BODY boundary needs -- the
-/// emitted parameter spelling, the per-declared-param leaf widths, and the
-/// result-wire width -- built once from a declaration and a substitution.
-/// Three independent oracles stood here before, each re-deriving
-/// [`fn_scalar_abi_spec`] for itself, so a publisher and the caller capturing
-/// it could only agree by all three being asked the same question.
-///
-/// **Scope, precisely.** This is not yet the object every definition and call
-/// route consumes; plan Stage 3 is what makes it that. Today:
-///
-/// - `lua_param_names` is read by luajit's `inline(lua)` emission
-///   (`skull::mir_emit`), the JS backend's `inline(js)` emission
-///   (`skull_codegen_js::emit`) and [`scalar_abi_param_collisions`]. Ordinary
-///   Rock bodies emit positional cells and never consult it.
-/// - `param_leaf_widths` is read by the JS arity guard alone.
-/// - `result_lanes` is read by the JS publisher and its scratch bank. **Lua
-///   does not read it** -- luajit carries several results on native
-///   multi-return, so there is no width for it to state (plan S 13a).
-/// - Only `skull::artifact` builds it PER INSTANCE. Every emission consumer
-///   goes through [`Self::for_declaration`], because pre-cutover emission
-///   still writes one shared body per declaration.
-///
-/// The substitution is an instance's [`crate::monoty::MonoSubst`], so a generic
-/// body instantiated at a multi-lane result states *that* width: `T` is one
-/// boxed slot on the declaration and two lanes at `T = (bool, float)`. A
-/// per-declaration answer is not a narrower answer, it is a different
-/// question -- which is why the artifact view asks per instance and emission,
-/// which has only the declaration to emit, asks for the declaration.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct BackendFnAbiPlan {
-    pub decl: FuncRef,
-    /// Physical values on the result wire: 0 with no return, 1 for an ordinary
-    /// one, more for the two shapes that splat -- a tuple return (each element
-    /// its own slot, a `nobox` element into its leaves) and a bare `nobox`
-    /// value return under the scalar ABI.
-    ///
-    /// **A JS transport fact.** Plan S 13b: leaf 0 rides the ordinary JS
-    /// `return`, lanes 1..N ride the module-scope scratch bank
-    /// (`docs/boundary-contracts.md` 1.2). Luajit has native multi-return and
-    /// consults nothing here; the artifact view still records the width for
-    /// every artifact, because it is a property of the wire rather than of the
-    /// backend that happens to need it spelled out.
-    ///
-    /// Derived from the same [`fn_scalar_abi_spec`] policy and
-    /// [`tuple_ret_shape`] the definition and every call site read, which a
-    /// textual scan of the opaque body for `__rock_retN` could not be.
-    pub result_lanes: usize,
-    /// Depth-first leaf names for a scalar-ABI FOREIGN body (`@scalar_abi`):
-    /// each value param expands to `<base>__<leaf>`, the names the hand-written
-    /// body references; other params keep their name. `None` when this instance
-    /// does not use the scalar ABI, and the caller emits the plain list. The
-    /// leaf ORDER matches `repr_to_leaves`, so def params line up with the
-    /// callsite splat positionally.
-    pub lua_param_names: Option<Vec<String>>,
-    /// Per-DECLARED-param leaf width (a value-struct param's flattened leaf
-    /// count, 1 otherwise). Per declared param rather than per slot so a
-    /// defaulted value-struct param counts as its whole leaf group.
-    pub param_leaf_widths: Option<Vec<usize>>,
-}
-
-impl BackendFnAbiPlan {
-    pub fn build(
-        ws: &Workspace,
-        scx: &ScalarCtx,
-        decl: FuncRef,
-        subst: &SpecSubst,
-    ) -> Self {
-        let f = &ws.module(decl.module).functions[decl.func];
-        let abi = fn_scalar_abi_spec(ws, scx, decl, subst);
-        let result_lanes = match f.return_ty {
-            None => 0,
-            Some(ret) => match shape::tuple_ret_shape(ws, subst, ret) {
-                Some(shape) => shape.slot_count(),
-                None => match abi.as_ref().and_then(|a| a.ret_shape.as_ref()) {
-                    Some(vs) => vs.leaf_count(),
-                    None => 1,
-                },
-            },
-        };
-        let lua_param_names = abi.as_ref().map(|a| {
-            let mut names = Vec::new();
-            for (pd, slot) in f.param_decls.iter().zip(a.param_shapes.iter()) {
-                slot_param_names(pd.name.as_str(), slot, &mut names);
-            }
-            names
-        });
-        let param_leaf_widths =
-            abi.as_ref().map(|a| a.param_shapes.iter().map(RetSlot::slot_count).collect());
-        Self { decl, result_lanes, lua_param_names, param_leaf_widths }
-    }
-
-    /// The declaration's own shape -- the empty-substitution instance.
-    pub fn for_declaration(ws: &Workspace, scx: &ScalarCtx, decl: FuncRef) -> Self {
-        Self::build(ws, scx, decl, &SpecSubst::default())
     }
 }
 
@@ -558,10 +399,11 @@ pub fn scalar_abi_param_collisions(
     if f.inline_body.is_none() {
         return Vec::new();
     }
-    let Some(names) = BackendFnAbiPlan::for_declaration(ws, scx, fref).lua_param_names else {
+    let plan = BackendFnAbiPlan::for_declaration(ws, scx, fref);
+    let Some(names) = plan.lua_param_names(ws) else {
         return Vec::new();
     };
-    let origins = scalar_abi_param_origins(ws, scx, fref);
+    let origins = scalar_abi_param_origins(ws, &plan);
     debug_assert_eq!(names.len(), origins.len(), "one derivation, two spellings");
 
     let mut out = Vec::new();
@@ -595,15 +437,18 @@ pub fn scalar_abi_param_collisions(
 /// A human description per emitted parameter, positionally parallel to
 /// [`scalar_abi_lua_param_names`]: either the declared param itself, or which
 /// leaf of which value param it flattens from (dotted, so it is readable and
-/// unambiguous). Built by the same walk under the `.` separator.
-fn scalar_abi_param_origins(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef) -> Vec<String> {
-    let Some(abi) = fn_scalar_abi(ws, scx, fref) else {
+/// unambiguous). Built by the same walk under the `.` separator, over the SAME
+/// plan the names come from -- a second plan here would be free to describe a
+/// different parameter list than the one being checked.
+fn scalar_abi_param_origins(ws: &Workspace, plan: &BackendFnAbiPlan) -> Vec<String> {
+    let Some(shapes) = plan.param_leaf_shapes() else {
         return Vec::new();
     };
-    let f = &ws.module(fref.module).functions[fref.func];
+    let decl = plan.decl();
+    let f = &ws.module(decl.module).functions[decl.func];
     let mut out = Vec::new();
-    for (pd, slot) in f.param_decls.iter().zip(abi.param_shapes) {
-        slot_param_origins(pd.name.as_str(), &slot, &mut out);
+    for (pd, slot) in f.param_decls.iter().zip(shapes) {
+        slot_param_origins(pd.name.as_str(), slot, &mut out);
     }
     out
 }
@@ -1121,22 +966,50 @@ pub fn lower_function(
     mid: ModuleId,
     fid: Idx<Function>,
 ) -> Result<MirFunc, CompilerError> {
-    lower_function_spec(ws, scx, mid, fid, &SpecSubst::default())
+    lower_emitted_body(ws, scx, &EmittedBodyId::Shared(FuncRef { module: mid, func: fid }))
 }
 
-/// Lower `fref` with a per-instantiation generic substitution (`docs/flatvec-plan.md`,
-/// call-site specialization). `subst` maps the callee's generic `VarId`s to concrete
-/// leaves so a value-instantiated body lowers as if hand-written for that type: value
-/// params explode field-wise, `buf[i]=v` scalarizes, `native_buffer_alloc<T>` resolves
-/// its ctype. An EMPTY `subst` is exactly [`lower_function`] (the shared generic /
-/// non-generic snapshot), byte-identical.
-pub fn lower_function_spec(
+/// **Lower the definition emission writes for `body`.**
+///
+/// The shared snapshot for a `Shared` id; for a `Specialized` one, the body as
+/// if hand-written for that instantiation (`docs/flatvec-plan.md`): value params
+/// explode field-wise, `buf[i]=v` scalarizes, `native_buffer_alloc<T>` resolves
+/// its ctype. An all-`None` key is `Shared` by construction, byte-identical to
+/// the shared snapshot.
+pub fn lower_emitted_body(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    body: &EmittedBodyId,
+) -> Result<MirFunc, CompilerError> {
+    let decl = body.decl();
+    lower_body(ws, scx, decl, AbiSubject::Emitted(body.clone()), &body.subst(ws))
+}
+
+/// **Lower a LOGICAL INSTANCE's body** under the substitution the mono graph
+/// recorded for it.
+///
+/// A different population from [`lower_emitted_body`] until plan step E1: an
+/// instance whose specialization the lowerer declined has no emitted body of
+/// its own, and this is how the join census measures what one would be.
+pub fn lower_instance_body(
     ws: &Workspace,
     scx: &ScalarCtx,
     mid: ModuleId,
     fid: Idx<Function>,
     subst: &SpecSubst,
 ) -> Result<MirFunc, CompilerError> {
+    let decl = FuncRef { module: mid, func: fid };
+    lower_body(ws, scx, decl, AbiSubject::Instance(decl), subst)
+}
+
+fn lower_body(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    self_ref: FuncRef,
+    subject: AbiSubject,
+    subst: &SpecSubst,
+) -> Result<MirFunc, CompilerError> {
+    let (mid, fid) = (self_ref.module, self_ref.func);
     let module = ws.module(mid);
     let func = &module.functions[fid];
     if func.inline_body.is_some() {
@@ -1164,10 +1037,11 @@ pub fn lower_function_spec(
     // leaf cells and a value return becomes a multi-value `Return`. A specialized
     // instantiation additionally treats a generic param/return bound to a value
     // leaf as that value (`sig_value_shape_spec`), so it joins the scalar ABI.
-    let self_ref = FuncRef { module: mid, func: fid };
-    let abi = fn_scalar_abi_spec(ws, scx, self_ref, subst);
-    let param_shapes = abi.as_ref().map(|a| a.param_shapes.clone()).unwrap_or_default();
-    let ret_shape = abi.and_then(|a| a.ret_shape);
+    // This body's own ABI, from the one plan the calls that target it read.
+    let abi = BackendFnAbiPlan::for_subject(ws, scx, subject, subst);
+    let param_shapes = abi.param_shapes();
+    let ret_shape = abi.ret_shape().cloned();
+    let ret_tuple = abi.ret_tuple().cloned();
     let mut b = Builder {
         ws,
         scx,
@@ -1189,7 +1063,7 @@ pub fn lower_function_spec(
         in_unspliced_ctx: func.is_coroutine,
         param_shapes,
         ret_shape,
-        ret_tuple: func.return_ty.and_then(|t| tuple_ret_shape(ws, subst, t)),
+        ret_tuple,
         ret_ty: func.return_ty,
         fn_name_span: Some(func.name_span),
         cur_span: None,

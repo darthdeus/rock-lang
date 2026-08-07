@@ -33,7 +33,7 @@ use skull_mir::gpu_layout::{
     texture_slots, uniform_array_block, vertex_attrs,
 };
 use skull_mir::intrinsics::{Emission, IntrinsicEntry, IntrinsicTable};
-use skull_mir::lower::{lower_function_spec, ScalarCtx, SpecSubst};
+use skull_mir::lower::{lower_emitted_body, ScalarCtx, SpecSubst};
 use skull_mir::monoty::{MonoCtor, MonoTy};
 use skull_mir::shader_ir::{
     FragmentOutput, LogicalSampler, ShaderIR, ShaderStageIr,
@@ -356,7 +356,7 @@ impl skull_mir::reach::ReachPolicy for Reach<'_> {
         // Signature must be tier 0 UNDER this instantiation.
         check_tier0_signature_spec(self.ws, &subst, f)?;
         // Lower to MIR (values-first-class) and profile-check the body.
-        let mf = lower_function_spec(self.ws, self.scx, inst.fref.module, inst.fref.func, &subst)
+        let mf = lower_emitted_body(self.ws, self.scx, &inst.emitted_body())
             .map_err(|e| {
                 err(f.name_span, format!("shader profile: `{}` cannot lower for GLSL: {}", f.name, e.message))
             })?;
@@ -2984,7 +2984,7 @@ fn plan_stage(
 ) -> Result<StagePlan, CompilerError> {
     let f = &ws.module(fref.module).functions[fref.func];
     let entry = ShaderInstance::plain(fref);
-    let mf = lower_function_spec(ws, scx, fref.module, fref.func, &entry.subst(ws)).map_err(|e| {
+    let mf = lower_emitted_body(ws, scx, &entry.emitted_body()).map_err(|e| {
         err(f.name_span, format!("shader profile: `{}` cannot lower for GLSL: {}", f.name, e.message))
     })?;
     let mut callees: Vec<ShaderInstance> = Vec::new();
@@ -4535,7 +4535,7 @@ mod assertion_flip_tests {
         let scx = ScalarCtx::new_values_first_class(&ws);
         let fref = resolve_root(&ws, mid, "f").expect("root");
         let mut mf =
-            lower_function_spec(&ws, &scx, fref.module, fref.func, &SpecSubst::default())
+            lower_emitted_body(&ws, &scx, &skull_mir::lower::EmittedBodyId::Shared(fref))
                 .expect("lower");
 
         // The coercion is present today (regression pin for the return sink).
@@ -4583,7 +4583,7 @@ mod assertion_flip_tests {
         let scx = ScalarCtx::new_values_first_class(&ws);
         let fref = resolve_root(&ws, mid, "caller").expect("root");
         let mut mf =
-            lower_function_spec(&ws, &scx, fref.module, fref.func, &SpecSubst::default())
+            lower_emitted_body(&ws, &scx, &skull_mir::lower::EmittedBodyId::Shared(fref))
                 .expect("lower");
 
         // CONTROL: the record exists and the body emits against it.
@@ -4613,7 +4613,7 @@ mod assertion_flip_tests {
         );
         let scx = ScalarCtx::new_values_first_class(&ws);
         let fref = resolve_root(&ws, mid, "caller").expect("root");
-        let mf = lower_function_spec(&ws, &scx, fref.module, fref.func, &SpecSubst::default())
+        let mf = lower_emitted_body(&ws, &scx, &skull_mir::lower::EmittedBodyId::Shared(fref))
             .expect("lower");
 
         // The fixture really does exercise the gate: a call is present, and it
@@ -4980,7 +4980,7 @@ mod assertion_flip_tests {
         );
         let scx = ScalarCtx::new_values_first_class(&ws);
         let fref = resolve_root(&ws, mid, "caller").expect("root");
-        let base = lower_function_spec(&ws, &scx, fref.module, fref.func, &SpecSubst::default())
+        let base = lower_emitted_body(&ws, &scx, &skull_mir::lower::EmittedBodyId::Shared(fref))
             .expect("lower");
 
         // CONTROL: the recorded key has the declared arity, and the body emits.
@@ -5018,7 +5018,7 @@ mod assertion_flip_tests {
         let scx = ScalarCtx::new_values_first_class(&ws);
         let fref = resolve_root(&ws, mid, "caller").expect("root");
         let mut mf =
-            lower_function_spec(&ws, &scx, fref.module, fref.func, &SpecSubst::default())
+            lower_emitted_body(&ws, &scx, &skull_mir::lower::EmittedBodyId::Shared(fref))
                 .expect("lower");
 
         let iid = *mf.spec_bindings.keys().next().expect("a recorded instantiation");

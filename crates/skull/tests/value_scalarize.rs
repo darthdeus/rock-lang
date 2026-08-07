@@ -347,9 +347,9 @@ fn main() {
 /// spanned rejection where the fn is taken by value.
 ///
 /// THE MECHANISM: the two ends derived the ABI from different sources. A
-/// definition reads `fn_scalar_abi`; an indirect call site has only the fn TYPE,
+/// definition reads its `BackendFnAbiPlan`; an indirect call site has only the fn TYPE,
 /// so it reads `fn_value_abi`. Those agree by construction for an ordinary body
-/// -- `fn_scalar_abi` NARROWS an address-taken one (`scx.taken_by_ref`) to
+/// -- the plan NARROWS an address-taken one (`scx.taken_by_ref`) to
 /// exactly the `nobox` shapes the type yields, which is what that narrowing
 /// exists for. `@scalar_abi` is the one thing that bypasses it, and deliberately:
 /// its hand-written `inline(lua)` body spells the leaf params (`r__tl__x`), so

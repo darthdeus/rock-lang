@@ -1010,7 +1010,8 @@ impl Builder<'_> {
             // `recv?.method(args)` UFCS: `method(recv, args)`, recv as arg 0.
             let func = self.resolve_funcref(e, method)?;
             let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
-            if let Some(abi) = fn_scalar_abi(self.ws, self.scx, func) {
+            let plan = BackendFnAbiPlan::for_declaration(self.ws, self.scx, func);
+            if let Some(abi) = plan.scalar().cloned() {
                 // Scalar-ABI callee: splat the value receiver + value args into
                 // leaves (a value return packs to the single safe-nav result).
                 return self.scalar_ufcs_call_repr(e, func, recv, &arg_idxs, &abi)

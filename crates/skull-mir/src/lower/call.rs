@@ -2,6 +2,7 @@
 //! call trees, and the pack/leaf plumbing that decides whether a value crosses
 //! a call boundary as leaves or as a box.
 use super::*;
+use super::abi::FnScalarAbi;
 
 impl Builder<'_> {
     /// Lower a call to a (boxed) single value — the scalar-ABI Group result is
@@ -583,6 +584,26 @@ impl Builder<'_> {
         }))
     }
 
+    /// **The ABI plan of the body this call TARGETS.**
+    ///
+    /// The callee's emitted body is named by the delivery decision that reached
+    /// this call: a served instantiation targets the specialized definition,
+    /// and everything else targets the shared one. That is the same id the
+    /// definition is lowered against, which is what keeps the caller's argument
+    /// splat and the callee's parameter list from being two derivations.
+    pub(crate) fn callee_abi_plan(
+        &self,
+        func: FuncRef,
+        spec: Option<&(SpecKey, SpecSubst)>,
+        subst: &SpecSubst,
+    ) -> BackendFnAbiPlan {
+        let body = match spec {
+            Some((key, _)) => EmittedBodyId::new(func, key.clone()),
+            None => EmittedBodyId::Shared(func),
+        };
+        BackendFnAbiPlan::for_subject(self.ws, self.scx, AbiSubject::Emitted(body), subst)
+    }
+
     /// THE tuple-return shape of a call, read off the CALLEE's declared return
     /// type under the CALLEE's instantiation.
     ///
@@ -605,10 +626,7 @@ impl Builder<'_> {
         let spec = self.call_spec_for_target(e, func)?;
         let empty = SpecSubst::default();
         let subst = spec.as_ref().map_or(&empty, |(_, s)| s);
-        let Some(ret) = self.ws.module(func.module).functions[func.func].return_ty else {
-            return Ok(None);
-        };
-        Ok(tuple_ret_shape(self.ws, subst, ret))
+        Ok(self.callee_abi_plan(func, spec.as_ref(), subst).ret_tuple().cloned())
     }
 
     /// [`Self::call_spec`] for the for-protocol `next` callee, whose bindings
@@ -691,7 +709,13 @@ impl Builder<'_> {
         // A call the policy declines to specialize still names exactly one
         // concrete instance, and this is where it says which.
         let callee_inst = self.callee_instance_for(e, func)?;
-        let ret_tuple = self.call_ret_tuple_shape(e, func)?;
+        let empty_subst = SpecSubst::default();
+        let subst = spec.as_ref().map_or(&empty_subst, |(_, s)| s);
+        // The ABI of the body this call TARGETS, from the plan that body's own
+        // definition is lowered against -- the tuple return shape included, which
+        // the call used to derive for itself.
+        let plan = self.callee_abi_plan(func, spec.as_ref(), subst);
+        let ret_tuple = plan.ret_tuple().cloned();
         if let Some(shape) = &ret_tuple {
             self.reject_nobox_opaque_tuple_return(e, func, shape)?;
         } else {
@@ -704,10 +728,7 @@ impl Builder<'_> {
         {
             return Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))));
         }
-        let empty_subst = SpecSubst::default();
-        let subst = spec.as_ref().map_or(&empty_subst, |(_, s)| s);
-        let scalar_abi = fn_scalar_abi_spec(self.ws, self.scx, func, subst);
-        let Some(scalar_abi) = scalar_abi else {
+        let Some(scalar_abi) = plan.scalar().cloned() else {
             self.reject_nobox_boxed_call_args(func, arg_idxs)?;
             self.reject_column_container_opaque_slots(e, func)?;
             let args = if any_named {

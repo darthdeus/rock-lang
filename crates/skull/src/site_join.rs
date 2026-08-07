@@ -811,7 +811,7 @@ pub fn census_detailed(
             skip(&mut c, BodySkip::NoSubstitution);
             continue;
         };
-        let mut mf = match skull_mir::lower::lower_function_spec(
+        let mut mf = match skull_mir::lower::lower_instance_body(
             ws,
             scx,
             inst.func.module,

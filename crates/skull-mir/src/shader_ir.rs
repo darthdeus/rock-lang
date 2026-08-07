@@ -71,6 +71,13 @@ impl ShaderInstance {
         crate::lower::spec_subst_from_key(ws, self.fref, &self.key)
     }
 
+    /// The definition GLSL emits for this instance. A shader instance IS an
+    /// emitted body -- one checked, emitted definition per instantiation --
+    /// which is what `unchecked_generic` being deleted rests on.
+    pub fn emitted_body(&self) -> crate::lower::EmittedBodyId {
+        crate::lower::EmittedBodyId::new(self.fref, self.key.clone())
+    }
+
     /// The symbol this instance is emitted under. Target-neutral: it is the
     /// mangled declaration plus the instantiation, and a backend that needs a
     /// different spelling renames from here rather than re-deriving it.

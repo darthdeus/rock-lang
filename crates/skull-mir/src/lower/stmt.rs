@@ -59,7 +59,7 @@ impl Builder<'_> {
     }
 
     /// The value ABI of a nested `fn`, read by both its definition and its call
-    /// sites. Same rule as [`fn_scalar_abi`] for a top-level fn, minus annotation
+    /// sites. Same rule as [`BackendFnAbiPlan`] for a top-level fn, minus annotation
     /// gates: a fn value narrows to `nobox` shapes; a direct-only fn may use every
     /// scalarizable value shape.
     pub(crate) fn nested_fn_abi(

@@ -1123,8 +1123,8 @@ fn emit_specialized_callees(
         };
         let mut reject = |e: CompilerError| errs.push((name.clone(), e));
         let subst = skull_mir::lower::spec_subst_from_key(ws, fref, &key);
-        let lowered =
-            skull_mir::lower::lower_function_spec(ws, scx, fref.module, fref.func, &subst);
+        let body = skull_mir::lower::EmittedBodyId::new(fref, key.clone());
+        let lowered = skull_mir::lower::lower_emitted_body(ws, scx, &body);
         let mut mf = match lowered {
             Ok(mf) => mf,
             Err(e) => {
@@ -1796,7 +1796,7 @@ fn assemble(
                 // (Js inline bodies were skipped above via the backend guard.)
                 let name = mangle_fn(ws, f);
                 let params = match skull_mir::lower::BackendFnAbiPlan::for_declaration(ws, scx, self_ref)
-                    .lua_param_names
+                    .lua_param_names(ws)
                 {
                     Some(names) => names.join(", "),
                     None => f.param_decls.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", "),

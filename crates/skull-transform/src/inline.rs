@@ -29,8 +29,8 @@ use bone_semantic::inference::{BodyInference, Workspace};
 use bone_semantic::prelude::{BoundNext, BoundTree, CompilerError};
 use comfy_la_arena::Idx;
 use skull_mir::lower::{
-    bound_next_shape, lower_function_spec, spec_key_from_next_generics, spec_subst_from_key,
-    BoundNextElem, ElemRebuild, ScalarCtx, SpecKey, SpecSubst,
+    bound_next_shape, lower_emitted_body, spec_key_from_next_generics,
+    BoundNextElem, ElemRebuild, EmittedBodyId, ScalarCtx, SpecKey, SpecSubst,
 };
 use skull_mir::mir::*;
 
@@ -183,10 +183,9 @@ fn classify(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef, key: &SpecKey) -> Op
         None => return None,
     };
     // A specialized snapshot lowers the body as if hand-written for the concrete
-    // instantiation (`docs/flatvec-plan.md`); an empty key is the shared snapshot,
-    // byte-identical to the old `lower_function`.
-    let subst = spec_subst_from_key(ws, fref, key);
-    let mut mf = lower_function_spec(ws, scx, fref.module, fref.func, &subst).ok()?;
+    // instantiation (`docs/flatvec-plan.md`); an all-`None` key is the shared
+    // snapshot, byte-identical to `lower_function`.
+    let mut mf = lower_emitted_body(ws, scx, &EmittedBodyId::new(fref, key.clone())).ok()?;
     // Cleanup first so the size gate reflects emitted size and the splice clones
     // a tight body (the caller re-runs cleanup over the whole result anyway).
     crate::cleanup(&mut mf);
