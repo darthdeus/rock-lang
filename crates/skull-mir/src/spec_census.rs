@@ -16,7 +16,7 @@
 //! does not bind it). It is treated as a WILDCARD when reconciling -- the shadow
 //! side is total, so it always has a concrete type where this side has a hole.
 
-use bone_semantic::hir::{BodyOwner, FnBackend};
+use bone_semantic::hir::BodyOwner;
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
 
@@ -66,7 +66,7 @@ impl PartialOrd for TodaySpec {
 /// The enclosing substitution is empty, matching the site-aware validator
 /// (`native_buffer_alloc_reject`): a call inside a generic body is read without
 /// an instantiation, which is exactly the shared-body condition being measured.
-pub fn today_specializations(ws: &Workspace, target: FnBackend) -> (Vec<TodaySpec>, usize) {
+pub fn today_specializations(ws: &Workspace) -> (Vec<TodaySpec>, usize) {
     let mut out = Vec::new();
     let mut rejected = 0usize;
     for module in ws.modules.iter() {
@@ -77,7 +77,7 @@ pub fn today_specializations(ws: &Workspace, target: FnBackend) -> (Vec<TodaySpe
         for (owner, inf) in ir.per_fn.iter() {
             let BodyOwner::Function(caller_fid) = owner else { continue };
             let caller = FuncRef { module: module.id, func: *caller_fid };
-            let (specs, rej) = specializations_in_body(ws, inf, target);
+            let (specs, rej) = specializations_in_body(ws, inf);
             rejected += rej;
             for (func, key) in specs {
                 out.push(TodaySpec {

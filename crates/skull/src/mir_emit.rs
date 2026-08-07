@@ -1016,6 +1016,14 @@ fn live_bodies(
             continue;
         }
         for (fid, f) in module.functions.iter() {
+            // A GENERIC declaration is never a root, however the root rule reads:
+            // it has no body to emit, so rooting it would ask for a shared
+            // generic snapshot that no longer exists. Its instances are reached
+            // through the demands of the bodies that call them, and a generic
+            // nothing instantiates emits nothing.
+            if is_generic(f) {
+                continue;
+            }
             if is_emission_root(module.file.as_str(), project_root, f, deco_map) {
                 roots.push(FuncRef { module: module.id, func: fid });
             }
@@ -1469,6 +1477,15 @@ fn emit_nested_fns(
 /// -- unlike [`emit_nested_fns`] -- fold no deps/statics (their `UnitOut` tracks
 /// neither) and run no `recover_counted_loops` (their loops recover at codegen,
 /// same as the co-fn step).
+/// The `static` cells of a hoisted-lambda tree, for the callers that emit it
+/// through [`emit_pass_nested_fns`] and so do not fold them along the way.
+fn collect_nested_statics(nested: &[MirFunc], out: &mut Vec<skull_mir::mir::StaticCell>) {
+    for nf in nested {
+        out.extend(nf.statics.iter().cloned());
+        collect_nested_statics(&nf.nested_fns, out);
+    }
+}
+
 fn emit_pass_nested_fns(ws: &Workspace, cg: &CodegenCtx, nested: &mut [MirFunc], out: &mut String) {
     for nf in nested.iter_mut() {
         skull_transform::cleanup_with_nobox(ws, nf);
@@ -1481,7 +1498,18 @@ fn emit_pass_nested_fns(ws: &Workspace, cg: &CodegenCtx, nested: &mut [MirFunc],
 /// NEITHER: it exists only monomorphized-by-inlining at its call sites (its
 /// body holds placeholder bound-calls that have no standalone emission).
 pub fn is_cached_body(f: &bone_semantic::hir::Function) -> bool {
-    !f.is_extern && f.inline_body.is_none() && !fn_has_bounds(f)
+    !f.is_extern && f.inline_body.is_none() && !fn_has_bounds(f) && !is_generic(f)
+}
+
+/// Whether the fn declares generics, and so has NO declaration-owned body.
+///
+/// This is the E1 cut stated as a predicate. A generic declaration is not a
+/// definition that happens to be shared across its instantiations -- it is not a
+/// definition at all, the way an `extern` or an `inline(lua)` body is not one.
+/// Every emitted body comes from an instance, and a declaration nothing
+/// instantiates emits nothing.
+pub fn is_generic(f: &bone_semantic::hir::Function) -> bool {
+    !f.generics.is_empty()
 }
 
 /// Whether the fn declares any `Iterator` bound on its generics.
@@ -1532,10 +1560,12 @@ fn is_stdlib_module_file(file: &str) -> bool {
 /// contributed:
 /// - `direct_globals` / `direct_calls`: global-init ordering is stated over
 ///   declarations, and a specialization's ordering facts are its declaration's.
-/// - `statics`: a specialized body's `static` cells have never been registered
-///   for hot-reload preservation. That is a real gap, but registering them here
-///   would change reload semantics under a byte-identity gate that cannot see
-///   it -- `docs/unfuck-backlog.md`.
+/// `statics` is NOT one of them. A specialized body's `static` cells are cells
+/// the emitted program uses, so leaving them out left them absent from
+/// `__rock_known_globals` -- no reset/preserve guard and no boot checkpoint
+/// could see them. That was survivable only while a specialization was rare;
+/// with emission owned by the instance, every generic body with a `static` is
+/// one.
 fn emit_spec_chunk(
     ws: &Workspace,
     cg: &CodegenCtx,
@@ -1572,7 +1602,9 @@ fn emit_spec_chunk(
         .map_err(|r| r.into_error(f.name_span, &format!("cannot emit specialized `{name}`: ")))?;
     let specs = specs[before..].to_vec();
     let mut lua = emit_named(ws, cg, name, &mf);
+    let mut statics = mf.statics.clone();
     let mut nested = std::mem::take(&mut mf.nested_fns);
+    collect_nested_statics(&nested, &mut statics);
     emit_pass_nested_fns(ws, cg, &mut nested, &mut lua);
     deps.insert(fref);
     collect_callee_frefs(&mf, &mut deps);
@@ -1582,7 +1614,7 @@ fn emit_spec_chunk(
         direct_globals: Vec::new(),
         direct_calls: Vec::new(),
         times: PhaseTimes::default(),
-        statics: Vec::new(),
+        statics,
         calls: skull_mir::reach::call_targets(&mf),
         global_names: skull_mir::reach::global_ref_names(&mf),
         specs,
@@ -1605,6 +1637,7 @@ fn emit_specialized_callees(
     live: &FxHashMap<EmittedBodyId, Chunk>,
     rejected: &[(String, CompilerError)],
     built: &mut Vec<(EmittedBodyId, Chunk)>,
+    statics: &mut Vec<skull_mir::mir::StaticCell>,
     out: &mut String,
 ) -> Vec<CompilerError> {
     let mut done: FxHashSet<EmittedBodyId> = FxHashSet::default();
@@ -1637,6 +1670,11 @@ fn emit_specialized_callees(
             continue;
         };
         out.push_str(&chunk.lua);
+        // A specialized definition's `static` cells are cells the program uses,
+        // so they register for hot-reload preservation on the same terms as a
+        // declaration's. Folded HERE because this is where a specialized body
+        // enters the output -- the declaration loop never sees one.
+        statics.extend(chunk.statics.iter().cloned());
         pending.extend(chunk.specs.iter().cloned());
         if !cached.contains_key(&body) {
             built.push((body.clone(), chunk.clone()));
@@ -2338,6 +2376,11 @@ fn assemble(
             if fn_has_bounds(f) {
                 continue;
             }
+            // A generic declaration has no definition of its own. Its bodies are
+            // its instances, rendered below by `emit_specialized_callees`.
+            if is_generic(f) {
+                continue;
+            }
             // Ordinary / coroutine: pull the cached chunk.
             match cache.chunks.get(&shared(self_ref)) {
                 Some(Ok(chunk)) => {
@@ -2386,6 +2429,7 @@ fn assemble(
         &live.spec_chunks,
         &live.rejected,
         built_specs,
+        &mut all_statics,
         &mut out,
     ));
 

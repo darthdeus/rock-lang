@@ -212,15 +212,6 @@ pub struct ScalarCtx {
     /// policy behind [`BackendFnAbiPlan`], which definitions and direct calls
     /// both read.
     values_first_class: bool,
-    /// When set, EVERY complete generic instantiation reifies -- the conditional
-    /// `any_value` trigger and the unspliced-context narrowing are both off.
-    ///
-    /// Not an optimization dial. It is set for a target that has no shared
-    /// generic body to decline to: GLSL has no boxed representation an unreified
-    /// `T` could take, so a declined key is not a slower lowering but no
-    /// lowering at all. The CPU backends keep the conditional trigger until
-    /// Stage 4 deletes it.
-    total_specialization: bool,
     /// The codegen backend this lowering feeds. Drives backend-variant selection
     /// at every resolved call ([`Builder::resolve_funcref`]): `Lua` rejects a
     /// call whose only binding is a JS decl; `Js` swaps a call to its JS sibling
@@ -269,7 +260,6 @@ impl ScalarCtx {
             per_body,
             ref_counts,
             values_first_class: false,
-            total_specialization: false,
             target: bone_semantic::hir::FnBackend::Lua,
         }
     }
@@ -296,15 +286,8 @@ impl ScalarCtx {
     pub fn new_values_first_class(ws: &Workspace) -> Self {
         let mut scx = Self::new(ws);
         scx.values_first_class = true;
-        scx.total_specialization = true;
         scx.target = bone_semantic::hir::FnBackend::Any;
         scx
-    }
-
-    /// Whether this lowering reifies EVERY complete instantiation
-    /// ([`total_specialization`]).
-    pub fn total_specialization(&self) -> bool {
-        self.total_specialization
     }
 
     /// Incrementally fold one re-inferred body's value-reference contribution into
@@ -2233,7 +2216,6 @@ fn native_buffer_alloc_elem_ctype_spec(
 /// specialize, or -- a library fn -- has no callers at all) is exempt: its
 /// standalone body's lowering-gap skip is then correct. Returns the first offender.
 pub fn native_buffer_alloc_reject(ws: &Workspace, mid: ModuleId) -> Option<(String, Span)> {
-    const LUA: bone_semantic::hir::FnBackend = bone_semantic::hir::FnBackend::Lua;
     let module = ws.module(mid);
     let ir = ws.inference(mid)?;
     // 1. Direct intrinsic calls with a concrete unallocatable element.
@@ -2310,7 +2292,7 @@ pub fn native_buffer_alloc_reject(ws: &Workspace, mid: ModuleId) -> Option<(Stri
             let resolves = if !owner_inlined {
                 false
             } else {
-                let spec = match compute_call_spec(ws, inf, c, fref, &SpecSubst::default(), LUA, false) {
+                let spec = match compute_call_spec(ws, inf, c, fref, &SpecSubst::default()) {
                     Ok(spec) => spec,
                     // This pass reads the same instantiation lowering does, so a
                     // compiler-state rejection is its answer too rather than
@@ -2943,7 +2925,6 @@ mod tests;
 pub(crate) mod shape_census_support {
     use super::shape::{compute_call_spec, SpecKey, SpecSubst};
     use crate::mir::FuncRef;
-    use bone_semantic::hir::FnBackend;
     use bone_semantic::inference::{BodyInference, Workspace};
 
     /// Every call in this body that today's machinery specializes, plus the
@@ -2951,7 +2932,6 @@ pub(crate) mod shape_census_support {
     pub(crate) fn specializations_in_body(
         ws: &Workspace,
         inf: &BodyInference,
-        target: FnBackend,
     ) -> (Vec<(FuncRef, SpecKey)>, usize) {
         // caller is supplied by the census; this returns callee-side data only
         let empty = SpecSubst::default();
@@ -2961,7 +2941,7 @@ pub(crate) mod shape_census_support {
         calls.sort_by_key(|(e, _)| **e);
         for (e, (m, f)) in calls {
             let func = FuncRef { module: *m, func: *f };
-            match compute_call_spec(ws, inf, *e, func, &empty, target, false) {
+            match compute_call_spec(ws, inf, *e, func, &empty) {
                 Ok(Some((key, _))) => out.push((func, key)),
                 Ok(None) => {}
                 Err(_) => rejected += 1,

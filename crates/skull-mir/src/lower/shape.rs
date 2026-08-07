@@ -1515,54 +1515,12 @@ pub fn growth_depth(t: &MonoTy) -> u32 {
 /// diagnostic mode, never a limit on what compiles.
 pub const ABLATION_GROWTH_DEPTH: u32 = 8;
 
-/// Whether any generic in `key` binds a type whose STORAGE the shared generic
-/// body cannot serve -- i.e. whether specializing is a CORRECTNESS requirement
-/// rather than an optimization.
-///
-/// In a context the inliner never enters, an ordinary call simply forgoes the
-/// scalar ABI (`in_unspliced_ctx`) because the shared generic body still serves a
-/// boxed value correctly. The `for`-protocol `next` can only do the same for an
-/// element the boxed representation still stores: under column storage the shared
-/// body reads a `_data` that does not exist. So an unspliceable `next` keeps its
-/// spec binding exactly when the element is column-stored, and the post-emit
-/// validator turns that into a rejection instead of a miscompile.
-///
-/// Two storage forms qualify, and the key cannot tell which position the type is
-/// used in -- so it over-approximates, which costs an extra specialized copy and
-/// can never cost correctness:
-///
-/// - a column-stored `Vec` element, where the shared body reads a missing `_data`
-/// - on JS ONLY, a leaf-addressed `NativeBuffer` element. luajit's `.ptr` is a
-///   `T*`, so `p[i]` yields an element reference and the shared body is right;
-///   JS backs the buffer with a TypedArray, so `ptr[i]` is a NUMBER and a whole
-///   element read from an opaque `T` silently returns a leaf. That is a
-///   miscompile, not a slowdown, so it does not wait for an annotation.
-pub(crate) fn spec_key_has_target_storage(
-    ws: &Workspace,
-    key: &SpecKey,
-    target: bone_semantic::hir::FnBackend,
-) -> bool {
-    let js = target == bone_semantic::hir::FnBackend::Js;
-    key.iter().flatten().any(|ty| {
-        ty.any_nominal(&|name| {
-            // Either flavour counts: the question is whether the shared boxed
-            // body would read a `_data` the storage does not have, and a
-            // nullable element is column-stored on exactly the same terms.
-            ((vec_column_elem(ws, name, false).is_some()
-                || vec_column_elem(ws, name, true).is_some())
-                && columns_available(ws, target, name))
-                || (js && leaf_addr_plan(ws, name).is_ok())
-        })
-    })
-}
-
 /// The physical form an opaque body would WRONGLY assume for a container
 /// parameter, or `None` when the boxed assumption still holds.
 ///
 /// One oracle for every container constructor 2.4 names
 /// (`docs/boundary-contracts.md`), so the rejection rule cannot drift from the
-/// storage lowering actually selects -- it composes exactly the two predicates
-/// [`spec_key_has_target_storage`] does, for the same reason.
+/// storage lowering actually selects.
 ///
 /// The split is not stylistic:
 ///
@@ -1595,10 +1553,9 @@ pub fn opaque_container_hazard(
     nullable: bool,
 ) -> Option<&'static str> {
     let js = target == bone_semantic::hir::FnBackend::Js;
-    // The element's own nullability, NOT either flavour.
-    // [`spec_key_has_target_storage`] may over-approximate -- an extra
-    // specialized copy costs nothing -- and a REJECTION may not: an unmarked
-    // `[BV2?]` is a boxed vec while its non-nullable twin `[BV2]` is columns.
+    // The element's own nullability, NOT either flavour: an unmarked `[BV2?]`
+    // is a boxed vec while its non-nullable twin `[BV2]` is columns, and a
+    // REJECTION may not over-approximate the way a spec-key trigger could.
     let columns =
         vec_column_elem(ws, elem, nullable).is_some() && columns_available(ws, target, elem);
     match container.as_str() {
@@ -1615,9 +1572,8 @@ pub fn opaque_container_hazard(
 /// Whether `[elem]` takes column storage when lowering for `target`.
 ///
 /// Every target now serves columns, so this is unconditional. It survives as a
-/// named predicate because [`spec_key_has_target_storage`] asks the question for a
-/// DIFFERENT reason -- whether specializing a generic callee is a correctness
-/// requirement -- and that reasoning is only sound while the two agree.
+/// named predicate because [`opaque_container_hazard`] asks it per container
+/// constructor, where the answer decides a rejection.
 pub(crate) fn columns_available(
     _ws: &Workspace,
     _target: bone_semantic::hir::FnBackend,
@@ -1869,8 +1825,6 @@ pub(crate) fn compute_call_spec(
     e: Idx<Expr>,
     func: FuncRef,
     enclosing: &SpecSubst,
-    target: bone_semantic::hir::FnBackend,
-    total: bool,
 ) -> Result<Option<(SpecKey, SpecSubst)>, CompilerError> {
     let f = &ws.module(func.module).functions[func.func];
     if f.generics.is_empty() {
@@ -1896,37 +1850,12 @@ pub(crate) fn compute_call_spec(
             ),
         ));
     };
-    let Some((key, subst)) = compute_spec_from_bindings(ws, inf, func, bindings, enclosing, total)?
-    else {
-        return Ok(None);
-    };
-    // A total-specialization target has no shared body to decline to, so the
-    // optimization gates below do not apply to it.
-    if total {
-        return Ok(Some((key, subst)));
-    }
-    // `@inline`/`@pure` is the OPT-IN gate: those callees specialize for speed, and
-    // whether it happens is the author's call.
-    //
-    // A column-eligible element is not an optimization. The shared body reads a
-    // `_data` that this instantiation's storage does not have, so it is WRONG, not
-    // slow -- the same asymmetry that decides whether an unspliceable call may
-    // fall back to the shared body. Specializing is the only correct lowering, so
-    // it does not wait for an annotation. This is what makes the plain-generic
-    // stdlib Vec surface (`clear`, `pop`, `remove_at`, ...) work over columns.
-    let opted_in =
-        f.annotations.iter().any(|a| matches!(a.name.name.as_str(), "inline" | "pure"));
-    // Stage-0e: the opt-in and the storage trigger are OPTIMIZATION gates, not
-    // correctness ones, so the ablation bypasses them to hold every reachable
-    // generic call to its complete instantiation. The gates are not deleted;
-    // with the mode off this is the untouched default path.
-    if crate::ablation::enabled() {
-        return Ok(Some((key, subst)));
-    }
-    if !opted_in && !spec_key_has_target_storage(ws, &key, target) {
-        return Ok(None);
-    }
-    Ok(Some((key, subst)))
+    // Every complete instantiation specializes. The `@inline`/`@pure` opt-in and
+    // the column-storage trigger were OPTIMIZATION gates over a shared generic
+    // body, choosing when a second definition was worth minting; with emission
+    // owned by the instance there is no shared body for a declined call to reach,
+    // so there is nothing left to gate.
+    Ok(compute_spec_from_bindings(ws, inf, func, bindings, enclosing)?)
 }
 
 /// Why a generic Rock call would keep the SHARED body, classified into an S 0e
@@ -2062,7 +1991,6 @@ pub(crate) fn compute_spec_from_bindings(
     func: FuncRef,
     bindings: &[TyId],
     enclosing: &SpecSubst,
-    total: bool,
 ) -> Result<Option<(SpecKey, SpecSubst)>, CompilerError> {
     let f = &ws.module(func.module).functions[func.func];
     if bindings.len() != f.generics.len() {
@@ -2078,7 +2006,6 @@ pub(crate) fn compute_spec_from_bindings(
     }
     let mut key: SpecKey = Vec::with_capacity(bindings.len());
     let mut subst = SpecSubst::default();
-    let mut any_value = false;
     let mut complete = true;
     for (g, b) in f.generics.iter().zip(bindings) {
         let Some(TypeExpr::Generic(var, _)) = ty_node(ws, inf, *g) else {
@@ -2092,7 +2019,6 @@ pub(crate) fn compute_spec_from_bindings(
         };
         match reify_type(ws, inf, *b, enclosing) {
             Some(ty) => {
-                any_value |= ty.any_nominal(&|name| map_is_value_struct(ws, name));
                 subst.insert(var, ty.clone());
                 key.push(Some(ty));
             }
@@ -2102,27 +2028,15 @@ pub(crate) fn compute_spec_from_bindings(
             }
         }
     }
-    // A target with NO shared generic body needs every complete key: there is
-    // no boxed representation on a GPU for an unreified `T` to take, so a
-    // partial answer is not a slower lowering, it is no lowering. Same rule the
-    // Stage-0e ablation applies workspace-wide, asked per lowering.
-    if total {
-        return Ok(complete.then_some((key, subst)));
-    }
-    // Stage-0e: `any_value` is the conditional trigger -- specialize only when
-    // some binding names a value struct. Totality has no such condition, so the
-    // ablation keeps every COMPLETE key.
+    // EVERY complete key specializes. There is no shared generic body to decline
+    // to any more, so a declined key is not a slower lowering -- it is a call
+    // spelling a name nothing defines.
     //
-    // A partial key is not a specialization. Every `None` slot maps back to the
-    // shared body through `spec_fn_name`, so returning one here would report a
-    // shared generic body as a success and skip the decline classifier entirely
-    // -- the mode's own blind spot, and exactly the uninterpretable result plan
-    // S 0f forbids ("dropping `any_value` with partial keys"). The default path
-    // below is untouched: it still accepts a partial key when `any_value` holds.
-    if crate::ablation::enabled() {
-        return Ok(complete.then_some((key, subst)));
-    }
-    Ok(any_value.then_some((key, subst)))
+    // A partial key is still not a specialization: a `None` slot maps back to
+    // the declaration through `spec_fn_name`, so returning one would name that
+    // same absent body. It is an INCOMPLETE instantiation, which the Stage-2
+    // `ConcreteTypeUnavailable` rejection owns.
+    Ok(complete.then_some((key, subst)))
 }
 
 /// The CONCRETE INSTANCE an iterator-protocol WITNESS resolves to, from the
@@ -2181,7 +2095,7 @@ pub fn spec_key_from_next_generics(
         let Some(bound) = next_generics.get(&var).copied() else { return Ok(None) };
         bindings.push(bound);
     }
-    Ok(compute_spec_from_bindings(ws, inf, func, &bindings, enclosing, false)?.map(|(key, _)| key))
+    Ok(compute_spec_from_bindings(ws, inf, func, &bindings, enclosing)?.map(|(key, _)| key))
 }
 
 /// [`ablation_decline`] for the for-protocol `next` witness, whose bindings come

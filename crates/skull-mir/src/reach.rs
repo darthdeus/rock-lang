@@ -144,14 +144,25 @@ pub fn global_ref_names(mf: &MirFunc) -> Vec<Ustr> {
     out
 }
 
-/// Every statically-resolved call target in `mf`, walking BLOCK inst-lists (not
-/// the raw arena) so a spliced-away call's stale arena inst is not re-discovered
-/// -- only the calls that survive inlining co-emit. Hoisted closure bodies are
-/// separate `nested_fns` after `convert_closures`, so their calls are walked too.
+/// Every call target in `mf` that is reached through the callee's DECLARATION
+/// body, walking BLOCK inst-lists (not the raw arena) so a spliced-away call's
+/// stale arena inst is not re-discovered -- only the calls that survive inlining
+/// co-emit. Hoisted closure bodies are separate `nested_fns` after
+/// `convert_closures`, so their calls are walked too.
+///
+/// A site carrying a `spec_bindings` entry names a SPECIALIZED body, and
+/// [`spec_bound_calls`] emits that edge as a `SpecDemand`. Yielding its
+/// declaration here as well would keep the callee's shared body reachable on
+/// the strength of a call that does not target it -- which is how a generic
+/// declaration stayed live with every one of its call sites specialized. The
+/// two functions partition one edge set; neither is the whole of it.
 pub fn call_targets(mf: &MirFunc) -> Vec<FuncRef> {
     fn walk(mf: &MirFunc, out: &mut Vec<FuncRef>) {
         for (_, block) in mf.blocks.iter() {
             for &iid in &block.insts {
+                if mf.spec_bindings.contains_key(&iid) {
+                    continue;
+                }
                 match &mf.insts[iid] {
                     Inst::Call { func, .. } | Inst::CallMulti { func, .. } => out.push(*func),
                     _ => {}

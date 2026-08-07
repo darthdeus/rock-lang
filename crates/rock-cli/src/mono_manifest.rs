@@ -2027,7 +2027,7 @@ fn one_project(
         digest: instance_graph::manifest_digest(&ws, &g),
         stable,
     };
-    let rec = instance_graph::reconcile(&ws, &g, bone_semantic::hir::FnBackend::Lua);
+    let rec = instance_graph::reconcile(&ws, &g);
     Ok(OneProject {
         row,
         hist: hist_of(&g),

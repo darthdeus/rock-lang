@@ -2867,12 +2867,8 @@ fn slots_match(slots: &[Option<String>], shadow: &[String]) -> bool {
             .all(|(s, a)| s.as_ref().is_none_or(|s| s == a))
 }
 
-pub fn reconcile(
-    ws: &Workspace,
-    g: &InstanceGraph,
-    target: bone_semantic::hir::FnBackend,
-) -> Reconciliation {
-    let (today, rejected_sites) = skull_mir::spec_census::today_specializations(ws, target);
+pub fn reconcile(ws: &Workspace, g: &InstanceGraph) -> Reconciliation {
+    let (today, rejected_sites) = skull_mir::spec_census::today_specializations(ws);
 
     // Shadow instances grouped by function, as canonical argument lists.
     let mut by_func: FxHashMap<(u32, u32), Vec<Vec<String>>> = FxHashMap::default();

@@ -1025,10 +1025,6 @@ impl Builder<'_> {
                 // JS -- keeps its spec binding.
                 let key = self
                     .call_spec(e, func)?
-                    .filter(|(k, _)| {
-                        !self.in_unspliced_ctx
-                            || spec_key_has_target_storage(self.ws, k, self.scx.target)
-                    })
                     .map(|(k, _)| k);
                 let callee_inst = self.callee_instance_for(e, func)?;
                 // A tuple-returning method splats N values, and they are handed on

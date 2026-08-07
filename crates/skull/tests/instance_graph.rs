@@ -201,7 +201,7 @@ fn main() {
 }
 "#,
     );
-    let r = instance_graph::reconcile(&ws, &g, bone_semantic::hir::FnBackend::Lua);
+    let r = instance_graph::reconcile(&ws, &g);
     assert!(r.today > 0, "the fixture produced no specializations to reconcile");
     assert!(
         r.missing.is_empty(),
