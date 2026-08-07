@@ -17,14 +17,16 @@
 //! INVERTED to pin the rejection.** When D-1 lands they go red; flip each to its
 //! documented positive form and delete this paragraph.
 //!
-//! The mode is process-global, so this serializes on the same discipline
-//! `ablation_totality.rs` uses and restores the flag on the way out.
+//! The mode is process-global, so this holds `common::AblationGuard` -- THE
+//! lock for this binary, shared with `ablation_totality.rs`. A per-file mutex
+//! would serialize this file against itself and against nothing else.
 
-use std::sync::{LazyLock, Mutex, MutexGuard};
+use std::sync::LazyLock;
 
 use bone_semantic::inference::Workspace;
-use skull_mir::ablation;
 use ustr::Ustr;
+
+use crate::common::AblationGuard as ModeGuard;
 
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
     rock_host::stdlib_loader::stdlib_files()
@@ -35,26 +37,6 @@ static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         })
         .collect()
 });
-
-static MODE: Mutex<()> = Mutex::new(());
-
-struct ModeGuard(#[allow(dead_code)] MutexGuard<'static, ()>);
-
-impl ModeGuard {
-    fn on() -> Self {
-        let g = MODE.lock().unwrap_or_else(|e| e.into_inner());
-        ablation::clear();
-        ablation::set_enabled(true);
-        ModeGuard(g)
-    }
-}
-
-impl Drop for ModeGuard {
-    fn drop(&mut self) {
-        ablation::set_enabled(false);
-        ablation::clear();
-    }
-}
 
 fn check(src: &str) -> Workspace {
     let mut modules = STDLIB.clone();

@@ -6,6 +6,8 @@ mod common;
 
 #[path = "backend_externs.rs"]
 mod backend_externs;
+#[path = "bounded_standalone_emission_sentinel.rs"]
+mod bounded_standalone_emission_sentinel;
 #[path = "closure.rs"]
 mod closure;
 #[path = "deepcopy.rs"]

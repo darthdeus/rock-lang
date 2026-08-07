@@ -27,25 +27,39 @@ fn write_tmp(tag: &str, src: &str) -> std::path::PathBuf {
     f
 }
 
-/// Compile under the mode and return (exit_ok, combined output).
+/// The census banner. Counted rather than matched, because "a census printed"
+/// and "exactly one census printed" are different claims: a duplicate is what a
+/// `fork` child reporting its inherited registry looks like.
+const BANNER: &str = "Stage-0e totality ablation";
+
+/// Compile with the mode on or off, returning (exit_ok, combined output).
 ///
 /// The emitted Lua goes to a real file beside the fixture rather than to
 /// `/dev/null`, so the census -- which is on STDOUT, the same stream a
 /// `--output -` would take -- is read without the artifact mixed into it.
-fn compile_ablated(path: &std::path::Path) -> (bool, String) {
-    let out = Command::new(rock_bin())
-        .args([
-            "compile",
-            path.to_str().unwrap(),
-            "--output",
-            path.with_extension("lua").to_str().unwrap(),
-        ])
-        .env("ROCK_MONO_ABLATION", "1")
-        .output()
-        .unwrap();
+fn compile(path: &std::path::Path, ablated: bool) -> (bool, String) {
+    let mut cmd = Command::new(rock_bin());
+    cmd.args([
+        "compile",
+        path.to_str().unwrap(),
+        "--output",
+        path.with_extension("lua").to_str().unwrap(),
+    ]);
+    // Set or REMOVE it: the ambient environment decides this otherwise, and a
+    // mode-off control that inherited the flag would assert nothing.
+    if ablated {
+        cmd.env("ROCK_MONO_ABLATION", "1");
+    } else {
+        cmd.env_remove("ROCK_MONO_ABLATION");
+    }
+    let out = cmd.output().unwrap();
     let mut s = String::from_utf8_lossy(&out.stdout).into_owned();
     s.push_str(&String::from_utf8_lossy(&out.stderr));
     (out.status.success(), s)
+}
+
+fn census_count(out: &str) -> usize {
+    out.matches(BANNER).count()
 }
 
 /// A bounded call has no standalone emission, so with inlining disabled the
@@ -83,16 +97,18 @@ fn main() {
 #[test]
 fn a_failed_build_still_prints_its_census() {
     let path = write_tmp("bounded", BOUNDED);
-    let (ok, out) = compile_ablated(&path);
+    let (ok, out) = compile(&path, true);
     assert!(
         !ok,
         "the fixture must FAIL to build under the mode, or it cannot witness the \
          exiting path; output:\n{out}"
     );
-    assert!(
-        out.contains("Stage-0e totality ablation"),
-        "a build that died printed no census, so every fatal it recorded is lost; \
-         output:\n{out}"
+    assert_eq!(
+        census_count(&out),
+        1,
+        "a build that died must print EXACTLY ONE census -- zero loses every fatal \
+         it recorded, and more than one is an inherited registry being reported by \
+         something that does not own it (a `fork` child); output:\n{out}"
     );
     assert!(
         out.contains("bounded body has no standalone emission"),
@@ -104,19 +120,37 @@ fn a_failed_build_still_prints_its_census() {
 #[test]
 fn a_surviving_build_prints_its_census() {
     let path = write_tmp("clean", CLEAN);
-    let (ok, out) = compile_ablated(&path);
+
+    // MODE OFF FIRST, and asserted rather than described. This is what makes
+    // the ablated run below a statement about the mode: the fixture compiles,
+    // so its failure under the mode is the mode's doing and not a broken
+    // fixture. It was previously only a manual measurement in a comment, which
+    // is not a control -- nothing would have caught the fixture rotting.
+    let (plain_ok, plain_out) = compile(&path, false);
     assert!(
-        out.contains("Stage-0e totality ablation"),
-        "the mode printed no census on a build that completed; output:\n{out}"
+        plain_ok,
+        "the fixture must BUILD with the mode off, or its ablated failure says \
+         nothing about the mode; output:\n{plain_out}"
+    );
+    assert_eq!(
+        census_count(&plain_out),
+        0,
+        "the mode is off and a census printed anyway; output:\n{plain_out}"
+    );
+
+    let (ok, out) = compile(&path, true);
+    assert_eq!(
+        census_count(&out),
+        1,
+        "a completed build must print EXACTLY ONE census; output:\n{out}"
     );
     assert!(
         !out.contains("bounded body has no standalone emission"),
         "a fixture with no bounded call reported the bounded mechanism, so the \
          assertion above cannot distinguish; output:\n{out}"
     );
-    // S 0e's fatality is carried by the STATUS: this fixture BUILDS (exit 0
-    // with the mode off) and still reaches stdlib generics that decline, so a
-    // successful build must leave a failing run.
+    // S 0e's fatality is carried by the STATUS, so a build that SUCCEEDS (just
+    // asserted) must still leave a failing run.
     //
     // This arm rides `main`'s own drain, not `exit_with_census` -- a build that
     // succeeds returns to `main` rather than exiting early, which is the whole

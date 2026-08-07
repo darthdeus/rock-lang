@@ -1,15 +1,17 @@
 //! Stage-0e totality ablation (`docs/monomorphization-plan.md` S 0e).
 //!
-//! The mode is process-global, so every test here serializes on one mutex and
-//! restores the flag on the way out. Without that, a parallel test would see the
-//! flag flipped under it and the fatals of one fixture would land in another's
-//! census.
+//! The mode is process-global, so every test here holds `common::AblationGuard`
+//! and restores the flag on the way out. That guard's lock is shared with every
+//! other file in this binary that touches the mode -- a per-file `static MODE`
+//! serializes a file against itself and against nothing else.
 
-use std::sync::{LazyLock, Mutex, MutexGuard};
+use std::sync::LazyLock;
 
 use bone_semantic::inference::Workspace;
 use skull_mir::ablation::{self, FatalCategory};
 use ustr::Ustr;
+
+use crate::common::AblationGuard as ModeGuard;
 
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
     rock_host::stdlib_loader::stdlib_files()
@@ -20,34 +22,6 @@ static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         })
         .collect()
 });
-
-static MODE: Mutex<()> = Mutex::new(());
-
-/// Hold the mode for one test. `Drop` restores it even on a panicking assert,
-/// so a failing test cannot leave the flag on for the next one.
-struct ModeGuard(#[allow(dead_code)] MutexGuard<'static, ()>);
-
-impl ModeGuard {
-    fn on() -> Self {
-        let g = MODE.lock().unwrap_or_else(|e| e.into_inner());
-        ablation::clear();
-        ablation::set_enabled(true);
-        ModeGuard(g)
-    }
-    fn off() -> Self {
-        let g = MODE.lock().unwrap_or_else(|e| e.into_inner());
-        ablation::clear();
-        ablation::set_enabled(false);
-        ModeGuard(g)
-    }
-}
-
-impl Drop for ModeGuard {
-    fn drop(&mut self) {
-        ablation::set_enabled(false);
-        ablation::clear();
-    }
-}
 
 fn check(src: &str) -> Workspace {
     let mut modules = STDLIB.clone();
