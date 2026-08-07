@@ -25,6 +25,10 @@ const __SCENE_BUILDING: int = 1
 const __SCENE_LIVE: int = 2
 const __SCENE_CLOSING: int = 3
 const __SCENE_DEAD: int = 4
+// Requested by `scene_discard`: queued exactly like Closing and equally
+// invisible to lookup, and distinguished only so the drain knows to skip this
+// incarnation's teardown actions.
+const __SCENE_DISCARDING: int = 5
 
 // The Session Scene registry: parallel columns indexed by Scene ID.
 //
@@ -38,6 +42,13 @@ global __SCENE_ROOTS: [any?] = []
 global __SCENE_STATES: [int] = []
 global __SCENE_ARENA_IDS: [[int]] = []
 global __SCENE_NEXT_ID: int = 0
+
+// What this Scene must run before its rows go, in registration order: the
+// terminal half of ownership, for contents whose disposal is more than
+// releasing memory. A Scene-owned task has defers and an `on_killed` to fire;
+// a Scene-owned native resource (P5) has a handle to release. Both are the
+// same shape, so they share this column rather than growing a second ledger.
+global __SCENE_CLOSERS: [[() -> ()]] = []
 
 // Staging for the safe-point drain, not a second ownership system: every entry
 // here is a Scene whose registry state is already Closing.
@@ -74,18 +85,22 @@ fn Scene<T>.is_live(scene) -> bool {
 fn __scene_reserve() -> int {
     if __SCENE_NEXT_ID == 0 {
         let root_arenas: [int] = []
+        let root_closers: [() -> ()] = []
         vec_push(__SCENE_ROOTS, null)
         vec_push(__SCENE_STATES, __SCENE_RESERVED)
         vec_push(__SCENE_ARENA_IDS, root_arenas)
+        vec_push(__SCENE_CLOSERS, root_closers)
         __SCENE_NEXT_ID = 1
     }
     let id = __SCENE_NEXT_ID
     assert(id == vec_len(__SCENE_STATES), "Scene registry is not dense at id {id}")
     __SCENE_NEXT_ID = id + 1
     let owned: [int] = []
+    let closers: [() -> ()] = []
     vec_push(__SCENE_ROOTS, null)
     vec_push(__SCENE_STATES, __SCENE_BUILDING)
     vec_push(__SCENE_ARENA_IDS, owned)
+    vec_push(__SCENE_CLOSERS, closers)
     return id
 }
 
@@ -93,7 +108,22 @@ fn __scene_reserve() -> int {
 // is retired through the ordinary Arena primitive, and one a caller already
 // destroyed reports false and is stepped over -- the loop releases what it owns,
 // not what it assumes.
-fn __scene_retire(scene_id: int) {
+//
+// `graceful` runs the registered teardown actions first, in registration order
+// and BEFORE any Arena is retired: a task's defer or a resource's release is
+// entitled to read and write the rows it was running against, and after
+// retirement those reads answer null and those writes assert. A closer that
+// throws propagates -- the Scene stays queued with its rows intact rather than
+// half-torn-down, which is the loud failure, not a swallowed one.
+fn __scene_retire(scene_id: int, graceful: bool) {
+    if graceful {
+        let closers = __SCENE_CLOSERS[scene_id]
+        for i in 0..vec_len(closers) {
+            closers[i]()
+        }
+    }
+    let no_closers: [() -> ()] = []
+    __SCENE_CLOSERS.set(scene_id, no_closers)
     let owned = __SCENE_ARENA_IDS[scene_id]
     for i in 0..vec_len(owned) {
         __arena_destroy_id(scene_id, owned[i])
@@ -110,11 +140,15 @@ fn __scene_retire(scene_id: int) {
 //
 // Failure is the callback returning null, not a caught runtime error: a `pcall`
 // around user code would swallow exactly the failures that must propagate.
+//
+// The abort is GRACEFUL: a builder that acquired something and then failed
+// registered its release on the way, and the abort is the only moment that
+// release can still run.
 fn scene_create<T>(build: fn(SceneBuilder) -> T?) -> Scene<T>? {
     let id = __scene_reserve()
     let root = build(SceneBuilder { _scene_id: id })
     if is_null(root) {
-        __scene_retire(id)
+        __scene_retire(id, true)
         return null
     }
     let published: any = root.unwrap()
@@ -136,6 +170,17 @@ fn SceneBuilder.arena<T>(builder) -> Arena<T> {
     return arena
 }
 
+// The builder's other capability: register what a graceful close must run for
+// the contents being built here. Same Building gate and same reason as
+// `arena` -- a copy that outlived construction would be registering against a
+// Scene that is already published or aborted.
+fn SceneBuilder.on_close(builder, action: () -> ()) {
+    let scene_id = builder._scene_id
+    assert(__scene_state(scene_id) == __SCENE_BUILDING,
+        "SceneBuilder for scene {scene_id} is no longer constructing (its Scene published or aborted)")
+    vec_push(__SCENE_CLOSERS[scene_id], action)
+}
+
 // Requests closure. True on the first call for a live Scene, false for a repeat
 // or a dead handle, so a caller can tell which close was theirs. Lookup stops
 // resolving immediately; the rows die at the next safe-point drain.
@@ -144,6 +189,35 @@ fn scene_close<T>(scene: Scene<T>) -> bool {
     if __scene_state(id) != __SCENE_LIVE { return false }
     __SCENE_STATES.set(id, __SCENE_CLOSING)
     vec_push(__SCENE_PENDING_CLOSE, id)
+    return true
+}
+
+// Discards the Scene: same request, same safe point, same invalidation -- and
+// none of its teardown actions run. This is the abrupt half of the pair, for a
+// world being thrown away rather than shut down: a level reload where the
+// outgoing room's on-death effects must not fire, a failed load, an editor
+// document abandoned without committing.
+//
+// It is a REQUEST for the same reason `scene_close` is: retiring rows the
+// moment a caller asks would pull them out from under an update already holding
+// them. A Scene already closing or discarding refuses, so the first request
+// wins and its mode is the one the drain honours.
+fn scene_discard<T>(scene: Scene<T>) -> bool {
+    let id = scene._scene_id
+    if __scene_state(id) != __SCENE_LIVE { return false }
+    __SCENE_STATES.set(id, __SCENE_DISCARDING)
+    vec_push(__SCENE_PENDING_CLOSE, id)
+    return true
+}
+
+// Registers a teardown action on a LIVE Scene, for something acquired after
+// construction -- a task spawned by gameplay, a resource opened on demand.
+// False for a Scene that has left lookup: an action accepted after the close
+// request would never run, and the caller could not tell.
+fn scene_on_close<T>(scene: Scene<T>, action: () -> ()) -> bool {
+    let id = scene._scene_id
+    if __scene_state(id) != __SCENE_LIVE { return false }
+    vec_push(__SCENE_CLOSERS[id], action)
     return true
 }
 
@@ -164,8 +238,12 @@ fn __scene_drain_closed() -> int {
     let drained = 0
     for i in 0..vec_len(pending) {
         let id = pending[i]
-        if __scene_state(id) == __SCENE_CLOSING {
-            __scene_retire(id)
+        let state = __scene_state(id)
+        if state == __SCENE_CLOSING {
+            __scene_retire(id, true)
+            drained += 1
+        } else if state == __SCENE_DISCARDING {
+            __scene_retire(id, false)
             drained += 1
         }
     }
@@ -185,6 +263,15 @@ fn scene_live_count() -> int {
 // The exact population the next drain will retire.
 fn scene_pending_close_count() -> int {
     return vec_len(__SCENE_PENDING_CLOSE)
+}
+
+// How many teardown actions this Scene will run on a graceful close. Zero for
+// a dead one, which is also what a drained Scene reports: the list is released
+// with the rows.
+fn scene_closer_count<T>(scene: Scene<T>) -> int {
+    let id = scene._scene_id
+    if __scene_state(id) == __SCENE_DEAD { return 0 }
+    return vec_len(__SCENE_CLOSERS[id])
 }
 
 // How many Arena incarnations this Scene still owns backing for. The identity
