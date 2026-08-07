@@ -62,22 +62,27 @@ fn census_count(out: &str) -> usize {
     out.matches(BANNER).count()
 }
 
-/// A bounded call has no standalone emission, so with inlining disabled the
-/// build FAILS -- and the census must still print, naming the mechanism.
+/// Polymorphic recursion instantiates one level deeper per call, so under the
+/// mode the build FAILS -- and the census must still print, naming the
+/// mechanism.
 ///
 /// This fixture is the whole point: it is the shape whose build dies. A fixture
 /// that compiled would pass against the defect, because the drain in `main` runs
 /// on that path.
-const BOUNDED: &str = r#"
-fn total<I: Iterator<int>>(it: I) -> int {
-    let s = 0
-    for v in it { s = s + v }
-    return s
+///
+/// It is a `polymorphic-growth` shape because that is an S 0h REJECT, permanent
+/// by decision. The `Iterator`-bounded shape that used to stand here stopped
+/// failing the moment D-1 gave a bounded body a standalone emission -- a fixture
+/// chosen from the open gap matrix disarms itself when the gap closes.
+const DYING: &str = r#"
+fn depth<T>(x: T, n: int) -> int {
+    if n <= 0 { return 0 }
+    let wrapped: [T] = [x]
+    return 1 + depth(wrapped, n - 1)
 }
 
 fn main() {
-    let xs: [int] = [1, 2, 3]
-    print("{total(xs.iter())}")
+    print("{depth(1, 12)}")
 }
 "#;
 
@@ -96,7 +101,7 @@ fn main() {
 
 #[test]
 fn a_failed_build_still_prints_its_census() {
-    let path = write_tmp("bounded", BOUNDED);
+    let path = write_tmp("dying", DYING);
     let (ok, out) = compile(&path, true);
     assert!(
         !ok,
@@ -111,9 +116,9 @@ fn a_failed_build_still_prints_its_census() {
          something that does not own it (a `fork` child); output:\n{out}"
     );
     assert!(
-        out.contains("bounded body has no standalone emission"),
-        "the census printed but does not name the `Iterator`-bounded mechanism the \
-         run recorded; output:\n{out}"
+        out.contains("polymorphic-growth"),
+        "the census printed but does not name the mechanism the run recorded; \
+         output:\n{out}"
     );
 }
 
@@ -145,8 +150,8 @@ fn a_surviving_build_prints_its_census() {
         "a completed build must print EXACTLY ONE census; output:\n{out}"
     );
     assert!(
-        !out.contains("bounded body has no standalone emission"),
-        "a fixture with no bounded call reported the bounded mechanism, so the \
+        !out.contains("polymorphic-growth"),
+        "a fixture with no polymorphic recursion reported that mechanism, so the \
          assertion above cannot distinguish; output:\n{out}"
     );
     // S 0e's fatality is carried by the STATUS, so a build that SUCCEEDS (just

@@ -28,10 +28,7 @@ use bone_semantic::hir::BodyOwner;
 use bone_semantic::inference::{BodyInference, Workspace};
 use bone_semantic::prelude::{BoundNext, BoundTree, CompilerError};
 use comfy_la_arena::Idx;
-use skull_mir::lower::{
-    bound_next_shape, lower_emitted_body, spec_key_from_next_generics,
-    BoundNextElem, ElemRebuild, EmittedBodyId, ScalarCtx, SpecKey, SpecSubst,
-};
+use skull_mir::lower::{lower_emitted_body, EmittedBodyId, ScalarCtx, SpecKey, SpecSubst};
 use skull_mir::mir::*;
 
 use crate::top_level_blocks;
@@ -684,227 +681,44 @@ fn resolve_cloned_bound_calls(
     }
 
     for (&old_id, &new_id) in inst_map {
-        let Inst::CallBoundMulti { dests, generic_idx, args } = &func.insts[new_id] else {
+        let Inst::CallBoundMulti { generic_idx, .. } = &func.insts[new_id] else {
             continue;
         };
         debug_assert!(matches!(callee.insts[old_id], Inst::CallBoundMulti { .. }));
         let g = *generic_idx as usize;
-        match n.next.get(&g) {
-            Some(BoundNext::Concrete {
-                func: (m, f),
-                sub,
-                next_generics,
-            }) => {
-                let concrete = FuncRef { module: *m, func: *f };
-                let (dests, args) = (dests.clone(), args.clone());
-                if !sub.is_empty() {
-                    // The sub-tree's leaves refer to the same site generics --
-                    // graft before attaching to the substituted call.
-                    let grafted = graft_bound_tree(sub, n)?;
-                    if !grafted.is_empty() {
-                        func.bound_trees.insert(new_id, grafted);
-                    }
+        let Some(bn) = n.next.get(&g) else {
+            return Err(CompilerError::new_no_location(format!(
+                "internal: placeholder bound-call (generic #{g}) has no concrete \
+                 resolution at this splice site"
+            )));
+        };
+        // The sub-tree's leaves refer to the same site generics -- graft before
+        // attaching to the substituted call, so the fixpoint sees them.
+        if let BoundNext::Concrete { sub, .. } = bn {
+            if !sub.is_empty() {
+                let grafted = graft_bound_tree(sub, n)?;
+                if !grafted.is_empty() {
+                    func.bound_trees.insert(new_id, grafted);
                 }
-                let spec = match caller_inf {
-                    Some(inf) => {
-                        spec_key_from_next_generics(ws, inf, concrete, next_generics, caller_subst)?
-                    }
-                    None => None,
-                };
-                func.insts[new_id] = Inst::CallMulti { dests, func: concrete, args };
-                if let Some(key) = spec.clone() {
-                    func.spec_bindings.insert(new_id, key);
-                }
-                // The placeholder's arity is `(bool, E)` because bound conformance
-                // fixes it there; the CONCRETE callee is only known here. When its
-                // element splats into leaves, the extra returns were being dropped
-                // by Lua and `E` bound the first leaf -- so the body then projected
-                // a field off a number. Size the dests to what the callee really
-                // returns and repack the element, so the body's own view of `E` is
-                // unchanged. The repack is a transient: SROA folds the field reads
-                // straight to the leaf cells, and a body that never touches the
-                // element (`count`) drops it as dead -- which is why this does not
-                // reintroduce the box the mark forbids, and why it does not
-                // over-reject `count` the way a splice-time arity check did.
-                if callee.bound_next_split.contains(&old_id) {
-                    check_bound_next_split(func, new_id, ws, concrete, spec.as_ref())?;
-                } else {
-                    repack_bound_next_element(func, new_id, ws, concrete, spec.as_ref())?;
-                }
-            }
-            Some(BoundNext::CallerGeneric(_)) | None => {
-                return Err(CompilerError::new_no_location(format!(
-                    "internal: placeholder bound-call (generic #{g}) has no concrete \
-                     resolution at this splice site"
-                )));
             }
         }
+        let leaf = skull_mir::bound::resolve_bound_next(
+            ws,
+            caller_inf,
+            caller_subst,
+            bn,
+            &Default::default(),
+        )?;
+        crate::bound::substitute_bound_call(
+            func,
+            new_id,
+            callee.bound_next_split.contains(&old_id),
+            &leaf,
+            ws,
+            "at this splice site",
+        )?;
     }
     Ok(())
-}
-
-/// The lowering already split this placeholder's element into leaf cells, so
-/// there is nothing to rebuild -- only the two sides' agreement to confirm.
-///
-/// They read the same instantiation from opposite ends: the lowering from the
-/// loop pattern's binding types, this from the concrete callee's return type. A
-/// disagreement means the body binds a different number of leaves than the call
-/// returns, which is a positional mis-pairing -- a leaf's value landing in
-/// another leaf's cell, silently. Rejected rather than repacked, because a
-/// repack over an already-split element would write into a cell nothing reads.
-fn check_bound_next_split(
-    func: &MirFunc,
-    call: Idx<Inst>,
-    ws: &Workspace,
-    concrete: FuncRef,
-    spec: Option<&SpecKey>,
-) -> Result<(), CompilerError> {
-    let Some(shape) = bound_next_shape(ws, concrete, spec) else {
-        return Ok(());
-    };
-    let Inst::CallMulti { dests, .. } = &func.insts[call] else {
-        return Ok(());
-    };
-    if dests.len() == shape.slot_count {
-        return Ok(());
-    }
-    Err(CompilerError::new_no_location(format!(
-        "`{}`: the loop element was split into {} destinations but `next` returns \
-         {} values at this specialization -- the two read the same instantiation \
-         and must agree, or a leaf's value lands in another leaf's cell",
-        func.name,
-        dests.len(),
-        shape.slot_count
-    )))
-}
-
-/// Re-size a just-substituted `next` call to the concrete callee's real return
-/// arity, and rebuild the element from the extra leaves into the cell the body
-/// already reads.
-///
-/// Only the placeholder path needs this. `lower_for_user_iter` sizes its dests
-/// from `ret_shape.slot_count()` at lowering time because it has the concrete
-/// callee in hand; a generic combinator body does not, so the correction lands
-/// here, at the first point the callee is known.
-fn repack_bound_next_element(
-    func: &mut MirFunc,
-    call: Idx<Inst>,
-    ws: &Workspace,
-    concrete: FuncRef,
-    spec: Option<&SpecKey>,
-) -> Result<(), CompilerError> {
-    let Some(shape) = bound_next_shape(ws, concrete, spec) else {
-        return Ok(());
-    };
-    let Inst::CallMulti { dests, .. } = &func.insts[call] else {
-        return Ok(());
-    };
-    let dests = dests.clone();
-    // Triggered by the element SPLATTING, never by the arity growing. A ONE-leaf
-    // element returns `(ok, leaf)` -- the same arity the placeholder assumed -- and
-    // still needs the repack, because what lands in the element cell is a bare
-    // leaf the body then projects a field off. Gating on arity leaves exactly that
-    // case broken, which is the seed's "NOT arity" probe.
-    let plan = match &shape.elem {
-        BoundNextElem::Opaque => return Ok(()),
-        BoundNextElem::Rebuild(plan) => plan,
-        // Never rewrite the call without knowing how to put the element back
-        // together: the leaves would land in cells nothing reads while the body
-        // still projects fields off one of them.
-        BoundNextElem::Unsupported => {
-            return Err(CompilerError::new_no_location(format!(
-                "`{}` returns {} values at this specialization but its element \
-                 cannot be rebuilt from leaves (a nullable `nobox` element, whose \
-                 presence leaf pairs with no field). Mechanism I of \
-                 docs/nobox-case-matrix.md.",
-                func.name, shape.slot_count
-            )));
-        }
-    };
-    let elem_cell = dests[1];
-    let leaf_count = plan.leaf_count();
-    if leaf_count + 1 != shape.slot_count {
-        return Err(CompilerError::new_no_location(format!(
-            "`{}`: `next` returns {} values but its element has {} leaves -- the \
-             rebuild is positional over those leaves, so repacking a mismatched \
-             pair would write one leaf's value into another field",
-            func.name, shape.slot_count, leaf_count
-        )));
-    }
-
-    // The call keeps `ok` and gains one fresh cell per leaf; the element cell is
-    // no longer a destination, it is what the repack stores into.
-    let leaf_cells: Vec<Idx<Cell>> = (0..leaf_count).map(|_| func.new_cell(None)).collect();
-    let mut new_dests = vec![dests[0]];
-    new_dests.extend(leaf_cells.iter().copied());
-    if let Inst::CallMulti { dests, .. } = &mut func.insts[call] {
-        *dests = new_dests;
-    }
-
-    let mut tail: Vec<Idx<Inst>> = Vec::new();
-    let mut taken = 0usize;
-    let packed = emit_elem_rebuild(func, plan, &leaf_cells, &mut taken, &mut tail);
-    let store = func.insts.alloc(Inst::Store { cell: elem_cell, value: packed });
-
-    // Inserted immediately after the call, in its own block: the element cell must
-    // hold the rebuilt value before the `ok` branch reads it.
-    tail.push(store);
-    for (_, block) in func.blocks.iter_mut() {
-        if let Some(at) = block.insts.iter().position(|i| *i == call) {
-            block.insts.splice(at + 1..at + 1, tail);
-            return Ok(());
-        }
-    }
-    Err(CompilerError::new_no_location(format!(
-        "internal: substituted `next` call in `{}` is not in any block",
-        func.name
-    )))
-}
-
-/// Emit the rebuild of one element from `cells`, consuming them left to right,
-/// appending every inst it creates to `tail` in evaluation order. Returns the
-/// value the element cell should hold.
-///
-/// The rebuild is a TRANSIENT in every arm: copy-prop forwards a field read of a
-/// `MakeValueStruct` and a `TupleIndex` of a `MakeTuple` to the construction
-/// operand, so the aggregates die in DCE and the `nobox` guarantee still holds
-/// over the emitted body.
-fn emit_elem_rebuild(
-    func: &mut MirFunc,
-    plan: &ElemRebuild,
-    cells: &[Idx<Cell>],
-    taken: &mut usize,
-    tail: &mut Vec<Idx<Inst>>,
-) -> Idx<Inst> {
-    match plan {
-        ElemRebuild::Passthrough => {
-            let l = func.insts.alloc(Inst::Load(cells[*taken]));
-            *taken += 1;
-            tail.push(l);
-            l
-        }
-        ElemRebuild::Value(name, fields) => {
-            let mut fs = Vec::with_capacity(fields.len());
-            for f in fields {
-                let l = func.insts.alloc(Inst::Load(cells[*taken]));
-                *taken += 1;
-                tail.push(l);
-                fs.push((*f, l));
-            }
-            let packed = func.insts.alloc(Inst::MakeValueStruct { name: *name, fields: fs });
-            tail.push(packed);
-            packed
-        }
-        ElemRebuild::Tuple(parts) => {
-            let mut vs = Vec::with_capacity(parts.len());
-            for p in parts {
-                vs.push(emit_elem_rebuild(func, p, cells, taken, tail));
-            }
-            let packed = func.insts.alloc(Inst::MakeTuple(vs));
-            tail.push(packed);
-            packed
-        }
-    }
 }
 
 /// Import the cloned callee body's `spec_bindings` into the caller (keys remapped
@@ -1283,11 +1097,17 @@ pub fn fn_has_bounds(f: &bone_semantic::hir::Function) -> bool {
 }
 
 /// Post-inline gate: a body about to be emitted must contain no placeholder
-/// bound-call and no residual call to a bounded fn. Either residue means the
-/// mono-by-inlining contract broke -- most commonly a combinator chain in a
-/// context the inliner does not enter (a `co fn` body, a recursive bounded fn).
-/// Reject with a real error instead of emitting broken output. Shared by the
-/// luajit driver (`skull::mir_emit`) and the JS closure emitter.
+/// bound-call, and no residual call to a bounded fn that NAMES NOTHING.
+///
+/// A residual call is fine when the lowerer gave it a specialization: it spells
+/// the specialized symbol (`callee_name` / `spec_fn_name`), and that definition
+/// is emitted standalone from the demand this same call site raises, with its
+/// placeholders resolved by the demand's tree
+/// (`skull_transform::bound::resolve_standalone_bound_calls`). What is still a
+/// rejection is a residual call the inliner did not splice AND the lowerer did
+/// not specialize -- there is then no body anywhere that serves it.
+///
+/// Shared by the luajit driver (`skull::mir_emit`) and the JS closure emitter.
 pub fn validate_no_residual_bound_calls(
     ws: &Workspace,
     f: &bone_semantic::hir::Function,
@@ -1307,7 +1127,15 @@ pub fn validate_no_residual_bound_calls(
                 }
                 Inst::Call { func, .. } | Inst::CallMulti { func, .. } => {
                     let callee = &ws.module(func.module).functions[func.func];
-                    if fn_has_bounds(callee) {
+                    // A specialized name is the whole admission: `spec_fn_name`
+                    // is `None` for an all-`None` key, which spells the shared
+                    // body -- and a bounded fn has none.
+                    let named = mf
+                        .spec_bindings
+                        .get(&iid)
+                        .and_then(|key| skull_mir::mangle::spec_fn_name(ws, callee, key))
+                        .is_some();
+                    if fn_has_bounds(callee) && !named {
                         // Stage-0e: this rejection IS the ablation's
                         // unsupported-surface population, and it fires from
                         // production's own check rather than from
@@ -1323,14 +1151,19 @@ pub fn validate_no_residual_bound_calls(
                             // declaration, so the census reported 27 declaration
                             // spans as though they were call sites.
                             mf.inst_spans.get(iid).copied().unwrap_or(callee.name_span),
-                            "an `Iterator`-bounded body has no standalone emission: it exists \
-                             only as an inline splice, so with inlining disabled the call has \
-                             no concrete callee at all (plan S 12)",
+                            "an `Iterator`-bounded call that neither spliced nor specialized: \
+                             the shared body cannot serve it (its placeholder `next` calls are \
+                             resolved per instantiation), and no demand names a standalone copy \
+                             (plan S 12)",
                         );
                         return Err(CompilerError::new_no_location(format!(
                             "`{}` calls `Iterator`-bounded `{}` in a context that cannot inline \
-                             it (bounded fns have no standalone emission -- iterator combinators \
-                             are not supported inside `co fn` bodies or recursive bounded fns)",
+                             it, and the call was not specialized either -- so nothing serves \
+                             it. A bounded body IS emitted standalone when a call demands one \
+                             (plan S 12); what is missing here is the demand, which the lowerer \
+                             raises only for an instantiation it specializes. Iterator \
+                             combinators inside `co fn` bodies and recursive bounded fns are \
+                             still the cases that hit this.",
                             f.name, callee.name
                         )));
                     }

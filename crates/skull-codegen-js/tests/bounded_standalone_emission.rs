@@ -1,21 +1,13 @@
-//! SENTINEL -- an `Iterator`-bounded body has no standalone JS emission
+//! An `Iterator`-bounded body emits STANDALONE to JS at each instantiation
 //! (`docs/monomorphization-plan.md` S 12, mono cut C+D step D-1).
 //!
-//! The JS SIBLING of `crates/skull/tests/bounded_standalone_emission_sentinel.rs`,
-//! and it exists because the Lua one does not cover this backend. JS keeps its
-//! own specialization queue (`spec_queue` / `collect_spec_bound_calls` in
-//! `emit.rs`), so the Lua-side plumbing D-1 needs does not reach it -- two
-//! populations for one question, which is the shape this arc keeps finding.
-//!
-//! JS also rejects a residual placeholder through a DIFFERENT surface: its
-//! instruction match has no `CallBoundMulti` arm, so the call falls to the
-//! generic `JS subset: unsupported effect` catch-all rather than to a
-//! bounded-specific diagnostic. Measured end to end, one program under the mode
-//! produces three rejections -- two shared with Lua, plus that one.
-//!
-//! Correct behavior is that the bounded body emits standalone at each
-//! instantiation. **The assertion below is INVERTED to pin the rejection.** When
-//! D-1 covers JS it goes red; flip it and assert the emitted definition.
+//! The JS SIBLING of `crates/skull/tests/bounded_standalone_emission.rs`, and it
+//! exists because the Lua one does not cover this backend. JS keeps its own
+//! specialization queue (`spec_queue` / `collect_spec_bound_calls` in
+//! `emit.rs`), so the Lua-side plumbing does not reach it -- two populations for
+//! one question, which is the shape this arc keeps finding. Both now carry the
+//! demand's `ResolvedBoundTree` and drive the one substitution in
+//! `skull_transform::bound`.
 //!
 //! The ablation flag is process-global. `cargo test` runs this crate's tests as
 //! threads in one binary, so the guard below holds a lock shared by every test
@@ -84,20 +76,37 @@ fn main() {
 }
 "#;
 
-/// SENTINEL. Correct behavior: `Ok`, with a standalone `total` definition in the
-/// emitted JS. When D-1 covers this backend, flip to `is_ok()` and assert the
-/// definition.
+/// Three separate things, for the same reason as the luajit sibling: emission
+/// succeeding says nothing (a build that dropped `total` also reports no error),
+/// a definition existing is checked on the DEFINITION line rather than on the
+/// call, and the placeholder having been RESOLVED is checked by the concrete
+/// `next` inside that definition -- which is the whole content of D-1.
 #[test]
-fn a_bounded_body_cannot_emit_to_js_with_inlining_disabled_sentinel() {
+fn a_bounded_body_emits_standalone_to_js_with_inlining_disabled() {
     let _g = ModeGuard::on();
-    let err = emit_js(&ws_with(BOUNDED)).err();
+    let js = emit_js(&ws_with(BOUNDED))
+        .expect("a bounded body must emit standalone to JS under its demand");
+    let def = js
+        .lines()
+        .find(|l| l.trim_start().starts_with("function total_") && l.contains("_spec_"))
+        .unwrap_or_else(|| panic!("no standalone specialized definition of `total` in:\n{js}"));
+    let open = def.find('(').expect("a definition header has params");
+    let symbol = def.trim_start()["function ".len()..open - (def.len() - def.trim_start().len())]
+        .to_string();
+    let body: Vec<&str> = js
+        .lines()
+        .skip_while(|l| *l != def)
+        .skip(1)
+        .take_while(|l| !l.trim_start().starts_with("function "))
+        .collect();
     assert!(
-        err.is_some(),
-        "PINNED BEHAVIOR (BUG): with inlining disabled, JS emission of a call to \
-         an `Iterator`-bounded fn must be REJECTED today -- its body's placeholder \
-         bound-calls are resolved only by the splice, and JS has no arm for one. \
-         If this now emits, D-1 reached the JS backend: flip the assertion and \
-         assert the standalone definition."
+        body.iter().any(|l| l.contains("next_")),
+        "the standalone `total` calls no concrete `next`, so its placeholder \
+         bound-call was not resolved: {body:?}"
+    );
+    assert!(
+        js.lines().any(|l| !l.trim_start().starts_with("function ") && l.contains(&format!("{symbol}("))),
+        "`{symbol}` is emitted but nothing calls it"
     );
 }
 

@@ -182,7 +182,18 @@ pub fn call_targets(mf: &MirFunc) -> Vec<FuncRef> {
 /// nested `fn` and a `co fn`'s state machine are their own emitted callables, and
 /// leaving them unchecked makes a missing splice silent (the nested fn dies at
 /// runtime on a nil `_data`).
-pub fn spec_bound_calls(mf: &MirFunc, out: &mut Vec<(FuncRef, crate::lower::SpecKey)>) {
+/// Each demand also carries the bound-conformance tree the callee's own
+/// placeholders resolve through, resolved HERE -- in the body that records it,
+/// where its inference arena is in scope. That is what lets a demand travel to
+/// a standalone emission at all: a raw [`bone_semantic::prelude::BoundTree`] is
+/// stated in this body's `TyId`s and means nothing anywhere else.
+pub fn spec_bound_calls(
+    ws: &bone_semantic::inference::Workspace,
+    ctx: &crate::bound::BoundCtx,
+    mf: &MirFunc,
+    out: &mut Vec<crate::bound::SpecDemand>,
+) -> Result<(), CompilerError> {
+    let empty = bone_semantic::prelude::BoundTree::default();
     for bid in crate::cfg::reachable_blocks_from(mf, mf.entry) {
         for &iid in &mf.blocks[bid].insts {
             let Some(key) = mf.spec_bindings.get(&iid) else { continue };
@@ -190,7 +201,10 @@ pub fn spec_bound_calls(mf: &MirFunc, out: &mut Vec<(FuncRef, crate::lower::Spec
                 Inst::Call { func, .. } | Inst::CallMulti { func, .. } => *func,
                 _ => continue,
             };
-            out.push((fref, key.clone()));
+            let raw = mf.bound_trees.get(&iid).unwrap_or(&empty);
+            let tree = crate::bound::resolve_bound_tree(ws, ctx.inf, ctx.subst, raw, ctx.incoming)?;
+            out.push(crate::bound::SpecDemand { func: fref, key: key.clone(), tree });
         }
     }
+    Ok(())
 }

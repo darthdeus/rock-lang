@@ -3047,7 +3047,11 @@ struct WorklistState {
     /// Standalone specialized copies, one per distinct `(callee, instantiation)`
     /// a body's `spec_bindings` still asks for after inlining.
     spec_lowered: Vec<(FuncRef, SpecKey, MirFunc)>,
-    spec_queue: Vec<(FuncRef, SpecKey)>,
+    spec_queue: Vec<skull_mir::bound::SpecDemand>,
+    /// The bound-conformance tree each demanded specialization is emitted under,
+    /// with the agreement check `skull_mir::bound::DemandMap` carries -- the same
+    /// object the luajit walk files its demands in.
+    spec_trees: skull_mir::bound::DemandMap,
     /// `inline(js)` callees, emitted verbatim (their raw JS body, not MIR-lowered).
     inline_js: Vec<FuncRef>,
     state_index: HashMap<ustr::Ustr, GlobalSite>,
@@ -3069,6 +3073,7 @@ struct WorklistState {
 impl WorklistState {
     fn new(ws: &Workspace, roots: &[(FuncRef, String)], program_mode: bool) -> Self {
         WorklistState {
+            spec_trees: Default::default(),
             cache: skull_transform::InlineCache::default(),
             names: CalleeNames {
                 names: roots
@@ -3185,11 +3190,17 @@ fn register_statics(mf: &MirFunc, gctx: &mut GlobalCtx) {
 /// The `(callee, instantiation)` pairs `mf` and its hoisted bodies still ask for
 /// after inlining. Per-BODY in `skull_mir`, so the nested walk is here: a hoisted
 /// lambda is its own emitted callable and its residual bindings are its own.
-fn collect_spec_bound_calls(mf: &MirFunc, out: &mut Vec<(FuncRef, SpecKey)>) {
-    skull_mir::reach::spec_bound_calls(mf, out);
+fn collect_spec_bound_calls(
+    ws: &Workspace,
+    ctx: &skull_mir::bound::BoundCtx,
+    mf: &MirFunc,
+    out: &mut Vec<skull_mir::bound::SpecDemand>,
+) -> Result<(), CompilerError> {
+    skull_mir::reach::spec_bound_calls(ws, ctx, mf, out)?;
     for nf in &mf.nested_fns {
-        collect_spec_bound_calls(nf, out);
+        collect_spec_bound_calls(ws, ctx, nf, out)?;
     }
+    Ok(())
 }
 
 /// A unit of JS reachability work. The search walks TWO node kinds -- a
@@ -3235,7 +3246,7 @@ impl JsReach<'_> {
             std::mem::take(&mut self.st.ginit_queue).into_iter().map(|(gname, _)| JsNode::Ginit(gname)),
         );
         out.extend(
-            std::mem::take(&mut self.st.spec_queue).into_iter().map(|(fr, key)| JsNode::Spec(fr, key)),
+            std::mem::take(&mut self.st.spec_queue).into_iter().map(|d| JsNode::Spec(d.func, d.key)),
         );
         out
     }
@@ -3281,7 +3292,11 @@ impl JsReach<'_> {
         for nf in &mf.nested_fns {
             collect(&mut findings, nobox_errs(self.ws, nf));
         }
-        findings.extend(self.discover(&mf)?);
+        let (subst, incoming) = Default::default();
+        let ctx = skull_mir::bound::body_ctx(
+            self.ws, fr.module, bone_semantic::hir::BodyOwner::Function(fr.func), &subst, &incoming,
+        );
+        findings.extend(self.discover(&ctx, &mf)?);
         match merge_findings(findings) {
             Some(e) => self.st.reject(&name, e),
             None => self.st.lowered.push((fr, mf)),
@@ -3309,6 +3324,15 @@ impl JsReach<'_> {
                 return Ok(());
             }
         };
+        // BEFORE every transform, and for the same reason as the luajit path:
+        // an `Iterator`-bounded body's placeholders are what make it unemittable
+        // on its own, and the demand that reached here is what resolves them.
+        let tree = self.st.spec_trees.tree_of(&body);
+        if let Err(e) = skull_transform::bound::resolve_standalone_bound_calls(self.ws, &mut mf, &tree)
+        {
+            self.st.reject(&name, e);
+            return Ok(());
+        }
         // A specialized `co fn` takes this same sequence, unlike luajit's, which
         // routes coroutines around it. Measured, not assumed: forcing the two to
         // agree changed no result on a column instantiation, one carrying a
@@ -3335,7 +3359,10 @@ impl JsReach<'_> {
         }
         mf.name = ustr::Ustr::from(name.as_str());
         self.st.names.insert(EmittedBodyId::new(fr, key.clone()), name.clone());
-        findings.extend(self.discover(&mf)?);
+        let ctx = skull_mir::bound::body_ctx(
+            self.ws, fr.module, bone_semantic::hir::BodyOwner::Function(fr.func), &subst, &tree,
+        );
+        findings.extend(self.discover(&ctx, &mf)?);
         match merge_findings(findings) {
             Some(e) => self.st.reject(&name, e),
             None => self.st.spec_lowered.push((fr, key, mf)),
@@ -3370,7 +3397,11 @@ impl JsReach<'_> {
         for nf in &mf.nested_fns {
             collect(&mut findings, nobox_errs(self.ws, nf));
         }
-        findings.extend(self.discover(&mf)?);
+        let (subst, incoming) = Default::default();
+        let ctx = skull_mir::bound::body_ctx(
+            self.ws, site.module, bone_semantic::hir::BodyOwner::Global(site.gid), &subst, &incoming,
+        );
+        findings.extend(self.discover(&ctx, &mf)?);
         if let Some(e) = merge_findings(findings) {
             self.st.reject(&init_name, e);
             return Ok(());
@@ -3398,11 +3429,37 @@ impl JsReach<'_> {
     /// to RETRY the file in program mode (where the applications are emitted).
     /// Demoting it to a sibling would turn a test that lifts into a test that
     /// skips, so it aborts the emission immediately as before.
-    fn discover(&mut self, mf: &MirFunc) -> Result<Vec<CompilerError>, CompilerError> {
+    fn discover(
+        &mut self,
+        ctx: &skull_mir::bound::BoundCtx,
+        mf: &MirFunc,
+    ) -> Result<Vec<CompilerError>, CompilerError> {
+        let ws = self.ws;
         let st = &mut *self.st;
         register_statics(mf, &mut st.gctx);
-        collect_spec_bound_calls(mf, &mut st.spec_queue);
         let mut findings = Vec::new();
+        let mut demands = Vec::new();
+        // A demand this body cannot state in self-contained terms is a finding,
+        // not a demand dropped: the callee would be reached by nothing while its
+        // call site still spells the specialized name.
+        collect(&mut findings, collect_spec_bound_calls(ws, ctx, mf, &mut demands));
+        for body in st.spec_trees.record(&demands) {
+            let fref = body.decl();
+            let f = &ws.module(fref.module).functions[fref.func];
+            collect::<()>(
+                &mut findings,
+                Err(CompilerError::new_with_label(
+                    f.name_span,
+                    format!(
+                        "internal: two call sites demand a specialization of `{}` with \
+                         different `Iterator` bound resolutions, so one emitted \
+                         definition cannot serve both",
+                        f.name
+                    ),
+                )),
+            );
+        }
+        st.spec_queue.extend(demands);
         collect(
             &mut findings,
             discover_callees(self.ws, mf, &mut st.names, &mut st.queue, &mut st.seen, &mut st.inline_js),
@@ -3986,6 +4043,20 @@ fn discover_callees(
         // definition to co-emit, and asking about its body first is how
         // `map_new` (a pure Rock body rendered `new Map()`) got walked into.
         if js_supply(ws, cf).is_some() {
+            continue;
+        }
+        // An `Iterator`-bounded fn has no SHARED body: its placeholder `next`
+        // calls are resolved per instantiation, so what a call site names is the
+        // specialized copy, queued as a `JsNode::Spec` by that site's demand.
+        // Queuing the declaration here would lower the unresolved body and
+        // reject on its own placeholder. The luajit sibling is
+        // `skull::mir_emit::is_cached_body`, which excludes it from the chunk
+        // cache for the same reason.
+        //
+        // A residual call to one that carries NO specialization is still a
+        // rejection, and it stays with `validate_no_residual_bound_calls` rather
+        // than turning into a silently missing definition here.
+        if skull_transform::fn_has_bounds(cf) {
             continue;
         }
         // `inline(js)`: co-emit its raw JS body verbatim (never MIR-lowered). The

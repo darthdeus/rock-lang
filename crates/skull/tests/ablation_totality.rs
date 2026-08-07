@@ -44,39 +44,49 @@ fn fatals_of(src: &str) -> Vec<ablation::Fatal> {
     ablation::take()
 }
 
-/// An `Iterator`-bounded body must produce a classified fatal under the mode: it
-/// exists only as an inline splice, so with specialization forced there is no
-/// concrete form to name (plan S 12, mono cut C+D step D-1).
+/// An `Iterator`-bounded body has a concrete form now (plan S 12, mono cut C+D
+/// step D-1): it is emitted STANDALONE at each instantiation, with its
+/// placeholder `next` calls resolved from the tree its specialization demand
+/// carries. So under the mode it must record nothing at all.
 ///
-/// RED CONTROL: `the_mode_off_records_nothing` is the same fixture with the mode
-/// off, and it must find zero. Together they show the mode is what produces the
-/// record, not the fixture.
+/// The growth call is the ADMISSION CONTROL, and it is a `polymorphic-growth`
+/// one on purpose: that is an S 0h REJECT, permanent by decision, so it cannot
+/// close underneath this fixture the way the bounded surface just did -- which
+/// is exactly how this test's own control rotted (it was `total` itself).
 #[test]
-fn a_bounded_body_is_an_unsupported_surface_fatal() {
+fn a_bounded_body_is_no_longer_an_unsupported_surface() {
     let _g = ModeGuard::on();
     let fatals = fatals_of(
         r#"
+fn depth<T>(x: T, n: int) -> int {
+    if n <= 0 { return 0 }
+    let wrapped: [T] = [x]
+    return 1 + depth(wrapped, n - 1)
+}
 fn total<I: Iterator<int>>(it: I) -> int {
     let s = 0
     for v in it { s = s + v }
     return s
 }
 fn main() {
+    depth(1, 12)
     let xs: [int] = [1, 2, 3]
     let n = total(xs.iter())
 }
 "#,
     );
-    let hit: Vec<&ablation::Fatal> = fatals
-        .iter()
-        .filter(|f| f.callee == "total" && f.category == FatalCategory::UnsupportedSurface)
-        .collect();
     assert!(
-        !hit.is_empty(),
-        "an `Iterator`-bounded body produced no unsupported-surface fatal; got {:?}",
+        fatals.iter().any(|f| f.category == FatalCategory::PolymorphicGrowth),
+        "the control did not fire, so this fixture proves nothing about `total`; got {:?}",
         fatals.iter().map(|f| (f.category, &f.callee)).collect::<Vec<_>>()
     );
-    assert_eq!(hit[0].caller, "main", "the fatal must name the CALLER");
+    let hit: Vec<&ablation::Fatal> = fatals.iter().filter(|f| f.callee == "total").collect();
+    assert!(
+        hit.is_empty(),
+        "an `Iterator`-bounded body is emitted standalone now, so a call to one \
+         must record no fatal; got {:?}",
+        hit.iter().map(|f| (f.category, f.detail.as_str())).collect::<Vec<_>>()
+    );
 }
 
 /// The other half of the same axis, and the reason the control above moved: a
@@ -84,9 +94,11 @@ fn main() {
 /// form -- a standalone specialized definition through `coro_transform` -- so
 /// under the mode it must now record nothing at all.
 ///
-/// The bounded call in the same fixture is the admission control: without it a
+/// The growth call in the same fixture is the admission control: without it a
 /// zero for `stream` would be indistinguishable from a fixture the ablation
-/// never saw.
+/// never saw. It is a `polymorphic-growth` call because that is an S 0h REJECT
+/// and therefore permanent -- the bounded call that used to stand here stopped
+/// firing the moment D-1 landed.
 #[test]
 fn a_generic_coroutine_is_no_longer_an_unsupported_surface() {
     let _g = ModeGuard::on();
@@ -95,20 +107,19 @@ fn a_generic_coroutine_is_no_longer_an_unsupported_surface() {
 co fn stream<T>(v: T) {
     yield
 }
-fn total<I: Iterator<int>>(it: I) -> int {
-    let s = 0
-    for v in it { s = s + v }
-    return s
+fn depth<T>(x: T, n: int) -> int {
+    if n <= 0 { return 0 }
+    let wrapped: [T] = [x]
+    return 1 + depth(wrapped, n - 1)
 }
 fn main() {
     let c = stream(1)
-    let xs: [int] = [1, 2, 3]
-    let n = total(xs.iter())
+    depth(1, 12)
 }
 "#,
     );
     assert!(
-        fatals.iter().any(|f| f.callee == "total"),
+        fatals.iter().any(|f| f.category == FatalCategory::PolymorphicGrowth),
         "the control did not fire, so this fixture proves nothing about `stream`; got {:?}",
         fatals.iter().map(|f| (f.category, &f.callee)).collect::<Vec<_>>()
     );
@@ -284,10 +295,11 @@ fn main() {
 /// [`skull_mir::monoty::convert`], so the category has no population by
 /// construction rather than by policy.
 ///
-/// The `total` call is the ADMISSION CONTROL, and it is what makes `ident`'s
-/// zero mean something: an `Iterator`-bounded body is the remaining unsupported
-/// surface, so the mode is demonstrably live over this very program. Without it
-/// a zero here would be indistinguishable from a fixture the ablation never saw.
+/// The `depth` call is the ADMISSION CONTROL, and it is what makes `ident`'s
+/// zero mean something: polymorphic growth is an S 0h REJECT and therefore
+/// permanent, so the mode is demonstrably live over this very program. Without
+/// it a zero here would be indistinguishable from a fixture the ablation never
+/// saw. It used to be an `Iterator`-bounded call, which D-1 closed.
 /// The emitted-identity half -- that the three calls name three different bodies
 /// -- is `valid_type_identity.rs`; this asserts only that they stopped being
 /// reported as unrepresentable.
@@ -299,10 +311,10 @@ fn an_unadmitted_binding_is_no_longer_a_fatal() {
 fn ident<T>(x: T) -> T { return x }
 fn nothing() {}
 fn twice(n: int) -> int { return n * 2 }
-fn total<I: Iterator<int>>(it: I) -> int {
-    let s = 0
-    for v in it { s = s + v }
-    return s
+fn depth<T>(x: T, n: int) -> int {
+    if n <= 0 { return 0 }
+    let wrapped: [T] = [x]
+    return 1 + depth(wrapped, n - 1)
 }
 fn main() {
     let u = ident(nothing())
@@ -310,19 +322,18 @@ fn main() {
     let b = ident(a)
     let f: fn(int) -> int = twice
     let g = ident(f)
-    let xs: [int] = [1, 2, 3]
-    let c = total(xs.iter())
+    depth(1, 12)
 }
 "#,
     );
     let control: Vec<&ablation::Fatal> = fatals
         .iter()
-        .filter(|f| f.callee == "total" && f.category == FatalCategory::UnsupportedSurface)
+        .filter(|f| f.category == FatalCategory::PolymorphicGrowth)
         .collect();
     assert!(
         !control.is_empty(),
-        "the control did not fire, so this fixture proves nothing about `ident`: an \
-         `Iterator`-bounded body must still be an unsupported surface; got {:?}",
+        "the control did not fire, so this fixture proves nothing about `ident`: \
+         polymorphic growth must still be a fatal; got {:?}",
         fatals.iter().map(|f| (f.category, &f.callee)).collect::<Vec<_>>()
     );
     let hit: Vec<&ablation::Fatal> = fatals.iter().filter(|f| f.callee == "ident").collect();

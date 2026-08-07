@@ -494,7 +494,7 @@ struct UnitOut {
     /// bodies and global initializers are always emitted.
     calls: Vec<FuncRef>,
     /// Specialized callees this definition needs emitted (see `Chunk::specs`).
-    specs: Vec<(FuncRef, skull_mir::lower::SpecKey)>,
+    specs: Vec<skull_mir::bound::SpecDemand>,
     /// Module-global names read/written (fn-as-value edges; see `Chunk`).
     global_names: Vec<Ustr>,
     times: PhaseTimes,
@@ -549,7 +549,12 @@ fn emit_decorator_unit(
                 cg.mint_synthetic(nf.name.to_string());
             }
             out.times.cleanup = tc.elapsed();
-            if let Err(e) = check_unit_spec_bindings(ws, mid, &deco_name, &mf, d.span, &mut out.specs) {
+            let (subst, incoming) = Default::default();
+            let owner = bone_semantic::hir::BodyOwner::Decorator(did);
+            let ctx = skull_mir::bound::body_ctx(ws, mid, owner, &subst, &incoming);
+            if let Err(e) =
+                check_unit_spec_bindings(ws, &ctx, mid, &deco_name, &mf, d.span, &mut out.specs)
+            {
                 out.hard_error = Some(e);
                 return out;
             }
@@ -614,7 +619,12 @@ fn emit_global_unit(
                 cg.mint_synthetic(nf.name.to_string());
             }
             out.times.cleanup = tc.elapsed();
-            if let Err(e) = check_unit_spec_bindings(ws, mid, g.name.as_str(), &mf, g.name_span, &mut out.specs) {
+            let (subst, incoming) = Default::default();
+            let owner = bone_semantic::hir::BodyOwner::Global(gid);
+            let ctx = skull_mir::bound::body_ctx(ws, mid, owner, &subst, &incoming);
+            if let Err(e) =
+                check_unit_spec_bindings(ws, &ctx, mid, g.name.as_str(), &mf, g.name_span, &mut out.specs)
+            {
                 out.hard_error = Some(e);
                 return out;
             }
@@ -717,6 +727,10 @@ struct LuaReach<'a> {
     errs: Vec<(String, CompilerError)>,
     inline_cache: skull_transform::InlineCache,
     roots: Vec<EmittedBodyId>,
+    /// The bound-conformance tree each reached specialized body is emitted
+    /// under, from the demand that reached it, with the agreement check
+    /// `skull_mir::bound::DemandMap` carries.
+    demands: skull_mir::bound::DemandMap,
 }
 
 /// Global-name -> fns, keyed by BOTH the emitted (mangled) name and the source
@@ -786,6 +800,11 @@ impl skull_mir::reach::ReachPolicy for LuaReach<'_> {
             Some(chunk) => (chunk.calls.clone(), chunk.global_names.clone(), chunk.specs.clone()),
             None => return Ok(Vec::new()),
         };
+        // BEFORE the successors are returned: a specialized successor is BUILT
+        // when it is visited, and its tree has to be on the map by then.
+        for body in self.demands.record(&specs) {
+            self.errs.push(demand_clash(self.ws, &body));
+        }
         let mut succs: Vec<EmittedBodyId> = calls.into_iter().map(shared).collect();
         for name in global_names {
             succs.extend(fns_named(self.by_name, name).map(shared));
@@ -793,7 +812,7 @@ impl skull_mir::reach::ReachPolicy for LuaReach<'_> {
         // The edge a declaration-keyed walk could not carry: a specialized body
         // is lowered under its instantiation, so it reaches callees, globals and
         // FURTHER specializations no shared body mentions.
-        succs.extend(specs.into_iter().map(|(fr, key)| EmittedBodyId::new(fr, key)));
+        succs.extend(specs.iter().map(|d| EmittedBodyId::new(d.func, d.key.clone())));
         Ok(succs)
     }
 }
@@ -826,11 +845,13 @@ impl<'a> LuaReach<'a> {
                         let f = &self.ws.module(fref.module).functions[fref.func];
                         let name = skull_mir::mangle::spec_fn_name(self.ws, f, key)?;
                         let mut specs = Vec::new();
+                        let tree = self.demands.tree_of(body);
                         let built = emit_spec_chunk(
                             self.ws,
                             self.cg,
                             self.scx,
                             body,
+                            &tree,
                             &name,
                             &mut self.inline_cache,
                             &mut specs,
@@ -941,6 +962,27 @@ struct LiveBodies {
     rejected: Vec<(String, CompilerError)>,
 }
 
+/// The diagnostic for a demand clash, at the declaration whose specialization
+/// two sites disagree about.
+fn demand_clash(ws: &Workspace, body: &EmittedBodyId) -> (String, CompilerError) {
+    let fref = body.decl();
+    let f = &ws.module(fref.module).functions[fref.func];
+    let name = body
+        .key()
+        .and_then(|k| skull_mir::mangle::spec_fn_name(ws, f, k))
+        .unwrap_or_else(|| f.name.to_string());
+    (
+        name.clone(),
+        CompilerError::new_with_label(
+            f.name_span,
+            format!(
+                "internal: two call sites demand `{name}` with different `Iterator` \
+                 bound resolutions, so one emitted definition cannot serve both"
+            ),
+        ),
+    )
+}
+
 impl LiveBodies {
     /// Whether this DECLARATION's own definition is emitted. The
     /// validation-vs-emitted split rests on this being the ONLY thing liveness
@@ -971,7 +1013,7 @@ fn live_bodies(
     project_root: Option<&str>,
     extra_roots: &[FuncRef],
     extra_root_names: &[Ustr],
-    unit_specs: &[(FuncRef, skull_mir::lower::SpecKey)],
+    unit_specs: &[skull_mir::bound::SpecDemand],
 ) -> Result<LiveBodies, CompilerError> {
     let by_name = build_name_index(ws);
     let mut roots: Vec<FuncRef> = Vec::new();
@@ -1000,7 +1042,7 @@ fn live_bodies(
     // instantiations they ask for are roots in their own right.
     let mut root_bodies: Vec<EmittedBodyId> = roots.iter().copied().map(shared).collect();
     root_bodies
-        .extend(unit_specs.iter().map(|(fr, key)| EmittedBodyId::new(*fr, key.clone())));
+        .extend(unit_specs.iter().map(|d| EmittedBodyId::new(d.func, d.key.clone())));
 
     let mut policy = LuaReach {
         ws,
@@ -1012,7 +1054,11 @@ fn live_bodies(
         errs: Vec::new(),
         inline_cache: skull_transform::InlineCache::default(),
         roots: root_bodies.clone(),
+        demands: skull_mir::bound::DemandMap::default(),
     };
+    for body in policy.demands.record(unit_specs) {
+        policy.errs.push(demand_clash(ws, &body));
+    }
     let order = skull_mir::reach::walk(&mut policy)?;
 
     // `walk` returns only EXPANDED nodes. A root and a LEAF (extern, inline(lua),
@@ -1035,7 +1081,7 @@ fn live_bodies(
         for &name in &chunk.global_names {
             bodies.extend(fns_named(&by_name, name).map(shared));
         }
-        bodies.extend(chunk.specs.iter().map(|(fr, key)| EmittedBodyId::new(*fr, key.clone())));
+        bodies.extend(chunk.specs.iter().map(|d| EmittedBodyId::new(d.func, d.key.clone())));
     }
     Ok(LiveBodies { bodies, spec_chunks: policy.built, rejected: policy.errs })
 }
@@ -1095,7 +1141,7 @@ struct Chunk {
     /// splice served, so each needs a standalone specialized copy emitted.
     /// Deduplicated program-wide by [`assemble`] -- many bodies ask for the same
     /// one, and it must be defined exactly once.
-    specs: Vec<(FuncRef, skull_mir::lower::SpecKey)>,
+    specs: Vec<skull_mir::bound::SpecDemand>,
 }
 
 /// The shared body of `fref` -- the id under which a declaration's own
@@ -1148,7 +1194,14 @@ fn rebuild_chunk(
             };
             let _ = fref;
             let mut specs = Vec::new();
-            emit_spec_chunk(ws, cg, scx, body, &name, inline_cache, &mut specs)
+            // The EMPTY tree, and that is not a fallback. A body with placeholders
+            // belongs to an `Iterator`-bounded declaration, and `is_cached_body`
+            // is false for one -- its caller DROPS the chunk instead of rebuilding
+            // it, so the liveness walk re-derives it WITH the demand's tree. If a
+            // body with placeholders ever did arrive here,
+            // `resolve_standalone_bound_calls` refuses it rather than emitting a
+            // definition that names no `next`.
+            emit_spec_chunk(ws, cg, scx, body, &Default::default(), &name, inline_cache, &mut specs)
         }
     }
 }
@@ -1263,6 +1316,7 @@ fn collect_callee_frefs(mf: &MirFunc, out: &mut FxHashSet<FuncRef>) {
 fn emit_coroutine_chunk(
     ws: &Workspace,
     cg: &CodegenCtx,
+    ctx: &skull_mir::bound::BoundCtx,
     body: &EmittedBodyId,
     f: &bone_semantic::hir::Function,
     mf: &mut MirFunc,
@@ -1271,11 +1325,12 @@ fn emit_coroutine_chunk(
     let tc = Instant::now();
     skull_transform::cleanup_with_nobox(ws, mf);
     times.cleanup = tc.elapsed();
-    // Coroutines never inline, so a combinator chain here would leave a call to a
-    // bounded fn that has no standalone emission -- reject.
+    // Coroutines never inline, so a combinator chain here leaves a residual call
+    // -- fine when the lowerer specialized it (a standalone body serves it), a
+    // rejection when it did not.
     skull_transform::validate_no_residual_bound_calls(ws, f, mf)?;
     let mut specs = Vec::new();
-    validate_emitted_body(ws, mf, &mut specs).map_err(|r| r.into_error(f.name_span, ""))?;
+    validate_emitted_body(ws, ctx, mf, &mut specs).map_err(|r| r.into_error(f.name_span, ""))?;
     skull_codegen_lua::regalloc_time_reset();
     let te = Instant::now();
     let plan = skull_mir::lower::plan_coroutine(ws, body);
@@ -1319,7 +1374,10 @@ fn emit_body_chunk(
     let mut mf = skull_mir::lower::lower_function(ws, scx, self_ref.module, self_ref.func)?;
     times.lower = tl.elapsed();
     if f.is_coroutine {
-        return emit_coroutine_chunk(ws, cg, &shared(self_ref), f, &mut mf, times);
+        let (subst, incoming) = Default::default();
+        let owner = BodyOwner::Function(self_ref.func);
+        let ctx = skull_mir::bound::body_ctx(ws, self_ref.module, owner, &subst, &incoming);
+        return emit_coroutine_chunk(ws, cg, &ctx, &shared(self_ref), f, &mut mf, times);
     }
     // Inline eligible direct calls before cleanup so a hot loop traces with no
     // per-call frame (`docs/skull-inlining-plan.md`).
@@ -1360,7 +1418,10 @@ fn emit_body_chunk(
     times.cleanup = tc.elapsed();
     skull_transform::validate_no_residual_bound_calls(ws, f, &mf)?;
     let mut specs = Vec::new();
-    validate_emitted_body(ws, &mf, &mut specs).map_err(|r| r.into_error(f.name_span, ""))?;
+    let (subst, incoming) = Default::default();
+    let owner = BodyOwner::Function(self_ref.func);
+    let ctx = skull_mir::bound::body_ctx(ws, self_ref.module, owner, &subst, &incoming);
+    validate_emitted_body(ws, &ctx, &mf, &mut specs).map_err(|r| r.into_error(f.name_span, ""))?;
     collect_callee_frefs(&mf, &mut deps);
     let (direct_globals, direct_calls) = direct_refs(ws, &mf);
     skull_codegen_lua::regalloc_time_reset();
@@ -1481,17 +1542,26 @@ fn emit_spec_chunk(
     cg: &CodegenCtx,
     scx: &skull_mir::lower::ScalarCtx,
     body: &EmittedBodyId,
+    tree: &skull_mir::bound::ResolvedBoundTree,
     name: &str,
     inline_cache: &mut skull_transform::InlineCache,
-    specs: &mut Vec<(FuncRef, skull_mir::lower::SpecKey)>,
+    specs: &mut Vec<skull_mir::bound::SpecDemand>,
 ) -> Result<Chunk, CompilerError> {
     let fref = body.decl();
     let f = &ws.module(fref.module).functions[fref.func];
     let subst = body.subst(ws);
     let mut mf = skull_mir::lower::lower_emitted_body(ws, scx, body)
         .map_err(|e| CompilerError::new_with_label(f.name_span, e.message))?;
+    // BEFORE every transform: an `Iterator`-bounded body's placeholders are what
+    // make it unemittable on its own, and the demand that reached here is what
+    // resolves them. The splice path does the same substitution at the moment it
+    // clones the body into a caller.
+    skull_transform::bound::resolve_standalone_bound_calls(ws, &mut mf, tree)
+        .map_err(|e| CompilerError::new_with_label(f.name_span, e.message))?;
+    let owner = BodyOwner::Function(fref.func);
+    let ctx = skull_mir::bound::body_ctx(ws, fref.module, owner, &subst, tree);
     if f.is_coroutine {
-        return emit_coroutine_chunk(ws, cg, body, f, &mut mf, PhaseTimes::default());
+        return emit_coroutine_chunk(ws, cg, &ctx, body, f, &mut mf, PhaseTimes::default());
     }
     let mut deps = prepare_instance_body(ws, scx, fref, &subst, name, &mut mf, inline_cache)
         .map_err(|e| CompilerError::new_with_label(f.name_span, e.message))?;
@@ -1499,7 +1569,7 @@ fn emit_spec_chunk(
     // Discovered BEFORE the verdict, and handed back through `specs` even when
     // the verdict rejects: the inline worklist pushed them into the live queue
     // first, so a failing build reports over that same closure.
-    validate_emitted_body(ws, &mf, specs)
+    validate_emitted_body(ws, &ctx, &mf, specs)
         .map_err(|r| r.into_error(f.name_span, &format!("cannot emit specialized `{name}`: ")))?;
     let specs = specs[before..].to_vec();
     let mut lua = emit_named(ws, cg, name, &mf);
@@ -1531,7 +1601,7 @@ fn emit_spec_chunk(
 /// removes.
 fn emit_specialized_callees(
     ws: &Workspace,
-    pending: &mut Vec<(FuncRef, skull_mir::lower::SpecKey)>,
+    pending: &mut Vec<skull_mir::bound::SpecDemand>,
     cached: &FxHashMap<EmittedBodyId, Result<Chunk, CompilerError>>,
     live: &FxHashMap<EmittedBodyId, Chunk>,
     rejected: &[(String, CompilerError)],
@@ -1542,7 +1612,8 @@ fn emit_specialized_callees(
     let mut errs: Vec<(String, CompilerError)> = rejected.to_vec();
     let rejected_names: FxHashSet<&str> =
         rejected.iter().map(|(n, _)| n.as_str()).collect();
-    while let Some((fref, key)) = pending.pop() {
+    while let Some(demand) = pending.pop() {
+        let (fref, key) = (demand.func, demand.key);
         let body = EmittedBodyId::new(fref, key.clone());
         if !done.insert(body.clone()) {
             continue;
@@ -1701,12 +1772,13 @@ fn validate_no_whole_element_column_access(mf: &skull_mir::mir::MirFunc) -> Resu
 /// top-level Lua function and so needs the checks in its own right.
 fn validate_nested_bodies(
     ws: &Workspace,
+    ctx: &skull_mir::bound::BoundCtx,
     nested: &[MirFunc],
-    specs: &mut Vec<(FuncRef, skull_mir::lower::SpecKey)>,
+    specs: &mut Vec<skull_mir::bound::SpecDemand>,
 ) -> Result<(), BodyRejection> {
     let mut acc = BodyRejection::default();
     for nf in nested {
-        if let Err(r) = validate_emitted_body(ws, nf, specs) {
+        if let Err(r) = validate_emitted_body(ws, ctx, nf, specs) {
             acc.absorb(r.prefixed(&format!("in nested body `{}`", nf.name)));
         }
     }
@@ -1791,11 +1863,17 @@ impl BodyRejection {
 /// call site.
 fn validate_emitted_body(
     ws: &Workspace,
+    ctx: &skull_mir::bound::BoundCtx,
     mf: &MirFunc,
-    specs: &mut Vec<(FuncRef, skull_mir::lower::SpecKey)>,
+    specs: &mut Vec<skull_mir::bound::SpecDemand>,
 ) -> Result<(), BodyRejection> {
-    skull_mir::reach::spec_bound_calls(mf, specs);
     let mut acc = BodyRejection::default();
+    // A demand this body cannot state in self-contained terms is a rejection,
+    // not a demand that is quietly dropped: the callee would then be reached by
+    // nothing and its call site would spell a definition the program lacks.
+    if let Err(e) = skull_mir::reach::spec_bound_calls(ws, ctx, mf, specs) {
+        acc.absorb(BodyRejection::gap(e.message));
+    }
     if let Err(r) = validate_no_whole_element_column_access(mf).map_err(BodyRejection::gap) {
         acc.absorb(r);
     }
@@ -1811,7 +1889,7 @@ fn validate_emitted_body(
             },
         ),
     );
-    if let Err(r) = validate_nested_bodies(ws, &mf.nested_fns, specs) {
+    if let Err(r) = validate_nested_bodies(ws, ctx, &mf.nested_fns, specs) {
         acc.absorb(r);
     }
     acc.into_result()
@@ -1823,14 +1901,15 @@ fn validate_emitted_body(
 /// known parity list, a user definition that cannot emit is a hard error.
 fn check_unit_spec_bindings(
     ws: &Workspace,
+    ctx: &skull_mir::bound::BoundCtx,
     mid: ModuleId,
     name: &str,
     mf: &MirFunc,
     span: bone_semantic::prelude::Span,
-    out_specs: &mut Vec<(FuncRef, skull_mir::lower::SpecKey)>,
+    out_specs: &mut Vec<skull_mir::bound::SpecDemand>,
 ) -> Result<(), CompilerError> {
     let mut specs = Vec::new();
-    let r = validate_emitted_body(ws, mf, &mut specs);
+    let r = validate_emitted_body(ws, ctx, mf, &mut specs);
     out_specs.extend(specs);
     match r {
         Ok(()) => Ok(()),
@@ -2095,7 +2174,7 @@ fn assemble(
     // ordering + deco application).
     let mut times = PhaseTimes::default();
     let mut t_scaffold = Duration::ZERO;
-    let mut needed_specs: Vec<(FuncRef, skull_mir::lower::SpecKey)> = Vec::new();
+    let mut needed_specs: Vec<skull_mir::bound::SpecDemand> = Vec::new();
     let mut rejections = Rejections::default();
     let mut skipped: Vec<(String, String)> = Vec::new();
     let mut direct_globals: FxHashMap<Ustr, Vec<Ustr>> = FxHashMap::default();

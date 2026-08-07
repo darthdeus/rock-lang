@@ -1,0 +1,199 @@
+//! A bound-conformance tree with every leaf carried in terms an emitted body
+//! can read on its own (`docs/monomorphization-plan.md` S 12).
+//!
+//! [`bone_semantic::prelude::BoundTree`] is stated in the CALLER's vocabulary:
+//! `BoundNext::Concrete::next_generics` maps a callee `VarId` to a `TyId` in the
+//! caller's own type arena. That is exactly what a splice needs -- it runs where
+//! the caller's [`BodyInference`] is in scope -- and it is why a raw tree cannot
+//! be the thing that travels to a standalone emission: the consumer would have
+//! to recover which body's arena the ids belong to, and two callers' trees for
+//! ONE instantiation are not comparable at all.
+//!
+//! [`ResolvedBoundTree`] is the same fact with the arena-dependent half already
+//! spent: each concrete leaf carries the callee `FuncRef` and the [`SpecKey`]
+//! its own instantiation resolves to. It is therefore self-contained, `Eq`, and
+//! a function of the instantiation rather than of the caller -- which is what
+//! makes it sound to key by emitted body and to CHECK for agreement when two
+//! sites demand the same one.
+
+use bone_semantic::inference::{BodyInference, Workspace};
+use bone_semantic::prelude::{BoundNext, BoundTree};
+use skull_parser::CompilerError;
+
+use crate::lower::{SpecKey, SpecSubst};
+use crate::mir::FuncRef;
+
+/// How one bounded generic index of a callee resolves.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ResolvedBoundNext {
+    /// A concrete `next`: the witness declaration, the specialization its own
+    /// instantiation asks for (`None` = the shared body serves it), and how the
+    /// witness's own bounded generics resolve in turn.
+    Concrete { func: FuncRef, spec: Option<SpecKey>, sub: ResolvedBoundTree },
+    /// Still the enclosing body's own bounded generic. Resolvable only where
+    /// that body's incoming tree is known -- at its splice, or at its
+    /// standalone instantiation.
+    CallerGeneric(usize),
+}
+
+/// Per bounded-generic index of a callee: how its placeholder `next` calls
+/// resolve. Empty for an unbounded callee.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ResolvedBoundTree {
+    pub next: std::collections::BTreeMap<usize, ResolvedBoundNext>,
+}
+
+impl ResolvedBoundTree {
+    pub fn is_empty(&self) -> bool {
+        self.next.is_empty()
+    }
+
+    pub fn get(&self, generic_idx: usize) -> Option<&ResolvedBoundNext> {
+        self.next.get(&generic_idx)
+    }
+}
+
+/// A specialized body some emitted body asks for: which declaration, at which
+/// instantiation, and -- when it is `Iterator`-bounded -- the tree its own
+/// placeholder `next` calls resolve through.
+///
+/// The tree is a function of the INSTANTIATION, not of the caller, which is the
+/// invariant `skull::instance_graph`'s per-instance `bound_trees` measures. It
+/// still travels here rather than being looked up there, because emission has
+/// no instance graph; the agreement CHECK on the demand map is what keeps the
+/// invariant from being taken on faith.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpecDemand {
+    pub func: FuncRef,
+    pub key: SpecKey,
+    pub tree: ResolvedBoundTree,
+}
+
+/// What a body needs in order to state a demand in self-contained terms: its
+/// own inference arena, its own instance substitution, and the tree IT was
+/// instantiated with (empty for a body that is not bounded).
+#[derive(Clone, Copy)]
+pub struct BoundCtx<'a> {
+    pub inf: Option<&'a BodyInference>,
+    pub subst: &'a SpecSubst,
+    pub incoming: &'a ResolvedBoundTree,
+}
+
+/// Every reached specialization's tree, keyed by the body that will be emitted.
+///
+/// The design rests on the tree being a function of the INSTANTIATION rather
+/// than of the caller, so this CHECKS that instead of assuming it: two sites
+/// demanding one emitted body must carry the same tree, or one definition would
+/// have to serve two resolutions and whichever demand arrived first would
+/// silently win. The instance graph measures the same property from the other
+/// side (0 disagreements over 2,934 re-reach comparisons); this is emission's
+/// own check, on the map emission actually reads.
+///
+/// One of these, not one per backend: both emitters keep their own worklist,
+/// and a check written twice is free to be weaker on one of them.
+#[derive(Default)]
+pub struct DemandMap {
+    trees: std::collections::HashMap<crate::lower::EmittedBodyId, ResolvedBoundTree>,
+}
+
+impl DemandMap {
+    /// File `demands`, returning the bodies whose tree DISAGREED with one
+    /// already filed. An agreeing repeat is silent, and a first sighting wins.
+    pub fn record(&mut self, demands: &[SpecDemand]) -> Vec<crate::lower::EmittedBodyId> {
+        let mut clashes = Vec::new();
+        for d in demands {
+            let body = crate::lower::EmittedBodyId::new(d.func, d.key.clone());
+            match self.trees.get(&body) {
+                Some(prev) if *prev != d.tree => clashes.push(body),
+                Some(_) => {}
+                None => {
+                    self.trees.insert(body, d.tree.clone());
+                }
+            }
+        }
+        clashes
+    }
+
+    /// The tree a body was demanded with. An absent one is the EMPTY tree, which
+    /// is correct for every body that has no placeholders and is a REJECTION for
+    /// one that does -- `skull_transform::bound::resolve_standalone_bound_calls`
+    /// refuses a placeholder it cannot resolve rather than emitting it.
+    pub fn tree_of(&self, body: &crate::lower::EmittedBodyId) -> ResolvedBoundTree {
+        self.trees.get(body).cloned().unwrap_or_default()
+    }
+}
+
+/// The context one body emits under: its own inference arena, its own instance
+/// substitution, and the tree it was instantiated with.
+///
+/// A body that is not an instantiation of anything still needs one, because the
+/// demands it makes may be for callees that ARE.
+pub fn body_ctx<'a>(
+    ws: &'a Workspace,
+    mid: bone_semantic::prelude::ModuleId,
+    owner: bone_semantic::hir::BodyOwner,
+    subst: &'a SpecSubst,
+    incoming: &'a ResolvedBoundTree,
+) -> BoundCtx<'a> {
+    BoundCtx { inf: ws.inference(mid).and_then(|r| r.per_fn.get(&owner)), subst, incoming }
+}
+
+/// Resolve a raw tree recorded in `inf`'s body against the `incoming` tree that
+/// body was itself instantiated with.
+///
+/// The two arms are the two things a leaf can be. A `Concrete` leaf spends the
+/// caller-arena `next_generics` HERE, where `inf` is the arena they belong to,
+/// and keeps only the resulting [`SpecKey`]. A `CallerGeneric` leaf is the
+/// enclosing body's own bounded generic, so it is answered by `incoming` -- and
+/// when `incoming` does not answer it, it stays a `CallerGeneric`: this body is
+/// itself generic in that position and the resolution belongs to whoever
+/// instantiates it, not to a failure here.
+pub fn resolve_bound_tree(
+    ws: &Workspace,
+    inf: Option<&BodyInference>,
+    subst: &SpecSubst,
+    raw: &BoundTree,
+    incoming: &ResolvedBoundTree,
+) -> Result<ResolvedBoundTree, CompilerError> {
+    let mut out = ResolvedBoundTree::default();
+    for (&g, bn) in &raw.next {
+        out.next.insert(g, resolve_bound_next(ws, inf, subst, bn, incoming)?);
+    }
+    Ok(out)
+}
+
+pub fn resolve_bound_next(
+    ws: &Workspace,
+    inf: Option<&BodyInference>,
+    subst: &SpecSubst,
+    bn: &BoundNext,
+    incoming: &ResolvedBoundTree,
+) -> Result<ResolvedBoundNext, CompilerError> {
+    match bn {
+        BoundNext::Concrete { func: (m, f), sub, next_generics } => {
+            let func = FuncRef { module: *m, func: *f };
+            // No inference for this body means no arena to read the witness
+            // instantiation out of; the shared witness is what the splice path
+            // has always used in that case.
+            let spec = match inf {
+                Some(inf) => crate::lower::spec_key_from_next_generics(
+                    ws,
+                    inf,
+                    func,
+                    next_generics,
+                    subst,
+                )?,
+                None => None,
+            };
+            Ok(ResolvedBoundNext::Concrete {
+                func,
+                spec,
+                sub: resolve_bound_tree(ws, inf, subst, sub, incoming)?,
+            })
+        }
+        BoundNext::CallerGeneric(g) => Ok(match incoming.get(*g) {
+            Some(resolved) => resolved.clone(),
+            None => ResolvedBoundNext::CallerGeneric(*g),
+        }),
+    }
+}
