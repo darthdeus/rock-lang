@@ -544,14 +544,19 @@ pub const JS_LOG_RUNTIME: &str = r#"
 function __stone_log_init() {
   if (__G.__stone_log_level == null || __G.__stone_log_level < 0) __G.__stone_log_level = 2;
 }
-function __stone_emit(level, category, msg) {
+function __stone_emit(level, category, msg, wall_clock) {
   if (category && category.length > 0) print("[" + category + "] " + msg);
   else print(msg);
 }
 function __stone_log(level, category, msg) {
   __stone_log_init();
   if (level > __G.__stone_log_level) return;
-  __stone_emit(level, category, msg);
+  __stone_emit(level, category, msg, false);
+}
+function __stone_log_wall_clock(level, category, msg) {
+  __stone_log_init();
+  if (level > __G.__stone_log_level) return;
+  __stone_emit(level, category, msg, true);
 }
 function log_set_level(level) { __G.__stone_log_level = level; }
 // `__stone_log_dedup` holds a COUNT, not a flag: `log_suppression_summary`
@@ -562,9 +567,7 @@ var __stone_log_counts = {};
 var __stone_log_sites = {};
 var __stone_log_summary_done = false;
 var __stone_log_throttle = {};
-var __stone_log_counts = {};
-var __stone_log_sites = {};
-var __stone_log_summary_done = false;
+var __stone_log_wall = {};
 var __stone_log_now_override = null;
 function _log_once_impl(category, msg, site) {
   __stone_log_init();
@@ -573,17 +576,21 @@ function _log_once_impl(category, msg, site) {
   __stone_log_dedup[site] = n;
   __stone_log_sites[site] = (category || "") + "|" + msg;
   if (n > 1) return;
-  __stone_emit(0, category, msg);
+  __stone_emit(0, category, msg, false);
 }
-function _log_throttled_with_now_impl(now_sec, category, msg, interval_sec, site) {
+function _log_throttled_with_now_impl(now_sec, category, msg, interval_sec, site, wall_clock) {
   __stone_log_init();
   if (0 > __G.__stone_log_level) return;
   __stone_log_counts[site] = (__stone_log_counts[site] || 0) + 1;
   __stone_log_sites[site] = (category || "") + "|" + msg;
+  // `= nil` in the luajit sibling, which removes the key; keep the two tables
+  // the same shape rather than storing a false.
+  if (wall_clock) __stone_log_wall[site] = true;
+  else delete __stone_log_wall[site];
   var last = __stone_log_throttle[site];
   if (last != null && (now_sec - last) < interval_sec) return;
   __stone_log_throttle[site] = now_sec;
-  __stone_emit(0, category, msg);
+  __stone_emit(0, category, msg, wall_clock);
 }
 // Ties order differently from the luajit sibling (JS sort is stable, table.sort
 // is not); the counts themselves match.
@@ -608,7 +615,8 @@ function log_suppression_summary() {
     var rec = __stone_log_sites[r.site] || "|";
     var bar = rec.indexOf("|");
     __stone_emit(0, rec.slice(0, bar),
-      "suppressed x" + r.n + " at " + r.site + ": " + rec.slice(bar + 1));
+      "suppressed x" + r.n + " at " + r.site + ": " + rec.slice(bar + 1),
+      __stone_log_wall[r.site] === true);
   }
 }
 function stone_log_set_now(now_sec) { __stone_log_now_override = now_sec; }
@@ -617,11 +625,11 @@ function __stone_log_now() {
   if (__stone_log_now_override != null) return __stone_log_now_override;
   return Date.now() / 1000;
 }
-function _log_throttled_impl(category, msg, interval_sec, site) {
-  _log_throttled_with_now_impl(__stone_log_now(), category, msg, interval_sec, site);
+function _log_throttled_impl(category, msg, interval_sec, site, wall_clock) {
+  _log_throttled_with_now_impl(__stone_log_now(), category, msg, interval_sec, site, wall_clock);
 }
 function log_reset_dedup() {
-  __stone_log_dedup = {}; __stone_log_throttle = {};
+  __stone_log_dedup = {}; __stone_log_throttle = {}; __stone_log_wall = {};
   __stone_log_counts = {}; __stone_log_sites = {}; __stone_log_summary_done = false;
 }
 function log_dedup_count() { return Object.keys(__stone_log_dedup).length; }
@@ -1164,6 +1172,9 @@ function stone_unload_image(h) {
   delete __SW.imageRepeat[h];
 }
 function stone_reload_image(h, path) { return false; }
+// No deferred-decode queue on web: the browser decodes into the texture at load
+// time, so there is never anything outstanding to flush.
+function stone_flush_image_uploads() {}
 // CPU-side pixel buffers (image_data.rs's twin). These were stubs returning 0,
 // which is the worst shape available: a caller got a handle-shaped 0, uploaded
 // it, and silently drew the white fallback with no log line anywhere. A real
@@ -1878,11 +1889,33 @@ function stone_draw_fullscreen_quad() {
 // coverage-RGBA (r=g=b=a=coverage, built from the canvas ALPHA channel --
 // raw white fillText would give (1,1,1,cov), wrong rgb under tinting).
 // Metric bit-parity with fontdue is a NON-goal; invariants only.
+//
+// Faces: `faceMask` declares which synthesized faces to bake (bit 0 bold,
+// bit 1 italic), exactly as stone-rs `FaceSet` does, and each declared face
+// gets its own row block in the same texture.
+//
+// The bake never asks CSS for a bold or italic face. Browser synthesis picks
+// its own angle -- the CSS default oblique is 14 degrees and Firefox uses
+// 11.3-16.7 depending on the host -- so asking for one would leave the two
+// legs agreeing on invariants while differing on the italic axis itself.
+// Instead every face is drawn from the SAME font spec with native's own 12
+// degrees and px/24 stroke applied here. `fontSynthesis = "none"` pins that:
+// it is inert while the spec names no weight, and it is what keeps a future
+// spec change from silently reintroducing the browser's angle.
+var __SW_OBLIQUE_DEG = 12;             // stone-rs glyph_raster::OBLIQUE_DEGREES
+var __SW_BOLD_PER_PX = 1 / 24;         // stone-rs glyph_raster::BOLD_STRENGTH_PER_PX
+// Face::ALL order: regular, bold, italic, bold-italic.
+function __sw_face_declared(mask, face) {
+  var wantsBold = face === 1 || face === 3;
+  var wantsItalic = face === 2 || face === 3;
+  return (!wantsBold || (mask & 1) !== 0) && (!wantsItalic || (mask & 2) !== 0);
+}
 function __sw_font_path_key(path) { return String(path).replace(/^\.?\//, ""); }
-function __sw_bake_font(path, pixelSize, existingAtlas) {
+function __sw_bake_font(path, pixelSize, existingAtlas, faceMask) {
+  faceMask = faceMask | 0;
   if (globalThis.__STONE_WEB_FAKE_ENV || typeof document === "undefined") {
     __sw_log_once("stone_load_font: no canvas2d in this environment -- glyphless fallback font");
-    return { em: pixelSize, atlas: existingAtlas || 0, glyphs: {}, maxH: pixelSize, fake: true, sourcePath: path };
+    return { em: pixelSize, atlas: existingAtlas || 0, glyphs: [{}, {}, {}, {}], maxH: pixelSize, fake: true, sourcePath: path, faceMask: faceMask };
   }
   var fams = __SW.fontFamilies || {};
   var fam = fams[__sw_font_path_key(path)];
@@ -1899,53 +1932,101 @@ function __sw_bake_font(path, pixelSize, existingAtlas) {
   var mctx = mcanvas.getContext("2d", { willReadFrequently: true });
   var fontSpec = pixelSize + "px " + fam;
   mctx.font = fontSpec;
+  mctx.fontSynthesis = "none"; // never the browser's own faux face; see above
   mctx.textBaseline = "alphabetic";
 
-  // Pass 1: metrics for all 95 glyphs -> cell size.
+  var baked = [];
+  for (var f = 0; f < 4; f++) if (__sw_face_declared(faceMask, f)) baked.push(f);
+  var shear = Math.tan((__SW_OBLIQUE_DEG * Math.PI) / 180);
+  var embolden = pixelSize * __SW_BOLD_PER_PX;
+
+  // Pass 1: metrics for all 95 glyphs of every declared face -> cell size.
+  // The cell holds the WIDEST face: an oblique pushes ink past its own
+  // advance, so sizing from regular alone would bleed bold-italic into the
+  // next cell. Canvas gives no sheared metrics, so the extra extent is
+  // derived from the shear and the glyph height, which is what the transform
+  // will actually add.
   var infos = [];
   var cellW = 1, cellH = 1;
-  for (var cp = 32; cp <= 126; cp++) {
-    var ch = String.fromCharCode(cp);
-    var m = mctx.measureText(ch);
-    var left = m.actualBoundingBoxLeft || 0;
-    var right = m.actualBoundingBoxRight || 0;
-    var ascent = m.actualBoundingBoxAscent || 0;
-    var descent = m.actualBoundingBoxDescent || 0;
-    var gw = Math.ceil(left + right);
-    var gh = Math.ceil(ascent + descent);
-    infos.push({ cp: cp, ch: ch, left: left, ascent: ascent, w: gw, h: gh, advance: m.width });
-    if (gw > cellW) cellW = gw;
-    if (gh > cellH) cellH = gh;
+  for (var bi = 0; bi < baked.length; bi++) {
+    var face = baked[bi];
+    var isBold = face === 1 || face === 3;
+    var isItalic = face === 2 || face === 3;
+    var faceInfos = [];
+    for (var cp = 32; cp <= 126; cp++) {
+      var ch = String.fromCharCode(cp);
+      var m = mctx.measureText(ch);
+      var left = m.actualBoundingBoxLeft || 0;
+      var right = m.actualBoundingBoxRight || 0;
+      var ascent = m.actualBoundingBoxAscent || 0;
+      var descent = m.actualBoundingBoxDescent || 0;
+      var grow = isBold ? embolden : 0;
+      var lean = isItalic ? Math.abs(ascent) * shear : 0;
+      var gw = Math.ceil(left + right + grow + lean);
+      var gh = Math.ceil(ascent + descent + grow);
+      faceInfos.push({
+        cp: cp, ch: ch, face: face, bold: isBold, italic: isItalic,
+        left: left + grow / 2, ascent: ascent + grow / 2,
+        w: gw, h: gh, advance: m.width + grow,
+      });
+      if (gw > cellW) cellW = gw;
+      if (gh > cellH) cellH = gh;
+    }
+    infos.push(faceInfos);
   }
   var PAD = 2;
   cellW += PAD * 2;
   cellH += PAD * 2;
   var COLS = 16; // mirror native text.rs grid
-  var rows = Math.ceil(infos.length / COLS);
-  var aw = COLS * cellW, ah = rows * cellH;
+  var rowsPerFace = Math.ceil(95 / COLS);
+  var aw = COLS * cellW, ah = rowsPerFace * baked.length * cellH;
 
   var canvas = document.createElement("canvas");
   canvas.width = aw; canvas.height = ah;
   var ctx = canvas.getContext("2d", { willReadFrequently: true });
   ctx.font = fontSpec;
+  ctx.fontSynthesis = "none";
   ctx.textBaseline = "alphabetic";
   ctx.fillStyle = "#ffffff";
 
-  var glyphs = {};
+  var glyphs = [{}, {}, {}, {}];
   var maxH = 1;
-  for (var i = 0; i < infos.length; i++) {
-    var g = infos[i];
-    var cx = (i % COLS) * cellW + PAD;
-    var cy = Math.floor(i / COLS) * cellH + PAD;
-    // Pen at (cx + left, cy + ascent): ink box lands at [cx, cy, w, h].
-    ctx.fillText(g.ch, cx + g.left, cy + g.ascent);
-    // 9-float glyph info: [u0 v0 u1 v1 width height bearing_x bearing_y advance];
-    // bearing_y is TOP-based (ink top above baseline = actualBoundingBoxAscent).
-    glyphs[g.cp] = new Float32Array([
-      cx / aw, cy / ah, (cx + g.w) / aw, (cy + g.h) / ah,
-      g.w, g.h, -g.left, g.ascent, g.advance,
-    ]);
-    if (g.h > maxH) maxH = g.h;
+  for (var bi2 = 0; bi2 < baked.length; bi2++) {
+    var faceRow = bi2 * rowsPerFace;
+    var fi = infos[bi2];
+    for (var i = 0; i < fi.length; i++) {
+      var g = fi[i];
+      var cx = (i % COLS) * cellW + PAD;
+      var cy = (faceRow + Math.floor(i / COLS)) * cellH + PAD;
+      // Pen at (cx + left, cy + ascent): ink box lands at [cx, cy, w, h].
+      // The oblique is a shear about the BASELINE, so the transform is applied
+      // around the pen rather than around the cell origin -- shearing about
+      // the cell would move the whole glyph instead of leaning it.
+      ctx.save();
+      if (g.italic) {
+        ctx.translate(cx + g.left, cy + g.ascent);
+        ctx.transform(1, 0, -shear, 1, 0, 0);
+        ctx.translate(-(cx + g.left), -(cy + g.ascent));
+      }
+      if (g.bold) {
+        // Canvas has no outline-level embolden; a centred stroke over the fill
+        // is the same construction native uses (fill unioned with a stroke of
+        // the target width), not a second offset fill.
+        ctx.lineWidth = embolden;
+        ctx.lineJoin = "round";
+        ctx.strokeStyle = "#ffffff";
+        ctx.strokeText(g.ch, cx + g.left, cy + g.ascent);
+      }
+      ctx.fillText(g.ch, cx + g.left, cy + g.ascent);
+      ctx.restore();
+      // 9-float glyph info: [u0 v0 u1 v1 width height bearing_x bearing_y advance];
+      // bearing_y is TOP-based (ink top above baseline = actualBoundingBoxAscent).
+      glyphs[g.face][g.cp] = new Float32Array([
+        cx / aw, cy / ah, (cx + g.w) / aw, (cy + g.h) / ah,
+        g.w, g.h, -g.left, g.ascent, g.advance,
+      ]);
+      if (g.h > maxH) maxH = g.h;
+    }
   }
 
   // Coverage-RGBA from the alpha channel.
@@ -1966,11 +2047,11 @@ function __sw_bake_font(path, pixelSize, existingAtlas) {
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   __SW.imageSizes[texHandle] = { w: aw, h: ah };
 
-  return { em: pixelSize, atlas: texHandle, glyphs: glyphs, maxH: maxH, sourcePath: path };
+  return { em: pixelSize, atlas: texHandle, glyphs: glyphs, maxH: maxH, sourcePath: path, faceMask: faceMask };
 }
 
-function stone_load_font(path, pixelSize) {
-  var baked = __sw_bake_font(path, pixelSize, 0);
+function stone_load_font(path, pixelSize, faceMask) {
+  var baked = __sw_bake_font(path, pixelSize, 0, faceMask);
   if (!baked) return 0;
 
   __SW.fonts = __SW.fonts || {};
@@ -1983,7 +2064,9 @@ function __sw_font(fontId) { return (__SW.fonts || {})[fontId]; }
 function stone_reload_font(fontId, path, pixelSize) {
   var old = __sw_font(fontId);
   if (!old || pixelSize < 1) return false;
-  var baked = __sw_bake_font(path, pixelSize, old.atlas);
+  // A rebake keeps the DECLARED faces: reload and resize change the source
+  // bytes or the size, never what the family declared at load.
+  var baked = __sw_bake_font(path, pixelSize, old.atlas, old.faceMask);
   if (!baked) return false;
   __SW.fonts[fontId] = baked;
   console.log("[STONE-WEB] font atlas rebaked @ " + pixelSize + "px");
@@ -1992,7 +2075,7 @@ function stone_reload_font(fontId, path, pixelSize) {
 function stone_resize_font(fontId, pixelSize) {
   var old = __sw_font(fontId);
   if (!old || pixelSize < 1) return false;
-  var baked = __sw_bake_font(old.sourcePath, pixelSize, old.atlas);
+  var baked = __sw_bake_font(old.sourcePath, pixelSize, old.atlas, old.faceMask);
   if (!baked) return false;
   __SW.fonts[fontId] = baked;
   console.log("[STONE-WEB] font atlas rebaked @ " + pixelSize + "px");
@@ -2009,10 +2092,10 @@ function stone_get_font_pixel_size_for(fontId) {
   var f = __sw_font(fontId);
   return f ? f.em : 48;
 }
-function stone_get_glyph_info_for(fontId, ch, out) {
+function stone_get_glyph_info_for(fontId, face, ch, out) {
   var f = __sw_font(fontId);
-  if (!f) return false;
-  var g = f.glyphs[ch];
+  if (!f || face < 0 || face > 3) return false;
+  var g = f.glyphs[face][ch];
   if (!g) return false;
   for (var i = 0; i < 9; i++) out[i] = g[i];
   return true;
@@ -2020,19 +2103,22 @@ function stone_get_glyph_info_for(fontId, ch, out) {
 // Shim-side measure, from the shim's OWN advances (native-formula drift is
 // the bug class this avoids): width = max line sum(advance)*scale; height
 // single-line = max glyph height*scale, multi-line adds (lines-1)*em*1.2.
+// The glyph max is over THIS TEXT's glyphs, as stone-rs `stone_measure_text`
+// takes it -- the font-wide maximum is a different number and made web plain
+// text sit lower than native for the same string.
 function stone_measure_text_js(fontId, text, scale) {
   var f = __sw_font(fontId);
   if (!f) return [0, 0];
   var s = String(text);
-  var lines = 1, w = 0, lineW = 0;
+  var lines = 1, w = 0, lineW = 0, maxH = 0;
   for (var i = 0; i < s.length; i++) {
     if (s[i] === "\n") { lines++; if (lineW > w) w = lineW; lineW = 0; continue; }
-    var g = f.glyphs[s.charCodeAt(i)];
-    if (g) lineW += g[8];
+    var g = f.glyphs[0][s.charCodeAt(i)];
+    if (g) { lineW += g[8]; if (g[5] > maxH) maxH = g[5]; }
   }
   if (lineW > w) w = lineW;
-  var h = f.maxH * Math.abs(scale);
-  if (lines > 1) h = (lines - 1) * f.em * Math.abs(scale) * 1.2 + f.maxH * Math.abs(scale);
+  var h = maxH * Math.abs(scale);
+  if (lines > 1) h = (lines - 1) * f.em * Math.abs(scale) * 1.2 + maxH * Math.abs(scale);
   return [w * scale, h];
 }
 // Baseline = max TOP-based bearing_y over the text's glyphs, * |scale|.
@@ -2042,7 +2128,7 @@ function stone_get_text_baseline_for(fontId, text, scale) {
   var s = String(text);
   var b = 0;
   for (var i = 0; i < s.length; i++) {
-    var g = f.glyphs[s.charCodeAt(i)];
+    var g = f.glyphs[0][s.charCodeAt(i)];
     if (g && g[7] > b) b = g[7];
   }
   return b * Math.abs(scale);

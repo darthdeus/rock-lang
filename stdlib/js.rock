@@ -13,6 +13,31 @@
 // Engine-owned fns keep their siblings in `js_ffi.rock`; only stdlib-owned ones
 // belong here.
 
+// The shared slot core. Its luajit sibling in `unified.rock` is the contract;
+// this is the same free list over a 0-based JS array. Column Maps are a luajit
+// storage form, so on this backend the only consumer is `Arena<T>`.
+@nomangle inline(js) fn __slot_alloc(m: any, hw: any) -> int = """
+  var fi = m.free_indices;
+  var s;
+  if (fi.len > 0) {
+    s = fi._data[fi.len - 1];
+    fi._data[fi.len - 1] = null;
+    fi.len = fi.len - 1;
+  } else {
+    s = hw.len;
+    hw.len = s + 1;
+  }
+  m.occupied_count = m.occupied_count + 1;
+  return s;
+"""
+
+@nomangle inline(js) fn __slot_release(m: any, slot: int) = """
+  var fi = m.free_indices;
+  fi._data[fi.len] = slot;
+  fi.len = fi.len + 1;
+  m.occupied_count = m.occupied_count - 1;
+"""
+
 // docs/field-refs-plan.md 1. A field ref IS the key on both backends, so both
 // bodies are the same indexing operation spelled twice.
 @inline inline(js) fn field_get<T, V>(o: T, f: ReadFieldRef<T, V>) -> V = "return o[f];"

@@ -22,19 +22,18 @@ impl Builder<'_> {
         // (the call-arg analog of `lower_for_user_iter`'s `iter_fn`).
         if let Some(w) = self.inf.and_then(|i| i.implicit_iter_args.get(&e)) {
             let (m, f) = w.func;
+            let iter_ref = FuncRef { module: m, func: f };
             // This coercion belongs to `e`, but the cursor was already restored
             // to the ENCLOSING expression above -- so set both halves of the
             // site explicitly rather than inheriting a cursor that names the
             // wrong expression.
             let outer_expr = self.cur_expr.replace(e);
             let call = self.with_site_op(crate::site::SiteOp::ImplicitIter, |b| {
-                b.emit_cur(Inst::Call {
-                    func: FuncRef { module: m, func: f },
-                    args: vec![v],
-                })
+                let args = b.iter_witness_args(iter_ref, ValueRepr::Scalar(v))?;
+                Ok(b.emit_cur(Inst::Call { func: iter_ref, args }))
             });
             self.cur_expr = outer_expr;
-            return Ok(call);
+            return call;
         }
         Ok(v)
     }

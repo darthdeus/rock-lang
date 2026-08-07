@@ -22,6 +22,8 @@ mod js_backend_externs_gate;
 mod js_backend_ratchet;
 #[path = "js_coroutines.rs"]
 mod js_coroutines;
+#[path = "js_test_harness_globals_sentinel.rs"]
+mod js_test_harness_globals_sentinel;
 #[path = "js_run_gate.rs"]
 mod js_run_gate;
 #[path = "js_value_tests.rs"]

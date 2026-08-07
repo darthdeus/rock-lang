@@ -345,6 +345,11 @@ pub enum MonoTyReason {
     NoNode,
     /// Resolution exceeded [`MAX_DEPTH`] -- a cyclic substitution chain.
     DepthLimit,
+    /// A body-local type or an unsolved inference variable reached from a
+    /// DECLARATION site, which has no body and therefore no inference arena to
+    /// resolve one in. A declared signature lives in its own module's arena, so
+    /// this is compiler state disagreeing with itself, never a source shape.
+    NotADeclarationType,
 }
 
 impl MonoTyReason {
@@ -357,6 +362,7 @@ impl MonoTyReason {
             Self::UnboundGeneric(_) => "unbound-generic",
             Self::NoNode => "no-node",
             Self::DepthLimit => "depth-limit",
+            Self::NotADeclarationType => "not-a-declaration-type",
         }
     }
 }
@@ -369,6 +375,61 @@ pub const MAX_DEPTH: u32 = 64;
 /// bindings, and what specialized lowering reads as
 /// [`crate::lower::SpecSubst`] -- one type, not two spellings of it.
 pub type MonoSubst = FxHashMap<VarId, MonoTy>;
+
+/// Where a `TyId`'s node is read from.
+///
+/// A BODY has an inference arena for `TyId::Local` and solved substitutions for
+/// `TypeExpr::Infer`. A DECLARATION has neither: a signature's types live in
+/// their own module's arena, so either shape reaching [`MonoArena::convert_in`]
+/// from a declaration is compiler state disagreeing with itself.
+///
+/// This is what lets one converter serve both. The alternative -- a second
+/// normalization walk for declaration types -- is how the extern-return
+/// classifier in `skull::mir_emit` started, and it grew its own partial
+/// substitution and its own cycle key before converging back here.
+#[derive(Clone, Copy)]
+pub enum TyEnv<'a> {
+    Body(&'a BodyInference),
+    Decl,
+}
+
+impl<'a> TyEnv<'a> {
+    /// The node a declared `TyId` names, for a caller that needs the type
+    /// EXPRESSION rather than its logical type -- reading a declaration's own
+    /// generic parameters, say. Same fail-closed resolution the converter uses.
+    pub fn decl_node(self, ws: &Workspace, ty: TyId) -> Result<TypeExpr, MonoTyReason> {
+        self.node(ws, ty)
+    }
+
+    fn node(self, ws: &Workspace, ty: TyId) -> Result<TypeExpr, MonoTyReason> {
+        match (ty, self) {
+            (TyId::Static(mid, idx), _) => ws
+                .modules
+                .get(mid.index())
+                .filter(|m| (idx.into_raw().into_u32() as usize) < m.ty_arena.len())
+                .map(|m| m.ty_arena[idx])
+                .ok_or(MonoTyReason::NoNode),
+            (TyId::Local(idx), TyEnv::Body(inf)) => {
+                // `Arena` indexes unchecked; bound it rather than panic.
+                if idx.into_raw().into_u32() as usize >= inf.ty_arena.len() {
+                    return Err(MonoTyReason::NoNode);
+                }
+                Ok(inf.ty_arena[idx])
+            }
+            (TyId::Local(_), TyEnv::Decl) => Err(MonoTyReason::NotADeclarationType),
+        }
+    }
+
+    /// The type inference solved `var` to, `None` when it left the slot open.
+    /// An open slot is not an error here -- a caller's substitution may still
+    /// answer it (see the `Infer` arm of `convert_at`).
+    fn solved(self, var: VarId) -> Result<Option<TyId>, MonoTyReason> {
+        match self {
+            TyEnv::Body(inf) => Ok(inf.substitutions.get(var)),
+            TyEnv::Decl => Err(MonoTyReason::NotADeclarationType),
+        }
+    }
+}
 
 /// The `VarId` a declared generic's `TyId` names, for building a [`MonoSubst`]
 /// against a callee's `Function::generics`. `None` for anything else -- the
@@ -496,6 +557,27 @@ impl MonoArena {
         Ok(self.intern(convert(ws, inf, ty, subst)?))
     }
 
+    /// [`convert_decl`], interned.
+    pub fn convert_decl(
+        &mut self,
+        ws: &Workspace,
+        ty: TyId,
+        subst: &MonoSubst,
+    ) -> Result<MonoTyId, MonoTyReason> {
+        Ok(self.intern(convert_decl(ws, ty, subst)?))
+    }
+
+    /// [`convert_in`], interned, for a caller that holds the environment.
+    pub fn convert_in(
+        &mut self,
+        ws: &Workspace,
+        env: TyEnv<'_>,
+        ty: TyId,
+        subst: &MonoSubst,
+    ) -> Result<MonoTyId, MonoTyReason> {
+        Ok(self.intern(convert_in(ws, env, ty, subst)?))
+    }
+
     /// [`convert`], interned, reporting how many declared generics the
     /// conversion resolved THROUGH `subst`.
     pub fn convert_counting(
@@ -522,7 +604,27 @@ pub fn convert<S: std::hash::BuildHasher>(
     ty: TyId,
     subst: &std::collections::HashMap<VarId, MonoTy, S>,
 ) -> Result<MonoTy, MonoTyReason> {
-    convert_at(ws, inf, ty, subst, 0, &mut 0)
+    convert_at(ws, TyEnv::Body(inf), ty, subst, 0, &mut 0)
+}
+
+/// Convert a type written in a DECLARATION -- a signature, a `newtype`'s
+/// representation -- which has no body and so no inference arena.
+pub fn convert_decl<S: std::hash::BuildHasher>(
+    ws: &Workspace,
+    ty: TyId,
+    subst: &std::collections::HashMap<VarId, MonoTy, S>,
+) -> Result<MonoTy, MonoTyReason> {
+    convert_at(ws, TyEnv::Decl, ty, subst, 0, &mut 0)
+}
+
+/// [`convert`] for a caller that already holds the environment.
+pub fn convert_in<S: std::hash::BuildHasher>(
+    ws: &Workspace,
+    env: TyEnv<'_>,
+    ty: TyId,
+    subst: &std::collections::HashMap<VarId, MonoTy, S>,
+) -> Result<MonoTy, MonoTyReason> {
+    convert_at(ws, env, ty, subst, 0, &mut 0)
 }
 
 /// [`convert`], reporting how many declared generics it resolved THROUGH
@@ -538,12 +640,12 @@ pub fn convert_counting<S: std::hash::BuildHasher>(
     subst: &std::collections::HashMap<VarId, MonoTy, S>,
     bound: &mut usize,
 ) -> Result<MonoTy, MonoTyReason> {
-    convert_at(ws, inf, ty, subst, 0, bound)
+    convert_at(ws, TyEnv::Body(inf), ty, subst, 0, bound)
 }
 
 fn convert_at<S: std::hash::BuildHasher>(
     ws: &Workspace,
-    inf: &BodyInference,
+    env: TyEnv<'_>,
     ty: TyId,
     subst: &std::collections::HashMap<VarId, MonoTy, S>,
     depth: u32,
@@ -552,7 +654,7 @@ fn convert_at<S: std::hash::BuildHasher>(
     if depth > MAX_DEPTH {
         return Err(MonoTyReason::DepthLimit);
     }
-    let node = crate::lower::ty_node(ws, inf, ty).ok_or(MonoTyReason::NoNode)?;
+    let node = env.node(ws, ty)?;
     Ok(match node {
         TypeExpr::Builtin(b) => match b {
             BuiltinTy::Int => MonoTy::Int,
@@ -574,8 +676,8 @@ fn convert_at<S: std::hash::BuildHasher>(
             // Safe to consult one map for both arms: `Gamma` mints inference
             // vars from `lower_var_high_water` up, so a `VarId` is a declared
             // generic or an inference var, never both.
-            match inf.substitutions.get(var) {
-                Some(next) => return convert_at(ws, inf, next, subst, depth + 1, bound),
+            match env.solved(var)? {
+                Some(next) => return convert_at(ws, env, next, subst, depth + 1, bound),
                 None => {
                     let bound_to =
                         subst.get(&var).cloned().ok_or(MonoTyReason::UnresolvedInfer(name))?;
@@ -590,12 +692,12 @@ fn convert_at<S: std::hash::BuildHasher>(
             return Ok(bound_to);
         }
         TypeExpr::Nullable(inner) => {
-            MonoTy::Nullable(Box::new(convert_at(ws, inf, ty.with_idx(inner), subst, depth + 1, bound)?))
+            MonoTy::Nullable(Box::new(convert_at(ws, env, ty.with_idx(inner), subst, depth + 1, bound)?))
         }
         TypeExpr::Tuple { elements } => {
             let mut parts = Vec::new();
             for el in elements {
-                parts.push(convert_at(ws, inf, ty.with_idx(el), subst, depth + 1, bound)?);
+                parts.push(convert_at(ws, env, ty.with_idx(el), subst, depth + 1, bound)?);
             }
             MonoTy::Tuple(parts)
         }
@@ -607,16 +709,16 @@ fn convert_at<S: std::hash::BuildHasher>(
             };
             let mut ps = Vec::new();
             for p in params {
-                ps.push(convert_at(ws, inf, ty.with_idx(p), subst, depth + 1, bound)?);
+                ps.push(convert_at(ws, env, ty.with_idx(p), subst, depth + 1, bound)?);
             }
             MonoTy::App { ctor, params: ps }
         }
         TypeExpr::Function { params, ret } => {
             let mut ps = Vec::new();
             for p in params {
-                ps.push(convert_at(ws, inf, ty.with_idx(p), subst, depth + 1, bound)?);
+                ps.push(convert_at(ws, env, ty.with_idx(p), subst, depth + 1, bound)?);
             }
-            let ret = convert_at(ws, inf, ty.with_idx(ret), subst, depth + 1, bound)?;
+            let ret = convert_at(ws, env, ty.with_idx(ret), subst, depth + 1, bound)?;
             MonoTy::Function { params: ps, ret: Box::new(ret) }
         }
     })

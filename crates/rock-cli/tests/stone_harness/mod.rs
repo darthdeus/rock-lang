@@ -349,3 +349,27 @@ fn rock_binary_path() -> PathBuf {
     p.push("rock");
     p
 }
+
+/// How many host-projection leaves a `--dump-state` dump carries.
+///
+/// The CLASSIFICATION is the engine's (`stone/engine/host_projection.rock`):
+/// a field whose declared type is a handle newtype is serialized as
+/// `"<host_projection>"`, or as `"<host_projection:<digest>>"` when the thing
+/// it names has logical content of its own -- a CPU image's pixels. So a dump
+/// is already free of process-local allocation identity when it reaches a
+/// comparison here, and this only counts the markers, as the DENOMINATOR: a
+/// green comparison is evidence only when there was something to exclude.
+///
+/// It replaced a test-only policy keyed on a wrapper's `__ty` plus a field
+/// spelling, which could drift from the engine silently and which deleted a
+/// `CpuImage`'s pixels along with its handle. The controls for the
+/// classification itself live in `games/testbed/tests/sims/b3_host_projection.rock`,
+/// where they can drive the real serializer.
+pub fn count_host_projections(v: &serde_json::Value) -> usize {
+    match v {
+        serde_json::Value::String(s) => usize::from(s.starts_with("<host_projection")),
+        serde_json::Value::Object(obj) => obj.values().map(count_host_projections).sum(),
+        serde_json::Value::Array(items) => items.iter().map(count_host_projections).sum(),
+        _ => 0,
+    }
+}

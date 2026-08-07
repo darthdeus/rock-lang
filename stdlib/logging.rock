@@ -33,10 +33,15 @@ global __stone_log_level: int = -1
 // (routing to the one rock-log sink) via stone/engine/log_sink.rock. With no
 // sink installed (rock test / rock run, or early global-init before the
 // install) fall back to a portable print() so logs still surface.
-@nomangle inline(lua) fn __stone_emit(level: int, category: string, msg: string) = """
+// `wall_clock` DECLARES that the record's content is a wall-clock measurement
+// -- a duration, a frame counter, or the fact that something was slow enough
+// to report at all. The sink marks it so a differential harness can drop the
+// record by declaration instead of sniffing its text
+// (`rock_log::WALL_CLOCK_MARK`); the print() fallback has no stamp to mark.
+@nomangle inline(lua) fn __stone_emit(level: int, category: string, msg: string, wall_clock: bool) = """
     local sink = _G.__rock_log_sink
     if sink ~= nil then
-        sink(level, category or "", msg)
+        sink(level, category or "", msg, wall_clock)
         return
     end
     if category and #category > 0 then
@@ -49,7 +54,13 @@ global __stone_log_level: int = -1
 @nomangle inline(lua) fn __stone_log(level: int, category: string, msg: string) = """
     __stone_log_init()
     if level > __stone_log_level then return end
-    __stone_emit(level, category, msg)
+    __stone_emit(level, category, msg, false)
+"""
+
+@nomangle inline(lua) fn __stone_log_wall_clock(level: int, category: string, msg: string) = """
+    __stone_log_init()
+    if level > __stone_log_level then return end
+    __stone_emit(level, category, msg, true)
 """
 
 fn log_error(category: string, msg: string) { __stone_log(0, category, msg) }
@@ -57,6 +68,12 @@ fn log_warn(category: string, msg: string) { __stone_log(1, category, msg) }
 fn log_info(category: string, msg: string) { __stone_log(2, category, msg) }
 fn log_debug(category: string, msg: string) { __stone_log(3, category, msg) }
 fn log_trace(category: string, msg: string) { __stone_log(4, category, msg) }
+
+// A record whose content IS a wall-clock measurement. Info level, because a
+// timing report is informational by nature. Declare only a record that says
+// nothing else: two runs of the same work cannot agree on it, so a differential
+// harness drops it whole, and any gameplay fact sharing the line goes with it.
+fn log_wall_clock(category: string, msg: string) { __stone_log_wall_clock(2, category, msg) }
 
 // Sets the ONE level source (the rock-log level, via the stone-installed
 // `_G.__rock_log_level_sink` seam) so it affects all gating -- Rust + Rock --
@@ -96,6 +113,7 @@ fn log_get_level() -> int { __stone_log_init(); return __stone_log_level }
 //   __stone_log_throttle — site -> last-fire-timestamp (seconds)
 //   __stone_log_counts   — site -> occurrence count (log_throttled)
 //   __stone_log_sites    — site -> "CATEGORY|last message", for the summary
+//   __stone_log_wall     — site -> true for a declared wall-clock site
 
 @nomangle inline(lua) fn _log_once_impl(category: string, msg: string, site: string) = """
     __stone_log_init()
@@ -111,7 +129,7 @@ fn log_get_level() -> int { __stone_log_init(); return __stone_log_level }
     __stone_log_dedup[site] = n
     __stone_log_sites[site] = (category or "") .. "|" .. msg
     if n > 1 then return end
-    __stone_emit(0, category, msg)
+    __stone_emit(0, category, msg, false)
 """
 
 // Report every deduped/throttled site that fired more than once, with its
@@ -142,7 +160,11 @@ fn log_get_level() -> int { __stone_log_init(); return __stone_log_level }
         local bar = string.find(rec, "|", 1, true)
         local cat = string.sub(rec, 1, bar - 1)
         local msg = string.sub(rec, bar + 1)
-        __stone_emit(0, cat, "suppressed x" .. r.n .. " at " .. r.site .. ": " .. msg)
+        -- A summary line quotes the site's last message and counts how often
+        -- it fired; for a declared site both halves are wall-clock, so the
+        -- summary inherits the declaration.
+        local wall = (__stone_log_wall or {})[r.site] == true
+        __stone_emit(0, cat, "suppressed x" .. r.n .. " at " .. r.site .. ": " .. msg, wall)
     end
 """
 
@@ -155,7 +177,7 @@ macro log_once(category: expr, msg: expr, site: expr) {
 }
 
 // Mockable-now seam used by log_throttled and exposed for deterministic tests.
-@nomangle inline(lua) fn _log_throttled_with_now_impl(now_sec: float, category: string, msg: string, interval_sec: float, site: string) = """
+@nomangle inline(lua) fn _log_throttled_with_now_impl(now_sec: float, category: string, msg: string, interval_sec: float, site: string, wall_clock: bool) = """
     __stone_log_init()
     -- error-class / always-on, same as _log_once_impl (preserves the
     -- original `0 > level` semantics + tests/log_once.rock contract).
@@ -163,20 +185,22 @@ macro log_once(category: expr, msg: expr, site: expr) {
     if __stone_log_throttle == nil then __stone_log_throttle = {} end
     if __stone_log_counts == nil then __stone_log_counts = {} end
     if __stone_log_sites == nil then __stone_log_sites = {} end
+    if __stone_log_wall == nil then __stone_log_wall = {} end
     __stone_log_counts[site] = (__stone_log_counts[site] or 0) + 1
     __stone_log_sites[site] = (category or "") .. "|" .. msg
+    __stone_log_wall[site] = wall_clock or nil
     local last = __stone_log_throttle[site]
     if last ~= nil and (now_sec - last) < interval_sec then return end
     __stone_log_throttle[site] = now_sec
-    __stone_emit(0, category, msg)
+    __stone_emit(0, category, msg, wall_clock)
 """
 
 macro log_throttled_with_now(now_sec: expr, category: expr, msg: expr, interval_sec: expr) {
-    _log_throttled_with_now_impl(now_sec, category, msg, interval_sec, __SITE__)
+    _log_throttled_with_now_impl(now_sec, category, msg, interval_sec, __SITE__, false)
 }
 
 macro log_throttled_with_now(now_sec: expr, category: expr, msg: expr, interval_sec: expr, site: expr) {
-    _log_throttled_with_now_impl(now_sec, category, msg, interval_sec, site)
+    _log_throttled_with_now_impl(now_sec, category, msg, interval_sec, site, false)
 }
 
 // Now-source seam for log_throttled. Stone's runner sets this each frame to
@@ -197,23 +221,54 @@ macro log_throttled_with_now(now_sec: expr, category: expr, msg: expr, interval_
 """
 
 // Wall-clock variant; thin wrapper around the mockable seam.
-@nomangle inline(lua) fn _log_throttled_impl(category: string, msg: string, interval_sec: float, site: string) = """
-    _log_throttled_with_now_impl(__stone_log_now(), category, msg, interval_sec, site)
+@nomangle inline(lua) fn _log_throttled_impl(category: string, msg: string, interval_sec: float, site: string, wall_clock: bool) = """
+    _log_throttled_with_now_impl(__stone_log_now(), category, msg, interval_sec, site, wall_clock)
 """
 
 macro log_throttled(category: expr, msg: expr, interval_sec: expr) {
-    _log_throttled_impl(category, msg, interval_sec, __SITE__)
+    _log_throttled_impl(category, msg, interval_sec, __SITE__, false)
 }
 
 macro log_throttled(category: expr, msg: expr, interval_sec: expr, site: expr) {
-    _log_throttled_impl(category, msg, interval_sec, site)
+    _log_throttled_impl(category, msg, interval_sec, site, false)
 }
 
-// Clear all dedup + throttle state. Called from tests; can be wired into
-// hot reload later if it becomes useful.
+// A single DECLARED wall-clock value inside a record that also carries facts
+// worth comparing. `log_wall_clock` drops the whole record, which is right when
+// the record says nothing else; a line like
+// `stroke 'A': commit {wall_clock_ms(t)} ({n} nodes)` still has to compare its
+// label and its node count, so the declaration goes on the value instead.
+//
+// Renders the measurement, except under `ROCK_MASK_WALL_CLOCK=1` -- set for
+// every sim child by `run_sim.rs` -- where it renders a fixed token. The
+// substitution happens at the SOURCE, so the differential harness never has to
+// recognize a duration in text and `cooldown 100ms` next to it stays compared.
+fn wall_clock_ms(ms: float) -> string {
+    static masked: bool = (env_var("ROCK_MASK_WALL_CLOCK") ?? "0") == "1"
+    if masked { return "<ms>" }
+    return "{ms}ms"
+}
+
+// Throttled counterpart of `log_wall_clock`: the record is declared, and so is
+// the suppression summary line the site earns, which carries the same message.
+macro log_wall_clock_throttled(category: expr, msg: expr, interval_sec: expr) {
+    _log_throttled_impl(category, msg, interval_sec, __SITE__, true)
+}
+
+// Clear EVERY record a suppression leaves: the dedup counts, the throttle
+// stamps, the counts and last messages `log_suppression_summary` reads, the
+// declared-wall-clock sites, and the once-per-process latch that stops the
+// summary running twice. A partial reset is worse than none -- the summary
+// would report totals for sites the caller believes it cleared, and the latch
+// would silence it entirely. Called from tests; can be wired into hot reload
+// later if it becomes useful.
 @nomangle inline(lua) fn log_reset_dedup() = """
     __stone_log_dedup = {}
     __stone_log_throttle = {}
+    __stone_log_counts = {}
+    __stone_log_sites = {}
+    __stone_log_wall = {}
+    __stone_log_summary_done = false
 """
 
 // Number of unique sites currently remembered by log_once. Used in tests.

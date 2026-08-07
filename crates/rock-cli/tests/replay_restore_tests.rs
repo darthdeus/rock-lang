@@ -9,6 +9,11 @@
 //! `c <tick> <name> <hash>` checkpoint names via `sim_state_names`); we compare
 //! those globals, not a duplicated Rust exclusion list.
 //!
+//! WHICH globals is engine-owned, and so is which LEAVES inside one are the
+//! host's realization rather than the state: a field whose declared type is a
+//! handle newtype serializes as a host projection
+//! (`stone/engine/host_projection.rock`). Nothing here duplicates that.
+//!
 //! Intended Phase-B hooks (do NOT exist yet -- that is why this is RED and
 //! #[ignore]d so it never gates `just t`): `STONE_SNAPSHOT_AT_TICK=T` captures a
 //! keyframe; `STONE_RESTORE_AT_TICK=U` restores the most recent keyframe. With
@@ -119,6 +124,12 @@ fn restore_returns_to_snapshot_tick_state() {
 
 /// Assert every sim-state global (`sim`) in `got` matches `want`, and at least
 /// one was compared.
+///
+/// Resource ids are excluded by the engine's serializer, which renders a leaf
+/// whose declared type is a handle newtype as a host projection
+/// (`stone/engine/host_projection.rock`): these two dumps come from two `rock
+/// frame` processes that created a different number of images and meshes on the
+/// way to the tick they report. The count here is the exclusion's denominator.
 fn assert_sim_state_matches(
     got: &serde_json::Value,
     want: &serde_json::Value,
@@ -126,17 +137,24 @@ fn assert_sim_state_matches(
     label: &str,
 ) {
     let mut compared = 0;
+    let mut stripped = 0;
     for (pkg, globals) in got.as_object().expect("dump object") {
         let want_pkg = &want[pkg];
         for (name, val) in globals.as_object().expect("pkg object") {
             if !sim.contains(name) {
                 continue;
             }
-            assert_eq!(val, &want_pkg[name], "sim-state {pkg}.{name} must match {label}");
+            let (a, b) = (val.clone(), want_pkg[name].clone());
+            stripped += crate::stone_harness::count_host_projections(&a);
+            stripped += crate::stone_harness::count_host_projections(&b);
+            assert_eq!(a, b, "sim-state {pkg}.{name} must match {label}");
             compared += 1;
         }
     }
     assert!(compared > 0, "must compare at least one sim-state global");
+    // The denominator for the exclusion: there WAS something to exclude, so a
+    // green here is not "there were no handles to disagree about".
+    assert!(stripped > 0, "no sim-state global carried a host-projection leaf");
 }
 
 /// P4 item 2: scrub to an ARBITRARY earlier tick. Cadence keyframes (every

@@ -48,23 +48,14 @@ impl Builder<'_> {
     /// [`Self::vec_column_elem_of`] one container out: an arena's `data` field is
     /// an ordinary `[E]`, so it columnizes on exactly the same rule, and the
     /// hardcoded `for`-over-arena walk has to read it the same way the Vec path
-    /// would.
-    pub(crate) fn arena_column_elem_of(&self, e: Idx<Expr>) -> Option<Ustr> {
-        let ty = self.resolve_tyid(*self.inf?.expr_types.get(e)?)?;
-        let TypeExpr::App { ctor: TypeCtor::Nominal(_), params } = self.ty_node(ty)? else {
-            return None;
-        };
-        let p = params.into_iter().next()?;
-        let elem = self.resolve_tyid(ty.with_idx(p))?;
-        let en = match self.ty_node(elem)? {
-            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => n,
-            TypeExpr::Generic(var, _) => match self.subst().get(&var) {
-                Some(ty) => ty.nominal()?,
-                _ => return None,
-            },
-            _ => return None,
-        };
-        vec_column_elem(self.ws, en, false)
+    /// would. A thin caller of the one oracle, like its Vec and Map siblings.
+    pub(crate) fn arena_column_elem_of(
+        &self,
+        e: Idx<Expr>,
+    ) -> Result<Option<ColumnElem>, CompilerError> {
+        Ok(self.concrete_ty(e)?.and_then(|ty| {
+            crate::lower::shape::arena_column_elem_mono(self.ws, self.scx.target, &ty)
+        }))
     }
 
     /// The Vec container kind for base expr `e`: an all-scalar value-struct

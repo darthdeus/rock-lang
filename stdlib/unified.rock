@@ -557,31 +557,51 @@ fn native_buffer_u32(n: int) -> NativeBufferU32 { return NativeBufferU32 { ptr: 
 // conditionally expensive invariant checks at the source level.
 @nomangle inline(lua) fn is_release_mode() -> bool = "return _G.__ROCK_RELEASE == true"
 
-// Bookkeeping SoA. A slot's index IS its position in every column, so the
-// per-entry wrapper (and the index it had to carry) is gone: arena ops touch
-// column SUBSETS -- `contains` reads occupancy+generations, `get` adds data,
-// `values()` never looks at generations at all.
-struct Arena<T> {
-    generations: [int],
-    occupied: [bool],
-    data: [T],
-    free_indices: [int],
-    occupied_count: int = 0,
+// A WEAK handle naming one Arena incarnation in the Session Arena registry.
+// It holds no columns, so it cannot keep backing data alive; the bookkeeping
+// SoA lives in `ArenaStore<T>` (`stdlib/arena.rock`) and is reached through the
+// one resolution oracle there. `T` is phantom: static type information with no
+// runtime field.
+value Arena<T> {
+    // `_`-prefixed: implementation details, hidden from member completion. Use
+    // the method API (`insert`/`get`/`len`/...), not the fields.
+    _scene_id: int,
+    _arena_id: int,
 }
 
-// GC-carrying `value` struct (generic + an `Arena<T>` field): immutable,
+// A weak scalar address into an Arena: four integers, trivially copyable, and
 // scalarized through calls/loops so a non-escaping arena `for (e, d)` pair-scan
-// builds no per-iteration Entity table; materializes as an immutable Lua table
-// (`Entity_vt`) only where it escapes (stored in a Vec / enum payload / global).
-// `==` is the metatable value eq: `_arena` by reference, `_index`/`_generation`
-// structural -- so entities from the SAME arena with equal slot+generation are
-// equal (a superset of `.equals`, which ignores the arena).
+// builds no per-iteration value. `==` is the value eq over all four fields,
+// which is the same answer `.equals` gives.
+//
+// Both of these land at the GC-carrying `value_table` tier, NOT `nobox` cdata:
+// a generic `value` struct does not reach the cdata tier even when every field
+// is scalar. That costs a table where one escapes, and it is why `Entity`
+// remains rejected as a `Map` key. Nothing here is a backend address -- the
+// logical identity is the integers, never the table.
 value Entity<T> {
-    // `_`-prefixed: implementation details, hidden from member completion. Use
-    // the method API (`get`/`remove`/`equals`/...), not the fields.
-    _arena: Arena<T>,
-    _index: int,
+    _scene_id: int,
+    _arena_id: int,
+    _slot: int,
     _generation: int,
+}
+
+// A WEAK handle naming one Scene incarnation in the Session Scene registry
+// (`stdlib/scene.rock`). `T` is the Scene's root state type and is phantom:
+// the authoritative root lives in the registry, so the handle keeps nothing
+// alive and dies with the incarnation it names. Equality is identity equality
+// over `_scene_id`.
+value Scene<T> {
+    _scene_id: int,
+}
+
+// The construction-time capability for one Scene: it can create Arenas owned by
+// that Scene, and only while the Scene's registry entry is still Building. It is
+// not a Scene handle, a scheduler, or a borrow scope, and a copy that escapes
+// construction is inert -- Scene IDs are never reused, so the entry it names can
+// only ever move forward to Live or Dead.
+value SceneBuilder {
+    _scene_id: int,
 }
 
 // ============================================================================
@@ -2255,23 +2275,55 @@ fn Map<K, V>.insert(map, key: K, value: V) {
 // `data` at the slot these return. Non-generic on purpose: `Inst::Call` carries
 // no generic arguments, so a synthesized call can only target a fn like these.
 
-// The slot of `key`, allocating one on a miss. A freed slot is reused before the
-// column grows, which is what keeps `clear` + rebuild allocation-free. Growing
-// takes `data.len` with it, so the caller's column store stays in bounds.
-@nomangle inline(lua) fn __map_col_slot(m: any, key: any) -> int = """
-    local s = m.spine[key]
-    if s ~= nil then return s end
+// --- the shared slot core -----------------------------------------------------
+//
+// The free-list discipline `Arena<T>` and column `Map<K,V>` both run: a released
+// slot is reused before the high-water mark grows, and a freed slot keeps its
+// stale leaves rather than being nil'd (nothing reads a free slot, and a nil
+// would punch a hole in a dense numeric column).
+//
+// `m` supplies `free_indices` and `occupied_count`, whose names the two already
+// share; `hw` is whichever column's length IS the high-water mark -- `data` for
+// a column Map, the occupancy column for an Arena. PRESENCE stays with each
+// collection, because a hash spine and an occupancy-plus-generation column
+// answer different questions and unifying them would need a variant tag.
+//
+// Non-generic on purpose: `Inst::Call` carries no generic arguments, so a
+// synthesized call can only target a fn like this one. That the element type
+// never appears is what makes one core serve both.
+//
+// Both halves assume the boxed `_data`/`len` Vec layout for `free_indices`;
+// this is only sound while that stays the representation of `[int]`
+// (`crates/skull/tests/inline_lua_column_container_param_sentinel.rs`).
+@nomangle inline(lua) fn __slot_alloc(m: any, hw: any) -> int = """
     local fi = m.free_indices
+    local s
     if fi.len > 0 then
         s = fi._data[fi.len]
         fi._data[fi.len] = nil
         fi.len = fi.len - 1
     else
-        s = m.data.len
-        m.data.len = m.data.len + 1
+        s = hw.len
+        hw.len = s + 1
     end
-    m.spine[key] = s
     m.occupied_count = m.occupied_count + 1
+    return s
+"""
+
+@nomangle inline(lua) fn __slot_release(m: any, slot: int) = """
+    local fi = m.free_indices
+    fi.len = fi.len + 1
+    fi._data[fi.len] = slot
+    m.occupied_count = m.occupied_count - 1
+"""
+
+// The slot of `key`, allocating one on a miss. Growth takes `data.len` with it,
+// so the caller's column store stays in bounds.
+@nomangle inline(lua) fn __map_col_slot(m: any, key: any) -> int = """
+    local s = m.spine[key]
+    if s ~= nil then return s end
+    s = __slot_alloc(m, m.data)
+    m.spine[key] = s
     return s
 """
 
@@ -2289,18 +2341,12 @@ fn Map<K, V>.insert(map, key: K, value: V) {
     return s
 """
 
-// Releases `key`'s slot to the free list and returns it, or -1 if absent. The
-// slot keeps its stale leaves rather than being nil'd -- the same rule
-// Arena.remove follows, since nothing reads a free slot and a nil would punch a
-// hole in a dense numeric column.
+// Releases `key`'s slot to the free list and returns it, or -1 if absent.
 @nomangle inline(lua) fn __map_col_free(m: any, key: any) -> int = """
     local s = m.spine[key]
     if s == nil then return -1 end
     m.spine[key] = nil
-    local fi = m.free_indices
-    fi.len = fi.len + 1
-    fi._data[fi.len] = s
-    m.occupied_count = m.occupied_count - 1
+    __slot_release(m, s)
     return s
 """
 
@@ -2323,10 +2369,8 @@ fn Map<K, V>.insert(map, key: K, value: V) {
 // Capacity is retained: every live slot goes back on the free list and the
 // columns keep their storage, so a rebuild after `clear` allocates nothing.
 @nomangle inline(lua) fn __map_col_clear(m: any) = """
-    local fi = m.free_indices
     for k, s in pairs(m.spine) do
-        fi.len = fi.len + 1
-        fi._data[fi.len] = s
+        __slot_release(m, s)
         m.spine[k] = nil
     end
     m.occupied_count = 0
