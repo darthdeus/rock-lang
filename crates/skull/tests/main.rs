@@ -22,6 +22,8 @@ mod closure_snapshot;
 mod coalesce_value_struct_literal_field_sentinel;
 #[path = "concrete_body.rs"]
 mod concrete_body;
+#[path = "concrete_coroutine_emission.rs"]
+mod concrete_coroutine_emission;
 #[path = "const_hoist.rs"]
 mod const_hoist;
 #[path = "const_hot_reload.rs"]
@@ -54,8 +56,8 @@ mod fn_record_mt;
 mod frame_lambda_hoist;
 #[path = "frame_slot_naming.rs"]
 mod frame_slot_naming;
-#[path = "generic_coroutine_column_param_sentinel.rs"]
-mod generic_coroutine_column_param_sentinel;
+#[path = "generic_coroutine_column_param.rs"]
+mod generic_coroutine_column_param;
 #[path = "hole_runtime_error.rs"]
 mod hole_runtime_error;
 #[path = "incremental_emit.rs"]

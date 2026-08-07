@@ -146,3 +146,124 @@ fn js_run_no_main_is_load_effects_only() {
     assert!(js_ok, "js run (no main) failed:\n{js_out}");
     assert_eq!(js_out, "", "no main -> no stdout");
 }
+
+// D-3: a generic `co fn` at a COLUMN-stored element must be emitted concretely,
+// one body per instantiation, on BOTH backends. The shared erased body reads a
+// `_data` that a column vec does not have, so it iterates zero times.
+//
+// The two backends used to fail this differently, which is why the gate is here
+// rather than in one crate's unit tests: luajit took a stop-gap rejection while
+// JS carried the SILENT miscompile and printed `0 0`. Cross-backend parity is
+// the arm that sees both.
+const GENERIC_CO_COLUMN: &str = r#"
+nobox value P { x: float, y: float }
+nobox value Q { a: float }
+
+co fn walk<T>(v: [T]) -> Coroutine<int, int, ()> {
+    let n = 0
+    for _e in v { n = n + 1; yield n }
+    return n
+}
+
+fn main() {
+    let ps: [P] = [P { x: 1.0, y: 0.0 }, P { x: 2.0, y: 0.0 }]
+    let qs: [Q] = [Q { a: 1.0 }, Q { a: 2.0 }, Q { a: 3.0 }]
+    let cp = walk(ps)
+    let tp = 0
+    for v in cp { tp = v }
+    let cq = walk(qs)
+    let tq = 0
+    for v in cq { tq = v }
+    print("{tp} {tq}")
+}
+"#;
+
+// The control on the ELEMENT: the same generic `co fn` over BOXED elements. It
+// keeps the shared body on both backends and must stay correct, so a green
+// above cannot come from "generic coroutines stopped working".
+const GENERIC_CO_BOXED: &str = r#"
+co fn walk<T>(v: [T]) -> Coroutine<int, int, ()> {
+    let n = 0
+    for _e in v { n = n + 1; yield n }
+    return n
+}
+
+fn main() {
+    let xs: [int] = [10, 20]
+    let ys: [string] = ["a", "b", "c"]
+    let cx = walk(xs)
+    let tx = 0
+    for v in cx { tx = v }
+    let cy = walk(ys)
+    let ty = 0
+    for v in cy { ty = v }
+    print("{tx} {ty}")
+}
+"#;
+
+fn both_backends(name: &str, src: &str, expected: &str) {
+    let dir = std::env::temp_dir().join(format!("rock_js_run_gate_{name}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{name}.rock"));
+    std::fs::write(&path, src).unwrap();
+
+    let (lua_out, lua_ok) = run(None, &path);
+    assert!(lua_ok, "luajit run failed:\n{lua_out}");
+    assert_eq!(lua_out, expected, "luajit output");
+
+    let (js_out, js_ok) = run(Some("js"), &path);
+    assert!(js_ok, "js run failed:\n{js_out}");
+    assert_eq!(js_out, expected, "js output");
+    assert_eq!(js_out, lua_out, "js and luajit must agree");
+}
+
+#[test]
+fn a_generic_coroutine_at_a_column_element_runs_on_both_backends() {
+    if !node_available() {
+        eprintln!("SKIP: node not found");
+        return;
+    }
+    both_backends("gen_co_column", GENERIC_CO_COLUMN, "2 3\n");
+}
+
+#[test]
+fn a_generic_coroutine_at_a_boxed_element_runs_on_both_backends() {
+    if !node_available() {
+        eprintln!("SKIP: node not found");
+        return;
+    }
+    both_backends("gen_co_boxed", GENERIC_CO_BOXED, "2 3\n");
+}
+
+// A specialized coroutine still goes through the frame machinery: the lambda
+// captures a frame cell, so it must collapse to a capture of `s` in the
+// specialized copy exactly as in the shared one. The two backends take different
+// preparation sequences to get there, which is why this is a parity arm.
+const GENERIC_CO_LAMBDA: &str = r#"
+nobox value P { x: float, y: float }
+
+co fn walk<T>(v: [T]) -> Coroutine<int, int, ()> {
+    let n = v.len
+    let bump = () => n + 10
+    let k = bump()
+    yield k
+    return n
+}
+
+fn main() {
+    let ps: [P] = [P { x: 1.0, y: 0.0 }, P { x: 2.0, y: 0.0 }]
+    let c = walk(ps)
+    let t = 0
+    for v in c { t = v }
+    print("{t}")
+}
+"#;
+
+#[test]
+fn a_specialized_coroutine_with_a_capturing_lambda_runs_on_both_backends() {
+    if !node_available() {
+        eprintln!("SKIP: node not found");
+        return;
+    }
+    both_backends("gen_co_lambda", GENERIC_CO_LAMBDA, "12\n");
+}

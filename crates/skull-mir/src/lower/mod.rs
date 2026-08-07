@@ -68,6 +68,9 @@ pub use shape::*;
 mod abi;
 pub use abi::{AbiSubject, BackendFnAbiPlan, EmittedBodyId};
 
+mod coroutine;
+pub use coroutine::{plan_coroutine, CoroutinePlan};
+
 /// The `impl Builder` walk, split by topic. Each is a plain `impl Builder<'_>`
 /// block in a child module -- Rust allows the impl to be spread across the
 /// crate, and a child sees this module's private items, so nothing needed
@@ -2229,66 +2232,6 @@ fn native_buffer_alloc_elem_ctype_spec(
 /// An opaque-generic intrinsic that is never called un-specialized (all callers
 /// specialize, or -- a library fn -- has no callers at all) is exempt: its
 /// standalone body's lowering-gap skip is then correct. Returns the first offender.
-/// A generic `co fn` called at a COLUMN-STORED instantiation: reject.
-///
-/// [`compute_call_spec`] bails on `is_coroutine` before it can build a `SpecKey`,
-/// so the body lowers ERASED and iterates the vec as though the boxed `_data`
-/// representation were there. A column vec has per-leaf arrays instead, so the
-/// loop runs ZERO times: the coroutine yields nothing and the call answers 0 for
-/// a 2-element vec, compile-clean and with no diagnostic.
-///
-/// This is a stop-gap for the silence, NOT the repair -- but the repair is bigger
-/// than it looks. Deleting the `is_coroutine` bail-out does NOT let these
-/// specialize; it panics codegen with `Yield must be removed by the coroutine
-/// transform before codegen` (measured). Specialization is delivered by
-/// inline-splicing a specialized clone, and a `co fn` cannot be spliced into its
-/// caller. The repair is to emit the clone as its own top-level coroutine and put
-/// it through `coro_transform` -- monomorphization-by-cloning. This pass is
-/// deleted when that exists.
-///
-/// NOT a `nobox` rule: column eligibility is wider than the mark, so an unmarked
-/// value element reaches it identically. Narrow on the other axis, though -- it
-/// fires only where `compute_call_spec` WOULD have specialized but for the
-/// coroutine bail, so a generic `co fn` over a boxed element keeps its shared
-/// body and keeps working.
-pub fn generic_coroutine_column_reject(
-    ws: &Workspace,
-    mid: ModuleId,
-) -> Result<Option<(String, Span)>, CompilerError> {
-    let module = ws.module(mid);
-    let Some(ir) = ws.inference(mid) else { return Ok(None) };
-    for (owner, body) in module.bodies.iter() {
-        let Some(inf) = ir.per_fn.get(owner) else { continue };
-        for (c, resolved) in inf.resolved_overload_calls.iter() {
-            let fref = FuncRef { module: resolved.0, func: resolved.1 };
-            let f = &ws.module(fref.module).functions[fref.func];
-            if !f.is_coroutine || f.generics.is_empty() {
-                continue;
-            }
-            let Some(bindings) = inf.call_generic_bindings.get(c) else { continue };
-            let Some((key, _)) =
-                compute_spec_from_bindings(ws, inf, fref, bindings, &SpecSubst::default(), false)?
-            else {
-                continue;
-            };
-            if !spec_key_has_target_storage(ws, &key, bone_semantic::hir::FnBackend::Lua) {
-                continue;
-            }
-            let fname = f.name;
-            let msg = format!(
-                "`{fname}` is a GENERIC `co fn`, and this call instantiates it at an element \
-                 whose container uses COLUMN storage (per-leaf arrays, no `_data`). A generic \
-                 coroutine is never specialized, so it would run its shared body against a \
-                 representation that is not there -- the loop would iterate zero times and the \
-                 coroutine would yield nothing, with no error. Call it at a boxed element, or \
-                 make the `co fn` non-generic by spelling the element type in its signature."
-            );
-            return Ok(Some((msg, body.expr_spans[*c])));
-        }
-    }
-    Ok(None)
-}
-
 pub fn native_buffer_alloc_reject(ws: &Workspace, mid: ModuleId) -> Option<(String, Span)> {
     const LUA: bone_semantic::hir::FnBackend = bone_semantic::hir::FnBackend::Lua;
     let module = ws.module(mid);

@@ -1248,6 +1248,60 @@ fn collect_callee_frefs(mf: &MirFunc, out: &mut FxHashSet<FuncRef>) {
     }
 }
 
+/// **The one Lua emission of a `co fn`**, shared by the declaration's own body
+/// and by each specialized instantiation of a generic one.
+///
+/// Coroutines are not inlined into and do not inline: the call constructs a
+/// coroutine object rather than running the body, which is why specialization
+/// here is delivered by a standalone definition instead of a splice. That is the
+/// whole difference from an ordinary specialization, and it is why this is not
+/// [`prepare_instance_body`] -- there is no inline pass, no `convert_closures`
+/// (the step's lambdas convert framed, inside `emit_coroutine`) and no FORL
+/// recovery (codegen's relooper does it).
+///
+/// `body` decides every symbol, through [`skull_mir::lower::plan_coroutine`].
+fn emit_coroutine_chunk(
+    ws: &Workspace,
+    cg: &CodegenCtx,
+    body: &EmittedBodyId,
+    f: &bone_semantic::hir::Function,
+    mf: &mut MirFunc,
+    mut times: PhaseTimes,
+) -> Result<Chunk, CompilerError> {
+    let tc = Instant::now();
+    skull_transform::cleanup_with_nobox(ws, mf);
+    times.cleanup = tc.elapsed();
+    // Coroutines never inline, so a combinator chain here would leave a call to a
+    // bounded fn that has no standalone emission -- reject.
+    skull_transform::validate_no_residual_bound_calls(ws, f, mf)?;
+    let mut specs = Vec::new();
+    validate_emitted_body(ws, mf, &mut specs).map_err(|r| r.into_error(f.name_span, ""))?;
+    skull_codegen_lua::regalloc_time_reset();
+    let te = Instant::now();
+    let plan = skull_mir::lower::plan_coroutine(ws, body);
+    let lua = crate::coroutine_emit::emit_coroutine(ws, cg, &plan, mf);
+    times.emit = te.elapsed();
+    times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(times.emit);
+    // A specialization's chunk names the DECLARATION it specializes, so editing a
+    // generic `co fn` re-emits every instantiation of it; the shared body has no
+    // such edge to record and keeps its empty dep set.
+    let mut deps = FxHashSet::default();
+    if body.key().is_some() {
+        deps.insert(body.decl());
+    }
+    Ok(Chunk {
+        lua,
+        deps,
+        direct_globals: Vec::new(),
+        direct_calls: Vec::new(),
+        times,
+        statics: mf.statics.clone(),
+        calls: skull_mir::reach::call_targets(mf),
+        global_names: skull_mir::reach::global_ref_names(mf),
+        specs,
+    })
+}
+
 /// Emit one ordinary or coroutine function body to a cacheable [`Chunk`]. Extern
 /// and `inline(lua)` functions are NOT handled here — they are cheap and
 /// regenerated in [`assemble`]. Captures per-stage emit time into the chunk so the
@@ -1265,33 +1319,7 @@ fn emit_body_chunk(
     let mut mf = skull_mir::lower::lower_function(ws, scx, self_ref.module, self_ref.func)?;
     times.lower = tl.elapsed();
     if f.is_coroutine {
-        // Coroutines are not inlined into and do not inline; their chunk is
-        // invalidated only by their own body edit. (Mirrors the old path, which
-        // recorded no global-init facts for coroutines.)
-        let tc = Instant::now();
-        skull_transform::cleanup_with_nobox(ws, &mut mf);
-        times.cleanup = tc.elapsed();
-        // Coroutines never inline, so a combinator chain here would leave a
-        // call to a bounded fn that has no standalone emission -- reject.
-        skull_transform::validate_no_residual_bound_calls(ws, f, &mf)?;
-        let mut specs = Vec::new();
-        validate_emitted_body(ws, &mf, &mut specs).map_err(|r| r.into_error(f.name_span, ""))?;
-        skull_codegen_lua::regalloc_time_reset();
-        let te = Instant::now();
-        let lua = crate::coroutine_emit::emit_coroutine(ws, cg, self_ref, &mf);
-        times.emit = te.elapsed();
-        times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(times.emit);
-        return Ok(Chunk {
-            lua,
-            deps: FxHashSet::default(),
-            direct_globals: Vec::new(),
-            direct_calls: Vec::new(),
-            times,
-            statics: mf.statics.clone(),
-            calls: skull_mir::reach::call_targets(&mf),
-            global_names: skull_mir::reach::global_ref_names(&mf),
-            specs,
-        });
+        return emit_coroutine_chunk(ws, cg, &shared(self_ref), f, &mut mf, times);
     }
     // Inline eligible direct calls before cleanup so a hot loop traces with no
     // per-call frame (`docs/skull-inlining-plan.md`).
@@ -1462,6 +1490,9 @@ fn emit_spec_chunk(
     let subst = body.subst(ws);
     let mut mf = skull_mir::lower::lower_emitted_body(ws, scx, body)
         .map_err(|e| CompilerError::new_with_label(f.name_span, e.message))?;
+    if f.is_coroutine {
+        return emit_coroutine_chunk(ws, cg, body, f, &mut mf, PhaseTimes::default());
+    }
     let mut deps = prepare_instance_body(ws, scx, fref, &subst, name, &mut mf, inline_cache)
         .map_err(|e| CompilerError::new_with_label(f.name_span, e.message))?;
     let before = specs.len();
@@ -2537,9 +2568,6 @@ pub fn emit_full_in(
         return Err(CompilerError::new_with_label(span, msg));
     }
     if let Some((msg, span)) = skull_mir::lower::native_buffer_alloc_reject(ws, user_mid) {
-        return Err(CompilerError::new_with_label(span, msg));
-    }
-    if let Some((msg, span)) = skull_mir::lower::generic_coroutine_column_reject(ws, user_mid)? {
         return Err(CompilerError::new_with_label(span, msg));
     }
     let cg = CodegenCtx::new(ws);

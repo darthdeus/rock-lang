@@ -7,7 +7,8 @@
 use bone_semantic::inference::Workspace;
 use comfy_la_arena::Idx;
 use rustc_hash::FxHashSet as HashSet;
-use skull_codegen_lua::{emit_named_framed, mangled, CodegenCtx, FrameCtx};
+use skull_codegen_lua::{emit_named_framed, CodegenCtx, FrameCtx};
+use skull_mir::lower::CoroutinePlan;
 use skull_mir::mir::*;
 use skull_transform::{CoroLowered, FrameInfo, STATE};
 
@@ -17,15 +18,23 @@ fn raw<T>(i: Idx<T>) -> u32 {
 
 /// Emit a `co fn` as its stackless `__step` (via the dumb printer, with a frame
 /// context) + the stdlib Coroutine constructor.
-pub fn emit_coroutine(ws: &Workspace, ctx: &CodegenCtx, self_ref: FuncRef, func: &MirFunc) -> String {
-    let name = mangled(ws, self_ref);
+///
+/// Every symbol comes from `plan`, which is the JS emitter's input too: a
+/// specialized instantiation is a distinct definition under a distinct base, and
+/// a base spelled here from the DECLARATION would give every instantiation of a
+/// generic `co fn` the same `__step`.
+pub fn emit_coroutine(
+    ws: &Workspace,
+    ctx: &CodegenCtx,
+    plan: &CoroutinePlan,
+    func: &MirFunc,
+) -> String {
+    let name = plan.base().to_string();
     // A co fn yielding a flat enum threads through the frame-slot channel (0 alloc
     // per yield); the channel's shape drives both the slot writes (transform) and
     // the generic/boxed `resume()` rebuild (constructor).
-    let channel = ws.module(self_ref.module).functions[self_ref.func]
-        .return_ty
-        .and_then(|t| skull_mir::lower::coroutine_yield_channel(ws, t));
-    let mut lowered = skull_transform::transform_coroutine(func, channel.as_ref());
+    let channel = plan.channel.as_ref();
+    let mut lowered = skull_transform::transform_coroutine(func, channel);
     let frame = FrameCtx {
         s_cell: lowered.s_cell,
         fields: lowered.frame_cells.iter().copied().collect(),
@@ -59,14 +68,15 @@ pub fn emit_coroutine(ws: &Workspace, ctx: &CodegenCtx, self_ref: FuncRef, func:
         slots: aux_slots,
         hoist_lambdas: false,
     };
-    // `__resume`/`__advance` are minted by `emit_constructor` from `name` -- check
-    // them here (the only place with `ctx`) for their collision side-effect; the
-    // constructor emits them unconditionally (`__advance` only with a channel).
-    ctx.mint_synthetic(format!("{name}__resume"));
-    if channel.is_some() {
-        ctx.mint_synthetic(format!("{name}__advance"));
+    // `__resume`/`__advance` are minted by `emit_constructor` from the plan --
+    // check them here (the only place with `ctx`) for their collision side-effect.
+    // Whether an `__advance` exists is the plan's answer, not a second reading of
+    // the channel.
+    ctx.mint_synthetic(plan.resume());
+    if let Some(advance) = plan.advance() {
+        ctx.mint_synthetic(advance);
     }
-    let step_name = ctx.mint_synthetic(format!("{name}__step"));
+    let step_name = ctx.mint_synthetic(plan.step());
     // S3 (docs/closure-conversion-mir-plan.md): route the STEP's lambdas through
     // the shared closure-conversion pass, with the frame so a captured frame cell
     // collapses to a capture of `s` (D2/D4(b) of docs/coroutine-frame-lambda-plan.md).
@@ -122,7 +132,7 @@ pub fn emit_coroutine(ws: &Workspace, ctx: &CodegenCtx, self_ref: FuncRef, func:
     };
     let mut defer_luas = String::new();
     for (k, (_, entry)) in lowered.step.coro_defers.iter().enumerate() {
-        let dname = ctx.mint_synthetic(format!("{name}__defer{k}"));
+        let dname = ctx.mint_synthetic(plan.defer(k));
         defer_luas.push_str(&emit_aux(&dname, *entry));
     }
     let mut hook_luas = String::new();
@@ -134,10 +144,10 @@ pub fn emit_coroutine(ws: &Workspace, ctx: &CodegenCtx, self_ref: FuncRef, func:
             panic!("co-fn hook {} of `{name}` must be an Inst::Lambda", kind.slot())
         };
         assert!(params.is_empty(), "co-fn lifecycle hooks are nullary (`{name}`)");
-        let hname = ctx.mint_synthetic(format!("{name}{}", kind.slot()));
+        let hname = ctx.mint_synthetic(plan.hook(kind.slot()));
         hook_luas.push_str(&emit_aux(&hname, *entry));
     }
-    let ctor = emit_constructor(&name, &step_name, &lowered, channel.as_ref());
+    let ctor = emit_constructor(plan, &step_name, &lowered);
     let _ = lowered.num_states;
     format!("{step_lua}{nested_luas}{defer_luas}{hook_luas}{ctor}")
 }
@@ -154,13 +164,10 @@ pub fn emit_coroutine(ws: &Workspace, ctx: &CodegenCtx, self_ref: FuncRef, func:
 /// frame slot), which is BOTH the ctor's Lua param name and the table field
 /// name; the state-table local `c<raw(s_cell)>` keeps the raw id (a plain
 /// local, `s` has no slot).
-fn emit_constructor(
-    name: &str,
-    step_name: &str,
-    lowered: &CoroLowered,
-    channel: Option<&skull_mir::lower::YieldChannel>,
-) -> String {
+fn emit_constructor(plan: &CoroutinePlan, step_name: &str, lowered: &CoroLowered) -> String {
     use std::fmt::Write as _;
+    let name = plan.base();
+    let channel = plan.channel.as_ref();
     let svar = format!("c{}", raw(lowered.s_cell));
     let param_fields: Vec<String> = lowered
         .params
@@ -180,7 +187,7 @@ fn emit_constructor(
     // never the current code's (the step is name-resolved, cleanup is not).
     let n_defers = lowered.step.coro_defers.len();
     if n_defers > 0 {
-        let list: Vec<String> = (0..n_defers).map(|k| format!("{name}__defer{k}")).collect();
+        let list: Vec<String> = (0..n_defers).map(|k| plan.defer(k)).collect();
         init.push(format!("__defers = {{ {} }}", list.join(", ")));
     }
 
@@ -190,7 +197,7 @@ fn emit_constructor(
     // `if s.__on_killed then s.__on_killed(s) end` call sites pass the frame.
     for (kind, _) in &lowered.hooks {
         let field = kind.slot();
-        init.push(format!("{field} = {name}{field}"));
+        init.push(format!("{field} = {}", plan.hook(field)));
     }
 
     // The pure readers (result/status/last_error/kill/fire_hot_reload) are NOT
@@ -227,20 +234,22 @@ fn emit_constructor(
         // `{name}__advance`) by GLOBAL name at call time, so a BodyOnly overlay's
         // new step is picked up mid-flight (guarded by
         // `live_flat_enum_coroutine_survives_overlay_and_threads_new_body`).
+        let advance = plan.advance().expect("a channel is what makes `__advance` exist");
+        let resume = plan.resume();
         return format!(
-            "function {name}__advance(s, arg)\n\
+            "function {advance}(s, arg)\n\
              \x20 if s.{STATE} < 0 then return true end\n\
              \x20 if s.__on_resume then s.__on_resume(s) end\n\
              \x20 local ok, err = pcall({step_name}, s, arg)\n\
              \x20 if not ok then s.{STATE} = -2; s.__error = err; if s.__inner then __rock_coroutine_kill(s.__inner); s.__inner = nil end; __rock_coroutine_run_defers(s); if s.__on_killed then s.__on_killed(s) end; return true end\n\
              \x20 return s.{STATE} < 0\n\
              end\n\
-             function {name}__resume(s, arg)\n\
-             \x20 if {name}__advance(s, arg) then return nil end\n\
+             function {resume}(s, arg)\n\
+             \x20 if {advance}(s, arg) then return nil end\n\
              \x20 return {box_fields}\n\
              end\n\
              function {name}({paramlist})\n\
-             \x20 local {svar} = {{ {fields}, __advance = {name}__advance, __resume = {name}__resume }}\n\
+             \x20 local {svar} = {{ {fields}, __advance = {advance}, __resume = {resume} }}\n\
              \x20 return {svar}\n\
              end\n",
             paramlist = param_fields.join(", "),
@@ -248,8 +257,9 @@ fn emit_constructor(
         );
     }
 
+    let resume = plan.resume();
     format!(
-        "function {name}__resume(s, arg)\n\
+        "function {resume}(s, arg)\n\
          \x20 if s.{STATE} < 0 then return nil end\n\
          \x20 if s.__on_resume then s.__on_resume(s) end\n\
          \x20 local ok, val = pcall({step_name}, s, arg)\n\
@@ -257,7 +267,7 @@ fn emit_constructor(
          \x20 return val\n\
          end\n\
          function {name}({paramlist})\n\
-         \x20 local {svar} = {{ {fields}, __resume = {name}__resume }}\n\
+         \x20 local {svar} = {{ {fields}, __resume = {resume} }}\n\
          \x20 return {svar}\n\
          end\n",
         paramlist = param_fields.join(", "),

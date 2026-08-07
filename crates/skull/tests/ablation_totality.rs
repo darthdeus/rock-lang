@@ -44,36 +44,81 @@ fn fatals_of(src: &str) -> Vec<ablation::Fatal> {
     ablation::take()
 }
 
-/// A generic `co fn` must produce a classified fatal under the mode.
-/// `compute_call_spec` bails on `is_coroutine` before it can build a SpecKey, so
-/// every instantiation shares one body -- exactly the "shared generic Rock body"
-/// the target invariant forbids, and the shape
-/// `generic_coroutine_column_param_sentinel` already pins as a live miscompile.
+/// An `Iterator`-bounded body must produce a classified fatal under the mode: it
+/// exists only as an inline splice, so with specialization forced there is no
+/// concrete form to name (plan S 12, mono cut C+D step D-1).
 ///
 /// RED CONTROL: `the_mode_off_records_nothing` is the same fixture with the mode
 /// off, and it must find zero. Together they show the mode is what produces the
 /// record, not the fixture.
 #[test]
-fn a_generic_coroutine_is_an_unsupported_surface_fatal() {
+fn a_bounded_body_is_an_unsupported_surface_fatal() {
+    let _g = ModeGuard::on();
+    let fatals = fatals_of(
+        r#"
+fn total<I: Iterator<int>>(it: I) -> int {
+    let s = 0
+    for v in it { s = s + v }
+    return s
+}
+fn main() {
+    let xs: [int] = [1, 2, 3]
+    let n = total(xs.iter())
+}
+"#,
+    );
+    let hit: Vec<&ablation::Fatal> = fatals
+        .iter()
+        .filter(|f| f.callee == "total" && f.category == FatalCategory::UnsupportedSurface)
+        .collect();
+    assert!(
+        !hit.is_empty(),
+        "an `Iterator`-bounded body produced no unsupported-surface fatal; got {:?}",
+        fatals.iter().map(|f| (f.category, &f.callee)).collect::<Vec<_>>()
+    );
+    assert_eq!(hit[0].caller, "main", "the fatal must name the CALLER");
+}
+
+/// The other half of the same axis, and the reason the control above moved: a
+/// generic `co fn` USED to be the unsupported surface. D-3 gave it a concrete
+/// form -- a standalone specialized definition through `coro_transform` -- so
+/// under the mode it must now record nothing at all.
+///
+/// The bounded call in the same fixture is the admission control: without it a
+/// zero for `stream` would be indistinguishable from a fixture the ablation
+/// never saw.
+#[test]
+fn a_generic_coroutine_is_no_longer_an_unsupported_surface() {
     let _g = ModeGuard::on();
     let fatals = fatals_of(
         r#"
 co fn stream<T>(v: T) {
     yield
 }
-fn main() { let c = stream(1) }
+fn total<I: Iterator<int>>(it: I) -> int {
+    let s = 0
+    for v in it { s = s + v }
+    return s
+}
+fn main() {
+    let c = stream(1)
+    let xs: [int] = [1, 2, 3]
+    let n = total(xs.iter())
+}
 "#,
     );
-    let hit: Vec<&ablation::Fatal> = fatals
-        .iter()
-        .filter(|f| f.callee == "stream" && f.category == FatalCategory::UnsupportedSurface)
-        .collect();
     assert!(
-        !hit.is_empty(),
-        "a generic `co fn` produced no unsupported-surface fatal; got {:?}",
+        fatals.iter().any(|f| f.callee == "total"),
+        "the control did not fire, so this fixture proves nothing about `stream`; got {:?}",
         fatals.iter().map(|f| (f.category, &f.callee)).collect::<Vec<_>>()
     );
-    assert_eq!(hit[0].caller, "main", "the fatal must name the CALLER");
+    let hit: Vec<&ablation::Fatal> = fatals.iter().filter(|f| f.callee == "stream").collect();
+    assert!(
+        hit.is_empty(),
+        "a generic `co fn` specializes now, so a call to one must record no \
+         fatal; got {:?}",
+        hit.iter().map(|f| (f.category, f.detail.as_str())).collect::<Vec<_>>()
+    );
 }
 
 /// A generic `inline(lua)` body is a real boundary, not a missing edge. It must
@@ -116,15 +161,17 @@ fn the_mode_off_records_nothing() {
     let _g = ModeGuard::off();
     let fatals = fatals_of(
         r#"
-co fn stream<T>(v: T) {
-    yield
+fn total<I: Iterator<int>>(it: I) -> int {
+    let s = 0
+    for v in it { s = s + v }
+    return s
 }
 inline(lua) fn probe_len<T>(v: [T]) -> int = """
     return #v._data
 """
 fn main() {
-    let c = stream(1)
     let xs: [int] = [1, 2, 3]
+    let t = total(xs.iter())
     let n = probe_len(xs)
 }
 "#,
@@ -237,8 +284,8 @@ fn main() {
 /// [`skull_mir::monoty::convert`], so the category has no population by
 /// construction rather than by policy.
 ///
-/// The `stream` call is the ADMISSION CONTROL, and it is what makes `ident`'s
-/// zero mean something: it is a generic `co fn`, still the one unsupported
+/// The `total` call is the ADMISSION CONTROL, and it is what makes `ident`'s
+/// zero mean something: an `Iterator`-bounded body is the remaining unsupported
 /// surface, so the mode is demonstrably live over this very program. Without it
 /// a zero here would be indistinguishable from a fixture the ablation never saw.
 /// The emitted-identity half -- that the three calls name three different bodies
@@ -252,25 +299,30 @@ fn an_unadmitted_binding_is_no_longer_a_fatal() {
 fn ident<T>(x: T) -> T { return x }
 fn nothing() {}
 fn twice(n: int) -> int { return n * 2 }
-co fn stream<T>(v: T) { yield }
+fn total<I: Iterator<int>>(it: I) -> int {
+    let s = 0
+    for v in it { s = s + v }
+    return s
+}
 fn main() {
     let u = ident(nothing())
     let a: any = 1
     let b = ident(a)
     let f: fn(int) -> int = twice
     let g = ident(f)
-    let c = stream(1)
+    let xs: [int] = [1, 2, 3]
+    let c = total(xs.iter())
 }
 "#,
     );
     let control: Vec<&ablation::Fatal> = fatals
         .iter()
-        .filter(|f| f.callee == "stream" && f.category == FatalCategory::UnsupportedSurface)
+        .filter(|f| f.callee == "total" && f.category == FatalCategory::UnsupportedSurface)
         .collect();
     assert!(
         !control.is_empty(),
-        "the control did not fire, so this fixture proves nothing about `ident`: a \
-         generic `co fn` must still be an unsupported surface; got {:?}",
+        "the control did not fire, so this fixture proves nothing about `ident`: an \
+         `Iterator`-bounded body must still be an unsupported surface; got {:?}",
         fatals.iter().map(|f| (f.category, &f.callee)).collect::<Vec<_>>()
     );
     let hit: Vec<&ablation::Fatal> = fatals.iter().filter(|f| f.callee == "ident").collect();

@@ -3309,6 +3309,13 @@ impl JsReach<'_> {
                 return Ok(());
             }
         };
+        // A specialized `co fn` takes this same sequence, unlike luajit's, which
+        // routes coroutines around it. Measured, not assumed: forcing the two to
+        // agree changed no result on a column instantiation, one carrying a
+        // capturing lambda, or one inlining an `@inline` callee -- the
+        // trampoline's own framed conversion is idempotent over what
+        // `convert_closures` already hoisted. Left as one path rather than a
+        // branch no fixture can distinguish.
         if let Err(e) = skull_transform::inline_functions_with_subst(
             self.ws, self.scx, fr, &mut mf, &mut self.st.cache, &subst,
         ) {
@@ -3458,7 +3465,8 @@ fn emit_lowered_fn(
     gctx: &GlobalCtx,
 ) -> Result<String, CompilerError> {
     if mf.is_coroutine {
-        return emit_coroutine_js(ws, fr, mf, js_name, names, hoisted, gctx);
+        let plan = skull_mir::lower::CoroutinePlan::new(ws, fr, js_name.to_string());
+        return emit_coroutine_js(ws, &plan, mf, names, hoisted, gctx);
     }
     let mut out = emit_fn_with_callees(ws, mf, js_name, names, hoisted, gctx)?;
     for nf in &mf.nested_fns {
@@ -4709,18 +4717,16 @@ fn build_vt_eq_defs(ws: &Workspace, names: &BTreeSet<ustr::Ustr>) -> Result<Stri
 /// `__rock_coroutine_kill`/`__rock_coroutine_run_defers`/`error`).
 fn emit_coroutine_js(
     ws: &Workspace,
-    fr: FuncRef,
+    plan: &skull_mir::lower::CoroutinePlan,
     mf: &MirFunc,
-    js_name: &str,
     callees: &CalleeNames,
     hoisted: &HashSet<ustr::Ustr>,
     globals: &GlobalCtx,
 ) -> Result<String, CompilerError> {
-    let f = &ws.module(fr.module).functions[fr.func];
-    let channel = f.return_ty.and_then(|t| skull_mir::lower::coroutine_yield_channel(ws, t));
-    let mut lowered = skull_transform::transform_coroutine(mf, channel.as_ref());
+    let channel = plan.channel.as_ref();
+    let mut lowered = skull_transform::transform_coroutine(mf, channel);
     let resume_arg = mf.resume_arg.ok_or_else(|| err("co fn must carry a resume-arg cell"))?;
-    let step_name = format!("{js_name}__step");
+    let step_name = plan.step();
     // Aux slot map BEFORE the closure pass mutates the arena (mirrors the Lua
     // driver); hook/defer regions are untouched by the pass, so the map stays valid.
     let aux_slots = lowered.aux_all_cells_slots(resume_arg);
@@ -4784,7 +4790,7 @@ fn emit_coroutine_js(
         out.push_str(&emit_fn_trampoline(
             ws,
             &lowered.step,
-            &format!("{js_name}__defer{k}"),
+            &plan.defer(k),
             callees,
             &hoisted,
             globals,
@@ -4797,7 +4803,7 @@ fn emit_coroutine_js(
         out.push_str(&emit_fn_trampoline(
             ws,
             &lowered.step,
-            &format!("{js_name}{slot}"),
+            &plan.hook(slot),
             callees,
             &hoisted,
             globals,
@@ -4806,7 +4812,7 @@ fn emit_coroutine_js(
             false,
         )?);
     }
-    out.push_str(&emit_js_constructor(js_name, &step_name, &lowered, channel.as_ref())?);
+    out.push_str(&emit_js_constructor(plan, &step_name, &lowered)?);
     Ok(out)
 }
 
@@ -4815,12 +4821,13 @@ fn emit_coroutine_js(
 /// `try/catch` is the `pcall`; `undefined -> null` on the step's value so a
 /// bare terminal return reads as nil.
 fn emit_js_constructor(
-    name: &str,
+    plan: &skull_mir::lower::CoroutinePlan,
     step_name: &str,
     lowered: &skull_transform::CoroLowered,
-    channel: Option<&skull_mir::lower::YieldChannel>,
 ) -> Result<String, CompilerError> {
     use std::fmt::Write as _;
+    let name = plan.base();
+    let channel = plan.channel.as_ref();
     let param_fields: Vec<String> = lowered
         .params
         .iter()
@@ -4842,12 +4849,12 @@ fn emit_js_constructor(
     }
     let n_defers = lowered.step.coro_defers.len();
     if n_defers > 0 {
-        let list: Vec<String> = (0..n_defers).map(|k| format!("{name}__defer{k}")).collect();
+        let list: Vec<String> = (0..n_defers).map(|k| plan.defer(k)).collect();
         init.push(format!("__defers: [{}]", list.join(", ")));
     }
     for (kind, _) in &lowered.hooks {
         let field = kind.slot();
-        init.push(format!("{field}: {name}{field}"));
+        init.push(format!("{field}: {}", plan.hook(field)));
     }
     // The step-raise recovery shared by both resume shapes: errored terminal,
     // kill the delegated inner, run defers LIFO, fire on_killed.
@@ -4875,26 +4882,29 @@ fn emit_js_constructor(
             );
         }
         box_fields.push_str(" }");
+        let advance = plan.advance().expect("a channel is what makes `__advance` exist");
+        let resume = plan.resume();
         return Ok(format!(
-            "function {name}__advance(s, arg) {{\n\
+            "function {advance}(s, arg) {{\n\
              \x20 if (s.__state < 0) return true;\n\
              \x20 if (s.__on_resume) s.__on_resume(s);\n\
              \x20 try {{ {step_name}(s, arg); }} catch (e) {{ {catch_body} return true; }}\n\
              \x20 return s.__state < 0;\n\
              }}\n\
-             function {name}__resume(s, arg) {{\n\
-             \x20 if ({name}__advance(s, arg)) return null;\n\
+             function {resume}(s, arg) {{\n\
+             \x20 if ({advance}(s, arg)) return null;\n\
              \x20 return {box_fields};\n\
              }}\n\
              function {name}({paramlist}) {{\n\
-             \x20 return {{ {fields}, __advance: {name}__advance, __resume: {name}__resume }};\n\
+             \x20 return {{ {fields}, __advance: {advance}, __resume: {resume} }};\n\
              }}\n",
             paramlist = param_fields.join(", "),
             fields = init.join(", "),
         ));
     }
+    let resume = plan.resume();
     Ok(format!(
-        "function {name}__resume(s, arg) {{\n\
+        "function {resume}(s, arg) {{\n\
          \x20 if (s.__state < 0) return null;\n\
          \x20 if (s.__on_resume) s.__on_resume(s);\n\
          \x20 var val;\n\
@@ -4902,7 +4912,7 @@ fn emit_js_constructor(
          \x20 return val === undefined ? null : val;\n\
          }}\n\
          function {name}({paramlist}) {{\n\
-         \x20 return {{ {fields}, __resume: {name}__resume }};\n\
+         \x20 return {{ {fields}, __resume: {resume} }};\n\
          }}\n",
         paramlist = param_fields.join(", "),
         fields = init.join(", "),

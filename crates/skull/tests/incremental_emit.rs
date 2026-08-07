@@ -217,3 +217,41 @@ fn one_liveness_walk_decides_the_specialized_bodies() {
         "the specialized body is decided once and emitted once"
     );
 }
+
+/// Editing a generic `co fn` must re-emit the SPECIALIZED coroutines of it.
+///
+/// A specialization is not reached through its declaration's chunk, so the only
+/// thing naming the connection is the declaration edge the specialized chunk
+/// records in its deps. Byte identity cannot see this at all -- it compares
+/// fresh full builds and never performs an edit -- so the arm lives here.
+///
+/// The element is column-stored on purpose: that is what makes the call
+/// specialize on the default path, so the fixture has a specialized coroutine to
+/// invalidate rather than one shared body.
+#[test]
+fn a_body_edit_to_a_generic_coroutine_reemits_its_specializations() {
+    let v1 = "nobox value P { x: float, y: float }\n\
+              co fn walk<T>(v: [T]) -> Coroutine<int, int, ()> {\n\
+              \x20   let n = v.len\n\
+              \x20   yield n\n\
+              \x20   return 1\n\
+              }\n\
+              fn use_it() -> Coroutine<int, int, ()> {\n\
+              \x20   let xs: [P] = [P { x: 1.0, y: 0.0 }]\n\
+              \x20   return walk(xs)\n\
+              }";
+    let v2 = v1.replace("return 1", "return 2");
+    // The population, asserted in the same test: without a specialized
+    // coroutine in v1 there is nothing for the edit to invalidate and the
+    // comparison would pass over an empty set.
+    let ws = crate::common::ws_of(v1);
+    let mid = skull::user_module_id(&ws).unwrap();
+    let lua = emit_full(&ws, mid).expect("emit_full v1").0.lua;
+    let spec_steps = lua
+        .match_indices("__step(")
+        .map(|(i, _)| lua[..i].rsplit("function ").next().unwrap_or("").to_string())
+        .filter(|n| n.contains("_spec_"))
+        .count();
+    assert_eq!(spec_steps, 1, "the fixture must produce a SPECIALIZED coroutine step:\n{lua}");
+    check_edit(v1, &v2, &["walk"]);
+}

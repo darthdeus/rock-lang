@@ -2709,13 +2709,21 @@ fn classify_boundaries(g: &mut InstanceGraph, ws: &Workspace) {
 
 /// The helper symbols each coroutine instance owns.
 ///
-/// `__step` and `__resume` are unconditional; `__advance` exists only on the
-/// frame-slot channel, which `coroutine_yield_channel` reads from the DECLARED
-/// return type -- a declaration, not the body's own inference, per the standing
-/// rule. Defers (`__defer<k>`) and lifecycle hooks (`__on_*`) are NOT counted:
-/// they come from `CoroLowered`, which exists only after the MIR transform, so
-/// there is no HIR-level oracle for them and guessing would be a fabricated
-/// number.
+/// The suffix list comes from the instance's own [`CoroutinePlan`], which is the
+/// emitters' input too -- `__step` and `__resume` are unconditional and
+/// `__advance` exists only on the frame-slot channel, and that condition has one
+/// home rather than a restatement here. The channel is read from the DECLARED
+/// return type, per the standing rule.
+///
+/// The BASE is the declaration's, deliberately: the graph reaches logical
+/// instances, and whether emission gives an instance its own specialized base is
+/// the lowerer's policy, which the graph does not model before plan step E1. So
+/// the symbol recorded here is what a DECLINED instantiation gets, and the
+/// collisions below are exactly the declined population.
+///
+/// Defers (`__defer<k>`) and lifecycle hooks (`__on_*`) are NOT counted: they
+/// come from `CoroLowered`, which exists only after the MIR transform, so there
+/// is no HIR-level oracle for them and guessing would be a fabricated number.
 fn record_coroutine_helpers(g: &mut InstanceGraph, ws: &Workspace) {
     let mut out = BTreeSet::new();
     for i in &g.instances {
@@ -2723,20 +2731,13 @@ fn record_coroutine_helpers(g: &mut InstanceGraph, ws: &Workspace) {
         if !f.is_coroutine {
             continue;
         }
-        let base = mangle_fn(ws, f);
+        let plan = skull_mir::lower::CoroutinePlan::new(ws, i.func, mangle_fn(ws, f));
         let owner_identity = g.identity(ws, i);
-        let mut suffixes: Vec<&'static str> = vec!["__step", "__resume"];
-        if f.return_ty
-            .and_then(|t| skull_mir::lower::coroutine_yield_channel(ws, t))
-            .is_some()
-        {
-            suffixes.push("__advance");
-        }
-        for suffix in suffixes {
+        for suffix in plan.declared_suffixes() {
             out.insert(CoroutineHelper {
                 owner_identity: owner_identity.clone(),
                 suffix,
-                symbol_today: format!("{base}{suffix}"),
+                symbol_today: format!("{}{suffix}", plan.base()),
             });
         }
     }
@@ -2746,11 +2747,11 @@ fn record_coroutine_helpers(g: &mut InstanceGraph, ws: &Workspace) {
 impl InstanceGraph {
     /// Helper symbols that more than one INSTANCE claims.
     ///
-    /// Each is a Stage-3 collision: `emit_coroutine` names helpers from the
-    /// source `FuncRef`, so every instance of one generic `co fn` produces the
-    /// same `<name>__step` / `__resume` / `__advance`. The current specializer
-    /// does not specialize coroutines, so the graph exposes collisions that the
-    /// Stage-3 cutover must prevent.
+    /// A generic `co fn` whose call site SPECIALIZES gets its own base
+    /// (`spec_fn_name`) and no longer collides; one whose specialization the
+    /// lowerer declined still shares the declaration's, so this reports the
+    /// declined population. E1 removes the category by making every instance an
+    /// emitted body.
     pub fn colliding_coroutine_helpers(&self) -> BTreeMap<String, BTreeSet<String>> {
         let mut by_symbol: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for h in &self.coroutine_helpers {

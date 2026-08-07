@@ -1876,16 +1876,13 @@ pub(crate) fn compute_call_spec(
     if f.generics.is_empty() {
         return Ok(None);
     }
-    // `is_coroutine` is NOT an arbitrary exclusion, and deleting it does not
-    // "let coroutines specialize" -- it panics codegen with `Yield must be
-    // removed by the coroutine transform before codegen` (measured). Eligibility
-    // here is deliberately a SUBSET of the inliner's `classify`, because
-    // specialization is DELIVERED by inline-splicing a specialized clone, and a
-    // `co fn` cannot be spliced into its caller: the call constructs a coroutine
-    // object rather than running the body. A specialized clone would need to be
-    // emitted as its own top-level coroutine and put through `coro_transform`,
-    // which is a mechanism that does not exist yet.
-    if f.is_extern || f.inline_body.is_some() || f.is_coroutine {
+    // A `co fn` IS eligible, and it is the one eligible callee the inliner never
+    // sees: the call constructs a coroutine object rather than running the body,
+    // so specialization is delivered by a standalone definition put through
+    // `coro_transform` (`skull::mir_emit::emit_coroutine_chunk`) rather than by a
+    // splice. `extern` and `inline(..)` stay excluded -- an opaque body has no
+    // Rock CFG to specialize at all.
+    if f.is_extern || f.inline_body.is_some() {
         return Ok(None);
     }
     let Some(bindings) = inf.call_generic_bindings.get(&e) else {
@@ -1952,15 +1949,6 @@ pub(crate) fn ablation_decline(
     let f = &ws.module(func.module).functions[func.func];
     if f.generics.is_empty() {
         return None;
-    }
-    if f.is_coroutine {
-        return Some((
-            C::UnsupportedSurface,
-            "a generic `co fn` has no concrete form: `compute_call_spec` bails on \
-             `is_coroutine` before building a SpecKey, so every instantiation shares one \
-             body and one set of `__step`/`__resume` symbols"
-                .to_string(),
-        ));
     }
     if f.is_extern || f.inline_body.is_some() {
         return Some((
