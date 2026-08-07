@@ -8,7 +8,7 @@
 use bone_semantic::hir::BodyOwner;
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
-use skull::mir_emit::{emit_full, emit_incremental};
+use skull::mir_emit::{emit_full, emit_incremental, emit_overlay};
 use crate::common::ws_of;
 
 /// The `(ModuleId, BodyOwner)` reinferred-id for the named function in `ws`.
@@ -116,4 +116,76 @@ fn transitive_inline_edit_reemits_root() {
               @inline\nfn b() -> int { c() }\n\
               fn a() -> int { b() }";
     check_edit(v1, v2, &["c"]);
+}
+
+/// A SPECIALIZED body is a cached emitted body like any other, so editing the
+/// generic it specializes must re-emit it.
+///
+/// Nothing else names that connection: a specialization is not reached through
+/// its declaration's own chunk, so without the declaration edge in its deps a
+/// stale copy is reused and the incremental output keeps the OLD body. The
+/// global initializer is what forces a standalone specialized copy -- it never
+/// runs an inliner, so the call cannot be served by a splice
+/// (`vec_value_columns.rs` documents the same route).
+#[test]
+fn body_edit_to_a_generic_reemits_its_specializations() {
+    let v1 = "value V2 { x: float, y: float }\n\
+              fn first<T>(xs: [T]) -> T { return xs[0] }\n\
+              global G: float = first([V2 { x: 1.0, y: 2.0 }]).x\n\
+              fn use_g() -> float { return G }";
+    let v2 = "value V2 { x: float, y: float }\n\
+              fn first<T>(xs: [T]) -> T { return xs[1] }\n\
+              global G: float = first([V2 { x: 1.0, y: 2.0 }]).x\n\
+              fn use_g() -> float { return G }";
+    check_edit(v1, v2, &["first"]);
+}
+
+/// The control: the specialized body is REALLY there, and it is what the edit
+/// above moves. Without this the test could pass over a program that emits no
+/// specialization at all, which is the shape every arm of it would satisfy.
+#[test]
+fn the_generic_fixture_emits_a_standalone_specialization() {
+    let v1 = "value V2 { x: float, y: float }\n\
+              fn first<T>(xs: [T]) -> T { return xs[0] }\n\
+              global G: float = first([V2 { x: 1.0, y: 2.0 }]).x\n\
+              fn use_g() -> float { return G }";
+    let ws = crate::common::ws_of(v1);
+    let mid = skull::user_module_id(&ws).unwrap();
+    let lua = emit_full(&ws, mid).expect("emit_full").0.lua;
+    assert!(
+        lua.contains("function first_arr_T_ret_T_spec_a_n2_V2_0_z("),
+        "fixture must emit a standalone specialized body"
+    );
+}
+
+/// The OVERLAY carries a changed specialization, not just its declaration.
+///
+/// A reload dofiles the overlay after `main.lua`, so a definition the overlay
+/// omits keeps running the version main.lua carries. Redefining only the
+/// declaration's shared body would leave the specialized copy -- which is what
+/// the unspliceable call site actually calls -- pinned at the pre-edit body,
+/// and nothing about the reload would look wrong.
+#[test]
+fn an_overlay_redefines_a_changed_specialization() {
+    let v1 = "value V2 { x: float, y: float }\n\
+              fn first<T>(xs: [T]) -> T { return xs[0] }\n\
+              global G: float = first([V2 { x: 1.0, y: 2.0 }]).x\n\
+              fn use_g() -> float { return G }";
+    let v2 = "value V2 { x: float, y: float }\n\
+              fn first<T>(xs: [T]) -> T { return xs[1] }\n\
+              global G: float = first([V2 { x: 1.0, y: 2.0 }]).x\n\
+              fn use_g() -> float { return G }";
+    let ws1 = crate::common::ws_of(v1);
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (full, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    let spec = "function first_arr_T_ret_T_spec_a_n2_V2_0_z(";
+    assert!(full.lua.contains(spec), "control: the full build defines the specialization");
+
+    let ws2 = crate::common::ws_of(v2);
+    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "first")]);
+    assert!(
+        overlay.lua.contains(spec),
+        "the overlay must redefine the specialization the edit moved:\n{}",
+        overlay.lua
+    );
 }
