@@ -14,7 +14,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use bone_semantic::inference::Workspace;
 use comfy_la_arena::Idx;
 use skull_mir::intrinsics::{Emission, IntrinsicTable};
-use skull_mir::lower::SpecKey;
+use skull_mir::lower::{EmittedBodyId, SpecKey};
 use skull_mir::mir::{Block, Cell, ContainerKind, FuncRef, Inst, Lit, MirFunc, Term};
 use skull_parser::{CompilerError, Span};
 use ustr::Ustr;
@@ -683,23 +683,26 @@ fn finalize_labels(mut s: String, markers: &[Idx<Block>], used: &HashSet<Idx<Blo
 /// standalone copy (`spec_fn_name`) -- for a column-stored element the shared
 /// body reads a `_data` the layout does not have, so it cannot serve the call at
 /// all. Same split the luajit emitter makes in `callee_name`.
+///
+/// ONE map over [`EmittedBodyId`], not a shared map beside a specialized one.
+/// The two were asking one question -- which definition serves this call -- and
+/// a caller had to know the all-`None` rule to join them.
 #[derive(Default)]
 pub struct CalleeNames {
-    plain: HashMap<FuncRef, String>,
-    spec: HashMap<(FuncRef, SpecKey), String>,
+    names: HashMap<EmittedBodyId, String>,
 }
 
 impl CalleeNames {
-    fn get(&self, fr: &FuncRef) -> Option<&String> {
-        self.plain.get(fr)
+    fn get(&self, body: &EmittedBodyId) -> Option<&String> {
+        self.names.get(body)
     }
 
-    fn insert(&mut self, fr: FuncRef, name: String) {
-        self.plain.insert(fr, name);
+    fn insert(&mut self, body: EmittedBodyId, name: String) {
+        self.names.insert(body, name);
     }
 
     fn entry_or_insert_with(&mut self, fr: FuncRef, f: impl FnOnce() -> String) {
-        self.plain.entry(fr).or_insert_with(f);
+        self.names.entry(EmittedBodyId::Shared(fr)).or_insert_with(f);
     }
 }
 
@@ -2233,21 +2236,14 @@ impl Emitter<'_> {
     /// rather than silently reaching the boxed shared body. Mirrors the luajit
     /// emitter's `callee_name`.
     fn callee_name(&self, iid: Idx<Inst>, func: FuncRef) -> Option<&String> {
-        match self.mf.spec_bindings.get(&iid) {
-            Some(key) => self.callees.spec.get(&(func, key.clone())).or_else(|| {
-                // An all-`None` key names no instantiation (`spec_fn_name` ->
-                // `None`); the shared body already serves it.
-                skull_mir::mangle::spec_fn_name(
-                    self.ws,
-                    &self.ws.module(func.module).functions[func.func],
-                    key,
-                )
-                .is_none()
-                .then(|| self.callees.get(&func))
-                .flatten()
-            }),
-            None => self.callees.get(&func),
-        }
+        // One lookup: `EmittedBodyId::new` IS the all-`None` rule -- a key that
+        // names no instantiation resolves to the shared body, which is what the
+        // fallback used to restate by re-asking `spec_fn_name`.
+        let body = match self.mf.spec_bindings.get(&iid) {
+            Some(key) => EmittedBodyId::new(func, key.clone()),
+            None => EmittedBodyId::Shared(func),
+        };
+        self.callees.get(&body)
     }
 
     fn render_call(
@@ -2439,9 +2435,9 @@ pub fn emit_with_closure(
         out.push_str(&init.js);
     }
     for (fr, mf) in &st.lowered {
-        match emit_lowered_fn(ws, *fr, mf, st.names.get(fr).expect("emitted body has a name"), &st.names, &hoisted, &st.gctx) {
+        match emit_lowered_fn(ws, *fr, mf, st.names.get(&EmittedBodyId::Shared(*fr)).expect("emitted body has a name"), &st.names, &hoisted, &st.gctx) {
             Ok(js) => out.push_str(&js),
-            Err(e) => rejections.push((st.names.get(fr).expect("emitted body has a name").clone(), e)),
+            Err(e) => rejections.push((st.names.get(&EmittedBodyId::Shared(*fr)).expect("emitted body has a name").clone(), e)),
         }
     }
     out.push_str(&emit_spec_bodies(ws, &st, &hoisted, &mut rejections));
@@ -2451,7 +2447,7 @@ pub fn emit_with_closure(
             ws,
             scx,
             *fr,
-            st.names.get(fr).expect("emitted body has a name"),
+            st.names.get(&EmittedBodyId::Shared(*fr)).expect("emitted body has a name"),
         )?);
     }
     Ok(out)
@@ -2694,12 +2690,12 @@ fn build_program_core(
     // 2. fn defs (main, decorated fns, transitive callees).
     let mut chunks = HashMap::new();
     for (fr, mf) in &st.lowered {
-        match emit_lowered_fn(ws, *fr, mf, st.names.get(fr).expect("emitted body has a name"), &st.names, &hoisted, &st.gctx) {
+        match emit_lowered_fn(ws, *fr, mf, st.names.get(&EmittedBodyId::Shared(*fr)).expect("emitted body has a name"), &st.names, &hoisted, &st.gctx) {
             Ok(js) => {
                 out.push_str(&js);
                 chunks.insert(*fr, JsChunk { js, statics: collect_statics(mf) });
             }
-            Err(e) => rejections.push((st.names.get(fr).expect("emitted body has a name").clone(), e)),
+            Err(e) => rejections.push((st.names.get(&EmittedBodyId::Shared(*fr)).expect("emitted body has a name").clone(), e)),
         }
     }
     // 2a. standalone specialized copies. STABLE, not a chunk: a chunk is keyed by
@@ -2710,7 +2706,7 @@ fn build_program_core(
     stable.push_str(&spec_bodies);
     // 2b. inline(js) fns, emitted verbatim.
     for fr in &st.inline_js {
-        let name = st.names.get(fr).expect("emitted body has a name");
+        let name = st.names.get(&EmittedBodyId::Shared(*fr)).expect("emitted body has a name");
         match emit_inline_js_fn(ws, scx, *fr, name) {
             Ok(definition) => {
                 out.push_str(&definition);
@@ -2811,7 +2807,7 @@ fn force_shader_register_sibling(
     let fr = FuncRef { module: m, func: f };
     if st.seen.insert(fr) {
         // Bare @nomangle name: the driver register lines call it verbatim.
-        st.names.insert(fr, name.to_string());
+        st.names.insert(EmittedBodyId::Shared(fr), name.to_string());
         let cf = &ws.module(m).functions[f];
         if matches!(cf.inline_body, Some((bone_semantic::hir::FnBackend::Js, _))) {
             st.inline_js.push(fr);
@@ -3074,7 +3070,12 @@ impl WorklistState {
     fn new(ws: &Workspace, roots: &[(FuncRef, String)], program_mode: bool) -> Self {
         WorklistState {
             cache: skull_transform::InlineCache::default(),
-            names: CalleeNames { plain: roots.iter().cloned().collect(), spec: HashMap::new() },
+            names: CalleeNames {
+                names: roots
+                    .iter()
+                    .map(|(fr, name)| (EmittedBodyId::Shared(*fr), name.clone()))
+                    .collect(),
+            },
             queue: roots.iter().map(|(fr, _)| *fr).collect(),
             seen: roots.iter().map(|(fr, _)| *fr).collect(),
             lowered: Vec::new(),
@@ -3249,7 +3250,8 @@ impl JsReach<'_> {
     /// itself is not recorded as lowered, so it contributes no JS.
     fn visit_fn(&mut self, fr: FuncRef) -> Result<(), CompilerError> {
         let f = &self.ws.module(fr.module).functions[fr.func];
-        let name = self.st.names.get(&fr).expect("queued fn has a name").clone();
+        let name =
+            self.st.names.get(&EmittedBodyId::Shared(fr)).expect("queued fn has a name").clone();
         let mut mf = match skull_mir::lower::lower_function(self.ws, self.scx, fr.module, fr.func) {
             Ok(mf) => mf,
             Err(e) => {
@@ -3325,7 +3327,7 @@ impl JsReach<'_> {
             collect(&mut findings, nobox_errs(self.ws, nf));
         }
         mf.name = ustr::Ustr::from(name.as_str());
-        self.st.names.spec.insert((fr, key.clone()), name.clone());
+        self.st.names.insert(EmittedBodyId::new(fr, key.clone()), name.clone());
         findings.extend(self.discover(&mf)?);
         match merge_findings(findings) {
             Some(e) => self.st.reject(&name, e),
@@ -3474,7 +3476,10 @@ fn emit_spec_bodies(
 ) -> String {
     let mut out = String::new();
     for (fr, key, mf) in &st.spec_lowered {
-        let name = &st.names.spec[&(*fr, key.clone())];
+        let name = st
+            .names
+            .get(&EmittedBodyId::new(*fr, key.clone()))
+            .expect("a lowered specialization has a name");
         match emit_lowered_fn(ws, *fr, mf, name, &st.names, hoisted, &st.gctx) {
             Ok(js) => out.push_str(&js),
             Err(e) => rejections.push((name.clone(), e)),
@@ -3845,7 +3850,7 @@ fn decorator_application_lines_js(
                 let &(dmid, did) = deco_map.get(&ann.name.name).expect("decorator name resolves");
                 let d = &ws.module(dmid).decorators[did];
                 let fr = FuncRef { module: module.id, func: fid };
-                let js_fn = names.get(&fr).ok_or_else(|| {
+                let js_fn = names.get(&EmittedBodyId::Shared(fr)).ok_or_else(|| {
                     err(format!(
                         "JS subset: decorated fn `{}` was not emitted (not a program root)",
                         f.name
@@ -3980,7 +3985,7 @@ fn discover_callees(
         // swapped it at lowering).
         if matches!(cf.inline_body, Some((bone_semantic::hir::FnBackend::Js, _))) {
             if seen.insert(callee) {
-                names.insert(callee, callee_js_name(ws, callee));
+                names.insert(EmittedBodyId::Shared(callee), callee_js_name(ws, callee));
                 inline_js.push(callee);
                 scan_inline_js_body(ws, callee, names, queue, seen, inline_js);
             }
@@ -4003,7 +4008,7 @@ fn discover_callees(
             continue;
         }
         if seen.insert(callee) {
-            names.insert(callee, callee_js_name(ws, callee));
+            names.insert(EmittedBodyId::Shared(callee), callee_js_name(ws, callee));
             queue.push(callee);
         }
     }
@@ -4060,13 +4065,13 @@ fn scan_inline_js_body(
             let target = FuncRef { module: m, func: fid };
             if matches!(cf.inline_body, Some((bone_semantic::hir::FnBackend::Js, _))) {
                 if seen.insert(target) {
-                    names.insert(target, cf.name.to_string());
+                    names.insert(EmittedBodyId::Shared(target), cf.name.to_string());
                     inline_js.push(target);
                     scan_inline_js_body(ws, target, names, queue, seen, inline_js);
                 }
             } else if cf.inline_body.is_none() && !cf.is_extern {
                 if seen.insert(target) {
-                    names.insert(target, cf.name.to_string());
+                    names.insert(EmittedBodyId::Shared(target), cf.name.to_string());
                     queue.push(target);
                 }
             }
@@ -4128,7 +4133,7 @@ fn discover_globals(
             let jsname = callee_js_name(ws, fr);
             gctx.fns.entry(name).or_insert_with(|| jsname.clone());
             if seen.insert(fr) {
-                names.insert(fr, jsname);
+                names.insert(EmittedBodyId::Shared(fr), jsname);
                 queue.push(fr);
             }
         } else if let Some(cands) = ws.functions_by_name.get(&name) {
@@ -4189,7 +4194,7 @@ fn register_fn_value_variant(
         let jsname = callee_js_name(ws, fr);
         gctx.fns.entry(name).or_insert_with(|| jsname.clone());
         if seen.insert(fr) {
-            names.insert(fr, jsname);
+            names.insert(EmittedBodyId::Shared(fr), jsname);
             inline_js.push(fr);
             scan_inline_js_body(ws, fr, names, queue, seen, inline_js);
         }
@@ -4201,7 +4206,7 @@ fn register_fn_value_variant(
         let jsname = callee_js_name(ws, fr);
         gctx.fns.entry(name).or_insert_with(|| jsname.clone());
         if seen.insert(fr) {
-            names.insert(fr, jsname);
+            names.insert(EmittedBodyId::Shared(fr), jsname);
             queue.push(fr);
         }
     }
@@ -4219,7 +4224,7 @@ fn direct_callees(mf: &MirFunc, names: &CalleeNames) -> Vec<ustr::Ustr> {
                     Inst::Call { func, .. } | Inst::CallMulti { func, .. } => *func,
                     _ => continue,
                 };
-                if let Some(n) = names.get(&fr) {
+                if let Some(n) = names.get(&EmittedBodyId::Shared(fr)) {
                     out.push(ustr::Ustr::from(n.as_str()));
                 }
             }
@@ -4257,7 +4262,7 @@ fn order_global_inits(
     // Key by the EMIT name (`names[fr]`, mangled) -- that is what `direct_callees`
     // resolves a call to, NOT the unmangled `mf.name`.
     for (fr, mf) in lowered {
-        if let Some(emit_name) = names.get(fr) {
+        if let Some(emit_name) = names.get(&EmittedBodyId::Shared(*fr)) {
             record(ustr::Ustr::from(emit_name.as_str()), mf);
         }
     }
