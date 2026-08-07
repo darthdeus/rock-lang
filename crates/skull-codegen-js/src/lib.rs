@@ -1172,6 +1172,9 @@ function stone_unload_image(h) {
   delete __SW.imageRepeat[h];
 }
 function stone_reload_image(h, path) { return false; }
+// No deferred-decode queue on web: the browser decodes into the texture at load
+// time, so there is never anything outstanding to flush.
+function stone_flush_image_uploads() {}
 // CPU-side pixel buffers (image_data.rs's twin). These were stubs returning 0,
 // which is the worst shape available: a caller got a handle-shaped 0, uploaded
 // it, and silently drew the white fallback with no log line anywhere. A real
