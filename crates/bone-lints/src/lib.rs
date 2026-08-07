@@ -124,6 +124,7 @@ pub const KNOWN_LINTS: &[&str] = &[
     UNUSED_FN,
     UNUSED_PURE_EXPR,
     TRANSMUTE_OF_NULLABLE,
+    TASK_NULL_ABANDON,
     BACKEND_SIBLING_MISMATCH,
     METHOD_SYNTAX,
     ROW_ESCAPE,
@@ -320,6 +321,14 @@ fn inference_findings_with(
             .bodies
             .iter()
             .flat_map(|(owner, body)| transmute_of_nullable_in_body(ws, bi(owner), body))
+            .collect();
+        out.extend(filter_suppressed(found, src).iter().map(Finding::of));
+    }
+    if sel.enabled(TASK_NULL_ABANDON) {
+        let found: Vec<_> = module
+            .bodies
+            .iter()
+            .flat_map(|(owner, body)| task_null_abandon_in_body(ws, bi(owner), body))
             .collect();
         out.extend(filter_suppressed(found, src).iter().map(Finding::of));
     }
@@ -1181,6 +1190,15 @@ fn is_nullable(ws: &Workspace, bi: &BodyInference, ty: TyId) -> bool {
 /// genuinely-unknown type reads as non-nullable -- the conservative side (a
 /// missed warning, never a false strip).
 pub(crate) fn head_type(ws: &Workspace, bi: &BodyInference, ty: TyId) -> TypeExpr {
+    head_ty(ws, bi, ty).1
+}
+
+/// [`head_type`] keeping the resolved id. A nested `Idx<TypeExpr>` (a
+/// `Nullable`'s inner, an `App`'s params) indexes the arena of the type that
+/// CONTAINS it -- which substitution-following may have moved to another module
+/// -- so descending needs `resolved.with_idx(inner)`, never a bare
+/// `TyId::Local`.
+fn head_ty(ws: &Workspace, bi: &BodyInference, ty: TyId) -> (TyId, TypeExpr) {
     let mut cur = ty;
     loop {
         let te = match cur {
@@ -1190,9 +1208,9 @@ pub(crate) fn head_type(ws: &Workspace, bi: &BodyInference, ty: TyId) -> TypeExp
         match te {
             TypeExpr::Infer(var, _) => match bi.substitutions.get(var) {
                 Some(sub) => cur = sub,
-                None => return te,
+                None => return (cur, te),
             },
-            _ => return te,
+            _ => return (cur, te),
         }
     }
 }
@@ -1521,6 +1539,137 @@ pub fn nominal_type_names(ws: &Workspace, warm: &FxHashSet<ModuleId>) -> FxHashS
         out.extend(m.struct_by_name.keys().copied());
         out.extend(m.enums_by_name.keys().copied());
         out.extend(m.newtypes_by_name.keys().copied());
+    }
+    out
+}
+
+/// A `task_null_abandon` finding: a plain `= null` over a `Task?` place.
+/// `place` is the rendered target (`m.co`), which the diagnostic names so the
+/// fix (`stop(m, .co)`) is spellable from the message alone.
+#[derive(Clone, Debug)]
+pub struct TaskNullAbandon {
+    pub place: Option<String>,
+    pub span: Span,
+}
+
+/// Canonical lint name for suppression: `// rock: allow(task_null_abandon)`.
+pub const TASK_NULL_ABANDON: &str = "task_null_abandon";
+
+impl LintFinding for TaskNullAbandon {
+    const LINT: &'static str = TASK_NULL_ABANDON;
+    fn line(&self) -> usize {
+        self.span.line_range.0
+    }
+    fn to_diagnostic(&self) -> CompilerError {
+        let what = match &self.place {
+            Some(p) => format!("`{p} = null`"),
+            None => "assigning `null` to a `Task?` slot".to_string(),
+        };
+        CompilerError::new_with_label(
+            self.span,
+            format!(
+                "{what} abandons the coroutine mid-stack -- it is dropped where it stands, \
+                 so its terminal `defer`s never run; use `stop` to cancel it (or `replace` \
+                 to swap one in), which kill the coroutine first"
+            ),
+        )
+        // `Warning`, not `Error`: nulling a slot just observed terminal, and
+        // cleanup inside the task's own terminal defer, are both legal and
+        // indistinguishable without liveness -- so the allow comment must stay
+        // reachable.
+        .with_level(CompilerErrorLevel::Warning)
+    }
+}
+
+/// `task_null_abandon` for one body. A flat scan, not a walk: v1 asks only
+/// "does a `= null` land on a `Task?` place", and every such assignment is
+/// judged the same wherever it sits.
+///
+/// Deliberately NOT covered: overwriting a live slot with a *new* task
+/// (`m.co = start(...)`, which `replace` exists for). Distinguishing that from
+/// the first store into an empty slot needs liveness-at-assignment, and a false
+/// positive on every initial store would be worse than the miss. The two LEGAL
+/// null-assign shapes -- nulling a task just observed terminal, and completion
+/// cleanup inside the task's own terminal defer -- are equally invisible here,
+/// which is why the lint reports at `Warning` with the allow comment legal.
+pub fn task_null_abandon_in_body(
+    ws: &Workspace,
+    bi: Option<&BodyInference>,
+    body: &Body,
+) -> Vec<TaskNullAbandon> {
+    let Some(bi) = bi else { return Vec::new() };
+    let mut out = Vec::new();
+    for (_, expr) in body.expr_arena.iter() {
+        let Expr::Assign { target, value } = *expr else { continue };
+        if !matches!(body.expr_arena[value], Expr::Null) {
+            continue;
+        }
+        let Some(ty) = place_type(bi, body, target) else { continue };
+        if !is_task_slot(ws, bi, ty) {
+            continue;
+        }
+        out.push(TaskNullAbandon {
+            place: render_place(body, target),
+            span: body.expr_spans[target],
+        });
+    }
+    out
+}
+
+/// The type of an assignment TARGET. A bare local target carries no
+/// `expr_types` entry -- a `Var` is a reference to a binding, and the binding
+/// arena is where its type lives -- so the two shapes read different tables.
+fn place_type(bi: &BodyInference, body: &Body, target: Idx<Expr>) -> Option<TyId> {
+    match body.expr_arena[target] {
+        Expr::Var(b) => bi.binding_types.get(b).copied(),
+        _ => bi.expr_types.get(target).copied(),
+    }
+}
+
+/// A `Task<R>?` place. The `?` is required: a non-nullable `Task` field cannot
+/// take a `null` at all, so bone has already rejected that program.
+fn is_task_slot(ws: &Workspace, bi: &BodyInference, ty: TyId) -> bool {
+    let (id, TypeExpr::Nullable(inner)) = head_ty(ws, bi, ty) else { return false };
+    matches!(
+        head_type(ws, bi, id.with_idx(inner)),
+        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } if n.as_str() == "Task"
+    )
+}
+
+/// Re-spell an assignment target for the diagnostic (`m.co`, `e.get()?.co`,
+/// `SLOT`). `None` for a shape not covered here, which the diagnostic phrases
+/// around rather than naming wrongly -- the span already points at the place.
+fn render_place(body: &Body, e: Idx<Expr>) -> Option<String> {
+    Some(match body.expr_arena[e] {
+        Expr::Var(b) => body.binding_arena[b].name.to_string(),
+        Expr::Global(n) => n.to_string(),
+        Expr::FieldAccess { base, field } => {
+            format!("{}.{}", render_place(body, base)?, field)
+        }
+        Expr::SafeNav { base, field } => format!("{}?.{}", render_place(body, base)?, field),
+        Expr::SafeNavCall { receiver, method, .. } => {
+            format!("{}?.{}()", render_place(body, receiver)?, method)
+        }
+        // UFCS: `e.get()` lowers to a call whose first arg is the receiver.
+        Expr::Call { callee: Callee::Unresolved { name, .. }, args } => {
+            let recv = args.into_iter().next()?;
+            format!("{}.{}()", render_place(body, recv)?, name)
+        }
+        _ => return None,
+    })
+}
+
+/// `task_null_abandon` findings across every non-stdlib body in the workspace.
+/// Convenience for tests and whole-workspace CLI runs; the surfaces go through
+/// [`inference_findings`].
+pub fn task_null_abandon(ws: &Workspace) -> Vec<TaskNullAbandon> {
+    let warm = FxHashSet::default();
+    let mut out = Vec::new();
+    for module in user_modules(ws, &warm) {
+        let inf = ws.inference(module.id);
+        for (owner, body) in module.bodies.iter() {
+            out.extend(task_null_abandon_in_body(ws, inf.and_then(|i| i.per_fn.get(owner)), body));
+        }
     }
     out
 }
