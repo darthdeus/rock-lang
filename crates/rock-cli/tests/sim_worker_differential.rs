@@ -1224,9 +1224,11 @@ fn a_boot_painted_canvas_is_refused_from_a_worker() {
     ]);
     let reason = format!("{out}{err}");
     assert!(
-        reason.contains("boot painted canvases whose contents cannot be reconstructed"),
-        "the refusal must name its reason, so an ineligible boot world is a \
-         reported fact rather than a silently slower suite:\n{reason}"
+        reason.contains("boot state whose contents cannot be reconstructed")
+            && reason.contains("canvas:"),
+        "the refusal must name its reason AND the class that raised it, so an \
+         ineligible boot world is a reported fact rather than a silently slower \
+         suite:\n{reason}"
     );
 }
 
@@ -1309,6 +1311,43 @@ fn a_boot_pixel_readback_slot_does_not_carry_its_submit_across_the_boundary() {
          {boots} boots\n{all}"
     );
     assert!(ok, "the readback boundary must be green:\n{all}");
+}
+
+/// A boot-owned ImageData's PIXELS are returned to boot's at the boundary.
+///
+/// Same blind spot as the canvas and readback cases -- present at its boot id,
+/// neither extra nor missing, contents crossed -- and the first one found by
+/// the mutator census rather than by a divergence: `image_data` is one of the
+/// classes `ContentPolicy` now forces to declare an answer.
+///
+/// Boot PAINTS the image, so the probe's assertion separates a RESTORE from a
+/// plausible-looking clear: a boundary that reset to creation's zeroes would
+/// satisfy "not the seed's red" while installing a state boot never had.
+///
+/// The boot count is asserted BEFORE the verdict, and it is load-bearing in a
+/// way this fixture makes sharp. A restore that reports failure ends the worker
+/// and the parent reruns the probe in a FRESH process, where it passes for the
+/// ordinary reason -- so "the sims passed" alone is satisfied by the boundary
+/// being broken. One boot is what makes the probe follow the seed.
+#[test]
+fn a_boot_image_data_does_not_carry_its_pixels_across_the_boundary() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "testbed",
+        "-j",
+        "1",
+        "b3_image_data_seed",
+        "b3_image_data_probe",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 1,
+        "the probe must FOLLOW the seed in one process or it proves nothing: \
+         {boots} boots\n{all}"
+    );
+    assert!(ok, "the ImageData contents boundary must be green:\n{all}");
 }
 
 /// Run `rock` and return `(exit_ok, stdout, stderr)` WITHOUT asserting on the
