@@ -993,14 +993,8 @@ impl LiveBodies {
 
     /// The declarations whose definitions are emitted -- what the overlay's
     /// `emitted` baseline records.
-    fn emitted_decls(&self) -> FxHashSet<FuncRef> {
-        self.bodies
-            .iter()
-            .filter_map(|b| match b {
-                EmittedBodyId::Shared(fref) => Some(*fref),
-                EmittedBodyId::Specialized(..) => None,
-            })
-            .collect()
+    fn emitted_bodies(&self) -> FxHashSet<EmittedBodyId> {
+        self.bodies.clone()
     }
 }
 
@@ -1262,11 +1256,16 @@ pub struct SkullEmitCache {
     /// `docs/static-hot-reload-overlay-bug.md`.
     static_key_baseline: FxHashMap<Ustr, String>,
     shader_registrations: ShaderRegistrations,
-    /// The fn definitions the last full assembly actually EMITTED (global DCE
-    /// prunes the rest). `assemble_overlay` needs it: the overlay redefines only
-    /// CHANGED fns, so a body edit that newly calls a previously-pruned fn would
-    /// otherwise leave that fn defined nowhere -- a runtime nil call on reload.
-    emitted: FxHashSet<FuncRef>,
+    /// The definitions the last full assembly actually EMITTED (global DCE prunes
+    /// the rest), keyed by EMITTED BODY. `assemble_overlay` needs it: the overlay
+    /// redefines only CHANGED fns, so a body edit that newly reaches a
+    /// previously-pruned definition would otherwise leave it defined nowhere -- a
+    /// runtime nil call on reload.
+    ///
+    /// By emitted body rather than by declaration, because a specialization is
+    /// its own definition with its own symbol. Keyed by `FuncRef`, the backfill
+    /// walk could only ever answer for shared bodies.
+    emitted: FxHashSet<EmittedBodyId>,
     /// The compilation target's root directory; see [`is_library_module`].
     project_root: Option<String>,
 }
@@ -2164,7 +2163,7 @@ fn assemble(
     scx: &skull_mir::lower::ScalarCtx,
     cache: &SkullEmitCache,
     built_specs: &mut Vec<(EmittedBodyId, Chunk)>,
-) -> Result<(MirEmit, FxHashSet<FuncRef>), CompilerError> {
+) -> Result<(MirEmit, FxHashSet<EmittedBodyId>), CompilerError> {
     // Per-stage lower/cleanup/emit/regalloc times: chunk times (captured during the
     // parallel `emit_full`/`emit_incremental` chunk build) summed in as chunks are
     // pulled, plus the decorator/global units re-emitted here. Under parallel emit
@@ -2518,7 +2517,7 @@ fn assemble(
     if let Some(err) = cg.take_rejection() {
         return Err(err);
     }
-    Ok((MirEmit { lua: out, skipped, phases }, live.emitted_decls()))
+    Ok((MirEmit { lua: out, skipped, phases }, live.emitted_bodies()))
 }
 
 /// Full emit: populate the chunk cache for every ordinary/coroutine body, then
@@ -2914,34 +2913,34 @@ pub fn emit_incremental(
 /// Fns the changed chunks now reach that the last full build did not emit.
 /// Bounded by `cache.emitted`, which is the leaf set -- so the common case (an
 /// edit that calls nothing new) expands nothing.
-fn newly_reachable(cache: &SkullEmitCache) -> Vec<FuncRef> {
+fn newly_reachable(cache: &SkullEmitCache) -> Vec<EmittedBodyId> {
     struct Backfill<'a> {
         cache: &'a SkullEmitCache,
-        roots: Vec<FuncRef>,
+        roots: Vec<EmittedBodyId>,
     }
     impl skull_mir::reach::ReachPolicy for Backfill<'_> {
-        type Node = FuncRef;
-        fn roots(&mut self) -> Result<Vec<FuncRef>, CompilerError> {
+        type Node = EmittedBodyId;
+        fn roots(&mut self) -> Result<Vec<EmittedBodyId>, CompilerError> {
             Ok(std::mem::take(&mut self.roots))
         }
-        fn is_leaf(&mut self, fref: FuncRef) -> Result<bool, CompilerError> {
-            Ok(self.cache.emitted.contains(&fref)
-                || !matches!(self.cache.chunks.get(&shared(fref)), Some(Ok(_))))
+        fn is_leaf(&mut self, body: EmittedBodyId) -> Result<bool, CompilerError> {
+            Ok(self.cache.emitted.contains(&body)
+                || !matches!(self.cache.chunks.get(&body), Some(Ok(_))))
         }
-        fn on_cycle(&mut self, _fref: FuncRef) -> Result<(), CompilerError> {
+        fn on_cycle(&mut self, _body: EmittedBodyId) -> Result<(), CompilerError> {
             Ok(())
         }
-        fn visit(&mut self, fref: FuncRef) -> Result<Vec<FuncRef>, CompilerError> {
-            match self.cache.chunks.get(&shared(fref)) {
-                Some(Ok(chunk)) => Ok(chunk.calls.clone()),
+        fn visit(&mut self, body: EmittedBodyId) -> Result<Vec<EmittedBodyId>, CompilerError> {
+            match self.cache.chunks.get(&body) {
+                Some(Ok(chunk)) => Ok(successors_of(chunk)),
                 _ => Ok(Vec::new()),
             }
         }
     }
-    let mut roots: Vec<FuncRef> = Vec::new();
+    let mut roots: Vec<EmittedBodyId> = Vec::new();
     for body in &cache.changed_since_full {
         if let Some(Ok(chunk)) = cache.chunks.get(body) {
-            roots.extend(chunk.calls.iter().copied().filter(|c| !cache.emitted.contains(c)));
+            roots.extend(successors_of(chunk).into_iter().filter(|b| !cache.emitted.contains(b)));
         }
     }
     if roots.is_empty() {
@@ -2950,9 +2949,90 @@ fn newly_reachable(cache: &SkullEmitCache) -> Vec<FuncRef> {
     let mut policy = Backfill { cache, roots: roots.clone() };
     // Infallible: every policy method returns Ok.
     let mut out = skull_mir::reach::walk(&mut policy).unwrap_or_default();
-    out.extend(roots.iter().copied());
-    out.retain(|fr| !cache.emitted.contains(fr));
+    out.extend(roots);
+    out.retain(|b| !cache.emitted.contains(b));
     out
+}
+
+/// The emitted bodies a chunk reaches: its declaration callees AND the
+/// specializations it demands.
+///
+/// Both, keyed the same way. Walking only `calls` -- which are DECLARATIONS --
+/// is what made the overlay backfill a shared body and never a specialization.
+fn successors_of(chunk: &Chunk) -> Vec<EmittedBodyId> {
+    let mut out: Vec<EmittedBodyId> = chunk.calls.iter().copied().map(shared).collect();
+    out.extend(chunk.specs.iter().map(|d| EmittedBodyId::new(d.func, d.key.clone())));
+    out
+}
+
+/// BUILD every specialization the changed bodies now demand that the cache does
+/// not already hold, so [`newly_reachable`] has a chunk to find.
+///
+/// The overlay is loaded after `main.lua`, which carries only what the last full
+/// build emitted. An edit that adds the first call to a NEW instantiation
+/// therefore needs the definition ADDED, not redefined -- and its call site
+/// already spells the specialized symbol, so omitting it is a nil global on
+/// reload rather than a stale body.
+///
+/// This is where the demand's bound tree earns its keep: an `Iterator`-bounded
+/// callee reached for the first time by an edit cannot be lowered from its
+/// declaration alone.
+fn backfill_new_specializations(ws: &Workspace, cache: &mut SkullEmitCache) -> Vec<CompilerError> {
+    let mut errs = Vec::new();
+    let mut demands: Vec<skull_mir::bound::SpecDemand> = Vec::new();
+    for body in &cache.changed_since_full {
+        if let Some(Ok(chunk)) = cache.chunks.get(body) {
+            demands.extend(chunk.specs.iter().cloned());
+        }
+    }
+    let mut map = skull_mir::bound::DemandMap::default();
+    for body in map.record(&demands) {
+        errs.push(demand_clash(ws, &body).1);
+    }
+    // A worklist, not one pass: a specialization built here can demand further
+    // ones that no chunk in the cache mentions.
+    let mut queue: Vec<EmittedBodyId> =
+        demands.iter().map(|d| EmittedBodyId::new(d.func, d.key.clone())).collect();
+    let mut seen: FxHashSet<EmittedBodyId> = FxHashSet::default();
+    while let Some(body) = queue.pop() {
+        if !seen.insert(body.clone()) || cache.chunks.contains_key(&body) {
+            continue;
+        }
+        let EmittedBodyId::Specialized(fref, key) = &body else { continue };
+        let f = &ws.module(fref.module).functions[fref.func];
+        let Some(name) = skull_mir::mangle::spec_fn_name(ws, f, key) else { continue };
+        let tree = map.tree_of(&body);
+        let mut specs = Vec::new();
+        // Disjoint field borrows: the emitter reads `cg`/`scx` and mutates only
+        // `inline_cache`, so the chunk map stays free to be written below.
+        let built = emit_spec_chunk(
+            ws,
+            &cache.cg,
+            &cache.scx,
+            &body,
+            &tree,
+            &name,
+            &mut cache.inline_cache,
+            &mut specs,
+        );
+        for d in &specs {
+            queue.push(EmittedBodyId::new(d.func, d.key.clone()));
+        }
+        for b in map.record(&specs) {
+            errs.push(demand_clash(ws, &b).1);
+        }
+        match built {
+            Ok(chunk) => {
+                for d in &chunk.deps {
+                    cache.dependents.entry(*d).or_default().insert(body.clone());
+                }
+                cache.chunks.insert(body.clone(), Ok(chunk));
+                cache.changed_since_full.insert(body);
+            }
+            Err(e) => errs.push(e),
+        }
+    }
+    errs
 }
 
 fn assemble_overlay(
@@ -2970,7 +3050,7 @@ fn assemble_overlay(
     // the first call to a dead fn leaves that fn defined nowhere and the reload
     // dies on a nil call. The walk stops at every already-emitted fn (`is_leaf`),
     // so on a normal edit it visits nothing.
-    order.extend(newly_reachable(cache).into_iter().map(shared));
+    order.extend(newly_reachable(cache));
     order.sort_by_key(overlay_order_key);
     order.dedup();
     for body in &order {
@@ -3201,6 +3281,13 @@ pub fn emit_overlay(
                 cache.changed_consts_since_full.insert((mid, gid));
             }
         }
+    }
+    // A specialization the edit reached for the FIRST time has no chunk yet, so
+    // it must be BUILT before the overlay looks for one. Never swallowed: the
+    // overlay's signature cannot return `Err`, so a failure warns here and the
+    // next full/incremental rebuild rejects it authoritatively.
+    for err in backfill_new_specializations(ws, cache) {
+        eprintln!("skull overlay emit: specialization backfill -- {}", err.message);
     }
     let t_relower = t2.elapsed();
     let t3 = Instant::now();

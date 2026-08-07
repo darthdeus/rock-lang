@@ -201,6 +201,97 @@ fn an_overlay_redefines_a_changed_specialization() {
     );
 }
 
+/// The OVERLAY carries a specialization the edit made NEWLY reachable
+/// (mono cut C+D, `B*-backfill`).
+///
+/// The sibling above edits a body whose specialization already exists, so the
+/// overlay only has to REDEFINE it. Here the edit adds the first call to a new
+/// instantiation, so the definition has to be ADDED -- and a reload dofiles the
+/// overlay after `main.lua`, which carries no such definition. The edited
+/// caller's call spells `..._spec_...`, so omitting it is a nil global at
+/// reload rather than a stale body.
+///
+/// The two populations are asserted in the same test: the P specialization must
+/// already exist (so this is about the NEW one) and the Q one must not.
+#[test]
+fn an_overlay_carries_a_newly_reachable_specialization() {
+    let types = "value P { x: float, y: float }\n\
+                 value Q { a: float, b: float, c: float }\n\
+                 fn tally_of<T>(xs: [T]) -> T { return xs[0] }\n";
+    let v1 = types.to_string()
+        + "global G1: float = tally_of([P { x: 1.0, y: 0.0 }]).x\n\
+           fn use_it() -> float { return G1 }";
+    let v2 = types.to_string()
+        + "global G1: float = tally_of([P { x: 1.0, y: 0.0 }]).x\n\
+           fn use_it() -> float { return tally_of([Q { a: 1.0, b: 2.0, c: 3.0 }]).a }";
+
+    let ws1 = crate::common::ws_of(&v1);
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (full, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    let spec_of = |lua: &str, ty: &str| {
+        lua.lines().any(|l| l.starts_with("function tally_of_") && l.contains(ty))
+    };
+    assert!(spec_of(&full.lua, "P"), "control: v1 already defines the P specialization");
+    assert!(!spec_of(&full.lua, "Q"), "control: v1 must NOT define the Q one yet");
+
+    let ws2 = crate::common::ws_of(&v2);
+    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "use_it")]);
+    assert!(
+        spec_of(&overlay.lua, "Q"),
+        "the overlay must ADD the specialization the edit made reachable, or the \
+         reload calls a nil global:\n{}",
+        overlay.lua
+    );
+}
+
+/// The overlay backfills a newly-reachable `Iterator`-BOUNDED body, which is
+/// the case its demand tree is load-bearing for (mono cut C+D, D-1 +
+/// `B*-backfill`).
+///
+/// A bounded body cannot be lowered from its declaration alone: its placeholder
+/// `next` calls are resolved by the demand, not by the body. So this is the arm
+/// that says the backfill carries the TREE and not just the key -- a backfill
+/// that rebuilt from the declaration would reject rather than emit.
+///
+/// Runs with inlining DISABLED, where a bounded call has no splice to fall back
+/// on.
+#[test]
+fn an_overlay_carries_a_newly_reachable_bounded_body() {
+    let _g = crate::common::AblationGuard::on();
+    let common = "fn total<I: Iterator<int>>(it: I) -> int {\n\
+                  \x20   let s = 0\n\
+                  \x20   for v in it { s = s + v }\n\
+                  \x20   return s\n\
+                  }\n";
+    let v1 = common.to_string() + "fn use_it() -> int { return 0 }";
+    let v2 = common.to_string()
+        + "fn use_it() -> int {\n\
+           \x20   let xs: [int] = [1, 2, 3]\n\
+           \x20   return total(xs.iter())\n\
+           }";
+
+    let ws1 = crate::common::ws_with_stdlib(&v1);
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (full, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    let standalone = |lua: &str| {
+        lua.lines().any(|l| l.starts_with("function total_") && l.contains("_spec_"))
+    };
+    assert!(
+        !standalone(&full.lua),
+        "control: v1 must NOT already define the bounded body, or the backfill has \
+         nothing to add"
+    );
+
+    let ws2 = crate::common::ws_with_stdlib(&v2);
+    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "use_it")]);
+    assert!(
+        standalone(&overlay.lua),
+        "the overlay must ADD the bounded body the edit made reachable, with its \
+         placeholders resolved from the demand's tree:\n{}",
+        overlay.lua
+    );
+}
+
 /// ONE liveness answer decides both kinds of emitted body.
 ///
 /// The renderer no longer discovers or builds: it orders text the walk already
