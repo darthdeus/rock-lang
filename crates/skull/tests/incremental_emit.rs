@@ -189,3 +189,31 @@ fn an_overlay_redefines_a_changed_specialization() {
         overlay.lua
     );
 }
+
+/// ONE liveness answer decides both kinds of emitted body.
+///
+/// The renderer no longer discovers or builds: it orders text the walk already
+/// reached. So a specialized body reaching a FURTHER specialization has to come
+/// out of the walk, and if the walk stopped carrying that edge the build fails
+/// loudly (`no liveness walk reached it`) rather than quietly rebuilding it in a
+/// second place. Measured on bitgun: cutting the edge fires that rejection.
+///
+/// Here the property is observable as output: the specialized body is emitted at
+/// all, and it is emitted ONCE -- two deciders would each be entitled to render
+/// it.
+#[test]
+fn one_liveness_walk_decides_the_specialized_bodies() {
+    let src = "value V2 { x: float, y: float }\n\
+               fn first<T>(xs: [T]) -> T { return xs[0] }\n\
+               global G: float = first([V2 { x: 1.0, y: 2.0 }]).x\n\
+               fn use_g() -> float { return G }";
+    let ws = crate::common::ws_of(src);
+    let mid = skull::user_module_id(&ws).unwrap();
+    let lua = emit_full(&ws, mid).expect("emit_full").0.lua;
+    let def = "function first_arr_T_ret_T_spec_a_n2_V2_0_z(";
+    assert_eq!(
+        lua.matches(def).count(),
+        1,
+        "the specialized body is decided once and emitted once"
+    );
+}

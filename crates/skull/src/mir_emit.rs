@@ -580,9 +580,19 @@ fn merge_units(
 /// fan-out matters -- it is the edit loop's throughput -- and it leaves the chunk
 /// key set complete, which the incremental cache depends on.
 struct LuaReach<'a> {
+    ws: &'a Workspace,
+    cg: &'a CodegenCtx,
+    scx: &'a skull_mir::lower::ScalarCtx,
     by_name: &'a FxHashMap<Ustr, Vec<FuncRef>>,
     chunks: &'a FxHashMap<EmittedBodyId, Result<Chunk, CompilerError>>,
-    roots: Vec<FuncRef>,
+    /// Specialized chunks this walk built, plus any it pulled from the cache.
+    built: FxHashMap<EmittedBodyId, Chunk>,
+    /// Specialized bodies that could not emit, by emitted name. Reported by the
+    /// renderer in name order, where a specialized rejection has always been
+    /// ordered against its siblings.
+    errs: Vec<(String, CompilerError)>,
+    inline_cache: skull_transform::InlineCache,
+    roots: Vec<EmittedBodyId>,
 }
 
 /// Global-name -> fns, keyed by BOTH the emitted (mangled) name and the source
@@ -622,32 +632,99 @@ fn fns_named<'a>(
 }
 
 impl skull_mir::reach::ReachPolicy for LuaReach<'_> {
-    type Node = FuncRef;
+    type Node = EmittedBodyId;
 
-    fn roots(&mut self) -> Result<Vec<FuncRef>, CompilerError> {
+    fn roots(&mut self) -> Result<Vec<EmittedBodyId>, CompilerError> {
         Ok(std::mem::take(&mut self.roots))
     }
 
-    /// A fn with no cached chunk (extern, `inline(lua)`, `Iterator`-bounded) has
-    /// no MIR to walk. It is still EMITTED if reached -- `is_leaf` only means
+    /// A body with no chunk (extern, `inline(lua)`, `Iterator`-bounded) has no
+    /// MIR to walk. It is still EMITTED if reached -- `is_leaf` only means
     /// "expand no further", and those bodies reach onward only by bare name,
     /// which the `@nomangle` root rule covers.
-    fn is_leaf(&mut self, fref: FuncRef) -> Result<bool, CompilerError> {
-        Ok(!matches!(self.chunks.get(&shared(fref)), Some(Ok(_))))
+    ///
+    /// A specialized body is never a leaf: [`Self::chunk_of`] builds one on
+    /// demand, so "no chunk yet" is not the same answer as "no body to walk".
+    fn is_leaf(&mut self, body: EmittedBodyId) -> Result<bool, CompilerError> {
+        Ok(match &body {
+            EmittedBodyId::Shared(fref) => !matches!(self.chunks.get(&shared(*fref)), Some(Ok(_))),
+            EmittedBodyId::Specialized(..) => false,
+        })
     }
 
     /// Recursion is ordinary Rock.
-    fn on_cycle(&mut self, _fref: FuncRef) -> Result<(), CompilerError> {
+    fn on_cycle(&mut self, _body: EmittedBodyId) -> Result<(), CompilerError> {
         Ok(())
     }
 
-    fn visit(&mut self, fref: FuncRef) -> Result<Vec<FuncRef>, CompilerError> {
-        let Some(Ok(chunk)) = self.chunks.get(&shared(fref)) else { return Ok(Vec::new()) };
-        let mut succs = chunk.calls.clone();
-        for &name in &chunk.global_names {
-            succs.extend(fns_named(self.by_name, name));
+    fn visit(&mut self, body: EmittedBodyId) -> Result<Vec<EmittedBodyId>, CompilerError> {
+        let (calls, global_names, specs) = match self.chunk_of(&body) {
+            Some(chunk) => (chunk.calls.clone(), chunk.global_names.clone(), chunk.specs.clone()),
+            None => return Ok(Vec::new()),
+        };
+        let mut succs: Vec<EmittedBodyId> = calls.into_iter().map(shared).collect();
+        for name in global_names {
+            succs.extend(fns_named(self.by_name, name).map(shared));
         }
+        // The edge a declaration-keyed walk could not carry: a specialized body
+        // is lowered under its instantiation, so it reaches callees, globals and
+        // FURTHER specializations no shared body mentions.
+        succs.extend(specs.into_iter().map(|(fr, key)| EmittedBodyId::new(fr, key)));
         Ok(succs)
+    }
+}
+
+impl<'a> LuaReach<'a> {
+    /// This body's chunk, BUILDING a specialized one that has none yet.
+    ///
+    /// The chicken-and-egg the previous two mechanisms avoided by cutting the
+    /// arrow: a specialized body's edges exist only once it is lowered, and it
+    /// was lowered only after DCE had already decided what to emit. One walk
+    /// cannot defer that, so it builds -- and the build is not wasted, because
+    /// the renderer downstream pulls the same chunk.
+    ///
+    /// A body that cannot emit contributes NO edges and is not recorded; the
+    /// renderer rebuilds it and reports the rejection there, which is the one
+    /// place a specialized rejection is ordered against its siblings.
+    fn chunk_of(&mut self, body: &EmittedBodyId) -> Option<&Chunk> {
+        if !self.built.contains_key(body) {
+            match body {
+                EmittedBodyId::Shared(fref) => {
+                    return match self.chunks.get(&shared(*fref)) {
+                        Some(Ok(chunk)) => Some(chunk),
+                        _ => None,
+                    };
+                }
+                EmittedBodyId::Specialized(fref, key) => {
+                    if let Some(Ok(chunk)) = self.chunks.get(body) {
+                        self.built.insert(body.clone(), chunk.clone());
+                    } else {
+                        let f = &self.ws.module(fref.module).functions[fref.func];
+                        let name = skull_mir::mangle::spec_fn_name(self.ws, f, key)?;
+                        let mut specs = Vec::new();
+                        let built = emit_spec_chunk(
+                            self.ws,
+                            self.cg,
+                            self.scx,
+                            body,
+                            &name,
+                            &mut self.inline_cache,
+                            &mut specs,
+                        );
+                        match built {
+                            Ok(chunk) => {
+                                self.built.insert(body.clone(), chunk);
+                            }
+                            Err(e) => {
+                                self.errs.push((name, e));
+                                return None;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.built.get(body)
     }
 }
 
@@ -717,14 +794,61 @@ pub(crate) fn is_emission_root(
 /// everything they transitively call. `extra_roots` carries the call edges of the
 /// definitions that are always emitted regardless (decorator bodies, global
 /// initializers) and of the shader registrations.
-fn reachable_fns(
+/// **Post-inline liveness over EMITTED BODIES** -- the one answer to "which
+/// definitions does this program need", for the shared body of a declaration and
+/// for a specialized instantiation alike.
+///
+/// There were two mechanisms. A `FuncRef` DCE walk decided shared bodies, and a
+/// demand closure seeded from the EMITTED chunks decided specialized ones, with
+/// the arrow between them cut: a declaration reached only by a specialized
+/// body's residual call was invisible to the walk. Measured before unifying, that
+/// arrow adds nothing on this corpus (0 such declarations over 8 projects), which
+/// is why one walk that carries it is byte-identical rather than a fix.
+///
+/// The walk BUILDS the specialized chunks it needs, so the answer is a fixpoint
+/// rather than one pass with a missing edge. Those chunks are handed back: the
+/// renderer downstream pulls them instead of lowering the same bodies again.
+struct LiveBodies {
+    /// Every emitted body a root reaches, both kinds.
+    bodies: FxHashSet<EmittedBodyId>,
+    /// Specialized chunks the walk built, for the renderer and the cache.
+    spec_chunks: FxHashMap<EmittedBodyId, Chunk>,
+    /// Specialized bodies that could not emit, by emitted name.
+    rejected: Vec<(String, CompilerError)>,
+}
+
+impl LiveBodies {
+    /// Whether this DECLARATION's own definition is emitted. The
+    /// validation-vs-emitted split rests on this being the ONLY thing liveness
+    /// gates: every declaration is still visited, reported on and rejected from.
+    fn emits(&self, fref: FuncRef) -> bool {
+        self.bodies.contains(&EmittedBodyId::Shared(fref))
+    }
+
+    /// The declarations whose definitions are emitted -- what the overlay's
+    /// `emitted` baseline records.
+    fn emitted_decls(&self) -> FxHashSet<FuncRef> {
+        self.bodies
+            .iter()
+            .filter_map(|b| match b {
+                EmittedBodyId::Shared(fref) => Some(*fref),
+                EmittedBodyId::Specialized(..) => None,
+            })
+            .collect()
+    }
+}
+
+fn live_bodies(
     ws: &Workspace,
+    cg: &CodegenCtx,
+    scx: &skull_mir::lower::ScalarCtx,
     cache: &SkullEmitCache,
     deco_map: &DecoMap,
     project_root: Option<&str>,
     extra_roots: &[FuncRef],
     extra_root_names: &[Ustr],
-) -> Result<FxHashSet<FuncRef>, CompilerError> {
+    unit_specs: &[(FuncRef, skull_mir::lower::SpecKey)],
+) -> Result<LiveBodies, CompilerError> {
     let by_name = build_name_index(ws);
     let mut roots: Vec<FuncRef> = Vec::new();
     for module in ws.modules.iter() {
@@ -747,24 +871,49 @@ fn reachable_fns(
         roots.extend(fns_named(&by_name, name));
     }
 
-    let mut policy =
-        LuaReach { by_name: &by_name, chunks: &cache.chunks, roots: roots.clone() };
+    // The always-emitted units (decorator bodies, global initializers) are not
+    // reached through any chunk -- they emit unconditionally -- so the
+    // instantiations they ask for are roots in their own right.
+    let mut root_bodies: Vec<EmittedBodyId> = roots.iter().copied().map(shared).collect();
+    root_bodies
+        .extend(unit_specs.iter().map(|(fr, key)| EmittedBodyId::new(*fr, key.clone())));
+
+    let mut policy = LuaReach {
+        ws,
+        cg,
+        scx,
+        by_name: &by_name,
+        chunks: &cache.chunks,
+        built: FxHashMap::default(),
+        errs: Vec::new(),
+        inline_cache: skull_transform::InlineCache::default(),
+        roots: root_bodies.clone(),
+    };
     let order = skull_mir::reach::walk(&mut policy)?;
 
     // `walk` returns only EXPANDED nodes. A root and a LEAF (extern, inline(lua),
-    // `Iterator`-bounded -- anything with no cached chunk) are reached and
-    // emittable too, so fold the roots and every expanded body's edges back in.
-    let mut set: FxHashSet<FuncRef> = order.iter().copied().collect();
-    set.extend(roots);
-    for fref in order {
-        if let Some(Ok(chunk)) = cache.chunks.get(&shared(fref)) {
-            set.extend(chunk.calls.iter().copied());
-            for &name in &chunk.global_names {
-                set.extend(fns_named(&by_name, name));
-            }
+    // `Iterator`-bounded -- anything with no chunk) are reached and emittable
+    // too, so fold the roots and every expanded body's edges back in.
+    let mut bodies: FxHashSet<EmittedBodyId> = order.iter().cloned().collect();
+    bodies.extend(root_bodies);
+    for body in &order {
+        let chunk = match body {
+            EmittedBodyId::Shared(fref) => match cache.chunks.get(&shared(*fref)) {
+                Some(Ok(chunk)) => chunk,
+                _ => continue,
+            },
+            EmittedBodyId::Specialized(..) => match policy.built.get(body) {
+                Some(chunk) => chunk,
+                None => continue,
+            },
+        };
+        bodies.extend(chunk.calls.iter().copied().map(shared));
+        for &name in &chunk.global_names {
+            bodies.extend(fns_named(&by_name, name).map(shared));
         }
+        bodies.extend(chunk.specs.iter().map(|(fr, key)| EmittedBodyId::new(*fr, key.clone())));
     }
-    Ok(set)
+    Ok(LiveBodies { bodies, spec_chunks: policy.built, rejected: policy.errs })
 }
 
 /// Emit the whole workspace via the new (cell-model) path. `user_mid` is the
@@ -1216,26 +1365,28 @@ fn emit_spec_chunk(
     })
 }
 
-/// Emit every specialized body the emitted definitions ask for, transitively.
+/// Render every specialized body the liveness walk found, in the order the
+/// assembled text has always had.
 ///
-/// The worklist is LIFO and dedupes by body, so the emission order is the one
-/// the assembled text has always had. What changed is where a body comes from: a
-/// cached chunk is REUSED, and a miss builds one and hands it back for the cache.
-/// A body that cannot emit is not cached -- a failing build discards its output
-/// anyway, and replaying a stored rejection would have to replay the partial
-/// spec closure that produced it.
+/// This ORDERS text; it does not decide or discover. The worklist is still LIFO
+/// and still dedupes, because that is what fixes the order, but every body it
+/// pops was already reached and built by [`live_bodies`]. A body it cannot find
+/// is an invariant failure rather than something to quietly build: two places
+/// that can decide a definition into the program is exactly the pair this step
+/// removes.
 fn emit_specialized_callees(
     ws: &Workspace,
-    scx: &skull_mir::lower::ScalarCtx,
-    cg: &CodegenCtx,
     pending: &mut Vec<(FuncRef, skull_mir::lower::SpecKey)>,
     cached: &FxHashMap<EmittedBodyId, Result<Chunk, CompilerError>>,
+    live: &FxHashMap<EmittedBodyId, Chunk>,
+    rejected: &[(String, CompilerError)],
     built: &mut Vec<(EmittedBodyId, Chunk)>,
     out: &mut String,
 ) -> Vec<CompilerError> {
     let mut done: FxHashSet<EmittedBodyId> = FxHashSet::default();
-    let mut inline_cache = skull_transform::InlineCache::default();
-    let mut errs: Vec<(String, CompilerError)> = Vec::new();
+    let mut errs: Vec<(String, CompilerError)> = rejected.to_vec();
+    let rejected_names: FxHashSet<&str> =
+        rejected.iter().map(|(n, _)| n.as_str()).collect();
     while let Some((fref, key)) = pending.pop() {
         let body = EmittedBodyId::new(fref, key.clone());
         if !done.insert(body.clone()) {
@@ -1245,17 +1396,25 @@ fn emit_specialized_callees(
         let Some(name) = skull_mir::mangle::spec_fn_name(ws, f, &key) else {
             continue; // all-`None` key: the shared body already serves it
         };
-        if let Some(Ok(chunk)) = cached.get(&body) {
-            out.push_str(&chunk.lua);
-            pending.extend(chunk.specs.iter().cloned());
-            continue;
-        }
-        match emit_spec_chunk(ws, cg, scx, &body, &name, &mut inline_cache, pending) {
-            Ok(chunk) => {
-                out.push_str(&chunk.lua);
-                built.push((body, chunk));
+        let Some(chunk) = live.get(&body).or_else(|| cached.get(&body).and_then(|c| c.as_ref().ok()))
+        else {
+            // Not a fallback: the walk either built this body or recorded why it
+            // could not, and a rejected one is reported through `rejected`.
+            if !rejected_names.contains(name.as_str()) {
+                errs.push((
+                    name.clone(),
+                    CompilerError::new_with_label(
+                        f.name_span,
+                        format!("internal: specialized `{name}` is emitted but no liveness walk reached it"),
+                    ),
+                ));
             }
-            Err(e) => errs.push((name.clone(), e)),
+            continue;
+        };
+        out.push_str(&chunk.lua);
+        pending.extend(chunk.specs.iter().cloned());
+        if !cached.contains_key(&body) {
+            built.push((body.clone(), chunk.clone()));
         }
     }
     errs.sort_by(|(a, _), (b, _)| a.cmp(b));
@@ -1847,10 +2006,11 @@ fn assemble(
     let mut global_skipped: Vec<(String, String)> = Vec::new();
     merge_units(global_results, &mut globals_lua, &mut global_skipped, &mut direct_globals, &mut direct_calls, &mut pending_inits, &mut always_emitted_calls, &mut always_emitted_names, &mut times);
 
-    // Whole-program DCE: emit a fn definition only if a root reaches it.
-    let reachable = reachable_fns(
-        ws, cache, &deco_map, cache.project_root.as_deref(), &always_emitted_calls,
-        &always_emitted_names,
+    // Whole-program DCE: emit a fn definition only if a root reaches it. ONE
+    // liveness answer, for shared and specialized bodies alike.
+    let live = live_bodies(
+        ws, cg, scx, cache, &deco_map, cache.project_root.as_deref(), &always_emitted_calls,
+        &always_emitted_names, &needed_specs,
     )?;
 
     // Function definitions, every module (cached chunk for ordinary/coroutine,
@@ -1875,7 +2035,7 @@ fn assemble(
             // an unlowerable user fn) runs for every fn exactly as before, so
             // pruning can change which definitions are emitted and nothing else --
             // in particular it never hides a diagnostic.
-            let emit_def = reachable.contains(&self_ref);
+            let emit_def = live.emits(self_ref);
             if f.is_extern {
                 // An `extern(ffi, "lib")` fn needs a thin wrapper binding it to the
                 // loaded library handle. A non-ffi extern is a pre-existing global.
@@ -1985,10 +2145,10 @@ fn assemble(
 
     rejections.extend(emit_specialized_callees(
         ws,
-        scx,
-        cg,
         &mut needed_specs,
         &cache.chunks,
+        &live.spec_chunks,
+        &live.rejected,
         built_specs,
         &mut out,
     ));
@@ -2104,7 +2264,7 @@ fn assemble(
     if let Some(err) = cg.take_rejection() {
         return Err(err);
     }
-    Ok((MirEmit { lua: out, skipped, phases }, reachable))
+    Ok((MirEmit { lua: out, skipped, phases }, live.emitted_decls()))
 }
 
 /// Full emit: populate the chunk cache for every ordinary/coroutine body, then
