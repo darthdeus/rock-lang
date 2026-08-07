@@ -12,6 +12,8 @@ mod arena_column_oracle;
 mod backend_variant_mangling;
 #[path = "bounded_lambda_inline.rs"]
 mod bounded_lambda_inline;
+#[path = "bounded_standalone_emission_sentinel.rs"]
+mod bounded_standalone_emission_sentinel;
 #[path = "capture_free_hoist.rs"]
 mod capture_free_hoist;
 #[path = "closure_snapshot.rs"]
