@@ -2,6 +2,9 @@
 
 mod stone_harness;
 
+#[path = "arena_serialization_tests.rs"]
+mod arena_serialization_tests;
+
 #[path = "game_snapshot_tests.rs"]
 mod game_snapshot_tests;
 #[path = "perf_json_format_test.rs"]
@@ -22,6 +25,8 @@ mod replay_timeline_tests;
 mod replay_window_tests;
 #[path = "frame_error_gate.rs"]
 mod frame_error_gate;
+#[path = "rich_text_reject_gate.rs"]
+mod rich_text_reject_gate;
 #[path = "shader_failure_gate.rs"]
 mod shader_failure_gate;
 #[path = "uniform_block_gate.rs"]
@@ -36,6 +41,8 @@ mod sim_concurrent_invocations;
 mod sim_worker_differential;
 #[path = "sim_reload_lane_drain.rs"]
 mod sim_reload_lane_drain;
+#[path = "sim_worker_pool.rs"]
+mod sim_worker_pool;
 #[path = "web_smoke_tests.rs"]
 mod web_smoke_tests;
 

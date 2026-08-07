@@ -434,7 +434,8 @@ fn runtime_prelude() -> &'static str {
     static PRELUDE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
         let out = PRELUDE_TEMPLATE
             .replace("{FN_MT}", skull_codegen_lua::FN_MT_PRELUDE)
-            .replace("{LEAF_VIEWS}", &skull_mir::lower::leaf_views_lua_table());
+            .replace("{LEAF_VIEWS}", &skull_mir::lower::leaf_views_lua_table())
+            .replace("{NB_PRIM_STORAGE}", &skull_mir::lower::nb_prim_storage_lua());
         // `str::replace` on a placeholder that drifted out of the template is a
         // NO-OP, and the survivor is valid Lua: `= {LEAF_VIEWS}` reads an unset
         // global, so the table is EMPTY rather than a syntax error. `pairs({})`
@@ -442,8 +443,12 @@ fn runtime_prelude() -> &'static str {
         // after a grow -- silently, which is the class that killed mag's
         // spell_damages once already. Fail loudly at build time instead.
         assert!(
-            !out.contains('{') || !out.contains("{LEAF_VIEWS}"),
+            !out.contains("{LEAF_VIEWS}"),
             "prelude template still contains an unsubstituted {{LEAF_VIEWS}} placeholder"
+        );
+        assert!(
+            !out.contains("{NB_PRIM_STORAGE}"),
+            "prelude template still contains an unsubstituted {{NB_PRIM_STORAGE}} placeholder"
         );
         out
     });
@@ -462,6 +467,31 @@ _G.__ROCK_LEAF_VIEWS = {LEAF_VIEWS}
 -- Never legitimately empty: an empty table means the generator emitted nothing,
 -- which would make view refresh a silent no-op and leave every view dangling.
 assert(next(_G.__ROCK_LEAF_VIEWS), "__ROCK_LEAF_VIEWS is empty; leaf-view refresh would silently do nothing")
+-- Compiler-described NativeBuffer STORAGE, keyed by the ctype LuaJIT gives the
+-- allocation itself. Generated from skull_mir::lower (NB_PRIM_ELEMS for the
+-- primitive/sized element types, value_leaf_layout_checked + LEAF_VIEWS for the
+-- value-struct ones), so a holder of a storage cdata can ask what its bytes mean
+-- -- element ctype, element width, and the views minted over it -- rather than
+-- reading a `__ty` string or re-deriving a layout. An element array whose ctype
+-- is absent here is storage the compiler does not describe, and every consumer
+-- must fail closed on it.
+--
+-- Keyed by `tostring(ffi.typeof(...))` because a ctype cdata hashes by identity
+-- as a table key, and because a typedef'd anonymous struct only gets its
+-- `struct <n>` spelling from LuaJIT. Registering through the same `ffi.typeof`
+-- the lookup uses is what makes the two agree.
+_G.__ROCK_NB_STORAGE = {}
+local function __rock_nb_storage(ctype, elem_size, views)
+  local ok, ct = pcall(ffi.typeof, ctype .. "[?]")
+  if not ok then error("skull: __ROCK_NB_STORAGE names undeclared ctype `" .. ctype .. "`", 0) end
+  if ffi.sizeof(ctype) ~= elem_size then
+    error("skull storage drift: sizeof(" .. ctype .. ") = " .. ffi.sizeof(ctype)
+          .. ", expected " .. elem_size, 0)
+  end
+  _G.__ROCK_NB_STORAGE[tostring(ct)] = { ctype = ctype, elem_size = elem_size, views = views }
+end
+_G.__rock_nb_storage = __rock_nb_storage
+{NB_PRIM_STORAGE}
 if not _G.__rock_on_hot_reload then _G.__rock_on_hot_reload = {} end
 -- THE way to read/write a global found by name in `__ROCK_GLOBALS`. A `nobox`
 -- global has no slot under its own name -- its storage is its leaf globals -- so
@@ -688,12 +718,19 @@ fn value_struct_defs(
     // Direct ffi.cdef: a skull chunk loads once per process, so a failure here
     // is a genuine emit bug and must abort with LuaJIT's own message — the old
     // pcall swallowed it and every `<Name>_ct` use downstream failed cryptically.
-    let checks = value_leaf_layout_checks(ws, &emitted)?;
-    Ok((format!("ffi.cdef[[\n{}]]\n{}{}", typedefs, ctors, checks), emitted, gc))
+    let (checks, storage) = value_leaf_layout_checks(ws, &emitted)?;
+    Ok((format!("ffi.cdef[[\n{}]]\n{}{}{}", typedefs, ctors, checks, storage), emitted, gc))
 }
 
 /// Assert, once at chunk load, that skull's C layout model agrees with LuaJIT's
-/// for every leaf of every FFI-clean value struct.
+/// for every leaf of every FFI-clean value struct -- and, from that same checked
+/// layout, register each struct as `NativeBuffer` storage in
+/// `_G.__ROCK_NB_STORAGE` (whose primitive/sized half the prelude declares).
+///
+/// One walk, two emitted views. The registry states what a buffer of this
+/// element is made of; the assertions state that the model producing it agrees
+/// with LuaJIT. Deriving both from the same `value_leaf_layout_checked` result
+/// is what keeps them from describing different layouts.
 ///
 /// Leaf addressing (`docs/native-buffer-leaf-addressing-plan.md`) indexes typed
 /// views with COMPILER-COMPUTED byte offsets — a literal constant per leaf, which
@@ -711,11 +748,12 @@ fn value_struct_defs(
 fn value_leaf_layout_checks(
     ws: &Workspace,
     emitted: &rustc_hash::FxHashSet<ustr::Ustr>,
-) -> Result<String, CompilerError> {
+) -> Result<(String, String), CompilerError> {
     use std::fmt::Write as _;
     let mut names: Vec<ustr::Ustr> = emitted.iter().copied().collect();
     names.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     let mut out = String::new();
+    let mut storage = String::new();
     for name in names {
         let (leaves, size, _align) = skull_mir::lower::value_leaf_layout_checked(ws, name)
             .map_err(|e| {
@@ -728,7 +766,7 @@ fn value_leaf_layout_checks(
             "if ffi.sizeof(\"{name}\") ~= {size} then error(\"skull layout drift: \
              sizeof({name}) = \" .. ffi.sizeof(\"{name}\") .. \", expected {size}\", 0) end"
         );
-        for l in leaves {
+        for l in &leaves {
             let _ = writeln!(
                 out,
                 "if ({expr}) ~= {off} then error(\"skull layout drift: {name}.{path} at \" \
@@ -738,8 +776,9 @@ fn value_leaf_layout_checks(
                 path = l.path,
             );
         }
+        storage.push_str(&skull_mir::lower::nb_value_storage_lua(name, &leaves, size));
     }
-    Ok(out)
+    Ok((out, storage))
 }
 
 /// Emit the table-repr materialization defs for every GC-carrying value struct:
@@ -889,7 +928,7 @@ fn enum_cdata_defs(ws: &Workspace) -> String {
 
 /// Attach an `ffi.metatype` to each cdata-eligible ENUM ctype giving it value
 /// `__eq` (compare `__tag` + `_0`, so two distinct `<Enum>_ct` cdata with equal
-/// fields are `==`, and they hash by value as Map keys) and a `__tostring` that
+/// fields are `==`) and a `__tostring` that
 /// renders `<Enum>::<Variant>` from a baked names table -- static reflection, no
 /// runtime engine. Without `__eq`, LuaJIT compares struct cdata by identity, so an
 /// ESCAPING enum (stored in `[Enum]`, a Map, ...) mis-compares. Name-sorted.
@@ -1084,17 +1123,38 @@ fn enum_runtime_defs(ws: &Workspace) -> String {
     out
 }
 
-/// Register a per-value-struct `inspect`/`copy`/`name` closure into
-/// `_G.__ROCK_C_STRUCT`, which the stdlib `inspect` consults to render a value
-/// cdata structurally (`ffi.istype(info.name, obj)` -> `info.inspect(obj)`)
-/// rather than printing its address. Without this a `"{v}"` interpoland on a
-/// value struct renders `cdata<struct N>: 0x...`. Mirrors
-/// rock-codegen/src/backend/lua/structs.rs. Gated by `emitted` — exactly the
-/// structs `value_struct_defs` declared a ctype for, so `ffi.istype` never
-/// names an undefined type.
+/// Register an `inspect`/`copy`/`name` closure into `_G.__ROCK_C_STRUCT` for
+/// every value cdata the compiler mints. That registry is what a consumer asks
+/// "what is this cdata, and how do I copy it": the stdlib `inspect` renders it
+/// structurally (`ffi.istype(info.name, obj)` -> `info.inspect(obj)`) instead of
+/// printing an address, `deepcopy` copies it instead of SHARING it, and the sim
+/// checkpoint census classifies it as `value_cdata` instead of refusing it as
+/// unmodelled. Mirrors rock-codegen/src/backend/lua/structs.rs.
+///
+/// Two producers, one registry. `value` structs are gated by `emitted` — exactly
+/// the structs `value_struct_defs` declared a ctype for, so `ffi.istype` never
+/// names an undefined type. A cdata-eligible enum ([`enum_cdata_defs`]) is the
+/// same layout tier: a typedef'd anonymous struct `{ int __tag; <slots> }`
+/// copied through its own `<Enum>_ct`. Its `inspect` delegates to `tostring`,
+/// which reaches the metatype `__tostring` [`enum_cdata_metatypes`] emitted --
+/// the enum's rendering has one source, not two that can drift.
 fn c_struct_inspect_defs(ws: &Workspace, emitted: &rustc_hash::FxHashSet<ustr::Ustr>) -> String {
     let mut out = String::new();
     {
+        let mut enums: Vec<ustr::Ustr> = ws.enums_by_name.keys().copied().collect();
+        enums.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        for name in enums {
+            let Some(shape) = skull_mir::lower::enum_value_shape(ws, name) else {
+                continue;
+            };
+            let copy_args: Vec<String> =
+                shape.field_names().iter().map(|f| format!("v.{f}")).collect();
+            out.push_str(&format!(
+                "_G.__ROCK_C_STRUCT[\"{name}\"] = {{ inspect = function(v)\n  return tostring(v)\n\
+                 end, copy = function(v)\n  return {name}_ct({})\nend, name = \"{name}\" }}\n",
+                copy_args.join(", ")
+            ));
+        }
         for s in canonical_value_structs(ws) {
             if !emitted.contains(&s.name) {
                 continue;

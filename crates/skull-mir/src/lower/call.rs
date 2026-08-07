@@ -1161,6 +1161,36 @@ impl Builder<'_> {
 
     /// Flatten a `ValueRepr` to its primitive leaf values per `shape` (the wire
     /// ABI). A boxed `Scalar` (e.g. a global cdata / if-join) is field-read.
+    /// Arguments for an `iter`/`pairs` WITNESS call -- the `for` protocol's and
+    /// the implicit iterable->iterator coercion's. The collection obeys the same
+    /// scalar ABI as any other direct-call parameter, so a `value`-struct
+    /// collection (an `Arena<T>` handle) splats to its leaves; handing the
+    /// materialized aggregate over instead gives a multi-parameter body one
+    /// argument and nils the rest.
+    ///
+    /// No scalar ABI means the boxed convention, which takes the collection
+    /// whole -- that is `Opaque`. A scalar ABI with an EMPTY parameter list is a
+    /// different thing entirely: the witness would have no collection parameter
+    /// to receive anything, so treating it as `Opaque` would silently pass an
+    /// argument nothing binds. Reject instead.
+    pub(crate) fn iter_witness_args(
+        &mut self,
+        iter_ref: FuncRef,
+        repr: ValueRepr,
+    ) -> Result<Vec<Idx<Inst>>, CompilerError> {
+        let slot = match fn_scalar_abi(self.ws, self.scx, iter_ref) {
+            None => RetSlot::Opaque,
+            Some(abi) => abi.param_shapes.first().cloned().ok_or_else(|| {
+                gap(format!(
+                    "`for`-protocol iter witness `{}` has a scalar ABI with no parameters, \
+                     so it cannot receive the collection",
+                    self.ws.module(iter_ref.module).functions[iter_ref.func].name
+                ))
+            })?,
+        };
+        Ok(self.repr_to_slot_values(repr, &slot))
+    }
+
     pub(crate) fn repr_to_leaves(&mut self, r: &ValueRepr, shape: &ValueShape) -> Vec<Idx<Inst>> {
         match r {
             // A tuple at a value-shaped sink is a boxed source: pack and

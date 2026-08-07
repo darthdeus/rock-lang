@@ -92,6 +92,9 @@ fn reload_lane_records_land_after_the_pool_drains() {
             .split_once('\t')
             .unwrap_or_else(|| panic!("malformed lifecycle event `{line}`"));
         match event {
+            // Process granularity (`record_sim_lifecycle`); this property is
+            // about ENTRIES, and every entry here is its own process anyway.
+            "proc_start" | "proc_end" => {}
             "start" if name == RELOAD_SIM => {
                 assert!(
                     active.is_empty(),

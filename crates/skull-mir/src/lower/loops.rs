@@ -155,16 +155,15 @@ impl Builder<'_> {
         body: Idx<Expr>,
         info: &ForIterInfo,
     ) -> Result<(), CompilerError> {
-        let coll = self.lower_expr(iter_expr)?;
         // The `for` protocol's witnesses belong to the HEAD expression, which is
         // the key `inf.for_iter_protocol` -- and therefore the instance graph --
-        // records them under. The cursor was restored to the ENCLOSING construct
-        // when `lower_expr` returned above (and is absent entirely when the
-        // `for` is a statement), so both halves are set explicitly here rather
-        // than inherited from a cursor that names the wrong expression. Same
-        // reason `lower_expr` sets them for an implicit-iter coercion.
+        // records them under. The enclosing cursor names the whole construct
+        // (and is absent entirely when the `for` is a statement), so both halves
+        // are set explicitly here rather than inherited from a cursor that names
+        // the wrong expression. Same reason `lower_expr` sets them for an
+        // implicit-iter coercion.
         let outer_expr = self.cur_expr.replace(iter_expr);
-        let out = self.lower_for_user_iter_witnessed(vars, iter_expr, body, info, coll);
+        let out = self.lower_for_user_iter_witnessed(vars, iter_expr, body, info);
         self.cur_expr = outer_expr;
         out
     }
@@ -175,7 +174,6 @@ impl Builder<'_> {
         iter_expr: Idx<Expr>,
         body: Idx<Expr>,
         info: &ForIterInfo,
-        coll: Idx<Inst>,
     ) -> Result<(), CompilerError> {
         let it_val = match info.iter.as_ref().map(|w| w.func) {
             Some((m, f)) => {
@@ -204,11 +202,13 @@ impl Builder<'_> {
                         );
                     }
                 }
+                let repr = self.lower_expr_repr(iter_expr)?;
+                let args = self.iter_witness_args(iter_ref, repr)?;
                 // The `for` head's `iter` witness, not the head expression's
                 // own call: both live at one expression and share one span, so
                 // the operation is what keeps them distinguishable.
                 let call = self.with_site_op(crate::site::SiteOp::ForIter, |b| {
-                    b.emit_cur(Inst::Call { func: iter_ref, args: vec![coll] })
+                    b.emit_cur(Inst::Call { func: iter_ref, args })
                 });
                 // The Stage-3 cutover the note above described: bone records the
                 // witness's own instantiation and emission consumes it HERE, as
@@ -230,7 +230,7 @@ impl Builder<'_> {
                 }
                 call
             }
-            None => coll,
+            None => self.lower_expr(iter_expr)?,
         };
         let it_cell = self.f.new_cell(Some(Ustr::from("__it")));
         self.emit_cur(Inst::Store { cell: it_cell, value: it_val });
@@ -453,12 +453,19 @@ impl Builder<'_> {
         // The element type, when it is column-eligible: under bookkeeping SoA the
         // arena's `data` is an ordinary `[T]`, so at an all-scalar value `T` it is
         // COLUMN-stored and a bare `Index` would read a table that isn't there.
-        let column_elem = self.arena_column_elem_of(iter);
+        let column_elem = self.arena_column_elem_of(iter)?;
 
+        // An Arena is a weak handle, so the columns come from its registry entry.
+        // Resolved ONCE here, outside the counted loop: Scene ownership must not
+        // put a registry lookup in front of every row. A retired handle resolves
+        // to an empty store, which the `i < n` header exits immediately.
         let arena = self.lower_expr(iter)?;
-        let occupied = self.emit_cur(Inst::Field { base: arena, field: Ustr::from("occupied") });
-        let generations = self.emit_cur(Inst::Field { base: arena, field: Ustr::from("generations") });
-        let data = self.emit_cur(Inst::Field { base: arena, field: Ustr::from("data") });
+        let scene_id = self.emit_cur(Inst::Field { base: arena, field: Ustr::from("_scene_id") });
+        let arena_id = self.emit_cur(Inst::Field { base: arena, field: Ustr::from("_arena_id") });
+        let store = self.call_spine("__arena_store_or_empty", vec![scene_id, arena_id])?;
+        let occupied = self.emit_cur(Inst::Field { base: store, field: Ustr::from("occupied") });
+        let generations = self.emit_cur(Inst::Field { base: store, field: Ustr::from("generations") });
+        let data = self.emit_cur(Inst::Field { base: store, field: Ustr::from("data") });
         let n = self.emit_cur(Inst::Len { base: occupied, kind: ContainerKind::Vec });
         let i_cell = self.f.new_cell(None);
         self.f.mark_loop_binding(i_cell);
@@ -514,8 +521,9 @@ impl Builder<'_> {
         let entity = self.emit_cur(Inst::MakeValueStruct {
             name: Ustr::from("Entity"),
             fields: vec![
-                (Ustr::from("_arena"), arena),
-                (Ustr::from("_index"), idx),
+                (Ustr::from("_scene_id"), scene_id),
+                (Ustr::from("_arena_id"), arena_id),
+                (Ustr::from("_slot"), idx),
                 (Ustr::from("_generation"), e_gen),
             ],
         });
@@ -525,7 +533,7 @@ impl Builder<'_> {
         // and the verifier rejects it by name rather than emitting a quiet box.
         let data = match column_elem {
             Some(elem) => {
-                let repr = self.column_element_repr(data, idx, ColumnElem::plain(elem))?;
+                let repr = self.column_element_repr(data, idx, elem)?;
                 self.pack(repr)
             }
             None => self.emit_cur(Inst::Index { base: data, index: idx, kind: ContainerKind::Vec }),

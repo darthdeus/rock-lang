@@ -10,7 +10,7 @@
 //! op-specific fields. See `stone/engine/sim.rock`.
 
 use anyhow::{anyhow, Context, Result};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use colored::Colorize;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -19,14 +19,34 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 use tempfile::TempDir;
 
-/// Frame budget. Sims terminate naturally via the runner's `sim_done`
-/// check; this is the upper bound for runaway / hung body.
+/// Frame budget for a sim that declares none. Sims terminate naturally via the
+/// runner's `sim_done` check; this is the upper bound for a runaway / hung
+/// body. A sim overrides it with `@sim_env("FRAME_COUNT", "<n>")`, which is a
+/// PER-ENTRY value: `sim_start_entry` republishes it at every entry boundary
+/// and the entry plan carries it, so entries with different budgets can share
+/// one worker process.
 const DEFAULT_FRAME_BUDGET: usize = 600;
+
+/// The budget one entry runs on: its own `@sim_env("FRAME_COUNT", ...)`, or the
+/// default. Rejects a value that is not a positive integer rather than falling
+/// back -- a sim asking for a bound the runner silently replaces would be
+/// guarded by a number nobody wrote.
+fn frame_budget_for(sim_name: &str, env_pairs: &[(String, String)]) -> Result<usize> {
+    let Some((_, raw)) = env_pairs.iter().find(|(k, _)| k == "FRAME_COUNT") else {
+        return Ok(DEFAULT_FRAME_BUDGET);
+    };
+    raw.parse::<usize>().ok().filter(|n| *n > 0).ok_or_else(|| {
+        anyhow!("sim `{sim_name}` declares @sim_env(\"FRAME_COUNT\", \"{raw}\"), which is not a positive integer")
+    })
+}
 /// Wall-clock timeout. An INDEPENDENT bound, not a backstop for the frame
 /// budget: it is the only thing that catches a child which never advances a
 /// frame at all -- an infinite loop inside one tick, a blocked FFI call, a
 /// driver stall -- where `FRAME_COUNT` can never be reached and so can never
 /// fire. Neither bound subsumes the other.
+///
+/// It bounds ONE entry: boot up to the first `entry_start`, then each entry
+/// from its own start. A worker's queued entries never accumulate against it.
 ///
 /// Deliberately generous, because it is a wedge detector and not a deadline.
 /// Per-child wall time rises sharply under `--jobs` (render-heavy mag sims have
@@ -103,6 +123,15 @@ fn sim_spawn_barrier() {
     }
 }
 
+/// Parent-side child lifecycle trace, enabled by `ROCK_SIM_LIFECYCLE_LOG`.
+///
+/// Two granularities, because they answer different questions. `start`/`end`
+/// bracket an ENTRY and are written for every part a child was handed, at spawn
+/// and at exit -- which is what the exclusive-lane property is about ("was any
+/// other entry in flight"). `proc_start`/`proc_end` bracket the PROCESS, keyed
+/// by its comma-joined label. A worker is handed a whole queue at once, so its
+/// entries all read live from spawn to exit; only the process events can say how
+/// many booted workers were alive at the same moment, which is the B5 property.
 fn record_sim_lifecycle(event: &str, sim_name: &str) {
     let Some(path) = std::env::var_os("ROCK_SIM_LIFECYCLE_LOG") else {
         return;
@@ -205,7 +234,7 @@ pub fn do_run_sim_opts(backend: crate::Backend, project: &str, sim_name: &str, q
 
     if summary.timed_out {
         return Err(anyhow!(
-            "sim `{sim_name}` timed out after {}s (frame budget {DEFAULT_FRAME_BUDGET}); \
+            "sim `{sim_name}` timed out after {}s (wall clock, not its frame budget); \
              override with ROCK_SIM_TIMEOUT_SECS",
             sim_timeout_secs()
         ));
@@ -396,9 +425,11 @@ pub fn do_run_named_sims(
     quiet: bool,
     update_snapshots: bool,
     jobs: Option<usize>,
+    mode: SimExecMode,
 ) -> Result<()> {
     // One name: identical to the classic single-run path (full detail). There
-    // is nothing to overlap, so `--jobs` does not apply.
+    // is nothing to overlap, so `--jobs` does not apply -- nor `--workers`,
+    // since a one-entry queue takes no checkpoint either way.
     if names.len() == 1 {
         return do_run_sim_opts(backend, project, &names[0], quiet, update_snapshots);
     }
@@ -413,6 +444,43 @@ pub fn do_run_named_sims(
     let (_, env_by_wire, mut stone) =
         compile_sims(backend, project_path, PathBuf::from(&output))?;
     sim_spawn_barrier();
+
+    if mode != SimExecMode::Isolated {
+        let results = run_specs_worker_mode(
+            &project,
+            &output,
+            &env_by_wire,
+            names,
+            quiet,
+            update_snapshots,
+            jobs,
+            &mut stone,
+            mode,
+        )?;
+        let mut passed = 0usize;
+        let mut failed: Vec<String> = Vec::new();
+        for (name, summary) in &results {
+            if entry_passed(summary) {
+                passed += 1;
+            } else {
+                failed.push(name.clone());
+            }
+        }
+        let suffix = if failed.is_empty() {
+            String::new()
+        } else {
+            format!(" -- FAILED: {}", failed.join(", "))
+        };
+        println!("[sim] {passed}/{} sims passed{suffix}", names.len());
+        if !failed.is_empty() {
+            return Err(anyhow!(
+                "{} of {} named sims failed in `{project}`",
+                failed.len(),
+                names.len()
+            ));
+        }
+        return Ok(());
+    }
 
     let jobs = resolve_jobs(jobs, update_snapshots);
 
@@ -517,12 +585,48 @@ pub fn do_run_named_sims(
 /// tally. Returns Err (non-zero exit) if any sim failed. Distinct sims
 /// don't chain, so each gets its own `OUT`; use the comma form for
 /// multi-start chains.
+/// The one bounded scheduler. `task` is claimed by index off a shared cursor,
+/// so a task runs exactly once on at most `jobs` OS threads at a time, and the
+/// serial path is the same call with `jobs == 1` rather than a second code path
+/// that could drift from it. Results come back keyed by index; the CALLER
+/// decides the reporting order, because completion order is not deterministic.
+///
+/// Both fan-outs go through here: Phase A's fresh-process children
+/// ([`do_run_all_sims`]) and Phase B's boot-checkpoint worker lanes
+/// ([`run_specs_worker_mode`]).
+fn run_bounded<T, F>(jobs: usize, n: usize, task: F) -> Vec<(usize, Result<T>)>
+where
+    F: Fn(usize) -> Result<T> + Sync,
+    T: Send,
+{
+    if jobs <= 1 || n <= 1 {
+        return (0..n).map(|i| (i, task(i))).collect();
+    }
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let collected: Mutex<Vec<(usize, Result<T>)>> = Mutex::new(Vec::new());
+    let lanes = jobs.min(n);
+    std::thread::scope(|scope| {
+        for _ in 0..lanes {
+            scope.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if i >= n {
+                    break;
+                }
+                let r = task(i);
+                collected.lock().unwrap().push((i, r));
+            });
+        }
+    });
+    collected.into_inner().expect("no lane panicked while holding the results lock")
+}
+
 pub fn do_run_all_sims(
     backend: crate::Backend,
     project: &str,
     quiet: bool,
     update_snapshots: bool,
     jobs: Option<usize>,
+    mode: SimExecMode,
 ) -> Result<()> {
     rock_host::project::ensure_workspace_root()?;
 
@@ -537,6 +641,46 @@ pub fn do_run_all_sims(
     sim_spawn_barrier();
     if wire_names.is_empty() {
         return Err(anyhow!("no @sim coroutines found in project `{project}`"));
+    }
+
+    if mode != SimExecMode::Isolated {
+        let results = run_specs_worker_mode(
+            &project,
+            &output,
+            &env_by_wire,
+            &wire_names,
+            quiet,
+            update_snapshots,
+            jobs,
+            &mut stone,
+            mode,
+        )?;
+        let mut passed = 0usize;
+        let mut failed: Vec<String> = Vec::new();
+        for (name, summary) in &results {
+            if entry_passed(summary) {
+                passed += 1;
+            } else {
+                failed.push(name.clone());
+            }
+        }
+        let suffix = if failed.is_empty() {
+            String::new()
+        } else {
+            format!(" -- FAILED: {}", failed.join(", "))
+        };
+        println!(
+            "[sim] {project} suite: {passed}/{} sims passed{suffix}",
+            wire_names.len()
+        );
+        if !failed.is_empty() {
+            return Err(anyhow!(
+                "{} of {} sims failed in `{project}`",
+                failed.len(),
+                wire_names.len()
+            ));
+        }
+        return Ok(());
     }
 
     let jobs = resolve_jobs(jobs, update_snapshots);
@@ -592,25 +736,9 @@ pub fn do_run_all_sims(
         Ok(summary)
     };
 
-    if jobs > 1 && ordinary_idx.len() > 1 {
-        let next = std::sync::atomic::AtomicUsize::new(0);
-        let collected: Mutex<Vec<(usize, Result<SimSummary>)>> = Mutex::new(Vec::new());
-        let workers = jobs.min(ordinary_idx.len());
-        std::thread::scope(|scope| {
-            for _ in 0..workers {
-                scope.spawn(|| loop {
-                    let slot = next.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    let Some(&i) = ordinary_idx.get(slot) else { break };
-                    let r = run_at(i, None);
-                    collected.lock().unwrap().push((i, r));
-                });
-            }
-        });
-        summaries.extend(collected.into_inner().unwrap());
-    } else {
-        for &i in &ordinary_idx {
-            summaries.insert(i, run_at(i, None));
-        }
+    for (slot, r) in run_bounded(jobs, ordinary_idx.len(), |slot| run_at(ordinary_idx[slot], None))
+    {
+        summaries.insert(ordinary_idx[slot], r);
     }
 
     // Reload lane, strictly after the pool has drained.
@@ -655,6 +783,192 @@ pub fn do_run_all_sims(
         ));
     }
     Ok(())
+}
+
+/// Worker-mode execution for a list of entry specs (`--workers`): eligible
+/// specs grouped by boot signature run in shared boot-checkpoint workers with
+/// recovery; the ineligible remainder runs isolated, each with its REPORTED
+/// reason.
+///
+/// B5 is the composition of Phase B's worker with Phase A's bounded scheduler,
+/// and it is a LANE PLAN handed to [`run_bounded`], not a second scheduler or a
+/// second worker lifecycle:
+///
+/// - a boot-signature group splits into at most `jobs` CONTIGUOUS lanes, so a
+///   process still serves exactly one canonical signature and the entries in a
+///   lane keep their requested ORDER. Splitting does change predecessors: each
+///   lane's head now starts a fresh worker where serially it would have
+///   followed someone, so `--jobs` trades boundary crossings for wall time.
+///   That is why `--multi-order` does not split (see [`run_worker_arm`]);
+/// - a lane is a whole `run_specs_recovering` queue, so recovery, the
+///   checkpoint-identity guard and the per-entry deadline are unchanged, and a
+///   worker death in one lane cannot reach another;
+/// - the unit of parallelism is the ENTRY (a whole comma-chain), never a chain
+///   part: a lane holds spec POSITIONS and `run_specs_recovering` expands each
+///   into its parts in order, sharing one `$OUT`;
+/// - an isolated entry that does not need the compile session rides the same
+///   pool; the hot-reload lane runs strictly AFTER the pool drains, because it
+///   mutates the one session and the one overlay;
+/// - reporting is deferred to spec order. Completion order is not
+///   deterministic, and a record has to be emitted whole.
+///
+/// Returns one summary per spec, in spec order.
+fn run_specs_worker_mode(
+    project: &str,
+    output: &str,
+    env_by_wire: &HashMap<String, Vec<(String, String)>>,
+    specs: &[String],
+    quiet: bool,
+    update_snapshots: bool,
+    jobs: Option<usize>,
+    stone: &mut crate::skull_backend::SkullStone,
+    mode: SimExecMode,
+) -> Result<Vec<(String, SimSummary)>> {
+    if cfg!(windows) {
+        return Err(anyhow!(
+            "--workers is not available on Windows: the per-entry environment reaches \
+             only the CRT view, so a native reader using the Win32 environment block \
+             would see the previous entry's $OUT"
+        ));
+    }
+    if update_snapshots {
+        return Err(anyhow!(
+            "--workers cannot rewrite snapshot baselines: the runner does not yet prove \
+             every destination path is unique. Run --update-snapshots isolated."
+        ));
+    }
+
+    let jobs = resolve_jobs(jobs, update_snapshots);
+    let (groups, isolated) = group_worker_specs(specs, env_by_wire, mode);
+    // One slot per spec POSITION: the same sim can be named twice, and each
+    // occurrence is its own entry with its own result.
+    let mut slots: Vec<Option<SimSummary>> = specs.iter().map(|_| None).collect();
+
+    // The lane plan. A group splits into contiguous blocks so the entries a
+    // worker serves stay in their requested order; splitting round-robin would
+    // reshuffle every predecessor for no gain.
+    let mut lanes: Vec<Vec<usize>> = Vec::new();
+    for group in &groups {
+        let blocks = jobs.min(group.len()).max(1);
+        for b in 0..blocks {
+            let lo = group.len() * b / blocks;
+            let hi = group.len() * (b + 1) / blocks;
+            if lo < hi {
+                lanes.push(group[lo..hi].to_vec());
+            }
+        }
+    }
+    // An isolated entry needs the compile SESSION only when it opted into the
+    // hot-reload lane; everything else isolated is an ordinary fresh process
+    // and can overlap. `worker_ineligibility` has other reasons (a `$OUT`-
+    // interpolating env, disagreeing chain parts, `SIM_WORKER_ISOLATED`) and
+    // none of them touch the session.
+    let (exclusive, poolable): (Vec<_>, Vec<_>) = isolated.into_iter().partition(|(i, _)| {
+        parse_sim_chain(&specs[*i])
+            .iter()
+            .any(|p| is_reload_lane(env_by_wire.get(*p).map_or(&[][..], |v| v)))
+    });
+
+    if !quiet {
+        for lane in &lanes {
+            if lane.len() > 1 {
+                println!("[sim] worker: {} entries share one booted process", lane.len());
+            }
+        }
+        for (i, reason) in poolable.iter().chain(exclusive.iter()) {
+            println!("[sim] {}: isolated ({reason})", specs[*i]);
+        }
+    }
+
+    // One pool over both kinds of work: a recovering worker queue, and an
+    // isolated entry that needs no session.
+    #[derive(Clone, Copy)]
+    enum Lane<'a> {
+        Worker(&'a [usize]),
+        Isolated(usize),
+    }
+    let work: Vec<Lane> = lanes
+        .iter()
+        .map(|l| Lane::Worker(l.as_slice()))
+        .chain(poolable.iter().map(|(i, _)| Lane::Isolated(*i)))
+        .collect();
+
+    let mut collected: Vec<(usize, SimSummary)> = Vec::new();
+    for (_, r) in run_bounded(jobs, work.len(), |w| match work[w] {
+        Lane::Worker(lane) => {
+            let lane_specs: Vec<String> = lane.iter().map(|&i| specs[i].clone()).collect();
+            // `run_specs_recovering` is positional, so its results line up with
+            // `lane_specs` and therefore with `lane`'s indices.
+            let results = run_specs_recovering(
+                project,
+                output,
+                env_by_wire,
+                &lane_specs,
+                update_snapshots,
+                false,
+            )?;
+            if results.len() != lane.len() {
+                return Err(anyhow!(
+                    "worker lane returned {} results for {} specs",
+                    results.len(),
+                    lane.len()
+                ));
+            }
+            Ok(lane
+                .iter()
+                .zip(results)
+                .map(|(&i, (_, summary, _crossed))| (i, summary))
+                .collect::<Vec<_>>())
+        }
+        Lane::Isolated(i) => {
+            let (_, summary) =
+                run_named_entry(project, &specs[i], quiet, true, update_snapshots, output, env_by_wire, None)?;
+            Ok(vec![(i, summary)])
+        }
+    }) {
+        collected.extend(r?);
+    }
+    for (i, summary) in collected {
+        slots[i] = Some(summary);
+    }
+
+    // The hot-reload lane, strictly after the pool has drained: it mutates the
+    // one `SkullStone` session and the one `incremental.lua` overlay.
+    for &(i, _) in &exclusive {
+        let (_, summary) = run_named_entry(
+            project,
+            &specs[i],
+            quiet,
+            true,
+            update_snapshots,
+            output,
+            env_by_wire,
+            Some(&mut *stone),
+        )?;
+        slots[i] = Some(summary);
+    }
+
+    // Records are emitted in SPEC order, whole. Completion order under a pool is
+    // not deterministic, and a record's diagnostics have to land with it.
+    if !quiet {
+        for (spec, slot) in specs.iter().zip(slots.iter()) {
+            if let Some(summary) = slot {
+                if !summary.diagnostics.is_empty() {
+                    eprint!("{}", summary.diagnostics);
+                }
+                summary.print(spec, false);
+            }
+        }
+    }
+
+    specs
+        .iter()
+        .zip(slots)
+        .map(|(spec, slot)| {
+            let summary = slot.ok_or_else(|| anyhow!("sim `{spec}` was never scheduled"))?;
+            Ok((spec.clone(), summary))
+        })
+        .collect()
 }
 
 /// A mid-sim `reload_edit` request parsed off the `__SIM__` side channel
@@ -786,6 +1100,215 @@ fn writes_live(buffered: bool) -> bool {
     !buffered
 }
 
+/// `@sim_env` keys the runner owns per entry, so they are NOT part of the boot
+/// signature two entries must agree on to share a process.
+///
+/// `FRAME_COUNT` is the entry's runaway bound, carried in the entry plan and
+/// republished by `sim_start_entry` at every boundary. `SIM_DT` and
+/// `SIM_SKIP_RENDER` are read ONCE during boot (`runner_load_sim_entries`), so
+/// they are still boot signature until the worker applies them per entry.
+///
+/// `ROCK_MASK_WALL_CLOCK` is owned outright: the runner publishes its own value
+/// after `preset_env`, so a declared one never reaches the child and cannot
+/// stand for a difference between two entries. Splitting a group on an inert
+/// value would isolate sims for nothing.
+const RUNNER_OWNED_ENV_KEYS: &[&str] = &["FRAME_COUNT", "ROCK_MASK_WALL_CLOCK"];
+
+/// The part of a sim's `@sim_env` that is consumed during global init, engine
+/// init and `@init` -- what a shared process cannot vary between entries.
+///
+/// Canonical (stable-sorted by key) so declaration order does not split a
+/// group: two sims agreeing on the same pairs share a signature however they
+/// spelled them. The sort is stable, so a duplicated key keeps its last-wins
+/// application order and a genuine effective difference still refuses.
+fn boot_signature(env_pairs: &[(String, String)]) -> Vec<(String, String)> {
+    let mut sig: Vec<(String, String)> = env_pairs
+        .iter()
+        .filter(|(k, _)| !RUNNER_OWNED_ENV_KEYS.contains(&k.as_str()))
+        .cloned()
+        .collect();
+    sig.sort_by(|a, b| a.0.cmp(&b.0));
+    sig
+}
+
+/// How `rock sim` maps entries to processes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SimExecMode {
+    /// One fresh process per entry: the permanent reference oracle, and what
+    /// `--isolated` selects. Never inferred -- it is always the caller's word.
+    Isolated,
+    /// Boot-checkpoint workers for everything eligible, RENDERED SIMS INCLUDED.
+    /// The explicit force/diagnostic spelling (`--workers`): it is how a
+    /// rendered sim gets measured in a worker at all, which the differential
+    /// and the multi-order gate both need.
+    Workers,
+    /// The DEFAULT. Render-skipped entries go to boot-checkpoint workers;
+    /// entries that render run in fresh processes with a REPORTED reason.
+    ///
+    /// The split is drawn where the evidence is. On the merged mag corpus every
+    /// divergence among boundary-crossing comparisons belonged to a sim that
+    /// renders, and the one render-skipped sim that diverged did so on a
+    /// NON-crossing comparison from an intermittent log record -- fresh-process
+    /// nondeterminism, which isolating it would not cure.
+    Hybrid,
+}
+
+/// Resolve the two CLI flags. clap already rejects the combination.
+pub fn exec_mode(isolated: bool, workers: bool) -> SimExecMode {
+    debug_assert!(!(isolated && workers));
+    match (isolated, workers) {
+        (true, _) => SimExecMode::Isolated,
+        (_, true) => SimExecMode::Workers,
+        _ => SimExecMode::Hybrid,
+    }
+}
+
+/// Whether an entry RENDERS, from the effective `SIM_SKIP_RENDER` value.
+///
+/// Read last-wins off the resolved pairs, never from the source annotations:
+/// `@sim_render` is lowered to `SIM_SKIP_RENDER=0` before an explicit
+/// `@sim_env` is appended (`skull_backend::collect_skull_sims`), so a sim
+/// carrying both is whatever it says LAST. Classifying on the annotations would
+/// disagree with the value the child actually boots with.
+///
+/// A sim declaring nothing does not render: draw systems are skipped by default
+/// under the harness.
+fn entry_renders(env: &[(String, String)]) -> bool {
+    env.iter()
+        .filter(|(k, _)| k == "SIM_SKIP_RENDER")
+        .next_back()
+        .is_some_and(|(_, v)| v == "0")
+}
+
+/// `STONE_ASSET_STUB` for a child running `parts`: headers-only assets unless
+/// something in the process renders.
+///
+/// ANY rendering entry opts the WHOLE process in to real pixels. The parts of a
+/// comma-separated chain share one process and therefore one image cache, so a
+/// per-entry answer is not available to give -- the first entry's uploads are
+/// still resident when the second runs. Deciding it per process, off the same
+/// `entry_renders` the isolation split uses, is what keeps a sim from counting
+/// as non-rendering here and rendering there.
+fn asset_stub_value(parts: &[WorkerPart]) -> &'static str {
+    if parts.iter().any(|p| entry_renders(&p.env)) {
+        return "0";
+    }
+    unstub_override("STONE_ASSET_STUB")
+}
+
+/// A stub knob's value, honouring an inherited request to load for real.
+///
+/// The parent environment can only ever turn stubbing OFF. Letting it turn
+/// stubbing ON would let a stray shell variable strip the pixels out of a
+/// snapshot sim, which fails as a wrong image rather than as a missing one;
+/// the other direction just makes a run slower and more real, which is exactly
+/// what someone debugging a stubbed sim wants -- and it makes the whole suite
+/// A/B-able without rebuilding.
+fn unstub_override(var: &str) -> &'static str {
+    unstub_from(std::env::var(var).ok().as_deref())
+}
+
+/// The decision itself, separated from the lookup so it is testable without
+/// mutating the process environment out from under a parallel test.
+fn unstub_from(inherited: Option<&str>) -> &'static str {
+    match inherited {
+        Some("0") => "0",
+        _ => "1",
+    }
+}
+
+/// Why an entry cannot join a shared worker process. The reason is REPORTED --
+/// a silently isolated entry would read as a worker result.
+fn worker_ineligibility(
+    spec: &str,
+    env_by_wire: &HashMap<String, Vec<(String, String)>>,
+    mode: SimExecMode,
+) -> Option<String> {
+    let parts = parse_sim_chain(spec);
+    // A spec with no parts has nothing to agree on; the isolated path rejects
+    // it with the runner's one "empty sim name" error.
+    if parts.is_empty() {
+        return Some("empty sim name".to_string());
+    }
+    for part in &parts {
+        let env = env_by_wire.get(*part).map_or(&[][..], |v| v);
+        if is_reload_lane(env) {
+            return Some("hot-reload lane: mutates the one session and overlay".to_string());
+        }
+        // The explicit opt-out, for sims that operate process-global machinery
+        // a shared worker cannot fence -- the checkpoint-machinery fixtures
+        // declare it because they replace the very image the boundary restores.
+        if env.iter().any(|(k, v)| k == "SIM_WORKER_ISOLATED" && v != "0") {
+            return Some("declares @sim_env(SIM_WORKER_ISOLATED)".to_string());
+        }
+        if let Some((k, v)) = env.iter().find(|(_, v)| v.contains("$OUT")) {
+            return Some(format!(
+                "@sim_env(\"{k}\", \"{v}\") interpolates $OUT, which resolves before the process starts"
+            ));
+        }
+        // The hybrid default's one extra rule. ANY rendered part isolates the
+        // whole chain: a chain runs as consecutive entries of one queue, so a
+        // rendered part would render inside a worker however the other parts
+        // are classified.
+        //
+        // `--workers` deliberately does NOT apply it. That mode exists to
+        // measure rendered sims in a worker, which is what the differential and
+        // the multi-order gate are for; a rule that isolated them there would
+        // make the gate unable to see the class it was built to see.
+        if mode == SimExecMode::Hybrid && entry_renders(env) {
+            return Some(format!(
+                "`{part}` renders (SIM_SKIP_RENDER=0); rendered sims run isolated by \
+                 default -- use --workers to measure one in a worker"
+            ));
+        }
+    }
+    // A chain's parts run as consecutive entries of one queue, so they must
+    // agree with each other exactly as distinct entries must.
+    let first_sig = boot_signature(env_by_wire.get(parts[0]).map_or(&[][..], |v| v));
+    for part in &parts[1..] {
+        if boot_signature(env_by_wire.get(*part).map_or(&[][..], |v| v)) != first_sig {
+            return Some(format!(
+                "chain parts `{}` and `{part}` disagree on their @sim_env boot signature",
+                parts[0]
+            ));
+        }
+    }
+    None
+}
+
+/// Partition entry specs for worker mode: groups of specs sharing a boot
+/// signature (in first-appearance order, each group keeping registry order)
+/// plus the isolated remainder, each with its reason.
+///
+/// Everything is carried as an INDEX into `specs`, never as the spec spelling:
+/// a suite may name the same sim twice, and those are two entries that each
+/// need scheduling and each own a result.
+#[allow(clippy::type_complexity)]
+fn group_worker_specs(
+    specs: &[String],
+    env_by_wire: &HashMap<String, Vec<(String, String)>>,
+    mode: SimExecMode,
+) -> (Vec<Vec<usize>>, Vec<(usize, String)>) {
+    let mut groups: Vec<(Vec<(String, String)>, Vec<usize>)> = Vec::new();
+    let mut isolated: Vec<(usize, String)> = Vec::new();
+    for (i, spec) in specs.iter().enumerate() {
+        if let Some(reason) = worker_ineligibility(spec, env_by_wire, mode) {
+            isolated.push((i, reason));
+            continue;
+        }
+        let head = parse_sim_chain(spec)
+            .first()
+            .copied()
+            .expect("an empty chain is classified ineligible above");
+        let sig = boot_signature(env_by_wire.get(head).map_or(&[][..], |v| v));
+        match groups.iter_mut().find(|(s, _)| *s == sig) {
+            Some((_, members)) => members.push(i),
+            None => groups.push((sig, vec![i])),
+        }
+    }
+    (groups.into_iter().map(|(_, members)| members).collect(), isolated)
+}
+
 /// One queued sim body. A worker child runs these in order in ONE process;
 /// the parts of a comma-chain share an `out_dir`, distinct entries do not.
 #[derive(Clone)]
@@ -831,22 +1354,113 @@ struct EntryStream {
 /// `__SIM__`) lines outside the envelope are ordinary boot/teardown logging and
 /// are attributed to the most recently started entry for debugging only.
 fn split_worker_stream(lines: &[String], parts: &[WorkerPart]) -> Result<Vec<EntryStream>> {
-    let n = parts.len();
-    let mut out: Vec<EntryStream> = (0..n).map(|_| EntryStream::default()).collect();
-    let mut open: Option<usize> = None;
-    let mut next_expected = 0usize;
+    let mut out: Vec<EntryStream> = (0..parts.len()).map(|_| EntryStream::default()).collect();
+    let mut tracker = EnvelopeTracker::for_parts(parts);
     // Where raw lines land while no entry is open: the entry that just closed,
     // or entry 0 before anything has started.
     let mut attribution = 0usize;
 
     for line in lines {
-        let Some(rest) = line.strip_prefix("__SIM__ ") else {
-            out[attribution].raw_all.push(line.clone());
-            if open.is_some() {
-                out[attribution].raw_in_entry.push(line.clone());
+        match tracker.observe(line)? {
+            EnvelopeStep::Raw { in_entry } => {
+                out[attribution].raw_all.push(line.clone());
+                if in_entry {
+                    out[attribution].raw_in_entry.push(line.clone());
+                }
             }
-            continue;
+            EnvelopeStep::Started(seq) => {
+                attribution = seq;
+                out[seq].started = true;
+            }
+            EnvelopeStep::Ended(seq) => out[seq].terminated = true,
+            EnvelopeStep::Op(live) => out[live].sim.push(line.clone()),
+        }
+    }
+
+    // An entry left open is only explicable as the one the process died in, so
+    // it has to be the last one that started.
+    if let Some(live) = tracker.open {
+        if live + 1 != tracker.next_expected
+            || tracker.next_expected != out.iter().filter(|s| s.started).count()
+        {
+            return Err(anyhow!(
+                "worker left entry {live} (`{}`) open but started later entries too",
+                parts[live].name
+            ));
+        }
+    }
+    Ok(out)
+}
+
+/// The ONE interpretation of the per-entry envelope, driven a line at a time.
+/// `split_worker_stream` uses it after the child exits to demux the stream,
+/// and the live stderr reader uses it to decide when the wall-clock deadline
+/// anchor may reset -- so a line the demux would reject can never buy a wedged
+/// child more time. An unvalidated `entry_start` reset was exactly that hole:
+/// a sim flooding bogus starts from inside one tick evaded the only bound
+/// that can kill it.
+struct EnvelopeTracker {
+    names: Vec<String>,
+    open: Option<usize>,
+    next_expected: usize,
+}
+
+/// What one observed line meant to the envelope.
+enum EnvelopeStep {
+    /// A valid `entry_start` for the expected next entry -- the only step the
+    /// deadline anchor may reset on.
+    Started(usize),
+    Ended(usize),
+    /// A structured operation inside the open entry.
+    Op(usize),
+    /// A non-`__SIM__` line; `in_entry` says whether an envelope was open.
+    Raw { in_entry: bool },
+}
+
+/// The live half of the wedged-child guard: each stderr line runs through the
+/// strict envelope, and the deadline anchor may reset exactly when this says
+/// so -- an accepted `entry_start`, nothing else. The first violation poisons
+/// the guard, so no later line can extend the deadline either; the violation
+/// itself is reported after the exit by `split_worker_stream` running the
+/// same interpretation. Without the gate, a sim wedged inside one tick --
+/// where the frame budget can never be evaluated -- could flood bogus starts
+/// and evade the only bound able to kill it.
+struct DeadlineGuard {
+    envelope: Option<EnvelopeTracker>,
+}
+
+impl DeadlineGuard {
+    fn for_parts(parts: &[WorkerPart]) -> Self {
+        Self { envelope: Some(EnvelopeTracker::for_parts(parts)) }
+    }
+
+    /// True exactly when `line` must reset the deadline anchor.
+    fn observe_resets(&mut self, line: &str) -> bool {
+        match self.envelope.as_mut().map(|t| t.observe(line)) {
+            Some(Ok(EnvelopeStep::Started(_))) => true,
+            Some(Err(_)) => {
+                self.envelope = None;
+                false
+            }
+            _ => false,
+        }
+    }
+}
+
+impl EnvelopeTracker {
+    fn for_parts(parts: &[WorkerPart]) -> Self {
+        Self {
+            names: parts.iter().map(|p| p.name.clone()).collect(),
+            open: None,
+            next_expected: 0,
+        }
+    }
+
+    fn observe(&mut self, line: &str) -> Result<EnvelopeStep> {
+        let Some(rest) = line.strip_prefix("__SIM__ ") else {
+            return Ok(EnvelopeStep::Raw { in_entry: self.open.is_some() });
         };
+        let n = self.names.len();
         let op = extract_str_field(rest, "op").unwrap_or_default();
         match op.as_str() {
             "entry_start" => {
@@ -859,60 +1473,48 @@ fn split_worker_stream(lines: &[String], parts: &[WorkerPart]) -> Result<Vec<Ent
                         "worker started entry {seq} but the queue has only {n} entries: {line}"
                     ));
                 }
-                if let Some(live) = open {
+                if let Some(live) = self.open {
                     return Err(anyhow!(
                         "worker started entry {seq} while entry {live} (`{}`) was still open: {line}",
-                        parts[live].name
+                        self.names[live]
                     ));
                 }
-                if seq != next_expected {
+                if seq != self.next_expected {
                     return Err(anyhow!(
-                        "worker started entry {seq} out of order (expected {next_expected}): {line}"
+                        "worker started entry {seq} out of order (expected {}): {line}",
+                        self.next_expected
                     ));
                 }
-                envelope_name_matches(rest, &parts[seq].name, line)?;
-                open = Some(seq);
-                attribution = seq;
-                next_expected = seq + 1;
-                out[seq].started = true;
+                envelope_name_matches(rest, &self.names[seq], line)?;
+                self.open = Some(seq);
+                self.next_expected = seq + 1;
+                Ok(EnvelopeStep::Started(seq))
             }
             "entry_end" => {
                 let seq = envelope_seq(rest, line)?;
-                let Some(live) = open else {
+                let Some(live) = self.open else {
                     return Err(anyhow!("worker ended entry {seq} with no entry open: {line}"));
                 };
                 if seq != live {
                     return Err(anyhow!(
                         "worker ended entry {seq} while entry {live} (`{}`) was open: {line}",
-                        parts[live].name
+                        self.names[live]
                     ));
                 }
-                envelope_name_matches(rest, &parts[live].name, line)?;
-                out[live].terminated = true;
-                open = None;
+                envelope_name_matches(rest, &self.names[live], line)?;
+                self.open = None;
+                Ok(EnvelopeStep::Ended(live))
             }
             _ => {
-                let Some(live) = open else {
+                let Some(live) = self.open else {
                     return Err(anyhow!(
                         "worker emitted a `{op}` operation outside any entry envelope: {line}"
                     ));
                 };
-                out[live].sim.push(line.clone());
+                Ok(EnvelopeStep::Op(live))
             }
         }
     }
-
-    // An entry left open is only explicable as the one the process died in, so
-    // it has to be the last one that started.
-    if let Some(live) = open {
-        if live + 1 != next_expected || next_expected != out.iter().filter(|s| s.started).count() {
-            return Err(anyhow!(
-                "worker left entry {live} (`{}`) open but started later entries too",
-                parts[live].name
-            ));
-        }
-    }
-    Ok(out)
 }
 
 fn envelope_seq(rest: &str, line: &str) -> Result<usize> {
@@ -936,9 +1538,10 @@ fn envelope_name_matches(rest: &str, expected: &str, line: &str) -> Result<()> {
 ///
 /// A single-part call is the ordinary fresh-process sim: the queue mechanism is
 /// the same one, so there is no second lifecycle to keep in step. More than one
-/// part means the entries share a booted process with NO state reset between
-/// them yet (`docs/sim-speed-plan.md` B1/B3) -- that is the condition the
-/// differential oracle exists to measure, not a supported way to run a suite.
+/// part means the entries share a booted process, with the child checkpointing
+/// at boot and restoring that image at every entry boundary
+/// (`sim_worker_restore_boot`); the native half B3 owes is what the remaining
+/// differential sentinels pin.
 fn run_worker(
     project: &str,
     parts: &[WorkerPart],
@@ -946,6 +1549,7 @@ fn run_worker(
     buffered: bool,
     update_snapshots: bool,
     output: &str,
+    recording: bool,
     stone: Option<&mut crate::skull_backend::SkullStone>,
 ) -> Result<Vec<SimSummary>> {
     let Some(first) = parts.first() else {
@@ -970,7 +1574,7 @@ fn run_worker(
             ));
         }
         for p in &parts[1..] {
-            if p.env != first.env {
+            if boot_signature(&p.env) != boot_signature(&first.env) {
                 return Err(anyhow!(
                     "sims `{}` and `{}` have different @sim_env boot signatures and \
                      cannot share one worker process",
@@ -1049,7 +1653,36 @@ fn run_worker(
         // `@sim_env("ROCK_TEST_SEED", ...)` in a sim still overrides
         // because `preset_env` is layered after this baseline.
         .env("ROCK_TEST_SEED", "42")
+        // Headers-only assets unless something in this process renders. Decided
+        // by `entry_renders`, the same oracle the isolation split uses, so a sim
+        // cannot count as non-rendering here and rendering there. ANY rendering
+        // entry in a chain opts the whole process in: one process, one image
+        // cache, and the first entry's loads are still resident for the second.
+        // Layered before `preset_env` so an explicit
+        // `@sim_env("STONE_ASSET_STUB", "0")` still wins.
+        .env("STONE_ASSET_STUB", asset_stub_value(parts))
+        // Audio is stubbed for EVERY entry, not just non-rendering ones: a
+        // rendered snapshot wants pixels and no sound, so `entry_renders` says
+        // nothing about it. The handful of sims that assert on voices, bus
+        // pulls or sound reload set `@sim_env("STONE_AUDIO_STUB", "0")`, which
+        // wins because `preset_env` is layered after this.
+        .env("STONE_AUDIO_STUB", unstub_override("STONE_AUDIO_STUB"))
         .envs(preset_env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        // Renders every `wall_clock_ms(..)` value as a fixed token, but ONLY
+        // for a run whose records get compared: two runs of the same sim cannot
+        // agree on a duration, and the records carrying one also carry facts
+        // that must stay compared. An ordinary run keeps the real numbers --
+        // masking them would turn the editor's timing logs into noise and would
+        // change what a sim's own artifacts contain. Same flag as
+        // `SimArtifacts::record_manifest`, threaded from the same source.
+        //
+        // Published AFTER `preset_env`, and an explicit "0" rather than an
+        // absence, because this variable is the HARNESS's on both sides. A
+        // fixture's `@sim_env` must not be able to unmask a compared run, and an
+        // inherited value must not be able to mask an ordinary one -- and
+        // `wall_clock_ms` latches it into a `static` on first read, so a
+        // per-entry override could not be honoured coherently anyway.
+        .env("ROCK_MASK_WALL_CLOCK", if recording { "1" } else { "0" })
         .env("FPS_LOG", "0")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -1067,6 +1700,7 @@ fn run_worker(
 
     let label = parts.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(",");
     let mut child = cmd.spawn()?;
+    record_sim_lifecycle("proc_start", &label);
     for p in parts {
         record_sim_lifecycle("start", &p.name);
     }
@@ -1081,12 +1715,18 @@ fn run_worker(
     // after the child exits which is useless feedback for a 30s sim.
     let stderr_lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let stdout_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    // What the wall-clock deadline is measured from: the spawn until the first
+    // entry opens, then each `entry_start`. The bound is a wedge detector for
+    // ONE entry, so a queue of healthy entries must not accumulate against it.
+    let deadline_anchor = Arc::new(Mutex::new(std::time::Instant::now()));
     // Mid-sim reload_edit ops flow stderr-thread -> wait-loop, which owns the
     // (single-threaded) SkullStone and services them between try_wait polls.
     let (reload_tx, reload_rx) = mpsc::channel::<ReloadEditReq>();
 
     let stderr_thread = {
         let lines = Arc::clone(&stderr_lines);
+        let anchor = Arc::clone(&deadline_anchor);
+        let mut deadline_guard = DeadlineGuard::for_parts(parts);
         // Buffered runs must not write anything from this thread: several
         // children are live, so a direct write here interleaves into the middle
         // of another sim's locked record. The lines are retained and handed
@@ -1100,8 +1740,12 @@ fn run_worker(
                     Ok(line) => line,
                     Err(e) => return Some(format!("error reading game stderr: {e}")),
                 };
+                if deadline_guard.observe_resets(&line) {
+                    *anchor.lock().unwrap() = std::time::Instant::now();
+                }
                 if let Some(rest) = line.strip_prefix("__SIM__ ") {
-                    if extract_str_field(rest, "op").as_deref() == Some("reload_edit") {
+                    let op = extract_str_field(rest, "op");
+                    if op.as_deref() == Some("reload_edit") {
                         // Send failure = the wait loop already reaped the child;
                         // the edit can't apply, which the sim's own wait_for
                         // timeout (or the post-exit drain) surfaces.
@@ -1147,7 +1791,6 @@ fn run_worker(
     };
 
     let timeout = Duration::from_secs(sim_timeout_secs());
-    let start_time = std::time::Instant::now();
     let mut pristine: HashMap<String, String> = HashMap::new();
     let mut reload_errors: Vec<SiteMessage> = Vec::new();
     let mut stone = stone;
@@ -1155,7 +1798,8 @@ fn run_worker(
         match child.try_wait()? {
             Some(s) => break (s, false),
             None => {
-                if start_time.elapsed() > timeout {
+                let since_anchor = deadline_anchor.lock().unwrap().elapsed();
+                if since_anchor > timeout {
                     let _ = child.kill();
                     let s = child.wait()?;
                     break (s, true);
@@ -1239,6 +1883,7 @@ fn run_worker(
     for p in parts {
         record_sim_lifecycle("end", &p.name);
     }
+    record_sim_lifecycle("proc_end", &label);
     if writes_live(buffered) {
         for message in &reader_diagnostics {
             log::warn!(target: "SIM", "{message}");
@@ -1260,6 +1905,7 @@ fn run_worker(
     for (i, (part, stream)) in parts.iter().zip(streams.iter()).enumerate() {
         let mut summary = SimSummary::from_stderr(&stream.sim.join("\n"));
         if !stream.started {
+            summary.never_started = true;
             summary.errors.push(SiteMessage {
                 message: format!(
                     "sim `{}` never started: the worker process ended during an earlier entry",
@@ -1389,7 +2035,7 @@ fn run_one_sim(
     let part = WorkerPart {
         name: sim_part.to_string(),
         out_dir: out_path.to_path_buf(),
-        frame_budget: DEFAULT_FRAME_BUDGET,
+        frame_budget: frame_budget_for(sim_part, env_pairs)?,
         env: env_pairs.to_vec(),
     };
     let mut summaries = run_worker(
@@ -1399,6 +2045,9 @@ fn run_one_sim(
         buffered,
         update_snapshots,
         output,
+        // Both callers build their `$OUT` from a non-recording `SimArtifacts`,
+        // so no record from here is ever compared.
+        false,
         stone,
     )?;
     Ok(summaries.remove(0))
@@ -1452,11 +2101,12 @@ fn run_entries(
         }
         part_counts.push(chain.len());
         for name in chain {
+            let env = env_by_wire.get(name).cloned().unwrap_or_default();
             parts.push(WorkerPart {
                 name: name.to_string(),
                 out_dir: entry_artifacts.path().to_path_buf(),
-                frame_budget: DEFAULT_FRAME_BUDGET,
-                env: env_by_wire.get(name).cloned().unwrap_or_default(),
+                frame_budget: frame_budget_for(name, &env)?,
+                env,
             });
         }
         artifacts.push(entry_artifacts);
@@ -1465,7 +2115,7 @@ fn run_entries(
     // Not quiet, but buffered: nothing is written live (several entries share
     // one stream), and every diagnostic is retained into its record instead.
     let summaries = match grouping {
-        Grouping::Shared => run_worker(project, &parts, false, true, false, output, None)?,
+        Grouping::Shared => run_worker(project, &parts, false, true, false, output, true, None)?,
         Grouping::PerPart => {
             let mut out = Vec::with_capacity(parts.len());
             for part in &parts {
@@ -1476,6 +2126,7 @@ fn run_entries(
                     true,
                     false,
                     output,
+                    true,
                     None,
                 )?);
             }
@@ -1494,6 +2145,502 @@ fn run_entries(
         records.push(record_of(spec, seq, merged));
     }
     Ok(records)
+}
+
+/// One queued entry spec (a name or a comma-chain) with its `$OUT` and parts,
+/// built once so recovery rounds rerun the SAME plan against the same
+/// directories.
+struct SpecPlan {
+    spec: String,
+    artifacts: Option<SimArtifacts>,
+    parts: Vec<WorkerPart>,
+}
+
+/// Run `entry_specs` in ONE boot-checkpoint worker, with failure containment:
+/// when the worker dies (crash, kill, timeout), the entry it died inside keeps
+/// its failure record and every UNSTARTED entry reruns in a fresh worker of
+/// the same boot signature. Containment, not a state reset claim -- the
+/// in-child boundary owns the reset.
+///
+/// The caller has already grouped `entry_specs` by boot signature;
+/// `run_worker` still refuses a mixed queue, so a grouping bug is loud.
+fn run_specs_recovering(
+    project: &str,
+    output: &str,
+    env_by_wire: &HashMap<String, Vec<(String, String)>>,
+    entry_specs: &[String],
+    update_snapshots: bool,
+    record_manifest: bool,
+) -> Result<Vec<(String, SimSummary, bool)>> {
+    let mut plans = Vec::with_capacity(entry_specs.len());
+    for spec in entry_specs {
+        let artifacts = SimArtifacts::with_manifest(record_manifest)?;
+        let chain = parse_sim_chain(spec);
+        if chain.is_empty() {
+            return Err(anyhow!("sim got an empty sim name"));
+        }
+        let parts = chain
+            .iter()
+            .map(|name| {
+                let env = env_by_wire.get(*name).cloned().unwrap_or_default();
+                Ok(WorkerPart {
+                    name: name.to_string(),
+                    out_dir: artifacts.path().to_path_buf(),
+                    frame_budget: frame_budget_for(name, &env)?,
+                    env,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        plans.push(SpecPlan { spec: spec.clone(), artifacts: Some(artifacts), parts });
+    }
+
+    // The third field is PROVENANCE: did this spec actually follow another one
+    // inside the same process? Position in the queue cannot answer that, because
+    // recovery reruns unstarted specs in a fresh worker where they start over at
+    // offset 0. Only the round that produced the record knows.
+    let mut done: Vec<(String, SimSummary, bool)> = Vec::new();
+    let mut base = 0usize;
+    while base < plans.len() {
+        let parts: Vec<WorkerPart> =
+            plans[base..].iter().flat_map(|p| p.parts.iter().cloned()).collect();
+        let summaries =
+            run_worker(project, &parts, false, true, update_snapshots, output, record_manifest, None)?;
+
+        // Reassemble per spec and decide how far this round got. Specs whose
+        // parts all started are final; the first spec with an unstarted part is
+        // where the process died IF any of its parts started (a half-run chain
+        // keeps its failure record). A fully-unstarted first spec means the
+        // worker died during boot: its record carries the process failure, so
+        // it is final too -- which is also the progress guarantee, since every
+        // round finalizes at least one spec.
+        let mut merged: Vec<(SimSummary, bool)> = Vec::new();
+        let mut it = summaries.into_iter();
+        for plan in &plans[base..] {
+            let part_summaries: Vec<SimSummary> = it.by_ref().take(plan.parts.len()).collect();
+            let any_unstarted = part_summaries.iter().any(|s| s.never_started);
+            let any_started = part_summaries.iter().any(|s| !s.never_started);
+            let mut m = SimSummary::default();
+            for s in part_summaries {
+                m.merge(s);
+            }
+            merged.push((m, any_unstarted && !any_started));
+            if any_unstarted {
+                break;
+            }
+        }
+
+        let finals = match merged.iter().position(|(m, _)| m.never_started) {
+            None => merged.len(),
+            // Died inside a started spec (or during boot for spec 0): that
+            // spec's record is final. A fully-unstarted later spec reruns.
+            Some(i) if merged[i].1 && i > 0 => i,
+            Some(i) => i + 1,
+        };
+        debug_assert!(finals >= 1, "a recovery round must finalize at least one spec");
+
+        for (offset, (mut summary, _)) in merged.into_iter().take(finals).enumerate() {
+            let plan = &mut plans[base + offset];
+            // An entry the native reset boundary could not return ENDS its
+            // worker, but its own record stands: it ran to completion inside a
+            // closed envelope, and it followed a predecessor, so it is real
+            // boundary evidence. Rerunning it would execute it twice and repeat
+            // whatever external side effects it had. Only its unstarted
+            // successors need a fresh worker, which the recovery loop already
+            // does for them. The reason is REPORTED so the entry is not a
+            // silently slower one.
+            let provenance = offset > 0;
+            if let Some(reason) = summary.worker_ineligible.take() {
+                eprintln!(
+                    "{} `{}` ended its worker: {}",
+                    "[sim]".yellow(),
+                    plan.spec,
+                    reason
+                );
+            }
+            let artifacts = plan
+                .artifacts
+                .take()
+                .expect("a spec is finalized exactly once");
+            artifacts.finish(&mut summary);
+            done.push((plan.spec.clone(), summary, provenance));
+        }
+        base += finals;
+    }
+    Ok(done)
+}
+
+/// Test-facing surface for the recovering worker queue: compile, run
+/// `entry_specs` in one worker (with recovery), and return a structured record
+/// per spec, artifact manifest included.
+///
+/// The flag beside each record is PROVENANCE: true when that spec actually
+/// followed another one inside the same process, and so is the only kind of
+/// record that can be evidence about a restore boundary. Recovery makes this
+/// unanswerable from queue position, since a rerun spec starts its fresh worker
+/// with no predecessor.
+/// The shuffled arm's permutation. Deterministic by construction: an order that
+/// varies per run makes a divergence unreproducible and a green run unrepeatable,
+/// which is the opposite of what a gate is for. One fixed seed, Fisher-Yates.
+fn fixed_shuffle(n: usize) -> Vec<usize> {
+    let mut idx: Vec<usize> = (0..n).collect();
+    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+    for i in (1..n).rev() {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        idx.swap(i, (state % (i as u64 + 1)) as usize);
+    }
+    idx
+}
+
+/// Run `ordered` the way `--workers` GROUPS it -- eligible specs grouped by
+/// boot signature into shared recovering workers, the remainder isolated -- and
+/// return a record per spec, aligned to `ordered`.
+///
+/// Deliberately one worker per signature, where `--workers` splits a group into
+/// `--jobs` lanes (B5): a lane split can only reduce how many entries actually
+/// follow a predecessor in one process, and that population is this gate's
+/// denominator. Nothing about what a worker does at a boundary differs between
+/// the two.
+///
+/// Results are carried by INDEX, never by spec spelling: a corpus may name the
+/// same sim twice and those are two entries with two results.
+fn run_worker_arm(
+    project: &str,
+    output: &str,
+    env_by_wire: &HashMap<String, Vec<(String, String)>>,
+    ordered: &[String],
+) -> Result<Vec<(crate::sim_record::SimRecord, bool)>> {
+    // The GATE measures rendered sims in workers on purpose: the hybrid
+    // default isolates them, and a gate that inherited that rule could never
+    // see the class it exists to watch.
+    let (groups, isolated) = group_worker_specs(ordered, env_by_wire, SimExecMode::Workers);
+    let mut out: Vec<Option<(crate::sim_record::SimRecord, bool)>> = vec![None; ordered.len()];
+
+    for members in groups {
+        let specs: Vec<String> = members.iter().map(|&i| ordered[i].clone()).collect();
+        let results = run_specs_recovering(project, output, env_by_wire, &specs, false, true)?;
+        if results.len() != members.len() {
+            return Err(anyhow!(
+                "worker group returned {} results for {} specs",
+                results.len(),
+                members.len()
+            ));
+        }
+        for (k, (spec, summary, crossed)) in results.into_iter().enumerate() {
+            out[members[k]] = Some((record_of(&spec, members[k], summary), crossed));
+        }
+    }
+    // Ineligible entries run in a fresh process, so they cross no boundary --
+    // they are still COMPARED (a difference here is a real one), they just
+    // cannot be evidence that a restore put the world back.
+    for (i, reason) in isolated {
+        println!("[multi-order]   isolated: {} -- {reason}", ordered[i]);
+        let mut records = run_entries(
+            project,
+            output,
+            env_by_wire,
+            std::slice::from_ref(&ordered[i]),
+            Grouping::PerPart,
+        )?;
+        out[i] = Some((records.remove(0), false));
+    }
+
+    out.into_iter()
+        .enumerate()
+        .map(|(i, r)| r.ok_or_else(|| anyhow!("sim `{}` was never scheduled", ordered[i])))
+        .collect()
+}
+
+/// The Phase B4 corpus gate (`docs/sim-speed-plan.md`): every sim's worker
+/// result must equal its own fresh-process reference, under three different
+/// predecessor assignments.
+///
+/// Three orders and not one because the class this gate exists to catch is
+/// leakage FROM a predecessor: in registry order a given sim always follows the
+/// same neighbour, so a leak between two sims that happen to agree would never
+/// be exercised. Reverse and a fixed shuffle give each sim different
+/// predecessors without giving up reproducibility.
+///
+/// The reference is per SIM, taken once in one fresh process each, which is the
+/// permanent `--isolated` oracle -- not a second worker arm, and not the
+/// previous arm's result.
+/// Arms no corpus in this tree can populate, so an empty one is the documented
+/// permanent state rather than a hole the gate should refuse over.
+///
+/// `errors` counts runner/sim `error` ops, and every op that emits one also
+/// FAILS its sim -- a fixture built to populate it would be a permanently red
+/// entry in `rock sim testbed`, and mag's known reds fail expects rather than
+/// erroring. The arm is still guarded twice over: `Comparison::population`
+/// panics on an arm that is absent rather than reading as "nothing to see", and
+/// `sim_record`'s synthetic per-arm tests fail when an arm is censused but no
+/// longer compared. Encoded here so that "permanently empty" is a stated
+/// exception with a reason, not a gate everyone learns to ignore.
+const ARMS_WITHOUT_A_CORPUS: &[&str] = &["errors"];
+
+/// Whether an empty comparison arm should stop the gate, given which arms came
+/// back empty and whether this run measured a named SUBSET.
+///
+/// Over the whole corpus an empty arm is a hole: the gate would be reporting a
+/// green over something it never compared. Over a subset it is expected -- the
+/// caller picked two sims to re-measure one class, and whether that pair
+/// happens to fail an expect is unrelated to why it was picked. A subset's
+/// evidence requirement is the boundary-crossing population instead, which is
+/// checked separately and is what a subset can actually be wrong about.
+fn population_refusal(empty: &[&str], subset: bool) -> Option<String> {
+    if subset {
+        return None;
+    }
+    let unexpected: Vec<&str> =
+        empty.iter().copied().filter(|a| !ARMS_WITHOUT_A_CORPUS.contains(a)).collect();
+    if unexpected.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "these arms compared an empty population, so their agreement is evidence of nothing: {}",
+        unexpected.join(", ")
+    ))
+}
+
+/// The corpus one `--multi-order` invocation measures: the whole registry, or
+/// the named subset of it in REGISTRY ORDER, which is what the "registry" arm
+/// means and what makes the reverse arm its reverse.
+///
+/// Every refusal here is loud, because each one would otherwise silently shrink
+/// the corpus and a gate that measured less than it was asked to would still
+/// print a green:
+///
+/// - an unknown name is a typo, and dropping it would run the gate over the
+///   sims that happened to match;
+/// - a REPEATED name has one reference record and two worker records, so the
+///   second comparison would be scored against a reference that is not its own;
+/// - a `a,b` comma-chain is a different unit -- chain parts share one `$OUT`
+///   and are one entry -- so it cannot name a corpus member.
+fn select_gate_corpus(registry: &[String], selected: &[String]) -> Result<Vec<String>> {
+    if selected.is_empty() {
+        return Ok(registry.to_vec());
+    }
+    let mut wanted: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    let (mut unknown, mut repeated, mut chained) = (Vec::new(), Vec::new(), Vec::new());
+    for name in selected {
+        if name.contains(',') {
+            chained.push(name.as_str());
+        } else if !registry.iter().any(|r| r == name) {
+            unknown.push(name.as_str());
+        } else if !wanted.insert(name.as_str()) {
+            repeated.push(name.as_str());
+        }
+    }
+    if !chained.is_empty() {
+        return Err(anyhow!(
+            "`--multi-order` takes sim NAMES, not comma-chains: {}. A chain's parts share one \
+             $OUT and run as a single entry, so a chain cannot be a member of the compared \
+             corpus.",
+            chained.join(", ")
+        ));
+    }
+    if !unknown.is_empty() {
+        return Err(anyhow!(
+            "no sim named {} (try `rock sim --list <project>`); refusing to run this gate over \
+             the names that did match",
+            unknown.join(", ")
+        ));
+    }
+    if !repeated.is_empty() {
+        return Err(anyhow!(
+            "{} named more than once. Each sim has ONE reference record, so a repeat would be \
+             compared against a reference that is not its own.",
+            repeated.join(", ")
+        ));
+    }
+    Ok(registry.iter().filter(|r| wanted.contains(r.as_str())).cloned().collect())
+}
+
+/// `selected` empty means the whole corpus. A non-empty `selected` runs the SAME
+/// four arms over just those sims, in registry order, so a divergence already
+/// isolated to a predecessor/target pair can be re-measured in seconds instead
+/// of re-running 262 sims. It narrows the CORPUS and nothing else: provenance,
+/// the boundary-crossing denominator, the empty-arm refusal and the scheduling
+/// are the whole-corpus ones, so a subset run is the same gate over less.
+///
+/// A subset cannot DISCOVER a divergence class the way the full corpus can --
+/// it fixes which predecessors exist -- so it confirms a class already isolated
+/// rather than replacing the arc checkpoint.
+pub fn run_multi_order_gate(
+    backend: crate::Backend,
+    project: &str,
+    selected: &[String],
+) -> Result<()> {
+    use crate::sim_record::{compare, COMPARED_ARMS};
+
+    rock_host::project::ensure_workspace_root()?;
+    let project_path = rock_host::project::resolve_project_dir(project)?;
+    let project = project_path.to_string_lossy().into_owned();
+    rock_host::engine_build::build_engine_libs(&project)?;
+
+    let out_dir = sim_output_dir()?;
+    let output = out_dir.path().to_string_lossy().into_owned();
+    let (wire_names, env_by_wire, _stone) =
+        compile_sims(backend, project_path, PathBuf::from(&output))?;
+    // Hot-reload sims are out of the corpus, and not because they are awkward:
+    // they mutate the ONE `incremental.lua` overlay, which the suite runner
+    // serializes behind an exclusive lane holding the compile session. This gate
+    // runs the corpus four times over, so each pass would hand them a different
+    // starting overlay and the divergence measured would be the harness's, not
+    // the worker's. They also never reach a worker (`worker_ineligibility`
+    // classifies the reload lane), so excluding them removes nothing this gate
+    // could have decided.
+    //
+    // Selection happens BEFORE that partition so an explicitly named reload sim
+    // is reported as excluded rather than silently missing from a corpus the
+    // caller wrote out by hand.
+    let wire_names = select_gate_corpus(&wire_names, selected)?;
+    let (wire_names, excluded): (Vec<String>, Vec<String>) = wire_names
+        .into_iter()
+        .partition(|name| !is_reload_lane(env_by_wire.get(name).map_or(&[][..], |v| v)));
+    let n = wire_names.len();
+    if n == 0 {
+        return Err(anyhow!("`{project}` registered no sims, so this gate would measure nothing"));
+    }
+    if !excluded.is_empty() {
+        println!(
+            "[multi-order] excluded {} hot-reload sim(s) -- they share one overlay and never \
+             reach a worker: {}",
+            excluded.len(),
+            excluded.join(", ")
+        );
+    }
+
+    println!("[multi-order] {n} sims; reference arm (one fresh process per sim)");
+    let reference = run_entries(&project, &output, &env_by_wire, &wire_names, Grouping::PerPart)?;
+    let reference_at: HashMap<&str, &crate::sim_record::SimRecord> =
+        wire_names.iter().map(String::as_str).zip(reference.iter()).collect();
+
+    let arms: Vec<(&str, Vec<usize>)> = vec![
+        ("registry", (0..n).collect()),
+        ("reverse", (0..n).rev().collect()),
+        ("shuffle", fixed_shuffle(n)),
+    ];
+
+    let mut totals: BTreeMap<&'static str, usize> =
+        COMPARED_ARMS.iter().map(|a| (*a, 0usize)).collect();
+    let mut diverged: Vec<String> = Vec::new();
+    let (mut crossed_n, mut fresh_n) = (0usize, 0usize);
+
+    for (label, order) in &arms {
+        println!("[multi-order] {label} arm");
+        let ordered: Vec<String> = order.iter().map(|&i| wire_names[i].clone()).collect();
+        let records = run_worker_arm(&project, &output, &env_by_wire, &ordered)?;
+        for (pos, (record, crossed)) in records.iter().enumerate() {
+            let name = &ordered[pos];
+            let Some(expected) = reference_at.get(name.as_str()) else {
+                return Err(anyhow!("`{name}` has no reference record"));
+            };
+            let c = compare(expected, record);
+            // EVERY comparison decides divergence -- a difference is a
+            // difference wherever it appears. Only a boundary-crossing entry
+            // feeds the DENOMINATOR: an entry that ran first in its process, or
+            // ran isolated, never had a predecessor's world to inherit, so its
+            // agreement with a fresh process is agreement between two fresh
+            // processes and cannot certify that a restore works.
+            if *crossed {
+                crossed_n += 1;
+                for a in COMPARED_ARMS {
+                    *totals.get_mut(a).expect("totals is keyed by COMPARED_ARMS") +=
+                        c.population(a);
+                }
+            } else {
+                fresh_n += 1;
+            }
+            if !c.is_equivalent() {
+                diverged.push(format!("[{label}] {name}\n{}", c.report()));
+            }
+        }
+    }
+    println!(
+        "[multi-order] {crossed_n} comparisons followed a predecessor in one process and are \
+         the evidence; {fresh_n} ran first in their process or isolated and are compared but \
+         not counted"
+    );
+    if crossed_n == 0 {
+        return Err(anyhow!(
+            "no entry followed a predecessor in one process, so nothing here is evidence \
+             about a restore boundary"
+        ));
+    }
+
+    // A comparison that found nothing is only evidence when each arm had
+    // something to compare. `verdict`, `saw_stop`, `timed_out` and `exit_code`
+    // are populated by every record by construction, so they cannot report an
+    // empty corpus; the rest can, and a zero there means the gate ran over sims
+    // that never produced that kind of observation.
+    println!("[multi-order] compared populations across {} arms:", arms.len());
+    let mut empty: Vec<&str> = Vec::new();
+    for a in COMPARED_ARMS {
+        let total = totals[a];
+        println!("[multi-order]   {a}: {total}");
+        if total == 0 {
+            empty.push(a);
+        }
+    }
+
+    if !diverged.is_empty() {
+        for d in &diverged {
+            println!("{d}");
+        }
+        return Err(anyhow!(
+            "{} of {} comparisons diverged from the isolated reference",
+            diverged.len(),
+            n * arms.len()
+        ));
+    }
+    // An empty arm is REPORTED in both forms, and what it means differs.
+    //
+    // Over the whole corpus it is a hole in the gate: `expects_fail` populates
+    // only from sims that FAIL, so a corpus where everything passes standalone
+    // cannot certify that arm, and the gate must say so rather than report a
+    // green it did not measure. mag carries known-red sims and populates it;
+    // testbed does not, which is why testbed validates the mechanism and mag is
+    // the gate. Not a fudge factor to relax.
+    //
+    // Over a NAMED SUBSET it means nothing at all. The caller chose two sims to
+    // re-measure one class; whether that pair happens to fail an expect or
+    // write an artifact is unrelated to what they were selected for, and
+    // failing on it would make an equivalent pair exit nonzero and be unusable
+    // as an iteration gate. The subset's evidence requirement is the
+    // boundary-crossing population, which is enforced above and is the thing a
+    // subset can actually be wrong about.
+    if let Some(reason) = population_refusal(&empty, !selected.is_empty()) {
+        return Err(anyhow!(reason));
+    }
+    println!(
+        "[multi-order] {} comparisons equivalent to the isolated reference",
+        n * arms.len()
+    );
+    Ok(())
+}
+
+pub fn run_worker_suite(
+    backend: crate::Backend,
+    project: &str,
+    entry_specs: &[String],
+) -> Result<Vec<(crate::sim_record::SimRecord, bool)>> {
+    rock_host::project::ensure_workspace_root()?;
+    let project_path = rock_host::project::resolve_project_dir(project)?;
+    let project = project_path.to_string_lossy().into_owned();
+    rock_host::engine_build::build_engine_libs(&project)?;
+
+    let out_dir = sim_output_dir()?;
+    let output = out_dir.path().to_string_lossy().into_owned();
+    let (_, env_by_wire, _stone) = compile_sims(backend, project_path, PathBuf::from(&output))?;
+
+    let results =
+        run_specs_recovering(&project, &output, &env_by_wire, entry_specs, false, true)?;
+    Ok(results
+        .into_iter()
+        .enumerate()
+        .map(|(seq, (spec, summary, crossed))| (record_of(&spec, seq, summary), crossed))
+        .collect())
 }
 
 /// What to compare: `target` run alone in a fresh process against `target` run
@@ -1998,6 +3145,16 @@ struct SimSummary {
     /// What the entry left under its `$OUT`, keyed by relative path. Captured
     /// by `SimArtifacts::finish_with` while the directory is still live.
     artifacts: std::collections::BTreeMap<String, crate::sim_record::ArtifactEntry>,
+    /// The worker process died before this entry's envelope ever opened. The
+    /// recovery loop reruns such entries in a fresh worker; every other caller
+    /// keeps the error record this flag rides beside.
+    never_started: bool,
+    /// Why this entry could not run as anything but the first entry of a
+    /// process: the native reset boundary found a resource it could neither
+    /// destroy nor return (`stone/engine/sim_native.rock`). The recovery loop
+    /// reruns the entry ALONE and reports the reason, so the record that
+    /// survives is the fresh-process one.
+    worker_ineligible: Option<String>,
 }
 
 impl SimSummary {
@@ -2020,6 +3177,10 @@ impl SimSummary {
         self.timed_out = self.timed_out || other.timed_out;
         if other.process_failure_code.is_some() {
             self.process_failure_code = other.process_failure_code;
+        }
+        self.never_started = self.never_started || other.never_started;
+        if other.worker_ineligible.is_some() {
+            self.worker_ineligible = other.worker_ineligible;
         }
     }
 }
@@ -2081,6 +3242,10 @@ impl SimSummary {
                     s.errors.push(SiteMessage { message, site });
                 }
                 "stop" => s.saw_stop = true,
+                "worker_ineligible" => {
+                    s.worker_ineligible =
+                        Some(extract_str_field(rest, "message").unwrap_or_default());
+                }
                 "snapshot" => {
                     let name = extract_str_field(rest, "name").unwrap_or_default();
                     let value_json = extract_raw_field(rest, "value").unwrap_or_else(|| "null".into());
@@ -2274,6 +3439,200 @@ fn extract_raw_field(json: &str, key: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    fn corpus() -> Vec<String> {
+        ["a_first", "b_second", "c_third"].iter().map(|s| s.to_string()).collect()
+    }
+
+    fn pick(names: &[&str]) -> Result<Vec<String>> {
+        let selected: Vec<String> = names.iter().map(|s| s.to_string()).collect();
+        select_gate_corpus(&corpus(), &selected)
+    }
+
+    /// Assets are stubbed per PROCESS, not per entry: a chain shares one image
+    /// cache, so one rendering part means the whole child needs real pixels.
+    #[test]
+    fn asset_stub_is_off_when_any_part_renders() {
+        let part = |renders: bool| WorkerPart {
+            name: "s".to_string(),
+            out_dir: PathBuf::new(),
+            frame_budget: 0,
+            env: vec![("SIM_SKIP_RENDER".to_string(), if renders { "0" } else { "1" }.to_string())],
+        };
+        // The inherited escape hatch is one-way: it can ask for real assets,
+        // never for stubs. A stray "1" must not strip pixels out of a snapshot.
+        assert_eq!(unstub_from(None), "1", "unset stays stubbed");
+        assert_eq!(unstub_from(Some("0")), "0", "an inherited 0 unstubs");
+        assert_eq!(unstub_from(Some("1")), "1", "an inherited 1 is the default anyway");
+        assert_eq!(unstub_from(Some("yes")), "1", "anything else is not an unstub request");
+
+        assert_eq!(asset_stub_value(&[]), "1", "nothing renders, nothing to load");
+        assert_eq!(asset_stub_value(&[part(false)]), "1", "a non-rendering entry stubs");
+        assert_eq!(asset_stub_value(&[part(true)]), "0", "a rendering entry needs pixels");
+        assert_eq!(
+            asset_stub_value(&[part(false), part(true)]),
+            "0",
+            "one rendering part in a chain opts the whole shared process in"
+        );
+        // A sim that declares nothing does not render, so the default is stub.
+        assert_eq!(
+            asset_stub_value(&[WorkerPart {
+                name: "s".to_string(),
+                out_dir: PathBuf::new(),
+                frame_budget: 0,
+                env: vec![],
+            }]),
+            "1",
+            "declaring nothing takes the stubbed default"
+        );
+    }
+
+    /// The hybrid split reads the EFFECTIVE value, last-wins. `@sim_render` is
+    /// lowered to `SIM_SKIP_RENDER=0` before an explicit `@sim_env` is appended,
+    /// so a sim carrying both is whatever it says last -- and that is the value
+    /// its child actually boots with.
+    #[test]
+    fn rendering_is_the_effective_last_wins_value() {
+        let pair = |k: &str, v: &str| (k.to_string(), v.to_string());
+        assert!(!entry_renders(&[]), "declaring nothing does not render");
+        assert!(entry_renders(&[pair("SIM_SKIP_RENDER", "0")]), "@sim_render sugar");
+        assert!(!entry_renders(&[pair("SIM_SKIP_RENDER", "1")]), "explicit skip");
+        // `@sim_render` then an explicit override, in lowering order.
+        assert!(
+            !entry_renders(&[pair("SIM_SKIP_RENDER", "0"), pair("SIM_SKIP_RENDER", "1")]),
+            "a later explicit @sim_env overrides the @sim_render sugar"
+        );
+        assert!(
+            entry_renders(&[pair("SIM_SKIP_RENDER", "1"), pair("SIM_SKIP_RENDER", "0")]),
+            "... and the other way round"
+        );
+        assert!(!entry_renders(&[pair("MAG_FORCE_VFX", "1")]), "an unrelated key is not it");
+    }
+
+    /// The default isolates a rendered entry and admits a render-skipped one,
+    /// and BOTH populations are non-empty -- a split that admitted everything,
+    /// or nothing, would be reported the same way by a test that only checked
+    /// one side.
+    #[test]
+    fn the_hybrid_default_splits_rendered_from_render_skipped() {
+        let mut wires: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        wires.insert("logic".to_string(), vec![]);
+        wires.insert(
+            "pixel".to_string(),
+            vec![("SIM_SKIP_RENDER".to_string(), "0".to_string())],
+        );
+        let specs = vec!["logic".to_string(), "pixel".to_string()];
+
+        let (groups, isolated) = group_worker_specs(&specs, &wires, SimExecMode::Hybrid);
+        assert_eq!(groups.len(), 1, "the render-skipped entry is admitted: {groups:?}");
+        assert_eq!(groups[0], vec![0], "and it is the logic one");
+        assert_eq!(isolated.len(), 1, "the rendered entry is isolated: {isolated:?}");
+        assert_eq!(isolated[0].0, 1);
+        assert!(
+            isolated[0].1.contains("renders"),
+            "with a REPORTED reason, since a silently isolated entry reads as a \
+             worker result: {}",
+            isolated[0].1
+        );
+
+        // `--workers` is the force/diagnostic spelling and must still admit the
+        // rendered one, or the differential and multi-order gates could never
+        // measure the class they exist for.
+        let (groups, isolated) = group_worker_specs(&specs, &wires, SimExecMode::Workers);
+        assert_eq!(isolated.len(), 0, "--workers admits rendered sims: {isolated:?}");
+        assert_eq!(groups.iter().map(Vec::len).sum::<usize>(), 2);
+    }
+
+    /// ANY rendered part isolates the whole chain: a chain runs as consecutive
+    /// entries of ONE queue, so a rendered part renders inside the worker
+    /// however its neighbours are classified.
+    #[test]
+    fn one_rendered_part_isolates_its_whole_chain() {
+        let mut wires: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        wires.insert("head".to_string(), vec![]);
+        wires.insert(
+            "tail".to_string(),
+            vec![("SIM_SKIP_RENDER".to_string(), "0".to_string())],
+        );
+        let (groups, isolated) =
+            group_worker_specs(&["head,tail".to_string()], &wires, SimExecMode::Hybrid);
+        assert!(groups.is_empty(), "the chain cannot be admitted: {groups:?}");
+        assert_eq!(isolated.len(), 1);
+        assert!(isolated[0].1.contains("tail"), "names the rendered part: {}", isolated[0].1);
+    }
+
+    /// A hole in the full-corpus gate stops it: the run would otherwise print a
+    /// green over an arm it never compared.
+    #[test]
+    fn the_full_corpus_refuses_an_arm_it_could_not_populate() {
+        let reason = population_refusal(&["expects_fail"], false).expect("must refuse");
+        assert!(reason.contains("expects_fail"), "names the arm: {reason}");
+    }
+
+    /// `errors` is the one arm no corpus in this tree can populate -- every op
+    /// that emits an `error` also fails its sim -- so it is a stated permanent
+    /// exception rather than a gate everyone learns to ignore.
+    #[test]
+    fn a_permanently_unpopulatable_arm_is_not_a_hole() {
+        assert!(population_refusal(&["errors"], false).is_none());
+        // ... and it does not launder a real hole reported beside it.
+        let reason = population_refusal(&["errors", "expects_fail"], false).expect("must refuse");
+        assert!(reason.contains("expects_fail"), "names the real hole: {reason}");
+        assert!(!reason.contains("errors"), "does not name the exception: {reason}");
+    }
+
+    /// A subset is chosen to re-measure ONE class. Whether that pair happens to
+    /// fail an expect or write an artifact is unrelated to why it was picked,
+    /// and refusing over it would make an equivalent pair exit nonzero -- which
+    /// is exactly the iteration gate this form exists to be.
+    #[test]
+    fn a_named_subset_is_not_refused_for_an_empty_population() {
+        assert!(population_refusal(&["expects_fail", "artifacts", "errors"], true).is_none());
+    }
+
+    /// No names is the whole registry, which is the arc-checkpoint form.
+    #[test]
+    fn an_empty_selection_is_the_whole_corpus() {
+        assert_eq!(pick(&[]).expect("whole corpus"), corpus());
+    }
+
+    /// REGISTRY order, not the order the caller typed -- that is what the
+    /// "registry" arm means, and what makes the "reverse" arm its reverse. A
+    /// subset that honoured argv order would silently rename its own arms.
+    #[test]
+    fn a_selection_keeps_registry_order_whatever_order_it_was_typed_in() {
+        assert_eq!(pick(&["c_third", "a_first"]).expect("subset"), vec!["a_first", "c_third"]);
+    }
+
+    /// Each refusal below would otherwise shrink the corpus silently, and a
+    /// gate that measured less than it was asked to would still print a green.
+    #[test]
+    fn an_unknown_name_refuses_instead_of_running_the_ones_that_matched() {
+        let err = pick(&["a_first", "typo_here"]).expect_err("unknown name must refuse");
+        assert!(err.to_string().contains("typo_here"), "names the offender: {err}");
+    }
+
+    #[test]
+    fn a_repeated_name_refuses_because_it_has_only_one_reference_record() {
+        let err = pick(&["a_first", "a_first"]).expect_err("repeat must refuse");
+        assert!(err.to_string().contains("a_first"), "names the offender: {err}");
+    }
+
+    /// Asserts the chain-SPECIFIC reason, not merely that something refused.
+    /// A chain name is also absent from the registry, so with this arm deleted
+    /// it falls through to the unknown-name refusal, which names the offender
+    /// too -- an "it refused" assertion passes either way and cannot tell the
+    /// two apart. Mutation-proven only in this form.
+    #[test]
+    fn a_comma_chain_is_refused_for_being_a_chain_not_for_being_unknown() {
+        let err = pick(&["a_first,b_second"]).expect_err("chain must refuse");
+        let msg = err.to_string();
+        assert!(msg.contains("a_first,b_second"), "names the offender: {err}");
+        assert!(
+            msg.contains("comma-chains") && msg.contains("$OUT"),
+            "must refuse it for being a chain, not for being an unknown name: {err}"
+        );
+    }
+
     /// A MISSING image golden used to bootstrap itself from the current frame
     /// and count as a passing expect, so a sim whose goldens are untracked
     /// (`mag/tests/sims/vfx_capture.snap/`, gitignored as display-specific)
@@ -2420,6 +3779,167 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn a_declared_frame_count_is_the_entrys_budget() {
+        assert_eq!(frame_budget_for("s", &env(&[])).expect("default"), DEFAULT_FRAME_BUDGET);
+        assert_eq!(frame_budget_for("s", &env(&[("FRAME_COUNT", "90")])).expect("declared"), 90);
+        // The two watchdog sims in testbed declare this; a runner that quietly
+        // capped them at the default would guard them with a bound nobody wrote.
+        assert_eq!(
+            frame_budget_for("s", &env(&[("FRAME_COUNT", "100000")])).expect("declared"),
+            100000
+        );
+        // Other keys are not budgets.
+        assert_eq!(
+            frame_budget_for("s", &env(&[("STONE_FX_OFF", "1")])).expect("default"),
+            DEFAULT_FRAME_BUDGET
+        );
+    }
+
+    #[test]
+    fn an_unusable_frame_count_is_rejected_not_defaulted() {
+        for bad in ["abc", "", "0", "-5", "12.5"] {
+            assert!(
+                frame_budget_for("s", &env(&[("FRAME_COUNT", bad)])).is_err(),
+                "`FRAME_COUNT={bad}` must reject rather than silently become the default"
+            );
+        }
+    }
+
+    #[test]
+    fn the_boot_signature_excludes_only_runner_owned_keys() {
+        let a = env(&[("FRAME_COUNT", "90"), ("STONE_FX_OFF", "1")]);
+        let b = env(&[("FRAME_COUNT", "40"), ("STONE_FX_OFF", "1")]);
+        assert_eq!(boot_signature(&a), boot_signature(&b), "the budget is per entry");
+
+        let c = env(&[("FRAME_COUNT", "90"), ("STONE_FX_OFF", "0")]);
+        assert_ne!(boot_signature(&a), boot_signature(&c), "a boot-consumed value is not");
+        // SIM_DT and SIM_SKIP_RENDER are read once during boot, so they stay in.
+        let d = env(&[("SIM_DT", "0.1")]);
+        assert_eq!(boot_signature(&d), d);
+    }
+
+    #[test]
+    fn the_boot_signature_is_declaration_order_independent() {
+        let a = env(&[("STONE_FX_OFF", "1"), ("SIM_DT", "0.1")]);
+        let b = env(&[("SIM_DT", "0.1"), ("STONE_FX_OFF", "1")]);
+        assert_eq!(boot_signature(&a), boot_signature(&b), "same pairs, either spelling");
+
+        // The sort is stable, so a duplicated key keeps last-wins order and a
+        // genuine effective difference still refuses.
+        let dup_a = env(&[("K", "1"), ("K", "2")]);
+        let dup_b = env(&[("K", "2"), ("K", "1")]);
+        assert_ne!(boot_signature(&dup_a), boot_signature(&dup_b));
+    }
+
+    fn wires(entries: &[(&str, &[(&str, &str)])]) -> HashMap<String, Vec<(String, String)>> {
+        entries
+            .iter()
+            .map(|(name, pairs)| (name.to_string(), env(pairs)))
+            .collect()
+    }
+
+    fn specs(names: &[&str]) -> Vec<String> {
+        names.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn worker_grouping_shares_a_signature_and_isolates_with_reasons() {
+        let wires = wires(&[
+            ("plain_a", &[]),
+            ("plain_b", &[("FRAME_COUNT", "40")]),
+            ("fx_off", &[("STONE_FX_OFF", "1")]),
+            ("reload", &[("STONE_HOT_RELOAD", "1")]),
+            ("outref", &[("SESSION", "$OUT/resume.json")]),
+            ("machinery", &[("SIM_WORKER_ISOLATED", "1")]),
+        ]);
+        let (groups, isolated) = group_worker_specs(
+            &specs(&["plain_a", "plain_b", "fx_off", "reload", "outref", "machinery"]),
+            &wires,
+            SimExecMode::Workers,
+        );
+
+        // FRAME_COUNT is runner-owned, so plain_a and plain_b share a group;
+        // fx_off's boot-consumed value is its own.
+        assert_eq!(groups, vec![vec![0, 1], vec![2]]);
+
+        assert_eq!(isolated.len(), 3);
+        assert_eq!(isolated[0].0, 3);
+        assert!(isolated[0].1.contains("hot-reload"), "{}", isolated[0].1);
+        assert_eq!(isolated[1].0, 4);
+        assert!(isolated[1].1.contains("$OUT"), "{}", isolated[1].1);
+        assert!(
+            !isolated[1].1.contains("hot-reload"),
+            "the $OUT refusal must carry its OWN reason: {}",
+            isolated[1].1
+        );
+        assert_eq!(isolated[2].0, 5);
+        assert!(isolated[2].1.contains("SIM_WORKER_ISOLATED"), "{}", isolated[2].1);
+    }
+
+    /// A suite may name the same sim twice. Both occurrences are entries that
+    /// must be scheduled and must each own a result, so admission carries spec
+    /// POSITIONS -- keying by spelling collapses them into one.
+    #[test]
+    fn a_duplicated_spec_is_two_scheduled_entries() {
+        let wires = wires(&[("plain", &[]), ("reload", &[("STONE_HOT_RELOAD", "1")])]);
+
+        let (groups, isolated) =
+            group_worker_specs(&specs(&["plain", "plain", "reload", "reload"]), &wires, SimExecMode::Workers);
+        assert_eq!(groups, vec![vec![0, 1]]);
+        assert_eq!(isolated.iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![2, 3]);
+
+        // Every position is scheduled exactly once, whatever it was named.
+        let mut seen: Vec<usize> =
+            groups.concat().into_iter().chain(isolated.iter().map(|(i, _)| *i)).collect();
+        seen.sort_unstable();
+        assert_eq!(seen, vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn a_chain_groups_by_its_parts_and_disagreeing_parts_isolate() {
+        let wires = wires(&[
+            ("head", &[("STONE_FX_OFF", "1")]),
+            ("tail_same", &[("STONE_FX_OFF", "1"), ("FRAME_COUNT", "30")]),
+            ("tail_other", &[("STONE_FX_OFF", "0")]),
+            ("plain", &[]),
+        ]);
+
+        let (groups, isolated) =
+            group_worker_specs(&specs(&["head,tail_same", "plain"]), &wires, SimExecMode::Workers);
+        assert_eq!(groups, vec![vec![0], vec![1]]);
+        assert!(isolated.is_empty());
+
+        let (groups, isolated) = group_worker_specs(&specs(&["head,tail_other"]), &wires, SimExecMode::Workers);
+        assert!(groups.is_empty());
+        assert_eq!(isolated.len(), 1);
+        assert!(
+            isolated[0].1.contains("disagree"),
+            "a mixed chain must say why it stays isolated: {}",
+            isolated[0].1
+        );
+    }
+
+    /// An empty spec is a user error with an existing message, not a crash:
+    /// admission must classify it rather than index its first part.
+    #[test]
+    fn an_empty_spec_is_classified_not_indexed() {
+        let wires = wires(&[("plain", &[])]);
+
+        assert!(worker_ineligibility("", &wires, SimExecMode::Workers).is_some());
+        assert!(worker_ineligibility(" , ", &wires, SimExecMode::Workers).is_some());
+
+        let (groups, isolated) = group_worker_specs(&specs(&["plain", ""]), &wires, SimExecMode::Workers);
+        assert_eq!(groups, vec![vec![0]]);
+        assert_eq!(isolated.len(), 1);
+        assert_eq!(isolated[0].0, 1);
+        assert!(isolated[0].1.contains("empty sim name"), "{}", isolated[0].1);
+    }
+
     #[test]
     fn buffered_runs_never_write_live() {
         assert!(writes_live(false));
@@ -2455,6 +3975,79 @@ mod tests {
 
     fn lines(raw: &[&str]) -> Vec<String> {
         raw.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The deadline anchor resets ONLY on `EnvelopeStep::Started`, so the
+    /// tracker's classification IS the guard's admission: a start the demux
+    /// would reject -- malformed, out of order, duplicate, while another
+    /// entry is open, or past the queue -- must not read as Started, and
+    /// after any violation the live reader stops consulting the tracker
+    /// entirely. A valid next start, and only that, is Started.
+    #[test]
+    fn only_an_accepted_entry_start_reads_as_started() {
+        let parts = worker_parts(&["a", "b"]);
+        let started = |t: &mut EnvelopeTracker, line: &str| {
+            matches!(t.observe(line), Ok(EnvelopeStep::Started(_)))
+        };
+
+        let mut t = EnvelopeTracker::for_parts(&parts);
+        assert!(started(&mut t, &start(0, "a")), "the expected first start is Started");
+
+        // Inside the open entry, every start shape refuses: the wedged-sim
+        // evasion is exactly a start emitted while its own entry is open.
+        assert!(t.observe(r#"__SIM__ {"op":"entry_start"}"#).is_err(), "malformed: no seq");
+        // A fresh tracker still refuses the malformed shape with nothing open.
+        assert!(
+            EnvelopeTracker::for_parts(&parts)
+                .observe(r#"__SIM__ {"op":"entry_start"}"#)
+                .is_err(),
+            "malformed: no seq, no entry open"
+        );
+        assert!(t.observe(&start(0, "a")).is_err(), "duplicate of the open entry");
+        assert!(t.observe(&start(1, "b")).is_err(), "the next entry cannot start while one is open");
+
+        assert!(matches!(t.observe(&end(0, "a")), Ok(EnvelopeStep::Ended(0))));
+        assert!(t.observe(&start(0, "a")).is_err(), "a closed entry cannot restart");
+        assert!(started(&mut t, &start(1, "b")), "the valid NEXT start is Started");
+        assert!(matches!(t.observe(&end(1, "b")), Ok(EnvelopeStep::Ended(1))));
+        assert!(t.observe(&start(2, "c")).is_err(), "past the end of the queue");
+
+        let mut t = EnvelopeTracker::for_parts(&parts);
+        assert!(t.observe(&start(1, "b")).is_err(), "out of order: entry 1 before entry 0");
+        let mut t = EnvelopeTracker::for_parts(&parts);
+        assert!(t.observe(&start(0, "b")).is_err(), "wrong name for the seq");
+    }
+
+    /// The wedged-child evasion, deterministically: a sim stuck inside one
+    /// tick can flood `entry_start`-shaped lines, and the deadline may reset
+    /// on NONE of them -- only on a start the strict envelope accepts. After
+    /// any violation the guard is poisoned, so even a line that would
+    /// otherwise be the valid next start extends nothing.
+    #[test]
+    fn the_deadline_guard_resets_only_on_accepted_starts() {
+        let parts = worker_parts(&["a", "b"]);
+
+        let mut g = DeadlineGuard::for_parts(&parts);
+        assert!(g.observe_resets(&start(0, "a")), "the expected first start resets");
+        assert!(!g.observe_resets(&expect_ok("inside a")), "an ordinary op does not");
+        assert!(!g.observe_resets("[   0.1s INFO ] raw logging"), "raw output does not");
+        // Every start shape a wedged sim can emit while its own entry is open.
+        assert!(!g.observe_resets(r#"__SIM__ {"op":"entry_start"}"#), "malformed: no seq");
+        assert!(!g.observe_resets(&start(0, "a")), "duplicate of the open entry");
+        assert!(!g.observe_resets(&start(1, "b")), "next entry while one is open");
+        // Poisoned by the violations above: the sequence end(0) -> start(1)
+        // WOULD be valid to a fresh envelope, and must extend nothing now.
+        assert!(!g.observe_resets(&end(0, "a")));
+        assert!(
+            !g.observe_resets(&start(1, "b")),
+            "a poisoned guard must not resume resetting on later well-formed lines"
+        );
+
+        // The healthy path keeps resetting across the whole queue.
+        let mut g = DeadlineGuard::for_parts(&parts);
+        assert!(g.observe_resets(&start(0, "a")));
+        assert!(!g.observe_resets(&end(0, "a")), "an entry's end is not a reset");
+        assert!(g.observe_resets(&start(1, "b")), "the valid next start resets");
     }
 
     fn start(seq: usize, name: &str) -> String {

@@ -127,6 +127,25 @@ pub fn vec_column_elem(ws: &Workspace, name: Ustr, nullable: bool) -> Option<Ust
     (columns <= MAX_COLUMN_LEAVES && !paths.iter().any(|p| p.as_str() == "len")).then_some(name)
 }
 
+/// The one column decision over an already-resolved ELEMENT: leaf-shape
+/// eligibility, then target availability.
+///
+/// Every container oracle below differs ONLY in how it gets from its own
+/// `MonoTy` to `(element, nullable)`. What makes an element column-eligible is
+/// this function and nothing else, so a container cannot pick up (or silently
+/// miss) a rule its siblings have -- which is exactly how the Arena path came
+/// to omit `columns_available`.
+fn column_elem_payload(
+    ws: &Workspace,
+    target: bone_semantic::hir::FnBackend,
+    elem: Ustr,
+    nullable: bool,
+) -> Option<ColumnElem> {
+    vec_column_elem(ws, elem, nullable)
+        .filter(|&name| columns_available(ws, target, name))
+        .map(|name| ColumnElem { name, nullable })
+}
+
 /// Column eligibility for a `[E]`, decided on the CONCRETE type.
 ///
 /// **The one oracle.** `Builder::vec_column_elem_of` is a thin caller of this,
@@ -154,9 +173,7 @@ pub fn vec_column_elem_mono(
     if nullable && !is_nobox_nominal(ws, en) {
         return None;
     }
-    vec_column_elem(ws, en, nullable)
-        .filter(|&name| columns_available(ws, target, name))
-        .map(|name| ColumnElem { name, nullable })
+    column_elem_payload(ws, target, en, nullable)
 }
 
 /// The `Map<K, V>` sibling of [`vec_column_elem_mono`].
@@ -166,15 +183,49 @@ pub fn vec_column_elem_mono(
 /// cannot tell an absent key from a key holding null. The KEY is deliberately
 /// not consulted -- a value-struct key rejects upstream (LuaJIT hashes cdata by
 /// pointer), and the spine stores whatever key the boxed representation stored.
+///
+/// The VALUE goes through [`column_elem_payload`] like every other container,
+/// so it now consults `columns_available` too. That is inert while the filter
+/// returns `true` unconditionally (verified: emitted Lua is byte-identical for
+/// bitgun, mag and testbed), and it is the point -- a per-target availability
+/// rule must not reach two of the three containers.
 pub fn map_column_value_mono(
     ws: &Workspace,
-    _target: bone_semantic::hir::FnBackend,
+    target: bone_semantic::hir::FnBackend,
     ty: &MonoTy,
 ) -> Option<ColumnElem> {
     let MonoTy::App { ctor: MonoCtor::Map, params } = ty else { return None };
     let (val, _) = params.get(1)?.peel_nullable();
     let vn = val.nominal()?;
-    vec_column_elem(ws, vn, false).map(|name| ColumnElem { name, nullable: false })
+    column_elem_payload(ws, target, vn, false)
+}
+
+/// The `Arena<E>` sibling of [`vec_column_elem_mono`].
+///
+/// An arena's `data` is an ordinary `[E]`, so it columnizes on exactly the same
+/// rule and is decided by the same [`column_elem_payload`]. A second hand-rolled
+/// walk lived in `Builder::arena_column_elem_of` and silently omitted the target
+/// filter.
+///
+/// A nullable element is refused rather than given a presence column: the
+/// `for`-over-arena walk reads `occupied`/`generations` for liveness and has no
+/// presence concept, so admitting one would mint a column set its only reader
+/// cannot address. That is also what the walk it replaces did.
+pub fn arena_column_elem_mono(
+    ws: &Workspace,
+    target: bone_semantic::hir::FnBackend,
+    ty: &MonoTy,
+) -> Option<ColumnElem> {
+    let MonoTy::App { ctor: MonoCtor::Nominal(name), params } = ty else { return None };
+    if name.as_str() != "Arena" {
+        return None;
+    }
+    let elem = params.first()?;
+    if matches!(elem, MonoTy::Nullable(_)) {
+        return None;
+    }
+    let en = elem.nominal()?;
+    column_elem_payload(ws, target, en, false)
 }
 
 /// The column KEYS of `shape`, presence first when the element type is nullable.
@@ -385,6 +436,68 @@ pub fn leaf_view_ctys(ws: &Workspace, elem: Ustr) -> Result<Vec<&'static str>, S
         }
     }
     Ok(out)
+}
+
+/// Every element type a `NativeBuffer`'s storage can be allocated with that is
+/// NOT a value struct: the primitives `native_buffer_alloc<T>` accepts and the
+/// sized phantoms (`NativeBufferU8` ...) the stdlib's `__nb_alloc_*` ctors
+/// build. Entries are `(C type, byte width)`.
+///
+/// Separate from [`c_prim_size_align`], which answers for a value struct's
+/// LEAVES -- `uint8_t` is never a leaf but is an element in its own right.
+pub const NB_PRIM_ELEMS: &[(&str, usize)] = &[
+    ("float", 4),
+    ("int", 4),
+    ("bool", 1),
+    ("uint8_t", 1),
+    ("int8_t", 1),
+    ("uint16_t", 2),
+    ("int16_t", 2),
+    ("uint32_t", 4),
+];
+
+/// One `_G.__ROCK_NB_STORAGE` registration: `__rock_nb_storage(<ctype>, <byte
+/// width>, { <view field> = "<cast type>", ... })`.
+///
+/// THE compiler-owned description of concrete buffer storage. A consumer that
+/// holds a storage cdata asks the registry what its bytes mean -- element ctype,
+/// element width, and the exact leaf views minted over it -- instead of guessing
+/// from a `__ty` string or re-deriving a layout. The element widths and the view
+/// set come from the same oracles the emitter itself uses
+/// ([`NB_PRIM_ELEMS`], [`value_leaf_layout_checked`], [`LEAF_VIEWS`]), so a
+/// registry entry cannot describe a layout the emitter does not produce.
+fn nb_storage_call(ctype: &str, size: usize, views: &[&str]) -> String {
+    let views: Vec<String> = views
+        .iter()
+        .map(|cty| {
+            let (_, field, cast) = LEAF_VIEWS
+                .iter()
+                .find(|(t, ..)| t == cty)
+                .expect("a leaf view C type must be in LEAF_VIEWS");
+            format!("{field} = \"{cast}\"")
+        })
+        .collect();
+    format!("__rock_nb_storage(\"{ctype}\", {size}, {{ {} }})\n", views.join(", "))
+}
+
+/// The registrations for [`NB_PRIM_ELEMS`]. A primitive element carries no leaf
+/// views -- its storage IS one C type, so `buf.ptr` already addresses it.
+pub fn nb_prim_storage_lua() -> String {
+    NB_PRIM_ELEMS.iter().map(|(cty, size)| nb_storage_call(cty, *size, &[])).collect()
+}
+
+/// The registration for FFI-clean value struct `elem` used as a buffer element,
+/// derived from the layout its caller ALREADY validated. Takes the checked
+/// leaves and size rather than re-walking: the emitter needs one layout per
+/// struct and the registry is a second view of it, not a second computation.
+pub fn nb_value_storage_lua(elem: Ustr, leaves: &[LeafSlot], size: usize) -> String {
+    let mut views: Vec<&'static str> = Vec::new();
+    for l in leaves {
+        if !views.contains(&l.cty) {
+            views.push(l.cty);
+        }
+    }
+    nb_storage_call(elem.as_str(), size, &views)
 }
 
 /// [`value_leaf_paths`] by type name -- the `ValueShape`-side leaf order, for

@@ -1256,10 +1256,23 @@ pub fn inline_functions_with_subst(
             callee_insts: cand.insts,
         });
         let added = splice(func, site, cand, ws, caller_inf, caller_subst)?;
+        // The callee's `static` cells now live in THIS body: the spliced code
+        // reads and writes them, and a `static` is one cell per owning fn, so
+        // the cell is the same one every call site shares. Carrying them here is
+        // the only way a cell whose owner has no standalone emission -- every
+        // `Iterator`-bounded fn -- reaches the emitted program's registry.
+        // Deduped below; one callee can be spliced at many sites.
+        func.statics.extend(cand.func.statics.iter().cloned());
         top.extend(added);
         spliced.insert(fref);
         resume = Some(pos);
         budget -= 1;
+    }
+    // Most bodies own no statics at all, and this runs for every emitted fn --
+    // so the set is only built when there is something that could duplicate.
+    if func.statics.len() > 1 {
+        let mut seen: HashSet<ustr::Ustr> = HashSet::default();
+        func.statics.retain(|sc| seen.insert(sc.cell));
     }
     Ok((spliced, records))
 }

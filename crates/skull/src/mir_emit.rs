@@ -292,21 +292,145 @@ fn render_default_lit(body: &bone_semantic::hir::Body, e: Idx<Expr>) -> Option<S
     }
 }
 
-/// The value-struct name an extern returns BY VALUE (the C ABI is then
-/// `void f(T* out, ..)`), or `None` if the return isn't a value struct. Drives
-/// the out-param bridge in the extern wrapper.
-fn extern_ret_value_struct(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> Option<String> {
-    use bone_semantic::hir::{TypeCtor, TypeExpr};
-    let te = match ty {
-        bone_semantic::prelude::TyId::Static(mid, idx) => ws.modules.get(mid.index())?.ty_arena[idx],
-        bone_semantic::prelude::TyId::Local(_) => return None,
+/// What an `extern(ffi)` wrapper does with the callee's return, decided ONCE
+/// from the declared Rock type.
+///
+/// The `ffi.cdef` lives inside an opaque `inline(lua)` body, so the declaration
+/// is the only contract the compiler has -- which is exactly why an unresolvable
+/// declared type is a hard error here and not a default. Falling back to
+/// "return it as-is" would silently reproduce the boxed-handle bug this
+/// classification exists to prevent, and would do it precisely where the
+/// compiler has admitted it does not know what the type is.
+#[derive(Debug)]
+enum ExternRet {
+    /// No return value.
+    None,
+    /// Rock `int`. LuaJIT hands back a BOXED cdata for a 64-bit C integer
+    /// (`uint64_t`, `int64_t`), so the wrapper coerces to a number. A cdata
+    /// leaking through is not cosmetic: LuaJIT keys a table by cdata IDENTITY,
+    /// so a handle used as a `Map<int, V>` key only ever hits on the box that
+    /// was inserted (`b1_ffi_handle.rock`).
+    Int,
+    /// A `value` struct returned BY VALUE; the C ABI is then
+    /// `void f(T* out, ..)`, so the wrapper bridges an out-param.
+    ValueStruct(String),
+    /// Everything else crosses as the callee produced it: LuaJIT already hands
+    /// back a Lua value for `bool`, `float`/`double` and a string, and a
+    /// pointer return is declared `Ptr<T>` and stays a cdata by design.
+    AsIs,
+}
+
+/// Hard backstop on the alias walk. Termination is decided by the visited set,
+/// which compares INTERNED instantiations; this only bounds a chain that keeps
+/// producing genuinely new ones.
+const MAX_ALIAS_STEPS: usize = 256;
+
+fn extern_ret(
+    ws: &Workspace,
+    f: &bone_semantic::hir::Function,
+) -> Result<ExternRet, CompilerError> {
+    use bone_semantic::hir::TypeExpr;
+    use skull_mir::monoty::{MonoArena, MonoCtor, MonoSubst, MonoTy, MonoTyId, MonoTyReason};
+
+    let Some(ret) = f.return_ty else { return Ok(ExternRet::None) };
+    let unrealizable = |what: &str| {
+        CompilerError::new_with_label(
+            f.name_span,
+            format!(
+                "extern `{}` returns {what}, which has no C representation: the wrapper \
+                 cannot know what the callee hands back or how to give it the declared \
+                 Rock type. Declare a concrete return type.",
+                f.name
+            ),
+        )
     };
-    match te {
-        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } if crate::is_value_struct(ws, name) => {
-            Some(name.as_str().to_string())
+    // Every non-conversion is a REASON, so none of them can read as "some other
+    // opaque type" the way a partial normalizer's fallback node would -- which
+    // matters most for the cycle check below, where a summarized instantiation
+    // could manufacture a false match.
+    let describe = |r: MonoTyReason| -> CompilerError {
+        match r {
+            MonoTyReason::UnboundGeneric(n) => {
+                unrealizable(&format!("the unbound generic parameter `{n}`"))
+            }
+            MonoTyReason::DepthLimit => unrealizable("a type that does not bottom out"),
+            MonoTyReason::RecoveryError => unrealizable("a type inference could not recover"),
+            other => unrealizable(&format!("a type the compiler cannot normalize ({})", other.bucket())),
         }
-        _ => None,
+    };
+
+    // ONE normalization oracle, shared with monomorphization
+    // (`skull_mir::monoty`). It is total, interning, and resolves a declared
+    // generic through the substitution -- so a newtype APPLICATION composes for
+    // free: each argument is converted in the environment it was written in and
+    // becomes a closed `MonoTyId`, which is exactly what a flat substitution can
+    // then carry into the next alias.
+    //
+    // `Outer<T>(Pair<Pair<T>>)` at `Outer<int>` is the shape that needs it: the
+    // argument handed to the inner `Pair` still mentions `Outer`'s `T`, and it is
+    // already `int` here because it was converted before being bound.
+    let mut arena = MonoArena::new();
+    let mut subst = MonoSubst::default();
+    let mut cur = arena.convert_decl(ws, ret, &subst).map_err(describe)?;
+
+    // The visited key is the interned instantiation itself. Interning is
+    // injective within one arena, so a repeat IS a cycle -- no separate summary
+    // to get wrong, and no reliance on the step bound.
+    let mut visited: Vec<MonoTyId> = Vec::new();
+
+    for _ in 0..MAX_ALIAS_STEPS {
+        let (name, params) = match arena.get(cur) {
+            MonoTy::Int => return Ok(ExternRet::Int),
+            MonoTy::App { ctor: MonoCtor::Nominal(name), params } => (*name, params.clone()),
+            _ => return Ok(ExternRet::AsIs),
+        };
+        if crate::is_value_struct(ws, name) {
+            return Ok(ExternRet::ValueStruct(name.as_str().to_string()));
+        }
+        let Some(nid) = ws.newtypes_by_name.get(&name).copied() else {
+            return Ok(ExternRet::AsIs);
+        };
+        if visited.contains(&cur) {
+            return Err(unrealizable("a newtype whose representation contains itself"));
+        }
+        visited.push(cur);
+
+        // Fail-closed internal invariants, neither reachable from source: bone
+        // refuses an arity mismatch itself ("Generic type `Two` expects 2 type
+        // argument(s), found 1", verified against the real compiler), and a
+        // newtype the workspace names but cannot produce is the registry
+        // disagreeing with the arena. Stated rather than assumed, because
+        // zipping a mismatched pair would silently drop or invent a binding.
+        let owner = ws
+            .modules
+            .get(nid.module.index())
+            .filter(|m| (nid.def.into_raw().into_u32() as usize) < m.newtypes.len())
+            .ok_or_else(|| unrealizable("a newtype whose definition is missing"))?;
+        let def = &owner.newtypes[nid.def];
+        if def.generics.len() != params.len() {
+            return Err(unrealizable(&format!(
+                "`{name}` applied to {} argument(s) where its declaration takes {}",
+                params.len(),
+                def.generics.len()
+            )));
+        }
+
+        let mut next = MonoSubst::default();
+        for (g, a) in def.generics.iter().zip(params) {
+            let (TypeExpr::Generic(var, _) | TypeExpr::Infer(var, _)) =
+                skull_mir::monoty::TyEnv::Decl.decl_node(ws, *g).map_err(describe)?
+            else {
+                return Err(unrealizable(&format!(
+                    "`{name}` declares a parameter that is not a generic"
+                )));
+            };
+            next.insert(var, a);
+        }
+        let wrapped = def.wrapped;
+        subst = next;
+        cur = arena.convert_decl(ws, wrapped, &subst).map_err(describe)?;
     }
+    Err(unrealizable("an alias chain that does not bottom out"))
 }
 
 /// The assembled new-path program plus the parity gap.
@@ -1766,24 +1890,27 @@ fn assemble(
                 if let Some(lib) = f.ffi_lib {
                     let nm = f.name.as_str();
                     let params = f.param_decls.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ");
-                    match f.return_ty.and_then(|t| extern_ret_value_struct(ws, t)) {
-                        Some(sname) => {
-                            let call_args = if params.is_empty() { "__out".to_string() } else { format!("__out, {params}") };
-                            // Returns an OWNING copy, never `__out[0]`. LuaJIT does
-                            // not keep the parent array alive through a reference
-                            // into it, so handing one back is a use-after-free that
-                            // reads fine until the memory is reused
-                            // (`tests/extern_value_return_ownership.rs`).
-                            let _ = writeln!(
-                                out,
-                                "function {nm}({params})\n  local __out = ffi.new(\"{sname}[1]\")\n  {lib}.{nm}({call_args})\n  return ffi.new(\"{sname}\", __out[0])\nend"
-                            );
+                    let body = match extern_ret(ws, f)? {
+                        // Returns an OWNING copy, never `__out[0]`. LuaJIT does
+                        // not keep the parent array alive through a reference
+                        // into it, so handing one back is a use-after-free that
+                        // reads fine until the memory is reused
+                        // (`tests/extern_value_return_ownership.rs`).
+                        ExternRet::ValueStruct(sname) => {
+                            let call_args = if params.is_empty() {
+                                "__out".to_string()
+                            } else {
+                                format!("__out, {params}")
+                            };
+                            format!(
+                                "  local __out = ffi.new(\"{sname}[1]\")\n  {lib}.{nm}({call_args})\n  return ffi.new(\"{sname}\", __out[0])"
+                            )
                         }
-                        None => {
-                            let ret = if f.return_ty.is_some() { "return " } else { "" };
-                            let _ = writeln!(out, "function {nm}({params})\n  {ret}{lib}.{nm}({params})\nend");
-                        }
-                    }
+                        ExternRet::Int => format!("  return tonumber({lib}.{nm}({params}))"),
+                        ExternRet::AsIs => format!("  return {lib}.{nm}({params})"),
+                        ExternRet::None => format!("  {lib}.{nm}({params})"),
+                    };
+                    let _ = writeln!(out, "function {nm}({params})\n{body}\nend");
                 }
                 continue;
             }
@@ -1919,10 +2046,20 @@ fn assemble(
     let mut seen_static: FxHashSet<Ustr> = FxHashSet::default();
     let mut static_resets = String::new();
     let mut static_regs = String::new();
+    // The worker boot checkpoint's view (`docs/sim-speed-plan.md` B1): cell ->
+    // done flag, stated rather than re-derived from a name suffix the way
+    // `__rock_known_globals`' flat name->key listing would force.
+    let mut static_pairs = String::new();
     for sc in &all_statics {
         if !seen_static.insert(sc.cell) {
             continue;
         }
+        let _ = write!(
+            static_pairs,
+            "[{:?}] = {:?},",
+            sc.cell.as_str(),
+            sc.done_flag.as_str()
+        );
         let key = static_cell_key(sc);
         let _ = write!(
             static_resets,
@@ -1947,6 +2084,13 @@ fn assemble(
     out.push_str("_G.__rock_known_globals = {");
     out.push_str(&known_globals);
     out.push_str(&static_regs);
+    out.push_str("}\n");
+    // Unconditional, an empty table included: a per-build registry that is only
+    // assigned when non-empty leaves the PREVIOUS build's table live across a
+    // hot reload, and a checkpoint would then restore cells this build does not
+    // have (`docs/backends.md`, skull codegen invariants).
+    out.push_str("_G.__ROCK_STATICS = {");
+    out.push_str(&static_pairs);
     out.push_str("}\n");
 
     // Decorator APPLICATIONS (after global inits so a deco body can push a global).

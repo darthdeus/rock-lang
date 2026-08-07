@@ -2,9 +2,11 @@
 //!
 //! A boot-checkpoint worker is only allowed to become the default when a sim
 //! that ran after a predecessor in ONE process is observationally identical to
-//! the same sim in a fresh process. This is the gate that decides that, and it
-//! exists BEFORE the reset it will eventually certify: the leak fixture below
-//! is red today and pins exactly how far the seam currently is from correct.
+//! the same sim in a fresh process. This is the gate that decides that. The B2
+//! boundary (`sim_worker_restore_boot`) restores the Lua-visible world --
+//! globals, statics, RNG, buffer bytes, engine config, input maps, the poller
+//! -- and the remaining sentinels (logger dedup, subprocesses) pin exactly the
+//! native half B3 still owes.
 //!
 //! Both sides of every comparison are produced by the same spawn/demux/record
 //! code with the same schema, differing only in how many entries share the
@@ -15,7 +17,7 @@
 //! `games/testbed/tests/sims/b0_*.rock` file, so a failure in one cannot mask
 //! the next.
 
-use rock_cli::run_sim::{run_differential, DifferentialPlan};
+use rock_cli::run_sim::{run_differential, run_worker_suite, DifferentialPlan};
 use rock_cli::sim_record::{compare, Comparison, SimRecord, COMPARED_ARMS};
 use rock_cli::Backend;
 
@@ -47,6 +49,35 @@ fn assert_equivalent(what: &str, c: &Comparison) {
 
 fn artifact_names(record: &SimRecord) -> Vec<String> {
     record.artifacts.keys().cloned().collect()
+}
+
+/// Run the real `rock` binary from the workspace root and return its stderr.
+/// `hostile_parent` puts `ROCK_MASK_WALL_CLOCK=1` in the PARENT environment,
+/// which is the route an inherited value takes into a child the runner spawns.
+fn run_rock(args: &[&str], hostile_parent: bool) -> String {
+    let mut rock = std::env::current_exe().expect("test exe");
+    rock.pop();
+    if rock.ends_with("deps") {
+        rock.pop();
+    }
+    let rock = rock.join("rock");
+    assert!(rock.exists(), "rock binary not built at {}", rock.display());
+
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("workspace root")
+        .to_path_buf();
+
+    let mut cmd = std::process::Command::new(&rock);
+    cmd.current_dir(&root).args(args);
+    if hostile_parent {
+        cmd.env("ROCK_MASK_WALL_CLOCK", "1");
+    }
+    let out = cmd.output().unwrap_or_else(|e| panic!("run rock {args:?}: {e}"));
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "{args:?} failed:\n{stderr}");
+    stderr
 }
 
 /// Distinct entries get distinct `$OUT`, in a worker as in a fresh process.
@@ -115,125 +146,881 @@ fn deferred_artifacts_are_recorded_while_out_is_still_live() {
     }
 }
 
-/// SENTINEL -- asserts the CURRENTLY BROKEN behavior. The worker seam runs
-/// entries back to back with no state reset (`docs/sim-speed-plan.md` B1/B3 are
-/// unimplemented), so a game global set by one entry survives into the next.
-///
-/// FLIP WHEN FIXED: once the boot-checkpoint restore lands, this must become
-/// `assert_equivalent`, in the same commit as the fix.
+/// The boot-checkpoint restore at the worker boundary
+/// (`sim_worker_restore_boot`) puts game globals back: a counter the
+/// predecessor bumped reads fresh in the next entry, in the probe's expect and
+/// in the file whose contents encode the value.
 #[test]
-fn a_leaked_global_still_reaches_the_next_entry() {
+fn a_predecessors_global_does_not_reach_the_next_entry() {
     let (isolated, worker) = differential(&["b0_leak_seed"], "b0_leak_probe");
     let c = compare(&isolated, &worker);
+    assert_equivalent("b0_leak_probe", &c);
 
-    assert!(
-        !c.is_equivalent(),
-        "the worker no longer leaks a game global -- land the reset and flip this \
-         sentinel to assert_equivalent"
-    );
-    // Named arms, not just "some difference": the leak has to be visible both
-    // as an assertion outcome and in a produced file's CONTENTS, because a
-    // reset that only fixed one of those would still be wrong.
-    for arm in ["verdict", "expects_pass", "expects_fail", "artifacts"] {
-        assert!(c.differs_on(arm), "expected a `{arm}` difference:\n{}", c.report());
-    }
-
+    // Agreement is only evidence when the probe measured: it passed its own
+    // fresh-counter expect and wrote the counter into an artifact.
     assert_eq!(isolated.verdict(), "PASS", "the probe passes in a fresh process");
-    assert_eq!(worker.verdict(), "FAIL", "and fails after a predecessor");
+    assert!(c.population("expects_pass") > 0, "the fixture asserted nothing");
     assert_eq!(
         worker.artifacts["count.txt"].len, 1,
-        "the counter is written as one digit either way"
+        "the counter is written as one digit"
     );
-    assert_ne!(
-        isolated.artifacts["count.txt"], worker.artifacts["count.txt"],
-        "same-length file, different contents -- a name-only manifest would miss this"
-    );
+    assert_eq!(isolated.artifacts["count.txt"], worker.artifacts["count.txt"]);
 }
 
-/// SENTINEL -- the RNG stream position is process-global, so a predecessor's
-/// draws move the probe's. Both entries still PASS their own assertions: the
-/// leak reaches the record only through the produced file's contents, which is
-/// why the manifest hashes bytes rather than listing names.
+/// A global that was NULL at boot is null again at the next entry.
 ///
-/// FLIP WHEN FIXED: becomes `assert_equivalent` when the checkpoint restores
-/// RNG state.
+/// Its own class, not a variant of `b0_leak_probe`: the image is keyed by
+/// member name and a nil value has no key, so a restore driven by the image
+/// cannot tell "boot had nil" from "not a member" -- while the frozen member
+/// set records it either way. A global with any other boot value has a key and
+/// is restored, which is why every existing fixture passed over this.
+///
+/// Found through mag's `reagents` (`docs/sim-speed-plan.md` B4): it asserts
+/// `reagent_context_spell() == null` and failed only after `spell_rows_focus`,
+/// which leaves the `SpellKind?` global `REG_HOVER_SPELL` set.
 #[test]
-fn the_rng_stream_position_still_leaks_into_the_next_entry() {
+fn a_global_that_was_null_at_boot_is_null_again_at_the_next_entry() {
+    let (isolated, worker) = differential(&["b0_null_global_seed"], "b0_null_global_probe");
+    let c = compare(&isolated, &worker);
+    assert_equivalent("b0_null_global_probe", &c);
+
+    assert_eq!(isolated.verdict(), "PASS", "the probe passes in a fresh process");
+    assert_eq!(worker.verdict(), "PASS", "and after a predecessor that set the global");
+    // Agreement over an unmade assertion would be agreement over nothing.
+    // (Membership is not asserted in the sim: a one-entry queue takes no
+    // checkpoint at all, so `sim_checkpoint_has` is false in the isolated arm
+    // by design and would diverge for a reason unrelated to the class.)
+    for (label, record) in [("isolated", &isolated), ("worker", &worker)] {
+        assert!(
+            record
+                .expects_pass
+                .iter()
+                .any(|m| m.message.contains("null again at the next entry")),
+            "{label}: the fixture never asserted the property: {:?}",
+            record.expects_pass
+        );
+    }
+}
+
+/// The checkpoint restores the RNG stream position, so the probe's first draw
+/// after a predecessor is the same one a fresh `ROCK_TEST_SEED=42` process
+/// makes. Only the produced file can see this class -- both sides pass their
+/// own expects either way -- so the load-bearing comparison is the artifact's
+/// CONTENTS.
+#[test]
+fn the_rng_stream_position_resets_at_the_entry_boundary() {
     let (isolated, worker) = differential(&["b0_rng_seed"], "b0_rng_probe");
     let c = compare(&isolated, &worker);
+    assert_equivalent("b0_rng_probe", &c);
 
-    assert!(
-        c.differs_on("artifacts"),
-        "the worker no longer leaks RNG position -- flip this sentinel:\n{}",
-        c.report()
-    );
-    assert_eq!(
-        isolated.verdict(),
-        worker.verdict(),
-        "both sides pass their own expects; only the drawn value moved"
-    );
-    assert_ne!(isolated.artifacts["draw.txt"], worker.artifacts["draw.txt"]);
+    assert!(c.population("artifacts") > 0, "the probe never wrote its draw");
+    assert_eq!(isolated.artifacts["draw.txt"], worker.artifacts["draw.txt"]);
 }
 
-/// SENTINEL -- a `static` local in an ordinarily-called function. Skull records
-/// this one's cell and done flag in `__rock_known_globals`, so it is the case a
-/// checkpoint registry can already see.
-///
-/// FLIP WHEN FIXED: becomes `assert_equivalent` when statics are restored.
+/// A `static` local in an ordinarily-called function restores at the boundary:
+/// the probe's bump reaches a fresh cell.
 #[test]
-fn a_called_function_static_still_leaks_into_the_next_entry() {
+fn a_called_function_static_resets_at_the_entry_boundary() {
     let (isolated, worker) = differential(&["b0_static_called_seed"], "b0_static_called_probe");
     let c = compare(&isolated, &worker);
+    assert_equivalent("b0_static_called_probe", &c);
 
-    assert!(!c.is_equivalent(), "the called-function static no longer leaks -- flip this sentinel");
-    for arm in ["verdict", "expects_fail", "artifacts"] {
-        assert!(c.differs_on(arm), "expected a `{arm}` difference:\n{}", c.report());
-    }
+    assert_eq!(isolated.verdict(), "PASS", "the probe passes in a fresh process");
+    assert!(c.population("expects_pass") > 0, "the fixture asserted nothing");
+    assert_eq!(
+        isolated.artifacts["called_static.txt"],
+        worker.artifacts["called_static.txt"]
+    );
 }
 
-/// SENTINEL -- the same state class reached through INLINED call sites, where
-/// the cell is read and written directly in the caller's body rather than
-/// through a call. Kept separate from its called-function sibling because a
-/// registry built from emitted bodies treats the two differently.
-///
-/// FLIP WHEN FIXED: becomes `assert_equivalent` when statics are restored.
+/// The same state class reached through INLINED call sites, where the cell is
+/// read and written directly in the caller's body rather than through a call.
+/// Kept separate from its called-function sibling because a registry built
+/// from emitted bodies treats the two differently.
 #[test]
-fn an_inlined_static_still_leaks_into_the_next_entry() {
+fn an_inlined_static_resets_at_the_entry_boundary() {
     let (isolated, worker) = differential(&["b0_static_inlined_seed"], "b0_static_inlined_probe");
     let c = compare(&isolated, &worker);
+    assert_equivalent("b0_static_inlined_probe", &c);
 
-    assert!(!c.is_equivalent(), "the inlined static no longer leaks -- flip this sentinel");
-    for arm in ["verdict", "expects_fail", "artifacts"] {
-        assert!(c.differs_on(arm), "expected a `{arm}` difference:\n{}", c.report());
-    }
+    assert_eq!(isolated.verdict(), "PASS", "the probe passes in a fresh process");
+    assert!(c.population("expects_pass") > 0, "the fixture asserted nothing");
+    assert_eq!(
+        isolated.artifacts["inlined_static.txt"],
+        worker.artifacts["inlined_static.txt"]
+    );
 }
 
-/// SENTINEL -- and the reason the `entry_diagnostics` arm exists. `log_once`
-/// dedups per call site in a process-global table, so a predecessor that logged
-/// through the same helper SUPPRESSES the probe's warning entirely. No other
-/// arm can see this: the sim passes, writes nothing, and exits cleanly.
-///
-/// FLIP WHEN FIXED: becomes `assert_equivalent` when the boundary clears logger
-/// dedup/throttle state.
+/// Logger suppression state restores at the boundary -- and this is the reason
+/// the `entry_diagnostics` arm exists. `log_once` dedups per call site in a Lua
+/// global outside `__ROCK_GLOBALS`, so the census never reaches it and a
+/// predecessor that logged through the same helper used to SUPPRESS the probe's
+/// warning entirely. No other arm can see that: the sim passes, writes nothing,
+/// and exits cleanly either way.
 #[test]
-fn logger_dedup_still_suppresses_the_next_entrys_warning() {
+fn logger_dedup_does_not_suppress_the_next_entrys_warning() {
     let (isolated, worker) = differential(&["b0_dedup_seed"], "b0_dedup_probe");
     let c = compare(&isolated, &worker);
+    assert_equivalent("b0_dedup_probe", &c);
 
+    // Agreement over silence would be agreement over nothing: the class is only
+    // observable when the isolated side actually emitted the warning.
     assert!(
-        c.differs_on("entry_diagnostics"),
-        "the worker no longer suppresses a repeated warning -- flip this sentinel:\n{}",
-        c.report()
-    );
-    assert!(
-        isolated.entry_diagnostics.contains("b#") || isolated.entry_diagnostics.contains("dedup"),
+        isolated.entry_diagnostics.contains("b0 dedup fixture warning"),
         "the isolated run must actually emit the warning: {:?}",
         isolated.entry_diagnostics
     );
+    assert!(
+        worker.entry_diagnostics.contains("b0 dedup fixture warning"),
+        "the worker's second entry must emit it too: {:?}",
+        worker.entry_diagnostics
+    );
+}
+
+/// The throttle half of the same class, and a separate test for the same reason
+/// the fixture is separate: a last-fire TIMESTAMP compared against restored game
+/// time resets differently from a count that suppresses forever, and one
+/// fixture's first failure would hide the other.
+#[test]
+fn a_throttled_sites_last_fire_does_not_reach_the_next_entry() {
+    let (isolated, worker) = differential(&["b0_throttle_seed"], "b0_throttle_probe");
+    let c = compare(&isolated, &worker);
+    assert_equivalent("b0_throttle_probe", &c);
+
+    for (label, record) in [("isolated", &isolated), ("worker", &worker)] {
+        assert!(
+            record.entry_diagnostics.contains("b0 throttle fixture warning"),
+            "{label}: nothing was emitted, so the agreement is over silence: {:?}",
+            record.entry_diagnostics
+        );
+    }
+}
+
+/// The clock the throttle stamps are measured AGAINST, which is a third fixture
+/// and not a variant of the second. `frame_core_pre_update` restamps
+/// `__stone_log_now_override` from engine `time` only on the following frame,
+/// while `sim_start_entry` ends in `run(handle)` -- so an entry's opening
+/// statements see its predecessor's clock, and a site with a real boot stamp
+/// then measures against it. `sim_publish_log_clock` sets the clock from engine
+/// `time` at both points instead -- leaving it unset falls back to `os.clock()`,
+/// which climbs across entries.
+#[test]
+fn the_throttle_clock_does_not_reach_the_next_entry() {
+    let (isolated, worker) = differential(&["b0_clock_seed"], "b0_clock_probe");
+    let c = compare(&isolated, &worker);
+    assert_equivalent("b0_clock_probe", &c);
+
+    // The fixture is only meaningful while the site is SUPPRESSED on both
+    // sides: a leaked clock is what makes it fire, so agreement over two
+    // firings would mean the boot stamp never landed.
+    for (label, record) in [("isolated", &isolated), ("worker", &worker)] {
+        assert!(
+            !record.entry_diagnostics.contains("b0 clock fixture warning"),
+            "{label}: the throttled site fired inside the entry, so the boot stamp \
+             it must be measured against was missing: {:?}",
+            record.entry_diagnostics
+        );
+    }
+}
+
+/// A record whose content is a wall-clock measurement is DECLARED as one at
+/// its log site, and the arm drops it by that declaration -- never by finding
+/// an `ms` in the text, which would make `cooldown 100ms` compare equal to
+/// `cooldown 200ms`.
+///
+/// The probe reads the engine clock, which the boundary does not restore, so
+/// all three of its records carry a number that really does differ between a
+/// fresh process and a worker's second entry. Equivalence here is therefore
+/// evidence about the declarations and not about a fixture with nothing to
+/// disagree on -- confirmed by mutation: dropping any one declaration makes
+/// this red.
+#[test]
+fn a_declared_wall_clock_record_does_not_diverge_but_its_neighbours_still_compare() {
+    let (isolated, worker) = differential(&["b0_wall_clock_seed"], "b0_wall_clock_probe");
+    let c = compare(&isolated, &worker);
+    assert_equivalent("b0_wall_clock_probe", &c);
+
+    for (label, record) in [("isolated", &isolated), ("worker", &worker)] {
+        // Both declared forms must have FIRED -- agreement over a record that
+        // was never emitted is agreement over nothing -- and must be absent
+        // from the compared text.
+        for declared in ["b0 wall-clock record at", "b0 wall-clock throttled record at"] {
+            assert!(
+                record.diagnostics.contains(declared),
+                "{label}: `{declared}` never fired, so its exclusion proves nothing: {:?}",
+                record.diagnostics
+            );
+            assert!(
+                !record.entry_diagnostics.contains(declared),
+                "{label}: `{declared}` is declared wall-clock and must not be compared: {:?}",
+                record.entry_diagnostics
+            );
+        }
+
+        // The mixed record survives whole, minus the one declared value.
+        assert!(
+            record.entry_diagnostics.contains("b0 mixed record: cooldown 100ms, elapsed <ms>"),
+            "{label}: the undeclared duration and the masked one must share the line: {:?}",
+            record.entry_diagnostics
+        );
+    }
+    assert!(
+        c.population("entry_diagnostics") > 0,
+        "the arm compared nothing, so the surviving record was never checked"
+    );
+}
+
+/// The value declaration is scoped to runs whose records are COMPARED. An
+/// ordinary `rock sim` run keeps the real measurement -- masking it would turn
+/// the editor's timing logs into noise and would change what a sim's own
+/// artifacts contain, for a comparison nobody is making.
+///
+/// Both modes are asserted here because either alone is half a control: the
+/// differential test above proves the mask is on where records are compared,
+/// and this proves it is off where they are not.
+#[test]
+fn the_value_mask_is_on_only_where_records_are_compared() {
+    for mode in [vec!["sim", "testbed", "b0_wall_clock_probe"],
+                 vec!["sim", "testbed", "b0_wall_clock_seed", "b0_wall_clock_probe", "--workers"]] {
+        let stderr = run_rock(&mode, false);
+
+        let mixed = stderr
+            .lines()
+            .find(|l| l.contains("b0 mixed record:"))
+            .unwrap_or_else(|| panic!("{mode:?} emitted no mixed record:\n{stderr}"));
+        assert!(
+            !mixed.contains("<ms>"),
+            "{mode:?} is not a compared run, so it must keep the measurement: {mixed}"
+        );
+        assert!(
+            mixed.contains("cooldown 100ms, elapsed ") && mixed.ends_with("ms"),
+            "{mode:?} must render a real duration: {mixed}"
+        );
+    }
+}
+
+/// `ROCK_MASK_WALL_CLOCK` is the HARNESS's variable, and a compared run must
+/// stay masked however loudly a fixture asks for real numbers. The value is
+/// latched into a `static` on first read, so an entry-dependent override could
+/// not be honoured coherently even if it were wanted -- the first entry to read
+/// it would decide for the whole worker.
+///
+/// The declaring pair is the mutation subject: with the runner publishing the
+/// mask before a sim's `@sim_env`, this fixture's `"0"` wins and both sides
+/// render a real duration the boundary does not restore, so the records
+/// diverge.
+#[test]
+fn a_fixture_cannot_unmask_a_compared_run() {
+    let (isolated, worker) = differential(&["b0_wall_clock_unmask_seed"], "b0_wall_clock_unmask_probe");
+    let c = compare(&isolated, &worker);
+    assert_equivalent("b0_wall_clock_unmask_probe", &c);
+
+    for (label, record) in [("isolated", &isolated), ("worker", &worker)] {
+        assert!(
+            record.entry_diagnostics.contains("b0 mixed record: cooldown 100ms, elapsed <ms>"),
+            "{label}: the fixture's ROCK_MASK_WALL_CLOCK=0 must not reach a compared run: {:?}",
+            record.entry_diagnostics
+        );
+    }
+    assert!(
+        c.population("entry_diagnostics") > 0,
+        "the arm compared nothing, so the masked record was never checked"
+    );
+}
+
+/// The other direction, and the one an inherited environment can reach: an
+/// ordinary run keeps its measurements even when the PARENT environment or the
+/// fixture itself sets the mask. Neither is allowed to speak for the runner --
+/// masking an ordinary run would turn the editor's timing logs into noise and
+/// would change what a sim's own artifacts contain.
+///
+/// The two hostile sources get a test each rather than two arms of one, because
+/// they enter by different routes -- the fixture's value through `preset_env`,
+/// the parent's through `Command`'s inherited environment -- and a single test
+/// would stop at whichever failed first, hiding the other.
+///
+/// Both ordinary modes are checked: an isolated run and a `--workers` run whose
+/// records nobody compares.
+fn assert_ordinary_run_keeps_its_measurements(seed: &str, probe: &str, hostile_parent: bool) {
+    for workers in [false, true] {
+        // An isolated run needs only the probe; a worker run needs the
+        // predecessor that puts it behind a boundary.
+        let args = if workers {
+            vec!["sim", "testbed", seed, probe, "--workers"]
+        } else {
+            vec!["sim", "testbed", probe]
+        };
+
+        let stderr = run_rock(&args, hostile_parent);
+        let mixed = stderr
+            .lines()
+            .find(|l| l.contains("b0 mixed record:"))
+            .unwrap_or_else(|| panic!("{args:?} emitted no mixed record:\n{stderr}"));
+        assert!(
+            !mixed.contains("<ms>"),
+            "{args:?} (hostile_parent={hostile_parent}) is not a compared run, \
+             so it must keep the measurement: {mixed}"
+        );
+        assert!(
+            mixed.contains("cooldown 100ms, elapsed ") && mixed.ends_with("ms"),
+            "{args:?} (hostile_parent={hostile_parent}) must render a real duration: {mixed}"
+        );
+    }
+}
+
+#[test]
+fn an_ordinary_run_keeps_its_measurements_when_the_fixture_asks_to_mask() {
+    assert_ordinary_run_keeps_its_measurements(
+        "b0_wall_clock_mask_seed",
+        "b0_wall_clock_mask_probe",
+        false,
+    );
+}
+
+#[test]
+fn an_ordinary_run_keeps_its_measurements_when_the_parent_environment_masks() {
+    assert_ordinary_run_keeps_its_measurements(
+        "b0_wall_clock_seed",
+        "b0_wall_clock_probe",
+        true,
+    );
+}
+
+/// The Session Arena registry crosses the REAL worker boundary intact.
+///
+/// The b1 fixtures call `sim_checkpoint_take`/`sim_checkpoint_restore` directly
+/// and declare `SIM_WORKER_ISOLATED`, so they certify the registry IMAGE and
+/// nothing about `sim_worker_restore_boot` using it. This pair declares
+/// neither, so the probe runs as the second entry in the seed's process.
+///
+/// Provenance is asserted rather than assumed, because every way this fixture
+/// could fail to be evidence looks like a pass: a `SIM_WORKER_ISOLATED`
+/// declaration, a boot-signature refusal, or a recovery rerun would all put the
+/// probe in a fresh process, where its agreement with a fresh process is
+/// agreement between two fresh processes. Two independent signals say it did
+/// not: the entry's position in its queue, and the absence of the process boot
+/// log an entry that booted its own process necessarily carries.
+#[test]
+fn the_arena_registry_survives_the_real_worker_boundary() {
+    let (isolated, worker) = differential(&["b2_arena_boundary_seed"], "b2_arena_boundary_probe");
+    let c = compare(&isolated, &worker);
+    assert_equivalent("b2_arena_boundary_probe", &c);
+
+    assert_eq!(isolated.seq, 0, "the isolated arm is a one-entry queue");
+    assert!(
+        worker.seq > 0,
+        "the probe ran first in its process, so it crossed no boundary and \
+         certifies nothing about the restore"
+    );
+    assert!(
+        isolated.diagnostics.contains("Initialized successfully"),
+        "the isolated arm must carry the boot log of the process it booted: {:?}",
+        isolated.diagnostics
+    );
+    assert!(
+        !worker.diagnostics.contains("Initialized successfully"),
+        "the worker arm carries a process boot log, so it booted its own process \
+         rather than following the seed: {:?}",
+        worker.diagnostics
+    );
+
+    // The artifact is what makes agreement mean something: both sides emit
+    // PASS whatever the ids are, and only this compares the identities.
     assert_eq!(
-        isolated.verdict(),
-        worker.verdict(),
-        "a suppressed warning changes no verdict -- that is what makes it invisible elsewhere"
+        artifact_names(&worker),
+        vec!["arena_boundary.txt".to_string()],
+        "the probe's identity manifest is the compared evidence"
+    );
+    assert!(
+        c.population("artifacts") > 0,
+        "the artifact arm compared nothing, so the identities were never checked"
+    );
+    assert!(
+        c.population("expects_pass") > 0,
+        "the fixture asserted nothing"
+    );
+}
+
+/// Engine configuration restores at the boundary. `TIME_SCALE` is a Stone
+/// global outside replay's six-global predicate; the checkpoint's membership is
+/// the whole registry, so the probe sees real time -- in the scale field AND in
+/// the dt its own frame advances, which is the reason this class matters.
+#[test]
+fn engine_configuration_resets_at_the_entry_boundary() {
+    let (isolated, worker) = differential(&["b0_config_seed"], "b0_config_probe");
+    let c = compare(&isolated, &worker);
+    assert_equivalent("b0_config_probe", &c);
+
+    assert_eq!(isolated.verdict(), "PASS", "the probe passes in a fresh process");
+    for (label, record) in [("isolated", &isolated), ("worker", &worker)] {
+        assert!(
+            record
+                .expects_pass
+                .iter()
+                .any(|m| m.message.contains("one frame advances a full fixed dt")),
+            "{label}: the probe never measured game time, so agreement proves \
+             nothing about the dt the scale feeds: {:?}",
+            record.expects_pass
+        );
+    }
+    assert_eq!(isolated.artifacts["scale.txt"], worker.artifacts["scale.txt"]);
+}
+
+/// Input edges restore at the boundary: a predecessor that stopped mid-hold
+/// left `keys_down` set, and `input_end_frame` would roll it forward forever --
+/// the restored map starts the probe with nothing held and no release edge.
+#[test]
+fn a_held_key_does_not_reach_the_next_entry() {
+    let (isolated, worker) = differential(&["b0_input_seed"], "b0_input_probe");
+    let c = compare(&isolated, &worker);
+    assert_equivalent("b0_input_probe", &c);
+
+    assert_eq!(isolated.verdict(), "PASS", "the probe passes in a fresh process");
+    assert!(c.population("expects_pass") > 0, "the fixture asserted nothing");
+    // "held" and "free" are the same length, so the CONTENTS comparison is the
+    // load-bearing one -- a name-or-length manifest would call a leak equal.
+    assert_eq!(isolated.artifacts["hold.txt"], worker.artifacts["hold.txt"]);
+}
+
+/// A task left live at `stop_sim()` does not tick in the next entry: restoring
+/// `POLLER` rebinds the boot arena, so the predecessor's registration is
+/// ABANDONED -- never polled again, and its terminal defers deliberately do not
+/// fire, because a fresh process's exit would not have fired them either.
+///
+/// The discriminant is a DELTA measured strictly inside the probe's window, not
+/// the counter's value: a value would only repeat the leaked-global class,
+/// while a delta can move only if foreign work is still being polled here.
+#[test]
+fn a_task_left_live_at_stop_sim_does_not_tick_in_the_next_entry() {
+    let (isolated, worker) = differential(&["b0_poller_seed"], "b0_poller_probe");
+    let c = compare(&isolated, &worker);
+    assert_equivalent("b0_poller_probe", &c);
+
+    assert_eq!(isolated.verdict(), "PASS", "nothing foreign ticks in a fresh process");
+    assert!(c.population("expects_pass") > 0, "the fixture asserted nothing");
+    assert_eq!(
+        worker.artifacts["ticks.txt"].len, 1,
+        "the probe writes its one-digit delta, so the zero was measured"
+    );
+    assert_eq!(isolated.artifacts["ticks.txt"], worker.artifacts["ticks.txt"]);
+}
+
+/// A native resource -- and the one native class the runtime exposes an honest
+/// observer for: handles are 1-based registry slots (`stone-rs/src/proc.rs`) and
+/// `stone_proc_alive` answers per handle, so the fixture compares handle SETS.
+/// A count could not see this at all -- the registry reuses a freed slot, so the
+/// freed and the leaked case have the same count.
+///
+/// The boundary's teardown (`sim_worker_teardown_procs`) has to satisfy both
+/// views: nothing the predecessor spawned is still live, AND the probe's own
+/// spawn lands on the first slot rather than being pushed past a held one. A
+/// teardown that killed the child but kept the slot passes the first and fails
+/// the second.
+#[test]
+fn a_subprocess_does_not_outlive_the_entry_that_spawned_it() {
+    let (isolated, worker) = differential(&["b0_proc_seed"], "b0_proc_probe");
+    let c = compare(&isolated, &worker);
+    assert_equivalent("b0_proc_probe", &c);
+
+    assert_eq!(isolated.verdict(), "PASS", "a fresh process inherits nothing");
+
+    for view in [
+        "no subprocess from a predecessor is live in this entry",
+        "this entry's own subprocess takes the first registry slot",
+    ] {
+        assert!(
+            worker.expects_pass.iter().any(|m| m.message.contains(view)),
+            "the `{view}` view did not fire, so only one of the two independent \
+             observations is evidence: {:?}",
+            worker.expects_pass
+        );
+    }
+    // Both runs have to have taken the measurement and found it empty --
+    // otherwise the agreement is between two probes that never looked.
+    assert_eq!(
+        isolated.artifacts["procs.txt"].len, 2,
+        "the isolated live-handle set must be the empty `[]`, not unwritten"
+    );
+    assert_eq!(isolated.artifacts["procs.txt"], worker.artifacts["procs.txt"]);
+}
+
+/// A non-default frame budget is per ENTRY, not per process: the budget an
+/// entry runs on is the one ITS sim declared, and it is measured from that
+/// entry's start frame.
+///
+/// The two fixtures declare DIFFERENT budgets on purpose -- a queue that served
+/// only one value would fail whichever it dropped -- and the predecessor burns
+/// most of its own before the probe starts, so a process-wide bound would kill
+/// the probe partway and cost it its later expects and its `stop_sim()`.
+#[test]
+fn a_declared_frame_budget_belongs_to_its_entry() {
+    let (isolated, worker) = differential(&["b0_budget_pred"], "b0_budget_probe");
+    let c = compare(&isolated, &worker);
+    assert_equivalent("b0_budget_probe", &c);
+
+    for (label, record) in [("isolated", &isolated), ("worker", &worker)] {
+        assert!(record.saw_stop, "{label}: the entry was cut short of stop_sim()");
+        assert!(
+            record
+                .expects_pass
+                .iter()
+                .any(|m| m.message.contains("kept its own budget through to the end")),
+            "{label}: the probe never reached its post-budget frames, so agreement \
+             proves nothing: {:?}",
+            record.expects_pass
+        );
+    }
+    // The declared value, not just "a budget": 90 is the probe's, 40 the
+    // predecessor's, 600 the default nobody here asked for.
+    assert_eq!(
+        worker.artifacts["budget.txt"].len,
+        2,
+        "the entry reports a two-digit budget, so neither 600 nor an empty read"
+    );
+    assert_eq!(isolated.artifacts["budget.txt"], worker.artifacts["budget.txt"]);
+    assert!(c.population("expects_pass") > 0);
+}
+
+/// Boot-signature admission, side one: entries that AGREE on a non-default
+/// boot value share one worker and the target behaves as it does alone.
+///
+/// The value is `SIM_SKIP_RENDER`, latched once by `runner_load_sim_entries`
+/// before the queue starts, so nothing per-entry could stand in for it -- and
+/// the probe asserts the latch actually moved off its default, so agreement is
+/// not two runs of an unread variable.
+#[test]
+fn a_compatible_boot_signature_reaches_the_shared_worker() {
+    let (isolated, worker) = differential(&["b0_env_pred"], "b0_env_probe");
+    let c = compare(&isolated, &worker);
+    assert_equivalent("b0_env_probe", &c);
+
+    for (label, record) in [("isolated", &isolated), ("worker", &worker)] {
+        assert!(
+            record
+                .expects_pass
+                .iter()
+                .any(|m| m.message.contains("boot latched it, away from its default")),
+            "{label}: the boot value never took effect, so this compared nothing: {:?}",
+            record.expects_pass
+        );
+    }
+    assert_eq!(worker.artifacts["env.txt"].len, 1, "the entry read the declared `0`");
+    assert_eq!(isolated.artifacts["env.txt"], worker.artifacts["env.txt"]);
+    assert!(c.population("artifacts") > 0);
+}
+
+/// Boot-signature admission, side two: an entry that DISAGREES on a
+/// boot-consumed value is refused, naming both sims and the reason -- never
+/// run in a process booted with the other value.
+#[test]
+fn an_incompatible_boot_signature_is_refused_with_its_reason() {
+    let plan = DifferentialPlan {
+        predecessors: vec!["b0_env_conflict".to_string()],
+        target: "b0_env_probe".to_string(),
+    };
+    let err = run_differential(Backend::Skull, "testbed", &plan)
+        .expect_err("a worker must not serve two different boot signatures");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("boot signatures") && msg.contains("b0_env_conflict") && msg.contains("b0_env_probe"),
+        "the refusal must say which sims and why, got: {msg}"
+    );
+}
+
+/// The other admission arm, with its own distinct reason: `$OUT` in a value is
+/// resolved before the process starts, so it cannot follow a per-entry `$OUT`.
+/// These two entries AGREE on their signature, so this is not the check above
+/// firing under another name.
+#[test]
+fn an_out_interpolating_env_is_refused_with_its_own_reason() {
+    let plan = DifferentialPlan {
+        predecessors: vec!["b0_env_outref_head".to_string()],
+        target: "b0_env_outref_tail".to_string(),
+    };
+    let err = run_differential(Backend::Skull, "testbed", &plan)
+        .expect_err("a worker cannot give one process two different $OUT-derived values");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("B0_ENV_SESSION") && msg.contains("$OUT"),
+        "the refusal must name the offending pair and the reason, got: {msg}"
+    );
+    assert!(
+        !msg.contains("boot signatures"),
+        "these entries agree on their signature; a signature refusal here would mean \
+         the fixture never reached the $OUT check: {msg}"
+    );
+}
+
+/// The DROPPED-DEFINITION static (`docs/sim-speed-plan.md` B1). Its
+/// `Iterator`-bounded owner has no standalone emission, so the cell exists only
+/// inlined at call sites; the B1 registration fix carries a spliced callee's
+/// statics into the body they splice into, so the cell reaches
+/// `__ROCK_STATICS` and the checkpoint restores it like any other. Pinned at
+/// the emitted-Lua level too, by
+/// `crates/skull/tests/static_registration_coverage.rs`.
+#[test]
+fn a_dropped_definitions_static_resets_at_the_entry_boundary() {
+    let (isolated, worker) = differential(&["b1_dropped_seed"], "b1_dropped_probe");
+    let c = compare(&isolated, &worker);
+    assert_equivalent("b1_dropped_probe", &c);
+
+    assert_eq!(isolated.verdict(), "PASS", "the probe passes in a fresh process");
+    assert!(c.population("expects_pass") > 0, "the fixture asserted nothing");
+    assert_eq!(
+        worker.artifacts["calls.txt"].len, 1,
+        "the probe writes its one-digit count, so the fresh cell was measured"
+    );
+    assert_eq!(isolated.artifacts["calls.txt"], worker.artifacts["calls.txt"]);
+}
+
+/// A predecessor the entry budget CUT -- its coroutine still suspended, a
+/// global dirtied -- is abandoned and restored over like any finished one. The
+/// wedge only wedges when chained behind its marker-writing head, so the suite
+/// sees both fixtures pass standalone.
+#[test]
+fn a_budget_cut_predecessor_still_restores_boot() {
+    let (isolated, worker) = differential(&["b2_wedge_head,b2_wedge_tail"], "b0_leak_probe");
+    let c = compare(&isolated, &worker);
+    assert_equivalent("b0_leak_probe after a wedged predecessor", &c);
+
+    assert_eq!(isolated.verdict(), "PASS", "the probe passes in a fresh process");
+    assert!(c.population("expects_pass") > 0, "the fixture asserted nothing");
+    assert_eq!(
+        worker.artifacts["count.txt"].len, 1,
+        "the probe wrote the counter it read, so the fresh zero was measured"
+    );
+    assert_eq!(isolated.artifacts["count.txt"], worker.artifacts["count.txt"]);
+}
+
+/// Failure containment (`docs/sim-speed-plan.md` B2): a worker that DIES
+/// mid-queue loses only the entry it died inside; every unstarted entry reruns
+/// in a fresh worker of the same boot signature and behaves as it does alone.
+/// The crash only fires when chained behind its marker-writing head, so the
+/// suite sees both fixtures pass standalone.
+#[test]
+fn a_crashed_worker_recovers_its_unstarted_entries() {
+    let records = run_worker_suite(
+        Backend::Skull,
+        "testbed",
+        &["b2_crash_head,b2_crash_tail".to_string(), "b0_leak_probe".to_string()],
+    )
+    .expect("the suite call itself must not error: the crash is an entry failure");
+    assert_eq!(records.len(), 2, "one record per entry spec");
+    let records: Vec<SimRecord> = records.into_iter().map(|(r, _)| r).collect();
+
+    let crashed = &records[0];
+    assert_eq!(
+        crashed.exit_code,
+        Some(7),
+        "the crash belongs to the entry the worker died inside: {crashed:?}"
+    );
+    assert_eq!(crashed.verdict(), "FAIL");
+
+    let probe = &records[1];
+    assert!(
+        probe.errors.is_empty(),
+        "recovery must rerun the unstarted entry, not record it as never started: {:?}",
+        probe.errors
+    );
+    assert_eq!(probe.verdict(), "PASS", "the recovered entry behaves as it does alone");
+    assert!(probe.saw_stop);
+    assert!(
+        probe
+            .expects_pass
+            .iter()
+            .any(|m| m.message.contains("a counter no predecessor touched")),
+        "the recovered entry must have run on a fresh world: {:?}",
+        probe.expects_pass
+    );
+    assert_eq!(
+        probe.artifacts["count.txt"].len, 1,
+        "the recovered entry produced its artifact under its own $OUT"
+    );
+}
+
+/// An entry that REPLACES the boot checkpoint mid-run (the checkpoint-
+/// machinery sims do this by design) must not have its mid-entry image
+/// silently restored into the next entry -- that was observed as a corruption
+/// cascade across every later entry in the queue. The boundary refuses with
+/// its reason and the worker dies there; recovery then reruns the unstarted
+/// entries fresh, so the damage is contained to the entry that caused it.
+#[test]
+fn a_replaced_boot_checkpoint_is_refused_not_restored() {
+    // Both sims carry the SIM_WORKER_ISOLATED marker, so worker-mode GROUPING
+    // never queues them -- this drives the raw queue surface underneath it,
+    // which is exactly where an unforeseen mid-entry take would land.
+    let records = run_worker_suite(
+        Backend::Skull,
+        "testbed",
+        &["b1_checkpoint_take_succeeds".to_string(), "b1_checkpoint_membership".to_string()],
+    )
+    .expect("the suite call itself must not error: the refusal is an entry failure");
+    assert_eq!(records.len(), 2);
+    let records: Vec<SimRecord> = records.into_iter().map(|(r, _)| r).collect();
+
+    let corruptor = &records[0];
+    assert!(
+        corruptor
+            .errors
+            .iter()
+            .any(|m| m.message.contains("boot checkpoint was replaced")),
+        "the boundary must name the refusal, not restore a mid-entry image: {:?}",
+        corruptor.errors
+    );
+    assert_eq!(corruptor.verdict(), "FAIL");
+
+    let probe = &records[1];
+    assert!(probe.errors.is_empty(), "recovery reruns the probe fresh: {:?}", probe.errors);
+    assert_eq!(
+        probe.verdict(),
+        "PASS",
+        "the recovered entry behaves as it does alone (its own machinery asserts \
+         hold only in a fresh process): {probe:?}"
+    );
+}
+
+/// A native resource an entry CREATED does not reach its successor
+/// (`docs/sim-speed-plan.md` B3). The Lua checkpoint cannot see a GL texture or
+/// an FBO, so the boundary tears the native world back down to the exact
+/// handle set boot published -- and the fixture reads that set two independent
+/// ways, the ledger's own diff and the monotonic id its own canvas is handed.
+#[test]
+fn a_predecessors_native_resource_does_not_reach_the_next_entry() {
+    let (isolated, worker) = differential(&["b3_leak_seed"], "b3_leak_probe");
+    let c = compare(&isolated, &worker);
+    assert_equivalent("b3_leak_probe", &c);
+    assert_eq!(isolated.verdict(), "PASS", "the probe passes in a fresh process");
+    assert!(c.population("expects_pass") > 0, "the fixture asserted nothing");
+}
+
+/// `stop_sim`'s three implicit invariants are process-lifetime state -- two
+/// growing atomics and a set of sticky per-block marks -- so in a worker they
+/// charged an entry with its predecessors' failures. A fresh process charges an
+/// entry with boot's failures plus its own, and that is what the worker must
+/// charge too.
+///
+/// The injection is real: `stone_create_shader` on a source that cannot compile
+/// drives the same reporting path a broken game shader does. It is chained-only
+/// so `rock sim testbed` stays green -- the same escape the `expects_fail`
+/// denominator uses.
+#[test]
+fn a_predecessors_shader_failure_is_not_charged_to_the_next_entry() {
+    let (isolated, worker) =
+        differential(&["b3_diag_head,b3_diag_injector"], "b3_diag_probe");
+    let c = compare(&isolated, &worker);
+    assert_equivalent("b3_diag_probe after an injected shader failure", &c);
+    assert_eq!(isolated.verdict(), "PASS", "the probe passes in a fresh process");
+    assert_eq!(worker.verdict(), "PASS", "and behind a predecessor that failed a compile");
+    assert!(c.population("expects_pass") > 0, "the fixture asserted nothing");
+}
+
+/// The other direction, which no teardown can fix: an entry that DESTROYED a
+/// boot-owned native resource leaves the restored globals naming a handle whose
+/// GL object is gone, and the first draw through one is a GL error. The
+/// boundary names what is missing and ends the worker -- but the entry itself
+/// ran to completion before that was knowable, so its record is kept (it
+/// followed a predecessor, which is what makes it evidence) and only its
+/// unstarted successors restart in a fresh worker.
+#[test]
+fn an_entry_that_destroyed_boots_native_world_keeps_its_record_and_ends_its_worker() {
+    // The head is not decoration. As entry ZERO the seed would have followed no
+    // predecessor, so its record could not be boundary evidence whatever the
+    // boundary did, and the provenance assertion below would pass vacuously.
+    let records = run_worker_suite(
+        Backend::Skull,
+        "testbed",
+        &[
+            "b3_canvas_head".to_string(),
+            "b3_canvas_seed".to_string(),
+            "b3_canvas_probe".to_string(),
+        ],
+    )
+    .expect("the suite call itself must not error: ineligibility is a scheduling fact");
+    assert_eq!(records.len(), 3, "one record per entry spec");
+
+    let (head, head_crossed) = &records[0];
+    assert_eq!(head.verdict(), "PASS", "the head runs normally: {head:?}");
+    assert!(!head_crossed, "entry zero follows nothing");
+
+    let (seed, seed_crossed) = &records[1];
+    assert_eq!(
+        seed.verdict(),
+        "PASS",
+        "ending the worker is a scheduling fact, not the entry's failure: {seed:?}"
+    );
+    assert!(
+        seed_crossed,
+        "the entry FOLLOWED a predecessor and its record is kept, so it stays \
+         boundary evidence rather than being thrown away for a fresh-process one"
+    );
+    assert_eq!(
+        seed.artifacts["runs.txt"].len, 1,
+        "the entry ran EXACTLY ONCE: it completed before the boundary could know, \
+         so rerunning it would repeat its side effects"
+    );
+    assert!(
+        seed.artifacts.contains_key("shutdown.txt"),
+        "the worker left through the ORDINARY exit, so `@shutdown` systems, \
+         `replay_finish` and engine teardown ran -- an `os_exit` would skip all \
+         of it and `runs.txt`, written mid-entry, could not tell: {:?}",
+        artifact_names(seed)
+    );
+
+    let (probe, probe_crossed) = &records[2];
+    assert!(
+        !probe_crossed,
+        "the successor restarts in a FRESH worker, so it follows nothing and \
+         cannot certify a restore"
+    );
+    assert_eq!(
+        probe.verdict(),
+        "PASS",
+        "the successor renders through boot's canvases, not through destroyed ones: {probe:?}"
+    );
+    assert!(
+        !probe
+            .expects_fail
+            .iter()
+            .any(|m| m.message.contains("GL errors")),
+        "the worker-only GL error class is what this boundary closes: {:?}",
+        probe.expects_fail
+    );
+}
+
+/// A voice on Bitgun's boot-owned sound, which cannot be covered by sound
+/// teardown and therefore exercises the voice destructor itself.
+///
+/// The load-bearing assertion is the SUCCESSOR's provenance. A boundary that
+/// destroyed what the seed left lets the worker continue, so the probe follows
+/// a predecessor; one that could not ends the worker, and the probe restarts
+/// fresh with no predecessor at all. The probe's own assertions cannot tell
+/// those apart -- it passes either way -- which is exactly the trap a
+/// leak fixture falls into once containment exists.
+#[test]
+fn a_predecessors_voice_on_a_boot_sound_does_not_reach_the_next_entry() {
+    let records = run_worker_suite(
+        Backend::Skull,
+        "bitgun",
+        &["b3_voice_leak_seed".to_string(), "b3_voice_leak_probe".to_string()],
+    )
+    .expect("the suite call itself must not error");
+    assert_eq!(records.len(), 2);
+
+    let (seed, _) = &records[0];
+    assert_eq!(seed.verdict(), "PASS", "the seed leaves its voice live on purpose: {seed:?}");
+
+    let (probe, probe_crossed) = &records[1];
+    assert_eq!(probe.verdict(), "PASS", "the successor inherits boot's audio world: {probe:?}");
+    assert!(
+        probe_crossed,
+        "the boundary DESTROYED what the seed left, so the worker carried on and \
+         this entry followed a predecessor -- a teardown that could not would have \
+         ended the worker and restarted this entry fresh, and its own assertions \
+         would still pass"
+    );
+    assert!(
+        !probe.expects_pass.is_empty(),
+        "the probe asserted nothing: {probe:?}"
     );
 }
 
@@ -244,9 +1031,11 @@ fn logger_dedup_still_suppresses_the_next_entrys_warning() {
 /// assert.
 #[test]
 fn every_comparator_arm_is_present_and_exercised() {
-    // No single fixture reaches every arm: the leak differential is the only
-    // one populating `expects_fail`, and only the dedup one logs inside its
-    // entry envelope. The denominator is the union.
+    // No single fixture reaches every arm: only the dedup one logs inside its
+    // entry envelope, and with the B2 boundary landed nothing fails in a worker
+    // that would not fail isolated -- `expects_fail` is populated by the
+    // deliberate chained-only failure, identical on both sides. The denominator
+    // is the union.
     let comparisons = [
         {
             let (i, w) = differential(&["b0_leak_seed"], "b0_leak_probe");
@@ -255,6 +1044,24 @@ fn every_comparator_arm_is_present_and_exercised() {
         {
             let (i, w) = differential(&["b0_dedup_seed"], "b0_dedup_probe");
             compare(&i, &w)
+        },
+        {
+            let (i, w) = differential(&["b0_leak_seed"], "b0_fail_head,b0_fail_tail");
+            let c = compare(&i, &w);
+            // The tail has a standalone branch; population is only evidence
+            // once both sides are known to have taken the FAILING one.
+            for (label, record) in [("isolated", &i), ("worker", &w)] {
+                assert!(
+                    record
+                        .expects_fail
+                        .iter()
+                        .any(|m| m.message.contains("deliberate chained-only failure")),
+                    "{label}: the tail took its standalone branch, so `expects_fail` \
+                     was never populated deliberately: {:?}",
+                    record.expects_fail
+                );
+            }
+            c
         },
     ];
 
@@ -271,4 +1078,344 @@ fn every_comparator_arm_is_present_and_exercised() {
         isolated.errors.is_empty() && worker.errors.is_empty(),
         "the zero `errors` denominator has to be a real zero, not an unread field"
     );
+}
+
+/// `--workers` scheduling is POSITIONAL: naming one sim twice is two entries,
+/// both of which must run and both of which must land a result. Keying results
+/// by spec spelling ran both and then reported the second as never scheduled.
+/// Driven through the CLI because `run_specs_worker_mode` is the layer that
+/// places results, and the tally line is what a user reads.
+#[test]
+fn a_duplicated_spec_runs_and_reports_twice_in_worker_mode() {
+    let mut rock = std::env::current_exe().expect("test exe");
+    rock.pop();
+    if rock.ends_with("deps") {
+        rock.pop();
+    }
+    let rock = rock.join("rock");
+    assert!(rock.exists(), "rock binary not built at {}", rock.display());
+
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("workspace root")
+        .to_path_buf();
+
+    let out = std::process::Command::new(&rock)
+        .current_dir(&root)
+        .args(["sim", "testbed", "b0_leak_probe", "b0_leak_probe", "--workers"])
+        .output()
+        .expect("run rock sim --workers");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+
+    assert!(
+        out.status.success(),
+        "a duplicated spec must not fail the invocation:\n{stdout}\n{stderr}"
+    );
+    assert!(
+        stdout.contains("[sim] 2/2 sims passed"),
+        "both occurrences must be accounted for:\n{stdout}"
+    );
+    // Per-entry records are the command's result on stderr; the tally is stdout.
+    assert_eq!(
+        stderr.matches("b0_leak_probe: PASS").count(),
+        2,
+        "each occurrence owns its own record:\n{stderr}"
+    );
+}
+
+/// PROVENANCE, which is what the `--multi-order` gate's denominator rests on:
+/// only an entry that actually followed another one inside one process can be
+/// evidence that a restore boundary works. An entry that ran first had no
+/// predecessor's world to inherit, so its agreement with a fresh process is
+/// agreement between two fresh processes.
+///
+/// Both classifications are pinned, because getting either wrong silently
+/// changes what the gate certifies: a healthy queue's successors must count,
+/// and an entry that RECOVERED into a fresh worker must not -- recovery is
+/// exactly the case where queue position lies about what happened.
+#[test]
+fn only_an_entry_that_followed_a_predecessor_counts_as_evidence() {
+    let healthy = run_worker_suite(
+        Backend::Skull,
+        "testbed",
+        &["b0_leak_seed".to_string(), "b0_leak_probe".to_string(), "b0_rng_probe".to_string()],
+    )
+    .expect("the healthy queue must run");
+    assert_eq!(
+        healthy.iter().map(|(_, crossed)| *crossed).collect::<Vec<_>>(),
+        vec![false, true, true],
+        "in one healthy worker only the first entry lacks a predecessor"
+    );
+    for (record, _) in &healthy {
+        assert_eq!(record.verdict(), "PASS", "the queue must be healthy: {record:?}");
+    }
+
+    // The crash kills the worker inside entry 0, so `b0_leak_probe` never
+    // started and is rerun in a FRESH worker -- where it is first, with no
+    // predecessor, however late its queue position is.
+    let recovered = run_worker_suite(
+        Backend::Skull,
+        "testbed",
+        &["b2_crash_head,b2_crash_tail".to_string(), "b0_leak_probe".to_string()],
+    )
+    .expect("the suite call itself must not error: the crash is an entry failure");
+    assert_eq!(
+        recovered.iter().map(|(_, crossed)| *crossed).collect::<Vec<_>>(),
+        vec![false, false],
+        "the recovered entry restarted a worker, so it followed nobody -- position \
+         alone would have called it a successor"
+    );
+    assert_eq!(
+        recovered[1].0.verdict(),
+        "PASS",
+        "the recovered entry still ran; it is just not evidence about a boundary"
+    );
+}
+
+/// A boot world whose canvas contents are NOT creation's cannot be returned by
+/// clearing, so it is refused from a worker rather than silently zeroed.
+///
+/// This is the premise the whole contents reset rests on. `tex_image_2d(.., None)`
+/// allocates without specifying contents, so creation now CLEARS explicitly and
+/// the boundary restores to that defined state -- which is only sound while boot
+/// itself has not painted over it. `b3_cc_paint_at_boot` makes `@init` paint one,
+/// and the worker must say so instead of installing blank where boot's
+/// projection was white.
+///
+/// The pixel value cannot be the assertion: boot's white survives in a fresh
+/// process AND in a worker that never cleared it, so the probe agrees either
+/// way. The REASON is the observable, and no entry may cross a boundary.
+#[test]
+fn a_boot_painted_canvas_is_refused_from_a_worker() {
+    let records = run_worker_suite(
+        Backend::Skull,
+        "testbed",
+        &["b3_cc_painted_head".to_string(), "b3_cc_painted_probe".to_string()],
+    )
+    .expect("the suite call itself must not error: ineligibility is a scheduling fact");
+    assert_eq!(records.len(), 2, "one record per entry spec");
+
+    for (record, crossed) in &records {
+        assert_eq!(
+            record.verdict(),
+            "PASS",
+            "refusing the boot world is a scheduling fact, not a failure: {record:?}"
+        );
+        assert!(
+            !crossed,
+            "no entry may inherit a boot world whose canvas contents cannot be \
+             reconstructed -- every one of these must have restarted fresh"
+        );
+    }
+
+    // TWO names: a one-entry queue takes no checkpoint and never reaches a
+    // boundary, so it would report nothing and this assertion would be about
+    // the wrong thing. The handle NUMBER is deliberately not asserted -- ids are
+    // monotonic per process, so pinning one pins a coincidence of allocation
+    // order.
+    let (_, out, err) = run_rock_status(&[
+        "sim",
+        "testbed",
+        "--multi-order",
+        "b3_cc_painted_head",
+        "b3_cc_painted_probe",
+    ]);
+    let reason = format!("{out}{err}");
+    assert!(
+        reason.contains("boot painted canvases whose contents cannot be reconstructed"),
+        "the refusal must name its reason, so an ineligible boot world is a \
+         reported fact rather than a silently slower suite:\n{reason}"
+    );
+}
+
+/// The DEFAULT mode is the hybrid: render-skipped entries share a
+/// boot-checkpoint worker, entries that render get a fresh process with a
+/// reported reason.
+///
+/// Both populations are asserted non-empty. A split that admitted everything,
+/// or that admitted nothing, would satisfy a test that only looked at one side
+/// -- and "nothing was admitted" is exactly what a silently broken predicate
+/// produces while every sim still passes.
+#[test]
+fn the_default_mode_admits_render_skipped_sims_and_isolates_rendered_ones() {
+    // `b3_cc_head`/`b3_cc_seed` declare no SIM_SKIP_RENDER, so they are
+    // render-skipped; `canvas_create_preserves_color_mask` declares
+    // SIM_SKIP_RENDER=0 and renders.
+    // `-j 1` because a signature group splits into at most `--jobs` CONTIGUOUS
+    // lanes and each lane's head starts its own worker (B5) -- at the default
+    // -j 4 these two eligible entries land in two lanes and both boot, which
+    // says nothing about whether they were ADMITTED. One lane makes "shared a
+    // process" observable.
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "testbed",
+        "-j",
+        "1",
+        "b3_cc_head",
+        "b3_cc_seed",
+        "canvas_create_preserves_color_mask",
+    ]);
+    let all = format!("{stdout}{stderr}");
+    assert!(ok, "the default mode must run these three green:\n{all}");
+
+    // The rendered one is isolated, and says why.
+    assert!(
+        all.contains("canvas_create_preserves_color_mask` runs isolated")
+            || all.contains("renders (SIM_SKIP_RENDER=0)"),
+        "a rendered sim must be isolated WITH ITS REASON -- a silently isolated \
+         entry reads as a worker result:\n{all}"
+    );
+
+    // ... and the render-skipped ones really did share a process. Two entries
+    // in one worker boot it once, so exactly one of them reports the engine
+    // banner a fresh process prints.
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert!(
+        boots >= 2,
+        "the rendered sim needs its own process, so at least two boots: {boots}\n{all}"
+    );
+    assert!(
+        boots < 3,
+        "the two render-skipped entries must SHARE a worker rather than each \
+         booting -- {boots} boots means the default admitted nothing:\n{all}"
+    );
+}
+
+/// Run `rock` and return `(exit_ok, stdout, stderr)` WITHOUT asserting on the
+/// exit code. The multi-order gate deliberately exits nonzero on a corpus that
+/// cannot populate every arm, and that refusal is part of what is under test.
+fn run_rock_status(args: &[&str]) -> (bool, String, String) {
+    let mut rock = std::env::current_exe().expect("test exe");
+    rock.pop();
+    if rock.ends_with("deps") {
+        rock.pop();
+    }
+    let rock = rock.join("rock");
+    assert!(rock.exists(), "rock binary not built at {}", rock.display());
+
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("workspace root")
+        .to_path_buf();
+
+    let out = std::process::Command::new(&rock)
+        .current_dir(&root)
+        .args(args)
+        .output()
+        .unwrap_or_else(|e| panic!("run rock {args:?}: {e}"));
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+/// `[multi-order] <n> comparisons followed a predecessor ...` -> `n`.
+fn boundary_crossings(stdout: &str) -> usize {
+    let line = stdout
+        .lines()
+        .find(|l| l.contains("comparisons followed a predecessor"))
+        .unwrap_or_else(|| panic!("the gate never reported its provenance split:\n{stdout}"));
+    line.split_whitespace()
+        .find_map(|w| w.parse::<usize>().ok())
+        .unwrap_or_else(|| panic!("no count in `{line}`"))
+}
+
+/// A NAMED subset is the same gate over a smaller corpus, and the property that
+/// makes that true is the boundary-crossing count.
+///
+/// A subset that quietly ran its sims isolated -- or that narrowed the corpus
+/// only after the arms were scheduled -- would still print three arms and still
+/// agree with the reference, because two fresh processes agree with each other.
+/// Only a non-zero boundary-crossing population says a restore was exercised at
+/// all, which is why that is what this asserts. The count is exact: two eligible
+/// sims share one worker per arm, so the second entry crosses and the first does
+/// not, three times over.
+///
+/// An equivalent subset must EXIT ZERO. testbed passes everything standalone,
+/// so `expects_fail`/`errors` have no population -- which is a hole in a
+/// whole-corpus gate and means nothing here, because the caller picked this
+/// pair to re-measure one class, not to populate every arm. Refusing over it
+/// would make the iteration gate unusable as an iteration gate.
+#[test]
+fn a_named_subset_is_the_same_gate_and_still_crosses_a_worker_boundary() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "testbed",
+        "--multi-order",
+        "b0_leak_seed",
+        "b0_leak_probe",
+    ]);
+
+    assert!(
+        stdout.contains("[multi-order] 2 sims"),
+        "the corpus must be the two named sims, not the whole registry:\n{stdout}"
+    );
+    assert_eq!(
+        boundary_crossings(&stdout),
+        3,
+        "one worker per arm over two eligible sims crosses exactly once per arm:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("diverged from the isolated reference"),
+        "the subset must agree with its own fresh-process references:\n{stdout}"
+    );
+    assert!(
+        ok,
+        "an equivalent subset is the iteration gate and must exit zero:\n{stdout}\n{stderr}"
+    );
+}
+
+/// The refusals that keep a subset from silently measuring less than it was
+/// asked to. Each is the CLI surface of a `select_gate_corpus` unit test.
+#[test]
+fn a_subset_refuses_a_name_it_cannot_measure() {
+    let (ok, _, stderr) =
+        run_rock_status(&["sim", "testbed", "--multi-order", "b0_leak_seed", "no_such_sim"]);
+    assert!(!ok, "an unknown name must not run the gate over the ones that matched");
+    assert!(stderr.contains("no_such_sim"), "the refusal names the offender:\n{stderr}");
+
+    let (ok, _, stderr) =
+        run_rock_status(&["sim", "testbed", "--multi-order", "b0_leak_seed", "b0_leak_seed"]);
+    assert!(!ok, "a repeated name has one reference record and must refuse");
+    assert!(stderr.contains("b0_leak_seed"), "the refusal names the offender:\n{stderr}");
+}
+
+/// The wall-clock timeout is the WEDGED-CHILD guard, so it bounds an entry,
+/// not the worker process: a queue of individually healthy entries must not
+/// fail whichever one happens to be running when their sum crosses it.
+#[test]
+fn the_wall_clock_deadline_is_per_entry_not_per_worker() {
+    const VAR: &str = "ROCK_SIM_TIMEOUT_SECS";
+    struct Restore(Option<String>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            // SAFETY: the heavy harness runs single-threaded (--test-threads=1).
+            unsafe {
+                match &self.0 {
+                    Some(v) => std::env::set_var(VAR, v),
+                    None => std::env::remove_var(VAR),
+                }
+            }
+        }
+    }
+    let _restore = Restore(std::env::var(VAR).ok());
+    // Each entry sleeps 4s; three of them plus boot cannot fit in 12s, while
+    // every single entry fits with room to spare.
+    unsafe { std::env::set_var(VAR, "12") };
+
+    let records = run_worker_suite(Backend::Skull, "testbed", &vec!["b2_slow_entry".to_string(); 3])
+        .expect("the suite call itself must not error");
+    assert_eq!(records.len(), 3);
+    let records: Vec<SimRecord> = records.into_iter().map(|(r, _)| r).collect();
+    for (i, record) in records.iter().enumerate() {
+        assert!(
+            !record.timed_out,
+            "entry {i} was inside its own deadline: {record:?}"
+        );
+        assert_eq!(record.verdict(), "PASS", "entry {i}: {record:?}");
+    }
 }

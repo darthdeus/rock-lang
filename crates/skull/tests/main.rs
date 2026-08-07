@@ -6,6 +6,8 @@ mod common;
 
 #[path = "ablation_totality.rs"]
 mod ablation_totality;
+#[path = "arena_column_oracle.rs"]
+mod arena_column_oracle;
 #[path = "backend_variant_mangling.rs"]
 mod backend_variant_mangling;
 #[path = "bounded_lambda_inline.rs"]
@@ -38,6 +40,8 @@ mod enum_scalarize;
 mod env_param_shadow;
 #[path = "env_record_hoist.rs"]
 mod env_record_hoist;
+#[path = "extern_return_representation.rs"]
+mod extern_return_representation;
 #[path = "extern_value_return_ownership.rs"]
 mod extern_value_return_ownership;
 #[path = "flat_vec_value_shape.rs"]
@@ -107,6 +111,8 @@ mod mangle_rename_hot_reload;
 mod mir_execution_oracle;
 #[path = "multi_rejection.rs"]
 mod multi_rejection;
+#[path = "nb_storage_registry.rs"]
+mod nb_storage_registry;
 #[path = "native_buffer_alloc.rs"]
 mod native_buffer_alloc;
 #[path = "native_buffer_leaf_addressing.rs"]
@@ -141,6 +147,8 @@ mod reserved_namespace;
 mod shader_pipeline_register;
 #[path = "static_hot_reload.rs"]
 mod static_hot_reload;
+#[path = "static_registration_coverage.rs"]
+mod static_registration_coverage;
 #[path = "struct_expand.rs"]
 mod struct_expand;
 #[path = "synthetic_name_collision.rs"]

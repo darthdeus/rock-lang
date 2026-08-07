@@ -165,6 +165,41 @@ static EPOCH_MS: Lazy<u128> = Lazy::new(|| {
     now
 });
 
+/// Separator between the stamp and the body for a record DECLARED a
+/// wall-clock measurement at its log site, in place of the ordinary space.
+///
+/// A record whose content IS a duration or a frame counter cannot be compared
+/// across two runs of the same work, so the sim differential
+/// (`rock-cli/src/sim_record.rs`) drops it. The declaration rides in the stamp
+/// rather than in the message, so the drop never has to sniff for an `ms`
+/// suffix. One character, so a declared record and a plain one align.
+///
+/// The exact stamp grammar is RESERVED PROTOCOL between this emitter and that
+/// harness. A `print()` reproducing it byte for byte is indistinguishable from
+/// a log record, and always was -- the harness already strips such a prefix
+/// and loses the category with it; the declaration only adds one more
+/// consequence to text that was already protocol. What the strict grammar
+/// buys is that ordinary game output cannot match it by ACCIDENT.
+pub const WALL_CLOCK_MARK: &str = "~";
+
+/// The full emitted line, minus colour. Pure so both the emitter and its
+/// tests -- and the harness that has to parse it back -- read one grammar.
+fn format_line(
+    elapsed: f64,
+    level: log::Level,
+    target: &str,
+    args: &std::fmt::Arguments,
+    wall_clock: bool,
+) -> String {
+    format!(
+        "[{:>8.3}s {}]{}{}",
+        elapsed,
+        level_tag(level),
+        if wall_clock { WALL_CLOCK_MARK } else { " " },
+        fmt_body(target, args),
+    )
+}
+
 fn elapsed_secs() -> f64 {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -189,18 +224,35 @@ impl log::Log for Logger {
         // out in the now-unified stream.
         // The whole line is wrapped, not just the level tag -- the body is
         // the part you read while scrolling for what went wrong.
-        let color = if *COLOR { level_color(record.level()) } else { "" };
-        let reset = if color.is_empty() { "" } else { SGR_RESET };
-        eprintln!(
-            "{}[{:>8.3}s {}] {}{}",
-            color,
-            elapsed_secs(),
-            level_tag(record.level()),
-            fmt_body(record.target(), record.args()),
-            reset
-        );
+        emit(record.level(), record.target(), record.args(), false);
     }
     fn flush(&self) {}
+}
+
+fn emit(level: log::Level, target: &str, args: &std::fmt::Arguments, wall_clock: bool) {
+    let color = if *COLOR { level_color(level) } else { "" };
+    let reset = if color.is_empty() { "" } else { SGR_RESET };
+    eprintln!(
+        "{}{}{}",
+        color,
+        format_line(elapsed_secs(), level, target, args, wall_clock),
+        reset
+    );
+}
+
+/// Emit a record DECLARED a wall-clock measurement at its log site: its
+/// content is a duration, a frame counter, or otherwise a property of when the
+/// process ran. Same backend, same gate, same format as every other record --
+/// only the separator differs (see [`WALL_CLOCK_MARK`]).
+///
+/// This bypasses the `log` facade because the facade has no channel for the
+/// declaration; it does not bypass the logger.
+pub fn emit_wall_clock(level: log::Level, target: &str, args: std::fmt::Arguments) {
+    init();
+    if log_to_level(level) > effective_max(target) {
+        return;
+    }
+    emit(level, target, &args, true);
 }
 
 static LOGGER: Logger = Logger;
@@ -322,6 +374,36 @@ mod tests {
         assert!(log_to_level(log::Level::Warn) <= effective_max("symphonia_format_ogg"));
         // our own info still passes at debug global level.
         assert!(log_to_level(log::Level::Info) <= effective_max("AUDIO"));
+    }
+
+    /// A wall-clock record is DECLARED at its log site, and the declaration
+    /// travels in the stamp the emitter owns -- not in the message, which a
+    /// game writes. It occupies the separator column, so a declared record and
+    /// a plain one put their bodies at the same offset.
+    #[test]
+    fn a_declared_wall_clock_record_is_marked_in_the_stamp() {
+        let plain = format_line(
+            1.296,
+            log::Level::Error,
+            "SLOWFRAME",
+            &format_args!("frame 60 took 69.7ms"),
+            false,
+        );
+        assert_eq!(plain, "[   1.296s ERROR] [SLOWFRAME] frame 60 took 69.7ms");
+
+        let declared = format_line(
+            1.296,
+            log::Level::Error,
+            "SLOWFRAME",
+            &format_args!("frame 60 took 69.7ms"),
+            true,
+        );
+        assert_eq!(declared, "[   1.296s ERROR]~[SLOWFRAME] frame 60 took 69.7ms");
+        assert_eq!(
+            plain.len(),
+            declared.len(),
+            "the declaration must not shift the body column"
+        );
     }
 
     #[test]
