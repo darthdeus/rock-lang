@@ -727,6 +727,62 @@ pub fn pass_lower_functions(a: &Ast, ctx: &mut LowerCtx) -> Result<(), CompilerE
                     comp_error!(item.span, "macro `{}` survived expansion", f.name.name);
                 }
 
+                // A definition for an operator nothing dispatches by name can
+                // never be called, so accepting it is a swallow: `operator ==`
+                // used to compile clean and leave structural equality in place
+                // with no diagnostic anywhere, and the ordering ops failed at
+                // the USE site blaming the operand type rather than naming the
+                // ignored overload.
+                //
+                // The exemption is a declaration over PRIMITIVES, which is what
+                // the hardcoded implementations these names refer to actually
+                // are: the stdlib's `operator(lua) ==`/`<`/`&&`/`~` over int,
+                // float, string and bool, and `fn __op_eq(a: any, b: any)`, the
+                // structural equality codegen emits. Overloading for your OWN
+                // type is the thing that can never be dispatched.
+                //
+                // Three narrower guards were tried and measured wrong. Gating on
+                // a Rock body, or on the `operator` spelling, each let a user's
+                // `inline(lua) operator ==` or plain `fn __op_eq` through to be
+                // silently ignored -- the exact bug being fixed. Gating on the
+                // module's file id looked right and is a bad proxy: `bone-query`
+                // warms the stdlib from its real filesystem path, so the check
+                // called the stdlib a user module and rejected its own
+                // operators, taking 6 LSP completion suites with it.
+                //
+                // `is_synthetic` is load-bearing under this rule: `desugar`
+                // mints `__op_lt`/`__op_le`/`__op_gt`/`__op_ge` over the NEWTYPE
+                // (not a primitive), so every newtype over a primitive would
+                // reject without it.
+                let fn_name = f.name.name.as_str();
+                let over_primitives = f.params.iter().all(|p| {
+                    matches!(
+                        a.types[p.ty].kind,
+                        skull_parser::TypeExprKind::Int
+                            | skull_parser::TypeExprKind::Float
+                            | skull_parser::TypeExprKind::String
+                            | skull_parser::TypeExprKind::Bool
+                            | skull_parser::TypeExprKind::Any
+                    )
+                });
+                // Only names the table CLASSIFIES are judged. The `__op_`
+                // namespace is wider than the parser's operator symbols --
+                // `__op_null_coalesce` (`??`) is a plain generic stdlib fn with
+                // no `operator` spelling -- and rejecting an unclassified name
+                // here would fail the whole stdlib. Keeping the table total over
+                // the parser is `operator_table_matches_the_parser`'s job, not a
+                // runtime arm's.
+                if !f.is_synthetic && !over_primitives {
+                    if let Some((symbol, false)) = bone_core::hir::operator_entry(fn_name) {
+                        comp_error!(
+                            item.span,
+                            "operator `{}` is not overloadable; only `{}` may be overloaded",
+                            symbol,
+                            bone_core::hir::overloadable_operator_symbols()
+                        );
+                    }
+                }
+
                 let fn_id = lower_function_def(ctx, a, f, &item.annotations, item.span.offset_range.0)?;
                 let mid = ctx.module.module_id();
 
