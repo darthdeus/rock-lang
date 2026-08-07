@@ -196,6 +196,75 @@ fn row_held_across_a_yield_is_flagged() {
     );
 }
 
+// --- flow precision the walk buys over source ordering --------------------
+//
+// Ported with the walk from the `lints` branch (`fa7a65204`). Each of these is
+// a case a source-offset rule answers wrong: it can see that a read follows a
+// `yield` textually, but not which PATHS reach it.
+
+#[test]
+fn suspension_on_one_branch_taints_the_merge() {
+    // Only the then-arm suspends, but the read after the `if` is reachable
+    // through it, so the binding is stale on one path.
+    assert_eq!(
+        kinds(
+            "co fn f(e: Entity<Mob>, c: bool) -> Coroutine<int> {\n    let m = unwrap(e.get())\n    if c {\n        yield 1\n    }\n    m.hp -= 1\n}"
+        ),
+        vec![EscapeKind::AcrossYield]
+    );
+}
+
+#[test]
+fn bind_and_use_within_one_iteration_is_clean() {
+    // Re-fetched at the top of each iteration and finished with before the
+    // suspension -- the correct loop shape.
+    let ks = kinds(
+        "co fn f(e: Entity<Mob>) -> Coroutine<int> {\n    for _i in 0..3 {\n        let m = unwrap(e.get())\n        m.hp -= 1\n        yield 1\n    }\n}",
+    );
+    assert!(ks.is_empty(), "bound and used before the yield, every iteration: {ks:?}");
+}
+
+#[test]
+fn read_before_the_loops_yield_is_flagged_via_the_back_edge() {
+    // Textually the read PRECEDES the yield, so a source-offset rule sees
+    // nothing. The back edge is the suspension: from iteration two on, the
+    // binding was fetched before a `yield` that already ran.
+    assert_eq!(
+        kinds(
+            "co fn f(e: Entity<Mob>) -> Coroutine<int> {\n    let m = unwrap(e.get())\n    for _i in 0..3 {\n        m.hp -= 1\n        yield 1\n    }\n}"
+        ),
+        vec![EscapeKind::AcrossYield]
+    );
+}
+
+#[test]
+fn refetch_into_the_same_local_clears_the_taint() {
+    // The fix the sims apply: `m = e.get().unwrap()` after each suspension.
+    // A rebind must clear `crossed`, or the correct program stays flagged.
+    let ks = kinds(
+        "co fn f(e: Entity<Mob>) -> Coroutine<int> {\n    let m = unwrap(e.get())\n    yield 1\n    m = unwrap(e.get())\n    m.hp -= 1\n}",
+    );
+    assert!(ks.is_empty(), "re-fetching into the same local is the documented fix: {ks:?}");
+}
+
+#[test]
+fn scalar_payload_is_not_tracked() {
+    // `Entity<int>` hands back the value itself -- nothing points at the arena,
+    // so holding it across a suspension is safe.
+    let ks = kinds(
+        "co fn f(e: Entity<int>) -> Coroutine<int> {\n    let n = unwrap(e.get())\n    yield 1\n    let _u = n + 1\n}",
+    );
+    assert!(ks.is_empty(), "a scalar payload is a copy, not a row: {ks:?}");
+}
+
+#[test]
+fn entity_handle_held_across_yield_is_clean() {
+    let ks = kinds(
+        "co fn f(e: Entity<Mob>) -> Coroutine<int> {\n    let h = e\n    yield 1\n    let _m = unwrap(h.get())\n}",
+    );
+    assert!(ks.is_empty(), "the handle is what you are supposed to hold: {ks:?}");
+}
+
 // --- the row sources ------------------------------------------------------
 
 #[test]

@@ -16,8 +16,8 @@
 
 use crate::{head_type, EscapeKind, RowEscape};
 use bone_core::hir::{
-    BinOp, BindingInfo, BuiltinTy, Expr, Function, Statement, TyId, TypeCtor, TypeExpr,
-    VarId,
+    BinOp, BindingInfo, BuiltinTy, Callee, Expr, Function, InterpPart, Pattern,
+    Statement, TyId, TypeCtor, TypeExpr, VarId, VariantArgs,
 };
 use bone_core::prelude::*;
 use bone_core::workspace::BodyInference;
@@ -387,55 +387,29 @@ impl Rows {
 
     /// A row still read after a suspension. Between the `yield` and the read,
     /// arbitrary game code ran: the row may name a despawned entity, and
-    /// nothing re-binds a suspended body's locals. Liveness, not scope -- a row
-    /// finished with before the `yield` is correct code and stays quiet.
+    /// nothing re-binds a suspended body's locals. The failure mode is a
+    /// VACUOUS GREEN rather than a wrong value -- `Arena.insert` rebinds a
+    /// reused slot's `_data` instead of mutating in place, so a stale row never
+    /// aliases the new occupant. It freezes at the dead entity's values and
+    /// writes through it reach nothing, which is why "the mob did not move"
+    /// passes trivially. See `docs/entity-coroutine-binding.md`.
     ///
-    /// Ordering is by source offset, which is also what makes the loop rule
-    /// expressible: for a row bound OUTSIDE a loop whose body suspends, every
-    /// read inside that loop is after a suspension via the back edge, whatever
-    /// its textual position.
+    /// An evaluation-order walk carrying two binding sets: `live` (fetched,
+    /// nothing suspended since) and `crossed` (fetched, then suspended). A read
+    /// of a `crossed` binding is the finding. Liveness, not scope -- a row
+    /// finished with before the `yield` stays quiet.
     fn suspensions(&self, ws: &Workspace, bi: &BodyInference, body: &Body, out: &mut Vec<RowEscape>) {
-        let yields: Vec<Span> = body
-            .expr_arena
-            .iter()
-            .filter(|(_, e)| matches!(e, Expr::Yield(_) | Expr::YieldDelegate(_)))
-            .map(|(i, _)| body.expr_spans[i])
-            .collect();
-        if yields.is_empty() {
+        let Some(root) = body.root else { return };
+        // No suspension point, nothing to be stale across. A flat arena scan
+        // over the overwhelming majority of bodies (nothing but a `co fn`
+        // suspends) is far cheaper than the ordered walk it skips.
+        if !body.expr_arena.iter().any(|(_, e)| matches!(e, Expr::Yield(_) | Expr::YieldDelegate(_)))
+        {
             return;
         }
-        let suspending_loops: Vec<Span> = body
-            .statement_arena
-            .iter()
-            .filter_map(|(_, s)| match s {
-                Statement::For { body: b, .. } | Statement::While { body: b, .. } => Some(*b),
-                _ => None,
-            })
-            .map(|b| body.expr_spans[b])
-            .filter(|l| yields.iter().any(|y| contains(*l, *y)))
-            .collect();
-
-        for (idx, e) in body.expr_arena.iter() {
-            let Expr::Var(b) = e else { continue };
-            if !self.bindings.contains(b) {
-                continue;
-            }
-            let bind = body.binding_spans[*b];
-            let read = body.expr_spans[idx];
-            let across_yield = yields
-                .iter()
-                .any(|y| y.offset_range.0 > bind.offset_range.0 && read.offset_range.0 > y.offset_range.0);
-            let across_back_edge = suspending_loops
-                .iter()
-                .any(|l| contains(*l, read) && !contains(*l, bind));
-            if across_yield || across_back_edge {
-                out.push(RowEscape {
-                    kind: EscapeKind::AcrossYield,
-                    row_type: self.render(ws, bi, idx),
-                    span: read,
-                });
-            }
-        }
+        let mut walk =
+            YieldWalk { rows: self, ws, bi, body, out, reported: FxHashSet::default() };
+        walk.expr(root, &mut Flow::default());
     }
 
     fn render(&self, ws: &Workspace, bi: &BodyInference, e: Idx<Expr>) -> String {
@@ -591,5 +565,404 @@ fn iterates_an_arena(
     match &body.expr_arena[iter] {
         Expr::Call { args, .. } => (*args).into_iter().next().is_some_and(is_arena),
         _ => false,
+    }
+}
+
+/// Bindings holding a row, split by whether a suspension has happened since the
+/// fetch. A read of a `crossed` binding is the finding.
+#[derive(Clone, Default)]
+struct Flow {
+    /// Fetched, no suspension since -- still naming a live slot.
+    live: FxHashSet<Idx<BindingInfo>>,
+    /// Fetched, then suspended. Any read from here on is stale.
+    crossed: FxHashSet<Idx<BindingInfo>>,
+}
+
+impl Flow {
+    fn suspend(&mut self) {
+        self.crossed.extend(self.live.drain());
+    }
+
+    /// Union both halves. Merging a branch that suspended with one that didn't
+    /// leaves the binding `crossed`, which is the answer we want: one path
+    /// through the code reads a recycled slot.
+    fn merge(&mut self, other: Flow) {
+        self.live.extend(other.live);
+        self.crossed.extend(other.crossed);
+    }
+
+    /// Total tracked bindings. The taint lattice only grows, so an unchanged
+    /// size means an unchanged state -- the fixpoint test.
+    fn size(&self) -> usize {
+        self.live.len() + self.crossed.len()
+    }
+
+    /// A re-assignment (or a re-fetch) invalidates whatever was known.
+    fn rebind(&mut self, b: Idx<BindingInfo>, fetched: bool) {
+        self.live.remove(&b);
+        self.crossed.remove(&b);
+        if fetched {
+            self.live.insert(b);
+        }
+    }
+}
+
+struct YieldWalk<'a> {
+    rows: &'a Rows,
+    ws: &'a Workspace,
+    bi: &'a BodyInference,
+    body: &'a Body,
+    out: &'a mut Vec<RowEscape>,
+    /// Loops are walked twice to reach the back-edge fixpoint, so the same read
+    /// can be visited more than once. One finding per read expression.
+    reported: FxHashSet<Idx<Expr>>,
+}
+
+impl YieldWalk<'_> {
+    fn report(&mut self, at: Idx<Expr>) {
+        if !self.reported.insert(at) {
+            return;
+        }
+        let row_type = match self.bi.expr_types.get(at).copied() {
+            Some(ty) => self.ws.render(Some(self.bi), ty),
+            None => "?".to_string(),
+        };
+        self.out.push(RowEscape {
+            kind: EscapeKind::AcrossYield,
+            row_type,
+            span: self.body.expr_spans[at],
+        });
+    }
+
+    /// Whether a binding of `value` is worth tracking. Row-ness comes from the
+    /// whole-body [`Rows`] fixpoint, so an Arena loop variable and a
+    /// `Scene<T>` root track alongside `e.get()` -- the reason
+    /// `los_blocks_aggro`'s `summon`, bound by `for (me, m) in MOBS`, is seen.
+    fn bind(&mut self, b: Idx<BindingInfo>, value: Idx<Expr>, f: &mut Flow) {
+        f.rebind(b, self.rows.exprs.contains(&value) && self.holds_payload(b));
+    }
+
+    /// A scalar copied out of a row is safe to hold: `Entity<int>` yields the
+    /// value itself, and nothing points back at the arena.
+    fn holds_payload(&self, b: Idx<BindingInfo>) -> bool {
+        let Some(ty) = self.bi.binding_types.get(b).copied() else { return false };
+        !matches!(head_type(self.ws, self.bi, ty), TypeExpr::Builtin(_))
+    }
+
+    fn block_expr(&mut self, e: Idx<Expr>, f: &mut Flow) {
+        self.expr(e, f);
+    }
+
+    /// Walk a branch from a copy of `f` and fold the result back in, so both
+    /// arms see the same entry state and the exit state is their union.
+    fn branch(&mut self, e: Option<Idx<Expr>>, entry: &Flow, out: &mut Flow) {
+        let Some(e) = e else { return };
+        let mut b = entry.clone();
+        self.expr(e, &mut b);
+        out.merge(b);
+    }
+
+    /// A loop body, walked to fixpoint. The taint lattice only grows, so the
+    /// second pass -- entered with the first pass's exit state -- is the
+    /// fixpoint. This is what makes the back-edge a suspension point: a binding
+    /// fetched at the top and read after a `yield` LATER in the body is fine,
+    /// but one fetched OUTSIDE and read after the body's `yield` is stale from
+    /// the second iteration on.
+    fn loop_body(&mut self, body: Idx<Expr>, f: &mut Flow) {
+        let before = f.size();
+        let mut pass = f.clone();
+        self.expr(body, &mut pass);
+        f.merge(pass);
+        // Already at the fixpoint -- the second pass would see the identical
+        // entry state and find nothing new. Skipping it is what keeps NESTED
+        // loops from costing 2^depth walks in the common case (a body with no
+        // tracked binding at all never grows).
+        if f.size() == before {
+            return;
+        }
+        let mut second = f.clone();
+        self.expr(body, &mut second);
+        f.merge(second);
+    }
+
+    fn stmt(&mut self, s: Idx<Statement>, f: &mut Flow) {
+        match &self.body.statement_arena[s] {
+            Statement::Let { name, value } => {
+                self.expr(*value, f);
+                self.bind(*name, *value, f);
+            }
+            Statement::LetNewtype { var, value, .. } => {
+                self.expr(*value, f);
+                self.bind(*var, *value, f);
+            }
+            Statement::LetTuple { vars, value } => {
+                self.expr(*value, f);
+                for b in vars.leaves() {
+                    f.rebind(b, self.rows.bindings.contains(&b));
+                }
+            }
+            Statement::Static { name, value } => {
+                self.expr(*value, f);
+                f.rebind(*name, false);
+            }
+            // A nested `fn` cannot capture enclosing locals (rejected in
+            // inference), so its body is unreachable from this flow.
+            Statement::Fn { .. } => {}
+            Statement::Return(v) => {
+                if let Some(v) = v {
+                    self.expr(*v, f);
+                }
+            }
+            Statement::Expr(e) => self.expr(*e, f),
+            // A `defer` body runs at scope exit, after every suspension the
+            // scope contains -- so it is walked with the exit state, not here.
+            Statement::Defer(_) => {}
+            Statement::For { vars, iter, body } => {
+                let (iter, body) = (*iter, *body);
+                let leaves = vars.leaves();
+                self.expr(iter, f);
+                // An Arena loop variable IS a row, re-fetched each iteration.
+                for b in leaves {
+                    let is_row = self.rows.bindings.contains(&b);
+                    f.rebind(b, is_row);
+                }
+                self.loop_body(body, f);
+            }
+            Statement::While { cond, body } => {
+                let (cond, body) = (*cond, *body);
+                self.expr(cond, f);
+                self.loop_body(body, f);
+                // The re-test runs after the body, so it sees the back-edge state.
+                self.expr(cond, f);
+            }
+            Statement::WhileLet { pattern, value, body } => {
+                let (pattern, value, body) = (*pattern, *value, *body);
+                self.expr(value, f);
+                if let Pattern::Bind(b) = self.body.pattern_arena[pattern] {
+                    self.bind(b, value, f);
+                }
+                self.loop_body(body, f);
+            }
+            Statement::Comment(_) | Statement::Break | Statement::Continue => {}
+        }
+    }
+
+    fn expr(&mut self, e: Idx<Expr>, f: &mut Flow) {
+        match self.body.expr_arena[e] {
+            Expr::Var(b) => {
+                if f.crossed.contains(&b) {
+                    self.report(e);
+                }
+            }
+
+            Expr::Yield(v) => {
+                if let Some(v) = v {
+                    self.expr(v, f);
+                }
+                f.suspend();
+            }
+            Expr::YieldDelegate(v) => {
+                self.expr(v, f);
+                f.suspend();
+            }
+
+            // A lambda body is deferred, and bone rejects `yield` inside one, so
+            // it can neither read at this point in the flow nor suspend. A
+            // capture that outlives a suspension is `closure_capture`'s job.
+            Expr::Lambda { .. } => {}
+
+            Expr::Block { statements, tail } => {
+                for s in statements {
+                    self.stmt(s, f);
+                }
+                if let Some(t) = tail {
+                    self.block_expr(t, f);
+                }
+                self.run_defers(statements, f);
+            }
+
+            Expr::If { cond, then_branch, else_branch } => {
+                self.expr(cond, f);
+                let entry = f.clone();
+                let mut out = Flow::default();
+                self.branch(Some(then_branch), &entry, &mut out);
+                match else_branch {
+                    Some(_) => self.branch(else_branch, &entry, &mut out),
+                    None => out.merge(entry),
+                }
+                *f = out;
+            }
+
+            Expr::IfLet { pattern, value, then_branch, else_branch } => {
+                self.expr(value, f);
+                let mut entry = f.clone();
+                if let Pattern::Bind(b) = self.body.pattern_arena[pattern] {
+                    self.bind(b, value, &mut entry);
+                }
+                let mut out = Flow::default();
+                self.branch(Some(then_branch), &entry, &mut out);
+                match else_branch {
+                    Some(_) => self.branch(else_branch, f, &mut out),
+                    None => out.merge(f.clone()),
+                }
+                *f = out;
+            }
+
+            Expr::Match { scrutinee, arms } => {
+                self.expr(scrutinee, f);
+                let entry = f.clone();
+                let mut out = Flow::default();
+                for arm in arms {
+                    let arm = self.body.match_arm_arena[arm];
+                    let mut a = entry.clone();
+                    if let Some(g) = arm.guard {
+                        self.expr(g, &mut a);
+                    }
+                    if let Pattern::Bind(b) = self.body.pattern_arena[arm.pattern] {
+                        self.bind(b, scrutinee, &mut a);
+                    }
+                    self.expr(arm.body, &mut a);
+                    out.merge(a);
+                }
+                *f = out;
+            }
+
+            Expr::Assign { target, value } => {
+                self.expr(value, f);
+                match self.body.expr_arena[target] {
+                    Expr::Var(b) => self.bind(b, value, f),
+                    _ => self.expr(target, f),
+                }
+            }
+            Expr::CompoundAssign { target, value, .. } => {
+                self.expr(value, f);
+                self.expr(target, f);
+            }
+
+            Expr::Call { callee, args } => {
+                if let Callee::Value(v) = callee {
+                    self.expr(v, f);
+                }
+                if let Callee::Local(b) = callee {
+                    if f.crossed.contains(&b) {
+                        self.report(e);
+                    }
+                }
+                for a in args {
+                    self.expr(a, f);
+                }
+            }
+            Expr::SafeNavCall { receiver, args, .. } => {
+                self.expr(receiver, f);
+                for a in args {
+                    self.expr(a, f);
+                }
+            }
+            Expr::SafeNavLet { receiver, binding, body } => {
+                self.expr(receiver, f);
+                self.bind(binding, receiver, f);
+                self.expr(body, f);
+            }
+
+            Expr::BinOp { op: BinOp::NullCoalesce, lhs, rhs } => {
+                self.expr(lhs, f);
+                let entry = f.clone();
+                let mut out = Flow::default();
+                self.branch(Some(rhs), &entry, &mut out);
+                out.merge(entry);
+                *f = out;
+            }
+            Expr::BinOp { lhs, rhs, .. } => {
+                self.expr(lhs, f);
+                self.expr(rhs, f);
+            }
+            Expr::Range { low, high } => {
+                self.expr(low, f);
+                self.expr(high, f);
+            }
+
+            Expr::Not(x)
+            | Expr::BitNot(x)
+            | Expr::UnaryMinus(x)
+            | Expr::Spread(x)
+            | Expr::As { value: x, .. }
+            | Expr::FieldAccess { base: x, .. }
+            | Expr::SafeNav { base: x, .. }
+            | Expr::TupleIndex { tuple: x, .. }
+            | Expr::IncDec { target: x, .. } => self.expr(x, f),
+
+            Expr::Index { base, index } => {
+                self.expr(base, f);
+                self.expr(index, f);
+            }
+
+            Expr::Tuple(xs) | Expr::Array(xs) => {
+                for x in xs {
+                    self.expr(x, f);
+                }
+            }
+
+            Expr::StructLiteral { fields, bases, .. } => {
+                for b in bases {
+                    self.expr(b, f);
+                }
+                for fd in fields {
+                    self.expr(self.body.struct_lit_field_arena[fd].value, f);
+                }
+            }
+            Expr::EnumVariant { args, .. } => match args {
+                VariantArgs::Unit => {}
+                VariantArgs::Tuple(xs) => {
+                    for x in xs {
+                        self.expr(x, f);
+                    }
+                }
+                VariantArgs::Record(fs) => {
+                    for fd in fs {
+                        self.expr(self.body.struct_lit_field_arena[fd].value, f);
+                    }
+                }
+            },
+
+            Expr::InterpolatedString(parts) => {
+                for p in parts {
+                    if let InterpPart::Value { expr, spec } = self.body.interp_part_arena[p] {
+                        self.expr(expr, f);
+                        if let Some(x) = spec.and_then(|s| s.precision_expr) {
+                            self.expr(x, f);
+                        }
+                    }
+                }
+            }
+
+            Expr::Return(v) => {
+                if let Some(v) = v {
+                    self.expr(v, f);
+                }
+            }
+
+            Expr::Unit
+            | Expr::Null
+            | Expr::Hole(_)
+            | Expr::Int(_)
+            | Expr::Float(_)
+            | Expr::Bool(_)
+            | Expr::String(_)
+            | Expr::Global(_)
+            | Expr::SiblingRef(_)
+            | Expr::Break
+            | Expr::Continue => {}
+        }
+    }
+
+    /// A block's `defer`s run at scope exit -- after every suspension the block
+    /// contains -- so they are walked last, with the block's exit state.
+    fn run_defers(&mut self, statements: IdxRange<Statement>, f: &mut Flow) {
+        for s in statements {
+            if let Statement::Defer(d) = self.body.statement_arena[s] {
+                let mut d_flow = f.clone();
+                self.expr(d, &mut d_flow);
+            }
+        }
     }
 }
