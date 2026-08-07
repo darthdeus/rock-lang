@@ -816,7 +816,9 @@ pub fn unused_fns_by_file(
     let mut out: FxHashMap<Ustr, Vec<UnusedFn>> = FxHashMap::default();
     for module in user_modules(ws, warm) {
         for (fid, f) in module.functions.iter() {
-            if !reachable.contains(&(module.id, fid)) {
+            // A derived newtype operator is not user surface: there is no
+            // declaration to delete and its span points at the `newtype` line.
+            if !reachable.contains(&(module.id, fid)) && !f.is_synthetic {
                 out.entry(module.file)
                     .or_default()
                     .push(UnusedFn { name: f.name, span: f.name_span });
@@ -829,7 +831,30 @@ pub fn unused_fns_by_file(
 /// A function is a reachability root iff it can be entered from outside the
 /// in-project call graph. See `unused_fns` for the rationale on each arm.
 fn is_root(f: &Function) -> bool {
-    f.is_extern || f.name.as_str() == "main" || !f.annotations.is_empty()
+    f.is_extern
+        || f.name.as_str() == "main"
+        || f.annotations.iter().any(|a| !is_implementation_anno(a.name.name.as_str()))
+}
+
+/// Builtin fn annotations that describe how a function is COMPILED, not how it
+/// is entered. Everything else -- `@test`/`@sim`, `@shader`, `@nomangle`, and
+/// every user `deco` -- is a root, so an annotation this list doesn't know
+/// keeps the conservative bias (root, no warning). Without the split, `@inline`
+/// or `@pure` alone silently exempts a fn from `unused_fn`.
+fn is_implementation_anno(name: &str) -> bool {
+    matches!(
+        name,
+        "pure"
+            | "debug_impure"
+            | "inline"
+            | "intrinsic"
+            | "native_required"
+            | "gpu_only"
+            | "scalar_abi"
+            | "struct_expand"
+            | "shader_expand"
+            | "consume"
+    )
 }
 
 /// Every function one body references: the resolved-call edges in its inference
