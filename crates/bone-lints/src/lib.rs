@@ -126,6 +126,7 @@ pub const KNOWN_LINTS: &[&str] = &[
     TRANSMUTE_OF_NULLABLE,
     BACKEND_SIBLING_MISMATCH,
     METHOD_SYNTAX,
+    ROW_ESCAPE,
 ];
 
 /// Lints that are OFF unless the invocation names them. A MIGRATION lint has a
@@ -135,7 +136,7 @@ pub const KNOWN_LINTS: &[&str] = &[
 /// (`rock lint <path> --lints=method_syntax`) is what a file-at-a-time
 /// conversion needs: the sweep is readable, and the build/LSP surfaces stay
 /// quiet the whole time.
-pub const OPT_IN_LINTS: &[&str] = &[METHOD_SYNTAX];
+pub const OPT_IN_LINTS: &[&str] = &[METHOD_SYNTAX, ROW_ESCAPE];
 
 /// What an invocation asks of the lint engine: which lints run, and the knobs
 /// the lints themselves take. The default tier is the catalog minus
@@ -307,19 +308,32 @@ fn inference_findings_with(
     src: &str,
     sel: &LintOptions,
 ) -> Vec<Finding> {
-    if warm.contains(&mid) || !sel.enabled(TRANSMUTE_OF_NULLABLE) {
+    if warm.contains(&mid) {
         return Vec::new();
     }
     let module = ws.module(mid);
     let inf = ws.inference(mid);
-    let findings: Vec<_> = module
-        .bodies
-        .iter()
-        .flat_map(|(owner, body)| {
-            transmute_of_nullable_in_body(ws, inf.and_then(|i| i.per_fn.get(owner)), body)
-        })
-        .collect();
-    filter_suppressed(findings, src).iter().map(Finding::of).collect()
+    let bi = |owner: &BodyOwner| inf.and_then(|i| i.per_fn.get(owner));
+    let mut out: Vec<Finding> = Vec::new();
+    if sel.enabled(TRANSMUTE_OF_NULLABLE) {
+        let found: Vec<_> = module
+            .bodies
+            .iter()
+            .flat_map(|(owner, body)| transmute_of_nullable_in_body(ws, bi(owner), body))
+            .collect();
+        out.extend(filter_suppressed(found, src).iter().map(Finding::of));
+    }
+    if sel.enabled(ROW_ESCAPE) {
+        let found: Vec<_> = module
+            .bodies
+            .iter()
+            .flat_map(|(owner, body)| {
+                row_escapes_in_body(ws, bi(owner), body, tail_sink(module, owner))
+            })
+            .collect();
+        out.extend(filter_suppressed(found, src).iter().map(Finding::of));
+    }
+    out
 }
 
 /// The whole-workspace lints, grouped by the file each finding sits in. A
@@ -1141,7 +1155,7 @@ fn is_nullable(ws: &Workspace, bi: &BodyInference, ty: TyId) -> bool {
 /// `Workspace::render`'s `Infer` arm). An unbound var resolves to itself, so a
 /// genuinely-unknown type reads as non-nullable -- the conservative side (a
 /// missed warning, never a false strip).
-fn head_type(ws: &Workspace, bi: &BodyInference, ty: TyId) -> TypeExpr {
+pub(crate) fn head_type(ws: &Workspace, bi: &BodyInference, ty: TyId) -> TypeExpr {
     let mut cur = ty;
     loop {
         let te = match cur {
@@ -1333,6 +1347,102 @@ pub fn unknown_type_names(
 ) -> Vec<Ustr> {
     let known = nominal_type_names(ws, warm);
     names.iter().copied().filter(|n| !known.contains(n)).collect()
+}
+
+/// How a row place left the scope its arena's lifetime governs. One kind per
+/// storage class the scoped-place rules in `docs/scene-system-plan.md` list, so
+/// a census can report the shape of the escape population and not just its size.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum EscapeKind {
+    StoreGlobal,
+    StoreStatic,
+    StoreField,
+    StoreCollection,
+    Return,
+    ClosureCapture,
+    AnyErasure,
+    AcrossYield,
+    FfiArg,
+}
+
+impl EscapeKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EscapeKind::StoreGlobal => "store_global",
+            EscapeKind::StoreStatic => "store_static",
+            EscapeKind::StoreField => "store_field",
+            EscapeKind::StoreCollection => "store_collection",
+            EscapeKind::Return => "return",
+            EscapeKind::ClosureCapture => "closure_capture",
+            EscapeKind::AnyErasure => "any_erasure",
+            EscapeKind::AcrossYield => "across_yield",
+            EscapeKind::FfiArg => "ffi_arg",
+        }
+    }
+}
+
+/// A `row_escape` finding: a row place -- a `T` read out of an `Arena<T>` or a
+/// `Scene<T>` root -- reaching storage that outlives the borrow.
+#[derive(Clone, Debug)]
+pub struct RowEscape {
+    pub kind: EscapeKind,
+    /// Rendered type of the escaping row (`Mob`, `TrActor`).
+    pub row_type: String,
+    pub span: Span,
+}
+
+/// Canonical lint name for suppression: `// rock: allow(row_escape)`.
+pub const ROW_ESCAPE: &str = "row_escape";
+
+impl LintFinding for RowEscape {
+    const LINT: &'static str = ROW_ESCAPE;
+    fn line(&self) -> usize {
+        self.span.line_range.0
+    }
+    fn to_diagnostic(&self) -> CompilerError {
+        CompilerError::new_with_label(
+            self.span,
+            format!(
+                "row of `{}` escapes here ({}) -- an Arena row is valid only until \
+                 its Scene unloads; hold the `Entity` and re-`get()` instead",
+                self.row_type,
+                self.kind.as_str()
+            ),
+        )
+        .with_level(CompilerErrorLevel::Advice)
+    }
+}
+
+mod row_escape;
+pub use row_escape::{row_escapes_in_body, row_population, RowPopulation};
+
+/// Where a body's TRAILING expression ends up, so `row_escape` can tell a
+/// returned row from a discarded one. A unit function's tail goes nowhere --
+/// `fn unload_sound(s: Sound) { s.handle.remove() }` drops the `T?` it produced.
+fn tail_sink(module: &Module, owner: &BodyOwner) -> Option<EscapeKind> {
+    match owner {
+        BodyOwner::Function(fid) => {
+            module.functions[*fid].return_ty.map(|_| EscapeKind::Return)
+        }
+        BodyOwner::Global(_) => Some(EscapeKind::StoreGlobal),
+        // A struct default / enum / newtype body's value is stored in the
+        // aggregate it belongs to.
+        _ => Some(EscapeKind::StoreField),
+    }
+}
+
+/// `row_escape` findings across every non-stdlib body in the workspace.
+pub fn row_escapes(ws: &Workspace) -> Vec<RowEscape> {
+    let warm = FxHashSet::default();
+    let mut out = Vec::new();
+    for module in user_modules(ws, &warm) {
+        let inf = ws.inference(module.id);
+        for (owner, body) in module.bodies.iter() {
+            let bi = inf.and_then(|i| i.per_fn.get(owner));
+            out.extend(row_escapes_in_body(ws, bi, body, tail_sink(module, owner)));
+        }
+    }
+    out
 }
 
 pub fn nominal_type_names(ws: &Workspace, warm: &FxHashSet<ModuleId>) -> FxHashSet<Ustr> {

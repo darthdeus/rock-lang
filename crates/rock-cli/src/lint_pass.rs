@@ -179,13 +179,29 @@ pub fn findings_with(
     // false-flag the game's callbacks as dead. Restricting the set also keeps
     // the pass off the compile hot path -- a dependency's bodies are never
     // walked for the per-body lints.
-    let owned = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let owned = owned_files(&texts, root);
     let report: FxHashMap<Ustr, &str> = texts
         .iter()
-        .filter(|(file, _)| Path::new(file.as_str()).starts_with(&owned))
+        .filter(|(file, _)| owned.contains(*file))
         .map(|(&file, text)| (file, text.as_str()))
         .collect();
     bone_lints::lint_workspace(ws, &warm, is_bin, &report, sel)
+}
+
+/// The files a lint invocation REPORTS on: this project's own, never a
+/// `stick.toml` dependency's. Published because anything that must agree with
+/// the finding set -- the `row_escape` census denominator -- has to be measured
+/// over exactly this set. A second copy of the rule would drift, and a
+/// denominator drawn from a wider set than its numerator is worse than none:
+/// every project that merely DEPENDS on an arena consumer would report a
+/// nonzero population it does not own.
+pub fn report_files(sources: &SourceFiles, root: &Path) -> FxHashSet<Ustr> {
+    owned_files(&source_texts(sources), root)
+}
+
+fn owned_files(texts: &FxHashMap<Ustr, String>, root: &Path) -> FxHashSet<Ustr> {
+    let owned = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    texts.keys().copied().filter(|f| Path::new(f.as_str()).starts_with(&owned)).collect()
 }
 
 /// `12 lint warnings (8 unused_var, 4 unused_fn) -- run `rock lint <root>` for detail`.
