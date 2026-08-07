@@ -1201,6 +1201,10 @@ fn fn_has_bounds(f: &bone_semantic::hir::Function) -> bool {
 /// parity list and stay lenient skips; a USER fn that cannot emit is a hard
 /// error — the lenient channel shipped callers of bounded fns as missing
 /// globals that died as runtime nil calls.
+///
+/// NOTE: this does NOT cover every way the stdlib gets loaded — `bone-query`
+/// warms it from its real filesystem path, which matches neither prefix. Do not
+/// reuse this as a general "is this the stdlib" oracle.
 fn is_stdlib_module_file(file: &str) -> bool {
     file.starts_with("<bone-stdlib:") || file.starts_with("<stdlib")
 }

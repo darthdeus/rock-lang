@@ -760,6 +760,64 @@ pub enum BinOp {
     Shr,
 }
 
+/// Every operator symbol the parser can mint a definition for, as
+/// `(fn name, symbol as written, may a user overload it)`.
+///
+/// Overloadable means exactly one thing: the operator's USE lowers to a call
+/// resolved by name, so a user fn can be found there. `+ - * / % ./` do.
+/// Everything else becomes a `BinOp` variant, a dedicated `Expr`, or native
+/// codegen and never consults a fn -- so a definition for one could not be
+/// reached however it was written. `pass_lower_functions` rejects those instead
+/// of emitting a fn nothing calls; before it did, `operator ==` silently left
+/// structural equality in place with no diagnostic at any stage.
+///
+/// This table must stay total over the parser's symbol match
+/// (`skull-parser/src/parser.rs`, `parse_operator`). `operator_table_covers_parser`
+/// in bone-core's tests asserts that by spelling every symbol.
+pub const OPERATOR_FNS: &[(&str, &str, bool)] = &[
+    ("__op_add", "+", true),
+    ("__op_sub", "-", true),
+    ("__op_mul", "*", true),
+    ("__op_div", "/", true),
+    ("__op_mod", "%", true),
+    ("__op_idiv", "./", true),
+    ("__op_eq", "==", false),
+    ("__op_ne", "!=", false),
+    ("__op_lt", "<", false),
+    ("__op_le", "<=", false),
+    ("__op_gt", ">", false),
+    ("__op_ge", ">=", false),
+    ("__op_and", "&&", false),
+    ("__op_or", "||", false),
+    ("__op_not", "!", false),
+    ("__op_bitnot", "~", false),
+    ("__op_bitand", "&", false),
+    ("__op_bitor", "|", false),
+    ("__op_bitxor", "^", false),
+    ("__op_shl", "<<", false),
+    ("__op_shr", ">>", false),
+    ("__op_index", "[]", false),
+];
+
+
+/// `None` for a name that is not an operator fn at all.
+pub fn operator_entry(name: &str) -> Option<(&'static str, bool)> {
+    OPERATOR_FNS
+        .iter()
+        .find(|(fn_name, _, _)| *fn_name == name)
+        .map(|(_, symbol, overloadable)| (*symbol, *overloadable))
+}
+
+/// The symbols a user may write an `operator` definition for, for diagnostics.
+pub fn overloadable_operator_symbols() -> String {
+    OPERATOR_FNS
+        .iter()
+        .filter(|(_, _, overloadable)| *overloadable)
+        .map(|(_, symbol, _)| *symbol)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[derive(Clone, Debug)]
 pub enum Statement {
     Let {

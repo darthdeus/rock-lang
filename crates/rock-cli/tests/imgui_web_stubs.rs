@@ -272,11 +272,29 @@ fn stub_body(d: &Decl) -> String {
         assert_eq!(
             parts.len(),
             2,
-            "imgui.rock: `{}` returns a {}-tuple; only (bool, T) editors are known",
+            "imgui.rock: `{}` returns a {}-tuple; only 2-tuples are known",
             d.name,
             parts.len()
         );
-        assert_eq!(parts[0], "bool", "imgui.rock: `{}` tuple does not lead with bool", d.name);
+        // Two shapes: a `(bool, T)` editor echoes its input, and a plain tuple
+        // of scalars (dock ids) has no input to echo and publishes neutrals.
+        if parts[0] != "bool" {
+            let zeros: Vec<String> = parts
+                .iter()
+                .map(|p| {
+                    neutral_scalar(p).unwrap_or_else(|| {
+                        panic!(
+                            "imgui.rock: `{}` returns a tuple containing `{p}`, which has no \
+                             known neutral stub value; teach the generator or give the bridge a \
+                             real JS body elsewhere",
+                            d.name
+                        )
+                    })
+                    .to_string()
+                })
+                .collect();
+            return format!("return __rock_publish({});", zeros.join(", "));
+        }
         // Convention: the label/id comes first and the edited value second.
         // Assert it rather than trusting it -- a reordered signature would
         // otherwise silently echo the label.
@@ -305,18 +323,29 @@ fn stub_body(d: &Decl) -> String {
         let zeros = vec!["0"; leaves.len()].join(", ");
         return format!("return __rock_publish({zeros});");
     }
-    match ret {
-        "bool" => "return false;".to_string(),
-        "int" | "float" => "return 0;".to_string(),
-        "Vec2" => "return { __ty: 'Vec2', x: 0, y: 0 };".to_string(),
-        // Single-quoted: the body is emitted INSIDE a Rock `"..."` literal, so a
-        // double quote here closes it and the file stops parsing.
-        "string" => "return '';".to_string(),
-        other => panic!(
-            "imgui.rock: `{}` returns `{other}`, which has no known neutral stub value; \
+    if ret == "Vec2" {
+        return "return { __ty: 'Vec2', x: 0, y: 0 };".to_string();
+    }
+    match neutral_scalar(ret) {
+        Some(v) => format!("return {v};"),
+        None => panic!(
+            "imgui.rock: `{}` returns `{ret}`, which has no known neutral stub value; \
              teach the generator or give the bridge a real JS body elsewhere",
             d.name
         ),
+    }
+}
+
+/// The neutral JS value for a scalar that crosses whole. `None` for anything
+/// boxed or unknown, which every caller turns into a panic rather than a guess.
+fn neutral_scalar(ty: &str) -> Option<&'static str> {
+    match ty {
+        "bool" => Some("false"),
+        "int" | "float" => Some("0"),
+        // Single-quoted: the body is emitted INSIDE a Rock `"..."` literal, so a
+        // double quote here closes it and the file stops parsing.
+        "string" => Some("''"),
+        _ => None,
     }
 }
 

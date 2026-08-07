@@ -100,6 +100,35 @@ fn main() {
 }
 "#;
 
+/// A LOCAL the outer struct is bound to, reassembled by a spread that escapes
+/// somewhere unscalarized. SROA splits the local into per-field cells, and the
+/// `pos` cell then holds a whole `NV2` -- the box. Normalization alone cannot
+/// clear it: the reassembly reads `pos` through a `Load`, which is opaque to a
+/// ctor-tree walk, so the outer ctor is not a target; and SROA alone cannot
+/// split the `pos` cell while that whole-value read is its user. Only
+/// interleaving the two reaches it.
+///
+/// Every ingredient is load-bearing and each was measured alone. The nested
+/// field must be `nobox` (a plain `value` is no violation). The escape must be
+/// unscalarized -- an enum payload, since the value-struct call ABI scalarizes a
+/// direct call argument and the reassembly disappears. And the block boundary
+/// must be there, or copy-prop forwards the ctor to the use and the tree walk
+/// sees it whole.
+const SROA_SPLIT_REASSEMBLY: &str = r#"
+nobox value NV2 { x: float, y: float }
+value E3 { pos: NV2, a: float }
+enum Part { One(E3) }
+global FLAG: bool = true
+fn sink(p: Part) -> float {
+    match p { Part::One(e) => return e.a + e.pos.x + e.pos.y }
+}
+fn main() {
+    let e = E3 { pos: NV2 { x: 1.0, y: 2.0 }, a: 4.0 }
+    if FLAG { print("boundary") }
+    print("{sink(Part::One(E3 { ..e, a: 8.0 }))}")
+}
+"#;
+
 /// An explicit `materialize` must stay legal -- it is the sanctioned escape.
 const EXPLICIT_MATERIALIZE: &str = r#"
 nobox value NV2 { x: float, y: float }
@@ -208,6 +237,20 @@ fn both_absent_spellings_store_the_same_tag() {
     assert_eq!(
         run_luajit(&format!("{lua}\nmain()\n"), "absent_spellings").trim(),
         "true true"
+    );
+}
+
+#[test]
+fn an_sroa_split_local_reassembled_into_an_escape_does_not_box_its_nested_field() {
+    let lua = emit_ok(SROA_SPLIT_REASSEMBLY, "a spread of an SROA-split local");
+    assert!(
+        !function_body(&lua, "main").contains("NV2_ct("),
+        "the split local's nested nobox field materialized a cdata:
+{lua}"
+    );
+    assert_eq!(
+        run_luajit(&format!("{lua}\nmain()\n"), "sroa_reassembly").trim(),
+        "boundary\n11"
     );
 }
 
