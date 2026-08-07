@@ -238,6 +238,35 @@ fn skull_emit_rejects(ws: &bone_semantic::inference::Workspace, files: &[(String
     })
 }
 
+/// Third gate, same principle as [`skull_emit_rejects`]: an `Error`-severity
+/// lint finding fails a real build (`rock lint`, and the pass every
+/// compile/run/test drives), so a `.rock.err` may name it as the rejecting
+/// stage. Soft tiers are ignored -- a `Warning` prints and builds, so it is not
+/// a rejection. Sources come from `files`, which is also where
+/// `// rock: allow(...)` suppression is read from, so a case can pin that an
+/// allow comment does NOT rescue an unsuppressable lint.
+///
+/// The DEFAULT tier is what runs, matching a build: an opt-in lint
+/// (`bone_lints::OPT_IN_LINTS`) is unreachable from any build, so a `.rock.err`
+/// must not be able to name one as its rejector.
+fn lint_rejects(ws: &bone_semantic::inference::Workspace, files: &[(String, String)]) -> bool {
+    let sources: rustc_hash::FxHashMap<ustr::Ustr, &str> =
+        files.iter().map(|(n, c)| (ustr::Ustr::from(n.as_str()), c.as_str())).collect();
+    // Same rule as the build pass (`lint_pass::warm_module_ids`): everything the
+    // case did not author is stdlib, and stdlib is scanned but never reported on.
+    let warm: rustc_hash::FxHashSet<bone_core::prelude::ModuleId> = ws
+        .modules
+        .iter()
+        .filter(|m| {
+            m.id != bone_core::prelude::ModuleId::builtin() && !sources.contains_key(&m.file)
+        })
+        .map(|m| m.id)
+        .collect();
+    bone_lints::lint_workspace(ws, &warm, true, &sources, &bone_lints::LintOptions::default())
+        .iter()
+        .any(|f| f.level() == rock_core::errors::CompilerErrorLevel::Error)
+}
+
 /// Error-test cases the skull/bone successor DELIBERATELY accepts -- documented
 /// divergences where rock's rejection is an accident or over-conservatism.
 /// Matched by case-name substring. Two families:
@@ -322,6 +351,9 @@ pub fn run_error_suite(
                     None => ErrorTestResult::Pass, // bone rejected -- expected
                     Some(ws) if skull_emit_rejects(&ws, &tc.files) => {
                         ErrorTestResult::Pass // skull emission rejected -- expected
+                    }
+                    Some(ws) if lint_rejects(&ws, &tc.files) => {
+                        ErrorTestResult::Pass // an Error-severity lint rejected -- expected
                     }
                     Some(_) if BONE_ERROR_DIVERGENCES.iter().any(|d| tc.name.contains(d)) => {
                         ErrorTestResult::Todo(format!(
