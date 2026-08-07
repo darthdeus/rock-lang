@@ -1191,9 +1191,29 @@ fn entry_renders(env: &[(String, String)]) -> bool {
 /// as non-rendering here and rendering there.
 fn asset_stub_value(parts: &[WorkerPart]) -> &'static str {
     if parts.iter().any(|p| entry_renders(&p.env)) {
-        "0"
-    } else {
-        "1"
+        return "0";
+    }
+    unstub_override("STONE_ASSET_STUB")
+}
+
+/// A stub knob's value, honouring an inherited request to load for real.
+///
+/// The parent environment can only ever turn stubbing OFF. Letting it turn
+/// stubbing ON would let a stray shell variable strip the pixels out of a
+/// snapshot sim, which fails as a wrong image rather than as a missing one;
+/// the other direction just makes a run slower and more real, which is exactly
+/// what someone debugging a stubbed sim wants -- and it makes the whole suite
+/// A/B-able without rebuilding.
+fn unstub_override(var: &str) -> &'static str {
+    unstub_from(std::env::var(var).ok().as_deref())
+}
+
+/// The decision itself, separated from the lookup so it is testable without
+/// mutating the process environment out from under a parallel test.
+fn unstub_from(inherited: Option<&str>) -> &'static str {
+    match inherited {
+        Some("0") => "0",
+        _ => "1",
     }
 }
 
@@ -1646,7 +1666,7 @@ fn run_worker(
         // nothing about it. The handful of sims that assert on voices, bus
         // pulls or sound reload set `@sim_env("STONE_AUDIO_STUB", "0")`, which
         // wins because `preset_env` is layered after this.
-        .env("STONE_AUDIO_STUB", "1")
+        .env("STONE_AUDIO_STUB", unstub_override("STONE_AUDIO_STUB"))
         .envs(preset_env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         // Renders every `wall_clock_ms(..)` value as a fixed token, but ONLY
         // for a run whose records get compared: two runs of the same sim cannot
@@ -3438,6 +3458,13 @@ mod tests {
             frame_budget: 0,
             env: vec![("SIM_SKIP_RENDER".to_string(), if renders { "0" } else { "1" }.to_string())],
         };
+        // The inherited escape hatch is one-way: it can ask for real assets,
+        // never for stubs. A stray "1" must not strip pixels out of a snapshot.
+        assert_eq!(unstub_from(None), "1", "unset stays stubbed");
+        assert_eq!(unstub_from(Some("0")), "0", "an inherited 0 unstubs");
+        assert_eq!(unstub_from(Some("1")), "1", "an inherited 1 is the default anyway");
+        assert_eq!(unstub_from(Some("yes")), "1", "anything else is not an unstub request");
+
         assert_eq!(asset_stub_value(&[]), "1", "nothing renders, nothing to load");
         assert_eq!(asset_stub_value(&[part(false)]), "1", "a non-rendering entry stubs");
         assert_eq!(asset_stub_value(&[part(true)]), "0", "a rendering entry needs pixels");
