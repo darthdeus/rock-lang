@@ -35,12 +35,23 @@
 //! position descriptor is `ReadFieldRef<T, Vec2>`, which is precisely this
 //! shape.
 //!
-//! The rejection's SHAPE is the open question, not its necessity. It must not
-//! be "opaque callee whose return type is nobox": stdlib constructors like
-//! `v(x, y)` are `@intrinsic inline(lua) -> Vec2` and are legitimate, so a
-//! blanket return check detonates the tree. The narrow reading -- a return
-//! spelled as a TYPE PARAMETER that a substitution lands on a nobox -- is what
-//! separates `field_get` from `v`.
+//! THE FIX, with its blast radius measured. The sibling rule twenty lines up in
+//! the same file already does this correctly: the opaque-CONTAINER check reads
+//! every declared parameter slot AND the return, resolved under the concrete
+//! substitution through `declared_slot_hazard`. The nobox check walks the
+//! caller's argument expressions and stops there. Give it the same return arm.
+//!
+//! What must stay legal is not `v(x, y)` -- that has a ROCK body, so it never
+//! reaches this check at all. It is the opaque bodies that legitimately hand
+//! back nobox leaves, and they are already marked: `@scalar_abi` (imgui's
+//! `imgui_get_mouse_pos`, `imgui_get_cursor_screen_pos`,
+//! `imgui_get_content_region_avail`, `imgui_get_mouse_drag_delta` in both the
+//! Lua and JS lanes, plus `stone_measure_text_vec2_for`) and `@gpu_only`
+//! (`texture`, `texture_size`, `frag_coord`), which this function already
+//! exempts. `fn_scalar_abi_spec` is the existing discriminant -- see this
+//! file's own line 10 -- so the arm is "declared return is nobox under the
+//! substitution AND the callee has no scalar-ABI spec". `field_get` is
+//! `@inline inline(lua)` with neither mark, which is why it should reject.
 
 /// The repro through the stdlib primitive that actually bites.
 const FIELD_GET_NOBOX: &str = r#"
