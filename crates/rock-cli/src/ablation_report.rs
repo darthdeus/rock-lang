@@ -11,6 +11,23 @@
 
 use skull_mir::ablation::{self, FatalCategory};
 
+/// The status a census-printing exit leaves with.
+///
+/// Separate from [`exit_with_census`] because that one cannot be called from a
+/// test: it ends the process. This is the whole decision, and the decision is
+/// where the mode's invariant lives -- S 0e's fatality is carried by the EXIT
+/// STATUS, so a run that recorded fatals may not leave with 0 no matter what
+/// the call site asked for. Several call sites do ask for 0 (`rock stone` and
+/// `rock watch` on a clean shutdown) or forward a subprocess's status, and
+/// honouring that verbatim is exactly the "printed a census and exited 0" hole
+/// this module's header forbids.
+pub fn census_exit_code(requested: i32, had_fatals: bool) -> i32 {
+    if had_fatals && requested == 0 {
+        return 1;
+    }
+    requested
+}
+
 /// Exit the process, printing the census first.
 ///
 /// `std::process::exit` runs no destructors and returns to no caller, so the
@@ -22,8 +39,8 @@ use skull_mir::ablation::{self, FatalCategory};
 /// The `Iterator`-bounded surface is entirely in the first group, which is why
 /// its category read zero everywhere.
 pub fn exit_with_census(code: i32) -> ! {
-    report("whole run");
-    std::process::exit(code)
+    let had_fatals = report("whole run");
+    std::process::exit(census_exit_code(code, had_fatals))
 }
 
 /// Print the census. Returns `true` when at least one fatal was recorded, which
@@ -184,4 +201,31 @@ fn elide_payloads(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::census_exit_code;
+
+    /// S 0e's fatality is carried by the exit status, so a recorded fatal must
+    /// override a success the call site asked for. `rock stone` and `rock watch`
+    /// exit 0 on a clean shutdown and `rock compile` forwards a subprocess's
+    /// status; without this a run under the mode prints its whole taxonomy and
+    /// still reports success, which is the one thing the mode exists to prevent.
+    #[test]
+    fn a_recorded_fatal_overrides_a_zero_exit() {
+        assert_eq!(census_exit_code(0, true), 1, "fatals must not exit 0");
+    }
+
+    /// The three neighbours, so the arm above is a rule and not a constant.
+    /// A clean run keeps its 0, and a non-zero status is passed through
+    /// unchanged either way -- overriding THAT would relabel a subprocess's
+    /// exit code and lose which failure it was.
+    #[test]
+    fn every_other_combination_passes_the_requested_status_through() {
+        assert_eq!(census_exit_code(0, false), 0, "a clean run keeps its success");
+        assert_eq!(census_exit_code(1, true), 1, "an already-failing run is unchanged");
+        assert_eq!(census_exit_code(2, true), 2, "a fatal must not relabel a status");
+        assert_eq!(census_exit_code(2, false), 2, "no fatals must not relabel a status");
+    }
 }

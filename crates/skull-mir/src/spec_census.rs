@@ -31,8 +31,8 @@ pub struct TodaySpec {
     /// difference in reachability, not a missing instance.
     pub caller: FuncRef,
     pub func: FuncRef,
-    /// Per declared generic, in declaration order. `None` = the partial key
-    /// erased this slot.
+    /// Per declared generic, in declaration order. `None` = no concrete type
+    /// reaches this slot, i.e. the enclosing body is a shared generic snapshot.
     pub slots: Vec<Option<String>>,
 }
 

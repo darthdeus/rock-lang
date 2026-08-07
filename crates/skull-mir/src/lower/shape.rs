@@ -1627,7 +1627,9 @@ pub(crate) fn columns_available(
 }
 
 /// A callee's per-generic instantiation at one call site, in declaration order.
-/// `None` = that generic did not reify (no specialization for it).
+/// `None` = no concrete type reaches that slot here, which since the key and
+/// identity share one walk ([`reify_type`]) means the ENCLOSING body is a shared
+/// generic snapshot. It is not "a type the key declines to name".
 /// The snapshot cache key alongside the `FuncRef`.
 pub type SpecKey = Vec<Option<MonoTy>>;
 
@@ -2402,8 +2404,10 @@ pub(crate) fn tuple_ret_shape(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> Op
 /// Read only where the LOWERING could not resolve the element itself: a body
 /// specialized at a value element splits `E` into leaf cells there
 /// (`MirFunc::bound_next_split`) and this only CHECKS the two agree. What is
-/// left is the case specialization cannot express -- a generic bound to a tuple,
-/// which does not reify -- so the element stays opaque and has to be rebuilt.
+/// left is a generic bound to a TUPLE: it reifies and is in the key like any
+/// other type, but [`mono_type_node`] has no arena to mint its node in, so
+/// lowering saw an unsubstituted generic and left the element opaque for the
+/// rebuild below.
 ///
 /// The three cases are kept DISTINCT on purpose: "nothing to repack" and "a shape
 /// the flat repack cannot express" must not collapse into one `None`, or an
@@ -2420,7 +2424,8 @@ pub enum BoundNextElem {
     ///
     /// Reached only when the lowering left the element opaque, which for a
     /// nullable value now means a TUPLE element (`zip`'s pair): a generic bound
-    /// to a tuple does not reify, so the body never specialized.
+    /// to a tuple has no [`mono_type_node`], so lowering read it as an
+    /// unsubstituted generic.
     Unsupported,
 }
 

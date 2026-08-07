@@ -2854,8 +2854,8 @@ pub struct Reconciliation {
     pub shadow_only: usize,
 }
 
-/// A today-slot matches a shadow arg when the slot is `None` (the partial key
-/// erased it, so it constrains nothing) or the canonical types are equal. Both
+/// A today-slot matches a shadow arg when the slot is `None` (no concrete type
+/// reaches it, so it constrains nothing) or the canonical types are equal. Both
 /// sides encode with `MonoTy::canonical`, so a pretty-printing ambiguity cannot
 /// match two different types to each other.
 fn slots_match(slots: &[Option<String>], shadow: &[String]) -> bool {

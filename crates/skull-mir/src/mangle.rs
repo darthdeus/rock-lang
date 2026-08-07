@@ -50,7 +50,11 @@ pub fn spec_fn_name(
         out.push_str(SEP);
         match leaf {
             Some(ty) => encode_mono_type(ty, &mut out),
-            None => out.push_str("any"),
+            // NOT a type, and it must not read as one: every real encoding is
+            // prefixed (`p_int`, `o_`, ...), so a bare word cannot collide with
+            // one. It used to be spelled `any`, which now names an admitted
+            // type (`p_any`) sitting in this same position.
+            None => out.push_str("unbound"),
         }
     }
     Some(out)

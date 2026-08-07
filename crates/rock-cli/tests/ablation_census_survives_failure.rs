@@ -28,9 +28,18 @@ fn write_tmp(tag: &str, src: &str) -> std::path::PathBuf {
 }
 
 /// Compile under the mode and return (exit_ok, combined output).
+///
+/// The emitted Lua goes to a real file beside the fixture rather than to
+/// `/dev/null`, so the census -- which is on STDOUT, the same stream a
+/// `--output -` would take -- is read without the artifact mixed into it.
 fn compile_ablated(path: &std::path::Path) -> (bool, String) {
     let out = Command::new(rock_bin())
-        .args(["compile", path.to_str().unwrap(), "--output", "/dev/null"])
+        .args([
+            "compile",
+            path.to_str().unwrap(),
+            "--output",
+            path.with_extension("lua").to_str().unwrap(),
+        ])
         .env("ROCK_MONO_ABLATION", "1")
         .output()
         .unwrap();
@@ -95,7 +104,7 @@ fn a_failed_build_still_prints_its_census() {
 #[test]
 fn a_surviving_build_prints_its_census() {
     let path = write_tmp("clean", CLEAN);
-    let (_, out) = compile_ablated(&path);
+    let (ok, out) = compile_ablated(&path);
     assert!(
         out.contains("Stage-0e totality ablation"),
         "the mode printed no census on a build that completed; output:\n{out}"
@@ -104,5 +113,19 @@ fn a_surviving_build_prints_its_census() {
         !out.contains("bounded body has no standalone emission"),
         "a fixture with no bounded call reported the bounded mechanism, so the \
          assertion above cannot distinguish; output:\n{out}"
+    );
+    // S 0e's fatality is carried by the STATUS: this fixture BUILDS (exit 0
+    // with the mode off) and still reaches stdlib generics that decline, so a
+    // successful build must leave a failing run.
+    //
+    // This arm rides `main`'s own drain, not `exit_with_census` -- a build that
+    // succeeds returns to `main` rather than exiting early, which is the whole
+    // reason the surviving path always worked. `census_exit_code`'s unit tests
+    // are the coverage for the exiting path; naming this one as that coverage
+    // would be claiming a control I have not got.
+    assert!(
+        !ok,
+        "the run recorded fatals and exited 0, so a green suite would hide \
+         them; output:\n{out}"
     );
 }
