@@ -122,6 +122,57 @@ fn main() {
 }
 "#;
 
+/// The callee's parameter is a BARE GENERIC and becomes a container only under
+/// this call's binding `T = [P]`. `param_ty` returns the declaration's `TyId`
+/// and `ty_node` resolves generics through the ENCLOSING body's substitution --
+/// the caller's -- so without the call's own bindings this reads as committing
+/// to no constructor, the body is admitted, and the guarded form answers `-1`.
+/// Measured before the fix.
+const GENERIC_PARAM_BOUND_AT_CALL: &str = r#"
+nobox value P { x: float, y: float }
+
+@nomangle inline(lua) fn opaque_t<T>(v: T) -> int = """
+    if v._data == nil then return -1 end
+    return #v._data
+"""
+
+fn main() {
+    let xs: [P] = [P { x: 1.0, y: 2.0 }]
+    print("{opaque_t(xs)}")
+}
+"#;
+
+/// Same signature, boxed element: the binding is still `T = [int]`, so this
+/// bounds the fix on the ELEMENT rather than on "a generic param rejects".
+const GENERIC_PARAM_BOXED_ELEM: &str = r#"
+@nomangle inline(lua) fn opaque_t<T>(v: T) -> int = """
+    if v._data == nil then return -1 end
+    return #v._data
+"""
+
+fn main() {
+    let xs: [int] = [1, 2, 3]
+    print("{opaque_t(xs)}")
+}
+"#;
+
+/// A bare generic bound to a NON-container: the rule must find no constructor
+/// and stay silent, or every generic opaque body would reject.
+/// The type guard leads because indexing a number THROWS in Lua before the body
+/// could answer -- without it this fixture dies for a reason unrelated to the
+/// rule, and would read as the rule firing.
+const GENERIC_PARAM_SCALAR: &str = r#"
+@nomangle inline(lua) fn opaque_t<T>(v: T) -> int = """
+    if type(v) ~= "table" then return -1 end
+    if v._data == nil then return -2 end
+    return #v._data
+"""
+
+fn main() {
+    print("{opaque_t(7)}")
+}
+"#;
+
 fn run(src: &str, tag: &str) -> String {
     let lua = crate::common::try_emit_module(src).expect("must emit");
     crate::common::run_luajit(&format!("{lua}\nmain()\n"), tag)
@@ -182,4 +233,28 @@ fn an_any_param_still_admits_a_column_vec() {
         "columns",
         "an `any` param claims no representation, so it must still be admitted"
     );
+}
+
+/// The call's binding, not the caller's. Without it the body is ADMITTED and
+/// the guarded form silently answers `-1`.
+#[test]
+fn a_generic_param_bound_to_a_column_vec_at_the_call_rejects() {
+    let msg = rejection(GENERIC_PARAM_BOUND_AT_CALL);
+    assert!(
+        msg.contains("column-stored `[P]`") && msg.contains("opaque_t"),
+        "a param spelled `T` that binds to `[P]` here must reject, got: {msg}"
+    );
+}
+
+/// Bounds it on the element: same generic param, boxed element, still correct.
+#[test]
+fn a_generic_param_bound_to_a_boxed_vec_is_correct() {
+    assert_eq!(run(GENERIC_PARAM_BOXED_ELEM, "inline_lua_gen_boxed"), "3");
+}
+
+/// Bounds it on the constructor: a generic bound to a scalar names no
+/// container, so the rule must not fire.
+#[test]
+fn a_generic_param_bound_to_a_scalar_is_admitted() {
+    assert_eq!(run(GENERIC_PARAM_SCALAR, "inline_lua_gen_scalar"), "-1");
 }

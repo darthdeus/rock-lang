@@ -296,7 +296,7 @@ impl Builder<'_> {
     /// resolved node. An earlier spelling relied on "`resolve_tyid` chases
     /// `Infer` but keeps `Nullable`", which held for a spelled-out `V?` and
     /// stopped holding once a GENERIC could be bound to one: `ty_node` applies
-    /// the substitution and `reified_type_node` erases the `?`, so a `T` bound to
+    /// the substitution and `mono_type_node` erases the `?`, so a `T` bound to
     /// `BV2?` answered as a bare `BV2` and licensed SROA to rebuild an absent row
     /// as `BV2_ct(nil, nil)`. `is_nullable_ty` reads `raw_ty_node` before the
     /// substitution erases anything and consults the binding, which is why
@@ -393,7 +393,13 @@ impl Builder<'_> {
         let saved_inf = self.inf;
         self.body = defaults_body;
         self.inf = defaults_inf;
-        let result = f(self, def_expr);
+        // `site_owner` is NOT swapped -- the sites still belong to the enclosing
+        // function INSTANCE -- but their `Idx<Expr>` now indexes THIS arena, so
+        // they are stamped in the struct's own domain. The walk records the same
+        // domain for the same defaults (`instance_graph::struct_default_edges`),
+        // which is what lets them join instead of being deliberately unstamped.
+        let domain = crate::site::SiteDomain::StructDefaults(sid.module, sid.def);
+        let result = self.in_domain(domain, |s| f(s, def_expr));
         self.body = saved_body;
         self.inf = saved_inf;
         result

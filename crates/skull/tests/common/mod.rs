@@ -37,6 +37,32 @@ fn assert_no_bone_errors(ws: &Workspace) {
     assert!(errs.is_empty(), "bone recorded errors: {errs:#?}");
 }
 
+/// The messages bone recorded for `src`, without emitting.
+///
+/// [`try_emit_module`] deliberately PANICS on these (a bone error there means a
+/// malformed fixture), so a test whose subject IS a bone-level rejection --
+/// annotation-registry violations, for one -- cannot use it.
+pub fn bone_rejections(src: &str) -> Vec<String> {
+    let mut modules = STDLIB.clone();
+    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
+    // BOTH channels. `semantic_pass` returns `Err` for a violation it treats as
+    // fatal (a struct-field annotation is one) and RECORDS the rest on the
+    // workspace; reading only the recorded set turns the fatal ones into a
+    // panic inside the helper rather than a rejection the caller can assert.
+    let ws = match bone_semantic::semantic_passes::semantic_pass(&mut modules) {
+        Ok(ws) => ws,
+        Err(e) => return vec![e.message],
+    };
+    ws.inferences
+        .iter()
+        .flatten()
+        .flat_map(|inf| inf.errors.values().flatten())
+        .chain(ws.modules.iter().flat_map(|m| m.lowering_errors.values().flatten()))
+        .chain(ws.modules.iter().flat_map(|m| m.interface_errors.iter()))
+        .map(|e| e.message.clone())
+        .collect()
+}
+
 /// Full MIR emit for `src` (the `<test>` module) through the skull pipeline
 /// (lower -> inline -> cleanup -> emit). Stdlib is loaded so int/float casts and
 /// `%`/arithmetic ops resolve to their stdlib helpers -- else the using fns fail

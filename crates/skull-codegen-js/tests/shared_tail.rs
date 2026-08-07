@@ -5,14 +5,12 @@
 //! mutation tests confirm the structuring is load-bearing (drop an arm / mistarget
 //! a labeled continue -> a wrong result, not a silent pass).
 
-use std::process::Command;
-
 use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::FuncRef;
 use crate::common::ws_with;
 
 fn node_available() -> bool {
-    Command::new("node").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+    crate::common::node().arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
 }
 
 fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<String, String> {
@@ -41,7 +39,7 @@ fn eval_int(defs: &str, root: &str, expect: i64) {
         skull_codegen_js::JS_STRUCTURAL_EQ,
         skull_codegen_js::JS_CALL_HELPER,
     );
-    let out = Command::new("node").arg("-e").arg(&program).output().expect("spawn node");
+    let out = crate::common::node().arg("-e").arg(&program).output().expect("spawn node");
     assert!(
         out.status.success(),
         "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",

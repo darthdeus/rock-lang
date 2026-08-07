@@ -74,7 +74,7 @@ impl Builder<'_> {
         // User iterator protocol (bone recorded the resolution for this For):
         // desugar to `it = iter(coll); loop { (ok, ..) = next(it); !ok -> break }`.
         // Only populated for non-builtin collections, so this never shadows a
-        // builtin template. `iter_fn: None` = identity (the collection IS the
+        // builtin template. `iter: None` = identity (the collection IS the
         // iterator); a `CallerGeneric` next = placeholder in a bounded body.
         if let Some(info) = self.inf.and_then(|i| i.for_iter_protocol.get(&iter).cloned()) {
             return self.lower_for_user_iter(&vars, iter, body, &info);
@@ -111,7 +111,7 @@ impl Builder<'_> {
         if self.expr_is_flat_vec(iter) {
             return self.lower_for_array(vars, iter, body);
         }
-        match self.coll_kind(iter) {
+        match self.coll_kind(iter)? {
             // `for x in [T]` always arrives with `for_iter_protocol` populated
             // (bone routes Array to the stdlib VecIter protocol); reaching the
             // dispatch means bone and skull disagree -- reject, don't emit a
@@ -156,13 +156,34 @@ impl Builder<'_> {
         info: &ForIterInfo,
     ) -> Result<(), CompilerError> {
         let coll = self.lower_expr(iter_expr)?;
-        let it_val = match info.iter_fn {
+        // The `for` protocol's witnesses belong to the HEAD expression, which is
+        // the key `inf.for_iter_protocol` -- and therefore the instance graph --
+        // records them under. The cursor was restored to the ENCLOSING construct
+        // when `lower_expr` returned above (and is absent entirely when the
+        // `for` is a statement), so both halves are set explicitly here rather
+        // than inherited from a cursor that names the wrong expression. Same
+        // reason `lower_expr` sets them for an implicit-iter coercion.
+        let outer_expr = self.cur_expr.replace(iter_expr);
+        let out = self.lower_for_user_iter_witnessed(vars, iter_expr, body, info, coll);
+        self.cur_expr = outer_expr;
+        out
+    }
+
+    fn lower_for_user_iter_witnessed(
+        &mut self,
+        vars: &BindingPattern,
+        iter_expr: Idx<Expr>,
+        body: Idx<Expr>,
+        info: &ForIterInfo,
+        coll: Idx<Inst>,
+    ) -> Result<(), CompilerError> {
+        let it_val = match info.iter.as_ref().map(|w| w.func) {
             Some((m, f)) => {
                 // Stage-0e: the `iter` witness is emitted with NO spec binding,
-                // so a generic one always reaches the shared generic body. bone
-                // records `next_generics` for `next` and nothing for `iter_fn`,
-                // which is the S 0d finding -- a missing RECORD, not a missing
-                // binding at a call site.
+                // so a generic one still reaches the shared generic body here.
+                // bone now records the witness's own instantiation
+                // (`IterWitness::generics`), and the instance graph consumes it;
+                // EMISSION consumes it at the Stage-3 cutover, not before.
                 let iter_ref = FuncRef { module: m, func: f };
                 if crate::ablation::enabled() {
                     let cf = &self.ws.module(m).functions[f];
@@ -177,12 +198,37 @@ impl Builder<'_> {
                                 .copied()
                                 .unwrap_or(cf.name_span),
                             "the `for`-protocol `iter` witness has no instantiation record \
-                             anywhere: bone records `next_generics` for `next` and nothing \
-                             for `iter_fn`, and this call is emitted with no spec binding",
+                             in emission: the recorded `IterWitness::generics` is not \
+                             consumed here until the Stage-3 cutover, so this call is \
+                             emitted with no spec binding",
                         );
                     }
                 }
-                self.emit_cur(Inst::Call { func: iter_ref, args: vec![coll] })
+                // The `for` head's `iter` witness, not the head expression's
+                // own call: both live at one expression and share one span, so
+                // the operation is what keeps them distinguishable.
+                let call = self.with_site_op(crate::site::SiteOp::ForIter, |b| {
+                    b.emit_cur(Inst::Call { func: iter_ref, args: vec![coll] })
+                });
+                // The Stage-3 cutover the note above described: bone records the
+                // witness's own instantiation and emission consumes it HERE, as
+                // identity. What it does NOT do is decide delivery -- the
+                // witness still reaches whatever body the specializer chose.
+                if let (Some(inf), Some(w)) = (self.inf, info.iter.as_ref()) {
+                    if let Some(subst) = crate::lower::shape::witness_instance_subst(
+                        self.ws,
+                        inf,
+                        iter_ref,
+                        &w.generics,
+                        self.spec_subst,
+                    )? {
+                        self.f.callee_instances.insert(
+                            call,
+                            crate::site::OwnerInstance { func: iter_ref, subst },
+                        );
+                    }
+                }
+                call
             }
             None => coll,
         };
@@ -248,7 +294,7 @@ impl Builder<'_> {
         let it_load = self.emit_cur(Inst::Load(it_cell));
         let dests: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
         match &info.next {
-            BoundNext::Concrete { func: (m, f), sub, .. } => {
+            BoundNext::Concrete { func: (m, f), sub, next_generics, .. } => {
                 let func = FuncRef { module: *m, func: *f };
                 // The synthesized `next` call has no expr to key
                 // `call_generic_bindings` by, so its instantiation comes from
@@ -256,10 +302,14 @@ impl Builder<'_> {
                 // splices the SHARED generic snapshot, whose element access was
                 // lowered against the boxed representation -- which reads a
                 // `_data` that column storage does not have.
-                let call = self.emit_cur(Inst::CallMulti {
-                    dests: dests.clone(),
-                    func,
-                    args: vec![it_load],
+                // The `for` protocol's `next` witness -- the sibling of the
+                // `ForIter` above at the SAME expression.
+                let call = self.with_site_op(crate::site::SiteOp::ForNext(Vec::new()), |b| {
+                    b.emit_cur(Inst::CallMulti {
+                        dests: dests.clone(),
+                        func,
+                        args: vec![it_load],
+                    })
                 });
                 if !sub.is_empty() {
                     self.f.bound_trees.insert(call, sub.clone());
@@ -267,12 +317,31 @@ impl Builder<'_> {
                 if let Some(key) = spec {
                     self.f.spec_bindings.insert(call, key);
                 }
+                if let Some(inf) = self.inf {
+                    if let Some(subst) = crate::lower::shape::witness_instance_subst(
+                        self.ws,
+                        inf,
+                        func,
+                        next_generics,
+                        self.spec_subst,
+                    )? {
+                        self.f
+                            .callee_instances
+                            .insert(call, crate::site::OwnerInstance { func, subst });
+                    }
+                }
             }
             BoundNext::CallerGeneric(gidx) => {
-                let call = self.emit_cur(Inst::CallBoundMulti {
-                    dests: dests.clone(),
-                    generic_idx: *gidx as u32,
-                    args: vec![it_load],
+                // The same `for`-protocol `next` obligation its concrete sibling
+                // above carries, at the same expression -- so it takes the same
+                // operation. Without it the witness is recorded on one arm and
+                // invisible on the other.
+                let call = self.with_site_op(crate::site::SiteOp::ForNext(Vec::new()), |b| {
+                    b.emit_cur(Inst::CallBoundMulti {
+                        dests: dests.clone(),
+                        generic_idx: *gidx as u32,
+                        args: vec![it_load],
+                    })
                 });
                 if ret_shape.splats() {
                     self.f.bound_next_split.insert(call);
@@ -512,7 +581,7 @@ impl Builder<'_> {
         // A column-stored Map iterates its SPINE: the walk yields (key, slot),
         // and the value is read leaf-wise out of `data` at that slot. No element
         // table is touched, because none exists.
-        let col = self.map_column_value_of(iter);
+        let col = self.map_column_value_of(iter)?;
         let m = self.lower_expr(iter)?;
         let table = match col {
             Some(_) => self.emit_cur(Inst::Field { base: m, field: Ustr::from("spine") }),
@@ -681,7 +750,7 @@ impl Builder<'_> {
             },
             _ => None,
         };
-        let kind = self.coll_kind(coll);
+        let kind = self.coll_kind(coll)?;
         if kind == ContainerKind::Map {
             let (ib, xpat) = split.ok_or_else(|| gap("enumerate over Map with a single binding"))?;
             return self.lower_for_map_enumerate(ib, &xpat, coll, body);
@@ -775,7 +844,7 @@ impl Builder<'_> {
             let len = self.emit_cur(Inst::Field { base: fv, field: Ustr::from("len") });
             (kind, buf, len)
         } else {
-            let kind = self.coll_kind(iter);
+            let kind = self.coll_kind(iter)?;
             let arr_v = self.lower_expr(iter)?;
             let len_v = self.emit_cur(Inst::Len { base: arr_v, kind });
             (kind, arr_v, len_v)

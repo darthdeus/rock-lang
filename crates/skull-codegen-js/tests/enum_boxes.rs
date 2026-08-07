@@ -9,14 +9,12 @@
 //! an inactive (nil) slot must own the SAME keys as a direct `MakeEnum`, or
 //! `__op_eq`'s key-count walk calls the equal values unequal.
 
-use std::process::Command;
-
 use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::FuncRef;
 use crate::common::ws_with;
 
 fn node_available() -> bool {
-    Command::new("node").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+    crate::common::node().arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
 }
 
 fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<String, String> {
@@ -51,7 +49,7 @@ fn eval(src: &str, root: &str, tail: &str) -> String {
     let ws = ws_with(src);
     let js = emit_closure(&ws, root).unwrap_or_else(|e| panic!("emit `{root}`: {e}"));
     let program = format!("{}{}\n{js}\n{tail}", preamble(), skull_codegen_js::JS_STRING_RUNTIME);
-    let out = Command::new("node").arg("-e").arg(&program).output().expect("spawn node");
+    let out = crate::common::node().arg("-e").arg(&program).output().expect("spawn node");
     assert!(
         out.status.success(),
         "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",

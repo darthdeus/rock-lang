@@ -14,7 +14,7 @@
 //!     only fired it because `VecIter<T>.next` is a generic `@inline` body
 //!     containing exactly that `let`.
 //!
-//! The mechanism: `reified_type_node` erases `Nullable`, so inside a body
+//! The mechanism: `mono_type_node` erases `Nullable`, so inside a body
 //! specialized at `T = BV2?` the substitution answers `ty_node(T)` as a bare
 //! `App{Nominal("BV2")}`. `binding_is_nonnull_value_struct` asked through
 //! `ty_node` and so returned true, setting `Cell::nonnull_value_struct` -- the

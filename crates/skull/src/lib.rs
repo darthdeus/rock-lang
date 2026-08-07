@@ -13,9 +13,14 @@
 //! goal is `rock test tests --backend skull` at 100% as bone grows. See
 //! `docs/skull-plan.md`.
 
+pub mod artifact;
+pub mod expr_subtree;
+pub mod concrete_body;
 pub mod coroutine_emit;
 pub mod inline_stats;
 pub mod instance_graph;
+pub mod shader_artifact;
+pub mod site_join;
 pub mod target_projection;
 pub mod mir_emit;
 

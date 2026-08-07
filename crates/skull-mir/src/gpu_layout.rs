@@ -221,6 +221,25 @@ pub enum WireKind {
 }
 
 impl WireKind {
+    /// The kind's code on the registration wire.
+    ///
+    /// Written out rather than derived from the discriminant: a member reordered
+    /// in the enum would otherwise renumber every kind silently, and the host
+    /// reads these numbers to decide how many components a payload element has
+    /// and whether it is written through the float or the int view. Pinned
+    /// against the host's own table by `wire_kind_codes.rs`.
+    pub fn code(self) -> u32 {
+        match self {
+            WireKind::F32 => 0,
+            WireKind::F32x2 => 1,
+            WireKind::F32x3 => 2,
+            WireKind::F32x4 => 3,
+            WireKind::I32 => 4,
+            WireKind::Bool32 => 5,
+            WireKind::Mat4 => 6,
+        }
+    }
+
     /// std140 base alignment (OpenGL 4.5 core, 7.6.2.2).
     fn align(self) -> u32 {
         match self {
@@ -399,7 +418,11 @@ fn round_up(v: u32, align: u32) -> u32 {
 }
 
 /// The wire kind for a declared field type, or `None` if it has no std140 form.
-fn wire_kind(ws: &Workspace, ty: TyId) -> Option<WireKind> {
+///
+/// Public because a `UniformArray<T>`'s ELEMENT is classified through it too:
+/// the array lane asking a different function what `Vec2` is on the wire is the
+/// second layout authority the separate-plan design exists to avoid.
+pub fn wire_kind(ws: &Workspace, ty: TyId) -> Option<WireKind> {
     match ty_expr(ws, ty) {
         Some(TypeExpr::Builtin(BuiltinTy::Float)) => Some(WireKind::F32),
         Some(TypeExpr::Builtin(BuiltinTy::Int)) => Some(WireKind::I32),
@@ -420,6 +443,25 @@ fn wire_kind(ws: &Workspace, ty: TyId) -> Option<WireKind> {
 /// Field order is member order, the same contract `@attr` uses for locations
 /// and `@textures` for slots.
 pub fn uniform_block(ws: &Workspace, struct_name: Ustr) -> Result<UniformBlockPlan, CompilerError> {
+    // The declaring struct's own span, so an over-budget block still points at
+    // the declaration rather than becoming location-free.
+    let span = ws
+        .struct_by_name
+        .get(&struct_name)
+        .map(|sid| ws.modules[sid.module.index()].structs[sid.def].name_span);
+    std140_block(struct_name, &uniform_group_members(ws, struct_name)?, span)
+}
+
+/// A uniform group's members in declaration order, with neutral kinds and NO
+/// places -- the logical half of a group, and the input a target lays out.
+///
+/// This is where the Workspace is read; [`std140_block`] never touches it, so a
+/// layout is a function of the member list alone -- which is what lets a second
+/// target lay the same members out its own way.
+pub fn uniform_group_members(
+    ws: &Workspace,
+    struct_name: Ustr,
+) -> Result<Vec<(Ustr, WireKind)>, CompilerError> {
     let Some(&sid) = ws.struct_by_name.get(&struct_name) else {
         return Err(CompilerError::new_no_location(format!(
             "uniform block: no struct named `{struct_name}`"
@@ -444,8 +486,6 @@ pub fn uniform_block(ws: &Workspace, struct_name: Ustr) -> Result<UniformBlockPl
     }
 
     let mut members = Vec::with_capacity(sd.fields.len());
-    let mut offset = 0u32;
-
     for fd in &sd.fields {
         let Some(kind) = wire_kind(ws, fd.ty) else {
             let ty_name = ty_expr(ws, fd.ty)
@@ -454,6 +494,19 @@ pub fn uniform_block(ws: &Workspace, struct_name: Ustr) -> Result<UniformBlockPl
                     _ => None,
                 })
                 .unwrap_or_else(|| "that type".to_string());
+            // A sampler is the one non-wire field with an obvious fix, and
+            // putting the texture beside the scalars is a plausible mistake.
+            if matches!(ty_name.as_str(), "Sampler2D" | "ISampler2D") {
+                return Err(err(
+                    fd.span,
+                    format!(
+                        "uniform block: `{struct_name}` field `{}` is a sampler, which cannot \
+                         live in a uniform buffer on any API -- pass it as an fn param instead \
+                         (`@textures` groups it and assigns the unit)",
+                        fd.name
+                    ),
+                ));
+            }
             return Err(err(
                 fd.span,
                 format!(
@@ -464,9 +517,34 @@ pub fn uniform_block(ws: &Workspace, struct_name: Ustr) -> Result<UniformBlockPl
                 ),
             ));
         };
+        members.push((fd.name, kind));
+    }
+    Ok(members)
+}
+
+/// **The std140 layout of a member list.** GL's physical answer, and a pure
+/// function of `members` -- no Workspace, no struct lookup.
+///
+/// `span` anchors the over-budget rejection when the caller has one; without it
+/// the error is location-free rather than pointing at an unrelated declaration.
+pub fn std140_block(
+    struct_name: Ustr,
+    members: &[(Ustr, WireKind)],
+    span: Option<Span>,
+) -> Result<UniformBlockPlan, CompilerError> {
+    if members.is_empty() {
+        let msg = format!("uniform block: `{struct_name}` has no members -- an empty block binds nothing");
+        return Err(match span {
+            Some(sp) => err(sp, msg),
+            None => CompilerError::new_no_location(msg),
+        });
+    }
+    let mut out = Vec::with_capacity(members.len());
+    let mut offset = 0u32;
+    for &(name, kind) in members {
         offset = round_up(offset, kind.align());
-        members.push(BlockMember {
-            name: fd.name,
+        out.push(BlockMember {
+            name,
             kind,
             offset,
             matrix_stride: matches!(kind, WireKind::Mat4).then_some(16),
@@ -474,8 +552,211 @@ pub fn uniform_block(ws: &Workspace, struct_name: Ustr) -> Result<UniformBlockPl
         offset += kind.size();
     }
 
-    Ok(UniformBlockPlan { struct_name, members, size: round_up(offset, 16) })
+    let size = round_up(offset, 16);
+    if size > GLES3_MAX_UNIFORM_BLOCK_SIZE {
+        let msg = format!(
+            "uniform block: `{struct_name}` needs {size} std140 bytes, over the {GLES3_MAX_UNIFORM_BLOCK_SIZE} \
+             an ES 3.0 driver is required to offer. The GLSL profile follows the runtime GL \
+             context, so this has to fit the tightest target the program can land on -- and \
+             nothing downstream would catch it, because `shader-validate`'s 300es leg links \
+             against the host driver's own (much larger) limit"
+        );
+        return Err(match span {
+            Some(sp) => err(sp, msg),
+            None => CompilerError::new_no_location(msg),
+        });
+    }
+
+    Ok(UniformBlockPlan { struct_name, members: out, size })
 }
+
+/// One `UniformArray<T>` member as DECLARED: the shader entry's `@size(N)` param.
+/// Offsets are the layout's answer, not the caller's, so they are absent here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ArrayMemberDecl {
+    pub name: Ustr,
+    pub elem: WireKind,
+    pub capacity: u32,
+    /// The `@size(N)` annotation this member's capacity came from. Every
+    /// rejection below is spanned here rather than at the entry: the fix for an
+    /// over-budget block or an unsupported element is always to change one
+    /// param's annotation, and a whole-fn span makes the reader find which.
+    pub span: Span,
+}
+
+/// One laid-out array member of an array block.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArrayMember {
+    pub name: Ustr,
+    pub elem: WireKind,
+    pub capacity: u32,
+    pub offset: u32,
+    /// std140 array stride: the element's base alignment rounded up to 16. That
+    /// is 16 for every kind an array may hold, so it is recorded rather than
+    /// assumed — a backend that gains a wider element kind reads this, and the
+    /// scalar-array waste (a `float[16]` costing 256 bytes) is visible in it.
+    pub stride: u32,
+}
+
+/// A stage's ARRAY block: the `UniformArray<T>` params of one shader entry, laid
+/// out std140 at their own binding.
+///
+/// Deliberately NOT members of [`UniformBlockPlan`]. That type's contract carries
+/// a value-struct producer — `lower::shape::uniform_block_checked` requires its
+/// `leaf_paths()` to equal `value_leaf_paths` over the same struct, matched by
+/// position — and an array member emits leaves no value struct can produce. One
+/// std140 authority (the [`WireKind`] rules and `round_up` below), two producers.
+///
+/// Separate from the scalar block PHYSICALLY too, not just as a type: the scalar
+/// group changes per draw while arrays change per activation, so sharing one
+/// buffer would force either a per-draw copy of the whole array payload or
+/// partial-update state. See `docs/shader-binding-layout-plan.md`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UniformArrayBlockPlan {
+    pub block_name: Ustr,
+    pub members: Vec<ArrayMember>,
+    /// Total size, rounded up to 16. Already a multiple of 16 given every
+    /// member's stride is, but rounded for the same reason the scalar block is.
+    pub size: u32,
+}
+
+impl UniformArrayBlockPlan {
+    /// A stable identity for this block's LAYOUT, the array lane's twin of
+    /// [`UniformBlockPlan::fingerprint`] and folded to 53 bits for the same
+    /// reason: it is emitted as a plain numeric literal, and LuaJIT and JS
+    /// represent integers exactly only that far.
+    ///
+    /// Seeded differently from the scalar fingerprint so an array block and a
+    /// scalar block cannot hash alike — they are independent bindings uploaded
+    /// separately, and a bind that compared the wrong one would accept a
+    /// mismatched buffer.
+    pub fn fingerprint(&self) -> u64 {
+        let mut h = fnv1a(0xa5a5_5a5a_c3c3_3c3c, self.block_name.as_bytes());
+        for m in &self.members {
+            h = fnv1a(h, m.name.as_bytes());
+            h = fnv1a(h, &[m.elem as u8]);
+            h = fnv1a(h, &m.offset.to_le_bytes());
+            h = fnv1a(h, &m.capacity.to_le_bytes());
+            h = fnv1a(h, &m.stride.to_le_bytes());
+        }
+        let h = fnv1a(h, &self.size.to_le_bytes());
+        (h ^ (h >> 53)) & ((1 << 53) - 1)
+    }
+}
+
+fn round_up_u64(v: u64, align: u64) -> u64 {
+    (v + align - 1) / align * align
+}
+
+/// The over-budget rejection, shared so every path that can produce an
+/// unrepresentable size reports the same way rather than one of them truncating.
+///
+/// Spanned at the member that pushed the block over, which is the one whose
+/// `@size(N)` the author can usefully shrink.
+fn oversized(block_name: Ustr, member: Ustr, span: Span, size: u64) -> CompilerError {
+    CompilerError::new_with_label(span, format!(
+        "uniform array block: `{block_name}` needs {size} std140 bytes at `{member}`, over the \
+         {GLES3_MAX_UNIFORM_BLOCK_SIZE} an ES 3.0 driver is required to offer. Array stride is 16 \
+         for every element kind, so a `@size(N)` array costs `N * 16` whatever it holds -- the \
+         budget is per BLOCK, and this one is the arrays alone"
+    ))
+}
+
+/// Lay out one stage's `UniformArray<T>` params as a std140 array block.
+///
+/// The admitted element kinds are exactly the set the GLSL emitter admits
+/// (`array_elem_kind` there): float, int, Vec2, Vec4. `Vec3` is refused because
+/// its base alignment is 16 while its size is 12, so an array of them is neither
+/// tightly packed nor stride-12; `Mat4` and `bool` are simply not offered yet.
+/// Both sides refusing the same set is what stops the layout and the declaration
+/// drifting into disagreeing about what an array may hold.
+pub fn uniform_array_block(
+    block_name: Ustr,
+    decls: &[ArrayMemberDecl],
+) -> Result<UniformArrayBlockPlan, CompilerError> {
+    if decls.is_empty() {
+        return Err(CompilerError::new_no_location(format!(
+            "uniform array block: `{block_name}` has no members -- an empty block binds nothing"
+        )));
+    }
+
+    let mut members = Vec::with_capacity(decls.len());
+    let mut offset = 0u64;
+
+    for d in decls {
+        let stride = match d.elem {
+            WireKind::F32 | WireKind::I32 | WireKind::F32x2 | WireKind::F32x4 => {
+                // An array's stride is its element's base alignment rounded up
+                // to 16. Every kind here rounds to 16; computed rather than
+                // written as a literal so a new kind cannot inherit it silently.
+                round_up(d.elem.align(), 16)
+            }
+            WireKind::F32x3 | WireKind::Mat4 | WireKind::Bool32 => {
+                let name = match d.elem {
+                    WireKind::F32x3 => "Vec3",
+                    WireKind::Mat4 => "Mat4",
+                    _ => "bool",
+                };
+                return Err(CompilerError::new_with_label(d.span, format!(
+                    "uniform array block: `{block_name}` member `{}` has element type `{name}`, \
+                     which a uniform array may not hold (allowed: float, int, Vec2, Vec4)",
+                    d.name
+                )));
+            }
+        };
+        if d.capacity == 0 {
+            return Err(CompilerError::new_with_label(d.span, format!(
+                "uniform array block: `{block_name}` member `{}` has capacity 0 -- `@size(N)` \
+                 declares how many elements the shader may index, so 0 declares an array nothing \
+                 can read",
+                d.name
+            )));
+        }
+
+        // u64 throughout, and the budget is checked BEFORE anything narrows.
+        // `capacity` is whatever `@size(N)` says, so `capacity * stride` is
+        // source-controlled: in u32 it panics under overflow checks and WRAPS
+        // without them, and a wrap lands on a small size that passes the budget
+        // -- evading the one thing this function enforces.
+        offset = round_up_u64(offset, stride as u64);
+        let member_offset =
+            u32::try_from(offset).map_err(|_| oversized(block_name, d.name, d.span, offset))?;
+        members.push(ArrayMember {
+            name: d.name,
+            elem: d.elem,
+            capacity: d.capacity,
+            offset: member_offset,
+            stride,
+        });
+        offset += d.capacity as u64 * stride as u64;
+        if offset > GLES3_MAX_UNIFORM_BLOCK_SIZE as u64 {
+            return Err(oversized(block_name, d.name, d.span, round_up_u64(offset, 16)));
+        }
+    }
+
+    // The last member is the one that reached the size, so it carries the span
+    // for both remaining checks.
+    let last = decls[decls.len() - 1];
+    let size = round_up_u64(offset, 16);
+    if size > GLES3_MAX_UNIFORM_BLOCK_SIZE as u64 {
+        return Err(oversized(block_name, last.name, last.span, size));
+    }
+
+    // Unreachable given the check above, but narrowing is where a wrap would
+    // hide, so it rejects rather than truncating.
+    let size =
+        u32::try_from(size).map_err(|_| oversized(block_name, last.name, last.span, size))?;
+    Ok(UniformArrayBlockPlan { block_name, members, size })
+}
+
+/// The ES 3.0 guaranteed minimum for `MAX_UNIFORM_BLOCK_SIZE` (ES 3.0 spec table
+/// 6.31), and the budget a block is held to.
+///
+/// Not the host driver's limit, deliberately: a desktop GL implementation
+/// reports far more (65536 on the dev machine's NVIDIA driver), so a block
+/// between the two numbers compiles and links on every gate in this repo and
+/// fails only on a physical device. A size the block may REACH, not exceed.
+pub const GLES3_MAX_UNIFORM_BLOCK_SIZE: u32 = 16384;
 
 fn ty_expr(ws: &Workspace, ty: TyId) -> Option<TypeExpr> {
     match ty {

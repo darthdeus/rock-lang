@@ -1063,6 +1063,13 @@ enum Storage {
     ValueStructField,
     VecElement,
     MapValue,
+    /// The present-key read through `.get` rather than the checked index, so
+    /// `map_column_get_repr`'s HIT arm has a population of its own.
+    MapValueGet,
+    /// The MISS arm. Reading an absent key must answer null, so the `??` here
+    /// is the one LIVE fallback the generator emits: the stored entry carries
+    /// the dead leaves, and a miss that wrongly yields it prints `-1 -1`.
+    MapValueMiss,
     Global,
     NativeBufferElement,
     FlatVecElement,
@@ -1163,13 +1170,15 @@ const REPRS: [Repr; 4] = [
     Repr::GcCarrying,
     Repr::WideLeaves,
 ];
-const STORAGES: [Storage; 13] = [
+const STORAGES: [Storage; 15] = [
     Storage::Local,
     Storage::Param,
     Storage::StructField,
     Storage::ValueStructField,
     Storage::VecElement,
     Storage::MapValue,
+    Storage::MapValueGet,
+    Storage::MapValueMiss,
     Storage::Global,
     Storage::NativeBufferElement,
     Storage::FlatVecElement,
@@ -1716,6 +1725,40 @@ fn render(shape: Shape) -> Option<Program> {
             ));
             body.push(format!("{}m[\"k\"] = {produced}", ind(depth)));
             "m[\"k\"]".into()
+        }
+        // `.get` returns `V?`, so a nullable V would be `P??`. Both `.get` arms
+        // are stated over the non-null value type only; the nullability axis is
+        // already carried by `Storage::MapValue` on the same container.
+        Storage::MapValueGet => {
+            if nullable {
+                return None;
+            }
+            body.push(format!("{}let m: Map<string, P> = map_new()", ind(depth)));
+            body.push(format!("{}m[\"k\"] = {produced}", ind(depth)));
+            // DEAD fallback, same discipline as everywhere else: the key is
+            // present, so a `.get` that wrongly misses surfaces as `-1 -1`
+            // rather than as a right answer for the wrong reason.
+            body.push(format!(
+                "{}let got: P = m.get(\"k\") ?? {ctor_dead}",
+                ind(depth)
+            ));
+            "got".into()
+        }
+        Storage::MapValueMiss => {
+            if nullable {
+                return None;
+            }
+            body.push(format!("{}let m: Map<string, P> = map_new()", ind(depth)));
+            // The STORED entry is the dead one and the fallback is the seeded
+            // one -- inverted against every other arm, because here the
+            // fallback is the correct path. A miss that returns the stored slot
+            // instead of null prints the dead leaves.
+            body.push(format!("{}m[\"stored\"] = {ctor_dead}", ind(depth)));
+            body.push(format!(
+                "{}let got: P = m.get(\"absent\") ?? {produced}",
+                ind(depth)
+            ));
+            "got".into()
         }
         Storage::Global => {
             decls.push(format!("global GP: {stored_ty}"));

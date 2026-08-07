@@ -140,7 +140,13 @@ fn main() { print("{SHADER_KEY}") }
         r#"{_data: [192], len: 1, __ty: "Vec"}"#,
         r#"{_data: [3], len: 1, __ty: "Vec"}"#,
         r#"{_data: ["uProjection", "uView", "uTransform"], len: 3, __ty: "Vec"}"#,
-        r#"{_data: [0, 64, 128], len: 3, __ty: "Vec"});"#,
+        r#"{_data: [0, 64, 128], len: 3, __ty: "Vec"}"#,
+        // Wire kind 6 is Mat4. Then capacity and array stride, both 0 for a
+        // SCALAR member -- capacity is what makes a member an array, and the
+        // host's payload pushes refuse a capacity-0 target rather than treating
+        // it as a one-element array.
+        r#"{_data: [6, 6, 6], len: 3, __ty: "Vec"}"#,
+        r#"{_data: [0, 0, 0], len: 3, __ty: "Vec"}, {_data: [0, 0, 0], len: 3, __ty: "Vec"});"#,
     ] {
         assert!(
             line.contains(expected),

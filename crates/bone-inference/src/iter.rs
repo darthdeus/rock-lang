@@ -204,14 +204,14 @@ pub(crate) fn resolve_for_iter_protocol(
         };
         gamma.out.for_iter_protocol.insert(
             iter_expr,
-            ForIterInfo { iter_fn: None, next: BoundNext::CallerGeneric(idx) },
+            ForIterInfo { iter: None, next: BoundNext::CallerGeneric(idx) },
         );
         return Ok(elem);
     }
 
-    let (iter_fn, it_ty) =
+    let (iter_witness, it_ty) =
         match resolve_unary_by_recv(c, gamma, Ustr::from("iter"), coll_ty, span) {
-            Ok((f, ret, _subs)) => {
+            Ok((f, ret, subs)) => {
                 let (fm, ff) = f;
                 if gamma.workspace.module(fm).functions[ff]
                     .generic_bounds
@@ -224,7 +224,7 @@ pub(crate) fn resolve_for_iter_protocol(
                         gamma.render(coll_ty)
                     );
                 }
-                (Some(f), ret)
+                (Some(IterWitness { func: f, generics: subs }), ret)
             }
             // Identity: the collection IS the iterator if `next` resolves on it.
             Err(_) => (None, coll_ty),
@@ -233,7 +233,7 @@ pub(crate) fn resolve_for_iter_protocol(
     let (next_fn, next_ret, next_subs) =
         match resolve_unary_by_recv(c, gamma, Ustr::from("next"), it_ty, span) {
             Ok(x) => x,
-            Err(_) if iter_fn.is_some() => comp_error!(
+            Err(_) if iter_witness.is_some() => comp_error!(
                 span,
                 "`iter` yields `{}`, but there is no `next({}) -> (bool, E)` function to drive the loop",
                 gamma.render(it_ty),
@@ -265,7 +265,7 @@ pub(crate) fn resolve_for_iter_protocol(
     gamma.out.for_iter_protocol.insert(
         iter_expr,
         ForIterInfo {
-            iter_fn,
+            iter: iter_witness,
             next: BoundNext::Concrete { func: next_fn, sub, next_generics: next_subs },
         },
     );
@@ -429,7 +429,7 @@ pub(crate) fn bound_next_elem(
 /// record into `resolved_overload_calls` (the caller stores it in
 /// `for_iter_protocol` / the bound tree).
 /// Implicit iterable->iterator coercion target for an argument at an
-/// `Iterator`-bounded param: `Some((iter_fn, iter_ret))` iff the arg type is
+/// `Iterator`-bounded param: `Some((witness, iter_ret))` iff the arg type is
 /// not itself an iterator (no `next(aty)`) but has a plain `iter(aty)`. The
 /// same rule the `for` head applies, extended to bounded call positions --
 /// `v.any(p)` means `v.iter().any(p)`. A caller bounded generic returns
@@ -441,7 +441,7 @@ pub(crate) fn implicit_iter_target(
     gamma: &mut Gamma,
     aty: TyId,
     span: Span,
-) -> Option<((ModuleId, Idx<Function>), TyId)> {
+) -> Option<(IterWitness, TyId)> {
     let a = resolve(gamma, aty, span);
     if matches!(*gamma.get(a), TypeExpr::Generic(..) | TypeExpr::Infer(..)) {
         return None;
@@ -454,7 +454,7 @@ pub(crate) fn implicit_iter_target(
     }
     let snap = gamma.out.checkpoint();
     match resolve_unary_by_recv(c, gamma, Ustr::from("iter"), a, span) {
-        Ok((f, ret, _subs)) => {
+        Ok((f, ret, subs)) => {
             // A bounded `iter` fn can't be a coercion target (same restriction
             // as the for head).
             if gamma.workspace.module(f.0).functions[f.1]
@@ -465,7 +465,7 @@ pub(crate) fn implicit_iter_target(
                 gamma.out.rollback_to(snap);
                 return None;
             }
-            Some((f, ret))
+            Some((IterWitness { func: f, generics: subs }, ret))
         }
         Err(_) => {
             gamma.out.rollback_to(snap);

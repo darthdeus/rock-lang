@@ -16,6 +16,8 @@ mod capture_free_hoist;
 mod closure_snapshot;
 #[path = "coalesce_value_struct_literal_field_sentinel.rs"]
 mod coalesce_value_struct_literal_field_sentinel;
+#[path = "concrete_body.rs"]
+mod concrete_body;
 #[path = "const_hoist.rs"]
 mod const_hoist;
 #[path = "const_hot_reload.rs"]
@@ -52,12 +54,45 @@ mod generic_coroutine_column_param_sentinel;
 mod hole_runtime_error;
 #[path = "incremental_emit.rs"]
 mod incremental_emit;
+#[path = "opaque_declared_type_reach.rs"]
+mod opaque_declared_type_reach;
+
+#[path = "opaque_container_axes.rs"]
+mod opaque_container_axes;
+
+#[path = "repr_opaque_param.rs"]
+mod repr_opaque_param;
+
+#[path = "vec_push_column_route.rs"]
+mod vec_push_column_route;
+
+#[path = "inline_body_column_map_param.rs"]
+mod inline_body_column_map_param;
+
 #[path = "inline_lua_column_container_param_sentinel.rs"]
 mod inline_lua_column_container_param_sentinel;
 #[path = "inline_value_specialization.rs"]
 mod inline_value_specialization;
 #[path = "instance_graph.rs"]
 mod instance_graph;
+#[path = "instance_owned_emission.rs"]
+mod instance_owned_emission;
+#[path = "site_join.rs"]
+mod site_join;
+#[path = "dispatched_sites.rs"]
+mod dispatched_sites;
+#[path = "site_domain.rs"]
+mod site_domain;
+#[path = "struct_default_generic_relation.rs"]
+mod struct_default_generic_relation;
+#[path = "logical_instance_identity.rs"]
+mod logical_instance_identity;
+#[path = "artifact_view.rs"]
+mod artifact_view;
+
+#[path = "shader_artifact.rs"]
+mod shader_artifact;
+
 #[path = "intrinsics.rs"]
 mod intrinsics;
 #[path = "lambda_static.rs"]

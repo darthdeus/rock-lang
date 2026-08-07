@@ -63,11 +63,53 @@ pub fn backend_variant(
     Err(NoServingBinding)
 }
 
+/// The backend-variant group representative of `rep` -- the declaration bone
+/// would have collapsed the group to, whichever member a caller happens to hold.
+///
+/// The inverse direction of [`backend_variant`]: that goes representative ->
+/// serving sibling for a target, this goes any member -> representative. A
+/// target-neutral consumer (`skull::instance_graph`) needs it for roots, which
+/// production hands it as raw declarations rather than as bone-resolved callees.
+///
+/// The preference order IS bone's `backend_rank` (`Any` < `Lua` < `Js`,
+/// `bone-inference/src/calls.rs`) and [`backend_variant_group`] owns the complete
+/// grouping rule, including bone's repeated-backend refusal.
+pub fn canonical_variant(ws: &Workspace, rep: FuncRef) -> FuncRef {
+    backend_variant_group(ws, rep)
+        .into_iter()
+        .min_by_key(|r| ws.module(r.module).functions[r.func].backend)
+        .expect("a variant group contains its requested member")
+}
+
+/// The backend-variant group containing `member`.
+///
+/// This is bone's complete collapse rule: same name and rendered parameter
+/// signature, with every backend distinct. A repeated backend is a genuine
+/// overload ambiguity, so no group exists and the member stays by itself.
+pub fn backend_variant_group(ws: &Workspace, member: FuncRef) -> Vec<FuncRef> {
+    let mf = &ws.module(member.module).functions[member.func];
+    let member_sig: Vec<String> =
+        mf.param_decls.iter().map(|p| ws.render(None, p.ty)).collect();
+    let Some(cands) = ws.functions_by_name.get(&mf.name) else { return vec![member] };
+    let mut group = Vec::new();
+    for &(mid, fid) in cands.iter() {
+        let f = &ws.module(mid).functions[fid];
+        if f.param_decls.len() != member_sig.len() {
+            continue;
+        }
+        if f.param_decls.iter().zip(&member_sig).all(|(p, r)| ws.render(None, p.ty) == *r) {
+            group.push(FuncRef { module: mid, func: fid });
+        }
+    }
+    let mut backends = std::collections::BTreeSet::new();
+    if group.iter().all(|r| backends.insert(ws.module(r.module).functions[r.func].backend)) {
+        group
+    } else {
+        vec![member]
+    }
+}
+
 /// A same-name, same-signature sibling of `rep` whose backend serves `target`.
-/// Signature match is param-type equality (rendered, inference-free) -- the
-/// same key bone's `collapse_backend_variants` groups on. The caller has
-/// already established the name has >=2 candidates, so `rep_sig` (a per-param
-/// render) is only built when a sibling could exist.
 pub fn sibling_variant(
     ws: &Workspace,
     rep: FuncRef,
@@ -75,15 +117,11 @@ pub fn sibling_variant(
     exact: bool,
 ) -> Option<FuncRef> {
     use bone_semantic::hir::FnBackend;
-    let rf = &ws.module(rep.module).functions[rep.func];
-    let name = rf.name;
-    let rep_sig: Vec<String> = rf.param_decls.iter().map(|p| ws.render(None, p.ty)).collect();
-    let cands = ws.functions_by_name.get(&name)?;
-    for &(mid, fid) in cands.iter() {
-        if mid == rep.module && fid == rep.func {
+    for candidate in backend_variant_group(ws, rep) {
+        if candidate == rep {
             continue;
         }
-        let f = &ws.module(mid).functions[fid];
+        let f = &ws.module(candidate.module).functions[candidate.func];
         let ok = if exact {
             f.backend == target
         } else {
@@ -92,12 +130,7 @@ pub fn sibling_variant(
         if !ok {
             continue;
         }
-        if f.param_decls.len() != rep_sig.len() {
-            continue;
-        }
-        if f.param_decls.iter().zip(&rep_sig).all(|(p, r)| ws.render(None, p.ty) == *r) {
-            return Some(FuncRef { module: mid, func: fid });
-        }
+        return Some(candidate);
     }
     None
 }
@@ -108,6 +141,20 @@ impl Builder<'_> {
     /// `Group`); everything else is a `Scalar`. The ABI boundaries
     /// (params/returns/call args) consume this to splat without a cdata round-trip.
     pub(crate) fn lower_expr_repr(&mut self, e: Idx<Expr>) -> Result<ValueRepr, CompilerError> {
+        // The unboxed route is a SECOND entry into expression lowering, so it
+        // narrows the source cursor exactly as [`Self::lower_expr`] does. Without
+        // this a scalar-ABI argument's own calls are stamped with the ENCLOSING
+        // expression -- `mote_value_noise(v(..))` filed the `v` call under the
+        // `mote_value_noise` site, which then selected the wrong callee.
+        let outer = self.cur_span.replace(self.body.expr_spans[e]);
+        let outer_expr = self.cur_expr.replace(e);
+        let out = self.lower_expr_repr_inner(e);
+        self.cur_span = outer;
+        self.cur_expr = outer_expr;
+        out
+    }
+
+    fn lower_expr_repr_inner(&mut self, e: Idx<Expr>) -> Result<ValueRepr, CompilerError> {
         // Probed ahead of the match rather than in a guard: the wire-shape oracle
         // is fallible, and a guard cannot propagate. Ordered after the `nobox`
         // coalesce below, which is the narrower case.
@@ -354,8 +401,8 @@ impl Builder<'_> {
             // element-type guard below: column storage has no element slot at
             // all, and inside a body specialized at `T = E?` the element type is
             // an unsubstituted generic that no type predicate can classify.
-            Expr::Index { base, index } if self.vec_column_elem_of(base).is_some() => {
-                let elem = self.vec_column_elem_of(base).expect("guard matched");
+            Expr::Index { base, index } if self.vec_column_elem_of(base)?.is_some() => {
+                let elem = self.vec_column_elem_of(base)?.expect("guard matched");
                 let (b, _) = self.lower_index_base(base)?;
                 let i = self.lower_expr(index)?;
                 self.column_element_repr(b, i, elem)
@@ -385,7 +432,7 @@ impl Builder<'_> {
                 // A column-stored Map reaches its leaves the same way, one
                 // indirection out: the spine resolves the key to a slot, and the
                 // slot indexes `data`'s columns.
-                if let Some(elem) = self.map_column_value_of(base) {
+                if let Some(elem) = self.map_column_value_of(base)? {
                     return self.map_column_index_repr(b, i, elem);
                 }
                 // Leaf addressing: no slot reference, no nested ctor -- each
@@ -918,22 +965,6 @@ impl Builder<'_> {
 
         self.cur = exit;
         self.yield_delegate_exit(sub)
-    }
-
-    /// Resolve an operator-helper stdlib fn (`__op_eq`/`__op_ne`) bone registers
-    /// under several synthetic overload entries — all the SAME `@nomangle`
-    /// inline(lua) body mangling to the bare name, so any resolves identically.
-    /// Picks the first (the genuine source def); deterministic by parse order.
-    pub(crate) fn resolve_op_helper(&self, name: &str) -> Result<FuncRef, CompilerError> {
-        match self
-            .ws
-            .functions_by_name
-            .get(&Ustr::from(name))
-            .and_then(|l| l.first())
-        {
-            Some((module, func)) => Ok(FuncRef { module: *module, func: *func }),
-            None => Err(gap(format!("operator helper `{name}` not found"))),
-        }
     }
 
     /// Resolve a global function by surface name to a [`FuncRef`], requiring a

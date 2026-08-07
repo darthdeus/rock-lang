@@ -20,37 +20,10 @@ impl Builder<'_> {
             let s = match self.body.interp_part_arena[p].clone() {
                 InterpPart::Literal(lit) => self.emit_cur(Inst::Const(Lit::Str(lit))),
                 InterpPart::Value { expr, spec } => {
-                    match spec {
-                        None if self.nobox_value_name(expr).is_some() => {
-                            self.stringify_nobox_expr(expr)?
-                        }
-                        // A tuple whose box would WIDEN is packed narrow here --
-                        // one slot per element, the nobox part materialized. The
-                        // widening exists for readers that derive the layout from
-                        // the declared type; `inspect` walks the table at runtime
-                        // and would render a wider tuple.
-                        //
-                        // Packing rather than rejecting on the spot is deliberate:
-                        // the resulting `<name>_ct` is what the post-transform
-                        // residue check already reports, so this boundary keeps the
-                        // attribution (`while emitting <fn>`) and the per-body
-                        // sibling accumulation that a fresh lowering-time error
-                        // would lose. Pinned by `multi_rejection` and
-                        // `nobox_diagnostic_attribution`.
-                        None if self.tuple_box_shape(expr).is_some() => {
-                            let r = self.lower_expr_repr(expr)?;
-                            let v = self.pack(r);
-                            self.stringify(expr, v)?
-                        }
-                        None => {
-                            let v = self.lower_expr(expr)?;
-                            self.stringify(expr, v)?
-                        }
-                        Some(spec) => {
-                            let v = self.lower_expr(expr)?;
-                            self.lower_format(expr, v, &spec)?
-                        }
-                    }
+                    // Every call a hole synthesizes belongs to the HOLE, not to
+                    // the enclosing `Interp`: two float holes in one literal
+                    // would otherwise be one site.
+                    self.with_site_expr(expr, |s| s.lower_interp_hole(expr, spec))?
                 }
             };
             acc = Some(match acc {
@@ -61,17 +34,56 @@ impl Builder<'_> {
         Ok(acc.unwrap_or_else(|| self.emit_cur(Inst::Const(Lit::Str(Ustr::from(""))))))
     }
 
+    fn lower_interp_hole(
+        &mut self,
+        expr: Idx<Expr>,
+        spec: Option<bone_semantic::hir::InterpSpec>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        match spec {
+            None if self.nobox_value_name(expr).is_some() => self.stringify_nobox_expr(expr),
+            // A tuple whose box would WIDEN is packed narrow here -- one slot
+            // per element, the nobox part materialized. The widening exists for
+            // readers that derive the layout from the declared type; `inspect`
+            // walks the table at runtime and would render a wider tuple.
+            //
+            // Packing rather than rejecting on the spot is deliberate: the
+            // resulting `<name>_ct` is what the post-transform residue check
+            // already reports, so this boundary keeps the attribution (`while
+            // emitting <fn>`) and the per-body sibling accumulation that a fresh
+            // lowering-time error would lose. Pinned by `multi_rejection` and
+            // `nobox_diagnostic_attribution`.
+            None if self.tuple_box_shape(expr).is_some() => {
+                let r = self.lower_expr_repr(expr)?;
+                let v = self.pack(r);
+                self.stringify(expr, v)
+            }
+            None => {
+                let v = self.lower_expr(expr)?;
+                self.stringify(expr, v)
+            }
+            Some(spec) => {
+                let v = self.lower_expr(expr)?;
+                self.lower_format(expr, v, &spec)
+            }
+        }
+    }
+
     pub(crate) fn stringify_nobox_expr(&mut self, expr: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
         let name = self
             .nobox_value_name(expr)
             .ok_or_else(|| self.gap_here("nobox interpolation type"))?;
         let repr = self.lower_expr_repr(expr)?;
-        self.stringify_nobox_repr(name, repr)
+        self.stringify_nobox_repr(name, Vec::new(), repr)
     }
 
+    /// `path` is the field-index chain reached so far. Each leaf render is a
+    /// distinct callee obligation at ONE expression, so the chain is its site
+    /// identity -- see `DispatchCtx::hole_plan`, which enumerates the same
+    /// chains from the declared field tree.
     pub(crate) fn stringify_nobox_repr(
         &mut self,
         name: Ustr,
+        path: Vec<u32>,
         repr: ValueRepr,
     ) -> Result<Idx<Inst>, CompilerError> {
         let ValueRepr::Group {
@@ -103,6 +115,7 @@ impl Builder<'_> {
             self.cur = value_bb;
             let rendered = self.stringify_nobox_repr(
                 name,
+                path,
                 ValueRepr::Group {
                     name,
                     parts,
@@ -140,6 +153,8 @@ impl Builder<'_> {
                 format!("{} = ", field.name).as_str(),
             ))));
             out = self.emit_cur(Inst::StringConcat(out, label));
+            let mut child_path = path.clone();
+            child_path.push(i as u32);
             let rendered = match part {
                 ValueRepr::Group {
                     name: child_name,
@@ -147,16 +162,19 @@ impl Builder<'_> {
                     ..
                 } => self.stringify_nobox_repr(
                     child_name,
+                    child_path,
                     ValueRepr::Group {
                         name: child_name,
                         parts,
                         present: None,
                     },
                 )?,
-                ValueRepr::Scalar(value) => self.stringify_struct_leaf(field.ty, value)?,
+                ValueRepr::Scalar(value) => {
+                    self.stringify_struct_leaf(field.ty, child_path, value)?
+                }
                 part @ ValueRepr::Tuple { .. } => {
                     let value = self.pack(part);
-                    self.stringify_struct_leaf(field.ty, value)?
+                    self.stringify_struct_leaf(field.ty, child_path, value)?
                 }
             };
             out = self.emit_cur(Inst::StringConcat(out, rendered));
@@ -168,67 +186,12 @@ impl Builder<'_> {
     pub(crate) fn stringify_struct_leaf(
         &mut self,
         ty: TyId,
+        path: Vec<u32>,
         value: Idx<Inst>,
     ) -> Result<Idx<Inst>, CompilerError> {
-        let ty = self
-            .resolve_tyid(ty)
-            .ok_or_else(|| gap("nobox interpolation field type"))?;
-        if matches!(self.ty_node(ty), Some(TypeExpr::Nullable(_))) {
-            let inspect = self.resolve_global_fn("inspect")?;
-            return Ok(self.emit_cur(Inst::Call {
-                func: inspect,
-                args: vec![value],
-            }));
-        }
-        match self.resolve_ty(ty) {
-            Some(TypeExpr::Builtin(BuiltinTy::Int | BuiltinTy::Bool)) => {
-                Ok(self.emit_cur(Inst::ToString(value)))
-            }
-            Some(TypeExpr::Builtin(BuiltinTy::String)) => {
-                let quote = self.emit_cur(Inst::Const(Lit::Str(Ustr::from("\""))));
-                let open = self.emit_cur(Inst::StringConcat(quote, value));
-                Ok(self.emit_cur(Inst::StringConcat(open, quote)))
-            }
-            Some(TypeExpr::Builtin(BuiltinTy::Float)) => {
-                let format = self.resolve_global_fn("__rock_format_float")?;
-                Ok(self.emit_cur(Inst::Call {
-                    func: format,
-                    args: vec![value],
-                }))
-            }
-            Some(TypeExpr::App {
-                ctor: TypeCtor::Nominal(name),
-                ..
-            }) if self.ws.newtypes_by_name.contains_key(&name) => {
-                let open = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(
-                    format!("{name}(").as_str(),
-                ))));
-                let inner = self.emit_cur(Inst::ToString(value));
-                let close = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(")"))));
-                let out = self.emit_cur(Inst::StringConcat(open, inner));
-                Ok(self.emit_cur(Inst::StringConcat(out, close)))
-            }
-            Some(TypeExpr::App {
-                ctor: TypeCtor::Nominal(name),
-                ..
-            }) if payload_free_enum_variants(self.ws, name).is_some() => {
-                let names = self.emit_cur(Inst::Global(Ustr::from(
-                    format!("__rock_enum_{name}_names").as_str(),
-                )));
-                Ok(self.emit_cur(Inst::Index {
-                    base: names,
-                    index: value,
-                    kind: ContainerKind::Map,
-                }))
-            }
-            Some(_) => {
-                let inspect = self.resolve_global_fn("inspect")?;
-                Ok(self.emit_cur(Inst::Call {
-                    func: inspect,
-                    args: vec![value],
-                }))
-            }
-            None => Err(gap("nobox interpolation field type")),
+        match self.dispatch().struct_leaf_route(ty) {
+            StringifyRoute::Unsupported => Err(gap("nobox interpolation field type")),
+            route => self.render_stringify(&route, path, value),
         }
     }
 
@@ -285,30 +248,40 @@ impl Builder<'_> {
         expr: Idx<Expr>,
         v: Idx<Inst>,
     ) -> Result<Idx<Inst>, CompilerError> {
-        match self.expr_ty(expr) {
-            Some(TypeExpr::Builtin(BuiltinTy::Int | BuiltinTy::Bool | BuiltinTy::String)) => {
-                Ok(self.emit_cur(Inst::ToString(v)))
+        let route = self.dispatch().stringify_route(expr);
+        self.render_stringify(&route, Vec::new(), v)
+    }
+
+    /// Render ONE [`StringifyRoute`]. The route is decided by
+    /// `skull_mir::lower::dispatch`, which the instance walk reads too; this is
+    /// the rendering half and makes no type decision of its own.
+    ///
+    /// `path` identifies the obligation within its hole -- empty for the hole,
+    /// a field-index chain for a nobox value's leaf.
+    pub(crate) fn render_stringify(
+        &mut self,
+        route: &StringifyRoute,
+        path: Vec<u32>,
+        v: Idx<Inst>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        match route {
+            StringifyRoute::ToString => Ok(self.emit_cur(Inst::ToString(v))),
+            StringifyRoute::QuotedString => {
+                let quote = self.emit_cur(Inst::Const(Lit::Str(Ustr::from("\""))));
+                let open = self.emit_cur(Inst::StringConcat(quote, v));
+                Ok(self.emit_cur(Inst::StringConcat(open, quote)))
             }
-            Some(TypeExpr::Builtin(BuiltinTy::Float)) => {
-                let func = self.resolve_global_fn("__rock_format_float")?;
-                Ok(self.emit_cur(Inst::Call { func, args: vec![v] }))
+            StringifyRoute::FormatFloat => {
+                self.dispatched_call("__rock_format_float", path, vec![v])
             }
             // A transparent newtype renders `Name(<inner>)`; its runtime value IS
             // the raw inner, so `tostring` it directly.
-            Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. })
-                if self.ws.newtypes_by_name.contains_key(&name) =>
-            {
+            StringifyRoute::Newtype(name) => {
                 let open = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(format!("{name}(").as_str()))));
                 let inner = self.emit_cur(Inst::ToString(v));
                 let close = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(")"))));
                 let a = self.emit_cur(Inst::StringConcat(open, inner));
                 Ok(self.emit_cur(Inst::StringConcat(a, close)))
-            }
-            // Composite (tuple/array/map/struct/enum) -> structured `inspect`.
-            Some(TypeExpr::Tuple { .. })
-            | Some(TypeExpr::App { ctor: TypeCtor::Array | TypeCtor::Map, .. }) => {
-                let func = self.resolve_global_fn("inspect")?;
-                Ok(self.emit_cur(Inst::Call { func, args: vec![v] }))
             }
             // A payload-free enum value is its ordinal int -> render the variant
             // name statically from `__rock_enum_<E>_names[tag]` (0-indexed, the
@@ -318,21 +291,15 @@ impl Builder<'_> {
             // the static type is known. The `inspect(any)` escape (a payload-free
             // enum passed to `inspect`/stored in `any`/inside a composite) is the
             // deferred box-on-escape-into-`any` work; see docs/skull-enum-value-types.md.
-            Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. })
-                if payload_free_enum_variants(self.ws, name).is_some() =>
-            {
+            StringifyRoute::EnumNames(name) => {
                 let names =
                     self.emit_cur(Inst::Global(Ustr::from(format!("__rock_enum_{name}_names").as_str())));
                 Ok(self.emit_cur(Inst::Index { base: names, index: v, kind: ContainerKind::Map }))
             }
-            Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. })
-                if self.ws.struct_by_name.contains_key(&name)
-                    || self.ws.enums_by_name.contains_key(&name) =>
-            {
-                let func = self.resolve_global_fn("inspect")?;
-                Ok(self.emit_cur(Inst::Call { func, args: vec![v] }))
+            StringifyRoute::Inspect => self.dispatched_call("inspect", path, vec![v]),
+            StringifyRoute::Unsupported => {
+                Err(gap("interpolation hole of unknown/unsupported type"))
             }
-            _ => Err(gap("interpolation hole of unknown/unsupported type")),
         }
     }
 
@@ -366,81 +333,58 @@ impl Builder<'_> {
         v: Idx<Inst>,
         spec: &bone_semantic::hir::InterpSpec,
     ) -> Result<Idx<Inst>, CompilerError> {
-        // Effective conversion letter when the spec omits one (`{x:5}`).
-        let inferred = match self.expr_ty(expr) {
-            Some(TypeExpr::Builtin(BuiltinTy::Int)) => Some('d'),
-            Some(TypeExpr::Builtin(BuiltinTy::Float)) => Some('f'),
-            Some(TypeExpr::Builtin(BuiltinTy::String | BuiltinTy::Bool)) => Some('s'),
-            _ => None,
-        };
+        // Every decision below -- which helper is called, and the flags the
+        // printf rendering reads -- comes from the ONE plan the instance walk
+        // also reads. This function renders it.
+        let plan = self.dispatch().format_plan(expr, spec);
+
         // A composite has no printf conversion: render it structurally (at
         // `.N` precision when asked, via `inspect_formatted`) and then run the
-        // same pad path a conversion would. The numeric-presentation flags
-        // below have no meaning on a structural rendering, so a spec carrying
-        // one is left to gap rather than silently ignored.
-        let has_precision = spec.precision.is_some() || spec.precision_expr.is_some();
-        if spec.format_type.is_none()
-            && inferred.is_none()
-            && spec.grouping.is_none()
-            && spec.sign.is_none()
-            && !spec.alternate
-            && !spec.zero_pad
-            && self.is_composite_expr(expr)
-        {
-            let rendered = if has_precision {
-                let prec = self.lower_precision(spec)?;
-                let func = self.resolve_global_fn("inspect_formatted")?;
-                self.emit_cur(Inst::Call { func, args: vec![v, prec] })
-            } else {
-                self.stringify_non_null(expr, v)?
+        // same pad path a conversion would.
+        if let Some(structural) = plan.structural.clone() {
+            let rendered = match structural {
+                StructuralRender::Formatted => {
+                    let prec = self.lower_precision(spec)?;
+                    self.dispatched_call("inspect_formatted", Vec::new(), vec![v, prec])?
+                }
+                StructuralRender::Plain(route) => self.render_stringify(&route, Vec::new(), v)?,
             };
             return self.pad_to_width(rendered, spec);
         }
 
-        let grouping = spec.grouping;
-        let has_width = spec.width.is_some() || spec.width_expr.is_some();
-        let ty = spec.format_type.or(inferred);
-        let special = matches!(spec.format_type, Some('b') | Some('%'));
-        let val_is_float = matches!(self.expr_ty(expr), Some(TypeExpr::Builtin(BuiltinTy::Float)));
-        let needs_pad = spec.fill.is_some()
-            || matches!(spec.alignment, Some('^'))
-            || ((grouping.is_some() || special) && has_width);
-        let skip_width = grouping.is_some() || needs_pad || special;
-
         // `%` (percent) and `b` (binary) have no printf equivalent -> the stdlib
         // helpers; width/align deferred to the pad helper (skip_width set above).
-        let mut out = if spec.format_type == Some('%') {
-            let prec = self.lower_precision(spec)?;
-            let func = self.resolve_global_fn("__rock_fmt_percent")?;
-            self.emit_cur(Inst::Call { func, args: vec![v, prec] })
-        } else if ty == Some('b') {
-            let func = self.resolve_global_fn("__rock_fmt_binary")?;
-            self.emit_cur(Inst::Call { func, args: vec![v] })
-        } else {
-            // printf path. An integer-class conversion on a float floors first
-            // (Lua `%d` truncates toward zero; rock floors toward -inf).
-            let v = if val_is_float && matches!(ty, Some('d' | 'x' | 'X' | 'o')) {
-                self.emit_cur(Inst::FloatToInt(v))
-            } else {
-                v
-            };
-            let pieces = fmt_pieces(spec, inferred, skip_width, needs_pad)
-                .ok_or_else(|| gap("interpolation format specifier (grouping / fill / center)"))?;
-            self.emit_format_pieces(v, pieces)?
+        let mut out = match plan.special {
+            Some("__rock_fmt_percent") => {
+                let prec = self.lower_precision(spec)?;
+                self.dispatched_call("__rock_fmt_percent", Vec::new(), vec![v, prec])?
+            }
+            Some("__rock_fmt_binary") => {
+                self.dispatched_call("__rock_fmt_binary", Vec::new(), vec![v])?
+            }
+            Some(other) => return Err(gap(format!("unplanned format helper `{other}`"))),
+            None => {
+                // printf path. An integer-class conversion on a float floors first
+                // (Lua `%d` truncates toward zero; rock floors toward -inf).
+                let v = if plan.val_is_float && matches!(plan.ty, Some('d' | 'x' | 'X' | 'o')) {
+                    self.emit_cur(Inst::FloatToInt(v))
+                } else {
+                    v
+                };
+                let pieces =
+                    fmt_pieces(spec, plan.inferred, plan.skip_width, plan.needs_pad).ok_or_else(
+                        || gap("interpolation format specifier (grouping / fill / center)"),
+                    )?;
+                self.emit_format_pieces(v, pieces)?
+            }
         };
 
-        if let Some(sep) = grouping {
-            // `_` with a radix conversion groups by nibble (4), else by 3.
-            let group = match (sep, spec.format_type.or(inferred)) {
-                ('_', Some('x' | 'X' | 'o' | 'b')) => 4i64,
-                _ => 3i64,
-            };
+        if let Some((sep, group)) = plan.grouping {
             let sep_v = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(sep.to_string().as_str()))));
             let grp_v = self.emit_cur(Inst::Const(Lit::Int(group)));
-            let func = self.resolve_global_fn("__rock_fmt_grouping")?;
-            out = self.emit_cur(Inst::Call { func, args: vec![out, sep_v, grp_v] });
+            out = self.dispatched_call("__rock_fmt_grouping", Vec::new(), vec![out, sep_v, grp_v])?;
         }
-        if needs_pad {
+        if plan.needs_pad {
             // Pad AFTER grouping (separators count toward the field width).
             out = self.pad_to_width(out, spec)?;
         }
@@ -464,8 +408,7 @@ impl Builder<'_> {
         let align_v = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(align.as_str()))));
         let fill = spec.fill.unwrap_or(' ').to_string();
         let fill_v = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(fill.as_str()))));
-        let func = self.resolve_global_fn("__rock_fmt_pad")?;
-        Ok(self.emit_cur(Inst::Call { func, args: vec![out, w, align_v, fill_v] }))
+        self.dispatched_call("__rock_fmt_pad", Vec::new(), vec![out, w, align_v, fill_v])
     }
 
     /// A spec's precision as a value: static `Int`, dynamic `{.{p}}` expression,
@@ -475,19 +418,6 @@ impl Builder<'_> {
             (Some(p), _) => Ok(self.emit_cur(Inst::Const(Lit::Int(p as i64)))),
             (None, Some(pe)) => self.lower_expr(pe),
             (None, None) => Ok(self.emit_cur(Inst::Const(Lit::Int(-1)))),
-        }
-    }
-
-    /// Whether `e`'s type is a composite (tuple/array/map/struct/enum) — what
-    /// `inspect`/`inspect_formatted` render structurally.
-    pub(crate) fn is_composite_expr(&self, e: Idx<Expr>) -> bool {
-        match self.expr_ty(e) {
-            Some(TypeExpr::Tuple { .. }) => true,
-            Some(TypeExpr::App { ctor: TypeCtor::Array | TypeCtor::Map, .. }) => true,
-            Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) => {
-                self.ws.struct_by_name.contains_key(&name) || self.ws.enums_by_name.contains_key(&name)
-            }
-            _ => false,
         }
     }
 

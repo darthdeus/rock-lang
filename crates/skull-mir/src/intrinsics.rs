@@ -138,6 +138,29 @@ pub trait IntrinsicTable {
     fn entries(&self) -> Vec<IntrinsicEntry>;
 }
 
+/// **How a backend supplies a callee ITSELF** -- the whole of it, in the
+/// backend's own precedence, as one question with one answer.
+///
+/// Not a second table beside [`IntrinsicTable`]. A backend's intrinsic table is
+/// an INPUT to its realization, layered under the call-site renderings that win
+/// ahead of it: the JS backend renders `map_new` as `new Map()` even though the
+/// declaration is a pure Rock body, and skips a host-bound callee before it
+/// reaches the `inline(js)` co-emit and plain-Rock branches. Asking the table
+/// alone gets a different answer than the emitter gives.
+///
+/// The implementor's own call rendering and callee discovery MUST branch on
+/// exactly this, so "how the artifact says this is supplied" and "what the
+/// emitter does" cannot drift. `skull_codegen_js::JsBackendRealization` is the
+/// worked example: `render_call`, `discover_callees` and the mono artifact view
+/// all read `js_supply`.
+pub trait BackendRealization {
+    /// Backend identity, for diagnostics.
+    fn backend(&self) -> &'static str;
+    /// True iff this backend renders or serves `f` without emitting any
+    /// declared body for it.
+    fn supplies(&self, ws: &Workspace, f: &Function) -> bool;
+}
+
 /// One backend-table entry's identity, for the fail-closed key check.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IntrinsicEntry {

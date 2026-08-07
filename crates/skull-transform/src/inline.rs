@@ -922,6 +922,28 @@ fn import_spec_bindings(
             func.spec_bindings.insert(new_id, key.clone());
         }
     }
+    // The IDENTITY record travels with the body for the same reason the site
+    // does: a spliced call still targets the instance the callee body named.
+    for (old_id, inst) in &callee.callee_instances {
+        if let Some(&new_id) = inst_map.get(old_id) {
+            func.callee_instances.insert(new_id, inst.clone());
+        }
+    }
+    // A minted fn-value symbol travels with the body that mints it: the callee's
+    // `let f = adder` is still a reference to `adder` after the splice, and the
+    // census joins it there. Dropping it would leave a spelled callee symbol in
+    // the caller with no recorded declaration -- exactly the fail-open the
+    // record exists to prevent.
+    for (old_id, fref) in &callee.fn_value_symbols {
+        if let Some(&new_id) = inst_map.get(old_id) {
+            func.fn_value_symbols.insert(new_id, *fref);
+        }
+    }
+    for n in &callee.hoisted_fn_globals {
+        if !func.hoisted_fn_globals.contains(n) {
+            func.hoisted_fn_globals.push(*n);
+        }
+    }
     // The callee's instruction spans come across with its body, so a rejection
     // raised after inlining still points at the construct in the CALLEE's source
     // rather than at the call site that absorbed it.
@@ -929,6 +951,26 @@ fn import_spec_bindings(
         if let Some(&new_id) = inst_map.get(&old_id) {
             func.inst_spans.insert(new_id, *span);
         }
+    }
+    // Site identity travels with the body, and its OWNER travels with it: a
+    // spliced call is the CALLEE instance's obligation, so the owner is
+    // re-interned into the caller's table and the entry re-pointed. Copying the
+    // `OwnerRef` verbatim would silently reinterpret the callee's index in the
+    // caller's table -- index 0 there is the CALLER, so every spliced call
+    // would join through the wrong body while looking perfectly well-formed.
+    let mut owner_map: HashMap<u32, skull_mir::site::OwnerRef> = HashMap::default();
+    for (old_id, cs) in &callee.call_sites {
+        let Some(&new_id) = inst_map.get(old_id) else { continue };
+        let owner = match owner_map.get(&cs.owner.0) {
+            Some(&o) => o,
+            None => {
+                let Some(inst) = callee.site_owners.get(cs.owner.0 as usize) else { continue };
+                let o = skull_mir::site::intern_owner(&mut func.site_owners, inst.clone());
+                owner_map.insert(cs.owner.0, o);
+                o
+            }
+        };
+        func.call_sites.insert(new_id, skull_mir::site::CallSite { owner, site: cs.site.clone() });
     }
 }
 
@@ -1165,7 +1207,7 @@ pub fn inline_functions(
     func: &mut MirFunc,
     cache: &mut InlineCache,
 ) -> Result<(HashSet<FuncRef>, Vec<SpliceRecord>), CompilerError> {
-    inline_functions_with_subst(ws, scx, self_ref, func, cache, &SpecSubst::new())
+    inline_functions_with_subst(ws, scx, self_ref, func, cache, &SpecSubst::default())
 }
 
 pub fn inline_functions_with_subst(

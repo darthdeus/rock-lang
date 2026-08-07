@@ -4,14 +4,12 @@
 //! output buffer. Node execution is the correctness oracle; `tests/js_log.rock`
 //! cross-checks against luajit.
 
-use std::process::Command;
-
 use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::FuncRef;
 use crate::common::ws_with;
 
 fn node_available() -> bool {
-    Command::new("node").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+    crate::common::node().arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
 }
 
 fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<String, String> {
@@ -42,7 +40,7 @@ fn eval_log(src: &str, expect: &str) {
         skull_codegen_js::JS_CALL_HELPER,
         skull_codegen_js::JS_LOG_RUNTIME,
     );
-    let out = Command::new("node").arg("-e").arg(&program).output().expect("spawn node");
+    let out = crate::common::node().arg("-e").arg(&program).output().expect("spawn node");
     assert!(
         out.status.success(),
         "node failed:\n{program}\n--- stderr ---\n{}",

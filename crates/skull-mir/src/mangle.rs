@@ -38,7 +38,7 @@ const SEP: &str = "_";
 pub fn spec_fn_name(
     ws: &Workspace,
     f: &Function,
-    key: &[Option<crate::lower::ReifiedType>],
+    key: &[Option<crate::monoty::MonoTy>],
 ) -> Option<String> {
     if key.iter().all(Option::is_none) {
         return None;
@@ -49,59 +49,18 @@ pub fn spec_fn_name(
     for leaf in key {
         out.push_str(SEP);
         match leaf {
-            Some(ty) => encode_reified_type(ty, &mut out),
+            Some(ty) => encode_mono_type(ty, &mut out),
             None => out.push_str("any"),
         }
     }
     Some(out)
 }
 
-fn encode_reified_type(ty: &crate::lower::ReifiedType, out: &mut String) {
-    use crate::lower::{ReifiedCtor, ReifiedType};
-    match ty {
-        ReifiedType::Prim(name) => {
-            out.push_str("p_");
-            out.push_str(name);
-        }
-        // `T = E?` is a DIFFERENT specialization from `T = E` (its slots carry a
-        // presence leaf), so the mangled name has to separate them or the two
-        // snapshots collide on one symbol.
-        ReifiedType::Nullable(inner) => {
-            out.push_str("o_");
-            encode_reified_type(inner, out);
-        }
-        // Length-prefixed and terminated like `App`, so `(A, B)` cannot encode
-        // the same as a one-slot tuple of something that encodes as `A_B`.
-        ReifiedType::Tuple(parts) => {
-            out.push_str("t_");
-            out.push_str(&parts.len().to_string());
-            for part in parts {
-                out.push('_');
-                encode_reified_type(part, out);
-            }
-            out.push_str("_z");
-        }
-        ReifiedType::App { ctor, params } => {
-            out.push_str("a_");
-            match ctor {
-                ReifiedCtor::Array => out.push('v'),
-                ReifiedCtor::Map => out.push('m'),
-                ReifiedCtor::Nominal(name) => {
-                    out.push('n');
-                    out.push_str(&name.len().to_string());
-                    out.push('_');
-                    out.push_str(name.as_str());
-                }
-            }
-            out.push('_');
-            out.push_str(&params.len().to_string());
-            for param in params {
-                out.push('_');
-                encode_reified_type(param, out);
-            }
-            out.push_str("_z");
-        }
-    }
+/// A specialized body's symbol IS the type's canonical identity
+/// ([`MonoTy::canonical`](crate::monoty::MonoTy::canonical)) -- one encoder, so
+/// a symbol and an instance identity cannot disagree about which type they name.
+fn encode_mono_type(ty: &crate::monoty::MonoTy, out: &mut String) {
+    ty.write_canonical(out);
 }
 
 /// True if `f` keeps its bare surface name (never mangled).
@@ -370,25 +329,101 @@ pub fn collision_errors(ws: &Workspace) -> Vec<(String, CompilerError)> {
 
 #[cfg(test)]
 mod tests {
-    use super::encode_reified_type;
-    use crate::lower::{ReifiedCtor, ReifiedType};
+    use super::encode_mono_type;
+    use crate::monoty::{MonoCtor, MonoTy};
     use ustr::Ustr;
 
-    fn nominal(name: &str, params: Vec<ReifiedType>) -> ReifiedType {
-        ReifiedType::App {
-            ctor: ReifiedCtor::Nominal(Ustr::from(name)),
-            params,
-        }
+    fn nominal(name: &str, params: Vec<MonoTy>) -> MonoTy {
+        MonoTy::App { ctor: MonoCtor::Nominal(Ustr::from(name)), params }
+    }
+
+    /// Every constructor and composition the encoder can see, spelled out. The
+    /// encoding IS the emitted symbol for a specialized body, so any change to
+    /// it renames functions across every artifact; these strings are the record
+    /// of what the symbols are, independent of which type tree produces them.
+    #[test]
+    fn mono_type_encoding_is_these_exact_strings() {
+        let enc = |ty: &MonoTy| {
+            let mut s = String::new();
+            encode_mono_type(ty, &mut s);
+            s
+        };
+
+        assert_eq!(enc(&MonoTy::Int), "p_int");
+        assert_eq!(enc(&MonoTy::Float), "p_float");
+        assert_eq!(enc(&MonoTy::Bool), "p_bool");
+        assert_eq!(enc(&MonoTy::String), "p_string");
+
+        assert_eq!(enc(&MonoTy::Nullable(Box::new(MonoTy::Int))), "o_p_int");
+        assert_eq!(
+            enc(&MonoTy::Nullable(Box::new(MonoTy::Nullable(Box::new(MonoTy::Int))))),
+            "o_o_p_int"
+        );
+
+        assert_eq!(enc(&MonoTy::Tuple(vec![])), "t_0_z");
+        assert_eq!(enc(&MonoTy::Tuple(vec![MonoTy::Int])), "t_1_p_int_z");
+        assert_eq!(
+            enc(&MonoTy::Tuple(vec![MonoTy::Int, nominal("Vec2", vec![])])),
+            "t_2_p_int_a_n4_Vec2_0_z_z"
+        );
+        assert_eq!(
+            enc(&MonoTy::Tuple(vec![
+                MonoTy::Nullable(Box::new(nominal("Vec2", vec![]))),
+                MonoTy::Int,
+            ])),
+            "t_2_o_a_n4_Vec2_0_z_p_int_z"
+        );
+
+        assert_eq!(
+            enc(&MonoTy::App { ctor: MonoCtor::Array, params: vec![MonoTy::Float] }),
+            "a_v_1_p_float_z"
+        );
+        assert_eq!(
+            enc(&MonoTy::App {
+                ctor: MonoCtor::Map,
+                params: vec![MonoTy::String, MonoTy::Int],
+            }),
+            "a_m_2_p_string_p_int_z"
+        );
+        assert_eq!(enc(&nominal("Vec2", vec![])), "a_n4_Vec2_0_z");
+        assert_eq!(
+            enc(&nominal("Entity", vec![nominal("Mob", vec![])])),
+            "a_n6_Entity_1_a_n3_Mob_0_z_z"
+        );
+
+        // Totality: no SpecKey slot carries these today, and each still has one
+        // symbol of its own rather than colliding with a neighbour.
+        assert_eq!(enc(&MonoTy::Any), "p_any");
+        assert_eq!(enc(&MonoTy::Unit), "p_unit");
+        assert_eq!(enc(&MonoTy::Never), "p_never");
+        assert_eq!(
+            enc(&MonoTy::Function {
+                params: vec![MonoTy::Int],
+                ret: Box::new(MonoTy::Float),
+            }),
+            "f_1_p_int_p_float_z"
+        );
+        // Argument order and arrow direction are identity, not decoration.
+        assert_ne!(
+            enc(&MonoTy::Function {
+                params: vec![MonoTy::Int],
+                ret: Box::new(MonoTy::Float)
+            }),
+            enc(&MonoTy::Function {
+                params: vec![MonoTy::Float],
+                ret: Box::new(MonoTy::Int)
+            })
+        );
     }
 
     #[test]
-    fn reified_type_encoding_preserves_tree_boundaries() {
+    fn mono_type_encoding_preserves_tree_boundaries() {
         let nested = nominal("VecIter", vec![nominal("V2", vec![])]);
         let flat = nominal("VecIter_1_a_n2_V2_0_z", vec![]);
         let mut nested_name = String::new();
         let mut flat_name = String::new();
-        encode_reified_type(&nested, &mut nested_name);
-        encode_reified_type(&flat, &mut flat_name);
+        encode_mono_type(&nested, &mut nested_name);
+        encode_mono_type(&flat, &mut flat_name);
 
         assert_eq!(nested_name, "a_n7_VecIter_1_a_n2_V2_0_z_z");
         assert_ne!(nested_name, flat_name);

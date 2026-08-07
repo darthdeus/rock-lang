@@ -1063,7 +1063,7 @@ fn emit_pass_nested_fns(ws: &Workspace, cg: &CodegenCtx, nested: &mut [MirFunc],
 /// regenerated inline (extern / `inline(lua)`). An `Iterator`-bounded fn is
 /// NEITHER: it exists only monomorphized-by-inlining at its call sites (its
 /// body holds placeholder bound-calls that have no standalone emission).
-fn is_cached_body(f: &bone_semantic::hir::Function) -> bool {
+pub fn is_cached_body(f: &bone_semantic::hir::Function) -> bool {
     !f.is_extern && f.inline_body.is_none() && !fn_has_bounds(f)
 }
 
@@ -1132,15 +1132,10 @@ fn emit_specialized_callees(
                 continue;
             }
         };
-        if let Err(e) =
-            skull_transform::inline_functions_with_subst(ws, scx, fref, &mut mf, &mut cache, &subst)
-        {
+        if let Err(e) = prepare_instance_body(ws, scx, fref, &subst, &name, &mut mf, &mut cache) {
             reject(CompilerError::new_with_label(f.name_span, e.message));
             continue;
         }
-        skull_transform::cleanup_with_nobox(ws, &mut mf);
-        skull_transform::convert_closures(&mut mf, &name);
-        skull_transform::recover_counted_loops(ws, &mut mf);
         if let Err(r) = validate_emitted_body(ws, &mf, pending) {
             reject(r.into_error(f.name_span, &format!("cannot emit specialized `{name}`: ")));
             continue;
@@ -1151,6 +1146,33 @@ fn emit_specialized_callees(
     }
     errs.sort_by(|(a, _), (b, _)| a.cmp(b));
     errs.into_iter().map(|(_, e)| e).collect()
+}
+
+/// **THE transform sequence an instance body is emitted through.**
+///
+/// Extracted so `emit_specialized_callees` and `skull::site_join`'s census
+/// consume ONE sequence rather than two that agree today. The census's whole
+/// claim is about the body EMISSION sees, so a census that re-listed these
+/// passes would be free to drift into measuring a body no emitter renders --
+/// and the drift would look like a clean measurement.
+///
+/// Everything after this point is rendering: `validate_emitted_body`,
+/// `emit_named` and the nested-fn emission. Nothing here mints a name or
+/// touches a `CodegenCtx`, which is what lets a read-only consumer run it.
+pub fn prepare_instance_body(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    fref: FuncRef,
+    subst: &skull_mir::lower::SpecSubst,
+    name: &str,
+    mf: &mut skull_mir::mir::MirFunc,
+    cache: &mut skull_transform::InlineCache,
+) -> Result<(), CompilerError> {
+    skull_transform::inline_functions_with_subst(ws, scx, fref, mf, cache, subst)?;
+    skull_transform::cleanup_with_nobox(ws, mf);
+    skull_transform::convert_closures(mf, name);
+    skull_transform::recover_counted_loops(ws, mf);
+    Ok(())
 }
 
 /// Every rejection one assembly found, across all four kinds of emitted
@@ -1595,39 +1617,30 @@ fn shader_registration_lines(ws: &Workspace) -> Result<ShaderRegistrations, Comp
         dependencies.extend(emission.dependencies);
         // Slot order is the engine's whole view of texture binding: it points
         // each sampler at its unit once at link time, then binds by slot.
-        let slot_names: Vec<&str> = emission.texture_slots.iter().map(|n| n.as_str()).collect();
+        let slot_names: Vec<&str> = emission.abi.texture_units.iter().map(|n| n.as_str()).collect();
         // The `@uniform` blocks' std140 layouts, in binding order: A1 has at
         // most one, an A2 pipeline has one per stage. Carried as PARALLEL FLAT
         // lists -- one entry per block, plus the members concatenated with a
         // per-block count -- so a hand-written driver never nests. A program
         // with no group sends empty lists, which are still arguments; a short
         // call is what rock-cli/tests/shader_register_arity_gate.rs catches.
-        let blocks = &emission.uniform_blocks;
-        // The BINDING travels explicitly rather than as position in these
-        // lists: slot 0 is reserved for `@engine`, so a program without one
-        // leaves it empty instead of shifting its own block into it.
-        let bindings: Vec<i64> = blocks.iter().map(|(b, _)| *b as i64).collect();
-        let names: Vec<&str> = blocks.iter().map(|(_, p)| p.struct_name.as_str()).collect();
-        let sizes: Vec<i64> = blocks.iter().map(|(_, p)| p.size as i64).collect();
-        let fingerprints: Vec<i64> = blocks.iter().map(|(_, p)| p.fingerprint() as i64).collect();
-        let counts: Vec<i64> = blocks.iter().map(|(_, p)| p.members.len() as i64).collect();
-        let member_names: Vec<&str> =
-            blocks.iter().flat_map(|(_, p)| p.members.iter().map(|m| m.name.as_str())).collect();
-        let offsets: Vec<i64> =
-            blocks.iter().flat_map(|(_, p)| p.members.iter().map(|m| m.offset as i64)).collect();
+        let w = skull_codegen_glsl::BlockWire::of(emission.abi.uniform_blocks.iter(), emission.abi.uniform_array_blocks.iter());
         let _ = writeln!(
             out,
-            "__rock_shader_register({:?}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
+            "__rock_shader_register({:?}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
             pair.key,
             lua_long_bracket(&emission.source),
             skull_codegen_lua::lua_string_vec(&slot_names),
-            skull_codegen_lua::lua_string_vec(&names),
-            skull_codegen_lua::lua_int_vec(&bindings),
-            skull_codegen_lua::lua_int_vec(&sizes),
-            skull_codegen_lua::lua_int_vec(&fingerprints),
-            skull_codegen_lua::lua_int_vec(&counts),
-            skull_codegen_lua::lua_string_vec(&member_names),
-            skull_codegen_lua::lua_int_vec(&offsets),
+            skull_codegen_lua::lua_string_vec(&w.names),
+            skull_codegen_lua::lua_int_vec(&w.bindings),
+            skull_codegen_lua::lua_int_vec(&w.sizes),
+            skull_codegen_lua::lua_int_vec(&w.fingerprints),
+            skull_codegen_lua::lua_int_vec(&w.counts),
+            skull_codegen_lua::lua_string_vec(&w.member_names),
+            skull_codegen_lua::lua_int_vec(&w.member_offsets),
+            skull_codegen_lua::lua_int_vec(&w.member_kinds),
+            skull_codegen_lua::lua_int_vec(&w.member_capacities),
+            skull_codegen_lua::lua_int_vec(&w.member_strides),
         );
     }
     Ok(ShaderRegistrations {
@@ -1782,7 +1795,9 @@ fn assemble(
                 // value-returning bodyless-`return` and prepending default fills.
                 // (Js inline bodies were skipped above via the backend guard.)
                 let name = mangle_fn(ws, f);
-                let params = match skull_mir::lower::scalar_abi_lua_param_names(ws, scx, self_ref) {
+                let params = match skull_mir::lower::BackendFnAbiPlan::for_declaration(ws, scx, self_ref)
+                    .lua_param_names
+                {
                     Some(names) => names.join(", "),
                     None => f.param_decls.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", "),
                 };

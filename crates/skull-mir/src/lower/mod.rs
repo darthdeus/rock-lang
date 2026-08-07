@@ -68,6 +68,11 @@ pub use shape::*;
 /// widening to make the split.
 mod call;
 mod control;
+mod dispatch;
+pub use dispatch::{
+    dispatched_callee_decl, dispatched_callee_decls,
+    DispatchCtx, EqRoute, FormatPlan, HolePlan, StringifyRoute, StructuralRender,
+};
 mod embed;
 mod expr;
 mod flat;
@@ -77,7 +82,9 @@ mod loops;
 mod nobox;
 mod pattern;
 mod resolve;
-pub use resolve::{backend_variant, sibling_variant, NoServingBinding};
+pub use resolve::{
+    backend_variant, backend_variant_group, canonical_variant, sibling_variant, NoServingBinding,
+};
 mod stmt;
 mod storage;
 mod structs;
@@ -195,6 +202,15 @@ pub struct ScalarCtx {
     /// (`docs/shaders.md` finding 5). The toggle is contained in
     /// [`fn_scalar_abi`], which definitions and direct calls both consult.
     values_first_class: bool,
+    /// When set, EVERY complete generic instantiation reifies -- the conditional
+    /// `any_value` trigger and the unspliced-context narrowing are both off.
+    ///
+    /// Not an optimization dial. It is set for a target that has no shared
+    /// generic body to decline to: GLSL has no boxed representation an unreified
+    /// `T` could take, so a declined key is not a slower lowering but no
+    /// lowering at all. The CPU backends keep the conditional trigger until
+    /// Stage 4 deletes it.
+    total_specialization: bool,
     /// The codegen backend this lowering feeds. Drives backend-variant selection
     /// at every resolved call ([`Builder::resolve_funcref`]): `Lua` rejects a
     /// call whose only binding is a JS decl; `Js` swaps a call to its JS sibling
@@ -243,11 +259,20 @@ impl ScalarCtx {
             per_body,
             ref_counts,
             values_first_class: false,
+            total_specialization: false,
             target: bone_semantic::hir::FnBackend::Lua,
         }
     }
 
     /// Set the codegen backend this lowering feeds (see [`target`]).
+    /// The backend this context lowers for. Read by consumers that must ask the
+    /// EMITTER's own declaration selection rather than restate it -- the site
+    /// join compares a target-selected sibling against the target-neutral
+    /// graph's representative through `backend_variant`.
+    pub fn target(&self) -> bone_semantic::hir::FnBackend {
+        self.target
+    }
+
     pub fn with_target(mut self, target: bone_semantic::hir::FnBackend) -> Self {
         self.target = target;
         self
@@ -261,8 +286,15 @@ impl ScalarCtx {
     pub fn new_values_first_class(ws: &Workspace) -> Self {
         let mut scx = Self::new(ws);
         scx.values_first_class = true;
+        scx.total_specialization = true;
         scx.target = bone_semantic::hir::FnBackend::Any;
         scx
+    }
+
+    /// Whether this lowering reifies EVERY complete instantiation
+    /// ([`total_specialization`]).
+    pub fn total_specialization(&self) -> bool {
+        self.total_specialization
     }
 
     /// Incrementally fold one re-inferred body's value-reference contribution into
@@ -315,7 +347,7 @@ struct FnScalarAbi {
 /// Address-taken Rock bodies narrow to the `nobox` shapes an indirect caller can
 /// derive from the fn type; direct-only bodies may scalarize every eligible value.
 fn fn_scalar_abi(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef) -> Option<FnScalarAbi> {
-    fn_scalar_abi_spec(ws, scx, fref, &SpecSubst::new())
+    fn_scalar_abi_spec(ws, scx, fref, &SpecSubst::default())
 }
 
 fn fn_nobox_abi_spec(
@@ -392,40 +424,103 @@ impl NestedFn {
     }
 }
 
-/// The Lua parameter-name list for a scalar-ABI `inline(lua)` fn (`@scalar_abi`):
-/// each value param expands to its depth-first leaf names `<base>__<leaf>` (the
-/// names the hand-written body references), non-value params keep their name.
-/// `None` if the fn doesn't use the scalar ABI (the caller emits the plain list).
-/// The leaf ORDER matches `repr_to_leaves`, so def params line up with the
-/// callsite splat positionally.
-pub fn scalar_abi_lua_param_names(
-    ws: &Workspace,
-    scx: &ScalarCtx,
-    fref: FuncRef,
-) -> Option<Vec<String>> {
-    let abi = fn_scalar_abi(ws, scx, fref)?;
-    let f = &ws.module(fref.module).functions[fref.func];
-    let mut names = Vec::new();
-    for (pd, slot) in f.param_decls.iter().zip(abi.param_shapes) {
-        slot_param_names(pd.name.as_str(), &slot, &mut names);
-    }
-    Some(names)
+/// **The backend ABI of one function instance** (plan S 13, Stage 3).
+///
+/// One object over the three facts the FOREIGN-BODY boundary needs -- the
+/// emitted parameter spelling, the per-declared-param leaf widths, and the
+/// result-wire width -- built once from a declaration and a substitution.
+/// Three independent oracles stood here before, each re-deriving
+/// [`fn_scalar_abi_spec`] for itself, so a publisher and the caller capturing
+/// it could only agree by all three being asked the same question.
+///
+/// **Scope, precisely.** This is not yet the object every definition and call
+/// route consumes; plan Stage 3 is what makes it that. Today:
+///
+/// - `lua_param_names` is read by luajit's `inline(lua)` emission
+///   (`skull::mir_emit`), the JS backend's `inline(js)` emission
+///   (`skull_codegen_js::emit`) and [`scalar_abi_param_collisions`]. Ordinary
+///   Rock bodies emit positional cells and never consult it.
+/// - `param_leaf_widths` is read by the JS arity guard alone.
+/// - `result_lanes` is read by the JS publisher and its scratch bank. **Lua
+///   does not read it** -- luajit carries several results on native
+///   multi-return, so there is no width for it to state (plan S 13a).
+/// - Only `skull::artifact` builds it PER INSTANCE. Every emission consumer
+///   goes through [`Self::for_declaration`], because pre-cutover emission
+///   still writes one shared body per declaration.
+///
+/// The substitution is an instance's [`crate::monoty::MonoSubst`], so a generic
+/// body instantiated at a multi-lane result states *that* width: `T` is one
+/// boxed slot on the declaration and two lanes at `T = (bool, float)`. A
+/// per-declaration answer is not a narrower answer, it is a different
+/// question -- which is why the artifact view asks per instance and emission,
+/// which has only the declaration to emit, asks for the declaration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BackendFnAbiPlan {
+    pub decl: FuncRef,
+    /// Physical values on the result wire: 0 with no return, 1 for an ordinary
+    /// one, more for the two shapes that splat -- a tuple return (each element
+    /// its own slot, a `nobox` element into its leaves) and a bare `nobox`
+    /// value return under the scalar ABI.
+    ///
+    /// **A JS transport fact.** Plan S 13b: leaf 0 rides the ordinary JS
+    /// `return`, lanes 1..N ride the module-scope scratch bank
+    /// (`docs/boundary-contracts.md` 1.2). Luajit has native multi-return and
+    /// consults nothing here; the artifact view still records the width for
+    /// every artifact, because it is a property of the wire rather than of the
+    /// backend that happens to need it spelled out.
+    ///
+    /// Derived from the same [`fn_scalar_abi_spec`] policy and
+    /// [`tuple_ret_shape`] the definition and every call site read, which a
+    /// textual scan of the opaque body for `__rock_retN` could not be.
+    pub result_lanes: usize,
+    /// Depth-first leaf names for a scalar-ABI FOREIGN body (`@scalar_abi`):
+    /// each value param expands to `<base>__<leaf>`, the names the hand-written
+    /// body references; other params keep their name. `None` when this instance
+    /// does not use the scalar ABI, and the caller emits the plain list. The
+    /// leaf ORDER matches `repr_to_leaves`, so def params line up with the
+    /// callsite splat positionally.
+    pub lua_param_names: Option<Vec<String>>,
+    /// Per-DECLARED-param leaf width (a value-struct param's flattened leaf
+    /// count, 1 otherwise). Per declared param rather than per slot so a
+    /// defaulted value-struct param counts as its whole leaf group.
+    pub param_leaf_widths: Option<Vec<usize>>,
 }
 
-/// Per-declared-param LEAF width under the scalar ABI (a value-struct param's
-/// flattened leaf count, 1 for everything else); `None` when `fref` does not
-/// use the scalar ABI. Pairs with `scalar_abi_lua_param_names` -- the JS arity
-/// guard needs widths per DECLARED param so a defaulted value-struct param
-/// counts as its whole leaf group, not one slot.
-pub fn scalar_abi_param_leaf_widths(
-    ws: &Workspace,
-    scx: &ScalarCtx,
-    fref: FuncRef,
-) -> Option<Vec<usize>> {
-    let abi = fn_scalar_abi(ws, scx, fref)?;
-    Some(
-        abi.param_shapes.iter().map(RetSlot::slot_count).collect(),
-    )
+impl BackendFnAbiPlan {
+    pub fn build(
+        ws: &Workspace,
+        scx: &ScalarCtx,
+        decl: FuncRef,
+        subst: &SpecSubst,
+    ) -> Self {
+        let f = &ws.module(decl.module).functions[decl.func];
+        let abi = fn_scalar_abi_spec(ws, scx, decl, subst);
+        let result_lanes = match f.return_ty {
+            None => 0,
+            Some(ret) => match shape::tuple_ret_shape(ws, subst, ret) {
+                Some(shape) => shape.slot_count(),
+                None => match abi.as_ref().and_then(|a| a.ret_shape.as_ref()) {
+                    Some(vs) => vs.leaf_count(),
+                    None => 1,
+                },
+            },
+        };
+        let lua_param_names = abi.as_ref().map(|a| {
+            let mut names = Vec::new();
+            for (pd, slot) in f.param_decls.iter().zip(a.param_shapes.iter()) {
+                slot_param_names(pd.name.as_str(), slot, &mut names);
+            }
+            names
+        });
+        let param_leaf_widths =
+            abi.as_ref().map(|a| a.param_shapes.iter().map(RetSlot::slot_count).collect());
+        Self { decl, result_lanes, lua_param_names, param_leaf_widths }
+    }
+
+    /// The declaration's own shape -- the empty-substitution instance.
+    pub fn for_declaration(ws: &Workspace, scx: &ScalarCtx, decl: FuncRef) -> Self {
+        Self::build(ws, scx, decl, &SpecSubst::default())
+    }
 }
 
 /// THE invariant: a function's emitted Lua parameter list must be INJECTIVE.
@@ -463,7 +558,7 @@ pub fn scalar_abi_param_collisions(
     if f.inline_body.is_none() {
         return Vec::new();
     }
-    let Some(names) = scalar_abi_lua_param_names(ws, scx, fref) else {
+    let Some(names) = BackendFnAbiPlan::for_declaration(ws, scx, fref).lua_param_names else {
         return Vec::new();
     };
     let origins = scalar_abi_param_origins(ws, scx, fref);
@@ -826,9 +921,10 @@ fn hash_init_expr(body: &Body, e: Idx<Expr>, h: &mut std::collections::hash_map:
         }
         Expr::Break => tag!(21),
         Expr::Continue => tag!(22),
-        Expr::As { value, target } => {
+        Expr::As { value, target, kind } => {
             tag!(23);
             target.hash(h);
+            kind.hash(h);
             go!(value);
         }
         Expr::TupleIndex { tuple, index } => {
@@ -1025,7 +1121,7 @@ pub fn lower_function(
     mid: ModuleId,
     fid: Idx<Function>,
 ) -> Result<MirFunc, CompilerError> {
-    lower_function_spec(ws, scx, mid, fid, &SpecSubst::new())
+    lower_function_spec(ws, scx, mid, fid, &SpecSubst::default())
 }
 
 /// Lower `fref` with a per-instantiation generic substitution (`docs/flatvec-plan.md`,
@@ -1096,6 +1192,13 @@ pub fn lower_function_spec(
         ret_ty: func.return_ty,
         fn_name_span: Some(func.name_span),
         cur_span: None,
+        cur_expr: None,
+        cur_domain: crate::site::SiteDomain::Own,
+        cur_op: crate::site::SiteOp::DirectCall,
+        site_owner: Some(crate::site::OwnerInstance {
+            func: self_ref,
+            subst: subst.clone(),
+        }),
         group_binds: HashMap::new(),
         tuple_binds: HashMap::new(),
         static_cells: HashMap::new(),
@@ -1147,7 +1250,7 @@ pub fn lower_global(
         .and_then(|ir| ir.per_fn.get(&BodyOwner::Global(gid)));
     let f = MirFunc::new(name);
     let cur = f.entry();
-    let empty_subst = SpecSubst::new();
+    let empty_subst = SpecSubst::default();
     let mut b = Builder {
         ws,
         scx,
@@ -1171,6 +1274,10 @@ pub fn lower_global(
         ret_ty: None,
         fn_name_span: None,
         cur_span: None,
+        cur_expr: None,
+        cur_domain: crate::site::SiteDomain::Own,
+        cur_op: crate::site::SiteOp::DirectCall,
+        site_owner: None,
         group_binds: HashMap::new(),
         tuple_binds: HashMap::new(),
         static_cells: HashMap::new(),
@@ -1219,7 +1326,7 @@ pub fn lower_decorator(
         .ok_or_else(|| gap("decorator body has no target binding"))?;
     let f = MirFunc::new(name);
     let cur = f.entry();
-    let empty_subst = SpecSubst::new();
+    let empty_subst = SpecSubst::default();
     let mut b = Builder {
         ws,
         scx,
@@ -1243,6 +1350,10 @@ pub fn lower_decorator(
         ret_ty: None,
         fn_name_span: None,
         cur_span: None,
+        cur_expr: None,
+        cur_domain: crate::site::SiteDomain::Own,
+        cur_op: crate::site::SiteOp::DirectCall,
+        site_owner: None,
         group_binds: HashMap::new(),
         tuple_binds: HashMap::new(),
         static_cells: HashMap::new(),
@@ -1332,6 +1443,37 @@ struct Builder<'a> {
     /// [`MirFunc::inst_spans`] so the diagnostic points at the construct rather
     /// than at the enclosing fn.
     cur_span: Option<Span>,
+    /// The source EXPRESSION currently being lowered, maintained by
+    /// [`Builder::lower_expr`] exactly beside [`Self::cur_span`]. Together with
+    /// [`Self::cur_op`] this is the [`crate::site::Site`] every call
+    /// instruction emitted from here down is stamped with, so the identity is
+    /// recorded at ONE choke point ([`Builder::emit_cur`]) rather than at each
+    /// of the call-emitting sites -- a per-site record would make a MISSING one
+    /// indistinguishable from a legitimately siteless call.
+    ///
+    /// `None` only outside any expression (a fn prologue), which is the
+    /// exclusion the site census reports by cause.
+    cur_expr: Option<Idx<Expr>>,
+    /// WHICH expression arena [`Self::cur_expr`] indexes. A struct-default
+    /// initializer is lowered from the declaring struct's `StructDefaults` body
+    /// into this CFG while `site_owner` still names the enclosing function, so
+    /// its index is only meaningful against THAT arena -- and the walk records
+    /// it under the same domain.
+    cur_domain: crate::site::SiteDomain,
+    /// The concrete INSTANCE being lowered, which OWNS every site recorded from
+    /// this builder: the declaration plus the substitution it is lowered under.
+    /// `None` for the always-emitted units -- a global initializer and a
+    /// decorator body are not functions and have no `FuncRef`, so their calls
+    /// carry no site and the census reports them under that cause rather than
+    /// losing them.
+    site_owner: Option<crate::site::OwnerInstance>,
+    /// Which OPERATION of [`Self::cur_expr`] is being lowered. `DirectCall` is
+    /// the default because a call emitted while lowering an expression is that
+    /// expression's own call; the witness and synthesized routes override it
+    /// for their sub-lowering through [`Builder::with_site_op`], because one
+    /// expression carries several distinct callee obligations and they must
+    /// stay distinguishable.
+    cur_op: crate::site::SiteOp,
     /// A value PARAM binding -> (struct name, its leaf cells, shape). A read of
     /// the param reconstructs the unboxed `Group` from these; a field read
     /// projects a leaf directly (no cdata).
@@ -1385,11 +1527,116 @@ impl Builder<'_> {
     }
 
     fn emit_cur(&mut self, inst: Inst) -> Idx<Inst> {
+        let is_call = matches!(
+            inst,
+            Inst::Call { .. }
+                | Inst::CallMulti { .. }
+                | Inst::CallValue { .. }
+                | Inst::CallValueMulti { .. }
+                | Inst::CallBoundMulti { .. }
+        );
         let id = self.f.emit(self.cur, inst);
         if let Some(span) = self.cur_span {
             self.f.inst_spans.insert(id, span);
         }
+        // THE choke point for call-site identity: every call FORM entering the
+        // arena is stamped here, so a missing stamp is a property of this ONE
+        // branch rather than of 48 call-emitting sites each remembering to
+        // record. `CallBoundMulti` is included: it is the `for` protocol's
+        // `next` witness on the caller-generic path, and its concrete sibling on
+        // the other arm carries a site, so leaving it out made the SAME source
+        // construct recorded or not depending on which arm it took. It is still
+        // a call a body may not carry into emission, which is a separate
+        // rejection.
+        //
+        // Not yet total: a call emitted outside any expression carries no site,
+        // reported by `skull::site_join::census` rather than assumed away.
+        // A fn-value MINT is stamped too. It is not a call, but it is a callee
+        // OBLIGATION -- the one place a declaration becomes a spelled value --
+        // and the graph records it at the same `Site { expr, FnValue }`. Keyed
+        // on the operation rather than on the instruction, because
+        // `Inst::Global` is also a module global and a `static` cell and those
+        // name no callee.
+        let is_mint = self.cur_op == crate::site::SiteOp::FnValue;
+        if is_call || is_mint {
+            if let (Some(owner), Some(expr)) = (self.site_owner.clone(), self.cur_expr) {
+                let owner = crate::site::intern_owner(&mut self.f.site_owners, owner);
+                self.f.call_sites.insert(
+                    id,
+                    crate::site::CallSite {
+                        owner,
+                        site: crate::site::Site {
+                            domain: self.cur_domain,
+                            expr,
+                            op: self.cur_op.clone(),
+                        },
+                    },
+                );
+            }
+        }
         id
+    }
+
+    /// The shared type/dispatch context this builder resolves through. Every
+    /// predicate below is a delegate: `DispatchCtx` is the one implementation,
+    /// so the instance walk asking the same question cannot get a second answer
+    /// (`skull_mir::lower::dispatch`).
+    pub(crate) fn dispatch(&self) -> dispatch::DispatchCtx<'_> {
+        dispatch::DispatchCtx {
+            ws: self.ws,
+            inf: self.inf,
+            body: self.body,
+            subst: self.spec_subst,
+            values_first_class: self.scx.values_first_class,
+        }
+    }
+
+    /// Lower `f` with the site EXPRESSION overridden, restoring it after.
+    ///
+    /// The symmetric half of [`Self::with_site_op`]. Most calls inherit the
+    /// cursor `lower_expr`/`lower_expr_repr` install, but a PLACE expression is
+    /// never lowered as a value -- `lower_assign_effect` dispatches on
+    /// `expr_arena[target]` directly -- so the calls its arms synthesize had no
+    /// cursor at all in statement position, and the enclosing one in value
+    /// position. Both are wrong against a walk that keys those obligations on
+    /// the `Expr::Index` node itself.
+    fn with_site_expr<T>(&mut self, expr: Idx<Expr>, f: impl FnOnce(&mut Self) -> T) -> T {
+        let outer = self.cur_expr.replace(expr);
+        let out = f(self);
+        self.cur_expr = outer;
+        out
+    }
+
+    /// Lower `f` with the site DOMAIN overridden, restoring it after.
+    ///
+    /// The third scoped half, beside the expression and the operation: a body
+    /// lowered from another arena keeps its own indices, and the domain is what
+    /// makes them readable. A flag rather than a cursor swap, because the nested
+    /// `lower_expr` installs the foreign index itself.
+    fn in_domain<T>(
+        &mut self,
+        domain: crate::site::SiteDomain,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let outer = std::mem::replace(&mut self.cur_domain, domain);
+        let out = f(self);
+        self.cur_domain = outer;
+        out
+    }
+
+    /// Lower `f` with the site OPERATION overridden, restoring it after. The
+    /// witness and synthesized routes emit calls that belong to the enclosing
+    /// expression but are NOT its own call, and a `for` head carries several at
+    /// one expression -- so the operation has to be scoped, not global.
+    fn with_site_op<T>(
+        &mut self,
+        op: crate::site::SiteOp,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let outer = std::mem::replace(&mut self.cur_op, op);
+        let out = f(self);
+        self.cur_op = outer;
+        out
     }
 
     /// Whether the current block is still open (no terminator set yet). A
@@ -2005,7 +2252,7 @@ fn fn_opaque_intrinsic_transitive(
     for (c, resolved) in inf.resolved_overload_calls.iter() {
         let callee = FuncRef { module: resolved.0, func: resolved.1 };
         let Some(bindings) = inf.call_generic_bindings.get(c) else { continue };
-        let empty = SpecSubst::new();
+        let empty = SpecSubst::default();
         if bindings.iter().all(|&b| reify_type(ws, inf, b, &empty).is_some()) {
             continue;
         }
@@ -2043,10 +2290,11 @@ fn native_buffer_alloc_elem_ctype_spec(
         }
         _ => None,
     };
-    match leaf {
-        Some(ReifiedType::Prim(p)) => Ok(Ustr::from(p)),
-        Some(ty) if ty.nominal().is_some() => {
-            let n = ty.nominal().unwrap();
+    if let Some(prim) = leaf.as_ref().and_then(crate::monoty::MonoTy::prim_name) {
+        return Ok(Ustr::from(prim));
+    }
+    match leaf.as_ref().map(|ty| (ty, ty.nominal())) {
+        Some((_, Some(n))) => {
             if !map_is_value_struct(ws, n) {
                 Err(format!("`native_buffer_alloc<{n}>` is invalid: `{n}` is not a `value` struct."))
             } else if value_struct_is_gc(ws, n) {
@@ -2058,7 +2306,7 @@ fn native_buffer_alloc_elem_ctype_spec(
                 Ok(n)
             }
         }
-        Some(_) => Err(
+        Some((_, None)) => Err(
             "`native_buffer_alloc<T>` requires a primitive or FFI-clean value-struct element"
                 .to_string(),
         ),
@@ -2121,7 +2369,7 @@ pub fn generic_coroutine_column_reject(
             }
             let Some(bindings) = inf.call_generic_bindings.get(c) else { continue };
             let Some((key, _)) =
-                compute_spec_from_bindings(ws, inf, fref, bindings, &SpecSubst::new())?
+                compute_spec_from_bindings(ws, inf, fref, bindings, &SpecSubst::default(), false)?
             else {
                 continue;
             };
@@ -2221,7 +2469,7 @@ pub fn native_buffer_alloc_reject(ws: &Workspace, mid: ModuleId) -> Option<(Stri
             let resolves = if !owner_inlined {
                 false
             } else {
-                let spec = match compute_call_spec(ws, inf, c, fref, &SpecSubst::new(), LUA) {
+                let spec = match compute_call_spec(ws, inf, c, fref, &SpecSubst::default(), LUA, false) {
                     Ok(spec) => spec,
                     // This pass reads the same instantiation lowering does, so a
                     // compiler-state rejection is its answer too rather than
@@ -2249,7 +2497,7 @@ pub fn native_buffer_alloc_reject(ws: &Workspace, mid: ModuleId) -> Option<(Stri
                     // which lowering swallows -- reject it loudly here).
                     None => spec.is_some_and(|(key, _)| {
                         key.iter().all(|l| match l {
-                            Some(ReifiedType::Prim(_)) => true,
+                            Some(ty) if ty.prim_name().is_some() => true,
                             Some(ty) => !ty.any_nominal(&|name| nominal_is_gc_value(ws, name)),
                             None => false,
                         })
@@ -2852,35 +3100,10 @@ mod tests;
 /// Support for `crate::spec_census` -- the Stage-0d reconciliation needs the
 /// RESULT of `compute_call_spec` without `lower::shape` becoming public.
 pub(crate) mod shape_census_support {
-    use super::shape::{compute_call_spec, ReifiedCtor, ReifiedType, SpecKey, SpecSubst};
+    use super::shape::{compute_call_spec, SpecKey, SpecSubst};
     use crate::mir::FuncRef;
     use bone_semantic::hir::FnBackend;
     use bone_semantic::inference::{BodyInference, Workspace};
-
-    /// Canonical rendering, byte-identical to `MonoArena::render` for the types
-    /// both trees can express. The reconciliation compares these strings.
-    pub(crate) fn render_reified(ty: &ReifiedType) -> String {
-        match ty {
-            ReifiedType::Prim(p) => (*p).to_string(),
-            ReifiedType::Nullable(inner) => format!("{}?", render_reified(inner)),
-            ReifiedType::Tuple(parts) => {
-                let ps: Vec<String> = parts.iter().map(render_reified).collect();
-                format!("({})", ps.join(", "))
-            }
-            ReifiedType::App { ctor, params } => {
-                let base = match ctor {
-                    ReifiedCtor::Array => "Vec".to_string(),
-                    ReifiedCtor::Map => "Map".to_string(),
-                    ReifiedCtor::Nominal(n) => n.to_string(),
-                };
-                if params.is_empty() {
-                    return base;
-                }
-                let ps: Vec<String> = params.iter().map(render_reified).collect();
-                format!("{base}<{}>", ps.join(", "))
-            }
-        }
-    }
 
     /// Every call in this body that today's machinery specializes, plus the
     /// count of sites whose spec decision REJECTED (the Stage-0b invariants).
@@ -2890,14 +3113,14 @@ pub(crate) mod shape_census_support {
         target: FnBackend,
     ) -> (Vec<(FuncRef, SpecKey)>, usize) {
         // caller is supplied by the census; this returns callee-side data only
-        let empty = SpecSubst::new();
+        let empty = SpecSubst::default();
         let mut out = Vec::new();
         let mut rejected = 0usize;
         let mut calls: Vec<_> = inf.resolved_overload_calls.iter().collect();
         calls.sort_by_key(|(e, _)| **e);
         for (e, (m, f)) in calls {
             let func = FuncRef { module: *m, func: *f };
-            match compute_call_spec(ws, inf, *e, func, &empty, target) {
+            match compute_call_spec(ws, inf, *e, func, &empty, target, false) {
                 Ok(Some((key, _))) => out.push((func, key)),
                 Ok(None) => {}
                 Err(_) => rejected += 1,

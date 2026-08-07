@@ -8,17 +8,33 @@ impl Builder<'_> {
         // from here down came from `e` unless a nested `lower_expr` narrows it,
         // and the restore puts the enclosing expression back on the way out.
         let outer = self.cur_span.replace(self.body.expr_spans[e]);
+        // The site's EXPRESSION half, tracked exactly beside the span half. A
+        // nested `lower_expr` narrows it and the restore puts the enclosing
+        // expression back, so a call always carries the innermost expression
+        // that produced it -- which is the key `ConcreteBody` is built on.
+        let outer_expr = self.cur_expr.replace(e);
         let v = self.lower_expr_inner(e);
         self.cur_span = outer;
+        self.cur_expr = outer_expr;
         let v = v?;
         // Implicit iterable->iterator coercion at a bounded call arg: bone
         // recorded the resolved `iter` fn; wrap the arg value in that call
         // (the call-arg analog of `lower_for_user_iter`'s `iter_fn`).
-        if let Some(&(m, f)) = self.inf.and_then(|i| i.implicit_iter_args.get(&e)) {
-            return Ok(self.emit_cur(Inst::Call {
-                func: FuncRef { module: m, func: f },
-                args: vec![v],
-            }));
+        if let Some(w) = self.inf.and_then(|i| i.implicit_iter_args.get(&e)) {
+            let (m, f) = w.func;
+            // This coercion belongs to `e`, but the cursor was already restored
+            // to the ENCLOSING expression above -- so set both halves of the
+            // site explicitly rather than inheriting a cursor that names the
+            // wrong expression.
+            let outer_expr = self.cur_expr.replace(e);
+            let call = self.with_site_op(crate::site::SiteOp::ImplicitIter, |b| {
+                b.emit_cur(Inst::Call {
+                    func: FuncRef { module: m, func: f },
+                    args: vec![v],
+                })
+            });
+            self.cur_expr = outer_expr;
+            return Ok(call);
         }
         Ok(v)
     }
@@ -48,7 +64,9 @@ impl Builder<'_> {
             // A nested fn used as a value: reference the hoisted top-level fn by
             // name (a plain global read -- zero closure alloc).
             Expr::Var(b) if self.nested_fn_globals.contains_key(&raw(b)) => {
-                Ok(self.emit_cur(Inst::Global(self.nested_fn_globals[&raw(b)].hoisted)))
+                let hoisted = self.nested_fn_globals[&raw(b)].hoisted;
+                self.f.hoisted_fn_globals.push(hoisted);
+                Ok(self.emit_cur(Inst::Global(hoisted)))
             }
             // A whole-tuple use of a name bound to slot cells: rebuild and pack.
             // Packing a `nobox` element here is exactly how a whole-tuple escape
@@ -76,11 +94,22 @@ impl Builder<'_> {
                 if self.scx.target != bone_semantic::hir::FnBackend::Js
                     && self.ws.functions_by_name.contains_key(&name) =>
             {
-                if let Ok(fref) = self.resolve_funcref(e, name) {
+                let fref = self.resolve_funcref(e, name).ok();
+                if let Some(fref) = fref {
                     self.reject_fn_value_abi_mismatch(e, fref)?;
                 }
                 let sym = self.fn_value_symbol(e, name)?;
-                Ok(self.emit_cur(Inst::Global(Ustr::from(sym.as_str()))))
+                let id = self.with_site_op(crate::site::SiteOp::FnValue, |b| {
+                    b.emit_cur(Inst::Global(Ustr::from(sym.as_str())))
+                });
+                // The one place a callee DECLARATION becomes a spelled value.
+                // Recorded here rather than recovered downstream from the name:
+                // `Inst::Global` is also a module global and a `static` cell,
+                // and a name comparison could not tell them apart.
+                if let Some(fref) = fref {
+                    self.f.fn_value_symbols.insert(id, fref);
+                }
+                Ok(id)
             }
             // A global holding a value struct routes through the repr layer so a
             // whole-value read copies the box (a global is a mutable place).
@@ -211,7 +240,7 @@ impl Builder<'_> {
                 // while the storage still has no element slot to name.
                 if self.value_struct_of(e).is_some()
                     || self.nullable_place_value_of(e).is_some()
-                    || self.vec_column_elem_of(base).is_some()
+                    || self.vec_column_elem_of(base)?.is_some()
                 {
                     let r = self.lower_expr_repr(e)?;
                     return Ok(self.pack(r));
@@ -432,7 +461,7 @@ impl Builder<'_> {
 
             // `as` is identity at runtime EXCEPT `float as int`, which floors
             // (Lua numbers are all doubles) — mirrors rock-codegen.
-            Expr::As { value, target } => {
+            Expr::As { value, target, .. } => {
                 let v = self.lower_expr(value)?;
                 let to_int = matches!(self.resolve_ty(target), Some(TypeExpr::Builtin(BuiltinTy::Int)));
                 let from_float =
@@ -675,33 +704,40 @@ impl Builder<'_> {
                     value: v,
                 });
             }
-            Expr::Index { base, index } => {
-                let (b, kind) = self.lower_index_base(base)?;
-                let i = self.lower_expr(index)?;
+            // `target` IS the `Expr::Index` node, and that is the expression
+            // the graph walk keys this arm's synthesized obligations on
+            // (`INDEX_TRIGGERED`). The place expression is never lowered as a
+            // value, so nothing else installs it: in statement position the
+            // cursor is absent entirely and in value position it names the
+            // enclosing assignment.
+            Expr::Index { base, index } => self.with_site_expr(target, |s| {
+                let (b, kind) = s.lower_index_base(base)?;
+                let i = s.lower_expr(index)?;
                 // Column storage has no element slot: the write goes leaf-wise
                 // into K columns, so the value is consumed as a repr and never
                 // boxed. Mirrors `column_element_repr` on the read side.
                 if let ContainerKind::VecValueColumns(elem) = kind {
-                    return self.column_element_store(b, i, value, elem);
+                    return s.column_element_store(b, i, value, elem);
                 }
                 // A column-stored Map has no slot at the key either: the write
                 // goes through the spine to a slot, then leaf-wise into `data`.
-                if let Some(elem) = self.map_column_value_of(base) {
-                    return self.map_column_store(b, i, value, elem);
+                if let Some(elem) = s.map_column_value_of(base)? {
+                    return s.map_column_store(b, i, value, elem);
                 }
                 if let ContainerKind::NativeBufferValue(elem) = kind {
-                    if self.is_leaf_addressed(elem) {
-                        return self.nb_leaf_element_store(b, i, value, elem);
+                    if s.is_leaf_addressed(elem) {
+                        return s.nb_leaf_element_store(b, i, value, elem);
                     }
                 }
-                let v = self.lower_expr(value)?;
-                self.emit_cur(Inst::StoreIndex {
+                let v = s.lower_expr(value)?;
+                s.emit_cur(Inst::StoreIndex {
                     base: b,
                     index: i,
                     value: v,
                     kind,
                 });
-            }
+                Ok(())
+            })?,
             Expr::Global(_) if self.nobox_global_place(target).is_some() => {
                 let (leaves, shape) =
                     self.nobox_global_place(target).expect("guard matched");
@@ -977,7 +1013,7 @@ impl Builder<'_> {
             if let Some(abi) = fn_scalar_abi(self.ws, self.scx, func) {
                 // Scalar-ABI callee: splat the value receiver + value args into
                 // leaves (a value return packs to the single safe-nav result).
-                return self.scalar_ufcs_call_repr(func, recv, &arg_idxs, &abi)
+                return self.scalar_ufcs_call_repr(e, func, recv, &arg_idxs, &abi)
             } else {
                 let mut argv = vec![recv];
                 for a in arg_idxs {
@@ -994,6 +1030,7 @@ impl Builder<'_> {
                             || spec_key_has_target_storage(self.ws, k, self.scx.target)
                     })
                     .map(|(k, _)| k);
+                let callee_inst = self.callee_instance_for(e, func)?;
                 // A tuple-returning method splats N values, and they are handed on
                 // UNPACKED: the per-slot join stores them slot-wise, so packing
                 // here would box a `nobox` element the wire just kept unboxed.
@@ -1003,13 +1040,13 @@ impl Builder<'_> {
                 let ret_ty = self.ws.module(func.module).functions[func.func].return_ty;
                 match ret_ty.and_then(|t| tuple_ret_shape(self.ws, self.spec_subst, t)) {
                     Some(shape) => {
-                        return Ok(self.emit_tuple_call_tree(func, argv, &shape, None, key));
+                        return Ok(self.emit_tuple_call_tree(
+                            func, argv, &shape, None, key, callee_inst,
+                        ));
                     }
                     None => {
                         let call = self.emit_cur(Inst::Call { func, args: argv });
-                        if let Some(k) = key {
-                            self.f.spec_bindings.insert(call, k);
-                        }
+                        self.record_call(call, func, None, key, callee_inst);
                         call
                     }
                 }
@@ -1388,13 +1425,13 @@ impl Builder<'_> {
             // Column storage: transpose the literal's elements into one array
             // per leaf. Each element lowers as a repr, so no element box is
             // built even for a literal with entries.
-            if let Some(elem) = self.vec_column_elem_of(lit) {
+            if let Some(elem) = self.vec_column_elem_of(lit)? {
                 return self.column_vec_literal(&idxs, elem);
             }
             let vs: Vec<Idx<Inst>> = idxs.iter().map(|&e| self.lower_expr(e)).collect::<Result<_, _>>()?;
             return Ok(self.emit_cur(Inst::MakeVec(vs)));
         }
-        if let Some(elem) = self.vec_column_elem_of(lit) {
+        if let Some(elem) = self.vec_column_elem_of(lit)? {
             let capacity = self.emit_cur(Inst::Const(Lit::Int(0)));
             let arr = self.empty_column_vec(elem, capacity)?;
             for &e in &idxs {
@@ -1488,7 +1525,7 @@ impl Builder<'_> {
         src: Idx<Inst>,
         dest: SpreadDest,
     ) -> Result<(), CompilerError> {
-        let src_kind = self.coll_kind(src_expr);
+        let src_kind = self.coll_kind(src_expr)?;
         let n = self.emit_cur(Inst::Len { base: src, kind: src_kind });
         let i_cell = self.f.new_cell(None);
         let zero = self.emit_cur(Inst::Const(Lit::Int(0)));

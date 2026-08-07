@@ -2,54 +2,21 @@
 //! return shapes, spread operands, and the `TyId` -> `TypeExpr` resolution that
 //! specialization substitutes through.
 use super::*;
+use crate::monoty::MonoTy;
 
 impl Builder<'_> {
-    /// Whether `e`'s static type is an enum ALL of whose variants are unit (no
-    /// payload). Those variants lower to interned singleton globals — reference-
-    /// equal across uses — so `==`/`!=` is native Lua `==`/`~=`, not the dynamic
-    /// `__op_eq` (type()/pairs()) walk (static-over-dynamic; trace-friendly).
-    pub(crate) fn is_payloadless_enum(&self, e: Idx<Expr>) -> bool {
-        let Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) = self.expr_ty(e) else {
-            return false;
-        };
-        let Some(eid) = self.ws.enums_by_name.get(&name) else {
-            return false;
-        };
-        let ed = &self.ws.modules[eid.module.index()].enums[eid.def];
-        ed.variants.iter().all(|v| matches!(v.payload, bone_semantic::hir::VariantPayload::Unit))
-    }
-
     pub(crate) fn is_null_lit(&self, e: Idx<Expr>) -> bool {
-        matches!(self.body.expr_arena[e], Expr::Null)
+        self.dispatch().is_null_lit(e)
     }
 
     /// Whether `e`'s type is `T?` (a `Nullable`, chasing `Infer` but NOT peeling
     /// the `Nullable` like `expr_ty` does). Drives the `if let` nil-guard.
     pub(crate) fn expr_is_nullable(&self, e: Idx<Expr>) -> bool {
-        self.inf
-            .and_then(|i| i.expr_types.get(e).copied())
-            .map(|ty| self.is_nullable_ty(ty))
-            .unwrap_or(false)
+        self.dispatch().expr_is_nullable(e)
     }
 
     pub(crate) fn is_nullable_ty(&self, ty: TyId) -> bool {
-        // A generic bound to `E?` is nullable, and `ty_node` cannot say so: it
-        // substitutes the PAYLOAD (a `Nullable` node needs an arena index).
-        // Read the raw node first, before that substitution erases the `?`.
-        if let Some(TypeExpr::Generic(var, _)) = self.raw_ty_node(ty) {
-            if let Some(b) = self.spec_subst.get(&var) {
-                return b.peel_nullable().1;
-            }
-        }
-        match self.ty_node(ty) {
-            Some(TypeExpr::Nullable(_)) => true,
-            Some(TypeExpr::Infer(var, _)) => self
-                .inf
-                .and_then(|i| i.substitutions.get(var))
-                .map(|s| self.is_nullable_ty(s))
-                .unwrap_or(false),
-            _ => false,
-        }
+        self.dispatch().is_nullable_ty(ty)
     }
 
     /// The declared field names of a call-site spread operand `..op`, in struct
@@ -200,8 +167,7 @@ impl Builder<'_> {
     /// The resolved type of an expression (chasing `Infer` vars + peeling
     /// `Nullable`), or `None` when inference is absent/unsolved.
     pub(crate) fn expr_ty(&self, e: Idx<Expr>) -> Option<TypeExpr> {
-        let ty = *self.inf?.expr_types.get(e)?;
-        self.resolve_ty(ty)
+        self.dispatch().expr_ty(e)
     }
 
     /// `Some` iff `e`'s inferred type is a (non-nullable) tuple. Used to route a
@@ -291,12 +257,12 @@ impl Builder<'_> {
     /// signature-side walker sees.
     pub(crate) fn tyid_tuple_ret_shape(&self, ty: TyId) -> Option<TupleRetShape> {
         // A generic bound to a TUPLE is the one binding `ty_node` cannot answer
-        // (see `reified_type_node`), so it is read off the substitution here --
+        // (see `mono_type_node`), so it is read off the substitution here --
         // the same source `body_ret_slot` reads. Without it a specialized body's
         // indirect call sees a bare `Generic` and declines to splat, while the
         // fn value it calls splats from its own concrete type.
-        if let Some(ReifiedType::Tuple(parts)) = self.bound_generic_subst(ty) {
-            return Some(reified_tuple_shape(self.ws, parts));
+        if let Some(MonoTy::Tuple(parts)) = self.bound_generic_subst(ty) {
+            return Some(mono_tuple_shape(self.ws, parts));
         }
         let ty = self.resolve_tyid(ty)?;
         let TypeExpr::Tuple { elements } = self.ty_node(ty)? else { return None };
@@ -393,7 +359,7 @@ impl Builder<'_> {
     /// Resolving `ty` for the rest of a caller instead is wrong: it erases a
     /// `Nullable` binding's `?` on the way through `ty_node`, which silently
     /// re-planned every nullable-column body to a non-nullable shape.
-    pub(crate) fn bound_generic_subst(&self, ty: TyId) -> Option<&ReifiedType> {
+    pub(crate) fn bound_generic_subst(&self, ty: TyId) -> Option<&MonoTy> {
         let var = match self.raw_ty_node(ty) {
             Some(TypeExpr::Generic(var, _)) => var,
             Some(TypeExpr::Infer(..)) => match self.resolve_tyid(ty).and_then(|t| self.raw_ty_node(t)) {
@@ -407,9 +373,9 @@ impl Builder<'_> {
 
     pub(crate) fn body_ret_slot(&self, ty: TyId) -> RetSlot {
         // A generic bound to a TUPLE is the one binding `ty_node` cannot answer
-        // (see `reified_type_node`), so it is read off the substitution directly.
-        if let Some(bound @ ReifiedType::Tuple(_)) = self.bound_generic_subst(ty) {
-            return reified_ret_slot(self.ws, bound);
+        // (see `mono_type_node`), so it is read off the substitution directly.
+        if let Some(bound @ MonoTy::Tuple(_)) = self.bound_generic_subst(ty) {
+            return mono_ret_slot(self.ws, bound);
         }
         if let Some(shape) = self.body_nobox_shape(ty) {
             return RetSlot::Leaves(shape);
@@ -498,58 +464,25 @@ impl Builder<'_> {
     }
 
     pub(crate) fn resolve_ty(&self, ty: TyId) -> Option<TypeExpr> {
-        let te = self.ty_node(ty)?;
-        match te {
-            TypeExpr::Infer(var, _) => {
-                let solved = self.inf?.substitutions.get(var)?;
-                self.resolve_ty(solved)
-            }
-            TypeExpr::Nullable(inner) => self.resolve_ty(ty.with_idx(inner)),
-            other => Some(other),
-        }
+        self.dispatch().resolve_ty(ty)
     }
 
     /// The stored type node, WITHOUT the specialization substitution -- the only
     /// place a generic's own identity is still visible, which is what
     /// [`Self::is_nullable_ty`] needs (the substitution answers with the payload).
     pub(crate) fn raw_ty_node(&self, ty: TyId) -> Option<TypeExpr> {
-        Some(match ty {
-            TyId::Static(mid, idx) => self.ws.module(mid).ty_arena[idx],
-            TyId::Local(idx) => self.inf?.ty_arena[idx],
-        })
+        self.dispatch().raw_ty_node(ty)
     }
 
     pub(crate) fn ty_node(&self, ty: TyId) -> Option<TypeExpr> {
-        let node = self.raw_ty_node(ty)?;
-        // In a specialized instantiation, a generic param resolves to its concrete
-        // leaf so all downstream type-driven lowering (field projection, container
-        // element, scalar shape) sees the real type. Synthesized leaves carry no
-        // App params -- v0 specializes leaf types only -- so no consumer indexes
-        // into `new_empty()`.
-        if let TypeExpr::Generic(var, _) = node {
-            // A tuple binding has no node to stand for it, and answers `None`.
-            // Falling through to the generic is exactly what this saw before
-            // tuples reified at all, so no consumer changes behaviour; the ones
-            // that need a tuple's slots read the binding through
-            // `reified_ret_slot` instead.
-            if let Some(sub) = self.spec_subst.get(&var).and_then(reified_type_node) {
-                return Some(sub);
-            }
-        }
-        Some(node)
+        self.dispatch().ty_node(ty)
     }
 
     /// The final `TyId` after chasing `Infer` substitutions (NOT peeling
     /// `Nullable` -- unlike `resolve_ty`, this keeps the `TyId` so its App params
     /// can be indexed in the correct arena via `with_idx`).
     pub(crate) fn resolve_tyid(&self, ty: TyId) -> Option<TyId> {
-        match self.ty_node(ty)? {
-            TypeExpr::Infer(var, _) => {
-                let solved = self.inf?.substitutions.get(var)?;
-                self.resolve_tyid(solved)
-            }
-            _ => Some(ty),
-        }
+        self.dispatch().resolve_tyid(ty)
     }
 
     /// The `EnumFlatShape` of `Y` when `e`'s type is `Coroutine<Y, ..>` and `Y` is

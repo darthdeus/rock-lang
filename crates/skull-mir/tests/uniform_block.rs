@@ -436,3 +436,72 @@ fn bloom_blurs_leaf_stores_carry_the_std140_gap() {
         LeafStore { offset: 12, view: WireView::Float },
     ]);
 }
+
+// -- The GLES 3.0 block-size budget.
+//
+// A block bigger than the mobile guarantee cannot be caught downstream. The
+// GLSL profile is chosen by the RUNTIME GL context, not by `rock compile`, so
+// one Rock program has to fit the tightest target it can land on; and
+// `rock shader-validate`'s 300es leg links against THIS machine's driver, which
+// reports GL_MAX_UNIFORM_BLOCK_SIZE 65536 -- four times the guarantee. A block
+// between the two numbers therefore links on every gate here and fails only on
+// a physical device.
+//
+// 16384 is the ES 3.0 guaranteed minimum for MAX_UNIFORM_BLOCK_SIZE (table
+// 6.31), and it is a limit the block may REACH: both sides of the boundary are
+// asserted below, because a check with only the rejecting side cannot show it
+// admits anything.
+
+/// `n` Mat4 fields, 64 std140 bytes each -- the densest shape a block can hold,
+/// so the boundary is reachable without a 4096-field fixture.
+fn mat4_block_src(n: usize) -> String {
+    let fields: Vec<String> = (0..n).map(|i| format!("m{i}: Mat4")).collect();
+    format!("value BigU {{ {} }}", fields.join(", "))
+}
+
+#[test]
+fn a_block_at_the_gles_limit_is_accepted() {
+    let p = plan_of(&mat4_block_src(256), "BigU");
+    assert_eq!(p.size, 16384, "256 * 64 -- exactly the ES 3.0 guarantee");
+}
+
+#[test]
+fn a_block_over_the_gles_limit_is_rejected() {
+    let ws = ws_of(&mat4_block_src(257));
+    let e = uniform_block(&ws, Ustr::from("BigU"))
+        .expect_err("16448 bytes exceeds the ES 3.0 guarantee of 16384 and must reject");
+    let m = e.message.clone();
+    assert!(
+        m.contains("16448") && m.contains("16384"),
+        "the rejection must state both the size and the budget it broke, got: {m}"
+    );
+}
+
+/// **A sampler field in a uniform group names the fix.**
+///
+/// A sampler cannot live in a uniform buffer on any API, and the mistake is a
+/// plausible one: the author wrote the texture beside the scalars. The generic
+/// "no std140 form here" answer is true and unhelpful, so the ONE classifier
+/// carries the hint rather than a caller's own walk.
+#[test]
+fn a_sampler_in_a_uniform_group_names_the_fix() {
+    let ws = ws_of("value BadU { tint: Vec4, tex: Sampler2D }\nfn main() {}");
+    let msg = skull_mir::gpu_layout::uniform_group_members(&ws, ustr::Ustr::from("BadU"))
+        .err()
+        .expect("a sampler field must reject")
+        .message;
+    assert!(
+        msg.contains("sampler") && msg.contains("fn param"),
+        "the rejection does not name the fix: {msg}"
+    );
+
+    // CONTROL: the same group without the sampler classifies, so the message
+    // above is about the field and not about the group being unreadable.
+    let ok = ws_of("value GoodU { tint: Vec4 }\nfn main() {}");
+    assert_eq!(
+        skull_mir::gpu_layout::uniform_group_members(&ok, ustr::Ustr::from("GoodU"))
+            .expect("a scalar group classifies")
+            .len(),
+        1
+    );
+}

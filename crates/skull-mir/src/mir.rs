@@ -702,6 +702,19 @@ pub struct MirFunc {
     /// snapshot; a surviving (un-spliced) entry is a hard site-aware rejection
     /// (its args are splatted, so the shared generic body cannot serve it).
     pub spec_bindings: bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::lower::SpecKey>,
+    /// Per call inst: the CONCRETE INSTANCE it targets -- the callee declaration
+    /// plus the substitution its own instantiation resolves to, in the same
+    /// `MonoSubst` vocabulary the instance graph records per instance.
+    ///
+    /// Separate from [`Self::spec_bindings`], and deliberately so: that map is
+    /// the DELIVERY record (which calls the lowerer chose to serve with a
+    /// specialized snapshot) and is therefore a policy artifact. This is
+    /// IDENTITY, recorded for every complete instantiation regardless of what
+    /// the policy decided, so a call that keeps the shared body still states
+    /// which instance it means. Reading the delivery record as identity is what
+    /// made a declined specialization indistinguishable from an unknown callee.
+    pub callee_instances:
+        bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::site::OwnerInstance>,
     /// Placeholder [`Inst::CallBoundMulti`]s whose element the LOWERING already
     /// split into leaf cells: `dests` is sized to the real return arity and the
     /// loop pattern is bound to the leaves, so the splice must leave both alone.
@@ -723,6 +736,42 @@ pub struct MirFunc {
     /// those. Keys are remapped on splice, like [`Self::spec_bindings`];
     /// transform-synthesized instructions simply have no entry.
     pub inst_spans: bone_semantic::prelude::ArenaMap<Idx<Inst>, bone_semantic::prelude::Span>,
+    /// **Which callee obligation of the source body each call instruction is**
+    /// (plan S 9, Stage 3). The join key between a lowered call and the callee
+    /// `skull::concrete_body::ConcreteBody` already resolved for that site, so
+    /// instance-driven emission can consume the graph's answer instead of
+    /// resolving one again.
+    ///
+    /// A span cannot serve as this key and never could: a `for` head's `iter`
+    /// and `next` live at one expression and share one span, so the OPERATION
+    /// is part of the identity (`crate::site::SiteOp`).
+    ///
+    /// Stamped at the single choke point [`crate::lower::Builder::emit_cur`]
+    /// for every call form, so a missing entry means the call was emitted
+    /// outside any expression rather than that a recording site was forgotten.
+    /// Keys are remapped on splice, like [`Self::spec_bindings`].
+    pub call_sites: bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::site::CallSite>,
+    /// Instructions that MINT a workspace function's emitted SYMBOL as a value
+    /// (`let f = adder`, an `adder` argument, a `func: adder` field), and which
+    /// function each names.
+    ///
+    /// Recorded because an [`Inst::Global`] is not self-describing: the same
+    /// form reads a module global, a `static` cell and a hoisted nested fn, and
+    /// only this one carries a callee declaration. An indirect call through a
+    /// value spells nothing, so the only way a wrong function can be NAMED is
+    /// through one of these -- which makes it the population that has to join,
+    /// rather than the `CallValue` that consumes it.
+    pub fn_value_symbols: bone_semantic::prelude::FxHashMap<Idx<Inst>, FuncRef>,
+    /// The emitted names of nested fns THIS body hoists to top level. Their
+    /// symbols are the owning instance's own output rather than a callee
+    /// declaration's, which is what separates them from
+    /// [`Self::fn_value_symbols`].
+    pub hoisted_fn_globals: Vec<Ustr>,
+    /// The owner instances [`Self::call_sites`] refers to, interned. Index 0 is
+    /// this body's own owner when it has one; inlining appends the spliced
+    /// callee's owner and remaps its entries, so a body holds one entry per
+    /// distinct instance whose calls it now contains.
+    pub site_owners: Vec<crate::site::OwnerInstance>,
 }
 
 impl MirFunc {
@@ -746,6 +795,11 @@ impl MirFunc {
             bound_next_split: Default::default(),
             nested_fns: Vec::new(),
             inst_spans: Default::default(),
+            call_sites: Default::default(),
+            callee_instances: Default::default(),
+            fn_value_symbols: Default::default(),
+            hoisted_fn_globals: Vec::new(),
+            site_owners: Vec::new(),
         }
     }
 
