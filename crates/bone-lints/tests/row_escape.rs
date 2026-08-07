@@ -5,7 +5,7 @@
 //! `semantic_pass`. `Arena`/`Entity`/`Scene` are declared locally with the same
 //! shapes `stdlib/unified.rock` gives them; the lint never looks at the stdlib.
 
-use bone_lints::{filter_suppressed, row_escapes, EscapeKind, LintFinding, RowEscape};
+use bone_lints::{filter_suppressed, row_escapes, EscapeClass, EscapeKind, LintFinding, RowEscape};
 use bone_semantic::prelude::*;
 use rock_core::errors::CompilerErrorLevel;
 
@@ -123,11 +123,35 @@ fn static_local_store_is_flagged() {
 // --- return, capture, erasure --------------------------------------------
 
 #[test]
-fn returning_a_row_is_flagged() {
-    assert_eq!(
-        kinds("fn leak(e: Entity<Mob>) -> Mob? {\n    return e.get()\n}"),
-        vec![EscapeKind::Return]
+fn returning_a_row_is_propagation_not_a_hazard() {
+    // `mag`'s `wall_at`, stone's `Sound.data`/`Font.data`: an accessor handing a
+    // row to its caller. A `return` runs nothing, so it cannot invalidate the
+    // slot -- what crosses it is the reference, never the validity window. It is
+    // reported only because it is where an INTRAPROCEDURAL check stops.
+    let fs = findings("fn accessor(e: Entity<Mob>) -> Mob? {\n    return e.get()\n}");
+    assert_eq!(fs.len(), 1, "{fs:?}");
+    assert_eq!(fs[0].kind, EscapeKind::Return);
+    assert_eq!(fs[0].kind.class(), EscapeClass::Propagation);
+    assert!(
+        fs[0].to_diagnostic().message.contains("caller"),
+        "the diagnostic must point at the callers, not accuse the accessor: {}",
+        fs[0].to_diagnostic().message
     );
+}
+
+#[test]
+fn escape_classes_partition_the_kinds() {
+    use EscapeKind::*;
+    // A row outliving an invalidation point unconditionally.
+    for k in [StoreGlobal, StoreStatic, StoreField, StoreCollection, AcrossYield] {
+        assert_eq!(k.class(), EscapeClass::Hazard, "{k:?}");
+    }
+    // A hazard only if the consumer RETAINS -- which no retain summary proves
+    // today, so these are reported without claiming a defect.
+    for k in [ClosureCapture, FfiArg, AnyErasure] {
+        assert_eq!(k.class(), EscapeClass::Unprovable, "{k:?}");
+    }
+    assert_eq!(Return.class(), EscapeClass::Propagation);
 }
 
 #[test]

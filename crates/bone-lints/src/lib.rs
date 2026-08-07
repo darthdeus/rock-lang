@@ -1365,7 +1365,44 @@ pub enum EscapeKind {
     FfiArg,
 }
 
+/// How much a kind actually claims. A row's validity runs from the `get()`
+/// until something invalidates the slot -- `remove`, `clear`, Scene unload --
+/// so what matters is whether the row is HELD across such a point, not which
+/// direction the reference travelled.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum EscapeClass {
+    /// The row outlives an invalidation point unconditionally. A defect.
+    Hazard,
+    /// A hazard only if the consumer RETAINS the row. Nothing here computes a
+    /// retain summary, so these are reported without the claim: a lambda
+    /// consumed synchronously by `any(..)` and one stashed in a Scene closer
+    /// are the same shape to this lint.
+    Unprovable,
+    /// Not a hazard. The row moved somewhere still governed by the program's
+    /// own rules -- the escape question simply moves with it. Reported because
+    /// it is where an intraprocedural check STOPS, which is what bounds the
+    /// census, not because the code is wrong.
+    Propagation,
+}
+
 impl EscapeKind {
+    pub fn class(self) -> EscapeClass {
+        match self {
+            EscapeKind::StoreGlobal
+            | EscapeKind::StoreStatic
+            | EscapeKind::StoreField
+            | EscapeKind::StoreCollection
+            | EscapeKind::AcrossYield => EscapeClass::Hazard,
+            EscapeKind::ClosureCapture | EscapeKind::FfiArg | EscapeKind::AnyErasure => {
+                EscapeClass::Unprovable
+            }
+            // A `return` runs nothing, so it cannot invalidate the slot: what
+            // crosses it is the reference, never the validity window. The
+            // accessor shape (`wall_at`, `Sound.data`) is CORRECT code.
+            EscapeKind::Return => EscapeClass::Propagation,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             EscapeKind::StoreGlobal => "store_global",
@@ -1400,16 +1437,24 @@ impl LintFinding for RowEscape {
         self.span.line_range.0
     }
     fn to_diagnostic(&self) -> CompilerError {
-        CompilerError::new_with_label(
-            self.span,
-            format!(
-                "row of `{}` escapes here ({}) -- an Arena row is valid only until \
-                 its Scene unloads; hold the `Entity` and re-`get()` instead",
-                self.row_type,
-                self.kind.as_str()
+        let (ty, kind) = (&self.row_type, self.kind.as_str());
+        let msg = match self.kind.class() {
+            EscapeClass::Hazard => format!(
+                "row of `{ty}` is held past an invalidation point here ({kind}) -- \
+                 the slot can be removed or the Scene unloaded before the next read; \
+                 hold the `Entity` and re-`get()` instead"
             ),
-        )
-        .with_level(CompilerErrorLevel::Advice)
+            EscapeClass::Unprovable => format!(
+                "row of `{ty}` leaves the checked region here ({kind}) -- safe only if \
+                 the consumer does not retain it, which nothing here proves"
+            ),
+            EscapeClass::Propagation => format!(
+                "row of `{ty}` is returned here -- not a defect: a `return` invalidates \
+                 nothing. The row becomes the CALLER's to account for, and this check \
+                 does not cross the boundary, so audit the callers"
+            ),
+        };
+        CompilerError::new_with_label(self.span, msg).with_level(CompilerErrorLevel::Advice)
     }
 }
 
