@@ -196,7 +196,7 @@ impl CommandContext {
 
         log::error!(target: "FRAME", "usage: rock frame [GAME_DIR] [OUTPUT_DIR]");
         log::error!(target: "FRAME", "example: rock frame bitgun tmp");
-        std::process::exit(1);
+        crate::ablation_report::exit_with_census(1);
     }
 
     pub fn get_path_or_current(&self) -> Result<String> {
@@ -673,7 +673,7 @@ impl CommandContext {
                 Ok(_) => Ok(()),
                 Err(e) => {
                     log::error!(target: "FMT", "{}", e);
-                    std::process::exit(1);
+                    crate::ablation_report::exit_with_census(1);
                 }
             };
         }

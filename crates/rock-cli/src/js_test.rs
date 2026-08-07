@@ -105,6 +105,7 @@ pub fn js_test(paths: &[String]) -> Result<()> {
     let ablation_fatals = crate::ablation_report::report("rock test --backend js");
 
     if summary.tests_failed > 0 || summary.unit_failures > 0 || ablation_fatals {
+        // Plain exit: the census above already drained the registry.
         std::process::exit(1);
     }
     Ok(())
@@ -456,10 +457,10 @@ pub fn js_run(path: &str) -> Result<()> {
     let program = build_run_program(&emitted);
     match rock_host::js_runner::run_node_code_streaming(&program) {
         Ok(0) => Ok(()),
-        Ok(code) => std::process::exit(code),
+        Ok(code) => crate::ablation_report::exit_with_census(code),
         Err(e) => {
             log::error!(target: "JS", "node run failed: {}", e.message);
-            std::process::exit(1);
+            crate::ablation_report::exit_with_census(1);
         }
     }
 }
@@ -471,14 +472,14 @@ fn emit_js_program_single(path: &str) -> skull_codegen_js::emit::JsProgram {
         Ok(s) => s,
         Err(e) => {
             log::error!(target: "JS", "cannot read {}: {}", path, e);
-            std::process::exit(1);
+            crate::ablation_report::exit_with_census(1);
         }
     };
     let user = match skull_parser::parse_module(&src, ustr::Ustr::from(path)) {
         Ok(u) => u,
         Err(e) => {
             eprintln!("{}", crate::skull_backend::render_file_errs(path, &src, &[e]));
-            std::process::exit(1);
+            crate::ablation_report::exit_with_census(1);
         }
     };
     let user_file = user.file;
@@ -486,7 +487,7 @@ fn emit_js_program_single(path: &str) -> skull_codegen_js::emit::JsProgram {
         Ok(ws) => ws,
         Err(errs) => {
             eprintln!("{}", crate::skull_backend::render_file_errs(path, &src, &errs));
-            std::process::exit(1);
+            crate::ablation_report::exit_with_census(1);
         }
     };
     let user_mid = crate::bone_backend::entry_module_id(&ws, user_file);
@@ -495,7 +496,7 @@ fn emit_js_program_single(path: &str) -> skull_codegen_js::emit::JsProgram {
         Ok(p) => p,
         Err(e) => {
             eprintln!("{}", crate::skull_backend::render_file_errs(path, &src, &[e]));
-            std::process::exit(1);
+            crate::ablation_report::exit_with_census(1);
         }
     }
 }
@@ -514,7 +515,7 @@ pub(crate) fn emit_js_program_project(
         Ok(emitted) => emitted,
         Err(e) => {
             eprintln!("{e}");
-            std::process::exit(1);
+            crate::ablation_report::exit_with_census(1);
         }
     }
 }

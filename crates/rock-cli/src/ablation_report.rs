@@ -11,6 +11,21 @@
 
 use skull_mir::ablation::{self, FatalCategory};
 
+/// Exit the process, printing the census first.
+///
+/// `std::process::exit` runs no destructors and returns to no caller, so the
+/// drain in `main` never happens on a path that calls it -- and the paths that
+/// do are exactly the ones a build under the mode dies on. That is not a
+/// cosmetic loss: the mode's contract is that it COLLECTS, so a census is
+/// evidence about the whole run, and a project whose build died reported
+/// NOTHING while a project that happened to compile reported a full taxonomy.
+/// The `Iterator`-bounded surface is entirely in the first group, which is why
+/// its category read zero everywhere.
+pub fn exit_with_census(code: i32) -> ! {
+    report("whole run");
+    std::process::exit(code)
+}
+
 /// Print the census. Returns `true` when at least one fatal was recorded, which
 /// the caller turns into a non-zero exit.
 ///

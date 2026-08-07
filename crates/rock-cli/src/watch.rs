@@ -77,7 +77,7 @@ pub(crate) fn reexec_current_binary() -> Result<()> {
     #[cfg(not(unix))]
     {
         std::process::Command::new(exe).args(args).spawn()?;
-        std::process::exit(0);
+        crate::ablation_report::exit_with_census(0);
     }
 }
 

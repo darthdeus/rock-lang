@@ -76,10 +76,10 @@ kill -KILL -{} 2>/dev/null  # Kill process group
                         "failed to spawn macOS orphan-prevention monitor (parent {parent_pid}, child {child_pid}): {e}"
                     );
                 }
-                std::process::exit(0);
+                crate::ablation_report::exit_with_census(0);
             } else {
                 // First child exits immediately
-                std::process::exit(0);
+                crate::ablation_report::exit_with_census(0);
             }
         } else if pid > 0 {
             // Parent waits for first child to exit
