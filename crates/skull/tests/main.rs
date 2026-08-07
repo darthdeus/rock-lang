@@ -159,6 +159,8 @@ mod value_push_generic_boundary;
 mod value_scalarize;
 #[path = "value_test_discovery.rs"]
 mod value_test_discovery;
+#[path = "valid_type_identity.rs"]
+mod valid_type_identity;
 #[path = "vec_value_columns.rs"]
 mod vec_value_columns;
 #[path = "vertex_plan.rs"]

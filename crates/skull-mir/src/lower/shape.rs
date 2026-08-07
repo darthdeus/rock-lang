@@ -1547,9 +1547,11 @@ pub type SpecSubst = crate::monoty::MonoSubst;
 /// before tuples reified at all; the consumers that need a tuple's slots read
 /// the binding directly through [`mono_ret_slot`].
 ///
-/// The constructors [`reify_type`] declines to admit answer `None` on the same
-/// terms, and for the same reason: they reach a SpecKey slot through no route
-/// today, and inventing a node for one would be a guess.
+/// `any`, unit, `never` and a function type answer `None` on the same terms.
+/// They are perfectly good [`SpecKey`] slots -- identity names them -- but the
+/// arena has no node to spell them with here, and inventing one would be a
+/// guess. The caller falls back to the unsubstituted generic, which is what a
+/// consumer reading a CONSTRUCTOR or a NOMINAL wants anyway.
 pub(crate) fn mono_type_node(ty: &MonoTy) -> Option<TypeExpr> {
     Some(match ty {
         MonoTy::Nullable(inner) => return mono_type_node(inner),
@@ -1607,66 +1609,31 @@ pub(crate) fn mono_tuple_shape(ws: &Workspace, parts: &[MonoTy]) -> TupleRetShap
     TupleRetShape { slots, nullable: false }
 }
 
-/// The concrete binding for `ty` under `enclosing`, or `None` when the
-/// CONDITIONAL specialization mechanism does not admit one.
+/// The concrete binding for `ty` under `enclosing`, or `None` when no concrete
+/// type exists here at all.
 ///
-/// The type tree is total ([`MonoTy`]); the admission is not, and that is the
-/// whole of what `None` means here. `any`, unit, `never` and function types are
-/// valid logical types this declines to key on, so their generics ride a shared
-/// body rather than a specialized copy -- the conditional-specialization policy
-/// plan S 2a measures and Stage 4 deletes outright, once the instance graph
-/// makes every instantiation concrete. Deciding it HERE, in one place, is what
-/// keeps it from living inside the type tree as a representational hole.
+/// ONE oracle answers this and the identity question alike
+/// ([`crate::monoty::convert`]), which is the whole content of plan S 2a/S 2b.
+/// It used to be a second, narrower walk whose `_ => None` arm declined valid
+/// `any`, unit, `never` and function types -- and `None` is not a type, it is the
+/// ABSENCE of one, shared by every binding that landed in it. So three
+/// instantiations at `unit`, `any` and `fn(int) -> int` mangled to one symbol
+/// and one emitted body served three representations. `MonoTy` has a
+/// constructor for each of the four, so there was never anything to represent;
+/// the hole was the admission.
 ///
-/// A genuine compiler state (an unresolvable `TyId`, an unbound generic) is also
-/// `None`; [`ablation_partial_key_decline`] is the discriminant that tells the
-/// two apart, because they call for opposite repairs.
+/// `None` now means exactly what [`crate::monoty::MonoTyReason`] means: a
+/// generic absent from `enclosing` (this is a shared generic body), an
+/// unresolved inference var, recovery poison, or a missing node. Those are
+/// compiler states, not language surface, and [`ablation_partial_key_decline`]
+/// reads the reason rather than re-deriving the predicate.
 pub(crate) fn reify_type(
     ws: &Workspace,
     inf: &BodyInference,
     ty: TyId,
     enclosing: &SpecSubst,
 ) -> Option<MonoTy> {
-    let ty = resolve_tyid(ws, inf, ty)?;
-    match ty_node(ws, inf, ty)? {
-        TypeExpr::Builtin(BuiltinTy::Int) => Some(MonoTy::Int),
-        TypeExpr::Builtin(BuiltinTy::Float) => Some(MonoTy::Float),
-        TypeExpr::Builtin(BuiltinTy::Bool) => Some(MonoTy::Bool),
-        // A string leaf is opaque to every shape decision, but it still has to
-        // REIFY: a tuple reifies only when all its parts do, so leaving this out
-        // made `(T, string)` unreifiable and the substitution then had no entry
-        // for the generic bound to it -- which is the one thing `ty_node` cannot
-        // answer. It cannot widen specialization on its own (`any_value` gates
-        // that on a value-struct leaf, which a prim is not).
-        TypeExpr::Builtin(BuiltinTy::String) => Some(MonoTy::String),
-        TypeExpr::Generic(var, _) => enclosing.get(&var).cloned(),
-        TypeExpr::Tuple { elements } => {
-            let parts = elements
-                .into_iter()
-                .map(|el| reify_type(ws, inf, ty.with_idx(el), enclosing))
-                .collect::<Option<Vec<_>>>()?;
-            Some(MonoTy::Tuple(parts))
-        }
-        TypeExpr::Nullable(inner) => Some(MonoTy::Nullable(Box::new(reify_type(
-            ws,
-            inf,
-            ty.with_idx(inner),
-            enclosing,
-        )?))),
-        TypeExpr::App { ctor, params } => {
-            let ctor = match ctor {
-                TypeCtor::Array => MonoCtor::Array,
-                TypeCtor::Map => MonoCtor::Map,
-                TypeCtor::Nominal(name) => MonoCtor::Nominal(name),
-            };
-            let params = params
-                .into_iter()
-                .map(|param| reify_type(ws, inf, ty.with_idx(param), enclosing))
-                .collect::<Option<Vec<_>>>()?;
-            Some(MonoTy::App { ctor, params })
-        }
-        _ => None,
-    }
+    crate::monoty::convert(ws, inf, ty, enclosing).ok()
 }
 
 /// The specialization decision for a call `e` (in a body with inference `inf`) to
@@ -1712,14 +1679,10 @@ pub fn callee_instance_subst(
 
 /// The concrete instance a set of generic bindings resolves to.
 ///
-/// IDENTITY, not delivery, and that is why it converts through
-/// [`crate::monoty::convert`] -- the one TOTAL logical-type oracle, and the same
-/// one `skull::instance_graph::instantiate` uses -- rather than through
-/// [`reify_type`], whose `_ => None` arm silently declines a function type.
-/// Six bitgun calls had a graph instance and no recorded claim because of it:
-/// `unwrap<fn()>`, `tick`/`start` over a coroutine payload, and `clear` over a
-/// `Map` of them. Two converters for one question is what let the record and
-/// the graph disagree while both looked complete.
+/// Converts through [`crate::monoty::convert`] -- the one TOTAL logical-type
+/// oracle, which `skull::instance_graph::instantiate` and the delivery-side
+/// [`reify_type`] also read. Two converters for one question is what lets a
+/// record and the graph disagree while both look complete.
 ///
 /// The two UNCONSTRAINED reasons are legitimate `None`s, and they are exactly
 /// the pair `instance_graph::convert_fail` calls `Fail::Unconstrained`:
@@ -1933,18 +1896,18 @@ pub(crate) fn ablation_decline(
 }
 
 /// Why a binding list cannot produce a COMPLETE [`SpecKey`] -- or `None` when
-/// every slot reifies and the key names exactly one instantiation.
+/// every slot converts and the key names exactly one instantiation.
 ///
-/// A slot `reify_type` answers `None` for is not one thing. Its admission is
-/// PARTIAL (plan S 2a): it declines valid `any`, unit, never and function
-/// types, and it also answers `None` for genuine compiler states. Reporting both
-/// as "the graph is missing a record" sends Stage 2 to add a record for a call
-/// whose record already exists, and hides that the defect is the KEY.
+/// There is no "valid type the key cannot name" arm, and its absence is
+/// structural rather than an omission: the key is built from
+/// [`crate::monoty::convert`] (see [`reify_type`]), so a binding that converts
+/// IS in the key. Plan S 2a's category emptied when the two walks became one --
+/// while they were separate, this function's discriminant was the disagreement
+/// between them, and there is none to read now.
 ///
-/// [`crate::monoty::convert`] is total, so it is the discriminant: a binding it
-/// CAN convert is a valid type the current identity mechanism has no name for
-/// (plan S 2b, "valid type absent from the key -> TOTAL `MonoTy`; never a
-/// fallback"), and one it cannot carries its own reason.
+/// So every remaining reason is a compiler state, and the split is which repair
+/// it calls for: an unbound generic says the CALLER is a shared generic body
+/// (Stage 3 work), and everything else is an invariant failure.
 pub(crate) fn ablation_partial_key_decline(
     ws: &Workspace,
     inf: &BodyInference,
@@ -1952,22 +1915,14 @@ pub(crate) fn ablation_partial_key_decline(
     enclosing: &SpecSubst,
 ) -> Option<(crate::ablation::FatalCategory, String)> {
     use crate::ablation::FatalCategory as C;
-    use crate::monoty::{MonoSubst, MonoTyReason};
-    let b = *bindings.iter().find(|b| reify_type(ws, inf, **b, enclosing).is_none())?;
-    let subst: MonoSubst = enclosing.iter().map(|(v, t)| (*v, t.clone())).collect();
-    Some(match crate::monoty::convert(ws, inf, b, &subst) {
-        Ok(ty) => (
-            C::UnsupportedSurface,
-            format!(
-                "a binding of `{}` is a VALID type that specialization does not admit \
-                 (plan S 2a), so its key slot is `None`: the call would ride a PARTIAL key \
-                 naming a family of instantiations rather than one",
-                ty.render()
-            ),
-        ),
+    use crate::monoty::MonoTyReason;
+    let reason = bindings
+        .iter()
+        .find_map(|b| crate::monoty::convert(ws, inf, *b, enclosing).err())?;
+    Some(match reason {
         // The enclosing instance never named this generic, so the caller itself
         // is a shared generic body -- a graph gap, not a key gap.
-        Err(MonoTyReason::UnboundGeneric(name)) => (
+        MonoTyReason::UnboundGeneric(name) => (
             C::MissingGraphEdge,
             format!(
                 "the binding names generic `{name}`, absent from the enclosing \
@@ -1975,10 +1930,10 @@ pub(crate) fn ablation_partial_key_decline(
                  no instantiation exists to key on"
             ),
         ),
-        Err(r) => (
+        r => (
             C::CompilerInvariant,
             format!(
-                "a generic binding is neither reifiable nor convertible ({}): inference \
+                "a generic binding does not convert to a logical type ({}): inference \
                  state, not a language surface",
                 r.bucket()
             ),

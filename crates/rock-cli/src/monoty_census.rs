@@ -56,19 +56,14 @@ pub fn do_monoty_census(root: Option<&str>) -> Result<()> {
     // MonoTys" is a whole-world count rather than a sum of per-project counts.
     let mut union = MonoArena::new();
     let mut union_ids = std::collections::HashSet::new();
-    // Distinct types (by canonical identity) containing an unadmitted ctor.
-    let mut union_gap_ids: std::collections::HashSet<String> = Default::default();
     let mut union_converted = 0usize;
-    // Occurrences whose logical type a SpecKey slot cannot be keyed on.
-    let mut union_gap_occurrences = 0usize;
     let mut union_failures: BTreeMap<&'static str, (usize, Vec<String>)> = BTreeMap::new();
 
     for dir in &projects {
         let name = rel(&root, dir);
-        match census_project(dir, &mut union, &mut union_ids, &mut union_gap_ids) {
-            Ok((stats, converted, failures, gap)) => {
+        match census_project(dir, &mut union, &mut union_ids) {
+            Ok((stats, converted, failures)) => {
                 union_converted += converted;
-                union_gap_occurrences += gap;
                 for (bucket, (n, ex)) in failures {
                     let e = union_failures.entry(bucket).or_default();
                     e.0 += n;
@@ -101,24 +96,6 @@ pub fn do_monoty_census(root: Option<&str>) -> Result<()> {
     println!(
         "| **union** | **{union_converted}** | **{}** | **{union_fail_total}** |",
         union_ids.len()
-    );
-    println!();
-
-    // The Stage-1 cost/benefit line: how much of the corpus is a type today's
-    // partial tree cannot name, and therefore silently folds onto a shared key.
-    println!("## what totality costs");
-    println!();
-    println!(
-        "- occurrences whose type contains a constructor specialization declines \
-         (`any`, unit, `never`, `fn`): **{union_gap_occurrences}** of {union_converted} \
-         ({:.2}%)",
-        100.0 * union_gap_occurrences as f64 / union_converted.max(1) as f64
-    );
-    println!(
-        "- DISTINCT logical types that contain one: **{}** of {} ({:.1}%)",
-        union_gap_ids.len(),
-        union_ids.len(),
-        100.0 * union_gap_ids.len() as f64 / union_ids.len().max(1) as f64
     );
     println!();
 
@@ -157,32 +134,12 @@ fn rel(root: &Path, p: &Path) -> String {
     p.strip_prefix(root).unwrap_or(p).display().to_string()
 }
 
-/// Does this logical type contain a constructor a `SpecKey` cannot be keyed on?
-///
-/// `reify_type` admits int/float/bool/string, tuple, nullable and application,
-/// and answers `None` for `any`, unit, never and function types -- and that
-/// `None` becomes a `SpecKey` slot rather than a rejection, so every type below
-/// is one that currently collapses distinct instantiations onto one identity.
-/// This count is the direct measurement of what totality buys.
-fn outside_reified_type(ty: &skull_mir::monoty::MonoTy) -> bool {
-    use skull_mir::monoty::MonoTy::*;
-    match ty {
-        Any | Unit | Never | Function { .. } => true,
-        Int | Float | Bool | String => false,
-        Nullable(inner) => outside_reified_type(inner),
-        Tuple(parts) => parts.iter().any(outside_reified_type),
-        App { params, .. } => params.iter().any(outside_reified_type),
-    }
-}
-
-type ProjectResult =
-    (ProjectStats, usize, BTreeMap<&'static str, (usize, Vec<String>)>, usize);
+type ProjectResult = (ProjectStats, usize, BTreeMap<&'static str, (usize, Vec<String>)>);
 
 fn census_project(
     dir: &PathBuf,
     union: &mut MonoArena,
     union_ids: &mut std::collections::HashSet<String>,
-    union_gap_ids: &mut std::collections::HashSet<String>,
 ) -> Result<ProjectResult> {
     let spec = crate::common::path_to_source_spec(&dir.display().to_string());
     let sources = crate::unified_compile::discover_sources(&spec)?;
@@ -194,7 +151,6 @@ fn census_project(
     let mut stats = ProjectStats::default();
     let mut seen_here = std::collections::HashSet::new();
     let mut converted = 0usize;
-    let mut gap = 0usize;
     let mut failures: BTreeMap<&'static str, (usize, Vec<String>)> = BTreeMap::new();
 
     // Module order is `ws.modules`, which assembly fixes deterministically.
@@ -208,13 +164,7 @@ fn census_project(
                 match union.convert(&ws, inf, *ty, &subst) {
                     Ok(id) => {
                         converted += 1;
-                        if outside_reified_type(union.get(id)) {
-                            gap += 1;
-                        }
                         let r = union.canonical(id);
-                        if outside_reified_type(union.get(id)) {
-                            union_gap_ids.insert(r.clone());
-                        }
                         seen_here.insert(r.clone());
                         union_ids.insert(r);
                     }
@@ -230,13 +180,7 @@ fn census_project(
                 match union.convert(&ws, inf, *ty, &subst) {
                     Ok(id) => {
                         converted += 1;
-                        if outside_reified_type(union.get(id)) {
-                            gap += 1;
-                        }
                         let r = union.canonical(id);
-                        if outside_reified_type(union.get(id)) {
-                            union_gap_ids.insert(r.clone());
-                        }
                         seen_here.insert(r.clone());
                         union_ids.insert(r);
                     }
@@ -254,7 +198,7 @@ fn census_project(
     stats.converted = converted;
     stats.unique = seen_here.len();
     stats.failures = failures.clone();
-    Ok((stats, converted, failures, gap))
+    Ok((stats, converted, failures))
 }
 
 /// Enough examples to see a PATTERN in a bucket; one can be an accident.

@@ -3,14 +3,14 @@
 //!
 //! `MirFunc::callee_instances` is the call's CLAIM about which concrete
 //! instance it targets, and `skull::site_join` compares it against the graph's
-//! own substitution. The two must be derived by ONE oracle: for a while they
-//! were not -- the graph converted through `skull_mir::monoty::convert` while
-//! lowering converted through `reify_type`, whose `_ => None` arm declines a
-//! function type. A call to `unwrap<fn()>` then had a graph instance and no
-//! recorded claim, which the census reported as `callee-no-instance`.
+//! own substitution. Both derive it from ONE oracle,
+//! `skull_mir::monoty::convert`. A second, narrower converter is the failure
+//! this guards: one that declines a function type gives `unwrap<fn()>` a graph
+//! instance and no recorded claim, which the census reports as
+//! `callee-no-instance`.
 //!
-//! Every fixture below pairs a shape the weaker converter DECLINED with a shape
-//! it accepted, and asserts the two stay DISTINCT identities -- a converter
+//! Every fixture below pairs a shape a narrower converter would DECLINE with one
+//! it would accept, and asserts the two stay DISTINCT identities -- a converter
 //! that answered `any` for everything would satisfy "it converted" and lose the
 //! property the identity exists for.
 
@@ -75,8 +75,8 @@ fn unjoined(c: &SiteJoinCensus, cause: Unjoined) -> usize {
 /// Every `callee-no-instance == 0` below is measured over the bodies that were
 /// actually LOWERED. A rejection in the identity oracle skips the body as
 /// `lower-failed`, which empties the population and leaves the zero true and
-/// meaningless -- measured: reverting the oracle to `reify_type` killed only the
-/// fixture that asserts on it directly until this guard existed.
+/// meaningless -- measured: narrowing the oracle killed only the fixture that
+/// asserts on it directly until this guard existed.
 fn assert_population(c: &SiteJoinCensus) {
     assert!(c.accounts(), "accounting identity broken: {c:?}");
     let failed = c
@@ -91,8 +91,8 @@ fn assert_population(c: &SiteJoinCensus) {
 /// A generic instantiated at a FUNCTION type records its instance, and the four
 /// neighbouring shapes stay distinct from it and from each other.
 ///
-/// `fn() -> unit` is the shape `reify_type` declined. The other four are the
-/// admission control: a converter that lost structure would collapse
+/// `fn() -> unit` is the shape a narrower converter declines. The other four are
+/// the admission control: a converter that lost structure would collapse
 /// `(int, int)` and `[int]` and `int?` onto one identity while still reporting
 /// "converted".
 #[test]

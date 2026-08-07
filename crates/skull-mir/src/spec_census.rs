@@ -11,10 +11,10 @@
 //! unambiguous, so the two sides are comparable and no pretty-printing
 //! ambiguity can match two different types to each other.
 //!
-//! A `None` slot is the partial key's erasure: `reify_type` declined to admit
-//! that generic (a valid `any`, unit, never or function type). It is treated as
-//! a WILDCARD when reconciling -- the shadow side is total, so it always has a
-//! concrete type where this side has a hole.
+//! A `None` slot means the key names no instantiation for that generic, which
+//! now happens only inside a SHARED generic body (the enclosing substitution
+//! does not bind it). It is treated as a WILDCARD when reconciling -- the shadow
+//! side is total, so it always has a concrete type where this side has a hole.
 
 use bone_semantic::hir::{BodyOwner, FnBackend};
 use bone_semantic::inference::Workspace;

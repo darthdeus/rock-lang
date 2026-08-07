@@ -3,16 +3,16 @@
 //! substitutions specialized lowering reads, the symbols the emitters mangle,
 //! and the instance graph.
 //!
-//! It replaced a second, PARTIAL tree that answered `None` for valid `any`,
-//! unit, never and function types and let that `None` become a key slot rather
-//! than a rejection -- so `f<Vec2, unit>`, `f<Vec2, any>` and
-//! `f<Vec2, fn(int)->int>` shared one identity, and `string` had to be added
-//! one observed symptom at a time.
-//!
-//! Admission to a `SpecKey` is still conditional, and that policy now lives
-//! ALONE in [`reify_type`](crate::lower::shape::reify_type) where it can be
-//! read, rather than inside the type tree where it was invisible. Stage 4
-//! deletes it with the rest of the conditional-specialization mechanism.
+//! There is ONE of these walks, and that is the point: a second, narrower one
+//! is free to answer `None` for a type it does not admit, and `None` is not a
+//! type -- it is the absence of one, which every binding that lands in it
+//! shares. `f<Vec2, unit>`, `f<Vec2, any>` and `f<Vec2, fn(int)->int>` are three
+//! instantiations, and a partial walk gives them one identity and one emitted
+//! body. So `SpecKey` slots are built from this conversion too
+//! ([`reify_type`](crate::lower::shape::reify_type)): WHETHER a call
+//! specializes is conditional (the `@inline`/`@pure` opt-in, the storage
+//! trigger), WHICH instantiation it names is not. Stage 4 deletes the rest of
+//! the policy.
 //!
 //! Three properties, in the order they matter:
 //!

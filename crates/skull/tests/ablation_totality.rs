@@ -251,56 +251,59 @@ fn main() {
     );
 }
 
-/// A generic call whose binding is a valid type specialization does not admit
-/// (`unit`, a function type, `any`) must produce a classified fatal.
+/// A generic call whose binding is `unit`, `any` or a function type is NOT a
+/// fatal: those are valid logical types with a `MonoTy` constructor apiece, so
+/// the key names them and each call has its own instantiation (plan S 2a/S 2b).
 ///
-/// It does not today: `compute_spec_from_bindings` pushes `None` into the key
-/// for such a slot and the ablation arm returns that PARTIAL key as a successful
-/// specialization, so `call_spec` never reaches the decline classifier -- and an
-/// all-`None` key maps straight back to the shared body (`spec_fn_name`). Plan
-/// S 2a's `f<Vec2, unit>` / `f<Vec2, any>` / `f<Vec2, fn(int)->int` collision,
-/// realized INSIDE the mode whose whole job is to reject shared generic bodies.
+/// This test used to assert the opposite, and that is what it was for. While the
+/// key was built by a second, narrower walk than the identity oracle, such a slot
+/// was `None` -- and `None` is the absence of a type, shared by every binding
+/// that landed in it, so `f<Vec2, unit>`, `f<Vec2, any>` and
+/// `f<Vec2, fn(int)->int>` all mangled to one symbol. Both walks are now
+/// [`skull_mir::monoty::convert`], so the category has no population by
+/// construction rather than by policy.
+///
+/// The `stream` call is the ADMISSION CONTROL, and it is what makes `ident`'s
+/// zero mean something: it is a generic `co fn`, still the one unsupported
+/// surface, so the mode is demonstrably live over this very program. Without it
+/// a zero here would be indistinguishable from a fixture the ablation never saw.
+/// The emitted-identity half -- that the three calls name three different bodies
+/// -- is `valid_type_identity.rs`; this asserts only that they stopped being
+/// reported as unrepresentable.
 #[test]
-fn an_unadmitted_binding_is_a_classified_fatal() {
+fn an_unadmitted_binding_is_no_longer_a_fatal() {
     let _g = ModeGuard::on();
     let fatals = fatals_of(
         r#"
 fn ident<T>(x: T) -> T { return x }
 fn nothing() {}
 fn twice(n: int) -> int { return n * 2 }
+co fn stream<T>(v: T) { yield }
 fn main() {
     let u = ident(nothing())
     let a: any = 1
     let b = ident(a)
     let f: fn(int) -> int = twice
     let g = ident(f)
+    let c = stream(1)
 }
 "#,
     );
-    let hit: Vec<&ablation::Fatal> = fatals.iter().filter(|f| f.callee == "ident").collect();
+    let control: Vec<&ablation::Fatal> = fatals
+        .iter()
+        .filter(|f| f.callee == "stream" && f.category == FatalCategory::UnsupportedSurface)
+        .collect();
     assert!(
-        !hit.is_empty(),
-        "a generic call at unit / any / a function type produced NO fatal -- it rode a \
-         partial key to the shared body; got {:?}",
+        !control.is_empty(),
+        "the control did not fire, so this fixture proves nothing about `ident`: a \
+         generic `co fn` must still be an unsupported surface; got {:?}",
         fatals.iter().map(|f| (f.category, &f.callee)).collect::<Vec<_>>()
     );
-    let sites: std::collections::BTreeSet<(ustr::Ustr, (usize, usize))> =
-        hit.iter().map(|f| (f.span.file, f.span.offset_range)).collect();
-    assert_eq!(sites.len(), 3, "expected one fatal SITE per unrepresentable binding; got {hit:?}");
-    for f in &hit {
-        assert_eq!(
-            f.category,
-            FatalCategory::UnsupportedSurface,
-            "a VALID type specialization does not admit is a surface gap, not a missing \
-             record: the graph edge exists and bone recorded the binding"
-        );
-    }
-    let rendered: std::collections::BTreeSet<&str> =
-        hit.iter().map(|f| f.detail.as_str()).collect();
-    assert_eq!(
-        rendered.len(),
-        3,
-        "the three bindings must be DISTINGUISHED by the detail -- a shared detail would \
-         mean the classifier is not reading the type; got {rendered:?}"
+    let hit: Vec<&ablation::Fatal> = fatals.iter().filter(|f| f.callee == "ident").collect();
+    assert!(
+        hit.is_empty(),
+        "`unit`, `any` and `fn(int) -> int` are valid types the key now names, so a call \
+         bound to one must record no fatal; got {:?}",
+        hit.iter().map(|f| (f.category, f.detail.as_str())).collect::<Vec<_>>()
     );
 }
