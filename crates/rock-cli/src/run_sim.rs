@@ -1641,6 +1641,12 @@ fn run_worker(
         // Layered before `preset_env` so an explicit
         // `@sim_env("STONE_ASSET_STUB", "0")` still wins.
         .env("STONE_ASSET_STUB", asset_stub_value(parts))
+        // Audio is stubbed for EVERY entry, not just non-rendering ones: a
+        // rendered snapshot wants pixels and no sound, so `entry_renders` says
+        // nothing about it. The handful of sims that assert on voices, bus
+        // pulls or sound reload set `@sim_env("STONE_AUDIO_STUB", "0")`, which
+        // wins because `preset_env` is layered after this.
+        .env("STONE_AUDIO_STUB", "1")
         .envs(preset_env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         // Renders every `wall_clock_ms(..)` value as a fixed token, but ONLY
         // for a run whose records get compared: two runs of the same sim cannot
