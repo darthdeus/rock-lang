@@ -1180,6 +1180,23 @@ fn entry_renders(env: &[(String, String)]) -> bool {
         .is_some_and(|(_, v)| v == "0")
 }
 
+/// `STONE_ASSET_STUB` for a child running `parts`: headers-only assets unless
+/// something in the process renders.
+///
+/// ANY rendering entry opts the WHOLE process in to real pixels. The parts of a
+/// comma-separated chain share one process and therefore one image cache, so a
+/// per-entry answer is not available to give -- the first entry's uploads are
+/// still resident when the second runs. Deciding it per process, off the same
+/// `entry_renders` the isolation split uses, is what keeps a sim from counting
+/// as non-rendering here and rendering there.
+fn asset_stub_value(parts: &[WorkerPart]) -> &'static str {
+    if parts.iter().any(|p| entry_renders(&p.env)) {
+        "0"
+    } else {
+        "1"
+    }
+}
+
 /// Why an entry cannot join a shared worker process. The reason is REPORTED --
 /// a silently isolated entry would read as a worker result.
 fn worker_ineligibility(
@@ -1616,6 +1633,14 @@ fn run_worker(
         // `@sim_env("ROCK_TEST_SEED", ...)` in a sim still overrides
         // because `preset_env` is layered after this baseline.
         .env("ROCK_TEST_SEED", "42")
+        // Headers-only assets unless something in this process renders. Decided
+        // by `entry_renders`, the same oracle the isolation split uses, so a sim
+        // cannot count as non-rendering here and rendering there. ANY rendering
+        // entry in a chain opts the whole process in: one process, one image
+        // cache, and the first entry's loads are still resident for the second.
+        // Layered before `preset_env` so an explicit
+        // `@sim_env("STONE_ASSET_STUB", "0")` still wins.
+        .env("STONE_ASSET_STUB", asset_stub_value(parts))
         .envs(preset_env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         // Renders every `wall_clock_ms(..)` value as a fixed token, but ONLY
         // for a run whose records get compared: two runs of the same sim cannot
@@ -3395,6 +3420,37 @@ mod tests {
     fn pick(names: &[&str]) -> Result<Vec<String>> {
         let selected: Vec<String> = names.iter().map(|s| s.to_string()).collect();
         select_gate_corpus(&corpus(), &selected)
+    }
+
+    /// Assets are stubbed per PROCESS, not per entry: a chain shares one image
+    /// cache, so one rendering part means the whole child needs real pixels.
+    #[test]
+    fn asset_stub_is_off_when_any_part_renders() {
+        let part = |renders: bool| WorkerPart {
+            name: "s".to_string(),
+            out_dir: PathBuf::new(),
+            frame_budget: 0,
+            env: vec![("SIM_SKIP_RENDER".to_string(), if renders { "0" } else { "1" }.to_string())],
+        };
+        assert_eq!(asset_stub_value(&[]), "1", "nothing renders, nothing to load");
+        assert_eq!(asset_stub_value(&[part(false)]), "1", "a non-rendering entry stubs");
+        assert_eq!(asset_stub_value(&[part(true)]), "0", "a rendering entry needs pixels");
+        assert_eq!(
+            asset_stub_value(&[part(false), part(true)]),
+            "0",
+            "one rendering part in a chain opts the whole shared process in"
+        );
+        // A sim that declares nothing does not render, so the default is stub.
+        assert_eq!(
+            asset_stub_value(&[WorkerPart {
+                name: "s".to_string(),
+                out_dir: PathBuf::new(),
+                frame_budget: 0,
+                env: vec![],
+            }]),
+            "1",
+            "declaring nothing takes the stubbed default"
+        );
     }
 
     /// The hybrid split reads the EFFECTIVE value, last-wins. `@sim_render` is
