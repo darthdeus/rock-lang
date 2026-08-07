@@ -1161,7 +1161,7 @@ fn boot_signature(env_pairs: &[(String, String)]) -> Vec<(String, String)> {
 }
 
 /// How `rock sim` maps entries to processes.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SimExecMode {
     /// One fresh process per entry: the permanent reference oracle, and what
     /// `--isolated` selects. Never inferred -- it is always the caller's word.
@@ -1219,9 +1219,9 @@ fn entry_renders(env: &[(String, String)]) -> bool {
 /// ANY rendering entry opts the WHOLE process in to real pixels. The parts of a
 /// comma-separated chain share one process and therefore one image cache, so a
 /// per-entry answer is not available to give -- the first entry's uploads are
-/// still resident when the second runs. Deciding it per process, off the same
-/// `entry_renders` the isolation split uses, is what keeps a sim from counting
-/// as non-rendering here and rendering there.
+/// still resident when the second runs. Deciding it per process, off one
+/// `entry_renders` oracle, is what keeps a sim from counting as non-rendering
+/// here and rendering there.
 fn asset_stub_value(parts: &[WorkerPart]) -> &'static str {
     if parts.iter().any(|p| entry_renders(&p.env)) {
         return "0";
@@ -1278,15 +1278,6 @@ fn worker_ineligibility(
                 "@sim_env(\"{k}\", \"{v}\") interpolates $OUT, which resolves before the process starts"
             ));
         }
-        // The hybrid default's one extra rule. ANY rendered part isolates the
-        // whole chain: a chain runs as consecutive entries of one queue, so a
-        // rendered part would render inside a worker however the other parts
-        // are classified.
-        //
-        // `--workers` deliberately does NOT apply it. That mode exists to
-        // measure rendered sims in a worker, which is what the differential and
-        // the multi-order gate are for; a rule that isolated them there would
-        // make the gate unable to see the class it was built to see.
     }
     // A chain's parts run as consecutive entries of one queue, so they must
     // agree with each other exactly as distinct entries must.
@@ -1679,8 +1670,8 @@ fn run_worker(
         // because `preset_env` is layered after this baseline.
         .env("ROCK_TEST_SEED", "42")
         // Headers-only assets unless something in this process renders. Decided
-        // by `entry_renders`, the same oracle the isolation split uses, so a sim
-        // cannot count as non-rendering here and rendering there. ANY rendering
+        // by `entry_renders`, the one oracle for the question, so a sim cannot
+        // count as non-rendering here and rendering there. ANY rendering
         // entry in a chain opts the whole process in: one process, one image
         // cache, and the first entry's loads are still resident for the second.
         // Layered before `preset_env` so an explicit
@@ -2336,9 +2327,6 @@ fn run_worker_arm(
     env_by_wire: &HashMap<String, Vec<(String, String)>>,
     ordered: &[String],
 ) -> Result<Vec<(crate::sim_record::SimRecord, bool)>> {
-    // The GATE measures rendered sims in workers on purpose: the hybrid
-    // default isolates them, and a gate that inherited that rule could never
-    // see the class it exists to watch.
     let (groups, isolated) = group_worker_specs(ordered, env_by_wire);
     let mut out: Vec<Option<(crate::sim_record::SimRecord, bool)>> = vec![None; ordered.len()];
 
@@ -3511,10 +3499,11 @@ mod tests {
         );
     }
 
-    /// The hybrid split reads the EFFECTIVE value, last-wins. `@sim_render` is
+    /// `entry_renders` reads the EFFECTIVE value, last-wins. `@sim_render` is
     /// lowered to `SIM_SKIP_RENDER=0` before an explicit `@sim_env` is appended,
     /// so a sim carrying both is whatever it says last -- and that is the value
-    /// its child actually boots with.
+    /// its child actually boots with. Nothing schedules on it now, but the
+    /// census and the capability docs classify sims by it.
     #[test]
     fn rendering_is_the_effective_last_wins_value() {
         let pair = |k: &str, v: &str| (k.to_string(), v.to_string());
@@ -3531,6 +3520,53 @@ mod tests {
             "... and the other way round"
         );
         assert!(!entry_renders(&[pair("MAG_FORCE_VFX", "1")]), "an unrelated key is not it");
+    }
+
+    /// The default DEGRADES where worker mode cannot run and an explicit
+    /// `--workers` REJECTS, which is the only difference between them. Both
+    /// arms are here because a resolver that always degraded, or always
+    /// rejected, would satisfy a test that checked one side.
+    #[test]
+    fn the_default_degrades_where_workers_rejects() {
+        let degraded = resolve_exec_mode(SimExecMode::Default, true, true)
+            .expect("the default falls back rather than failing the run");
+        assert_eq!(
+            degraded,
+            SimExecMode::Isolated,
+            "and it falls back to the ORACLE, not to some third behaviour"
+        );
+
+        let err = resolve_exec_mode(SimExecMode::Workers, true, true)
+            .expect_err("--workers was asked for on purpose and must not be downgraded");
+        assert!(
+            err.to_string().contains("--workers"),
+            "the error names the flag that was refused: {err}"
+        );
+    }
+
+    /// The control for the pair above: with no constraint in play the default
+    /// stays in worker mode. Without this, a resolver that degraded
+    /// unconditionally would pass the degrade arm and silently cost the 4.3x.
+    #[test]
+    fn the_default_stays_in_worker_mode_when_nothing_blocks_it() {
+        assert_eq!(
+            resolve_exec_mode(SimExecMode::Default, false, true).expect("no constraint"),
+            SimExecMode::Default,
+        );
+        assert_eq!(
+            resolve_exec_mode(SimExecMode::Workers, false, true).expect("no constraint"),
+            SimExecMode::Workers,
+        );
+    }
+
+    /// `--isolated` is unreachable by either path: it is already the oracle, so
+    /// there is nothing to degrade to and nothing to refuse.
+    #[test]
+    fn isolated_is_unaffected_by_the_availability_check() {
+        assert_eq!(
+            resolve_exec_mode(SimExecMode::Isolated, true, true).expect("isolated always runs"),
+            SimExecMode::Isolated,
+        );
     }
 
     /// The default admits a RENDERED entry as readily as a render-skipped one.
