@@ -582,18 +582,9 @@ fn generic_root_obligation(ws: &Workspace, r: FuncRef, f: &Function) -> Option<&
     None
 }
 
-/// Polymorphic recursion (`f<T> -> f<[T]>`) does not terminate under
-/// demand-driven instantiation (plan S 7). The cap turns divergence into a
-/// REPORT: a capped instance is a changing-instance recursion candidate.
-///
-/// It caps the STRUCTURAL DEPTH of the instantiation types, not the path length
-/// from a root. A path length is a property of how the walk arrived, so capping
-/// on it makes graph MEMBERSHIP depend on discovery order -- measured: with a
-/// path cap, `games/little-knights` produced two different manifests under
-/// forward and reversed root order, failing plan S 20g.4. Type depth is a
-/// property of the instance itself, so the same instance is capped or not
-/// regardless of how it was reached.
-pub const MAX_INSTANTIATION_DEPTH: u32 = 12;
+/// Re-exported from [`skull_mir::monoty`], which owns the decision so the graph
+/// and both emitters cannot drift. See `too_deep_to_instantiate` there.
+pub use skull_mir::monoty::MAX_INSTANTIATION_DEPTH;
 
 /// Whether an instance's substitution makes it a CONCRETE shape -- the one
 /// question every declaration-based pass has to ask before it may answer.
@@ -1304,9 +1295,14 @@ pub fn build(ws: &Workspace, roots: Vec<FuncRef>, perturb: bool) -> InstanceGrap
     }
 
     while let Some((inst, subst, depth)) = work.pop() {
-        let ty_depth =
-            inst.args.iter().map(|a| g.arena.depth(*a)).max().unwrap_or(0);
-        if ty_depth > MAX_INSTANTIATION_DEPTH {
+        // The one admissibility oracle, shared with both emitters. The graph
+        // DECLINES to expand where they reject: a capped instance is a
+        // changing-instance-recursion candidate, not yet a verdict.
+        if skull_mir::monoty::too_deep_to_instantiate(
+            inst.args.iter().map(|a| g.arena.get(*a)),
+        )
+        .is_some()
+        {
             g.depth_capped.push(inst);
             continue;
         }

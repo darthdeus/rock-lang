@@ -3246,9 +3246,37 @@ impl JsReach<'_> {
         out.extend(
             std::mem::take(&mut self.st.ginit_queue).into_iter().map(|(gname, _)| JsNode::Ginit(gname)),
         );
-        out.extend(
-            std::mem::take(&mut self.st.spec_queue).into_iter().map(|d| JsNode::Spec(d.func, d.key)),
-        );
+        // The SAME admissibility oracle the Lua walk and the instance graph
+        // read. Without it this queue drains a changing-instance recursion
+        // forever: every demand names a strictly deeper instantiation, so each
+        // node is distinct and the walk's dedup never fires. Lua rejected and JS
+        // HUNG -- a rejection added to one emitter leaves the sibling on the
+        // default, and here the default was non-termination rather than a wrong
+        // answer.
+        for d in std::mem::take(&mut self.st.spec_queue) {
+            match skull_mir::monoty::too_deep_to_instantiate(d.key.iter().flatten()) {
+                Some(at) => {
+                    let f = &self.ws.module(d.func.module).functions[d.func.func];
+                    let at = at.render();
+                    self.st.reject(
+                        &f.name.to_string(),
+                        CompilerError::new_with_label(
+                            f.name_span,
+                            format!(
+                                "polymorphic recursion: instantiating `{}` at `{at}` exceeds \
+                                 the instantiation depth limit of {}. A recursive call whose \
+                                 type arguments GROW never terminates -- each call needs a new \
+                                 body -- so it is rejected rather than expanded. Same-instance \
+                                 recursion (type arguments unchanged) is unaffected.",
+                                f.name,
+                                skull_mir::monoty::MAX_INSTANTIATION_DEPTH,
+                            ),
+                        ),
+                    );
+                }
+                None => out.push(JsNode::Spec(d.func, d.key)),
+            }
+        }
         out
     }
 

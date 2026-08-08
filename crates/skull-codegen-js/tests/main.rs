@@ -73,6 +73,8 @@ mod overlay;
 mod parse_float;
 #[path = "prelude_decl_arity.rs"]
 mod prelude_decl_arity;
+#[path = "polymorphic_recursion.rs"]
+mod polymorphic_recursion;
 #[path = "program.rs"]
 mod program;
 #[path = "put.rs"]

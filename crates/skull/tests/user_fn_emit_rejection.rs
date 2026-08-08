@@ -104,8 +104,11 @@ fn stdlib_parity_gaps_stay_lenient() {
 /// producer is fixed. So the gate is verified by MUTATION instead -- deleting
 /// the implicit-iter coercion's `spec_bindings` delivery in
 /// `skull_mir::lower::expr` reintroduces it, and emission then reports
-/// `internal: iter_arr_T_ret_VecIter_T is called at its DECLARATION` where it
-/// previously produced a running program that crashed. This test pins the arm
+/// ``iter_arr_T_ret_VecIter_T` is reached at its DECLARATION` where it
+/// previously produced a running program that crashed. The message deliberately
+/// carries no `internal:` label: an unconstrained type argument lands on the
+/// same arm and is a PROGRAM error, so naming it a compiler invariant failure
+/// would send the reader to the wrong place. This test pins the arm
 /// that must keep the rejection reachable: an ordinary generic call still emits,
 /// so the gate cannot be satisfied by refusing generics outright.
 #[test]

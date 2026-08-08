@@ -1070,12 +1070,8 @@ fn too_deep_to_instantiate(
     ws: &Workspace,
     d: &skull_mir::bound::SpecDemand,
 ) -> Option<(String, CompilerError)> {
-    let depth = d.key.iter().flatten().map(|t| t.depth()).max().unwrap_or(0);
-    if depth <= crate::instance_graph::MAX_INSTANTIATION_DEPTH {
-        return None;
-    }
+    let at = skull_mir::monoty::too_deep_to_instantiate(d.key.iter().flatten())?.render();
     let f = &ws.module(d.func.module).functions[d.func.func];
-    let at = d.key.iter().flatten().max_by_key(|t| t.depth()).map(|t| t.render()).unwrap_or_default();
     let name = skull_mir::mangle::spec_fn_name(ws, f, &d.key).unwrap_or_else(|| f.name.to_string());
     Some((name, CompilerError::new_with_label(
         f.name_span,

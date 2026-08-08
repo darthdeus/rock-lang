@@ -723,3 +723,42 @@ fn convert_at<S: std::hash::BuildHasher>(
         }
     })
 }
+
+/// Polymorphic recursion (`f<T> -> f<[T]>`) does not terminate under
+/// demand-driven instantiation (plan S 7). The cap turns divergence into a
+/// REPORT: a capped instance is a changing-instance recursion candidate.
+///
+/// It caps the STRUCTURAL DEPTH of the instantiation types, not the path length
+/// from a root. A path length is a property of how the walk arrived, so capping
+/// on it makes graph MEMBERSHIP depend on discovery order -- measured: with a
+/// path cap, `games/little-knights` produced two different manifests under
+/// forward and reversed root order, failing plan S 20g.4. Type depth is a
+/// property of the instance itself, so the same instance is capped or not
+/// regardless of how it was reached.
+///
+/// It lives HERE, in the lowest crate that owns [`MonoTy`], so the instance
+/// graph and BOTH emitters read one decision. Sharing only the constant is not
+/// enough: three call sites each aggregating depth their own way is three
+/// implementations that can drift, and the one that lacked the check entirely
+/// did not miscompile -- it HUNG.
+pub const MAX_INSTANTIATION_DEPTH: u32 = 12;
+
+/// **THE admissibility decision for an instantiation's type arguments.**
+///
+/// Returns the offending argument -- the deepest one past the cap -- or `None`
+/// when the instantiation is admissible. Callers differ only in what they DO
+/// with the answer: the instance graph declines to expand and records a
+/// changing-instance-recursion candidate, while emission REJECTS, because a call
+/// site has already spelled the specialized name and skipping the body would
+/// ship a call to a definition nothing writes.
+///
+/// Takes `&MonoTy` rather than a depth so the aggregation is here too. The graph
+/// holds `MonoTyId`s and reaches these through `MonoArena::get`; emission holds
+/// the owned trees of a `SpecKey` directly.
+pub fn too_deep_to_instantiate<'a>(
+    args: impl IntoIterator<Item = &'a MonoTy>,
+) -> Option<&'a MonoTy> {
+    args.into_iter()
+        .filter(|t| t.depth() > MAX_INSTANTIATION_DEPTH)
+        .max_by_key(|t| t.depth())
+}
