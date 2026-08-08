@@ -1386,6 +1386,40 @@ fn a_boot_shader_does_not_carry_its_uniform_values_across_the_boundary() {
     assert!(ok, "the shader uniform boundary must be green:\n{all}");
 }
 
+/// A boot-owned retained mesh's INSTANCE BUFFER is returned to boot's at the
+/// boundary.
+///
+/// `stone_mesh_set_instances` is a one-shot latch, so an entry that latches a
+/// boot mesh does not merely leave contents behind: the mesh is unlatchable for
+/// every successor after it, and the live-handle diff sees nothing because the
+/// mesh is present at its boot id.
+///
+/// `b3_mesh_active` runs first as the recipe control. It latches a mesh of its
+/// OWN -- no FFI un-latches one, so a control writing a boot mesh could not put
+/// it back -- and it asserts both the capture's denominator and the one-shot
+/// premise the restore is built on.
+#[test]
+fn a_boot_mesh_does_not_carry_its_instance_buffer_across_the_boundary() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "testbed",
+        "-j",
+        "1",
+        "b3_mesh_active",
+        "b3_mesh_seed",
+        "b3_mesh_probe",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 1,
+        "the probe must FOLLOW the seed in one process or it proves nothing: \
+         {boots} boots\n{all}"
+    );
+    assert!(ok, "the mesh instance boundary must be green:\n{all}");
+}
+
 /// Run `rock` and return `(exit_ok, stdout, stderr)` WITHOUT asserting on the
 /// exit code. The multi-order gate deliberately exits nonzero on a corpus that
 /// cannot populate every arm, and that refusal is part of what is under test.
