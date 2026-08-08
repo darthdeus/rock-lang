@@ -2143,6 +2143,28 @@ pub(crate) fn ablation_next_decline(
 /// arena-free key in its cache; this re-pairs it with the callee's generic
 /// `VarId`s to drive [`lower_emitted_body`]. An empty / all-`None` key yields an
 /// empty subst (the shared snapshot).
+/// The inverse of [`spec_subst_from_key`], and the E1 cut's premise: for a body
+/// emission actually writes, a [`SpecKey`] carries nothing the [`SpecSubst`]
+/// does not.
+///
+/// `Some` only for a TOTAL rebuild -- every declared generic present in `subst`
+/// -- so the caller cannot mistake a partial answer for a key. That is the same
+/// completeness `compute_spec_from_bindings` demands before it returns a key at
+/// all, and it is what makes the two directions a round trip rather than a pair
+/// of lossy projections.
+///
+/// The declaration supplies the ORDER, which is the only thing a substitution
+/// lacks: a key is positional over `f.generics` and a subst is keyed by `VarId`.
+pub fn spec_key_from_subst(ws: &Workspace, fref: FuncRef, subst: &SpecSubst) -> Option<SpecKey> {
+    let f = &ws.module(fref.module).functions[fref.func];
+    let mut key = SpecKey::with_capacity(f.generics.len());
+    for g in f.generics.iter() {
+        let Some(TypeExpr::Generic(var, _)) = static_ty(ws, *g) else { return None };
+        key.push(Some(subst.get(&var)?.clone()));
+    }
+    Some(key)
+}
+
 pub fn spec_subst_from_key(ws: &Workspace, fref: FuncRef, key: &SpecKey) -> SpecSubst {
     let f = &ws.module(fref.module).functions[fref.func];
     let mut subst = SpecSubst::default();

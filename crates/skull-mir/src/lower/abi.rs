@@ -37,12 +37,18 @@ use crate::mir::FuncRef;
 /// populations are the emitted bodies, and each has its own ABI: `ident<T>` is
 /// one boxed slot on the declaration and two float leaves at `T = Vec2`.
 ///
-/// This is deliberately NOT [`crate::monoty::MonoSubst`]-keyed identity. A
-/// logical instance already carries concrete generic arguments, and a call the
-/// specialization policy DECLINED still records one, so enumerating instances
-/// would not rename today's population -- it would emit every declined body as
-/// well. Cut C+D step E1 is where identity becomes `Instance` and both variants
-/// go.
+/// This is not yet [`crate::monoty::MonoSubst`]-keyed identity, and cut C+D
+/// step E1 is where it becomes `Instance` and both variants go.
+///
+/// **The stated obstacle is spent.** It was that a declined specialization
+/// still records an instance, so enumerating instances would emit every
+/// declined body as well -- but E1's `compute_spec_from_bindings` no longer
+/// declines: "EVERY complete key specializes. There is no shared generic body
+/// to decline to any more." The two populations have already converged, and the
+/// key and the substitution are one fact
+/// (`tests/spec_key_subst_roundtrip.rs`). What remains is mechanical: the
+/// chunk cache, symbols, callers and both ABI plans move together, across all
+/// three re-emit paths.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum EmittedBodyId {
     /// The declaration's own body: non-generic, or the shared generic snapshot.
@@ -76,10 +82,18 @@ impl EmittedBodyId {
         }
     }
 
-    /// The substitution this body lowers under. `spec_subst_from_key` is the
-    /// one direction that is total: a [`SpecKey`] holds a `None` for a generic
-    /// that has no `MonoTy` node (a tuple), so a substitution cannot be turned
-    /// back into a key without losing bindings.
+    /// The substitution this body lowers under.
+    ///
+    /// BOTH directions are total for a body emission writes -- `spec_subst_from_key`
+    /// and `spec_key_from_subst` round-trip, over every shape a key takes,
+    /// tuples included (`tests/spec_key_subst_roundtrip.rs`, mutation-verified
+    /// on the positional half). The declaration supplies the ORDER, which is the
+    /// only thing a substitution lacks.
+    ///
+    /// The old claim that a key holds `None` for a tuple was stale from D-2,
+    /// which gave `MonoTy` a `Tuple` constructor; and since E1 a PARTIAL key
+    /// names no body at all, so the other reason for keeping the two apart
+    /// describes nothing emission emits.
     pub fn subst(&self, ws: &Workspace) -> SpecSubst {
         match self {
             Self::Shared(_) => SpecSubst::default(),
