@@ -735,13 +735,19 @@ fn callee_inst_at(
     if renders_inline(cf) || cf.generics.is_empty() {
         return Ok(ShaderInstance { fref: func, key });
     }
+    // Covers both shapes: a call that recorded nothing, and one whose key the
+    // producer declined to build because a type parameter did not reify. Those
+    // used to be two arms, the second scanning for a `None` slot; a key is
+    // total now, so that state is unrepresentable rather than merely unreached,
+    // and its message is folded in here.
     if key.is_empty() {
         return Err(err(
             span,
             format!(
-                "shader profile: the call to generic `{}` has no recorded instantiation, so GLSL \
-                 has no concrete shape to emit it at. A GPU has no boxed representation for an \
-                 unreified generic, so this cannot fall back to the declaration",
+                "shader profile: the call to generic `{}` has no recorded instantiation -- either \
+                 none was recorded, or a type parameter was left uninstantiated -- so GLSL has no \
+                 concrete shape to emit it at. A GPU has no boxed representation for an unreified \
+                 generic, so this cannot fall back to the declaration",
                 cf.name
             ),
         ));
@@ -759,17 +765,6 @@ fn callee_inst_at(
                 cf.name,
                 key.len(),
                 cf.generics.len()
-            ),
-        ));
-    }
-    if let Some(i) = key.iter().position(Option::is_none) {
-        let g = cf.generics.get(i).map_or_else(|| format!("#{i}"), |_| format!("#{i}"));
-        return Err(err(
-            span,
-            format!(
-                "shader profile: the call to generic `{}` left type parameter {g} uninstantiated, \
-                 so GLSL has no concrete shape to emit it at",
-                cf.name
             ),
         ));
     }
@@ -4990,9 +4985,9 @@ mod assertion_flip_tests {
             .expect("the fixture must emit with a well-formed key");
 
         for (label, key) in [
-            ("too long", vec![Some(MonoTy::Float), Some(MonoTy::Int), Some(MonoTy::Int)]),
+            ("too long", vec![MonoTy::Float, MonoTy::Int, MonoTy::Int]),
             // Non-empty and short: the case an `is_empty` check cannot see.
-            ("too short", vec![Some(MonoTy::Float)]),
+            ("too short", vec![MonoTy::Float]),
         ] {
             let mut mf = base.clone();
             mf.spec_bindings.insert(iid, key);
@@ -5007,30 +5002,13 @@ mod assertion_flip_tests {
         }
     }
 
-    /// **A generic callee whose key is PARTIAL rejects too.** A `None` slot is
-    /// a generic that did not reify, so the key names the shared body -- the
-    /// same fallback as an absent record, reached a different way.
-    #[test]
-    fn a_partially_instantiated_generic_callee_rejects() {
-        let (ws, mid) = build_ws(
-            "@pure fn passthrough<T>(x: T) -> T { return x }\n             @pure fn caller(x: float) -> float { return passthrough(x) }",
-        );
-        let scx = ScalarCtx::new_values_first_class(&ws);
-        let fref = resolve_root(&ws, mid, "caller").expect("root");
-        let mut mf =
-            lower_emitted_body(&ws, &scx, &skull_mir::lower::EmittedBodyId::Shared(fref))
-                .expect("lower");
-
-        let iid = *mf.spec_bindings.keys().next().expect("a recorded instantiation");
-        mf.spec_bindings.insert(iid, vec![None]);
-        let msg = emit_fn_def(&ws, &ShaderInstance::plain(fref), &mf)
-            .expect_err("a partial key must reject")
-            .message;
-        assert!(
-            msg.contains("uninstantiated") && msg.contains("passthrough"),
-            "unexpected rejection: {msg}"
-        );
-    }
+    // A partial key -- a recorded instantiation with an unreified slot -- used to
+    // be pinned here as its own rejection. A key is TOTAL now, so the producer
+    // returns no key at all rather than one with a hole, and the state arrives
+    // as an absent record. That is
+    // `a_generic_callee_with_no_recorded_instantiation_rejects` above, which is
+    // the surviving coverage; a second test inserting an empty key would assert
+    // the same arm twice.
 }
 
 #[cfg(test)]

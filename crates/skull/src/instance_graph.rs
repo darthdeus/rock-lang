@@ -715,8 +715,8 @@ impl InstanceGraph {
         if i.args.is_empty() {
             return mangle_fn(ws, f);
         }
-        let key: Vec<Option<skull_mir::monoty::MonoTy>> =
-            i.args.iter().map(|a| Some(self.arena.get(*a).clone())).collect();
+        let key: skull_mir::lower::SpecKey =
+            i.args.iter().map(|a| self.arena.get(*a).clone()).collect();
         skull_mir::mangle::spec_fn_name(ws, f, &key)
             .expect("an instance with arguments always has a specialized symbol")
     }
@@ -2855,12 +2855,13 @@ pub struct Reconciliation {
 /// reaches it, so it constrains nothing) or the canonical types are equal. Both
 /// sides encode with `MonoTy::canonical`, so a pretty-printing ambiguity cannot
 /// match two different types to each other.
-fn slots_match(slots: &[Option<String>], shadow: &[String]) -> bool {
-    slots.len() == shadow.len()
-        && slots
-            .iter()
-            .zip(shadow)
-            .all(|(s, a)| s.as_ref().is_none_or(|s| s == a))
+/// Positional equality. It used to treat a `None` slot as matching ANYTHING,
+/// which a total key cannot express -- and never had to: the corpus produced no
+/// partial key, so the wildcard arm matched nothing it would not have matched
+/// exactly. Strictly narrower, and the census below is the measurement that
+/// says so.
+fn slots_match(slots: &[String], shadow: &[String]) -> bool {
+    slots == shadow
 }
 
 pub fn reconcile(ws: &Workspace, g: &InstanceGraph) -> Reconciliation {
@@ -2897,8 +2898,7 @@ pub fn reconcile(ws: &Workspace, g: &InstanceGraph) -> Reconciliation {
                 }
                 let f = &ws.module(t.func.module).functions[t.func.func];
                 let caller = &ws.module(t.caller.module).functions[t.caller.func];
-                let slots: Vec<&str> =
-                    t.slots.iter().map(|s| s.as_deref().unwrap_or("<erased>")).collect();
+                let slots: Vec<&str> = t.slots.iter().map(String::as_str).collect();
                 r.missing.push(format!(
                     "{}<{}> (called from `{}`)",
                     f.name,

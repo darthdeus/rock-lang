@@ -58,26 +58,27 @@ pub enum EmittedBodyId {
 }
 
 impl EmittedBodyId {
-    /// The body a `key` names. An all-`None` key is `Shared`, which is the same
-    /// rule `mangle::spec_fn_name` states by declining to mint a name for one:
-    /// nothing is reified, so there is no second definition to target.
+    /// The body a `key` names.
+    ///
+    /// TOTAL, and it normalizes nothing. It used to map an all-`None` key back
+    /// to `Shared`, which made this the place absence was decided for producers
+    /// that had already failed to decide it -- and the all-`None` population
+    /// was entirely EMPTY keys from non-generic callees (measured: 756 of 756).
+    /// A non-generic concrete instance has no arguments and is not "the shared
+    /// body", so that sentinel could not survive into an `Instance`-keyed
+    /// identity. Every producer now returns `Option<SpecKey>` and says so
+    /// itself.
+    ///
+    /// The emptiness assertion goes away with the `Shared` arm, not before it:
+    /// while `Shared` exists, an empty key reaching here means a producer
+    /// stopped deciding.
     pub fn new(decl: FuncRef, key: SpecKey) -> Self {
-        // A key is ALL-`None` (the shared body) or fully total (one
-        // instantiation); a partial one names neither and would key a chunk on
-        // half an identity. Measured over the 18 bin projects plus `tests/`:
-        // 267,671 total, 756 all-`None`, ZERO partial. That is what makes the
-        // `Option` here vestigial, and it is the premise the `Instance` re-key
-        // narrows on -- a total key is `instance_graph::Instance`'s `args` in
-        // everything but interning.
         debug_assert!(
-            key.iter().all(Option::is_none) || key.iter().all(Option::is_some),
-            "a specialization key is total or empty, never partial",
+            !key.is_empty(),
+            "an empty specialization key names no instantiation -- \
+             the producer decides absence, not this constructor",
         );
-        if key.iter().all(Option::is_none) {
-            Self::Shared(decl)
-        } else {
-            Self::Specialized(decl, key)
-        }
+        Self::Specialized(decl, key)
     }
 
     pub fn decl(&self) -> FuncRef {

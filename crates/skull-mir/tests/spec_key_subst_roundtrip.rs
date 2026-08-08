@@ -71,20 +71,17 @@ fn decl(ws: &bone_semantic::inference::Workspace, name: &str) -> FuncRef {
 fn key_shapes() -> Vec<(&'static str, SpecKey)> {
     let v2 = MonoTy::App { ctor: MonoCtor::Nominal(Ustr::from("V2")), params: vec![] };
     vec![
-        ("scalar", vec![Some(MonoTy::Int)]),
-        ("value struct", vec![Some(v2.clone())]),
-        ("tuple", vec![Some(MonoTy::Tuple(vec![MonoTy::Int, MonoTy::Float]))]),
-        ("nullable", vec![Some(MonoTy::Nullable(Box::new(MonoTy::Int)))]),
-        ("unit", vec![Some(MonoTy::Unit)]),
-        ("any", vec![Some(MonoTy::Any)]),
+        ("scalar", vec![MonoTy::Int]),
+        ("value struct", vec![v2.clone()]),
+        ("tuple", vec![MonoTy::Tuple(vec![MonoTy::Int, MonoTy::Float])]),
+        ("nullable", vec![MonoTy::Nullable(Box::new(MonoTy::Int))]),
+        ("unit", vec![MonoTy::Unit]),
+        ("any", vec![MonoTy::Any]),
         (
             "function",
-            vec![Some(MonoTy::Function {
-                params: vec![MonoTy::Int],
-                ret: Box::new(MonoTy::Bool),
-            })],
+            vec![MonoTy::Function { params: vec![MonoTy::Int], ret: Box::new(MonoTy::Bool) }],
         ),
-        ("nested app", vec![Some(MonoTy::Nullable(Box::new(v2)))]),
+        ("nested app", vec![MonoTy::Nullable(Box::new(v2))]),
     ]
 }
 
@@ -128,8 +125,8 @@ fn a_complete_key_survives_the_round_trip_through_its_substitution() {
 fn a_multi_generic_key_keeps_its_positions() {
     let ws = ws_of(SRC);
     let pair = decl(&ws, "pair");
-    let ab: SpecKey = vec![Some(MonoTy::Int), Some(MonoTy::String)];
-    let ba: SpecKey = vec![Some(MonoTy::String), Some(MonoTy::Int)];
+    let ab: SpecKey = vec![MonoTy::Int, MonoTy::String];
+    let ba: SpecKey = vec![MonoTy::String, MonoTy::Int];
     let ab_back = spec_key_from_subst(&ws, pair, &spec_subst_from_key(&ws, pair, &ab))
         .expect("complete substitution rebuilds");
     let ba_back = spec_key_from_subst(&ws, pair, &spec_subst_from_key(&ws, pair, &ba))
@@ -155,7 +152,7 @@ fn an_incomplete_substitution_rebuilds_no_key() {
     let pair = decl(&ws, "pair");
     // Bind only the FIRST generic, by round-tripping a key that names one and
     // dropping the other's binding.
-    let full: SpecKey = vec![Some(MonoTy::Int), Some(MonoTy::String)];
+    let full: SpecKey = vec![MonoTy::Int, MonoTy::String];
     let mut subst = spec_subst_from_key(&ws, pair, &full);
     assert_eq!(subst.len(), 2, "the fixture must start complete");
     let victim = *subst.keys().next().expect("a bound var");
@@ -167,16 +164,31 @@ fn an_incomplete_substitution_rebuilds_no_key() {
     );
 }
 
-/// The arm of `EmittedBodyId::new`'s totality assertion. A partial key names
-/// neither the shared body nor one instantiation, and the corpus produces none
-/// (267,671 total / 756 all-`None` / 0 partial over the 18 bin projects plus
-/// `tests/`) -- so without this the assertion could be vacuous and nothing
-/// would say.
+/// The arm of `EmittedBodyId::new`'s emptiness assertion, and the successor to
+/// the partial-key arm this replaced -- a partial key is no longer
+/// REPRESENTABLE, so the state that remains to guard is an empty one.
+///
+/// An empty key used to be normalized back to `Shared` here. It named 756 of
+/// 756 all-`None` constructions corpus-wide, every one a non-generic callee,
+/// and a non-generic concrete instance legitimately has no arguments -- so the
+/// sentinel had to go and the decision had to move to the producer.
 #[test]
 #[cfg(debug_assertions)]
-#[should_panic(expected = "total or empty")]
-fn a_partial_specialization_key_names_no_body() {
+#[should_panic(expected = "empty specialization key")]
+fn an_empty_specialization_key_names_no_body() {
     let ws = ws_of(SRC);
-    let partial: SpecKey = vec![Some(skull_mir::monoty::MonoTy::Int), None];
-    let _ = EmittedBodyId::new(decl(&ws, "pair"), partial);
+    let _ = EmittedBodyId::new(decl(&ws, "pair"), SpecKey::new());
+}
+
+/// The producer, not the constructor, is what decides a non-generic callee has
+/// no key. This is the population the old all-`None` normalization stood in
+/// for, asserted where the decision now lives.
+#[test]
+fn a_non_generic_declaration_rebuilds_no_key() {
+    let ws = ws_of(SRC);
+    let main = decl(&ws, "main");
+    assert!(
+        spec_key_from_subst(&ws, main, &Default::default()).is_none(),
+        "a declaration with no generics has no instantiation to name"
+    );
 }

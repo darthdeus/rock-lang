@@ -613,3 +613,28 @@ fn a_non_generic_call_from_a_coroutine_hook_runs_on_both_backends() {
     }
     both_backends("co_hook_nongeneric", CO_HOOK_NON_GENERIC, "1\n");
 }
+
+// A NON-GENERIC `next` witness reached through a generic combinator --
+// `CharsIter.next` inside `count`. The producer must answer "no instantiation"
+// for it rather than an empty key, because an empty key filed as a delivery
+// record names a specialization nothing defines.
+//
+// Pinned by name because the alternative gate is invisible: deleting the
+// producer's guard leaves the whole nextest half GREEN and only moves `rock
+// test tests/`'s DENOMINATOR (4675 -> 4619), since a file whose compile panics
+// contributes zero tests rather than a failure.
+const NON_GENERIC_WITNESS: &str = r#"
+fn main() {
+    let n = "hello".chars().count()
+    print("{n}")
+}
+"#;
+
+#[test]
+fn a_non_generic_iterator_witness_runs_on_both_backends() {
+    if !node_available() {
+        eprintln!("SKIP: node not found");
+        return;
+    }
+    both_backends("non_generic_witness", NON_GENERIC_WITNESS, "5\n");
+}

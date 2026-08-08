@@ -44,7 +44,7 @@ fn tree(witness: u32) -> ResolvedBoundTree {
 }
 
 fn demand(callee: u32, ty: &str, tree: ResolvedBoundTree) -> SpecDemand {
-    SpecDemand { func: fref(callee), key: vec![Some(nominal(ty))], tree }
+    SpecDemand { func: fref(callee), key: vec![nominal(ty)], tree }
 }
 
 /// Two sites demanding ONE emitted body with DIFFERENT trees is a clash: one
@@ -58,7 +58,7 @@ fn two_sites_demanding_one_body_with_different_trees_clash() {
     let clashes = map.record(&[demand(1, "int", tree(9))]);
     assert_eq!(
         clashes,
-        vec![EmittedBodyId::new(fref(1), vec![Some(nominal("int"))])],
+        vec![EmittedBodyId::new(fref(1), vec![nominal("int")])],
         "a second demand for the same emitted body with a different tree must clash, \
          and must name the body"
     );
@@ -86,8 +86,8 @@ fn two_instantiations_of_one_declaration_may_differ() {
     let mut map = DemandMap::default();
     let clashes = map.record(&[demand(1, "int", tree(7)), demand(1, "string", tree(9))]);
     assert!(clashes.is_empty(), "distinct instantiations are distinct bodies: {clashes:?}");
-    assert_eq!(map.tree_of(&EmittedBodyId::new(fref(1), vec![Some(nominal("int"))])), tree(7));
-    assert_eq!(map.tree_of(&EmittedBodyId::new(fref(1), vec![Some(nominal("string"))])), tree(9));
+    assert_eq!(map.tree_of(&EmittedBodyId::new(fref(1), vec![nominal("int")])), tree(7));
+    assert_eq!(map.tree_of(&EmittedBodyId::new(fref(1), vec![nominal("string")])), tree(9));
 }
 
 /// An unrecorded body reads as the EMPTY tree rather than as an error here.
@@ -98,5 +98,5 @@ fn two_instantiations_of_one_declaration_may_differ() {
 #[test]
 fn an_unrecorded_body_reads_as_the_empty_tree() {
     let map = DemandMap::default();
-    assert!(map.tree_of(&EmittedBodyId::new(fref(3), vec![Some(nominal("int"))])).is_empty());
+    assert!(map.tree_of(&EmittedBodyId::new(fref(3), vec![nominal("int")])).is_empty());
 }

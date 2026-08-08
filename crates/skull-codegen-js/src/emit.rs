@@ -3254,7 +3254,7 @@ impl JsReach<'_> {
         // default, and here the default was non-termination rather than a wrong
         // answer.
         for d in std::mem::take(&mut self.st.spec_queue) {
-            match skull_mir::monoty::too_deep_to_instantiate(d.key.iter().flatten()) {
+            match skull_mir::monoty::too_deep_to_instantiate(d.key.iter()) {
                 Some(at) => {
                     let f = &self.ws.module(d.func.module).functions[d.func.func];
                     let at = at.render();

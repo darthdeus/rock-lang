@@ -1070,7 +1070,7 @@ fn too_deep_to_instantiate(
     ws: &Workspace,
     d: &skull_mir::bound::SpecDemand,
 ) -> Option<(String, CompilerError)> {
-    let at = skull_mir::monoty::too_deep_to_instantiate(d.key.iter().flatten())?.render();
+    let at = skull_mir::monoty::too_deep_to_instantiate(d.key.iter())?.render();
     let f = &ws.module(d.func.module).functions[d.func.func];
     let name = skull_mir::mangle::spec_fn_name(ws, f, &d.key).unwrap_or_else(|| f.name.to_string());
     Some((name, CompilerError::new_with_label(
@@ -1249,12 +1249,9 @@ fn shared(fref: FuncRef) -> EmittedBodyId {
 /// sort by their instantiation's canonical spelling, which is injective.
 fn overlay_order_key(body: &EmittedBodyId) -> (usize, u32, Option<String>) {
     let fref = body.decl();
-    let key = body.key().map(|k| {
-        k.iter()
-            .map(|slot| slot.as_ref().map_or_else(|| "_".to_string(), |ty| ty.canonical()))
-            .collect::<Vec<_>>()
-            .join(",")
-    });
+    let key = body
+        .key()
+        .map(|k| k.iter().map(skull_mir::monoty::MonoTy::canonical).collect::<Vec<_>>().join(","));
     (fref.module.index(), u32::from(fref.func.into_raw()), key)
 }
 

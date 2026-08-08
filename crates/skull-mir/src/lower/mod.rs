@@ -2319,10 +2319,9 @@ pub fn native_buffer_alloc_reject(ws: &Workspace, mid: ModuleId) -> Option<(Stri
                     // intrinsic would fail cdef resolution inside the splice,
                     // which lowering swallows -- reject it loudly here).
                     None => spec.is_some_and(|(key, _)| {
-                        key.iter().all(|l| match l {
-                            Some(ty) if ty.prim_name().is_some() => true,
-                            Some(ty) => !ty.any_nominal(&|name| nominal_is_gc_value(ws, name)),
-                            None => false,
+                        key.iter().all(|ty| {
+                            ty.prim_name().is_some()
+                                || !ty.any_nominal(&|name| nominal_is_gc_value(ws, name))
                         })
                     }),
                 }

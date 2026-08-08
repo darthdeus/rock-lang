@@ -52,8 +52,8 @@ impl ShaderStage {
 ///
 /// The reachability node, the body key and the emitted name all come off this
 /// one value, so two instantiations of one generic helper are two functions and
-/// cannot be confused for one. An all-`None` key is the non-generic case and
-/// keeps the declaration's own name ([`spec_fn_name`] returns `None` for it).
+/// cannot be confused for one. An EMPTY key is the non-generic case and keeps
+/// the declaration's own name ([`spec_fn_name`] returns `None` for it).
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct ShaderInstance {
     pub fref: FuncRef,
@@ -74,7 +74,14 @@ impl ShaderInstance {
     /// The definition GLSL emits for this instance. A shader instance IS an
     /// emitted body -- one checked, emitted definition per instantiation --
     /// which is what `unchecked_generic` being deleted rests on.
+    /// An empty key is decided HERE rather than normalized downstream: a
+    /// non-generic shader instance has no arguments, which is a fact about this
+    /// instance and not something `EmittedBodyId::new` should infer from a
+    /// vector's length.
     pub fn emitted_body(&self) -> crate::lower::EmittedBodyId {
+        if self.key.is_empty() {
+            return crate::lower::EmittedBodyId::Shared(self.fref);
+        }
         crate::lower::EmittedBodyId::new(self.fref, self.key.clone())
     }
 

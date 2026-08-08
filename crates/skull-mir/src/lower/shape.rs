@@ -1582,15 +1582,31 @@ pub(crate) fn columns_available(
     true
 }
 
-/// A callee's per-generic instantiation at one call site, in declaration order.
-/// `None` = no concrete type reaches that slot here, which since the key and
-/// identity share one walk ([`reify_type`]) means the ENCLOSING body is a shared
-/// generic snapshot. It is not "a type the key declines to name".
-/// The snapshot cache key alongside the `FuncRef`.
-pub type SpecKey = Vec<Option<MonoTy>>;
+/// A callee's instantiation at one call site: one concrete type per declared
+/// generic, in declaration order. TOTAL by construction.
+///
+/// Absence lives OUTSIDE this type, in the `Option<SpecKey>` every producer
+/// returns -- `None` means no specialized delivery. It used to live inside, as
+/// a per-slot `Option`, and that shape admitted two things nothing wanted. A
+/// PARTIAL key named neither the shared body nor one instantiation (measured:
+/// 267,671 total constructions and zero partial), and an EMPTY key was the
+/// shared-body sentinel for a non-generic callee -- 756 of them, normalized
+/// back to `Shared` by `EmittedBodyId::new` rather than decided by whoever
+/// built it.
+///
+/// The empty case is the one that had to go. A non-generic concrete instance
+/// legitimately has no arguments, so "empty means shared" is a conflation that
+/// cannot survive into an `Instance`-keyed identity. Producers decide absence
+/// now; nothing normalizes it afterwards.
+///
+/// This is `skull::instance_graph::Instance`'s `args` in everything but
+/// interning -- a PREMISE that the narrowing is safe, not evidence the two
+/// identities are one. That convergence is the cache-key step, and it is named
+/// in `docs/parked/mono.md`.
+pub type SpecKey = Vec<MonoTy>;
 
 /// Callee generic `VarId` -> its concrete type tree, for specialized lowering.
-/// Only the reified generics appear; a `None` in the [`SpecKey`] is absent here.
+/// Total against the declaration's generics, exactly as [`SpecKey`] is.
 ///
 /// THE SAME TYPE as [`crate::monoty::MonoSubst`], which is what an instance of
 /// the mono graph carries. One substitution vocabulary, so an instance's own
@@ -2004,9 +2020,19 @@ pub(crate) fn compute_spec_from_bindings(
             ),
         ));
     }
+    // A non-generic declaration has no instantiation to name. It used to return
+    // `Some(vec![])` and rely on `EmittedBodyId::new` reading empty as "the
+    // shared body" -- absence decided two layers away from the producer, by a
+    // sentinel that a non-generic `Instance` legitimately collides with.
+    // A non-generic declaration has no instantiation to name. It used to return
+    // `Some(vec![])` and rely on `EmittedBodyId::new` reading empty as "the
+    // shared body" -- absence decided two layers away from the producer, by a
+    // sentinel that a non-generic `Instance` legitimately collides with.
+    if f.generics.is_empty() {
+        return Ok(None);
+    }
     let mut key: SpecKey = Vec::with_capacity(bindings.len());
     let mut subst = SpecSubst::default();
-    let mut complete = true;
     for (g, b) in f.generics.iter().zip(bindings) {
         let Some(TypeExpr::Generic(var, _)) = ty_node(ws, inf, *g) else {
             return Err(CompilerError::new_with_label(
@@ -2017,26 +2043,20 @@ pub(crate) fn compute_spec_from_bindings(
                 ),
             ));
         };
-        match reify_type(ws, inf, *b, enclosing) {
-            Some(ty) => {
-                subst.insert(var, ty.clone());
-                key.push(Some(ty));
-            }
-            None => {
-                key.push(None);
-                complete = false;
-            }
-        }
+        // One unreified slot and there is no key at all. A partial key named the
+        // DECLARATION through `spec_fn_name`, i.e. the same absent body a
+        // missing key names, so building one was never a third answer.
+        let Some(ty) = reify_type(ws, inf, *b, enclosing) else { return Ok(None) };
+        subst.insert(var, ty.clone());
+        key.push(ty);
     }
     // EVERY complete key specializes. There is no shared generic body to decline
     // to any more, so a declined key is not a slower lowering -- it is a call
     // spelling a name nothing defines.
     //
-    // A partial key is still not a specialization: a `None` slot maps back to
-    // the declaration through `spec_fn_name`, so returning one would name that
-    // same absent body. It is an INCOMPLETE instantiation, which the Stage-2
-    // `ConcreteTypeUnavailable` rejection owns.
-    Ok(complete.then_some((key, subst)))
+    // An INCOMPLETE instantiation is the Stage-2 `ConcreteTypeUnavailable`
+    // rejection's business, and it left through the `reify_type` arm above.
+    Ok(Some((key, subst)))
 }
 
 /// The CONCRETE INSTANCE an iterator-protocol WITNESS resolves to, from the
@@ -2157,10 +2177,13 @@ pub(crate) fn ablation_next_decline(
 /// lacks: a key is positional over `f.generics` and a subst is keyed by `VarId`.
 pub fn spec_key_from_subst(ws: &Workspace, fref: FuncRef, subst: &SpecSubst) -> Option<SpecKey> {
     let f = &ws.module(fref.module).functions[fref.func];
+    if f.generics.is_empty() {
+        return None;
+    }
     let mut key = SpecKey::with_capacity(f.generics.len());
     for g in f.generics.iter() {
         let Some(TypeExpr::Generic(var, _)) = static_ty(ws, *g) else { return None };
-        key.push(Some(subst.get(&var)?.clone()));
+        key.push(subst.get(&var)?.clone());
     }
     Some(key)
 }
@@ -2168,8 +2191,8 @@ pub fn spec_key_from_subst(ws: &Workspace, fref: FuncRef, subst: &SpecSubst) -> 
 pub fn spec_subst_from_key(ws: &Workspace, fref: FuncRef, key: &SpecKey) -> SpecSubst {
     let f = &ws.module(fref.module).functions[fref.func];
     let mut subst = SpecSubst::default();
-    for (g, ty) in f.generics.iter().zip(key) {
-        if let (Some(TypeExpr::Generic(var, _)), Some(reified)) = (static_ty(ws, *g), ty) {
+    for (g, reified) in f.generics.iter().zip(key) {
+        if let Some(TypeExpr::Generic(var, _)) = static_ty(ws, *g) {
             subst.insert(var, reified.clone());
         }
     }

@@ -85,7 +85,7 @@ fn an_emitted_body_states_its_own_abi() {
     assert_eq!(shared.param_leaf_widths(), None, "the shared body keeps one boxed slot");
     assert_eq!(shared.result_lanes(), 1);
 
-    let key: SpecKey = vec![Some(nominal("V2"))];
+    let key: SpecKey = vec![nominal("V2")];
     let spec = BackendFnAbiPlan::for_body(&ws, &scx, EmittedBodyId::Specialized(ident, key));
     assert_eq!(
         spec.param_leaf_widths(),

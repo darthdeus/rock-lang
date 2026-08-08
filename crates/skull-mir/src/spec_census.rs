@@ -31,14 +31,15 @@ pub struct TodaySpec {
     /// difference in reachability, not a missing instance.
     pub caller: FuncRef,
     pub func: FuncRef,
-    /// Per declared generic, in declaration order. `None` = no concrete type
-    /// reaches this slot, i.e. the enclosing body is a shared generic snapshot.
-    pub slots: Vec<Option<String>>,
+    /// Per declared generic, in declaration order. Total: a site with any
+    /// unreified slot produces no key at all, so there is nothing partial to
+    /// record here.
+    pub slots: Vec<String>,
 }
 
 /// `FuncRef` is not `Ord`; sort by its raw indices so the census output is
 /// order-stable.
-fn key(t: &TodaySpec) -> (u32, u32, u32, u32, &[Option<String>]) {
+fn key(t: &TodaySpec) -> (u32, u32, u32, u32, &[String]) {
     (
         t.func.module.raw(),
         t.func.func.into_raw().into_u32(),
@@ -83,7 +84,7 @@ pub fn today_specializations(ws: &Workspace) -> (Vec<TodaySpec>, usize) {
                 out.push(TodaySpec {
                     caller,
                     func,
-                    slots: key.iter().map(|s| s.as_ref().map(crate::monoty::MonoTy::canonical)).collect(),
+                    slots: key.iter().map(crate::monoty::MonoTy::canonical).collect(),
                 });
             }
         }
