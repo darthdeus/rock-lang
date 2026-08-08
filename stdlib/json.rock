@@ -329,6 +329,13 @@ fn json_decode(s: string) -> JsonValue? {
     return v
 }
 
+// Behind this call boundary the loop is an inner loop in whatever root trace
+// luajit is recording, and it resolves as a `loop` trace (fast) or a `return`
+// trace (slow, whitespace then skipped in the interpreter) per process. That
+// is the twitter/citm bimodality. Do NOT "fix" it with `@inline`: that wins on
+// an isolated single payload and costs 3-4x in a process that decodes several
+// documents, which is the shape production has. Two other rewrites are also
+// measured losses. See docs/json-parser-benchmarking-plan.md before touching.
 fn parse_skip_ws(p: JsonParser) {
     while p.pos < p.len {
         let b = p.src.unit_at(p.pos)
