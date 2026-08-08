@@ -1647,10 +1647,9 @@ impl InstanceGraph {
         for i in self.root_instances.clone() {
             self.merge_reach(&i, &MonoSubst::default());
         }
-        // Taken out and put back rather than iterated by key: reading each
-        // contribution through the map would need a clone per owner to satisfy
-        // the borrow checker, which is 6,200 deep clones on mag and was most of
-        // this function's cost.
+        // Taken out and put back rather than iterated by key: the merges below
+        // need `&mut self`, so reading each contribution through the map would
+        // mean a deep clone per owner.
         let contributions = std::mem::take(&mut self.contributions);
         for (owner, c) in &contributions {
             self.edges.extend(c.edges.iter().cloned());
