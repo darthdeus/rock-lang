@@ -1453,6 +1453,44 @@ fn a_boot_font_does_not_carry_its_atlas_across_the_boundary() {
     assert!(ok, "the font atlas boundary must be green:\n{all}");
 }
 
+/// A boot-owned sound's DECODED BUFFER is returned to boot's at the boundary.
+///
+/// `stone_reload_sound` decodes a new file over a live handle and keeps the
+/// handle -- so every `Sound` naming it survives a hot reload, which is what
+/// keeps the crossing out of the live-handle diff.
+///
+/// bitgun rather than testbed for the reason `b3_native_audio` gives:
+/// `stone_load_sound` returns 0 for a missing file and testbed ships no audio.
+/// All three entries carry the same `@sim_env("STONE_AUDIO_STUB", "0")`,
+/// because a differing one is a different boot signature and would put the
+/// probe in a worker of its own.
+///
+/// `b3_sound_active` runs first as the recipe control. It reloads a sound of
+/// its OWN, asserts the capture's denominator, and asserts that the two files
+/// really do decode differently -- without which the probe would pass for a
+/// boundary that touched nothing.
+#[test]
+fn a_boot_sound_does_not_carry_its_decoded_buffer_across_the_boundary() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "bitgun",
+        "-j",
+        "1",
+        "b3_sound_active",
+        "b3_sound_seed",
+        "b3_sound_probe",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 1,
+        "the probe must FOLLOW the seed in one process or it proves nothing: \
+         {boots} boots\n{all}"
+    );
+    assert!(ok, "the sound contents boundary must be green:\n{all}");
+}
+
 /// Run `rock` and return `(exit_ok, stdout, stderr)` WITHOUT asserting on the
 /// exit code. The multi-order gate deliberately exits nonzero on a corpus that
 /// cannot populate every arm, and that refusal is part of what is under test.
