@@ -461,11 +461,16 @@ fn parse_string_raw(p: JsonParser) -> string? {
                 p.ok = false
                 return null
             }
+        } else if b < 32 {
+            // JSON requires every byte below 0x20 to be escaped. 0x7F (DEL) is
+            // above the range and stays legal raw.
+            p.ok = false
+            return null
         } else {
             let start = p.pos
             while p.pos < p.len {
                 let c = p.src.unit_at(p.pos)
-                if c == 34 || c == 92 { break }
+                if c == 34 || c == 92 || c < 32 { break }
                 p.pos = p.pos + 1
             }
             parts.push(p.src.substring(start, p.pos))
@@ -498,22 +503,26 @@ fn parse_hex4(s: string) -> int? {
 }
 
 fn parse_number(p: JsonParser) -> JsonValue {
+    // The grammar is `[-] int [frac] [exp]`, and it is enforced here rather
+    // than left to parse_float: Lua's tonumber accepts `2.e3`, `.5` and `01`,
+    // so a permissive scan makes the verdict the host runtime's rather than
+    // JSON's.
     let start = p.pos
     let is_float = false
-    if p.src.unit_at(p.pos) == 45 {
+    if p.pos < p.len && p.src.unit_at(p.pos) == 45 {
         p.pos = p.pos + 1
     }
-    while p.pos < p.len {
-        let b = p.src.unit_at(p.pos)
-        if b >= 48 && b <= 57 {
-            p.pos = p.pos + 1
-        } else {
-            break
-        }
+
+    // int: a lone 0, or a nonzero digit followed by any digits. Never empty,
+    // never a leading zero.
+    if p.pos >= p.len {
+        p.ok = false
+        return JsonValue::Null
     }
-    if p.pos < p.len && p.src.unit_at(p.pos) == 46 {
-        is_float = true
+    let lead = p.src.unit_at(p.pos)
+    if lead == 48 {
         p.pos = p.pos + 1
+    } else if lead >= 49 && lead <= 57 {
         while p.pos < p.len {
             let b = p.src.unit_at(p.pos)
             if b >= 48 && b <= 57 {
@@ -522,7 +531,35 @@ fn parse_number(p: JsonParser) -> JsonValue {
                 break
             }
         }
+    } else {
+        p.ok = false
+        return JsonValue::Null
     }
+
+    // frac: the point must be followed by at least one digit.
+    if p.pos < p.len && p.src.unit_at(p.pos) == 46 {
+        is_float = true
+        p.pos = p.pos + 1
+        let frac_start = p.pos
+        while p.pos < p.len {
+            let b = p.src.unit_at(p.pos)
+            if b >= 48 && b <= 57 {
+                p.pos = p.pos + 1
+            } else {
+                break
+            }
+        }
+        if p.pos == frac_start {
+            p.ok = false
+            return JsonValue::Null
+        }
+    }
+
+    // exp: likewise at least one digit, after an optional sign. Measured, this
+    // arm changes no verdict today -- `1e` reaches parse_float, and both
+    // LuaJIT's tonumber and JS's Number reject it. It stays because that makes
+    // the rejection the host runtime's rather than the grammar's, which is the
+    // fallback this rewrite exists to remove.
     if p.pos < p.len {
         let b = p.src.unit_at(p.pos)
         if b == 101 || b == 69 {
@@ -534,6 +571,7 @@ fn parse_number(p: JsonParser) -> JsonValue {
                     p.pos = p.pos + 1
                 }
             }
+            let exp_start = p.pos
             while p.pos < p.len {
                 let b2 = p.src.unit_at(p.pos)
                 if b2 >= 48 && b2 <= 57 {
@@ -542,12 +580,13 @@ fn parse_number(p: JsonParser) -> JsonValue {
                     break
                 }
             }
+            if p.pos == exp_start {
+                p.ok = false
+                return JsonValue::Null
+            }
         }
     }
-    if p.pos == start {
-        p.ok = false
-        return JsonValue::Null
-    }
+
     let lit = p.src.substring(start, p.pos)
     if is_float {
         let f = lit.parse_float()
