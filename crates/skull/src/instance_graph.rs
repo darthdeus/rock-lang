@@ -401,14 +401,23 @@ pub struct InstanceGraph {
     /// Every site the walk ATTEMPTED, including the ones with no `from`
     /// instance to record against. The denominator for `call_sites`.
     pub sites_attempted: usize,
-    /// Instances [`detect_changing_instance_recursion`] actually searched FROM,
-    /// and the queue pops those searches performed. Published for the same
-    /// reason `sites_attempted` is: the pass is a whole-graph search whose cost
-    /// is invisible from its output, which is empty on every program that has
-    /// no polymorphic recursion. A structural test asserts on these, because a
-    /// rejection-output test cannot tell a cheap search from an exhaustive one.
+    /// Instances [`detect_changing_instance_recursion`] actually searched FROM.
+    ///
+    /// Published for the same reason `sites_attempted` is: the pass is a
+    /// whole-graph search whose cost is invisible from its own output, which is
+    /// EMPTY on every program without polymorphic recursion -- so a
+    /// rejection-output test passes whether the search is bounded or
+    /// exhaustive. This is an OPERATIONAL counter, describing work performed
+    /// rather than the graph produced, so it belongs in a census assertion and
+    /// never in a comparison of two graphs.
+    ///
+    /// A step counter sat here too and was removed: no assertion over it could
+    /// be made to FAIL. The obvious one (losing the per-search `seen` dedup)
+    /// stayed green under mutation, because the bound a small fixture can state
+    /// is far looser than the blowup, and a pinned count would move on
+    /// unrelated stdlib edits. The traversal measurements it was added for are
+    /// in `docs/parked/mono.md`.
     pub recursion_starts: usize,
-    pub recursion_steps: usize,
     /// Callees seeded from an ALWAYS-EMITTED body (a decorator definition or a
     /// global initializer) rather than from a function root. Production treats
     /// their call edges as reachability roots (`mir_emit::reachable_fns`'s
@@ -1208,7 +1217,6 @@ pub fn build(ws: &Workspace, roots: Vec<FuncRef>, perturb: bool) -> InstanceGrap
         duplicate_sites: Vec::new(),
         sites_attempted: 0,
         recursion_starts: 0,
-        recursion_steps: 0,
         substitutions: BTreeMap::new(),
         subst_disagreements: Vec::new(),
         subst_comparisons: 0,
@@ -1646,34 +1654,21 @@ fn detect_changing_instance_recursion(g: &mut InstanceGraph, ws: &Workspace) {
 
     // A declaration with exactly ONE instance graph-wide can never satisfy the
     // predicate below -- the search looks for a DIFFERENT instantiation of the
-    // start's own declaration, and the only nodes reachable are instances the
-    // graph holds. Skipping those starts is not an approximation.
+    // start's own declaration, and the only reachable nodes are instances the
+    // graph holds. Skipping those starts is exact, not an approximation.
     //
-    // It is most of the work. Without it every instance with an outgoing edge
-    // runs a full DFS over the whole edge set with its own `seen`, i.e. O(V.E),
-    // and the `already` skip below only engages AFTER a finding -- so a program
-    // with no polymorphic recursion, which is the normal case, skips nothing at
-    // all.
+    // It is most of the work, because the `already` skip further down engages
+    // only AFTER a finding: without this, a program with no polymorphic
+    // recursion -- the normal case -- runs a full DFS from every instance with
+    // an outgoing edge, over the whole edge set, O(V.E).
     //
-    // MEASURED, not projected -- start counts do not predict traversal work,
-    // and here they under-predicted it badly, because the skipped starts are
-    // disproportionately the ones with large reachable sets:
-    //
-    //             starts          queue pops           build
-    //   match3   1434 -> 389   35,962 ->  2,633   23ms -> 15ms
-    //   bitgun   2108 -> 681   67,094 ->  5,845   36ms -> 24ms
-    //   mag      3333 -> 897  169,211 ->  8,065   73ms -> 42ms
-    //
-    // 73% fewer starts, 95% fewer pops, 42% off the whole graph build on mag.
-    // `mono-manifest` output is byte-identical on all three with the filter on
-    // and off, which is the semantics-preserving check; `recursion_starts` and
-    // `recursion_steps` are published so a structural test can assert the bound
-    // that the pass's own (empty) output cannot show.
-    //
-    // Counted over ALL instances, not over `succ` -- a declaration's second
+    // Counted over ALL instances, not over `succ`: a declaration's second
     // instance can be a LEAF with no outgoing edges, so it never appears as a
     // candidate start while being exactly what makes the first one's search
-    // worth running.
+    // worth running. Counting over the starts would silently re-admit nothing
+    // and skip the pair that matters.
+    //
+    // Measurements in `docs/parked/mono.md`.
     let mut per_decl: FxHashMap<(u32, u32), usize> = FxHashMap::default();
     for i in &g.instances {
         *per_decl.entry((i.func.module.raw(), i.func.func.into_raw().into_u32())).or_default() += 1;
@@ -1692,7 +1687,6 @@ fn detect_changing_instance_recursion(g: &mut InstanceGraph, ws: &Workspace) {
     let mut found: Vec<(Instance, Span, String)> = Vec::new();
     let mut already: BTreeSet<(u32, u32)> = BTreeSet::new();
     let mut starts = 0usize;
-    let mut steps = 0usize;
     for start in order {
         let key = (start.func.module.raw(), start.func.func.into_raw().into_u32());
         if already.contains(&key) {
@@ -1702,7 +1696,6 @@ fn detect_changing_instance_recursion(g: &mut InstanceGraph, ws: &Workspace) {
         let mut seen: BTreeSet<&Instance> = BTreeSet::new();
         let mut queue: Vec<(&Instance, Span)> = vec![(start, Span::unknown())];
         while let Some((node, via)) = queue.pop() {
-            steps += 1;
             if node.func == start.func && node.args != start.args {
                 already.insert(key);
                 found.push((
@@ -1725,7 +1718,6 @@ fn detect_changing_instance_recursion(g: &mut InstanceGraph, ws: &Workspace) {
         }
     }
     g.recursion_starts = starts;
-    g.recursion_steps = steps;
     for (at, span, message) in found {
         g.rejections.push(Rejection {
             kind: RejectionKind::ChangingInstanceRecursion,
