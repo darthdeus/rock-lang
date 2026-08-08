@@ -603,7 +603,7 @@ pub struct Args {
     pub union: bool,
     /// Where `--union` looks for consumers. Defaults to the lib's parent, which
     /// is right when the lib sits beside its consumers (`stone/`); a nested lib
-    /// (`libs/json`) needs the repo root passed explicitly.
+    /// (`libs/chess-core`) needs the repo root passed explicitly.
     pub consumers: Option<String>,
 
     /// For `rock test`: force package-aware compilation (the surrounding
@@ -741,7 +741,7 @@ impl Args {
             .arg(Arg::new("union").long("union").action(ArgAction::SetTrue)
                 .help("For `rock lint <lib>`: judge a library's reachability against every consumer in the repo at once, reporting only functions that NONE of them reach. The only sound way to run unused_fn on a lib."))
             .arg(Arg::new("consumers").long("consumers")
-                .help("For `rock lint --union`: directory to search for consumers (default: the lib's parent). Pass the repo root for a nested lib like `libs/json`."))
+                .help("For `rock lint --union`: directory to search for consumers (default: the lib's parent). Pass the repo root for a nested lib like `libs/chess-core`."))
             .arg(Arg::new("backend").long("backend")
                 .value_parser(clap::value_parser!(Backend))
                 .help("Compiler backend: `skull` (default -- bone type-check + skull codegen, runs Lua), `bone` (type-check only, no codegen), `js` (test only -- JS-subset @test execution under node, SKIP(reason) outside the subset), or `glsl` (test only -- GLSL value-test execution on the GPU, both 330core+300es profiles). Can also be set via ROCK_BACKEND=bone|skull|js|glsl."))
