@@ -1367,6 +1367,7 @@ function stone_bind_canvas_depth_to_unit(h, unit) {
   var c = __SW.canvases[h];
   return c && c.depthTex ? stone_bind_texture_to_unit(c.depthTex, unit) !== 0 : false;
 }
+function stone_canvas_exists(h) { return !!__SW.canvases[h]; }
 function stone_canvas_has_depth(h) { var c = __SW.canvases[h]; return !!(c && c.depthTex); }
 function stone_sprite_draw_canvas(shader, h, tw, th, x, y, w, hh, sx, sy, sw, sh) {
   var c = __SW.canvases[h];
@@ -1807,6 +1808,7 @@ function stone_shader_set_vec2_array(h, name, values, count) {
 function stone_shader_set_vec4_array(h, name, values, count) {
   __sw_with_shader_uniform(h, name, function (gl, l) { gl.uniform4fv(l, values.subarray ? values.subarray(0, count * 4) : values); });
 }
+function stone_bind_image_texture_to_unit(h, unit) { return stone_bind_texture_to_unit(h, unit) !== 0; }
 function stone_bind_texture_to_unit(tex, unit) {
   var gl = __SW.gl, t = __SW.textures[tex];
   if (!gl || !t || unit < 0) return 0;
