@@ -419,9 +419,22 @@ fn main() {
     // -- distinct sites are not the property, and two distinct sites both
     // resolving the SHARED generic body satisfy every other assertion here.
     // Measured: emptying lowering's slot substitution while leaving the domain
-    // key intact moves this 2 -> 0 and `CalleeNoInstance` 0 -> 2, and changes
-    // nothing else in the census.
-    assert_eq!(c.joined_instance_verified, 2, "{c:?}");
+    // key intact moves the struct-default pair out of it and `CalleeNoInstance`
+    // 0 -> 2, and changes nothing else in the census.
+    //
+    // The POPULATION is asserted and the TOTAL is not, deliberately. This arm
+    // used to pin the total at 2, which was the whole fixture's count before E1;
+    // instance-owned emission verifies more calls in the same program (7 here),
+    // so an exact total measures how much of the fixture happens to be generic
+    // rather than whether these two calls named their instance. The pair that
+    // carries the property is a non-zero population plus a ZERO
+    // `CalleeNoInstance` -- under the mutation the two calls land in that
+    // bucket, which is what actually goes red.
+    assert!(
+        c.joined_instance_verified >= 2,
+        "the struct-default calls must be instance-verified, and the population \
+         must be non-zero or the zero below is vacuous: {c:?}"
+    );
     assert_eq!(unjoined(&c, Unjoined::CalleeNoInstance), 0, "{c:?}");
 
     // THE WALK's side, which is a second derivation and can fail alone: two
