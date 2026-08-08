@@ -1179,10 +1179,9 @@ pub enum SimExecMode {
     /// request errors, because someone who typed `--workers` is measuring
     /// something and a silent downgrade would answer the wrong question.
     ///
-    /// Rendered sims used to run isolated here. `--multi-order` on the mag
-    /// corpus now compares 807 boundary-crossing entries with rendered sims in
-    /// workers and finds zero divergences, which is the evidence that rule was
-    /// waiting for.
+    /// Rendered sims run in workers too. The evidence is `--multi-order` on the
+    /// mag corpus, which compares 840 boundary-crossing entries across
+    /// registry, reverse and a seeded shuffle and finds zero divergences.
     Default,
 }
 
