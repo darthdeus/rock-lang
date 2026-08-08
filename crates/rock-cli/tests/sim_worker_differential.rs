@@ -1491,6 +1491,66 @@ fn a_boot_sound_does_not_carry_its_decoded_buffer_across_the_boundary() {
     assert!(ok, "the sound contents boundary must be green:\n{all}");
 }
 
+/// A BOOT-owned voice takes the worker off the table, named as the handle that
+/// did it.
+///
+/// The one class that answers a boundary with a refusal rather than a restore:
+/// a voice's contents are its position in a buffer, that position advances on
+/// its own with the wall clock, and nothing can put it back -- `SoundSource`
+/// implements no `try_seek` so rodio's default answers `NotSupported`, and a
+/// voice whose samples ran out cannot be restarted at all.
+///
+/// Two invocations, because the arms differ in a `@sim_env` value and so are
+/// different boot signatures by construction. The second is what scopes the
+/// refusal to BOOT: an entry's own voice is an extra the class diff destroys,
+/// and its successor still shares the process.
+#[test]
+fn a_boot_voice_takes_the_worker_off_the_table() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "bitgun",
+        "-j",
+        "1",
+        "b3_voice_boot_live",
+        "b3_voice_boot_follows",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 2,
+        "a boot voice cannot cross a boundary, so the successor must be RERUN \
+         in a fresh process: {boots} boots\n{all}"
+    );
+    assert!(
+        all.contains("ended its worker: boot state whose contents cannot be reconstructed: voice:"),
+        "and the refusal must name the handle that caused it:\n{all}"
+    );
+    assert!(ok, "while every entry still runs and passes:\n{all}");
+
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "bitgun",
+        "-j",
+        "1",
+        "b3_voice_entry_only",
+        "b3_voice_entry_only_follows",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 1,
+        "an ENTRY's voice is an extra the diff destroys, so its successor \
+         still follows it in one process: {boots} boots\n{all}"
+    );
+    assert!(
+        !all.contains("ended its worker"),
+        "and nothing about that boot world is unreturnable:\n{all}"
+    );
+    assert!(ok, "with both entries green:\n{all}");
+}
+
 /// Run `rock` and return `(exit_ok, stdout, stderr)` WITHOUT asserting on the
 /// exit code. The multi-order gate deliberately exits nonzero on a corpus that
 /// cannot populate every arm, and that refusal is part of what is under test.
