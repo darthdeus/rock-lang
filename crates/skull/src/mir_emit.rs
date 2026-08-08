@@ -812,7 +812,25 @@ impl skull_mir::reach::ReachPolicy for LuaReach<'_> {
         // The edge a declaration-keyed walk could not carry: a specialized body
         // is lowered under its instantiation, so it reaches callees, globals and
         // FURTHER specializations no shared body mentions.
-        succs.extend(specs.iter().map(|d| EmittedBodyId::new(d.func, d.key.clone())));
+        //
+        // It is also the edge that can fail to terminate. Polymorphic recursion
+        // demands a strictly deeper instantiation at every step, so each node is
+        // DISTINCT and the walk's own dedup can never close the loop -- before
+        // E1 the shared generic body absorbed the recursion, and removing it is
+        // what turned a compiling program into a hanging compiler. Bounded by
+        // the same `MAX_INSTANTIATION_DEPTH` over the same `MonoTy::depth` the
+        // instance graph uses, so the two agree on what does not terminate.
+        //
+        // Emission REJECTS where the graph merely declines to expand: the call
+        // site already spells the specialized name, so skipping the body would
+        // ship a call to a definition nothing writes.
+        for d in specs.iter() {
+            if let Some((name, err)) = too_deep_to_instantiate(self.ws, d) {
+                self.errs.push((name, err));
+                continue;
+            }
+            succs.push(EmittedBodyId::new(d.func, d.key.clone()));
+        }
         Ok(succs)
     }
 }
@@ -996,6 +1014,45 @@ impl LiveBodies {
     fn emitted_bodies(&self) -> FxHashSet<EmittedBodyId> {
         self.bodies.clone()
     }
+}
+
+/// The spanned rejection for a specialization demand whose type arguments have
+/// outgrown [`crate::instance_graph::MAX_INSTANTIATION_DEPTH`], or `None` when
+/// it is within bounds.
+///
+/// This is the emission side of plan S 0h's `ChangingInstanceRecursion` call --
+/// changing-instance recursion is REJECT, and the rejection has to come from
+/// the INSTANCE, because E1 leaves no declaration body to reject from. The
+/// depth test is the graph's: one `MonoTy::depth`, one constant, so "does this
+/// instantiation terminate" has a single answer on both sides.
+///
+/// Depth is the right discriminant rather than a chain walk: a recursion whose
+/// arguments do not change is same-instance recursion, which is legal and which
+/// the walk's dedup already closes. Only a chain that grows its arguments
+/// diverges, and growth is exactly what depth measures.
+fn too_deep_to_instantiate(
+    ws: &Workspace,
+    d: &skull_mir::bound::SpecDemand,
+) -> Option<(String, CompilerError)> {
+    let depth = d.key.iter().flatten().map(|t| t.depth()).max().unwrap_or(0);
+    if depth <= crate::instance_graph::MAX_INSTANTIATION_DEPTH {
+        return None;
+    }
+    let f = &ws.module(d.func.module).functions[d.func.func];
+    let at = d.key.iter().flatten().max_by_key(|t| t.depth()).map(|t| t.render()).unwrap_or_default();
+    let name = skull_mir::mangle::spec_fn_name(ws, f, &d.key).unwrap_or_else(|| f.name.to_string());
+    Some((name, CompilerError::new_with_label(
+        f.name_span,
+        format!(
+            "polymorphic recursion: instantiating `{}` at `{at}` exceeds the \
+             instantiation depth limit of {}. A recursive call whose type \
+             arguments GROW never terminates -- each call needs a new body -- so \
+             it is rejected rather than expanded. Same-instance recursion (type \
+             arguments unchanged) is unaffected.",
+            f.name,
+            crate::instance_graph::MAX_INSTANTIATION_DEPTH,
+        ),
+    )))
 }
 
 fn live_bodies(

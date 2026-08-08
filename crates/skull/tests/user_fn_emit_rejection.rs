@@ -5,27 +5,75 @@
 //! shipped as a missing global and died at runtime as a nil call.
 use crate::common::{emit_mir, try_emit_module};
 
-// `rec` is self-recursive AND bounded: never inlinable, no standalone emission,
-// so `main`'s residual call can never resolve. This must be a compile error.
-const RECURSIVE_BOUNDED_CALLER: &str = r#"
-fn rec<I: Iterator<int>>(it: I) -> int {
-    return rec(it)
+// CHANGING-INSTANCE RECURSION: `rec<T>` calls itself at `[T]`, so every call
+// needs a body for a strictly deeper type and the chain never closes. Chosen
+// because it is unemittable BY DECISION and permanently so -- plan S 0h decided
+// changing-instance recursion is a REJECT -- rather than because some gap has
+// not been closed yet.
+//
+// The previous fixture was a self-recursive BOUNDED fn, justified as having "no
+// standalone emission". D-1 gave bounded bodies exactly that, so the fixture
+// compiled fine and the test failed open. That is the trap `CLAUDE.md` names:
+// a test whose fixture is an open gap goes green when the gap closes.
+const POLYMORPHIC_RECURSION: &str = r#"
+fn rec<T>(x: T, n: int) -> int {
+    if n <= 0 { return 0 }
+    return rec([x], n - 1)
 }
 
 fn main() {
-    print(rec([1].iter()))
+    print("{rec(1, 3)}")
 }
 "#;
 
+// The admission control for the rejection: recursion whose type arguments do
+// NOT change is same-instance recursion, which is legal and must keep
+// compiling. Without it the rejection above could be "generic recursion is
+// refused", which would be a different and much worse rule.
+const SAME_INSTANCE_RECURSION: &str = r#"
+fn countdown<T>(x: T, n: int) -> int {
+    if n <= 0 { return 0 }
+    return 1 + countdown(x, n - 1)
+}
+
+fn main() {
+    print("{countdown(1, 5)}")
+}
+"#;
+
+/// An unemittable user fn REJECTS, and under E1 the rejection comes from the
+/// INSTANCE -- there is no declaration body left to reject from.
+///
+/// Before this, emission did not reject: it HUNG. Each call demanded a strictly
+/// deeper instantiation, every node was distinct, and the reachability walk's
+/// own dedup could never close the loop. Pre-E1 the shared generic body absorbed
+/// the recursion, so removing that body is what turned a compiling program into
+/// a non-terminating compiler -- measured at the CLI, `rock run` timed out at 60s
+/// with no output while `--backend bone` type-checked it in 14ms.
 #[test]
 fn user_fn_emit_failure_is_a_hard_error() {
-    let err = try_emit_module(RECURSIVE_BOUNDED_CALLER)
+    let err = try_emit_module(POLYMORPHIC_RECURSION)
         .expect_err("an unemittable user fn must reject, not silently skip");
     assert!(
         err.message.contains("rec"),
         "error should name the offending call chain: {}",
         err.message
     );
+    assert!(
+        err.message.contains("polymorphic recursion"),
+        "the rejection must name the CAUSE, so it is distinguishable from any \
+         other emit failure that happens to mention `rec`: {}",
+        err.message
+    );
+}
+
+/// Same-instance recursion still emits. This is the half that makes the
+/// rejection a statement about GROWTH rather than about recursion.
+#[test]
+fn same_instance_recursion_still_emits() {
+    if let Err(e) = try_emit_module(SAME_INSTANCE_RECURSION) {
+        panic!("recursion whose type arguments do not change must still emit: {}", e.message);
+    }
 }
 
 // The stdlib's known parity gaps (`flat_vec_new`/`grow`, generic bodies that
