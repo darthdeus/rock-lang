@@ -302,8 +302,195 @@ pub struct Unresolved {
     pub span: Span,
 }
 
+/// WHICH body's walk produced a set of facts.
+///
+/// The two kinds are not a labelling of one thing: an instance's callees are
+/// its own obligations and carry an [`Edge`] and a [`Site`], while an
+/// always-emitted body's callees are ROOTS with neither -- production emits
+/// that body regardless of any call (`mir_emit::reachable_fns`'s
+/// `extra_roots`), so nothing points at them.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Owner {
+    /// One instance's own body, plus the struct-field defaults it injects.
+    Instance(Instance),
+    /// A global initializer or a decorator definition.
+    AlwaysEmitted(ModuleId, BodyOwner),
+}
+
+impl Owner {
+    /// A total order. Neither `ModuleId` nor `BodyOwner` has one, and owners are
+    /// ordered so that derivation from the contribution set is a function of the
+    /// SET rather than of the order the walk discovered it in.
+    fn ord_key(&self) -> (u8, Option<&Instance>, usize, u8, u32) {
+        match self {
+            Self::Instance(i) => (0, Some(i), 0, 0, 0),
+            Self::AlwaysEmitted(m, o) => {
+                let (tag, idx) = body_owner_key(*o);
+                (1, None, m.index(), tag, idx)
+            }
+        }
+    }
+
+    pub fn instance(&self) -> Option<&Instance> {
+        match self {
+            Self::Instance(i) => Some(i),
+            Self::AlwaysEmitted(..) => None,
+        }
+    }
+}
+
+impl Ord for Owner {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.ord_key().cmp(&other.ord_key())
+    }
+}
+
+impl PartialOrd for Owner {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// A `BodyOwner`'s discriminant and index, so owners can be ordered and
+/// compared. Total over the enum on purpose -- a new variant is a compile
+/// error here rather than a silent collapse onto an existing tag.
+fn body_owner_key(o: BodyOwner) -> (u8, u32) {
+    match o {
+        BodyOwner::Function(i) => (0, i.into_raw().into_u32()),
+        BodyOwner::Decorator(i) => (1, i.into_raw().into_u32()),
+        BodyOwner::Global(i) => (2, i.into_raw().into_u32()),
+        BodyOwner::StructDefaults(i) => (3, i.into_raw().into_u32()),
+        BodyOwner::Enum(i) => (4, i.into_raw().into_u32()),
+        BodyOwner::Newtype(i) => (5, i.into_raw().into_u32()),
+    }
+}
+
+/// **Everything ONE body's walk produced**, kept as the primary record the
+/// graph's flat fields are DERIVED from rather than accumulated into them.
+///
+/// A re-walk REPLACES a contribution wholesale and the flat fields are rebuilt
+/// from the whole set, which is what makes removal expressible at all: an
+/// accumulated total can only be added to, and a subtraction from one cannot be
+/// checked against the population it summarizes.
+#[derive(Clone, Default, Debug)]
+pub struct Contribution {
+    /// Outgoing edges. Empty for an always-emitted body, whose callees are
+    /// roots rather than obligations -- see [`Self::always_emitted_targets`].
+    pub edges: Vec<Edge>,
+    pub call_sites: BTreeMap<Site, SiteRecord>,
+    pub duplicate_sites: Vec<Site>,
+    pub unresolved: Vec<Unresolved>,
+    pub rejections: Vec<Rejection>,
+    pub storage_failures: Vec<MonoTyReason>,
+    pub erased_entries: BTreeSet<String>,
+    pub always_emitted_targets: BTreeSet<Instance>,
+    /// Always-emitted call sites that could not instantiate, by callee name.
+    pub always_emitted_holes: Vec<(String, AlwaysEmittedFailure)>,
+    /// Every instance this walk reached, with the substitution it reached it
+    /// UNDER. [`InstanceGraph::substitutions`] is derived from these, so an
+    /// instance whose only caller is gone loses its substitution with it.
+    pub reached: Vec<(Instance, MonoSubst)>,
+    /// Concrete conformance witnesses this walk supplied to its callees.
+    pub bound_trees: Vec<(Instance, InstanceBoundTree)>,
+    /// The struct-field-default bodies this walk INJECTED, by declaring module
+    /// index and struct index. Recorded even when the injected initializers
+    /// resolve no callee at all: an edit that ADDS a call to one of them has to
+    /// re-walk this owner, and a set derived from the sites it happened to
+    /// produce would be empty in exactly that case.
+    pub defaults_used: BTreeSet<(usize, u32)>,
+    /// Whether the walk ENTERED the body. False for a boundary, a body with no
+    /// usable inference, and a depth-capped instance.
+    pub expanded: bool,
+    /// The expansion was cut by [`MAX_INSTANTIATION_DEPTH`].
+    pub depth_capped: bool,
+    pub sites_attempted: usize,
+    pub always_emitted_seeds: usize,
+    pub synthesized_examined: usize,
+    pub synthesized_approximated: usize,
+}
+
+/// **The one walk context.** A full build and an incremental re-walk both run
+/// through it, so neither can record a fact the other does not.
+///
+/// It holds the arena (which is shared and monotonic), the owner's OWN
+/// conformance witnesses -- the single cross-owner read the walk makes -- and
+/// the contribution being produced. Nothing else of the graph is reachable
+/// from here, which is what stops a walk from depending on what some other
+/// owner happened to record first.
+struct Walk<'a> {
+    arena: &'a mut MonoArena,
+    owner_tree: Option<&'a InstanceBoundTree>,
+    out: &'a mut Contribution,
+}
+
+impl Walk<'_> {
+    /// Record what one source operation resolved to.
+    ///
+    /// Every recorder funnels through here, so a site cannot be recorded in one
+    /// place and resolved in another. A repeat key is kept as a finding rather
+    /// than overwritten: silently replacing it would make the second operation
+    /// vanish from the tables while the counts still looked total.
+    fn record_site(
+        &mut self,
+        from: Option<&Instance>,
+        site: Site,
+        outcome: SiteOutcome,
+        span: Span,
+    ) {
+        self.out.sites_attempted += 1;
+        if from.is_none() {
+            return;
+        }
+        let prev = self.out.call_sites.insert(site.clone(), SiteRecord { outcome, span });
+        if prev.is_some() {
+            self.out.duplicate_sites.push(site);
+        }
+    }
+
+    /// Reach `to` at `subst`.
+    ///
+    /// The substitution must be a FUNCTION OF THE INSTANCE -- a specialized
+    /// body's shape comes from declarations plus the instance substitution, so
+    /// two callers reaching one instance must agree on it. That is not
+    /// self-evident: the `VarId` keys come from `generic_var_of` reading the
+    /// CALLER's `BodyInference`, so nothing structural forces agreement. Every
+    /// reach is kept HERE, with its own caller; the comparison that decides
+    /// agreement happens once, over the whole contribution set
+    /// ([`InstanceGraph::derive`]), because the walk is no longer the thing
+    /// that owns the answer.
+    fn reach(&mut self, to: Instance, subst: MonoSubst) {
+        self.out.reached.push((to, subst));
+    }
+
+    fn record_bound_tree(&mut self, instance: &Instance, incoming: InstanceBoundTree) {
+        self.out.bound_trees.push((instance.clone(), incoming));
+    }
+
+    /// A call from an always-emitted body whose instantiation failed. There is
+    /// no `from` instance to file an [`Unresolved`] or a [`Rejection`] against,
+    /// but the REASON and the SPAN are the same ones those carry and are kept.
+    ///
+    /// Per SITE, not per reason: two failures of one callee are two diagnostics
+    /// at two places, and a set keyed on the reason reports them as one fact
+    /// with no location.
+    fn record_always_emitted_hole(
+        &mut self,
+        name: String,
+        outcome: AlwaysEmittedOutcome,
+        span: Span,
+    ) {
+        self.out.always_emitted_holes.push((name, AlwaysEmittedFailure { outcome, span }));
+    }
+}
+
 pub struct InstanceGraph {
     pub arena: MonoArena,
+    /// The primary records. Every flat field below is derived from these plus
+    /// [`Self::root_instances`]; nothing writes a flat field directly.
+    pub contributions: BTreeMap<Owner, Contribution>,
+    /// Instances production roots regardless of any call. A reachability walk
+    /// starts here and at every always-emitted target.
+    pub root_instances: BTreeSet<Instance>,
     pub instances: BTreeSet<Instance>,
     pub edges: Vec<Edge>,
     pub unresolved: Vec<Unresolved>,
@@ -742,50 +929,6 @@ impl InstanceGraph {
         v
     }
 
-    /// Reach `to` at `subst`: record the instance, keep its substitution, and
-    /// worklist it the first time.
-    ///
-    /// The substitution must be a FUNCTION OF THE INSTANCE -- a specialized
-    /// body's shape comes from declarations plus the instance substitution, so
-    /// two callers reaching one instance must agree on it. That is not
-    /// self-evident: the `VarId` keys come from `generic_var_of` reading the
-    /// CALLER's `BodyInference`, so nothing structural forces agreement, and
-    /// the worklist keeps only whichever arrived first. Disagreements are
-    /// recorded rather than resolved by arrival order.
-    fn reach(
-        &mut self,
-        work: &mut Vec<(Instance, MonoSubst)>,
-        to: Instance,
-        subst: MonoSubst,
-    ) {
-        // Roots come through here too: a non-generic instance's substitution is
-        // EMPTY, not absent, and seeding them directly is what left corpus
-        // instances with no recorded substitution at all.
-        match self.substitutions.get(&to) {
-            Some(prev) => {
-                // The COMPARISONS are the denominator, not the recorded
-                // substitutions: an instance reached exactly once never runs
-                // this arm, and counting recordings would report agreement the
-                // walk never tested.
-                self.subst_comparisons += 1;
-                *self.subst_compared.entry(to.clone()).or_insert(0) += 1;
-                if *prev != subst {
-                    self.subst_disagreements.push(SubstDisagreement {
-                        instance: to.clone(),
-                        kept: prev.clone(),
-                        discarded: subst.clone(),
-                    });
-                }
-            }
-            None => {
-                self.substitutions.insert(to.clone(), subst.clone());
-            }
-        }
-        if self.instances.insert(to.clone()) {
-            work.push((to, subst));
-        }
-    }
-
     /// Instances with no recorded substitution. Must be empty: a non-generic
     /// instance's substitution is EMPTY, not absent, and a `ConcreteBody`
     /// cannot be built for a body whose substitution the walk never kept.
@@ -797,73 +940,6 @@ impl InstanceGraph {
             .collect()
     }
 
-    /// Record what one source operation resolved to.
-    ///
-    /// Every recorder funnels through here, so a site cannot be recorded in one
-    /// place and resolved in another. A repeat key is kept as a finding rather
-    /// than overwritten: silently replacing it would make the second operation
-    /// vanish from the tables while the counts still looked total.
-    fn record_site(&mut self, from: Option<&Instance>, site: Site, outcome: SiteOutcome, span: Span) {
-        self.sites_attempted += 1;
-        let Some(from) = from else { return };
-        let prev = self
-            .call_sites
-            .entry(from.clone())
-            .or_default()
-            .insert(site.clone(), SiteRecord { outcome, span });
-        if prev.is_some() {
-            self.duplicate_sites.push((from.clone(), site));
-        }
-    }
-
-    fn record_bound_tree(&mut self, instance: &Instance, incoming: InstanceBoundTree) {
-        match self.bound_trees.get(instance) {
-            Some(recorded) if recorded != &incoming => {
-                self.bound_tree_comparisons += 1;
-                self.bound_tree_disagreements.push(BoundTreeDisagreement {
-                    instance: instance.clone(),
-                    recorded: recorded.clone(),
-                    incoming,
-                });
-            }
-            Some(_) => {
-                self.bound_tree_comparisons += 1;
-            }
-            None => {
-                self.bound_trees.insert(instance.clone(), incoming);
-            }
-        }
-    }
-
-    /// A generic function production emits regardless of any call, that no call
-    /// instantiates.
-    fn record_generic_root(&mut self, name: String) {
-        self.uninstantiated_roots.entry(name).or_default().generic_root = true;
-    }
-
-    fn excuse_generic_root(&mut self, reason: &'static str, name: String) {
-        self.excused_generic_roots.entry(reason).or_default().insert(name);
-    }
-
-    /// A call from an always-emitted body whose instantiation failed. There is
-    /// no `from` instance to file an [`Unresolved`] or a [`Rejection`] against,
-    /// but the REASON and the SPAN are the same ones those carry and are kept.
-    ///
-    /// Per SITE, not per reason: two failures of one callee are two diagnostics
-    /// at two places, and a set keyed on the reason reports them as one fact
-    /// with no location.
-    fn record_always_emitted_hole(
-        &mut self,
-        name: String,
-        outcome: AlwaysEmittedOutcome,
-        span: Span,
-    ) {
-        self.uninstantiated_roots
-            .entry(name)
-            .or_default()
-            .always_emitted_sites
-            .push(AlwaysEmittedFailure { outcome, span });
-    }
 
     /// Which recorded facts could produce a located error and which could not
     /// (plan S 2: "retain each edge's source span, for good errors at unresolved
@@ -1176,6 +1252,18 @@ pub struct RecursionCensus {
 /// discovery instead of re-deriving it. `perturb` reverses the seeding order;
 /// the manifest must be identical either way (plan S 20g.4).
 pub fn build(ws: &Workspace, roots: Vec<FuncRef>, perturb: bool) -> InstanceGraph {
+    let mut g = InstanceGraph::empty();
+    g.seed_roots(ws, canonical_roots(ws, roots, perturb));
+    let pending = g.always_emitted_owners(ws);
+    g.run(ws, pending);
+    g.derive(ws);
+    g
+}
+
+/// Production's roots as the graph keys them: bone's collapsed representative,
+/// deduplicated and ordered. `perturb` reverses the seeding order; the graph
+/// must mean the same thing either way (plan S 20g.4).
+fn canonical_roots(ws: &Workspace, roots: Vec<FuncRef>, perturb: bool) -> Vec<FuncRef> {
     let mut roots: Vec<FuncRef> =
         roots.into_iter().map(|r| skull_mir::lower::canonical_variant(ws, r)).collect();
     roots.sort_by_key(|r| (r.module.raw(), r.func.into_raw().into_u32()));
@@ -1183,9 +1271,15 @@ pub fn build(ws: &Workspace, roots: Vec<FuncRef>, perturb: bool) -> InstanceGrap
     if perturb {
         roots.reverse();
     }
+    roots
+}
 
-    let mut g = InstanceGraph {
+impl InstanceGraph {
+    fn empty() -> Self {
+        InstanceGraph {
         arena: MonoArena::new(),
+        contributions: BTreeMap::new(),
+        root_instances: BTreeSet::new(),
         instances: BTreeSet::new(),
         edges: Vec::new(),
         unresolved: Vec::new(),
@@ -1214,107 +1308,531 @@ pub fn build(ws: &Workspace, roots: Vec<FuncRef>, perturb: bool) -> InstanceGrap
         bound_trees: BTreeMap::new(),
         bound_tree_disagreements: Vec::new(),
         bound_tree_comparisons: 0,
-    };
+        }
+    }
 
-    // A root that is generic has no instantiation of its own; it is a shared
-    // body until a call supplies one. Recorded rather than invented.
-    let mut work: Vec<(Instance, MonoSubst)> = Vec::new();
-    for r in roots {
-        let f = &ws.module(r.module).functions[r.func];
-        if !f.generics.is_empty() {
-            match generic_root_obligation(ws, r, f) {
-                Some(reason) => g.excuse_generic_root(reason, mangle_fn(ws, f)),
-                None => g.record_generic_root(mangle_fn(ws, f)),
+    /// The instances production roots regardless of any call, and the generic
+    /// roots no instantiation can discharge.
+    ///
+    /// Interface-tier state: it is a function of the ROOT SET, so a body edit
+    /// leaves it alone and re-seeding it is cheap enough to do unconditionally
+    /// rather than keep a second answer about when it moved.
+    fn seed_roots(&mut self, ws: &Workspace, roots: Vec<FuncRef>) {
+        self.root_instances.clear();
+        self.uninstantiated_roots.clear();
+        self.excused_generic_roots.clear();
+        // A root that is generic has no instantiation of its own; it is a
+        // shared body until a call supplies one. Recorded rather than invented.
+        for r in roots {
+            let f = &ws.module(r.module).functions[r.func];
+            if !f.generics.is_empty() {
+                match generic_root_obligation(ws, r, f) {
+                    Some(reason) => {
+                        self.excused_generic_roots
+                            .entry(reason)
+                            .or_default()
+                            .insert(mangle_fn(ws, f));
+                    }
+                    None => {
+                        self.uninstantiated_roots
+                            .entry(mangle_fn(ws, f))
+                            .or_default()
+                            .generic_root = true;
+                    }
+                }
+                continue;
             }
-            continue;
+            self.root_instances.insert(Instance { func: r, args: Vec::new() });
         }
-        let inst = Instance { func: r, args: Vec::new() };
-        g.reach(&mut work, inst, MonoSubst::default());
     }
 
-    // Globals and decorators have no `Instance` origin, so their body edges
-    // seed the same worklist as function roots.
-    for module in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
-        let Some(inference) = ws.inference(module.id) else { continue };
-        let mut owners: Vec<BodyOwner> = module
-            .bodies
-            .keys()
-            .filter(|o| matches!(o, BodyOwner::Decorator(_) | BodyOwner::Global(_)))
-            .copied()
-            .collect();
-        owners.sort_by_key(|o| format!("{o:?}"));
-        for owner in owners {
-            let Some(inf) = inference.per_fn.get(&owner) else { continue };
-            let body = module.bodies.get(&owner);
-            walk_body_edges(
-                &mut g, &mut work, ws, inf, body, None, &MonoSubst::default(),
-                &SiteDomain::Own, None,
+    /// Globals and decorators have no `Instance` origin, so their bodies are
+    /// owners in their own right.
+    fn always_emitted_owners(&self, ws: &Workspace) -> Vec<Owner> {
+        let mut out = Vec::new();
+        for module in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
+            let Some(inference) = ws.inference(module.id) else { continue };
+            let mut owners: Vec<BodyOwner> = module
+                .bodies
+                .keys()
+                .filter(|o| matches!(o, BodyOwner::Decorator(_) | BodyOwner::Global(_)))
+                .copied()
+                .collect();
+            owners.sort_by_key(|o| body_owner_key(*o));
+            for owner in owners {
+                if inference.per_fn.contains_key(&owner) {
+                    out.push(Owner::AlwaysEmitted(module.id, owner));
+                }
+            }
+        }
+        out
+    }
+
+    /// Expand owners until nothing new is reached.
+    ///
+    /// `pending` is the set to (re-)walk unconditionally; everything they reach
+    /// that has no contribution yet joins them. A full build hands it the
+    /// always-emitted bodies and lets the roots come through
+    /// [`Self::merge_reached`]; an update hands it the owners whose bodies
+    /// changed. One driver, so the two cannot walk differently.
+    fn run(&mut self, ws: &Workspace, mut pending: Vec<Owner>) -> RunStats {
+        let mut stats = RunStats::default();
+        for i in self.root_instances.clone() {
+            self.merge_reach(i.clone(), MonoSubst::default());
+            if !self.contributions.contains_key(&Owner::Instance(i.clone())) {
+                pending.push(Owner::Instance(i));
+            }
+        }
+        // A conformance tree is supplied by an owner's CALLER, so an owner
+        // walked before its caller was re-walked read a stale one. Recorded
+        // here and re-checked below rather than assumed away by walk order.
+        let mut walked_with: BTreeMap<Instance, InstanceBoundTree> = BTreeMap::new();
+        let mut rounds = 0usize;
+        loop {
+            while let Some(owner) = pending.pop() {
+                if let Owner::Instance(i) = &owner {
+                    walked_with.insert(
+                        i.clone(),
+                        self.bound_trees.get(i).cloned().unwrap_or_default(),
+                    );
+                }
+                let c = self.expand(ws, &owner);
+                stats.expanded += 1;
+                pending.extend(self.commit(owner, c));
+            }
+            // The fixpoint: an owner whose witnesses moved while it was already
+            // walked must be walked again, or its callees are the ones the old
+            // witnesses selected.
+            let stale: Vec<Owner> = walked_with
+                .iter()
+                .filter(|(i, used)| {
+                    self.contributions.contains_key(&Owner::Instance((*i).clone()))
+                        && self.bound_trees.get(*i).unwrap_or(&InstanceBoundTree::default())
+                            != *used
+                })
+                .map(|(i, _)| Owner::Instance(i.clone()))
+                .collect();
+            if stale.is_empty() {
+                break;
+            }
+            rounds += 1;
+            assert!(
+                rounds < 64,
+                "conformance witnesses did not settle after {rounds} rounds; \
+                 {} owners still disagree with what they were walked with",
+                stale.len()
             );
+            for owner in &stale {
+                self.contributions.remove(owner);
+            }
+            pending = stale;
+        }
+        stats
+    }
+
+    /// Walk ONE owner's body. The only producer of a [`Contribution`], so a
+    /// full build and an incremental re-walk cannot record different facts.
+    fn expand(&mut self, ws: &Workspace, owner: &Owner) -> Contribution {
+        let mut out = Contribution::default();
+        match owner {
+            Owner::AlwaysEmitted(module, body_owner) => {
+                let Some(inf) =
+                    ws.inference(*module).and_then(|ir| ir.per_fn.get(body_owner))
+                else {
+                    return out;
+                };
+                let body = ws.module(*module).bodies.get(body_owner);
+                let mut w = Walk { arena: &mut self.arena, owner_tree: None, out: &mut out };
+                walk_body_edges(
+                    &mut w, ws, inf, body, None, &MonoSubst::default(), &SiteDomain::Own, None,
+                );
+            }
+            Owner::Instance(inst) => {
+                // The one admissibility oracle, shared with both emitters. The
+                // graph DECLINES to expand where they reject: a capped instance
+                // is a changing-instance-recursion candidate, not yet a verdict.
+                if skull_mir::monoty::too_deep_to_instantiate(
+                    inst.args.iter().map(|a| self.arena.get(*a)),
+                )
+                .is_some()
+                {
+                    out.depth_capped = true;
+                    return out;
+                }
+                let FunctionBody::Ready { inf, body } = function_body(ws, inst.func) else {
+                    return out;
+                };
+                // A boundary's Rock body is not the one emission uses -- it
+                // emits the foreign text -- so the walk STOPS here. Marking it
+                // unexpanded while continuing to enumerate its calls was the
+                // worst of both: the closure gate excused the instance as having
+                // no callees while the graph carried them, and a
+                // `@native_required` fallback body reached callees emission
+                // never routes through.
+                let f = &ws.module(inst.func.module).functions[inst.func.func];
+                if declared_boundary(f).is_some() {
+                    return out;
+                }
+                out.expanded = true;
+                // A body's own substitution is the one its caller reached it
+                // under, which the contribution set already answers. An
+                // instance with no record is an invariant break, not a body to
+                // walk with an empty one.
+                let subst = self
+                    .substitutions
+                    .get(inst)
+                    .cloned()
+                    .expect("every reached instance has a recorded substitution");
+                let owner_tree = self.bound_trees.get(inst).cloned().unwrap_or_default();
+                let mut w = Walk {
+                    arena: &mut self.arena,
+                    owner_tree: Some(&owner_tree),
+                    out: &mut out,
+                };
+                walk_body_edges(
+                    &mut w, ws, inf, Some(body), Some(inst), &subst, &SiteDomain::Own, None,
+                );
+                walk_struct_default_edges(&mut w, ws, body, inst, &subst);
+            }
+        }
+        out
+    }
+
+    /// Install a contribution and return the owners it newly demands.
+    fn commit(&mut self, owner: Owner, c: Contribution) -> Vec<Owner> {
+        let mut demanded = Vec::new();
+        // Every callee is in `reached`, an always-emitted body's included --
+        // `always_emitted_targets` marks which of them are ROOTS, it is not a
+        // second population. Merging it again would reach each of those with an
+        // EMPTY substitution and manufacture a disagreement with its own.
+        for (to, subst) in &c.reached {
+            self.merge_reach(to.clone(), subst.clone());
+            if !self.contributions.contains_key(&Owner::Instance(to.clone())) {
+                demanded.push(Owner::Instance(to.clone()));
+            }
+        }
+        for (i, tree) in &c.bound_trees {
+            self.merge_bound_tree(i, tree.clone());
+        }
+        self.contributions.insert(owner, c);
+        demanded.sort();
+        demanded.dedup();
+        demanded
+    }
+
+    /// One reach, merged into the substitution record.
+    ///
+    /// The COMPARISONS are the denominator, not the recorded substitutions: an
+    /// instance reached exactly once never runs the comparison arm, and
+    /// counting recordings would report an agreement nothing tested.
+    fn merge_reach(&mut self, to: Instance, subst: MonoSubst) {
+        match self.substitutions.get(&to) {
+            Some(prev) => {
+                self.subst_comparisons += 1;
+                *self.subst_compared.entry(to.clone()).or_insert(0) += 1;
+                if *prev != subst {
+                    self.subst_disagreements.push(SubstDisagreement {
+                        instance: to,
+                        kept: prev.clone(),
+                        discarded: subst,
+                    });
+                }
+            }
+            None => {
+                self.substitutions.insert(to, subst);
+            }
         }
     }
 
-    while let Some((inst, subst)) = work.pop() {
-        // The one admissibility oracle, shared with both emitters. The graph
-        // DECLINES to expand where they reject: a capped instance is a
-        // changing-instance-recursion candidate, not yet a verdict.
-        if skull_mir::monoty::too_deep_to_instantiate(
-            inst.args.iter().map(|a| g.arena.get(*a)),
-        )
-        .is_some()
-        {
-            g.depth_capped.push(inst);
-            continue;
-        }
-        let FunctionBody::Ready { inf, body } = function_body(ws, inst.func) else {
-            continue;
-        };
-        let module = ws.module(inst.func.module);
-        // A boundary's Rock body is not the one emission uses -- it emits the
-        // foreign text -- so the walk STOPS here. Marking it unexpanded while
-        // continuing to enumerate its calls was the worst of both: the closure
-        // gate excused the instance as having no callees while the graph carried
-        // them, and a `@native_required` fallback body reached callees emission
-        // never routes through.
-        let f = &module.functions[inst.func.func];
-        if declared_boundary(f).is_some() {
-            continue;
-        }
-        g.expanded.insert(inst.clone());
-
-        walk_body_edges(
-            &mut g, &mut work, ws, inf, Some(body), Some(&inst), &subst,
-            &SiteDomain::Own, None,
-        );
-        walk_struct_default_edges(&mut g, &mut work, ws, body, &inst, &subst);
-    }
-
-    // Which holes nevertheless have concrete instances from other call sites.
-    // A post-pass because a root is recorded before the worklist runs, so at
-    // insertion time no instance of it exists yet -- which is how a name a
-    // later call fully instantiated went on reading as having no concrete body
-    // at all.
-    if !g.uninstantiated_roots.is_empty() {
-        let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-        for i in &g.instances {
-            let f = &ws.module(i.func.module).functions[i.func.func];
-            *counts.entry(mangle_fn(ws, f)).or_default() += 1;
-        }
-        for (name, hole) in g.uninstantiated_roots.iter_mut() {
-            hole.instances = counts.get(name).copied().unwrap_or(0);
+    fn merge_bound_tree(&mut self, instance: &Instance, incoming: InstanceBoundTree) {
+        match self.bound_trees.get(instance) {
+            Some(recorded) if recorded != &incoming => {
+                self.bound_tree_comparisons += 1;
+                self.bound_tree_disagreements.push(BoundTreeDisagreement {
+                    instance: instance.clone(),
+                    recorded: recorded.clone(),
+                    incoming,
+                });
+            }
+            Some(_) => {
+                self.bound_tree_comparisons += 1;
+            }
+            None => {
+                self.bound_trees.insert(instance.clone(), incoming);
+            }
         }
     }
 
-    record_inline_body_deps(&mut g, ws);
-    detect_changing_instance_recursion(&mut g, ws);
-    classify_boundaries(&mut g, ws);
-    record_coroutine_helpers(&mut g, ws);
-    g
+    /// **Rebuild every flat field from the contribution set**, prune what no
+    /// root reaches, and re-run the whole-graph post-passes.
+    ///
+    /// This is the only writer of the flat fields, so "what does the graph
+    /// say" has one answer whether it was just built or just updated. It
+    /// returns the instances it pruned.
+    fn derive(&mut self, ws: &Workspace) -> BTreeSet<Instance> {
+        let live = self.reachable_instances();
+        let pruned: BTreeSet<Instance> = self
+            .contributions
+            .keys()
+            .filter_map(|o| o.instance())
+            .filter(|i| !live.contains(*i))
+            .cloned()
+            .collect();
+        // The arena is NOT pruned with them: an entry outliving its last
+        // instance is exactly what keeps ids stable across edits.
+        self.contributions.retain(|o, _| o.instance().is_none_or(|i| live.contains(i)));
+
+        self.instances = live;
+        self.edges.clear();
+        self.unresolved.clear();
+        self.rejections.clear();
+        self.depth_capped.clear();
+        self.expanded.clear();
+        self.erased_entries.clear();
+        self.storage_failures.clear();
+        self.call_sites.clear();
+        self.duplicate_sites.clear();
+        self.always_emitted_targets.clear();
+        self.sites_attempted = 0;
+        self.always_emitted_seeds = 0;
+        self.synthesized_examined = 0;
+        self.synthesized_approximated = 0;
+        // Re-derived from the reaches that SURVIVED, so a pruned caller takes
+        // its callee's substitution with it.
+        self.substitutions.clear();
+        self.subst_compared.clear();
+        self.subst_comparisons = 0;
+        self.subst_disagreements.clear();
+        self.bound_trees.clear();
+        self.bound_tree_comparisons = 0;
+        self.bound_tree_disagreements.clear();
+        for name in self.uninstantiated_roots.values_mut() {
+            name.always_emitted_sites.clear();
+        }
+
+        for i in self.root_instances.clone() {
+            self.merge_reach(i, MonoSubst::default());
+        }
+        let owners: Vec<Owner> = self.contributions.keys().cloned().collect();
+        for owner in &owners {
+            let c = self.contributions.get(owner).expect("just listed").clone();
+            self.edges.extend(c.edges.iter().cloned());
+            self.unresolved.extend(c.unresolved.iter().cloned());
+            self.rejections.extend(c.rejections.iter().cloned());
+            self.storage_failures.extend(c.storage_failures.iter().cloned());
+            self.erased_entries.extend(c.erased_entries.iter().cloned());
+            self.always_emitted_targets.extend(c.always_emitted_targets.iter().cloned());
+            self.sites_attempted += c.sites_attempted;
+            self.always_emitted_seeds += c.always_emitted_seeds;
+            self.synthesized_examined += c.synthesized_examined;
+            self.synthesized_approximated += c.synthesized_approximated;
+            if let Some(i) = owner.instance() {
+                if c.expanded {
+                    self.expanded.insert(i.clone());
+                }
+                if c.depth_capped {
+                    self.depth_capped.push(i.clone());
+                }
+                if !c.call_sites.is_empty() {
+                    self.call_sites.insert(i.clone(), c.call_sites.clone());
+                }
+                self.duplicate_sites
+                    .extend(c.duplicate_sites.iter().map(|s| (i.clone(), s.clone())));
+            }
+            for (name, failure) in &c.always_emitted_holes {
+                self.uninstantiated_roots
+                    .entry(name.clone())
+                    .or_default()
+                    .always_emitted_sites
+                    .push(failure.clone());
+            }
+            for (to, subst) in &c.reached {
+                self.merge_reach(to.clone(), subst.clone());
+            }
+            for (i, tree) in &c.bound_trees {
+                self.merge_bound_tree(i, tree.clone());
+            }
+        }
+        // Which holes nevertheless have concrete instances from other call
+        // sites. A post-pass because a root is recorded before any body is
+        // walked, so at insertion time no instance of it exists yet -- which is
+        // how a name a later call fully instantiated went on reading as having
+        // no concrete body at all.
+        if !self.uninstantiated_roots.is_empty() {
+            let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+            for i in &self.instances {
+                let f = &ws.module(i.func.module).functions[i.func.func];
+                *counts.entry(mangle_fn(ws, f)).or_default() += 1;
+            }
+            for (name, hole) in self.uninstantiated_roots.iter_mut() {
+                hole.instances = counts.get(name).copied().unwrap_or(0);
+            }
+        }
+
+        record_inline_body_deps(self, ws);
+        detect_changing_instance_recursion(self, ws);
+        classify_boundaries(self, ws);
+        record_coroutine_helpers(self, ws);
+        pruned
+    }
+
+    /// **Update the graph for a BODY-ONLY change**, in place, against the same
+    /// monotonic [`MonoArena`].
+    ///
+    /// `changed` is the reinferred `(ModuleId, BodyOwner)` population
+    /// incremental inference already produces
+    /// (`bone_incremental::UpdateResult::reinferred`). Only the owners those
+    /// bodies belong to are re-walked; everything they newly reach is walked
+    /// too, and everything no root reaches any more is PRUNED -- including
+    /// groups of instances that keep each other alive, which a reference count
+    /// could never drop to zero.
+    ///
+    /// It is the same walk, the same reachability and the same derivation a
+    /// full [`build`] runs; what differs is only which owners are re-walked.
+    /// The arena alone stays monotonic: a pruned instance's interned types go
+    /// unreferenced, which is what keeps ids stable across edits.
+    ///
+    /// **INTERFACE-tier changes are not this function's job.** A changed
+    /// signature moves the root set, the mangling and every caller's
+    /// instantiation; `bone_incremental::UpdateTier` names that case and the
+    /// caller must rebuild instead.
+    pub fn update_bodies(
+        &mut self,
+        ws: &Workspace,
+        roots: Vec<FuncRef>,
+        changed: &[(ModuleId, BodyOwner)],
+    ) -> UpdateStats {
+        let before: BTreeSet<Instance> = self.instances.clone();
+        self.seed_roots(ws, canonical_roots(ws, roots, false));
+
+        let affected = self.affected_owners(ws, changed);
+        for owner in &affected {
+            self.contributions.remove(owner);
+        }
+        let run = self.run(ws, affected.clone());
+        let pruned = self.derive(ws);
+        UpdateStats {
+            affected: affected.len(),
+            expanded: run.expanded,
+            pruned: pruned.len(),
+            newly_reached: self.instances.difference(&before).count(),
+            owners: self.contributions.len(),
+            instances: self.instances.len(),
+        }
+    }
+
+    /// Which owners a changed body invalidates.
+    ///
+    /// Total over [`BodyOwner`] on purpose: an arm that silently did nothing
+    /// would leave a stale contribution behind and the graph would still look
+    /// consistent with itself.
+    fn affected_owners(&self, ws: &Workspace, changed: &[(ModuleId, BodyOwner)]) -> Vec<Owner> {
+        let mut out: Vec<Owner> = Vec::new();
+        for (module, body_owner) in changed {
+            match body_owner {
+                // Every LIVE instance of that declaration. The graph keys
+                // instances on bone's collapsed representative, so a backend
+                // sibling's body reaches its instances through the same
+                // canonicalization `build` seeds roots with.
+                BodyOwner::Function(f) => {
+                    let decl = skull_mir::lower::canonical_variant(
+                        ws,
+                        FuncRef { module: *module, func: *f },
+                    );
+                    out.extend(
+                        self.contributions
+                            .keys()
+                            .filter_map(|o| o.instance())
+                            .filter(|i| i.func == decl)
+                            .map(|i| Owner::Instance(i.clone())),
+                    );
+                }
+                // An owner in its own right.
+                BodyOwner::Decorator(_) | BodyOwner::Global(_) => {
+                    out.push(Owner::AlwaysEmitted(*module, *body_owner));
+                }
+                // Not an owner: its initializers are lowered INTO whichever
+                // instance omits the field, so the affected owners are the
+                // injecting instances. Which literal omits which field is a
+                // property of the struct DECLARATION and of the injecting
+                // body, neither of which a body-only edit to the defaults can
+                // move, so `defaults_used` is the whole population.
+                BodyOwner::StructDefaults(def) => {
+                    let key = (module.index(), def.into_raw().into_u32());
+                    out.extend(
+                        self.contributions
+                            .iter()
+                            .filter(|(_, c)| c.defaults_used.contains(&key))
+                            .filter_map(|(o, _)| o.instance())
+                            .map(|i| Owner::Instance(i.clone())),
+                    );
+                }
+                // No owner and no facts: the walk never enters an enum's or a
+                // newtype's body, so neither contributes an edge, a site or a
+                // type resolution to remove. `expanded_and_boundary_partition`
+                // is what would go red if one ever did.
+                BodyOwner::Enum(_) | BodyOwner::Newtype(_) => {}
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// The instances a ROOT reaches, over the contributions' own edges.
+    ///
+    /// Reachability, not "every instance ever reached": an edit can strand a
+    /// whole group of instances that keep each other alive, and a cycle has no
+    /// member a reference count would ever drop to zero.
+    fn reachable_instances(&self) -> BTreeSet<Instance> {
+        let mut seeds: Vec<Instance> = self.root_instances.iter().cloned().collect();
+        for c in self.contributions.values() {
+            seeds.extend(c.always_emitted_targets.iter().cloned());
+        }
+        let mut live: BTreeSet<Instance> = BTreeSet::new();
+        while let Some(i) = seeds.pop() {
+            if !live.insert(i.clone()) {
+                continue;
+            }
+            let Some(c) = self.contributions.get(&Owner::Instance(i)) else { continue };
+            seeds.extend(c.edges.iter().map(|e| e.to.clone()));
+        }
+        live
+    }
+}
+
+/// What one [`InstanceGraph::run`] actually walked. Operational, and the check
+/// that an update touched the affected region rather than the program.
+#[derive(Default, Debug, Clone, Copy)]
+pub struct RunStats {
+    pub expanded: usize,
+}
+
+/// What one [`InstanceGraph::update_bodies`] did, as a structural census.
+///
+/// Canonical equality against a fresh build cannot tell an update from a hidden
+/// full rebuild -- a rebuild reaches the right answer too. These are what
+/// separate them, which is why they are reported rather than inferred from wall
+/// time: every number here has a total beside it, so "small" is a comparison
+/// rather than an adjective.
+#[derive(Default, Debug, Clone, Copy)]
+pub struct UpdateStats {
+    /// Owners re-walked because their body changed.
+    pub affected: usize,
+    /// Owners walked in total: the affected ones plus everything newly
+    /// reached, plus any re-walk the conformance fixpoint demanded.
+    pub expanded: usize,
+    /// Instances no root reaches any more.
+    pub pruned: usize,
+    /// Instances the graph did not have before.
+    pub newly_reached: usize,
+    pub owners: usize,
+    pub instances: usize,
 }
 
 #[allow(clippy::too_many_arguments)]
 fn walk_body_edges(
-    g: &mut InstanceGraph,
-    work: &mut Vec<(Instance, MonoSubst)>,
+    w: &mut Walk,
     ws: &Workspace,
     inf: &BodyInference,
     body: Option<&bone_semantic::hir::Body>,
@@ -1343,7 +1861,7 @@ fn walk_body_edges(
         let span = body.and_then(|b| b.expr_spans.get(e).copied()).unwrap_or_else(Span::unknown);
         let kind = if bindings.is_some() { EdgeKind::GenericCall } else { EdgeKind::DirectCall };
         if let Some(to) = record_call(
-            g, work, ws, inf, from, subst, callee, bindings, kind, span,
+            w, ws, inf, from, subst, callee, bindings, kind, span,
             Site { domain: domain.clone(), expr: e, op: SiteOp::DirectCall },
         ) {
             resolved_calls.insert(e, to);
@@ -1356,17 +1874,17 @@ fn walk_body_edges(
             let cf = &ws.module(callee.module).functions[callee.func];
             if cf.generics.is_empty() {
                 record_call(
-                    g, work, ws, inf, from, subst, callee, None, EdgeKind::FnValue, span,
+                    w, ws, inf, from, subst, callee, None, EdgeKind::FnValue, span,
                     Site { domain: domain.clone(), expr: e, op: SiteOp::FnValue },
                 );
             } else if let Some(from) = from {
-                g.record_site(
+                w.record_site(
                     Some(from),
                     Site { domain: domain.clone(), expr: e, op: SiteOp::FnValue },
                     SiteOutcome::Failed("generic-fn-value"),
                     span,
                 );
-                g.rejections.push(Rejection {
+                w.out.rejections.push(Rejection {
                     kind: RejectionKind::GenericFnValue,
                     at: from.clone(),
                     span,
@@ -1377,8 +1895,8 @@ fn walk_body_edges(
                     ),
                 });
             } else {
-                g.always_emitted_seeds += 1;
-                g.record_always_emitted_hole(
+                w.out.always_emitted_seeds += 1;
+                w.record_always_emitted_hole(
                     mangle_fn(ws, cf),
                     AlwaysEmittedOutcome::Rejection(RejectionKind::GenericFnValue),
                     span,
@@ -1388,11 +1906,11 @@ fn walk_body_edges(
 
         let mut failures: Vec<(Idx<bone_semantic::hir::Expr>, MonoTyReason)> = Vec::new();
         let sites = compiler_generated_sites(
-            ws, inf, body, subst, &mut g.synthesized_examined, &mut failures,
-            &mut g.synthesized_approximated,
+            ws, inf, body, subst, &mut w.out.synthesized_examined, &mut failures,
+            &mut w.out.synthesized_approximated,
         );
         for (e, reason) in failures {
-            g.storage_failures.push(reason.clone());
+            w.out.storage_failures.push(reason.clone());
             let Some(from) = from else { continue };
             let span = body.expr_spans.get(e).copied().unwrap_or_else(Span::unknown);
             let kind = match reason {
@@ -1401,7 +1919,7 @@ fn walk_body_edges(
                 }
                 _ => RejectionKind::ConcreteTypeUnavailable,
             };
-            g.rejections.push(Rejection {
+            w.out.rejections.push(Rejection {
                 kind,
                 at: from.clone(),
                 span,
@@ -1440,22 +1958,22 @@ fn walk_body_edges(
             match resolved {
                 Some(callee) => {
                     record_call(
-                        g, work, ws, inf, from, subst, callee, None,
+                        w, ws, inf, from, subst, callee, None,
                         EdgeKind::CompilerGenerated, span, site,
                     );
                     if erased {
-                        g.erased_entries.insert(name.to_string());
+                        w.out.erased_entries.insert(name.to_string());
                     }
                 }
                 None => {
-                    g.record_site(
+                    w.record_site(
                         from,
                         site,
                         SiteOutcome::Failed("compiler-generated-entry-unresolved"),
                         span,
                     );
                     if let Some(from) = from {
-                        g.unresolved.push(Unresolved {
+                        w.out.unresolved.push(Unresolved {
                             from: from.clone(),
                             callee: from.func,
                             reason: "compiler-generated-entry-unresolved",
@@ -1473,7 +1991,7 @@ fn walk_body_edges(
     for (e, witness) in implicit.into_iter().filter(|(e, _)| reached(*e)) {
         let span = body.and_then(|b| b.expr_spans.get(e).copied()).unwrap_or_else(Span::unknown);
         record_witness(
-            g, work, ws, inf, from, subst, witness, span, EdgeKind::ImplicitIter,
+            w, ws, inf, from, subst, witness, span, EdgeKind::ImplicitIter,
             Site { domain: domain.clone(), expr: e, op: SiteOp::ImplicitIter },
         );
     }
@@ -1484,10 +2002,10 @@ fn walk_body_edges(
     for (e, tree) in trees.into_iter().filter(|(e, _)| reached(*e)) {
         let span = body.and_then(|b| b.expr_spans.get(e).copied()).unwrap_or_else(Span::unknown);
         let concrete = walk_bound_tree(
-            g, work, ws, inf, from, subst, tree, span, e, BoundRoot::Call, domain, &[],
+            w, ws, inf, from, subst, tree, span, e, BoundRoot::Call, domain, &[],
         );
         if let Some(to) = resolved_calls.get(&e) {
-            g.record_bound_tree(to, concrete);
+            w.record_bound_tree(to, concrete);
         }
     }
 
@@ -1497,23 +2015,22 @@ fn walk_body_edges(
     for (e, gidx) in bound_calls.into_iter().filter(|(e, _)| reached(*e)) {
         let span = body.and_then(|b| b.expr_spans.get(e).copied()).unwrap_or_else(Span::unknown);
         let site = Site { domain: domain.clone(), expr: e, op: SiteOp::DirectCall };
-        let resolved = from
-            .and_then(|i| g.bound_trees.get(i))
-            .and_then(|tree| tree.next.get(&gidx))
-            .cloned();
+        let owner_tree = w.owner_tree;
+        let resolved =
+            from.and(owner_tree).and_then(|tree| tree.next.get(&gidx)).cloned();
         let Some(resolved) = resolved else {
-            g.record_site(from, site, SiteOutcome::Failed("caller-generic-witness-unbound"), span);
+            w.record_site(from, site, SiteOutcome::Failed("caller-generic-witness-unbound"), span);
             continue;
         };
         if let Some(from) = from {
-            g.edges.push(Edge {
+            w.out.edges.push(Edge {
                 from: from.clone(),
                 to: resolved.callee.clone(),
                 kind: EdgeKind::BoundNextWitness,
                 span,
             });
         }
-        g.record_site(from, site, SiteOutcome::Resolved(resolved.callee), span);
+        w.record_site(from, site, SiteOutcome::Resolved(resolved.callee), span);
     }
 
     let mut iters: Vec<(Idx<bone_semantic::hir::Expr>, &bone_semantic::prelude::ForIterInfo)> =
@@ -1523,12 +2040,12 @@ fn walk_body_edges(
         let span = body.and_then(|b| b.expr_spans.get(e).copied()).unwrap_or_else(Span::unknown);
         if let Some(witness) = &info.iter {
             record_witness(
-                g, work, ws, inf, from, subst, witness, span,
+                w, ws, inf, from, subst, witness, span,
                 EdgeKind::IteratorIter, Site { domain: domain.clone(), expr: e, op: SiteOp::ForIter },
             );
         }
         let _ = record_bound_next(
-            g, work, ws, inf, from, subst, &info.next, span,
+            w, ws, inf, from, subst, &info.next, span,
             EdgeKind::IteratorNext, e, BoundRoot::For, domain, &[],
         );
     }
@@ -1536,8 +2053,7 @@ fn walk_body_edges(
 
 #[allow(clippy::too_many_arguments)]
 fn record_call(
-    g: &mut InstanceGraph,
-    work: &mut Vec<(Instance, MonoSubst)>,
+    w: &mut Walk,
     ws: &Workspace,
     inf: &BodyInference,
     from: Option<&Instance>,
@@ -1549,10 +2065,10 @@ fn record_call(
     site: Site,
 ) -> Option<Instance> {
     if from.is_none() {
-        g.always_emitted_seeds += 1;
+        w.out.always_emitted_seeds += 1;
     }
     let cf = &ws.module(callee.module).functions[callee.func];
-    let (args, callee_subst) = match instantiate(&mut g.arena, ws, inf, cf, bindings, subst) {
+    let (args, callee_subst) = match instantiate(&mut *w.arena, ws, inf, cf, bindings, subst) {
         Ok(v) => v,
         // An always-emitted body has no `from` to file against, but the
         // CLASSIFICATION is the same one an instantiated body's call gets:
@@ -1560,26 +2076,26 @@ fn record_call(
         // either way. Ordered before the classifying arms so these guards win.
 
         Err(Fail::Unconstrained(_)) if from.is_none() => {
-            g.record_always_emitted_hole(
+            w.record_always_emitted_hole(
                 mangle_fn(ws, cf),
                 AlwaysEmittedOutcome::Rejection(RejectionKind::UnconstrainedTypeVar),
                 span,
             );
-            g.record_site(from, site, SiteOutcome::Failed("unconstrained-type-var"), span);
+            w.record_site(from, site, SiteOutcome::Failed("unconstrained-type-var"), span);
             return None;
         }
         Err(fail) if from.is_none() => {
-            g.record_always_emitted_hole(
+            w.record_always_emitted_hole(
                 mangle_fn(ws, cf),
                 AlwaysEmittedOutcome::Unresolved(fail.reason()),
                 span,
             );
-            g.record_site(from, site, SiteOutcome::Failed(fail.reason()), span);
+            w.record_site(from, site, SiteOutcome::Failed(fail.reason()), span);
             return None;
         }
         Err(Fail::Unconstrained(_)) => {
             let name = mangle_fn(ws, cf);
-            g.rejections.push(Rejection {
+            w.out.rejections.push(Rejection {
                 kind: RejectionKind::UnconstrainedTypeVar,
                 at: from.expect("guarded above").clone(),
                 span,
@@ -1588,31 +2104,31 @@ fn record_call(
                      no concrete type to instantiate it at"
                 ),
             });
-            g.record_site(from, site, SiteOutcome::Failed("unconstrained-type-var"), span);
+            w.record_site(from, site, SiteOutcome::Failed("unconstrained-type-var"), span);
             return None;
         }
         Err(fail) => {
-            g.unresolved.push(Unresolved {
+            w.out.unresolved.push(Unresolved {
                 from: from.expect("guarded above").clone(),
                 callee,
                 reason: fail.reason(),
                 span,
             });
-            g.record_site(from, site, SiteOutcome::Failed(fail.reason()), span);
+            w.record_site(from, site, SiteOutcome::Failed(fail.reason()), span);
             return None;
         }
     };
     let to = Instance { func: callee, args };
     match from {
-        Some(from) => g.edges.push(Edge { from: from.clone(), to: to.clone(), kind, span }),
+        Some(from) => w.out.edges.push(Edge { from: from.clone(), to: to.clone(), kind, span }),
         // No `from`, so no edge and no site: an always-emitted body's callee is
         // a ROOT, and only this record says so.
         None => {
-            g.always_emitted_targets.insert(to.clone());
+            w.out.always_emitted_targets.insert(to.clone());
         }
     }
-    g.record_site(from, site, SiteOutcome::Resolved(to.clone()), span);
-    g.reach(work, to.clone(), callee_subst);
+    w.record_site(from, site, SiteOutcome::Resolved(to.clone()), span);
+    w.reach(to.clone(), callee_subst);
     Some(to)
 }
 
@@ -1725,8 +2241,7 @@ fn detect_changing_instance_recursion(g: &mut InstanceGraph, ws: &Workspace) {
 /// instantiates at, rather than a second one per witness kind.
 #[allow(clippy::too_many_arguments)]
 fn record_witness(
-    g: &mut InstanceGraph,
-    work: &mut Vec<(Instance, MonoSubst)>,
+    w: &mut Walk,
     ws: &Workspace,
     inf: &BodyInference,
     from: Option<&Instance>,
@@ -1737,47 +2252,47 @@ fn record_witness(
     site: Site,
 ) {
     if from.is_none() {
-        g.always_emitted_seeds += 1;
+        w.out.always_emitted_seeds += 1;
     }
     let rep = FuncRef { module: witness.func.0, func: witness.func.1 };
     let resolved = &ws.module(rep.module).functions[rep.func];
     let callee = rep;
     let cf = &ws.module(callee.module).functions[callee.func];
-    match instantiate_witness(&mut g.arena, ws, inf, resolved, cf, &witness.generics, subst) {
+    match instantiate_witness(&mut *w.arena, ws, inf, resolved, cf, &witness.generics, subst) {
         Ok((args, callee_subst)) => {
             let to = Instance { func: callee, args };
             match from {
                 Some(from) => {
-                    g.edges.push(Edge { from: from.clone(), to: to.clone(), kind, span })
+                    w.out.edges.push(Edge { from: from.clone(), to: to.clone(), kind, span })
                 }
                 // See `record_call`: an always-emitted body's callee is a root.
                 None => {
-                    g.always_emitted_targets.insert(to.clone());
+                    w.out.always_emitted_targets.insert(to.clone());
                 }
             }
-            g.record_site(from, site, SiteOutcome::Resolved(to.clone()), span);
-            g.reach(work, to, callee_subst);
+            w.record_site(from, site, SiteOutcome::Resolved(to.clone()), span);
+            w.reach(to, callee_subst);
         }
         // See `record_call`: the classification survives the absence of a
         // `from` instance.
         Err(Fail::Unconstrained(_)) if from.is_none() => {
-            g.record_always_emitted_hole(
+            w.record_always_emitted_hole(
                 mangle_fn(ws, cf),
                 AlwaysEmittedOutcome::Rejection(RejectionKind::UnconstrainedTypeVar),
                 span,
             );
-            g.record_site(from, site, SiteOutcome::Failed("unconstrained-type-var"), span);
+            w.record_site(from, site, SiteOutcome::Failed("unconstrained-type-var"), span);
         }
         Err(fail) if from.is_none() => {
-            g.record_always_emitted_hole(
+            w.record_always_emitted_hole(
                 mangle_fn(ws, cf),
                 AlwaysEmittedOutcome::Unresolved(fail.reason()),
                 span,
             );
-            g.record_site(from, site, SiteOutcome::Failed(fail.reason()), span);
+            w.record_site(from, site, SiteOutcome::Failed(fail.reason()), span);
         }
         Err(Fail::Unconstrained(_)) => {
-            g.rejections.push(Rejection {
+            w.out.rejections.push(Rejection {
                 kind: RejectionKind::UnconstrainedTypeVar,
                 at: from.expect("guarded above").clone(),
                 span,
@@ -1786,16 +2301,16 @@ fn record_witness(
                     mangle_fn(ws, cf)
                 ),
             });
-            g.record_site(from, site, SiteOutcome::Failed("unconstrained-type-var"), span);
+            w.record_site(from, site, SiteOutcome::Failed("unconstrained-type-var"), span);
         }
         Err(fail) => {
-            g.unresolved.push(Unresolved {
+            w.out.unresolved.push(Unresolved {
                 from: from.expect("guarded above").clone(),
                 callee,
                 reason: fail.reason(),
                 span,
             });
-            g.record_site(from, site, SiteOutcome::Failed(fail.reason()), span);
+            w.record_site(from, site, SiteOutcome::Failed(fail.reason()), span);
         }
     }
 }
@@ -1817,8 +2332,7 @@ fn record_witness(
 /// A `..base` functional update writes every field the literal does not, so a
 /// literal with a base omits nothing.
 fn walk_struct_default_edges(
-    g: &mut InstanceGraph,
-    work: &mut Vec<(Instance, MonoSubst)>,
+    w: &mut Walk,
     ws: &Workspace,
     body: &Body,
     inst: &Instance,
@@ -1933,6 +2447,7 @@ fn walk_struct_default_edges(
     }
 
     for (_, (module, def, args, fields)) in omitted {
+        w.out.defaults_used.insert((module.index(), def.into_raw().into_u32()));
         let owner = BodyOwner::StructDefaults(def);
         let Some(defaults) = ws.modules[module.index()].bodies.get(&owner) else { continue };
         let Some(inf) = ws.inference(module).and_then(|ir| ir.per_fn.get(&owner)) else {
@@ -1947,8 +2462,7 @@ fn walk_struct_default_edges(
         // enclosing instance's -- the two are keyed in different bodies.
         let inner = skull_mir::struct_defaults::slot_subst(Some(inf), &args);
         walk_body_edges(
-            g,
-            work,
+            w,
             ws,
             inf,
             Some(defaults),
@@ -1967,8 +2481,7 @@ fn walk_struct_default_edges(
 /// the inner witnesses.
 #[allow(clippy::too_many_arguments)]
 fn record_bound_next(
-    g: &mut InstanceGraph,
-    work: &mut Vec<(Instance, MonoSubst)>,
+    w: &mut Walk,
     ws: &Workspace,
     inf: &BodyInference,
     from: Option<&Instance>,
@@ -1983,23 +2496,21 @@ fn record_bound_next(
 ) -> Option<InstanceBoundNext> {
     let site = root.site(domain.clone(), expr, path.to_vec());
     if let BoundNext::CallerGeneric(gidx) = next {
-        let resolved = from
-            .and_then(|i| g.bound_trees.get(i))
-            .and_then(|tree| tree.next.get(gidx))
-            .cloned();
+        let owner_tree = w.owner_tree;
+        let resolved = from.and(owner_tree).and_then(|tree| tree.next.get(gidx)).cloned();
         let Some(resolved) = resolved else {
-            g.record_site(from, site, SiteOutcome::Failed("caller-generic-witness-unbound"), span);
+            w.record_site(from, site, SiteOutcome::Failed("caller-generic-witness-unbound"), span);
             return None;
         };
         if let Some(from) = from {
-            g.edges.push(Edge {
+            w.out.edges.push(Edge {
                 from: from.clone(),
                 to: resolved.callee.clone(),
                 kind,
                 span,
             });
         }
-        g.record_site(from, site, SiteOutcome::Resolved(resolved.callee.clone()), span);
+        w.record_site(from, site, SiteOutcome::Resolved(resolved.callee.clone()), span);
         return Some(resolved);
     }
 
@@ -2011,50 +2522,50 @@ fn record_bound_next(
     let callee = rep;
     let cf = &ws.module(callee.module).functions[callee.func];
     if from.is_none() {
-        g.always_emitted_seeds += 1;
+        w.out.always_emitted_seeds += 1;
     }
-    match instantiate_witness(&mut g.arena, ws, inf, resolved, cf, next_generics, subst) {
+    match instantiate_witness(&mut *w.arena, ws, inf, resolved, cf, next_generics, subst) {
         Ok((args, callee_subst)) => {
             let to = Instance { func: callee, args };
             match from {
                 Some(from) => {
-                    g.edges.push(Edge { from: from.clone(), to: to.clone(), kind, span })
+                    w.out.edges.push(Edge { from: from.clone(), to: to.clone(), kind, span })
                 }
                 // See `record_call`: an always-emitted body's callee is a root.
                 None => {
-                    g.always_emitted_targets.insert(to.clone());
+                    w.out.always_emitted_targets.insert(to.clone());
                 }
             }
-            g.record_site(from, site, SiteOutcome::Resolved(to.clone()), span);
-            g.reach(work, to.clone(), callee_subst);
+            w.record_site(from, site, SiteOutcome::Resolved(to.clone()), span);
+            w.reach(to.clone(), callee_subst);
             let concrete_sub = walk_bound_tree(
-                g, work, ws, inf, from, subst, sub, span, expr, root, domain, path,
+                w, ws, inf, from, subst, sub, span, expr, root, domain, path,
             );
-            g.record_bound_tree(&to, concrete_sub.clone());
+            w.record_bound_tree(&to, concrete_sub.clone());
             Some(InstanceBoundNext { callee: to, sub: concrete_sub })
         }
         // See `record_call`: the classification survives the absence of a
         // `from` instance.
         Err(Fail::Unconstrained(_)) if from.is_none() => {
-            g.record_always_emitted_hole(
+            w.record_always_emitted_hole(
                 mangle_fn(ws, cf),
                 AlwaysEmittedOutcome::Rejection(RejectionKind::UnconstrainedTypeVar),
                 span,
             );
-            g.record_site(from, site, SiteOutcome::Failed("unconstrained-type-var"), span);
+            w.record_site(from, site, SiteOutcome::Failed("unconstrained-type-var"), span);
             None
         }
         Err(fail) if from.is_none() => {
-            g.record_always_emitted_hole(
+            w.record_always_emitted_hole(
                 mangle_fn(ws, cf),
                 AlwaysEmittedOutcome::Unresolved(fail.reason()),
                 span,
             );
-            g.record_site(from, site, SiteOutcome::Failed(fail.reason()), span);
+            w.record_site(from, site, SiteOutcome::Failed(fail.reason()), span);
             None
         }
         Err(Fail::Unconstrained(_)) => {
-            g.rejections.push(Rejection {
+            w.out.rejections.push(Rejection {
                 kind: RejectionKind::UnconstrainedTypeVar,
                 at: from.expect("guarded above").clone(),
                 span,
@@ -2063,17 +2574,17 @@ fn record_bound_next(
                     mangle_fn(ws, cf)
                 ),
             });
-            g.record_site(from, site, SiteOutcome::Failed("unconstrained-type-var"), span);
+            w.record_site(from, site, SiteOutcome::Failed("unconstrained-type-var"), span);
             None
         }
         Err(fail) => {
-            g.unresolved.push(Unresolved {
+            w.out.unresolved.push(Unresolved {
                 from: from.expect("guarded above").clone(),
                 callee,
                 reason: fail.reason(),
                 span,
             });
-            g.record_site(from, site, SiteOutcome::Failed(fail.reason()), span);
+            w.record_site(from, site, SiteOutcome::Failed(fail.reason()), span);
             None
         }
     }
@@ -2081,8 +2592,7 @@ fn record_bound_next(
 
 #[allow(clippy::too_many_arguments)]
 fn walk_bound_tree(
-    g: &mut InstanceGraph,
-    work: &mut Vec<(Instance, MonoSubst)>,
+    w: &mut Walk,
     ws: &Workspace,
     inf: &BodyInference,
     from: Option<&Instance>,
@@ -2103,7 +2613,7 @@ fn walk_bound_tree(
         let mut child = path.to_vec();
         child.push(*k);
         if let Some(next) = record_bound_next(
-            g, work, ws, inf, from, subst, &tree.next[k], span,
+            w, ws, inf, from, subst, &tree.next[k], span,
             EdgeKind::BoundNextWitness, expr, root, domain, &child,
         ) {
             resolved.next.insert(*k, next);
