@@ -31,9 +31,13 @@
 use std::collections::BTreeMap;
 
 use bone_semantic::inference::Workspace;
+use bone_semantic::prelude::Span;
 use skull_mir::mangle::mangle_fn;
+use skull_mir::monoty::MonoSubst;
 
-use crate::instance_graph::{Instance, InstanceGraph};
+use crate::instance_graph::{
+    Instance, InstanceBoundTree, InstanceGraph, Site, SiteDomain, SiteOp,
+};
 
 /// One graph's semantic state: section name -> sorted canonical lines.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
@@ -93,6 +97,77 @@ fn decl_key(ws: &Workspace, d: skull_mir::mir::FuncRef) -> String {
     format!("{}#{}.{}", mangle_fn(ws, f), d.module.raw(), d.func.into_raw().into_u32())
 }
 
+/// A span's COMPLETE position, not its `Debug` -- which prints the file alone
+/// (`rock_core::source_code`), so two diagnostics at different lines of one file
+/// render identically through it. A stale record that survived an edit usually
+/// differs from the fresh one in position and nothing else, which is exactly
+/// what that would hide.
+fn span_key(s: &Span) -> String {
+    format!(
+        "{}:{}:{}-{}:{}@{}..{}",
+        s.file,
+        s.line_range.0,
+        s.col_range.0,
+        s.line_range.1,
+        s.col_range.1,
+        s.offset_range.0,
+        s.offset_range.1,
+    )
+}
+
+/// A site's whole identity: the arena its expression indexes, the expression,
+/// and the operation. The struct-defaults domain carries the ARGUMENTS that
+/// selected the callee, rendered canonically rather than through `MonoTy`'s
+/// `Debug`.
+fn site_key(s: &Site) -> String {
+    let domain = match &s.domain {
+        SiteDomain::Own => "own".to_string(),
+        SiteDomain::StructDefaults(m, d, args) => format!(
+            "defaults({}.{}<{}>)",
+            m.index(),
+            d.into_raw().into_u32(),
+            args.iter().map(|a| a.canonical()).collect::<Vec<_>>().join(","),
+        ),
+    };
+    let op = match &s.op {
+        SiteOp::DirectCall => "direct-call".to_string(),
+        SiteOp::FnValue => "fn-value".to_string(),
+        SiteOp::ForIter => "for-iter".to_string(),
+        SiteOp::ImplicitIter => "implicit-iter".to_string(),
+        SiteOp::ForNext(path) => format!("for-next{}", path_key(path)),
+        SiteOp::BoundNext(path) => format!("bound-next{}", path_key(path)),
+        SiteOp::Synthesized(name) => format!("synthesized({name})"),
+        SiteOp::Dispatched { name, path } => format!("dispatched({name}){}", path_key(path)),
+    };
+    format!("{domain}/{}/{op}", s.expr.into_raw().into_u32())
+}
+
+fn path_key<T: std::fmt::Display>(path: &[T]) -> String {
+    format!("[{}]", path.iter().map(|p| p.to_string()).collect::<Vec<_>>().join("."))
+}
+
+/// A conformance tree RECURSIVELY. Rendering only the outermost witnesses
+/// leaves a chained iterator's inner `next` unobserved, which is the half a
+/// re-expansion is most likely to get wrong.
+fn bound_tree_key(ws: &Workspace, g: &InstanceGraph, t: &InstanceBoundTree) -> String {
+    let parts: Vec<String> = t
+        .next
+        .iter()
+        .map(|(idx, n)| {
+            format!("{idx}->{}{}", instance_key(ws, g, &n.callee), bound_tree_key(ws, g, &n.sub))
+        })
+        .collect();
+    format!("{{{}}}", parts.join(","))
+}
+
+/// A substitution's bindings, sorted so the map's iteration order cannot leak
+/// into the comparison.
+fn subst_key(s: &MonoSubst) -> String {
+    let mut binds: Vec<String> = s.iter().map(|(v, t)| format!("{v:?}={}", t.canonical())).collect();
+    binds.sort();
+    binds.join(",")
+}
+
 /// [`CanonicalGraph`] for `g`.
 pub fn canonical(ws: &Workspace, g: &InstanceGraph) -> CanonicalGraph {
     let mut out: BTreeMap<&'static str, Vec<String>> = BTreeMap::new();
@@ -106,20 +181,41 @@ pub fn canonical(ws: &Workspace, g: &InstanceGraph) -> CanonicalGraph {
     put("expanded", g.expanded.iter().map(&key).collect());
     put(
         "edges",
-        g.edges.iter().map(|e| format!("{} -{:?}-> {}", key(&e.from), e.kind, key(&e.to))).collect(),
+        g.edges
+            .iter()
+            .map(|e| {
+                format!(
+                    "{} -{:?}-> {} @{}",
+                    key(&e.from),
+                    e.kind,
+                    key(&e.to),
+                    span_key(&e.span)
+                )
+            })
+            .collect(),
     );
     put(
         "unresolved",
         g.unresolved
             .iter()
-            .map(|u| format!("{} -> {} [{}]", key(&u.from), decl_key(ws, u.callee), u.reason))
+            .map(|u| {
+                format!(
+                    "{} -> {} [{}] @{}",
+                    key(&u.from),
+                    decl_key(ws, u.callee),
+                    u.reason,
+                    span_key(&u.span)
+                )
+            })
             .collect(),
     );
     put(
         "rejections",
         g.rejections
             .iter()
-            .map(|r| format!("{:?} at {}: {}", r.kind, key(&r.at), r.message))
+            .map(|r| {
+                format!("{:?} at {} @{}: {}", r.kind, key(&r.at), span_key(&r.span), r.message)
+            })
             .collect(),
     );
     put("depth_capped", g.depth_capped.iter().map(&key).collect());
@@ -147,28 +243,13 @@ pub fn canonical(ws: &Workspace, g: &InstanceGraph) -> CanonicalGraph {
     );
     put(
         "substitutions",
-        g.substitutions
-            .iter()
-            .map(|(i, s)| {
-                let mut binds: Vec<String> =
-                    s.iter().map(|(v, t)| format!("{v:?}={}", t.canonical())).collect();
-                binds.sort();
-                format!("{} :: {}", key(i), binds.join(","))
-            })
-            .collect(),
+        g.substitutions.iter().map(|(i, s)| format!("{} :: {}", key(i), subst_key(s))).collect(),
     );
     put(
         "bound_trees",
         g.bound_trees
             .iter()
-            .map(|(i, t)| {
-                let ns: Vec<String> = t
-                    .next
-                    .iter()
-                    .map(|(idx, n)| format!("{idx}->{}", key(&n.callee)))
-                    .collect();
-                format!("{} :: {}", key(i), ns.join(","))
-            })
+            .map(|(i, t)| format!("{} :: {}", key(i), bound_tree_key(ws, g, t)))
             .collect(),
     );
     // The outcome carries an `Instance`, so it is rendered through `key` rather
@@ -191,7 +272,7 @@ pub fn canonical(ws: &Workspace, g: &InstanceGraph) -> CanonicalGraph {
                                 format!("failed({why})")
                             }
                         };
-                        format!("{} @{:?} {outcome}", key(i), s)
+                        format!("{} @{} {outcome} @{}", key(i), site_key(s), span_key(&r.span))
                     })
                     .collect::<Vec<_>>()
             })
@@ -199,14 +280,39 @@ pub fn canonical(ws: &Workspace, g: &InstanceGraph) -> CanonicalGraph {
     );
     put(
         "duplicate_sites",
-        g.duplicate_sites.iter().map(|(i, s)| format!("{} @{s:?}", key(i))).collect(),
+        g.duplicate_sites.iter().map(|(i, s)| format!("{} @{}", key(i), site_key(s))).collect(),
     );
+    // Each always-emitted failure by OUTCOME and SPAN, not as a count: two
+    // failures of one callee are two diagnostics at two places, and a count
+    // reports them as one fact with no location -- which is also what makes a
+    // stale one invisible after the call it belonged to is gone.
     put(
         "uninstantiated_roots",
         g.uninstantiated_roots
             .iter()
             .map(|(n, h)| {
-                format!("{n} generic_root={} sites={} instances={}", h.generic_root, h.always_emitted_sites.len(), h.instances)
+                let mut sites: Vec<String> = h
+                    .always_emitted_sites
+                    .iter()
+                    .map(|s| {
+                        let outcome = match &s.outcome {
+                            crate::instance_graph::AlwaysEmittedOutcome::Unresolved(r) => {
+                                format!("unresolved({r})")
+                            }
+                            crate::instance_graph::AlwaysEmittedOutcome::Rejection(k) => {
+                                format!("rejection({})", k.name())
+                            }
+                        };
+                        format!("{outcome}@{}", span_key(&s.span))
+                    })
+                    .collect();
+                sites.sort();
+                format!(
+                    "{n} generic_root={} instances={} sites=[{}]",
+                    h.generic_root,
+                    h.instances,
+                    sites.join(","),
+                )
             })
             .collect(),
     );
@@ -220,13 +326,36 @@ pub fn canonical(ws: &Workspace, g: &InstanceGraph) -> CanonicalGraph {
             .collect(),
     );
     put("always_emitted_targets", g.always_emitted_targets.iter().map(&key).collect());
+    // Both sides of each disagreement. The instance alone says only THAT one
+    // exists; what makes the record actionable -- and what an updater can get
+    // wrong on its own -- is which two answers disagreed.
     put(
         "subst_disagreements",
-        g.subst_disagreements.iter().map(|d| format!("{}", key(&d.instance))).collect(),
+        g.subst_disagreements
+            .iter()
+            .map(|d| {
+                format!(
+                    "{} kept={{{}}} discarded={{{}}}",
+                    key(&d.instance),
+                    subst_key(&d.kept),
+                    subst_key(&d.discarded)
+                )
+            })
+            .collect(),
     );
     put(
         "bound_tree_disagreements",
-        g.bound_tree_disagreements.iter().map(|d| format!("{}", key(&d.instance))).collect(),
+        g.bound_tree_disagreements
+            .iter()
+            .map(|d| {
+                format!(
+                    "{} recorded={} incoming={}",
+                    key(&d.instance),
+                    bound_tree_key(ws, g, &d.recorded),
+                    bound_tree_key(ws, g, &d.incoming)
+                )
+            })
+            .collect(),
     );
     CanonicalGraph(out)
 }
