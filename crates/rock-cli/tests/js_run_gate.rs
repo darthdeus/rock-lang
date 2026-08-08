@@ -460,3 +460,156 @@ fn a_refined_value_receiver_runs_on_both_backends() {
     }
     both_backends("safe_nav_refined", REFINED_VALUE_RECEIVER, "300\n-1\n");
 }
+
+// A generic call from a `co fn`'s lifecycle HOOK. The hook body is peeled to
+// the constructor and left detached -- unreachable from the step entry and never
+// hoisted into `nested_fns` -- so the walk that files specialization demands saw
+// neither, while the walk that finds ordinary callees (every arena block) saw it
+// fine. The result was a call to a specialization nothing defined.
+//
+// Both backends fail this without the fix, differently: luajit dies on a nil
+// global at runtime, JS refuses to emit. Hence a cross-backend arm.
+const CO_HOOK_GENERIC: &str = r#"
+global LOG: [string] = []
+
+co fn worker() -> Coroutine<int> {
+    on_killed {
+        LOG.push("killed")
+    }
+    yield 1
+    yield 2
+}
+
+fn main() {
+    let c = worker()
+    let _ = c.resume()
+    c.kill()
+    print("{LOG.len()} {LOG[0]}")
+}
+"#;
+
+// The same defect reached through a `co fn`'s LAMBDA rather than a hook. It is
+// the quieter half: the step runs under `__resume`'s pcall, so the missing
+// definition lands in `s.__error` and surfaces as a wrong answer rather than a
+// crash.
+const CO_LAMBDA_GENERIC: &str = r#"
+global LOG: [string] = []
+
+co fn worker() -> Coroutine<int> {
+    let add = () => { LOG.push("lam") }
+    add()
+    yield 1
+}
+
+fn main() {
+    let c = worker()
+    let _ = c.resume()
+    print("{LOG.len()} {LOG[0]}")
+}
+"#;
+
+// Control on the REGION: the same generic call from the step's own body, which
+// is entry-reachable and always filed its demand.
+const CO_BODY_GENERIC: &str = r#"
+global LOG: [string] = []
+
+co fn worker() -> Coroutine<int> {
+    LOG.push("body")
+    yield 1
+}
+
+fn main() {
+    let c = worker()
+    let _ = c.resume()
+    print("{LOG.len()} {LOG[0]}")
+}
+"#;
+
+// Control on the REGION, detached arm: a `defer` body is also detached, and it
+// did NOT lose its demand. So "detached" alone is not the discriminant, and a
+// fix that keys on reachability alone would be keying on the wrong thing.
+const CO_DEFER_GENERIC: &str = r#"
+global LOG: [string] = []
+
+co fn worker() -> Coroutine<int> {
+    defer {
+        LOG.push("defer")
+    }
+    yield 1
+    yield 2
+}
+
+fn main() {
+    let c = worker()
+    let _ = c.resume()
+    c.kill()
+    print("{LOG.len()} {LOG[0]}")
+}
+"#;
+
+// Control on the CALLEE: a non-generic call from the same hook. It always
+// worked, because ordinary callee discovery walks every arena block -- which is
+// what localises the defect to the demand walk rather than to hook emission.
+const CO_HOOK_NON_GENERIC: &str = r#"
+global N: int = 0
+
+fn bump() { N = N + 1 }
+
+co fn worker() -> Coroutine<int> {
+    on_killed { bump() }
+    yield 1
+    yield 2
+}
+
+fn main() {
+    let c = worker()
+    let _ = c.resume()
+    c.kill()
+    print("{N}")
+}
+"#;
+
+#[test]
+fn a_generic_call_from_a_coroutine_hook_runs_on_both_backends() {
+    if !node_available() {
+        eprintln!("SKIP: node not found");
+        return;
+    }
+    both_backends("co_hook_generic", CO_HOOK_GENERIC, "1 killed\n");
+}
+
+#[test]
+fn a_generic_call_from_a_coroutine_lambda_runs_on_both_backends() {
+    if !node_available() {
+        eprintln!("SKIP: node not found");
+        return;
+    }
+    both_backends("co_lambda_generic", CO_LAMBDA_GENERIC, "1 lam\n");
+}
+
+#[test]
+fn a_generic_call_from_a_coroutine_body_runs_on_both_backends() {
+    if !node_available() {
+        eprintln!("SKIP: node not found");
+        return;
+    }
+    both_backends("co_body_generic", CO_BODY_GENERIC, "1 body\n");
+}
+
+#[test]
+fn a_generic_call_from_a_coroutine_defer_runs_on_both_backends() {
+    if !node_available() {
+        eprintln!("SKIP: node not found");
+        return;
+    }
+    both_backends("co_defer_generic", CO_DEFER_GENERIC, "1 defer\n");
+}
+
+#[test]
+fn a_non_generic_call_from_a_coroutine_hook_runs_on_both_backends() {
+    if !node_available() {
+        eprintln!("SKIP: node not found");
+        return;
+    }
+    both_backends("co_hook_nongeneric", CO_HOOK_NON_GENERIC, "1\n");
+}
