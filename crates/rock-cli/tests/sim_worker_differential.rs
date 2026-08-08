@@ -1733,20 +1733,22 @@ fn a_successor_entry_mixes_with_boots_audio_ambient() {
     assert!(ok, "the ambient audio boundary must be green:\n{all}");
 }
 
-/// Under `STONE_AUDIO_STUB` the audio row records ABSENT, not the defaults.
+/// Under `STONE_AUDIO_STUB` the audio row RECORDS, because the state is real.
 ///
-/// There is no `AudioState` at all in a stubbed process, so every setter already
-/// no-ops and nothing can cross a boundary. "Captured nothing" and "captured the
-/// default values" produce identical restores, which is why the ledger's answer
-/// has three states -- a row claiming the second would publish a denominator for
-/// state that does not exist. The fixture asserts the neighbouring rows still
-/// record, so the 2 is this row's answer rather than a capture that failed.
+/// It used to record ABSENT, and that was right for a stub with no `AudioState`
+/// at all. A stubbed run now builds a real state with no device -- the volumes
+/// and every bus parameter exist and take writes -- so that state genuinely
+/// crosses a boundary in the configuration every sim runs by default, and
+/// "absent" there would have been a row publishing "nothing to capture" over
+/// state a predecessor can really move. The fixture proves the writability
+/// rather than asserting it, and checks the neighbouring rows so the answer is
+/// this row's rather than a process-wide capture.
 ///
 /// Its own run: the default environment is a different boot signature from the
 /// trio above, which asserts it shares one process.
 #[test]
-fn the_audio_row_records_absent_under_the_stub() {
-    let (ok, stdout, stderr) = run_rock_status(&["sim", "testbed", "b3a_stub_absent"]);
+fn the_audio_row_records_under_the_stub_because_its_state_is_real() {
+    let (ok, stdout, stderr) = run_rock_status(&["sim", "testbed", "b3a_stub_recorded"]);
     let all = format!("{stdout}{stderr}");
     assert!(ok, "the stub's ambient answer must be green:\n{all}");
 }
