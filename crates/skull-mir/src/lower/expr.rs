@@ -1039,46 +1039,13 @@ impl Builder<'_> {
             self.emit_call_value_n(shape, fieldv, argv)
         } else {
             // `recv?.method(args)` UFCS: `method(recv, args)`, recv as arg 0.
+            // The whole call -- both ABIs, the delivery key, the bound tree, the
+            // callee instance and the target ABI plan -- is the ordinary direct
+            // call's business, so it happens there rather than being reassembled
+            // here from the DECLARATION's plan.
             let func = self.resolve_funcref(e, method)?;
             let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
-            let plan = BackendFnAbiPlan::for_declaration(self.ws, self.scx, func);
-            if let Some(abi) = plan.scalar().cloned() {
-                // Scalar-ABI callee: splat the value receiver + value args into
-                // leaves (a value return packs to the single safe-nav result).
-                return self.scalar_ufcs_call_repr(e, func, recv, &arg_idxs, &abi)
-            } else {
-                let mut argv = vec![recv];
-                for a in arg_idxs {
-                    argv.push(self.lower_expr(a)?);
-                }
-                // The instantiation key travels through `?.` like it does through a
-                // plain call: a storage the shared generic body cannot serve --
-                // a column-stored element, or a leaf-addressed buffer element on
-                // JS -- keeps its spec binding.
-                let key = self
-                    .call_spec(e, func)?
-                    .map(|(k, _)| k);
-                let callee_inst = self.callee_instance_for(e, func)?;
-                // A tuple-returning method splats N values, and they are handed on
-                // UNPACKED: the per-slot join stores them slot-wise, so packing
-                // here would box a `nobox` element the wire just kept unboxed.
-                // A method whose own return is `(..)?` carries its presence tag in
-                // the repr, and the join forwards that tag rather than minting
-                // `true` -- `a?.m()` is absent when either link is.
-                let ret_ty = self.ws.module(func.module).functions[func.func].return_ty;
-                match ret_ty.and_then(|t| tuple_ret_shape(self.ws, self.subst(), t)) {
-                    Some(shape) => {
-                        return Ok(self.emit_tuple_call_tree(
-                            func, argv, &shape, None, key, callee_inst,
-                        ));
-                    }
-                    None => {
-                        let call = self.emit_cur(Inst::Call { func, args: argv });
-                        self.record_call(call, func, None, key, callee_inst);
-                        call
-                    }
-                }
-            }
+            return self.ufcs_call_repr(e, func, recv, &arg_idxs);
         };
         Ok(ValueRepr::Scalar(cv))
     }

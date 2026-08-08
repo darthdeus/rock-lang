@@ -355,3 +355,108 @@ fn a_specialized_coroutine_with_a_capturing_lambda_runs_on_both_backends() {
     }
     both_backends("gen_co_lambda", GENERIC_CO_LAMBDA, "12\n");
 }
+
+// A direct UFCS call through safe navigation, where the receiver is a `value`.
+// Both factors are required: a `value` receiver scalarizes through the call, and
+// `?.` builds the call on the guarded path, and only the pair loses the
+// instantiation. mag's three `?.get()` sites on `Entity<T>` are this shape, and
+// they are why the project stopped compiling.
+//
+// The backends DIVERGED here, luajit rejecting what JS emitted correctly, so a
+// single-backend fixture would have read as either "correctly rejected" or
+// "works". The controls below hold each factor fixed in turn; all three arms
+// print the same two lines, so a green cannot come from a different plausible
+// answer.
+const SAFE_NAV_VALUE_RECEIVER: &str = r#"
+value Handle<T> { slot: int, payload: T }
+
+fn Handle<T>.fetch(h) -> T? {
+    if h.slot < 0 { return null }
+    return h.payload
+}
+
+fn find(slot: int) -> Handle<int>? {
+    if slot == 0 { return null }
+    return Handle { slot: slot, payload: slot * 100 }
+}
+
+fn main() {
+    print("{find(3)?.fetch() ?? -1}")
+    print("{find(0)?.fetch() ?? -1}")
+}
+"#;
+
+// Control on the RECEIVER: a boxed `struct`, safe navigation unchanged.
+const SAFE_NAV_STRUCT_RECEIVER: &str = r#"
+struct Handle<T> { slot: int, payload: T }
+
+fn Handle<T>.fetch(h) -> T? {
+    if h.slot < 0 { return null }
+    return h.payload
+}
+
+fn find(slot: int) -> Handle<int>? {
+    if slot == 0 { return null }
+    return Handle { slot: slot, payload: slot * 100 }
+}
+
+fn main() {
+    print("{find(3)?.fetch() ?? -1}")
+    print("{find(0)?.fetch() ?? -1}")
+}
+"#;
+
+// Control on the CALL FORM: the same `value` receiver reached through a
+// refinement instead of `?.`, which is the ordinary direct UFCS call the
+// safe-nav one has to agree with.
+const REFINED_VALUE_RECEIVER: &str = r#"
+value Handle<T> { slot: int, payload: T }
+
+fn Handle<T>.fetch(h) -> T? {
+    if h.slot < 0 { return null }
+    return h.payload
+}
+
+fn find(slot: int) -> Handle<int>? {
+    if slot == 0 { return null }
+    return Handle { slot: slot, payload: slot * 100 }
+}
+
+fn probe(slot: int) -> int? {
+    let h = find(slot)
+    if h != null { return h.fetch() }
+    return null
+}
+
+fn main() {
+    print("{probe(3) ?? -1}")
+    print("{probe(0) ?? -1}")
+}
+"#;
+
+#[test]
+fn safe_nav_on_a_value_receiver_runs_on_both_backends() {
+    if !node_available() {
+        eprintln!("SKIP: node not found");
+        return;
+    }
+    both_backends("safe_nav_value", SAFE_NAV_VALUE_RECEIVER, "300\n-1\n");
+}
+
+#[test]
+fn safe_nav_on_a_struct_receiver_runs_on_both_backends() {
+    if !node_available() {
+        eprintln!("SKIP: node not found");
+        return;
+    }
+    both_backends("safe_nav_struct", SAFE_NAV_STRUCT_RECEIVER, "300\n-1\n");
+}
+
+#[test]
+fn a_refined_value_receiver_runs_on_both_backends() {
+    if !node_available() {
+        eprintln!("SKIP: node not found");
+        return;
+    }
+    both_backends("safe_nav_refined", REFINED_VALUE_RECEIVER, "300\n-1\n");
+}

@@ -2,7 +2,25 @@
 //! call trees, and the pack/leaf plumbing that decides whether a value crosses
 //! a call boundary as leaves or as a box.
 use super::*;
-use super::abi::FnScalarAbi;
+
+/// Everything a direct call to a statically-known callee carries besides its
+/// operands: the bound-conformance tree, the delivery decision (specialization
+/// key + substitution), the callee's concrete INSTANCE, and the ABI plan of the
+/// body the call TARGETS.
+///
+/// ONE bundle, built once by [`Builder::plan_direct_call`], because these four
+/// facts are one decision and a path that computes a SUBSET is silently wrong
+/// rather than merely incomplete. The UFCS path under `?.` computed exactly
+/// that subset -- the instance, no tree, no key, and the DECLARATION's ABI plan
+/// instead of the target's -- so `x?.m()` on a `value` receiver named an
+/// instantiation it never delivered, and the callee was then reached at its
+/// declaration with no body to serve it.
+pub(crate) struct DirectCall {
+    pub(crate) tree: Option<bone_semantic::prelude::BoundTree>,
+    pub(crate) spec: Option<(SpecKey, SpecSubst)>,
+    pub(crate) callee_inst: Option<crate::monoty::MonoSubst>,
+    pub(crate) plan: BackendFnAbiPlan,
+}
 
 impl Builder<'_> {
     /// Lower a call to a (boxed) single value — the scalar-ABI Group result is
@@ -436,31 +454,48 @@ impl Builder<'_> {
     /// keeps the shared generic snapshot (byte-identical). Eligibility is a subset
     /// of the inliner's `classify` (not extern / lua / coroutine) so a specialized
     /// splice always resolves; a residual case falls to the site-aware rejection.
-    /// Attach everything a lowered direct call carries besides its operands: the
-    /// bound-conformance tree, the delivery key, and the callee's concrete
-    /// INSTANCE.
+    /// Build the [`DirectCall`] bundle for a call at `e` to `func`.
     ///
-    /// One helper rather than the four copies this replaced -- the identity
-    /// record has to reach every emission shape (scalar, multi, tuple), and a
-    /// per-shape copy is exactly where one of them would be forgotten.
-    pub(crate) fn record_call(
+    /// The delivery decision comes first because the ABI plan depends on it: a
+    /// served instantiation targets the specialized definition, whose parameter
+    /// list is what the caller's argument splat has to match.
+    pub(crate) fn plan_direct_call(
         &mut self,
-        call: Idx<Inst>,
+        e: Idx<Expr>,
         func: FuncRef,
-        tree: Option<bone_semantic::prelude::BoundTree>,
-        key: Option<SpecKey>,
-        inst: Option<crate::monoty::MonoSubst>,
-    ) {
-        if let Some(t) = tree {
-            self.f.bound_trees.insert(call, t);
+    ) -> Result<DirectCall, CompilerError> {
+        let tree = self
+            .inf
+            .and_then(|i| i.bound_call_trees.get(&e))
+            .filter(|t| !t.is_empty())
+            .cloned();
+        let spec = self.call_spec_for_target(e, func)?;
+        // IDENTITY, computed beside the delivery decision and independent of it.
+        // A call the policy declines to specialize still names exactly one
+        // concrete instance, and this is where it says which.
+        let callee_inst = self.callee_instance_for(e, func)?;
+        let empty_subst = SpecSubst::default();
+        let subst = spec.as_ref().map_or(&empty_subst, |(_, s)| s);
+        let plan = self.callee_abi_plan(func, spec.as_ref(), subst);
+        Ok(DirectCall { tree, spec, callee_inst, plan })
+    }
+
+    /// Attach the bundle's identity records to the emitted call inst.
+    ///
+    /// Takes the whole [`DirectCall`] rather than the three records loosely,
+    /// because the loose form is what let a caller pass `None, None` for the
+    /// two it had not computed and still typecheck.
+    pub(crate) fn record_call(&mut self, call: Idx<Inst>, func: FuncRef, dc: &DirectCall) {
+        if let Some(t) = &dc.tree {
+            self.f.bound_trees.insert(call, t.clone());
         }
-        if let Some(k) = key {
-            self.f.spec_bindings.insert(call, k);
+        if let Some((k, _)) = &dc.spec {
+            self.f.spec_bindings.insert(call, k.clone());
         }
-        if let Some(subst) = inst {
+        if let Some(subst) = &dc.callee_inst {
             self.f
                 .callee_instances
-                .insert(call, crate::site::OwnerInstance { func, subst });
+                .insert(call, crate::site::OwnerInstance { func, subst: subst.clone() });
         }
     }
 
@@ -679,11 +714,6 @@ impl Builder<'_> {
         arg_idxs: &[Idx<Expr>],
         any_named: bool,
     ) -> Result<ValueRepr, CompilerError> {
-        let tree = self
-            .inf
-            .and_then(|i| i.bound_call_trees.get(&e))
-            .filter(|t| !t.is_empty())
-            .cloned();
         // A value-instantiated `@inline` generic call takes the specialized scalar
         // ABI: value args splat, the return arrives as leaves, and the emitted call
         // is tagged so the inliner splices the matching specialized snapshot. Empty
@@ -699,23 +729,13 @@ impl Builder<'_> {
         // longer the only thing that can serve it: the call targets a standalone
         // specialized copy, lowered under this same substitution, so the two agree
         // on the ABI without an inliner ever running.
-        let spec = self.call_spec_for_target(e, func)?;
-        // The instantiation key is recorded on the emitted call inst whenever this
-        // is a specialized call -- even on the boxed (non-scalar-ABI) path, because
-        // the specialized body still differs (e.g. a `native_buffer_alloc<T>` ctype
+        //
+        // The instantiation key rides the emitted call inst whenever this is a
+        // specialized call -- even on the boxed (non-scalar-ABI) path, because the
+        // specialized body still differs (e.g. a `native_buffer_alloc<T>` ctype
         // resolves) though the param/return ABI is unchanged.
-        let key = spec.as_ref().map(|(k, _)| k.clone());
-        // IDENTITY, computed beside the delivery decision and independent of it.
-        // A call the policy declines to specialize still names exactly one
-        // concrete instance, and this is where it says which.
-        let callee_inst = self.callee_instance_for(e, func)?;
-        let empty_subst = SpecSubst::default();
-        let subst = spec.as_ref().map_or(&empty_subst, |(_, s)| s);
-        // The ABI of the body this call TARGETS, from the plan that body's own
-        // definition is lowered against -- the tuple return shape included, which
-        // the call used to derive for itself.
-        let plan = self.callee_abi_plan(func, spec.as_ref(), subst);
-        let ret_tuple = plan.ret_tuple().cloned();
+        let dc = self.plan_direct_call(e, func)?;
+        let ret_tuple = dc.plan.ret_tuple().cloned();
         if let Some(shape) = &ret_tuple {
             self.reject_nobox_opaque_tuple_return(e, func, shape)?;
         } else {
@@ -728,7 +748,7 @@ impl Builder<'_> {
         {
             return Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))));
         }
-        let Some(scalar_abi) = plan.scalar().cloned() else {
+        let Some(scalar_abi) = dc.plan.scalar().cloned() else {
             self.reject_nobox_boxed_call_args(func, arg_idxs)?;
             self.reject_column_container_opaque_slots(e, func)?;
             let args = if any_named {
@@ -751,10 +771,10 @@ impl Builder<'_> {
             // day a `@gpu_only` intrinsic returns a tuple.
             self.authorize_gpu_boundary_boxes(&func, &args);
             if let Some(shape) = &ret_tuple {
-                return Ok(self.emit_tuple_call_tree(func, args, shape, tree, key, callee_inst));
+                return Ok(self.emit_tuple_call_tree(func, args, shape, &dc));
             }
             let call = self.emit_cur(Inst::Call { func, args });
-            self.record_call(call, func, tree, key, callee_inst);
+            self.record_call(call, func, &dc);
             return Ok(ValueRepr::Scalar(call));
         };
         let args = self.scalar_call_args(
@@ -764,23 +784,22 @@ impl Builder<'_> {
             &scalar_abi.param_shapes,
         )?;
         let ret_shape = scalar_abi.ret_shape;
-        let key = spec.map(|(k, _)| k);
         match ret_shape {
             Some(shape) => {
                 let n = shape.leaf_count();
                 let dests: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
                 let call = self.emit_cur(Inst::CallMulti { dests: dests.clone(), func, args });
-                self.record_call(call, func, tree, key, callee_inst);
+                self.record_call(call, func, &dc);
                 let leaves: Vec<Idx<Inst>> =
                     dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
                 let mut idx = 0;
                 Ok(self.rebuild_from_leaves(&shape, &leaves, &mut idx))
             }
             None => match &ret_tuple {
-                Some(shape) => Ok(self.emit_tuple_call_tree(func, args, shape, tree, key, callee_inst)),
+                Some(shape) => Ok(self.emit_tuple_call_tree(func, args, shape, &dc)),
                 None => {
                     let call = self.emit_cur(Inst::Call { func, args });
-                    self.record_call(call, func, tree, key, callee_inst);
+                    self.record_call(call, func, &dc);
                     Ok(ValueRepr::Scalar(call))
                 }
             },
@@ -795,10 +814,10 @@ impl Builder<'_> {
     /// `Tuple` repr whose splatting elements are Groups rebuilt from their
     /// leaves, so a `nobox` element never becomes a box on the way to a bind.
     ///
-    /// `tree` records an `Iterator`-bound resolution against the emitted call
-    /// inst (chain roots like a directly-called bounded `next`).
+    /// `dc` carries the `Iterator`-bound resolution recorded against the emitted
+    /// call inst (chain roots like a directly-called bounded `next`).
     ///
-    /// A tuple return does not exempt the call from its instantiation `key`:
+    /// A tuple return does not exempt the call from its instantiation key:
     /// under column storage the shared generic body reads a `_data` the
     /// instantiation does not have, so the specialized copy is the only correct
     /// target.
@@ -807,14 +826,12 @@ impl Builder<'_> {
         func: FuncRef,
         args: Vec<Idx<Inst>>,
         shape: &TupleRetShape,
-        tree: Option<bone_semantic::prelude::BoundTree>,
-        key: Option<SpecKey>,
-        callee_inst: Option<crate::monoty::MonoSubst>,
+        dc: &DirectCall,
     ) -> ValueRepr {
         let dests: Vec<Idx<Cell>> =
             (0..shape.slot_count()).map(|_| self.f.new_cell(None)).collect();
         let call = self.emit_cur(Inst::CallMulti { dests: dests.clone(), func, args });
-        self.record_call(call, func, tree, key, callee_inst);
+        self.record_call(call, func, dc);
         let loads: Vec<Idx<Inst>> = dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
         self.tuple_result(shape, &loads)
     }
@@ -892,23 +909,46 @@ impl Builder<'_> {
         }
     }
 
-    /// A scalar-ABI UFCS call `method(recv, args)` where `recv` is an
-    /// already-lowered value (the safe-nav receiver). The receiver fills param 0
-    /// (splat its leaves if that param is a value), args fill the rest; a value
-    /// return packs to a single value (the safe-nav result is one nullable value).
-    /// A scalar-ABI UFCS call with the receiver already lowered, yielding a REPR:
-    /// a value callee hands back its leaves, so a safe-nav join that stores PER
-    /// SLOT never has to take a box apart again. The single packing caller went
-    /// away when `?.` stopped packing.
-    pub(crate) fn scalar_ufcs_call_repr(
+    /// A UFCS call `method(recv, args)` where `recv` is an already-lowered value
+    /// -- the safe-nav receiver. The receiver fills param 0 (splat to its leaves
+    /// when that param is a value), args fill the rest.
+    ///
+    /// THE `?.` UFCS entry, scalar and boxed ABI alike, and it consumes the same
+    /// [`DirectCall`] bundle [`Self::lower_direct_call_repr`] does. Splitting the
+    /// two ABIs across two call sites is how the boxed one came to record a key
+    /// the scalar one did not, and how both came to read the DECLARATION's ABI
+    /// plan rather than the target's.
+    ///
+    /// A value callee hands back its leaves, so a safe-nav join that stores PER
+    /// SLOT never has to take a box apart again.
+    pub(crate) fn ufcs_call_repr(
         &mut self,
         e: Idx<Expr>,
         func: FuncRef,
         recv: Idx<Inst>,
         arg_idxs: &[Idx<Expr>],
-        abi: &FnScalarAbi,
     ) -> Result<ValueRepr, CompilerError> {
-        let callee_inst = self.callee_instance_for(e, func)?;
+        let dc = self.plan_direct_call(e, func)?;
+        let Some(abi) = dc.plan.scalar().cloned() else {
+            let mut argv = vec![recv];
+            for &a in arg_idxs {
+                argv.push(self.lower_expr(a)?);
+            }
+            // A tuple-returning method splats N values, handed on UNPACKED: the
+            // per-slot join stores them slot-wise, so packing here would box a
+            // `nobox` element the wire just kept unboxed. A method whose own
+            // return is `(..)?` carries its presence tag in the repr, and the
+            // join forwards that tag rather than minting `true` -- `a?.m()` is
+            // absent when either link is.
+            return Ok(match dc.plan.ret_tuple().cloned() {
+                Some(shape) => self.emit_tuple_call_tree(func, argv, &shape, &dc),
+                None => {
+                    let call = self.emit_cur(Inst::Call { func, args: argv });
+                    self.record_call(call, func, &dc);
+                    ValueRepr::Scalar(call)
+                }
+            });
+        };
         let mut argv = Vec::new();
         // The RECEIVER arrives already lowered, so it cannot go through
         // `arg_values_for_slot`; a tuple receiver has no UFCS spelling, so
@@ -930,7 +970,7 @@ impl Builder<'_> {
                 let dests: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
                 let call =
                     self.emit_cur(Inst::CallMulti { dests: dests.clone(), func, args: argv });
-                self.record_call(call, func, None, None, callee_inst);
+                self.record_call(call, func, &dc);
                 let leaves: Vec<Idx<Inst>> =
                     dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
                 let mut idx = 0;
@@ -938,7 +978,7 @@ impl Builder<'_> {
             }
             None => {
                 let call = self.emit_cur(Inst::Call { func, args: argv });
-                self.record_call(call, func, None, None, callee_inst);
+                self.record_call(call, func, &dc);
                 Ok(ValueRepr::Scalar(call))
             }
         }
