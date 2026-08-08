@@ -1843,6 +1843,7 @@ pub fn build_function(
         backend,
         annotations,
         ffi_lib,
+        is_synthetic: f.is_synthetic,
     };
 
     Ok((func, if body_failed { None } else { Some(body) }, errors))

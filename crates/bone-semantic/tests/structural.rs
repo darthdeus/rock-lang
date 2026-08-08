@@ -828,6 +828,7 @@ fn structurally_equal_compounds_reassign_is_ok() {
         backend: bone_semantic::hir::FnBackend::Any,
         annotations: vec![],
         ffi_lib: None,
+        is_synthetic: false,
     });
 
     m.id = ws.intern_module(m.file);
