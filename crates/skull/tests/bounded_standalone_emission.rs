@@ -67,6 +67,27 @@ fn main() {
 }
 "#;
 
+/// A bounded body whose resolved witness is ITSELF bounded. `collect`'s
+/// placeholder resolves to `MapIter.next`, which holds a placeholder of its own
+/// for the inner `VecIter`. Only the second level needs the sub-tree that a
+/// resolved leaf carries, which is why one level of nesting cannot see this.
+///
+/// The terminal is what forces it: a `for` over the same chain drives `next`
+/// from the concrete loop header, where the witness is in hand. `.collect()`
+/// hands the chain to a bounded body, so the resolution has to travel.
+const NESTED: &str = r#"
+struct Item { id: int, p: float }
+
+fn main() {
+    let xs = [
+        Item { id: 1, p: 3.0 },
+        Item { id: 2, p: 2.0 },
+    ]
+    let ids = xs.map(_.id).collect()
+    print("{ids[0]}")
+}
+"#;
+
 fn emit(src: &str) -> Result<String, String> {
     let ws = check(src);
     let mid = skull::user_module_id(&ws).expect("user module");
@@ -113,6 +134,34 @@ fn a_bounded_body_emits_standalone_with_inlining_disabled() {
         .lines()
         .any(|l| !l.starts_with("function ") && l.contains(&format!("{symbol}(")));
     assert!(called, "`{symbol}` is emitted but nothing calls it");
+}
+
+/// A resolved witness that is itself bounded resolves too, one level down.
+///
+/// The demand a substitution files for its witness must carry the witness's OWN
+/// tree -- the `sub` of the leaf that resolved it. Dropping it files the demand
+/// with an EMPTY tree, and `MapIter.next` then reaches its standalone emission
+/// with nothing to resolve generic #0 from. The splice path cannot see this: it
+/// recurses into the callee in place, so the sub-tree never has to travel.
+///
+/// Asserting the emitted `MapIter.next` calls a concrete `next` is the arm that
+/// distinguishes a real resolution from an emission that merely succeeded --
+/// the same reason the single-level test checks the callee and not just the
+/// absence of an error.
+#[test]
+fn a_witness_that_is_itself_bounded_resolves_from_the_leafs_sub_tree() {
+    let _g = ModeGuard::on();
+    let lua = emit(NESTED).expect("a bounded witness of a bounded body must emit standalone");
+    let def = lua
+        .lines()
+        .find(|l| l.starts_with("function next_MapIter_") && l.contains("_spec_"))
+        .unwrap_or_else(|| panic!("no standalone `MapIter.next` specialization in:\n{lua}"));
+    let body = body_of(&lua, def);
+    assert!(
+        body.iter().any(|l| l.contains("next_VecIter")),
+        "`MapIter.next` emitted without resolving its own placeholder to the inner \
+         `VecIter.next`: {body:?}"
+    );
 }
 
 /// The admission control for the sentinel. Not inverted: this asserts the

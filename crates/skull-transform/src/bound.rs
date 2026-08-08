@@ -49,6 +49,17 @@ pub fn resolve_standalone_bound_calls(
             )));
         };
         let (split, leaf) = (mf.bound_next_split.contains(&id), leaf.clone());
+        // The witness this resolves to may be bounded ITSELF, and its resolution
+        // is the leaf's `sub`. Attach it to the retargeted call so the demand
+        // `reach::spec_bound_calls` files for that witness carries it; without
+        // this the demand goes out with an EMPTY tree and the witness reaches its
+        // own standalone emission with nothing to resolve from. The splice path
+        // grafts the raw `sub` at the same point for the same reason.
+        if let ResolvedBoundNext::Concrete { sub, .. } = &leaf {
+            if !sub.is_empty() {
+                mf.resolved_bound_trees.insert(id, sub.clone());
+            }
+        }
         substitute_bound_call(mf, id, split, &leaf, ws, "in this instantiation")?;
     }
     for nf in &mut mf.nested_fns {

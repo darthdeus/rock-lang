@@ -212,8 +212,18 @@ pub fn spec_bound_calls(
                 Inst::Call { func, .. } | Inst::CallMulti { func, .. } => *func,
                 _ => continue,
             };
-            let raw = mf.bound_trees.get(&iid).unwrap_or(&empty);
-            let tree = crate::bound::resolve_bound_tree(ws, ctx.inf, ctx.subst, raw, ctx.incoming)?;
+            // An already-RESOLVED tree wins: this call was retargeted by a
+            // standalone substitution, whose leaf carried the callee's own
+            // resolution. Re-deriving it from `bound_trees` is not possible --
+            // there is no raw entry, and this body's arena cannot state a tree
+            // that came from another instantiation.
+            let tree = match mf.resolved_bound_trees.get(&iid) {
+                Some(t) => t.clone(),
+                None => {
+                    let raw = mf.bound_trees.get(&iid).unwrap_or(&empty);
+                    crate::bound::resolve_bound_tree(ws, ctx.inf, ctx.subst, raw, ctx.incoming)?
+                }
+            };
             out.push(crate::bound::SpecDemand { func: fref, key: key.clone(), tree });
         }
     }
