@@ -1603,9 +1603,24 @@ impl InstanceGraph {
     /// reset and runs first on both paths, so a clear in both places would be
     /// one mechanism twice -- mutation-verified inert.
     ///
-    /// This is the only writer of the flat fields, so "what does the graph
-    /// say" has one answer whether it was just built or just updated. It
-    /// returns the instances it pruned.
+    /// It is the only writer of the CONCATENATION fields -- `edges`,
+    /// `call_sites`, `duplicate_sites`, `unresolved`, `rejections`,
+    /// `storage_failures`, `depth_capped`, `expanded`, `always_emitted_targets`
+    /// and the operational counters. It is NOT the only writer of the graph:
+    ///
+    /// - [`Self::seed_roots`] owns `root_instances`, `uninstantiated_roots` and
+    ///   `excused_generic_roots`;
+    /// - the four post-passes it calls each own their own field
+    ///   (`inline_body_deps`, `boundaries`, `coroutine_helpers`,
+    ///   `recursion_starts`, and the whole-graph `rejections` append);
+    /// - `substitutions`, `bound_trees` and their agreement records are written
+    ///   BOTH here and by [`Self::merge_reach`]/[`Self::merge_bound_tree`] from
+    ///   [`Self::commit`] during [`Self::run`], because `expand` reads an
+    ///   instance's substitution and witnesses before this ever runs.
+    ///
+    /// That last one is two writers for one fact and is the seam the
+    /// derivation cut removes: one indexing path, taken by install and replace
+    /// alike. Returns the instances it pruned.
     fn derive(&mut self, ws: &Workspace) -> BTreeSet<Instance> {
         let live = self.reachable_instances();
         let pruned: BTreeSet<Instance> = self
