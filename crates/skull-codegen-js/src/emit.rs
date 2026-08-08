@@ -2632,17 +2632,18 @@ fn build_program_core(
             for nf in &mut mf.nested_fns {
                 skull_transform::recover_counted_loops(ws, nf);
             }
-            register_statics(&mf, &mut st.gctx);
-            let mut findings: Vec<CompilerError> = Vec::new();
-            collect(
-                &mut findings,
-                discover_callees(ws, &mf, &mut st.names, &mut st.queue, &mut st.seen, &mut st.inline_js),
+            // THE shared discovery step, not a restatement of the parts of it a
+            // decorator was thought to need. Enumerating callees and globals by
+            // hand here left out the third thing `discover` does -- filing this
+            // body's `spec_bindings` as demands -- so a specialization a deco
+            // body was the only caller of was never queued, and the call site
+            // spelled a name nothing emitted.
+            let (subst, incoming) = Default::default();
+            let ctx = skull_mir::bound::body_ctx(
+                ws, module.id, bone_semantic::hir::BodyOwner::Decorator(did), &subst, &incoming,
             );
-            discover_globals(
-                ws, &mf, &st.state_index, &st.nobox_leaf_globals, &st.deco_globals, &st.enum_defs, &mut st.gctx,
-                &mut st.ginit_queue, &mut st.ginit_seen, &mut st.names, &mut st.queue, &mut st.seen,
-                &mut st.inline_js,
-            )?;
+            let mut findings: Vec<CompilerError> = Vec::new();
+            findings.extend((JsReach { ws, scx, st: &mut st }).discover(&ctx, &mf)?);
             match merge_findings(findings) {
                 Some(e) => st.reject(&deco_name, e),
                 None => deco_bodies.push((deco_name, mf)),
