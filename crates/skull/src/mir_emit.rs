@@ -1495,8 +1495,9 @@ fn emit_pass_nested_fns(ws: &Workspace, cg: &CodegenCtx, nested: &mut [MirFunc],
 
 /// Whether a function body is cached as a [`Chunk`] (ordinary or coroutine) vs
 /// regenerated inline (extern / `inline(lua)`). An `Iterator`-bounded fn is
-/// NEITHER: it exists only monomorphized-by-inlining at its call sites (its
-/// body holds placeholder bound-calls that have no standalone emission).
+/// NEITHER: it is emitted STANDALONE per instantiation, resolving its
+/// placeholder bound-calls from the tree that specialization demand carries, so
+/// there is no declaration-keyed chunk to cache.
 pub fn is_cached_body(f: &bone_semantic::hir::Function) -> bool {
     !f.is_extern && f.inline_body.is_none() && !fn_has_bounds(f) && !is_generic(f)
 }
