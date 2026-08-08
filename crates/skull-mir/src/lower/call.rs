@@ -647,7 +647,21 @@ impl Builder<'_> {
                 }
             }
         }
-        Ok(key)
+        // A key that names NO instantiation is not a delivery record. A
+        // non-generic callee produces an EMPTY key here (the zip over
+        // `f.generics` runs zero times and completeness holds vacuously), and
+        // filing that as a `spec_bindings` entry says "this call is served by a
+        // specialized snapshot" about a callee that has none.
+        //
+        // It is not cosmetic. `reach::call_targets` SKIPS any site carrying a
+        // `spec_bindings` entry, because `spec_bound_calls` owns that edge -- so
+        // an empty-key entry removes the callee from ordinary discovery and
+        // hands it to a demand path that resolves it right back to the shared
+        // body. Lua survives that round trip (`EmittedBodyId::new` maps an
+        // all-`None` key to `Shared`, which its walk then reaches); JS does not,
+        // and reported `no specialized body emitted for the `next` instantiation`
+        // about `CharsIter.next`, which is not generic at all.
+        Ok(key.filter(|k| !k.iter().all(Option::is_none)))
     }
 
     /// Lower a direct (statically-resolved) call. When the callee uses the scalar
