@@ -166,3 +166,17 @@ fn an_incomplete_substitution_rebuilds_no_key() {
         "a substitution missing a declared generic must rebuild NO key"
     );
 }
+
+/// The arm of `EmittedBodyId::new`'s totality assertion. A partial key names
+/// neither the shared body nor one instantiation, and the corpus produces none
+/// (267,671 total / 756 all-`None` / 0 partial over the 18 bin projects plus
+/// `tests/`) -- so without this the assertion could be vacuous and nothing
+/// would say.
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "total or empty")]
+fn a_partial_specialization_key_names_no_body() {
+    let ws = ws_of(SRC);
+    let partial: SpecKey = vec![Some(skull_mir::monoty::MonoTy::Int), None];
+    let _ = EmittedBodyId::new(decl(&ws, "pair"), partial);
+}

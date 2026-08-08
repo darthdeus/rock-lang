@@ -62,6 +62,17 @@ impl EmittedBodyId {
     /// rule `mangle::spec_fn_name` states by declining to mint a name for one:
     /// nothing is reified, so there is no second definition to target.
     pub fn new(decl: FuncRef, key: SpecKey) -> Self {
+        // A key is ALL-`None` (the shared body) or fully total (one
+        // instantiation); a partial one names neither and would key a chunk on
+        // half an identity. Measured over the 18 bin projects plus `tests/`:
+        // 267,671 total, 756 all-`None`, ZERO partial. That is what makes the
+        // `Option` here vestigial, and it is the premise the `Instance` re-key
+        // narrows on -- a total key is `instance_graph::Instance`'s `args` in
+        // everything but interning.
+        debug_assert!(
+            key.iter().all(Option::is_none) || key.iter().all(Option::is_some),
+            "a specialization key is total or empty, never partial",
+        );
         if key.iter().all(Option::is_none) {
             Self::Shared(decl)
         } else {
