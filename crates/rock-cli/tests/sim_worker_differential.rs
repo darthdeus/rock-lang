@@ -1313,6 +1313,176 @@ fn a_boot_pixel_readback_slot_does_not_carry_its_submit_across_the_boundary() {
     assert!(ok, "the readback boundary must be green:\n{all}");
 }
 
+/// A file change queued during one entry is not delivered to the next as a
+/// hot-reload event.
+///
+/// The asset watcher's `CHANGED` set is a QUEUE a SUCCESSOR drains, and its
+/// stores are path-keyed, so id accounting cannot see them and neither
+/// per-handle axis has anything to hang them on. Live under the harness:
+/// `ASSET_DEV_MODE` is on for every `sim` invocation.
+///
+/// The oracle is the EVENT, not the queue depth, and that distinction is
+/// measured rather than assumed: two earlier versions asserted on the queue and
+/// the mutation that deletes the restore survived both, because whoever polls
+/// first empties it. With the restore deleted the probe hot-reloads three fonts
+/// it never touched -- that is the defect, and `ASSET_CHANGE_EVENTS` is what
+/// cannot be laundered.
+#[test]
+fn a_predecessors_file_change_is_not_the_next_entrys_hot_reload() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "testbed",
+        "-j",
+        "1",
+        "b3_watcher_active",
+        "b3_watcher_seed",
+        "b3_watcher_probe",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 1,
+        "the probe must FOLLOW the seed in one process or it proves nothing: \
+         {boots} boots\n{all}"
+    );
+    assert!(ok, "the asset watcher boundary must be green:\n{all}");
+}
+
+/// A warning the RUST logger suppressed for one entry is not suppressed for
+/// the next.
+///
+/// The Rust half of the store `logger_dedup_does_not_suppress_the_next_entrys
+/// _warning` covers on the Lua side. It had no reset at all -- `reset_dedup()`
+/// was not even exported -- and it is call-site keyed, so no ledger axis could
+/// reach it: a warning that fired in entry 3 was simply silent in entry 7, and
+/// a suppressed warning is invisible to every other observation.
+///
+/// `b3_log_dedup_active` runs first as the recipe control, and carries the
+/// row's denominator: boot's image is legitimately EMPTY here, so the number
+/// that matters is that a capture RAN.
+#[test]
+fn the_rust_loggers_dedup_does_not_suppress_the_next_entrys_warning() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "testbed",
+        "-j",
+        "1",
+        "b3_log_dedup_active",
+        "b3_log_dedup_seed",
+        "b3_log_dedup_probe",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 1,
+        "the probe must FOLLOW the seed in one process or it proves nothing: \
+         {boots} boots\n{all}"
+    );
+    assert!(ok, "the Rust logger dedup boundary must be green:\n{all}");
+}
+
+/// An mpv target an ENTRY created is destroyed as an extra, and its successor
+/// stays in the same worker.
+///
+/// The admitted side of the `unrestorable` gate, and it is the half a
+/// rejection-only test cannot supply: a policy that refused every target of the
+/// class would satisfy the refusal test below while taking the worker off the
+/// table for a program that never booted one.
+#[test]
+fn an_entry_created_mpv_target_is_torn_down_without_costing_the_worker() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "testbed",
+        "-j",
+        "1",
+        "b3_mpv_entry_only",
+        "b3_mpv_entry_only_follows",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 1,
+        "an entry-created target must not cost the worker: {boots} boots\n{all}"
+    );
+    assert!(ok, "the entry-created mpv target arm must be green:\n{all}");
+}
+
+/// A BOOT-owned mpv target takes that boot signature off the worker, reported
+/// with the handle that did it.
+///
+/// The refused side. Both sims still PASS -- the refusal is not an error, it is
+/// the boundary declining to claim a world it did not return -- so the verdict
+/// alone proves nothing and the BOOT COUNT is the evidence: the follower reruns
+/// in a fresh process, which is exactly what the refusal buys.
+#[test]
+fn a_boot_owned_mpv_target_refuses_the_worker_and_names_itself() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "testbed",
+        "-j",
+        "1",
+        "b3_mpv_boot_live",
+        "b3_mpv_boot_follows",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    assert!(
+        all.contains("boot state whose contents cannot be reconstructed: mpv_target:"),
+        "the refusal must name the handle that earned it:\n{all}"
+    );
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 2,
+        "a refused boot world must put the successor in a FRESH process: \
+         {boots} boots\n{all}"
+    );
+    assert!(ok, "a refusal is not a failure; both entries still run:\n{all}");
+}
+
+/// A boot-owned IMAGE's texture is returned to boot's at the boundary, pixels
+/// and wrap state both.
+///
+/// The GPU-side half of the ImageData case below, and the one that could not be
+/// done by snapshotting contents: reading a texture back needs `glGetTexImage`,
+/// which GLES does not have, and imaging every boot asset would cost mag
+/// hundreds of megabytes per worker. So boot's TEXTURE OBJECT is retained and
+/// the first write to a boot-owned image is diverted onto a replacement
+/// (`image_write_target`), which makes the cost scale with the images an entry
+/// mutates rather than with the ones it boots.
+///
+/// `b3_img_active` runs first as the recipe control: it proves the texel probe
+/// reads what boot uploaded, that REPEAT is a state creation does not establish,
+/// and the capture's own denominator -- a boundary that snapshotted no image
+/// diverts nothing and refuses nothing, which looks from the outside exactly
+/// like one that found nothing to divert.
+///
+/// Two boot images, and the untouched one is what separates a restore from a
+/// boundary that swept every texture it found.
+#[test]
+fn a_boot_image_does_not_carry_its_texture_across_the_boundary() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "testbed",
+        "-j",
+        "1",
+        "b3_img_active",
+        "b3_img_seed",
+        "b3_img_probe",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 1,
+        "the probe must FOLLOW the seed in one process or it proves nothing: \
+         {boots} boots\n{all}"
+    );
+    assert!(ok, "the image contents boundary must be green:\n{all}");
+}
+
 /// A boot-owned ImageData's PIXELS are returned to boot's at the boundary.
 ///
 /// Same blind spot as the canvas and readback cases -- present at its boot id,
