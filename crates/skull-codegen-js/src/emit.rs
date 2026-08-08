@@ -3588,33 +3588,37 @@ fn check_scalar_abi(
                     Inst::Call { func, args } | Inst::CallMulti { func, args, .. } => (func, args.len()),
                     _ => continue,
                 };
-                if let Some(key) = mf.spec_bindings.get(&iid) {
-                    match spec_arities.get(&(*callee, key.clone())) {
-                        // An unemitted specialization is `callee_name`'s rejection
-                        // to make -- it knows which name went missing.
-                        None => {}
-                        Some(&arity) if argc == arity => {}
+                // ONE admission rule, over the EMITTED BODY the call targets.
+                // The two arms decide only WHICH body that is; the arity window
+                // is then the same question of both, asked through the same ABI
+                // plan. Stating the rule twice is how the specialized arm came
+                // to demand `argc == arity`: it lost the omitted-defaulted-
+                // argument window the shared arm allowed, so the one shape that
+                // exists only at a specialization -- a defaulted param behind a
+                // scalarized value-struct one -- rejected while luajit compiled
+                // and ran it.
+                let (body, arity, what) = match mf.spec_bindings.get(&iid) {
+                    Some(key) => match spec_arities.get(&(*callee, key.clone())) {
+                        // An unemitted specialization is `callee_name`'s
+                        // rejection to make -- it knows which name went missing.
+                        None => continue,
                         Some(&arity) => {
-                            let cf = &ws.module(callee.module).functions[callee.func];
-                            findings.push(err(format!(
-                                "JS subset: value-struct scalar ABI mismatch calling specialized \
-                                 `{}` ({argc} args vs {arity} params)",
-                                cf.name
-                            )));
+                            (EmittedBodyId::new(*callee, key.clone()), arity, "specialized ")
                         }
-                    }
-                    continue;
-                }
-                if let Some(&arity) = arities.get(callee) {
-                    let required = required_arg_count(ws, scx, *callee, arity);
-                    if argc < required || argc > arity {
-                        let cf = &ws.module(callee.module).functions[callee.func];
-                        findings.push(err(format!(
-                            "JS subset: value-struct scalar ABI mismatch calling `{}` \
-                             ({argc} args vs {required}..={arity} params; callee not inlined)",
-                            cf.name
-                        )));
-                    }
+                    },
+                    None => match arities.get(callee) {
+                        None => continue,
+                        Some(&arity) => (EmittedBodyId::Shared(*callee), arity, ""),
+                    },
+                };
+                let required = required_arg_count(ws, scx, body, arity);
+                if argc < required || argc > arity {
+                    let cf = &ws.module(callee.module).functions[callee.func];
+                    findings.push(err(format!(
+                        "JS subset: value-struct scalar ABI mismatch calling {what}`{}` \
+                         ({argc} args vs {required}..={arity} params)",
+                        cf.name
+                    )));
                 }
             }
         }
@@ -5025,13 +5029,14 @@ fn global_refs(mf: &MirFunc) -> Vec<ustr::Ustr> {
 /// MIR param slot. A GC value-struct default would break the 1:1 assumption, but
 /// value-struct construction rejects at emit independently, so no such call is
 /// admitted here.
-fn required_arg_count(
+pub fn required_arg_count(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
-    fr: FuncRef,
+    body: EmittedBodyId,
     arity: usize,
 ) -> usize {
     use bone_semantic::hir::BodyOwner;
+    let fr = body.decl();
     let defaults: Vec<bool> = ws
         .module(fr.module)
         .bodies
@@ -5040,7 +5045,10 @@ fn required_arg_count(
         .unwrap_or_default();
     // Scalar ABI: a defaulted value-struct param explodes to N leaf slots and
     // all N are omittable together -- subtract per-param LEAF widths, not 1.
-    if let Some(widths) = skull_mir::lower::BackendFnAbiPlan::for_declaration(ws, scx, fr).param_leaf_widths() {
+    // The widths come from the EMITTED BODY's own plan: a specialization's
+    // instantiation is exactly where a param's leaf width differs from the
+    // declaration's, so asking the declaration would answer for another ABI.
+    if let Some(widths) = skull_mir::lower::BackendFnAbiPlan::for_body(ws, scx, body).param_leaf_widths() {
         let omittable: usize = widths
             .iter()
             .zip(defaults.iter().chain(std::iter::repeat(&false)))

@@ -38,6 +38,8 @@ mod log_dedup;
 mod loops;
 #[path = "publisher_abi.rs"]
 mod publisher_abi;
+#[path = "scalar_abi_arity.rs"]
+mod scalar_abi_arity;
 #[path = "map_iter.rs"]
 mod map_iter;
 #[path = "match_fold.rs"]
