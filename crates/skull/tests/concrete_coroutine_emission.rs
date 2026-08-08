@@ -155,18 +155,37 @@ fn a_non_generic_coroutine_over_a_column_vec_is_correct() {
     assert_eq!(run(CONCRETE_CO_COLUMN, "concrete_co_col"), "2");
 }
 
-/// 2x2 cell: generic WITHOUT column storage. Both instantiations run, and they
-/// keep ONE shared body -- the default path does not specialize a plain generic.
+/// 2x2 cell: generic WITHOUT column storage. Both instantiations run, and each
+/// owns its own `__step` -- emission is instance-owned, so a boxed element is
+/// not a reason to share a body. There is no shared generic body to share.
+///
+/// This cell used to demand ONE `__step`, which stated the pre-cutover
+/// specialization POLICY ("the default path does not specialize a plain
+/// generic"). That gate is deleted, along with `ScalarCtx::total_specialization`.
+/// Ratified on measurement, not on the plan: the two families are complete and
+/// consistent -- 6 definitions (ctor / `__resume` / `__step` x2) against exactly
+/// 6 call targets, symbols distinct -- and all three body pairs are IDENTICAL
+/// once the instantiation tag is normalised away, which is the ABI plans
+/// agreeing. Re-merging equal-ABI bodies is an optimization for E2 or later, not
+/// a reason to keep a shared generic body.
 #[test]
-fn a_generic_coroutine_over_boxed_elements_shares_one_body() {
+fn a_generic_coroutine_over_boxed_elements_owns_a_step_per_instance() {
     assert_eq!(run(GENERIC_CO_BOXED, "gen_co_boxed"), "2 3");
     let lua = common::try_emit_module(GENERIC_CO_BOXED).expect("must emit");
     let steps: Vec<String> =
         step_definitions(&lua).into_iter().filter(|n| n.starts_with("walk")).collect();
     assert_eq!(
         steps.len(),
-        1,
-        "a boxed element is not a specialization trigger, so both instantiations \
-         must still share one `__step`; got {steps:?}"
+        2,
+        "each instantiation must own a `__step`; got {steps:?}"
+    );
+    // Distinctness is the half that matters: two definitions sharing a symbol
+    // would clobber, and the later one would silently serve both element types.
+    let distinct: std::collections::BTreeSet<&String> = steps.iter().collect();
+    assert_eq!(
+        steps.len(),
+        distinct.len(),
+        "no `__step` symbol may be defined twice -- the later definition would \
+         clobber the earlier one: {steps:?}"
     );
 }
