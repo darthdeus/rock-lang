@@ -1349,6 +1349,119 @@ fn a_predecessors_file_change_is_not_the_next_entrys_hot_reload() {
     assert!(ok, "the asset watcher boundary must be green:\n{all}");
 }
 
+/// A sampler an entry binds on a unit >= 2 does not reach the next entry.
+///
+/// Units 2 and up, and the choice carries the assertion. Units 0 and 1 are
+/// rewritten every frame by the present and tonemap passes, so a violation on
+/// either is laundered before any reading can attribute it and an assertion
+/// over them passes whether or not the boundary works -- the `sampler_release`
+/// lesson in CLAUDE.md, learned by deleting two of six releases and watching
+/// the sweep stay green. Every reading is taken before the entry's first frame
+/// advance, since the render path binds samplers of its own.
+#[test]
+fn a_predecessors_sampler_does_not_reach_the_next_entrys_texture_unit() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "testbed",
+        "-j",
+        "1",
+        "b3_sampler_active",
+        "b3_sampler_seed",
+        "b3_sampler_probe",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 1,
+        "the probe must FOLLOW the seed in one process or it proves nothing: \
+         {boots} boots\n{all}"
+    );
+    assert!(ok, "the sampler unit boundary must be green:\n{all}");
+}
+
+/// The colour mask, clear colour and scissor an entry leaves do not reach the
+/// next entry.
+///
+/// Their own ambient row rather than a side effect: today they are normalized
+/// only inside `stone_canvas_reset_contents`, so a program with no boot canvas
+/// -- or one whose canvases the policy refuses -- normalizes nothing, and the
+/// per-frame site that would otherwise cover them sits inside the render gate
+/// and never runs for a non-rendered sim. This fixture renders nothing, which
+/// is what makes the probe's reading about the boundary and not about a frame.
+#[test]
+fn a_predecessors_gl_write_state_does_not_reach_the_next_entry() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim", "testbed", "-j", "1", "b3_ws_active", "b3_ws_seed", "b3_ws_probe",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 1,
+        "the probe must FOLLOW the seed in one process or it proves nothing: \
+         {boots} boots\n{all}"
+    );
+    assert!(ok, "the GL write state boundary must be green:\n{all}");
+}
+
+/// A boot canvas an entry NARROWED is back at boot's active rect for the next
+/// entry.
+///
+/// The half of a canvas's contents the paint flag cannot see:
+/// `stone_set_canvas_active` moves the sub-rect every later bind draws into and
+/// sets no `bound_as_target`, so the canvas reports "never painted" while its
+/// geometry has moved. Per-handle, so it lives in the canvas class's own policy
+/// rather than in `AMBIENT` -- one process-wide row over N canvases could not
+/// say which canvas moved.
+///
+/// The probe reads before its first frame advance, which is the only window
+/// where this is observable: `set_scene_active_rects` re-establishes the rect on
+/// the successor's first `frame_core_resolve_view`, so a reading one frame later
+/// passes with the fix deleted.
+#[test]
+fn a_predecessors_canvas_narrowing_does_not_reach_the_next_entry() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim", "testbed", "-j", "1", "b3_car_active", "b3_car_seed", "b3_car_probe",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 1,
+        "the probe must FOLLOW the seed in one process or it proves nothing: \
+         {boots} boots\n{all}"
+    );
+    assert!(ok, "the canvas active-rect boundary must be green:\n{all}");
+}
+
+/// A canvas BOOT itself narrowed takes that boot signature off the worker.
+///
+/// The refusal half of the same policy, and the reason `boot_mutated` grew a
+/// second question rather than the reset simply growing a second write: widening
+/// boot's own narrowed rect back to the full size installs a geometry boot never
+/// had, which is a different wrong state rather than a restore. Both sims still
+/// PASS -- a refusal is not an error -- so the BOOT COUNT is the evidence.
+#[test]
+fn a_boot_narrowed_canvas_refuses_the_worker_and_names_itself() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim", "testbed", "-j", "1", "b3_car_boot_narrowed", "b3_car_boot_narrowed_follows",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    assert!(
+        all.contains("boot state whose contents cannot be reconstructed: canvas:"),
+        "the refusal must name the canvas that earned it:\n{all}"
+    );
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 2,
+        "a refused boot world must put the successor in a FRESH process: \
+         {boots} boots\n{all}"
+    );
+    assert!(ok, "a refusal is not a failure; both entries still run:\n{all}");
+}
+
 /// A warning the RUST logger suppressed for one entry is not suppressed for
 /// the next.
 ///
