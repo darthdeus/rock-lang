@@ -15,9 +15,10 @@
 //!
 //! The controls bound the change on both axes: a NON-generic `co fn` over the
 //! same column vec, and the same generic `co fn` over a BOXED element, must both
-//! keep working -- and the boxed one must keep sharing its body, because a
-//! non-column plain generic is not a specialization trigger on the default path.
+//! keep working. Under instance-owned emission the boxed one owns a family per
+//! instantiation too -- there is no shared generic body to fall back to.
 
+use std::collections::BTreeSet;
 use crate::common;
 
 /// One generic `co fn`, two column-stored instantiations with different element
@@ -65,10 +66,8 @@ fn main() {
 }
 "#;
 
-/// Control, the other axis: keep GENERIC, drop the column storage. A boxed
-/// element is not a specialization trigger, so this must keep ONE shared body --
-/// otherwise the arm above would be green for a change that specializes every
-/// generic coroutine, which is E1's job and not D-3's.
+/// Control, the other axis: keep GENERIC, drop the column storage. Both
+/// instantiations must run and own their own helper families.
 const GENERIC_CO_BOXED: &str = r#"
 co fn walk<T>(v: [T]) -> Coroutine<int, int, ()> {
     let n = 0
@@ -155,33 +154,69 @@ fn a_non_generic_coroutine_over_a_column_vec_is_correct() {
     assert_eq!(run(CONCRETE_CO_COLUMN, "concrete_co_col"), "2");
 }
 
-/// 2x2 cell: generic WITHOUT column storage. Both instantiations run, and each
-/// owns its own `__step` -- emission is instance-owned, so a boxed element is
-/// not a reason to share a body. There is no shared generic body to share.
+/// Every top-level definition whose symbol starts with `prefix`, and every
+/// symbol with that prefix the chunk REFERENCES anywhere but its own definition
+/// header. The two are compared, so a body that is defined and never reached, or
+/// reached and never defined, is visible.
 ///
-/// This cell used to demand ONE `__step`, which stated the pre-cutover
-/// specialization POLICY ("the default path does not specialize a plain
-/// generic"). That gate is deleted, along with `ScalarCtx::total_specialization`.
-/// Ratified on measurement, not on the plan: the two families are complete and
-/// consistent -- 6 definitions (ctor / `__resume` / `__step` x2) against exactly
-/// 6 call targets, symbols distinct -- and all three body pairs are IDENTICAL
-/// once the instantiation tag is normalised away, which is the ABI plans
-/// agreeing. Re-merging equal-ABI bodies is an optimization for E2 or later, not
-/// a reason to keep a shared generic body.
+/// REFERENCED, not called: a coroutine's helpers are reached as VALUES --
+/// `pcall(..__step, s, arg)` and `__resume = ..__resume` -- so a call-shaped
+/// probe sees only the two ctors and reports four phantom orphans.
+fn defined_and_referenced(lua: &str, prefix: &str) -> (BTreeSet<String>, BTreeSet<String>) {
+    let mut defined = BTreeSet::new();
+    let mut referenced = BTreeSet::new();
+    for (i, _) in lua.match_indices(prefix) {
+        let rest = &lua[i..];
+        let len = rest
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .unwrap_or(rest.len());
+        let name = rest[..len].to_string();
+        if lua[..i].ends_with("function ") {
+            defined.insert(name);
+        } else {
+            referenced.insert(name);
+        }
+    }
+    (defined, referenced)
+}
+
+/// 2x2 cell: generic WITHOUT column storage. Each instantiation owns its own
+/// family -- emission is instance-owned, so a boxed element is not a reason to
+/// share a body, and there is no shared generic body left to share.
+///
+/// **Runtime output cannot carry this test.** Both instantiations have the SAME
+/// boxed ABI, so a call routed to the wrong family still returns a well-typed
+/// answer of the right shape -- and here the two lengths differ only because the
+/// fixture feeds different-length inputs. Same-ABI misrouting is invisible to
+/// `"2 3"` and invisible to a count of definitions. So the evidence is the exact
+/// set equality between what is DEFINED and what is REFERENCED: every emitted family
+/// member is reached, and every reached symbol exists. A missing definition, a
+/// definition nothing routes to, and two families collapsing onto one symbol all
+/// break it.
 #[test]
-fn a_generic_coroutine_over_boxed_elements_owns_a_step_per_instance() {
+fn a_generic_coroutine_over_boxed_elements_owns_a_family_per_instance() {
     assert_eq!(run(GENERIC_CO_BOXED, "gen_co_boxed"), "2 3");
     let lua = common::try_emit_module(GENERIC_CO_BOXED).expect("must emit");
+
+    let (defined, referenced) = defined_and_referenced(&lua, "walk_");
+    // Non-empty and EXACT: a zero-over-zero equality is the vacuous pass this
+    // shape invites, so the population is asserted first. Measured: two
+    // instantiations x (ctor, `__resume`, `__step`).
+    assert_eq!(
+        defined.len(),
+        6,
+        "expected a ctor/`__resume`/`__step` family per instantiation; defined {defined:?}"
+    );
+    assert_eq!(
+        defined, referenced,
+        "every emitted `walk` body must be reached and every reached symbol must \
+         exist -- defined {defined:?}, referenced {referenced:?}"
+    );
+
     let steps: Vec<String> =
         step_definitions(&lua).into_iter().filter(|n| n.starts_with("walk")).collect();
-    assert_eq!(
-        steps.len(),
-        2,
-        "each instantiation must own a `__step`; got {steps:?}"
-    );
-    // Distinctness is the half that matters: two definitions sharing a symbol
-    // would clobber, and the later one would silently serve both element types.
-    let distinct: std::collections::BTreeSet<&String> = steps.iter().collect();
+    let distinct: BTreeSet<&String> = steps.iter().collect();
+    assert_eq!(steps.len(), 2, "each instantiation must own a `__step`; got {steps:?}");
     assert_eq!(
         steps.len(),
         distinct.len(),
