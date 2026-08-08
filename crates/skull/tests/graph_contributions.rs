@@ -89,7 +89,7 @@ fn the_edge_closure_and_the_reach_record_name_the_same_instances() {
     // specialization, and every stdlib callee reached transitively -- which is
     // where an updater gets reachability wrong in the first place. Verified by
     // mutation: dropping the `GenericCall` reach fails both arms below.
-    let kinds: BTreeSet<&str> = g.edges.iter().map(|e| e.kind.name()).collect();
+    let kinds: BTreeSet<&str> = g.edges().map(|e| e.kind.name()).collect();
     for required in ["direct-call", "generic-call", "fn-value", "bound-next-witness"] {
         assert!(kinds.contains(required), "the fixture has no `{required}` edge: {kinds:?}");
     }
@@ -136,9 +136,9 @@ fn the_operational_censuses_are_sums_of_the_primary_records() {
     assert_eq!(g.always_emitted_seeds, sum(|c| c.always_emitted_seeds));
     assert_eq!(g.synthesized_examined, sum(|c| c.synthesized_examined));
     assert_eq!(g.synthesized_approximated, sum(|c| c.synthesized_approximated));
-    assert_eq!(g.edges.len(), sum(|c| c.edges.len()));
+    assert_eq!(g.edges().count(), sum(|c| c.edges.len()));
     assert_eq!(
-        g.call_sites.values().map(|s| s.len()).sum::<usize>(),
+        g.call_sites().map(|(_, m)| m).map(|s| s.len()).sum::<usize>(),
         sum(|c| c.call_sites.len())
     );
 }

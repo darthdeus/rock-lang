@@ -82,7 +82,7 @@ fn main() {
     );
     // Every expanded instance, not "most": a missing table is a hole in the
     // Stage-3 cutover, and the walk already RECORDS which bodies it entered.
-    for i in &g.expanded {
+    for i in g.expanded() {
         assert!(
             bodies.bodies.contains_key(i),
             "expanded instance `{}` has no ConcreteBody",
@@ -170,8 +170,7 @@ fn main() { let a = plain(1) }
     let roots = instance_graph::emission_roots(&ws, None);
     let mut g = instance_graph::build(&ws, roots, false);
     let inst = g
-        .expanded
-        .iter()
+        .expanded()
         .find(|i| g.identity(&ws, i).starts_with("plain"))
         .cloned()
         .expect("no plain instance was expanded");
@@ -185,7 +184,7 @@ fn main() { let a = plain(1) }
     let stale_roots = instance_graph::emission_roots(&ws, None);
     let stale_graph = instance_graph::build(&ws, stale_roots, false);
     assert!(
-        stale_graph.expanded.iter().all(|i| i.func != inst.func),
+        stale_graph.expanded().all(|i| i.func != inst.func),
         "the instance graph expanded a body from stale inference"
     );
 
@@ -220,8 +219,7 @@ fn main() { let a = ident(1) }
     let roots = instance_graph::emission_roots(&ws, None);
     let mut g = instance_graph::build(&ws, roots, false);
     let inst = g
-        .expanded
-        .iter()
+        .expanded()
         .find(|i| g.identity(&ws, i).starts_with("ident"))
         .cloned()
         .expect("no ident instance was expanded");
@@ -424,16 +422,15 @@ fn every_recorded_operation_becomes_one_entry_a_hole_or_a_rejection() {
     // recording sites would keep the identity above (its denominator is the
     // sites) and break this one.
     let resolved = g
-        .call_sites
-        .values()
-        .flat_map(|m| m.values())
+        .call_sites()
+        .flat_map(|(_, m)| m.values())
         .filter(|r| matches!(r.outcome, SiteOutcome::Resolved(_)))
         .count();
     assert_eq!(
         resolved,
-        g.edges.len(),
+        g.edges().count(),
         "the walk recorded {} edges but {resolved} resolved sites",
-        g.edges.len()
+        g.edges().count()
     );
     assert!(bodies.gaps.is_empty(), "an expanded instance got no body: {:?}", c.gaps);
     // Each table has a population, so the identity above is not satisfied by
@@ -458,9 +455,9 @@ fn every_recorded_operation_becomes_one_entry_a_hole_or_a_rejection() {
         bodies.unknown_rock_callees
     );
     assert!(
-        g.duplicate_sites.is_empty(),
+        g.duplicate_sites().next().is_none(),
         "two operations collapsed onto one site key: {:?}",
-        g.duplicate_sites
+        g.duplicate_sites().collect::<Vec<_>>()
     );
     // Every hole is located -- a hole with no span cannot become a compile
     // error at the Stage-3 cutover.
@@ -608,8 +605,7 @@ fn main() { let n = sum_it([1, 2].iter()) }
     let roots = instance_graph::emission_roots(&ws, None);
     let mut g = instance_graph::build(&ws, roots, false);
     let inst = g
-        .expanded
-        .iter()
+        .expanded()
         .find(|i| g.identity(&ws, i).starts_with("sum_it"))
         .cloned()
         .expect("no concrete `sum_it` instance");
@@ -735,9 +731,8 @@ fn a_column_vec_sort_names_one_of_its_two_arms() {
     let sorted = |src: &str| -> Vec<&'static str> {
         let (_, g, _) = bodies_of(src);
         let mut v: Vec<&'static str> = g
-            .call_sites
-            .values()
-            .flat_map(|sites| sites.keys())
+            .call_sites()
+            .flat_map(|(_, sites)| sites.keys())
             .filter_map(|s| match s.op {
                 SiteOp::Synthesized(n @ ("__rock_col_sort" | "__rock_col_sort_leaves")) => Some(n),
                 _ => None,
@@ -827,5 +822,5 @@ fn main() { let a = body([1, 2]) }
         bodies.bodies[inst].callees().iter().all(|(s, _)| s.expr != header),
         "the template-lowered `for` header has a callee entry after all"
     );
-    assert_eq!(g.storage_failures.len(), 0, "a synthesized receiver had no concrete type");
+    assert_eq!(g.storage_failures().count(), 0, "a synthesized receiver had no concrete type");
 }

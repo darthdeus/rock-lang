@@ -1094,8 +1094,7 @@ fn main() { print("{apply(add_one, 1)}") }
     let (ws, mut g) = graph_of(src);
     let bodies = skull::concrete_body::build(&ws, &mut g);
     let main_inst = g
-        .expanded
-        .iter()
+        .expanded()
         .find(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "main")
         .expect("`main` instance")
         .clone();

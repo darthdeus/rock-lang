@@ -21,7 +21,8 @@ use skull::graph_snapshot::{canonical, CanonicalGraph};
 use skull::instance_graph::{
     self, AlwaysEmittedFailure, AlwaysEmittedOutcome, Boundary, BoundaryClass,
     BoundTreeDisagreement, DeclKey, EdgeKind, Instance, InstanceBoundNext, InstanceBoundTree,
-    InstanceGraph, Rejection, RejectionKind, Site, SiteDomain, SiteOp, SiteOutcome, SiteRecord,
+    InstanceGraph, Owner, Rejection, RejectionKind, Site, SiteDomain, SiteOp, SiteOutcome,
+    SiteRecord,
     SubstDisagreement, Unresolved,
 };
 use skull_mir::monoty::{MonoSubst, MonoTy, MonoTyReason};
@@ -209,6 +210,18 @@ fn arm(
 
 fn noop(_: &mut InstanceGraph) {}
 
+/// The first contribution that owns an edge. The oracle's arms mutate the
+/// PRIMARY RECORD, which is where the row lives -- there is no flat copy to
+/// perturb instead, and perturbing one would prove nothing about the other.
+fn first_edge_owner(g: &mut InstanceGraph) -> &mut skull::instance_graph::Contribution {
+    g.contributions.values_mut().find(|c| !c.edges.is_empty()).expect("an edge")
+}
+
+/// Any contribution, for arms that ADD a record rather than alter one.
+fn any_owner(g: &mut InstanceGraph) -> &mut skull::instance_graph::Contribution {
+    g.contributions.values_mut().next().expect("a contribution")
+}
+
 /// The n-th instance in the graph's own order. Deterministic: `instances` is a
 /// `BTreeSet` and the build is order-stable (the arm above proves it).
 fn inst(g: &InstanceGraph, n: usize) -> Instance {
@@ -218,8 +231,7 @@ fn inst(g: &InstanceGraph, n: usize) -> Instance {
 /// A real span from the graph, so a span arm probes a rendering rather than the
 /// `<unknown>` sentinel.
 fn real_span(g: &InstanceGraph) -> Span {
-    g.edges
-        .iter()
+    g.edges()
         .map(|e| e.span)
         .find(|s| !instance_graph::is_spanless(s))
         .expect("the fixture has a spanned edge")
@@ -269,8 +281,8 @@ fn tree(callee: Instance, sub: InstanceBoundTree) -> InstanceBoundTree {
 }
 
 fn put_site(g: &mut InstanceGraph, site: Site, record: SiteRecord) {
-    let owner = inst(g, 0);
-    g.call_sites.entry(owner).or_default().insert(site, record);
+    let owner = Owner::Instance(inst(g, 0));
+    g.contributions.get_mut(&owner).expect("owner").call_sites.insert(site, record);
 }
 
 fn resolved_site(g: &InstanceGraph, n: usize) -> SiteRecord {
@@ -322,14 +334,18 @@ fn arms() -> Vec<Arm> {
         g.instances.remove(&victim);
     }));
     v.push(arm("expanded.presence", "expanded", noop, |g| {
-        let victim = g.expanded.iter().next().expect("an expanded instance").clone();
-        g.expanded.remove(&victim);
+        g.contributions.values_mut().find(|c| c.expanded).expect("an expanded body").expanded =
+            false;
     }));
     v.push(arm("edges.presence", "edges", noop, |g| {
-        g.edges.pop().expect("an edge");
+        first_edge_owner(g).edges.pop().expect("an edge");
     }));
     v.push(arm("depth_capped.presence", "depth_capped", noop, |g| {
-        g.depth_capped.pop().expect("the fixture's capped instance");
+        g.contributions
+            .values_mut()
+            .find(|c| c.depth_capped)
+            .expect("the fixture's capped instance")
+            .depth_capped = false;
     }));
     v.push(arm("boundaries.presence", "boundaries", noop, |g| {
         let k = g.boundaries.keys().next().expect("a boundary").clone();
@@ -348,8 +364,12 @@ fn arms() -> Vec<Arm> {
         g.always_emitted_targets.remove(&victim);
     }));
     v.push(arm("call_sites.presence", "call_sites", noop, |g| {
-        let victim = g.call_sites.keys().next().expect("a call-site owner").clone();
-        g.call_sites.remove(&victim);
+        g.contributions
+            .values_mut()
+            .find(|c| !c.call_sites.is_empty())
+            .expect("a call-site owner")
+            .call_sites
+            .clear();
     }));
     v.push(arm("substitutions.presence", "substitutions", noop, |g| {
         let victim = g.substitutions.keys().next().expect("a substitution").clone();
@@ -367,8 +387,10 @@ fn arms() -> Vec<Arm> {
         let k = g.uninstantiated_roots.keys().next().expect("a root hole").clone();
         g.uninstantiated_roots.remove(&k);
     }));
+    // The fixture's own rejection is the WHOLE-GRAPH one: the recursion pass is
+    // not a body's walk, so it is the graph that owns it.
     v.push(arm("rejections.presence", "rejections", noop, |g| {
-        g.rejections.pop().expect("the fixture's recursion rejection");
+        g.graph_rejections.pop().expect("the fixture's recursion rejection");
     }));
     v.push(arm("bound_trees.presence", "bound_trees", noop, |g| {
         let k = g.bound_trees.keys().next().expect("a bound tree").clone();
@@ -379,20 +401,29 @@ fn arms() -> Vec<Arm> {
     v.push(arm(
         "edges.kind",
         "edges",
-        |g| g.edges[0].kind = EdgeKind::DirectCall,
-        |g| g.edges[0].kind = EdgeKind::FnValue,
+        |g| first_edge_owner(g).edges[0].kind = EdgeKind::DirectCall,
+        |g| first_edge_owner(g).edges[0].kind = EdgeKind::FnValue,
     ));
-    v.push(arm("edges.from", "edges", noop, |g| g.edges[0].from = inst(g, 1)));
-    v.push(arm("edges.to", "edges", noop, |g| g.edges[0].to = inst(g, 1)));
+    v.push(arm("edges.from", "edges", noop, |g| {
+        let to = inst(g, 1);
+        first_edge_owner(g).edges[0].from = to;
+    }));
+    v.push(arm("edges.to", "edges", noop, |g| {
+        let to = inst(g, 1);
+        first_edge_owner(g).edges[0].to = to;
+    }));
     for (name, mutate) in span_field_probes() {
         v.push(Arm {
             name,
             section: "edges",
-            a: Box::new(|g: &mut InstanceGraph| g.edges[0].span = real_span(g)),
+            a: Box::new(|g: &mut InstanceGraph| {
+                let s = real_span(g);
+                first_edge_owner(g).edges[0].span = s;
+            }),
             b: Box::new(move |g: &mut InstanceGraph| {
                 let mut s = real_span(g);
                 mutate(&mut s);
-                g.edges[0].span = s;
+                first_edge_owner(g).edges[0].span = s;
             }),
         });
     }
@@ -403,12 +434,12 @@ fn arms() -> Vec<Arm> {
         "unresolved",
         |g| {
             let u = synthetic_unresolved(g);
-            g.unresolved.push(u);
+            any_owner(g).unresolved.push(u);
         },
         |g| {
             let mut u = synthetic_unresolved(g);
             u.from = inst(g, 1);
-            g.unresolved.push(u);
+            any_owner(g).unresolved.push(u);
         },
     ));
     v.push(arm(
@@ -416,12 +447,12 @@ fn arms() -> Vec<Arm> {
         "unresolved",
         |g| {
             let u = synthetic_unresolved(g);
-            g.unresolved.push(u);
+            any_owner(g).unresolved.push(u);
         },
         |g| {
             let mut u = synthetic_unresolved(g);
             u.callee = inst(g, 1).func;
-            g.unresolved.push(u);
+            any_owner(g).unresolved.push(u);
         },
     ));
     v.push(arm(
@@ -429,12 +460,12 @@ fn arms() -> Vec<Arm> {
         "unresolved",
         |g| {
             let u = synthetic_unresolved(g);
-            g.unresolved.push(u);
+            any_owner(g).unresolved.push(u);
         },
         |g| {
             let mut u = synthetic_unresolved(g);
             u.reason = "synthetic-b";
-            g.unresolved.push(u);
+            any_owner(g).unresolved.push(u);
         },
     ));
     v.push(arm(
@@ -442,12 +473,12 @@ fn arms() -> Vec<Arm> {
         "unresolved",
         |g| {
             let u = synthetic_unresolved(g);
-            g.unresolved.push(u);
+            any_owner(g).unresolved.push(u);
         },
         |g| {
             let mut u = synthetic_unresolved(g);
             u.span = shifted(u.span);
-            g.unresolved.push(u);
+            any_owner(g).unresolved.push(u);
         },
     ));
 
@@ -457,12 +488,12 @@ fn arms() -> Vec<Arm> {
         "rejections",
         |g| {
             let r = synthetic_rejection(g);
-            g.rejections.push(r);
+            any_owner(g).rejections.push(r);
         },
         |g| {
             let mut r = synthetic_rejection(g);
             r.kind = RejectionKind::UnconstrainedTypeVar;
-            g.rejections.push(r);
+            any_owner(g).rejections.push(r);
         },
     ));
     v.push(arm(
@@ -470,12 +501,12 @@ fn arms() -> Vec<Arm> {
         "rejections",
         |g| {
             let r = synthetic_rejection(g);
-            g.rejections.push(r);
+            any_owner(g).rejections.push(r);
         },
         |g| {
             let mut r = synthetic_rejection(g);
             r.at = inst(g, 1);
-            g.rejections.push(r);
+            any_owner(g).rejections.push(r);
         },
     ));
     v.push(arm(
@@ -483,12 +514,12 @@ fn arms() -> Vec<Arm> {
         "rejections",
         |g| {
             let r = synthetic_rejection(g);
-            g.rejections.push(r);
+            any_owner(g).rejections.push(r);
         },
         |g| {
             let mut r = synthetic_rejection(g);
             r.message = "synthetic-b".to_string();
-            g.rejections.push(r);
+            any_owner(g).rejections.push(r);
         },
     ));
     v.push(arm(
@@ -496,12 +527,12 @@ fn arms() -> Vec<Arm> {
         "rejections",
         |g| {
             let r = synthetic_rejection(g);
-            g.rejections.push(r);
+            any_owner(g).rejections.push(r);
         },
         |g| {
             let mut r = synthetic_rejection(g);
             r.span = shifted(r.span);
-            g.rejections.push(r);
+            any_owner(g).rejections.push(r);
         },
     ));
 
@@ -614,27 +645,29 @@ fn arms() -> Vec<Arm> {
     v.push(arm(
         "duplicate_sites.instance",
         "duplicate_sites",
+        // Which instance a duplicate belongs to is the OWNER of the record, so
+        // the two arms put the same site on two different owners.
         |g| {
-            let i = inst(g, 0);
-            g.duplicate_sites.push((i, a_site()));
+            let owner = Owner::Instance(inst(g, 0));
+            g.contributions.get_mut(&owner).expect("owner").duplicate_sites.push(a_site());
         },
         |g| {
-            let i = inst(g, 1);
-            g.duplicate_sites.push((i, a_site()));
+            let owner = Owner::Instance(inst(g, 1));
+            g.contributions.get_mut(&owner).expect("owner").duplicate_sites.push(a_site());
         },
     ));
     v.push(arm(
         "duplicate_sites.site",
         "duplicate_sites",
         |g| {
-            let i = inst(g, 0);
-            g.duplicate_sites.push((i, a_site()));
+            let owner = Owner::Instance(inst(g, 0));
+            g.contributions.get_mut(&owner).expect("owner").duplicate_sites.push(a_site());
         },
         |g| {
-            let i = inst(g, 0);
+            let owner = Owner::Instance(inst(g, 0));
             let mut s = a_site();
             s.op = SiteOp::FnValue;
-            g.duplicate_sites.push((i, s));
+            g.contributions.get_mut(&owner).expect("owner").duplicate_sites.push(s);
         },
     ));
 
@@ -924,8 +957,8 @@ fn arms() -> Vec<Arm> {
     v.push(arm(
         "storage_failures.reason",
         "storage_failures",
-        |g| g.storage_failures.push(MonoTyReason::NoNode),
-        |g| g.storage_failures.push(MonoTyReason::DepthLimit),
+        |g| any_owner(g).storage_failures.push(MonoTyReason::NoNode),
+        |g| any_owner(g).storage_failures.push(MonoTyReason::DepthLimit),
     ));
 
     v

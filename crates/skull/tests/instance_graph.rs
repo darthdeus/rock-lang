@@ -166,11 +166,10 @@ fn main() {
 }
 "#,
     );
-    let nexts = g.edges.iter().filter(|e| e.kind == EdgeKind::IteratorNext).count();
+    let nexts = g.edges().filter(|e| e.kind == EdgeKind::IteratorNext).count();
     assert!(nexts > 0, "no iterator-next edge was recorded");
     assert!(
-        g.edges
-            .iter()
+        g.edges()
             .filter(|e| e.kind == EdgeKind::IteratorNext)
             .all(|e| !e.to.args.is_empty()),
         "an iterator-next witness reached a generic callee with no instantiation"
@@ -234,8 +233,7 @@ fn main() {
 "#,
     );
     let vals: Vec<&str> = g
-        .edges
-        .iter()
+        .edges()
         .filter(|e| e.kind == EdgeKind::FnValue)
         .map(|e| g.symbol(&ws, &e.to))
         .collect::<Vec<_>>()
@@ -262,8 +260,7 @@ fn main() {
 "#,
     );
     let witnesses: Vec<String> = g
-        .edges
-        .iter()
+        .edges()
         .filter(|e| {
             e.kind == EdgeKind::IteratorNext || e.kind == EdgeKind::BoundNextWitness
         })
@@ -603,10 +600,9 @@ fn rejections_of(
     // than per fixture: every rejection kind reaches the property this way, and
     // the corpus measures 0 rejections, so these fixtures are its only evidence.
     let spanless: Vec<&instance_graph::Rejection> =
-        g.rejections.iter().filter(|r| instance_graph::is_spanless(&r.span)).collect();
+        g.rejections().filter(|r| instance_graph::is_spanless(&r.span)).collect();
     assert!(spanless.is_empty(), "a rejection carried no source span: {spanless:?}");
-    g.rejections
-        .iter()
+    g.rejections()
         .filter(|r| r.kind == kind)
         .map(|r| format!("{} at {:?}: {}", g.identity(ws, &r.at), r.span, r.message))
         .collect()
@@ -760,7 +756,7 @@ fn main() {
         "a concrete fn value was rejected"
     );
     assert!(
-        g.edges.iter().any(|e| e.kind == EdgeKind::FnValue),
+        g.edges().any(|e| e.kind == EdgeKind::FnValue),
         "the fixture produced no fn-value edge to control against"
     );
 }
@@ -833,7 +829,8 @@ fn main() {
 }
 "#,
     );
-    assert!(g.rejections.is_empty(), "a valid program was rejected: {:?}", g.rejections);
+    let rejected: Vec<String> = g.rejections().map(|r| r.message.clone()).collect();
+    assert!(rejected.is_empty(), "a valid program was rejected: {rejected:?}");
 }
 
 // ---------------------------------------------------------------------------
@@ -861,8 +858,7 @@ fn main() {
 "#,
     );
     let iters: Vec<String> = g
-        .edges
-        .iter()
+        .edges()
         .filter(|e| e.kind == EdgeKind::IteratorIter)
         .map(|e| g.symbol(&ws, &e.to))
         .collect();
@@ -872,7 +868,7 @@ fn main() {
         "the generic `iter` witness was not instantiated at `int`: {iters:?}"
     );
     assert!(
-        !g.unresolved.iter().any(|u| u.reason == "iter-witness-no-instantiation-record"),
+        !g.unresolved().any(|u| u.reason == "iter-witness-no-instantiation-record"),
         "a witness was still filed as having no instantiation record"
     );
 }
@@ -891,8 +887,7 @@ fn main() {
 "#,
     );
     let iters: Vec<String> = g
-        .edges
-        .iter()
+        .edges()
         .filter(|e| e.kind == EdgeKind::ImplicitIter)
         .map(|e| g.symbol(&ws, &e.to))
         .collect();
@@ -902,8 +897,7 @@ fn main() {
         "the generic `iter` witness was not instantiated at `int`: {iters:?}"
     );
     assert!(
-        !g.unresolved
-            .iter()
+        !g.unresolved()
             .any(|u| u.reason == "implicit-iter-witness-no-instantiation-record"),
         "a witness was still filed as having no instantiation record"
     );
@@ -976,15 +970,13 @@ fn main() {
 "#,
     );
     let iters: Vec<String> = g
-        .edges
-        .iter()
+        .edges()
         .filter(|e| e.kind == EdgeKind::IteratorIter)
         .map(|e| g.symbol(&ws, &e.to))
         .collect();
     assert!(!iters.is_empty(), "a concrete `iter` witness produced no edge");
     assert!(
-        g.edges
-            .iter()
+        g.edges()
             .filter(|e| e.kind == EdgeKind::IteratorIter)
             .all(|e| e.to.args.is_empty()),
         "a non-generic witness was given instance arguments: {iters:?}"
@@ -1006,7 +998,7 @@ fn main() {
 "#,
     );
     let nexts: Vec<&instance_graph::Edge> =
-        g.edges.iter().filter(|e| e.kind == EdgeKind::IteratorNext).collect();
+        g.edges().filter(|e| e.kind == EdgeKind::IteratorNext).collect();
     assert!(!nexts.is_empty(), "no iterator-next edge was recorded");
     assert!(
         nexts.iter().all(|e| !e.to.args.is_empty()),
@@ -1051,15 +1043,14 @@ fn main() {
     let roots = instance_graph::emission_roots(&ws, None);
     let g = instance_graph::build(&ws, roots.clone(), false);
     assert!(
-        !g.unresolved.iter().any(|u| u.reason.contains("unbound")),
+        !g.unresolved().any(|u| u.reason.contains("unbound")),
         "a witness degraded to unbound: {:?}",
-        g.unresolved
-            .iter()
+        g.unresolved()
             .map(|u| (u.reason, ws.module(u.callee.module).functions[u.callee.func].name))
             .collect::<Vec<_>>()
     );
     let witnesses: Vec<&instance_graph::Edge> =
-        g.edges.iter().filter(|e| e.kind == EdgeKind::IteratorIter).collect();
+        g.edges().filter(|e| e.kind == EdgeKind::IteratorIter).collect();
     assert!(!witnesses.is_empty(), "no iterator-iter edge");
 
     // The witness is ONE instance, and each artifact realizes it to its own
@@ -1228,9 +1219,9 @@ fn main() {
 "#,
     );
     assert!(
-        !g.unresolved.iter().any(|u| u.reason == "unbound-generic"),
+        !g.unresolved().any(|u| u.reason == "unbound-generic"),
         "a callee binding inside a generic body had no substitution: {:?}",
-        g.unresolved.iter().map(|u| u.reason).collect::<Vec<_>>()
+        g.unresolved().map(|u| u.reason).collect::<Vec<_>>()
     );
     let pushes: Vec<String> = g
         .instances
@@ -1262,8 +1253,7 @@ fn generated_edges(
     g: &instance_graph::InstanceGraph,
 ) -> Vec<String> {
     let mut v: Vec<String> = g
-        .edges
-        .iter()
+        .edges()
         .filter(|e| e.kind == EdgeKind::CompilerGenerated)
         .map(|e| ws.module(e.to.func.module).functions[e.to.func.func].name.to_string())
         .collect();
@@ -1384,8 +1374,7 @@ fn main() {
     // Every column intercept comes from an instance instantiated at `P`. None
     // comes from the `int` one, which is the discriminant.
     let sources: Vec<String> = g
-        .edges
-        .iter()
+        .edges()
         .filter(|e| {
             e.kind == EdgeKind::CompilerGenerated
                 && ws.module(e.to.func.module).functions[e.to.func.func]
@@ -1415,8 +1404,7 @@ fn is_expanded(
     g: &instance_graph::InstanceGraph,
     name: &str,
 ) -> bool {
-    g.expanded
-        .iter()
+    g.expanded()
         .any(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == name)
 }
 
@@ -1494,8 +1482,7 @@ fn main() { pinned_op(1) }
         "a callee reachable ONLY through a skipped fallback rung is in the graph"
     );
     let out: Vec<String> = g
-        .edges
-        .iter()
+        .edges()
         .filter(|e| {
             ws.module(e.from.func.module).functions[e.from.func.func].name.as_str()
                 == "pinned_op"
@@ -1520,7 +1507,7 @@ fn main() { mapped_op(1) }
         "an inline-only intrinsic was not classified as a boundary"
     );
     assert!(
-        !g.edges.iter().any(|e| {
+        !g.edges().any(|e| {
             ws.module(e.from.func.module).functions[e.from.func.func].name.as_str()
                 == "mapped_op"
         }),
@@ -1548,8 +1535,7 @@ fn main() {
     let c = g.closure(&ws);
     assert!(c.unexpanded.is_empty(), "neither expanded nor a boundary: {:?}", c.unexpanded);
     let both: Vec<String> = g
-        .expanded
-        .iter()
+        .expanded()
         .filter(|i| {
             instance_graph::boundary_class_for(
                 &ws.module(i.func.module).functions[i.func.func],
@@ -1778,11 +1764,10 @@ fn main() { let x = pick() }
 "#,
     );
     assert!(
-        g2.rejections
-            .iter()
+        g2.rejections()
             .any(|r| r.kind == instance_graph::RejectionKind::UnconstrainedTypeVar),
         "the same call from a function body did not reject: {:?}",
-        g2.rejections
+        g2.rejections().map(|r| r.message.clone()).collect::<Vec<_>>()
     );
 }
 
@@ -1822,7 +1807,7 @@ fn main() {
 "#,
     );
     let kinds: std::collections::BTreeSet<&'static str> =
-        g.edges.iter().map(|e| e.kind.name()).collect();
+        g.edges().map(|e| e.kind.name()).collect();
     for want in [
         "direct-call",
         "generic-call",
@@ -1836,7 +1821,7 @@ fn main() {
         assert!(kinds.contains(want), "fixture produced no `{want}` edge; covered: {kinds:?}");
     }
     let mut spanless: std::collections::BTreeMap<&'static str, Vec<String>> = Default::default();
-    for e in &g.edges {
+    for e in g.edges() {
         if instance_graph::is_spanless(&e.span) {
             let v = spanless.entry(e.kind.name()).or_default();
             if v.len() < 5 {
@@ -1847,8 +1832,8 @@ fn main() {
     assert!(
         spanless.is_empty(),
         "{} of {} edges carry no source span: {spanless:#?}",
-        g.edges.iter().filter(|e| instance_graph::is_spanless(&e.span)).count(),
-        g.edges.len()
+        g.edges().filter(|e| instance_graph::is_spanless(&e.span)).count(),
+        g.edges().count()
     );
 }
 
@@ -1954,7 +1939,7 @@ fn main() { let a = ident(1) }
     let roots = instance_graph::emission_roots(&ws, None);
     let g = instance_graph::build(&ws, roots, false);
     let sites: Vec<&instance_graph::Unresolved> =
-        g.unresolved.iter().filter(|u| u.reason == "no-bindings").collect();
+        g.unresolved().filter(|u| u.reason == "no-bindings").collect();
     let callees: Vec<&str> = sites
         .iter()
         .map(|u| ws.module(u.callee.module).functions[u.callee.func].name.as_str())
@@ -1963,7 +1948,7 @@ fn main() { let a = ident(1) }
         callees,
         vec!["ident"],
         "expected exactly the `ident` call to lose its instantiation, got {:?}",
-        g.unresolved.iter().map(|u| u.reason).collect::<Vec<_>>()
+        g.unresolved().map(|u| u.reason).collect::<Vec<_>>()
     );
     assert_eq!(sites.len(), removed, "one dropped record, one unresolved site");
     assert!(
@@ -2006,7 +1991,7 @@ fn main() {
     // CONTROL: the NEXT half is untouched and still resolves. Without it this
     // fixture would also pass on a `record_bound_next` regression.
     assert!(
-        g.edges.iter().any(|e| e.kind == EdgeKind::IteratorNext),
+        g.edges().any(|e| e.kind == EdgeKind::IteratorNext),
         "the fixture disturbed the next half too, so it does not isolate `record_witness`"
     );
     assert!(
@@ -2141,7 +2126,7 @@ fn main() {
     // is what separates this fixture from the `record_witness` one -- without
     // it, either mutation would satisfy both tests.
     assert!(
-        g.edges.iter().any(|e| e.kind == EdgeKind::IteratorIter),
+        g.edges().any(|e| e.kind == EdgeKind::IteratorIter),
         "the fixture disturbed the iter half too, so it does not isolate `record_bound_next`"
     );
 }
@@ -2155,8 +2140,7 @@ fn unresolved_witnesses_of<'g>(
     g: &'g instance_graph::InstanceGraph,
     fn_name: &str,
 ) -> Vec<&'g instance_graph::Unresolved> {
-    g.unresolved
-        .iter()
+    g.unresolved()
         .filter(|u| {
             u.reason == "witness-generic-unbound"
                 && ws.module(u.callee.module).functions[u.callee.func].name.as_str() == fn_name
@@ -2165,8 +2149,7 @@ fn unresolved_witnesses_of<'g>(
 }
 
 fn all_unresolved(ws: &Workspace, g: &instance_graph::InstanceGraph) -> Vec<(String, String)> {
-    g.unresolved
-        .iter()
+    g.unresolved()
         .map(|u| {
             (
                 u.reason.to_string(),
@@ -2305,15 +2288,14 @@ fn main() {{
     // silently drops to a different site still satisfies "non-zero" while
     // covering less than it claims. `m.len()` is the one site naming the
     // ambiguous entry; the store names `__map_col_slot`, which is unaffected.
-    let reasons: Vec<&str> = g.unresolved.iter().map(|u| u.reason).collect();
+    let reasons: Vec<&str> = g.unresolved().map(|u| u.reason).collect();
     assert_eq!(
         reasons,
         vec!["compiler-generated-entry-unresolved"; 1],
         "the unresolved population changed shape"
     );
     let spanless: Vec<&str> = g
-        .unresolved
-        .iter()
+        .unresolved()
         .filter(|u| instance_graph::is_spanless(&u.span))
         .map(|u| u.reason)
         .collect();
@@ -2321,7 +2303,7 @@ fn main() {{
     let census = g.span_census();
     assert_eq!(
         census.unresolved.values().map(|c| c.examined).sum::<usize>(),
-        g.unresolved.len(),
+        g.unresolved().count(),
         "the census did not examine every unresolved site"
     );
 
@@ -2332,9 +2314,9 @@ fn main() {{
     let clean_roots = instance_graph::emission_roots(&clean_ws, None);
     let clean = instance_graph::build(&clean_ws, clean_roots, false);
     assert!(
-        clean.unresolved.is_empty(),
+        clean.unresolved().next().is_none(),
         "the shared walk should resolve every synthesized entry: {:?}",
-        clean.unresolved.iter().map(|u| u.reason).collect::<Vec<_>>()
+        clean.unresolved().map(|u| u.reason).collect::<Vec<_>>()
     );
 }
 
@@ -2388,7 +2370,7 @@ fn main() {
     // The candidate starts are instances with outgoing edges -- what the pass
     // would search from with no filter at all.
     let mut candidates: std::collections::BTreeSet<&instance_graph::Instance> = Default::default();
-    for e in &g.edges {
+    for e in g.edges() {
         candidates.insert(&e.from);
     }
     let admissible = candidates

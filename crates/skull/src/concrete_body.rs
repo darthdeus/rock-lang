@@ -558,7 +558,7 @@ fn callee_tables(
     body: &mut ConcreteBody,
     out: &mut ConcreteBodies,
 ) {
-    let Some(sites) = g.call_sites.get(inst) else { return };
+    let Some(sites) = g.sites_of(inst) else { return };
     for (site, rec) in sites {
         out.sites_examined += 1;
         let target = match &rec.outcome {
@@ -634,7 +634,7 @@ fn callee_tables(
 /// arena would hand out ids that mean nothing beside `Instance::args`.
 pub fn build(ws: &Workspace, g: &mut InstanceGraph) -> ConcreteBodies {
     let mut out = ConcreteBodies::default();
-    let expanded: Vec<Instance> = g.expanded.iter().cloned().collect();
+    let expanded: Vec<Instance> = g.expanded().cloned().collect();
     for inst in expanded {
         if g.bound_tree_disagreements.iter().any(|d| d.instance == inst) {
             out.gaps.push(MissingBody { instance: inst, gap: BodyGap::InconsistentBounds });

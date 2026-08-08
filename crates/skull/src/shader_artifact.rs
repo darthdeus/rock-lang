@@ -171,7 +171,7 @@ pub fn realize_shader(
     let mut edges: BTreeMap<Instance, Vec<(Instance, Span)>> = BTreeMap::new();
     let mut sites_walked = 0usize;
     while let Some(caller) = queue.pop_front() {
-        let Some(sites) = g.call_sites.get(&caller) else { continue };
+        let Some(sites) = g.sites_of(&caller) else { continue };
         for rec in sites.values() {
             sites_walked += 1;
             let SiteOutcome::Resolved(callee) = &rec.outcome else { continue };

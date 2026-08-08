@@ -876,7 +876,7 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         admit(r, &mut instances, &mut realization, &mut queue);
     }
     while let Some(caller) = queue.pop_front() {
-        let Some(sites) = g.call_sites.get(&caller) else { continue };
+        let Some(sites) = g.sites_of(&caller) else { continue };
         for (site, rec) in sites {
             sites_walked += 1;
             let SiteOutcome::Resolved(callee) = &rec.outcome else { continue };

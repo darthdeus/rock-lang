@@ -178,11 +178,10 @@ pub fn canonical(ws: &Workspace, g: &InstanceGraph) -> CanonicalGraph {
     };
 
     put("instances", g.instances.iter().map(&key).collect());
-    put("expanded", g.expanded.iter().map(&key).collect());
+    put("expanded", g.expanded().map(&key).collect());
     put(
         "edges",
-        g.edges
-            .iter()
+        g.edges()
             .map(|e| {
                 format!(
                     "{} -{:?}-> {} @{}",
@@ -196,8 +195,7 @@ pub fn canonical(ws: &Workspace, g: &InstanceGraph) -> CanonicalGraph {
     );
     put(
         "unresolved",
-        g.unresolved
-            .iter()
+        g.unresolved()
             .map(|u| {
                 format!(
                     "{} -> {} [{}] @{}",
@@ -211,15 +209,14 @@ pub fn canonical(ws: &Workspace, g: &InstanceGraph) -> CanonicalGraph {
     );
     put(
         "rejections",
-        g.rejections
-            .iter()
+        g.rejections()
             .map(|r| {
                 format!("{:?} at {} @{}: {}", r.kind, key(&r.at), span_key(&r.span), r.message)
             })
             .collect(),
     );
-    put("depth_capped", g.depth_capped.iter().map(&key).collect());
-    put("storage_failures", g.storage_failures.iter().map(|r| format!("{r:?}")).collect());
+    put("depth_capped", g.depth_capped().map(&key).collect());
+    put("storage_failures", g.storage_failures().map(|r| format!("{r:?}")).collect());
     put(
         "boundaries",
         g.boundaries.iter().map(|(k, b)| format!("{k} {:?} {}", b.class, b.symbol)).collect(),
@@ -258,8 +255,7 @@ pub fn canonical(ws: &Workspace, g: &InstanceGraph) -> CanonicalGraph {
     // prevent. The stability arm caught it.
     put(
         "call_sites",
-        g.call_sites
-            .iter()
+        g.call_sites()
             .flat_map(|(i, sites)| {
                 sites
                     .iter()
@@ -280,7 +276,7 @@ pub fn canonical(ws: &Workspace, g: &InstanceGraph) -> CanonicalGraph {
     );
     put(
         "duplicate_sites",
-        g.duplicate_sites.iter().map(|(i, s)| format!("{} @{}", key(i), site_key(s))).collect(),
+        g.duplicate_sites().map(|(i, s)| format!("{} @{}", key(i), site_key(s))).collect(),
     );
     // Each always-emitted failure by OUTCOME and SPAN, not as a count: two
     // failures of one callee are two diagnostics at two places, and a count

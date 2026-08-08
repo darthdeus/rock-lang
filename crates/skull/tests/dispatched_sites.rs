@@ -100,7 +100,7 @@ fn walk_dispatched_in(ws: &Workspace, name: &str) -> Vec<&'static str> {
         .expect("fn not found");
     let fref = skull_mir::mir::FuncRef { module: mid, func: fid };
     let mut out: Vec<&'static str> = Vec::new();
-    for (inst, sites) in &g.call_sites {
+    for (inst, sites) in g.call_sites() {
         if inst.func != fref {
             continue;
         }

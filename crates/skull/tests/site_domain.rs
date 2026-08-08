@@ -271,9 +271,8 @@ fn main() {
     let ws = check(src);
     let g = graph_of(&ws);
     let targets: std::collections::BTreeSet<String> = g
-        .call_sites
-        .values()
-        .flat_map(|sites| sites.iter())
+        .call_sites()
+        .flat_map(|(_, sites)| sites.iter())
         .filter(|(site, _)| matches!(site.domain, SiteDomain::StructDefaults(..)))
         .filter_map(|(_, rec)| match &rec.outcome {
             skull::instance_graph::SiteOutcome::Resolved(i) => Some(g.identity(&ws, i)),
@@ -462,8 +461,7 @@ fn main() {
     // The program is LEGAL, so the walk rejects nothing.
     let g = graph_of(&ws);
     let unconstrained = g
-        .rejections
-        .iter()
+        .rejections()
         .filter(|r| {
             matches!(r.kind, skull::instance_graph::RejectionKind::UnconstrainedTypeVar)
         })
@@ -472,7 +470,7 @@ fn main() {
         unconstrained, 0,
         "a legal generic-struct default is reported as an unconstrained type \
          variable: {:?}",
-        g.rejections
+        g.rejections().map(|r| r.message.clone()).collect::<Vec<_>>()
     );
 }
 

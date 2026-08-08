@@ -199,8 +199,7 @@ fn deleting_the_only_external_edge_prunes_a_mutually_reachable_cycle() {
     // "nothing points at it" rule would keep both alive forever.
     let incoming = |name: &str| {
         case.graph
-            .edges
-            .iter()
+            .edges()
             .filter(|e| case.identity(&e.to).contains(name))
             .count()
     };
@@ -280,13 +279,12 @@ fn removing_polymorphic_recursion_clears_the_whole_graph_rejection() {
     let mut case = Case::new("fn main() { print(\"{deep(1, 3)}\") }\n", POLY_LIB);
     let recursion_rejections = |c: &Case| {
         c.graph
-            .rejections
-            .iter()
+            .rejections()
             .filter(|r| r.kind == RejectionKind::ChangingInstanceRecursion)
             .count()
     };
     assert_eq!(recursion_rejections(&case), 1, "the fixture produced no recursion rejection");
-    assert!(!case.graph.depth_capped.is_empty(), "the fixture capped no expansion");
+    assert!(case.graph.depth_capped().next().is_some(), "the fixture capped no expansion");
 
     let stats = case.edit(LIB, FLAT_LIB);
 
@@ -296,9 +294,9 @@ fn removing_polymorphic_recursion_clears_the_whole_graph_rejection() {
         "the recursion rejection survived a program that no longer has the recursion"
     );
     assert!(
-        case.graph.depth_capped.is_empty(),
+        case.graph.depth_capped().next().is_none(),
         "capped instances survived: {:?}",
-        case.graph.depth_capped.len()
+        case.graph.depth_capped().count()
     );
     assert!(stats.pruned > 0, "the deep instantiation chain was not pruned");
     case.assert_matches_fresh("recursion removed");
@@ -438,14 +436,19 @@ fn resolving_a_call_removes_its_stale_unresolved_record() {
     );
     let before = graph_of(&p.v1);
     let stale: Vec<&str> =
-        before.unresolved.iter().filter(|u| u.reason == "no-bindings").map(|u| u.reason).collect();
-    assert_eq!(stale.len(), 1, "the fixture recorded no unresolved call: {:?}", before.unresolved);
+        before.unresolved().filter(|u| u.reason == "no-bindings").map(|u| u.reason).collect();
+    assert_eq!(
+        stale.len(),
+        1,
+        "the fixture recorded no unresolved call: {:?}",
+        before.unresolved().map(|u| u.reason).collect::<Vec<_>>()
+    );
 
     let (g, stats) = p.update();
     assert!(
-        g.unresolved.is_empty(),
+        g.unresolved().next().is_none(),
         "an unresolved record survived the call resolving: {:?}",
-        g.unresolved.iter().map(|u| u.reason).collect::<Vec<_>>()
+        g.unresolved().map(|u| u.reason).collect::<Vec<_>>()
     );
     assert!(stats.newly_reached > 0, "the resolved call reached no instance");
     p.assert_matches_fresh(&g, "unresolved cleared");
@@ -485,15 +488,15 @@ fn a_resolvable_conversion_removes_its_stale_storage_failure() {
     );
     let before = graph_of(&p.v1);
     assert!(
-        !before.storage_failures.is_empty(),
+        before.storage_failures().next().is_some(),
         "the fixture recorded no storage failure"
     );
 
     let (g, _stats) = p.update();
     assert!(
-        g.storage_failures.is_empty(),
+        g.storage_failures().next().is_none(),
         "a storage failure survived the conversion resolving: {:?}",
-        g.storage_failures
+        g.storage_failures().collect::<Vec<_>>()
     );
     p.assert_matches_fresh(&g, "storage failure cleared");
 }
@@ -514,14 +517,13 @@ fn reducing_a_too_deep_instantiation_removes_the_depth_cap() {
     let shallow_main = "fn main() {\n    let v: [[int]] = [[1]]\n    print(\"{take(v)}\")\n}\n";
     let mut case = Case::new(deep_main, TAKE_LIB);
     assert_eq!(
-        case.graph.depth_capped.len(),
+        case.graph.depth_capped().count(),
         1,
         "the fixture capped no expansion; `MAX_INSTANTIATION_DEPTH` may have moved"
     );
     assert!(
         case.graph
-            .rejections
-            .iter()
+            .rejections()
             .all(|r| r.kind != RejectionKind::ChangingInstanceRecursion),
         "this fixture must cap WITHOUT polymorphic recursion, or it tests two producers"
     );
@@ -529,7 +531,7 @@ fn reducing_a_too_deep_instantiation_removes_the_depth_cap() {
     let stats = case.edit(MAIN, shallow_main);
 
     assert!(
-        case.graph.depth_capped.is_empty(),
+        case.graph.depth_capped().next().is_none(),
         "a capped instance survived the instantiation getting shallower"
     );
     assert!(stats.pruned > 0, "the deep instance was not pruned");

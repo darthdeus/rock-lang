@@ -519,10 +519,12 @@ pub struct InstanceGraph {
     /// starts here and at every always-emitted target.
     pub root_instances: BTreeSet<Instance>,
     pub instances: BTreeSet<Instance>,
-    pub edges: Vec<Edge>,
-    pub unresolved: Vec<Unresolved>,
-    /// Constructions the model refuses. See [`RejectionKind`].
-    pub rejections: Vec<Rejection>,
+    /// Constructions the model refuses that no single body produced:
+    /// [`detect_changing_instance_recursion`] is a WHOLE-GRAPH search over the
+    /// edge set, so its findings belong to the graph rather than to an owner.
+    /// Every other rejection lives in the contribution whose walk raised it;
+    /// [`InstanceGraph::rejections`] is the two of them together.
+    pub graph_rejections: Vec<Rejection>,
     /// Names with no concrete instance covering the obligation that put them
     /// here, BY CAUSE. See [`RootHole`]: one set carrying several different
     /// facts could only ever be read as the weakest of them.
@@ -532,11 +534,6 @@ pub struct InstanceGraph {
     /// EXCLUDED is the only way to tell a narrowed gate from a dead one, and a
     /// filter whose rejects are invisible reads as "there were none".
     pub excused_generic_roots: BTreeMap<&'static str, BTreeSet<String>>,
-    /// Instances whose expansion was cut by [`MAX_INSTANTIATION_DEPTH`].
-    pub depth_capped: Vec<Instance>,
-    /// Instances whose Rock body the walk actually entered and enumerated the
-    /// callees of. Recorded, never inferred from a proxy.
-    pub expanded: BTreeSet<Instance>,
     /// Every reached boundary, classified per `docs/boundary-contracts.md`.
     pub boundaries: BTreeMap<String, Boundary>,
     /// Helper symbols owned by coroutine instances.
@@ -556,11 +553,6 @@ pub struct InstanceGraph {
     /// is a per-artifact decision (`crate::artifact`), because the serving
     /// declaration differs by target.
     pub inline_body_deps: BTreeMap<DeclKey, BTreeSet<&'static str>>,
-    /// Every storage query that could not decide, by reason. Kept beside the
-    /// rejection list because a rejection KIND aggregates several reasons, so
-    /// the kind histogram cannot answer "how many storage queries failed, and
-    /// why".
-    pub storage_failures: Vec<MonoTyReason>,
     /// Storage-condition queries the walk ran, the denominator for the
     /// synthesized-call population. Without it a zero synthesized-edge count
     /// cannot be told apart from a walk that asked nothing.
@@ -600,18 +592,6 @@ pub struct InstanceGraph {
     /// (`mir_emit::reachable_fns`'s `extra_roots`), so an artifact view must
     /// seed from them too.
     pub always_emitted_targets: BTreeSet<Instance>,
-    /// Per instance, the callee EACH of its source operations resolved to.
-    /// `ConcreteBody`'s callee tables are this record projected per table; the
-    /// walk is the one resolver (plan S 9).
-    ///
-    /// Keyed only for instances -- an always-emitted body has no instance for a
-    /// site to belong to, and its failures are already recorded per site in
-    /// [`RootHole::always_emitted_sites`].
-    pub call_sites: BTreeMap<Instance, BTreeMap<Site, SiteRecord>>,
-    /// Sites recorded more than once for one instance. Must be empty: a body is
-    /// walked exactly once per instance, so a repeat means two operations
-    /// collapsed onto one key and one of them is invisible.
-    pub duplicate_sites: Vec<(Instance, Site)>,
     /// Every site the walk ATTEMPTED, including the ones with no `from`
     /// instance to record against. The denominator for `call_sites`.
     pub sites_attempted: usize,
@@ -910,7 +890,7 @@ impl InstanceGraph {
         let unexpanded: BTreeSet<String> = self
             .instances
             .iter()
-            .filter(|i| !self.expanded.contains(*i))
+            .filter(|i| !self.is_expanded(i))
             .filter(|i| {
                 boundary_class_for(&ws.module(i.func.module).functions[i.func.func], erased)
                     .is_none()
@@ -929,13 +909,13 @@ impl InstanceGraph {
         Closure {
             instances: self.instances.len(),
             unexpanded,
-            depth_capped: self.depth_capped.iter().map(|i| self.identity(ws, i)).collect(),
+            depth_capped: self.depth_capped().map(|i| self.identity(ws, i)).collect(),
             // Every hole, whatever its cause. A root WITH instances is still a
             // hole: the instances discharge its Rock call sites, never the
             // bare-name obligation that made it a root.
             uninstantiated_roots: self.uninstantiated_roots.keys().cloned().collect(),
             colliding_symbols: colliding,
-            expanded: self.expanded.len(),
+            expanded: self.expanded().count(),
         }
     }
 
@@ -978,17 +958,17 @@ impl InstanceGraph {
     /// -- is silent by construction.
     pub fn span_census(&self) -> SpanCensus {
         let mut c = SpanCensus::default();
-        for e in &self.edges {
+        for e in self.edges() {
             let k = c.edges.entry(e.kind.name()).or_default();
             k.examined += 1;
             k.spanless += usize::from(is_spanless(&e.span));
         }
-        for r in &self.rejections {
+        for r in self.rejections() {
             let k = c.rejections.entry(r.kind.name()).or_default();
             k.examined += 1;
             k.spanless += usize::from(is_spanless(&r.span));
         }
-        for u in &self.unresolved {
+        for u in self.unresolved() {
             let k = c.unresolved.entry(u.reason).or_default();
             k.examined += 1;
             k.spanless += usize::from(is_spanless(&u.span));
@@ -1010,7 +990,7 @@ impl InstanceGraph {
 
     pub fn edge_histogram(&self) -> BTreeMap<&'static str, usize> {
         let mut h = BTreeMap::new();
-        for e in &self.edges {
+        for e in self.edges() {
             *h.entry(e.kind.name()).or_insert(0) += 1;
         }
         h
@@ -1026,7 +1006,7 @@ impl InstanceGraph {
     pub fn recursion_census(&self, ws: &Workspace) -> RecursionCensus {
         // Adjacency over instances.
         let mut succ: FxHashMap<&Instance, Vec<&Instance>> = FxHashMap::default();
-        for e in &self.edges {
+        for e in self.edges() {
             succ.entry(&e.from).or_default().push(&e.to);
         }
         let mut direct = BTreeSet::new();
@@ -1064,8 +1044,7 @@ impl InstanceGraph {
             direct_same_instance: direct,
             mutual_same_instance: mutual,
             changing_instance: self
-                .rejections
-                .iter()
+                .rejections()
                 .filter(|r| r.kind == RejectionKind::ChangingInstanceRecursion)
                 .map(|r| self.identity(ws, &r.at))
                 .collect(),
@@ -1308,24 +1287,17 @@ impl InstanceGraph {
         contributions: BTreeMap::new(),
         root_instances: BTreeSet::new(),
         instances: BTreeSet::new(),
-        edges: Vec::new(),
-        unresolved: Vec::new(),
-        rejections: Vec::new(),
+        graph_rejections: Vec::new(),
         uninstantiated_roots: BTreeMap::new(),
         excused_generic_roots: BTreeMap::new(),
-        depth_capped: Vec::new(),
-        expanded: BTreeSet::new(),
         boundaries: BTreeMap::new(),
         coroutine_helpers: BTreeSet::new(),
         erased_entries: BTreeSet::new(),
         inline_body_deps: BTreeMap::new(),
-        storage_failures: Vec::new(),
         synthesized_examined: 0,
         synthesized_approximated: 0,
         always_emitted_seeds: 0,
         always_emitted_targets: BTreeSet::new(),
-        call_sites: BTreeMap::new(),
-        duplicate_sites: Vec::new(),
         sites_attempted: 0,
         recursion_starts: 0,
         substitutions: BTreeMap::new(),
@@ -1635,15 +1607,8 @@ impl InstanceGraph {
         self.contributions.retain(|o, _| o.instance().is_none_or(|i| live.contains(i)));
 
         self.instances = live;
-        self.edges.clear();
-        self.unresolved.clear();
-        self.rejections.clear();
-        self.depth_capped.clear();
-        self.expanded.clear();
+        self.graph_rejections.clear();
         self.erased_entries.clear();
-        self.storage_failures.clear();
-        self.call_sites.clear();
-        self.duplicate_sites.clear();
         self.always_emitted_targets.clear();
         self.sites_attempted = 0;
         self.always_emitted_seeds = 0;
@@ -1666,30 +1631,13 @@ impl InstanceGraph {
         // need `&mut self`, so reading each contribution through the map would
         // mean a deep clone per owner.
         let contributions = std::mem::take(&mut self.contributions);
-        for (owner, c) in &contributions {
-            self.edges.extend(c.edges.iter().cloned());
-            self.unresolved.extend(c.unresolved.iter().cloned());
-            self.rejections.extend(c.rejections.iter().cloned());
-            self.storage_failures.extend(c.storage_failures.iter().cloned());
+        for (_owner, c) in &contributions {
             self.erased_entries.extend(c.erased_entries.iter().cloned());
             self.always_emitted_targets.extend(c.always_emitted_targets.iter().cloned());
             self.sites_attempted += c.sites_attempted;
             self.always_emitted_seeds += c.always_emitted_seeds;
             self.synthesized_examined += c.synthesized_examined;
             self.synthesized_approximated += c.synthesized_approximated;
-            if let Some(i) = owner.instance() {
-                if c.expanded {
-                    self.expanded.insert(i.clone());
-                }
-                if c.depth_capped {
-                    self.depth_capped.push(i.clone());
-                }
-                if !c.call_sites.is_empty() {
-                    self.call_sites.insert(i.clone(), c.call_sites.clone());
-                }
-                self.duplicate_sites
-                    .extend(c.duplicate_sites.iter().map(|s| (i.clone(), s.clone())));
-            }
             for (name, failure) in &c.always_emitted_holes {
                 self.uninstantiated_roots
                     .entry(name.clone())
@@ -1863,6 +1811,86 @@ impl InstanceGraph {
         out.sort();
         out.dedup();
         out
+    }
+
+    /// One instance's primary record, or `None` if the graph does not hold it.
+    ///
+    /// Not public: the two owner-local questions consumers actually ask are
+    /// [`Self::sites_of`] and [`Self::is_expanded`], and publishing the whole
+    /// record would invite a consumer to answer a third one its own way.
+    fn contribution(&self, i: &Instance) -> Option<&Contribution> {
+        self.contributions.get(&Owner::Instance(i.clone()))
+    }
+
+    /// **Owner-local**: what each of this instance's operations resolved to.
+    /// Read straight off its own record rather than through a graph-wide map,
+    /// because that is the question being asked.
+    pub fn sites_of(&self, i: &Instance) -> Option<&BTreeMap<Site, SiteRecord>> {
+        self.contribution(i).map(|c| &c.call_sites).filter(|m| !m.is_empty())
+    }
+
+    /// Every edge in the graph, in owner order.
+    ///
+    /// An ITERATOR rather than a field: the rows already exist, once, in the
+    /// contributions. Materializing a second copy cost 32k `Edge` clones per
+    /// update on mag and served no production consumer -- `artifact` says in
+    /// its own comment that it deliberately works from sites, not edges.
+    pub fn edges(&self) -> impl Iterator<Item = &Edge> {
+        self.contributions.values().flat_map(|c| c.edges.iter())
+    }
+
+    /// Calls the walk could not turn into an instance, in owner order.
+    pub fn unresolved(&self) -> impl Iterator<Item = &Unresolved> {
+        self.contributions.values().flat_map(|c| c.unresolved.iter())
+    }
+
+    /// Every storage query that could not decide, by reason.
+    pub fn storage_failures(&self) -> impl Iterator<Item = &MonoTyReason> {
+        self.contributions.values().flat_map(|c| c.storage_failures.iter())
+    }
+
+    /// Sites recorded twice for one instance. The OWNER is the instance, so the
+    /// pair comes from the map key rather than from a copy stored in the row.
+    pub fn duplicate_sites(&self) -> impl Iterator<Item = (&Instance, &Site)> {
+        self.contributions.iter().filter_map(|(o, c)| o.instance().map(|i| (i, c))).flat_map(
+            |(i, c)| c.duplicate_sites.iter().map(move |s| (i, s)),
+        )
+    }
+
+    /// Instances whose expansion `MAX_INSTANTIATION_DEPTH` cut.
+    pub fn depth_capped(&self) -> impl Iterator<Item = &Instance> {
+        self.contributions
+            .iter()
+            .filter(|(_, c)| c.depth_capped)
+            .filter_map(|(o, _)| o.instance())
+    }
+
+    /// Instances whose Rock body the walk entered.
+    pub fn expanded(&self) -> impl Iterator<Item = &Instance> {
+        self.contributions.iter().filter(|(_, c)| c.expanded).filter_map(|(o, _)| o.instance())
+    }
+
+    /// **Owner-local**: did the walk enter this instance's body? Read by
+    /// [`Self::closure`]; consumers that want the whole population use
+    /// [`Self::expanded`].
+    pub fn is_expanded(&self, i: &Instance) -> bool {
+        self.contribution(i).is_some_and(|c| c.expanded)
+    }
+
+    /// Every instance's site table, in owner order.
+    pub fn call_sites(&self) -> impl Iterator<Item = (&Instance, &BTreeMap<Site, SiteRecord>)> {
+        self.contributions
+            .iter()
+            .filter_map(|(o, c)| o.instance().map(|i| (i, &c.call_sites)))
+            .filter(|(_, m)| !m.is_empty())
+    }
+
+    /// Every rejection: the per-body ones and the whole-graph ones.
+    pub fn rejections(&self) -> impl Iterator<Item = &Rejection> {
+        self.contributions
+            .values()
+            .flat_map(|c| c.rejections.iter())
+            .chain(self.graph_rejections.iter())
     }
 
     /// The instances a ROOT reaches, over the contributions' own edges.
@@ -2252,7 +2280,7 @@ fn detect_changing_instance_recursion(g: &mut InstanceGraph, ws: &Workspace) {
     // Instance-level adjacency, carrying each edge's span so a rejection can
     // name the call that changed the arguments.
     let mut succ: FxHashMap<&Instance, Vec<(&Instance, Span)>> = FxHashMap::default();
-    for e in &g.edges {
+    for e in g.edges() {
         succ.entry(&e.from).or_default().push((&e.to, e.span));
     }
 
@@ -2323,7 +2351,7 @@ fn detect_changing_instance_recursion(g: &mut InstanceGraph, ws: &Workspace) {
     }
     g.recursion_starts = starts;
     for (at, span, message) in found {
-        g.rejections.push(Rejection {
+        g.graph_rejections.push(Rejection {
             kind: RejectionKind::ChangingInstanceRecursion,
             at,
             span,

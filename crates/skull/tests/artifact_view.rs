@@ -948,7 +948,9 @@ fn main() { let a = only_lua(1) }
     assert_eq!(severed[0].cause, Unrealizable::ForeignToArtifact);
     // Located: a rejection with no span cannot become a compile error at the
     // Stage-3 cutover. The span is the walk's, read back at the severed SITE.
-    let span = g.call_sites[&severed[0].caller][&severed[0].site].span;
+    let span = g.sites_of(&severed[0].caller).expect("the caller's sites")
+        [&severed[0].site]
+        .span;
     assert!(!instance_graph::is_spanless(&span), "the severed call carries no source span");
     // And it is NOT retained: a consumer must not be able to read a callable
     // entry for it.

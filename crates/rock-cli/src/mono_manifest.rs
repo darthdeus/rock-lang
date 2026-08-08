@@ -1854,7 +1854,7 @@ fn one_project(
         let mut seen: std::collections::BTreeSet<(u32, u32, u32, &'static str)> =
             Default::default();
         let mut synth: BTreeMap<&'static str, usize> = BTreeMap::new();
-        for (inst, sites) in &g.call_sites {
+        for (inst, sites) in g.call_sites() {
             for site in sites.keys() {
                 let skull::instance_graph::SiteOp::Synthesized(n) = site.op else { continue };
                 let key = (
@@ -1869,7 +1869,7 @@ fn one_project(
             }
         }
         let mut synth_sites: BTreeMap<&'static str, Vec<String>> = BTreeMap::new();
-        for sites in g.call_sites.values() {
+        for (_, sites) in g.call_sites() {
             for (site, rec) in sites {
                 let skull::instance_graph::SiteOp::Synthesized(n) = site.op else { continue };
                 synth_sites.entry(n).or_default().push(format!(
@@ -1893,12 +1893,12 @@ fn one_project(
     }
 
     let mut reasons: BTreeMap<String, usize> = BTreeMap::new();
-    for u in &g.unresolved {
+    for u in g.unresolved() {
         *reasons.entry(u.reason.to_string()).or_insert(0) += 1;
     }
     // A few examples per reason: one can be an accident, three show a pattern.
     let mut examples: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for u in &g.unresolved {
+    for u in g.unresolved() {
         let e = examples.entry(u.reason.to_string()).or_default();
         let f = &ws.module(u.callee.module).functions[u.callee.func];
         let file = relativize(u.span.file.as_str(), root);
@@ -1913,7 +1913,7 @@ fn one_project(
     }
     let mut rejections: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut rejection_examples: Vec<String> = Vec::new();
-    for r in &g.rejections {
+    for r in g.rejections() {
         *rejections.entry(r.kind.name()).or_insert(0) += 1;
         let file = relativize(r.span.file.as_str(), root);
         if rejection_examples.len() < 3 {
@@ -1951,7 +1951,7 @@ fn one_project(
             .map_err(|e| anyhow::anyhow!("writing {stem}.join: {e}"))?;
     }
     let bodies_missing_for_expanded =
-        g.expanded.iter().filter(|i| !bodies.bodies.contains_key(*i)).count();
+        g.expanded().filter(|i| !bodies.bodies.contains_key(*i)).count();
     let body_free_examples: Vec<String> = bodies
         .free_types
         .iter()
@@ -1988,9 +1988,8 @@ fn one_project(
         .collect();
 
     let sites_resolved = g
-        .call_sites
-        .values()
-        .flat_map(|m| m.values())
+        .call_sites()
+        .flat_map(|(_, m)| m.values())
         .filter(|r| matches!(r.outcome, skull::instance_graph::SiteOutcome::Resolved(_)))
         .count();
     let callee_hole_examples: Vec<String> = bodies
@@ -2021,8 +2020,8 @@ fn one_project(
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
         generic_instances: g.instances.iter().filter(|i| !i.args.is_empty()).count(),
-        edges: g.edges.len(),
-        unresolved: g.unresolved.len(),
+        edges: g.edges().count(),
+        unresolved: g.unresolved().count(),
         uninstantiated_roots: g.uninstantiated_roots.len(),
         digest: instance_graph::manifest_digest(&ws, &g),
         stable,
@@ -2040,7 +2039,7 @@ fn one_project(
         synthesized_examined: g.synthesized_examined,
         storage_failures: {
             let mut m: BTreeMap<&'static str, usize> = BTreeMap::new();
-            for r in &g.storage_failures {
+            for r in g.storage_failures() {
                 *m.entry(r.bucket()).or_insert(0) += 1;
             }
             m
@@ -2075,8 +2074,8 @@ fn one_project(
             .map(|d| g.identity(&ws, &d.instance))
             .collect(),
         sites_resolved,
-        sites_edges: g.edges.len(),
-        duplicate_sites: g.duplicate_sites.len(),
+        sites_edges: g.edges().count(),
+        duplicate_sites: g.duplicate_sites().count(),
         callee_hole_examples,
         synthesized_approximated: g.synthesized_approximated,
         body_census,

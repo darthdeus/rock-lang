@@ -794,7 +794,7 @@ pub fn census_detailed(
     let mangled = &mangled;
     let mut cache = skull_transform::InlineCache::default();
 
-    for inst in &g.expanded {
+    for inst in g.expanded() {
         let f = &ws.module(inst.func.module).functions[inst.func.func];
         let skip = |c: &mut SiteJoinCensus, why: BodySkip| {
             *c.bodies_skipped.entry(why).or_insert(0) += 1;
