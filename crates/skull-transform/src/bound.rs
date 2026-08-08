@@ -101,7 +101,7 @@ pub fn substitute_bound_call(
     let (dests, args) = (dests.clone(), args.clone());
     func.insts[call] = Inst::CallMulti { dests, func: concrete, args };
     if let Some(key) = spec.clone() {
-        func.spec_bindings.insert(call, key);
+        skull_mir::site::record_specialized_call(func, ws, call, concrete, key);
     }
     // The placeholder's arity is `(bool, E)` because bound conformance
     // fixes it there; the CONCRETE callee is only known here. When its

@@ -193,6 +193,36 @@ pub fn intern_owner(table: &mut Vec<OwnerInstance>, owner: OwnerInstance) -> Own
     OwnerRef((table.len() - 1) as u32)
 }
 
+/// Record that `call` is served by the `key` instantiation of `callee`.
+///
+/// THE writer of that pair. The delivery key and the callee INSTANCE are one
+/// fact -- `spec_key_from_subst` and `spec_subst_from_key` round-trip over
+/// every shape a key takes -- so a path that writes one and not the other
+/// leaves a site whose instantiation is knowable and unrecorded. Measured over
+/// the 18 bin projects plus `tests/`: **128,956 specialized demand sites agreed
+/// on both records and 373 had no instance at all**, every one of them a
+/// bounded `next` retargeted by `substitute_bound_call`, which wrote only the
+/// key.
+///
+/// Lowering keeps its own INDEPENDENT derivation of the instance
+/// (`Builder::callee_instance_for`, computed beside the delivery decision
+/// rather than from it) and writes both through `record_call`. That second
+/// opinion is worth keeping, so this is not routed through here; what makes the
+/// two an agreement rather than a convention is the assertion in
+/// [`crate::reach::spec_bound_calls`], which sees every site either writer
+/// produced.
+pub fn record_specialized_call(
+    func: &mut crate::mir::MirFunc,
+    ws: &bone_semantic::inference::Workspace,
+    call: Idx<crate::mir::Inst>,
+    callee: crate::mir::FuncRef,
+    key: crate::lower::SpecKey,
+) {
+    let subst = crate::lower::spec_subst_from_key(ws, callee, &key);
+    func.spec_bindings.insert(call, key);
+    func.callee_instances.insert(call, OwnerInstance { func: callee, subst });
+}
+
 /// A [`Site`] plus the owner it belongs to.
 ///
 /// The owner is not redundant with the MirFunc the entry lives in. Inlining

@@ -303,6 +303,22 @@ pub fn spec_bound_calls(
                     crate::bound::resolve_bound_tree(ws, ctx.inf, ctx.subst, raw, ctx.incoming)?
                 }
             };
+            // The premise the Instance re-key rests on, checked where every
+            // specialized site passes regardless of which path wrote it. Two
+            // writers derive the instance differently -- lowering beside the
+            // delivery decision, `substitute_bound_call` from the key -- so
+            // "they agree" is a measurement, not a convention, and a site with
+            // no instance at all is the shape that actually occurred.
+            debug_assert!(
+                mf.callee_instances.get(&iid).is_some_and(|oi| {
+                    oi.func == fref
+                        && crate::lower::spec_key_from_subst(ws, fref, &oi.subst)
+                            .is_some_and(|k| &k == key)
+                }),
+                "specialized call to `{}` in `{}` records no agreeing instance",
+                ws.module(fref.module).functions[fref.func].name,
+                mf.name,
+            );
             out.push(crate::bound::SpecDemand { func: fref, key: key.clone(), tree });
         }
     }
