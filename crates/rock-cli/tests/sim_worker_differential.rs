@@ -1551,6 +1551,67 @@ fn a_boot_voice_takes_the_worker_off_the_table() {
     assert!(ok, "with both entries green:\n{all}");
 }
 
+/// A boot-owned track's place at the single music SINK is returned at the
+/// boundary, and a track boot was playing refuses instead.
+///
+/// The bytes behind a music handle are immutable -- nothing writes
+/// `audio.music` after the insert -- so what crosses is which handle the one
+/// sink is playing. A track boot left SILENT is returned by stopping the
+/// playback an entry left; a track boot left PLAYING cannot be returned at all,
+/// because its offset advances on its own and `repeat_infinite()`'s `Buffered`
+/// supports no seek.
+///
+/// Two invocations, because the arms differ in a `@sim_env` value and so are
+/// different boot signatures by construction.
+///
+/// `b3_music_active` runs first as the recipe control. It plays a track of its
+/// OWN, asserts the capture's denominator, and asserts that playing one really
+/// does move the sink -- without which the probe would pass for a boundary that
+/// touched nothing.
+#[test]
+fn a_boot_track_does_not_carry_the_music_sink_across_the_boundary() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "bitgun",
+        "-j",
+        "1",
+        "b3_music_active",
+        "b3_music_seed",
+        "b3_music_probe",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 1,
+        "the probe must FOLLOW the seed in one process or it proves nothing: \
+         {boots} boots\n{all}"
+    );
+    assert!(ok, "the music sink boundary must be green:\n{all}");
+
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "bitgun",
+        "-j",
+        "1",
+        "b3_music_boot_playing",
+        "b3_music_boot_playing_follows",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 2,
+        "a track boot was PLAYING cannot cross, so the successor must be RERUN \
+         in a fresh process: {boots} boots\n{all}"
+    );
+    assert!(
+        all.contains("ended its worker: boot state whose contents cannot be reconstructed: music:"),
+        "and the refusal must name the handle that caused it:\n{all}"
+    );
+    assert!(ok, "while every entry still runs and passes:\n{all}");
+}
+
 /// Run `rock` and return `(exit_ok, stdout, stderr)` WITHOUT asserting on the
 /// exit code. The multi-order gate deliberately exits nonzero on a corpus that
 /// cannot populate every arm, and that refusal is part of what is under test.
