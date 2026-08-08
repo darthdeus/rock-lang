@@ -661,7 +661,7 @@ impl Builder<'_> {
         // all-`None` key to `Shared`, which its walk then reaches); JS does not,
         // and reported `no specialized body emitted for the `next` instantiation`
         // about `CharsIter.next`, which is not generic at all.
-        Ok(key)
+        Ok(key.filter(|k| !k.iter().all(Option::is_none)))
     }
 
     /// Lower a direct (statically-resolved) call. When the callee uses the scalar
