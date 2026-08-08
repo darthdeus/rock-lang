@@ -1357,6 +1357,23 @@ function stone_set_canvas(h) {
     gl.disable(gl.SCISSOR_TEST);
   }
 }
+// The rendering path's canvas verbs: the handle is resolved here and no
+// texture name reaches Rock. Twins of the native ones in stone-rs/src/canvas.rs.
+function stone_bind_canvas_texture_to_unit(h, unit) {
+  var c = __SW.canvases[h];
+  return c ? stone_bind_texture_to_unit(c.tex, unit) !== 0 : false;
+}
+function stone_bind_canvas_depth_to_unit(h, unit) {
+  var c = __SW.canvases[h];
+  return c && c.depthTex ? stone_bind_texture_to_unit(c.depthTex, unit) !== 0 : false;
+}
+function stone_canvas_has_depth(h) { var c = __SW.canvases[h]; return !!(c && c.depthTex); }
+function stone_sprite_draw_canvas(shader, h, tw, th, x, y, w, hh, sx, sy, sw, sh) {
+  var c = __SW.canvases[h];
+  if (!c) return;
+  stone_sprite_draw_texture(shader, c.tex, tw, th, x, y, w, hh, sx, sy, sw, sh, 0, 1, 1, 1, 1, 1, 1);
+}
+// GL names, for the imgui path only.
 function stone_get_canvas_texture(h) { var c = __SW.canvases[h]; return c ? c.tex : 0; }
 function stone_get_canvas_depth_texture(h) { var c = __SW.canvases[h]; return c ? (c.depthTex || 0) : 0; }
 // Sub-rect of the bound target, logical top-left px -> GL bottom-origin.
