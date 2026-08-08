@@ -304,10 +304,23 @@ struct JsonParser {
     pos: int,
     len: int,
     ok: bool,
+    depth: int,
 }
 
+// Container nesting a document may reach before it is rejected as malformed.
+// The decoder is recursive, so without this a deep document overflows the
+// interpreter stack and takes the process down instead of returning null.
+//
+// Sized for the shallower backend, not the roomier one: measured, LuaJIT
+// overflows near 4500 levels and the JS backend between 900 and 1000 -- and
+// the JS figure is not a constant, it shrinks as the caller's own stack grows,
+// so a limit set just under it would hold from main and fail from inside a
+// game. 256 keeps ~3.7x margin against the shallowest observed ceiling while
+// staying 50x above the deepest JSON in this repo, which is 5.
+fn json_max_depth() -> int { return 256 }
+
 fn json_decode(s: string) -> JsonValue? {
-    let p = JsonParser { src: s, pos: 0, len: s.len(), ok: true }
+    let p = JsonParser { src: s, pos: 0, len: s.len(), ok: true, depth: 0 }
     parse_skip_ws(p)
     let v = parse_value(p)
     parse_skip_ws(p)
@@ -338,8 +351,20 @@ fn parse_value(p: JsonParser) -> JsonValue {
     if b == 116 { return parse_keyword(p, "true", JsonValue::Bool(true)) }
     if b == 102 { return parse_keyword(p, "false", JsonValue::Bool(false)) }
     if b == 34 { return parse_string_value(p) }
-    if b == 91 { return parse_array_value(p) }
-    if b == 123 { return parse_object_value(p) }
+    if b == 91 || b == 123 {
+        // One place owns the depth counter, so the container parsers keep
+        // their many return points. The over-limit path leaves it
+        // un-decremented, which is harmless: p.ok is false and the parse is
+        // already unwinding.
+        p.depth = p.depth + 1
+        if p.depth > json_max_depth() {
+            p.ok = false
+            return JsonValue::Null
+        }
+        let v = if b == 91 { parse_array_value(p) } else { parse_object_value(p) }
+        p.depth = p.depth - 1
+        return v
+    }
     // number: starts with - or 0..9
     if b == 45 || (b >= 48 && b <= 57) {
         return parse_number(p)
