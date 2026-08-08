@@ -84,6 +84,9 @@ mod inline_value_specialization;
 #[path = "graph_contributions.rs"]
 mod graph_contributions;
 
+#[path = "graph_update.rs"]
+mod graph_update;
+
 #[path = "graph_snapshot.rs"]
 mod graph_snapshot;
 

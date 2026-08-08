@@ -48,3 +48,6 @@ mod web_smoke_tests;
 
 #[path = "shader_texture_census.rs"]
 mod shader_texture_census;
+
+#[path = "graph_update_projects.rs"]
+mod graph_update_projects;

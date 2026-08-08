@@ -32,6 +32,10 @@ smallvec = { workspace = true }
 
 [dev-dependencies]
 rock-host = { path = "../rock-host" }
+# The updater's tests drive real incremental inference rather than inventing a
+# reinferred-body set: `UpdateResult::reinferred` is exactly the population
+# `InstanceGraph::update_bodies` takes.
+bone-incremental = { path = "../bone-incremental" }
 
 [lints]
 workspace = true

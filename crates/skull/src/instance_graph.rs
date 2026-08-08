@@ -392,12 +392,13 @@ pub struct Contribution {
     pub reached: Vec<(Instance, MonoSubst)>,
     /// Concrete conformance witnesses this walk supplied to its callees.
     pub bound_trees: Vec<(Instance, InstanceBoundTree)>,
-    /// The struct-field-default bodies this walk INJECTED, by declaring module
-    /// index and struct index. Recorded even when the injected initializers
-    /// resolve no callee at all: an edit that ADDS a call to one of them has to
-    /// re-walk this owner, and a set derived from the sites it happened to
-    /// produce would be empty in exactly that case.
-    pub defaults_used: BTreeSet<(usize, u32)>,
+    /// The FILES this contribution's spans point into.
+    ///
+    /// It is not always the owner's own file. A struct literal that omits a
+    /// field injects that field's initializer from the DECLARING struct's
+    /// module, so the injecting instance records sites spanned in a file it
+    /// does not live in -- and an edit anywhere in that file shifts them.
+    pub span_files: BTreeSet<ustr::Ustr>,
     /// Whether the walk ENTERED the body. False for a boundary, a body with no
     /// usable inference, and a depth-capped instance.
     pub expanded: bool,
@@ -438,6 +439,7 @@ impl Walk<'_> {
         span: Span,
     ) {
         self.out.sites_attempted += 1;
+        self.saw(span);
         if from.is_none() {
             return;
         }
@@ -466,6 +468,30 @@ impl Walk<'_> {
         self.out.bound_trees.push((instance.clone(), incoming));
     }
 
+    fn push_edge(&mut self, e: Edge) {
+        self.saw(e.span);
+        self.out.edges.push(e);
+    }
+
+    fn push_rejection(&mut self, r: Rejection) {
+        self.saw(r.span);
+        self.out.rejections.push(r);
+    }
+
+    fn push_unresolved(&mut self, u: Unresolved) {
+        self.saw(u.span);
+        self.out.unresolved.push(u);
+    }
+
+    /// Note that a fact was recorded at `span`. Every span that reaches a
+    /// contribution goes through here or through [`Self::record_site`], so the
+    /// invalidation set cannot miss a file the walk quoted.
+    fn saw(&mut self, span: Span) {
+        if !is_spanless(&span) {
+            self.out.span_files.insert(span.file);
+        }
+    }
+
     /// A call from an always-emitted body whose instantiation failed. There is
     /// no `from` instance to file an [`Unresolved`] or a [`Rejection`] against,
     /// but the REASON and the SPAN are the same ones those carry and are kept.
@@ -479,6 +505,7 @@ impl Walk<'_> {
         outcome: AlwaysEmittedOutcome,
         span: Span,
     ) {
+        self.saw(span);
         self.out.always_emitted_holes.push((name, AlwaysEmittedFailure { outcome, span }));
     }
 }
@@ -1378,7 +1405,7 @@ impl InstanceGraph {
     fn run(&mut self, ws: &Workspace, mut pending: Vec<Owner>) -> RunStats {
         let mut stats = RunStats::default();
         for i in self.root_instances.clone() {
-            self.merge_reach(i.clone(), MonoSubst::default());
+            self.merge_reach(&i, &MonoSubst::default());
             if !self.contributions.contains_key(&Owner::Instance(i.clone())) {
                 pending.push(Owner::Instance(i));
             }
@@ -1416,15 +1443,13 @@ impl InstanceGraph {
                 break;
             }
             rounds += 1;
+            stats.settle_rounds = rounds;
             assert!(
                 rounds < 64,
                 "conformance witnesses did not settle after {rounds} rounds; \
                  {} owners still disagree with what they were walked with",
                 stale.len()
             );
-            for owner in &stale {
-                self.contributions.remove(owner);
-            }
             pending = stale;
         }
         stats
@@ -1506,13 +1531,13 @@ impl InstanceGraph {
         // second population. Merging it again would reach each of those with an
         // EMPTY substitution and manufacture a disagreement with its own.
         for (to, subst) in &c.reached {
-            self.merge_reach(to.clone(), subst.clone());
+            self.merge_reach(to, subst);
             if !self.contributions.contains_key(&Owner::Instance(to.clone())) {
                 demanded.push(Owner::Instance(to.clone()));
             }
         }
         for (i, tree) in &c.bound_trees {
-            self.merge_bound_tree(i, tree.clone());
+            self.merge_bound_tree(i, tree);
         }
         self.contributions.insert(owner, c);
         demanded.sort();
@@ -1525,46 +1550,58 @@ impl InstanceGraph {
     /// The COMPARISONS are the denominator, not the recorded substitutions: an
     /// instance reached exactly once never runs the comparison arm, and
     /// counting recordings would report an agreement nothing tested.
-    fn merge_reach(&mut self, to: Instance, subst: MonoSubst) {
-        match self.substitutions.get(&to) {
+    fn merge_reach(&mut self, to: &Instance, subst: &MonoSubst) {
+        match self.substitutions.get(to) {
             Some(prev) => {
+                // Compared before anything is cloned: most reaches are repeats
+                // of one already recorded, and cloning the substitution first
+                // meant one hash-map allocation per EDGE.
                 self.subst_comparisons += 1;
-                *self.subst_compared.entry(to.clone()).or_insert(0) += 1;
-                if *prev != subst {
+                match self.subst_compared.get_mut(to) {
+                    Some(n) => *n += 1,
+                    None => {
+                        self.subst_compared.insert(to.clone(), 1);
+                    }
+                }
+                if prev != subst {
                     self.subst_disagreements.push(SubstDisagreement {
-                        instance: to,
+                        instance: to.clone(),
                         kept: prev.clone(),
-                        discarded: subst,
+                        discarded: subst.clone(),
                     });
                 }
             }
             None => {
-                self.substitutions.insert(to, subst);
+                self.substitutions.insert(to.clone(), subst.clone());
             }
         }
     }
 
-    fn merge_bound_tree(&mut self, instance: &Instance, incoming: InstanceBoundTree) {
+    fn merge_bound_tree(&mut self, instance: &Instance, incoming: &InstanceBoundTree) {
         match self.bound_trees.get(instance) {
-            Some(recorded) if recorded != &incoming => {
+            Some(recorded) if recorded != incoming => {
                 self.bound_tree_comparisons += 1;
                 self.bound_tree_disagreements.push(BoundTreeDisagreement {
                     instance: instance.clone(),
                     recorded: recorded.clone(),
-                    incoming,
+                    incoming: incoming.clone(),
                 });
             }
             Some(_) => {
                 self.bound_tree_comparisons += 1;
             }
             None => {
-                self.bound_trees.insert(instance.clone(), incoming);
+                self.bound_trees.insert(instance.clone(), incoming.clone());
             }
         }
     }
 
     /// **Rebuild every flat field from the contribution set**, prune what no
     /// root reaches, and re-run the whole-graph post-passes.
+    ///
+    /// `uninstantiated_roots` is NOT reset here: [`Self::seed_roots`] owns that
+    /// reset and runs first on both paths, so a clear in both places would be
+    /// one mechanism twice -- mutation-verified inert.
     ///
     /// This is the only writer of the flat fields, so "what does the graph
     /// say" has one answer whether it was just built or just updated. It
@@ -1606,16 +1643,16 @@ impl InstanceGraph {
         self.bound_trees.clear();
         self.bound_tree_comparisons = 0;
         self.bound_tree_disagreements.clear();
-        for name in self.uninstantiated_roots.values_mut() {
-            name.always_emitted_sites.clear();
-        }
 
         for i in self.root_instances.clone() {
-            self.merge_reach(i, MonoSubst::default());
+            self.merge_reach(&i, &MonoSubst::default());
         }
-        let owners: Vec<Owner> = self.contributions.keys().cloned().collect();
-        for owner in &owners {
-            let c = self.contributions.get(owner).expect("just listed").clone();
+        // Taken out and put back rather than iterated by key: reading each
+        // contribution through the map would need a clone per owner to satisfy
+        // the borrow checker, which is 6,200 deep clones on mag and was most of
+        // this function's cost.
+        let contributions = std::mem::take(&mut self.contributions);
+        for (owner, c) in &contributions {
             self.edges.extend(c.edges.iter().cloned());
             self.unresolved.extend(c.unresolved.iter().cloned());
             self.rejections.extend(c.rejections.iter().cloned());
@@ -1647,12 +1684,13 @@ impl InstanceGraph {
                     .push(failure.clone());
             }
             for (to, subst) in &c.reached {
-                self.merge_reach(to.clone(), subst.clone());
+                self.merge_reach(to, subst);
             }
             for (i, tree) in &c.bound_trees {
-                self.merge_bound_tree(i, tree.clone());
+                self.merge_bound_tree(i, tree);
             }
         }
+        self.contributions = contributions;
         // Which holes nevertheless have concrete instances from other call
         // sites. A post-pass because a root is recorded before any body is
         // walked, so at insertion time no instance of it exists yet -- which is
@@ -1703,12 +1741,25 @@ impl InstanceGraph {
         changed: &[(ModuleId, BodyOwner)],
     ) -> UpdateStats {
         let before: BTreeSet<Instance> = self.instances.clone();
+        // Re-derived and CHECKED, not assumed: the root set is a function of
+        // the declarations, so a body-only edit cannot move it, and an edit
+        // that did move it is an interface change the caller must rebuild for
+        // rather than one this function can absorb.
+        let previous_roots = std::mem::take(&mut self.root_instances);
         self.seed_roots(ws, canonical_roots(ws, roots, false));
+        assert!(
+            self.root_instances == previous_roots,
+            "the root set moved during a body-only update ({} before, {} after) -- that is \
+             an interface change",
+            previous_roots.len(),
+            self.root_instances.len()
+        );
 
+        // No removal step: `run` expands every pending owner unconditionally
+        // and `commit` inserts over whatever was there, so an affected owner's
+        // old contribution is REPLACED rather than merged with. A remove-first
+        // loop stood here and was inert -- mutation-verified.
         let affected = self.affected_owners(ws, changed);
-        for owner in &affected {
-            self.contributions.remove(owner);
-        }
         let run = self.run(ws, affected.clone());
         let pruned = self.derive(ws);
         UpdateStats {
@@ -1718,60 +1769,81 @@ impl InstanceGraph {
             newly_reached: self.instances.difference(&before).count(),
             owners: self.contributions.len(),
             instances: self.instances.len(),
+            settle_rounds: run.settle_rounds,
         }
     }
 
     /// Which owners a changed body invalidates.
     ///
+    /// Two causes, and the second is the one a "re-walk the edited body" rule
+    /// misses. An owner's contribution is stale if
+    ///
+    /// - the edited body IS its body, or
+    /// - it QUOTES the edited file. Every recorded fact carries a span, and an
+    ///   edit anywhere in a file shifts the offsets of everything after it, so
+    ///   an untouched body in the same file holds spans that no longer match
+    ///   the workspace. It is not even confined to one file: a struct literal
+    ///   that omits a field injects that field's initializer from the DECLARING
+    ///   struct's module, so an instance records sites spanned in a file it does
+    ///   not live in.
+    ///
+    /// The second cause was found by the always-emitted-hole fixture, whose
+    /// edit made one identifier a character longer: every span in `main` moved
+    /// by one byte and the updated graph kept the old ones.
+    ///
     /// Total over [`BodyOwner`] on purpose: an arm that silently did nothing
     /// would leave a stale contribution behind and the graph would still look
     /// consistent with itself.
     fn affected_owners(&self, ws: &Workspace, changed: &[(ModuleId, BodyOwner)]) -> Vec<Owner> {
-        let mut out: Vec<Owner> = Vec::new();
+        let mut changed_files: BTreeSet<ustr::Ustr> = BTreeSet::new();
+        let mut changed_decls: BTreeSet<DeclKey> = BTreeSet::new();
+        let mut changed_seeds: Vec<Owner> = Vec::new();
         for (module, body_owner) in changed {
+            changed_files.insert(ws.module(*module).file);
             match body_owner {
-                // Every LIVE instance of that declaration. The graph keys
-                // instances on bone's collapsed representative, so a backend
-                // sibling's body reaches its instances through the same
-                // canonicalization `build` seeds roots with.
+                // The graph keys instances on bone's collapsed representative,
+                // so a backend sibling's body reaches its instances through the
+                // same canonicalization `build` seeds roots with.
                 BodyOwner::Function(f) => {
-                    let decl = skull_mir::lower::canonical_variant(
+                    changed_decls.insert(DeclKey(skull_mir::lower::canonical_variant(
                         ws,
                         FuncRef { module: *module, func: *f },
-                    );
-                    out.extend(
-                        self.contributions
-                            .keys()
-                            .filter_map(|o| o.instance())
-                            .filter(|i| i.func == decl)
-                            .map(|i| Owner::Instance(i.clone())),
-                    );
+                    )));
                 }
-                // An owner in its own right.
-                BodyOwner::Decorator(_) | BodyOwner::Global(_) => {
-                    out.push(Owner::AlwaysEmitted(*module, *body_owner));
+                // An owner in its own right. Reachable through a `const`
+                // initializer, whose VALUE is a body
+                // (`bone_incremental::item_prints`); a mutable `global` keeps
+                // whole-item interface, so an edit to one arrives as a tier
+                // change instead and never here.
+                BodyOwner::Global(_) => {
+                    changed_seeds.push(Owner::AlwaysEmitted(*module, *body_owner));
                 }
-                // Not an owner: its initializers are lowered INTO whichever
-                // instance omits the field, so the affected owners are the
-                // injecting instances. Which literal omits which field is a
-                // property of the struct DECLARATION and of the injecting
-                // body, neither of which a body-only edit to the defaults can
-                // move, so `defaults_used` is the whole population.
-                BodyOwner::StructDefaults(def) => {
-                    let key = (module.index(), def.into_raw().into_u32());
-                    out.extend(
-                        self.contributions
-                            .iter()
-                            .filter(|(_, c)| c.defaults_used.contains(&key))
-                            .filter_map(|(o, _)| o.instance())
-                            .map(|i| Owner::Instance(i.clone())),
-                    );
-                }
-                // No owner and no facts: the walk never enters an enum's or a
-                // newtype's body, so neither contributes an edge, a site or a
-                // type resolution to remove. `expanded_and_boundary_partition`
-                // is what would go red if one ever did.
-                BodyOwner::Enum(_) | BodyOwner::Newtype(_) => {}
+                // **Not reachable from a body-only edit, and rejected rather
+                // than handled.** A struct, an enum, a newtype and a decorator
+                // each hash their WHOLE item into the interface print, so any
+                // edit to one is an interface change: it moves the root set, the
+                // manglings and every caller's instantiation, none of which this
+                // function claims to maintain. Handling the arm anyway would be
+                // a mechanism with no way in, and a silent no-op would leave a
+                // stale contribution behind while the graph still looked
+                // consistent with itself. Pinned by
+                // `a_struct_enum_newtype_or_decorator_edit_is_interface_tier`.
+                BodyOwner::Decorator(_)
+                | BodyOwner::StructDefaults(_)
+                | BodyOwner::Enum(_)
+                | BodyOwner::Newtype(_) => panic!(
+                    "`update_bodies` was given {body_owner:?}, which no BODY-ONLY edit can \
+                     produce -- that item kind hashes whole-item into its interface print. \
+                     The caller is on an interface-tier change and must rebuild."
+                ),
+            }
+        }
+        let mut out: Vec<Owner> = changed_seeds;
+        for (owner, c) in &self.contributions {
+            let quotes_edit = c.span_files.iter().any(|f| changed_files.contains(f));
+            let is_edited_body = owner.instance().is_some_and(|i| changed_decls.contains(&DeclKey(i.func)));
+            if quotes_edit || is_edited_body {
+                out.push(owner.clone());
             }
         }
         out.sort();
@@ -1785,19 +1857,24 @@ impl InstanceGraph {
     /// whole group of instances that keep each other alive, and a cycle has no
     /// member a reference count would ever drop to zero.
     fn reachable_instances(&self) -> BTreeSet<Instance> {
-        let mut seeds: Vec<Instance> = self.root_instances.iter().cloned().collect();
+        let mut seeds: Vec<&Instance> = self.root_instances.iter().collect();
         for c in self.contributions.values() {
-            seeds.extend(c.always_emitted_targets.iter().cloned());
+            seeds.extend(c.always_emitted_targets.iter());
         }
-        let mut live: BTreeSet<Instance> = BTreeSet::new();
+        // Over REFERENCES: an `Instance` owns its argument vector, so a walk
+        // that clones every node it visits allocates once per edge.
+        let mut live: BTreeSet<&Instance> = BTreeSet::new();
         while let Some(i) = seeds.pop() {
-            if !live.insert(i.clone()) {
+            if !live.insert(i) {
                 continue;
             }
-            let Some(c) = self.contributions.get(&Owner::Instance(i)) else { continue };
-            seeds.extend(c.edges.iter().map(|e| e.to.clone()));
+            let Some((_, c)) = self.contributions.get_key_value(&Owner::Instance(i.clone()))
+            else {
+                continue;
+            };
+            seeds.extend(c.edges.iter().map(|e| &e.to));
         }
-        live
+        live.into_iter().cloned().collect()
     }
 }
 
@@ -1806,6 +1883,13 @@ impl InstanceGraph {
 #[derive(Default, Debug, Clone, Copy)]
 pub struct RunStats {
     pub expanded: usize,
+    /// How many times the conformance fixpoint had to walk owners again.
+    ///
+    /// Published because a guard with no population reads as load-bearing when
+    /// it is not: this is 0 on every fixture and on all three real projects, so
+    /// it is what makes the result independent of walk ORDER rather than a pass
+    /// the answer depends on.
+    pub settle_rounds: usize,
 }
 
 /// What one [`InstanceGraph::update_bodies`] did, as a structural census.
@@ -1828,6 +1912,8 @@ pub struct UpdateStats {
     pub newly_reached: usize,
     pub owners: usize,
     pub instances: usize,
+    /// See [`RunStats::settle_rounds`].
+    pub settle_rounds: usize,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1884,7 +1970,7 @@ fn walk_body_edges(
                     SiteOutcome::Failed("generic-fn-value"),
                     span,
                 );
-                w.out.rejections.push(Rejection {
+                w.push_rejection(Rejection {
                     kind: RejectionKind::GenericFnValue,
                     at: from.clone(),
                     span,
@@ -1919,7 +2005,7 @@ fn walk_body_edges(
                 }
                 _ => RejectionKind::ConcreteTypeUnavailable,
             };
-            w.out.rejections.push(Rejection {
+            w.push_rejection(Rejection {
                 kind,
                 at: from.clone(),
                 span,
@@ -1973,7 +2059,7 @@ fn walk_body_edges(
                         span,
                     );
                     if let Some(from) = from {
-                        w.out.unresolved.push(Unresolved {
+                        w.push_unresolved(Unresolved {
                             from: from.clone(),
                             callee: from.func,
                             reason: "compiler-generated-entry-unresolved",
@@ -2023,7 +2109,7 @@ fn walk_body_edges(
             continue;
         };
         if let Some(from) = from {
-            w.out.edges.push(Edge {
+            w.push_edge(Edge {
                 from: from.clone(),
                 to: resolved.callee.clone(),
                 kind: EdgeKind::BoundNextWitness,
@@ -2095,7 +2181,7 @@ fn record_call(
         }
         Err(Fail::Unconstrained(_)) => {
             let name = mangle_fn(ws, cf);
-            w.out.rejections.push(Rejection {
+            w.push_rejection(Rejection {
                 kind: RejectionKind::UnconstrainedTypeVar,
                 at: from.expect("guarded above").clone(),
                 span,
@@ -2108,7 +2194,7 @@ fn record_call(
             return None;
         }
         Err(fail) => {
-            w.out.unresolved.push(Unresolved {
+            w.push_unresolved(Unresolved {
                 from: from.expect("guarded above").clone(),
                 callee,
                 reason: fail.reason(),
@@ -2120,7 +2206,7 @@ fn record_call(
     };
     let to = Instance { func: callee, args };
     match from {
-        Some(from) => w.out.edges.push(Edge { from: from.clone(), to: to.clone(), kind, span }),
+        Some(from) => w.push_edge(Edge { from: from.clone(), to: to.clone(), kind, span }),
         // No `from`, so no edge and no site: an always-emitted body's callee is
         // a ROOT, and only this record says so.
         None => {
@@ -2263,7 +2349,7 @@ fn record_witness(
             let to = Instance { func: callee, args };
             match from {
                 Some(from) => {
-                    w.out.edges.push(Edge { from: from.clone(), to: to.clone(), kind, span })
+                    w.push_edge(Edge { from: from.clone(), to: to.clone(), kind, span })
                 }
                 // See `record_call`: an always-emitted body's callee is a root.
                 None => {
@@ -2292,7 +2378,7 @@ fn record_witness(
             w.record_site(from, site, SiteOutcome::Failed(fail.reason()), span);
         }
         Err(Fail::Unconstrained(_)) => {
-            w.out.rejections.push(Rejection {
+            w.push_rejection(Rejection {
                 kind: RejectionKind::UnconstrainedTypeVar,
                 at: from.expect("guarded above").clone(),
                 span,
@@ -2304,7 +2390,7 @@ fn record_witness(
             w.record_site(from, site, SiteOutcome::Failed("unconstrained-type-var"), span);
         }
         Err(fail) => {
-            w.out.unresolved.push(Unresolved {
+            w.push_unresolved(Unresolved {
                 from: from.expect("guarded above").clone(),
                 callee,
                 reason: fail.reason(),
@@ -2447,7 +2533,6 @@ fn walk_struct_default_edges(
     }
 
     for (_, (module, def, args, fields)) in omitted {
-        w.out.defaults_used.insert((module.index(), def.into_raw().into_u32()));
         let owner = BodyOwner::StructDefaults(def);
         let Some(defaults) = ws.modules[module.index()].bodies.get(&owner) else { continue };
         let Some(inf) = ws.inference(module).and_then(|ir| ir.per_fn.get(&owner)) else {
@@ -2503,7 +2588,7 @@ fn record_bound_next(
             return None;
         };
         if let Some(from) = from {
-            w.out.edges.push(Edge {
+            w.push_edge(Edge {
                 from: from.clone(),
                 to: resolved.callee.clone(),
                 kind,
@@ -2529,7 +2614,7 @@ fn record_bound_next(
             let to = Instance { func: callee, args };
             match from {
                 Some(from) => {
-                    w.out.edges.push(Edge { from: from.clone(), to: to.clone(), kind, span })
+                    w.push_edge(Edge { from: from.clone(), to: to.clone(), kind, span })
                 }
                 // See `record_call`: an always-emitted body's callee is a root.
                 None => {
@@ -2565,7 +2650,7 @@ fn record_bound_next(
             None
         }
         Err(Fail::Unconstrained(_)) => {
-            w.out.rejections.push(Rejection {
+            w.push_rejection(Rejection {
                 kind: RejectionKind::UnconstrainedTypeVar,
                 at: from.expect("guarded above").clone(),
                 span,
@@ -2578,7 +2663,7 @@ fn record_bound_next(
             None
         }
         Err(fail) => {
-            w.out.unresolved.push(Unresolved {
+            w.push_unresolved(Unresolved {
                 from: from.expect("guarded above").clone(),
                 callee,
                 reason: fail.reason(),
