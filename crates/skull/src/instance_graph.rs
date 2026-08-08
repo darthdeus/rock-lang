@@ -754,16 +754,13 @@ impl InstanceGraph {
     /// recorded rather than resolved by arrival order.
     fn reach(
         &mut self,
-        work: &mut Vec<(Instance, MonoSubst, u32)>,
+        work: &mut Vec<(Instance, MonoSubst)>,
         to: Instance,
         subst: MonoSubst,
-        depth: u32,
     ) {
-        // `depth` is the depth to ENTER `to` at, so a root enters at 0 and a
-        // callee at its caller's depth + 1. Roots come through here too: a
-        // non-generic instance's substitution is EMPTY, not absent, and
-        // seeding them directly is what left corpus instances with no
-        // recorded substitution at all.
+        // Roots come through here too: a non-generic instance's substitution is
+        // EMPTY, not absent, and seeding them directly is what left corpus
+        // instances with no recorded substitution at all.
         match self.substitutions.get(&to) {
             Some(prev) => {
                 // The COMPARISONS are the denominator, not the recorded
@@ -785,7 +782,7 @@ impl InstanceGraph {
             }
         }
         if self.instances.insert(to.clone()) {
-            work.push((to, subst, depth));
+            work.push((to, subst));
         }
     }
 
@@ -1221,7 +1218,7 @@ pub fn build(ws: &Workspace, roots: Vec<FuncRef>, perturb: bool) -> InstanceGrap
 
     // A root that is generic has no instantiation of its own; it is a shared
     // body until a call supplies one. Recorded rather than invented.
-    let mut work: Vec<(Instance, MonoSubst, u32)> = Vec::new();
+    let mut work: Vec<(Instance, MonoSubst)> = Vec::new();
     for r in roots {
         let f = &ws.module(r.module).functions[r.func];
         if !f.generics.is_empty() {
@@ -1232,7 +1229,7 @@ pub fn build(ws: &Workspace, roots: Vec<FuncRef>, perturb: bool) -> InstanceGrap
             continue;
         }
         let inst = Instance { func: r, args: Vec::new() };
-        g.reach(&mut work, inst, MonoSubst::default(), 0);
+        g.reach(&mut work, inst, MonoSubst::default());
     }
 
     // Globals and decorators have no `Instance` origin, so their body edges
@@ -1250,13 +1247,13 @@ pub fn build(ws: &Workspace, roots: Vec<FuncRef>, perturb: bool) -> InstanceGrap
             let Some(inf) = inference.per_fn.get(&owner) else { continue };
             let body = module.bodies.get(&owner);
             walk_body_edges(
-                &mut g, &mut work, ws, inf, body, None, &MonoSubst::default(), 0,
+                &mut g, &mut work, ws, inf, body, None, &MonoSubst::default(),
                 &SiteDomain::Own, None,
             );
         }
     }
 
-    while let Some((inst, subst, depth)) = work.pop() {
+    while let Some((inst, subst)) = work.pop() {
         // The one admissibility oracle, shared with both emitters. The graph
         // DECLINES to expand where they reject: a capped instance is a
         // changing-instance-recursion candidate, not yet a verdict.
@@ -1285,10 +1282,10 @@ pub fn build(ws: &Workspace, roots: Vec<FuncRef>, perturb: bool) -> InstanceGrap
         g.expanded.insert(inst.clone());
 
         walk_body_edges(
-            &mut g, &mut work, ws, inf, Some(body), Some(&inst), &subst, depth,
+            &mut g, &mut work, ws, inf, Some(body), Some(&inst), &subst,
             &SiteDomain::Own, None,
         );
-        walk_struct_default_edges(&mut g, &mut work, ws, body, &inst, &subst, depth);
+        walk_struct_default_edges(&mut g, &mut work, ws, body, &inst, &subst);
     }
 
     // Which holes nevertheless have concrete instances from other call sites.
@@ -1317,13 +1314,12 @@ pub fn build(ws: &Workspace, roots: Vec<FuncRef>, perturb: bool) -> InstanceGrap
 #[allow(clippy::too_many_arguments)]
 fn walk_body_edges(
     g: &mut InstanceGraph,
-    work: &mut Vec<(Instance, MonoSubst, u32)>,
+    work: &mut Vec<(Instance, MonoSubst)>,
     ws: &Workspace,
     inf: &BodyInference,
     body: Option<&bone_semantic::hir::Body>,
     from: Option<&Instance>,
     subst: &MonoSubst,
-    depth: u32,
     // WHICH arena the sites recorded here index, and -- for a foreign one --
     // which of its expressions this owner actually reaches. `None` is the whole
     // body, which is what an own-domain walk always wants.
@@ -1347,7 +1343,7 @@ fn walk_body_edges(
         let span = body.and_then(|b| b.expr_spans.get(e).copied()).unwrap_or_else(Span::unknown);
         let kind = if bindings.is_some() { EdgeKind::GenericCall } else { EdgeKind::DirectCall };
         if let Some(to) = record_call(
-            g, work, ws, inf, from, subst, depth, callee, bindings, kind, span,
+            g, work, ws, inf, from, subst, callee, bindings, kind, span,
             Site { domain: domain.clone(), expr: e, op: SiteOp::DirectCall },
         ) {
             resolved_calls.insert(e, to);
@@ -1360,7 +1356,7 @@ fn walk_body_edges(
             let cf = &ws.module(callee.module).functions[callee.func];
             if cf.generics.is_empty() {
                 record_call(
-                    g, work, ws, inf, from, subst, depth, callee, None, EdgeKind::FnValue, span,
+                    g, work, ws, inf, from, subst, callee, None, EdgeKind::FnValue, span,
                     Site { domain: domain.clone(), expr: e, op: SiteOp::FnValue },
                 );
             } else if let Some(from) = from {
@@ -1444,7 +1440,7 @@ fn walk_body_edges(
             match resolved {
                 Some(callee) => {
                     record_call(
-                        g, work, ws, inf, from, subst, depth, callee, None,
+                        g, work, ws, inf, from, subst, callee, None,
                         EdgeKind::CompilerGenerated, span, site,
                     );
                     if erased {
@@ -1477,7 +1473,7 @@ fn walk_body_edges(
     for (e, witness) in implicit.into_iter().filter(|(e, _)| reached(*e)) {
         let span = body.and_then(|b| b.expr_spans.get(e).copied()).unwrap_or_else(Span::unknown);
         record_witness(
-            g, work, ws, inf, from, subst, depth, witness, span, EdgeKind::ImplicitIter,
+            g, work, ws, inf, from, subst, witness, span, EdgeKind::ImplicitIter,
             Site { domain: domain.clone(), expr: e, op: SiteOp::ImplicitIter },
         );
     }
@@ -1488,7 +1484,7 @@ fn walk_body_edges(
     for (e, tree) in trees.into_iter().filter(|(e, _)| reached(*e)) {
         let span = body.and_then(|b| b.expr_spans.get(e).copied()).unwrap_or_else(Span::unknown);
         let concrete = walk_bound_tree(
-            g, work, ws, inf, from, subst, depth, tree, span, e, BoundRoot::Call, domain, &[],
+            g, work, ws, inf, from, subst, tree, span, e, BoundRoot::Call, domain, &[],
         );
         if let Some(to) = resolved_calls.get(&e) {
             g.record_bound_tree(to, concrete);
@@ -1527,12 +1523,12 @@ fn walk_body_edges(
         let span = body.and_then(|b| b.expr_spans.get(e).copied()).unwrap_or_else(Span::unknown);
         if let Some(witness) = &info.iter {
             record_witness(
-                g, work, ws, inf, from, subst, depth, witness, span,
+                g, work, ws, inf, from, subst, witness, span,
                 EdgeKind::IteratorIter, Site { domain: domain.clone(), expr: e, op: SiteOp::ForIter },
             );
         }
         let _ = record_bound_next(
-            g, work, ws, inf, from, subst, depth, &info.next, span,
+            g, work, ws, inf, from, subst, &info.next, span,
             EdgeKind::IteratorNext, e, BoundRoot::For, domain, &[],
         );
     }
@@ -1541,12 +1537,11 @@ fn walk_body_edges(
 #[allow(clippy::too_many_arguments)]
 fn record_call(
     g: &mut InstanceGraph,
-    work: &mut Vec<(Instance, MonoSubst, u32)>,
+    work: &mut Vec<(Instance, MonoSubst)>,
     ws: &Workspace,
     inf: &BodyInference,
     from: Option<&Instance>,
     subst: &MonoSubst,
-    depth: u32,
     callee: FuncRef,
     bindings: Option<&Vec<bone_semantic::prelude::TyId>>,
     kind: EdgeKind,
@@ -1617,7 +1612,7 @@ fn record_call(
         }
     }
     g.record_site(from, site, SiteOutcome::Resolved(to.clone()), span);
-    g.reach(work, to.clone(), callee_subst, depth + 1);
+    g.reach(work, to.clone(), callee_subst);
     Some(to)
 }
 
@@ -1731,12 +1726,11 @@ fn detect_changing_instance_recursion(g: &mut InstanceGraph, ws: &Workspace) {
 #[allow(clippy::too_many_arguments)]
 fn record_witness(
     g: &mut InstanceGraph,
-    work: &mut Vec<(Instance, MonoSubst, u32)>,
+    work: &mut Vec<(Instance, MonoSubst)>,
     ws: &Workspace,
     inf: &BodyInference,
     from: Option<&Instance>,
     subst: &MonoSubst,
-    depth: u32,
     witness: &IterWitness,
     span: Span,
     kind: EdgeKind,
@@ -1762,7 +1756,7 @@ fn record_witness(
                 }
             }
             g.record_site(from, site, SiteOutcome::Resolved(to.clone()), span);
-            g.reach(work, to, callee_subst, depth + 1);
+            g.reach(work, to, callee_subst);
         }
         // See `record_call`: the classification survives the absence of a
         // `from` instance.
@@ -1824,12 +1818,11 @@ fn record_witness(
 /// literal with a base omits nothing.
 fn walk_struct_default_edges(
     g: &mut InstanceGraph,
-    work: &mut Vec<(Instance, MonoSubst, u32)>,
+    work: &mut Vec<(Instance, MonoSubst)>,
     ws: &Workspace,
     body: &Body,
     inst: &Instance,
     subst: &MonoSubst,
-    depth: u32,
 ) {
     use bone_semantic::hir::Expr as E;
     // One entry per (struct, ARGUMENTS, omitted field) this instance reaches,
@@ -1961,7 +1954,6 @@ fn walk_struct_default_edges(
             Some(defaults),
             Some(inst),
             &inner,
-            depth,
             &SiteDomain::StructDefaults(module, def, args),
             Some(&reached),
         );
@@ -1976,12 +1968,11 @@ fn walk_struct_default_edges(
 #[allow(clippy::too_many_arguments)]
 fn record_bound_next(
     g: &mut InstanceGraph,
-    work: &mut Vec<(Instance, MonoSubst, u32)>,
+    work: &mut Vec<(Instance, MonoSubst)>,
     ws: &Workspace,
     inf: &BodyInference,
     from: Option<&Instance>,
     subst: &MonoSubst,
-    depth: u32,
     next: &BoundNext,
     span: Span,
     kind: EdgeKind,
@@ -2035,9 +2026,9 @@ fn record_bound_next(
                 }
             }
             g.record_site(from, site, SiteOutcome::Resolved(to.clone()), span);
-            g.reach(work, to.clone(), callee_subst, depth + 1);
+            g.reach(work, to.clone(), callee_subst);
             let concrete_sub = walk_bound_tree(
-                g, work, ws, inf, from, subst, depth, sub, span, expr, root, domain, path,
+                g, work, ws, inf, from, subst, sub, span, expr, root, domain, path,
             );
             g.record_bound_tree(&to, concrete_sub.clone());
             Some(InstanceBoundNext { callee: to, sub: concrete_sub })
@@ -2091,12 +2082,11 @@ fn record_bound_next(
 #[allow(clippy::too_many_arguments)]
 fn walk_bound_tree(
     g: &mut InstanceGraph,
-    work: &mut Vec<(Instance, MonoSubst, u32)>,
+    work: &mut Vec<(Instance, MonoSubst)>,
     ws: &Workspace,
     inf: &BodyInference,
     from: Option<&Instance>,
     subst: &MonoSubst,
-    depth: u32,
     tree: &bone_semantic::prelude::BoundTree,
     span: Span,
     expr: Idx<bone_semantic::hir::Expr>,
@@ -2113,7 +2103,7 @@ fn walk_bound_tree(
         let mut child = path.to_vec();
         child.push(*k);
         if let Some(next) = record_bound_next(
-            g, work, ws, inf, from, subst, depth, &tree.next[k], span,
+            g, work, ws, inf, from, subst, &tree.next[k], span,
             EdgeKind::BoundNextWitness, expr, root, domain, &child,
         ) {
             resolved.next.insert(*k, next);
