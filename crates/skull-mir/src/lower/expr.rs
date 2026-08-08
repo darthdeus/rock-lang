@@ -22,6 +22,7 @@ impl Builder<'_> {
         // (the call-arg analog of `lower_for_user_iter`'s `iter_fn`).
         if let Some(w) = self.inf.and_then(|i| i.implicit_iter_args.get(&e)) {
             let (m, f) = w.func;
+            let generics = w.generics.clone();
             let iter_ref = FuncRef { module: m, func: f };
             // This coercion belongs to `e`, but the cursor was already restored
             // to the ENCLOSING expression above -- so set both halves of the
@@ -30,10 +31,23 @@ impl Builder<'_> {
             let outer_expr = self.cur_expr.replace(e);
             let call = self.with_site_op(crate::site::SiteOp::ImplicitIter, |b| {
                 let args = b.iter_witness_args(iter_ref, ValueRepr::Scalar(v))?;
-                Ok(b.emit_cur(Inst::Call { func: iter_ref, args }))
-            });
+                Ok::<_, CompilerError>(b.emit_cur(Inst::Call { func: iter_ref, args }))
+            })?;
+            // DELIVERY, exactly as the `for` head's witness does it. Both forms
+            // are ordinary calls to a generic `iter`, so under instance-owned
+            // emission both must name an instance; recording identity without
+            // delivering it spells a symbol nothing defines.
+            let span = self
+                .body
+                .expr_spans
+                .get(e)
+                .copied()
+                .unwrap_or(self.ws.module(m).functions[f].name_span);
+            if let Some(key) = self.next_call_spec(iter_ref, &generics, span)? {
+                self.f.spec_bindings.insert(call, key);
+            }
             self.cur_expr = outer_expr;
-            return call;
+            return Ok(call);
         }
         Ok(v)
     }

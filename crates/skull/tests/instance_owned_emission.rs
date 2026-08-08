@@ -159,3 +159,57 @@ fn main() {
          naming one shared `inner` is declaration ownership one level down"
     );
 }
+
+/// The `iter` symbol the body of `caller` calls, whatever it is spelled.
+///
+/// Deliberately NOT filtered to known definitions the way `callees_named_in`
+/// is: the property here is that the spelling names something that EXISTS, so
+/// filtering by the definition set first would answer the question by
+/// construction and pass on a call to a nil global.
+fn iter_called_in(lua: &str, caller: &str) -> String {
+    let body = function_body(lua, caller);
+    let at = body.find("iter_").unwrap_or_else(|| panic!("no `iter` call in `{caller}`:\n{body}"));
+    let rest = &body[at..];
+    rest[..rest.find('(').expect("a call has `(`")].to_string()
+}
+
+/// An `iter` witness names an INSTANCE in both call forms it has.
+///
+/// Two forms reach the generic stdlib `iter`: a `for` head's witness, and the
+/// implicit iterable->iterator coercion at a bounded call argument
+/// (`a.map(..)`, where `a` is `[T]` and `map` takes an `Iterator`). Under
+/// instance-owned emission the generic declaration has no body, so a witness
+/// that records identity without DELIVERING its instantiation spells a name
+/// nothing defines -- a nil global at runtime, with no compiler diagnostic,
+/// because the Lua emitter does not check that a call resolves.
+///
+/// The `for` arm is the control: it delivers, so a failure in the coercion arm
+/// is about the call FORM and not about `iter` witnesses in general.
+#[test]
+fn both_iter_witness_forms_name_a_definition_that_exists() {
+    let coerced = emit_module(
+        r#"
+fn main() {
+    let a: [int] = [1, 2]
+    print("{a.map(_ * 2).sum()}")
+}
+"#,
+    );
+    let looped = emit_module(
+        r#"
+fn main() {
+    let a: [int] = [1, 2]
+    let s = 0
+    for v in a.iter().map(_ * 2) { s = s + v }
+    print("{s}")
+}
+"#,
+    );
+    for (form, lua) in [("implicit coercion", &coerced), ("`for` head", &looped)] {
+        let called = iter_called_in(lua, "main");
+        assert!(
+            definition_symbols(lua).iter().any(|d| *d == called),
+            "the {form} witness calls `{called}`, which no definition defines"
+        );
+    }
+}
