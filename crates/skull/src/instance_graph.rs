@@ -410,13 +410,6 @@ pub struct InstanceGraph {
     /// exhaustive. This is an OPERATIONAL counter, describing work performed
     /// rather than the graph produced, so it belongs in a census assertion and
     /// never in a comparison of two graphs.
-    ///
-    /// A step counter sat here too and was removed: no assertion over it could
-    /// be made to FAIL. The obvious one (losing the per-search `seen` dedup)
-    /// stayed green under mutation, because the bound a small fixture can state
-    /// is far looser than the blowup, and a pinned count would move on
-    /// unrelated stdlib edits. The traversal measurements it was added for are
-    /// in `docs/parked/mono.md`.
     pub recursion_starts: usize,
     /// Callees seeded from an ALWAYS-EMITTED body (a decorator definition or a
     /// global initializer) rather than from a function root. Production treats
