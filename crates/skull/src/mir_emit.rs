@@ -785,7 +785,43 @@ impl skull_mir::reach::ReachPolicy for LuaReach<'_> {
     /// demand, so "no chunk yet" is not the same answer as "no body to walk".
     fn is_leaf(&mut self, body: EmittedBodyId) -> Result<bool, CompilerError> {
         Ok(match &body {
-            EmittedBodyId::Shared(fref) => !matches!(self.chunks.get(&shared(*fref)), Some(Ok(_))),
+            EmittedBodyId::Shared(fref) => {
+                let leaf = !matches!(self.chunks.get(&shared(*fref)), Some(Ok(_)));
+                if leaf {
+                    // A legitimate leaf is OPAQUE -- extern / `inline(lua)` --
+                    // and is still emitted, reaching onward by bare name. A
+                    // GENERIC Rock declaration is not: E1 left it with no body
+                    // at all, so arriving at its shared id means a call site
+                    // spelled the declaration's own symbol and nothing defines
+                    // it. Lua would emit that call and die at runtime on a nil
+                    // global with no diagnostic, which is how a witness that
+                    // recorded identity without DELIVERING its instantiation
+                    // stayed invisible for 59 Rock `@test`s. JS rejects the same
+                    // condition; this is the missing half.
+                    let f = &self.ws.module(fref.module).functions[fref.func];
+                    if is_generic(f) && !f.is_extern && f.inline_body.is_none() {
+                        let name = mangle_fn(self.ws, f);
+                        self.errs.push((
+                            name.clone(),
+                            CompilerError::new_with_label(
+                                f.name_span,
+                                format!(
+                                    "`{name}` is reached at its DECLARATION, and a generic \
+                                     declaration has no emitted body -- every call must name a \
+                                     concrete instantiation. Two things land here. Either a \
+                                     type argument is UNCONSTRAINED at the call (nothing pins \
+                                     it, e.g. a generic that appears only in the return type), \
+                                     which is a program error; or a call site recorded which \
+                                     instance it means without DELIVERING it, which is a \
+                                     compiler one. Check whether the call's type arguments are \
+                                     inferable first."
+                                ),
+                            ),
+                        ));
+                    }
+                }
+                leaf
+            }
             EmittedBodyId::Specialized(..) => false,
         })
     }

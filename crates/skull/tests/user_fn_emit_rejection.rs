@@ -88,3 +88,40 @@ fn stdlib_parity_gaps_stay_lenient() {
         emit.skipped
     );
 }
+
+/// A call that reaches a GENERIC DECLARATION's body rejects, rather than
+/// emitting a call to a symbol nothing defines.
+///
+/// E1 left a generic declaration with no body at all, so its mangled name is
+/// never written. The Lua emitter had no check for this: it wrote the call and
+/// the program died at runtime on `attempt to call global '..' (a nil value)`,
+/// with no compiler diagnostic -- while the JS emitter rejected the same
+/// condition with a span. That asymmetry is what hid the class on the backend
+/// the games ship on, and it cost 59 Rock `@test`s before the two witness call
+/// forms were fixed.
+///
+/// There is no SOURCE that produces this today, which is the point: every known
+/// producer is fixed. So the gate is verified by MUTATION instead -- deleting
+/// the implicit-iter coercion's `spec_bindings` delivery in
+/// `skull_mir::lower::expr` reintroduces it, and emission then reports
+/// `internal: iter_arr_T_ret_VecIter_T is called at its DECLARATION` where it
+/// previously produced a running program that crashed. This test pins the arm
+/// that must keep the rejection reachable: an ordinary generic call still emits,
+/// so the gate cannot be satisfied by refusing generics outright.
+#[test]
+fn an_ordinary_generic_call_still_emits() {
+    let src = r#"
+fn ident<T>(x: T) -> T { return x }
+
+fn main() {
+    print("{ident(1)} {ident(\"s\")}")
+}
+"#;
+    if let Err(e) = try_emit_module(src) {
+        panic!(
+            "a generic call that DELIVERS its instantiation must emit -- the \
+             declaration-body gate must not refuse generics outright: {}",
+            e.message
+        );
+    }
+}
