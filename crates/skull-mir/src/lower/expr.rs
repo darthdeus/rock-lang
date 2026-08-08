@@ -46,6 +46,24 @@ impl Builder<'_> {
             if let Some(key) = self.next_call_spec(iter_ref, &generics, span)? {
                 self.f.spec_bindings.insert(call, key);
             }
+            // IDENTITY beside delivery, the plan's split, and the same pair the
+            // `for` witness records. Delivery alone leaves the site's own claim
+            // unstated, which the census reports as `callee-no-instance` -- it
+            // was invisible only because the census runs POST-TRANSFORM and a
+            // splice removed the site before it could be examined.
+            if let Some(inf) = self.inf {
+                if let Some(subst) = crate::lower::shape::witness_instance_subst(
+                    self.ws,
+                    inf,
+                    iter_ref,
+                    &generics,
+                    self.subst(),
+                )? {
+                    self.f
+                        .callee_instances
+                        .insert(call, crate::site::OwnerInstance { func: iter_ref, subst });
+                }
+            }
             self.cur_expr = outer_expr;
             return Ok(call);
         }

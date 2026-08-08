@@ -556,3 +556,40 @@ fn main() {{
     );
 }
 
+
+/// Both `iter` witness forms state their own concrete instance, so the census
+/// can verify them.
+///
+/// The plan splits DELIVERY (`spec_bindings`) from IDENTITY
+/// (`callee_instances`), and the implicit iterable->iterator coercion wrote
+/// neither -- the instance GRAPH knew the identity, because it reads
+/// `implicit_iter_args` itself, while the emitted body stated no claim. That is
+/// `callee-no-instance`, and it was invisible because the census runs
+/// POST-TRANSFORM: a splice removed the site before it could be examined, so the
+/// zero held only while inlining was on.
+///
+/// `examined_by_op` is asserted alongside, because a zero over a population of
+/// zero is what this test would otherwise become: if the coercion stopped being
+/// lowered as a call at all, no site would be examined and no site would be
+/// unjoined. The `for` arm is the control that already worked.
+#[test]
+fn both_iter_witness_forms_state_the_instance_they_target() {
+    for (form, src) in [
+        ("implicit coercion", "fn main() { let a: [int] = [1, 2]\n  print(\"{a.map(_ * 2).sum()}\") }"),
+        ("`for` head", "fn main() { let a: [int] = [1, 2]\n  let s = 0\n  for v in a { s = s + v }\n  print(\"{s}\") }"),
+    ] {
+        let c = census_of(src);
+        let op = if form == "`for` head" { "for-iter" } else { "implicit-iter" };
+        assert!(
+            c.examined_by_op.get(op).copied().unwrap_or(0) > 0,
+            "no `{op}` site examined for the {form} form, so its zero would be \
+             vacuous: {c:?}"
+        );
+        assert_eq!(
+            unjoined(&c, Unjoined::CalleeNoInstance),
+            0,
+            "the {form} witness names no instance the census can verify: {c:?}"
+        );
+        assert!(c.accounts(), "accounting identity broken for {form}: {c:?}");
+    }
+}

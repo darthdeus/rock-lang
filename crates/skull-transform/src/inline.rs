@@ -739,6 +739,15 @@ fn resolve_cloned_bound_calls(
 /// through the clone) so a specialized call INSIDE a spliced body is itself found
 /// and specialized by the fixpoint -- the `spec_bindings` analogue of
 /// `resolve_cloned_bound_calls` importing `bound_trees`.
+///
+/// **E2 must decide about `MirFunc::resolved_bound_trees`, which this does NOT
+/// import.** It carries the resolution a STANDALONE substitution attached to a
+/// retargeted call, and E1 runs with inlining disabled, so no cloned body has
+/// one yet and dropping it costs nothing today. Once inlining returns, a spliced
+/// body CAN carry one, and losing it here would file that call's demand with an
+/// empty tree -- the same defect `26abf43dd` fixed, arriving by the other path.
+/// Either remap it beside the maps below, or establish that a spliced body never
+/// holds one; do not leave it unexamined.
 fn import_spec_bindings(
     func: &mut MirFunc,
     callee: &MirFunc,
