@@ -1422,6 +1422,45 @@ fn a_boot_shader_does_not_carry_its_uniform_block_bytes_across_the_boundary() {
     assert!(ok, "the uniform block contents boundary must be green:\n{all}");
 }
 
+/// GL's BLEND state is returned to boot's at the boundary.
+///
+/// Census 3's first row, and the state neither per-handle ledger axis can reach:
+/// the blend mode belongs to no handle, so there is nothing to put in a live set
+/// and nothing whose contents it is.
+///
+/// The sharpest case in the arc, because the checkpoint CAUSES it. The Rock-side
+/// `CURRENT_BLEND` shadow rides the checkpoint back to boot's value while GL
+/// keeps the predecessor's, and the flush loop then SKIPS `set_blend_mode` when
+/// the batch's mode already equals the shadow -- so restoring the shadow alone
+/// manufactures a disagreement and the guard preserves it. Measured before the
+/// fix: the probe's rect drew ADDITIVE at 0.996 where alpha reads 0.75.
+///
+/// `b3_blend_control` runs first and produces both readings inside one entry, so
+/// the spread the other two rest on is shown rather than assumed. All three
+/// declare the same `SIM_SKIP_RENDER`, since differing values are different boot
+/// signatures and would put the probe in its own process.
+#[test]
+fn a_successor_entry_draws_with_boots_gl_blend_state() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "testbed",
+        "-j",
+        "1",
+        "b3_blend_control",
+        "b3_blend_seed",
+        "b3_blend_probe",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 1,
+        "the probe must FOLLOW the seed in one process or it proves nothing: \
+         {boots} boots\n{all}"
+    );
+    assert!(ok, "the ambient blend boundary must be green:\n{all}");
+}
+
 /// A block BOOT filled takes the worker off the table, named as the shader that
 /// owns it.
 ///
