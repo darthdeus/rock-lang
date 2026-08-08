@@ -1529,6 +1529,58 @@ fn a_successor_entry_points_at_boots_cursor() {
     assert!(ok, "the ambient cursor boundary must be green:\n{all}");
 }
 
+/// Both master volumes and every bus's parameters are returned to boot's.
+///
+/// Census 3's fourth row, and the one whose probe can assert EQUALITY rather
+/// than a difference: boot's own reading rides a Rock global the checkpoint
+/// returns to every entry, so a boundary installing plausible defaults instead
+/// of boot's values fails the assertion. The control runs LAST because it
+/// disturbs the mix without putting it back, and running it first would make its
+/// leftovers the seed's starting state.
+///
+/// `STONE_AUDIO_STUB=0` on all three, and the same value on all three: a
+/// differing one is a different boot signature and would give the probe its own
+/// process.
+#[test]
+fn a_successor_entry_mixes_with_boots_audio_ambient() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "testbed",
+        "-j",
+        "1",
+        "b3a_seed",
+        "b3a_probe",
+        "b3a_control",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 1,
+        "the probe must FOLLOW the seed in one process or it proves nothing: \
+         {boots} boots\n{all}"
+    );
+    assert!(ok, "the ambient audio boundary must be green:\n{all}");
+}
+
+/// Under `STONE_AUDIO_STUB` the audio row records ABSENT, not the defaults.
+///
+/// There is no `AudioState` at all in a stubbed process, so every setter already
+/// no-ops and nothing can cross a boundary. "Captured nothing" and "captured the
+/// default values" produce identical restores, which is why the ledger's answer
+/// has three states -- a row claiming the second would publish a denominator for
+/// state that does not exist. The fixture asserts the neighbouring rows still
+/// record, so the 2 is this row's answer rather than a capture that failed.
+///
+/// Its own run: the default environment is a different boot signature from the
+/// trio above, which asserts it shares one process.
+#[test]
+fn the_audio_row_records_absent_under_the_stub() {
+    let (ok, stdout, stderr) = run_rock_status(&["sim", "testbed", "b3a_stub_absent"]);
+    let all = format!("{stdout}{stderr}");
+    assert!(ok, "the stub's ambient answer must be green:\n{all}");
+}
+
 /// A block BOOT filled takes the worker off the table, named as the shader that
 /// owns it.
 ///
