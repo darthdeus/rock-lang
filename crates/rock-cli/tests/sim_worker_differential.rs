@@ -1350,6 +1350,42 @@ fn a_boot_image_data_does_not_carry_its_pixels_across_the_boundary() {
     assert!(ok, "the ImageData contents boundary must be green:\n{all}");
 }
 
+/// A boot-owned shader's default-block UNIFORM VALUES are returned to boot's at
+/// the boundary.
+///
+/// Program state, deliberately: a linked program is immutable but its uniform
+/// values are stored in it and outlive whatever set them, so an entry that
+/// writes one on a boot-owned shader leaves it written for its successor. The
+/// tree already knows this fact one scope down -- `ui_ctx_shader.rock` exists
+/// because "a GL uniform is per-program state that persists across flushes".
+///
+/// `b3_su_active` runs first as the recipe control: it proves `uProbe` is an
+/// ACTIVE uniform and that boot's value reads back, so a sentinel in the probe
+/// cannot be blamed on a uniform the linker eliminated. It also asserts the
+/// capture's own denominator -- a snapshot that walked zero uniforms would
+/// satisfy every other assertion here.
+#[test]
+fn a_boot_shader_does_not_carry_its_uniform_values_across_the_boundary() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "testbed",
+        "-j",
+        "1",
+        "b3_su_active",
+        "b3_su_seed",
+        "b3_su_probe",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 1,
+        "the probe must FOLLOW the seed in one process or it proves nothing: \
+         {boots} boots\n{all}"
+    );
+    assert!(ok, "the shader uniform boundary must be green:\n{all}");
+}
+
 /// Run `rock` and return `(exit_ok, stdout, stderr)` WITHOUT asserting on the
 /// exit code. The multi-order gate deliberately exits nonzero on a corpus that
 /// cannot populate every arm, and that refusal is part of what is under test.
