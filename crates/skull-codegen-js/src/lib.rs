@@ -47,6 +47,10 @@ pub const JS_INTRINSICS: &[(&str, usize, &str)] = &[
     ("round", 1, "Math.floor($1 + 0.5)"),
     ("sign", 1, "Math.sign($1)"),
     ("fract", 1, "($1 - Math.floor($1))"),
+    // `join` over a `[string]`: the backing array IS the input both hosts want,
+    // so this is one `Array.prototype.join` here and one `table.concat` on
+    // luajit. `_data` is 0-based and may be longer than `len`, hence the slice.
+    ("join", 2, "$1._data.slice(0, $1.len).join($2)"),
     // Reference identity (stdlib `same_ref`). `===` on two objects is JS
     // identity, the same question luajit's `rawequal` answers; on primitives
     // both reduce to value equality, which is also what identity means there.
