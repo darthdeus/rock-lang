@@ -1461,6 +1461,40 @@ fn a_successor_entry_draws_with_boots_gl_blend_state() {
     assert!(ok, "the ambient blend boundary must be green:\n{all}");
 }
 
+/// The letterbox PRESENT rect is returned to boot's at the boundary.
+///
+/// Census 3's second row, and the one with no laundering anywhere: every bind of
+/// canvas 0 RE-APPLIES the rect, so a successor does not merely inherit stale
+/// state, it has the predecessor's sub-rect actively re-installed on its own
+/// draws. `present_letterbox_end` is the only clear and early-returns when the
+/// scene covers the drawable, which it does in every project here.
+///
+/// No rendering needed, and that is the point: with draws skipped there is still
+/// nothing between the seed and the probe that could put the rect back. The
+/// probe asserts the CONSEQUENCE as well as the stored value -- what GL's
+/// viewport becomes after a canvas-0 bind.
+#[test]
+fn a_successor_entry_presents_through_boots_letterbox_rect() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "testbed",
+        "-j",
+        "1",
+        "b3pv_control",
+        "b3pv_seed",
+        "b3pv_probe",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 1,
+        "the probe must FOLLOW the seed in one process or it proves nothing: \
+         {boots} boots\n{all}"
+    );
+    assert!(ok, "the ambient present-viewport boundary must be green:\n{all}");
+}
+
 /// A block BOOT filled takes the worker off the table, named as the shader that
 /// owns it.
 ///
