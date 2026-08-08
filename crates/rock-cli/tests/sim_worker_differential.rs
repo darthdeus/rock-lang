@@ -1224,9 +1224,11 @@ fn a_boot_painted_canvas_is_refused_from_a_worker() {
     ]);
     let reason = format!("{out}{err}");
     assert!(
-        reason.contains("boot painted canvases whose contents cannot be reconstructed"),
-        "the refusal must name its reason, so an ineligible boot world is a \
-         reported fact rather than a silently slower suite:\n{reason}"
+        reason.contains("boot state whose contents cannot be reconstructed")
+            && reason.contains("canvas:"),
+        "the refusal must name its reason AND the class that raised it, so an \
+         ineligible boot world is a reported fact rather than a silently slower \
+         suite:\n{reason}"
     );
 }
 
@@ -1238,49 +1240,892 @@ fn a_boot_painted_canvas_is_refused_from_a_worker() {
 /// or that admitted nothing, would satisfy a test that only looked at one side
 /// -- and "nothing was admitted" is exactly what a silently broken predicate
 /// produces while every sim still passes.
+///
+/// The default admits RENDERED entries into a shared worker, since B4. Two
+/// RENDERED sims, because that is the only corpus that can show it: entries
+/// declaring different `SIM_SKIP_RENDER` values have different BOOT SIGNATURES
+/// and get separate workers whatever the rendered rule says, so a mixed corpus
+/// boots twice both before and after the flip and discriminates nothing.
+///
+/// `-j 1` because a signature group splits into at most `--jobs` CONTIGUOUS
+/// lanes and each lane's head starts its own worker (B5) -- at -j 4 these two
+/// land in separate lanes and each boots, which says nothing about admission.
 #[test]
-fn the_default_mode_admits_render_skipped_sims_and_isolates_rendered_ones() {
-    // `b3_cc_head`/`b3_cc_seed` declare no SIM_SKIP_RENDER, so they are
-    // render-skipped; `canvas_create_preserves_color_mask` declares
-    // SIM_SKIP_RENDER=0 and renders.
-    // `-j 1` because a signature group splits into at most `--jobs` CONTIGUOUS
-    // lanes and each lane's head starts its own worker (B5) -- at the default
-    // -j 4 these two eligible entries land in two lanes and both boot, which
-    // says nothing about whether they were ADMITTED. One lane makes "shared a
-    // process" observable.
+fn the_default_mode_admits_rendered_sims_into_one_worker() {
     let (ok, stdout, stderr) = run_rock_status(&[
         "sim",
         "testbed",
         "-j",
         "1",
-        "b3_cc_head",
-        "b3_cc_seed",
         "canvas_create_preserves_color_mask",
+        "b3_readback_control",
     ]);
     let all = format!("{stdout}{stderr}");
-    assert!(ok, "the default mode must run these three green:\n{all}");
+    assert!(ok, "the default mode must run both green:\n{all}");
 
-    // The rendered one is isolated, and says why.
     assert!(
-        all.contains("canvas_create_preserves_color_mask` runs isolated")
-            || all.contains("renders (SIM_SKIP_RENDER=0)"),
-        "a rendered sim must be isolated WITH ITS REASON -- a silently isolated \
-         entry reads as a worker result:\n{all}"
+        !all.contains("runs isolated") && !all.contains("renders (SIM_SKIP_RENDER=0)"),
+        "rendering is no longer a reason to isolate; nothing may report one:\n{all}"
     );
 
-    // ... and the render-skipped ones really did share a process. Two entries
-    // in one worker boot it once, so exactly one of them reports the engine
-    // banner a fresh process prints.
     let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 1,
+        "two rendered entries of one signature must SHARE a worker: {boots} boots\n{all}"
+    );
+}
+
+/// A boot-owned pixel-readback slot's CONTENTS are returned to creation's at the
+/// boundary. The set diff cannot see this class: the slot is present, at its
+/// boot id, neither extra nor missing, and what crossed is a promoted submit
+/// inside it (`a97015add`).
+///
+/// Three entries, and the order is the point. `b3_readback_control` proves the
+/// priming recipe yields a readable 1.0 inside ONE entry, so a sentinel in the
+/// probe cannot be blamed on priming that never worked. The seed primes and
+/// deliberately never reads -- `consume` is one-shot and clears `ready_primed`,
+/// so any check that the seed primed the slot would be the thing that unprimes
+/// it. The probe then consumes and must see the sentinel.
+///
+/// `-j 1` for the lane reason above: at -j 4 the seed and probe land in separate
+/// lanes, each boots, and the probe reads the sentinel because it is a FRESH
+/// PROCESS -- passing for a reason that has nothing to do with the boundary.
+/// Measured: that is exactly what an earlier version of this fixture did.
+#[test]
+fn a_boot_pixel_readback_slot_does_not_carry_its_submit_across_the_boundary() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "testbed",
+        "-j",
+        "1",
+        "b3_readback_control",
+        "b3_readback_seed",
+        "b3_readback_probe",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 1,
+        "the probe must FOLLOW the seed in one process or it proves nothing: \
+         {boots} boots\n{all}"
+    );
+    assert!(ok, "the readback boundary must be green:\n{all}");
+}
+
+/// A file change queued during one entry is not delivered to the next as a
+/// hot-reload event.
+///
+/// The asset watcher's `CHANGED` set is a QUEUE a SUCCESSOR drains, and its
+/// stores are path-keyed, so id accounting cannot see them and neither
+/// per-handle axis has anything to hang them on. Live under the harness:
+/// `ASSET_DEV_MODE` is on for every `sim` invocation.
+///
+/// The oracle is the EVENT, not the queue depth, and that distinction is
+/// measured rather than assumed: two earlier versions asserted on the queue and
+/// the mutation that deletes the restore survived both, because whoever polls
+/// first empties it. With the restore deleted the probe hot-reloads three fonts
+/// it never touched -- that is the defect, and `ASSET_CHANGE_EVENTS` is what
+/// cannot be laundered.
+#[test]
+fn a_predecessors_file_change_is_not_the_next_entrys_hot_reload() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "testbed",
+        "-j",
+        "1",
+        "b3_watcher_active",
+        "b3_watcher_seed",
+        "b3_watcher_probe",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 1,
+        "the probe must FOLLOW the seed in one process or it proves nothing: \
+         {boots} boots\n{all}"
+    );
+    assert!(ok, "the asset watcher boundary must be green:\n{all}");
+}
+
+/// A sampler an entry binds on a unit >= 2 does not reach the next entry.
+///
+/// Units 2 and up, and the choice carries the assertion. Units 0 and 1 are
+/// rewritten every frame by the present and tonemap passes, so a violation on
+/// either is laundered before any reading can attribute it and an assertion
+/// over them passes whether or not the boundary works -- the `sampler_release`
+/// lesson in CLAUDE.md, learned by deleting two of six releases and watching
+/// the sweep stay green. Every reading is taken before the entry's first frame
+/// advance, since the render path binds samplers of its own.
+#[test]
+fn a_predecessors_sampler_does_not_reach_the_next_entrys_texture_unit() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "testbed",
+        "-j",
+        "1",
+        "b3_sampler_active",
+        "b3_sampler_seed",
+        "b3_sampler_probe",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 1,
+        "the probe must FOLLOW the seed in one process or it proves nothing: \
+         {boots} boots\n{all}"
+    );
+    assert!(ok, "the sampler unit boundary must be green:\n{all}");
+}
+
+/// The colour mask, clear colour and scissor an entry leaves do not reach the
+/// next entry.
+///
+/// Their own ambient row rather than a side effect: today they are normalized
+/// only inside `stone_canvas_reset_contents`, so a program with no boot canvas
+/// -- or one whose canvases the policy refuses -- normalizes nothing, and the
+/// per-frame site that would otherwise cover them sits inside the render gate
+/// and never runs for a non-rendered sim. This fixture renders nothing, which
+/// is what makes the probe's reading about the boundary and not about a frame.
+#[test]
+fn a_predecessors_gl_write_state_does_not_reach_the_next_entry() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim", "testbed", "-j", "1", "b3_ws_active", "b3_ws_seed", "b3_ws_probe",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 1,
+        "the probe must FOLLOW the seed in one process or it proves nothing: \
+         {boots} boots\n{all}"
+    );
+    assert!(ok, "the GL write state boundary must be green:\n{all}");
+}
+
+/// A boot canvas an entry NARROWED is back at boot's active rect for the next
+/// entry.
+///
+/// The half of a canvas's contents the paint flag cannot see:
+/// `stone_set_canvas_active` moves the sub-rect every later bind draws into and
+/// sets no `bound_as_target`, so the canvas reports "never painted" while its
+/// geometry has moved. Per-handle, so it lives in the canvas class's own policy
+/// rather than in `AMBIENT` -- one process-wide row over N canvases could not
+/// say which canvas moved.
+///
+/// The probe reads before its first frame advance, which is the only window
+/// where this is observable: `set_scene_active_rects` re-establishes the rect on
+/// the successor's first `frame_core_resolve_view`, so a reading one frame later
+/// passes with the fix deleted.
+#[test]
+fn a_predecessors_canvas_narrowing_does_not_reach_the_next_entry() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim", "testbed", "-j", "1", "b3_car_active", "b3_car_seed", "b3_car_probe",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 1,
+        "the probe must FOLLOW the seed in one process or it proves nothing: \
+         {boots} boots\n{all}"
+    );
+    assert!(ok, "the canvas active-rect boundary must be green:\n{all}");
+}
+
+/// A canvas BOOT itself narrowed takes that boot signature off the worker.
+///
+/// The refusal half of the same policy, and the reason `boot_mutated` grew a
+/// second question rather than the reset simply growing a second write: widening
+/// boot's own narrowed rect back to the full size installs a geometry boot never
+/// had, which is a different wrong state rather than a restore. Both sims still
+/// PASS -- a refusal is not an error -- so the BOOT COUNT is the evidence.
+#[test]
+fn a_boot_narrowed_canvas_refuses_the_worker_and_names_itself() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim", "testbed", "-j", "1", "b3_car_boot_narrowed", "b3_car_boot_narrowed_follows",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
     assert!(
-        boots >= 2,
-        "the rendered sim needs its own process, so at least two boots: {boots}\n{all}"
+        all.contains("boot state whose contents cannot be reconstructed: canvas:"),
+        "the refusal must name the canvas that earned it:\n{all}"
+    );
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 2,
+        "a refused boot world must put the successor in a FRESH process: \
+         {boots} boots\n{all}"
+    );
+    assert!(ok, "a refusal is not a failure; both entries still run:\n{all}");
+}
+
+/// A warning the RUST logger suppressed for one entry is not suppressed for
+/// the next.
+///
+/// The Rust half of the store `logger_dedup_does_not_suppress_the_next_entrys
+/// _warning` covers on the Lua side. It had no reset at all -- `reset_dedup()`
+/// was not even exported -- and it is call-site keyed, so no ledger axis could
+/// reach it: a warning that fired in entry 3 was simply silent in entry 7, and
+/// a suppressed warning is invisible to every other observation.
+///
+/// `b3_log_dedup_active` runs first as the recipe control, and carries the
+/// row's denominator: boot's image is legitimately EMPTY here, so the number
+/// that matters is that a capture RAN.
+#[test]
+fn the_rust_loggers_dedup_does_not_suppress_the_next_entrys_warning() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "testbed",
+        "-j",
+        "1",
+        "b3_log_dedup_active",
+        "b3_log_dedup_seed",
+        "b3_log_dedup_probe",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 1,
+        "the probe must FOLLOW the seed in one process or it proves nothing: \
+         {boots} boots\n{all}"
+    );
+    assert!(ok, "the Rust logger dedup boundary must be green:\n{all}");
+}
+
+/// An mpv target an ENTRY created is destroyed as an extra, and its successor
+/// stays in the same worker.
+///
+/// The admitted side of the `unrestorable` gate, and it is the half a
+/// rejection-only test cannot supply: a policy that refused every target of the
+/// class would satisfy the refusal test below while taking the worker off the
+/// table for a program that never booted one.
+#[test]
+fn an_entry_created_mpv_target_is_torn_down_without_costing_the_worker() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "testbed",
+        "-j",
+        "1",
+        "b3_mpv_entry_only",
+        "b3_mpv_entry_only_follows",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 1,
+        "an entry-created target must not cost the worker: {boots} boots\n{all}"
+    );
+    assert!(ok, "the entry-created mpv target arm must be green:\n{all}");
+}
+
+/// A BOOT-owned mpv target takes that boot signature off the worker, reported
+/// with the handle that did it.
+///
+/// The refused side. Both sims still PASS -- the refusal is not an error, it is
+/// the boundary declining to claim a world it did not return -- so the verdict
+/// alone proves nothing and the BOOT COUNT is the evidence: the follower reruns
+/// in a fresh process, which is exactly what the refusal buys.
+#[test]
+fn a_boot_owned_mpv_target_refuses_the_worker_and_names_itself() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "testbed",
+        "-j",
+        "1",
+        "b3_mpv_boot_live",
+        "b3_mpv_boot_follows",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    assert!(
+        all.contains("boot state whose contents cannot be reconstructed: mpv_target:"),
+        "the refusal must name the handle that earned it:\n{all}"
+    );
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 2,
+        "a refused boot world must put the successor in a FRESH process: \
+         {boots} boots\n{all}"
+    );
+    assert!(ok, "a refusal is not a failure; both entries still run:\n{all}");
+}
+
+/// A boot-owned IMAGE's texture is returned to boot's at the boundary, pixels
+/// and wrap state both.
+///
+/// The GPU-side half of the ImageData case below, and the one that could not be
+/// done by snapshotting contents: reading a texture back needs `glGetTexImage`,
+/// which GLES does not have, and imaging every boot asset would cost mag
+/// hundreds of megabytes per worker. So boot's TEXTURE OBJECT is retained and
+/// the first write to a boot-owned image is diverted onto a replacement
+/// (`image_write_target`), which makes the cost scale with the images an entry
+/// mutates rather than with the ones it boots.
+///
+/// `b3_img_active` runs first as the recipe control: it proves the texel probe
+/// reads what boot uploaded, that REPEAT is a state creation does not establish,
+/// and the capture's own denominator -- a boundary that snapshotted no image
+/// diverts nothing and refuses nothing, which looks from the outside exactly
+/// like one that found nothing to divert.
+///
+/// Two boot images, and the untouched one is what separates a restore from a
+/// boundary that swept every texture it found.
+#[test]
+fn a_boot_image_does_not_carry_its_texture_across_the_boundary() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "testbed",
+        "-j",
+        "1",
+        "b3_img_active",
+        "b3_img_seed",
+        "b3_img_probe",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 1,
+        "the probe must FOLLOW the seed in one process or it proves nothing: \
+         {boots} boots\n{all}"
+    );
+    assert!(ok, "the image contents boundary must be green:\n{all}");
+}
+
+/// A boot-owned ImageData's PIXELS are returned to boot's at the boundary.
+///
+/// Same blind spot as the canvas and readback cases -- present at its boot id,
+/// neither extra nor missing, contents crossed -- and the first one found by
+/// the mutator census rather than by a divergence: `image_data` is one of the
+/// classes `ContentPolicy` now forces to declare an answer.
+///
+/// Boot PAINTS the image, so the probe's assertion separates a RESTORE from a
+/// plausible-looking clear: a boundary that reset to creation's zeroes would
+/// satisfy "not the seed's red" while installing a state boot never had.
+///
+/// The boot count is asserted BEFORE the verdict, and it is load-bearing in a
+/// way this fixture makes sharp. A restore that reports failure ends the worker
+/// and the parent reruns the probe in a FRESH process, where it passes for the
+/// ordinary reason -- so "the sims passed" alone is satisfied by the boundary
+/// being broken. One boot is what makes the probe follow the seed.
+#[test]
+fn a_boot_image_data_does_not_carry_its_pixels_across_the_boundary() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "testbed",
+        "-j",
+        "1",
+        "b3_image_data_seed",
+        "b3_image_data_probe",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 1,
+        "the probe must FOLLOW the seed in one process or it proves nothing: \
+         {boots} boots\n{all}"
+    );
+    assert!(ok, "the ImageData contents boundary must be green:\n{all}");
+}
+
+/// A boot-owned shader's default-block UNIFORM VALUES are returned to boot's at
+/// the boundary.
+///
+/// Program state, deliberately: a linked program is immutable but its uniform
+/// values are stored in it and outlive whatever set them, so an entry that
+/// writes one on a boot-owned shader leaves it written for its successor. The
+/// tree already knows this fact one scope down -- `ui_ctx_shader.rock` exists
+/// because "a GL uniform is per-program state that persists across flushes".
+///
+/// `b3_su_active` runs first as the recipe control: it proves `uProbe` is an
+/// ACTIVE uniform and that boot's value reads back, so a sentinel in the probe
+/// cannot be blamed on a uniform the linker eliminated. It also asserts the
+/// capture's own denominator -- a snapshot that walked zero uniforms would
+/// satisfy every other assertion here.
+#[test]
+fn a_boot_shader_does_not_carry_its_uniform_values_across_the_boundary() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "testbed",
+        "-j",
+        "1",
+        "b3_su_active",
+        "b3_su_seed",
+        "b3_su_probe",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 1,
+        "the probe must FOLLOW the seed in one process or it proves nothing: \
+         {boots} boots\n{all}"
+    );
+    assert!(ok, "the shader uniform boundary must be green:\n{all}");
+}
+
+/// A uniform BLOCK bound onto a boot-owned shader is returned to the zeroes
+/// registration established.
+///
+/// The block half of the shader class, and the state a real game's uniforms
+/// mostly live in. A block has no handle of its own -- `BLOCKS` is keyed by
+/// shader handle -- so the identity diff is blind twice over: the buffer is in
+/// no live set, and the shader owning it is present at its boot id whatever an
+/// entry uploaded.
+///
+/// `b3_ub_active` runs first as the recipe control and carries more weight here
+/// than for any sibling class: the restored contents ARE zeroes, so the probe's
+/// reading alone cannot tell a returned buffer from one that never existed. The
+/// control proves the block takes an upload and reads it back, and asserts the
+/// boundary's own denominator.
+#[test]
+fn a_boot_shader_does_not_carry_its_uniform_block_bytes_across_the_boundary() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "testbed",
+        "-j",
+        "1",
+        "b3_ub_active",
+        "b3_ub_seed",
+        "b3_ub_probe",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 1,
+        "the probe must FOLLOW the seed in one process or it proves nothing: \
+         {boots} boots\n{all}"
+    );
+    assert!(ok, "the uniform block contents boundary must be green:\n{all}");
+}
+
+/// GL's BLEND state is returned to boot's at the boundary.
+///
+/// Census 3's first row, and the state neither per-handle ledger axis can reach:
+/// the blend mode belongs to no handle, so there is nothing to put in a live set
+/// and nothing whose contents it is.
+///
+/// The sharpest case in the arc, because the checkpoint CAUSES it. The Rock-side
+/// `CURRENT_BLEND` shadow rides the checkpoint back to boot's value while GL
+/// keeps the predecessor's, and the flush loop then SKIPS `set_blend_mode` when
+/// the batch's mode already equals the shadow -- so restoring the shadow alone
+/// manufactures a disagreement and the guard preserves it. Measured before the
+/// fix: the probe's rect drew ADDITIVE at 0.996 where alpha reads 0.75.
+///
+/// `b3_blend_control` runs first and produces both readings inside one entry, so
+/// the spread the other two rest on is shown rather than assumed. All three
+/// declare the same `SIM_SKIP_RENDER`, since differing values are different boot
+/// signatures and would put the probe in its own process.
+#[test]
+fn a_successor_entry_draws_with_boots_gl_blend_state() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "testbed",
+        "-j",
+        "1",
+        "b3_blend_control",
+        "b3_blend_seed",
+        "b3_blend_probe",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 1,
+        "the probe must FOLLOW the seed in one process or it proves nothing: \
+         {boots} boots\n{all}"
+    );
+    assert!(ok, "the ambient blend boundary must be green:\n{all}");
+}
+
+/// The letterbox PRESENT rect is returned to boot's at the boundary.
+///
+/// Census 3's second row, and the one with no laundering anywhere: every bind of
+/// canvas 0 RE-APPLIES the rect, so a successor does not merely inherit stale
+/// state, it has the predecessor's sub-rect actively re-installed on its own
+/// draws. `present_letterbox_end` is the only clear and early-returns when the
+/// scene covers the drawable, which it does in every project here.
+///
+/// No rendering needed, and that is the point: with draws skipped there is still
+/// nothing between the seed and the probe that could put the rect back. The
+/// probe asserts the CONSEQUENCE as well as the stored value -- what GL's
+/// viewport becomes after a canvas-0 bind.
+#[test]
+fn a_successor_entry_presents_through_boots_letterbox_rect() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "testbed",
+        "-j",
+        "1",
+        "b3pv_control",
+        "b3pv_seed",
+        "b3pv_probe",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 1,
+        "the probe must FOLLOW the seed in one process or it proves nothing: \
+         {boots} boots\n{all}"
+    );
+    assert!(ok, "the ambient present-viewport boundary must be green:\n{all}");
+}
+
+/// The ACTIVE cursor and the pointer visibility are returned to boot's.
+///
+/// Census 3's third row. `CURSORS` is a ledger class and its handles are diffed,
+/// so an entry-created cursor is an extra and gets destroyed -- but WHICH cursor
+/// SDL points at belongs to no handle, and the boundary's own teardown moves it:
+/// creating a cursor ACTIVATES it, and `stone_free_cursor` resets the cursor when
+/// it frees the active one.
+///
+/// Boot owns a cursor of its own in this fixture, and that is what makes the
+/// probe discriminating: with boot's active id at 0 the teardown's reset would
+/// land on boot's value by accident, and a restore would be indistinguishable
+/// from doing nothing.
+#[test]
+fn a_successor_entry_points_at_boots_cursor() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "testbed",
+        "-j",
+        "1",
+        "b3c_control",
+        "b3c_seed",
+        "b3c_probe",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 1,
+        "the probe must FOLLOW the seed in one process or it proves nothing: \
+         {boots} boots\n{all}"
+    );
+    assert!(ok, "the ambient cursor boundary must be green:\n{all}");
+}
+
+/// Both master volumes and every bus's parameters are returned to boot's.
+///
+/// Census 3's fourth row, and the one whose probe can assert EQUALITY rather
+/// than a difference: boot's own reading rides a Rock global the checkpoint
+/// returns to every entry, so a boundary installing plausible defaults instead
+/// of boot's values fails the assertion. The control runs LAST because it
+/// disturbs the mix without putting it back, and running it first would make its
+/// leftovers the seed's starting state.
+///
+/// `STONE_AUDIO_STUB=0` on all three, and the same value on all three: a
+/// differing one is a different boot signature and would give the probe its own
+/// process.
+#[test]
+fn a_successor_entry_mixes_with_boots_audio_ambient() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "testbed",
+        "-j",
+        "1",
+        "b3a_seed",
+        "b3a_probe",
+        "b3a_control",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 1,
+        "the probe must FOLLOW the seed in one process or it proves nothing: \
+         {boots} boots\n{all}"
+    );
+    assert!(ok, "the ambient audio boundary must be green:\n{all}");
+}
+
+/// Under `STONE_AUDIO_STUB` the audio row RECORDS, because the state is real.
+///
+/// It used to record ABSENT, and that was right for a stub with no `AudioState`
+/// at all. A stubbed run now builds a real state with no device -- the volumes
+/// and every bus parameter exist and take writes -- so that state genuinely
+/// crosses a boundary in the configuration every sim runs by default, and
+/// "absent" there would have been a row publishing "nothing to capture" over
+/// state a predecessor can really move. The fixture proves the writability
+/// rather than asserting it, and checks the neighbouring rows so the answer is
+/// this row's rather than a process-wide capture.
+///
+/// Its own run: the default environment is a different boot signature from the
+/// trio above, which asserts it shares one process.
+#[test]
+fn the_audio_row_records_under_the_stub_because_its_state_is_real() {
+    let (ok, stdout, stderr) = run_rock_status(&["sim", "testbed", "b3a_stub_recorded"]);
+    let all = format!("{stdout}{stderr}");
+    assert!(ok, "the stub's ambient answer must be green:\n{all}");
+}
+
+/// A block BOOT filled takes the worker off the table, named as the shader that
+/// owns it.
+///
+/// The refusal half of the same policy, and the reason the block half is a
+/// RESET rather than a snapshot everywhere: zeroing a buffer boot itself
+/// uploaded into installs contents boot never had, which is a different wrong
+/// state rather than a restore.
+///
+/// Its own `@sim_env`, so it is a different boot signature from the entries
+/// above -- which assert they share one process, and could not if this
+/// fixture's refusal reached them.
+#[test]
+fn a_block_boot_filled_takes_the_worker_off_the_table() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "testbed",
+        "-j",
+        "1",
+        "b3_ub_boot_filled",
+        "b3_ub_boot_filled_follows",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 2,
+        "a block boot filled cannot be zeroed back, so the successor must be \
+         RERUN in a fresh process: {boots} boots\n{all}"
     );
     assert!(
-        boots < 3,
-        "the two render-skipped entries must SHARE a worker rather than each \
-         booting -- {boots} boots means the default admitted nothing:\n{all}"
+        all.contains("ended its worker: boot state whose contents cannot be reconstructed: shader:"),
+        "and the refusal must name the shader that owns it:\n{all}"
     );
+    assert!(ok, "while every entry still runs and passes:\n{all}");
+}
+
+/// A boot-owned retained mesh's INSTANCE BUFFER is returned to boot's at the
+/// boundary.
+///
+/// `stone_mesh_set_instances` is a one-shot latch, so an entry that latches a
+/// boot mesh does not merely leave contents behind: the mesh is unlatchable for
+/// every successor after it, and the live-handle diff sees nothing because the
+/// mesh is present at its boot id.
+///
+/// `b3_mesh_active` runs first as the recipe control. It latches a mesh of its
+/// OWN -- no FFI un-latches one, so a control writing a boot mesh could not put
+/// it back -- and it asserts both the capture's denominator and the one-shot
+/// premise the restore is built on.
+#[test]
+fn a_boot_mesh_does_not_carry_its_instance_buffer_across_the_boundary() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "testbed",
+        "-j",
+        "1",
+        "b3_mesh_active",
+        "b3_mesh_seed",
+        "b3_mesh_probe",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 1,
+        "the probe must FOLLOW the seed in one process or it proves nothing: \
+         {boots} boots\n{all}"
+    );
+    assert!(ok, "the mesh instance boundary must be green:\n{all}");
+}
+
+/// A boot-owned font's ATLAS is re-baked to boot's raster at the boundary.
+///
+/// `stone_reload_font` and `stone_resize_font` rebuild the atlas under the same
+/// font_id and the same GL texture object -- on purpose, so every Font handle
+/// stays valid -- which is exactly what keeps the crossing out of the
+/// live-handle diff.
+///
+/// `b3_font_active` runs first as the recipe control. It re-bakes a font of its
+/// OWN, asserts the capture's denominator, and asserts the premise the restore
+/// rests on: that a re-raster from the same bytes at the same size reproduces
+/// the glyph table exactly.
+#[test]
+fn a_boot_font_does_not_carry_its_atlas_across_the_boundary() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "testbed",
+        "-j",
+        "1",
+        "b3_font_active",
+        "b3_font_seed",
+        "b3_font_probe",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 1,
+        "the probe must FOLLOW the seed in one process or it proves nothing: \
+         {boots} boots\n{all}"
+    );
+    assert!(ok, "the font atlas boundary must be green:\n{all}");
+}
+
+/// A boot-owned sound's DECODED BUFFER is returned to boot's at the boundary.
+///
+/// `stone_reload_sound` decodes a new file over a live handle and keeps the
+/// handle -- so every `Sound` naming it survives a hot reload, which is what
+/// keeps the crossing out of the live-handle diff.
+///
+/// bitgun rather than testbed for the reason `b3_native_audio` gives:
+/// `stone_load_sound` returns 0 for a missing file and testbed ships no audio.
+/// All three entries carry the same `@sim_env("STONE_AUDIO_STUB", "0")`,
+/// because a differing one is a different boot signature and would put the
+/// probe in a worker of its own.
+///
+/// `b3_sound_active` runs first as the recipe control. It reloads a sound of
+/// its OWN, asserts the capture's denominator, and asserts that the two files
+/// really do decode differently -- without which the probe would pass for a
+/// boundary that touched nothing.
+#[test]
+fn a_boot_sound_does_not_carry_its_decoded_buffer_across_the_boundary() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "bitgun",
+        "-j",
+        "1",
+        "b3_sound_active",
+        "b3_sound_seed",
+        "b3_sound_probe",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 1,
+        "the probe must FOLLOW the seed in one process or it proves nothing: \
+         {boots} boots\n{all}"
+    );
+    assert!(ok, "the sound contents boundary must be green:\n{all}");
+}
+
+/// A BOOT-owned voice takes the worker off the table, named as the handle that
+/// did it.
+///
+/// The one class that answers a boundary with a refusal rather than a restore:
+/// a voice's contents are its position in a buffer, that position advances on
+/// its own with the wall clock, and nothing can put it back -- `SoundSource`
+/// implements no `try_seek` so rodio's default answers `NotSupported`, and a
+/// voice whose samples ran out cannot be restarted at all.
+///
+/// Two invocations, because the arms differ in a `@sim_env` value and so are
+/// different boot signatures by construction. The second is what scopes the
+/// refusal to BOOT: an entry's own voice is an extra the class diff destroys,
+/// and its successor still shares the process.
+#[test]
+fn a_boot_voice_takes_the_worker_off_the_table() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "bitgun",
+        "-j",
+        "1",
+        "b3_voice_boot_live",
+        "b3_voice_boot_follows",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 2,
+        "a boot voice cannot cross a boundary, so the successor must be RERUN \
+         in a fresh process: {boots} boots\n{all}"
+    );
+    assert!(
+        all.contains("ended its worker: boot state whose contents cannot be reconstructed: voice:"),
+        "and the refusal must name the handle that caused it:\n{all}"
+    );
+    assert!(ok, "while every entry still runs and passes:\n{all}");
+
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "bitgun",
+        "-j",
+        "1",
+        "b3_voice_entry_only",
+        "b3_voice_entry_only_follows",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 1,
+        "an ENTRY's voice is an extra the diff destroys, so its successor \
+         still follows it in one process: {boots} boots\n{all}"
+    );
+    assert!(
+        !all.contains("ended its worker"),
+        "and nothing about that boot world is unreturnable:\n{all}"
+    );
+    assert!(ok, "with both entries green:\n{all}");
+}
+
+/// A boot-owned track's place at the single music SINK is returned at the
+/// boundary, and a track boot was playing refuses instead.
+///
+/// The bytes behind a music handle are immutable -- nothing writes
+/// `audio.music` after the insert -- so what crosses is which handle the one
+/// sink is playing. A track boot left SILENT is returned by stopping the
+/// playback an entry left; a track boot left PLAYING cannot be returned at all,
+/// because its offset advances on its own and `repeat_infinite()`'s `Buffered`
+/// supports no seek.
+///
+/// Two invocations, because the arms differ in a `@sim_env` value and so are
+/// different boot signatures by construction.
+///
+/// `b3_music_active` runs first as the recipe control. It plays a track of its
+/// OWN, asserts the capture's denominator, and asserts that playing one really
+/// does move the sink -- without which the probe would pass for a boundary that
+/// touched nothing.
+#[test]
+fn a_boot_track_does_not_carry_the_music_sink_across_the_boundary() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "bitgun",
+        "-j",
+        "1",
+        "b3_music_active",
+        "b3_music_seed",
+        "b3_music_probe",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 1,
+        "the probe must FOLLOW the seed in one process or it proves nothing: \
+         {boots} boots\n{all}"
+    );
+    assert!(ok, "the music sink boundary must be green:\n{all}");
+
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "bitgun",
+        "-j",
+        "1",
+        "b3_music_boot_playing",
+        "b3_music_boot_playing_follows",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 2,
+        "a track boot was PLAYING cannot cross, so the successor must be RERUN \
+         in a fresh process: {boots} boots\n{all}"
+    );
+    assert!(
+        all.contains("ended its worker: boot state whose contents cannot be reconstructed: music:"),
+        "and the refusal must name the handle that caused it:\n{all}"
+    );
+    assert!(ok, "while every entry still runs and passes:\n{all}");
 }
 
 /// Run `rock` and return `(exit_ok, stdout, stderr)` WITHOUT asserting on the

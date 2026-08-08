@@ -286,10 +286,30 @@ static DEDUP: Lazy<Mutex<HashSet<&'static str>>> =
 static THROTTLE: Lazy<Mutex<HashMap<&'static str, Instant>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+/// Sites that dedup per SUBJECT rather than per site: an offending image
+/// handle, an unknown enum int. Separate from `DEDUP` only because the key has
+/// a second component; it is the same store in every other sense and
+/// `reset_dedup`, the image and the count all cover both.
+static DEDUP_SUBJECT: Lazy<Mutex<HashSet<(&'static str, u64)>>> =
+    Lazy::new(|| Mutex::new(HashSet::new()));
+
 /// True the first time `key` (a `concat!(file!(),":",line!())`) is
 /// seen, false after. The emit itself goes through `log::` in the macro.
 pub fn once_should_emit(key: &'static str) -> bool {
     DEDUP.lock().unwrap().insert(key)
+}
+
+/// True the first time this `(key, subject)` pair is seen.
+///
+/// The variant for a diagnostic whose interesting part is WHICH thing was
+/// wrong. A site-only key reports the first offender and swallows every later
+/// one, so the log shows one row where eight are wrong while the failure count
+/// stays correct -- which is why the subject belongs IN the key rather than
+/// only in the message. Callers that had grown their own set for this
+/// (`stone_get_image_texture`'s stub handles, the blend-mode drift warning) go
+/// through here instead, so one reset reaches all of them.
+pub fn once_should_emit_for(key: &'static str, subject: u64) -> bool {
+    DEDUP_SUBJECT.lock().unwrap().insert((key, subject))
 }
 
 /// True if `key` hasn't fired within `interval`. Records the time on
@@ -312,12 +332,56 @@ pub fn throttle_should_emit(key: &'static str, interval: Duration) -> bool {
 /// Clear dedup + throttle state (tests; hot reload).
 pub fn reset_dedup() {
     DEDUP.lock().unwrap().clear();
+    DEDUP_SUBJECT.lock().unwrap().clear();
     THROTTLE.lock().unwrap().clear();
 }
 
-/// Distinct `log_once!` call sites that have fired.
+/// Every suppression record this logger holds, copied out.
+///
+/// The sim worker's entry boundary needs boot's IMAGE rather than an empty
+/// store, for the reason the Lua half already documents: a fresh process
+/// reaches its first entry with whatever boot itself logged already deduped, so
+/// clearing would make a worker emit warnings no isolated run has.
+pub struct DedupImage {
+    once: HashSet<&'static str>,
+    subject: HashSet<(&'static str, u64)>,
+    throttle: HashMap<&'static str, Instant>,
+}
+
+impl DedupImage {
+    /// Distinct suppression records this image holds, on the same scale
+    /// `dedup_count` reports so a caller can compare the two.
+    pub fn len(&self) -> usize {
+        self.once.len() + self.subject.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+pub fn dedup_image() -> DedupImage {
+    DedupImage {
+        once: DEDUP.lock().unwrap().clone(),
+        subject: DEDUP_SUBJECT.lock().unwrap().clone(),
+        throttle: THROTTLE.lock().unwrap().clone(),
+    }
+}
+
+/// Put a previously copied image back, replacing whatever has accumulated
+/// since. Every store the image covers is replaced, never merged: a merge
+/// would keep a successor's warnings suppressed by its predecessor, which is
+/// the whole defect.
+pub fn restore_dedup_image(image: &DedupImage) {
+    *DEDUP.lock().unwrap() = image.once.clone();
+    *DEDUP_SUBJECT.lock().unwrap() = image.subject.clone();
+    *THROTTLE.lock().unwrap() = image.throttle.clone();
+}
+
+/// Distinct `log_once!` call sites that have fired, site-keyed and
+/// subject-keyed together.
 pub fn dedup_count() -> usize {
-    DEDUP.lock().unwrap().len()
+    DEDUP.lock().unwrap().len() + DEDUP_SUBJECT.lock().unwrap().len()
 }
 
 /// Distinct `log_throttled!` call sites currently tracked.

@@ -492,6 +492,10 @@ pub struct Function {
     pub backend: FnBackend,
     pub annotations: Vec<Annotation>,
     pub ffi_lib: Option<Ustr>,
+    /// Parser-derived rather than user-written: the `__op_*` operators
+    /// synthesized for a newtype over a primitive. Lints report on user surface
+    /// only -- an unreached derived operator has no available action.
+    pub is_synthetic: bool,
 }
 
 #[derive(Clone, Debug)]

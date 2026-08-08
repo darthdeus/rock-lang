@@ -1161,7 +1161,7 @@ fn boot_signature(env_pairs: &[(String, String)]) -> Vec<(String, String)> {
 }
 
 /// How `rock sim` maps entries to processes.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SimExecMode {
     /// One fresh process per entry: the permanent reference oracle, and what
     /// `--isolated` selects. Never inferred -- it is always the caller's word.
@@ -1179,10 +1179,9 @@ pub enum SimExecMode {
     /// request errors, because someone who typed `--workers` is measuring
     /// something and a silent downgrade would answer the wrong question.
     ///
-    /// Rendered sims used to run isolated here. `--multi-order` on the mag
-    /// corpus now compares 807 boundary-crossing entries with rendered sims in
-    /// workers and finds zero divergences, which is the evidence that rule was
-    /// waiting for.
+    /// Rendered sims run in workers too. The evidence is `--multi-order` on the
+    /// mag corpus, which compares 840 boundary-crossing entries across
+    /// registry, reverse and a seeded shuffle and finds zero divergences.
     Default,
 }
 
@@ -1219,9 +1218,9 @@ fn entry_renders(env: &[(String, String)]) -> bool {
 /// ANY rendering entry opts the WHOLE process in to real pixels. The parts of a
 /// comma-separated chain share one process and therefore one image cache, so a
 /// per-entry answer is not available to give -- the first entry's uploads are
-/// still resident when the second runs. Deciding it per process, off the same
-/// `entry_renders` the isolation split uses, is what keeps a sim from counting
-/// as non-rendering here and rendering there.
+/// still resident when the second runs. Deciding it per process, off one
+/// `entry_renders` oracle, is what keeps a sim from counting as non-rendering
+/// here and rendering there.
 fn asset_stub_value(parts: &[WorkerPart]) -> &'static str {
     if parts.iter().any(|p| entry_renders(&p.env)) {
         return "0";
@@ -1278,15 +1277,6 @@ fn worker_ineligibility(
                 "@sim_env(\"{k}\", \"{v}\") interpolates $OUT, which resolves before the process starts"
             ));
         }
-        // The hybrid default's one extra rule. ANY rendered part isolates the
-        // whole chain: a chain runs as consecutive entries of one queue, so a
-        // rendered part would render inside a worker however the other parts
-        // are classified.
-        //
-        // `--workers` deliberately does NOT apply it. That mode exists to
-        // measure rendered sims in a worker, which is what the differential and
-        // the multi-order gate are for; a rule that isolated them there would
-        // make the gate unable to see the class it was built to see.
     }
     // A chain's parts run as consecutive entries of one queue, so they must
     // agree with each other exactly as distinct entries must.
@@ -1679,8 +1669,8 @@ fn run_worker(
         // because `preset_env` is layered after this baseline.
         .env("ROCK_TEST_SEED", "42")
         // Headers-only assets unless something in this process renders. Decided
-        // by `entry_renders`, the same oracle the isolation split uses, so a sim
-        // cannot count as non-rendering here and rendering there. ANY rendering
+        // by `entry_renders`, the one oracle for the question, so a sim cannot
+        // count as non-rendering here and rendering there. ANY rendering
         // entry in a chain opts the whole process in: one process, one image
         // cache, and the first entry's loads are still resident for the second.
         // Layered before `preset_env` so an explicit
@@ -2336,9 +2326,6 @@ fn run_worker_arm(
     env_by_wire: &HashMap<String, Vec<(String, String)>>,
     ordered: &[String],
 ) -> Result<Vec<(crate::sim_record::SimRecord, bool)>> {
-    // The GATE measures rendered sims in workers on purpose: the hybrid
-    // default isolates them, and a gate that inherited that rule could never
-    // see the class it exists to watch.
     let (groups, isolated) = group_worker_specs(ordered, env_by_wire);
     let mut out: Vec<Option<(crate::sim_record::SimRecord, bool)>> = vec![None; ordered.len()];
 
@@ -2395,13 +2382,24 @@ fn run_worker_arm(
 ///
 /// `errors` counts runner/sim `error` ops, and every op that emits one also
 /// FAILS its sim -- a fixture built to populate it would be a permanently red
-/// entry in `rock sim testbed`, and mag's known reds fail expects rather than
-/// erroring. The arm is still guarded twice over: `Comparison::population`
-/// panics on an arm that is absent rather than reading as "nothing to see", and
-/// `sim_record`'s synthetic per-arm tests fail when an arm is censused but no
-/// longer compared. Encoded here so that "permanently empty" is a stated
-/// exception with a reason, not a gate everyone learns to ignore.
-const ARMS_WITHOUT_A_CORPUS: &[&str] = &["errors"];
+/// entry in `rock sim testbed`.
+///
+/// `expects_fail` is the same shape for the same reason: the only thing that
+/// populates it is a sim whose expect FAILS, so a corpus for it is a
+/// deliberately red sim kept alive to feed a gate. A healthy project has none,
+/// and mag is 299/299 -- degrading the normal suite to populate one arm trades
+/// a real signal for a bookkeeping one. What this arm can be wrong about is
+/// covered where a failing expect is a fixture rather than a regression: the
+/// targeted `sim_worker_differential` gates drive failing entries directly and
+/// compare them across the boundary.
+///
+/// Both arms are still guarded twice over: `Comparison::population` panics on
+/// an arm that is ABSENT rather than reading as "nothing to see", so an arm
+/// that stops being censused at all is still a hard failure, and `sim_record`'s
+/// synthetic per-arm tests fail when an arm is censused but no longer compared.
+/// Encoded here so that "permanently empty" is a stated exception with a
+/// reason, not a gate everyone learns to ignore.
+const ARMS_WITHOUT_A_CORPUS: &[&str] = &["errors", "expects_fail"];
 
 /// Whether an empty comparison arm should stop the gate, given which arms came
 /// back empty and whether this run measured a named SUBSET.
@@ -3511,10 +3509,11 @@ mod tests {
         );
     }
 
-    /// The hybrid split reads the EFFECTIVE value, last-wins. `@sim_render` is
+    /// `entry_renders` reads the EFFECTIVE value, last-wins. `@sim_render` is
     /// lowered to `SIM_SKIP_RENDER=0` before an explicit `@sim_env` is appended,
     /// so a sim carrying both is whatever it says last -- and that is the value
-    /// its child actually boots with.
+    /// its child actually boots with. Nothing schedules on it now, but the
+    /// census and the capability docs classify sims by it.
     #[test]
     fn rendering_is_the_effective_last_wins_value() {
         let pair = |k: &str, v: &str| (k.to_string(), v.to_string());
@@ -3531,6 +3530,53 @@ mod tests {
             "... and the other way round"
         );
         assert!(!entry_renders(&[pair("MAG_FORCE_VFX", "1")]), "an unrelated key is not it");
+    }
+
+    /// The default DEGRADES where worker mode cannot run and an explicit
+    /// `--workers` REJECTS, which is the only difference between them. Both
+    /// arms are here because a resolver that always degraded, or always
+    /// rejected, would satisfy a test that checked one side.
+    #[test]
+    fn the_default_degrades_where_workers_rejects() {
+        let degraded = resolve_exec_mode(SimExecMode::Default, true, true)
+            .expect("the default falls back rather than failing the run");
+        assert_eq!(
+            degraded,
+            SimExecMode::Isolated,
+            "and it falls back to the ORACLE, not to some third behaviour"
+        );
+
+        let err = resolve_exec_mode(SimExecMode::Workers, true, true)
+            .expect_err("--workers was asked for on purpose and must not be downgraded");
+        assert!(
+            err.to_string().contains("--workers"),
+            "the error names the flag that was refused: {err}"
+        );
+    }
+
+    /// The control for the pair above: with no constraint in play the default
+    /// stays in worker mode. Without this, a resolver that degraded
+    /// unconditionally would pass the degrade arm and silently cost the 4.3x.
+    #[test]
+    fn the_default_stays_in_worker_mode_when_nothing_blocks_it() {
+        assert_eq!(
+            resolve_exec_mode(SimExecMode::Default, false, true).expect("no constraint"),
+            SimExecMode::Default,
+        );
+        assert_eq!(
+            resolve_exec_mode(SimExecMode::Workers, false, true).expect("no constraint"),
+            SimExecMode::Workers,
+        );
+    }
+
+    /// `--isolated` is unreachable by either path: it is already the oracle, so
+    /// there is nothing to degrade to and nothing to refuse.
+    #[test]
+    fn isolated_is_unaffected_by_the_availability_check() {
+        assert_eq!(
+            resolve_exec_mode(SimExecMode::Isolated, true, true).expect("isolated always runs"),
+            SimExecMode::Isolated,
+        );
     }
 
     /// The default admits a RENDERED entry as readily as a render-skipped one.
@@ -3579,22 +3625,33 @@ mod tests {
 
     /// A hole in the full-corpus gate stops it: the run would otherwise print a
     /// green over an arm it never compared.
+    ///
+    /// The fixture arm is `verdict` because it is non-exempt PERMANENTLY: a run
+    /// that compared no verdicts compared nothing, so it can never join
+    /// `ARMS_WITHOUT_A_CORPUS`. An arm that is merely unpopulated today would
+    /// disarm this test the moment it was exempted, which is exactly what
+    /// happened when `expects_fail` stood here.
     #[test]
     fn the_full_corpus_refuses_an_arm_it_could_not_populate() {
-        let reason = population_refusal(&["expects_fail"], false).expect("must refuse");
-        assert!(reason.contains("expects_fail"), "names the arm: {reason}");
+        let reason = population_refusal(&["verdict"], false).expect("must refuse");
+        assert!(reason.contains("verdict"), "names the arm: {reason}");
     }
 
-    /// `errors` is the one arm no corpus in this tree can populate -- every op
-    /// that emits an `error` also fails its sim -- so it is a stated permanent
-    /// exception rather than a gate everyone learns to ignore.
+    /// The arms no corpus in this tree can populate are stated permanent
+    /// exceptions rather than a gate everyone learns to ignore: an `error` op
+    /// also fails its sim, and only a deliberately red sim populates
+    /// `expects_fail`.
     #[test]
     fn a_permanently_unpopulatable_arm_is_not_a_hole() {
         assert!(population_refusal(&["errors"], false).is_none());
-        // ... and it does not launder a real hole reported beside it.
-        let reason = population_refusal(&["errors", "expects_fail"], false).expect("must refuse");
-        assert!(reason.contains("expects_fail"), "names the real hole: {reason}");
+        assert!(population_refusal(&["expects_fail"], false).is_none());
+        assert!(population_refusal(&["errors", "expects_fail"], false).is_none());
+        // ... and neither launders a real hole reported beside it.
+        let reason =
+            population_refusal(&["errors", "expects_fail", "verdict"], false).expect("must refuse");
+        assert!(reason.contains("verdict"), "names the real hole: {reason}");
         assert!(!reason.contains("errors"), "does not name the exception: {reason}");
+        assert!(!reason.contains("expects_fail"), "does not name the exception: {reason}");
     }
 
     /// A subset is chosen to re-measure ONE class. Whether that pair happens to
