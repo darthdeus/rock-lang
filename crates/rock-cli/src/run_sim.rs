@@ -2383,13 +2383,24 @@ fn run_worker_arm(
 ///
 /// `errors` counts runner/sim `error` ops, and every op that emits one also
 /// FAILS its sim -- a fixture built to populate it would be a permanently red
-/// entry in `rock sim testbed`, and mag's known reds fail expects rather than
-/// erroring. The arm is still guarded twice over: `Comparison::population`
-/// panics on an arm that is absent rather than reading as "nothing to see", and
-/// `sim_record`'s synthetic per-arm tests fail when an arm is censused but no
-/// longer compared. Encoded here so that "permanently empty" is a stated
-/// exception with a reason, not a gate everyone learns to ignore.
-const ARMS_WITHOUT_A_CORPUS: &[&str] = &["errors"];
+/// entry in `rock sim testbed`.
+///
+/// `expects_fail` is the same shape for the same reason: the only thing that
+/// populates it is a sim whose expect FAILS, so a corpus for it is a
+/// deliberately red sim kept alive to feed a gate. A healthy project has none,
+/// and mag is 299/299 -- degrading the normal suite to populate one arm trades
+/// a real signal for a bookkeeping one. What this arm can be wrong about is
+/// covered where a failing expect is a fixture rather than a regression: the
+/// targeted `sim_worker_differential` gates drive failing entries directly and
+/// compare them across the boundary.
+///
+/// Both arms are still guarded twice over: `Comparison::population` panics on
+/// an arm that is ABSENT rather than reading as "nothing to see", so an arm
+/// that stops being censused at all is still a hard failure, and `sim_record`'s
+/// synthetic per-arm tests fail when an arm is censused but no longer compared.
+/// Encoded here so that "permanently empty" is a stated exception with a
+/// reason, not a gate everyone learns to ignore.
+const ARMS_WITHOUT_A_CORPUS: &[&str] = &["errors", "expects_fail"];
 
 /// Whether an empty comparison arm should stop the gate, given which arms came
 /// back empty and whether this run measured a named SUBSET.
@@ -3615,22 +3626,33 @@ mod tests {
 
     /// A hole in the full-corpus gate stops it: the run would otherwise print a
     /// green over an arm it never compared.
+    ///
+    /// The fixture arm is `verdict` because it is non-exempt PERMANENTLY: a run
+    /// that compared no verdicts compared nothing, so it can never join
+    /// `ARMS_WITHOUT_A_CORPUS`. An arm that is merely unpopulated today would
+    /// disarm this test the moment it was exempted, which is exactly what
+    /// happened when `expects_fail` stood here.
     #[test]
     fn the_full_corpus_refuses_an_arm_it_could_not_populate() {
-        let reason = population_refusal(&["expects_fail"], false).expect("must refuse");
-        assert!(reason.contains("expects_fail"), "names the arm: {reason}");
+        let reason = population_refusal(&["verdict"], false).expect("must refuse");
+        assert!(reason.contains("verdict"), "names the arm: {reason}");
     }
 
-    /// `errors` is the one arm no corpus in this tree can populate -- every op
-    /// that emits an `error` also fails its sim -- so it is a stated permanent
-    /// exception rather than a gate everyone learns to ignore.
+    /// The arms no corpus in this tree can populate are stated permanent
+    /// exceptions rather than a gate everyone learns to ignore: an `error` op
+    /// also fails its sim, and only a deliberately red sim populates
+    /// `expects_fail`.
     #[test]
     fn a_permanently_unpopulatable_arm_is_not_a_hole() {
         assert!(population_refusal(&["errors"], false).is_none());
-        // ... and it does not launder a real hole reported beside it.
-        let reason = population_refusal(&["errors", "expects_fail"], false).expect("must refuse");
-        assert!(reason.contains("expects_fail"), "names the real hole: {reason}");
+        assert!(population_refusal(&["expects_fail"], false).is_none());
+        assert!(population_refusal(&["errors", "expects_fail"], false).is_none());
+        // ... and neither launders a real hole reported beside it.
+        let reason =
+            population_refusal(&["errors", "expects_fail", "verdict"], false).expect("must refuse");
+        assert!(reason.contains("verdict"), "names the real hole: {reason}");
         assert!(!reason.contains("errors"), "does not name the exception: {reason}");
+        assert!(!reason.contains("expects_fail"), "does not name the exception: {reason}");
     }
 
     /// A subset is chosen to re-measure ONE class. Whether that pair happens to
