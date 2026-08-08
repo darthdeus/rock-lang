@@ -1386,6 +1386,78 @@ fn a_boot_shader_does_not_carry_its_uniform_values_across_the_boundary() {
     assert!(ok, "the shader uniform boundary must be green:\n{all}");
 }
 
+/// A uniform BLOCK bound onto a boot-owned shader is returned to the zeroes
+/// registration established.
+///
+/// The block half of the shader class, and the state a real game's uniforms
+/// mostly live in. A block has no handle of its own -- `BLOCKS` is keyed by
+/// shader handle -- so the identity diff is blind twice over: the buffer is in
+/// no live set, and the shader owning it is present at its boot id whatever an
+/// entry uploaded.
+///
+/// `b3_ub_active` runs first as the recipe control and carries more weight here
+/// than for any sibling class: the restored contents ARE zeroes, so the probe's
+/// reading alone cannot tell a returned buffer from one that never existed. The
+/// control proves the block takes an upload and reads it back, and asserts the
+/// boundary's own denominator.
+#[test]
+fn a_boot_shader_does_not_carry_its_uniform_block_bytes_across_the_boundary() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "testbed",
+        "-j",
+        "1",
+        "b3_ub_active",
+        "b3_ub_seed",
+        "b3_ub_probe",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 1,
+        "the probe must FOLLOW the seed in one process or it proves nothing: \
+         {boots} boots\n{all}"
+    );
+    assert!(ok, "the uniform block contents boundary must be green:\n{all}");
+}
+
+/// A block BOOT filled takes the worker off the table, named as the shader that
+/// owns it.
+///
+/// The refusal half of the same policy, and the reason the block half is a
+/// RESET rather than a snapshot everywhere: zeroing a buffer boot itself
+/// uploaded into installs contents boot never had, which is a different wrong
+/// state rather than a restore.
+///
+/// Its own `@sim_env`, so it is a different boot signature from the entries
+/// above -- which assert they share one process, and could not if this
+/// fixture's refusal reached them.
+#[test]
+fn a_block_boot_filled_takes_the_worker_off_the_table() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "testbed",
+        "-j",
+        "1",
+        "b3_ub_boot_filled",
+        "b3_ub_boot_filled_follows",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 2,
+        "a block boot filled cannot be zeroed back, so the successor must be \
+         RERUN in a fresh process: {boots} boots\n{all}"
+    );
+    assert!(
+        all.contains("ended its worker: boot state whose contents cannot be reconstructed: shader:"),
+        "and the refusal must name the shader that owns it:\n{all}"
+    );
+    assert!(ok, "while every entry still runs and passes:\n{all}");
+}
+
 /// A boot-owned retained mesh's INSTANCE BUFFER is returned to boot's at the
 /// boundary.
 ///
