@@ -1420,6 +1420,39 @@ fn a_boot_mesh_does_not_carry_its_instance_buffer_across_the_boundary() {
     assert!(ok, "the mesh instance boundary must be green:\n{all}");
 }
 
+/// A boot-owned font's ATLAS is re-baked to boot's raster at the boundary.
+///
+/// `stone_reload_font` and `stone_resize_font` rebuild the atlas under the same
+/// font_id and the same GL texture object -- on purpose, so every Font handle
+/// stays valid -- which is exactly what keeps the crossing out of the
+/// live-handle diff.
+///
+/// `b3_font_active` runs first as the recipe control. It re-bakes a font of its
+/// OWN, asserts the capture's denominator, and asserts the premise the restore
+/// rests on: that a re-raster from the same bytes at the same size reproduces
+/// the glyph table exactly.
+#[test]
+fn a_boot_font_does_not_carry_its_atlas_across_the_boundary() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "testbed",
+        "-j",
+        "1",
+        "b3_font_active",
+        "b3_font_seed",
+        "b3_font_probe",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 1,
+        "the probe must FOLLOW the seed in one process or it proves nothing: \
+         {boots} boots\n{all}"
+    );
+    assert!(ok, "the font atlas boundary must be green:\n{all}");
+}
+
 /// Run `rock` and return `(exit_ok, stdout, stderr)` WITHOUT asserting on the
 /// exit code. The multi-order gate deliberately exits nonzero on a corpus that
 /// cannot populate every arm, and that refusal is part of what is under test.
