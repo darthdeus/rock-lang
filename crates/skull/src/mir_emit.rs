@@ -1502,6 +1502,27 @@ pub fn is_cached_body(f: &bone_semantic::hir::Function) -> bool {
     !f.is_extern && f.inline_body.is_none() && !fn_has_bounds(f) && !is_generic(f)
 }
 
+/// Whether THIS EMITTED BODY is a cached [`Chunk`] -- the same question
+/// [`is_cached_body`] answers for a declaration, asked of the body actually
+/// being emitted.
+///
+/// A SPECIALIZATION always is. It is a concrete instance with a body of its own,
+/// so the two reasons a declaration is not cached under E1 -- it is generic, or
+/// it is `Iterator`-bounded -- are precisely the reasons the specialization
+/// EXISTS. Only opacity survives the distinction, and an opaque declaration has
+/// no specializations to begin with.
+///
+/// Asking the declaration's predicate of an emitted body is what deleted a
+/// generic's specialized chunk on every edit: `is_cached_body` said false, the
+/// caller took its "regenerated, drop the chunk" branch, and the overlay then
+/// found nothing to redefine.
+pub fn is_cached_emitted_body(f: &bone_semantic::hir::Function, body: &EmittedBodyId) -> bool {
+    match body {
+        EmittedBodyId::Specialized(..) => !f.is_extern && f.inline_body.is_none(),
+        EmittedBodyId::Shared(_) => is_cached_body(f),
+    }
+}
+
 /// Whether the fn declares generics, and so has NO declaration-owned body.
 ///
 /// This is the E1 cut stated as a predicate. A generic declaration is not a
@@ -2898,7 +2919,7 @@ fn update_chunk_cache(
         let f = &ws.module(fref.module).functions[fref.func];
         // An edit can flip a body between cached (ordinary/coroutine) and
         // regenerated (extern / inline(lua)); only the former has a chunk.
-        if is_cached_body(f) {
+        if is_cached_emitted_body(f, body) {
             let chunk = rebuild_chunk(ws, cg, scx, body, f, &mut cache.inline_cache);
             if let Ok(c) = &chunk {
                 let new_deps: Vec<FuncRef> = c.deps.iter().copied().collect();
