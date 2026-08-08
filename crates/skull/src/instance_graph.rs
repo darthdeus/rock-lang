@@ -42,60 +42,11 @@ use skull_mir::mangle::mangle_fn;
 use skull_mir::monoty::{MonoArena, MonoSubst, MonoTyId, MonoTyReason};
 use skull_mir::mir::FuncRef;
 
-/// A function at one concrete instantiation. Non-generic functions get an
-/// instance too (empty `args`), so no consumer can reintroduce `if generic`.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub struct Instance {
-    pub func: FuncRef,
-    pub args: Vec<MonoTyId>,
-}
-
-/// A `FuncRef` as an ORDERED map key.
-///
-/// `FuncRef` is not `Ord`, and ordering by it would be ordering by arena
-/// position anyway. This is `(module, function index)` -- stable within a build
-/// and used only to make iteration deterministic, the same contract
-/// [`ord_key`] states for an [`Instance`].
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct DeclKey(pub FuncRef);
-
-impl DeclKey {
-    pub fn raw(self) -> (u32, u32) {
-        (self.0.module.raw(), self.0.func.into_raw().into_u32())
-    }
-}
-
-impl Ord for DeclKey {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.raw().cmp(&other.raw())
-    }
-}
-
-impl PartialOrd for DeclKey {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-/// `FuncRef` is not `Ord`, and ordering by it would be ordering by arena
-/// position anyway. The key is `(module, function index, args)` -- stable within
-/// a build, and only ever used to make iteration order deterministic; the
-/// MANIFEST is sorted by rendered symbol, which is stable across builds.
-fn ord_key(i: &Instance) -> (u32, u32, &[MonoTyId]) {
-    (i.func.module.raw(), i.func.func.into_raw().into_u32(), &i.args)
-}
-
-impl Ord for Instance {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        ord_key(self).cmp(&ord_key(other))
-    }
-}
-
-impl PartialOrd for Instance {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
+/// The identity vocabulary now lives in `skull-mir` ([`skull_mir::instance`]),
+/// low enough that emission can key its bodies on it. This module remains the
+/// AUTHORITY that builds instances and owns the [`MonoArena`] their `args`
+/// index into; only the type's placement moved.
+pub use skull_mir::instance::{DeclKey, Instance};
 
 /// Why one instance depends on another. The plan's edge kinds; the histogram of
 /// these is what makes an absent edge class visible.

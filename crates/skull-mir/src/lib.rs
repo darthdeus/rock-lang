@@ -21,6 +21,7 @@ pub mod mir;
 pub mod monoty;
 pub mod reach;
 pub mod shader_ir;
+pub mod instance;
 pub mod site;
 pub mod spec_census;
 pub mod struct_defaults;
