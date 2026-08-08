@@ -1495,6 +1495,40 @@ fn a_successor_entry_presents_through_boots_letterbox_rect() {
     assert!(ok, "the ambient present-viewport boundary must be green:\n{all}");
 }
 
+/// The ACTIVE cursor and the pointer visibility are returned to boot's.
+///
+/// Census 3's third row. `CURSORS` is a ledger class and its handles are diffed,
+/// so an entry-created cursor is an extra and gets destroyed -- but WHICH cursor
+/// SDL points at belongs to no handle, and the boundary's own teardown moves it:
+/// creating a cursor ACTIVATES it, and `stone_free_cursor` resets the cursor when
+/// it frees the active one.
+///
+/// Boot owns a cursor of its own in this fixture, and that is what makes the
+/// probe discriminating: with boot's active id at 0 the teardown's reset would
+/// land on boot's value by accident, and a restore would be indistinguishable
+/// from doing nothing.
+#[test]
+fn a_successor_entry_points_at_boots_cursor() {
+    let (ok, stdout, stderr) = run_rock_status(&[
+        "sim",
+        "testbed",
+        "-j",
+        "1",
+        "b3c_control",
+        "b3c_seed",
+        "b3c_probe",
+    ]);
+    let all = format!("{stdout}{stderr}");
+
+    let boots = all.matches("[STONE] Initialized successfully").count();
+    assert_eq!(
+        boots, 1,
+        "the probe must FOLLOW the seed in one process or it proves nothing: \
+         {boots} boots\n{all}"
+    );
+    assert!(ok, "the ambient cursor boundary must be green:\n{all}");
+}
+
 /// A block BOOT filled takes the worker off the table, named as the shader that
 /// owns it.
 ///
