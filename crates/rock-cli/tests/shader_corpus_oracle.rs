@@ -1,13 +1,20 @@
 //! Phase-4 GLSL corpus oracle.
 //!
-//! This is the source-side census before changing production ownership: every
-//! registered program is emitted for both target profiles, and its GLSL,
-//! logical interface and physical ABI are recorded per project and shader key.
-//! The real-driver compile/link gate remains `shader-validate`.
+//! The private GLSL emitter is the expected side for this landing. The other
+//! side is the shared InstanceGraph/ShaderArtifactView population, compared
+//! per registered program and stage before production ownership moves. The
+//! committed row digest is an explicit canonical encoding; it never hashes a
+//! `Debug` rendering of a plan.
 
 use rock_cli::glsl_test::validate_workspace;
-use skull_codegen_glsl::GlslProfile;
+use skull_codegen_glsl::{BlockWire, GlslProfile, ShaderAbiPlan};
+use skull_mir::gpu_layout::{AttrKind, SamplerKind, WireKind};
+use skull_mir::mir::FuncRef;
+use skull_mir::shader_ir::{
+    FragmentOutput, ShaderInterfacePlan, ShaderStage, UniformRole, VertexRate,
+};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 const PROJECTS: &[&str] = &[
@@ -87,10 +94,19 @@ struct RowKey {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ShaderRow {
     key: RowKey,
-    stage_count: usize,
+    stage_sections: usize,
+    graph_roots: Vec<String>,
+    graph_helpers: Vec<String>,
+    entries: Vec<String>,
+    stage_populations: Vec<Vec<String>>,
+    helper_instances: Vec<String>,
+    builtin_instances: Vec<String>,
+    emission_order: Vec<Vec<String>>,
     glsl_fingerprint: u64,
     interface_fingerprint: u64,
-    uniform_fingerprint: u64,
+    abi_fingerprint: u64,
+    block_wire_fingerprint: u64,
+    hot_reload_dependencies: Vec<String>,
 }
 
 fn repo_root() -> PathBuf {
@@ -134,21 +150,253 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     h
 }
 
-fn fingerprint_debug<T: std::fmt::Debug>(value: &T) -> u64 {
-    fnv1a(format!("{value:?}").as_bytes())
+#[derive(Default)]
+struct Canonical(Vec<u8>);
+
+impl Canonical {
+    fn u8(&mut self, value: u8) {
+        self.0.push(value);
+    }
+
+    fn u32(&mut self, value: u32) {
+        self.0.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn u64(&mut self, value: u64) {
+        self.0.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn string(&mut self, value: &str) {
+        self.u32(value.len() as u32);
+        self.0.extend_from_slice(value.as_bytes());
+    }
+
+    fn strings(&mut self, values: &[String]) {
+        self.u32(values.len() as u32);
+        for value in values {
+            self.string(value);
+        }
+    }
+
+    fn nested_strings(&mut self, values: &[Vec<String>]) {
+        self.u32(values.len() as u32);
+        for value in values {
+            self.strings(value);
+        }
+    }
 }
 
-fn uniform_fingerprint(abi: &skull_codegen_glsl::ShaderAbiPlan) -> u64 {
-    let mut bytes = Vec::new();
+fn stage_code(stage: ShaderStage) -> u8 {
+    match stage {
+        ShaderStage::Vertex => 0,
+        ShaderStage::Fragment => 1,
+    }
+}
+
+fn wire_code(kind: WireKind) -> u8 {
+    kind.code() as u8
+}
+
+fn attr_code(kind: AttrKind) -> u8 {
+    match kind {
+        AttrKind::F32 => 0,
+        AttrKind::F32x2 => 1,
+        AttrKind::F32x3 => 2,
+        AttrKind::F32x4 => 3,
+        AttrKind::I32 => 4,
+    }
+}
+
+fn sampler_code(kind: SamplerKind) -> u8 {
+    match kind {
+        SamplerKind::Float => 0,
+        SamplerKind::Int => 1,
+    }
+}
+
+fn uniform_role_code(role: UniformRole) -> u8 {
+    match role {
+        UniformRole::Engine => 0,
+        UniformRole::Stage(stage) => 1 + stage_code(stage),
+    }
+}
+
+fn rate_code(rate: VertexRate) -> u8 {
+    match rate {
+        VertexRate::PerVertex => 0,
+        VertexRate::PerInstance => 1,
+    }
+}
+
+fn interface_bytes(interface: &ShaderInterfacePlan) -> Vec<u8> {
+    let mut out = Canonical::default();
+    out.u32(interface.stages.len() as u32);
+    for stage in &interface.stages {
+        out.u8(stage_code(*stage));
+    }
+    out.u32(interface.vertex_inputs.len() as u32);
+    for input in &interface.vertex_inputs {
+        out.string(input.struct_name.as_str());
+        out.u8(rate_code(input.rate));
+        out.u32(input.attrs.len() as u32);
+        for (name, kind) in &input.attrs {
+            out.string(name.as_str());
+            out.u8(attr_code(*kind));
+        }
+    }
+    out.u32(interface.varyings.len() as u32);
+    for varying in &interface.varyings {
+        out.string(varying.name.as_str());
+        out.u8(wire_code(varying.kind));
+        out.u8(varying.flat as u8);
+    }
+    out.u32(interface.uniform_groups.len() as u32);
+    for group in &interface.uniform_groups {
+        out.u8(uniform_role_code(group.role));
+        out.string(group.struct_name.as_str());
+        out.u32(group.members.len() as u32);
+        for (name, kind) in &group.members {
+            out.string(name.as_str());
+            out.u8(wire_code(*kind));
+        }
+    }
+    out.u32(interface.array_groups.len() as u32);
+    for group in &interface.array_groups {
+        out.u8(stage_code(group.stage));
+        out.string(group.owner.as_str());
+        out.u32(group.members.len() as u32);
+        for member in &group.members {
+            out.string(member.name.as_str());
+            out.u8(wire_code(member.elem));
+            out.u32(member.capacity);
+        }
+    }
+    match &interface.textures {
+        None => out.u8(0),
+        Some(group) => {
+            out.u8(1);
+            out.string(group.struct_name.map_or("", |name| name.as_str()));
+            out.u32(group.samplers.len() as u32);
+            for (name, kind) in &group.samplers {
+                out.string(name.as_str());
+                out.u8(sampler_code(*kind));
+            }
+            out.u32(group.stages.len() as u32);
+            for stage in &group.stages {
+                out.u8(stage_code(*stage));
+            }
+        }
+    }
+    out.u32(interface.bare_samplers.len() as u32);
+    for sampler in &interface.bare_samplers {
+        out.string(sampler.name.as_str());
+        out.u8(sampler_code(sampler.kind));
+        out.u8(stage_code(sampler.stage));
+    }
+    match &interface.fragment_output {
+        FragmentOutput::None => out.u8(0),
+        FragmentOutput::Single(kind) => {
+            out.u8(1);
+            out.u8(wire_code(*kind));
+        }
+        FragmentOutput::Mrt(fields) => {
+            out.u8(2);
+            out.u32(fields.len() as u32);
+            for (name, kind) in fields {
+                out.string(name.as_str());
+                out.u8(wire_code(*kind));
+            }
+        }
+    }
+    out.0
+}
+
+fn abi_bytes(abi: &ShaderAbiPlan) -> Vec<u8> {
+    let mut out = Canonical::default();
+    out.u32(abi.uniform_blocks.len() as u32);
     for (binding, block) in &abi.uniform_blocks {
-        bytes.extend_from_slice(&binding.to_le_bytes());
-        bytes.extend_from_slice(&block.fingerprint().to_le_bytes());
+        out.u32(*binding);
+        out.string(block.struct_name.as_str());
+        out.u32(block.size);
+        out.u32(block.members.len() as u32);
+        for member in &block.members {
+            out.string(member.name.as_str());
+            out.u8(wire_code(member.kind));
+            out.u32(member.offset);
+            match member.matrix_stride {
+                Some(stride) => {
+                    out.u8(1);
+                    out.u32(stride);
+                }
+                None => out.u8(0),
+            }
+        }
     }
+    out.u32(abi.uniform_array_blocks.len() as u32);
     for (binding, block) in &abi.uniform_array_blocks {
-        bytes.extend_from_slice(&binding.to_le_bytes());
-        bytes.extend_from_slice(&block.fingerprint().to_le_bytes());
+        out.u32(*binding);
+        out.string(block.block_name.as_str());
+        out.u32(block.size);
+        out.u32(block.members.len() as u32);
+        for member in &block.members {
+            out.string(member.name.as_str());
+            out.u8(wire_code(member.elem));
+            out.u32(member.capacity);
+            out.u32(member.offset);
+            out.u32(member.stride);
+        }
     }
-    fnv1a(&bytes)
+    out.u32(abi.texture_units.len() as u32);
+    for name in &abi.texture_units {
+        out.string(name.as_str());
+    }
+    out.u32(abi.attribute_locations.len() as u32);
+    for (name, location) in &abi.attribute_locations {
+        out.string(name.as_str());
+        out.u32(*location);
+    }
+    out.0
+}
+
+fn block_wire_bytes(abi: &ShaderAbiPlan) -> Vec<u8> {
+    let wire = BlockWire::of(abi.uniform_blocks.iter(), abi.uniform_array_blocks.iter());
+    let mut out = Canonical::default();
+    out.u32(wire.names.len() as u32);
+    for name in &wire.names {
+        out.string(name);
+    }
+    out.u32(wire.bindings.len() as u32);
+    for value in &wire.bindings {
+        out.u64(*value as i64 as u64);
+    }
+    out.u32(wire.sizes.len() as u32);
+    for value in &wire.sizes {
+        out.u64(*value as i64 as u64);
+    }
+    out.u32(wire.fingerprints.len() as u32);
+    for value in &wire.fingerprints {
+        out.u64(*value as i64 as u64);
+    }
+    out.u32(wire.counts.len() as u32);
+    for value in &wire.counts {
+        out.u64(*value as i64 as u64);
+    }
+    out.u32(wire.member_names.len() as u32);
+    for name in &wire.member_names {
+        out.string(name);
+    }
+    for values in [
+        &wire.member_offsets,
+        &wire.member_kinds,
+        &wire.member_capacities,
+        &wire.member_strides,
+    ] {
+        out.u32(values.len() as u32);
+        for value in values.iter() {
+            out.u64(*value as i64 as u64);
+        }
+    }
+    out.0
 }
 
 fn source_stages(source: &str) -> usize {
@@ -165,70 +413,237 @@ fn source_stages(source: &str) -> usize {
     vertex + fragment
 }
 
-fn snapshot() -> Vec<ShaderRow> {
-    let root = repo_root();
-    let discovered = discovered_bin_projects(&root);
-    assert_eq!(
-        discovered,
-        PROJECTS.iter().copied().map(str::to_string).collect(),
-        "the explicit shader corpus list must partition the current bin corpus"
-    );
+fn fref_key(ws: &bone_semantic::inference::Workspace, fref: FuncRef) -> String {
+    let f = &ws.module(fref.module).functions[fref.func];
+    format!(
+        "{}@{}.{}",
+        f.name,
+        fref.module.raw(),
+        fref.func.into_raw().into_u32()
+    )
+}
+
+fn instance_key(
+    ws: &bone_semantic::inference::Workspace,
+    graph: &skull::instance_graph::InstanceGraph,
+    instance: &skull::instance_graph::Instance,
+) -> String {
+    graph.identity(ws, instance)
+}
+
+fn instance_keys<'a>(
+    ws: &bone_semantic::inference::Workspace,
+    graph: &skull::instance_graph::InstanceGraph,
+    instances: impl IntoIterator<Item = &'a skull::instance_graph::Instance>,
+) -> Vec<String> {
+    instances
+        .into_iter()
+        .map(|i| instance_key(ws, graph, i))
+        .collect()
+}
+
+fn sorted_instance_keys<'a>(
+    ws: &bone_semantic::inference::Workspace,
+    graph: &skull::instance_graph::InstanceGraph,
+    instances: impl IntoIterator<Item = &'a skull::instance_graph::Instance>,
+) -> Vec<String> {
+    let mut out = instance_keys(ws, graph, instances);
+    out.sort();
+    out
+}
+
+fn emit_pair(
+    ws: &bone_semantic::inference::Workspace,
+    pair: &skull_mir::lower::ShaderPair,
+    profile: GlslProfile,
+) -> skull_codegen_glsl::ShaderEmission {
+    let fragment = ws.module(pair.frag.module).functions[pair.frag.func].name;
+    match pair.vert {
+        Some(vertex) => {
+            let vertex_name = ws.module(vertex.module).functions[vertex.func].name;
+            skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
+                ws,
+                vertex.module,
+                vertex_name.as_str(),
+                fragment.as_str(),
+                profile,
+            )
+        }
+        None => skull_codegen_glsl::emit_shader_entry_with_dependencies(
+            ws,
+            pair.frag.module,
+            fragment.as_str(),
+            profile,
+        ),
+    }
+    .unwrap_or_else(|e| panic!("`{}` failed to emit: {e}", pair.key))
+}
+
+fn target_for(profile: GlslProfile) -> skull::target_projection::TargetSpec {
+    skull::target_projection::TargetSpec {
+        shader: Some(skull::target_projection::ShaderTargetSpec::Glsl(profile)),
+        ..skull::target_projection::LUAJIT_DESKTOP
+    }
+}
+
+fn snapshot_project(project: &str, path: &Path) -> Vec<ShaderRow> {
+    let ws = validate_workspace(path.to_str().unwrap()).expect("workspace");
+    let pairs = skull_mir::lower::collect_shader_pairs(&ws).expect("shader pairs");
+    let programs: Vec<skull::shader_artifact::ShaderProgram> = pairs
+        .iter()
+        .map(|pair| skull::shader_artifact::ShaderProgram {
+            vert: pair.vert,
+            frag: pair.frag,
+        })
+        .collect();
+    let roots: Vec<FuncRef> = programs
+        .iter()
+        .flat_map(|program| {
+            program
+                .vert
+                .into_iter()
+                .chain(std::iter::once(program.frag))
+        })
+        .collect();
+    let graph = skull::instance_graph::build(&ws, roots, false);
     let mut rows = Vec::new();
 
-    for project in PROJECTS {
-        let path = root.join(project);
-        assert!(
-            path.join("stick.toml").is_file(),
-            "not a corpus project: {project}"
+    for (profile_name, profile) in PROFILES {
+        let view = skull::shader_artifact::realize_shader(
+            &ws,
+            &graph,
+            &skull::shader_artifact::ShaderArtifactRequest {
+                spec: target_for(*profile),
+                programs: &programs,
+            },
+        )
+        .expect("GLSL view");
+        assert_eq!(
+            view.program_views.len(),
+            pairs.len(),
+            "program-view denominator moved"
         );
-        let ws = validate_workspace(path.to_str().unwrap()).expect("workspace");
-        let pairs = skull_mir::lower::collect_shader_pairs(&ws).expect("shader pairs");
-        for pair in pairs {
-            let fragment = ws.module(pair.frag.module).functions[pair.frag.func].name;
-            for (profile_name, profile) in PROFILES {
-                let emission = match pair.vert {
-                    Some(vertex) => {
-                        let vertex_name = ws.module(vertex.module).functions[vertex.func].name;
-                        skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
-                            &ws,
-                            vertex.module,
-                            vertex_name.as_str(),
-                            fragment.as_str(),
-                            *profile,
-                        )
-                    }
-                    None => skull_codegen_glsl::emit_shader_entry_with_dependencies(
-                        &ws,
-                        pair.frag.module,
-                        fragment.as_str(),
-                        *profile,
-                    ),
-                }
-                .unwrap_or_else(|e| {
-                    panic!("{project}: `{}` [{profile_name}] failed: {e}", pair.key)
-                });
 
-                rows.push(ShaderRow {
-                    key: RowKey {
-                        project: (*project).to_string(),
-                        shader: pair.key.clone(),
-                        profile: *profile_name,
-                    },
-                    stage_count: source_stages(&emission.source),
-                    glsl_fingerprint: fnv1a(emission.source.as_bytes()),
-                    interface_fingerprint: fingerprint_debug(&emission.interface),
-                    uniform_fingerprint: uniform_fingerprint(&emission.abi),
-                });
+        for (index, pair) in pairs.iter().enumerate() {
+            let emission = emit_pair(&ws, pair, *profile);
+            let program_view = &view.program_views[index];
+            let key = RowKey {
+                project: project.to_string(),
+                shader: pair.key.clone(),
+                profile: *profile_name,
+            };
+            assert_eq!(
+                program_view.program, programs[index],
+                "{project}: program view key changed for {} [{profile_name}]",
+                pair.key
+            );
+            assert_view_matches_emission(&ws, &graph, &key, &emission, program_view);
+
+            let mut stage_populations = Vec::new();
+            let mut emission_order = Vec::new();
+            let mut entries = Vec::new();
+            let mut helpers = BTreeSet::new();
+            let mut builtins = BTreeSet::new();
+            let mut dependencies = BTreeSet::new();
+            for stage in &program_view.stages {
+                entries.push(instance_key(&ws, &graph, &stage.entry));
+                stage_populations.push(sorted_instance_keys(&ws, &graph, &stage.retained));
+                emission_order.push(instance_keys(&ws, &graph, stage.order.iter()));
+                helpers.extend(stage.helpers.iter().map(|i| instance_key(&ws, &graph, i)));
+                builtins.extend(stage.builtins.iter().map(|i| instance_key(&ws, &graph, i)));
+                dependencies.extend(stage.dependencies.iter().map(|f| fref_key(&ws, *f)));
             }
+            rows.push(ShaderRow {
+                key,
+                stage_sections: source_stages(&emission.source),
+                graph_roots: sorted_instance_keys(&ws, &graph, view.roots.iter()),
+                graph_helpers: sorted_instance_keys(&ws, &graph, view.helpers.iter()),
+                entries,
+                stage_populations,
+                helper_instances: helpers.into_iter().collect(),
+                builtin_instances: builtins.into_iter().collect(),
+                emission_order,
+                glsl_fingerprint: fnv1a(emission.source.as_bytes()),
+                interface_fingerprint: fnv1a(&interface_bytes(&emission.interface)),
+                abi_fingerprint: fnv1a(&abi_bytes(&emission.abi)),
+                block_wire_fingerprint: fnv1a(&block_wire_bytes(&emission.abi)),
+                hot_reload_dependencies: dependencies.into_iter().collect(),
+            });
         }
     }
-
     rows.sort_by(|a, b| a.key.cmp(&b.key));
     rows
 }
 
-fn changed_rows(before: &[ShaderRow], after: &[ShaderRow]) -> Vec<RowKey> {
-    assert_eq!(before.len(), after.len(), "mutation comparison lost a row");
+fn assert_view_matches_emission(
+    ws: &bone_semantic::inference::Workspace,
+    graph: &skull::instance_graph::InstanceGraph,
+    key: &RowKey,
+    emission: &skull_codegen_glsl::ShaderEmission,
+    program_view: &skull::shader_artifact::ShaderProgramView,
+) {
+    assert_eq!(
+        program_view.stages.len(),
+        emission.ir.stages.len(),
+        "{key:?}: graph/emitter stage population denominator differs"
+    );
+    for (view_stage, emitted_stage) in program_view.stages.iter().zip(&emission.ir.stages) {
+        assert_eq!(
+            view_stage.stage, emitted_stage.stage,
+            "{key:?}: graph/emitter stage key differs"
+        );
+        assert_eq!(
+            view_stage.entry, emitted_stage.entry.inst,
+            "{key:?}: graph/emitter entry instance differs"
+        );
+        let expected_retained: BTreeSet<_> = std::iter::once(&emitted_stage.entry.inst)
+            .chain(emitted_stage.order.iter().map(|i| &i.inst))
+            .cloned()
+            .collect();
+        let view_retained_keys = sorted_instance_keys(ws, graph, view_stage.retained.iter());
+        let expected_retained_keys = sorted_instance_keys(ws, graph, expected_retained.iter());
+        assert_eq!(
+            view_retained_keys, expected_retained_keys,
+            "{key:?}: graph/emitter retained stage population differs"
+        );
+        let expected_helpers: BTreeSet<_> =
+            emitted_stage.order.iter().map(|i| i.inst.clone()).collect();
+        assert_eq!(
+            view_stage.helpers, expected_helpers,
+            "{key:?}: graph/emitter helper population differs"
+        );
+        let expected_order: Vec<_> = emitted_stage.order.iter().map(|i| i.inst.clone()).collect();
+        assert_eq!(
+            view_stage.order, expected_order,
+            "{key:?}: graph/emitter helper emission order differs"
+        );
+        assert_eq!(
+            view_stage.dependencies,
+            emitted_stage.declarations(),
+            "{key:?}: graph/emitter hot-reload dependencies differ"
+        );
+        assert!(
+            view_stage
+                .retained
+                .iter()
+                .all(|instance| graph.concreteness(instance)
+                    != skull::instance_graph::Concreteness::Missing),
+            "{key:?}: retained shader population contains a missing graph substitution"
+        );
+    }
+    assert!(
+        !program_view.stages.is_empty(),
+        "{key:?}: shader has no graph stages"
+    );
+}
+
+fn changed_keys(before: &[ShaderRow], after: &[ShaderRow]) -> Vec<RowKey> {
+    let before_keys: BTreeSet<_> = before.iter().map(|row| row.key.clone()).collect();
+    let after_keys: BTreeSet<_> = after.iter().map(|row| row.key.clone()).collect();
+    assert_eq!(
+        before_keys, after_keys,
+        "shader mutation added or removed a row"
+    );
     before
         .iter()
         .zip(after)
@@ -237,24 +652,335 @@ fn changed_rows(before: &[ShaderRow], after: &[ShaderRow]) -> Vec<RowKey> {
         .collect()
 }
 
+fn canonical_fingerprint(row: &ShaderRow) -> u64 {
+    let mut out = Canonical::default();
+    out.string(&row.key.project);
+    out.string(&row.key.shader);
+    out.string(row.key.profile);
+    out.u64(row.stage_sections as u64);
+    out.strings(&row.graph_roots);
+    out.strings(&row.graph_helpers);
+    out.strings(&row.entries);
+    out.nested_strings(&row.stage_populations);
+    out.strings(&row.helper_instances);
+    out.strings(&row.builtin_instances);
+    out.nested_strings(&row.emission_order);
+    out.u64(row.glsl_fingerprint);
+    out.u64(row.interface_fingerprint);
+    out.u64(row.abi_fingerprint);
+    out.u64(row.block_wire_fingerprint);
+    out.strings(&row.hot_reload_dependencies);
+    fnv1a(&out.0)
+}
+
+fn canonical_baseline() -> BTreeMap<RowKey, u64> {
+    let mut out = BTreeMap::new();
+    for line in include_str!("shader_corpus_canonical.tsv").lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let mut fields = line.split('\t');
+        let project = fields.next().expect("canonical project").to_string();
+        let shader = fields.next().expect("canonical shader").to_string();
+        let profile = match fields.next().expect("canonical profile") {
+            "330core" => "330core",
+            "300es" => "300es",
+            other => panic!("unknown canonical profile: {other}"),
+        };
+        let fingerprint = u64::from_str_radix(fields.next().expect("canonical fingerprint"), 16)
+            .expect("canonical fingerprint is hex");
+        assert!(
+            fields.next().is_none(),
+            "canonical row has extra fields: {line}"
+        );
+        assert!(
+            out.insert(
+                RowKey {
+                    project,
+                    shader,
+                    profile
+                },
+                fingerprint
+            )
+            .is_none()
+        );
+    }
+    out
+}
+
+fn shader_fixture_source(helper_a_body: &str) -> String {
+    format!(
+        r#"
+@shader(fragment)
+fn oracle_shader_a(tc: Vec2) -> Vec4 {{
+    let value = oracle_helper_a(tc.x)
+    return Vec4 {{ x: value, y: 0.0, z: 0.0, w: 1.0 }}
+}}
+
+fn oracle_helper_a(value: float) -> float {{ {helper_a_body} }}
+
+@shader(fragment)
+fn oracle_shader_b(tc: Vec2) -> Vec4 {{
+    let value = oracle_helper_b(tc.y)
+    return Vec4 {{ x: 0.0, y: value, z: 0.0, w: 1.0 }}
+}}
+
+fn oracle_helper_b(value: float) -> float {{ return value + 3.0 }}
+
+global oracle_shader_a_registration: string = rock_shader(oracle_shader_a)
+global oracle_shader_b_registration: string = rock_shader(oracle_shader_b)
+"#,
+    )
+}
+
+#[test]
+fn shader_source_mutation_names_only_the_changed_shader_profiles() {
+    let temp = tempfile::tempdir().expect("fixture tempdir");
+    let source = temp.path().join("shaders.rock");
+    fs::write(&source, shader_fixture_source("return value + 1.0")).expect("baseline source");
+    let baseline = snapshot_project("fixture", temp.path());
+    fs::write(&source, shader_fixture_source("return value + 2.0")).expect("candidate source");
+    let candidate = snapshot_project("fixture", temp.path());
+
+    let baseline_keys: BTreeSet<_> = baseline.iter().map(|row| row.key.clone()).collect();
+    assert_eq!(
+        baseline_keys.len(),
+        4,
+        "two shaders x two profiles must be compared"
+    );
+    assert_eq!(
+        baseline_keys,
+        candidate.iter().map(|row| row.key.clone()).collect(),
+        "helper mutation must not add or remove a project/shader/profile row"
+    );
+    let changed = changed_keys(&baseline, &candidate);
+    let expected = BTreeSet::from([
+        RowKey {
+            project: "fixture".into(),
+            shader: "oracle_shader_a".into(),
+            profile: "330core",
+        },
+        RowKey {
+            project: "fixture".into(),
+            shader: "oracle_shader_a".into(),
+            profile: "300es",
+        },
+    ]);
+    assert_eq!(
+        changed.iter().cloned().collect::<BTreeSet<_>>(),
+        expected,
+        "helper A source mutation changed the wrong exact project/shader/profile rows: {changed:?}"
+    );
+    for row in &candidate {
+        if row.key.shader == "oracle_shader_b" {
+            let old = baseline
+                .iter()
+                .find(|before| before.key == row.key)
+                .unwrap();
+            assert_eq!(
+                old, row,
+                "shader B changed under a helper A-only mutation: {:?}",
+                row.key
+            );
+        }
+    }
+    for row in candidate
+        .iter()
+        .filter(|row| row.key.shader == "oracle_shader_a")
+    {
+        let old = baseline
+            .iter()
+            .find(|before| before.key == row.key)
+            .unwrap();
+        assert_ne!(
+            old.glsl_fingerprint, row.glsl_fingerprint,
+            "shader A source did not change: {:?}",
+            row.key
+        );
+        assert_eq!(
+            old.interface_fingerprint, row.interface_fingerprint,
+            "shader A interface moved: {:?}",
+            row.key
+        );
+        assert_eq!(
+            old.abi_fingerprint, row.abi_fingerprint,
+            "shader A ABI moved: {:?}",
+            row.key
+        );
+        assert_eq!(
+            old.block_wire_fingerprint, row.block_wire_fingerprint,
+            "shader A block wire moved: {:?}",
+            row.key
+        );
+        assert_eq!(
+            old.graph_roots, row.graph_roots,
+            "shader A graph roots moved: {:?}",
+            row.key
+        );
+        assert_eq!(
+            old.stage_populations, row.stage_populations,
+            "shader A population moved: {:?}",
+            row.key
+        );
+    }
+}
+
+#[test]
+fn shader_oracle_rejects_a_missing_stage_population() {
+    let temp = tempfile::tempdir().expect("fixture tempdir");
+    fs::write(
+        temp.path().join("shaders.rock"),
+        shader_fixture_source("return value + 1.0"),
+    )
+    .expect("fixture source");
+    let expected = snapshot_project("fixture", temp.path());
+    let mut candidate = expected.clone();
+    let target = candidate
+        .iter_mut()
+        .find(|row| row.key.shader == "oracle_shader_a" && row.key.profile == "330core")
+        .expect("stage-population mutation target");
+    assert!(
+        target.stage_populations[0].len() > 1,
+        "fixture needs a retained helper control"
+    );
+    target.stage_populations[0].pop();
+    let changed = changed_keys(&expected, &candidate);
+    assert_eq!(
+        changed,
+        vec![RowKey {
+            project: "fixture".into(),
+            shader: "oracle_shader_a".into(),
+            profile: "330core",
+        }],
+        "a missing stage instance must name its exact project/shader/profile row"
+    );
+}
+
+#[test]
+fn shader_oracle_rejects_a_view_population_missing_from_emission() {
+    let temp = tempfile::tempdir().expect("fixture tempdir");
+    fs::write(
+        temp.path().join("shaders.rock"),
+        shader_fixture_source("return value + 1.0"),
+    )
+    .expect("fixture source");
+    let ws = validate_workspace(temp.path().to_str().unwrap()).expect("workspace");
+    let pairs = skull_mir::lower::collect_shader_pairs(&ws).expect("shader pairs");
+    let programs: Vec<skull::shader_artifact::ShaderProgram> = pairs
+        .iter()
+        .map(|pair| skull::shader_artifact::ShaderProgram {
+            vert: pair.vert,
+            frag: pair.frag,
+        })
+        .collect();
+    let roots: Vec<FuncRef> = programs
+        .iter()
+        .flat_map(|program| {
+            program
+                .vert
+                .into_iter()
+                .chain(std::iter::once(program.frag))
+        })
+        .collect();
+    let graph = skull::instance_graph::build(&ws, roots, false);
+    let profile = GlslProfile::Core330;
+    let view = skull::shader_artifact::realize_shader(
+        &ws,
+        &graph,
+        &skull::shader_artifact::ShaderArtifactRequest {
+            spec: target_for(profile),
+            programs: &programs,
+        },
+    )
+    .expect("GLSL view");
+    let index = pairs
+        .iter()
+        .position(|pair| pair.key == "oracle_shader_a")
+        .expect("fixture shader A");
+    let emission = emit_pair(&ws, &pairs[index], profile);
+    let key = RowKey {
+        project: "fixture".into(),
+        shader: "oracle_shader_a".into(),
+        profile: "330core",
+    };
+    let mut broken = view.program_views[index].clone();
+    let entry = broken.stages[0].entry.clone();
+    let removed = broken.stages[0]
+        .retained
+        .iter()
+        .find(|instance| *instance != &entry)
+        .cloned()
+        .expect("fixture helper population");
+    assert!(broken.stages[0].retained.remove(&removed));
+    let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert_view_matches_emission(&ws, &graph, &key, &emission, &broken);
+    }))
+    .expect_err("a missing stage instance must make the graph/view oracle red");
+    let failure = failure
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| failure.downcast_ref::<&str>().map(ToString::to_string))
+        .unwrap_or_default();
+    assert!(
+        failure.contains(&format!("{key:?}")),
+        "the rejection must name its exact project/shader/profile key: {failure}"
+    );
+}
+
 #[test]
 #[ignore = "real 28-project Phase-4 corpus oracle"]
 fn shader_corpus_has_per_shader_profile_and_interface_evidence() {
-    let rows = snapshot();
+    let root = repo_root();
+    let discovered = discovered_bin_projects(&root);
+    assert_eq!(
+        discovered,
+        PROJECTS.iter().copied().map(str::to_string).collect(),
+        "the explicit shader corpus list must partition the current bin corpus"
+    );
+    let mut rows = Vec::new();
+    for project in PROJECTS {
+        rows.extend(snapshot_project(project, &root.join(project)));
+    }
+    rows.sort_by(|a, b| a.key.cmp(&b.key));
+
     assert_eq!(PROJECTS.len(), 28, "the shader corpus denominator moved");
     assert_eq!(rows.len(), 524 * PROFILES.len(), "profile rows moved");
-
     let shader_keys: BTreeSet<(&str, &str)> = rows
         .iter()
-        .map(|r| (r.key.project.as_str(), r.key.shader.as_str()))
+        .map(|row| (row.key.project.as_str(), row.key.shader.as_str()))
         .collect();
     assert_eq!(shader_keys.len(), 524, "shader population moved");
     assert_eq!(
-        rows.iter().map(|r| r.stage_count).sum::<usize>(),
-        524 * 2 * 2
+        rows.iter().map(|row| row.stage_sections).sum::<usize>(),
+        524 * 2 * 2,
+        "2,096 stage sections moved"
+    );
+    assert!(
+        rows.iter()
+            .map(|row| row.graph_helpers.len())
+            .sum::<usize>()
+            > 0,
+        "graph helper population is empty"
+    );
+    assert!(
+        rows.iter()
+            .map(|row| row.helper_instances.len())
+            .sum::<usize>()
+            > 0,
+        "helper instance population is empty"
+    );
+    assert!(
+        rows.iter()
+            .flat_map(|row| row.emission_order.iter())
+            .map(Vec::len)
+            .sum::<usize>()
+            > 0,
+        "emission-order population is empty"
     );
     assert_eq!(
-        rows.iter().map(|r| r.key.profile).collect::<BTreeSet<_>>(),
+        rows.iter()
+            .map(|row| row.key.profile)
+            .collect::<BTreeSet<_>>(),
         BTreeSet::from(["300es", "330core"]),
         "both GLSL profiles must be represented"
     );
@@ -266,10 +992,47 @@ fn shader_corpus_has_per_shader_profile_and_interface_evidence() {
         .collect();
     for row in &rows {
         *observed_projects.get_mut(row.key.project.as_str()).unwrap() += 1;
+        assert!(
+            !row.entries.is_empty(),
+            "empty concrete entry population: {:?}",
+            row.key
+        );
+        assert!(
+            row.stage_populations
+                .iter()
+                .all(|population| !population.is_empty()),
+            "empty per-stage retained population: {:?}",
+            row.key
+        );
+        assert_ne!(
+            row.glsl_fingerprint, 0,
+            "empty GLSL fingerprint: {:?}",
+            row.key
+        );
+        assert_ne!(
+            row.interface_fingerprint, 0,
+            "empty interface fingerprint: {:?}",
+            row.key
+        );
+        assert_ne!(
+            row.abi_fingerprint, 0,
+            "empty ABI fingerprint: {:?}",
+            row.key
+        );
+        assert_ne!(
+            row.block_wire_fingerprint, 0,
+            "empty BlockWire fingerprint: {:?}",
+            row.key
+        );
+        assert!(
+            !row.hot_reload_dependencies.is_empty(),
+            "empty hot-reload dependencies: {:?}",
+            row.key
+        );
     }
-    let expected_projects: BTreeMap<&str, usize> = EXPECTED_PROFILE_ROWS.iter().copied().collect();
     assert_eq!(
-        observed_projects, expected_projects,
+        observed_projects,
+        EXPECTED_PROFILE_ROWS.iter().copied().collect(),
         "per-project shader rows moved"
     );
     assert_eq!(
@@ -287,46 +1050,21 @@ fn shader_corpus_has_per_shader_profile_and_interface_evidence() {
         1
     );
 
-    let mut by_shader: BTreeMap<(&str, &str), Vec<&ShaderRow>> = BTreeMap::new();
+    let expected = canonical_baseline();
+    let actual: BTreeMap<_, _> = rows
+        .iter()
+        .map(|row| (row.key.clone(), canonical_fingerprint(row)))
+        .collect();
+    assert_eq!(
+        actual.keys().collect::<BTreeSet<_>>(),
+        expected.keys().collect::<BTreeSet<_>>(),
+        "canonical row keys moved"
+    );
     for row in &rows {
-        by_shader
-            .entry((row.key.project.as_str(), row.key.shader.as_str()))
-            .or_default()
-            .push(row);
-        assert_ne!(
-            row.glsl_fingerprint, 0,
-            "empty GLSL fingerprint: {:?}",
-            row.key
-        );
-        assert_ne!(
-            row.interface_fingerprint, 0,
-            "empty interface fingerprint: {:?}",
-            row.key
-        );
-        assert_ne!(
-            row.uniform_fingerprint, 0,
-            "empty uniform fingerprint: {:?}",
+        assert_eq!(
+            actual[&row.key], expected[&row.key],
+            "canonical shader row changed for exact project/shader/profile key {:?}",
             row.key
         );
     }
-    assert!(by_shader.values().all(|rows| rows.len() == PROFILES.len()));
-    for rows in by_shader.values() {
-        assert_eq!(rows[0].stage_count, 2);
-        assert_eq!(rows[0].interface_fingerprint, rows[1].interface_fingerprint);
-        assert_eq!(rows[0].uniform_fingerprint, rows[1].uniform_fingerprint);
-        assert_ne!(rows[0].glsl_fingerprint, rows[1].glsl_fingerprint);
-    }
-
-    let mut mutated = rows.clone();
-    let target = mutated
-        .iter_mut()
-        .find(|row| {
-            row.key.project == "mag"
-                && row.key.shader == "ui_vert+ui_dissolve_frag"
-                && row.key.profile == "330core"
-        })
-        .expect("the mutation target must be in the real corpus");
-    let expected = target.key.clone();
-    target.glsl_fingerprint ^= 1;
-    assert_eq!(changed_rows(&rows, &mutated), vec![expected]);
 }

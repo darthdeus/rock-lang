@@ -604,6 +604,9 @@ impl IntrinsicTable for GlslIntrinsics {
 pub fn renders_inline(f: &Function) -> bool {
     GlslIntrinsics.lookup(f).is_some()
         || (vec_op_symbol(f.name.as_str()).is_some() && f.param_decls.iter().count() == 2)
+        // Scalar `%` is lowered to `Inst::IntMod`/`Inst::FloatMod`, and GLSL's
+        // helper prelude renders that operation without a callable definition.
+        || (f.name.as_str() == "__op_mod" && f.param_decls.iter().count() == 2)
 }
 
 /// The GLSL infix operator symbol for a non-scalar `__op_*` (Vec operator) call.

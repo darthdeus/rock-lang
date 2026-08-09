@@ -29,6 +29,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use bone_semantic::inference::Workspace;
 use skull_codegen_glsl::GlslProfile;
 use skull_mir::mir::FuncRef;
+use skull_mir::shader_ir::ShaderStage;
 use skull_parser::Span;
 
 use crate::instance_graph::{Concreteness, DeclKey, Instance, InstanceGraph, SiteOutcome};
@@ -54,6 +55,28 @@ pub struct ShaderArtifactRequest<'a> {
     /// roots. Production reads them from `skull_mir::lower`'s `rock_shader`
     /// collector; the view never re-derives them.
     pub programs: &'a [ShaderProgram],
+}
+
+/// The graph-owned population for one shader stage of one registered program.
+/// The emitter may render this later, but it does not get to choose a different
+/// entry, helper set or reload dependency set.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ShaderStageView {
+    pub stage: ShaderStage,
+    pub entry: Instance,
+    pub retained: BTreeSet<Instance>,
+    pub helpers: BTreeSet<Instance>,
+    pub builtins: BTreeSet<Instance>,
+    pub order: Vec<Instance>,
+    pub dependencies: Vec<FuncRef>,
+}
+
+/// The graph-owned populations for one registered shader program. `stages` is
+/// in registration order: vertex first when present, fragment second.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ShaderProgramView {
+    pub program: ShaderProgram,
+    pub stages: Vec<ShaderStageView>,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -115,6 +138,10 @@ pub struct ShaderArtifactView {
     /// Call sites the retention walk traversed -- the denominator for
     /// `rejections`, so zero rejections over zero sites cannot read as clean.
     pub sites_walked: usize,
+    /// Per-program roots and retained populations, aligned with the request's
+    /// `programs` slice. Missing graph roots remain represented by an empty
+    /// stage list so a denominator cannot silently shrink.
+    pub program_views: Vec<ShaderProgramView>,
 }
 
 impl ShaderArtifactView {
@@ -186,6 +213,34 @@ pub fn realize_shader(
                 queue.push_back(callee.clone());
             }
         }
+    }
+
+    let mut program_views = Vec::with_capacity(req.programs.len());
+    for program in req.programs {
+        let entry_of = |r: FuncRef| -> Option<&Instance> {
+            let key = DeclKey(skull_mir::lower::canonical_variant(ws, r));
+            roots.iter().find(|i| DeclKey(i.func) == key)
+        };
+        let mut stages = Vec::new();
+        if let Some(vertex) = program.vert.and_then(entry_of) {
+            stages.push(stage_view(
+                ws,
+                g,
+                &edges,
+                vertex,
+                ShaderStage::Vertex,
+            ));
+        }
+        if let Some(fragment) = entry_of(program.frag) {
+            stages.push(stage_view(
+                ws,
+                g,
+                &edges,
+                fragment,
+                ShaderStage::Fragment,
+            ));
+        }
+        program_views.push(ShaderProgramView { program: *program, stages });
     }
 
     // THE PROFILE PASS IS EMISSION'S OWN, run per ENTRY.
@@ -315,7 +370,79 @@ pub fn realize_shader(
         programs_unchecked,
         programs: req.programs.len(),
         sites_walked,
+        program_views,
     })
+}
+
+fn stage_view(
+    ws: &Workspace,
+    g: &InstanceGraph,
+    edges: &BTreeMap<Instance, Vec<(Instance, Span)>>,
+    entry: &Instance,
+    stage: ShaderStage,
+) -> ShaderStageView {
+    let retained = reachable_from(std::slice::from_ref(entry), edges);
+    let helpers: BTreeSet<Instance> = retained
+        .iter()
+        .filter(|i| *i != entry)
+        .cloned()
+        .collect();
+    let mut builtins = BTreeSet::new();
+    for caller in &retained {
+        let Some(sites) = g.sites_of(caller) else { continue };
+        for rec in sites.values() {
+            let SiteOutcome::Resolved(callee) = &rec.outcome else { continue };
+            let f = &ws.module(callee.func.module).functions[callee.func.func];
+            if skull_codegen_glsl::renders_inline(f) {
+                builtins.insert(callee.clone());
+            }
+        }
+    }
+    let mut order = Vec::new();
+    let mut active = BTreeSet::new();
+    let mut done = BTreeSet::new();
+    postorder(entry, edges, &retained, &mut active, &mut done, &mut order);
+    order.retain(|i| i != entry);
+    let mut dependencies = Vec::new();
+    let mut seen = BTreeSet::new();
+    for instance in order.iter().chain(std::iter::once(entry)) {
+        let key = (instance.func.module.raw(), instance.func.func.into_raw().into_u32());
+        if seen.insert(key) {
+            dependencies.push(instance.func);
+        }
+    }
+    ShaderStageView {
+        stage,
+        entry: entry.clone(),
+        retained,
+        helpers,
+        builtins,
+        order,
+        dependencies,
+    }
+}
+
+fn postorder(
+    node: &Instance,
+    edges: &BTreeMap<Instance, Vec<(Instance, Span)>>,
+    retained: &BTreeSet<Instance>,
+    active: &mut BTreeSet<Instance>,
+    done: &mut BTreeSet<Instance>,
+    order: &mut Vec<Instance>,
+) {
+    if done.contains(node) || !active.insert(node.clone()) {
+        return;
+    }
+    for (callee, _) in edges.get(node).into_iter().flatten() {
+        if retained.contains(callee) {
+            postorder(callee, edges, retained, active, done, order);
+        }
+    }
+    active.remove(node);
+    done.insert(node.clone());
+    if !order.contains(node) {
+        order.push(node.clone());
+    }
 }
 
 /// The instances reachable from `roots` over the RETAINED shader call relation
