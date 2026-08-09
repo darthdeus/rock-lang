@@ -210,20 +210,6 @@ fn check_tier0_signature_spec(
     Ok(())
 }
 
-/// Validate a helper declaration against the target-neutral shader vocabulary.
-pub fn check_tier0_signature(ws: &Workspace, function: &Function) -> Result<(), CompilerError> {
-    struct NeutralPolicy;
-    impl ShaderPlannerPolicy for NeutralPolicy {
-        fn inline_call(&self, _: &Function) -> bool {
-            false
-        }
-        fn backend_name(&self) -> &'static str {
-            "shader artifact"
-        }
-    }
-    check_tier0_signature_spec(ws, &SpecSubst::default(), function, &NeutralPolicy)
-}
-
 const CONST_CHAIN_DEPTH: usize = 16;
 
 fn const_lit(ws: &Workspace, name: Ustr) -> Option<Lit> {
@@ -538,7 +524,7 @@ impl skull_mir::reach::ReachPolicy for Reach<'_> {
 }
 
 /// Plan one concrete stage's target-neutral MIR and reachable helpers.
-pub fn plan_stage(
+fn plan_stage(
     ws: &Workspace,
     scx: &ScalarCtx,
     fref: FuncRef,

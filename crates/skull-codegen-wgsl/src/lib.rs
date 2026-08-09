@@ -33,16 +33,97 @@ fn err(span: Span, message: impl Into<String>) -> CompilerError {
     CompilerError::new_with_label(span, message.into())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WgslBuiltin {
+    Clamp,
+    Floor,
+    Fract,
+    Max,
+    Min,
+    Abs,
+}
+
+impl WgslBuiltin {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Clamp => "clamp",
+            Self::Floor => "floor",
+            Self::Fract => "fract",
+            Self::Max => "max",
+            Self::Min => "min",
+            Self::Abs => "abs",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WgslOperator {
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+
+impl WgslOperator {
+    fn symbol(self) -> &'static str {
+        match self {
+            Self::Add => "+",
+            Self::Sub => "-",
+            Self::Mul => "*",
+            Self::Div => "/",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WgslIntrinsic {
+    Texture,
+    VectorConstructor,
+    Builtin(WgslBuiltin),
+    Operator(WgslOperator),
+    UnsupportedOperator,
+}
+
+impl WgslIntrinsic {
+    fn classify(function: &Function) -> Option<Self> {
+        let intrinsic = Self::classify_name(function.name.as_str());
+        if matches!(intrinsic, Some(Self::Operator(_))) && function.param_decls.len() != 2 {
+            return Some(Self::UnsupportedOperator);
+        }
+        intrinsic
+    }
+
+    fn classify_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "texture" => Self::Texture,
+            "v" => Self::VectorConstructor,
+            "clamp" => Self::Builtin(WgslBuiltin::Clamp),
+            "floor" => Self::Builtin(WgslBuiltin::Floor),
+            "fract" => Self::Builtin(WgslBuiltin::Fract),
+            "max" => Self::Builtin(WgslBuiltin::Max),
+            "min" => Self::Builtin(WgslBuiltin::Min),
+            "abs" => Self::Builtin(WgslBuiltin::Abs),
+            "__op_add" => Self::Operator(WgslOperator::Add),
+            "__op_sub" => Self::Operator(WgslOperator::Sub),
+            "__op_mul" => Self::Operator(WgslOperator::Mul),
+            "__op_div" => Self::Operator(WgslOperator::Div),
+            name if name.starts_with("__op_") => Self::UnsupportedOperator,
+            _ => return None,
+        })
+    }
+
+    fn is_admitted(self) -> bool {
+        !matches!(self, Self::UnsupportedOperator)
+    }
+}
+
 /// The inline call surface this emitter actually knows how to render. The
 /// neutral planner receives this policy instead of importing a GLSL mapping.
 pub struct WgslShaderPolicy;
 
 impl ShaderPlannerPolicy for WgslShaderPolicy {
     fn inline_call(&self, function: &Function) -> bool {
-        matches!(
-            function.name.as_str(),
-            "texture" | "v" | "clamp" | "floor" | "fract" | "max" | "min" | "abs"
-        ) || (function.name.as_str().starts_with("__op_") && function.param_decls.len() == 2)
+        WgslIntrinsic::classify(function).is_some_and(WgslIntrinsic::is_admitted)
     }
 
     fn backend_name(&self) -> &'static str {
@@ -1323,9 +1404,9 @@ impl<'a> FunctionEmitter<'a> {
         args: &[Idx<skull_mir::mir::Inst>],
     ) -> Result<ValueKind, CompilerError> {
         let function = &self.ws.module(func.module).functions[func.func];
-        match function.name.as_str() {
-            "texture" => Ok(ValueKind::Vec4),
-            "v" => {
+        match WgslIntrinsic::classify(function) {
+            Some(WgslIntrinsic::Texture) => Ok(ValueKind::Vec4),
+            Some(WgslIntrinsic::VectorConstructor) => {
                 let total: usize = args
                     .iter()
                     .map(|arg| self.value_kind(*arg).map(ValueKind::components))
@@ -1340,16 +1421,20 @@ impl<'a> FunctionEmitter<'a> {
                     )),
                 }
             }
-            "clamp" | "floor" | "fract" | "max" | "min" | "abs" => self.value_kind(
+            Some(WgslIntrinsic::Builtin(_)) => self.value_kind(
                 args.first()
                     .copied()
                     .ok_or_else(|| err(self.span, "WGSL intrinsic call has no operand"))?,
             ),
-            name if name.starts_with("__op_") => self.value_kind(
+            Some(WgslIntrinsic::Operator(_)) => self.value_kind(
                 args.first()
                     .copied()
                     .ok_or_else(|| err(self.span, "WGSL operator call has no operand"))?,
             ),
+            Some(WgslIntrinsic::UnsupportedOperator) => Err(err(
+                self.span,
+                format!("WGSL operator `{}` is not admitted", function.name),
+            )),
             _ => {
                 let instance = self.resolve_callee(iid, func)?;
                 let called = self
@@ -1515,8 +1600,8 @@ impl<'a> FunctionEmitter<'a> {
     ) -> Result<String, CompilerError> {
         let function = &self.ws.module(func.module).functions[func.func];
         let name = function.name.as_str();
-        match name {
-            "texture" => {
+        match WgslIntrinsic::classify(function) {
+            Some(WgslIntrinsic::Texture) => {
                 if args.len() != 2 {
                     return Err(err(
                         self.span,
@@ -1536,7 +1621,7 @@ impl<'a> FunctionEmitter<'a> {
                     self.render_val(args[1])?
                 ))
             }
-            "v" => {
+            Some(WgslIntrinsic::VectorConstructor) => {
                 let kind = self.call_kind(iid, func, args)?;
                 let rendered = args
                     .iter()
@@ -1544,7 +1629,7 @@ impl<'a> FunctionEmitter<'a> {
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(format!("{}({})", kind.wgsl().unwrap(), rendered.join(", ")))
             }
-            "clamp" | "floor" | "fract" | "max" | "min" | "abs" => {
+            Some(WgslIntrinsic::Builtin(builtin)) => {
                 let target = self.value_kind(
                     args.first()
                         .copied()
@@ -1554,29 +1639,21 @@ impl<'a> FunctionEmitter<'a> {
                     .iter()
                     .map(|arg| self.render_intrinsic_arg(*arg, target))
                     .collect::<Result<Vec<_>, _>>()?;
-                Ok(format!("{}({})", name, rendered.join(", ")))
+                Ok(format!("{}({})", builtin.name(), rendered.join(", ")))
             }
-            name if name.starts_with("__op_") => {
-                let op = match name {
-                    "__op_add" => "+",
-                    "__op_sub" => "-",
-                    "__op_mul" => "*",
-                    "__op_div" => "/",
-                    _ => {
-                        return Err(err(
-                            self.span,
-                            format!("WGSL operator `{name}` is not admitted"),
-                        ));
-                    }
-                };
+            Some(WgslIntrinsic::Operator(operator)) => {
                 if args.len() != 2 {
                     return Err(err(
                         self.span,
                         format!("WGSL operator `{name}` requires two operands"),
                     ));
                 }
-                self.binary(args[0], op, args[1])
+                self.binary(args[0], operator.symbol(), args[1])
             }
+            Some(WgslIntrinsic::UnsupportedOperator) => Err(err(
+                self.span,
+                format!("WGSL operator `{name}` is not admitted"),
+            )),
             _ => {
                 let instance = self.resolve_callee(iid, func)?;
                 let self_name = instance.symbol(self.ws);
@@ -1657,6 +1734,28 @@ fn zero_value(kind: ValueKind) -> &'static str {
         ValueKind::Vec4 => "vec4<f32>(0.0)",
         ValueKind::Mat4 => "mat4x4<f32>(0.0)",
         ValueKind::Sampler(_) => "0.0",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WgslIntrinsic, WgslOperator};
+
+    #[test]
+    fn intrinsic_classifier_matches_the_admitted_wgsl_surface() {
+        assert!(WgslIntrinsic::classify_name("texture").is_some_and(WgslIntrinsic::is_admitted));
+        assert!(WgslIntrinsic::classify_name("v").is_some_and(WgslIntrinsic::is_admitted));
+        assert!(WgslIntrinsic::classify_name("clamp").is_some_and(WgslIntrinsic::is_admitted));
+        assert!(WgslIntrinsic::classify_name("__op_add").is_some_and(WgslIntrinsic::is_admitted));
+        assert_eq!(
+            WgslIntrinsic::classify_name("__op_pow"),
+            Some(WgslIntrinsic::UnsupportedOperator)
+        );
+        assert_eq!(
+            WgslIntrinsic::classify_name("__op_add"),
+            Some(WgslIntrinsic::Operator(WgslOperator::Add))
+        );
+        assert_eq!(WgslIntrinsic::classify_name("helper"), None);
     }
 }
 
