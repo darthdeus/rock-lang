@@ -67,6 +67,9 @@ mod no_inline_function;
 mod nomangle_roots;
 #[path = "number_format.rs"]
 mod number_format;
+#[path = "session_arena.rs"]
+mod session_arena;
+
 #[path = "overlay.rs"]
 mod overlay;
 #[path = "parse_float.rs"]

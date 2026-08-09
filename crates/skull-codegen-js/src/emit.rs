@@ -2537,14 +2537,14 @@ pub fn emit_program_cached(
     ws: &Workspace,
     user_mid: bone_semantic::prelude::ModuleId,
 ) -> Result<(JsProgram, JsEmitCache), CompilerError> {
-    let scx = &js_scx(ws);
+    let scx = js_scx(ws);
     let mut extra = Vec::new();
     let main_js_name = nullary_main(ws, user_mid).map(|fr| {
         let name = callee_js_name(ws, fr);
         extra.push((fr, name.clone()));
         name
     });
-    let build = build_program_core(ws, scx, &extra)?;
+    let build = build_program_core(ws, &scx, &extra)?;
     let static_keys = build
         .chunks
         .values()
@@ -2559,6 +2559,7 @@ pub fn emit_program_cached(
         build,
         changed_since_full: HashSet::new(),
         static_keys,
+        scx,
     };
     Ok((program, cache))
 }
@@ -2871,11 +2872,30 @@ pub struct JsEmitCache {
     build: ProgramBuild,
     changed_since_full: HashSet<FuncRef>,
     static_keys: HashMap<ustr::Ustr, String>,
+    /// **The session's lowering context, kept across edits.**
+    ///
+    /// It owns the `MonoInterner`, and an `Instance` is an identity only
+    /// relative to the arena that minted its type ids. An overlay that built
+    /// its own would answer with keys the cache cannot read -- and the graph and
+    /// artifact view Phase 3 puts here next are `Instance`-keyed throughout, so
+    /// two arenas would be two populations wearing one type.
+    ///
+    /// Maintained, not merely retained: `emit_overlay` re-runs
+    /// `ScalarCtx::update_body` for every re-inferred body, because the
+    /// value-reference scan behind scalar-ABI eligibility is per body and would
+    /// otherwise answer for the source as it was at the full build.
+    scx: skull_mir::lower::ScalarCtx,
 }
 
 impl JsEmitCache {
     pub fn current_program(&self) -> &str {
         &self.build.program
+    }
+
+    /// The session arena. Handed out so a caller can prove two runs share one;
+    /// `Arc::ptr_eq` on it is the identity, `len()` the population.
+    pub fn interner_handle(&self) -> std::sync::Arc<skull_mir::monoty::MonoInterner> {
+        self.scx.interner_handle()
     }
 }
 
@@ -2901,7 +2921,6 @@ pub fn emit_overlay(
     cache: &mut JsEmitCache,
     reinferred: &[(bone_semantic::prelude::ModuleId, bone_semantic::hir::BodyOwner)],
 ) -> Result<JsReload, CompilerError> {
-    let scx = &js_scx(ws);
     if reinferred
         .iter()
         .any(|(_, owner)| {
@@ -2915,11 +2934,20 @@ pub fn emit_overlay(
         return Ok(JsReload::FullRequired);
     }
 
+    // **The session's own arena, not a fresh one** -- see `JsEmitCache::scx`.
+    // MAINTAINED first: the value-reference scan behind scalar-ABI eligibility
+    // is per body, so a reused context that skipped this would plan the ABI the
+    // source had at the full build. Same maintenance `skull::mir_emit`'s
+    // `update_chunk_cache` performs for luajit.
+    for &(mid, owner) in reinferred {
+        cache.scx.update_body(ws, mid, owner);
+    }
+
     let mut roots = Vec::new();
     if let Some(main) = nullary_main(ws, user_mid) {
         roots.push((main, callee_js_name(ws, main)));
     }
-    let current = build_program_core(ws, scx, &roots)?;
+    let current = build_program_core(ws, &cache.scx, &roots)?;
     if current.stable != cache.build.stable {
         return Ok(JsReload::FullRequired);
     }
@@ -3002,7 +3030,7 @@ pub fn emit_overlay(
         let Some(rebind) = exact_inline_js(ws, "__rock_rebind_system") else {
             return Ok(JsReload::FullRequired);
         };
-        out.push_str(&emit_inline_js_fn(ws, scx, rebind, "__rock_rebind_system")?);
+        out.push_str(&emit_inline_js_fn(ws, &cache.scx, rebind, "__rock_rebind_system")?);
         for fref in decorated {
             let function = &ws.module(fref.module).functions[fref.func];
             out.push_str(&format!(
