@@ -28,7 +28,8 @@ use bone_semantic::hir::BodyOwner;
 use bone_semantic::inference::{BodyInference, Workspace};
 use bone_semantic::prelude::{BoundNext, BoundTree, CompilerError};
 use comfy_la_arena::Idx;
-use skull_mir::lower::{lower_emitted_body, EmittedBodyId, ScalarCtx, SpecKey, SpecSubst};
+use skull_mir::instance::Instance;
+use skull_mir::lower::{lower_instance, ScalarCtx, SpecSubst};
 use skull_mir::mir::*;
 
 use crate::top_level_blocks;
@@ -105,11 +106,10 @@ pub struct SpliceRecord {
 /// whose body and scalar ABI are unchanged keeps its cached lowered body instead
 /// of re-lowering every edit. The driver [`invalidate`](Self::invalidate)s the
 /// affected callees per edit so no stale body is ever cloned.
-/// Cache key: a callee `FuncRef` plus its per-instantiation [`SpecKey`]. A
-/// non-specialized call keys on the EMPTY key (the shared generic / non-generic
-/// snapshot); each distinct value instantiation gets its own specialized snapshot,
-/// so compile cost scales with element types used, not call sites.
-type CacheKey = (FuncRef, SpecKey);
+/// Cache key: the callee [`Instance`] -- the same concrete-body identity the
+/// chunk cache and both emitters key on. Each distinct instantiation gets its
+/// own snapshot, so compile cost scales with element types used, not call sites.
+type CacheKey = Instance;
 
 #[derive(Default)]
 pub struct InlineCache {
@@ -124,7 +124,7 @@ impl InlineCache {
     /// incremental driver invalidates wholesale. A body edit must also drop the
     /// specialized snapshots keyed off it, so this matches on the `fref` component.
     pub fn invalidate(&mut self, fref: FuncRef) {
-        self.cands.retain(|(f, _), _| *f != fref);
+        self.cands.retain(|inst, _| inst.func != fref);
     }
 }
 
@@ -174,7 +174,8 @@ fn inlining_enabled() -> bool {
     false
 }
 
-fn classify(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef, key: &SpecKey) -> Option<CalleeBody> {
+fn classify(ws: &Workspace, scx: &ScalarCtx, inst: &Instance) -> Option<CalleeBody> {
+    let fref = inst.func;
     let f = &ws.module(fref.module).functions[fref.func];
     if f.is_extern || f.inline_body.is_some() || f.is_coroutine {
         return None;
@@ -193,10 +194,10 @@ fn classify(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef, key: &SpecKey) -> Op
         None if has_bounds => true,
         None => return None,
     };
-    // A specialized snapshot lowers the body as if hand-written for the concrete
-    // instantiation (`docs/flatvec-plan.md`); an all-`None` key is the shared
-    // snapshot, byte-identical to `lower_function`.
-    let mut mf = lower_emitted_body(ws, scx, &EmittedBodyId::new(fref, key.clone())).ok()?;
+    // A snapshot lowers the body as if hand-written for the concrete
+    // instantiation (`docs/flatvec-plan.md`); a non-generic instance's is the
+    // declaration's own body.
+    let mut mf = lower_instance(ws, scx, inst).ok()?;
     // Cleanup first so the size gate reflects emitted size and the splice clones
     // a tight body (the caller re-runs cleanup over the whole result anyway).
     crate::cleanup(&mut mf);
@@ -293,43 +294,39 @@ fn classify(ws: &Workspace, scx: &ScalarCtx, fref: FuncRef, key: &SpecKey) -> Op
     }
 }
 
-/// Get (lowering+classifying on first sight) the candidate for `(fref, key)`.
-/// A non-empty `key` builds the specialized snapshot for that instantiation.
+/// Get (lowering+classifying on first sight) the candidate for `inst`.
 fn get<'a>(
     cache: &'a mut InlineCache,
     ws: &Workspace,
     scx: &ScalarCtx,
-    fref: FuncRef,
-    key: &SpecKey,
+    inst: &Instance,
 ) -> Option<&'a CalleeBody> {
-    let ck = (fref, key.clone());
-    if !cache.cands.contains_key(&ck) {
-        let v = classify(ws, scx, fref, key);
-        cache.cands.insert(ck.clone(), v);
+    if !cache.cands.contains_key(inst) {
+        let v = classify(ws, scx, inst);
+        cache.cands.insert(inst.clone(), v);
     }
-    cache.cands[&ck].as_ref()
+    cache.cands[inst].as_ref()
 }
 
 /// One resolved, eligible call site in the caller, extracted before the splice.
-/// `key` is the site's instantiation (empty = the shared snapshot), read from the
-/// caller's `spec_bindings` so the splice clones the matching specialized body.
+/// `inst` is the concrete body it targets, read from the caller's
+/// `spec_bindings` so the splice clones the matching specialized body; a call
+/// with no entry there targets the declaration's own non-generic instance.
 enum Site {
     /// `Inst::Call` — single (or void) result; `call_id` is the call's value.
-    Single { bid: Idx<Block>, idx: usize, call_id: Idx<Inst>, fref: FuncRef, args: Vec<Idx<Inst>>, key: SpecKey },
+    Single { bid: Idx<Block>, idx: usize, call_id: Idx<Inst>, args: Vec<Idx<Inst>>, inst: Instance },
     /// `Inst::CallMulti` — N leaves bound positionally into `dests`.
-    Multi { bid: Idx<Block>, idx: usize, call_id: Idx<Inst>, dests: Vec<Idx<Cell>>, fref: FuncRef, args: Vec<Idx<Inst>>, key: SpecKey },
+    Multi { bid: Idx<Block>, idx: usize, call_id: Idx<Inst>, dests: Vec<Idx<Cell>>, args: Vec<Idx<Inst>>, inst: Instance },
 }
 
 impl Site {
-    fn fref(&self) -> FuncRef {
+    fn inst(&self) -> &Instance {
         match self {
-            Site::Single { fref, .. } | Site::Multi { fref, .. } => *fref,
+            Site::Single { inst, .. } | Site::Multi { inst, .. } => inst,
         }
     }
-    fn key(&self) -> &SpecKey {
-        match self {
-            Site::Single { key, .. } | Site::Multi { key, .. } => key,
-        }
+    fn fref(&self) -> FuncRef {
+        self.inst().func
     }
     fn pos(&self) -> (Idx<Block>, usize) {
         match self {
@@ -395,29 +392,33 @@ fn find_site(
         };
         let insts = func.blocks[bid].insts.clone();
         for (idx, iid) in insts.into_iter().enumerate().skip(start) {
-            let key = func.spec_bindings.get(&iid).cloned().unwrap_or_default();
+            // The site's own delivery record when it has one, else the
+            // declaration's non-generic instance. Not a sentinel for "shared":
+            // a call with no recorded instantiation targets a callee that has
+            // none to record.
+            let inst_of = |fref: FuncRef| {
+                func.spec_bindings.get(&iid).cloned().unwrap_or_else(|| Instance::base(fref))
+            };
             let site = match &func.insts[iid] {
                 Inst::Call { func: fref, args } if *fref != self_ref => Site::Single {
                     bid,
                     idx,
                     call_id: iid,
-                    fref: *fref,
                     args: args.clone(),
-                    key,
+                    inst: inst_of(*fref),
                 },
                 Inst::CallMulti { dests, func: fref, args } if *fref != self_ref => Site::Multi {
                     bid,
                     idx,
                     call_id: iid,
                     dests: dests.clone(),
-                    fref: *fref,
                     args: args.clone(),
-                    key,
+                    inst: inst_of(*fref),
                 },
                 _ => continue,
             };
             let cell_count = func.cells.len();
-            match get(cache, ws, scx, site.fref(), site.key()) {
+            match get(cache, ws, scx, site.inst()) {
                 // Decline a splice that would breach the per-caller cell budget
                 // (keep scanning — a smaller candidate may still fit). A SPECIALIZED
                 // call (non-empty spec key) is exempt: its args are splatted to
@@ -426,7 +427,7 @@ fn find_site(
                 // always exists. Declining it would leave a residual miscompile.
                 Some(cand)
                     if arity_ok(cand, &site)
-                        && (!site.key().is_empty()
+                        && (!site.inst().args.is_empty()
                             || cell_count + cand.func.cells.len() <= CELL_BUDGET) =>
                 {
                     return Some(site)
@@ -680,6 +681,7 @@ fn resolve_cloned_bound_calls(
     inst_map: &HashMap<Idx<Inst>, Idx<Inst>>,
     site_tree: Option<&BoundTree>,
     ws: &Workspace,
+    scx: &ScalarCtx,
     caller_inf: Option<&BodyInference>,
     caller_subst: &SpecSubst,
 ) -> Result<(), CompilerError> {
@@ -718,6 +720,7 @@ fn resolve_cloned_bound_calls(
         }
         let leaf = skull_mir::bound::resolve_bound_next(
             ws,
+            scx.interner(),
             caller_inf,
             caller_subst,
             bn,
@@ -729,6 +732,7 @@ fn resolve_cloned_bound_calls(
             callee.bound_next_split.contains(&old_id),
             &leaf,
             ws,
+            scx.interner(),
             "at this splice site",
         )?;
     }
@@ -818,15 +822,16 @@ fn splice(
     site: Site,
     cand: &CalleeBody,
     ws: &Workspace,
+    scx: &ScalarCtx,
     caller_inf: Option<&BodyInference>,
     caller_subst: &SpecSubst,
 ) -> Result<Vec<Idx<Block>>, CompilerError> {
     match cand.kind {
         Kind::Straight => {
-            splice_straight(func, site, cand, ws, caller_inf, caller_subst)?;
+            splice_straight(func, site, cand, ws, scx, caller_inf, caller_subst)?;
             Ok(Vec::new())
         }
-        Kind::General => splice_general(func, site, cand, ws, caller_inf, caller_subst),
+        Kind::General => splice_general(func, site, cand, ws, scx, caller_inf, caller_subst),
     }
 }
 
@@ -839,6 +844,7 @@ fn splice_straight(
     site: Site,
     cand: &CalleeBody,
     ws: &Workspace,
+    scx: &ScalarCtx,
     caller_inf: Option<&BodyInference>,
     caller_subst: &SpecSubst,
 ) -> Result<(), CompilerError> {
@@ -855,6 +861,7 @@ fn splice_straight(
         &inst_map,
         site_tree.as_ref(),
         ws,
+        scx,
         caller_inf,
         caller_subst,
     )?;
@@ -925,6 +932,7 @@ fn splice_general(
     site: Site,
     cand: &CalleeBody,
     ws: &Workspace,
+    scx: &ScalarCtx,
     caller_inf: Option<&BodyInference>,
     caller_subst: &SpecSubst,
 ) -> Result<Vec<Idx<Block>>, CompilerError> {
@@ -941,6 +949,7 @@ fn splice_general(
         &inst_map,
         site_tree.as_ref(),
         ws,
+        scx,
         caller_inf,
         caller_subst,
     )?;
@@ -1078,7 +1087,7 @@ pub fn inline_functions_with_subst(
         let pos = site.pos();
         let fref = site.fref();
         // Re-borrow the candidate immutably for the splice (distinct from `func`).
-        let cand = cache.cands[&(fref, site.key().clone())]
+        let cand = cache.cands[site.inst()]
             .as_ref()
             .expect("site implies a cached candidate");
         // SAFETY-of-borrows: `splice` mutates `func`, reads `cand` (in `cache`);
@@ -1091,7 +1100,7 @@ pub fn inline_functions_with_subst(
             forced: cand.forced,
             callee_insts: cand.insts,
         });
-        let added = splice(func, site, cand, ws, caller_inf, caller_subst)?;
+        let added = splice(func, site, cand, ws, scx, caller_inf, caller_subst)?;
         // The callee's `static` cells now live in THIS body: the spliced code
         // reads and writes them, and a `static` is one cell per owning fn, so
         // the cell is the same one every call site shares. Carrying them here is
@@ -1153,11 +1162,7 @@ pub fn validate_no_residual_bound_calls(
                     // A specialized name is the whole admission: `spec_fn_name`
                     // is `None` for an all-`None` key, which spells the shared
                     // body -- and a bounded fn has none.
-                    let named = mf
-                        .spec_bindings
-                        .get(&iid)
-                        .and_then(|key| skull_mir::mangle::spec_fn_name(ws, callee, key))
-                        .is_some();
+                    let named = mf.spec_bindings.get(&iid).is_some_and(|i| !i.args.is_empty());
                     if fn_has_bounds(callee) && !named {
                         // Stage-0e: this rejection IS the ablation's
                         // unsupported-surface population, and it fires from

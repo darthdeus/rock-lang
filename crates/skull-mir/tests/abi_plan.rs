@@ -14,7 +14,8 @@
 
 use std::sync::LazyLock;
 
-use skull_mir::lower::{BackendFnAbiPlan, EmittedBodyId, ScalarCtx, SpecKey};
+use skull_mir::instance::Instance;
+use skull_mir::lower::{BackendFnAbiPlan, ScalarCtx, SpecKey};
 use skull_mir::mir::FuncRef;
 use skull_mir::monoty::{MonoCtor, MonoTy};
 use ustr::Ustr;
@@ -73,7 +74,7 @@ fn main() {
 /// the oracle answers for whichever one is being emitted.
 ///
 /// The declaration arm is the admission control: it must keep answering the
-/// shared body's boxed ABI, so a plan that simply always specialized would fail
+/// unsubstituted boxed ABI, so a plan that simply always specialized would fail
 /// here rather than look like success.
 #[test]
 fn an_emitted_body_states_its_own_abi() {
@@ -81,12 +82,19 @@ fn an_emitted_body_states_its_own_abi() {
     let scx = ScalarCtx::new(&ws);
     let ident = func_ref(&ws, "ident");
 
-    let shared = BackendFnAbiPlan::for_body(&ws, &scx, EmittedBodyId::Shared(ident));
-    assert_eq!(shared.param_leaf_widths(), None, "the shared body keeps one boxed slot");
+    // The declaration's own non-generic instance: no substitution, so the
+    // declared `T` stays one boxed slot. This is the arm that would go red if a
+    // plan simply always specialized.
+    let shared = BackendFnAbiPlan::for_instance(&ws, &scx, &Instance::base(ident));
+    assert_eq!(shared.param_leaf_widths(), None, "an unsubstituted `T` is one boxed slot");
     assert_eq!(shared.result_lanes(), 1);
 
     let key: SpecKey = vec![nominal("V2")];
-    let spec = BackendFnAbiPlan::for_body(&ws, &scx, EmittedBodyId::Specialized(ident, key));
+    let spec = BackendFnAbiPlan::for_instance(
+        &ws,
+        &scx,
+        &Instance::intern(scx.interner(), ident, key),
+    );
     assert_eq!(
         spec.param_leaf_widths(),
         Some(vec![2]),
@@ -96,15 +104,15 @@ fn an_emitted_body_states_its_own_abi() {
 }
 
 /// The control: a non-generic declaration has exactly one emitted body, and the
-/// shared plan already states its scalarized ABI. Without this arm the test
+/// base plan already states its scalarized ABI. Without this arm the test
 /// above could pass on an oracle that answers only for generics.
 #[test]
-fn a_non_generic_body_states_its_abi_on_the_shared_id() {
+fn a_non_generic_body_states_its_abi_on_its_base_instance() {
     let ws = ws_of(SRC);
     let scx = ScalarCtx::new(&ws);
     let shift = func_ref(&ws, "shift");
 
-    let plan = BackendFnAbiPlan::for_body(&ws, &scx, EmittedBodyId::Shared(shift));
+    let plan = BackendFnAbiPlan::for_instance(&ws, &scx, &Instance::base(shift));
     assert_eq!(plan.param_leaf_widths(), Some(vec![2]));
     assert_eq!(plan.result_lanes(), 2);
 }

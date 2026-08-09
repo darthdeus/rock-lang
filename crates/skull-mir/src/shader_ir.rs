@@ -25,8 +25,7 @@
 use ustr::Ustr;
 
 use crate::gpu_layout::{ArrayMemberDecl, AttrKind, SamplerKind, WireKind};
-use crate::lower::SpecKey;
-use crate::mangle::spec_fn_name;
+use crate::instance::Instance;
 use crate::mir::{FuncRef, MirFunc};
 use bone_semantic::inference::Workspace;
 
@@ -50,47 +49,47 @@ impl ShaderStage {
 /// **One shader INSTANCE**: a declaration plus the instantiation a caller
 /// reached it at.
 ///
-/// The reachability node, the body key and the emitted name all come off this
-/// one value, so two instantiations of one generic helper are two functions and
-/// cannot be confused for one. An EMPTY key is the non-generic case and keeps
-/// the declaration's own name ([`spec_fn_name`] returns `None` for it).
+/// The reachability node, the body identity and the emitted name all come off
+/// this one value, so two instantiations of one generic helper are two
+/// functions and cannot be confused for one.
+///
+/// It IS the [`Instance`] every other emitter keys on -- a shader instance is
+/// an emitted body, one checked definition per instantiation, which is what
+/// `unchecked_generic` being deleted rests on. The wrapper survives only to
+/// carry GLSL's own vocabulary at the type level.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct ShaderInstance {
-    pub fref: FuncRef,
-    pub key: SpecKey,
+    pub inst: Instance,
 }
 
 impl ShaderInstance {
+    pub fn new(inst: Instance) -> Self {
+        ShaderInstance { inst }
+    }
+
     /// The declaration's own shape -- an entry, or a helper reached with no
     /// instantiation.
     pub fn plain(fref: FuncRef) -> Self {
-        ShaderInstance { fref, key: Vec::new() }
+        ShaderInstance { inst: Instance::base(fref) }
     }
 
-    pub fn subst(&self, ws: &Workspace) -> crate::lower::SpecSubst {
-        crate::lower::spec_subst_from_key(ws, self.fref, &self.key)
+    pub fn fref(&self) -> FuncRef {
+        self.inst.func
     }
 
-    /// The definition GLSL emits for this instance. A shader instance IS an
-    /// emitted body -- one checked, emitted definition per instantiation --
-    /// which is what `unchecked_generic` being deleted rests on.
-    /// An empty key is decided HERE rather than normalized downstream: a
-    /// non-generic shader instance has no arguments, which is a fact about this
-    /// instance and not something `EmittedBodyId::new` should infer from a
-    /// vector's length.
-    pub fn emitted_body(&self) -> crate::lower::EmittedBodyId {
-        if self.key.is_empty() {
-            return crate::lower::EmittedBodyId::Shared(self.fref);
-        }
-        crate::lower::EmittedBodyId::new(self.fref, self.key.clone())
+    pub fn subst(
+        &self,
+        ws: &Workspace,
+        interner: &crate::monoty::MonoInterner,
+    ) -> crate::lower::SpecSubst {
+        self.inst.subst(ws, interner)
     }
 
     /// The symbol this instance is emitted under. Target-neutral: it is the
     /// mangled declaration plus the instantiation, and a backend that needs a
     /// different spelling renames from here rather than re-deriving it.
-    pub fn symbol(&self, ws: &Workspace) -> String {
-        let f = &ws.module(self.fref.module).functions[self.fref.func];
-        spec_fn_name(ws, f, &self.key).unwrap_or_else(|| crate::mangle::mangle_fn(ws, f))
+    pub fn symbol(&self, ws: &Workspace, interner: &crate::monoty::MonoInterner) -> String {
+        self.inst.symbol(ws, interner)
     }
 }
 
@@ -120,7 +119,7 @@ impl ShaderStageIr {
     pub fn declarations(&self) -> Vec<FuncRef> {
         let mut seen: rustc_hash::FxHashSet<(u32, u32)> = rustc_hash::FxHashSet::default();
         let mut out = Vec::new();
-        for f in self.order.iter().map(|i| i.fref).chain(std::iter::once(self.entry.fref)) {
+        for f in self.order.iter().map(|i| i.fref()).chain(std::iter::once(self.entry.fref())) {
             if seen.insert((f.module.raw(), f.func.into_raw().into_u32())) {
                 out.push(f);
             }

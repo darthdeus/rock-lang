@@ -44,7 +44,9 @@ impl Builder<'_> {
                 .copied()
                 .unwrap_or(self.ws.module(m).functions[f].name_span);
             if let Some(key) = self.next_call_spec(iter_ref, &generics, span)? {
-                self.f.spec_bindings.insert(call, key);
+                let inst =
+                    crate::instance::Instance::intern(self.scx.interner(), iter_ref, key);
+                self.f.spec_bindings.insert(call, inst);
             }
             // IDENTITY beside delivery, the plan's split, and the same pair the
             // `for` witness records. Delivery alone leaves the site's own claim

@@ -66,7 +66,7 @@ pub use shape::*;
 /// is private to it, so a definition and the call that targets it cannot reach
 /// it from two places.
 mod abi;
-pub use abi::{AbiSubject, BackendFnAbiPlan, EmittedBodyId};
+pub use abi::BackendFnAbiPlan;
 
 mod coroutine;
 pub use coroutine::{plan_coroutine, CoroutinePlan};
@@ -218,6 +218,19 @@ pub struct ScalarCtx {
     /// when the collapsed representative is a luajit-native variant. `Any`
     /// disables the filtering entirely (the GLSL backend + generic/test callers).
     target: bone_semantic::hir::FnBackend,
+    /// **The build's one type arena.**
+    ///
+    /// An [`Instance`](crate::instance::Instance) is an identity only while one
+    /// arena is reachable from everything that mints or reads one, and lowering
+    /// is where a callee instantiation is first named. It lives here because
+    /// this is the build-scoped context every lowering entry point already
+    /// carries -- threading a second parameter through them would put the same
+    /// object in two places and let a caller supply the wrong one.
+    ///
+    /// [`ScalarCtx::adopt_arena`] hands it the arena an
+    /// `instance_graph::build` filled, which is what makes the graph's ids and
+    /// emission's ids the same ids.
+    interner: crate::monoty::MonoInterner,
 }
 
 /// The fn-names a single body references by value (`Expr::Global(name)` whose
@@ -261,7 +274,27 @@ impl ScalarCtx {
             ref_counts,
             values_first_class: false,
             target: bone_semantic::hir::FnBackend::Lua,
+            interner: crate::monoty::MonoInterner::new(),
         }
+    }
+
+    /// **The build's one type arena**, through which every [`Instance`] is
+    /// minted and read.
+    ///
+    /// [`Instance`]: crate::instance::Instance
+    pub fn interner(&self) -> &crate::monoty::MonoInterner {
+        &self.interner
+    }
+
+    /// Adopt the arena an `instance_graph::build` filled, so the graph's ids and
+    /// emission's ids are the same ids.
+    ///
+    /// The arena is monotonic, so emission naming a type the graph did not
+    /// reach simply extends it; what would break identity is a SECOND arena,
+    /// which is why there is no way to swap one in that does not consume the
+    /// old one.
+    pub fn adopt_arena(&mut self, arena: crate::monoty::MonoArena) {
+        self.interner = crate::monoty::MonoInterner::from_arena(arena);
     }
 
     /// Set the codegen backend this lowering feeds (see [`target`]).
@@ -952,23 +985,26 @@ pub fn lower_function(
     mid: ModuleId,
     fid: Idx<Function>,
 ) -> Result<MirFunc, CompilerError> {
-    lower_emitted_body(ws, scx, &EmittedBodyId::Shared(FuncRef { module: mid, func: fid }))
+    lower_instance(ws, scx, &crate::instance::Instance::base(FuncRef { module: mid, func: fid }))
 }
 
-/// **Lower the definition emission writes for `body`.**
+/// **Lower the definition emission writes for `inst`.**
 ///
-/// The shared snapshot for a `Shared` id; for a `Specialized` one, the body as
-/// if hand-written for that instantiation (`docs/flatvec-plan.md`): value params
-/// explode field-wise, `buf[i]=v` scalarizes, `native_buffer_alloc<T>` resolves
-/// its ctype. An all-`None` key is `Shared` by construction, byte-identical to
-/// the shared snapshot.
-pub fn lower_emitted_body(
+/// The body as if hand-written for that instantiation
+/// (`docs/flatvec-plan.md`): value params explode field-wise, `buf[i]=v`
+/// scalarizes, `native_buffer_alloc<T>` resolves its ctype. A non-generic
+/// instance substitutes nothing, which is the declaration's own body.
+///
+/// The instance's arguments are ids into `scx`'s arena, so this is only correct
+/// where the caller minted them through the same [`ScalarCtx`] -- which is what
+/// makes there being ONE arena a soundness property rather than a tidiness one.
+pub fn lower_instance(
     ws: &Workspace,
     scx: &ScalarCtx,
-    body: &EmittedBodyId,
+    inst: &crate::instance::Instance,
 ) -> Result<MirFunc, CompilerError> {
-    let decl = body.decl();
-    lower_body(ws, scx, decl, AbiSubject::Emitted(body.clone()), &body.subst(ws))
+    let subst = inst.subst(ws, scx.interner());
+    lower_body(ws, scx, inst.func, inst.clone(), &subst)
 }
 
 /// **Lower a LOGICAL INSTANCE's body** under the substitution the mono graph
@@ -985,14 +1021,14 @@ pub fn lower_instance_body(
     subst: &SpecSubst,
 ) -> Result<MirFunc, CompilerError> {
     let decl = FuncRef { module: mid, func: fid };
-    lower_body(ws, scx, decl, AbiSubject::Instance(decl), subst)
+    lower_body(ws, scx, decl, crate::instance::Instance::base(decl), subst)
 }
 
 fn lower_body(
     ws: &Workspace,
     scx: &ScalarCtx,
     self_ref: FuncRef,
-    subject: AbiSubject,
+    subject: crate::instance::Instance,
     subst: &SpecSubst,
 ) -> Result<MirFunc, CompilerError> {
     let (mid, fid) = (self_ref.module, self_ref.func);
@@ -1024,7 +1060,7 @@ fn lower_body(
     // instantiation additionally treats a generic param/return bound to a value
     // leaf as that value (`sig_value_shape_spec`), so it joins the scalar ABI.
     // This body's own ABI, from the one plan the calls that target it read.
-    let abi = BackendFnAbiPlan::for_subject(ws, scx, subject, subst);
+    let abi = BackendFnAbiPlan::for_instance_with_subst(ws, scx, &subject, subst);
     let param_shapes = abi.param_shapes();
     let ret_shape = abi.ret_shape().cloned();
     let ret_tuple = abi.ret_tuple().cloned();

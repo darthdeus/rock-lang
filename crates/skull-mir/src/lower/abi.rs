@@ -3,8 +3,8 @@
 //! Every question about how a function's values cross the wire -- which params
 //! splat to leaves, what the return carries, how many lanes a JS result
 //! publishes, what an `inline(lua)` body's params are spelled -- is answered
-//! here, for one [`EmittedBodyId`] under one execution target, by one
-//! [`BackendFnAbiPlan`].
+//! here, for one [`Instance`](crate::instance::Instance) under one execution
+//! target, by one [`BackendFnAbiPlan`].
 //!
 //! The policy itself ([`fn_scalar_abi_spec`]) is PRIVATE to this module. That
 //! is the whole point of the module boundary: a definition's parameter list and
@@ -24,117 +24,9 @@ use bone_semantic::inference::Workspace;
 
 use super::{
     nobox_declared_shape_spec, nobox_param_slot_spec, sig_param_slot_spec, sig_value_shape_spec,
-    slot_param_names, spec_subst_from_key, tuple_ret_shape, RetSlot, ScalarCtx, SpecKey, SpecSubst,
-    TupleRetShape, ValueShape,
+    slot_param_names, tuple_ret_shape, RetSlot, ScalarCtx, SpecSubst, TupleRetShape, ValueShape,
 };
 use crate::mir::FuncRef;
-
-/// **Which definition is being emitted.**
-///
-/// Pre-cutover, emission writes one shared body per declaration plus a
-/// specialized body per instantiation the lowerer decided to serve
-/// (`emit_specialized_callees` on luajit, `spec_queue` on JS). Those two
-/// populations are the emitted bodies, and each has its own ABI: `ident<T>` is
-/// one boxed slot on the declaration and two float leaves at `T = Vec2`.
-///
-/// This is not yet [`crate::monoty::MonoSubst`]-keyed identity, and cut C+D
-/// step E1 is where it becomes `Instance` and both variants go.
-///
-/// **The stated obstacle is spent.** It was that a declined specialization
-/// still records an instance, so enumerating instances would emit every
-/// declined body as well -- but E1's `compute_spec_from_bindings` no longer
-/// declines: "EVERY complete key specializes. There is no shared generic body
-/// to decline to any more." The two populations have already converged, and the
-/// key and the substitution are one fact
-/// (`tests/spec_key_subst_roundtrip.rs`). What remains is mechanical: the
-/// chunk cache, symbols, callers and both ABI plans move together, across all
-/// three re-emit paths.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub enum EmittedBodyId {
-    /// The declaration's own body: non-generic, or the shared generic snapshot.
-    Shared(FuncRef),
-    /// A specialized body, keyed by the instantiation the lowerer serves it for.
-    Specialized(FuncRef, SpecKey),
-}
-
-impl EmittedBodyId {
-    /// The body a `key` names.
-    ///
-    /// TOTAL, and it normalizes nothing. It used to map an all-`None` key back
-    /// to `Shared`, which made this the place absence was decided for producers
-    /// that had already failed to decide it -- and the all-`None` population
-    /// was entirely EMPTY keys from non-generic callees (measured: 756 of 756).
-    /// A non-generic concrete instance has no arguments and is not "the shared
-    /// body", so that sentinel could not survive into an `Instance`-keyed
-    /// identity. Every producer now returns `Option<SpecKey>` and says so
-    /// itself.
-    ///
-    /// The emptiness assertion goes away with the `Shared` arm, not before it:
-    /// while `Shared` exists, an empty key reaching here means a producer
-    /// stopped deciding.
-    pub fn new(decl: FuncRef, key: SpecKey) -> Self {
-        debug_assert!(
-            !key.is_empty(),
-            "an empty specialization key names no instantiation -- \
-             the producer decides absence, not this constructor",
-        );
-        Self::Specialized(decl, key)
-    }
-
-    pub fn decl(&self) -> FuncRef {
-        match self {
-            Self::Shared(fr) | Self::Specialized(fr, _) => *fr,
-        }
-    }
-
-    pub fn key(&self) -> Option<&SpecKey> {
-        match self {
-            Self::Shared(_) => None,
-            Self::Specialized(_, k) => Some(k),
-        }
-    }
-
-    /// The substitution this body lowers under.
-    ///
-    /// BOTH directions are total for a body emission writes -- `spec_subst_from_key`
-    /// and `spec_key_from_subst` round-trip, over every shape a key takes,
-    /// tuples included (`tests/spec_key_subst_roundtrip.rs`, mutation-verified
-    /// on the positional half). The declaration supplies the ORDER, which is the
-    /// only thing a substitution lacks.
-    ///
-    /// The old claim that a key holds `None` for a tuple was stale from D-2,
-    /// which gave `MonoTy` a `Tuple` constructor; and since E1 a PARTIAL key
-    /// names no body at all, so the other reason for keeping the two apart
-    /// describes nothing emission emits.
-    pub fn subst(&self, ws: &Workspace) -> SpecSubst {
-        match self {
-            Self::Shared(_) => SpecSubst::default(),
-            Self::Specialized(fr, key) => spec_subst_from_key(ws, *fr, key),
-        }
-    }
-}
-
-/// What a [`BackendFnAbiPlan`] answers for. Two populations, named, because
-/// they are two populations until E1: emission writes bodies, and the mono
-/// graph reaches logical instances, and a declined specialization is an
-/// instance with no emitted body of its own.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum AbiSubject {
-    /// A definition emission writes.
-    Emitted(EmittedBodyId),
-    /// A logical instance of the mono graph (`skull::artifact`), which has no
-    /// emitted body of its own before E1.
-    Instance(FuncRef),
-}
-
-impl AbiSubject {
-    pub fn decl(&self) -> FuncRef {
-        match self {
-            Self::Emitted(id) => id.decl(),
-            Self::Instance(fr) => *fr,
-        }
-    }
-}
 
 /// The scalarized wire of one emitted body: what each declared param occupies,
 /// and what the return carries. `None` for the whole plan means the boxed ABI.
@@ -220,7 +112,7 @@ pub(super) fn fn_value_nobox_abi(
 /// that exist for foreign bodies.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BackendFnAbiPlan {
-    pub subject: AbiSubject,
+    pub subject: crate::instance::Instance,
     /// The codegen backend this plan was built for. Part of the key: the same
     /// body has a different ABI under `values_first_class` (GLSL) than under
     /// luajit, and `result_lanes` is a JS transport fact.
@@ -237,60 +129,79 @@ pub struct BackendFnAbiPlan {
 }
 
 impl BackendFnAbiPlan {
-    /// THE emission-side constructor: one plan per (execution target, emitted body).
-    pub fn for_body(ws: &Workspace, scx: &ScalarCtx, body: EmittedBodyId) -> Self {
-        let subst = body.subst(ws);
-        Self::assemble(ws, scx, AbiSubject::Emitted(body), &subst)
-    }
-
-    /// [`Self::for_body`] for a caller that already resolved the substitution.
-    /// A body's lowering and its call sites each hold both, so re-deriving one
-    /// from the other would be work with no second opinion in it.
+    /// **THE constructor: one plan per (execution target, concrete body).**
     ///
-    /// The id would otherwise be DECORATIVE here -- the ABI comes from `subst`,
-    /// so an id naming another instantiation would ride along unnoticed. The
-    /// debug assertion is what makes the two a checked agreement rather than a
-    /// convention; it is off in release, where the compile path pays nothing.
-    pub(super) fn for_subject(
+    /// Every definition and every call that targets it reaches this with the
+    /// SAME [`Instance`], which is what makes the caller's argument splat and
+    /// the callee's parameter list one derivation rather than two.
+    ///
+    /// [`Instance`]: crate::instance::Instance
+    pub fn for_instance(
         ws: &Workspace,
         scx: &ScalarCtx,
-        subject: AbiSubject,
+        inst: &crate::instance::Instance,
+    ) -> Self {
+        let subst = inst.subst(ws, scx.interner());
+        Self::assemble(ws, scx, inst.clone(), &subst)
+    }
+
+    /// [`Self::for_instance`] for a caller that already resolved the
+    /// substitution. A body's lowering and its call sites each hold both, so
+    /// re-deriving one from the other would be work with no second opinion in
+    /// it.
+    ///
+    /// The instance would otherwise be DECORATIVE here -- the ABI comes from
+    /// `subst`, so one naming another instantiation would ride along unnoticed.
+    /// The debug assertion is what makes the two a checked agreement rather
+    /// than a convention; it is off in release, where the compile path pays
+    /// nothing.
+    pub(super) fn for_instance_with_subst(
+        ws: &Workspace,
+        scx: &ScalarCtx,
+        inst: &crate::instance::Instance,
         subst: &SpecSubst,
     ) -> Self {
-        if let AbiSubject::Emitted(body) = &subject {
-            debug_assert_eq!(
-                &body.subst(ws),
-                subst,
-                "an emitted body's id and the substitution it lowers under must be one instantiation",
-            );
-        }
-        Self::assemble(ws, scx, subject, subst)
+        debug_assert_eq!(
+            &inst.subst(ws, scx.interner()),
+            subst,
+            "a body's instance and the substitution it lowers under must be one instantiation",
+        );
+        Self::assemble(ws, scx, inst.clone(), subst)
     }
 
-    /// The shared body's plan -- the declaration's own emitted definition.
+    /// The plan of a declaration's own NON-GENERIC instance.
+    ///
+    /// Not "the shared body's plan": a declaration with generics has no body of
+    /// its own to plan for, and asking this about one is a caller bug rather
+    /// than a different answer.
     pub fn for_declaration(ws: &Workspace, scx: &ScalarCtx, decl: FuncRef) -> Self {
-        Self::for_body(ws, scx, EmittedBodyId::Shared(decl))
+        Self::for_instance(ws, scx, &crate::instance::Instance::base(decl))
     }
 
-    /// The LOGICAL-instance route (`skull::artifact`), keyed by a mono
-    /// instance's own substitution. A different population from the emitted
-    /// bodies above until E1 collapses the two.
-    pub fn for_instance(
+    /// The plan of an instance whose arguments live in ANOTHER arena -- the
+    /// mono graph's, read through the substitution it recorded rather than
+    /// through interned ids this [`ScalarCtx`] cannot resolve.
+    ///
+    /// The census route (`skull::artifact`, `skull::site_join`). It exists
+    /// because those consumers hold a graph substitution directly; it is not a
+    /// second identity, and it takes no instance precisely so it cannot be
+    /// mistaken for one.
+    pub fn for_foreign_subst(
         ws: &Workspace,
         scx: &ScalarCtx,
         decl: FuncRef,
         subst: &SpecSubst,
     ) -> Self {
-        Self::assemble(ws, scx, AbiSubject::Instance(decl), subst)
+        Self::assemble(ws, scx, crate::instance::Instance::base(decl), subst)
     }
 
     fn assemble(
         ws: &Workspace,
         scx: &ScalarCtx,
-        subject: AbiSubject,
+        subject: crate::instance::Instance,
         subst: &SpecSubst,
     ) -> Self {
-        let decl = subject.decl();
+        let decl = subject.func;
         let f = &ws.module(decl.module).functions[decl.func];
         let scalar = fn_scalar_abi_spec(ws, scx, decl, subst);
         let ret_tuple = f.return_ty.and_then(|ty| tuple_ret_shape(ws, subst, ty));
@@ -298,7 +209,7 @@ impl BackendFnAbiPlan {
     }
 
     pub fn decl(&self) -> FuncRef {
-        self.subject.decl()
+        self.subject.func
     }
 
     /// The scalarized wire, or `None` for the boxed ABI.

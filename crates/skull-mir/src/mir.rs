@@ -708,12 +708,17 @@ pub struct MirFunc {
     /// sub-tree is grafted as a raw tree in the caller's own arena.
     pub resolved_bound_trees:
         bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::bound::ResolvedBoundTree>,
-    /// Per call inst that the caller lowered with the SPECIALIZED scalar ABI: the
-    /// callee's per-generic instantiation key (`docs/flatvec-plan.md` call-site
+    /// Per call inst that the caller lowered with the SPECIALIZED scalar ABI:
+    /// **the concrete callee body it targets** (`docs/flatvec-plan.md` call-site
     /// specialization). The inliner reads it to splice the matching specialized
     /// snapshot; a surviving (un-spliced) entry is a hard site-aware rejection
     /// (its args are splatted, so the shared generic body cannot serve it).
-    pub spec_bindings: bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::lower::SpecKey>,
+    ///
+    /// An [`Instance`](crate::instance::Instance) rather than an instantiation
+    /// KEY, so the symbol a call renderer spells and the symbol the definition
+    /// was emitted under come from one object rather than from two derivations
+    /// of one encoder.
+    pub spec_bindings: bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::instance::Instance>,
     /// Per call inst: the CONCRETE INSTANCE it targets -- the callee declaration
     /// plus the substitution its own instantiation resolves to, in the same
     /// `MonoSubst` vocabulary the instance graph records per instance.

@@ -124,7 +124,7 @@ fn main() {
     // rejection would be measuring bone. What IS checkable here is that the
     // admission window did not widen for a callee with nothing to omit.
     let fr = FuncRef { module: mid, func: fid };
-    let body = skull_mir::lower::EmittedBodyId::Shared(fr);
+    let body = skull_mir::instance::Instance::base(fr);
     // A control on the fixture itself: `take` from the tests above HAS a default,
     // so its window is strictly wider at the same arity. Without this the
     // assertion below is satisfied by a `required_arg_count` that returns its
@@ -150,7 +150,7 @@ fn main() {
         skull_codegen_js::emit::required_arg_count(
             &with_default,
             &dscx,
-            skull_mir::lower::EmittedBodyId::Shared(FuncRef { module: dmid, func: dfid }),
+            skull_mir::instance::Instance::base(FuncRef { module: dmid, func: dfid }),
             3,
         ) < 3,
         "a callee WITH a default must have a wider window, or the point above is \

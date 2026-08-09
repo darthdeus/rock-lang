@@ -1023,7 +1023,7 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
             let Some(subst) = g.substitution(i) else { continue };
             publisher_lanes.insert(
                 i.clone(),
-                skull_mir::lower::BackendFnAbiPlan::for_instance(ws, scx, r.decl, subst).result_lanes(),
+                skull_mir::lower::BackendFnAbiPlan::for_foreign_subst(ws, scx, r.decl, subst).result_lanes(),
             );
         }
     }

@@ -190,7 +190,7 @@ fn a_second_target_derives_a_different_physical_layout_from_the_same_interface()
         .ir
         .stages
         .iter()
-        .map(|s| ws.module(s.entry.fref.module).functions[s.entry.fref.func].name.as_str())
+        .map(|s| ws.module(s.entry.fref().module).functions[s.entry.fref().func].name.as_str())
         .collect();
     assert_eq!(names, vec!["hv", "hf"], "the IR's stages are not the program's entries");
     // The stages carry their own kind, and the vertex stage's body really is
@@ -200,7 +200,7 @@ fn a_second_target_derives_a_different_physical_layout_from_the_same_interface()
         vec![IrStage::Vertex, IrStage::Fragment]
     );
     assert_ne!(
-        em.ir.stages[0].entry.fref, em.ir.stages[1].entry.fref,
+        em.ir.stages[0].entry.fref(), em.ir.stages[1].entry.fref(),
         "both stages published the same entry instance"
     );
     assert_ne!(

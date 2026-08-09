@@ -33,7 +33,9 @@ use skull_mir::gpu_layout::{
     texture_slots, uniform_array_block, vertex_attrs,
 };
 use skull_mir::intrinsics::{Emission, IntrinsicEntry, IntrinsicTable};
-use skull_mir::lower::{lower_emitted_body, ScalarCtx, SpecSubst};
+use skull_mir::lower::{lower_instance, ScalarCtx, SpecSubst};
+use skull_mir::instance::Instance;
+use skull_mir::monoty::MonoInterner;
 use skull_mir::monoty::{MonoCtor, MonoTy};
 use skull_mir::shader_ir::{
     FragmentOutput, LogicalSampler, ShaderIR, ShaderStageIr,
@@ -275,8 +277,8 @@ fn render_const_lit(lit: &Lit) -> Option<String> {
 /// The GLSL name of a shader instance. The symbol is target-neutral
 /// ([`ShaderInstance::symbol`]); this is the seam where a backend that needed a
 /// different spelling would rename, and GLSL does not.
-fn glsl_name(ws: &Workspace, inst: &ShaderInstance) -> String {
-    inst.symbol(ws)
+fn glsl_name(ws: &Workspace, interner: &MonoInterner, inst: &ShaderInstance) -> String {
+    inst.symbol(ws, interner)
 }
 
 struct Reach<'a> {
@@ -323,7 +325,7 @@ impl skull_mir::reach::ReachPolicy for Reach<'_> {
     }
 
     fn is_leaf(&mut self, inst: ShaderInstance) -> Result<bool, CompilerError> {
-        let f = &self.ws.module(inst.fref.module).functions[inst.fref.func];
+        let f = &self.ws.module(inst.fref().module).functions[inst.fref().func];
         // An intrinsic mapping OR a Vec operator is rendered inline at call sites
         // (a native builtin / infix op), never emitted as a GLSL definition, never
         // walked -- so it's a reachability leaf.
@@ -343,7 +345,7 @@ impl skull_mir::reach::ReachPolicy for Reach<'_> {
     }
 
     fn on_cycle(&mut self, inst: ShaderInstance) -> Result<(), CompilerError> {
-        let f = &self.ws.module(inst.fref.module).functions[inst.fref.func];
+        let f = &self.ws.module(inst.fref().module).functions[inst.fref().func];
         Err(err(
             f.name_span,
             format!("shader profile: recursion through `{}` is not allowed on GLSL", f.name),
@@ -351,12 +353,12 @@ impl skull_mir::reach::ReachPolicy for Reach<'_> {
     }
 
     fn visit(&mut self, inst: ShaderInstance) -> Result<Vec<ShaderInstance>, CompilerError> {
-        let f = &self.ws.module(inst.fref.module).functions[inst.fref.func];
-        let subst = inst.subst(self.ws);
+        let f = &self.ws.module(inst.fref().module).functions[inst.fref().func];
+        let subst = inst.subst(self.ws, self.scx.interner());
         // Signature must be tier 0 UNDER this instantiation.
         check_tier0_signature_spec(self.ws, &subst, f)?;
         // Lower to MIR (values-first-class) and profile-check the body.
-        let mf = lower_emitted_body(self.ws, self.scx, &inst.emitted_body())
+        let mf = lower_instance(self.ws, self.scx, &inst.inst)
             .map_err(|e| {
                 err(f.name_span, format!("shader profile: `{}` cannot lower for GLSL: {}", f.name, e.message))
             })?;
@@ -643,6 +645,10 @@ enum FoldKind {
 
 struct FnEmit<'a> {
     ws: &'a Workspace,
+    /// The build's one arena: a callee instance's arguments are ids into it, so
+    /// the name a call renders and the substitution its result types resolve
+    /// through both read it.
+    interner: &'a MonoInterner,
     f: &'a MirFunc,
     /// GLSL return type (None = void); floats coerce int-literal returns.
     ret_ty: Option<GlslTy>,
@@ -731,10 +737,14 @@ fn callee_inst_at(
     span: Span,
 ) -> Result<ShaderInstance, CompilerError> {
     let cf = &ws.module(func.module).functions[func.func];
-    let key = mf.spec_bindings.get(&iid).cloned().unwrap_or_default();
+    // Absent is not "the declaration": a callee with no generics HAS no
+    // instantiation to record, and one that is generic and recorded nothing is
+    // the rejection below.
+    let recorded = mf.spec_bindings.get(&iid).cloned();
     if renders_inline(cf) || cf.generics.is_empty() {
-        return Ok(ShaderInstance { fref: func, key });
+        return Ok(ShaderInstance::new(recorded.unwrap_or_else(|| Instance::base(func))));
     }
+    let key = recorded.as_ref().map(|i| i.args.clone()).unwrap_or_default();
     // Covers both shapes: a call that recorded nothing, and one whose key the
     // producer declined to build because a type parameter did not reify. Those
     // used to be two arms, the second scanning for a `None` slot; a key is
@@ -768,7 +778,7 @@ fn callee_inst_at(
             ),
         ));
     }
-    Ok(ShaderInstance { fref: func, key })
+    Ok(ShaderInstance::new(recorded.expect("a non-empty key implies a recorded instance")))
 }
 
 /// A `void main()` entry that destructures its terminal `return <struct
@@ -804,10 +814,11 @@ struct LoopCtx {
 /// Emit `<ret> <name>(<params>) { <body> }` for one lowered INSTANCE.
 fn emit_fn_def(
     ws: &Workspace,
+    interner: &MonoInterner,
     inst: &ShaderInstance,
     mf: &MirFunc,
 ) -> Result<String, CompilerError> {
-    emit_fn_def_with(ws, inst, mf, None)
+    emit_fn_def_with(ws, interner, inst, mf, None)
 }
 
 /// [`emit_fn_def`], optionally in ENTRY mode: the uniform-struct and sampler
@@ -815,12 +826,13 @@ fn emit_fn_def(
 /// uniform globals) and the fn keeps its bare Rock name.
 fn emit_fn_def_with(
     ws: &Workspace,
+    interner: &MonoInterner,
     inst: &ShaderInstance,
     mf: &MirFunc,
     entry: Option<&EntryShape>,
 ) -> Result<String, CompilerError> {
-    let fref = inst.fref;
-    let subst = inst.subst(ws);
+    let fref = inst.fref();
+    let subst = inst.subst(ws, interner);
     let f = &ws.module(fref.module).functions[fref.func];
     let emits_main = entry.is_some_and(|s| s.main_out.is_some());
     let name = if emits_main {
@@ -828,7 +840,7 @@ fn emit_fn_def_with(
     } else if entry.is_some() {
         f.name.as_str().to_string()
     } else {
-        glsl_name(ws, inst)
+        glsl_name(ws, interner, inst)
     };
     // A `void main()` entry destructures its returned struct into globals
     // (gl_Position + varyings, or MRT outs) -- no signature return type.
@@ -871,6 +883,7 @@ fn emit_fn_def_with(
 
     let mut e = FnEmit {
         ws,
+        interner,
         f: mf,
         ret_ty,
         cell_name: HashMap::default(),
@@ -1243,7 +1256,7 @@ impl FnEmit<'_> {
             }
             Inst::Call { func, args } => {
                 let cf = &self.ws.module(func.module).functions[func.func];
-                let csub = self.callee_inst(iid).subst(self.ws);
+                let csub = self.callee_inst(iid).subst(self.ws, self.interner);
                 match cf.return_ty.and_then(|rt| glsl_ty(self.ws, &csub, rt, cf.name_span, "return").ok()) {
                     Some(t) => t,
                     // Generic-return genType builtins (min<T>/max<T>/clamp/abs):
@@ -1415,7 +1428,7 @@ impl FnEmit<'_> {
     ) -> Result<String, CompilerError> {
         let cf = &self.ws.module(func.module).functions[func.func];
         let callee = self.callee_inst(iid);
-        let csub = callee.subst(self.ws);
+        let csub = callee.subst(self.ws, self.interner);
         let name = cf.name.as_str();
         // A non-scalar `__op_*` call is a Vec operator -> native infix. An int
         // operand (`*(Vec2, int)`) is cast to float (GLSL has no vec*int).
@@ -1483,7 +1496,7 @@ impl FnEmit<'_> {
             return Ok(s);
         }
         // An emittable user fn -> a plain call to THIS INSTANCE's GLSL name.
-        let gname = glsl_name(self.ws, callee);
+        let gname = glsl_name(self.ws, self.interner, callee);
         let rargs: Result<Vec<String>, CompilerError> =
             args.iter().enumerate().map(|(i, a)| arg_t(i, *a, self)).collect();
         Ok(format!("{gname}({})", rargs?.join(", ")))
@@ -1955,7 +1968,7 @@ pub fn emit_shader_library(
             out.push('\n');
         }
         let mf = &reach.bodies[&fref];
-        out.push_str(&emit_fn_def(ws, &fref, mf)?);
+        out.push_str(&emit_fn_def(ws, scx.interner(), &fref, mf)?);
     }
     Ok(out)
 }
@@ -2949,7 +2962,11 @@ struct StagePlan {
 impl StagePlan {
     /// The helpers this stage emits: the int-div/mod prelude the reachable
     /// bodies need, then each helper definition in emission order.
-    fn render_helpers(&self, ws: &Workspace) -> Result<String, CompilerError> {
+    fn render_helpers(
+        &self,
+        ws: &Workspace,
+        interner: &MonoInterner,
+    ) -> Result<String, CompilerError> {
         let mut out = String::new();
         let prelude = helper_prelude(self.uses_idiv, self.uses_imod);
         if !prelude.is_empty() {
@@ -2957,7 +2974,7 @@ impl StagePlan {
             out.push('\n');
         }
         for href in &self.ir.order {
-            out.push_str(&emit_fn_def(ws, href, &self.ir.bodies[href])?);
+            out.push_str(&emit_fn_def(ws, interner, href, &self.ir.bodies[href])?);
             out.push('\n');
         }
         Ok(out)
@@ -2979,7 +2996,7 @@ fn plan_stage(
 ) -> Result<StagePlan, CompilerError> {
     let f = &ws.module(fref.module).functions[fref.func];
     let entry = ShaderInstance::plain(fref);
-    let mf = lower_emitted_body(ws, scx, &entry.emitted_body()).map_err(|e| {
+    let mf = lower_instance(ws, scx, &entry.inst).map_err(|e| {
         err(f.name_span, format!("shader profile: `{}` cannot lower for GLSL: {}", f.name, e.message))
     })?;
     let mut callees: Vec<ShaderInstance> = Vec::new();
@@ -3117,11 +3134,12 @@ pub fn emit_shader_entry_with_dependencies(
     let scx = ScalarCtx::new_values_first_class(ws);
     let fref = resolve_root(ws, mid, root)?;
     let plan = plan_shader_entry(ws, &scx, fref)?;
-    render_shader_entry(ws, &plan, profile)
+    render_shader_entry(ws, scx.interner(), &plan, profile)
 }
 
 fn render_shader_entry(
     ws: &Workspace,
+    interner: &MonoInterner,
     plan: &EntryPlan,
     profile: GlslProfile,
 ) -> Result<ShaderEmission, CompilerError> {
@@ -3150,8 +3168,8 @@ fn render_shader_entry(
         px.push_str(&format!("uniform {} {};\n", sampler_glsl_ty(*k).uniform_decl(), n));
     }
     px.push('\n');
-    px.push_str(&plan.stage.render_helpers(ws)?);
-    px.push_str(&emit_fn_def_with(ws, &plan.stage.ir.entry, &plan.stage.ir.body, Some(shape))?);
+    px.push_str(&plan.stage.render_helpers(ws, interner)?);
+    px.push_str(&emit_fn_def_with(ws, interner, &plan.stage.ir.entry, &plan.stage.ir.body, Some(shape))?);
     px.push('\n');
     px.push_str(&format!("void main() {{\n  FragColor = {}(TexCoord);\n}}\n", f.name));
 
@@ -3818,6 +3836,7 @@ fn reject_position_read(ws: &Workspace, mf: &MirFunc, varyings_cell: Idx<Cell>, 
 
 fn emit_vertex_stage(
     ws: &Workspace,
+    interner: &MonoInterner,
     stage: &StagePlan,
     v: &VertexShape,
     iface: &ShaderInterfacePlan,
@@ -3851,7 +3870,8 @@ fn emit_vertex_stage(
             position_is_gl: true,
         }),
     };
-    let (mf, helpers, dependencies) = (&stage.ir.body, stage.render_helpers(ws)?, stage.dependencies());
+    let (mf, helpers, dependencies) =
+        (&stage.ir.body, stage.render_helpers(ws, interner)?, stage.dependencies());
 
     let mut out = String::new();
     for (n, t, loc) in &program.attributes {
@@ -3892,22 +3912,23 @@ fn emit_vertex_stage(
     }
     out.push('\n');
     out.push_str(&helpers);
-    out.push_str(&emit_fn_def_with(ws, &stage.ir.entry, mf, Some(&shape))?);
+    out.push_str(&emit_fn_def_with(ws, interner, &stage.ir.entry, mf, Some(&shape))?);
     Ok((out, dependencies))
 }
 
 fn emit_fragment_stage(
     ws: &Workspace,
+    interner: &MonoInterner,
     stage: &StagePlan,
     fs: &FragShape,
     iface: &ShaderInterfacePlan,
     program: &ProgramAbi<'_>,
 ) -> Result<(String, Vec<FuncRef>), CompilerError> {
-    let span = ws.module(stage.ir.entry.fref.module).functions[stage.ir.entry.fref.func].name_span;
+    let span = ws.module(stage.ir.entry.fref().module).functions[stage.ir.entry.fref().func].name_span;
     let resolved = program.stage(IrStage::Fragment)?;
     let (frag_block, engine_block, array_block) =
         (resolved.uniform_block, resolved.engine_block, resolved.array_block);
-    let fref = stage.ir.entry.fref;
+    let fref = stage.ir.entry.fref();
     // MRT: the entry is emitted as `void main()` destructuring its returned
     // output struct into the `layout(location=N) out` globals (like the vertex
     // varyings path). Single-output keeps the `vec4 <fn>()` + wrapper form.
@@ -3931,7 +3952,7 @@ fn emit_fragment_stage(
         arrays: fs.arrays.iter().map(|a| a.param).collect(),
         main_out,
     };
-    let (mf, helpers, dependencies) = (&stage.ir.body, stage.render_helpers(ws)?, stage.dependencies());
+    let (mf, helpers, dependencies) = (&stage.ir.body, stage.render_helpers(ws, interner)?, stage.dependencies());
 
     let mut out = String::new();
     for (n, t, flat) in interface_varyings(iface) {
@@ -3972,7 +3993,7 @@ fn emit_fragment_stage(
     }
     out.push('\n');
     out.push_str(&helpers);
-    out.push_str(&emit_fn_def_with(ws, &stage.ir.entry, mf, Some(&shape))?);
+    out.push_str(&emit_fn_def_with(ws, interner, &stage.ir.entry, mf, Some(&shape))?);
     // Single-output: the entry fn returns Vec4; main() forwards it to FragColor.
     // MRT: the entry IS `void main()` (destructured), so no wrapper.
     if !matches!(iface.fragment_output, FragmentOutput::Mrt(_)) {
@@ -4279,17 +4300,18 @@ pub fn emit_shader_pipeline_with_dependencies(
     let vfref = resolve_root(ws, mid, vert_root)?;
     let ffref = resolve_root(ws, mid, frag_root)?;
     let plan = plan_shader_pipeline(ws, &scx, vfref, ffref)?;
-    render_shader_pipeline(ws, &plan, profile)
+    render_shader_pipeline(ws, scx.interner(), &plan, profile)
 }
 
 fn render_shader_pipeline(
     ws: &Workspace,
+    interner: &MonoInterner,
     plan: &PipelinePlan,
     profile: GlslProfile,
 ) -> Result<ShaderEmission, CompilerError> {
     // Validated ONCE for the program: an unknown binding belongs to no stage,
     // so re-running the check per stage says nothing the first run did not.
-    let vspan = ws.module(plan.vert.ir.entry.fref.module).functions[plan.vert.ir.entry.fref.func]
+    let vspan = ws.module(plan.vert.ir.entry.fref().module).functions[plan.vert.ir.entry.fref().func]
         .name_span;
     let program = ProgramAbi::of(
         &plan.interface,
@@ -4300,6 +4322,7 @@ fn render_shader_pipeline(
 
     let (vertex_block, vertex_dependencies) = emit_vertex_stage(
         ws,
+        interner,
         &plan.vert,
         &plan.vshape,
         &plan.interface,
@@ -4307,6 +4330,7 @@ fn render_shader_pipeline(
     )?;
     let (pixel_block, pixel_dependencies) = emit_fragment_stage(
         ws,
+        interner,
         &plan.frag,
         &plan.fshape,
         &plan.interface,
@@ -4530,7 +4554,7 @@ mod assertion_flip_tests {
         let scx = ScalarCtx::new_values_first_class(&ws);
         let fref = resolve_root(&ws, mid, "f").expect("root");
         let mut mf =
-            lower_emitted_body(&ws, &scx, &skull_mir::lower::EmittedBodyId::Shared(fref))
+            lower_instance(&ws, &scx, &Instance::base(fref))
                 .expect("lower");
 
         // The coercion is present today (regression pin for the return sink).
@@ -4554,7 +4578,7 @@ mod assertion_flip_tests {
             }
         }
 
-        let r = emit_fn_def(&ws, &ShaderInstance::plain(fref), &mf);
+        let r = emit_fn_def(&ws, scx.interner(), &ShaderInstance::plain(fref), &mf);
         let msg = r.expect_err("a missed int->float sink must be a hard emit error").message;
         assert!(msg.contains("missed lowering sink"), "unexpected error: {msg}");
     }
@@ -4578,18 +4602,18 @@ mod assertion_flip_tests {
         let scx = ScalarCtx::new_values_first_class(&ws);
         let fref = resolve_root(&ws, mid, "caller").expect("root");
         let mut mf =
-            lower_emitted_body(&ws, &scx, &skull_mir::lower::EmittedBodyId::Shared(fref))
+            lower_instance(&ws, &scx, &Instance::base(fref))
                 .expect("lower");
 
         // CONTROL: the record exists and the body emits against it.
         assert_eq!(mf.spec_bindings.len(), 1, "the fixture recorded no instantiation to remove");
-        let ok = emit_fn_def(&ws, &ShaderInstance::plain(fref), &mf)
+        let ok = emit_fn_def(&ws, scx.interner(), &ShaderInstance::plain(fref), &mf)
             .expect("the body emits with its instantiation recorded");
         assert!(ok.contains("passthrough_T_ret_T_spec_p_float("), "{ok}");
 
         // Remove exactly the record, change nothing else.
         mf.spec_bindings.clear();
-        let msg = emit_fn_def(&ws, &ShaderInstance::plain(fref), &mf)
+        let msg = emit_fn_def(&ws, scx.interner(), &ShaderInstance::plain(fref), &mf)
             .expect_err("a generic callee with no instantiation must reject")
             .message;
         assert!(
@@ -4608,7 +4632,7 @@ mod assertion_flip_tests {
         );
         let scx = ScalarCtx::new_values_first_class(&ws);
         let fref = resolve_root(&ws, mid, "caller").expect("root");
-        let mf = lower_emitted_body(&ws, &scx, &skull_mir::lower::EmittedBodyId::Shared(fref))
+        let mf = lower_instance(&ws, &scx, &Instance::base(fref))
             .expect("lower");
 
         // The fixture really does exercise the gate: a call is present, and it
@@ -4619,7 +4643,7 @@ mod assertion_flip_tests {
         );
         assert!(mf.spec_bindings.is_empty(), "a non-generic callee recorded an instantiation");
 
-        let out = emit_fn_def(&ws, &ShaderInstance::plain(fref), &mf)
+        let out = emit_fn_def(&ws, scx.interner(), &ShaderInstance::plain(fref), &mf)
             .expect("a non-generic callee must be admitted with no record");
         assert!(out.contains("doubled_float_ret_float("), "{out}");
     }
@@ -4944,10 +4968,10 @@ mod assertion_flip_tests {
 
         // CONTROL: it renders with the output declared.
         assert!(matches!(plan.interface.fragment_output, FragmentOutput::Single(_)));
-        render_shader_pipeline(&ws, &plan, GlslProfile::Core330).expect("the control must render");
+        render_shader_pipeline(&ws, scx.interner(), &plan, GlslProfile::Core330).expect("the control must render");
 
         plan.interface.fragment_output = FragmentOutput::None;
-        let msg = render_shader_pipeline(&ws, &plan, GlslProfile::Core330)
+        let msg = render_shader_pipeline(&ws, scx.interner(), &plan, GlslProfile::Core330)
             .err()
             .expect("a fragment stage with no output must reject")
             .message;
@@ -4975,13 +4999,17 @@ mod assertion_flip_tests {
         );
         let scx = ScalarCtx::new_values_first_class(&ws);
         let fref = resolve_root(&ws, mid, "caller").expect("root");
-        let base = lower_emitted_body(&ws, &scx, &skull_mir::lower::EmittedBodyId::Shared(fref))
+        let base = lower_instance(&ws, &scx, &Instance::base(fref))
             .expect("lower");
 
         // CONTROL: the recorded key has the declared arity, and the body emits.
         let iid = *base.spec_bindings.keys().next().expect("a recorded instantiation");
-        assert_eq!(base.spec_bindings[&iid].len(), 2, "the callee declares two generics");
-        emit_fn_def(&ws, &ShaderInstance::plain(fref), &base)
+        assert_eq!(
+            base.spec_bindings[&iid].args.len(),
+            2,
+            "the callee declares two generics"
+        );
+        emit_fn_def(&ws, scx.interner(), &ShaderInstance::plain(fref), &base)
             .expect("the fixture must emit with a well-formed key");
 
         for (label, key) in [
@@ -4990,8 +5018,9 @@ mod assertion_flip_tests {
             ("too short", vec![MonoTy::Float]),
         ] {
             let mut mf = base.clone();
-            mf.spec_bindings.insert(iid, key);
-            let msg = emit_fn_def(&ws, &ShaderInstance::plain(fref), &mf)
+            let callee = base.spec_bindings[&iid].func;
+            mf.spec_bindings.insert(iid, Instance::intern(scx.interner(), callee, key));
+            let msg = emit_fn_def(&ws, scx.interner(), &ShaderInstance::plain(fref), &mf)
                 .err()
                 .unwrap_or_else(|| panic!("a {label} key must reject"))
                 .message;

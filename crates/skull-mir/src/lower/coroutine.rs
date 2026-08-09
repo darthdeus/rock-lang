@@ -9,7 +9,7 @@
 //! instantiation, which is the collision
 //! `InstanceGraph::colliding_coroutine_helpers` reports.
 //!
-//! One [`CoroutinePlan`] per [`EmittedBodyId`] answers both: the base symbol is
+//! One [`CoroutinePlan`] per [`Instance`] answers both: the base symbol is
 //! the body's own (a specialization's `spec_fn_name`, not its declaration's),
 //! and the yield channel is computed once.
 //!
@@ -21,7 +21,9 @@
 
 use bone_semantic::inference::Workspace;
 
-use super::{coroutine_yield_channel, EmittedBodyId, YieldChannel};
+use super::{coroutine_yield_channel, YieldChannel};
+use crate::instance::Instance;
+use crate::monoty::MonoInterner;
 use crate::mir::FuncRef;
 
 /// Every symbol a transformed `co fn` owns, plus its yield channel.
@@ -88,21 +90,11 @@ impl CoroutinePlan {
     }
 }
 
-/// Plan the emission of the `co fn` definition `body` names.
+/// Plan the emission of the `co fn` definition `inst` names.
 ///
-/// `Shared` gets the declaration's mangled name -- today's shared snapshot --
-/// and a specialization gets its own `spec_fn_name`, which is the name its call
-/// sites already target.
-pub fn plan_coroutine(ws: &Workspace, body: &EmittedBodyId) -> CoroutinePlan {
-    let decl = body.decl();
-    let f = &ws.module(decl.module).functions[decl.func];
-    // Not `unwrap_or(mangle_fn)`: `EmittedBodyId::new` maps an all-`None` key to
-    // `Shared`, so a `Specialized` id always has a name and a miss would mean the
-    // two rules disagree.
-    let base = match body.key() {
-        None => crate::mangle::mangle_fn(ws, f),
-        Some(key) => crate::mangle::spec_fn_name(ws, f, key)
-            .expect("a Specialized body has a non-empty key, so it has a spec name"),
-    };
-    CoroutinePlan::new(ws, decl, base)
+/// The base symbol is the instance's own -- one encoder, so a specialization's
+/// helpers (`__step`, `__resume`, `__advance`) hang off the name its call sites
+/// already target rather than off the declaration's.
+pub fn plan_coroutine(ws: &Workspace, interner: &MonoInterner, inst: &Instance) -> CoroutinePlan {
+    CoroutinePlan::new(ws, inst.func, inst.symbol(ws, interner))
 }

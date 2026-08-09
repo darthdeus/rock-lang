@@ -193,13 +193,13 @@ pub fn intern_owner(table: &mut Vec<OwnerInstance>, owner: OwnerInstance) -> Own
     OwnerRef((table.len() - 1) as u32)
 }
 
-/// Record that `call` is served by the `key` instantiation of `callee`.
+/// Record that `call` is served by the concrete body `inst`.
 ///
 /// The writer for the RETARGETING path. There are deliberately two writers of
 /// this pair, not one: lowering derives the instance INDEPENDENTLY of the
 /// delivery decision (`Builder::callee_instance_for`) and writes both through
 /// `record_call`, while this path has no independent source and derives the
-/// instance from the key through the documented `spec_subst_from_key`
+/// substitution from the instance through the documented `spec_subst_from_key`
 /// round-trip. Keeping the second opinion is worth more than collapsing to a
 /// single writer.
 ///
@@ -217,13 +217,13 @@ pub fn intern_owner(table: &mut Vec<OwnerInstance>, owner: OwnerInstance) -> Own
 pub fn record_specialized_call(
     func: &mut crate::mir::MirFunc,
     ws: &bone_semantic::inference::Workspace,
+    interner: &crate::monoty::MonoInterner,
     call: Idx<crate::mir::Inst>,
-    callee: crate::mir::FuncRef,
-    key: crate::lower::SpecKey,
+    inst: crate::instance::Instance,
 ) {
-    let subst = crate::lower::spec_subst_from_key(ws, callee, &key);
-    func.spec_bindings.insert(call, key);
-    func.callee_instances.insert(call, OwnerInstance { func: callee, subst });
+    let subst = inst.subst(ws, interner);
+    func.callee_instances.insert(call, OwnerInstance { func: inst.func, subst });
+    func.spec_bindings.insert(call, inst);
 }
 
 /// A [`Site`] plus the owner it belongs to.

@@ -32,6 +32,7 @@ use skull_mir::cfg::{
     PredMap, predecessors, reachable_blocks_from, reverse_postorder, successors,
 };
 use skull_mir::mir::*;
+use skull_mir::monoty::MonoInterner;
 
 pub use skull_mir::mangle::mangle_fn;
 
@@ -304,18 +305,25 @@ pub(crate) fn collect_lambda_params(func: &MirFunc) -> HashSet<Idx<Cell>> {
 pub fn emit_function(
     ws: &Workspace,
     ctx: &CodegenCtx,
+    interner: &MonoInterner,
     self_ref: FuncRef,
     func: &MirFunc,
 ) -> String {
     let name = mangle_fn(ws, func_of(ws, self_ref));
-    emit_named(ws, ctx, &name, func)
+    emit_named(ws, ctx, interner, &name, func)
 }
 
 /// Emit a MIR function under the EXACT Lua name `name` (no mangling) — for
 /// synthetic functions with an already-final name (a global-initializer fn).
 /// Calls inside the body still mangle their `FuncRef`s via `ctx`.
-pub fn emit_named(ws: &Workspace, ctx: &CodegenCtx, name: &str, func: &MirFunc) -> String {
-    emit_named_framed(ws, ctx, name, func, None, None)
+pub fn emit_named(
+    ws: &Workspace,
+    ctx: &CodegenCtx,
+    interner: &MonoInterner,
+    name: &str,
+    func: &MirFunc,
+) -> String {
+    emit_named_framed(ws, ctx, interner, name, func, None, None)
 }
 
 /// The coroutine state-table context: a `co fn`'s `__step` reads/writes its
@@ -349,6 +357,7 @@ pub struct FrameCtx {
 pub fn emit_named_framed(
     ws: &Workspace,
     ctx: &CodegenCtx,
+    interner: &MonoInterner,
     name: &str,
     func: &MirFunc,
     frame: Option<&FrameCtx>,
@@ -384,7 +393,7 @@ pub fn emit_named_framed(
         String::with_capacity(hoist_defs.len() + name.len() + 64 + estimated_body_bytes);
     out.push_str(&hoist_defs);
     let _ = write!(out, "function {}", name);
-    render_scope(ws, ctx, func, entry, params, &lambda_params, true, frame, &cell_colors, &hoist, &hoist_names, &mut out);
+    render_scope(ws, ctx, interner, func, entry, params, &lambda_params, true, frame, &cell_colors, &hoist, &hoist_names, &mut out);
     out.push('\n');
     out
 }
@@ -1057,6 +1066,7 @@ fn compute_inlinable(func: &MirFunc, scope: &[Idx<Block>]) -> Vec<bool> {
 fn render_scope(
     ws: &Workspace,
     ctx: &CodegenCtx,
+    interner: &MonoInterner,
     func: &MirFunc,
     entry: Idx<Block>,
     params: &[Idx<Cell>],
@@ -1185,6 +1195,7 @@ fn render_scope(
     let mut em = Emitter {
         ws,
         ctx,
+        interner,
         func,
         colors,
         color_scope,
@@ -1232,6 +1243,12 @@ fn write_vname(out: &mut String, colors: &[u32], id: Idx<Inst>) {
 struct Emitter<'a> {
     ws: &'a Workspace,
     ctx: &'a CodegenCtx,
+    /// The build's one arena, so the symbol a call spells comes from the same
+    /// [`Instance`] object the definition was emitted under rather than from a
+    /// second derivation of the same encoder.
+    ///
+    /// [`Instance`]: skull_mir::instance::Instance
+    interner: &'a MonoInterner,
     func: &'a MirFunc,
     /// Dense `raw(inst) -> color` (`u32::MAX` = uncolored); read per operand by
     /// [`write_vname`] as `colors[raw(id)]` instead of a hash probe.
@@ -1389,12 +1406,10 @@ impl Emitter<'_> {
     /// could not serve those arguments. Same derivation the specialized definition
     /// is emitted under, so the two cannot drift.
     fn callee_name(&self, id: Idx<Inst>, func: FuncRef) -> String {
-        let callee = func_of(self.ws, func);
-        self.func
-            .spec_bindings
-            .get(&id)
-            .and_then(|key| skull_mir::mangle::spec_fn_name(self.ws, callee, key))
-            .unwrap_or_else(|| mangle_fn(self.ws, callee))
+        match self.func.spec_bindings.get(&id) {
+            Some(inst) => inst.symbol(self.ws, self.interner),
+            None => mangle_fn(self.ws, func_of(self.ws, func)),
+        }
     }
 
     fn try_emit_inline_lua_splice(&self, out: &mut String, id: Idx<Inst>) -> bool {
@@ -1629,7 +1644,7 @@ impl Emitter<'_> {
                 // other lambda was already converted to a `MakeEnv` / `Global` +
                 // hoisted sibling by `convert_closures`.
                 out.push_str("function");
-                render_scope(self.ws, self.ctx, self.func, *entry, params, self.lambda_params, false, self.frame, self.cell_colors, self.hoist, self.hoist_names, out);
+                render_scope(self.ws, self.ctx, self.interner, self.func, *entry, params, self.lambda_params, false, self.frame, self.cell_colors, self.hoist, self.hoist_names, out);
             }
 
             Inst::MakeTuple(vs) => {

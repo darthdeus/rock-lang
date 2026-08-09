@@ -1591,7 +1591,7 @@ pub(crate) fn columns_available(
 /// PARTIAL key named neither the shared body nor one instantiation (measured:
 /// 267,671 total constructions and zero partial), and an EMPTY key was the
 /// shared-body sentinel for a non-generic callee -- 756 of them, normalized
-/// back to `Shared` by `EmittedBodyId::new` rather than decided by whoever
+/// back to the declaration by the id constructor rather than decided by whoever
 /// built it.
 ///
 /// The empty case is the one that had to go. A non-generic concrete instance
@@ -2021,11 +2021,11 @@ pub(crate) fn compute_spec_from_bindings(
         ));
     }
     // A non-generic declaration has no instantiation to name. It used to return
-    // `Some(vec![])` and rely on `EmittedBodyId::new` reading empty as "the
+    // `Some(vec![])` and rely on the identity constructor reading empty as "the
     // shared body" -- absence decided two layers away from the producer, by a
     // sentinel that a non-generic `Instance` legitimately collides with.
     // A non-generic declaration has no instantiation to name. It used to return
-    // `Some(vec![])` and rely on `EmittedBodyId::new` reading empty as "the
+    // `Some(vec![])` and rely on the identity constructor reading empty as "the
     // shared body" -- absence decided two layers away from the producer, by a
     // sentinel that a non-generic `Instance` legitimately collides with.
     if f.generics.is_empty() {
@@ -2424,12 +2424,16 @@ pub struct BoundNextShape {
     pub elem: BoundNextElem,
 }
 
+/// Takes the INSTANCE rather than a `(FuncRef, key)` pair: the two halves of
+/// that pair could name different declarations, and the shape this computes
+/// pairs the callee's return arity against the body's own split.
 pub fn bound_next_shape(
     ws: &Workspace,
-    fref: FuncRef,
-    key: Option<&SpecKey>,
+    interner: &crate::monoty::MonoInterner,
+    inst: &crate::instance::Instance,
 ) -> Option<BoundNextShape> {
-    let subst = key.map(|k| spec_subst_from_key(ws, fref, k)).unwrap_or_default();
+    let fref = inst.func;
+    let subst = inst.subst(ws, interner);
     let ret = ws.module(fref.module).functions[fref.func].return_ty?;
     let shape = tuple_ret_shape(ws, &subst, ret)?;
     // The element is slot 1 alone, or slots 1.. as a tuple -- the same pairing

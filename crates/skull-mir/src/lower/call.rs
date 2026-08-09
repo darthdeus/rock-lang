@@ -490,7 +490,8 @@ impl Builder<'_> {
             self.f.bound_trees.insert(call, t.clone());
         }
         if let Some((k, _)) = &dc.spec {
-            self.f.spec_bindings.insert(call, k.clone());
+            let inst = crate::instance::Instance::intern(self.scx.interner(), func, k.clone());
+            self.f.spec_bindings.insert(call, inst);
         }
         if let Some(subst) = &dc.callee_inst {
             self.f
@@ -617,11 +618,13 @@ impl Builder<'_> {
         spec: Option<&(SpecKey, SpecSubst)>,
         subst: &SpecSubst,
     ) -> BackendFnAbiPlan {
-        let body = match spec {
-            Some((key, _)) => EmittedBodyId::new(func, key.clone()),
-            None => EmittedBodyId::Shared(func),
+        let inst = match spec {
+            Some((key, _)) => {
+                crate::instance::Instance::intern(self.scx.interner(), func, key.clone())
+            }
+            None => crate::instance::Instance::base(func),
         };
-        BackendFnAbiPlan::for_subject(self.ws, self.scx, AbiSubject::Emitted(body), subst)
+        BackendFnAbiPlan::for_instance_with_subst(self.ws, self.scx, &inst, subst)
     }
 
     /// THE tuple-return shape of a call, read off the CALLEE's declared return

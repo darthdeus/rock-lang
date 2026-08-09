@@ -24,7 +24,13 @@ fn fref(module: u32, func: u32) -> FuncRef {
 /// nothing. Those were the same value while a key slot was optional; they are
 /// different lengths now, which is the point of the narrowing.
 fn inst(module: u32, func: u32, tag: Option<skull_mir::monoty::MonoTy>) -> ShaderInstance {
-    ShaderInstance { fref: fref(module, func), key: tag.into_iter().collect() }
+    static ARENA: std::sync::LazyLock<skull_mir::monoty::MonoInterner> =
+        std::sync::LazyLock::new(skull_mir::monoty::MonoInterner::new);
+    ShaderInstance::new(skull_mir::instance::Instance::intern(
+        &ARENA,
+        fref(module, func),
+        tag.into_iter().collect(),
+    ))
 }
 
 fn stage_ir(entry: ShaderInstance, order: Vec<ShaderInstance>) -> ShaderStageIr {
@@ -68,7 +74,7 @@ fn a_stage_reload_set_dedups_a_nonadjacent_repeat() {
 
     // The denominator: the order really does hold the repeat this is about.
     assert_eq!(ir.order.len(), 3);
-    assert_eq!(ir.order.iter().filter(|i| i.fref == helper).count(), 2);
+    assert_eq!(ir.order.iter().filter(|i| i.fref() == helper).count(), 2);
 
     let decls = ir.declarations();
     assert_eq!(

@@ -200,7 +200,12 @@ impl Builder<'_> {
                         .copied()
                         .unwrap_or(self.ws.module(m).functions[f].name_span);
                     if let Some(key) = self.next_call_spec(iter_ref, &w.generics, span)? {
-                        self.f.spec_bindings.insert(call, key);
+                        let inst = crate::instance::Instance::intern(
+                            self.scx.interner(),
+                            iter_ref,
+                            key,
+                        );
+                        self.f.spec_bindings.insert(call, inst);
                     }
                 }
                 if let (Some(inf), Some(w)) = (self.inf, info.iter.as_ref()) {
@@ -300,7 +305,9 @@ impl Builder<'_> {
                     self.f.bound_trees.insert(call, sub.clone());
                 }
                 if let Some(key) = spec {
-                    self.f.spec_bindings.insert(call, key);
+                    let inst =
+                        crate::instance::Instance::intern(self.scx.interner(), func, key);
+                    self.f.spec_bindings.insert(call, inst);
                 }
                 if let Some(inf) = self.inf {
                     if let Some(subst) = crate::lower::shape::witness_instance_subst(

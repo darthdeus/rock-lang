@@ -20,7 +20,9 @@
 
 use std::sync::LazyLock;
 
-use skull_mir::lower::{spec_key_from_subst, spec_subst_from_key, EmittedBodyId, SpecKey};
+use skull_mir::instance::Instance;
+use skull_mir::lower::{spec_key_from_subst, spec_subst_from_key, SpecKey};
+use skull_mir::monoty::MonoInterner;
 use skull_mir::mir::FuncRef;
 use skull_mir::monoty::{MonoCtor, MonoTy};
 use ustr::Ustr;
@@ -110,10 +112,11 @@ fn a_complete_key_survives_the_round_trip_through_its_substitution() {
         assert_eq!(back, key, "{what}: the key did not survive the round trip");
         // The body identity is what actually has to be stable -- two keys that
         // compare equal but build different ids would defeat the point.
+        let arena = MonoInterner::new();
         assert_eq!(
-            EmittedBodyId::new(ident, back),
-            EmittedBodyId::new(ident, key),
-            "{what}: the rebuilt key names a different emitted body"
+            Instance::intern(&arena, ident, back),
+            Instance::intern(&arena, ident, key),
+            "{what}: the rebuilt key names a different concrete body"
         );
     }
 }
@@ -133,10 +136,11 @@ fn a_multi_generic_key_keeps_its_positions() {
         .expect("complete substitution rebuilds");
     assert_eq!(ab_back, ab, "positions swapped on the round trip");
     assert_eq!(ba_back, ba, "positions swapped on the round trip");
+    let arena = MonoInterner::new();
     assert_ne!(
-        EmittedBodyId::new(pair, ab_back),
-        EmittedBodyId::new(pair, ba_back),
-        "two orderings of one generic list must be two emitted bodies"
+        Instance::intern(&arena, pair, ab_back),
+        Instance::intern(&arena, pair, ba_back),
+        "two orderings of one generic list must be two concrete bodies"
     );
 }
 
@@ -162,22 +166,6 @@ fn an_incomplete_substitution_rebuilds_no_key() {
         spec_key_from_subst(&ws, pair, &subst).is_none(),
         "a substitution missing a declared generic must rebuild NO key"
     );
-}
-
-/// The arm of `EmittedBodyId::new`'s emptiness assertion, and the successor to
-/// the partial-key arm this replaced -- a partial key is no longer
-/// REPRESENTABLE, so the state that remains to guard is an empty one.
-///
-/// An empty key used to be normalized back to `Shared` here. It named 756 of
-/// 756 all-`None` constructions corpus-wide, every one a non-generic callee,
-/// and a non-generic concrete instance legitimately has no arguments -- so the
-/// sentinel had to go and the decision had to move to the producer.
-#[test]
-#[cfg(debug_assertions)]
-#[should_panic(expected = "empty specialization key")]
-fn an_empty_specialization_key_names_no_body() {
-    let ws = ws_of(SRC);
-    let _ = EmittedBodyId::new(decl(&ws, "pair"), SpecKey::new());
 }
 
 /// The producer, not the constructor, is what decides a non-generic callee has

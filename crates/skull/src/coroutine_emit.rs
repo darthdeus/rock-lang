@@ -26,6 +26,7 @@ fn raw<T>(i: Idx<T>) -> u32 {
 pub fn emit_coroutine(
     ws: &Workspace,
     ctx: &CodegenCtx,
+    interner: &skull_mir::monoty::MonoInterner,
     plan: &CoroutinePlan,
     func: &MirFunc,
 ) -> String {
@@ -101,7 +102,8 @@ pub fn emit_coroutine(
     for nf in lowered.step.nested_fns[pre_nested..].iter() {
         ctx.mint_synthetic(nf.name.to_string());
     }
-    let step_lua = emit_named_framed(ws, ctx, &step_name, &lowered.step, Some(&frame), None);
+    let step_lua =
+        emit_named_framed(ws, ctx, interner, &step_name, &lowered.step, Some(&frame), None);
     // Hoisted lambda bodies: frame-free sibling fns (the pass materialized their
     // frame accesses as `e.c<S>.c<slot>`, so they need no `FrameCtx`). cleanup
     // drops the clone's dead ROOT-region insts; a co fn's loops are recovered by
@@ -111,7 +113,8 @@ pub fn emit_coroutine(
     let mut hoisted = std::mem::take(&mut lowered.step.nested_fns);
     for nf in hoisted[pre_nested..].iter_mut() {
         skull_transform::cleanup_with_nobox(ws, nf);
-        nested_luas.push_str(&skull_codegen_lua::emit_named(ws, ctx, nf.name.as_str(), nf));
+        nested_luas
+            .push_str(&skull_codegen_lua::emit_named(ws, ctx, interner, nf.name.as_str(), nf));
     }
     lowered.step.nested_fns = hoisted;
     // Terminal-cleanup defers and lifecycle-hook lambdas
@@ -128,7 +131,15 @@ pub fn emit_coroutine(
     // `__rock_coroutine_run_defers` iterates the defers LIFO with per-body pcall.
     let s_params = [lowered.s_cell];
     let emit_aux = |aux_name: &str, entry: Idx<Block>| {
-        emit_named_framed(ws, ctx, aux_name, &lowered.step, Some(&aux_frame), Some((entry, &s_params)))
+        emit_named_framed(
+            ws,
+            ctx,
+            interner,
+            aux_name,
+            &lowered.step,
+            Some(&aux_frame),
+            Some((entry, &s_params)),
+        )
     };
     let mut defer_luas = String::new();
     for (k, (_, entry)) in lowered.step.coro_defers.iter().enumerate() {

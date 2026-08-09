@@ -14,7 +14,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use bone_semantic::inference::Workspace;
 use comfy_la_arena::Idx;
 use skull_mir::intrinsics::{Emission, IntrinsicTable};
-use skull_mir::lower::{EmittedBodyId, SpecKey};
+use skull_mir::instance::Instance;
 use skull_mir::mir::{Block, Cell, ContainerKind, FuncRef, Inst, Lit, MirFunc, Term};
 use skull_parser::{CompilerError, Span};
 use ustr::Ustr;
@@ -684,25 +684,25 @@ fn finalize_labels(mut s: String, markers: &[Idx<Block>], used: &HashSet<Idx<Blo
 /// body reads a `_data` the layout does not have, so it cannot serve the call at
 /// all. Same split the luajit emitter makes in `callee_name`.
 ///
-/// ONE map over [`EmittedBodyId`], not a shared map beside a specialized one.
-/// The two were asking one question -- which definition serves this call -- and
-/// a caller had to know the all-`None` rule to join them.
+/// ONE map over [`Instance`], not a shared map beside a specialized one. The
+/// two were asking one question -- which definition serves this call -- and a
+/// caller had to know the empty-key rule to join them.
 #[derive(Default)]
 pub struct CalleeNames {
-    names: HashMap<EmittedBodyId, String>,
+    names: HashMap<Instance, String>,
 }
 
 impl CalleeNames {
-    fn get(&self, body: &EmittedBodyId) -> Option<&String> {
+    fn get(&self, body: &Instance) -> Option<&String> {
         self.names.get(body)
     }
 
-    fn insert(&mut self, body: EmittedBodyId, name: String) {
+    fn insert(&mut self, body: Instance, name: String) {
         self.names.insert(body, name);
     }
 
     fn entry_or_insert_with(&mut self, fr: FuncRef, f: impl FnOnce() -> String) {
-        self.names.entry(EmittedBodyId::Shared(fr)).or_insert_with(f);
+        self.names.entry(Instance::base(fr)).or_insert_with(f);
     }
 }
 
@@ -2236,12 +2236,12 @@ impl Emitter<'_> {
     /// rather than silently reaching the boxed shared body. Mirrors the luajit
     /// emitter's `callee_name`.
     fn callee_name(&self, iid: Idx<Inst>, func: FuncRef) -> Option<&String> {
-        // One lookup: `EmittedBodyId::new` IS the all-`None` rule -- a key that
+        // One lookup: the delivery record IS the answer -- a call that recorded
         // names no instantiation resolves to the shared body, which is what the
         // fallback used to restate by re-asking `spec_fn_name`.
         let body = match self.mf.spec_bindings.get(&iid) {
-            Some(key) => EmittedBodyId::new(func, key.clone()),
-            None => EmittedBodyId::Shared(func),
+            Some(inst) => inst.clone(),
+            None => Instance::base(func),
         };
         self.callees.get(&body)
     }
@@ -2435,9 +2435,9 @@ pub fn emit_with_closure(
         out.push_str(&init.js);
     }
     for (fr, mf) in &st.lowered {
-        match emit_lowered_fn(ws, *fr, mf, st.names.get(&EmittedBodyId::Shared(*fr)).expect("emitted body has a name"), &st.names, &hoisted, &st.gctx) {
+        match emit_lowered_fn(ws, *fr, mf, st.names.get(&Instance::base(*fr)).expect("emitted body has a name"), &st.names, &hoisted, &st.gctx) {
             Ok(js) => out.push_str(&js),
-            Err(e) => rejections.push((st.names.get(&EmittedBodyId::Shared(*fr)).expect("emitted body has a name").clone(), e)),
+            Err(e) => rejections.push((st.names.get(&Instance::base(*fr)).expect("emitted body has a name").clone(), e)),
         }
     }
     out.push_str(&emit_spec_bodies(ws, &st, &hoisted, &mut rejections));
@@ -2447,7 +2447,7 @@ pub fn emit_with_closure(
             ws,
             scx,
             *fr,
-            st.names.get(&EmittedBodyId::Shared(*fr)).expect("emitted body has a name"),
+            st.names.get(&Instance::base(*fr)).expect("emitted body has a name"),
         )?);
     }
     Ok(out)
@@ -2640,7 +2640,12 @@ fn build_program_core(
             // spelled a name nothing emitted.
             let (subst, incoming) = Default::default();
             let ctx = skull_mir::bound::body_ctx(
-                ws, module.id, bone_semantic::hir::BodyOwner::Decorator(did), &subst, &incoming,
+                ws,
+                module.id,
+                bone_semantic::hir::BodyOwner::Decorator(did),
+                &subst,
+                &incoming,
+                scx.interner(),
             );
             let mut findings: Vec<CompilerError> = Vec::new();
             findings.extend((JsReach { ws, scx, st: &mut st }).discover(&ctx, &mf)?);
@@ -2691,12 +2696,12 @@ fn build_program_core(
     // 2. fn defs (main, decorated fns, transitive callees).
     let mut chunks = HashMap::new();
     for (fr, mf) in &st.lowered {
-        match emit_lowered_fn(ws, *fr, mf, st.names.get(&EmittedBodyId::Shared(*fr)).expect("emitted body has a name"), &st.names, &hoisted, &st.gctx) {
+        match emit_lowered_fn(ws, *fr, mf, st.names.get(&Instance::base(*fr)).expect("emitted body has a name"), &st.names, &hoisted, &st.gctx) {
             Ok(js) => {
                 out.push_str(&js);
                 chunks.insert(*fr, JsChunk { js, statics: collect_statics(mf) });
             }
-            Err(e) => rejections.push((st.names.get(&EmittedBodyId::Shared(*fr)).expect("emitted body has a name").clone(), e)),
+            Err(e) => rejections.push((st.names.get(&Instance::base(*fr)).expect("emitted body has a name").clone(), e)),
         }
     }
     // 2a. standalone specialized copies. STABLE, not a chunk: a chunk is keyed by
@@ -2707,7 +2712,7 @@ fn build_program_core(
     stable.push_str(&spec_bodies);
     // 2b. inline(js) fns, emitted verbatim.
     for fr in &st.inline_js {
-        let name = st.names.get(&EmittedBodyId::Shared(*fr)).expect("emitted body has a name");
+        let name = st.names.get(&Instance::base(*fr)).expect("emitted body has a name");
         match emit_inline_js_fn(ws, scx, *fr, name) {
             Ok(definition) => {
                 out.push_str(&definition);
@@ -2808,7 +2813,7 @@ fn force_shader_register_sibling(
     let fr = FuncRef { module: m, func: f };
     if st.seen.insert(fr) {
         // Bare @nomangle name: the driver register lines call it verbatim.
-        st.names.insert(EmittedBodyId::Shared(fr), name.to_string());
+        st.names.insert(Instance::base(fr), name.to_string());
         let cf = &ws.module(m).functions[f];
         if matches!(cf.inline_body, Some((bone_semantic::hir::FnBackend::Js, _))) {
             st.inline_js.push(fr);
@@ -3047,7 +3052,7 @@ struct WorklistState {
     lowered: Vec<(FuncRef, MirFunc)>,
     /// Standalone specialized copies, one per distinct `(callee, instantiation)`
     /// a body's `spec_bindings` still asks for after inlining.
-    spec_lowered: Vec<(FuncRef, SpecKey, MirFunc)>,
+    spec_lowered: Vec<(Instance, MirFunc)>,
     spec_queue: Vec<skull_mir::bound::SpecDemand>,
     /// The bound-conformance tree each demanded specialization is emitted under,
     /// with the agreement check `skull_mir::bound::DemandMap` carries -- the same
@@ -3079,7 +3084,7 @@ impl WorklistState {
             names: CalleeNames {
                 names: roots
                     .iter()
-                    .map(|(fr, name)| (EmittedBodyId::Shared(*fr), name.clone()))
+                    .map(|(fr, name)| (Instance::base(*fr), name.clone()))
                     .collect(),
             },
             queue: roots.iter().map(|(fr, _)| *fr).collect(),
@@ -3114,7 +3119,7 @@ impl WorklistState {
         self.lowered
             .iter()
             .map(|(_, mf)| mf)
-            .chain(self.spec_lowered.iter().map(|(_, _, mf)| mf))
+            .chain(self.spec_lowered.iter().map(|(_, mf)| mf))
             .chain(self.ginits.iter().map(|g| &g.mf))
             .collect()
     }
@@ -3125,8 +3130,8 @@ impl WorklistState {
         // Specialized copies share a `FuncRef`, so the emitted NAME is what
         // orders them (one per instantiation, all distinct).
         self.spec_lowered.sort_by(|a, b| {
-            (a.0.module.index(), u32::from(a.0.func.into_raw()), &a.2.name)
-                .cmp(&(b.0.module.index(), u32::from(b.0.func.into_raw()), &b.2.name))
+            (a.0.func.module.index(), u32::from(a.0.func.func.into_raw()), &a.1.name)
+                .cmp(&(b.0.func.module.index(), u32::from(b.0.func.func.into_raw()), &b.1.name))
         });
         self.inline_js
             .sort_by_key(|fr| (fr.module.index(), u32::from(fr.func.into_raw())));
@@ -3220,7 +3225,7 @@ enum JsNode {
     /// not splice. Its own node because a specialized body is lowered under its
     /// substitution and can therefore reach callees, globals and FURTHER
     /// specializations that no shared body mentions.
-    Spec(FuncRef, SpecKey),
+    Spec(Instance),
 }
 
 /// The JS half of [`skull_mir::reach`]: roots and successors, with cycles
@@ -3254,9 +3259,10 @@ impl JsReach<'_> {
         // default, and here the default was non-termination rather than a wrong
         // answer.
         for d in std::mem::take(&mut self.st.spec_queue) {
-            match skull_mir::monoty::too_deep_to_instantiate(d.key.iter()) {
+            let args = d.inst.arg_types(self.scx.interner());
+            match skull_mir::monoty::too_deep_to_instantiate(args.iter()) {
                 Some(at) => {
-                    let f = &self.ws.module(d.func.module).functions[d.func.func];
+                    let f = &self.ws.module(d.inst.func.module).functions[d.inst.func.func];
                     let at = at.render();
                     self.st.reject(
                         &f.name.to_string(),
@@ -3274,7 +3280,7 @@ impl JsReach<'_> {
                         ),
                     );
                 }
-                None => out.push(JsNode::Spec(d.func, d.key)),
+                None => out.push(JsNode::Spec(d.inst)),
             }
         }
         out
@@ -3291,7 +3297,7 @@ impl JsReach<'_> {
     fn visit_fn(&mut self, fr: FuncRef) -> Result<(), CompilerError> {
         let f = &self.ws.module(fr.module).functions[fr.func];
         let name =
-            self.st.names.get(&EmittedBodyId::Shared(fr)).expect("queued fn has a name").clone();
+            self.st.names.get(&Instance::base(fr)).expect("queued fn has a name").clone();
         let mut mf = match skull_mir::lower::lower_function(self.ws, self.scx, fr.module, fr.func) {
             Ok(mf) => mf,
             Err(e) => {
@@ -3323,7 +3329,12 @@ impl JsReach<'_> {
         }
         let (subst, incoming) = Default::default();
         let ctx = skull_mir::bound::body_ctx(
-            self.ws, fr.module, bone_semantic::hir::BodyOwner::Function(fr.func), &subst, &incoming,
+            self.ws,
+            fr.module,
+            bone_semantic::hir::BodyOwner::Function(fr.func),
+            &subst,
+            &incoming,
+            self.scx.interner(),
         );
         findings.extend(self.discover(&ctx, &mf)?);
         match merge_findings(findings) {
@@ -3339,14 +3350,12 @@ impl JsReach<'_> {
     /// the driver here is the reachability walk rather than a private worklist,
     /// because JS emits a closure rather than whole modules and a specialized
     /// body's callees and globals must join that closure.
-    fn visit_spec(&mut self, fr: FuncRef, key: SpecKey) -> Result<(), CompilerError> {
-        let f = &self.ws.module(fr.module).functions[fr.func];
-        let Some(name) = skull_mir::mangle::spec_fn_name(self.ws, f, &key) else {
-            return Ok(()); // all-`None` key: the shared body already serves it
-        };
-        let subst = skull_mir::lower::spec_subst_from_key(self.ws, fr, &key);
-        let body = skull_mir::lower::EmittedBodyId::new(fr, key.clone());
-        let mut mf = match skull_mir::lower::lower_emitted_body(self.ws, self.scx, &body) {
+    fn visit_spec(&mut self, inst: Instance) -> Result<(), CompilerError> {
+        let fr = inst.func;
+        let name = inst.symbol(self.ws, self.scx.interner());
+        let subst = inst.subst(self.ws, self.scx.interner());
+        let body = inst.clone();
+        let mut mf = match skull_mir::lower::lower_instance(self.ws, self.scx, &inst) {
             Ok(mf) => mf,
             Err(e) => {
                 self.st.reject(&name, e);
@@ -3357,8 +3366,12 @@ impl JsReach<'_> {
         // an `Iterator`-bounded body's placeholders are what make it unemittable
         // on its own, and the demand that reached here is what resolves them.
         let tree = self.st.spec_trees.tree_of(&body);
-        if let Err(e) = skull_transform::bound::resolve_standalone_bound_calls(self.ws, &mut mf, &tree)
-        {
+        if let Err(e) = skull_transform::bound::resolve_standalone_bound_calls(
+            self.ws,
+            self.scx.interner(),
+            &mut mf,
+            &tree,
+        ) {
             self.st.reject(&name, e);
             return Ok(());
         }
@@ -3387,14 +3400,19 @@ impl JsReach<'_> {
             collect(&mut findings, nobox_errs(self.ws, nf));
         }
         mf.name = ustr::Ustr::from(name.as_str());
-        self.st.names.insert(EmittedBodyId::new(fr, key.clone()), name.clone());
+        self.st.names.insert(inst.clone(), name.clone());
         let ctx = skull_mir::bound::body_ctx(
-            self.ws, fr.module, bone_semantic::hir::BodyOwner::Function(fr.func), &subst, &tree,
+            self.ws,
+            fr.module,
+            bone_semantic::hir::BodyOwner::Function(fr.func),
+            &subst,
+            &tree,
+            self.scx.interner(),
         );
         findings.extend(self.discover(&ctx, &mf)?);
         match merge_findings(findings) {
             Some(e) => self.st.reject(&name, e),
-            None => self.st.spec_lowered.push((fr, key, mf)),
+            None => self.st.spec_lowered.push((inst, mf)),
         }
         Ok(())
     }
@@ -3428,7 +3446,12 @@ impl JsReach<'_> {
         }
         let (subst, incoming) = Default::default();
         let ctx = skull_mir::bound::body_ctx(
-            self.ws, site.module, bone_semantic::hir::BodyOwner::Global(site.gid), &subst, &incoming,
+            self.ws,
+            site.module,
+            bone_semantic::hir::BodyOwner::Global(site.gid),
+            &subst,
+            &incoming,
+            self.scx.interner(),
         );
         findings.extend(self.discover(&ctx, &mf)?);
         if let Some(e) = merge_findings(findings) {
@@ -3473,7 +3496,7 @@ impl JsReach<'_> {
         // call site still spells the specialized name.
         collect(&mut findings, collect_spec_bound_calls(ws, ctx, mf, &mut demands));
         for body in st.spec_trees.record(&demands) {
-            let fref = body.decl();
+            let fref = body.func;
             let f = &ws.module(fref.module).functions[fref.func];
             collect::<()>(
                 &mut findings,
@@ -3521,7 +3544,7 @@ impl skull_mir::reach::ReachPolicy for JsReach<'_> {
         match node {
             JsNode::Fn(fr) => self.visit_fn(fr)?,
             JsNode::Ginit(gname) => self.visit_ginit(gname)?,
-            JsNode::Spec(fr, key) => self.visit_spec(fr, key)?,
+            JsNode::Spec(inst) => self.visit_spec(inst)?,
         }
         Ok(self.take_pending())
     }
@@ -3569,12 +3592,9 @@ fn emit_spec_bodies(
     rejections: &mut Vec<(String, CompilerError)>,
 ) -> String {
     let mut out = String::new();
-    for (fr, key, mf) in &st.spec_lowered {
-        let name = st
-            .names
-            .get(&EmittedBodyId::new(*fr, key.clone()))
-            .expect("a lowered specialization has a name");
-        match emit_lowered_fn(ws, *fr, mf, name, &st.names, hoisted, &st.gctx) {
+    for (inst, mf) in &st.spec_lowered {
+        let name = st.names.get(inst).expect("a lowered specialization has a name");
+        match emit_lowered_fn(ws, inst.func, mf, name, &st.names, hoisted, &st.gctx) {
             Ok(js) => out.push_str(&js),
             Err(e) => rejections.push((name.clone(), e)),
         }
@@ -3595,7 +3615,7 @@ fn check_scalar_abi(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
     lowered: &[(FuncRef, MirFunc)],
-    spec_lowered: &[(FuncRef, SpecKey, MirFunc)],
+    spec_lowered: &[(Instance, MirFunc)],
     bodies: &[&MirFunc],
 ) -> Vec<(String, CompilerError)> {
     let arities: HashMap<FuncRef, usize> =
@@ -3605,8 +3625,8 @@ fn check_scalar_abi(
     // so a spec-bound call must be measured against its own copy, not the shared
     // body it shares a `FuncRef` with. Checking the shared arity reads every
     // correct specialized call as a dropped-leaf bug.
-    let spec_arities: HashMap<(FuncRef, SpecKey), usize> =
-        spec_lowered.iter().map(|(fr, key, mf)| ((*fr, key.clone()), mf.params.len())).collect();
+    let spec_arities: HashMap<Instance, usize> =
+        spec_lowered.iter().map(|(inst, mf)| (inst.clone(), mf.params.len())).collect();
     let mut out: Vec<(String, CompilerError)> = Vec::new();
     for mf in bodies {
         let mut findings: Vec<CompilerError> = Vec::new();
@@ -3626,17 +3646,15 @@ fn check_scalar_abi(
                 // scalarized value-struct one -- rejected while luajit compiled
                 // and ran it.
                 let (body, arity, what) = match mf.spec_bindings.get(&iid) {
-                    Some(key) => match spec_arities.get(&(*callee, key.clone())) {
+                    Some(inst) => match spec_arities.get(inst) {
                         // An unemitted specialization is `callee_name`'s
                         // rejection to make -- it knows which name went missing.
                         None => continue,
-                        Some(&arity) => {
-                            (EmittedBodyId::new(*callee, key.clone()), arity, "specialized ")
-                        }
+                        Some(&arity) => (inst.clone(), arity, "specialized "),
                     },
                     None => match arities.get(callee) {
                         None => continue,
-                        Some(&arity) => (EmittedBodyId::Shared(*callee), arity, ""),
+                        Some(&arity) => (Instance::base(*callee), arity, ""),
                     },
                 };
                 let required = required_arg_count(ws, scx, body, arity);
@@ -3948,7 +3966,7 @@ fn decorator_application_lines_js(
                 let &(dmid, did) = deco_map.get(&ann.name.name).expect("decorator name resolves");
                 let d = &ws.module(dmid).decorators[did];
                 let fr = FuncRef { module: module.id, func: fid };
-                let js_fn = names.get(&EmittedBodyId::Shared(fr)).ok_or_else(|| {
+                let js_fn = names.get(&Instance::base(fr)).ok_or_else(|| {
                     err(format!(
                         "JS subset: decorated fn `{}` was not emitted (not a program root)",
                         f.name
@@ -4097,7 +4115,7 @@ fn discover_callees(
         // swapped it at lowering).
         if matches!(cf.inline_body, Some((bone_semantic::hir::FnBackend::Js, _))) {
             if seen.insert(callee) {
-                names.insert(EmittedBodyId::Shared(callee), callee_js_name(ws, callee));
+                names.insert(Instance::base(callee), callee_js_name(ws, callee));
                 inline_js.push(callee);
                 scan_inline_js_body(ws, callee, names, queue, seen, inline_js);
             }
@@ -4120,7 +4138,7 @@ fn discover_callees(
             continue;
         }
         if seen.insert(callee) {
-            names.insert(EmittedBodyId::Shared(callee), callee_js_name(ws, callee));
+            names.insert(Instance::base(callee), callee_js_name(ws, callee));
             queue.push(callee);
         }
     }
@@ -4177,13 +4195,13 @@ fn scan_inline_js_body(
             let target = FuncRef { module: m, func: fid };
             if matches!(cf.inline_body, Some((bone_semantic::hir::FnBackend::Js, _))) {
                 if seen.insert(target) {
-                    names.insert(EmittedBodyId::Shared(target), cf.name.to_string());
+                    names.insert(Instance::base(target), cf.name.to_string());
                     inline_js.push(target);
                     scan_inline_js_body(ws, target, names, queue, seen, inline_js);
                 }
             } else if cf.inline_body.is_none() && !cf.is_extern {
                 if seen.insert(target) {
-                    names.insert(EmittedBodyId::Shared(target), cf.name.to_string());
+                    names.insert(Instance::base(target), cf.name.to_string());
                     queue.push(target);
                 }
             }
@@ -4245,7 +4263,7 @@ fn discover_globals(
             let jsname = callee_js_name(ws, fr);
             gctx.fns.entry(name).or_insert_with(|| jsname.clone());
             if seen.insert(fr) {
-                names.insert(EmittedBodyId::Shared(fr), jsname);
+                names.insert(Instance::base(fr), jsname);
                 queue.push(fr);
             }
         } else if let Some(cands) = ws.functions_by_name.get(&name) {
@@ -4306,7 +4324,7 @@ fn register_fn_value_variant(
         let jsname = callee_js_name(ws, fr);
         gctx.fns.entry(name).or_insert_with(|| jsname.clone());
         if seen.insert(fr) {
-            names.insert(EmittedBodyId::Shared(fr), jsname);
+            names.insert(Instance::base(fr), jsname);
             inline_js.push(fr);
             scan_inline_js_body(ws, fr, names, queue, seen, inline_js);
         }
@@ -4318,7 +4336,7 @@ fn register_fn_value_variant(
         let jsname = callee_js_name(ws, fr);
         gctx.fns.entry(name).or_insert_with(|| jsname.clone());
         if seen.insert(fr) {
-            names.insert(EmittedBodyId::Shared(fr), jsname);
+            names.insert(Instance::base(fr), jsname);
             queue.push(fr);
         }
     }
@@ -4336,7 +4354,7 @@ fn direct_callees(mf: &MirFunc, names: &CalleeNames) -> Vec<ustr::Ustr> {
                     Inst::Call { func, .. } | Inst::CallMulti { func, .. } => *func,
                     _ => continue,
                 };
-                if let Some(n) = names.get(&EmittedBodyId::Shared(fr)) {
+                if let Some(n) = names.get(&Instance::base(fr)) {
                     out.push(ustr::Ustr::from(n.as_str()));
                 }
             }
@@ -4374,7 +4392,7 @@ fn order_global_inits(
     // Key by the EMIT name (`names[fr]`, mangled) -- that is what `direct_callees`
     // resolves a call to, NOT the unmangled `mf.name`.
     for (fr, mf) in lowered {
-        if let Some(emit_name) = names.get(&EmittedBodyId::Shared(*fr)) {
+        if let Some(emit_name) = names.get(&Instance::base(*fr)) {
             record(ustr::Ustr::from(emit_name.as_str()), mf);
         }
     }
@@ -5060,11 +5078,11 @@ fn global_refs(mf: &MirFunc) -> Vec<ustr::Ustr> {
 pub fn required_arg_count(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
-    body: EmittedBodyId,
+    body: Instance,
     arity: usize,
 ) -> usize {
     use bone_semantic::hir::BodyOwner;
-    let fr = body.decl();
+    let fr = body.func;
     let defaults: Vec<bool> = ws
         .module(fr.module)
         .bodies
@@ -5076,7 +5094,9 @@ pub fn required_arg_count(
     // The widths come from the EMITTED BODY's own plan: a specialization's
     // instantiation is exactly where a param's leaf width differs from the
     // declaration's, so asking the declaration would answer for another ABI.
-    if let Some(widths) = skull_mir::lower::BackendFnAbiPlan::for_body(ws, scx, body).param_leaf_widths() {
+    if let Some(widths) =
+        skull_mir::lower::BackendFnAbiPlan::for_instance(ws, scx, &body).param_leaf_widths()
+    {
         let omittable: usize = widths
             .iter()
             .zip(defaults.iter().chain(std::iter::repeat(&false)))

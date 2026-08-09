@@ -25,7 +25,7 @@ fn emit_dump(mut modules: Vec<skull_parser::Ast>, fn_name: &str) -> String {
     let func = skull_mir::lower::lower_function(&ws, &scx, mid, fid)
         .unwrap_or_else(|e| panic!("lower failed: {}", e.message));
     let ctx = CodegenCtx::new(&ws);
-    emit_function(&ws, &ctx, FuncRef { module: mid, func: fid }, &func)
+    emit_function(&ws, &ctx, scx.interner(), FuncRef { module: mid, func: fid }, &func)
 }
 
 /// Stdlib-free: literals, vars, `let`, builtin comparisons, control flow.
@@ -64,7 +64,7 @@ fn emit_clean(src: &str, fn_name: &str) -> String {
         .unwrap_or_else(|e| panic!("lower failed: {}", e.message));
     skull_transform::cleanup(&mut func);
     let ctx = CodegenCtx::new(&ws);
-    emit_function(&ws, &ctx, FuncRef { module: mid, func: fid }, &func)
+    emit_function(&ws, &ctx, scx.interner(), FuncRef { module: mid, func: fid }, &func)
 }
 
 /// Emit EVERY lowerable function in the `<test>` module, run a Lua `driver`
@@ -114,7 +114,7 @@ fn run(src: &str, driver: &str) -> String {
                 .expect("inline failed");
             skull_transform::cleanup(&mut func);
             skull_transform::recover_counted_loops(&ws, &mut func);
-            lua.push_str(&emit_function(&ws, &ctx, fref, &func));
+            lua.push_str(&emit_function(&ws, &ctx, scx.interner(), fref, &func));
         }
     }
     // Alias the user module's uniquely-named fns back to their bare source names
@@ -607,7 +607,7 @@ fn emit_inlined(src: &str, fn_name: &str) -> String {
     skull_transform::cleanup(&mut func);
     skull_transform::recover_counted_loops(&ws, &mut func);
     let ctx = CodegenCtx::new(&ws);
-    emit_function(&ws, &ctx, self_ref, &func)
+    emit_function(&ws, &ctx, scx.interner(), self_ref, &func)
 }
 
 // --- Slice 4 acceptance gate: an @inline user iterator driven by `for`

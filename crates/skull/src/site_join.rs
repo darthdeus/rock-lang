@@ -499,10 +499,10 @@ struct CallRow {
     inst: bone_semantic::prelude::Idx<Inst>,
     site: Option<CallSite>,
     target: Option<skull_mir::mir::FuncRef>,
-    /// The call's OWN instantiation key (`MirFunc::spec_bindings`), which is
-    /// what makes the comparison instance-level rather than declaration-level.
+    /// The call's OWN delivery record (`MirFunc::spec_bindings`), which is what
+    /// makes the comparison instance-level rather than declaration-level.
     /// `None` when the lowerer recorded none.
-    spec_key: Option<skull_mir::lower::SpecKey>,
+    spec_key: Option<skull_mir::instance::Instance>,
     /// The call's own claim about WHICH concrete instance it targets
     /// (`MirFunc::callee_instances`). This is the identity record, recorded for
     /// every complete instantiation regardless of what the specialization
@@ -711,9 +711,9 @@ fn measure_body_into(
                 .unwrap_or_else(|| "<indirect>".into());
             let key = match (&row.spec_key, &row.callee_inst) {
                 (None, None) => "nokey/noinst".to_string(),
-                (Some(k), None) => format!("key{}/noinst", k.len()),
+                (Some(k), None) => format!("key{}/noinst", k.args.len()),
                 (None, Some(i)) => format!("nokey/inst{}", i.subst.len()),
-                (Some(k), Some(i)) => format!("key{}/inst{}", k.len(), i.subst.len()),
+                (Some(k), Some(i)) => format!("key{}/inst{}", k.args.len(), i.subst.len()),
             };
             c.rows.push(format!(
                 "{}\t{op}\t{span}\towner={owner}\ttarget={target}\t{key}\tin={}\t{note}",

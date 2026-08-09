@@ -286,7 +286,7 @@ pub fn spec_bound_calls(
     let empty = bone_semantic::prelude::BoundTree::default();
     for bid in emitted_blocks(mf) {
         for &iid in &mf.blocks[bid].insts {
-            let Some(key) = mf.spec_bindings.get(&iid) else { continue };
+            let Some(inst) = mf.spec_bindings.get(&iid) else { continue };
             let fref = match &mf.insts[iid] {
                 Inst::Call { func, .. } | Inst::CallMulti { func, .. } => *func,
                 _ => continue,
@@ -300,7 +300,14 @@ pub fn spec_bound_calls(
                 Some(t) => t.clone(),
                 None => {
                     let raw = mf.bound_trees.get(&iid).unwrap_or(&empty);
-                    crate::bound::resolve_bound_tree(ws, ctx.inf, ctx.subst, raw, ctx.incoming)?
+                    crate::bound::resolve_bound_tree(
+                        ws,
+                        ctx.interner,
+                        ctx.inf,
+                        ctx.subst,
+                        raw,
+                        ctx.incoming,
+                    )?
                 }
             };
             // The premise the Instance re-key rests on, checked where every
@@ -309,17 +316,25 @@ pub fn spec_bound_calls(
             // delivery decision, `substitute_bound_call` from the key -- so
             // "they agree" is a measurement, not a convention, and a site with
             // no instance at all is the shape that actually occurred.
+            debug_assert_eq!(
+                inst.func,
+                fref,
+                "the delivery record for a call in `{}` names a different callee than the \
+                 instruction does",
+                mf.name,
+            );
             debug_assert!(
                 mf.callee_instances.get(&iid).is_some_and(|oi| {
                     oi.func == fref
-                        && crate::lower::spec_key_from_subst(ws, fref, &oi.subst)
-                            .is_some_and(|k| &k == key)
+                        && crate::lower::spec_key_from_subst(ws, fref, &oi.subst).is_some_and(
+                            |k| crate::instance::Instance::intern(ctx.interner, fref, k) == *inst,
+                        )
                 }),
                 "specialized call to `{}` in `{}` records no agreeing instance",
                 ws.module(fref.module).functions[fref.func].name,
                 mf.name,
             );
-            out.push(crate::bound::SpecDemand { func: fref, key: key.clone(), tree });
+            out.push(crate::bound::SpecDemand { inst: inst.clone(), tree });
         }
     }
     Ok(())

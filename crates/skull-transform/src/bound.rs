@@ -13,7 +13,9 @@ use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::CompilerError;
 use comfy_la_arena::Idx;
 use skull_mir::bound::ResolvedBoundNext;
-use skull_mir::lower::{bound_next_shape, BoundNextElem, ElemRebuild, SpecKey};
+use skull_mir::instance::Instance;
+use skull_mir::lower::{bound_next_shape, BoundNextElem, ElemRebuild};
+use skull_mir::monoty::MonoInterner;
 use skull_mir::mir::*;
 
 /// Resolve every placeholder in a body that is being emitted STANDALONE at one
@@ -29,6 +31,7 @@ use skull_mir::mir::*;
 /// tree, and leaving them out makes the residue surface at runtime.
 pub fn resolve_standalone_bound_calls(
     ws: &Workspace,
+    interner: &MonoInterner,
     mf: &mut MirFunc,
     incoming: &skull_mir::bound::ResolvedBoundTree,
 ) -> Result<(), CompilerError> {
@@ -60,10 +63,10 @@ pub fn resolve_standalone_bound_calls(
                 mf.resolved_bound_trees.insert(id, sub.clone());
             }
         }
-        substitute_bound_call(mf, id, split, &leaf, ws, "in this instantiation")?;
+        substitute_bound_call(mf, id, split, &leaf, ws, interner, "in this instantiation")?;
     }
     for nf in &mut mf.nested_fns {
-        resolve_standalone_bound_calls(ws, nf, incoming)?;
+        resolve_standalone_bound_calls(ws, interner, nf, incoming)?;
     }
     Ok(())
 }
@@ -84,6 +87,7 @@ pub fn substitute_bound_call(
     already_split: bool,
     leaf: &ResolvedBoundNext,
     ws: &Workspace,
+    interner: &MonoInterner,
     what: &str,
 ) -> Result<(), CompilerError> {
     let (concrete, spec) = match leaf {
@@ -100,8 +104,8 @@ pub fn substitute_bound_call(
     };
     let (dests, args) = (dests.clone(), args.clone());
     func.insts[call] = Inst::CallMulti { dests, func: concrete, args };
-    if let Some(key) = spec.clone() {
-        skull_mir::site::record_specialized_call(func, ws, call, concrete, key);
+    if let Some(inst) = spec.clone() {
+        skull_mir::site::record_specialized_call(func, ws, interner, call, inst);
     }
     // The placeholder's arity is `(bool, E)` because bound conformance
     // fixes it there; the CONCRETE callee is only known here. When its
@@ -114,10 +118,15 @@ pub fn substitute_bound_call(
     // element (`count`) drops it as dead -- which is why this does not
     // reintroduce the box the mark forbids, and why it does not
     // over-reject `count` the way a splice-time arity check did.
+    // The instance the shape is read at: the leaf's own when it named one, else
+    // the non-generic instance of the concrete witness. `Instance::base` is not a
+    // fallback for a missing record -- a witness with no type arguments has none
+    // to record.
+    let inst = spec.clone().unwrap_or_else(|| Instance::base(concrete));
     if already_split {
-        check_bound_next_split(func, call, ws, concrete, spec.as_ref())
+        check_bound_next_split(func, call, ws, interner, &inst)
     } else {
-        repack_bound_next_element(func, call, ws, concrete, spec.as_ref())
+        repack_bound_next_element(func, call, ws, interner, &inst)
     }
 }
 
@@ -134,10 +143,10 @@ fn check_bound_next_split(
     func: &MirFunc,
     call: Idx<Inst>,
     ws: &Workspace,
-    concrete: FuncRef,
-    spec: Option<&SpecKey>,
+    interner: &MonoInterner,
+    inst: &Instance,
 ) -> Result<(), CompilerError> {
-    let Some(shape) = bound_next_shape(ws, concrete, spec) else {
+    let Some(shape) = bound_next_shape(ws, interner, inst) else {
         return Ok(());
     };
     let Inst::CallMulti { dests, .. } = &func.insts[call] else {
@@ -168,10 +177,10 @@ fn repack_bound_next_element(
     func: &mut MirFunc,
     call: Idx<Inst>,
     ws: &Workspace,
-    concrete: FuncRef,
-    spec: Option<&SpecKey>,
+    interner: &MonoInterner,
+    inst: &Instance,
 ) -> Result<(), CompilerError> {
-    let Some(shape) = bound_next_shape(ws, concrete, spec) else {
+    let Some(shape) = bound_next_shape(ws, interner, inst) else {
         return Ok(());
     };
     let Inst::CallMulti { dests, .. } = &func.insts[call] else {
