@@ -2242,14 +2242,15 @@ pub fn emit_full_in(
     if let Some(err) = skull_mir::lower::gpu_only_call_rejection(ws, user_mid) {
         return Err(err);
     }
-    if let Some((key, span)) = skull_mir::lower::value_struct_map_key(ws, user_mid) {
+    if let Some((why, span)) = skull_mir::lower::map_key_rejection(ws, user_mid) {
         return Err(CompilerError::new_with_label(
             span,
             format!(
-                "`{key}` is a `value` struct and cannot be a `Map` key -- value structs hash by \
-                 cdata pointer identity, so a runtime-built key silently misses an entry stored \
-                 under an equal-by-value instance. Use an int/string/bool/float/newtype key, or a \
-                 string key derived from the struct's fields."
+                "this `Map` key is not value-keyed and would silently miss: {why}. A runtime-built \
+                 key does not find the entry stored under an equal-by-value one, so an insert at \
+                 an equal key grows the map instead of replacing. Use an int, string, bool or \
+                 float key -- or a newtype over one of those -- or derive a string key from the \
+                 value's fields."
             ),
         ));
     }

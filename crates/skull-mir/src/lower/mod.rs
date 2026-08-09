@@ -2043,6 +2043,92 @@ fn resolve_tyid(ws: &Workspace, inf: &BodyInference, ty: TyId) -> Option<TyId> {
     }
 }
 
+/// Why `K` cannot be a `Map` key, or `None` when it is admitted.
+///
+/// An ALLOW-LIST, not a scan for known-bad shapes. Lua keys a table by identity
+/// for everything that is not a scalar, so the admitted set is the closed one --
+/// int/float/string/bool are value-keyed, and a `newtype` is admitted exactly
+/// when what it wraps is. Every other concrete key misses silently: a cdata
+/// (`value` struct, cdata-tier payload enum) hashes by pointer, and a table
+/// (tuple, array, plain struct, table-tier payload enum) by table identity.
+///
+/// An UNRESOLVED key is admitted, and that is load-bearing rather than lenient:
+/// `fn Map<K, V>.insert` in the stdlib is generic, and rejecting a type
+/// parameter would refuse the declaration of every Map method. Only a key that
+/// resolves to a concrete non-admitted type is a finding.
+fn map_key_rejection_reason(
+    ws: &Workspace,
+    inf: &BodyInference,
+    k: TyId,
+    depth: u32,
+) -> Option<String> {
+    // A newtype chain is finite, but a malformed self-wrapping one must not spin.
+    if depth > 8 {
+        return None;
+    }
+    match ty_node(ws, inf, k)? {
+        TypeExpr::Builtin(
+            BuiltinTy::Int
+            | BuiltinTy::Float
+            | BuiltinTy::Bool
+            | BuiltinTy::String
+            // Not key shapes, but nothing here can decide against them either.
+            | BuiltinTy::Any
+            | BuiltinTy::Unit
+            | BuiltinTy::Never
+            | BuiltinTy::Error,
+        ) => None,
+        // A type parameter or an uninstantiated call-site var: undecidable here.
+        TypeExpr::Generic(..) | TypeExpr::Infer(..) => None,
+        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } => {
+            if let Some(nid) = ws.newtypes_by_name.get(&name) {
+                let wrapped = ws.modules[nid.module.index()].newtypes[nid.def].wrapped;
+                let wrapped = resolve_tyid(ws, inf, wrapped)?;
+                return map_key_rejection_reason(ws, inf, wrapped, depth + 1).map(|why| {
+                    format!("`{name}` wraps {why}, and a newtype is keyed as what it wraps")
+                });
+            }
+            // A payload-free enum lowers to an int ordinal, so it IS value-keyed.
+            // One payload variant is enough to make the type cdata- or
+            // table-carrying, and the key that misses is the payload-carrying
+            // one -- a `Color::Red` control would hit and hide it.
+            if let Some(eid) = ws.enums_by_name.get(&name) {
+                let e = &ws.modules[eid.module.index()].enums[eid.def];
+                return e
+                    .variants
+                    .iter()
+                    .any(|v| !matches!(v.payload, VariantPayload::Unit))
+                    .then(|| {
+                        format!(
+                            "`{name}` has payload-carrying variants, keyed by cdata or object \
+                             identity (a payload-free enum is an int ordinal and stays allowed)"
+                        )
+                    });
+            }
+            if map_is_value_struct(ws, name) {
+                Some(format!("`{name}` is a `value` struct, keyed by cdata identity"))
+            } else {
+                Some(format!("`{name}` is a struct, keyed by object identity"))
+            }
+        }
+        TypeExpr::Tuple { .. } => {
+            Some("a tuple is an aggregate, keyed by object identity".to_string())
+        }
+        TypeExpr::App { ctor: TypeCtor::Array, .. } => {
+            Some("an array is an aggregate, keyed by object identity".to_string())
+        }
+        TypeExpr::App { ctor: TypeCtor::Map, .. } => {
+            Some("a `Map` is an aggregate, keyed by object identity".to_string())
+        }
+        TypeExpr::Nullable(..) => {
+            Some("a nullable key cannot be distinguished from a missing entry".to_string())
+        }
+        TypeExpr::Function { .. } => {
+            Some("a function is keyed by identity".to_string())
+        }
+    }
+}
+
 fn map_is_value_struct(ws: &Workspace, name: Ustr) -> bool {
     ws.struct_by_name
         .get(&name)
@@ -2050,28 +2136,25 @@ fn map_is_value_struct(ws: &Workspace, name: Ustr) -> bool {
         .unwrap_or(false)
 }
 
-/// When `ty` resolves to `Map<K, V>` with `K` a `value` struct, returns K's name.
-fn map_key_value_struct(ws: &Workspace, inf: &BodyInference, ty: TyId) -> Option<Ustr> {
+/// When `ty` resolves to `Map<K, V>` with an inadmissible `K`, returns why.
+fn map_key_rejected(ws: &Workspace, inf: &BodyInference, ty: TyId) -> Option<String> {
     let ty = resolve_tyid(ws, inf, ty)?;
     let TypeExpr::App { ctor: TypeCtor::Map, params } = ty_node(ws, inf, ty)? else {
         return None;
     };
     let k = resolve_tyid(ws, inf, ty.with_idx(params.into_iter().next()?))?;
-    match ty_node(ws, inf, k)? {
-        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } if map_is_value_struct(ws, name) => {
-            Some(name)
-        }
-        _ => None,
-    }
+    map_key_rejection_reason(ws, inf, k, 0)
 }
 
-/// Scan module `mid`'s function bodies for a `Map<K, V>` whose key `K` is a
-/// `value` struct. Value structs are C-layout cdata; as Lua table keys they
-/// hash by pointer identity, so a runtime-built key silently misses an entry
-/// stored under an equal-by-value but distinct instance (store `mk(1,2)`, read
-/// a fresh `mk(1,2)` -> nil). int / string / bool / float / newtype keys are Lua
-/// value-keyed and stay allowed. Returns the first offending (key name, span).
-pub fn value_struct_map_key(ws: &Workspace, mid: ModuleId) -> Option<(Ustr, Span)> {
+/// Scan module `mid`'s function bodies for a `Map<K, V>` whose key `K` is not
+/// value-keyed, and return the first offending (message, span).
+///
+/// The failure this prevents is SILENT: a runtime-built key misses an entry
+/// stored under an equal-by-value one, so `m.insert(k, v)` twice at equal `k`
+/// grows the map instead of replacing (measured: `Map<(int,int), string>` -> len
+/// 2, against a string control at len 1). Nothing at runtime reports it, and
+/// `a == b` can be true on the very keys that miss.
+pub fn map_key_rejection(ws: &Workspace, mid: ModuleId) -> Option<(String, Span)> {
     let module = ws.module(mid);
     let ir = ws.inference(mid)?;
     for (fid, _f) in module.functions.iter() {
@@ -2080,8 +2163,8 @@ pub fn value_struct_map_key(ws: &Workspace, mid: ModuleId) -> Option<(Ustr, Span
             continue;
         };
         for (e, tyid) in inf.expr_types.iter() {
-            if let Some(name) = map_key_value_struct(ws, inf, *tyid) {
-                return Some((name, body.expr_spans[e]));
+            if let Some(why) = map_key_rejected(ws, inf, *tyid) {
+                return Some((why, body.expr_spans[e]));
             }
         }
     }

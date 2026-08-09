@@ -38,6 +38,8 @@ mod loops;
 mod publisher_abi;
 #[path = "map_iter.rs"]
 mod map_iter;
+#[path = "map_key_admission.rs"]
+mod map_key_admission;
 #[path = "match_fold.rs"]
 mod match_fold;
 #[path = "misc_intrinsics.rs"]
