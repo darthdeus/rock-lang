@@ -1701,3 +1701,160 @@ fn main() {
     );
     assert_eq!(js.census().widest_result_lanes, 2);
 }
+
+// ---------------------------------------------------------------------------
+// PUBLICATION obligations: an `@nomangle` root's bare-name promise is a
+// DIFFERENT question from which declaration serves a resolved call.
+// ---------------------------------------------------------------------------
+
+const PUBLICATION_FIXTURE: &str = r#"
+@nomangle fn portable(x: int) -> int { return x + 1 }
+inline(lua) fn portable(x: int) -> int = """
+    return x + 2
+"""
+fn caller() -> int { return portable(5) }
+
+fn plain(x: int) -> int { return x + 1 }
+inline(lua) fn plain(x: int) -> int = """
+    return x + 2
+"""
+fn other_caller() -> int { return plain(5) }
+
+fn main() { print("{caller()} {other_caller()}") }
+"#;
+
+/// The compact fixture: an `@nomangle` portable declaration with a same-name
+/// `inline(lua)` sibling, plus an ordinary call, plus a sibling control (the
+/// SAME shape with no `@nomangle`) that must not acquire a publication.
+#[test]
+fn a_nomangle_root_publishes_its_own_body_beside_the_calls_sibling_serves() {
+    let ws = check(PUBLICATION_FIXTURE);
+    let (g, roots) = graph_for(&ws);
+    let lua = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
+
+    // Nonzero ordinary-call population: the artifact retains real Rock work.
+    assert!(!lua.instances.is_empty(), "the fixture retained no ordinary Rock instances at all");
+    // Nonzero exact-publication population: the `@nomangle` root's promise is
+    // modeled at all.
+    assert!(
+        !lua.publications.is_empty(),
+        "the `@nomangle` root produced no publication obligation"
+    );
+    // `portable` specifically is represented (the stdlib carries its own
+    // `@nomangle` declarations, some of them GENERIC -- a generic declaration
+    // has no concrete base `Instance` at all in this model, which is a real,
+    // separate, expected member of `unrepresented_publications` and not what
+    // this fixture is testing).
+    assert!(
+        !lua.unrepresented_publications.iter().any(|r| ws.module(r.module).functions[r.func]
+            .name
+            .as_str()
+            == "portable"),
+        "portable's own declaration should be its group's representative (Any \
+         is the lowest backend rank): {:?}",
+        lua.unrepresented_publications
+    );
+
+    // The ordinary call resolves through the Lua sibling: `caller`'s realized
+    // callee is the `inline(lua)` declaration, not the `@nomangle` one.
+    let nomangle_fid = ws
+        .modules
+        .iter()
+        .find_map(|m| {
+            m.functions
+                .iter()
+                .find(|(_, f)| {
+                    f.name.as_str() == "portable"
+                        && f.annotations.iter().any(|a| a.name.name.as_str() == "nomangle")
+                })
+                .map(|(fid, _)| (m.id, fid))
+        })
+        .expect("the @nomangle declaration exists");
+    let portable_canonical = lua
+        .realization
+        .keys()
+        .find(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "portable")
+        .cloned()
+        .expect("the canonical `portable` instance is retained");
+    let served_backend =
+        ws.module(lua.realization[&portable_canonical].decl.module).functions
+            [lua.realization[&portable_canonical].decl.func]
+            .backend;
+    assert_eq!(
+        served_backend,
+        FnBackend::Lua,
+        "the ordinary call to `portable` must be served by the Lua sibling, not the \
+         @nomangle Any-backed declaration"
+    );
+    assert_ne!(
+        lua.realization[&portable_canonical].decl,
+        skull_mir::mir::FuncRef { module: nomangle_fid.0, func: nomangle_fid.1 },
+        "call-serving realization selected the @nomangle declaration itself, not its sibling"
+    );
+
+    // The bare `@nomangle` Rock definition remains a publication obligation for
+    // its OWN declaration -- the canonical Instance IS the @nomangle instance
+    // here (Any is always the lowest backend rank), so this is the SAME key as
+    // `portable_canonical` above, naming a DIFFERENT thing (its own body, not
+    // whichever declaration serves calls).
+    assert_eq!(
+        lua.publications.get(&portable_canonical).map(String::as_str),
+        Some("portable"),
+        "the @nomangle root's own bare-name publication is missing or misnamed: {:?}",
+        lua.publications
+    );
+
+    // The sibling control (same shape, no `@nomangle`) must NOT acquire a
+    // publication obligation -- ordinary same-name siblings stay exactly as
+    // sibling-collapse always treated them.
+    let plain_canonical = lua
+        .realization
+        .keys()
+        .find(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "plain")
+        .cloned()
+        .expect("the canonical `plain` instance is retained");
+    assert!(
+        !lua.publications.contains_key(&plain_canonical),
+        "a same-name sibling pair with no @nomangle root acquired a publication obligation"
+    );
+    assert!(
+        lua.publication_collisions.is_empty(),
+        "the compact fixture has no colliding publication pair: {:?}",
+        lua.publication_collisions
+    );
+}
+
+/// Two INDEPENDENT `@nomangle` declarations sharing one bare name (different
+/// signatures, so `backend_variant_group` never groups them -- this collision
+/// is not routed through sibling selection at all) must REJECT rather than let
+/// one publication silently overwrite the other.
+const PUBLICATION_COLLISION_FIXTURE: &str = r#"
+@nomangle fn dup(x: int) -> int { return x }
+@nomangle fn dup(x: string) -> string { return x }
+fn main() { print("{dup(1)} {dup(\"s\")}") }
+"#;
+
+#[test]
+fn two_nomangle_roots_sharing_a_bare_name_collide_rather_than_overwrite() {
+    let ws = check(PUBLICATION_COLLISION_FIXTURE);
+    let (g, roots) = graph_for(&ws);
+    let lua = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
+
+    assert_eq!(
+        lua.publication_collisions.len(),
+        1,
+        "two independent @nomangle roots named `dup` did not collide: {:?}",
+        lua.publication_collisions
+    );
+    let collision = &lua.publication_collisions[0];
+    assert_eq!(collision.symbol, "dup");
+    assert_eq!(collision.instances.len(), 2, "the collision did not name both instances");
+    // Neither colliding instance is silently admitted as a resolved publication
+    // -- a reject beats a last-writer-wins guess.
+    for i in &collision.instances {
+        assert!(
+            !lua.publications.contains_key(i),
+            "a colliding publication was admitted anyway: {i:?}"
+        );
+    }
+}

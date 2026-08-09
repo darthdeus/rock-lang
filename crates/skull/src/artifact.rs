@@ -376,6 +376,16 @@ pub struct SymbolCollision {
     pub instances: Vec<Instance>,
 }
 
+/// Two PUBLICATION obligations (see [`ArtifactView::publications`]) claiming
+/// one physical symbol. Rejected rather than resolved by last-definition-wins,
+/// which is what a renderer that did not model this distinctly would silently
+/// do to two `@nomangle` declarations sharing a bare name.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct PublicationCollision {
+    pub symbol: String,
+    pub instances: Vec<Instance>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct ArtifactCensus {
     /// Instances retained, the roots they were reached from, and the shared
@@ -411,6 +421,9 @@ pub struct ArtifactCensus {
     /// Retained instances with no substitution record in the shared graph. An
     /// invariant finding; 0 is the only acceptable value.
     pub missing_substitutions: usize,
+    pub publications: usize,
+    pub unrepresented_publications: usize,
+    pub publication_collisions: usize,
     /// Deferred obligations, carried from the target spec.
     pub deferred: Vec<&'static str>,
 }
@@ -474,6 +487,41 @@ pub struct ArtifactView {
     /// The shared population this view was taken over -- the denominator.
     pub shared_instances: usize,
     pub deferred: Vec<&'static str>,
+    /// **Bare-name PUBLICATION obligations, distinct from [`Self::realization`].**
+    ///
+    /// `realization` (and `instances`/`boundaries` derived from it) answers
+    /// "how are CALLS to this canonical `Instance` served on this artifact" --
+    /// `realize_decl`'s sibling selection may legitimately route every call to
+    /// a same-signature backend sibling. A `publication` answers a different
+    /// question: "which EXACT declarations does the program's source demand
+    /// exist under their own name regardless of any call". An explicit
+    /// `@nomangle` root is the source of that demand -- its whole contract is a
+    /// stable bare-named entry point for code OUTSIDE the MIR call graph
+    /// (hand-written Lua, FFI callbacks), which backend-variant collapse must
+    /// not silently erase just because some sibling happens to serve the calls
+    /// this artifact CAN see.
+    ///
+    /// Keyed by the EXACT declaration's own `Instance` (never canonicalized
+    /// away), which can legitimately equal a key in `realization` naming a
+    /// DIFFERENT `decl` -- one `Instance` can carry both a call-serving
+    /// realization through a sibling and a publication obligation for its own
+    /// body, and that is not a conflict: a publication is not a call.
+    ///
+    /// Reuses the graph's OWN expansion for the exact declaration -- no second
+    /// discovery walk. An `@nomangle` root that is not, itself, the graph's own
+    /// canonical representative for its declaration has no contribution record
+    /// this pass can reuse, and is reported via
+    /// [`Self::unrepresented_publications`] rather than silently dropped.
+    pub publications: BTreeMap<Instance, String>,
+    /// `@nomangle` roots whose exact declaration is not the graph's own
+    /// canonical representative (so this pass has no expansion to reuse for
+    /// it) -- an invariant finding this pass fails closed on rather than
+    /// silently omitting the promise. Not expected in the shipped corpus: an
+    /// ordinary `@nomangle` declaration with no `inline`/`extern` annotation is
+    /// backend `Any`, which is always the LOWEST backend-rank in its group and
+    /// therefore always the representative already.
+    pub unrepresented_publications: Vec<FuncRef>,
+    pub publication_collisions: Vec<PublicationCollision>,
 }
 
 impl ArtifactView {
@@ -494,6 +542,9 @@ impl ArtifactView {
             && self.missing_substitutions == other.missing_substitutions
             && self.shared_instances == other.shared_instances
             && self.deferred == other.deferred
+            && self.publications == other.publications
+            && self.unrepresented_publications == other.unrepresented_publications
+            && self.publication_collisions == other.publication_collisions
     }
 
     /// Every retained instance -- Rock bodies AND boundaries. The positive side
@@ -536,6 +587,9 @@ impl ArtifactView {
             multi_lane_publishers: self.publisher_lanes.values().filter(|n| **n > 1).count(),
             widest_result_lanes: self.publisher_lanes.values().copied().max().unwrap_or(0),
             missing_substitutions: self.missing_substitutions.len(),
+            publications: self.publications.len(),
+            unrepresented_publications: self.unrepresented_publications.len(),
+            publication_collisions: self.publication_collisions.len(),
             deferred: self.deferred.clone(),
             ..Default::default()
         };
@@ -1058,10 +1112,51 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         .cloned()
         .collect();
 
+    // **Bare-name PUBLICATION obligations** -- see `ArtifactView::publications`.
+    // An explicit `@nomangle` root's promise is about the EXACT declaration a
+    // program wrote, never about whichever sibling `backend_variant` would
+    // pick for a resolved call; ordinary call-serving realization above
+    // (`realizable`/`realization`) is untouched by this, and
+    // `backend_variant_group`/`canonical_variant` are not consulted here at
+    // all -- this is a second, independent obligation over the SAME graph, not
+    // a second discovery walk: the exact instance's own contribution, if the
+    // graph has one, is what `g.instances`/`g.sites_of` already recorded.
+    let mut by_pub_symbol: BTreeMap<String, Vec<Instance>> = BTreeMap::new();
+    let mut unrepresented_publications: Vec<FuncRef> = Vec::new();
+    for r in req.roots {
+        let f = &ws.module(r.module).functions[r.func];
+        if !f.annotations.iter().any(|a| a.name.name.as_str() == "nomangle") {
+            continue;
+        }
+        if !instance_graph::serves(f.backend, target.execution.backend.unwrap_or(FnBackend::Any)) {
+            continue;
+        }
+        let inst = Instance::base(*r);
+        if !g.instances.contains(&inst) {
+            unrepresented_publications.push(*r);
+            continue;
+        }
+        by_pub_symbol.entry(f.name.to_string()).or_default().push(inst);
+    }
+    let mut publications: BTreeMap<Instance, String> = BTreeMap::new();
+    let mut publication_collisions: Vec<PublicationCollision> = Vec::new();
+    for (symbol, mut instances) in by_pub_symbol {
+        instances.sort();
+        instances.dedup();
+        if instances.len() > 1 {
+            publication_collisions.push(PublicationCollision { symbol, instances });
+        } else {
+            publications.insert(instances.into_iter().next().expect("non-empty group"), symbol);
+        }
+    }
+
     ArtifactView {
         shared_instances: g.instances.len(),
         publisher_lanes,
         missing_substitutions,
+        publications,
+        unrepresented_publications,
+        publication_collisions,
         // An execution-axis question too: every obligation it names is about
         // memory, coroutines, widths or foreign symbols. A shader-derived
         // deferral would be a separate list on a separate axis.
