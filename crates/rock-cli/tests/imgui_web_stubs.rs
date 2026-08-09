@@ -295,16 +295,25 @@ fn stub_body(d: &Decl) -> String {
                 .collect();
             return format!("return __rock_publish({});", zeros.join(", "));
         }
-        // Convention: the label/id comes first and the edited value second.
-        // Assert it rather than trusting it -- a reordered signature would
-        // otherwise silently echo the label.
-        let (vname, vty) = d.params.get(1).unwrap_or_else(|| {
-            panic!("imgui.rock: `{}` returns (bool, T) but has no second parameter", d.name)
-        });
+        // Convention: the edited value is the parameter literally named
+        // `value` (e.g. a slider's track `size` can sit between the label and
+        // it). A decl with no `value` param names it something else instead
+        // (`imgui_combo`'s `current_idx`), which the old position-1 rule still
+        // covers since nothing else precedes it there. Assert the type rather
+        // than trusting either lookup -- a reordered or renamed signature
+        // would otherwise silently echo the wrong parameter.
+        let (vname, vty) = d
+            .params
+            .iter()
+            .find(|(name, _)| name == "value")
+            .or_else(|| d.params.get(1))
+            .unwrap_or_else(|| {
+                panic!("imgui.rock: `{}` returns (bool, T) but has no second parameter", d.name)
+            });
         assert_eq!(
             vty, parts[1],
-            "imgui.rock: `{}` returns (bool, {}) but its second parameter `{vname}` is {vty}; \
-             the echo convention (value is the second parameter) no longer holds",
+            "imgui.rock: `{}` returns (bool, {}) but its echoed parameter `{vname}` is {vty}; \
+             the echo convention (a `value` param, or the second parameter) no longer holds",
             d.name, parts[1]
         );
         // Multi-value returns use the scratch ABI, never an array

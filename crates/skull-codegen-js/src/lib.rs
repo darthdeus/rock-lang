@@ -2361,9 +2361,22 @@ function stone_stop_music() {
   var A = __SW.audio;
   if (A.musicSrc) { try { A.musicSrc.stop(); } catch (e) {} A.musicSrc = null; }
 }
-function stone_set_music_volume(v) { var A = __SW.audio; A.musicVol = v; if (A.musicGain) A.musicGain.gain.value = v; }
-function stone_set_sound_volume(v) { var A = __SW.audio; A.sfxVol = v; if (A.sfxGain) A.sfxGain.gain.value = v; }
-// No convolver graph on web v1 (zero game callers); silent stub.
+// No bus graph on web v1 (mixer.rock's five strips have no WebAudio
+// counterpart yet); every bus/voice op below is a silent stub, same tier as
+// the convolver reverb has always been.
+function stone_bus_set_gain(bus, gain) { return false; }
+function stone_bus_samples_pulled(bus) { return 0; }
+function stone_bus_duck_count(bus) { return 0; }
+function stone_bus_gain(bus) { return 1; }
+function stone_bus_peak(bus) { return 0; }
+function stone_bus_set_lowpass(bus, cutoff_hz, q) { return false; }
+function stone_bus_set_distortion(bus, drive, mix) { return false; }
+function stone_bus_set_reverb(bus, enabled, room_size, damping, wet, dry, width) { return false; }
+function stone_bus_duck(bus, depth, attack_secs, release_secs) { return false; }
+function stone_voice_active(voice) { return false; }
+function stone_voice_stop(voice) { return false; }
+function stone_voice_set_gain(voice, gain) { return false; }
+function stone_voice_set_speed(voice, speed) { return false; }
 
 // --- uniform introspection / gpu timer / delay / cursors / retained mesh ---
 function stone_shader_uniform_count(h) {
