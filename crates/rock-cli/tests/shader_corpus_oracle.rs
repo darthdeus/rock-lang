@@ -11,11 +11,12 @@ use skull_codegen_glsl::{BlockWire, GlslProfile, ShaderAbiPlan};
 use skull_mir::gpu_layout::{AttrKind, SamplerKind, WireKind};
 use skull_mir::mir::FuncRef;
 use skull_mir::shader_ir::{
-    FragmentOutput, ShaderInterfacePlan, ShaderStage, UniformRole, VertexRate,
+    FragmentOutput, ShaderInterfacePlan, ShaderStage, ShaderStageIr, UniformRole, VertexRate,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 const PROJECTS: &[&str] = &[
     "anvil",
@@ -472,6 +473,19 @@ fn emit_pair(
     .unwrap_or_else(|e| panic!("`{}` failed to emit: {e}", pair.key))
 }
 
+fn emit_pair_with_view(
+    ws: &bone_semantic::inference::Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    view: &skull::shader_artifact::ShaderProgramView,
+    profile: GlslProfile,
+) -> skull_codegen_glsl::ShaderEmission {
+    let emission = match view.program.vert {
+        Some(_) => skull_codegen_glsl::emit_shader_pipeline_with_view(ws, scx, view, profile),
+        None => skull_codegen_glsl::emit_shader_entry_with_view(ws, scx, view, profile),
+    };
+    emission.unwrap_or_else(|e| panic!("view emission failed for {:?}: {e}", view.program))
+}
+
 fn target_for(profile: GlslProfile) -> skull::target_projection::TargetSpec {
     skull::target_projection::TargetSpec {
         shader: Some(skull::target_projection::ShaderTargetSpec::Glsl(profile)),
@@ -499,16 +513,19 @@ fn snapshot_project(project: &str, path: &Path) -> Vec<ShaderRow> {
         })
         .collect();
     let graph = skull::instance_graph::build(&ws, roots, false);
+    let scx = skull_mir::lower::ScalarCtx::new_values_first_class(&ws)
+        .sharing(Arc::clone(graph.interner()));
     let mut rows = Vec::new();
 
     for (profile_name, profile) in PROFILES {
-        let view = skull::shader_artifact::realize_shader(
+        let view = skull::shader_artifact::realize_shader_with_context(
             &ws,
             &graph,
             &skull::shader_artifact::ShaderArtifactRequest {
                 spec: target_for(*profile),
                 programs: &programs,
             },
+            &scx,
         )
         .expect("GLSL view");
         assert_eq!(
@@ -530,6 +547,8 @@ fn snapshot_project(project: &str, path: &Path) -> Vec<ShaderRow> {
                 "{project}: program view key changed for {} [{profile_name}]",
                 pair.key
             );
+            let view_emission = emit_pair_with_view(&ws, &scx, program_view, *profile);
+            assert_emissions_match(&ws, &graph, &key, &emission, &view_emission, program_view);
             assert_view_matches_emission(&ws, &graph, &key, &emission, program_view);
 
             let mut stage_populations = Vec::new();
@@ -566,6 +585,103 @@ fn snapshot_project(project: &str, path: &Path) -> Vec<ShaderRow> {
     }
     rows.sort_by(|a, b| a.key.cmp(&b.key));
     rows
+}
+
+fn sorted_dependency_keys(
+    dependencies: impl IntoIterator<Item = FuncRef>,
+) -> Vec<(u32, u32)> {
+    let mut out: Vec<_> = dependencies
+        .into_iter()
+        .map(|f| (f.module.raw(), f.func.into_raw().into_u32()))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn legacy_builtin_instances(
+    ws: &bone_semantic::inference::Workspace,
+    graph: &skull::instance_graph::InstanceGraph,
+    stage: &ShaderStageIr,
+) -> BTreeSet<skull::instance_graph::Instance> {
+    let callers = stage.order.iter().chain(std::iter::once(&stage.entry));
+    let mut builtins = BTreeSet::new();
+    for caller in callers {
+        let Some(sites) = graph.sites_of(&caller.inst) else { continue };
+        for record in sites.values() {
+            let skull::instance_graph::SiteOutcome::Resolved(callee) = &record.outcome else {
+                continue;
+            };
+            let f = &ws.module(callee.func.module).functions[callee.func.func];
+            if skull_codegen_glsl::renders_inline_instance(ws, f, callee, graph.interner()) {
+                builtins.insert(callee.clone());
+            }
+        }
+    }
+    builtins
+}
+
+fn assert_stage_ir_equal(
+    key: &RowKey,
+    expected: &ShaderStageIr,
+    actual: &ShaderStageIr,
+) {
+    assert_eq!(actual.stage, expected.stage, "{key:?}: view stage IR stage differs");
+    assert_eq!(actual.entry, expected.entry, "{key:?}: view stage IR entry differs");
+    assert_eq!(actual.body, expected.body, "{key:?}: view entry MIR differs");
+    assert_eq!(actual.order, expected.order, "{key:?}: view stage emission order differs");
+    assert_eq!(actual.bodies, expected.bodies, "{key:?}: view helper MIR differs");
+}
+
+fn assert_emissions_match(
+    ws: &bone_semantic::inference::Workspace,
+    graph: &skull::instance_graph::InstanceGraph,
+    key: &RowKey,
+    expected: &skull_codegen_glsl::ShaderEmission,
+    actual: &skull_codegen_glsl::ShaderEmission,
+    program_view: &skull::shader_artifact::ShaderProgramView,
+) {
+    assert_eq!(actual.source, expected.source, "{key:?}: view GLSL differs");
+    assert_eq!(actual.interface, expected.interface, "{key:?}: view interface differs");
+    assert_eq!(
+        abi_bytes(&actual.abi),
+        abi_bytes(&expected.abi),
+        "{key:?}: view ABI differs"
+    );
+    assert_eq!(
+        block_wire_bytes(&actual.abi),
+        block_wire_bytes(&expected.abi),
+        "{key:?}: view BlockWire differs"
+    );
+    assert_eq!(
+        sorted_dependency_keys(actual.dependencies.iter().copied()),
+        sorted_dependency_keys(expected.dependencies.iter().copied()),
+        "{key:?}: view dependencies differ"
+    );
+    assert_eq!(
+        actual.ir.stages.len(),
+        expected.ir.stages.len(),
+        "{key:?}: view stage IR denominator differs"
+    );
+    assert_eq!(
+        actual.ir.stages.len(),
+        program_view.stages.len(),
+        "{key:?}: view stage population denominator differs"
+    );
+    for ((expected_stage, actual_stage), view_stage) in expected
+        .ir
+        .stages
+        .iter()
+        .zip(&actual.ir.stages)
+        .zip(&program_view.stages)
+    {
+        assert_stage_ir_equal(key, expected_stage, actual_stage);
+        assert_eq!(
+            view_stage.builtins,
+            legacy_builtin_instances(ws, graph, expected_stage),
+            "{key:?}: view builtin population differs"
+        );
+    }
 }
 
 fn assert_view_matches_emission(

@@ -34,3 +34,16 @@ pub struct ShaderProgramView {
     pub program: ShaderProgram,
     pub stages: Vec<ShaderStageView>,
 }
+
+/// The graph-owned population for an explicit-root GLSL function library.
+/// Unlike [`ShaderProgramView`], this has no registered shader stages or
+/// interface contract: the caller supplies ordinary function roots and the
+/// backend only packages their retained definitions.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct ShaderLibraryView {
+    pub roots: Vec<Instance>,
+    pub retained: BTreeSet<Instance>,
+    pub builtins: BTreeSet<Instance>,
+    pub order: Vec<Instance>,
+    pub dependencies: Vec<FuncRef>,
+}

@@ -50,7 +50,28 @@ fn emit_with(
     }
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
     let roots: Vec<String> = roots.iter().map(|s| s.to_string()).collect();
-    skull_codegen_glsl::emit_shader_library(&ws, mid, &roots).map_err(|e| e.message)
+    let root_refs = roots
+        .iter()
+        .map(|root| skull_codegen_glsl::resolve_root(&ws, mid, root))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.message)?;
+    let session = skull_codegen_glsl::shader_library_session(&ws, root_refs)
+        .map_err(|e| e.message)?;
+    skull_codegen_glsl::emit_shader_library_with_view(&ws, &session.scx, &session.view)
+        .map_err(|e| e.message)
+}
+
+#[test]
+fn function_library_preserves_no_version_contract() {
+    let glsl = emit(
+        "fn helper(value: float) -> float { return value + 1.0 }",
+        &["helper"],
+    )
+    .expect("emit");
+    assert!(
+        !glsl.starts_with("#version"),
+        "route-B function libraries must not select a GLSL profile:\n{glsl}"
+    );
 }
 
 #[test]

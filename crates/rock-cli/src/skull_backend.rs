@@ -894,7 +894,25 @@ pub fn skull_shader(files: &[String], output: Option<String>, profile: Option<St
             )
             .map(|emission| emission.source)
         } else {
-            skull_codegen_glsl::emit_shader(&ws, user_mid, &roots, prof)
+            let root_refs = roots
+                .iter()
+                .map(|root| skull_codegen_glsl::resolve_root(&ws, user_mid, root))
+                .collect::<std::result::Result<Vec<_>, _>>();
+            let root_refs = match root_refs {
+                Ok(root_refs) => root_refs,
+                Err(e) => {
+                    eprintln!("{}", render_file_errs(path, &src, &[e]));
+                    crate::ablation_report::exit_with_census(1);
+                }
+            };
+            let session = match skull_codegen_glsl::shader_library_session(&ws, root_refs) {
+                Ok(session) => session,
+                Err(e) => {
+                    eprintln!("{}", render_file_errs(path, &src, &[e]));
+                    crate::ablation_report::exit_with_census(1);
+                }
+            };
+            skull_codegen_glsl::emit_shader_library_with_view(&ws, &session.scx, &session.view)
         };
         match glsl {
             Ok(g) => g,
