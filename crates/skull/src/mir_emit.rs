@@ -905,10 +905,28 @@ fn view_driven_specialized_chunks(
             built.insert(inst, c.clone());
             continue;
         }
+        let Some(subst) = cache.graph.substitution(&inst) else {
+            errs.push((
+                inst.symbol(ws, scx.interner()),
+                CompilerError::new_no_location("graph has no substitution for a retained specialization".to_string()),
+            ));
+            continue;
+        };
         let tree = cache.graph.bound_tree(&inst).cloned().unwrap_or_default().to_resolved();
+        let f = &ws.module(inst.func.module).functions[inst.func.func];
+        if fn_has_bounds(f) && tree.is_empty() {
+            errs.push((
+                inst.symbol(ws, scx.interner()),
+                CompilerError::new_with_label(
+                    f.name_span,
+                    "graph has no resolved bound tree for a bounded specialization".to_string(),
+                ),
+            ));
+            continue;
+        }
         let name = inst.symbol(ws, scx.interner());
         let mut specs = Vec::new();
-        match emit_spec_chunk(ws, cg, scx, &inst, &tree, &name, &mut inline_cache, &mut specs) {
+        match emit_spec_chunk(ws, cg, scx, &inst, subst, &tree, &name, &mut inline_cache, &mut specs) {
             Ok(chunk) => {
                 pending.extend(chunk.specs.iter().map(|d| d.inst.clone()));
                 built.insert(inst, chunk);
@@ -1070,6 +1088,7 @@ fn rebuild_chunk(
     ws: &Workspace,
     cg: &CodegenCtx,
     scx: &skull_mir::lower::ScalarCtx,
+    graph: &crate::instance_graph::InstanceGraph,
     body: &Instance,
     f: &bone_semantic::hir::Function,
     inline_cache: &mut skull_transform::InlineCache,
@@ -1083,14 +1102,20 @@ fn rebuild_chunk(
             // against its siblings.
             let name = body.symbol(ws, scx.interner());
             let mut specs = Vec::new();
-            // The EMPTY tree, and that is not a fallback. A body with placeholders
-            // belongs to an `Iterator`-bounded declaration, and `is_cached_body`
-            // is false for one -- its caller DROPS the chunk instead of rebuilding
-            // it, so the liveness walk re-derives it WITH the demand's tree. If a
-            // body with placeholders ever did arrive here,
-            // `resolve_standalone_bound_calls` refuses it rather than emitting a
-            // definition that names no `next`.
-            emit_spec_chunk(ws, cg, scx, body, &Default::default(), &name, inline_cache, &mut specs)
+            let subst = graph.substitution(body).ok_or_else(|| {
+                CompilerError::new_with_label(
+                    f.name_span,
+                    format!("graph has no substitution for specialized `{name}`"),
+                )
+            })?;
+            let tree = graph.bound_tree(body).cloned().unwrap_or_default().to_resolved();
+            if fn_has_bounds(f) && tree.is_empty() {
+                return Err(CompilerError::new_with_label(
+                    f.name_span,
+                    format!("graph has no resolved bound tree for specialized `{name}`"),
+                ));
+            }
+            emit_spec_chunk(ws, cg, scx, body, subst, &tree, &name, inline_cache, &mut specs)
         }
     }
 }
@@ -1171,15 +1196,13 @@ pub struct SkullEmitCache {
     static_key_baseline: FxHashMap<Ustr, String>,
     shader_registrations: ShaderRegistrations,
     shader_view: crate::shader_artifact::ShaderArtifactView,
-    /// The definitions the last full assembly actually EMITTED (global DCE prunes
-    /// the rest), keyed by EMITTED BODY. `assemble_overlay` needs it: the overlay
-    /// redefines only CHANGED fns, so a body edit that newly reaches a
-    /// previously-pruned definition would otherwise leave it defined nowhere -- a
-    /// runtime nil call on reload.
+    /// The definitions the last assembly actually EMITTED (global DCE prunes
+    /// the rest), keyed by EMITTED BODY. Graph-delta materialization uses it to
+    /// distinguish a cached body that is newly retained from one already present
+    /// in the live program.
     ///
     /// By emitted body rather than by declaration, because a specialization is
-    /// its own definition with its own symbol. Keyed by `FuncRef`, the backfill
-    /// walk could only ever answer for shared bodies.
+    /// its own definition with its own symbol.
     emitted: FxHashSet<Instance>,
     /// The compilation target's root directory; see [`is_library_module`].
     project_root: Option<String>,
@@ -1508,6 +1531,7 @@ fn emit_spec_chunk(
     cg: &CodegenCtx,
     scx: &skull_mir::lower::ScalarCtx,
     body: &Instance,
+    subst: &skull_mir::monoty::MonoSubst,
     tree: &skull_mir::bound::ResolvedBoundTree,
     name: &str,
     inline_cache: &mut skull_transform::InlineCache,
@@ -1515,7 +1539,6 @@ fn emit_spec_chunk(
 ) -> Result<Chunk, CompilerError> {
     let fref = body.func;
     let f = &ws.module(fref.module).functions[fref.func];
-    let subst = body.subst(ws, scx.interner());
     let mut mf = skull_mir::lower::lower_instance(ws, scx, body)
         .map_err(|e| CompilerError::new_with_label(f.name_span, e.message))?;
     // BEFORE every transform: an `Iterator`-bounded body's placeholders are what
@@ -3024,11 +3047,120 @@ fn forget_instance(&mut self, gone: &Instance) {
     self.emitted.remove(gone);
 }
 
+/// Materialize the bodies a graph update newly reached. The graph owns both
+/// the concrete substitution and the resolved iterator witnesses; the cache
+/// only stores the chunks those facts produce.
+fn build_graph_added_chunks(
+    cache: &mut SkullEmitCache,
+    ws: &Workspace,
+    added: &std::collections::BTreeSet<Instance>,
+) -> Vec<CompilerError> {
+    let mut pending: Vec<Instance> = added.iter().cloned().collect();
+    let mut seen: FxHashSet<Instance> = FxHashSet::default();
+    let mut built: Vec<(Instance, Chunk)> = Vec::new();
+    let mut errs = Vec::new();
+
+    while let Some(body) = pending.pop() {
+        if !seen.insert(body.clone()) {
+            continue;
+        }
+        if cache.chunks.get(&body).is_some_and(|chunk| chunk.is_ok()) {
+            if !cache.emitted.contains(&body) {
+                cache.changed_since_full.insert(body.clone());
+            }
+            continue;
+        }
+        let f = &ws.module(body.func.module).functions[body.func.func];
+        let chunk = if body.args.is_empty() {
+            match rebuild_chunk(
+                ws,
+                &cache.cg,
+                &cache.scx,
+                &cache.graph,
+                &body,
+                f,
+                &mut cache.inline_cache,
+            ) {
+                Ok(chunk) => chunk,
+                Err(err) => {
+                    errs.push(err);
+                    continue;
+                }
+            }
+        } else {
+            let Some(subst) = cache.graph.substitution(&body) else {
+                errs.push(CompilerError::new_with_label(
+                    f.name_span,
+                    format!("graph has no substitution for added `{}`", body.symbol(ws, cache.scx.interner())),
+                ));
+                continue;
+            };
+            let tree = cache.graph.bound_tree(&body).cloned().unwrap_or_default().to_resolved();
+            if fn_has_bounds(f) && tree.is_empty() {
+                errs.push(CompilerError::new_with_label(
+                    f.name_span,
+                    format!("graph has no resolved bound tree for added `{}`", body.symbol(ws, cache.scx.interner())),
+                ));
+                continue;
+            }
+            let name = body.symbol(ws, cache.scx.interner());
+            let mut specs = Vec::new();
+            match emit_spec_chunk(
+                ws,
+                &cache.cg,
+                &cache.scx,
+                &body,
+                subst,
+                &tree,
+                &name,
+                &mut cache.inline_cache,
+                &mut specs,
+            ) {
+                Ok(chunk) => chunk,
+                Err(err) => {
+                    errs.push(err);
+                    continue;
+                }
+            }
+        };
+        let mut valid = true;
+        for demand in &chunk.specs {
+            if cache.graph.concreteness(&demand.inst)
+                == crate::instance_graph::Concreteness::Missing
+            {
+                errs.push(CompilerError::new_with_label(
+                    f.name_span,
+                    format!(
+                        "graph omitted added specialization `{}` demanded by `{}`",
+                        demand.inst.symbol(ws, cache.scx.interner()),
+                        body.symbol(ws, cache.scx.interner())
+                    ),
+                ));
+                valid = false;
+                continue;
+            }
+            pending.push(demand.inst.clone());
+        }
+        if valid {
+            built.push((body, chunk));
+        }
+    }
+
+    for (body, chunk) in built {
+        for dep in &chunk.deps {
+            cache.dependents.entry(*dep).or_default().insert(body.clone());
+        }
+        cache.chunks.insert(body.clone(), Ok(chunk));
+        cache.changed_since_full.insert(body);
+    }
+    errs
+}
+
 fn update_chunk_cache(
     &mut self,
     ws: &Workspace,
     reinferred: &[(ModuleId, BodyOwner)],
-) -> FxHashSet<Instance> {
+) -> (FxHashSet<Instance>, Vec<CompilerError>) {
     let cache = self;
     // Fold each re-inferred body's value-reference contribution into the cached
     // ScalarCtx. A name whose taken-by-ref membership flips changes scalar-ABI
@@ -3116,22 +3248,13 @@ fn update_chunk_cache(
             affected.extend(deps.iter().cloned());
         }
     }
-    // **`update.added` deliberately does NOT go in here**, and that asymmetry is
-    // the whole content of the split.
-    //
     // REMOVAL is the graph's to report and emission's alone cannot see it:
     // nothing on this side knows an instance was stranded, so a surviving chunk
     // makes `emit_incremental` re-emit a definition no call reaches. That is
     // handled above, before the borrows.
     //
-    // CONSTRUCTION is the DEMAND's, because the identity is not sufficient to
-    // build the body. An `Iterator`-bounded instance's placeholder `next` calls
-    // are resolved from the `ResolvedBoundTree` its demand carries, and the
-    // graph's `Instance` carries no tree -- so building from the added set here
-    // produces a chunk under an EMPTY tree, and `backfill_new_specializations`
-    // then skips it as already-present. Measured, not reasoned: doing it made
-    // `an_overlay_carries_a_newly_reachable_bounded_body` red while every other
-    // arm stayed green.
+    // Construction of graph additions happens after invalidation below, so a
+    // newly reached body cannot reuse an inline decision made for the old body.
     let _aff_ms = _t_aff.elapsed();
 
     // The persistent InlineCache keeps unchanged callee bodies across edits; the
@@ -3160,7 +3283,7 @@ fn update_chunk_cache(
         // An edit can flip a body between cached (ordinary/coroutine) and
         // regenerated (extern / inline(lua)); only the former has a chunk.
         if is_cached_emitted_body(f, body) {
-            let chunk = rebuild_chunk(ws, cg, scx, body, f, &mut cache.inline_cache);
+            let chunk = rebuild_chunk(ws, cg, scx, &cache.graph, body, f, &mut cache.inline_cache);
             if let Ok(c) = &chunk {
                 let new_deps: Vec<FuncRef> = c.deps.iter().copied().collect();
                 for d in new_deps {
@@ -3172,6 +3295,7 @@ fn update_chunk_cache(
             cache.chunks.remove(body);
         }
     }
+    let added_errors = Self::build_graph_added_chunks(cache, ws, &update.added);
     if std::env::var("SKULL_EMIT_PROFILE").is_ok() {
         eprintln!(
             "    update_chunk_cache: graph {:.3}ms (+{} -{} instances) | affected-scan {:.3}ms (O(edit), {} chunks) | re-lower {:.3}ms ({} affected)",
@@ -3184,7 +3308,7 @@ fn update_chunk_cache(
             affected.len(),
         );
     }
-    affected
+    (affected, added_errors)
 }
 }
 
@@ -3198,7 +3322,10 @@ pub fn emit_incremental(
     // `update_chunk_cache`'s re-walk must see this edit's set, not the last
     // build's.
     let shader_changed = cache.update_shader_registrations(ws, reinferred)?;
-    let _affected = cache.update_chunk_cache(ws, reinferred);
+    let (_affected, added_errors) = cache.update_chunk_cache(ws, reinferred);
+    for err in added_errors {
+        eprintln!("skull incremental emit: graph-added body -- {}", err.message);
+    }
     if shader_changed {
         cache.refresh_shader_registrations(ws)?;
     }
@@ -3225,132 +3352,6 @@ pub fn emit_incremental(
 /// Loaded AFTER `main.lua`; redefined globals override their stale defs. Emits NO
 /// scaffold/globals -- those are unchanged on a body edit and live in main.lua.
 /// `docs/skull-incremental-emit-split.md`.
-/// Fns the changed chunks now reach that the last full build did not emit.
-/// Bounded by `cache.emitted`, which is the leaf set -- so the common case (an
-/// edit that calls nothing new) expands nothing.
-fn newly_reachable(cache: &SkullEmitCache) -> Vec<Instance> {
-    struct Backfill<'a> {
-        cache: &'a SkullEmitCache,
-        roots: Vec<Instance>,
-    }
-    impl skull_mir::reach::ReachPolicy for Backfill<'_> {
-        type Node = Instance;
-        fn roots(&mut self) -> Result<Vec<Instance>, CompilerError> {
-            Ok(std::mem::take(&mut self.roots))
-        }
-        fn is_leaf(&mut self, body: Instance) -> Result<bool, CompilerError> {
-            Ok(self.cache.emitted.contains(&body)
-                || !matches!(self.cache.chunks.get(&body), Some(Ok(_))))
-        }
-        fn on_cycle(&mut self, _body: Instance) -> Result<(), CompilerError> {
-            Ok(())
-        }
-        fn visit(&mut self, body: Instance) -> Result<Vec<Instance>, CompilerError> {
-            match self.cache.chunks.get(&body) {
-                Some(Ok(chunk)) => Ok(successors_of(chunk)),
-                _ => Ok(Vec::new()),
-            }
-        }
-    }
-    let mut roots: Vec<Instance> = Vec::new();
-    for body in &cache.changed_since_full {
-        if let Some(Ok(chunk)) = cache.chunks.get(body) {
-            roots.extend(successors_of(chunk).into_iter().filter(|b| !cache.emitted.contains(b)));
-        }
-    }
-    if roots.is_empty() {
-        return Vec::new();
-    }
-    let mut policy = Backfill { cache, roots: roots.clone() };
-    // Infallible: every policy method returns Ok.
-    let mut out = skull_mir::reach::walk(&mut policy).unwrap_or_default();
-    out.extend(roots);
-    out.retain(|b| !cache.emitted.contains(b));
-    out
-}
-
-/// The emitted bodies a chunk reaches: its declaration callees AND the
-/// specializations it demands.
-///
-/// Both, keyed the same way. Walking only `calls` -- which are DECLARATIONS --
-/// is what made the overlay backfill a shared body and never a specialization.
-fn successors_of(chunk: &Chunk) -> Vec<Instance> {
-    let mut out: Vec<Instance> = chunk.calls.iter().copied().map(shared).collect();
-    out.extend(chunk.specs.iter().map(|d| d.inst.clone()));
-    out
-}
-
-/// BUILD every specialization the changed bodies now demand that the cache does
-/// not already hold, so [`newly_reachable`] has a chunk to find.
-///
-/// The overlay is loaded after `main.lua`, which carries only what the last full
-/// build emitted. An edit that adds the first call to a NEW instantiation
-/// therefore needs the definition ADDED, not redefined -- and its call site
-/// already spells the specialized symbol, so omitting it is a nil global on
-/// reload rather than a stale body.
-///
-/// This is where the demand's bound tree earns its keep: an `Iterator`-bounded
-/// callee reached for the first time by an edit cannot be lowered from its
-/// declaration alone.
-fn backfill_new_specializations(ws: &Workspace, cache: &mut SkullEmitCache) -> Vec<CompilerError> {
-    let mut errs = Vec::new();
-    let mut demands: Vec<skull_mir::bound::SpecDemand> = Vec::new();
-    for body in &cache.changed_since_full {
-        if let Some(Ok(chunk)) = cache.chunks.get(body) {
-            demands.extend(chunk.specs.iter().cloned());
-        }
-    }
-    let mut map = skull_mir::bound::DemandMap::default();
-    for body in map.record(&demands) {
-        errs.push(demand_clash(ws, &cache.scx, &body).1);
-    }
-    // A worklist, not one pass: a specialization built here can demand further
-    // ones that no chunk in the cache mentions.
-    let mut queue: Vec<Instance> =
-        demands.iter().map(|d| d.inst.clone()).collect();
-    let mut seen: FxHashSet<Instance> = FxHashSet::default();
-    while let Some(body) = queue.pop() {
-        if !seen.insert(body.clone()) || cache.chunks.contains_key(&body) {
-            continue;
-        }
-        if body.args.is_empty() {
-            continue;
-        }
-        let name = body.symbol(ws, cache.scx.interner());
-        let tree = map.tree_of(&body);
-        let mut specs = Vec::new();
-        // Disjoint field borrows: the emitter reads `cg`/`scx` and mutates only
-        // `inline_cache`, so the chunk map stays free to be written below.
-        let built = emit_spec_chunk(
-            ws,
-            &cache.cg,
-            &cache.scx,
-            &body,
-            &tree,
-            &name,
-            &mut cache.inline_cache,
-            &mut specs,
-        );
-        for d in &specs {
-            queue.push(d.inst.clone());
-        }
-        for b in map.record(&specs) {
-            errs.push(demand_clash(ws, &cache.scx, &b).1);
-        }
-        match built {
-            Ok(chunk) => {
-                for d in &chunk.deps {
-                    cache.dependents.entry(*d).or_default().insert(body.clone());
-                }
-                cache.chunks.insert(body.clone(), Ok(chunk));
-                cache.changed_since_full.insert(body);
-            }
-            Err(e) => errs.push(e),
-        }
-    }
-    errs
-}
-
 fn assemble_overlay(
     ws: &Workspace,
     cache: &SkullEmitCache,
@@ -3361,12 +3362,6 @@ fn assemble_overlay(
 
     // Redefine the changed functions, deterministic order for a stable diff.
     let mut order: Vec<Instance> = cache.changed_since_full.iter().cloned().collect();
-    // ... plus anything they now reach that the last full build had PRUNED. The
-    // overlay redefines only changed fns, so without this a body edit that adds
-    // the first call to a dead fn leaves that fn defined nowhere and the reload
-    // dies on a nil call. The walk stops at every already-emitted fn (`is_leaf`),
-    // so on a normal edit it visits nothing.
-    order.extend(newly_reachable(cache));
     order.sort_by_key(|b| overlay_order_key(&cache.scx, b));
     order.dedup();
     for body in &order {
@@ -3588,7 +3583,10 @@ pub fn emit_overlay(
             false
         }
     };
-    let affected = cache.update_chunk_cache(ws, reinferred);
+    let (affected, added_errors) = cache.update_chunk_cache(ws, reinferred);
+    for err in added_errors {
+        eprintln!("skull overlay emit: graph-added body -- {}", err.message);
+    }
     if shader_changed {
         if let Err(err) = cache.refresh_shader_registrations(ws) {
             eprintln!("skull overlay emit: graph-owned shader registration -- {}", err.message);
@@ -3604,13 +3602,6 @@ pub fn emit_overlay(
                 cache.changed_consts_since_full.insert((mid, gid));
             }
         }
-    }
-    // A specialization the edit reached for the FIRST time has no chunk yet, so
-    // it must be BUILT before the overlay looks for one. Never swallowed: the
-    // overlay's signature cannot return `Err`, so a failure warns here and the
-    // next full/incremental rebuild rejects it authoritatively.
-    for err in backfill_new_specializations(ws, cache) {
-        eprintln!("skull overlay emit: specialization backfill -- {}", err.message);
     }
     let t_relower = t2.elapsed();
     let t3 = Instant::now();

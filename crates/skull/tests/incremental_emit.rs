@@ -202,7 +202,7 @@ fn an_overlay_redefines_a_changed_specialization() {
 }
 
 /// The OVERLAY carries a specialization the edit made NEWLY reachable
-/// (mono cut C+D, `B*-backfill`).
+/// (graph-delta overlay construction).
 ///
 /// The sibling above edits a body whose specialization already exists, so the
 /// overlay only has to REDEFINE it. Here the edit adds the first call to a new
@@ -315,8 +315,8 @@ fn a_later_edit_to_a_generic_reaches_an_instantiation_an_earlier_edit_added() {
 /// `SkullEmitCache::forget_instance` the entry simply stays. That is harmless
 /// for a full reassembly -- the liveness walk does not reach it -- which is
 /// exactly why it needs its own arm: the damage only appears when the
-/// instantiation comes BACK, because `backfill_new_specializations` skips a
-/// body the cache already holds and the reload then runs a definition built
+/// instantiation comes BACK, because a stale chunk would otherwise survive the
+/// graph removal and the reload then run a definition built
 /// from the pre-edit source.
 ///
 /// The three populations are asserted in order: `Q` present, `Q` stranded, `Q`
@@ -376,12 +376,11 @@ fn an_instantiation_that_returns_after_being_pruned_is_rebuilt_not_reused() {
 }
 
 /// The overlay carries a NON-GENERIC LIBRARY body the edit made reachable for
-/// the first time (mono cut C+D, `B*-backfill`).
+/// the first time (graph-delta overlay construction).
 ///
 /// Its two siblings above both add a SPECIALIZATION, and those reach the overlay
-/// through `backfill_new_specializations`, which builds the chunk and files it
-/// in `changed_since_full` -- so they stay green with the reachability backfill
-/// deleted and say nothing about it. This is the arm that has no other route.
+/// through the graph-added chunk path, which builds the chunk and files it in
+/// `changed_since_full`. This is the arm that has no other route.
 ///
 /// The subject must live in a LIBRARY module, and that is the whole reason this
 /// fixture uses a stdlib fn: `is_library_module` makes the compiled unit's own
@@ -426,14 +425,14 @@ fn an_overlay_carries_a_newly_reachable_library_body() {
     );
 }
 
-/// The overlay backfills a newly-reachable `Iterator`-BOUNDED body, which is
+/// The overlay materializes a newly-reachable `Iterator`-BOUNDED body, which is
 /// the case its demand tree is load-bearing for (mono cut C+D, D-1 +
-/// `B*-backfill`).
+/// the graph-delta construction path.
 ///
 /// A bounded body cannot be lowered from its declaration alone: its placeholder
 /// `next` calls are resolved by the demand, not by the body. So this is the arm
-/// that says the backfill carries the TREE and not just the key -- a backfill
-/// that rebuilt from the declaration would reject rather than emit.
+/// that says graph construction carries the TREE and not just the key -- a
+/// declaration-only rebuild would reject rather than emit.
 ///
 /// Runs with inlining DISABLED, where a bounded call has no splice to fall back
 /// on.
@@ -460,7 +459,7 @@ fn an_overlay_carries_a_newly_reachable_bounded_body() {
     };
     assert!(
         !standalone(&full.lua),
-        "control: v1 must NOT already define the bounded body, or the backfill has \
+        "control: v1 must NOT already define the bounded body, or graph addition has \
          nothing to add"
     );
 
@@ -540,27 +539,25 @@ fn a_body_edit_to_a_generic_coroutine_reemits_its_specializations() {
     check_edit(v1, &v2, &["walk"]);
 }
 
-/// An edit that introduces a NEW specialization demand must BACKFILL it
+/// An edit that introduces a NEW specialization demand must MATERIALIZE it
 /// (mono cut C+D, the item B\* left open and D-1 absorbs).
 ///
-/// Invalidation and backfill are different failures. The sibling above edits a
+/// Invalidation and graph addition are different failures. The sibling above edits a
 /// callee whose specializations already exist, so the cache knows the key set and
 /// only has to re-emit; here the edit is in the CALLER and produces a key the
 /// cache has never seen. A cache that only re-emits what it already holds is
 /// green on that one and silently short a definition on this one -- the caller
 /// would then spell a specialized symbol nothing defines.
 ///
-/// It works because backfill is NOT a second mechanism: `emit_incremental`
-/// reassembles through the same `assemble` (`view_driven_specialized_chunks`)
-/// pass `emit_full` runs, so a demand that appears for the first time is
-/// discovered and BUILT there. Pinning it here is what keeps a future "only
-/// reassemble what changed" optimization from removing that without noticing.
+/// The graph update now reports the new instance and the cache builds it from
+/// the graph's substitution and bound tree before overlay assembly. The same
+/// `assemble` path still remains the incremental oracle for parity.
 ///
 /// Asserted on the incremental output's own definition COUNT as well as against
 /// a fresh build. Equality alone would be satisfied by two builds that both lack
 /// the new body, and the count alone would not catch a stale one.
 #[test]
-fn an_edit_that_introduces_a_new_specialization_demand_backfills_it() {
+fn an_edit_that_introduces_a_new_specialization_demand_builds_from_graph_delta() {
     let types = "value P { x: float, y: float }\n\
                  value Q { a: float, b: float, c: float }\n\
                  fn tally_of<T>(xs: [T]) -> T { return xs[0] }\n";
@@ -608,7 +605,7 @@ fn an_edit_that_introduces_a_new_specialization_demand_backfills_it() {
         .count();
     assert_eq!(
         defs, 2,
-        "the incremental assembly must BACKFILL the specialization the edit introduced"
+        "the incremental assembly must materialize the specialization the edit introduced"
     );
 }
 
@@ -667,7 +664,7 @@ fn a_standalone_bounded_body_survives_an_incremental_rebuild() {
 }
 
 /// **An edit that REMOVES the last call to an instantiation must prune it**,
-/// leaving no stale definition live -- the direction the backfill arms above do
+/// leaving no stale definition live -- the direction the graph-addition arms above do
 /// not cover.
 ///
 /// The sibling declaration instance is what makes it a per-INSTANCE question
