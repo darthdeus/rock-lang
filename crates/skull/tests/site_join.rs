@@ -56,7 +56,7 @@ fn instance_claim(
 ) -> skull_mir::site::OwnerInstance {
     skull_mir::site::OwnerInstance {
         func: inst.func,
-        subst: g.substitutions.get(inst).expect("instance has a substitution").clone(),
+        subst: g.substitution(inst).expect("instance has a substitution").clone(),
     }
 }
 
@@ -422,8 +422,8 @@ fn main() {
     );
     // The two `ident` instances, and the key that names each.
     let insts: Vec<&skull::instance_graph::Instance> = g
-        .substitutions
-        .keys()
+        .substitutions()
+        .map(|(i, _)| i)
         .filter(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "ident")
         .collect();
     assert_eq!(insts.len(), 2, "fixture must produce TWO instances of one declaration: {insts:?}");
@@ -475,8 +475,8 @@ fn main() { print("{one(1)} {two(2)}") }
 "#,
     );
     let find = |name: &str| -> skull::instance_graph::Instance {
-        g.substitutions
-            .keys()
+        g.substitutions()
+            .map(|(i, _)| i)
             .find(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == name)
             .expect("instance")
             .clone()
@@ -512,8 +512,8 @@ fn main() { print("{pair(1, 2.0)} {other(1, 2.0)}") }
 "#,
     );
     let find = |n: &str| {
-        g.substitutions
-            .keys()
+        g.substitutions()
+            .map(|(i, _)| i)
             .find(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == n)
             .unwrap_or_else(|| panic!("no `{n}` instance"))
             .clone()
@@ -626,8 +626,8 @@ fn main() { print("{ident(1)}") }
 "#,
     );
     let inst = g
-        .substitutions
-        .keys()
+        .substitutions()
+        .map(|(i, _)| i)
         .find(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "ident")
         .expect("instance")
         .clone();
@@ -639,7 +639,10 @@ fn main() { print("{ident(1)}") }
     );
     // Remove ONLY the resolved instance's record -- the call still carries the
     // same complete claim, so nothing about the CALL changed.
-    let removed = g.substitutions.remove(&inst);
+    // Through the INDEX, which is where the record lives: removing the
+    // instance's entry is removing every owner's opinion of it.
+    let removed = g.index.subst.remove(&inst);
+    g.root_instances.remove(&inst);
     assert!(removed.is_some(), "nothing was removed, so the arm below is untested");
     assert_eq!(
         skull::site_join::check_callee(&ws, &g, &rock(&inst), inst.func, Some(&claim), LUA),
@@ -834,15 +837,16 @@ fn main() { print("{top()}") }
     // the recorded owner too, and a mutation applied to both sides of a
     // comparison cannot fail it.
     let victim = g
-        .substitutions
-        .keys()
+        .substitutions()
+        .map(|(i, _)| i)
         .find(|i| {
             ws.module(i.func.module).functions[i.func.func].name.as_str() == "wrap"
-                && !g.substitutions[i].is_empty()
+                && g.substitution(i).is_some_and(|s| !s.is_empty())
         })
         .expect("`wrap` instance with a concrete substitution")
         .clone();
-    let removed = g.substitutions.remove(&victim);
+    let removed = g.index.subst.remove(&victim);
+    g.root_instances.remove(&victim);
     assert!(removed.is_some(), "nothing was removed, so the arm below is untested");
 
     let after = site_join::census(&ws, &scx, &g, &bodies);

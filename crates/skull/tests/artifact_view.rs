@@ -534,7 +534,7 @@ fn retention_is_reachability_not_a_declaration_filter() {
         .iter()
         .filter(|i| {
             (i.func == main_only[0] && i.args.is_empty())
-                || g.always_emitted_targets.contains(*i)
+                || g.is_always_emitted_target(i)
         })
         .collect();
     assert_eq!(
@@ -1545,7 +1545,8 @@ fn main() {
         .find(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "wired_pair")
         .expect("the publisher instance")
         .clone();
-    assert!(g.substitutions.remove(&inst).is_some(), "there was no record to remove");
+    let removed = g.index.subst.remove(&inst).is_some() | g.root_instances.remove(&inst);
+    assert!(removed, "there was no record to remove");
 
     let after = artifact::realize(&ws, &g, &ArtifactRequest::new(JAVASCRIPT_WEB, &roots));
     assert_eq!(

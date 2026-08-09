@@ -834,7 +834,7 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     let mut roots: BTreeSet<Instance> = BTreeSet::new();
     for i in &g.instances {
         let is_root = root_decls.contains(&DeclKey(i.func))
-            || g.always_emitted_targets.contains(i);
+            || g.is_always_emitted_target(i);
         if is_root && realizable[i].is_ok() {
             roots.insert(i.clone());
         }
@@ -1020,7 +1020,7 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
             if !matches!(r.kind, Realization::ForeignBody(BoundaryClass::InlineBody)) {
                 continue;
             }
-            let Some(subst) = g.substitutions.get(i) else { continue };
+            let Some(subst) = g.substitution(i) else { continue };
             publisher_lanes.insert(
                 i.clone(),
                 skull_mir::lower::BackendFnAbiPlan::for_instance(ws, scx, r.decl, subst).result_lanes(),

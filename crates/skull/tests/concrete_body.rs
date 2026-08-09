@@ -234,13 +234,8 @@ fn main() { let a = ident(1) }
         .get(&bone_semantic::hir::BodyOwner::Function(inst.func.func))
         .expect("ident has no body");
 
-    let with = concrete_body::convert_body(
-        &mut g.arena,
-        &ws,
-        inf,
-        body,
-        g.substitutions.get(&inst).expect("ident instance kept no substitution"),
-    );
+    let subst = g.substitution(&inst).expect("ident instance kept no substitution").clone();
+    let with = concrete_body::convert_body(&mut g.arena, &ws, inf, body, &subst);
     assert_eq!(with.failures.len(), 0, "the real substitution left slots unbound: {:?}", with.failures);
     assert!(with.examined() > 0);
 
@@ -547,9 +542,9 @@ fn main() {
 "#,
     );
     assert!(
-        g.bound_tree_disagreements.is_empty(),
+        g.bound_tree_disagreements().next().is_none(),
         "one instance got two conformance answers: {:?}",
-        g.bound_tree_disagreements
+        g.bound_tree_disagreements().collect::<Vec<_>>()
     );
 
     let pull = bodies
@@ -609,13 +604,26 @@ fn main() { let n = sum_it([1, 2].iter()) }
         .find(|i| g.identity(&ws, i).starts_with("sum_it"))
         .cloned()
         .expect("no concrete `sum_it` instance");
-    let recorded = g.bound_trees[&inst].clone();
+    let recorded = g.bound_tree(&inst).cloned().expect("no witness tree");
     assert!(!recorded.next.is_empty(), "fixture has no bound witness tree");
-    g.bound_tree_disagreements.push(instance_graph::BoundTreeDisagreement {
-        instance: inst.clone(),
-        recorded,
-        incoming: instance_graph::InstanceBoundTree::default(),
-    });
+    // A disagreement IS two owners supplying different witnesses, so it is
+    // constructed as a second index entry rather than as a record beside them.
+    // The synthetic owner sorts after every `Owner::Instance`, so the real
+    // tree stays the kept one.
+    g.index
+        .trees
+        .get_mut(&inst)
+        .expect("the instance has a witness record")
+        .dissent
+        .insert(
+            instance_graph::Owner::AlwaysEmitted(
+                bone_semantic::prelude::ModuleId::builtin(),
+                bone_semantic::hir::BodyOwner::Global(bone_semantic::prelude::Idx::from_raw(
+                    0u32.into(),
+                )),
+            ),
+            instance_graph::InstanceBoundTree::default(),
+        );
 
     let bodies = concrete_body::build(&ws, &mut g);
     assert!(!bodies.bodies.contains_key(&inst), "an ambiguous body was still built");

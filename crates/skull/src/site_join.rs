@@ -595,7 +595,7 @@ fn mangled_symbols(ws: &Workspace) -> std::collections::HashSet<ustr::Ustr> {
 
 fn owner_index(g: &InstanceGraph) -> HashMap<skull_mir::mir::FuncRef, Vec<(MonoSubst, Instance)>> {
     let mut ix: HashMap<skull_mir::mir::FuncRef, Vec<(MonoSubst, Instance)>> = HashMap::new();
-    for (inst, subst) in &g.substitutions {
+    for (inst, subst) in g.substitutions() {
         ix.entry(inst.func).or_default().push((subst.clone(), inst.clone()));
     }
     ix
@@ -807,7 +807,7 @@ pub fn census_detailed(
             skip(&mut c, BodySkip::NoLoweredBody);
             continue;
         }
-        let Some(subst) = g.substitutions.get(inst) else {
+        let Some(subst) = g.substitution(inst) else {
             skip(&mut c, BodySkip::NoSubstitution);
             continue;
         };
@@ -966,7 +966,7 @@ pub fn check_callee(
     if claim.func != target {
         return CalleeCheck::ClaimDeclMismatch;
     }
-    match g.substitutions.get(callee_inst) {
+    match g.substitution(callee_inst) {
         Some(resolved) if *resolved == claim.subst => CalleeCheck::Instance,
         Some(_) => CalleeCheck::InstanceMismatch,
         None => CalleeCheck::ResolvedUnrecorded,

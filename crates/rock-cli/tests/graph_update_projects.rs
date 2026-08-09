@@ -119,9 +119,16 @@ fn project_case(rel: &str) {
         "{rel} does not typecheck clean, so nothing below would be evidence"
     );
 
-    let t = Instant::now();
+    // MIN of several, not one sample: this box is noisy enough that a single
+    // build has swung 2x between runs, and the comparison the note carries is
+    // between phases rather than between machines.
+    let mut fresh_ms = f64::MAX;
     let mut graph = graph_of(session.workspace(), &dir);
-    let fresh_ms = t.elapsed().as_secs_f64() * 1000.0;
+    for _ in 0..5 {
+        let t = Instant::now();
+        graph = graph_of(session.workspace(), &dir);
+        fresh_ms = fresh_ms.min(t.elapsed().as_secs_f64() * 1000.0);
+    }
     let owners_total = graph.contributions.len();
     let instances_total = graph.instances.len();
 
@@ -167,6 +174,8 @@ fn project_case(rel: &str) {
         panic!("{rel}: no bare call statement whose deletion strands anything, out of {examined} examined")
     });
 
+    // The same for the update: the first call pays for whatever the machine
+    // was doing a moment ago.
     let del = edit_and_compare(&mut session, &mut graph, &dir, &path, &edited, "deletion");
     assert!(del.stats.pruned > 0, "{rel}: the chosen deletion pruned nothing");
     let add = edit_and_compare(&mut session, &mut graph, &dir, &path, &original, "addition");

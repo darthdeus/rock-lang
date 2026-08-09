@@ -636,11 +636,11 @@ pub fn build(ws: &Workspace, g: &mut InstanceGraph) -> ConcreteBodies {
     let mut out = ConcreteBodies::default();
     let expanded: Vec<Instance> = g.expanded().cloned().collect();
     for inst in expanded {
-        if g.bound_tree_disagreements.iter().any(|d| d.instance == inst) {
+        if g.has_bound_tree_disagreement(&inst) {
             out.gaps.push(MissingBody { instance: inst, gap: BodyGap::InconsistentBounds });
             continue;
         }
-        let Some(subst) = g.substitutions.get(&inst).cloned() else {
+        let Some(subst) = g.substitution(&inst).cloned() else {
             out.gaps.push(MissingBody { instance: inst, gap: BodyGap::NoSubstitution });
             continue;
         };

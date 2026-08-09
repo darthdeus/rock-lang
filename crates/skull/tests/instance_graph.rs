@@ -2030,9 +2030,10 @@ fn main() { a(); b(); c(); d() }
     // prove that `ident<int>` and `ident<string>` were each reached through
     // both of their callers.
     let compared: std::collections::BTreeMap<String, usize> = g
-        .subst_compared
+        .instances
         .iter()
-        .map(|(i, n)| (g.identity(&ws, i), *n))
+        .map(|i| (g.identity(&ws, i), g.subst_compared(i)))
+        .filter(|(_, n)| *n > 0)
         .collect();
     // `ident<int>` is reached from `a` directly and from `hold<int>`
     // transitively, so its substitution is computed twice from two different
@@ -2051,16 +2052,13 @@ fn main() { a(); b(); c(); d() }
              never tested; compared: {compared:?}"
         );
     }
-    let disagreements: Vec<String> = g
-        .subst_disagreements
-        .iter()
-        .map(|d| g.identity(&ws, &d.instance))
-        .collect();
+    let disagreements: Vec<String> =
+        g.subst_disagreements().map(|d| g.identity(&ws, &d.instance)).collect();
     assert!(
         disagreements.is_empty(),
         "{} of {} comparisons found an instance reached at two substitutions: {disagreements:?}",
-        g.subst_disagreements.len(),
-        g.subst_comparisons
+        g.subst_disagreements().count(),
+        g.subst_comparisons()
     );
     // The substitution is KEPT for EVERY instance, not merely checked --
     // `ConcreteBody` needs it, and the walk used to drop it on the floor. Not
@@ -2070,10 +2068,11 @@ fn main() { a(); b(); c(); d() }
     let missing = g.instances_without_substitution(&ws);
     assert!(missing.is_empty(), "instances with no recorded substitution: {missing:?}");
     assert!(
-        g.substitutions.contains_key(&instance_graph::Instance {
+        g.substitution(&instance_graph::Instance {
             func: main_ref(&ws),
             args: Vec::new(),
-        }),
+        })
+        .is_some(),
         "`main`, a non-generic root, has no recorded substitution"
     );
 }

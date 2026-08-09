@@ -19,11 +19,10 @@ use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::Span;
 use skull::graph_snapshot::{canonical, CanonicalGraph};
 use skull::instance_graph::{
-    self, AlwaysEmittedFailure, AlwaysEmittedOutcome, Boundary, BoundaryClass,
-    BoundTreeDisagreement, DeclKey, EdgeKind, Instance, InstanceBoundNext, InstanceBoundTree,
+    self, Agreed, AlwaysEmittedFailure, AlwaysEmittedOutcome, Boundary, BoundaryClass,
+    DeclKey, EdgeKind, Instance, InstanceBoundNext, InstanceBoundTree,
     InstanceGraph, Owner, Rejection, RejectionKind, Site, SiteDomain, SiteOp, SiteOutcome,
-    SiteRecord,
-    SubstDisagreement, Unresolved,
+    SiteRecord, Unresolved,
 };
 use skull_mir::monoty::{MonoSubst, MonoTy, MonoTyReason};
 use ustr::Ustr;
@@ -262,8 +261,8 @@ fn defaults_domain(args: Vec<MonoTy>) -> SiteDomain {
 /// real one, retyped so two arms can differ in the VALUE alone.
 fn subst_with(g: &InstanceGraph, ty: MonoTy) -> MonoSubst {
     let var = *g
-        .substitutions
-        .values()
+        .substitutions()
+        .map(|(_, s)| s)
         .find(|s| !s.is_empty())
         .expect("the fixture has a generic instance")
         .keys()
@@ -272,6 +271,59 @@ fn subst_with(g: &InstanceGraph, ty: MonoTy) -> MonoSubst {
     let mut out = MonoSubst::default();
     out.insert(var, ty);
     out
+}
+
+/// A low-sorting owner, so a value written under it is the AGREED one.
+fn first_owner(g: &InstanceGraph) -> Owner {
+    Owner::Instance(inst(g, 0))
+}
+
+/// A synthetic always-emitted owner. Every `Owner::AlwaysEmitted` sorts after
+/// every `Owner::Instance`, so a value written under it is the DISCARDED half
+/// of a disagreement rather than the kept one.
+fn later_owner() -> Owner {
+    Owner::AlwaysEmitted(
+        bone_semantic::prelude::ModuleId::builtin(),
+        bone_semantic::hir::BodyOwner::Global(bone_semantic::prelude::Idx::from_raw(0u32.into())),
+    )
+}
+
+/// One instance's whole witness record: agreed value, plus an optional second
+/// opinion. A disagreement IS two owners answering differently, so it is
+/// constructed that way rather than as a record beside them.
+fn set_trees(
+    g: &mut InstanceGraph,
+    i: Instance,
+    agreed: InstanceBoundTree,
+    other: Option<InstanceBoundTree>,
+) {
+    let (a, b) = (first_owner(g), later_owner());
+    let mut rec = Agreed {
+        owners: BTreeSet::from([a]),
+        value: agreed,
+        dissent: BTreeMap::new(),
+        total: 1,
+    };
+    if let Some(o) = other {
+        rec.dissent.insert(b, o);
+        rec.total += 1;
+    }
+    g.index.trees.insert(i, rec);
+}
+
+fn set_substs(g: &mut InstanceGraph, i: Instance, agreed: MonoSubst, other: Option<MonoSubst>) {
+    let (a, b) = (first_owner(g), later_owner());
+    let mut rec = Agreed {
+        owners: BTreeSet::from([a]),
+        value: agreed,
+        dissent: BTreeMap::new(),
+        total: 1,
+    };
+    if let Some(o) = other {
+        rec.dissent.insert(b, o);
+        rec.total += 1;
+    }
+    g.index.subst.insert(i, rec);
 }
 
 fn tree(callee: Instance, sub: InstanceBoundTree) -> InstanceBoundTree {
@@ -307,21 +359,7 @@ fn synthetic_rejection(g: &InstanceGraph) -> Rejection {
     }
 }
 
-fn synthetic_subst_disagreement(g: &InstanceGraph) -> SubstDisagreement {
-    SubstDisagreement {
-        instance: inst(g, 0),
-        kept: subst_with(g, MonoTy::Never),
-        discarded: subst_with(g, MonoTy::Unit),
-    }
-}
 
-fn synthetic_tree_disagreement(g: &InstanceGraph) -> BoundTreeDisagreement {
-    BoundTreeDisagreement {
-        instance: inst(g, 0),
-        recorded: tree(inst(g, 0), InstanceBoundTree::default()),
-        incoming: tree(inst(g, 1), InstanceBoundTree::default()),
-    }
-}
 
 const HOLE: &str = "synthetic_root";
 
@@ -360,8 +398,8 @@ fn arms() -> Vec<Arm> {
         g.erased_entries.remove(&victim);
     }));
     v.push(arm("always_emitted_targets.presence", "always_emitted_targets", noop, |g| {
-        let victim = g.always_emitted_targets.iter().next().expect("a seeded target").clone();
-        g.always_emitted_targets.remove(&victim);
+        let victim = g.always_emitted_targets().next().expect("a seeded target").clone();
+        g.index.always_emitted.remove(&victim);
     }));
     v.push(arm("call_sites.presence", "call_sites", noop, |g| {
         g.contributions
@@ -372,8 +410,9 @@ fn arms() -> Vec<Arm> {
             .clear();
     }));
     v.push(arm("substitutions.presence", "substitutions", noop, |g| {
-        let victim = g.substitutions.keys().next().expect("a substitution").clone();
-        g.substitutions.remove(&victim);
+        let victim = g.index.subst.keys().next().expect("a substitution").clone();
+        g.index.subst.remove(&victim);
+        g.root_instances.remove(&victim);
     }));
     v.push(arm("inline_body_deps.presence", "inline_body_deps", noop, |g| {
         let k = *g.inline_body_deps.keys().next().expect("an inline dep");
@@ -393,8 +432,8 @@ fn arms() -> Vec<Arm> {
         g.graph_rejections.pop().expect("the fixture's recursion rejection");
     }));
     v.push(arm("bound_trees.presence", "bound_trees", noop, |g| {
-        let k = g.bound_trees.keys().next().expect("a bound tree").clone();
-        g.bound_trees.remove(&k);
+        let k = g.index.trees.keys().next().expect("a bound tree").clone();
+        g.index.trees.remove(&k);
     }));
 
     // --- edges: every field ---
@@ -677,11 +716,11 @@ fn arms() -> Vec<Arm> {
         "bound_trees",
         |g| {
             let (i, t) = (inst(g, 0), tree(inst(g, 0), InstanceBoundTree::default()));
-            g.bound_trees.insert(i, t);
+            set_trees(g, i, t, None);
         },
         |g| {
             let (i, t) = (inst(g, 0), tree(inst(g, 1), InstanceBoundTree::default()));
-            g.bound_trees.insert(i, t);
+            set_trees(g, i, t, None);
         },
     ));
     v.push(arm(
@@ -690,12 +729,12 @@ fn arms() -> Vec<Arm> {
         |g| {
             let t = tree(inst(g, 0), tree(inst(g, 0), InstanceBoundTree::default()));
             let i = inst(g, 0);
-            g.bound_trees.insert(i, t);
+            set_trees(g, i, t, None);
         },
         |g| {
             let t = tree(inst(g, 0), tree(inst(g, 1), InstanceBoundTree::default()));
             let i = inst(g, 0);
-            g.bound_trees.insert(i, t);
+            set_trees(g, i, t, None);
         },
     ));
     v.push(arm(
@@ -704,7 +743,7 @@ fn arms() -> Vec<Arm> {
         |g| {
             let t = tree(inst(g, 0), InstanceBoundTree::default());
             let i = inst(g, 0);
-            g.bound_trees.insert(i, t);
+            set_trees(g, i, t, None);
         },
         |g| {
             let mut t = InstanceBoundTree::default();
@@ -713,7 +752,7 @@ fn arms() -> Vec<Arm> {
                 InstanceBoundNext { callee: inst(g, 0), sub: InstanceBoundTree::default() },
             );
             let i = inst(g, 0);
-            g.bound_trees.insert(i, t);
+            set_trees(g, i, t, None);
         },
     ));
 
@@ -723,11 +762,11 @@ fn arms() -> Vec<Arm> {
         "substitutions",
         |g| {
             let (i, s) = (inst(g, 0), subst_with(g, MonoTy::Never));
-            g.substitutions.insert(i, s);
+            set_substs(g, i, s, None);
         },
         |g| {
             let (i, s) = (inst(g, 0), subst_with(g, MonoTy::Unit));
-            g.substitutions.insert(i, s);
+            set_substs(g, i, s, None);
         },
     ));
 
@@ -736,80 +775,68 @@ fn arms() -> Vec<Arm> {
         "subst_disagreements.instance",
         "subst_disagreements",
         |g| {
-            let d = synthetic_subst_disagreement(g);
-            g.subst_disagreements.push(d);
+            let (i, a, b) = (inst(g, 0), subst_with(g, MonoTy::Never), subst_with(g, MonoTy::Unit));
+            set_substs(g, i, a, Some(b));
         },
         |g| {
-            let mut d = synthetic_subst_disagreement(g);
-            d.instance = inst(g, 1);
-            g.subst_disagreements.push(d);
+            let (i, a, b) = (inst(g, 1), subst_with(g, MonoTy::Never), subst_with(g, MonoTy::Unit));
+            set_substs(g, i, a, Some(b));
         },
     ));
     v.push(arm(
         "subst_disagreements.kept",
         "subst_disagreements",
         |g| {
-            let d = synthetic_subst_disagreement(g);
-            g.subst_disagreements.push(d);
+            let (i, a, b) = (inst(g, 0), subst_with(g, MonoTy::Never), subst_with(g, MonoTy::Unit));
+            set_substs(g, i, a, Some(b));
         },
         |g| {
-            let mut d = synthetic_subst_disagreement(g);
-            d.kept = subst_with(g, MonoTy::Unit);
-            g.subst_disagreements.push(d);
-        },
-    ));
-    v.push(arm(
-        "subst_disagreements.discarded",
-        "subst_disagreements",
-        |g| {
-            let d = synthetic_subst_disagreement(g);
-            g.subst_disagreements.push(d);
-        },
-        |g| {
-            let mut d = synthetic_subst_disagreement(g);
-            d.discarded = subst_with(g, MonoTy::Never);
-            g.subst_disagreements.push(d);
+            let (i, a, b) = (inst(g, 0), subst_with(g, MonoTy::Unit), subst_with(g, MonoTy::Never));
+            set_substs(g, i, a, Some(b));
         },
     ));
     v.push(arm(
         "bound_tree_disagreements.instance",
         "bound_tree_disagreements",
         |g| {
-            let d = synthetic_tree_disagreement(g);
-            g.bound_tree_disagreements.push(d);
+            let (i, a) = (inst(g, 0), tree(inst(g, 0), InstanceBoundTree::default()));
+            set_trees(g, i, a, Some(InstanceBoundTree::default()));
         },
         |g| {
-            let mut d = synthetic_tree_disagreement(g);
-            d.instance = inst(g, 1);
-            g.bound_tree_disagreements.push(d);
+            let (i, a) = (inst(g, 1), tree(inst(g, 0), InstanceBoundTree::default()));
+            set_trees(g, i, a, Some(InstanceBoundTree::default()));
         },
     ));
     v.push(arm(
         "bound_tree_disagreements.recorded",
         "bound_tree_disagreements",
         |g| {
-            let mut d = synthetic_tree_disagreement(g);
-            d.recorded = tree(inst(g, 0), tree(inst(g, 0), InstanceBoundTree::default()));
-            g.bound_tree_disagreements.push(d);
+            let (i, a) = (inst(g, 0), tree(inst(g, 0), tree(inst(g, 0), InstanceBoundTree::default())));
+            set_trees(g, i, a, Some(InstanceBoundTree::default()));
         },
         |g| {
-            let mut d = synthetic_tree_disagreement(g);
-            d.recorded = tree(inst(g, 0), tree(inst(g, 1), InstanceBoundTree::default()));
-            g.bound_tree_disagreements.push(d);
+            let (i, a) = (inst(g, 0), tree(inst(g, 0), tree(inst(g, 1), InstanceBoundTree::default())));
+            set_trees(g, i, a, Some(InstanceBoundTree::default()));
         },
     ));
     v.push(arm(
         "bound_tree_disagreements.incoming",
         "bound_tree_disagreements",
         |g| {
-            let mut d = synthetic_tree_disagreement(g);
-            d.incoming = tree(inst(g, 1), tree(inst(g, 0), InstanceBoundTree::default()));
-            g.bound_tree_disagreements.push(d);
+            let (i, a, b) = (
+                inst(g, 0),
+                tree(inst(g, 0), InstanceBoundTree::default()),
+                tree(inst(g, 1), tree(inst(g, 0), InstanceBoundTree::default())),
+            );
+            set_trees(g, i, a, Some(b));
         },
         |g| {
-            let mut d = synthetic_tree_disagreement(g);
-            d.incoming = tree(inst(g, 1), tree(inst(g, 1), InstanceBoundTree::default()));
-            g.bound_tree_disagreements.push(d);
+            let (i, a, b) = (
+                inst(g, 0),
+                tree(inst(g, 0), InstanceBoundTree::default()),
+                tree(inst(g, 1), tree(inst(g, 1), InstanceBoundTree::default())),
+            );
+            set_trees(g, i, a, Some(b));
         },
     ));
 
@@ -1031,15 +1058,17 @@ fn counters_and_arena_growth_are_not_semantic() {
 
     let (_, mut g) = build(false);
     g.sites_attempted += 1234;
-    g.subst_comparisons += 7;
-    g.bound_tree_comparisons += 7;
     g.recursion_starts += 99;
     g.synthesized_examined += 5;
     g.synthesized_approximated += 5;
     g.always_emitted_seeds += 3;
-    if let Some(v) = g.subst_compared.keys().next().cloned() {
-        *g.subst_compared.entry(v).or_default() += 11;
+    // The agreement counters are DERIVED from the reach index now, so moving
+    // them means moving the index -- an extra reach of an instance the graph
+    // already has, which is work performed and not a fact about the graph.
+    if let Some(a) = g.index.subst.values_mut().next() {
+        a.total += 11;
     }
+    assert!(g.subst_comparisons() > 0 && g.bound_tree_comparisons() == g.bound_tree_comparisons());
     // An orphan type interned but referenced by no instance -- exactly what a
     // persisted arena accumulates across edits.
     g.arena.intern(MonoTy::Never);

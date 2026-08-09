@@ -240,12 +240,11 @@ pub fn canonical(ws: &Workspace, g: &InstanceGraph) -> CanonicalGraph {
     );
     put(
         "substitutions",
-        g.substitutions.iter().map(|(i, s)| format!("{} :: {}", key(i), subst_key(s))).collect(),
+        g.substitutions().map(|(i, s)| format!("{} :: {}", key(i), subst_key(s))).collect(),
     );
     put(
         "bound_trees",
-        g.bound_trees
-            .iter()
+        g.bound_trees()
             .map(|(i, t)| format!("{} :: {}", key(i), bound_tree_key(ws, g, t)))
             .collect(),
     );
@@ -321,14 +320,13 @@ pub fn canonical(ws: &Workspace, g: &InstanceGraph) -> CanonicalGraph {
             })
             .collect(),
     );
-    put("always_emitted_targets", g.always_emitted_targets.iter().map(&key).collect());
+    put("always_emitted_targets", g.always_emitted_targets().map(&key).collect());
     // Both sides of each disagreement. The instance alone says only THAT one
     // exists; what makes the record actionable -- and what an updater can get
     // wrong on its own -- is which two answers disagreed.
     put(
         "subst_disagreements",
-        g.subst_disagreements
-            .iter()
+        g.subst_disagreements()
             .map(|d| {
                 format!(
                     "{} kept={{{}}} discarded={{{}}}",
@@ -341,8 +339,7 @@ pub fn canonical(ws: &Workspace, g: &InstanceGraph) -> CanonicalGraph {
     );
     put(
         "bound_tree_disagreements",
-        g.bound_tree_disagreements
-            .iter()
+        g.bound_tree_disagreements()
             .map(|d| {
                 format!(
                     "{} recorded={} incoming={}",

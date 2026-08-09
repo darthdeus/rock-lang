@@ -559,7 +559,7 @@ fn editing_a_const_initializer_replaces_its_always_emitted_owner() {
     assert!(case.has_instance_named("pick_a"), "v1 never reached `pick_a`");
     assert!(!case.has_instance_named("pick_b"));
     assert!(
-        !case.graph.always_emitted_targets.is_empty(),
+        case.graph.always_emitted_targets().next().is_some(),
         "the const's callee must be recorded as a root, not as an edge target"
     );
 

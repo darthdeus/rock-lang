@@ -510,6 +510,99 @@ impl Walk<'_> {
     }
 }
 
+/// A root's substitution, which is empty rather than absent.
+static EMPTY_SUBST: std::sync::LazyLock<MonoSubst> =
+    std::sync::LazyLock::new(MonoSubst::default);
+
+/// **Everything derived from more than one contribution.**
+///
+/// A substitution is recorded by the CALLER, not by the instance whose body it
+/// belongs to, so "what is this instance's substitution" is not a question a
+/// single record can answer. Keeping the per-owner answers rather than one
+/// merged value is what makes removal expressible: dropping a caller drops its
+/// opinion and the remaining ones still decide.
+///
+/// The agreed answer is the FIRST owner's in [`Owner`] order, which makes it a
+/// function of the contribution SET rather than of the order the walk
+/// discovered it in -- so a fresh build and an update cannot pick differently.
+#[derive(Default, Debug)]
+pub struct Indices {
+    /// Instance -> who reached it and what they said.
+    pub subst: BTreeMap<Instance, Agreed<MonoSubst>>,
+    /// Instance -> who supplied its conformance witnesses and what they said.
+    pub trees: BTreeMap<Instance, Agreed<InstanceBoundTree>>,
+    /// Runtime entry name -> the owners whose walk named it. Membership is a
+    /// non-empty owner set, never a count, so removing the last namer removes
+    /// the entry and a stale one cannot survive as a positive number.
+    pub erased: BTreeMap<String, BTreeSet<Owner>>,
+    /// Instance -> the always-emitted bodies that root it.
+    pub always_emitted: BTreeMap<Instance, BTreeSet<Owner>>,
+}
+
+/// **One fact several owners assert, with the agreement kept rather than
+/// assumed.**
+///
+/// The value is stored ONCE for every owner that agrees on it: they are equal
+/// by definition, so keeping a copy per owner would be 32k substitution clones
+/// per build on mag to represent 5k distinct answers. An owner that says
+/// something DIFFERENT is kept in full, because that is the finding.
+///
+/// `total` is the number of times the fact was asserted, which is not
+/// `owners.len()`: one body can reach one callee from several sites, and the
+/// agreement counters are per ASSERTION.
+#[derive(Clone, Debug)]
+pub struct Agreed<T> {
+    /// Owners asserting [`Self::value`].
+    pub owners: BTreeSet<Owner>,
+    pub value: T,
+    /// Owners asserting something else, each with what it said. Empty on every
+    /// valid program -- a non-empty one means the fact is not a function of the
+    /// instance, so a body built from it would depend on which owner won.
+    pub dissent: BTreeMap<Owner, T>,
+    pub total: usize,
+}
+
+impl<T: Clone + PartialEq> Agreed<T> {
+    fn new(owner: Owner, value: T) -> Self {
+        Agreed { owners: BTreeSet::from([owner]), value, dissent: BTreeMap::new(), total: 1 }
+    }
+
+    fn assert_by(&mut self, owner: Owner, value: &T) {
+        self.total += 1;
+        if *value == self.value {
+            self.owners.insert(owner);
+        } else {
+            self.dissent.insert(owner, value.clone());
+        }
+    }
+
+    /// Drop one owner's assertions. Returns false when nothing is left.
+    fn retract(&mut self, owner: &Owner, times: usize) -> bool {
+        self.total = self.total.saturating_sub(times);
+        self.owners.remove(owner);
+        self.dissent.remove(owner);
+        if self.owners.is_empty() {
+            // The agreeing side is gone; a dissenter becomes the answer, or
+            // there is no answer left at all.
+            let Some(first) = self.dissent.keys().next().cloned() else { return false };
+            let value = self.dissent.remove(&first).expect("just read");
+            self.owners.insert(first);
+            self.value = value;
+        }
+        true
+    }
+
+    /// The answer, decided by OWNER order rather than by arrival, so a fresh
+    /// build and an update cannot pick differently.
+    fn decided(&self) -> &T {
+        let agreed = self.owners.iter().next();
+        match (agreed, self.dissent.iter().next()) {
+            (Some(a), Some((d, v))) if d < a => v,
+            _ => &self.value,
+        }
+    }
+}
+
 pub struct InstanceGraph {
     pub arena: MonoArena,
     /// The primary records. Every flat field below is derived from these plus
@@ -561,37 +654,12 @@ pub struct InstanceGraph {
     /// one name was kept. The residual over-approximation, as a number rather
     /// than a paragraph.
     pub synthesized_approximated: usize,
-    /// Each instance's substitution: callee `VarId` -> its concrete type. What
-    /// a `ConcreteBody`'s type tables are built under (plan S 9). Kept because
-    /// the walk computed it and then dropped it, leaving nothing able to state
-    /// an instance's types concretely.
-    pub substitutions: BTreeMap<Instance, MonoSubst>,
-    /// Instances two callers reached with DIFFERENT substitutions. Non-empty
-    /// means the substitution is not a function of the instance, so a
-    /// `ConcreteBody` built from it would depend on discovery order.
-    pub subst_disagreements: Vec<SubstDisagreement>,
-    /// How many times the walk actually COMPARED an instance's substitution
-    /// against a recorded one. The denominator for `subst_disagreements`.
-    pub subst_comparisons: usize,
-    /// The same, PER INSTANCE. A global count cannot say that any PARTICULAR
-    /// instance was reached from two callers, which is what the agreement
-    /// property is about.
-    pub subst_compared: BTreeMap<Instance, usize>,
-    /// Concrete conformance witnesses for each bounded instance. This replaces
-    /// the splice-time `CallerGeneric` environment for consumers of the graph.
-    pub bound_trees: BTreeMap<Instance, InstanceBoundTree>,
-    /// One logical instance reached with two different witness trees. Empty is
-    /// required: otherwise its body would depend on discovery order.
-    pub bound_tree_disagreements: Vec<BoundTreeDisagreement>,
-    /// Re-reaches whose witness trees were actually compared.
-    pub bound_tree_comparisons: usize,
-    /// Instances reached from an ALWAYS-EMITTED body -- a decorator definition
-    /// or a global initializer. They have no `from` instance, so they carry no
-    /// incoming [`Edge`] and no [`Site`], and a reachability walk over the edges
-    /// alone would call them unreachable. Production treats them as roots
-    /// (`mir_emit::reachable_fns`'s `extra_roots`), so an artifact view must
-    /// seed from them too.
-    pub always_emitted_targets: BTreeSet<Instance>,
+    /// **The cross-owner facts, maintained where a contribution is installed
+    /// or removed.** Public for the same reason [`Self::contributions`] is --
+    /// the oracle and its tests construct states directly -- but consumers ask
+    /// through the accessors, which are the one place the agreed answer is
+    /// decided.
+    pub index: Indices,
     /// Every site the walk ATTEMPTED, including the ones with no `from`
     /// instance to record against. The denominator for `call_sites`.
     pub sites_attempted: usize,
@@ -777,7 +845,7 @@ impl InstanceGraph {
     /// GLSL artifact passes read this, so the two cannot classify one instance
     /// differently.
     pub fn concreteness(&self, i: &Instance) -> Concreteness {
-        match self.substitutions.get(i) {
+        match self.substitution(i) {
             None => Concreteness::Missing,
             Some(s) if s.is_empty() && i.args.is_empty() => Concreteness::Concrete,
             Some(_) => Concreteness::Generic,
@@ -942,7 +1010,7 @@ impl InstanceGraph {
     pub fn instances_without_substitution(&self, ws: &Workspace) -> BTreeSet<String> {
         self.instances
             .iter()
-            .filter(|i| !self.substitutions.contains_key(*i))
+            .filter(|i| self.substitution(i).is_none())
             .map(|i| self.identity(ws, i))
             .collect()
     }
@@ -1287,6 +1355,7 @@ impl InstanceGraph {
         contributions: BTreeMap::new(),
         root_instances: BTreeSet::new(),
         instances: BTreeSet::new(),
+        index: Indices::default(),
         graph_rejections: Vec::new(),
         uninstantiated_roots: BTreeMap::new(),
         excused_generic_roots: BTreeMap::new(),
@@ -1297,16 +1366,8 @@ impl InstanceGraph {
         synthesized_examined: 0,
         synthesized_approximated: 0,
         always_emitted_seeds: 0,
-        always_emitted_targets: BTreeSet::new(),
         sites_attempted: 0,
         recursion_starts: 0,
-        substitutions: BTreeMap::new(),
-        subst_disagreements: Vec::new(),
-        subst_comparisons: 0,
-        subst_compared: BTreeMap::new(),
-        bound_trees: BTreeMap::new(),
-        bound_tree_disagreements: Vec::new(),
-        bound_tree_comparisons: 0,
         }
     }
 
@@ -1377,7 +1438,6 @@ impl InstanceGraph {
     fn run(&mut self, ws: &Workspace, mut pending: Vec<Owner>) -> RunStats {
         let mut stats = RunStats::default();
         for i in self.root_instances.clone() {
-            self.merge_reach(&i, &MonoSubst::default());
             if !self.contributions.contains_key(&Owner::Instance(i.clone())) {
                 pending.push(Owner::Instance(i));
             }
@@ -1390,14 +1450,11 @@ impl InstanceGraph {
         loop {
             while let Some(owner) = pending.pop() {
                 if let Owner::Instance(i) = &owner {
-                    walked_with.insert(
-                        i.clone(),
-                        self.bound_trees.get(i).cloned().unwrap_or_default(),
-                    );
+                    walked_with.insert(i.clone(), self.bound_tree(i).cloned().unwrap_or_default());
                 }
                 let c = self.expand(ws, &owner);
                 stats.expanded += 1;
-                pending.extend(self.commit(owner, c));
+                pending.extend(self.install(owner, c));
             }
             // The fixpoint: an owner whose witnesses moved while it was already
             // walked must be walked again, or its callees are the ones the old
@@ -1406,8 +1463,7 @@ impl InstanceGraph {
                 .iter()
                 .filter(|(i, used)| {
                     self.contributions.contains_key(&Owner::Instance((*i).clone()))
-                        && self.bound_trees.get(*i).unwrap_or(&InstanceBoundTree::default())
-                            != *used
+                        && self.bound_tree(i).unwrap_or(&InstanceBoundTree::default()) != *used
                 })
                 .map(|(i, _)| Owner::Instance(i.clone()))
                 .collect();
@@ -1476,11 +1532,10 @@ impl InstanceGraph {
                 // instance with no record is an invariant break, not a body to
                 // walk with an empty one.
                 let subst = self
-                    .substitutions
-                    .get(inst)
+                    .substitution(inst)
                     .cloned()
                     .expect("every reached instance has a recorded substitution");
-                let owner_tree = self.bound_trees.get(inst).cloned().unwrap_or_default();
+                let owner_tree = self.bound_tree(inst).cloned().unwrap_or_default();
                 let mut w = Walk {
                     arena: &mut self.arena,
                     owner_tree: Some(&owner_tree),
@@ -1495,75 +1550,104 @@ impl InstanceGraph {
         out
     }
 
-    /// Install a contribution and return the owners it newly demands.
-    fn commit(&mut self, owner: Owner, c: Contribution) -> Vec<Owner> {
-        let mut demanded = Vec::new();
+    /// **Install a contribution, replacing whatever the owner had.**
+    ///
+    /// The ONE indexing path. A full build only ever installs; an update
+    /// installs over an existing record and prunes through
+    /// [`Self::uninstall`]. Both go through here, so an index cannot be
+    /// maintained one way on one path and another way on the other -- which is
+    /// what `derive` re-deriving the substitution maps behind `commit`'s back
+    /// used to be.
+    ///
+    /// Returns the owners the contribution newly demands.
+    fn install(&mut self, owner: Owner, c: Contribution) -> Vec<Owner> {
+        self.uninstall(&owner);
         // Every callee is in `reached`, an always-emitted body's included --
         // `always_emitted_targets` marks which of them are ROOTS, it is not a
-        // second population. Merging it again would reach each of those with an
-        // EMPTY substitution and manufacture a disagreement with its own.
+        // second population.
         for (to, subst) in &c.reached {
-            self.merge_reach(to, subst);
-            if !self.contributions.contains_key(&Owner::Instance(to.clone())) {
-                demanded.push(Owner::Instance(to.clone()));
+            match self.index.subst.get_mut(to) {
+                Some(a) => a.assert_by(owner.clone(), subst),
+                None => {
+                    self.index.subst.insert(to.clone(), Agreed::new(owner.clone(), subst.clone()));
+                }
             }
         }
         for (i, tree) in &c.bound_trees {
-            self.merge_bound_tree(i, tree);
+            match self.index.trees.get_mut(i) {
+                Some(a) => a.assert_by(owner.clone(), tree),
+                None => {
+                    self.index.trees.insert(i.clone(), Agreed::new(owner.clone(), tree.clone()));
+                }
+            }
         }
+        for name in &c.erased_entries {
+            self.index.erased.entry(name.clone()).or_default().insert(owner.clone());
+        }
+        for to in &c.always_emitted_targets {
+            self.index.always_emitted.entry(to.clone()).or_default().insert(owner.clone());
+        }
+        // The demand check runs AFTER the insert. `install` uninstalls first,
+        // so a body that reaches ITSELF -- any recursive function -- would
+        // otherwise find itself absent at the moment it asked and re-walk
+        // forever.
+        let reached: Vec<Instance> = c.reached.iter().map(|(to, _)| to.clone()).collect();
         self.contributions.insert(owner, c);
+        let mut demanded: Vec<Owner> = reached
+            .into_iter()
+            .map(Owner::Instance)
+            .filter(|o| !self.contributions.contains_key(o))
+            .collect();
         demanded.sort();
         demanded.dedup();
         demanded
     }
 
-    /// One reach, merged into the substitution record.
+    /// Remove a contribution and everything the indices held on its behalf.
     ///
-    /// The COMPARISONS are the denominator, not the recorded substitutions: an
-    /// instance reached exactly once never runs the comparison arm, and
-    /// counting recordings would report an agreement nothing tested.
-    fn merge_reach(&mut self, to: &Instance, subst: &MonoSubst) {
-        match self.substitutions.get(to) {
-            Some(prev) => {
-                // Compared before anything is cloned: most reaches are repeats
-                // of one already recorded, and cloning the substitution first
-                // meant one hash-map allocation per EDGE.
-                self.subst_comparisons += 1;
-                match self.subst_compared.get_mut(to) {
-                    Some(n) => *n += 1,
-                    None => {
-                        self.subst_compared.insert(to.clone(), 1);
-                    }
+    /// An index entry disappears when its last owner does, never when a count
+    /// reaches zero: the owner SET is the record, so a stale fact cannot
+    /// survive as a positive number nobody can check.
+    fn uninstall(&mut self, owner: &Owner) {
+        let Some(old) = self.contributions.remove(owner) else { return };
+        // One owner can assert one fact several times, so the retraction is by
+        // COUNT: dropping it once would leave a total that outlives its owner.
+        let mut reach_times: BTreeMap<&Instance, usize> = BTreeMap::new();
+        for (to, _) in &old.reached {
+            *reach_times.entry(to).or_insert(0) += 1;
+        }
+        for (to, times) in reach_times {
+            if let Some(a) = self.index.subst.get_mut(to) {
+                if !a.retract(owner, times) {
+                    self.index.subst.remove(to);
                 }
-                if prev != subst {
-                    self.subst_disagreements.push(SubstDisagreement {
-                        instance: to.clone(),
-                        kept: prev.clone(),
-                        discarded: subst.clone(),
-                    });
-                }
-            }
-            None => {
-                self.substitutions.insert(to.clone(), subst.clone());
             }
         }
-    }
-
-    fn merge_bound_tree(&mut self, instance: &Instance, incoming: &InstanceBoundTree) {
-        match self.bound_trees.get(instance) {
-            Some(recorded) if recorded != incoming => {
-                self.bound_tree_comparisons += 1;
-                self.bound_tree_disagreements.push(BoundTreeDisagreement {
-                    instance: instance.clone(),
-                    recorded: recorded.clone(),
-                    incoming: incoming.clone(),
-                });
+        let mut tree_times: BTreeMap<&Instance, usize> = BTreeMap::new();
+        for (i, _) in &old.bound_trees {
+            *tree_times.entry(i).or_insert(0) += 1;
+        }
+        for (i, times) in tree_times {
+            if let Some(a) = self.index.trees.get_mut(i) {
+                if !a.retract(owner, times) {
+                    self.index.trees.remove(i);
+                }
             }
-            Some(_) => {
-                self.bound_tree_comparisons += 1;
+        }
+        for name in &old.erased_entries {
+            if let Some(set) = self.index.erased.get_mut(name) {
+                set.remove(owner);
+                if set.is_empty() {
+                    self.index.erased.remove(name);
+                }
             }
-            None => {
-                self.bound_trees.insert(instance.clone(), incoming.clone());
+        }
+        for to in &old.always_emitted_targets {
+            if let Some(set) = self.index.always_emitted.get_mut(to) {
+                set.remove(owner);
+                if set.is_empty() {
+                    self.index.always_emitted.remove(to);
+                }
             }
         }
     }
@@ -1595,64 +1679,57 @@ impl InstanceGraph {
     /// alike. Returns the instances it pruned.
     fn derive(&mut self, ws: &Workspace) -> BTreeSet<Instance> {
         let live = self.reachable_instances();
-        let pruned: BTreeSet<Instance> = self
+        let dead: Vec<Owner> = self
             .contributions
             .keys()
-            .filter_map(|o| o.instance())
-            .filter(|i| !live.contains(*i))
+            .filter(|o| o.instance().is_some_and(|i| !live.contains(i)))
             .cloned()
             .collect();
-        // The arena is NOT pruned with them: an entry outliving its last
-        // instance is exactly what keeps ids stable across edits.
-        self.contributions.retain(|o, _| o.instance().is_none_or(|i| live.contains(i)));
+        let pruned: BTreeSet<Instance> =
+            dead.iter().filter_map(|o| o.instance()).cloned().collect();
+        // Through `uninstall`, so a pruned owner's index entries go with it --
+        // the arena is the ONLY thing not pruned, because an entry outliving
+        // its last instance is what keeps ids stable across edits.
+        for owner in &dead {
+            self.uninstall(owner);
+        }
 
         self.instances = live;
         self.graph_rejections.clear();
-        self.erased_entries.clear();
-        self.always_emitted_targets.clear();
         self.sites_attempted = 0;
         self.always_emitted_seeds = 0;
         self.synthesized_examined = 0;
         self.synthesized_approximated = 0;
-        // Re-derived from the reaches that SURVIVED, so a pruned caller takes
-        // its callee's substitution with it.
-        self.substitutions.clear();
-        self.subst_compared.clear();
-        self.subst_comparisons = 0;
-        self.subst_disagreements.clear();
-        self.bound_trees.clear();
-        self.bound_tree_comparisons = 0;
-        self.bound_tree_disagreements.clear();
-
-        for i in self.root_instances.clone() {
-            self.merge_reach(&i, &MonoSubst::default());
+        for name in self.uninstantiated_roots.values_mut() {
+            name.always_emitted_sites.clear();
         }
-        // Taken out and put back rather than iterated by key: the merges below
-        // need `&mut self`, so reading each contribution through the map would
-        // mean a deep clone per owner.
-        let contributions = std::mem::take(&mut self.contributions);
-        for (_owner, c) in &contributions {
-            self.erased_entries.extend(c.erased_entries.iter().cloned());
-            self.always_emitted_targets.extend(c.always_emitted_targets.iter().cloned());
+        // Summed over the primary records rather than accumulated beside them.
+        // O(owners) with no allocation, and `graph_contributions` asserts the
+        // equality, so a maintained total that drifted would be caught rather
+        // than believed.
+        for c in self.contributions.values() {
             self.sites_attempted += c.sites_attempted;
             self.always_emitted_seeds += c.always_emitted_seeds;
             self.synthesized_examined += c.synthesized_examined;
             self.synthesized_approximated += c.synthesized_approximated;
-            for (name, failure) in &c.always_emitted_holes {
-                self.uninstantiated_roots
-                    .entry(name.clone())
-                    .or_default()
-                    .always_emitted_sites
-                    .push(failure.clone());
-            }
-            for (to, subst) in &c.reached {
-                self.merge_reach(to, subst);
-            }
-            for (i, tree) in &c.bound_trees {
-                self.merge_bound_tree(i, tree);
-            }
         }
-        self.contributions = contributions;
+        let holes: Vec<(String, AlwaysEmittedFailure)> = self
+            .contributions
+            .values()
+            .flat_map(|c| c.always_emitted_holes.iter().cloned())
+            .collect();
+        for (name, failure) in holes {
+            self.uninstantiated_roots
+                .entry(name)
+                .or_default()
+                .always_emitted_sites
+                .push(failure);
+        }
+        // The erased catalogue is bounded by `ERASED_RUNTIME_ENTRIES` (15
+        // names), so it is rebuilt from the index rather than maintained: the
+        // inline-body pass below adds to it too, and one writer beats two.
+        self.erased_entries = self.index.erased.keys().cloned().collect();
+
         // Which holes nevertheless have concrete instances from other call
         // sites. A post-pass because a root is recorded before any body is
         // walked, so at insertion time no instance of it exists yet -- which is
@@ -1883,6 +1960,111 @@ impl InstanceGraph {
             .iter()
             .filter_map(|(o, c)| o.instance().map(|i| (i, &c.call_sites)))
             .filter(|(_, m)| !m.is_empty())
+    }
+
+    /// **Owner-local**: the substitution this instance's body is walked under.
+    ///
+    /// A ROOT has no caller to have recorded one, and its substitution is EMPTY
+    /// rather than absent -- seeding roots directly is what once left corpus
+    /// instances with no record at all.
+    pub fn substitution(&self, i: &Instance) -> Option<&MonoSubst> {
+        self.index
+            .subst
+            .get(i)
+            .map(|a| a.decided())
+            .or_else(|| self.root_instances.contains(i).then(|| &*EMPTY_SUBST))
+    }
+
+    /// Every instance's agreed substitution.
+    pub fn substitutions(&self) -> impl Iterator<Item = (&Instance, &MonoSubst)> {
+        self.index
+            .subst
+            .iter()
+            .map(|(i, a)| (i, a.decided()))
+            .chain(
+                self.root_instances
+                    .iter()
+                    .filter(|i| !self.index.subst.contains_key(*i))
+                    .map(|i| (i, &*EMPTY_SUBST)),
+            )
+    }
+
+    /// Instances two owners reached with DIFFERENT substitutions. Non-empty
+    /// means the substitution is not a function of the instance, so a
+    /// `ConcreteBody` built from it would depend on which caller won.
+    pub fn subst_disagreements(&self) -> impl Iterator<Item = SubstDisagreement> + '_ {
+        self.index.subst.iter().flat_map(|(i, a)| {
+            let kept = a.decided().clone();
+            let out: Vec<SubstDisagreement> = a
+                .dissent
+                .values()
+                .chain(std::iter::once(&a.value))
+                .filter(|v| **v != kept)
+                .map(|v| SubstDisagreement {
+                    instance: i.clone(),
+                    kept: kept.clone(),
+                    discarded: v.clone(),
+                })
+                .collect();
+            out
+        })
+    }
+
+    /// **Owner-local**: the concrete witnesses supplied for this instance.
+    pub fn bound_tree(&self, i: &Instance) -> Option<&InstanceBoundTree> {
+        self.index.trees.get(i).map(|a| a.decided())
+    }
+
+    pub fn bound_trees(&self) -> impl Iterator<Item = (&Instance, &InstanceBoundTree)> {
+        self.index.trees.iter().map(|(i, a)| (i, a.decided()))
+    }
+
+    /// **Owner-local**: was this instance reached with two different witness
+    /// trees? Asked per instance by `concrete_body`, which used to answer it by
+    /// scanning the whole disagreement vector.
+    pub fn has_bound_tree_disagreement(&self, i: &Instance) -> bool {
+        self.index.trees.get(i).is_some_and(|a| !a.dissent.is_empty())
+    }
+
+    pub fn bound_tree_disagreements(&self) -> impl Iterator<Item = BoundTreeDisagreement> + '_ {
+        self.index.trees.iter().flat_map(|(i, a)| {
+            let recorded = a.decided().clone();
+            let out: Vec<BoundTreeDisagreement> = a
+                .dissent
+                .values()
+                .chain(std::iter::once(&a.value))
+                .filter(|v| **v != recorded)
+                .map(|v| BoundTreeDisagreement {
+                    instance: i.clone(),
+                    recorded: recorded.clone(),
+                    incoming: v.clone(),
+                })
+                .collect();
+            out
+        })
+    }
+
+    /// **Owner-local**: is this instance rooted by an always-emitted body?
+    pub fn is_always_emitted_target(&self, i: &Instance) -> bool {
+        self.index.always_emitted.contains_key(i)
+    }
+
+    pub fn always_emitted_targets(&self) -> impl Iterator<Item = &Instance> {
+        self.index.always_emitted.keys()
+    }
+
+    /// Re-reaches the agreement check ran over. Derived from the index rather
+    /// than accumulated: an instance reached N times was compared N-1 times.
+    pub fn subst_comparisons(&self) -> usize {
+        self.index.subst.values().map(|a| a.total - 1).sum()
+    }
+
+    pub fn subst_compared(&self, i: &Instance) -> usize {
+        self.index.subst.get(i).map_or(0, |a| a.total - 1)
+    }
+
+    pub fn bound_tree_comparisons(&self) -> usize {
+        self.index.trees.values().map(|a| a.total - 1).sum()
     }
 
     /// Every rejection: the per-body ones and the whole-graph ones.

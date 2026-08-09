@@ -2054,22 +2054,20 @@ fn one_project(
         coroutine_helpers: g.coroutine_helpers.len(),
         coroutine_helper_collisions: g.colliding_coroutine_helpers().len(),
         always_emitted_seeds: g.always_emitted_seeds,
-        subst_disagreements: g.subst_disagreements.len(),
+        subst_disagreements: g.subst_disagreements().count(),
         subst_disagreeing_instances: g
-            .subst_disagreements
-            .iter()
+            .subst_disagreements()
             .map(|d| g.identity(&ws, &d.instance))
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
         instances_without_substitution: g.instances_without_substitution(&ws),
-        substitutions_recorded: g.substitutions.len(),
-        subst_comparisons: g.subst_comparisons,
-        bound_tree_disagreements: g.bound_tree_disagreements.len(),
-        bound_tree_comparisons: g.bound_tree_comparisons,
-        bound_trees_recorded: g.bound_trees.len(),
+        substitutions_recorded: g.substitutions().count(),
+        subst_comparisons: g.subst_comparisons(),
+        bound_tree_disagreements: g.bound_tree_disagreements().count(),
+        bound_tree_comparisons: g.bound_tree_comparisons(),
+        bound_trees_recorded: g.bound_trees().count(),
         subst_examples: g
-            .subst_disagreements
-            .iter()
+            .subst_disagreements()
             .take(3)
             .map(|d| g.identity(&ws, &d.instance))
             .collect(),
