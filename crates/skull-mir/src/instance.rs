@@ -12,8 +12,10 @@
 //! Nothing here mints an arena-free instance of the same shape -- that would be
 //! the second identity this stage exists to remove.
 
+use bone_semantic::inference::Workspace;
+
 use crate::mir::FuncRef;
-use crate::monoty::MonoTyId;
+use crate::monoty::{MonoInterner, MonoSubst, MonoTy, MonoTyId};
 
 /// A function at one concrete instantiation. Non-generic functions get an
 /// instance too (empty `args`), so no consumer can reintroduce `if generic`.
@@ -25,6 +27,79 @@ use crate::monoty::MonoTyId;
 pub struct Instance {
     pub func: FuncRef,
     pub args: Vec<MonoTyId>,
+}
+
+impl Instance {
+    /// The one instance of a NON-GENERIC declaration.
+    ///
+    /// Named rather than spelled `Instance { func, args: vec![] }` at each site
+    /// so the empty argument list reads as what it is. It is not a sentinel: a
+    /// non-generic function has no type arguments, and asking whether a
+    /// declaration is generic is a question about the DECLARATION
+    /// ([`Self::is_generic`]), never about how many arguments happen to be here.
+    pub fn base(func: FuncRef) -> Self {
+        Self { func, args: Vec::new() }
+    }
+
+    /// Whether the DECLARATION this instantiates is generic.
+    ///
+    /// Deliberately reads `f.generics`, not `self.args`. The two agree for every
+    /// instance the graph builds, and the point of asking the declaration is
+    /// that an argument list that disagreed would be a defect rather than a
+    /// different answer.
+    pub fn is_generic(&self, ws: &Workspace) -> bool {
+        !ws.module(self.func.module).functions[self.func.func].generics.is_empty()
+    }
+
+    /// The instance's type arguments as the types they are, in declaration
+    /// order.
+    ///
+    /// The arena direction that is always safe: ids in, owned types out. The
+    /// other direction ([`Self::intern`]) is the one that must go through the
+    /// build's single interner.
+    pub fn arg_types(&self, interner: &MonoInterner) -> Vec<MonoTy> {
+        interner.get_all(&self.args)
+    }
+
+    /// Build an instance from a declaration and the concrete types it is
+    /// instantiated at, interning each argument into the build's arena.
+    ///
+    /// THE only way an instance is minted outside the graph's own walk, and it
+    /// takes the interner precisely so it cannot be done without one.
+    pub fn intern(interner: &MonoInterner, func: FuncRef, args: Vec<MonoTy>) -> Self {
+        Self { func, args: interner.intern_all(args) }
+    }
+
+    /// The substitution this instance's body lowers under: each declared
+    /// generic's `VarId` bound to its concrete type.
+    ///
+    /// The declaration supplies the ORDER, which is the only thing a
+    /// substitution lacks. Empty for a non-generic instance, which is the
+    /// substitution its body has always lowered under.
+    pub fn subst(&self, ws: &Workspace, interner: &MonoInterner) -> MonoSubst {
+        if self.args.is_empty() {
+            return MonoSubst::default();
+        }
+        crate::lower::spec_subst_from_key(ws, self.func, &self.arg_types(interner))
+    }
+
+    /// **The emitted symbol for this instance**, and the only encoder any
+    /// consumer may ask.
+    ///
+    /// Two cases, both explicit. A non-generic instance IS the declaration's
+    /// base mangling -- not a fallback for a failed lookup. A generic one always
+    /// has concrete arguments, so [`crate::mangle::spec_fn_name`] cannot
+    /// decline, and an `unwrap_or_else` back to the base name would hand a
+    /// specialization the declaration's symbol, which is the miscompile
+    /// instance-owned emission exists to remove.
+    pub fn symbol(&self, ws: &Workspace, interner: &MonoInterner) -> String {
+        let f = &ws.module(self.func.module).functions[self.func.func];
+        if self.args.is_empty() {
+            return crate::mangle::mangle_fn(ws, f);
+        }
+        crate::mangle::spec_fn_name(ws, f, &self.arg_types(interner))
+            .expect("an instance with arguments always has a specialized symbol")
+    }
 }
 
 /// A `FuncRef` as an ORDERED map key.

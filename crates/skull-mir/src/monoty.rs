@@ -592,6 +592,100 @@ impl MonoArena {
     }
 }
 
+/// **The one arena a whole build shares**, behind the interior mutability that
+/// sharing needs.
+///
+/// A [`MonoTyId`] means nothing without the arena that minted it, so an
+/// [`Instance`](crate::instance::Instance) is only an identity while one arena
+/// is reachable from everything that mints or reads one. Body lowering fans out
+/// across threads ([`par_map`](../../skull/src/mir_emit.rs)) and every body may
+/// name a callee instantiation, so the arena has to be shareable rather than
+/// owned by one walk -- and giving each walk its own would mint the second
+/// identity this stage exists to remove.
+///
+/// The lock is taken per INTERN, not per lowered body: a build interns on the
+/// order of its instance count (bitgun 3,495) against seconds of lowering, so
+/// the contention is not measurable. It is a [`std::sync::Mutex`] rather than a
+/// sharded map for that reason -- there is nothing here to optimize yet.
+///
+/// The arena is MONOTONIC and is never pruned. An entry outliving its last
+/// instance is what keeps ids stable across incremental edits, which is the
+/// property `InstanceGraph::update_bodies` rests on.
+pub struct MonoInterner {
+    arena: std::sync::Mutex<MonoArena>,
+}
+
+impl Default for MonoInterner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Debug for MonoInterner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "MonoInterner({} types)", self.len())
+    }
+}
+
+impl MonoInterner {
+    pub fn new() -> Self {
+        Self { arena: std::sync::Mutex::new(MonoArena::new()) }
+    }
+
+    /// Adopt an arena an [`InstanceGraph`](../../skull/src/instance_graph.rs)
+    /// build already filled. The graph and emission share ONE arena; a second
+    /// one would give the same type two ids and the same body two identities.
+    pub fn from_arena(arena: MonoArena) -> Self {
+        Self { arena: std::sync::Mutex::new(arena) }
+    }
+
+    pub fn len(&self) -> usize {
+        self.with(MonoArena::len)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn intern(&self, ty: MonoTy) -> MonoTyId {
+        self.arena.lock().expect("mono arena poisoned").intern(ty)
+    }
+
+    /// One lock acquisition for a whole argument list, which is how an
+    /// instance's arguments arrive.
+    pub fn intern_all(&self, tys: impl IntoIterator<Item = MonoTy>) -> Vec<MonoTyId> {
+        let mut arena = self.arena.lock().expect("mono arena poisoned");
+        tys.into_iter().map(|ty| arena.intern(ty)).collect()
+    }
+
+    /// The type an id names. Returns an OWNED [`MonoTy`] because the arena is
+    /// behind a lock; a [`MonoTy`] owns its children, so this is the same
+    /// self-contained value every other consumer already passes around.
+    pub fn get(&self, id: MonoTyId) -> MonoTy {
+        self.with(|a| a.get(id).clone())
+    }
+
+    /// The counterpart to [`Self::intern_all`], for reading an instance's
+    /// arguments back out as the types they are.
+    pub fn get_all(&self, ids: &[MonoTyId]) -> Vec<MonoTy> {
+        self.with(|a| ids.iter().map(|id| a.get(*id).clone()).collect())
+    }
+
+    /// Read-only access under one lock, for a caller doing several reads.
+    pub fn with<R>(&self, f: impl FnOnce(&MonoArena) -> R) -> R {
+        f(&self.arena.lock().expect("mono arena poisoned"))
+    }
+
+    /// Mutable access under one lock, for a caller doing several interns.
+    pub fn with_mut<R>(&self, f: impl FnOnce(&mut MonoArena) -> R) -> R {
+        f(&mut self.arena.lock().expect("mono arena poisoned"))
+    }
+
+    pub fn into_arena(self) -> MonoArena {
+        self.arena.into_inner().expect("mono arena poisoned")
+    }
+}
+
 /// Convert an inferred `TyId` to its total logical type.
 ///
 /// `subst` binds declared generics; a generic absent from it is
