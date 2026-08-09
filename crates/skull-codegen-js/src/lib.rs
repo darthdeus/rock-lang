@@ -1854,14 +1854,25 @@ var __sw_fsq_uv = [1, 1];
 function stone_set_fullscreen_uv_scale(sx, sy) {
   __sw_fsq_uv = [Math.max(sx, 0), Math.max(sy, 0)];
 }
+// THE statement of this tier's fullscreen geometry: the static buffers, the
+// scaled respecification and stone_fullscreen_quad_vertices all read it, so a
+// semantic submission can carry the exact bytes without restating them.
+function __sw_fsq_verts(flipped, sx, sy) {
+  var v0 = (flipped ? 1 : 0) * sy, v1 = (flipped ? 0 : 1) * sy;
+  return new Float32Array([
+    -1, -1, 0, v0,  1, -1, sx, v0,  1, 1, sx, v1,
+    -1, -1, 0, v0,  1, 1, sx, v1,  -1, 1, 0, v1,
+  ]);
+}
+function stone_fullscreen_quad_vertices(to_window, sx, sy, out) {
+  var v = __sw_fsq_verts(!!to_window, sx, sy);
+  for (var i = 0; i < v.length; i++) out[i] = v[i];
+  return v.length;
+}
 function __sw_fsq_buffer(gl, flipped) {
   var b = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, b);
-  var v0 = flipped ? 1 : 0, v1 = flipped ? 0 : 1;
-  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
-    -1, -1, 0, v0,  1, -1, 1, v0,  1, 1, 1, v1,
-    -1, -1, 0, v0,  1, 1, 1, v1,  -1, 1, 0, v1,
-  ]), gl.STATIC_DRAW);
+  gl.bufferData(gl.ARRAY_BUFFER, __sw_fsq_verts(flipped, 1, 1), gl.STATIC_DRAW);
   return b;
 }
 function stone_draw_fullscreen_quad() {
@@ -1881,13 +1892,9 @@ function stone_draw_fullscreen_quad() {
     // Re-specify the scaled quad; six vertices, and it reaches custom vertex
     // stages the way a uniform would not.
     if (!__sw_fsq_scaled) __sw_fsq_scaled = gl.createBuffer();
-    var flipped = __SW.boundCanvas === 0;
-    var v0 = flipped ? 1 : 0, v1 = flipped ? 0 : 1;
     gl.bindBuffer(gl.ARRAY_BUFFER, __sw_fsq_scaled);
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
-      -1, -1, 0, v0 * sy,  1, -1, sx, v0 * sy,  1, 1, sx, v1 * sy,
-      -1, -1, 0, v0 * sy,  1, 1, sx, v1 * sy,  -1, 1, 0, v1 * sy,
-    ]), gl.DYNAMIC_DRAW);
+    gl.bufferData(gl.ARRAY_BUFFER,
+      __sw_fsq_verts(__SW.boundCanvas === 0, sx, sy), gl.DYNAMIC_DRAW);
   }
   gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 16, 0);
   gl.enableVertexAttribArray(0);
