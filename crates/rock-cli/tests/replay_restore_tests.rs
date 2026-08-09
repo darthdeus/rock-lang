@@ -211,6 +211,90 @@ fn scrub_to_earlier_tick_matches_plain_run() {
     assert_sim_state_matches(&scrubbed, &reference, &sim, "tick-25");
 }
 
+#[test]
+fn scrub_reports_seek_cost_and_resimulation_population() {
+    let game = "bitgun";
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("seek-metrics.replay");
+    let log_s = log.to_string_lossy().into_owned();
+    let scratch = tempfile::tempdir().unwrap();
+
+    let rec = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args([
+            "frame", game, "-n", "60", "--record", &log_s,
+            "--output", &scratch.path().to_string_lossy(),
+        ])
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .current_dir(workspace_root())
+        .output()
+        .expect("spawn record");
+    assert!(rec.status.success(), "record failed: {}", String::from_utf8_lossy(&rec.stderr));
+
+    let scrubbed = run_replay_dump(
+        game,
+        60,
+        &log_s,
+        &[
+            ("STONE_KEYFRAME_INTERVAL", "10"),
+            ("STONE_SCRUB_AT_TICK", "40"),
+            ("STONE_SCRUB_TO_TICK", "25"),
+        ],
+    );
+    let diag = &scrubbed["__stone_diag"];
+    assert_eq!(diag["STONE_SEEK_COUNT"].as_i64(), Some(1));
+    assert_eq!(diag["STONE_SEEK_FROM_TICK"].as_i64(), Some(40));
+    assert_eq!(diag["STONE_SEEK_TO_TICK"].as_i64(), Some(25));
+    assert_eq!(diag["STONE_SEEK_RESIM_FRAMES"].as_i64(), Some(5));
+    assert!(
+        diag["STONE_SEEK_MS"].as_f64().is_some_and(|ms| ms > 0.0),
+        "seek timing must be reported as a positive duration: {diag}"
+    );
+    assert!(
+        diag["STONE_SEEK_RESIM_MS"].as_f64().is_some_and(|ms| ms > 0.0),
+        "resimulation timing must be reported as a positive duration: {diag}"
+    );
+}
+
+#[test]
+fn refused_scrub_does_not_leave_seek_active_or_complete() {
+    let game = "bitgun";
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("refused-scrub.replay");
+    let log_s = log.to_string_lossy().into_owned();
+    let scratch = tempfile::tempdir().unwrap();
+
+    let rec = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args([
+            "frame", game, "-n", "60", "--record", &log_s,
+            "--output", &scratch.path().to_string_lossy(),
+        ])
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .current_dir(workspace_root())
+        .output()
+        .expect("spawn record");
+    assert!(rec.status.success(), "record failed: {}", String::from_utf8_lossy(&rec.stderr));
+
+    // Interval zero disables every cadence capture, so this deliberately has
+    // no keyframe <= the backward target. A refused scrub must leave playback
+    // untouched and must not publish a completed seek.
+    let refused = run_replay_dump(
+        game,
+        60,
+        &log_s,
+        &[
+            ("STONE_KEYFRAME_INTERVAL", "0"),
+            ("STONE_SCRUB_AT_TICK", "40"),
+            ("STONE_SCRUB_TO_TICK", "25"),
+        ],
+    );
+    assert_eq!(current_tick(&refused), 61, "a refused scrub must not pause or rewind playback");
+    let diag = &refused["__stone_diag"];
+    assert_eq!(diag["STONE_SEEK_ACTIVE"].as_i64(), Some(0));
+    assert!(diag.get("STONE_SEEK_COUNT").is_none(), "a refused scrub must not complete a seek: {diag}");
+    assert!(diag.get("STONE_SEEK_RESIM_FRAMES").is_none(), "a refused scrub must not count resimulation: {diag}");
+    assert!(diag.get("STONE_SEEK_MS").is_none(), "a refused scrub must not report seek time: {diag}");
+}
+
 fn keyframe_count(s: &serde_json::Value) -> i64 {
     s["__stone_diag"]["STONE_KEYFRAME_COUNT"].as_i64().expect("STONE_KEYFRAME_COUNT")
 }
