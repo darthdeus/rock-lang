@@ -1005,7 +1005,11 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         .spec
         .execution
         .backend
-        .map(|b| skull_mir::lower::ScalarCtx::new(ws).with_target(b));
+        .map(|b| {
+            skull_mir::lower::ScalarCtx::new(ws)
+                .with_target(b)
+                .sharing(g.interner().clone())
+        });
     // ...under THAT INSTANCE's own substitution, which is what makes the width
     // a property of the instance and not of the declaration: `-> T` is one
     // boxed slot on the declaration and two lanes at `T = (bool, float)`, and
@@ -1020,10 +1024,26 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
             if !matches!(r.kind, Realization::ForeignBody(BoundaryClass::InlineBody)) {
                 continue;
             }
-            let Some(subst) = g.substitution(i) else { continue };
+            // The graph must have a record, or this instance is the invariant
+            // finding below rather than a lane width. The plan is then built
+            // POSITIONALLY, from the instance's own arguments against the
+            // SELECTED declaration's generics -- the same route every emitted
+            // body's plan takes. It used to pass the recorded substitution
+            // instead, which is keyed by `i.func`'s `VarId`s and applied to a
+            // possibly-different backend sibling; the declaration supplies the
+            // order, and a sibling is chosen for having the same signature.
+            if g.substitution(i).is_none() {
+                continue;
+            }
+            let selected = Instance { func: r.decl, args: i.args.clone() };
+            debug_assert_eq!(
+                ws.module(selected.func.module).functions[selected.func.func].generics.len(),
+                ws.module(i.func.module).functions[i.func.func].generics.len(),
+                "a backend sibling must declare the same generics as the instance it serves",
+            );
             publisher_lanes.insert(
                 i.clone(),
-                skull_mir::lower::BackendFnAbiPlan::for_foreign_subst(ws, scx, r.decl, subst).result_lanes(),
+                skull_mir::lower::BackendFnAbiPlan::for_instance(ws, scx, &selected).result_lanes(),
             );
         }
     }

@@ -1934,7 +1934,9 @@ fn one_project(
     let body_census = bodies.census();
     // The MIR-call -> ConcreteBody join, over production's own expanded set.
     let site_join = {
-        let scx = skull_mir::lower::ScalarCtx::new(&ws);
+        // Shares the graph's arena: the instances handed to `lower_instance`
+        // carry ids only this arena can resolve.
+        let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
         skull::site_join::census_detailed(&ws, &scx, &g, &bodies, dump.is_some())
     };
     if let Some((path, name)) = dump {

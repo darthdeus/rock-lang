@@ -227,10 +227,12 @@ pub struct ScalarCtx {
     /// carries -- threading a second parameter through them would put the same
     /// object in two places and let a caller supply the wrong one.
     ///
-    /// [`ScalarCtx::adopt_arena`] hands it the arena an
-    /// `instance_graph::build` filled, which is what makes the graph's ids and
-    /// emission's ids the same ids.
-    interner: crate::monoty::MonoInterner,
+    /// It is a SHARED HANDLE, not an owned arena. The retained
+    /// `InstanceGraph` mints instances against the same object, and neither
+    /// side can own it outright: moving the arena here would leave the graph's
+    /// `MonoTyId`s dangling, and copying it would be the second identity this
+    /// stage exists to remove. [`ScalarCtx::sharing`] is how the two are joined.
+    interner: std::sync::Arc<crate::monoty::MonoInterner>,
 }
 
 /// The fn-names a single body references by value (`Expr::Global(name)` whose
@@ -274,7 +276,7 @@ impl ScalarCtx {
             ref_counts,
             values_first_class: false,
             target: bone_semantic::hir::FnBackend::Lua,
-            interner: crate::monoty::MonoInterner::new(),
+            interner: std::sync::Arc::new(crate::monoty::MonoInterner::new()),
         }
     }
 
@@ -286,15 +288,16 @@ impl ScalarCtx {
         &self.interner
     }
 
-    /// Adopt the arena an `instance_graph::build` filled, so the graph's ids and
-    /// emission's ids are the same ids.
+    /// Share the arena a retained `InstanceGraph` mints against, so the graph's
+    /// ids and emission's ids are the same ids.
     ///
-    /// The arena is monotonic, so emission naming a type the graph did not
-    /// reach simply extends it; what would break identity is a SECOND arena,
-    /// which is why there is no way to swap one in that does not consume the
-    /// old one.
-    pub fn adopt_arena(&mut self, arena: crate::monoty::MonoArena) {
-        self.interner = crate::monoty::MonoInterner::from_arena(arena);
+    /// Takes the HANDLE, not an arena: the graph keeps minting after this, so a
+    /// snapshot would go stale the moment an incremental update expanded it.
+    /// The arena is monotonic, so emission naming a type the graph never
+    /// reached simply extends the shared one.
+    pub fn sharing(mut self, interner: std::sync::Arc<crate::monoty::MonoInterner>) -> Self {
+        self.interner = interner;
+        self
     }
 
     /// Set the codegen backend this lowering feeds (see [`target`]).
@@ -1005,23 +1008,6 @@ pub fn lower_instance(
 ) -> Result<MirFunc, CompilerError> {
     let subst = inst.subst(ws, scx.interner());
     lower_body(ws, scx, inst.func, inst.clone(), &subst)
-}
-
-/// **Lower a LOGICAL INSTANCE's body** under the substitution the mono graph
-/// recorded for it.
-///
-/// A different population from [`lower_emitted_body`] until plan step E1: an
-/// instance whose specialization the lowerer declined has no emitted body of
-/// its own, and this is how the join census measures what one would be.
-pub fn lower_instance_body(
-    ws: &Workspace,
-    scx: &ScalarCtx,
-    mid: ModuleId,
-    fid: Idx<Function>,
-    subst: &SpecSubst,
-) -> Result<MirFunc, CompilerError> {
-    let decl = FuncRef { module: mid, func: fid };
-    lower_body(ws, scx, decl, crate::instance::Instance::base(decl), subst)
 }
 
 fn lower_body(

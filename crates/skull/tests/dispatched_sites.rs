@@ -61,7 +61,9 @@ fn prepared_body(ws: &Workspace, name: &str) -> MirFunc {
     let fref = skull_mir::mir::FuncRef { module: mid, func: fid };
     let scx = ScalarCtx::new(ws);
     let subst = skull_mir::lower::SpecSubst::default();
-    let mut mf = skull_mir::lower::lower_instance_body(ws, &scx, mid, fid, &subst).expect("lower");
+    let mut mf =
+        skull_mir::lower::lower_instance(ws, &scx, &skull_mir::instance::Instance::base(fref))
+            .expect("lower");
     let mangled = skull_mir::mangle::mangle_fn(ws, f);
     let mut cache = skull_transform::InlineCache::default();
     skull::mir_emit::prepare_instance_body(ws, &scx, fref, &subst, &mangled, &mut mf, &mut cache)

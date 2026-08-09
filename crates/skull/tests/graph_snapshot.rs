@@ -1071,7 +1071,7 @@ fn counters_and_arena_growth_are_not_semantic() {
     assert!(g.subst_comparisons() > 0 && g.bound_tree_comparisons() == g.bound_tree_comparisons());
     // An orphan type interned but referenced by no instance -- exactly what a
     // persisted arena accumulates across edits.
-    g.arena.intern(MonoTy::Never);
+    g.interner().intern(MonoTy::Never);
 
     let after = snap(&ws, &g);
     let d = before.diff(&after);

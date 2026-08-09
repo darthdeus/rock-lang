@@ -61,7 +61,7 @@ fn instantiations_of(ws: &Workspace, g: &InstanceGraph, name: &str) -> Vec<Strin
             i.func.module == mid && ws.module(mid).functions[i.func.func].name.as_str() == name
         })
         .map(|i| {
-            i.args.iter().map(|a| g.arena.get(*a).render()).collect::<Vec<_>>().join(", ")
+            i.args.iter().map(|a| g.interner().get(*a).render()).collect::<Vec<_>>().join(", ")
         })
         .collect();
     out.sort();

@@ -671,6 +671,17 @@ impl MonoInterner {
         self.with(|a| ids.iter().map(|id| a.get(*id).clone()).collect())
     }
 
+    /// The display rendering of an interned type. Not an identity -- see
+    /// [`MonoTy::render`].
+    pub fn render(&self, id: MonoTyId) -> String {
+        self.with(|a| a.render(id))
+    }
+
+    /// The canonical identity string of an interned type.
+    pub fn canonical(&self, id: MonoTyId) -> String {
+        self.with(|a| a.canonical(id))
+    }
+
     /// Read-only access under one lock, for a caller doing several reads.
     pub fn with<R>(&self, f: impl FnOnce(&MonoArena) -> R) -> R {
         f(&self.arena.lock().expect("mono arena poisoned"))

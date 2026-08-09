@@ -244,6 +244,137 @@ fn an_overlay_carries_a_newly_reachable_specialization() {
     );
 }
 
+/// **A SECOND edit to a generic re-emits the instantiation a FIRST edit added**
+/// -- which is only true if the graph is MAINTAINED across edits rather than
+/// frozen at the last full build (mono cut C+D, E1 graph ownership).
+///
+/// `update_chunk_cache` maps a changed declaration to its live instances
+/// through `InstanceGraph::instances_of`. A graph left at its full-build state
+/// still answers, and answers plausibly -- it just does not know about `Q`,
+/// which the first edit introduced. So the second edit re-emits `P` and leaves
+/// the reload running the OLD `Q` body: a stale specialization, silently, with
+/// every existing arm green.
+///
+/// Both populations are asserted: the first overlay must actually add `Q` (or
+/// the second overlay has nothing to be stale about), and the second must carry
+/// the edited body at BOTH instantiations.
+#[test]
+fn a_later_edit_to_a_generic_reaches_an_instantiation_an_earlier_edit_added() {
+    let types = "value P { x: float, y: float }\n\
+                 value Q { a: float, b: float, c: float }\n";
+    let generic = |marker: &str| {
+        format!("fn tally_of<T>(xs: [T]) -> T {{ print(\"{marker}\") return xs[0] }}\n")
+    };
+    let v1 = types.to_string()
+        + &generic("MARK1")
+        + "global G1: float = tally_of([P { x: 1.0, y: 0.0 }]).x\n\
+           fn use_it() -> float { return G1 }";
+    // Edit 1: `use_it` gains the first call at `Q`.
+    let v2 = types.to_string()
+        + &generic("MARK1")
+        + "global G1: float = tally_of([P { x: 1.0, y: 0.0 }]).x\n\
+           fn use_it() -> float { return tally_of([Q { a: 1.0, b: 2.0, c: 3.0 }]).a }";
+    // Edit 2: the GENERIC's own body changes. Both instantiations must move.
+    let v3 = types.to_string()
+        + &generic("MARK2")
+        + "global G1: float = tally_of([P { x: 1.0, y: 0.0 }]).x\n\
+           fn use_it() -> float { return tally_of([Q { a: 1.0, b: 2.0, c: 3.0 }]).a }";
+
+    let ws1 = crate::common::ws_with_stdlib(&v1);
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (_full, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+
+    let ws2 = crate::common::ws_with_stdlib(&v2);
+    let o1 = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "use_it")]);
+    let defines_q = |lua: &str| {
+        lua.lines().any(|l| l.starts_with("function tally_of_") && l.contains("Q"))
+    };
+    assert!(defines_q(&o1.lua), "control: edit 1 must add the Q instantiation:\n{}", o1.lua);
+
+    let ws3 = crate::common::ws_with_stdlib(&v3);
+    let o2 = emit_overlay(&ws3, &mut cache, &[body_id(&ws3, "tally_of")]);
+    // The marker is what makes "re-emitted" observable; a name-only check would
+    // pass on the stale definition.
+    let bodies: Vec<&str> =
+        o2.lua.lines().filter(|l| l.starts_with("function tally_of_")).collect();
+    assert_eq!(bodies.len(), 2, "both instantiations must be redefined, got {bodies:?}");
+    assert_eq!(
+        o2.lua.matches("MARK2").count(),
+        2,
+        "each redefined body must carry the EDITED marker, or one instantiation \
+         was served from a chunk the stale graph never invalidated:\n{}",
+        o2.lua
+    );
+}
+
+/// **A pruned instance's chunk is FORGOTTEN, so a later edit that brings the
+/// instantiation back rebuilds it instead of serving the stale body.**
+///
+/// Removal is the direction emission cannot see on its own: nothing on the
+/// chunk side knows an instance was stranded, so without
+/// `SkullEmitCache::forget_instance` the entry simply stays. That is harmless
+/// for a full reassembly -- the liveness walk does not reach it -- which is
+/// exactly why it needs its own arm: the damage only appears when the
+/// instantiation comes BACK, because `backfill_new_specializations` skips a
+/// body the cache already holds and the reload then runs a definition built
+/// from the pre-edit source.
+///
+/// The three populations are asserted in order: `Q` present, `Q` stranded, `Q`
+/// back and carrying the EDITED body.
+#[test]
+fn an_instantiation_that_returns_after_being_pruned_is_rebuilt_not_reused() {
+    let types = "value P { x: float, y: float }\n\
+                 value Q { a: float, b: float, c: float }\n";
+    let generic = |marker: &str| {
+        format!("fn tally_of<T>(xs: [T]) -> T {{ print(\"{marker}\") return xs[0] }}\n")
+    };
+    let keep_alive = "global G1: float = tally_of([P { x: 1.0, y: 0.0 }]).x\n";
+    let calls_q = "fn use_it() -> float { return tally_of([Q { a: 1.0, b: 2.0, c: 3.0 }]).a }";
+    let no_q = "fn use_it() -> float { return G1 }";
+
+    let v1 = types.to_string() + &generic("MARK1") + keep_alive + calls_q;
+    let v2 = types.to_string() + &generic("MARK1") + keep_alive + no_q; // strands Q
+    let v3 = types.to_string() + &generic("MARK2") + keep_alive + no_q; // edits the generic
+    let v4 = types.to_string() + &generic("MARK2") + keep_alive + calls_q; // Q returns
+
+    let ws1 = crate::common::ws_with_stdlib(&v1);
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (full, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    let q_bodies = |lua: &str| -> Vec<String> {
+        lua.lines()
+            .filter(|l| l.starts_with("function tally_of_") && l.contains("Q"))
+            .map(str::to_string)
+            .collect()
+    };
+    assert_eq!(q_bodies(&full.lua).len(), 1, "control: v1 defines the Q instantiation");
+
+    let ws2 = crate::common::ws_with_stdlib(&v2);
+    let _ = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "use_it")]);
+    let ws3 = crate::common::ws_with_stdlib(&v3);
+    let _ = emit_overlay(&ws3, &mut cache, &[body_id(&ws3, "tally_of")]);
+
+    let ws4 = crate::common::ws_with_stdlib(&v4);
+    let back = emit_overlay(&ws4, &mut cache, &[body_id(&ws4, "use_it")]);
+    assert_eq!(
+        q_bodies(&back.lua).len(),
+        1,
+        "control: the returning instantiation must be defined again:\n{}",
+        back.lua
+    );
+    let text = &back.lua;
+    let start = text.find("function tally_of_").map(|i| &text[i..]).unwrap_or(text);
+    let q_start = text
+        .find(q_bodies(text)[0].as_str())
+        .map(|i| &text[i..])
+        .unwrap_or(start);
+    let q_body: String = q_start.lines().take_while(|l| *l != "end").collect();
+    assert!(
+        q_body.contains("MARK2"),
+        "the returning instantiation must be REBUILT from the edited generic, not \
+         served from the chunk it had before it was pruned:\n{q_body}"
+    );
+}
+
 /// The overlay carries a NON-GENERIC LIBRARY body the edit made reachable for
 /// the first time (mono cut C+D, `B*-backfill`).
 ///

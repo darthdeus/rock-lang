@@ -129,7 +129,7 @@ fn main() {
     // supply.
     let rendered: Vec<(String, String)> = differing
         .iter()
-        .map(|(_, x, y)| (g.arena.render(*x), g.arena.render(*y)))
+        .map(|(_, x, y)| (g.interner().render(*x), g.interner().render(*y)))
         .collect();
     assert!(
         rendered.iter().any(|(x, y)| (x == "int" && y == "string") || (x == "string" && y == "int")),
@@ -235,12 +235,12 @@ fn main() { let a = ident(1) }
         .expect("ident has no body");
 
     let subst = g.substitution(&inst).expect("ident instance kept no substitution").clone();
-    let with = concrete_body::convert_body(&mut g.arena, &ws, inf, body, &subst);
+    let with = g.interner().with_mut(|a| concrete_body::convert_body(a, &ws, inf, body, &subst));
     assert_eq!(with.failures.len(), 0, "the real substitution left slots unbound: {:?}", with.failures);
     assert!(with.examined() > 0);
 
     let without =
-        concrete_body::convert_body(&mut g.arena, &ws, inf, body, &Default::default());
+        g.interner().with_mut(|a| concrete_body::convert_body(a, &ws, inf, body, &Default::default()));
     assert!(
         !without.failures.is_empty(),
         "an EMPTY substitution converted every slot of a generic body, so the \

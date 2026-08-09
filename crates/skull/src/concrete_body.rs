@@ -659,7 +659,7 @@ pub fn build(ws: &Workspace, g: &mut InstanceGraph) -> ConcreteBodies {
                 continue;
             }
         };
-        let c = convert_body(&mut g.arena, ws, inf, body, &subst);
+        let c = g.interner().with_mut(|a| convert_body(a, ws, inf, body, &subst));
         out.expr_examined += c.expr_examined;
         out.binding_examined += c.binding_examined;
         out.generics_bound += c.generics_bound;

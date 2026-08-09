@@ -1312,6 +1312,12 @@ fn rebuild_chunk(
 /// [`assemble`] every time. See `docs/skull-incremental-emit-plan.md`.
 pub struct SkullEmitCache {
     chunks: FxHashMap<Instance, Result<Chunk, CompilerError>>,
+    /// **The authoritative instance graph, retained across body edits.**
+    ///
+    /// It owns the shared arena handle every `Instance` in this cache indexes,
+    /// so it cannot be rebuilt per edit without invalidating every key here --
+    /// `update_bodies` maintains it in place against the same monotonic arena.
+    graph: crate::instance_graph::InstanceGraph,
     /// Functions changed since the last full build (`emit_full`), accumulated by
     /// `emit_overlay` so the `incremental.lua` overlay always carries the latest
     /// version of every touched fn (not just the most recent edit). Reset to
@@ -1443,13 +1449,11 @@ fn emit_coroutine_chunk(
     let lua = crate::coroutine_emit::emit_coroutine(ws, cg, scx.interner(), &plan, mf);
     times.emit = te.elapsed();
     times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(times.emit);
-    // A specialization's chunk names the DECLARATION it specializes, so editing a
-    // generic `co fn` re-emits every instantiation of it; the shared body has no
-    // such edge to record and keeps its empty dep set.
-    let mut deps = FxHashSet::default();
-    if !body.args.is_empty() {
-        deps.insert(body.func);
-    }
+    // No declaration edge here: "this instance instantiates that declaration" is
+    // the GRAPH's fact, and `update_chunk_cache` reads it through
+    // `instances_of`. `deps` carries only what codegen alone knows -- which
+    // bodies this chunk's TEXT contains.
+    let deps = FxHashSet::default();
     Ok(Chunk {
         lua,
         deps,
@@ -1737,7 +1741,6 @@ fn emit_spec_chunk(
     let mut nested = std::mem::take(&mut mf.nested_fns);
     collect_nested_statics(&nested, &mut statics);
     emit_pass_nested_fns(ws, cg, scx, &mut nested, &mut lua);
-    deps.insert(fref);
     collect_callee_frefs(&mf, &mut deps);
     Ok(Chunk {
         lua,
@@ -2824,9 +2827,25 @@ pub fn emit_full_in(
         return Err(CompilerError::new_with_label(span, msg));
     }
     let cg = CodegenCtx::new(ws);
+    // **The graph is built FIRST, and its arena is what lowering interns into.**
+    //
+    // Order is load-bearing rather than incidental: an `Instance`'s args are ids
+    // into one arena, so a `ScalarCtx` built before the graph would mint its own
+    // and the two would name the same type with different ids. Sharing the
+    // HANDLE rather than an arena snapshot is what keeps them one after an
+    // incremental update expands it.
+    //
+    // The roots are production's own (`emission_roots` over the same
+    // `is_emission_root` the liveness walk uses), so this introduces no second
+    // root-discovery mechanism.
+    let graph = crate::instance_graph::build(
+        ws,
+        crate::instance_graph::emission_roots(ws, project_root),
+        false,
+    );
     // The overload set lives in `cg` (computed once there); borrow it rather than
     // rescanning the workspace.
-    let scx = skull_mir::lower::ScalarCtx::new(ws);
+    let scx = skull_mir::lower::ScalarCtx::new(ws).sharing(graph.interner().clone());
 
     // The emitted param list must be injective. Checked per SIGNATURE, over every
     // function rather than just the emitted set: a duplicate Lua param is illegal
@@ -2879,6 +2898,7 @@ pub fn emit_full_in(
     let shader_registrations = shader_registration_lines(ws)?;
     let cache = SkullEmitCache {
         chunks,
+        graph,
         changed_since_full: FxHashSet::default(),
         cg,
         scx,
@@ -2952,6 +2972,26 @@ fn absorb_spec_chunks(&mut self, built: Vec<(Instance, Chunk)>) {
     }
 }
 
+/// Drop every trace of an instance the graph pruned: its chunk, its
+/// reverse-dependency edges, and its membership in the overlay/emitted sets.
+///
+/// Leaving the chunk behind is not harmless -- `emit_incremental` reassembles
+/// from the cache, so a stale entry re-emits a definition no call reaches, and
+/// `changed_since_full` would keep offering it to the overlay forever.
+fn forget_instance(&mut self, gone: &Instance) {
+    if let Some(Ok(c)) = self.chunks.get(gone) {
+        let deps: Vec<FuncRef> = c.deps.iter().copied().collect();
+        for d in deps {
+            if let Some(set) = self.dependents.get_mut(&d) {
+                set.remove(gone);
+            }
+        }
+    }
+    self.chunks.remove(gone);
+    self.changed_since_full.remove(gone);
+    self.emitted.remove(gone);
+}
+
 fn update_chunk_cache(
     &mut self,
     ws: &Workspace,
@@ -2972,12 +3012,30 @@ fn update_chunk_cache(
             }
         }
     }
+    // **THE GRAPH IS MAINTAINED BEFORE THE CHUNK SET IS DECIDED.**
+    //
+    // A body edit can add an instantiation, strand one, or both, and only the
+    // graph knows which -- the chunk cache is downstream of that answer, not a
+    // second derivation of it. `update_bodies` re-walks the owners the edit
+    // invalidated against the SAME monotonic arena every key here indexes, so
+    // ids stay stable and the added/removed sets below are directly usable as
+    // cache keys.
+    //
+    // Rebuilding the graph instead of updating it is what the arc measured and
+    // rejected: 15-33 ms release against a sub-millisecond edit.
+    let _t_graph = Instant::now();
+    let roots =
+        crate::instance_graph::emission_roots(ws, cache.project_root.as_deref());
+    let update = cache.graph.update_bodies(ws, roots, reinferred);
+    let _graph_ms = _t_graph.elapsed();
+
+    // Before any borrow of the cache's own fields, because it mutates several.
+    for gone in &update.removed {
+        cache.forget_instance(gone);
+    }
+
     let scx = &cache.scx;
     let cg = &cache.cg;
-    // No valid-scan/retain: this path only ever sees BODY edits (an add/remove fn
-    // is interface-tier -> the caller routes to `emit_full`, a fresh cache), so the
-    // chunk key set -- and the `dependents` index built over it -- is invariant
-    // between full builds. There are no dangling `FuncRef`s to prune.
 
     let _t_aff = Instant::now();
     let mut changed: FxHashSet<FuncRef> = reinferred
@@ -2991,16 +3049,44 @@ fn update_chunk_cache(
     // re-emit even if their own body didn't change.
     changed.extend(flipped_frefs.iter().copied());
 
-    // Affected = changed + every chunk that DEPENDS on a changed fn. The reverse
-    // `dependents` index turns this O(edit x fan-out) instead of the old O(chunks)
-    // scan. Each chunk's deps already encode its full inline closure, so one
-    // reverse hop is complete (no fixpoint) -- identical result to the prior scan.
+    // **A changed declaration maps to its LIVE INSTANCES through the graph**,
+    // not to one declaration-shaped key. Editing a generic `co fn` with two
+    // instantiations must re-emit both bodies, and editing one specialization's
+    // declaration must not be indistinguishable from editing the other's.
+    // `Instance::base` is still taken for every changed fn: a non-generic one
+    // IS its base instance, and a declaration the graph never reached still has
+    // a chunk here that an edit can invalidate.
     let mut affected: FxHashSet<Instance> = changed.iter().copied().map(shared).collect();
+    for c in &changed {
+        affected.extend(cache.graph.instances_of(*c).cloned());
+    }
+    // ...plus every chunk that DEPENDS on a changed fn. This is the CODEGEN
+    // reverse graph, which the instance graph does not hold and must not be
+    // confused with `Indices::preds`: `preds` is call edges between instances,
+    // while `deps` records that a chunk's TEXT contains another declaration's
+    // body (an inline splice) or specializes it. Neither is derivable from the
+    // other, so both survive.
     for c in &changed {
         if let Some(deps) = cache.dependents.get(c) {
             affected.extend(deps.iter().cloned());
         }
     }
+    // **`update.added` deliberately does NOT go in here**, and that asymmetry is
+    // the whole content of the split.
+    //
+    // REMOVAL is the graph's to report and emission's alone cannot see it:
+    // nothing on this side knows an instance was stranded, so a surviving chunk
+    // makes `emit_incremental` re-emit a definition no call reaches. That is
+    // handled above, before the borrows.
+    //
+    // CONSTRUCTION is the DEMAND's, because the identity is not sufficient to
+    // build the body. An `Iterator`-bounded instance's placeholder `next` calls
+    // are resolved from the `ResolvedBoundTree` its demand carries, and the
+    // graph's `Instance` carries no tree -- so building from the added set here
+    // produces a chunk under an EMPTY tree, and `backfill_new_specializations`
+    // then skips it as already-present. Measured, not reasoned: doing it made
+    // `an_overlay_carries_a_newly_reachable_bounded_body` red while every other
+    // arm stayed green.
     let _aff_ms = _t_aff.elapsed();
 
     // The persistent InlineCache keeps unchanged callee bodies across edits; the
@@ -3043,7 +3129,10 @@ fn update_chunk_cache(
     }
     if std::env::var("SKULL_EMIT_PROFILE").is_ok() {
         eprintln!(
-            "    update_chunk_cache: affected-scan {:.3}ms (O(edit), {} chunks) | re-lower {:.3}ms ({} affected)",
+            "    update_chunk_cache: graph {:.3}ms (+{} -{} instances) | affected-scan {:.3}ms (O(edit), {} chunks) | re-lower {:.3}ms ({} affected)",
+            _graph_ms.as_secs_f64() * 1000.0,
+            update.added.len(),
+            update.removed.len(),
             _aff_ms.as_secs_f64() * 1000.0,
             cache.chunks.len(),
             _t_relow.elapsed().as_secs_f64() * 1000.0,

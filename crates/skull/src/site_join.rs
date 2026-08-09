@@ -807,17 +807,16 @@ pub fn census_detailed(
             skip(&mut c, BodySkip::NoLoweredBody);
             continue;
         }
+        // The graph must have a record, or this body is `NoSubstitution` rather
+        // than a lowering. The lowering itself then goes through the ONE entry
+        // every emitted body takes, against the arena this graph and `scx`
+        // share -- there is no second lowering route keyed on a foreign
+        // substitution any more.
         let Some(subst) = g.substitution(inst) else {
             skip(&mut c, BodySkip::NoSubstitution);
             continue;
         };
-        let mut mf = match skull_mir::lower::lower_instance_body(
-            ws,
-            scx,
-            inst.func.module,
-            inst.func.func,
-            subst,
-        ) {
+        let mut mf = match skull_mir::lower::lower_instance(ws, scx, inst) {
             Ok(mf) => mf,
             Err(_) => {
                 skip(&mut c, BodySkip::LowerFailed);

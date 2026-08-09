@@ -84,7 +84,7 @@ pub fn instance_key(ws: &Workspace, g: &InstanceGraph, i: &Instance) -> String {
     // needs.
     out.push_str(&format!("#{}.{}", i.func.module.raw(), i.func.func.into_raw().into_u32()));
     if !i.args.is_empty() {
-        let args: Vec<String> = i.args.iter().map(|a| g.arena.canonical(*a)).collect();
+        let args: Vec<String> = i.args.iter().map(|a| g.interner().canonical(*a)).collect();
         out.push('<');
         out.push_str(&args.join(","));
         out.push('>');

@@ -39,7 +39,7 @@ use bone_semantic::prelude::{BoundNext, IterWitness, ModuleId, Span};
 use comfy_la_arena::Idx;
 use rustc_hash::{FxHashMap, FxHashSet};
 use skull_mir::mangle::mangle_fn;
-use skull_mir::monoty::{MonoArena, MonoSubst, MonoTyId, MonoTyReason};
+use skull_mir::monoty::{MonoArena, MonoInterner, MonoSubst, MonoTyId, MonoTyReason};
 use skull_mir::mir::FuncRef;
 
 /// The identity vocabulary now lives in `skull-mir` ([`skull_mir::instance`]),
@@ -413,13 +413,13 @@ pub struct Contribution {
 /// **The one walk context.** A full build and an incremental re-walk both run
 /// through it, so neither can record a fact the other does not.
 ///
-/// It holds the arena (which is shared and monotonic), the owner's OWN
+/// It holds the interner (shared and monotonic), the owner's OWN
 /// conformance witnesses -- the single cross-owner read the walk makes -- and
 /// the contribution being produced. Nothing else of the graph is reachable
 /// from here, which is what stops a walk from depending on what some other
 /// owner happened to record first.
 struct Walk<'a> {
-    arena: &'a mut MonoArena,
+    interner: &'a MonoInterner,
     owner_tree: Option<&'a InstanceBoundTree>,
     out: &'a mut Contribution,
 }
@@ -623,7 +623,14 @@ impl<T: Clone + PartialEq> Agreed<T> {
 }
 
 pub struct InstanceGraph {
-    pub arena: MonoArena,
+    /// **The build's one arena, SHARED rather than owned.**
+    ///
+    /// A retained graph and the emission that consumes it both mint and read
+    /// [`Instance`]s, so neither can own the arena outright: moving it into
+    /// `ScalarCtx` would leave this graph's `MonoTyId`s dangling, and keeping a
+    /// copy here would be the second identity this stage exists to remove. The
+    /// handle is the durable owner; both sides hold a clone of it.
+    interner: std::sync::Arc<MonoInterner>,
     /// The primary records. Every flat field below is derived from these plus
     /// [`Self::root_instances`]; nothing writes a flat field directly.
     pub contributions: BTreeMap<Owner, Contribution>,
@@ -894,7 +901,7 @@ impl InstanceGraph {
         if i.args.is_empty() {
             return base;
         }
-        let args: Vec<String> = i.args.iter().map(|a| self.arena.render(*a)).collect();
+        let args: Vec<String> = i.args.iter().map(|a| self.interner.render(*a)).collect();
         format!("{base}<{}>", args.join(", "))
     }
 
@@ -921,7 +928,7 @@ impl InstanceGraph {
         if i.args.is_empty() {
             return format!("{base}@{}.{}", decl.0, decl.1);
         }
-        let args: Vec<String> = i.args.iter().map(|a| self.arena.canonical(*a)).collect();
+        let args: Vec<String> = i.args.iter().map(|a| self.interner.canonical(*a)).collect();
         format!("{base}@{}.{}<{}>", decl.0, decl.1, args.join(","))
     }
 
@@ -937,7 +944,7 @@ impl InstanceGraph {
         for i in &self.instances {
             *by_id.entry(self.identity(ws, i)).or_insert(0) += 1;
             let f = &ws.module(i.func.module).functions[i.func.func];
-            let args: Vec<String> = i.args.iter().map(|a| self.arena.canonical(*a)).collect();
+            let args: Vec<String> = i.args.iter().map(|a| self.interner.canonical(*a)).collect();
             *by_name.entry(format!("{}<{}>", mangle_fn(ws, f), args.join(","))).or_insert(0) += 1;
         }
         let merged = |m: BTreeMap<String, usize>| -> usize {
@@ -970,7 +977,7 @@ impl InstanceGraph {
             return mangle_fn(ws, f);
         }
         let key: skull_mir::lower::SpecKey =
-            i.args.iter().map(|a| self.arena.get(*a).clone()).collect();
+            i.args.iter().map(|a| self.interner.get(*a)).collect();
         skull_mir::mangle::spec_fn_name(ws, f, &key)
             .expect("an instance with arguments always has a specialized symbol")
     }
@@ -1357,7 +1364,21 @@ pub struct RecursionCensus {
 /// discovery instead of re-deriving it. `perturb` reverses the seeding order;
 /// the manifest must be identical either way (plan S 20g.4).
 pub fn build(ws: &Workspace, roots: Vec<FuncRef>, perturb: bool) -> InstanceGraph {
-    let mut g = InstanceGraph::empty();
+    build_in(ws, roots, perturb, std::sync::Arc::new(MonoInterner::new()))
+}
+
+/// [`build`] against an arena the caller already owns.
+///
+/// THE entry production uses: `emit_full_in` retains both the graph and the
+/// `ScalarCtx` that lowers against it, and they must share one arena or an
+/// `Instance` minted by the graph means nothing to emission.
+pub fn build_in(
+    ws: &Workspace,
+    roots: Vec<FuncRef>,
+    perturb: bool,
+    interner: std::sync::Arc<MonoInterner>,
+) -> InstanceGraph {
+    let mut g = InstanceGraph::empty_in(interner);
     g.seed_roots(ws, canonical_roots(ws, roots, perturb));
     let pending = g.always_emitted_owners(ws);
     g.run(ws, pending);
@@ -1380,9 +1401,28 @@ fn canonical_roots(ws: &Workspace, roots: Vec<FuncRef>, perturb: bool) -> Vec<Fu
 }
 
 impl InstanceGraph {
-    fn empty() -> Self {
+    /// Every LIVE instance of one declaration.
+    ///
+    /// A scan of the instance set rather than an index, deliberately: the only
+    /// caller asks it once per CHANGED declaration on a body edit (a handful),
+    /// and a maintained `DeclKey -> {Instance}` map would be a third reverse
+    /// index to keep in step with `preds` and `decls` for no measured gain.
+    pub fn instances_of(&self, fref: FuncRef) -> impl Iterator<Item = &Instance> {
+        self.instances.iter().filter(move |i| i.func == fref)
+    }
+
+    /// **The arena this graph's `MonoTyId`s index**, as the shared handle.
+    ///
+    /// Handed to `ScalarCtx` so emission lowers against the same ids the graph
+    /// minted. Cloning the `Arc` shares the arena; there is deliberately no way
+    /// to get an owned `MonoArena` out, because a copy is a second identity.
+    pub fn interner(&self) -> &std::sync::Arc<MonoInterner> {
+        &self.interner
+    }
+
+    fn empty_in(interner: std::sync::Arc<MonoInterner>) -> Self {
         InstanceGraph {
-        arena: MonoArena::new(),
+        interner,
         contributions: BTreeMap::new(),
         lost: BTreeSet::new(),
         root_instances: BTreeSet::new(),
@@ -1481,7 +1521,28 @@ impl InstanceGraph {
         let mut rounds = 0usize;
         loop {
             while let Some(owner) = pending.pop() {
+                // **An instance that lost its last namer DURING this run is not
+                // walkable, and is not an invariant break.**
+                //
+                // The prune runs in `derive`, AFTER this loop, so a stranded
+                // instance can still be sitting in `pending` -- an edit
+                // invalidates every owner that QUOTES the edited file, which in
+                // a single-file program is every owner, including ones the same
+                // edit is about to strand. Its substitution was retracted by its
+                // caller's re-walk a moment ago, so `expand` would find none and
+                // the invariant assertion would fire on a body that is simply
+                // gone.
+                //
+                // Skipping leaves it with its old contribution, which `derive`
+                // then prunes: membership is root reachability, and nothing
+                // points at it any more. Found by driving a real body edit
+                // through `update_chunk_cache` -- the graph fixtures live in a
+                // multi-file project, where the stranded owner does not quote
+                // the edited file and never reaches this loop.
                 if let Owner::Instance(i) = &owner {
+                    if self.substitution(i).is_none() {
+                        continue;
+                    }
                     walked_with.insert(i.clone(), self.bound_tree(i).cloned().unwrap_or_default());
                 }
                 let c = self.expand(ws, &owner);
@@ -1527,7 +1588,7 @@ impl InstanceGraph {
                     return out;
                 };
                 let body = ws.module(*module).bodies.get(body_owner);
-                let mut w = Walk { arena: &mut self.arena, owner_tree: None, out: &mut out };
+                let mut w = Walk { interner: &self.interner, owner_tree: None, out: &mut out };
                 walk_body_edges(
                     &mut w, ws, inf, body, None, &MonoSubst::default(), &SiteDomain::Own, None,
                 );
@@ -1537,7 +1598,7 @@ impl InstanceGraph {
                 // graph DECLINES to expand where they reject: a capped instance
                 // is a changing-instance-recursion candidate, not yet a verdict.
                 if skull_mir::monoty::too_deep_to_instantiate(
-                    inst.args.iter().map(|a| self.arena.get(*a)),
+                    inst.args.iter().map(|a| self.interner.get(*a)).collect::<Vec<_>>().iter(),
                 )
                 .is_some()
                 {
@@ -1569,7 +1630,7 @@ impl InstanceGraph {
                     .expect("every reached instance has a recorded substitution");
                 let owner_tree = self.bound_tree(inst).cloned().unwrap_or_default();
                 let mut w = Walk {
-                    arena: &mut self.arena,
+                    interner: &self.interner,
                     owner_tree: Some(&owner_tree),
                     out: &mut out,
                 };
@@ -1911,6 +1972,8 @@ impl InstanceGraph {
             pruned: prune.pruned.len(),
             suspect_region: prune.region,
             newly_reached: self.instances.difference(&before).count(),
+            added: self.instances.difference(&before).cloned().collect(),
+            removed: before.difference(&self.instances).cloned().collect(),
             owners: self.contributions.len(),
             instances: self.instances.len(),
             settle_rounds: run.settle_rounds,
@@ -2335,7 +2398,7 @@ struct Prune {
 /// separate them, which is why they are reported rather than inferred from wall
 /// time: every number here has a total beside it, so "small" is a comparison
 /// rather than an adjective.
-#[derive(Default, Debug, Clone, Copy)]
+#[derive(Default, Debug, Clone)]
 pub struct UpdateStats {
     /// Owners re-walked because their body changed.
     pub affected: usize,
@@ -2354,6 +2417,16 @@ pub struct UpdateStats {
     pub suspect_region: usize,
     /// Instances the graph did not have before.
     pub newly_reached: usize,
+    /// **The instances this update ADDED**, as the set rather than the count.
+    ///
+    /// Emission needs the members, not the size: each one needs a chunk built
+    /// and becomes eligible for overlay backfill. `newly_reached` is its
+    /// cardinality and is kept because the fixtures assert on it.
+    pub added: BTreeSet<Instance>,
+    /// **The instances this update REMOVED** -- pruned, or left with no root.
+    /// Their chunks and reverse-dependency edges must go with them, or a full
+    /// reassembly re-emits a definition nothing calls.
+    pub removed: BTreeSet<Instance>,
     pub owners: usize,
     pub instances: usize,
     /// See [`RunStats::settle_rounds`].
@@ -2598,7 +2671,7 @@ fn record_call(
         w.out.always_emitted_seeds += 1;
     }
     let cf = &ws.module(callee.module).functions[callee.func];
-    let (args, callee_subst) = match instantiate(&mut *w.arena, ws, inf, cf, bindings, subst) {
+    let (args, callee_subst) = match w.interner.with_mut(|a| instantiate(a, ws, inf, cf, bindings, subst)) {
         Ok(v) => v,
         // An always-emitted body has no `from` to file against, but the
         // CLASSIFICATION is the same one an instantiated body's call gets:
@@ -2793,7 +2866,7 @@ fn record_witness(
     let resolved = &ws.module(rep.module).functions[rep.func];
     let callee = rep;
     let cf = &ws.module(callee.module).functions[callee.func];
-    match instantiate_witness(&mut *w.arena, ws, inf, resolved, cf, &witness.generics, subst) {
+    match w.interner.with_mut(|a| instantiate_witness(a, ws, inf, resolved, cf, &witness.generics, subst)) {
         Ok((args, callee_subst)) => {
             let to = Instance { func: callee, args };
             match from {
@@ -3058,7 +3131,7 @@ fn record_bound_next(
     if from.is_none() {
         w.out.always_emitted_seeds += 1;
     }
-    match instantiate_witness(&mut *w.arena, ws, inf, resolved, cf, next_generics, subst) {
+    match w.interner.with_mut(|a| instantiate_witness(a, ws, inf, resolved, cf, next_generics, subst)) {
         Ok((args, callee_subst)) => {
             let to = Instance { func: callee, args };
             match from {
@@ -3904,7 +3977,7 @@ pub fn reconcile(ws: &Workspace, g: &InstanceGraph) -> Reconciliation {
         by_func
             .entry((i.func.module.raw(), i.func.func.into_raw().into_u32()))
             .or_default()
-            .push(i.args.iter().map(|a| g.arena.canonical(*a)).collect());
+            .push(i.args.iter().map(|a| g.interner.canonical(*a)).collect());
     }
 
     let mut r = Reconciliation { today: today.len(), rejected_sites, ..Default::default() };
@@ -3946,7 +4019,7 @@ pub fn reconcile(ws: &Workspace, g: &InstanceGraph) -> Reconciliation {
         .iter()
         .filter(|i| {
             let k = (i.func.module.raw(), i.func.func.into_raw().into_u32());
-            let args: Vec<String> = i.args.iter().map(|a| g.arena.canonical(*a)).collect();
+            let args: Vec<String> = i.args.iter().map(|a| g.interner.canonical(*a)).collect();
             !matched_shadow.contains(&(k.0, k.1, args))
         })
         .count();

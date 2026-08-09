@@ -1674,7 +1674,7 @@ fn main() {
         .filter(|(i, _)| {
             ws.module(i.func.module).functions[i.func.func].name.as_str() == "wired"
         })
-        .map(|(i, n)| (g.arena.render(i.args[0]), *n))
+        .map(|(i, n)| (g.interner().render(i.args[0]), *n))
         .collect();
 
     // The DENOMINATOR: the fixture has a real generic population, so a zero

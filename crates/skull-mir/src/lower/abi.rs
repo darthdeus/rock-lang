@@ -178,23 +178,6 @@ impl BackendFnAbiPlan {
         Self::for_instance(ws, scx, &crate::instance::Instance::base(decl))
     }
 
-    /// The plan of an instance whose arguments live in ANOTHER arena -- the
-    /// mono graph's, read through the substitution it recorded rather than
-    /// through interned ids this [`ScalarCtx`] cannot resolve.
-    ///
-    /// The census route (`skull::artifact`, `skull::site_join`). It exists
-    /// because those consumers hold a graph substitution directly; it is not a
-    /// second identity, and it takes no instance precisely so it cannot be
-    /// mistaken for one.
-    pub fn for_foreign_subst(
-        ws: &Workspace,
-        scx: &ScalarCtx,
-        decl: FuncRef,
-        subst: &SpecSubst,
-    ) -> Self {
-        Self::assemble(ws, scx, crate::instance::Instance::base(decl), subst)
-    }
-
     fn assemble(
         ws: &Workspace,
         scx: &ScalarCtx,
