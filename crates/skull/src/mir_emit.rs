@@ -1312,19 +1312,25 @@ fn rebuild_chunk(
 /// [`assemble`] every time. See `docs/skull-incremental-emit-plan.md`.
 pub struct SkullEmitCache {
     chunks: FxHashMap<Instance, Result<Chunk, CompilerError>>,
-    /// **The authoritative instance graph, retained across body edits, built on
-    /// FIRST EDIT rather than at `emit_full`.**
+    /// **The authoritative instance graph, built EAGERLY by `emit_full_in`
+    /// before any chunk is lowered, and retained across body edits.**
     ///
-    /// A one-shot `rock compile` never edits, and paying a whole graph build for
-    /// it cost 16-32% of compile wall time (mag 120 -> 158 ms). Deferring is safe
-    /// only because the arena is a SHARED HANDLE: `build_in` mints into the very
-    /// interner lowering has already been interning into, so ids minted before
-    /// the graph existed stay valid and there is still exactly one arena. A graph
-    /// built with its own arena here would be the second identity.
+    /// `emit_full_in` mints the arena, builds this graph into it FIRST, and
+    /// hands the same `Arc<MonoInterner>` to `scx` (`ScalarCtx::sharing`) --
+    /// that order is load-bearing, because an `Instance` the graph minted has
+    /// to mean something to lowering. There is no lazy/first-edit path: a
+    /// one-shot `rock compile` pays the build unconditionally, which is what
+    /// makes `lua_view` (below) a real production fact rather than a shadow
+    /// computed beside emission.
     ///
-    /// Once built it is maintained in place by `update_bodies` -- never rebuilt,
+    /// Maintained in place by `update_bodies` on every edit -- never rebuilt,
     /// which would invalidate every `Instance` key in this cache.
-    graph: Option<crate::instance_graph::InstanceGraph>,
+    graph: crate::instance_graph::InstanceGraph,
+    /// The Lua artifact's realization of `graph`, from the SAME roots
+    /// `emit_full_in` builds the graph from. Recomputed by every full/edit
+    /// cycle that touches the graph, so it never drifts from what emission
+    /// actually discovers.
+    lua_view: crate::artifact::ArtifactView,
     /// Functions changed since the last full build (`emit_full`), accumulated by
     /// `emit_overlay` so the `incremental.lua` overlay always carries the latest
     /// version of every touched fn (not just the most recent edit). Reset to
@@ -2834,9 +2840,16 @@ pub fn emit_full_in(
         return Err(CompilerError::new_with_label(span, msg));
     }
     let cg = CodegenCtx::new(ws);
+    // **The graph is built FIRST, into a fresh arena, and `scx` shares that
+    // arena rather than minting its own.** An `Instance` the graph mints has to
+    // mean something to lowering, and a second arena would be a second identity
+    // for the same instance. See `SkullEmitCache::graph`.
+    let emission_roots = crate::instance_graph::emission_roots(ws, project_root);
+    let graph = crate::instance_graph::build(ws, emission_roots.clone(), false);
     // The overload set lives in `cg` (computed once there); borrow it rather than
     // rescanning the workspace.
-    let scx = skull_mir::lower::ScalarCtx::new(ws);
+    let scx =
+        skull_mir::lower::ScalarCtx::new(ws).sharing(std::sync::Arc::clone(graph.interner()));
 
     // The emitted param list must be injective. Checked per SIGNATURE, over every
     // function rather than just the emitted set: a duplicate Lua param is illegal
@@ -2887,10 +2900,20 @@ pub fn emit_full_in(
         }
     }
     let shader_registrations = shader_registration_lines(ws)?;
+    // Realized from the SAME graph and the SAME roots emission built from, so
+    // this is production's own fact rather than a second discovery beside it.
+    let lua_view = crate::artifact::realize(
+        ws,
+        &graph,
+        &crate::artifact::ArtifactRequest::new(
+            crate::target_projection::LUAJIT_DESKTOP,
+            &emission_roots,
+        ),
+    );
     let cache = SkullEmitCache {
         chunks,
-        // Built on the first body edit, against `scx`'s own arena. See the field.
-        graph: None,
+        graph,
+        lua_view,
         changed_since_full: FxHashSet::default(),
         cg,
         scx,
@@ -2928,6 +2951,19 @@ pub fn emit_full_in(
 /// `emit_incremental` (full reassembly) and `emit_overlay` (the incremental.lua
 /// split).
 impl SkullEmitCache {
+    /// The authoritative instance graph this cache emits against. Always
+    /// present -- there is no build in which production has no graph.
+    pub fn graph(&self) -> &crate::instance_graph::InstanceGraph {
+        &self.graph
+    }
+
+    /// The Lua artifact's realization of [`Self::graph`], from the same roots
+    /// the graph was built/updated from. Recomputed every edit; see the field.
+    pub fn lua_view(&self) -> &crate::artifact::ArtifactView {
+        &self.lua_view
+    }
+
+
 fn update_shader_registrations(
     &mut self,
     ws: &Workspace,
@@ -3017,41 +3053,21 @@ fn update_chunk_cache(
     // rejected: 15-33 ms release against a sub-millisecond edit.
     let _t_graph = Instant::now();
     let roots = crate::instance_graph::emission_roots(ws, cache.project_root.as_deref());
-    let update = match &mut cache.graph {
-        Some(g) => g.update_bodies(ws, roots, reinferred),
-        // First edit: build it INTO the arena lowering has been using, so every
-        // `Instance` already in this cache keeps its meaning.
-        //
-        // The build observes the EDITED workspace, so it reports no delta of its
-        // own -- and this edit may already have stranded something. `removed` is
-        // therefore derived from the cache instead: a SPECIALIZED chunk whose
-        // instance the fresh graph does not reach is one this edit (or the build
-        // that preceded it) left behind. Only specialized chunks, because a
-        // declaration's own chunk exists whether or not anything reaches it and
-        // the liveness walk is what selects those.
-        none => {
-            let g = crate::instance_graph::build_in(
-                ws,
-                roots,
-                false,
-                cache.scx.interner_handle(),
-            );
-            let removed: std::collections::BTreeSet<Instance> = cache
-                .chunks
-                .keys()
-                .filter(|i| !i.args.is_empty() && !g.instances.contains(*i))
-                .cloned()
-                .collect();
-            *none = Some(g);
-            crate::instance_graph::UpdateStats { removed, ..Default::default() }
-        }
-    };
+    let update = cache.graph.update_bodies(ws, roots.clone(), reinferred);
     let _graph_ms = _t_graph.elapsed();
 
     // Before any borrow of the cache's own fields, because it mutates several.
     for gone in &update.removed {
         cache.forget_instance(gone);
     }
+
+    // The graph moved; the Lua view is this edit's realization of it, from the
+    // same roots. Kept in step with `graph` rather than a first-edit snapshot.
+    cache.lua_view = crate::artifact::realize(
+        ws,
+        &cache.graph,
+        &crate::artifact::ArtifactRequest::new(crate::target_projection::LUAJIT_DESKTOP, &roots),
+    );
 
     let scx = &cache.scx;
     let cg = &cache.cg;
@@ -3077,9 +3093,7 @@ fn update_chunk_cache(
     // a chunk here that an edit can invalidate.
     let mut affected: FxHashSet<Instance> = changed.iter().copied().map(shared).collect();
     for c in &changed {
-        if let Some(g) = &cache.graph {
-            affected.extend(g.instances_of(*c).cloned());
-        }
+        affected.extend(cache.graph.instances_of(*c).cloned());
     }
     // ...plus every chunk that DEPENDS on a changed fn. This is the CODEGEN
     // reverse graph, which the instance graph does not hold and must not be
