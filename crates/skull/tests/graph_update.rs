@@ -76,7 +76,16 @@ impl Case {
 
     /// Apply one BODY-ONLY edit and update the persisted graph with the exact
     /// owners incremental inference reinferred.
+    ///
+    /// Every arm runs with `ROCK_GRAPH_VERIFY`, which makes the updater check
+    /// its affected-region prune against a whole-graph reachability walk. The
+    /// delta is what production runs; the wholesale walk is the oracle, and a
+    /// region the delta failed to reach fails here rather than leaving a stale
+    /// instance nobody looks at.
     fn edit(&mut self, path: &str, text: &str) -> UpdateStats {
+        // SAFETY: set before any thread the updater uses exists; nextest runs
+        // each test in its own process.
+        unsafe { std::env::set_var("ROCK_GRAPH_VERIFY", "1") };
         let res = self.session.update_file(path, text).expect("incremental update");
         assert_eq!(
             res.tier,

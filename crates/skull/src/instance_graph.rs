@@ -537,6 +537,25 @@ pub struct Indices {
     pub erased: BTreeMap<String, BTreeSet<Owner>>,
     /// Instance -> the always-emitted bodies that root it.
     pub always_emitted: BTreeMap<Instance, BTreeSet<Owner>>,
+    /// Declaration -> how many LIVE instances it has.
+    ///
+    /// The three per-declaration post-passes read the declaration set, not the
+    /// instance set, so this is what tells them which declarations ENTERED or
+    /// LEFT the graph -- the only ones whose answer can have moved.
+    pub decls: BTreeMap<DeclKey, usize>,
+    /// Instance -> the instances with an edge INTO it.
+    ///
+    /// Forward adjacency needs no index -- an owner's successors are its own
+    /// contribution's edges. The reverse is what pruning needs and what no
+    /// single record holds: to decide whether a stranded instance still has a
+    /// way in, you have to ask who points AT it.
+    ///
+    /// HASHED, not ordered. It is written once per EDGE -- 32k times per build
+    /// on mag -- and an `Instance`'s `Ord` compares a `Vec<MonoTyId>` element by
+    /// element, which cost 65 ms of a 127 ms build. Nothing reads it in order:
+    /// the only question asked of it is whether ANY predecessor lies outside a
+    /// region.
+    pub preds: FxHashMap<Instance, FxHashSet<Instance>>,
 }
 
 /// **One fact several owners assert, with the agreement kept rather than
@@ -654,6 +673,18 @@ pub struct InstanceGraph {
     /// one name was kept. The residual over-approximation, as a number rather
     /// than a paragraph.
     pub synthesized_approximated: usize,
+    /// Instances that lost an incoming edge since the last [`Self::derive`].
+    ///
+    /// The prune candidates, and the reason an update does not have to walk
+    /// the whole graph to find them: only an instance whose in-edges changed
+    /// can have become unreachable. Cleared by `derive`.
+    ///
+    /// A re-installed owner takes its own targets back OUT: re-walking a body
+    /// that still calls what it called before loses nothing, and leaving them
+    /// in made the suspect region the whole reachable graph -- 3.3 ms of a 7 ms
+    /// update on match3, where 33 owners were re-walked and almost every edge
+    /// came back identical.
+    lost: BTreeSet<Instance>,
     /// **The cross-owner facts, maintained where a contribution is installed
     /// or removed.** Public for the same reason [`Self::contributions`] is --
     /// the oracle and its tests construct states directly -- but consumers ask
@@ -1330,7 +1361,7 @@ pub fn build(ws: &Workspace, roots: Vec<FuncRef>, perturb: bool) -> InstanceGrap
     g.seed_roots(ws, canonical_roots(ws, roots, perturb));
     let pending = g.always_emitted_owners(ws);
     g.run(ws, pending);
-    g.derive(ws);
+    g.derive(ws, false);
     g
 }
 
@@ -1353,6 +1384,7 @@ impl InstanceGraph {
         InstanceGraph {
         arena: MonoArena::new(),
         contributions: BTreeMap::new(),
+        lost: BTreeSet::new(),
         root_instances: BTreeSet::new(),
         instances: BTreeSet::new(),
         index: Indices::default(),
@@ -1587,6 +1619,16 @@ impl InstanceGraph {
         for to in &c.always_emitted_targets {
             self.index.always_emitted.entry(to.clone()).or_default().insert(owner.clone());
         }
+        if let Some(from) = owner.instance() {
+            for e in &c.edges {
+                self.index.preds.entry(e.to.clone()).or_default().insert(from.clone());
+                self.lost.remove(&e.to);
+            }
+            *self.index.decls.entry(DeclKey(from.func)).or_insert(0) += 1;
+        }
+        for to in &c.always_emitted_targets {
+            self.lost.remove(to);
+        }
         // The demand check runs AFTER the insert. `install` uninstalls first,
         // so a body that reaches ITSELF -- any recursive function -- would
         // otherwise find itself absent at the moment it asked and re-walk
@@ -1649,6 +1691,32 @@ impl InstanceGraph {
                     self.index.always_emitted.remove(to);
                 }
             }
+            // An always-emitted body ROOTS its callees, so withdrawing one is
+            // the same kind of loss as deleting an edge: the instance may have
+            // had no other way in. Found by the cross-check -- editing a const
+            // initializer left its old callee live.
+            self.lost.insert(to.clone());
+        }
+        if let Some(from) = owner.instance() {
+            for e in &old.edges {
+                if let Some(set) = self.index.preds.get_mut(&e.to) {
+                    set.remove(from);
+                    if set.is_empty() {
+                        self.index.preds.remove(&e.to);
+                    }
+                }
+            }
+            // Its own edges are gone, so its successors may have lost their
+            // last way in. Recorded for the caller to prune from.
+            self.lost.extend(old.edges.iter().map(|e| e.to.clone()));
+            if let std::collections::btree_map::Entry::Occupied(mut e) =
+                self.index.decls.entry(DeclKey(from.func))
+            {
+                *e.get_mut() -= 1;
+                if *e.get() == 0 {
+                    e.remove();
+                }
+            }
         }
     }
 
@@ -1677,16 +1745,27 @@ impl InstanceGraph {
     /// That last one is two writers for one fact and is the seam the
     /// derivation cut removes: one indexing path, taken by install and replace
     /// alike. Returns the instances it pruned.
-    fn derive(&mut self, ws: &Workspace) -> BTreeSet<Instance> {
-        let live = self.reachable_instances();
-        let dead: Vec<Owner> = self
-            .contributions
-            .keys()
-            .filter(|o| o.instance().is_some_and(|i| !live.contains(i)))
-            .cloned()
-            .collect();
+    fn derive(&mut self, ws: &Workspace, incremental: bool) -> BTreeSet<Instance> {
+        let lost: Vec<Instance> = std::mem::take(&mut self.lost).into_iter().collect();
+        // A FRESH build prunes nothing by construction: `run` only ever walks
+        // owners a root or an always-emitted seed demanded, so every owner it
+        // installed is root-reachable. An update is where the question has an
+        // answer, and the answer is searched over the affected region.
         let pruned: BTreeSet<Instance> =
-            dead.iter().filter_map(|o| o.instance()).cloned().collect();
+            if incremental { self.stranded(&lost) } else { BTreeSet::new() };
+        if std::env::var("ROCK_GRAPH_VERIFY").is_ok() {
+            // Both claims against one whole-graph reachability walk, on demand:
+            // that the delta found everything, and that a fresh build had
+            // nothing to find. The compact fixtures run with it on, so a region
+            // the delta failed to reach is a failure there rather than a stale
+            // instance nobody looks at.
+            let wholesale = self.unreachable_wholesale();
+            assert_eq!(
+                pruned, wholesale,
+                "the affected-region prune and a whole-graph reachability walk disagree"
+            );
+        }
+        let dead: Vec<Owner> = pruned.iter().cloned().map(Owner::Instance).collect();
         // Through `uninstall`, so a pruned owner's index entries go with it --
         // the arena is the ONLY thing not pruned, because an entry outliving
         // its last instance is what keeps ids stable across edits.
@@ -1694,7 +1773,35 @@ impl InstanceGraph {
             self.uninstall(owner);
         }
 
-        self.instances = live;
+        // What ENTERED and LEFT, which is what the per-declaration passes below
+        // are refreshed over. A fresh build's `before` is empty, so they run
+        // over everything -- the same code path, not a second one.
+        let after: BTreeSet<Instance> =
+            self.contributions.keys().filter_map(|o| o.instance()).cloned().collect();
+        let entered: Vec<Instance> = after.difference(&self.instances).cloned().collect();
+        let left: Vec<Instance> = self.instances.difference(&after).cloned().collect();
+        self.instances = after;
+        let decls_entered: Vec<DeclKey> = {
+            let mut v: Vec<DeclKey> = entered.iter().map(|i| DeclKey(i.func)).collect();
+            v.sort();
+            v.dedup();
+            v.retain(|d| self.index.decls.contains_key(d));
+            v
+        };
+        let decls_left: Vec<DeclKey> = {
+            let mut v: Vec<DeclKey> = left.iter().map(|i| DeclKey(i.func)).collect();
+            v.sort();
+            v.dedup();
+            v.retain(|d| !self.index.decls.contains_key(d));
+            v
+        };
+        for decl in &decls_left {
+            for member in skull_mir::lower::backend_variant_group(ws, decl.0) {
+                self.inline_body_deps.remove(&DeclKey(member));
+            }
+            let f = &ws.module(decl.0.module).functions[decl.0.func];
+            self.boundaries.remove(&mangle_fn(ws, f));
+        }
         self.graph_rejections.clear();
         self.sites_attempted = 0;
         self.always_emitted_seeds = 0;
@@ -1725,10 +1832,6 @@ impl InstanceGraph {
                 .always_emitted_sites
                 .push(failure);
         }
-        // The erased catalogue is bounded by `ERASED_RUNTIME_ENTRIES` (15
-        // names), so it is rebuilt from the index rather than maintained: the
-        // inline-body pass below adds to it too, and one writer beats two.
-        self.erased_entries = self.index.erased.keys().cloned().collect();
 
         // Which holes nevertheless have concrete instances from other call
         // sites. A post-pass because a root is recorded before any body is
@@ -1746,10 +1849,11 @@ impl InstanceGraph {
             }
         }
 
-        record_inline_body_deps(self, ws);
+        record_inline_body_deps(self, ws, &decls_entered);
+        self.refresh_erased_entries();
         detect_changing_instance_recursion(self, ws);
-        classify_boundaries(self, ws);
-        record_coroutine_helpers(self, ws);
+        classify_boundaries(self, ws, &decls_entered);
+        record_coroutine_helpers(self, ws, &entered, &left);
         pruned
     }
 
@@ -1800,7 +1904,7 @@ impl InstanceGraph {
         // loop stood here and was inert -- mutation-verified.
         let affected = self.affected_owners(ws, changed);
         let run = self.run(ws, affected.clone());
-        let pruned = self.derive(ws);
+        let pruned = self.derive(ws, true);
         UpdateStats {
             affected: affected.len(),
             expanded: run.expanded,
@@ -2075,12 +2179,106 @@ impl InstanceGraph {
             .chain(self.graph_rejections.iter())
     }
 
+    /// The erased catalogue: the entries the WALK named plus the ones opaque
+    /// inline bodies name. Bounded by `ERASED_RUNTIME_ENTRIES` (15 names), so
+    /// it is rebuilt from its two indices rather than maintained -- one writer
+    /// for a set this small beats two that have to agree.
+    fn refresh_erased_entries(&mut self) {
+        self.erased_entries = self
+            .index
+            .erased
+            .keys()
+            .cloned()
+            .chain(self.inline_body_deps.values().flatten().map(|n| (*n).to_string()))
+            .collect();
+    }
+
+    /// **What an edit stranded**, searched over the affected region only.
+    ///
+    /// Reachability, not reference counting: an edit can strand a whole group
+    /// of instances that keep each other alive, and a cycle has no member whose
+    /// count would ever drop to zero. But it does not need the whole graph
+    /// either -- only an instance whose IN-EDGES changed can have become
+    /// unreachable, so the search starts at those and stops at the boundary of
+    /// what they can reach.
+    ///
+    /// Three steps, and the third is what makes cycles come out right:
+    ///
+    /// 1. the SUSPECT region is everything forward-reachable from the instances
+    ///    that lost an in-edge -- if one is dead, everything only it reached is
+    ///    dead too;
+    /// 2. an ANCHOR is a member of that region a root still reaches without
+    ///    going through it: a root instance, an always-emitted target, or the
+    ///    target of an edge from a live instance OUTSIDE the region;
+    /// 3. whatever the anchors reach INSIDE the region survives. A cycle with no
+    ///    anchor keeps only itself alive, so nothing marks it and it goes.
+    fn stranded(&self, lost: &[Instance]) -> BTreeSet<Instance> {
+        // Owned nodes, one map lookup per node VISITED rather than one per edge
+        // followed: `contributions` is keyed by `Owner`, so borrowing a target
+        // back out of it costs an `Instance` clone either way.
+        let succ = |i: &Instance| -> &[Edge] {
+            self.contributions
+                .get(&Owner::Instance(i.clone()))
+                .map_or(&[][..], |c| c.edges.as_slice())
+        };
+        let mut region: BTreeSet<Instance> = BTreeSet::new();
+        let mut queue: Vec<Instance> = lost.to_vec();
+        while let Some(i) = queue.pop() {
+            if !self.contributions.contains_key(&Owner::Instance(i.clone()))
+                || !region.insert(i.clone())
+            {
+                continue;
+            }
+            queue.extend(succ(&i).iter().map(|e| e.to.clone()));
+        }
+        if region.is_empty() {
+            return BTreeSet::new();
+        }
+        let mut alive: Vec<Instance> = region
+            .iter()
+            .filter(|i| {
+                self.root_instances.contains(*i)
+                    || self.index.always_emitted.contains_key(*i)
+                    || self
+                        .index
+                        .preds
+                        .get(*i)
+                        .is_some_and(|p| p.iter().any(|from| !region.contains(from)))
+            })
+            .cloned()
+            .collect();
+        let mut survives: BTreeSet<Instance> = BTreeSet::new();
+        while let Some(i) = alive.pop() {
+            if !survives.insert(i.clone()) {
+                continue;
+            }
+            for e in succ(&i) {
+                if region.contains(&e.to) && !survives.contains(&e.to) {
+                    alive.push(e.to.clone());
+                }
+            }
+        }
+        region.difference(&survives).cloned().collect()
+    }
+
+    /// Instances the graph holds that no root reaches. The whole-graph
+    /// counterpart of [`Self::stranded`].
+    fn unreachable_wholesale(&self) -> BTreeSet<Instance> {
+        let live = self.reachable_instances();
+        self.contributions
+            .keys()
+            .filter_map(|o| o.instance())
+            .filter(|i| !live.contains(*i))
+            .cloned()
+            .collect()
+    }
+
     /// The instances a ROOT reaches, over the contributions' own edges.
     ///
-    /// Reachability, not "every instance ever reached": an edit can strand a
-    /// whole group of instances that keep each other alive, and a cycle has no
-    /// member a reference count would ever drop to zero.
-    fn reachable_instances(&self) -> BTreeSet<Instance> {
+    /// The whole-graph form. A fresh build needs it -- there is no prior state
+    /// to take a delta against -- and it is the ORACLE the incremental prune is
+    /// checked against under `ROCK_GRAPH_VERIFY`.
+    pub fn reachable_instances(&self) -> BTreeSet<Instance> {
         let mut seeds: Vec<&Instance> = self.root_instances.iter().collect();
         for c in self.contributions.values() {
             seeds.extend(c.always_emitted_targets.iter());
@@ -2461,9 +2659,17 @@ fn record_call(
 fn detect_changing_instance_recursion(g: &mut InstanceGraph, ws: &Workspace) {
     // Instance-level adjacency, carrying each edge's span so a rejection can
     // name the call that changed the arguments.
-    let mut succ: FxHashMap<&Instance, Vec<(&Instance, Span)>> = FxHashMap::default();
-    for e in g.edges() {
-        succ.entry(&e.from).or_default().push((&e.to, e.span));
+    // Adjacency by REFERENCE into the contributions. Looking a successor's
+    // edges back out of `contributions` instead costs an `Instance` clone per
+    // node visited, because the map is keyed by `Owner` -- measured at 3.8 ms
+    // against 1.3 for the map on mag.
+    let mut succ: FxHashMap<&Instance, &[Edge]> = FxHashMap::default();
+    for (owner, c) in &g.contributions {
+        if let Some(i) = owner.instance() {
+            if !c.edges.is_empty() {
+                succ.insert(i, c.edges.as_slice());
+            }
+        }
     }
 
     // A declaration with exactly ONE instance graph-wide can never satisfy the
@@ -2483,19 +2689,16 @@ fn detect_changing_instance_recursion(g: &mut InstanceGraph, ws: &Workspace) {
     // and skip the pair that matters.
     //
     // Measurements in `docs/parked/mono.md`.
-    let mut per_decl: FxHashMap<(u32, u32), usize> = FxHashMap::default();
-    for i in &g.instances {
-        *per_decl.entry((i.func.module.raw(), i.func.func.into_raw().into_u32())).or_default() += 1;
-    }
-
+    // The per-declaration instance counts are a maintained index, not a fresh
+    // pass over every instance.
+    // Starts are instances with an OUTGOING edge -- a leaf can never reach a
+    // different instantiation of itself -- while the per-declaration COUNT is
+    // over every instance, because a declaration's second instance can be a
+    // leaf and is exactly what makes the first one's search worth running.
     let mut order: Vec<&Instance> = succ
         .keys()
         .copied()
-        .filter(|i| {
-            per_decl
-                .get(&(i.func.module.raw(), i.func.func.into_raw().into_u32()))
-                .is_some_and(|n| *n > 1)
-        })
+        .filter(|i| g.index.decls.get(&DeclKey(i.func)).is_some_and(|n| *n > 1))
         .collect();
     order.sort();
     let mut found: Vec<(Instance, Span, String)> = Vec::new();
@@ -2524,9 +2727,9 @@ fn detect_changing_instance_recursion(g: &mut InstanceGraph, ws: &Workspace) {
                 ));
                 break;
             }
-            for (next, span) in succ.get(node).map(|v| v.as_slice()).unwrap_or(&[]) {
-                if seen.insert(next) {
-                    queue.push((next, *span));
+            for e in succ.get(node).copied().unwrap_or(&[]) {
+                if seen.insert(&e.to) {
+                    queue.push((&e.to, e.span));
                 }
             }
         }
@@ -3466,7 +3669,7 @@ fn has_rock_body(f: &Function) -> bool {
 /// appearing in a comment or a string inside the body would be a false positive;
 /// none exists in the corpus, and a false POSITIVE keeps a symbol alive, where a
 /// false negative drops one emission requires.
-fn record_inline_body_deps(g: &mut InstanceGraph, ws: &Workspace) {
+fn record_inline_body_deps(g: &mut InstanceGraph, ws: &Workspace, decls: &[DeclKey]) {
     // METADATA ONLY so far: each sibling's dependency is recorded and joins
     // `erased_entries`, but it is not yet resolved to a `BoundaryId` or an
     // instance the way a call edge is. That resolution belongs to the artifact
@@ -3474,37 +3677,29 @@ fn record_inline_body_deps(g: &mut InstanceGraph, ws: &Workspace) {
     // recording it here without a target would be a second, weaker reachability
     // mechanism. All members of a represented backend-variant group are scanned;
     // the artifact later reads only the declaration it selected.
-    let mut deps: BTreeMap<DeclKey, BTreeSet<&'static str>> = BTreeMap::new();
-    let declarations: BTreeSet<DeclKey> = g
-        .instances
-        .iter()
-        .flat_map(|i| skull_mir::lower::backend_variant_group(ws, i.func))
-        .map(DeclKey)
-        .collect();
-    for decl in declarations {
-        let f = &ws.module(decl.0.module).functions[decl.0.func];
-        let Some(body) = &f.inline_body else { continue };
-        let text = body.1.as_str();
-        for name in ERASED_RUNTIME_ENTRIES {
-            if text.contains(name) {
-                deps.entry(decl).or_default().insert(name);
-                g.erased_entries.insert((*name).to_string());
+    for decl in decls {
+        for member in skull_mir::lower::backend_variant_group(ws, decl.0) {
+            let member = DeclKey(member);
+            let f = &ws.module(member.0.module).functions[member.0.func];
+            let Some(body) = &f.inline_body else { continue };
+            let text = body.1.as_str();
+            for name in ERASED_RUNTIME_ENTRIES {
+                if text.contains(name) {
+                    g.inline_body_deps.entry(member).or_default().insert(name);
+                }
             }
         }
     }
-    g.inline_body_deps = deps;
 }
 
-fn classify_boundaries(g: &mut InstanceGraph, ws: &Workspace) {
+fn classify_boundaries(g: &mut InstanceGraph, ws: &Workspace, decls: &[DeclKey]) {
     let erased: BTreeSet<String> = g.erased_entries.clone();
-    let mut found: BTreeMap<String, Boundary> = BTreeMap::new();
-    for i in &g.instances {
-        let f = &ws.module(i.func.module).functions[i.func.func];
+    for decl in decls {
+        let f = &ws.module(decl.0.module).functions[decl.0.func];
         let symbol = mangle_fn(ws, f);
         let Some(class) = boundary_class_for(f, &erased) else { continue };
-        found.insert(symbol.clone(), Boundary { class, symbol });
+        g.boundaries.insert(symbol.clone(), Boundary { class, symbol });
     }
-    g.boundaries = found;
 }
 
 /// The helper symbols each coroutine instance owns.
@@ -3524,9 +3719,20 @@ fn classify_boundaries(g: &mut InstanceGraph, ws: &Workspace) {
 /// Defers (`__defer<k>`) and lifecycle hooks (`__on_*`) are NOT counted: they
 /// come from `CoroLowered`, which exists only after the MIR transform, so there
 /// is no HIR-level oracle for them and guessing would be a fabricated number.
-fn record_coroutine_helpers(g: &mut InstanceGraph, ws: &Workspace) {
-    let mut out = BTreeSet::new();
-    for i in &g.instances {
+/// Keyed by INSTANCE, so it is refreshed for the instances that entered or
+/// left rather than for the whole graph. `removed` runs first: an instance that
+/// was replaced appears in both lists and must end up recorded.
+fn record_coroutine_helpers(
+    g: &mut InstanceGraph,
+    ws: &Workspace,
+    added: &[Instance],
+    removed: &[Instance],
+) {
+    for i in removed {
+        let identity = g.identity(ws, i);
+        g.coroutine_helpers.retain(|h| h.owner_identity != identity);
+    }
+    for i in added {
         let f = &ws.module(i.func.module).functions[i.func.func];
         if !f.is_coroutine {
             continue;
@@ -3534,14 +3740,13 @@ fn record_coroutine_helpers(g: &mut InstanceGraph, ws: &Workspace) {
         let plan = skull_mir::lower::CoroutinePlan::new(ws, i.func, mangle_fn(ws, f));
         let owner_identity = g.identity(ws, i);
         for suffix in plan.declared_suffixes() {
-            out.insert(CoroutineHelper {
+            g.coroutine_helpers.insert(CoroutineHelper {
                 owner_identity: owner_identity.clone(),
                 suffix,
                 symbol_today: format!("{}{suffix}", plan.base()),
             });
         }
     }
-    g.coroutine_helpers = out;
 }
 
 impl InstanceGraph {
