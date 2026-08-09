@@ -388,7 +388,7 @@ mod tests {
             "a_n6_Entity_1_a_n3_Mob_0_z_z"
         );
 
-        // Totality: no SpecKey slot carries these today, and each still has one
+        // Totality: no instantiation carries these today, and each still has one
         // symbol of its own rather than colliding with a neighbour.
         assert_eq!(enc(&MonoTy::Any), "p_any");
         assert_eq!(enc(&MonoTy::Unit), "p_unit");

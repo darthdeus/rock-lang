@@ -206,7 +206,6 @@ impl Builder<'_> {
             resume_arg: None,
             // A hoisted nested fn is emitted via `emit_nested_fns`, which never
             // runs `inline_functions` -- box value args.
-            in_unspliced_ctx: true,
             param_shapes: abi.param_shapes.clone(),
             ret_shape: abi.ret_shape.clone(),
             ret_tuple: None,

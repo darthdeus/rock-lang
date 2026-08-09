@@ -33,7 +33,7 @@ use std::hash::Hash;
 /// policy is free to record whatever else expanding a node produced.
 pub trait ReachPolicy {
     /// A unit of work. `Clone + Eq + Hash` because the driver marks every node.
-    /// Not `Copy`: JS's specialized-callee node carries a `SpecKey`.
+    /// Not `Copy`: JS's specialized-callee node carries an `Instance`.
     type Node: Clone + Eq + Hash;
 
     /// Where the search starts. Called once, before any expansion.

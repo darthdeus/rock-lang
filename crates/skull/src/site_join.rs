@@ -938,7 +938,7 @@ pub fn check_callee(
     // instantiation it does not have. An opaque body -- `inline(lua)`,
     // `inline(js)`, `extern` -- is emitted once per declaration and target, so
     // its generic arguments do not participate in the symbol emission spells;
-    // demanding a `SpecKey` for one asked a Rock question of a non-Rock callee
+    // demanding an instantiation for one asked a Rock question of a non-Rock callee
     // and reported the absence as `callee-no-key` (bitgun: 215 sites over 18
     // declarations, `__vec_data_get`, `transmute`, `phantom` among them).
     //
@@ -955,7 +955,7 @@ pub fn check_callee(
     // A complete key has one reified entry per declared generic. Each way of
     // falling short is its own answer: they have different causes and only one
     // of them is conditional specialization.
-    // The call's OWN claim, in the graph's vocabulary. Not the `SpecKey`: that
+    // The call's OWN claim, in the graph's vocabulary. Not the delivery record: that
     // is the delivery record, present only where the policy chose to specialize,
     // so reading it as identity made a DECLINED specialization look exactly like
     // an uninferred callee.
@@ -993,7 +993,7 @@ pub fn check_callee(
 /// - declaration agrees, is generic, and no instance was recorded, or the
 ///   record names another declaration -> UNVERIFIED, never a silent success,
 ///   under the cause that applies. The record is the IDENTITY one, not the
-///   `SpecKey` delivery record: reading delivery as identity made a declined
+///   delivery record: reading delivery as identity made a declined
 ///   specialization indistinguishable from an uninferred callee.
 fn classify(
     ws: &Workspace,

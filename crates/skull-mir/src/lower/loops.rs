@@ -179,7 +179,29 @@ impl Builder<'_> {
             Some((m, f)) => {
                 let iter_ref = FuncRef { module: m, func: f };
                 let repr = self.lower_expr_repr(iter_expr)?;
-                let args = self.iter_witness_args(iter_ref, repr)?;
+                // Resolved BEFORE the arguments are shaped, for the same reason
+                // the implicit-coercion form does it: the splat must match the
+                // body the call targets.
+                let witness = match info.iter.as_ref() {
+                    Some(w) => {
+                        let span = self
+                            .body
+                            .expr_spans
+                            .get(iter_expr)
+                            .copied()
+                            .unwrap_or(self.ws.module(m).functions[f].name_span);
+                        match self.next_call_spec(iter_ref, &w.generics, span)? {
+                            Some(key) => crate::instance::Instance::intern(
+                                self.scx.interner(),
+                                iter_ref,
+                                key,
+                            ),
+                            None => crate::instance::Instance::base(iter_ref),
+                        }
+                    }
+                    None => crate::instance::Instance::base(iter_ref),
+                };
+                let args = self.iter_witness_args(&witness, repr)?;
                 // The `for` head's `iter` witness, not the head expression's
                 // own call: both live at one expression and share one span, so
                 // the operation is what keeps them distinguishable.
@@ -192,21 +214,8 @@ impl Builder<'_> {
                 // an instance like any other -- it was the last call form still
                 // reaching a shared generic body by construction, and once that
                 // body stopped being emitted it named a nil global.
-                if let Some(w) = info.iter.as_ref() {
-                    let span = self
-                        .body
-                        .expr_spans
-                        .get(iter_expr)
-                        .copied()
-                        .unwrap_or(self.ws.module(m).functions[f].name_span);
-                    if let Some(key) = self.next_call_spec(iter_ref, &w.generics, span)? {
-                        let inst = crate::instance::Instance::intern(
-                            self.scx.interner(),
-                            iter_ref,
-                            key,
-                        );
-                        self.f.spec_bindings.insert(call, inst);
-                    }
+                if !witness.args.is_empty() {
+                    self.f.spec_bindings.insert(call, witness.clone());
                 }
                 if let (Some(inf), Some(w)) = (self.inf, info.iter.as_ref()) {
                     if let Some(subst) = crate::lower::shape::witness_instance_subst(

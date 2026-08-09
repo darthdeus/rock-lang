@@ -5,8 +5,9 @@
 //!
 //! An [`Instance`] is `(FuncRef, Vec<MonoTyId>)` -- a function plus the total
 //! logical types of its generic arguments, keyed on
-//! [`MonoTy`](skull_mir::monoty::MonoTy) from Stage 0c rather than on `SpecKey`.
-//! That is the whole point of the probe: `SpecKey` is partial (plan S 2a), so
+//! [`MonoTy`](skull_mir::monoty::MonoTy) from Stage 0c rather than on an
+//! emission-private key. That is the whole point of the probe: such a key was
+//! partial (plan S 2a), so
 //! `f<Vec2, unit>` and `f<Vec2, any>` share its identity while they get distinct
 //! `InstanceId`s here.
 //!
@@ -953,33 +954,22 @@ impl InstanceGraph {
         (merged(by_id), merged(by_name))
     }
 
-    /// The instance's LOGICAL symbol: `skull_mir::mangle::spec_fn_name`, the
-    /// encoder today's specializer already spells a specialized body with.
-    /// A non-generic instance keeps its base mangling; a generic one is suffixed
-    /// with its arguments' canonical encodings, which is why this is injective
-    /// where [`Self::symbol`] is not.
+    /// The instance's LOGICAL symbol.
+    ///
+    /// DELEGATES to [`Instance::symbol`] -- it does not restate it. The two
+    /// stood side by side, each reaching `spec_fn_name` with its own
+    /// declaration lookup and its own non-generic special case, which is two
+    /// derivations of one encoder and exactly the shape that drifts. Emission
+    /// spells a definition with `Instance::symbol`; a graph view that answered
+    /// differently would be describing a body nothing emits.
     ///
     /// **This is not the final emitted spelling.** Plan S 0h puts that under the
     /// ARTIFACT's ABI/boundary plan -- one symbol per `(artifact, instance)` --
-    /// so a target may legally spell this instance differently. What is tested
-    /// here is the ENCODER: distinct logical instances must not encode alike.
-    /// Per-artifact injectivity is a property of each artifact view and is
-    /// asserted there, not here.
+    /// so a target may legally spell this instance differently. What is shared
+    /// here is the ENCODER, and per-artifact injectivity stays a property of
+    /// each artifact view.
     pub fn logical_symbol(&self, ws: &Workspace, i: &Instance) -> String {
-        let f = &ws.module(i.func.module).functions[i.func.func];
-        // Two cases, both explicit. A non-generic instance IS the base symbol --
-        // not a fallback for a failed lookup. A generic one always has concrete
-        // arguments, so `spec_fn_name` cannot decline (it returns `None` only for
-        // an all-`None` key, which an instance can never build), and an
-        // `unwrap_or_else` back to the base name would silently give a
-        // specialization the shared body's symbol.
-        if i.args.is_empty() {
-            return mangle_fn(ws, f);
-        }
-        let key: skull_mir::lower::SpecKey =
-            i.args.iter().map(|a| self.interner.get(*a)).collect();
-        skull_mir::mangle::spec_fn_name(ws, f, &key)
-            .expect("an instance with arguments always has a specialized symbol")
+        i.symbol(ws, &self.interner)
     }
 
     /// Plan S 2's Stage-2 gate, as data: what is NOT closed about this graph.

@@ -2,7 +2,7 @@
 //! C+D, step A*).
 //!
 //! Pre-cutover, emission writes two populations of definition: one shared body
-//! per declaration, plus a specialized body per `(FuncRef, SpecKey)` the
+//! per declaration, plus a specialized body per `(FuncRef, Vec<MonoTy>)` the
 //! lowerer decided to serve. Those are the emitted bodies, and each has its own
 //! backend ABI -- a generic that takes and returns `T` is one boxed slot on the
 //! declaration and two float leaves at `T = V2`. The declaration's answer is
@@ -15,7 +15,7 @@
 use std::sync::LazyLock;
 
 use skull_mir::instance::Instance;
-use skull_mir::lower::{BackendFnAbiPlan, ScalarCtx, SpecKey};
+use skull_mir::lower::{BackendFnAbiPlan, ScalarCtx};
 use skull_mir::mir::FuncRef;
 use skull_mir::monoty::{MonoCtor, MonoTy};
 use ustr::Ustr;
@@ -89,7 +89,7 @@ fn an_emitted_body_states_its_own_abi() {
     assert_eq!(shared.param_leaf_widths(), None, "an unsubstituted `T` is one boxed slot");
     assert_eq!(shared.result_lanes(), 1);
 
-    let key: SpecKey = vec![nominal("V2")];
+    let key: Vec<MonoTy> = vec![nominal("V2")];
     let spec = BackendFnAbiPlan::for_instance(
         &ws,
         &scx,

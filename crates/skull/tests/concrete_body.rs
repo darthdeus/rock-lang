@@ -217,7 +217,7 @@ fn main() { let a = ident(1) }
 "#;
     let ws = check(src);
     let roots = instance_graph::emission_roots(&ws, None);
-    let mut g = instance_graph::build(&ws, roots, false);
+    let g = instance_graph::build(&ws, roots, false);
     let inst = g
         .expanded()
         .find(|i| g.identity(&ws, i).starts_with("ident"))

@@ -4,7 +4,7 @@
 //! the same reason [`crate::site`] does: so there is ONE vocabulary rather than
 //! two equivalent ones with a translation between them. It was in
 //! `skull::instance_graph`, which put it above emission and left emission to key
-//! its bodies on a parallel `SpecKey`.
+//! its bodies on a parallel instantiation key.
 //!
 //! The placement is the only thing that moved. `skull::instance_graph` remains
 //! the AUTHORITY: it builds instances against its [`crate::monoty::MonoArena`],
@@ -21,7 +21,7 @@ use crate::monoty::{MonoInterner, MonoSubst, MonoTy, MonoTyId};
 /// instance too (empty `args`), so no consumer can reintroduce `if generic`.
 ///
 /// Empty `args` is a NON-GENERIC instance and nothing else. It is not a
-/// "shared body" sentinel; that conflation is what `SpecKey`'s narrowing
+/// "shared body" sentinel; that conflation is what the narrowing
 /// removed, and reintroducing it here would put it back one layer down.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct Instance {

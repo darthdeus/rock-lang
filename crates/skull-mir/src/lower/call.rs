@@ -17,7 +17,11 @@ use super::*;
 /// declaration with no body to serve it.
 pub(crate) struct DirectCall {
     pub(crate) tree: Option<bone_semantic::prelude::BoundTree>,
-    pub(crate) spec: Option<(SpecKey, SpecSubst)>,
+    /// The concrete body this call targets, and the substitution it lowers
+    /// under. An [`Instance`](crate::instance::Instance) rather than a key: the
+    /// same object the definition is emitted under, so the caller's splat and
+    /// the callee's parameter list cannot be two derivations.
+    pub(crate) spec: Option<(crate::instance::Instance, SpecSubst)>,
     pub(crate) callee_inst: Option<crate::monoty::MonoSubst>,
     pub(crate) plan: BackendFnAbiPlan,
 }
@@ -489,9 +493,8 @@ impl Builder<'_> {
         if let Some(t) = &dc.tree {
             self.f.bound_trees.insert(call, t.clone());
         }
-        if let Some((k, _)) = &dc.spec {
-            let inst = crate::instance::Instance::intern(self.scx.interner(), func, k.clone());
-            self.f.spec_bindings.insert(call, inst);
+        if let Some((inst, _)) = &dc.spec {
+            self.f.spec_bindings.insert(call, inst.clone());
         }
         if let Some(subst) = &dc.callee_inst {
             self.f
@@ -526,8 +529,11 @@ impl Builder<'_> {
         &self,
         e: Idx<Expr>,
         func: FuncRef,
-    ) -> Result<Option<(SpecKey, SpecSubst)>, CompilerError> {
+    ) -> Result<Option<(crate::instance::Instance, SpecSubst)>, CompilerError> {
         let Some(inf) = self.inf else { return Ok(None) };
+        // INTERNED HERE, at the one boundary where the build's arena is in
+        // scope: `compute_call_spec` is arena-free shape analysis, and this is
+        // where its answer stops being a list of types and becomes an identity.
         let spec = compute_call_spec(self.ws, inf, e, func, self.subst())?;
         // Stage-0e census. Recorded HERE rather than inside `compute_call_spec`
         // because the classification needs no context and the record needs the
@@ -591,7 +597,9 @@ impl Builder<'_> {
                 );
             }
         }
-        Ok(spec)
+        Ok(spec.map(|(key, subst)| {
+            (crate::instance::Instance::intern(self.scx.interner(), func, key), subst)
+        }))
     }
 
     /// [`Self::call_spec`] narrowed by the target's storage filter -- the form
@@ -601,7 +609,7 @@ impl Builder<'_> {
         &self,
         e: Idx<Expr>,
         func: FuncRef,
-    ) -> Result<Option<(SpecKey, SpecSubst)>, CompilerError> {
+    ) -> Result<Option<(crate::instance::Instance, SpecSubst)>, CompilerError> {
         self.call_spec(e, func)
     }
 
@@ -615,16 +623,18 @@ impl Builder<'_> {
     pub(crate) fn callee_abi_plan(
         &self,
         func: FuncRef,
-        spec: Option<&(SpecKey, SpecSubst)>,
+        spec: Option<&(crate::instance::Instance, SpecSubst)>,
         subst: &SpecSubst,
     ) -> BackendFnAbiPlan {
+        let base;
         let inst = match spec {
-            Some((key, _)) => {
-                crate::instance::Instance::intern(self.scx.interner(), func, key.clone())
+            Some((inst, _)) => inst,
+            None => {
+                base = crate::instance::Instance::base(func);
+                &base
             }
-            None => crate::instance::Instance::base(func),
         };
-        BackendFnAbiPlan::for_instance_with_subst(self.ws, self.scx, &inst, subst)
+        BackendFnAbiPlan::for_instance_with_subst(self.ws, self.scx, inst, subst)
     }
 
     /// THE tuple-return shape of a call, read off the CALLEE's declared return
@@ -654,13 +664,13 @@ impl Builder<'_> {
 
     /// [`Self::call_spec`] for the for-protocol `next` callee, whose bindings
     /// come from bone's `next_generics` rather than a call expr. Ordered into
-    /// the callee's generic declaration order, which is what [`SpecKey`] is.
+    /// the callee's generic declaration order, which is what [`Vec<MonoTy>`] is.
     pub(crate) fn next_call_spec(
         &self,
         func: FuncRef,
         next_generics: &rustc_hash::FxHashMap<bone_semantic::hir::VarId, TyId>,
         span: bone_semantic::prelude::Span,
-    ) -> Result<Option<SpecKey>, CompilerError> {
+    ) -> Result<Option<Vec<crate::monoty::MonoTy>>, CompilerError> {
         let Some(inf) = self.inf else { return Ok(None) };
         let key = spec_key_from_next_generics(self.ws, inf, func, next_generics, self.subst())?;
         let callee = &self.ws.module(func.module).functions[func.func];
@@ -1236,12 +1246,19 @@ impl Builder<'_> {
     /// different thing entirely: the witness would have no collection parameter
     /// to receive anything, so treating it as `Opaque` would silently pass an
     /// argument nothing binds. Reject instead.
+    /// Takes the witness INSTANCE, not its declaration. The call this shapes
+    /// arguments for targets the specialized definition, so asking the
+    /// declaration would splat against one ABI and be received by another --
+    /// the same mismatch the safe-navigation UFCS path had. Unification rather
+    /// than a measured fix: `iter<T>`'s collection parameter is an array, which
+    /// is `Opaque` at every instantiation, so the two answers agree today.
     pub(crate) fn iter_witness_args(
         &mut self,
-        iter_ref: FuncRef,
+        inst: &crate::instance::Instance,
         repr: ValueRepr,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
-        let plan = BackendFnAbiPlan::for_declaration(self.ws, self.scx, iter_ref);
+        let iter_ref = inst.func;
+        let plan = BackendFnAbiPlan::for_instance(self.ws, self.scx, inst);
         let slot = match plan.scalar() {
             None => RetSlot::Opaque,
             Some(abi) => abi.param_shapes.first().cloned().ok_or_else(|| {

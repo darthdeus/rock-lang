@@ -181,7 +181,7 @@ pub enum CliCommand {
     MonoTyCensus,
     /// `rock mono-manifest [root]` -- DIAGNOSTIC (Stage 0d,
     /// `docs/monomorphization-plan.md`): build the SHADOW instance graph over
-    /// the closed world (instances keyed by `MonoTy`, not `SpecKey`), and
+    /// the closed world (instances keyed by `MonoTy`), and
     /// report instance/edge counts, the edge-kind histogram and the recursion
     /// census. Changes no emission. See `mono_manifest::do_mono_manifest`.
     MonoManifest,

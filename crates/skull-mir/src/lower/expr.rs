@@ -29,24 +29,29 @@ impl Builder<'_> {
             // site explicitly rather than inheriting a cursor that names the
             // wrong expression.
             let outer_expr = self.cur_expr.replace(e);
-            let call = self.with_site_op(crate::site::SiteOp::ImplicitIter, |b| {
-                let args = b.iter_witness_args(iter_ref, ValueRepr::Scalar(v))?;
-                Ok::<_, CompilerError>(b.emit_cur(Inst::Call { func: iter_ref, args }))
-            })?;
-            // DELIVERY, exactly as the `for` head's witness does it. Both forms
-            // are ordinary calls to a generic `iter`, so under instance-owned
-            // emission both must name an instance; recording identity without
-            // delivering it spells a symbol nothing defines.
+            // The instance is resolved BEFORE the arguments are shaped: they are
+            // splatted against the ABI of the body the call targets, not the
+            // declaration's.
             let span = self
                 .body
                 .expr_spans
                 .get(e)
                 .copied()
                 .unwrap_or(self.ws.module(m).functions[f].name_span);
-            if let Some(key) = self.next_call_spec(iter_ref, &generics, span)? {
-                let inst =
-                    crate::instance::Instance::intern(self.scx.interner(), iter_ref, key);
-                self.f.spec_bindings.insert(call, inst);
+            let witness = match self.next_call_spec(iter_ref, &generics, span)? {
+                Some(key) => crate::instance::Instance::intern(self.scx.interner(), iter_ref, key),
+                None => crate::instance::Instance::base(iter_ref),
+            };
+            let call = self.with_site_op(crate::site::SiteOp::ImplicitIter, |b| {
+                let args = b.iter_witness_args(&witness, ValueRepr::Scalar(v))?;
+                Ok::<_, CompilerError>(b.emit_cur(Inst::Call { func: iter_ref, args }))
+            })?;
+            // DELIVERY, exactly as the `for` head's witness does it. Both forms
+            // are ordinary calls to a generic `iter`, so under instance-owned
+            // emission both must name an instance; recording identity without
+            // delivering it spells a symbol nothing defines.
+            if !witness.args.is_empty() {
+                self.f.spec_bindings.insert(call, witness.clone());
             }
             // IDENTITY beside delivery, the plan's split, and the same pair the
             // `for` witness records. Delivery alone leaves the site's own claim
@@ -443,7 +448,6 @@ impl Builder<'_> {
                 // now -- `convert_closures` splits it out and the inliner runs
                 // over the standalone body -- but that happens after lowering, so
                 // this decision cannot see the specialized callee it would need.
-                let saved_unspliced = std::mem::replace(&mut self.in_unspliced_ctx, true);
                 self.ret_tuple = self.lambda_ret_tuple_shape(e);
                 // A `nobox` return leaves as leaves, same multi-return wire the
                 // tuple ABI uses and the same fn-TYPE key.
@@ -456,7 +460,6 @@ impl Builder<'_> {
                     }
                     self.defers = saved_defers;
                     self.in_defer_body = saved_in_defer;
-                    self.in_unspliced_ctx = saved_unspliced;
                     self.ret_tuple = saved_ret_tuple;
                     self.ret_shape = saved_ret_shape;
                     self.cur = saved;
@@ -485,7 +488,6 @@ impl Builder<'_> {
                 }
                 self.defers = saved_defers;
                 self.in_defer_body = saved_in_defer;
-                self.in_unspliced_ctx = saved_unspliced;
                 self.ret_tuple = saved_ret_tuple;
                 self.ret_shape = saved_ret_shape;
                 self.cur = saved;

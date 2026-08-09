@@ -1582,31 +1582,9 @@ pub(crate) fn columns_available(
     true
 }
 
-/// A callee's instantiation at one call site: one concrete type per declared
-/// generic, in declaration order. TOTAL by construction.
-///
-/// Absence lives OUTSIDE this type, in the `Option<SpecKey>` every producer
-/// returns -- `None` means no specialized delivery. It used to live inside, as
-/// a per-slot `Option`, and that shape admitted two things nothing wanted. A
-/// PARTIAL key named neither the shared body nor one instantiation (measured:
-/// 267,671 total constructions and zero partial), and an EMPTY key was the
-/// shared-body sentinel for a non-generic callee -- 756 of them, normalized
-/// back to the declaration by the id constructor rather than decided by whoever
-/// built it.
-///
-/// The empty case is the one that had to go. A non-generic concrete instance
-/// legitimately has no arguments, so "empty means shared" is a conflation that
-/// cannot survive into an `Instance`-keyed identity. Producers decide absence
-/// now; nothing normalizes it afterwards.
-///
-/// This is `skull::instance_graph::Instance`'s `args` in everything but
-/// interning -- a PREMISE that the narrowing is safe, not evidence the two
-/// identities are one. That convergence is the cache-key step, and it is named
-/// in `docs/parked/mono.md`.
-pub type SpecKey = Vec<MonoTy>;
 
 /// Callee generic `VarId` -> its concrete type tree, for specialized lowering.
-/// Total against the declaration's generics, exactly as [`SpecKey`] is.
+/// Total against the declaration's generics, exactly as [`Vec<MonoTy>`] is.
 ///
 /// THE SAME TYPE as [`crate::monoty::MonoSubst`], which is what an instance of
 /// the mono graph carries. One substitution vocabulary, so an instance's own
@@ -1635,7 +1613,7 @@ pub type SpecSubst = crate::monoty::MonoSubst;
 /// the binding directly through [`mono_ret_slot`].
 ///
 /// `any`, unit, `never` and a function type answer `None` on the same terms.
-/// They are perfectly good [`SpecKey`] slots -- identity names them -- but the
+/// They are perfectly good [`Vec<MonoTy>`] slots -- identity names them -- but the
 /// arena has no node to spell them with here, and inventing one would be a
 /// guess. The caller falls back to the unsubstituted generic, which is what a
 /// consumer reading a CONSTRUCTOR or a NOMINAL wants anyway.
@@ -1841,7 +1819,7 @@ pub(crate) fn compute_call_spec(
     e: Idx<Expr>,
     func: FuncRef,
     enclosing: &SpecSubst,
-) -> Result<Option<(SpecKey, SpecSubst)>, CompilerError> {
+) -> Result<Option<(Vec<MonoTy>, SpecSubst)>, CompilerError> {
     let f = &ws.module(func.module).functions[func.func];
     if f.generics.is_empty() {
         return Ok(None);
@@ -1943,7 +1921,7 @@ pub(crate) fn ablation_decline(
     ablation_partial_key_decline(ws, inf, bindings, enclosing)
 }
 
-/// Why a binding list cannot produce a COMPLETE [`SpecKey`] -- or `None` when
+/// Why a binding list cannot produce a COMPLETE [`Vec<MonoTy>`] -- or `None` when
 /// every slot converts and the key names exactly one instantiation.
 ///
 /// There is no "valid type the key cannot name" arm, and its absence is
@@ -2007,7 +1985,7 @@ pub(crate) fn compute_spec_from_bindings(
     func: FuncRef,
     bindings: &[TyId],
     enclosing: &SpecSubst,
-) -> Result<Option<(SpecKey, SpecSubst)>, CompilerError> {
+) -> Result<Option<(Vec<MonoTy>, SpecSubst)>, CompilerError> {
     let f = &ws.module(func.module).functions[func.func];
     if bindings.len() != f.generics.len() {
         return Err(CompilerError::new_with_label(
@@ -2031,7 +2009,7 @@ pub(crate) fn compute_spec_from_bindings(
     if f.generics.is_empty() {
         return Ok(None);
     }
-    let mut key: SpecKey = Vec::with_capacity(bindings.len());
+    let mut key: Vec<MonoTy> = Vec::with_capacity(bindings.len());
     let mut subst = SpecSubst::default();
     for (g, b) in f.generics.iter().zip(bindings) {
         let Some(TypeExpr::Generic(var, _)) = ty_node(ws, inf, *g) else {
@@ -2097,7 +2075,7 @@ pub fn spec_key_from_next_generics(
     func: FuncRef,
     next_generics: &rustc_hash::FxHashMap<bone_semantic::hir::VarId, TyId>,
     enclosing: &SpecSubst,
-) -> Result<Option<SpecKey>, CompilerError> {
+) -> Result<Option<Vec<MonoTy>>, CompilerError> {
     let f = &ws.module(func.module).functions[func.func];
     let mut bindings = Vec::with_capacity(f.generics.len());
     for generic in &f.generics {
@@ -2159,12 +2137,12 @@ pub(crate) fn ablation_next_decline(
 }
 
 /// Rebuild the [`SpecSubst`] (callee generic `VarId` -> concrete type) for `fref`
-/// from a [`SpecKey`] (trees in declaration order). The inliner holds only the
+/// from a [`Vec<MonoTy>`] (trees in declaration order). The inliner holds only the
 /// arena-free key in its cache; this re-pairs it with the callee's generic
 /// `VarId`s to drive [`lower_emitted_body`]. An empty / all-`None` key yields an
 /// empty subst (the shared snapshot).
 /// The inverse of [`spec_subst_from_key`], and the E1 cut's premise: for a body
-/// emission actually writes, a [`SpecKey`] carries nothing the [`SpecSubst`]
+/// emission actually writes, a [`Vec<MonoTy>`] carries nothing the [`SpecSubst`]
 /// does not.
 ///
 /// `Some` only for a TOTAL rebuild -- every declared generic present in `subst`
@@ -2175,12 +2153,12 @@ pub(crate) fn ablation_next_decline(
 ///
 /// The declaration supplies the ORDER, which is the only thing a substitution
 /// lacks: a key is positional over `f.generics` and a subst is keyed by `VarId`.
-pub fn spec_key_from_subst(ws: &Workspace, fref: FuncRef, subst: &SpecSubst) -> Option<SpecKey> {
+pub fn spec_key_from_subst(ws: &Workspace, fref: FuncRef, subst: &SpecSubst) -> Option<Vec<MonoTy>> {
     let f = &ws.module(fref.module).functions[fref.func];
     if f.generics.is_empty() {
         return None;
     }
-    let mut key = SpecKey::with_capacity(f.generics.len());
+    let mut key: Vec<MonoTy> = Vec::with_capacity(f.generics.len());
     for g in f.generics.iter() {
         let Some(TypeExpr::Generic(var, _)) = static_ty(ws, *g) else { return None };
         key.push(subst.get(&var)?.clone());
@@ -2188,7 +2166,7 @@ pub fn spec_key_from_subst(ws: &Workspace, fref: FuncRef, subst: &SpecSubst) -> 
     Some(key)
 }
 
-pub fn spec_subst_from_key(ws: &Workspace, fref: FuncRef, key: &SpecKey) -> SpecSubst {
+pub fn spec_subst_from_key(ws: &Workspace, fref: FuncRef, key: &Vec<MonoTy>) -> SpecSubst {
     let f = &ws.module(fref.module).functions[fref.func];
     let mut subst = SpecSubst::default();
     for (g, reified) in f.generics.iter().zip(key) {

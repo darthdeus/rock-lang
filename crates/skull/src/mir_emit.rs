@@ -1673,7 +1673,7 @@ fn is_stdlib_module_file(file: &str) -> bool {
 /// A worklist, not a loop over the initial set: a specialized body is lowered
 /// under its own substitution and can therefore require further specializations
 /// that no shared body ever mentions (`Vec<Vec2>.remove_at` calling
-/// `__vec_data_set` at `T = Vec2`). `done` keys on the full `(FuncRef, SpecKey)`
+/// `__vec_data_set` at `T = Vec2`). `done` keys on the full `Instance`
 /// so each is defined exactly once no matter how many bodies requested it.
 ///
 /// A failing specialization does NOT stop the worklist: each instantiation is an

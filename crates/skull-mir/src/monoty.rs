@@ -1,5 +1,6 @@
 //! `MonoTy` -- THE logical type (`docs/monomorphization-plan.md` Stage 1). Every
-//! concrete type identity in the compiler is one of these: `SpecKey` slots, the
+//! concrete type identity in the compiler is one of these: an `Instance`'s
+//! arguments, the
 //! substitutions specialized lowering reads, the symbols the emitters mangle,
 //! and the instance graph.
 //!
@@ -8,7 +9,7 @@
 //! type -- it is the absence of one, which every binding that lands in it
 //! shares. `f<Vec2, unit>`, `f<Vec2, any>` and `f<Vec2, fn(int)->int>` are three
 //! instantiations, and a partial walk gives them one identity and one emitted
-//! body. So `SpecKey` slots are built from this conversion too
+//! body. So an instance's arguments are built from this conversion too
 //! ([`reify_type`](crate::lower::shape::reify_type)): WHETHER a call
 //! specializes is conditional (the `@inline`/`@pure` opt-in, the storage
 //! trigger), WHICH instantiation it names is not. Stage 4 deletes the rest of
@@ -859,7 +860,7 @@ pub const MAX_INSTANTIATION_DEPTH: u32 = 12;
 ///
 /// Takes `&MonoTy` rather than a depth so the aggregation is here too. The graph
 /// holds `MonoTyId`s and reaches these through `MonoArena::get`; emission holds
-/// the owned trees of a `SpecKey` directly.
+/// the owned trees of an argument list directly.
 pub fn too_deep_to_instantiate<'a>(
     args: impl IntoIterator<Item = &'a MonoTy>,
 ) -> Option<&'a MonoTy> {

@@ -1,27 +1,25 @@
-//! `SpecKey` and `SpecSubst` are one fact, which is the E1 architectural cut's
-//! premise (`docs/monomorphization-plan.md` cut C+D, step E1).
+//! An instance's ARGUMENTS and its `SpecSubst` are one fact, which is the E1
+//! architectural cut's premise (`docs/monomorphization-plan.md` cut C+D, E1).
 //!
-//! `EmittedBodyId` is keyed by `(FuncRef, SpecKey)` and the mono graph keys an
-//! instance by `(FuncRef, MonoSubst)`. Moving emission identity onto `Instance`
-//! is only a rename of today's population if those two carry the same
-//! information for every body emission WRITES -- otherwise the cut silently
-//! changes which definitions exist.
+//! Emission keys a body on `Instance` -- a declaration plus interned type
+//! arguments in declaration order -- and the mono graph records a `MonoSubst`
+//! per instance. Those two carry the same information for every body emission
+//! writes, or the cut silently changes which definitions exist.
 //!
-//! It does, and E1 is what made it true. `compute_spec_from_bindings` builds the
-//! key and the substitution in ONE loop from one `reify_type`, and since E1 a
-//! PARTIAL key names no body at all: "EVERY complete key specializes. There is
-//! no shared generic body to decline to any more", so a `None` slot is an
-//! incomplete instantiation owned by the Stage-2 `ConcreteTypeUnavailable`
-//! rejection rather than a body identity.
+//! `compute_spec_from_bindings` builds the argument list and the substitution in
+//! ONE loop from one `reify_type`, and since E1 a PARTIAL list names no body at
+//! all: "EVERY complete key specializes. There is no shared generic body to
+//! decline to any more", so an unresolved slot is an incomplete instantiation
+//! owned by the Stage-2 `ConcreteTypeUnavailable` rejection rather than a body
+//! identity.
 //!
-//! Both reasons `abi.rs` gave for keeping them separate are therefore spent: the
-//! tuple reason was stale (`MonoTy::Tuple` has existed since D-2), and the
-//! partial-key reason no longer describes a body.
+//! `instance_identity.rs` is the other half: that going through the ARENA loses
+//! nothing either.
 
 use std::sync::LazyLock;
 
 use skull_mir::instance::Instance;
-use skull_mir::lower::{spec_key_from_subst, spec_subst_from_key, SpecKey};
+use skull_mir::lower::{spec_key_from_subst, spec_subst_from_key};
 use skull_mir::monoty::MonoInterner;
 use skull_mir::mir::FuncRef;
 use skull_mir::monoty::{MonoCtor, MonoTy};
@@ -70,7 +68,7 @@ fn decl(ws: &bone_semantic::inference::Workspace, name: &str) -> FuncRef {
 /// directions could plausibly disagree on: a tuple (the stale reason `abi.rs`
 /// gave), a nullable, a nested application, and a MULTI-generic declaration
 /// where positional order is the only thing a substitution does not carry.
-fn key_shapes() -> Vec<(&'static str, SpecKey)> {
+fn key_shapes() -> Vec<(&'static str, Vec<MonoTy>)> {
     let v2 = MonoTy::App { ctor: MonoCtor::Nominal(Ustr::from("V2")), params: vec![] };
     vec![
         ("scalar", vec![MonoTy::Int]),
@@ -128,8 +126,8 @@ fn a_complete_key_survives_the_round_trip_through_its_substitution() {
 fn a_multi_generic_key_keeps_its_positions() {
     let ws = ws_of(SRC);
     let pair = decl(&ws, "pair");
-    let ab: SpecKey = vec![MonoTy::Int, MonoTy::String];
-    let ba: SpecKey = vec![MonoTy::String, MonoTy::Int];
+    let ab: Vec<MonoTy> = vec![MonoTy::Int, MonoTy::String];
+    let ba: Vec<MonoTy> = vec![MonoTy::String, MonoTy::Int];
     let ab_back = spec_key_from_subst(&ws, pair, &spec_subst_from_key(&ws, pair, &ab))
         .expect("complete substitution rebuilds");
     let ba_back = spec_key_from_subst(&ws, pair, &spec_subst_from_key(&ws, pair, &ba))
@@ -156,7 +154,7 @@ fn an_incomplete_substitution_rebuilds_no_key() {
     let pair = decl(&ws, "pair");
     // Bind only the FIRST generic, by round-tripping a key that names one and
     // dropping the other's binding.
-    let full: SpecKey = vec![MonoTy::Int, MonoTy::String];
+    let full: Vec<MonoTy> = vec![MonoTy::Int, MonoTy::String];
     let mut subst = spec_subst_from_key(&ws, pair, &full);
     assert_eq!(subst.len(), 2, "the fixture must start complete");
     let victim = *subst.keys().next().expect("a bound var");

@@ -1068,7 +1068,6 @@ fn lower_body(
         resume_arg,
         // A coroutine body emits via `emit_coroutine` before `inline_functions`
         // runs, so it is never spliced -- box value args (see field docs).
-        in_unspliced_ctx: func.is_coroutine,
         param_shapes,
         ret_shape,
         ret_tuple,
@@ -1151,7 +1150,6 @@ pub fn lower_global(
         in_defer_body: false,
         resume_arg: None,
         // Global-init bodies never run `inline_functions` -- box value args.
-        in_unspliced_ctx: true,
         param_shapes: Vec::new(),
         ret_shape: None,
         ret_tuple: None,
@@ -1228,7 +1226,6 @@ pub fn lower_decorator(
         in_defer_body: false,
         resume_arg: None,
         // Decorator bodies never run `inline_functions` -- box value args.
-        in_unspliced_ctx: true,
         param_shapes: Vec::new(),
         ret_shape: None,
         ret_tuple: None,
@@ -1318,7 +1315,6 @@ struct Builder<'a> {
     /// body -- an unspliced residual would call the SHARED generic body (`T` = one
     /// boxed slot) with splatted args and drop every leaf but the first. Boxing
     /// the value arg matches the shared body exactly.
-    in_unspliced_ctx: bool,
     /// Per-param scalarized shape: `Some` for a value param expanded to leaf
     /// cells (parallel to `body.param_bindings`). Empty when the fn doesn't use
     /// the scalar ABI (globals, decorators, non-value fns).
@@ -2944,7 +2940,8 @@ mod tests;
 /// Support for `crate::spec_census` -- the Stage-0d reconciliation needs the
 /// RESULT of `compute_call_spec` without `lower::shape` becoming public.
 pub(crate) mod shape_census_support {
-    use super::shape::{compute_call_spec, SpecKey, SpecSubst};
+    use super::shape::{compute_call_spec, SpecSubst};
+    use crate::monoty::MonoTy;
     use crate::mir::FuncRef;
     use bone_semantic::inference::{BodyInference, Workspace};
 
@@ -2953,7 +2950,7 @@ pub(crate) mod shape_census_support {
     pub(crate) fn specializations_in_body(
         ws: &Workspace,
         inf: &BodyInference,
-    ) -> (Vec<(FuncRef, SpecKey)>, usize) {
+    ) -> (Vec<(FuncRef, Vec<MonoTy>)>, usize) {
         // caller is supplied by the census; this returns callee-side data only
         let empty = SpecSubst::default();
         let mut out = Vec::new();

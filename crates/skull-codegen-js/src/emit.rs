@@ -679,7 +679,7 @@ fn finalize_labels(mut s: String, markers: &[Idx<Block>], used: &HashSet<Idx<Blo
 /// The JS name every co-emitted callee is called by. Two tables because a call
 /// resolves by whether the LOWERER gave it an instantiation: an ordinary call
 /// targets the shared body's mangled name, while a call carrying a
-/// [`SpecKey`](skull_mir::lower::SpecKey) targets that instantiation's own
+/// [`Instance`](skull_mir::instance::Instance) targets that instantiation's own
 /// standalone copy (`spec_fn_name`) -- for a column-stored element the shared
 /// body reads a `_data` the layout does not have, so it cannot serve the call at
 /// all. Same split the luajit emitter makes in `callee_name`.
