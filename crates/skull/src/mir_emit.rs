@@ -1755,7 +1755,7 @@ fn shader_registration_lines(ws: &Workspace) -> Result<ShaderRegistrations, Comp
         let w = skull_codegen_glsl::BlockWire::of(emission.abi.uniform_blocks.iter(), emission.abi.uniform_array_blocks.iter());
         let _ = writeln!(
             out,
-            "__rock_shader_register({:?}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
+            "__rock_shader_register({:?}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
             pair.key,
             lua_long_bracket(&emission.source),
             skull_codegen_lua::lua_string_vec(&slot_names),
@@ -1769,6 +1769,7 @@ fn shader_registration_lines(ws: &Workspace) -> Result<ShaderRegistrations, Comp
             skull_codegen_lua::lua_int_vec(&w.member_kinds),
             skull_codegen_lua::lua_int_vec(&w.member_capacities),
             skull_codegen_lua::lua_int_vec(&w.member_strides),
+            pair.vert.is_none(),
         );
     }
     Ok(ShaderRegistrations {

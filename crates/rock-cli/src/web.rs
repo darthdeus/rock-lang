@@ -698,7 +698,7 @@ fn shader_register_lines_js(ws: &bone_semantic::inference::Workspace) -> Result<
         );
         let _ = writeln!(
             out,
-            "__rock_shader_register({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {});",
+            "__rock_shader_register({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {});",
             crate::js_test::js_str(&pair.key),
             crate::js_test::js_str(&emission.source),
             js_string_vec(&emission.abi.texture_units),
@@ -712,6 +712,7 @@ fn shader_register_lines_js(ws: &bone_semantic::inference::Workspace) -> Result<
             js_int_vec(&w.member_kinds),
             js_int_vec(&w.member_capacities),
             js_int_vec(&w.member_strides),
+            pair.vert.is_none(),
         );
     }
     Ok(out)

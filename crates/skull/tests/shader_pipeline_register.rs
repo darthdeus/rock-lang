@@ -66,6 +66,17 @@ fn registration_carries_generated_glsl() {
 }
 
 #[test]
+fn explicit_vertex_registration_marks_that_it_is_not_fullscreen() {
+    let lua = emit_module(SRC);
+    let at = lua.find("__rock_shader_register(").expect("a registration");
+    let reg = &lua[at..];
+    assert!(
+        reg.contains(r#"__ty = "Vec"}, false)"#),
+        "an explicit vertex artifact must register as non-fullscreen:\n{reg}"
+    );
+}
+
+#[test]
 fn reemission_is_byte_identical() {
     assert_eq!(emit_module(SRC), emit_module(SRC), "re-emission must be byte-identical");
 }
@@ -304,6 +315,10 @@ fn single_arg_registration_carries_both_ifdef_blocks() {
     for n in ["#version 330 core", "#ifdef PIXEL", "#ifdef VERTEX"] {
         assert!(reg.contains(n), "single-arg registration missing `{n}`:\n{reg}");
     }
+    assert!(
+        reg.contains(r#"__ty = "Vec"}, true)"#),
+        "a fragment-only artifact must register as compiler-owned fullscreen:\n{reg}"
+    );
 }
 
 #[test]
