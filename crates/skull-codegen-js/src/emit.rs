@@ -2403,9 +2403,9 @@ fn is_nomangle(f: &bone_semantic::hir::Function) -> bool {
 /// Function declarations hoist in JS, so definition order is irrelevant.
 pub fn emit_with_closure(
     ws: &Workspace,
-    scx: &skull_mir::lower::ScalarCtx,
     roots: &[(FuncRef, String)],
 ) -> Result<String, CompilerError> {
+    let scx = &js_scx(ws);
     let mut st = WorklistState::new(ws, roots, false);
     drain_worklists(ws, scx, &mut st)?;
     st.canonicalize_emission_order();
@@ -2496,9 +2496,12 @@ fn emit_ginit_with_nested(
 /// module load exactly as on luajit.
 /// **THE JS lowering context, and there is one construction of it.**
 ///
-/// Every JS entry point builds `scx` here rather than taking one from its
-/// caller. Six production sites used to construct their own -- three in
-/// `rock-cli::web`, three in `rock-cli::js_test` -- which is a seam where the
+/// All FIVE JS entry points build `scx` here rather than taking one from a
+/// caller: `emit_program`, `emit_program_cached`, `emit_program_with_roots`,
+/// `emit_overlay` and `emit_with_closure`, the last being the per-test closure
+/// `rock test --backend js` runs ordinary `@test`s through. Seven production
+/// sites used to construct their own -- three in `rock-cli::web`, four in
+/// `rock-cli::js_test` -- which is a seam where the
 /// TARGET can differ (a `ScalarCtx` without `with_target(Js)` plans a different
 /// ABI) and, once the JS artifact view lands, where the `MonoInterner` can
 /// differ too. An `Instance` is an identity only relative to its arena, so two

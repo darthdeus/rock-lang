@@ -6,7 +6,6 @@
 //! execution is the correctness oracle; `tests/js_module_globals.rock`
 //! cross-checks against luajit.
 
-use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::FuncRef;
 use crate::common::ws_with;
 
@@ -18,7 +17,6 @@ fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<
     // Target JS explicitly (as the real per-test path does): a fn taken by value
     // keeps its surface name only on the JS target, where JS resolves it through
     // its own `discover_globals`; a non-Js target mangles the value ref.
-    let scx = ScalarCtx::new(ws).with_target(bone_semantic::hir::FnBackend::Js);
     let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
     let mut r = None;
     for (fid, f) in ws.module(mid).functions.iter() {
@@ -26,7 +24,7 @@ fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<
             r = Some(FuncRef { module: mid, func: fid });
         }
     }
-    skull_codegen_js::emit::emit_with_closure(ws, &scx, &[(r.unwrap(), root.to_string())])
+    skull_codegen_js::emit::emit_with_closure(ws, &[(r.unwrap(), root.to_string())])
         .map_err(|e| e.message)
 }
 

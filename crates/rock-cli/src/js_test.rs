@@ -17,7 +17,6 @@ use crate::bone_backend::{categorize, short_path};
 use crate::test_protocol::{parse_skull_markers, reason_histogram};
 use crate::Result;
 use colored::Colorize;
-use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::FuncRef;
 use std::time::Instant;
 
@@ -317,7 +316,6 @@ fn js_run_tests(
     let mut fails: Vec<String> = Vec::new();
     let mut skips: Vec<(String, Vec<String>)> = Vec::new();
 
-    let scx = ScalarCtx::new(ws).with_target(bone_semantic::hir::FnBackend::Js);
     // (test index, per-test isolated defs) for tests emittable in ISOLATION.
     let mut supported: Vec<(usize, String)> = Vec::new();
     // Test indices that reject ONLY because they read a decorator-populated
@@ -328,7 +326,7 @@ fn js_run_tests(
         let js_name = format!("__t{i}");
         let roots = [(*fr, js_name)];
         let emitted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            skull_codegen_js::emit::emit_with_closure(ws, &scx, &roots)
+            skull_codegen_js::emit::emit_with_closure(ws, &roots)
         }));
         match emitted {
             Ok(Ok(js)) => supported.push((i, js)),

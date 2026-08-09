@@ -23,12 +23,10 @@
 //! driver, never returned by `emit_with_closure`, so it is naturally out of
 //! scope here.
 
-use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::FuncRef;
 use crate::common::ws_with;
 
 fn emit(ws: &bone_semantic::inference::Workspace, root: &str) -> String {
-    let scx = ScalarCtx::new(ws);
     let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
     let mut r = None;
     for (fid, f) in ws.module(mid).functions.iter() {
@@ -36,7 +34,7 @@ fn emit(ws: &bone_semantic::inference::Workspace, root: &str) -> String {
             r = Some(FuncRef { module: mid, func: fid });
         }
     }
-    skull_codegen_js::emit::emit_with_closure(ws, &scx, &[(r.expect(root), root.to_string())])
+    skull_codegen_js::emit::emit_with_closure(ws, &[(r.expect(root), root.to_string())])
         .unwrap_or_else(|e| panic!("emit `{root}`: {}", e.message))
 }
 

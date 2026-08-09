@@ -4,7 +4,6 @@
 //! co-emitted under FuncRef-deterministic names; mapped intrinsics stay
 //! templates; anything else rejects with the emitter's own message.
 
-use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::FuncRef;
 
 /// FuncRef of the unique fn named `name` in the `<test>` module.
@@ -25,9 +24,8 @@ fn co_emits_plain_rock_callee_transitively() {
          fn helper(x: int) -> int { leaf(x) * 2 }\n\
          fn root(y: int) -> int { helper(y) + leaf(y) }\n",
     );
-    let scx = ScalarCtx::new(&ws);
     let root = test_fn_ref(&ws, "root");
-    let js = skull_codegen_js::emit::emit_with_closure(&ws, &scx, &[(root, "root".to_string())])
+    let js = skull_codegen_js::emit::emit_with_closure(&ws, &[(root, "root".to_string())])
         .expect("closure emit");
     assert!(js.contains("function root("), "root under its given name:\n{js}");
     // Callees under the shared (name + signature) mangle, one definition each
@@ -42,9 +40,8 @@ fn rejects_unmapped_inline_lua_callee_with_emitter_message() {
         "inline(lua) fn my_lua_thing(x: int) -> int = \"\"\" return x \"\"\"\n\
          fn root(y: int) -> int { my_lua_thing(y) }\n",
     );
-    let scx = ScalarCtx::new(&ws);
     let root = test_fn_ref(&ws, "root");
-    let err = skull_codegen_js::emit::emit_with_closure(&ws, &scx, &[(root, "root".to_string())])
+    let err = skull_codegen_js::emit::emit_with_closure(&ws, &[(root, "root".to_string())])
         .expect_err("inline(lua) callee must reject");
     assert!(
         err.message.contains("my_lua_thing") && err.message.contains("not a mapped JS intrinsic"),
@@ -63,9 +60,8 @@ fn user_fn_shadowing_intrinsic_name_is_co_emitted_not_mapped() {
         "fn abs(b: bool) -> int { if b { 1 } else { 0 } }\n\
          fn root() -> int { abs(true) }\n",
     );
-    let scx = ScalarCtx::new(&ws);
     let root = test_fn_ref(&ws, "root");
-    let js = skull_codegen_js::emit::emit_with_closure(&ws, &scx, &[(root, "root".to_string())])
+    let js = skull_codegen_js::emit::emit_with_closure(&ws, &[(root, "root".to_string())])
         .expect("closure emit");
     assert!(!js.contains("Math.abs"), "user `abs` must not map to Math.abs:\n{js}");
     assert!(js.contains("function abs_bool_ret_int"), "user `abs` co-emitted:\n{js}");
@@ -74,9 +70,8 @@ fn user_fn_shadowing_intrinsic_name_is_co_emitted_not_mapped() {
 #[test]
 fn stdlib_intrinsic_calls_stay_templates() {
     let ws = crate::common::ws_with("fn root(x: float) -> float { floor(x) + sqrt(x) }\n");
-    let scx = ScalarCtx::new(&ws);
     let root = test_fn_ref(&ws, "root");
-    let js = skull_codegen_js::emit::emit_with_closure(&ws, &scx, &[(root, "root".to_string())])
+    let js = skull_codegen_js::emit::emit_with_closure(&ws, &[(root, "root".to_string())])
         .expect("closure emit");
     assert!(js.contains("Math.floor"), "{js}");
     assert!(js.contains("Math.sqrt"), "{js}");

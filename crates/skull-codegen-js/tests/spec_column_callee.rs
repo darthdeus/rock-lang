@@ -13,7 +13,6 @@
 //! the correct answer -- falling back to the boxed body died on
 //! `undefined._data`.
 
-use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::FuncRef;
 
 use crate::common::ws_with;
@@ -49,7 +48,6 @@ fn node_available() -> bool {
 
 fn emit_js(name: &str) -> Result<String, String> {
     let ws = ws_with(SRC);
-    let scx = ScalarCtx::new(&ws).with_target(bone_semantic::hir::FnBackend::Js);
     let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
     let fid = ws
         .module(mid)
@@ -60,7 +58,6 @@ fn emit_js(name: &str) -> Result<String, String> {
         .expect("fn in <test>");
     skull_codegen_js::emit::emit_with_closure(
         &ws,
-        &scx,
         &[(FuncRef { module: mid, func: fid }, name.to_string())],
     )
     .map_err(|e| e.message)

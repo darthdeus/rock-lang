@@ -12,7 +12,6 @@
 
 use bone_semantic::inference::Workspace;
 use skull_codegen_js::JS_NB_CHECK_SHIMS;
-use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::FuncRef;
 
 const FIXTURE: &str = include_str!("fixtures/nb_differential.rock");
@@ -150,14 +149,13 @@ fn find_fn(ws: &Workspace, name: &str) -> FuncRef {
 /// `native_buffer_*` ctors are co-emitted automatically as reachable callees),
 /// preceded by the checked-access shim preamble.
 fn emit_js_program(ws: &Workspace, names: &[&str]) -> String {
-    let scx = ScalarCtx::new(ws);
     let roots: Vec<(FuncRef, String)> =
         names.iter().map(|&n| (find_fn(ws, n), n.to_string())).collect();
     let mut out = String::new();
     out.push_str(JS_NB_CHECK_SHIMS);
     out.push('\n');
     out.push_str(
-        &skull_codegen_js::emit::emit_with_closure(ws, &scx, &roots)
+        &skull_codegen_js::emit::emit_with_closure(ws, &roots)
             .unwrap_or_else(|e| panic!("closure emit: {}", e.message)),
     );
     out
