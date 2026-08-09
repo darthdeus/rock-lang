@@ -19,6 +19,7 @@
 
 mod structure;
 
+pub use skull_mir::shader_ir::GlslProfile;
 use bone_semantic::hir::{
     AnnoValue, BodyOwner, BuiltinTy, Expr, Function, StructDef, TyId, TypeCtor, TypeExpr,
 };
@@ -3189,15 +3190,6 @@ fn render_shader_entry(
     })
 }
 
-/// Emission profile (docs/shaders.md): the `#version` line and
-/// any builtin/precision differences. `Core330` is the desktop default; `Es300`
-/// is the mobile GLES target. Threaded through every A2 emission path.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
-pub enum GlslProfile {
-    #[default]
-    Core330,
-    Es300,
-}
 
 // --- A2: vertex+fragment pipeline (docs/shaders.md) ---------------------
 

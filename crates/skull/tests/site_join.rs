@@ -38,7 +38,7 @@ fn check(src: &str) -> Workspace {
 
 fn graph_of(src: &str) -> (Workspace, InstanceGraph) {
     let ws = check(src);
-    let roots = instance_graph::emission_roots(&ws, None);
+    let roots = skull::mir_emit::emission_roots(&ws, None);
     let g = instance_graph::build(&ws, roots, false);
     (ws, g)
 }

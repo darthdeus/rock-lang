@@ -50,7 +50,7 @@ fn short(key: &String) -> String {
 }
 
 fn graph_of(ws: &Workspace) -> InstanceGraph {
-    instance_graph::build(ws, instance_graph::emission_roots(ws, Some(PROJ)), false)
+    instance_graph::build(ws, skull::mir_emit::emission_roots(ws, Some(PROJ)), false)
 }
 
 /// One persisted graph across a sequence of edits.
@@ -96,7 +96,7 @@ impl Case {
         );
         assert!(!res.reinferred.is_empty(), "a body-only edit reinferred nothing");
         let ws = self.session.workspace();
-        let roots = instance_graph::emission_roots(ws, Some(PROJ));
+        let roots = skull::mir_emit::emission_roots(ws, Some(PROJ));
         self.graph.update_bodies(ws, roots, &res.reinferred)
     }
 
@@ -420,7 +420,7 @@ impl Perturbed {
     /// Build against v1, update to v2, and compare with a fresh v2 build.
     fn update(&self) -> (InstanceGraph, UpdateStats) {
         let mut g = graph_of(&self.v1);
-        let roots = instance_graph::emission_roots(&self.v2, Some(PROJ));
+        let roots = skull::mir_emit::emission_roots(&self.v2, Some(PROJ));
         let stats = g.update_bodies(&self.v2, roots, &self.changed);
         (g, stats)
     }
@@ -736,7 +736,7 @@ fn a_const_initializer_with_no_facts_that_gains_a_call_is_still_re_walked() {
 fn a_moved_root_set_is_refused_rather_than_absorbed() {
     let case = Case::new("fn main() { print(\"{other()}\") }\n", CHAIN_LIB);
     let ws = case.ws();
-    let mut roots = instance_graph::emission_roots(ws, Some(PROJ));
+    let mut roots = skull::mir_emit::emission_roots(ws, Some(PROJ));
     roots.pop().expect("the fixture has roots");
     let mut graph = graph_of(ws);
     graph.update_bodies(ws, roots, &[]);

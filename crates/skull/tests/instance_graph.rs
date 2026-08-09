@@ -25,7 +25,7 @@ fn check(src: &str) -> Workspace {
 
 fn graph_of(src: &str) -> (Workspace, instance_graph::InstanceGraph) {
     let ws = check(src);
-    let roots = instance_graph::emission_roots(&ws, None);
+    let roots = skull::mir_emit::emission_roots(&ws, None);
     let g = instance_graph::build(&ws, roots, false);
     (ws, g)
 }
@@ -114,7 +114,7 @@ fn main() { near(); far() }
     // got there first. With every module a root (the `None` form) path depth
     // cannot vary, and this test would pass under any cap -- the corpus found
     // the defect precisely because real projects have library modules.
-    let roots = instance_graph::emission_roots(&ws, Some("<test>"));
+    let roots = skull::mir_emit::emission_roots(&ws, Some("<test>"));
     let fwd = instance_graph::build(&ws, roots.clone(), false);
     let rev = instance_graph::build(&ws, roots, true);
     assert_eq!(
@@ -305,7 +305,7 @@ fn main() {
 }
 "#,
     );
-    let roots = instance_graph::emission_roots(&ws, None);
+    let roots = skull::mir_emit::emission_roots(&ws, None);
     let g = instance_graph::build(&ws, roots.clone(), false);
 
     // The property, formerly a sentinel asserting the opposite: there is no
@@ -400,7 +400,7 @@ extern(js) fn web_tick(n: int) -> int
 fn main() { host_tick(3) }
 "#;
     let ws = check(src);
-    let roots = instance_graph::emission_roots(&ws, None);
+    let roots = skull::mir_emit::emission_roots(&ws, None);
     assert!(
         instance_graph::build(&ws, roots.clone(), false)
             .instances
@@ -499,7 +499,7 @@ fn main() {
 }
 "#;
     let ws = check(src);
-    let roots = instance_graph::emission_roots(&ws, None);
+    let roots = skull::mir_emit::emission_roots(&ws, None);
 
     skull_mir::ablation::set_enabled(false);
     let normal = instance_graph::build(&ws, roots.clone(), false);
@@ -1040,7 +1040,7 @@ fn main() {
 }
 "#;
     let ws = check(src);
-    let roots = instance_graph::emission_roots(&ws, None);
+    let roots = skull::mir_emit::emission_roots(&ws, None);
     let g = instance_graph::build(&ws, roots.clone(), false);
     assert!(
         !g.unresolved().any(|u| u.reason.contains("unbound")),
@@ -1720,7 +1720,7 @@ global G: int = pick()
 fn main() { let x = G }
 "#,
     );
-    let roots = instance_graph::emission_roots(&ws, Some("<project>"));
+    let roots = skull::mir_emit::emission_roots(&ws, Some("<project>"));
     let g = instance_graph::build(&ws, roots, false);
     let hole = g.uninstantiated_roots.get("pick_ret_int").unwrap_or_else(|| {
         panic!("no hole recorded for `pick`: {:?}", g.uninstantiated_roots)
@@ -1891,7 +1891,7 @@ global F: fn(int) -> int = ident
 fn main() { let y = F(1) }
 "#,
     );
-    let roots = instance_graph::emission_roots(&ws, Some("<project>"));
+    let roots = skull::mir_emit::emission_roots(&ws, Some("<project>"));
     let g = instance_graph::build(&ws, roots, false);
     let sites: Vec<&instance_graph::AlwaysEmittedFailure> = g
         .uninstantiated_roots
@@ -1936,7 +1936,7 @@ fn main() { let a = ident(1) }
     // applying a module-local `BodyOwner` to every module -- before that it
     // removed a same-index stdlib `get` record too and reported 2.
     assert_eq!(removed, 1, "expected exactly `ident`'s binding record to be dropped");
-    let roots = instance_graph::emission_roots(&ws, None);
+    let roots = skull::mir_emit::emission_roots(&ws, None);
     let g = instance_graph::build(&ws, roots, false);
     let sites: Vec<&instance_graph::Unresolved> =
         g.unresolved().filter(|u| u.reason == "no-bindings").collect();
@@ -1972,7 +1972,7 @@ fn main() {
     );
     let removed = drop_witness_generic_records(&mut ws, "main");
     assert_eq!(removed, 1, "expected the one `for`-protocol ITER record to be dropped");
-    let roots = instance_graph::emission_roots(&ws, None);
+    let roots = skull::mir_emit::emission_roots(&ws, None);
     let g = instance_graph::build(&ws, roots, false);
     // Discriminated by CALLEE, not by reason: both halves fail through
     // `instantiate_witness` and report `witness-generic-unbound`, so a
@@ -2107,7 +2107,7 @@ fn main() {
     );
     let removed = drop_bound_next_generic_records(&mut ws, "main");
     assert_eq!(removed, 1, "expected the one `for`-protocol `next` record to be dropped");
-    let roots = instance_graph::emission_roots(&ws, None);
+    let roots = skull::mir_emit::emission_roots(&ws, None);
     let g = instance_graph::build(&ws, roots, false);
     // Same discriminant as the iter fixture, pointed at the other callee.
     let sites = unresolved_witnesses_of(&ws, &g, "next");
@@ -2281,7 +2281,7 @@ fn main() {{
         )
     };
     let ws = check(&program(r#"inline(lua) fn __map_col_len(n: int) -> int = "return n""#));
-    let roots = instance_graph::emission_roots(&ws, None);
+    let roots = skull::mir_emit::emission_roots(&ws, None);
     let g = instance_graph::build(&ws, roots.clone(), false);
     // The EXACT denominator and reason, not merely non-empty: a fixture that
     // silently drops to a different site still satisfies "non-zero" while
@@ -2310,7 +2310,7 @@ fn main() {{
     // every entry, so the population is a property of the ambiguity and not of
     // the fixture being malformed.
     let clean_ws = check(&program(""));
-    let clean_roots = instance_graph::emission_roots(&clean_ws, None);
+    let clean_roots = skull::mir_emit::emission_roots(&clean_ws, None);
     let clean = instance_graph::build(&clean_ws, clean_roots, false);
     assert!(
         clean.unresolved().next().is_none(),

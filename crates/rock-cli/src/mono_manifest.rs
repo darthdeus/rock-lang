@@ -1580,7 +1580,7 @@ fn one_project(
         .map_err(|errs| anyhow::anyhow!("{} type errors", errs.len()))?;
 
     let project_root = dir.display().to_string();
-    let roots = instance_graph::emission_roots(&ws, Some(&project_root));
+    let roots = skull::mir_emit::emission_roots(&ws, Some(&project_root));
 
     let mut g = instance_graph::build(&ws, roots.clone(), false);
     // S 20g.4: perturbing discovery order may not change the manifest.

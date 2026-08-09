@@ -40,7 +40,7 @@ fn check(src: &str) -> Workspace {
 }
 
 fn graph_for(ws: &Workspace) -> (InstanceGraph, Vec<skull_mir::mir::FuncRef>) {
-    let roots = instance_graph::emission_roots(ws, None);
+    let roots = skull::mir_emit::emission_roots(ws, None);
     (instance_graph::build(ws, roots.clone(), false), roots)
 }
 

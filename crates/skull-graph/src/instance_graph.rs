@@ -3897,23 +3897,6 @@ pub(crate) fn function_body(ws: &Workspace, f: FuncRef) -> FunctionBody<'_> {
     FunctionBody::Ready { inf, body }
 }
 
-/// Every function the emitter would root, using production's own predicate.
-pub fn emission_roots(ws: &Workspace, project_root: Option<&str>) -> Vec<FuncRef> {
-    let (deco_map, _) = super::mir_emit::build_deco_map(ws);
-    let mut roots = Vec::new();
-    for module in ws.modules.iter() {
-        if module.id == ModuleId::builtin() {
-            continue;
-        }
-        for (fid, f) in module.functions.iter() {
-            if super::mir_emit::is_emission_root(module.file.as_str(), project_root, f, &deco_map)
-            {
-                roots.push(FuncRef { module: module.id, func: fid });
-            }
-        }
-    }
-    roots
-}
 
 /// The compact manifest: one line per instance, sorted by identity, each line
 /// carrying its identity and its display symbol.

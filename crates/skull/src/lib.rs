@@ -13,17 +13,18 @@
 //! goal is `rock test tests --backend skull` at 100% as bone grows. See
 //! `docs/skull-plan.md`.
 
-pub mod artifact;
-pub mod expr_subtree;
-pub mod concrete_body;
 pub mod coroutine_emit;
 pub mod inline_stats;
 pub mod graph_snapshot;
-pub mod instance_graph;
 pub mod shader_artifact;
 pub mod site_join;
-pub mod target_projection;
 pub mod mir_emit;
+
+// The shared graph layer, re-exported under its original paths. It moved BELOW
+// the backends (`skull-graph`) so the JS and GLSL emitters can realize the same
+// graph the luajit driver does; consumers name it the same way either side of
+// that move.
+pub use skull_graph::{artifact, concrete_body, expr_subtree, instance_graph, target_projection};
 
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;

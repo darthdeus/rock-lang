@@ -101,7 +101,7 @@ pub struct PlatformSpec {
 /// have no GPU route at all.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShaderTargetSpec {
-    Glsl(skull_codegen_glsl::GlslProfile),
+    Glsl(skull_mir::shader_ir::GlslProfile),
     SpirV,
     Wgsl,
     Msl,
@@ -154,7 +154,7 @@ pub const WASI: PlatformSpec = PlatformSpec {
 };
 
 pub const GLSL_330: ShaderTargetSpec =
-    ShaderTargetSpec::Glsl(skull_codegen_glsl::GlslProfile::Core330);
+    ShaderTargetSpec::Glsl(skull_mir::shader_ir::GlslProfile::Core330);
 
 /// The luajit execution backend.
 pub const LUAJIT: ExecutionTargetSpec = ExecutionTargetSpec {

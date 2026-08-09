@@ -60,7 +60,7 @@ fn build() -> (Workspace, InstanceGraph) {
     let mut modules = STDLIB.clone();
     modules.push(skull_parser::parse_module_clean(SRC, Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    let roots = instance_graph::emission_roots(&ws, None);
+    let roots = skull::mir_emit::emission_roots(&ws, None);
     let g = instance_graph::build(&ws, roots, false);
     (ws, g)
 }

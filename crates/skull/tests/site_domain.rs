@@ -42,7 +42,7 @@ fn render_args(g: &InstanceGraph, args: &[skull_mir::monoty::MonoTyId]) -> Strin
 }
 
 fn graph_of(ws: &Workspace) -> InstanceGraph {
-    let roots = instance_graph::emission_roots(ws, None);
+    let roots = skull::mir_emit::emission_roots(ws, None);
     instance_graph::build(ws, roots, false)
 }
 

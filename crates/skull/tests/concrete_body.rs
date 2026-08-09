@@ -34,7 +34,7 @@ fn check(src: &str) -> Workspace {
 
 fn bodies_of(src: &str) -> (Workspace, InstanceGraph, ConcreteBodies) {
     let ws = check(src);
-    let roots = instance_graph::emission_roots(&ws, None);
+    let roots = skull::mir_emit::emission_roots(&ws, None);
     let mut g = instance_graph::build(&ws, roots, false);
     let bodies = concrete_body::build(&ws, &mut g);
     (ws, g, bodies)
@@ -167,7 +167,7 @@ fn plain(x: int) -> int { return x + 1 }
 fn main() { let a = plain(1) }
 "#,
     );
-    let roots = instance_graph::emission_roots(&ws, None);
+    let roots = skull::mir_emit::emission_roots(&ws, None);
     let mut g = instance_graph::build(&ws, roots, false);
     let inst = g
         .expanded()
@@ -181,7 +181,7 @@ fn main() { let a = plain(1) }
         .expect("plain has no body")
         .generation += 1;
 
-    let stale_roots = instance_graph::emission_roots(&ws, None);
+    let stale_roots = skull::mir_emit::emission_roots(&ws, None);
     let stale_graph = instance_graph::build(&ws, stale_roots, false);
     assert!(
         stale_graph.expanded().all(|i| i.func != inst.func),
@@ -216,7 +216,7 @@ fn ident<T>(x: T) -> T { return x }
 fn main() { let a = ident(1) }
 "#;
     let ws = check(src);
-    let roots = instance_graph::emission_roots(&ws, None);
+    let roots = skull::mir_emit::emission_roots(&ws, None);
     let g = instance_graph::build(&ws, roots, false);
     let inst = g
         .expanded()
@@ -597,7 +597,7 @@ fn sum_it<I: Iterator<int>>(it: I) -> int {
 fn main() { let n = sum_it([1, 2].iter()) }
 "#,
     );
-    let roots = instance_graph::emission_roots(&ws, None);
+    let roots = skull::mir_emit::emission_roots(&ws, None);
     let mut g = instance_graph::build(&ws, roots, false);
     let inst = g
         .expanded()

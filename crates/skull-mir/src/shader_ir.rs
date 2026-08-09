@@ -24,6 +24,21 @@
 
 use ustr::Ustr;
 
+/// Which GLSL dialect an artifact packages (docs/shaders.md): the `#version`
+/// line plus the builtin/precision differences that follow from it. `Core330`
+/// is the desktop default; `Es300` is the mobile GLES target.
+///
+/// It lives on the NEUTRAL side because it is a property of the TARGET, not of
+/// the emitter: `skull_graph::target_projection::ShaderTargetSpec` names it as
+/// one axis of a target spec, and the graph layer must not depend on a backend
+/// to spell its own axes.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub enum GlslProfile {
+    #[default]
+    Core330,
+    Es300,
+}
+
 use crate::gpu_layout::{ArrayMemberDecl, AttrKind, SamplerKind, WireKind};
 use crate::instance::Instance;
 use crate::mir::{FuncRef, MirFunc};

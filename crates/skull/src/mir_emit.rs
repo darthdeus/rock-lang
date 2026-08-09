@@ -2046,6 +2046,30 @@ fn register_sim_fn(ws: &Workspace) -> Option<FuncRef> {
     })
 }
 
+/// Every function this build roots from, by the emitter's own predicate.
+///
+/// It lives in the DRIVER, not in `skull_graph`: which declarations a build
+/// roots from is a production decision (project layout, decorators, `@sim`,
+/// `@test`), and the graph takes roots as an INPUT precisely so it cannot make
+/// that decision itself. See [`all_roots`], which adds the generated-glue
+/// obligations on top.
+pub fn emission_roots(ws: &Workspace, project_root: Option<&str>) -> Vec<FuncRef> {
+    let (deco_map, _) = build_deco_map(ws);
+    let mut roots = Vec::new();
+    for module in ws.modules.iter() {
+        if module.id == ModuleId::builtin() {
+            continue;
+        }
+        for (fid, f) in module.functions.iter() {
+            if is_emission_root(module.file.as_str(), project_root, f, &deco_map)
+            {
+                roots.push(FuncRef { module: module.id, func: fid });
+            }
+        }
+    }
+    roots
+}
+
 /// The roots one Lua build is taken over: the declared emission roots plus the
 /// obligations GENERATED GLUE TEXT carries.
 ///
@@ -2064,7 +2088,7 @@ fn all_roots(
     project_root: Option<&str>,
     shaders: &ShaderRegistrations,
 ) -> Vec<FuncRef> {
-    let mut roots = crate::instance_graph::emission_roots(ws, project_root);
+    let mut roots = emission_roots(ws, project_root);
     let mut seen: FxHashSet<FuncRef> = roots.iter().copied().collect();
     let mut glue: Vec<FuncRef> = Vec::new();
     if !collect_sim_fns(ws).is_empty() {

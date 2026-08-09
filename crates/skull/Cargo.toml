@@ -17,6 +17,8 @@ sequential = []
 [dependencies]
 bone-semantic = { path = "../bone-semantic" }
 skull-mir = { path = "../skull-mir" }
+# The shared instance graph + artifact views, below every backend.
+skull-graph = { path = "../skull-graph" }
 skull-codegen-lua = { path = "../skull-codegen-lua" }
 # Driver-layer GLSL emission for `rock_shader` top-level registration
 # (docs/shaders.md). skull (the driver) may depend on the GLSL

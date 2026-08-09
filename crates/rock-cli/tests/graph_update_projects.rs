@@ -53,7 +53,7 @@ fn project_files(path: &str) -> Vec<(String, String)> {
 }
 
 fn graph_of(ws: &Workspace, root: &str) -> InstanceGraph {
-    instance_graph::build(ws, instance_graph::emission_roots(ws, Some(root)), false)
+    instance_graph::build(ws, skull::mir_emit::emission_roots(ws, Some(root)), false)
 }
 
 /// A bare call STATEMENT: a line that is exactly `name(...)`, with no `let`, no
@@ -96,7 +96,7 @@ fn edit_and_compare(
     assert_eq!(res.tier, UpdateTier::BodyOnly, "{label}: edit was not body-only");
     assert!(!res.reinferred.is_empty(), "{label}: a body-only edit reinferred nothing");
     let ws = session.workspace();
-    let roots = instance_graph::emission_roots(ws, Some(root));
+    let roots = skull::mir_emit::emission_roots(ws, Some(root));
     let t = Instant::now();
     let stats = graph.update_bodies(ws, roots, &res.reinferred);
     let update_ms = t.elapsed().as_secs_f64() * 1000.0;
