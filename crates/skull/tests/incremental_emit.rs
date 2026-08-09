@@ -483,3 +483,80 @@ fn a_standalone_bounded_body_survives_an_incremental_rebuild() {
         "incremental assembly != fresh emit after editing a bounded body"
     );
 }
+
+/// **An edit that REMOVES the last call to an instantiation must prune it**,
+/// leaving no stale definition live -- the direction the backfill arms above do
+/// not cover.
+///
+/// The sibling declaration instance is what makes it a per-INSTANCE question
+/// rather than a per-declaration one: `tally_of<P>` stays reached throughout, so
+/// an implementation that invalidated by DECLARATION would either keep both or
+/// drop both, and only one is correct.
+///
+/// Both populations are asserted from fresh builds first, in the same run: v1
+/// must hold two specializations and v2 exactly one, or the edit removes nothing
+/// and the arm proves nothing.
+#[test]
+fn an_edit_that_removes_the_last_call_to_an_instantiation_prunes_it() {
+    let types = "value P { x: float, y: float }\n\
+                 value Q { a: float, b: float, c: float }\n\
+                 fn tally_of<T>(xs: [T]) -> T { return xs[0] }\n";
+    let with_both = types.to_string()
+        + "fn use_it() -> float {\n\
+           \x20   let ps: [P] = [P { x: 1.0, y: 0.0 }]\n\
+           \x20   let qs: [Q] = [Q { a: 1.0, b: 2.0, c: 3.0 }]\n\
+           \x20   return tally_of(ps).x + tally_of(qs).a\n\
+           }";
+    let with_one = types.to_string()
+        + "fn use_it() -> float {\n\
+           \x20   let ps: [P] = [P { x: 1.0, y: 0.0 }]\n\
+           \x20   return tally_of(ps).x\n\
+           }";
+    let specs_in = |lua: &str| {
+        lua.lines().filter(|l| l.starts_with("function tally_of_") && l.contains("_spec_")).count()
+    };
+    let fresh_specs = |src: &str| {
+        let ws = crate::common::ws_with_stdlib(src);
+        let mid = skull::user_module_id(&ws).unwrap();
+        specs_in(&emit_full(&ws, mid).expect("emit_full").0.lua)
+    };
+    assert_eq!(fresh_specs(&with_both), 2, "v1 must hold TWO specialized `tally_of`");
+    assert_eq!(
+        fresh_specs(&with_one),
+        1,
+        "v2 must hold ONE -- the sibling instance stays reached, so this is per-instance"
+    );
+
+    check_edit_with(crate::common::ws_with_stdlib, &with_both, &with_one, &["use_it"]);
+
+    // The direct arm. `check_edit_with` compares against a fresh emit, which is
+    // the strongest oracle available, but it cannot say WHICH of the two
+    // instances survived -- both counts moving together would still match.
+    let ws1 = crate::common::ws_with_stdlib(&with_both);
+    let mid1 = skull::user_module_id(&ws1).unwrap();
+    let (_, mut cache) = emit_full(&ws1, mid1).expect("emit_full v1");
+    let ws2 = crate::common::ws_with_stdlib(&with_one);
+    let reinferred = vec![body_id(&ws2, "use_it")];
+    let incremental = emit_incremental(&ws2, &mut cache, &reinferred).expect("emit_incremental");
+    assert_eq!(
+        specs_in(&incremental.lua),
+        1,
+        "the incremental assembly kept a definition nothing calls any more:\n{}",
+        incremental.lua
+    );
+    // ...and it is the one still called, not merely one of the two.
+    let ws_one = crate::common::ws_with_stdlib(&with_one);
+    let mid_one = skull::user_module_id(&ws_one).unwrap();
+    let fresh_lua = emit_full(&ws_one, mid_one).expect("emit_full v2").0.lua;
+    let surviving = |lua: &str| {
+        lua.lines()
+            .filter(|l| l.starts_with("function tally_of_") && l.contains("_spec_"))
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        surviving(&incremental.lua),
+        surviving(&fresh_lua),
+        "the surviving instance is not the one a fresh build keeps"
+    );
+}
