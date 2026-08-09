@@ -2495,7 +2495,7 @@ pub fn emit_with_closure(
         &session.graph,
         &session.view,
         scx.interner_handle(),
-    );
+    )?;
     drain_worklists(ws, &scx, &mut st)?;
     st.canonicalize_emission_order();
     let mut rejections = std::mem::take(&mut st.rejections);
@@ -2843,7 +2843,7 @@ fn assemble_program_core(
         &session.graph,
         &session.view,
         scx.interner_handle(),
-    );
+    )?;
 
     force_shader_register_sibling(ws, &mut st)?;
 
@@ -3429,12 +3429,15 @@ impl WorklistState {
         graph: &InstanceGraph,
         view: &ArtifactView,
         _interner: std::sync::Arc<skull_mir::monoty::MonoInterner>,
-    ) -> Self {
+    ) -> Result<Self, CompilerError> {
         let mut names = CalleeNames::from_graph(graph);
         for (fr, name) in roots {
-            let key = names
-                .base_instance(ws, *fr)
-                .unwrap_or_else(|| Instance::base(skull_mir::lower::canonical_variant(ws, *fr)));
+            let key = names.base_instance(ws, *fr).ok_or_else(|| {
+                err(format!(
+                    "JS: root `{}` has no base InstanceGraph instance",
+                    ws.module(fr.module).functions[fr.func].name
+                ))
+            })?;
             names.insert(key, name.clone());
         }
         for (inst, _realized) in &view.realization {
@@ -3454,9 +3457,12 @@ impl WorklistState {
         let mut seen = HashSet::new();
         let mut inline_js = Vec::new();
         for &(requested, _) in roots {
-            let key = names
-                .base_instance(ws, requested)
-                .unwrap_or_else(|| Instance::base(skull_mir::lower::canonical_variant(ws, requested)));
+            let key = names.base_instance(ws, requested).ok_or_else(|| {
+                err(format!(
+                    "JS: root `{}` has no base InstanceGraph instance",
+                    ws.module(requested.module).functions[requested.func].name
+                ))
+            })?;
             let fr = view.realization.get(&key).map_or(requested, |realized| realized.decl);
             let f = &ws.module(fr.module).functions[fr.func];
             if matches!(f.inline_body, Some((bone_semantic::hir::FnBackend::Js, _))) {
@@ -3476,7 +3482,7 @@ impl WorklistState {
             .iter()
             .map(|(inst, realized)| (inst.clone(), realized.decl))
             .collect();
-        WorklistState {
+        Ok(WorklistState {
             spec_trees: Default::default(),
             graph_trees,
             cache: skull_transform::InlineCache::default(),
@@ -3498,7 +3504,7 @@ impl WorklistState {
             rejections: Vec::new(),
             artifact_decls,
             fn_value_targets: view.fn_value_targets.iter().cloned().collect(),
-        }
+        })
     }
 
     /// Record a definition that cannot be emitted and keep going. The definition
@@ -4630,6 +4636,9 @@ fn discover_callees_graph(
     }
 }
 
+// Opaque-boundary root discovery only: bare names inside verbatim JS are not
+// ordinary delivery edges. Phase 6 still owes this scan's unification with the
+// graph/view root vocabulary.
 fn inline_js_nomangle_targets(ws: &Workspace, fr: FuncRef) -> Vec<FuncRef> {
     let f = &ws.module(fr.module).functions[fr.func];
     let Some((bone_semantic::hir::FnBackend::Js, body)) = f.inline_body else { return Vec::new() };
@@ -6137,4 +6146,68 @@ fn reachable_from(mf: &MirFunc, root: Idx<Block>) -> Vec<Idx<Block>> {
         }
     }
     reachable
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn workspace(src: &str) -> Workspace {
+        let mut modules: Vec<skull_parser::Ast> = rock_host::stdlib_loader::stdlib_files()
+            .iter()
+            .map(|file| {
+                let id = Ustr::from(format!("<stdlib:{}>", file.name).as_str());
+                skull_parser::parse_module_clean(file.contents, id).expect("stdlib parse")
+            })
+            .collect();
+        modules.push(
+            skull_parser::parse_module_clean(src, Ustr::from("<test>"))
+                .expect("test parse"),
+        );
+        bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic pass")
+    }
+
+    #[test]
+    fn a_missing_graph_root_does_not_mint_a_base_instance() {
+        let ws = workspace("fn root() {}\n");
+        let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
+        let fid = ws
+            .module(mid)
+            .functions
+            .iter()
+            .find(|(_, f)| f.name.as_str() == "root")
+            .map(|(fid, _)| fid)
+            .expect("root");
+        let root = FuncRef { module: mid, func: fid };
+        let interner = std::sync::Arc::new(skull_mir::monoty::MonoInterner::new());
+        let graph = skull_graph::instance_graph::build_in(&ws, Vec::new(), false, interner.clone());
+        let roots = [root];
+        let view = artifact::realize(
+            &ws,
+            &graph,
+            &artifact::ArtifactRequest::new(target_projection::JAVASCRIPT_WEB, &roots)
+                .with_mappings(artifact::ArtifactMappings::for_backend(
+                    bone_semantic::hir::FnBackend::Js,
+                ))
+                .with_symbols(&artifact::REALIZED_SYMBOLS),
+        );
+
+        let result = WorklistState::new(
+            &ws,
+            &[(root, "root".to_string())],
+            false,
+            &graph,
+            &view,
+            interner,
+        );
+        let error = match result {
+            Ok(_) => panic!("a missing graph root must be rejected"),
+            Err(error) => error,
+        };
+        assert!(
+            error.message.contains("root `root` has no base InstanceGraph instance"),
+            "missing-root rejection should name the graph invariant: {}",
+            error.message
+        );
+    }
 }

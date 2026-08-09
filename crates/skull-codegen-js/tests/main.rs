@@ -20,6 +20,8 @@ mod emit;
 mod enum_boxes;
 #[path = "format_specs.rs"]
 mod format_specs;
+#[path = "generic_inline.rs"]
+mod generic_inline;
 #[path = "inline_pipeline.rs"]
 mod inline_pipeline;
 #[path = "inspect.rs"]
