@@ -3174,67 +3174,6 @@ fn Envelope.step_by(e, goal: float, step_dt: float) -> float {
     end
 """
 
-// The double denoted by the units in `[start, end_idx)`, read in place. For a
-// caller that has ALREADY validated the number's grammar -- it returns `float`,
-// not `float?`, so it has no way to report a rejection; `parse_float` is the
-// checked form. Exists because materializing the literal costs a string
-// allocation plus an intern per number, which is most of a float-heavy decode.
-//
-// `end_idx` is unused on luajit (strtod stops at the first byte that cannot
-// continue a number, and luajit strings are NUL-terminated so the read is
-// bounded) and load-bearing on JS, which slices.
-//
-// The C parser reads LC_NUMERIC and JSON's decimal separator is always `.`, so
-// a `de_DE` process would otherwise decode `1.5` as `1` -- silently, for every
-// float in every document. `strtod_l` against a locale pinned to "C" is immune.
-// Gate: tests/json_number_locale.rock.
-// The setup lives in its own function on purpose. Building the closures inline
-// here puts an UCLO bytecode in the hot path, which luajit cannot record: with
-// the setup in this body the decode ran 70% INTERPRETED and canada went to
-// ~105ms against a 32ms baseline. Keep this body free of closures and branches
-// that create upvalues.
-@intrinsic @native_required inline(lua) fn string.parse_float_at(s, start: int, end_idx: int) -> float = """
-    local f = _G.__rock_parse_float_at or __rock_parse_float_at_setup()
-    return f(s, start, end_idx)
-"""
-
-@nomangle inline(lua) fn __rock_parse_float_at_setup() -> any = """
-    local f
-    local cast = ffi.cast
-    -- LC_NUMERIC_MASK is a header constant the ffi cannot read: 16 on Darwin,
-    -- 2 on glibc. A wrong value is not silently wrong -- POSIX newlocale takes
-    -- every category outside `mask` from "C" when `base` is NULL, so LC_NUMERIC
-    -- lands on "C" either way -- but the probe below refuses to install the
-    -- fast path if that reasoning ever fails.
-    local ok = pcall(ffi.cdef, [[
-typedef void *__rock_locale_t;
-__rock_locale_t newlocale(int mask, const char *locale, __rock_locale_t base);
-double strtod_l(const char *nptr, char **endptr, __rock_locale_t loc);
-]])
-    if ok then
-        local mask = (ffi.os == "OSX" or ffi.os == "BSD") and 16 or 2
-        local got, loc = pcall(function() return ffi.C.newlocale(mask, "C", nil) end)
-        if got and loc ~= nil then
-            local strtod_l = ffi.C.strtod_l
-            local function probe(str) return strtod_l(cast("const char*", str), nil, loc) end
-            if probe("1.5") == 1.5 and probe("-3.25e2") == -325 and probe("2.5E-2") == 0.025 then
-                f = function(str, a, b) return strtod_l(cast("const char*", str) + a, nil, loc) end
-            end
-        end
-    end
-    if not f then
-        -- Correct, just slower: luajit's own scanner does not read the locale.
-        -- This is a perf fallback with identical results, not a swallowed
-        -- failure, so it reports itself and continues.
-        local msg = "parse_float_at: no C-locale strtod_l on " .. tostring(ffi.os) .. "; using the portable path"
-        local warn = _G.__stone_log
-        if warn then warn(1, "STDLIB", msg) else io.stderr:write("[WARN] " .. msg .. "\\n") end
-        f = function(str, a, b) return tonumber(string.sub(str, a + 1, b)) end
-    end
-    _G.__rock_parse_float_at = f
-    return f
-"""
-
 @intrinsic @inline inline(lua) fn string_char(code: int) -> string = "string.char(code)"
 
 @intrinsic inline(lua) fn from_codepoint(cp: int) -> string = """
