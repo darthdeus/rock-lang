@@ -11,10 +11,10 @@
 //! **Current dependents, stated rather than assumed** (E1 Phase 3/4 in
 //! `docs/monomorphization-plan.md`): `skull`, `skull-codegen-js`, and
 //! `skull-codegen-glsl` depend on this crate. Lua, JS, and native shader
-//! registration consume per-target views; the web, validator, and route-B GLSL
-//! entry points still use the legacy private reachability path. The native seam
-//! is `mir_emit::shader_registration_lines`, which calls the view-driven
-//! entry/pipeline emitters.
+//! registration consume per-target views; route-B's plain GLSL function-library
+//! entry point remains a legacy path because it has no registered shader
+//! artifact. The native seam is `mir_emit::shader_registration_lines`, and the
+//! web/validator drivers use the same view-driven entry/pipeline emitters.
 //!
 //! **Roots are an INPUT, not something derived here.** Which declarations a
 //! build roots from is a driver decision (`skull::mir_emit::emission_roots`,

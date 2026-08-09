@@ -3133,7 +3133,7 @@ fn plan_stage_from_view(
     let mut allowed: HashSet<ShaderInstance> = HashSet::default();
     allowed.insert(entry.clone());
     allowed.extend(view.order.iter().cloned().map(ShaderInstance::new));
-    let mut discovered_builtins: HashSet<Instance> = HashSet::default();
+    let mut discovered_builtins: HashSet<FuncRef> = HashSet::default();
     let entry_calls = checked_view_callees(
         ws,
         &entry,
@@ -3171,10 +3171,11 @@ fn plan_stage_from_view(
         );
         bodies.insert(helper, body);
     }
-    let expected_builtins: HashSet<_> = view.builtins.iter().cloned().collect();
+    let expected_builtins: HashSet<_> = view.builtins.iter().map(|instance| instance.func).collect();
     if discovered_builtins != expected_builtins {
         return Err(CompilerError::new_no_location(
-            "shader graph/view builtin population differs from lowered calls".to_string(),
+            "shader graph/view builtin declaration population differs from lowered calls"
+                .to_string(),
         ));
     }
     reject_population_cycles(ws, &calls)?;
@@ -3215,14 +3216,14 @@ fn checked_view_callees(
     callees: Vec<ShaderInstance>,
     allowed: &HashSet<ShaderInstance>,
     interner: &MonoInterner,
-    builtins: &mut HashSet<Instance>,
+    builtins: &mut HashSet<FuncRef>,
 ) -> Result<Vec<ShaderInstance>, CompilerError> {
     let caller_f = &ws.module(caller.fref().module).functions[caller.fref().func];
     let mut retained = Vec::new();
     for callee in callees {
         let f = &ws.module(callee.fref().module).functions[callee.fref().func];
         if renders_inline_instance(ws, f, &callee.inst, interner) {
-            builtins.insert(callee.inst);
+            builtins.insert(callee.fref());
             continue;
         }
         if is_lowered_native_operator(ws, f, &callee.inst, interner) {

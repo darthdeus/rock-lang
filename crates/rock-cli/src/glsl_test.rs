@@ -664,29 +664,66 @@ pub fn shader_validate_run(dirs: &[String], print: bool) -> Result<ValidateSumma
         let pairs = skull_mir::lower::collect_shader_pairs(&ws)
             .map_err(|e| anyhow::anyhow!("{dir}: collect_shader_pairs: {}", e.message))?;
         summary.projects.push((dir.clone(), pairs.len()));
+        let programs: Vec<skull::shader_artifact::ShaderProgram> = pairs
+            .iter()
+            .map(|pair| skull::shader_artifact::ShaderProgram {
+                vert: pair.vert,
+                frag: pair.frag,
+            })
+            .collect();
+        let roots: Vec<FuncRef> = programs
+            .iter()
+            .flat_map(|program| {
+                program
+                    .vert
+                    .into_iter()
+                    .chain(std::iter::once(program.frag))
+            })
+            .collect();
+        let graph = skull::instance_graph::build(&ws, roots, false);
+        let shader_scx = skull_mir::lower::ScalarCtx::new_values_first_class(&ws)
+            .sharing(std::sync::Arc::clone(graph.interner()));
 
         for (pi, (pname, profile)) in PROFILES.iter().enumerate() {
             if !gl_available[pi] {
                 continue;
             }
+            let view = skull::shader_artifact::realize_shader_with_context(
+                &ws,
+                &graph,
+                &skull::shader_artifact::ShaderArtifactRequest {
+                    spec: skull::target_projection::TargetSpec {
+                        shader: Some(skull::target_projection::ShaderTargetSpec::Glsl(*profile)),
+                        ..skull::target_projection::LUAJIT_DESKTOP
+                    },
+                    programs: &programs,
+                },
+                &shader_scx,
+            )
+            .ok_or_else(|| anyhow::anyhow!("{dir}: GLSL shader view is unavailable"))?;
+            if view.program_views.len() != pairs.len() {
+                anyhow::bail!("{dir}: GLSL shader view/collection denominator differs");
+            }
             let mut jobs: Vec<(String, String, String)> = Vec::with_capacity(pairs.len());
-            for pair in &pairs {
-                let fname = ws.module(pair.frag.module).functions[pair.frag.func].name;
-                let glsl = match pair.vert {
-                    Some(vert) => {
-                        let vname = ws.module(vert.module).functions[vert.func].name;
-                        skull_codegen_glsl::emit_shader_pipeline(
-                            &ws, vert.module, vname.as_str(), fname.as_str(), *profile,
-                        )
-                    }
-                    None => skull_codegen_glsl::emit_shader_entry(
-                        &ws, pair.frag.module, fname.as_str(), *profile,
+            for (pair, program_view) in pairs.iter().zip(&view.program_views) {
+                let emission = match pair.vert {
+                    Some(_) => skull_codegen_glsl::emit_shader_pipeline_with_view(
+                        &ws,
+                        &shader_scx,
+                        program_view,
+                        *profile,
+                    ),
+                    None => skull_codegen_glsl::emit_shader_entry_with_view(
+                        &ws,
+                        &shader_scx,
+                        program_view,
+                        *profile,
                     ),
                 }
                 .map_err(|e| {
                     anyhow::anyhow!("{dir}: `{}` failed to emit for {pname}: {}", pair.key, e.message)
                 })?;
-                let (vertex, fragment) = split_stages(&glsl);
+                let (vertex, fragment) = split_stages(&emission.source);
                 jobs.push((format!("{dir}:{}", pair.key), vertex, fragment));
             }
             if jobs.is_empty() {

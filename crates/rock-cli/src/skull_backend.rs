@@ -745,6 +745,53 @@ pub(crate) fn parse_glsl_profile(s: Option<&str>) -> Result<skull_codegen_glsl::
     }
 }
 
+fn emit_shader_program_with_view(
+    ws: &bone_semantic::inference::Workspace,
+    program: skull::shader_artifact::ShaderProgram,
+    profile: skull_codegen_glsl::GlslProfile,
+) -> std::result::Result<skull_codegen_glsl::ShaderEmission, skull_parser::CompilerError> {
+    let roots: Vec<skull_mir::mir::FuncRef> = program
+        .vert
+        .into_iter()
+        .chain(std::iter::once(program.frag))
+        .collect();
+    let graph = skull::instance_graph::build(ws, roots, false);
+    let shader_scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
+        .sharing(std::sync::Arc::clone(graph.interner()));
+    let programs = [program];
+    let view = skull::shader_artifact::realize_shader_with_context(
+        ws,
+        &graph,
+        &skull::shader_artifact::ShaderArtifactRequest {
+            spec: skull::target_projection::TargetSpec {
+                shader: Some(skull::target_projection::ShaderTargetSpec::Glsl(profile)),
+                ..skull::target_projection::LUAJIT_DESKTOP
+            },
+            programs: &programs,
+        },
+        &shader_scx,
+    )
+    .ok_or_else(|| skull_parser::CompilerError::new_no_location("GLSL shader view is unavailable".to_string()))?;
+    let program_view = view
+        .program_views
+        .first()
+        .ok_or_else(|| skull_parser::CompilerError::new_no_location("GLSL shader view has no program".to_string()))?;
+    match program.vert {
+        Some(_) => skull_codegen_glsl::emit_shader_pipeline_with_view(
+            ws,
+            &shader_scx,
+            program_view,
+            profile,
+        ),
+        None => skull_codegen_glsl::emit_shader_entry_with_view(
+            ws,
+            &shader_scx,
+            program_view,
+            profile,
+        ),
+    }
+}
+
 /// `rock shader <file.rock> <fn> [fn...] [--output <file.glsl>]` -- GLSL emission.
 /// Three forms:
 ///   - fn library (route B): plain roots, no `#version` line -- `--profile`
@@ -795,7 +842,27 @@ pub fn skull_shader(files: &[String], output: Option<String>, profile: Option<St
             anyhow::bail!("rock shader: the vertex+fragment pipeline form takes exactly two roots: <vert_fn> <frag_fn>");
         }
         let prof = parse_glsl_profile(profile.as_deref())?;
-        match skull_codegen_glsl::emit_shader_pipeline(&ws, user_mid, &roots[0], &roots[1], prof) {
+        let vert = match skull_codegen_glsl::resolve_root(&ws, user_mid, &roots[0]) {
+            Ok(root) => root,
+            Err(e) => {
+                eprintln!("{}", render_file_errs(path, &src, &[e]));
+                crate::ablation_report::exit_with_census(1);
+            }
+        };
+        let frag = match skull_codegen_glsl::resolve_root(&ws, user_mid, &roots[1]) {
+            Ok(root) => root,
+            Err(e) => {
+                eprintln!("{}", render_file_errs(path, &src, &[e]));
+                crate::ablation_report::exit_with_census(1);
+            }
+        };
+        match emit_shader_program_with_view(
+            &ws,
+            skull::shader_artifact::ShaderProgram { vert: Some(vert), frag },
+            prof,
+        )
+        .map(|emission| emission.source)
+        {
             Ok(g) => g,
             Err(e) => {
                 eprintln!("{}", render_file_errs(path, &src, &[e]));
@@ -812,7 +879,24 @@ pub fn skull_shader(files: &[String], output: Option<String>, profile: Option<St
             anyhow::bail!("rock shader: --profile applies to shader entries (pipeline or @shader(fragment) fullscreen), not the route-B fn library (it emits no #version line)");
         }
         let prof = parse_glsl_profile(profile.as_deref())?;
-        match skull_codegen_glsl::emit_shader(&ws, user_mid, &roots, prof) {
+        let glsl = if is_entry {
+            let frag = match skull_codegen_glsl::resolve_root(&ws, user_mid, &roots[0]) {
+                Ok(root) => root,
+                Err(e) => {
+                    eprintln!("{}", render_file_errs(path, &src, &[e]));
+                    crate::ablation_report::exit_with_census(1);
+                }
+            };
+            emit_shader_program_with_view(
+                &ws,
+                skull::shader_artifact::ShaderProgram { vert: None, frag },
+                prof,
+            )
+            .map(|emission| emission.source)
+        } else {
+            skull_codegen_glsl::emit_shader(&ws, user_mid, &roots, prof)
+        };
+        match glsl {
             Ok(g) => g,
             Err(e) => {
                 eprintln!("{}", render_file_errs(path, &src, &[e]));

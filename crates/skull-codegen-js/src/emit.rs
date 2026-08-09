@@ -2478,9 +2478,16 @@ pub fn emit_with_closure(
     roots: &[(FuncRef, String)],
 ) -> Result<String, CompilerError> {
     let scx = js_scx(ws);
+    let mut refs: Vec<FuncRef> = roots.iter().map(|(fr, _)| *fr).collect();
+    let mut ref_set: HashSet<FuncRef> = refs.iter().copied().collect();
+    for shader_root in shader_root_refs(ws)? {
+        if ref_set.insert(shader_root) {
+            refs.push(shader_root);
+        }
+    }
     let mut root_plan = JsRootPlan {
         named: roots.to_vec(),
-        refs: roots.iter().map(|(fr, _)| *fr).collect(),
+        refs,
     };
     let session = loop {
         let session = new_js_session(ws, &scx, &root_plan.refs);
@@ -2661,8 +2668,20 @@ fn js_root_plan(
             }
         }
     }
-    let refs = named.iter().map(|(fr, _)| *fr).collect();
+    let mut refs: Vec<FuncRef> = named.iter().map(|(fr, _)| *fr).collect();
+    for shader_root in shader_root_refs(ws)? {
+        if seen.insert(shader_root) {
+            refs.push(shader_root);
+        }
+    }
     Ok(JsRootPlan { named, refs })
+}
+
+fn shader_root_refs(ws: &Workspace) -> Result<Vec<FuncRef>, CompilerError> {
+    Ok(skull_mir::lower::collect_shader_pairs(ws)?
+        .into_iter()
+        .flat_map(|pair| pair.vert.into_iter().chain(std::iter::once(pair.frag)))
+        .collect())
 }
 
 fn extend_root_plan_from_inline_view(ws: &Workspace, plan: &mut JsRootPlan, view: &ArtifactView) -> bool {
@@ -3135,6 +3154,10 @@ impl JsEmitCache {
 
     pub fn graph_population(&self) -> usize {
         self.session.graph.instances.len()
+    }
+
+    pub fn graph(&self) -> &InstanceGraph {
+        &self.session.graph
     }
 
     pub fn graph_update(&self) -> Option<JsGraphUpdate> {

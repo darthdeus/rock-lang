@@ -48,8 +48,8 @@ fn build_web_bundle(
     copy_assets: bool,
     watch: bool,
 ) -> Result<Vec<WebAsset>> {
-    let (emitted, ws) = crate::js_test::try_emit_js_program_project(project)?;
-    write_web_bundle(project, out_dir, copy_assets, watch, &emitted, &ws)
+    let (emitted, cache, ws) = crate::js_test::try_emit_js_program_project_cached(project)?;
+    write_web_bundle(project, out_dir, copy_assets, watch, &emitted, &ws, &cache)
 }
 
 fn write_web_bundle(
@@ -59,8 +59,9 @@ fn write_web_bundle(
     watch: bool,
     emitted: &skull_codegen_js::emit::JsProgram,
     ws: &bone_semantic::inference::Workspace,
+    cache: &skull_codegen_js::emit::JsEmitCache,
 ) -> Result<Vec<WebAsset>> {
-    let register_lines = shader_register_lines_js(&ws)?;
+    let register_lines = shader_register_lines_js(ws, cache)?;
     let game_dir = web_game_dir(project);
     let assets = collect_web_assets(Path::new(project), &game_dir)?;
     let preload: Vec<String> = assets.iter().map(|asset| asset.key.clone()).collect();
@@ -116,8 +117,15 @@ impl WebCompiler {
             "{}",
             crate::skull_backend::render_project_err(live.sources(), &error)
         ))?;
-        let assets =
-            write_web_bundle(project, out_dir, false, true, &emitted, live.workspace())?;
+        let assets = write_web_bundle(
+            project,
+            out_dir,
+            false,
+            true,
+            &emitted,
+            live.workspace(),
+            &cache,
+        )?;
         let main_js_name = emitted.main_js_name.clone();
         Ok((Self { project: live, cache, main_js_name }, assets))
     }
@@ -147,7 +155,10 @@ impl WebCompiler {
                     crate::skull_backend::render_project_err(self.project.sources(), &error)
                 ))? {
                     skull_codegen_js::emit::JsReload::Overlay(mut overlay) => {
-                        overlay.push_str(&shader_register_lines_js(self.project.workspace())?);
+                        overlay.push_str(&shader_register_lines_js(
+                            self.project.workspace(),
+                            &self.cache,
+                        )?);
                         rock_host::project::write_atomic(
                             &out_dir.join("incremental.js"),
                             &overlay,
@@ -182,6 +193,7 @@ impl WebCompiler {
             true,
             &emitted,
             self.project.workspace(),
+            &cache,
         )?;
         self.main_js_name = emitted.main_js_name;
         self.cache = cache;
@@ -196,7 +208,7 @@ impl WebCompiler {
             program: self.cache.current_program().to_string(),
             main_js_name: self.main_js_name.clone(),
         };
-        let register_lines = shader_register_lines_js(self.project.workspace())?;
+        let register_lines = shader_register_lines_js(self.project.workspace(), &self.cache)?;
         let game_js = assemble_web_program(&emitted, &register_lines, &preload, &game_dir);
         rock_host::project::write_atomic(&out_dir.join("game.js"), &game_js)?;
         Ok(())
@@ -651,29 +663,54 @@ fn js_int_vec(items: &[i64]) -> String {
 /// rewrite at shader-compile time, like the native GLES path). Emitted after
 /// the program (module load), before the boot line, so registrations queue in
 /// PENDING_SHADER_SRCS pre-GL exactly as on a native cold start.
-fn shader_register_lines_js(ws: &bone_semantic::inference::Workspace) -> Result<String> {
+fn shader_register_lines_js(
+    ws: &bone_semantic::inference::Workspace,
+    cache: &skull_codegen_js::emit::JsEmitCache,
+) -> Result<String> {
     use std::fmt::Write as _;
     let pairs =
         skull_mir::lower::collect_shader_pairs(ws).map_err(|e| anyhow::anyhow!(e.message))?;
+    let programs: Vec<skull::shader_artifact::ShaderProgram> = pairs
+        .iter()
+        .map(|pair| skull::shader_artifact::ShaderProgram {
+            vert: pair.vert,
+            frag: pair.frag,
+        })
+        .collect();
+    let shader_scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
+        .sharing(cache.interner_handle());
+    let view = skull::shader_artifact::realize_shader_with_context(
+        ws,
+        cache.graph(),
+        &skull::shader_artifact::ShaderArtifactRequest {
+            spec: skull::target_projection::TargetSpec {
+                shader: Some(skull::target_projection::ShaderTargetSpec::Glsl(
+                    skull_codegen_glsl::GlslProfile::Core330,
+                )),
+                ..skull::target_projection::LUAJIT_DESKTOP
+            },
+            programs: &programs,
+        },
+        &shader_scx,
+    )
+    .ok_or_else(|| anyhow::anyhow!("GLSL shader view is unavailable for the JS session"))?;
+    if view.program_views.len() != pairs.len() {
+        anyhow::bail!("GLSL shader view/collection denominator differs for the JS session");
+    }
     let mut out = String::new();
     let profile = skull_codegen_glsl::GlslProfile::Core330;
-    for pair in pairs {
-        let fname = ws.module(pair.frag.module).functions[pair.frag.func].name;
+    for (pair, program_view) in pairs.iter().zip(&view.program_views) {
         let emission = match pair.vert {
-            Some(vert) => {
-                let vname = ws.module(vert.module).functions[vert.func].name;
-                skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
-                    ws,
-                    vert.module,
-                    vname.as_str(),
-                    fname.as_str(),
-                    profile,
-                )
-            }
-            None => skull_codegen_glsl::emit_shader_entry_with_dependencies(
+            Some(_) => skull_codegen_glsl::emit_shader_pipeline_with_view(
                 ws,
-                pair.frag.module,
-                fname.as_str(),
+                &shader_scx,
+                program_view,
+                profile,
+            ),
+            None => skull_codegen_glsl::emit_shader_entry_with_view(
+                ws,
+                &shader_scx,
+                program_view,
                 profile,
             ),
         }

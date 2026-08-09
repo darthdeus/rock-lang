@@ -520,6 +520,17 @@ pub(crate) fn emit_js_program_project(
 pub(crate) fn try_emit_js_program_project(
     dir: &str,
 ) -> Result<(skull_codegen_js::emit::JsProgram, bone_semantic::inference::Workspace)> {
+    let (program, _cache, ws) = try_emit_js_program_project_cached(dir)?;
+    Ok((program, ws))
+}
+
+pub(crate) fn try_emit_js_program_project_cached(
+    dir: &str,
+) -> Result<(
+    skull_codegen_js::emit::JsProgram,
+    skull_codegen_js::emit::JsEmitCache,
+    bone_semantic::inference::Workspace,
+)> {
     use std::path::PathBuf;
     let spec = crate::unified_compile::SourceSpec::Directory(PathBuf::from(dir));
     let sources = crate::unified_compile::discover_sources(&spec)
@@ -544,14 +555,14 @@ pub(crate) fn try_emit_js_program_project(
         )),
     };
     let user_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
-    let prog = match skull_codegen_js::emit::emit_program(&ws, user_mid) {
+    let (prog, cache) = match skull_codegen_js::emit::emit_program_cached(&ws, user_mid) {
         Ok(p) => p,
         Err(e) => return Err(anyhow::anyhow!(
             "{}",
             crate::skull_backend::render_project_err(&sources, &e)
         )),
     };
-    Ok((prog, ws))
+    Ok((prog, cache, ws))
 }
 
 /// Node-specific glue for the engine-agnostic RNG prelude (`JS_RNG_RUNTIME`) and
