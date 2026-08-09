@@ -141,19 +141,13 @@ fn assert_scoped(stats: &UpdateStats, label: &str) {
         stats.pruned,
         stats.newly_reached
     );
-    // The PRUNE's own cost. A whole-graph strand search returns the same pruned
-    // set and passes canonical equality, so no other arm here can see it. Bound
-    // against the WALK because both scale with the edit: an instance can only
-    // lose an in-edge because an owner was re-walked.
-    assert!(
-        stats.suspect_region <= stats.expanded * 4,
-        "{label}: the strand search visited {} instances after walking {} owners \
-         (of {} instances, {} pruned) -- that is a whole-graph walk, not an affected region",
-        stats.suspect_region,
-        stats.expanded,
-        stats.instances,
-        stats.pruned
-    );
+    // **The prune's own cost is NOT asserted here, deliberately.** These
+    // fixtures hold ~95 instances, so a whole-graph strand search visits 6 and
+    // a correct one visits 7 (one owner can strand a whole iterator chain):
+    // the two are not separable at this scale, and a bound that cannot
+    // distinguish them would be a vacuous arm rather than a cheap one. It lives
+    // in `rock-cli/tests/graph_update_projects.rs`, where the same mutation
+    // moves the region from 2/1/2 to 988/379/94.
 }
 
 // ---------------------------------------------------------------------------
@@ -746,4 +740,97 @@ fn a_moved_root_set_is_refused_rather_than_absorbed() {
     roots.pop().expect("the fixture has roots");
     let mut graph = graph_of(ws);
     graph.update_bodies(ws, roots, &[]);
+}
+
+// ---------------------------------------------------------------------------
+// The two prune arms that had no population until here
+// ---------------------------------------------------------------------------
+
+/// A library holding an always-emitted `const` whose callee is ALSO called from
+/// the target. The const lives in the library on purpose: an initializer in the
+/// edited file is re-walked itself, and a re-installed owner takes its own
+/// targets back out of `lost`, which would keep `shared` out of the suspect
+/// region entirely and leave the arm below unexercised.
+const ANCHOR_LIB: &str = r#"
+const C: int = shared()
+fn shared() -> int { return 1 }
+fn other() -> int { return 7 }
+"#;
+
+/// **An always-emitted target is an ANCHOR, so what only it reaches survives.**
+///
+/// `shared` loses its edge from `main` and enters the suspect region, and the
+/// const's call is NOT an edge -- an always-emitted body's callees are roots
+/// with no incoming edge -- so `root_instances` and `preds` both answer no. The
+/// always-emitted arm is the only thing keeping it alive.
+///
+/// Written because mutation found the arm uncovered: deleting it left every
+/// compact fixture AND all three real projects green, so nothing measured
+/// reached this shape.
+#[test]
+fn an_always_emitted_target_anchors_what_the_edit_stranded() {
+    let mut case = Case::new(
+        "fn main() { print(\"{shared()} {other()} {C}\") }\n",
+        ANCHOR_LIB,
+    );
+    assert!(case.has_instance_named("shared"), "v1 never reached `shared`");
+    let anchored: Vec<String> =
+        case.graph.always_emitted_targets().map(|i| case.identity(i)).collect();
+    assert!(
+        anchored.iter().any(|k| k.contains("shared")),
+        "the fixture's anchor is not an always-emitted target: {anchored:?}"
+    );
+
+    let stats = case.edit(MAIN, "fn main() { print(\"{other()} {C}\") }\n");
+
+    assert!(
+        case.has_instance_named("shared"),
+        "`shared` was pruned although the const initializer still calls it"
+    );
+    assert_eq!(stats.pruned, 0, "nothing should have been stranded");
+    assert!(
+        stats.suspect_region > 0,
+        "the arm is vacuous unless `shared` actually entered the suspect region"
+    );
+    case.assert_matches_fresh("always-emitted anchor");
+    assert_scoped(&stats, "always-emitted anchor");
+}
+
+const BOUNDED_LIB: &str = r#"
+fn total(v: Vec<int>) -> int {
+    let t = 0
+    for x in v.iter().filter(_ > 0) { t = t + x }
+    return t
+}
+fn other() -> int { return 7 }
+"#;
+
+/// **A pruned instance takes its BOUND TREE out of the index with it.**
+///
+/// `bound_trees` is a maintained cross-owner index and a semantic field of the
+/// canonical form, so a tree that outlives its last owner is a stale fact a
+/// fresh build does not have.
+///
+/// Written because mutation found `uninstall`'s tree retraction uncovered:
+/// deleting it left every compact fixture AND all three real projects green.
+/// The compact fixtures had no bounded call at all, and the projects' chosen
+/// edits prune no bounded instance.
+#[test]
+fn pruning_an_instance_retracts_its_bound_tree() {
+    let mut case = Case::new(
+        "fn main() { print(\"{total([1, 2])} {other()}\") }\n",
+        BOUNDED_LIB,
+    );
+    let before = case.graph.bound_trees().count();
+    assert!(before > 0, "the fixture recorded no bound tree, so the arm has no population");
+
+    let stats = case.edit(MAIN, "fn main() { print(\"{other()}\") }\n");
+
+    assert!(stats.pruned > 0, "the deletion stranded nothing, so nothing was retracted");
+    assert!(
+        case.graph.bound_trees().count() < before,
+        "every one of the {before} bound trees outlived the instances that owned them"
+    );
+    case.assert_matches_fresh("bound tree retracted");
+    assert_scoped(&stats, "bound tree retracted");
 }
