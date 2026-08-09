@@ -2690,6 +2690,12 @@ function lua_tostring(x) {
   return String(x);
 }
 function __rock_format_float(v) {
+  // Non-finite first: C `%.2g` renders these as inf/-inf/nan, and __c_g below
+  // reconstructs a value from its mantissa bits, so it would reach BigInt() with
+  // Infinity and throw rather than format. Same spellings lua_tostring uses.
+  if (v !== v) return "nan";
+  if (v === Infinity) return "inf";
+  if (v === -Infinity) return "-inf";
   var av = Math.abs(v);
   if (av !== 0 && (av < 0.0001 || av >= 1000000)) {
     return __c_g(v, 2);
