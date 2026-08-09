@@ -706,231 +706,6 @@ fn merge_units(
     }
 }
 
-/// The Lua half of [`skull_mir::reach`]. Unlike JS and GLSL this does NOT
-/// interleave lowering with discovery: `emit_full` has already lowered every body
-/// in parallel, so the call graph is final before the walk starts and `visit` is a
-/// cache lookup. (The "reachability cannot be a pre-pass" rule is about LOWERING
-/// order; once the chunks exist it no longer applies.) Keeping the parallel
-/// fan-out matters -- it is the edit loop's throughput -- and it leaves the chunk
-/// key set complete, which the incremental cache depends on.
-struct LuaReach<'a> {
-    ws: &'a Workspace,
-    cg: &'a CodegenCtx,
-    scx: &'a skull_mir::lower::ScalarCtx,
-    by_name: &'a FxHashMap<Ustr, Vec<FuncRef>>,
-    chunks: &'a FxHashMap<Instance, Result<Chunk, CompilerError>>,
-    /// Specialized chunks this walk built, plus any it pulled from the cache.
-    built: FxHashMap<Instance, Chunk>,
-    /// Specialized bodies that could not emit, by emitted name. Reported by the
-    /// renderer in name order, where a specialized rejection has always been
-    /// ordered against its siblings.
-    errs: Vec<(String, CompilerError)>,
-    inline_cache: skull_transform::InlineCache,
-    roots: Vec<Instance>,
-    /// The bound-conformance tree each reached specialized body is emitted
-    /// under, from the demand that reached it, with the agreement check
-    /// `skull_mir::bound::DemandMap` carries.
-    demands: skull_mir::bound::DemandMap,
-}
-
-/// Global-name -> fns, keyed by BOTH the emitted (mangled) name and the source
-/// name. A fn taken as a VALUE lowers to `Inst::Global` carrying the name the Lua
-/// printer emits verbatim -- which is the MANGLED name for an ordinary fn
-/// (`double` -> `double_int_ret_int`) and the source name for a `@nomangle` one.
-/// Looking up only the source name silently misses every mangled fn value, which
-/// is how `let f: fn(int) -> int = double` first emitted a reference to a
-/// definition DCE had dropped.
-///
-/// A source name maps to its whole overload set: the read carries no signature, so
-/// this is conservative (it can keep a sibling the body never takes) but never
-/// drops a live one.
-fn build_name_index(ws: &Workspace) -> FxHashMap<Ustr, Vec<FuncRef>> {
-    let mut idx: FxHashMap<Ustr, Vec<FuncRef>> = FxHashMap::default();
-    for module in ws.modules.iter() {
-        if module.id == ModuleId::builtin() {
-            continue;
-        }
-        for (fid, f) in module.functions.iter() {
-            let fref = FuncRef { module: module.id, func: fid };
-            idx.entry(f.name).or_default().push(fref);
-            let mangled = Ustr::from(&mangle_fn(ws, f));
-            if mangled != f.name {
-                idx.entry(mangled).or_default().push(fref);
-            }
-        }
-    }
-    idx
-}
-
-fn fns_named<'a>(
-    by_name: &'a FxHashMap<Ustr, Vec<FuncRef>>,
-    name: Ustr,
-) -> impl Iterator<Item = FuncRef> + 'a {
-    by_name.get(&name).map(|v| v.as_slice()).unwrap_or(&[]).iter().copied()
-}
-
-impl skull_mir::reach::ReachPolicy for LuaReach<'_> {
-    type Node = Instance;
-
-    fn roots(&mut self) -> Result<Vec<Instance>, CompilerError> {
-        Ok(std::mem::take(&mut self.roots))
-    }
-
-    /// A body with no chunk (extern, `inline(lua)`, `Iterator`-bounded) has no
-    /// MIR to walk. It is still EMITTED if reached -- `is_leaf` only means
-    /// "expand no further", and those bodies reach onward only by bare name,
-    /// which the `@nomangle` root rule covers.
-    ///
-    /// A specialized body is never a leaf: [`Self::chunk_of`] builds one on
-    /// demand, so "no chunk yet" is not the same answer as "no body to walk".
-    fn is_leaf(&mut self, body: Instance) -> Result<bool, CompilerError> {
-        // A specialized body is never a leaf: `chunk_of` builds one on demand,
-        // so "no chunk yet" is not the same answer as "no body to walk".
-        if !body.args.is_empty() {
-            return Ok(false);
-        }
-        Ok({
-            {
-                let fref = &body.func;
-                let leaf = !matches!(self.chunks.get(&shared(*fref)), Some(Ok(_)));
-                if leaf {
-                    // A legitimate leaf is OPAQUE -- extern / `inline(lua)` --
-                    // and is still emitted, reaching onward by bare name. A
-                    // GENERIC Rock declaration is not: E1 left it with no body
-                    // at all, so arriving at its shared id means a call site
-                    // spelled the declaration's own symbol and nothing defines
-                    // it. Lua would emit that call and die at runtime on a nil
-                    // global with no diagnostic, which is how a witness that
-                    // recorded identity without DELIVERING its instantiation
-                    // stayed invisible for 59 Rock `@test`s. JS rejects the same
-                    // condition; this is the missing half.
-                    let f = &self.ws.module(fref.module).functions[fref.func];
-                    if is_generic(f) && !f.is_extern && f.inline_body.is_none() {
-                        let name = mangle_fn(self.ws, f);
-                        self.errs.push((
-                            name.clone(),
-                            CompilerError::new_with_label(
-                                f.name_span,
-                                format!(
-                                    "`{name}` is reached at its DECLARATION, and a generic \
-                                     declaration has no emitted body -- every call must name a \
-                                     concrete instantiation. Two things land here. Either a \
-                                     type argument is UNCONSTRAINED at the call (nothing pins \
-                                     it, e.g. a generic that appears only in the return type), \
-                                     which is a program error; or a call site recorded which \
-                                     instance it means without DELIVERING it, which is a \
-                                     compiler one. Check whether the call's type arguments are \
-                                     inferable first."
-                                ),
-                            ),
-                        ));
-                    }
-                }
-                leaf
-            }
-        })
-    }
-
-    /// Recursion is ordinary Rock.
-    fn on_cycle(&mut self, _body: Instance) -> Result<(), CompilerError> {
-        Ok(())
-    }
-
-    fn visit(&mut self, body: Instance) -> Result<Vec<Instance>, CompilerError> {
-        let (calls, global_names, specs) = match self.chunk_of(&body) {
-            Some(chunk) => (chunk.calls.clone(), chunk.global_names.clone(), chunk.specs.clone()),
-            None => return Ok(Vec::new()),
-        };
-        // BEFORE the successors are returned: a specialized successor is BUILT
-        // when it is visited, and its tree has to be on the map by then.
-        for body in self.demands.record(&specs) {
-            self.errs.push(demand_clash(self.ws, self.scx, &body));
-        }
-        let mut succs: Vec<Instance> = calls.into_iter().map(shared).collect();
-        for name in global_names {
-            succs.extend(fns_named(self.by_name, name).map(shared));
-        }
-        // The edge a declaration-keyed walk could not carry: a specialized body
-        // is lowered under its instantiation, so it reaches callees, globals and
-        // FURTHER specializations no shared body mentions.
-        //
-        // It is also the edge that can fail to terminate. Polymorphic recursion
-        // demands a strictly deeper instantiation at every step, so each node is
-        // DISTINCT and the walk's own dedup can never close the loop -- before
-        // E1 the shared generic body absorbed the recursion, and removing it is
-        // what turned a compiling program into a hanging compiler. Bounded by
-        // the same `MAX_INSTANTIATION_DEPTH` over the same `MonoTy::depth` the
-        // instance graph uses, so the two agree on what does not terminate.
-        //
-        // Emission REJECTS where the graph merely declines to expand: the call
-        // site already spells the specialized name, so skipping the body would
-        // ship a call to a definition nothing writes.
-        for d in specs.iter() {
-            if let Some((name, err)) = too_deep_to_instantiate(self.ws, self.scx, d) {
-                self.errs.push((name, err));
-                continue;
-            }
-            succs.push(d.inst.clone());
-        }
-        Ok(succs)
-    }
-}
-
-impl<'a> LuaReach<'a> {
-    /// This body's chunk, BUILDING a specialized one that has none yet.
-    ///
-    /// The chicken-and-egg the previous two mechanisms avoided by cutting the
-    /// arrow: a specialized body's edges exist only once it is lowered, and it
-    /// was lowered only after DCE had already decided what to emit. One walk
-    /// cannot defer that, so it builds -- and the build is not wasted, because
-    /// the renderer downstream pulls the same chunk.
-    ///
-    /// A body that cannot emit contributes NO edges and is not recorded; the
-    /// renderer rebuilds it and reports the rejection there, which is the one
-    /// place a specialized rejection is ordered against its siblings.
-    fn chunk_of(&mut self, body: &Instance) -> Option<&Chunk> {
-        if !self.built.contains_key(body) {
-            if body.args.is_empty() {
-                return match self.chunks.get(body) {
-                    Some(Ok(chunk)) => Some(chunk),
-                    _ => None,
-                };
-            }
-            {
-                {
-                    if let Some(Ok(chunk)) = self.chunks.get(body) {
-                        self.built.insert(body.clone(), chunk.clone());
-                    } else {
-                        let name = body.symbol(self.ws, self.scx.interner());
-                        let mut specs = Vec::new();
-                        let tree = self.demands.tree_of(body);
-                        let built = emit_spec_chunk(
-                            self.ws,
-                            self.cg,
-                            self.scx,
-                            body,
-                            &tree,
-                            &name,
-                            &mut self.inline_cache,
-                            &mut specs,
-                        );
-                        match built {
-                            Ok(chunk) => {
-                                self.built.insert(body.clone(), chunk);
-                            }
-                            Err(e) => {
-                                self.errs.push((name, e));
-                                return None;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        self.built.get(body)
-    }
-}
-
 /// Whether `f` must be emitted no matter what the call graph says.
 ///
 /// `@nomangle` is the load-bearing one. It is precisely the annotation for "this
@@ -993,33 +768,6 @@ pub(crate) fn is_emission_root(
     f.annotations.iter().any(|a| deco_map.contains_key(&a.name.name))
 }
 
-/// The fns whose definitions must appear in the emitted chunk: the roots plus
-/// everything they transitively call. `extra_roots` carries the call edges of the
-/// definitions that are always emitted regardless (decorator bodies, global
-/// initializers) and of the shader registrations.
-/// **Post-inline liveness over EMITTED BODIES** -- the one answer to "which
-/// definitions does this program need", for the shared body of a declaration and
-/// for a specialized instantiation alike.
-///
-/// There were two mechanisms. A `FuncRef` DCE walk decided shared bodies, and a
-/// demand closure seeded from the EMITTED chunks decided specialized ones, with
-/// the arrow between them cut: a declaration reached only by a specialized
-/// body's residual call was invisible to the walk. Measured before unifying, that
-/// arrow adds nothing on this corpus (0 such declarations over 8 projects), which
-/// is why one walk that carries it is byte-identical rather than a fix.
-///
-/// The walk BUILDS the specialized chunks it needs, so the answer is a fixpoint
-/// rather than one pass with a missing edge. Those chunks are handed back: the
-/// renderer downstream pulls them instead of lowering the same bodies again.
-struct LiveBodies {
-    /// Every emitted body a root reaches, both kinds.
-    bodies: FxHashSet<Instance>,
-    /// Specialized chunks the walk built, for the renderer and the cache.
-    spec_chunks: FxHashMap<Instance, Chunk>,
-    /// Specialized bodies that could not emit, by emitted name.
-    rejected: Vec<(String, CompilerError)>,
-}
-
 /// The diagnostic for a demand clash, at the declaration whose specialization
 /// two sites disagree about.
 fn demand_clash(
@@ -1042,21 +790,6 @@ fn demand_clash(
     )
 }
 
-impl LiveBodies {
-    /// Whether this DECLARATION's own definition is emitted. The
-    /// validation-vs-emitted split rests on this being the ONLY thing liveness
-    /// gates: every declaration is still visited, reported on and rejected from.
-    fn emits(&self, fref: FuncRef) -> bool {
-        self.bodies.contains(&Instance::base(fref))
-    }
-
-    /// The declarations whose definitions are emitted -- what the overlay's
-    /// `emitted` baseline records.
-    fn emitted_bodies(&self) -> FxHashSet<Instance> {
-        self.bodies.clone()
-    }
-}
-
 /// The spanned rejection for a specialization demand whose type arguments have
 /// outgrown [`crate::instance_graph::MAX_INSTANTIATION_DEPTH`], or `None` when
 /// it is within bounds.
@@ -1074,12 +807,12 @@ impl LiveBodies {
 fn too_deep_to_instantiate(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
-    d: &skull_mir::bound::SpecDemand,
+    inst: &Instance,
 ) -> Option<(String, CompilerError)> {
-    let args = d.inst.arg_types(scx.interner());
+    let args = inst.arg_types(scx.interner());
     let at = skull_mir::monoty::too_deep_to_instantiate(args.iter())?.render();
-    let f = &ws.module(d.inst.func.module).functions[d.inst.func.func];
-    let name = d.inst.symbol(ws, scx.interner());
+    let f = &ws.module(inst.func.module).functions[inst.func.func];
+    let name = inst.symbol(ws, scx.interner());
     Some((name, CompilerError::new_with_label(
         f.name_span,
         format!(
@@ -1094,95 +827,132 @@ fn too_deep_to_instantiate(
     )))
 }
 
-fn live_bodies(
+/// The graph's own [`crate::instance_graph::InstanceBoundTree`] restated as a
+/// [`skull_mir::bound::ResolvedBoundTree`], the vocabulary standalone chunk
+/// lowering reads.
+///
+/// The two exist because a splice's tree (`ResolvedBoundNext::CallerGeneric`)
+/// can defer to the enclosing body's OWN incoming tree -- meaningful only at a
+/// splice, which reads the enclosing body's inference. A RETAINED graph
+/// instance's tree has no such enclosing body to defer to: `reach` resolves
+/// every reached instance's own substitution before walking it, so the
+/// graph's tree is always fully concrete already, which is exactly why it has
+/// no `CallerGeneric` variant to represent at all. `spec` is `None` for a
+/// non-generic witness (no instantiation to name) and `Some` otherwise,
+/// mirroring `ResolvedBoundNext::Concrete`'s own doc.
+fn instance_tree_to_resolved(
+    t: &crate::instance_graph::InstanceBoundTree,
+) -> skull_mir::bound::ResolvedBoundTree {
+    skull_mir::bound::ResolvedBoundTree {
+        next: t
+            .next
+            .iter()
+            .map(|(k, v)| {
+                let spec = if v.callee.args.is_empty() { None } else { Some(v.callee.clone()) };
+                (
+                    *k,
+                    skull_mir::bound::ResolvedBoundNext::Concrete {
+                        func: v.callee.func,
+                        spec,
+                        sub: instance_tree_to_resolved(&v.sub),
+                    },
+                )
+            })
+            .collect(),
+    }
+}
+
+/// **Phase 2's specialized-body population, driven by SpecDemand closure over
+/// `cache.lua_view`'s retained ordinary population -- not by `lua_view.
+/// instances` directly, and not by a reachability walk.**
+///
+/// `lua_view` answers RETENTION (is this instance part of the program at
+/// all), which is a different question from DELIVERY (does it need a
+/// standalone Lua definition, or is every call to it spliced/inlined away at
+/// the call site). Delivery is decided per call site during ordinary lowering
+/// -- already done, once, in `emit_full`'s upfront parallel chunk build -- and
+/// is exactly what a chunk's own `specs: Vec<SpecDemand>` records. A generic
+/// instance the graph retains but nothing DEMANDS standalone (every caller
+/// spliced it) has no chunk to build at all: `map_new<int, IVec2>` is such a
+/// case in the shipped corpus (found empirically -- every real project
+/// reaches it only through a global's `Map<int, IVec2> = map_new()`
+/// initializer, which the column-storage inliner splices away entirely, so
+/// building it standalone hits a REAL rejection -- `transmute` cannot build a
+/// column-stored `Map` -- for an instance nothing ever calls that way).
+///
+/// `pending` seeds from the already-lowered chunk of every ordinary/coroutine
+/// declaration `should_emit_via_view` retains, plus every already-collected
+/// always-emitted (decorator/global) demand; each newly BUILT specialized
+/// chunk's own `.specs` extends the worklist, mirroring
+/// `emit_specialized_callees`'s render-time fixpoint but for BUILDING. Each
+/// instance's tree is the graph's OWN resolved bound tree (never `DemandMap`
+/// -- sufficient per `instance_tree_to_resolved`'s doc, corpus-verified
+/// byte-identical against `DemandMap`-lowered text for every case both sides
+/// reach). A demand clash (`cache.graph.has_bound_tree_disagreement`) rejects
+/// that one instance rather than picking an arbitrary tree -- the
+/// graph-driven equivalent of `DemandMap`'s clash check.
+fn view_driven_specialized_chunks(
     ws: &Workspace,
     cg: &CodegenCtx,
     scx: &skull_mir::lower::ScalarCtx,
     cache: &SkullEmitCache,
-    deco_map: &DecoMap,
-    project_root: Option<&str>,
-    extra_roots: &[FuncRef],
-    extra_root_names: &[Ustr],
-    unit_specs: &[skull_mir::bound::SpecDemand],
-) -> Result<LiveBodies, CompilerError> {
-    let by_name = build_name_index(ws);
-    let mut roots: Vec<FuncRef> = Vec::new();
+    initial: &[skull_mir::bound::SpecDemand],
+) -> (FxHashMap<Instance, Chunk>, Vec<(String, CompilerError)>) {
+    let mut built: FxHashMap<Instance, Chunk> = FxHashMap::default();
+    let mut errs: Vec<(String, CompilerError)> = Vec::new();
+    let mut inline_cache = skull_transform::InlineCache::default();
+    let mut pending: Vec<Instance> = initial.iter().map(|d| d.inst.clone()).collect();
     for module in ws.modules.iter() {
         if module.id == ModuleId::builtin() {
             continue;
         }
         for (fid, f) in module.functions.iter() {
-            // A GENERIC declaration is never a root, however the root rule reads:
-            // it has no body to emit, so rooting it would ask for a shared
-            // generic snapshot that no longer exists. Its instances are reached
-            // through the demands of the bodies that call them, and a generic
-            // nothing instantiates emits nothing.
-            if is_generic(f) {
+            let self_ref = FuncRef { module: module.id, func: fid };
+            if !is_cached_emitted_body(f, &shared(self_ref))
+                || !should_emit_via_view(ws, &cache.lua_view, self_ref)
+            {
                 continue;
             }
-            if is_emission_root(module.file.as_str(), project_root, f, deco_map) {
-                roots.push(FuncRef { module: module.id, func: fid });
+            if let Some(Ok(c)) = cache.chunks.get(&shared(self_ref)) {
+                pending.extend(c.specs.iter().map(|d| d.inst.clone()));
             }
         }
     }
-    roots.extend(extra_roots.iter().copied());
-    roots.extend(cache.shader_registrations.dependencies.iter().copied());
-    // `sim_registration_lines` calls `register_sim` from generated text.
-    if !collect_sim_fns(ws).is_empty() {
-        roots.extend(register_sim_fn(ws));
-    }
-    for &name in extra_root_names {
-        roots.extend(fns_named(&by_name, name));
-    }
-
-    // The always-emitted units (decorator bodies, global initializers) are not
-    // reached through any chunk -- they emit unconditionally -- so the
-    // instantiations they ask for are roots in their own right.
-    let mut root_bodies: Vec<Instance> = roots.iter().copied().map(shared).collect();
-    root_bodies
-        .extend(unit_specs.iter().map(|d| d.inst.clone()));
-
-    let mut policy = LuaReach {
-        ws,
-        cg,
-        scx,
-        by_name: &by_name,
-        chunks: &cache.chunks,
-        built: FxHashMap::default(),
-        errs: Vec::new(),
-        inline_cache: skull_transform::InlineCache::default(),
-        roots: root_bodies.clone(),
-        demands: skull_mir::bound::DemandMap::default(),
-    };
-    for body in policy.demands.record(unit_specs) {
-        policy.errs.push(demand_clash(ws, scx, &body));
-    }
-    let order = skull_mir::reach::walk(&mut policy)?;
-
-    // `walk` returns only EXPANDED nodes. A root and a LEAF (extern, inline(lua),
-    // `Iterator`-bounded -- anything with no chunk) are reached and emittable
-    // too, so fold the roots and every expanded body's edges back in.
-    let mut bodies: FxHashSet<Instance> = order.iter().cloned().collect();
-    bodies.extend(root_bodies);
-    for body in &order {
-        let chunk = if body.args.is_empty() {
-            match cache.chunks.get(body) {
-                Some(Ok(chunk)) => chunk,
-                _ => continue,
-            }
-        } else {
-            match policy.built.get(body) {
-                Some(chunk) => chunk,
-                None => continue,
-            }
-        };
-        bodies.extend(chunk.calls.iter().copied().map(shared));
-        for &name in &chunk.global_names {
-            bodies.extend(fns_named(&by_name, name).map(shared));
+    let mut done: FxHashSet<Instance> = FxHashSet::default();
+    while let Some(inst) = pending.pop() {
+        if !done.insert(inst.clone()) {
+            continue;
         }
-        bodies.extend(chunk.specs.iter().map(|d| d.inst.clone()));
+        // Polymorphic recursion (plan S 0h: REJECT). The graph's own build
+        // silently CAPS a too-deep instance (`depth_capped`, no rejection --
+        // it is a target-neutral fact-recorder, not a diagnostic surface), so
+        // emission is where the spanned rejection has to live, same as before.
+        if let Some((name, err)) = too_deep_to_instantiate(ws, scx, &inst) {
+            errs.push((name, err));
+            continue;
+        }
+        if cache.graph.has_bound_tree_disagreement(&inst) {
+            errs.push(demand_clash(ws, scx, &inst));
+            continue;
+        }
+        if let Some(Ok(c)) = cache.chunks.get(&inst) {
+            pending.extend(c.specs.iter().map(|d| d.inst.clone()));
+            built.insert(inst, c.clone());
+            continue;
+        }
+        let tree = cache.graph.bound_tree(&inst).cloned().unwrap_or_default();
+        let tree = instance_tree_to_resolved(&tree);
+        let name = inst.symbol(ws, scx.interner());
+        let mut specs = Vec::new();
+        match emit_spec_chunk(ws, cg, scx, &inst, &tree, &name, &mut inline_cache, &mut specs) {
+            Ok(chunk) => {
+                pending.extend(chunk.specs.iter().map(|d| d.inst.clone()));
+                built.insert(inst, chunk);
+            }
+            Err(e) => errs.push((name, e)),
+        }
     }
-    Ok(LiveBodies { bodies, spec_chunks: policy.built, rejected: policy.errs })
+    (built, errs)
 }
 
 /// Emit the whole workspace via the new (cell-model) path. `user_mid` is the
@@ -1249,6 +1019,32 @@ struct Chunk {
 /// silent widening.
 fn shared(fref: FuncRef) -> Instance {
     Instance::base(fref)
+}
+
+/// Whether `self_ref`'s OWN ordinary/coroutine chunk must be emitted, per
+/// `view` -- the exact predicate a population-source cutover would gate the
+/// module-fn loop's `emit_def` with. TWO independent reasons, matching this
+/// session's author decision:
+///
+/// - **call-serving**: `self_ref` is the declaration `realize_decl` SELECTED
+///   to serve calls to its canonical `Instance` (which may be a DIFFERENT
+///   `FuncRef` than `self_ref` when `self_ref` is a non-representative
+///   sibling, and vice versa when `self_ref` IS the representative but a
+///   same-name sibling serves calls instead).
+/// - **publication**: `self_ref` carries an explicit `@nomangle` root whose
+///   own bare-name promise the artifact must publish regardless of whether
+///   any resolved call reaches it that way.
+///
+/// A declaration can be neither (pruned), either, or -- the whole point of
+/// modeling publication separately -- BOTH under two different symbols.
+fn should_emit_via_view(ws: &Workspace, view: &crate::artifact::ArtifactView, self_ref: FuncRef) -> bool {
+    let canonical = skull_mir::lower::canonical_variant(ws, self_ref);
+    let call_serving = view
+        .realization
+        .get(&Instance::base(canonical))
+        .is_some_and(|r| r.decl == self_ref);
+    let publication = view.publications.contains_key(&Instance::base(self_ref));
+    call_serving || publication
 }
 
 /// Deterministic overlay order over emitted bodies. Reduces to the declaration
@@ -2423,54 +2219,72 @@ fn assemble(
     let mut global_skipped: Vec<(String, String)> = Vec::new();
     merge_units(global_results, &mut globals_lua, &mut global_skipped, &mut direct_globals, &mut direct_calls, &mut pending_inits, &mut always_emitted_calls, &mut always_emitted_names, &mut times);
 
-    // Whole-program DCE: emit a fn definition only if a root reaches it. ONE
-    // liveness answer, for shared and specialized bodies alike.
-    let live = live_bodies(
-        ws, cg, scx, cache, &deco_map, cache.project_root.as_deref(), &always_emitted_calls,
-        &always_emitted_names, &needed_specs,
-    )?;
+    // **Whole-program population, driven by `cache.lua_view` -- Phase 2.**
+    // `should_emit_via_view` decides every ordinary/coroutine/inline
+    // definition below; `view_driven_specialized_chunks` decides every
+    // specialized one. Corpus-verified before this cutover landed (every real
+    // `stick.toml` project, both directions: zero instances the old walk
+    // emitted that the view did not retain, and the reverse direction's only
+    // difference was instances nothing ever DEMANDS standalone -- see that
+    // fn's own doc). `_ = &always_emitted_calls` /`&always_emitted_names`:
+    // still collected above (decorator/global lowering needs its own direct
+    // calls for OTHER bookkeeping -- global-read ordering, static baselines --
+    // untouched by this cutover), but no longer fed to a root-discovery walk.
+    // **Generated-glue extra roots.** `sim_registration_lines` and
+    // `shader_registration_lines` write Lua TEXT that calls a specific
+    // declaration by its mangled name directly -- `register_sim(...)` and any
+    // shader-emission dependency -- entirely outside any Rock body the graph
+    // could ever see a call site in. Not a Rock call at all, so no amount of
+    // graph reachability can name it; this is the one class of "extra root"
+    // `live_bodies` carried that is genuinely NOT representable in the
+    // target-neutral graph (everything else it carried -- decorator/global
+    // direct calls -- the graph's own `Owner::AlwaysEmitted` walk already
+    // covers). Found empirically: `sims_clear_contract_via_real_engine`
+    // failed at runtime on a nil `register_sim` the moment this was dropped.
+    let mut extra_hard_roots: FxHashSet<FuncRef> = FxHashSet::default();
+    if !collect_sim_fns(ws).is_empty() {
+        extra_hard_roots.extend(register_sim_fn(ws));
+    }
+    extra_hard_roots.extend(cache.shader_registrations.dependencies.iter().copied());
 
-    // **Phase-2 population audit (`docs/parked/mono.md`).** Not yet load-bearing:
-    // logs a gap rather than rejecting, because the safety-critical direction for
-    // switching Lua's population source to `cache.lua_view` is "everything the
-    // WALK emits today is already in the view" -- an unaccounted-for extra root
-    // (shader registration deps, sim registration, decorator/global re-lowering)
-    // would otherwise turn this into a build-breaking false positive on real
-    // corpora before that gap is understood and closed. Once a corpus run shows
-    // zero gaps this promotes to a real `CompilerError` and the walk's discovery
-    // is deleted in favor of driving directly from the view.
-    {
-        let mut gaps: Vec<String> = Vec::new();
-        for module in ws.modules.iter() {
-            if module.id == ModuleId::builtin() {
+    let (spec_chunks, spec_rejected) =
+        view_driven_specialized_chunks(ws, cg, scx, cache, &needed_specs);
+
+    // **Foreign-body (`inline(lua)`/`extern`) DELIVERY, separate from
+    // RETENTION.** `lua_view` (and `should_emit_via_view`'s call-serving half)
+    // answers "is this declaration's canonical Instance part of the program",
+    // which is not the same question as "does anything call it in RESIDUAL
+    // (non-spliced) form" -- `@pure @inline` stdlib operators (`+`, `-`, ...)
+    // are retained (something calls `+`) but almost always fully spliced away
+    // at every call site, so a naive retention-only gate emitted them
+    // standalone anyway (found empirically: `__op_add_int_int_ret_int` and
+    // siblings newly appeared in every project's output the moment retention
+    // alone drove the inline-body gate). Splicing eligibility is a LOWERING
+    // decision the graph does not model (same class of fact as a generic's
+    // standalone-vs-spliced `SpecDemand`, just for a NON-generic body), so
+    // this is collected from what already-lowered chunks record they still
+    // call after inlining (`Chunk::calls`), exactly as `chunk.specs` seeds
+    // `view_driven_specialized_chunks` above.
+    let mut needed_foreign: FxHashSet<Instance> = FxHashSet::default();
+    needed_foreign.extend(always_emitted_calls.iter().map(|f| shared(*f)));
+    for module in ws.modules.iter() {
+        if module.id == ModuleId::builtin() {
+            continue;
+        }
+        for (fid, f) in module.functions.iter() {
+            let self_ref = FuncRef { module: module.id, func: fid };
+            if !is_cached_emitted_body(f, &shared(self_ref))
+                || !should_emit_via_view(ws, &cache.lua_view, self_ref)
+            {
                 continue;
             }
-            for (fid, f) in module.functions.iter() {
-                if f.backend == bone_semantic::hir::FnBackend::Js {
-                    continue;
-                }
-                let self_ref = FuncRef { module: module.id, func: fid };
-                if is_generic(f) || f.is_extern || f.inline_body.is_some() || fn_has_bounds(f) {
-                    continue;
-                }
-                if live.emits(self_ref) && !cache.lua_view.instances.contains(&shared(self_ref)) {
-                    gaps.push(format!("base:{}", mangle_fn(ws, f)));
-                }
+            if let Some(Ok(c)) = cache.chunks.get(&shared(self_ref)) {
+                needed_foreign.extend(c.calls.iter().map(|f| shared(*f)));
             }
         }
-        for inst in live.spec_chunks.keys() {
-            if !cache.lua_view.instances.contains(inst) {
-                gaps.push(format!("spec:{}", inst.symbol(ws, scx.interner())));
-            }
-        }
-        if !gaps.is_empty() {
-            let n = gaps.len();
-            gaps.truncate(20);
-            eprintln!(
-                "skull: lua_view population gap, {n} instance(s) the walk emits and the view \
-                 does not retain: {gaps:?}"
-            );
-        }
+    }
+    for c in spec_chunks.values() {
+        needed_foreign.extend(c.calls.iter().map(|f| shared(*f)));
     }
 
     // Function definitions, every module (cached chunk for ordinary/coroutine,
@@ -2495,7 +2309,8 @@ fn assemble(
             // an unlowerable user fn) runs for every fn exactly as before, so
             // pruning can change which definitions are emitted and nothing else --
             // in particular it never hides a diagnostic.
-            let emit_def = live.emits(self_ref);
+            let emit_def = extra_hard_roots.contains(&self_ref)
+                || should_emit_via_view(ws, &cache.lua_view, self_ref);
             if f.is_extern {
                 // An `extern(ffi, "lib")` fn needs a thin wrapper binding it to the
                 // loaded library handle. A non-ffi extern is a pre-existing global.
@@ -2527,7 +2342,31 @@ fn assemble(
                 continue;
             }
             if let Some((_, body)) = f.inline_body {
-                if !emit_def {
+                // Retention alone (`emit_def`) over-emits here -- see
+                // `needed_foreign`'s doc. Three independent reasons still force
+                // emission regardless of splicing eligibility: a publication
+                // obligation (`@nomangle`), a residual (non-spliced) demand, or
+                // being a ROOT in its own right (an own-project inline(lua) fn
+                // is unconditionally rooted by `is_emission_root` even with no
+                // caller at all -- same reasoning as `main`/`@sim`/`@test`;
+                // found empirically, `anvil`'s `sv_close`/`sv_is_eof` etc. have
+                // no call site anywhere in the corpus and are rooted purely by
+                // living in the project's own file).
+                let publication = cache.lua_view.publications.contains_key(&shared(self_ref));
+                // The DECLARED root predicate, not `lua_view.roots` -- that set
+                // also carries the graph's own "callee of an always-emitted
+                // body, no incoming edge" category, which is a REACHED
+                // instance subject to the same splicing question as any other
+                // (found empirically: `__op_mul`/`__op_div`, called from a
+                // global initializer's constant expression somewhere in the
+                // corpus, are NOT declared roots and are still spliced away
+                // everywhere -- `lua_view.roots` alone over-emitted them).
+                let is_root = !is_generic(f) && is_emission_root(module.file.as_str(), cache.project_root.as_deref(), f, &deco_map);
+                if !(publication
+                    || is_root
+                    || extra_hard_roots.contains(&self_ref)
+                    || needed_foreign.contains(&shared(self_ref)))
+                {
                     continue;
                 }
                 // inline(lua): emit the hand-written body verbatim, wrapping a
@@ -2616,8 +2455,8 @@ fn assemble(
         scx,
         &mut needed_specs,
         &cache.chunks,
-        &live.spec_chunks,
-        &live.rejected,
+        &spec_chunks,
+        &spec_rejected,
         built_specs,
         &mut all_statics,
         &mut out,
@@ -2751,7 +2590,36 @@ fn assemble(
     if let Some(err) = cg.take_rejection() {
         return Err(err);
     }
-    Ok((MirEmit { lua: out, skipped, phases }, live.emitted_bodies()))
+    let mut emitted_bodies: FxHashSet<Instance> = FxHashSet::default();
+    for module in ws.modules.iter() {
+        if module.id == ModuleId::builtin() {
+            continue;
+        }
+        for (fid, f) in module.functions.iter() {
+            if f.backend == bone_semantic::hir::FnBackend::Js {
+                continue;
+            }
+            let self_ref = FuncRef { module: module.id, func: fid };
+            let actually_emitted = if f.is_extern {
+                true
+            } else if f.inline_body.is_some() {
+                let is_root = !is_generic(f)
+                    && is_emission_root(module.file.as_str(), cache.project_root.as_deref(), f, &deco_map);
+                cache.lua_view.publications.contains_key(&shared(self_ref))
+                    || is_root
+                    || extra_hard_roots.contains(&self_ref)
+                    || needed_foreign.contains(&shared(self_ref))
+            } else {
+                extra_hard_roots.contains(&self_ref)
+                    || should_emit_via_view(ws, &cache.lua_view, self_ref)
+            };
+            if actually_emitted {
+                emitted_bodies.insert(shared(self_ref));
+            }
+        }
+    }
+    emitted_bodies.extend(spec_chunks.keys().cloned());
+    Ok((MirEmit { lua: out, skipped, phases }, emitted_bodies))
 }
 
 /// Full emit: populate the chunk cache for every ordinary/coroutine body, then

@@ -551,10 +551,10 @@ fn a_body_edit_to_a_generic_coroutine_reemits_its_specializations() {
 /// would then spell a specialized symbol nothing defines.
 ///
 /// It works because backfill is NOT a second mechanism: `emit_incremental`
-/// reassembles through the same `live_bodies` walk `emit_full` runs, so a demand
-/// that appears for the first time is discovered and BUILT there. Pinning it
-/// here is what keeps a future "only reassemble what changed" optimization from
-/// removing that without noticing.
+/// reassembles through the same `assemble` (`view_driven_specialized_chunks`)
+/// pass `emit_full` runs, so a demand that appears for the first time is
+/// discovered and BUILT there. Pinning it here is what keeps a future "only
+/// reassemble what changed" optimization from removing that without noticing.
 ///
 /// Asserted on the incremental output's own definition COUNT as well as against
 /// a fresh build. Equality alone would be satisfied by two builds that both lack

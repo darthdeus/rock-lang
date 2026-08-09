@@ -218,8 +218,9 @@ fn main() {
 /// authoritative graph, not merely capable of building one beside itself.**
 ///
 /// This is the RED that a lazy `Option<InstanceGraph>` plus a private
-/// `LuaReach` discovery walk fails and a production-owned graph/view passes.
-/// It proves, in one fixture:
+/// discovery walk (`LuaReach`, deleted -- population is now driven by
+/// `cache.lua_view` end to end) fails and a production-owned graph/view
+/// passes. It proves, in one fixture:
 ///
 /// - `emit_full`'s cache always carries a graph (never absent) whose instance
 ///   population is non-empty.
