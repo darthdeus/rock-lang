@@ -174,6 +174,34 @@ pub fn try_emit_with_stdlib_module(
     skull::mir_emit::emit_workspace_mir(&ws, mid).map(|e| e.lua)
 }
 
+/// Like [`ws_with_stdlib`] but ALSO loads `lib` as an extra stdlib module, so a
+/// case needs a body the emission-root predicate classifies as LIBRARY (and
+/// therefore prunable) rather than as own-project source.
+pub fn ws_with_stdlib_module(lib: &str, src: &str) -> Workspace {
+    let mut modules = STDLIB.clone();
+    modules.push(skull_parser::parse_module_clean(lib, Ustr::from("<stdlib:probe>")).expect("parse lib"));
+    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    assert_no_bone_errors(&ws);
+    ws
+}
+
+/// The `FuncRef` of the single workspace fn named `name`. Panics unless there is
+/// exactly one -- an ambiguous match would silently assert about another
+/// declaration.
+pub fn fn_ref(ws: &Workspace, name: &str) -> skull_mir::mir::FuncRef {
+    let mut found = Vec::new();
+    for m in ws.modules.iter() {
+        for (fid, f) in m.functions.iter() {
+            if f.name.as_str() == name {
+                found.push(skull_mir::mir::FuncRef { module: m.id, func: fid });
+            }
+        }
+    }
+    assert_eq!(found.len(), 1, "expected exactly one fn named `{name}`, got {}", found.len());
+    found[0]
+}
+
 /// Single-module workspace (no stdlib) for incremental / hot-reload tests.
 pub fn ws_of(src: &str) -> Workspace {
     let module = skull_parser::parse_module_clean(src, Ustr::from("<t>")).expect("parse");

@@ -84,6 +84,12 @@ mod inline_value_specialization;
 #[path = "graph_contributions.rs"]
 mod graph_contributions;
 
+#[path = "foreign_fn_value_delivery.rs"]
+mod foreign_fn_value_delivery;
+
+#[path = "generated_glue_roots.rs"]
+mod generated_glue_roots;
+
 #[path = "graph_update.rs"]
 mod graph_update;
 

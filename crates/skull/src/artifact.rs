@@ -434,6 +434,29 @@ pub struct ArtifactView {
     /// The artifact's root instances -- realizable emission roots, plus the
     /// callees of always-emitted bodies, which have no incoming edge.
     pub roots: BTreeSet<Instance>,
+    /// The subset of [`Self::roots`] that this artifact was ASKED for --
+    /// `ArtifactRequest::roots`, canonicalized -- as distinct from the
+    /// structural roots the graph adds because they carry no incoming edge
+    /// (`is_always_emitted_target`).
+    ///
+    /// The two are different obligations and a consumer that conflates them is
+    /// wrong in both directions: a declared root's own body must exist whether
+    /// or not any call reaches it, while a structural root is an ordinary
+    /// reached instance whose splicing eligibility is still open. Recorded here
+    /// so emission reads root PROVENANCE off the view instead of re-running the
+    /// root predicate beside it.
+    ///
+    /// A generic root contributes nothing: it has no base instance to emit.
+    pub declared_roots: BTreeSet<Instance>,
+    /// Retained instances a retained body reaches by taking the function as a
+    /// VALUE (`SiteOp::FnValue`) rather than by calling it.
+    ///
+    /// A value take is not spliceable: there is no call for a body to be
+    /// substituted into, so the program stores the definition itself under its
+    /// own symbol. That makes it a DELIVERY fact a residual-call scan cannot
+    /// produce -- and a foreign (`inline(lua)`) body reached only this way was
+    /// retained, called by name and never defined.
+    pub fn_value_targets: BTreeSet<Instance>,
     /// Retained ROCK instances: reachable from `roots`, realizable here, and
     /// lowered from a Rock body. A SUBSET of `g.instances`.
     ///
@@ -528,6 +551,8 @@ impl ArtifactView {
     /// Compare every realized output except the target description itself.
     pub fn same_cpu_decisions(&self, other: &Self) -> bool {
         self.roots == other.roots
+            && self.declared_roots == other.declared_roots
+            && self.fn_value_targets == other.fn_value_targets
             && self.instances == other.instances
             && self.boundaries == other.boundaries
             && self.realization == other.realization
@@ -886,11 +911,15 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         .map(|r| DeclKey(skull_mir::lower::canonical_variant(ws, *r)))
         .collect();
     let mut roots: BTreeSet<Instance> = BTreeSet::new();
+    let mut declared_roots: BTreeSet<Instance> = BTreeSet::new();
     for i in &g.instances {
-        let is_root = root_decls.contains(&DeclKey(i.func))
-            || g.is_always_emitted_target(i);
+        let declared = root_decls.contains(&DeclKey(i.func));
+        let is_root = declared || g.is_always_emitted_target(i);
         if is_root && realizable[i].is_ok() {
             roots.insert(i.clone());
+            if declared {
+                declared_roots.insert(i.clone());
+            }
         }
     }
 
@@ -929,13 +958,19 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     for r in &roots {
         admit(r, &mut instances, &mut realization, &mut queue);
     }
+    let mut fn_value_targets: BTreeSet<Instance> = BTreeSet::new();
     while let Some(caller) = queue.pop_front() {
         let Some(sites) = g.sites_of(&caller) else { continue };
         for (site, rec) in sites {
             sites_walked += 1;
             let SiteOutcome::Resolved(callee) = &rec.outcome else { continue };
             match realizable.get(callee) {
-                Some(Ok(_)) => admit(callee, &mut instances, &mut realization, &mut queue),
+                Some(Ok(_)) => {
+                    if site.op == skull_mir::site::SiteOp::FnValue {
+                        fn_value_targets.insert(callee.clone());
+                    }
+                    admit(callee, &mut instances, &mut realization, &mut queue)
+                }
                 Some(Err(cause)) => severed.push(Severed {
                     caller: caller.clone(),
                     site: site.clone(),
@@ -1163,6 +1198,8 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         deferred: crate::target_projection::deferred_for(&target.execution),
         spec: req.spec,
         roots,
+        declared_roots,
+        fn_value_targets,
         instances,
         boundaries,
         realization,

@@ -1042,6 +1042,40 @@ fn should_emit_via_view(ws: &Workspace, view: &crate::artifact::ArtifactView, se
     call_serving || publication
 }
 
+/// Whether a FOREIGN (`inline(lua)`) body needs a standalone definition.
+///
+/// Retention alone over-emits here: a `@pure @inline` stdlib operator is
+/// retained (something calls `+`) and spliced away at every call site, so the
+/// question is delivery, not membership. Four independent reasons force a
+/// definition -- a bare-name publication promise, being a DECLARED root in its
+/// own right (an own-project `inline(lua)` fn is rooted with no caller at all,
+/// same reasoning as `main`/`@sim`/`@test`), a residual non-spliced call, or a
+/// FUNCTION-VALUE take, which is not a call and so has nothing to splice into:
+/// the program stores the definition itself under its own symbol.
+///
+/// `declared_roots`, not `roots`: the latter also carries the graph's own
+/// "callee of an always-emitted body, no incoming edge" category, which is an
+/// ordinary reached instance subject to the same splicing question (found
+/// empirically -- `__op_mul`/`__op_div`, reached from a global initializer's
+/// constant expression, are not declared roots and are spliced away
+/// everywhere). A generic declaration has no base instance and so is never in
+/// the set.
+///
+/// ONE oracle: the definition loop and the emitted-body census both call it, so
+/// they cannot disagree about what the assembly contains.
+fn emits_foreign_definition(
+    ws: &Workspace,
+    view: &crate::artifact::ArtifactView,
+    needed_foreign: &FxHashSet<Instance>,
+    self_ref: FuncRef,
+) -> bool {
+    let canonical = shared(skull_mir::lower::canonical_variant(ws, self_ref));
+    view.publications.contains_key(&shared(self_ref))
+        || view.declared_roots.contains(&canonical)
+        || view.fn_value_targets.contains(&canonical)
+        || needed_foreign.contains(&shared(self_ref))
+}
+
 /// Deterministic overlay order over emitted bodies. Reduces to the declaration
 /// order the overlay used before specializations could appear in it: a
 /// declaration's own body sorts ahead of its specializations, and those sort by
@@ -2012,6 +2046,37 @@ fn register_sim_fn(ws: &Workspace) -> Option<FuncRef> {
     })
 }
 
+/// The roots one Lua build is taken over: the declared emission roots plus the
+/// obligations GENERATED GLUE TEXT carries.
+///
+/// `sim_registration_lines` writes `register_sim("<wire>", <mangled>)` and
+/// `shader_registration_lines` writes a program whose stage entries and GLSL
+/// helpers are named by their own declarations. Neither is a Rock call site, so
+/// no amount of graph reachability can find them -- they are an artifact ROOT
+/// (plan S 11: "the target may change roots"), which is what
+/// `ArtifactRequest::roots` is for. Emitting the generated call while the
+/// definition is pruned is a nil call at load, which is exactly what happened.
+///
+/// The shader collection is therefore built BEFORE the graph, not beside the
+/// assembly that renders it.
+fn all_roots(
+    ws: &Workspace,
+    project_root: Option<&str>,
+    shaders: &ShaderRegistrations,
+) -> Vec<FuncRef> {
+    let mut roots = crate::instance_graph::emission_roots(ws, project_root);
+    let mut seen: FxHashSet<FuncRef> = roots.iter().copied().collect();
+    let mut glue: Vec<FuncRef> = Vec::new();
+    if !collect_sim_fns(ws).is_empty() {
+        glue.extend(register_sim_fn(ws));
+    }
+    glue.extend(shaders.dependencies.iter().copied());
+    // Deterministic: `dependencies` is a hash set, so its iteration order is not.
+    glue.sort_by_key(|f| (f.module.index(), f.func.into_raw()));
+    roots.extend(glue.into_iter().filter(|f| seen.insert(*f)));
+    roots
+}
+
 fn sim_registration_lines(
     ws: &Workspace,
 ) -> Result<String, CompilerError> {
@@ -2222,23 +2287,9 @@ fn assemble(
     // still collected above (decorator/global lowering needs its own direct
     // calls for OTHER bookkeeping -- global-read ordering, static baselines --
     // untouched by this cutover), but no longer fed to a root-discovery walk.
-    // **Generated-glue extra roots.** `sim_registration_lines` and
-    // `shader_registration_lines` write Lua TEXT that calls a specific
-    // declaration by its mangled name directly -- `register_sim(...)` and any
-    // shader-emission dependency -- entirely outside any Rock body the graph
-    // could ever see a call site in. Not a Rock call at all, so no amount of
-    // graph reachability can name it; this is the one class of "extra root"
-    // `live_bodies` carried that is genuinely NOT representable in the
-    // target-neutral graph (everything else it carried -- decorator/global
-    // direct calls -- the graph's own `Owner::AlwaysEmitted` walk already
-    // covers). Found empirically: `sims_clear_contract_via_real_engine`
-    // failed at runtime on a nil `register_sim` the moment this was dropped.
-    let mut extra_hard_roots: FxHashSet<FuncRef> = FxHashSet::default();
-    if !collect_sim_fns(ws).is_empty() {
-        extra_hard_roots.extend(register_sim_fn(ws));
-    }
-    extra_hard_roots.extend(cache.shader_registrations.dependencies.iter().copied());
-
+    // Generated-glue obligations (`register_sim`, shader dependencies) are part
+    // of the ROOT INPUT the graph and the view were built from -- see
+    // [`all_roots`] -- so there is no second population source here.
     let (spec_chunks, spec_rejected) =
         view_driven_specialized_chunks(ws, cg, scx, cache, &needed_specs);
 
@@ -2301,8 +2352,7 @@ fn assemble(
             // an unlowerable user fn) runs for every fn exactly as before, so
             // pruning can change which definitions are emitted and nothing else --
             // in particular it never hides a diagnostic.
-            let emit_def = extra_hard_roots.contains(&self_ref)
-                || should_emit_via_view(ws, &cache.lua_view, self_ref);
+            let emit_def = should_emit_via_view(ws, &cache.lua_view, self_ref);
             if f.is_extern {
                 // An `extern(ffi, "lib")` fn needs a thin wrapper binding it to the
                 // loaded library handle. A non-ffi extern is a pre-existing global.
@@ -2344,21 +2394,7 @@ fn assemble(
                 // found empirically, `anvil`'s `sv_close`/`sv_is_eof` etc. have
                 // no call site anywhere in the corpus and are rooted purely by
                 // living in the project's own file).
-                let publication = cache.lua_view.publications.contains_key(&shared(self_ref));
-                // The DECLARED root predicate, not `lua_view.roots` -- that set
-                // also carries the graph's own "callee of an always-emitted
-                // body, no incoming edge" category, which is a REACHED
-                // instance subject to the same splicing question as any other
-                // (found empirically: `__op_mul`/`__op_div`, called from a
-                // global initializer's constant expression somewhere in the
-                // corpus, are NOT declared roots and are still spliced away
-                // everywhere -- `lua_view.roots` alone over-emitted them).
-                let is_root = !is_generic(f) && is_emission_root(module.file.as_str(), cache.project_root.as_deref(), f, &deco_map);
-                if !(publication
-                    || is_root
-                    || extra_hard_roots.contains(&self_ref)
-                    || needed_foreign.contains(&shared(self_ref)))
-                {
+                if !emits_foreign_definition(ws, &cache.lua_view, &needed_foreign, self_ref) {
                     continue;
                 }
                 // inline(lua): emit the hand-written body verbatim, wrapping a
@@ -2595,15 +2631,9 @@ fn assemble(
             let actually_emitted = if f.is_extern {
                 true
             } else if f.inline_body.is_some() {
-                let is_root = !is_generic(f)
-                    && is_emission_root(module.file.as_str(), cache.project_root.as_deref(), f, &deco_map);
-                cache.lua_view.publications.contains_key(&shared(self_ref))
-                    || is_root
-                    || extra_hard_roots.contains(&self_ref)
-                    || needed_foreign.contains(&shared(self_ref))
+                emits_foreign_definition(ws, &cache.lua_view, &needed_foreign, self_ref)
             } else {
-                extra_hard_roots.contains(&self_ref)
-                    || should_emit_via_view(ws, &cache.lua_view, self_ref)
+                should_emit_via_view(ws, &cache.lua_view, self_ref)
             };
             if actually_emitted {
                 emitted_bodies.insert(shared(self_ref));
@@ -2747,7 +2777,10 @@ pub fn emit_full_in(
     // arena rather than minting its own.** An `Instance` the graph mints has to
     // mean something to lowering, and a second arena would be a second identity
     // for the same instance. See `SkullEmitCache::graph`.
-    let emission_roots = crate::instance_graph::emission_roots(ws, project_root);
+    // Generated glue is part of the ROOT INPUT, so the shader collection is
+    // built before the graph rather than beside the assembly that consumes it.
+    let shader_registrations = shader_registration_lines(ws)?;
+    let emission_roots = all_roots(ws, project_root, &shader_registrations);
     let graph = crate::instance_graph::build(ws, emission_roots.clone(), false);
     // The overload set lives in `cg` (computed once there); borrow it rather than
     // rescanning the workspace.
@@ -2802,7 +2835,6 @@ pub fn emit_full_in(
             static_key_baseline.insert(sc.cell, static_cell_key(sc));
         }
     }
-    let shader_registrations = shader_registration_lines(ws)?;
     // Realized from the SAME graph and the SAME roots emission built from, so
     // this is production's own fact rather than a second discovery beside it.
     let lua_view = crate::artifact::realize(
@@ -2955,7 +2987,9 @@ fn update_chunk_cache(
     // Rebuilding the graph instead of updating it is what the arc measured and
     // rejected: 15-33 ms release against a sub-millisecond edit.
     let _t_graph = Instant::now();
-    let roots = crate::instance_graph::emission_roots(ws, cache.project_root.as_deref());
+    // `update_shader_registrations` runs BEFORE this (in `emit_incremental`), so
+    // the glue roots below are this edit's, not the previous build's.
+    let roots = all_roots(ws, cache.project_root.as_deref(), &cache.shader_registrations);
     let update = cache.graph.update_bodies(ws, roots.clone(), reinferred);
     let _graph_ms = _t_graph.elapsed();
 
@@ -3087,8 +3121,11 @@ pub fn emit_incremental(
     reinferred: &[(ModuleId, BodyOwner)],
 ) -> Result<MirEmit, CompilerError> {
     let t_reemit = Instant::now();
-    let _affected = cache.update_chunk_cache(ws, reinferred);
+    // Shader registrations FIRST: their dependencies are graph/view roots, so
+    // `update_chunk_cache`'s re-walk must see this edit's set, not the last
+    // build's.
     cache.update_shader_registrations(ws, reinferred)?;
+    let _affected = cache.update_chunk_cache(ws, reinferred);
     let reemit = t_reemit.elapsed();
 
     // Reassembly: the SAME work `emit_full` does (concat every cached chunk +
@@ -3466,8 +3503,8 @@ pub fn emit_overlay(
     // -- no whole-workspace rebuild.
     let t_scx = t1.elapsed();
     let t2 = Instant::now();
-    let affected = cache.update_chunk_cache(ws, reinferred);
-    cache.changed_since_full.extend(affected);
+    // Shader registrations FIRST -- their dependencies are graph/view roots, so
+    // `update_chunk_cache`'s re-walk must see this edit's set.
     let shader_changed = match cache.update_shader_registrations(ws, reinferred) {
         Ok(changed) => changed,
         Err(err) => {
@@ -3475,6 +3512,8 @@ pub fn emit_overlay(
             false
         }
     };
+    let affected = cache.update_chunk_cache(ws, reinferred);
+    cache.changed_since_full.extend(affected);
     // Accumulate changed `const` globals so the overlay re-emits their inits
     // (unguarded). A mutable `global` value edit is interface-tier (full rebuild),
     // so it never reaches here; even so, gate on `is_const` defensively.
