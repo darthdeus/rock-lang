@@ -1,0 +1,33 @@
+// CONTROLS for `nobox_nullable_struct_field.rock`. Own file: that one's probe is
+// a compile rejection, which aborts its whole file.
+
+nobox value P { x: int, y: int }
+nobox value Outer { a: P?, b: int }
+nobox value Plain { a: P, b: int }
+
+fn seed(n: int) -> int { return n }
+
+// A NON-nullable nobox field composes fine -- so the discriminant is the `?`,
+// not nesting.
+@test(output = "1 2 3")
+fn control_non_nullable_nobox_field() {
+    let o = Plain { a: P { x: seed(1), y: 2 }, b: 3 }
+    print("{o.a.x} {o.a.y} {o.b}")
+}
+
+// The ABSENT arm needs no shape for the payload, so it is unaffected.
+@test(output = "-1 9")
+fn control_nullable_nobox_field_absent() {
+    let o = Outer { a: null, b: 9 }
+    print("{o.a?.x ?? -1} {o.b}")
+}
+
+// A nullable field of a PLAIN (heap) struct works: the parent is a table, so the
+// field takes the flat-field path rather than a value-struct leaf list.
+struct Heap { a: P?, b: int }
+
+@test(output = "1 3")
+fn control_nullable_nobox_field_on_heap_struct() {
+    let h = Heap { a: P { x: seed(1), y: 2 }, b: 3 }
+    print("{h.a?.x} {h.b}")
+}

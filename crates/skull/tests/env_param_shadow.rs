@@ -4,9 +4,7 @@
 //! emits the bare name, so the global resolved to the env record (a table) and
 //! arithmetic on it crashed at runtime. The param is now the reserved name
 //! `__rock_env`, which no user identifier can legally collide with.
-
-mod common;
-use common::{emit_module, run_luajit};
+use crate::common::{emit_module, run_luajit};
 
 /// The repro: a global `e` read alongside a captured param inside a capturing
 /// lambda. Pre-fix this crashed ("arithmetic on a table value"); the env record

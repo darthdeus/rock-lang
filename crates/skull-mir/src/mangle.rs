@@ -24,6 +24,45 @@ use skull_parser::CompilerError;
 /// The mangle separator. A single `_`; see the module docs for why.
 const SEP: &str = "_";
 
+/// The emitted name for the copy of `f` specialized at `key` -- the instantiation
+/// the call site already lowered its arguments for.
+///
+/// Derived from [`mangle_fn`] plus the reified type trees in declaration order, so the
+/// definition and every call site agree without a side table, exactly as the base
+/// mangle does. `None` for an all-`None` key: that is the shared snapshot, which
+/// keeps the base name.
+///
+/// An exempt (`@nomangle`, `extern`, ...) callee still gets a suffixed name here.
+/// Its bare name belongs to the ONE body the author owns; a specialized copy is a
+/// different function and must not claim it.
+pub fn spec_fn_name(
+    ws: &Workspace,
+    f: &Function,
+    key: &[Option<crate::monoty::MonoTy>],
+) -> Option<String> {
+    if key.iter().all(Option::is_none) {
+        return None;
+    }
+    let mut out = mangle_fn(ws, f);
+    out.push_str(SEP);
+    out.push_str("spec");
+    for leaf in key {
+        out.push_str(SEP);
+        match leaf {
+            Some(ty) => encode_mono_type(ty, &mut out),
+            None => out.push_str("any"),
+        }
+    }
+    Some(out)
+}
+
+/// A specialized body's symbol IS the type's canonical identity
+/// ([`MonoTy::canonical`](crate::monoty::MonoTy::canonical)) -- one encoder, so
+/// a symbol and an instance identity cannot disagree about which type they name.
+fn encode_mono_type(ty: &crate::monoty::MonoTy, out: &mut String) {
+    ty.write_canonical(out);
+}
+
 /// True if `f` keeps its bare surface name (never mangled).
 pub fn is_exempt(f: &Function) -> bool {
     let name = f.name.as_str();
@@ -286,4 +325,107 @@ pub fn collision_errors(ws: &Workspace) -> Vec<(String, CompilerError)> {
 
     out.sort_by(|a, b| a.0.cmp(&b.0));
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::encode_mono_type;
+    use crate::monoty::{MonoCtor, MonoTy};
+    use ustr::Ustr;
+
+    fn nominal(name: &str, params: Vec<MonoTy>) -> MonoTy {
+        MonoTy::App { ctor: MonoCtor::Nominal(Ustr::from(name)), params }
+    }
+
+    /// Every constructor and composition the encoder can see, spelled out. The
+    /// encoding IS the emitted symbol for a specialized body, so any change to
+    /// it renames functions across every artifact; these strings are the record
+    /// of what the symbols are, independent of which type tree produces them.
+    #[test]
+    fn mono_type_encoding_is_these_exact_strings() {
+        let enc = |ty: &MonoTy| {
+            let mut s = String::new();
+            encode_mono_type(ty, &mut s);
+            s
+        };
+
+        assert_eq!(enc(&MonoTy::Int), "p_int");
+        assert_eq!(enc(&MonoTy::Float), "p_float");
+        assert_eq!(enc(&MonoTy::Bool), "p_bool");
+        assert_eq!(enc(&MonoTy::String), "p_string");
+
+        assert_eq!(enc(&MonoTy::Nullable(Box::new(MonoTy::Int))), "o_p_int");
+        assert_eq!(
+            enc(&MonoTy::Nullable(Box::new(MonoTy::Nullable(Box::new(MonoTy::Int))))),
+            "o_o_p_int"
+        );
+
+        assert_eq!(enc(&MonoTy::Tuple(vec![])), "t_0_z");
+        assert_eq!(enc(&MonoTy::Tuple(vec![MonoTy::Int])), "t_1_p_int_z");
+        assert_eq!(
+            enc(&MonoTy::Tuple(vec![MonoTy::Int, nominal("Vec2", vec![])])),
+            "t_2_p_int_a_n4_Vec2_0_z_z"
+        );
+        assert_eq!(
+            enc(&MonoTy::Tuple(vec![
+                MonoTy::Nullable(Box::new(nominal("Vec2", vec![]))),
+                MonoTy::Int,
+            ])),
+            "t_2_o_a_n4_Vec2_0_z_p_int_z"
+        );
+
+        assert_eq!(
+            enc(&MonoTy::App { ctor: MonoCtor::Array, params: vec![MonoTy::Float] }),
+            "a_v_1_p_float_z"
+        );
+        assert_eq!(
+            enc(&MonoTy::App {
+                ctor: MonoCtor::Map,
+                params: vec![MonoTy::String, MonoTy::Int],
+            }),
+            "a_m_2_p_string_p_int_z"
+        );
+        assert_eq!(enc(&nominal("Vec2", vec![])), "a_n4_Vec2_0_z");
+        assert_eq!(
+            enc(&nominal("Entity", vec![nominal("Mob", vec![])])),
+            "a_n6_Entity_1_a_n3_Mob_0_z_z"
+        );
+
+        // Totality: no SpecKey slot carries these today, and each still has one
+        // symbol of its own rather than colliding with a neighbour.
+        assert_eq!(enc(&MonoTy::Any), "p_any");
+        assert_eq!(enc(&MonoTy::Unit), "p_unit");
+        assert_eq!(enc(&MonoTy::Never), "p_never");
+        assert_eq!(
+            enc(&MonoTy::Function {
+                params: vec![MonoTy::Int],
+                ret: Box::new(MonoTy::Float),
+            }),
+            "f_1_p_int_p_float_z"
+        );
+        // Argument order and arrow direction are identity, not decoration.
+        assert_ne!(
+            enc(&MonoTy::Function {
+                params: vec![MonoTy::Int],
+                ret: Box::new(MonoTy::Float)
+            }),
+            enc(&MonoTy::Function {
+                params: vec![MonoTy::Float],
+                ret: Box::new(MonoTy::Int)
+            })
+        );
+    }
+
+    #[test]
+    fn mono_type_encoding_preserves_tree_boundaries() {
+        let nested = nominal("VecIter", vec![nominal("V2", vec![])]);
+        let flat = nominal("VecIter_1_a_n2_V2_0_z", vec![]);
+        let mut nested_name = String::new();
+        let mut flat_name = String::new();
+        encode_mono_type(&nested, &mut nested_name);
+        encode_mono_type(&flat, &mut flat_name);
+
+        assert_eq!(nested_name, "a_n7_VecIter_1_a_n2_V2_0_z_z");
+        assert_ne!(nested_name, flat_name);
+    }
 }

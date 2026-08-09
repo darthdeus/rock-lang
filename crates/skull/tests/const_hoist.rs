@@ -16,9 +16,7 @@
 //!
 //! Emitted in the function's OWN chunk (not shared scaffolding), so an incremental
 //! body-edit overlay carries the def with the function it serves.
-
-mod common;
-use common::{emit_module, function_body};
+use crate::common::{emit_module, function_body};
 
 fn count(hay: &str, needle: &str) -> usize {
     hay.matches(needle).count()
@@ -32,18 +30,21 @@ const TWO_CONST_NESTED: &str = r#"
 value FixVec2 { x: float, y: float }
 value Outer { a: FixVec2, b: FixVec2, c: float }
 
-@nomangle inline(lua) fn __nb_alloc_Outer(n: int) -> Ptr<Outer> = 'return ffi.new("Outer[?]", n)'
-fn nb(n: int) -> NativeBuffer<Outer> { return NativeBuffer { ptr: __nb_alloc_Outer(n), len: n } }
-
-fn fill(buf: NativeBuffer<Outer>, n: int) {
+// A `[Outer]` Vec, NOT a NativeBuffer: `Outer` has 5 leaves, over
+// `MAX_COLUMN_LEAVES`, so the Vec keeps boxed elements and the ctor genuinely
+// has to be built. (A NativeBuffer element is leaf-addressed now and writes the
+// constant leaves straight through its views, so it builds no ctor to hoist --
+// which would make this test vacuous rather than exercise hoisting.)
+fn fill(out: [Outer], n: int) {
     for i in 0..n {
-        buf[i] = Outer { a: FixVec2 { x: 3.0, y: 7.0 }, b: FixVec2 { x: 3.0, y: 7.0 }, c: i as float }
+        out.push(Outer { a: FixVec2 { x: 3.0, y: 7.0 }, b: FixVec2 { x: 3.0, y: 7.0 }, c: i as float })
     }
 }
 
 fn main() {
-    let buf = nb(4)
-    fill(buf, 4)
+    let out: [Outer] = []
+    fill(out, 4)
+    print("{out.len}")
 }
 "#;
 

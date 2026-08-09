@@ -1,9 +1,7 @@
 use bone_semantic::hir::BodyOwner;
 use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::FuncRef;
-
-mod common;
-use common::ws_with;
+use crate::common::ws_with;
 
 fn function(ws: &bone_semantic::inference::Workspace, name: &str) -> FuncRef {
     let mid = *ws
@@ -41,7 +39,7 @@ fn global(
 }
 
 fn node(source: &str) -> String {
-    let output = std::process::Command::new("node")
+    let output = crate::common::node()
         .args(["-e", source])
         .output()
         .expect("node");

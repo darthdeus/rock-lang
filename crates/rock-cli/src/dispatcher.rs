@@ -335,6 +335,14 @@ impl CommandContext {
             crate::run_sim::do_list_sims(backend, project)
         } else if self.args.files.is_empty() {
             anyhow::bail!("sim needs a project: rock sim <project> [name]");
+        } else if self.args.multi_order {
+            // `files[1..]` narrows the CORPUS to those sims and changes nothing
+            // else about the gate; empty means the whole registry.
+            crate::run_sim::run_multi_order_gate(
+                backend,
+                &self.args.files[0],
+                &self.args.files[1..],
+            )
         } else if self.args.files.len() == 1 {
             // No name: run the whole suite.
             let project = &self.args.files[0];
@@ -343,6 +351,8 @@ impl CommandContext {
                 project,
                 self.args.quiet,
                 self.args.update_snapshots,
+                self.args.jobs,
+                crate::run_sim::exec_mode(self.args.isolated, self.args.workers),
             )
         } else {
             // files[0] = project, files[1..] = one or more sim names. One name
@@ -356,6 +366,8 @@ impl CommandContext {
                 &names,
                 self.args.quiet,
                 self.args.update_snapshots,
+                self.args.jobs,
+                crate::run_sim::exec_mode(self.args.isolated, self.args.workers),
             )
         }
     }
@@ -583,6 +595,22 @@ impl CommandContext {
             let path = self.get_path_or_current()?;
             return crate::skull_backend::skull_iter_incremental(&path, self.args.iters, self.args.warmup);
         }
+        // mono-ty-census converts the closed world's inferred types to MonoTy and
+        // reports; a Stage-0 diagnostic that touches no emission, dispatched early
+        // like the other skull diagnostics.
+        if self.args.command == CliCommand::MonoTyCensus {
+            let root = self.get_path_or_current()?;
+            return crate::monoty_census::do_monoty_census(Some(&root));
+        }
+        // mono-manifest builds the Stage-0d shadow instance graph; a diagnostic
+        // that touches no emission, dispatched early like its 0c sibling.
+        if self.args.command == CliCommand::MonoManifest {
+            let root = self.get_path_or_current()?;
+            // `ROCK_MONO_DUMP=<dir>` writes the per-project Lua and JS manifests
+            // there. A target disagreement is only diagnosable by diffing them.
+            let dump = std::env::var("ROCK_MONO_DUMP").ok();
+            return crate::mono_manifest::do_mono_manifest(Some(&root), dump.as_deref());
+        }
         // iter-lsp is the tight-loop profiler for the per-edit LSP query path
         // (BoneWorkspace on the bone backend); dispatched early like the other
         // iter-* profilers.
@@ -670,7 +698,12 @@ impl CommandContext {
                     self.args.consumers.as_deref(),
                 );
             }
-            return crate::lint_cmd::do_lint(&path);
+            return crate::lint_cmd::do_lint(
+                &path,
+                self.args.lints.as_deref(),
+                self.args.only_types.as_deref(),
+                self.args.ignore_types.as_deref(),
+            );
         }
         if self.args.command == CliCommand::StoneTest {
             let path = self.get_path_or_current()?;

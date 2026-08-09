@@ -210,13 +210,13 @@ fn workspace_for_dir(rel: &str) -> Option<Workspace> {
         .iter()
         .map(|f| {
             let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());
-            skull_parser::parse_module(f.contents, id).expect("stdlib parse")
+            skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
         })
         .collect();
     for file in &sources.files {
         let f = file.borrow();
         let id = Ustr::from(f.file.to_id_path().as_str());
-        match skull_parser::parse_module(&f.contents, id) {
+        match skull_parser::parse_module_clean(&f.contents, id) {
             Ok(m) => modules.push(m),
             Err(e) => {
                 eprintln!("  [{dir}] parse failed for {id}: {}", e.message);
@@ -239,7 +239,7 @@ fn workspace_stdlib_only() -> Workspace {
         .iter()
         .map(|f| {
             let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());
-            skull_parser::parse_module(f.contents, id).expect("stdlib parse")
+            skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
         })
         .collect();
     bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("stdlib semantic_pass")

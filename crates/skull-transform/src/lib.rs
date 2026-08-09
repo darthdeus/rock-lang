@@ -27,8 +27,10 @@
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
+use bone_semantic::inference::Workspace;
 use comfy_la_arena::{Idx, RawIdx};
 use skull_mir::mir::*;
+use ustr::Ustr;
 
 mod closure;
 mod forl;
@@ -37,10 +39,59 @@ pub mod scope;
 pub use closure::{convert_closures, convert_closures_framed, FrameInfo};
 pub use forl::recover_counted_loops;
 pub use inline::{
-    fn_has_bounds, inline_functions, validate_no_residual_bound_calls, InlineCache, SpliceRecord,
+    fn_has_bounds, inline_functions, inline_functions_with_subst, validate_no_residual_bound_calls,
+    InlineCache, SpliceRecord,
 };
 
 pub const STATE: &str = "__state";
+
+/// Every implicit `nobox` materialization in `func`, in block order -- EVERY
+/// one, not the first. A body with two sinks is two findings: reporting one
+/// makes the second invisible until the first is fixed, so any "N sinks left"
+/// count read off this check would be a floor rather than a total (the
+/// `pass_uniforms` gap hid behind an earlier rejection in the same body exactly
+/// this way).
+pub fn nobox_materialization_violations(
+    ws: &Workspace,
+    func: &MirFunc,
+) -> Vec<(String, Option<bone_semantic::prelude::Span>)> {
+    let mut out = Vec::new();
+    for (_, block) in func.blocks.iter() {
+        for &iid in &block.insts {
+            let Inst::MakeValueStruct { name, .. } = &func.insts[iid] else {
+                continue;
+            };
+            // A cdata ENUM packs through `MakeValueStruct` under the enum's own
+            // name, which is correctly absent from `struct_by_name` -- `nobox` is
+            // a struct marker, so those are genuinely out of scope. Any OTHER
+            // unknown name is not a licence to skip: this rung enforces a
+            // GUARANTEE, so it is reported rather than passed over.
+            let Some(sid) = ws.struct_by_name.get(name) else {
+                if skull_mir::lower::enum_value_shape(ws, *name).is_some() {
+                    continue;
+                }
+                out.push((
+                    format!(
+                        "`{name}` is constructed as a value struct here but is neither a struct \
+                         nor a cdata enum in the workspace, so the `nobox` guarantee cannot be \
+                         checked for it"
+                    ),
+                    func.inst_spans.get(iid).copied(),
+                ));
+                continue;
+            };
+            if ws.modules[sid.module.index()].structs[sid.def].is_nobox {
+                out.push((
+                    format!(
+                        "nobox value `{name}` survived lowering as an implicit materialization"
+                    ),
+                    func.inst_spans.get(iid).copied(),
+                ));
+            }
+        }
+    }
+    out
+}
 
 /// Dead-code elimination over a [`MirFunc`] (a CFG->CFG cleanup, run before emit).
 /// Removes, to a fixpoint: (a) pure value-producing insts with no users — the
@@ -179,12 +230,32 @@ fn term_uses_each(term: &Term, push: &mut impl FnMut(Idx<Inst>)) {
     }
 }
 
+/// Whether an `Index` read must execute even when its result is unused -- i.e.
+/// whether the bounds check rides ON this inst. Every ordinary container index
+/// errors on OOB, so it does.
+///
+/// LEAF reads are the exception: one ELEMENT access is decomposed into K leaf
+/// reads sharing ONE hoisted check (`__nb_checked_index` for a NativeBuffer;
+/// `Inst::VecCheckedIndex` for columns -- "one call per ELEMENT access, not per
+/// column"). Each leaf read is then a raw pointer read carrying no error of its
+/// own, so reading one field of a K-leaf element would otherwise emit all K
+/// loads and discard K-1.
+///
+/// Consulted by BOTH [`is_dead_rc`] (initial seeding) and [`is_dead_value`]
+/// (cascade). They must agree: a kind dead in one and live in the other either
+/// leaks the loads back or deletes a real bounds error.
+fn index_read_is_checked(kind: &ContainerKind) -> bool {
+    !matches!(kind, ContainerKind::NativeBufferLeaf | ContainerKind::VecColumn)
+}
+
 /// Whether a value-producing inst is pure enough that an unused result is dead.
-/// `Call`/`CallValue` run for effect; an `Index` read is bounds-checked (errors),
-/// so a discarded result must still execute.
+/// `Call`/`CallValue` run for effect; a checked `Index` must still execute.
 fn is_dead_value(inst: &Inst) -> bool {
-    !matches!(inst, Inst::Call { .. } | Inst::CallValue { .. } | Inst::Index { .. })
-        && inst.produces_value()
+    match inst {
+        Inst::Call { .. } | Inst::CallValue { .. } => false,
+        Inst::Index { kind, .. } if index_read_is_checked(kind) => false,
+        _ => inst.produces_value(),
+    }
 }
 
 /// The pre-emit MIR cleanup: copy-propagate intra-block loads, then DCE the dead
@@ -202,13 +273,26 @@ pub fn cleanup(func: &mut MirFunc) {
     // cursors: MapIter{__inner: VecIter{..}}). Sweeping between rounds lets
     // each level peel; depth = chain nesting, so this converges fast. The ctor
     // store prefilter avoids allocating the per-cell analysis for no-op rounds.
+    let dbg = std::env::var("SROA_DEBUG").is_ok();
+    let mut round = 0;
     loop {
+        if dbg {
+            eprintln!("--- SROA round {round} input ({}) ---\n{func}", func.name);
+            round += 1;
+        }
         let changed = has_scalarizable_store(func) && scalarize_struct_cells_once(func);
+        // Inside the loop, because SROA is what CREATES the shape: forwarding a
+        // nullable value field's read to the literal that filled it leaves a
+        // presence test whose operand is now a fresh ctor.
+        let folded = fold_never_nil_compares(func);
         let subst = copy_propagate_subst(func);
         dce_core(func, subst.as_deref());
-        if !changed {
+        if !changed && !folded {
             break;
         }
+    }
+    if dbg {
+        eprintln!("--- SROA final ({}) ---\n{func}", func.name);
     }
     if fold_const_branches(func) {
         dce(func);
@@ -231,6 +315,51 @@ fn has_scalarizable_store(func: &MirFunc) -> bool {
             )
         })
     })
+}
+
+/// Fold a nil test whose operand is a freshly CONSTRUCTED aggregate: a ctor result
+/// is never nil, so `Eq(ctor, nil)` is statically false and `NotEq` statically true.
+/// [`fold_const_branches`] then turns the branch into a `Goto` and DCE removes the
+/// unreachable arm along with the boxes only it used.
+///
+/// This exists because SROA manufactures the shape rather than the lowering emitting
+/// it: a presence-aware read of a nullable value field tests `Inst::Field` against
+/// nil, which is a real test, and forwarding that field read to the literal behind
+/// it turns the operand into a ctor. 18 generated shapes boxed a value twice and
+/// branched on the result purely for this, and the value oracle read every one as
+/// CORRECT because the ANSWER was right.
+fn fold_never_nil_compares(func: &mut MirFunc) -> bool {
+    let never_nil = |func: &MirFunc, v: Idx<Inst>| {
+        matches!(
+            &func.insts[v],
+            Inst::MakeValueStruct { .. }
+                | Inst::MakeStruct { .. }
+                | Inst::MakeEnum { .. }
+                | Inst::MakeTuple(_)
+        )
+    };
+    let is_nil = |func: &MirFunc, v: Idx<Inst>| matches!(&func.insts[v], Inst::Const(Lit::Nil));
+
+    let mut rewrites: Vec<(Idx<Inst>, bool)> = Vec::new();
+    for (iid, inst) in func.insts.iter() {
+        let (a, b, eq) = match inst {
+            Inst::Eq(a, b) => (*a, *b, true),
+            Inst::NotEq(a, b) => (*a, *b, false),
+            _ => continue,
+        };
+        let known = (never_nil(func, a) && is_nil(func, b))
+            || (never_nil(func, b) && is_nil(func, a));
+        if known {
+            rewrites.push((iid, !eq));
+        }
+    }
+    if rewrites.is_empty() {
+        return false;
+    }
+    for (iid, value) in rewrites {
+        func.insts[iid] = Inst::Const(Lit::Bool(value));
+    }
+    true
 }
 
 /// Fold `Branch` on a constant bool condition into a `Goto`, then clear blocks
@@ -360,6 +489,225 @@ pub fn scalarize_native_buffer_stores(func: &mut MirFunc) {
     }
 }
 
+/// Whether `mvs`'s constructor tree transitively contains an IMPLICIT nobox
+/// materialization. The trigger is recursive on purpose: for
+/// `Outer { b: Box2 { lo: NV2 {..} } }` the outer's immediate operand is a
+/// `Box2` literal, which is not itself nobox. A `MaterializeValueStruct`
+/// operand is the SANCTIONED escape and is never a violation.
+fn ctor_tree_has_implicit_nobox(ws: &Workspace, func: &MirFunc, mvs: Idx<Inst>) -> bool {
+    let (name, fields) = match &func.insts[mvs] {
+        Inst::MakeValueStruct { name, fields } => (name, fields),
+        // An EXPLICIT box is a sanctioned root, but its nested fields are still
+        // implicit: `materialize(E5 { pos: NV2 { .. } })` authorizes the E5 box,
+        // never a separate NV2 one.
+        Inst::MaterializeValueStruct { name, fields } => (name, fields),
+        _ => return false,
+    };
+    if let Some(sid) = ws.struct_by_name.get(name) {
+        if ws.modules[sid.module.index()].structs[sid.def].is_nobox {
+            return true;
+        }
+    }
+    fields.iter().any(|(_, op)| {
+        // A `materialize` OPERAND is the sanctioned escape -- never a violation,
+        // and not descended into.
+        !matches!(&func.insts[*op], Inst::MaterializeValueStruct { .. })
+            && ctor_tree_has_implicit_nobox(ws, func, *op)
+    })
+}
+
+/// Resolve one dotted leaf path against a ctor tree, emitting `Field` reads for
+/// any OPAQUE operand the path passes through (a nested value read off an
+/// existing cdata is legal and must be decomposed, not rejected). `None` when
+/// the path does not resolve, which the caller turns into a rejection rather
+/// than a guess.
+fn leaf_operand(
+    func: &mut MirFunc,
+    root: Idx<Inst>,
+    path: &str,
+    out: &mut Vec<Idx<Inst>>,
+) -> Option<Idx<Inst>> {
+    let mut cur = root;
+    for comp in path.split('.') {
+        let comp = Ustr::from(comp);
+        let next = match &func.insts[cur] {
+            // Reads THROUGH an explicit `materialize` operand, so the box it
+            // requested is DCE'd when the parent flattens for some other field.
+            // Deliberate: a value struct has no identity, so eliding a box of one
+            // is unobservable -- `materialize`'s contract is about what the
+            // program computes, not about a heap object surviving. Preserving it
+            // instead needs the `Field` reads ordered after the box, which the
+            // splice position does not currently give (they land at the parent
+            // ctor's slot, ahead of where emit places the operand). Recorded in
+            // `docs/nobox-nested-ctor-plan.md` as the open alternative.
+            Inst::MakeValueStruct { fields, .. } | Inst::MaterializeValueStruct { fields, .. } => {
+                fields.iter().find(|(n, _)| *n == comp).map(|(_, op)| *op)
+            }
+            // Opaque: read the field off the existing value.
+            _ => {
+                let f = func.insts.alloc(Inst::Field { base: cur, field: comp });
+                out.push(f);
+                Some(f)
+            }
+        }?;
+        cur = next;
+    }
+    Some(cur)
+}
+
+/// Flatten a value-struct ctor whose tree implicitly materializes a `nobox`
+/// field into one carrying that type's COMPLETE primitive leaf list, keyed by
+/// dotted path (`("pos.x", ..)`). The nested ctors then have no users and DCE
+/// removes them.
+///
+/// Flattening happens at the OUTERMOST materialization: rewriting bottom-up
+/// would satisfy the guarantee too, but allocate an intermediate cdata per
+/// construction. A ctor that is itself a field operand of another ctor is
+/// therefore skipped -- the outer one absorbs it.
+///
+/// The dotted form exists only between here (end of `cleanup`) and emit. Field
+/// names are documented as MIR-pass metadata rather than the wire shape, and
+/// every pass that runs in between (`convert_closures`, `recover_counted_loops`,
+/// `inline_hoisted_bodies`, the verifier) remaps operands or matches the struct
+/// NAME only -- none interpret field names.
+pub fn flatten_nobox_nested_ctors(ws: &Workspace, func: &mut MirFunc) -> bool {
+    let all: Vec<Idx<Inst>> =
+        func.blocks.iter().flat_map(|(_, b)| b.insts.iter().copied()).collect();
+    // A ctor used as a field operand of another ctor is not the outermost one.
+    let mut inner: HashSet<Idx<Inst>> = HashSet::default();
+    for &i in &all {
+        if let Inst::MakeValueStruct { fields, .. } | Inst::MaterializeValueStruct { fields, .. } =
+            &func.insts[i]
+        {
+            inner.extend(fields.iter().map(|(_, op)| *op));
+        }
+    }
+    let targets: Vec<Idx<Inst>> = all
+        .iter()
+        .copied()
+        .filter(|i| !inner.contains(i) && ctor_tree_has_implicit_nobox(ws, func, *i))
+        .collect();
+    if targets.is_empty() {
+        return false;
+    }
+    let mut replacement: HashMap<Idx<Inst>, Vec<Idx<Inst>>> = HashMap::default();
+    for t in targets {
+        let (name, explicit) = match &func.insts[t] {
+            Inst::MakeValueStruct { name, .. } => (*name, false),
+            Inst::MaterializeValueStruct { name, .. } => (*name, true),
+            _ => continue,
+        };
+        // A GC-tier outer stores fields as table entries, so there is no cdata
+        // to write leaves into; leave it for the verifier to reject.
+        if skull_mir::lower::value_struct_is_gc(ws, name) {
+            continue;
+        }
+        let Some(paths) = skull_mir::lower::value_leaf_paths_of(ws, name) else { continue };
+        let mut pre: Vec<Idx<Inst>> = Vec::new();
+        let mut leaves: Vec<(Ustr, Idx<Inst>)> = Vec::with_capacity(paths.len());
+        let mut ok = true;
+        for path in &paths {
+            match leaf_operand(func, t, path.as_str(), &mut pre) {
+                Some(op) => leaves.push((*path, op)),
+                None => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if !ok {
+            continue;
+        }
+        // An already-flat ctor rewrites to ITSELF -- a `nobox` name is its own
+        // trigger, so `materialize(Color { .. })` is a target on every pass. The
+        // rewrite is harmless but the "changed" answer is not: `cleanup_with_nobox`
+        // iterates on it, so reporting a no-op as progress never terminates.
+        let unchanged = matches!(
+            &func.insts[t],
+            Inst::MakeValueStruct { fields, .. } | Inst::MaterializeValueStruct { fields, .. }
+                if *fields == leaves
+        );
+        if unchanged {
+            continue;
+        }
+        let span = func.inst_spans.get(t).copied();
+        // Preserve the variant: an explicit box stays explicit, it just stops
+        // building a nested one on the way.
+        let flat = func.insts.alloc(if explicit {
+            Inst::MaterializeValueStruct { name, fields: leaves }
+        } else {
+            Inst::MakeValueStruct { name, fields: leaves }
+        });
+        // Minted insts inherit the outer ctor's span: a rejection downstream must
+        // still name the user's line.
+        if let Some(sp) = span {
+            for &n in pre.iter().chain(std::iter::once(&flat)) {
+                func.inst_spans.insert(n, sp);
+            }
+        }
+        pre.push(flat);
+        replacement.insert(t, pre);
+    }
+    if replacement.is_empty() {
+        return false;
+    }
+    // The flattened ctor takes the original's slot, so every existing user of
+    // `t` now reads the flat form.
+    let remap: HashMap<Idx<Inst>, Idx<Inst>> =
+        replacement.iter().map(|(k, v)| (*k, *v.last().unwrap())).collect();
+    let m = |o: Idx<Inst>| remap.get(&o).copied().unwrap_or(o);
+    for i in func.insts.iter_mut().map(|(id, _)| id).collect::<Vec<_>>() {
+        remap_inst(&mut func.insts[i], &m);
+    }
+    // Terminators too: a `Term` still pointing at the replaced ctor references an
+    // inst that is no longer in any block, which regalloc later reads as an
+    // unassigned value index and panics rather than failing anywhere useful.
+    let block_ids: Vec<Idx<Block>> = func.blocks.iter().map(|(id, _)| id).collect();
+    for bid in &block_ids {
+        remap_term(&mut func.blocks[*bid].term, &m);
+    }
+    for bid in block_ids {
+        if !func.blocks[bid].insts.iter().any(|i| replacement.contains_key(i)) {
+            continue;
+        }
+        let old = std::mem::take(&mut func.blocks[bid].insts);
+        let mut new = Vec::with_capacity(old.len());
+        for i in old {
+            match replacement.get(&i) {
+                Some(ins) => new.extend_from_slice(ins),
+                None => new.push(i),
+            }
+        }
+        func.blocks[bid].insts = new;
+    }
+    true
+}
+
+/// [`cleanup`] plus nobox nested-ctor normalization and the DCE that clears the
+/// ctors it orphans. Every emit path that is followed by
+/// [`nobox_materialization_violations`] must use THIS, not `cleanup`:
+/// normalization has to run before the verifier, and after `cleanup`'s own final
+/// DCE (the verifier walks `block.insts`, so an orphaned inner ctor left in the
+/// list still rejects). Idempotent -- the rewritten form no longer matches the
+/// trigger -- which matters because `cleanup` is called from many sites.
+///
+/// Every emit-path caller uses this; plain `cleanup` survives only as this
+/// function's own first step. Were a site to miss it, the failure would be
+/// CLOSED -- a spurious rejection from the verifier, never a silent miscompile.
+pub fn cleanup_with_nobox(ws: &Workspace, func: &mut MirFunc) {
+    cleanup(func);
+    // INTERLEAVED, not once each. Flattening replaces a nested nobox ctor's
+    // users with leaf reads, and that is exactly the shape SROA needs to split
+    // the field cell the ctor is stored to: while the outer ctor still reads the
+    // nested one whole, the nested ctor has more than one user and SROA leaves
+    // the field cell alone, so the box survives. Terminates because the pass is
+    // idempotent -- a flattened ctor no longer matches the trigger.
+    while flatten_nobox_nested_ctors(ws, func) {
+        cleanup(func);
+    }
+    dce(func);
+}
+
 /// Emit one `StoreField(slot, field, value)` per IMMEDIATE field of `mvs` (a
 /// `MakeValueStruct`). Does NOT descend into nested value-struct fields: a
 /// nested field's value is assigned whole (`slot.pos = Vec2_ct(x, y)`), matching
@@ -402,6 +750,9 @@ enum StructId {
 enum FieldSrc {
     Operand(Idx<Inst>),
     ConstStr(ustr::Ustr),
+    /// Leaf-wise copy from another family's field cell (a value-struct alias
+    /// member, see `copy_alias`) -- materializes a `Load` at the store site.
+    CellLoad(Idx<Cell>),
 }
 
 /// If `inst` is a scalarizable aggregate ctor, its identity + logical field list.
@@ -682,6 +1033,28 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
         }
     }
 
+    // A VALUE-struct alias member is a distinct BINDING, not the same object.
+    // `value` types are immutable, so unification buys no by-ref sharing, while
+    // collapsing the cells hands the member the ROOT's live range -- which a
+    // closure capture observes: the leaves of a per-iteration `for` binding
+    // become the loop cursor's multi-store slots, boxed once for the whole
+    // function and nil-ed on the exhausted path. Such a member keeps its own
+    // leaf cells and its alias store expands to leaf-wise copies. Reference
+    // structs still unify: there `let q = p` aliases and by-ref mutation must
+    // land in shared cells.
+    let mut copy_alias: Vec<Option<Idx<Cell>>> = vec![None; nc];
+    for k in 0..nc {
+        if rep[k] == k || disq[k] || !matches!(cand[rep[k]], Some(StructId::Value(_))) {
+            continue;
+        }
+        copy_alias[k] = Some(Idx::from_raw(RawIdx::from_u32(rep[k] as u32)));
+        cand_fields[k] = cand_fields[rep[k]].clone();
+        if let Some(order) = value_order.get(&rep[k]).cloned() {
+            value_order.insert(k, order);
+        }
+        rep[k] = k;
+    }
+
     // A `Load` of a candidate cell may be used ONLY as a `Field`/`StoreField`
     // base of a declared field -- or as the value of an accepted alias store
     // within the same family (that store deletes). Map each such load to its
@@ -715,13 +1088,15 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
                             *base == op && known(&ustr::Ustr::from(&format!("_{index}")))
                         }
                         // The alias store itself: `Store(y, Load(x))` where y and x
-                        // unify to the same root. It is deleted by the rewrite.
+                        // unify to the same root (deleted by the rewrite), or where
+                        // y copies x's leaves (expanded to leaf-wise stores).
                         Inst::Store { cell, value } => {
                             let yk = raw(*cell) as usize;
                             *value == op
                                 && alias[yk].is_some()
                                 && !disq[yk]
-                                && rep[yk] == rep[raw(c) as usize]
+                                && (rep[yk] == rep[raw(c) as usize]
+                                    || copy_alias[yk] == Some(c))
                         }
                         _ => false,
                     };
@@ -758,6 +1133,19 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
                     disq[rep[k]] = true;
                 }
                 if disq[rep[k]] || cand[rep[k]].is_none() {
+                    disq[k] = true;
+                }
+            }
+            // A copy member reads the root's leaf cells, so a whole root takes
+            // the member with it -- and a whole member's surviving `Store(k,
+            // Load(root))` would read the root's now-uninit aggregate, so it
+            // takes the root too.
+            if let Some(root) = copy_alias[k] {
+                let rk = raw(root) as usize;
+                if disq[k] {
+                    disq[rk] = true;
+                }
+                if disq[rk] || cand[rk].is_none() {
                     disq[k] = true;
                 }
             }
@@ -803,6 +1191,16 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
     // disqualified mid-analysis, so a cell escaping via a non-projection use (e.g.
     // whole-struct `==`) keeps its aggregate, and its field accesses must stay on
     // it -- rewriting them without expanding the store gives an uninit cell.
+    // Only a field the CTOR actually provides has a cell to redirect to. A
+    // nested value member is stored under its dotted LEAF names (`params.x`,
+    // `params.y`), so the immediate `.params` read names no cell, and minting
+    // one gives a load nothing ever stores -- the uninit-cell failure the
+    // comment above describes, reached the other way. Such a read stays a
+    // `Field` on the aggregate, which the `escape_loads` rebuild below
+    // reconstitutes at exactly this load.
+    let provides = |c: Idx<Cell>, f: &ustr::Ustr| {
+        cand_fields[rep[raw(c) as usize]].as_ref().is_some_and(|s| s.contains(f))
+    };
     let field_rewrites: Vec<(Idx<Inst>, Idx<Cell>, ustr::Ustr)> = func
         .blocks
         .iter()
@@ -811,7 +1209,7 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
             Inst::Field { base, field } => load_cell
                 .get(base)
                 .copied()
-                .filter(|&c| is_cand(c))
+                .filter(|&c| is_cand(c) && provides(c, field))
                 .map(|c| (i, c, *field)),
             _ => None,
         })
@@ -879,6 +1277,21 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
                         fs.into_iter().map(|f| (f, FieldSrc::Operand(*value))).collect(),
                     ));
                 }
+                // A value-struct alias member copies the root's leaves.
+                if let (Inst::Load(_), Some(root)) =
+                    (&func.insts[*value], copy_alias[raw(*cell) as usize])
+                {
+                    let mut fs: Vec<ustr::Ustr> = cand_fields[raw(*cell) as usize]
+                        .as_ref()
+                        .map(|s| s.iter().copied().collect())
+                        .unwrap_or_default();
+                    fs.sort_unstable();
+                    return Some((
+                        i,
+                        *cell,
+                        fs.into_iter().map(|f| (f, FieldSrc::CellLoad(root))).collect(),
+                    ));
+                }
                 ctor_fields(&func.insts[*value], cell_enum[raw(*cell) as usize])
                     .map(|(_, fields)| (i, *cell, fields))
             }
@@ -898,6 +1311,7 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
                 let ck = raw(*cell) as usize;
                 ck < nc
                     && alias[ck].is_some()
+                    && copy_alias[ck].is_none()
                     && !disq[ck]
                     && matches!(&func.insts[*value], Inst::Load(_))
             }
@@ -912,6 +1326,24 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
     for i in alias_deletions {
         replacement.insert(i, Vec::new());
     }
+    // A field cell that ALWAYS holds a value-struct ctor inherits the parent's
+    // non-null licence, so a later round can split it in turn instead of
+    // disqualifying its family when the field escapes whole (`Outer { ..o }`
+    // rebuilds `o.inner` as one operand). Nullable fields are excluded by
+    // construction: a nil store expands to `Const(Nil)` per field, which is not
+    // a ctor -- the licence `nonnull_value_struct` grants is exactly "this cell
+    // can be rebuilt from its leaves", and nil cannot be.
+    let mut nn_field: HashMap<(Idx<Cell>, ustr::Ustr), bool> = HashMap::default();
+    for (_, c, fields) in &store_expansions {
+        if !func.cells[*c].nonnull_value_struct {
+            continue;
+        }
+        for (fname, src) in fields {
+            let is_value_ctor = matches!(src,
+                FieldSrc::Operand(v) if matches!(&func.insts[*v], Inst::MakeValueStruct { .. }));
+            *nn_field.entry((*c, *fname)).or_insert(true) &= is_value_ctor;
+        }
+    }
     for (store_i, c, fields) in store_expansions {
         let mut news = Vec::with_capacity(fields.len());
         for (fname, src) in fields {
@@ -925,8 +1357,17 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
                     news.push(cv);
                     cv
                 }
+                FieldSrc::CellLoad(root) => {
+                    let rc = get_field_cell(func, root, fname);
+                    let lv = func.insts.alloc(Inst::Load(rc));
+                    news.push(lv);
+                    lv
+                }
             };
             let fc = get_field_cell(func, c, fname);
+            if nn_field.get(&(c, fname)).copied().unwrap_or(false) {
+                func.mark_nonnull_value_struct(fc);
+            }
             news.push(func.insts.alloc(Inst::Store { cell: fc, value: fval }));
         }
         replacement.insert(store_i, news);
@@ -1027,6 +1468,49 @@ fn copy_propagate_subst(func: &MirFunc) -> Option<Vec<Option<Idx<Inst>>>> {
             }
         }
     }
+    // A leaf write THROUGH a value field (`h.p.x = 5`, base `Field(Load(c), p)`)
+    // mutates the cell's contents in place, so its stored value is not stable for
+    // the rest of the block. Forwarding the load would move the write onto the
+    // ctor -- a temporary -- while the `Field`-of-ctor fold below sends later
+    // reads to the ORIGINAL construction operands, disconnecting the two. Keeping
+    // the cell also lets SROA peel it on the next round, where the write becomes a
+    // leaf-cell store. Same exclusion as `escaping`, different reason.
+    //
+    // Only cells holding a VALUE qualify. A direct `obj.f = v` on a cell holding
+    // a `MakeStruct` table targets one runtime object shared by every use, so
+    // forwarding stays sound (and the fold below never forwards through a table
+    // anyway) -- excluding those keeps the hot `obj.field = v` shape
+    // copy-propagated. SROA peels one level per round, so the base is a `Field`
+    // chain on the first round and a bare `Load` of the peeled value cell after.
+    let mut holds_value = vec![false; func.cells.len()];
+    for (_, b) in func.blocks.iter() {
+        for &i in &b.insts {
+            if let Inst::Store { cell, value } = &func.insts[i] {
+                if matches!(&func.insts[*value], Inst::MakeValueStruct { .. }) {
+                    holds_value[raw(*cell) as usize] = true;
+                }
+            }
+        }
+    }
+    for (_, b) in func.blocks.iter() {
+        for &i in &b.insts {
+            let Inst::StoreField { base, .. } = &func.insts[i] else { continue };
+            // `d.o.i.a = 9` nests the reads; the write lands in the root cell.
+            let mut cur = *base;
+            loop {
+                match &func.insts[cur] {
+                    Inst::Load(c) => {
+                        if holds_value[raw(*c) as usize] {
+                            escaping[raw(*c) as usize] = true;
+                        }
+                        break;
+                    }
+                    Inst::Field { base, .. } => cur = *base,
+                    _ => break,
+                }
+            }
+        }
+    }
     let mut subst: Vec<Option<Idx<Inst>>> = vec![None; func.insts.len()];
     let mut any_subst = false;
     let mut cur: Vec<Option<Idx<Inst>>> = vec![None; func.cells.len()];
@@ -1070,6 +1554,23 @@ fn copy_propagate_subst(func: &MirFunc) -> Option<Vec<Option<Idx<Inst>>>> {
                         }
                     }
                 }
+                // `TupleIndex(<tuple ctor>, i) -> the ctor's i-th operand`. A Rock
+                // tuple has no assignable place, so a `MakeTuple` is immutable for
+                // the same reason a `MakeValueStruct` is. This is what lets a
+                // combinator's `let (ok, x) = next(inner)` reach the element the
+                // mechanism-I repack built: without it the element stays behind an
+                // un-forwarded `TupleIndex`, and the presence test on it is a
+                // whole-value use that pins the box `nobox` forbids.
+                Inst::TupleIndex { base, index } => {
+                    let (base, index) = (*base, *index);
+                    let rb = resolve_subst(&subst, base);
+                    if let Inst::MakeTuple(vs) = &func.insts[rb] {
+                        if let Some(op) = vs.get(index) {
+                            subst[raw(id) as usize] = Some(resolve_subst(&subst, *op));
+                            any_subst = true;
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -1095,7 +1596,8 @@ fn resolve_subst(subst: &[Option<Idx<Inst>>], mut x: Idx<Inst>) -> Idx<Inst> {
 /// checked `Index` read can error, so a discarded read must still run.
 fn is_dead_rc(inst: &Inst, i: Idx<Inst>, use_count: &[u32], load_count: &[u32]) -> bool {
     match inst {
-        Inst::Call { .. } | Inst::CallValue { .. } | Inst::Index { .. } => false,
+        Inst::Call { .. } | Inst::CallValue { .. } => false,
+        Inst::Index { kind, .. } if index_read_is_checked(kind) => false,
         Inst::Store { cell, .. } => load_count[raw(*cell) as usize] == 0,
         _ if inst.produces_value() => use_count[raw(i) as usize] == 0,
         _ => false,
@@ -1235,6 +1737,7 @@ pub(crate) fn value_operands(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
     match inst {
         Inst::Const(_) | Inst::Global(_) | Inst::Load(_) | Inst::Lambda { .. }
         | Inst::CoroHook { .. } => {}
+        Inst::FfiViewCast { ptr, .. } => p(ptr),
         Inst::IntAdd(a, b) | Inst::IntSub(a, b) | Inst::IntMul(a, b) | Inst::IntDiv(a, b)
         | Inst::IntMod(a, b) | Inst::FloatAdd(a, b) | Inst::FloatSub(a, b) | Inst::FloatMul(a, b)
         | Inst::FloatDiv(a, b) | Inst::FloatMod(a, b) | Inst::StringConcat(a, b)
@@ -1250,7 +1753,16 @@ pub(crate) fn value_operands(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
         Inst::CallValue { callee, args } => { p(callee); args.iter().for_each(&mut p); }
         Inst::CallValueMulti { callee, args, .. } => { p(callee); args.iter().for_each(&mut p); }
         Inst::MakeTuple(vs) | Inst::MakeVec(vs) => vs.iter().for_each(&mut p),
-        Inst::MakeStruct { fields, .. } | Inst::MakeValueStruct { fields, .. } | Inst::MakeEnv { fields, .. } => fields.iter().for_each(|(_, a)| p(a)),
+        Inst::MakeVecColumns {
+            columns, capacity, ..
+        } => {
+            p(capacity);
+            columns.iter().flat_map(|(_, vs)| vs).for_each(&mut p)
+        }
+        Inst::MakeStruct { fields, .. }
+        | Inst::MakeValueStruct { fields, .. }
+        | Inst::MaterializeValueStruct { fields, .. }
+        | Inst::MakeEnv { fields, .. } => fields.iter().for_each(|(_, a)| p(a)),
         Inst::MakeEnum { positional, named, .. } => {
             positional.iter().for_each(&mut p);
             named.iter().for_each(|(_, a)| p(a));
@@ -1263,6 +1775,7 @@ pub(crate) fn value_operands(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
         Inst::FfiNewArray { count, .. } => p(count),
         Inst::Field { base, .. } | Inst::TupleIndex { base, .. } => p(base),
         Inst::Index { base, index, .. } => { p(base); p(index); }
+        Inst::VecCheckedIndex { vec, index } => { p(vec); p(index); }
         Inst::Len { base, .. } => p(base),
         Inst::Store { value, .. } => p(value),
         Inst::StoreField { base, value, .. } => { p(base); p(value); }
@@ -1279,6 +1792,7 @@ pub(crate) fn remap_inst(inst: &mut Inst, m: &impl Fn(Idx<Inst>) -> Idx<Inst>) {
     match inst {
         Inst::Const(_) | Inst::Global(_) | Inst::Load(_) | Inst::Lambda { .. }
         | Inst::CoroHook { .. } => {}
+        Inst::FfiViewCast { ptr, .. } => f(ptr),
         Inst::IntAdd(a, b) | Inst::IntSub(a, b) | Inst::IntMul(a, b) | Inst::IntDiv(a, b)
         | Inst::IntMod(a, b) | Inst::FloatAdd(a, b) | Inst::FloatSub(a, b) | Inst::FloatMul(a, b)
         | Inst::FloatDiv(a, b) | Inst::FloatMod(a, b) | Inst::StringConcat(a, b)
@@ -1294,7 +1808,16 @@ pub(crate) fn remap_inst(inst: &mut Inst, m: &impl Fn(Idx<Inst>) -> Idx<Inst>) {
         Inst::CallValue { callee, args } => { f(callee); args.iter_mut().for_each(&mut f); }
         Inst::CallValueMulti { callee, args, .. } => { f(callee); args.iter_mut().for_each(&mut f); }
         Inst::MakeTuple(vs) | Inst::MakeVec(vs) => vs.iter_mut().for_each(&mut f),
-        Inst::MakeStruct { fields, .. } | Inst::MakeValueStruct { fields, .. } | Inst::MakeEnv { fields, .. } => fields.iter_mut().for_each(|(_, a)| f(a)),
+        Inst::MakeVecColumns {
+            columns, capacity, ..
+        } => {
+            f(capacity);
+            columns.iter_mut().flat_map(|(_, vs)| vs).for_each(&mut f)
+        }
+        Inst::MakeStruct { fields, .. }
+        | Inst::MakeValueStruct { fields, .. }
+        | Inst::MaterializeValueStruct { fields, .. }
+        | Inst::MakeEnv { fields, .. } => fields.iter_mut().for_each(|(_, a)| f(a)),
         Inst::MakeEnum { positional, named, .. } => {
             positional.iter_mut().for_each(&mut f);
             named.iter_mut().for_each(|(_, a)| f(a));
@@ -1307,6 +1830,7 @@ pub(crate) fn remap_inst(inst: &mut Inst, m: &impl Fn(Idx<Inst>) -> Idx<Inst>) {
         Inst::FfiNewArray { count, .. } => f(count),
         Inst::Field { base, .. } | Inst::TupleIndex { base, .. } => f(base),
         Inst::Index { base, index, .. } => { f(base); f(index); }
+        Inst::VecCheckedIndex { vec, index } => { f(vec); f(index); }
         Inst::Len { base, .. } => f(base),
         Inst::Store { value, .. } => f(value),
         Inst::StoreField { base, value, .. } => { f(base); f(value); }

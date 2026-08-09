@@ -384,9 +384,16 @@ impl StickConfig {
             .unwrap_or(false)
     }
 
-    /// Recognised values for `[engine] needs = [...]`. Keep in sync with
-    /// `build_engine_libs` in `cli/stone.rs`.
-    pub const KNOWN_ENGINE_NEEDS: &'static [&'static str] = &["video"];
+    /// Recognised values for `[engine] needs = [...]`, read off the build table
+    /// rather than restated. A hand-maintained copy drifts silently, and in the
+    /// direction that looks like the user's fault: a need the table can build
+    /// but the validator rejects reads as a typo in their manifest.
+    pub fn known_engine_needs() -> Vec<&'static str> {
+        crate::engine_build::OPTIONAL_ENGINE_LIBS
+            .iter()
+            .map(|l| l.need)
+            .collect()
+    }
 
     /// Reject typos in `[engine] needs = [...]` (e.g. "vidoe") so the
     /// build doesn't silently skip an optional cdylib the user asked for.
@@ -422,12 +429,13 @@ impl StickConfig {
         let Some(engine) = self.engine.as_ref() else {
             return Ok(());
         };
+        let known = Self::known_engine_needs();
         for entry in &engine.needs {
-            if !Self::KNOWN_ENGINE_NEEDS.contains(&entry.as_str()) {
+            if !known.contains(&entry.as_str()) {
                 anyhow::bail!(
                     "stick.toml: unknown [engine] needs entry {:?}. Known: {:?}",
                     entry,
-                    Self::KNOWN_ENGINE_NEEDS
+                    known
                 );
             }
         }
@@ -662,6 +670,41 @@ mod tests {
             "[package]\nname = \"x\"\nversion = \"1.2.3\"\n",
         ).unwrap();
         assert_eq!(cfg.package.version(), "1.2.3");
+    }
+
+    /// Every lib the build table can produce must be ACCEPTED by the validator,
+    /// and a non-entry must still be rejected. Asserting the accept side alone
+    /// passes on a validator that accepts everything.
+    #[test]
+    fn the_validator_admits_exactly_the_build_table() {
+        let table = crate::engine_build::OPTIONAL_ENGINE_LIBS;
+        assert!(!table.is_empty(), "no optional libs to check");
+        for lib in table {
+            let cfg = StickConfig::new_from_str(&format!(
+                "[package]\nname = \"x\"\n[engine]\nneeds = [\"{}\"]\n",
+                lib.need
+            ))
+            .unwrap();
+            cfg.validate_engine_needs()
+                .unwrap_or_else(|e| panic!("table lib {:?} rejected: {e}", lib.need));
+            assert!(cfg.needs_engine_lib(lib.need));
+        }
+        let cfg = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[engine]\nneeds = [\"not-a-lib\"]\n",
+        )
+        .unwrap();
+        cfg.validate_engine_needs()
+            .expect_err("a need outside the table must be rejected");
+    }
+
+    #[test]
+    fn validate_engine_needs_accepts_wgpu() {
+        let cfg = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[engine]\nneeds = [\"wgpu\"]\n",
+        ).unwrap();
+        cfg.validate_engine_needs().expect("wgpu is a known need");
+        assert!(cfg.needs_engine_lib("wgpu"));
+        assert!(!cfg.needs_engine_lib("video"));
     }
 
     #[test]

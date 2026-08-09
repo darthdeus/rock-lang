@@ -4,9 +4,7 @@
 //! value -- no record, no `__call`, zero alloc). A CAPTURING lambda is untouched
 //! (stays an inline closure). Naming `k` = the `Inst::Lambda`'s inst-arena index
 //! order (shared with the future P2.6 record naming).
-
-mod common;
-use common::{emit_module, function_body, mangled_name, run_luajit};
+use crate::common::{emit_module, function_body, mangled_name, run_luajit};
 
 // `free_loop` creates a capture-free lambda (`() => { sink(42) }` closes over
 // nothing) in a loop; `capturing_loop` creates one that captures the loop
@@ -131,7 +129,7 @@ fn hoist_name_collision_with_user_fn_rejected() {
 fn foo() -> fn() { return () => { sink(1) } }
 fn main() {}
 "#;
-    let err = common::try_emit_module(src).err().expect("the collision must be rejected");
+    let err = crate::common::try_emit_module(src).err().expect("the collision must be rejected");
     assert!(
         err.message.contains("foo_ret_fn_ret_unit__lambda0") && err.message.contains("compiler-reserved synthetic name"),
         "rejection names the colliding synthetic name; got: {}",

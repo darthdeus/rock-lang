@@ -132,10 +132,11 @@ pub struct CodegenCtx {
     /// through [`mint_synthetic`] that lands here would clobber the user's def
     /// last-write-wins, so it is rejected (span points at the user's def).
     reserved: HashMap<String, Span>,
-    /// Collisions recorded during (parallel) emit; drained by [`take_collision`]
-    /// at each public emit boundary. `Mutex` because `&CodegenCtx` is shared
-    /// across rayon workers; contention is nil (a few mints per fn).
-    collisions: Mutex<Vec<(String, CompilerError)>>,
+    /// Rejections recorded during (parallel) emit -- name collisions and broken
+    /// codegen invariants alike; drained by [`take_rejection`] at each public
+    /// emit boundary. `Mutex` because `&CodegenCtx` is shared across rayon
+    /// workers; contention is nil (a few per fn).
+    rejections: Mutex<Vec<(String, CompilerError)>>,
 }
 
 /// True if `name` is an identifier skull emits as a bare LOCAL inside function
@@ -198,7 +199,7 @@ impl CodegenCtx {
         // signatures mangling alike, or a mangled name equal to an exempt bare
         // name. Drained through the same sink as the synthetic-name collisions.
         collisions.extend(skull_mir::mangle::collision_errors(ws));
-        CodegenCtx { reserved, collisions: Mutex::new(collisions) }
+        CodegenCtx { reserved, rejections: Mutex::new(collisions) }
     }
 
     /// Mint a compiler-reserved synthetic top-level Lua name: a hoisted lambda
@@ -206,7 +207,7 @@ impl CodegenCtx {
     /// `__advance`/`__defer<k>`/`__on_killed`/`__on_resume`/`__on_hot_reload`).
     /// Returns `name` unchanged. If it collides with a REAL top-level name (a
     /// user fn's Lua name or a global), records a spanned rejection pointing at
-    /// that user definition -- drained after emit by [`take_collision`]. This is
+    /// that user definition -- drained after emit by [`take_rejection`]. This is
     /// reject-not-panic: a collision is illegal user code, not a compiler bug, so
     /// it surfaces as a diagnostic and keeps `rock stone` / `lsp serve` alive.
     /// THE single choke point for every synthetic top-level name across skull.
@@ -218,20 +219,24 @@ impl CodegenCtx {
                  `__advance`, `__defer<k>`, and `__on_killed`/`__on_resume`/`__on_hot_reload` \
                  forms are reserved)"
             );
-            self.collisions
-                .lock()
-                .expect("collision sink")
-                .push((name.clone(), CompilerError::new_with_label(span, msg)));
+            self.reject(name.clone(), CompilerError::new_with_label(span, msg));
         }
         name
     }
 
-    /// Drain the recorded synthetic-name collisions and return the first (by
-    /// synthetic name, for determinism across rayon scheduling), or `None`.
-    /// Called at each public emit boundary; draining clears the sink so a later
-    /// emit on the same (cached) ctx starts fresh.
-    pub fn take_collision(&self) -> Option<CompilerError> {
-        let mut sink = self.collisions.lock().expect("collision sink");
+    /// Record a rejection found mid-emit, keyed by `key` for deterministic
+    /// ordering across rayon scheduling. THE sink for anything the render path
+    /// cannot return a `Result` from.
+    pub fn reject(&self, key: String, err: CompilerError) {
+        self.rejections.lock().expect("rejection sink").push((key, err));
+    }
+
+    /// Drain the recorded rejections and return the first (by key, for
+    /// determinism across rayon scheduling), or `None`. Called at each public
+    /// emit boundary; draining clears the sink so a later emit on the same
+    /// (cached) ctx starts fresh.
+    pub fn take_rejection(&self) -> Option<CompilerError> {
+        let mut sink = self.rejections.lock().expect("rejection sink");
         sink.sort_by(|a, b| a.0.cmp(&b.0));
         sink.drain(..).next().map(|(_, e)| e)
     }
@@ -372,6 +377,7 @@ pub fn emit_named_framed(
     // def is emitted in THIS function's chunk (not shared scaffolding), so an
     // incremental body-edit overlay carries it; value structs are immutable, so
     // re-running the def on reload is a harmless no-op (no preservation guard).
+    record_leaf_form_violations(ws, ctx, func);
     let (hoist, hoist_names, hoist_defs) = collect_const_hoists(ws, func, name);
     let estimated_body_bytes = func.insts.len() * 24;
     let mut out =
@@ -383,21 +389,150 @@ pub fn emit_named_framed(
     out
 }
 
+/// Whether every use of `cand` is a provably READ-ONLY consumer, so sharing one
+/// module-scope instance across all of them is unobservable.
+///
+/// FAIL-CLOSED by construction: the allow-list is tiny and anything else --
+/// including a new `Inst` variant -- disqualifies. The inverse (list the
+/// escaping consumers) would silently start sharing a mutable value the day the
+/// enum grows.
+fn const_hoist_uses_are_read_only(ws: &Workspace, func: &MirFunc, cand: Idx<Inst>) -> bool {
+    for (_, inst) in func.insts.iter() {
+        let allowed = match inst {
+            // A field/tuple projection and an equality test observe the value
+            // without retaining or mutating it.
+            Inst::Field { base, .. } | Inst::TupleIndex { base, .. } => *base == cand,
+            Inst::Eq(a, b) | Inst::NotEq(a, b) => *a == cand || *b == cand,
+            // Storing INTO cdata copies by value, so the destination cannot alias
+            // the shared instance: an FFI-clean `<Name>_ct(..)` ctor copies each
+            // field, and a `slot.f = v` into a NativeBuffer element writes bytes.
+            // A TABLE destination (plain struct, GC-tier `<Name>_vt`, Vec element,
+            // global, cell) stores the REFERENCE and is what aliases.
+            Inst::MakeValueStruct { name, fields }
+            | Inst::MaterializeValueStruct { name, fields } => {
+                !fields.iter().any(|(_, v)| *v == cand)
+                    || !skull_mir::lower::value_struct_is_gc(ws, *name)
+            }
+            Inst::StoreField { base, value, .. } => {
+                *value != cand
+                    || matches!(
+                        func.insts[*base],
+                        Inst::Index { kind: ContainerKind::NativeBuffer | ContainerKind::NativeBufferValue(_), .. }
+                    )
+            }
+            _ => false,
+        };
+        if allowed {
+            continue;
+        }
+        let mut reads = false;
+        regalloc::inst_uses(inst, &mut |u| reads |= u == cand);
+        if reads {
+            return false;
+        }
+    }
+    // A terminator operand leaves the function (return value, branch
+    // discriminant, yield channel), so it is never a read-only use.
+    !func.blocks.iter().any(|(_, blk)| match &blk.term {
+        Term::Return(vs) | Term::Yield { values: vs, .. } => vs.contains(&cand),
+        Term::Branch { cond, .. } => *cond == cand,
+        Term::Switch { discr, .. } => *discr == cand,
+        _ => false,
+    })
+}
+
+
+/// Whether these ctor operands are the flattened LEAF form (dotted field names
+/// naming primitive leaves) rather than the declared-field form.
+///
+/// Deliberately NOT "some name contains a dot": the sequence must equal
+/// `value_leaf_paths_of` EXACTLY. The ctor is positional, so a partially or
+/// wrongly flattened field list would emit silently against the wrong
+/// signature; requiring the canonical sequence turns that into a loud panic at
+/// emit instead -- the same fail-closed move `value_leaf_layout_checked` makes.
+fn is_leaf_form(fields: &[(ustr::Ustr, Idx<Inst>)]) -> bool {
+    fields.iter().any(|(n, _)| n.contains('.'))
+}
+
+/// `Some(err)` if a flattened (dotted-field) ctor for `name` does not carry
+/// EXACTLY its canonical leaf sequence. The `_lct` ctor is positional, so a
+/// partial or reordered flattening would write one leaf's value into another
+/// with no diagnostic.
+///
+/// A violation is a compiler-invariant break rather than illegal user code, but
+/// it still REJECTS instead of panicking: this runs on every emit, and a panic
+/// takes `rock lsp serve` and `rock stone`'s watch loop down with a backtrace
+/// and no diagnostic. Twin of the JS emitter's check.
+pub fn leaf_form_violation(
+    ws: &Workspace,
+    name: ustr::Ustr,
+    got: &[ustr::Ustr],
+) -> Option<CompilerError> {
+    let canonical = skull_mir::lower::value_leaf_paths_of(ws, name).unwrap_or_default();
+    if got == canonical {
+        return None;
+    }
+    Some(CompilerError::new_no_location(format!(
+        "`{name}` ctor carries dotted field names that are not its canonical leaf \
+         sequence: {got:?} vs {canonical:?}"
+    )))
+}
+
+/// Every flattened value-struct ctor in `func`, checked against its canonical
+/// leaf sequence. Run once per emitted function, before rendering: the render
+/// path picks `_lct` off the dotted names alone and cannot itself reject.
+fn record_leaf_form_violations(ws: &Workspace, ctx: &CodegenCtx, func: &MirFunc) {
+    for (_, inst) in func.insts.iter() {
+        let (Inst::MakeValueStruct { name, fields } | Inst::MaterializeValueStruct { name, fields }) =
+            inst
+        else {
+            continue;
+        };
+        if !is_leaf_form(fields) {
+            continue;
+        }
+        let got: Vec<ustr::Ustr> = fields.iter().map(|(n, _)| *n).collect();
+        if let Some(err) = leaf_form_violation(ws, *name, &got) {
+            ctx.reject(name.to_string(), err);
+        }
+    }
+}
+
 /// Group every all-constant `MakeValueStruct` (every field operand a `Const`) by
 /// (struct name, field literals). Returns `(inst -> group, group -> global name,
 /// def lines)`: each group becomes one function-owned global
-/// `__skull_kc_<fn>_<g> = <Name>_ct(<lits>)`. Hoisting is unconditional -- a
-/// module-scope global is built once at chunk load, so it is never worse than a
-/// per-use ctor (which it equals on a trace via SINK and beats in the
-/// interpreter), unlike a per-CALL function-entry local which defeats SINK.
+/// `__skull_kc_<fn>_<g> = <Name>_ct(<lits>)`. A module-scope global is built once
+/// at chunk load, so it is never worse than a per-use ctor (which it equals on a
+/// trace via SINK and beats in the interpreter), unlike a per-CALL function-entry
+/// local which defeats SINK.
+///
+/// Hoisting is NOT unconditional: it is sound only while the shared instance
+/// cannot be mutated. The place model legalized leaf writes through mutable
+/// storage (docs/value-semantics-axes.md), so a constant that reaches a mutable
+/// place must be materialized FRESH per construction -- otherwise `a.p.x = 5`
+/// through one holder rewrites every other holder of that literal, including an
+/// unrelated global (`tests/value_const_hoist_aliasing.rock`). Candidates whose
+/// uses are not provably read-only emit their ctor inline, exactly as before the
+/// hoist existed.
 fn collect_const_hoists(
     ws: &Workspace,
     func: &MirFunc,
     base: &str,
 ) -> (HashMap<Idx<Inst>, u32>, Vec<String>, String) {
-    let mut groups: Vec<(ustr::Ustr, Vec<Lit>)> = Vec::new();
+    // The leaf-form flag rides with the group: a flattened all-const ctor must
+    // hoist against `_lct`, whose arity and signature differ from `_ct`.
+    let mut groups: Vec<(ustr::Ustr, Vec<Lit>, bool)> = Vec::new();
     let mut hoist: HashMap<Idx<Inst>, u32> = HashMap::default();
+    // Only insts still REACHED BY A BLOCK. The arena keeps orphans (DCE unlinks
+    // from blocks, it does not free), and hoisting one emits a module-scope ctor
+    // call for a value the program never builds -- which for a nobox type is a
+    // materialization the verifier cannot see, since it walks `block.insts`.
+    let live: HashSet<Idx<Inst>> =
+        func.blocks.iter().flat_map(|(_, b)| b.insts.iter().copied()).collect();
     for (id, inst) in func.insts.iter() {
+        if !live.contains(&id) {
+            continue;
+        }
         let Inst::MakeValueStruct { name, fields } = inst else {
             continue;
         };
@@ -416,10 +551,14 @@ fn collect_const_hoists(
             })
             .collect();
         let Some(lits) = lits else { continue };
-        let g = match groups.iter().position(|(n, l)| *n == *name && *l == lits) {
+        if !const_hoist_uses_are_read_only(ws, func, id) {
+            continue;
+        }
+        let leaf_form = is_leaf_form(fields);
+        let g = match groups.iter().position(|(n, l, lf)| *n == *name && *l == lits && *lf == leaf_form) {
             Some(p) => p as u32,
             None => {
-                groups.push((*name, lits));
+                groups.push((*name, lits, leaf_form));
                 (groups.len() - 1) as u32
             }
         };
@@ -430,9 +569,9 @@ fn collect_const_hoists(
     }
     let mut names = Vec::with_capacity(groups.len());
     let mut defs = String::new();
-    for (g, (name, lits)) in groups.iter().enumerate() {
+    for (g, (name, lits, leaf_form)) in groups.iter().enumerate() {
         let gname = format!("__skull_kc_{base}_{g}");
-        let suffix = if skull_mir::lower::value_struct_is_gc(ws, *name) { "_vt" } else { "_ct" };
+        let suffix = if *leaf_form { "_lct" } else if skull_mir::lower::value_struct_is_gc(ws, *name) { "_vt" } else { "_ct" };
         let _ = write!(defs, "{gname} = {name}{suffix}(");
         for (i, l) in lits.iter().enumerate() {
             if i > 0 {
@@ -1133,23 +1272,8 @@ impl Emitter<'_> {
         push_uint(out, raw(bb));
         out.push_str("::\n");
         let insts: &[Idx<Inst>] = &self.func.blocks[bb].insts;
-        let mut i = 0;
-        while i < insts.len() {
-            let id = insts[i];
-            // A NativeBuffer slot read (`__nb_checked_get`) feeding only field
-            // stores is emitted as a `do local __slot = ..; __slot.f = .. end`
-            // cluster -- a BLOCK-scoped local, not a reused function register. A
-            // function-level register holding the slot cdata gets a loop-carried
-            // PHI (it reads live at the loop header snapshot), which pins the
-            // pointer cdata so LuaJIT cannot sink it (24 B/elem); a block local is
-            // dead at the header, so it sinks to 0 -- matching rock. See the slot
-            // cluster method.
-            if let Some(consumed) = self.try_emit_nb_slot_cluster(out, bb, id, &insts[i + 1..]) {
-                i += 1 + consumed;
-                continue;
-            }
+        for &id in insts {
             self.emit_inst(out, id);
-            i += 1;
         }
         // A goto into an un-emitted counted-loop header becomes a structured
         // `for` (the preheader falls through into it); everything else is a goto.
@@ -1162,69 +1286,6 @@ impl Emitter<'_> {
             }
         }
         self.emit_term(out, &self.func.blocks[bb].term);
-    }
-
-    /// If `slot` is a non-inlinable `Index{NativeBuffer}` whose ONLY uses are the
-    /// field stores immediately following it (a `buf[i] = ValueStruct{..}` lowered
-    /// by `scalarize_native_buffer_stores`), emit it as a `do … end` cluster with
-    /// a BLOCK-scoped local for the slot, and return how many following stores it
-    /// consumed. Else `None` (the slot is emitted normally).
-    ///
-    /// Why: skull holds the slot in a function-level register, which LuaJIT keeps
-    /// live at the loop-header snapshot -> a loop-carried PHI on the `buf.ptr[i]`
-    /// pointer cdata -> it cannot sink (24 B/element). rock declares the slot as a
-    /// fresh `local` inside the loop body, dead at the header, so it sinks to 0. A
-    /// block-scoped local reproduces that.
-    fn try_emit_nb_slot_cluster(
-        &self,
-        out: &mut String,
-        bb: Idx<Block>,
-        slot: Idx<Inst>,
-        following: &[Idx<Inst>],
-    ) -> Option<usize> {
-        if self.inlinable[raw(slot) as usize]
-            || !matches!(
-                &self.func.insts[slot],
-                Inst::Index { kind, .. } if kind.is_native_buffer()
-            )
-        {
-            return None;
-        }
-        // Consecutive field stores into the slot. Even a SINGLE store keeps the
-        // pointer cdata live across the iteration in a function register (-> a
-        // loop-carried PHI that doesn't sink, 24 B/iter); block-scoping fixes any
-        // count >= 1.
-        let n = following
-            .iter()
-            .take_while(|&&fi| matches!(&self.func.insts[fi], Inst::StoreField { base, .. } if *base == slot))
-            .count();
-        if n == 0 {
-            return None;
-        }
-        // The slot must have NO use after the cluster (later insts or the term) --
-        // a block-scoped local would be out of scope there.
-        let mut escapes = false;
-        for &fi in &following[n..] {
-            regalloc::inst_uses(&self.func.insts[fi], &mut |u| escapes |= u == slot);
-        }
-        regalloc::term_uses(&self.func.blocks[bb].term, &mut |u| escapes |= u == slot);
-        if escapes {
-            return None;
-        }
-        let lname = format!("__nbslot{}", raw(slot));
-        out.push_str("  do\n");
-        let _ = write!(out, "    local {lname} = ");
-        self.write_value(out, &self.func.insts[slot]);
-        out.push('\n');
-        for &fi in &following[..n] {
-            if let Inst::StoreField { field, value, .. } = &self.func.insts[fi] {
-                let _ = write!(out, "    {lname}.{field} = ");
-                self.write_opnd(out, *value);
-                out.push('\n');
-            }
-        }
-        out.push_str("  end\n");
-        Some(n)
     }
 
     /// Emit a recognized counted loop as `for <slot> = <slot>, hi[-1] do .. end`.
@@ -1313,15 +1374,29 @@ impl Emitter<'_> {
             out.push_str("  ");
             write_vname(out, &self.colors, id);
             out.push_str(" = ");
-            self.write_value(out, inst);
+            self.write_value(out, id, inst);
             out.push('\n');
         } else {
-            self.write_effect(out, inst);
+            self.write_effect(out, id, inst);
         }
     }
 
     /// Splice an `@inline inline(lua)` `Call` inline, if `id` is one. Returns
     /// true iff it spliced; else the caller emits the normal `callee(args)`.
+    /// The emitted symbol this call targets. A call the lowerer gave a
+    /// specialized instantiation (its value args splatted to leaves) targets the
+    /// SPECIALIZED copy -- the shared generic body takes `T` as one boxed slot and
+    /// could not serve those arguments. Same derivation the specialized definition
+    /// is emitted under, so the two cannot drift.
+    fn callee_name(&self, id: Idx<Inst>, func: FuncRef) -> String {
+        let callee = func_of(self.ws, func);
+        self.func
+            .spec_bindings
+            .get(&id)
+            .and_then(|key| skull_mir::mangle::spec_fn_name(self.ws, callee, key))
+            .unwrap_or_else(|| mangle_fn(self.ws, callee))
+    }
+
     fn try_emit_inline_lua_splice(&self, out: &mut String, id: Idx<Inst>) -> bool {
         let Inst::Call { func, args } = &self.func.insts[id] else {
             return false;
@@ -1405,7 +1480,7 @@ impl Emitter<'_> {
             // bare negative literal under unary `-` would form `--` — a Lua
             // comment — without the wrap.)
             out.push('(');
-            self.write_value(out, &self.func.insts[id]);
+            self.write_value(out, id, &self.func.insts[id]);
             out.push(')');
         } else {
             write_vname(out, &self.colors, id);
@@ -1436,7 +1511,7 @@ impl Emitter<'_> {
     }
 
     /// The RHS expression for a value-producing instruction.
-    fn write_value(&self, out: &mut String, inst: &Inst) {
+    fn write_value(&self, out: &mut String, id: Idx<Inst>, inst: &Inst) {
         match inst {
             Inst::Const(l) => write_lit(out, l),
             Inst::Global(g) => out.push_str(g.as_str()),
@@ -1500,7 +1575,7 @@ impl Emitter<'_> {
             // the inner value's expression verbatim (identity). Reached only if a
             // pass ever materializes one; the operand path (`write_opnd`) folds it
             // away. `write_value` (not `write_opnd`) to avoid a double wrap.
-            Inst::IntToFloat(x) => self.write_value(out, &self.func.insts[*x]),
+            Inst::IntToFloat(x) => self.write_value(out, *x, &self.func.insts[*x]),
 
             Inst::IntLt(a, b) | Inst::FloatLt(a, b) => self.write_bin(out, "<", a, b),
             Inst::IntLeq(a, b) | Inst::FloatLeq(a, b) => self.write_bin(out, "<=", a, b),
@@ -1530,7 +1605,7 @@ impl Emitter<'_> {
             Inst::Shr(a, b) => self.write_bitfn(out, "bit.rshift", a, b),
 
             Inst::Call { func, args } => {
-                let callee = mangle_fn(self.ws, func_of(self.ws, *func));
+                let callee = self.callee_name(id, *func);
                 out.push_str(&callee);
                 out.push('(');
                 self.write_csv(out, args);
@@ -1567,6 +1642,33 @@ impl Emitter<'_> {
                 self.write_csv(out, vs);
                 let _ = write!(out, "}}, len = {}, __ty = \"Vec\"}}", vs.len());
             }
+            // Column storage: one array per leaf, sharing the single `len`.
+            // Keys are written in brackets because a nested leaf path is dotted
+            // (`min.x`), which is not a bare Lua identifier.
+            Inst::MakeVecColumns {
+                elem,
+                columns,
+                len,
+                capacity,
+            } => {
+                out.push_str("{[");
+                write_lua_string(out, skull_mir::mir::VEC_COLUMN_HEADER_FIELD);
+                out.push_str("] = {repr = ");
+                write_lua_string(out, skull_mir::mir::VEC_COLUMN_REPR);
+                out.push_str(", elem = ");
+                write_lua_string(out, elem.as_str());
+                out.push_str(", cap = ");
+                self.write_opnd(out, *capacity);
+                out.push_str("}, ");
+                for (name, vs) in columns {
+                    out.push('[');
+                    write_lua_string(out, name.as_str());
+                    out.push_str("] = {");
+                    self.write_csv(out, vs);
+                    out.push_str("}, ");
+                }
+                let _ = write!(out, "len = {len}, __ty = \"Vec\"}}");
+            }
             Inst::MakeStruct { ty, fields } => {
                 out.push('{');
                 let mut first = true;
@@ -1580,17 +1682,31 @@ impl Emitter<'_> {
                         out.push_str(", ");
                     }
                     first = false;
-                    let _ = write!(out, "{n} = ");
+                    write_table_key(out, n.as_str());
                     self.write_opnd(out, *id);
                 }
                 out.push('}');
             }
-            Inst::MakeValueStruct { name, fields } => {
+            Inst::MakeValueStruct { name, fields }
+            | Inst::MaterializeValueStruct { name, fields } => {
                 // Positional ctor in declared field order; field names are for MIR
                 // passes only (SROA), not the wire shape. The ctor NAME is chosen
                 // by tier from the ONE classification: `_vt` (table) for a
                 // GC-carrying value struct, `_ct` (cdata) for an FFI-clean one.
-                let suffix = if skull_mir::lower::value_struct_is_gc(self.ws, *name) {
+                //
+                // A leaf-table struct is decided by TYPE, ahead of any operand
+                // check: it has no declared-field ctor at all (the prelude emits
+                // only `_lct` for it), and its pack site is unconditionally leaf
+                // form. Asking the operands instead reads the same oracle through
+                // a proxy that does not hold -- a nullable child with no data
+                // leaves contributes one leaf keyed on the field's own name, so
+                // the leaf sequence is textually identical to the declared field
+                // list and no operand-shape test can tell them apart.
+                let suffix = if skull_mir::lower::value_struct_is_leaf_table(self.ws, *name) {
+                    "_lct"
+                } else if is_leaf_form(fields) {
+                    "_lct"
+                } else if skull_mir::lower::value_struct_is_gc(self.ws, *name) {
                     "_vt"
                 } else {
                     "_ct"
@@ -1645,9 +1761,14 @@ impl Emitter<'_> {
                 self.write_opnd(out, *count);
                 out.push(')');
             }
+            Inst::FfiViewCast { cty, ptr } => {
+                let _ = write!(out, "ffi.cast(\"{cty}*\", ");
+                self.write_opnd(out, *ptr);
+                out.push(')');
+            }
             Inst::Field { base, field } => {
                 self.write_opnd(out, *base);
-                let _ = write!(out, ".{field}");
+                write_field_key(out, field.as_str());
             }
             Inst::TupleIndex { base, index } => {
                 self.write_opnd(out, *base);
@@ -1657,12 +1778,30 @@ impl Emitter<'_> {
             }
 
             Inst::Index { base, index, kind } => self.write_index(out, *base, *index, *kind),
+            Inst::VecCheckedIndex { vec, index } => {
+                out.push_str("__vec_checked_index(");
+                self.write_opnd(out, *vec);
+                out.push_str(", ");
+                self.write_opnd(out, *index);
+                out.push(')');
+            }
             Inst::Len { base, kind } => match kind {
                 ContainerKind::Vec
+                | ContainerKind::VecValueColumns(_)
                 | ContainerKind::NativeBuffer
                 | ContainerKind::NativeBufferValue(_) => {
                     self.write_opnd(out, *base);
                     out.push_str(".len");
+                }
+                // Neither a bare leaf column nor a leaf VIEW has a `len` of its
+                // own -- the owning container holds the single length, so
+                // lowering asks it there.
+                ContainerKind::NativeBufferLeaf => {
+                    unreachable!("`len` of a leaf view: lowering must ask the owning buffer")
+                }
+                ContainerKind::VecColumn => {
+                    out.push('#');
+                    self.write_opnd(out, *base);
                 }
                 ContainerKind::Map => {
                     // No O(1) length on a Map; lowering shouldn't emit this kind.
@@ -1760,6 +1899,25 @@ impl Emitter<'_> {
                 self.write_opnd(out, index);
                 out.push(')');
             }
+            // A leaf column: `index` is already 1-based and already checked
+            // (`VecCheckedIndex`), so this is a raw array read.
+            ContainerKind::VecColumn => {
+                self.write_opnd(out, base);
+                out.push('[');
+                self.write_opnd(out, index);
+                out.push(']');
+            }
+            // A whole-element read has no single slot to name -- column storage
+            // has no element table. Lowering decomposes every such read into
+            // per-column reads (`column_element_repr`), so reaching emit means
+            // that decomposition was bypassed. Fail loudly: emitting ANY Lua
+            // here would be silently wrong code.
+            ContainerKind::VecValueColumns(elem) => {
+                unreachable!(
+                    "whole-element index of column-stored [{elem}] reached emit, in `{}`",
+                    self.func.name
+                )
+            }
             ContainerKind::NativeBuffer | ContainerKind::NativeBufferValue(_) => {
                 out.push_str("__nb_checked_get(");
                 self.write_opnd(out, base);
@@ -1767,7 +1925,9 @@ impl Emitter<'_> {
                 self.write_opnd(out, index);
                 out.push(')');
             }
-            ContainerKind::Map => {
+            // A leaf view is a raw C pointer: index it directly. The index is
+            // absolute and the ELEMENT access was bounds-checked once already.
+            ContainerKind::NativeBufferLeaf | ContainerKind::Map => {
                 self.write_opnd(out, base);
                 out.push('[');
                 self.write_opnd(out, index);
@@ -1776,7 +1936,7 @@ impl Emitter<'_> {
         }
     }
 
-    fn write_effect(&self, out: &mut String, inst: &Inst) {
+    fn write_effect(&self, out: &mut String, id: Idx<Inst>, inst: &Inst) {
         match inst {
             Inst::Store { cell, value } => {
                 out.push_str("  ");
@@ -1788,7 +1948,8 @@ impl Emitter<'_> {
             Inst::StoreField { base, field, value } => {
                 out.push_str("  ");
                 self.write_opnd(out, *base);
-                let _ = write!(out, ".{field} = ");
+                write_field_key(out, field.as_str());
+                out.push_str(" = ");
                 self.write_opnd(out, *value);
                 out.push('\n');
             }
@@ -1818,7 +1979,11 @@ impl Emitter<'_> {
                         self.write_opnd(out, *value);
                         out.push_str(")\n");
                     }
-                    ContainerKind::Map => {
+                    // Raw 1-based write into one leaf column; the owning Vec's
+                    // `len` was checked once by `VecCheckedIndex`.
+                    ContainerKind::Map
+                    | ContainerKind::VecColumn
+                    | ContainerKind::NativeBufferLeaf => {
                         out.push_str("  ");
                         self.write_opnd(out, *base);
                         out.push('[');
@@ -1826,6 +1991,11 @@ impl Emitter<'_> {
                         out.push_str("] = ");
                         self.write_opnd(out, *value);
                         out.push('\n');
+                    }
+                    // One `value` operand cannot carry K leaves; lowering splits
+                    // an element write into per-column stores.
+                    ContainerKind::VecValueColumns(elem) => {
+                        unreachable!("whole-element store into column-stored [{elem}] reached emit")
                     }
                 }
             }
@@ -1845,8 +2015,13 @@ impl Emitter<'_> {
                         self.write_opnd(out, *value);
                         out.push('\n');
                     }
+                    // Column push bumps the shared `len` once, then writes K
+                    // columns -- more than one `value`, so lowering splits it.
                     ContainerKind::NativeBuffer
                     | ContainerKind::NativeBufferValue(_)
+                    | ContainerKind::NativeBufferLeaf
+                    | ContainerKind::VecValueColumns(_)
+                    | ContainerKind::VecColumn
                     | ContainerKind::Map => {
                         unreachable!("ArrayPush only lowers for Vec array literals, got {kind:?}")
                     }
@@ -1875,7 +2050,7 @@ impl Emitter<'_> {
                     }
                     write_cellname(out, self.frame, self.cell_colors, *c);
                 }
-                let callee = mangle_fn(self.ws, func_of(self.ws, *func));
+                let callee = self.callee_name(id, *func);
                 let _ = write!(out, " = {callee}(");
                 self.write_csv(out, args);
                 out.push_str(")\n");
@@ -2001,6 +2176,70 @@ pub fn lua_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     write_lua_string(&mut out, s);
     out
+}
+
+/// A Rock `[string]` value as a Lua literal.
+///
+/// The Vec representation is owned by `Inst::MakeVec` above; this is the same
+/// shape, exposed so a compiler-emitted call site (the `rock_shader`
+/// registrations in `skull::mir_emit`) cannot drift from it.
+pub fn lua_string_vec(items: &[&str]) -> String {
+    let mut out = String::from("{_data = {");
+    for (i, s) in items.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        write_lua_string(&mut out, s);
+    }
+    let _ = write!(out, "}}, len = {}, __ty = \"Vec\"}}", items.len());
+    out
+}
+
+/// The `[int]` sibling of [`lua_string_vec`], for driver text handing the engine
+/// a list of integers (a uniform block's member offsets).
+pub fn lua_int_vec(items: &[i64]) -> String {
+    let mut out = String::from("{_data = {");
+    for (i, n) in items.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        let _ = write!(out, "{n}");
+    }
+    let _ = write!(out, "}}, len = {}, __ty = \"Vec\"}}", items.len());
+    out
+}
+
+/// A field key is a Lua identifier unless it is an `embed` leaf's physical key,
+/// which is a dotted path (`"p.x"`). Lua keywords never reach here -- the
+/// tokenizer already escapes them to `__rock_<kw>` -- so anything non-identifier
+/// is a compiler-minted physical key. Constant-string bracket indexing compiles
+/// to the same `TGETS` as dot sugar, so the bracket form costs nothing.
+fn is_lua_ident(s: &str) -> bool {
+    let mut cs = s.chars();
+    cs.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && cs.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Suffix position: `base.f` or `base["a.b"]`.
+fn write_field_key(out: &mut String, field: &str) {
+    if is_lua_ident(field) {
+        let _ = write!(out, ".{field}");
+    } else {
+        out.push('[');
+        write_lua_string(out, field);
+        out.push(']');
+    }
+}
+
+/// Table-constructor key position: `f = ` or `["a.b"] = `.
+fn write_table_key(out: &mut String, field: &str) {
+    if is_lua_ident(field) {
+        let _ = write!(out, "{field} = ");
+    } else {
+        out.push('[');
+        write_lua_string(out, field);
+        out.push_str("] = ");
+    }
 }
 
 /// Append the double-quoted, escaped Lua string literal for `s` into `out`.

@@ -18,9 +18,7 @@
 //! (adding an overload renamed the unique `foo` and orphaned the running global,
 //! silent-stale). The fix (always-mangle) landed; the assertions are flipped to
 //! guard the correct behavior. History: docs/mangle-rename-hot-reload-investigation.md.
-
-mod common;
-use common::ws_of;
+use crate::common::ws_of;
 
 /// `src` -> full skull Lua program (stdlib-free: int/string/empty-main only).
 fn emit_program(src: &str) -> String {

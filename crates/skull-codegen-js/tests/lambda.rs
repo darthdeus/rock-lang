@@ -8,10 +8,7 @@
 
 use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::FuncRef;
-use std::process::Command;
-
-mod common;
-use common::{emit_user, ws_with};
+use crate::common::{emit_user, ws_with};
 
 fn test_fn_ref(ws: &bone_semantic::inference::Workspace, name: &str) -> FuncRef {
     let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
@@ -24,7 +21,7 @@ fn test_fn_ref(ws: &bone_semantic::inference::Workspace, name: &str) -> FuncRef 
 }
 
 fn node_available() -> bool {
-    Command::new("node").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+    crate::common::node().arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
 }
 
 /// Run `<defs>; console.log(<call>)` under node and parse the printed int. The
@@ -33,7 +30,7 @@ fn node_available() -> bool {
 fn node_eval_int(defs: &str, call: &str) -> i64 {
     let program =
         format!("{}{defs}\nconsole.log({call});", skull_codegen_js::JS_CALL_HELPER);
-    let out = Command::new("node").arg("-e").arg(&program).output().expect("spawn node");
+    let out = crate::common::node().arg("-e").arg(&program).output().expect("spawn node");
     assert!(
         out.status.success(),
         "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",

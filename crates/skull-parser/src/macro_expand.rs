@@ -139,6 +139,70 @@ pub fn check_macro_name_uniqueness(modules: &[Ast]) -> Vec<CompilerError> {
     errs
 }
 
+/// Every macro call whose argument labels don't fit the macro's parameters,
+/// across the whole module set. Runs BEFORE expansion (which erases the macro
+/// defs) and alongside [`check_macro_name_uniqueness`], for the same reason:
+/// `expand_macros` is driven from bone and returns no diagnostics, so a
+/// rejection has to be raised by a pass the caller can collect from.
+///
+/// Both this and the expander bind through `bind_macro_args`, so what is
+/// reported here is exactly what would have been bound.
+///
+/// Without this, a bad label leaves the call UNEXPANDED and the user sees
+/// "missing function `foo`" -- a true rejection naming the wrong cause.
+pub fn check_macro_call_labels(modules: &[Ast]) -> Vec<CompilerError> {
+    let reg = build_registry(modules);
+    if reg.is_empty() {
+        return Vec::new();
+    }
+    let mut errs = Vec::new();
+    for m in modules {
+        for (e, data) in m.exprs.iter() {
+            let ExprKind::FunctionCall { func, args, .. } = &data.kind else {
+                continue;
+            };
+            // Labels can only appear inside the parens, so a call with none
+            // binds positionally and cannot fail this check.
+            if args.iter().all(|a| a.name.is_none()) {
+                continue;
+            }
+            let (name, extra) = match &m.exprs[*func].kind {
+                ExprKind::Ident(id) => (id.name, 0),
+                ExprKind::FieldAccess(_, member) => (member.name, 1),
+                _ => continue,
+            };
+            let Some(cands) = reg.get(&name) else { continue };
+            let Some(tmpl) = select_overload(cands, args.len() + extra) else {
+                continue;
+            };
+            let mut call_args: Vec<MacroArg> = Vec::with_capacity(args.len() + extra);
+            if extra == 1 {
+                call_args.push(MacroArg { label: None, value: e });
+            }
+            call_args
+                .extend(args.iter().map(|a| MacroArg { label: a.name.as_ref().map(|n| n.name), value: a.value }));
+            let Err(err) = bind_macro_args(&tmpl.params, &call_args) else {
+                continue;
+            };
+            let names: Vec<String> = tmpl.params.iter().map(|p| p.name.to_string()).collect();
+            let msg = match err {
+                BindErr::UnknownLabel(l) => format!(
+                    "macro `{name}` has no parameter named `{l}` -- its parameters are ({}). An argument label must name a parameter; it is not a positional argument.",
+                    names.join(", ")
+                ),
+                BindErr::AlreadyBound(l) => {
+                    format!("macro `{name}` got two values for parameter `{l}`")
+                }
+                BindErr::LabelOnVariadic(l) => format!(
+                    "macro `{name}`'s parameter `{l}` is variadic -- it captures the remaining arguments, so it cannot be named"
+                ),
+            };
+            errs.push(CompilerError::new_with_label(data.span, msg));
+        }
+    }
+    errs
+}
+
 /// Expand every macro call in a SINGLE module against a prebuilt `registry`,
 /// then drop that module's macro defs. This is the per-module unit that
 /// `expand_macros` applies to each module -- exposed so an incremental driver
@@ -262,7 +326,10 @@ fn expand_top_level_macros(ast: &mut Ast, reg: &Registry) {
             out.push(item);
             continue;
         };
+        // `ItemKind::MacroInvocation` carries bare values -- the top-level
+        // invocation form has no label syntax -- so every arg here is positional.
         let (name, args) = (name.clone(), args.clone());
+        let args: Vec<MacroArg> = args.into_iter().map(|value| MacroArg { label: None, value }).collect();
         match expand_item_macro(ast, name, &args, reg) {
             Some(items) => out.extend(items),
             None => {} // not an item-macro at this arity — drop the invocation
@@ -273,7 +340,7 @@ fn expand_top_level_macros(ast: &mut Ast, reg: &Registry) {
 
 /// Select the item-macro overload for `name(args)`, build the fragment/expr
 /// substitutions, graft the macro_items into `ast`, substitute, and return them.
-fn expand_item_macro(ast: &mut Ast, name: Ident, args: &[Idx<ExprData>], reg: &Registry) -> Option<Vec<Item>> {
+fn expand_item_macro(ast: &mut Ast, name: Ident, args: &[MacroArg], reg: &Registry) -> Option<Vec<Item>> {
     let argc = args.len();
     // Index of the matching overload (one with item bodies, satisfiable arity).
     let cands = reg.get(&name.name)?;
@@ -288,17 +355,20 @@ fn expand_item_macro(ast: &mut Ast, name: Ident, args: &[Idx<ExprData>], reg: &R
     // positions (ctor names / refs). expr args substitute whole subtrees.
     let mut ty_subs: HashMap<Ustr, Idx<TypeExprData>> = HashMap::new();
     let mut expr_subs: HashMap<Ustr, Idx<ExprData>> = HashMap::new();
+    // Same by-label-then-by-position binding as the expr path; item macros take
+    // no variadic, so only the slots matter.
+    let bound = bind_macro_args(&cands[idx].params, args).ok()?;
     // Snapshot the per-param (fragment, name) + the arg/default source so the
     // graft (needs &tmpl + &mut ast) doesn't overlap the &reg borrow.
-    let plan: Vec<(Ustr, Option<Frag>, bool)> = cands[idx]
+    let plan: Vec<(Ustr, Option<Frag>, Option<Idx<ExprData>>)> = cands[idx]
         .params
         .iter()
         .enumerate()
-        .map(|(i, p)| (p.name, p.fragment, i < argc))
+        .map(|(i, p)| (p.name, p.fragment, bound.slots[i]))
         .collect();
-    for (i, (pname, frag, has_arg)) in plan.iter().enumerate() {
-        let arg = if *has_arg {
-            args[i]
+    for (i, (pname, frag, arg_slot)) in plan.iter().enumerate() {
+        let arg = if let Some(a) = *arg_slot {
+            a
         } else {
             // Fill from the template default (grafted into the caller arena).
             let d = cands[idx].params[i].default?;
@@ -631,12 +701,17 @@ fn try_expand(ast: &mut Ast, e: Idx<ExprData>, reg: &Registry, depth: usize, sta
             return;
         };
         let func = *func;
-        let arg_idxs: Vec<Idx<ExprData>> = args.iter().map(|a| a.value).collect();
+        // The caller's labels ride along: binding is by NAME when one is given,
+        // by position otherwise (`bind_macro_args`).
+        let arg_idxs: Vec<MacroArg> =
+            args.iter().map(|a| MacroArg { label: a.name.as_ref().map(|n| n.name), value: a.value }).collect();
         match &ast.exprs[func].kind {
             ExprKind::Ident(id) => (id.name, arg_idxs, true),
             ExprKind::FieldAccess(recv, member) => {
+                // UFCS receiver takes the first slot positionally -- it is
+                // written before the parens, so it can carry no label.
                 let mut vs = Vec::with_capacity(arg_idxs.len() + 1);
-                vs.push(*recv);
+                vs.push(MacroArg { label: None, value: *recv });
                 vs.extend(arg_idxs);
                 (member.name, vs, false)
             }
@@ -682,16 +757,24 @@ fn try_expand(ast: &mut Ast, e: Idx<ExprData>, reg: &Registry, depth: usize, sta
     // itself retagged before it expands).
     retag_block(ast, body, ast.exprs[e].span);
 
-    // Bind params: a regular param takes one arg (or its default); a variadic
-    // param captures all trailing args, spliced wherever the body forwards
-    // `...rest`.
+    // Bind params: a regular param takes the arg that names it or the next
+    // positional one (or its default); a variadic param captures all trailing
+    // args, spliced wherever the body forwards `...rest`.
+    //
+    // A binding error is reported by `check_macro_call_labels`, which runs the
+    // same binder before the compile proceeds; leaving the call unexpanded here
+    // is what makes that report the only thing the user sees.
+    let Ok(bound) = bind_macro_args(&tmpl.params, &arg_values) else {
+        return;
+    };
     let mut subs: HashMap<Ustr, Idx<ExprData>> = HashMap::new();
     let mut variadic: HashMap<Ustr, Vec<Idx<ExprData>>> = HashMap::new();
     for (i, p) in tmpl.params.iter().enumerate() {
         if p.is_variadic {
-            variadic.insert(p.name, arg_values.get(i..).map(|s| s.to_vec()).unwrap_or_default());
-        } else if let Some(a) = arg_values.get(i) {
-            subs.insert(p.name, *a);
+            let rest = bound.variadic.as_ref().filter(|(vi, _)| *vi == i);
+            variadic.insert(p.name, rest.map(|(_, v)| v.clone()).unwrap_or_default());
+        } else if let Some(a) = bound.slots[i] {
+            subs.insert(p.name, a);
         } else if let Some(d) = p.default {
             let g = graft_expr(&tmpl.tmpl, ast, d);
             subs.insert(p.name, g);
@@ -1003,6 +1086,101 @@ fn subst_in_type_exprs(ast: &mut Ast, e: Idx<ExprData>, ty_subs: &HashMap<Ustr, 
 
 /// Exact-arity non-variadic overload preferred; else a variadic one whose fixed
 /// params are satisfied. Mirror of bone's `select_macro_overload`.
+/// One call argument as the expander sees it: the value, plus the label the
+/// caller wrote before it (`f(x, speed: 2)`), if any.
+#[derive(Clone, Copy)]
+struct MacroArg {
+    label: Option<Ustr>,
+    value: Idx<ExprData>,
+}
+
+/// Why a call's args don't fit the macro's params. Carries the offending name
+/// so the caller can build a spanned message.
+enum BindErr {
+    UnknownLabel(Ustr),
+    AlreadyBound(Ustr),
+    LabelOnVariadic(Ustr),
+}
+
+/// Where each param's argument comes from.
+struct Bound {
+    /// Per param, in declaration order. `None` = no arg reached it, so the
+    /// param's own default applies (arity selection already guaranteed it has
+    /// one).
+    slots: Vec<Option<Idx<ExprData>>>,
+    /// (param index, captured args) for a variadic param.
+    variadic: Option<(usize, Vec<Idx<ExprData>>)>,
+}
+
+/// Map a call's args onto a macro's params the way a fn call maps them:
+/// unlabelled args fill params left to right, a labelled arg fills the param it
+/// NAMES wherever that sits, and a param no arg reaches falls back to its
+/// default.
+///
+/// This is the single binding implementation -- the expander uses it to bind and
+/// `check_macro_call_labels` uses it to report. A second copy of the rule in the
+/// checker is how the checker and the expander come to disagree about what a
+/// call means.
+///
+/// Binding by position alone (what this replaced) silently mis-binds every call
+/// that labels an argument out of its declared slot, and silently accepts a
+/// label naming no parameter at all.
+fn bind_macro_args(params: &[MParam], args: &[MacroArg]) -> Result<Bound, BindErr> {
+    let mut slots: Vec<Option<Idx<ExprData>>> = vec![None; params.len()];
+    let mut variadic: Option<(usize, Vec<Idx<ExprData>>)> = None;
+    // Next param a positional arg would fill. Labels never move it: `f(1, c: 3)`
+    // leaves 3's slot for the next positional, matching fn-call binding.
+    let mut next = 0usize;
+
+    for a in args {
+        match a.label {
+            Some(l) => {
+                let Some(i) = params.iter().position(|p| p.name == l) else {
+                    return Err(BindErr::UnknownLabel(l));
+                };
+                // A variadic captures a RUN of args; naming it binds one, which
+                // has no meaning. Reject rather than pick an interpretation.
+                if params[i].is_variadic {
+                    return Err(BindErr::LabelOnVariadic(l));
+                }
+                if slots[i].is_some() {
+                    return Err(BindErr::AlreadyBound(l));
+                }
+                slots[i] = Some(a.value);
+            }
+            None => {
+                while next < params.len() && slots[next].is_some() {
+                    next += 1;
+                }
+                if next >= params.len() {
+                    // Arity selection admitted this call, so the only way to run
+                    // past the last param is a trailing variadic; without one
+                    // there is no slot and the overload was mis-selected.
+                    match variadic.as_mut() {
+                        Some((_, rest)) => rest.push(a.value),
+                        None => return Err(BindErr::UnknownLabel(params.last().map(|p| p.name).unwrap_or_default())),
+                    }
+                    continue;
+                }
+                if params[next].is_variadic {
+                    variadic.get_or_insert((next, Vec::new())).1.push(a.value);
+                } else {
+                    slots[next] = Some(a.value);
+                    next += 1;
+                }
+            }
+        }
+    }
+
+    // A variadic that no arg reached still binds -- to nothing.
+    if variadic.is_none() {
+        if let Some(i) = params.iter().position(|p| p.is_variadic) {
+            variadic = Some((i, Vec::new()));
+        }
+    }
+    Ok(Bound { slots, variadic })
+}
+
 fn select_overload(cands: &[MacroTemplate], argc: usize) -> Option<&MacroTemplate> {
     let mut exact: Option<&MacroTemplate> = None;
     let mut variadic: Option<&MacroTemplate> = None;

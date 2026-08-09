@@ -8,15 +8,38 @@ static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         .iter()
         .map(|f| {
             let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());
-            skull_parser::parse_module(f.contents, id).expect("stdlib parse")
+            skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
+        })
+        .collect()
+});
+
+/// The stdlib with `Vec2` marked `nobox`. `nobox` is a whole-language guarantee,
+/// and a tier-0 `vecN` is the type anyone would mark first, so the GLSL surface
+/// has to carry one. Built here rather than in `stdlib/vec.rock` so the fixture
+/// does not depend on whether the real stdlib has opted in yet.
+static STDLIB_NOBOX_VEC2: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
+    rock_host::stdlib_loader::stdlib_files()
+        .iter()
+        .map(|f| {
+            let src = f.contents.replace("\nvalue Vec2 {", "\nnobox value Vec2 {");
+            let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());
+            skull_parser::parse_module_clean(&src, id).expect("stdlib parse")
         })
         .collect()
 });
 
 /// Emit GLSL for `roots` from `src` (the `<test>` module).
 fn emit(src: &str, roots: &[&str]) -> Result<String, String> {
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module(src, Ustr::from("<test>")).expect("parse"));
+    emit_with(&STDLIB, src, roots)
+}
+
+fn emit_with(
+    stdlib: &[skull_parser::Ast],
+    src: &str,
+    roots: &[&str],
+) -> Result<String, String> {
+    let mut modules = stdlib.to_vec();
+    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
     // `semantic_pass` returns Ok with per-body errors recorded in `ws.errors`;
     // the CLI reports those and refuses to emit. Without this check the goldens
@@ -706,7 +729,7 @@ fn emit_entry_profile(
     profile: skull_codegen_glsl::GlslProfile,
 ) -> Result<String, String> {
     let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module(src, Ustr::from("<test>")).expect("parse"));
+    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
     // `semantic_pass` returns Ok with per-body errors recorded in `ws.errors`;
     // the CLI reports those and refuses to emit. Without this check the goldens
@@ -719,9 +742,9 @@ fn emit_entry_profile(
     skull_codegen_glsl::emit_shader_entry(&ws, mid, root, profile).map_err(|e| e.message)
 }
 
-/// The A1 scaffold: generated #version + PIXEL block (in/out, uniforms from the
-/// struct's fields + sampler params, helpers, entry fn with dropped uniform/
-/// sampler params, main) + the default fullscreen VERTEX block.
+/// The A1 scaffold: generated #version + PIXEL block (in/out, the `@uniform`
+/// group's std140 block + sampler declarations, helpers, entry fn with dropped
+/// uniform/sampler params, main) + the default fullscreen VERTEX block.
 #[test]
 fn fragment_entry_scaffold() {
     let src = r#"
@@ -744,8 +767,8 @@ fn fragment_entry_scaffold() {
     assert!(glsl.contains("#ifdef PIXEL"), "got:\n{glsl}");
     assert!(glsl.contains("in vec2 TexCoord;"), "got:\n{glsl}");
     assert!(glsl.contains("out vec4 FragColor;"), "got:\n{glsl}");
-    // Uniforms: struct fields in declaration order, then samplers.
-    assert!(glsl.contains("uniform float strength;\nuniform vec2 center;\nuniform float radius;\nuniform sampler2D scene;"), "got:\n{glsl}");
+    // Uniforms: one std140 block in field order, then the loose samplers.
+    assert!(glsl.contains("layout(std140) uniform GlowU {\n    float strength;\n    vec2 center;\n    float radius;\n};\nuniform sampler2D scene;"), "got:\n{glsl}");
     // Helper before entry; entry drops uniform/sampler params.
     let fi = glsl.find("float falloff_float_float_ret_float(float d, float r)").expect("helper emitted");
     let gi = glsl.find("vec4 glow(vec2 tc)").expect("entry emitted");
@@ -759,6 +782,41 @@ fn fragment_entry_scaffold() {
     assert!(glsl.contains("#ifdef VERTEX"), "got:\n{glsl}");
     assert!(glsl.contains("gl_Position = vec4(aPos, 0.0, 1.0);"), "got:\n{glsl}");
     assert!(glsl.contains("TexCoord = aTexCoord;"), "got:\n{glsl}");
+}
+
+/// `@uniform` is ONE std140 block, not a run of loose uniforms. The block is
+/// declared with no instance name, so its members stay bare GLSL globals and
+/// every body reading them is unchanged -- that is what confines this change to
+/// declaration lines (verified on real drivers in both profiles,
+/// docs/shader-binding-layout-plan.md). Samplers are opaque and cannot live in a
+/// block, so they stay loose beside it.
+#[test]
+fn fragment_entry_uniforms_are_one_std140_block() {
+    let src = r#"
+        value GlowU { strength: float, center: Vec2, radius: float }
+
+        @shader(fragment)
+        fn glow(@uniform u: GlowU, scene: Sampler2D, tc: Vec2) -> Vec4 {
+            let d = tc.distance(u.center)
+            let k = 1.0 + u.strength * (1.0 - smoothstep(0.0, u.radius, d))
+            let t = texture(scene, tc)
+            return Vec4 { x: t.x * k, y: t.y * k, z: t.z * k, w: t.w }
+        }
+    "#;
+    let glsl = emit_entry(src, "glow").expect("emit");
+    // Member order is field order -- the same contract @attr uses for locations
+    // and @textures for slots.
+    assert!(
+        glsl.contains(
+            "layout(std140) uniform GlowU {\n    float strength;\n    vec2 center;\n    float radius;\n};\n"
+        ),
+        "got:\n{glsl}"
+    );
+    assert!(glsl.contains("uniform sampler2D scene;"), "got:\n{glsl}");
+    assert!(!glsl.contains("uniform float strength;"), "no loose member survives:\n{glsl}");
+    // The block is UNNAMED-instance, so reads are bare globals exactly as before.
+    assert!(glsl.contains("distance(tc, center)"), "got:\n{glsl}");
+    assert!(!glsl.contains("u."), "uniform struct must not survive as a param:\n{glsl}");
 }
 
 /// ES300 fullscreen entry: the profile header replaces the hardcoded 330
@@ -812,4 +870,84 @@ fn mat4_native_multiply() {
     assert!(glsl.contains("return (m * p);"), "got:\n{glsl}");
     assert!(glsl.contains("mat4 compose_Mat4_Mat4_ret_Mat4(mat4 a, mat4 b) {"), "got:\n{glsl}");
     assert!(glsl.contains("return (a * b);"), "got:\n{glsl}");
+}
+
+/// A `nobox` value crossing a call on the GLSL path must NOT be rejected as a
+/// boxed boundary. GLSL has no collections and no boxes: a `value` struct is a
+/// first-class `vecN`, which is exactly what `ScalarCtx::values_first_class`
+/// says. The nobox sink classifier used `!fn_uses_scalar_abi` as its proxy for
+/// "this callee takes a real boxed value", and that flag INVERTS under
+/// values-first-class -- so every shader call rejected.
+#[test]
+fn nobox_value_crosses_a_glsl_call_without_materializing() {
+    let src = r#"
+        @pure fn len2(v: Vec2) -> float { return v.x * v.x + v.y * v.y }
+        @pure fn shade(p: Vec2) -> float { return len2(p) }
+    "#;
+    let glsl = emit_with(&STDLIB_NOBOX_VEC2, src, &["shade"]).expect("nobox Vec2 must emit GLSL");
+    assert!(
+        glsl.contains("vec2 v") || glsl.contains("(vec2 "),
+        "nobox Vec2 must lower to a first-class vec2 parameter:\n{glsl}"
+    );
+    assert!(
+        !glsl.contains("materialize"),
+        "GLSL emission must not route a nobox value through materialization:\n{glsl}"
+    );
+}
+
+/// The `@gpu_only` intrinsic boundary is the ONE place a nobox value is
+/// authorized to box (`authorize_gpu_boundary_boxes`), and it authorizes by
+/// re-marking the packed arg `MaterializeValueStruct`. So on the GLSL side that
+/// variant is the shape a mapped intrinsic's argument arrives in, and every
+/// ctor arm has to render it exactly like `MakeValueStruct` -- a plain `vecN`.
+///
+/// Distinct from `nobox_value_crosses_a_glsl_call_without_materializing`, which
+/// pins the opposite property one layer out: an ORDINARY call is first-class and
+/// mints no Materialize at all. Here the boundary is `@gpu_only`, the MIR does
+/// carry a Materialize, and the requirement is that GLSL renders it as a ctor
+/// rather than dropping it. Neither test may be "fixed" against the other.
+///
+/// The argument must be a literal ctor AT the call. `authorize_gpu_boundary_boxes`
+/// re-marks only a `MakeValueStruct` operand, so passing a `Vec2` param whole --
+/// or building it through the stdlib `v(..)` helper -- mints nothing to authorize
+/// and leaves all four arms unexercised.
+#[test]
+fn a_materialized_nobox_value_at_a_gpu_intrinsic_lowers_to_a_vec_ctor() {
+    let src = r#"
+        fn shade(s: Sampler2D, u: float, v_: float) -> Vec4 {
+            return texture(s, Vec2 { x: u, y: v_ })
+        }
+    "#;
+    let glsl = emit_with(&STDLIB_NOBOX_VEC2, src, &["shade"])
+        .expect("a nobox Vec2 at a @gpu_only boundary must emit GLSL");
+    assert!(
+        glsl.contains("texture(s, vec2(u, v_))"),
+        "the authorized box must render as a plain vec2 ctor argument:\n{glsl}"
+    );
+}
+
+/// A `let` of a `nobox` value inside a shader body stays a single `vecN` local.
+/// GLSL has no boxed representation to avoid, so the leaf-cell form buys nothing
+/// and costs correctness twice: `<name>__<i>` is a RESERVED identifier (GLSL spec
+/// 3.7), and each leaf re-evaluates the whole initializer.
+///
+/// The two nobox tests above pin call BOUNDARIES; this one pins a body-internal
+/// storage decision, which `fn_uses_scalar_abi` never sees.
+#[test]
+fn a_nobox_value_local_stays_a_single_glsl_vec() {
+    let src = r#"
+        @pure fn shade(tc: Vec2) -> Vec4 {
+            let shift = v(tc.x * 0.5, tc.y * 0.5)
+            return Vec4 { x: shift.x, y: shift.y, z: 0.0, w: 1.0 }
+        }
+    "#;
+    let glsl = emit_with(&STDLIB_NOBOX_VEC2, src, &["shade"]).expect("nobox Vec2 must emit GLSL");
+    assert!(
+        glsl.contains("vec2 shift;"),
+        "the local must be one vec2, not scalarized leaves:\n{glsl}"
+    );
+    assert!(
+        !glsl.contains("shift__"),
+        "a double underscore is a reserved GLSL identifier:\n{glsl}"
+    );
 }

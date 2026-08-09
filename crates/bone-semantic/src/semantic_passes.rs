@@ -3,6 +3,7 @@ use skull_parser::{Ast, ItemKind};
 use bone_core::annotations::{validate_annotations, AnnoPos};
 use bone_lower::lower_annotations;
 
+use crate::hir::{BuiltinTy, TypeCtor, TypeExpr};
 use crate::{hir::Module, prelude::*};
 
 struct LowerItem<'a> {
@@ -95,6 +96,7 @@ pub fn lower_modules(
                     ws.type_generic_arity.insert(s.name.name, s.generics.len());
                     ws.type_generic_defaults
                         .insert(s.name.name, trailing_generic_defaults(rock_mod, &s.generics));
+                    ws.has_nobox_types |= s.is_nobox;
                 }
                 ItemKind::Enum(e) => {
                     ws.type_generic_arity.insert(e.name.name, e.generics.len());
@@ -333,7 +335,147 @@ pub fn lower_modules(
         ws.insert_module(module);
     }
 
+    check_embed_site_legality(ws, &ids);
+
     Ok(ids)
+}
+
+/// What an `embed f: T` field points at, once `T` is peeled of nullability.
+enum EmbedTarget {
+    Struct(StructId),
+    /// Not embeddable: `embed` inlines a type's LEAVES into the parent, so the
+    /// target must be a nominal struct whose fields are known at the
+    /// declaration. The string names what was found, for the message.
+    NotAStruct(&'static str),
+}
+
+fn embed_target(ws: &Workspace, ty: TyId) -> EmbedTarget {
+    let TyId::Static(mid, mut idx) = ty else {
+        return EmbedTarget::NotAStruct("a body-local type");
+    };
+    let arena = &ws.module(mid).ty_arena;
+    // Peel `?`: `embed f: Foo?` is a presence slot over the same leaves.
+    while let TypeExpr::Nullable(inner) = arena[idx] {
+        idx = inner;
+    }
+    match arena[idx] {
+        TypeExpr::App {
+            ctor: TypeCtor::Nominal(n),
+            ..
+        } => match ws.struct_by_name.get(&n) {
+            Some(sid) => EmbedTarget::Struct(*sid),
+            None => EmbedTarget::NotAStruct("a non-struct nominal type"),
+        },
+        TypeExpr::App {
+            ctor: TypeCtor::Array,
+            ..
+        }
+        | TypeExpr::App {
+            ctor: TypeCtor::Map, ..
+        } => EmbedTarget::NotAStruct("a collection"),
+        TypeExpr::Builtin(BuiltinTy::Any) => EmbedTarget::NotAStruct("`any`"),
+        TypeExpr::Builtin(_) => EmbedTarget::NotAStruct("a primitive"),
+        TypeExpr::Generic(..) | TypeExpr::Infer(..) => {
+            EmbedTarget::NotAStruct("a generic parameter")
+        }
+        TypeExpr::Function { .. } => EmbedTarget::NotAStruct("a function type"),
+        TypeExpr::Tuple { .. } => EmbedTarget::NotAStruct("a tuple"),
+        TypeExpr::Nullable(_) => EmbedTarget::NotAStruct("a non-struct type"),
+    }
+}
+
+/// Declaration-level legality for `embed` fields, workspace-wide (a target can
+/// live in another module, so this cannot run per-module during lowering).
+///
+/// Two rules, both from the storage model: the target must be a nominal struct
+/// (embed inlines its LEAVES into the parent, so they must be statically
+/// known), and the embed graph must be ACYCLIC -- a cycle has no finite layout,
+/// and unlike a boxed self-reference there is no pointer to break it.
+///
+/// Recoverable `interface_errors`, not fail-fast: same channel as an unknown
+/// type name in a signature, so the LSP still gets partial results. Errors are
+/// recorded only for the modules lowered by THIS call (`fresh`) -- an unchanged
+/// module keeps the entry it already carries, so an incremental edit cannot
+/// accumulate duplicates of another module's error.
+fn check_embed_site_legality(ws: &mut Workspace, fresh: &[ModuleId]) {
+    let mut errs: Vec<(ModuleId, CompilerError)> = Vec::new();
+    // struct -> the structs it embeds, for the acyclicity walk.
+    let mut edges: FxHashMap<StructId, Vec<(StructId, Span, Ustr)>> = FxHashMap::default();
+
+    for m in ws.modules.iter() {
+        let mid = m.id;
+        for (def, sdef) in m.structs.iter() {
+            let sid = StructId { module: mid, def };
+            for f in sdef.fields.iter() {
+                if !f.is_embed {
+                    continue;
+                }
+                ws.has_embed_fields = true;
+                match embed_target(ws, f.ty) {
+                    EmbedTarget::Struct(target) => {
+                        edges.entry(sid).or_default().push((target, f.span, f.name));
+                    }
+                    EmbedTarget::NotAStruct(what) => errs.push((
+                        mid,
+                        CompilerError::new_with_label(
+                            f.span,
+                            format!(
+                                "cannot `embed` field `{}`: {} has no statically known leaves to inline -- only a struct can be embedded",
+                                f.name, what
+                            ),
+                        ),
+                    )),
+                }
+            }
+        }
+    }
+
+    // Any struct on a cycle reports at its own embed field, so a mutual cycle
+    // names both sides rather than depending on visit order.
+    for (&sid, fields) in edges.iter() {
+        for &(target, span, fname) in fields.iter() {
+            if reaches(&edges, target, sid) {
+                errs.push((
+                    sid.module,
+                    CompilerError::new_with_label(
+                        span,
+                        format!(
+                            "cannot `embed` field `{}`: the embed graph is cyclic, so the layout has no finite size -- box one link to break it",
+                            fname
+                        ),
+                    ),
+                ));
+            }
+        }
+    }
+
+    for (mid, e) in errs {
+        if fresh.contains(&mid) {
+            ws.module_mut(mid).interface_errors.push(e);
+        }
+    }
+}
+
+/// Is `goal` reachable from `from` through embed edges (inclusive of `from`)?
+fn reaches(
+    edges: &FxHashMap<StructId, Vec<(StructId, Span, Ustr)>>,
+    from: StructId,
+    goal: StructId,
+) -> bool {
+    let mut seen: FxHashSet<StructId> = FxHashSet::default();
+    let mut stack = vec![from];
+    while let Some(s) = stack.pop() {
+        if s == goal {
+            return true;
+        }
+        if !seen.insert(s) {
+            continue;
+        }
+        if let Some(next) = edges.get(&s) {
+            stack.extend(next.iter().map(|(t, _, _)| *t));
+        }
+    }
+    false
 }
 
 pub fn infer_modules(ws: &mut Workspace, ids: &[ModuleId]) -> Result<(), CompilerError> {
@@ -518,6 +660,7 @@ pub fn pass_register_forward_decls(
                 name: s.name.name,
                 name_span: s.name.span,
                 is_value: s.is_value,
+                is_nobox: s.is_nobox,
                 span: item.span,
                 generics: Vec::new(),
                 fields: Vec::new(),
@@ -582,6 +725,62 @@ pub fn pass_lower_functions(a: &Ast, ctx: &mut LowerCtx) -> Result<(), CompilerE
             ItemKind::Function(f) => {
                 if f.is_macro {
                     comp_error!(item.span, "macro `{}` survived expansion", f.name.name);
+                }
+
+                // A definition for an operator nothing dispatches by name can
+                // never be called, so accepting it is a swallow: `operator ==`
+                // used to compile clean and leave structural equality in place
+                // with no diagnostic anywhere, and the ordering ops failed at
+                // the USE site blaming the operand type rather than naming the
+                // ignored overload.
+                //
+                // The exemption is a declaration over PRIMITIVES, which is what
+                // the hardcoded implementations these names refer to actually
+                // are: the stdlib's `operator(lua) ==`/`<`/`&&`/`~` over int,
+                // float, string and bool, and `fn __op_eq(a: any, b: any)`, the
+                // structural equality codegen emits. Overloading for your OWN
+                // type is the thing that can never be dispatched.
+                //
+                // Three narrower guards were tried and measured wrong. Gating on
+                // a Rock body, or on the `operator` spelling, each let a user's
+                // `inline(lua) operator ==` or plain `fn __op_eq` through to be
+                // silently ignored -- the exact bug being fixed. Gating on the
+                // module's file id looked right and is a bad proxy: `bone-query`
+                // warms the stdlib from its real filesystem path, so the check
+                // called the stdlib a user module and rejected its own
+                // operators, taking 6 LSP completion suites with it.
+                //
+                // `is_synthetic` is load-bearing under this rule: `desugar`
+                // mints `__op_lt`/`__op_le`/`__op_gt`/`__op_ge` over the NEWTYPE
+                // (not a primitive), so every newtype over a primitive would
+                // reject without it.
+                let fn_name = f.name.name.as_str();
+                let over_primitives = f.params.iter().all(|p| {
+                    matches!(
+                        a.types[p.ty].kind,
+                        skull_parser::TypeExprKind::Int
+                            | skull_parser::TypeExprKind::Float
+                            | skull_parser::TypeExprKind::String
+                            | skull_parser::TypeExprKind::Bool
+                            | skull_parser::TypeExprKind::Any
+                    )
+                });
+                // Only names the table CLASSIFIES are judged. The `__op_`
+                // namespace is wider than the parser's operator symbols --
+                // `__op_null_coalesce` (`??`) is a plain generic stdlib fn with
+                // no `operator` spelling -- and rejecting an unclassified name
+                // here would fail the whole stdlib. Keeping the table total over
+                // the parser is `operator_table_matches_the_parser`'s job, not a
+                // runtime arm's.
+                if !f.is_synthetic && !over_primitives {
+                    if let Some((symbol, false)) = bone_core::hir::operator_entry(fn_name) {
+                        comp_error!(
+                            item.span,
+                            "operator `{}` is not overloadable; only `{}` may be overloaded",
+                            symbol,
+                            bone_core::hir::overloadable_operator_symbols()
+                        );
+                    }
                 }
 
                 let fn_id = lower_function_def(ctx, a, f, &item.annotations, item.span.offset_range.0)?;

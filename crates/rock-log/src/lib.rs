@@ -97,6 +97,36 @@ fn level_tag(l: log::Level) -> &'static str {
     }
 }
 
+/// SGR sequence for a level, or `""` when colour is off. Only error and
+/// warn get one: colouring every line is noise, and the point is that the
+/// two that need action stand out of a stream the game and the driver both
+/// write to.
+fn level_color(l: log::Level) -> &'static str {
+    match l {
+        log::Level::Error => "\x1b[1;31m", // bold red
+        log::Level::Warn => "\x1b[33m",    // yellow
+        _ => "",
+    }
+}
+
+const SGR_RESET: &str = "\x1b[0m";
+
+/// Colour is on only when stderr is a terminal, so piped/captured output
+/// (sim harnesses, `2>` redirects, CI) stays byte-clean. `ROCK_LOG_COLOR`
+/// = `always` | `never` | `auto` overrides; `NO_COLOR` (any value) forces
+/// off, per no-color.org.
+static COLOR: Lazy<bool> = Lazy::new(|| {
+    match std::env::var("ROCK_LOG_COLOR").as_deref().map(str::trim) {
+        Ok("always") | Ok("1") => return true,
+        Ok("never") | Ok("0") => return false,
+        _ => {}
+    }
+    if std::env::var_os("NO_COLOR").is_some() {
+        return false;
+    }
+    std::io::IsTerminal::is_terminal(&std::io::stderr())
+});
+
 /// Body (without the time/level prefix). `target` is the deliberate
 /// `[CATEGORY]` only when it's one of our short tags; a module-path
 /// target (contains "::") or empty is third-party / untargeted and
@@ -135,6 +165,41 @@ static EPOCH_MS: Lazy<u128> = Lazy::new(|| {
     now
 });
 
+/// Separator between the stamp and the body for a record DECLARED a
+/// wall-clock measurement at its log site, in place of the ordinary space.
+///
+/// A record whose content IS a duration or a frame counter cannot be compared
+/// across two runs of the same work, so the sim differential
+/// (`rock-cli/src/sim_record.rs`) drops it. The declaration rides in the stamp
+/// rather than in the message, so the drop never has to sniff for an `ms`
+/// suffix. One character, so a declared record and a plain one align.
+///
+/// The exact stamp grammar is RESERVED PROTOCOL between this emitter and that
+/// harness. A `print()` reproducing it byte for byte is indistinguishable from
+/// a log record, and always was -- the harness already strips such a prefix
+/// and loses the category with it; the declaration only adds one more
+/// consequence to text that was already protocol. What the strict grammar
+/// buys is that ordinary game output cannot match it by ACCIDENT.
+pub const WALL_CLOCK_MARK: &str = "~";
+
+/// The full emitted line, minus colour. Pure so both the emitter and its
+/// tests -- and the harness that has to parse it back -- read one grammar.
+fn format_line(
+    elapsed: f64,
+    level: log::Level,
+    target: &str,
+    args: &std::fmt::Arguments,
+    wall_clock: bool,
+) -> String {
+    format!(
+        "[{:>8.3}s {}]{}{}",
+        elapsed,
+        level_tag(level),
+        if wall_clock { WALL_CLOCK_MARK } else { " " },
+        fmt_body(target, args),
+    )
+}
+
 fn elapsed_secs() -> f64 {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -157,14 +222,37 @@ impl log::Log for Logger {
         // (zero-dep, monotonic, matches the engine's [FPS]/[T] style;
         // wall-clock would need chrono). Level so errors/warns stand
         // out in the now-unified stream.
-        eprintln!(
-            "[{:>8.3}s {}] {}",
-            elapsed_secs(),
-            level_tag(record.level()),
-            fmt_body(record.target(), record.args())
-        );
+        // The whole line is wrapped, not just the level tag -- the body is
+        // the part you read while scrolling for what went wrong.
+        emit(record.level(), record.target(), record.args(), false);
     }
     fn flush(&self) {}
+}
+
+fn emit(level: log::Level, target: &str, args: &std::fmt::Arguments, wall_clock: bool) {
+    let color = if *COLOR { level_color(level) } else { "" };
+    let reset = if color.is_empty() { "" } else { SGR_RESET };
+    eprintln!(
+        "{}{}{}",
+        color,
+        format_line(elapsed_secs(), level, target, args, wall_clock),
+        reset
+    );
+}
+
+/// Emit a record DECLARED a wall-clock measurement at its log site: its
+/// content is a duration, a frame counter, or otherwise a property of when the
+/// process ran. Same backend, same gate, same format as every other record --
+/// only the separator differs (see [`WALL_CLOCK_MARK`]).
+///
+/// This bypasses the `log` facade because the facade has no channel for the
+/// declaration; it does not bypass the logger.
+pub fn emit_wall_clock(level: log::Level, target: &str, args: std::fmt::Arguments) {
+    init();
+    if log_to_level(level) > effective_max(target) {
+        return;
+    }
+    emit(level, target, &args, true);
 }
 
 static LOGGER: Logger = Logger;
@@ -198,10 +286,30 @@ static DEDUP: Lazy<Mutex<HashSet<&'static str>>> =
 static THROTTLE: Lazy<Mutex<HashMap<&'static str, Instant>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+/// Sites that dedup per SUBJECT rather than per site: an offending image
+/// handle, an unknown enum int. Separate from `DEDUP` only because the key has
+/// a second component; it is the same store in every other sense and
+/// `reset_dedup`, the image and the count all cover both.
+static DEDUP_SUBJECT: Lazy<Mutex<HashSet<(&'static str, u64)>>> =
+    Lazy::new(|| Mutex::new(HashSet::new()));
+
 /// True the first time `key` (a `concat!(file!(),":",line!())`) is
 /// seen, false after. The emit itself goes through `log::` in the macro.
 pub fn once_should_emit(key: &'static str) -> bool {
     DEDUP.lock().unwrap().insert(key)
+}
+
+/// True the first time this `(key, subject)` pair is seen.
+///
+/// The variant for a diagnostic whose interesting part is WHICH thing was
+/// wrong. A site-only key reports the first offender and swallows every later
+/// one, so the log shows one row where eight are wrong while the failure count
+/// stays correct -- which is why the subject belongs IN the key rather than
+/// only in the message. Callers that had grown their own set for this
+/// (`stone_get_image_texture`'s stub handles, the blend-mode drift warning) go
+/// through here instead, so one reset reaches all of them.
+pub fn once_should_emit_for(key: &'static str, subject: u64) -> bool {
+    DEDUP_SUBJECT.lock().unwrap().insert((key, subject))
 }
 
 /// True if `key` hasn't fired within `interval`. Records the time on
@@ -224,12 +332,56 @@ pub fn throttle_should_emit(key: &'static str, interval: Duration) -> bool {
 /// Clear dedup + throttle state (tests; hot reload).
 pub fn reset_dedup() {
     DEDUP.lock().unwrap().clear();
+    DEDUP_SUBJECT.lock().unwrap().clear();
     THROTTLE.lock().unwrap().clear();
 }
 
-/// Distinct `log_once!` call sites that have fired.
+/// Every suppression record this logger holds, copied out.
+///
+/// The sim worker's entry boundary needs boot's IMAGE rather than an empty
+/// store, for the reason the Lua half already documents: a fresh process
+/// reaches its first entry with whatever boot itself logged already deduped, so
+/// clearing would make a worker emit warnings no isolated run has.
+pub struct DedupImage {
+    once: HashSet<&'static str>,
+    subject: HashSet<(&'static str, u64)>,
+    throttle: HashMap<&'static str, Instant>,
+}
+
+impl DedupImage {
+    /// Distinct suppression records this image holds, on the same scale
+    /// `dedup_count` reports so a caller can compare the two.
+    pub fn len(&self) -> usize {
+        self.once.len() + self.subject.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+pub fn dedup_image() -> DedupImage {
+    DedupImage {
+        once: DEDUP.lock().unwrap().clone(),
+        subject: DEDUP_SUBJECT.lock().unwrap().clone(),
+        throttle: THROTTLE.lock().unwrap().clone(),
+    }
+}
+
+/// Put a previously copied image back, replacing whatever has accumulated
+/// since. Every store the image covers is replaced, never merged: a merge
+/// would keep a successor's warnings suppressed by its predecessor, which is
+/// the whole defect.
+pub fn restore_dedup_image(image: &DedupImage) {
+    *DEDUP.lock().unwrap() = image.once.clone();
+    *DEDUP_SUBJECT.lock().unwrap() = image.subject.clone();
+    *THROTTLE.lock().unwrap() = image.throttle.clone();
+}
+
+/// Distinct `log_once!` call sites that have fired, site-keyed and
+/// subject-keyed together.
 pub fn dedup_count() -> usize {
-    DEDUP.lock().unwrap().len()
+    DEDUP.lock().unwrap().len() + DEDUP_SUBJECT.lock().unwrap().len()
 }
 
 /// Distinct `log_throttled!` call sites currently tracked.
@@ -286,6 +438,36 @@ mod tests {
         assert!(log_to_level(log::Level::Warn) <= effective_max("symphonia_format_ogg"));
         // our own info still passes at debug global level.
         assert!(log_to_level(log::Level::Info) <= effective_max("AUDIO"));
+    }
+
+    /// A wall-clock record is DECLARED at its log site, and the declaration
+    /// travels in the stamp the emitter owns -- not in the message, which a
+    /// game writes. It occupies the separator column, so a declared record and
+    /// a plain one put their bodies at the same offset.
+    #[test]
+    fn a_declared_wall_clock_record_is_marked_in_the_stamp() {
+        let plain = format_line(
+            1.296,
+            log::Level::Error,
+            "SLOWFRAME",
+            &format_args!("frame 60 took 69.7ms"),
+            false,
+        );
+        assert_eq!(plain, "[   1.296s ERROR] [SLOWFRAME] frame 60 took 69.7ms");
+
+        let declared = format_line(
+            1.296,
+            log::Level::Error,
+            "SLOWFRAME",
+            &format_args!("frame 60 took 69.7ms"),
+            true,
+        );
+        assert_eq!(declared, "[   1.296s ERROR]~[SLOWFRAME] frame 60 took 69.7ms");
+        assert_eq!(
+            plain.len(),
+            declared.len(),
+            "the declaration must not shift the body column"
+        );
     }
 
     #[test]

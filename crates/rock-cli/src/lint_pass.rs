@@ -154,6 +154,19 @@ pub fn findings(
     root: &Path,
     scope: Scope,
 ) -> Vec<bone_lints::Finding> {
+    findings_with(ws, sources, root, scope, &bone_lints::LintOptions::default())
+}
+
+/// [`findings`] for an explicit lint selection. `rock lint --lints=<names>`
+/// only: a BUILD always runs the default tier, so no invocation flag can drop
+/// a lint the compiler considers non-optional.
+pub fn findings_with(
+    ws: &Workspace,
+    sources: &SourceFiles,
+    root: &Path,
+    scope: Scope,
+    sel: &bone_lints::LintOptions,
+) -> Vec<bone_lints::Finding> {
     let texts = source_texts(sources);
     let warm = warm_module_ids(ws, &texts);
     let is_bin =
@@ -166,13 +179,29 @@ pub fn findings(
     // false-flag the game's callbacks as dead. Restricting the set also keeps
     // the pass off the compile hot path -- a dependency's bodies are never
     // walked for the per-body lints.
-    let owned = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let owned = owned_files(&texts, root);
     let report: FxHashMap<Ustr, &str> = texts
         .iter()
-        .filter(|(file, _)| Path::new(file.as_str()).starts_with(&owned))
+        .filter(|(file, _)| owned.contains(*file))
         .map(|(&file, text)| (file, text.as_str()))
         .collect();
-    bone_lints::lint_workspace(ws, &warm, is_bin, &report)
+    bone_lints::lint_workspace(ws, &warm, is_bin, &report, sel)
+}
+
+/// The files a lint invocation REPORTS on: this project's own, never a
+/// `stick.toml` dependency's. Published because anything that must agree with
+/// the finding set -- the `row_escape` census denominator -- has to be measured
+/// over exactly this set. A second copy of the rule would drift, and a
+/// denominator drawn from a wider set than its numerator is worse than none:
+/// every project that merely DEPENDS on an arena consumer would report a
+/// nonzero population it does not own.
+pub fn report_files(sources: &SourceFiles, root: &Path) -> FxHashSet<Ustr> {
+    owned_files(&source_texts(sources), root)
+}
+
+fn owned_files(texts: &FxHashMap<Ustr, String>, root: &Path) -> FxHashSet<Ustr> {
+    let owned = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    texts.keys().copied().filter(|f| Path::new(f.as_str()).starts_with(&owned)).collect()
 }
 
 /// `12 lint warnings (8 unused_var, 4 unused_fn) -- run `rock lint <root>` for detail`.
@@ -225,6 +254,13 @@ pub fn unused_fns_under(
         );
     }
     out
+}
+
+/// The modules of `ws` this build does not own -- [`warm_module_ids`] for a
+/// caller holding only the `SourceFiles`. `rock lint` needs it to validate
+/// `--ignore-types` against the project's own type names.
+pub fn warm_modules(ws: &Workspace, sources: &SourceFiles) -> FxHashSet<ModuleId> {
+    warm_module_ids(ws, &source_texts(sources))
 }
 
 fn warm_module_ids(ws: &Workspace, texts: &FxHashMap<Ustr, String>) -> FxHashSet<ModuleId> {

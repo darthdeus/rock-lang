@@ -2,6 +2,7 @@
 name = "skull-codegen-js"
 version = "0.1.0"
 edition = "2024"
+autotests = false
 
 # skull-codegen-js: the conformance-differential JS backend (docs/js-backend-plan.md).
 # A structured MIR->JS emitter for the scalar + NativeBuffer subset, run under
@@ -26,3 +27,7 @@ ustr = { workspace = true }
 
 [lints]
 workspace = true
+
+[[test]]
+name = "js_tests"
+path = "tests/main.rs"

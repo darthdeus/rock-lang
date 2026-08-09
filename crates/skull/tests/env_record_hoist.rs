@@ -9,9 +9,7 @@
 //!
 //! Contrast `capture_free_hoist.rs`: a lambda that captures NOTHING stays a bare
 //! hoisted global name (no record, no `__call`).
-
-mod common;
-use common::{emit_module, function_body, mangled_name, run_luajit};
+use crate::common::{emit_module, function_body, mangled_name, run_luajit};
 
 /// A lambda capturing a single-assignment fn param: the record + `(__rock_env, ..)` body
 /// shape, and no inline closure at the creation site.

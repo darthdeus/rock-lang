@@ -12,7 +12,7 @@
 use bone_semantic::inference::Workspace;
 
 fn ws_of(src: &str) -> Workspace {
-    let module = skull_parser::parse_module(src, ustr::Ustr::from("<t>")).expect("parse");
+    let module = skull_parser::parse_module_clean(src, ustr::Ustr::from("<t>")).expect("parse");
     bone_semantic::semantic_passes::semantic_pass(&mut [module]).expect("semantic_pass")
 }
 

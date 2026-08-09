@@ -2,12 +2,10 @@
 //! `SkullTest::returns` (V1 of `docs/multi-backend-testing-plan.md`), and the
 //! malformed shapes reject with a spanned CompilerError.
 
-mod common;
-
 use skull::ValueExpect;
 
 fn tests_of(src: &str) -> Result<Vec<skull::SkullTest>, skull_parser::CompilerError> {
-    let ws = common::ws_with_stdlib(src);
+    let ws = crate::common::ws_with_stdlib(src);
     let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("module id");
     skull::module_tests(&ws, mid)
 }

@@ -6,16 +6,12 @@
 //! execution is the correctness oracle; `tests/js_module_globals.rock`
 //! cross-checks against luajit.
 
-use std::process::Command;
-
 use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::FuncRef;
-
-mod common;
-use common::ws_with;
+use crate::common::ws_with;
 
 fn node_available() -> bool {
-    Command::new("node").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+    crate::common::node().arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
 }
 
 fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<String, String> {
@@ -48,7 +44,7 @@ fn eval_int(defs: &str, root: &str, expect: i64) {
         skull_codegen_js::JS_CALL_HELPER,
         skull_codegen_js::JS_STRING_RUNTIME,
     );
-    let out = Command::new("node").arg("-e").arg(&program).output().expect("spawn node");
+    let out = crate::common::node().arg("-e").arg(&program).output().expect("spawn node");
     assert!(
         out.status.success(),
         "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",
@@ -119,4 +115,22 @@ fn fn_as_value() {
     let ws = ws_with(src);
     let js = emit_closure(&ws, "root").expect("fn-as-value emits");
     eval_int(&js, "root", 6);
+}
+
+// A `nobox` global's STORAGE is its leaves (`__nbg_<base>_<i>`), so its init
+// line has to assign those leaves -- assigning the base name leaves every leaf
+// `undefined`, and the reads go to the leaves. The luajit twin is pinned by
+// `skull/tests/nobox_values.rs`; this is the JS side of the same rule.
+#[test]
+fn a_nobox_global_initializes_its_leaves() {
+    let src = "nobox value P { x: int, y: int }\n\
+               global ORIGIN: P = P { x: 3, y: 4 }\n\
+               fn root() -> int { return ORIGIN.x * 10 + ORIGIN.y }";
+    let ws = ws_with(src);
+    let js = emit_closure(&ws, "root").expect("nobox global emits");
+    assert!(
+        js.contains("__G.__nbg_ORIGIN_0 = ") && js.contains("__G.__nbg_ORIGIN_1 = "),
+        "the init must assign both leaves, not the boxed base name:\n{js}"
+    );
+    eval_int(&js, "root", 34);
 }

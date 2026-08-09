@@ -14,7 +14,7 @@ static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         .iter()
         .map(|f| {
             let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());
-            skull_parser::parse_module(f.contents, id).expect("stdlib parse")
+            skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
         })
         .collect()
 });
@@ -37,13 +37,39 @@ fn assert_no_bone_errors(ws: &Workspace) {
     assert!(errs.is_empty(), "bone recorded errors: {errs:#?}");
 }
 
+/// The messages bone recorded for `src`, without emitting.
+///
+/// [`try_emit_module`] deliberately PANICS on these (a bone error there means a
+/// malformed fixture), so a test whose subject IS a bone-level rejection --
+/// annotation-registry violations, for one -- cannot use it.
+pub fn bone_rejections(src: &str) -> Vec<String> {
+    let mut modules = STDLIB.clone();
+    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
+    // BOTH channels. `semantic_pass` returns `Err` for a violation it treats as
+    // fatal (a struct-field annotation is one) and RECORDS the rest on the
+    // workspace; reading only the recorded set turns the fatal ones into a
+    // panic inside the helper rather than a rejection the caller can assert.
+    let ws = match bone_semantic::semantic_passes::semantic_pass(&mut modules) {
+        Ok(ws) => ws,
+        Err(e) => return vec![e.message],
+    };
+    ws.inferences
+        .iter()
+        .flatten()
+        .flat_map(|inf| inf.errors.values().flatten())
+        .chain(ws.modules.iter().flat_map(|m| m.lowering_errors.values().flatten()))
+        .chain(ws.modules.iter().flat_map(|m| m.interface_errors.iter()))
+        .map(|e| e.message.clone())
+        .collect()
+}
+
 /// Full MIR emit for `src` (the `<test>` module) through the skull pipeline
 /// (lower -> inline -> cleanup -> emit). Stdlib is loaded so int/float casts and
 /// `%`/arithmetic ops resolve to their stdlib helpers -- else the using fns fail
 /// to lower and are silently skipped.
 pub fn emit_mir(src: &str) -> skull::mir_emit::MirEmit {
     let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module(src, Ustr::from("<test>")).expect("parse"));
+    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
     assert_no_bone_errors(&ws);
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
@@ -54,7 +80,7 @@ pub fn emit_mir(src: &str) -> skull::mir_emit::MirEmit {
 /// that inspect stdlib declarations (e.g. `@intrinsic` annotations).
 pub fn ws_with_stdlib(src: &str) -> Workspace {
     let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module(src, Ustr::from("<test>")).expect("parse"));
+    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
     bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass")
 }
 
@@ -68,7 +94,7 @@ pub fn emit_module(src: &str) -> String {
 /// errors still panic (a malformed test, not what these cases probe).
 pub fn try_emit_module(src: &str) -> Result<String, skull_parser::CompilerError> {
     let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module(src, Ustr::from("<test>")).expect("parse"));
+    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
     assert_no_bone_errors(&ws);
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
@@ -88,6 +114,24 @@ pub fn function_body<'a>(lua: &'a str, name: &str) -> &'a str {
     let rest = &lua[start..];
     let end = rest.find("\nend\n").map(|e| e + 5).unwrap_or(rest.len());
     &rest[..end]
+}
+
+/// The body of the single emitted function whose name contains `needle`.
+/// Synthetic callables carry a generated suffix (`<mangled>__lambda0`) or a
+/// hash (`__local_go_<hash>_inner_0`), so they are found by pattern rather
+/// than spelled out. Panics if it is not unique -- an ambiguous match would
+/// silently assert against the wrong body.
+pub fn body_of_synthetic<'a>(lua: &'a str, needle: &str) -> &'a str {
+    let names: Vec<&str> = lua
+        .match_indices("\nfunction ")
+        .map(|(i, m)| {
+            let rest = &lua[i + m.len()..];
+            &rest[..rest.find('(').expect("fn header has `(`")]
+        })
+        .filter(|n| n.contains(needle))
+        .collect();
+    assert_eq!(names.len(), 1, "expected exactly one fn containing `{needle}`, got {names:?}");
+    function_body(lua, names[0])
 }
 
 /// The full emitted (mangled) name of the top-level fn whose SOURCE name is
@@ -113,9 +157,26 @@ pub fn mangled_name(lua: &str, src: &str) -> String {
     panic!("no non-synthetic `function {src}` in:\n{lua}");
 }
 
+/// Like [`try_emit_module`] but ALSO loads `lib` as an extra stdlib module. The
+/// emit path is deliberately lenient for stdlib bodies (a codegen parity gap
+/// there becomes a silent `skipped`), so a case probing that leniency needs a
+/// body the module-file check actually classifies as stdlib.
+pub fn try_emit_with_stdlib_module(
+    lib: &str,
+    src: &str,
+) -> Result<String, skull_parser::CompilerError> {
+    let mut modules = STDLIB.clone();
+    modules.push(skull_parser::parse_module_clean(lib, Ustr::from("<stdlib:probe>")).expect("parse lib"));
+    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    assert_no_bone_errors(&ws);
+    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    skull::mir_emit::emit_workspace_mir(&ws, mid).map(|e| e.lua)
+}
+
 /// Single-module workspace (no stdlib) for incremental / hot-reload tests.
 pub fn ws_of(src: &str) -> Workspace {
-    let module = skull_parser::parse_module(src, Ustr::from("<t>")).expect("parse");
+    let module = skull_parser::parse_module_clean(src, Ustr::from("<t>")).expect("parse");
     bone_semantic::semantic_passes::semantic_pass(&mut [module]).expect("semantic_pass")
 }
 

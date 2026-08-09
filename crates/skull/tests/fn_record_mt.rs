@@ -9,9 +9,7 @@
 //! "stdlib inline(lua)"; an inline(lua) fn doesn't auto-run at load and a
 //! metatable is a table, not a callable, so the prelude bare-global form is what
 //! the design's `setmetatable({..}, __rock_fn_mt)` reference needs.)
-
-mod common;
-use common::{emit_module, run_luajit};
+use crate::common::{emit_module, run_luajit};
 
 /// Any emitted program carries the prelude, so `__rock_fn_mt` is present.
 #[test]

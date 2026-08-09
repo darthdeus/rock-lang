@@ -8,9 +8,7 @@
 //! Fix: scope analysis considers only lambdas whose creation site is REACHABLE
 //! (a fixpoint from the fn entry through live scopes); a transitively-dead
 //! lambda gets no scope. These compile-and-run without panicking.
-
-mod common;
-use common::{emit_module, mangled_name, run_luajit};
+use crate::common::{emit_module, mangled_name, run_luajit};
 
 /// The confirmed repro: an outer lambda inside `if false`, itself holding an
 /// inner lambda. Both are dead; the live `return 42` path must compile.

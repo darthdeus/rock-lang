@@ -5,9 +5,7 @@
 //! (`incremental.rs::generate_global_code`, `if is_const`). skull reads the flag
 //! off `hir::GlobalDef.is_const` in `mir_emit::emit_global_unit`.
 //! Design: docs/skull-const-hot-reload-plan.md.
-
-mod common;
-use common::ws_of;
+use crate::common::ws_of;
 
 /// Compile `src` to a full skull Lua program (no stdlib -- int/empty-main only).
 fn emit_program(src: &str) -> String {

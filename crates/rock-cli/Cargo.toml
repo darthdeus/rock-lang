@@ -2,6 +2,7 @@
 name = "rock-cli"
 version = "0.1.0"
 edition = "2024"
+autotests = false
 
 [lib]
 path = "src/lib.rs"
@@ -81,3 +82,11 @@ workspace = true
 [package.metadata.cargo-machete]
 # `#[global_allocator]` decl in main.rs; cargo-machete's grep doesn't see it.
 ignored = ["mimalloc"]
+
+[[test]]
+name = "rock_cli_tests"
+path = "tests/main.rs"
+
+[[test]]
+name = "rock_cli_heavy"
+path = "tests/main_heavy.rs"

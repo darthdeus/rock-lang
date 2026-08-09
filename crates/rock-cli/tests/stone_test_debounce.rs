@@ -6,10 +6,8 @@
 //! default nextest profile today (the gate to `-P full` happens once we
 //! also have Phase B/C runtime tests piling up here).
 
-mod stone_harness;
-
 use std::time::Duration;
-use stone_harness::StoneHarness;
+use crate::stone_harness::StoneHarness;
 
 const BASIC_PROGRAM: &str = "fn main() { let x = 1 }\n";
 const QUIESCENT: Duration = Duration::from_millis(400);

@@ -14,6 +14,15 @@ pub struct Workspace {
     pub inferences: Vec<Option<InferenceResult>>,
 
     pub struct_by_name: FxHashMap<Ustr, StructId>,
+    /// Any struct anywhere declares an `embed` field. Set (never cleared) while
+    /// registering struct fields, so the per-body projection-only check can bail
+    /// in O(1) on the overwhelmingly common workspace that uses no `embed` at
+    /// all. Monotonic on purpose: staying true after the last embed field is
+    /// deleted costs a check, whereas a stale false would skip enforcement.
+    pub has_embed_fields: bool,
+    /// Any value type is declared `nobox`. Monotonic for the same incremental
+    /// safety reason as `has_embed_fields`.
+    pub has_nobox_types: bool,
     pub enums_by_name: FxHashMap<Ustr, EnumId>,
     pub newtypes_by_name: FxHashMap<Ustr, NewtypeId>,
     /// Declared generic-parameter count for every nominal type (struct / enum /
@@ -92,6 +101,8 @@ impl Workspace {
             inferences: Default::default(),
 
             struct_by_name: Default::default(),
+            has_embed_fields: false,
+            has_nobox_types: false,
             enums_by_name: Default::default(),
             newtypes_by_name: Default::default(),
             type_generic_arity: Default::default(),
@@ -288,6 +299,14 @@ pub enum BoundNext {
     Concrete {
         func: (ModuleId, Idx<Function>),
         sub: BoundTree,
+        /// `func`'s own generic instantiation at this site, callee `VarId` ->
+        /// caller-arena `TyId`. A `for`-protocol `next` call is SYNTHESIZED (it
+        /// has no call expr), so it can never be keyed in
+        /// `call_generic_bindings` -- this is the only record of what its
+        /// generics bound to, and skull needs it to specialize the callee body
+        /// (`VecIter<Vec2>.next` reading flat element storage rather than the
+        /// shared generic snapshot's boxed one).
+        next_generics: FxHashMap<VarId, TyId>,
     },
     /// The instantiation was the ENCLOSING fn's own bounded generic (bound
     /// propagation): resolves via the caller's placeholder for that generic
@@ -308,14 +327,28 @@ impl BoundTree {
     }
 }
 
+/// A synthesized `iter` call: the resolved fn plus its own generic
+/// instantiation, callee `VarId` -> caller-arena `TyId`.
+///
+/// Symmetric to [`BoundNext::Concrete`]'s `next_generics`, and for the same
+/// reason: a synthesized call has no call expr, so it can never be keyed in
+/// `call_generic_bindings`, and this is the only record of what its generics
+/// bound to. Empty for a non-generic `iter`. Resolution computes this
+/// substitution to type the call; retaining it recomputes nothing.
+#[derive(Clone, Debug, PartialEq)]
+pub struct IterWitness {
+    pub func: (ModuleId, Idx<Function>),
+    pub generics: FxHashMap<VarId, TyId>,
+}
+
 /// `for x in coll` resolution through the iterator protocol: the optional
-/// `iter` fn (`None` = identity, the collection IS the iterator -- bare
+/// `iter` witness (`None` = identity, the collection IS the iterator -- bare
 /// combinator chains and bounded generics iterate as themselves) and how
 /// `next` resolves (concrete fn + bound tree, or the enclosing fn's bounded
 /// generic).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ForIterInfo {
-    pub iter_fn: Option<(ModuleId, Idx<Function>)>,
+    pub iter: Option<IterWitness>,
     pub next: BoundNext,
 }
 
@@ -352,10 +385,10 @@ pub struct BodyInference {
     /// placeholder bound-calls inside that callee when it is inlined here.
     pub bound_call_trees: FxHashMap<Idx<Expr>, BoundTree>,
     /// Args (incl. UFCS receivers) implicitly coerced iterable->iterator at an
-    /// `Iterator`-bounded param: arg expr -> the resolved `iter` fn. skull
+    /// `Iterator`-bounded param: arg expr -> the resolved `iter` witness. skull
     /// wraps the lowered arg value in this call (the call-argument analog of
-    /// `for_iter_protocol`'s `iter_fn`).
-    pub implicit_iter_args: FxHashMap<Idx<Expr>, (ModuleId, Idx<Function>)>,
+    /// `for_iter_protocol`'s `iter`).
+    pub implicit_iter_args: FxHashMap<Idx<Expr>, IterWitness>,
 
     pub ty_arena: Arena<TypeExpr>,
     pub ty_spans: ArenaMap<Idx<TypeExpr>, Span>,

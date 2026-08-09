@@ -1411,19 +1411,19 @@ impl BoneWorkspace {
             }
         }
         // Field-reference key path: a call-arg slot whose expected param is
-        // `FieldOf<Struct, V>` completes to Struct's fields of type V (the
+        // `FieldRef<Struct, V>` completes to Struct's fields of type V (the
         // typechecker's invariance) -- offered whether or not the leading `.`
         // is typed yet, with a generic `T` resolved from a sibling arg. Analyze
         // a munged variant so the callee + args resolve through an incomplete
         // `.`. Gated so the variant only fires when the slot is plausibly a
-        // field ref (live signature says FieldOf, or a `.` is already typed);
+        // field ref (live signature says FieldRef, or a `.` is already typed);
         // `field_ref_arg_completions` returns None -> falls through to normal
         // completion (e.g. enum-shorthand `.Variant` in an arg).
         if let Some((callee, arg_idx, recv_end)) = cx.arg_call.clone() {
             let lead_dot = leading_dot(src, offset);
             // Skip the variant only when the live signature is KNOWN and clearly
             // not a field ref. If the callee is unknown live (the incomplete arg
-            // broke the current file) or the slot is FieldOf, analyze the munge
+            // broke the current file) or the slot is FieldRef, analyze the munge
             // to resolve it -- so normal `foo(arg` stays variant-free but a
             // field-ref slot is caught even through a parse error. The gate reads
             // the param's nominal HEAD (`TypeCtor`), not a rendered substring.
@@ -2521,8 +2521,23 @@ impl BoneWorkspace {
         // serve a signature even when the file doesn't fully type-check.
         let inf = ws.inference(mid);
         let (sigs, call_span) = crate::query::signature_help(ws, mid, inf, offset, Some(&proj.texts))?;
-        // Active argument = top-level commas between the call's `(` and the cursor.
-        let active = active_param(src, call_span.offset_range.0, offset);
+        let call_start = call_span.offset_range.0;
+        let paren_start = active_call_paren_start(src, call_start, offset);
+        // Active argument = top-level commas between the call's OWN `(` (not
+        // necessarily the first `(` after `call_start` -- a UFCS receiver
+        // that is itself a call, `get_screen().rect_outline(|)`, has its own
+        // sibling paren pair) and the cursor.
+        let mut active = paren_start.map_or(0, |p| active_param(src, p, offset));
+        // UFCS: `recv.callee(..)` folds the receiver into HIR arg 0 (the
+        // signature's params include it, e.g. `dl: DrawList` ahead of
+        // `pos: Vec2`), but the WRITTEN paren list the cursor sits in only
+        // has the trailing args -- `active_param`'s comma count is 0-based
+        // over that written list alone. Shift by one so a dot-call cursor in
+        // the first written arg highlights the SECOND declared param, not
+        // the receiver's.
+        if paren_start.is_some_and(|p| call_is_ufcs_dot_syntax(src, call_start, p)) {
+            active += 1;
+        }
         Some(SignatureHelp {
             signatures: sigs
                 .into_iter()
@@ -3401,14 +3416,56 @@ fn line_indent_at(src: &str, pos: usize) -> String {
         .collect()
 }
 
-/// Active argument index for signature help: count of top-level commas between
-/// the call's opening `(` and the cursor. Depth tracks nested parens so a comma
-/// inside a nested call doesn't advance the outer arg; a naive string-skip keeps
-/// commas inside string literals from counting (no escape handling -- fine for a
-/// cursor heuristic). `call_start` is the byte offset of the call expression.
-fn active_param(src: &str, call_start: usize, offset: usize) -> u32 {
-    let end = offset.min(src.len());
+/// Byte offset of the call's OWN opening `(` -- the top-level paren group
+/// that is still unclosed at `offset` (i.e. actually contains the cursor).
+/// `call_start` is the byte offset of the whole call EXPRESSION, which for a
+/// UFCS/method call includes the receiver (`get_screen().rect_outline(|)`
+/// starts at `get_screen`, not `rect_outline`); a receiver that is itself a
+/// call has its own top-level paren pair, fully closed before the real one
+/// opens, so tracking depth alone and taking the FIRST `(` would anchor on
+/// the receiver's parens instead. Depth resets to 0 between sibling groups,
+/// so the position is retaken (and forgotten again if that group closes
+/// too) every time depth returns to 0 -- the group left open at `offset` is
+/// the answer. `None` when no paren is still open at `offset` (shouldn't
+/// happen for a real call/struct-literal site, but the caller degrades to
+/// arg 0 / non-UFCS rather than panic).
+fn active_call_paren_start(src: &str, call_start: usize, offset: usize) -> Option<usize> {
+    let b = src.as_bytes();
+    let end = offset.min(b.len());
     let start = call_start.min(end);
+    let mut depth = 0i32;
+    let mut active: Option<usize> = None;
+    let mut in_str = false;
+    for (i, &c) in b[start..end].iter().enumerate() {
+        match c {
+            b'"' => in_str = !in_str,
+            b'(' if !in_str => {
+                if depth == 0 {
+                    active = Some(start + i);
+                }
+                depth += 1;
+            }
+            b')' if !in_str => {
+                depth -= 1;
+                if depth == 0 {
+                    active = None;
+                }
+            }
+            _ => {}
+        }
+    }
+    active
+}
+
+/// Active argument index for signature help: count of top-level commas
+/// between the call's own opening `(` (`paren_start`, from
+/// `active_call_paren_start`) and the cursor. Depth tracks nested parens so a
+/// comma inside a nested call doesn't advance the outer arg; a naive
+/// string-skip keeps commas inside string literals from counting (no escape
+/// handling -- fine for a cursor heuristic).
+fn active_param(src: &str, paren_start: usize, offset: usize) -> u32 {
+    let end = offset.min(src.len());
+    let start = paren_start.min(end);
     let mut depth = 0i32;
     let mut arg = 0u32;
     let mut in_str = false;
@@ -3424,8 +3481,26 @@ fn active_param(src: &str, call_start: usize, offset: usize) -> u32 {
     arg
 }
 
+/// Whether the call whose own opening paren sits at `paren_start` is written
+/// as `recv.name(..)` (a UFCS/method dot-call) rather than a bare `name(..)`:
+/// the identifier immediately before `paren_start` is itself preceded by a
+/// `.`. `call_start` (the whole call expression's start) bounds the
+/// backward walk so it can't run past the receiver into unrelated code.
+fn call_is_ufcs_dot_syntax(src: &str, call_start: usize, paren_start: usize) -> bool {
+    let b = src.as_bytes();
+    let start = call_start.min(b.len());
+    let mut j = paren_start.min(b.len()).max(start);
+    while j > start && (b[j - 1].is_ascii_alphanumeric() || b[j - 1] == b'_') {
+        j -= 1;
+    }
+    while j > start && (b[j - 1] == b' ' || b[j - 1] == b'\t') {
+        j -= 1;
+    }
+    j > start && b[j - 1] == b'.'
+}
+
 /// Whether any overload of `callee` declares arg `arg_index` as a
-/// `FieldOf<..>` slot, decided on the param's nominal head. None when no
+/// `FieldRef<..>` slot, decided on the param's nominal head. None when no
 /// overload is known live (unknown callee / arity) -- the caller treats that
 /// as "can't rule it out".
 pub(crate) fn callee_slot_is_field_of(ws: &Workspace, callee: &str, arg_index: usize) -> Option<bool> {
@@ -3443,7 +3518,7 @@ pub(crate) fn callee_slot_is_field_of(ws: &Workspace, callee: &str, arg_index: u
                 TyId::Static(pmid, idx) => ws.module(pmid).ty_arena[idx],
                 TyId::Local(_) => continue,
             };
-            if matches!(te, TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } if matches!(n.as_str(), "FieldOf" | "KeyPath"))
+            if matches!(te, TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } if matches!(n.as_str(), "FieldRef" | "ReadFieldRef" | "WriteFieldRef"))
             {
                 found = true;
             }

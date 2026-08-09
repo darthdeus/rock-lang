@@ -20,7 +20,7 @@ use bone_semantic::prelude::*;
 use bone_incremental::session::Session;
 
 fn parse(src: &str) -> skull_parser::Ast {
-    skull_parser::parse_module(src, Ustr::from("<inference_recovery>")).expect("parse")
+    skull_parser::parse_module_clean(src, Ustr::from("<inference_recovery>")).expect("parse")
 }
 
 fn ws_of(src: &str) -> (Workspace, ModuleId) {

@@ -126,7 +126,7 @@ fn corpus_report() {
             if got_trim == exp_trim {
                 pass += 1;
             } else {
-                if got_trim == c.input.trim_end() && skull_parser::parse_module(&c.input, "x".into()).is_err() {
+                if got_trim == c.input.trim_end() && skull_parser::parse_module_clean(&c.input, "x".into()).is_err() {
                     parse_err += 1;
                 }
                 failures.push((c.file, c.name, c.input, exp_trim.to_string(), got_trim.to_string()));

@@ -4,16 +4,12 @@
 //! co-emits. The node-executed check is the correctness oracle; the corpus
 //! `tests/js_string_builder.rock` cross-checks against luajit.
 
-use std::process::Command;
-
 use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::FuncRef;
-
-mod common;
-use common::ws_with;
+use crate::common::ws_with;
 
 fn node_available() -> bool {
-    Command::new("node").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+    crate::common::node().arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
 }
 
 fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<String, String> {
@@ -39,7 +35,7 @@ fn eval_str(defs: &str, root: &str, expect: &str) {
         skull_codegen_js::JS_NB_CHECK_SHIMS,
         skull_codegen_js::JS_VEC_CHECK_SHIMS,
     );
-    let out = Command::new("node").arg("-e").arg(&program).output().expect("spawn node");
+    let out = crate::common::node().arg("-e").arg(&program).output().expect("spawn node");
     assert!(
         out.status.success(),
         "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",

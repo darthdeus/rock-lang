@@ -72,7 +72,31 @@ pub(crate) fn body_errors(ws: &bone_semantic::inference::Workspace) -> Vec<Compi
 /// the first — a project with 5 type errors must not force a
 /// fix-one-recompile-repeat loop.
 pub(crate) fn render_errs(sources: &SourceFiles, errs: &[CompilerError]) -> String {
-    rock_core::errors::render_all(errs, sources)
+    // A diagnostic can land in an INLINED stdlib body, whose modules are parsed
+    // under `<bone-stdlib:NAME>` and appear in no caller's source set -- the
+    // span lookup then fails and the snippet plus every label is dropped. Added
+    // here, the one sink all render paths share, rather than per caller.
+    let mut sf = SourceFiles { files: sources.files.clone() };
+    for f in rock_host::stdlib_loader::stdlib_files() {
+        let id = format!("<bone-stdlib:{}>", f.name);
+        sf.add_or_update_file(source_file_from_path_and_contents(
+            id.clone(),
+            id,
+            f.contents.to_string(),
+        ));
+    }
+    // An emit path that can only return ONE error attaches the rest as
+    // siblings; expanded here for the same reason as the stdlib sources above --
+    // this is the shared sink, and rendering only the primary is how a
+    // twenty-site sink list got read as three.
+    let expanded: Vec<CompilerError> = errs
+        .iter()
+        .flat_map(|e| {
+            std::iter::once(CompilerError { siblings: Vec::new(), ..e.clone() })
+                .chain(e.siblings.iter().cloned())
+        })
+        .collect();
+    rock_core::errors::render_all(&expanded, &sf)
 }
 
 /// The bone stdlib with `user` modules appended — the checkable module set every
@@ -105,6 +129,12 @@ pub(crate) fn check_modules(
     let macro_dupes = skull_parser::check_macro_name_uniqueness(modules);
     if !macro_dupes.is_empty() {
         return Err(macro_dupes);
+    }
+    // A macro argument label must name one of that macro's parameters -- also
+    // before expansion, which is what drops the labels.
+    let macro_labels = skull_parser::check_macro_call_labels(modules);
+    if !macro_labels.is_empty() {
+        return Err(macro_labels);
     }
     let ws = bone_semantic::semantic_passes::semantic_pass(modules).map_err(|e| vec![e])?;
     let errs = body_errors(&ws);
@@ -1156,5 +1186,39 @@ mod tests {
         // controls: mutable globals stay writable.
         assert!(!rejected("global BAR: int = 5\nfn f() { BAR = 6 }"), "mutable global write");
         assert!(!rejected("global BAR: int = 5\nfn f() { BAR += 1 }"), "mutable global compound");
+    }
+
+    // A diagnostic can land in an INLINED stdlib body, whose modules are parsed
+    // under `<bone-stdlib:NAME>` and belong to no project's source set. Without
+    // the registration in `render_errs` the header still prints and the snippet
+    // plus every label is silently dropped. Renderer-level on purpose: a
+    // lowering change can move where a rejection LANDS -- which is how the
+    // end-to-end fixture that used to cover this went vacuous -- but it cannot
+    // move the span-to-source lookup this asserts.
+    #[test]
+    fn a_diagnostic_spanned_into_stdlib_renders_its_snippet() {
+        const NEEDLE: &str = "fn Vec<T>.push(";
+        let unified = rock_host::stdlib_loader::stdlib_files()
+            .iter()
+            .find(|f| f.name == "unified.rock")
+            .expect("unified.rock is a stdlib module");
+        let offset = unified.contents.find(NEEDLE).expect("needle still in unified.rock");
+        let head = &unified.contents[..offset];
+        let line = head.matches('\n').count();
+        let col = offset - head.rfind('\n').map_or(0, |i| i + 1);
+        let span = rock_core::Span {
+            file: ustr::Ustr::from("<bone-stdlib:unified.rock>"),
+            line_range: (line, line),
+            col_range: (col, col + NEEDLE.len()),
+            offset_range: (offset, offset + NEEDLE.len()),
+        };
+        let err = CompilerError::new_with_label(span, "boxed here".to_string());
+        let rendered = render_errs(&SourceFiles { files: vec![] }, &[err]);
+
+        assert!(
+            rendered.contains(NEEDLE),
+            "the stdlib source line must render, not be dropped:\n{rendered}"
+        );
+        assert!(rendered.contains("boxed here"), "the label must render:\n{rendered}");
     }
 }

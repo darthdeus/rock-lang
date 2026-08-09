@@ -10,9 +10,7 @@
 //! cdata-eligible (cut 1 is single-scalar-payload) and keep the table -- exactly
 //! the case this SROA targets. (A single-scalar enum is now a value cdata instead;
 //! see `enum_cdata.rs`.) Escaping table enums keep the table.
-
-mod common;
-use common::emit_module;
+use crate::common::emit_module;
 
 // Direct ctor stores into `s` (the second guarded by an `if`), then match-with-
 // binding -- the non-escaping construct/match path. Only `w` (an int) is observed.

@@ -14,6 +14,7 @@ pub mod sexp;
 pub use ast::*;
 pub use parser::Parser;
 
+pub use rock_core::errors::CompilerErrorKind;
 pub use rock_core::{CompilerError, SourceFiles, Span, source_file_from_path_and_contents};
 pub use ordered_float::OrderedFloat;
 pub use rock_tokenizer::TokenKind;
@@ -37,6 +38,23 @@ pub fn parse_module(source: &str, file: Ustr) -> Result<Ast, CompilerError> {
     let mut ast = Parser::new(tokens, source, 0).parse_module()?;
     ast.file = file;
     Ok(ast)
+}
+
+/// [`parse_module`] for a caller that has NO recovery story: a recovered syntax
+/// error is an `Err` here rather than a dropped item in an otherwise-`Ok` tree.
+///
+/// Test fixtures and corpus tools want this one. `parse_module(..).expect(..)`
+/// reads like it proves the source parsed, and does not -- a malformed item is
+/// silently absent from the AST, so the test runs against a partial workspace
+/// and passes for a reason that has nothing to do with its name. That is how a
+/// `""" .. """` inline body missing its `=` sat in the JS emitter fixtures:
+/// accepted, dropped, and the rejection under test came from a different path.
+pub fn parse_module_clean(source: &str, file: Ustr) -> Result<Ast, CompilerError> {
+    let ast = parse_module(source, file)?;
+    match ast.recovery_errors.first() {
+        Some(e) => Err(e.clone()),
+        None => Ok(ast),
+    }
 }
 
 /// Parse exactly ONE top-level item from `source` (the text of a single item),
@@ -93,7 +111,7 @@ pub fn cook_one(ast: &mut Ast, registry: &macro_expand::MacroRegistry) {
     desugar::desugar(ast);
 }
 
-pub use macro_expand::{check_macro_name_uniqueness, collect_registry, MacroRegistry};
+pub use macro_expand::{check_macro_call_labels, check_macro_name_uniqueness, collect_registry, MacroRegistry};
 
 #[cfg(test)]
 mod tests {
@@ -183,6 +201,24 @@ mod tests {
         assert_eq!(mini.items[0].annotations.len(), 1, "annotation preserved");
     }
 
+    #[test]
+    fn parse_module_clean_rejects_what_parse_module_recovers_from() {
+        // A fn body-less because its inline body lost its `=`: recovered, the
+        // item dropped, and `parse_module` still Ok. The strict form is the
+        // oracle a fixture helper needs.
+        let src = "inline(lua) fn f(x: int) -> int \"\"\" return x \"\"\"\n";
+        let file = Ustr::from("<clean>");
+        let lenient = parse_module(src, file).expect("recovering parse still returns a tree");
+        assert!(!lenient.recovery_errors.is_empty(), "the dropped item is recorded");
+        assert!(
+            !lenient.items.iter().any(|i| matches!(&i.kind, ItemKind::Function(_))),
+            "the malformed fn is absent from the lenient tree, which is the trap"
+        );
+        assert!(parse_module_clean(src, file).is_err(), "strict parse rejects it");
+        // Both sides: clean source must still come back Ok.
+        assert!(parse_module_clean("fn f(x: int) -> int { return x }\n", file).is_ok());
+    }
+
     fn first_fn(ast: &Ast) -> &FunctionDef {
         match &ast.items[0].kind {
             ItemKind::Function(f) => f,
@@ -262,6 +298,27 @@ mod tests {
         assert_eq!(anns.len(), 2, "two field annotations");
         assert_eq!(anns[0].name.name, "flat");
         assert_eq!(anns[1].name.name, "w");
+    }
+
+    #[test]
+    fn nobox_value_marks_the_value_type() {
+        let src = "nobox value V { x: int }";
+        let ast = parse_module(src, Ustr::from("test.rock")).expect("parse failed");
+        assert!(ast.recovery_errors.is_empty(), "clean parse: {:?}", ast.recovery_errors);
+        let s = first_struct(&ast);
+        assert!(s.is_value);
+        assert!(s.is_nobox);
+    }
+
+    #[test]
+    fn nobox_rejects_a_reference_struct() {
+        let ast = parse_module("nobox struct S { x: int }", Ustr::from("test.rock"))
+            .expect("parser recovers the invalid item");
+        assert!(
+            ast.recovery_errors.iter().any(|err| err.message.contains("`nobox` requires `value`")),
+            "{:?}",
+            ast.recovery_errors
+        );
     }
 
     #[test]
@@ -398,6 +455,31 @@ mod tests {
         // The block must not leak into normal lambda parsing.
         let s = body_sexp("fn f() { let g = x => x + 1 }");
         assert!(s.contains("lambda") || s.contains("=>"), "bare-ident lambda still parses: {s}");
+    }
+
+    #[test]
+    fn item_recovery_does_not_swallow_the_next_fn() {
+        // An item error detected AT an item boundary leaves the parser sitting on
+        // the next `fn`. Recovery used to force-consume a token before scanning,
+        // so that `fn` was eaten and the whole following function vanished from
+        // the AST -- a valid item lost to a neighbour's error, which in the editor
+        // took hover/completion down with it.
+        let src = "fn helper(a: int) -> int { return a * 2 }\n\
+                   fn incomplete(x: int) -> int\n\
+                   fn survivor() -> int { return 7 }\n";
+        let ast = parse_module(src, Ustr::from("<recovery>")).expect("total parse");
+        assert_eq!(ast.recovery_errors.len(), 1, "exactly the one malformed item");
+        let fns: Vec<&str> = ast
+            .items
+            .iter()
+            .filter_map(|i| match &i.kind {
+                ItemKind::Function(f) => Some(f.name.name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(fns.contains(&"helper"), "the item before survives: {fns:?}");
+        assert!(fns.contains(&"survivor"), "the item AFTER survives: {fns:?}");
+        assert!(!fns.contains(&"incomplete"), "the malformed item is the only one dropped: {fns:?}");
     }
 
     #[test]

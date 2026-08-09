@@ -245,8 +245,6 @@ impl TokenKind {
 
             Equals | NotEquals => left(19),
 
-            Mod => left(21),
-
             LeftShift | RightShift => left(23),
 
             LessThan | LessThanEqual | GreaterThan | GreaterThanEqual => left(25),
@@ -256,12 +254,24 @@ impl TokenKind {
             BitOr => left(29),
 
             Plus | Minus => left(31),
-            Mul | Div | IntDiv => left(35),
+            // `%` belongs with `*` and `/`, at the SAME level so the three are
+            // left-associative among themselves. It sat at 21 -- under the
+            // shifts and the comparisons, and under `+`/`-` -- so `a + b % c`
+            // was `(a + b) % c`, `a % b * c` was `a % (b * c)`, and `a % b < c`
+            // was `a % (b < c)`, which the typechecker rejected outright.
+            // Pinned by `tests/mod_precedence.rock`.
+            Mul | Div | IntDiv | Mod => left(35),
 
             Dot | Colon => left(51),
 
             Dollar => right(1),
-            DoubleQuestionMark => left(3),
+
+            // Above every assignment form (Assign 5, the compound assigns 9)
+            // and below `||` (13), matching C#. At 3 it sat BELOW Assign, so
+            // `x = a ?? b` parsed as `(x = a) ?? b`: the assignment's RHS is
+            // parsed at min_bp 5, `??` stopped it, and the outer loop then
+            // took the whole assignment as the coalesce's left operand.
+            DoubleQuestionMark => left(11),
 
             _ => None,
         }

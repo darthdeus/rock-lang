@@ -6,16 +6,12 @@
 //! REFERENCE on luajit, which a generic contents-eq cannot reproduce). The
 //! node-executed checks are the correctness oracle.
 
-use std::process::Command;
-
 use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::FuncRef;
-
-mod common;
-use common::ws_with;
+use crate::common::ws_with;
 
 fn node_available() -> bool {
-    Command::new("node").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+    crate::common::node().arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
 }
 
 fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<String, String> {
@@ -43,7 +39,7 @@ fn eval_int(defs: &str, root: &str, expect: i64) {
         skull_codegen_js::JS_TABLE_PRIM,
         skull_codegen_js::JS_STRUCTURAL_EQ,
     );
-    let out = Command::new("node").arg("-e").arg(&program).output().expect("spawn node");
+    let out = crate::common::node().arg("-e").arg(&program).output().expect("spawn node");
     assert!(
         out.status.success(),
         "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",
@@ -108,4 +104,26 @@ fn gc_carrying_value_struct_eq() {
         "emits the W registry entry (string ref, scalar structural):\n{js}"
     );
     eval_int(&js, "root", 1);
+}
+
+/// A `nobox` return crosses the JS call boundary as LEAVES, not as anything the
+/// guarantee forbids. This replaced a blanket rejection, so it asserts the
+/// property that rejection was protecting rather than the rejection itself: the
+/// value must not materialize as an object OR as a transport array (which is an
+/// allocation just the same, and does not vanish under V8's escape analysis --
+/// measured in docs/js-nobox-return-abi-plan.md).
+#[test]
+fn nobox_value_return_crosses_as_leaves_not_a_box() {
+    let src = "nobox value V { x: int, y: int }\n\
+               fn mk() -> V { V { x: 1, y: 2 } }\n\
+               fn root() -> int {\n\
+                   let v = mk()\n\
+                   return v.x * 10 + v.y\n\
+               }";
+    let ws = ws_with(src);
+    let js = emit_closure(&ws, "root").expect("a nobox return emits under the scratch ABI");
+    assert!(!js.contains("\"V\""), "nobox value materialized an object:\n{js}");
+    assert!(!js.contains("return ["), "nobox return allocated a transport array:\n{js}");
+    assert!(js.contains("__rock_ret1 = "), "leaf 1 must ride the scratch bank:\n{js}");
+    eval_int(&js, "root", 12);
 }

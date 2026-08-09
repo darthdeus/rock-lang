@@ -26,7 +26,6 @@ skull-parser = { path = "../skull-parser" }
 anyhow = { workspace = true }
 fs-err = { workspace = true }
 clap = { workspace = true }
-comfy-git-version = { workspace = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -25,9 +25,7 @@
 
 use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::FuncRef;
-
-mod common;
-use common::ws_with;
+use crate::common::ws_with;
 
 fn emit(ws: &bone_semantic::inference::Workspace, root: &str) -> String {
     let scx = ScalarCtx::new(ws);

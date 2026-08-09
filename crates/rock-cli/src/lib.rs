@@ -50,13 +50,17 @@ pub mod live_project;
 pub mod web;
 mod test_protocol;
 mod lint_cmd;
-mod lint_union;
+pub(crate) mod lint_union;
 pub mod lint_pass;
+pub mod ablation_report;
+mod mono_manifest;
+mod monoty_census;
 mod lsp_survey;
 mod lsp_test;
 mod parallel_runner;
 mod image_video;
-mod run_sim;
+pub mod run_sim;
+pub mod sim_record;
 mod stone;
 pub mod stone_test;
 mod test;
@@ -169,6 +173,18 @@ pub enum CliCommand {
     /// (mean/p50/p99) + overlay size. Mirrors what `SkullStone::recompile` does on
     /// a body edit (no reassembly). See `skull_backend::skull_iter_incremental`.
     IterIncremental,
+    /// `rock mono-ty-census [root]` -- DIAGNOSTIC (Stage 0c,
+    /// `docs/monomorphization-plan.md`): convert every inferred expr/binding
+    /// type of the closed world to the total `MonoTy` and report conversions,
+    /// distinct logical types, and failures bucketed by reason. Changes no
+    /// emission. See `monoty_census::do_monoty_census`.
+    MonoTyCensus,
+    /// `rock mono-manifest [root]` -- DIAGNOSTIC (Stage 0d,
+    /// `docs/monomorphization-plan.md`): build the SHADOW instance graph over
+    /// the closed world (instances keyed by `MonoTy`, not `SpecKey`), and
+    /// report instance/edge counts, the edge-kind histogram and the recursion
+    /// census. Changes no emission. See `mono_manifest::do_mono_manifest`.
+    MonoManifest,
     /// `rock iter-lsp <project> [--iters N --warmup W]` -- tight-loop profiler
     /// for the per-edit LSP query path on the bone backend (the work the editor
     /// does per keystroke through `BoneWorkspace`): `update` (didChange) +
@@ -244,7 +260,7 @@ pub enum CliCommand {
     /// `rock shader-validate <project> [project...]` -- compile+link every
     /// `rock_shader` pair the project(s) register, on REAL GL contexts in both
     /// profiles (330core + 300es), via `stone-glsl-runner`'s compile-only mode
-    /// (`docs/shader-mobile-port-plan.md` A3). A driver rejection is a FAIL
+    /// (`docs/shaders.md` § Testing). A driver rejection is a FAIL
     /// carrying the compile log; a no-display environment skips-with-log
     /// (runner exit 2, the one sanctioned skip); zero verdicts exits non-zero.
     /// See `glsl_test::shader_validate`.
@@ -276,6 +292,8 @@ impl clap::ValueEnum for CliCommand {
             Self::SkullInlineStats,
             Self::SkullIncrementalProfile,
             Self::IterIncremental,
+            Self::MonoTyCensus,
+            Self::MonoManifest,
             Self::IterLsp,
             Self::LspSurvey,
             Self::IterReinfer,
@@ -324,6 +342,8 @@ impl CliCommand {
             Self::SkullInlineStats => "skull-inline-stats",
             Self::SkullIncrementalProfile => "skull-incremental-profile",
             Self::IterIncremental => "iter-incremental",
+            Self::MonoTyCensus => "mono-ty-census",
+            Self::MonoManifest => "mono-manifest",
             Self::IterLsp => "iter-lsp",
             Self::LspSurvey => "lsp-survey",
             Self::IterReinfer => "iter-reinfer",
@@ -493,6 +513,21 @@ pub struct Args {
     pub no_timeout: bool,
     pub dump_state: bool,
     pub update_snapshots: bool,
+    /// For `rock sim`: how many sim children may run at once. `None` uses the
+    /// conservative default in `run_sim::resolve_jobs`.
+    pub jobs: Option<usize>,
+    /// For `rock sim`: force one fresh process per entry. This is the permanent
+    /// reference-oracle surface (`docs/sim-speed-plan.md`), today also the
+    /// default; it stays meaningful when boot-checkpoint workers become one.
+    pub isolated: bool,
+    /// For `rock sim`: opt into boot-checkpoint workers -- eligible entries
+    /// grouped by boot signature share one booted process with the B2 restore
+    /// boundary between them. Ineligible entries stay isolated with a reason.
+    pub workers: bool,
+    /// For `rock sim <project>`: the B4 corpus gate. Runs the whole project in
+    /// three predecessor orders and compares every sim against its own
+    /// fresh-process reference. An arc checkpoint, not an iteration step.
+    pub multi_order: bool,
 
     /// For `rock frame`: record per-tick input + dt to this replay log
     /// (docs/replay-scrub-plan.md). Mutually exclusive with `--replay`.
@@ -548,6 +583,20 @@ pub struct Args {
     /// `Error`-severity findings render and fail the build under both.
     pub no_lints: bool,
     pub lint_summary: bool,
+
+    /// `rock lint --lints=a,b`: run exactly these lints instead of the default
+    /// tier. The only way to reach an opt-in lint (`bone_lints::OPT_IN_LINTS`),
+    /// which a build and the LSP never run. `rock lint` only -- a build's
+    /// catalog is not the author's to narrow per invocation.
+    pub lints: Option<String>,
+
+    /// `rock lint --only-types=Mob,Item` / `--ignore-types=Color,Vec2`: the
+    /// receiver types `method_syntax` sweeps, as a whitelist and a blocklist. A
+    /// conversion happens one type at a time, so the sweep has to narrow from
+    /// the invocation; `--ignore-types` subtracts from whatever `--only-types`
+    /// leaves.
+    pub only_types: Option<String>,
+    pub ignore_types: Option<String>,
 
     /// `rock lint --union <lib>`: judge a library's reachability against every
     /// consumer in the repo at once, reporting only what none of them reach.
@@ -644,6 +693,17 @@ impl Args {
                 .help("Dump all global state as JSON after the last frame (for AI/human diagnostics)"))
             .arg(Arg::new("update-snapshots").long("update-snapshots").action(ArgAction::SetTrue)
                 .help("For `rock sim`: rewrite snapshot baselines instead of diffing."))
+            .arg(Arg::new("jobs").long("jobs").short('j').value_name("N")
+                .value_parser(clap::value_parser!(usize))
+                .help("For `rock sim`: run up to N sim children concurrently (default 4, 1 = serial). Applies to the whole-suite and multi-name forms."))
+            .arg(Arg::new("isolated").long("isolated").action(ArgAction::SetTrue)
+                .conflicts_with("workers")
+                .help("For `rock sim`: force one fresh process per entry -- the permanent reference oracle. The default is the hybrid: render-skipped entries share boot-checkpoint workers, rendered entries run isolated with a reported reason."))
+            .arg(Arg::new("workers").long("workers").action(ArgAction::SetTrue)
+                .help("For `rock sim`: force RENDERED sims into shared boot-checkpoint workers too, which the hybrid default isolates -- the diagnostic spelling, and how the differential and multi-order gates measure that class. Hot-reload sims, $OUT-interpolating env and SIM_WORKER_ISOLATED still run isolated with a reported reason."))
+            .arg(Arg::new("multi-order").long("multi-order").action(ArgAction::SetTrue)
+                .conflicts_with_all(["isolated", "workers"])
+                .help("For `rock sim <project> [name...]`: the B4 corpus gate -- run the corpus in registry, reverse and one fixed shuffled order and compare every sim against its own fresh-process reference. With no names it runs the whole project and is an arc checkpoint (slow); with names it runs the same four arms over just those sims, which confirms an already-isolated divergence in seconds but cannot discover a new one."))
             .arg(Arg::new("record").long("record").value_name("FILE")
                 .help("For `rock frame`: record per-tick input + dt to FILE (a replay log). Replay it with --replay."))
             .arg(Arg::new("replay").long("replay").value_name("FILE")
@@ -672,6 +732,12 @@ impl Args {
                 .help("Drop lint warnings/advice from build output. Error-severity lints still run and still fail the build."))
             .arg(Arg::new("lint-summary").long("lint-summary").action(ArgAction::SetTrue)
                 .help("Report build lint warnings/advice as a one-line count instead of rendering each. Error-severity lints always render in full."))
+            .arg(Arg::new("lints").long("lints")
+                .help("For `rock lint <path>`: run ONLY the named lints (comma-separated), including opt-in ones a build never runs. `--lints=method_syntax` is how a migration lint is surfaced."))
+            .arg(Arg::new("only-types").long("only-types")
+                .help("For `rock lint --lints=method_syntax`: comma-separated type names to sweep, to the exclusion of every other (--only-types=Mob,Item). A name that is no type in the project rejects."))
+            .arg(Arg::new("ignore-types").long("ignore-types")
+                .help("For `rock lint --lints=method_syntax`: comma-separated type names to drop from the sweep (--ignore-types=Color,Vec2). A name that is no type in the project is reported."))
             .arg(Arg::new("union").long("union").action(ArgAction::SetTrue)
                 .help("For `rock lint <lib>`: judge a library's reachability against every consumer in the repo at once, reporting only functions that NONE of them reach. The only sound way to run unused_fn on a lib."))
             .arg(Arg::new("consumers").long("consumers")
@@ -719,6 +785,10 @@ impl Args {
             no_timeout: m.get_flag("no-timeout"),
             dump_state: m.get_flag("dump-state"),
             update_snapshots: m.get_flag("update-snapshots"),
+            jobs: m.get_one::<usize>("jobs").copied(),
+            isolated: m.get_flag("isolated"),
+            workers: m.get_flag("workers"),
+            multi_order: m.get_flag("multi-order"),
             record: m.get_one::<String>("record").cloned(),
             replay: m.get_one::<String>("replay").cloned(),
             checkpoint_interval: m.get_one::<usize>("checkpoint-interval").copied(),
@@ -733,6 +803,9 @@ impl Args {
             package: m.get_flag("package"),
             no_lints: m.get_flag("no-lints"),
             lint_summary: m.get_flag("lint-summary"),
+            lints: m.get_one::<String>("lints").cloned(),
+            only_types: m.get_one::<String>("only-types").cloned(),
+            ignore_types: m.get_one::<String>("ignore-types").cloned(),
             union: m.get_flag("union"),
             consumers: m.get_one::<String>("consumers").cloned(),
             // Backend selection. An explicit `--backend` flag wins; otherwise an

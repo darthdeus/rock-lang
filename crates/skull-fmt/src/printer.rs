@@ -420,7 +420,13 @@ impl<'a> Printer<'a> {
     }
 
     fn struct_def(&self, s: &StructDef) -> Doc {
-        let prefix = if s.is_value { "value " } else { "struct " };
+        let prefix = if s.is_nobox {
+            "nobox value "
+        } else if s.is_value {
+            "value "
+        } else {
+            "struct "
+        };
         let head = Doc::concat([
             Doc::text(prefix),
             Doc::text(kw(s.name.name)),
@@ -446,11 +452,15 @@ impl<'a> Printer<'a> {
     }
 
     fn field(&self, field: &Field) -> Doc {
-        let mut parts = vec![
+        let mut parts = vec![];
+        if field.is_embed {
+            parts.push(Doc::text("embed "));
+        }
+        parts.extend([
             Doc::text(kw(field.name.name)),
             Doc::text(": "),
             self.type_expr(field.ty),
-        ];
+        ]);
         if let Some(d) = field.default {
             parts.push(Doc::text(" = "));
             parts.push(self.expr(d));

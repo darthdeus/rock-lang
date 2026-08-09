@@ -1,0 +1,32 @@
+// M3, marked tier: a `??` recovering a nullable `nobox` value, used DIRECTLY as
+// a plain struct's ctor-field initializer.
+//
+// The discriminant is the `??` at that position. Three controls pin each half of
+// it, in `nobox_coalesce_at_ctor_field_control.rock` -- their own file, because a
+// compile rejection aborts this one and a control in here would never run. So it
+// is neither "a phi at a ctor field" nor "`??` anywhere" -- it is the
+// nullable-to-present collapse landing on a field initializer.
+
+nobox value NV { a: int, b: int }
+
+fn seed(n: int) -> int { return n }
+fn mk(n: int) -> NV { return NV { a: n, b: 11 } }
+fn maybe(n: int) -> NV? { if n > 0 { return NV { a: n, b: 11 } } return null }
+fn take(v: NV) -> int { return v.a }
+
+struct Holder { p: NV }
+
+// The shape: `??` straight into the ctor field. Rejects, with a finding for the
+// `??` and one for its fallback ctor.
+@test(output = "7")
+fn probe_coalesce_at_ctor_field() {
+    let h = Holder { p: maybe(seed(7)) ?? NV { a: 0, b: 0 } }
+    print("{h.p.a}")
+}
+
+// The fallback being a CALL rather than a literal ctor changes nothing.
+@test(output = "7")
+fn probe_coalesce_call_fallback_at_ctor_field() {
+    let h = Holder { p: maybe(seed(7)) ?? mk(0) }
+    print("{h.p.a}")
+}

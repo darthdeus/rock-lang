@@ -9,14 +9,14 @@ use rock_core::errors::CompilerErrorLevel;
 const FILE: &str = "<catalog>";
 
 fn parse(src: &str) -> skull_parser::Ast {
-    skull_parser::parse_module(src, Ustr::from(FILE)).expect("parse")
+    skull_parser::parse_module_clean(src, Ustr::from(FILE)).expect("parse")
 }
 
 fn findings(src: &str) -> Vec<Finding> {
     let ws = semantic_pass(&mut [parse(src)]).expect("clean program typechecks");
     let mut sources = FxHashMap::default();
     sources.insert(Ustr::from(FILE), src);
-    lint_workspace(&ws, &FxHashSet::default(), true, &sources)
+    lint_workspace(&ws, &FxHashSet::default(), true, &sources, &Default::default())
 }
 
 fn lints_of(src: &str) -> Vec<&'static str> {
@@ -82,7 +82,7 @@ fn unused_fn_is_gated_on_bin_packages() {
     let ws = semantic_pass(&mut [parse(src)]).expect("typechecks");
     let mut sources = FxHashMap::default();
     sources.insert(Ustr::from(FILE), src);
-    let lib = lint_workspace(&ws, &FxHashSet::default(), false, &sources);
+    let lib = lint_workspace(&ws, &FxHashSet::default(), false, &sources, &Default::default());
     assert!(lib.is_empty(), "a lib's public fn has no in-project caller, got {lib:?}");
 }
 
@@ -96,7 +96,7 @@ fn warm_modules_are_not_reported_on() {
         ws.modules.iter().filter(|m| m.id != ModuleId::builtin()).map(|m| m.id).collect();
     let mut sources = FxHashMap::default();
     sources.insert(Ustr::from(FILE), src);
-    assert!(lint_workspace(&ws, &warm, true, &sources).is_empty());
+    assert!(lint_workspace(&ws, &warm, true, &sources, &Default::default()).is_empty());
 }
 
 #[test]

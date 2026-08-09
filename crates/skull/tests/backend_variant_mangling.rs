@@ -4,9 +4,7 @@
 //! elsewhere. This is what makes hot reload safe (see mangle_rename_hot_reload.rs)
 //! and what fixed the stone-web arc-2 regression where a web sibling silently
 //! renamed every previously-unique Lua definition and call site.
-
-mod common;
-use common::emit_module;
+use crate::common::emit_module;
 
 const DBL_ALONE: &str = r#"
 fn dbl(x: int) -> int { return x + x }

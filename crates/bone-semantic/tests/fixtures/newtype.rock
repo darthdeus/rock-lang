@@ -54,8 +54,8 @@ fn f() -> int {
     5
 }
 
-// A newtype wraps exactly one type; multi-field defs are rejected by the
-// grammar.
+// A newtype wraps exactly one type; a multi-field def is rejected at the
+// declaration, whether or not it is ever constructed.
 //- newtype_multi_field_rejected @fail
 newtype Bad(int, string)
 fn f() -> int {

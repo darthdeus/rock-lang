@@ -9,9 +9,7 @@
 //! Pre-P2 this test pinned the BOXED status quo (`V2_ct(..)` + `__nb_checked_set`);
 //! landing the feature flipped it to the zero-box assertions below (git `c42bd06ce`
 //! is the boxed-premise revision, for the before/after diff).
-
-mod common;
-use common::{emit_module, function_body};
+use crate::common::{emit_module, function_body};
 
 // A generic `@inline` set/get over a `NativeBuffer<T>`, instantiated at the value
 // struct `V2`. Mirrors the FlatVec push/get shape (`buf[len] = v` / `return buf[i]`).
@@ -47,15 +45,16 @@ fn generic_inline_at_value_type_splices_zero_box() {
         !body.contains("__nb_checked_set"),
         "specialized store must be field-wise, not the boxed `__nb_checked_set`; got:\n{body}"
     );
-    // Positive: the slot is fetched once (`__nb_checked_get`) and its fields are
-    // written in place -- the scalarized native-buffer store shape.
+    // Positive: the element is bounds-checked once by INDEX and its leaves are
+    // written through typed views -- no slot reference is fetched, so the
+    // specialized store allocates nothing on any path, not just on trace.
     assert!(
-        body.contains("__nb_checked_get"),
-        "specialized store fetches the flat slot via `__nb_checked_get`; got:\n{body}"
+        body.contains("__nb_checked_index"),
+        "specialized store must bounds-check the element access; got:\n{body}"
     );
     assert!(
-        body.contains(".x = ") && body.contains(".y = "),
-        "specialized store writes the fields in place (`slot.x = ..; slot.y = ..`); got:\n{body}"
+        !body.contains("__nb_checked_get"),
+        "specialized store should take no slot reference; got:\n{body}"
     );
 }
 

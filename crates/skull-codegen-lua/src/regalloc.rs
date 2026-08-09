@@ -117,6 +117,7 @@ fn raw<T>(i: Idx<T>) -> usize {
 pub(crate) fn inst_uses(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
     match inst {
         Inst::Const(_) | Inst::Global(_) | Inst::Load(_) => {}
+        Inst::FfiViewCast { ptr, .. } => push(*ptr),
         Inst::IntAdd(a, b)
         | Inst::IntSub(a, b)
         | Inst::IntMul(a, b)
@@ -166,10 +167,19 @@ pub(crate) fn inst_uses(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
         // A closure captures cells (not values); its body's value uses live in
         // its own scope, colored separately.
         Inst::Lambda { .. } => {}
+        Inst::MakeVecColumns {
+            columns, capacity, ..
+        } => {
+            push(*capacity);
+            columns.iter().flat_map(|(_, vs)| vs).for_each(|&i| push(i));
+        }
         Inst::MakeTuple(vs) | Inst::MakeVec(vs) => {
             vs.iter().for_each(|a| push(*a))
         }
-        Inst::MakeStruct { fields, .. } | Inst::MakeValueStruct { fields, .. } | Inst::MakeEnv { fields, .. } => fields.iter().for_each(|(_, a)| push(*a)),
+        Inst::MakeStruct { fields, .. }
+        | Inst::MakeValueStruct { fields, .. }
+        | Inst::MaterializeValueStruct { fields, .. }
+        | Inst::MakeEnv { fields, .. } => fields.iter().for_each(|(_, a)| push(*a)),
         Inst::MakeEnum { positional, named, .. } => {
             positional.iter().for_each(|a| push(*a));
             named.iter().for_each(|(_, a)| push(*a));
@@ -183,6 +193,10 @@ pub(crate) fn inst_uses(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
         Inst::Field { base, .. } | Inst::TupleIndex { base, .. } => push(*base),
         Inst::Index { base, index, .. } => {
             push(*base);
+            push(*index);
+        }
+        Inst::VecCheckedIndex { vec, index } => {
+            push(*vec);
             push(*index);
         }
         Inst::Len { base, .. } => push(*base),

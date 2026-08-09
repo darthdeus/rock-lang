@@ -6,15 +6,12 @@
 //! Gated on `node` being present -- absent, the test skips WITH A LOG (never a
 //! silent pass). node is at `/run/current-system/sw/bin/node` on the dev box.
 
-use std::process::Command;
 
 use skull_codegen_js::{fill_template, JS_INTRINSICS};
-
-mod common;
-use common::{emit_scalar, stdlib_ws};
+use crate::common::{emit_scalar, stdlib_ws};
 
 fn node_available() -> bool {
-    Command::new("node")
+    crate::common::node()
         .arg("--version")
         .output()
         .map(|o| o.status.success())
@@ -23,7 +20,7 @@ fn node_available() -> bool {
 
 /// Run a JS program that prints exactly one number; parse it as f64.
 fn node_eval_number(program: &str) -> f64 {
-    let out = Command::new("node")
+    let out = crate::common::node()
         .arg("-e")
         .arg(program)
         .output()

@@ -513,7 +513,11 @@ pub struct Generic {
 /// Rock body / `extern` / `extern(ffi,..)` carries no explicit backend tag here);
 /// it exists so the HIR-side [`FnBackend`] the bone layer reuses can mark portable
 /// decls that any backend may emit.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// Declaration order is bone's `backend_rank` (`bone-inference/src/calls.rs`):
+/// `Any` < `Lua` < `Js`, the preference order a backend-variant group collapses
+/// to its representative by. `Ord` is derived from it so a key that includes a
+/// backend cannot introduce a second one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FnBackend {
     Any,
     Lua,
@@ -585,6 +589,7 @@ pub struct StructDef {
     pub generics: Vec<Generic>,
     pub fields: Vec<Field>,
     pub is_value: bool,
+    pub is_nobox: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -596,6 +601,10 @@ pub struct Field {
     /// Leading `@name` / `@name(args)` on the field. Preserved for the
     /// bone-side registry pass; no skull consumer reads it yet.
     pub annotations: Vec<Annotation>,
+    /// `embed f: Foo` -- the field's leaves live in the parent and the field
+    /// has no independently storable aggregate (projection-only).
+    /// `embed` is CONTEXTUAL: `embed: int` is still a field named `embed`.
+    pub is_embed: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

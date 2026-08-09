@@ -451,7 +451,7 @@ pub(crate) fn for_in_iterable_slot(src: &str, offset: usize) -> bool {
 /// (docs/completion-v2-design.md M2b). Field order below is the dispatch
 /// precedence. Classification is SYNTACTIC; handlers may still fall through
 /// at runtime (an `X {` head that isn't a struct, a call slot that isn't
-/// FieldOf), which is why the dispatcher keeps an ordered attempt chain
+/// FieldRef), which is why the dispatcher keeps an ordered attempt chain
 /// rather than a single-winner match.
 pub(crate) struct CompletionCx {
     /// The recovered-AST classifier over the munge ladder; None only on the
@@ -506,12 +506,22 @@ pub(crate) struct CompletionCx {
 
 /// Classify the cursor for completion: parse the munge ladder once, consult
 /// every classifier once, and encode the cross-classifier guards (field
-/// value yields to call arg; yield/Entity hints are universe-gated) in one
+/// value wins over call arg; yield/Entity hints are universe-gated) in one
 /// place instead of scattered call sites.
 pub(crate) fn classify(src: &str, offset: usize) -> CompletionCx {
     let ast = crate::cursor_context::CursorAst::at(src, offset);
     let cx = ast.as_ref();
-    let arg_call = cx.and_then(|c| c.call_arg());
+    let field_value = cx.and_then(|c| c.struct_field_value());
+    // `struct_field_value` only fires inside a REAL record literal's `field:
+    // <cursor>` value slot (or a decl field default) -- structurally the
+    // innermost enclosing context, and strictly more specific than any
+    // call the record literal happens to sit inside as an argument
+    // (`run(Pass { blend: <cursor> })`: `call_arg` walks past the `Pass {
+    // .. }` literal to report `run`'s own param type, which is the WRONG,
+    // less specific slot). So field_value must win whenever it fires;
+    // arg_call is the fallback for a direct (non-record) call arg.
+    let has_field_value = field_value.is_some();
+    let arg_call = if has_field_value { None } else { cx.and_then(|c| c.call_arg()) };
     let expr_position = !cx.is_some_and(|c| c.is_type_position());
     CompletionCx {
         member: cx.and_then(|c| c.member_path()),
@@ -520,16 +530,18 @@ pub(crate) fn classify(src: &str, offset: usize) -> CompletionCx {
         qualified: cx.and_then(|c| c.qualified_base()),
         struct_literal: cx.and_then(|c| c.struct_literal()),
         decorator: decorator_context(src, offset),
-        field_value: if arg_call.is_none() {
-            cx.and_then(|c| c.struct_field_value())
-        } else {
-            None
-        },
+        field_value,
         anchor: cx.and_then(slot_anchor),
         bool_chain: cx.is_some_and(|c| c.bool_condition_chain()),
         after_yield: expr_position && cx.is_some_and(|c| c.after_yield()),
         param_type: if expr_position { None } else { cx.and_then(|c| c.param_type()) },
-        named_arg: cx.and_then(|c| c.named_arg_slot()),
+        // Same precedence as `arg_call` above: `named_arg_slot` is built on
+        // the same `enclosing_arg_call` walk, so it has the identical bug --
+        // typing a nested record literal's field VALUE (`run(Widget { x:
+        // <cursor> })`) reports the OUTER call's still-unsupplied params as
+        // `name:` candidates, leaking an unrelated arg-name suggestion into
+        // an unrelated struct's field-value slot.
+        named_arg: if has_field_value { None } else { cx.and_then(|c| c.named_arg_slot()) },
         coroutine_generic: cx.is_some_and(|c| c.coroutine_first_generic_arg()),
         pattern_scrutinee: match_arm_scrutinee(src, offset),
         for_in: for_in_iterable_slot(src, offset),

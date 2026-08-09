@@ -216,6 +216,106 @@ mod tests {
         );
     }
 
+    /// Every `imgui.<Name>` the engine calls must exist in the cimgui export
+    /// table. cimgui suffixes overloaded functions (`IsMouseDown_Nil`,
+    /// `BeginChild_Str`, `ImVec2_Float`), so the bare ImGui name a binding is
+    /// written from is often not what the table holds — and the real table has
+    /// no `__index` fallback, so the miss is a nil call at the first frame that
+    /// reaches it, not at load. `imgui_is_mouse_down` shipped this way and
+    /// crashed only once a pointer actually dragged a debug window, which no
+    /// headless sim can do.
+    ///
+    /// Occurrence rule: `imgui.Name` counts when it is immediately followed by
+    /// `(` or `.` (a call, or a reach through `imgui.C`), or immediately
+    /// preceded by `(` or `,` (an enum passed as an argument). That skips the
+    /// prose and filename uses (`imgui.ini`, `"imgui.layout-version"`).
+    #[test]
+    fn every_imgui_binding_the_engine_calls_exists() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+        let mut exported: std::collections::HashSet<String> = std::collections::HashSet::new();
+        // `M.C = lib` is assigned in init.lua, not the generated tables.
+        exported.insert("C".to_string());
+        for f in CIMGUI_FILES {
+            for line in f.contents.lines() {
+                let t = line.trim_start();
+                let Some(rest) = t.strip_prefix("M.") else { continue };
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .collect();
+                if !name.is_empty() {
+                    exported.insert(name);
+                }
+            }
+        }
+        assert!(
+            exported.contains("IsWindowFocused"),
+            "export scrape found {} names but not IsWindowFocused — \
+             the generated table's shape changed, fix the scrape",
+            exported.len()
+        );
+
+        let mut sources = Vec::new();
+        collect_rock_files(&root.join("stone"), &mut sources);
+        assert!(
+            sources.len() > 50,
+            "expected to walk stone's .rock tree, found {} files",
+            sources.len()
+        );
+
+        let mut missing: Vec<String> = Vec::new();
+        for path in &sources {
+            let Ok(text) = std::fs::read_to_string(path) else { continue };
+            for (lineno, line) in text.lines().enumerate() {
+                let b = line.as_bytes();
+                for (i, _) in line.match_indices("imgui.") {
+                    let start = i + "imgui.".len();
+                    let name: String = line[start..]
+                        .chars()
+                        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                        .collect();
+                    if name.is_empty() {
+                        continue;
+                    }
+                    let after = b.get(start + name.len()).copied();
+                    let before = if i == 0 { None } else { b.get(i - 1).copied() };
+                    let is_use = matches!(after, Some(b'(') | Some(b'.'))
+                        || matches!(before, Some(b'(') | Some(b','));
+                    if !is_use || exported.contains(&name) {
+                        continue;
+                    }
+                    missing.push(format!(
+                        "{}:{}: imgui.{}",
+                        path.strip_prefix(&root).unwrap_or(path).display(),
+                        lineno + 1,
+                        name
+                    ));
+                }
+            }
+        }
+        missing.sort();
+        assert!(
+            missing.is_empty(),
+            "these names are not in the cimgui export table (check for an \
+             overload suffix such as _Nil / _Str / _Float in \
+             prebuilt/lua/cimgui/wrap.lua):\n  {}",
+            missing.join("\n  ")
+        );
+    }
+
+    fn collect_rock_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                collect_rock_files(&p, out);
+            } else if p.extension().is_some_and(|x| x == "rock") {
+                out.push(p);
+            }
+        }
+    }
+
     #[test]
     fn embedded_files_nonempty() {
         for f in CIMGUI_FILES {

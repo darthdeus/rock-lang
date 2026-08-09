@@ -1,4 +1,4 @@
-//! `rock shader-validate` gate contract (docs/shader-mobile-port-plan.md A3):
+//! `rock shader-validate` gate contract (docs/shaders.md § Testing):
 //! a missing runner is a hard error (never a green skip), a real project's
 //! registered pairs get per-profile compile verdicts on real GL contexts, and
 //! runner FAIL lines land in the summary (the fail path is live, not

@@ -5,16 +5,12 @@
 //! checks are the correctness oracle; the shape assertions pin that the
 //! fallback fired (and, dually, that a structured body does NOT trampoline).
 
-use std::process::Command;
-
 use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::FuncRef;
-
-mod common;
-use common::ws_with;
+use crate::common::ws_with;
 
 fn node_available() -> bool {
-    Command::new("node").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+    crate::common::node().arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
 }
 
 fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<String, String> {
@@ -43,7 +39,7 @@ fn eval_int(defs: &str, root: &str, expect: i64) {
         skull_codegen_js::JS_STRUCTURAL_EQ,
         skull_codegen_js::JS_CALL_HELPER,
     );
-    let out = Command::new("node").arg("-e").arg(&program).output().expect("spawn node");
+    let out = crate::common::node().arg("-e").arg(&program).output().expect("spawn node");
     assert!(
         out.status.success(),
         "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",
@@ -149,7 +145,11 @@ fn multi_value_return_through_fallback() {
     );
     let js = emit_closure(&ws, "root").expect("multi-value return through fallback");
     assert!(js.contains("switch (__bb"), "expected the callee to trampoline:\n{js}");
-    assert!(js.contains("return ["), "expected packed multi-value return:\n{js}");
+    // The trampoline printer must use the SAME scratch ABI as the structured
+    // one -- if it diverged, a body that falls back would silently change
+    // calling convention against callers emitted the other way.
+    assert!(js.contains("__rock_ret1 = "), "expected a scratch-slot publish:\n{js}");
+    assert!(!js.contains("return ["), "the fallback must not allocate an array:\n{js}");
     // pair(2) = (6, 7) -> 6*10 + 7.
     eval_int(&js, "root", 67);
 }

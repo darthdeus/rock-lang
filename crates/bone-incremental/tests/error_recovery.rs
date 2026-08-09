@@ -11,7 +11,7 @@ use bone_semantic::prelude::*;
 use bone_incremental::session::Session;
 
 fn parse(src: &str) -> skull_parser::Ast {
-    skull_parser::parse_module(src, Ustr::from("<error_recovery>")).expect("parse")
+    skull_parser::parse_module_clean(src, Ustr::from("<error_recovery>")).expect("parse")
 }
 
 /// All lowering + inference diagnostics in the workspace (the two sinks

@@ -190,11 +190,18 @@ pub fn do_stone_watch(
         PathBuf::from("stone-rs/src"),
         PathBuf::from("stone-rs/Cargo.toml"),
         PathBuf::from("stone-rs/build.rs"),
-        PathBuf::from("stone-video/src"),
-        PathBuf::from("stone-video/Cargo.toml"),
-        PathBuf::from("stone-video/build.rs"),
         PathBuf::from("tmp"),  // Watch tmp/ for restart.txt trigger
     ]);
+    // Every optional lib, from the build table: a crate that can be BUILT on an
+    // edit but is not WATCHED for one is a hot-reload hole that looks like the
+    // edit did nothing.
+    for lib in rock_host::engine_build::OPTIONAL_ENGINE_LIBS {
+        watch_paths.extend([
+            PathBuf::from(format!("{}/src", lib.crate_name)),
+            PathBuf::from(format!("{}/Cargo.toml", lib.crate_name)),
+            PathBuf::from(format!("{}/build.rs", lib.crate_name)),
+        ]);
+    }
     watch_paths.extend(crate::watch::compiler_watch_paths());
 
     // Create channel for file change events
@@ -241,10 +248,16 @@ pub fn do_stone_watch(
             let filename = path.file_name().map(|f| f.to_string_lossy().to_string())
                 .unwrap_or_default();
 
-            // Match stone-rs/ and stone-video/ BEFORE the generic "Cargo." check
-            // below: `stone-rs/Cargo.toml` would otherwise be routed to the
+            // Match the engine crates BEFORE the generic "Cargo." check below:
+            // `stone-rs/Cargo.toml` would otherwise be routed to the
             // compiler-rebuild branch and never trigger a libstone rebuild.
-            if path_str.contains("stone-rs/") || path_str.contains("stone-video/") {
+            // Optional crates come from the build table, so a new one is
+            // routed here without a second edit.
+            let is_engine_crate = path_str.contains("stone-rs/")
+                || rock_host::engine_build::OPTIONAL_ENGINE_LIBS
+                    .iter()
+                    .any(|l| path_str.contains(&format!("{}/", l.crate_name)));
+            if is_engine_crate {
                 needs_libstone_rebuild = true;
                 changed_libstone.push(filename);
             } else if crate::watch::is_compiler_source(path) {
@@ -428,39 +441,32 @@ fn build_all_for_game(game_path: &str) -> Result<()> {
         return Ok(());
     }
 
-    let needs_video = rock_host::engine_build::game_requests_video(game_path)?
-        && std::path::Path::new("stone-video").exists();
+    // Same table the incremental path builds from, so startup and rebuild
+    // cannot disagree about which optional libs this game gets.
+    // Same table the incremental path builds from, so startup and rebuild
+    // cannot disagree about which optional libs this game gets.
+    let optional_libs = rock_host::engine_build::game_engine_libs(game_path)?;
 
-    // Two invocations are required. A single `cargo build --lib --bin rock`
-    // builds only the `rock` bin (the `--bin` filter narrows targets across
-    // the whole selection), so stone-rs's cdylib never gets compiled and the
-    // subsequent stage_cdylib trips on a missing libstone_rs.dylib in fresh
-    // checkouts / worktrees. Build the engine libs (no --bin filter) first,
-    // then the compiler bin.
+    // `--lib --bin rock` selects both halves in ONE invocation: every default
+    // member's lib/cdylib target plus rock-cli's bin. The two build in
+    // parallel, and stone-rs's cdylib lands for the stage_cdylib below.
     //
-    // Neither call passes `-p`: resolver-2 unifies features over the SELECTED
-    // packages only, so a narrower selection is a distinct feature resolution
-    // and rebuilds every shared dep plus the whole compiler stack under a
-    // second -C metadata. Keeping both on the default-member selection matches
-    // the justfile's `cargo run --bin rock` and keeps one set of artifacts.
+    // No `-p`: resolver-2 unifies features over the SELECTED packages only, so
+    // a narrower selection is a distinct feature resolution and rebuilds every
+    // shared dep plus the whole compiler stack under a second -C metadata.
+    // Staying on the default-member selection keeps one set of artifacts,
+    // shared with rock.sh's build.
     info!("Building engine + compiler (cargo)...");
 
-    rock_host::engine_build::run_cargo(&["build", "--lib"], "Failed to build engine libs")?;
-    if needs_video {
-        rock_host::engine_build::run_cargo(
-            &["build", "-p", "stone-video"],
-            "Failed to build stone-video",
-        )?;
-    }
-
     rock_host::engine_build::run_cargo(
-        &["build", "--bin", "rock"],
-        "Failed to build rock compiler",
+        &["build", "--lib", "--bin", "rock"],
+        "Failed to build engine + compiler",
     )?;
-
     rock_host::engine_build::stage_cdylib("stone_rs", "stone")?;
-    if needs_video {
-        rock_host::engine_build::stage_cdylib("stone_video", "stone_video")?;
+    // One helper, not a second build+stage pair here: two of them drift, and
+    // the drift is invisible until a lib builds on one path and not the other.
+    for lib in &optional_libs {
+        rock_host::engine_build::build_optional_engine_lib(lib)?;
     }
 
     Ok(())

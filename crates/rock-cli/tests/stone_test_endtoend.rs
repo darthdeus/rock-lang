@@ -9,11 +9,9 @@
 //! a debouncer + LuaJIT). When this file's count grows past ~10, gate it
 //! to nextest `-P full` like `game_snapshot_tests`.
 
-mod stone_harness;
-
 use rock_host::lua_runner::run_lua_code;
 use std::time::Duration;
-use stone_harness::StoneHarness;
+use crate::stone_harness::StoneHarness;
 
 const QUIESCENT: Duration = Duration::from_millis(400);
 const SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -126,9 +124,14 @@ fn incremental_recompile_lua_runs_correctly_under_hot_reload() {
         panic!("LuaJIT failed on watcher output:\n{}", e);
     });
     assert!(
-        out.trim().starts_with("PASS"),
+        out.success,
+        "LuaJIT exited non-zero on the watcher's output:\n{}",
+        out.combined(),
+    );
+    assert!(
+        out.stdout.trim().starts_with("PASS"),
         "watcher's incremental Lua output diverges from expected runtime behavior:\n{}",
-        out,
+        out.combined(),
     );
 }
 

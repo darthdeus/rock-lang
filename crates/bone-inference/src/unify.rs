@@ -501,6 +501,37 @@ pub(crate) fn types_equal(gamma: &Gamma, a: TyId, b: TyId) -> bool {
     }
 }
 
+/// Whether `ty` still holds an unbound inference variable anywhere in its tree.
+/// Pure: reads the substitution store without writing to it, so a caller can ask
+/// whether a type stands on its own before deciding to admit it.
+pub(crate) fn has_unbound_infer(gamma: &Gamma, ty: TyId) -> bool {
+    match *gamma.get(ty) {
+        TypeExpr::Infer(v, _) => match gamma.out.substitutions.get(v) {
+            Some(next) => has_unbound_infer(gamma, next),
+            None => true,
+        },
+
+        TypeExpr::Builtin(_) | TypeExpr::Generic(..) => false,
+
+        TypeExpr::Nullable(inner) => has_unbound_infer(gamma, ty.with_idx(inner)),
+
+        TypeExpr::App { params, .. } => params
+            .into_iter()
+            .any(|p| has_unbound_infer(gamma, ty.with_idx(p))),
+
+        TypeExpr::Tuple { elements } => elements
+            .into_iter()
+            .any(|e| has_unbound_infer(gamma, ty.with_idx(e))),
+
+        TypeExpr::Function { params, ret } => {
+            has_unbound_infer(gamma, ty.with_idx(ret))
+                || params
+                    .into_iter()
+                    .any(|p| has_unbound_infer(gamma, ty.with_idx(p)))
+        }
+    }
+}
+
 pub fn coerce(gamma: &mut Gamma, from: TyId, to: TyId, span: Span) -> Result<(), CompilerError> {
     let from_r = resolve(gamma, from, span);
     let to_r = resolve(gamma, to, span);
@@ -568,20 +599,30 @@ pub fn coerce(gamma: &mut Gamma, from: TyId, to: TyId, span: Span) -> Result<(),
         }
     }
 
-    // A writable field ref `FieldOf<T, V>` is usable read-only: it coerces to
-    // `KeyPath<T, V>` (invariant in T, covariant in V). docs/field-refs-plan.md 1.
+    // `FieldRef<T, V>` carries both capabilities, so it is the TOP of the lattice
+    // and coerces DOWN to either single-capability former: to `ReadFieldRef<T, V>`
+    // (invariant in T, covariant in V) and to `WriteFieldRef<T, V>` (invariant in
+    // both -- write-only contravariance in V would be sound but has no consumer).
+    // Nothing coerces the other way, and the two single-capability formers are
+    // INCOMPARABLE: `WriteFieldRef -> ReadFieldRef` is the whole-value extraction
+    // an embedded field must not offer. docs/field-refs-plan.md.
     if let (
         TypeExpr::App { ctor: TypeCtor::Nominal(fname), params: fp },
         TypeExpr::App { ctor: TypeCtor::Nominal(tname), params: tp },
     ) = (*gamma.get(from_r), *gamma.get(to_r))
     {
-        if fname.as_str() == "FieldOf" && tname.as_str() == "KeyPath" {
+        if fname.as_str() == "FieldRef"
+            && matches!(tname.as_str(), "ReadFieldRef" | "WriteFieldRef")
+        {
             let mut fi = fp.into_iter();
             let mut ti = tp.into_iter();
             let (ft, fv) = (from_r.with_idx(fi.next().unwrap()), from_r.with_idx(fi.next().unwrap()));
             let (tt, tv) = (to_r.with_idx(ti.next().unwrap()), to_r.with_idx(ti.next().unwrap()));
             unify(gamma, ft, tt, span)?;
-            return coerce(gamma, fv, tv, span);
+            return match tname.as_str() {
+                "WriteFieldRef" => unify(gamma, fv, tv, span),
+                _ => coerce(gamma, fv, tv, span),
+            };
         }
     }
 

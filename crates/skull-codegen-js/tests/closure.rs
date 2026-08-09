@@ -7,8 +7,6 @@
 use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::FuncRef;
 
-mod common;
-
 /// FuncRef of the unique fn named `name` in the `<test>` module.
 fn test_fn_ref(ws: &bone_semantic::inference::Workspace, name: &str) -> FuncRef {
     let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
@@ -22,7 +20,7 @@ fn test_fn_ref(ws: &bone_semantic::inference::Workspace, name: &str) -> FuncRef 
 
 #[test]
 fn co_emits_plain_rock_callee_transitively() {
-    let ws = common::ws_with(
+    let ws = crate::common::ws_with(
         "fn leaf(x: int) -> int { x + 1 }\n\
          fn helper(x: int) -> int { leaf(x) * 2 }\n\
          fn root(y: int) -> int { helper(y) + leaf(y) }\n",
@@ -40,8 +38,8 @@ fn co_emits_plain_rock_callee_transitively() {
 
 #[test]
 fn rejects_unmapped_inline_lua_callee_with_emitter_message() {
-    let ws = common::ws_with(
-        "inline(lua) fn my_lua_thing(x: int) -> int \"\"\" return x \"\"\"\n\
+    let ws = crate::common::ws_with(
+        "inline(lua) fn my_lua_thing(x: int) -> int = \"\"\" return x \"\"\"\n\
          fn root(y: int) -> int { my_lua_thing(y) }\n",
     );
     let scx = ScalarCtx::new(&ws);
@@ -61,7 +59,7 @@ fn user_fn_shadowing_intrinsic_name_is_co_emitted_not_mapped() {
     // param so overload resolution picks it over the stdlib float one -- must
     // NOT silently render as Math.abs: the template applies only to the
     // stdlib @intrinsic decl.
-    let ws = common::ws_with(
+    let ws = crate::common::ws_with(
         "fn abs(b: bool) -> int { if b { 1 } else { 0 } }\n\
          fn root() -> int { abs(true) }\n",
     );
@@ -75,7 +73,7 @@ fn user_fn_shadowing_intrinsic_name_is_co_emitted_not_mapped() {
 
 #[test]
 fn stdlib_intrinsic_calls_stay_templates() {
-    let ws = common::ws_with("fn root(x: float) -> float { floor(x) + sqrt(x) }\n");
+    let ws = crate::common::ws_with("fn root(x: float) -> float { floor(x) + sqrt(x) }\n");
     let scx = ScalarCtx::new(&ws);
     let root = test_fn_ref(&ws, "root");
     let js = skull_codegen_js::emit::emit_with_closure(&ws, &scx, &[(root, "root".to_string())])

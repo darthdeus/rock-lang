@@ -5,9 +5,7 @@
 //! element (heap struct, opaque generic `T`) is a HARD emit-time error covered
 //! by `tests/errors/native_buffer_alloc_*.rock.err`; here we pin the positive
 //! shape: the emitted ffi ctor carries the right ctype for value / int / float.
-
-mod common;
-use common::{emit_module, function_body};
+use crate::common::{emit_module, function_body};
 
 const VALUE_ELEM: &str = r#"
 value V2 { x: float, y: float }

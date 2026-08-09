@@ -6,10 +6,10 @@ use ustr::ustr;
 use bone_core::{
     annotations::{validate_annotations, AnnoPos},
     hir::{
-        BindingInfo, BindingKind, BindingPattern, Callee, DecoratorDef, EnumVariantDef, Expr,
-        Function, GlobalDef, InterpPart, InterpSpec, MatchArm, ParamDecl, Pattern, RecordPatField,
-        Scope, Statement, StructLitField, TyId, TypeCtor, TypeExpr, VarId, VariantArgs,
-        VariantPayload,
+        AsKind, BindingInfo, BindingKind, BindingPattern, Callee, DecoratorDef, EnumVariantDef,
+        Expr, Function, GlobalDef, InterpPart, InterpSpec, MatchArm, ParamDecl, Pattern,
+        RecordPatField, Scope, Statement, StructLitField, TyId, TypeCtor, TypeExpr, VarId,
+        VariantArgs, VariantPayload,
     },
     prelude::*,
 };
@@ -419,10 +419,14 @@ pub fn lower_type_expr_in(
             )
         }
 
-        // `FieldOf<T, V>` (writable field ref) and `KeyPath<T, V>` (read-only field
-        // ref -- `field_get`, allows value structs) are name-recognized magic
-        // formers, not declared types; both lower to a 2-param Nominal.
-        TypeExprKind::App { ctor, args } if ctor.name == "FieldOf" || ctor.name == "KeyPath" => {
+        // `FieldRef<T, V>` (full field ref: read + write), `ReadFieldRef<T, V>`
+        // (read-only -- `field_get`, allows value structs) and `WriteFieldRef<T, V>`
+        // (write-only -- `field_set`, the selector an embedded field can satisfy)
+        // are name-recognized magic formers, not declared types; all lower to a
+        // 2-param Nominal.
+        TypeExprKind::App { ctor, args }
+            if matches!(ctor.name.as_str(), "FieldRef" | "ReadFieldRef" | "WriteFieldRef") =>
+        {
             if args.len() != 2 {
                 comp_error!(
                     te.span,
@@ -1361,6 +1365,7 @@ pub fn lower_expr_value(
         ExprKind::As(inner, ty) => Expr::As {
             value: lower_expr(ctx, a, body, scope, a.e(inner))?,
             target: lower_type_expr_local(ctx, a, body, a.te(ty))?,
+            kind: AsKind::Cast,
         },
 
         ExprKind::Index(base, index) => Expr::Index {
@@ -1503,6 +1508,7 @@ pub fn lower_expr_value(
         ExprKind::TypeAscription(inner, ty) => Expr::As {
             value: lower_expr(ctx, a, body, scope, a.e(inner))?,
             target: lower_type_expr_local(ctx, a, body, a.te(ty))?,
+            kind: AsKind::Ascribe,
         },
 
         ExprKind::PreIncrement(inner) => Expr::IncDec {
@@ -1803,6 +1809,14 @@ pub fn build_function(
     let (body_failed, inline_body, is_extern, ffi_lib, backend, mut errors) =
         lower_fn_body_into(ctx, a, f, &mut body, &param_tys)?;
     errors.extend(anno_errors);
+    // Needs the body kind, which only exists after the lower above.
+    if let Err(e) = bone_core::annotations::validate_param_repr_against_body(
+        f.name.name,
+        &param_decls,
+        inline_body.is_some() || is_extern,
+    ) {
+        errors.push(e);
+    }
 
     let is_variadic = f.params.last().map_or(false, |p| p.is_variadic);
     let num_required = f
@@ -1829,6 +1843,7 @@ pub fn build_function(
         backend,
         annotations,
         ffi_lib,
+        is_synthetic: f.is_synthetic,
     };
 
     Ok((func, if body_failed { None } else { Some(body) }, errors))
@@ -2185,6 +2200,7 @@ pub fn lower_struct_def(
             span: field.name.span,
             has_default: field.default.is_some(),
             annotations: field_annotations,
+            is_embed: field.is_embed,
         });
 
         if let Some(default) = default {
@@ -2236,12 +2252,20 @@ pub fn lower_enum_def(
                     .map(|f| {
                         let annos = lower_annotations(a, &f.annotations);
                         validate_annotations(AnnoPos::EnumVariantField, &annos, &ctx.workspace.decorator_names)?;
+                        if f.is_embed {
+                            comp_error!(
+                                f.name.span,
+                                "`embed` is not allowed on an enum variant field `{}`; embed inlines leaves into a struct owner",
+                                f.name.name
+                            );
+                        }
                         Ok(hir::StructFieldDef {
                             name: f.name.name,
                             ty: lower_type_expr(ctx, a, &mut body, a.te(&f.ty))?,
                             span: f.name.span,
                             has_default: false,
                             annotations: annos,
+                            is_embed: false,
                         })
                     })
                     .try_vec()?;

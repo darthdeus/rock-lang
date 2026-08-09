@@ -5,9 +5,7 @@
 //! pins that behavior BEFORE P2 step 6 hoists lambda bodies to top-level fns:
 //! the static is a module global either way, so hoisting must not change it, and
 //! this test goes red if it ever does.
-
-mod common;
-use common::{emit_module, run_luajit};
+use crate::common::{emit_module, run_luajit};
 
 /// A lambda (stored in a global so it escapes) whose body holds a `static n`.
 /// Each call increments; the reload test distinguishes RESET (back to the

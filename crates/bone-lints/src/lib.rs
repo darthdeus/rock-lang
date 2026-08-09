@@ -6,7 +6,7 @@
 
 use bone_core::hir::{
     BinOp, BindingInfo, BindingKind, BodyOwner, Callee, Expr, FnBackend, Function, Module,
-    Statement, TyId, TypeExpr,
+    Statement, TyId, TypeCtor, TypeExpr,
 };
 use bone_core::prelude::*;
 use bone_core::workspace::{BodyInference, BoundNext, BoundTree};
@@ -124,8 +124,88 @@ pub const KNOWN_LINTS: &[&str] = &[
     UNUSED_FN,
     UNUSED_PURE_EXPR,
     TRANSMUTE_OF_NULLABLE,
+    TASK_NULL_ABANDON,
     BACKEND_SIBLING_MISMATCH,
+    METHOD_SYNTAX,
+    ROW_ESCAPE,
 ];
+
+/// Lints that are OFF unless the invocation names them. A MIGRATION lint has a
+/// finding on nearly every declaration written before it existed, so a
+/// default-on tier would bury the rest of the catalog and make every build's
+/// output useless until the migration finished. Naming it
+/// (`rock lint <path> --lints=method_syntax`) is what a file-at-a-time
+/// conversion needs: the sweep is readable, and the build/LSP surfaces stay
+/// quiet the whole time.
+pub const OPT_IN_LINTS: &[&str] = &[METHOD_SYNTAX, ROW_ESCAPE];
+
+/// What an invocation asks of the lint engine: which lints run, and the knobs
+/// the lints themselves take. The default tier is the catalog minus
+/// [`OPT_IN_LINTS`]; [`LintOptions::only`] runs exactly the named set, opt-in
+/// ones included, and silences everything else.
+///
+/// This gates COMPUTATION, not just output: a silenced lint's analysis never
+/// runs, so an opt-in lint costs a build nothing.
+#[derive(Clone, Debug, Default)]
+pub struct LintOptions {
+    only: Option<Vec<String>>,
+    only_types: Option<FxHashSet<Ustr>>,
+    ignore_types: FxHashSet<Ustr>,
+}
+
+impl LintOptions {
+    /// Run exactly `names`. Names that aren't in [`KNOWN_LINTS`] are kept so a
+    /// caller can reject a typo through [`LintOptions::unknown`] -- silently
+    /// dropping one would run nothing and report success.
+    pub fn only(names: impl IntoIterator<Item = String>) -> Self {
+        LintOptions { only: Some(names.into_iter().collect()), ..Default::default() }
+    }
+
+    /// Drop these types from `method_syntax`'s candidate receivers. A project
+    /// converts one type at a time, so the sweep has to be narrowable from the
+    /// invocation -- the alternative is an `allow` comment on every call site of
+    /// a type the author is not converting today.
+    pub fn ignoring_types(mut self, names: impl IntoIterator<Item = Ustr>) -> Self {
+        self.ignore_types = names.into_iter().collect();
+        self
+    }
+
+    /// Restrict `method_syntax` to these receiver types -- the whitelist form
+    /// of the same knob, for working one type at a time rather than subtracting
+    /// the rest. Composes with [`LintOptions::ignoring_types`], which subtracts
+    /// from whatever this leaves.
+    pub fn over_types(mut self, names: impl IntoIterator<Item = Ustr>) -> Self {
+        self.only_types = Some(names.into_iter().collect());
+        self
+    }
+
+    pub fn ignored_types(&self) -> &FxHashSet<Ustr> {
+        &self.ignore_types
+    }
+
+    /// Whether `method_syntax` may report over receiver type `name`.
+    pub fn covers_type(&self, name: Ustr) -> bool {
+        self.only_types.as_ref().is_none_or(|only| only.contains(&name))
+            && !self.ignore_types.contains(&name)
+    }
+
+    pub fn enabled(&self, lint: &str) -> bool {
+        match &self.only {
+            Some(names) => names.iter().any(|n| n == lint),
+            None => !OPT_IN_LINTS.contains(&lint),
+        }
+    }
+
+    /// The selected names that name no lint in the catalog.
+    pub fn unknown(&self) -> Vec<&str> {
+        let Some(names) = &self.only else { return Vec::new() };
+        names
+            .iter()
+            .map(String::as_str)
+            .filter(|n| !KNOWN_LINTS.contains(n))
+            .collect()
+    }
+}
 
 /// A name-tagged, rendered finding of any lint -- the type every SURFACE
 /// consumes (LSP diagnostics, `rock lint`, the build pass), so a surface never
@@ -164,30 +244,49 @@ pub fn flat_findings(
     mid: ModuleId,
     src: &str,
 ) -> Vec<Finding> {
-    flat_findings_with(ws, &enum_variant_names(ws, warm), warm, mid, src)
+    flat_findings_with(
+        ws,
+        &enum_variant_names(ws, warm),
+        warm,
+        mid,
+        src,
+        &LintOptions::default(),
+        &FxHashSet::default(),
+    )
 }
 
-/// [`flat_findings`] with the workspace's enum-variant names supplied. The
-/// variant scan is whole-workspace, so a caller linting EVERY module computes it
-/// once here instead of once per file.
+/// [`flat_findings`] with the workspace-wide scans supplied. The variant scan
+/// and the nominal-type scan are whole-workspace, so a caller linting EVERY
+/// module computes them once instead of once per file. `types` is only read by
+/// the opt-in `method_syntax` lint, so the default tier passes an empty set.
 fn flat_findings_with(
     ws: &Workspace,
     variants: &FxHashSet<Ustr>,
     warm: &FxHashSet<ModuleId>,
     mid: ModuleId,
     src: &str,
+    sel: &LintOptions,
+    types: &FxHashSet<Ustr>,
 ) -> Vec<Finding> {
     if warm.contains(&mid) {
         return Vec::new();
     }
     let module = ws.module(mid);
-    let unused_vars: Vec<_> =
-        module.bodies.values().flat_map(|b| unused_vars_in_body(b, variants)).collect();
-    let unused_pure: Vec<_> =
-        module.bodies.values().flat_map(unused_pure_exprs_in_body).collect();
-    let mut out: Vec<Finding> =
-        filter_suppressed(unused_vars, src).iter().map(Finding::of).collect();
-    out.extend(filter_suppressed(unused_pure, src).iter().map(Finding::of));
+    let mut out: Vec<Finding> = Vec::new();
+    if sel.enabled(UNUSED_VAR) {
+        let found: Vec<_> =
+            module.bodies.values().flat_map(|b| unused_vars_in_body(b, variants)).collect();
+        out.extend(filter_suppressed(found, src).iter().map(Finding::of));
+    }
+    if sel.enabled(UNUSED_PURE_EXPR) {
+        let found: Vec<_> =
+            module.bodies.values().flat_map(unused_pure_exprs_in_body).collect();
+        out.extend(filter_suppressed(found, src).iter().map(Finding::of));
+    }
+    if sel.enabled(METHOD_SYNTAX) {
+        let found = method_syntax_in_module(ws, module, types, src);
+        out.extend(filter_suppressed(found, src).iter().map(Finding::of));
+    }
     out
 }
 
@@ -200,19 +299,50 @@ pub fn inference_findings(
     mid: ModuleId,
     src: &str,
 ) -> Vec<Finding> {
+    inference_findings_with(ws, warm, mid, src, &LintOptions::default())
+}
+
+fn inference_findings_with(
+    ws: &Workspace,
+    warm: &FxHashSet<ModuleId>,
+    mid: ModuleId,
+    src: &str,
+    sel: &LintOptions,
+) -> Vec<Finding> {
     if warm.contains(&mid) {
         return Vec::new();
     }
     let module = ws.module(mid);
     let inf = ws.inference(mid);
-    let findings: Vec<_> = module
-        .bodies
-        .iter()
-        .flat_map(|(owner, body)| {
-            transmute_of_nullable_in_body(ws, inf.and_then(|i| i.per_fn.get(owner)), body)
-        })
-        .collect();
-    filter_suppressed(findings, src).iter().map(Finding::of).collect()
+    let bi = |owner: &BodyOwner| inf.and_then(|i| i.per_fn.get(owner));
+    let mut out: Vec<Finding> = Vec::new();
+    if sel.enabled(TRANSMUTE_OF_NULLABLE) {
+        let found: Vec<_> = module
+            .bodies
+            .iter()
+            .flat_map(|(owner, body)| transmute_of_nullable_in_body(ws, bi(owner), body))
+            .collect();
+        out.extend(filter_suppressed(found, src).iter().map(Finding::of));
+    }
+    if sel.enabled(TASK_NULL_ABANDON) {
+        let found: Vec<_> = module
+            .bodies
+            .iter()
+            .flat_map(|(owner, body)| task_null_abandon_in_body(ws, bi(owner), body))
+            .collect();
+        out.extend(filter_suppressed(found, src).iter().map(Finding::of));
+    }
+    if sel.enabled(ROW_ESCAPE) {
+        let found: Vec<_> = module
+            .bodies
+            .iter()
+            .flat_map(|(owner, body)| {
+                row_escapes_in_body(ws, bi(owner), body, tail_sink(module, owner))
+            })
+            .collect();
+        out.extend(filter_suppressed(found, src).iter().map(Finding::of));
+    }
+    out
 }
 
 /// The whole-workspace lints, grouped by the file each finding sits in. A
@@ -227,11 +357,23 @@ pub fn workspace_findings_by_file(
     warm: &FxHashSet<ModuleId>,
     is_bin: bool,
 ) -> FxHashMap<Ustr, Vec<Finding>> {
+    workspace_findings_by_file_with(ws, warm, is_bin, &LintOptions::default())
+}
+
+fn workspace_findings_by_file_with(
+    ws: &Workspace,
+    warm: &FxHashSet<ModuleId>,
+    is_bin: bool,
+    sel: &LintOptions,
+) -> FxHashMap<Ustr, Vec<Finding>> {
     let mut out: FxHashMap<Ustr, Vec<Finding>> = FxHashMap::default();
-    if is_bin {
+    if is_bin && sel.enabled(UNUSED_FN) {
         for (file, findings) in unused_fns_by_file(ws, warm) {
             out.entry(file).or_default().extend(findings.iter().map(Finding::of));
         }
+    }
+    if !sel.enabled(BACKEND_SIBLING_MISMATCH) {
+        return out;
     }
     // Warm modules are SCANNED (half of every stone sibling set is stdlib) but
     // not reported on, like every other lint's treatment of stdlib files.
@@ -255,19 +397,31 @@ pub fn workspace_findings_by_file(
 /// dependencies stay silent without being invisible. Restricting the report set
 /// is also what keeps the pass off the compile hot path: a dependency's bodies
 /// are never walked for the per-body lints.
+///
+/// `sel` selects the tier: [`LintOptions::default`] is what a build and the
+/// LSP run (the catalog minus [`OPT_IN_LINTS`]); `rock lint --lints=<names>`
+/// runs exactly what it names.
 pub fn lint_workspace(
     ws: &Workspace,
     warm: &FxHashSet<ModuleId>,
     is_bin: bool,
     sources: &FxHashMap<Ustr, &str>,
+    sel: &LintOptions,
 ) -> Vec<Finding> {
-    let mut by_file = workspace_findings_by_file(ws, warm, is_bin);
+    let mut by_file = workspace_findings_by_file_with(ws, warm, is_bin, sel);
     let variants = enum_variant_names(ws, warm);
+    let types = if sel.enabled(METHOD_SYNTAX) {
+        let mut names = nominal_type_names(ws, warm);
+        names.retain(|&n| sel.covers_type(n));
+        names
+    } else {
+        FxHashSet::default()
+    };
     let mut out = Vec::new();
     for module in user_modules(ws, warm) {
         let Some(&src) = sources.get(&module.file) else { continue };
-        out.extend(flat_findings_with(ws, &variants, warm, module.id, src));
-        out.extend(inference_findings(ws, warm, module.id, src));
+        out.extend(flat_findings_with(ws, &variants, warm, module.id, src, sel, &types));
+        out.extend(inference_findings_with(ws, warm, module.id, src, sel));
         if let Some(findings) = by_file.remove(&module.file) {
             out.extend(filter_suppressed_findings(findings, src));
         }
@@ -457,8 +611,8 @@ fn backend_name(b: FnBackend) -> Option<&'static str> {
 ///
 /// A name declared on two concrete backends is a *sibling set*: shared code
 /// calls it and each backend emits its own body, so the decls have to agree.
-/// They drift silently -- the split of `field_get` onto `KeyPath<T, V>` left the
-/// `inline(js)` sibling on `FieldOf`, which nothing caught until a luajit build
+/// They drift silently -- the split of `field_get` onto `ReadFieldRef<T, V>` left the
+/// `inline(js)` sibling on `FieldRef`, which nothing caught until a luajit build
 /// resolved to the js-only decl and emit rejected it. skull's emit check sees
 /// only the backend being built and only reached calls, so the OTHER backend's
 /// half stays broken until someone builds for it.
@@ -671,7 +825,9 @@ pub fn unused_fns_by_file(
     let mut out: FxHashMap<Ustr, Vec<UnusedFn>> = FxHashMap::default();
     for module in user_modules(ws, warm) {
         for (fid, f) in module.functions.iter() {
-            if !reachable.contains(&(module.id, fid)) {
+            // A derived newtype operator is not user surface: there is no
+            // declaration to delete and its span points at the `newtype` line.
+            if !reachable.contains(&(module.id, fid)) && !f.is_synthetic {
                 out.entry(module.file)
                     .or_default()
                     .push(UnusedFn { name: f.name, span: f.name_span });
@@ -684,7 +840,30 @@ pub fn unused_fns_by_file(
 /// A function is a reachability root iff it can be entered from outside the
 /// in-project call graph. See `unused_fns` for the rationale on each arm.
 fn is_root(f: &Function) -> bool {
-    f.is_extern || f.name.as_str() == "main" || !f.annotations.is_empty()
+    f.is_extern
+        || f.name.as_str() == "main"
+        || f.annotations.iter().any(|a| !is_implementation_anno(a.name.name.as_str()))
+}
+
+/// Builtin fn annotations that describe how a function is COMPILED, not how it
+/// is entered. Everything else -- `@test`/`@sim`, `@shader`, `@nomangle`, and
+/// every user `deco` -- is a root, so an annotation this list doesn't know
+/// keeps the conservative bias (root, no warning). Without the split, `@inline`
+/// or `@pure` alone silently exempts a fn from `unused_fn`.
+fn is_implementation_anno(name: &str) -> bool {
+    matches!(
+        name,
+        "pure"
+            | "debug_impure"
+            | "inline"
+            | "intrinsic"
+            | "native_required"
+            | "gpu_only"
+            | "scalar_abi"
+            | "struct_expand"
+            | "shader_expand"
+            | "consume"
+    )
 }
 
 /// Every function one body references: the resolved-call edges in its inference
@@ -723,13 +902,15 @@ fn body_edges(
 }
 
 /// Every function a body's inference resolved a call/protocol edge to:
-/// overload-resolved calls (incl. operators and UFCS), the `iter`/`next` of a
-/// user `for`-loop, and bounded-generic `next` chains.
+/// overload-resolved calls (incl. operators and UFCS), implicit iterable
+/// coercions, the `iter`/`next` of a user `for`-loop, and bounded-generic `next`
+/// chains.
 fn inference_edges(bi: &BodyInference, out: &mut Vec<(ModuleId, Idx<Function>)>) {
     out.extend(bi.resolved_overload_calls.values().copied());
+    out.extend(bi.implicit_iter_args.values().map(|w| w.func));
     for info in bi.for_iter_protocol.values() {
-        if let Some(f) = info.iter_fn {
-            out.push(f);
+        if let Some(w) = &info.iter {
+            out.push(w.func);
         }
         collect_bound_next(&info.next, out);
     }
@@ -745,7 +926,7 @@ fn collect_bound_tree(tree: &BoundTree, out: &mut Vec<(ModuleId, Idx<Function>)>
 }
 
 fn collect_bound_next(bn: &BoundNext, out: &mut Vec<(ModuleId, Idx<Function>)>) {
-    if let BoundNext::Concrete { func, sub } = bn {
+    if let BoundNext::Concrete { func, sub, .. } = bn {
         out.push(*func);
         collect_bound_tree(sub, out);
     }
@@ -1008,7 +1189,16 @@ fn is_nullable(ws: &Workspace, bi: &BodyInference, ty: TyId) -> bool {
 /// `Workspace::render`'s `Infer` arm). An unbound var resolves to itself, so a
 /// genuinely-unknown type reads as non-nullable -- the conservative side (a
 /// missed warning, never a false strip).
-fn head_type(ws: &Workspace, bi: &BodyInference, ty: TyId) -> TypeExpr {
+pub(crate) fn head_type(ws: &Workspace, bi: &BodyInference, ty: TyId) -> TypeExpr {
+    head_ty(ws, bi, ty).1
+}
+
+/// [`head_type`] keeping the resolved id. A nested `Idx<TypeExpr>` (a
+/// `Nullable`'s inner, an `App`'s params) indexes the arena of the type that
+/// CONTAINS it -- which substitution-following may have moved to another module
+/// -- so descending needs `resolved.with_idx(inner)`, never a bare
+/// `TyId::Local`.
+fn head_ty(ws: &Workspace, bi: &BodyInference, ty: TyId) -> (TyId, TypeExpr) {
     let mut cur = ty;
     loop {
         let te = match cur {
@@ -1018,9 +1208,9 @@ fn head_type(ws: &Workspace, bi: &BodyInference, ty: TyId) -> TypeExpr {
         match te {
             TypeExpr::Infer(var, _) => match bi.substitutions.get(var) {
                 Some(sub) => cur = sub,
-                None => return te,
+                None => return (cur, te),
             },
-            _ => return te,
+            _ => return (cur, te),
         }
     }
 }
@@ -1036,6 +1226,449 @@ pub fn transmute_of_nullable(ws: &Workspace) -> Vec<TransmuteOfNullable> {
         for (owner, body) in module.bodies.iter() {
             let bi = inf.and_then(|i| i.per_fn.get(owner));
             out.extend(transmute_of_nullable_in_body(ws, bi, body));
+        }
+    }
+    out
+}
+
+/// A `method_syntax` finding: a free function whose first parameter is a user
+/// type, declared in prefix form (`fn damage(m: Mob, n: int)`) where the
+/// receiver form (`fn Mob.damage(m, n: int)`) says the same thing.
+#[derive(Clone, Debug)]
+pub struct MethodSyntax {
+    pub name: Ustr,
+    /// The nominal type of param 0 -- the receiver path of the rewrite.
+    pub receiver: Ustr,
+    /// The rewritten parameter list, param 0 stripped of its type annotation.
+    pub params: String,
+    pub span: Span,
+}
+
+/// Canonical lint name for suppression: `// rock: allow(method_syntax)`.
+pub const METHOD_SYNTAX: &str = "method_syntax";
+
+impl LintFinding for MethodSyntax {
+    const LINT: &'static str = METHOD_SYNTAX;
+    fn line(&self) -> usize {
+        self.span.line_range.0
+    }
+    fn to_diagnostic(&self) -> CompilerError {
+        CompilerError::new_with_label(
+            self.span,
+            format!(
+                "`{}` takes `{}` as its first parameter -- declare it as `fn {}.{}({})`",
+                self.name, self.receiver, self.receiver, self.name, self.params
+            ),
+        )
+        .with_level(CompilerErrorLevel::Advice)
+    }
+}
+
+/// Prefix-form declarations in one module that the receiver form
+/// (`fn Type.name(recv, ..)`) expresses directly. The receiver form is pure
+/// surface sugar -- it desugars to exactly this free fn with param 0 typed by
+/// the path -- so every finding is a mechanical, signature-preserving rewrite,
+/// which is what lets a project convert a file at a time.
+///
+/// `types` is the workspace's nominal type names (see [`nominal_type_names`]).
+/// A candidate needs a param 0 whose type is one of them with NO type
+/// arguments: that is the only shape the receiver path can spell, so a
+/// container, nullable, tuple, builtin, or generic param 0 is never a
+/// candidate. `extern` decls are excluded because the parser REJECTS a receiver
+/// path on one.
+pub fn method_syntax_in_module(
+    ws: &Workspace,
+    module: &Module,
+    types: &FxHashSet<Ustr>,
+    src: &str,
+) -> Vec<MethodSyntax> {
+    let mut out = Vec::new();
+    for (_, f) in module.functions.iter() {
+        if f.is_extern || f.name.as_str() == "main" || f.name_span.file != module.file {
+            continue;
+        }
+        let Some(recv) = f.param_decls.first() else { continue };
+        let Some(receiver) = nominal_name(ws, recv.ty) else { continue };
+        if !types.contains(&receiver)
+            || !spelled_at(src, f.name, f.name_span)
+            || written_as_method(src, f.span, f.name_span)
+        {
+            continue;
+        }
+        out.push(MethodSyntax {
+            name: f.name,
+            receiver,
+            params: rewritten_params(ws, f),
+            span: f.name_span,
+        });
+    }
+    out
+}
+
+/// `m, n: int` -- the receiver form's parameter list: param 0 loses its type
+/// annotation (the receiver path carries it), the rest are unchanged.
+///
+/// A default's EXPRESSION is not in the signature (it lives in the body arena),
+/// so a decl carrying one renders as `m, ..` instead: a suggestion that silently
+/// dropped `= 3` reads as a complete new signature and is one paste away from
+/// changing behavior.
+fn rewritten_params(ws: &Workspace, f: &Function) -> String {
+    if f.param_decls.iter().any(|p| p.has_default) {
+        return format!("{}, ..", f.param_decls[0].name);
+    }
+    f.param_decls
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            if i == 0 {
+                p.name.to_string()
+            } else {
+                format!("{}: {}", p.name, ws.render(None, p.ty))
+            }
+        })
+        .join(", ")
+}
+
+/// The name of a bare nominal type (`Mob`), and `None` for anything a receiver
+/// path cannot spell: a builtin, a generic param, a nullable, a tuple, a fn
+/// type, or an APPLIED nominal (`Pair<int>` -- the path form takes the decl's
+/// own generics, not concrete arguments).
+fn nominal_name(ws: &Workspace, ty: TyId) -> Option<Ustr> {
+    let te = match ty {
+        TyId::Static(m, i) => ws.module(m).ty_arena[i],
+        // A decl's param types are lowered into the module arena; a body-local
+        // type here would be a different question than the one being asked.
+        TyId::Local(_) => return None,
+    };
+    match te {
+        TypeExpr::App { ctor: TypeCtor::Nominal(name), params } if params.len() == 0 => Some(name),
+        _ => None,
+    }
+}
+
+/// Whether the source at `name_span` spells this function's name -- i.e. the
+/// author wrote this declaration, here. A SYNTHESIZED decl fails it: a
+/// `newtype Hp(int)` mints ten operator fns (`__op_add(a: Hp, b: Hp)`) whose
+/// name span covers the newtype's name, and every one of them is a
+/// receiver-shaped signature nobody can rewrite. Same net catches a
+/// macro-expanded decl, whose span is retagged to the call site.
+fn spelled_at(src: &str, name: Ustr, name_span: Span) -> bool {
+    let (a, b) = name_span.offset_range;
+    if b > src.len() || a > b || !src.is_char_boundary(a) || !src.is_char_boundary(b) {
+        return false;
+    }
+    &src[a..b] == name.as_str()
+}
+
+/// Whether the decl was WRITTEN in receiver form. Both forms lower to the same
+/// HIR -- that is the point of the sugar -- so the surface is the only
+/// discriminant, and without it the lint reports every already-converted fn.
+/// `fn Mob.damage` puts a `.` immediately before the name; the prefix form
+/// cannot, since the only thing between `fn` and the name is whitespace.
+fn written_as_method(src: &str, fn_span: Span, name_span: Span) -> bool {
+    let (start, end) = (fn_span.offset_range.0, name_span.offset_range.0);
+    if end > src.len() || start > end {
+        return false;
+    }
+    if !src.is_char_boundary(start) || !src.is_char_boundary(end) {
+        return false;
+    }
+    src[start..end].trim_end().ends_with('.')
+}
+
+/// Every nominal type name declared in a user module: structs, enums, and
+/// newtypes. `Vec`/`Map` are not here -- they lower to their own type
+/// constructors, never `Nominal` -- so a container param can't reach the lint
+/// through this set either.
+/// The names in `names` that no user module declares as a type. An ignore list
+/// fails OPEN -- a misspelled entry filters nothing and the type keeps showing
+/// up, which reads as the flag not working -- so the caller names them.
+pub fn unknown_type_names(
+    ws: &Workspace,
+    warm: &FxHashSet<ModuleId>,
+    names: &[Ustr],
+) -> Vec<Ustr> {
+    let known = nominal_type_names(ws, warm);
+    names.iter().copied().filter(|n| !known.contains(n)).collect()
+}
+
+/// How a row place left the scope its arena's lifetime governs. One kind per
+/// storage class the scoped-place rules in `docs/scene-system-plan.md` list, so
+/// a census can report the shape of the escape population and not just its size.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum EscapeKind {
+    StoreGlobal,
+    StoreStatic,
+    StoreField,
+    StoreCollection,
+    Return,
+    ClosureCapture,
+    AnyErasure,
+    AcrossYield,
+    FfiArg,
+}
+
+/// How much a kind actually claims. A row's validity runs from the `get()`
+/// until something invalidates the slot -- `remove`, `clear`, Scene unload --
+/// so what matters is whether the row is HELD across such a point, not which
+/// direction the reference travelled.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum EscapeClass {
+    /// The row outlives an invalidation point unconditionally. A defect.
+    Hazard,
+    /// A hazard only if the consumer RETAINS the row. Nothing here computes a
+    /// retain summary, so these are reported without the claim: a lambda
+    /// consumed synchronously by `any(..)` and one stashed in a Scene closer
+    /// are the same shape to this lint.
+    Unprovable,
+    /// Not a hazard. The row moved somewhere still governed by the program's
+    /// own rules -- the escape question simply moves with it. Reported because
+    /// it is where an intraprocedural check STOPS, which is what bounds the
+    /// census, not because the code is wrong.
+    Propagation,
+}
+
+impl EscapeKind {
+    pub fn class(self) -> EscapeClass {
+        match self {
+            EscapeKind::StoreGlobal
+            | EscapeKind::StoreStatic
+            | EscapeKind::StoreField
+            | EscapeKind::StoreCollection
+            | EscapeKind::AcrossYield => EscapeClass::Hazard,
+            EscapeKind::ClosureCapture | EscapeKind::FfiArg | EscapeKind::AnyErasure => {
+                EscapeClass::Unprovable
+            }
+            // A `return` runs nothing, so it cannot invalidate the slot: what
+            // crosses it is the reference, never the validity window. The
+            // accessor shape (`wall_at`, `Sound.data`) is CORRECT code.
+            EscapeKind::Return => EscapeClass::Propagation,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EscapeKind::StoreGlobal => "store_global",
+            EscapeKind::StoreStatic => "store_static",
+            EscapeKind::StoreField => "store_field",
+            EscapeKind::StoreCollection => "store_collection",
+            EscapeKind::Return => "return",
+            EscapeKind::ClosureCapture => "closure_capture",
+            EscapeKind::AnyErasure => "any_erasure",
+            EscapeKind::AcrossYield => "across_yield",
+            EscapeKind::FfiArg => "ffi_arg",
+        }
+    }
+}
+
+/// A `row_escape` finding: a row place -- a `T` read out of an `Arena<T>` or a
+/// `Scene<T>` root -- reaching storage that outlives the borrow.
+#[derive(Clone, Debug)]
+pub struct RowEscape {
+    pub kind: EscapeKind,
+    /// Rendered type of the escaping row (`Mob`, `TrActor`).
+    pub row_type: String,
+    pub span: Span,
+}
+
+/// Canonical lint name for suppression: `// rock: allow(row_escape)`.
+pub const ROW_ESCAPE: &str = "row_escape";
+
+impl LintFinding for RowEscape {
+    const LINT: &'static str = ROW_ESCAPE;
+    fn line(&self) -> usize {
+        self.span.line_range.0
+    }
+    fn to_diagnostic(&self) -> CompilerError {
+        let (ty, kind) = (&self.row_type, self.kind.as_str());
+        let msg = match self.kind.class() {
+            EscapeClass::Hazard => format!(
+                "row of `{ty}` is held past an invalidation point here ({kind}) -- \
+                 the slot can be removed or the Scene unloaded before the next read; \
+                 hold the `Entity` and re-`get()` instead"
+            ),
+            EscapeClass::Unprovable => format!(
+                "row of `{ty}` leaves the checked region here ({kind}) -- safe only if \
+                 the consumer does not retain it, which nothing here proves"
+            ),
+            EscapeClass::Propagation => format!(
+                "row of `{ty}` is returned here -- not a defect: a `return` invalidates \
+                 nothing. The row becomes the CALLER's to account for, and this check \
+                 does not cross the boundary, so audit the callers"
+            ),
+        };
+        CompilerError::new_with_label(self.span, msg).with_level(CompilerErrorLevel::Advice)
+    }
+}
+
+mod row_escape;
+pub use row_escape::{row_escapes_in_body, row_population, RowPopulation};
+
+/// Where a body's TRAILING expression ends up, so `row_escape` can tell a
+/// returned row from a discarded one. A unit function's tail goes nowhere --
+/// `fn unload_sound(s: Sound) { s.handle.remove() }` drops the `T?` it produced.
+fn tail_sink(module: &Module, owner: &BodyOwner) -> Option<EscapeKind> {
+    match owner {
+        BodyOwner::Function(fid) => {
+            module.functions[*fid].return_ty.map(|_| EscapeKind::Return)
+        }
+        BodyOwner::Global(_) => Some(EscapeKind::StoreGlobal),
+        // A struct default / enum / newtype body's value is stored in the
+        // aggregate it belongs to.
+        _ => Some(EscapeKind::StoreField),
+    }
+}
+
+/// `row_escape` findings across every non-stdlib body in the workspace.
+pub fn row_escapes(ws: &Workspace) -> Vec<RowEscape> {
+    let warm = FxHashSet::default();
+    let mut out = Vec::new();
+    for module in user_modules(ws, &warm) {
+        let inf = ws.inference(module.id);
+        for (owner, body) in module.bodies.iter() {
+            let bi = inf.and_then(|i| i.per_fn.get(owner));
+            out.extend(row_escapes_in_body(ws, bi, body, tail_sink(module, owner)));
+        }
+    }
+    out
+}
+
+pub fn nominal_type_names(ws: &Workspace, warm: &FxHashSet<ModuleId>) -> FxHashSet<Ustr> {
+    let mut out = FxHashSet::default();
+    for m in user_modules(ws, warm) {
+        out.extend(m.struct_by_name.keys().copied());
+        out.extend(m.enums_by_name.keys().copied());
+        out.extend(m.newtypes_by_name.keys().copied());
+    }
+    out
+}
+
+/// A `task_null_abandon` finding: a plain `= null` over a `Task?` place.
+/// `place` is the rendered target (`m.co`), which the diagnostic names so the
+/// fix (`stop(m, .co)`) is spellable from the message alone.
+#[derive(Clone, Debug)]
+pub struct TaskNullAbandon {
+    pub place: Option<String>,
+    pub span: Span,
+}
+
+/// Canonical lint name for suppression: `// rock: allow(task_null_abandon)`.
+pub const TASK_NULL_ABANDON: &str = "task_null_abandon";
+
+impl LintFinding for TaskNullAbandon {
+    const LINT: &'static str = TASK_NULL_ABANDON;
+    fn line(&self) -> usize {
+        self.span.line_range.0
+    }
+    fn to_diagnostic(&self) -> CompilerError {
+        let what = match &self.place {
+            Some(p) => format!("`{p} = null`"),
+            None => "assigning `null` to a `Task?` slot".to_string(),
+        };
+        CompilerError::new_with_label(
+            self.span,
+            format!(
+                "{what} abandons the coroutine mid-stack -- it is dropped where it stands, \
+                 so its terminal `defer`s never run; use `stop` to cancel it (or `replace` \
+                 to swap one in), which kill the coroutine first"
+            ),
+        )
+        // `Warning`, not `Error`: nulling a slot just observed terminal, and
+        // cleanup inside the task's own terminal defer, are both legal and
+        // indistinguishable without liveness -- so the allow comment must stay
+        // reachable.
+        .with_level(CompilerErrorLevel::Warning)
+    }
+}
+
+/// `task_null_abandon` for one body. A flat scan, not a walk: v1 asks only
+/// "does a `= null` land on a `Task?` place", and every such assignment is
+/// judged the same wherever it sits.
+///
+/// Deliberately NOT covered: overwriting a live slot with a *new* task
+/// (`m.co = start(...)`, which `replace` exists for). Distinguishing that from
+/// the first store into an empty slot needs liveness-at-assignment, and a false
+/// positive on every initial store would be worse than the miss. The two LEGAL
+/// null-assign shapes -- nulling a task just observed terminal, and completion
+/// cleanup inside the task's own terminal defer -- are equally invisible here,
+/// which is why the lint reports at `Warning` with the allow comment legal.
+pub fn task_null_abandon_in_body(
+    ws: &Workspace,
+    bi: Option<&BodyInference>,
+    body: &Body,
+) -> Vec<TaskNullAbandon> {
+    let Some(bi) = bi else { return Vec::new() };
+    let mut out = Vec::new();
+    for (_, expr) in body.expr_arena.iter() {
+        let Expr::Assign { target, value } = *expr else { continue };
+        if !matches!(body.expr_arena[value], Expr::Null) {
+            continue;
+        }
+        let Some(ty) = place_type(bi, body, target) else { continue };
+        if !is_task_slot(ws, bi, ty) {
+            continue;
+        }
+        out.push(TaskNullAbandon {
+            place: render_place(body, target),
+            span: body.expr_spans[target],
+        });
+    }
+    out
+}
+
+/// The type of an assignment TARGET. A bare local target carries no
+/// `expr_types` entry -- a `Var` is a reference to a binding, and the binding
+/// arena is where its type lives -- so the two shapes read different tables.
+fn place_type(bi: &BodyInference, body: &Body, target: Idx<Expr>) -> Option<TyId> {
+    match body.expr_arena[target] {
+        Expr::Var(b) => bi.binding_types.get(b).copied(),
+        _ => bi.expr_types.get(target).copied(),
+    }
+}
+
+/// A `Task<R>?` place. The `?` is required: a non-nullable `Task` field cannot
+/// take a `null` at all, so bone has already rejected that program.
+fn is_task_slot(ws: &Workspace, bi: &BodyInference, ty: TyId) -> bool {
+    let (id, TypeExpr::Nullable(inner)) = head_ty(ws, bi, ty) else { return false };
+    matches!(
+        head_type(ws, bi, id.with_idx(inner)),
+        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } if n.as_str() == "Task"
+    )
+}
+
+/// Re-spell an assignment target for the diagnostic (`m.co`, `e.get()?.co`,
+/// `SLOT`). `None` for a shape not covered here, which the diagnostic phrases
+/// around rather than naming wrongly -- the span already points at the place.
+fn render_place(body: &Body, e: Idx<Expr>) -> Option<String> {
+    Some(match body.expr_arena[e] {
+        Expr::Var(b) => body.binding_arena[b].name.to_string(),
+        Expr::Global(n) => n.to_string(),
+        Expr::FieldAccess { base, field } => {
+            format!("{}.{}", render_place(body, base)?, field)
+        }
+        Expr::SafeNav { base, field } => format!("{}?.{}", render_place(body, base)?, field),
+        Expr::SafeNavCall { receiver, method, .. } => {
+            format!("{}?.{}()", render_place(body, receiver)?, method)
+        }
+        // UFCS: `e.get()` lowers to a call whose first arg is the receiver.
+        Expr::Call { callee: Callee::Unresolved { name, .. }, args } => {
+            let recv = args.into_iter().next()?;
+            format!("{}.{}()", render_place(body, recv)?, name)
+        }
+        _ => return None,
+    })
+}
+
+/// `task_null_abandon` findings across every non-stdlib body in the workspace.
+/// Convenience for tests and whole-workspace CLI runs; the surfaces go through
+/// [`inference_findings`].
+pub fn task_null_abandon(ws: &Workspace) -> Vec<TaskNullAbandon> {
+    let warm = FxHashSet::default();
+    let mut out = Vec::new();
+    for module in user_modules(ws, &warm) {
+        let inf = ws.inference(module.id);
+        for (owner, body) in module.bodies.iter() {
+            out.extend(task_null_abandon_in_body(ws, inf.and_then(|i| i.per_fn.get(owner)), body));
         }
     }
     out
