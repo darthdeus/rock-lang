@@ -1001,11 +1001,6 @@ struct Chunk {
     /// set. Distinct from `deps`, which is an invalidation superset (it also holds
     /// everything inlined AWAY, and would keep spliced-out callees alive).
     calls: Vec<FuncRef>,
-    /// Module-global names this body reads/writes. A top-level fn used as a VALUE
-    /// lowers to an `Inst::Global`, not a call, so these are reachability edges
-    /// too -- without them a fn passed as an argument gets pruned out from under
-    /// a live reference.
-    global_names: Vec<Ustr>,
     /// Callees this body invokes through a SPECIALIZED instantiation that no
     /// splice served, so each needs a standalone specialized copy emitted.
     /// Deduplicated program-wide by [`assemble`] -- many bodies ask for the same
@@ -1271,7 +1266,6 @@ fn emit_coroutine_chunk(
         times,
         statics: mf.statics.clone(),
         calls: skull_mir::reach::call_targets(mf),
-        global_names: skull_mir::reach::global_ref_names(mf),
         specs,
     })
 }
@@ -1358,8 +1352,7 @@ fn emit_body_chunk(
     times.emit = te.elapsed();
     times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(times.emit);
     let calls = skull_mir::reach::call_targets(&mf);
-    let global_names = skull_mir::reach::global_ref_names(&mf);
-    Ok(Chunk { lua, deps, direct_globals, direct_calls, times, statics, calls, global_names, specs })
+    Ok(Chunk { lua, deps, direct_globals, direct_calls, times, statics, calls, specs })
 }
 
 /// Emit each hoisted nested `fn` (and its own nested fns, depth-first) as a
@@ -1559,7 +1552,6 @@ fn emit_spec_chunk(
         times: PhaseTimes::default(),
         statics,
         calls: skull_mir::reach::call_targets(&mf),
-        global_names: skull_mir::reach::global_ref_names(&mf),
         specs,
     })
 }
