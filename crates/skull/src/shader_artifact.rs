@@ -170,9 +170,8 @@ pub fn realize_shader_with_context(
     let roots: BTreeSet<Instance> =
         g.instances.iter().filter(|i| root_decls.contains(&DeclKey(i.func))).cloned().collect();
 
-    // Retention: the same walk shape the CPU view runs, over the same recorded
-    // call sites, from a DIFFERENT root set. A callee that renders inline is a
-    // leaf, which is `skull_codegen_glsl`'s own reachability rule (`Reach`).
+    // Retention: the same graph-site walk shape the CPU view runs, from a
+    // different shader root set. Inline callees are packaging leaves.
     let mut helpers: BTreeSet<Instance> = BTreeSet::new();
     let mut builtins: BTreeSet<Instance> = BTreeSet::new();
     let mut seen: BTreeSet<Instance> = roots.clone();
@@ -233,9 +232,10 @@ pub fn realize_shader_with_context(
     // before it writes GLSL: stage classification of the entry's signature (an
     // `@uniform` block param is legal there and is NOT a tier-0 leaf -- asking
     // the fn-library check of an entry rejected 1,539 real shaders), the
-    // entry's own lowering and tier-0 body pass, the same `Reach` walk over its
-    // callees (which rejects recursion, a foreign body with no GLSL mapping and
-    // a helper outside tier 0), and the stage-specific builtin validation.
+    // entry's own lowering and tier-0 body pass, the graph/view population
+    // over its callees (which rejects recursion, a foreign body with no GLSL
+    // mapping and a helper outside tier 0), and the stage-specific builtin
+    // validation.
     // A summary of those checks written here could disagree with the emitter;
     // this cannot.
     //

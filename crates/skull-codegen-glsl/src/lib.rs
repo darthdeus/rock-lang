@@ -30,7 +30,7 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use skull_codegen_lua::mangle_fn;
 use skull_graph::instance_graph::{InstanceGraph, SiteOutcome};
 pub use skull_graph::shader::ShaderLibraryView;
-use skull_graph::shader::{ShaderProgramView, ShaderStageView};
+use skull_graph::shader::{ShaderProgram, ShaderProgramView, ShaderStageView};
 use skull_mir::cfg::reverse_postorder;
 use skull_mir::gpu_layout::{
     ArrayMemberDecl, AttrKind, SamplerKind, UniformArrayBlockPlan, UniformBlockPlan, WireKind,
@@ -274,106 +274,13 @@ fn render_const_lit(lit: &Lit) -> Option<String> {
     }
 }
 
-// --- reachability + profile pass --------------------------------------------
+// --- profile pass ------------------------------------------------------------
 
-/// GLSL's reachability policy for [`skull_mir::reach`]: walk the shader entry's
-/// call graph, lowering and profile-checking each fn, and reject recursion (GLSL
-/// has no call stack for it). Unlike the JS policy this walks bare `FuncRef`s --
-/// there is no second node kind and nothing to register per edge, so the leaf
-/// test lives on the node.
 /// The GLSL name of a shader instance. The symbol is target-neutral
 /// ([`ShaderInstance::symbol`]); this is the seam where a backend that needed a
 /// different spelling would rename, and GLSL does not.
 fn glsl_name(ws: &Workspace, interner: &MonoInterner, inst: &ShaderInstance) -> String {
     inst.symbol(ws, interner)
-}
-
-struct Reach<'a> {
-    ws: &'a Workspace,
-    scx: &'a ScalarCtx,
-    /// Lowered MIR of every emittable (non-intrinsic) reachable instance.
-    bodies: HashMap<ShaderInstance, MirFunc>,
-    /// Where the search starts, and the entry already on the path (see
-    /// `initially_in_progress`).
-    seeds: Vec<ShaderInstance>,
-    entry: Option<ShaderInstance>,
-}
-
-impl<'a> Reach<'a> {
-    fn new(ws: &'a Workspace, scx: &'a ScalarCtx) -> Self {
-        Reach { ws, scx, bodies: HashMap::default(), seeds: Vec::new(), entry: None }
-    }
-
-    /// Expand `seeds` and return the emittable instances in post-order (callees
-    /// before callers -- GLSL emits straight from this and has no forward
-    /// declarations).
-    fn walk(&mut self) -> Result<Vec<ShaderInstance>, CompilerError> {
-        skull_mir::reach::walk(self)
-    }
-}
-
-impl skull_mir::reach::ReachPolicy for Reach<'_> {
-    type Node = ShaderInstance;
-
-    fn roots(&mut self) -> Result<Vec<ShaderInstance>, CompilerError> {
-        Ok(std::mem::take(&mut self.seeds))
-    }
-
-    /// The shader entry is lowered and profile-checked by the caller, which then
-    /// seeds the driver with its callees -- so a callee calling back into the
-    /// entry is recursion, and the driver can only see that if the entry counts
-    /// as already on the path.
-    ///
-    /// Recursion is per INSTANCE: one instantiation of a generic helper reaching
-    /// a DIFFERENT instantiation of itself is a diverging chain, not a cycle,
-    /// and the mono graph classifies it the same way (plan S 7).
-    fn initially_in_progress(&mut self) -> Vec<ShaderInstance> {
-        self.entry.clone().into_iter().collect()
-    }
-
-    fn is_leaf(&mut self, inst: ShaderInstance) -> Result<bool, CompilerError> {
-        let f = &self.ws.module(inst.fref().module).functions[inst.fref().func];
-        // An intrinsic mapping OR a Vec operator is rendered inline at call sites
-        // (a native builtin / infix op), never emitted as a GLSL definition, never
-        // walked -- so it's a reachability leaf.
-        if renders_inline(f) {
-            return Ok(true);
-        }
-        if f.is_extern || f.inline_body.is_some() {
-            return Err(err(
-                f.name_span,
-                format!(
-                    "shader profile: `{}` has no emittable body and no GLSL intrinsic mapping",
-                    f.name
-                ),
-            ));
-        }
-        Ok(false)
-    }
-
-    fn on_cycle(&mut self, inst: ShaderInstance) -> Result<(), CompilerError> {
-        let f = &self.ws.module(inst.fref().module).functions[inst.fref().func];
-        Err(err(
-            f.name_span,
-            format!("shader profile: recursion through `{}` is not allowed on GLSL", f.name),
-        ))
-    }
-
-    fn visit(&mut self, inst: ShaderInstance) -> Result<Vec<ShaderInstance>, CompilerError> {
-        let f = &self.ws.module(inst.fref().module).functions[inst.fref().func];
-        let subst = inst.subst(self.ws, self.scx.interner());
-        // Signature must be tier 0 UNDER this instantiation.
-        check_tier0_signature_spec(self.ws, &subst, f)?;
-        // Lower to MIR (values-first-class) and profile-check the body.
-        let mf = lower_instance(self.ws, self.scx, &inst.inst)
-            .map_err(|e| {
-                err(f.name_span, format!("shader profile: `{}` cannot lower for GLSL: {}", f.name, e.message))
-            })?;
-        let mut callees: Vec<ShaderInstance> = Vec::new();
-        profile_body(self.ws, f, &mf, &mut callees)?;
-        self.bodies.insert(inst, mf);
-        Ok(callees)
-    }
 }
 
 /// Reject a signature whose params/return aren't tier 0, as DECLARED.
@@ -2149,6 +2056,208 @@ pub fn shader_library_session(
     Ok(ShaderLibrarySession { graph, scx, view })
 }
 
+/// The graph, lowering context and registered-program population kept together
+/// for routes that do not already own a `skull::shader_artifact` view.
+pub struct ShaderProgramSession {
+    pub graph: InstanceGraph,
+    pub scx: ScalarCtx,
+    pub view: ShaderProgramView,
+}
+
+fn shader_program_root(
+    ws: &Workspace,
+    graph: &InstanceGraph,
+    fref: FuncRef,
+) -> Result<Instance, CompilerError> {
+    let canonical = skull_mir::lower::canonical_variant(ws, fref);
+    graph
+        .instances
+        .iter()
+        .find(|instance| instance.func == canonical && instance.args.is_empty())
+        .cloned()
+        .ok_or_else(|| {
+            CompilerError::new_no_location(format!(
+                "shader graph has no concrete root instance for `{}`",
+                ws.module(fref.module).functions[fref.func].name
+            ))
+        })
+}
+
+fn shader_reachable(
+    roots: &[Instance],
+    edges: &std::collections::BTreeMap<Instance, Vec<Instance>>,
+) -> BTreeSet<Instance> {
+    let mut seen: BTreeSet<Instance> = roots.iter().cloned().collect();
+    let mut queue: std::collections::VecDeque<Instance> = roots.iter().cloned().collect();
+    while let Some(instance) = queue.pop_front() {
+        for callee in edges.get(&instance).into_iter().flatten() {
+            if seen.insert(callee.clone()) {
+                queue.push_back(callee.clone());
+            }
+        }
+    }
+    seen
+}
+
+fn shader_postorder(
+    instance: &Instance,
+    edges: &std::collections::BTreeMap<Instance, Vec<Instance>>,
+    retained: &BTreeSet<Instance>,
+    active: &mut BTreeSet<Instance>,
+    done: &mut BTreeSet<Instance>,
+    order: &mut Vec<Instance>,
+) {
+    if done.contains(instance) || !active.insert(instance.clone()) {
+        return;
+    }
+    for callee in edges.get(instance).into_iter().flatten() {
+        if retained.contains(callee) {
+            shader_postorder(callee, edges, retained, active, done, order);
+        }
+    }
+    active.remove(instance);
+    done.insert(instance.clone());
+    if !order.contains(instance) {
+        order.push(instance.clone());
+    }
+}
+
+fn shader_stage_view(
+    ws: &Workspace,
+    graph: &InstanceGraph,
+    edges: &std::collections::BTreeMap<Instance, Vec<Instance>>,
+    entry: Instance,
+    stage: ShaderStage,
+) -> ShaderStageView {
+    let retained = shader_reachable(std::slice::from_ref(&entry), edges);
+    let helpers: BTreeSet<Instance> = retained
+        .iter()
+        .filter(|instance| *instance != &entry)
+        .cloned()
+        .collect();
+    let mut builtins = BTreeSet::new();
+    for caller in &retained {
+        let Some(sites) = graph.sites_of(caller) else { continue };
+        for record in sites.values() {
+            let SiteOutcome::Resolved(callee) = &record.outcome else { continue };
+            let f = &ws.module(callee.func.module).functions[callee.func.func];
+            if renders_inline_instance(ws, f, callee, graph.interner()) {
+                builtins.insert(callee.clone());
+            }
+        }
+    }
+    let mut order = Vec::new();
+    shader_postorder(
+        &entry,
+        edges,
+        &retained,
+        &mut BTreeSet::new(),
+        &mut BTreeSet::new(),
+        &mut order,
+    );
+    order.retain(|instance| instance != &entry);
+    let mut dependencies = Vec::new();
+    let mut seen = BTreeSet::new();
+    for instance in order.iter().chain(std::iter::once(&entry)) {
+        let key = (instance.func.module.raw(), instance.func.func.into_raw().into_u32());
+        if seen.insert(key) {
+            dependencies.push(instance.func);
+        }
+    }
+    ShaderStageView { stage, entry, retained, helpers, builtins, order, dependencies }
+}
+
+fn realize_shader_program_view(
+    ws: &Workspace,
+    graph: &InstanceGraph,
+    program: ShaderProgram,
+) -> Result<ShaderProgramView, CompilerError> {
+    let mut roots = Vec::new();
+    if let Some(vertex) = program.vert {
+        roots.push(shader_program_root(ws, graph, vertex)?);
+    }
+    roots.push(shader_program_root(ws, graph, program.frag)?);
+
+    let mut seen = roots.iter().cloned().collect::<BTreeSet<_>>();
+    let mut queue = roots.clone();
+    let mut edges: std::collections::BTreeMap<Instance, Vec<Instance>> =
+        std::collections::BTreeMap::new();
+    while let Some(caller) = queue.pop() {
+        let Some(sites) = graph.sites_of(&caller) else { continue };
+        for record in sites.values() {
+            let SiteOutcome::Resolved(callee) = &record.outcome else { continue };
+            if graph.concreteness(callee)
+                == skull_graph::instance_graph::Concreteness::Missing
+            {
+                return Err(CompilerError::new_no_location(format!(
+                    "shader graph has no substitution for `{}`",
+                    ws.module(callee.func.module).functions[callee.func.func].name
+                )));
+            }
+            let f = &ws.module(callee.func.module).functions[callee.func.func];
+            if renders_inline_instance(ws, f, callee, graph.interner())
+                || is_lowered_native_operator(ws, f, callee, graph.interner())
+            {
+                continue;
+            }
+            edges.entry(caller.clone()).or_default().push(callee.clone());
+            if seen.insert(callee.clone()) {
+                queue.push(callee.clone());
+            }
+        }
+    }
+    let stages = match program.vert {
+        Some(vertex) => vec![
+            shader_stage_view(
+                ws,
+                graph,
+                &edges,
+                shader_program_root(ws, graph, vertex)?,
+                ShaderStage::Vertex,
+            ),
+            shader_stage_view(
+                ws,
+                graph,
+                &edges,
+                shader_program_root(ws, graph, program.frag)?,
+                ShaderStage::Fragment,
+            ),
+        ],
+        None => vec![shader_stage_view(
+            ws,
+            graph,
+            &edges,
+            shader_program_root(ws, graph, program.frag)?,
+            ShaderStage::Fragment,
+        )],
+    };
+    Ok(ShaderProgramView { program, stages })
+}
+
+/// Build a registered-program view from the shared graph. The returned session
+/// is the compatibility seam for callers that have roots but no retained
+/// `ShaderArtifactView`; emission itself still consumes the supplied view.
+pub fn shader_program_session(
+    ws: &Workspace,
+    program: ShaderProgram,
+) -> Result<ShaderProgramSession, CompilerError> {
+    let roots: Vec<_> = program
+        .vert
+        .into_iter()
+        .chain(std::iter::once(program.frag))
+        .collect();
+    let interner = Arc::new(MonoInterner::new());
+    let graph = skull_graph::instance_graph::build_in(
+        ws,
+        roots,
+        false,
+        Arc::clone(&interner),
+    );
+    let scx = ScalarCtx::new_values_first_class(ws).sharing(interner);
+    let view = realize_shader_program_view(ws, &graph, program)?;
+    Ok(ShaderProgramSession { graph, scx, view })
+}
+
 fn checked_library_callees(
     ws: &Workspace,
     caller: &ShaderInstance,
@@ -3263,11 +3372,11 @@ fn array_block_name(entry: Ustr) -> Ustr {
 /// **One stage's validated plan**: its lowered body, the emittable helpers it
 /// reaches in emission order, and the prelude flags those bodies imply.
 ///
-/// Built once by [`plan_stage`], which performs every rejection the stage's own
-/// code can produce -- lowering, the tier-0 body profile, the [`Reach`] walk
-/// (recursion, a foreign body with no GLSL mapping, a helper outside tier 0)
-/// and the stage-specific builtin validation. Rendering reads it and cannot
-/// reach a different verdict, because there is nothing left to decide.
+/// Built from the supplied graph/view population, which performs every
+/// rejection the stage's own code can produce -- lowering, the tier-0 body
+/// profile, recursion, a foreign body with no GLSL mapping, a helper outside
+/// tier 0 and the stage-specific builtin validation. Rendering reads it and
+/// cannot reach a different verdict, because there is nothing left to decide.
 struct StagePlan {
     /// The stage's concrete bodies -- target-neutral, and the only part of this
     /// plan a non-GLSL backend would want.
@@ -3307,47 +3416,6 @@ impl StagePlan {
     fn dependencies(&self) -> Vec<FuncRef> {
         self.dependencies.clone()
     }
-}
-
-fn plan_stage(
-    ws: &Workspace,
-    scx: &ScalarCtx,
-    fref: FuncRef,
-    stage: Stage,
-) -> Result<StagePlan, CompilerError> {
-    let f = &ws.module(fref.module).functions[fref.func];
-    let entry = ShaderInstance::plain(fref);
-    let mf = lower_instance(ws, scx, &entry.inst).map_err(|e| {
-        err(f.name_span, format!("shader profile: `{}` cannot lower for GLSL: {}", f.name, e.message))
-    })?;
-    let mut callees: Vec<ShaderInstance> = Vec::new();
-    profile_body(ws, f, &mf, &mut callees)?;
-
-    let mut reach = Reach::new(ws, scx);
-    // The entry is lowered above; a callee calling back into it is recursion.
-    reach.entry = Some(entry.clone());
-    reach.seeds = callees;
-    let order = reach.walk()?;
-
-    reject_stage_violations(ws, stage, reach.bodies.values().chain(std::iter::once(&mf)), f.name_span)?;
-    let ir_stage = match stage {
-        Stage::Vertex => IrStage::Vertex,
-        Stage::Fragment => IrStage::Fragment,
-    };
-
-    let (mut uses_idiv, mut uses_imod) = (false, false);
-    for body in reach.bodies.values().chain(std::iter::once(&mf)) {
-        for (_, inst) in body.insts.iter() {
-            match inst {
-                Inst::IntDiv(..) => uses_idiv = true,
-                Inst::IntMod(..) => uses_imod = true,
-                _ => {}
-            }
-        }
-    }
-    let ir = ShaderStageIr { stage: ir_stage, entry, body: mf, order, bodies: reach.bodies };
-    let dependencies = ir.declarations();
-    Ok(StagePlan { ir, uses_idiv, uses_imod, dependencies })
 }
 
 fn plan_stage_from_view(
@@ -3561,9 +3629,9 @@ fn reject_population_cycles(
 ///
 /// Everything emission decides before it writes GLSL, in emission's own order:
 /// the stage classification of the entry's signature, its lowering and tier-0
-/// body pass, the [`Reach`] walk over its callees, the stage-builtin
-/// validation, the `@uniform` block's std140 layout and the program's
-/// `@textures` slot assignment.
+/// body pass over the graph/view population, the stage-builtin validation, the
+/// `@uniform` block's std140 layout and the program's `@textures` slot
+/// assignment.
 ///
 /// [`check_entry_profile`] builds this and DROPS it; [`emit_shader_entry`]
 /// builds it and renders it. There is no second sequence, so the mono shader
@@ -3582,27 +3650,19 @@ struct EntryPlan {
     abi: ShaderAbiPlan,
 }
 
-fn plan_shader_entry(
-    ws: &Workspace,
-    scx: &ScalarCtx,
-    fref: FuncRef,
-) -> Result<EntryPlan, CompilerError> {
-    plan_shader_entry_inner(ws, scx, fref, None)
-}
-
 fn plan_shader_entry_from_view(
     ws: &Workspace,
     scx: &ScalarCtx,
     view: &ShaderStageView,
 ) -> Result<EntryPlan, CompilerError> {
-    plan_shader_entry_inner(ws, scx, view.entry.func, Some(view))
+    plan_shader_entry_inner(ws, scx, view.entry.func, view)
 }
 
 fn plan_shader_entry_inner(
     ws: &Workspace,
     scx: &ScalarCtx,
     fref: FuncRef,
-    stage_view: Option<&ShaderStageView>,
+    stage_view: &ShaderStageView,
 ) -> Result<EntryPlan, CompilerError> {
     let f = &ws.module(fref.module).functions[fref.func];
     match shader_stage(f) {
@@ -3619,10 +3679,7 @@ fn plan_shader_entry_inner(
     // and is not a tier-0 leaf (asking the library check of an entry rejected
     // 1,539 real shaders).
     let class = classify_entry(ws, f)?;
-    let stage = match stage_view {
-        Some(view) => plan_stage_from_view(ws, scx, view, Stage::Fragment)?,
-        None => plan_stage(ws, scx, fref, Stage::Fragment)?,
-    };
+    let stage = plan_stage_from_view(ws, scx, stage_view, Stage::Fragment)?;
     let interface = ShaderInterfacePlan {
         stages: vec![IrStage::Fragment],
         uniform_groups: class
@@ -3667,8 +3724,8 @@ fn plan_shader_entry_inner(
 /// takes no substitution -- so a caller holding concrete instances must not
 /// hand this a generic declaration and read the answer as concrete.
 pub fn check_entry_profile(ws: &Workspace, fref: FuncRef) -> Result<(), CompilerError> {
-    let scx = ScalarCtx::new_values_first_class(ws);
-    plan_shader_entry(ws, &scx, fref).map(|_| ())
+    let session = shader_program_session(ws, ShaderProgram { vert: None, frag: fref })?;
+    check_entry_profile_with_view(ws, &session.scx, &session.view)
 }
 
 /// Validate one shader entry against the graph-owned concrete population.
@@ -3695,10 +3752,9 @@ pub fn emit_shader_entry_with_dependencies(
     root: &str,
     profile: GlslProfile,
 ) -> Result<ShaderEmission, CompilerError> {
-    let scx = ScalarCtx::new_values_first_class(ws);
     let fref = resolve_root(ws, mid, root)?;
-    let plan = plan_shader_entry(ws, &scx, fref)?;
-    render_shader_entry(ws, scx.interner(), &plan, profile)
+    let session = shader_program_session(ws, ShaderProgram { vert: None, frag: fref })?;
+    emit_shader_entry_with_view(ws, &session.scx, &session.view, profile)
 }
 
 /// Emit a single-entry program from the graph-owned population. The caller's
@@ -4708,8 +4764,8 @@ pub fn emit_shader_pipeline(
 /// classified AGAINST those varyings (not as a standalone entry, where a
 /// varyings param has no meaning), the cross-stage collisions, the per-stage
 /// `@uniform` and program `@engine` std140 layouts, each stage's own lowering +
-/// tier-0 + reachability + stage-builtin pass, and the program's `@textures`
-/// slot assignment.
+/// tier-0 + graph/view population + stage-builtin pass, and the program's
+/// `@textures` slot assignment.
 ///
 /// [`check_pipeline_profile`] builds this and DROPS it; emission builds it and
 /// renders it.
@@ -4723,15 +4779,6 @@ struct PipelinePlan {
     interface: ShaderInterfacePlan,
     /// GLSL's physical answer to `interface`.
     abi: ShaderAbiPlan,
-}
-
-fn plan_shader_pipeline(
-    ws: &Workspace,
-    scx: &ScalarCtx,
-    vfref: FuncRef,
-    ffref: FuncRef,
-) -> Result<PipelinePlan, CompilerError> {
-    plan_shader_pipeline_inner(ws, scx, vfref, ffref, None)
 }
 
 fn plan_shader_pipeline_from_view(
@@ -4762,7 +4809,7 @@ fn plan_shader_pipeline_from_view(
         scx,
         vertex.entry.func,
         fragment.entry.func,
-        Some((vertex, fragment)),
+        (vertex, fragment),
     )
 }
 
@@ -4771,7 +4818,7 @@ fn plan_shader_pipeline_inner(
     scx: &ScalarCtx,
     vfref: FuncRef,
     ffref: FuncRef,
-    stage_views: Option<(&ShaderStageView, &ShaderStageView)>,
+    stage_views: (&ShaderStageView, &ShaderStageView),
 ) -> Result<PipelinePlan, CompilerError> {
     let vf = &ws.module(vfref.module).functions[vfref.func];
     let ff = &ws.module(ffref.module).functions[ffref.func];
@@ -4892,14 +4939,8 @@ fn plan_shader_pipeline_inner(
         vf.name_span,
     )?;
 
-    let vert = match stage_views {
-        Some((vertex, _)) => plan_stage_from_view(ws, scx, vertex, Stage::Vertex)?,
-        None => plan_stage(ws, scx, vfref, Stage::Vertex)?,
-    };
-    let frag = match stage_views {
-        Some((_, fragment)) => plan_stage_from_view(ws, scx, fragment, Stage::Fragment)?,
-        None => plan_stage(ws, scx, ffref, Stage::Fragment)?,
-    };
+    let vert = plan_stage_from_view(ws, scx, stage_views.0, Stage::Vertex)?;
+    let frag = plan_stage_from_view(ws, scx, stage_views.1, Stage::Fragment)?;
     reject_position_read(ws, &frag.ir.body, frag.ir.body.params[fshape.varyings_param], ff.name_span)?;
 
     Ok(PipelinePlan { vshape, fshape, vert, frag, interface, abi })
@@ -4916,8 +4957,11 @@ pub fn check_pipeline_profile(
     vfref: FuncRef,
     ffref: FuncRef,
 ) -> Result<(), CompilerError> {
-    let scx = ScalarCtx::new_values_first_class(ws);
-    plan_shader_pipeline(ws, &scx, vfref, ffref).map(|_| ())
+    let session = shader_program_session(
+        ws,
+        ShaderProgram { vert: Some(vfref), frag: ffref },
+    )?;
+    check_pipeline_profile_with_view(ws, &session.scx, &session.view)
 }
 
 /// Validate one shader pipeline against the graph-owned concrete populations.
@@ -4941,11 +4985,13 @@ pub fn emit_shader_pipeline_with_dependencies(
     frag_root: &str,
     profile: GlslProfile,
 ) -> Result<ShaderEmission, CompilerError> {
-    let scx = ScalarCtx::new_values_first_class(ws);
     let vfref = resolve_root(ws, mid, vert_root)?;
     let ffref = resolve_root(ws, mid, frag_root)?;
-    let plan = plan_shader_pipeline(ws, &scx, vfref, ffref)?;
-    render_shader_pipeline(ws, scx.interner(), &plan, profile)
+    let session = shader_program_session(
+        ws,
+        ShaderProgram { vert: Some(vfref), frag: ffref },
+    )?;
+    emit_shader_pipeline_with_view(ws, &session.scx, &session.view, profile)
 }
 
 /// Emit a pipeline from the graph-owned stage populations in `view`.
@@ -5622,17 +5668,28 @@ mod assertion_flip_tests {
              fn of(vary: Vary) -> Vec4 { return v(vary.uv.x, 0.0, 0.0, 1.0) }\n\
              fn main() { let k = rock_shader(ov, of) }",
         );
-        let scx = ScalarCtx::new_values_first_class(&ws);
         let vf = resolve_root(&ws, mid, "ov").expect("root");
         let ff = resolve_root(&ws, mid, "of").expect("root");
-        let mut plan = plan_shader_pipeline(&ws, &scx, vf, ff).expect("the fixture must plan");
+        let session = shader_program_session(
+            &ws,
+            ShaderProgram { vert: Some(vf), frag: ff },
+        )
+        .expect("the fixture must realize");
+        let mut plan = plan_shader_pipeline_from_view(&ws, &session.scx, &session.view)
+            .expect("the fixture must plan");
 
         // CONTROL: it renders with the output declared.
         assert!(matches!(plan.interface.fragment_output, FragmentOutput::Single(_)));
-        render_shader_pipeline(&ws, scx.interner(), &plan, GlslProfile::Core330).expect("the control must render");
+        render_shader_pipeline(&ws, session.scx.interner(), &plan, GlslProfile::Core330)
+            .expect("the control must render");
 
         plan.interface.fragment_output = FragmentOutput::None;
-        let msg = render_shader_pipeline(&ws, scx.interner(), &plan, GlslProfile::Core330)
+        let msg = render_shader_pipeline(
+            &ws,
+            session.scx.interner(),
+            &plan,
+            GlslProfile::Core330,
+        )
             .err()
             .expect("a fragment stage with no output must reject")
             .message;
