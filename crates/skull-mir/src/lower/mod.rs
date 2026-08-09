@@ -300,6 +300,12 @@ impl ScalarCtx {
         self
     }
 
+    /// The shared handle, for a consumer that must mint against the SAME arena
+    /// later -- an `InstanceGraph` built on demand rather than up front.
+    pub fn interner_handle(&self) -> std::sync::Arc<crate::monoty::MonoInterner> {
+        std::sync::Arc::clone(&self.interner)
+    }
+
     /// Set the codegen backend this lowering feeds (see [`target`]).
     /// The backend this context lowers for. Read by consumers that must ask the
     /// EMITTER's own declaration selection rather than restate it -- the site
