@@ -9,12 +9,11 @@
 //! backend to spell its own target axes would not be neutral.
 //!
 //! **Current dependents, stated rather than assumed** (E1 Phase 3/4 in
-//! `docs/monomorphization-plan.md`): `skull` alone, which is the luajit driver
-//! and the only production emission that consumes a view today.
-//! `skull-codegen-js` will depend on this crate when JS retention moves off
-//! `WorklistState`. Production GLSL is planned to reach the shader artifact
-//! view through the `skull` driver -- `mir_emit::shader_registration_lines` is
-//! what calls `plan_shader_entry`/`plan_shader_pipeline` -- so
+//! `docs/monomorphization-plan.md`): `skull` and `skull-codegen-js` depend on
+//! this crate. Lua and JS production emission consume per-target views; GLSL
+//! production still has its private reachability path. The planned GLSL seam is
+//! through the `skull` driver -- `mir_emit::shader_registration_lines` is what
+//! calls `plan_shader_entry`/`plan_shader_pipeline` -- so
 //! `skull-codegen-glsl` may never need a direct dependency at all.
 //!
 //! **Roots are an INPUT, not something derived here.** Which declarations a
