@@ -1745,14 +1745,14 @@ impl InstanceGraph {
     /// That last one is two writers for one fact and is the seam the
     /// derivation cut removes: one indexing path, taken by install and replace
     /// alike. Returns the instances it pruned.
-    fn derive(&mut self, ws: &Workspace, incremental: bool) -> BTreeSet<Instance> {
+    fn derive(&mut self, ws: &Workspace, incremental: bool) -> Prune {
         let lost: Vec<Instance> = std::mem::take(&mut self.lost).into_iter().collect();
         // A FRESH build prunes nothing by construction: `run` only ever walks
         // owners a root or an always-emitted seed demanded, so every owner it
         // installed is root-reachable. An update is where the question has an
         // answer, and the answer is searched over the affected region.
-        let pruned: BTreeSet<Instance> =
-            if incremental { self.stranded(&lost) } else { BTreeSet::new() };
+        let Prune { pruned, region } =
+            if incremental { self.stranded(&lost) } else { Prune::default() };
         if std::env::var("ROCK_GRAPH_VERIFY").is_ok() {
             // Both claims against one whole-graph reachability walk, on demand:
             // that the delta found everything, and that a fresh build had
@@ -1854,7 +1854,7 @@ impl InstanceGraph {
         detect_changing_instance_recursion(self, ws);
         classify_boundaries(self, ws, &decls_entered);
         record_coroutine_helpers(self, ws, &entered, &left);
-        pruned
+        Prune { pruned, region }
     }
 
     /// **Update the graph for a BODY-ONLY change**, in place, against the same
@@ -1904,11 +1904,12 @@ impl InstanceGraph {
         // loop stood here and was inert -- mutation-verified.
         let affected = self.affected_owners(ws, changed);
         let run = self.run(ws, affected.clone());
-        let pruned = self.derive(ws, true);
+        let prune = self.derive(ws, true);
         UpdateStats {
             affected: affected.len(),
             expanded: run.expanded,
-            pruned: pruned.len(),
+            pruned: prune.pruned.len(),
+            suspect_region: prune.region,
             newly_reached: self.instances.difference(&before).count(),
             owners: self.contributions.len(),
             instances: self.instances.len(),
@@ -2212,7 +2213,7 @@ impl InstanceGraph {
     ///    target of an edge from a live instance OUTSIDE the region;
     /// 3. whatever the anchors reach INSIDE the region survives. A cycle with no
     ///    anchor keeps only itself alive, so nothing marks it and it goes.
-    fn stranded(&self, lost: &[Instance]) -> BTreeSet<Instance> {
+    fn stranded(&self, lost: &[Instance]) -> Prune {
         // Owned nodes, one map lookup per node VISITED rather than one per edge
         // followed: `contributions` is keyed by `Owner`, so borrowing a target
         // back out of it costs an `Instance` clone either way.
@@ -2232,7 +2233,7 @@ impl InstanceGraph {
             queue.extend(succ(&i).iter().map(|e| e.to.clone()));
         }
         if region.is_empty() {
-            return BTreeSet::new();
+            return Prune::default();
         }
         let mut alive: Vec<Instance> = region
             .iter()
@@ -2258,7 +2259,7 @@ impl InstanceGraph {
                 }
             }
         }
-        region.difference(&survives).cloned().collect()
+        Prune { pruned: region.difference(&survives).cloned().collect(), region: region.len() }
     }
 
     /// Instances the graph holds that no root reaches. The whole-graph
@@ -2314,6 +2315,19 @@ pub struct RunStats {
     pub settle_rounds: usize,
 }
 
+/// What [`InstanceGraph::derive`] pruned, and over how much.
+///
+/// The region is carried out beside the answer because it is the only thing
+/// that distinguishes an affected-region search from a whole-graph one: both
+/// return the same pruned set, and canonical equality is green either way.
+#[derive(Default)]
+struct Prune {
+    pruned: BTreeSet<Instance>,
+    /// How many instances the suspect walk VISITED to produce `pruned` -- the
+    /// forward closure of what lost an in-edge.
+    region: usize,
+}
+
 /// What one [`InstanceGraph::update_bodies`] did, as a structural census.
 ///
 /// Canonical equality against a fresh build cannot tell an update from a hidden
@@ -2330,6 +2344,14 @@ pub struct UpdateStats {
     pub expanded: usize,
     /// Instances no root reaches any more.
     pub pruned: usize,
+    /// **Instances the strand search VISITED**, i.e. the size of the suspect
+    /// region -- the forward closure of everything that lost an in-edge.
+    ///
+    /// The prune's own cost, which its RESULT cannot report: a whole-graph
+    /// search returns exactly the same `pruned` set and passes canonical
+    /// equality, so nothing else here can tell the two apart. Asserted against
+    /// `instances` so "affected region" is a comparison rather than a claim.
+    pub suspect_region: usize,
     /// Instances the graph did not have before.
     pub newly_reached: usize,
     pub owners: usize,

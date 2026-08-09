@@ -141,6 +141,19 @@ fn assert_scoped(stats: &UpdateStats, label: &str) {
         stats.pruned,
         stats.newly_reached
     );
+    // The PRUNE's own cost. A whole-graph strand search returns the same pruned
+    // set and passes canonical equality, so no other arm here can see it. Bound
+    // against the WALK because both scale with the edit: an instance can only
+    // lose an in-edge because an owner was re-walked.
+    assert!(
+        stats.suspect_region <= stats.expanded * 4,
+        "{label}: the strand search visited {} instances after walking {} owners \
+         (of {} instances, {} pruned) -- that is a whole-graph walk, not an affected region",
+        stats.suspect_region,
+        stats.expanded,
+        stats.instances,
+        stats.pruned
+    );
 }
 
 // ---------------------------------------------------------------------------
