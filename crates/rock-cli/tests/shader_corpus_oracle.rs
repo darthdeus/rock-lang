@@ -177,13 +177,6 @@ impl Canonical {
             self.string(value);
         }
     }
-
-    fn nested_strings(&mut self, values: &[Vec<String>]) {
-        self.u32(values.len() as u32);
-        for value in values {
-            self.strings(value);
-        }
-    }
 }
 
 fn stage_code(stage: ShaderStage) -> u8 {
@@ -658,13 +651,6 @@ fn canonical_fingerprint(row: &ShaderRow) -> u64 {
     out.string(&row.key.shader);
     out.string(row.key.profile);
     out.u64(row.stage_sections as u64);
-    out.strings(&row.graph_roots);
-    out.strings(&row.graph_helpers);
-    out.strings(&row.entries);
-    out.nested_strings(&row.stage_populations);
-    out.strings(&row.helper_instances);
-    out.strings(&row.builtin_instances);
-    out.nested_strings(&row.emission_order);
     out.u64(row.glsl_fingerprint);
     out.u64(row.interface_fingerprint);
     out.u64(row.abi_fingerprint);
@@ -693,8 +679,8 @@ fn canonical_baseline() -> BTreeMap<RowKey, u64> {
             fields.next().is_none(),
             "canonical row has extra fields: {line}"
         );
-        assert!(
-            out.insert(
+        assert!(out
+            .insert(
                 RowKey {
                     project,
                     shader,
@@ -702,8 +688,7 @@ fn canonical_baseline() -> BTreeMap<RowKey, u64> {
                 },
                 fingerprint
             )
-            .is_none()
-        );
+            .is_none());
     }
     out
 }
@@ -1050,11 +1035,11 @@ fn shader_corpus_has_per_shader_profile_and_interface_evidence() {
         1
     );
 
-    let expected = canonical_baseline();
     let actual: BTreeMap<_, _> = rows
         .iter()
         .map(|row| (row.key.clone(), canonical_fingerprint(row)))
         .collect();
+    let expected = canonical_baseline();
     assert_eq!(
         actual.keys().collect::<BTreeSet<_>>(),
         expected.keys().collect::<BTreeSet<_>>(),

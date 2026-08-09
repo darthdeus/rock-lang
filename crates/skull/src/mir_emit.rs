@@ -1170,6 +1170,7 @@ pub struct SkullEmitCache {
     /// `docs/static-hot-reload-overlay-bug.md`.
     static_key_baseline: FxHashMap<Ustr, String>,
     shader_registrations: ShaderRegistrations,
+    shader_view: crate::shader_artifact::ShaderArtifactView,
     /// The definitions the last full assembly actually EMITTED (global DCE prunes
     /// the rest), keyed by EMITTED BODY. `assemble_overlay` needs it: the overlay
     /// redefines only CHANGED fns, so a body edit that newly reaches a
@@ -1189,6 +1190,7 @@ struct ShaderRegistrations {
     lua: String,
     dependencies: FxHashSet<FuncRef>,
     callsites: FxHashSet<(ModuleId, BodyOwner)>,
+    roots: Vec<FuncRef>,
 }
 
 /// A `static` cell's reload key: rendered type + initializer content hash. Equal
@@ -2039,9 +2041,9 @@ pub fn emission_roots(ws: &Workspace, project_root: Option<&str>) -> Vec<FuncRef
 ///
 /// `sim_registration_lines` writes `register_sim("<wire>", <mangled>)` and
 /// `shader_registration_lines` writes a program whose stage entries and GLSL
-/// helpers are named by their own declarations. Neither is a Rock call site, so
-/// no amount of graph reachability can find them -- they are an artifact ROOT
-/// (plan S 11: "the target may change roots"), which is what
+/// helpers are named by its graph-owned view. Neither is a Rock call site, so
+/// no amount of ordinary graph reachability can find them -- they are an
+/// artifact ROOT (plan S 11: "the target may change roots"), which is what
 /// `ArtifactRequest::roots` is for. Emitting the generated call while the
 /// definition is pruned is a nil call at load, which is exactly what happened.
 ///
@@ -2050,7 +2052,7 @@ pub fn emission_roots(ws: &Workspace, project_root: Option<&str>) -> Vec<FuncRef
 fn all_roots(
     ws: &Workspace,
     project_root: Option<&str>,
-    shaders: &ShaderRegistrations,
+    shader_roots: &[FuncRef],
 ) -> Vec<FuncRef> {
     let mut roots = emission_roots(ws, project_root);
     let mut seen: FxHashSet<FuncRef> = roots.iter().copied().collect();
@@ -2058,7 +2060,7 @@ fn all_roots(
     if !collect_sim_fns(ws).is_empty() {
         glue.extend(register_sim_fn(ws));
     }
-    glue.extend(shaders.dependencies.iter().copied());
+    glue.extend(shader_roots.iter().copied());
     // Deterministic: `dependencies` is a hash set, so its iteration order is not.
     glue.sort_by_key(|f| (f.module.index(), f.func.into_raw()));
     roots.extend(glue.into_iter().filter(|f| seen.insert(*f)));
@@ -2106,45 +2108,73 @@ fn lua_long_bracket(s: &str) -> String {
     }
 }
 
+fn shader_programs(
+    collection: &skull_mir::lower::ShaderCollection,
+) -> Vec<crate::shader_artifact::ShaderProgram> {
+    collection
+        .pairs
+        .iter()
+        .map(|pair| crate::shader_artifact::ShaderProgram { vert: pair.vert, frag: pair.frag })
+        .collect()
+}
+
+fn realize_shader_view(
+    ws: &Workspace,
+    graph: &crate::instance_graph::InstanceGraph,
+    programs: &[crate::shader_artifact::ShaderProgram],
+    scx: &skull_mir::lower::ScalarCtx,
+) -> Result<crate::shader_artifact::ShaderArtifactView, CompilerError> {
+    crate::shader_artifact::realize_shader_with_context(
+        ws,
+        graph,
+        &crate::shader_artifact::ShaderArtifactRequest {
+            spec: crate::target_projection::TargetSpec {
+                shader: Some(crate::target_projection::ShaderTargetSpec::Glsl(
+                    skull_codegen_glsl::GlslProfile::Core330,
+                )),
+                ..crate::target_projection::LUAJIT_DESKTOP
+            },
+            programs,
+        },
+        scx,
+    )
+    .ok_or_else(|| CompilerError::new_no_location("GLSL shader view is unavailable".to_string()))
+}
+
 /// `__rock_shader_register("<key>", <glsl>)` for every distinct `rock_shader`
 /// pair (docs/shaders.md). Emitted at module-init time after
 /// the `@sim` registrations, at chunk top level, so a reload re-`dofile`s them
 /// with the new source (the hot-reload-parity invariant). Deterministic
 /// sorted-by-key order (from `collect_shader_pairs`) keeps re-emission
-/// byte-identical. GLSL emission lives HERE, in the driver -- skull-mir surfaces
-/// only the resolved `FuncRef`s (the layering constraint). An emit error (tier
-/// violation, stage/collision) is a spanned `CompilerError` failing the compile,
-/// never skip-and-continue.
-fn shader_registration_lines(ws: &Workspace) -> Result<ShaderRegistrations, CompilerError> {
+/// byte-identical. The driver realizes the graph-owned shader view and passes
+/// it to GLSL; skull-mir still surfaces only the resolved `FuncRef`s. An emit
+/// error (tier violation, stage/collision) is a spanned `CompilerError` failing
+/// the compile, never skip-and-continue.
+fn shader_registration_lines(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    collection: &skull_mir::lower::ShaderCollection,
+    view: &crate::shader_artifact::ShaderArtifactView,
+) -> Result<ShaderRegistrations, CompilerError> {
     // Always Core330. The profile is a property of the GL context, which a build
     // cannot know: the engine rewrites #version + precision for GLES at
     // shader-compile time (stone-gl `adapt_source_for_gles`), and that header is
     // the ONLY difference between the two profiles.
     let profile = skull_codegen_glsl::GlslProfile::Core330;
-    let collection = skull_mir::lower::collect_shader_collection(ws)?;
+    if view.profile != profile || view.program_views.len() != collection.pairs.len() {
+        return Err(CompilerError::new_no_location(
+            "shader graph/view registration denominator differs from shader collection"
+                .to_string(),
+        ));
+    }
     let mut out = String::new();
     let mut dependencies = FxHashSet::default();
-    for pair in collection.pairs {
-        let fname = ws.module(pair.frag.module).functions[pair.frag.func].name;
+    for (pair, program_view) in collection.pairs.iter().zip(&view.program_views) {
         // vert=None is the A3c single-arg fullscreen form -> the A1 single-entry
         // emitter (PIXEL body + fullscreen VERTEX passthrough).
         let emission = match pair.vert {
-            Some(vert) => {
-                let vname = ws.module(vert.module).functions[vert.func].name;
-                skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
-                    ws,
-                    vert.module,
-                    vname.as_str(),
-                    fname.as_str(),
-                    profile,
-                )?
-            }
-            None => skull_codegen_glsl::emit_shader_entry_with_dependencies(
-                ws,
-                pair.frag.module,
-                fname.as_str(),
-                profile,
-            )?,
+            Some(_) => skull_codegen_glsl::emit_shader_pipeline_with_view(ws, scx, program_view, profile)?,
+            None => skull_codegen_glsl::emit_shader_entry_with_view(ws, scx, program_view, profile)?,
         };
         dependencies.extend(emission.dependencies);
         // Slot order is the engine's whole view of texture binding: it points
@@ -2175,10 +2205,16 @@ fn shader_registration_lines(ws: &Workspace) -> Result<ShaderRegistrations, Comp
             skull_codegen_lua::lua_int_vec(&w.member_strides),
         );
     }
+    let roots = collection
+        .pairs
+        .iter()
+        .flat_map(|pair| pair.vert.into_iter().chain(std::iter::once(pair.frag)))
+        .collect();
     Ok(ShaderRegistrations {
         lua: out,
         dependencies,
-        callsites: collection.callsites.into_iter().collect(),
+        callsites: collection.callsites.iter().copied().collect(),
+        roots,
     })
 }
 
@@ -2777,15 +2813,26 @@ pub fn emit_full_in(
     // arena rather than minting its own.** An `Instance` the graph mints has to
     // mean something to lowering, and a second arena would be a second identity
     // for the same instance. See `SkullEmitCache::graph`.
-    // Generated glue is part of the ROOT INPUT, so the shader collection is
-    // built before the graph rather than beside the assembly that consumes it.
-    let shader_registrations = shader_registration_lines(ws)?;
-    let emission_roots = all_roots(ws, project_root, &shader_registrations);
+    // Generated glue is part of the ROOT INPUT. Shader declarations are known
+    // before the graph; their GLSL bodies are rendered only after the view owns
+    // the retained instances.
+    let shader_collection = skull_mir::lower::collect_shader_collection(ws)?;
+    let shader_programs = shader_programs(&shader_collection);
+    let shader_roots: Vec<FuncRef> = shader_programs
+        .iter()
+        .flat_map(|program| program.vert.into_iter().chain(std::iter::once(program.frag)))
+        .collect();
+    let emission_roots = all_roots(ws, project_root, &shader_roots);
     let graph = crate::instance_graph::build(ws, emission_roots.clone(), false);
     // The overload set lives in `cg` (computed once there); borrow it rather than
     // rescanning the workspace.
     let scx =
         skull_mir::lower::ScalarCtx::new(ws).sharing(std::sync::Arc::clone(graph.interner()));
+    let shader_scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
+        .sharing(std::sync::Arc::clone(graph.interner()));
+    let shader_view = realize_shader_view(ws, &graph, &shader_programs, &shader_scx)?;
+    let shader_registrations =
+        shader_registration_lines(ws, &shader_scx, &shader_collection, &shader_view)?;
 
     // The emitted param list must be injective. Checked per SIGNATURE, over every
     // function rather than just the emitted set: a duplicate Lua param is illegal
@@ -2857,6 +2904,7 @@ pub fn emit_full_in(
         changed_consts_since_full: FxHashSet::default(),
         static_key_baseline,
         shader_registrations,
+        shader_view,
         emitted: FxHashSet::default(),
         project_root: project_root.map(str::to_string),
     };
@@ -2919,8 +2967,29 @@ fn update_shader_registrations(
     if !affected {
         return Ok(false);
     }
-    self.shader_registrations = shader_registration_lines(ws)?;
+    let collection = skull_mir::lower::collect_shader_collection(ws)?;
+    self.shader_registrations.roots = collection
+        .pairs
+        .iter()
+        .flat_map(|pair| pair.vert.into_iter().chain(std::iter::once(pair.frag)))
+        .collect();
+    self.shader_registrations.callsites = collection.callsites.iter().copied().collect();
     Ok(true)
+}
+
+fn refresh_shader_registrations(
+    &mut self,
+    ws: &Workspace,
+) -> Result<(), CompilerError> {
+    let collection = skull_mir::lower::collect_shader_collection(ws)?;
+    let programs = shader_programs(&collection);
+    let shader_scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
+        .sharing(std::sync::Arc::clone(self.graph.interner()));
+    let view = realize_shader_view(ws, &self.graph, &programs, &shader_scx)?;
+    let registrations = shader_registration_lines(ws, &shader_scx, &collection, &view)?;
+    self.shader_view = view;
+    self.shader_registrations = registrations;
+    Ok(())
 }
 
 /// Take the specialized chunks an assembly BUILT into the cache, with their
@@ -2989,7 +3058,11 @@ fn update_chunk_cache(
     let _t_graph = Instant::now();
     // `update_shader_registrations` runs BEFORE this (in `emit_incremental`), so
     // the glue roots below are this edit's, not the previous build's.
-    let roots = all_roots(ws, cache.project_root.as_deref(), &cache.shader_registrations);
+    let roots = all_roots(
+        ws,
+        cache.project_root.as_deref(),
+        &cache.shader_registrations.roots,
+    );
     let update = cache.graph.update_bodies(ws, roots.clone(), reinferred);
     let _graph_ms = _t_graph.elapsed();
 
@@ -3124,8 +3197,11 @@ pub fn emit_incremental(
     // Shader registrations FIRST: their dependencies are graph/view roots, so
     // `update_chunk_cache`'s re-walk must see this edit's set, not the last
     // build's.
-    cache.update_shader_registrations(ws, reinferred)?;
+    let shader_changed = cache.update_shader_registrations(ws, reinferred)?;
     let _affected = cache.update_chunk_cache(ws, reinferred);
+    if shader_changed {
+        cache.refresh_shader_registrations(ws)?;
+    }
     let reemit = t_reemit.elapsed();
 
     // Reassembly: the SAME work `emit_full` does (concat every cached chunk +
@@ -3513,6 +3589,11 @@ pub fn emit_overlay(
         }
     };
     let affected = cache.update_chunk_cache(ws, reinferred);
+    if shader_changed {
+        if let Err(err) = cache.refresh_shader_registrations(ws) {
+            eprintln!("skull overlay emit: graph-owned shader registration -- {}", err.message);
+        }
+    }
     cache.changed_since_full.extend(affected);
     // Accumulate changed `const` globals so the overlay re-emits their inits
     // (unguarded). A mutable `global` value edit is interface-tier (full rebuild),

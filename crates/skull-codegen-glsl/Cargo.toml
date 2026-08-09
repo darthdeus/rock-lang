@@ -14,6 +14,7 @@ edition = "2024"
 comfy-la-arena = { workspace = true }
 rustc-hash = { workspace = true }
 skull-mir = { path = "../skull-mir" }
+skull-graph = { path = "../skull-graph" }
 skull-codegen-lua = { path = "../skull-codegen-lua" }
 bone-semantic = { path = "../bone-semantic" }
 skull-parser = { path = "../skull-parser" }

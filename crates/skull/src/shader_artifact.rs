@@ -35,18 +35,7 @@ use skull_parser::Span;
 use crate::instance_graph::{Concreteness, DeclKey, Instance, InstanceGraph, SiteOutcome};
 use crate::target_projection::{ShaderTargetSpec, TargetSpec};
 
-/// One registered shader program: a `(vertex, fragment)` pair, or the
-/// single-argument fullscreen form whose vertex stage the compiler supplies.
-///
-/// PAIRS, not a flat root list. A pipeline fragment's signature is classified
-/// against its vertex stage's varyings type -- as a standalone entry the same
-/// signature is refused outright -- so a view holding only the fragment could
-/// not ask GLSL the question emission asks.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct ShaderProgram {
-    pub vert: Option<FuncRef>,
-    pub frag: FuncRef,
-}
+pub use crate::shader::{ShaderProgram, ShaderProgramView, ShaderStageView};
 
 /// Everything one shader artifact view is taken through.
 pub struct ShaderArtifactRequest<'a> {
@@ -57,27 +46,6 @@ pub struct ShaderArtifactRequest<'a> {
     pub programs: &'a [ShaderProgram],
 }
 
-/// The graph-owned population for one shader stage of one registered program.
-/// The emitter may render this later, but it does not get to choose a different
-/// entry, helper set or reload dependency set.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct ShaderStageView {
-    pub stage: ShaderStage,
-    pub entry: Instance,
-    pub retained: BTreeSet<Instance>,
-    pub helpers: BTreeSet<Instance>,
-    pub builtins: BTreeSet<Instance>,
-    pub order: Vec<Instance>,
-    pub dependencies: Vec<FuncRef>,
-}
-
-/// The graph-owned populations for one registered shader program. `stages` is
-/// in registration order: vertex first when present, fragment second.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct ShaderProgramView {
-    pub program: ShaderProgram,
-    pub stages: Vec<ShaderStageView>,
-}
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ShaderRejectionKind {
@@ -171,6 +139,20 @@ pub fn realize_shader(
     g: &InstanceGraph,
     req: &ShaderArtifactRequest<'_>,
 ) -> Option<ShaderArtifactView> {
+    let scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
+        .sharing(std::sync::Arc::clone(g.interner()));
+    realize_shader_with_context(ws, g, req, &scx)
+}
+
+/// Realize a shader view with the lowering context that shares the graph's
+/// interner. Production emission uses this entry point so concrete graph ids
+/// and lowered shader bodies are read from one arena.
+pub fn realize_shader_with_context(
+    ws: &Workspace,
+    g: &InstanceGraph,
+    req: &ShaderArtifactRequest<'_>,
+    scx: &skull_mir::lower::ScalarCtx,
+) -> Option<ShaderArtifactView> {
     // The typed axis value. A non-GLSL shader target packages no GLSL artifact
     // -- and says so by being absent here rather than by defaulting to a
     // profile it does not have.
@@ -203,8 +185,11 @@ pub fn realize_shader(
             sites_walked += 1;
             let SiteOutcome::Resolved(callee) = &rec.outcome else { continue };
             let f = &ws.module(callee.func.module).functions[callee.func.func];
-            if skull_codegen_glsl::renders_inline(f) {
+            if skull_codegen_glsl::renders_inline_instance(ws, f, callee, g.interner()) {
                 builtins.insert(callee.clone());
+                continue;
+            }
+            if skull_codegen_glsl::is_lowered_native_operator(ws, f, callee, g.interner()) {
                 continue;
             }
             edges.entry(caller.clone()).or_default().push((callee.clone(), rec.span));
@@ -244,7 +229,7 @@ pub fn realize_shader(
     }
 
     // THE PROFILE PASS IS EMISSION'S OWN, run per ENTRY.
-    // `check_entry_profile` is the whole of what `emit_shader_entry` does
+    // The view-aware checker is the whole of what the view-driven emitter does
     // before it writes GLSL: stage classification of the entry's signature (an
     // `@uniform` block param is legal there and is NOT a tier-0 leaf -- asking
     // the fn-library check of an entry rejected 1,539 real shaders), the
@@ -265,7 +250,7 @@ pub fn realize_shader(
     let mut checked = 0usize;
     let mut missing_substitutions: BTreeSet<Instance> = BTreeSet::new();
     let mut programs_unchecked = 0usize;
-    for program in req.programs {
+    for (program_index, program) in req.programs.iter().enumerate() {
         // The PROGRAM's own root instances -- the fragment entry, and the
         // vertex stage when the pair has one.
         let entry_of = |r: FuncRef| -> Option<&Instance> {
@@ -309,9 +294,10 @@ pub fn realize_shader(
         checked += 1;
         let entry_cycle = cyclic.contains(root)
             || reaches_cycle(root, &edges, &cyclic);
+        let program_view = &program_views[program_index];
         let outcome = match program.vert {
-            Some(v) => skull_codegen_glsl::check_pipeline_profile(ws, v, program.frag),
-            None => skull_codegen_glsl::check_entry_profile(ws, program.frag),
+            Some(_) => skull_codegen_glsl::check_pipeline_profile_with_view(ws, scx, program_view),
+            None => skull_codegen_glsl::check_entry_profile_with_view(ws, scx, program_view),
         };
         match outcome {
             Ok(()) => {
@@ -393,8 +379,11 @@ fn stage_view(
         for rec in sites.values() {
             let SiteOutcome::Resolved(callee) = &rec.outcome else { continue };
             let f = &ws.module(callee.func.module).functions[callee.func.func];
-            if skull_codegen_glsl::renders_inline(f) {
+            if skull_codegen_glsl::renders_inline_instance(ws, f, callee, g.interner()) {
                 builtins.insert(callee.clone());
+            }
+            if skull_codegen_glsl::is_lowered_native_operator(ws, f, callee, g.interner()) {
+                continue;
             }
         }
     }

@@ -28,6 +28,7 @@ use bone_semantic::prelude::{FnList, ModuleId, Span};
 use comfy_la_arena::Idx;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use skull_codegen_lua::mangle_fn;
+use skull_graph::shader::{ShaderProgramView, ShaderStageView};
 use skull_mir::cfg::reverse_postorder;
 use skull_mir::gpu_layout::{
     ArrayMemberDecl, AttrKind, SamplerKind, UniformArrayBlockPlan, UniformBlockPlan, WireKind,
@@ -41,7 +42,8 @@ use skull_mir::monoty::{MonoCtor, MonoTy};
 use skull_mir::shader_ir::{
     FragmentOutput, LogicalSampler, ShaderIR, ShaderStageIr,
     LogicalArrayGroup, LogicalTextureGroup, LogicalUniformGroup, LogicalVarying,
-    LogicalVertexInput, ShaderInstance, ShaderInterfacePlan, ShaderStage as IrStage, UniformRole,
+    LogicalVertexInput, ShaderInstance, ShaderInterfacePlan, ShaderStage,
+    ShaderStage as IrStage, UniformRole,
     VertexRate,
 };
 use skull_mir::mir::*;
@@ -597,16 +599,64 @@ impl IntrinsicTable for GlslIntrinsics {
     }
 }
 
-/// Whether a callee is rendered inline at call sites (an intrinsic template or a
-/// Vec operator's native infix), rather than emitted as a GLSL fn definition. A
-/// `__op_*` reaching codegen as a real call is always non-scalar (scalar ops lower
-/// to native MIR insts), so a 2-arg `__op_*` is always a Vec operator.
+/// Whether a callee that survived MIR lowering is rendered inline at call sites
+/// rather than emitted as a GLSL fn definition. Scalar operators do not reach
+/// this predicate: lowering turns them into native MIR instructions.
 pub fn renders_inline(f: &Function) -> bool {
     GlslIntrinsics.lookup(f).is_some()
         || (vec_op_symbol(f.name.as_str()).is_some() && f.param_decls.iter().count() == 2)
-        // Scalar `%` is lowered to `Inst::IntMod`/`Inst::FloatMod`, and GLSL's
-        // helper prelude renders that operation without a callable definition.
-        || (f.name.as_str() == "__op_mod" && f.param_decls.iter().count() == 2)
+}
+
+/// The graph sees HIR call obligations before scalar operators are lowered away,
+/// so it needs the concrete argument types to distinguish a vector infix from a
+/// scalar MIR instruction.
+pub fn renders_inline_instance(
+    ws: &Workspace,
+    f: &Function,
+    inst: &Instance,
+    interner: &MonoInterner,
+) -> bool {
+    if GlslIntrinsics.lookup(f).is_some() {
+        return true;
+    }
+    if vec_op_symbol(f.name.as_str()).is_none() || f.param_decls.iter().count() != 2 {
+        return false;
+    }
+    let subst = inst.subst(ws, interner);
+    f.param_decls.iter().any(|param| {
+        matches!(
+            glsl_ty(ws, &subst, param.ty, f.name_span, "operator").ok(),
+            Some(GlslTy::Vec2 | GlslTy::Vec3 | GlslTy::Vec4 | GlslTy::Mat4)
+        ) || matches!(
+            ws.render(None, param.ty).as_str(),
+            "Vec2" | "Vec3" | "Vec4" | "Mat4"
+        )
+    })
+}
+
+/// A HIR arithmetic call that lowering removes into an `Inst::*` operation. It
+/// is a graph leaf, but it is not a GLSL helper/builtin population.
+pub fn is_lowered_native_operator(
+    ws: &Workspace,
+    f: &Function,
+    inst: &Instance,
+    interner: &MonoInterner,
+) -> bool {
+    if !matches!(
+        f.name.as_str(),
+        "__op_add" | "__op_sub" | "__op_mul" | "__op_div" | "__op_mod"
+    ) || f.param_decls.iter().count() != 2
+        || renders_inline_instance(ws, f, inst, interner)
+    {
+        return false;
+    }
+    let subst = inst.subst(ws, interner);
+    f.param_decls.iter().all(|param| {
+        matches!(
+            glsl_ty(ws, &subst, param.ty, f.name_span, "operator").ok(),
+            Some(GlslTy::Float | GlslTy::Int)
+        ) || matches!(ws.render(None, param.ty).as_str(), "float" | "int")
+    })
 }
 
 /// The GLSL infix operator symbol for a non-scalar `__op_*` (Vec operator) call.
@@ -2961,6 +3011,7 @@ struct StagePlan {
     /// property of this target and not of the bodies.
     uses_idiv: bool,
     uses_imod: bool,
+    dependencies: Vec<FuncRef>,
 }
 
 impl StagePlan {
@@ -2988,7 +3039,7 @@ impl StagePlan {
     /// dependency set. DECLARATIONS: a reload watches source files, and two
     /// instances of one generic helper share one.
     fn dependencies(&self) -> Vec<FuncRef> {
-        self.ir.declarations()
+        self.dependencies.clone()
     }
 }
 
@@ -3028,11 +3079,215 @@ fn plan_stage(
             }
         }
     }
-    Ok(StagePlan {
-        ir: ShaderStageIr { stage: ir_stage, entry, body: mf, order, bodies: reach.bodies },
-        uses_idiv,
-        uses_imod,
-    })
+    let ir = ShaderStageIr { stage: ir_stage, entry, body: mf, order, bodies: reach.bodies };
+    let dependencies = ir.declarations();
+    Ok(StagePlan { ir, uses_idiv, uses_imod, dependencies })
+}
+
+fn plan_stage_from_view(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    view: &ShaderStageView,
+    expected: Stage,
+) -> Result<StagePlan, CompilerError> {
+    let expected_ir = match expected {
+        Stage::Vertex => ShaderStage::Vertex,
+        Stage::Fragment => ShaderStage::Fragment,
+    };
+    if view.stage != expected_ir {
+        return Err(CompilerError::new_no_location(format!(
+            "shader graph/view stage mismatch: expected {expected_ir:?}, got {:?}",
+            view.stage
+        )));
+    }
+    if view.order.iter().any(|instance| instance == &view.entry)
+        || view.order.len() != view.helpers.len()
+        || view.order.iter().cloned().collect::<std::collections::BTreeSet<_>>() != view.helpers
+    {
+        return Err(CompilerError::new_no_location(
+            "shader graph/view helper order is not the retained helper population".to_string(),
+        ));
+    }
+    let mut expected_retained = view.helpers.clone();
+    expected_retained.insert(view.entry.clone());
+    if expected_retained != view.retained {
+        return Err(CompilerError::new_no_location(
+            "shader graph/view retained population is not entry plus helpers".to_string(),
+        ));
+    }
+
+    let entry = ShaderInstance::new(view.entry.clone());
+    let entry_f = &ws.module(entry.fref().module).functions[entry.fref().func];
+    let entry_body = lower_instance(ws, scx, &entry.inst).map_err(|e| {
+        err(
+            entry_f.name_span,
+            format!(
+                "shader profile: `{}` cannot lower for GLSL: {}",
+                entry_f.name, e.message
+            ),
+        )
+    })?;
+    let mut entry_callees = Vec::new();
+    profile_body(ws, entry_f, &entry_body, &mut entry_callees)?;
+
+    let mut allowed: HashSet<ShaderInstance> = HashSet::default();
+    allowed.insert(entry.clone());
+    allowed.extend(view.order.iter().cloned().map(ShaderInstance::new));
+    let mut discovered_builtins: HashSet<Instance> = HashSet::default();
+    let entry_calls = checked_view_callees(
+        ws,
+        &entry,
+        entry_callees,
+        &allowed,
+        scx.interner(),
+        &mut discovered_builtins,
+    )?;
+    let mut calls: HashMap<ShaderInstance, Vec<ShaderInstance>> = HashMap::default();
+    calls.insert(entry.clone(), entry_calls);
+    let mut bodies: HashMap<ShaderInstance, MirFunc> = HashMap::default();
+    for raw in &view.order {
+        let helper = ShaderInstance::new(raw.clone());
+        let f = &ws.module(helper.fref().module).functions[helper.fref().func];
+        let subst = helper.subst(ws, scx.interner());
+        check_tier0_signature_spec(ws, &subst, f)?;
+        let body = lower_instance(ws, scx, &helper.inst).map_err(|e| {
+            err(
+                f.name_span,
+                format!("shader profile: `{}` cannot lower for GLSL: {}", f.name, e.message),
+            )
+        })?;
+        let mut callees = Vec::new();
+        profile_body(ws, f, &body, &mut callees)?;
+        calls.insert(
+            helper.clone(),
+            checked_view_callees(
+                ws,
+                &helper,
+                callees,
+                &allowed,
+                scx.interner(),
+                &mut discovered_builtins,
+            )?,
+        );
+        bodies.insert(helper, body);
+    }
+    let expected_builtins: HashSet<_> = view.builtins.iter().cloned().collect();
+    if discovered_builtins != expected_builtins {
+        return Err(CompilerError::new_no_location(
+            "shader graph/view builtin population differs from lowered calls".to_string(),
+        ));
+    }
+    reject_population_cycles(ws, &calls)?;
+    reject_stage_violations(
+        ws,
+        expected,
+        bodies.values().chain(std::iter::once(&entry_body)),
+        entry_f.name_span,
+    )?;
+
+    let (mut uses_idiv, mut uses_imod) = (false, false);
+    for body in bodies.values().chain(std::iter::once(&entry_body)) {
+        for (_, inst) in body.insts.iter() {
+            match inst {
+                Inst::IntDiv(..) => uses_idiv = true,
+                Inst::IntMod(..) => uses_imod = true,
+                _ => {}
+            }
+        }
+    }
+    let order: Vec<ShaderInstance> = view.order.iter().cloned().map(ShaderInstance::new).collect();
+    let ir_stage = match expected {
+        Stage::Vertex => IrStage::Vertex,
+        Stage::Fragment => IrStage::Fragment,
+    };
+    let ir = ShaderStageIr { stage: ir_stage, entry, body: entry_body, order, bodies };
+    if ir.declarations() != view.dependencies {
+        return Err(CompilerError::new_no_location(
+            "shader graph/view hot-reload dependencies differ from lowered order".to_string(),
+        ));
+    }
+    Ok(StagePlan { ir, uses_idiv, uses_imod, dependencies: view.dependencies.clone() })
+}
+
+fn checked_view_callees(
+    ws: &Workspace,
+    caller: &ShaderInstance,
+    callees: Vec<ShaderInstance>,
+    allowed: &HashSet<ShaderInstance>,
+    interner: &MonoInterner,
+    builtins: &mut HashSet<Instance>,
+) -> Result<Vec<ShaderInstance>, CompilerError> {
+    let caller_f = &ws.module(caller.fref().module).functions[caller.fref().func];
+    let mut retained = Vec::new();
+    for callee in callees {
+        let f = &ws.module(callee.fref().module).functions[callee.fref().func];
+        if renders_inline_instance(ws, f, &callee.inst, interner) {
+            builtins.insert(callee.inst);
+            continue;
+        }
+        if is_lowered_native_operator(ws, f, &callee.inst, interner) {
+            continue;
+        }
+        if f.is_extern || f.inline_body.is_some() {
+            return Err(err(
+                f.name_span,
+                format!(
+                    "shader profile: `{}` has no emittable body and no GLSL intrinsic mapping",
+                    f.name
+                ),
+            ));
+        }
+        if !allowed.contains(&callee) {
+            return Err(err(
+                caller_f.name_span,
+                format!(
+                    "shader graph/view omitted the concrete callee `{}` reached by `{}`",
+                    f.name, caller_f.name
+                ),
+            ));
+        }
+        retained.push(callee);
+    }
+    Ok(retained)
+}
+
+fn reject_population_cycles(
+    ws: &Workspace,
+    calls: &HashMap<ShaderInstance, Vec<ShaderInstance>>,
+) -> Result<(), CompilerError> {
+    fn visit(
+        ws: &Workspace,
+        node: &ShaderInstance,
+        calls: &HashMap<ShaderInstance, Vec<ShaderInstance>>,
+        active: &mut HashSet<ShaderInstance>,
+        done: &mut HashSet<ShaderInstance>,
+    ) -> Result<(), CompilerError> {
+        if active.contains(node) {
+            let f = &ws.module(node.fref().module).functions[node.fref().func];
+            return Err(err(
+                f.name_span,
+                format!("shader profile: recursion through `{}` is not allowed on GLSL", f.name),
+            ));
+        }
+        if !done.insert(node.clone()) {
+            return Ok(());
+        }
+        active.insert(node.clone());
+        if let Some(callees) = calls.get(node) {
+            for callee in callees {
+                visit(ws, callee, calls, active, done)?;
+            }
+        }
+        active.remove(node);
+        Ok(())
+    }
+
+    let mut active = HashSet::default();
+    let mut done = HashSet::default();
+    for node in calls.keys() {
+        visit(ws, node, calls, &mut active, &mut done)?;
+    }
+    Ok(())
 }
 
 /// **The one validated plan for a single-entry (A1) shader program.**
@@ -3065,6 +3320,23 @@ fn plan_shader_entry(
     scx: &ScalarCtx,
     fref: FuncRef,
 ) -> Result<EntryPlan, CompilerError> {
+    plan_shader_entry_inner(ws, scx, fref, None)
+}
+
+fn plan_shader_entry_from_view(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    view: &ShaderStageView,
+) -> Result<EntryPlan, CompilerError> {
+    plan_shader_entry_inner(ws, scx, view.entry.func, Some(view))
+}
+
+fn plan_shader_entry_inner(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    fref: FuncRef,
+    stage_view: Option<&ShaderStageView>,
+) -> Result<EntryPlan, CompilerError> {
     let f = &ws.module(fref.module).functions[fref.func];
     match shader_stage(f) {
         Some("fragment") => {}
@@ -3080,7 +3352,10 @@ fn plan_shader_entry(
     // and is not a tier-0 leaf (asking the library check of an entry rejected
     // 1,539 real shaders).
     let class = classify_entry(ws, f)?;
-    let stage = plan_stage(ws, scx, fref, Stage::Fragment)?;
+    let stage = match stage_view {
+        Some(view) => plan_stage_from_view(ws, scx, view, Stage::Fragment)?,
+        None => plan_stage(ws, scx, fref, Stage::Fragment)?,
+    };
     let interface = ShaderInterfacePlan {
         stages: vec![IrStage::Fragment],
         uniform_groups: class
@@ -3129,6 +3404,24 @@ pub fn check_entry_profile(ws: &Workspace, fref: FuncRef) -> Result<(), Compiler
     plan_shader_entry(ws, &scx, fref).map(|_| ())
 }
 
+/// Validate one shader entry against the graph-owned concrete population.
+pub fn check_entry_profile_with_view(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    view: &ShaderProgramView,
+) -> Result<(), CompilerError> {
+    let stage = view
+        .stages
+        .iter()
+        .find(|stage| stage.stage == ShaderStage::Fragment)
+        .ok_or_else(|| {
+            CompilerError::new_no_location(
+                "shader graph/view has no fragment stage for a single-entry shader".to_string(),
+            )
+        })?;
+    plan_shader_entry_from_view(ws, scx, stage).map(|_| ())
+}
+
 pub fn emit_shader_entry_with_dependencies(
     ws: &Workspace,
     mid: ModuleId,
@@ -3138,6 +3431,34 @@ pub fn emit_shader_entry_with_dependencies(
     let scx = ScalarCtx::new_values_first_class(ws);
     let fref = resolve_root(ws, mid, root)?;
     let plan = plan_shader_entry(ws, &scx, fref)?;
+    render_shader_entry(ws, scx.interner(), &plan, profile)
+}
+
+/// Emit a single-entry program from the graph-owned population. The caller's
+/// `ScalarCtx` must share the graph interner; the view supplies the concrete
+/// entry and helper order, while this backend supplies only MIR delivery and
+/// GLSL rendering.
+pub fn emit_shader_entry_with_view(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    view: &ShaderProgramView,
+    profile: GlslProfile,
+) -> Result<ShaderEmission, CompilerError> {
+    if view.program.vert.is_some() {
+        return Err(CompilerError::new_no_location(
+            "shader graph/view pipeline passed to single-entry GLSL emission".to_string(),
+        ));
+    }
+    let stage = view
+        .stages
+        .iter()
+        .find(|stage| stage.stage == ShaderStage::Fragment)
+        .ok_or_else(|| {
+            CompilerError::new_no_location(
+                "shader graph/view has no fragment stage for a single-entry shader".to_string(),
+            )
+        })?;
+    let plan = plan_shader_entry_from_view(ws, scx, stage)?;
     render_shader_entry(ws, scx.interner(), &plan, profile)
 }
 
@@ -4143,6 +4464,48 @@ fn plan_shader_pipeline(
     vfref: FuncRef,
     ffref: FuncRef,
 ) -> Result<PipelinePlan, CompilerError> {
+    plan_shader_pipeline_inner(ws, scx, vfref, ffref, None)
+}
+
+fn plan_shader_pipeline_from_view(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    view: &ShaderProgramView,
+) -> Result<PipelinePlan, CompilerError> {
+    let vertex = view
+        .stages
+        .iter()
+        .find(|stage| stage.stage == ShaderStage::Vertex)
+        .ok_or_else(|| {
+            CompilerError::new_no_location(
+                "shader graph/view has no vertex stage for a pipeline".to_string(),
+            )
+        })?;
+    let fragment = view
+        .stages
+        .iter()
+        .find(|stage| stage.stage == ShaderStage::Fragment)
+        .ok_or_else(|| {
+            CompilerError::new_no_location(
+                "shader graph/view has no fragment stage for a pipeline".to_string(),
+            )
+        })?;
+    plan_shader_pipeline_inner(
+        ws,
+        scx,
+        vertex.entry.func,
+        fragment.entry.func,
+        Some((vertex, fragment)),
+    )
+}
+
+fn plan_shader_pipeline_inner(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    vfref: FuncRef,
+    ffref: FuncRef,
+    stage_views: Option<(&ShaderStageView, &ShaderStageView)>,
+) -> Result<PipelinePlan, CompilerError> {
     let vf = &ws.module(vfref.module).functions[vfref.func];
     let ff = &ws.module(ffref.module).functions[ffref.func];
     if shader_stage(vf) != Some("vertex") {
@@ -4262,8 +4625,14 @@ fn plan_shader_pipeline(
         vf.name_span,
     )?;
 
-    let vert = plan_stage(ws, scx, vfref, Stage::Vertex)?;
-    let frag = plan_stage(ws, scx, ffref, Stage::Fragment)?;
+    let vert = match stage_views {
+        Some((vertex, _)) => plan_stage_from_view(ws, scx, vertex, Stage::Vertex)?,
+        None => plan_stage(ws, scx, vfref, Stage::Vertex)?,
+    };
+    let frag = match stage_views {
+        Some((_, fragment)) => plan_stage_from_view(ws, scx, fragment, Stage::Fragment)?,
+        None => plan_stage(ws, scx, ffref, Stage::Fragment)?,
+    };
     reject_position_read(ws, &frag.ir.body, frag.ir.body.params[fshape.varyings_param], ff.name_span)?;
 
     Ok(PipelinePlan { vshape, fshape, vert, frag, interface, abi })
@@ -4284,6 +4653,20 @@ pub fn check_pipeline_profile(
     plan_shader_pipeline(ws, &scx, vfref, ffref).map(|_| ())
 }
 
+/// Validate one shader pipeline against the graph-owned concrete populations.
+pub fn check_pipeline_profile_with_view(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    view: &ShaderProgramView,
+) -> Result<(), CompilerError> {
+    if view.program.vert.is_none() {
+        return Err(CompilerError::new_no_location(
+            "shader graph/view single-entry program passed to pipeline GLSL validation".to_string(),
+        ));
+    }
+    plan_shader_pipeline_from_view(ws, scx, view).map(|_| ())
+}
+
 pub fn emit_shader_pipeline_with_dependencies(
     ws: &Workspace,
     mid: ModuleId,
@@ -4295,6 +4678,22 @@ pub fn emit_shader_pipeline_with_dependencies(
     let vfref = resolve_root(ws, mid, vert_root)?;
     let ffref = resolve_root(ws, mid, frag_root)?;
     let plan = plan_shader_pipeline(ws, &scx, vfref, ffref)?;
+    render_shader_pipeline(ws, scx.interner(), &plan, profile)
+}
+
+/// Emit a pipeline from the graph-owned stage populations in `view`.
+pub fn emit_shader_pipeline_with_view(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    view: &ShaderProgramView,
+    profile: GlslProfile,
+) -> Result<ShaderEmission, CompilerError> {
+    if view.program.vert.is_none() {
+        return Err(CompilerError::new_no_location(
+            "shader graph/view single-entry program passed to pipeline GLSL emission".to_string(),
+        ));
+    }
+    let plan = plan_shader_pipeline_from_view(ws, scx, view)?;
     render_shader_pipeline(ws, scx.interner(), &plan, profile)
 }
 

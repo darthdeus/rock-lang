@@ -24,7 +24,7 @@ pub mod mir_emit;
 // the backends (`skull-graph`) so the JS and GLSL emitters can realize the same
 // graph the luajit driver does; consumers name it the same way either side of
 // that move.
-pub use skull_graph::{artifact, concrete_body, expr_subtree, instance_graph, target_projection};
+pub use skull_graph::{artifact, concrete_body, expr_subtree, instance_graph, shader, target_projection};
 
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
