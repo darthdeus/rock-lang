@@ -5,11 +5,14 @@ edition = "2024"
 
 [dependencies]
 bone-semantic = { path = "../bone-semantic" }
+comfy-la-arena = { workspace = true }
 skull-mir = { path = "../skull-mir" }
 skull-parser = { path = "../skull-parser" }
 ustr = { workspace = true }
 
 [dev-dependencies]
+naga = { version = "27", features = ["wgsl-in"] }
+rock-host = { path = "../rock-host" }
 skull-codegen-glsl = { path = "../skull-codegen-glsl" }
 
 [lints]

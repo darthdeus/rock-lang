@@ -1,0 +1,63 @@
+struct FullscreenVertexIn {
+  @location(0) position: vec2<f32>,
+  @location(1) uv: vec2<f32>,
+}
+
+struct FullscreenVertexOut {
+  @builtin(position) position: vec4<f32>,
+  @location(0) uv: vec2<f32>,
+}
+
+struct TonemapU {
+  exposure: f32,
+  bloom_intensity: f32,
+  bloom_uv: vec2<f32>,
+  bloom_uv_lo: vec2<f32>,
+  bloom_uv_hi: vec2<f32>,
+}
+
+@group(0) @binding(0) var<uniform> u_TonemapU: TonemapU;
+
+@group(0) @binding(1) var tex_scene_tex: texture_2d<f32>;
+@group(0) @binding(2) var samp_scene_tex: sampler;
+@group(0) @binding(3) var tex_bloom_tex: texture_2d<f32>;
+@group(0) @binding(4) var samp_bloom_tex: sampler;
+
+fn aces_film_Vec3_ret_Vec3(x: vec3<f32>) -> vec3<f32> {
+  var a: f32 = 0.0;
+  var b: f32 = 0.0;
+  var c: f32 = 0.0;
+  var d: f32 = 0.0;
+  var e: f32 = 0.0;
+  a = 2.51;
+  b = 0.03;
+  c = 2.43;
+  d = 0.59;
+  e = 0.14;
+  return clamp(((x * ((a * x) + b)) / ((x * ((c * x) + d)) + e)), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+fn tonemap_frag_TonemapTex_TonemapU_Vec2_ret_Vec4(uv: vec2<f32>) -> vec4<f32> {
+  var scene_pixel: vec4<f32> = vec4<f32>(0.0);
+  var bloom_pixel: vec4<f32> = vec4<f32>(0.0);
+  var combined: vec3<f32> = vec3<f32>(0.0);
+  scene_pixel = textureSample(tex_scene_tex, samp_scene_tex, uv);
+  bloom_pixel = textureSample(tex_bloom_tex, samp_bloom_tex, clamp((uv * u_TonemapU.bloom_uv), u_TonemapU.bloom_uv_lo, u_TonemapU.bloom_uv_hi));
+  combined = (vec3<f32>(scene_pixel.x, scene_pixel.y, scene_pixel.z) + (vec3<f32>(bloom_pixel.x, bloom_pixel.y, bloom_pixel.z) * u_TonemapU.bloom_intensity));
+  combined = (combined * u_TonemapU.exposure);
+  combined = aces_film_Vec3_ret_Vec3(combined);
+  return vec4<f32>(combined, scene_pixel.w);
+}
+
+@vertex
+fn fullscreen_vertex(input: FullscreenVertexIn) -> FullscreenVertexOut {
+  var output: FullscreenVertexOut;
+  output.position = vec4<f32>(input.position, 0.0, 1.0);
+  output.uv = input.uv;
+  return output;
+}
+
+@fragment
+fn fragment_main(input: FullscreenVertexOut) -> @location(0) vec4<f32> {
+  return tonemap_frag_TonemapTex_TonemapU_Vec2_ret_Vec4(input.uv);
+}

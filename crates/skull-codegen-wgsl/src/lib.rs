@@ -8,12 +8,20 @@
 //! slot remains the order published by `@textures`.
 
 use bone_semantic::prelude::Span;
+use bone_semantic::{
+    hir::{BuiltinTy, Function, TyId, TypeCtor, TypeExpr},
+    inference::Workspace,
+};
+use comfy_la_arena::Idx;
 use skull_mir::gpu_layout::{SamplerKind, WireKind};
+use skull_mir::mir::{Inst, Lit, MirFunc, Term};
 use skull_mir::shader_ir::{
-    FragmentOutput, LogicalTextureGroup, LogicalUniformGroup, ShaderInterfacePlan, ShaderStage,
-    UniformRole,
+    FragmentOutput, LogicalTextureGroup, LogicalUniformGroup, ShaderIR, ShaderInstance,
+    ShaderInterfacePlan, ShaderStage, ShaderStageIr, UniformRole,
 };
 use skull_parser::CompilerError;
+use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use ustr::Ustr;
 
 pub const WGSL_BIND_GROUP: u32 = 0;
@@ -541,5 +549,1134 @@ pub fn texture_type(kind: SamplerKind) -> &'static str {
     match kind {
         SamplerKind::Float => "texture_2d<f32>",
         SamplerKind::Int => "texture_2d<i32>",
+    }
+}
+
+/// A WGSL module emitted from one compiler-owned fullscreen fragment stage.
+#[derive(Clone)]
+pub struct WgslShaderEmission {
+    pub source: String,
+    pub interface: ShaderInterfacePlan,
+    pub abi: WgslAbiPlan,
+    pub ir: ShaderIR,
+}
+
+/// Emit a compiler-owned fullscreen module directly from neutral MIR.
+///
+/// `Workspace` supplies neutral declaration names and type metadata for MIR
+/// calls. It does not participate in ABI projection: callers must provide the
+/// `WgslAbiPlan` already derived from `ShaderInterfacePlan`.
+pub fn emit_fullscreen_shader(
+    ws: &Workspace,
+    ir: &ShaderIR,
+    iface: &ShaderInterfacePlan,
+    abi: &WgslAbiPlan,
+    span: Span,
+) -> Result<WgslShaderEmission, CompilerError> {
+    abi.validate(iface, span)?;
+    validate_ir_shape(ir, span)?;
+    let stage = &ir.stages[0];
+    let entry_fn = function_for_instance(ws, &stage.entry);
+    let entry_roles = entry_param_roles(ws, entry_fn, &stage.body, iface, abi, span)?;
+    validate_known_bodies(stage, span)?;
+
+    let mut source = String::new();
+    emit_fullscreen_types(&mut source, abi);
+    emit_uniforms(&mut source, abi);
+    emit_textures(&mut source, abi);
+
+    for instance in &stage.order {
+        let body = stage.bodies.get(instance).ok_or_else(|| {
+            err(
+                span,
+                format!(
+                    "WGSL IR order names `{}` without a lowered body",
+                    instance.symbol(ws)
+                ),
+            )
+        })?;
+        let f = function_for_instance(ws, instance);
+        let emitter = FunctionEmitter::new(ws, stage, instance, body, abi, HashMap::new(), span)?;
+        source.push_str(&emitter.emit_function(f, false)?);
+    }
+
+    let emitter =
+        FunctionEmitter::new(ws, stage, &stage.entry, &stage.body, abi, entry_roles, span)?;
+    source.push_str(&emitter.emit_function(entry_fn, true)?);
+    emit_fullscreen_entries(&mut source, abi, stage.entry.symbol(ws));
+
+    Ok(WgslShaderEmission {
+        source,
+        interface: iface.clone(),
+        abi: abi.clone(),
+        ir: ir.clone(),
+    })
+}
+
+fn validate_ir_shape(ir: &ShaderIR, span: Span) -> Result<(), CompilerError> {
+    if ir.stages.len() != 1 || ir.stages[0].stage != ShaderStage::Fragment {
+        return Err(err(
+            span,
+            "WGSL fullscreen emission requires exactly one fragment IR stage; explicit vertex pipelines are not supported yet",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_known_bodies(stage: &ShaderStageIr, span: Span) -> Result<(), CompilerError> {
+    let order: HashSet<ShaderInstance> = stage.order.iter().cloned().collect();
+    if order.len() != stage.order.len() || order.len() != stage.bodies.len() {
+        return Err(err(
+            span,
+            "WGSL IR helper order and body population disagree",
+        ));
+    }
+    if stage
+        .bodies
+        .keys()
+        .any(|instance| !order.contains(instance))
+    {
+        return Err(err(
+            span,
+            "WGSL IR contains a helper body outside its emission order",
+        ));
+    }
+    Ok(())
+}
+
+fn emit_fullscreen_types(out: &mut String, abi: &WgslAbiPlan) {
+    let vertex = abi.fullscreen_vertex;
+    let fragment = abi.fragment;
+    writeln!(out, "struct FullscreenVertexIn {{").unwrap();
+    writeln!(
+        out,
+        "  @location({}) position: vec2<f32>,",
+        vertex.position_location
+    )
+    .unwrap();
+    writeln!(out, "  @location({}) uv: vec2<f32>,", vertex.uv_location).unwrap();
+    out.push_str("}\n\nstruct FullscreenVertexOut {\n");
+    writeln!(out, "  @builtin(position) position: vec4<f32>,").unwrap();
+    writeln!(
+        out,
+        "  @location({}) uv: vec2<f32>,",
+        vertex.varying_location
+    )
+    .unwrap();
+    out.push_str("}\n\n");
+    let _ = fragment;
+}
+
+fn emit_uniforms(out: &mut String, abi: &WgslAbiPlan) {
+    for block in &abi.uniform_blocks {
+        writeln!(out, "struct {} {{", block.struct_name).unwrap();
+        for member in &block.members {
+            writeln!(
+                out,
+                "  {}: {},",
+                member.name,
+                wgsl_type(member.kind).unwrap()
+            )
+            .unwrap();
+        }
+        out.push_str("}\n\n");
+        writeln!(
+            out,
+            "@group({}) @binding({}) var<uniform> u_{}: {};",
+            abi.bind_group, block.binding, block.struct_name, block.struct_name
+        )
+        .unwrap();
+    }
+    if !abi.uniform_blocks.is_empty() {
+        out.push('\n');
+    }
+}
+
+fn emit_textures(out: &mut String, abi: &WgslAbiPlan) {
+    for texture in &abi.textures {
+        writeln!(
+            out,
+            "@group({}) @binding({}) var tex_{}: {};",
+            abi.bind_group,
+            texture.texture_binding,
+            texture.name,
+            texture_type(texture.kind)
+        )
+        .unwrap();
+        writeln!(
+            out,
+            "@group({}) @binding({}) var samp_{}: sampler;",
+            abi.bind_group, texture.sampler_binding, texture.name
+        )
+        .unwrap();
+    }
+    if !abi.textures.is_empty() {
+        out.push('\n');
+    }
+}
+
+fn emit_fullscreen_entries(out: &mut String, abi: &WgslAbiPlan, entry: String) {
+    let vertex = abi.fullscreen_vertex;
+    let fragment = abi.fragment;
+    out.push_str(
+        "@vertex\nfn fullscreen_vertex(input: FullscreenVertexIn) -> FullscreenVertexOut {\n",
+    );
+    out.push_str("  var output: FullscreenVertexOut;\n");
+    out.push_str("  output.position = vec4<f32>(input.position, 0.0, 1.0);\n");
+    out.push_str("  output.uv = input.uv;\n");
+    out.push_str("  return output;\n}\n\n");
+    writeln!(
+        out,
+        "@fragment\nfn fragment_main(input: FullscreenVertexOut) -> @location({}) {} {{",
+        fragment.output_location,
+        wgsl_type(fragment.output).unwrap()
+    )
+    .unwrap();
+    writeln!(out, "  return {}(input.uv);", entry).unwrap();
+    out.push_str("}\n");
+    let _ = vertex;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ValueKind {
+    F32,
+    I32,
+    Bool,
+    Vec2,
+    Vec3,
+    Vec4,
+    Mat4,
+    Sampler(SamplerKind),
+}
+
+impl ValueKind {
+    fn wire(self) -> Option<WireKind> {
+        match self {
+            Self::F32 => Some(WireKind::F32),
+            Self::I32 => Some(WireKind::I32),
+            Self::Bool => None,
+            Self::Vec2 => Some(WireKind::F32x2),
+            Self::Vec3 => Some(WireKind::F32x3),
+            Self::Vec4 => Some(WireKind::F32x4),
+            Self::Mat4 => Some(WireKind::Mat4),
+            Self::Sampler(_) => None,
+        }
+    }
+
+    fn wgsl(self) -> Option<&'static str> {
+        self.wire().and_then(wgsl_type)
+    }
+
+    fn components(self) -> usize {
+        match self {
+            Self::F32 | Self::I32 | Self::Bool => 1,
+            Self::Vec2 => 2,
+            Self::Vec3 => 3,
+            Self::Vec4 => 4,
+            Self::Mat4 | Self::Sampler(_) => 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ParamRole {
+    Texture,
+    Uniform(UniformRole),
+    TexCoord,
+}
+
+fn function_for_instance<'a>(ws: &'a Workspace, instance: &ShaderInstance) -> &'a Function {
+    &ws.module(instance.fref.module).functions[instance.fref.func]
+}
+
+fn type_expr(ws: &Workspace, ty: TyId) -> Option<TypeExpr> {
+    match ty {
+        TyId::Static(module, index) => Some(ws.module(module).ty_arena[index]),
+        TyId::Local(_) => None,
+    }
+}
+
+fn nominal_name(ws: &Workspace, ty: TyId) -> Option<Ustr> {
+    match type_expr(ws, ty)? {
+        TypeExpr::App {
+            ctor: TypeCtor::Nominal(name),
+            ..
+        } => Some(name),
+        _ => None,
+    }
+}
+
+fn value_kind_for_type(ws: &Workspace, ty: TyId) -> Option<ValueKind> {
+    match type_expr(ws, ty)? {
+        TypeExpr::Builtin(BuiltinTy::Float) => Some(ValueKind::F32),
+        TypeExpr::Builtin(BuiltinTy::Int) => Some(ValueKind::I32),
+        TypeExpr::Builtin(BuiltinTy::Bool) => Some(ValueKind::Bool),
+        TypeExpr::App {
+            ctor: TypeCtor::Nominal(name),
+            ..
+        } => match name.as_str() {
+            "Vec2" => Some(ValueKind::Vec2),
+            "Vec3" => Some(ValueKind::Vec3),
+            "Vec4" => Some(ValueKind::Vec4),
+            "Mat4" => Some(ValueKind::Mat4),
+            "Sampler2D" => Some(ValueKind::Sampler(SamplerKind::Float)),
+            "ISampler2D" => Some(ValueKind::Sampler(SamplerKind::Int)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn wire_value_kind(kind: WireKind) -> Option<ValueKind> {
+    match kind {
+        WireKind::F32 => Some(ValueKind::F32),
+        WireKind::F32x2 => Some(ValueKind::Vec2),
+        WireKind::F32x3 => Some(ValueKind::Vec3),
+        WireKind::F32x4 => Some(ValueKind::Vec4),
+        WireKind::I32 => Some(ValueKind::I32),
+        WireKind::Mat4 => Some(ValueKind::Mat4),
+        WireKind::Bool32 => None,
+    }
+}
+
+fn has_anno(function: &Function, param: usize, name: &str) -> bool {
+    function.param_decls[param]
+        .annotations
+        .iter()
+        .any(|annotation| annotation.name.name.as_str() == name)
+}
+
+fn entry_param_roles(
+    ws: &Workspace,
+    function: &Function,
+    body: &MirFunc,
+    iface: &ShaderInterfacePlan,
+    abi: &WgslAbiPlan,
+    span: Span,
+) -> Result<HashMap<Idx<skull_mir::mir::Cell>, ParamRole>, CompilerError> {
+    if function.param_decls.len() != body.params.len() {
+        return Err(err(
+            span,
+            "WGSL entry declaration and IR parameter populations disagree",
+        ));
+    }
+    let mut roles = HashMap::new();
+    let mut uv_count = 0;
+    for (index, cell) in body.params.iter().enumerate() {
+        let param = &function.param_decls[index];
+        let role = if has_anno(function, index, "textures") {
+            let name = nominal_name(ws, param.ty).ok_or_else(|| {
+                err(
+                    param_span(function, index),
+                    "WGSL texture parameter is not a named group",
+                )
+            })?;
+            let group_name = iface.textures.as_ref().and_then(|group| group.struct_name);
+            if group_name != Some(name) {
+                return Err(err(
+                    param_span(function, index),
+                    format!(
+                        "WGSL texture parameter `{}` is absent from the interface plan",
+                        param.name
+                    ),
+                ));
+            }
+            ParamRole::Texture
+        } else if has_anno(function, index, "engine") {
+            check_uniform_param(
+                ws,
+                param.ty,
+                UniformRole::Engine,
+                iface,
+                param_span(function, index),
+            )?;
+            ParamRole::Uniform(UniformRole::Engine)
+        } else if has_anno(function, index, "uniform") {
+            check_uniform_param(
+                ws,
+                param.ty,
+                UniformRole::Stage(ShaderStage::Fragment),
+                iface,
+                param_span(function, index),
+            )?;
+            ParamRole::Uniform(UniformRole::Stage(ShaderStage::Fragment))
+        } else if value_kind_for_type(ws, param.ty) == Some(ValueKind::Vec2) {
+            uv_count += 1;
+            ParamRole::TexCoord
+        } else {
+            return Err(err(
+                param_span(function, index),
+                format!(
+                    "WGSL fullscreen parameter `{}` is not a texture group, uniform group, or Vec2 UV",
+                    param.name
+                ),
+            ));
+        };
+        roles.insert(*cell, role);
+    }
+    if uv_count != 1 {
+        return Err(err(
+            span,
+            format!("WGSL fullscreen entry has {uv_count} UV parameters; exactly one is required"),
+        ));
+    }
+    let _ = abi;
+    Ok(roles)
+}
+
+fn param_span(function: &Function, _index: usize) -> Span {
+    function.name_span
+}
+
+fn check_uniform_param(
+    ws: &Workspace,
+    ty: TyId,
+    role: UniformRole,
+    iface: &ShaderInterfacePlan,
+    span: Span,
+) -> Result<(), CompilerError> {
+    let name = nominal_name(ws, ty)
+        .ok_or_else(|| err(span, "WGSL uniform parameter is not a named group"))?;
+    let Some(group) = iface.uniform_group(role) else {
+        return Err(err(
+            span,
+            format!("WGSL uniform group `{name}` is absent from the interface plan"),
+        ));
+    };
+    if group.struct_name != name {
+        return Err(err(
+            span,
+            format!(
+                "WGSL uniform parameter `{name}` does not match interface group `{}`",
+                group.struct_name
+            ),
+        ));
+    }
+    Ok(())
+}
+
+struct FunctionEmitter<'a> {
+    ws: &'a Workspace,
+    stage: &'a ShaderStageIr,
+    instance: &'a ShaderInstance,
+    body: &'a MirFunc,
+    abi: &'a WgslAbiPlan,
+    param_roles: HashMap<Idx<skull_mir::mir::Cell>, ParamRole>,
+    cell_names: HashMap<Idx<skull_mir::mir::Cell>, String>,
+    cell_kinds: HashMap<Idx<skull_mir::mir::Cell>, ValueKind>,
+    span: Span,
+}
+
+impl<'a> FunctionEmitter<'a> {
+    fn new(
+        ws: &'a Workspace,
+        stage: &'a ShaderStageIr,
+        instance: &'a ShaderInstance,
+        body: &'a MirFunc,
+        abi: &'a WgslAbiPlan,
+        param_roles: HashMap<Idx<skull_mir::mir::Cell>, ParamRole>,
+        span: Span,
+    ) -> Result<Self, CompilerError> {
+        let mut cell_names = HashMap::new();
+        let mut cell_kinds = HashMap::new();
+        for (cell, data) in body.cells.iter() {
+            cell_names.insert(
+                cell,
+                data.name.map_or_else(
+                    || format!("cell_{}", cell.into_raw().into_u32()),
+                    |name| name.to_string(),
+                ),
+            );
+            if let Some(ty) = data.ty.and_then(|ty| value_kind_for_type(ws, ty)) {
+                cell_kinds.insert(cell, ty);
+            }
+        }
+        let mut emitter = Self {
+            ws,
+            stage,
+            instance,
+            body,
+            abi,
+            param_roles,
+            cell_names,
+            cell_kinds,
+            span,
+        };
+        emitter.infer_local_kinds()?;
+        Ok(emitter)
+    }
+
+    fn infer_local_kinds(&mut self) -> Result<(), CompilerError> {
+        for (_, block) in self.body.blocks.iter() {
+            for iid in &block.insts {
+                if let Inst::Store { cell, value } = self.body.insts[*iid] {
+                    let kind = self.value_kind(value)?;
+                    if let Some(old) = self.cell_kinds.insert(cell, kind) {
+                        if old != kind {
+                            return Err(err(
+                                self.span,
+                                format!("WGSL cell `{}` changes type", self.cell_names[&cell]),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_function(self, function: &Function, entry: bool) -> Result<String, CompilerError> {
+        if self.body.blocks.len() != 1 {
+            return Err(err(
+                self.span,
+                format!(
+                    "WGSL function `{}` uses control flow outside the admitted straight-line slice",
+                    function.name
+                ),
+            ));
+        }
+        let block = &self.body.blocks[self.body.entry];
+        let Term::Return(values) = &block.term else {
+            return Err(err(
+                self.span,
+                format!("WGSL function `{}` does not end in a return", function.name),
+            ));
+        };
+        if values.len() != 1 {
+            return Err(err(
+                self.span,
+                format!("WGSL function `{}` has a multi-value return", function.name),
+            ));
+        }
+        let return_kind = self.value_kind(values[0])?;
+        let return_ty = return_kind.wgsl().ok_or_else(|| {
+            err(
+                self.span,
+                format!(
+                    "WGSL function `{}` returns an unsupported value",
+                    function.name
+                ),
+            )
+        })?;
+        let name = if entry {
+            self.instance.symbol(self.ws)
+        } else {
+            self.instance.symbol(self.ws)
+        };
+        let param = if entry {
+            "uv: vec2<f32>".to_string()
+        } else {
+            self.body
+                .params
+                .iter()
+                .map(|cell| {
+                    let kind = self.cell_kinds.get(cell).copied().ok_or_else(|| {
+                        err(
+                            self.span,
+                            format!(
+                                "WGSL parameter `{}` has no neutral type",
+                                self.cell_names[cell]
+                            ),
+                        )
+                    })?;
+                    let ty = kind.wgsl().ok_or_else(|| {
+                        err(
+                            self.span,
+                            format!(
+                                "WGSL parameter `{}` is not a value parameter",
+                                self.cell_names[cell]
+                            ),
+                        )
+                    })?;
+                    Ok(format!("{}: {}", self.cell_names[cell], ty))
+                })
+                .collect::<Result<Vec<_>, CompilerError>>()?
+                .join(", ")
+        };
+
+        let mut out = String::new();
+        writeln!(out, "fn {}({}) -> {} {{", name, param, return_ty).unwrap();
+        let parameters: HashSet<_> = self.body.params.iter().copied().collect();
+        for (cell, _) in self.body.cells.iter() {
+            let Some(kind) = self.cell_kinds.get(&cell).copied() else {
+                continue;
+            };
+            if parameters.contains(&cell) || !self.is_stored_cell(cell) {
+                continue;
+            }
+            writeln!(
+                out,
+                "  var {}: {} = {};",
+                self.cell_names[&cell],
+                kind.wgsl().unwrap(),
+                zero_value(kind)
+            )
+            .unwrap();
+        }
+        for iid in &block.insts {
+            match &self.body.insts[*iid] {
+                Inst::Store { cell, value } => {
+                    let rhs = self.render_val(*value)?;
+                    writeln!(out, "  {} = {};", self.cell_names[cell], rhs).unwrap();
+                }
+                Inst::Call { func, args } => {
+                    let target = &self.ws.module(func.module).functions[func.func];
+                    if target.return_ty.is_none() {
+                        writeln!(out, "  {};", self.render_call(*iid, *func, args)?).unwrap();
+                    }
+                }
+                Inst::Const(_)
+                | Inst::Load(_)
+                | Inst::Field { .. }
+                | Inst::MakeValueStruct { .. }
+                | Inst::MaterializeValueStruct { .. }
+                | Inst::IntAdd(..)
+                | Inst::IntSub(..)
+                | Inst::IntMul(..)
+                | Inst::IntDiv(..)
+                | Inst::IntMod(..)
+                | Inst::FloatAdd(..)
+                | Inst::FloatSub(..)
+                | Inst::FloatMul(..)
+                | Inst::FloatDiv(..)
+                | Inst::FloatMod(..)
+                | Inst::IntLt(..)
+                | Inst::IntLeq(..)
+                | Inst::IntGt(..)
+                | Inst::IntGeq(..)
+                | Inst::FloatLt(..)
+                | Inst::FloatLeq(..)
+                | Inst::FloatGt(..)
+                | Inst::FloatGeq(..)
+                | Inst::Eq(..)
+                | Inst::NotEq(..)
+                | Inst::FloatToInt(_)
+                | Inst::IntToFloat(_)
+                | Inst::Neg(_)
+                | Inst::Not(_) => {}
+                other => {
+                    return Err(err(
+                        self.span,
+                        format!(
+                            "WGSL function `{}` reaches unsupported MIR operation `{}`",
+                            function.name,
+                            mir_kind(other)
+                        ),
+                    ));
+                }
+            }
+        }
+        writeln!(out, "  return {};", self.render_val(values[0])?).unwrap();
+        out.push_str("}\n\n");
+        Ok(out)
+    }
+
+    fn is_stored_cell(&self, cell: Idx<skull_mir::mir::Cell>) -> bool {
+        self.body.blocks.iter().any(|(_, block)| block.insts.iter().any(|iid| matches!(self.body.insts[*iid], Inst::Store { cell: stored, .. } if stored == cell)))
+    }
+
+    fn value_kind(&self, iid: Idx<skull_mir::mir::Inst>) -> Result<ValueKind, CompilerError> {
+        match &self.body.insts[iid] {
+            Inst::Const(Lit::Float(_)) => Ok(ValueKind::F32),
+            Inst::Const(Lit::Int(_)) => Ok(ValueKind::I32),
+            Inst::Const(Lit::Bool(_)) => Ok(ValueKind::Bool),
+            Inst::Const(Lit::Nil) | Inst::Const(Lit::Str(_)) => Err(err(
+                self.span,
+                "WGSL fullscreen emission does not support null or string literals",
+            )),
+            Inst::Load(cell) => self.cell_kinds.get(cell).copied().ok_or_else(|| {
+                err(
+                    self.span,
+                    format!(
+                        "WGSL load of `{}` has no neutral type",
+                        self.cell_names[cell]
+                    ),
+                )
+            }),
+            Inst::Field { base, field } => self.field_kind(*base, *field),
+            Inst::MakeValueStruct { name, .. } | Inst::MaterializeValueStruct { name, .. } => {
+                value_struct_kind(*name).ok_or_else(|| {
+                    err(
+                        self.span,
+                        format!("WGSL does not support value struct `{name}`"),
+                    )
+                })
+            }
+            Inst::Call { func, args } => self.call_kind(iid, *func, args),
+            Inst::IntAdd(..)
+            | Inst::IntSub(..)
+            | Inst::IntMul(..)
+            | Inst::IntDiv(..)
+            | Inst::IntMod(..) => Ok(ValueKind::I32),
+            Inst::FloatAdd(..)
+            | Inst::FloatSub(..)
+            | Inst::FloatMul(..)
+            | Inst::FloatDiv(..)
+            | Inst::FloatMod(..) => Ok(ValueKind::F32),
+            Inst::IntLt(..)
+            | Inst::IntLeq(..)
+            | Inst::IntGt(..)
+            | Inst::IntGeq(..)
+            | Inst::FloatLt(..)
+            | Inst::FloatLeq(..)
+            | Inst::FloatGt(..)
+            | Inst::FloatGeq(..)
+            | Inst::Eq(..)
+            | Inst::NotEq(..)
+            | Inst::Not(_) => Ok(ValueKind::Bool),
+            Inst::FloatToInt(_) => Ok(ValueKind::I32),
+            Inst::IntToFloat(_) => Ok(ValueKind::F32),
+            Inst::Neg(value) => self.value_kind(*value),
+            other => Err(err(
+                self.span,
+                format!(
+                    "WGSL reaches unsupported value operation `{}`",
+                    mir_kind(other)
+                ),
+            )),
+        }
+    }
+
+    fn field_kind(
+        &self,
+        base: Idx<skull_mir::mir::Inst>,
+        field: Ustr,
+    ) -> Result<ValueKind, CompilerError> {
+        if let Inst::Load(cell) = self.body.insts[base] {
+            match self.param_roles.get(&cell).copied() {
+                Some(ParamRole::Texture) => {
+                    let texture = self
+                        .abi
+                        .textures
+                        .iter()
+                        .find(|texture| texture.name == field)
+                        .ok_or_else(|| {
+                            err(
+                                self.span,
+                                format!("WGSL texture field `{field}` is absent from the ABI plan"),
+                            )
+                        })?;
+                    return Ok(ValueKind::Sampler(texture.kind));
+                }
+                Some(ParamRole::Uniform(role)) => {
+                    let block = self.abi.uniform_block(role).ok_or_else(|| {
+                        err(
+                            self.span,
+                            format!("WGSL uniform role for `{field}` is absent from the ABI plan"),
+                        )
+                    })?;
+                    let member = block
+                        .members
+                        .iter()
+                        .find(|member| member.name == field)
+                        .ok_or_else(|| {
+                            err(
+                                self.span,
+                                format!("WGSL uniform field `{field}` is absent from the ABI plan"),
+                            )
+                        })?;
+                    return wire_value_kind(member.kind).ok_or_else(|| {
+                        err(
+                            self.span,
+                            format!("WGSL uniform field `{field}` is not an emitted value"),
+                        )
+                    });
+                }
+                Some(ParamRole::TexCoord) | None => {}
+            }
+        }
+        match self.value_kind(base)? {
+            ValueKind::Vec2 | ValueKind::Vec3 | ValueKind::Vec4
+                if matches!(field.as_str(), "x" | "y" | "z" | "w") =>
+            {
+                Ok(ValueKind::F32)
+            }
+            _ => Err(err(
+                self.span,
+                format!("WGSL field `{field}` is not a supported fullscreen projection"),
+            )),
+        }
+    }
+
+    fn call_kind(
+        &self,
+        iid: Idx<skull_mir::mir::Inst>,
+        func: skull_mir::mir::FuncRef,
+        args: &[Idx<skull_mir::mir::Inst>],
+    ) -> Result<ValueKind, CompilerError> {
+        let function = &self.ws.module(func.module).functions[func.func];
+        match function.name.as_str() {
+            "texture" => Ok(ValueKind::Vec4),
+            "v" => {
+                let total: usize = args
+                    .iter()
+                    .map(|arg| self.value_kind(*arg).map(ValueKind::components))
+                    .try_fold(0usize, |sum, n| n.map(|n| sum + n))?;
+                match total {
+                    2 => Ok(ValueKind::Vec2),
+                    3 => Ok(ValueKind::Vec3),
+                    4 => Ok(ValueKind::Vec4),
+                    _ => Err(err(
+                        self.span,
+                        format!("WGSL v(...) has unsupported component count {total}"),
+                    )),
+                }
+            }
+            "clamp" | "floor" | "fract" | "max" | "min" | "abs" => self.value_kind(
+                args.first()
+                    .copied()
+                    .ok_or_else(|| err(self.span, "WGSL intrinsic call has no operand"))?,
+            ),
+            name if name.starts_with("__op_") => self.value_kind(
+                args.first()
+                    .copied()
+                    .ok_or_else(|| err(self.span, "WGSL operator call has no operand"))?,
+            ),
+            _ => {
+                let instance = self.resolve_callee(iid, func)?;
+                let called = self
+                    .stage
+                    .order
+                    .iter()
+                    .find(|candidate| **candidate == instance)
+                    .ok_or_else(|| {
+                        err(
+                            self.span,
+                            format!(
+                                "WGSL call to `{}` has no emitted helper body",
+                                function.name
+                            ),
+                        )
+                    })?;
+                let called_function = function_for_instance(self.ws, called);
+                called_function
+                    .return_ty
+                    .and_then(|ty| value_kind_for_type(self.ws, ty))
+                    .ok_or_else(|| {
+                        err(
+                            self.span,
+                            format!(
+                                "WGSL helper `{}` has no supported return type",
+                                called_function.name
+                            ),
+                        )
+                    })
+            }
+        }
+    }
+
+    fn resolve_callee(
+        &self,
+        iid: Idx<skull_mir::mir::Inst>,
+        func: skull_mir::mir::FuncRef,
+    ) -> Result<ShaderInstance, CompilerError> {
+        let function = &self.ws.module(func.module).functions[func.func];
+        let key = self
+            .body
+            .spec_bindings
+            .get(&iid)
+            .cloned()
+            .unwrap_or_default();
+        if let Some(instance) = self.stage.order.iter().find(|instance| {
+            instance.fref == func && (instance.key == key || function.generics.is_empty())
+        }) {
+            return Ok(instance.clone());
+        }
+        Err(err(
+            self.span,
+            format!(
+                "WGSL call to `{}` has no concrete emitted instance",
+                function.name
+            ),
+        ))
+    }
+
+    fn render_val(&self, iid: Idx<skull_mir::mir::Inst>) -> Result<String, CompilerError> {
+        match &self.body.insts[iid] {
+            Inst::Const(Lit::Float(value)) => Ok(format_float(*value)),
+            Inst::Const(Lit::Int(value)) => Ok(value.to_string()),
+            Inst::Const(Lit::Bool(value)) => Ok(value.to_string()),
+            Inst::Const(Lit::Nil) | Inst::Const(Lit::Str(_)) => Err(err(
+                self.span,
+                "WGSL fullscreen emission does not support null or string literals",
+            )),
+            Inst::Load(cell) => match self.param_roles.get(cell).copied() {
+                Some(ParamRole::TexCoord) => Ok("uv".to_string()),
+                Some(ParamRole::Texture) | Some(ParamRole::Uniform(_)) => Err(err(
+                    self.span,
+                    format!(
+                        "WGSL resource cell `{}` must be accessed through a field",
+                        self.cell_names[cell]
+                    ),
+                )),
+                None => Ok(self.cell_names[cell].clone()),
+            },
+            Inst::Field { base, field } => {
+                if let Inst::Load(cell) = self.body.insts[*base] {
+                    match self.param_roles.get(&cell).copied() {
+                        Some(ParamRole::Texture) => {
+                            self.abi.textures.iter().find(|texture| texture.name == *field).ok_or_else(|| err(self.span, format!("WGSL texture field `{field}` is absent from the ABI plan")))?;
+                            return Ok(format!("tex_{field}"));
+                        }
+                        Some(ParamRole::Uniform(role)) => {
+                            let block = self.abi.uniform_block(role).ok_or_else(|| err(self.span, format!("WGSL uniform role for `{field}` is absent from the ABI plan")))?;
+                            if !block.members.iter().any(|member| member.name == *field) {
+                                return Err(err(
+                                    self.span,
+                                    format!(
+                                        "WGSL uniform field `{field}` is absent from the ABI plan"
+                                    ),
+                                ));
+                            }
+                            return Ok(format!("u_{}.{}", block.struct_name, field));
+                        }
+                        Some(ParamRole::TexCoord) | None => {}
+                    }
+                }
+                Ok(format!("{}.{}", self.render_val(*base)?, field))
+            }
+            Inst::MakeValueStruct { name, fields }
+            | Inst::MaterializeValueStruct { name, fields } => {
+                let kind = value_struct_kind(*name).ok_or_else(|| {
+                    err(
+                        self.span,
+                        format!("WGSL does not support value struct `{name}`"),
+                    )
+                })?;
+                let args = fields
+                    .iter()
+                    .map(|(_, value)| self.render_val(*value))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(format!("{}({})", kind.wgsl().unwrap(), args.join(", ")))
+            }
+            Inst::Call { func, args } => self.render_call(iid, *func, args),
+            Inst::IntAdd(a, b) | Inst::FloatAdd(a, b) => self.binary(*a, "+", *b),
+            Inst::IntSub(a, b) | Inst::FloatSub(a, b) => self.binary(*a, "-", *b),
+            Inst::IntMul(a, b) | Inst::FloatMul(a, b) => self.binary(*a, "*", *b),
+            Inst::IntDiv(a, b) | Inst::FloatDiv(a, b) => self.binary(*a, "/", *b),
+            Inst::IntMod(a, b) | Inst::FloatMod(a, b) => self.binary(*a, "%", *b),
+            Inst::IntLt(a, b) | Inst::FloatLt(a, b) => self.binary(*a, "<", *b),
+            Inst::IntLeq(a, b) | Inst::FloatLeq(a, b) => self.binary(*a, "<=", *b),
+            Inst::IntGt(a, b) | Inst::FloatGt(a, b) => self.binary(*a, ">", *b),
+            Inst::IntGeq(a, b) | Inst::FloatGeq(a, b) => self.binary(*a, ">=", *b),
+            Inst::Eq(a, b) => self.binary(*a, "==", *b),
+            Inst::NotEq(a, b) => self.binary(*a, "!=", *b),
+            Inst::FloatToInt(value) => Ok(format!("i32({})", self.render_val(*value)?)),
+            Inst::IntToFloat(value) => Ok(format!("f32({})", self.render_val(*value)?)),
+            Inst::Neg(value) => Ok(format!("(-{})", self.render_val(*value)?)),
+            Inst::Not(value) => Ok(format!("(!{})", self.render_val(*value)?)),
+            other => Err(err(
+                self.span,
+                format!(
+                    "WGSL reaches unsupported value operation `{}`",
+                    mir_kind(other)
+                ),
+            )),
+        }
+    }
+
+    fn binary(
+        &self,
+        a: Idx<skull_mir::mir::Inst>,
+        op: &str,
+        b: Idx<skull_mir::mir::Inst>,
+    ) -> Result<String, CompilerError> {
+        Ok(format!(
+            "({} {} {})",
+            self.render_val(a)?,
+            op,
+            self.render_val(b)?
+        ))
+    }
+
+    fn render_call(
+        &self,
+        iid: Idx<skull_mir::mir::Inst>,
+        func: skull_mir::mir::FuncRef,
+        args: &[Idx<skull_mir::mir::Inst>],
+    ) -> Result<String, CompilerError> {
+        let function = &self.ws.module(func.module).functions[func.func];
+        let name = function.name.as_str();
+        match name {
+            "texture" => {
+                if args.len() != 2 {
+                    return Err(err(
+                        self.span,
+                        "WGSL texture intrinsic requires one logical sampler and one UV",
+                    ));
+                }
+                let texture = self.sampler_binding(args[0])?;
+                if texture.kind != SamplerKind::Float {
+                    return Err(err(
+                        self.span,
+                        "WGSL fullscreen emission does not yet admit integer texture sampling",
+                    ));
+                }
+                Ok(format!(
+                    "textureSample(tex_{0}, samp_{0}, {1})",
+                    texture.name,
+                    self.render_val(args[1])?
+                ))
+            }
+            "v" => {
+                let kind = self.call_kind(iid, func, args)?;
+                let rendered = args
+                    .iter()
+                    .map(|arg| self.render_val(*arg))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(format!("{}({})", kind.wgsl().unwrap(), rendered.join(", ")))
+            }
+            "clamp" | "floor" | "fract" | "max" | "min" | "abs" => {
+                let target = self.value_kind(
+                    args.first()
+                        .copied()
+                        .ok_or_else(|| err(self.span, "WGSL intrinsic call has no operand"))?,
+                )?;
+                let rendered = args
+                    .iter()
+                    .map(|arg| self.render_intrinsic_arg(*arg, target))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(format!("{}({})", name, rendered.join(", ")))
+            }
+            name if name.starts_with("__op_") => {
+                let op = match name {
+                    "__op_add" => "+",
+                    "__op_sub" => "-",
+                    "__op_mul" => "*",
+                    "__op_div" => "/",
+                    _ => {
+                        return Err(err(
+                            self.span,
+                            format!("WGSL operator `{name}` is not admitted"),
+                        ));
+                    }
+                };
+                if args.len() != 2 {
+                    return Err(err(
+                        self.span,
+                        format!("WGSL operator `{name}` requires two operands"),
+                    ));
+                }
+                self.binary(args[0], op, args[1])
+            }
+            _ => {
+                let instance = self.resolve_callee(iid, func)?;
+                let self_name = instance.symbol(self.ws);
+                let rendered = args
+                    .iter()
+                    .map(|arg| self.render_val(*arg))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(format!("{}({})", self_name, rendered.join(", ")))
+            }
+        }
+    }
+
+    fn render_intrinsic_arg(
+        &self,
+        arg: Idx<skull_mir::mir::Inst>,
+        target: ValueKind,
+    ) -> Result<String, CompilerError> {
+        let rendered = self.render_val(arg)?;
+        if target.components() > 1 && self.value_kind(arg)? == ValueKind::F32 {
+            Ok(format!("{}({})", target.wgsl().unwrap(), rendered))
+        } else {
+            Ok(rendered)
+        }
+    }
+
+    fn sampler_binding(
+        &self,
+        iid: Idx<skull_mir::mir::Inst>,
+    ) -> Result<&WgslTextureBinding, CompilerError> {
+        let Inst::Field { base, field } = &self.body.insts[iid] else {
+            return Err(err(
+                self.span,
+                "WGSL texture intrinsic did not receive a logical texture field",
+            ));
+        };
+        let Inst::Load(cell) = self.body.insts[*base] else {
+            return Err(err(
+                self.span,
+                "WGSL texture field base is not the compiler-owned texture group",
+            ));
+        };
+        if !matches!(self.param_roles.get(&cell), Some(ParamRole::Texture)) {
+            return Err(err(
+                self.span,
+                "WGSL texture field base is not the compiler-owned texture group",
+            ));
+        }
+        self.abi
+            .textures
+            .iter()
+            .find(|texture| texture.name == *field)
+            .ok_or_else(|| {
+                err(
+                    self.span,
+                    format!("WGSL texture slot `{field}` is absent from the ABI plan"),
+                )
+            })
+    }
+}
+
+fn value_struct_kind(name: Ustr) -> Option<ValueKind> {
+    match name.as_str() {
+        "Vec2" => Some(ValueKind::Vec2),
+        "Vec3" => Some(ValueKind::Vec3),
+        "Vec4" => Some(ValueKind::Vec4),
+        "Mat4" => Some(ValueKind::Mat4),
+        _ => None,
+    }
+}
+
+fn zero_value(kind: ValueKind) -> &'static str {
+    match kind {
+        ValueKind::F32 => "0.0",
+        ValueKind::I32 => "0",
+        ValueKind::Bool => "false",
+        ValueKind::Vec2 => "vec2<f32>(0.0)",
+        ValueKind::Vec3 => "vec3<f32>(0.0)",
+        ValueKind::Vec4 => "vec4<f32>(0.0)",
+        ValueKind::Mat4 => "mat4x4<f32>(0.0)",
+        ValueKind::Sampler(_) => "0.0",
+    }
+}
+
+fn format_float(value: f64) -> String {
+    let mut text = format!("{value}");
+    if !text.contains('.') && !text.contains('e') && !text.contains('E') {
+        text.push_str(".0");
+    }
+    text
+}
+
+fn mir_kind(inst: &Inst) -> &'static str {
+    match inst {
+        Inst::Global(_) => "global",
+        Inst::CallMulti { .. }
+        | Inst::CallValue { .. }
+        | Inst::CallValueMulti { .. }
+        | Inst::CallBoundMulti { .. } => "multi-value call",
+        Inst::MakeTuple(_) | Inst::MakeVec(_) | Inst::MakeVecColumns { .. } => "aggregate",
+        Inst::MakeStruct { .. } | Inst::MakeEnum { .. } | Inst::MakeEnumDyn { .. } => {
+            "heap aggregate"
+        }
+        Inst::Index { .. } | Inst::Len { .. } | Inst::VecCheckedIndex { .. } => {
+            "container operation"
+        }
+        Inst::StoreField { .. } | Inst::StoreIndex { .. } | Inst::StoreGlobal { .. } => "mutation",
+        Inst::Lambda { .. } | Inst::MakeEnv { .. } => "closure",
+        Inst::FfiNewArray { .. } | Inst::FfiViewCast { .. } => "FFI operation",
+        Inst::BitAnd(..)
+        | Inst::BitOr(..)
+        | Inst::BitXor(..)
+        | Inst::Shl(..)
+        | Inst::Shr(..)
+        | Inst::BitNot(_) => "bitwise operation",
+        Inst::CoroSetInner(_)
+        | Inst::CoroHook { .. }
+        | Inst::MapNext { .. }
+        | Inst::ArrayPush { .. } => "coroutine/iteration operation",
+        _ => "unsupported operation",
     }
 }
