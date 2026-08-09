@@ -15,7 +15,6 @@
 
 use crate::common::ws_with;
 
-use skull_mir::lower::ScalarCtx;
 
 /// THE ablation lock for this test binary. One mutex, not one per file: a
 /// per-file `static` serializes a file against itself and against nothing else.
@@ -40,9 +39,8 @@ impl Drop for ModeGuard {
 }
 
 fn emit_js(ws: &bone_semantic::inference::Workspace) -> Result<String, String> {
-    let scx = ScalarCtx::new(ws).with_target(bone_semantic::hir::FnBackend::Js);
     let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
-    skull_codegen_js::emit::emit_program(ws, &scx, mid)
+    skull_codegen_js::emit::emit_program(ws, mid)
         .map(|p| p.program)
         .map_err(|e| e.message)
 }

@@ -2494,11 +2494,29 @@ fn emit_ginit_with_nested(
 /// Unlike [`emit_with_closure`], a decorator-populated global read does NOT
 /// reject here -- the applications ARE emitted, so the registry is populated at
 /// module load exactly as on luajit.
+/// **THE JS lowering context, and there is one construction of it.**
+///
+/// Every JS entry point builds `scx` here rather than taking one from its
+/// caller. Six production sites used to construct their own -- three in
+/// `rock-cli::web`, three in `rock-cli::js_test` -- which is a seam where the
+/// TARGET can differ (a `ScalarCtx` without `with_target(Js)` plans a different
+/// ABI) and, once the JS artifact view lands, where the `MonoInterner` can
+/// differ too. An `Instance` is an identity only relative to its arena, so two
+/// arenas are two identities for one instance and every `Instance`-keyed
+/// structure here (`CalleeNames`, `JsEmitCache`, `spec_trees`) would silently
+/// mean different things per entry point.
+///
+/// The luajit driver already owns its own (`skull::mir_emit::emit_full_in`);
+/// this is that same rule for JS.
+fn js_scx(ws: &Workspace) -> skull_mir::lower::ScalarCtx {
+    skull_mir::lower::ScalarCtx::new(ws).with_target(bone_semantic::hir::FnBackend::Js)
+}
+
 pub fn emit_program(
     ws: &Workspace,
-    scx: &skull_mir::lower::ScalarCtx,
     user_mid: bone_semantic::prelude::ModuleId,
 ) -> Result<JsProgram, CompilerError> {
+    let scx = &js_scx(ws);
     // The program entry: a nullary `main` in the entry module (D3). Passed as the
     // one extra root; the module-load effects (deco applications, ginits) run
     // regardless of whether a `main` exists.
@@ -2514,9 +2532,9 @@ pub fn emit_program(
 
 pub fn emit_program_cached(
     ws: &Workspace,
-    scx: &skull_mir::lower::ScalarCtx,
     user_mid: bone_semantic::prelude::ModuleId,
 ) -> Result<(JsProgram, JsEmitCache), CompilerError> {
+    let scx = &js_scx(ws);
     let mut extra = Vec::new();
     let main_js_name = nullary_main(ws, user_mid).map(|fr| {
         let name = callee_js_name(ws, fr);
@@ -2548,10 +2566,9 @@ pub fn emit_program_cached(
 /// just the program string; the caller invokes each root by the JS name it gave.
 pub fn emit_program_with_roots(
     ws: &Workspace,
-    scx: &skull_mir::lower::ScalarCtx,
     roots: &[(FuncRef, String)],
 ) -> Result<String, CompilerError> {
-    emit_program_core(ws, scx, roots)
+    emit_program_core(ws, &js_scx(ws), roots)
 }
 
 /// The shared program assembly for [`emit_program`] / [`emit_program_with_roots`]:
@@ -2877,11 +2894,11 @@ impl JsReload {
 
 pub fn emit_overlay(
     ws: &Workspace,
-    scx: &skull_mir::lower::ScalarCtx,
     user_mid: bone_semantic::prelude::ModuleId,
     cache: &mut JsEmitCache,
     reinferred: &[(bone_semantic::prelude::ModuleId, bone_semantic::hir::BodyOwner)],
 ) -> Result<JsReload, CompilerError> {
+    let scx = &js_scx(ws);
     if reinferred
         .iter()
         .any(|(_, owner)| {

@@ -1,5 +1,4 @@
 use bone_semantic::hir::BodyOwner;
-use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::FuncRef;
 use crate::common::ws_with;
 
@@ -65,15 +64,12 @@ fn const_value_overlay_redefines_users_without_reinitializing_state() {
          @nomangle fn hot() -> int { WISP_COUNT }\n\
          fn main() { print(hot()) }\n",
     );
-    let before_scx = ScalarCtx::new(&before).with_target(bone_semantic::hir::FnBackend::Js);
-    let after_scx = ScalarCtx::new(&after).with_target(bone_semantic::hir::FnBackend::Js);
     let mid = function(&before, "main").module;
     let (program, mut cache) =
-        skull_codegen_js::emit::emit_program_cached(&before, &before_scx, mid).unwrap();
+        skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
     let (global_mid, global_id) = global(&after, "WISP_COUNT");
     let overlay = skull_codegen_js::emit::emit_overlay(
         &after,
-        &after_scx,
         mid,
         &mut cache,
         &[(global_mid, BodyOwner::Global(global_id))],
@@ -102,15 +98,12 @@ fn const_value_overlay_reinitializes_dependent_constants() {
          @nomangle fn hot() -> int { COUNT }\n\
          fn main() { print(hot()) }\n",
     );
-    let before_scx = ScalarCtx::new(&before).with_target(bone_semantic::hir::FnBackend::Js);
-    let after_scx = ScalarCtx::new(&after).with_target(bone_semantic::hir::FnBackend::Js);
     let mid = function(&before, "main").module;
     let (program, mut cache) =
-        skull_codegen_js::emit::emit_program_cached(&before, &before_scx, mid).unwrap();
+        skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
     let (global_mid, global_id) = global(&after, "BASE");
     let overlay = skull_codegen_js::emit::emit_overlay(
         &after,
-        &after_scx,
         mid,
         &mut cache,
         &[(global_mid, BodyOwner::Global(global_id))],
@@ -137,15 +130,12 @@ fn overlay_redefines_a_function_without_reinitializing_global_state() {
          @nomangle fn hot() -> int { 2 }\n\
          fn main() { print(hot()) }\n",
     );
-    let before_scx = ScalarCtx::new(&before).with_target(bone_semantic::hir::FnBackend::Js);
-    let after_scx = ScalarCtx::new(&after).with_target(bone_semantic::hir::FnBackend::Js);
     let mid = function(&before, "main").module;
     let (program, mut cache) =
-        skull_codegen_js::emit::emit_program_cached(&before, &before_scx, mid).unwrap();
+        skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
     let hot = function(&after, "hot");
     let overlay = skull_codegen_js::emit::emit_overlay(
         &after,
-        &after_scx,
         mid,
         &mut cache,
         &[(hot.module, BodyOwner::Function(hot.func))],
@@ -178,15 +168,11 @@ fn successive_overlays_accumulate_changed_function_definitions() {
          @nomangle fn second() -> int { 20 }\n\
          fn main() { print(first() + second()) }\n",
     );
-    let scx0 = ScalarCtx::new(&v0).with_target(bone_semantic::hir::FnBackend::Js);
-    let scx1 = ScalarCtx::new(&v1).with_target(bone_semantic::hir::FnBackend::Js);
-    let scx2 = ScalarCtx::new(&v2).with_target(bone_semantic::hir::FnBackend::Js);
     let mid = function(&v0, "main").module;
-    let (_, mut cache) = skull_codegen_js::emit::emit_program_cached(&v0, &scx0, mid).unwrap();
+    let (_, mut cache) = skull_codegen_js::emit::emit_program_cached(&v0, mid).unwrap();
     let first = function(&v1, "first");
     skull_codegen_js::emit::emit_overlay(
         &v1,
-        &scx1,
         mid,
         &mut cache,
         &[(first.module, BodyOwner::Function(first.func))],
@@ -196,7 +182,6 @@ fn successive_overlays_accumulate_changed_function_definitions() {
     let second = function(&v2, "second");
     let overlay = skull_codegen_js::emit::emit_overlay(
         &v2,
-        &scx2,
         mid,
         &mut cache,
         &[(second.module, BodyOwner::Function(second.func))],
@@ -229,15 +214,12 @@ fn changed_static_initializer_resets_only_its_live_cell() {
          }\n\
          fn main() { print(hot()) }\n",
     );
-    let before_scx = ScalarCtx::new(&before).with_target(bone_semantic::hir::FnBackend::Js);
-    let after_scx = ScalarCtx::new(&after).with_target(bone_semantic::hir::FnBackend::Js);
     let mid = function(&before, "main").module;
     let (program, mut cache) =
-        skull_codegen_js::emit::emit_program_cached(&before, &before_scx, mid).unwrap();
+        skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
     let hot = function(&after, "hot");
     let overlay = skull_codegen_js::emit::emit_overlay(
         &after,
-        &after_scx,
         mid,
         &mut cache,
         &[(hot.module, BodyOwner::Function(hot.func))],
@@ -273,15 +255,12 @@ fn decorated_function_overlay_rebinds_the_registered_function_value() {
     };
     let before = ws_with(&source("one"));
     let after = ws_with(&source("two"));
-    let before_scx = ScalarCtx::new(&before).with_target(bone_semantic::hir::FnBackend::Js);
-    let after_scx = ScalarCtx::new(&after).with_target(bone_semantic::hir::FnBackend::Js);
     let mid = function(&before, "main").module;
     let (program, mut cache) =
-        skull_codegen_js::emit::emit_program_cached(&before, &before_scx, mid).unwrap();
+        skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
     let hot = function(&after, "hot");
     let overlay = skull_codegen_js::emit::emit_overlay(
         &after,
-        &after_scx,
         mid,
         &mut cache,
         &[(hot.module, BodyOwner::Function(hot.func))],

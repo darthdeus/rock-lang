@@ -108,11 +108,8 @@ impl WebCompiler {
         let include_tests =
             !rock_host::project::is_game_project(&PathBuf::from(project)).unwrap_or(false);
         let live = crate::live_project::LiveProject::init(project, include_tests)?;
-        let scx = skull_mir::lower::ScalarCtx::new(live.workspace())
-            .with_target(bone_semantic::hir::FnBackend::Js);
         let (emitted, cache) = skull_codegen_js::emit::emit_program_cached(
             live.workspace(),
-            &scx,
             live.entry_module(),
         )
         .map_err(|error| anyhow::anyhow!(
@@ -139,11 +136,8 @@ impl WebCompiler {
                 Ok(WebCompile::Reload)
             }
             crate::live_project::LiveUpdate::BodyOnly { reinferred, .. } => {
-                let scx = skull_mir::lower::ScalarCtx::new(self.project.workspace())
-                    .with_target(bone_semantic::hir::FnBackend::Js);
                 match skull_codegen_js::emit::emit_overlay(
                     self.project.workspace(),
-                    &scx,
                     self.project.entry_module(),
                     &mut self.cache,
                     &reinferred,
@@ -173,11 +167,8 @@ impl WebCompiler {
     }
 
     fn emit_full(&mut self, project: &str, out_dir: &Path) -> Result<Vec<WebAsset>> {
-        let scx = skull_mir::lower::ScalarCtx::new(self.project.workspace())
-            .with_target(bone_semantic::hir::FnBackend::Js);
         let (emitted, cache) = skull_codegen_js::emit::emit_program_cached(
             self.project.workspace(),
-            &scx,
             self.project.entry_module(),
         )
         .map_err(|error| anyhow::anyhow!(

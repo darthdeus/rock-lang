@@ -7,13 +7,11 @@
 //! (`crates/rock-cli/tests/js_run_gate.rs`); this file pins the assembly ORDER
 //! and application-line CONTENT in the emitted string.
 
-use skull_mir::lower::ScalarCtx;
 use crate::common::ws_with;
 
 fn emit_program(ws: &bone_semantic::inference::Workspace) -> String {
-    let scx = ScalarCtx::new(ws);
     let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
-    skull_codegen_js::emit::emit_program(ws, &scx, mid)
+    skull_codegen_js::emit::emit_program(ws, mid)
         .unwrap_or_else(|e| panic!("emit_program rejected: {}", e.message))
         .program
 }

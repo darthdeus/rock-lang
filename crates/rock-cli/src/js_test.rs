@@ -358,7 +358,7 @@ fn js_run_tests(
         run_idxs.sort_unstable();
         let roots: Vec<(FuncRef, String)> =
             run_idxs.iter().map(|&i| (tests[i].0, format!("__t{i}"))).collect();
-        match skull_codegen_js::emit::emit_program_with_roots(ws, &scx, &roots) {
+        match skull_codegen_js::emit::emit_program_with_roots(ws, &roots) {
             Ok(blob) => blob,
             Err(e) => {
                 // Whole-file emission rejected (a deco-dependent test also hits an
@@ -491,8 +491,7 @@ fn emit_js_program_single(path: &str) -> skull_codegen_js::emit::JsProgram {
         }
     };
     let user_mid = crate::bone_backend::entry_module_id(&ws, user_file);
-    let scx = ScalarCtx::new(&ws).with_target(bone_semantic::hir::FnBackend::Js);
-    match skull_codegen_js::emit::emit_program(&ws, &scx, user_mid) {
+    match skull_codegen_js::emit::emit_program(&ws, user_mid) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("{}", crate::skull_backend::render_file_errs(path, &src, &[e]));
@@ -547,8 +546,7 @@ pub(crate) fn try_emit_js_program_project(
         )),
     };
     let user_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
-    let scx = ScalarCtx::new(&ws).with_target(bone_semantic::hir::FnBackend::Js);
-    let prog = match skull_codegen_js::emit::emit_program(&ws, &scx, user_mid) {
+    let prog = match skull_codegen_js::emit::emit_program(&ws, user_mid) {
         Ok(p) => p,
         Err(e) => return Err(anyhow::anyhow!(
             "{}",
