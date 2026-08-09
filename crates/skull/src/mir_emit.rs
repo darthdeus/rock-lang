@@ -2430,6 +2430,49 @@ fn assemble(
         &always_emitted_names, &needed_specs,
     )?;
 
+    // **Phase-2 population audit (`docs/parked/mono.md`).** Not yet load-bearing:
+    // logs a gap rather than rejecting, because the safety-critical direction for
+    // switching Lua's population source to `cache.lua_view` is "everything the
+    // WALK emits today is already in the view" -- an unaccounted-for extra root
+    // (shader registration deps, sim registration, decorator/global re-lowering)
+    // would otherwise turn this into a build-breaking false positive on real
+    // corpora before that gap is understood and closed. Once a corpus run shows
+    // zero gaps this promotes to a real `CompilerError` and the walk's discovery
+    // is deleted in favor of driving directly from the view.
+    {
+        let mut gaps: Vec<String> = Vec::new();
+        for module in ws.modules.iter() {
+            if module.id == ModuleId::builtin() {
+                continue;
+            }
+            for (fid, f) in module.functions.iter() {
+                if f.backend == bone_semantic::hir::FnBackend::Js {
+                    continue;
+                }
+                let self_ref = FuncRef { module: module.id, func: fid };
+                if is_generic(f) || f.is_extern || f.inline_body.is_some() || fn_has_bounds(f) {
+                    continue;
+                }
+                if live.emits(self_ref) && !cache.lua_view.instances.contains(&shared(self_ref)) {
+                    gaps.push(format!("base:{}", mangle_fn(ws, f)));
+                }
+            }
+        }
+        for inst in live.spec_chunks.keys() {
+            if !cache.lua_view.instances.contains(inst) {
+                gaps.push(format!("spec:{}", inst.symbol(ws, scx.interner())));
+            }
+        }
+        if !gaps.is_empty() {
+            let n = gaps.len();
+            gaps.truncate(20);
+            eprintln!(
+                "skull: lua_view population gap, {n} instance(s) the walk emits and the view \
+                 does not retain: {gaps:?}"
+            );
+        }
+    }
+
     // Function definitions, every module (cached chunk for ordinary/coroutine,
     // regenerated for extern / inline(lua)). The cached chunks were built in
     // parallel by `emit_full`/`emit_incremental`; here we pull their Lua and sum

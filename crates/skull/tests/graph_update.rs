@@ -834,3 +834,60 @@ fn pruning_an_instance_retracts_its_bound_tree() {
     case.assert_matches_fresh("bound tree retracted");
     assert_scoped(&stats, "bound tree retracted");
 }
+
+// ---------------------------------------------------------------------------
+// A struct default reached ONLY from an always-emitted owner (a global
+// initializer's struct literal, never a function body)
+// ---------------------------------------------------------------------------
+
+const STRUCT_DEFAULT_LIB: &str = r#"
+fn make<T>(x: T) -> T { return x }
+struct Holder { v: int = make(5) }
+"#;
+
+/// **`walk_struct_default_edges` covered instance owners only; an
+/// always-emitted owner's own struct literal was invisible.**
+///
+/// `global G: Holder = Holder {}` never calls `make` explicitly -- the
+/// omitted field's default does, and the default lives in `Holder`'s
+/// declaring struct, entered only when something constructs `Holder {}`. No
+/// function body in this fixture ever does; only the global initializer does,
+/// which is `Owner::AlwaysEmitted`, not `Owner::Instance`. Found by the E1
+/// Phase-2 population audit (`skull::mir_emit`), identically across every
+/// real corpus project's `Poller`/`CoState` global (`arena_new<CoState>` and
+/// its own `__arena_new_owned<int>` call) before this fix.
+#[test]
+fn a_global_initializers_struct_default_reaches_its_omitted_fields_callee() {
+    let case = Case::new(
+        "global G: Holder = Holder {}\nfn main() { print(\"{1}\") }\n",
+        STRUCT_DEFAULT_LIB,
+    );
+    let has_make_int = case.graph.instances.iter().any(|i| {
+        let k = case.identity(i);
+        k.starts_with("make") && k.contains("int")
+    });
+    assert!(
+        has_make_int,
+        "`make<int>` is reached only through Holder's field default at the global \
+         initializer `G`, and the graph does not have it: {:?}",
+        case.instance_names()
+    );
+}
+
+/// The control for the arm above: with no `Holder {}` construction anywhere
+/// (global deleted), `make<int>` must NOT be reached -- proving the assertion
+/// is about the struct-default EDGE, not about `make` being unconditionally
+/// present.
+#[test]
+fn with_no_holder_construction_the_defaults_callee_is_absent() {
+    let case = Case::new("fn main() { print(\"{1}\") }\n", STRUCT_DEFAULT_LIB);
+    let has_make_int = case
+        .graph
+        .instances
+        .iter()
+        .any(|i| case.identity(i).starts_with("make") && case.identity(i).contains("int"));
+    assert!(
+        !has_make_int,
+        "`make<int>` is reached with no `Holder {{}}` construction anywhere in the fixture"
+    );
+}

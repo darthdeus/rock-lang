@@ -1582,6 +1582,19 @@ impl InstanceGraph {
                 walk_body_edges(
                     &mut w, ws, inf, body, None, &MonoSubst::default(), &SiteDomain::Own, None,
                 );
+                // An always-emitted body's struct literals omit fields too --
+                // `global POLLER: CoroutinePoller = CoroutinePoller {}` reaches
+                // `coroutines: Arena<CoState> = arena_new()` exactly as an
+                // ordinary instance's literal would. `walk_struct_default_edges`
+                // was instance-only, so a struct default reached ONLY from a
+                // global initializer or a decorator body was invisible to the
+                // graph while emission (which lowers the same literal) still
+                // built and emitted it -- found by the Phase-2 population audit,
+                // identically on every corpus project (`arena_new<CoState>` and
+                // its own `__arena_new_owned<int>` call).
+                if let Some(body) = body {
+                    walk_struct_default_edges(&mut w, ws, *module, body, *body_owner, None, &MonoSubst::default());
+                }
             }
             Owner::Instance(inst) => {
                 // The one admissibility oracle, shared with both emitters. The
@@ -1627,7 +1640,15 @@ impl InstanceGraph {
                 walk_body_edges(
                     &mut w, ws, inf, Some(body), Some(inst), &subst, &SiteDomain::Own, None,
                 );
-                walk_struct_default_edges(&mut w, ws, body, inst, &subst);
+                walk_struct_default_edges(
+                    &mut w,
+                    ws,
+                    inst.func.module,
+                    body,
+                    BodyOwner::Function(inst.func.func),
+                    Some(inst),
+                    &subst,
+                );
             }
         }
         out
@@ -2932,8 +2953,10 @@ fn record_witness(
 fn walk_struct_default_edges(
     w: &mut Walk,
     ws: &Workspace,
+    module: ModuleId,
     body: &Body,
-    inst: &Instance,
+    top_owner: BodyOwner,
+    from: Option<&Instance>,
     subst: &MonoSubst,
 ) {
     use bone_semantic::hir::Expr as E;
@@ -2964,9 +2987,7 @@ fn walk_struct_default_edges(
     // Each entry carries the inference and SUBSTITUTION in force for that body,
     // exactly as `Builder::with_struct_default` nests them: a nested defaults
     // body resolves under its own struct's slot bindings, not the outer one's.
-    let Some(top_inf) = ws.inference(inst.func.module).and_then(|ir| {
-        ir.per_fn.get(&BodyOwner::Function(inst.func.func))
-    }) else {
+    let Some(top_inf) = ws.inference(module).and_then(|ir| ir.per_fn.get(&top_owner)) else {
         return;
     };
     let mut pending: Vec<(
@@ -3063,7 +3084,7 @@ fn walk_struct_default_edges(
             ws,
             inf,
             Some(defaults),
-            Some(inst),
+            from,
             &inner,
             &SiteDomain::StructDefaults(module, def, args),
             Some(&reached),
