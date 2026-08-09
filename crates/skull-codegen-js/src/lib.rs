@@ -942,6 +942,9 @@ function stone_get_window_size(pw, ph) { pw[0] = __SW.logicalW; ph[0] = __SW.log
 function stone_get_drawable_size(pw, ph) {
   pw[0] = Math.round(__SW.logicalW * __SW.dpr); ph[0] = Math.round(__SW.logicalH * __SW.dpr);
 }
+// A canvas has no notch: the insets are zero, as on desktop. A viewport that
+// grew one would read env(safe-area-inset-*) off the document element here.
+function stone_get_safe_area(pt, pr, pb, pl) { pt[0] = 0; pr[0] = 0; pb[0] = 0; pl[0] = 0; }
 function stone_get_dpi_scale() { return __SW.dpr; }
 function stone_take_window_resized() { var r = __SW.resized; __SW.resized = false; return r; }
 function stone_gl_finish() { if (__SW.gl && __SW.gl.finish) __SW.gl.finish(); }

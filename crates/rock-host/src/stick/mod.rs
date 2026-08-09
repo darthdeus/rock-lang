@@ -13,12 +13,53 @@ pub struct StickConfig {
     /// bindgen — slow, only anvil needs it). Default: empty
     /// list = stone-rs only.
     pub engine: Option<EngineConfig>,
+    /// Optional iOS bundle settings. Read by the deploy scripts
+    /// (`tools/ios/*.sh`) when they write Info.plist -- orientation is a
+    /// build-time property of the bundle, not something the running game can
+    /// choose, so it cannot live in `GameConfig`. Default: landscape.
+    pub ios: Option<IosConfig>,
     pub dependencies: HashMap<String, Dependency>,
 }
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     pub needs: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct IosConfig {
+    /// `landscape` | `portrait` | `all`. None = unset, deploy uses landscape.
+    pub orientation: Option<String>,
+}
+
+impl<'de> serde::Deserialize<'de> for IosConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Vis;
+        impl<'de> serde::de::Visitor<'de> for Vis {
+            type Value = IosConfig;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                write!(f, "IosConfig struct")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<IosConfig, A::Error> {
+                let mut orientation: Option<String> = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "orientation" => { orientation = Some(map.next_value()?); }
+                        other => {
+                            // Fail closed: a misspelled key here would silently
+                            // ship the default orientation, and the only symptom
+                            // is a phone that rotates when it shouldn't.
+                            return Err(serde::de::Error::custom(format!(
+                                "unknown key `{other}` in [ios]; known keys: orientation"
+                            )));
+                        }
+                    }
+                }
+                Ok(IosConfig { orientation })
+            }
+        }
+        d.deserialize_map(Vis)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -216,6 +257,7 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
             fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<StickConfig, A::Error> {
                 let mut package: Option<Package> = None;
                 let mut engine: Option<EngineConfig> = None;
+                let mut ios: Option<IosConfig> = None;
                 let mut dependencies: HashMap<String, Dependency> = HashMap::new();
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
@@ -232,12 +274,13 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                             ));
                         }
                         "engine" => { engine = map.next_value()?; }
+                        "ios" => { ios = map.next_value()?; }
                         "dependencies" => { dependencies = map.next_value()?; }
                         _ => { let _ = map.next_value::<serde::de::IgnoredAny>()?; }
                     }
                 }
                 let package = package.ok_or_else(|| serde::de::Error::missing_field("package"))?;
-                Ok(StickConfig { package, engine, dependencies })
+                Ok(StickConfig { package, engine, ios, dependencies })
             }
         }
         d.deserialize_map(Vis)
@@ -354,6 +397,34 @@ impl StickConfig {
 
     /// Reject typos in `[engine] needs = [...]` (e.g. "vidoe") so the
     /// build doesn't silently skip an optional cdylib the user asked for.
+    /// Recognised values for `[ios] orientation`. Keep in sync with the case
+    /// arms in `tools/ios/run-game-device.sh`.
+    pub const KNOWN_IOS_ORIENTATIONS: [&'static str; 3] = ["landscape", "portrait", "all"];
+
+    /// The orientation the iOS bundle should pin, if the manifest sets one.
+    /// The deploy scripts default to landscape when this is None.
+    pub fn ios_orientation(&self) -> Option<&str> {
+        self.ios.as_ref()?.orientation.as_deref()
+    }
+
+    /// Reject a bad `[ios] orientation` at build time. Without this the deploy
+    /// script sees an unrecognised string; the failure mode is a phone that
+    /// rotates freely, which thrashes canvas re-init hard enough to look like
+    /// a hang (docs/ios-bringup.md).
+    pub fn validate_ios(&self) -> Result<()> {
+        let Some(orientation) = self.ios_orientation() else {
+            return Ok(());
+        };
+        if !Self::KNOWN_IOS_ORIENTATIONS.contains(&orientation) {
+            anyhow::bail!(
+                "stick.toml: unknown [ios] orientation {:?}. Known: {:?}",
+                orientation,
+                Self::KNOWN_IOS_ORIENTATIONS
+            );
+        }
+        Ok(())
+    }
+
     pub fn validate_engine_needs(&self) -> Result<()> {
         let Some(engine) = self.engine.as_ref() else {
             return Ok(());
@@ -656,6 +727,46 @@ mod tests {
         let msg = format!("{}", err);
         assert!(msg.contains("vidoe"), "error mentions the bad entry: {msg}");
         assert!(msg.contains("video"), "error suggests the known list: {msg}");
+    }
+
+    #[test]
+    fn ios_orientation_round_trips() {
+        let cfg = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[ios]\norientation = \"portrait\"\n",
+        ).unwrap();
+        assert_eq!(cfg.ios_orientation(), Some("portrait"));
+        cfg.validate_ios().expect("portrait is a known orientation");
+    }
+
+    #[test]
+    fn ios_orientation_defaults_to_unset() {
+        let cfg = StickConfig::new_from_str("[package]\nname = \"x\"\n").unwrap();
+        assert_eq!(cfg.ios_orientation(), None);
+        cfg.validate_ios().expect("no ios section is fine");
+    }
+
+    #[test]
+    fn validate_ios_rejects_bad_orientation() {
+        // The deploy script would otherwise write an Info.plist with no
+        // recognised orientation and the phone rotates freely -- which thrashes
+        // canvas re-init hard enough to look like a hang.
+        let cfg = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[ios]\norientation = \"sideways\"\n",
+        ).unwrap();
+        let err = cfg.validate_ios().expect_err("bad orientation must be rejected");
+        let msg = format!("{}", err);
+        assert!(msg.contains("sideways"), "error mentions the bad value: {msg}");
+        assert!(msg.contains("portrait"), "error suggests the known list: {msg}");
+    }
+
+    #[test]
+    fn ios_section_rejects_unknown_key() {
+        // A misspelled key would ship the default orientation silently.
+        let err = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[ios]\norientaton = \"portrait\"\n",
+        ).expect_err("unknown [ios] key must be rejected");
+        let msg = format!("{}", err);
+        assert!(msg.contains("orientaton"), "error names the bad key: {msg}");
     }
 
     #[test]

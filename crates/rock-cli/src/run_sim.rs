@@ -899,9 +899,20 @@ fn run_specs_worker_mode(
     });
 
     if !quiet {
+        // EVERY lane is a boot, so every lane reports one. A singleton lane
+        // printed nothing, which made a sim that silently got its own process
+        // indistinguishable in the log from one sharing a 46-way worker -- the
+        // same thing the isolation reasons below exist to prevent, on the path
+        // they do not cover. Measured on mag: 18 lines printed against 43 boots.
+        //
+        // A group larger than the job count splits into contiguous lanes, and
+        // that split CHANGES PREDECESSORS, so it decides which entries are
+        // boundary-crossing evidence. Say so rather than leaving it to be
+        // derived from `--jobs`.
         for lane in &lanes {
-            if lane.len() > 1 {
-                println!("[sim] worker: {} entries share one booted process", lane.len());
+            match lane.len() {
+                1 => println!("[sim] worker: 1 entry in its own booted process"),
+                n => println!("[sim] worker: {n} entries share one booted process"),
             }
         }
         for (i, reason) in poolable.iter().chain(exclusive.iter()) {
@@ -1143,6 +1154,26 @@ fn writes_live(buffered: bool) -> bool {
 /// value would isolate sims for nothing.
 const RUNNER_OWNED_ENV_KEYS: &[&str] = &["FRAME_COUNT", "ROCK_MASK_WALL_CLOCK"];
 
+/// Fixed values the runner publishes to EVERY sim child, layered BEFORE
+/// `preset_env` so a declaration still wins.
+///
+/// One source, read by the spawn that applies them and by `boot_signature`
+/// which discounts them: a sim that restates one of these gets a byte-identical
+/// child environment to a sim that declares nothing, so the pair cannot stand
+/// for a difference between two entries. Splitting a group on it isolates sims
+/// for nothing -- the `ROCK_MASK_WALL_CLOCK` argument above, for a key whose
+/// DECLARED VALUE happens to equal the baseline.
+///
+/// Matched as (key, value) and not by key, which is the whole point: a
+/// different value is a real boot difference. Putting the key in
+/// `RUNNER_OWNED_ENV_KEYS` instead would silently run a seed-7 sim in a
+/// seed-42 process.
+///
+/// Only fixed literals belong here. `STONE_ASSET_STUB` and `STONE_AUDIO_STUB`
+/// are computed from the group's own composition, so discounting them would be
+/// circular -- the value depends on the grouping this decides.
+const RUNNER_BASELINE_ENV: &[(&str, &str)] = &[("ROCK_TEST_SEED", "42"), ("STONE_HEADLESS", "1")];
+
 /// The part of a sim's `@sim_env` that is consumed during global init, engine
 /// init and `@init` -- what a shared process cannot vary between entries.
 ///
@@ -1154,6 +1185,9 @@ fn boot_signature(env_pairs: &[(String, String)]) -> Vec<(String, String)> {
     let mut sig: Vec<(String, String)> = env_pairs
         .iter()
         .filter(|(k, _)| !RUNNER_OWNED_ENV_KEYS.contains(&k.as_str()))
+        .filter(|(k, v)| {
+            !RUNNER_BASELINE_ENV.iter().any(|(bk, bv)| *bk == k.as_str() && *bv == v.as_str())
+        })
         .cloned()
         .collect();
     sig.sort_by(|a, b| a.0.cmp(&b.0));
@@ -1662,12 +1696,12 @@ fn run_worker(
     cmd.env("ROCK_SIM_ENTRY_PLAN", plan_file.path())
         .env("ROCK_RUN_SIM", &first.name)
         .env("FRAME_COUNT", first.frame_budget.to_string())
-        .env("STONE_HEADLESS", "1")
         .env("OUT", &first.out_dir)
-        // Default deterministic seed for sims. An explicit
-        // `@sim_env("ROCK_TEST_SEED", ...)` in a sim still overrides
-        // because `preset_env` is layered after this baseline.
-        .env("ROCK_TEST_SEED", "42")
+        // `STONE_HEADLESS` and the deterministic sim seed. Applied from the same
+        // table `boot_signature` discounts, so the baseline a sim can restate
+        // for free is stated once. An explicit `@sim_env` still overrides,
+        // because `preset_env` is layered after this.
+        .envs(RUNNER_BASELINE_ENV.iter().copied())
         // Headers-only assets unless something in this process renders. Decided
         // by `entry_renders`, the one oracle for the question, so a sim cannot
         // count as non-rendering here and rendering there. ANY rendering
@@ -2218,6 +2252,19 @@ fn run_specs_recovering(
     while base < plans.len() {
         let parts: Vec<WorkerPart> =
             plans[base..].iter().flat_map(|p| p.parts.iter().cloned()).collect();
+        // Every round past the first boots ANOTHER process, so it is a third
+        // source of boots beside the lane plan and the isolated entries -- and
+        // the only one decided at runtime, which no static grouping can predict.
+        // Without this line the boot count does not reconcile with the log:
+        // measured on testbed, 89 boots against 70 reported, the 19 missing
+        // being exactly the entries that ended their worker.
+        if base > 0 {
+            println!(
+                "[sim] worker: rebooting for {} unstarted entr{}",
+                plans.len() - base,
+                if plans.len() - base == 1 { "y" } else { "ies" }
+            );
+        }
         let summaries =
             run_worker(project, &parts, false, true, update_snapshots, output, record_manifest, None)?;
 
@@ -3469,6 +3516,58 @@ mod tests {
     fn pick(names: &[&str]) -> Result<Vec<String>> {
         let selected: Vec<String> = names.iter().map(|s| s.to_string()).collect();
         select_gate_corpus(&corpus(), &selected)
+    }
+
+    fn sig(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        boot_signature(
+            &pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<Vec<_>>(),
+        )
+    }
+
+    /// A declaration that RESTATES the runner's own baseline produces a
+    /// byte-identical child environment, so it cannot stand for a difference
+    /// between two entries -- the same argument `RUNNER_OWNED_ENV_KEYS` already
+    /// makes for `ROCK_MASK_WALL_CLOCK`. mag declares `ROCK_TEST_SEED=42` in 182
+    /// sims and nothing in 73, and splitting those cost 6 of its 43 boots.
+    #[test]
+    fn a_declaration_at_the_runner_baseline_does_not_split_a_group() {
+        for (key, value) in RUNNER_BASELINE_ENV {
+            assert_eq!(
+                sig(&[(key, value)]),
+                sig(&[]),
+                "`{key}={value}` restates the runner's baseline, so it is not a boot difference"
+            );
+        }
+    }
+
+    /// The other side, and the reason this is a (key, value) match rather than
+    /// an entry in `RUNNER_OWNED_ENV_KEYS`: a DIFFERENT value is a real boot
+    /// difference and must still refuse to share a process. Dropping the key
+    /// outright would silently run a seed-7 sim in a seed-42 process.
+    #[test]
+    fn a_declaration_away_from_the_baseline_still_splits_a_group() {
+        assert_ne!(
+            sig(&[("ROCK_TEST_SEED", "7")]),
+            sig(&[]),
+            "a seed the runner did not publish is a genuine boot difference"
+        );
+        assert_ne!(
+            sig(&[("ROCK_TEST_SEED", "7")]),
+            sig(&[("ROCK_TEST_SEED", "42")]),
+            "two different declared seeds are two different boot worlds"
+        );
+    }
+
+    /// The canonicalization must not swallow a neighbour: a signature keeps
+    /// every pair that is not a baseline restatement.
+    #[test]
+    fn canonicalizing_the_baseline_leaves_other_pairs_alone() {
+        assert_eq!(
+            sig(&[("ROCK_TEST_SEED", "42"), ("SIM_SKIP_RENDER", "0")]),
+            sig(&[("SIM_SKIP_RENDER", "0")]),
+            "only the inert pair comes out"
+        );
+        assert_eq!(sig(&[("SIM_SKIP_RENDER", "0")]).len(), 1);
     }
 
     /// Assets are stubbed per PROCESS, not per entry: a chain shares one image

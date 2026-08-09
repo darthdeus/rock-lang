@@ -78,6 +78,7 @@ pub fn game_engine_libs(game_path: &str) -> Result<Vec<&'static EngineLib>> {
         return Ok(Vec::new());
     };
     cfg.validate_engine_needs()?;
+    cfg.validate_ios()?;
     Ok(OPTIONAL_ENGINE_LIBS
         .iter()
         .filter(|lib| cfg.needs_engine_lib(lib.need))

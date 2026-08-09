@@ -2264,3 +2264,49 @@ fn the_wall_clock_deadline_is_per_entry_not_per_worker() {
         assert_eq!(record.verdict(), "PASS", "entry {i}: {record:?}");
     }
 }
+
+/// A task the BOOT process owns is restored at the boundary and keeps being
+/// polled -- the half of task handling
+/// `a_task_left_live_at_stop_sim_does_not_tick_in_the_next_entry` does not
+/// reach. That test covers a task an ENTRY created and abandoned; the
+/// checkpoint's own image of `POLLER` had never been exercised, because no
+/// production `@init` spawns a task, so every game's checkpoint captured an
+/// empty poller.
+///
+/// Two arms, and it needs both. The counter's VALUE shows the boot image came
+/// back rather than the predecessor's accumulation; its ADVANCE shows the
+/// restored registration is live. A delta alone cannot decide this -- the boot
+/// task ticks in a fresh process too, so a delta agrees whether or not the
+/// restore happened, which is the opposite discriminant from the abandoned-task
+/// test above.
+///
+/// The provenance guard is load-bearing here rather than decorative: driving
+/// this pair as a comma-chain boots TWICE, so the probe reads creation state as
+/// a fresh process and passes with the restore deleted (measured).
+#[test]
+fn a_boot_owned_task_is_restored_and_still_polled_in_the_next_entry() {
+    let (isolated, worker) = differential(&["b0_boot_task_seed"], "b0_boot_task_probe");
+    let c = compare(&isolated, &worker);
+    assert_equivalent("b0_boot_task_probe", &c);
+
+    assert_eq!(isolated.seq, 0, "the isolated arm is a one-entry queue");
+    assert!(
+        worker.seq > 0,
+        "the probe ran first in its process, so it crossed no boundary and \
+         certifies nothing about the restore"
+    );
+    assert!(
+        isolated.diagnostics.contains("Initialized successfully"),
+        "the isolated arm must carry the boot log of the process it booted: {:?}",
+        isolated.diagnostics
+    );
+    assert!(
+        !worker.diagnostics.contains("Initialized successfully"),
+        "the worker arm carries a process boot log, so it booted its own process \
+         rather than following the seed: {:?}",
+        worker.diagnostics
+    );
+
+    assert_eq!(worker.verdict(), "PASS", "{worker:?}");
+    assert!(c.population("expects_pass") > 0, "the arms compared no expect records");
+}
