@@ -640,6 +640,48 @@ fn builtin_vertex_id_maps() {
     assert!(!glsl.contains("vertex_id("), "must not emit a fn call:\n{glsl}");
 }
 
+/// The premise the backend-neutral fullscreen submission rests on
+/// (`docs/gl-surface-census.md`): an A1 entry contributes NO vertex code, so
+/// nothing in an A1 program can observe how a backend tessellates the
+/// fullscreen rectangle. Two different entries emit the same VERTEX section,
+/// byte for byte, and that section reads only the two attributes -- no
+/// gl_VertexID, no per-vertex branch, nothing order-dependent.
+///
+/// The contrast is `builtin_vertex_id_maps` above: an explicit `@shader(vertex)`
+/// stage CAN read gl_VertexID, which is why the fullscreen guarantee is scoped
+/// to the generated stage rather than claimed for every draw.
+#[test]
+fn a1_vertex_stage_is_compiler_owned_and_order_blind() {
+    let vertex_of = |glsl: &str| -> String {
+        let (_, v) = glsl.split_once("#ifdef VERTEX").expect("a VERTEX section");
+        v.split("#endif").next().expect("a terminated VERTEX section").to_string()
+    };
+    let a = emit_entry(
+        r#"
+        @shader(fragment)
+        fn f(tc: Vec2) -> Vec4 { return Vec4 { x: tc.x, y: tc.y, z: 0.0, w: 1.0 } }
+    "#,
+        "f",
+    )
+    .expect("emit a");
+    let b = emit_entry(
+        r#"
+        @shader(fragment)
+        fn g(tc: Vec2) -> Vec4 { return Vec4 { x: 1.0 - tc.y, y: 0.0, z: tc.x, w: 0.5 } }
+    "#,
+        "g",
+    )
+    .expect("emit b");
+
+    let (va, vb) = (vertex_of(&a), vertex_of(&b));
+    assert_eq!(va, vb, "two A1 entries must share one compiler-owned vertex stage");
+    assert!(va.contains("gl_Position = vec4(aPos, 0.0, 1.0)"), "got:\n{va}");
+    assert!(va.contains("TexCoord = aTexCoord"), "got:\n{va}");
+    assert!(!va.contains("gl_VertexID"), "the generated stage must not read vertex order:\n{va}");
+    // And the entry's own body reached only the fragment half.
+    assert!(!va.contains("f("), "the entry body must not appear in the vertex stage:\n{va}");
+}
+
 #[test]
 fn reject_vertex_id_in_fragment_stage() {
     let src = r#"

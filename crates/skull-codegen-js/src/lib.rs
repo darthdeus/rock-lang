@@ -1392,6 +1392,12 @@ function stone_set_viewport_rect(x, y, w, h) {
   var gw = Math.round(w * s), gh = Math.round(h * s);
   __SW.gl.viewport(Math.round(x * s), wh[1] - Math.round(y * s) - gh, gw, gh);
 }
+// The semantic submission's GpuRect: bottom-left, the bound target's own
+// pixels, verbatim. Unlike stone_set_viewport_rect above it neither scales by
+// dpr nor flips Y -- the caller stated the rect in GL's own convention.
+function stone_set_gl_viewport(x, y, w, h) {
+  __SW.gl.viewport(x, y, w, h);
+}
 // mode: 0 = nearest, 1 = linear. Integer formats refuse -- a linear-filtered
 // integer texture samples zero.
 function stone_set_canvas_filter(h, mode) {
@@ -1854,9 +1860,9 @@ var __sw_fsq_uv = [1, 1];
 function stone_set_fullscreen_uv_scale(sx, sy) {
   __sw_fsq_uv = [Math.max(sx, 0), Math.max(sy, 0)];
 }
-// THE statement of this tier's fullscreen geometry: the static buffers, the
-// scaled respecification and stone_fullscreen_quad_vertices all read it, so a
-// semantic submission can carry the exact bytes without restating them.
+// The imperative fullscreen path's geometry -- the static buffers and the
+// scaled respecification read it. The semantic submission does NOT: it goes
+// through stone_draw_fullscreen_rect, which takes the corner mapping.
 function __sw_fsq_verts(flipped, sx, sy) {
   var v0 = (flipped ? 1 : 0) * sy, v1 = (flipped ? 0 : 1) * sy;
   return new Float32Array([
@@ -1864,10 +1870,38 @@ function __sw_fsq_verts(flipped, sx, sy) {
     -1, -1, 0, v0,  1, 1, sx, v1,  -1, 1, 0, v1,
   ]);
 }
-function stone_fullscreen_quad_vertices(to_window, sx, sy, out) {
-  var v = __sw_fsq_verts(!!to_window, sx, sy);
-  for (var i = 0; i < v.length; i++) out[i] = v[i];
-  return v.length;
+// THIS tier's tessellation of the fullscreen rectangle for the corner UV
+// mapping a semantic submission resolved: (u0,v0) at NDC (-1,-1), (u1,v1) at
+// NDC (+1,+1). The order and the diagonal are deliberately NOT the native
+// tier's (sprite.rs fs_rect_data splits the other way) -- the mapping is the
+// contract, the tessellation is backend implementation data.
+function __sw_fsq_rect(u0, v0, u1, v1) {
+  return new Float32Array([
+    -1, -1, u0, v0,   1, -1, u1, v0,   1, 1, u1, v1,
+    -1, -1, u0, v0,   1,  1, u1, v1,  -1, 1, u0, v1,
+  ]);
+}
+// Culling is disabled HERE rather than assumed: the two tiers wind opposite
+// ways, so "no culling" is state this draw states.
+function stone_draw_fullscreen_rect(u0, v0, u1, v1) {
+  var gl = __SW.gl;
+  var sh = __SW.shaders[__SW.curShader];
+  if (!gl || !sh) return;
+  gl.useProgram(sh.prog);
+  __sw_fix_stale_int_units(gl, sh);
+  if (!__sw_fsq_scaled) __sw_fsq_scaled = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, __sw_fsq_scaled);
+  gl.bufferData(gl.ARRAY_BUFFER, __sw_fsq_rect(u0, v0, u1, v1), gl.DYNAMIC_DRAW);
+  gl.disable(gl.CULL_FACE);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 16, 0);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 16, 8);
+  gl.enableVertexAttribArray(1);
+  gl.disableVertexAttribArray(2);
+  gl.disableVertexAttribArray(3);
+  gl.disableVertexAttribArray(4);
+  gl.drawArrays(gl.TRIANGLES, 0, 6);
+  __sw_mark_drawn(sh);
 }
 function __sw_fsq_buffer(gl, flipped) {
   var b = gl.createBuffer();
