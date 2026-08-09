@@ -212,6 +212,29 @@ pub struct InstanceBoundTree {
     pub next: BTreeMap<usize, InstanceBoundNext>,
 }
 
+impl InstanceBoundTree {
+    /// Convert the graph's witness tree to the vocabulary standalone lowering consumes.
+    pub fn to_resolved(&self) -> skull_mir::bound::ResolvedBoundTree {
+        skull_mir::bound::ResolvedBoundTree {
+            next: self
+                .next
+                .iter()
+                .map(|(index, witness)| {
+                    let spec = (!witness.callee.args.is_empty()).then(|| witness.callee.clone());
+                    (
+                        *index,
+                        skull_mir::bound::ResolvedBoundNext::Concrete {
+                            func: witness.callee.func,
+                            spec,
+                            sub: witness.sub.to_resolved(),
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct BoundTreeDisagreement {
     pub instance: Instance,
@@ -762,6 +785,7 @@ pub const COMPILER_GENERATED_TRIGGERS: &[(&str, StorageCond, &[&str])] = &[
     ("__vec_data_clone", StorageCond::VecColumn, &["__rock_col_copy"]),
     ("__vec_data_sort", StorageCond::VecColumn, &["__rock_col_sort", "__rock_col_sort_leaves"]),
     ("__rock_vec_to_lua_array", StorageCond::VecColumn, &["__rock_vec_column_elements"]),
+    ("map_new", StorageCond::MapColumn, &["__map_col_new_spine"]),
     ("table_unset", StorageCond::MapColumn, &["__map_col_free"]),
     ("len", StorageCond::MapColumn, &["__map_col_len"]),
     ("map_len", StorageCond::MapColumn, &["__map_col_len"]),
@@ -787,6 +811,7 @@ pub const ERASED_RUNTIME_ENTRIES: &[&str] = &[
     "__map_col_contains",
     "__map_col_free",
     "__map_col_len",
+    "__map_col_new_spine",
     "__map_col_slot",
     "__map_col_slot_checked",
     "__map_col_slot_of",
@@ -3561,6 +3586,14 @@ fn compiler_generated_sites(
                 else {
                     continue;
                 };
+                if *trigger == "map_new" {
+                    if args.clone().next().is_some() {
+                        continue;
+                    }
+                    let Some(_) = settle(e, *cond, e) else { continue };
+                    out.extend(names.iter().map(|n| GeneratedSite { expr: e, name: n }));
+                    continue;
+                }
                 // The receiver is the UFCS first argument; an arm with no
                 // receiver cannot be the column form.
                 let Some(recv) = args.clone().next() else { continue };

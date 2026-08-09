@@ -1,22 +1,7 @@
-//! **The JS build session is DURABLE: full emit and overlay share one arena.**
-//!
-//! An `Instance` is an identity only relative to the `MonoInterner` that minted
-//! its type ids. A cache that survives an edit while the overlay interns into a
-//! FRESH arena therefore holds keys that mean nothing to the run answering, and
-//! every `Instance`-keyed structure the emitter carries -- `CalleeNames`,
-//! `spec_trees`, and the graph and artifact view Phase 3 puts here next --
-//! would silently be two populations wearing one type.
-//!
-//! **What is observable today, and what is not.** Reuse alone has no emitted
-//! consequence: re-interning a type is idempotent, so a shared arena and a
-//! fresh one produce identical output. Nor can the two arms this property
-//! really wants be written yet, and the sentinel below records why -- JS's
-//! overlay puts specialized bodies in its STABLE section, so every edit that
-//! changes the instance population, and every edit that flips a scalar ABI
-//! (which changes a definition the stable section derives from), returns
-//! `FullRequired` before an overlay exists to assert against. That is what
-//! Phase 3C changes; until then this file pins the arena identity and the
-//! reason the stronger arms are absent.
+//! The cached JS build keeps one `MonoInterner`, `InstanceGraph`, and
+//! `ArtifactView` across full emission and overlay edits. The graph delta arms
+//! below prove addition, removal, and reintroduction against a nonzero
+//! population.
 
 mod common;
 use bone_semantic::hir::BodyOwner;
@@ -34,16 +19,7 @@ fn function(ws: &bone_semantic::inference::Workspace, name: &str) -> FuncRef {
     FuncRef { module: mid, func: fid }
 }
 
-/// The session arena survives the edit as ONE object.
-///
-/// **Stated with its own weakness**: this arm cannot fail on a fresh overlay
-/// arena, because the cache's handle is unchanged whatever the overlay does. It
-/// asserts that the cache OWNS a non-empty arena and keeps it across an edit;
-/// that the overlay USES it is enforced by construction (`emit_overlay`
-/// constructs no `ScalarCtx` of its own, so removing the reuse fails to
-/// compile) rather than by this assertion. It becomes a real arm in Phase 3C,
-/// when the graph and view this arena keys live in the cache beside it and the
-/// sentinel below flips.
+/// The cached session keeps one arena while the retained graph is rebuilt.
 #[test]
 fn the_cache_keeps_one_arena_across_an_overlay_edit() {
     const BEFORE: &str = "\
@@ -84,22 +60,8 @@ fn main() { print(hot() + other()) }\n";
     assert_eq!(cache.interner_handle().len(), 1, "and the population it already had");
 }
 
-/// **SENTINEL -- flip when Phase 3C makes the JS overlay instance-aware.**
-///
-/// The natural discriminant for arena continuity is that an edit demanding a
-/// NEW instantiation interns it in the arena the cache owns. That cannot be
-/// written today: JS puts specialized bodies in the overlay's STABLE section,
-/// so any edit changing the instance population fails the `stable` comparison
-/// and returns `FullRequired` before an overlay is produced at all.
-///
-/// Asserting `FullRequired` pins the reason. When the overlay is driven by the
-/// artifact view's added/removed instances rather than by a whole-program text
-/// diff, this becomes `Overlay`, the arm above can assert real arena growth,
-/// and the OTHER arm this file wants becomes writable too: an edit that flips a
-/// `value` struct's scalar ABI, proving `emit_overlay`'s `update_body` loop
-/// re-scans the edited body rather than reusing the full build's scan.
 #[test]
-fn an_instance_adding_edit_is_a_full_reload_today_sentinel() {
+fn an_instance_adding_edit_is_served_by_the_overlay() {
     const BEFORE: &str = "\
 fn pick<T>(x: T, y: T) -> T { x }\n\
 @nomangle fn hot() -> float { pick(1.0, 2.0) }\n\
@@ -114,6 +76,11 @@ fn main() { print(hot()) }\n";
     let mid = function(&before, "main").module;
     let (_, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
     assert_eq!(cache.interner_handle().len(), 1, "one instantiation before the edit");
+    let initial_population = cache.graph_population();
+    assert!(
+        initial_population > 0,
+        "the full build must retain graph instances"
+    );
 
     let hot = function(&after, "hot");
     let reload = skull_codegen_js::emit::emit_overlay(
@@ -124,8 +91,111 @@ fn main() { print(hot()) }\n";
     )
     .unwrap();
     assert!(
-        matches!(reload, skull_codegen_js::emit::JsReload::FullRequired),
-        "specialized bodies live in the overlay's stable section, so an edit that \
-         adds an instantiation is a full reload -- flip when Phase 3C changes that"
+        matches!(reload, skull_codegen_js::emit::JsReload::Overlay(_)),
+        "an edit that adds a retained instance must produce an overlay"
+    );
+    assert!(
+        cache.interner_handle().len() >= 2,
+        "the edit must add an instance type"
+    );
+    let added = cache.graph_update().expect("graph update after addition");
+    assert!(added.added > 0, "the edit must add a graph instance");
+    assert_eq!(
+        added.removed, 0,
+        "the addition arm must not remove the old instance"
+    );
+
+    const REMOVED: &str = "\
+fn pick<T>(x: T, y: T) -> T { x }\n\
+@nomangle fn hot() -> float { pick(1.0, 2.0) }\n\
+fn main() { print(hot()) }\n";
+    let removed_ws = ws_with(REMOVED);
+    let removed_hot = function(&removed_ws, "hot");
+    let removal = skull_codegen_js::emit::emit_overlay(
+        &removed_ws,
+        mid,
+        &mut cache,
+        &[(removed_hot.module, BodyOwner::Function(removed_hot.func))],
+    )
+    .unwrap();
+    assert!(matches!(
+        removal,
+        skull_codegen_js::emit::JsReload::Overlay(_)
+    ));
+    let removed = cache.graph_update().expect("graph update after removal");
+    assert!(removed.removed > 0, "the edit must remove the int instance");
+    assert_eq!(removed.added, 0, "the removal arm must not add an instance");
+    let removal_population = cache.graph_population();
+    assert!(
+        removal_population < added.after,
+        "the removed instance must leave the graph"
+    );
+
+    let reintroduced_hot = function(&after, "hot");
+    let reintroduced = skull_codegen_js::emit::emit_overlay(
+        &after,
+        mid,
+        &mut cache,
+        &[(
+            reintroduced_hot.module,
+            BodyOwner::Function(reintroduced_hot.func),
+        )],
+    )
+    .unwrap();
+    assert!(matches!(
+        reintroduced,
+        skull_codegen_js::emit::JsReload::Overlay(_)
+    ));
+    let readded = cache
+        .graph_update()
+        .expect("graph update after reintroduction");
+    assert!(
+        readded.added > 0,
+        "reintroduction must rebuild the removed instance"
+    );
+    assert_eq!(readded.removed, 0, "reintroduction must not hide a removal");
+    assert!(
+        cache.graph_population() > removal_population,
+        "reintroduction must grow the live graph population"
+    );
+}
+
+#[test]
+fn every_js_production_route_enters_the_shared_session() {
+    let source = include_str!("../src/emit.rs");
+    for (route, seam) in [
+        ("pub fn emit_with_closure(", "new_js_session("),
+        ("pub fn emit_program(", "build_program_session("),
+        ("pub fn emit_program_cached(", "build_program_session("),
+        ("pub fn emit_program_with_roots(", "emit_program_core("),
+        ("pub fn emit_overlay(", "update_js_session("),
+    ] {
+        let start = source.find(route).expect("production JS route");
+        let tail = &source[start..];
+        assert!(tail.contains(seam), "{route} must enter {seam}");
+    }
+    assert_eq!(
+        source.matches("fn js_scx(").count(),
+        1,
+        "one JS context constructor"
+    );
+    assert_eq!(
+        source.matches("fn new_js_session(").count(),
+        1,
+        "one JS session constructor"
+    );
+    assert_eq!(
+        source.matches("fn update_js_session(").count(),
+        1,
+        "one JS session updater"
+    );
+    let overlay = &source[source.find("pub fn emit_overlay(").unwrap()..];
+    assert!(
+        !overlay.contains("js_scx("),
+        "overlay must retain the cached context"
+    );
+    assert!(
+        !overlay.contains("new_js_session("),
+        "overlay must retain the cached graph"
     );
 }

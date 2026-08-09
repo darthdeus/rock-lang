@@ -118,7 +118,7 @@ impl<'a> ArtifactMappings<'a> {
 /// is a property of the default planner and not of the model. A test planner
 /// that renames deliberately is what keeps the two apart.
 pub trait SymbolPlanner {
-    fn symbol(&self, ws: &Workspace, g: &InstanceGraph, i: &Instance) -> String;
+    fn symbol(&self, ws: &Workspace, g: &InstanceGraph, i: &Instance, realized: Realized) -> String;
     fn describe(&self) -> &'static str;
 }
 
@@ -129,13 +129,30 @@ pub trait SymbolPlanner {
 pub struct LogicalSymbols;
 
 impl SymbolPlanner for LogicalSymbols {
-    fn symbol(&self, ws: &Workspace, g: &InstanceGraph, i: &Instance) -> String {
+    fn symbol(&self, ws: &Workspace, g: &InstanceGraph, i: &Instance, _realized: Realized) -> String {
         g.logical_symbol(ws, i)
     }
     fn describe(&self) -> &'static str {
         "logical"
     }
 }
+
+/// Spell an instance through the declaration this artifact selected. This is
+/// the production choice for backends whose sibling declarations own different
+/// publication conventions (`@nomangle` is the visible case).
+pub struct RealizedSymbols;
+
+impl SymbolPlanner for RealizedSymbols {
+    fn symbol(&self, ws: &Workspace, g: &InstanceGraph, i: &Instance, realized: Realized) -> String {
+        Instance { func: realized.decl, args: i.args.clone() }.symbol(ws, g.interner())
+    }
+
+    fn describe(&self) -> &'static str {
+        "realized-declaration"
+    }
+}
+
+pub static REALIZED_SYMBOLS: RealizedSymbols = RealizedSymbols;
 
 /// Everything one artifact view is taken through.
 pub struct ArtifactRequest<'a> {
@@ -830,6 +847,12 @@ fn realize_body(
         return class_or_reject(target, BoundaryClass::ErasedRuntimeEntry);
     }
     if f.is_extern {
+        // `extern(js)` names the browser/runtime surface, not a host C symbol;
+        // the JS artifact owns that boundary even though the web platform does
+        // not expose the desktop foreign-symbol capability.
+        if f.backend == FnBackend::Js && target.execution.backend == Some(FnBackend::Js) {
+            return Ok(Realization::ForeignBody(BoundaryClass::Extern));
+        }
         return class_or_reject(target, BoundaryClass::Extern);
     }
     if intrinsics::is_intrinsic(f) {
@@ -1005,7 +1028,7 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     let mut by_symbol: BTreeMap<String, Vec<Instance>> = BTreeMap::new();
     let mut symbols = BTreeMap::new();
     for i in realization.keys() {
-        let s = req.symbols.symbol(ws, g, i);
+        let s = req.symbols.symbol(ws, g, i, realization[i]);
         by_symbol.entry(s.clone()).or_default().push(i.clone());
         symbols.insert(i.clone(), s);
     }

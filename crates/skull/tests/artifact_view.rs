@@ -54,7 +54,13 @@ fn graph_for(ws: &Workspace) -> (InstanceGraph, Vec<skull_mir::mir::FuncRef>) {
 /// identity property: plan S 0h puts the spelling under the ARTIFACT.
 struct Prefixed(&'static str);
 impl artifact::SymbolPlanner for Prefixed {
-    fn symbol(&self, ws: &Workspace, g: &InstanceGraph, i: &Instance) -> String {
+    fn symbol(
+        &self,
+        ws: &Workspace,
+        g: &InstanceGraph,
+        i: &Instance,
+        _realized: artifact::Realized,
+    ) -> String {
         format!("{}${}", self.0, g.logical_symbol(ws, i))
     }
     fn describe(&self) -> &'static str {
@@ -157,6 +163,37 @@ fn an_artifact_realizes_the_shared_instance_to_the_sibling_that_serves_it() {
     assert_eq!(lid.symbol, jid.symbol, "the fixture no longer shares an emitted symbol");
     assert_ne!(lid.declaration, jid.declaration, "one declaration served both artifacts");
     assert_ne!(lid, jid, "target-distinct boundary contracts collapsed to one id");
+}
+
+#[test]
+fn an_artifact_symbol_follows_the_declaration_it_selected() {
+    let ws = check(
+        r#"
+@nomangle inline(lua) fn sibling_probe(x: int) -> int = "return x"
+inline(js) fn sibling_probe(x: int) -> int = "return x"
+fn main() { let x = sibling_probe(1) }
+"#,
+    );
+    let (g, roots) = graph_for(&ws);
+    let js = artifact::realize(
+        &ws,
+        &g,
+        &ArtifactRequest::new(JAVASCRIPT_WEB, &roots).with_symbols(&artifact::REALIZED_SYMBOLS),
+    );
+    let (instance, realized) = js
+        .realization
+        .iter()
+        .find(|(i, r)| {
+            ws.module(i.func.module).functions[i.func.func].name.as_str() == "sibling_probe"
+                && r.decl != i.func
+        })
+        .expect("the fixture did not select a JS sibling");
+    let selected = Instance { func: realized.decl, args: instance.args.clone() };
+    assert_eq!(
+        js.symbols[instance],
+        selected.symbol(&ws, g.interner()),
+        "the artifact symbol came from the target-neutral representative"
+    );
 }
 
 // ---------------------------------------------------------------------------

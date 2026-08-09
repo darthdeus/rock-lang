@@ -827,41 +827,6 @@ fn too_deep_to_instantiate(
     )))
 }
 
-/// The graph's own [`crate::instance_graph::InstanceBoundTree`] restated as a
-/// [`skull_mir::bound::ResolvedBoundTree`], the vocabulary standalone chunk
-/// lowering reads.
-///
-/// The two exist because a splice's tree (`ResolvedBoundNext::CallerGeneric`)
-/// can defer to the enclosing body's OWN incoming tree -- meaningful only at a
-/// splice, which reads the enclosing body's inference. A RETAINED graph
-/// instance's tree has no such enclosing body to defer to: `reach` resolves
-/// every reached instance's own substitution before walking it, so the
-/// graph's tree is always fully concrete already, which is exactly why it has
-/// no `CallerGeneric` variant to represent at all. `spec` is `None` for a
-/// non-generic witness (no instantiation to name) and `Some` otherwise,
-/// mirroring `ResolvedBoundNext::Concrete`'s own doc.
-fn instance_tree_to_resolved(
-    t: &crate::instance_graph::InstanceBoundTree,
-) -> skull_mir::bound::ResolvedBoundTree {
-    skull_mir::bound::ResolvedBoundTree {
-        next: t
-            .next
-            .iter()
-            .map(|(k, v)| {
-                let spec = if v.callee.args.is_empty() { None } else { Some(v.callee.clone()) };
-                (
-                    *k,
-                    skull_mir::bound::ResolvedBoundNext::Concrete {
-                        func: v.callee.func,
-                        spec,
-                        sub: instance_tree_to_resolved(&v.sub),
-                    },
-                )
-            })
-            .collect(),
-    }
-}
-
 /// **Phase 2's specialized-body population, driven by SpecDemand closure over
 /// `cache.lua_view`'s retained ordinary population -- not by `lua_view.
 /// instances` directly, and not by a reachability walk.**
@@ -940,8 +905,7 @@ fn view_driven_specialized_chunks(
             built.insert(inst, c.clone());
             continue;
         }
-        let tree = cache.graph.bound_tree(&inst).cloned().unwrap_or_default();
-        let tree = instance_tree_to_resolved(&tree);
+        let tree = cache.graph.bound_tree(&inst).cloned().unwrap_or_default().to_resolved();
         let name = inst.symbol(ws, scx.interner());
         let mut specs = Vec::new();
         match emit_spec_chunk(ws, cg, scx, &inst, &tree, &name, &mut inline_cache, &mut specs) {

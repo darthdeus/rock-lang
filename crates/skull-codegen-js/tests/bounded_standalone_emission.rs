@@ -1,20 +1,15 @@
 //! An `Iterator`-bounded body emits STANDALONE to JS at each instantiation
 //! (`docs/monomorphization-plan.md` S 12, mono cut C+D step D-1).
 //!
-//! The JS SIBLING of `crates/skull/tests/bounded_standalone_emission.rs`, and it
-//! exists because the Lua one does not cover this backend. JS keeps its own
-//! specialization queue (`spec_queue` / `collect_spec_bound_calls` in
-//! `emit.rs`), so the Lua-side plumbing does not reach it -- two populations for
-//! one question, which is the shape this arc keeps finding. Both now carry the
-//! demand's `ResolvedBoundTree` and drive the one substitution in
-//! `skull_transform::bound`.
+//! The JS sibling of `crates/skull/tests/bounded_standalone_emission.rs`.
+//! JS retains a delivery queue, while the shared graph owns each instance and
+//! its resolved bound tree.
 //!
 //! The ablation flag is process-global. `cargo test` runs this crate's tests as
 //! threads in one binary, so the guard below holds a lock shared by every test
 //! in it that touches the mode -- today only this file.
 
 use crate::common::ws_with;
-
 
 /// THE ablation lock for this test binary. One mutex, not one per file: a
 /// per-file `static` serializes a file against itself and against nothing else.
@@ -120,5 +115,60 @@ fn an_unbounded_body_emits_to_js_with_inlining_disabled() {
         "the same program without a bounded generic must still emit to JS with \
          inlining disabled, or the sentinel cannot attribute its rejection to the \
          bound; got {err:?}"
+    );
+}
+
+#[test]
+fn js_specializations_consume_graph_bound_trees() {
+    let source = include_str!("../src/emit.rs");
+    assert!(
+        source.contains("let graph_trees = graph"),
+        "JS must snapshot graph bound trees"
+    );
+    assert!(
+        source.contains(".bound_trees()"),
+        "JS must read graph bound trees"
+    );
+    assert!(
+        source.contains("graph_trees"),
+        "JS must retain graph bound trees for delivery"
+    );
+    assert!(
+        source.contains("self.st.graph_trees"),
+        "specialized lowering must read graph trees"
+    );
+}
+
+#[test]
+fn a_column_map_initializer_reaches_its_graph_runtime_entry() {
+    let source = r#"
+nobox value Cell { x: float, y: float }
+global CELLS: Map<int, Cell> = map_new()
+
+fn main() {
+    CELLS.insert(1, Cell { x: 2.0, y: 3.0 })
+}
+"#;
+    let js = emit_js(&ws_with(source)).expect("column-map initialization must emit");
+    assert!(
+        js.contains("Object.create(null)"),
+        "the graph must retain the JS map-spine entry reached by the initializer:\n{js}"
+    );
+}
+
+#[test]
+fn a_generic_inline_js_boundary_is_emitted_per_instance() {
+    let source = r#"
+struct Point { x: int }
+
+fn main() {
+    let p = Point { x: 7 }
+    print("{field_get(p, .x)}")
+}
+"#;
+    let js = emit_js(&ws_with(source)).expect("the retained field_get boundary must emit");
+    assert!(
+        js.lines().any(|line| line.starts_with("function field_get_") && line.contains("_spec_")),
+        "the concrete inline(js) instance must have its own definition:\n{js}"
     );
 }
