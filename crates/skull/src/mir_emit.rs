@@ -2380,6 +2380,11 @@ fn assemble(
             if f.is_extern {
                 // An `extern(ffi, "lib")` fn needs a thin wrapper binding it to the
                 // loaded library handle. A non-ffi extern is a pre-existing global.
+                //
+                // Gated by the VIEW like every other definition. `is_emission_root`
+                // roots every `extern`, so in practice the view retains them all
+                // and this changes no output -- but an ungated write is a second
+                // population input, and one is the whole point of the cut.
                 if let Some(lib) = f.ffi_lib {
                     let nm = f.name.as_str();
                     let params = f.param_decls.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", ");
@@ -2403,7 +2408,14 @@ fn assemble(
                         ExternRet::AsIs => format!("  return {lib}.{nm}({params})"),
                         ExternRet::None => format!("  {lib}.{nm}({params})"),
                     };
-                    let _ = writeln!(out, "function {nm}({params})\n{body}\nend");
+                    // The rejection above runs for EVERY extern; only the WRITE
+                    // is gated. Pruning may change which definitions are emitted
+                    // and nothing else -- gating the whole arm suppressed
+                    // `extern_ret`'s unbound-generic rejection, whose subject is
+                    // a generic declaration the view holds no base instance for.
+                    if emit_def {
+                        let _ = writeln!(out, "function {nm}({params})\n{body}\nend");
+                    }
                 }
                 continue;
             }
@@ -2653,7 +2665,7 @@ fn assemble(
             }
             let self_ref = FuncRef { module: module.id, func: fid };
             let actually_emitted = if f.is_extern {
-                true
+                should_emit_via_view(ws, &cache.lua_view, self_ref)
             } else if f.inline_body.is_some() {
                 emits_foreign_definition(ws, &cache.lua_view, &needed_foreign, self_ref)
             } else {
