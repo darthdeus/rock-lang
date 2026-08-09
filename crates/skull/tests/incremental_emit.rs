@@ -244,6 +244,57 @@ fn an_overlay_carries_a_newly_reachable_specialization() {
     );
 }
 
+/// The overlay carries a NON-GENERIC LIBRARY body the edit made reachable for
+/// the first time (mono cut C+D, `B*-backfill`).
+///
+/// Its two siblings above both add a SPECIALIZATION, and those reach the overlay
+/// through `backfill_new_specializations`, which builds the chunk and files it
+/// in `changed_since_full` -- so they stay green with the reachability backfill
+/// deleted and say nothing about it. This is the arm that has no other route.
+///
+/// The subject must live in a LIBRARY module, and that is the whole reason this
+/// fixture uses a stdlib fn: `is_library_module` makes the compiled unit's own
+/// sources roots, so a fn in the fixture text is emitted whether or not anything
+/// calls it and could never be "newly reachable". `is_ascii_ws` is a plain
+/// `@pure` stdlib fn -- with inlining off it is emitted standalone -- and no
+/// trivial program reaches it.
+///
+/// Both populations are asserted in the same run: it must be ABSENT from the
+/// full build, or "the overlay adds it" is satisfied by a definition that was
+/// already there.
+#[test]
+fn an_overlay_carries_a_newly_reachable_library_body() {
+    let v1 = "fn use_it(c: int) -> bool { return c == 32 }\n\
+              fn main() { print(\"{use_it(9)}\") }";
+    let v2 = "fn use_it(c: int) -> bool { return is_ascii_ws(c) }\n\
+              fn main() { print(\"{use_it(9)}\") }";
+
+    let ws1 = crate::common::ws_with_stdlib(v1);
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (full, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    let defines =
+        |lua: &str| lua.lines().any(|l| l.starts_with("function is_ascii_ws_int_ret_bool("));
+    assert!(
+        !defines(&full.lua),
+        "control: v1 must not define `is_ascii_ws`, or the overlay assertion below \
+         is about a definition that already existed"
+    );
+
+    let ws2 = crate::common::ws_with_stdlib(v2);
+    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "use_it")]);
+    assert!(
+        overlay.lua.contains("is_ascii_ws_int_ret_bool("),
+        "control: the edited body must actually call it:\n{}",
+        overlay.lua
+    );
+    assert!(
+        defines(&overlay.lua),
+        "the overlay must DEFINE the library body the edit made reachable, or the \
+         reload calls a nil global:\n{}",
+        overlay.lua
+    );
+}
+
 /// The overlay backfills a newly-reachable `Iterator`-BOUNDED body, which is
 /// the case its demand tree is load-bearing for (mono cut C+D, D-1 +
 /// `B*-backfill`).
