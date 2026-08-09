@@ -2308,7 +2308,8 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
         let (emit_ms, overlay_bytes, phases) = {
             let ws = session.workspace();
             let t_e = Instant::now();
-            let e = skull::mir_emit::emit_overlay(ws, &mut cache, &upd.reinferred);
+            let e = skull::mir_emit::emit_overlay(ws, &mut cache, &upd.reinferred)
+                .map_err(|e| anyhow::anyhow!("emit_overlay: {}", e.message))?;
             (ms(t_e), e.lua.len(), e.phases)
         };
 
@@ -2584,6 +2585,7 @@ impl SkullStone {
             let overlay = {
                 let ws = self.project.workspace();
                 skull::mir_emit::emit_overlay(ws, &mut self.cache, &reinferred)
+                    .map_err(|e| anyhow::anyhow!("{}", render_project_err(self.project.sources(), &e)))?
             };
             let bytes = overlay.lua.len();
             let emit_ms = t_emit.elapsed().as_secs_f64() * 1000.0;

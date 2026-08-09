@@ -12,7 +12,15 @@ use bone_semantic::hir::BodyOwner;
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
 use crate::common::{emit_module, function_body, ws_with_stdlib};
-use skull::mir_emit::{emit_full, emit_incremental, emit_overlay};
+use skull::mir_emit::{emit_full, emit_incremental, emit_overlay as emit_overlay_result, MirEmit, SkullEmitCache};
+
+fn emit_overlay(
+    ws: &Workspace,
+    cache: &mut SkullEmitCache,
+    reinferred: &[(ModuleId, BodyOwner)],
+) -> MirEmit {
+    emit_overlay_result(ws, cache, reinferred).expect("emit_overlay")
+}
 
 /// One shared vertex + one fragment, referenced from TWO call sites (two fns).
 const SRC: &str = r#"

@@ -3064,13 +3064,16 @@ fn build_graph_added_chunks(
         if !seen.insert(body.clone()) {
             continue;
         }
+        let f = &ws.module(body.func.module).functions[body.func.func];
+        if !is_cached_emitted_body(f, &body) {
+            continue;
+        }
         if cache.chunks.get(&body).is_some_and(|chunk| chunk.is_ok()) {
             if !cache.emitted.contains(&body) {
                 cache.changed_since_full.insert(body.clone());
             }
             continue;
         }
-        let f = &ws.module(body.func.module).functions[body.func.func];
         let chunk = if body.args.is_empty() {
             match rebuild_chunk(
                 ws,
@@ -3154,6 +3157,12 @@ fn build_graph_added_chunks(
         cache.changed_since_full.insert(body);
     }
     errs
+}
+
+fn combine_errors(mut errors: Vec<CompilerError>) -> Option<CompilerError> {
+    let first = errors.first()?.clone();
+    errors.remove(0);
+    Some(first.with_siblings(errors))
 }
 
 fn update_chunk_cache(
@@ -3323,8 +3332,8 @@ pub fn emit_incremental(
     // build's.
     let shader_changed = cache.update_shader_registrations(ws, reinferred)?;
     let (_affected, added_errors) = cache.update_chunk_cache(ws, reinferred);
-    for err in added_errors {
-        eprintln!("skull incremental emit: graph-added body -- {}", err.message);
+    if let Some(err) = SkullEmitCache::combine_errors(added_errors) {
+        return Err(err);
     }
     if shader_changed {
         cache.refresh_shader_registrations(ws)?;
@@ -3565,7 +3574,7 @@ pub fn emit_overlay(
     ws: &Workspace,
     cache: &mut SkullEmitCache,
     reinferred: &[(ModuleId, BodyOwner)],
-) -> MirEmit {
+) -> Result<MirEmit, CompilerError> {
     let t0 = Instant::now();
     // `cg` is cached (interface-derived, identical on body edits) -- no rebuild.
     let t_cg = t0.elapsed();
@@ -3576,21 +3585,13 @@ pub fn emit_overlay(
     let t2 = Instant::now();
     // Shader registrations FIRST -- their dependencies are graph/view roots, so
     // `update_chunk_cache`'s re-walk must see this edit's set.
-    let shader_changed = match cache.update_shader_registrations(ws, reinferred) {
-        Ok(changed) => changed,
-        Err(err) => {
-            eprintln!("skull overlay emit: rock_shader registration -- {}", err.message);
-            false
-        }
-    };
+    let shader_changed = cache.update_shader_registrations(ws, reinferred)?;
     let (affected, added_errors) = cache.update_chunk_cache(ws, reinferred);
-    for err in added_errors {
-        eprintln!("skull overlay emit: graph-added body -- {}", err.message);
+    if let Some(err) = SkullEmitCache::combine_errors(added_errors) {
+        return Err(err);
     }
     if shader_changed {
-        if let Err(err) = cache.refresh_shader_registrations(ws) {
-            eprintln!("skull overlay emit: graph-owned shader registration -- {}", err.message);
-        }
+        cache.refresh_shader_registrations(ws)?;
     }
     cache.changed_since_full.extend(affected);
     // Accumulate changed `const` globals so the overlay re-emits their inits
@@ -3622,12 +3623,10 @@ pub fn emit_overlay(
         cache.static_key_baseline.insert(cell, key);
     }
     let t_asm = t3.elapsed();
-    // Overlay can't return Err (its `MirEmit` return is baked into the watch
-    // fast-path callers), but a body edit that mints a newly-colliding synthetic
-    // name must not be swallowed. Warn (never-swallow); the next full/incremental
-    // rebuild rejects it authoritatively through `assemble`.
+    // A body edit that mints a newly-colliding synthetic name is not safe to
+    // deliver as an overlay.
     if let Some(err) = cache.cg.take_rejection() {
-        eprintln!("skull overlay emit: reserved-name collision -- {}", err.message);
+        return Err(err);
     }
     emit.phases = vec![
         ("CodegenCtx::new", t_cg),
@@ -3635,5 +3634,5 @@ pub fn emit_overlay(
         ("update_chunk_cache (re-lower changed)", t_relower),
         ("assemble_overlay (+build_deco_map)", t_asm),
     ];
-    emit
+    Ok(emit)
 }

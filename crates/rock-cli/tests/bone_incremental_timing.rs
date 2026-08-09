@@ -124,7 +124,8 @@ fn emit_overlay_changed_fn_plus_rebind_accumulates() {
     let edit1 = target.1.replace(needle, &format!("{needle} // overlay-test-1"));
     let r1 = session.update_file(&target.0, &edit1).expect("update 1");
     assert_eq!(r1.tier, bone_incremental::session::UpdateTier::BodyOnly, "body edit");
-    let ov1 = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &r1.reinferred);
+    let ov1 = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &r1.reinferred)
+        .expect("emit_overlay");
 
     assert!(ov1.lua.contains("\nfunction "), "overlay must redefine a fn:\n{}", &ov1.lua[..ov1.lua.len().min(400)]);
     assert!(ov1.lua.contains("clear_all_systems()"), "overlay must rebind systems");
@@ -137,7 +138,8 @@ fn emit_overlay_changed_fn_plus_rebind_accumulates() {
     if target.1.matches(needle2).count() == 1 {
         let edit2 = edit1.replace(needle2, &format!("{needle2} // overlay-test-2"));
         let r2 = session.update_file(&target.0, &edit2).expect("update 2");
-        let ov2 = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &r2.reinferred);
+        let ov2 = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &r2.reinferred)
+            .expect("emit_overlay");
         assert!(
             ov2.lua.lines().count() >= lines1,
             "overlay should accumulate, not shrink: {} -> {}",

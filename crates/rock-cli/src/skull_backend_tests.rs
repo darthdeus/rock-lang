@@ -1,5 +1,13 @@
 use std::time::Duration;
 
+fn emit_overlay_checked(
+    ws: &bone_semantic::inference::Workspace,
+    cache: &mut skull::mir_emit::SkullEmitCache,
+    reinferred: &[(bone_semantic::prelude::ModuleId, bone_semantic::hir::BodyOwner)],
+) -> skull::mir_emit::MirEmit {
+    skull::mir_emit::emit_overlay(ws, cache, reinferred).expect("emit_overlay")
+}
+
 #[cfg(test)]
 enum ExecOutcome {
     /// Clean run; holds full stdout (module load prints + test prints).
@@ -385,7 +393,7 @@ mod overlay_runtime_tests {
     //! cache, and compose `frozen_baseline ++ overlay` against a fresh `emit_full`.
 
     use crate::bone_backend::bone_session;
-    use super::{exec_lua, normalize_stdout, ExecOutcome};
+    use super::{emit_overlay_checked, exec_lua, normalize_stdout, ExecOutcome};
 
     /// Standalone `@test`/synthetic programs have no engine, but the overlay
     /// always calls `clear_all_systems()` (the system rebind). Stub it so the
@@ -515,7 +523,7 @@ mod overlay_runtime_tests {
             "constructing an already-defined value struct is a body edit, got {:?}",
             result.tier
         );
-        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
         assert!(overlay.lua.contains("P_ct"), "overlay's edited body must reference P_ct");
         let fresh = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1").0;
 
@@ -547,7 +555,7 @@ mod overlay_runtime_tests {
             "literal edit should be BodyOnly, got {:?}",
             result.tier
         );
-        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
         let fresh = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1").0;
 
         // Sanity: the stale baseline alone prints 1,1 -- so a leak is observable.
@@ -581,7 +589,7 @@ mod overlay_runtime_tests {
             "const value edit should be BodyOnly, got {:?}",
             result.tier
         );
-        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
         let fresh = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1").0;
 
         // Sanity: the stale baseline alone prints the OLD const, so a leak is observable.
@@ -623,7 +631,7 @@ mod overlay_runtime_tests {
             "static initializer edit should be BodyOnly, got {:?}",
             result.tier
         );
-        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
 
         // Warm the static in the frozen baseline (first main() -> inits x=5, sets
         // the done-flag), THEN load the overlay + call again. The bug is observable
@@ -661,7 +669,7 @@ mod overlay_runtime_tests {
             "nested static init edit should be BodyOnly, got {:?}",
             result.tier
         );
-        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
 
         let composed = run_parts(&[&stale_main, SYS_STUB, "main()", &overlay.lua, "main()"]);
         match composed {
@@ -696,9 +704,9 @@ mod overlay_runtime_tests {
         let stale_main = full0.lua;
 
         let r1 = session.update_file("main.rock", v1).expect("update v1");
-        let overlay1 = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &r1.reinferred);
+        let overlay1 = emit_overlay_checked(session.workspace(), &mut cache, &r1.reinferred);
         let r2 = session.update_file("main.rock", v2).expect("update v2");
-        let overlay2 = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &r2.reinferred);
+        let overlay2 = emit_overlay_checked(session.workspace(), &mut cache, &r2.reinferred);
 
         // Models the live game: main.lua(v0) loaded once; each overlay dofile'd in
         // turn; probe reached (accumulating) between reloads. n: inits 0 -> 1,2 ->
@@ -750,7 +758,7 @@ mod overlay_runtime_tests {
             "unrelated body edit should be BodyOnly, got {:?}",
             result.tier
         );
-        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
 
         // Warm the static to 99 (DO_SET=true, one call), load the overlay, then call
         // again with DO_SET=false: an unrelated edit must PRESERVE n -> still 99.
@@ -787,7 +795,7 @@ mod overlay_runtime_tests {
             "const value edit should be BodyOnly, got {:?}",
             result.tier
         );
-        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
         let fresh = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1").0;
 
         // Sanity: the stale baseline prints the OLD downstream value (B = old A + 1).
@@ -815,7 +823,7 @@ mod overlay_runtime_tests {
         let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
 
         let result = session.update_file("main.rock", v1).expect("update v1");
-        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
 
         // A changed -> its ginit fn + line re-emitted. DEP reads A -> its line
         // re-emitted (ginit unchanged, lives in main.lua). UNRELATED is independent
@@ -949,7 +957,7 @@ mod overlay_runtime_tests {
                 diags.iter().map(|d| d.message.clone()).collect::<Vec<_>>()
             );
 
-            let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+            let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
             let fresh = skull::mir_emit::emit_full(session.workspace(), mid)
                 .unwrap_or_else(|e| panic!("seed {seed} step {step}: emit_full vk: {}", e.message))
                 .0;
@@ -1037,7 +1045,7 @@ mod overlay_runtime_tests {
             .iter()
             .map(|(fid, _)| (mid, BodyOwner::Function(fid)))
             .collect();
-        let overlay = skull::mir_emit::emit_overlay(&ws, &mut cache, &reinferred);
+        let overlay = emit_overlay_checked(&ws, &mut cache, &reinferred);
 
         // The overlay rebind calls `__rock_rebind_system` (an engine fn absent in
         // a standalone @test compile) for each changed decorated fn. Files with
@@ -1208,7 +1216,7 @@ mod overlay_runtime_tests {
             result.reinferred.len(), 1,
             "a decorated-fn body edit must re-infer exactly the edited body"
         );
-        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
         // The overlay carries the redefined body AND a targeted rebind of just the
         // changed decorated fn (in-place, not clear-all + re-register-all).
         assert!(
@@ -1284,7 +1292,7 @@ mod overlay_runtime_tests {
         // The co fn body edit must re-infer exactly the edited body.
         assert_eq!(result.reinferred.len(), 1, "a co fn body edit re-infers exactly one body");
 
-        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
         // The overlay must carry the re-emitted coroutine (its top-level step fn).
         assert!(
             overlay.lua.contains("counter_ret_Coroutine_int_unit_unit__step("),
@@ -1340,7 +1348,7 @@ mod overlay_runtime_tests {
         }
 
         let result = session.update_file("main.rock", &v1).expect("update v1");
-        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
         // The overlay must re-emit the whole frame-slot channel.
         assert!(overlay.lua.contains("gen_ret_Coroutine_Ev_unit_unit__step("), "overlay must re-emit the step fn:\n{}", overlay.lua);
         assert!(overlay.lua.contains(".__y0 = "), "overlay step must write yield leaves to frame slots:\n{}", overlay.lua);
@@ -1400,7 +1408,7 @@ mod overlay_runtime_tests {
         let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
 
         let result = session.update_file("main.rock", &v1).expect("update v1");
-        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
 
         // start() + pump() under v0 (Tick(1)=1), then overlay, then pump() x3 on the
         // SAME live coroutine under v1: Pair(10,20)=30, Done=100, then done -> -1.
@@ -1469,7 +1477,7 @@ mod overlay_runtime_tests {
             "inserting a let is a body edit -- must be BodyOnly (the premise), got {:?}",
             result.tier
         );
-        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
 
         // start() + pump() under v0 (Tick(7)=7, suspended at state 1), overlay,
         // then pump() again on the SAME live coroutine. The frame layout stamp
@@ -1522,7 +1530,7 @@ mod overlay_runtime_tests {
             "adding a yield is a body edit -- must be BodyOnly (the premise), got {:?}",
             result.tier
         );
-        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
 
         // v0: pump() -> Tick(1)=1, suspended at state 1 (before print("fire")).
         // Overlay renumbers: the new Ev::Done yield becomes state 1, so the live
@@ -1574,7 +1582,7 @@ mod overlay_runtime_tests {
             "a constant tweak in the inner co fn must be BodyOnly, got {:?}",
             result.tier
         );
-        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
 
         // pump #1 under v0: outer primes inner, re-yields inner's Tick(1). Overlay
         // (layout-stable: constants only). pump #2 resumes the live chain: the
@@ -1627,7 +1635,7 @@ mod overlay_runtime_tests {
             "outer's added local must be BodyOnly, got {:?}",
             result.tier
         );
-        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
 
         // pump #1: outer primes inner -> Tick(1). Overlay shifts OUTER's layout.
         // pump #2: outer stamp-killed -> -1, and the inner's on_killed must fire.
@@ -1676,7 +1684,7 @@ mod overlay_runtime_tests {
         let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
         let result = session.update_file("main.rock", &v1).expect("update v1");
         assert!(matches!(result.tier, bone_incremental::session::UpdateTier::BodyOnly));
-        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
 
         // pump #1: Tick(7), BUSY=1, suspended. Overlay (cell shift). pump #2:
         // stamp-kill -> -1, and the v0 defer must have cleared BUSY.
@@ -2082,9 +2090,9 @@ mod overlay_runtime_tests {
         let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
 
         let r1 = session.update_file("main.rock", &v1).expect("update v1");
-        let overlay1 = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &r1.reinferred);
+        let overlay1 = emit_overlay_checked(session.workspace(), &mut cache, &r1.reinferred);
         let r2 = session.update_file("main.rock", &v2).expect("update v2");
-        let overlay2 = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &r2.reinferred);
+        let overlay2 = emit_overlay_checked(session.workspace(), &mut cache, &r2.reinferred);
 
         // full0 registers bump_fire_count via @on_reload. Each overlay is a body
         // edit of `unrelated` (bump_fire_count is NEVER in the changed set), then a
@@ -2134,7 +2142,7 @@ mod overlay_runtime_tests {
         let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
 
         let r1 = session.update_file("main.rock", &v1).expect("update v1");
-        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &r1.reinferred);
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &r1.reinferred);
 
         // full0 registers `refresh` by name. The overlay redefines the `refresh`
         // global (new body); the fire must resolve and run the NEW body -> OUT == 2.
@@ -2282,7 +2290,7 @@ mod overlay_runtime_tests {
             "editing a lambda operator is a body edit, got {:?}",
             result.tier
         );
-        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
         assert!(
             overlay.lua.contains("gen_ret_Coroutine_Ev_unit_unit__step__lambda0"),
             "the overlay must carry the hoisted lambda body (const-hoist precedent); \
@@ -2343,7 +2351,7 @@ mod overlay_runtime_tests {
         );
 
         let result = session.update_file("main.rock", &v1).expect("update v1");
-        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
         assert!(overlay.lua.contains("gen_ret_Coroutine_Ev_unit_unit__step__lambda1"), "overlay must carry the hoisted g body");
 
         // start() + pump() under v0: f = record snapshotting the OLD lambda0
@@ -2405,7 +2413,7 @@ mod overlay_runtime_tests {
             "adding a lambda-local is a body edit, got {:?}",
             result.tier
         );
-        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
         let fresh = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1").0;
 
         // Dense slots leave the stamp fixed under a lambda-internal cell edit.
@@ -2462,7 +2470,7 @@ mod overlay_runtime_tests {
             "adding a co-fn local is a body edit, got {:?}",
             result.tier
         );
-        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
         let fresh = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1").0;
 
         assert_ne!(

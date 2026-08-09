@@ -8,8 +8,16 @@
 use bone_semantic::hir::BodyOwner;
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
-use skull::mir_emit::{emit_full, emit_incremental, emit_overlay};
+use skull::mir_emit::{emit_full, emit_incremental, emit_overlay as emit_overlay_result, MirEmit};
 use crate::common::ws_of;
+
+fn emit_overlay(
+    ws: &Workspace,
+    cache: &mut skull::mir_emit::SkullEmitCache,
+    reinferred: &[(ModuleId, BodyOwner)],
+) -> MirEmit {
+    emit_overlay_result(ws, cache, reinferred).expect("emit_overlay")
+}
 
 /// The `(ModuleId, BodyOwner)` reinferred-id for the named function in `ws`.
 fn body_id(ws: &Workspace, name: &str) -> (ModuleId, BodyOwner) {
@@ -425,51 +433,76 @@ fn an_overlay_carries_a_newly_reachable_library_body() {
     );
 }
 
-/// The overlay materializes a newly-reachable `Iterator`-BOUNDED body, which is
-/// the case its demand tree is load-bearing for (mono cut C+D, D-1 +
-/// the graph-delta construction path.
-///
-/// A bounded body cannot be lowered from its declaration alone: its placeholder
-/// `next` calls are resolved by the demand, not by the body. So this is the arm
-/// that says graph construction carries the TREE and not just the key -- a
-/// declaration-only rebuild would reject rather than emit.
-///
-/// Runs with inlining DISABLED, where a bounded call has no splice to fall back
-/// on.
+/// A graph-added specialization whose user body fails construction must make
+/// both reload paths fail closed.
 #[test]
-fn an_overlay_carries_a_newly_reachable_bounded_body() {
-    let _g = crate::common::AblationGuard::on();
-    let common = "fn total<I: Iterator<int>>(it: I) -> int {\n\
-                  \x20   let s = 0\n\
-                  \x20   for v in it { s = s + v }\n\
-                  \x20   return s\n\
+fn an_overlay_rejects_a_failed_graph_added_body() {
+    let common = "nobox value NV2 { x: float, y: float }\n\
+                  fn bad<T>(xs: [T]) -> int {\n\
+                  \x20   let t = (xs[0], 1.0)\n\
+                  \x20   print(\"{t}\")\n\
+                  \x20   return 0\n\
                   }\n";
     let v1 = common.to_string() + "fn use_it() -> int { return 0 }";
     let v2 = common.to_string()
         + "fn use_it() -> int {\n\
-           \x20   let xs: [int] = [1, 2, 3]\n\
-           \x20   return total(xs.iter())\n\
+           \x20   let xs: [NV2] = [NV2 { x: 1.0, y: 2.0 }]\n\
+           \x20   return bad(xs)\n\
            }";
 
     let ws1 = crate::common::ws_with_stdlib(&v1);
     let mid = skull::user_module_id(&ws1).unwrap();
     let (full, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
-    let standalone = |lua: &str| {
-        lua.lines().any(|l| l.starts_with("function total_") && l.contains("_spec_"))
-    };
-    assert!(
-        !standalone(&full.lua),
-        "control: v1 must NOT already define the bounded body, or graph addition has \
-         nothing to add"
-    );
+    assert!(!full.lua.contains("function bad_"), "v1 must not emit the specialization");
 
     let ws2 = crate::common::ws_with_stdlib(&v2);
-    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "use_it")]);
+    let err = match emit_overlay_result(&ws2, &mut cache, &[body_id(&ws2, "use_it")]) {
+        Ok(_) => panic!("a failed graph-added construction must trigger FullRequired"),
+        Err(err) => err,
+    };
     assert!(
-        standalone(&overlay.lua),
-        "the overlay must ADD the bounded body the edit made reachable, with its \
-         placeholders resolved from the demand's tree:\n{}",
-        overlay.lua
+        err.message.contains("nobox") && err.message.contains("bad"),
+        "the overlay failure must identify the graph-added construction: {}",
+        err.message
+    );
+}
+
+#[test]
+fn graph_added_construction_failure_is_propagated_by_incremental() {
+    let common = "nobox value NV2 { x: float, y: float }\n\
+                  fn bad<T>(xs: [T]) -> int {\n\
+                  \x20   let t = (xs[0], 1.0)\n\
+                  \x20   print(\"{t}\")\n\
+                  \x20   return 0\n\
+                  }\n";
+    let v1 = common.to_string() + "fn use_it() -> int { return 0 }";
+    let v2 = common.to_string()
+        + "fn use_it() -> int {\n\
+           \x20   let xs: [NV2] = [NV2 { x: 1.0, y: 2.0 }]\n\
+           \x20   return bad(xs)\n\
+           }";
+
+    let ws1 = crate::common::ws_with_stdlib(&v1);
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let ws2 = crate::common::ws_with_stdlib(&v2);
+    let full_err = match emit_full(&ws2, skull::user_module_id(&ws2).unwrap()) {
+        Ok(_) => panic!("a full build must reject the failed graph-added construction"),
+        Err(err) => err,
+    };
+    assert!(
+        full_err.message.contains("nobox") && full_err.message.contains("bad"),
+        "the full-build failure must identify the rejected specialization: {}",
+        full_err.message
+    );
+    let (_, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    let err = match emit_incremental(&ws2, &mut cache, &[body_id(&ws2, "use_it")]) {
+        Ok(_) => panic!("a failed graph-added construction must not be printed and ignored"),
+        Err(err) => err,
+    };
+    assert!(
+        err.message.contains("nobox") && err.message.contains("bad"),
+        "the propagated error must identify the failed graph-added construction: {}",
+        err.message
     );
 }
 
