@@ -1,8 +1,3 @@
-struct FullscreenVertexIn {
-  @location(0) position: vec2<f32>,
-  @location(1) uv: vec2<f32>,
-}
-
 struct FullscreenVertexOut {
   @builtin(position) position: vec4<f32>,
   @location(0) uv: vec2<f32>,
@@ -42,10 +37,12 @@ fn present_frag_SrcTex_PresentU_Vec2_ret_Vec4(uv: vec2<f32>) -> vec4<f32> {
 }
 
 @vertex
-fn fullscreen_vertex(input: FullscreenVertexIn) -> FullscreenVertexOut {
+fn fullscreen_vertex(@builtin(vertex_index) vertex_index: u32) -> FullscreenVertexOut {
   var output: FullscreenVertexOut;
-  output.position = vec4<f32>(input.position, 0.0, 1.0);
-  output.uv = input.uv;
+  let x = f32(vertex_index & 1u) * 2.0 - 1.0;
+  let y = f32(vertex_index >> 1u) * 2.0 - 1.0;
+  output.position = vec4<f32>(x, y, 0.0, 1.0);
+  output.uv = vec2<f32>(f32(vertex_index & 1u), f32(vertex_index >> 1u));
   return output;
 }
 

@@ -13,6 +13,7 @@ use bone_semantic::{
     inference::Workspace,
 };
 use comfy_la_arena::Idx;
+use skull_codegen_shader::{ShaderArtifactPlan, ShaderPlannerPolicy};
 use skull_mir::gpu_layout::{SamplerKind, WireKind};
 use skull_mir::mir::{Inst, Lit, MirFunc, Term};
 use skull_mir::shader_ir::{
@@ -25,14 +26,37 @@ use std::fmt::Write as _;
 use ustr::Ustr;
 
 pub const WGSL_BIND_GROUP: u32 = 0;
-pub const FULLSCREEN_POSITION_LOCATION: u32 = 0;
-pub const FULLSCREEN_UV_LOCATION: u32 = 1;
 pub const FULLSCREEN_VARYING_LOCATION: u32 = 0;
 pub const FRAGMENT_OUTPUT_LOCATION: u32 = 0;
-pub const FULLSCREEN_VERTEX_STRIDE: u32 = 16;
 
 fn err(span: Span, message: impl Into<String>) -> CompilerError {
     CompilerError::new_with_label(span, message.into())
+}
+
+/// The inline call surface this emitter actually knows how to render. The
+/// neutral planner receives this policy instead of importing a GLSL mapping.
+pub struct WgslShaderPolicy;
+
+impl ShaderPlannerPolicy for WgslShaderPolicy {
+    fn inline_call(&self, function: &Function) -> bool {
+        matches!(
+            function.name.as_str(),
+            "texture" | "v" | "clamp" | "floor" | "fract" | "max" | "min" | "abs"
+        ) || (function.name.as_str().starts_with("__op_") && function.param_decls.len() == 2)
+    }
+
+    fn backend_name(&self) -> &'static str {
+        "WGSL"
+    }
+}
+
+/// Plan a compiler-owned fullscreen fragment without involving another
+/// backend's emitter or ABI.
+pub fn plan_fullscreen_artifact(
+    ws: &Workspace,
+    root: skull_mir::mir::FuncRef,
+) -> Result<ShaderArtifactPlan, CompilerError> {
+    skull_codegen_shader::plan_fullscreen_fragment(ws, root, &WgslShaderPolicy)
 }
 
 fn round_up(value: u32, alignment: u32) -> u32 {
@@ -199,13 +223,18 @@ pub struct WgslTextureBinding {
     pub visibility: WgslStageVisibility,
 }
 
+/// The topology the compiler-owned vertex-index fullscreen stage needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WgslPrimitiveTopology {
+    TriangleStrip,
+}
+
 /// The compiler-owned geometry contract for the fullscreen vertex stage.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WgslFullscreenVertex {
-    pub position_location: u32,
-    pub uv_location: u32,
+    pub topology: WgslPrimitiveTopology,
+    pub vertex_count: u32,
     pub varying_location: u32,
-    pub stride: u32,
 }
 
 /// The fragment input/output locations for the admitted fullscreen shape.
@@ -256,10 +285,9 @@ impl WgslAbiPlan {
         Ok(Self {
             bind_group: WGSL_BIND_GROUP,
             fullscreen_vertex: WgslFullscreenVertex {
-                position_location: FULLSCREEN_POSITION_LOCATION,
-                uv_location: FULLSCREEN_UV_LOCATION,
+                topology: WgslPrimitiveTopology::TriangleStrip,
+                vertex_count: 4,
                 varying_location: FULLSCREEN_VARYING_LOCATION,
-                stride: FULLSCREEN_VERTEX_STRIDE,
             },
             fragment: WgslFragmentIo {
                 uv_location: FULLSCREEN_VARYING_LOCATION,
@@ -556,6 +584,7 @@ pub fn texture_type(kind: SamplerKind) -> &'static str {
 #[derive(Clone)]
 pub struct WgslShaderEmission {
     pub source: String,
+    pub dependencies: Vec<skull_mir::mir::FuncRef>,
     pub interface: ShaderInterfacePlan,
     pub abi: WgslAbiPlan,
     pub ir: ShaderIR,
@@ -607,6 +636,7 @@ pub fn emit_fullscreen_shader(
 
     Ok(WgslShaderEmission {
         source,
+        dependencies: ir.declarations(),
         interface: iface.clone(),
         abi: abi.clone(),
         ir: ir.clone(),
@@ -646,16 +676,7 @@ fn validate_known_bodies(stage: &ShaderStageIr, span: Span) -> Result<(), Compil
 
 fn emit_fullscreen_types(out: &mut String, abi: &WgslAbiPlan) {
     let vertex = abi.fullscreen_vertex;
-    let fragment = abi.fragment;
-    writeln!(out, "struct FullscreenVertexIn {{").unwrap();
-    writeln!(
-        out,
-        "  @location({}) position: vec2<f32>,",
-        vertex.position_location
-    )
-    .unwrap();
-    writeln!(out, "  @location({}) uv: vec2<f32>,", vertex.uv_location).unwrap();
-    out.push_str("}\n\nstruct FullscreenVertexOut {\n");
+    out.push_str("struct FullscreenVertexOut {\n");
     writeln!(out, "  @builtin(position) position: vec4<f32>,").unwrap();
     writeln!(
         out,
@@ -664,7 +685,6 @@ fn emit_fullscreen_types(out: &mut String, abi: &WgslAbiPlan) {
     )
     .unwrap();
     out.push_str("}\n\n");
-    let _ = fragment;
 }
 
 fn emit_uniforms(out: &mut String, abi: &WgslAbiPlan) {
@@ -716,14 +736,13 @@ fn emit_textures(out: &mut String, abi: &WgslAbiPlan) {
 }
 
 fn emit_fullscreen_entries(out: &mut String, abi: &WgslAbiPlan, entry: String) {
-    let vertex = abi.fullscreen_vertex;
     let fragment = abi.fragment;
-    out.push_str(
-        "@vertex\nfn fullscreen_vertex(input: FullscreenVertexIn) -> FullscreenVertexOut {\n",
-    );
+    out.push_str("@vertex\nfn fullscreen_vertex(@builtin(vertex_index) vertex_index: u32) -> FullscreenVertexOut {\n");
     out.push_str("  var output: FullscreenVertexOut;\n");
-    out.push_str("  output.position = vec4<f32>(input.position, 0.0, 1.0);\n");
-    out.push_str("  output.uv = input.uv;\n");
+    out.push_str("  let x = f32(vertex_index & 1u) * 2.0 - 1.0;\n");
+    out.push_str("  let y = f32(vertex_index >> 1u) * 2.0 - 1.0;\n");
+    out.push_str("  output.position = vec4<f32>(x, y, 0.0, 1.0);\n");
+    out.push_str("  output.uv = vec2<f32>(f32(vertex_index & 1u), f32(vertex_index >> 1u));\n");
     out.push_str("  return output;\n}\n\n");
     writeln!(
         out,
@@ -734,7 +753,6 @@ fn emit_fullscreen_entries(out: &mut String, abi: &WgslAbiPlan, entry: String) {
     .unwrap();
     writeln!(out, "  return {}(input.uv);", entry).unwrap();
     out.push_str("}\n");
-    let _ = vertex;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

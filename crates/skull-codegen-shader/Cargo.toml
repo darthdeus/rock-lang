@@ -1,0 +1,18 @@
+[package]
+name = "skull-codegen-shader"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bone-semantic = { path = "../bone-semantic" }
+comfy-la-arena = { workspace = true }
+rustc-hash = { workspace = true }
+skull-mir = { path = "../skull-mir" }
+skull-parser = { path = "../skull-parser" }
+ustr = { workspace = true }
+
+[dev-dependencies]
+rock-host = { path = "../rock-host" }
+
+[lints]
+workspace = true

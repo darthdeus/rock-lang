@@ -1,6 +1,7 @@
 use bone_semantic::prelude::Span;
-use skull_codegen_glsl::GlslProfile;
-use skull_codegen_wgsl::{WgslAbiPlan, emit_fullscreen_shader};
+use skull_codegen_wgsl::{
+    WgslAbiPlan, WgslPrimitiveTopology, emit_fullscreen_shader, plan_fullscreen_artifact,
+};
 use skull_mir::mir::{Inst, Term};
 use std::sync::LazyLock;
 use ustr::Ustr;
@@ -18,6 +19,7 @@ static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         .collect()
 });
 
+// This is the deliberate migration slice, not a census of every shader root.
 const ROOTS: &[(&str, &str, &str)] = &[
     (
         "blit_frag",
@@ -56,16 +58,14 @@ fn artifact(root: &str, source: &str) -> skull_codegen_wgsl::WgslShaderEmission 
         source
     );
     let (ws, mid) = workspace(&source);
-    let neutral = skull_codegen_glsl::emit_shader_entry_with_dependencies(
-        &ws,
-        mid,
-        root,
-        GlslProfile::Core330,
-    )
-    .expect("neutral ShaderIR/interface");
+    let fref = skull_codegen_shader::resolve_root(&ws, mid, root).expect("root");
+    let neutral = plan_fullscreen_artifact(&ws, fref).expect("neutral ShaderIR/interface");
     let abi = WgslAbiPlan::wgsl(&neutral.interface, Span::default()).expect("WGSL ABI");
-    emit_fullscreen_shader(&ws, &neutral.ir, &neutral.interface, &abi, Span::default())
-        .expect("WGSL emission")
+    let emission =
+        emit_fullscreen_shader(&ws, &neutral.ir, &neutral.interface, &abi, Span::default())
+            .expect("WGSL emission");
+    assert_eq!(emission.dependencies, neutral.dependencies);
+    emission
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -109,7 +109,7 @@ fn operation_census(emission: &skull_codegen_wgsl::WgslShaderEmission) -> Operat
 }
 
 #[test]
-fn neutral_ir_operation_census_covers_the_three_admitted_roots() {
+fn neutral_ir_operation_census_covers_the_three_selected_migration_roots() {
     let expected = [
         (
             "blit_frag",
@@ -160,24 +160,24 @@ fn neutral_ir_operation_census_covers_the_three_admitted_roots() {
         assert_eq!(operation_census(&artifact(root, source)), expected_census);
         examined += 1;
     }
-    assert_eq!(examined, 3, "all admitted roots were censused");
+    assert_eq!(examined, 3, "all selected migration roots were censused");
 }
 
 #[test]
-fn the_admitted_fullscreen_population_is_examined_and_admitted_3_of_3() {
+fn the_selected_fullscreen_migration_roots_are_examined_and_emitted_3_of_3() {
     let mut examined = 0;
-    let mut admitted = 0;
+    let mut emitted = 0;
     let mut errors = Vec::new();
     for (root, source, _) in ROOTS {
         examined += 1;
         match std::panic::catch_unwind(|| artifact(root, source)) {
-            Ok(_) => admitted += 1,
+            Ok(_) => emitted += 1,
             Err(_) => errors.push(*root),
         }
     }
-    assert_eq!(examined, 3, "the validator examined every admitted root");
-    assert_eq!(admitted, 3, "WGSL admitted roots: {errors:?}");
-    assert!(errors.is_empty(), "no admitted root was silently skipped");
+    assert_eq!(examined, 3, "the validator examined every selected root");
+    assert_eq!(emitted, 3, "WGSL selected migration roots: {errors:?}");
+    assert!(errors.is_empty(), "no selected root was silently skipped");
 }
 
 #[test]
@@ -196,7 +196,13 @@ fn source_goldens_and_physical_structure_are_deterministic() {
             "one fragment entry for `{root}`"
         );
         assert!(artifact.source.contains("fn fragment_main"));
-        assert_eq!(artifact.abi.fullscreen_vertex.stride, 16);
+        assert_eq!(artifact.abi.fullscreen_vertex.vertex_count, 4);
+        assert_eq!(
+            artifact.abi.fullscreen_vertex.topology,
+            WgslPrimitiveTopology::TriangleStrip
+        );
+        assert!(artifact.source.contains("@builtin(vertex_index)"));
+        assert!(!artifact.source.contains("FullscreenVertexIn"));
         assert_eq!(artifact.abi.fragment.output_location, 0);
         assert!(
             artifact
@@ -239,7 +245,7 @@ fn naga_validates_all_three_generated_modules_3_of_3() {
             Err(error) => errors.push(format!("{root}: {error}")),
         }
     }
-    assert_eq!(examined, 3, "WGSL validator examined every admitted root");
+    assert_eq!(examined, 3, "WGSL validator examined every selected root");
     assert_eq!(validated, 3, "WGSL validator errors: {errors:?}");
     assert!(
         errors.is_empty(),

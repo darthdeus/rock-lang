@@ -81,24 +81,32 @@ fn wgsl_and_glsl_project_the_same_interface_independently() {
 }
 
 #[test]
-fn abi_validation_catches_offset_binding_and_visibility_mutations() {
+fn abi_validation_rejects_offset_mutation() {
     let iface = fixture();
     let mut plan = WgslAbiPlan::wgsl(&iface, Span::default()).expect("WGSL projection");
 
     plan.uniform_blocks[0].members[1].offset = 4;
     assert!(
         plan.validate(&iface, Span::default()).is_err(),
-        "copied GLSL/tight offset must be rejected"
+        "mutated WGSL uniform offset must be rejected"
     );
+}
 
-    plan = WgslAbiPlan::wgsl(&iface, Span::default()).expect("WGSL projection");
+#[test]
+fn abi_validation_rejects_swapped_texture_bindings() {
+    let iface = fixture();
+    let mut plan = WgslAbiPlan::wgsl(&iface, Span::default()).expect("WGSL projection");
     plan.textures.swap(0, 1);
     assert!(
         plan.validate(&iface, Span::default()).is_err(),
         "swapped logical texture slots must be rejected"
     );
+}
 
-    plan = WgslAbiPlan::wgsl(&iface, Span::default()).expect("WGSL projection");
+#[test]
+fn abi_validation_rejects_stage_visibility_drift() {
+    let iface = fixture();
+    let mut plan = WgslAbiPlan::wgsl(&iface, Span::default()).expect("WGSL projection");
     plan.uniform_blocks[0].visibility.fragment = false;
     assert!(
         plan.validate(&iface, Span::default()).is_err(),

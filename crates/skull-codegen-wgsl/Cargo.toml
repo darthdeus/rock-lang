@@ -8,6 +8,7 @@ bone-semantic = { path = "../bone-semantic" }
 comfy-la-arena = { workspace = true }
 skull-mir = { path = "../skull-mir" }
 skull-parser = { path = "../skull-parser" }
+skull-codegen-shader = { path = "../skull-codegen-shader" }
 ustr = { workspace = true }
 
 [dev-dependencies]
