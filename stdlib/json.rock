@@ -613,15 +613,14 @@ fn parse_number(p: JsonParser) -> JsonValue {
         }
     }
 
-    let lit = p.src.substring(start, p.pos)
+    // The grammar above has already accepted the whole literal, so the float
+    // conversion cannot fail and needs no substring: `parse_float_at` reads the
+    // source in place. That precondition is what lets it return `float` rather
+    // than `float?` -- do not call it on unvalidated bytes.
     if is_float {
-        let f = lit.parse_float()
-        if f == null {
-            p.ok = false
-            return JsonValue::Null
-        }
-        return JsonValue::Float(f.unwrap())
+        return JsonValue::Float(p.src.parse_float_at(start, p.pos))
     }
+    let lit = p.src.substring(start, p.pos)
     let i = lit.parse_int()
     if i == null {
         p.ok = false
