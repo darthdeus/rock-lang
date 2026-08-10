@@ -2625,6 +2625,38 @@ mod shape_drift_tests {
             "a signature-only edit carries no data-shape drift -- full reload, NOT a restart, got {reload:?}"
         );
     }
+
+    #[test]
+    fn shader_resource_interface_edit_requests_full_reload() {
+        let v0 = "@shader(fragment)\n\
+                  fn frag(tc: Vec2) -> Vec4 {\n\
+                    return Vec4 { x: tc.x, y: 0.0, z: 1.0, w: 1.0 }\n\
+                  }\n\
+                  global KEY: string = rock_shader(frag)\n\
+                  fn main() { }\n";
+        let v1 = "@shader(fragment)\n\
+                  fn frag(tex: Sampler2D, tc: Vec2) -> Vec4 {\n\
+                    return texture(tex, tc)\n\
+                  }\n\
+                  global KEY: string = rock_shader(frag)\n\
+                  fn main() { }\n";
+        let (_dir, mut stone, main_lua, inc_lua, rock) = boot(v0);
+        let baseline = std::fs::read_to_string(&main_lua).unwrap();
+        assert!(baseline.contains("__rock_shader_register(\"frag\""));
+
+        std::fs::write(&rock, v1).unwrap();
+        let reload = stone.recompile(&[rock], &main_lua, &inc_lua).expect("shader recompile");
+        assert!(
+            matches!(reload, SkullReload::Full { .. }),
+            "a shader resource/interface change must use the full path, got {reload:?}"
+        );
+        let current = std::fs::read_to_string(&main_lua).unwrap();
+        assert!(
+            current.contains("texture("),
+            "the full shader reassembly must carry the new resource-consuming source"
+        );
+        assert_ne!(current, baseline, "the resource edit must change the registered artifact");
+    }
 }
 
 #[cfg(test)]
