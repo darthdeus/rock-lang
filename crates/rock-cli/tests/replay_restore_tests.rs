@@ -1050,6 +1050,88 @@ fn a_second_rewind_after_a_branch_sees_only_the_branched_history() {
     assert_eq!(current_tick(&live), 30, "the second rewind must land at its target: {diag}");
 }
 
+/// Transient correctness against REAL state, not just the seam's call count.
+/// The probe keeps Stone's world/UI/meat particle arenas and a Stone tween
+/// populated every tick and a music stream playing, so the jump has something to
+/// clear; the same run carries a persistent game value written once at init,
+/// which the keyframe restores and nothing re-derives -- so a reset that fired
+/// every `@reset` would show up as a zero there.
+///
+/// Both arms of the ONE shared implementation are driven: a live rewind and an
+/// A-B loop jump.
+#[test]
+fn playback_jumps_clear_real_stone_transients_and_keep_persistent_state() {
+    let game = "survivors";
+    let dir = tempfile::tempdir().unwrap();
+
+    let assert_reset = |dump: &serde_json::Value, label: &str| {
+        let diag = &dump["__stone_diag"];
+        assert!(
+            diag["STONE_TRANSIENT_BEFORE_PARTICLES"].as_i64().is_some_and(|n| n > 0),
+            "{label}: the particle arenas must be populated at the jump: {diag}"
+        );
+        assert!(
+            diag["STONE_TRANSIENT_BEFORE_TWEENS"].as_i64().is_some_and(|n| n > 0),
+            "{label}: a tween must be active at the jump: {diag}"
+        );
+        assert_eq!(
+            diag["STONE_TRANSIENT_BEFORE_MUSIC"].as_i64(), Some(1),
+            "{label}: music must be playing at the jump: {diag}"
+        );
+        assert_eq!(diag["STONE_TRANSIENT_AFTER_PARTICLES"].as_i64(), Some(0), "{label}: {diag}");
+        assert_eq!(diag["STONE_TRANSIENT_AFTER_TWEENS"].as_i64(), Some(0), "{label}: {diag}");
+        assert_eq!(diag["STONE_TRANSIENT_AFTER_MUSIC"].as_i64(), Some(0), "{label}: {diag}");
+        // The GAME-owned pool: a static local no keyframe images, so only the
+        // game's registered `on_loop_jump` callback can empty it.
+        assert!(
+            diag["TRANSIENT_PROBE_POOL_AT_JUMP"].as_i64().is_some_and(|n| n > 0),
+            "{label}: the game pool must be populated at the jump: {diag}"
+        );
+        assert_eq!(diag["TRANSIENT_PROBE_POOL_AFTER_JUMP"].as_i64(), Some(0), "{label}: {diag}");
+        let persistent = dump
+            .as_object()
+            .expect("dump object")
+            .values()
+            .find_map(|g| g.as_object().and_then(|o| o.get("TRANSIENT_PROBE_PERSISTENT")))
+            .expect("the persistent probe global must be dumped");
+        assert_eq!(
+            persistent.as_i64(), Some(4242),
+            "{label}: the reset must not touch persistent game state the keyframe restored"
+        );
+    };
+
+    // Arm 1: a live rewind.
+    let live_log = dir.path().join("transient-live.replay").to_string_lossy().into_owned();
+    let rewound = run_record_dump(
+        game, 80, &live_log,
+        &[
+            ("ROCK_TEST_SEED", "42"),
+            ("STONE_TRANSIENT_PROBE", "1"),
+            ("STONE_LIVE_REWIND", "1"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
+            ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
+        ],
+    );
+    assert_eq!(rewound["__stone_diag"]["STONE_LIVE_REWIND_COUNT"].as_i64(), Some(1));
+    assert_reset(&rewound, "live rewind");
+
+    // Arm 2: an A-B loop jump over a replay of the same recording.
+    let looped = run_replay_dump(
+        game, 120, &live_log,
+        &[
+            ("STONE_TRANSIENT_PROBE", "1"),
+            ("STONE_LOOP_A", "10"),
+            ("STONE_LOOP_B", "20"),
+            ("STONE_KEYFRAME_INTERVAL", "10"),
+        ],
+    );
+    assert!(
+        looped["__stone_diag"]["STONE_LOOP_JUMPS"].as_i64().is_some_and(|n| n > 0),
+        "the loop must jump: {}", looped["__stone_diag"]
+    );
+    assert_reset(&looped, "A-B loop jump");
+}
+
 fn keyframe_count(s: &serde_json::Value) -> i64 {
     s["__stone_diag"]["STONE_KEYFRAME_COUNT"].as_i64().expect("STONE_KEYFRAME_COUNT")
 }
