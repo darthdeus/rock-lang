@@ -31,8 +31,15 @@ pub const JS_INTRINSICS: &[(&str, usize, &str)] = &[
     // base math
     ("sin", 1, "Math.sin($1)"),
     ("cos", 1, "Math.cos($1)"),
+    ("tan", 1, "Math.tan($1)"),
     ("sqrt", 1, "Math.sqrt($1)"),
     ("exp", 1, "Math.exp($1)"),
+    // `log` is the NATURAL log on both hosts (Lua `math.log`, JS `Math.log`).
+    // `log2` gets `Math.log2` rather than a mirror of luajit's
+    // `math.log(x) / 0.6931471805599453`: it is the same function computed
+    // better, exact on powers of two where the division is a bit short.
+    ("log", 1, "Math.log($1)"),
+    ("log2", 1, "Math.log2($1)"),
     ("abs", 1, "Math.abs($1)"),
     ("floor", 1, "Math.floor($1)"),
     ("ceil", 1, "Math.ceil($1)"),
