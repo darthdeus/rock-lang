@@ -14,7 +14,7 @@ use comfy_la_arena::{ArenaMap, Idx};
 use skull::concrete_body::{self, Callee, ConcreteBodies, ConcreteBody, IteratorOpKind, Slot};
 use skull::instance_graph::{self, InstanceGraph, Site, SiteOp, SiteOutcome};
 use skull_mir::monoty::{MonoTy, MonoTyId, MonoTyReason};
-use skull_mir::mir::{Inst, MirFunc};
+use skull_mir::mir::{Inst, MirFunc, Term};
 use ustr::Ustr;
 
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
@@ -614,6 +614,67 @@ fn main() { print("{startup}") }
     assert!(
         err.message.contains("concrete callee signature disagrees with its body plan"),
         "unexpected always-emitted mismatch diagnostic: {err:?}"
+    );
+    let _ = owner;
+}
+
+fn return_arity(mir: &MirFunc) -> usize {
+    mir.blocks
+        .values()
+        .find_map(|block| match &block.term {
+            Term::Return(values) => Some(values.len()),
+            _ => None,
+        })
+        .expect("lowered body has no return")
+}
+
+#[test]
+fn production_global_result_shape_consumes_the_concrete_signature() {
+    let (ws, g, bodies) = bodies_of(
+        r#"
+nobox value V { x: float, y: float }
+global G: V = V { x: 1.0, y: 2.0 }
+fn main() { print("{G.x}") }
+"#,
+    );
+    let user_mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
+    let (owner, plan) = bodies
+        .always_plans
+        .iter()
+        .find(|(owner, _)| {
+            matches!(
+                owner,
+                skull_mir::concrete::ConcreteOwner::Global { module, .. } if *module == user_mid
+            )
+        })
+        .expect("global has no concrete plan");
+    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let intact = skull_mir::lower::lower_global_with_plans(
+        &ws,
+        &scx,
+        plan,
+        &bodies.plans,
+        Ustr::from("__test_ginit"),
+    )
+    .expect("intact global plan failed")
+    .expect("global initializer disappeared");
+    assert_eq!(return_arity(&intact), 2, "fixture has no multi-leaf global result");
+
+    let mut poisoned = plan.clone();
+    poisoned.signature.result = Some(g.interner().intern(MonoTy::Float));
+    let lowered = skull_mir::lower::lower_global_with_plans(
+        &ws,
+        &scx,
+        &poisoned,
+        &bodies.plans,
+        Ustr::from("__test_ginit"),
+    )
+    .expect("poisoned global plan failed")
+    .expect("poisoned global initializer disappeared");
+    assert_eq!(
+        return_arity(&lowered),
+        1,
+        "global lowering reconstructed its declared result shape"
     );
     let _ = owner;
 }

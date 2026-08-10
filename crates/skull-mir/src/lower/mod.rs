@@ -1285,11 +1285,13 @@ fn lower_global_inner(
         nested_fn_counters: HashMap::new(),
         presence_only: None,
     };
-    // A `nobox` global is category-2 storage: its layout comes from the declared
-    // type, so the initializer RETURNS leaves and `mir_emit` binds one Lua global
-    // per leaf. Without this the body packs a box the verifier then rejects.
-    let g = &module.globals[gid];
-    b.ret_shape = nobox_declared_shape(ws, g.ty);
+    // A `nobox` global is category-2 storage: its concrete plan owns the layout,
+    // so the initializer RETURNS leaves and `mir_emit` binds one Lua global per
+    // leaf. Without this the body packs a box the verifier then rejects.
+    b.ret_shape = (!scx.values_first_class)
+        .then(|| concrete_plan.signature.result)
+        .flatten()
+        .and_then(|id| mono_nobox_value_shape(ws, &scx.interner().get(id)));
     b.lower_root()?;
     Ok(Some(b.f))
 }
