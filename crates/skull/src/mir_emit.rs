@@ -4206,7 +4206,7 @@ fn main() {
             Err(err) => err,
         };
         assert!(
-            err.message.contains("concrete specialized call has no resolved bound plan"),
+            err.message.contains("concrete ABI plan is missing for callee `next`"),
             "the missing iterator bound plan must fail at its production consumer, got: {err:?}"
         );
     }
