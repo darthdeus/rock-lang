@@ -25,9 +25,9 @@
 //! from a join that quietly does not work.
 //!
 //! **The join FAILS CLOSED, and verifies the CALLEE.** [`resolve_owner`]
-//! demands an exact `(declaration, substitution)` match against the graph's own
-//! record, so an owner the graph does not have is reported rather than matched
-//! to another instance of the same declaration. And a site resolving is not
+//! demands an exact `Instance` match against the graph's own record, so an
+//! owner the graph does not have is reported rather than matched to another
+//! instance of the same declaration. And a site resolving is not
 //! enough: the resolved callee must equal the function the MIR call actually
 //! targets ([`Unjoined::CalleeMismatch`]), because a right site pointing at a
 //! wrong callee is the one failure instance-driven emission cannot tolerate.
@@ -41,7 +41,6 @@ use std::collections::{BTreeMap, HashMap};
 use bone_semantic::inference::Workspace;
 use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::{Inst, MirFunc};
-use skull_mir::monoty::MonoSubst;
 use skull_mir::site::{CallSite, Site};
 
 use crate::concrete_body::{Callee, ConcreteBodies};
@@ -577,8 +576,8 @@ fn reachable_call_rows(mf: &MirFunc, out: &mut Vec<CallRow>) {
     }
 }
 
-/// `(declaration, substitution) -> Instance`, so an owner recorded by lowering
-/// can be resolved to the graph's instance identity.
+/// `declaration -> Instance`, so an owner recorded by lowering can be resolved
+/// to the graph's instance identity without rebuilding a substitution.
 ///
 /// Built from `InstanceGraph::substitutions`, which is the graph's own record,
 /// so this is a lookup rather than a second derivation of instance identity.
@@ -592,19 +591,19 @@ fn mangled_symbols(ws: &Workspace) -> std::collections::HashSet<ustr::Ustr> {
         .collect()
 }
 
-fn owner_index(g: &InstanceGraph) -> HashMap<skull_mir::mir::FuncRef, Vec<(MonoSubst, Instance)>> {
-    let mut ix: HashMap<skull_mir::mir::FuncRef, Vec<(MonoSubst, Instance)>> = HashMap::new();
-    for (inst, subst) in g.substitutions() {
-        ix.entry(inst.func).or_default().push((subst.clone(), inst.clone()));
+fn owner_index(g: &InstanceGraph) -> HashMap<skull_mir::mir::FuncRef, Vec<Instance>> {
+    let mut ix: HashMap<skull_mir::mir::FuncRef, Vec<Instance>> = HashMap::new();
+    for (inst, _) in g.substitutions() {
+        ix.entry(inst.func).or_default().push(inst.clone());
     }
     ix
 }
 
 fn resolve_owner<'a>(
-    ix: &'a HashMap<skull_mir::mir::FuncRef, Vec<(MonoSubst, Instance)>>,
+    ix: &'a HashMap<skull_mir::mir::FuncRef, Vec<Instance>>,
     owner: &Instance,
 ) -> Option<&'a Instance> {
-    ix.get(&owner.func)?.iter().find(|(_, i)| *i == *owner).map(|(_, i)| i)
+    ix.get(&owner.func)?.iter().find(|i| *i == owner)
 }
 
 /// Whether skull lowers a standalone body for this declaration at all.
@@ -659,7 +658,7 @@ fn measure_body_into(
     target_backend: bone_semantic::hir::FnBackend,
     c: &mut SiteJoinCensus,
     g: &InstanceGraph,
-    ix: &HashMap<skull_mir::mir::FuncRef, Vec<(MonoSubst, Instance)>>,
+    ix: &HashMap<skull_mir::mir::FuncRef, Vec<Instance>>,
     bodies: &ConcreteBodies,
     mangled: &std::collections::HashSet<ustr::Ustr>,
     inst: &Instance,
@@ -1004,7 +1003,7 @@ fn classify(
     c: &mut SiteJoinCensus,
     g: &InstanceGraph,
     mf: &MirFunc,
-    ix: &HashMap<skull_mir::mir::FuncRef, Vec<(MonoSubst, Instance)>>,
+    ix: &HashMap<skull_mir::mir::FuncRef, Vec<Instance>>,
     bodies: &ConcreteBodies,
     measured: &Instance,
     row: &CallRow,
