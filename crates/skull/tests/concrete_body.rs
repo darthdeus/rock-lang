@@ -146,7 +146,7 @@ fn main() {
     poisoned.types.ty_types.remove(&missing);
     let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
     assert!(
-        skull_mir::lower::lower_instance_with_plan(&ws, &scx, &poisoned).is_err(),
+        skull_mir::lower::lower_instance_with_plans(&ws, &scx, &poisoned, &bodies.plans).is_err(),
         "lowering ignored a missing concrete type-node entry"
     );
 }
@@ -182,13 +182,13 @@ fn main() {
     assert!(nested.is_some(), "the concrete plan lost the nested application tree");
 
     let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
-    skull_mir::lower::lower_instance_with_plan(&ws, &scx, plan)
+    skull_mir::lower::lower_instance_with_plans(&ws, &scx, plan, &bodies.plans)
         .expect("plan-driven lowering failed");
 
     let mut poisoned = plan.clone();
     poisoned.types.expr_types = ArenaMap::default();
     assert!(
-        skull_mir::lower::lower_instance_with_plan(&ws, &scx, &poisoned).is_err(),
+        skull_mir::lower::lower_instance_with_plans(&ws, &scx, &poisoned, &bodies.plans).is_err(),
         "lowering accepted a plan after its concrete expression table was removed"
     );
 }
@@ -226,7 +226,7 @@ fn main() {
     body.binding_arena[binding].declared_ty = Some(bone_semantic::prelude::TyId::Static(mid, extra));
 
     let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
-    let err = skull_mir::lower::lower_instance_with_plan(&ws, &scx, &plan)
+    let err = skull_mir::lower::lower_instance_with_plans(&ws, &scx, &plan, &bodies.plans)
         .expect_err("lowering accepted a declaration type absent from its concrete plan");
     assert!(err.message.contains("missing concrete type node"), "{err:?}");
 }
@@ -248,7 +248,7 @@ fn main() { let v = make(); print("{v.x}") }
         .expect("make has no concrete plan");
     let plan = bodies.plans.get(&make).expect("make plan disappeared");
     let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
-    let mir = skull_mir::lower::lower_instance_with_plan(&ws, &scx, plan)
+    let mir = skull_mir::lower::lower_instance_with_plans(&ws, &scx, plan, &bodies.plans)
         .expect("plan-driven struct literal lowering failed");
     assert!(
         count_int_to_float(&mir) > 0,
@@ -441,7 +441,7 @@ fn main() {
     assert!(plan.signature.result.is_some(), "body signature has no result population");
     plan.signature.result = Some(g.interner().intern(MonoTy::Float));
     let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
-    let mir = skull_mir::lower::lower_instance_with_plan(&ws, &scx, &plan)
+    let mir = skull_mir::lower::lower_instance_with_plans(&ws, &scx, &plan, &bodies.plans)
         .expect("plan-driven return lowering failed");
     assert!(
         count_int_to_float(&mir) > 0,
@@ -484,7 +484,7 @@ fn main() {
     poisoned.foreign_domains.remove(&domain);
     let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
     assert!(
-        skull_mir::lower::lower_instance_with_plan(&ws, &scx, &poisoned).is_err(),
+        skull_mir::lower::lower_instance_with_plans(&ws, &scx, &poisoned, &bodies.plans).is_err(),
         "lowering accepted a plan after its struct-default domain was removed"
     );
 }
@@ -529,7 +529,7 @@ fn main() {
     poisoned.foreign_domains.remove(&domain);
     let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
     assert!(
-        skull_mir::lower::lower_instance_with_plan(&ws, &scx, &poisoned).is_err(),
+        skull_mir::lower::lower_instance_with_plans(&ws, &scx, &poisoned, &bodies.plans).is_err(),
         "lowering accepted a struct default after its concrete domain was removed"
     );
 }

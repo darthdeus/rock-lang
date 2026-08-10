@@ -998,14 +998,6 @@ pub fn lower_function(
     lower_instance(ws, scx, &crate::instance::Instance::base(FuncRef { module: mid, func: fid }))
 }
 
-pub fn lower_function_with_plan(
-    ws: &Workspace,
-    scx: &ScalarCtx,
-    plan: &ConcreteBodyPlan,
-) -> Result<MirFunc, CompilerError> {
-    lower_instance_with_plan(ws, scx, plan)
-}
-
 pub fn lower_function_with_plans(
     ws: &Workspace,
     scx: &ScalarCtx,
@@ -1039,20 +1031,6 @@ pub fn lower_instance(
         None,
         None,
     )
-}
-
-/// Lower an ordinary function from its graph-owned concrete body plan.
-///
-/// The legacy instance entry point remains for the source-shaped test and
-/// always-emitted paths while their owners are migrated. Production callers
-/// of an ordinary instance use this entry point so missing or mismatched plans
-/// are located before lowering can reconstruct a type from HIR.
-pub fn lower_instance_with_plan(
-    ws: &Workspace,
-    scx: &ScalarCtx,
-    plan: &ConcreteBodyPlan,
-) -> Result<MirFunc, CompilerError> {
-    lower_instance_with_plan_inner(ws, scx, plan, None)
 }
 
 /// Lower an ordinary function while resolving every concrete callee ABI from
