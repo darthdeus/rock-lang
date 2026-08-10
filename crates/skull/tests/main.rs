@@ -81,6 +81,8 @@ mod inline_body_column_map_param;
 mod inline_lua_column_container_param_sentinel;
 #[path = "inline_value_specialization.rs"]
 mod inline_value_specialization;
+#[path = "inline_stats.rs"]
+mod inline_stats;
 #[path = "graph_contributions.rs"]
 mod graph_contributions;
 
