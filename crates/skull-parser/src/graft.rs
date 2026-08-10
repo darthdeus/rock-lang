@@ -54,6 +54,7 @@ pub fn graft_item(src: &Ast, dst: &mut Ast, item: &Item) -> Item {
         span: item.span,
         annotations: item.annotations.clone(),
         kind,
+        is_global_write: item.is_global_write,
     }
 }
 
