@@ -47,6 +47,10 @@ pub const JS_INTRINSICS: &[(&str, usize, &str)] = &[
     ("round", 1, "Math.floor($1 + 0.5)"),
     ("sign", 1, "Math.sign($1)"),
     ("fract", 1, "($1 - Math.floor($1))"),
+    // `join` over a `[string]`: the backing array IS the input both hosts want,
+    // so this is one `Array.prototype.join` here and one `table.concat` on
+    // luajit. `_data` is 0-based and may be longer than `len`, hence the slice.
+    ("join", 2, "$1._data.slice(0, $1.len).join($2)"),
     // Reference identity (stdlib `same_ref`). `===` on two objects is JS
     // identity, the same question luajit's `rawequal` answers; on primitives
     // both reduce to value equality, which is also what identity means there.
@@ -2762,6 +2766,12 @@ function lua_tostring(x) {
   return String(x);
 }
 function __rock_format_float(v) {
+  // Non-finite first: C `%.2g` renders these as inf/-inf/nan, and __c_g below
+  // reconstructs a value from its mantissa bits, so it would reach BigInt() with
+  // Infinity and throw rather than format. Same spellings lua_tostring uses.
+  if (v !== v) return "nan";
+  if (v === Infinity) return "inf";
+  if (v === -Infinity) return "-inf";
   var av = Math.abs(v);
   if (av !== 0 && (av < 0.0001 || av >= 1000000)) {
     return __c_g(v, 2);
