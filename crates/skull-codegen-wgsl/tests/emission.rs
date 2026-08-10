@@ -215,7 +215,7 @@ fn source_goldens_and_physical_structure_are_deterministic() {
         for (slot, texture) in artifact.abi.textures.iter().enumerate() {
             assert_eq!(
                 texture.texture_binding,
-                artifact.abi.uniform_blocks.len() as u32 + slot as u32 * 2
+                artifact.abi.uniform_blocks.len() as u32 + 1 + slot as u32 * 2
             );
             assert_eq!(texture.sampler_binding, texture.texture_binding + 1);
         }

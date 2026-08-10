@@ -333,6 +333,7 @@ pub struct WgslAbiPlan {
     pub bind_group: u32,
     pub fullscreen_vertex: WgslFullscreenVertex,
     pub fragment: WgslFragmentIo,
+    pub fullscreen_uniform: WgslUniformBlock,
     pub uniform_blocks: Vec<WgslUniformBlock>,
     pub textures: Vec<WgslTextureBinding>,
 }
@@ -343,6 +344,29 @@ impl WgslAbiPlan {
         validate_fullscreen_interface(iface, span)?;
 
         let visibility = WgslStageVisibility::for_interface(iface);
+        let fullscreen_uniform = WgslUniformBlock {
+            role: UniformRole::Stage(ShaderStage::Vertex),
+            struct_name: Ustr::from("FullscreenU"),
+            binding: 0,
+            size: 16,
+            members: vec![
+                WgslUniformMember {
+                    name: Ustr::from("uv0"),
+                    kind: WireKind::F32x2,
+                    offset: 0,
+                    align: 8,
+                    size: 8,
+                },
+                WgslUniformMember {
+                    name: Ustr::from("uv1"),
+                    kind: WireKind::F32x2,
+                    offset: 8,
+                    align: 8,
+                    size: 8,
+                },
+            ],
+            visibility: WgslStageVisibility { vertex: true, fragment: false },
+        };
         let mut groups = iface.uniform_groups.clone();
         groups.sort_by_key(|g| uniform_role_key(g.role));
 
@@ -350,13 +374,13 @@ impl WgslAbiPlan {
         for (binding, group) in groups.iter().enumerate() {
             uniform_blocks.push(layout_uniform_group(
                 group,
-                binding as u32,
+                binding as u32 + 1,
                 visibility,
                 span,
             )?);
         }
 
-        let texture_base = uniform_blocks.len() as u32;
+        let texture_base = uniform_blocks.len() as u32 + 1;
         let textures = iface
             .textures
             .as_ref()
@@ -376,6 +400,7 @@ impl WgslAbiPlan {
                 output_location: FRAGMENT_OUTPUT_LOCATION,
                 output: WireKind::F32x4,
             },
+            fullscreen_uniform,
             uniform_blocks,
             textures,
         })
@@ -437,6 +462,9 @@ impl WgslAbiPlan {
             self.fragment.output.code()
         )
         .unwrap();
+        writeln!(payload, "fullscreen FullscreenU 0 16 v 2").unwrap();
+        writeln!(payload, "member uv0 1 0 8 8").unwrap();
+        writeln!(payload, "member uv1 1 8 8 8").unwrap();
         writeln!(payload, "blocks {}", self.uniform_blocks.len()).unwrap();
         for block in &self.uniform_blocks {
             writeln!(
@@ -879,6 +907,26 @@ fn emit_fullscreen_types(out: &mut String, abi: &WgslAbiPlan) {
 }
 
 fn emit_uniforms(out: &mut String, abi: &WgslAbiPlan) {
+    let block = &abi.fullscreen_uniform;
+    writeln!(out, "struct {} {{", block.struct_name).unwrap();
+    for member in &block.members {
+        writeln!(
+            out,
+            "  {}: {},",
+            member.name,
+            wgsl_type(member.kind).unwrap()
+        )
+        .unwrap();
+    }
+    out.push_str("}\n\n");
+    writeln!(
+        out,
+        "@group({}) @binding({}) var<uniform> u_{}: {};",
+        abi.bind_group, block.binding, block.struct_name, block.struct_name
+    )
+    .unwrap();
+    out.push('\n');
+
     for block in &abi.uniform_blocks {
         writeln!(out, "struct {} {{", block.struct_name).unwrap();
         for member in &block.members {
@@ -933,7 +981,8 @@ fn emit_fullscreen_entries(out: &mut String, abi: &WgslAbiPlan, entry: String) {
     out.push_str("  let x = f32(vertex_index & 1u) * 2.0 - 1.0;\n");
     out.push_str("  let y = f32(vertex_index >> 1u) * 2.0 - 1.0;\n");
     out.push_str("  output.position = vec4<f32>(x, y, 0.0, 1.0);\n");
-    out.push_str("  output.uv = vec2<f32>(f32(vertex_index & 1u), f32(vertex_index >> 1u));\n");
+    out.push_str("  let corner = vec2<f32>(f32(vertex_index & 1u), f32(vertex_index >> 1u));\n");
+    out.push_str("  output.uv = u_FullscreenU.uv0 + corner * (u_FullscreenU.uv1 - u_FullscreenU.uv0);\n");
     out.push_str("  return output;\n}\n\n");
     writeln!(
         out,

@@ -3,6 +3,13 @@ struct FullscreenVertexOut {
   @location(0) uv: vec2<f32>,
 }
 
+struct FullscreenU {
+  uv0: vec2<f32>,
+  uv1: vec2<f32>,
+}
+
+@group(0) @binding(0) var<uniform> u_FullscreenU: FullscreenU;
+
 struct PresentU {
   src_origin: vec2<f32>,
   src_extent: vec2<f32>,
@@ -11,10 +18,10 @@ struct PresentU {
   dst_scale: vec2<f32>,
 }
 
-@group(0) @binding(0) var<uniform> u_PresentU: PresentU;
+@group(0) @binding(1) var<uniform> u_PresentU: PresentU;
 
-@group(0) @binding(1) var tex_src_tex: texture_2d<f32>;
-@group(0) @binding(2) var samp_src_tex: sampler;
+@group(0) @binding(2) var tex_src_tex: texture_2d<f32>;
+@group(0) @binding(3) var samp_src_tex: sampler;
 
 fn present_frag_SrcTex_PresentU_Vec2_ret_Vec4(uv: vec2<f32>) -> vec4<f32> {
   var dst: vec2<f32> = vec2<f32>(0.0);
@@ -42,7 +49,8 @@ fn fullscreen_vertex(@builtin(vertex_index) vertex_index: u32) -> FullscreenVert
   let x = f32(vertex_index & 1u) * 2.0 - 1.0;
   let y = f32(vertex_index >> 1u) * 2.0 - 1.0;
   output.position = vec4<f32>(x, y, 0.0, 1.0);
-  output.uv = vec2<f32>(f32(vertex_index & 1u), f32(vertex_index >> 1u));
+  let corner = vec2<f32>(f32(vertex_index & 1u), f32(vertex_index >> 1u));
+  output.uv = u_FullscreenU.uv0 + corner * (u_FullscreenU.uv1 - u_FullscreenU.uv0);
   return output;
 }
 

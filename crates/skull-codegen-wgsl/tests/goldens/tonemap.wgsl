@@ -3,6 +3,13 @@ struct FullscreenVertexOut {
   @location(0) uv: vec2<f32>,
 }
 
+struct FullscreenU {
+  uv0: vec2<f32>,
+  uv1: vec2<f32>,
+}
+
+@group(0) @binding(0) var<uniform> u_FullscreenU: FullscreenU;
+
 struct TonemapU {
   exposure: f32,
   bloom_intensity: f32,
@@ -11,12 +18,12 @@ struct TonemapU {
   bloom_uv_hi: vec2<f32>,
 }
 
-@group(0) @binding(0) var<uniform> u_TonemapU: TonemapU;
+@group(0) @binding(1) var<uniform> u_TonemapU: TonemapU;
 
-@group(0) @binding(1) var tex_scene_tex: texture_2d<f32>;
-@group(0) @binding(2) var samp_scene_tex: sampler;
-@group(0) @binding(3) var tex_bloom_tex: texture_2d<f32>;
-@group(0) @binding(4) var samp_bloom_tex: sampler;
+@group(0) @binding(2) var tex_scene_tex: texture_2d<f32>;
+@group(0) @binding(3) var samp_scene_tex: sampler;
+@group(0) @binding(4) var tex_bloom_tex: texture_2d<f32>;
+@group(0) @binding(5) var samp_bloom_tex: sampler;
 
 fn aces_film_Vec3_ret_Vec3(x: vec3<f32>) -> vec3<f32> {
   var a: f32 = 0.0;
@@ -50,7 +57,8 @@ fn fullscreen_vertex(@builtin(vertex_index) vertex_index: u32) -> FullscreenVert
   let x = f32(vertex_index & 1u) * 2.0 - 1.0;
   let y = f32(vertex_index >> 1u) * 2.0 - 1.0;
   output.position = vec4<f32>(x, y, 0.0, 1.0);
-  output.uv = vec2<f32>(f32(vertex_index & 1u), f32(vertex_index >> 1u));
+  let corner = vec2<f32>(f32(vertex_index & 1u), f32(vertex_index >> 1u));
+  output.uv = u_FullscreenU.uv0 + corner * (u_FullscreenU.uv1 - u_FullscreenU.uv0);
   return output;
 }
 

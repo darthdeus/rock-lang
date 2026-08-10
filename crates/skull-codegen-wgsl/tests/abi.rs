@@ -54,7 +54,7 @@ fn wgsl_and_glsl_project_the_same_interface_independently() {
     let glsl_block = &glsl.uniform_blocks[0];
     let wgsl_block = &wgsl.uniform_blocks[0];
     assert_eq!(glsl_block.0, 2, "GLSL fragment binding");
-    assert_eq!(wgsl_block.binding, 0, "WGSL owns its bind-group numbering");
+    assert_eq!(wgsl_block.binding, 1, "WGSL reserves binding 0 for geometry");
     assert_eq!(wgsl_block.members[0].offset, 0);
     assert_eq!(wgsl_block.members[1].offset, 8);
     assert_eq!(
@@ -66,13 +66,17 @@ fn wgsl_and_glsl_project_the_same_interface_independently() {
         glsl.texture_units,
         vec![Ustr::from("scene"), Ustr::from("bloom")]
     );
-    assert_eq!(wgsl.textures[0].texture_binding, 1);
-    assert_eq!(wgsl.textures[0].sampler_binding, 2);
-    assert_eq!(wgsl.textures[1].texture_binding, 3);
-    assert_eq!(wgsl.textures[1].sampler_binding, 4);
-    assert_ne!(
+    assert_eq!(wgsl.textures[0].texture_binding, 2);
+    assert_eq!(wgsl.textures[0].sampler_binding, 3);
+    assert_eq!(wgsl.textures[1].texture_binding, 4);
+    assert_eq!(wgsl.textures[1].sampler_binding, 5);
+    assert_eq!(
         glsl_block.0, wgsl.textures[0].texture_binding,
-        "copying the GLSL binding would bind the first WGSL texture over the uniform block"
+        "the independent target projections use different binding spaces"
+    );
+    assert_ne!(
+        wgsl_block.binding, wgsl.textures[0].texture_binding,
+        "WGSL keeps geometry and logical bindings distinct"
     );
     assert_eq!(
         wgsl.textures.iter().map(|t| t.name).collect::<Vec<_>>(),
@@ -136,10 +140,11 @@ fn abi_wire_is_deterministic_and_carries_physical_order() {
     assert!(wire.starts_with("WGSL_ABI_V1\nchecksum "));
     assert!(wire.contains("vertex triangle_strip 4 0"));
     assert!(wire.contains("fragment 0 0 3"));
-    assert!(wire.contains("block fragment FragU 0 16 f 2"));
+    assert!(wire.contains("fullscreen FullscreenU 0 16 v 2"));
+    assert!(wire.contains("block fragment FragU 1 16 f 2"));
     assert!(wire.contains("member cutoff 0 0 4 4"));
     assert!(wire.contains("member resolution 1 8 8 8"));
-    assert!(wire.contains("texture 0 scene float 1 2 f"));
-    assert!(wire.contains("texture 1 bloom float 3 4 f"));
+    assert!(wire.contains("texture 0 scene float 2 3 f"));
+    assert!(wire.contains("texture 1 bloom float 4 5 f"));
     assert_eq!(wire, plan.wire(), "the compiler wire must be deterministic");
 }
