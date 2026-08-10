@@ -14,20 +14,9 @@
 //!     only fired it because `VecIter<T>.next` is a generic `@inline` body
 //!     containing exactly that `let`.
 //!
-//! The mechanism: `mono_type_node` erases `Nullable`, so inside a body
-//! specialized at `T = BV2?` the substitution answers `ty_node(T)` as a bare
-//! `App{Nominal("BV2")}`. `binding_is_nonnull_value_struct` asked through
-//! `ty_node` and so returned true, setting `Cell::nonnull_value_struct` -- the
-//! ONE license for SROA to rematerialize an escaping load. SROA then scalarized
-//! the cell (its `store c, nil` arm being compatible with any ctor candidate)
-//! and rebuilt at the escaping use as `BV2_ct(nil, nil)`, which fails the cdata
-//! conversion.
-//!
-//! That predicate's own doc comment asserted the premise that made it read as
-//! correct -- "`resolve_tyid` chases `Infer` but keeps `Nullable`" -- true when
-//! written for a spelled-out `V?`, false once a generic could be bound to one.
-//! It now asks `is_nullable_ty`, the existing oracle, which reads `raw_ty_node`
-//! before the substitution erases anything.
+//! The binding predicate uses the concrete nullable fact before SROA is allowed
+//! to rematerialize an escaping load. An absent row therefore stays absent, and
+//! the same test covers both the direct index and iterator paths.
 //!
 //! MARKED and UNMARKED are legitimately two mechanisms here, not one to unify:
 //! marked splits leaves at LOWERING (`nobox_shape_of_ty`, re-applying the `?`),
