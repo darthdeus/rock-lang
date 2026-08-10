@@ -319,10 +319,7 @@ pub fn spec_bound_calls(
             // intentionally remain valid without a callee instance.
             let owner_agrees = inst.func == fref
                 && mf.callee_instances.get(&iid).is_some_and(|oi| {
-                    oi.func == fref
-                        && crate::lower::spec_key_from_subst(ws, fref, &oi.subst).is_some_and(
-                            |k| crate::instance::Instance::intern(ctx.interner, fref, k) == *inst,
-                        )
+                    oi == inst
                 });
             if !owner_agrees {
                 return Err(CompilerError::new_no_location(format!(

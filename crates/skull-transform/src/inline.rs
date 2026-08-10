@@ -393,7 +393,6 @@ fn call_target(
     call_id: Idx<Inst>,
     fref: FuncRef,
     ws: &Workspace,
-    scx: &ScalarCtx,
 ) -> Result<Option<(Instance, BackendFnAbiPlan)>, CompilerError> {
     let Some(owner) = func.callee_instances.get(&call_id) else {
         return Ok(None);
@@ -406,20 +405,17 @@ fn call_target(
         )));
     }
     let declaration = &ws.module(fref.module).functions[fref.func];
-    let inst = if declaration.generics.is_empty() {
-        if !owner.subst.is_empty() {
+    if declaration.generics.is_empty() {
+        if !owner.args.is_empty() {
             return Err(CompilerError::new_no_location(format!(
-                "internal: non-generic call target `{}` carries a non-empty owner substitution",
+                "internal: non-generic call target `{}` carries type arguments",
                 declaration.name,
             )));
         }
-        Instance::intern(scx.interner(), owner.func, Vec::new())
-    } else {
-        let Some(key) = skull_mir::lower::spec_key_from_subst(ws, owner.func, &owner.subst) else {
-            return Ok(None);
-        };
-        Instance::intern(scx.interner(), owner.func, key)
-    };
+    } else if owner.args.is_empty() {
+        return Ok(None);
+    }
+    let inst = owner.clone();
     if let Some(delivery) = func.spec_bindings.get(&call_id) {
         if delivery != &inst {
             return Err(CompilerError::new_no_location(format!(
@@ -492,13 +488,13 @@ fn find_site(
         for (idx, iid) in insts.into_iter().enumerate().skip(start) {
             let site = match &func.insts[iid] {
                 Inst::Call { func: fref, args } if *fref != self_ref => {
-                    let Some((inst, abi)) = call_target(func, iid, *fref, ws, scx)? else {
+                    let Some((inst, abi)) = call_target(func, iid, *fref, ws)? else {
                         continue;
                     };
                     Site::Single { bid, idx, call_id: iid, args: args.clone(), inst, abi }
                 }
                 Inst::CallMulti { dests, func: fref, args } if *fref != self_ref => {
-                    let Some((inst, abi)) = call_target(func, iid, *fref, ws, scx)? else {
+                    let Some((inst, abi)) = call_target(func, iid, *fref, ws)? else {
                         continue;
                     };
                     Site::Multi {

@@ -155,26 +155,11 @@ impl Site {
     }
 }
 
-/// The body that OWNS a set of sites: a declaration plus the substitution it
-/// was lowered under -- i.e. a concrete INSTANCE, in lowering's vocabulary.
-///
-/// The declaration alone is not enough. Inlining splices a *specialized*
-/// snapshot, so `identity<int>` and `identity<string>` can both be spliced into
-/// one caller; their sites index the same expression arena and would join
-/// through whichever instance was looked up first. The substitution is what
-/// makes the owner concrete, and it is the same `MonoSubst` the graph records
-/// per instance, so the two can be compared without a translation.
-#[derive(Clone, PartialEq, Debug)]
-pub struct OwnerInstance {
-    pub func: crate::mir::FuncRef,
-    pub subst: crate::monoty::MonoSubst,
-}
-
 /// An index into [`crate::mir::MirFunc::site_owners`].
 ///
-/// Interned rather than stored inline because a substitution is a map: after
-/// inlining a body can hold thousands of sites over a handful of owners, and
-/// cloning the map per call site would dominate both memory and comparison.
+/// Interned rather than stored inline because a body can hold thousands of
+/// sites over a handful of owners, and cloning the owner per call site would
+/// dominate both memory and comparison.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct OwnerRef(pub u32);
 
@@ -182,10 +167,12 @@ pub struct OwnerRef(pub u32);
 ///
 /// ONE oracle for both writers -- lowering, which interns the body's own owner,
 /// and the inliner, which interns a spliced callee's. Two find-or-push routines
-/// would be free to disagree about identity (a subst compared by pointer, a
-/// declaration compared without it) and the disagreement would surface as a
-/// call joining through the wrong instance, which reads as a plausible answer.
-pub fn intern_owner(table: &mut Vec<OwnerInstance>, owner: OwnerInstance) -> OwnerRef {
+/// would be free to disagree about identity and make a call join through the
+/// wrong concrete body.
+pub fn intern_owner(
+    table: &mut Vec<crate::instance::Instance>,
+    owner: crate::instance::Instance,
+) -> OwnerRef {
     if let Some(i) = table.iter().position(|o| *o == owner) {
         return OwnerRef(i as u32);
     }
@@ -198,10 +185,7 @@ pub fn intern_owner(table: &mut Vec<OwnerInstance>, owner: OwnerInstance) -> Own
 /// The writer for the RETARGETING path. There are deliberately two writers of
 /// this pair, not one: lowering derives the instance INDEPENDENTLY of the
 /// delivery decision (`Builder::callee_instance_for`) and writes both through
-/// `record_call`, while this path has no independent source and derives the
-/// substitution from the instance through the documented `spec_subst_from_key`
-/// round-trip. Keeping the second opinion is worth more than collapsing to a
-/// single writer.
+/// `record_call`, while this path receives the resolved instance directly.
 ///
 /// What the two must never do is write one record and not the other. The
 /// delivery key and the callee instance are one fact, so a path that writes
@@ -216,12 +200,10 @@ pub fn intern_owner(table: &mut Vec<OwnerInstance>, owner: OwnerInstance) -> Own
 /// either writer produced.
 pub fn record_specialized_call(
     func: &mut crate::mir::MirFunc,
-    ws: &bone_semantic::inference::Workspace,
-    interner: &crate::monoty::MonoInterner,
     call: Idx<crate::mir::Inst>,
     inst: crate::instance::Instance,
 ) {
-    record_call_owner(func, ws, interner, call, &inst);
+    record_call_owner(func, call, &inst);
     func.spec_bindings.insert(call, inst);
 }
 
@@ -229,13 +211,10 @@ pub fn record_specialized_call(
 /// delivery map has no specialized entry.
 pub fn record_call_owner(
     func: &mut crate::mir::MirFunc,
-    ws: &bone_semantic::inference::Workspace,
-    interner: &crate::monoty::MonoInterner,
     call: Idx<crate::mir::Inst>,
     inst: &crate::instance::Instance,
 ) {
-    let subst = inst.subst(ws, interner);
-    func.callee_instances.insert(call, OwnerInstance { func: inst.func, subst });
+    func.callee_instances.insert(call, inst.clone());
 }
 
 /// A [`Site`] plus the owner it belongs to.

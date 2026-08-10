@@ -65,8 +65,6 @@ impl Builder<'_> {
             if iter_decl.generics.is_empty() || !witness.args.is_empty() {
                 crate::site::record_call_owner(
                     &mut self.f,
-                    self.ws,
-                    self.scx.interner(),
                     call,
                     &witness,
                 );

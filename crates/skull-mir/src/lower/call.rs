@@ -22,7 +22,7 @@ pub(crate) struct DirectCall {
     /// same object the definition is emitted under, so the caller's splat and
     /// the callee's parameter list cannot be two derivations.
     pub(crate) spec: Option<(crate::instance::Instance, SpecSubst)>,
-    pub(crate) callee_inst: Option<crate::monoty::MonoSubst>,
+    pub(crate) callee_inst: Option<crate::instance::Instance>,
     pub(crate) plan: BackendFnAbiPlan,
 }
 
@@ -480,21 +480,8 @@ impl Builder<'_> {
         let callee_inst = self.callee_instance_for(e, func)?;
         let empty_subst = SpecSubst::default();
         let subst = spec.as_ref().map_or(&empty_subst, |(_, s)| s);
-        let plan = if let Some(owner_subst) = &callee_inst {
-            let f = &self.ws.module(func.module).functions[func.func];
-            let owner = if f.generics.is_empty() {
-                crate::instance::Instance::intern(self.scx.interner(), func, Vec::new())
-            } else {
-                let key = crate::lower::spec_key_from_subst(self.ws, func, owner_subst)
-                    .ok_or_else(|| {
-                        CompilerError::new_with_label(
-                            self.body.expr_spans[e],
-                            format!("internal: concrete call to `{}` has an incomplete owner", f.name),
-                        )
-                    })?;
-                crate::instance::Instance::intern(self.scx.interner(), func, key)
-            };
-            BackendFnAbiPlan::for_instance(self.ws, self.scx, &owner)
+        let plan = if let Some(owner) = &callee_inst {
+            BackendFnAbiPlan::for_instance(self.ws, self.scx, owner)
         } else {
             self.callee_abi_plan(func, spec.as_ref(), subst)
         };
@@ -513,10 +500,9 @@ impl Builder<'_> {
         if let Some((inst, _)) = &dc.spec {
             self.f.spec_bindings.insert(call, inst.clone());
         }
-        if let Some(subst) = &dc.callee_inst {
-            self.f
-                .callee_instances
-                .insert(call, crate::site::OwnerInstance { func, subst: subst.clone() });
+        if let Some(owner) = &dc.callee_inst {
+            debug_assert_eq!(owner.func, func);
+            self.f.callee_instances.insert(call, owner.clone());
         }
         self.f.call_abi_plans.insert(call, dc.plan.clone());
     }
@@ -534,13 +520,35 @@ impl Builder<'_> {
         &self,
         e: Idx<Expr>,
         func: FuncRef,
-    ) -> Result<Option<crate::monoty::MonoSubst>, CompilerError> {
+    ) -> Result<Option<crate::instance::Instance>, CompilerError> {
         if self.ws.module(func.module).functions[func.func].generics.is_empty() {
-            return Ok(Some(crate::monoty::MonoSubst::default()));
+            return Ok(Some(crate::instance::Instance::base(func)));
         }
         match self.inf {
             Some(inf) => {
-                crate::lower::shape::callee_instance_subst(self.ws, inf, e, func, self.subst())
+                let Some(subst) = crate::lower::shape::callee_instance_subst(
+                    self.ws,
+                    inf,
+                    e,
+                    func,
+                    self.subst(),
+                )? else {
+                    return Ok(None);
+                };
+                let key = crate::lower::spec_key_from_subst(self.ws, func, &subst).ok_or_else(|| {
+                    CompilerError::new_with_label(
+                        self.body.expr_spans[e],
+                        format!(
+                            "internal: concrete call to `{}` has an incomplete owner",
+                            self.ws.module(func.module).functions[func.func].name
+                        ),
+                    )
+                })?;
+                Ok(Some(crate::instance::Instance::intern(
+                    self.scx.interner(),
+                    func,
+                    key,
+                )))
             }
             None => Ok(None),
         }

@@ -109,7 +109,7 @@ pub fn substitute_bound_call(
     let owner = spec
         .clone()
         .unwrap_or_else(|| Instance::intern(interner, concrete, Vec::new()));
-    skull_mir::site::record_call_owner(func, ws, interner, call, &owner);
+    skull_mir::site::record_call_owner(func, call, &owner);
     func.call_abi_plans
         .insert(call, skull_mir::lower::BackendFnAbiPlan::for_instance(ws, scx, &owner));
     if let Some(inst) = spec.clone() {

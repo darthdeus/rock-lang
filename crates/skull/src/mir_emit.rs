@@ -1390,7 +1390,7 @@ fn emit_body_chunk_with_mutation(
                 .map(|(call, owner)| (*call, owner.clone()))
                 .expect("the mutation fixture must lower a concrete generic call");
             assert!(
-                !owner.subst.is_empty(),
+                !owner.args.is_empty(),
                 "the mutation fixture must have a complete concrete owner"
             );
             assert!(
@@ -1409,7 +1409,8 @@ fn emit_body_chunk_with_mutation(
                     mf.callee_instances
                         .get_mut(&call)
                         .expect("owner disappeared before key mutation")
-                        .subst = Default::default();
+                        .args
+                        .clear();
                 }
                 BodyMutation::None => unreachable!(),
             }

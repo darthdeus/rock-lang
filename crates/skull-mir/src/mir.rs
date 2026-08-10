@@ -721,9 +721,7 @@ pub struct MirFunc {
     /// was emitted under come from one object rather than from two derivations
     /// of one encoder.
     pub spec_bindings: bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::instance::Instance>,
-    /// Per call inst: the CONCRETE INSTANCE it targets -- the callee declaration
-    /// plus the substitution its own instantiation resolves to, in the same
-    /// `MonoSubst` vocabulary the instance graph records per instance.
+    /// Per call inst: the CONCRETE INSTANCE it targets.
     ///
     /// Separate from [`Self::spec_bindings`], and deliberately so: that map is
     /// the DELIVERY record (which calls the lowerer chose to serve with a
@@ -733,7 +731,7 @@ pub struct MirFunc {
     /// which instance it means. Reading the delivery record as identity is what
     /// made a declined specialization indistinguishable from an unknown callee.
     pub callee_instances:
-        bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::site::OwnerInstance>,
+        bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::instance::Instance>,
     /// The ABI plan the call lowering used for each direct call. This is kept
     /// beside identity because reconstructing it from a later, possibly mutated
     /// owner would make an ABI corruption look self-consistent.
@@ -795,7 +793,7 @@ pub struct MirFunc {
     /// this body's own owner when it has one; inlining appends the spliced
     /// callee's owner and remaps its entries, so a body holds one entry per
     /// distinct instance whose calls it now contains.
-    pub site_owners: Vec<crate::site::OwnerInstance>,
+    pub site_owners: Vec<crate::instance::Instance>,
 }
 
 impl MirFunc {

@@ -1144,10 +1144,7 @@ fn lower_body(
         cur_expr: None,
         cur_domain: crate::site::SiteDomain::Own,
         cur_op: crate::site::SiteOp::DirectCall,
-        site_owner: Some(crate::site::OwnerInstance {
-            func: self_ref,
-            subst: subst.clone(),
-        }),
+        site_owner: Some(subject.clone()),
         group_binds: HashMap::new(),
         tuple_binds: HashMap::new(),
         static_cells: HashMap::new(),
@@ -1521,12 +1518,12 @@ struct Builder<'a> {
     /// it under the same domain.
     cur_domain: crate::site::SiteDomain,
     /// The concrete INSTANCE being lowered, which OWNS every site recorded from
-    /// this builder: the declaration plus the substitution it is lowered under.
+    /// this builder.
     /// `None` for the always-emitted units -- a global initializer and a
     /// decorator body are not functions and have no `FuncRef`, so their calls
     /// carry no site and the census reports them under that cause rather than
     /// losing them.
-    site_owner: Option<crate::site::OwnerInstance>,
+    site_owner: Option<crate::instance::Instance>,
     /// Which OPERATION of [`Self::cur_expr`] is being lowered. `DirectCall` is
     /// the default because a call emitted while lowering an expression is that
     /// expression's own call; the witness and synthesized routes override it

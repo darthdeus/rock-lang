@@ -19,7 +19,6 @@ use skull_mir::mir::{Block, Cell, ContainerKind, FuncRef, Inst, Lit, MirFunc, Te
 use skull_graph::artifact::{self, ArtifactView};
 use skull_graph::instance_graph::{InstanceGraph, Site, SiteOutcome};
 use skull_graph::target_projection;
-use skull_mir::monoty::MonoSubst;
 use skull_parser::{CompilerError, Span};
 use ustr::Ustr;
 
@@ -690,7 +689,7 @@ fn finalize_labels(mut s: String, markers: &[Idx<Block>], used: &HashSet<Idx<Blo
 pub struct CalleeNames {
     names: HashMap<Instance, String>,
     graph_instances: Vec<Instance>,
-    owner_instances: Vec<(FuncRef, MonoSubst, Instance)>,
+    owner_instances: Vec<Instance>,
     site_targets: HashMap<(Instance, Site), Instance>,
 }
 
@@ -698,7 +697,7 @@ impl CalleeNames {
     fn from_graph(graph: &InstanceGraph) -> Self {
         let owner_instances = graph
             .substitutions()
-            .map(|(instance, subst)| (instance.func, subst.clone(), instance.clone()))
+            .map(|(instance, _)| instance.clone())
             .collect();
         let site_targets = graph
             .call_sites()
@@ -741,13 +740,13 @@ impl CalleeNames {
     fn instance_for_owner(
         &self,
         ws: &Workspace,
-        owner: &skull_mir::site::OwnerInstance,
+        owner: &Instance,
     ) -> Option<Instance> {
         let func = skull_mir::lower::canonical_variant(ws, owner.func);
         self.owner_instances
             .iter()
-            .find(|(candidate, subst, _)| *candidate == func && *subst == owner.subst)
-            .map(|(_, _, instance)| instance.clone())
+            .find(|candidate| candidate.func == func && candidate.args == owner.args)
+            .cloned()
     }
 
     fn instance_for_call(

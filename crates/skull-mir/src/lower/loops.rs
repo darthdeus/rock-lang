@@ -230,8 +230,6 @@ impl Builder<'_> {
                 if self.ws.module(m).functions[f].generics.is_empty() || !witness.args.is_empty() {
                     crate::site::record_call_owner(
                         &mut self.f,
-                        self.ws,
-                        self.scx.interner(),
                         call,
                         &witness,
                     );
@@ -334,8 +332,6 @@ impl Builder<'_> {
                     });
                     crate::site::record_call_owner(
                         &mut self.f,
-                        self.ws,
-                        self.scx.interner(),
                         call,
                         &owner,
                     );

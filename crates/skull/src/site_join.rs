@@ -42,7 +42,7 @@ use bone_semantic::inference::Workspace;
 use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::{Inst, MirFunc};
 use skull_mir::monoty::MonoSubst;
-use skull_mir::site::{CallSite, OwnerInstance, Site};
+use skull_mir::site::{CallSite, Site};
 
 use crate::concrete_body::{Callee, ConcreteBodies};
 use crate::instance_graph::{Instance, InstanceGraph};
@@ -58,8 +58,7 @@ pub enum Unjoined {
     /// have. A splice that failed to re-intern its owner lands here rather than
     /// silently reading the caller's entry 0.
     OwnerNotInTable,
-    /// The owner instance corresponds to no `Instance` in the graph -- the
-    /// substitution a body was lowered under is not one the walk recorded.
+    /// The owner instance corresponds to no `Instance` in the graph.
     OwnerNotAnInstance,
     /// The owning instance has no `ConcreteBody` (the walk did not expand it).
     NoBody,
@@ -507,7 +506,7 @@ struct CallRow {
     /// (`MirFunc::callee_instances`). This is the identity record, recorded for
     /// every complete instantiation regardless of what the specialization
     /// POLICY decided, so it is what the comparison reads.
-    callee_inst: Option<OwnerInstance>,
+    callee_inst: Option<Instance>,
     /// For an indirect call, what produced the callee operand. `None` for a
     /// direct call.
     producer: Option<IndirectProducer>,
@@ -603,9 +602,9 @@ fn owner_index(g: &InstanceGraph) -> HashMap<skull_mir::mir::FuncRef, Vec<(MonoS
 
 fn resolve_owner<'a>(
     ix: &'a HashMap<skull_mir::mir::FuncRef, Vec<(MonoSubst, Instance)>>,
-    owner: &OwnerInstance,
+    owner: &Instance,
 ) -> Option<&'a Instance> {
-    ix.get(&owner.func)?.iter().find(|(s, _)| *s == owner.subst).map(|(_, i)| i)
+    ix.get(&owner.func)?.iter().find(|(_, i)| *i == *owner).map(|(_, i)| i)
 }
 
 /// Whether skull lowers a standalone body for this declaration at all.
@@ -694,10 +693,10 @@ fn measure_body_into(
                     format!(
                         "{}/{}",
                         ws.module(o.func.module).functions[o.func.func].name,
-                        if o.subst.is_empty() {
+                        if o.args.is_empty() {
                             "EMPTY".to_string()
                         } else {
-                            o.subst.len().to_string()
+                            o.args.len().to_string()
                         }
                     )
                 })
@@ -712,8 +711,8 @@ fn measure_body_into(
             let key = match (&row.spec_key, &row.callee_inst) {
                 (None, None) => "nokey/noinst".to_string(),
                 (Some(k), None) => format!("key{}/noinst", k.args.len()),
-                (None, Some(i)) => format!("nokey/inst{}", i.subst.len()),
-                (Some(k), Some(i)) => format!("key{}/inst{}", k.args.len(), i.subst.len()),
+                (None, Some(i)) => format!("nokey/inst{}", i.args.len()),
+                (Some(k), Some(i)) => format!("key{}/inst{}", k.args.len(), i.args.len()),
             };
             c.rows.push(format!(
                 "{}\t{op}\t{span}\towner={owner}\ttarget={target}\t{key}\tin={}\t{note}",
@@ -736,12 +735,12 @@ fn measure_body_into(
                         let owner = mf.site_owners.get(cs.owner.0 as usize).map(|o| {
                             let f = &ws.module(o.func.module).functions[o.func.func];
                             format!(
-                                "owner `{}` subst {}",
+                                "owner `{}` args {}",
                                 f.name,
-                                if o.subst.is_empty() {
+                                if o.args.is_empty() {
                                     "EMPTY".to_string()
                                 } else {
-                                    format!("{}", o.subst.len())
+                                    format!("{}", o.args.len())
                                 }
                             )
                         });
@@ -911,14 +910,14 @@ pub enum Verified {
 /// Declaration equality is the WEAKER question: two instantiations of one
 /// generic compare equal under it, which is precisely the distinction
 /// instance-driven emission exists to make. So generic arguments participate
-/// whenever the call carries a complete key, and the absence of one is reported
+/// whenever the call carries a complete instance, and the absence of one is reported
 /// rather than treated as agreement.
 pub fn check_callee(
     ws: &Workspace,
     g: &InstanceGraph,
     callee: &Callee,
     target: skull_mir::mir::FuncRef,
-    call_inst: Option<&OwnerInstance>,
+    call_inst: Option<&Instance>,
     target_backend: bone_semantic::hir::FnBackend,
 ) -> CalleeCheck {
     let callee_inst = callee.instance();
@@ -957,7 +956,7 @@ pub fn check_callee(
     if generics == 0 {
         return CalleeCheck::NonGeneric;
     }
-    // A complete key has one reified entry per declared generic. Each way of
+    // A complete instance has one argument per declared generic. Each way of
     // falling short is its own answer: they have different causes and only one
     // of them is conditional specialization.
     // The call's OWN claim, in the graph's vocabulary. Not the delivery record: that
@@ -971,7 +970,7 @@ pub fn check_callee(
         return CalleeCheck::ClaimDeclMismatch;
     }
     match g.substitution(callee_inst) {
-        Some(resolved) if *resolved == claim.subst => CalleeCheck::Instance,
+        Some(_) if callee_inst.args == claim.args => CalleeCheck::Instance,
         Some(_) => CalleeCheck::InstanceMismatch,
         None => CalleeCheck::ResolvedUnrecorded,
     }
@@ -993,7 +992,7 @@ pub fn check_callee(
 ///   its declaration, class, target and spelling rather than a Rock
 ///   instantiation;
 /// - declaration agrees, is generic, and the call RECORDED its concrete
-///   instance (`MirFunc::callee_instances`) -> compare that substitution against
+///   instance (`MirFunc::callee_instances`) -> compare its arguments against
 ///   the resolved instance's own;
 /// - declaration agrees, is generic, and no instance was recorded, or the
 ///   record names another declaration -> UNVERIFIED, never a silent success,

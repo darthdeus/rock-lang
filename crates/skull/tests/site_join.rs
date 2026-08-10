@@ -14,7 +14,6 @@ use skull::site_join::{self, SiteJoinCensus, Unjoined};
 use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::{Inst, MirFunc};
 use skull_mir::monoty::{MonoCtor, MonoTy};
-use skull_mir::site::OwnerInstance;
 use skull_mir::site::{Site, SiteDomain, SiteOp};
 use ustr::Ustr;
 
@@ -53,13 +52,10 @@ fn census_of(src: &str) -> SiteJoinCensus {
 }
 
 fn instance_claim(
-    g: &InstanceGraph,
+    _g: &InstanceGraph,
     inst: &skull::instance_graph::Instance,
-) -> skull_mir::site::OwnerInstance {
-    skull_mir::site::OwnerInstance {
-        func: inst.func,
-        subst: g.substitution(inst).expect("instance has a substitution").clone(),
-    }
+) -> skull::instance_graph::Instance {
+    inst.clone()
 }
 
 /// A `Callee::Rock` over `inst`, the arm an ordinary Rock call resolves to.
@@ -629,9 +625,9 @@ fn main() {
     // asking the oracle under test which candidate it likes.
     let c0 = instance_claim(&g, insts[0]);
     let c1 = instance_claim(&g, insts[1]);
-    assert_eq!(c0.subst.len(), 1, "fixture has one generic: {c0:?}");
-    assert_eq!(c1.subst.len(), 1, "fixture has one generic: {c1:?}");
-    assert_ne!(c0.subst, c1.subst, "the two claims must differ, or the swap below is a no-op");
+    assert_eq!(c0.args.len(), 1, "fixture has one generic: {c0:?}");
+    assert_eq!(c1.args.len(), 1, "fixture has one generic: {c1:?}");
+    assert_ne!(c0.args, c1.args, "the two claims must differ, or the swap below is a no-op");
 
     // Matched: the instance and its OWN claim.
     assert_eq!(
@@ -722,13 +718,13 @@ fn main() { print("{pair(1, 2.0)} {other(1, 2.0)}") }
         "fixture must declare two generics"
     );
 
-    let check = |c: Option<&skull_mir::site::OwnerInstance>| {
+    let check = |c: Option<&skull::instance_graph::Instance>| {
         skull::site_join::check_callee(&ws, &g, &rock(&inst), inst.func, c, LUA)
     };
 
     // ADMISSION CONTROL: the instance's own recorded substitution verifies.
     let good = instance_claim(&g, &inst);
-    assert_eq!(good.subst.len(), 2, "one entry per generic: {good:?}");
+    assert_eq!(good.args.len(), 2, "one entry per generic: {good:?}");
     assert_eq!(
         check(Some(&good)),
         skull::site_join::CalleeCheck::Instance,
@@ -741,16 +737,15 @@ fn main() { print("{pair(1, 2.0)} {other(1, 2.0)}") }
 
     // A record naming ANOTHER declaration. Not a policy outcome: the record is
     // written beside the call it belongs to, so this can only be a recorder bug.
-    let wrong_decl = skull_mir::site::OwnerInstance {
+    let wrong_decl = skull::instance_graph::Instance {
         func: alien.func,
-        subst: good.subst.clone(),
+        args: good.args.clone(),
     };
     assert_eq!(check(Some(&wrong_decl)), skull::site_join::CalleeCheck::ClaimDeclMismatch);
 
     // Right declaration, WRONG substitution: a partial one names no instance.
     let mut partial = good.clone();
-    let first = *partial.subst.keys().next().expect("non-empty");
-    partial.subst.remove(&first);
+    partial.args.pop();
     assert_eq!(check(Some(&partial)), skull::site_join::CalleeCheck::InstanceMismatch);
 }
 
@@ -919,7 +914,7 @@ fn main() { print("{top()}") }
         &skull_mir::instance::Instance::base(fref),
     )
     .expect("lower top");
-    let (call, owner) = mf
+    let (call, owner): (_, skull::instance_graph::Instance) = mf
         .insts
         .iter()
         .find_map(|(id, inst)| match inst {
@@ -931,7 +926,7 @@ fn main() { print("{top()}") }
             _ => None,
         })
         .expect("concrete wrap call");
-    assert!(!owner.subst.is_empty(), "the fixture must have a concrete wrap owner: {owner:?}");
+    assert!(!owner.args.is_empty(), "the fixture must have a concrete wrap owner: {owner:?}");
     assert!(mf.spec_bindings.remove(&call).is_some(), "the fixture must have delivery to remove");
 
     let mangled = skull_mir::mangle::mangle_fn(&ws, f);
@@ -1012,10 +1007,7 @@ fn main() { print("{top()}") }
         wrap,
         vec![MonoTy::App { ctor: MonoCtor::Nominal(Ustr::from("Pair")), params: Vec::new() }],
     );
-    mf.callee_instances.insert(
-        call,
-        OwnerInstance { func: pair.func, subst: pair.subst(&ws, scx.interner()) },
-    );
+    mf.callee_instances.insert(call, pair);
     assert!(mf.spec_bindings.remove(&call).is_some(), "the negative arm must remove delivery");
 
     let mangled = skull_mir::mangle::mangle_fn(&ws, f);
