@@ -91,8 +91,8 @@ fn application_line_content() {
 /// specialized body emitted`.
 ///
 /// `main` deliberately does NOT push, so the demand has exactly one origin.
-/// Normal inlining may consume the specialized call entirely; in that case the
-/// decorator body must contain the concrete append rather than silently losing it.
+/// The normal lane may inline the specialized call; a no-inline lane must retain
+/// the standalone specialized definition and its concrete append.
 #[test]
 fn a_specialization_demanded_only_by_a_decorator_body_is_emitted() {
     let ws = ws_with(
@@ -108,6 +108,18 @@ fn main() { print("{XS.len}") }
     let body = &js[js.find("function __deco_reg(").expect("decorator body")..];
     assert!(
         body.contains("_data[v0.len] = 1") && body.contains("v0.len = v0.len + 1"),
-        "decorator lost the concrete push operation: {body}"
+        "decorator lost the concrete inline push operation: {body}"
+    );
+
+    let _inline = crate::common::InlineOffGuard::on();
+    let standalone = emit_program(&ws);
+    assert!(
+        standalone.contains("function push_"),
+        "decorator-only specialization did not emit the concrete push definition:\n{standalone}"
+    );
+    let push = &standalone[standalone.find("function push_").expect("push definition")..];
+    assert!(
+        push.contains("_data[v0.len] = v1") && push.contains("v0.len = v0.len + 1"),
+        "standalone decorator specialization lost the concrete push operation: {push}"
     );
 }

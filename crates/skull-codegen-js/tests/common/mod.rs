@@ -5,6 +5,31 @@
 
 use skull_mir::lower::{lower_function, ScalarCtx};
 
+static INLINE_MODE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub struct InlineOffGuard(
+    #[allow(dead_code)] std::sync::MutexGuard<'static, ()>,
+    Option<String>,
+);
+
+impl InlineOffGuard {
+    pub fn on() -> Self {
+        let guard = INLINE_MODE.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var("SKULL_INLINE_OFF").ok();
+        unsafe { std::env::set_var("SKULL_INLINE_OFF", "1") };
+        InlineOffGuard(guard, previous)
+    }
+}
+
+impl Drop for InlineOffGuard {
+    fn drop(&mut self) {
+        match &self.1 {
+            Some(value) => unsafe { std::env::set_var("SKULL_INLINE_OFF", value) },
+            None => unsafe { std::env::remove_var("SKULL_INLINE_OFF") },
+        }
+    }
+}
+
 /// Every `node` spawn in this crate's tests goes through here.
 ///
 /// `console.log` of a NUMBER is formatted by `util.inspect`, which colours it,
@@ -106,4 +131,3 @@ pub fn emit_scalar(ws: &bone_semantic::inference::Workspace, name: &str, arity: 
     }
     panic!("no emittable scalar `{name}`/{arity} overload");
 }
-
