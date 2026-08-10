@@ -284,6 +284,7 @@ pub fn spec_bound_calls(
     out: &mut Vec<crate::bound::SpecDemand>,
 ) -> Result<(), CompilerError> {
     let empty = bone_semantic::prelude::BoundTree::default();
+    let empty_resolved = crate::bound::ResolvedBoundTree::default();
     for bid in emitted_blocks(mf) {
         for &iid in &mf.blocks[bid].insts {
             let Some(inst) = mf.spec_bindings.get(&iid) else { continue };
@@ -311,15 +312,16 @@ pub fn spec_bound_calls(
             // resolution. Re-deriving it from `bound_trees` is not possible --
             // there is no raw entry, and this body's arena cannot state a tree
             // that came from another instantiation.
+            let raw = mf.bound_trees.get(&iid).unwrap_or(&empty);
             let tree = match mf.resolved_bound_trees.get(&iid) {
                 Some(t) => t.clone(),
-                None if ctx.is_concrete() => {
+                None if ctx.is_concrete() && !raw.is_empty() => {
                     return Err(CompilerError::new_no_location(
                         "concrete specialized call has no resolved bound plan".to_string(),
                     ));
                 }
+                None if ctx.is_concrete() => empty_resolved.clone(),
                 None => {
-                    let raw = mf.bound_trees.get(&iid).unwrap_or(&empty);
                     let subst = ctx
                         .legacy_subst()
                         .expect("legacy bound context has a substitution");

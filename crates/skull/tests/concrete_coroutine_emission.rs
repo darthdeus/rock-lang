@@ -88,6 +88,16 @@ fn main() {
 }
 "#;
 
+const GENERIC_CO_CONCRETE_RESULT_FALLOFF: &str = r#"
+co fn missing<T>(value: T) -> Coroutine<int, T> {
+    yield 1
+}
+
+fn main() {
+    let _c = missing(1)
+}
+"#;
+
 fn run(src: &str, tag: &str) -> String {
     let lua = common::try_emit_module(src)
         .unwrap_or_else(|e| panic!("must emit ({tag}): {}", e.message));
@@ -222,5 +232,15 @@ fn a_generic_coroutine_over_boxed_elements_owns_a_family_per_instance() {
         distinct.len(),
         "no `__step` symbol may be defined twice -- the later definition would \
          clobber the earlier one: {steps:?}"
+    );
+}
+
+#[test]
+fn a_concrete_coroutine_result_rejects_a_reachable_falloff() {
+    let err = common::try_emit_module(GENERIC_CO_CONCRETE_RESULT_FALLOFF)
+        .expect_err("a concrete non-unit coroutine result cannot fall off");
+    assert!(
+        err.message.contains("can fall off") && err.message.contains("missing"),
+        "{err:?}"
     );
 }

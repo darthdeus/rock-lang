@@ -127,9 +127,10 @@ fn main() {
     // so its window is strictly wider at the same arity. Without this the
     // assertion below is satisfied by a `required_arg_count` that returns its
     // argument for every input.
+    let abi = skull_mir::lower::BackendFnAbiPlan::for_instance(&ws, &scx, &body);
     for arity in [1usize, 3, 5] {
         assert_eq!(
-            skull_codegen_js::emit::required_arg_count(&ws, &scx, body.clone(), arity),
+            skull_codegen_js::emit::required_arg_count(&ws, &abi, arity),
             arity,
             "a callee with no defaulted params must have a single-valued arity window"
         );
@@ -144,13 +145,13 @@ fn main() {
         .map(|(fid, _)| fid)
         .expect("take");
     let dscx = ScalarCtx::new(&with_default).with_target(bone_semantic::hir::FnBackend::Js);
+    let dabi = skull_mir::lower::BackendFnAbiPlan::for_instance(
+        &with_default,
+        &dscx,
+        &skull_mir::instance::Instance::base(FuncRef { module: dmid, func: dfid }),
+    );
     assert!(
-        skull_codegen_js::emit::required_arg_count(
-            &with_default,
-            &dscx,
-            skull_mir::instance::Instance::base(FuncRef { module: dmid, func: dfid }),
-            3,
-        ) < 3,
+        skull_codegen_js::emit::required_arg_count(&with_default, &dabi, 3) < 3,
         "a callee WITH a default must have a wider window, or the point above is \
          not a property of defaults at all"
     );

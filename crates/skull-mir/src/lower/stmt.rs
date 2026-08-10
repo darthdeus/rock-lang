@@ -68,7 +68,7 @@ impl Builder<'_> {
         params: IdxRange<BindingInfo>,
         ret_ty: Option<TyId>,
         hoisted: Ustr,
-    ) -> NestedFn {
+    ) -> Result<NestedFn, CompilerError> {
         let param_names: Vec<Ustr> =
             params.into_iter().map(|pb| self.body.binding_arena[pb].name).collect();
         let boxed =
@@ -79,7 +79,41 @@ impl Builder<'_> {
             .iter()
             .any(|(_, e)| matches!(e, Expr::Var(b) if *b == name));
         if self.scx.values_first_class {
-            return boxed;
+            return Ok(boxed);
+        }
+        if self.concrete_plan.is_some() {
+            let fn_ty = self
+                .binding_ty(name)
+                .and_then(|ty| self.concrete_ty_id(ty))
+                .ok_or_else(|| gap("concrete nested function binding has no type plan"))?;
+            let crate::monoty::MonoTy::Function { params, ret } = fn_ty else {
+                return Err(gap("concrete nested function binding is not a function type"));
+            };
+            let slot_of = |ty: &crate::monoty::MonoTy| {
+                if taken_by_value {
+                    crate::lower::mono_nobox_value_shape(self.ws, ty)
+                        .map(RetSlot::Leaves)
+                        .or_else(|| {
+                            crate::lower::mono_tuple_ret_shape(self.ws, ty)
+                                .filter(TupleRetShape::splats)
+                                .map(RetSlot::Nested)
+                        })
+                        .unwrap_or(RetSlot::Opaque)
+                } else {
+                    crate::lower::mono_sig_param_slot(self.ws, ty)
+                }
+            };
+            let abi = NestedFn {
+                hoisted,
+                param_names,
+                param_shapes: params.iter().map(slot_of).collect(),
+                ret_shape: if taken_by_value {
+                    crate::lower::mono_nobox_value_shape(self.ws, &ret)
+                } else {
+                    crate::lower::mono_value_shape(self.ws, &ret)
+                },
+            };
+            return Ok(if abi.uses_scalar_abi() { abi } else { boxed });
         }
         // TAKEN BY VALUE: the ABI narrows to what an indirect call site can
         // compute from the fn TYPE alone ([`Self::fn_value_abi`]), which is
@@ -123,7 +157,7 @@ impl Builder<'_> {
                 .nested_fn_ret_ty(name, ret_ty)
                 .and_then(|t| shape_of(self, t)),
         };
-        if abi.uses_scalar_abi() { abi } else { boxed }
+        Ok(if abi.uses_scalar_abi() { abi } else { boxed })
     }
 
     /// A nested `fn`'s return type. An ANNOTATION is authoritative when present;
@@ -201,7 +235,7 @@ impl Builder<'_> {
             v
         };
         let hoisted = Ustr::from(format!("__local_{}_{}_{}", self.static_owner, sname, ctr).as_str());
-        let abi = self.nested_fn_abi(name, params, ret_ty, hoisted);
+        let abi = self.nested_fn_abi(name, params, ret_ty, hoisted)?;
         self.nested_fn_globals.insert(raw(name), abi.clone());
 
         let mf = MirFunc::new(hoisted);

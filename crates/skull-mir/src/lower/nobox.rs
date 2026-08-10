@@ -498,11 +498,8 @@ impl Builder<'_> {
         Err(CompilerError::new_with_label(
             self.body.expr_spans[e],
             format!(
-                "`{}` cannot be taken as a fn value: its `@scalar_abi` definition \
-                 takes leaf params, but an indirect call derives the ABI from the \
-                 fn TYPE alone, which boxes them -- so the first leaf would get \
-                 the whole box and the rest nil (mark the value type `nobox` so \
-                 both ends agree, or call it directly)",
+                "`{}` cannot be used as a fn value because its fixed ABI does not match the \
+                 type-derived `nobox` fn-value ABI",
                 callee.name,
             ),
         ))
@@ -709,62 +706,6 @@ impl Builder<'_> {
 
     pub(crate) fn nobox_binding_shape(&self, binding: Idx<BindingInfo>) -> Option<ValueShape> {
         self.nobox_shape_of_ty(self.binding_ty(binding)?)
-    }
-
-    /// The leaf shape of a `nobox`-typed `ty` (nullable included: presence is
-    /// leaf 0), `None` for every other type.
-    /// Argument positions of a `ShaderPipeline` expansion, where a bare fn name is
-    /// consumed by the compiler and never becomes a runtime fn value:
-    /// `rock_shader(frag)` lowers its argument to the entry's NAME as a string
-    /// literal, so no function-value ABI applies there.
-    pub(crate) fn expansion_arg_exprs(&self) -> HashSet<Idx<Expr>> {
-        let mut out = HashSet::new();
-        for (e, expr) in self.body.expr_arena.iter() {
-            let Expr::Call { callee, args } = expr else { continue };
-            let Callee::Unresolved { name, .. } = callee else { continue };
-            let Ok(func) = self.resolve_funcref(e, *name) else { continue };
-            // ONLY `ShaderPipeline`. It resolves its argument to a fn NAME and emits a
-            // string literal, so the name never becomes a runtime value. The sibling
-            // kinds evaluate theirs -- `expand_materialize` calls `lower_expr_repr` on
-            // it -- so exempting them let `materialize(<nobox-carrying fn>)` bypass the
-            // ABI rejection entirely, which is a hole, not a narrowing.
-            if matches!(self.fn_expand_kind(func), Some(ExpandKind::ShaderPipeline)) {
-                out.extend(args.clone().into_iter());
-            }
-        }
-        out
-    }
-
-    pub(crate) fn reject_incompatible_nobox_fn_value_abi(&self) -> Result<(), CompilerError> {
-        if self.scx.values_first_class {
-            return Ok(());
-        }
-        let expansion_args = self.expansion_arg_exprs();
-        for (e, expr) in self.body.expr_arena.iter() {
-            let Expr::Global(name) = expr else { continue };
-            if expansion_args.contains(&e) {
-                continue;
-            }
-            let Some(overloads) = self.ws.functions_by_name.get(name) else { continue };
-            let incompatible = overloads.iter().any(|(mid, fid)| {
-                let fref = FuncRef { module: *mid, func: *fid };
-                let expected =
-                    super::abi::fn_value_nobox_abi(self.ws, fref, &SpecSubst::default());
-                let emitted =
-                    BackendFnAbiPlan::for_declaration(self.ws, self.scx, fref).scalar().cloned();
-                expected.is_some() && emitted != expected
-            });
-            if incompatible {
-                return Err(CompilerError::new_with_label(
-                    self.body.expr_spans[e],
-                    format!(
-                        "`{name}` cannot be used as a fn value because its fixed ABI does not \
-                         match the type-derived `nobox` fn-value ABI"
-                    ),
-                ));
-            }
-        }
-        Ok(())
     }
 
     /// The leaf ABI of a FN TYPE, or `None` when nothing in the signature is a

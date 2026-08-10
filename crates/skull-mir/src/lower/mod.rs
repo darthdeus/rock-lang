@@ -1218,7 +1218,6 @@ fn lower_body(
         nested_fn_counters: HashMap::new(),
         presence_only: None,
     };
-    b.reject_incompatible_nobox_fn_value_abi()?;
     b.lower_params();
     b.fill_param_defaults()?;
     b.lower_root()?;
@@ -1304,11 +1303,6 @@ fn lower_global_inner(
         nested_fn_counters: HashMap::new(),
         presence_only: None,
     };
-    // Same gate the fn and decorator bodies run. An initializer can name a fn
-    // whose fixed ABI cannot adopt the type-derived leaf ABI, and a global is a
-    // fn value's most ordinary home (a dispatch table); without this the name
-    // reached codegen and the leaves splatted into a callee expecting a box.
-    b.reject_incompatible_nobox_fn_value_abi()?;
     // A `nobox` global is category-2 storage: its layout comes from the declared
     // type, so the initializer RETURNS leaves and `mir_emit` binds one Lua global
     // per leaf. Without this the body packs a box the verifier then rejects.
@@ -1504,7 +1498,6 @@ fn lower_decorator_inner(
     let tcell = b.f.new_cell(Some(b.body.binding_arena[target].name));
     b.f.params.push(tcell);
     b.binds.insert(raw(target), tcell);
-    b.reject_incompatible_nobox_fn_value_abi()?;
     b.lower_params();
     b.fill_param_defaults()?;
     b.lower_root()?;
@@ -1941,23 +1934,43 @@ impl Builder<'_> {
     /// instantiations are still checked by bone) all stay admitted. Called only
     /// when the body's end is reachable, so `while true` bodies never trip it.
     fn reject_nonunit_coroutine_falloff(&self) -> Result<(), CompilerError> {
-        let Some(ret) = self.ret_ty else { return Ok(()) };
-        let Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), params }) = static_ty(self.ws, ret)
-        else {
-            return Ok(());
-        };
-        if n.as_str() != "Coroutine" {
-            return Ok(());
-        }
-        let TyId::Static(m, _) = ret else { return Ok(()) };
-        // Fewer than two args means R was default-filled to `()`.
-        let Some(r_idx) = params.into_iter().nth(1) else { return Ok(()) };
-        let nonunit_concrete = match self.ws.module(m).ty_arena[r_idx] {
-            TypeExpr::Builtin(BuiltinTy::Unit | BuiltinTy::Error) => false,
-            TypeExpr::Tuple { elements } if elements.into_iter().count() == 0 => false,
-            TypeExpr::Nullable(_) => false,
-            TypeExpr::Generic(..) | TypeExpr::Infer(..) => false,
-            _ => true,
+        let nonunit_concrete = if let Some(plan) = self.concrete_plan {
+            let Some(result_id) = plan.signature.result else { return Ok(()) };
+            let result = self.scx.interner().get(result_id);
+            let crate::monoty::MonoTy::App {
+                ctor: crate::monoty::MonoCtor::Nominal(name),
+                params,
+            } = result
+            else {
+                return Ok(())
+            };
+            if name.as_str() != "Coroutine" {
+                return Ok(())
+            }
+            let Some(result) = params.get(1) else { return Ok(()) };
+            match result {
+                crate::monoty::MonoTy::Unit | crate::monoty::MonoTy::Nullable(_) => false,
+                crate::monoty::MonoTy::Tuple(parts) => !parts.is_empty(),
+                _ => true,
+            }
+        } else {
+            let Some(ret) = self.ret_ty else { return Ok(()) };
+            let Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), params }) = static_ty(self.ws, ret)
+            else {
+                return Ok(())
+            };
+            if n.as_str() != "Coroutine" {
+                return Ok(())
+            }
+            let TyId::Static(m, _) = ret else { return Ok(()) };
+            let Some(r_idx) = params.into_iter().nth(1) else { return Ok(()) };
+            match self.ws.module(m).ty_arena[r_idx] {
+                TypeExpr::Builtin(BuiltinTy::Unit | BuiltinTy::Error) => false,
+                TypeExpr::Tuple { elements } if elements.into_iter().count() == 0 => false,
+                TypeExpr::Nullable(_) => false,
+                TypeExpr::Generic(..) | TypeExpr::Infer(..) => false,
+                _ => true,
+            }
         };
         if nonunit_concrete {
             let msg = format!(

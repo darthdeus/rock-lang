@@ -2501,7 +2501,15 @@ pub fn emit_with_closure(
     st.canonicalize_emission_order();
     let mut rejections = std::mem::take(&mut st.rejections);
     let bodies = st.top_bodies();
-    rejections.extend(check_scalar_abi(ws, &scx, &st.lowered, &st.spec_lowered, &bodies));
+    rejections.extend(check_scalar_abi(
+        ws,
+        &scx,
+        &st.lowered,
+        &st.spec_lowered,
+        &bodies,
+        &st.concrete,
+        &st.artifact_decls,
+    ));
     let hoisted = collect_hoisted(&bodies);
 
     let mut out = String::new();
@@ -2957,7 +2965,15 @@ fn assemble_program_core(
     let mut rejections = std::mem::take(&mut st.rejections);
     let mut bodies = st.top_bodies();
     bodies.extend(deco_bodies.iter().map(|(_, mf)| mf));
-    rejections.extend(check_scalar_abi(ws, scx, &st.lowered, &st.spec_lowered, &bodies));
+    rejections.extend(check_scalar_abi(
+        ws,
+        scx,
+        &st.lowered,
+        &st.spec_lowered,
+        &bodies,
+        &st.concrete,
+        &st.artifact_decls,
+    ));
     let hoisted = collect_hoisted(&bodies);
 
     let mut out = String::new();
@@ -4241,6 +4257,8 @@ fn check_scalar_abi(
     lowered: &[(FuncRef, MirFunc)],
     spec_lowered: &[(Instance, MirFunc)],
     bodies: &[&MirFunc],
+    concrete: &BTreeMap<Instance, skull_mir::concrete::ConcreteBodyPlan>,
+    artifact_decls: &HashMap<Instance, FuncRef>,
 ) -> Vec<(String, CompilerError)> {
     let arities: HashMap<FuncRef, usize> =
         lowered.iter().map(|(fr, mf)| (*fr, mf.params.len())).collect();
@@ -4281,7 +4299,32 @@ fn check_scalar_abi(
                         Some(&arity) => (Instance::base(*callee), arity, ""),
                     },
                 };
-                let required = required_arg_count(ws, scx, body, arity);
+                let abi = concrete
+                    .get(&body)
+                    .or_else(|| {
+                        artifact_decls.get(&body).and_then(|decl| {
+                            concrete.get(&Instance { func: *decl, args: body.args.clone() })
+                        })
+                    });
+                let required = match abi {
+                    Some(plan) => {
+                        let abi = skull_mir::lower::BackendFnAbiPlan::for_concrete_plan(
+                            ws, scx, plan,
+                        );
+                        required_arg_count(ws, &abi, arity)
+                    }
+                    None if skull_mir::lower::requires_concrete_body_plan(ws, &body) => {
+                        findings.push(err(format!(
+                            "JS subset: no concrete ABI plan for {what}`{}`",
+                            ws.module(callee.module).functions[callee.func].name,
+                        )));
+                        continue;
+                    }
+                    None => {
+                        let abi = skull_mir::lower::BackendFnAbiPlan::for_instance(ws, scx, &body);
+                        required_arg_count(ws, &abi, arity)
+                    }
+                };
                 if argc < required || argc > arity {
                     let cf = &ws.module(callee.module).functions[callee.func];
                     findings.push(err(format!(
@@ -5661,12 +5704,11 @@ fn global_refs(mf: &MirFunc) -> Vec<ustr::Ustr> {
 /// admitted here.
 pub fn required_arg_count(
     ws: &Workspace,
-    scx: &skull_mir::lower::ScalarCtx,
-    body: Instance,
+    abi: &skull_mir::lower::BackendFnAbiPlan,
     arity: usize,
 ) -> usize {
     use bone_semantic::hir::BodyOwner;
-    let fr = body.func;
+    let fr = abi.decl();
     let defaults: Vec<bool> = ws
         .module(fr.module)
         .bodies
@@ -5678,9 +5720,7 @@ pub fn required_arg_count(
     // The widths come from the EMITTED BODY's own plan: a specialization's
     // instantiation is exactly where a param's leaf width differs from the
     // declaration's, so asking the declaration would answer for another ABI.
-    if let Some(widths) =
-        skull_mir::lower::BackendFnAbiPlan::for_instance(ws, scx, &body).param_leaf_widths()
-    {
+    if let Some(widths) = abi.param_leaf_widths() {
         let omittable: usize = widths
             .iter()
             .zip(defaults.iter().chain(std::iter::repeat(&false)))
