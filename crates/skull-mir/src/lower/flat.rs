@@ -2,6 +2,7 @@
 //! than a nested table, plus the cell group/repr conversions a coroutine frame
 //! and a flat literal both go through.
 use super::*;
+use crate::monoty::MonoTy;
 
 impl Builder<'_> {
     /// Lower an enum-typed value into its flattened cells: the discriminant
@@ -115,6 +116,19 @@ impl Builder<'_> {
     /// The flat-enum `ValueShape` of `e`'s (non-nullable) inferred type, else `None`
     /// -- the gate for threading a `let`/reassign target as leaf cells.
     pub(crate) fn flat_enum_value_shape_of(&self, e: Idx<Expr>) -> Option<ValueShape> {
+        if let Some(ty) = self.concrete_expr_ty(e) {
+            let MonoTy::App {
+                ctor: crate::monoty::MonoCtor::Nominal(name),
+                ..
+            } = ty.peel_nullable().0
+            else {
+                return None;
+            };
+            return flat_enum_shape(self.ws, *name).map(|s| s.value_shape());
+        }
+        if self.concrete_plan.is_some() {
+            return None;
+        }
         match self.expr_ty(e)? {
             TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => {
                 flat_enum_shape(self.ws, n).map(|s| s.value_shape())
@@ -125,6 +139,19 @@ impl Builder<'_> {
 
     /// The `EnumFlatShape` of `e`'s (`Nullable`-peeled) inferred type, else `None`.
     pub(crate) fn flat_enum_shape_of_expr(&self, e: Idx<Expr>) -> Option<EnumFlatShape> {
+        if let Some(ty) = self.concrete_expr_ty(e) {
+            let MonoTy::App {
+                ctor: crate::monoty::MonoCtor::Nominal(name),
+                ..
+            } = ty.peel_nullable().0
+            else {
+                return None;
+            };
+            return flat_enum_shape(self.ws, *name);
+        }
+        if self.concrete_plan.is_some() {
+            return None;
+        }
         match self.expr_ty(e)? {
             TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => flat_enum_shape(self.ws, n),
             _ => None,
@@ -134,6 +161,17 @@ impl Builder<'_> {
     /// Whether `e`'s inferred type is a `Coroutine<..>` -- the guard that a
     /// `resume(e)` call is a real coroutine resume (not a user fn named `resume`).
     pub(crate) fn is_coroutine_recv(&self, e: Idx<Expr>) -> bool {
+        if let Some(ty) = self.concrete_expr_ty(e) {
+            return matches!(
+                ty.peel_nullable().0,
+                MonoTy::App {
+                    ctor: crate::monoty::MonoCtor::Nominal(name), ..
+                } if name.as_str() == "Coroutine"
+            );
+        }
+        if self.concrete_plan.is_some() {
+            return false;
+        }
         matches!(
             self.expr_ty(e),
             Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. }) if n.as_str() == "Coroutine"

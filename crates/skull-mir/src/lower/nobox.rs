@@ -69,6 +69,23 @@ impl Builder<'_> {
             if self.is_explicit_materialize_call(arg) {
                 continue;
             }
+            if let Some(ty) = self.concrete_expr_ty(arg) {
+                let Some(name) = ty.peel_nullable().0.nominal() else { continue };
+                let Some(sid) = self.ws.struct_by_name.get(&name) else { continue };
+                if self.ws.modules[sid.module.index()].structs[sid.def].is_nobox {
+                    return Err(CompilerError::new_with_label(
+                        self.body.expr_spans[arg],
+                        format!(
+                            "nobox value `{name}` cannot cross boxed call boundary `{}`",
+                            callee.name
+                        ),
+                    ));
+                }
+                continue;
+            }
+            if self.concrete_plan.is_some() {
+                continue;
+            }
             let Some(TypeExpr::App {
                 ctor: TypeCtor::Nominal(name),
                 ..
@@ -729,6 +746,12 @@ impl Builder<'_> {
     }
 
     pub(crate) fn nobox_shape_of_ty(&self, ty: TyId) -> Option<ValueShape> {
+        if let Some(concrete) = self.concrete_ty_id(ty) {
+            return mono_nobox_value_shape(self.ws, &concrete);
+        }
+        if self.concrete_plan.is_some() {
+            return None;
+        }
         // The BODY arena's spelling of [`nullable_nominal_shape`]: same rule, its
         // own type-node lookup. `is_nobox_struct` (not `is_nobox_nominal`) is the
         // one real difference -- it also honours `scx.values_first_class`, which

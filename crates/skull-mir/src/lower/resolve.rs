@@ -653,6 +653,7 @@ impl Builder<'_> {
         &mut self,
         arg_idxs: &[Idx<Expr>],
         func: FuncRef,
+        callee_inst: Option<&crate::instance::Instance>,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         let param_names: Vec<Ustr> = self
             .ws
@@ -698,9 +699,16 @@ impl Builder<'_> {
                     slots.len()
                 )));
             }
-            let v = match self.param_ty(func, pidx) {
-                Some(t) => self.coerced(v, a, t),
-                None => v,
+            let v = match callee_inst
+                .map(|inst| self.concrete_callee_param_ty(inst, pidx))
+                .transpose()?
+                .flatten()
+            {
+                Some(t) => self.coerced_mono(v, a, &t),
+                None => match self.param_ty(func, pidx) {
+                    Some(t) => self.coerced(v, a, t),
+                    None => v,
+                },
             };
             slots[pidx] = Some(v);
         }

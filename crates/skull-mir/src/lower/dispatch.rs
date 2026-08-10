@@ -322,6 +322,9 @@ impl<'a> DispatchCtx<'a> {
         if let Some(ty) = self.concrete_ty(ty) {
             return ty.peel_nullable().1;
         }
+        if self.concrete_plan.is_some() {
+            return false;
+        }
         // A generic bound to `E?` is nullable and `ty_node` cannot say so: it
         // substitutes the PAYLOAD. Read the raw node before that erases the `?`.
         if let Some(TypeExpr::Generic(var, _)) = self.raw_ty_node(ty) {
@@ -343,6 +346,9 @@ impl<'a> DispatchCtx<'a> {
     pub fn expr_is_nullable(&self, e: Idx<Expr>) -> bool {
         if let Some(ty) = self.concrete_expr_ty(e) {
             return ty.peel_nullable().1;
+        }
+        if self.concrete_plan.is_some() {
+            return false;
         }
         self.inf
             .and_then(|i| i.expr_types.get(e).copied())
@@ -374,6 +380,9 @@ impl<'a> DispatchCtx<'a> {
                 _ => None,
             };
         }
+        if self.concrete_plan.is_some() {
+            return None;
+        }
         let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = self.expr_ty(e)? else {
             return None;
         };
@@ -396,6 +405,9 @@ impl<'a> DispatchCtx<'a> {
             let ed = &self.ws.modules[eid.module.index()].enums[eid.def];
             return ed.variants.iter().all(|v| matches!(v.payload, bone_semantic::hir::VariantPayload::Unit));
         }
+        if self.concrete_plan.is_some() {
+            return false;
+        }
         let Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) = self.expr_ty(e) else {
             return false;
         };
@@ -417,6 +429,9 @@ impl<'a> DispatchCtx<'a> {
                     | crate::monoty::MonoTy::String
             ) || self.is_payloadless_enum(e);
         }
+        if self.concrete_plan.is_some() {
+            return false;
+        }
         matches!(
             self.expr_ty(e),
             Some(TypeExpr::Builtin(
@@ -434,6 +449,9 @@ impl<'a> DispatchCtx<'a> {
                     ctor: crate::monoty::MonoCtor::Nominal(n), ..
                 } if flat_enum_shape(self.ws, *n).is_some()
             );
+        }
+        if self.concrete_plan.is_some() {
+            return false;
         }
         matches!(
             self.expr_ty(e),
@@ -478,6 +496,9 @@ impl<'a> DispatchCtx<'a> {
                     || self.ws.enums_by_name.contains_key(name) => StringifyRoute::Inspect,
                 _ => StringifyRoute::Unsupported,
             };
+        }
+        if self.concrete_plan.is_some() {
+            return StringifyRoute::Unsupported;
         }
         match self.expr_ty(expr) {
             Some(TypeExpr::Builtin(BuiltinTy::Int | BuiltinTy::Bool | BuiltinTy::String)) => {
@@ -556,6 +577,9 @@ impl<'a> DispatchCtx<'a> {
                 _ => false,
             };
         }
+        if self.concrete_plan.is_some() {
+            return false;
+        }
         match self.expr_ty(e) {
             Some(TypeExpr::Tuple { .. }) => true,
             Some(TypeExpr::App { ctor: TypeCtor::Array | TypeCtor::Map, .. }) => true,
@@ -611,23 +635,26 @@ impl<'a> DispatchCtx<'a> {
     /// THE plan for a `{x:spec}` hole. Every branch that decides a stdlib call
     /// is here; the printf conversion STRING is not, because it emits no call.
     pub fn format_plan(&self, hole: Idx<Expr>, spec: &InterpSpec) -> FormatPlan {
-        let inferred = match self.concrete_expr_ty(hole) {
-            Some(crate::monoty::MonoTy::Int) => Some('d'),
-            Some(crate::monoty::MonoTy::Float) => Some('f'),
-            Some(crate::monoty::MonoTy::String | crate::monoty::MonoTy::Bool) => Some('s'),
-            Some(crate::monoty::MonoTy::Nullable(inner)) => match *inner {
-                crate::monoty::MonoTy::Int => Some('d'),
-                crate::monoty::MonoTy::Float => Some('f'),
-                crate::monoty::MonoTy::String | crate::monoty::MonoTy::Bool => Some('s'),
+        let inferred = if self.concrete_plan.is_some() {
+            match self.concrete_expr_ty(hole) {
+                Some(crate::monoty::MonoTy::Int) => Some('d'),
+                Some(crate::monoty::MonoTy::Float) => Some('f'),
+                Some(crate::monoty::MonoTy::String | crate::monoty::MonoTy::Bool) => Some('s'),
+                Some(crate::monoty::MonoTy::Nullable(inner)) => match *inner {
+                    crate::monoty::MonoTy::Int => Some('d'),
+                    crate::monoty::MonoTy::Float => Some('f'),
+                    crate::monoty::MonoTy::String | crate::monoty::MonoTy::Bool => Some('s'),
+                    _ => None,
+                },
+                Some(_) | None => None,
+            }
+        } else {
+            match self.expr_ty(hole) {
+                Some(TypeExpr::Builtin(BuiltinTy::Int)) => Some('d'),
+                Some(TypeExpr::Builtin(BuiltinTy::Float)) => Some('f'),
+                Some(TypeExpr::Builtin(BuiltinTy::String | BuiltinTy::Bool)) => Some('s'),
                 _ => None,
-            },
-            Some(_) => None,
-            None => match self.expr_ty(hole) {
-            Some(TypeExpr::Builtin(BuiltinTy::Int)) => Some('d'),
-            Some(TypeExpr::Builtin(BuiltinTy::Float)) => Some('f'),
-            Some(TypeExpr::Builtin(BuiltinTy::String | BuiltinTy::Bool)) => Some('s'),
-            _ => None,
-            },
+            }
         };
         let has_precision = spec.precision.is_some() || spec.precision_expr.is_some();
         // A composite has no printf conversion. The numeric-presentation flags
@@ -652,10 +679,11 @@ impl<'a> DispatchCtx<'a> {
         let has_width = spec.width.is_some() || spec.width_expr.is_some();
         let ty = spec.format_type.or(inferred);
         let special_conv = matches!(spec.format_type, Some('b') | Some('%'));
-        let val_is_float = matches!(
-            self.concrete_expr_ty(hole),
-            Some(crate::monoty::MonoTy::Float)
-        ) || matches!(self.expr_ty(hole), Some(TypeExpr::Builtin(BuiltinTy::Float)));
+        let val_is_float = if self.concrete_plan.is_some() {
+            matches!(self.concrete_expr_ty(hole), Some(crate::monoty::MonoTy::Float))
+        } else {
+            matches!(self.expr_ty(hole), Some(TypeExpr::Builtin(BuiltinTy::Float)))
+        };
         let needs_pad = spec.fill.is_some()
             || matches!(spec.alignment, Some('^'))
             || ((grouping_sep.is_some() || special_conv) && has_width);

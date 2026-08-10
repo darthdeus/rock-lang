@@ -391,6 +391,17 @@ impl Builder<'_> {
     /// The variant names of `e`'s enum type (empty if `e` is not an enum) — used
     /// to recognize an unqualified nullary-variant pattern at a match root.
     pub(crate) fn scrut_variants(&self, e: Idx<Expr>) -> HashSet<Ustr> {
+        if let Some(ty) = self.concrete_expr_ty(e) {
+            let Some(name) = ty.peel_nullable().0.nominal() else { return HashSet::new() };
+            if let Some(&eid) = self.ws.enums_by_name.get(&name) {
+                let ed = &self.ws.modules[eid.module.index()].enums[eid.def];
+                return ed.variants.iter().map(|v| v.name).collect();
+            }
+            return HashSet::new();
+        }
+        if self.concrete_plan.is_some() {
+            return HashSet::new();
+        }
         if let Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) = self.expr_ty(e) {
             if let Some(&eid) = self.ws.enums_by_name.get(&name) {
                 let ed = &self.ws.modules[eid.module.index()].enums[eid.def];
@@ -404,6 +415,13 @@ impl Builder<'_> {
     /// threaded into `match_pattern`/`test_tag` so a payload-free enum's tag test
     /// can int-compare the ordinal instead of reading `.__variant`.
     pub(crate) fn scrut_enum_name(&self, e: Idx<Expr>) -> Option<Ustr> {
+        if let Some(ty) = self.concrete_expr_ty(e) {
+            let name = ty.peel_nullable().0.nominal()?;
+            return self.ws.enums_by_name.contains_key(&name).then_some(name);
+        }
+        if self.concrete_plan.is_some() {
+            return None;
+        }
         match self.expr_ty(e) {
             Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. })
                 if self.ws.enums_by_name.contains_key(&name) =>
@@ -416,6 +434,16 @@ impl Builder<'_> {
 
     /// Whether `e`'s inferred type is a transparent newtype nominal.
     pub(crate) fn expr_is_newtype(&self, e: Idx<Expr>) -> bool {
+        if let Some(ty) = self.concrete_expr_ty(e) {
+            return ty
+                .peel_nullable()
+                .0
+                .nominal()
+                .is_some_and(|name| self.ws.newtypes_by_name.contains_key(&name));
+        }
+        if self.concrete_plan.is_some() {
+            return false;
+        }
         matches!(
             self.expr_ty(e),
             Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. })
@@ -425,6 +453,16 @@ impl Builder<'_> {
 
     /// Whether `iter`'s inferred type is an `Arena<T>` nominal.
     pub(crate) fn iter_is_arena(&self, iter: Idx<Expr>) -> bool {
+        if let Some(ty) = self.concrete_expr_ty(iter) {
+            return ty
+                .peel_nullable()
+                .0
+                .nominal()
+                .is_some_and(|name| name.as_str() == "Arena");
+        }
+        if self.concrete_plan.is_some() {
+            return false;
+        }
         matches!(
             self.expr_ty(iter),
             Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) if name.as_str() == "Arena"

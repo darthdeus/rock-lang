@@ -8,12 +8,13 @@
 
 use std::sync::LazyLock;
 
-use bone_semantic::hir::{BindingInfo, Expr};
+use bone_semantic::hir::{BindingInfo, BodyOwner, Expr, TypeExpr};
 use bone_semantic::inference::Workspace;
 use comfy_la_arena::{ArenaMap, Idx};
 use skull::concrete_body::{self, Callee, ConcreteBodies, ConcreteBody, IteratorOpKind, Slot};
 use skull::instance_graph::{self, InstanceGraph, Site, SiteOp, SiteOutcome};
 use skull_mir::monoty::{MonoTy, MonoTyId, MonoTyReason};
+use skull_mir::mir::{Inst, MirFunc};
 use ustr::Ustr;
 
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
@@ -43,6 +44,111 @@ fn bodies_of(src: &str) -> (Workspace, InstanceGraph, ConcreteBodies) {
 fn assert_arena_tables(body: &ConcreteBody) {
     let _: &ArenaMap<Idx<Expr>, MonoTyId> = &body.expr_types;
     let _: &ArenaMap<Idx<BindingInfo>, MonoTyId> = &body.binding_types;
+}
+
+fn collect_nested_type_nodes(
+    ws: &Workspace,
+    inf: &bone_semantic::inference::BodyInference,
+    ty: bone_semantic::prelude::TyId,
+    out: &mut Vec<bone_semantic::prelude::TyId>,
+) {
+    let node = match ty {
+        bone_semantic::prelude::TyId::Static(mid, idx) => ws.module(mid).ty_arena[idx],
+        bone_semantic::prelude::TyId::Local(idx) => inf.ty_arena[idx],
+    };
+    match node {
+        TypeExpr::Nullable(inner) => {
+            let child = ty.with_idx(inner);
+            out.push(child);
+            collect_nested_type_nodes(ws, inf, child, out);
+        }
+        TypeExpr::App { params, .. } => {
+            for param in params {
+                let child = ty.with_idx(param);
+                out.push(child);
+                collect_nested_type_nodes(ws, inf, child, out);
+            }
+        }
+        TypeExpr::Function { params, ret } => {
+            for param in params {
+                let child = ty.with_idx(param);
+                out.push(child);
+                collect_nested_type_nodes(ws, inf, child, out);
+            }
+            let child = ty.with_idx(ret);
+            out.push(child);
+            collect_nested_type_nodes(ws, inf, child, out);
+        }
+        TypeExpr::Tuple { elements } => {
+            for element in elements {
+                let child = ty.with_idx(element);
+                out.push(child);
+                collect_nested_type_nodes(ws, inf, child, out);
+            }
+        }
+        TypeExpr::Builtin(_) | TypeExpr::Generic(..) | TypeExpr::Infer(..) => {}
+    }
+}
+
+#[test]
+fn concrete_plan_indexes_nested_type_nodes() {
+    let (ws, g, bodies) = bodies_of(
+        r#"
+fn id<T>(x: T) -> T { return x }
+fn bump(x: int) -> int { return x + 1 }
+fn main() {
+    let xs: [[int]] = [[1]]
+    let pair: (int, int) = (1, 2)
+    let func: fn(int) -> int = bump
+    let nullable: int? = id(1)
+    let a = id(xs)
+    let b = id(pair)
+    let c = id(func)
+    let d = id(nullable)
+    print("{a} {b} {c(1)} {d}")
+}
+"#,
+    );
+    let (main, plan) = bodies
+        .plans
+        .iter()
+        .find(|(inst, _)| g.identity(&ws, inst).starts_with("main"))
+        .expect("main has no concrete plan");
+    let inf = ws
+        .inference(main.func.module)
+        .and_then(|ir| ir.per_fn.get(&BodyOwner::Function(main.func.func)))
+        .expect("main has no inference");
+    let mut nested = Vec::new();
+    for ty in inf.expr_types.values().chain(inf.binding_types.values()) {
+        collect_nested_type_nodes(&ws, inf, *ty, &mut nested);
+    }
+    let mut unique = Vec::new();
+    for ty in nested {
+        if !unique.contains(&ty) {
+            unique.push(ty);
+        }
+    }
+    assert!(!unique.is_empty(), "fixture exposed no nested type population");
+    for ty in unique {
+        assert!(
+            plan.types.ty_types.contains_key(&ty),
+            "concrete plan omitted nested type node {ty:?}"
+        );
+    }
+    let missing = plan
+        .types
+        .ty_types
+        .keys()
+        .next()
+        .copied()
+        .expect("concrete plan has no type nodes");
+    let mut poisoned = plan.clone();
+    poisoned.types.ty_types.remove(&missing);
+    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    assert!(
+        skull_mir::lower::lower_instance_with_plan(&ws, &scx, &poisoned).is_err(),
+        "lowering ignored a missing concrete type-node entry"
+    );
 }
 
 /// The first production consumer of the concrete plan must see the complete
@@ -119,6 +225,115 @@ fn main() {
     assert!(
         skull_mir::lower::lower_instance_with_plans(&ws, &scx, main_plan, &plans).is_err(),
         "call lowering fell back after the selected callee ABI plan was removed"
+    );
+}
+
+#[test]
+fn production_call_identity_consumes_the_plan_site_map() {
+    let (ws, g, bodies) = bodies_of(
+        r#"
+fn id<T>(x: T) -> T { return x }
+fn main() {
+    let out = id(1)
+    print("{out}")
+}
+"#,
+    );
+    let main_plan = bodies
+        .plans
+        .iter()
+        .find(|(inst, _)| g.identity(&ws, inst).starts_with("main"))
+        .map(|(_, plan)| plan)
+        .expect("main has no concrete plan");
+    assert!(!main_plan.callees.is_empty(), "fixture has no concrete site population");
+    let mut poisoned = main_plan.clone();
+    poisoned.callees.clear();
+    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    assert!(
+        skull_mir::lower::lower_instance_with_plans(&ws, &scx, &poisoned, &bodies.plans).is_err(),
+        "lowering reconstructed a callee identity after its plan site was removed"
+    );
+}
+
+fn count_int_to_float(mir: &MirFunc) -> usize {
+    mir.insts
+        .values()
+        .filter(|inst| matches!(inst, Inst::IntToFloat(_)))
+        .count()
+        + mir.nested_fns.iter().map(count_int_to_float).sum::<usize>()
+}
+
+#[test]
+fn production_call_coercion_consumes_the_selected_callee_signature() {
+    let (ws, g, bodies) = bodies_of(
+        r#"
+fn id<T>(x: T) -> T { return x }
+fn main() {
+    let out = id(1)
+    print("{out}")
+}
+"#,
+    );
+    let main_plan = bodies
+        .plans
+        .iter()
+        .find(|(inst, _)| g.identity(&ws, inst).starts_with("main"))
+        .map(|(_, plan)| plan)
+        .expect("main has no concrete plan");
+    let callee = main_plan
+        .callees
+        .values()
+        .find(|inst| ws.module(inst.func.module).functions[inst.func.func].name.as_str() == "id")
+        .cloned()
+        .expect("main has no concrete id call");
+    let callee_plan = bodies.plans.get(&callee).expect("id has no concrete plan");
+    assert_eq!(
+        callee_plan.signature.params.len(),
+        1,
+        "callee signature has no parameter population"
+    );
+    let float = g.interner().intern(MonoTy::Float);
+    let mut plans = bodies.plans.clone();
+    plans
+        .get_mut(&callee)
+        .expect("selected callee plan disappeared")
+        .signature
+        .params[0] = float;
+    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let mir = skull_mir::lower::lower_instance_with_plans(&ws, &scx, main_plan, &plans)
+        .expect("plan-driven call lowering failed");
+    assert!(
+        count_int_to_float(&mir) > 0,
+        "call lowering ignored the selected callee's concrete parameter signature"
+    );
+}
+
+#[test]
+fn production_return_coercion_consumes_the_body_signature() {
+    let (ws, g, bodies) = bodies_of(
+        r#"
+fn id<T>(x: T) -> T { return x }
+fn main() {
+    let out = id(1)
+    print("{out}")
+}
+"#,
+    );
+    let callee = bodies
+        .plans
+        .keys()
+        .find(|inst| ws.module(inst.func.module).functions[inst.func.func].name.as_str() == "id")
+        .cloned()
+        .expect("id has no concrete plan");
+    let mut plan = bodies.plans.get(&callee).expect("id plan disappeared").clone();
+    assert!(plan.signature.result.is_some(), "body signature has no result population");
+    plan.signature.result = Some(g.interner().intern(MonoTy::Float));
+    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let mir = skull_mir::lower::lower_instance_with_plan(&ws, &scx, &plan)
+        .expect("plan-driven return lowering failed");
+    assert!(
+        count_int_to_float(&mir) > 0,
+        "return lowering ignored the body's concrete result signature"
     );
 }
 

@@ -30,7 +30,7 @@ use skull_parser::CompilerError;
 
 use crate::intrinsics::ExpandKind;
 use crate::mir::*;
-use crate::concrete::{ConcreteBodyPlan, ConcreteOwner, ConcretePlans};
+use crate::concrete::{ConcreteBodyPlan, ConcreteOwner, ConcretePlans, ConcreteTypeTables};
 
 fn gap(msg: impl std::fmt::Display) -> CompilerError {
     CompilerError::new_no_location(format!("skull-mir: lowering gap: {msg}"))
@@ -1078,6 +1078,7 @@ fn lower_instance_with_plan_inner(
         .inference(mid)
         .and_then(|ir| ir.per_fn.get(&BodyOwner::Function(fid)));
     if let Some(inf) = inf {
+        validate_concrete_type_tables(ws, inf, &plan.types, "concrete plan")?;
         for (expr, _) in inf.expr_types.iter() {
             if plan.types.expr_types.get(expr).is_none() {
                 return Err(gap(format!("concrete plan is missing expression type {expr:?}")));
@@ -1394,6 +1395,7 @@ fn validate_always_plan(
         .inference(mid)
         .and_then(|ir| ir.per_fn.get(&owner))
         .ok_or_else(|| gap("concrete always-emitted plan has no inference"))?;
+    validate_concrete_type_tables(ws, inf, &plan.types, "concrete always-emitted plan")?;
     for (expr, _) in inf.expr_types.iter() {
         if plan.types.expr_types.get(expr).is_none() {
             return Err(gap(format!(
@@ -1417,6 +1419,65 @@ fn validate_always_plan(
                 site.domain
             )));
         }
+    }
+    Ok(())
+}
+
+fn validate_concrete_type_tables(
+    ws: &Workspace,
+    inf: &BodyInference,
+    tables: &ConcreteTypeTables,
+    label: &str,
+) -> Result<(), CompilerError> {
+    fn visit(
+        ws: &Workspace,
+        inf: &BodyInference,
+        tables: &ConcreteTypeTables,
+        label: &str,
+        ty: TyId,
+        seen: &mut HashSet<TyId>,
+    ) -> Result<(), CompilerError> {
+        if !seen.insert(ty) {
+            return Ok(());
+        }
+        if tables.ty_type(ty).is_none() {
+            return Err(gap(format!("{label} is missing concrete type node {ty:?}")));
+        }
+        let node = match ty {
+            TyId::Static(mid, idx) => ws.module(mid).ty_arena[idx],
+            TyId::Local(idx) => inf.ty_arena[idx],
+        };
+        match node {
+            TypeExpr::Nullable(inner) => visit(ws, inf, tables, label, ty.with_idx(inner), seen),
+            TypeExpr::App { params, .. } => {
+                for param in params {
+                    visit(ws, inf, tables, label, ty.with_idx(param), seen)?;
+                }
+                Ok(())
+            }
+            TypeExpr::Function { params, ret } => {
+                for param in params {
+                    visit(ws, inf, tables, label, ty.with_idx(param), seen)?;
+                }
+                visit(ws, inf, tables, label, ty.with_idx(ret), seen)
+            }
+            TypeExpr::Tuple { elements } => {
+                for element in elements {
+                    visit(ws, inf, tables, label, ty.with_idx(element), seen)?;
+                }
+                Ok(())
+            }
+            TypeExpr::Infer(var, _) => match inf.substitutions.get(var) {
+                Some(next) => visit(ws, inf, tables, label, next, seen),
+                None => Ok(()),
+            },
+            TypeExpr::Builtin(_) | TypeExpr::Generic(..) => Ok(()),
+        }
+    }
+
+    let mut seen = HashSet::new();
+    for ty in inf.expr_types.values().chain(inf.binding_types.values()) {
+        visit(ws, inf, tables, label, *ty, &mut seen)?;
     }
     Ok(())
 }
@@ -1988,9 +2049,19 @@ impl Builder<'_> {
             return Ok(self.tuple_return_operands(v, shape.slots.len()));
         }
         let v = self.lower_expr(e)?;
-        let v = match self.ret_ty {
-            Some(rt) => self.coerced(v, e, rt),
-            None => v,
+        let v = if let Some(plan) = self.concrete_plan {
+            match plan.signature.result {
+                Some(result) => {
+                    let result = self.scx.interner().get(result);
+                    self.coerced_mono(v, e, &result)
+                }
+                None => v,
+            }
+        } else {
+            match self.ret_ty {
+                Some(rt) => self.coerced(v, e, rt),
+                None => v,
+            }
         };
         Ok(vec![v])
     }

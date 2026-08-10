@@ -148,6 +148,24 @@ impl Builder<'_> {
     /// (`sig_shape_of_nominal`), reached through `ty_node`, which also applies the
     /// enclosing specialization substitution.
     pub(crate) fn body_sig_value_shape(&self, ty: TyId) -> Option<ValueShape> {
+        if let Some(concrete) = self.concrete_ty_id(ty) {
+            let (payload, nullable) = concrete.peel_nullable();
+            let crate::monoty::MonoTy::App {
+                ctor: crate::monoty::MonoCtor::Nominal(name),
+                ..
+            } = payload
+            else {
+                return None;
+            };
+            return if nullable {
+                sig_shape_of_nullable_nominal(self.ws, *name)
+            } else {
+                sig_shape_of_nominal(self.ws, *name)
+            };
+        }
+        if self.concrete_plan.is_some() {
+            return None;
+        }
         let ty = self.resolve_tyid(ty)?;
         match self.ty_node(ty)? {
             TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => sig_shape_of_nominal(self.ws, n),

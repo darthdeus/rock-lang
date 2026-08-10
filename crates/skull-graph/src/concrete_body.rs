@@ -29,15 +29,16 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use bone_semantic::hir::{BindingInfo, Body, BodyOwner, Expr};
+use bone_semantic::hir::{BindingInfo, Body, BodyOwner, Expr, TypeExpr};
 use bone_semantic::inference::{BodyInference, Workspace};
-use bone_semantic::prelude::Span;
+use bone_semantic::prelude::{Span, TyId};
 use comfy_la_arena::{ArenaMap, Idx};
 use skull_mir::concrete::{
     ConcreteAlwaysPlans, ConcreteBodyPlan, ConcreteOwner, ConcreteSignature, ConcreteTypeTables,
 };
 use skull_mir::monoty::{MonoArena, MonoSubst, MonoTyId, MonoTyReason};
 use skull_mir::mir::FuncRef;
+use rustc_hash::FxHashSet;
 
 use crate::instance_graph::{
     boundary_class_for, function_body, is_spanless, BoundaryClass, FunctionBody, Instance,
@@ -677,22 +678,70 @@ fn concrete_tables(
     if let Some(failure) = converted.failures.first() {
         return Err(failure.reason.clone());
     }
-    let mut ty_types = rustc_hash::FxHashMap::default();
-    for (expr, ty) in inf.expr_types.iter() {
-        if let Some(id) = converted.expr_types.get(expr) {
-            ty_types.insert(*ty, *id);
-        }
-    }
-    for (binding, ty) in inf.binding_types.iter() {
-        if let Some(id) = converted.binding_types.get(binding) {
-            ty_types.insert(*ty, *id);
-        }
-    }
+    let ty_types = concrete_ty_types(ws, g, inf, subst)?;
     Ok(ConcreteTypeTables {
         expr_types: converted.expr_types,
         binding_types: converted.binding_types,
         ty_types,
     })
+}
+
+fn concrete_ty_types(
+    ws: &Workspace,
+    g: &InstanceGraph,
+    inf: &BodyInference,
+    subst: &MonoSubst,
+) -> Result<rustc_hash::FxHashMap<TyId, MonoTyId>, MonoTyReason> {
+    let mut nodes = FxHashSet::default();
+    for ty in inf.expr_types.values().chain(inf.binding_types.values()) {
+        collect_type_nodes(ws, inf, *ty, &mut nodes);
+    }
+    g.interner().with_mut(|arena| {
+        nodes
+            .into_iter()
+            .map(|ty| arena.convert(ws, inf, ty, subst).map(|id| (ty, id)))
+            .collect::<Result<rustc_hash::FxHashMap<_, _>, _>>()
+    })
+}
+
+fn collect_type_nodes(
+    ws: &Workspace,
+    inf: &BodyInference,
+    ty: TyId,
+    out: &mut FxHashSet<TyId>,
+) {
+    if !out.insert(ty) {
+        return;
+    }
+    let node = match ty {
+        TyId::Static(mid, idx) => ws.module(mid).ty_arena[idx],
+        TyId::Local(idx) => inf.ty_arena[idx],
+    };
+    match node {
+        TypeExpr::Nullable(inner) => collect_type_nodes(ws, inf, ty.with_idx(inner), out),
+        TypeExpr::App { params, .. } => {
+            for param in params {
+                collect_type_nodes(ws, inf, ty.with_idx(param), out);
+            }
+        }
+        TypeExpr::Function { params, ret } => {
+            for param in params {
+                collect_type_nodes(ws, inf, ty.with_idx(param), out);
+            }
+            collect_type_nodes(ws, inf, ty.with_idx(ret), out);
+        }
+        TypeExpr::Tuple { elements } => {
+            for element in elements {
+                collect_type_nodes(ws, inf, ty.with_idx(element), out);
+            }
+        }
+        TypeExpr::Infer(var, _) => {
+            if let Some(next) = inf.substitutions.get(var) {
+                collect_type_nodes(ws, inf, next, out);
+            }
+        }
+        TypeExpr::Builtin(_) | TypeExpr::Generic(..) => {}
+    }
 }
 
 fn foreign_domain_tables<I>(
@@ -735,17 +784,7 @@ fn concrete_plan(
     for (site, callee) in body.callees() {
         callees.insert(site, callee.instance().clone());
     }
-    let mut ty_types = rustc_hash::FxHashMap::default();
-    for (expr, ty) in inf.expr_types.iter() {
-        if let Some(id) = body.expr_types.get(expr) {
-            ty_types.insert(*ty, *id);
-        }
-    }
-    for (binding, ty) in inf.binding_types.iter() {
-        if let Some(id) = body.binding_types.get(binding) {
-            ty_types.insert(*ty, *id);
-        }
-    }
+    let ty_types = concrete_ty_types(ws, g, inf, subst)?;
     let foreign_domains = foreign_domain_tables(
         ws,
         g,

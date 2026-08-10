@@ -499,9 +499,16 @@ impl Builder<'_> {
             // (Lua numbers are all doubles) — mirrors rock-codegen.
             Expr::As { value, target, .. } => {
                 let v = self.lower_expr(value)?;
-                let to_int = matches!(self.resolve_ty(target), Some(TypeExpr::Builtin(BuiltinTy::Int)));
-                let from_float =
-                    matches!(self.expr_ty(value), Some(TypeExpr::Builtin(BuiltinTy::Float)));
+                let to_int = self
+                    .concrete_ty_id(target)
+                    .is_some_and(|ty| matches!(ty.peel_nullable().0, crate::monoty::MonoTy::Int))
+                    || (self.concrete_plan.is_none()
+                        && matches!(self.resolve_ty(target), Some(TypeExpr::Builtin(BuiltinTy::Int))));
+                let from_float = self
+                    .concrete_expr_ty(value)
+                    .is_some_and(|ty| matches!(ty.peel_nullable().0, crate::monoty::MonoTy::Float))
+                    || (self.concrete_plan.is_none()
+                        && matches!(self.expr_ty(value), Some(TypeExpr::Builtin(BuiltinTy::Float))));
                 if to_int && from_float {
                     Ok(self.emit_cur(Inst::FloatToInt(v)))
                 } else {
@@ -1491,6 +1498,37 @@ impl Builder<'_> {
             return Ok(());
         }
         let v = self.lower_expr(inner)?;
+        if let Some(ty) = self.concrete_expr_ty(inner) {
+            return match ty.peel_nullable().0 {
+                crate::monoty::MonoTy::Tuple(elements) => {
+                    for (index, _) in elements.into_iter().enumerate() {
+                        let value = self.emit_cur(Inst::TupleIndex { base: v, index });
+                        self.append_spread_repr(arr, ValueRepr::Scalar(value), dest)?;
+                    }
+                    Ok(())
+                }
+                crate::monoty::MonoTy::App {
+                    ctor: crate::monoty::MonoCtor::Array | crate::monoty::MonoCtor::Map,
+                    ..
+                } => self.spread_array_loop(arr, inner, v, dest),
+                crate::monoty::MonoTy::App {
+                    ctor: crate::monoty::MonoCtor::Nominal(name), ..
+                } => {
+                    let fields = self
+                        .struct_field_names(*name)
+                        .ok_or_else(|| gap("spread of a non-struct nominal type"))?;
+                    for field in fields {
+                        let value = self.emit_cur(Inst::Field { base: v, field });
+                        self.append_spread_repr(arr, ValueRepr::Scalar(value), dest)?;
+                    }
+                    Ok(())
+                }
+                _ => Err(gap("spread of an unsupported type")),
+            };
+        }
+        if self.concrete_plan.is_some() {
+            return Err(gap("spread expression is missing from the concrete type plan"));
+        }
         match self.expr_ty(inner) {
             Some(TypeExpr::Tuple { elements }) => {
                 for i in 0..elements.into_iter().count() {

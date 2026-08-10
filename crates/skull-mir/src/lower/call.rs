@@ -27,6 +27,39 @@ pub(crate) struct DirectCall {
 }
 
 impl Builder<'_> {
+    fn concrete_callee_for_site(
+        &self,
+        e: Idx<Expr>,
+    ) -> Result<Option<crate::instance::Instance>, CompilerError> {
+        let Some(plan) = self.concrete_plan else { return Ok(None) };
+        let site = crate::site::Site {
+            domain: self.cur_domain.clone(),
+            expr: e,
+            op: self.cur_op.clone(),
+        };
+        plan.callees.get(&site).cloned().map(Some).ok_or_else(|| {
+            gap(format!(
+                "concrete plan is missing callee identity for site {:?}",
+                site.op
+            ))
+        })
+    }
+
+    pub(crate) fn concrete_callee_param_ty(
+        &self,
+        inst: &crate::instance::Instance,
+        pidx: usize,
+    ) -> Result<Option<crate::monoty::MonoTy>, CompilerError> {
+        let Some(plans) = self.concrete_plans else { return Ok(None) };
+        let Some(plan) = plans.get(inst) else { return Ok(None) };
+        let id = plan.signature.params.get(pidx).ok_or_else(|| {
+            gap(format!(
+                "concrete ABI plan has no parameter {pidx} for callee instance"
+            ))
+        })?;
+        Ok(Some(self.scx.interner().get(*id)))
+    }
+
     pub(crate) fn callee_abi_plan_for_instance(
         &self,
         inst: &crate::instance::Instance,
@@ -504,7 +537,11 @@ impl Builder<'_> {
         // IDENTITY, computed beside the delivery decision and independent of it.
         // A call the policy declines to specialize still names exactly one
         // concrete instance, and this is where it says which.
-        let callee_inst = self.callee_instance_for(e, func)?;
+        let callee_inst = if self.concrete_plan.is_some() {
+            self.concrete_callee_for_site(e)?
+        } else {
+            self.callee_instance_for(e, func)?
+        };
         let empty_subst = SpecSubst::default();
         let subst = spec.as_ref().map_or(&empty_subst, |(_, s)| s);
         let plan = if let Some(owner) = &callee_inst {
@@ -825,13 +862,18 @@ impl Builder<'_> {
             self.reject_nobox_boxed_call_args(func, arg_idxs)?;
             self.reject_column_container_opaque_slots(e, func)?;
             let args = if any_named {
-                self.reorder_named_args(arg_idxs, func)?
+                self.reorder_named_args(arg_idxs, func, dc.callee_inst.as_ref())?
             } else {
                 arg_idxs
                     .iter()
                     .enumerate()
                     .map(|(i, &a)| {
                         let v = self.lower_expr(a)?;
+                        if let Some(inst) = dc.callee_inst.as_ref() {
+                            if let Some(t) = self.concrete_callee_param_ty(inst, i)? {
+                                return Ok(self.coerced_mono(v, a, &t));
+                            }
+                        }
                         Ok(match self.param_ty(func, i) {
                             Some(t) => self.coerced(v, a, t),
                             None => v,

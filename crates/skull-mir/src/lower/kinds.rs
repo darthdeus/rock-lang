@@ -15,6 +15,9 @@ impl Builder<'_> {
                 } if n.as_str() == "FlatVec"
             );
         }
+        if self.concrete_plan.is_some() {
+            return false;
+        }
         matches!(self.expr_ty(e),
             Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. }) if n.as_str() == "FlatVec")
     }
@@ -25,6 +28,25 @@ impl Builder<'_> {
     /// plain `NativeBuffer` (matching the alloc intrinsic, which also requires a
     /// concrete element).
     pub(crate) fn nb_value_elem(&self, e: Idx<Expr>) -> Option<Ustr> {
+        if let Some(concrete) = self.concrete_expr_ty(e) {
+            let MonoTy::App {
+                ctor: crate::monoty::MonoCtor::Nominal(name),
+                params,
+            } = concrete.peel_nullable().0
+            else {
+                return None;
+            };
+            if !matches!(name.as_str(), "NativeBuffer" | "FlatVec") {
+                return None;
+            }
+            let Some(elem) = params.first().and_then(MonoTy::nominal) else {
+                return None;
+            };
+            return is_ffi_clean_value_struct(self.ws, elem).then_some(elem);
+        }
+        if self.concrete_plan.is_some() {
+            return None;
+        }
         let ty = self.resolve_tyid(*self.inf?.expr_types.get(e)?)?;
         let TypeExpr::App { ctor: TypeCtor::Nominal(n), params } = self.ty_node(ty)? else {
             return None;
@@ -229,6 +251,21 @@ impl Builder<'_> {
     /// (`Vec`/`Map`/`NativeBuffer`+sized), so any other type reaching here is a
     /// front-end/back-end disagreement, not a program the user could write.
     pub(crate) fn coll_kind(&self, base: Idx<Expr>) -> Result<ContainerKind, CompilerError> {
+        if let Some(ty) = self.concrete_expr_ty(base) {
+            let (payload, _) = ty.peel_nullable();
+            return match payload {
+                MonoTy::App { ctor: crate::monoty::MonoCtor::Array, .. } => self.vec_kind(base),
+                MonoTy::App { ctor: crate::monoty::MonoCtor::Map, .. } => Ok(ContainerKind::Map),
+                MonoTy::App {
+                    ctor: crate::monoty::MonoCtor::Nominal(name),
+                    ..
+                } if is_native_buffer(name.as_str()) => Ok(self.nb_kind(base)),
+                _ => Err(self.gap_here("concrete type is not an indexable container")),
+            };
+        }
+        if self.concrete_plan.is_some() {
+            return Err(self.gap_here("container expression is missing from the concrete type plan"));
+        }
         Ok(match self.expr_ty(base) {
             Some(TypeExpr::App {
                 ctor: TypeCtor::Array,
@@ -259,7 +296,27 @@ impl Builder<'_> {
     // --- type queries (decision: ops are typed at BUILD time) ---
 
     pub(crate) fn arith_ty(&self, e: Idx<Expr>) -> Option<ArithTy> {
+        if let Some(ty) = self.concrete_expr_ty(e) {
+            return self.arith_ty_of_mono(&ty);
+        }
         self.arith_ty_of(self.expr_ty(e)?)
+    }
+
+    fn arith_ty_of_mono(&self, ty: &MonoTy) -> Option<ArithTy> {
+        let (payload, _) = ty.peel_nullable();
+        match payload {
+            MonoTy::Int => Some(ArithTy::Int),
+            MonoTy::Float => Some(ArithTy::Float),
+            MonoTy::String => Some(ArithTy::Str),
+            MonoTy::App { ctor: crate::monoty::MonoCtor::Nominal(name), .. }
+                if self.ws.newtypes_by_name.contains_key(name) =>
+            {
+                let nid = self.ws.newtypes_by_name.get(name)?;
+                let wrapped = self.ws.modules[nid.module.index()].newtypes[nid.def].wrapped;
+                self.arith_ty_of(self.resolve_ty(wrapped)?)
+            }
+            _ => None,
+        }
     }
 
     /// int->float subsumption funnel. Wraps `value` in [`Inst::IntToFloat`] iff
@@ -271,8 +328,30 @@ impl Builder<'_> {
     /// keeps matching `Const(Lit::Int(1))`). Identity on luajit; materialized by
     /// non-Lua backends. See `docs/shaders.md`.
     pub(crate) fn coerced(&mut self, value: Idx<Inst>, value_expr: Idx<Expr>, expected: TyId) -> Idx<Inst> {
-        let to_float = self.resolve_ty(expected).and_then(|t| self.arith_ty_of(t)) == Some(ArithTy::Float);
+        let to_float = self
+            .concrete_ty_id(expected)
+            .as_ref()
+            .and_then(|t| self.arith_ty_of_mono(t))
+            .or_else(|| {
+                (!self.concrete_plan.is_some())
+                    .then(|| self.resolve_ty(expected).and_then(|t| self.arith_ty_of(t)))
+                    .flatten()
+            })
+            == Some(ArithTy::Float);
         self.coerce_i2f(value, self.arith_ty(value_expr) == Some(ArithTy::Int), to_float)
+    }
+
+    pub(crate) fn coerced_mono(
+        &mut self,
+        value: Idx<Inst>,
+        value_expr: Idx<Expr>,
+        expected: &MonoTy,
+    ) -> Idx<Inst> {
+        self.coerce_i2f(
+            value,
+            self.arith_ty(value_expr) == Some(ArithTy::Int),
+            self.arith_ty_of_mono(expected) == Some(ArithTy::Float),
+        )
     }
 
     /// A variable binding's type: the inferred type, falling back to the declared

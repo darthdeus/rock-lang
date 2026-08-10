@@ -186,6 +186,17 @@ impl Builder<'_> {
     /// Whether `e`'s type is a `value` struct -- the shape whose rvalue lowering
     /// packs a fresh cdata rather than handing back shared storage.
     pub(crate) fn expr_is_value_struct(&self, e: Idx<Expr>) -> bool {
+        if let Some(ty) = self.concrete_expr_ty(e) {
+            return matches!(
+                ty.peel_nullable().0,
+                MonoTy::App {
+                    ctor: crate::monoty::MonoCtor::Nominal(name), ..
+                } if self.is_value_struct(name.to_owned().into())
+            );
+        }
+        if self.concrete_plan.is_some() {
+            return false;
+        }
         match self.expr_ty(e) {
             Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) => self.is_value_struct(name),
             _ => false,
@@ -239,6 +250,13 @@ impl Builder<'_> {
     /// The value-struct type of `e` IGNORING nullability (`expr_ty` peels
     /// `Nullable`, so a `V?` resolves to `V` here).
     pub(crate) fn value_struct_name_of(&self, e: Idx<Expr>) -> Option<Ustr> {
+        if let Some(ty) = self.concrete_expr_ty(e) {
+            let name = ty.peel_nullable().0.nominal()?;
+            return self.is_value_struct(name).then_some(name);
+        }
+        if self.concrete_plan.is_some() {
+            return None;
+        }
         let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = self.expr_ty(e)? else {
             return None;
         };
@@ -280,6 +298,12 @@ impl Builder<'_> {
     /// the shape lookup stays the thing that fails closed on a non-aggregate.
     pub(crate) fn value_aggregate_of(&self, e: Idx<Expr>) -> Option<Ustr> {
         if self.expr_is_nullable(e) {
+            return None;
+        }
+        if let Some(ty) = self.concrete_expr_ty(e) {
+            return ty.peel_nullable().0.nominal();
+        }
+        if self.concrete_plan.is_some() {
             return None;
         }
         let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = self.expr_ty(e)? else {
@@ -423,6 +447,18 @@ impl Builder<'_> {
             .and_then(|ir| ir.per_fn.get(&owner));
         let args = self.struct_default_args(struct_name, sid)?;
         let slot_subst = crate::struct_defaults::slot_subst(defaults_inf, &args);
+        let domain = crate::site::SiteDomain::StructDefaults(sid.module, sid.def, args);
+        if let (Some(plan), Some(defaults_inf)) = (self.concrete_plan, defaults_inf) {
+            let tables = plan
+                .domain_types(&domain)
+                .ok_or_else(|| gap(format!("concrete plan is missing type tables for site domain {domain:?}")))?;
+            super::validate_concrete_type_tables(
+                self.ws,
+                defaults_inf,
+                tables,
+                "concrete struct-default plan",
+            )?;
+        }
         // Lower the default expr in the defaults body's context, into the current
         // block, then restore.
         let saved_body = self.body;
@@ -440,7 +476,6 @@ impl Builder<'_> {
         // The ARGUMENTS are part of that key: `Box<int>` and `Box<string>` inject
         // the same declaration's initializers and resolve different callees, so a
         // declaration-keyed domain would collapse them onto one obligation.
-        let domain = crate::site::SiteDomain::StructDefaults(sid.module, sid.def, args);
         let result = self.in_domain(domain, |s| f(s, def_expr));
         self.body = saved_body;
         self.inf = saved_inf;
@@ -922,6 +957,13 @@ impl Builder<'_> {
     /// from real fields (len-1 `x/y/z/w`) and non-vec bases.
     pub(crate) fn swizzle_of(&self, base: Idx<Expr>, field: Ustr) -> Option<Vec<usize>> {
         if field.len() == 1 && "xyzw".contains(field.as_str()) {
+            return None;
+        }
+        if let Some(ty) = self.concrete_expr_ty(base) {
+            let Some(name) = ty.peel_nullable().0.nominal() else { return None };
+            return bone_semantic::inference::vec_swizzle_components(name.as_str(), field.as_str());
+        }
+        if self.concrete_plan.is_some() {
             return None;
         }
         let TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. } = self.expr_ty(base)? else {
