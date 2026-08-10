@@ -15,6 +15,8 @@
 use std::sync::LazyLock;
 
 use bone_semantic::inference::Workspace;
+use skull_mir::mir::{Inst, MirFunc};
+use skull_mir::monoty::{MonoCtor, MonoTy};
 use ustr::Ustr;
 
 use crate::common::{AblationGuard as ModeGuard, InlineOffGuard};
@@ -181,5 +183,114 @@ fn an_unbounded_body_emits_with_inlining_disabled() {
         "the same program without a bounded generic must still emit with \
          inlining disabled, or the sentinel cannot attribute its rejection to \
          the bound; got {err:?}"
+    );
+}
+
+fn first_call_multi_arity(mf: &MirFunc) -> usize {
+    mf.insts
+        .values()
+        .find_map(|inst| match inst {
+            Inst::CallMulti { dests, .. } => Some(dests.len()),
+            _ => None,
+        })
+        .expect("resolved bounded body has no concrete next call")
+}
+
+#[test]
+fn standalone_bound_rewrite_consumes_the_selected_result_plan() {
+    let ws = check(
+        r#"
+nobox value Pair { x: int, y: int }
+
+fn sum_all<I: Iterator<int>>(it: I) -> int {
+    let total = 0
+    for v in it { total = total + v }
+    return total
+}
+
+fn main() {
+    let xs: [int] = [1, 2, 3]
+    print("{sum_all(xs.iter())}")
+}
+"#,
+    );
+    let roots = skull::mir_emit::emission_roots(&ws, None);
+    let mut graph = skull::instance_graph::build(&ws, roots, false);
+    let bodies = skull::concrete_body::build(&ws, &mut graph);
+    let (_inst, plan) = bodies
+        .plans
+        .iter()
+        .find(|(inst, plan)| {
+            ws.module(inst.func.module).functions[inst.func.func].name.as_str() == "sum_all"
+                && !plan.bound_tree.is_empty()
+        })
+        .expect("no standalone bounded instance with a resolved tree");
+    let witness = plan
+        .bound_tree
+        .next
+        .values()
+        .find_map(|next| match next {
+            skull_mir::bound::ResolvedBoundNext::Concrete { instance, .. } => {
+                Some(instance.clone())
+            }
+            skull_mir::bound::ResolvedBoundNext::CallerGeneric(_) => None,
+        })
+        .expect("bounded plan has no concrete witness");
+
+    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(graph.interner().clone());
+    let mut intact = skull_mir::lower::lower_instance_with_plans(&ws, &scx, plan, &bodies.plans)
+        .expect("intact bounded body did not lower");
+    skull_transform::bound::resolve_standalone_bound_calls_with_plans(
+        &ws,
+        &scx,
+        graph.interner(),
+        &mut intact,
+        &plan.bound_tree,
+        &bodies.plans,
+    )
+    .expect("intact bounded body did not resolve");
+    assert_eq!(first_call_multi_arity(&intact), 2, "the control lost (ok, int)");
+
+    let mut poisoned_plans = bodies.plans.clone();
+    let pair = MonoTy::App {
+        ctor: MonoCtor::Nominal(Ustr::from("Pair")),
+        params: Vec::new(),
+    };
+    let wrong_result = graph.interner().intern(MonoTy::Tuple(vec![MonoTy::Bool, pair]));
+    poisoned_plans
+        .get_mut(&witness)
+        .expect("witness plan disappeared")
+        .signature
+        .result = Some(wrong_result);
+    let mut poisoned_owner = plan.clone();
+    for (site, callee) in &poisoned_owner.callees {
+        if callee == &witness {
+            poisoned_owner
+                .callee_signatures
+                .get_mut(site)
+                .expect("witness signature disappeared")
+                .result = Some(wrong_result);
+        }
+    }
+    let mut poisoned = skull_mir::lower::lower_instance_with_plans(
+        &ws,
+        &scx,
+        &poisoned_owner,
+        &poisoned_plans,
+    )
+    .expect("plan mutation made the bounded body fail before rewrite");
+    skull_transform::bound::resolve_standalone_bound_calls_with_plans(
+        &ws,
+        &scx,
+        graph.interner(),
+        &mut poisoned,
+        &poisoned_owner.bound_tree,
+        &poisoned_plans,
+    )
+    .expect("poisoned bounded body did not resolve");
+    assert_eq!(
+        first_call_multi_arity(&poisoned),
+        3,
+        "bound rewriting ignored the selected concrete result plan"
     );
 }

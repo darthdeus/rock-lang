@@ -15,6 +15,7 @@ use bone_semantic::inference::Workspace;
 use comfy_la_arena::Idx;
 use ustr::Ustr;
 
+use crate::concrete::ConcreteSignature;
 use crate::monoty::{MonoCtor, MonoTy};
 
 pub fn value_struct_all_float_leaf_count(ws: &Workspace, name: Ustr) -> Option<usize> {
@@ -2413,6 +2414,23 @@ pub fn bound_next_shape(
     let subst = inst.subst(ws, interner);
     let ret = ws.module(fref.module).functions[fref.func].return_ty?;
     let shape = tuple_ret_shape(ws, &subst, ret)?;
+    bound_next_shape_from_tuple(shape)
+}
+
+/// The same bound-`next` shape from the selected concrete body signature.
+/// Production standalone resolution already owns this signature; rebuilding
+/// it from the witness declaration would reintroduce the source-shaped oracle.
+pub fn bound_next_shape_from_concrete(
+    ws: &Workspace,
+    interner: &crate::monoty::MonoInterner,
+    signature: &ConcreteSignature,
+) -> Option<BoundNextShape> {
+    let result = signature.result.map(|id| interner.get(id))?;
+    let shape = mono_tuple_ret_shape(ws, &result)?;
+    bound_next_shape_from_tuple(shape)
+}
+
+fn bound_next_shape_from_tuple(shape: TupleRetShape) -> Option<BoundNextShape> {
     // The element is slot 1 alone, or slots 1.. as a tuple -- the same pairing
     // `lower_for_user_iter` makes when it binds the pattern, so the two paths
     // cannot disagree about what the element IS.

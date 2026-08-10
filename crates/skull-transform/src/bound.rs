@@ -14,7 +14,9 @@ use bone_semantic::prelude::CompilerError;
 use comfy_la_arena::Idx;
 use skull_mir::bound::ResolvedBoundNext;
 use skull_mir::instance::Instance;
-use skull_mir::lower::{bound_next_shape, BoundNextElem, ElemRebuild};
+use skull_mir::lower::{
+    bound_next_shape, bound_next_shape_from_concrete, BoundNextElem, ElemRebuild,
+};
 use skull_mir::monoty::MonoInterner;
 use skull_mir::mir::*;
 
@@ -214,10 +216,30 @@ fn substitute_bound_call_inner(
     // The instance the shape is read at is carried by the resolved leaf.
     let inst = owner;
     if already_split {
-        check_bound_next_split(func, call, ws, interner, &inst)
+        check_bound_next_split(func, call, ws, interner, &inst, concrete_plans)
     } else {
-        repack_bound_next_element(func, call, ws, interner, &inst)
+        repack_bound_next_element(func, call, ws, interner, &inst, concrete_plans)
     }
+}
+
+fn bound_next_shape_for_instance(
+    ws: &Workspace,
+    interner: &MonoInterner,
+    inst: &Instance,
+    concrete_plans: Option<&skull_mir::concrete::ConcretePlans>,
+) -> Result<Option<skull_mir::lower::BoundNextShape>, CompilerError> {
+    if let Some(plans) = concrete_plans {
+        if skull_mir::lower::requires_concrete_body_plan(ws, inst) {
+            let plan = plans.get(inst).ok_or_else(|| {
+                CompilerError::new_no_location(format!(
+                    "internal: concrete body plan is missing for bound witness `{}`",
+                    inst.func.func.into_raw().into_u32()
+                ))
+            })?;
+            return Ok(bound_next_shape_from_concrete(ws, interner, &plan.signature));
+        }
+    }
+    Ok(bound_next_shape(ws, interner, inst))
 }
 
 /// The lowering already split this placeholder's element into leaf cells, so
@@ -235,8 +257,9 @@ fn check_bound_next_split(
     ws: &Workspace,
     interner: &MonoInterner,
     inst: &Instance,
+    concrete_plans: Option<&skull_mir::concrete::ConcretePlans>,
 ) -> Result<(), CompilerError> {
-    let Some(shape) = bound_next_shape(ws, interner, inst) else {
+    let Some(shape) = bound_next_shape_for_instance(ws, interner, inst, concrete_plans)? else {
         return Ok(());
     };
     let Inst::CallMulti { dests, .. } = &func.insts[call] else {
@@ -269,8 +292,9 @@ fn repack_bound_next_element(
     ws: &Workspace,
     interner: &MonoInterner,
     inst: &Instance,
+    concrete_plans: Option<&skull_mir::concrete::ConcretePlans>,
 ) -> Result<(), CompilerError> {
-    let Some(shape) = bound_next_shape(ws, interner, inst) else {
+    let Some(shape) = bound_next_shape_for_instance(ws, interner, inst, concrete_plans)? else {
         return Ok(());
     };
     let Inst::CallMulti { dests, .. } = &func.insts[call] else {
