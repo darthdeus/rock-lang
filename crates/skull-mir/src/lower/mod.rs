@@ -70,7 +70,7 @@ mod abi;
 pub use abi::{requires_concrete_body_plan, BackendFnAbiPlan};
 
 mod coroutine;
-pub use coroutine::{plan_coroutine, CoroutinePlan};
+pub use coroutine::CoroutinePlan;
 
 /// The `impl Builder` walk, split by topic. Each is a plain `impl Builder<'_>`
 /// block in a child module -- Rust allows the impl to be spread across the

@@ -3964,7 +3964,16 @@ fn record_coroutine_helpers(
         if !f.is_coroutine {
             continue;
         }
-        let plan = match skull_mir::lower::plan_coroutine(ws, g.interner(), i) {
+        let plan = match crate::concrete_body::concrete_signature_for_instance(ws, g, i).and_then(
+            |signature| {
+                skull_mir::lower::CoroutinePlan::from_concrete_signature(
+                    ws,
+                    g.interner(),
+                    &signature,
+                    i.symbol(ws, g.interner()),
+                )
+            },
+        ) {
             Ok(plan) => plan,
             Err(reason) => {
                 g.graph_rejections.push(Rejection {

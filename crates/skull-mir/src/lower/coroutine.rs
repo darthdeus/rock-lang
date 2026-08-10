@@ -6,15 +6,14 @@
 //! instance-owned symbol and concrete result type so they agree on the helper
 //! family for each instantiation.
 //!
-//! `from_instance` handles graph helper accounting before body tables exist;
-//! emitted bodies use `from_concrete_plan`, whose result and channel come from
-//! the selected concrete signature.
+//! Graph helper accounting uses `from_concrete_signature` before body tables
+//! exist; emitted bodies use `from_concrete_plan`, whose result and channel
+//! come from the selected concrete signature.
 
 use bone_semantic::inference::Workspace;
 
 use super::{coroutine_yield_channel_mono, YieldChannel};
-use crate::concrete::ConcreteBodyPlan;
-use crate::instance::Instance;
+use crate::concrete::{ConcreteBodyPlan, ConcreteSignature};
 use crate::monoty::{MonoInterner, MonoTy, MonoTyReason};
 
 /// Every symbol a transformed `co fn` owns, plus its yield channel.
@@ -39,29 +38,18 @@ impl CoroutinePlan {
         concrete: &ConcreteBodyPlan,
         base: String,
     ) -> Result<Self, MonoTyReason> {
-        let result = concrete
-            .signature
-            .result
-            .map(|id| interner.get(id));
-        let channel = result.as_ref().and_then(|ty| coroutine_yield_channel_mono(ws, ty));
-        Ok(Self { base, result, channel })
+        Self::from_concrete_signature(ws, interner, &concrete.signature, base)
     }
 
-    /// Build the graph-side helper plan from an instance's resolved signature.
-    pub fn from_instance(
+    pub fn from_concrete_signature(
         ws: &Workspace,
         interner: &MonoInterner,
-        inst: &Instance,
+        signature: &ConcreteSignature,
+        base: String,
     ) -> Result<Self, MonoTyReason> {
-        let f = &ws.module(inst.func.module).functions[inst.func.func];
-        let subst = inst.subst(ws, interner);
-        let result = f
-            .return_ty
-            .map(|ty| interner.with_mut(|arena| arena.convert_decl(ws, ty, &subst)))
-            .transpose()?
-            .map(|id| interner.get(id));
+        let result = signature.result.map(|id| interner.get(id));
         let channel = result.as_ref().and_then(|ty| coroutine_yield_channel_mono(ws, ty));
-        Ok(Self { base: inst.symbol(ws, interner), result, channel })
+        Ok(Self { base, result, channel })
     }
 
     /// The constructor's own name -- the symbol a call site targets.
@@ -105,15 +93,38 @@ impl CoroutinePlan {
     }
 }
 
-/// Plan the emission of the `co fn` definition `inst` names.
-///
-/// The base symbol is the instance's own -- one encoder, so a specialization's
-/// helpers (`__step`, `__resume`, `__advance`) hang off the name its call sites
-/// already target rather than off the declaration's.
-pub fn plan_coroutine(
-    ws: &Workspace,
-    interner: &MonoInterner,
-    inst: &Instance,
-) -> Result<CoroutinePlan, MonoTyReason> {
-    CoroutinePlan::from_instance(ws, interner, inst)
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::monoty::MonoCtor;
+    use ustr::Ustr;
+
+    #[test]
+    fn concrete_signature_owns_the_coroutine_yield_channel() {
+        let ast = skull_parser::parse_module(
+            "nobox value Payload { x: float, y: float }\n\
+             enum Event { Tick(Payload) }",
+            Ustr::from("<test>"),
+        )
+        .expect("parse");
+        let ws = bone_semantic::semantic_passes::semantic_pass(&mut [ast]).expect("semantic");
+        let interner = MonoInterner::new();
+        let event = interner.intern(MonoTy::App {
+            ctor: MonoCtor::Nominal(Ustr::from("Event")),
+            params: Vec::new(),
+        });
+        let result = interner.intern(MonoTy::App {
+            ctor: MonoCtor::Nominal(Ustr::from("Coroutine")),
+            params: vec![interner.get(event)],
+        });
+        let signature = ConcreteSignature { params: Vec::new(), result: Some(result) };
+        let plan = CoroutinePlan::from_concrete_signature(
+            &ws,
+            &interner,
+            &signature,
+            "event".to_string(),
+        )
+        .expect("concrete coroutine signature");
+        assert!(plan.channel.is_some(), "the concrete yield type must select a channel");
+    }
 }

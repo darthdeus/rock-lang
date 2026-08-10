@@ -472,6 +472,47 @@ fn main() { let c = ticker(3) }
     assert!(helpers.contains(&"__resume"), "no `__resume` helper: {helpers:?}");
 }
 
+#[test]
+fn coroutine_graph_helpers_match_the_concrete_signature_plan() {
+    let (ws, mut g) = graph_of(
+        r#"
+nobox value Payload { x: float, y: float }
+enum Event { Tick(Payload) }
+co fn ticker() -> Coroutine<Event> {
+    yield Event::Tick(Payload { x: 1.0, y: 2.0 })
+}
+fn main() { let c = ticker(); let _ = c.resume() }
+"#,
+    );
+    let bodies = skull::concrete_body::build(&ws, &mut g);
+    let mut compared = 0;
+    for (inst, concrete) in &bodies.plans {
+        let f = &ws.module(inst.func.module).functions[inst.func.func];
+        if !f.is_coroutine {
+            continue;
+        }
+        let plan = skull_mir::lower::CoroutinePlan::from_concrete_plan(
+            &ws,
+            g.interner(),
+            concrete,
+            inst.symbol(&ws, g.interner()),
+        )
+        .expect("concrete coroutine plan");
+        let expected: std::collections::BTreeSet<&str> =
+            plan.declared_suffixes().into_iter().collect();
+        let actual: std::collections::BTreeSet<&str> = g
+            .coroutine_helpers
+            .iter()
+            .filter(|helper| helper.owner_identity == g.identity(&ws, inst))
+            .map(|helper| helper.suffix)
+            .collect();
+        assert_eq!(actual, expected, "graph helper accounting drifted from the plan");
+        assert!(expected.contains("__advance"), "fixture did not produce a yield channel");
+        compared += 1;
+    }
+    assert!(compared > 0, "fixture produced no concrete coroutine plan");
+}
+
 /// S 0g: the manifest must be stable with inlining DISABLED, as well as under a
 /// perturbed discovery order.
 ///

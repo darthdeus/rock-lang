@@ -667,6 +667,18 @@ fn concrete_signature(
     })
 }
 
+/// Resolve the concrete signature a graph instance owns before a consumer
+/// needs a full body plan. This is used by graph-side helper accounting, whose
+/// pass runs before `ConcreteBodies::build` installs per-body tables.
+pub fn concrete_signature_for_instance(
+    ws: &Workspace,
+    g: &InstanceGraph,
+    inst: &Instance,
+) -> Result<ConcreteSignature, MonoTyReason> {
+    let subst = g.substitution(inst).ok_or(MonoTyReason::NoNode)?;
+    concrete_signature(ws, g, inst, subst)
+}
+
 fn concrete_tables(
     ws: &Workspace,
     g: &InstanceGraph,
