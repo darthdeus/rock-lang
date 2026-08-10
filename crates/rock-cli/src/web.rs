@@ -850,3 +850,153 @@ fn index_html(title: &str, watch: bool) -> String {
 "#
     )
 }
+
+#[cfg(test)]
+mod shader_registration_removal_tests {
+    use super::*;
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+
+    const V0: &str = r#"
+@shader(fragment)
+fn frag_a(tc: Vec2) -> Vec4 {
+    return Vec4 { x: tc.x, y: 0.0, z: 0.0, w: 1.0 }
+}
+
+@shader(fragment)
+fn frag_b(tc: Vec2) -> Vec4 {
+    return Vec4 { x: 0.0, y: tc.x, z: 0.0, w: 1.0 }
+}
+
+fn choose_a() -> string { return rock_shader(frag_a) }
+fn choose_b() -> string { return rock_shader(frag_b) }
+fn main() { print(choose_a()); print(choose_b()) }
+
+@nomangle inline(js) fn __rock_shader_register(
+    key: string,
+    src: string,
+    texture_slots: [string],
+    names: [string],
+    bindings: [int],
+    sizes: [int],
+    fingerprints: [int],
+    counts: [int],
+    member_names: [string],
+    member_offsets: [int],
+    member_kinds: [int],
+    member_capacities: [int],
+    member_strides: [int]
+) = """
+    (globalThis.__ROCK_SHADERS = globalThis.__ROCK_SHADERS || {})[key] = src;
+"""
+"#;
+
+    fn v1() -> String {
+        V0.replace("return rock_shader(frag_b)", "return \"removed\"")
+    }
+
+    fn key(
+        ws: &bone_semantic::inference::Workspace,
+        program: &skull::shader_artifact::ShaderProgram,
+    ) -> String {
+        let name = |fref: skull_mir::mir::FuncRef| {
+            ws.module(fref.module).functions[fref.func].name.to_string()
+        };
+        match program.vert {
+            Some(vert) => format!("{}+{}", name(vert), name(program.frag)),
+            None => name(program.frag),
+        }
+    }
+
+    fn logical_keys(
+        ws: &bone_semantic::inference::Workspace,
+        graph: &skull::instance_graph::InstanceGraph,
+    ) -> BTreeSet<String> {
+        let pairs = skull_mir::lower::collect_shader_pairs(ws).expect("shader collection");
+        let programs: Vec<_> = pairs
+            .iter()
+            .map(|pair| skull::shader_artifact::ShaderProgram {
+                vert: pair.vert,
+                frag: pair.frag,
+            })
+            .collect();
+        let scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
+            .sharing(Arc::clone(graph.interner()));
+        let view = skull::shader_artifact::realize_shader_with_context(
+            ws,
+            graph,
+            &skull::shader_artifact::ShaderArtifactRequest {
+                spec: skull::target_projection::TargetSpec {
+                    shader: Some(skull::target_projection::ShaderTargetSpec::Glsl(
+                        skull_codegen_glsl::GlslProfile::Core330,
+                    )),
+                    ..skull::target_projection::LUAJIT_DESKTOP
+                },
+                programs: &programs,
+            },
+            &scx,
+        )
+        .expect("shader artifact view");
+        assert!(
+            view.program_views
+                .iter()
+                .all(|program| !program.stages.is_empty())
+        );
+        view.program_views
+            .iter()
+            .map(|program| key(ws, &program.program))
+            .collect()
+    }
+
+    fn registration_keys(text: &str) -> BTreeSet<String> {
+        let prefix = "__rock_shader_register(\"";
+        text.lines()
+            .filter_map(|line| {
+                let start = line.find(prefix).map(|index| index + prefix.len())?;
+                let end = line[start..].find('"')?;
+                Some(line[start..start + end].to_string())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn web_reload_removing_one_shader_callsite_removes_one_runtime_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = dir.path().join("project");
+        let output = dir.path().join("web");
+        std::fs::create_dir_all(&project).expect("project");
+        std::fs::write(project.join("stick.toml"), "[package]\nname = \"shader-removal\"\n")
+            .expect("manifest");
+        let source = project.join("main.rock");
+        std::fs::write(&source, V0).expect("source");
+        let project_name = project.to_str().expect("project path");
+        let (mut compiler, _) =
+            WebCompiler::init(project_name, &output).expect("initial web build");
+        let baseline = std::fs::read_to_string(output.join("game.js")).expect("baseline game");
+        let wanted = BTreeSet::from(["frag_a".to_string(), "frag_b".to_string()]);
+        assert_eq!(registration_keys(&baseline), wanted);
+        assert_eq!(logical_keys(compiler.project.workspace(), compiler.cache.graph()), wanted);
+
+        std::fs::write(&source, v1()).expect("edited source");
+        let reload = compiler
+            .recompile(project_name, &output, std::slice::from_ref(&source))
+            .expect("web reload");
+        assert!(
+            matches!(reload, WebCompile::Reload),
+            "a shader key removal must require a page reload"
+        );
+
+        let current = BTreeSet::from(["frag_a".to_string()]);
+        assert_eq!(logical_keys(compiler.project.workspace(), compiler.cache.graph()), current);
+        let mut runtime = registration_keys(
+            &std::fs::read_to_string(output.join("game.js")).unwrap(),
+        );
+        let incremental = std::fs::read_to_string(output.join("incremental.js"))
+            .expect("incremental web artifact");
+        runtime.extend(registration_keys(&incremental));
+        assert_eq!(
+            runtime, current,
+            "web runtime registration population retained a removed key"
+        );
+    }
+}

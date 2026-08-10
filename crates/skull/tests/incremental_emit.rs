@@ -209,20 +209,20 @@ fn an_overlay_redefines_a_changed_specialization() {
     );
 }
 
-/// The OVERLAY carries a specialization the edit made NEWLY reachable
+/// The OVERLAY carries a specialization the graph added for the edit
 /// (graph-delta overlay construction).
 ///
 /// The sibling above edits a body whose specialization already exists, so the
 /// overlay only has to REDEFINE it. Here the edit adds the first call to a new
-/// instantiation, so the definition has to be ADDED -- and a reload dofiles the
-/// overlay after `main.lua`, which carries no such definition. The edited
+/// instantiation, so the graph delta has to add its definition -- and a reload
+/// dofiles the overlay after `main.lua`, which carries no such definition. The edited
 /// caller's call spells `..._spec_...`, so omitting it is a nil global at
 /// reload rather than a stale body.
 ///
 /// The two populations are asserted in the same test: the P specialization must
-/// already exist (so this is about the NEW one) and the Q one must not.
+/// already exist (so this is about the graph addition) and the Q one must not.
 #[test]
-fn an_overlay_carries_a_newly_reachable_specialization() {
+fn an_overlay_carries_a_graph_added_specialization() {
     let types = "value P { x: float, y: float }\n\
                  value Q { a: float, b: float, c: float }\n\
                  fn tally_of<T>(xs: [T]) -> T { return xs[0] }\n";
@@ -361,7 +361,7 @@ fn an_instantiation_that_returns_after_being_pruned_is_rebuilt_not_reused() {
     assert_eq!(
         q_bodies(&removal.lua).len(),
         0,
-        "the removal overlay must undefine the stranded Q specialization:\n{}",
+        "the removal overlay must remove the stranded Q specialization:\n{}",
         removal.lua
     );
     let ws3 = crate::common::ws_with_stdlib(&v3);
@@ -416,8 +416,8 @@ fn an_overlay_reemits_a_definition_after_a_scalar_abi_width_flip() {
     );
 }
 
-/// The overlay carries a NON-GENERIC LIBRARY body the edit made reachable for
-/// the first time (graph-delta overlay construction).
+/// The overlay carries a NON-GENERIC LIBRARY body the graph added for the edit
+/// (graph-delta overlay construction).
 ///
 /// Its two siblings above both add a SPECIALIZATION, and those reach the overlay
 /// through the graph-added chunk path, which builds the chunk and files it in
@@ -426,7 +426,7 @@ fn an_overlay_reemits_a_definition_after_a_scalar_abi_width_flip() {
 /// The subject must live in a LIBRARY module, and that is the whole reason this
 /// fixture uses a stdlib fn: `is_library_module` makes the compiled unit's own
 /// sources roots, so a fn in the fixture text is emitted whether or not anything
-/// calls it and could never be "newly reachable". `is_ascii_ws` is a plain
+/// calls it and could never be graph-added. `is_ascii_ws` is a plain
 /// `@pure` stdlib fn -- with inlining off it is emitted standalone -- and no
 /// trivial program reaches it.
 ///
@@ -434,7 +434,7 @@ fn an_overlay_reemits_a_definition_after_a_scalar_abi_width_flip() {
 /// full build, or "the overlay adds it" is satisfied by a definition that was
 /// already there.
 #[test]
-fn an_overlay_carries_a_newly_reachable_library_body() {
+fn an_overlay_carries_a_graph_added_library_body() {
     let v1 = "fn use_it(c: int) -> bool { return c == 32 }\n\
               fn main() { print(\"{use_it(9)}\") }";
     let v2 = "fn use_it(c: int) -> bool { return is_ascii_ws(c) }\n\

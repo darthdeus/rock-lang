@@ -2436,6 +2436,10 @@ pub enum SkullReload {
     /// pure `emit_overlay` (directly comparable to `iter-incremental`); `write_ms`
     /// is the separate disk write of the overlay.
     Incremental { bytes: usize, reinferred: usize, cook_ms: f64, emit_ms: f64, write_ms: f64 },
+    /// The live process cannot remove a shader registration. The caller must
+    /// restart it, then call [`SkullStone::force_full`] to materialize the
+    /// current program; no output was written on this path.
+    FullRequired { reasons: Vec<String> },
     /// A type's runtime SHAPE changed (docs/hot-reload-schema-drift-plan.md):
     /// live state cannot be migrated, so the game process must RESTART.
     /// Nothing was written -- the running process must never dofile the
@@ -2547,6 +2551,15 @@ impl SkullStone {
         };
 
         let t_emit = Instant::now();
+        if self
+            .cache
+            .shader_registration_keys_changed(self.project.workspace())
+            .map_err(|e| anyhow::anyhow!("{}", render_project_err(self.project.sources(), &e)))?
+        {
+            return Ok(SkullReload::FullRequired {
+                reasons: vec!["shader registration key set changed".to_string()],
+            });
+        }
         if full {
             // Schema-drift gate (docs/hot-reload-schema-drift-plan.md): live
             // data outlives every reload tier, so if any type's runtime layout

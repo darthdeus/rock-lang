@@ -27,6 +27,7 @@ use skull_codegen_lua::{emit_function, emit_named, mangle_fn, CodegenCtx};
 use skull_mir::instance::Instance;
 use skull_mir::mir::{FuncRef, Inst, MirFunc, Term};
 use skull_parser::CompilerError;
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 use ustr::Ustr;
@@ -1214,6 +1215,7 @@ struct ShaderRegistrations {
     dependencies: FxHashSet<FuncRef>,
     callsites: FxHashSet<(ModuleId, BodyOwner)>,
     roots: Vec<FuncRef>,
+    keys: BTreeSet<String>,
 }
 
 /// A `static` cell's reload key: rendered type + initializer content hash. Equal
@@ -2233,11 +2235,13 @@ fn shader_registration_lines(
         .iter()
         .flat_map(|pair| pair.vert.into_iter().chain(std::iter::once(pair.frag)))
         .collect();
+    let keys = collection.pairs.iter().map(|pair| pair.key.clone()).collect();
     Ok(ShaderRegistrations {
         lua: out,
         dependencies,
         callsites: collection.callsites.iter().copied().collect(),
         roots,
+        keys,
     })
 }
 
@@ -2967,6 +2971,21 @@ impl SkullEmitCache {
     /// the graph was built/updated from. Recomputed every edit; see the field.
     pub fn lua_view(&self) -> &crate::artifact::ArtifactView {
         &self.lua_view
+    }
+
+    /// A live shader registry cannot remove a key from the running process:
+    /// registration lines only add or replace entries. A key-set change must
+    /// therefore take the process-restarting reload path before any overlay is
+    /// written.
+    pub fn shader_registration_keys_changed(
+        &self,
+        ws: &Workspace,
+    ) -> Result<bool, CompilerError> {
+        let current: BTreeSet<String> = skull_mir::lower::collect_shader_pairs(ws)?
+            .into_iter()
+            .map(|pair| pair.key)
+            .collect();
+        Ok(current != self.shader_registrations.keys)
     }
 
 

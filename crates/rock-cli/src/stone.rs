@@ -351,10 +351,10 @@ pub fn do_stone_watch(
                     changed_paths.clear();
                     compilation_succeeded = true;
                     clear_error_file();
-                    if !outcome.restart_types.is_empty() {
+                    if !outcome.restart_reasons.is_empty() {
                         info!(
-                            "type shape changed ({}) -- live state cannot be migrated, restarting game process",
-                            outcome.restart_types.join(", ")
+                            "live reload requires a process restart ({})",
+                            outcome.restart_reasons.join(", ")
                         );
                         should_restart = true;
                     }

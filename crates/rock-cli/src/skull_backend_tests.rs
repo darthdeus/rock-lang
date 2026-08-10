@@ -2660,6 +2660,146 @@ mod shape_drift_tests {
 }
 
 #[cfg(test)]
+mod shader_registration_removal_tests {
+    use super::super::{SkullReload, SkullStone};
+    use std::collections::BTreeSet;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    const V0: &str = r#"
+@shader(fragment)
+fn frag_a(tc: Vec2) -> Vec4 {
+    return Vec4 { x: tc.x, y: 0.0, z: 0.0, w: 1.0 }
+}
+
+@shader(fragment)
+fn frag_b(tc: Vec2) -> Vec4 {
+    return Vec4 { x: 0.0, y: tc.x, z: 0.0, w: 1.0 }
+}
+
+fn choose_a() -> string { return rock_shader(frag_a) }
+fn choose_b() -> string { return rock_shader(frag_b) }
+fn main() { print(choose_a()); print(choose_b()) }
+"#;
+
+    fn v1() -> String {
+        V0.replace("return rock_shader(frag_b)", "return \"removed\"")
+    }
+
+    fn key(
+        ws: &bone_semantic::inference::Workspace,
+        program: &skull::shader_artifact::ShaderProgram,
+    ) -> String {
+        let name = |fref: skull_mir::mir::FuncRef| {
+            ws.module(fref.module).functions[fref.func].name.to_string()
+        };
+        match program.vert {
+            Some(vert) => format!("{}+{}", name(vert), name(program.frag)),
+            None => name(program.frag),
+        }
+    }
+
+    fn logical_keys(
+        ws: &bone_semantic::inference::Workspace,
+        graph: &skull::instance_graph::InstanceGraph,
+    ) -> BTreeSet<String> {
+        let collection =
+            skull_mir::lower::collect_shader_collection(ws).expect("shader collection");
+        let programs: Vec<_> = collection
+            .pairs
+            .iter()
+            .map(|pair| skull::shader_artifact::ShaderProgram {
+                vert: pair.vert,
+                frag: pair.frag,
+            })
+            .collect();
+        let scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
+            .sharing(Arc::clone(graph.interner()));
+        let view = skull::shader_artifact::realize_shader_with_context(
+            ws,
+            graph,
+            &skull::shader_artifact::ShaderArtifactRequest {
+                spec: skull::target_projection::TargetSpec {
+                    shader: Some(skull::target_projection::ShaderTargetSpec::Glsl(
+                        skull_codegen_glsl::GlslProfile::Core330,
+                    )),
+                    ..skull::target_projection::LUAJIT_DESKTOP
+                },
+                programs: &programs,
+            },
+            &scx,
+        )
+        .expect("shader artifact view");
+        assert!(
+            view.program_views
+                .iter()
+                .all(|program| !program.stages.is_empty())
+        );
+        view.program_views
+            .iter()
+            .map(|program| key(ws, &program.program))
+            .collect()
+    }
+
+    fn registration_keys(text: &str) -> BTreeSet<String> {
+        let prefix = "__rock_shader_register(\"";
+        text.lines()
+            .filter_map(|line| {
+                let start = line.find(prefix).map(|index| index + prefix.len())?;
+                let end = line[start..].find('"')?;
+                Some(line[start..start + end].to_string())
+            })
+            .collect()
+    }
+
+    fn boot(source: &str) -> (tempfile::TempDir, SkullStone, PathBuf, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().to_str().expect("tempdir path").to_string();
+        let main = dir.path().join("main.lua");
+        let incremental = dir.path().join("incremental.lua");
+        let rock = dir.path().join("main.rock");
+        std::fs::write(&rock, source).expect("source");
+        let stone = SkullStone::init(&root, &main, &incremental).expect("initial compile");
+        (dir, stone, main, incremental, rock)
+    }
+
+    #[test]
+    fn native_reload_removing_one_shader_callsite_removes_one_runtime_key() {
+        let (_dir, mut stone, main, incremental, rock) = boot(V0);
+        let wanted = BTreeSet::from(["frag_a".to_string(), "frag_b".to_string()]);
+        let baseline = std::fs::read_to_string(&main).unwrap();
+        assert_eq!(registration_keys(&baseline), wanted);
+        assert_eq!(logical_keys(stone.project.workspace(), stone.cache.graph()), wanted);
+
+        std::fs::write(&rock, v1()).expect("edited source");
+        let reload = stone
+            .recompile(std::slice::from_ref(&rock), &main, &incremental)
+            .expect("reload");
+        assert!(
+            matches!(reload, SkullReload::FullRequired { .. }),
+            "a shader key removal must require a process restart: {reload:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&main).unwrap(),
+            baseline,
+            "FullRequired must not write a program for the old live process"
+        );
+
+        stone
+            .force_full(&main, &incremental)
+            .expect("canonicalize shader removal");
+
+        let current = BTreeSet::from(["frag_a".to_string()]);
+        assert_eq!(logical_keys(stone.project.workspace(), stone.cache.graph()), current);
+        let runtime = registration_keys(&std::fs::read_to_string(&main).unwrap());
+        assert_eq!(
+            runtime, current,
+            "native runtime registration population retained a removed key"
+        );
+    }
+}
+
+#[cfg(test)]
 mod force_full_tests {
     //! `force_full` is the stone restart-path canonicalizer: after body edits
     //! have accumulated into `incremental.lua` (overlaying a stale `main.lua`),
@@ -2759,7 +2899,7 @@ mod force_full_tests {
     /// Global DCE prunes a fn no root reaches, so main.lua does NOT define it.
     /// A later BODY edit that adds the first call to that fn must still leave it
     /// defined somewhere: the overlay redefines only CHANGED fns, so without the
-    /// newly-reachable backfill (`newly_reachable`) the composed program calls a
+    /// graph-added backfill the composed program calls a
     /// global that exists in neither file and dies on load.
     #[test]
     fn overlay_backfills_a_fn_the_edit_makes_reachable() {

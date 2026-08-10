@@ -2804,6 +2804,7 @@ pub fn emit_program_cached(
         build,
         changed_since_full: HashSet::new(),
         static_keys,
+        shader_registration_keys: shader_registration_keys(ws)?,
         scx,
         session,
     };
@@ -3140,6 +3141,7 @@ pub struct JsEmitCache {
     build: ProgramBuild,
     changed_since_full: HashSet<FuncRef>,
     static_keys: HashMap<ustr::Ustr, String>,
+    shader_registration_keys: BTreeSet<String>,
     /// The session's lowering context, graph, and artifact view, kept across edits.
     scx: skull_mir::lower::ScalarCtx,
     session: JsSession,
@@ -3201,6 +3203,11 @@ pub fn emit_overlay(
             )
         })
     {
+        return Ok(JsReload::FullRequired);
+    }
+
+    let current_shader_keys = shader_registration_keys(ws)?;
+    if current_shader_keys != cache.shader_registration_keys {
         return Ok(JsReload::FullRequired);
     }
 
@@ -3396,6 +3403,13 @@ pub fn emit_overlay(
 
     cache.build = current;
     Ok(JsReload::Overlay(out))
+}
+
+fn shader_registration_keys(ws: &Workspace) -> Result<BTreeSet<String>, CompilerError> {
+    Ok(skull_mir::lower::collect_shader_pairs(ws)?
+        .into_iter()
+        .map(|pair| pair.key)
+        .collect())
 }
 
 fn static_cell_key(cell: &skull_mir::mir::StaticCell) -> String {

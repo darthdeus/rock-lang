@@ -19,13 +19,13 @@ use std::path::{Path, PathBuf};
 /// What a successful (re)compile asks of the runtime beyond hot-reloading.
 #[derive(Default)]
 pub struct CompileOutcome {
-    /// Type names whose runtime SHAPE changed. Non-empty => live state cannot
-    /// be migrated, so the runtime must RESTART the game process: kill, then
+    /// Reasons whose live state or runtime registry cannot be migrated. Non-empty
+    /// => the runtime must RESTART the game process: kill, then
     /// `canonicalize_for_restart` (which writes the deferred `main.lua`), then
     /// respawn. The compile deliberately did NOT write `main.lua` -- the old
     /// process must never hot-reload the new-shape program
     /// (docs/hot-reload-schema-drift-plan.md).
-    pub restart_types: Vec<String>,
+    pub restart_reasons: Vec<String>,
 }
 
 pub trait GameCompiler {
@@ -104,7 +104,11 @@ impl GameCompiler for SkullGameCompiler {
                         cook_ms + emit_ms + write_ms, cook_ms, emit_ms, write_ms, reinferred, if reinferred == 1 { "" } else { "s" }, bytes),
                     SkullReload::ShapeChanged { types } => {
                         self.pending_shape_write = true;
-                        return Ok(CompileOutcome { restart_types: types });
+                        return Ok(CompileOutcome { restart_reasons: types });
+                    }
+                    SkullReload::FullRequired { reasons } => {
+                        self.pending_shape_write = true;
+                        return Ok(CompileOutcome { restart_reasons: reasons });
                     }
                     SkullReload::NoChange => {}
                 }
