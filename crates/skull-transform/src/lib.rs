@@ -40,7 +40,7 @@ pub mod scope;
 pub use closure::{convert_closures, convert_closures_framed, FrameInfo};
 pub use forl::recover_counted_loops;
 pub use inline::{
-    fn_has_bounds, inline_functions_with_plans,
+    fn_has_bounds, inline_functions_with_plans, inline_off_guard, InlineOffGuard,
     validate_no_residual_bound_calls,
     InlineCache, SpliceRecord,
 };
@@ -1611,7 +1611,7 @@ mod tests {
             .find(|(_, f)| f.name.as_str() == fn_name)
             .expect("function");
         let scx = skull_mir::lower::ScalarCtx::new(&ws);
-        skull_mir::lower::lower_function(&ws, &scx, mid, fid).expect("lower")
+        skull_mir::lower::lower_function_source(&ws, &scx, mid, fid).expect("lower")
     }
 
     #[test]

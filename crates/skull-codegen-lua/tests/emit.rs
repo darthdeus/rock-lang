@@ -22,7 +22,7 @@ fn emit_dump(mut modules: Vec<skull_parser::Ast>, fn_name: &str) -> String {
         .find(|(_, f)| f.name.as_str() == fn_name)
         .expect("function by name");
     let scx = skull_mir::lower::ScalarCtx::new(&ws);
-    let func = skull_mir::lower::lower_function(&ws, &scx, mid, fid)
+    let func = skull_mir::lower::lower_function_source(&ws, &scx, mid, fid)
         .unwrap_or_else(|e| panic!("lower failed: {}", e.message));
     let ctx = CodegenCtx::new(&ws);
     emit_function(&ws, &ctx, scx.interner(), FuncRef { module: mid, func: fid }, &func)
@@ -60,7 +60,7 @@ fn emit_clean(src: &str, fn_name: &str) -> String {
         .find(|(_, f)| f.name.as_str() == fn_name)
         .expect("function by name");
     let scx = skull_mir::lower::ScalarCtx::new(&ws);
-    let mut func = skull_mir::lower::lower_function(&ws, &scx, mid, fid)
+    let mut func = skull_mir::lower::lower_function_source(&ws, &scx, mid, fid)
         .unwrap_or_else(|e| panic!("lower failed: {}", e.message));
     skull_transform::cleanup(&mut func);
     let ctx = CodegenCtx::new(&ws);
@@ -115,7 +115,7 @@ fn run(src: &str, driver: &str) -> String {
         if f.inline_body.is_some() {
             continue;
         }
-        if let Ok(mut func) = skull_mir::lower::lower_instance(&ws, &scx, inst) {
+        if let Ok(mut func) = skull_mir::lower::lower_instance_source(&ws, &scx, inst) {
             skull_transform::cleanup(&mut func);
             skull_transform::recover_counted_loops(&ws, &mut func);
             lua.push_str(&skull_codegen_lua::emit_named(
@@ -582,7 +582,7 @@ end
     );
 }
 
-/// Full pre-emit pipeline (mirrors `mir_emit.rs`): lower -> `inline_functions`
+/// Full pre-emit pipeline (mirrors `mir_emit.rs`): plan-backed lower -> inline
 /// -> `cleanup` -> emit. The honest artifact for zero-alloc claims: an `@inline`
 /// `iter`/`next` is only spliced (and its cursor struct scalarized) once the
 /// inliner has run, which `emit_clean` does NOT do.
@@ -607,13 +607,34 @@ fn emit_inlined(src: &str, fn_name: &str) -> String {
         .iter()
         .find(|(_, f)| f.name.as_str() == fn_name)
         .expect("function by name");
-    let scx = skull_mir::lower::ScalarCtx::new(&ws);
+    let interner = std::sync::Arc::new(skull_mir::monoty::MonoInterner::new());
+    let graph = skull_graph::instance_graph::build_in(
+        &ws,
+        ws.module(mid)
+            .functions
+            .iter()
+            .map(|(fid, _)| FuncRef { module: mid, func: fid })
+            .collect(),
+        false,
+        interner.clone(),
+    );
+    let bodies = skull_graph::concrete_body::build(&ws, &graph);
+    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(interner);
     let self_ref = FuncRef { module: mid, func: fid };
-    let mut func = skull_mir::lower::lower_function(&ws, &scx, mid, fid)
+    let self_inst = skull_mir::instance::Instance::base(self_ref);
+    let plan = bodies.plans.get(&self_inst).expect("concrete self plan");
+    let mut func = skull_mir::lower::lower_instance_with_plans(&ws, &scx, plan, &bodies.plans)
         .unwrap_or_else(|e| panic!("lower failed: {}", e.message));
     let mut cache = skull_transform::InlineCache::default();
-    skull_transform::inline_functions(&ws, &scx, self_ref, &mut func, &mut cache)
-        .expect("inline failed");
+    skull_transform::inline_functions_with_plans(
+        &ws,
+        &scx,
+        self_ref,
+        &mut func,
+        &mut cache,
+        &bodies.plans,
+    )
+    .expect("inline failed");
     skull_transform::cleanup(&mut func);
     skull_transform::recover_counted_loops(&ws, &mut func);
     let ctx = CodegenCtx::new(&ws);

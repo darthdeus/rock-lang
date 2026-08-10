@@ -8,7 +8,7 @@
 //! structure. Vec overloads (multi-value return) reject -- the reject-don't-
 //! fallback discipline that keeps the emitter honest as the subset grows.
 
-use skull_mir::lower::{lower_function, ScalarCtx};
+use skull_mir::lower::{lower_function_source, ScalarCtx};
 use crate::common::{emit_scalar, lower_test_fn, stdlib_ws, ws_with};
 
 // clamp: the returning-arms diamond -- every branch arm `return`s, so the
@@ -149,7 +149,7 @@ fn vec_overload_rejects() {
                 && f.inline_body.is_none()
                 && !f.annotations.iter().any(|a| a.name.name.as_str() == "intrinsic")
             {
-                let Ok(mf) = lower_function(&ws, &scx, mid, fid) else { continue };
+                let Ok(mf) = lower_function_source(&ws, &scx, mid, fid) else { continue };
                 lowered += 1;
                 match skull_codegen_js::emit::emit_fn(&ws, &mf, "lerp_vec") {
                     Err(e) => reject_msgs.push(e.message),
@@ -227,7 +227,7 @@ fn native_buffer_ctor_emits_object_literal() {
     for (_, &mid) in ws.module_ids.iter() {
         for (fid, f) in ws.module(mid).functions.iter() {
             if f.name.as_str() == "native_buffer_float" {
-                let mf = lower_function(&ws, &scx, mid, fid).expect("lower");
+                let mf = lower_function_source(&ws, &scx, mid, fid).expect("lower");
                 assert_eq!(
                     skull_codegen_js::emit::emit_fn(&ws, &mf, "native_buffer_float").unwrap(),
                     "\

@@ -40,7 +40,7 @@ use skull_mir::intrinsics::{Emission, IntrinsicEntry, IntrinsicTable};
 use skull_mir::concrete::{ConcreteBodyPlan, ConcretePlans, ConcreteSignature};
 use skull_mir::lower::{ScalarCtx, SpecSubst};
 #[cfg(test)]
-use skull_mir::lower::lower_instance;
+use skull_mir::lower::lower_instance_source;
 use skull_mir::instance::Instance;
 use skull_mir::monoty::MonoInterner;
 use skull_mir::monoty::{MonoCtor, MonoTy};
@@ -3898,7 +3898,8 @@ fn plan_shader_entry_inner(
 /// not a summary of it: the only thing left out below this point is the GLSL
 /// text itself.
 ///
-/// Declaration-based, like the rest of GLSL lowering today -- `lower_function`
+/// Declaration-based, like the rest of GLSL lowering today --
+/// `lower_function_source`
 /// takes no substitution -- so a caller holding concrete instances must not
 /// hand this a generic declaration and read the answer as concrete.
 pub fn check_entry_profile(ws: &Workspace, fref: FuncRef) -> Result<(), CompilerError> {
@@ -5478,7 +5479,7 @@ mod assertion_flip_tests {
         let scx = ScalarCtx::new_values_first_class(&ws);
         let fref = resolve_root(&ws, mid, "f").expect("root");
         let mut mf =
-            lower_instance(&ws, &scx, &Instance::base(fref))
+            lower_instance_source(&ws, &scx, &Instance::base(fref))
                 .expect("lower");
 
         // The coercion is present today (regression pin for the return sink).
@@ -5526,7 +5527,7 @@ mod assertion_flip_tests {
         let scx = ScalarCtx::new_values_first_class(&ws);
         let fref = resolve_root(&ws, mid, "caller").expect("root");
         let mut mf =
-            lower_instance(&ws, &scx, &Instance::base(fref))
+            lower_instance_source(&ws, &scx, &Instance::base(fref))
                 .expect("lower");
 
         // CONTROL: the record exists and the body emits against it.
@@ -5556,7 +5557,7 @@ mod assertion_flip_tests {
         );
         let scx = ScalarCtx::new_values_first_class(&ws);
         let fref = resolve_root(&ws, mid, "caller").expect("root");
-        let mf = lower_instance(&ws, &scx, &Instance::base(fref))
+        let mf = lower_instance_source(&ws, &scx, &Instance::base(fref))
             .expect("lower");
 
         // The fixture really does exercise the gate: a call is present, and it
@@ -5934,7 +5935,7 @@ mod assertion_flip_tests {
         );
         let scx = ScalarCtx::new_values_first_class(&ws);
         let fref = resolve_root(&ws, mid, "caller").expect("root");
-        let base = lower_instance(&ws, &scx, &Instance::base(fref))
+        let base = lower_instance_source(&ws, &scx, &Instance::base(fref))
             .expect("lower");
 
         // CONTROL: the recorded key has the declared arity, and the body emits.
@@ -5987,8 +5988,12 @@ mod assertion_flip_tests {
         plan.signature.result = Some(session.scx.interner().intern(MonoTy::String));
 
         let err = emit_shader_library_with_view(&ws, &session.scx, &view)
-            .expect_err("a non-tier-0 concrete result plan must reject GLSL emission");
-        assert!(err.message.contains("not tier 0"), "unexpected error: {}", err.message);
+            .expect_err("a concrete result plan disagreement must reject GLSL emission");
+        assert!(
+            err.message.contains("concrete callee signature disagrees with its body plan"),
+            "unexpected error: {}",
+            err.message
+        );
     }
 
     #[test]
@@ -6045,7 +6050,12 @@ mod assertion_flip_tests {
         signature.result = Some(scx.interner().intern(MonoTy::String));
         let bad_signature = emit_shader_library_with_view(&ws, scx, &view)
             .expect_err("a non-tier-0 concrete call result must reject GLSL emission");
-        assert!(bad_signature.message.contains("call result") || bad_signature.message.contains("not tier 0"), "{bad_signature}");
+        assert!(
+            bad_signature
+                .message
+                .contains("concrete callee signature disagrees with its body plan"),
+            "{bad_signature}"
+        );
     }
 
     // A partial key -- a recorded instantiation with an unreified slot -- used to

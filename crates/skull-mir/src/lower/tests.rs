@@ -14,7 +14,7 @@
             .iter()
             .find(|(_, f)| f.name.as_str() == fn_name)
             .expect("function by name");
-        lower_function(&ws, &ScalarCtx::new(&ws), mid, fid)
+        lower_function_source(&ws, &ScalarCtx::new(&ws), mid, fid)
             .unwrap_or_else(|e| panic!("lower failed: {}", e.message))
             .to_string()
     }

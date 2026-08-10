@@ -990,13 +990,13 @@ fn hash_init_stmt(body: &Body, s: Idx<Statement>, h: &mut std::collections::hash
     }
 }
 
-pub fn lower_function(
+pub fn lower_function_source(
     ws: &Workspace,
     scx: &ScalarCtx,
     mid: ModuleId,
     fid: Idx<Function>,
 ) -> Result<MirFunc, CompilerError> {
-    lower_instance(ws, scx, &crate::instance::Instance::base(FuncRef { module: mid, func: fid }))
+    lower_instance_source(ws, scx, &crate::instance::Instance::base(FuncRef { module: mid, func: fid }))
 }
 
 pub fn lower_function_with_plans(
@@ -1018,7 +1018,7 @@ pub fn lower_function_with_plans(
 /// The instance's arguments are ids into `scx`'s arena, so this is only correct
 /// where the caller minted them through the same [`ScalarCtx`] -- which is what
 /// makes there being ONE arena a soundness property rather than a tidiness one.
-pub fn lower_instance(
+pub fn lower_instance_source(
     ws: &Workspace,
     scx: &ScalarCtx,
     inst: &crate::instance::Instance,

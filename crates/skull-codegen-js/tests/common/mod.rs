@@ -3,30 +3,13 @@
 
 #![allow(dead_code)] // every test file includes this module; none uses all of it.
 
-use skull_mir::lower::{lower_function, ScalarCtx};
+use skull_mir::lower::{lower_function_source, ScalarCtx};
 
-static INLINE_MODE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-pub struct InlineOffGuard(
-    #[allow(dead_code)] std::sync::MutexGuard<'static, ()>,
-    Option<String>,
-);
+pub struct InlineOffGuard(#[allow(dead_code)] skull_transform::InlineOffGuard);
 
 impl InlineOffGuard {
     pub fn on() -> Self {
-        let guard = INLINE_MODE.lock().unwrap_or_else(|e| e.into_inner());
-        let previous = std::env::var("SKULL_INLINE_OFF").ok();
-        unsafe { std::env::set_var("SKULL_INLINE_OFF", "1") };
-        InlineOffGuard(guard, previous)
-    }
-}
-
-impl Drop for InlineOffGuard {
-    fn drop(&mut self) {
-        match &self.1 {
-            Some(value) => unsafe { std::env::set_var("SKULL_INLINE_OFF", value) },
-            None => unsafe { std::env::remove_var("SKULL_INLINE_OFF") },
-        }
+        InlineOffGuard(skull_transform::inline_off_guard())
     }
 }
 
@@ -81,7 +64,7 @@ pub fn lower_test_fn(
     let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
     for (fid, f) in ws.module(mid).functions.iter() {
         if f.name.as_str() == name {
-            return lower_function(ws, &scx, mid, fid)
+            return lower_function_source(ws, &scx, mid, fid)
                 .unwrap_or_else(|e| panic!("lower `{name}`: {}", e.message));
         }
     }
@@ -123,7 +106,7 @@ pub fn emit_scalar(ws: &bone_semantic::inference::Workspace, name: &str, arity: 
             {
                 continue;
             }
-            let Ok(mf) = lower_function(ws, &scx, mid, fid) else { continue };
+            let Ok(mf) = lower_function_source(ws, &scx, mid, fid) else { continue };
             if let Ok(js) = skull_codegen_js::emit::emit_fn(ws, &mf, &format!("{name}_fb")) {
                 return js;
             }

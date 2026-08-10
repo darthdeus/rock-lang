@@ -183,7 +183,7 @@ fn main() { print("{sum_all(Counter { n: 0 })}") }
         .find(|(_, f)| f.name.as_str() == "sum_all")
         .expect("sum_all");
     let scx = ScalarCtx::new(&ws);
-    let mf = skull_mir::lower::lower_instance(
+    let mf = skull_mir::lower::lower_instance_source(
         &ws,
         &scx,
         &skull_mir::instance::Instance::base(skull_mir::mir::FuncRef {
@@ -355,7 +355,7 @@ fn main() {
         .find(|(_, f)| f.name.as_str() == "sum_all")
         .expect("sum_all");
     let scx = ScalarCtx::new(&ws);
-    let raw = skull_mir::lower::lower_instance(
+    let raw = skull_mir::lower::lower_instance_source(
         &ws,
         &scx,
         &skull_mir::instance::Instance::base(skull_mir::mir::FuncRef {
@@ -438,14 +438,14 @@ fn main() {
         {
             continue;
         }
-        let Ok(mf) = skull_mir::lower::lower_instance(&ws, &scx, candidate) else { continue };
+        let Ok(mf) = skull_mir::lower::lower_instance_source(&ws, &scx, candidate) else { continue };
         if count_bound_multi(&mf) > 0 {
             picked = Some((candidate.clone(), candidate_tree.to_resolved()));
             break;
         }
     }
     let (inst, tree) = picked.expect("the fixture has no prepared bounded body with a tree");
-    let mut mf = skull_mir::lower::lower_instance(&ws, &scx, &inst).expect("lower bounded instance");
+    let mut mf = skull_mir::lower::lower_instance_source(&ws, &scx, &inst).expect("lower bounded instance");
     assert!(!tree.is_empty(), "the prepared bounded fixture has no incoming tree");
     let placeholder_ids: Vec<_> = mf
         .insts

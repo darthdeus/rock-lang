@@ -23,7 +23,7 @@ fn lower(src: &str, fn_name: &str) -> MirFunc {
         .find(|(_, f)| f.name.as_str() == fn_name)
         .expect("function by name");
     let scx = skull_mir::lower::ScalarCtx::new(&ws);
-    skull_mir::lower::lower_function(&ws, &scx, mid, fid)
+    skull_mir::lower::lower_function_source(&ws, &scx, mid, fid)
         .unwrap_or_else(|e| panic!("lower failed: {}", e.message))
 }
 

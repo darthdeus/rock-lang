@@ -23,6 +23,7 @@
 //! i.e. in compile/emit cost, hot-reload size, and runtime trace shape.
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use std::cell::Cell as ThreadCell;
 
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::{BoundTree, CompilerError};
@@ -52,6 +53,33 @@ const MAX_INLINES_PER_FN: usize = 1000;
 /// -live pathological case, not the typical local count; 400 matches the value
 /// the old (coloring-aware) skull validated across the corpus.
 const CELL_BUDGET: usize = 400;
+
+thread_local! {
+    static INLINE_OFF: ThreadCell<bool> = const { ThreadCell::new(false) };
+}
+
+pub struct InlineOffGuard {
+    previous: bool,
+}
+
+pub fn inline_off_guard() -> InlineOffGuard {
+    let previous = INLINE_OFF.with(|off| {
+        let previous = off.get();
+        off.set(true);
+        previous
+    });
+    InlineOffGuard { previous }
+}
+
+impl Drop for InlineOffGuard {
+    fn drop(&mut self) {
+        INLINE_OFF.with(|off| off.set(self.previous));
+    }
+}
+
+fn inline_disabled() -> bool {
+    INLINE_OFF.with(|off| off.get()) || std::env::var_os("SKULL_INLINE_OFF").is_some()
+}
 
 /// Whether a candidate callee is a single straight-line block or a CFG.
 #[derive(Copy, Clone, PartialEq)]
@@ -1251,7 +1279,7 @@ fn inline_functions_inner(
     let mut spliced = HashSet::default();
     let mut records: Vec<SpliceRecord> = Vec::new();
     // Kill-switch for perf attribution / bisecting a suspected inline bug.
-    if std::env::var("SKULL_INLINE_OFF").is_ok() {
+    if inline_disabled() {
         return Ok((spliced, records));
     }
     // The caller's top-level blocks (excludes closure sub-CFGs), maintained
@@ -1476,7 +1504,7 @@ fn outer(x: int) -> int {
             .find(|(_, f)| f.name.as_str() == "outer")
             .expect("outer");
         let scx = ScalarCtx::new(&ws);
-        let body = skull_mir::lower::lower_instance(
+        let body = skull_mir::lower::lower_instance_source(
             &ws,
             &scx,
             &Instance::base(FuncRef { module: mid, func: fid }),

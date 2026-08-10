@@ -7,7 +7,7 @@
 //! Emitted-shape assertions alone cannot tell "flat" from "boxed and unboxed
 //! again", so the round-trips below RUN under node.
 
-use skull_mir::lower::{lower_function, ScalarCtx};
+use skull_mir::lower::{lower_function_source, ScalarCtx};
 use skull_mir::mir::FuncRef;
 
 use crate::common::ws_with;
@@ -96,7 +96,7 @@ fn lua_mir(name: &str) -> String {
         .find(|(_, f)| f.name.as_str() == name)
         .map(|(fid, _)| fid)
         .expect("fn in <test>");
-    lower_function(&ws, &scx, mid, fid)
+    lower_function_source(&ws, &scx, mid, fid)
         .unwrap_or_else(|e| panic!("lower `{name}`: {}", e.message))
         .to_string()
 }
