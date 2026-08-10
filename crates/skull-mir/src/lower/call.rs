@@ -1493,7 +1493,7 @@ impl Builder<'_> {
         repr: ValueRepr,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         let iter_ref = inst.func;
-        let plan = BackendFnAbiPlan::for_instance(self.ws, self.scx, inst);
+        let plan = self.callee_abi_plan_for_instance(inst)?;
         let slot = match plan.scalar() {
             None => RetSlot::Opaque,
             Some(abi) => abi.param_shapes.first().cloned().ok_or_else(|| {
