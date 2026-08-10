@@ -2,7 +2,7 @@
 //! (docs/shaders.md). A call `rock_shader(vert, frag)`
 //! (two direct references to top-level `@shader` fns) collapses at emit to the
 //! pipeline key const `"<vert>+<frag>"`, and the driver emits exactly one
-//! top-level `__rock_shader_register("<key>", <glsl>)` per DISTINCT pair -- N
+//! top-level `__rock_shader_register` carrying the GLSL and semantic wires per DISTINCT pair -- N
 //! call sites of the same pair dedup to one registration. Re-emission is
 //! byte-identical (incremental byte-identity gate).
 //!
@@ -73,7 +73,7 @@ fn explicit_vertex_registration_marks_that_it_is_not_fullscreen() {
     let at = lua.find("__rock_shader_register(").expect("a registration");
     let reg = &lua[at..];
     assert!(
-        reg.contains(r#"__ty = "Vec"}, false)"#),
+        reg.contains("false, [[") && reg.contains("fullscreen 0"),
         "an explicit vertex artifact must register as non-fullscreen:\n{reg}"
     );
 }
@@ -318,7 +318,7 @@ fn single_arg_registration_carries_both_ifdef_blocks() {
         assert!(reg.contains(n), "single-arg registration missing `{n}`:\n{reg}");
     }
     assert!(
-        reg.contains(r#"__ty = "Vec"}, true)"#),
+        reg.contains("true, [[") && reg.contains("fullscreen 1"),
         "a fragment-only artifact must register as compiler-owned fullscreen:\n{reg}"
     );
 }
