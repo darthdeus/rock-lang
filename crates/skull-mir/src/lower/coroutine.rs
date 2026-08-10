@@ -48,8 +48,12 @@ impl CoroutinePlan {
         base: String,
     ) -> Result<Self, MonoTyReason> {
         let result = signature.result.map(|id| interner.get(id));
-        let channel = result.as_ref().and_then(|ty| coroutine_yield_channel_mono(ws, ty));
+        let channel = result.as_ref().and_then(|ty| Self::channel_for_concrete_type(ws, ty));
         Ok(Self { base, result, channel })
+    }
+
+    pub fn channel_for_concrete_type(ws: &Workspace, ty: &MonoTy) -> Option<YieldChannel> {
+        coroutine_yield_channel_mono(ws, ty)
     }
 
     /// The constructor's own name -- the symbol a call site targets.

@@ -106,5 +106,8 @@ fn main() { print("{XS.len}") }
     );
     let js = emit_program(&ws);
     let body = &js[js.find("function __deco_reg(").expect("decorator body")..];
-    assert!(body.contains("_data") && body.contains("len"), "decorator lost the concrete push: {body}");
+    assert!(
+        body.contains("_data[v0.len] = 1") && body.contains("v0.len = v0.len + 1"),
+        "decorator lost the concrete push operation: {body}"
+    );
 }

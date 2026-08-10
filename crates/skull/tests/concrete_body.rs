@@ -194,6 +194,31 @@ fn main() {
 }
 
 #[test]
+fn production_lowering_concrete_struct_literal_coerces_declared_float_fields() {
+    let (ws, g, bodies) = bodies_of(
+        r#"
+nobox value V { x: float }
+fn make() -> V { return V { x: 1 } }
+fn main() { let v = make(); print("{v.x}") }
+"#,
+    );
+    let make = bodies
+        .plans
+        .keys()
+        .find(|inst| ws.module(inst.func.module).functions[inst.func.func].name.as_str() == "make")
+        .cloned()
+        .expect("make has no concrete plan");
+    let plan = bodies.plans.get(&make).expect("make plan disappeared");
+    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let mir = skull_mir::lower::lower_instance_with_plan(&ws, &scx, plan)
+        .expect("plan-driven struct literal lowering failed");
+    assert!(
+        count_int_to_float(&mir) > 0,
+        "a concrete float field lost the int-to-float coercion"
+    );
+}
+
+#[test]
 fn production_call_abi_requires_the_selected_callee_plan() {
     let (ws, g, bodies) = bodies_of(
         r#"

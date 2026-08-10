@@ -186,7 +186,25 @@ impl Builder<'_> {
     /// must have already advanced the coroutine (`cobj.__advance(cobj, arg)`)
     /// before this read.
     pub(crate) fn resume_frame_read(&mut self, cobj: Idx<Inst>, shape: &EnumFlatShape) -> ValueRepr {
-        let n = shape.leaf_count();
+        let value_shape = shape.value_shape();
+        self.resume_frame_read_with_shape(cobj, shape.leaf_count(), &value_shape)
+    }
+
+    pub(crate) fn resume_frame_read_channel(
+        &mut self,
+        cobj: Idx<Inst>,
+        channel: &YieldChannel,
+    ) -> ValueRepr {
+        let value_shape = channel.value_shape();
+        self.resume_frame_read_with_shape(cobj, channel.leaf_count(), &value_shape)
+    }
+
+    fn resume_frame_read_with_shape(
+        &mut self,
+        cobj: Idx<Inst>,
+        n: usize,
+        value_shape: &ValueShape,
+    ) -> ValueRepr {
         let frame = cobj;
         let state = self.emit_cur(Inst::Field { base: frame, field: Ustr::from("__state") });
         let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
@@ -213,7 +231,7 @@ impl Builder<'_> {
         self.cur = join;
         let leaves: Vec<Idx<Inst>> = cells.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
         let mut idx = 0;
-        self.rebuild_from_leaves(&shape.value_shape(), &leaves, &mut idx)
+        self.rebuild_from_leaves(value_shape, &leaves, &mut idx)
     }
 
     /// Split a flat-enum `ValueRepr::Group` into its cells (the inverse of

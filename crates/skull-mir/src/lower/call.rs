@@ -383,19 +383,32 @@ impl Builder<'_> {
         // which IS the frame), then we read them back as an unboxed group -- no
         // per-yield allocation.
         if let Callee::Unresolved { name, .. } = callee {
-            if name.as_str() == "resume"
-                && !arg_idxs.is_empty()
-                && self.is_coroutine_recv(arg_idxs[0])
-            {
-                if let Some(shape) = self.flat_enum_shape_of_expr(e) {
-                    let recv = self.lower_expr(arg_idxs[0])?;
-                    let advance = self.emit_cur(Inst::Field { base: recv, field: Ustr::from("__advance") });
-                    let mut cargs: Vec<Idx<Inst>> = vec![recv];
-                    if let Some(&a) = arg_idxs.get(1) {
-                        cargs.push(self.lower_expr(a)?);
+            if name.as_str() == "resume" && !arg_idxs.is_empty() {
+                if self.concrete_plan.is_some() {
+                    let recv_ty = self
+                        .concrete_expr_ty(arg_idxs[0])
+                        .ok_or_else(|| self.gap_here("concrete coroutine receiver has no type"))?;
+                    if let Some(channel) = CoroutinePlan::channel_for_concrete_type(self.ws, &recv_ty) {
+                        let recv = self.lower_expr(arg_idxs[0])?;
+                        let advance = self.emit_cur(Inst::Field { base: recv, field: Ustr::from("__advance") });
+                        let mut cargs: Vec<Idx<Inst>> = vec![recv];
+                        if let Some(&a) = arg_idxs.get(1) {
+                            cargs.push(self.lower_expr(a)?);
+                        }
+                        self.emit_cur(Inst::CallValue { callee: advance, args: cargs });
+                        return Ok(self.resume_frame_read_channel(recv, &channel));
                     }
-                    self.emit_cur(Inst::CallValue { callee: advance, args: cargs });
-                    return Ok(self.resume_frame_read(recv, &shape));
+                } else if self.is_coroutine_recv(arg_idxs[0]) {
+                    if let Some(shape) = self.flat_enum_shape_of_expr(e) {
+                        let recv = self.lower_expr(arg_idxs[0])?;
+                        let advance = self.emit_cur(Inst::Field { base: recv, field: Ustr::from("__advance") });
+                        let mut cargs: Vec<Idx<Inst>> = vec![recv];
+                        if let Some(&a) = arg_idxs.get(1) {
+                            cargs.push(self.lower_expr(a)?);
+                        }
+                        self.emit_cur(Inst::CallValue { callee: advance, args: cargs });
+                        return Ok(self.resume_frame_read(recv, &shape));
+                    }
                 }
             }
         }

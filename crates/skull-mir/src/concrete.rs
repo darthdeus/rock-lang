@@ -10,6 +10,7 @@ use bone_semantic::hir::{BindingInfo, Expr};
 use bone_semantic::prelude::ModuleId;
 use comfy_la_arena::{ArenaMap, Idx};
 use rustc_hash::FxHashMap;
+use ustr::Ustr;
 
 use crate::bound::ResolvedBoundTree;
 use crate::instance::Instance;
@@ -37,6 +38,10 @@ pub struct ConcreteTypeTables {
     /// ownership; this index prevents a second substitution lookup while a
     /// query starts from one of those concrete slots.
     pub ty_types: FxHashMap<bone_semantic::prelude::TyId, MonoTyId>,
+    /// Declared field types for each concrete value-struct literal. The field
+    /// declaration lives outside the body's inference arena, so its concrete
+    /// type cannot be recovered from `ty_types` alone.
+    pub struct_field_types: ArenaMap<Idx<Expr>, FxHashMap<Ustr, MonoTyId>>,
 }
 
 impl ConcreteTypeTables {
@@ -50,6 +55,10 @@ impl ConcreteTypeTables {
 
     pub fn ty_type(&self, ty: bone_semantic::prelude::TyId) -> Option<MonoTyId> {
         self.ty_types.get(&ty).copied()
+    }
+
+    pub fn struct_field_type(&self, literal: Idx<Expr>, field: Ustr) -> Option<MonoTyId> {
+        self.struct_field_types.get(literal)?.get(&field).copied()
     }
 }
 

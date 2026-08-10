@@ -621,13 +621,42 @@ impl Builder<'_> {
     /// Coerce a value-struct field's repr int->float at CONSTRUCTION (before any
     /// scalar-ABI splat, per the plan): only a `Scalar` leaf can be an int; a
     /// `Group` / nested-value repr is already composite.
-    pub(crate) fn coerce_field_repr(&mut self, r: ValueRepr, value_expr: Idx<Expr>, struct_name: Ustr, field: Ustr) -> ValueRepr {
+    pub(crate) fn coerce_field_repr(
+        &mut self,
+        r: ValueRepr,
+        value_expr: Idx<Expr>,
+        struct_name: Ustr,
+        field: Ustr,
+    ) -> Result<ValueRepr, CompilerError> {
+        let expected = if self.concrete_plan.is_some() {
+            let literal = self
+                .cur_expr
+                .ok_or_else(|| self.gap_here("concrete struct field has no literal expression"))?;
+            let id = self
+                .dispatch()
+                .concrete_types
+                .and_then(|tables| tables.struct_field_type(literal, field))
+                .ok_or_else(|| {
+                    self.gap_here(format!(
+                        "concrete struct field plan is missing `{struct_name}.{field}`"
+                    ))
+                })?;
+            Some(self.scx.interner().get(id))
+        } else {
+            None
+        };
         match r {
-            ValueRepr::Scalar(s) => match self.struct_field_ty(struct_name, field) {
-                Some(fty) => ValueRepr::Scalar(self.coerced(s, value_expr, fty)),
-                None => ValueRepr::Scalar(s),
-            },
-            other => other,
+            ValueRepr::Scalar(s) => {
+                let s = match expected {
+                    Some(ref ty) => self.coerced_mono(s, value_expr, ty),
+                    None => match self.struct_field_ty(struct_name, field) {
+                        Some(fty) => self.coerced(s, value_expr, fty),
+                        None => s,
+                    },
+                };
+                Ok(ValueRepr::Scalar(s))
+            }
+            other => Ok(other),
         }
     }
 

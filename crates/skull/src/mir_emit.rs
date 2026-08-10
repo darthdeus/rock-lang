@@ -3080,21 +3080,62 @@ fn emit_full_in_with_mutation(
     #[cfg(test)]
     if let BodyMutation::ClearCoroutineResultPlan { body } = mutation {
         let mut matched = 0;
+        let mut consumer_matched = 0;
+        let main = ws
+            .modules
+            .iter()
+            .filter(|module| module.id != ModuleId::builtin())
+            .find_map(|module| {
+                module
+                    .functions
+                    .iter()
+                    .find(|(_, function)| function.name.as_str() == "main")
+                    .map(|(func, _)| FuncRef { module: module.id, func })
+            })
+            .expect("coroutine-plan mutation needs a main function");
+        let int = graph.interner().intern(skull_mir::monoty::MonoTy::Int);
         for (instance, plan) in &mut concrete.plans {
-            if instance.func != body {
+            if instance.func == body {
+                assert!(
+                    plan.signature.result.is_some(),
+                    "coroutine-plan mutation found a body with no concrete result witness"
+                );
+                plan.signature.result = None;
+                matched += 1;
+            }
+            if instance.func != main || !instance.args.is_empty() {
                 continue;
             }
-            assert!(
-                plan.signature.result.is_some(),
-                "coroutine-plan mutation found a body with no concrete result witness"
-            );
-            plan.signature.result = None;
-            matched += 1;
+            let hir_body = ws
+                .module(instance.func.module)
+                .bodies
+                .get(&bone_semantic::hir::BodyOwner::Function(instance.func.func))
+                .expect("main body");
+            for (_, expr) in hir_body.expr_arena.iter() {
+                let bone_semantic::hir::Expr::Call {
+                    callee: bone_semantic::hir::Callee::Unresolved { name, .. },
+                    args,
+                } = expr
+                else {
+                    continue;
+                };
+                if name.as_str() != "resume" {
+                    continue;
+                }
+                let Some(recv) = args.into_iter().next() else { continue };
+                assert!(
+                    plan.types.expr_types.get(recv).is_some(),
+                    "coroutine-plan mutation found no concrete receiver type"
+                );
+                plan.types.expr_types.insert(recv, int);
+                consumer_matched += 1;
+            }
         }
         assert!(
             matched > 0,
             "coroutine-plan mutation found no concrete instance for {body:?}"
         );
+        assert!(consumer_matched > 0, "coroutine-plan mutation found no resume consumer");
     }
     #[cfg(test)]
     if let BodyMutation::ClearIteratorWitnessInstance { body } = mutation {
@@ -4205,6 +4246,10 @@ fn main() {
         assert!(
             !emit.lua.contains(&format!("function {symbol}__advance(")),
             "the coroutine emitter ignored the concrete result plan mutation"
+        );
+        assert!(
+            !emit.lua.contains(".__advance"),
+            "the resume consumer ignored the concrete coroutine channel mutation"
         );
     }
 

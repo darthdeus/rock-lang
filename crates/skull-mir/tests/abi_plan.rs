@@ -15,6 +15,7 @@
 use std::sync::LazyLock;
 
 use skull_mir::instance::Instance;
+use skull_mir::concrete::{ConcreteBodyPlan, ConcreteOwner, ConcreteSignature, ConcreteTypeTables};
 use skull_mir::lower::{BackendFnAbiPlan, ScalarCtx};
 use skull_mir::mir::FuncRef;
 use skull_mir::monoty::{MonoCtor, MonoTy};
@@ -115,4 +116,38 @@ fn a_non_generic_body_states_its_abi_on_its_base_instance() {
     let plan = BackendFnAbiPlan::for_instance(&ws, &scx, &Instance::base(shift));
     assert_eq!(plan.param_leaf_widths(), Some(vec![2]));
     assert_eq!(plan.result_lanes(), 2);
+}
+
+#[test]
+fn concrete_plan_applies_fixed_name_guards_before_fn_value_narrowing() {
+    let ws = ws_of(
+        r#"
+nobox value V2 { x: float, y: float }
+@nomangle fn sink(v: V2) -> V2 { return v }
+fn apply(f: (V2) -> V2, v: V2) -> V2 { return f(v) }
+fn main() {
+    let v = V2 { x: 1.0, y: 2.0 }
+    print("{apply(sink, v).x}")
+}
+"#,
+    );
+    let scx = ScalarCtx::new(&ws);
+    let sink = func_ref(&ws, "sink");
+    let v2 = scx.interner().intern(nominal("V2"));
+    let plan = ConcreteBodyPlan {
+        owner: ConcreteOwner::Function(Instance::base(sink)),
+        types: ConcreteTypeTables::default(),
+        foreign_domains: Default::default(),
+        signature: ConcreteSignature { params: vec![v2], result: Some(v2) },
+        callees: Default::default(),
+        callee_signatures: Default::default(),
+        bound_tree: Default::default(),
+    };
+    let abi = BackendFnAbiPlan::for_concrete_plan(&ws, &scx, &plan);
+    assert_eq!(
+        abi.param_leaf_widths(),
+        None,
+        "a fixed-name body must retain its boxed ABI even when taken by reference"
+    );
+    assert_eq!(abi.result_lanes(), 1);
 }

@@ -606,7 +606,7 @@ impl Builder<'_> {
                     r
                 }
             };
-            let r = self.coerce_field_repr(r, lf.value, name, lf.name);
+            let r = self.coerce_field_repr(r, lf.value, name, lf.name)?;
             litmap.push((lf.name, r));
         }
         let parts: Vec<ValueRepr> = match self.struct_field_names(name) {

@@ -237,6 +237,8 @@ pub fn run_luajit(prog: &str, tag: &str) -> String {
 /// in another's census.
 static ABLATION_MODE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+static INLINE_MODE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Hold the ablation mode for one test. `Drop` restores it even on a panicking
 /// assert, so a failing test cannot leave the flag on for the next one.
 pub struct AblationGuard(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
@@ -268,19 +270,23 @@ impl Drop for AblationGuard {
     }
 }
 
-pub struct InlineOffGuard(Option<String>);
+pub struct InlineOffGuard(
+    #[allow(dead_code)] std::sync::MutexGuard<'static, ()>,
+    Option<String>,
+);
 
 impl InlineOffGuard {
     pub fn on() -> Self {
+        let guard = INLINE_MODE.lock().unwrap_or_else(|e| e.into_inner());
         let previous = std::env::var("SKULL_INLINE_OFF").ok();
         unsafe { std::env::set_var("SKULL_INLINE_OFF", "1") };
-        InlineOffGuard(previous)
+        InlineOffGuard(guard, previous)
     }
 }
 
 impl Drop for InlineOffGuard {
     fn drop(&mut self) {
-        match &self.0 {
+        match &self.1 {
             Some(value) => unsafe { std::env::set_var("SKULL_INLINE_OFF", value) },
             None => unsafe { std::env::remove_var("SKULL_INLINE_OFF") },
         }

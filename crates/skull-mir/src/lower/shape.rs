@@ -2945,6 +2945,21 @@ impl YieldChannel {
     pub fn leaf_count(&self) -> usize {
         1 + self.tuple_width + self.record_fields.len()
     }
+
+    pub(crate) fn value_shape(&self) -> ValueShape {
+        let mut fields = vec![(Ustr::from("__tag"), FieldShape::Prim)];
+        for i in 0..self.tuple_width {
+            fields.push((Ustr::from(format!("_{i}").as_str()), FieldShape::Prim));
+        }
+        for field in &self.record_fields {
+            fields.push((*field, FieldShape::Prim));
+        }
+        ValueShape {
+            name: self.enum_name,
+            fields,
+            nullable: false,
+        }
+    }
 }
 
 /// The [`YieldChannel`] of a co fn's declared return type `Coroutine<Y, ...>`.

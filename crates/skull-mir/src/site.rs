@@ -180,33 +180,6 @@ pub fn intern_owner(
     OwnerRef((table.len() - 1) as u32)
 }
 
-/// Record that `call` is served by the concrete body `inst`.
-///
-/// The writer for the RETARGETING path. There are deliberately two writers of
-/// this pair, not one: lowering derives the instance INDEPENDENTLY of the
-/// delivery decision (`Builder::callee_instance_for`) and writes both through
-/// `record_call`, while this path receives the resolved instance directly.
-///
-/// What the two must never do is write one record and not the other. The
-/// delivery key and the callee instance are one fact, so a path that writes
-/// half of it leaves a site whose instantiation is knowable and unrecorded.
-/// Measured over the 18 bin projects plus `tests/`: **128,956 specialized
-/// demand sites agreed on both records and 373 had no instance at all**, every
-/// one of them a bounded `next` retargeted here, back when this wrote only the
-/// key.
-///
-/// What makes the two writers an AGREEMENT rather than a convention is the
-/// assertion in [`crate::reach::spec_bound_calls`], which sees every site
-/// either writer produced.
-pub fn record_specialized_call(
-    func: &mut crate::mir::MirFunc,
-    call: Idx<crate::mir::Inst>,
-    inst: crate::instance::Instance,
-) {
-    record_call_owner(func, call, &inst);
-    func.spec_bindings.insert(call, inst);
-}
-
 /// Record the concrete owner of a call, including a non-generic witness whose
 /// delivery map has no specialized entry.
 pub fn record_call_owner(

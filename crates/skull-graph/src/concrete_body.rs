@@ -36,9 +36,10 @@ use comfy_la_arena::{ArenaMap, Idx};
 use skull_mir::concrete::{
     ConcreteAlwaysPlans, ConcreteBodyPlan, ConcreteOwner, ConcreteSignature, ConcreteTypeTables,
 };
-use skull_mir::monoty::{MonoArena, MonoSubst, MonoTyId, MonoTyReason};
+use skull_mir::monoty::{MonoArena, MonoCtor, MonoSubst, MonoTy, MonoTyId, MonoTyReason, TyEnv};
 use skull_mir::mir::FuncRef;
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
+use ustr::Ustr;
 
 use crate::instance_graph::{
     boundary_class_for, function_body, is_spanless, BoundaryClass, FunctionBody, Instance,
@@ -691,11 +692,57 @@ fn concrete_tables(
         return Err(failure.reason.clone());
     }
     let ty_types = concrete_ty_types(ws, g, inf, subst)?;
+    let struct_field_types = concrete_struct_field_types(ws, g, body, &converted.expr_types)?;
     Ok(ConcreteTypeTables {
         expr_types: converted.expr_types,
         binding_types: converted.binding_types,
         ty_types,
+        struct_field_types,
     })
+}
+
+fn concrete_struct_field_types(
+    ws: &Workspace,
+    g: &InstanceGraph,
+    body: &Body,
+    expr_types: &ArenaMap<Idx<Expr>, MonoTyId>,
+) -> Result<ArenaMap<Idx<Expr>, FxHashMap<Ustr, MonoTyId>>, MonoTyReason> {
+    let mut out = ArenaMap::default();
+    for (expr, ty_id) in expr_types.iter() {
+        let Expr::StructLiteral { name, .. } = body.expr_arena[expr] else { continue };
+        let concrete = g.interner().get(*ty_id);
+        let (payload, _) = concrete.peel_nullable();
+        let MonoTy::App { ctor: MonoCtor::Nominal(actual), params } = payload else {
+            return Err(MonoTyReason::NoNode);
+        };
+        if *actual != name {
+            return Err(MonoTyReason::NoNode);
+        }
+        let sid = *ws.struct_by_name.get(&name).ok_or(MonoTyReason::NoNode)?;
+        let def = &ws.modules[sid.module.index()].structs[sid.def];
+        if def.generics.len() != params.len() {
+            return Err(MonoTyReason::NoNode);
+        }
+        let mut subst = MonoSubst::default();
+        for (generic, param) in def.generics.iter().zip(params) {
+            let TypeExpr::Generic(var, _) = TyEnv::Decl.decl_node(ws, *generic)? else {
+                return Err(MonoTyReason::NoNode);
+            };
+            subst.insert(var, param.clone());
+        }
+        let fields = g.interner().with_mut(|arena| {
+            def.fields
+                .iter()
+                .map(|field| {
+                    arena
+                        .convert_decl(ws, field.ty, &subst)
+                        .map(|ty| (field.name, ty))
+                })
+                .collect::<Result<FxHashMap<_, _>, _>>()
+        })?;
+        out.insert(expr, fields);
+    }
+    Ok(out)
 }
 
 fn concrete_ty_types(
@@ -790,6 +837,7 @@ fn concrete_plan(
     inst: &Instance,
     subst: &MonoSubst,
     inf: &BodyInference,
+    hir_body: &Body,
     body: &ConcreteBody,
 ) -> Result<ConcreteBodyPlan, MonoTyReason> {
     let mut callees = BTreeMap::new();
@@ -801,6 +849,7 @@ fn concrete_plan(
         callees.insert(site, instance);
     }
     let ty_types = concrete_ty_types(ws, g, inf, subst)?;
+    let struct_field_types = concrete_struct_field_types(ws, g, hir_body, &body.expr_types)?;
     let default_domains = g
         .contributions
         .get(&Owner::Instance(inst.clone()))
@@ -814,6 +863,7 @@ fn concrete_plan(
             expr_types: body.expr_types.clone(),
             binding_types: body.binding_types.clone(),
             ty_types,
+            struct_field_types,
         },
         foreign_domains,
         signature: concrete_signature(ws, g, inst, subst)?,
@@ -968,7 +1018,7 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
         for u in untyped {
             out.untyped.push((inst.clone(), u));
         }
-        match concrete_plan(ws, g, &inst, &subst, inf, &concrete) {
+        match concrete_plan(ws, g, &inst, &subst, inf, body, &concrete) {
             Ok(plan) => {
                 out.plans.insert(inst.clone(), plan);
             }
