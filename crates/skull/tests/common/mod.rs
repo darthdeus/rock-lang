@@ -186,6 +186,21 @@ pub fn ws_with_stdlib_module(lib: &str, src: &str) -> Workspace {
     ws
 }
 
+pub fn ws_with_dependency_module(lib: &str, src: &str) -> Workspace {
+    let mut modules = STDLIB.clone();
+    modules.push(
+        skull_parser::parse_module_clean(lib, Ustr::from("/tmp/rock-mono-dependency/engine.rock"))
+            .expect("parse lib"),
+    );
+    modules.push(
+        skull_parser::parse_module_clean(src, Ustr::from("/tmp/rock-mono-project/main.rock"))
+            .expect("parse"),
+    );
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    assert_no_bone_errors(&ws);
+    ws
+}
+
 /// The `FuncRef` of the single workspace fn named `name`. Panics unless there is
 /// exactly one -- an ambiguous match would silently assert about another
 /// declaration.

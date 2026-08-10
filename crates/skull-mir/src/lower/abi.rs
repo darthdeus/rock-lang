@@ -32,8 +32,9 @@ use crate::concrete::ConcreteBodyPlan;
 use crate::mir::FuncRef;
 
 /// Whether a callee is a Rock body subject that the concrete registry must
-/// contain. Foreign and erased declarations still have an ABI, but no body
-/// plan exists for them because their backend supplies the body itself.
+/// contain. Foreign, compile-time expansion, and native-required intrinsic
+/// declarations still have an ABI, but no body plan exists for them because
+/// their backend or lowering arm supplies the body itself.
 pub fn requires_concrete_body_plan(
     ws: &Workspace,
     inst: &crate::instance::Instance,
@@ -41,6 +42,8 @@ pub fn requires_concrete_body_plan(
     let f = &ws.module(inst.func.module).functions[inst.func.func];
     !f.is_extern
         && f.inline_body.is_none()
+        && crate::intrinsics::expand_kind(f).is_none()
+        && !(crate::intrinsics::is_intrinsic(f) && crate::intrinsics::is_native_required(f))
         && ws
             .module(inst.func.module)
             .bodies

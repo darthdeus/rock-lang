@@ -2569,11 +2569,9 @@ fn assemble(
             if f.backend == bone_semantic::hir::FnBackend::Js {
                 continue;
             }
-            // Whole-program DCE. Only the DEFINITION is gated: the bookkeeping
-            // below (global-init ordering facts, skip reporting, the hard error on
-            // an unlowerable user fn) runs for every fn exactly as before, so
-            // pruning can change which definitions are emitted and nothing else --
-            // in particular it never hides a diagnostic.
+            // Whole-program DCE gates both chunk construction and definition
+            // emission. Retained bodies still fail hard when their plan or chunk
+            // is missing; pruned dependency bodies have neither by design.
             let emit_def = should_emit_via_view(ws, &cache.lua_view, self_ref);
             if f.is_extern {
                 // An `extern(ffi, "lib")` fn needs a thin wrapper binding it to the
@@ -2687,6 +2685,7 @@ fn assemble(
                         needed_specs.extend(chunk.specs.iter().cloned());
                     }
                 }
+                Some(Err(err)) if !emit_def => {}
                 Some(Err(err)) => {
                     // A GUARANTEE violation is never a known stdlib gap: silently
                     // dropping the body would leave callers calling a nil global.
@@ -2698,6 +2697,7 @@ fn assemble(
                         rejections.push(err.clone());
                     }
                 }
+                None if !emit_def => {}
                 None => {
                     if is_stdlib_module_file(module.file.as_str()) {
                         skipped.push((mangle_fn(ws, f), "not emitted (no cached chunk)".to_string()));
@@ -2878,9 +2878,9 @@ fn assemble(
     Ok((MirEmit { lua: out, skipped, phases }, emitted_bodies))
 }
 
-/// Full emit: populate the chunk cache for every ordinary/coroutine body, then
-/// assemble. Byte-identical to the pre-cache emit. Returns the cache so a later
-/// [`emit_incremental`] can reuse the unchanged chunks.
+/// Full emit: populate the chunk cache for every retained ordinary/coroutine
+/// body, then assemble. Byte-identical to the pre-cache emit. Returns the cache
+/// so a later [`emit_incremental`] can reuse the unchanged chunks.
 ///
 /// The per-body chunk emit runs in PARALLEL ([`par_map_with`], one
 /// [`InlineCache`](skull_transform::InlineCache) per rayon worker) by default;
@@ -3121,6 +3121,15 @@ fn emit_full_in_with_mutation(
             "cannot build concrete always-emitted lowering plan for {owner:?}: {reason:?}"
         )));
     }
+    // Pruned dependency bodies have no concrete plan and must not enter the fanout.
+    let lua_view = crate::artifact::realize(
+        ws,
+        &graph,
+        &crate::artifact::ArtifactRequest::new(
+            crate::target_projection::LUAJIT_DESKTOP,
+            &emission_roots,
+        ),
+    );
     // The overload set lives in `cg` (computed once there); borrow it rather than
     // rescanning the workspace.
     let scx =
@@ -3148,10 +3157,14 @@ fn emit_full_in_with_mutation(
         .iter()
         .filter(|m| m.id != ModuleId::builtin())
         .flat_map(|m| {
+            let view = &lua_view;
             m.functions
                 .iter()
-                .filter(|(_, f)| is_cached_body(f))
-                .map(move |(fid, f)| (FuncRef { module: m.id, func: fid }, f))
+                .filter_map(move |(fid, f)| {
+                    let self_ref = FuncRef { module: m.id, func: fid };
+                    (is_cached_body(f) && should_emit_via_view(ws, view, self_ref))
+                        .then_some((self_ref, f))
+                })
         })
         .collect();
     let chunks = par_map_with(
@@ -3182,16 +3195,6 @@ fn emit_full_in_with_mutation(
             static_key_baseline.insert(sc.cell, static_cell_key(sc));
         }
     }
-    // Realized from the SAME graph and the SAME roots emission built from, so
-    // this is production's own fact rather than a second discovery beside it.
-    let lua_view = crate::artifact::realize(
-        ws,
-        &graph,
-        &crate::artifact::ArtifactRequest::new(
-            crate::target_projection::LUAJIT_DESKTOP,
-            &emission_roots,
-        ),
-    );
     let cache = SkullEmitCache {
         chunks,
         concrete,

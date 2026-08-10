@@ -13,7 +13,7 @@
 //! be a nil call at load.
 
 mod common;
-use common::{fn_ref, ws_with_stdlib_module};
+use common::{fn_ref, ws_with_dependency_module, ws_with_stdlib_module};
 use skull::mir_emit::emit_full;
 use skull_mir::instance::Instance;
 use ustr::Ustr;
@@ -101,6 +101,20 @@ fn an_unrelated_library_body_stays_pruned() {
         !definition_symbols(&emit.lua).iter().any(|s| s.starts_with("unrelated_library_body")),
         "an uncalled library body must not be defined"
     );
+}
+
+#[test]
+fn an_unretained_dependency_body_needs_no_concrete_plan() {
+    let ws = ws_with_dependency_module(
+        "fn unused_dependency_body() -> int { return 7 }",
+        "fn main() { print(\"hi\") }",
+    );
+    let mid = *ws
+        .module_ids
+        .get(&Ustr::from("/tmp/rock-mono-project/main.rock"))
+        .expect("project module");
+    skull::mir_emit::emit_full_in(&ws, mid, Some("/tmp/rock-mono-project"))
+        .expect("pruned dependency bodies must not require lowering plans");
 }
 
 /// A registered `rock_shader` program's dependencies -- its stage entries and
