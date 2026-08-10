@@ -2885,9 +2885,8 @@ fn assemble_program_core(
                 module: module.id,
                 index: did.into_raw().into_u32(),
             };
-            let lowered = st
-                .always
-                .get(&owner)
+            let concrete_plan = st.always.get(&owner);
+            let lowered = concrete_plan
                 .ok_or_else(|| err(format!("JS: no concrete plan for decorator `{}`", d.name)))
                 .and_then(|plan| {
                     skull_mir::lower::lower_decorator_with_plans(
@@ -2930,12 +2929,14 @@ fn assemble_program_core(
             // body's `spec_bindings` as demands -- so a specialization a deco
             // body was the only caller of was never queued, and the call site
             // spelled a name nothing emitted.
-            let (subst, incoming) = Default::default();
-            let ctx = skull_mir::bound::body_ctx(
+            let incoming = concrete_plan
+                .expect("a lowered decorator has a concrete plan")
+                .bound_tree
+                .clone();
+            let ctx = skull_mir::bound::concrete_body_ctx(
                 ws,
                 module.id,
                 bone_semantic::hir::BodyOwner::Decorator(did),
-                &subst,
                 &incoming,
                 scx.interner(),
             );
@@ -3810,12 +3811,11 @@ impl JsDelivery<'_> {
         for nf in &mf.nested_fns {
             collect(&mut findings, nobox_errs(self.ws, nf));
         }
-        let (subst, incoming) = Default::default();
-        let ctx = skull_mir::bound::body_ctx(
+        let incoming = plan.bound_tree.clone();
+        let ctx = skull_mir::bound::concrete_body_ctx(
             self.ws,
             fr.module,
             bone_semantic::hir::BodyOwner::Function(fr.func),
-            &subst,
             &incoming,
             self.scx.interner(),
         );
@@ -3890,7 +3890,6 @@ impl JsDelivery<'_> {
             return Ok(());
         };
         let lowered_inst = Instance { func: fr, args: inst.args.clone() };
-        let subst = lowered_inst.subst(self.ws, self.scx.interner());
         let plan = match self.st.concrete.get(&lowered_inst) {
             Some(plan) => plan,
             None => {
@@ -3968,11 +3967,10 @@ impl JsDelivery<'_> {
         }
         mf.name = ustr::Ustr::from(name.as_str());
         self.st.names.insert(inst.clone(), name.clone());
-        let ctx = skull_mir::bound::body_ctx(
+        let ctx = skull_mir::bound::concrete_body_ctx(
             self.ws,
             fr.module,
             bone_semantic::hir::BodyOwner::Function(fr.func),
-            &subst,
             &tree,
             self.scx.interner(),
         );
@@ -3993,7 +3991,8 @@ impl JsDelivery<'_> {
             module: site.module,
             index: site.gid.into_raw().into_u32(),
         };
-        let lowered = match self.st.always.get(&owner) {
+        let concrete_plan = self.st.always.get(&owner);
+        let lowered = match concrete_plan {
             Some(plan) => skull_mir::lower::lower_global_with_plans(
                 self.ws,
                 self.scx,
@@ -4030,12 +4029,14 @@ impl JsDelivery<'_> {
         for nf in &mf.nested_fns {
             collect(&mut findings, nobox_errs(self.ws, nf));
         }
-        let (subst, incoming) = Default::default();
-        let ctx = skull_mir::bound::body_ctx(
+        let incoming = concrete_plan
+            .expect("a lowered global has a concrete plan")
+            .bound_tree
+            .clone();
+        let ctx = skull_mir::bound::concrete_body_ctx(
             self.ws,
             site.module,
             bone_semantic::hir::BodyOwner::Global(site.gid),
-            &subst,
             &incoming,
             self.scx.interner(),
         );

@@ -82,9 +82,15 @@ impl SpecDemand {
 /// own inference arena, its own instance substitution, and the tree IT was
 /// instantiated with (empty for a body that is not bounded).
 #[derive(Clone, Copy)]
+pub(crate) enum BoundMode<'a> {
+    Legacy { subst: &'a SpecSubst },
+    Concrete,
+}
+
+#[derive(Clone, Copy)]
 pub struct BoundCtx<'a> {
     pub inf: Option<&'a BodyInference>,
-    pub subst: &'a SpecSubst,
+    pub(crate) mode: BoundMode<'a>,
     pub incoming: &'a ResolvedBoundTree,
     /// The build's one arena, because a resolved leaf NAMES a concrete body and
     /// naming one is interning one.
@@ -150,9 +156,37 @@ pub fn body_ctx<'a>(
 ) -> BoundCtx<'a> {
     BoundCtx {
         inf: ws.inference(mid).and_then(|r| r.per_fn.get(&owner)),
-        subst,
+        mode: BoundMode::Legacy { subst },
         incoming,
         interner,
+    }
+}
+
+pub fn concrete_body_ctx<'a>(
+    ws: &'a Workspace,
+    mid: bone_semantic::prelude::ModuleId,
+    owner: bone_semantic::hir::BodyOwner,
+    incoming: &'a ResolvedBoundTree,
+    interner: &'a MonoInterner,
+) -> BoundCtx<'a> {
+    BoundCtx {
+        inf: ws.inference(mid).and_then(|r| r.per_fn.get(&owner)),
+        mode: BoundMode::Concrete,
+        incoming,
+        interner,
+    }
+}
+
+impl BoundCtx<'_> {
+    pub(crate) fn is_concrete(&self) -> bool {
+        matches!(self.mode, BoundMode::Concrete)
+    }
+
+    pub(crate) fn legacy_subst(&self) -> Option<&SpecSubst> {
+        match self.mode {
+            BoundMode::Legacy { subst } => Some(subst),
+            BoundMode::Concrete => None,
+        }
     }
 }
 

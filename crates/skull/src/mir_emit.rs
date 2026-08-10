@@ -541,20 +541,18 @@ fn emit_decorator_unit(
         module: mid,
         index: did.into_raw().into_u32(),
     };
-    let lowered = concrete
-        .plan_for_owner(&owner)
+    let concrete_plan = concrete.plan_for_owner(&owner);
+    let lowered = concrete_plan
         .ok_or_else(|| {
             CompilerError::new_with_label(d.span, "no concrete plan for decorator".to_string())
         })
-        .and_then(|plan| {
-            skull_mir::lower::lower_decorator_with_plans(
-                ws,
-                scx,
-                plan,
-                &concrete.plans,
-                ustr::Ustr::from(deco_name.as_str()),
-            )
-        });
+        .and_then(|plan| skull_mir::lower::lower_decorator_with_plans(
+            ws,
+            scx,
+            plan,
+            &concrete.plans,
+            ustr::Ustr::from(deco_name.as_str()),
+        ));
     out.times.lower = tl.elapsed();
     match lowered {
         Ok(mut mf) => {
@@ -567,9 +565,15 @@ fn emit_decorator_unit(
                 cg.mint_synthetic(nf.name.to_string());
             }
             out.times.cleanup = tc.elapsed();
-            let (subst, incoming) = Default::default();
             let owner = bone_semantic::hir::BodyOwner::Decorator(did);
-            let ctx = skull_mir::bound::body_ctx(ws, mid, owner, &subst, &incoming, scx.interner());
+            let plan = concrete_plan.expect("a lowered decorator has a concrete plan");
+            let ctx = skull_mir::bound::concrete_body_ctx(
+                ws,
+                mid,
+                owner,
+                &plan.bound_tree,
+                scx.interner(),
+            );
             if let Err(e) =
                 check_unit_spec_bindings(ws, &ctx, mid, &deco_name, &mf, d.span, &mut out.specs)
             {
@@ -623,7 +627,8 @@ fn emit_global_unit(
         module: mid,
         index: gid.into_raw().into_u32(),
     };
-    let lowered = match concrete.plan_for_owner(&owner) {
+    let concrete_plan = concrete.plan_for_owner(&owner);
+    let lowered = match concrete_plan {
         Some(plan) => skull_mir::lower::lower_global_with_plans(
             ws,
             scx,
@@ -659,9 +664,15 @@ fn emit_global_unit(
                 cg.mint_synthetic(nf.name.to_string());
             }
             out.times.cleanup = tc.elapsed();
-            let (subst, incoming) = Default::default();
             let owner = bone_semantic::hir::BodyOwner::Global(gid);
-            let ctx = skull_mir::bound::body_ctx(ws, mid, owner, &subst, &incoming, scx.interner());
+            let plan = concrete_plan.expect("a lowered global has a concrete plan");
+            let ctx = skull_mir::bound::concrete_body_ctx(
+                ws,
+                mid,
+                owner,
+                &plan.bound_tree,
+                scx.interner(),
+            );
             if let Err(e) =
                 check_unit_spec_bindings(ws, &ctx, mid, g.name.as_str(), &mf, g.name_span, &mut out.specs)
             {
@@ -946,16 +957,9 @@ fn view_driven_specialized_chunks(
             built.insert(inst, c.clone());
             continue;
         }
-        let Some(subst) = cache.graph.substitution(&inst) else {
-            errs.push((
-                inst.symbol(ws, scx.interner()),
-                CompilerError::new_no_location("graph has no substitution for a retained specialization".to_string()),
-            ));
-            continue;
-        };
         let name = inst.symbol(ws, scx.interner());
         let mut specs = Vec::new();
-        match emit_spec_chunk(ws, cg, scx, &cache.concrete, &inst, subst, &name, &mut inline_cache, &mut specs) {
+        match emit_spec_chunk(ws, cg, scx, &cache.concrete, &inst, &name, &mut inline_cache, &mut specs) {
             Ok(chunk) => {
                 pending.extend(chunk.specs.iter().map(|d| d.inst.clone()));
                 built.insert(inst, chunk);
@@ -1132,7 +1136,6 @@ fn rebuild_chunk(
     ws: &Workspace,
     cg: &CodegenCtx,
     scx: &skull_mir::lower::ScalarCtx,
-    graph: &crate::instance_graph::InstanceGraph,
     concrete: &crate::concrete_body::ConcreteBodies,
     body: &Instance,
     f: &bone_semantic::hir::Function,
@@ -1147,13 +1150,7 @@ fn rebuild_chunk(
             // against its siblings.
             let name = body.symbol(ws, scx.interner());
             let mut specs = Vec::new();
-            let subst = graph.substitution(body).ok_or_else(|| {
-                CompilerError::new_with_label(
-                    f.name_span,
-                    format!("graph has no substitution for specialized `{name}`"),
-                )
-            })?;
-            emit_spec_chunk(ws, cg, scx, concrete, body, subst, &name, inline_cache, &mut specs)
+            emit_spec_chunk(ws, cg, scx, concrete, body, &name, inline_cache, &mut specs)
         }
     }
 }
@@ -1426,10 +1423,14 @@ fn emit_body_chunk_with_mutation(
         _ => {}
     }
     if f.is_coroutine {
-        let (subst, incoming) = Default::default();
         let owner = BodyOwner::Function(self_ref.func);
-        let ctx =
-            skull_mir::bound::body_ctx(ws, self_ref.module, owner, &subst, &incoming, scx.interner());
+        let ctx = skull_mir::bound::concrete_body_ctx(
+            ws,
+            self_ref.module,
+            owner,
+            &plan.bound_tree,
+            scx.interner(),
+        );
         return emit_coroutine_chunk(ws, cg, scx, &ctx, plan, f, &mut mf, times);
     }
     // Inline eligible direct calls before cleanup so a hot loop traces with no
@@ -1485,10 +1486,13 @@ fn emit_body_chunk_with_mutation(
     times.cleanup = tc.elapsed();
     skull_transform::validate_no_residual_bound_calls(ws, f, &mf)?;
     let mut specs = Vec::new();
-    let (subst, incoming) = Default::default();
     let owner = BodyOwner::Function(self_ref.func);
-    let ctx = skull_mir::bound::body_ctx(
-        ws, self_ref.module, owner, &subst, &incoming, scx.interner(),
+    let ctx = skull_mir::bound::concrete_body_ctx(
+        ws,
+        self_ref.module,
+        owner,
+        &plan.bound_tree,
+        scx.interner(),
     );
     validate_emitted_body(ws, &ctx, &mf, &mut specs).map_err(|r| r.into_error(f.name_span, ""))?;
     collect_callee_frefs(&mf, &mut deps);
@@ -1662,7 +1666,6 @@ fn emit_spec_chunk(
     scx: &skull_mir::lower::ScalarCtx,
     concrete: &crate::concrete_body::ConcreteBodies,
     body: &Instance,
-    subst: &skull_mir::monoty::MonoSubst,
     name: &str,
     inline_cache: &mut skull_transform::InlineCache,
     specs: &mut Vec<skull_mir::bound::SpecDemand>,
@@ -1695,7 +1698,13 @@ fn emit_spec_chunk(
     )
         .map_err(|e| CompilerError::new_with_label(f.name_span, e.message))?;
     let owner = BodyOwner::Function(fref.func);
-    let ctx = skull_mir::bound::body_ctx(ws, fref.module, owner, &subst, tree, scx.interner());
+    let ctx = skull_mir::bound::concrete_body_ctx(
+        ws,
+        fref.module,
+        owner,
+        tree,
+        scx.interner(),
+    );
     if f.is_coroutine {
         return emit_coroutine_chunk(ws, cg, scx, &ctx, plan, f, &mut mf, PhaseTimes::default());
     }
@@ -3439,7 +3448,6 @@ fn build_graph_added_chunks(
                 ws,
                 &cache.cg,
                 &cache.scx,
-                &cache.graph,
                 &cache.concrete,
                 &body,
                 f,
@@ -3452,13 +3460,6 @@ fn build_graph_added_chunks(
                 }
             }
         } else {
-            let Some(subst) = cache.graph.substitution(&body) else {
-                errs.push(CompilerError::new_with_label(
-                    f.name_span,
-                    format!("graph has no substitution for added `{}`", body.symbol(ws, cache.scx.interner())),
-                ));
-                continue;
-            };
             let name = body.symbol(ws, cache.scx.interner());
             let mut specs = Vec::new();
             match emit_spec_chunk(
@@ -3467,7 +3468,6 @@ fn build_graph_added_chunks(
                 &cache.scx,
                 &cache.concrete,
                 &body,
-                subst,
                 &name,
                 &mut cache.inline_cache,
                 &mut specs,
@@ -3650,7 +3650,7 @@ fn update_chunk_cache(
         // An edit can flip a body between cached (ordinary/coroutine) and
         // regenerated (extern / inline(lua)); only the former has a chunk.
         if is_cached_emitted_body(f, body) {
-            let chunk = rebuild_chunk(ws, cg, scx, &cache.graph, &cache.concrete, body, f, &mut cache.inline_cache);
+            let chunk = rebuild_chunk(ws, cg, scx, &cache.concrete, body, f, &mut cache.inline_cache);
             if let Ok(c) = &chunk {
                 let new_deps: Vec<FuncRef> = c.deps.iter().copied().collect();
                 for d in new_deps {
@@ -4214,7 +4214,7 @@ fn main() {
             Err(err) => err,
         };
         assert!(
-            err.message.contains("no resolved bound tree"),
+            err.message.contains("concrete callee bound plan is empty for its site"),
             "the poisoned plan must fail at the plan consumer, got: {err:?}"
         );
     }
@@ -4269,8 +4269,8 @@ fn main() {
             Err(err) => err,
         };
         assert!(
-            err.message.contains("concrete ABI plan is missing for callee"),
-            "the missing iterator instance must fail at its production consumer, got: {err:?}"
+            err.message.contains("concrete specialized call has no resolved bound plan"),
+            "the missing iterator bound plan must fail at its production consumer, got: {err:?}"
         );
     }
 }

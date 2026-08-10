@@ -291,32 +291,9 @@ pub fn spec_bound_calls(
                 Inst::Call { func, .. } | Inst::CallMulti { func, .. } => *func,
                 _ => continue,
             };
-            // An already-RESOLVED tree wins: this call was retargeted by a
-            // standalone substitution, whose leaf carried the callee's own
-            // resolution. Re-deriving it from `bound_trees` is not possible --
-            // there is no raw entry, and this body's arena cannot state a tree
-            // that came from another instantiation.
-            let tree = match mf.resolved_bound_trees.get(&iid) {
-                Some(t) => t.clone(),
-                None => {
-                    let raw = mf.bound_trees.get(&iid).unwrap_or(&empty);
-                    crate::bound::resolve_bound_tree(
-                        ws,
-                        ctx.interner,
-                        ctx.inf,
-                        ctx.subst,
-                        raw,
-                        ctx.incoming,
-                    )?
-                }
-            };
-            // The premise the Instance re-key rests on, checked where every
-            // specialized site passes regardless of which path wrote it. Two
-            // writers derive the instance differently -- lowering beside the
-            // delivery decision, `substitute_bound_call` from the key -- so
-            // agreement is a measured invariant, not a convention. This is
-            // only the specialized population; ordinary and synthesized calls
-            // intentionally remain valid without a callee instance.
+            // Check the delivery identity before reading the bound plan. A
+            // broken owner is the primary invariant at this site; otherwise a
+            // missing secondary bound fact would mask the owner disagreement.
             let owner_agrees = inst.func == fref
                 && mf.callee_instances.get(&iid).is_some_and(|oi| {
                     oi == inst
@@ -329,6 +306,33 @@ pub fn spec_bound_calls(
                     mf.name,
                 )));
             }
+            // An already-RESOLVED tree wins: this call was retargeted by a
+            // standalone substitution, whose leaf carried the callee's own
+            // resolution. Re-deriving it from `bound_trees` is not possible --
+            // there is no raw entry, and this body's arena cannot state a tree
+            // that came from another instantiation.
+            let tree = match mf.resolved_bound_trees.get(&iid) {
+                Some(t) => t.clone(),
+                None if ctx.is_concrete() => {
+                    return Err(CompilerError::new_no_location(
+                        "concrete specialized call has no resolved bound plan".to_string(),
+                    ));
+                }
+                None => {
+                    let raw = mf.bound_trees.get(&iid).unwrap_or(&empty);
+                    let subst = ctx
+                        .legacy_subst()
+                        .expect("legacy bound context has a substitution");
+                    crate::bound::resolve_bound_tree(
+                        ws,
+                        ctx.interner,
+                        ctx.inf,
+                        subst,
+                        raw,
+                        ctx.incoming,
+                    )?
+                }
+            };
             out.push(crate::bound::SpecDemand { inst: inst.clone(), tree });
         }
     }
