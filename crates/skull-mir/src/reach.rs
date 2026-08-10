@@ -314,26 +314,24 @@ pub fn spec_bound_calls(
             // specialized site passes regardless of which path wrote it. Two
             // writers derive the instance differently -- lowering beside the
             // delivery decision, `substitute_bound_call` from the key -- so
-            // "they agree" is a measurement, not a convention, and a site with
-            // no instance at all is the shape that actually occurred.
-            debug_assert_eq!(
-                inst.func,
-                fref,
-                "the delivery record for a call in `{}` names a different callee than the \
-                 instruction does",
-                mf.name,
-            );
-            debug_assert!(
-                mf.callee_instances.get(&iid).is_some_and(|oi| {
+            // agreement is a measured invariant, not a convention. This is
+            // only the specialized population; ordinary and synthesized calls
+            // intentionally remain valid without a callee instance.
+            let owner_agrees = inst.func == fref
+                && mf.callee_instances.get(&iid).is_some_and(|oi| {
                     oi.func == fref
                         && crate::lower::spec_key_from_subst(ws, fref, &oi.subst).is_some_and(
                             |k| crate::instance::Instance::intern(ctx.interner, fref, k) == *inst,
                         )
-                }),
-                "specialized call to `{}` in `{}` records no agreeing instance",
-                ws.module(fref.module).functions[fref.func].name,
-                mf.name,
-            );
+                });
+            if !owner_agrees {
+                return Err(CompilerError::new_no_location(format!(
+                    "specialized call to `{}` in `{}` has no concrete owner agreeing with its \
+                     delivery instance",
+                    ws.module(fref.module).functions[fref.func].name,
+                    mf.name,
+                )));
+            }
             out.push(crate::bound::SpecDemand { inst: inst.clone(), tree });
         }
     }

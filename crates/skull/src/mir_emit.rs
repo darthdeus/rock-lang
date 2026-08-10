@@ -991,6 +991,15 @@ struct Chunk {
     specs: Vec<skull_mir::bound::SpecDemand>,
 }
 
+#[derive(Clone, Copy)]
+enum BodyMutation {
+    None,
+    #[cfg(test)]
+    RemoveCalleeOwner { caller: FuncRef, callee: FuncRef },
+    #[cfg(test)]
+    ClearCalleeOwnerKey { caller: FuncRef, callee: FuncRef },
+}
+
 /// The shared body of `fref` -- the id under which a declaration's own
 /// definition is cached. Written out at every chunk lookup so the day a
 /// SPECIALIZED body answers one of them is a visible change rather than a
@@ -1307,10 +1316,63 @@ fn emit_body_chunk(
     f: &bone_semantic::hir::Function,
     inline_cache: &mut skull_transform::InlineCache,
 ) -> Result<Chunk, CompilerError> {
+    emit_body_chunk_with_mutation(ws, cg, scx, self_ref, f, inline_cache, BodyMutation::None)
+}
+
+fn emit_body_chunk_with_mutation(
+    ws: &Workspace,
+    cg: &CodegenCtx,
+    scx: &skull_mir::lower::ScalarCtx,
+    self_ref: FuncRef,
+    f: &bone_semantic::hir::Function,
+    inline_cache: &mut skull_transform::InlineCache,
+    mutation: BodyMutation,
+) -> Result<Chunk, CompilerError> {
     let mut times = PhaseTimes::default();
     let tl = Instant::now();
     let mut mf = skull_mir::lower::lower_function(ws, scx, self_ref.module, self_ref.func)?;
     times.lower = tl.elapsed();
+    match mutation {
+        BodyMutation::None => {}
+        #[cfg(test)]
+        BodyMutation::RemoveCalleeOwner { caller, callee }
+        | BodyMutation::ClearCalleeOwnerKey { caller, callee }
+            if caller == self_ref =>
+        {
+            let (call, owner) = mf
+                .callee_instances
+                .iter()
+                .find(|(_, owner)| owner.func == callee)
+                .map(|(call, owner)| (*call, owner.clone()))
+                .expect("the mutation fixture must lower a concrete generic call");
+            assert!(
+                !owner.subst.is_empty(),
+                "the mutation fixture must have a complete concrete owner"
+            );
+            assert!(
+                mf.spec_bindings.contains_key(&call),
+                "the mutation must retain the specialized delivery record"
+            );
+            assert!(
+                mf.call_abi_plans.contains_key(&call),
+                "the mutation must retain the lowered ABI record"
+            );
+            match mutation {
+                BodyMutation::RemoveCalleeOwner { .. } => {
+                    mf.callee_instances.remove(&call);
+                }
+                BodyMutation::ClearCalleeOwnerKey { .. } => {
+                    mf.callee_instances
+                        .get_mut(&call)
+                        .expect("owner disappeared before key mutation")
+                        .subst = Default::default();
+                }
+                BodyMutation::None => unreachable!(),
+            }
+        }
+        #[cfg(test)]
+        _ => {}
+    }
     if f.is_coroutine {
         let (subst, incoming) = Default::default();
         let owner = BodyOwner::Function(self_ref.func);
@@ -2790,6 +2852,24 @@ pub fn emit_full_in(
     user_mid: ModuleId,
     project_root: Option<&str>,
 ) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
+    emit_full_in_with_mutation(ws, user_mid, project_root, BodyMutation::None)
+}
+
+#[cfg(test)]
+fn emit_full_in_with_test_mutation(
+    ws: &Workspace,
+    user_mid: ModuleId,
+    mutation: BodyMutation,
+) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
+    emit_full_in_with_mutation(ws, user_mid, None, mutation)
+}
+
+fn emit_full_in_with_mutation(
+    ws: &Workspace,
+    user_mid: ModuleId,
+    project_root: Option<&str>,
+    mutation: BodyMutation,
+) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
     let project_root = canonical_project_root(ws, project_root)?;
     let project_root = project_root.as_deref();
     validate_on_reload_nomangle(ws)?;
@@ -2888,7 +2968,10 @@ pub fn emit_full_in(
         fn_items,
         skull_transform::InlineCache::default,
         |inline_cache, (self_ref, f)| {
-            (shared(self_ref), emit_body_chunk(ws, &cg, &scx, self_ref, f, inline_cache))
+            (
+                shared(self_ref),
+                emit_body_chunk_with_mutation(ws, &cg, &scx, self_ref, f, inline_cache, mutation),
+            )
         },
     );
     let chunks: FxHashMap<Instance, Result<Chunk, CompilerError>> = chunks.into_iter().collect();
@@ -3675,4 +3758,119 @@ pub fn emit_overlay(
         ("assemble_overlay (+build_deco_map)", t_asm),
     ];
     Ok(emit)
+}
+
+#[cfg(test)]
+mod missing_owner_tests {
+    use super::*;
+    use bone_semantic::inference::Workspace;
+    use skull_mir::mir::FuncRef;
+    use skull_mir::monoty::MonoTy;
+    use skull_parser::CompilerError;
+    use ustr::Ustr;
+
+    const SRC: &str = r#"
+@inline
+fn wrap<T>(x: T) -> T { return x }
+
+fn top() -> int { return wrap(7) }
+fn main() { let result = top() }
+"#;
+
+    fn workspace() -> Workspace {
+        let mut modules = vec![
+            skull_parser::parse_module_clean(SRC, Ustr::from("<missing-owner-test>"))
+                .expect("parse"),
+        ];
+        bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
+    }
+
+    fn ref_for(ws: &Workspace, name: &str) -> FuncRef {
+        let module = ws
+            .modules
+            .iter()
+            .find(|m| m.id != ModuleId::builtin())
+            .expect("test module");
+        let (func, _) = module
+            .functions
+            .iter()
+            .find(|(_, f)| f.name.as_str() == name)
+            .expect("function");
+        FuncRef { module: module.id, func }
+    }
+
+    fn concrete_symbol(ws: &Workspace, cache: &SkullEmitCache, fref: FuncRef) -> String {
+        Instance::intern(cache.graph.interner(), fref, vec![MonoTy::Int])
+            .symbol(ws, cache.scx.interner())
+    }
+
+    fn assert_residual_definition_and_call(
+        ws: &Workspace,
+        cache: &SkullEmitCache,
+        emit: &MirEmit,
+        callee: FuncRef,
+    ) {
+        let symbol = concrete_symbol(ws, cache, callee);
+        assert!(
+            emit.lua.contains(&format!("function {symbol}(")),
+            "the concrete residual definition is missing: {symbol}\n{}",
+            emit.lua
+        );
+        assert!(
+            emit.lua
+                .lines()
+                .any(|line| !line.starts_with("function ") && line.contains(&format!("{symbol}("))),
+            "the residual call does not name the concrete definition: {symbol}\n{}",
+            emit.lua
+        );
+    }
+
+    fn emit_with_mutation(
+        mutation: BodyMutation,
+    ) -> Result<(Workspace, SkullEmitCache, MirEmit), CompilerError> {
+        let ws = workspace();
+        let mid = ws
+            .modules
+            .iter()
+            .find(|m| m.id != ModuleId::builtin())
+            .expect("test module")
+            .id;
+        let (emit, cache) = emit_full_in_with_test_mutation(&ws, mid, mutation)?;
+        Ok((ws, cache, emit))
+    }
+
+    fn assert_rejection_or_residual(
+        result: Result<(Workspace, SkullEmitCache, MirEmit), CompilerError>,
+        callee: FuncRef,
+    ) {
+        match result {
+            Err(err) => assert!(
+                err.message.contains("no concrete owner agreeing with its delivery instance"),
+                "owner loss must be an explicit rejection, not an unrelated emission gap: {err:?}"
+            ),
+            Ok((ws, cache, emit)) => assert_residual_definition_and_call(&ws, &cache, &emit, callee),
+        }
+    }
+
+    #[test]
+    fn missing_generic_callee_owner_rejects_or_emits_concrete_residual() {
+        let ws = workspace();
+        let caller = ref_for(&ws, "top");
+        let callee = ref_for(&ws, "wrap");
+        assert_rejection_or_residual(
+            emit_with_mutation(BodyMutation::RemoveCalleeOwner { caller, callee }),
+            callee,
+        );
+    }
+
+    #[test]
+    fn incomplete_generic_callee_owner_key_rejects_or_emits_concrete_residual() {
+        let ws = workspace();
+        let caller = ref_for(&ws, "top");
+        let callee = ref_for(&ws, "wrap");
+        assert_rejection_or_residual(
+            emit_with_mutation(BodyMutation::ClearCalleeOwnerKey { caller, callee }),
+            callee,
+        );
+    }
 }
