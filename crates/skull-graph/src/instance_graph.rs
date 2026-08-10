@@ -402,6 +402,13 @@ pub struct Contribution {
     /// roots rather than obligations -- see [`Self::always_emitted_targets`].
     pub edges: Vec<Edge>,
     pub call_sites: BTreeMap<Site, SiteRecord>,
+    /// Resolved sites from a global/decorator body. These have no instance key
+    /// for the graph's cross-owner index, but lowering still needs their owner-local
+    /// concrete callee identity.
+    pub always_call_sites: BTreeMap<Site, SiteRecord>,
+    /// Struct-default arenas this body injects, including defaults with no
+    /// callee site of their own.
+    pub struct_default_domains: BTreeSet<SiteDomain>,
     pub duplicate_sites: Vec<Site>,
     pub unresolved: Vec<Unresolved>,
     pub rejections: Vec<Rejection>,
@@ -465,6 +472,13 @@ impl Walk<'_> {
         self.out.sites_attempted += 1;
         self.saw(span);
         if from.is_none() {
+            let prev = self
+                .out
+                .always_call_sites
+                .insert(site.clone(), SiteRecord { outcome, span });
+            if prev.is_some() {
+                self.out.duplicate_sites.push(site);
+            }
             return;
         }
         let prev = self.out.call_sites.insert(site.clone(), SiteRecord { outcome, span });
@@ -3119,6 +3133,8 @@ fn walk_struct_default_edges(
         // The initializers resolve under the STRUCT's slot bindings, not the
         // enclosing instance's -- the two are keyed in different bodies.
         let inner = skull_mir::struct_defaults::slot_subst(Some(inf), &args);
+        let domain = SiteDomain::StructDefaults(module, def, args);
+        w.out.struct_default_domains.insert(domain.clone());
         walk_body_edges(
             w,
             ws,
@@ -3126,7 +3142,7 @@ fn walk_struct_default_edges(
             Some(defaults),
             from,
             &inner,
-            &SiteDomain::StructDefaults(module, def, args),
+            &domain,
             Some(&reached),
         );
     }
@@ -3923,21 +3939,13 @@ fn classify_boundaries(g: &mut InstanceGraph, ws: &Workspace, decls: &[DeclKey])
 
 /// The helper symbols each coroutine instance owns.
 ///
-/// The suffix list comes from the instance's own [`CoroutinePlan`], which is the
-/// emitters' input too -- `__step` and `__resume` are unconditional and
-/// `__advance` exists only on the frame-slot channel, and that condition has one
-/// home rather than a restatement here. The channel is read from the DECLARED
-/// return type, per the standing rule.
-///
-/// The BASE is the declaration's, deliberately: the graph reaches logical
-/// instances, and whether emission gives an instance its own specialized base is
-/// the lowerer's policy, which the graph does not model before plan step E1. So
-/// the symbol recorded here is what a DECLINED instantiation gets, and the
-/// collisions below are exactly the declined population.
+/// The suffix list comes from the instance's own [`CoroutinePlan`], which is
+/// the emitters' input too. `__advance` exists only on the concrete frame-slot
+/// channel, and the base is the instance symbol used by its emitted body.
 ///
 /// Defers (`__defer<k>`) and lifecycle hooks (`__on_*`) are NOT counted: they
 /// come from `CoroLowered`, which exists only after the MIR transform, so there
-/// is no HIR-level oracle for them and guessing would be a fabricated number.
+/// is no graph-side oracle for them.
 /// Keyed by INSTANCE, so it is refreshed for the instances that entered or
 /// left rather than for the whole graph. `removed` runs first: an instance that
 /// was replaced appears in both lists and must end up recorded.
@@ -3956,7 +3964,22 @@ fn record_coroutine_helpers(
         if !f.is_coroutine {
             continue;
         }
-        let plan = skull_mir::lower::CoroutinePlan::new(ws, i.func, mangle_fn(ws, f));
+        let plan = match skull_mir::lower::plan_coroutine(ws, g.interner(), i) {
+            Ok(plan) => plan,
+            Err(reason) => {
+                g.graph_rejections.push(Rejection {
+                    kind: RejectionKind::ConcreteTypeUnavailable,
+                    at: i.clone(),
+                    span: f.name_span,
+                    message: format!(
+                        "cannot build concrete coroutine plan for `{}`: {}",
+                        f.name,
+                        reason.bucket()
+                    ),
+                });
+                continue;
+            }
+        };
         let owner_identity = g.identity(ws, i);
         for suffix in plan.declared_suffixes() {
             g.coroutine_helpers.insert(CoroutineHelper {

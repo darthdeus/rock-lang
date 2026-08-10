@@ -142,10 +142,8 @@ fn the_same_native_buffer_body_is_admitted_on_lua() {
 /// The ELEMENT bound, on the target that rejects.
 #[test]
 fn a_primitive_element_buffer_is_admitted_on_js() {
-    assert!(
-        js(NATIVEBUFFER_PRIMITIVE).is_ok(),
-        "no leaf plan means no representation the boxed form does not have"
-    );
+    let result = js(NATIVEBUFFER_PRIMITIVE);
+    assert!(result.is_ok(), "no leaf plan means no representation the boxed form does not have: {result:?}");
 }
 
 /// The acceptance contract's "expansion intrinsics are exempt BY CONSTRUCTION",

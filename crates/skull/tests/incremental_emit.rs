@@ -579,7 +579,8 @@ fn one_liveness_walk_decides_the_specialized_bodies() {
 /// invalidate rather than one shared body.
 #[test]
 fn a_body_edit_to_a_generic_coroutine_reemits_its_specializations() {
-    let v1 = "nobox value P { x: float, y: float }\n\
+    let v1 = "struct Vec<T> { _data: any, len: int }\n\
+              nobox value P { x: float, y: float }\n\
               co fn walk<T>(v: [T]) -> Coroutine<int, int, ()> {\n\
               \x20   let n = v.len\n\
               \x20   yield n\n\

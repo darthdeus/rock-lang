@@ -40,7 +40,6 @@ pub fn requires_concrete_body_plan(
 ) -> bool {
     let f = &ws.module(inst.func.module).functions[inst.func.func];
     !f.is_extern
-        && !f.is_coroutine
         && f.inline_body.is_none()
         && ws
             .module(inst.func.module)

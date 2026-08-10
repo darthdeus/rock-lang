@@ -397,7 +397,9 @@ fn call_target(
     let Some(owner) = func.callee_instances.get(&call_id) else {
         return Ok(None);
     };
-    if owner.func != fref {
+    if skull_mir::lower::canonical_variant(ws, owner.func)
+        != skull_mir::lower::canonical_variant(ws, fref)
+    {
         return Err(CompilerError::new_no_location(format!(
             "internal: call in `{}` records owner `{}` but targets another declaration",
             func.name,

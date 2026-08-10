@@ -890,10 +890,11 @@ fn too_deep_to_instantiate(
 /// always-emitted (decorator/global) demand; each newly BUILT specialized
 /// chunk's own `.specs` extends the worklist, mirroring
 /// `emit_specialized_callees`'s render-time fixpoint but for BUILDING. Each
-/// instance's tree is the graph's OWN resolved bound tree (never `DemandMap`
-/// -- sufficient per `instance_tree_to_resolved`'s doc, corpus-verified
-/// byte-identical against `DemandMap`-lowered text for every case both sides
-/// reach). A demand clash (`cache.graph.has_bound_tree_disagreement`) rejects
+/// instance's tree is the concrete plan's resolved bound tree, which the graph
+/// installs as part of that owner plan (never `DemandMap` -- sufficient per
+/// `instance_tree_to_resolved`'s doc, corpus-verified byte-identical against
+/// `DemandMap`-lowered text for every case both sides reach). A demand clash
+/// (`cache.graph.has_bound_tree_disagreement`) rejects
 /// that one instance rather than picking an arbitrary tree -- the
 /// graph-driven equivalent of `DemandMap`'s clash check.
 fn view_driven_specialized_chunks(
@@ -952,21 +953,9 @@ fn view_driven_specialized_chunks(
             ));
             continue;
         };
-        let tree = cache.graph.bound_tree(&inst).cloned().unwrap_or_default().to_resolved();
-        let f = &ws.module(inst.func.module).functions[inst.func.func];
-        if fn_has_bounds(f) && tree.is_empty() {
-            errs.push((
-                inst.symbol(ws, scx.interner()),
-                CompilerError::new_with_label(
-                    f.name_span,
-                    "graph has no resolved bound tree for a bounded specialization".to_string(),
-                ),
-            ));
-            continue;
-        }
         let name = inst.symbol(ws, scx.interner());
         let mut specs = Vec::new();
-        match emit_spec_chunk(ws, cg, scx, &cache.concrete, &inst, subst, &tree, &name, &mut inline_cache, &mut specs) {
+        match emit_spec_chunk(ws, cg, scx, &cache.concrete, &inst, subst, &name, &mut inline_cache, &mut specs) {
             Ok(chunk) => {
                 pending.extend(chunk.specs.iter().map(|d| d.inst.clone()));
                 built.insert(inst, chunk);
@@ -1037,6 +1026,10 @@ enum BodyMutation {
     RemoveCalleeOwner { caller: FuncRef, callee: FuncRef },
     #[cfg(test)]
     ClearCalleeOwnerKey { caller: FuncRef, callee: FuncRef },
+    #[cfg(test)]
+    ClearBoundPlan { body: FuncRef },
+    #[cfg(test)]
+    ClearCoroutineResultPlan { body: FuncRef },
 }
 
 /// The shared body of `fref` -- the id under which a declaration's own
@@ -1158,14 +1151,7 @@ fn rebuild_chunk(
                     format!("graph has no substitution for specialized `{name}`"),
                 )
             })?;
-            let tree = graph.bound_tree(body).cloned().unwrap_or_default().to_resolved();
-            if fn_has_bounds(f) && tree.is_empty() {
-                return Err(CompilerError::new_with_label(
-                    f.name_span,
-                    format!("graph has no resolved bound tree for specialized `{name}`"),
-                ));
-            }
-            emit_spec_chunk(ws, cg, scx, concrete, body, subst, &tree, &name, inline_cache, &mut specs)
+            emit_spec_chunk(ws, cg, scx, concrete, body, subst, &name, inline_cache, &mut specs)
         }
     }
 }
@@ -1302,13 +1288,13 @@ fn collect_callee_frefs(mf: &MirFunc, out: &mut FxHashSet<FuncRef>) {
 /// (the step's lambdas convert framed, inside `emit_coroutine`) and no FORL
 /// recovery (codegen's relooper does it).
 ///
-/// `body` decides every symbol, through [`skull_mir::lower::plan_coroutine`].
+/// The concrete body plan decides the instance symbol and yield channel.
 fn emit_coroutine_chunk(
     ws: &Workspace,
     cg: &CodegenCtx,
     scx: &skull_mir::lower::ScalarCtx,
     ctx: &skull_mir::bound::BoundCtx,
-    body: &Instance,
+    concrete_plan: &skull_mir::concrete::ConcreteBodyPlan,
     f: &bone_semantic::hir::Function,
     mf: &mut MirFunc,
     mut times: PhaseTimes,
@@ -1324,7 +1310,21 @@ fn emit_coroutine_chunk(
     validate_emitted_body(ws, ctx, mf, &mut specs).map_err(|r| r.into_error(f.name_span, ""))?;
     skull_codegen_lua::regalloc_time_reset();
     let te = Instant::now();
-    let plan = skull_mir::lower::plan_coroutine(ws, scx.interner(), body);
+    let inst = concrete_plan
+        .function_instance()
+        .expect("a coroutine emission plan must own a function instance");
+    let plan = skull_mir::lower::CoroutinePlan::from_concrete_plan(
+        ws,
+        scx.interner(),
+        concrete_plan,
+        inst.symbol(ws, scx.interner()),
+    )
+    .map_err(|reason| {
+        CompilerError::new_with_label(
+            f.name_span,
+            format!("cannot build concrete coroutine plan for `{}`: {}", f.name, reason.bucket()),
+        )
+    })?;
     let lua = crate::coroutine_emit::emit_coroutine(ws, cg, scx.interner(), &plan, mf);
     times.emit = te.elapsed();
     times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(times.emit);
@@ -1415,6 +1415,8 @@ fn emit_body_chunk_with_mutation(
                         .clear();
                 }
                 BodyMutation::None => unreachable!(),
+                BodyMutation::ClearBoundPlan { .. } => unreachable!(),
+                BodyMutation::ClearCoroutineResultPlan { .. } => unreachable!(),
             }
         }
         #[cfg(test)]
@@ -1425,7 +1427,7 @@ fn emit_body_chunk_with_mutation(
         let owner = BodyOwner::Function(self_ref.func);
         let ctx =
             skull_mir::bound::body_ctx(ws, self_ref.module, owner, &subst, &incoming, scx.interner());
-        return emit_coroutine_chunk(ws, cg, scx, &ctx, &shared(self_ref), f, &mut mf, times);
+        return emit_coroutine_chunk(ws, cg, scx, &ctx, plan, f, &mut mf, times);
     }
     // Inline eligible direct calls before cleanup so a hot loop traces with no
     // per-call frame (`docs/skull-inlining-plan.md`).
@@ -1658,7 +1660,6 @@ fn emit_spec_chunk(
     concrete: &crate::concrete_body::ConcreteBodies,
     body: &Instance,
     subst: &skull_mir::monoty::MonoSubst,
-    tree: &skull_mir::bound::ResolvedBoundTree,
     name: &str,
     inline_cache: &mut skull_transform::InlineCache,
     specs: &mut Vec<skull_mir::bound::SpecDemand>,
@@ -1668,6 +1669,13 @@ fn emit_spec_chunk(
     let plan = concrete
         .plan_for(body)
         .ok_or_else(|| CompilerError::new_with_label(f.name_span, format!("no concrete plan for `{name}`")))?;
+    let tree = &plan.bound_tree;
+    if fn_has_bounds(f) && tree.is_empty() {
+        return Err(CompilerError::new_with_label(
+            f.name_span,
+            format!("concrete plan has no resolved bound tree for specialized `{name}`"),
+        ));
+    }
     let mut mf = skull_mir::lower::lower_instance_with_plans(ws, scx, plan, &concrete.plans)
         .map_err(|e| CompilerError::new_with_label(f.name_span, e.message))?;
     // BEFORE every transform: an `Iterator`-bounded body's placeholders are what
@@ -1686,7 +1694,7 @@ fn emit_spec_chunk(
     let owner = BodyOwner::Function(fref.func);
     let ctx = skull_mir::bound::body_ctx(ws, fref.module, owner, &subst, tree, scx.interner());
     if f.is_coroutine {
-        return emit_coroutine_chunk(ws, cg, scx, &ctx, body, f, &mut mf, PhaseTimes::default());
+        return emit_coroutine_chunk(ws, cg, scx, &ctx, plan, f, &mut mf, PhaseTimes::default());
     }
     let mut deps = prepare_instance_body_with_plans(
         ws,
@@ -3040,7 +3048,51 @@ fn emit_full_in_with_mutation(
         .collect();
     let emission_roots = all_roots(ws, project_root, &shader_roots);
     let mut graph = crate::instance_graph::build(ws, emission_roots.clone(), false);
-    let concrete = crate::concrete_body::build(ws, &mut graph);
+    #[allow(unused_mut)]
+    let mut concrete = crate::concrete_body::build(ws, &mut graph);
+    #[cfg(test)]
+    if let BodyMutation::ClearBoundPlan { body } = mutation {
+        let mut matched = 0;
+        for (instance, plan) in &mut concrete.plans {
+            if instance.func != body || instance.args.is_empty() {
+                continue;
+            }
+            assert!(
+                !plan.bound_tree.is_empty(),
+                "bound-plan mutation found a specialized body with no witness tree"
+            );
+            plan.bound_tree = Default::default();
+            matched += 1;
+        }
+        assert!(
+            matched > 0,
+            "bound-plan mutation found no specialized instance for {body:?}; plans={:?}",
+            concrete
+                .plans
+                .keys()
+                .map(|instance| (instance.func, instance.args.len()))
+                .collect::<Vec<_>>()
+        );
+    }
+    #[cfg(test)]
+    if let BodyMutation::ClearCoroutineResultPlan { body } = mutation {
+        let mut matched = 0;
+        for (instance, plan) in &mut concrete.plans {
+            if instance.func != body {
+                continue;
+            }
+            assert!(
+                plan.signature.result.is_some(),
+                "coroutine-plan mutation found a body with no concrete result witness"
+            );
+            plan.signature.result = None;
+            matched += 1;
+        }
+        assert!(
+            matched > 0,
+            "coroutine-plan mutation found no concrete instance for {body:?}"
+        );
+    }
     if let Some((instance, reason)) = concrete.plan_failures.first() {
         let f = &ws.module(instance.func.module).functions[instance.func.func];
         return Err(CompilerError::new_with_label(
@@ -3340,14 +3392,6 @@ fn build_graph_added_chunks(
                 ));
                 continue;
             };
-            let tree = cache.graph.bound_tree(&body).cloned().unwrap_or_default().to_resolved();
-            if fn_has_bounds(f) && tree.is_empty() {
-                errs.push(CompilerError::new_with_label(
-                    f.name_span,
-                    format!("graph has no resolved bound tree for added `{}`", body.symbol(ws, cache.scx.interner())),
-                ));
-                continue;
-            }
             let name = body.symbol(ws, cache.scx.interner());
             let mut specs = Vec::new();
             match emit_spec_chunk(
@@ -3357,7 +3401,6 @@ fn build_graph_added_chunks(
                 &cache.concrete,
                 &body,
                 subst,
-                &tree,
                 &name,
                 &mut cache.inline_cache,
                 &mut specs,
@@ -3910,6 +3953,71 @@ fn top() -> int { return wrap(7) }
 fn main() { let result = top() }
 "#;
 
+    const BOUNDED_SRC: &str = r#"
+fn total<I: Iterator<int>>(it: I) -> int {
+    let sum = 0
+    for value in it { sum = sum + value }
+    return sum
+}
+
+fn top() -> int { return total([1, 2, 3].iter()) }
+fn main() { let result = top() }
+"#;
+
+    const COROUTINE_PLAN_SRC: &str = r#"
+enum Ev { Tick(string) }
+global R: int = 0
+
+co fn worker() -> Coroutine<Ev> {
+    let counter = 100
+    let add = (n: int) => n + counter
+    R = add(5)
+    yield Ev::Tick("x")
+}
+
+fn main() {
+    let c = worker()
+    let _ = c.resume()
+}
+"#;
+
+    static STDLIB: std::sync::LazyLock<Vec<skull_parser::Ast>> = std::sync::LazyLock::new(|| {
+        rock_host::stdlib_loader::stdlib_files()
+            .iter()
+            .map(|file| {
+                let id = Ustr::from(format!("<stdlib:{}>", file.name).as_str());
+                skull_parser::parse_module_clean(file.contents, id).expect("stdlib parse")
+            })
+            .collect()
+    });
+
+    static INLINE_OFF: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[allow(dead_code)]
+    struct InlineOff(std::sync::MutexGuard<'static, ()>, Option<String>);
+
+    impl InlineOff {
+        fn on() -> Self {
+            let guard = INLINE_OFF.lock().unwrap_or_else(|e| e.into_inner());
+            let previous = std::env::var("SKULL_INLINE_OFF").ok();
+            unsafe { std::env::set_var("SKULL_INLINE_OFF", "1") };
+            skull_mir::ablation::clear();
+            skull_mir::ablation::set_enabled(true);
+            Self(guard, previous)
+        }
+    }
+
+    impl Drop for InlineOff {
+        fn drop(&mut self) {
+            skull_mir::ablation::set_enabled(false);
+            skull_mir::ablation::clear();
+            match &self.1 {
+                Some(value) => unsafe { std::env::set_var("SKULL_INLINE_OFF", value) },
+                None => unsafe { std::env::remove_var("SKULL_INLINE_OFF") },
+            }
+        }
+    }
+
     fn workspace() -> Workspace {
         let mut modules = vec![
             skull_parser::parse_module_clean(SRC, Ustr::from("<missing-owner-test>"))
@@ -3918,18 +4026,36 @@ fn main() { let result = top() }
         bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
     }
 
+    fn bounded_workspace() -> Workspace {
+        let mut modules = STDLIB.clone();
+        modules.push(
+            skull_parser::parse_module_clean(BOUNDED_SRC, Ustr::from("<bound-plan-test>"))
+                .expect("parse"),
+        );
+        bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
+    }
+
+    fn coroutine_workspace() -> Workspace {
+        let mut modules = STDLIB.clone();
+        modules.push(
+            skull_parser::parse_module_clean(COROUTINE_PLAN_SRC, Ustr::from("<coroutine-plan-test>"))
+                .expect("parse"),
+        );
+        bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
+    }
+
     fn ref_for(ws: &Workspace, name: &str) -> FuncRef {
-        let module = ws
-            .modules
+        ws.modules
             .iter()
-            .find(|m| m.id != ModuleId::builtin())
-            .expect("test module");
-        let (func, _) = module
-            .functions
-            .iter()
-            .find(|(_, f)| f.name.as_str() == name)
-            .expect("function");
-        FuncRef { module: module.id, func }
+            .filter(|module| module.id != ModuleId::builtin())
+            .find_map(|module| {
+                module
+                    .functions
+                    .iter()
+                    .find(|(_, f)| f.name.as_str() == name)
+                    .map(|(func, _)| FuncRef { module: module.id, func })
+            })
+            .expect("function")
     }
 
     fn concrete_symbol(ws: &Workspace, cache: &SkullEmitCache, fref: FuncRef) -> String {
@@ -4004,6 +4130,53 @@ fn main() { let result = top() }
         assert_rejection_or_residual(
             emit_with_mutation(BodyMutation::ClearCalleeOwnerKey { caller, callee }),
             callee,
+        );
+    }
+
+    #[test]
+    fn emission_rejects_a_poisoned_concrete_bound_plan() {
+        let _inline = InlineOff::on();
+        let ws = bounded_workspace();
+        let mid = *ws
+            .module_ids
+            .get(&Ustr::from("<bound-plan-test>"))
+            .expect("test module");
+        let body = ref_for(&ws, "total");
+        let err = match emit_full_in_with_test_mutation(&ws, mid, BodyMutation::ClearBoundPlan { body }) {
+            Ok(_) => panic!("emission ignored the poisoned concrete bound plan"),
+            Err(err) => err,
+        };
+        assert!(
+            err.message.contains("no resolved bound tree"),
+            "the poisoned plan must fail at the plan consumer, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn emission_consumes_a_concrete_coroutine_result_plan() {
+        let ws = coroutine_workspace();
+        let mid = *ws
+            .module_ids
+            .get(&Ustr::from("<coroutine-plan-test>"))
+            .expect("test module");
+        let body = ref_for(&ws, "worker");
+        let (intact, intact_cache) =
+            emit_full_in_with_test_mutation(&ws, mid, BodyMutation::None).expect("intact emission");
+        let symbol = Instance::base(body).symbol(&ws, intact_cache.scx.interner());
+        assert!(
+            intact.lua.contains(&format!("function {symbol}__advance(")),
+            "the intact coroutine fixture must exercise the concrete yield channel"
+        );
+        let (emit, cache) = emit_full_in_with_test_mutation(
+            &ws,
+            mid,
+            BodyMutation::ClearCoroutineResultPlan { body },
+        )
+        .expect("emission with the poisoned result plan");
+        let symbol = Instance::base(body).symbol(&ws, cache.scx.interner());
+        assert!(
+            !emit.lua.contains(&format!("function {symbol}__advance(")),
+            "the coroutine emitter ignored the concrete result plan mutation"
         );
     }
 }

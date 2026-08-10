@@ -125,23 +125,19 @@ fn an_unbounded_body_emits_to_js_with_inlining_disabled() {
 }
 
 #[test]
-fn js_specializations_consume_graph_bound_trees() {
+fn js_specializations_consume_concrete_plan_bound_trees() {
     let source = include_str!("../src/emit.rs");
     assert!(
-        source.contains("let graph_trees = graph"),
-        "JS must snapshot graph bound trees"
+        !source.contains("graph_trees"),
+        "JS must not retain a second graph-tree delivery map"
     );
     assert!(
-        source.contains(".bound_trees()"),
-        "JS must read graph bound trees"
+        source.contains("plan.bound_tree"),
+        "JS standalone lowering must read the selected concrete plan tree"
     );
     assert!(
-        source.contains("graph_trees"),
-        "JS must retain graph bound trees for delivery"
-    );
-    assert!(
-        source.contains("self.st.graph_trees"),
-        "specialized lowering must read graph trees"
+        source.contains("concrete plan has no resolved bound tree"),
+        "JS must reject a missing plan tree rather than fabricate an empty one"
     );
 }
 

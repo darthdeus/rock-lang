@@ -2963,6 +2963,39 @@ pub fn coroutine_yield_channel(ws: &Workspace, return_ty: TyId) -> Option<YieldC
     })
 }
 
+/// The same channel oracle for a fully concrete logical coroutine type. The
+/// declaration-shaped variant is retained for source-only analysis; emitted
+/// coroutine bodies use this concrete form.
+pub fn coroutine_yield_channel_mono(ws: &Workspace, ty: &MonoTy) -> Option<YieldChannel> {
+    let (ty, nullable) = ty.peel_nullable();
+    if nullable {
+        return None;
+    }
+    let MonoTy::App {
+        ctor: MonoCtor::Nominal(name),
+        params,
+    } = ty
+    else {
+        return None;
+    };
+    if name.as_str() != "Coroutine" {
+        return None;
+    }
+    let MonoTy::App {
+        ctor: MonoCtor::Nominal(yield_name),
+        ..
+    } = params.first()?
+    else {
+        return None;
+    };
+    let shape = flat_enum_shape(ws, *yield_name)?;
+    Some(YieldChannel {
+        enum_name: shape.name,
+        tuple_width: shape.tuple_width(),
+        record_fields: shape.record_fields,
+    })
+}
+
 /// The reused frame slot name for the `i`th yield leaf: `__y{i}` (tag at 0, then
 /// positional, then record leaves -- `value_shape` leaf order).
 pub fn yield_slot(i: usize) -> Ustr {

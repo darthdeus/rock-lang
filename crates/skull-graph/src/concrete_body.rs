@@ -785,11 +785,13 @@ fn concrete_plan(
         callees.insert(site, callee.instance().clone());
     }
     let ty_types = concrete_ty_types(ws, g, inf, subst)?;
-    let foreign_domains = foreign_domain_tables(
-        ws,
-        g,
-        body.callees().into_iter().map(|(site, _)| site.domain),
-    )?;
+    let default_domains = g
+        .contributions
+        .get(&Owner::Instance(inst.clone()))
+        .into_iter()
+        .flat_map(|c| c.struct_default_domains.iter().cloned());
+    let site_domains = body.callees().into_iter().map(|(site, _)| site.domain);
+    let foreign_domains = foreign_domain_tables(ws, g, default_domains.chain(site_domains))?;
     Ok(ConcreteBodyPlan {
         owner: ConcreteOwner::Function(inst.clone()),
         types: ConcreteTypeTables {
@@ -824,16 +826,14 @@ fn concrete_always_plan(
         .get(&Owner::AlwaysEmitted(module, owner))
         .ok_or(MonoTyReason::NoNode)?;
     let mut callees = BTreeMap::new();
-    for (site, record) in &contribution.call_sites {
+    for (site, record) in &contribution.always_call_sites {
         if let SiteOutcome::Resolved(instance) = &record.outcome {
             callees.insert(site.clone(), instance.clone());
         }
     }
-    let foreign_domains = foreign_domain_tables(
-        ws,
-        g,
-        contribution.call_sites.keys().map(|site| site.domain.clone()),
-    )?;
+    let default_domains = contribution.struct_default_domains.iter().cloned();
+    let site_domains = contribution.always_call_sites.keys().map(|site| site.domain.clone());
+    let foreign_domains = foreign_domain_tables(ws, g, default_domains.chain(site_domains))?;
     let signature = match owner {
         BodyOwner::Global(gid) => {
             let result = g.interner().with_mut(|arena| {

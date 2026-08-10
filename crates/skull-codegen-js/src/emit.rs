@@ -2526,12 +2526,16 @@ pub fn emit_with_closure(
     }
     for (fr, mf) in &st.lowered {
         let name = st.names.name_for_decl(ws, *fr).expect("emitted body has a name");
-        match emit_lowered_fn(ws, *fr, mf, name, &st.names, &hoisted, &st.gctx) {
+        let plan = st
+            .concrete
+            .get(&Instance::base(*fr))
+            .ok_or_else(|| err(format!("JS: no concrete plan for `{name}`")))?;
+        match emit_lowered_fn(ws, scx.interner(), mf, name, plan, &st.names, &hoisted, &st.gctx) {
             Ok(js) => out.push_str(&js),
             Err(e) => rejections.push((name.clone(), e)),
         }
     }
-    out.push_str(&emit_spec_bodies(ws, &st, &hoisted, &mut rejections));
+    out.push_str(&emit_spec_bodies(ws, scx.interner(), &st, &hoisted, &mut rejections));
     combine_rejections(rejections)?;
     for body in &st.inline_js {
         out.push_str(&emit_inline_js_fn(
@@ -2987,7 +2991,11 @@ fn assemble_program_core(
     let mut chunks = HashMap::new();
     for (fr, mf) in &st.lowered {
         let name = st.names.name_for_decl(ws, *fr).expect("emitted body has a name");
-        match emit_lowered_fn(ws, *fr, mf, name, &st.names, &hoisted, &st.gctx) {
+        let plan = session
+            .concrete
+            .get(&Instance::base(*fr))
+            .ok_or_else(|| err(format!("JS: no concrete plan for `{name}`")))?;
+        match emit_lowered_fn(ws, scx.interner(), mf, name, plan, &st.names, &hoisted, &st.gctx) {
             Ok(js) => {
                 out.push_str(&js);
                 chunks.insert(*fr, JsChunk { js, statics: collect_statics(mf) });
@@ -2998,7 +3006,7 @@ fn assemble_program_core(
     // 2a. standalone specialized copies. They are keyed by Instance so an
     // overlay can add, remove, or rebuild one without confusing it with the
     // shared generic declaration.
-    let spec_chunks = emit_spec_chunks(ws, &st, &hoisted, &mut rejections);
+    let spec_chunks = emit_spec_chunks(ws, scx.interner(), &st, &hoisted, &mut rejections);
     for chunk in ordered_spec_chunks(&spec_chunks, &st.spec_lowered) {
         out.push_str(&chunk.js);
     }
@@ -3500,7 +3508,6 @@ struct WorklistState {
     standalone_seen: HashSet<Instance>,
     view_instances: BTreeSet<Instance>,
     bound_tree_disagreements: HashSet<Instance>,
-    graph_trees: HashMap<Instance, skull_mir::bound::ResolvedBoundTree>,
     /// `inline(js)` callees, emitted verbatim (their raw JS body, not MIR-lowered).
     inline_js: Vec<JsInlineBody>,
     state_index: HashMap<ustr::Ustr, GlobalSite>,
@@ -3557,10 +3564,6 @@ impl WorklistState {
                 .clone();
             names.names.entry(inst.clone()).or_insert(name);
         }
-        let graph_trees = graph
-            .bound_trees()
-            .map(|(inst, tree)| (inst.clone(), tree.to_resolved()))
-            .collect();
         let bound_tree_disagreements = graph
             .bound_tree_disagreements()
             .map(|finding| finding.instance)
@@ -3601,7 +3604,6 @@ impl WorklistState {
             standalone_seen: HashSet::new(),
             view_instances: view.instances.clone(),
             bound_tree_disagreements,
-            graph_trees,
             cache: skull_transform::InlineCache::default(),
             names,
             queue,
@@ -3888,7 +3890,6 @@ impl JsDelivery<'_> {
             return Ok(());
         };
         let lowered_inst = Instance { func: fr, args: inst.args.clone() };
-        let body = inst.clone();
         let subst = lowered_inst.subst(self.ws, self.scx.interner());
         let plan = match self.st.concrete.get(&lowered_inst) {
             Some(plan) => plan,
@@ -3909,17 +3910,17 @@ impl JsDelivery<'_> {
                 return Ok(());
             }
         };
+        let f = &self.ws.module(fr.module).functions[fr.func];
         // BEFORE every transform, and for the same reason as the luajit path:
         // an `Iterator`-bounded body's placeholders are what make it unemittable
         // on its own, and the demand that reached here is what resolves them.
-        let tree = self.st.graph_trees.get(&body).cloned().unwrap_or_default();
-        let f = &self.ws.module(fr.module).functions[fr.func];
+        let tree = plan.bound_tree.clone();
         if f.generic_bounds.iter().any(Option::is_some) && tree.is_empty() {
             self.st.reject(
                 &name,
                 CompilerError::new_with_label(
                     f.name_span,
-                    "JS: the graph has no resolved bound tree for a bounded specialization"
+                    "JS: the concrete plan has no resolved bound tree for a bounded specialization"
                         .to_string(),
                 ),
             );
@@ -4137,15 +4138,22 @@ fn drain_worklists(
 /// the ordinary fn path plus its hoisted (`convert_closures`) sibling bodies.
 fn emit_lowered_fn(
     ws: &Workspace,
-    fr: FuncRef,
+    interner: &skull_mir::monoty::MonoInterner,
     mf: &MirFunc,
     js_name: &str,
+    concrete: &skull_mir::concrete::ConcreteBodyPlan,
     names: &CalleeNames,
     hoisted: &HashSet<ustr::Ustr>,
     gctx: &GlobalCtx,
 ) -> Result<String, CompilerError> {
     if mf.is_coroutine {
-        let plan = skull_mir::lower::CoroutinePlan::new(ws, fr, js_name.to_string());
+        let plan = skull_mir::lower::CoroutinePlan::from_concrete_plan(
+            ws,
+            interner,
+            concrete,
+            js_name.to_string(),
+        )
+        .map_err(|reason| err(format!("JS: cannot build concrete coroutine plan: {}", reason.bucket())))?;
         return emit_coroutine_js(ws, &plan, mf, names, hoisted, gctx);
     }
     let mut out = emit_fn_with_callees(ws, mf, js_name, names, hoisted, gctx)?;
@@ -4158,6 +4166,7 @@ fn emit_lowered_fn(
 /// The standalone specialized copies, each under its `spec_fn_name`.
 fn emit_spec_chunks(
     ws: &Workspace,
+    interner: &skull_mir::monoty::MonoInterner,
     st: &WorklistState,
     hoisted: &HashSet<ustr::Ustr>,
     rejections: &mut Vec<(String, CompilerError)>,
@@ -4165,7 +4174,22 @@ fn emit_spec_chunks(
     let mut chunks = HashMap::new();
     for (inst, mf) in &st.spec_lowered {
         let name = st.names.get(inst).expect("a lowered specialization has a name");
-        match emit_lowered_fn(ws, inst.func, mf, name, &st.names, hoisted, &st.gctx) {
+        let selected_decl = match st.artifact_decls.get(inst).copied() {
+            Some(decl) => decl,
+            None => {
+                rejections.push((name.clone(), err("JS: no selected declaration for specialization")));
+                continue;
+            }
+        };
+        let selected = Instance { func: selected_decl, args: inst.args.clone() };
+        let plan = match st.concrete.get(&selected) {
+            Some(plan) => plan,
+            None => {
+                rejections.push((name.clone(), err("JS: no concrete plan for selected specialization")));
+                continue;
+            }
+        };
+        match emit_lowered_fn(ws, interner, mf, name, plan, &st.names, hoisted, &st.gctx) {
             Ok(js) => {
                 chunks.insert(inst.clone(), JsSpecChunk { name: name.clone(), js });
             }
@@ -4190,11 +4214,12 @@ fn ordered_spec_chunks<'a>(
 
 fn emit_spec_bodies(
     ws: &Workspace,
+    interner: &skull_mir::monoty::MonoInterner,
     st: &WorklistState,
     hoisted: &HashSet<ustr::Ustr>,
     rejections: &mut Vec<(String, CompilerError)>,
 ) -> String {
-    let chunks = emit_spec_chunks(ws, st, hoisted, rejections);
+    let chunks = emit_spec_chunks(ws, interner, st, hoisted, rejections);
     ordered_spec_chunks(&chunks, &st.spec_lowered)
         .into_iter()
         .map(|chunk| chunk.js.as_str())

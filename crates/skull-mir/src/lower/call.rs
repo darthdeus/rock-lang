@@ -565,7 +565,10 @@ impl Builder<'_> {
             self.f.spec_bindings.insert(call, inst.clone());
         }
         if let Some(owner) = &dc.callee_inst {
-            debug_assert_eq!(owner.func, func);
+            debug_assert_eq!(
+                crate::lower::canonical_variant(self.ws, owner.func),
+                crate::lower::canonical_variant(self.ws, func)
+            );
             self.f.callee_instances.insert(call, owner.clone());
         }
         self.f.call_abi_plans.insert(call, dc.plan.clone());

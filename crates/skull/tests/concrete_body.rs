@@ -378,28 +378,110 @@ fn main() {
 }
 
 #[test]
+fn production_plan_keeps_struct_default_domains_without_callees() {
+    let (ws, g, bodies) = bodies_of(
+        r#"
+struct Box<T> { value: T? = null }
+fn main() {
+    let a: Box<int> = Box {}
+    let b: Box<string> = Box {}
+    print("{a.value} {b.value}")
+}
+"#,
+    );
+    let main = bodies
+        .plans
+        .iter()
+        .find(|(inst, _)| g.identity(&ws, inst).starts_with("main"))
+        .map(|(_, plan)| plan)
+        .expect("main has no concrete plan");
+    assert_eq!(
+        main.foreign_domains.len(),
+        2,
+        "a default body without calls still needs both concrete domains"
+    );
+    let mut rendered = main
+        .foreign_domains
+        .values()
+        .flat_map(|tables| tables.expr_types.values())
+        .map(|id| g.interner().render(*id))
+        .collect::<Vec<_>>();
+    rendered.sort();
+    assert!(rendered.iter().any(|ty| ty == "int?"), "missing int default table: {rendered:?}");
+    assert!(
+        rendered.iter().any(|ty| ty == "string?"),
+        "missing string default table: {rendered:?}"
+    );
+    let domain = main.foreign_domains.keys().next().cloned().expect("default domain");
+    let mut poisoned = main.clone();
+    poisoned.foreign_domains.remove(&domain);
+    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    assert!(
+        skull_mir::lower::lower_instance_with_plan(&ws, &scx, &poisoned).is_err(),
+        "lowering accepted a struct default after its concrete domain was removed"
+    );
+}
+
+#[test]
 fn production_plan_covers_an_always_emitted_global() {
     let (ws, g, bodies) = bodies_of(
         r#"
-global startup: int = 7
+global startup: int = read_startup()
+fn read_startup() -> int { return 7 }
 fn main() { print("{startup}") }
 "#,
     );
+    let user_mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
     let (owner, plan) = bodies
         .always_plans
         .iter()
-        .find(|(owner, _)| matches!(owner, skull_mir::concrete::ConcreteOwner::Global { .. }))
+        .find(|(owner, _)| {
+            matches!(
+                owner,
+                skull_mir::concrete::ConcreteOwner::Global { module, .. } if *module == user_mid
+            )
+        })
         .expect("global has no concrete plan");
     assert!(plan.signature.result.is_some(), "global plan lost its concrete result type");
+    assert_eq!(
+        plan.callees.len(),
+        1,
+        "always-emitted plan lost its direct call population"
+    );
     let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
-    skull_mir::lower::lower_global_with_plan(&ws, &scx, plan, Ustr::from("__test_ginit"))
+    skull_mir::lower::lower_global_with_plans(
+        &ws,
+        &scx,
+        plan,
+        &bodies.plans,
+        Ustr::from("__test_ginit"),
+    )
         .expect("plan-driven global lowering failed");
     let mut poisoned = plan.clone();
     poisoned.types.expr_types = ArenaMap::default();
     assert!(
-        skull_mir::lower::lower_global_with_plan(&ws, &scx, &poisoned, Ustr::from("__test_ginit"))
+        skull_mir::lower::lower_global_with_plans(
+            &ws,
+            &scx,
+            &poisoned,
+            &bodies.plans,
+            Ustr::from("__test_ginit"),
+        )
             .is_err(),
         "global lowering ignored its concrete type plan"
+    );
+    let mut missing_callee = plan.clone();
+    missing_callee.callees.clear();
+    assert!(
+        skull_mir::lower::lower_global_with_plans(
+            &ws,
+            &scx,
+            &missing_callee,
+            &bodies.plans,
+            Ustr::from("__test_ginit"),
+        )
+        .is_err(),
+        "global lowering ignored its concrete callee plan"
     );
     let _ = owner;
 }

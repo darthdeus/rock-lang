@@ -2,49 +2,66 @@
 //!
 //! A transformed `co fn` is not one function: it is a step, a resume, an
 //! optional advance, a defer per terminal-cleanup site and a body per lifecycle
-//! hook, all minted from one base symbol. Both emitters used to spell that base
-//! themselves -- the Lua driver from `mangled(ws, self_ref)`, the JS driver from
-//! the name its caller happened to pass -- and each restated when an `__advance`
-//! exists. A generic `co fn` therefore had one set of helper symbols for every
-//! instantiation, which is the collision
-//! `InstanceGraph::colliding_coroutine_helpers` reports.
+//! hook, all minted from one base symbol. The graph and emitters consume the
+//! instance-owned symbol and concrete result type so they agree on the helper
+//! family for each instantiation.
 //!
-//! One [`CoroutinePlan`] per [`Instance`] answers both: the base symbol is
-//! the body's own (a specialization's `spec_fn_name`, not its declaration's),
-//! and the yield channel is computed once.
-//!
-//! The channel is read from the DECLARED return type, not from the
-//! instantiation. That is the standing rule -- `__advance` is the concrete
-//! consumer's fast path, and a consumer selects it from the declared
-//! `Coroutine<Y, ..>` it can see, so resolving `Y` per instantiation would let a
-//! specialized body publish a channel its callers do not know to read.
+//! `from_instance` handles graph helper accounting before body tables exist;
+//! emitted bodies use `from_concrete_plan`, whose result and channel come from
+//! the selected concrete signature.
 
 use bone_semantic::inference::Workspace;
 
-use super::{coroutine_yield_channel, YieldChannel};
+use super::{coroutine_yield_channel_mono, YieldChannel};
+use crate::concrete::ConcreteBodyPlan;
 use crate::instance::Instance;
-use crate::monoty::MonoInterner;
-use crate::mir::FuncRef;
+use crate::monoty::{MonoInterner, MonoTy, MonoTyReason};
 
 /// Every symbol a transformed `co fn` owns, plus its yield channel.
 pub struct CoroutinePlan {
     base: String,
+    /// The concrete `Coroutine<yield, result, next>` type of this instance.
+    /// Emitters use the derived channel below, while retaining the full result
+    /// for consumers that need the coroutine contract itself.
+    pub result: Option<MonoTy>,
     /// `Some` -> the step writes yield leaves into reused `s.__y*` frame slots
     /// and the boxed `__resume` rebuilds a variant box from them.
     pub channel: Option<YieldChannel>,
 }
 
 impl CoroutinePlan {
-    /// Plan the emission of `decl`'s body under `base`.
-    ///
-    /// The base is an argument because JS roots carry a spelling their caller
-    /// assigns (`emit_with_closure` takes `(FuncRef, String)` pairs, so a `co fn`
-    /// root can be emitted as `main`), while luajit derives it from the emitted
-    /// body. What is NOT an argument is any other symbol: every helper is minted
-    /// here, from this one base.
-    pub fn new(ws: &Workspace, decl: FuncRef, base: String) -> Self {
-        let f = &ws.module(decl.module).functions[decl.func];
-        Self { base, channel: f.return_ty.and_then(|t| coroutine_yield_channel(ws, t)) }
+    /// Build the plan consumed by an emitter from the graph-owned concrete
+    /// signature. `base` remains target-owned: Lua uses the instance symbol,
+    /// while JS passes the artifact-selected symbol.
+    pub fn from_concrete_plan(
+        ws: &Workspace,
+        interner: &MonoInterner,
+        concrete: &ConcreteBodyPlan,
+        base: String,
+    ) -> Result<Self, MonoTyReason> {
+        let result = concrete
+            .signature
+            .result
+            .map(|id| interner.get(id));
+        let channel = result.as_ref().and_then(|ty| coroutine_yield_channel_mono(ws, ty));
+        Ok(Self { base, result, channel })
+    }
+
+    /// Build the graph-side helper plan from an instance's resolved signature.
+    pub fn from_instance(
+        ws: &Workspace,
+        interner: &MonoInterner,
+        inst: &Instance,
+    ) -> Result<Self, MonoTyReason> {
+        let f = &ws.module(inst.func.module).functions[inst.func.func];
+        let subst = inst.subst(ws, interner);
+        let result = f
+            .return_ty
+            .map(|ty| interner.with_mut(|arena| arena.convert_decl(ws, ty, &subst)))
+            .transpose()?
+            .map(|id| interner.get(id));
+        let channel = result.as_ref().and_then(|ty| coroutine_yield_channel_mono(ws, ty));
+        Ok(Self { base: inst.symbol(ws, interner), result, channel })
     }
 
     /// The constructor's own name -- the symbol a call site targets.
@@ -78,9 +95,7 @@ impl CoroutinePlan {
         format!("{}{slot}", self.base)
     }
 
-    /// The suffixes this plan owns that are derivable WITHOUT the MIR transform:
-    /// defers and hooks come from `CoroLowered`, so a HIR-level consumer
-    /// (`skull::instance_graph`) can only name these.
+    /// The helper suffixes known before the MIR transform.
     pub fn declared_suffixes(&self) -> Vec<&'static str> {
         let mut out = vec!["__step", "__resume"];
         if self.channel.is_some() {
@@ -95,6 +110,10 @@ impl CoroutinePlan {
 /// The base symbol is the instance's own -- one encoder, so a specialization's
 /// helpers (`__step`, `__resume`, `__advance`) hang off the name its call sites
 /// already target rather than off the declaration's.
-pub fn plan_coroutine(ws: &Workspace, interner: &MonoInterner, inst: &Instance) -> CoroutinePlan {
-    CoroutinePlan::new(ws, inst.func, inst.symbol(ws, interner))
+pub fn plan_coroutine(
+    ws: &Workspace,
+    interner: &MonoInterner,
+    inst: &Instance,
+) -> Result<CoroutinePlan, MonoTyReason> {
+    CoroutinePlan::from_instance(ws, interner, inst)
 }
