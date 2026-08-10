@@ -161,20 +161,10 @@ fn annotation_gate(has_inline: bool, has_pure: bool, size_heuristic: bool) -> Op
 /// eligible. Hard exclusions: extern, `inline(lua)`, `co fn`, lambda-bearing,
 /// self-recursive, or any reachable non-`Return`/`Goto`/`Branch`/`Switch`
 /// terminator (a reachable `Unreachable`/`Yield` would mis-lower to a bare
-/// `return` inside the caller). `@inline` bypasses the size caps only. The gate
-/// remains a temporary E2 boundary until the concrete-body cut and its
-/// adversarial checks are complete.
-fn inlining_enabled() -> bool {
-    true
-}
-
 fn classify(ws: &Workspace, scx: &ScalarCtx, inst: &Instance) -> Option<CalleeBody> {
     let fref = inst.func;
     let f = &ws.module(fref.module).functions[fref.func];
     if f.is_extern || f.inline_body.is_some() || f.is_coroutine {
-        return None;
-    }
-    if !inlining_enabled() {
         return None;
     }
     let has_inline = f.annotations.iter().any(|a| a.name.name.as_str() == "inline");
