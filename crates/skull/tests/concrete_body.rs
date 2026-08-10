@@ -194,6 +194,44 @@ fn main() {
 }
 
 #[test]
+fn production_lowering_rejects_a_declared_type_missing_from_the_plan() {
+    let (mut ws, g, bodies) = bodies_of(
+        r#"
+fn main() {
+    let value: int = 1
+    print("{value}")
+}
+"#,
+    );
+    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
+    let (inst, plan) = bodies
+        .plans
+        .iter()
+        .find(|(inst, _)| g.identity(&ws, inst).starts_with("main"))
+        .map(|(inst, plan)| (inst.clone(), plan.clone()))
+        .expect("main has no concrete plan");
+    let extra = ws.modules[mid.index()]
+        .ty_arena
+        .alloc(TypeExpr::Builtin(bone_semantic::hir::BuiltinTy::Float));
+    let body = ws.modules[mid.index()]
+        .bodies
+        .get_mut(&BodyOwner::Function(inst.func.func))
+        .expect("main has no body");
+    let binding = body
+        .binding_arena
+        .iter()
+        .find(|(_, binding)| binding.name == Ustr::from("value"))
+        .map(|(idx, _)| idx)
+        .expect("value binding");
+    body.binding_arena[binding].declared_ty = Some(bone_semantic::prelude::TyId::Static(mid, extra));
+
+    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let err = skull_mir::lower::lower_instance_with_plan(&ws, &scx, &plan)
+        .expect_err("lowering accepted a declaration type absent from its concrete plan");
+    assert!(err.message.contains("missing concrete type node"), "{err:?}");
+}
+
+#[test]
 fn production_lowering_concrete_struct_literal_coerces_declared_float_fields() {
     let (ws, g, bodies) = bodies_of(
         r#"

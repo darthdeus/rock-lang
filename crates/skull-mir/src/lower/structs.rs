@@ -486,6 +486,7 @@ impl Builder<'_> {
             super::validate_concrete_type_tables(
                 self.ws,
                 defaults_inf,
+                defaults_body,
                 tables,
                 "concrete struct-default plan",
             )?;

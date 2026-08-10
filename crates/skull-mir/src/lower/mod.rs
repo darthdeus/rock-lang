@@ -1078,14 +1078,15 @@ fn lower_instance_with_plan_inner(
         .ok_or_else(|| gap("concrete plan does not own a function instance"))?;
     let (mid, fid) = (inst.func.module, inst.func.func);
     let module = ws.module(mid);
-    if !module.bodies.contains_key(&BodyOwner::Function(fid)) {
-        return Err(gap("concrete plan function has no body"));
-    }
+    let body = module
+        .bodies
+        .get(&BodyOwner::Function(fid))
+        .ok_or_else(|| gap("concrete plan function has no body"))?;
     let inf = ws
         .inference(mid)
         .and_then(|ir| ir.per_fn.get(&BodyOwner::Function(fid)));
     if let Some(inf) = inf {
-        validate_concrete_type_tables(ws, inf, &plan.types, "concrete plan")?;
+        validate_concrete_type_tables(ws, inf, body, &plan.types, "concrete plan")?;
         for (expr, _) in inf.expr_types.iter() {
             if plan.types.expr_types.get(expr).is_none() {
                 return Err(gap(format!("concrete plan is missing expression type {expr:?}")));
@@ -1342,7 +1343,12 @@ fn validate_always_plan(
         .inference(mid)
         .and_then(|ir| ir.per_fn.get(&owner))
         .ok_or_else(|| gap("concrete always-emitted plan has no inference"))?;
-    validate_concrete_type_tables(ws, inf, &plan.types, "concrete always-emitted plan")?;
+    let body = ws
+        .module(mid)
+        .bodies
+        .get(&owner)
+        .ok_or_else(|| gap("concrete always-emitted plan has no body"))?;
+    validate_concrete_type_tables(ws, inf, body, &plan.types, "concrete always-emitted plan")?;
     for (expr, _) in inf.expr_types.iter() {
         if plan.types.expr_types.get(expr).is_none() {
             return Err(gap(format!(
@@ -1379,6 +1385,7 @@ fn validate_always_plan(
 fn validate_concrete_type_tables(
     ws: &Workspace,
     inf: &BodyInference,
+    body: &Body,
     tables: &ConcreteTypeTables,
     label: &str,
 ) -> Result<(), CompilerError> {
@@ -1431,6 +1438,32 @@ fn validate_concrete_type_tables(
     let mut seen = HashSet::new();
     for ty in inf.expr_types.values().chain(inf.binding_types.values()) {
         visit(ws, inf, tables, label, *ty, &mut seen)?;
+    }
+    for (_, binding) in body.binding_arena.iter() {
+        if let Some(ty) = binding.declared_ty {
+            visit(ws, inf, tables, label, ty, &mut seen)?;
+        }
+    }
+    for (expr, node) in body.expr_arena.iter() {
+        let Expr::StructLiteral { name, .. } = node else { continue };
+        let fields = tables.struct_field_types.get(expr).ok_or_else(|| {
+            gap(format!(
+                "{label} is missing concrete fields for struct literal `{name}` ({expr:?})"
+            ))
+        })?;
+        let sid = ws
+            .struct_by_name
+            .get(&name)
+            .ok_or_else(|| gap(format!("{label} names unknown struct `{name}`")))?;
+        let def = &ws.modules[sid.module.index()].structs[sid.def];
+        for field in &def.fields {
+            if !fields.contains_key(&field.name) {
+                return Err(gap(format!(
+                    "{label} is missing concrete field `{name}.{}` ({expr:?})",
+                    field.name
+                )));
+            }
+        }
     }
     Ok(())
 }
