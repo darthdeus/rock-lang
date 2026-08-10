@@ -330,6 +330,7 @@ pub struct WgslFragmentIo {
 /// WGSL's physical answer to one target-neutral fullscreen interface.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WgslAbiPlan {
+    pub semantic_fingerprint: u64,
     pub bind_group: u32,
     pub fullscreen_vertex: WgslFullscreenVertex,
     pub fragment: WgslFragmentIo,
@@ -342,6 +343,7 @@ impl WgslAbiPlan {
     /// Derive WGSL's layout from the neutral interface alone.
     pub fn wgsl(iface: &ShaderInterfacePlan, span: Span) -> Result<Self, CompilerError> {
         validate_fullscreen_interface(iface, span)?;
+        let semantic_fingerprint = iface.semantic_fingerprint(true);
 
         let visibility = WgslStageVisibility::for_interface(iface);
         let fullscreen_uniform = WgslUniformBlock {
@@ -389,6 +391,7 @@ impl WgslAbiPlan {
             .unwrap_or_default();
 
         Ok(Self {
+            semantic_fingerprint,
             bind_group: WGSL_BIND_GROUP,
             fullscreen_vertex: WgslFullscreenVertex {
                 topology: WgslPrimitiveTopology::TriangleStrip,
@@ -442,6 +445,7 @@ impl WgslAbiPlan {
     /// is rejected before a backend can consume the source.
     pub fn wire(&self) -> String {
         let mut payload = String::new();
+        writeln!(payload, "semantic {}", self.semantic_fingerprint).unwrap();
         writeln!(payload, "group {}", self.bind_group).unwrap();
         let topology = match self.fullscreen_vertex.topology {
             WgslPrimitiveTopology::TriangleStrip => "triangle_strip",

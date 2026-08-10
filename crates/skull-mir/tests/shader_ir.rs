@@ -5,11 +5,11 @@
 //! use of it.
 
 use comfy_la_arena::Idx;
-use skull_mir::gpu_layout::WireKind;
+use skull_mir::gpu_layout::{SamplerKind, WireKind};
 use skull_mir::mir::FuncRef;
 use skull_mir::shader_ir::{
-    LogicalUniformGroup, ShaderIR, ShaderInstance, ShaderInterfacePlan, ShaderStage,
-    ShaderStageIr, UniformRole,
+    LogicalTextureGroup, LogicalUniformGroup, ShaderIR, ShaderInstance, ShaderInterfacePlan,
+    ShaderStage, ShaderStageIr, UniformRole,
 };
 use ustr::Ustr;
 
@@ -114,4 +114,36 @@ fn perturbing_an_interface_member_changes_the_interface() {
     let mut widened = base.clone();
     widened.uniform_groups[0].members[0].1 = WireKind::F32x4;
     assert_ne!(base, widened, "the interface plan does not distinguish its own members");
+}
+
+#[test]
+fn semantic_wire_is_neutral_and_fingerprint_tracks_logical_shape() {
+    let base = ShaderInterfacePlan {
+        uniform_groups: vec![LogicalUniformGroup {
+            role: UniformRole::Stage(ShaderStage::Fragment),
+            struct_name: Ustr::from("U"),
+            members: vec![(Ustr::from("a"), WireKind::F32)],
+        }],
+        textures: Some(LogicalTextureGroup {
+            struct_name: Some(Ustr::from("Textures")),
+            samplers: vec![
+                (Ustr::from("scene"), SamplerKind::Float),
+                (Ustr::from("bloom"), SamplerKind::Float),
+            ],
+            stages: vec![ShaderStage::Fragment],
+        }),
+        ..Default::default()
+    };
+    let wire = base.semantic_wire(true);
+    for forbidden in ["offset", "binding", "std140", "WGSL", "GLSL"] {
+        assert!(!wire.contains(forbidden), "semantic wire leaked {forbidden}: {wire}");
+    }
+    let mut renamed = base.clone();
+    renamed.uniform_groups[0].members[0].0 = Ustr::from("b");
+    assert_ne!(base.semantic_fingerprint(true), renamed.semantic_fingerprint(true));
+
+    let mut swapped = base.clone();
+    swapped.textures.as_mut().unwrap().samplers.swap(0, 1);
+    assert_ne!(base.semantic_fingerprint(true), swapped.semantic_fingerprint(true));
+    assert_ne!(base.semantic_fingerprint(true), base.semantic_fingerprint(false));
 }

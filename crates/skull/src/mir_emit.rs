@@ -1775,9 +1775,11 @@ fn shader_registration_lines(
         // with no group sends empty lists, which are still arguments; a short
         // call is what rock-cli/tests/shader_register_arity_gate.rs catches.
         let w = skull_codegen_glsl::BlockWire::of(emission.abi.uniform_blocks.iter(), emission.abi.uniform_array_blocks.iter());
+        let fullscreen = pair.vert.is_none();
+        let semantic_wire = emission.interface.semantic_wire(fullscreen);
         let _ = writeln!(
             out,
-            "__rock_shader_register({:?}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
+            "__rock_shader_register({:?}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
             pair.key,
             lua_long_bracket(&emission.source),
             skull_codegen_lua::lua_string_vec(&slot_names),
@@ -1791,7 +1793,8 @@ fn shader_registration_lines(
             skull_codegen_lua::lua_int_vec(&w.member_kinds),
             skull_codegen_lua::lua_int_vec(&w.member_capacities),
             skull_codegen_lua::lua_int_vec(&w.member_strides),
-            pair.vert.is_none(),
+            fullscreen,
+            lua_long_bracket(&semantic_wire),
         );
     }
     if renderer_target == RendererTarget::Wgpu {
@@ -1823,12 +1826,14 @@ fn shader_registration_lines(
             )?;
             dependencies.extend(emission.dependencies.iter().copied());
             let wire = emission.abi.wire();
+            let semantic_wire = neutral.interface.semantic_wire(true);
             let _ = writeln!(
                 out,
-                "__rock_wgpu_shader_register({}, {}, {})",
+                "__rock_wgpu_shader_register({}, {}, {}, {})",
                 skull_codegen_lua::lua_string(root),
                 skull_codegen_lua::lua_string(&emission.source),
                 skull_codegen_lua::lua_string(&wire),
+                skull_codegen_lua::lua_string(&semantic_wire),
             );
             admitted += 1;
         }

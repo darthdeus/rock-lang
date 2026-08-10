@@ -122,7 +122,7 @@ fn main() { print("{SHADER_KEY}") }
         "registration slots drifted (field order IS the texture unit):\n{slots}"
     );
     assert!(
-        line.ends_with("false);"),
+        line.contains("false, "),
         "an explicit vertex artifact must register as non-fullscreen:\n{line}"
     );
     // The `@uniform` blocks travel as parallel FLAT lists: names, sizes,
@@ -150,7 +150,7 @@ fn main() { print("{SHADER_KEY}") }
         // host's payload pushes refuse a capacity-0 target rather than treating
         // it as a one-element array.
         r#"{_data: [6, 6, 6], len: 3, __ty: "Vec"}"#,
-        r#"{_data: [0, 0, 0], len: 3, __ty: "Vec"}, {_data: [0, 0, 0], len: 3, __ty: "Vec"}, false);"#,
+        r#"{_data: [0, 0, 0], len: 3, __ty: "Vec"}, {_data: [0, 0, 0], len: 3, __ty: "Vec"}, false,"#,
     ] {
         assert!(
             line.contains(expected),

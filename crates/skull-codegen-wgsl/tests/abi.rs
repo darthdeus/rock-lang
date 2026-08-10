@@ -82,6 +82,31 @@ fn wgsl_and_glsl_project_the_same_interface_independently() {
         wgsl.textures.iter().map(|t| t.name).collect::<Vec<_>>(),
         iface.sampler_names()
     );
+    assert_eq!(
+        iface.semantic_fingerprint(true),
+        wgsl.semantic_fingerprint,
+        "the semantic identity is independent of the two physical projections"
+    );
+}
+
+#[test]
+fn semantic_wire_has_no_physical_layout_and_mutations_are_load_bearing() {
+    let iface = fixture();
+    let wire = iface.semantic_wire(true);
+    for forbidden in ["offset", "binding", "std140", "WGSL", "GLSL"] {
+        assert!(!wire.contains(forbidden), "semantic wire leaked {forbidden}: {wire}");
+    }
+
+    let mut swapped = iface.clone();
+    swapped.textures.as_mut().unwrap().samplers.swap(0, 1);
+    assert_ne!(iface.semantic_fingerprint(true), swapped.semantic_fingerprint(true));
+
+    let explicit = iface.clone();
+    assert_ne!(iface.semantic_fingerprint(true), explicit.semantic_fingerprint(false));
+
+    let mut changed_member = iface.clone();
+    changed_member.uniform_groups[0].members[0].0 = Ustr::from("renamed");
+    assert_ne!(iface.semantic_fingerprint(true), changed_member.semantic_fingerprint(true));
 }
 
 #[test]
