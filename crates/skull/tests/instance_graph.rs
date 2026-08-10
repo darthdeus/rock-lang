@@ -386,9 +386,8 @@ fn main() {}
 /// view and is asserted over the shared `Instance` in
 /// `artifact_view::cross_artifact_identity_is_the_instance_and_not_the_spelling`.
 #[test]
-fn extern_availability_follows_the_capability_not_the_target_name() {
+fn extern_availability_distinguishes_backend_owned_js_boundary() {
     use skull::artifact::{self, ArtifactRequest, Exclusion, Unrealizable};
-    use skull::instance_graph::BoundaryClass;
     use skull::target_projection as tp;
     // TWO externs, because the two causes are different questions. The
     // Lua-hosted one is foreign to any non-Lua artifact before its CLASS is
@@ -426,14 +425,14 @@ fn main() { host_tick(3) }
         None,
         "luajit supplies foreign symbols, and `main` calls this one"
     );
-    // The CAPABILITY arm: this declaration serves the JS artifact, so the class
-    // question is reached, and `foreign_symbols: false` is what rejects it.
-    // Unreachability cannot answer for it -- an `extern` is an emission ROOT.
+    // `extern(js)` is the browser/runtime boundary owned by the JS artifact;
+    // the generic foreign-symbol capability describes host symbols, not this
+    // backend-owned runtime surface. Unreachability cannot answer for it -- an
+    // `extern` is an emission ROOT.
     assert_eq!(
         cause_of(tp::JAVASCRIPT_WEB, "web_tick"),
-        Some(Exclusion::Unrealizable(Unrealizable::ClassUnsupported(BoundaryClass::Extern))),
-        "JS declares no foreign-symbol capability, so even its own extern must \
-         be an invalid boundary rather than a stub"
+        None,
+        "the JS artifact owns its `extern(js)` runtime boundary"
     );
     // The BACKEND arm: a Lua-hosted extern names a host these artifacts do not
     // have, which is answered before the class question. `NATIVE_C64` declares

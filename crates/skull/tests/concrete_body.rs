@@ -716,12 +716,19 @@ fn main() {
         })
         .collect();
     names.sort();
-    // The write, the read, and the nullable write -- one name each, except the
-    // nullable write, whose arm genuinely emits both a slot and a free.
+    // The constructor spine, write, read, and nullable write -- one name each,
+    // except the nullable write, whose arm genuinely emits both a slot and a
+    // free.
     assert_eq!(
         names,
-        vec!["__map_col_free", "__map_col_slot", "__map_col_slot", "__map_col_slot_checked"],
-        "the synthesized names are not the ones the three arms emit"
+        vec![
+            "__map_col_free",
+            "__map_col_new_spine",
+            "__map_col_slot",
+            "__map_col_slot",
+            "__map_col_slot_checked",
+        ],
+        "the synthesized names are not the ones the four arms emit"
     );
     assert_eq!(
         g.synthesized_approximated, 0,
