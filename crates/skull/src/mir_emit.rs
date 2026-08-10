@@ -2673,7 +2673,7 @@ fn assemble(
     // and in `emit_incremental`'s re-emit). Reject with a spanned diagnostic
     // rather than emit two clobbering top-level defs. Covers `emit_full` +
     // `emit_incremental` (both funnel through here); the overlay fast path drains
-    // in `emit_overlay` (can't return Err, so it warns).
+    // in `emit_overlay` and propagates the same error.
     if let Some(err) = cg.take_rejection() {
         return Err(err);
     }
@@ -3000,10 +3000,10 @@ fn update_shader_registrations(
     Ok(true)
 }
 
-fn refresh_shader_registrations(
-    &mut self,
-    ws: &Workspace,
-) -> Result<(), CompilerError> {
+    fn refresh_shader_registrations(
+        &mut self,
+        ws: &Workspace,
+    ) -> Result<(), CompilerError> {
     let collection = skull_mir::lower::collect_shader_collection(ws)?;
     let programs = shader_programs(&collection);
     let shader_scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
@@ -3011,9 +3011,25 @@ fn refresh_shader_registrations(
     let view = realize_shader_view(ws, &self.graph, &programs, &shader_scx)?;
     let registrations = shader_registration_lines(ws, &shader_scx, &collection, &view)?;
     self.shader_view = view;
-    self.shader_registrations = registrations;
-    Ok(())
-}
+        self.shader_registrations = registrations;
+        Ok(())
+    }
+
+    fn shader_delta_affects_view(&self, update: &crate::instance_graph::UpdateStats) -> bool {
+        let shader_decls: FxHashSet<FuncRef> = self
+            .shader_view
+            .roots
+            .iter()
+            .chain(self.shader_view.helpers.iter())
+            .chain(self.shader_view.builtins.iter())
+            .map(|instance| instance.func)
+            .collect();
+        update
+            .added
+            .iter()
+            .chain(update.removed.iter())
+            .any(|instance| shader_decls.contains(&instance.func))
+    }
 
 /// Take the specialized chunks an assembly BUILT into the cache, with their
 /// reverse-dependency edges, so the next build reuses them and an edit to any
@@ -3169,7 +3185,11 @@ fn update_chunk_cache(
     &mut self,
     ws: &Workspace,
     reinferred: &[(ModuleId, BodyOwner)],
-) -> (FxHashSet<Instance>, Vec<CompilerError>) {
+) -> (
+    FxHashSet<Instance>,
+    crate::instance_graph::UpdateStats,
+    Vec<CompilerError>,
+) {
     let cache = self;
     // Fold each re-inferred body's value-reference contribution into the cached
     // ScalarCtx. A name whose taken-by-ref membership flips changes scalar-ABI
@@ -3317,7 +3337,7 @@ fn update_chunk_cache(
             affected.len(),
         );
     }
-    (affected, added_errors)
+    (affected, update, added_errors)
 }
 }
 
@@ -3331,11 +3351,11 @@ pub fn emit_incremental(
     // `update_chunk_cache`'s re-walk must see this edit's set, not the last
     // build's.
     let shader_changed = cache.update_shader_registrations(ws, reinferred)?;
-    let (_affected, added_errors) = cache.update_chunk_cache(ws, reinferred);
+    let (_affected, update, added_errors) = cache.update_chunk_cache(ws, reinferred);
     if let Some(err) = SkullEmitCache::combine_errors(added_errors) {
         return Err(err);
     }
-    if shader_changed {
+    if shader_changed || cache.shader_delta_affects_view(&update) {
         cache.refresh_shader_registrations(ws)?;
     }
     let reemit = t_reemit.elapsed();
@@ -3586,10 +3606,11 @@ pub fn emit_overlay(
     // Shader registrations FIRST -- their dependencies are graph/view roots, so
     // `update_chunk_cache`'s re-walk must see this edit's set.
     let shader_changed = cache.update_shader_registrations(ws, reinferred)?;
-    let (affected, added_errors) = cache.update_chunk_cache(ws, reinferred);
+    let (affected, update, added_errors) = cache.update_chunk_cache(ws, reinferred);
     if let Some(err) = SkullEmitCache::combine_errors(added_errors) {
         return Err(err);
     }
+    let shader_changed = shader_changed || cache.shader_delta_affects_view(&update);
     if shader_changed {
         cache.refresh_shader_registrations(ws)?;
     }
