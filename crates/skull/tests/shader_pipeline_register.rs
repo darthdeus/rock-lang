@@ -12,7 +12,9 @@ use bone_semantic::hir::BodyOwner;
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
 use crate::common::{emit_module, function_body, ws_with_stdlib};
-use skull::mir_emit::{emit_full, emit_incremental, emit_overlay};
+use skull::mir_emit::{
+    emit_full, emit_full_in_for_renderer, emit_incremental, emit_overlay, RendererTarget,
+};
 
 /// One shared vertex + one fragment, referenced from TWO call sites (two fns).
 const SRC: &str = r#"
@@ -350,4 +352,38 @@ fn single_arg_overlay_carries_registration() {
         "the incremental overlay must re-run the single-arg registration:\n{}",
         overlay.lua
     );
+}
+
+const WGPU_FULLSCREEN_SRC: &str = r#"
+@shader(fragment)
+fn blit_frag(tc: Vec2) -> Vec4 { return Vec4 { x: tc.x, y: 0.0, z: 1.0, w: 1.0 } }
+@shader(fragment)
+fn present_frag(tc: Vec2) -> Vec4 { return Vec4 { x: 0.0, y: tc.y, z: 1.0, w: 1.0 } }
+@shader(fragment)
+fn tonemap_frag(tc: Vec2) -> Vec4 { return Vec4 { x: 1.0, y: 1.0, z: tc.x, w: 1.0 } }
+
+fn use_all() -> string {
+    let a = rock_shader(blit_frag)
+    let b = rock_shader(present_frag)
+    return rock_shader(tonemap_frag)
+}
+"#;
+
+#[test]
+fn selected_wgpu_registration_is_exactly_the_three_fullscreen_roots() {
+    let ws = ws_with_stdlib(WGPU_FULLSCREEN_SRC);
+    let mid = test_mid(&ws);
+    let (emit, _) = emit_full_in_for_renderer(&ws, mid, None, RendererTarget::Wgpu)
+        .expect("selected fullscreen roots emit");
+    assert_eq!(
+        emit.lua.matches("__rock_wgpu_shader_register(").count(),
+        3,
+        "the selected renderer admits a non-zero, exact WGSL root population"
+    );
+    for root in ["blit_frag", "present_frag", "tonemap_frag"] {
+        assert!(
+            emit.lua.contains(&format!("__rock_wgpu_shader_register(\"{root}\"")),
+            "selected root {root} is missing from WGSL registration"
+        );
+    }
 }

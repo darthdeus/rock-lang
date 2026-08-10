@@ -909,7 +909,17 @@ pub fn emit_workspace_mir_in(
     user_mid: ModuleId,
     project_root: Option<&str>,
 ) -> Result<MirEmit, CompilerError> {
-    emit_full_in(ws, user_mid, project_root).map(|(emit, _cache)| emit)
+    emit_workspace_mir_in_for_renderer(ws, user_mid, project_root, RendererTarget::Gl)
+}
+
+pub fn emit_workspace_mir_in_for_renderer(
+    ws: &Workspace,
+    user_mid: ModuleId,
+    project_root: Option<&str>,
+    renderer_target: RendererTarget,
+) -> Result<MirEmit, CompilerError> {
+    emit_full_in_for_renderer(ws, user_mid, project_root, renderer_target)
+        .map(|(emit, _cache)| emit)
 }
 
 /// One emitted ordinary/coroutine function definition plus the facts incremental
@@ -1011,6 +1021,13 @@ pub struct SkullEmitCache {
     emitted: FxHashSet<FuncRef>,
     /// The compilation target's root directory; see [`is_library_module`].
     project_root: Option<String>,
+    renderer_target: RendererTarget,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RendererTarget {
+    Gl,
+    Wgpu,
 }
 
 #[derive(Default)]
@@ -1711,7 +1728,12 @@ fn lua_long_bracket(s: &str) -> String {
 /// only the resolved `FuncRef`s (the layering constraint). An emit error (tier
 /// violation, stage/collision) is a spanned `CompilerError` failing the compile,
 /// never skip-and-continue.
-fn shader_registration_lines(ws: &Workspace) -> Result<ShaderRegistrations, CompilerError> {
+const WGSL_FULLSCREEN_ROOTS: [&str; 3] = ["blit_frag", "present_frag", "tonemap_frag"];
+
+fn shader_registration_lines(
+    ws: &Workspace,
+    renderer_target: RendererTarget,
+) -> Result<ShaderRegistrations, CompilerError> {
     // Always Core330. The profile is a property of the GL context, which a build
     // cannot know: the engine rewrites #version + precision for GLES at
     // shader-compile time (stone-gl `adapt_source_for_gles`), and that header is
@@ -1720,7 +1742,7 @@ fn shader_registration_lines(ws: &Workspace) -> Result<ShaderRegistrations, Comp
     let collection = skull_mir::lower::collect_shader_collection(ws)?;
     let mut out = String::new();
     let mut dependencies = FxHashSet::default();
-    for pair in collection.pairs {
+    for pair in &collection.pairs {
         let fname = ws.module(pair.frag.module).functions[pair.frag.func].name;
         // vert=None is the A3c single-arg fullscreen form -> the A1 single-entry
         // emitter (PIXEL body + fullscreen VERTEX passthrough).
@@ -1771,6 +1793,51 @@ fn shader_registration_lines(ws: &Workspace) -> Result<ShaderRegistrations, Comp
             skull_codegen_lua::lua_int_vec(&w.member_strides),
             pair.vert.is_none(),
         );
+    }
+    if renderer_target == RendererTarget::Wgpu {
+        let mut admitted = 0usize;
+        for root in WGSL_FULLSCREEN_ROOTS {
+            let Some(pair) = collection.pairs.iter().find(|pair| pair.key == root) else {
+                return Err(CompilerError::new_no_location(format!(
+                    "selected wgpu fullscreen root `{root}` was not admitted by rock_shader"
+                )));
+            };
+            if let Some(vert) = pair.vert {
+                let vname = ws.module(vert.module).functions[vert.func].name;
+                return Err(CompilerError::new_no_location(format!(
+                    "selected wgpu fullscreen root `{root}` has explicit vertex stage `{vname}`; \
+                     only compiler-owned fullscreen geometry is supported"
+                )));
+            }
+            let neutral = skull_codegen_wgsl::plan_fullscreen_artifact(ws, pair.frag)?;
+            let abi = skull_codegen_wgsl::WgslAbiPlan::wgsl(
+                &neutral.interface,
+                bone_semantic::prelude::Span::default(),
+            )?;
+            let emission = skull_codegen_wgsl::emit_fullscreen_shader(
+                ws,
+                &neutral.ir,
+                &neutral.interface,
+                &abi,
+                bone_semantic::prelude::Span::default(),
+            )?;
+            dependencies.extend(emission.dependencies.iter().copied());
+            let wire = emission.abi.wire();
+            let _ = writeln!(
+                out,
+                "__rock_wgpu_shader_register({}, {}, {})",
+                skull_codegen_lua::lua_string(root),
+                skull_codegen_lua::lua_string(&emission.source),
+                skull_codegen_lua::lua_string(&wire),
+            );
+            admitted += 1;
+        }
+        if admitted != WGSL_FULLSCREEN_ROOTS.len() {
+            return Err(CompilerError::new_no_location(format!(
+                "selected wgpu fullscreen registration admitted {admitted} roots, expected {}",
+                WGSL_FULLSCREEN_ROOTS.len()
+            )));
+        }
     }
     Ok(ShaderRegistrations {
         lua: out,
@@ -2177,7 +2244,7 @@ pub fn emit_full(
     ws: &Workspace,
     user_mid: ModuleId,
 ) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
-    emit_full_in(ws, user_mid, None)
+    emit_full_in_for_renderer(ws, user_mid, None, RendererTarget::Gl)
 }
 
 /// Absolutize `project_root` so it can be prefix-matched against module file
@@ -2214,6 +2281,15 @@ pub fn emit_full_in(
     ws: &Workspace,
     user_mid: ModuleId,
     project_root: Option<&str>,
+) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
+    emit_full_in_for_renderer(ws, user_mid, project_root, RendererTarget::Gl)
+}
+
+pub fn emit_full_in_for_renderer(
+    ws: &Workspace,
+    user_mid: ModuleId,
+    project_root: Option<&str>,
+    renderer_target: RendererTarget,
 ) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
     let project_root = canonical_project_root(ws, project_root)?;
     let project_root = project_root.as_deref();
@@ -2317,7 +2393,7 @@ pub fn emit_full_in(
             static_key_baseline.insert(sc.cell, static_cell_key(sc));
         }
     }
-    let shader_registrations = shader_registration_lines(ws)?;
+    let shader_registrations = shader_registration_lines(ws, renderer_target)?;
     let cache = SkullEmitCache {
         chunks,
         changed_since_full: FxHashSet::default(),
@@ -2330,6 +2406,7 @@ pub fn emit_full_in(
         shader_registrations,
         emitted: FxHashSet::default(),
         project_root: project_root.map(str::to_string),
+        renderer_target,
     };
     let (emit, emitted) = assemble(ws, &cache.cg, &cache.scx, &cache)?;
     let mut cache = cache;
@@ -2375,7 +2452,7 @@ fn update_shader_registrations(
     if !affected {
         return Ok(false);
     }
-    self.shader_registrations = shader_registration_lines(ws)?;
+    self.shader_registrations = shader_registration_lines(ws, self.renderer_target)?;
     Ok(true)
 }
 

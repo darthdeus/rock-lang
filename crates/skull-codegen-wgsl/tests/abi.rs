@@ -128,3 +128,18 @@ fn unsupported_fullscreen_shapes_are_spanned_rejections() {
         WgslAbiPlan::wgsl(&iface, Span::default()).expect_err("bool uniform must be rejected");
     assert!(error.message.contains("unsupported wire kind"));
 }
+
+#[test]
+fn abi_wire_is_deterministic_and_carries_physical_order() {
+    let plan = WgslAbiPlan::wgsl(&fixture(), Span::default()).expect("WGSL projection");
+    let wire = plan.wire();
+    assert!(wire.starts_with("WGSL_ABI_V1\nchecksum "));
+    assert!(wire.contains("vertex triangle_strip 4 0"));
+    assert!(wire.contains("fragment 0 0 3"));
+    assert!(wire.contains("block fragment FragU 0 16 f 2"));
+    assert!(wire.contains("member cutoff 0 0 4 4"));
+    assert!(wire.contains("member resolution 1 8 8 8"));
+    assert!(wire.contains("texture 0 scene float 1 2 f"));
+    assert!(wire.contains("texture 1 bloom float 3 4 f"));
+    assert_eq!(wire, plan.wire(), "the compiler wire must be deterministic");
+}

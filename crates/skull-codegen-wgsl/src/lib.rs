@@ -28,6 +28,7 @@ use ustr::Ustr;
 pub const WGSL_BIND_GROUP: u32 = 0;
 pub const FULLSCREEN_VARYING_LOCATION: u32 = 0;
 pub const FRAGMENT_OUTPUT_LOCATION: u32 = 0;
+pub const WGSL_ABI_WIRE_VERSION: &str = "WGSL_ABI_V1";
 
 fn err(span: Span, message: impl Into<String>) -> CompilerError {
     CompilerError::new_with_label(span, message.into())
@@ -407,6 +408,115 @@ impl WgslAbiPlan {
     pub fn texture(&self, slot: u32) -> Option<&WgslTextureBinding> {
         self.textures.iter().find(|texture| texture.slot == slot)
     }
+
+    /// Serialize the physical projection for the runtime boundary.
+    ///
+    /// This is deliberately a small versioned wire rather than WGSL metadata
+    /// recovered by the runtime. The checksum covers every physical field, so
+    /// a stale or independently edited binding/order/offset/visibility answer
+    /// is rejected before a backend can consume the source.
+    pub fn wire(&self) -> String {
+        let mut payload = String::new();
+        writeln!(payload, "group {}", self.bind_group).unwrap();
+        let topology = match self.fullscreen_vertex.topology {
+            WgslPrimitiveTopology::TriangleStrip => "triangle_strip",
+        };
+        writeln!(
+            payload,
+            "vertex {} {} {}",
+            topology,
+            self.fullscreen_vertex.vertex_count,
+            self.fullscreen_vertex.varying_location
+        )
+        .unwrap();
+        writeln!(
+            payload,
+            "fragment {} {} {}",
+            self.fragment.uv_location,
+            self.fragment.output_location,
+            self.fragment.output.code()
+        )
+        .unwrap();
+        writeln!(payload, "blocks {}", self.uniform_blocks.len()).unwrap();
+        for block in &self.uniform_blocks {
+            writeln!(
+                payload,
+                "block {} {} {} {} {} {}",
+                uniform_role_wire(block.role),
+                block.struct_name,
+                block.binding,
+                block.size,
+                visibility_wire(block.visibility),
+                block.members.len()
+            )
+            .unwrap();
+            for member in &block.members {
+                writeln!(
+                    payload,
+                    "member {} {} {} {} {}",
+                    member.name,
+                    member.kind.code(),
+                    member.offset,
+                    member.align,
+                    member.size
+                )
+                .unwrap();
+            }
+        }
+        writeln!(payload, "textures {}", self.textures.len()).unwrap();
+        for texture in &self.textures {
+            writeln!(
+                payload,
+                "texture {} {} {} {} {} {}",
+                texture.slot,
+                texture.name,
+                sampler_kind_wire(texture.kind),
+                texture.texture_binding,
+                texture.sampler_binding,
+                visibility_wire(texture.visibility)
+            )
+            .unwrap();
+        }
+        format!(
+            "{}\nchecksum {}\n{}",
+            WGSL_ABI_WIRE_VERSION,
+            wire_checksum(payload.as_bytes()),
+            payload
+        )
+    }
+}
+
+fn uniform_role_wire(role: UniformRole) -> &'static str {
+    match role {
+        UniformRole::Engine => "engine",
+        UniformRole::Stage(ShaderStage::Fragment) => "fragment",
+        UniformRole::Stage(ShaderStage::Vertex) => "vertex",
+    }
+}
+
+fn sampler_kind_wire(kind: SamplerKind) -> &'static str {
+    match kind {
+        SamplerKind::Float => "float",
+        SamplerKind::Int => "int",
+    }
+}
+
+fn visibility_wire(visibility: WgslStageVisibility) -> &'static str {
+    match (visibility.vertex, visibility.fragment) {
+        (false, false) => "none",
+        (true, false) => "v",
+        (false, true) => "f",
+        (true, true) => "vf",
+    }
+}
+
+fn wire_checksum(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 fn uniform_role_key(role: UniformRole) -> u8 {
