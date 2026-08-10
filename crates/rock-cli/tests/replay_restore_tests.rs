@@ -72,6 +72,26 @@ fn run_replay_dump(game: &str, frames: u32, log: &str, env: &[(&str, &str)]) -> 
     serde_json::from_slice(&out.stdout).expect("dump-state JSON")
 }
 
+/// `rock frame <game> -n N --record <log> --dump-state [env]` -> parsed JSON.
+/// Unlike `run_replay_dump`, this keeps the process in live record mode so a
+/// test can prove a rewind happened without a supervisor relaunch.
+fn run_record_dump(game: &str, frames: u32, log: &str, env: &[(&str, &str)]) -> serde_json::Value {
+    let scratch = tempfile::tempdir().unwrap();
+    let frames_s = frames.to_string();
+    let out = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args([
+            "frame", game, "-n", &frames_s, "--record", log,
+            "--dump-state", "--output", &scratch.path().to_string_lossy(),
+        ])
+        .envs(env.iter().copied())
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .current_dir(workspace_root())
+        .output()
+        .expect("spawn live record");
+    assert!(out.status.success(), "live record failed: {}", String::from_utf8_lossy(&out.stderr));
+    serde_json::from_slice(&out.stdout).expect("live record dump-state JSON")
+}
+
 fn current_tick(s: &serde_json::Value) -> i64 {
     s["stone"]["current_tick"].as_i64().expect("current_tick")
 }
@@ -155,6 +175,26 @@ fn assert_sim_state_matches(
     // The denominator for the exclusion: there WAS something to exclude, so a
     // green here is not "there were no handles to disagree about".
     assert!(stripped > 0, "no sim-state global carried a host-projection leaf");
+}
+
+fn assert_sim_state_matches_exact(
+    got: &serde_json::Value,
+    want: &serde_json::Value,
+    sim: &std::collections::HashSet<String>,
+    label: &str,
+) {
+    let mut compared = 0;
+    for (pkg, globals) in got.as_object().expect("dump object") {
+        let want_pkg = &want[pkg];
+        for (name, val) in globals.as_object().expect("pkg object") {
+            if !sim.contains(name) {
+                continue;
+            }
+            assert_eq!(val, &want_pkg[name], "sim-state {pkg}.{name} must match {label}");
+            compared += 1;
+        }
+    }
+    assert!(compared > 0, "must compare at least one sim-state global");
 }
 
 /// P4 item 2: scrub to an ARBITRARY earlier tick. Cadence keyframes (every
@@ -293,6 +333,118 @@ fn refused_scrub_does_not_leave_seek_active_or_complete() {
     assert!(diag.get("STONE_SEEK_COUNT").is_none(), "a refused scrub must not complete a seek: {diag}");
     assert!(diag.get("STONE_SEEK_RESIM_FRAMES").is_none(), "a refused scrub must not count resimulation: {diag}");
     assert!(diag.get("STONE_SEEK_MS").is_none(), "a refused scrub must not report seek time: {diag}");
+}
+
+#[test]
+fn live_record_rewind_matches_plain_replay_at_target() {
+    let game = "bitgun";
+    let history: u32 = 40;
+    let target: i64 = 25;
+    let runtime_frames = 80;
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("live-rewind.replay");
+    let log_s = log.to_string_lossy().into_owned();
+
+    let rewound = run_record_dump(
+        game,
+        runtime_frames,
+        &log_s,
+        &[
+            ("STONE_LIVE_REWIND", "1"),
+            ("STONE_LIVE_REWIND_AT_FRAME", "40"),
+            ("STONE_LIVE_REWIND_TO_TICK", "25"),
+            ("STONE_AUDIO_PROBE", "1"),
+        ],
+    );
+    assert_eq!(current_tick(&rewound), target, "live rewind must pause at the requested target");
+    let diag = &rewound["__stone_diag"];
+    assert_eq!(diag["STONE_LIVE_REWIND_SUPPORTED"].as_i64(), Some(1));
+    assert_eq!(diag["STONE_LIVE_REWIND_REFUSED"].as_i64(), Some(0));
+    assert_eq!(diag["STONE_LIVE_REWIND_COUNT"].as_i64(), Some(1));
+    assert_eq!(diag["STONE_LIVE_REWIND_RESTORE_TICK"].as_i64(), Some(0));
+    assert_eq!(diag["STONE_LIVE_REWIND_FUTURE_TICKS"].as_i64(), Some(history as i64 - target));
+    assert_eq!(diag["STONE_SEEK_COUNT"].as_i64(), Some(1));
+    assert_eq!(diag["STONE_SEEK_FROM_TICK"].as_i64(), Some(history as i64));
+    assert_eq!(diag["STONE_SEEK_TO_TICK"].as_i64(), Some(target));
+    assert_eq!(diag["STONE_SEEK_RESIM_FRAMES"].as_i64(), Some(target));
+    assert_eq!(diag["STONE_SEEK_ACTIVE"].as_i64(), Some(0));
+    assert!(
+        diag["AUDIO_SEEK_MUTES"].as_i64().is_some_and(|n| n > 0),
+        "live rewind must use the seek audio mute gate: {diag}"
+    );
+    assert!(
+        diag["STONE_RESTORE_MS"].as_f64().is_some_and(|ms| ms > 0.0),
+        "live rewind must reach the existing snapshot restore path: {diag}"
+    );
+    assert!(
+        diag["STONE_TRANSIENT_RESET_CALLS"].as_i64().unwrap_or(0) > 0,
+        "live rewind must fire the existing transient-reset seam: {diag}"
+    );
+    let record_lines = std::fs::read_to_string(&log_s)
+        .unwrap()
+        .lines()
+        .filter(|line| line.starts_with("t "))
+        .count();
+    assert_eq!(record_lines, history as usize, "the live future must remain one canonical input stream");
+
+    let reference = run_replay_dump(
+        game,
+        history,
+        &log_s,
+        &[("STONE_START_PAUSED", "1"), ("STONE_STEP_FRAMES", &target.to_string())],
+    );
+    assert_eq!(current_tick(&reference), target, "reference must sit at tick {target}");
+    let sim = sim_state_names(game, history);
+    assert_sim_state_matches(&rewound, &reference, &sim, "live-rewind tick-25");
+}
+
+#[test]
+fn live_record_rewind_refuses_unsupported_state_without_mutating_world() {
+    let game = "survivors";
+    let runtime_frames = 80;
+    let dir = tempfile::tempdir().unwrap();
+    for (mode, global, kind) in [
+        ("scene", "LIVE_REWIND_PROBE_SCENE", "Scene"),
+        ("foreign", "LIVE_REWIND_PROBE_FOREIGN", "raw"),
+        ("cdata", "LIVE_REWIND_PROBE_MUTABLE_CDATA", "cdata"),
+    ] {
+        let refused_log = dir.path().join(format!("{mode}-refused.replay"));
+        let refused_log_s = refused_log.to_string_lossy().into_owned();
+        let refused = run_record_dump(
+            game,
+            runtime_frames,
+            &refused_log_s,
+            &[
+                ("ROCK_TEST_SEED", "42"),
+                ("STONE_LIVE_REWIND", "1"),
+                ("STONE_LIVE_REWIND_UNSUPPORTED", mode),
+                ("STONE_LIVE_REWIND_AT_FRAME", "40"),
+                ("STONE_LIVE_REWIND_TO_TICK", "25"),
+            ],
+        );
+        let control = run_replay_dump(
+            game,
+            runtime_frames,
+            &refused_log_s,
+            &[("STONE_KEYFRAME_INTERVAL", "0"), ("STONE_LIVE_REWIND_UNSUPPORTED", mode)],
+        );
+
+        assert_eq!(current_tick(&refused), current_tick(&control), "{mode} refusal must keep live time moving");
+        let diag = &refused["__stone_diag"];
+        assert_eq!(diag["STONE_LIVE_REWIND_SUPPORTED"].as_i64(), Some(0), "{mode}");
+        assert_eq!(diag["STONE_LIVE_REWIND_REFUSED"].as_i64(), Some(1), "{mode}");
+        assert_eq!(diag["STONE_LIVE_REWIND_REFUSALS"].as_i64(), Some(1), "{mode}");
+        assert!(diag.get("STONE_LIVE_REWIND_COUNT").is_none(), "{mode} refusal must not restore: {diag}");
+        assert!(diag.get("STONE_SEEK_COUNT").is_none(), "{mode} refusal must not activate a seek: {diag}");
+        assert!(diag.get("STONE_RESTORE_MS").is_none(), "{mode} refusal must not restore partial state: {diag}");
+        assert_eq!(diag.get("STONE_TRANSIENT_RESET_CALLS").and_then(serde_json::Value::as_i64), None);
+        let reason = diag["STONE_LIVE_REWIND_REFUSAL"].as_str().expect("refusal reason");
+        assert!(reason.contains(global), "{mode} refusal must name its global: {reason}");
+        assert!(reason.contains(kind), "{mode} refusal must name its unsupported type: {reason}");
+
+        let sim = sim_state_names(game, runtime_frames);
+        assert_sim_state_matches_exact(&refused, &control, &sim, &format!("refused live-rewind {mode} control"));
+    }
 }
 
 fn keyframe_count(s: &serde_json::Value) -> i64 {
