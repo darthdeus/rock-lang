@@ -687,7 +687,8 @@ pub struct MirFunc {
     /// pass (`skull_transform::recover_counted_loops`) is gated on these tags:
     /// only a desugared iterator loop may have its bound snapshot-hoisted
     /// (iterator invalidation is recorded UB), never a user-written `while`.
-    /// The id survives inlining: `splice_general` keeps the call block's id.
+    /// General splicing maps each cloned header through its block map; the
+    /// caller's original call block keeps its own id.
     pub for_iter_headers: Vec<Idx<Block>>,
     /// Per call inst of an `Iterator`-bounded callee: the resolution tree that
     /// substitutes the placeholder [`Inst::CallBoundMulti`]s inside that callee
@@ -704,8 +705,9 @@ pub struct MirFunc {
     /// `BoundTree`'s `next_generics` are `TyId`s in the arena that recorded it,
     /// so a tree arriving from another instantiation cannot be stated as one --
     /// which is the whole reason a demand carries a `ResolvedBoundTree`. The
-    /// splice path has no need of it: it clones the callee in place, so its
-    /// sub-tree is grafted as a raw tree in the caller's own arena.
+    /// splice path imports the resolved sub-tree beside the raw graft so a
+    /// later standalone demand or nested splice does not re-derive another
+    /// body's fact.
     pub resolved_bound_trees:
         bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::bound::ResolvedBoundTree>,
     /// Per call inst that the caller lowered with the SPECIALIZED scalar ABI:

@@ -160,21 +160,9 @@ fn annotation_gate(has_inline: bool, has_pure: bool, size_heuristic: bool) -> Op
 /// eligible. Hard exclusions: extern, `inline(lua)`, `co fn`, lambda-bearing,
 /// self-recursive, or any reachable non-`Return`/`Goto`/`Branch`/`Switch`
 /// terminator (a reachable `Unreachable`/`Yield` would mis-lower to a bare
-/// `return` inside the caller). `@inline` bypasses the size caps only.
-/// **Inlining is OFF, for cut C+D step E1** (`docs/monomorphization-plan.md`
-/// Stage 3, "Gate: compiling with inlining DISABLED remains correct").
-///
-/// A splice carries the callee's body into the caller, and the spliced
-/// snapshot's generic calls were lowered against whatever instantiation the
-/// callee was lowered for. Now that every body is instance-owned that choice is
-/// the CALLER's, so a splice taken from the wrong instance spells a callee
-/// symbol nothing emits -- which is a nil global at runtime, not a slower
-/// program. Stage-0e already turned inlining off for exactly this reason and
-/// that gate is subsumed here.
-///
-/// E2 restores it over concrete instance bodies. At that point a residual call
-/// names a concrete definition with the same ABI plan, which is what makes
-/// [`arity_ok`] declining a splice correct behaviour rather than a miscompile.
+/// `return` inside the caller). `@inline` bypasses the size caps only. The gate
+/// remains a temporary E2 boundary until the concrete-body cut and its
+/// adversarial checks are complete.
 fn inlining_enabled() -> bool {
     true
 }
@@ -618,6 +606,9 @@ fn clone_all(
         remap_term_clone(&mut term, &inst_map, &block_map);
         caller.blocks[nbid].term = term;
     }
+    caller
+        .for_iter_headers
+        .extend(callee.for_iter_headers.iter().map(|header| block_map[header]));
     (inst_map, cell_map, block_map)
 }
 
@@ -856,6 +847,14 @@ fn resolve_cloned_bound_calls(
             scx.interner(),
             "at this splice site",
         )?;
+    }
+    if let Some((&old_id, &new_id)) = inst_map.iter().find(|(_, new_id)| {
+        matches!(func.insts[**new_id], Inst::CallBoundMulti { .. })
+    }) {
+        return Err(CompilerError::new_no_location(format!(
+            "internal: cloned bounded placeholder {:?} from `{}` survived concrete splice as {:?}",
+            old_id, callee.name, new_id
+        )));
     }
     Ok(())
 }

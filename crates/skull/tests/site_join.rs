@@ -270,6 +270,144 @@ fn main() { print("{top(3)}") }
     }
 }
 
+#[test]
+fn cloned_iterator_headers_are_reinterned_for_forl_recovery() {
+    let ws = check(
+        r#"
+@inline
+fn sum_inner(xs: [int]) -> int {
+    let total = 0
+    for x in xs { total = total + x }
+    return total
+}
+
+fn top(xs: [int]) -> int { return sum_inner(xs) }
+fn main() { print("{top([1, 2, 3])}") }
+"#,
+    );
+    let mf = prepared_body(&ws, "top");
+    assert!(
+        !mf.for_iter_headers.is_empty(),
+        "the inline callee's iterator header was not carried into the caller"
+    );
+    for &header in &mf.for_iter_headers {
+        assert!(
+            mf.blocks.iter().any(|(block, _)| block == header),
+            "for_iter_headers contains a block outside the caller CFG: {header:?}"
+        );
+    }
+}
+
+fn count_bound_splits(mf: &MirFunc) -> usize {
+    mf.bound_next_split.len() + mf.nested_fns.iter().map(count_bound_splits).sum::<usize>()
+}
+
+#[test]
+fn cloned_bounded_value_calls_consume_split_placeholders() {
+    let ws = check(
+        r#"
+nobox value Pair { x: int, y: int }
+
+fn sum_all<I: Iterator<Pair>>(it: I) -> int {
+    let total = 0
+    for v in it { total = total + v.x }
+    return total
+}
+
+fn main() {
+    let xs = [Pair { x: 1, y: 2 }, Pair { x: 3, y: 4 }]
+    print("{sum_all(xs.iter())}")
+}
+        "#,
+    );
+    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
+    let (sum_fid, _) = ws
+        .module(mid)
+        .functions
+        .iter()
+        .find(|(_, f)| f.name.as_str() == "sum_all")
+        .expect("sum_all");
+    let scx = ScalarCtx::new(&ws);
+    let raw = skull_mir::lower::lower_instance(
+        &ws,
+        &scx,
+        &skull_mir::instance::Instance::base(skull_mir::mir::FuncRef {
+            module: mid,
+            func: sum_fid,
+        }),
+    )
+    .expect("lower sum_all");
+    assert!(count_bound_multi(&raw) > 0, "fixture has no bounded placeholder");
+    assert!(!raw.bound_next_split.is_empty(), "fixture has no split placeholder");
+    let mf = prepared_body(&ws, "main");
+    let bound_calls = count_bound_multi(&mf);
+    assert_eq!(bound_calls, 0, "a concrete bounded call survived splicing: {mf:?}");
+    assert_eq!(
+        count_bound_splits(&mf),
+        0,
+        "a split marker survived after its bounded placeholder was consumed"
+    );
+}
+
+#[test]
+fn standalone_bounded_resolution_records_a_nonempty_resolved_tree() {
+    let src = r#"
+struct Item { id: int, p: float }
+
+fn main() {
+    let xs = [Item { id: 1, p: 3.0 }, Item { id: 2, p: 2.0 }]
+    let ids = xs.map(_.id).collect()
+    print("{ids[0]}")
+}
+"#;
+    let (ws, g) = graph_of(src);
+    let scx = ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let mut picked = None;
+    for (candidate, candidate_tree) in g.bound_trees() {
+        if candidate_tree.next.is_empty()
+            || !candidate_tree.next.values().any(|w| !w.sub.next.is_empty())
+            || !ws.module(candidate.func.module).functions[candidate.func.func]
+                .generic_bounds
+                .iter()
+                .any(Option::is_some)
+        {
+            continue;
+        }
+        let Ok(mf) = skull_mir::lower::lower_instance(&ws, &scx, candidate) else { continue };
+        if count_bound_multi(&mf) > 0 {
+            picked = Some((candidate.clone(), candidate_tree.to_resolved()));
+            break;
+        }
+    }
+    let (inst, tree) = picked.expect("the fixture has no prepared bounded body with a tree");
+    let mut mf = skull_mir::lower::lower_instance(&ws, &scx, &inst).expect("lower bounded instance");
+    assert!(!tree.is_empty(), "the prepared bounded fixture has no incoming tree");
+    let placeholder_ids: Vec<_> = mf
+        .insts
+        .iter()
+        .filter_map(|(id, inst)| matches!(inst, Inst::CallBoundMulti { .. }).then_some(id))
+        .collect();
+    assert!(!placeholder_ids.is_empty(), "the standalone fixture has no placeholder");
+    skull_transform::bound::resolve_standalone_bound_calls(
+        &ws,
+        &scx,
+        scx.interner(),
+        &mut mf,
+        &tree,
+    )
+    .expect("resolve bounded instance");
+    assert!(
+        !mf.resolved_bound_trees.is_empty(),
+        "standalone substitution did not retain the witness's resolved tree"
+    );
+    for id in placeholder_ids {
+        assert!(
+            mf.callee_instances.contains_key(&id),
+            "the concrete bounded callee lost its owner identity at {id:?}"
+        );
+    }
+}
+
 /// A synthesized column-storage call joins ONLY under its own operation.
 ///
 /// A column-stored `Map` rewrites `m[k] = v` and `table_unset` into runtime
