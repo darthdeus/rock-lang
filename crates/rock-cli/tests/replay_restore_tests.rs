@@ -351,8 +351,8 @@ fn live_record_rewind_matches_plain_replay_at_target() {
         &log_s,
         &[
             ("STONE_LIVE_REWIND", "1"),
-            ("STONE_LIVE_REWIND_AT_FRAME", "40"),
-            ("STONE_LIVE_REWIND_TO_TICK", "25"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
+            ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
             ("STONE_AUDIO_PROBE", "1"),
         ],
     );
@@ -418,8 +418,8 @@ fn live_record_rewind_refuses_unsupported_state_without_mutating_world() {
                 ("ROCK_TEST_SEED", "42"),
                 ("STONE_LIVE_REWIND", "1"),
                 ("STONE_LIVE_REWIND_UNSUPPORTED", mode),
-                ("STONE_LIVE_REWIND_AT_FRAME", "40"),
-                ("STONE_LIVE_REWIND_TO_TICK", "25"),
+                ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
+                ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
             ],
         );
         let control = run_replay_dump(
@@ -483,8 +483,8 @@ fn live_record_rewind_refuses_late_created_unsupported_state() {
                 ("STONE_LIVE_REWIND", "1"),
                 ("STONE_LIVE_REWIND_UNSUPPORTED", mode),
                 ("STONE_LIVE_REWIND_UNSUPPORTED_AT_TICK", "10"),
-                ("STONE_LIVE_REWIND_AT_FRAME", "40"),
-                ("STONE_LIVE_REWIND_TO_TICK", "25"),
+                ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
+                ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
             ],
         );
         let control = run_replay_dump(
@@ -546,8 +546,8 @@ fn live_record_rewind_admits_supported_late_state() {
         ("STONE_LIVE_REWIND", "1"),
         ("STONE_LIVE_REWIND_UNSUPPORTED", "supported"),
         ("STONE_LIVE_REWIND_UNSUPPORTED_AT_TICK", "10"),
-        ("STONE_LIVE_REWIND_AT_FRAME", "40"),
-        ("STONE_LIVE_REWIND_TO_TICK", "25"),
+        ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
+        ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
     ];
     let rewound = run_record_dump(game, 80, &log_s, env);
     let diag = &rewound["__stone_diag"];
@@ -607,8 +607,8 @@ fn live_rewind_pauses_at_horizon_and_keeps_the_future_inspectable() {
         let copy_s = copy.to_string_lossy().into_owned();
         let mut env: Vec<(&str, &str)> = vec![
             ("STONE_LIVE_REWIND", "1"),
-            ("STONE_LIVE_REWIND_AT_FRAME", "40"),
-            ("STONE_LIVE_REWIND_TO_TICK", "25"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
+            ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
             ("STONE_LIVE_PLAY_AT_FRAME", "70"),
             ("STONE_KEYFRAME_INTERVAL", "10"),
             ("STONE_SAVE_REPRO_AT_FRAME", "41"),
@@ -663,7 +663,7 @@ fn live_rewind_pauses_at_horizon_and_keeps_the_future_inspectable() {
     // Arm B: from the paused horizon, scrub backward again.
     let rescrubbed = run(
         "rescrub",
-        &[("STONE_LIVE_SCRUB_AT_FRAME", "100"), ("STONE_LIVE_SCRUB_TO_TICK", "30")],
+        &[("STONE_TIMELINE_SEEK_AT_FRAME_2", "100"), ("STONE_TIMELINE_SEEK_TO_TICK_2", "30")],
     );
     let diag = &rescrubbed["__stone_diag"];
     assert!(
@@ -687,6 +687,63 @@ fn live_rewind_pauses_at_horizon_and_keeps_the_future_inspectable() {
     let mut sim_b = sim_state_names(game, horizon as u32);
     sim_b.remove("dt");
     assert_sim_state_matches(&rescrubbed, &reference_30, &sim_b, "re-scrub tick-30");
+}
+
+/// The author-facing surface: with live rewind opted in and admitted, the
+/// existing replay timeline bar opens over the LIVE recording and spans the
+/// retained history. Without the opt-in the bar stays closed, so a plain
+/// recording pays nothing. After a rewind the bar's span is the whole recorded
+/// log -- the stretch past `current_tick` is exactly the retained future the
+/// author can still play into.
+///
+/// The bar's control wiring is what is asserted here; placement and styling are
+/// author-verified, per the timeline bar's own convention.
+#[test]
+fn live_timeline_bar_exposes_retained_history_while_recording() {
+    let game = "bitgun";
+    let dir = tempfile::tempdir().unwrap();
+
+    let armed_log = dir.path().join("bar-armed.replay").to_string_lossy().into_owned();
+    let armed = run_record_dump(game, 30, &armed_log, &[("STONE_LIVE_REWIND", "1")]);
+    let diag = &armed["__stone_diag"];
+    assert!(
+        diag["REPLAY_TIMELINE_DRAWS"].as_i64().is_some_and(|n| n > 0),
+        "an armed live recording must open the timeline bar: {diag}"
+    );
+    // The bar is drawn inside the frame, before the tick counter advances at
+    // frame end, so its last span is one behind the dumped `current_tick`. The
+    // point is that it TRACKS the live tick rather than a fixed log length.
+    assert_eq!(
+        diag["REPLAY_TIMELINE_TOTAL"].as_i64(), Some(current_tick(&armed) - 1),
+        "over a live recording the bar spans the retained history: {diag}"
+    );
+
+    let plain_log = dir.path().join("bar-plain.replay").to_string_lossy().into_owned();
+    let plain = run_record_dump(game, 30, &plain_log, &[]);
+    assert!(
+        plain["__stone_diag"].get("REPLAY_TIMELINE_DRAWS").is_none(),
+        "a recording without the opt-in must not open the bar: {}",
+        plain["__stone_diag"]
+    );
+
+    // After the rewind the session is paused at T with the future retained; the
+    // bar must show that future, not stop at where the author is standing.
+    let rewound_log = dir.path().join("bar-rewound.replay").to_string_lossy().into_owned();
+    let rewound = run_record_dump(
+        game, 80, &rewound_log,
+        &[
+            ("STONE_LIVE_REWIND", "1"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
+            ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
+        ],
+    );
+    let diag = &rewound["__stone_diag"];
+    assert_eq!(current_tick(&rewound), 25);
+    assert_eq!(diag["STONE_LIVE_REWIND_COUNT"].as_i64(), Some(1), "the bar's seek action must rewind: {diag}");
+    assert_eq!(
+        diag["REPLAY_TIMELINE_TOTAL"].as_i64(), Some(40),
+        "at the paused historical tick the bar must span the retained future: {diag}"
+    );
 }
 
 fn keyframe_count(s: &serde_json::Value) -> i64 {
