@@ -2573,6 +2573,21 @@ fn build_program_core(
     scx: &skull_mir::lower::ScalarCtx,
     extra_roots: &[(FuncRef, String)],
 ) -> Result<ProgramBuild, CompilerError> {
+    // The Map-key admission is a property of the KEY REPRESENTATION, not of a
+    // backend: JS keys a Map by object identity exactly as Lua keys a table by
+    // it. Run it here, the one core all four JS entry points reach, so `rock web`
+    // cannot accept a program `rock compile` refuses.
+    for module in ws.modules.iter() {
+        if module.id == bone_semantic::prelude::ModuleId::builtin() {
+            continue;
+        }
+        if let Some((why, span)) = skull_mir::lower::map_key_rejection(ws, module.id) {
+            return Err(CompilerError::new_with_label(
+                span,
+                format!("this `Map` key is not value-keyed and would silently miss: {why}"),
+            ));
+        }
+    }
     let deco_names = decorator_names(ws);
     let mut roots: Vec<(FuncRef, String)> = extra_roots.to_vec();
     let mut root_set: HashSet<FuncRef> = extra_roots.iter().map(|(fr, _)| *fr).collect();

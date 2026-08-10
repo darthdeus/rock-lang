@@ -99,7 +99,19 @@ const PIN_DYLIB: &str = r#"    do
 const STUB_TABLE: &str = r#"    local _noop = function() end
     local _true = function() return true end
     local _false = function() return false end
+    -- `C` is the raw cimgui namespace, indexed as a TABLE (imgui.C.igGetIO_Nil())
+    -- -- the catch-all __index below would hand back a function and throw. The
+    -- IO record is a real table so ConfigFlags reads as a number and writes
+    -- stick; unknown fields read false ("imgui wants nothing").
+    local _io = setmetatable(
+        {WantCaptureMouse = false, WantCaptureKeyboard = false,
+         WantTextInput = false, KeyShift = false, ConfigFlags = 0},
+        {__index = function() return false end})
+    local _C = setmetatable(
+        {igGetIO_Nil = function() return _io end},
+        {__index = function() return _noop end})
     _G.imgui = setmetatable({
+        C = _C,
         Begin = _true, BeginChild_Str = _true,
         Button = _false, TreeNode_Str = _false,
         InputText = _false, SliderFloat = _false, SliderFloat2 = _false, SliderFloat4 = _false,
@@ -371,6 +383,63 @@ io.write("STUB_OK\n")
         assert!(
             stdout.contains("STUB_OK"),
             "missing STUB_OK marker\nstdout: {}\nstderr: {}",
+            stdout,
+            stderr
+        );
+    }
+
+    /// The engine reaches the imgui IO struct through `imgui.C.igGetIO_Nil()`
+    /// on paths that run every frame with no imgui present (the runner's
+    /// text-input hotkey gate). A catch-all `__index` returning a function
+    /// makes `imgui.C` uncallable-as-a-table and throws once per frame.
+    #[test]
+    fn stub_supports_c_namespace_and_io() {
+        let luajit = match find_luajit() {
+            Some(p) => p,
+            None => {
+                eprintln!("skipping: no luajit on PATH or in prebuilt/");
+                return;
+            }
+        };
+
+        let mut script = String::new();
+        script.push_str(
+            r#"
+local ffi = require("ffi")
+ffi.load = function(name, ...) error("simulated: cannot load " .. tostring(name)) end
+"#,
+        );
+        script.push_str(&build_prelude());
+        script.push_str(r#"
+local io_ = _G.imgui.C.igGetIO_Nil()
+assert(type(io_) == "table", "imgui.C.igGetIO_Nil() must return a table")
+assert(io_.WantTextInput == false, "WantTextInput must be false without imgui")
+assert(io_.WantCaptureMouse == false, "WantCaptureMouse must be false without imgui")
+assert(io_.KeyShift == false, "KeyShift must be false without imgui")
+-- imgui_enable_docking() does bit.bor(io.ConfigFlags, 128): must be a number,
+-- and the write must stick so a second read isn't nil.
+io_.ConfigFlags = bit.bor(io_.ConfigFlags, 128)
+assert(_G.imgui.C.igGetIO_Nil().ConfigFlags == 128, "ConfigFlags write must persist")
+-- Unknown C entry points are callable no-ops, like the top-level stub.
+_G.imgui.C.ImGuiIO_AddMousePosEvent(io_, 1, 2)
+assert(_G.imgui.C.ImGuiDockNode_IsEmpty(nil) == nil, "unknown C fn should be a no-op")
+io.write("C_STUB_OK\n")
+"#);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let script_path = dir.path().join("c_stub_test.lua");
+        std::fs::write(&script_path, &script).expect("write script");
+
+        let out = std::process::Command::new(&luajit)
+            .arg(&script_path)
+            .output()
+            .expect("spawn luajit");
+
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success() && stdout.contains("C_STUB_OK"),
+            "stub C namespace unusable\nstdout: {}\nstderr: {}",
             stdout,
             stderr
         );

@@ -130,6 +130,8 @@ mod nobox_arena_random_sentinel;
 mod nobox_column_threshold;
 #[path = "nobox_fn_value_nullable_return_sentinel.rs"]
 mod nobox_fn_value_nullable_return_sentinel;
+#[path = "nobox_generic_return_boundary_sentinel.rs"]
+mod nobox_generic_return_boundary_sentinel;
 #[path = "nobox_global_accessor_shape.rs"]
 mod nobox_global_accessor_shape;
 #[path = "nobox_nested_ctor.rs"]

@@ -437,8 +437,13 @@ fn parse_string_raw(p: JsonParser) -> string? {
                 return null
             }
         } else {
-            parts.push(p.src.substring(p.pos, p.pos + 1))
-            p.pos = p.pos + 1
+            let start = p.pos
+            while p.pos < p.len {
+                let c = p.src.unit_at(p.pos)
+                if c == 34 || c == 92 { break }
+                p.pos = p.pos + 1
+            }
+            parts.push(p.src.substring(start, p.pos))
         }
     }
     p.ok = false

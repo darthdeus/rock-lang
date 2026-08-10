@@ -1276,6 +1276,13 @@ fn build_rock_globals_registry(
     }
 
     let mut by_package: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    // The RECURSIVE declared shape per global. A global has no reflection
+    // envelope to hang a type on -- `dump_globals_json` serializes its value
+    // with nothing in hand -- so a global holding `Image`, `[Image]` or
+    // `Map<string, Image>` serialized its raw process-local ids into
+    // dump-state, replay and keyframes. Emitted only for the globals whose
+    // declared type contains a nominal, so the rest keep the walk they have.
+    let mut global_descs: BTreeMap<String, String> = BTreeMap::new();
     for m in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
         let module_path = m.file.as_str();
         // Longest-prefix match so nested packages resolve to the deepest one.
@@ -1299,6 +1306,9 @@ fn build_rock_globals_registry(
             // Publishing leaves here instead (which is what this did) put physical
             // names in the dump, in save files and in replay keyframes.
             entry.push(g.name.as_str().to_string());
+            if let Some(d) = skull::type_desc_lua(ws, g.ty) {
+                global_descs.insert(g.name.as_str().to_string(), d);
+            }
         }
     }
     by_package.retain(|_, names| !names.is_empty());
@@ -1320,6 +1330,16 @@ fn build_rock_globals_registry(
         out.push_str("},");
     }
     out.push_str("}\n");
+    // Rides with the registry for the same reason the accessors do: a consumer
+    // that had the names but not the shapes would serialize every handle-typed
+    // global as a raw id, which is the state this replaced.
+    if !global_descs.is_empty() {
+        out.push_str("_G.__ROCK_GLOBAL_DESC = {");
+        for (name, desc) in &global_descs {
+            out.push_str(&format!("[{name:?}]={desc},"));
+        }
+        out.push_str("}\n");
+    }
     // The accessor table rides WITH the registry, never appended separately: four
     // emit paths append this block, and a registry whose consumers had no
     // accessors would read nil for every `nobox` global.

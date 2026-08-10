@@ -1630,6 +1630,10 @@ fn fn_has_bounds(f: &bone_semantic::hir::Function) -> bool {
 /// parity list and stay lenient skips; a USER fn that cannot emit is a hard
 /// error — the lenient channel shipped callers of bounded fns as missing
 /// globals that died as runtime nil calls.
+///
+/// NOTE: this does NOT cover every way the stdlib gets loaded — `bone-query`
+/// warms it from its real filesystem path, which matches neither prefix. Do not
+/// reuse this as a general "is this the stdlib" oracle.
 fn is_stdlib_module_file(file: &str) -> bool {
     file.starts_with("<bone-stdlib:") || file.starts_with("<stdlib")
 }
@@ -2280,7 +2284,7 @@ fn shader_registration_lines(ws: &Workspace) -> Result<ShaderRegistrations, Comp
         let w = skull_codegen_glsl::BlockWire::of(emission.abi.uniform_blocks.iter(), emission.abi.uniform_array_blocks.iter());
         let _ = writeln!(
             out,
-            "__rock_shader_register({:?}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
+            "__rock_shader_register({:?}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
             pair.key,
             lua_long_bracket(&emission.source),
             skull_codegen_lua::lua_string_vec(&slot_names),
@@ -2294,6 +2298,7 @@ fn shader_registration_lines(ws: &Workspace) -> Result<ShaderRegistrations, Comp
             skull_codegen_lua::lua_int_vec(&w.member_kinds),
             skull_codegen_lua::lua_int_vec(&w.member_capacities),
             skull_codegen_lua::lua_int_vec(&w.member_strides),
+            pair.vert.is_none(),
         );
     }
     Ok(ShaderRegistrations {
@@ -2783,14 +2788,15 @@ pub fn emit_full_in(
     if let Some(err) = skull_mir::lower::gpu_only_call_rejection(ws, user_mid) {
         return Err(err);
     }
-    if let Some((key, span)) = skull_mir::lower::value_struct_map_key(ws, user_mid) {
+    if let Some((why, span)) = skull_mir::lower::map_key_rejection(ws, user_mid) {
         return Err(CompilerError::new_with_label(
             span,
             format!(
-                "`{key}` is a `value` struct and cannot be a `Map` key -- value structs hash by \
-                 cdata pointer identity, so a runtime-built key silently misses an entry stored \
-                 under an equal-by-value instance. Use an int/string/bool/float/newtype key, or a \
-                 string key derived from the struct's fields."
+                "this `Map` key is not value-keyed and would silently miss: {why}. A runtime-built \
+                 key does not find the entry stored under an equal-by-value one, so an insert at \
+                 an equal key grows the map instead of replacing. Use an int, string, bool or \
+                 float key -- or a newtype over one of those -- or derive a string key from the \
+                 value's fields."
             ),
         ));
     }

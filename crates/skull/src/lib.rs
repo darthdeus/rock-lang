@@ -1186,6 +1186,190 @@ fn c_struct_inspect_defs(ws: &Workspace, emitted: &rustc_hash::FxHashSet<ustr::U
     out
 }
 
+/// A RECURSIVE, structural rendering of a declared type as a Lua table literal.
+///
+/// [`reflect_field_type`] is flat and lossy on purpose -- it collapses a
+/// nullable to `any`, an array to `[]` and drops every generic argument -- so a
+/// consumer holding one of its strings cannot tell a `Vec<Image>`'s element
+/// from an ordinary int. That is why a direct global, a `Vec` element, a map
+/// value and a tuple member all serialize their raw process-local ids today.
+/// This preserves the shape all the way down, so the walk that reaches a leaf
+/// also knows what the leaf was DECLARED to be.
+///
+/// Purely STRUCTURAL: it names nominal types and says nothing about which of
+/// them the host owns. The native-class list stays in exactly one place
+/// (`stone/engine/host_projection.rock`); a copy here would be a second thing
+/// to forget a type in, and the two drifting would make every handle of the
+/// forgotten type serialize as a missing one.
+///
+/// `None` when the type contains no nominal type anywhere, so a descriptor is
+/// emitted only where one could possibly matter -- `Vec<int>` gets none. Every
+/// value with no descriptor keeps exactly the walk, and the bytes, it has today.
+pub fn type_desc_lua(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> Option<String> {
+    let mut out = String::new();
+    desc_into(ws, ty, &mut out, 0).then_some(out)
+}
+
+/// [`type_desc_lua`] for a position that ALREADY has the flat reflection `type`
+/// string beside it -- a struct field.
+///
+/// A bare nominal is fully expressible there, and the struct-field consumer has
+/// classified off it since B3a. Emitting a descriptor that repeats what the
+/// neighbouring key already says would be a second mechanism for the one case
+/// that was never broken, and would move bytes for every struct field in every
+/// game while adding no coverage. A global has no such neighbour, which is why
+/// it uses [`type_desc_lua`] directly.
+fn field_desc_lua(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> Option<String> {
+    let d = type_desc_lua(ws, ty)?;
+    (!d.starts_with("{k=\"nom\"")).then_some(d)
+}
+
+/// Append `ty`'s descriptor to `out`; the bool is whether any nominal type was
+/// reached, which is what decides that the descriptor is worth emitting.
+///
+/// `depth` bounds the walk. A recursive type (`struct Node { next: Node? }`)
+/// is a finite TypeExpr graph but an unbounded TREE, so an unguarded walk would
+/// not terminate. The cutoff renders `{k="any"}`, which every consumer already
+/// has to handle -- it is the descriptor of an untyped value, not a wrong one.
+fn desc_into(ws: &Workspace, ty: bone_semantic::prelude::TyId, out: &mut String, depth: u32) -> bool {
+    use bone_semantic::hir::{TypeCtor, TypeExpr};
+    use bone_semantic::prelude::TyId;
+
+    const MAX_DEPTH: u32 = 12;
+    if depth >= MAX_DEPTH {
+        out.push_str("{k=\"any\"}");
+        return false;
+    }
+    let te = match ty {
+        TyId::Static(m, idx) => match ws.modules.get(m.index()) {
+            Some(module) => module.ty_arena[idx],
+            None => {
+                out.push_str("{k=\"any\"}");
+                return false;
+            }
+        },
+        // A local (body) arena type never reaches a declaration's descriptor.
+        TyId::Local(_) => {
+            out.push_str("{k=\"any\"}");
+            return false;
+        }
+    };
+    match te {
+        TypeExpr::Builtin(_) | TypeExpr::Generic(..) | TypeExpr::Infer(..) | TypeExpr::Function { .. } => {
+            out.push_str("{k=\"any\"}");
+            false
+        }
+        TypeExpr::Nullable(inner) => {
+            out.push_str("{k=\"opt\",inner=");
+            let found = desc_into(ws, ty.with_idx(inner), out, depth + 1);
+            out.push('}');
+            found
+        }
+        TypeExpr::Tuple { elements } => {
+            out.push_str("{k=\"tuple\",elems={");
+            let mut found = false;
+            for (i, e) in elements.into_iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                found |= desc_into(ws, ty.with_idx(e), out, depth + 1);
+            }
+            out.push_str("}}");
+            found
+        }
+        TypeExpr::App { ctor, params } => match ctor {
+            TypeCtor::Array => {
+                // An array with no argument carries no element type to render.
+                let Some(elem) = params.into_iter().next() else {
+                    out.push_str("{k=\"any\"}");
+                    return false;
+                };
+                out.push_str("{k=\"vec\",elem=");
+                let found = desc_into(ws, ty.with_idx(elem), out, depth + 1);
+                out.push('}');
+                found
+            }
+            TypeCtor::Map => {
+                // Only the VALUE side is rendered. A map's keys are serialized
+                // as JSON object keys, so a key position has no leaf slot a
+                // projection marker could be written into.
+                let Some(val) = params.into_iter().nth(1) else {
+                    out.push_str("{k=\"any\"}");
+                    return false;
+                };
+                out.push_str("{k=\"map\",val=");
+                let found = desc_into(ws, ty.with_idx(val), out, depth + 1);
+                out.push('}');
+                found
+            }
+            TypeCtor::Nominal(name) => {
+                // The name is the whole answer for a nominal leaf: the consumer
+                // asks the ONE classifier whether it is a native class, and a
+                // struct's own fields are reached through the type table's
+                // per-field descriptors rather than repeated inside this one.
+                out.push_str("{k=\"nom\",name=\"");
+                out.push_str(name.as_str());
+                out.push_str("\"}");
+                true
+            }
+        },
+    }
+}
+
+/// Per-variant payload descriptors for a BOXED enum, or `None` when no variant
+/// payload anywhere in the enum contains a nominal type -- in which case the
+/// enum needs no reflection entry and does not get one, so an enum of plain
+/// payloads keeps exactly the bytes it has today.
+///
+/// A boxed enum's two payload forms are distinct runtime shapes and are keyed
+/// the way the serializer reaches them, not the way they were declared: a TUPLE
+/// payload lands under positional keys `1..n`, a RECORD payload under its field
+/// names. Keying them alike would make one of the two unreachable.
+///
+/// Uses [`type_desc_lua`] rather than [`field_desc_lua`] for the same reason a
+/// global does: there is no flat `type` string beside a payload slot, so a bare
+/// nominal has to be carried here or it is carried nowhere.
+fn boxed_variant_descs(ws: &Workspace, e: &bone_semantic::hir::EnumDef) -> Option<String> {
+    use bone_semantic::hir::VariantPayload;
+    let mut any = false;
+    let mut variants: Vec<String> = Vec::new();
+    for variant in e.variants.iter() {
+        let body = match &variant.payload {
+            VariantPayload::Unit => continue,
+            VariantPayload::Tuple(types) => {
+                let entries: Vec<String> = types
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, ty)| {
+                        let d = type_desc_lua(ws, *ty)?;
+                        Some(format!("[{}]={d}", i + 1))
+                    })
+                    .collect();
+                if entries.is_empty() {
+                    continue;
+                }
+                format!("pos={{{}}}", entries.join(","))
+            }
+            VariantPayload::Record(fields) => {
+                let entries: Vec<String> = fields
+                    .iter()
+                    .filter_map(|f| {
+                        let d = type_desc_lua(ws, f.ty)?;
+                        Some(format!("[{:?}]={d}", f.name.as_str()))
+                    })
+                    .collect();
+                if entries.is_empty() {
+                    continue;
+                }
+                format!("named={{{}}}", entries.join(","))
+            }
+        };
+        any = true;
+        variants.push(format!("[{:?}]={{{body}}}", variant.name.as_str()));
+    }
+    any.then(|| variants.join(","))
+}
+
 /// (reflection type-string, nullable) for a struct field's `TyId`. The string
 /// matches rock's `to_simple_string` for the cases the reflection stdlib needs
 /// (int/float/string/bool, a nominal name, `[..]`); anything else is "any".
@@ -1284,9 +1468,16 @@ fn type_table_defs(ws: &Workspace, gc: &rustc_hash::FxHashSet<ustr::Ustr>) -> St
                         None => tystr,
                     };
                     let embed = if flattened { ", embed = true" } else { "" };
+                    // The recursive shape, present only where the flat `type`
+                    // above cannot express it (a container, a tuple, a nullable
+                    // -- anything with a nominal inside it).
+                    let desc = match field_desc_lua(ws, f.ty) {
+                        Some(d) => format!(", desc = {d}"),
+                        None => String::new(),
+                    };
                     format!(
-                        "{{ name = \"{}\", type = \"{}\", nullable = {}{} }}",
-                        f.name, tystr, nullable, embed
+                        "{{ name = \"{}\", type = \"{}\", nullable = {}{}{} }}",
+                        f.name, tystr, nullable, embed, desc
                     )
                 })
                 .collect();
@@ -1313,6 +1504,20 @@ fn type_table_defs(ws: &Workspace, gc: &rustc_hash::FxHashSet<ustr::Ustr>) -> St
             use bone_semantic::hir::VariantPayload;
 
             let Some(shape) = skull_mir::lower::enum_value_shape(ws, e.name) else {
+                // A BOXED enum has no value shape, and until now no reflection
+                // entry at all -- so a serializer reaching one had nothing to
+                // ask about its payload and rendered every handle in it as a
+                // raw id. The entry exists only to carry the payload's declared
+                // shapes; a boxed enum's own storage is its `__variant` tag plus
+                // the payload slots, which reflection reads directly.
+                if let Some(vd) = boxed_variant_descs(ws, e) {
+                    out.push_str(&format!(
+                        "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"enum\", type_id = {id}, fields = {{ }}, variant_desc = {{ {vd} }} }}\n",
+                        n = e.name,
+                        id = type_id,
+                    ));
+                    type_id += 1;
+                }
                 continue;
             };
             let mut fields = vec![

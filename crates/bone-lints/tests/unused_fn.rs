@@ -150,3 +150,40 @@ fn operator_overload_target_is_not_flagged() {
         names(src)
     );
 }
+
+#[test]
+fn pure_alone_is_not_a_root() {
+    // `@pure` describes how the fn compiles, not how it is entered. Rooting on
+    // "has any annotation" silently exempted every `@pure`/`@inline` helper --
+    // it hid `step_toward` in mag and 20+ findings in stone.
+    let src = "fn main() {}\n@pure\nfn dead(x: int) -> int {\n    return x\n}";
+    assert_eq!(names(src), vec!["dead".to_string()], "@pure says nothing about reachability");
+}
+
+#[test]
+fn inline_alone_is_not_a_root() {
+    let src = "fn main() {}\n@inline inline(lua) fn dead() = \"\"";
+    assert_eq!(names(src), vec!["dead".to_string()], "@inline says nothing about reachability");
+}
+
+#[test]
+fn a_decorator_is_still_a_root() {
+    // A user `deco`'s machinery invokes the target, so it is entered from
+    // outside the call graph -- unlike the implementation annotations above.
+    let src = "deco init track {\n}\n\nfn main() {}\n@track\nfn hooked() {}";
+    assert!(names(src).is_empty(), "a decorated fn is a root: got {:?}", names(src));
+}
+
+#[test]
+fn synthesized_newtype_operators_are_not_flagged() {
+    // The parser derives `__op_add`/`__op_lt`/... for every newtype over a
+    // primitive. The user never wrote them and cannot delete them, so an
+    // unreached one is noise with no available action. Their only HIR mark
+    // today is `@pure @inline`, which the split above stopped rooting on.
+    let src = "newtype Handle(int)\n\nfn main() {\n    let h = Handle(1)\n}";
+    assert!(
+        names(src).is_empty(),
+        "compiler-derived newtype operators are not user surface: got {:?}",
+        names(src)
+    );
+}
