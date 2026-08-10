@@ -228,6 +228,20 @@ fn audio_muted_only_while_seeking() {
     );
 }
 
+/// `rock frame` owns `STONE_HEADLESS`; ordinary headless playback must pass
+/// through the same audio gate even when it is not currently seeking.
+#[test]
+fn headless_frame_runs_are_quiet() {
+    let state = run_frame_env("bitgun", 5, &[], &[("STONE_AUDIO_PROBE", "1")]);
+    let mutes = state["__stone_diag"]["AUDIO_QUIET_MUTES"].as_i64().unwrap_or(0);
+    assert!(mutes > 0, "a headless frame run must suppress its audio probe");
+    assert_eq!(
+        state["__stone_diag"]["AUDIO_STUB_ACTIVE"].as_i64(),
+        Some(1),
+        "a headless frame run must not open the native audio path"
+    );
+}
+
 /// P4 item 5: a BACKWARD scrub mutes audio through the SAME single gate as a
 /// forward seek (no second gate). The scrub's resim (from the restored keyframe
 /// forward to the target) runs render-skipped with `timeline_seeking()` true, so

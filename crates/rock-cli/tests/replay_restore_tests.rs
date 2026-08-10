@@ -399,13 +399,13 @@ fn live_record_rewind_matches_plain_replay_at_target() {
 }
 
 /// Seek resimulation must run the same game semantics as ordinary playback.
-/// Mag's main-menu focus and Play action live in `@late_draw`, so this is the
+/// Mag's main-menu interaction and Play action live in `@late_draw`, so this is the
 /// concrete integration case that render-skipped resimulation currently loses.
 #[test]
 fn mag_main_menu_transition_survives_seek_resimulation() {
     let game = "mag";
     let frames = 80;
-    let target: u32 = 60;
+    let target: u32 = 40;
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("menu.replay");
     let log_s = log.to_string_lossy().into_owned();
@@ -414,7 +414,11 @@ fn mag_main_menu_transition_survives_seek_resimulation() {
         game,
         frames,
         &log_s,
-        &[("MAG_BOOT_MENU", "1"), ("STONE_CHECKPOINT_INTERVAL", "0")],
+        &[
+            ("MAG_BOOT_MENU", "1"),
+            ("MAG_SCREENSHOT", "1"),
+            ("STONE_CHECKPOINT_INTERVAL", "0"),
+        ],
     );
 
     let text = std::fs::read_to_string(&log).expect("read Mag replay");
@@ -428,11 +432,9 @@ fn mag_main_menu_transition_survives_seek_resimulation() {
             let mut fields: Vec<&str> = line.split_whitespace().collect();
             assert_eq!(fields.len(), 8, "recorded tick shape changed: {line}");
             fields[1] = "0x1.999999999999ap-4";
-            fields[6] = match tick {
-                40 => "down",
-                44 => "return",
-                _ => "-",
-            };
+            fields[2] = "960";
+            fields[3] = "432";
+            fields[7] = if tick == 30 { "1" } else { "-" };
             tick += 1;
             fields.join(" ")
         })
@@ -460,6 +462,7 @@ fn mag_main_menu_transition_survives_seek_resimulation() {
         &log_s,
         &[
             ("MAG_BOOT_MENU", "1"),
+            ("MAG_SCREENSHOT", "1"),
             ("STONE_KEYFRAME_INTERVAL", "1000"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", &frames.to_string()),
             ("STONE_TIMELINE_SEEK_TO_TICK", &target.to_string()),
@@ -474,6 +477,92 @@ fn mag_main_menu_transition_survives_seek_resimulation() {
     assert_eq!(
         sought["mag"]["SCREEN"], reference["mag"]["SCREEN"],
         "seek resimulation must preserve Mag's @late_draw Play transition"
+    );
+
+    let cadence_sought = run_replay_dump(
+        game,
+        frames + target + 10,
+        &log_s,
+        &[
+            ("MAG_BOOT_MENU", "1"),
+            ("MAG_SCREENSHOT", "1"),
+            ("STONE_KEYFRAME_INTERVAL", "30"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME", &frames.to_string()),
+            ("STONE_TIMELINE_SEEK_TO_TICK", &target.to_string()),
+        ],
+    );
+    assert_eq!(
+        cadence_sought["__stone_diag"]["STONE_SEEK_RESIM_FRAMES"].as_i64(),
+        Some(10),
+        "the fixture must restore immediately before the click"
+    );
+    assert_eq!(
+        cadence_sought["mag"]["SCREEN"], reference["mag"]["SCREEN"],
+        "a cadence-keyframe seek must restore Mag's retained mouse state"
+    );
+
+    let keyboard_log = dir.path().join("menu-keyboard.replay");
+    let keyboard_log_s = keyboard_log.to_string_lossy().into_owned();
+    let mut tick = 0;
+    let lines = text
+        .lines()
+        .map(|line| {
+            if !line.starts_with("t ") {
+                return line.to_string();
+            }
+            let mut fields: Vec<&str> = line.split_whitespace().collect();
+            fields[1] = "0x1.999999999999ap-4";
+            fields[2] = "0";
+            fields[3] = "0";
+            fields[6] = match tick {
+                28 | 30 | 50 | 52 => "down",
+                32 => "return",
+                45 => "escape",
+                _ => "-",
+            };
+            fields[7] = "-";
+            tick += 1;
+            fields.join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(tick, frames as usize + 1, "fixture must rewrite every recorded tick");
+    std::fs::write(&keyboard_log, lines + "\n").expect("write keyboard Mag replay");
+
+    let keyboard_reference = run_replay_dump(
+        game,
+        frames,
+        &keyboard_log_s,
+        &[
+            ("MAG_BOOT_MENU", "1"),
+            ("MAG_SCREENSHOT", "1"),
+            ("STONE_START_PAUSED", "1"),
+            ("STONE_STEP_FRAMES", &target.to_string()),
+        ],
+    );
+    assert_eq!(
+        keyboard_reference["mag"]["SETTINGS_OPEN"].as_bool(),
+        Some(true),
+        "ordinary keyboard playback must activate Settings"
+    );
+    let keyboard_sought = run_replay_dump(
+        game,
+        frames + target + 10,
+        &keyboard_log_s,
+        &[
+            ("MAG_BOOT_MENU", "1"),
+            ("STONE_KEYFRAME_INTERVAL", "32"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME", &frames.to_string()),
+            ("STONE_TIMELINE_SEEK_TO_TICK", &target.to_string()),
+        ],
+    );
+    assert_eq!(
+        keyboard_sought["mag"]["SETTINGS_OPEN"], keyboard_reference["mag"]["SETTINGS_OPEN"],
+        "a cadence-keyframe seek must restore Mag's retained focus target"
+    );
+    assert_eq!(
+        keyboard_sought["mag"]["CREDITS_OPEN"], keyboard_reference["mag"]["CREDITS_OPEN"],
+        "restored focus must not activate a different menu item"
     );
 }
 
@@ -1186,6 +1275,8 @@ fn playback_jumps_clear_real_stone_transients_and_keep_persistent_state() {
         &[
             ("ROCK_TEST_SEED", "42"),
             ("STONE_TRANSIENT_PROBE", "1"),
+            ("STONE_QUIET", "0"),
+            ("STONE_AUDIO_STUB", "0"),
             ("STONE_LIVE_REWIND", "1"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
             ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
@@ -1199,6 +1290,8 @@ fn playback_jumps_clear_real_stone_transients_and_keep_persistent_state() {
         game, 120, &live_log,
         &[
             ("STONE_TRANSIENT_PROBE", "1"),
+            ("STONE_QUIET", "0"),
+            ("STONE_AUDIO_STUB", "0"),
             ("STONE_LOOP_A", "10"),
             ("STONE_LOOP_B", "20"),
             ("STONE_KEYFRAME_INTERVAL", "10"),
