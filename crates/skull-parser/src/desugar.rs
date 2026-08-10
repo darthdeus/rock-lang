@@ -111,6 +111,7 @@ fn synth_newtype_operators(ast: &mut Ast) {
             };
             ast.items.push(Item {
                 annotations: vec![mk_anno("pure"), mk_anno("inline")],
+                is_global_write: false,
                 span: sp,
                 kind: ItemKind::Function(FunctionDef {
                     span: sp,

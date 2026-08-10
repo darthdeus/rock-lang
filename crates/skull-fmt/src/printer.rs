@@ -250,7 +250,7 @@ impl<'a> Printer<'a> {
             // declaration line) then slice the declaration verbatim, stripping a
             // trailing `;`. The body (inline-lua / extern / operator) isn't
             // recoverable from the AST, so it stays byte-for-byte.
-            let mut parts = Vec::new();
+            let mut parts = self.item_global_write(item);
             for anno in &item.annotations {
                 parts.push(self.annotation(anno));
                 parts.push(Doc::text(" "));
@@ -266,7 +266,7 @@ impl<'a> Printer<'a> {
             parts.push(Doc::text(decl));
             return self.with_trailing_comment(Doc::concat(parts), item.span, 'N');
         }
-        let mut parts = Vec::new();
+        let mut parts = self.item_global_write(item);
         let decl_line = self.item_decl_line(item);
         let annos = &item.annotations;
         for (i, anno) in annos.iter().enumerate() {
@@ -318,6 +318,31 @@ impl<'a> Printer<'a> {
         let mut doc = Doc::concat(parts);
         doc = self.with_trailing_comment(doc, item.span, 'N');
         doc
+    }
+
+    /// An item-level `@global_write`. The parser consumes it into a flag rather
+    /// than the annotation list (`Item.is_global_write`), so it has no span to
+    /// place and is normalized: emitted first, on its own line, whatever order
+    /// or line the author wrote it on. Stable under re-formatting because the
+    /// flag round-trips.
+    fn item_global_write(&self, item: &Item) -> Vec<Doc> {
+        if item.is_global_write {
+            vec![Doc::text("@global_write"), hardline()]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Annotations in a NON-ITEM position (a fn parameter, a struct or
+    /// record-variant field): they sit inline ahead of the thing they mark,
+    /// one space apart, rather than on their own lines the way an item's do.
+    /// `AnnoPos` (`crates/bone-core/src/annotations.rs`) is the full list of
+    /// positions the parser accepts.
+    fn leading_annotations(&self, annos: &[Annotation]) -> Vec<Doc> {
+        annos
+            .iter()
+            .flat_map(|a| [self.annotation(a), Doc::text(" ")])
+            .collect()
     }
 
     fn annotation(&self, anno: &Annotation) -> Doc {
@@ -453,6 +478,7 @@ impl<'a> Printer<'a> {
 
     fn field(&self, field: &Field) -> Doc {
         let mut parts = vec![];
+        parts.extend(self.leading_annotations(&field.annotations));
         if field.is_embed {
             parts.push(Doc::text("embed "));
         }
@@ -616,7 +642,8 @@ impl<'a> Printer<'a> {
             return Doc::text("()");
         }
         let param_doc = |p: &Param, bare: bool| {
-            let mut parts = vec![Doc::text(kw(p.name.name))];
+            let mut parts = self.leading_annotations(&p.annotations);
+            parts.push(Doc::text(kw(p.name.name)));
             if !bare {
                 parts.push(Doc::text(": "));
                 parts.push(self.type_expr(p.ty));
@@ -1199,7 +1226,18 @@ impl<'a> Printer<'a> {
                 };
             }
         }
-        self.maybe_verbatim_line(span, || self.stmt_structural(s))
+        // `@global_write` is a FLAG on the statement, not an entry in an
+        // annotation list, so it has to be re-emitted from that flag. Only on
+        // the structural path -- the statement's span covers the prefix
+        // (`parser.rs`, `parse_statement`), so a verbatim slice already has it.
+        self.maybe_verbatim_line(span, || {
+            let doc = self.stmt_structural(s);
+            if self.ast.s(&s).is_global_write {
+                Doc::concat([Doc::text("@global_write "), doc])
+            } else {
+                doc
+            }
+        })
     }
 
     fn stmt_structural(&self, s: Idx<StatementData>) -> Doc {

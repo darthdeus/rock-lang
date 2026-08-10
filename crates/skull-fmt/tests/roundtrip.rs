@@ -64,6 +64,126 @@ fn comment_multiset(src: &str) -> std::collections::HashMap<String, usize> {
     m
 }
 
+/// Multiset of `@name` markers, counted off the TOKENS rather than the text so
+/// an `@` inside a string or an `inline(lua)` body cannot be mistaken for one.
+/// Covers every position at once -- item, fn parameter, struct and
+/// record-variant field, and the statement-level `@global_write` -- which is
+/// what makes it a guard on positions nobody has added yet, and what lets it
+/// see a marker the PARSER drops rather than only one the printer forgets.
+///
+/// Idempotency cannot see a dropped marker: the stripped form reparses and
+/// re-formats to itself, so both sides agree and the gate stays green. That is
+/// exactly how `@global_write` and every parameter annotation were being
+/// deleted silently.
+///
+/// `@` is ALSO the `wait_for` condition operator (`yield wait_for 5000 @ {
+/// cond }`), so the sigil is identified by what precedes it rather than by the
+/// `@name` shape alone: an annotation opens its line or follows `(`, `,` or
+/// `{`, while the operator always follows an expression. Without this the
+/// formatter's `@ { player.kills == 1 }` -> `@ player.kills == 1` rewrite reads
+/// as an invented `@player`.
+fn annotation_multiset(src: &str) -> std::collections::HashMap<String, usize> {
+    use rock_tokenizer::TokenKind as T;
+    let mut m = std::collections::HashMap::new();
+    let Ok(tokens) = rock_tokenizer::Tokenizer::new(src, "<anno>".into()).tokenize() else {
+        return m;
+    };
+    // Index of the token just past the last annotation counted, so a RUN of
+    // them (`@scalar_abi @nomangle inline(js) fn ..`, and the same run split
+    // across lines, which the formatter joins) keeps counting after the first.
+    let mut run_end: Option<usize> = None;
+    let mut i = 0;
+    while i < tokens.len() {
+        if tokens[i].kind != T::At {
+            i += 1;
+            continue;
+        }
+        let opens_position = run_end == Some(i)
+            || match i.checked_sub(1).map(|p| &tokens[p]) {
+                None => true,
+                Some(prev) => {
+                    prev.span.line_range.1 != tokens[i].span.line_range.0
+                        || matches!(prev.kind, T::OpenParen | T::Comma | T::OpenCurly)
+                }
+            };
+        if !opens_position {
+            i += 1;
+            continue;
+        }
+        let Some(T::Ident(name)) = tokens.get(i + 1).map(|t| &t.kind) else {
+            i += 1;
+            continue;
+        };
+        *m.entry(name.as_str().to_string()).or_default() += 1;
+        // Step past `@name` and any balanced `(args)` so the next token is
+        // where a sibling annotation would start.
+        let mut j = i + 2;
+        if tokens.get(j).map(|t| &t.kind) == Some(&T::OpenParen) {
+            let mut depth = 0usize;
+            while j < tokens.len() {
+                match tokens[j].kind {
+                    T::OpenParen => depth += 1,
+                    T::CloseParen => {
+                        depth -= 1;
+                        if depth == 0 {
+                            j += 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                j += 1;
+            }
+        }
+        run_end = Some(j);
+        i = j;
+    }
+    m
+}
+
+#[test]
+fn real_sources_keep_every_annotation_marker() {
+    let files = rock_files();
+    assert!(files.len() > 100, "expected the real corpus, found {}", files.len());
+
+    // The guard is only evidence if the corpus actually CARRIES the positions
+    // it is meant to protect. Assert the population, not just the absence of a
+    // difference: a zero here would make every arm below vacuous.
+    let mut total: usize = 0;
+    let mut global_writes: usize = 0;
+    let mut fails = Vec::new();
+    for f in &files {
+        let short = f.strip_prefix(repo_root()).unwrap_or(f).display();
+        let Ok(src) = fs::read_to_string(f) else { continue };
+        let out = skull_fmt::format_code(&src);
+
+        let src_a = annotation_multiset(&src);
+        let out_a = annotation_multiset(&out);
+        total += src_a.values().sum::<usize>();
+        global_writes += src_a.get("global_write").copied().unwrap_or(0);
+
+        for (name, n) in &src_a {
+            let got = out_a.get(name).copied().unwrap_or(0);
+            if got < *n {
+                fails.push(format!("@{name} dropped in {short}: {n} -> {got}"));
+            }
+        }
+        for (name, n) in &out_a {
+            let had = src_a.get(name).copied().unwrap_or(0);
+            if *n > had {
+                fails.push(format!("@{name} invented in {short}: {had} -> {n}"));
+            }
+        }
+    }
+
+    assert!(fails.is_empty(), "{} annotation drift(s):\n{}", fails.len(), fails.join("\n"));
+    assert!(total > 500, "corpus carries only {total} annotations -- the guard is vacuous");
+    assert!(
+        global_writes > 0,
+        "corpus carries no `@global_write` -- the statement-flag arm proves nothing"
+    );
+}
+
 #[test]
 fn real_sources_are_idempotent_reparse_and_keep_comments() {
     let files = rock_files();
