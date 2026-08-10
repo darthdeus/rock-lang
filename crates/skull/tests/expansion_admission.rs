@@ -34,6 +34,20 @@ fn main() {
 }
 "#;
 
+const SHADER_AND_STRUCT_INVALID: &str = r#"
+enum Pairs { F(float), I(int) }
+value BadPairs { flag: bool }
+
+@struct_expand inline(lua) fn pairs<T>(u: T) -> [(string, Pairs)] = """
+    error("pairs must be compiler-expanded")
+"""
+
+fn main() {
+    let _ = rock_shader(3)
+    let _ = pairs(BadPairs { flag: true })
+}
+"#;
+
 fn direct_admission_error(src: &str) -> skull_parser::CompilerError {
     let ws = ws_with_stdlib(src);
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
@@ -103,4 +117,19 @@ fn direct_admission_covers_struct_and_vertex_kinds() {
 
     let vertex = direct_admission_error(VERTEX_INVALID);
     assert!(vertex.message.contains("`@vertex_expand`"), "{vertex:?}");
+}
+
+#[test]
+fn struct_priority_beats_invalid_shader_pipeline() {
+    let err = direct_admission_error(SHADER_AND_STRUCT_INVALID);
+    assert!(
+        err.message.contains("`@struct_expand`"),
+        "struct expansion must retain the historical priority over shader expansion:\n{}",
+        err.message
+    );
+    assert!(
+        !err.message.contains("`rock_shader` takes either one argument"),
+        "shader expansion incorrectly won over the higher-priority struct rejection:\n{}",
+        err.message
+    );
 }

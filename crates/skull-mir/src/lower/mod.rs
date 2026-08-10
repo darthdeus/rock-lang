@@ -2822,8 +2822,8 @@ impl ExpansionRejections {
     }
 
     fn finish(self) -> Option<CompilerError> {
-        self.shader_pipeline
-            .or(self.struct_pairs)
+        self.struct_pairs
+            .or(self.shader_pipeline)
             .or(self.vertex_layout)
             .or(self.uniform_block)
             .or(self.uniform_values)
