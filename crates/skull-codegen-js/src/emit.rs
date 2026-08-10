@@ -2460,13 +2460,6 @@ pub fn callee_js_name(ws: &Workspace, fr: FuncRef) -> String {
     skull_mir::mangle::mangle_fn(ws, f)
 }
 
-/// A `@nomangle` fn keeps its bare name, so an inline(js) body referencing it by
-/// its literal source name resolves to that bare global (the verbatim-name
-/// discipline).
-fn is_nomangle(f: &bone_semantic::hir::Function) -> bool {
-    f.annotations.iter().any(|a| a.name.name.as_str() == "nomangle")
-}
-
 /// Emit `roots` (each under its given JS name) plus the transitive plain-Rock
 /// callee closure of each root, callees under [`callee_js_name`]s. Mapped
 /// intrinsics stay call-site templates. Any callee that is neither (inline(lua)
@@ -2652,24 +2645,6 @@ fn js_root_plan(
             named.push((fr, "__rock_shader_register".to_string()));
         }
     }
-    let mut pending: Vec<FuncRef> = named.iter().map(|(fr, _)| *fr).collect();
-    let mut cursor = 0;
-    while let Some(fr) = pending.get(cursor).copied() {
-        cursor += 1;
-        if !matches!(
-            ws.module(fr.module).functions[fr.func].inline_body,
-            Some((bone_semantic::hir::FnBackend::Js, _))
-        ) {
-            continue;
-        }
-        for target in inline_js_nomangle_targets(ws, fr) {
-            if seen.insert(target) {
-                let name = ws.module(target.module).functions[target.func].name.to_string();
-                named.push((target, name));
-                pending.push(target);
-            }
-        }
-    }
     let mut refs: Vec<FuncRef> = named.iter().map(|(fr, _)| *fr).collect();
     for shader_root in shader_root_refs(ws)? {
         if seen.insert(shader_root) {
@@ -2687,23 +2662,22 @@ fn shader_root_refs(ws: &Workspace) -> Result<Vec<FuncRef>, CompilerError> {
 }
 
 fn extend_root_plan_from_inline_view(ws: &Workspace, plan: &mut JsRootPlan, view: &ArtifactView) -> bool {
+    extend_root_plan_from_opaque_targets(ws, plan, view.opaque_boundary_roots.values().flatten().copied())
+}
+
+fn extend_root_plan_from_opaque_targets(
+    ws: &Workspace,
+    plan: &mut JsRootPlan,
+    targets: impl IntoIterator<Item = FuncRef>,
+) -> bool {
     let mut seen: HashSet<FuncRef> = plan.refs.iter().copied().collect();
     let mut added = false;
-    for realized in view.realization.values() {
-        let selected = realized.decl;
-        if !matches!(
-            ws.module(selected.module).functions[selected.func].inline_body,
-            Some((bone_semantic::hir::FnBackend::Js, _))
-        ) {
-            continue;
-        }
-        for target in inline_js_nomangle_targets(ws, selected) {
-            if seen.insert(target) {
-                let name = ws.module(target.module).functions[target.func].name.to_string();
-                plan.named.push((target, name));
-                plan.refs.push(target);
-                added = true;
-            }
+    for target in targets {
+        if seen.insert(target) {
+            let name = ws.module(target.module).functions[target.func].name.to_string();
+            plan.named.push((target, name));
+            plan.refs.push(target);
+            added = true;
         }
     }
     added
@@ -3225,7 +3199,20 @@ pub fn emit_overlay(
         extra_roots.push((main, callee_js_name(ws, main)));
     }
     let mut root_plan = js_root_plan(ws, &extra_roots)?;
-    extend_root_plan_from_inline_view(ws, &mut root_plan, &cache.session.view);
+    let current_opaque = skull_graph::instance_graph::opaque_boundary_roots_for_decls(
+        ws,
+        cache.session.view.realization.values().map(|realized| realized.decl),
+    );
+    extend_root_plan_from_opaque_targets(
+        ws,
+        &mut root_plan,
+        current_opaque.values().flatten().copied(),
+    );
+    let current_roots: HashSet<FuncRef> = root_plan.refs.iter().copied().collect();
+    let session_roots: HashSet<FuncRef> = cache.session.roots.iter().copied().collect();
+    if current_roots != session_roots {
+        return Ok(JsReload::FullRequired);
+    }
     update_js_session(ws, &mut cache.session, &root_plan.refs, reinferred);
     let current = assemble_program_core(ws, &cache.scx, &root_plan.named, &cache.session)?;
     let update = cache
@@ -4710,44 +4697,6 @@ fn discover_callees_graph(
         Some(e) => Err(e),
         None => Ok(()),
     }
-}
-
-// Opaque-boundary root discovery only: bare names inside verbatim JS are not
-// ordinary delivery edges. Phase 6 still owes this scan's unification with the
-// graph/view root vocabulary.
-fn inline_js_nomangle_targets(ws: &Workspace, fr: FuncRef) -> Vec<FuncRef> {
-    let f = &ws.module(fr.module).functions[fr.func];
-    let Some((bone_semantic::hir::FnBackend::Js, body)) = f.inline_body else { return Vec::new() };
-    let mut idents: HashSet<&str> = HashSet::new();
-    let bytes = body.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        let c = bytes[i] as char;
-        if c.is_ascii_alphabetic() || c == '_' {
-            let start = i;
-            while i < bytes.len()
-                && ((bytes[i] as char).is_ascii_alphanumeric() || bytes[i] == b'_')
-            {
-                i += 1;
-            }
-            idents.insert(&body.as_str()[start..i]);
-        } else {
-            i += 1;
-        }
-    }
-    let mut targets = Vec::new();
-    for ident in idents {
-        let name = ustr::Ustr::from(ident);
-        let Some(cands) = ws.functions_by_name.get(&name) else { continue };
-        for &(module, func) in cands.iter() {
-            if is_nomangle(&ws.module(module).functions[func]) {
-                targets.push(FuncRef { module, func });
-            }
-        }
-    }
-    targets.sort_by_key(|target| (target.module.index(), u32::from(target.func.into_raw())));
-    targets.dedup();
-    targets
 }
 
 fn register_fn_values_from_view(

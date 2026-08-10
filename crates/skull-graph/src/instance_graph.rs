@@ -696,6 +696,10 @@ pub struct InstanceGraph {
     /// is a per-artifact decision (`crate::artifact`), because the serving
     /// declaration differs by target.
     pub inline_body_deps: BTreeMap<DeclKey, BTreeSet<&'static str>>,
+    /// Bare `@nomangle` declarations named by retained `inline(js)` bodies.
+    /// The graph records the opaque-boundary root obligation; a target view
+    /// filters it to the declarations it actually realizes.
+    pub inline_body_nomangle_roots: BTreeMap<DeclKey, FxHashSet<FuncRef>>,
     /// Storage-condition queries the walk ran, the denominator for the
     /// synthesized-call population. Without it a zero synthesized-edge count
     /// cannot be told apart from a walk that asked nothing.
@@ -1450,6 +1454,7 @@ impl InstanceGraph {
         coroutine_helpers: BTreeSet::new(),
         erased_entries: BTreeSet::new(),
         inline_body_deps: BTreeMap::new(),
+        inline_body_nomangle_roots: BTreeMap::new(),
         synthesized_examined: 0,
         synthesized_approximated: 0,
         always_emitted_seeds: 0,
@@ -1895,6 +1900,7 @@ impl InstanceGraph {
         for decl in &decls_left {
             for member in skull_mir::lower::backend_variant_group(ws, decl.0) {
                 self.inline_body_deps.remove(&DeclKey(member));
+                self.inline_body_nomangle_roots.remove(&DeclKey(member));
             }
             let f = &ws.module(decl.0.module).functions[decl.0.func];
             self.boundaries.remove(&mangle_fn(ws, f));
@@ -1947,6 +1953,7 @@ impl InstanceGraph {
         }
 
         record_inline_body_deps(self, ws, &decls_entered);
+        record_inline_body_nomangle_roots(self, ws, decls_entered.iter().map(|decl| decl.0));
         self.refresh_erased_entries();
         detect_changing_instance_recursion(self, ws);
         classify_boundaries(self, ws, &decls_entered);
@@ -2002,6 +2009,14 @@ impl InstanceGraph {
         let affected = self.affected_owners(ws, changed);
         let run = self.run(ws, affected.clone());
         let prune = self.derive(ws, true);
+        let changed_decls = changed.iter().filter_map(|(module, owner)| match owner {
+            BodyOwner::Function(func) => Some(skull_mir::lower::canonical_variant(
+                ws,
+                FuncRef { module: *module, func: *func },
+            )),
+            _ => None,
+        });
+        record_inline_body_nomangle_roots(self, ws, changed_decls);
         UpdateStats {
             affected: affected.len(),
             expanded: run.expanded,
@@ -3829,6 +3844,68 @@ fn record_inline_body_deps(g: &mut InstanceGraph, ws: &Workspace, decls: &[DeclK
             }
         }
     }
+}
+
+/// Resolve bare `@nomangle` names in JS opaque bodies into root declarations.
+/// The body remains opaque to MIR; this is only the publication obligation for
+/// symbols the text calls by source name.
+pub fn opaque_boundary_roots_for_decls(
+    ws: &Workspace,
+    decls: impl IntoIterator<Item = FuncRef>,
+) -> BTreeMap<DeclKey, FxHashSet<FuncRef>> {
+    let mut roots = BTreeMap::new();
+    for decl in decls {
+        for member in skull_mir::lower::backend_variant_group(ws, decl) {
+            let owner = DeclKey(member);
+            let targets = roots.entry(owner).or_insert_with(FxHashSet::default);
+            let f = &ws.module(member.module).functions[member.func];
+            let Some((bone_semantic::hir::FnBackend::Js, body)) = f.inline_body else {
+                continue;
+            };
+            let text = body.as_str();
+            let bytes = text.as_bytes();
+            let mut i = 0;
+            while i < bytes.len() {
+                let c = bytes[i] as char;
+                if c.is_ascii_alphabetic() || c == '_' {
+                    let start = i;
+                    while i < bytes.len()
+                        && ((bytes[i] as char).is_ascii_alphanumeric() || bytes[i] == b'_')
+                    {
+                        i += 1;
+                    }
+                    let name = ustr::Ustr::from(&text[start..i]);
+                    if let Some(candidates) = ws.functions_by_name.get(&name) {
+                        for &(target_module, target_func) in candidates {
+                            let target = &ws.module(target_module).functions[target_func];
+                            if target
+                                .annotations
+                                .iter()
+                                .any(|annotation| annotation.name.name.as_str() == "nomangle")
+                            {
+                                targets.insert(FuncRef {
+                                    module: target_module,
+                                    func: target_func,
+                                });
+                            }
+                        }
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+        }
+    }
+    roots
+}
+
+fn record_inline_body_nomangle_roots(
+    g: &mut InstanceGraph,
+    ws: &Workspace,
+    decls: impl IntoIterator<Item = FuncRef>,
+) {
+    g.inline_body_nomangle_roots
+        .extend(opaque_boundary_roots_for_decls(ws, decls));
 }
 
 fn classify_boundaries(g: &mut InstanceGraph, ws: &Workspace, decls: &[DeclKey]) {

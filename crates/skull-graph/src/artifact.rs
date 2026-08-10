@@ -46,6 +46,7 @@ use crate::instance_graph::{
     self, BoundaryClass, Concreteness, DeclKey, Instance, InstanceGraph, Site, SiteOutcome,
 };
 use crate::target_projection::{supports, CpuTargetSpec, TargetSpec};
+use rustc_hash::FxHashSet;
 
 /// Where an artifact's realization of a callee comes from, when the
 /// declaration's own body is not it.
@@ -500,6 +501,10 @@ pub struct ArtifactView {
     pub symbol_collisions: Vec<SymbolCollision>,
     pub inline_deps: Vec<InlineDep>,
     pub unresolved_inline_deps: Vec<UnresolvedInlineDep>,
+    /// Bare-name roots recorded by the shared graph for retained `inline(js)`
+    /// declarations. These are opaque-boundary obligations, not MIR delivery
+    /// edges; JS adds the targets to its next graph/view construction.
+    pub opaque_boundary_roots: BTreeMap<DeclKey, FxHashSet<FuncRef>>,
     /// The physical RESULT LANES of every retained instance the artifact emits
     /// as a foreign body: how many values its result wire carries. Plan S 13b's
     /// JS publisher takes its arity from exactly this, so an artifact that
@@ -580,6 +585,7 @@ impl ArtifactView {
             && self.symbol_collisions == other.symbol_collisions
             && self.inline_deps == other.inline_deps
             && self.unresolved_inline_deps == other.unresolved_inline_deps
+            && self.opaque_boundary_roots == other.opaque_boundary_roots
             && self.publisher_lanes == other.publisher_lanes
             && self.missing_substitutions == other.missing_substitutions
             && self.shared_instances == other.shared_instances
@@ -1208,6 +1214,13 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         }
     }
 
+    let opaque_boundary_roots = g
+        .inline_body_nomangle_roots
+        .iter()
+        .filter(|(owner, _)| retained_decls.contains(owner))
+        .map(|(owner, targets)| (owner.clone(), targets.clone()))
+        .collect();
+
     ArtifactView {
         shared_instances: g.instances.len(),
         publisher_lanes,
@@ -1233,5 +1246,6 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         symbol_collisions,
         inline_deps,
         unresolved_inline_deps,
+        opaque_boundary_roots,
     }
 }
