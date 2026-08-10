@@ -746,6 +746,310 @@ fn live_timeline_bar_exposes_retained_history_while_recording() {
     );
 }
 
+/// Every line of a replay log, and the lines up to and including the `n`th
+/// recorded tick. The prefix form is what proves a branch re-rendered the
+/// retained history through the same wire machinery that streamed it: `c` and
+/// `r` lines have to land in the same places, not merely be present.
+fn replay_lines(path: &str) -> Vec<String> {
+    std::fs::read_to_string(path).expect("replay log").lines().map(str::to_string).collect()
+}
+
+fn prefix_through_nth_tick(path: &str, n: usize) -> Vec<String> {
+    let lines = replay_lines(path);
+    let mut seen = 0;
+    let mut out = Vec::new();
+    for l in lines {
+        let is_tick = l.starts_with("t ");
+        out.push(l);
+        if is_tick {
+            seen += 1;
+            if seen == n {
+                return out;
+            }
+        }
+    }
+    panic!("{path} holds fewer than {n} recorded ticks");
+}
+
+fn nth_tick_line(path: &str, n: usize) -> Option<String> {
+    replay_lines(path).into_iter().filter(|l| l.starts_with("t ")).nth(n - 1)
+}
+
+/// The branch oracle. One run populates EVERY future-bearing surface past the
+/// branch point -- input records, desync checkpoints, a resize, a reload marker,
+/// a keyframe, the live horizon and the streamed file -- then rewinds without
+/// truncating anything, branches explicitly at T, and keeps recording.
+///
+/// Each class asserts a measured drop (a count taken before and after, so a
+/// class that stops being cut reports zero) and the retained prefix is compared
+/// byte-for-byte against a copy of the log taken before the branch. The final
+/// check is end-to-end: replay the rewritten from-boot file in a fresh process
+/// and compare its simulation state with the live branched state.
+#[test]
+fn explicit_branch_truncates_every_future_bearing_surface_together() {
+    let game = "bitgun";
+    let branch_tick: i64 = 25;
+    let horizon: i64 = 40;
+    let dir = tempfile::tempdir().unwrap();
+    let log_s = dir.path().join("branch.replay").to_string_lossy().into_owned();
+    let before_s = dir.path().join("branch-before.replay").to_string_lossy().into_owned();
+
+    let live = run_record_dump(
+        game, 120, &log_s,
+        &[
+            ("STONE_LIVE_REWIND", "1"),
+            ("STONE_CHECKPOINT_INTERVAL", "5"),
+            ("STONE_RESIZE_AT_FRAME", "30"),      // a resize event past T
+            ("STONE_RESIZE_W", "1000"),
+            ("STONE_RESIZE_H", "700"),
+            ("STONE_RELOAD_AT_FRAME", "32"),      // a reload marker past T
+            ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
+            ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
+            ("STONE_SAVE_REPRO_AT_FRAME", "41"),  // the log as it stood, unbranched
+            ("STONE_SAVE_REPRO_PATH", &before_s),
+            ("STONE_BRANCH_AT_FRAME", "70"),
+        ],
+    );
+    let diag = &live["__stone_diag"];
+
+    // The rewind alone changed nothing: the copy taken after it still holds the
+    // whole future, so every "gone" assertion below has a real denominator.
+    assert_eq!(recorded_tick_lines(&before_s), horizon as usize, "the pre-branch log must hold the future");
+    assert!(
+        replay_lines(&before_s).iter().any(|l| l.starts_with("r 3")),
+        "the pre-branch log must carry a resize past T"
+    );
+    assert!(
+        replay_lines(&before_s).iter().any(|l| l.starts_with("reload 3")),
+        "the pre-branch log must carry a reload marker past T"
+    );
+
+    assert_eq!(diag["STONE_BRANCH_COUNT"].as_i64(), Some(1), "{diag}");
+    assert_eq!(diag["STONE_BRANCH_TICK"].as_i64(), Some(branch_tick), "{diag}");
+    assert_eq!(
+        diag["STONE_BRANCH_DROPPED_RECORDS"].as_i64(), Some(horizon - branch_tick),
+        "input records after T must go: {diag}"
+    );
+    for class in ["CHECKPOINTS", "RESIZES", "RELOADS", "KEYFRAMES"] {
+        let key = format!("STONE_BRANCH_DROPPED_{class}");
+        assert!(
+            diag[&key].as_i64().is_some_and(|n| n > 0),
+            "{class} after T must go, and the population must be nonzero: {diag}"
+        );
+    }
+    assert_eq!(
+        diag["STONE_KEYFRAME_COUNT"].as_i64(), Some(1),
+        "only the keyframes at or before T survive: {diag}"
+    );
+    assert_eq!(
+        diag["STONE_BRANCH_RECORDING_AFTER"].as_i64(), Some(1),
+        "a branch must hand the session back to the recorder: {diag}"
+    );
+    assert_eq!(
+        diag["STONE_BRANCH_HORIZON_AFTER"].as_i64(), Some(-1),
+        "a branched session is no longer a rewound one, so it has no horizon: {diag}"
+    );
+
+    // The rewritten prefix is byte-identical to what was streamed, `c`/`r`
+    // interleaving included -- one wire-format writer, not two.
+    assert_eq!(
+        prefix_through_nth_tick(&log_s, branch_tick as usize),
+        prefix_through_nth_tick(&before_s, branch_tick as usize),
+        "the branch must re-render the retained prefix exactly as it was streamed"
+    );
+    // New recording appends, and what it records discriminates from the future
+    // that was discarded.
+    let after = recorded_tick_lines(&log_s);
+    assert!(after > branch_tick as usize, "the branched session must keep recording (got {after} ticks)");
+    assert_ne!(
+        nth_tick_line(&log_s, branch_tick as usize + 1),
+        nth_tick_line(&before_s, branch_tick as usize + 1),
+        "the first tick after the branch must not be the discarded future's"
+    );
+
+    // End to end: the rewritten from-boot file must reproduce the live branched
+    // state in a fresh process. This second run is the SAME scenario minus the
+    // window resize, because replaying any log that carries a mid-run resize
+    // already diverges today -- replay overrides `WINDOW_SIZE` but never resizes
+    // the real window, so anything reading the drawable drifts. That is a
+    // pre-existing defect, pinned by
+    // `replay_of_a_log_with_a_midrun_resize_desyncs_sentinel`, not something the
+    // branch introduces: the branch re-emits the resize at the branch tick and
+    // the assertions above cover its truncation.
+    let replayable_s = dir.path().join("branch-replayable.replay").to_string_lossy().into_owned();
+    let live2 = run_record_dump(
+        game, 120, &replayable_s,
+        &[
+            ("STONE_LIVE_REWIND", "1"),
+            ("STONE_CHECKPOINT_INTERVAL", "5"),
+            ("STONE_RELOAD_AT_FRAME", "32"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
+            ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
+            ("STONE_BRANCH_AT_FRAME", "70"),
+        ],
+    );
+    let diag2 = &live2["__stone_diag"];
+    assert_eq!(diag2["STONE_BRANCH_COUNT"].as_i64(), Some(1), "{diag2}");
+    for class in ["RECORDS", "CHECKPOINTS", "RELOADS", "KEYFRAMES"] {
+        let key = format!("STONE_BRANCH_DROPPED_{class}");
+        assert!(
+            diag2[&key].as_i64().is_some_and(|n| n > 0),
+            "the replayable arm must also have had a {class} population past T: {diag2}"
+        );
+    }
+    let after2 = recorded_tick_lines(&replayable_s);
+    let replayed = run_replay_dump(game, after2 as u32 + 5, &replayable_s, &[]);
+    assert_eq!(
+        current_tick(&replayed), current_tick(&live2),
+        "the branched log must replay to the live tick"
+    );
+    let mut sim = sim_state_names(game, 40);
+    sim.remove("dt");
+    assert_sim_state_matches(&live2, &replayed, &sim, "branched from-boot replay");
+}
+
+/// PINNED BUG. A replay applies a recorded resize by overriding `WINDOW_SIZE`
+/// only -- it never resizes the real window -- so any state derived from the
+/// actual drawable drifts from the recorded run, and the desync detector aborts
+/// with exit 5. Correct behavior is for a replay of a log carrying an `r` line
+/// to reproduce the recorded run exactly.
+///
+/// This is inverted: it asserts the divergence that happens today. When the
+/// replay path starts resizing the window (or otherwise reproducing the
+/// recorded drawable), this test goes red -- flip it to assert success and
+/// delete the carve-out in
+/// `explicit_branch_truncates_every_future_bearing_surface_together`.
+#[test]
+fn replay_of_a_log_with_a_midrun_resize_desyncs_sentinel() {
+    let game = "bitgun";
+    let dir = tempfile::tempdir().unwrap();
+    let log_s = dir.path().join("resize.replay").to_string_lossy().into_owned();
+    let scratch = tempfile::tempdir().unwrap();
+
+    let rec = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args([
+            "frame", game, "-n", "60", "--record", &log_s,
+            "--output", &scratch.path().to_string_lossy(),
+        ])
+        .envs([
+            ("STONE_CHECKPOINT_INTERVAL", "1"),
+            ("STONE_RESIZE_AT_FRAME", "30"),
+            ("STONE_RESIZE_W", "1000"),
+            ("STONE_RESIZE_H", "700"),
+        ])
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .current_dir(workspace_root())
+        .output()
+        .expect("spawn record");
+    assert!(rec.status.success(), "record failed: {}", String::from_utf8_lossy(&rec.stderr));
+    assert!(
+        replay_lines(&log_s).iter().any(|l| l.starts_with("r ")),
+        "the fixture must actually carry a resize line"
+    );
+
+    let out = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args([
+            "frame", game, "-n", "70", "--replay", &log_s,
+            "--output", &scratch.path().to_string_lossy(),
+        ])
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .current_dir(workspace_root())
+        .output()
+        .expect("spawn replay");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success() && stderr.contains("desync"),
+        "PINNED BEHAVIOR (BUG): replaying a log with a mid-run resize must desync today. \
+         If this replay now succeeds, the fix landed -- flip this assertion and drop the \
+         carve-out in the branch oracle. stderr: {stderr}"
+    );
+}
+
+/// Atomicity. With the rewrite forced to fail, the branch must leave the session
+/// exactly where it was: paused in replay, the old file valid and complete, the
+/// future still playable, and no in-memory collection cut.
+#[test]
+fn a_failed_branch_rewrite_leaves_the_future_intact() {
+    let game = "bitgun";
+    let horizon: i64 = 40;
+    let dir = tempfile::tempdir().unwrap();
+    let log_s = dir.path().join("failbranch.replay").to_string_lossy().into_owned();
+    let before_s = dir.path().join("failbranch-before.replay").to_string_lossy().into_owned();
+
+    let live = run_record_dump(
+        game, 140, &log_s,
+        &[
+            ("STONE_LIVE_REWIND", "1"),
+            ("STONE_BRANCH_FAIL", "rewrite"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
+            ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
+            ("STONE_SAVE_REPRO_AT_FRAME", "41"),
+            ("STONE_SAVE_REPRO_PATH", &before_s),
+            ("STONE_BRANCH_AT_FRAME", "70"),
+            ("STONE_LIVE_PLAY_AT_FRAME", "75"),   // the future must still play
+        ],
+    );
+    let diag = &live["__stone_diag"];
+    assert_eq!(diag["STONE_BRANCH_FAILURES"].as_i64(), Some(1), "{diag}");
+    assert!(diag.get("STONE_BRANCH_COUNT").is_none(), "a failed rewrite must not branch: {diag}");
+    for class in ["RECORDS", "CHECKPOINTS", "RESIZES", "RELOADS", "KEYFRAMES"] {
+        let key = format!("STONE_BRANCH_DROPPED_{class}");
+        assert!(diag.get(&key).is_none(), "a failed rewrite must cut nothing ({class}): {diag}");
+    }
+
+    // The old file survives untouched and is still a valid from-boot log.
+    assert_eq!(replay_lines(&log_s), replay_lines(&before_s), "a failed rewrite must not touch the log");
+    assert_eq!(recorded_tick_lines(&log_s), horizon as usize);
+
+    // Still in replay with the future playable: it plays to the horizon and
+    // pauses there rather than exiting.
+    assert_eq!(current_tick(&live), horizon, "the retained future must still play: {diag}");
+    assert!(
+        diag["STONE_REPLAY_HORIZON_PAUSES"].as_i64().is_some_and(|n| n > 0),
+        "the session must still be a paused live rewind: {diag}"
+    );
+    let reference = run_replay_dump(
+        game, horizon as u32, &log_s,
+        &[("STONE_START_PAUSED", "1"), ("STONE_STEP_FRAMES", &horizon.to_string())],
+    );
+    let mut sim = sim_state_names(game, horizon as u32);
+    sim.remove("dt");
+    assert_sim_state_matches(&live, &reference, &sim, "unbranched future after a failed rewrite");
+}
+
+/// The consequence of cutting the in-memory input history: a SECOND rewind after
+/// a branch must see the branched history, not the discarded one. The horizon it
+/// reports is `#records`, so a records/cursor truncation that did not happen
+/// shows up here as a horizon longer than the file.
+#[test]
+fn a_second_rewind_after_a_branch_sees_only_the_branched_history() {
+    let game = "bitgun";
+    let dir = tempfile::tempdir().unwrap();
+    let log_s = dir.path().join("rebranch.replay").to_string_lossy().into_owned();
+
+    let live = run_record_dump(
+        game, 160, &log_s,
+        &[
+            ("STONE_LIVE_REWIND", "1"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
+            ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
+            ("STONE_BRANCH_AT_FRAME", "70"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME_2", "110"),
+            ("STONE_TIMELINE_SEEK_TO_TICK_2", "30"),
+        ],
+    );
+    let diag = &live["__stone_diag"];
+    assert_eq!(diag["STONE_BRANCH_COUNT"].as_i64(), Some(1), "{diag}");
+    assert_eq!(diag["STONE_LIVE_REWIND_COUNT"].as_i64(), Some(2), "both rewinds must fire: {diag}");
+    let horizon = diag["STONE_LIVE_REWIND_HORIZON"].as_i64().expect("horizon");
+    assert!(horizon > 25, "the branched session must have recorded past T (got {horizon})");
+    assert_eq!(
+        horizon, recorded_tick_lines(&log_s) as i64,
+        "the second rewind's horizon must be the branched history, not the discarded future: {diag}"
+    );
+    assert_eq!(current_tick(&live), 30, "the second rewind must land at its target: {diag}");
+}
+
 fn keyframe_count(s: &serde_json::Value) -> i64 {
     s["__stone_diag"]["STONE_KEYFRAME_COUNT"].as_i64().expect("STONE_KEYFRAME_COUNT")
 }
