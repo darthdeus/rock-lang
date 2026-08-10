@@ -528,3 +528,69 @@ fn web_chrome_hot_reload_preserves_state() {
         "browser hot reload failed.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
 }
+
+/// `rock web --single-file` in a real browser, loaded from `file://` -- the one
+/// place the single-file promise can actually be checked. The structural gates
+/// in `web_package_tests` prove the page has no external references; only a
+/// browser proves the embedded bytes are USABLE.
+///
+/// No HTTP server here on purpose. Every other test in this file serves over
+/// HTTP because a fetch of a `file://` sibling is blocked; a single-file build
+/// issues no fetch at all, so `file://` is exactly the case worth pinning and
+/// it is what a player double-clicking the file gets.
+///
+/// chesslings rather than match3: match3 stages only the fallback font, so it
+/// would pass with image embedding broken.
+///
+/// Failure mode to expect: if the prelude stops preferring an inlined asset
+/// over a fetch, this does not fail fast -- the file:// fetch never resolves and
+/// the run burns the driver's full 120s boot deadline before reporting. Measured
+/// on that exact mutation (2.3s PASS -> 120s timeout).
+#[test]
+fn web_chrome_single_file_boots_from_a_file_url() {
+    if Command::new("node").arg("--version").output().map(|o| !o.status.success()).unwrap_or(true) {
+        eprintln!("SKIP single_file_boots: node not on PATH");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let status = Command::new(rock_bin())
+        .current_dir(repo_root())
+        .args(["web", "games/chesslings", "--single-file", "--out",
+               dir.path().join("index.html").to_str().unwrap()])
+        .status()
+        .expect("spawn rock web --single-file");
+    assert!(status.success(), "rock web --single-file failed");
+    let page = dir.path().join("index.html");
+    assert!(page.is_file(), "single-file page not emitted");
+
+    let shot = dir.path().join("shot.png");
+    let out = Command::new("node")
+        .arg(repo_root().join("tools/web/chrome_cdp_smoke.js"))
+        .arg(format!("file://{}", page.display()))
+        .arg(&shot)
+        .args([
+            "--frames", "20",
+            // Asserts the DECODE, not just the bytes: an embedded font has to
+            // reach FontFace and an embedded image createImageBitmap, and both
+            // live in the fetch chain the inline path bypasses. Counting only
+            // __ROCK_WEB_ASSETS keys would pass with that chain skipped.
+            "--expect",
+            "(function(){var n=0;for(var k in __ROCK_WEB_ASSETS)n++;\
+             return [n > 1, Object.keys(__SW.imageBitmaps).length > 0,\
+             Object.keys(__SW.fontFamilies || {}).length > 0].join(',');})()",
+            "--value", "true,true,true",
+        ])
+        .output()
+        .expect("spawn cdp driver");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if stderr.contains("SKIP: no chrome") {
+        eprintln!("SKIP single_file_boots: no chrome on PATH");
+        return;
+    }
+    assert!(
+        out.status.success() && stdout.contains("PASS"),
+        "single-file file:// smoke failed.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert_not_blank(&shot, "the chesslings scene");
+}

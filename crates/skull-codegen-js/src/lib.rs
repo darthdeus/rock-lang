@@ -2619,10 +2619,21 @@ function __rock_web_boot(mainFn) {
     return;
   }
   Promise.all(pre.map(function (path) {
-    return fetch(path).then(function (r) {
-      if (!r.ok) throw new Error(path + " -> HTTP " + r.status);
-      return r.arrayBuffer();
-    }).then(function (buf) {
+    // A single-file build (`rock web --single-file`) has already populated
+    // __ROCK_WEB_ASSETS from base64 embedded in the page, so there is nothing
+    // to fetch -- and under file:// a fetch would fail outright. Take the bytes
+    // and fall through to the SAME decode chain: the font and image rungs below
+    // are what make an asset usable, so skipping them would leave a preloaded
+    // font unregistered and a preloaded image undecoded.
+    var __inlined = __ROCK_WEB_ASSETS[path];
+    var __bytes = __inlined
+      ? Promise.resolve(__inlined.buffer.slice(
+          __inlined.byteOffset, __inlined.byteOffset + __inlined.byteLength))
+      : fetch(path).then(function (r) {
+          if (!r.ok) throw new Error(path + " -> HTTP " + r.status);
+          return r.arrayBuffer();
+        });
+    return __bytes.then(function (buf) {
       __ROCK_WEB_ASSETS[path] = new Uint8Array(buf);
       if (/\.(ttf|otf)$/i.test(path) && typeof FontFace !== "undefined") {
         var fam = "__sw_font_" + path.replace(/[^A-Za-z0-9]/g, "_");
