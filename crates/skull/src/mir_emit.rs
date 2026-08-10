@@ -3156,12 +3156,12 @@ fn emit_full_in_with_mutation(
                 .next
                 .values_mut()
                 .find_map(|next| match next {
-                    skull_mir::bound::ResolvedBoundNext::Concrete { spec, .. }
-                        if spec.is_some() => Some(spec),
+                    skull_mir::bound::ResolvedBoundNext::Concrete { instance, .. }
+                        if !instance.args.is_empty() => Some(instance),
                     _ => None,
                 })
                 .expect("iterator-plan mutation found no concrete witness instance");
-            *witness = None;
+            witness.args.clear();
             matched += 1;
         }
         assert!(

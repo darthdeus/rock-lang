@@ -165,8 +165,8 @@ fn substitute_bound_call_inner(
     concrete_plans: Option<&skull_mir::concrete::ConcretePlans>,
     what: &str,
 ) -> Result<(), CompilerError> {
-    let (concrete, spec) = match leaf {
-        ResolvedBoundNext::Concrete { func, spec, .. } => (*func, spec),
+    let owner = match leaf {
+        ResolvedBoundNext::Concrete { instance, .. } => instance.clone(),
         ResolvedBoundNext::CallerGeneric(g) => {
             return Err(CompilerError::new_no_location(format!(
                 "internal: placeholder bound-call (generic #{g}) has no concrete \
@@ -178,10 +178,7 @@ fn substitute_bound_call_inner(
         return Ok(());
     };
     let (dests, args) = (dests.clone(), args.clone());
-    func.insts[call] = Inst::CallMulti { dests, func: concrete, args };
-    let owner = spec
-        .clone()
-        .unwrap_or_else(|| Instance::intern(interner, concrete, Vec::new()));
+    func.insts[call] = Inst::CallMulti { dests, func: owner.func, args };
     skull_mir::site::record_call_owner(func, call, &owner);
     let abi = match concrete_plans {
         Some(plans) => {
@@ -200,8 +197,8 @@ fn substitute_bound_call_inner(
         None => skull_mir::lower::BackendFnAbiPlan::for_instance(ws, scx, &owner),
     };
     func.call_abi_plans.insert(call, abi);
-    if let Some(inst) = spec.clone() {
-        func.spec_bindings.insert(call, inst);
+    if !owner.args.is_empty() {
+        func.spec_bindings.insert(call, owner.clone());
     }
     // The placeholder's arity is `(bool, E)` because bound conformance
     // fixes it there; the CONCRETE callee is only known here. When its
@@ -214,11 +211,8 @@ fn substitute_bound_call_inner(
     // element (`count`) drops it as dead -- which is why this does not
     // reintroduce the box the mark forbids, and why it does not
     // over-reject `count` the way a splice-time arity check did.
-    // The instance the shape is read at: the leaf's own when it named one, else
-    // the non-generic instance of the concrete witness. `Instance::base` is not a
-    // fallback for a missing record -- a witness with no type arguments has none
-    // to record.
-    let inst = spec.clone().unwrap_or_else(|| Instance::base(concrete));
+    // The instance the shape is read at is carried by the resolved leaf.
+    let inst = owner;
     if already_split {
         check_bound_next_split(func, call, ws, interner, &inst)
     } else {

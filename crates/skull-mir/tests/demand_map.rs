@@ -31,13 +31,12 @@ fn fref(n: u32) -> FuncRef {
 }
 
 /// A one-leaf tree resolving generic #0 to witness `witness`.
-fn tree(witness: u32) -> ResolvedBoundTree {
+fn tree(i: &MonoInterner, witness: u32) -> ResolvedBoundTree {
     let mut t = ResolvedBoundTree::default();
     t.next.insert(
         0,
         ResolvedBoundNext::Concrete {
-            func: fref(witness),
-            spec: None,
+            instance: Instance::intern(i, fref(witness), vec![nominal("float")]),
             sub: ResolvedBoundTree::default(),
         },
     );
@@ -63,9 +62,9 @@ fn demand(i: &MonoInterner, callee: u32, ty: &str, tree: ResolvedBoundTree) -> S
 fn two_sites_demanding_one_body_with_different_trees_clash() {
     let i = interner();
     let mut map = DemandMap::default();
-    assert!(map.record(&[demand(&i, 1, "int", tree(7))]).is_empty(), "a first sighting is not a clash");
+    assert!(map.record(&[demand(&i, 1, "int", tree(&i, 7))]).is_empty(), "a first sighting is not a clash");
 
-    let clashes = map.record(&[demand(&i, 1, "int", tree(9))]);
+    let clashes = map.record(&[demand(&i, 1, "int", tree(&i, 9))]);
     assert_eq!(
         clashes,
         vec![inst(&i, 1, "int")],
@@ -81,9 +80,9 @@ fn two_sites_demanding_one_body_with_different_trees_clash() {
 fn a_repeated_demand_that_agrees_is_silent() {
     let i = interner();
     let mut map = DemandMap::default();
-    map.record(&[demand(&i, 1, "int", tree(7))]);
+    map.record(&[demand(&i, 1, "int", tree(&i, 7))]);
     assert!(
-        map.record(&[demand(&i, 1, "int", tree(7)), demand(&i, 1, "int", tree(7))]).is_empty(),
+        map.record(&[demand(&i, 1, "int", tree(&i, 7)), demand(&i, 1, "int", tree(&i, 7))]).is_empty(),
         "agreeing repeats must be silent"
     );
 }
@@ -96,10 +95,13 @@ fn a_repeated_demand_that_agrees_is_silent() {
 fn two_instantiations_of_one_declaration_may_differ() {
     let i = interner();
     let mut map = DemandMap::default();
-    let clashes = map.record(&[demand(&i, 1, "int", tree(7)), demand(&i, 1, "string", tree(9))]);
+    let clashes = map.record(&[
+        demand(&i, 1, "int", tree(&i, 7)),
+        demand(&i, 1, "string", tree(&i, 9)),
+    ]);
     assert!(clashes.is_empty(), "distinct instantiations are distinct bodies: {clashes:?}");
-    assert_eq!(map.tree_of(&inst(&i, 1, "int")), tree(7));
-    assert_eq!(map.tree_of(&inst(&i, 1, "string")), tree(9));
+    assert_eq!(map.tree_of(&inst(&i, 1, "int")), tree(&i, 7));
+    assert_eq!(map.tree_of(&inst(&i, 1, "string")), tree(&i, 9));
 }
 
 /// An unrecorded body reads as the EMPTY tree rather than as an error here.

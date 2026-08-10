@@ -28,10 +28,10 @@ use crate::monoty::MonoInterner;
 /// How one bounded generic index of a callee resolves.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ResolvedBoundNext {
-    /// A concrete `next`: the witness declaration, the concrete BODY its own
-    /// instantiation asks for (`None` = the witness is not generic here), and
-    /// how the witness's own bounded generics resolve in turn.
-    Concrete { func: FuncRef, spec: Option<Instance>, sub: ResolvedBoundTree },
+    /// A concrete `next` witness and how its own bounded generics resolve in
+    /// turn. The non-generic case is `Instance::base`, so every consumer reads
+    /// one identity rather than re-pairing a declaration with an optional key.
+    Concrete { instance: Instance, sub: ResolvedBoundTree },
     /// Still the enclosing body's own bounded generic. Resolvable only where
     /// that body's incoming tree is known -- at its splice, or at its
     /// standalone instantiation.
@@ -229,7 +229,7 @@ pub fn resolve_bound_next(
             // No inference for this body means no arena to read the witness
             // instantiation out of; the shared witness is what the splice path
             // has always used in that case.
-            let spec = match inf {
+            let instance = match inf {
                 Some(inf) => crate::lower::spec_key_from_next_generics(
                     ws,
                     inf,
@@ -237,12 +237,12 @@ pub fn resolve_bound_next(
                     next_generics,
                     subst,
                 )?
-                .map(|key| Instance::intern(interner, func, key)),
-                None => None,
+                .map(|key| Instance::intern(interner, func, key))
+                .unwrap_or_else(|| Instance::base(func)),
+                None => Instance::base(func),
             };
             Ok(ResolvedBoundNext::Concrete {
-                func,
-                spec,
+                instance,
                 sub: resolve_bound_tree(ws, interner, inf, subst, sub, incoming)?,
             })
         }

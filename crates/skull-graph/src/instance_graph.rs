@@ -220,12 +220,10 @@ impl InstanceBoundTree {
                 .next
                 .iter()
                 .map(|(index, witness)| {
-                    let spec = (!witness.callee.args.is_empty()).then(|| witness.callee.clone());
                     (
                         *index,
                         skull_mir::bound::ResolvedBoundNext::Concrete {
-                            func: witness.callee.func,
-                            spec,
+                            instance: witness.callee.clone(),
                             sub: witness.sub.to_resolved(),
                         },
                     )

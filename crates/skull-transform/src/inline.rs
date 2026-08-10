@@ -777,10 +777,9 @@ fn graft_resolved_bound_tree(
     let mut out = skull_mir::bound::ResolvedBoundTree::default();
     for (&g, next) in &tree.next {
         let next = match next {
-            skull_mir::bound::ResolvedBoundNext::Concrete { func, spec, sub } => {
+            skull_mir::bound::ResolvedBoundNext::Concrete { instance, sub } => {
                 skull_mir::bound::ResolvedBoundNext::Concrete {
-                    func: *func,
-                    spec: spec.clone(),
+                    instance: instance.clone(),
                     sub: graft_resolved_bound_tree(sub, incoming)?,
                 }
             }

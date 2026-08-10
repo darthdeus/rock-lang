@@ -404,9 +404,7 @@ impl Builder<'_> {
                 gap(format!("concrete plan is missing bound `next` witness {gidx}"))
             })?;
             let instance = match next {
-                crate::bound::ResolvedBoundNext::Concrete { func, spec, .. } => spec
-                    .clone()
-                    .unwrap_or_else(|| crate::instance::Instance::base(*func)),
+                crate::bound::ResolvedBoundNext::Concrete { instance, .. } => instance.clone(),
                 crate::bound::ResolvedBoundNext::CallerGeneric(inner) => {
                     return Err(gap(format!(
                         "concrete bound `next` witness {gidx} remains caller-generic at {inner}"
