@@ -44,7 +44,9 @@ pub struct DispatchCtx<'a> {
     pub concrete_plan: Option<&'a ConcreteBodyPlan>,
     pub concrete_types: Option<&'a ConcreteTypeTables>,
     pub interner: Option<&'a crate::monoty::MonoInterner>,
-    pub subst: &'a MonoSubst,
+    /// Source substitution for the graph's legacy view. Concrete lowering sets
+    /// this to `None` because every type decision must come from its plan.
+    pub legacy_subst: Option<&'a MonoSubst>,
     pub values_first_class: bool,
 }
 
@@ -328,7 +330,7 @@ impl<'a> DispatchCtx<'a> {
         // A generic bound to `E?` is nullable and `ty_node` cannot say so: it
         // substitutes the PAYLOAD. Read the raw node before that erases the `?`.
         if let Some(TypeExpr::Generic(var, _)) = self.raw_ty_node(ty) {
-            if let Some(b) = self.subst.get(&var) {
+            if let Some(b) = self.legacy_subst.and_then(|subst| subst.get(&var)) {
                 return b.peel_nullable().1;
             }
         }

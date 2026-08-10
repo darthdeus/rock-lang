@@ -144,7 +144,29 @@ impl Builder<'_> {
         &self,
         e: Idx<Expr>,
         func: FuncRef,
+        concrete_callee: Option<&crate::instance::Instance>,
     ) -> Result<(), CompilerError> {
+        if let Some(instance) = concrete_callee {
+            let plan = self
+                .concrete_plan
+                .ok_or_else(|| self.gap_here("concrete callee has no owner plan"))?;
+            let site = crate::site::Site {
+                domain: self.cur_domain.clone(),
+                expr: e,
+                op: self.cur_op.clone(),
+            };
+            if plan.callees.get(&site) != Some(instance) {
+                return Err(self.gap_here("concrete callee identity disagrees with its site plan"));
+            }
+            let signature = plan.callee_signatures.get(&site).ok_or_else(|| {
+                self.gap_here("concrete callee signature is missing for its site")
+            })?;
+            return self.reject_concrete_column_container_opaque_slots(
+                e,
+                instance.func,
+                signature,
+            );
+        }
         let callee = &self.ws.module(func.module).functions[func.func];
         if callee.inline_body.is_none() && !callee.is_extern {
             return Ok(());
@@ -212,34 +234,89 @@ impl Builder<'_> {
         ty: TyId,
     ) -> Result<Option<(String, &'static str)>, CompilerError> {
         let Some(mono) = self.declared_slot_mono(e, func, ty)? else { return Ok(None) };
+        Ok(self.slot_hazard_mono(&mono))
+    }
+
+    fn slot_hazard_mono(
+        &self,
+        mono: &crate::monoty::MonoTy,
+    ) -> Option<(String, &'static str)> {
         use crate::lower::shape::{map_column_value_mono, vec_column_elem_mono};
-        if let Some(el) = vec_column_elem_mono(self.ws, self.scx.target, &mono) {
-            return Ok(Some((format!("[{}]", el.name), "`_data`")));
+        if let Some(el) = vec_column_elem_mono(self.ws, self.scx.target, mono) {
+            return Some((format!("[{}]", el.name), "`_data`"));
         }
-        if let Some(el) = map_column_value_mono(self.ws, self.scx.target, &mono) {
-            return Ok(Some((format!("Map<_, {}>", el.name), "a bare key table")));
+        if let Some(el) = map_column_value_mono(self.ws, self.scx.target, mono) {
+            return Some((format!("Map<_, {}>", el.name), "a bare key table"));
         }
-        let crate::monoty::MonoTy::App { ctor: crate::monoty::MonoCtor::Nominal(c), params } =
-            &mono
+        let crate::monoty::MonoTy::App {
+            ctor: crate::monoty::MonoCtor::Nominal(c),
+            params,
+        } = mono
         else {
-            return Ok(None);
+            return None;
         };
         if !crate::lower::shape::is_nominal_container(*c) {
-            return Ok(None);
+            return None;
         }
-        let [only] = params.as_slice() else { return Ok(None) };
+        let [only] = params.as_slice() else { return None };
         let (payload, nullable) = only.peel_nullable();
-        let Some(elem) = payload.nominal() else { return Ok(None) };
-        Ok(
-            crate::lower::shape::opaque_container_hazard(
-                self.ws,
-                self.scx.target,
-                *c,
-                elem,
-                nullable,
-            )
-            .map(|physical| (format!("{c}<{elem}>"), physical)),
+        let Some(elem) = payload.nominal() else { return None };
+        crate::lower::shape::opaque_container_hazard(
+            self.ws,
+            self.scx.target,
+            *c,
+            elem,
+            nullable,
         )
+        .map(|physical| (format!("{c}<{elem}>"), physical))
+    }
+
+    fn reject_concrete_column_container_opaque_slots(
+        &self,
+        e: Idx<Expr>,
+        func: FuncRef,
+        signature: &crate::concrete::ConcreteSignature,
+    ) -> Result<(), CompilerError> {
+        let callee = &self.ws.module(func.module).functions[func.func];
+        if callee.inline_body.is_none() && !callee.is_extern {
+            return Ok(());
+        }
+        if callee.param_decls.len() != signature.params.len() {
+            return Err(self.gap_here("concrete callee signature has the wrong parameter count"));
+        }
+        for (i, id) in signature.params.iter().enumerate() {
+            if self.param_is_repr_opaque(func, i) {
+                continue;
+            }
+            let mono = self.scx.interner().get(*id);
+            if let Some((rendered, physical)) = self.slot_hazard_mono(&mono) {
+                return Err(CompilerError::new_with_label(
+                    self.body.expr_spans[e],
+                    format!(
+                        "column-stored `{rendered}` cannot cross opaque body boundary \
+                         `{}` (an inline/extern body sees per-leaf columns, not \
+                         {physical}; take `any` if the body reads the column layout \
+                         itself, else use a boxed element type)",
+                        callee.name
+                    ),
+                ));
+            }
+        }
+        let Some(id) = signature.result else { return Ok(()) };
+        let mono = self.scx.interner().get(id);
+        let Some((rendered, physical)) = self.slot_hazard_mono(&mono) else {
+            return Ok(());
+        };
+        Err(CompilerError::new_with_label(
+            self.body.expr_spans[e],
+            format!(
+                "opaque body boundary `{}` cannot BUILD column-stored \
+                 `{rendered}` (an inline/extern body hand-builds {physical}, which \
+                 a column-planned result does not have; return `any` if the body \
+                 builds the column layout itself, else use a boxed element type)",
+                callee.name
+            ),
+        ))
     }
 
     /// A callee-declared type as a CONCRETE type at this call site.

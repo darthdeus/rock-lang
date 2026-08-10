@@ -64,9 +64,45 @@ impl Builder<'_> {
 
     pub(crate) fn concrete_callee_param_ty(
         &self,
+        e: Idx<Expr>,
         inst: &crate::instance::Instance,
         pidx: usize,
     ) -> Result<Option<crate::monoty::MonoTy>, CompilerError> {
+        if let Some(plan) = self.concrete_plan {
+            let site = crate::site::Site {
+                domain: self.cur_domain.clone(),
+                expr: e,
+                op: self.cur_op.clone(),
+            };
+            if plan.callees.get(&site) != Some(inst) {
+                return Err(self.gap_here("concrete callee identity disagrees with its site plan"));
+            }
+            let signature = if let Some(plans) = self.concrete_plans {
+                let needs_plan = crate::lower::requires_concrete_body_plan(self.ws, inst)
+                    && crate::monoty::too_deep_to_instantiate(
+                        inst.arg_types(self.scx.interner()).iter(),
+                    )
+                    .is_none();
+                if needs_plan {
+                    &plans.get(inst).ok_or_else(|| {
+                        self.gap_here("concrete callee body plan is missing for its site")
+                    })?
+                    .signature
+                } else {
+                    plan.callee_signatures.get(&site).ok_or_else(|| {
+                        self.gap_here("concrete callee signature is missing for its site")
+                    })?
+                }
+            } else {
+                plan.callee_signatures.get(&site).ok_or_else(|| {
+                    self.gap_here("concrete callee signature is missing for its site")
+                })?
+            };
+            let id = signature.params.get(pidx).ok_or_else(|| {
+                self.gap_here("concrete callee signature has no parameter for this argument")
+            })?;
+            return Ok(Some(self.scx.interner().get(*id)));
+        }
         let Some(plans) = self.concrete_plans else { return Ok(None) };
         let Some(plan) = plans.get(inst) else { return Ok(None) };
         let id = plan.signature.params.get(pidx).ok_or_else(|| {
@@ -891,19 +927,28 @@ impl Builder<'_> {
         let ret_tuple = (!lua_opaque).then_some(declared_ret_tuple).flatten();
         let Some(scalar_abi) = dc.plan.scalar().cloned() else {
             self.reject_nobox_boxed_call_args(func, arg_idxs)?;
-            self.reject_column_container_opaque_slots(e, func)?;
+            self.reject_column_container_opaque_slots(
+                e,
+                func,
+                self.concrete_plan.and_then(|_| dc.callee_inst.as_ref()),
+            )?;
             let args = if any_named {
-                self.reorder_named_args(arg_idxs, func, dc.callee_inst.as_ref())?
+                self.reorder_named_args(e, arg_idxs, func, dc.callee_inst.as_ref())?
             } else {
                 arg_idxs
                     .iter()
                     .enumerate()
                     .map(|(i, &a)| {
                         let v = self.lower_expr(a)?;
-                        if let Some(inst) = dc.callee_inst.as_ref() {
-                            if let Some(t) = self.concrete_callee_param_ty(inst, i)? {
-                                return Ok(self.coerced_mono(v, a, &t));
-                            }
+                        if self.concrete_plan.is_some() {
+                            let inst = dc
+                                .callee_inst
+                                .as_ref()
+                                .ok_or_else(|| self.gap_here("concrete call has no callee instance"))?;
+                            let t = self
+                                .concrete_callee_param_ty(e, inst, i)?
+                                .ok_or_else(|| self.gap_here("concrete call has no callee parameter type"))?;
+                            return Ok(self.coerced_mono(v, a, &t));
                         }
                         Ok(match self.param_ty(func, i) {
                             Some(t) => self.coerced(v, a, t),

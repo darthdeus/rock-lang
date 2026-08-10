@@ -72,6 +72,9 @@ pub struct ConcreteBodyPlan {
     pub signature: ConcreteSignature,
     /// Every resolved site is owned by its concrete callee instance.
     pub callees: BTreeMap<Site, Instance>,
+    /// Concrete signatures for the same resolved sites, including boundaries
+    /// whose body is supplied by the target rather than lowered here.
+    pub callee_signatures: BTreeMap<Site, ConcreteSignature>,
     pub bound_tree: ResolvedBoundTree,
 }
 

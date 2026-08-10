@@ -653,6 +653,7 @@ impl Builder<'_> {
     /// them).
     pub(crate) fn reorder_named_args(
         &mut self,
+        e: Idx<Expr>,
         arg_idxs: &[Idx<Expr>],
         func: FuncRef,
         callee_inst: Option<&crate::instance::Instance>,
@@ -702,11 +703,14 @@ impl Builder<'_> {
                 )));
             }
             let v = match callee_inst
-                .map(|inst| self.concrete_callee_param_ty(inst, pidx))
+                .map(|inst| self.concrete_callee_param_ty(e, inst, pidx))
                 .transpose()?
                 .flatten()
             {
                 Some(t) => self.coerced_mono(v, a, &t),
+                None if self.concrete_plan.is_some() => {
+                    return Err(self.gap_here("concrete call has no callee parameter type"));
+                }
                 None => match self.param_ty(func, pidx) {
                     Some(t) => self.coerced(v, a, t),
                     None => v,

@@ -3693,7 +3693,7 @@ fn dispatched_sites(
         concrete_plan: None,
         concrete_types: None,
         interner: None,
-        subst,
+        legacy_subst: Some(subst),
         values_first_class: false,
     };
     let mut out: Vec<(Site, &'static str)> = Vec::new();

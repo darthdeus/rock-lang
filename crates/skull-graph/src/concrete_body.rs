@@ -781,8 +781,12 @@ fn concrete_plan(
     body: &ConcreteBody,
 ) -> Result<ConcreteBodyPlan, MonoTyReason> {
     let mut callees = BTreeMap::new();
+    let mut callee_signatures = BTreeMap::new();
     for (site, callee) in body.callees() {
-        callees.insert(site, callee.instance().clone());
+        let instance = callee.instance().clone();
+        let subst = g.substitution(&instance).cloned().ok_or(MonoTyReason::NoNode)?;
+        callee_signatures.insert(site.clone(), concrete_signature(ws, g, &instance, &subst)?);
+        callees.insert(site, instance);
     }
     let ty_types = concrete_ty_types(ws, g, inf, subst)?;
     let default_domains = g
@@ -802,6 +806,7 @@ fn concrete_plan(
         foreign_domains,
         signature: concrete_signature(ws, g, inst, subst)?,
         callees,
+        callee_signatures,
         bound_tree: g.bound_tree(inst).map_or_else(Default::default, |tree| tree.to_resolved()),
     })
 }
@@ -826,8 +831,14 @@ fn concrete_always_plan(
         .get(&Owner::AlwaysEmitted(module, owner))
         .ok_or(MonoTyReason::NoNode)?;
     let mut callees = BTreeMap::new();
+    let mut callee_signatures = BTreeMap::new();
     for (site, record) in &contribution.always_call_sites {
         if let SiteOutcome::Resolved(instance) = &record.outcome {
+            let subst = g.substitution(instance).cloned().ok_or(MonoTyReason::NoNode)?;
+            callee_signatures.insert(
+                site.clone(),
+                concrete_signature(ws, g, instance, &subst)?,
+            );
             callees.insert(site.clone(), instance.clone());
         }
     }
@@ -871,6 +882,7 @@ fn concrete_always_plan(
         foreign_domains,
         signature,
         callees,
+        callee_signatures,
         bound_tree: Default::default(),
     }))
 }

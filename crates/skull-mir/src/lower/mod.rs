@@ -1030,8 +1030,15 @@ pub fn lower_instance(
     scx: &ScalarCtx,
     inst: &crate::instance::Instance,
 ) -> Result<MirFunc, CompilerError> {
-    let subst = inst.subst(ws, scx.interner());
-    lower_body(ws, scx, inst.func, inst.clone(), &subst, None, None)
+    lower_body(
+        ws,
+        scx,
+        inst.func,
+        inst.clone(),
+        Some(inst.subst(ws, scx.interner())),
+        None,
+        None,
+    )
 }
 
 /// Lower an ordinary function from its graph-owned concrete body plan.
@@ -1091,6 +1098,12 @@ fn lower_instance_with_plan_inner(
         }
     }
     for site in plan.callees.keys() {
+        if !plan.callee_signatures.contains_key(site) {
+            return Err(gap(format!(
+                "concrete plan is missing the callee signature for site {:?}",
+                site.op
+            )));
+        }
         if !matches!(site.domain, crate::site::SiteDomain::Own)
             && plan.domain_types(&site.domain).is_none()
         {
@@ -1100,8 +1113,7 @@ fn lower_instance_with_plan_inner(
             )));
         }
     }
-    let subst = inst.subst(ws, scx.interner());
-    lower_body(ws, scx, inst.func, inst.clone(), &subst, Some(plan), concrete_plans)
+    lower_body(ws, scx, inst.func, inst.clone(), None, Some(plan), concrete_plans)
 }
 
 fn lower_body(
@@ -1109,7 +1121,7 @@ fn lower_body(
     scx: &ScalarCtx,
     self_ref: FuncRef,
     subject: crate::instance::Instance,
-    subst: &SpecSubst,
+    legacy_subst: Option<SpecSubst>,
     concrete_plan: Option<&ConcreteBodyPlan>,
     concrete_plans: Option<&ConcretePlans>,
 ) -> Result<MirFunc, CompilerError> {
@@ -1144,7 +1156,16 @@ fn lower_body(
     // This body's own ABI, from the one plan the calls that target it read.
     let abi = concrete_plan
         .map(|plan| BackendFnAbiPlan::for_concrete_plan(ws, scx, plan))
-        .unwrap_or_else(|| BackendFnAbiPlan::for_instance_with_subst(ws, scx, &subject, subst));
+        .unwrap_or_else(|| {
+            BackendFnAbiPlan::for_instance_with_subst(
+                ws,
+                scx,
+                &subject,
+                legacy_subst
+                    .as_ref()
+                    .expect("legacy lowering needs its source substitution"),
+            )
+        });
     let param_shapes = abi.param_shapes();
     let ret_shape = abi.ret_shape().cloned();
     let ret_tuple = abi.ret_tuple().cloned();
@@ -1153,8 +1174,7 @@ fn lower_body(
         scx,
         concrete_plan,
         concrete_plans,
-        spec_subst: subst,
-        struct_default_subst: None,
+        legacy_subst,
         generic_bounds: &func.generic_bounds,
         body,
         inf,
@@ -1279,14 +1299,12 @@ fn lower_global_inner(
         .and_then(|ir| ir.per_fn.get(&BodyOwner::Global(gid)));
     let f = MirFunc::new(name);
     let cur = f.entry();
-    let empty_subst = SpecSubst::default();
     let mut b = Builder {
         ws,
         scx,
         concrete_plan,
         concrete_plans,
-        spec_subst: &empty_subst,
-        struct_default_subst: None,
+        legacy_subst: concrete_plan.is_none().then(SpecSubst::default),
         generic_bounds: &[],
         body,
         inf,
@@ -1411,6 +1429,12 @@ fn validate_always_plan(
         }
     }
     for site in plan.callees.keys() {
+        if !plan.callee_signatures.contains_key(site) {
+            return Err(gap(format!(
+                "concrete always-emitted plan is missing the callee signature for site {:?}",
+                site.op
+            )));
+        }
         if !matches!(site.domain, crate::site::SiteDomain::Own)
             && plan.domain_types(&site.domain).is_none()
         {
@@ -1504,14 +1528,12 @@ fn lower_decorator_inner(
         .ok_or_else(|| gap("decorator body has no target binding"))?;
     let f = MirFunc::new(name);
     let cur = f.entry();
-    let empty_subst = SpecSubst::default();
     let mut b = Builder {
         ws,
         scx,
         concrete_plan,
         concrete_plans,
-        spec_subst: &empty_subst,
-        struct_default_subst: None,
+        legacy_subst: concrete_plan.is_none().then(SpecSubst::default),
         generic_bounds: &[],
         body,
         inf,
@@ -1559,24 +1581,11 @@ struct Builder<'a> {
     scx: &'a ScalarCtx,
     concrete_plan: Option<&'a ConcreteBodyPlan>,
     concrete_plans: Option<&'a ConcretePlans>,
-    /// Per-instantiation generic substitution (`docs/flatvec-plan.md` call-site
-    /// specialization). Empty for the shared generic / non-generic snapshot; a
-    /// value-instantiated splice carries `callee generic VarId -> concrete type`
-    /// so type resolution (`type_of`/`native_buffer_alloc_ctype`/param shapes)
-    /// sees the concrete type and the body scalarizes.
-    spec_subst: &'a SpecSubst,
-    /// While a struct-default initializer is being lowered: the declaring
-    /// struct's generic slots bound to the LITERAL's concrete arguments,
-    /// REPLACING [`Self::spec_subst`] rather than extending it.
-    ///
-    /// It replaces because the two are keyed in different bodies. A defaults
-    /// body is a body of its own, and [`Builder::with_struct_default`] swaps
-    /// `body`/`inf` to it; the enclosing instance's substitution names the
-    /// enclosing fn's generics, which mean nothing there.
-    ///
-    /// Read through [`Self::subst`], never directly -- a reader that takes
-    /// `spec_subst` while this is set resolves against the wrong body.
-    struct_default_subst: Option<SpecSubst>,
+    /// Legacy source substitution, absent for every concrete-plan builder.
+    /// Struct-default lowering temporarily replaces this one value with the
+    /// defaults body's slot substitution; concrete builders keep it absent and
+    /// read their foreign-domain tables instead.
+    legacy_subst: Option<SpecSubst>,
     /// The enclosing fn's `generic_bounds`, parallel to its `generics`:
     /// `Some(elem)` where a generic is declared `I: Iterator<elem>`. THE declared
     /// source for a placeholder `next`'s element shape -- the call's inferred
@@ -1778,9 +1787,11 @@ impl Builder<'_> {
     /// installed, else this instance's own.
     ///
     /// One oracle, because the two are keyed in DIFFERENT bodies -- see
-    /// [`Self::struct_default_subst`]. Every reader goes through here.
+    /// Every source-shaped reader goes through this legacy-only adapter.
     pub(crate) fn subst(&self) -> &SpecSubst {
-        self.struct_default_subst.as_ref().unwrap_or(self.spec_subst)
+        self.legacy_subst
+            .as_ref()
+            .expect("concrete lowering attempted to read a source substitution")
     }
 
     pub(crate) fn dispatch(&self) -> dispatch::DispatchCtx<'_> {
@@ -1793,7 +1804,7 @@ impl Builder<'_> {
                 .concrete_plan
                 .and_then(|plan| plan.domain_types(&self.cur_domain)),
             interner: Some(self.scx.interner()),
-            subst: self.subst(),
+            legacy_subst: self.legacy_subst.as_ref(),
             values_first_class: self.scx.values_first_class,
         }
     }
