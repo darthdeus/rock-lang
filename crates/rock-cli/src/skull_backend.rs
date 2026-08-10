@@ -2315,9 +2315,10 @@ fn skull_game_preamble(dir: &str) -> String {
         Ok(skull::mir_emit::RendererTarget::Wgpu) => "wgpu",
         Err(e) => panic!("cannot read renderer selection for {dir}: {e}"),
     };
-    let mut full = format!(
-        "__ROCK_GAME_SOURCE_DIR = \"{escaped}\"\n__ROCK_RENDERER_BACKEND = \"{renderer}\"\n"
-    );
+    let mut full = format!("__ROCK_GAME_SOURCE_DIR = \"{escaped}\"\n");
+    if renderer == "wgpu" {
+        full.push_str("__ROCK_RENDERER_BACKEND = \"wgpu\"\n");
+    }
     full.push_str(&rock_host::cimgui_embed::build_prelude());
     if !full.ends_with('\n') {
         full.push('\n');
