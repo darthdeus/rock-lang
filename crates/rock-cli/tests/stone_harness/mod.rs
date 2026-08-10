@@ -187,25 +187,46 @@ impl StoneHarness {
     /// coalesced": the exact final count is host-dependent, but the
     /// settled count once events stop arriving is stable.
     pub fn await_settled(&self, quiescent: Duration, timeout: Duration) -> Vec<ReloadEvent> {
+        self.await_settled_impl(quiescent, timeout, false)
+    }
+
+    /// Like `await_settled`, but require an event after the call begins.
+    /// Compile errors count as events even though they are not reloads.
+    pub fn await_write_settled(&self, quiescent: Duration, timeout: Duration) -> Vec<ReloadEvent> {
+        self.await_settled_impl(quiescent, timeout, true)
+    }
+
+    fn await_settled_impl(
+        &self,
+        quiescent: Duration,
+        timeout: Duration,
+        require_event: bool,
+    ) -> Vec<ReloadEvent> {
         let deadline = Instant::now() + timeout;
         let mut last_count = self.reload_log().len();
+        let mut last_event_count = self.events.lock().unwrap().len();
+        let mut saw_event = !require_event;
         let mut last_change = Instant::now();
         loop {
             std::thread::sleep(Duration::from_millis(20));
             let now_count = self.reload_log().len();
-            if now_count != last_count {
+            let now_event_count = self.events.lock().unwrap().len();
+            if now_count != last_count || now_event_count != last_event_count {
                 last_count = now_count;
+                last_event_count = now_event_count;
+                saw_event = true;
                 last_change = Instant::now();
             }
-            if last_change.elapsed() >= quiescent {
+            if saw_event && last_change.elapsed() >= quiescent {
                 return self.reload_log();
             }
             if Instant::now() >= deadline {
                 panic!(
-                    "await_settled: never quiet for {}ms within {}ms (last_count={})",
+                    "await_settled: no post-write event or quiet for {}ms within {}ms (reload_count={}, event_count={})",
                     quiescent.as_millis(),
                     timeout.as_millis(),
                     last_count,
+                    last_event_count,
                 );
             }
         }

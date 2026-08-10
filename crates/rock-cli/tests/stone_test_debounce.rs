@@ -17,7 +17,7 @@ const SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
 fn smoke_initial_write_triggers_one_reload() {
     let h = StoneHarness::spawn(&[]);
     h.write_file("a.rock", BASIC_PROGRAM);
-    let log = h.await_settled(QUIESCENT, SETTLE_TIMEOUT);
+    let log = h.await_write_settled(QUIESCENT, SETTLE_TIMEOUT);
     assert_eq!(
         log.len(),
         1,
@@ -37,7 +37,7 @@ fn rapid_burst_coalesces() {
     for i in 0..10 {
         h.write_file("a.rock", &format!("fn main() {{ let x = {} }}\n", i));
     }
-    let log = h.await_settled(QUIESCENT, SETTLE_TIMEOUT);
+    let log = h.await_write_settled(QUIESCENT, SETTLE_TIMEOUT);
     assert!(
         log.len() <= 3,
         "10 rapid writes should coalesce to ≤3 reloads, got {}: {:?}",
@@ -59,13 +59,13 @@ fn separated_writes_each_reload() {
     // host artifact, under-firing would be a real bug.
     let h = StoneHarness::spawn(&[]);
     h.write_file("a.rock", "fn main() { let x = 1 }\n");
-    h.await_settled(QUIESCENT, SETTLE_TIMEOUT);
+    h.await_write_settled(QUIESCENT, SETTLE_TIMEOUT);
 
     h.write_file("a.rock", "fn main() { let x = 2 }\n");
-    h.await_settled(QUIESCENT, SETTLE_TIMEOUT);
+    h.await_write_settled(QUIESCENT, SETTLE_TIMEOUT);
 
     h.write_file("a.rock", "fn main() { let x = 3 }\n");
-    let log = h.await_settled(QUIESCENT, SETTLE_TIMEOUT);
+    let log = h.await_write_settled(QUIESCENT, SETTLE_TIMEOUT);
     assert!(
         log.len() >= 3,
         "three separated writes should produce at least three reloads, got {}: {:?}",
@@ -79,7 +79,7 @@ fn compile_error_event_emitted_for_bad_source() {
     let h = StoneHarness::spawn(&[]);
     h.write_file("a.rock", "fn main() { this is not valid rock");
     // Wait for the watcher to settle.
-    let _ = h.await_settled(QUIESCENT, SETTLE_TIMEOUT);
+    let _ = h.await_write_settled(QUIESCENT, SETTLE_TIMEOUT);
     let errors = h.error_log();
     assert!(
         !errors.is_empty(),
