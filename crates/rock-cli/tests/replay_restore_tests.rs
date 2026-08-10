@@ -585,6 +585,110 @@ fn live_record_rewind_admits_supported_late_state() {
     assert_sim_state_matches_exact(&rewound, &reference, &sim, "supported late-state live-rewind");
 }
 
+/// A rewound live session owns its recorded future, so reaching the horizon is
+/// an inspection boundary, not the end of a batch job: it must PAUSE there and
+/// stay interactive rather than taking the ordinary replay exit. Both arms play
+/// T -> H, which consumes the retained records; arm B then scrubs backward again
+/// from H, which is only reachable if the process is still alive at all.
+///
+/// The log-unchanged claim is checked WITHIN the process (a from-boot copy taken
+/// one frame after the rewind, compared with the file at shutdown): two record
+/// runs cannot be compared byte-for-byte because `dt` is real wall-clock time.
+#[test]
+fn live_rewind_pauses_at_horizon_and_keeps_the_future_inspectable() {
+    let game = "bitgun";
+    let horizon: i64 = 40;
+    let dir = tempfile::tempdir().unwrap();
+
+    let run = |name: &str, extra: &[(&str, &str)]| {
+        let log = dir.path().join(format!("{name}.replay"));
+        let log_s = log.to_string_lossy().into_owned();
+        let copy = dir.path().join(format!("{name}-at-rewind.replay"));
+        let copy_s = copy.to_string_lossy().into_owned();
+        let mut env: Vec<(&str, &str)> = vec![
+            ("STONE_LIVE_REWIND", "1"),
+            ("STONE_LIVE_REWIND_AT_FRAME", "40"),
+            ("STONE_LIVE_REWIND_TO_TICK", "25"),
+            ("STONE_LIVE_PLAY_AT_FRAME", "70"),
+            ("STONE_KEYFRAME_INTERVAL", "10"),
+            ("STONE_SAVE_REPRO_AT_FRAME", "41"),
+        ];
+        env.push(("STONE_SAVE_REPRO_PATH", Box::leak(copy_s.clone().into_boxed_str())));
+        env.extend_from_slice(extra);
+        let dump = run_record_dump(game, 120, &log_s, &env);
+        // The log must be untouched between the rewind and shutdown: no branch
+        // was requested, so the retained future is still exactly what it was.
+        let at_rewind = std::fs::read(&copy_s).expect("from-boot copy taken at the rewind");
+        let at_exit = std::fs::read(&log_s).expect("final log");
+        assert_eq!(
+            recorded_tick_lines(&copy_s), horizon as usize,
+            "{name}: the copy must hold the whole retained future, else the compare is vacuous"
+        );
+        assert_eq!(
+            at_rewind, at_exit,
+            "{name}: rewinding and inspecting must not rewrite the log"
+        );
+        assert_eq!(recorded_tick_lines(&log_s), horizon as usize, "{name}: the future must stay retained");
+        dump
+    };
+
+    // Arm A: play T -> H and stop at the horizon.
+    let at_horizon = run("horizon", &[]);
+    let diag = &at_horizon["__stone_diag"];
+    assert_eq!(
+        current_tick(&at_horizon), horizon,
+        "playing the retained future must reach the horizon: {diag}"
+    );
+    assert!(
+        diag["STONE_REPLAY_HORIZON_PAUSES"].as_i64().is_some_and(|n| n > 0),
+        "reaching the horizon must pause the session, not end it: {diag}"
+    );
+    assert_eq!(diag["STONE_LIVE_REWIND_HORIZON"].as_i64(), Some(horizon));
+
+    // The consumed future must be the recorded one: landing at H matches a plain
+    // replay stepped to H.
+    let log_a = dir.path().join("horizon.replay").to_string_lossy().into_owned();
+    let reference_h = run_replay_dump(
+        game, horizon as u32, &log_a,
+        &[("STONE_START_PAUSED", "1"), ("STONE_STEP_FRAMES", &horizon.to_string())],
+    );
+    assert_eq!(current_tick(&reference_h), horizon);
+    // `dt` is the instantaneous frame delta, 0 on a frame that did not tick --
+    // a phase artifact between a session frozen AT the horizon and a reference
+    // stepped to it. Same carve-out the A-B loop comparisons make.
+    let mut sim = sim_state_names(game, horizon as u32);
+    sim.remove("dt");
+    assert_sim_state_matches(&at_horizon, &reference_h, &sim, "live-rewind horizon tick-40");
+
+    // Arm B: from the paused horizon, scrub backward again.
+    let rescrubbed = run(
+        "rescrub",
+        &[("STONE_LIVE_SCRUB_AT_FRAME", "100"), ("STONE_LIVE_SCRUB_TO_TICK", "30")],
+    );
+    let diag = &rescrubbed["__stone_diag"];
+    assert!(
+        diag["STONE_REPLAY_HORIZON_PAUSES"].as_i64().is_some_and(|n| n > 0),
+        "arm B must reach the horizon before scrubbing back: {diag}"
+    );
+    assert_eq!(
+        current_tick(&rescrubbed), 30,
+        "the user must be able to scrub backward again from the horizon: {diag}"
+    );
+    assert_eq!(diag["STONE_SEEK_COUNT"].as_i64(), Some(2), "rewind + re-scrub are two seeks: {diag}");
+    assert_eq!(diag["STONE_SEEK_FROM_TICK"].as_i64(), Some(horizon));
+    assert_eq!(diag["STONE_SEEK_TO_TICK"].as_i64(), Some(30));
+
+    let log_b = dir.path().join("rescrub.replay").to_string_lossy().into_owned();
+    let reference_30 = run_replay_dump(
+        game, horizon as u32, &log_b,
+        &[("STONE_START_PAUSED", "1"), ("STONE_STEP_FRAMES", "30")],
+    );
+    assert_eq!(current_tick(&reference_30), 30);
+    let mut sim_b = sim_state_names(game, horizon as u32);
+    sim_b.remove("dt");
+    assert_sim_state_matches(&rescrubbed, &reference_30, &sim_b, "re-scrub tick-30");
+}
+
 fn keyframe_count(s: &serde_json::Value) -> i64 {
     s["__stone_diag"]["STONE_KEYFRAME_COUNT"].as_i64().expect("STONE_KEYFRAME_COUNT")
 }
