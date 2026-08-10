@@ -595,6 +595,26 @@ fn main() { print("{startup}") }
         .is_err(),
         "global lowering ignored its concrete callee plan"
     );
+    let call_site = plan.callees.keys().next().expect("global call site");
+    let callee = plan.callees[call_site].clone();
+    let mut mismatched_plans = bodies.plans.clone();
+    mismatched_plans
+        .get_mut(&callee)
+        .expect("global callee plan disappeared")
+        .signature
+        .result = Some(g.interner().intern(MonoTy::Float));
+    let err = skull_mir::lower::lower_global_with_plans(
+        &ws,
+        &scx,
+        plan,
+        &mismatched_plans,
+        Ustr::from("__test_ginit"),
+    )
+    .expect_err("global lowering accepted a mismatched callee body plan");
+    assert!(
+        err.message.contains("concrete callee signature disagrees with its body plan"),
+        "unexpected always-emitted mismatch diagnostic: {err:?}"
+    );
     let _ = owner;
 }
 

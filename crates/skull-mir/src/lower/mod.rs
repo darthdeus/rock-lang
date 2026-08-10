@@ -1115,32 +1115,7 @@ fn lower_instance_with_plan_inner(
         }
     }
     if let Some(concrete_plans) = concrete_plans {
-        for (site, owner) in &plan.callees {
-            let needs_plan = requires_concrete_body_plan(ws, owner)
-                && crate::monoty::too_deep_to_instantiate(
-                    owner.arg_types(scx.interner()).iter(),
-                )
-                .is_none();
-            if !needs_plan {
-                continue;
-            }
-            let callee_plan = concrete_plans.get(owner).ok_or_else(|| {
-                gap(format!(
-                    "concrete callee body plan is missing for site {:?}",
-                    site.op
-                ))
-            })?;
-            let recorded = plan
-                .callee_signatures
-                .get(site)
-                .expect("callee signature checked above");
-            if recorded != &callee_plan.signature {
-                return Err(gap(format!(
-                    "concrete callee signature disagrees with its body plan at site {:?}",
-                    site.op
-                )));
-            }
-        }
+        validate_concrete_callee_plans(ws, scx, plan, concrete_plans)?;
     }
     lower_body(ws, scx, inst.func, inst.clone(), None, Some(plan), concrete_plans)
 }
@@ -1269,7 +1244,7 @@ pub fn lower_global_with_plans(
         return Err(gap("concrete global plan has an invalid global index"));
     }
     let gid = Idx::from_raw(RawIdx::from_u32(*index));
-    validate_always_plan(ws, *module, BodyOwner::Global(gid), plan)?;
+    validate_always_plan(ws, scx, *module, BodyOwner::Global(gid), plan, concrete_plans)?;
     lower_global_inner(ws, scx, *module, gid, name, plan, concrete_plans)
 }
 
@@ -1357,15 +1332,17 @@ pub fn lower_decorator_with_plans(
         return Err(gap("concrete decorator plan has an invalid decorator index"));
     }
     let did = Idx::from_raw(RawIdx::from_u32(*index));
-    validate_always_plan(ws, *module, BodyOwner::Decorator(did), plan)?;
+    validate_always_plan(ws, scx, *module, BodyOwner::Decorator(did), plan, concrete_plans)?;
     lower_decorator_inner(ws, scx, *module, did, name, plan, concrete_plans)
 }
 
 fn validate_always_plan(
     ws: &Workspace,
+    scx: &ScalarCtx,
     mid: ModuleId,
     owner: BodyOwner,
     plan: &ConcreteBodyPlan,
+    concrete_plans: &ConcretePlans,
 ) -> Result<(), CompilerError> {
     let inf = ws
         .inference(mid)
@@ -1404,6 +1381,41 @@ fn validate_always_plan(
             return Err(gap(format!(
                 "concrete always-emitted plan is missing type tables for site domain {:?}",
                 site.domain
+            )));
+        }
+    }
+    validate_concrete_callee_plans(ws, scx, plan, concrete_plans)?;
+    Ok(())
+}
+
+fn validate_concrete_callee_plans(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    plan: &ConcreteBodyPlan,
+    concrete_plans: &ConcretePlans,
+) -> Result<(), CompilerError> {
+    for (site, owner) in &plan.callees {
+        let needs_plan = requires_concrete_body_plan(ws, owner)
+            && crate::monoty::too_deep_to_instantiate(owner.arg_types(scx.interner()).iter()).is_none();
+        if !needs_plan {
+            continue;
+        }
+        let callee_plan = concrete_plans.get(owner).ok_or_else(|| {
+            gap(format!(
+                "concrete callee body plan is missing for site {:?}",
+                site.op
+            ))
+        })?;
+        let recorded = plan.callee_signatures.get(site).ok_or_else(|| {
+            gap(format!(
+                "concrete plan is missing the callee signature for site {:?}",
+                site.op
+            ))
+        })?;
+        if recorded != &callee_plan.signature {
+            return Err(gap(format!(
+                "concrete callee signature disagrees with its body plan at site {:?}",
+                site.op
             )));
         }
     }
