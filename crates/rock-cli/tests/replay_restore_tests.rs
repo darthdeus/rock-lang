@@ -447,6 +447,144 @@ fn live_record_rewind_refuses_unsupported_state_without_mutating_world() {
     }
 }
 
+/// Recorded input ticks in a from-boot log. A promotion to replay stops the
+/// recorder, so this count is the direct oracle for "the session is still live".
+fn recorded_tick_lines(path: &str) -> usize {
+    std::fs::read_to_string(path)
+        .expect("replay log")
+        .lines()
+        .filter(|l| l.starts_with("t "))
+        .count()
+}
+
+/// Boot admission describes boot. Unsupported Scene/raw/native state created
+/// AFTER boot but before H must still refuse the rewind at H -- before mode
+/// promotion and before any restore -- so the live world is never partially
+/// rolled back. The distinguishing evidence against the boot-refusal test is
+/// `STONE_LIVE_REWIND_SUPPORTED == 1`: boot WAS admissible here.
+#[test]
+fn live_record_rewind_refuses_late_created_unsupported_state() {
+    let game = "survivors";
+    let runtime_frames = 80;
+    let dir = tempfile::tempdir().unwrap();
+    for (mode, global, kind) in [
+        ("scene", "LIVE_REWIND_PROBE_SCENE", "Scene"),
+        ("foreign", "LIVE_REWIND_PROBE_FOREIGN", "raw"),
+        ("cdata", "LIVE_REWIND_PROBE_MUTABLE_CDATA", "cdata"),
+    ] {
+        let log = dir.path().join(format!("{mode}-late.replay"));
+        let log_s = log.to_string_lossy().into_owned();
+        let refused = run_record_dump(
+            game,
+            runtime_frames,
+            &log_s,
+            &[
+                ("ROCK_TEST_SEED", "42"),
+                ("STONE_LIVE_REWIND", "1"),
+                ("STONE_LIVE_REWIND_UNSUPPORTED", mode),
+                ("STONE_LIVE_REWIND_UNSUPPORTED_AT_TICK", "10"),
+                ("STONE_LIVE_REWIND_AT_FRAME", "40"),
+                ("STONE_LIVE_REWIND_TO_TICK", "25"),
+            ],
+        );
+        let control = run_replay_dump(
+            game,
+            runtime_frames,
+            &log_s,
+            &[
+                ("STONE_KEYFRAME_INTERVAL", "0"),
+                ("STONE_LIVE_REWIND_UNSUPPORTED", mode),
+                ("STONE_LIVE_REWIND_UNSUPPORTED_AT_TICK", "10"),
+            ],
+        );
+
+        let diag = &refused["__stone_diag"];
+        assert_eq!(
+            diag["STONE_LIVE_REWIND_SUPPORTED"].as_i64(), Some(1),
+            "{mode}: boot must be admissible, else this is the boot-refusal case: {diag}"
+        );
+        assert_eq!(diag["STONE_LIVE_REWIND_REFUSED"].as_i64(), Some(1), "{mode}");
+        assert_eq!(diag["STONE_LIVE_REWIND_REFUSALS"].as_i64(), Some(1), "{mode}");
+        assert!(diag.get("STONE_LIVE_REWIND_COUNT").is_none(), "{mode} refusal must not restore: {diag}");
+        assert!(diag.get("STONE_SEEK_COUNT").is_none(), "{mode} refusal must not activate a seek: {diag}");
+        assert!(diag.get("STONE_RESTORE_MS").is_none(), "{mode} refusal must not restore partial state: {diag}");
+        assert_eq!(diag.get("STONE_TRANSIENT_RESET_CALLS").and_then(serde_json::Value::as_i64), None);
+        let reason = diag["STONE_LIVE_REWIND_REFUSAL"].as_str().expect("refusal reason");
+        assert!(reason.contains(global), "{mode} refusal must name its global: {reason}");
+        assert!(reason.contains(kind), "{mode} refusal must name its unsupported type: {reason}");
+
+        // No mode promotion: the recorder is still appending, so the log holds a
+        // tick per run frame rather than stopping at the rewind frame (40).
+        // `rock frame -n N` ticks N+1 frames -- the bound is checked after the
+        // frame runs -- so that, not N, is the denominator.
+        assert_eq!(
+            recorded_tick_lines(&log_s), runtime_frames as usize + 1,
+            "{mode} refusal must leave the session recording (no promotion to replay)"
+        );
+        assert_eq!(current_tick(&refused), current_tick(&control), "{mode} refusal must keep live time moving");
+        let sim = sim_state_names(game, runtime_frames);
+        assert_sim_state_matches_exact(&refused, &control, &sim, &format!("late-refused live-rewind {mode}"));
+    }
+}
+
+/// The admission control: state created just as late, but SUPPORTED, must reach
+/// the same gate and rewind. Without this arm the refusal test above cannot
+/// distinguish "the gate classified the world" from "any late write refuses".
+/// `LIVE_REWIND_PROBE_LATE_OK` is written at tick 10 and re-derived by the
+/// resimulation, so the landing state has to carry it.
+#[test]
+fn live_record_rewind_admits_supported_late_state() {
+    let game = "survivors";
+    let history: u32 = 40;
+    let target: i64 = 25;
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("late-supported.replay");
+    let log_s = log.to_string_lossy().into_owned();
+
+    let env: &[(&str, &str)] = &[
+        ("ROCK_TEST_SEED", "42"),
+        ("STONE_LIVE_REWIND", "1"),
+        ("STONE_LIVE_REWIND_UNSUPPORTED", "supported"),
+        ("STONE_LIVE_REWIND_UNSUPPORTED_AT_TICK", "10"),
+        ("STONE_LIVE_REWIND_AT_FRAME", "40"),
+        ("STONE_LIVE_REWIND_TO_TICK", "25"),
+    ];
+    let rewound = run_record_dump(game, 80, &log_s, env);
+    let diag = &rewound["__stone_diag"];
+    assert_eq!(diag["STONE_LIVE_REWIND_SUPPORTED"].as_i64(), Some(1));
+    assert_eq!(diag["STONE_LIVE_REWIND_COUNT"].as_i64(), Some(1), "supported late state must rewind: {diag}");
+    assert_eq!(diag.get("STONE_LIVE_REWIND_REFUSALS").and_then(serde_json::Value::as_i64), None);
+    assert_eq!(current_tick(&rewound), target);
+    assert_eq!(
+        recorded_tick_lines(&log_s), history as usize,
+        "the rewind must promote at H, leaving the recorded future intact"
+    );
+
+    let reference = run_replay_dump(
+        game,
+        history,
+        &log_s,
+        &[
+            ("STONE_START_PAUSED", "1"),
+            ("STONE_STEP_FRAMES", &target.to_string()),
+            ("STONE_LIVE_REWIND_UNSUPPORTED", "supported"),
+            ("STONE_LIVE_REWIND_UNSUPPORTED_AT_TICK", "10"),
+        ],
+    );
+    assert_eq!(current_tick(&reference), target, "reference must sit at tick {target}");
+    for s in [&rewound, &reference] {
+        let v = s
+            .as_object()
+            .expect("dump object")
+            .values()
+            .find_map(|g| g.as_object().and_then(|o| o.get("LIVE_REWIND_PROBE_LATE_OK")))
+            .expect("late probe global must be dumped");
+        assert_eq!(v.as_i64(), Some(7), "the late-created supported value must be re-derived past tick 10");
+    }
+    let sim = sim_state_names(game, history);
+    assert_sim_state_matches_exact(&rewound, &reference, &sim, "supported late-state live-rewind");
+}
+
 fn keyframe_count(s: &serde_json::Value) -> i64 {
     s["__stone_diag"]["STONE_KEYFRAME_COUNT"].as_i64().expect("STONE_KEYFRAME_COUNT")
 }
