@@ -12,7 +12,7 @@ use bone_semantic::prelude::{FnList, ModuleId, Span};
 use comfy_la_arena::Idx;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use skull_mir::gpu_layout::{SamplerKind, WireKind, texture_slots};
-use skull_mir::lower::{ScalarCtx, SpecSubst, lower_function_spec};
+use skull_mir::lower::{ScalarCtx, SpecSubst, lower_instance_body};
 use skull_mir::mir::{FuncRef, Inst, Lit, MirFunc};
 use skull_mir::monoty::{MonoCtor, MonoTy};
 use skull_mir::shader_ir::{
@@ -423,15 +423,6 @@ fn callee_instance(
             ),
         ));
     }
-    if let Some(index) = key.iter().position(Option::is_none) {
-        return Err(err(
-            span,
-            format!(
-                "shader profile: the call to generic `{}` left type parameter #{index} uninstantiated",
-                callee.name
-            ),
-        ));
-    }
     Ok(ShaderInstance {
         fref: function,
         key,
@@ -498,7 +489,7 @@ impl skull_mir::reach::ReachPolicy for Reach<'_> {
         let function = &self.ws.module(instance.fref.module).functions[instance.fref.func];
         let subst = instance.subst(self.ws);
         check_tier0_signature_spec(self.ws, &subst, function, self.policy)?;
-        let body = lower_function_spec(
+        let body = lower_instance_body(
             self.ws,
             self.scx,
             instance.fref.module,
@@ -533,7 +524,7 @@ fn plan_stage(
 ) -> Result<ShaderStageIr, CompilerError> {
     let function = &ws.module(fref.module).functions[fref.func];
     let entry = ShaderInstance::plain(fref);
-    let body = lower_function_spec(ws, scx, fref.module, fref.func, &entry.subst(ws)).map_err(
+    let body = lower_instance_body(ws, scx, fref.module, fref.func, &entry.subst(ws)).map_err(
         |error| {
             err(
                 function.name_span,

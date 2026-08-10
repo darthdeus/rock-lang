@@ -454,9 +454,8 @@ pub struct ArtifactView {
     /// than leaving emission to read it out of the body text.
     ///
     /// Derived from `skull_mir::lower::BackendFnAbiPlan`, built under the
-    /// instance's own substitution -- the same `fn_scalar_abi` /
-    /// `tuple_ret_shape` policy definitions and call sites read, asked of the
-    /// shape this artifact actually carries.
+    /// instance's own substitution -- the same ABI policy definitions and call
+    /// sites read, asked of the shape this artifact actually carries.
     ///
     /// Recorded for EVERY artifact, including luajit, even though only the JS
     /// publisher needs the number spelled out: the width is a property of the
@@ -1024,7 +1023,7 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
             let Some(subst) = g.substitutions.get(i) else { continue };
             publisher_lanes.insert(
                 i.clone(),
-                skull_mir::lower::BackendFnAbiPlan::build(ws, scx, r.decl, subst).result_lanes,
+                skull_mir::lower::BackendFnAbiPlan::for_instance(ws, scx, r.decl, subst).result_lanes(),
             );
         }
     }

@@ -354,6 +354,34 @@ impl Builder<'_> {
         self.with_struct_default(struct_name, field, |s, def| s.lower_expr(def))
     }
 
+    /// The declaring struct's generic ARGUMENTS at this injection.
+    ///
+    /// The expression is the site cursor: an injection happens while its own
+    /// literal is current. Deriving from a cursor is only sound because
+    /// [`crate::struct_defaults::args_at`] verifies the answer is an
+    /// application of this very struct -- a route that injects while some other
+    /// expression is current rejects instead of binding the wrong literal's
+    /// arguments.
+    fn struct_default_args(
+        &mut self,
+        struct_name: Ustr,
+        sid: bone_semantic::prelude::StructId,
+    ) -> Result<Vec<crate::monoty::MonoTy>, CompilerError> {
+        let generics = crate::struct_defaults::declared_generics(self.ws, sid);
+        if generics == 0 {
+            return Ok(Vec::new());
+        }
+        let (Some(e), Some(inf)) = (self.cur_expr, self.inf) else {
+            return Err(gap(format!(
+                "generic struct `{struct_name}` injects a field default outside any \
+                 typed expression, so its arguments cannot be determined"
+            )));
+        };
+        crate::struct_defaults::args_at(self.ws, inf, self.subst(), e, struct_name, generics)
+            .map(|a| a.to_vec())
+            .map_err(|e| gap(e.render(struct_name)))
+    }
+
     /// Run `f` on a field's default INITIALIZER EXPRESSION with the defaults
     /// body's arena and inference installed. Consumers that need more than a
     /// boxed value (an embed field's presence-plus-leaves) must see the expr,
@@ -387,21 +415,30 @@ impl Builder<'_> {
             .ws
             .inference(sid.module)
             .and_then(|ir| ir.per_fn.get(&owner));
+        let args = self.struct_default_args(struct_name, sid)?;
+        let slot_subst = crate::struct_defaults::slot_subst(defaults_inf, &args);
         // Lower the default expr in the defaults body's context, into the current
         // block, then restore.
         let saved_body = self.body;
         let saved_inf = self.inf;
+        let saved_subst = self.struct_default_subst.take();
         self.body = defaults_body;
         self.inf = defaults_inf;
+        self.struct_default_subst = Some(slot_subst);
         // `site_owner` is NOT swapped -- the sites still belong to the enclosing
         // function INSTANCE -- but their `Idx<Expr>` now indexes THIS arena, so
         // they are stamped in the struct's own domain. The walk records the same
         // domain for the same defaults (`instance_graph::struct_default_edges`),
         // which is what lets them join instead of being deliberately unstamped.
-        let domain = crate::site::SiteDomain::StructDefaults(sid.module, sid.def);
+        //
+        // The ARGUMENTS are part of that key: `Box<int>` and `Box<string>` inject
+        // the same declaration's initializers and resolve different callees, so a
+        // declaration-keyed domain would collapse them onto one obligation.
+        let domain = crate::site::SiteDomain::StructDefaults(sid.module, sid.def, args);
         let result = self.in_domain(domain, |s| f(s, def_expr));
         self.body = saved_body;
         self.inf = saved_inf;
+        self.struct_default_subst = saved_subst;
         result
     }
 

@@ -142,7 +142,7 @@ pub fn glsl_test(paths: &[String]) -> Result<()> {
         );
     }
     if total_failed > 0 || summary.unit_failures > 0 || zero_verdicts {
-        std::process::exit(1);
+        crate::ablation_report::exit_with_census(1);
     }
     Ok(())
 }
@@ -629,7 +629,7 @@ pub fn shader_validate(dirs: &[String]) -> Result<()> {
         println!("{}", "no GL context for any profile -- zero shader verdicts ran".red());
     }
     if any_failed || zero_verdicts {
-        std::process::exit(1);
+        crate::ablation_report::exit_with_census(1);
     }
     Ok(())
 }

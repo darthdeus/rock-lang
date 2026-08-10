@@ -82,3 +82,34 @@ fn application_line_content() {
         .unwrap_or_else(|| panic!("no beta application line:\n{js}"));
     assert!(beta_app.trim_end().ends_with(", null);"), "defaulted stage -> null: {beta_app}");
 }
+
+/// A specialization whose ONLY caller is a decorator body still gets emitted.
+///
+/// A `deco` body is a third body kind beside plain fns and global initializers,
+/// and it went through a hand-written subset of the shared discovery step --
+/// callees and globals, but not the body's `spec_bindings`. So a specialization
+/// no other body demanded was never queued while the deco body's call site still
+/// spelled its specialized name, and emission rejected with `JS subset: no
+/// specialized body emitted`.
+///
+/// `main` deliberately does NOT push, so the demand has exactly one origin. The
+/// assertion is that the DEFINITION exists, not merely that emission succeeded:
+/// a build that dropped the call would also not reject.
+#[test]
+fn a_specialization_demanded_only_by_a_decorator_body_is_emitted() {
+    let ws = ws_with(
+        r#"
+global XS: [int] = []
+deco init reg() { XS.push(1) }
+@reg
+fn alpha() { print("alpha") }
+fn main() { print("{XS.len}") }
+"#,
+    );
+    let js = emit_program(&ws);
+    assert!(
+        js.contains("function push_"),
+        "no `push` definition emitted for the demand the deco body is the only \
+         origin of:\n{js}"
+    );
+}

@@ -83,14 +83,14 @@ pub fn iter_tokenize(path: &str, iters: usize) -> Result<()> {
     let mut stats = CompileStats::new();
     if let Err(e) = tokenize_all(&sources, Some(&mut stats)) {
         eprintln!("{}", e.render(&sources));
-        std::process::exit(1);
+        crate::ablation_report::exit_with_census(1);
     }
 
     let t = Instant::now();
     for _ in 0..iters {
         if let Err(e) = tokenize_all(&sources, None) {
             eprintln!("{}", e.render(&sources));
-            std::process::exit(1);
+            crate::ablation_report::exit_with_census(1);
         }
     }
     report("iter-tokenize", path, iters, &stats, t.elapsed());
@@ -155,7 +155,7 @@ fn prepare_skull(path: &str) -> Result<(SkullPrepared, CompileStats)> {
             Ok(t) => t,
             Err(e) => {
                 eprintln!("{}", e.render(&sources));
-                std::process::exit(1);
+                crate::ablation_report::exit_with_census(1);
             }
         };
         stats.merge(&count_source_stats(&f.contents, &tokens));

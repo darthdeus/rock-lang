@@ -2,6 +2,8 @@
 
 mod stone_harness;
 
+#[path = "ablation_census_survives_failure.rs"]
+mod ablation_census_survives_failure;
 #[path = "arena_reuse_alloc_gate.rs"]
 mod arena_reuse_alloc_gate;
 #[path = "bone_incremental_timing.rs"]

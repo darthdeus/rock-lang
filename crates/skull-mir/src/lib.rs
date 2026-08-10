@@ -9,6 +9,7 @@
 //! `docs/skull-bone-mir-faithful-plan.md`.
 
 pub mod ablation;
+pub mod bound;
 pub mod cfg;
 pub mod decorator;
 pub mod gpu_layout;
@@ -20,7 +21,9 @@ pub mod mir;
 pub mod monoty;
 pub mod reach;
 pub mod shader_ir;
+pub mod instance;
 pub mod site;
 pub mod spec_census;
+pub mod struct_defaults;
 pub mod verdict;
 pub mod vertex_plan;
