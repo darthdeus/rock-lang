@@ -190,20 +190,27 @@ impl Builder<'_> {
                             .get(iter_expr)
                             .copied()
                             .unwrap_or(self.ws.module(m).functions[f].name_span);
-                        match self.next_call_spec(iter_ref, &w.generics, span)? {
-                            Some(key) => crate::instance::Instance::intern(
-                                self.scx.interner(),
-                                iter_ref,
-                                key,
-                            ),
-                            None if self.ws.module(m).functions[f].generics.is_empty() => {
-                                crate::instance::Instance::intern(
+                        if self.concrete_plan.is_some() {
+                            self.with_site_op(crate::site::SiteOp::ForIter, |b| {
+                                b.concrete_callee_for_site(iter_expr)
+                            })?
+                            .ok_or_else(|| gap("for-iter has no concrete callee"))?
+                        } else {
+                            match self.next_call_spec(iter_ref, &w.generics, span)? {
+                                Some(key) => crate::instance::Instance::intern(
                                     self.scx.interner(),
                                     iter_ref,
-                                    Vec::new(),
-                                )
+                                    key,
+                                ),
+                                None if self.ws.module(m).functions[f].generics.is_empty() => {
+                                    crate::instance::Instance::intern(
+                                        self.scx.interner(),
+                                        iter_ref,
+                                        Vec::new(),
+                                    )
+                                }
+                                None => crate::instance::Instance::base(iter_ref),
                             }
-                            None => crate::instance::Instance::base(iter_ref),
                         }
                     }
                     None if self.ws.module(m).functions[f].generics.is_empty() => {
@@ -224,7 +231,9 @@ impl Builder<'_> {
                 // an instance like any other -- it was the last call form still
                 // reaching a shared generic body by construction, and once that
                 // body stopped being emitted it named a nil global.
-                if !witness.args.is_empty() {
+                if let Some(delivery) = self.concrete_delivery_instance(&witness) {
+                    self.f.spec_bindings.insert(call, delivery);
+                } else if self.concrete_plan.is_none() && !witness.args.is_empty() {
                     self.f.spec_bindings.insert(call, witness.clone());
                 }
                 if self.ws.module(m).functions[f].generics.is_empty() || !witness.args.is_empty() {
@@ -249,18 +258,33 @@ impl Builder<'_> {
         // when the spec is dropped the call reaches the shared generic body,
         // whose `E` is unbound and therefore never splats -- so the two sides
         // agree about how many values come back.
-        let spec = match &info.next {
-            BoundNext::Concrete { func: (m, f), next_generics, .. } => self
-                .next_call_spec(
-                    FuncRef { module: *m, func: *f },
-                    next_generics,
-                    self.body
-                        .expr_spans
-                        .get(iter_expr)
-                        .copied()
-                        .unwrap_or(self.ws.module(*m).functions[*f].name_span),
-                )?,
-            BoundNext::CallerGeneric(_) => None,
+        let concrete_next = if self.concrete_plan.is_some()
+            && matches!(info.next, BoundNext::Concrete { .. })
+        {
+            self.with_site_op(crate::site::SiteOp::ForNext(Vec::new()), |b| {
+                b.concrete_callee_for_site(iter_expr)
+            })?
+            .ok_or_else(|| gap("for-next has no concrete callee"))?
+            .into()
+        } else {
+            None
+        };
+        let spec = if self.concrete_plan.is_none() {
+            match &info.next {
+                BoundNext::Concrete { func: (m, f), next_generics, .. } => self
+                    .next_call_spec(
+                        FuncRef { module: *m, func: *f },
+                        next_generics,
+                        self.body
+                            .expr_spans
+                            .get(iter_expr)
+                            .copied()
+                            .unwrap_or(self.ws.module(*m).functions[*f].name_span),
+                    )?,
+                BoundNext::CallerGeneric(_) => None,
+            }
+        } else {
+            None
         };
         // A placeholder next is `(bool, E)` by bound conformance, but `E`'s SHAPE
         // is this body's own specialization to answer -- the concrete callee is
@@ -271,17 +295,24 @@ impl Builder<'_> {
         // aggregate, and a presence leaf has no field to rebuild into.
         let ret_shape = match &info.next {
             BoundNext::Concrete { func: (m, f), .. } => {
-                let func = FuncRef { module: *m, func: *f };
-                let subst = spec
-                    .as_ref()
-                    .map(|k| spec_subst_from_key(self.ws, func, k))
-                    .unwrap_or_default();
-                self.ws.module(*m).functions[*f]
-                    .return_ty
-                    .and_then(|t| tuple_ret_shape(self.ws, &subst, t))
-                    .ok_or_else(|| gap("for-iter `next` must return a tuple"))?
+                if let Some(owner) = concrete_next.as_ref() {
+                    self.callee_abi_plan_for_instance(owner)?
+                        .ret_tuple()
+                        .cloned()
+                        .ok_or_else(|| gap("for-iter `next` must return a tuple"))?
+                } else {
+                    let func = FuncRef { module: *m, func: *f };
+                    let subst = spec
+                        .as_ref()
+                        .map(|k| spec_subst_from_key(self.ws, func, k))
+                        .unwrap_or_default();
+                    self.ws.module(*m).functions[*f]
+                        .return_ty
+                        .and_then(|t| tuple_ret_shape(self.ws, &subst, t))
+                        .ok_or_else(|| gap("for-iter `next` must return a tuple"))?
+                }
             }
-            BoundNext::CallerGeneric(gidx) => self.bound_next_tuple_shape(*gidx),
+            BoundNext::CallerGeneric(gidx) => self.bound_next_tuple_shape(*gidx)?,
         };
         if ret_shape.slots.len() < 2 {
             return Err(gap("for-iter `next` must return `(bool, E)`"));
@@ -300,7 +331,10 @@ impl Builder<'_> {
         let dests: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
         match &info.next {
             BoundNext::Concrete { func: (m, f), sub, .. } => {
-                let func = FuncRef { module: *m, func: *f };
+                let func = concrete_next
+                    .as_ref()
+                    .map(|owner| owner.func)
+                    .unwrap_or(FuncRef { module: *m, func: *f });
                 // The synthesized `next` call has no expr to key
                 // `call_generic_bindings` by, so its instantiation comes from
                 // bone's recorded `next_generics`. Without this the inliner
@@ -320,11 +354,17 @@ impl Builder<'_> {
                     self.f.bound_trees.insert(call, sub.clone());
                 }
                 let callee_decl = &self.ws.module(func.module).functions[func.func];
-                let owner = spec.as_ref().map(|key| {
-                    crate::instance::Instance::intern(self.scx.interner(), func, key.clone())
+                let owner = concrete_next.clone().or_else(|| {
+                    spec.as_ref().map(|key| {
+                        crate::instance::Instance::intern(self.scx.interner(), func, key.clone())
+                    })
                 });
-                if spec.is_some() {
-                    self.f.spec_bindings.insert(call, owner.clone().expect("spec has owner"));
+                if let Some(delivery) = owner.as_ref().and_then(|i| self.concrete_delivery_instance(i)) {
+                    self.f.spec_bindings.insert(call, delivery);
+                } else if self.concrete_plan.is_none() && spec.is_some() {
+                    self.f
+                        .spec_bindings
+                        .insert(call, owner.clone().expect("spec has owner"));
                 }
                 if callee_decl.generics.is_empty() || owner.is_some() {
                     let owner = owner.unwrap_or_else(|| {
@@ -341,7 +381,7 @@ impl Builder<'_> {
                 } else {
                     self.f.call_abi_plans.insert(
                         call,
-                        self.callee_abi_plan(func, None, &SpecSubst::default()),
+                        self.callee_abi_plan(func, None),
                     );
                 }
             }

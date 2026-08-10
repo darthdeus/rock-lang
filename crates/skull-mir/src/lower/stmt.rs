@@ -304,10 +304,11 @@ impl Builder<'_> {
                             })
                             .collect();
                         self.group_binds.insert(raw(name), (cells, shape));
-                    } else if let Some(shape) = self
-                        .nullable_tuple_wire_shape(value)?
-                        .or_else(|| self.expr_tuple_shape(value).filter(TupleRetShape::splats))
-                    {
+                    } else {
+                        let shape = self
+                            .nullable_tuple_wire_shape(value)?
+                            .or(self.expr_tuple_shape(value)?.filter(TupleRetShape::splats));
+                        if let Some(shape) = shape {
                         // A splatting tuple binds its WIRE -- one cell per slot, led
                         // by presence when the wire carries one. Packing it instead
                         // boxes the `nobox` element the splat exists to keep
@@ -315,8 +316,8 @@ impl Builder<'_> {
                         // a nullable one answered `t == null` as false when absent.
                         let r = self.lower_expr_repr(value)?;
                         let slots = self.tuple_repr_to_slots(r, &shape);
-                        self.bind_tuple_slots(name, &slots, shape);
-                    } else {
+                            self.bind_tuple_slots(name, &slots, shape);
+                        } else {
                         let v = self.lower_expr(value)?;
                         let v = self.coerced_to_binding(v, value, name);
                         let cty = self.binding_ty(name);
@@ -326,6 +327,7 @@ impl Builder<'_> {
                         }
                         self.emit_cur(Inst::Store { cell, value: v });
                         self.binds.insert(raw(name), cell);
+                        }
                     }
                 }
                 Statement::Expr(e) => {
@@ -360,7 +362,7 @@ impl Builder<'_> {
                 // `let (a, b) = e` — destructure via TupleIndex into a cell per
                 // leaf (the same machinery `for (k,v)` uses).
                 Statement::LetTuple { vars, value } => {
-                    match self.expr_tuple_shape(value).filter(TupleRetShape::splats) {
+                    match self.expr_tuple_shape(value)?.filter(TupleRetShape::splats) {
                         Some(shape) => {
                             let r = self.lower_expr_repr(value)?;
                             self.bind_tuple_repr(&vars, &shape, r);

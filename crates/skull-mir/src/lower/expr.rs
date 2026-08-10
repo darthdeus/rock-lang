@@ -38,12 +38,19 @@ impl Builder<'_> {
                 .get(e)
                 .copied()
                 .unwrap_or(self.ws.module(m).functions[f].name_span);
-            let witness = match self.next_call_spec(iter_ref, &generics, span)? {
-                Some(key) => crate::instance::Instance::intern(self.scx.interner(), iter_ref, key),
-                None if self.ws.module(m).functions[f].generics.is_empty() => {
-                    crate::instance::Instance::intern(self.scx.interner(), iter_ref, Vec::new())
+            let witness = if self.concrete_plan.is_some() {
+                self.with_site_op(crate::site::SiteOp::ImplicitIter, |b| {
+                    b.concrete_callee_for_site(e)
+                })?
+                .ok_or_else(|| gap("implicit iterator has no concrete callee"))?
+            } else {
+                match self.next_call_spec(iter_ref, &generics, span)? {
+                    Some(key) => crate::instance::Instance::intern(self.scx.interner(), iter_ref, key),
+                    None if self.ws.module(m).functions[f].generics.is_empty() => {
+                        crate::instance::Instance::intern(self.scx.interner(), iter_ref, Vec::new())
+                    }
+                    None => crate::instance::Instance::base(iter_ref),
                 }
-                None => crate::instance::Instance::base(iter_ref),
             };
             let call = self.with_site_op(crate::site::SiteOp::ImplicitIter, |b| {
                 let args = b.iter_witness_args(&witness, ValueRepr::Scalar(v))?;
@@ -53,7 +60,9 @@ impl Builder<'_> {
             // are ordinary calls to a generic `iter`, so under instance-owned
             // emission both must name an instance; recording identity without
             // delivering it spells a symbol nothing defines.
-            if !witness.args.is_empty() {
+            if let Some(delivery) = self.concrete_delivery_instance(&witness) {
+                self.f.spec_bindings.insert(call, delivery);
+            } else if self.concrete_plan.is_none() && !witness.args.is_empty() {
                 self.f.spec_bindings.insert(call, witness.clone());
             }
             // IDENTITY beside delivery, the plan's split, and the same pair the
@@ -72,7 +81,7 @@ impl Builder<'_> {
             let abi = if iter_decl.generics.is_empty() || !witness.args.is_empty() {
                 self.callee_abi_plan_for_instance(&witness)?
             } else {
-                self.callee_abi_plan(iter_ref, None, &SpecSubst::default())
+                self.callee_abi_plan(iter_ref, None)
             };
             self.f.call_abi_plans.insert(call, abi);
             self.cur_expr = outer_expr;
@@ -252,7 +261,7 @@ impl Builder<'_> {
                 //
                 // `None` when nothing splats, which is every tuple that compiled
                 // before: those keep today's one-value-per-element box exactly.
-                let shape = self.tuple_box_shape(e);
+                let shape = self.tuple_box_shape(e)?;
                 let mut vs = Vec::new();
                 for (i, el) in elems.into_iter().enumerate() {
                     let r = self.lower_expr_repr(el)?;

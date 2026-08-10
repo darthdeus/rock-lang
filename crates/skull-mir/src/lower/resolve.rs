@@ -163,6 +163,8 @@ impl Builder<'_> {
                 return self.nullcoalesce_tuple_repr(lhs, rhs);
             }
         }
+        let expr_tuple_shape = self.expr_tuple_shape(e)?;
+        let tuple_box_shape = expr_tuple_shape.clone().filter(TupleRetShape::splats);
         match self.body.expr_arena[e].clone() {
             Expr::Block { statements, tail } => self.lower_block_repr(statements, tail),
             Expr::If {
@@ -197,7 +199,7 @@ impl Builder<'_> {
             // A tuple literal whose type splats stays a `Tuple` repr, so a
             // `nobox` element reaches the return boundary as leaves instead of
             // being packed into the table first.
-            Expr::Tuple(elems) if self.expr_tuple_shape(e).is_some_and(|s| s.splats()) => {
+            Expr::Tuple(elems) if expr_tuple_shape.as_ref().is_some_and(TupleRetShape::splats) => {
                 let parts = elems
                     .into_iter()
                     .map(|el| self.lower_expr_repr(el))
@@ -463,8 +465,8 @@ impl Builder<'_> {
             // honest: slot projection, `let (a, b) =`, and the `for` destructure
             // all already consume a `ValueRepr::Tuple`, so none of them needs to
             // know the box widened. Slots the consumer ignores are DCE'd.
-            _ if self.tuple_box_shape(e).is_some() => {
-                let shape = self.tuple_box_shape(e).expect("guard matched");
+            _ if tuple_box_shape.is_some() => {
+                let shape = tuple_box_shape.expect("guard matched");
                 let base = self.lower_expr(e)?;
                 let slots: Vec<Idx<Inst>> = (0..shape.slot_count())
                     .map(|i| self.emit_cur(Inst::TupleIndex { base, index: i }))

@@ -1030,6 +1030,8 @@ enum BodyMutation {
     ClearBoundPlan { body: FuncRef },
     #[cfg(test)]
     ClearCoroutineResultPlan { body: FuncRef },
+    #[cfg(test)]
+    ClearIteratorWitnessInstance { body: FuncRef },
 }
 
 /// The shared body of `fref` -- the id under which a declaration's own
@@ -1417,6 +1419,7 @@ fn emit_body_chunk_with_mutation(
                 BodyMutation::None => unreachable!(),
                 BodyMutation::ClearBoundPlan { .. } => unreachable!(),
                 BodyMutation::ClearCoroutineResultPlan { .. } => unreachable!(),
+                BodyMutation::ClearIteratorWitnessInstance { .. } => unreachable!(),
             }
         }
         #[cfg(test)]
@@ -3093,6 +3096,31 @@ fn emit_full_in_with_mutation(
             "coroutine-plan mutation found no concrete instance for {body:?}"
         );
     }
+    #[cfg(test)]
+    if let BodyMutation::ClearIteratorWitnessInstance { body } = mutation {
+        let mut matched = 0;
+        for (instance, plan) in &mut concrete.plans {
+            if instance.func != body {
+                continue;
+            }
+            let witness = plan
+                .bound_tree
+                .next
+                .values_mut()
+                .find_map(|next| match next {
+                    skull_mir::bound::ResolvedBoundNext::Concrete { spec, .. }
+                        if spec.is_some() => Some(spec),
+                    _ => None,
+                })
+                .expect("iterator-plan mutation found no concrete witness instance");
+            *witness = None;
+            matched += 1;
+        }
+        assert!(
+            matched > 0,
+            "iterator-plan mutation found no concrete instance for {body:?}"
+        );
+    }
     if let Some((instance, reason)) = concrete.plan_failures.first() {
         let f = &ws.module(instance.func.module).functions[instance.func.func];
         return Err(CompilerError::new_with_label(
@@ -4177,6 +4205,29 @@ fn main() {
         assert!(
             !emit.lua.contains(&format!("function {symbol}__advance(")),
             "the coroutine emitter ignored the concrete result plan mutation"
+        );
+    }
+
+    #[test]
+    fn emission_rejects_a_missing_concrete_iterator_witness_instance() {
+        let _inline = InlineOff::on();
+        let ws = bounded_workspace();
+        let mid = *ws
+            .module_ids
+            .get(&Ustr::from("<bound-plan-test>"))
+            .expect("test module");
+        let body = ref_for(&ws, "total");
+        let err = match emit_full_in_with_test_mutation(
+            &ws,
+            mid,
+            BodyMutation::ClearIteratorWitnessInstance { body },
+        ) {
+            Ok(_) => panic!("emission ignored the missing concrete iterator witness instance"),
+            Err(err) => err,
+        };
+        assert!(
+            err.message.contains("concrete ABI plan is missing for callee"),
+            "the missing iterator instance must fail at its production consumer, got: {err:?}"
         );
     }
 }

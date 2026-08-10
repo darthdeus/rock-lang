@@ -4,9 +4,8 @@
 use super::*;
 
 /// Everything a direct call to a statically-known callee carries besides its
-/// operands: the bound-conformance tree, the delivery decision (specialization
-/// key + substitution), the callee's concrete INSTANCE, and the ABI plan of the
-/// body the call TARGETS.
+/// operands: the bound-conformance tree, the concrete delivery instance, the
+/// callee's concrete INSTANCE, and the ABI plan of the body the call TARGETS.
 ///
 /// ONE bundle, built once by [`Builder::plan_direct_call`], because these four
 /// facts are one decision and a path that computes a SUBSET is silently wrong
@@ -17,25 +16,32 @@ use super::*;
 /// declaration with no body to serve it.
 pub(crate) struct DirectCall {
     pub(crate) tree: Option<bone_semantic::prelude::BoundTree>,
-    /// The concrete body this call targets, and the substitution it lowers
-    /// under. An [`Instance`](crate::instance::Instance) rather than a key: the
-    /// same object the definition is emitted under, so the caller's splat and
-    /// the callee's parameter list cannot be two derivations.
-    pub(crate) spec: Option<(crate::instance::Instance, SpecSubst)>,
+    /// The concrete body delivered by this call, when it has one. An
+    /// [`Instance`](crate::instance::Instance) is the delivery identity rather
+    /// than a key plus a reconstructed substitution.
+    pub(crate) delivery: Option<crate::instance::Instance>,
     pub(crate) callee_inst: Option<crate::instance::Instance>,
     pub(crate) plan: BackendFnAbiPlan,
 }
 
 impl Builder<'_> {
-    fn concrete_callee_for_site(
+    pub(crate) fn concrete_callee_for_site(
         &self,
         e: Idx<Expr>,
+    ) -> Result<Option<crate::instance::Instance>, CompilerError> {
+        self.concrete_callee_for_site_op(e, self.cur_op.clone())
+    }
+
+    pub(crate) fn concrete_callee_for_site_op(
+        &self,
+        e: Idx<Expr>,
+        op: crate::site::SiteOp,
     ) -> Result<Option<crate::instance::Instance>, CompilerError> {
         let Some(plan) = self.concrete_plan else { return Ok(None) };
         let site = crate::site::Site {
             domain: self.cur_domain.clone(),
             expr: e,
-            op: self.cur_op.clone(),
+            op,
         };
         plan.callees.get(&site).cloned().map(Some).ok_or_else(|| {
             gap(format!(
@@ -43,6 +49,17 @@ impl Builder<'_> {
                 site.op
             ))
         })
+    }
+
+    pub(crate) fn concrete_delivery_instance(
+        &self,
+        inst: &crate::instance::Instance,
+    ) -> Option<crate::instance::Instance> {
+        if inst.args.is_empty() {
+            return None;
+        }
+        self.concrete_plans
+            .and_then(|plans| plans.contains_key(inst).then(|| inst.clone()))
     }
 
     pub(crate) fn concrete_callee_param_ty(
@@ -142,7 +159,7 @@ impl Builder<'_> {
                     // cannot catch it and an unrejected one is a SILENT wrong
                     // answer. Escape: `(materialize(v), n)` stops that slot
                     // splatting, so the box is one-slot-per-element again.
-                    if let Some(shape) = self.tuple_box_shape(arg) {
+                    if let Some(shape) = self.tuple_box_shape(arg)? {
                         return Err(CompilerError::new_with_label(
                             self.body.expr_spans[e],
                             format!(
@@ -367,7 +384,7 @@ impl Builder<'_> {
                 // element arrives as leaves instead of one opaque slot. Leaving
                 // it opaque forces the splice to rebuild an aggregate, which a
                 // presence-carrying element cannot be rebuilt into.
-                let shape = self.bound_next_tuple_shape(gidx);
+                let shape = self.bound_next_tuple_shape(gidx)?;
                 let dests: Vec<Idx<Cell>> =
                     (0..shape.slot_count()).map(|_| self.f.new_cell(None)).collect();
                 let call = self.emit_cur(Inst::CallBoundMulti {
@@ -438,14 +455,14 @@ impl Builder<'_> {
                         if let Some(&recv_expr) = arg_idxs.first() {
                             if self.struct_field_is_fn(recv_expr, name) {
                                 let fieldv = self.emit_cur(Inst::Field { base: arg_vals[0], field: name });
-                                let v = self.emit_call_value(e, fieldv, arg_vals[1..].to_vec());
+                                let v = self.emit_call_value(e, fieldv, arg_vals[1..].to_vec())?;
                                 return Ok(ValueRepr::Scalar(v));
                             }
                         }
                         // `g(args)` where `g` is a fn-typed module global.
                         if self.is_fn_global(name) {
                             let g = self.emit_cur(Inst::Global(name));
-                            let v = self.emit_call_value(e, g, arg_vals);
+                            let v = self.emit_call_value(e, g, arg_vals)?;
                             return Ok(ValueRepr::Scalar(v));
                         }
                     }
@@ -463,7 +480,7 @@ impl Builder<'_> {
                     let arg_vals =
                         self.slotted_call_args(&abi.param_names, &abi.param_shapes, &arg_idxs)?;
                     let Some(shape) = abi.ret_shape else {
-                        let v = self.emit_call_value(e, g, arg_vals);
+                        let v = self.emit_call_value(e, g, arg_vals)?;
                         return Ok(ValueRepr::Scalar(v));
                     };
                     let dests: Vec<Idx<Cell>> =
@@ -485,7 +502,7 @@ impl Builder<'_> {
                 // Nothing `nobox` in the signature -- args are boxed.
                 let arg_vals: Vec<Idx<Inst>> =
                     arg_idxs.iter().map(|&a| self.lower_expr(a)).collect::<Result<_, _>>()?;
-                let v = self.emit_call_value(e, callee_v, arg_vals);
+                let v = self.emit_call_value(e, callee_v, arg_vals)?;
                 Ok(ValueRepr::Scalar(v))
             }
             // A fn-typed expression result: lower it, call through it.
@@ -497,7 +514,7 @@ impl Builder<'_> {
                 }
                 let arg_vals: Vec<Idx<Inst>> =
                     arg_idxs.iter().map(|&a| self.lower_expr(a)).collect::<Result<_, _>>()?;
-                let v = self.emit_call_value(e, callee_v, arg_vals);
+                let v = self.emit_call_value(e, callee_v, arg_vals)?;
                 Ok(ValueRepr::Scalar(v))
             }
         }
@@ -533,7 +550,6 @@ impl Builder<'_> {
             .and_then(|i| i.bound_call_trees.get(&e))
             .filter(|t| !t.is_empty())
             .cloned();
-        let spec = self.call_spec_for_target(e, func)?;
         // IDENTITY, computed beside the delivery decision and independent of it.
         // A call the policy declines to specialize still names exactly one
         // concrete instance, and this is where it says which.
@@ -542,14 +558,17 @@ impl Builder<'_> {
         } else {
             self.callee_instance_for(e, func)?
         };
-        let empty_subst = SpecSubst::default();
-        let subst = spec.as_ref().map_or(&empty_subst, |(_, s)| s);
+        let delivery = if self.concrete_plan.is_some() {
+            callee_inst.as_ref().and_then(|inst| self.concrete_delivery_instance(inst))
+        } else {
+            self.call_spec_for_target(e, func)?
+        };
         let plan = if let Some(owner) = &callee_inst {
             self.callee_abi_plan_for_instance(owner)?
         } else {
-            self.callee_abi_plan(func, spec.as_ref(), subst)
+            self.callee_abi_plan(func, delivery.as_ref())
         };
-        Ok(DirectCall { tree, spec, callee_inst, plan })
+        Ok(DirectCall { tree, delivery, callee_inst, plan })
     }
 
     /// Attach the bundle's identity records to the emitted call inst.
@@ -561,7 +580,7 @@ impl Builder<'_> {
         if let Some(t) = &dc.tree {
             self.f.bound_trees.insert(call, t.clone());
         }
-        if let Some((inst, _)) = &dc.spec {
+        if let Some(inst) = &dc.delivery {
             self.f.spec_bindings.insert(call, inst.clone());
         }
         if let Some(owner) = &dc.callee_inst {
@@ -625,7 +644,7 @@ impl Builder<'_> {
         &self,
         e: Idx<Expr>,
         func: FuncRef,
-    ) -> Result<Option<(crate::instance::Instance, SpecSubst)>, CompilerError> {
+    ) -> Result<Option<crate::instance::Instance>, CompilerError> {
         let Some(inf) = self.inf else { return Ok(None) };
         // INTERNED HERE, at the one boundary where the build's arena is in
         // scope: `compute_call_spec` is arena-free shape analysis, and this is
@@ -693,9 +712,7 @@ impl Builder<'_> {
                 );
             }
         }
-        Ok(spec.map(|(key, subst)| {
-            (crate::instance::Instance::intern(self.scx.interner(), func, key), subst)
-        }))
+        Ok(spec.map(|(key, _)| crate::instance::Instance::intern(self.scx.interner(), func, key)))
     }
 
     /// [`Self::call_spec`] narrowed by the target's storage filter -- the form
@@ -705,7 +722,7 @@ impl Builder<'_> {
         &self,
         e: Idx<Expr>,
         func: FuncRef,
-    ) -> Result<Option<(crate::instance::Instance, SpecSubst)>, CompilerError> {
+    ) -> Result<Option<crate::instance::Instance>, CompilerError> {
         self.call_spec(e, func)
     }
 
@@ -719,18 +736,17 @@ impl Builder<'_> {
     pub(crate) fn callee_abi_plan(
         &self,
         func: FuncRef,
-        spec: Option<&(crate::instance::Instance, SpecSubst)>,
-        subst: &SpecSubst,
+        delivery: Option<&crate::instance::Instance>,
     ) -> BackendFnAbiPlan {
         let base;
-        let inst = match spec {
-            Some((inst, _)) => inst,
+        let inst = match delivery {
+            Some(inst) => inst,
             None => {
                 base = crate::instance::Instance::base(func);
                 &base
             }
         };
-        BackendFnAbiPlan::for_instance_with_subst(self.ws, self.scx, inst, subst)
+        BackendFnAbiPlan::for_instance(self.ws, self.scx, inst)
     }
 
     /// THE tuple-return shape of a call, read off the CALLEE's declared return
@@ -752,10 +768,22 @@ impl Builder<'_> {
         e: Idx<Expr>,
         func: FuncRef,
     ) -> Result<Option<TupleRetShape>, CompilerError> {
-        let spec = self.call_spec_for_target(e, func)?;
-        let empty = SpecSubst::default();
-        let subst = spec.as_ref().map_or(&empty, |(_, s)| s);
-        Ok(self.callee_abi_plan(func, spec.as_ref(), subst).ret_tuple().cloned())
+        let owner = if self.concrete_plan.is_some() {
+            self.concrete_callee_for_site(e)?
+        } else {
+            self.callee_instance_for(e, func)?
+        };
+        let delivery = if self.concrete_plan.is_some() {
+            owner.as_ref().and_then(|inst| self.concrete_delivery_instance(inst))
+        } else {
+            self.call_spec_for_target(e, func)?
+        };
+        let abi = if let Some(owner) = owner {
+            self.callee_abi_plan_for_instance(&owner)?
+        } else {
+            self.callee_abi_plan(func, delivery.as_ref())
+        };
+        Ok(abi.ret_tuple().cloned())
     }
 
     /// [`Self::call_spec`] for the for-protocol `next` callee, whose bindings
@@ -1001,8 +1029,13 @@ impl Builder<'_> {
     /// materializes the table, a destructure elides it. The ABI is decided by the
     /// call's STATIC type, so direct and indirect callees of the same fn-type
     /// agree with no callee-identity analysis.
-    pub(crate) fn emit_call_value(&mut self, e: Idx<Expr>, callee: Idx<Inst>, args: Vec<Idx<Inst>>) -> Idx<Inst> {
-        self.emit_call_value_n(self.expr_tuple_shape(e), callee, args)
+    pub(crate) fn emit_call_value(
+        &mut self,
+        e: Idx<Expr>,
+        callee: Idx<Inst>,
+        args: Vec<Idx<Inst>>,
+    ) -> Result<Idx<Inst>, CompilerError> {
+        Ok(self.emit_call_value_n(self.expr_tuple_shape(e)?, callee, args))
     }
 
     /// [`Self::emit_call_value`] with an explicit tuple shape (the safe-nav call

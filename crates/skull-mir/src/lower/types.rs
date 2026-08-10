@@ -178,31 +178,38 @@ impl Builder<'_> {
         self.dispatch().expr_ty(e)
     }
 
-    /// `Some` iff `e`'s inferred type is a (non-nullable) tuple. Used to route a
-    /// tuple result across a call boundary (the call expr's own type IS the
-    /// callee's return type, so direct and INDIRECT calls agree).
+    /// `Some` iff `e`'s concrete or inferred type is a (non-nullable) tuple. Used
+    /// to route a tuple result across a call boundary (the call expr's own type
+    /// IS the callee's return type, so direct and INDIRECT calls agree).
     /// `resolve_tyid` (not `resolve_ty`) so a `Nullable(Tuple)` doesn't peel to a
     /// bare tuple and get mis-splatted.
-    pub(crate) fn expr_tuple_shape(&self, e: Idx<Expr>) -> Option<TupleRetShape> {
+    pub(crate) fn expr_tuple_shape(
+        &self,
+        e: Idx<Expr>,
+    ) -> Result<Option<TupleRetShape>, CompilerError> {
         // A bound `next` answers from its DECLARATION, never from the type this
         // body's single generic check left on the call: the destructure that
         // consumes the shape and the call that emits it must read the same
         // oracle, or the binding takes a different number of leaves than the
         // call returns and the difference is made up with a constant.
-        if let Some(&gidx) = self.inf?.bound_calls.get(&e) {
-            return Some(self.bound_next_tuple_shape(gidx));
+        if let Some(&gidx) = self.inf.and_then(|inf| inf.bound_calls.get(&e)) {
+            return self.bound_next_tuple_shape(gidx).map(Some);
         }
         if let Some(MonoTy::Tuple(parts)) = self.concrete_expr_ty(e) {
-            return Some(mono_tuple_shape(self.ws, &parts));
+            return Ok(Some(mono_tuple_shape(self.ws, &parts)));
         }
         if self.concrete_plan.is_some() {
-            return None;
+            return Ok(None);
         }
-        self.tyid_tuple_ret_shape(self.resolve_tyid(*self.inf?.expr_types.get(e)?)?)
+        Ok(self
+            .inf
+            .and_then(|inf| inf.expr_types.get(e))
+            .and_then(|ty| self.resolve_tyid(*ty))
+            .and_then(|ty| self.tyid_tuple_ret_shape(ty)))
     }
 
     pub(crate) fn repr_join_slot(&self, e: Idx<Expr>) -> Result<Option<RetSlot>, CompilerError> {
-        if let Some(shape) = self.expr_tuple_shape(e).filter(TupleRetShape::splats) {
+        if let Some(shape) = self.expr_tuple_shape(e)?.filter(TupleRetShape::splats) {
             return Ok(Some(RetSlot::Nested(shape)));
         }
         // A `?.` yielding a TUPLE. `expr_tuple_shape` declines a `Nullable(Tuple)`
@@ -317,8 +324,11 @@ impl Builder<'_> {
     ///
     /// `None` for every tuple that has no `nobox` element -- which is every tuple
     /// that compiled before this existed, so their boxes are byte-identical.
-    pub(crate) fn tuple_box_shape(&self, e: Idx<Expr>) -> Option<TupleRetShape> {
-        self.expr_tuple_shape(e).filter(|s| s.splats())
+    pub(crate) fn tuple_box_shape(
+        &self,
+        e: Idx<Expr>,
+    ) -> Result<Option<TupleRetShape>, CompilerError> {
+        Ok(self.expr_tuple_shape(e)?.filter(|s| s.splats()))
     }
 
     /// The tuple slot of a declared PARAM on the body arena -- [`tuple_param_slot`]'s
@@ -370,20 +380,11 @@ impl Builder<'_> {
     }
 
     /// The element slot of a placeholder `next` on the `Iterator`-bounded generic
-    /// at `gidx`, read from the enclosing fn's DECLARED bound under this body's
-    /// specialization.
+    /// at `gidx` in the legacy shared body. A concrete body uses its resolved
+    /// witness's ABI plan instead.
     ///
-    /// The declaration is the source because it is the only one that carries the
-    /// instantiation. A bounded body is type-checked ONCE against its bound, so
-    /// the `next(x)` call's inferred `(bool, E)` is a body-local type from that
-    /// single check -- it neither names the generic nor tracks the site, and
-    /// reading the element off it plans a shape for whatever that check happened
-    /// to leave there. Same rule as the presence slot: read a declaration, never
-    /// an expression's type.
-    ///
-    /// `Opaque` whenever the specialization does not resolve the element -- the
-    /// shared generic snapshot keeps one opaque slot and the splice's repack
-    /// keeps correcting it.
+    /// `Opaque` whenever the shared body's specialization does not resolve the
+    /// element; the splice's repack corrects that shape for the concrete callee.
     pub(crate) fn bound_next_elem_slot(&self, gidx: usize) -> RetSlot {
         match self.generic_bounds.get(gidx).copied().flatten() {
             Some(elem) => ret_slot(self.ws, self.subst(), elem),
@@ -392,12 +393,40 @@ impl Builder<'_> {
     }
 
     /// The full `(bool, E)` shape of a placeholder `next` on the generic at
-    /// `gidx` -- THE oracle every consumer of that call routes through.
-    pub(crate) fn bound_next_tuple_shape(&self, gidx: usize) -> TupleRetShape {
-        TupleRetShape {
+    /// `gidx` -- the concrete bound plan or the legacy shared-body rule is the
+    /// oracle every consumer of that call routes through.
+    pub(crate) fn bound_next_tuple_shape(
+        &self,
+        gidx: usize,
+    ) -> Result<TupleRetShape, CompilerError> {
+        if let Some(plan) = self.concrete_plan {
+            let next = plan.bound_tree.get(gidx).ok_or_else(|| {
+                gap(format!("concrete plan is missing bound `next` witness {gidx}"))
+            })?;
+            let instance = match next {
+                crate::bound::ResolvedBoundNext::Concrete { func, spec, .. } => spec
+                    .clone()
+                    .unwrap_or_else(|| crate::instance::Instance::base(*func)),
+                crate::bound::ResolvedBoundNext::CallerGeneric(inner) => {
+                    return Err(gap(format!(
+                        "concrete bound `next` witness {gidx} remains caller-generic at {inner}"
+                    )))
+                }
+            };
+            let shape = self
+                .callee_abi_plan_for_instance(&instance)?
+                .ret_tuple()
+                .cloned()
+                .ok_or_else(|| gap("concrete bound `next` must return a tuple"))?;
+            if shape.slots.len() < 2 {
+                return Err(gap("concrete bound `next` must return `(bool, E)`"));
+            }
+            return Ok(shape);
+        }
+        Ok(TupleRetShape {
             nullable: false,
             slots: vec![RetSlot::Opaque, self.bound_next_elem_slot(gidx)],
-        }
+        })
     }
 
     /// What the substitution binds `ty` to, when `ty` is (or resolves to) a
