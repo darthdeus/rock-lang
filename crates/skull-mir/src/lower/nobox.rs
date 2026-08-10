@@ -288,7 +288,7 @@ impl Builder<'_> {
             if self.param_is_repr_opaque(func, i) {
                 continue;
             }
-            let mono = self.scx.interner().get(*id);
+            let mono = self.concrete_mono(*id);
             if let Some((rendered, physical)) = self.slot_hazard_mono(&mono) {
                 return Err(CompilerError::new_with_label(
                     self.body.expr_spans[e],
@@ -303,7 +303,7 @@ impl Builder<'_> {
             }
         }
         let Some(id) = signature.result else { return Ok(()) };
-        let mono = self.scx.interner().get(id);
+        let mono = self.concrete_mono(id);
         let Some((rendered, physical)) = self.slot_hazard_mono(&mono) else {
             return Ok(());
         };
@@ -638,7 +638,7 @@ impl Builder<'_> {
                         "concrete struct field plan is missing `{struct_name}.{field}`"
                     ))
                 })?;
-            Some(self.scx.interner().get(id))
+            Some(self.concrete_mono(id))
         } else {
             None
         };

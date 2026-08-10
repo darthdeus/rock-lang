@@ -43,6 +43,7 @@ pub struct DispatchCtx<'a> {
     pub body: &'a Body,
     pub concrete_plan: Option<&'a ConcreteBodyPlan>,
     pub concrete_types: Option<&'a ConcreteTypeTables>,
+    pub concrete_type_cache: Option<&'a super::ConcreteTypeCache>,
     pub interner: Option<&'a crate::monoty::MonoInterner>,
     /// Source substitution for the graph's legacy view. Concrete lowering sets
     /// this to `None` because every type decision must come from its plan.
@@ -284,11 +285,23 @@ impl<'a> DispatchCtx<'a> {
     /// an HIR arena to fabricate a partial node.
     pub fn concrete_ty(&self, ty: TyId) -> Option<crate::monoty::MonoTy> {
         let id = self.concrete_types?.ty_type(ty)?;
-        Some(self.interner?.get(id))
+        self.concrete_mono(id)
     }
 
     pub fn concrete_expr_ty(&self, expr: Idx<Expr>) -> Option<crate::monoty::MonoTy> {
         let id = self.concrete_types?.expr_type(expr)?;
+        self.concrete_mono(id)
+    }
+
+    pub(crate) fn concrete_mono(&self, id: crate::monoty::MonoTyId) -> Option<crate::monoty::MonoTy> {
+        if let Some(cache) = self.concrete_type_cache {
+            if let Some(ty) = cache.borrow().get(&id).cloned() {
+                return Some(ty);
+            }
+            let ty = self.interner?.get(id);
+            cache.borrow_mut().insert(id, ty.clone());
+            return Some(ty);
+        }
         Some(self.interner?.get(id))
     }
 

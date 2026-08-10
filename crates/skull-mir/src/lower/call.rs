@@ -125,7 +125,7 @@ impl Builder<'_> {
             let id = signature.params.get(pidx).ok_or_else(|| {
                 self.gap_here("concrete callee signature has no parameter for this argument")
             })?;
-            return Ok(Some(self.scx.interner().get(*id)));
+            return Ok(Some(self.concrete_mono(*id)));
         }
         let Some(plans) = self.concrete_plans else { return Ok(None) };
         let Some(plan) = plans.get(inst) else { return Ok(None) };
@@ -134,7 +134,7 @@ impl Builder<'_> {
                 "concrete ABI plan has no parameter {pidx} for callee instance"
             ))
         })?;
-        Ok(Some(self.scx.interner().get(*id)))
+        Ok(Some(self.concrete_mono(*id)))
     }
 
     pub(crate) fn concrete_coroutine_channel(
@@ -162,7 +162,7 @@ impl Builder<'_> {
                     self.gap_here("concrete coroutine callee signature is missing")
                 })?,
             };
-            signature.result.map(|id| self.scx.interner().get(id))
+            signature.result.map(|id| self.concrete_mono(id))
         } else {
             Some(self.concrete_expr_ty(receiver).ok_or_else(|| {
                 self.gap_here("concrete coroutine receiver has no type")

@@ -604,16 +604,15 @@ impl MonoArena {
 /// owned by one walk -- and giving each walk its own would mint the second
 /// identity this stage exists to remove.
 ///
-/// The lock is taken per INTERN, not per lowered body: a build interns on the
-/// order of its instance count (bitgun 3,495) against seconds of lowering, so
-/// the contention is not measurable. It is a [`std::sync::Mutex`] rather than a
-/// sharded map for that reason -- there is nothing here to optimize yet.
+/// Reads happen throughout parallel lowering, while interning is confined to
+/// graph construction and the occasional newly discovered call target. Keep
+/// those populations apart so concrete-plan reads do not serialize on writes.
 ///
 /// The arena is MONOTONIC and is never pruned. An entry outliving its last
 /// instance is what keeps ids stable across incremental edits, which is the
 /// property `InstanceGraph::update_bodies` rests on.
 pub struct MonoInterner {
-    arena: std::sync::Mutex<MonoArena>,
+    arena: std::sync::RwLock<MonoArena>,
 }
 
 impl Default for MonoInterner {
@@ -630,14 +629,14 @@ impl std::fmt::Debug for MonoInterner {
 
 impl MonoInterner {
     pub fn new() -> Self {
-        Self { arena: std::sync::Mutex::new(MonoArena::new()) }
+        Self { arena: std::sync::RwLock::new(MonoArena::new()) }
     }
 
     /// Adopt an arena an [`InstanceGraph`](../../skull/src/instance_graph.rs)
     /// build already filled. The graph and emission share ONE arena; a second
     /// one would give the same type two ids and the same body two identities.
     pub fn from_arena(arena: MonoArena) -> Self {
-        Self { arena: std::sync::Mutex::new(arena) }
+        Self { arena: std::sync::RwLock::new(arena) }
     }
 
     pub fn len(&self) -> usize {
@@ -649,13 +648,13 @@ impl MonoInterner {
     }
 
     pub fn intern(&self, ty: MonoTy) -> MonoTyId {
-        self.arena.lock().expect("mono arena poisoned").intern(ty)
+        self.arena.write().expect("mono arena poisoned").intern(ty)
     }
 
     /// One lock acquisition for a whole argument list, which is how an
     /// instance's arguments arrive.
     pub fn intern_all(&self, tys: impl IntoIterator<Item = MonoTy>) -> Vec<MonoTyId> {
-        let mut arena = self.arena.lock().expect("mono arena poisoned");
+        let mut arena = self.arena.write().expect("mono arena poisoned");
         tys.into_iter().map(|ty| arena.intern(ty)).collect()
     }
 
@@ -685,12 +684,12 @@ impl MonoInterner {
 
     /// Read-only access under one lock, for a caller doing several reads.
     pub fn with<R>(&self, f: impl FnOnce(&MonoArena) -> R) -> R {
-        f(&self.arena.lock().expect("mono arena poisoned"))
+        f(&self.arena.read().expect("mono arena poisoned"))
     }
 
     /// Mutable access under one lock, for a caller doing several interns.
     pub fn with_mut<R>(&self, f: impl FnOnce(&mut MonoArena) -> R) -> R {
-        f(&mut self.arena.lock().expect("mono arena poisoned"))
+        f(&mut self.arena.write().expect("mono arena poisoned"))
     }
 
     pub fn into_arena(self) -> MonoArena {

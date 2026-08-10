@@ -3690,6 +3690,7 @@ fn dispatched_sites(
         body,
         concrete_plan: None,
         concrete_types: None,
+        concrete_type_cache: None,
         interner: None,
         legacy_subst: Some(subst),
         values_first_class: false,

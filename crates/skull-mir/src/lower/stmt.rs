@@ -245,6 +245,9 @@ impl Builder<'_> {
             scx: self.scx,
             concrete_plan: self.concrete_plan,
             concrete_plans: self.concrete_plans,
+            concrete_type_cache: self
+                .concrete_plan
+                .map(|_| std::cell::RefCell::new(rustc_hash::FxHashMap::default())),
             legacy_subst: self.legacy_subst.clone(),
             generic_bounds: self.generic_bounds,
             body: self.body,

@@ -16,6 +16,7 @@
 //! `gap` (return a clear error) and land in later phases. The gate is the real
 //! corpus, not this comment; see `docs/skull-bone-mir-faithful-plan.md`.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use bone_semantic::hir::{
@@ -31,6 +32,9 @@ use skull_parser::CompilerError;
 use crate::intrinsics::ExpandKind;
 use crate::mir::*;
 use crate::concrete::{ConcreteBodyPlan, ConcreteOwner, ConcretePlans, ConcreteTypeTables};
+use crate::monoty::{MonoTy, MonoTyId};
+
+type ConcreteTypeCache = RefCell<rustc_hash::FxHashMap<MonoTyId, MonoTy>>;
 
 fn gap(msg: impl std::fmt::Display) -> CompilerError {
     CompilerError::new_no_location(format!("skull-mir: lowering gap: {msg}"))
@@ -1157,6 +1161,7 @@ fn lower_body(
         scx,
         concrete_plan,
         concrete_plans,
+        concrete_type_cache: concrete_plan.map(|_| RefCell::new(rustc_hash::FxHashMap::default())),
         legacy_subst,
         generic_bounds: &func.generic_bounds,
         body,
@@ -1254,6 +1259,7 @@ fn lower_global_inner(
         scx,
         concrete_plan: Some(concrete_plan),
         concrete_plans: Some(concrete_plans),
+        concrete_type_cache: Some(RefCell::new(rustc_hash::FxHashMap::default())),
         legacy_subst: None,
         generic_bounds: &[],
         body,
@@ -1292,7 +1298,7 @@ fn lower_global_inner(
     b.ret_shape = (!scx.values_first_class)
         .then(|| concrete_plan.signature.result)
         .flatten()
-        .and_then(|id| mono_nobox_value_shape(ws, &scx.interner().get(id)));
+        .and_then(|id| mono_nobox_value_shape(ws, &b.concrete_mono(id)));
     b.lower_root()?;
     Ok(Some(b.f))
 }
@@ -1516,6 +1522,7 @@ fn lower_decorator_inner(
         scx,
         concrete_plan: Some(concrete_plan),
         concrete_plans: Some(concrete_plans),
+        concrete_type_cache: Some(RefCell::new(rustc_hash::FxHashMap::default())),
         legacy_subst: None,
         generic_bounds: &[],
         body,
@@ -1563,6 +1570,7 @@ struct Builder<'a> {
     scx: &'a ScalarCtx,
     concrete_plan: Option<&'a ConcreteBodyPlan>,
     concrete_plans: Option<&'a ConcretePlans>,
+    concrete_type_cache: Option<ConcreteTypeCache>,
     /// Legacy source substitution, absent for every concrete-plan builder.
     /// Struct-default lowering temporarily replaces this one value with the
     /// defaults body's slot substitution; concrete builders keep it absent and
@@ -1776,6 +1784,18 @@ impl Builder<'_> {
             .expect("concrete lowering attempted to read a source substitution")
     }
 
+    pub(crate) fn concrete_mono(&self, id: MonoTyId) -> MonoTy {
+        let Some(cache) = &self.concrete_type_cache else {
+            return self.scx.interner().get(id);
+        };
+        if let Some(ty) = cache.borrow().get(&id).cloned() {
+            return ty;
+        }
+        let ty = self.scx.interner().get(id);
+        cache.borrow_mut().insert(id, ty.clone());
+        ty
+    }
+
     pub(crate) fn dispatch(&self) -> dispatch::DispatchCtx<'_> {
         dispatch::DispatchCtx {
             ws: self.ws,
@@ -1785,6 +1805,7 @@ impl Builder<'_> {
             concrete_types: self
                 .concrete_plan
                 .and_then(|plan| plan.domain_types(&self.cur_domain)),
+            concrete_type_cache: self.concrete_type_cache.as_ref(),
             interner: Some(self.scx.interner()),
             legacy_subst: self.legacy_subst.as_ref(),
             values_first_class: self.scx.values_first_class,
@@ -1990,7 +2011,7 @@ impl Builder<'_> {
     fn reject_nonunit_coroutine_falloff(&self) -> Result<(), CompilerError> {
         let nonunit_concrete = if let Some(plan) = self.concrete_plan {
             let Some(result_id) = plan.signature.result else { return Ok(()) };
-            let result = self.scx.interner().get(result_id);
+            let result = self.concrete_mono(result_id);
             let crate::monoty::MonoTy::App {
                 ctor: crate::monoty::MonoCtor::Nominal(name),
                 params,
@@ -2065,7 +2086,7 @@ impl Builder<'_> {
         let v = if let Some(plan) = self.concrete_plan {
             match plan.signature.result {
                 Some(result) => {
-                    let result = self.scx.interner().get(result);
+                    let result = self.concrete_mono(result);
                     self.coerced_mono(v, e, &result)
                 }
                 None => v,
