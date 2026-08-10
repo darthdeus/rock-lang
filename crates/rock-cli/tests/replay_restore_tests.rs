@@ -1132,6 +1132,163 @@ fn playback_jumps_clear_real_stone_transients_and_keep_persistent_state() {
     assert_reset(&looped, "A-B loop jump");
 }
 
+/// Replay observability. Every counter asserts its own population in the same
+/// run; the timings assert that work was measured, never a budget -- these are
+/// wall-clock numbers on a shared machine.
+///
+/// The cadence overhead is an A/B and is REPORTED, not gated: the difference
+/// between a cadence-on and cadence-off run is well inside the run-to-run
+/// spread of a `rock frame` process here, so a threshold on it would be a
+/// measurement of the machine.
+#[test]
+fn replay_reports_its_own_costs() {
+    let game = "bitgun";
+    let dir = tempfile::tempdir().unwrap();
+
+    // Record a log to replay for the seek/eviction/cadence arms.
+    let log_s = dir.path().join("costs.replay").to_string_lossy().into_owned();
+    let scratch = tempfile::tempdir().unwrap();
+    let rec = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args([
+            "frame", game, "-n", "100", "--record", &log_s,
+            "--output", &scratch.path().to_string_lossy(),
+        ])
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .current_dir(workspace_root())
+        .output()
+        .expect("spawn record");
+    assert!(rec.status.success(), "record failed: {}", String::from_utf8_lossy(&rec.stderr));
+
+    // Seek: the first RENDERED frame at the target, which the seek total hides.
+    // Eviction: window 30 over a 100-tick log drops keyframes as it goes.
+    let seeked = run_replay_dump(
+        game, 100, &log_s,
+        &[
+            ("STONE_KEYFRAME_INTERVAL", "10"),
+            ("STONE_KEYFRAME_WINDOW", "30"),
+            ("STONE_SCRUB_AT_TICK", "90"),
+            ("STONE_SCRUB_TO_TICK", "55"),
+        ],
+    );
+    let diag = &seeked["__stone_diag"];
+    assert_eq!(diag["STONE_SEEK_COUNT"].as_i64(), Some(1), "{diag}");
+    assert_eq!(
+        diag["STONE_SEEK_FIRST_FRAMES"].as_i64(), Some(1),
+        "exactly one first-rendered-frame must be reported per seek: {diag}"
+    );
+    let first_ms = diag["STONE_SEEK_FIRST_FRAME_MS"].as_f64().expect("first frame ms");
+    assert!(first_ms > 0.0, "the target frame must be measured: {diag}");
+    let evictions = diag["STONE_KEYFRAME_EVICTIONS"].as_i64().expect("eviction count");
+    assert!(evictions > 0, "the bounded window must have evicted something: {diag}");
+    assert!(
+        diag["STONE_KEYFRAME_EVICT_MS"].as_f64().is_some_and(|v| v > 0.0),
+        "eviction time must be measured where evictions happened: {diag}"
+    );
+    let cadence_ms = diag["STONE_KEYFRAME_CADENCE_MS"].as_f64().expect("cadence ms");
+    let cadence_n = diag["STONE_KEYFRAME_CADENCE_CAPTURES"].as_i64().expect("cadence captures");
+    assert!(cadence_n > 0 && cadence_ms > 0.0, "{diag}");
+    assert!(
+        diag["STONE_KEYFRAME_GLOBALS"].as_i64().is_some_and(|n| n > 0)
+            && diag["STONE_KEYFRAME_NODES"].as_i64().is_some_and(|n| n > 0),
+        "a keyframe must report the population it copied: {diag}"
+    );
+    println!(
+        "[replay-costs] seek first rendered frame {first_ms:.2}ms; {evictions} evictions in \
+         {:.2}ms; {cadence_n} cadence captures in {cadence_ms:.2}ms",
+        diag["STONE_KEYFRAME_EVICT_MS"].as_f64().unwrap()
+    );
+
+    // Cadence overhead, A/B and REPORTED. The off arm must have no cadence
+    // population at all -- otherwise the two arms are the same run.
+    let t_on = std::time::Instant::now();
+    let on = run_replay_dump(game, 100, &log_s, &[("STONE_KEYFRAME_INTERVAL", "10")]);
+    let on_ms = t_on.elapsed().as_secs_f64() * 1000.0;
+    let t_off = std::time::Instant::now();
+    let off = run_replay_dump(game, 100, &log_s, &[("STONE_KEYFRAME_INTERVAL", "0")]);
+    let off_ms = t_off.elapsed().as_secs_f64() * 1000.0;
+    let on_n = on["__stone_diag"]["STONE_KEYFRAME_CADENCE_CAPTURES"].as_i64().unwrap_or(0);
+    assert!(on_n > 0, "the cadence-on arm must capture: {}", on["__stone_diag"]);
+    assert!(
+        off["__stone_diag"].get("STONE_KEYFRAME_CADENCE_CAPTURES").is_none(),
+        "the cadence-off arm must capture nothing, else the A/B compares one thing with itself: {}",
+        off["__stone_diag"]
+    );
+    // Control for the seek counter above: a run that never seeks must report no
+    // first-frame at all, so the "exactly one" is a count and not a constant.
+    assert!(
+        off["__stone_diag"].get("STONE_SEEK_FIRST_FRAMES").is_none(),
+        "a run with no seek must report no first-rendered-frame: {}",
+        off["__stone_diag"]
+    );
+    let in_engine = on["__stone_diag"]["STONE_KEYFRAME_CADENCE_MS"].as_f64().unwrap_or(0.0);
+    println!(
+        "[replay-costs] cadence A/B over 100 ticks: {on_n} captures, {in_engine:.2}ms in-engine; \
+         process wall clock {on_ms:.0}ms on vs {off_ms:.0}ms off (reported, not gated -- process \
+         spread here dwarfs the difference)"
+    );
+
+    // Save and branch rewrite: time and bytes, on a live rewound session.
+    let branch_log = dir.path().join("costs-branch.replay").to_string_lossy().into_owned();
+    let copy_s = dir.path().join("costs-copy.replay").to_string_lossy().into_owned();
+    let branched = run_record_dump(
+        game, 120, &branch_log,
+        &[
+            ("STONE_LIVE_REWIND", "1"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
+            ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
+            ("STONE_SAVE_REPRO_AT_FRAME", "41"),
+            ("STONE_SAVE_REPRO_PATH", &copy_s),
+            ("STONE_BRANCH_AT_FRAME", "70"),
+        ],
+    );
+    let diag = &branched["__stone_diag"];
+    assert_eq!(diag["STONE_REPLAY_SAVES"].as_i64(), Some(1), "{diag}");
+    let save_bytes = diag["STONE_REPLAY_SAVE_BYTES"].as_i64().expect("save bytes");
+    assert_eq!(
+        save_bytes as u64, std::fs::metadata(&copy_s).unwrap().len(),
+        "the reported save size must be the file that was written"
+    );
+    assert!(diag["STONE_REPLAY_SAVE_MS"].as_f64().is_some_and(|v| v > 0.0), "{diag}");
+    let rewrite_bytes = diag["STONE_BRANCH_REWRITE_BYTES"].as_i64().expect("rewrite bytes");
+    assert!(rewrite_bytes > 0 && rewrite_bytes < save_bytes, "a branch must shrink the log: {diag}");
+    let rewrite_ms = diag["STONE_BRANCH_REWRITE_MS"].as_f64().expect("rewrite ms");
+    assert!(rewrite_ms > 0.0, "{diag}");
+    println!(
+        "[replay-costs] save {save_bytes}B in {:.2}ms; branch rewrite to {rewrite_bytes}B in \
+         {rewrite_ms:.2}ms",
+        diag["STONE_REPLAY_SAVE_MS"].as_f64().unwrap()
+    );
+
+    // Keyframe BYTES are only honest where real memory was imaged. bitgun holds
+    // no buffer storage in sim state, so its figure is a truthful zero; bopt
+    // holds a NativeBuffer, so its keyframe reports the bytes it copied.
+    let seek_diag = &seeked["__stone_diag"];
+    assert_eq!(
+        seek_diag.get("STONE_KEYFRAME_STORAGE_BYTES").and_then(serde_json::Value::as_i64),
+        Some(0),
+        "bitgun images no buffer storage, so its byte figure must be a real zero: {seek_diag}"
+    );
+    let bopt_log = dir.path().join("bopt.replay").to_string_lossy().into_owned();
+    let bopt_rec = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .args([
+            "frame", "bopt", "-n", "25", "--record", &bopt_log,
+            "--output", &scratch.path().to_string_lossy(),
+        ])
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .current_dir(workspace_root())
+        .output()
+        .expect("spawn bopt record");
+    assert!(bopt_rec.status.success(), "bopt record failed: {}", String::from_utf8_lossy(&bopt_rec.stderr));
+    let bopt = run_replay_dump("bopt", 30, &bopt_log, &[("STONE_KEYFRAME_INTERVAL", "10")]);
+    let bytes = bopt["__stone_diag"]["STONE_KEYFRAME_STORAGE_BYTES"].as_i64().expect("storage bytes");
+    assert!(
+        bytes > 0,
+        "bopt holds buffer storage in sim state, so its keyframe must report imaged bytes: {}",
+        bopt["__stone_diag"]
+    );
+    println!("[replay-costs] bopt keyframe imaged {bytes} bytes of buffer storage");
+}
+
 fn keyframe_count(s: &serde_json::Value) -> i64 {
     s["__stone_diag"]["STONE_KEYFRAME_COUNT"].as_i64().expect("STONE_KEYFRAME_COUNT")
 }
