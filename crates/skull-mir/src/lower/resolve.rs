@@ -63,6 +63,18 @@ pub fn backend_variant(
     Err(NoServingBinding)
 }
 
+/// The target-selected declaration for one target-neutral concrete instance.
+/// The arguments remain the graph's identity; only the body sibling changes.
+pub fn backend_variant_instance(
+    ws: &Workspace,
+    inst: &crate::instance::Instance,
+    target: bone_semantic::hir::FnBackend,
+) -> Result<crate::instance::Instance, NoServingBinding> {
+    let f = &ws.module(inst.func.module).functions[inst.func.func];
+    let func = backend_variant(ws, f.name, inst.func, target)?;
+    Ok(crate::instance::Instance { func, args: inst.args.clone() })
+}
+
 /// The backend-variant group representative of `rep` -- the declaration bone
 /// would have collapsed the group to, whichever member a caller happens to hold.
 ///

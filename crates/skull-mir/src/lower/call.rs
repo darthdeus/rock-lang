@@ -25,6 +25,25 @@ pub(crate) struct DirectCall {
 }
 
 impl Builder<'_> {
+    fn selected_abi_instance(
+        &self,
+        inst: &crate::instance::Instance,
+    ) -> Result<crate::instance::Instance, CompilerError> {
+        match crate::lower::backend_variant_instance(self.ws, inst, self.scx.target) {
+            Ok(selected) => Ok(selected),
+            Err(_) if self.scx.target == bone_semantic::hir::FnBackend::Js => {
+                // JS host mappings deliberately defer body selection to the JS
+                // emitter when no Rock declaration serves this target.
+                Ok(inst.clone())
+            }
+            Err(_) => Err(gap(format!(
+                "callee `{}` has no body serving the {:?} target",
+                self.ws.module(inst.func.module).functions[inst.func.func].name,
+                self.scx.target,
+            ))),
+        }
+    }
+
     pub(crate) fn concrete_callee_for_site(
         &self,
         e: Idx<Expr>,
@@ -156,16 +175,17 @@ impl Builder<'_> {
         &self,
         inst: &crate::instance::Instance,
     ) -> Result<BackendFnAbiPlan, CompilerError> {
+        let selected = self.selected_abi_instance(inst)?;
         if let Some(plans) = self.concrete_plans {
             if !crate::lower::requires_concrete_body_plan(self.ws, inst) {
-                return Ok(BackendFnAbiPlan::for_instance(self.ws, self.scx, inst));
+                return Ok(BackendFnAbiPlan::for_instance(self.ws, self.scx, &selected));
             }
             if crate::monoty::too_deep_to_instantiate(
                 inst.arg_types(self.scx.interner()).iter(),
             )
             .is_some()
             {
-                return Ok(BackendFnAbiPlan::for_instance(self.ws, self.scx, inst));
+                return Ok(BackendFnAbiPlan::for_instance(self.ws, self.scx, &selected));
             }
             let plan = plans.get(inst).ok_or_else(|| {
                 let name = self.ws.module(inst.func.module).functions[inst.func.func].name;
@@ -174,9 +194,12 @@ impl Builder<'_> {
                     inst.func.func.into_raw().into_u32()
                 ))
             })?;
+            if selected.func != inst.func {
+                return Ok(BackendFnAbiPlan::for_instance(self.ws, self.scx, &selected));
+            }
             return Ok(BackendFnAbiPlan::for_concrete_plan(self.ws, self.scx, plan));
         }
-        Ok(BackendFnAbiPlan::for_instance(self.ws, self.scx, inst))
+        Ok(BackendFnAbiPlan::for_instance(self.ws, self.scx, &selected))
     }
 
     /// Lower a call to a (boxed) single value — the scalar-ABI Group result is

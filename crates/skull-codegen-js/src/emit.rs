@@ -175,7 +175,7 @@ fn max_multi_wire(bodies: &[&MirFunc]) -> usize {
 }
 
 /// The widest wire any reachable `inline(js)` body PUBLISHES, from the concrete
-/// result ABI of each body's own declaration -- never from the body text.
+/// result ABI of each artifact-selected declaration -- never from the body text.
 ///
 /// The bank has two writers: MIR ([`max_multi_wire`]) and the opaque bodies.
 /// The opaque half used to be a substring scan for `__rock_retN`, which made
@@ -197,7 +197,10 @@ fn max_published_lanes(
                 Some((bone_semantic::hir::FnBackend::Js, _))
             )
         })
-        .map(|body| skull_mir::lower::BackendFnAbiPlan::for_instance(ws, scx, &body.instance).result_lanes())
+        .map(|body| {
+            let selected = Instance { func: body.decl, args: body.instance.args.clone() };
+            skull_mir::lower::BackendFnAbiPlan::for_instance(ws, scx, &selected).result_lanes()
+        })
         .max()
         .unwrap_or(0)
 }
@@ -3700,7 +3703,8 @@ fn emit_inline_js_fn(
     // A @scalar_abi fn's value-struct params explode into their
     // `<name>__<leaf>` scalars, same as the lua path, so the exploded call
     // sites and the raw body's leaf names agree.
-    let abi = skull_mir::lower::BackendFnAbiPlan::for_instance(ws, scx, instance);
+    let selected = Instance { func: fr, args: instance.args.clone() };
+    let abi = skull_mir::lower::BackendFnAbiPlan::for_instance(ws, scx, &selected);
     let lua_param_names = abi.lua_param_names(ws);
     let params = match &lua_param_names {
         Some(names) => names.join(", "),
@@ -3715,8 +3719,9 @@ fn emit_inline_js_fn(
         Some((bone_semantic::hir::FnBackend::Js, s)) => s.to_string(),
         _ => String::new(),
     };
-    // The publisher contract, checked and lowered against the declaration's
-    // own concrete result ABI.
+    // The publisher contract is checked against the selected body's ABI. The
+    // canonical graph instance supplies identity; this sibling supplies the
+    // opaque body and its parameter/result convention.
     let src = lower_publisher(&src, abi.result_lanes(), f.name.as_str())?;
     Ok(format!("function {js_name}({params}) {{\n{src}\n}}\n"))
 }
@@ -4299,17 +4304,30 @@ fn check_scalar_abi(
                         Some(&arity) => (Instance::base(*callee), arity, ""),
                     },
                 };
-                let abi = concrete
+                let selected = artifact_decls
                     .get(&body)
-                    .or_else(|| {
-                        artifact_decls.get(&body).and_then(|decl| {
-                            concrete.get(&Instance { func: *decl, args: body.args.clone() })
-                        })
-                    });
+                    .map(|decl| Instance { func: *decl, args: body.args.clone() });
+                let selected_sibling = selected.as_ref().is_some_and(|inst| inst.func != body.func);
+                let abi = if selected_sibling {
+                    None
+                } else {
+                    concrete.get(&body).or_else(|| {
+                        selected
+                            .as_ref()
+                            .and_then(|inst| concrete.get(inst))
+                    })
+                };
                 let required = match abi {
                     Some(plan) => {
                         let abi = skull_mir::lower::BackendFnAbiPlan::for_concrete_plan(
                             ws, scx, plan,
+                        );
+                        required_arg_count(ws, &abi, arity)
+                    }
+                    None if selected_sibling => {
+                        let selected = selected.expect("selected sibling was checked above");
+                        let abi = skull_mir::lower::BackendFnAbiPlan::for_instance(
+                            ws, scx, &selected,
                         );
                         required_arg_count(ws, &abi, arity)
                     }

@@ -93,7 +93,8 @@ mod nobox;
 mod pattern;
 mod resolve;
 pub use resolve::{
-    backend_variant, backend_variant_group, canonical_variant, sibling_variant, NoServingBinding,
+    backend_variant, backend_variant_group, backend_variant_instance, canonical_variant,
+    sibling_variant, NoServingBinding,
 };
 mod stmt;
 mod storage;
