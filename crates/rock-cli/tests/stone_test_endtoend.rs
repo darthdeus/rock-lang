@@ -38,6 +38,7 @@ fn global_type_change_vec_to_arena_emits_restart_decision() {
     // before mutating, otherwise the rewrite could coalesce with the seed
     // and we'd never see the type change as a separate reload event.
     h.await_reload_count(1, SETTLE_TIMEOUT);
+    let baseline = h.event_count();
 
     h.write_file(
         "game.rock",
@@ -49,7 +50,7 @@ fn global_type_change_vec_to_arena_emits_restart_decision() {
              return n\n\
          }\n",
     );
-    let log = h.await_settled(QUIESCENT, SETTLE_TIMEOUT);
+    let log = h.await_settled_after(baseline, QUIESCENT, SETTLE_TIMEOUT);
     assert!(
         log.len() >= 2,
         "expected at least 2 reloads (seed + type change), got: {:?}",
@@ -80,11 +81,12 @@ fn incremental_recompile_lua_runs_correctly_under_hot_reload() {
     h.await_settled(QUIESCENT, SETTLE_TIMEOUT);
     let before_lua = h.compiled_lua();
 
+    let baseline = h.event_count();
     h.write_file(
         "a.rock",
         "global SCORE: int = 0\n@nomangle fn bump() { SCORE = SCORE + 10 }\n",
     );
-    let log = h.await_settled(QUIESCENT, SETTLE_TIMEOUT);
+    let log = h.await_settled_after(baseline, QUIESCENT, SETTLE_TIMEOUT);
     assert!(
         log.len() >= 2,
         "expected at least 2 reloads (seed + body change), got: {:?}",
@@ -145,11 +147,12 @@ fn function_body_change_keeps_hot_reload_decision() {
     )]);
     h.await_reload_count(1, SETTLE_TIMEOUT);
 
+    let baseline = h.event_count();
     h.write_file(
         "a.rock",
         "global SCORE: int = 0\n@nomangle fn bump() { SCORE = SCORE + 99 }\n",
     );
-    let log = h.await_settled(QUIESCENT, SETTLE_TIMEOUT);
+    let log = h.await_settled_after(baseline, QUIESCENT, SETTLE_TIMEOUT);
     assert!(log.len() >= 2);
     assert_eq!(
         log.last().unwrap().decision,
