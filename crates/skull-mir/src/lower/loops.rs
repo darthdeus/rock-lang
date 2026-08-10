@@ -359,6 +359,12 @@ impl Builder<'_> {
                         crate::instance::Instance::intern(self.scx.interner(), func, key.clone())
                     })
                 });
+                if self.concrete_plan.is_some() && !sub.is_empty() {
+                    let owner = owner
+                        .as_ref()
+                        .ok_or_else(|| gap("concrete for-next has no callee instance"))?;
+                    self.record_callee_bound_tree(call, owner, true)?;
+                }
                 if let Some(delivery) = owner.as_ref().and_then(|i| self.concrete_delivery_instance(i)) {
                     self.f.spec_bindings.insert(call, delivery);
                 } else if self.concrete_plan.is_none() && spec.is_some() {

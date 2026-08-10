@@ -1703,11 +1703,10 @@ fn emit_spec_chunk(
         ws,
         scx,
         fref,
-        &subst,
         name,
         &mut mf,
         inline_cache,
-        Some(&concrete.plans),
+        &concrete.plans,
     )
         .map_err(|e| CompilerError::new_with_label(f.name_span, e.message))?;
     let before = specs.len();
@@ -1817,27 +1816,26 @@ pub fn prepare_instance_body(
     mf: &mut skull_mir::mir::MirFunc,
     cache: &mut skull_transform::InlineCache,
 ) -> Result<FxHashSet<FuncRef>, CompilerError> {
-    prepare_instance_body_with_plans(ws, scx, fref, subst, name, mf, cache, None)
+    let (spliced, _records) = skull_transform::inline_functions_with_subst(
+        ws, scx, fref, mf, cache, subst,
+    )?;
+    skull_transform::cleanup_with_nobox(ws, mf);
+    skull_transform::convert_closures(mf, name);
+    skull_transform::recover_counted_loops(ws, mf);
+    Ok(spliced.into_iter().collect())
 }
 
 pub fn prepare_instance_body_with_plans(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
     fref: FuncRef,
-    subst: &skull_mir::lower::SpecSubst,
     name: &str,
     mf: &mut skull_mir::mir::MirFunc,
     cache: &mut skull_transform::InlineCache,
-    concrete_plans: Option<&skull_mir::concrete::ConcretePlans>,
+    concrete_plans: &skull_mir::concrete::ConcretePlans,
 ) -> Result<FxHashSet<FuncRef>, CompilerError> {
-    let (spliced, _records) = skull_transform::inline_functions_with_subst_and_plans(
-        ws,
-        scx,
-        fref,
-        mf,
-        cache,
-        subst,
-        concrete_plans,
+    let (spliced, _records) = skull_transform::inline_functions_with_plans(
+        ws, scx, fref, mf, cache, concrete_plans,
     )?;
     skull_transform::cleanup_with_nobox(ws, mf);
     skull_transform::convert_closures(mf, name);

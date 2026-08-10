@@ -346,6 +346,44 @@ fn main() {
 }
 
 #[test]
+fn concrete_lowering_carries_the_callee_bound_plan_to_the_call() {
+    let (ws, mut g) = graph_of(
+        r#"
+fn sum_all<I: Iterator<int>>(it: I) -> int {
+    let total = 0
+    for v in it { total = total + v }
+    return total
+}
+
+fn main() { print("{sum_all([1, 2, 3].iter())}") }
+"#,
+    );
+    let bodies = skull::concrete_body::build(&ws, &mut g);
+    let main = bodies
+        .plans
+        .iter()
+        .find(|(inst, _)| {
+            inst.args.is_empty()
+                && ws.module(inst.func.module).functions[inst.func.func].name.as_str() == "main"
+        })
+        .expect("main has no concrete plan");
+    let callee_plan = main
+        .1
+        .callees
+        .values()
+        .find_map(|inst| bodies.plans.get(inst).filter(|plan| !plan.bound_tree.is_empty()))
+        .expect("main does not retain a bounded callee plan");
+    let scx = ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let mf = skull_mir::lower::lower_instance_with_plans(&ws, &scx, main.1, &bodies.plans)
+        .expect("lower main with concrete plans");
+    assert!(!mf.resolved_bound_trees.is_empty(), "the concrete call lost its bound plan");
+    assert!(
+        mf.resolved_bound_trees.values().any(|tree| tree == &callee_plan.bound_tree),
+        "the call carried a different resolved tree than its concrete callee"
+    );
+}
+
+#[test]
 fn standalone_bounded_resolution_records_a_nonempty_resolved_tree() {
     let src = r#"
 struct Item { id: int, p: float }

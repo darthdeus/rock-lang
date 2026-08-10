@@ -630,7 +630,12 @@ impl Builder<'_> {
     /// Takes the whole [`DirectCall`] rather than the three records loosely,
     /// because the loose form is what let a caller pass `None, None` for the
     /// two it had not computed and still typecheck.
-    pub(crate) fn record_call(&mut self, call: Idx<Inst>, func: FuncRef, dc: &DirectCall) {
+    pub(crate) fn record_call(
+        &mut self,
+        call: Idx<Inst>,
+        func: FuncRef,
+        dc: &DirectCall,
+    ) -> Result<(), CompilerError> {
         if let Some(t) = &dc.tree {
             self.f.bound_trees.insert(call, t.clone());
         }
@@ -642,9 +647,37 @@ impl Builder<'_> {
                 crate::lower::canonical_variant(self.ws, owner.func),
                 crate::lower::canonical_variant(self.ws, func)
             );
+            self.record_callee_bound_tree(
+                call,
+                owner,
+                dc.tree.as_ref().is_some_and(|tree| !tree.is_empty()),
+            )?;
             self.f.callee_instances.insert(call, owner.clone());
         }
         self.f.call_abi_plans.insert(call, dc.plan.clone());
+        Ok(())
+    }
+
+    pub(crate) fn record_callee_bound_tree(
+        &mut self,
+        call: Idx<Inst>,
+        owner: &crate::instance::Instance,
+        raw_tree_present: bool,
+    ) -> Result<(), CompilerError> {
+        let Some(plans) = self.concrete_plans else { return Ok(()) };
+        let Some(plan) = plans.get(owner) else {
+            if raw_tree_present {
+                return Err(self.gap_here("concrete callee bound plan is missing for its site"));
+            }
+            return Ok(());
+        };
+        if raw_tree_present && plan.bound_tree.is_empty() {
+            return Err(self.gap_here("concrete callee bound plan is empty for its site"));
+        }
+        if !plan.bound_tree.is_empty() {
+            self.f.resolved_bound_trees.insert(call, plan.bound_tree.clone());
+        }
+        Ok(())
     }
 
     /// The concrete instance a call at `e` to `func` names -- the IDENTITY
@@ -980,10 +1013,10 @@ impl Builder<'_> {
             // day a `@gpu_only` intrinsic returns a tuple.
             self.authorize_gpu_boundary_boxes(&func, &args);
             if let Some(shape) = &ret_tuple {
-                return Ok(self.emit_tuple_call_tree(func, args, shape, &dc));
+                return Ok(self.emit_tuple_call_tree(func, args, shape, &dc)?);
             }
             let call = self.emit_cur(Inst::Call { func, args });
-            self.record_call(call, func, &dc);
+            self.record_call(call, func, &dc)?;
             return Ok(ValueRepr::Scalar(call));
         };
         let args = self.scalar_call_args(
@@ -998,17 +1031,17 @@ impl Builder<'_> {
                 let n = shape.leaf_count();
                 let dests: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
                 let call = self.emit_cur(Inst::CallMulti { dests: dests.clone(), func, args });
-                self.record_call(call, func, &dc);
+                self.record_call(call, func, &dc)?;
                 let leaves: Vec<Idx<Inst>> =
                     dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
                 let mut idx = 0;
                 Ok(self.rebuild_from_leaves(&shape, &leaves, &mut idx))
             }
             None => match &ret_tuple {
-                Some(shape) => Ok(self.emit_tuple_call_tree(func, args, shape, &dc)),
+                Some(shape) => Ok(self.emit_tuple_call_tree(func, args, shape, &dc)?),
                 None => {
                     let call = self.emit_cur(Inst::Call { func, args });
-                    self.record_call(call, func, &dc);
+                    self.record_call(call, func, &dc)?;
                     Ok(ValueRepr::Scalar(call))
                 }
             },
@@ -1036,13 +1069,13 @@ impl Builder<'_> {
         args: Vec<Idx<Inst>>,
         shape: &TupleRetShape,
         dc: &DirectCall,
-    ) -> ValueRepr {
+    ) -> Result<ValueRepr, CompilerError> {
         let dests: Vec<Idx<Cell>> =
             (0..shape.slot_count()).map(|_| self.f.new_cell(None)).collect();
         let call = self.emit_cur(Inst::CallMulti { dests: dests.clone(), func, args });
-        self.record_call(call, func, dc);
+        self.record_call(call, func, dc)?;
         let loads: Vec<Idx<Inst>> = dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
-        self.tuple_result(shape, &loads)
+        Ok(self.tuple_result(shape, &loads))
     }
 
     /// The call-site result for a captured tuple return: the plain
@@ -1155,10 +1188,10 @@ impl Builder<'_> {
             // join forwards that tag rather than minting `true` -- `a?.m()` is
             // absent when either link is.
             return Ok(match dc.plan.ret_tuple().cloned() {
-                Some(shape) => self.emit_tuple_call_tree(func, argv, &shape, &dc),
+                Some(shape) => self.emit_tuple_call_tree(func, argv, &shape, &dc)?,
                 None => {
                     let call = self.emit_cur(Inst::Call { func, args: argv });
-                    self.record_call(call, func, &dc);
+                    self.record_call(call, func, &dc)?;
                     ValueRepr::Scalar(call)
                 }
             });
@@ -1184,7 +1217,7 @@ impl Builder<'_> {
                 let dests: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
                 let call =
                     self.emit_cur(Inst::CallMulti { dests: dests.clone(), func, args: argv });
-                self.record_call(call, func, &dc);
+                self.record_call(call, func, &dc)?;
                 let leaves: Vec<Idx<Inst>> =
                     dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
                 let mut idx = 0;
@@ -1192,7 +1225,7 @@ impl Builder<'_> {
             }
             None => {
                 let call = self.emit_cur(Inst::Call { func, args: argv });
-                self.record_call(call, func, &dc);
+                self.record_call(call, func, &dc)?;
                 Ok(ValueRepr::Scalar(call))
             }
         }

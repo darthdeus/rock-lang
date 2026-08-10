@@ -3944,14 +3944,13 @@ impl JsDelivery<'_> {
         // trampoline's own framed conversion is idempotent over what
         // `convert_closures` already hoisted. Left as one path rather than a
         // branch no fixture can distinguish.
-        if let Err(e) = skull_transform::inline_functions_with_subst_and_plans(
+        if let Err(e) = skull_transform::inline_functions_with_plans(
             self.ws,
             self.scx,
             fr,
             &mut mf,
             &mut self.st.cache,
-            &subst,
-            Some(&self.st.concrete),
+            &self.st.concrete,
         ) {
             self.st.reject(&name, e);
             return Ok(());

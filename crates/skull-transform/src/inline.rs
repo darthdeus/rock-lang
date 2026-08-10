@@ -770,6 +770,33 @@ fn graft_bound_next(bn: &BoundNext, n: &BoundTree) -> Result<BoundNext, Compiler
     }
 }
 
+fn graft_resolved_bound_tree(
+    tree: &skull_mir::bound::ResolvedBoundTree,
+    incoming: &skull_mir::bound::ResolvedBoundTree,
+) -> Result<skull_mir::bound::ResolvedBoundTree, CompilerError> {
+    let mut out = skull_mir::bound::ResolvedBoundTree::default();
+    for (&g, next) in &tree.next {
+        let next = match next {
+            skull_mir::bound::ResolvedBoundNext::Concrete { func, spec, sub } => {
+                skull_mir::bound::ResolvedBoundNext::Concrete {
+                    func: *func,
+                    spec: spec.clone(),
+                    sub: graft_resolved_bound_tree(sub, incoming)?,
+                }
+            }
+            skull_mir::bound::ResolvedBoundNext::CallerGeneric(g) => {
+                incoming.get(*g).cloned().ok_or_else(|| {
+                    CompilerError::new_no_location(format!(
+                        "internal: unresolved concrete `Iterator` bound (generic #{g}) while inlining"
+                    ))
+                })?
+            }
+        };
+        out.next.insert(g, next);
+    }
+    Ok(out)
+}
+
 /// After cloning a callee body into the caller: substitute every cloned
 /// placeholder [`Inst::CallBoundMulti`] with the concrete `next` from the
 /// site's tree, and import the callee's own carried `bound_trees` (keys
@@ -785,46 +812,75 @@ fn resolve_cloned_bound_calls(
     ws: &Workspace,
     scx: &ScalarCtx,
     caller_inf: Option<&BodyInference>,
-    caller_subst: &SpecSubst,
+    caller_subst: Option<&SpecSubst>,
     concrete_plans: Option<&ConcretePlans>,
 ) -> Result<(), CompilerError> {
     let empty = BoundTree::default();
     let n = site_tree.unwrap_or(&empty);
-    let incoming = match site_resolved_tree {
-        Some(tree) => tree.clone(),
-        None => skull_mir::bound::resolve_bound_tree(
-            ws,
-            scx.interner(),
-            caller_inf,
-            caller_subst,
-            n,
-            &Default::default(),
-        )?,
+    let incoming = match (concrete_plans, site_resolved_tree) {
+        (Some(_), Some(tree)) => tree.clone(),
+        (Some(_), None) if n.is_empty() => Default::default(),
+        (Some(_), None) => {
+            return Err(CompilerError::new_no_location(
+                "internal: concrete splice site has no resolved bound plan",
+            ));
+        }
+        (None, Some(tree)) => tree.clone(),
+        (None, None) => {
+            let caller_subst = caller_subst.ok_or_else(|| {
+                CompilerError::new_no_location("legacy inline path has no caller substitution")
+            })?;
+            skull_mir::bound::resolve_bound_tree(
+                ws,
+                scx.interner(),
+                caller_inf,
+                caller_subst,
+                n,
+                &Default::default(),
+            )?
+        }
     };
-    let callee_inf = ws
-        .inference(callee_subject.func.module)
-        .and_then(|result| result.per_fn.get(&BodyOwner::Function(callee_subject.func.func)));
-    let callee_subst = callee_subject.subst(ws, scx.interner());
     let mut resolved_by_old: HashMap<Idx<Inst>, skull_mir::bound::ResolvedBoundTree> =
         HashMap::default();
 
-    for (old_id, tree) in &callee.bound_trees {
-        let new_id = inst_map[old_id];
-        let grafted = graft_bound_tree(tree, n)?;
-        if !grafted.is_empty() {
-            func.bound_trees.insert(new_id, grafted);
+    if concrete_plans.is_some() {
+        for old_id in callee.bound_trees.keys() {
+            let new_id = inst_map[old_id];
+            let resolved = callee.resolved_bound_trees.get(old_id).ok_or_else(|| {
+                CompilerError::new_no_location(format!(
+                    "internal: concrete callee `{}` has a raw bound tree without its resolved plan",
+                    callee.name
+                ))
+            })?;
+            let grafted = graft_resolved_bound_tree(resolved, &incoming)?;
+            if !grafted.is_empty() {
+                func.resolved_bound_trees.insert(new_id, grafted.clone());
+                resolved_by_old.insert(*old_id, grafted);
+            }
         }
-        let resolved = skull_mir::bound::resolve_bound_tree(
-            ws,
-            scx.interner(),
-            callee_inf,
-            &callee_subst,
-            tree,
-            &incoming,
-        )?;
-        if !resolved.is_empty() {
-            func.resolved_bound_trees.insert(new_id, resolved.clone());
-            resolved_by_old.insert(*old_id, resolved);
+    } else {
+        let callee_inf = ws
+            .inference(callee_subject.func.module)
+            .and_then(|result| result.per_fn.get(&BodyOwner::Function(callee_subject.func.func)));
+        let callee_subst = callee_subject.subst(ws, scx.interner());
+        for (old_id, tree) in &callee.bound_trees {
+            let new_id = inst_map[old_id];
+            let grafted = graft_bound_tree(tree, n)?;
+            if !grafted.is_empty() {
+                func.bound_trees.insert(new_id, grafted);
+            }
+            let resolved = skull_mir::bound::resolve_bound_tree(
+                ws,
+                scx.interner(),
+                callee_inf,
+                &callee_subst,
+                tree,
+                &incoming,
+            )?;
+            if !resolved.is_empty() {
+                func.resolved_bound_trees.insert(new_id, resolved.clone());
+                resolved_by_old.insert(*old_id, resolved);
+            }
         }
     }
 
@@ -1047,7 +1103,7 @@ fn splice(
     ws: &Workspace,
     scx: &ScalarCtx,
     caller_inf: Option<&BodyInference>,
-    caller_subst: &SpecSubst,
+    caller_subst: Option<&SpecSubst>,
     concrete_plans: Option<&ConcretePlans>,
 ) -> Result<Vec<Idx<Block>>, CompilerError> {
     match cand.kind {
@@ -1070,7 +1126,7 @@ fn splice_straight(
     ws: &Workspace,
     scx: &ScalarCtx,
     caller_inf: Option<&BodyInference>,
-    caller_subst: &SpecSubst,
+    caller_subst: Option<&SpecSubst>,
     concrete_plans: Option<&ConcretePlans>,
 ) -> Result<(), CompilerError> {
     let callee = &cand.func;
@@ -1164,7 +1220,7 @@ fn splice_general(
     ws: &Workspace,
     scx: &ScalarCtx,
     caller_inf: Option<&BodyInference>,
-    caller_subst: &SpecSubst,
+    caller_subst: Option<&SpecSubst>,
     concrete_plans: Option<&ConcretePlans>,
 ) -> Result<Vec<Idx<Block>>, CompilerError> {
     let callee = &cand.func;
@@ -1288,7 +1344,8 @@ pub fn inline_functions(
     func: &mut MirFunc,
     cache: &mut InlineCache,
 ) -> Result<(HashSet<FuncRef>, Vec<SpliceRecord>), CompilerError> {
-    inline_functions_with_subst_and_plans(ws, scx, self_ref, func, cache, &SpecSubst::default(), None)
+    let subst = SpecSubst::default();
+    inline_functions_inner(ws, scx, self_ref, func, cache, Some(&subst), None)
 }
 
 pub fn inline_functions_with_plans(
@@ -1299,15 +1356,7 @@ pub fn inline_functions_with_plans(
     cache: &mut InlineCache,
     concrete_plans: &ConcretePlans,
 ) -> Result<(HashSet<FuncRef>, Vec<SpliceRecord>), CompilerError> {
-    inline_functions_with_subst_and_plans(
-        ws,
-        scx,
-        self_ref,
-        func,
-        cache,
-        &SpecSubst::default(),
-        Some(concrete_plans),
-    )
+    inline_functions_inner(ws, scx, self_ref, func, cache, None, Some(concrete_plans))
 }
 
 pub fn inline_functions_with_subst(
@@ -1318,7 +1367,7 @@ pub fn inline_functions_with_subst(
     cache: &mut InlineCache,
     caller_subst: &SpecSubst,
 ) -> Result<(HashSet<FuncRef>, Vec<SpliceRecord>), CompilerError> {
-    inline_functions_with_subst_and_plans(ws, scx, self_ref, func, cache, caller_subst, None)
+    inline_functions_inner(ws, scx, self_ref, func, cache, Some(caller_subst), None)
 }
 
 pub fn inline_functions_with_subst_and_plans(
@@ -1328,6 +1377,18 @@ pub fn inline_functions_with_subst_and_plans(
     func: &mut MirFunc,
     cache: &mut InlineCache,
     caller_subst: &SpecSubst,
+    concrete_plans: Option<&ConcretePlans>,
+) -> Result<(HashSet<FuncRef>, Vec<SpliceRecord>), CompilerError> {
+    inline_functions_inner(ws, scx, self_ref, func, cache, Some(caller_subst), concrete_plans)
+}
+
+fn inline_functions_inner(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    self_ref: FuncRef,
+    func: &mut MirFunc,
+    cache: &mut InlineCache,
+    caller_subst: Option<&SpecSubst>,
     concrete_plans: Option<&ConcretePlans>,
 ) -> Result<(HashSet<FuncRef>, Vec<SpliceRecord>), CompilerError> {
     let mut spliced = HashSet::default();

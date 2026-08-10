@@ -807,10 +807,10 @@ pub fn census_detailed(
         // every emitted body takes, against the arena this graph and `scx`
         // share -- there is no second lowering route keyed on a foreign
         // substitution any more.
-        let Some(subst) = g.substitution(inst) else {
+        if g.substitution(inst).is_none() {
             skip(&mut c, BodySkip::NoSubstitution);
             continue;
-        };
+        }
         if !has_lowered_body(ws, inst.func) {
             skip(&mut c, BodySkip::NoLoweredBody);
             continue;
@@ -832,11 +832,10 @@ pub fn census_detailed(
             ws,
             scx,
             inst.func,
-            subst,
             &name,
             &mut mf,
             &mut cache,
-            Some(&bodies.plans),
+            &bodies.plans,
         )
         .is_err()
         {
