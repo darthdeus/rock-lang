@@ -357,7 +357,13 @@ fn an_instantiation_that_returns_after_being_pruned_is_rebuilt_not_reused() {
     assert_eq!(q_bodies(&full.lua).len(), 1, "control: v1 defines the Q instantiation");
 
     let ws2 = crate::common::ws_with_stdlib(&v2);
-    let _ = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "use_it")]);
+    let removal = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "use_it")]);
+    assert_eq!(
+        q_bodies(&removal.lua).len(),
+        0,
+        "the removal overlay must undefine the stranded Q specialization:\n{}",
+        removal.lua
+    );
     let ws3 = crate::common::ws_with_stdlib(&v3);
     let _ = emit_overlay(&ws3, &mut cache, &[body_id(&ws3, "tally_of")]);
 
@@ -380,6 +386,33 @@ fn an_instantiation_that_returns_after_being_pruned_is_rebuilt_not_reused() {
         q_body.contains("MARK2"),
         "the returning instantiation must be REBUILT from the edited generic, not \
          served from the chunk it had before it was pruned:\n{q_body}"
+    );
+}
+
+#[test]
+fn an_overlay_reemits_a_definition_after_a_scalar_abi_width_flip() {
+    let v1 = "value V2 { x: float, y: float }\n\
+              fn foo(v: V2) -> float { v.x }\n\
+              fn other() -> float { foo(V2 { x: 2.0, y: 3.0 }) }\n\
+              fn use_ref() -> float { other() }";
+    let v2 = "value V2 { x: float, y: float }\n\
+              fn foo(v: V2) -> float { v.x }\n\
+              fn other() -> float { foo(V2 { x: 2.0, y: 3.0 }) }\n\
+              fn use_ref() -> float {\n\
+                let f = foo\n\
+                f(V2 { x: 1.0, y: 2.0 })\
+              }";
+    let ws1 = crate::common::ws_with_stdlib(v1);
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (full1, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    assert!(full1.lua.contains("function foo_"), "v1 must emit foo");
+
+    let ws2 = crate::common::ws_with_stdlib(v2);
+    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "use_ref")]);
+    assert!(
+        overlay.lua.contains("function foo_") && overlay.lua.contains("function use_ref"),
+        "the ABI-width flip must re-emit foo and its caller in the overlay:\n{}",
+        overlay.lua
     );
 }
 
