@@ -343,33 +343,23 @@ impl Builder<'_> {
                 // by its literal pairs list -- recognized through the intrinsic
                 // registry off the resolved FuncRef, so no user fn is hijacked by
                 // name and the common non-intrinsic call pays only one field read.
-                Ok(func) if matches!(self.fn_expand_kind(func), Some(ExpandKind::StructPairs)) => {
-                    self.expand_struct_pairs(e, func, &arg_idxs)
-                }
-                Ok(func) if matches!(self.fn_expand_kind(func), Some(ExpandKind::Materialize)) => {
-                    self.expand_materialize(&arg_idxs)
-                }
-                Ok(func)
-                    if matches!(self.fn_expand_kind(func), Some(ExpandKind::ShaderPipeline)) =>
-                {
-                    self.expand_shader_pipeline(e, &arg_idxs)
-                }
-                Ok(func)
-                    if matches!(self.fn_expand_kind(func), Some(ExpandKind::VertexLayout)) =>
-                {
-                    self.expand_vertex_layout(e, func, &arg_idxs)
-                }
-                Ok(func)
-                    if matches!(self.fn_expand_kind(func), Some(ExpandKind::UniformBlock)) =>
-                {
-                    self.expand_uniform_block(e, func, &arg_idxs)
-                }
-                Ok(func)
-                    if matches!(self.fn_expand_kind(func), Some(ExpandKind::UniformValues)) =>
-                {
-                    self.expand_uniform_values(e, func, &arg_idxs)
-                }
-                Ok(func) => self.lower_direct_call_repr(e, func, &arg_idxs, any_named),
+                Ok(func) => match self.fn_expand_kind(func) {
+                    Some(ExpandKind::StructPairs) => self.expand_struct_pairs(e, func, &arg_idxs),
+                    Some(ExpandKind::Materialize) => self.expand_materialize(&arg_idxs),
+                    Some(ExpandKind::ShaderPipeline) => {
+                        self.expand_shader_pipeline(e, &arg_idxs)
+                    }
+                    Some(ExpandKind::VertexLayout) => {
+                        self.expand_vertex_layout(e, func, &arg_idxs)
+                    }
+                    Some(ExpandKind::UniformBlock) => {
+                        self.expand_uniform_block(e, func, &arg_idxs)
+                    }
+                    Some(ExpandKind::UniformValues) => {
+                        self.expand_uniform_values(e, func, &arg_idxs)
+                    }
+                    None => self.lower_direct_call_repr(e, func, &arg_idxs, any_named),
+                },
                 Err(gap_err) => {
                     if !any_named {
                         let arg_vals: Vec<Idx<Inst>> =

@@ -34,6 +34,8 @@ mod coroutine_hook_hoist;
 mod dead_lambda_scope;
 #[path = "embed_scalarize.rs"]
 mod embed_scalarize;
+#[path = "expansion_admission.rs"]
+mod expansion_admission;
 #[path = "enum_cdata.rs"]
 mod enum_cdata;
 #[path = "enum_payload_sroa.rs"]

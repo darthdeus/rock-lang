@@ -2477,11 +2477,11 @@ pub fn gc_value_c_boundary(ws: &Workspace, mid: ModuleId) -> Option<(String, Spa
     None
 }
 
-// -- `@struct_expand` emit-time rejection (docs/shaders.md, Layer 2).
+// -- compile-time expansion admission ---------------------------------------
 // The lowering expander replaces a valid call; this pass is the FATAL gate that
 // rejects an invalid one, since a per-fn lowering error would only be recorded as
-// a lenient skip. Both resolve fields through `struct_expand_variants`, so they
-// never diverge. --
+// a lenient skip. Each call is resolved once here, then its expansion-specific
+// validator owns the predicates shared with lowering.
 
 /// The declaration-order `(field, ty)` list of value struct `name`, else `None`.
 fn resolve_call_fn(
@@ -2499,75 +2499,53 @@ fn resolve_call_fn(
     }
 }
 
-/// Scan module `mid`'s bodies for a `@struct_expand` call that the lowering
-/// expander could not honor: a non-value-struct argument, a field whose type has
-/// no payload-unique variant of the target enum, a field type matching two
-/// variants, or a return type that is not `[(string, <enum>)]`. Returns the first
-/// spanned rejection.
-pub fn struct_expand_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerError> {
-    let module = ws.module(mid);
-    let ir = ws.inference(mid)?;
-    for (owner, body) in module.bodies.iter() {
-        let Some(inf) = ir.per_fn.get(owner) else { continue };
-        for (e, expr) in body.expr_arena.iter() {
-            let Expr::Call { callee: Callee::Unresolved { name, .. }, args } = expr else {
-                continue;
-            };
-            let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else { continue };
-            let f = &ws.module(fmod).functions[fid];
-            if !matches!(crate::intrinsics::expand_kind(f), Some(ExpandKind::StructPairs)) {
-                continue;
-            }
-            let fname = f.name;
-            let call_span = body.expr_spans[e];
-            let reject = |span: Span, msg: String| Some(CompilerError::new_with_label(span, msg));
+fn struct_expand_rejection_for_call(
+    ws: &Workspace,
+    inf: &BodyInference,
+    body: &Body,
+    call: Idx<Expr>,
+    f: &Function,
+    args: &[Idx<Expr>],
+) -> Option<CompilerError> {
+    let fname = f.name;
+    let call_span = body.expr_spans[call];
+    let reject = |span: Span, msg: String| Some(CompilerError::new_with_label(span, msg));
 
-            let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
-            let [arg] = arg_idxs[..] else {
-                return reject(call_span, format!("`@struct_expand` fn `{fname}` takes exactly one argument"));
-            };
-            let arg_span = body.expr_spans[arg];
+    let [arg] = args else {
+        return reject(call_span, format!("`@struct_expand` fn `{fname}` takes exactly one argument"));
+    };
+    let arg_span = body.expr_spans[*arg];
 
-            let Some(enum_name) = f.return_ty.and_then(|ret| pairs_return_enum(ws, ret)) else {
-                return reject(
-                    call_span,
-                    format!(
-                        "`@struct_expand` fn `{fname}` must return `[(string, <enum>)]`, got `{}`",
-                        f.return_ty.map(|r| ws.render(None, r)).unwrap_or_else(|| "()".to_string())
-                    ),
-                );
-            };
+    let Some(enum_name) = f.return_ty.and_then(|ret| pairs_return_enum(ws, ret)) else {
+        return reject(
+            call_span,
+            format!(
+                "`@struct_expand` fn `{fname}` must return `[(string, <enum>)]`, got `{}`",
+                f.return_ty.map(|r| ws.render(None, r)).unwrap_or_else(|| "()".to_string())
+            ),
+        );
+    };
 
-            let struct_name = inf
-                .expr_types
-                .get(arg)
-                .and_then(|t| resolve_tyid(ws, inf, *t))
-                .and_then(|t| match ty_node(ws, inf, t) {
-                    Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. }) => Some(n),
-                    _ => None,
-                });
-            let Some(fields) = struct_name.and_then(|n| value_struct_field_tys(ws, n)) else {
-                return reject(
-                    arg_span,
-                    format!("`@struct_expand` fn `{fname}` argument must be a value struct"),
-                );
-            };
+    let struct_name = inf
+        .expr_types
+        .get(*arg)
+        .and_then(|t| resolve_tyid(ws, inf, *t))
+        .and_then(|t| match ty_node(ws, inf, t) {
+            Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. }) => Some(n),
+            _ => None,
+        });
+    let Some(fields) = struct_name.and_then(|n| value_struct_field_tys(ws, n)) else {
+        return reject(
+            arg_span,
+            format!("`@struct_expand` fn `{fname}` argument must be a value struct"),
+        );
+    };
 
-            if let Err(msg) = struct_expand_variants(ws, enum_name, &fields) {
-                return reject(arg_span, format!("`@struct_expand`: {msg}"));
-            }
-        }
+    if let Err(msg) = struct_expand_variants(ws, enum_name, &fields) {
+        return reject(arg_span, format!("`@struct_expand`: {msg}"));
     }
     None
 }
-
-// -- `@shader_expand` (`rock_shader`) expansion + rejection
-// (docs/shaders.md). A call collapses to the pipeline key const
-// `"<vert>+<frag>"`; the driver (skull::mir_emit) emits one top-level
-// `__rock_shader_register(key, glsl)` per distinct pair. The lowering expander,
-// the fatal rejection gate, and the driver's pair collector all resolve args
-// through `resolve_shader_pair`, so they never diverge. skull-mir stays free of
-// GLSL emission (the layering constraint): only FuncRefs + the key cross up. --
 
 /// A resolved `rock_shader(...)` pipeline. Two forms:
 /// - two-arg `rock_shader(vert, frag)`: `vert = Some(..)`, `key = "<vert>+<frag>"`;
@@ -2676,148 +2654,195 @@ pub fn resolve_shader_pair(
     }
 }
 
-/// Scan module `mid`'s bodies for a `rock_shader` call the lowering expander
-/// could not honor (bad arity, a non-`@shader` / non-direct-reference arg, a
-/// stage mismatch). Returns the first spanned rejection. FATAL gate: a per-fn
-/// lowering error is only a lenient skip, so validation lives here.
-pub fn shader_expand_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerError> {
-    let module = ws.module(mid);
-    let ir = ws.inference(mid)?;
-    for (owner, body) in module.bodies.iter() {
-        let Some(inf) = ir.per_fn.get(owner) else { continue };
-        for (e, expr) in body.expr_arena.iter() {
-            let Expr::Call { callee: Callee::Unresolved { name, .. }, args } = expr else {
-                continue;
-            };
-            let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else { continue };
-            if !matches!(
-                crate::intrinsics::expand_kind(&ws.module(fmod).functions[fid]),
-                Some(ExpandKind::ShaderPipeline)
-            ) {
-                continue;
-            }
-            let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
-            if let Err(err) = resolve_shader_pair(ws, body, e, &arg_idxs) {
-                return Some(err);
-            }
-        }
-    }
-    None
+fn shader_expand_rejection_for_call(
+    ws: &Workspace,
+    body: &Body,
+    call: Idx<Expr>,
+    args: &[Idx<Expr>],
+) -> Option<CompilerError> {
+    resolve_shader_pair(ws, body, call, args).err()
 }
 
 /// Emit-time validation for `@uniform_expand` calls. Shares both rejection
 /// messages with the expander, so the two cannot diverge on what they accept.
-pub fn uniform_expand_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerError> {
-    let module = ws.module(mid);
-    let ir = ws.inference(mid)?;
-    for (owner, body) in module.bodies.iter() {
-        let Some(inf) = ir.per_fn.get(owner) else { continue };
-        for (e, expr) in body.expr_arena.iter() {
-            let Expr::Call { callee: Callee::Unresolved { name, .. }, args } = expr else {
-                continue;
-            };
-            let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else { continue };
-            let f = &ws.module(fmod).functions[fid];
-            if !matches!(crate::intrinsics::expand_kind(f), Some(ExpandKind::UniformBlock)) {
-                continue;
-            }
-            let fname = f.name;
-            let reject = |span: Span, msg: String| Some(CompilerError::new_with_label(span, msg));
+fn uniform_expand_rejection_for_call(
+    ws: &Workspace,
+    inf: &BodyInference,
+    body: &Body,
+    call: Idx<Expr>,
+    f: &Function,
+    args: &[Idx<Expr>],
+) -> Option<CompilerError> {
+    let fname = f.name;
+    let reject = |span: Span, msg: String| Some(CompilerError::new_with_label(span, msg));
 
-            let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
-            // Both accepted shapes end in the uniform group: the 3-arg packer
-            // and the 1-arg fingerprint. Shares the expander's predicates so a
-            // validator cannot accept more than the expander does.
-            let u = match arg_idxs[..] {
-                [u] => u,
-                [_, _, u] => u,
-                _ => return reject(body.expr_spans[e], uniform_expand_arity_msg(fname)),
-            };
-            // The validator has no active specialization, so an unsubstituted
-            // generic reads as "not a value struct" here -- which is the right
-            // answer either way: the layout is derived from a concrete type.
-            let Some(sname) = value_struct_name_at(ws, inf, u) else {
-                return reject(body.expr_spans[u], uniform_expand_arg_msg(fname));
-            };
-            if let Err(msg) = uniform_block_checked(ws, sname) {
-                return reject(body.expr_spans[u], format!("`@uniform_expand`: {msg}"));
-            }
-        }
+    // Both accepted shapes end in the uniform group: the 3-arg packer and the
+    // 1-arg fingerprint. Shares the expander's predicates so a validator
+    // cannot accept more than the expander does.
+    let u = match args {
+        [u] => *u,
+        [_, _, u] => *u,
+        _ => return reject(body.expr_spans[call], uniform_expand_arity_msg(fname)),
+    };
+    // The validator has no active specialization, so an unsubstituted generic
+    // reads as "not a value struct" here -- which is the right answer either
+    // way: the layout is derived from a concrete type.
+    let Some(sname) = value_struct_name_at(ws, inf, u) else {
+        return reject(body.expr_spans[u], uniform_expand_arg_msg(fname));
+    };
+    if let Err(msg) = uniform_block_checked(ws, sname) {
+        return reject(body.expr_spans[u], format!("`@uniform_expand`: {msg}"));
     }
     None
 }
 
-/// Emit-time validation for `@uniform_values`: the call must have one concrete
-/// uniform group and the declared result must be the compiler-owned canonical
-/// packet shape. Lowering repeats these predicates for the active specialization.
-pub fn uniform_values_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerError> {
-    let module = ws.module(mid);
-    let ir = ws.inference(mid)?;
-    for (owner, body) in module.bodies.iter() {
-        let Some(inf) = ir.per_fn.get(owner) else { continue };
-        for (e, expr) in body.expr_arena.iter() {
-            let Expr::Call { callee: Callee::Unresolved { name, .. }, args } = expr else {
-                continue;
-            };
-            let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else { continue };
-            let f = &ws.module(fmod).functions[fid];
-            if !matches!(crate::intrinsics::expand_kind(f), Some(ExpandKind::UniformValues)) {
-                continue;
-            }
-            let fname = f.name;
-            let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
-            let [u] = arg_idxs[..] else {
-                return Some(CompilerError::new_with_label(
-                    body.expr_spans[e],
-                    format!("`@uniform_values` fn `{fname}` takes exactly one uniform group"),
-                ));
-            };
-            let Some(sname) = value_struct_name_at(ws, inf, u) else {
-                return Some(CompilerError::new_with_label(
-                    body.expr_spans[u],
-                    format!("`@uniform_values` fn `{fname}`'s argument must be a concrete value struct"),
-                ));
-            };
-            if let Err(msg) = uniform_semantic_checked(ws, sname) {
-                return Some(CompilerError::new_with_label(
-                    body.expr_spans[u],
-                    format!("`@uniform_values`: {msg}"),
-                ));
-            }
-            let Some(&ret_ty) = inf.expr_types.get(e) else {
-                return Some(CompilerError::new_with_label(
-                    body.expr_spans[e],
-                    format!("`@uniform_values` fn `{fname}` has no inferred packet result"),
-                ));
-            };
-            let Some(ret_ty) = resolve_tyid(ws, inf, ret_ty) else {
-                return Some(CompilerError::new_with_label(
-                    body.expr_spans[e],
-                    format!("`@uniform_values` fn `{fname}` has no concrete packet result"),
-                ));
-            };
-            let Some(TypeExpr::App { ctor: TypeCtor::Nominal(block_name), .. }) = static_ty(ws, ret_ty) else {
-                return Some(CompilerError::new_with_label(
-                    body.expr_spans[e],
-                    format!("`@uniform_values` fn `{fname}` must return the canonical packet struct"),
-                ));
-            };
-            if let Err(msg) = uniform_values_return_shape(ws, block_name) {
-                return Some(CompilerError::new_with_label(
-                    body.expr_spans[e],
-                    format!("`@uniform_values`: {msg}"),
-                ));
-            }
-        }
+fn uniform_values_rejection_for_call(
+    ws: &Workspace,
+    inf: &BodyInference,
+    body: &Body,
+    call: Idx<Expr>,
+    f: &Function,
+    args: &[Idx<Expr>],
+) -> Option<CompilerError> {
+    let fname = f.name;
+    let [u] = args else {
+        return Some(CompilerError::new_with_label(
+            body.expr_spans[call],
+            format!("`@uniform_values` fn `{fname}` takes exactly one uniform group"),
+        ));
+    };
+    let u = *u;
+    let Some(sname) = value_struct_name_at(ws, inf, u) else {
+        return Some(CompilerError::new_with_label(
+            body.expr_spans[u],
+            format!("`@uniform_values` fn `{fname}`'s argument must be a concrete value struct"),
+        ));
+    };
+    if let Err(msg) = uniform_semantic_checked(ws, sname) {
+        return Some(CompilerError::new_with_label(
+            body.expr_spans[u],
+            format!("`@uniform_values`: {msg}"),
+        ));
+    }
+    let Some(&ret_ty) = inf.expr_types.get(call) else {
+        return Some(CompilerError::new_with_label(
+            body.expr_spans[call],
+            format!("`@uniform_values` fn `{fname}` has no inferred packet result"),
+        ));
+    };
+    let Some(ret_ty) = resolve_tyid(ws, inf, ret_ty) else {
+        return Some(CompilerError::new_with_label(
+            body.expr_spans[call],
+            format!("`@uniform_values` fn `{fname}` has no concrete packet result"),
+        ));
+    };
+    let Some(TypeExpr::App { ctor: TypeCtor::Nominal(block_name), .. }) = static_ty(ws, ret_ty) else {
+        return Some(CompilerError::new_with_label(
+            body.expr_spans[call],
+            format!("`@uniform_values` fn `{fname}` must return the canonical packet struct"),
+        ));
+    };
+    if let Err(msg) = uniform_values_return_shape(ws, block_name) {
+        return Some(CompilerError::new_with_label(
+            body.expr_spans[call],
+            format!("`@uniform_values`: {msg}"),
+        ));
     }
     None
 }
 
 /// Emit-time validation for `@vertex_expand` calls: misuse is a spanned
 /// compile error, never a call that reaches the fn's error body.
-pub fn vertex_expand_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerError> {
+fn vertex_expand_rejection_for_call(
+    ws: &Workspace,
+    inf: &BodyInference,
+    body: &Body,
+    call: Idx<Expr>,
+    f: &Function,
+    args: &[Idx<Expr>],
+) -> Option<CompilerError> {
+    let fname = f.name;
+    let call_span = body.expr_spans[call];
+    let reject = |span: Span, msg: String| Some(CompilerError::new_with_label(span, msg));
+
+    let [arg] = args else {
+        return reject(
+            call_span,
+            format!("`@vertex_expand` fn `{fname}` takes exactly one argument"),
+        );
+    };
+    let arg = *arg;
+
+    if f.return_ty.and_then(|r| vertex_expand_return(ws, r)).is_none() {
+        return reject(call_span, vertex_expand_ret_msg(ws, fname, f.return_ty));
+    }
+    let Some(elem) = flat_elem_of(ws, inf, arg) else {
+        return reject(body.expr_spans[arg], vertex_expand_arg_msg(fname));
+    };
+    // The derivation and both float-unit rejections, at validation time rather
+    // than only at lowering -- so a bad layout is reported even when the call
+    // sits in a body that is never emitted.
+    let plan = match crate::vertex_plan::vertex_plan(ws, elem) {
+        Ok(p) => p,
+        Err(err) => {
+            return reject(
+                body.expr_spans[arg],
+                format!("`@vertex_expand`: {}", err.message),
+            )
+        }
+    };
+    if let Err(msg) = plan.float_unit_stride().and_then(|_| plan.float_unit_sizes()) {
+        return reject(body.expr_spans[arg], format!("`@vertex_expand`: {msg}"));
+    }
+    None
+}
+
+struct ExpansionRejections {
+    struct_pairs: Option<CompilerError>,
+    shader_pipeline: Option<CompilerError>,
+    vertex_layout: Option<CompilerError>,
+    uniform_block: Option<CompilerError>,
+    uniform_values: Option<CompilerError>,
+}
+
+impl ExpansionRejections {
+    fn record(&mut self, kind: ExpandKind, rejection: Option<CompilerError>) {
+        let Some(rejection) = rejection else { return };
+        let slot = match kind {
+            ExpandKind::StructPairs => &mut self.struct_pairs,
+            ExpandKind::ShaderPipeline => &mut self.shader_pipeline,
+            ExpandKind::VertexLayout => &mut self.vertex_layout,
+            ExpandKind::UniformBlock => &mut self.uniform_block,
+            ExpandKind::UniformValues => &mut self.uniform_values,
+            ExpandKind::Materialize => return,
+        };
+        if slot.is_none() {
+            *slot = Some(rejection);
+        }
+    }
+
+    fn finish(self) -> Option<CompilerError> {
+        self.shader_pipeline
+            .or(self.struct_pairs)
+            .or(self.vertex_layout)
+            .or(self.uniform_block)
+            .or(self.uniform_values)
+    }
+}
+
+/// Scan module `mid` once for every direct expansion call. The first rejection
+/// is retained per expansion category, then the categories are applied in the
+/// historical priority order rather than in lexical order.
+pub fn expansion_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerError> {
     let module = ws.module(mid);
     let ir = ws.inference(mid)?;
+    let mut rejections = ExpansionRejections {
+        struct_pairs: None,
+        shader_pipeline: None,
+        vertex_layout: None,
+        uniform_block: None,
+        uniform_values: None,
+    };
     for (owner, body) in module.bodies.iter() {
         let Some(inf) = ir.per_fn.get(owner) else { continue };
         for (e, expr) in body.expr_arena.iter() {
@@ -2826,45 +2851,30 @@ pub fn vertex_expand_rejection(ws: &Workspace, mid: ModuleId) -> Option<Compiler
             };
             let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else { continue };
             let f = &ws.module(fmod).functions[fid];
-            if !matches!(crate::intrinsics::expand_kind(f), Some(ExpandKind::VertexLayout)) {
-                continue;
-            }
-            let fname = f.name;
-            let call_span = body.expr_spans[e];
-            let reject = |span: Span, msg: String| Some(CompilerError::new_with_label(span, msg));
-
+            let Some(kind) = crate::intrinsics::expand_kind(f) else { continue };
             let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
-            let [arg] = arg_idxs[..] else {
-                return reject(
-                    call_span,
-                    format!("`@vertex_expand` fn `{fname}` takes exactly one argument"),
-                );
-            };
-
-            if f.return_ty.and_then(|r| vertex_expand_return(ws, r)).is_none() {
-                return reject(call_span, vertex_expand_ret_msg(ws, fname, f.return_ty));
-            }
-            let Some(elem) = flat_elem_of(ws, inf, arg) else {
-                return reject(body.expr_spans[arg], vertex_expand_arg_msg(fname));
-            };
-            // The derivation and both float-unit rejections, at validation time
-            // rather than only at lowering -- so a bad layout is reported even
-            // when the call sits in a body that never gets emitted.
-            let plan = match crate::vertex_plan::vertex_plan(ws, elem) {
-                Ok(p) => p,
-                Err(err) => {
-                    return reject(
-                        body.expr_spans[arg],
-                        format!("`@vertex_expand`: {}", err.message),
-                    )
+            let rejection = match kind {
+                ExpandKind::StructPairs => {
+                    struct_expand_rejection_for_call(ws, inf, body, e, f, &arg_idxs)
                 }
+                ExpandKind::ShaderPipeline => {
+                    shader_expand_rejection_for_call(ws, body, e, &arg_idxs)
+                }
+                ExpandKind::VertexLayout => {
+                    vertex_expand_rejection_for_call(ws, inf, body, e, f, &arg_idxs)
+                }
+                ExpandKind::UniformBlock => {
+                    uniform_expand_rejection_for_call(ws, inf, body, e, f, &arg_idxs)
+                }
+                ExpandKind::UniformValues => {
+                    uniform_values_rejection_for_call(ws, inf, body, e, f, &arg_idxs)
+                }
+                ExpandKind::Materialize => None,
             };
-            if let Err(msg) = plan.float_unit_stride().and_then(|_| plan.float_unit_sizes()) {
-                return reject(body.expr_spans[arg], format!("`@vertex_expand`: {msg}"));
-            }
+            rejections.record(kind, rejection);
         }
     }
-    None
+    rejections.finish()
 }
 
 /// Every distinct `rock_shader` pair across the workspace, deduped by key and
