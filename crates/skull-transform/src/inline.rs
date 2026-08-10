@@ -1370,18 +1370,6 @@ pub fn inline_functions_with_subst(
     inline_functions_inner(ws, scx, self_ref, func, cache, Some(caller_subst), None)
 }
 
-pub fn inline_functions_with_subst_and_plans(
-    ws: &Workspace,
-    scx: &ScalarCtx,
-    self_ref: FuncRef,
-    func: &mut MirFunc,
-    cache: &mut InlineCache,
-    caller_subst: &SpecSubst,
-    concrete_plans: Option<&ConcretePlans>,
-) -> Result<(HashSet<FuncRef>, Vec<SpliceRecord>), CompilerError> {
-    inline_functions_inner(ws, scx, self_ref, func, cache, Some(caller_subst), concrete_plans)
-}
-
 fn inline_functions_inner(
     ws: &Workspace,
     scx: &ScalarCtx,

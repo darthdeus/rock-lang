@@ -41,7 +41,7 @@ pub use closure::{convert_closures, convert_closures_framed, FrameInfo};
 pub use forl::recover_counted_loops;
 pub use inline::{
     fn_has_bounds, inline_functions, inline_functions_with_plans,
-    inline_functions_with_subst, inline_functions_with_subst_and_plans,
+    inline_functions_with_subst,
     validate_no_residual_bound_calls,
     InlineCache, SpliceRecord,
 };
