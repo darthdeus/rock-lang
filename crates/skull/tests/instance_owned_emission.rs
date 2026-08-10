@@ -281,6 +281,7 @@ fn main() {
     let defs = definition_symbols(&emit.lua);
     let mut checked_transitive_leaf = false;
     let mut retained_without_definition = 0;
+    let mut checked_residual_calls = 0;
     for inst in &view.instances {
         let sym = view.symbols.get(inst).expect("every retained instance has a symbol");
         if !defs.contains(sym) {
@@ -291,6 +292,21 @@ fn main() {
             assert!(defs.contains(sym), "the transitively reached leaf was not delivered: `{sym}`");
         }
     }
+    for caller in &defs {
+        let body = function_body(&emit.lua, caller);
+        for (inst, sym) in &view.symbols {
+            if !view.instances.contains(inst) {
+                continue;
+            }
+            if body.contains(&format!("{sym}(")) {
+                checked_residual_calls += 1;
+                assert!(
+                    defs.contains(sym),
+                    "a residual call names Rock instance `{sym}` without an emitted definition"
+                );
+            }
+        }
+    }
     assert!(
         checked_transitive_leaf,
         "fixture defect: the transitively-reached leaf was not retained at all"
@@ -298,6 +314,10 @@ fn main() {
     assert!(
         retained_without_definition > 0,
         "the fixture did not expose the retention/delivery distinction"
+    );
+    assert!(
+        checked_residual_calls > 0,
+        "fixture defect: no retained Rock call crossed a residual emission boundary"
     );
 
     // A boundary (`print`) is retained as a boundary, never as a Rock

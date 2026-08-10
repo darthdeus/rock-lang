@@ -1,6 +1,7 @@
 //! Target-neutral shader populations realized from the shared instance graph.
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use skull_mir::mir::FuncRef;
 use skull_mir::shader_ir::ShaderStage;
@@ -34,7 +35,7 @@ pub struct ShaderStageView {
 pub struct ShaderProgramView {
     pub program: ShaderProgram,
     pub stages: Vec<ShaderStageView>,
-    pub concrete_plans: ConcretePlans,
+    pub concrete_plans: Arc<ConcretePlans>,
 }
 
 /// The graph-owned population for an explicit-root GLSL function library.
@@ -48,5 +49,5 @@ pub struct ShaderLibraryView {
     pub builtins: BTreeSet<Instance>,
     pub order: Vec<Instance>,
     pub dependencies: Vec<FuncRef>,
-    pub concrete_plans: ConcretePlans,
+    pub concrete_plans: Arc<ConcretePlans>,
 }

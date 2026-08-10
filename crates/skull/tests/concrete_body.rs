@@ -511,6 +511,48 @@ fn main() { print("{startup}") }
     let _ = owner;
 }
 
+#[test]
+fn always_emitted_plan_retains_a_failed_callee_site() {
+    let ws = check(
+        r#"
+fn pick<T>() -> int { return 1 }
+global G: int = pick()
+fn main() { let x = G }
+"#,
+    );
+    let user_mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
+    let roots = skull::mir_emit::emission_roots(&ws, Some("<project>"));
+    let mut g = instance_graph::build(&ws, roots, false);
+    let bodies = concrete_body::build(&ws, &mut g);
+    let (owner, plan) = bodies
+        .always_plans
+        .iter()
+        .find(|(owner, _)| {
+            matches!(
+                owner,
+                skull_mir::concrete::ConcreteOwner::Global { module, .. } if *module == user_mid
+            )
+        })
+        .expect("global has no concrete plan");
+    assert_eq!(plan.callees.len(), 0, "failed call was fabricated as resolved");
+    assert_eq!(plan.failed_sites.len(), 1, "failed site was dropped from the plan");
+    assert_eq!(plan.failed_sites.values().next(), Some(&"unconstrained-type-var"));
+    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let err = skull_mir::lower::lower_global_with_plans(
+        &ws,
+        &scx,
+        plan,
+        &bodies.plans,
+        Ustr::from("__test_ginit"),
+    )
+    .expect_err("lowering ignored the graph's failed always-emitted site");
+    assert!(
+        err.message.contains("unresolved callee site"),
+        "failed site lost its lowering diagnostic: {err:?}"
+    );
+    let _ = owner;
+}
+
 /// Every instance the walk EXPANDED gets a body, and every one of its slots is
 /// concrete. The denominator is stated: zero free types over zero examined
 /// slots would be no evidence at all.

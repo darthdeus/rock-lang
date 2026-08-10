@@ -25,6 +25,7 @@
 //! is why shader decisions may not reach CPU admission.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::Arc;
 
 use bone_semantic::inference::Workspace;
 use skull_codegen_glsl::GlslProfile;
@@ -200,7 +201,7 @@ pub fn realize_shader_with_context(
     }
 
     let mut program_views = Vec::with_capacity(req.programs.len());
-    let concrete_plans = skull_graph::concrete_body::build(ws, g).plans;
+    let concrete_plans = Arc::new(skull_graph::concrete_body::build(ws, g).plans);
     for program in req.programs {
         let entry_of = |r: FuncRef| -> Option<&Instance> {
             let key = DeclKey(skull_mir::lower::canonical_variant(ws, r));
@@ -228,7 +229,7 @@ pub fn realize_shader_with_context(
         program_views.push(ShaderProgramView {
             program: *program,
             stages,
-            concrete_plans: concrete_plans.clone(),
+            concrete_plans: Arc::clone(&concrete_plans),
         });
     }
 

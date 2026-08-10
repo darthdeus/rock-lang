@@ -84,6 +84,9 @@ pub struct ConcreteBodyPlan {
     /// Concrete signatures for the same resolved sites, including boundaries
     /// whose body is supplied by the target rather than lowered here.
     pub callee_signatures: BTreeMap<Site, ConcreteSignature>,
+    /// Sites the graph visited but could not resolve. Keeping these distinct
+    /// from absent entries lets lowering report a planned failure at the site.
+    pub failed_sites: BTreeMap<Site, &'static str>,
     pub bound_tree: ResolvedBoundTree,
 }
 

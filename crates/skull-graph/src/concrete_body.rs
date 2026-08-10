@@ -848,6 +848,15 @@ fn concrete_plan(
         callee_signatures.insert(site.clone(), concrete_signature(ws, g, &instance, &subst)?);
         callees.insert(site, instance);
     }
+    let failed_sites = g
+        .sites_of(inst)
+        .into_iter()
+        .flat_map(|sites| sites.iter())
+        .filter_map(|(site, record)| match &record.outcome {
+            SiteOutcome::Failed(reason) => Some((site.clone(), *reason)),
+            SiteOutcome::Resolved(_) => None,
+        })
+        .collect();
     let ty_types = concrete_ty_types(ws, g, inf, subst)?;
     let struct_field_types = concrete_struct_field_types(ws, g, hir_body, &body.expr_types)?;
     let default_domains = g
@@ -869,6 +878,7 @@ fn concrete_plan(
         signature: concrete_signature(ws, g, inst, subst)?,
         callees,
         callee_signatures,
+        failed_sites,
         bound_tree: g.bound_tree(inst).map_or_else(Default::default, |tree| tree.to_resolved()),
     })
 }
@@ -894,14 +904,20 @@ fn concrete_always_plan(
         .ok_or(MonoTyReason::NoNode)?;
     let mut callees = BTreeMap::new();
     let mut callee_signatures = BTreeMap::new();
+    let mut failed_sites = BTreeMap::new();
     for (site, record) in &contribution.always_call_sites {
-        if let SiteOutcome::Resolved(instance) = &record.outcome {
-            let subst = g.substitution(instance).cloned().ok_or(MonoTyReason::NoNode)?;
-            callee_signatures.insert(
-                site.clone(),
-                concrete_signature(ws, g, instance, &subst)?,
-            );
-            callees.insert(site.clone(), instance.clone());
+        match &record.outcome {
+            SiteOutcome::Resolved(instance) => {
+                let subst = g.substitution(instance).cloned().ok_or(MonoTyReason::NoNode)?;
+                callee_signatures.insert(
+                    site.clone(),
+                    concrete_signature(ws, g, instance, &subst)?,
+                );
+                callees.insert(site.clone(), instance.clone());
+            }
+            SiteOutcome::Failed(reason) => {
+                failed_sites.insert(site.clone(), *reason);
+            }
         }
     }
     let default_domains = contribution.struct_default_domains.iter().cloned();
@@ -945,6 +961,7 @@ fn concrete_always_plan(
         signature,
         callees,
         callee_signatures,
+        failed_sites,
         bound_tree: Default::default(),
     }))
 }

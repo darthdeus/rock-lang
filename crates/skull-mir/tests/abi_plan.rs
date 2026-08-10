@@ -141,6 +141,7 @@ fn main() {
         signature: ConcreteSignature { params: vec![v2], result: Some(v2) },
         callees: Default::default(),
         callee_signatures: Default::default(),
+        failed_sites: Default::default(),
         bound_tree: Default::default(),
     };
     let abi = BackendFnAbiPlan::for_concrete_plan(&ws, &scx, &plan);

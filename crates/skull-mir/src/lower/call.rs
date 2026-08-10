@@ -43,6 +43,11 @@ impl Builder<'_> {
             expr: e,
             op,
         };
+        if let Some(reason) = plan.failed_sites.get(&site) {
+            return Err(self.gap_here(format!(
+                "concrete plan records an unresolved callee site: {reason}"
+            )));
+        }
         plan.callees.get(&site).cloned().map(Some).ok_or_else(|| {
             gap(format!(
                 "concrete plan is missing callee identity for site {:?}",
