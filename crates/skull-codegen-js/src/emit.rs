@@ -2899,7 +2899,9 @@ fn assemble_program_core(
                 scx.interner(),
             );
             let mut findings: Vec<CompilerError> = Vec::new();
-            findings.extend((JsReach { ws, scx, st: &mut st }).discover(&ctx, &mf)?);
+            findings.extend(
+                JsDelivery { ws, scx, st: &mut st }.schedule_body(&ctx, &mf)?,
+            );
             match merge_findings(findings) {
                 Some(e) => st.reject(&deco_name, e),
                 None => deco_bodies.push((deco_name, mf)),
@@ -3451,12 +3453,14 @@ struct WorklistState {
     seen: HashSet<FuncRef>,
     lowered: Vec<(FuncRef, MirFunc)>,
     /// Standalone specialized copies, one per distinct `(callee, instantiation)`
-    /// a body's `spec_bindings` still asks for after inlining.
+    /// a body's `spec_bindings` still asks for after inlining. This is DELIVERY
+    /// work, not instance discovery: every entry must already be in the graph
+    /// view's retained population.
     spec_lowered: Vec<(Instance, MirFunc)>,
-    spec_queue: Vec<skull_mir::bound::SpecDemand>,
-    /// The bound-conformance tree each demanded specialization is emitted under,
-    /// with the agreement check over the graph-owned tree facts.
-    spec_trees: skull_mir::bound::DemandMap,
+    standalone_specs: Vec<Instance>,
+    standalone_seen: HashSet<Instance>,
+    view_instances: BTreeSet<Instance>,
+    bound_tree_disagreements: HashSet<Instance>,
     graph_trees: HashMap<Instance, skull_mir::bound::ResolvedBoundTree>,
     /// `inline(js)` callees, emitted verbatim (their raw JS body, not MIR-lowered).
     inline_js: Vec<JsInlineBody>,
@@ -3516,6 +3520,10 @@ impl WorklistState {
             .bound_trees()
             .map(|(inst, tree)| (inst.clone(), tree.to_resolved()))
             .collect();
+        let bound_tree_disagreements = graph
+            .bound_tree_disagreements()
+            .map(|finding| finding.instance)
+            .collect();
         let mut queue = Vec::new();
         let mut seen = HashSet::new();
         let mut inline_js = Vec::new();
@@ -3546,7 +3554,10 @@ impl WorklistState {
             .map(|(inst, realized)| (inst.clone(), realized.decl))
             .collect();
         Ok(WorklistState {
-            spec_trees: Default::default(),
+            standalone_specs: Vec::new(),
+            standalone_seen: HashSet::new(),
+            view_instances: view.instances.clone(),
+            bound_tree_disagreements,
             graph_trees,
             cache: skull_transform::InlineCache::default(),
             names,
@@ -3554,7 +3565,6 @@ impl WorklistState {
             seen,
             lowered: Vec::new(),
             spec_lowered: Vec::new(),
-            spec_queue: Vec::new(),
             inline_js,
             state_index: build_state_index(ws),
             nobox_leaf_globals: build_nobox_leaf_globals(ws),
@@ -3685,91 +3695,22 @@ fn collect_spec_bound_calls(
     Ok(())
 }
 
-/// A unit of JS reachability work. The search walks TWO node kinds -- a
-/// plain-Rock fn to lower, and a module global whose initializer must be emitted
-/// -- and either can discover the other, which is why the shared driver is
-/// generic over its node type instead of walking bare `FuncRef`s.
-///
-/// A ginit is keyed by NAME only: `state_index` is the single map from a global's
-/// name to its definition site, so the site is derivable and the name is what
-/// `ginit_seen` already dedupes on.
-#[derive(Clone, PartialEq, Eq, Hash)]
-enum JsNode {
-    Fn(FuncRef),
-    Ginit(ustr::Ustr),
-    /// One `(callee, instantiation)` the lowerer specialized and the inliner did
-    /// not splice. Its own node because a specialized body is lowered under its
-    /// substitution and can therefore reach callees, globals and FURTHER
-    /// specializations that no shared body mentions.
-    Spec(Instance),
-}
-
-/// The JS half of [`skull_mir::reach`]: roots and successors, with cycles
-/// allowed (mutual recursion is ordinary Rock) and no leaf class.
-///
-/// JS has no leaves at the node level because it filters them one step earlier,
-/// at EDGE discovery: graph discovery must classify an intrinsic / host-mapped
-/// / `inline(js)` callee anyway in order to REGISTER it (a bare name, a verbatim
-/// co-emission), so a non-expandable callee never becomes a node in the first
-/// place. GLSL, which registers nothing, filters at the node instead. The trait
-/// serves both; `is_leaf` is the hook for the latter shape.
-struct JsReach<'a> {
+/// The backend-local delivery scheduler. Logical instances, selected
+/// declarations and symbols come from `ArtifactView`; this type only lowers
+/// retained declarations, follows post-inline residual calls, and emits the
+/// global/opaque bodies those definitions still require.
+struct JsDelivery<'a> {
     ws: &'a Workspace,
     scx: &'a skull_mir::lower::ScalarCtx,
     st: &'a mut WorklistState,
 }
 
-impl JsReach<'_> {
-    /// Everything `discover_*`/the root seeding has queued since the last drain,
-    /// as nodes. Both queues are emptied: the driver owns the traversal from here.
-    fn take_pending(&mut self) -> Vec<JsNode> {
-        let mut out: Vec<JsNode> = std::mem::take(&mut self.st.queue).into_iter().map(JsNode::Fn).collect();
-        out.extend(
-            std::mem::take(&mut self.st.ginit_queue).into_iter().map(|(gname, _)| JsNode::Ginit(gname)),
-        );
-        // The SAME admissibility oracle the Lua walk and the instance graph
-        // read. Without it this queue drains a changing-instance recursion
-        // forever: every demand names a strictly deeper instantiation, so each
-        // node is distinct and the walk's dedup never fires. Lua rejected and JS
-        // HUNG -- a rejection added to one emitter leaves the sibling on the
-        // default, and here the default was non-termination rather than a wrong
-        // answer.
-        for d in std::mem::take(&mut self.st.spec_queue) {
-            let args = d.inst.arg_types(self.scx.interner());
-            match skull_mir::monoty::too_deep_to_instantiate(args.iter()) {
-                Some(at) => {
-                    let f = &self.ws.module(d.inst.func.module).functions[d.inst.func.func];
-                    let at = at.render();
-                    self.st.reject(
-                        &f.name.to_string(),
-                        CompilerError::new_with_label(
-                            f.name_span,
-                            format!(
-                                "polymorphic recursion: instantiating `{}` at `{at}` exceeds \
-                                 the instantiation depth limit of {}. A recursive call whose \
-                                 type arguments GROW never terminates -- each call needs a new \
-                                 body -- so it is rejected rather than expanded. Same-instance \
-                                 recursion (type arguments unchanged) is unaffected.",
-                                f.name,
-                                skull_mir::monoty::MAX_INSTANTIATION_DEPTH,
-                            ),
-                        ),
-                    );
-                }
-                None => out.push(JsNode::Spec(d.inst)),
-            }
-        }
-        out
-    }
-
+impl JsDelivery<'_> {
     /// Lower + transform one fn through the same per-body pipeline the luajit
     /// path runs (lower -> inline -> cleanup -> closures -> FORL -> residual-
     /// bound-call validation; coroutines skip inline/FORL), then record it.
-    /// A rejected body is RECORDED and the walk continues (an `Err` return means
-    /// abort the whole emission -- reserved for the decorator-application signal
-    /// [`JsReach::discover`] describes). Its callees are still discovered, which
-    /// is what makes the sibling definitions behind it visible at all; the body
-    /// itself is not recorded as lowered, so it contributes no JS.
+    /// A rejected body is recorded and delivery continues; its residual facts
+    /// are still scheduled so a sibling definition is not hidden by the error.
     fn visit_fn(&mut self, fr: FuncRef) -> Result<(), CompilerError> {
         let f = &self.ws.module(fr.module).functions[fr.func];
         let name = self
@@ -3816,7 +3757,7 @@ impl JsReach<'_> {
             &incoming,
             self.scx.interner(),
         );
-        findings.extend(self.discover(&ctx, &mf)?);
+        findings.extend(self.schedule_body(&ctx, &mf)?);
         match merge_findings(findings) {
             Some(e) => self.st.reject(&name, e),
             None => self.st.lowered.push((fr, mf)),
@@ -3824,13 +3765,54 @@ impl JsReach<'_> {
         Ok(())
     }
 
-    /// Lower one standalone specialized copy of `fr` at `key`, under the name its
-    /// call sites already target. The luajit sibling is
-    /// `skull::mir_emit::emit_specialized_callees`; the only difference is that
-    /// the driver here is the reachability walk rather than a private worklist,
-    /// because JS emits a closure rather than whole modules and a specialized
-    /// body's callees and globals must join that closure.
-    fn visit_spec(&mut self, inst: Instance) -> Result<(), CompilerError> {
+    /// Lower one standalone specialized copy already retained by the graph and
+    /// required by a post-inline residual call. The view supplies identity,
+    /// declaration and symbol; this method only performs delivery lowering.
+    fn lower_standalone(&mut self, inst: Instance) -> Result<(), CompilerError> {
+        if !self.st.view_instances.contains(&inst) {
+            self.st.reject(
+                &format!("instance:{:?}", inst.func),
+                err("JS: a residual specialization is absent from the artifact view"),
+            );
+            return Ok(());
+        }
+        if self.st.bound_tree_disagreements.contains(&inst) {
+            let f = &self.ws.module(inst.func.module).functions[inst.func.func];
+            let name = inst.symbol(self.ws, self.scx.interner());
+            self.st.reject(
+                &name,
+                CompilerError::new_with_label(
+                    f.name_span,
+                    format!(
+                        "internal: two call sites demand `{name}` with different `Iterator` \
+                         bound resolutions, so one emitted definition cannot serve both"
+                    ),
+                ),
+            );
+            return Ok(());
+        }
+        if let Some(at) = skull_mir::monoty::too_deep_to_instantiate(
+            inst.arg_types(self.scx.interner()).iter(),
+        ) {
+            let f = &self.ws.module(inst.func.module).functions[inst.func.func];
+            let at = at.render();
+            self.st.reject(
+                &f.name.to_string(),
+                CompilerError::new_with_label(
+                    f.name_span,
+                    format!(
+                        "polymorphic recursion: instantiating `{}` at `{at}` exceeds the \
+                         instantiation depth limit of {}. A recursive call whose type \
+                         arguments GROW never terminates -- each call needs a new body -- so it \
+                         is rejected rather than expanded. Same-instance recursion (type \
+                         arguments unchanged) is unaffected.",
+                        f.name,
+                        skull_mir::monoty::MAX_INSTANTIATION_DEPTH,
+                    ),
+                ),
+            );
+            return Ok(());
+        }
         let Some(&fr) = self.st.artifact_decls.get(&inst) else {
             self.st.reject(
                 &format!("instance:{:?}", inst.func),
@@ -3859,6 +3841,18 @@ impl JsReach<'_> {
         // an `Iterator`-bounded body's placeholders are what make it unemittable
         // on its own, and the demand that reached here is what resolves them.
         let tree = self.st.graph_trees.get(&body).cloned().unwrap_or_default();
+        let f = &self.ws.module(fr.module).functions[fr.func];
+        if f.generic_bounds.iter().any(Option::is_some) && tree.is_empty() {
+            self.st.reject(
+                &name,
+                CompilerError::new_with_label(
+                    f.name_span,
+                    "JS: the graph has no resolved bound tree for a bounded specialization"
+                        .to_string(),
+                ),
+            );
+            return Ok(());
+        }
         if let Err(e) = skull_transform::bound::resolve_standalone_bound_calls(
             self.ws,
             self.scx.interner(),
@@ -3902,7 +3896,7 @@ impl JsReach<'_> {
             &tree,
             self.scx.interner(),
         );
-        findings.extend(self.discover(&ctx, &mf)?);
+        findings.extend(self.schedule_body(&ctx, &mf)?);
         match merge_findings(findings) {
             Some(e) => self.st.reject(&name, e),
             None => self.st.spec_lowered.push((inst, mf)),
@@ -3946,7 +3940,7 @@ impl JsReach<'_> {
             &incoming,
             self.scx.interner(),
         );
-        findings.extend(self.discover(&ctx, &mf)?);
+        findings.extend(self.schedule_body(&ctx, &mf)?);
         if let Some(e) = merge_findings(findings) {
             self.st.reject(&init_name, e);
             return Ok(());
@@ -3965,16 +3959,16 @@ impl JsReach<'_> {
         Ok(())
     }
 
-    /// Queue everything this body reaches, returning the body's own discovery
-    /// findings (unmapped callees) for the caller to accumulate.
+    /// Queue everything this body still needs after inlining, returning the
+    /// body's delivery findings (unmapped callees) for the caller to accumulate.
     ///
-    /// An `Err` is the ONE discovery outcome that is not a census finding:
-    /// graph global discovery rejects exactly once, on a read of a
+    /// An `Err` is the ONE scheduling outcome that is not a census finding:
+    /// global scheduling rejects exactly once, on a read of a
     /// decorator-populated global, and the per-test driver matches that message
     /// to RETRY the file in program mode (where the applications are emitted).
     /// Demoting it to a sibling would turn a test that lifts into a test that
     /// skips, so it aborts the emission immediately as before.
-    fn discover(
+    fn schedule_body(
         &mut self,
         ctx: &skull_mir::bound::BoundCtx,
         mf: &MirFunc,
@@ -3984,62 +3978,29 @@ impl JsReach<'_> {
         register_statics(mf, &mut st.gctx);
         let mut findings = Vec::new();
         let mut demands = Vec::new();
-        // A demand this body cannot state in self-contained terms is a finding,
-        // not a demand dropped: the callee would be reached by nothing while its
-        // call site still spells the specialized name.
         collect(&mut findings, collect_spec_bound_calls(ws, ctx, mf, &mut demands));
-        let demands: Vec<_> = demands
-            .into_iter()
-            .map(|d| skull_mir::bound::SpecDemand {
-                tree: st.graph_trees.get(&d.inst).cloned().unwrap_or_default(),
-                inst: d.inst,
-            })
-            .collect();
-        for body in st.spec_trees.record(&demands) {
-            let fref = body.func;
-            let f = &ws.module(fref.module).functions[fref.func];
-            collect::<()>(
-                &mut findings,
-                Err(CompilerError::new_with_label(
-                    f.name_span,
-                    format!(
-                        "internal: two call sites demand a specialization of `{}` with \
-                         different `Iterator` bound resolutions, so one emitted \
-                         definition cannot serve both",
-                        f.name
-                    ),
-                )),
-            );
+        for demand in demands {
+            if st.bound_tree_disagreements.contains(&demand.inst) {
+                let f = &ws.module(demand.inst.func.module).functions[demand.inst.func.func];
+                collect::<()>(
+                    &mut findings,
+                    Err(CompilerError::new_with_label(
+                        f.name_span,
+                        format!(
+                            "internal: two call sites demand a specialization of `{}` with \
+                             different `Iterator` bound resolutions, so one emitted \
+                             definition cannot serve both",
+                            f.name
+                        ),
+                    )),
+                );
+            } else {
+                queue_standalone(st, ws, demand.inst, &mut findings);
+            }
         }
-        st.spec_queue.extend(demands);
-        collect(&mut findings, discover_callees_graph(self.ws, mf, st));
-        discover_globals_graph(self.ws, mf, st)?;
+        collect(&mut findings, schedule_residual_calls(self.ws, mf, st));
+        schedule_global_reads(self.ws, mf, st)?;
         Ok(findings)
-    }
-}
-
-impl skull_mir::reach::ReachPolicy for JsReach<'_> {
-    type Node = JsNode;
-
-    fn roots(&mut self) -> Result<Vec<JsNode>, CompilerError> {
-        Ok(self.take_pending())
-    }
-
-    fn is_leaf(&mut self, _node: JsNode) -> Result<bool, CompilerError> {
-        Ok(false)
-    }
-
-    fn on_cycle(&mut self, _node: JsNode) -> Result<(), CompilerError> {
-        Ok(())
-    }
-
-    fn visit(&mut self, node: JsNode) -> Result<Vec<JsNode>, CompilerError> {
-        match node {
-            JsNode::Fn(fr) => self.visit_fn(fr)?,
-            JsNode::Ginit(gname) => self.visit_ginit(gname)?,
-            JsNode::Spec(inst) => self.visit_spec(inst)?,
-        }
-        Ok(self.take_pending())
     }
 }
 
@@ -4051,7 +4012,25 @@ fn drain_worklists(
     scx: &skull_mir::lower::ScalarCtx,
     st: &mut WorklistState,
 ) -> Result<(), CompilerError> {
-    skull_mir::reach::walk(&mut JsReach { ws, scx, st })?;
+    let mut delivery = JsDelivery { ws, scx, st };
+    let mut spec_cursor = 0;
+    loop {
+        while let Some(fr) = delivery.st.queue.pop() {
+            delivery.visit_fn(fr)?;
+        }
+        while let Some((gname, _)) = delivery.st.ginit_queue.pop() {
+            delivery.visit_ginit(gname)?;
+        }
+        if !delivery.st.queue.is_empty() || !delivery.st.ginit_queue.is_empty() {
+            continue;
+        }
+        if let Some(inst) = delivery.st.standalone_specs.get(spec_cursor).cloned() {
+            spec_cursor += 1;
+            delivery.lower_standalone(inst)?;
+            continue;
+        }
+        break;
+    }
     Ok(())
 }
 
@@ -4596,10 +4575,39 @@ fn build_nobox_leaf_globals(ws: &Workspace) -> HashMap<ustr::Ustr, ustr::Ustr> {
     m
 }
 
-/// Discover residual delivery edges. The graph/view owns the logical instance,
+fn queue_standalone(
+    st: &mut WorklistState,
+    ws: &Workspace,
+    inst: Instance,
+    findings: &mut Vec<CompilerError>,
+) {
+    let Some(&selected) = st.artifact_decls.get(&inst) else {
+        findings.push(err("JS: a retained specialization has no artifact declaration"));
+        return;
+    };
+    if js_supply(ws, &ws.module(selected.module).functions[selected.func]).is_some() {
+        return;
+    }
+    if !st.view_instances.contains(&inst) {
+        let f = &ws.module(inst.func.module).functions[inst.func.func];
+        findings.push(CompilerError::new_with_label(
+            f.name_span,
+            format!(
+                "JS: residual specialization of `{}` is absent from the artifact view",
+                f.name
+            ),
+        ));
+        return;
+    }
+    if st.standalone_seen.insert(inst.clone()) {
+        st.standalone_specs.push(inst);
+    }
+}
+
+/// Schedule residual delivery edges. The graph/view owns the logical instance,
 /// declaration, boundary, and symbol; post-inline MIR only decides whether a
 /// retained body still needs a definition.
-fn discover_callees_graph(
+fn schedule_residual_calls(
     ws: &Workspace,
     mf: &MirFunc,
     st: &mut WorklistState,
@@ -4684,10 +4692,7 @@ fn discover_callees_graph(
                     cf.name
                 )));
             } else {
-                st.spec_queue.push(skull_mir::bound::SpecDemand {
-                    inst: instance,
-                    tree: Default::default(),
-                });
+                queue_standalone(st, ws, instance, &mut findings);
             }
         } else if st.seen.insert(selected) {
             st.queue.push(selected);
@@ -4759,7 +4764,7 @@ fn register_fn_values_from_view(
     Ok(())
 }
 
-fn discover_globals_graph(ws: &Workspace, mf: &MirFunc, st: &mut WorklistState) -> Result<(), CompilerError> {
+fn schedule_global_reads(ws: &Workspace, mf: &MirFunc, st: &mut WorklistState) -> Result<(), CompilerError> {
     let mut fn_value_names = HashSet::new();
     register_fn_values_from_view(ws, mf, st, &mut fn_value_names)?;
     for name in global_refs(mf) {
