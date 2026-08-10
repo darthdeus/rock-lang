@@ -387,6 +387,11 @@ fn web_chrome_screenshot_and_click_pick_mag() {
         &[
             "--frames",
             "30",
+            // mag's web canvas is 1920x1080, so the default 1280x720 window
+            // leaves the right third of the scene outside the viewport -- and a
+            // click there is a silent miss rather than an error.
+            "--window-size",
+            "1920,1080",
             // Derive the click from the player's LIVE projection, never a
             // literal pixel: a hard-coded point silently becomes a test of the
             // current framing and goes stale whenever camera framing or present
@@ -395,17 +400,31 @@ fn web_chrome_screenshot_and_click_pick_mag() {
             // the feet anchor, matching mag's own `player_body_probe_world`
             // test hook, and logical output units map to CSS through the canvas
             // element's rect so the expression holds at any devicePixelRatio.
+            // A nobox `Vec2` return does NOT arrive as an array: leaf 0 is the
+            // JS return value and leaf 1 rides `__rock_ret1`, so each slot must
+            // be captured immediately after its own call, before the next call
+            // republishes the bank. Indexing the result (`rp[0]`/`rp[1]`) reads
+            // undefined and the whole expression collapses to [null, null].
             "--click-expr",
-            "(function(){               var rp=render_pos_Movable_ret_Vec2(__G.player.movable);               var s=world_to_screen_Vec2_ret_Vec2(rp[0],rp[1]+1.5);               var c=document.querySelector('canvas');var r=c.getBoundingClientRect();               return [r.left+s[0]*(r.width/__SW.logicalW),                       r.top+s[1]*(r.height/__SW.logicalH)];})()",
+            "(function(){               var rpx=render_pos_Movable_ret_Vec2(__G.player.movable), rpy=__rock_ret1;               var sx=world_to_screen_Vec2_ret_Vec2(rpx,rpy+1.5), sy=__rock_ret1;               var c=document.querySelector('canvas');var r=c.getBoundingClientRect();               return [r.left+sx*(r.width/__SW.logicalW),                       r.top+sy*(r.height/__SW.logicalH)];})()",
+            // Ask the game's OWN accessor rather than a mirror global: this is
+            // the same call `pick_at_cursor` makes, so it exercises the real
+            // path (MRT id write -> PBO readback -> SELECTION -> ClickTarget)
+            // and answers `None` on a miss rather than undefined.
+            //
             // Report whether anything was picked AT ALL, so the two failures are
             // told apart from the message alone:
             //   "nohover:None" -> the click landed off the sprite (a projection
             //                     or framing fault, since the point is derived).
             //   "hover:None"   -> something was picked and the click path
             //                     dropped it; that is a real pipeline defect.
+            // A PAYLOADLESS variant emits as a bare string ("None", "Player");
+            // only a payload-carrying one is an object with `__variant`. Read
+            // both, or a unit variant reads as undefined.
             "--expect",
-            "(__G.HOVER_ENTITY_ID ? \"hover\" : \"nohover\") + \":\" + \
-             (__G.last_click_target && __G.last_click_target.__variant)",
+            "(function(){var t=pick_from_id_int_ret_ClickTarget(__G.HOVER_ENTITY_ID); \
+             return (__G.HOVER_ENTITY_ID ? \"hover\" : \"nohover\") + \":\" + \
+             (typeof t === \"string\" ? t : t.__variant);})()",
             "--value",
             "hover:Player",
         ],
