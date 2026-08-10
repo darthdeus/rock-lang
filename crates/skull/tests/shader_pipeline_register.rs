@@ -355,6 +355,36 @@ fn single_arg_overlay_carries_registration() {
 }
 
 const WGPU_FULLSCREEN_SRC: &str = r#"
+value EngineU {
+    uProjection: Mat4,
+    uView: Mat4,
+    uYBounds: Vec2,
+    uScreenBounds: Vec2,
+    uEngineTime: float,
+}
+struct MainTex { uTexture: Sampler2D }
+value SpriteBasicVert {
+    aPos: Vec2,
+    aTexCoord: Vec2,
+    aColor: Vec4,
+}
+value SpriteBasicVary {
+    position: Vec4,
+    TexCoord: Vec2,
+    VertexColor: Vec4,
+}
+@shader(vertex)
+fn sprite_basic_vert(@attr a: SpriteBasicVert, @engine e: EngineU) -> SpriteBasicVary {
+    return SpriteBasicVary {
+        position: e.uProjection * e.uView * v(a.aPos, 0.0, 1.0),
+        TexCoord: a.aTexCoord,
+        VertexColor: a.aColor,
+    }
+}
+@shader(fragment)
+fn sprite_basic_frag(vary: SpriteBasicVary, @textures t: MainTex) -> Vec4 {
+    return texture(t.uTexture, vary.TexCoord) * vary.VertexColor
+}
 @shader(fragment)
 fn blit_frag(tc: Vec2) -> Vec4 { return Vec4 { x: tc.x, y: 0.0, z: 1.0, w: 1.0 } }
 @shader(fragment)
@@ -365,22 +395,28 @@ fn tonemap_frag(tc: Vec2) -> Vec4 { return Vec4 { x: 1.0, y: 1.0, z: tc.x, w: 1.
 fn use_all() -> string {
     let a = rock_shader(blit_frag)
     let b = rock_shader(present_frag)
-    return rock_shader(tonemap_frag)
+    let c = rock_shader(tonemap_frag)
+    return rock_shader(sprite_basic_vert, sprite_basic_frag)
 }
 "#;
 
 #[test]
-fn selected_wgpu_registration_is_exactly_the_three_fullscreen_roots() {
+fn selected_wgpu_registration_is_exactly_the_four_selected_artifacts() {
     let ws = ws_with_stdlib(WGPU_FULLSCREEN_SRC);
     let mid = test_mid(&ws);
     let (emit, _) = emit_full_in_for_renderer(&ws, mid, None, RendererTarget::Wgpu)
-        .expect("selected fullscreen roots emit");
+        .expect("selected artifacts emit");
     assert_eq!(
         emit.lua.matches("__rock_wgpu_shader_register(").count(),
-        3,
-        "the selected renderer admits a non-zero, exact WGSL root population"
+        4,
+        "the selected renderer admits a non-zero, exact WGSL artifact population"
     );
-    for root in ["blit_frag", "present_frag", "tonemap_frag"] {
+    for root in [
+        "blit_frag",
+        "present_frag",
+        "tonemap_frag",
+        "sprite_basic_vert+sprite_basic_frag",
+    ] {
         assert!(
             emit.lua.contains(&format!("__rock_wgpu_shader_register(\"{root}\"")),
             "selected root {root} is missing from WGSL registration"
