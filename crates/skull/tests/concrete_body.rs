@@ -356,6 +356,17 @@ fn main() {
         "callee signature has no parameter population"
     );
     let float = g.interner().intern(MonoTy::Float);
+    let site = main_plan
+        .callees
+        .iter()
+        .find_map(|(site, inst)| (inst == &callee).then_some(site))
+        .expect("id call site disappeared");
+    let mut caller = main_plan.clone();
+    caller
+        .callee_signatures
+        .get_mut(site)
+        .expect("id call signature disappeared")
+        .params[0] = float;
     let mut plans = bodies.plans.clone();
     plans
         .get_mut(&callee)
@@ -363,11 +374,49 @@ fn main() {
         .signature
         .params[0] = float;
     let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
-    let mir = skull_mir::lower::lower_instance_with_plans(&ws, &scx, main_plan, &plans)
+    let mir = skull_mir::lower::lower_instance_with_plans(&ws, &scx, &caller, &plans)
         .expect("plan-driven call lowering failed");
     assert!(
         count_int_to_float(&mir) > 0,
         "call lowering ignored the selected callee's concrete parameter signature"
+    );
+}
+
+#[test]
+fn production_call_rejects_a_callee_signature_body_disagreement() {
+    let (ws, g, bodies) = bodies_of(
+        r#"
+fn id<T>(x: T) -> T { return x }
+fn main() {
+    let out = id(1)
+    print("{out}")
+}
+"#,
+    );
+    let main_plan = bodies
+        .plans
+        .iter()
+        .find(|(inst, _)| g.identity(&ws, inst).starts_with("main"))
+        .map(|(_, plan)| plan)
+        .expect("main has no concrete plan");
+    let callee = main_plan
+        .callees
+        .values()
+        .find(|inst| ws.module(inst.func.module).functions[inst.func.func].name.as_str() == "id")
+        .cloned()
+        .expect("main has no concrete id call");
+    let mut plans = bodies.plans.clone();
+    plans
+        .get_mut(&callee)
+        .expect("selected callee plan disappeared")
+        .signature
+        .params[0] = g.interner().intern(MonoTy::Float);
+    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let err = skull_mir::lower::lower_instance_with_plans(&ws, &scx, main_plan, &plans)
+        .expect_err("lowering accepted a mismatched callee body plan");
+    assert!(
+        err.message.contains("concrete callee signature disagrees with its body plan"),
+        "unexpected mismatch diagnostic: {err:?}"
     );
 }
 

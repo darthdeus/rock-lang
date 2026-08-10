@@ -1114,6 +1114,34 @@ fn lower_instance_with_plan_inner(
             )));
         }
     }
+    if let Some(concrete_plans) = concrete_plans {
+        for (site, owner) in &plan.callees {
+            let needs_plan = requires_concrete_body_plan(ws, owner)
+                && crate::monoty::too_deep_to_instantiate(
+                    owner.arg_types(scx.interner()).iter(),
+                )
+                .is_none();
+            if !needs_plan {
+                continue;
+            }
+            let callee_plan = concrete_plans.get(owner).ok_or_else(|| {
+                gap(format!(
+                    "concrete callee body plan is missing for site {:?}",
+                    site.op
+                ))
+            })?;
+            let recorded = plan
+                .callee_signatures
+                .get(site)
+                .expect("callee signature checked above");
+            if recorded != &callee_plan.signature {
+                return Err(gap(format!(
+                    "concrete callee signature disagrees with its body plan at site {:?}",
+                    site.op
+                )));
+            }
+        }
+    }
     lower_body(ws, scx, inst.func, inst.clone(), None, Some(plan), concrete_plans)
 }
 

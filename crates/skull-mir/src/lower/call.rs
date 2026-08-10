@@ -118,6 +118,40 @@ impl Builder<'_> {
         Ok(Some(self.scx.interner().get(*id)))
     }
 
+    pub(crate) fn concrete_coroutine_channel(
+        &self,
+        receiver: Idx<Expr>,
+    ) -> Result<Option<crate::lower::YieldChannel>, CompilerError> {
+        let Some(body_plan) = self.concrete_plan else { return Ok(None) };
+        let site = crate::site::Site {
+            domain: self.cur_domain.clone(),
+            expr: receiver,
+            op: crate::site::SiteOp::DirectCall,
+        };
+        let result = if let Some(owner) = body_plan.callees.get(&site) {
+            let signature = match self.concrete_plans {
+                Some(plans)
+                    if crate::lower::requires_concrete_body_plan(self.ws, owner)
+                        && crate::monoty::too_deep_to_instantiate(
+                            owner.arg_types(self.scx.interner()).iter(),
+                        )
+                        .is_none() => &plans.get(owner).ok_or_else(|| {
+                        self.gap_here("concrete coroutine callee body plan is missing")
+                    })?
+                    .signature,
+                Some(_) | None => body_plan.callee_signatures.get(&site).ok_or_else(|| {
+                    self.gap_here("concrete coroutine callee signature is missing")
+                })?,
+            };
+            signature.result.map(|id| self.scx.interner().get(id))
+        } else {
+            Some(self.concrete_expr_ty(receiver).ok_or_else(|| {
+                self.gap_here("concrete coroutine receiver has no type")
+            })?)
+        };
+        Ok(result.as_ref().and_then(|ty| CoroutinePlan::channel_for_concrete_type(self.ws, ty)))
+    }
+
     pub(crate) fn callee_abi_plan_for_instance(
         &self,
         inst: &crate::instance::Instance,
@@ -390,10 +424,7 @@ impl Builder<'_> {
         if let Callee::Unresolved { name, .. } = callee {
             if name.as_str() == "resume" && !arg_idxs.is_empty() {
                 if self.concrete_plan.is_some() {
-                    let recv_ty = self
-                        .concrete_expr_ty(arg_idxs[0])
-                        .ok_or_else(|| self.gap_here("concrete coroutine receiver has no type"))?;
-                    if let Some(channel) = CoroutinePlan::channel_for_concrete_type(self.ws, &recv_ty) {
+                    if let Some(channel) = self.concrete_coroutine_channel(arg_idxs[0])? {
                         let recv = self.lower_expr(arg_idxs[0])?;
                         let advance = self.emit_cur(Inst::Field { base: recv, field: Ustr::from("__advance") });
                         let mut cargs: Vec<Idx<Inst>> = vec![recv];
