@@ -2617,12 +2617,14 @@ struct JsSession {
     last_update: Option<JsGraphUpdate>,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct JsGraphUpdate {
     pub before: usize,
     pub after: usize,
     pub added: usize,
     pub removed: usize,
+    pub added_instances: BTreeSet<Instance>,
+    pub removed_instances: BTreeSet<Instance>,
 }
 
 fn js_root_plan(
@@ -2753,6 +2755,8 @@ fn update_js_session(
         after: session.graph.instances.len(),
         added: update.added.len(),
         removed: update.removed.len(),
+        added_instances: update.added,
+        removed_instances: update.removed,
     });
 }
 
@@ -3161,7 +3165,7 @@ impl JsEmitCache {
     }
 
     pub fn graph_update(&self) -> Option<JsGraphUpdate> {
-        self.session.last_update
+        self.session.last_update.clone()
     }
 }
 
@@ -3217,6 +3221,11 @@ pub fn emit_overlay(
     extend_root_plan_from_inline_view(ws, &mut root_plan, &cache.session.view);
     update_js_session(ws, &mut cache.session, &root_plan.refs, reinferred);
     let current = assemble_program_core(ws, &cache.scx, &root_plan.named, &cache.session)?;
+    let update = cache
+        .session
+        .last_update
+        .as_ref()
+        .expect("JS session update must publish its graph delta");
     if current.stable != cache.build.stable {
         return Ok(JsReload::FullRequired);
     }
@@ -3226,22 +3235,52 @@ pub fn emit_overlay(
         return Ok(JsReload::FullRequired);
     }
 
+    let newly_reached_specs: BTreeSet<_> = current
+        .spec_chunks
+        .keys()
+        .filter(|instance| !cache.build.spec_chunks.contains_key(*instance))
+        .cloned()
+        .collect();
+    if !newly_reached_specs.is_subset(&update.added_instances) {
+        return Err(CompilerError::new_no_location(
+            "JS graph delta omitted a newly retained specialization".to_string(),
+        ));
+    }
+    let stranded_specs: BTreeSet<_> = cache
+        .build
+        .spec_chunks
+        .keys()
+        .filter(|instance| !current.spec_chunks.contains_key(*instance))
+        .cloned()
+        .collect();
+    if !stranded_specs.is_subset(&update.removed_instances) {
+        return Err(CompilerError::new_no_location(
+            "JS graph delta omitted a removed specialization".to_string(),
+        ));
+    }
+
     let mut changed_specs: Vec<&JsSpecChunk> = current
         .spec_chunks
         .iter()
         .filter_map(|(inst, chunk)| {
-            cache
-                .build
-                .spec_chunks
-                .get(inst)
-                .map_or(Some(chunk), |previous| (previous.js != chunk.js).then_some(chunk))
+            if update.added_instances.contains(inst) {
+                return Some(chunk);
+            }
+            cache.build.spec_chunks.get(inst).and_then(|previous| {
+                (previous.js != chunk.js).then_some(chunk)
+            })
         })
         .collect();
     let mut removed_specs: Vec<&JsSpecChunk> = cache
         .build
         .spec_chunks
         .iter()
-        .filter_map(|(inst, chunk)| (!current.spec_chunks.contains_key(inst)).then_some(chunk))
+        .filter_map(|(inst, chunk)| {
+            update
+                .removed_instances
+                .contains(inst)
+                .then_some(chunk)
+        })
         .collect();
     changed_specs.sort_by(|left, right| left.name.cmp(&right.name));
     removed_specs.sort_by(|left, right| left.name.cmp(&right.name));

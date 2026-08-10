@@ -101,6 +101,15 @@ fn main() { print(hot()) }\n";
     let added = cache.graph_update().expect("graph update after addition");
     assert!(added.added > 0, "the edit must add a graph instance");
     assert_eq!(
+        added.added_instances.len(),
+        added.added,
+        "the published addition population must carry the exact instances"
+    );
+    assert!(
+        added.added_instances.iter().all(|instance| cache.graph().instances.contains(instance)),
+        "every published added instance must remain live in the session graph"
+    );
+    assert_eq!(
         added.removed, 0,
         "the addition arm must not remove the old instance"
     );
@@ -124,6 +133,15 @@ fn main() { print(hot()) }\n";
     ));
     let removed = cache.graph_update().expect("graph update after removal");
     assert!(removed.removed > 0, "the edit must remove the int instance");
+    assert_eq!(
+        removed.removed_instances.len(),
+        removed.removed,
+        "the published removal population must carry the exact instances"
+    );
+    assert!(
+        removed.removed_instances.iter().all(|instance| !cache.graph().instances.contains(instance)),
+        "every published removed instance must leave the session graph"
+    );
     assert_eq!(removed.added, 0, "the removal arm must not add an instance");
     let removal_population = cache.graph_population();
     assert!(
@@ -153,6 +171,8 @@ fn main() { print(hot()) }\n";
         readded.added > 0,
         "reintroduction must rebuild the removed instance"
     );
+    assert_eq!(readded.added_instances.len(), readded.added);
+    assert!(readded.removed_instances.is_empty());
     assert_eq!(readded.removed, 0, "reintroduction must not hide a removal");
     assert!(
         cache.graph_population() > removal_population,
@@ -189,7 +209,15 @@ fn every_js_production_route_enters_the_shared_session() {
         1,
         "one JS session updater"
     );
+    assert!(
+        source.contains("update.added") && source.contains("update.removed"),
+        "the session must publish the graph's exact delta populations"
+    );
     let overlay = &source[source.find("pub fn emit_overlay(").unwrap()..];
+    assert!(
+        overlay.contains("added_instances") && overlay.contains("removed_instances"),
+        "the JS overlay must consume graph-added and graph-removed populations"
+    );
     assert!(
         !overlay.contains("js_scx("),
         "overlay must retain the cached context"
