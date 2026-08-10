@@ -653,30 +653,9 @@ fn main() { print("{ident(1)}") }
     );
 }
 
-/// SENTINEL -- flip when specialization becomes total (mono Stage 3, cut C).
-///
-/// The SUBSTITUTION half of the owner, which the non-generic inlining control
-/// above cannot reach: one GENERIC `@inline` declaration instantiated at two
-/// concrete types in ONE caller. CORRECT behavior is two owner entries with
-/// distinct, NON-EMPTY substitutions, because both snapshots splice into the
-/// same body and index the same expression arena -- the substitution is the
-/// only thing that tells their sites apart.
-///
-/// TODAY specialization is CONDITIONAL, and this fixture straddles the
-/// condition. `wrap<Vec2>` specializes (its element has value-struct storage,
-/// which is a correctness trigger rather than an optimization) and its owner is
-/// already concrete. `wrap<int>` does NOT: the lowerer keeps the shared generic
-/// snapshot and splices it under the EMPTY substitution, which is not any
-/// instance. That EMPTY entry is the minimal reproduction of the corpus's
-/// largest unjoined bucket (`owner-not-an-instance`), and it is why
-/// instance-owned definition emission must not land first.
-///
-/// When specialization is total this goes red: the EMPTY entry becomes a second
-/// concrete substitution.
 #[test]
-fn an_inlined_generic_splices_one_shared_snapshot_sentinel() {
-    let ws = check(
-        r#"
+fn generic_calls_join_two_concrete_instances() {
+    let src = r#"
 @inline
 fn wrap<T>(x: T) -> T { return id2(x) }
 fn id2<T>(x: T) -> T { return x }
@@ -687,37 +666,31 @@ fn top() -> int {
     return a + int(b.x)
 }
 fn main() { print("{top()}") }
-"#,
-    );
-    let mf = prepared_body(&ws, "top");
-    let wrap_substs: Vec<&skull_mir::monoty::MonoSubst> = mf
-        .site_owners
-        .iter()
-        .filter(|o| ws.module(o.func.module).functions[o.func.func].name.as_str() == "wrap")
-        .map(|o| &o.subst)
+"#;
+    let (ws, g) = graph_of(src);
+    let wraps: Vec<_> = g
+        .substitutions()
+        .filter(|(i, _)| ws.module(i.func.module).functions[i.func.func].name.as_str() == "wrap")
         .collect();
-    // The fixture must actually splice BOTH instantiations, or it pins nothing:
-    // a single entry would mean one of the two calls vanished.
     assert_eq!(
-        wrap_substs.len(),
+        wraps.len(),
         2,
-        "the fixture must splice both instantiations of `wrap`, got {wrap_substs:?}"
-    );
-    let empty = wrap_substs.iter().filter(|s| s.is_empty()).count();
-    let concrete = wrap_substs.iter().filter(|s| !s.is_empty()).count();
-    // The CONTROL: the instantiation that already specializes. Without it the
-    // assertion below could pass because nothing specializes at all, which is a
-    // different defect wearing the same number.
-    assert_eq!(
-        concrete, 1,
-        "the value-struct instantiation must already be instance-concrete: {wrap_substs:?}"
+        "the fixture must reach both concrete `wrap` instances: {wraps:?}"
     );
     assert_eq!(
-        empty, 1,
-        "PINNED: `wrap<int>` splices the SHARED generic snapshot under the EMPTY \
-         substitution. Zero here means specialization went total -- flip this test to \
-         assert two distinct non-empty substitutions."
+        wraps.iter().filter(|(_, subst)| !subst.is_empty()).count(),
+        2,
+        "a generic declaration must not use an empty specialization identity: {wraps:?}"
     );
+    let c = {
+        let mut graph = g;
+        let bodies = skull::concrete_body::build(&ws, &mut graph);
+        let scx = ScalarCtx::new(&ws);
+        site_join::census(&ws, &scx, &graph, &bodies)
+    };
+    assert!(c.joined_instance_verified >= 2, "{c:?}");
+    assert_eq!(c.unjoined.get(&Unjoined::OwnerNotAnInstance), None, "{c:?}");
+    assert_eq!(c.unjoined.get(&Unjoined::OwnerNotInTable), None, "{c:?}");
 }
 
 /// Every call instruction that survives to the emitted body carries a site.
@@ -876,20 +849,9 @@ fn main() { print("{top()}") }
     );
 }
 
-/// A generic body the inliner splices as its SHARED snapshot has no concrete
-/// owner instance, and the join must REFUSE it rather than pick one of the
-/// declaration's instances.
-///
-/// SENTINEL for the population: this is the minimal reproduction of the corpus's
-/// largest unjoined bucket (bitgun: 1,102 `owner-not-an-instance`). It goes red
-/// when specialization becomes total, and the fail-closed property it shares
-/// with the test above survives that in
-/// [`an_owner_the_graph_does_not_have_is_refused`], which does not need a defect
-/// to fire.
 #[test]
-fn a_shared_generic_splice_refuses_rather_than_guessing() {
-    let c = census_of(
-        r#"
+fn generic_calls_join_distinct_concrete_instances() {
+    let src = r#"
 fn ident<T>(x: T) -> T { return x }
 fn use_both() -> int {
     let a = ident(1)
@@ -897,20 +859,29 @@ fn use_both() -> int {
     return a + int(b)
 }
 fn main() { print("{use_both()}") }
-"#,
+"#;
+    let (ws, g) = graph_of(src);
+    let idents: Vec<_> = g
+        .substitutions()
+        .filter(|(i, _)| ws.module(i.func.module).functions[i.func.func].name.as_str() == "ident")
+        .collect();
+    assert_eq!(idents.len(), 2, "expected two `ident` instances: {idents:?}");
+    assert!(idents.iter().all(|(_, subst)| !subst.is_empty()), "{idents:?}");
+
+    let c = {
+        let mut graph = g;
+        let bodies = skull::concrete_body::build(&ws, &mut graph);
+        let scx = ScalarCtx::new(&ws);
+        site_join::census(&ws, &scx, &graph, &bodies)
+    };
+    assert!(c.obligations_examined > 0, "fixture examined no calls: {c:?}");
+    assert!(
+        c.joined_instance_verified >= 2,
+        "the two generic calls did not verify concrete instances: {c:?}"
     );
     assert!(c.accounts(), "accounting identity broken: {c:?}");
-    // The REFUSAL population must be non-zero, or this test passes without ever
-    // exercising a shared generic splice -- the exact thing it claims to cover.
-    let refused = c.unjoined.get(&Unjoined::OwnerNotAnInstance).copied().unwrap_or(0);
-    assert!(
-        refused > 0,
-        "no shared-generic splice was refused, so the fail-closed path is untested: {c:?}"
-    );
-    // And nothing may reach past the owner table: that would be a guess, not a
-    // refusal.
-    let guessed = c.unjoined.get(&Unjoined::OwnerNotInTable).copied().unwrap_or(0);
-    assert_eq!(guessed, 0, "an owner index escaped its table: {c:?}");
+    assert_eq!(c.unjoined.get(&Unjoined::OwnerNotAnInstance), None, "{c:?}");
+    assert_eq!(c.unjoined.get(&Unjoined::OwnerNotInTable), None, "{c:?}");
 }
 
 // ---------------------------------------------------------------------------

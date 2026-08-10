@@ -67,13 +67,11 @@ fn emit_clean(src: &str, fn_name: &str) -> String {
     emit_function(&ws, &ctx, scx.interner(), FuncRef { module: mid, func: fid }, &func)
 }
 
-/// Emit EVERY lowerable function in the `<test>` module, run a Lua `driver`
-/// expression (e.g. `"sign(-5)"`) under luajit, and return its trimmed stdout.
-/// The deeper oracle: it proves the emitted Lua is valid AND computes correctly,
-/// not just that its text matches. Stdlib is loaded so `__op_*` resolves; only
-/// snippets whose ops fold to inline Lua (arith / control flow / aggregates /
-/// indexing — no stdlib *fn* calls) run self-contained. Skips if luajit is
-/// absent so the suite still runs on a bare box.
+/// Emit the graph-reached lowerable instances for the `<test>` module's user
+/// roots, run a Lua `driver` expression (e.g. `"sign(-5)"`) under luajit, and
+/// return its trimmed stdout. This keeps inlining disabled and delivers the
+/// residual stdlib instances instead of depending on a splice for completeness.
+/// Skips if luajit is absent so the suite still runs on a bare box.
 fn run(src: &str, driver: &str) -> String {
     use std::sync::LazyLock;
     static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
@@ -94,7 +92,15 @@ fn run(src: &str, driver: &str) -> String {
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
     let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("user module id");
     let ctx = CodegenCtx::new(&ws);
-    let scx = skull_mir::lower::ScalarCtx::new(&ws);
+    let roots = ws
+        .module(mid)
+        .functions
+        .iter()
+        .map(|(fid, _)| FuncRef { module: mid, func: fid })
+        .collect();
+    let interner = std::sync::Arc::new(skull_mir::monoty::MonoInterner::new());
+    let graph = skull_graph::instance_graph::build_in(&ws, roots, false, interner.clone());
+    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(interner);
     // Capturing lambdas lower to `setmetatable({..}, __rock_fn_mt)` env records
     // (docs/closure-env-records-plan.md); the record metatable lives in skull's
     // runtime prelude, which this bare harness does not emit -- pull in the
@@ -104,17 +110,21 @@ fn run(src: &str, driver: &str) -> String {
         skull_codegen_lua::FN_MT_PRELUDE,
         skull_codegen_lua::VEC_CHECK_SHIMS
     );
-    let mut cache = skull_transform::InlineCache::default();
-    for (fid, _) in ws.module(mid).functions.iter() {
-        let fref = FuncRef { module: mid, func: fid };
-        if let Ok(mut func) = skull_mir::lower::lower_function(&ws, &scx, mid, fid) {
-            // The real pipeline: stdlib callees (VecIter's iter/next under a
-            // `for x in vec`) inline away, so the chunk stays self-contained.
-            skull_transform::inline_functions(&ws, &scx, fref, &mut func, &mut cache)
-                .expect("inline failed");
+    for inst in graph.expanded() {
+        let f = &ws.module(inst.func.module).functions[inst.func.func];
+        if f.inline_body.is_some() {
+            continue;
+        }
+        if let Ok(mut func) = skull_mir::lower::lower_instance(&ws, &scx, inst) {
             skull_transform::cleanup(&mut func);
             skull_transform::recover_counted_loops(&ws, &mut func);
-            lua.push_str(&emit_function(&ws, &ctx, scx.interner(), fref, &func));
+            lua.push_str(&skull_codegen_lua::emit_named(
+                &ws,
+                &ctx,
+                scx.interner(),
+                &inst.symbol(&ws, scx.interner()),
+                &func,
+            ));
         }
     }
     // Alias the user module's uniquely-named fns back to their bare source names
@@ -288,8 +298,8 @@ fn exec_vec_index() {
 
 #[test]
 fn exec_for_over_array() {
-    // `[T]` iterates via the stdlib VecIter protocol; the inline pass splices
-    // iter/next away so the emitted fn is still self-contained.
+    // `[T]` iterates via concrete stdlib VecIter instances delivered beside the
+    // user body; this fixture must work with inlining disabled.
     let src = "
 fn total(xs: [int]) -> int {
     let s = 0;

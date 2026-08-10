@@ -2899,10 +2899,10 @@ mod force_full_tests {
     /// Global DCE prunes a fn no root reaches, so main.lua does NOT define it.
     /// A later BODY edit that adds the first call to that fn must still leave it
     /// defined somewhere: the overlay redefines only CHANGED fns, so without the
-    /// graph-added backfill the composed program calls a
+    /// graph-delta construction the composed program calls a
     /// global that exists in neither file and dies on load.
     #[test]
-    fn overlay_backfills_a_fn_the_edit_makes_reachable() {
+    fn overlay_delivers_a_graph_added_fn_the_edit_makes_reachable() {
         let dir = tempfile::tempdir().expect("tempdir");
         let dir_str = dir.path().to_str().unwrap().to_string();
         let src = |p: &str| dir.path().join(p);
