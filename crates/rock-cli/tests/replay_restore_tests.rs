@@ -398,6 +398,85 @@ fn live_record_rewind_matches_plain_replay_at_target() {
     assert_sim_state_matches(&rewound, &reference, &sim, "live-rewind tick-25");
 }
 
+/// Seek resimulation must run the same game semantics as ordinary playback.
+/// Mag's main-menu focus and Play action live in `@late_draw`, so this is the
+/// concrete integration case that render-skipped resimulation currently loses.
+#[test]
+fn mag_main_menu_transition_survives_seek_resimulation() {
+    let game = "mag";
+    let frames = 80;
+    let target: u32 = 60;
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("menu.replay");
+    let log_s = log.to_string_lossy().into_owned();
+
+    let _ = run_record_dump(
+        game,
+        frames,
+        &log_s,
+        &[("MAG_BOOT_MENU", "1"), ("STONE_CHECKPOINT_INTERVAL", "0")],
+    );
+
+    let text = std::fs::read_to_string(&log).expect("read Mag replay");
+    let mut tick = 0;
+    let lines = text
+        .lines()
+        .map(|line| {
+            if !line.starts_with("t ") {
+                return line.to_string();
+            }
+            let mut fields: Vec<&str> = line.split_whitespace().collect();
+            assert_eq!(fields.len(), 8, "recorded tick shape changed: {line}");
+            fields[1] = "0x1.999999999999ap-4";
+            fields[6] = match tick {
+                40 => "down",
+                44 => "return",
+                _ => "-",
+            };
+            tick += 1;
+            fields.join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(tick, frames as usize + 1, "fixture must rewrite every recorded tick");
+    std::fs::write(&log, lines + "\n").expect("write deterministic Mag replay");
+
+    let reference = run_replay_dump(
+        game,
+        frames,
+        &log_s,
+        &[
+            ("MAG_BOOT_MENU", "1"),
+            ("STONE_START_PAUSED", "1"),
+            ("STONE_STEP_FRAMES", &target.to_string()),
+        ],
+    );
+    assert_eq!(current_tick(&reference), i64::from(target));
+    assert_eq!(reference["mag"]["SCREEN"].as_i64(), Some(2), "ordinary playback must activate Play");
+
+    let sought = run_replay_dump(
+        game,
+        frames + target + 10,
+        &log_s,
+        &[
+            ("MAG_BOOT_MENU", "1"),
+            ("STONE_KEYFRAME_INTERVAL", "1000"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME", &frames.to_string()),
+            ("STONE_TIMELINE_SEEK_TO_TICK", &target.to_string()),
+        ],
+    );
+    assert_eq!(current_tick(&sought), i64::from(target), "seek must pause at the requested tick");
+    assert_eq!(
+        sought["__stone_diag"]["STONE_SEEK_RESIM_FRAMES"].as_i64(),
+        Some(i64::from(target)),
+        "the fixture must exercise from-boot resimulation"
+    );
+    assert_eq!(
+        sought["mag"]["SCREEN"], reference["mag"]["SCREEN"],
+        "seek resimulation must preserve Mag's @late_draw Play transition"
+    );
+}
+
 #[test]
 fn live_record_rewind_refuses_unsupported_state_without_mutating_world() {
     let game = "survivors";
