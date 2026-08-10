@@ -708,21 +708,25 @@ fn concrete_struct_field_types(
     expr_types: &ArenaMap<Idx<Expr>, MonoTyId>,
 ) -> Result<ArenaMap<Idx<Expr>, FxHashMap<Ustr, MonoTyId>>, MonoTyReason> {
     let mut out = ArenaMap::default();
-    for (expr, ty_id) in expr_types.iter() {
-        let Expr::StructLiteral { name, .. } = body.expr_arena[expr] else { continue };
-        let concrete = g.interner().get(*ty_id);
-        let (payload, _) = concrete.peel_nullable();
-        let MonoTy::App { ctor: MonoCtor::Nominal(actual), params } = payload else {
-            return Err(MonoTyReason::NoNode);
-        };
-        if *actual != name {
-            return Err(MonoTyReason::NoNode);
-        }
+    for (expr, node) in body.expr_arena.iter() {
+        let Expr::StructLiteral { name, .. } = node else { continue };
         let sid = *ws.struct_by_name.get(&name).ok_or(MonoTyReason::NoNode)?;
         let def = &ws.modules[sid.module.index()].structs[sid.def];
-        if def.generics.len() != params.len() {
-            return Err(MonoTyReason::NoNode);
-        }
+        let params = match expr_types.get(expr).copied() {
+            Some(ty_id) => {
+                let concrete = g.interner().get(ty_id);
+                let (payload, _) = concrete.peel_nullable();
+                let MonoTy::App { ctor: MonoCtor::Nominal(actual), params } = payload else {
+                    return Err(MonoTyReason::NoNode);
+                };
+                if *actual != *name || def.generics.len() != params.len() {
+                    return Err(MonoTyReason::NoNode);
+                }
+                params.to_vec()
+            }
+            None if def.generics.is_empty() => Vec::new(),
+            None => return Err(MonoTyReason::NoNode),
+        };
         let mut subst = MonoSubst::default();
         for (generic, param) in def.generics.iter().zip(params) {
             let TypeExpr::Generic(var, _) = TyEnv::Decl.decl_node(ws, *generic)? else {

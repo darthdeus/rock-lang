@@ -1018,9 +1018,9 @@ fn textures_group_keeps_int_sampler_kind() {
         }
         @shader(fragment)
         fn fs(vary: Vary, @textures t: PickTex) -> Vec4 {
-            let id = texture(t.ids, vary.uv)
+            let id = texture_id(t.ids, vary.uv)
             let c = texture(t.color, vary.uv)
-            return Vec4 { x: c.x, y: c.y, z: float(id.x), w: 1.0 }
+            return Vec4 { x: c.x, y: c.y, z: float(id), w: 1.0 }
         }
     "#;
     let glsl = emit_pipeline(src, "vs", "fs").expect("must emit");

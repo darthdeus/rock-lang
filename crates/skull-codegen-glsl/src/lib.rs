@@ -37,7 +37,7 @@ use skull_mir::gpu_layout::{
     texture_slots, uniform_array_block, vertex_attrs,
 };
 use skull_mir::intrinsics::{Emission, IntrinsicEntry, IntrinsicTable};
-use skull_mir::concrete::ConcretePlans;
+use skull_mir::concrete::{ConcreteBodyPlan, ConcretePlans, ConcreteSignature};
 use skull_mir::lower::{ScalarCtx, SpecSubst};
 #[cfg(test)]
 use skull_mir::lower::lower_instance;
@@ -146,6 +146,24 @@ fn mono_glsl_ty(t: &MonoTy) -> Option<GlslTy> {
         MonoTy::App { ctor: MonoCtor::Nominal(n), .. } => nominal_glsl_ty(n.as_str()),
         _ => None,
     }
+}
+
+fn concrete_glsl_ty(
+    interner: &MonoInterner,
+    id: skull_mir::monoty::MonoTyId,
+    span: Span,
+    what: &str,
+) -> Result<GlslTy, CompilerError> {
+    let ty = interner.get(id);
+    mono_glsl_ty(&ty).ok_or_else(|| {
+        err(
+            span,
+            format!(
+                "shader profile: {what} type `{}` is not tier 0 (only float/int/bool/Vec2/Vec3/Vec4)",
+                ty.render()
+            ),
+        )
+    })
 }
 
 /// Render a Rock type to its tier-0 GLSL type UNDER `subst`, or reject.
@@ -323,12 +341,13 @@ fn profile_body(
     f: &Function,
     mf: &MirFunc,
     callees: &mut Vec<ShaderInstance>,
+    concrete: bool,
 ) -> Result<(), CompilerError> {
     let span = f.name_span;
     for (iid, inst) in mf.insts.iter() {
         match inst {
             Inst::Call { func, .. } => {
-                callees.push(callee_inst_at(ws, mf, iid, *func, span)?)
+                callees.push(callee_inst_at(ws, mf, iid, *func, span, concrete)?)
             }
             // A `const` global folds to its literal at the use site; a mutable
             // `global` is runtime state with no GLSL equivalent.
@@ -644,6 +663,7 @@ struct FnEmit<'a> {
     /// Entry mode: global field name -> GLSL type (for `ty_of` on those reads).
     /// Names are collision-checked unique, so one combined map covers all bases.
     uniform_fields: HashMap<Ustr, GlslTy>,
+    ignored_type_cells: HashSet<Idx<Cell>>,
     /// Cosmetic folds (`docs/shaders.md`, cosmetic tier). A diamond's
     /// single-use result cell -> the expression it renders as; the diamond itself
     /// is skipped, its declaration + stores suppressed.
@@ -660,6 +680,7 @@ struct FnEmit<'a> {
     /// The fn's name span -- body-level emit errors anchor here (MIR insts carry
     /// no spans, so per-expression precision is not available).
     fn_span: Span,
+    concrete_plan: Option<&'a ConcreteBodyPlan>,
     /// The INSTANCE being emitted: this body's own generic bindings. Every
     /// declared type it renders resolves through this, so `T` is `float` here
     /// and `int` in the sibling instance of the same declaration.
@@ -682,6 +703,40 @@ impl FnEmit<'_> {
             "every Call in this body was resolved by `callee_inst_at` before emission",
         )
     }
+
+    fn concrete_call_signature(&self, iid: Idx<Inst>) -> Result<&ConcreteSignature, CompilerError> {
+        let plan = self
+            .concrete_plan
+            .ok_or_else(|| err(self.span(), "shader profile: concrete call queried without a body plan"))?;
+        let site = self
+            .f
+            .call_sites
+            .get(&iid)
+            .ok_or_else(|| err(self.span(), "shader profile: concrete call has no site identity"))?;
+        plan.callee_signatures.get(&site.site).ok_or_else(|| {
+            err(self.span(), "shader profile: concrete call has no signature in the body plan")
+        })
+    }
+
+    fn call_param_types(
+        &self,
+        iid: Idx<Inst>,
+        cf: &Function,
+    ) -> Result<Vec<Option<GlslTy>>, CompilerError> {
+        if self.concrete_plan.is_some() {
+            let sig = self.concrete_call_signature(iid)?;
+            return sig
+                .params
+                .iter()
+                .map(|&id| Ok(mono_glsl_ty(&self.interner.get(id))))
+                .collect();
+        }
+        Ok(cf
+            .param_decls
+            .iter()
+            .map(|p| glsl_ty(self.ws, &self.callee_inst(iid).subst(self.ws, self.interner), p.ty, cf.name_span, "arg").ok())
+            .collect())
+    }
 }
 
 /// **The one resolver of a call site's callee instance, and it FAILS CLOSED.**
@@ -703,12 +758,17 @@ fn callee_inst_at(
     iid: Idx<Inst>,
     func: FuncRef,
     span: Span,
+    concrete: bool,
 ) -> Result<ShaderInstance, CompilerError> {
     let cf = &ws.module(func.module).functions[func.func];
     // Absent is not "the declaration": a callee with no generics HAS no
     // instantiation to record, and one that is generic and recorded nothing is
     // the rejection below.
-    let recorded = mf.spec_bindings.get(&iid).cloned();
+    let recorded = if concrete {
+        mf.callee_instances.get(&iid).cloned()
+    } else {
+        mf.spec_bindings.get(&iid).cloned()
+    };
     if renders_inline(cf) || cf.generics.is_empty() {
         return Ok(ShaderInstance::new(recorded.unwrap_or_else(|| Instance::base(func))));
     }
@@ -780,13 +840,14 @@ struct LoopCtx {
 }
 
 /// Emit `<ret> <name>(<params>) { <body> }` for one lowered INSTANCE.
+#[cfg(test)]
 fn emit_fn_def(
     ws: &Workspace,
     interner: &MonoInterner,
     inst: &ShaderInstance,
     mf: &MirFunc,
 ) -> Result<String, CompilerError> {
-    emit_fn_def_with(ws, interner, inst, mf, None)
+    emit_fn_def_with(ws, interner, inst, mf, None, None)
 }
 
 /// [`emit_fn_def`], optionally in ENTRY mode: the uniform-struct and sampler
@@ -798,6 +859,7 @@ fn emit_fn_def_with(
     inst: &ShaderInstance,
     mf: &MirFunc,
     entry: Option<&EntryShape>,
+    concrete_plan: Option<&ConcreteBodyPlan>,
 ) -> Result<String, CompilerError> {
     let fref = inst.fref();
     let subst = inst.subst(ws, interner);
@@ -815,9 +877,16 @@ fn emit_fn_def_with(
     let ret_ty = if emits_main {
         None
     } else {
-        match f.return_ty {
-            Some(rt) => Some(glsl_ty(ws, &subst, rt, f.name_span, "return")?),
-            None => None,
+        if let Some(plan) = concrete_plan {
+            plan.signature
+                .result
+                .map(|id| concrete_glsl_ty(interner, id, f.name_span, "return"))
+                .transpose()?
+        } else {
+            match f.return_ty {
+                Some(rt) => Some(glsl_ty(ws, &subst, rt, f.name_span, "return")?),
+                None => None,
+            }
         }
     };
     let ret = ret_ty.map_or("void", |t| t.name());
@@ -827,7 +896,7 @@ fn emit_fn_def_with(
     let mut callee_insts: HashMap<Idx<Inst>, ShaderInstance> = HashMap::default();
     for (iid, inst) in mf.insts.iter() {
         if let Inst::Call { func, .. } = inst {
-            callee_insts.insert(iid, callee_inst_at(ws, mf, iid, *func, f.name_span)?);
+            callee_insts.insert(iid, callee_inst_at(ws, mf, iid, *func, f.name_span, concrete_plan.is_some())?);
         }
     }
 
@@ -867,11 +936,22 @@ fn emit_fn_def_with(
             .map(|s| s.global_params.iter().map(|&i| mf.params[i]).collect())
             .unwrap_or_default(),
         uniform_fields: entry.map(|s| s.uniform_fields.iter().copied().collect()).unwrap_or_default(),
+        ignored_type_cells: entry
+            .map(|s| {
+                s.global_params
+                    .iter()
+                    .copied()
+                    .chain(s.arrays.iter().copied())
+                    .map(|i| mf.params[i])
+                    .collect()
+            })
+            .unwrap_or_default(),
         folded_cond: HashMap::default(),
         folded_block: HashMap::default(),
         folded_bound: HashMap::default(),
         main_out: entry.and_then(|s| s.main_out.clone()),
         fn_span: f.name_span,
+        concrete_plan,
         subst: subst.clone(),
         callee_insts,
     };
@@ -900,10 +980,17 @@ fn emit_fn_def_with(
         if struct_params.contains(&i) {
             continue;
         }
-        let ty = glsl_ty(ws, &subst, f.param_decls[i].ty, f.name_span, "parameter")?;
+        let ty = if let Some(plan) = concrete_plan {
+            let id = plan.signature.params.get(i).copied().ok_or_else(|| {
+                err(f.name_span, format!("shader profile: concrete parameter {i} is missing from the plan"))
+            })?;
+            concrete_glsl_ty(interner, id, f.name_span, "parameter")?
+        } else {
+            glsl_ty(ws, &subst, f.param_decls[i].ty, f.name_span, "parameter")?
+        };
         e.cell_ty.insert(c, ty);
     }
-    e.compute_cell_types();
+    e.compute_cell_types()?;
     e.compute_folds();
 
     // Parameter list (entry mode drops uniform-struct + sampler params).
@@ -980,28 +1067,49 @@ impl FnEmit<'_> {
     /// it maps to a tier-0 GLSL type (fixes `let y: float = 0`, whose first store's
     /// rep is int); fall back to first-store inference (RPO) for compiler-minted
     /// temps (if-result, loop counter) that carry no binding type.
-    fn compute_cell_types(&mut self) {
+    fn compute_cell_types(&mut self) -> Result<(), CompilerError> {
         for (cid, cell) in self.f.cells.iter() {
             if self.cell_ty.contains_key(&cid) {
                 continue;
             }
+            if self.ignored_type_cells.contains(&cid) {
+                continue;
+            }
+            if self
+                .single_store_value(cid)
+                .is_some_and(|value| matches!(self.f.insts[value], Inst::Load(base) if self.global_cells.contains(&base)))
+            {
+                continue;
+            }
             if let Some(ty) = cell.ty {
-                if let Ok(g) = glsl_ty(self.ws, &self.subst, ty, Span::default(), "local") {
-                    self.cell_ty.insert(cid, g);
-                }
+                let g = if let Some(plan) = self.concrete_plan {
+                    let id = plan.types.ty_type(ty).ok_or_else(|| {
+                        err(self.span(), "shader profile: local cell is missing from the concrete type plan")
+                    })?;
+                    concrete_glsl_ty(self.interner, id, self.span(), "local")?
+                } else {
+                    match glsl_ty(self.ws, &self.subst, ty, Span::default(), "local") {
+                        Ok(g) => g,
+                        Err(_) => continue,
+                    }
+                };
+                self.cell_ty.insert(cid, g);
             }
         }
         let rpo = reverse_postorder(self.f, self.f.entry);
         for &b in &rpo {
             for &iid in &self.f.blocks[b].insts {
                 if let Inst::Store { cell, value } = self.f.insts[iid] {
-                    if !self.cell_ty.contains_key(&cell) {
-                        let ty = self.ty_of(value);
+                    if !self.cell_ty.contains_key(&cell)
+                        && !matches!(self.f.insts[value], Inst::Load(base) if self.global_cells.contains(&base))
+                    {
+                        let ty = self.ty_of(value)?;
                         self.cell_ty.insert(cell, ty);
                     }
                 }
             }
         }
+        Ok(())
     }
 
     /// Detect the cosmetic-tier folds (`docs/shaders.md`): `&&`/`||`
@@ -1185,8 +1293,8 @@ impl FnEmit<'_> {
     }
 
     /// The GLSL type of a value instruction.
-    fn ty_of(&self, iid: Idx<Inst>) -> GlslTy {
-        match &self.f.insts[iid] {
+    fn ty_of(&self, iid: Idx<Inst>) -> Result<GlslTy, CompilerError> {
+        Ok(match &self.f.insts[iid] {
             Inst::Const(Lit::Float(_)) => GlslTy::Float,
             Inst::Const(Lit::Int(_)) => GlslTy::Int,
             Inst::Const(Lit::Bool(_)) => GlslTy::Bool,
@@ -1196,7 +1304,7 @@ impl FnEmit<'_> {
             Inst::IntLt(..) | Inst::IntLeq(..) | Inst::IntGt(..) | Inst::IntGeq(..)
             | Inst::FloatLt(..) | Inst::FloatLeq(..) | Inst::FloatGt(..) | Inst::FloatGeq(..)
             | Inst::Eq(..) | Inst::NotEq(..) | Inst::Not(_) => GlslTy::Bool,
-            Inst::Neg(x) => self.ty_of(*x),
+            Inst::Neg(x) => self.ty_of(*x)?,
             Inst::FloatToInt(_) => GlslTy::Int,
             Inst::IntToFloat(_) => GlslTy::Float,
             Inst::Load(c) => self.cell_ty.get(c).copied().unwrap_or(GlslTy::Float),
@@ -1206,7 +1314,7 @@ impl FnEmit<'_> {
             Inst::Field { base, field } => {
                 if self.is_uniform_base(*base) {
                     self.uniform_fields.get(field).copied().unwrap_or(GlslTy::Float)
-                } else if self.ty_of(*base) == GlslTy::Bvec3 {
+                } else if self.ty_of(*base)? == GlslTy::Bvec3 {
                     GlslTy::Bool // bvec3 component read
                 } else {
                     GlslTy::Float // Vec component
@@ -1224,22 +1332,30 @@ impl FnEmit<'_> {
             }
             Inst::Call { func, args } => {
                 let cf = &self.ws.module(func.module).functions[func.func];
-                let csub = self.callee_inst(iid).subst(self.ws, self.interner);
-                match cf.return_ty.and_then(|rt| glsl_ty(self.ws, &csub, rt, cf.name_span, "return").ok()) {
-                    Some(t) => t,
-                    // Generic-return genType builtins (min<T>/max<T>/clamp/abs):
-                    // GLSL's result type is the argument type. Load-bearing under
-                    // ES300, which has no implicit int->float on assignment.
-                    None if matches!(cf.name.as_str(), "min" | "max" | "clamp" | "abs")
-                        && !args.is_empty() =>
-                    {
-                        self.ty_of(args[0])
+                if self.concrete_plan.is_some() {
+                    let sig = self.concrete_call_signature(iid)?;
+                    let id = sig.result.ok_or_else(|| {
+                        err(self.span(), format!("shader profile: call to `{}` has no concrete result type", cf.name))
+                    })?;
+                    concrete_glsl_ty(self.interner, id, self.span(), "call result")?
+                } else {
+                    let csub = self.callee_inst(iid).subst(self.ws, self.interner);
+                    match cf.return_ty.and_then(|rt| glsl_ty(self.ws, &csub, rt, cf.name_span, "return").ok()) {
+                        Some(t) => t,
+                        // Generic-return genType builtins (min<T>/max<T>/clamp/abs):
+                        // GLSL's result type is the argument type. Load-bearing under
+                        // ES300, which has no implicit int->float on assignment.
+                        None if matches!(cf.name.as_str(), "min" | "max" | "clamp" | "abs")
+                            && !args.is_empty() =>
+                        {
+                            self.ty_of(args[0])?
+                        }
+                        None => GlslTy::Float,
                     }
-                    None => GlslTy::Float,
                 }
             }
             _ => GlslTy::Float,
-        }
+        })
     }
 
     /// Render at a float context slot. int->float subsumption is materialized at
@@ -1248,7 +1364,7 @@ impl FnEmit<'_> {
     /// lowering sink -- a hard emit error, never silent driver-dependent GLSL.
     /// (GLSL ES has no implicit int->float; desktop drivers vary on the corner.)
     fn render_val_t(&self, iid: Idx<Inst>, want: GlslTy) -> Result<String, CompilerError> {
-        if want == GlslTy::Float && self.ty_of(iid) == GlslTy::Int {
+        if want == GlslTy::Float && self.ty_of(iid)? == GlslTy::Int {
             return Err(err(
                 self.span(),
                 format!(
@@ -1396,14 +1512,17 @@ impl FnEmit<'_> {
     ) -> Result<String, CompilerError> {
         let cf = &self.ws.module(func.module).functions[func.func];
         let callee = self.callee_inst(iid);
-        let csub = callee.subst(self.ws, self.interner);
+        let param_types = self.call_param_types(iid, cf)?;
         let name = cf.name.as_str();
         // A non-scalar `__op_*` call is a Vec operator -> native infix. An int
         // operand (`*(Vec2, int)`) is cast to float (GLSL has no vec*int).
         if let Some(sym) = vec_op_symbol(name) {
             if args.len() == 2 {
                 let render_operand = |i: usize, e: &Self| -> Result<String, CompilerError> {
-                    let pt = glsl_ty(e.ws, &csub, cf.param_decls[i].ty, cf.name_span, "operand")?;
+                    let pt = param_types
+                        .get(i)
+                        .and_then(|t| *t)
+                        .ok_or_else(|| err(e.span(), "shader profile: vector operator parameter has no GLSL type"))?;
                     let s = e.render_val(args[i])?;
                     Ok(if pt == GlslTy::Int { format!("float({s})") } else { s })
                 };
@@ -1413,7 +1532,7 @@ impl FnEmit<'_> {
         // Args render against the declared param type where it maps to GLSL
         // (a generic param, e.g. `min<T>`, doesn't -- those render plain).
         let arg_t = |i: usize, a: Idx<Inst>, e: &Self| -> Result<String, CompilerError> {
-            match cf.param_decls.get(i).and_then(|p| glsl_ty(e.ws, &csub, p.ty, cf.name_span, "arg").ok()) {
+            match param_types.get(i).copied().flatten() {
                 Some(want) => e.render_val_t(a, want),
                 None => e.render_val(a),
             }
@@ -1424,17 +1543,11 @@ impl FnEmit<'_> {
         // hazard. GLSL constructors take mixed components natively, so emit
         // vecN(...) with N = the summed component count.
         if name == "v"
-            && cf.param_decls.iter().any(|p| {
-                matches!(
-                    glsl_ty(self.ws, &csub, p.ty, cf.name_span, "ctor param").ok(),
-                    Some(GlslTy::Vec2 | GlslTy::Vec3 | GlslTy::Vec4)
-                )
-            })
+            && param_types.iter().flatten().any(|ty| matches!(ty, GlslTy::Vec2 | GlslTy::Vec3 | GlslTy::Vec4))
         {
-            let n: usize = cf
-                .param_decls
+            let n: usize = param_types
                 .iter()
-                .map(|p| match glsl_ty(self.ws, &csub, p.ty, cf.name_span, "ctor param").ok() {
+                .map(|ty| match ty {
                     Some(GlslTy::Vec2) => 2,
                     Some(GlslTy::Vec3) => 3,
                     Some(GlslTy::Vec4) => 4,
@@ -2343,7 +2456,7 @@ pub fn emit_shader_library_with_view(
             )
         })?;
         let mut direct = Vec::new();
-        profile_body(ws, f, &body, &mut direct)?;
+        profile_body(ws, f, &body, &mut direct, true)?;
         let retained = checked_library_callees(
             ws,
             &instance,
@@ -2390,7 +2503,18 @@ pub fn emit_shader_library_with_view(
         }
         let instance = ShaderInstance::new(raw.clone());
         let body = bodies.get(&instance).expect("view order body was lowered");
-        out.push_str(&emit_fn_def(ws, scx.interner(), &instance, body)?);
+        let body_plan = view
+            .concrete_plans
+            .get(raw)
+            .ok_or_else(|| CompilerError::new_no_location("shader profile: helper has no concrete plan".to_string()))?;
+        out.push_str(&emit_fn_def_with(
+            ws,
+            scx.interner(),
+            &instance,
+            body,
+            None,
+            Some(body_plan),
+        )?);
     }
     Ok(out)
 }
@@ -3396,6 +3520,7 @@ struct StagePlan {
     uses_idiv: bool,
     uses_imod: bool,
     dependencies: Vec<FuncRef>,
+    concrete_plans: Arc<ConcretePlans>,
 }
 
 impl StagePlan {
@@ -3413,7 +3538,21 @@ impl StagePlan {
             out.push('\n');
         }
         for href in &self.ir.order {
-            out.push_str(&emit_fn_def(ws, interner, href, &self.ir.bodies[href])?);
+            let body_plan = self
+                .concrete_plans
+                .get(&href.inst)
+                .ok_or_else(|| {
+                    let f = &ws.module(href.fref().module).functions[href.fref().func];
+                    err(f.name_span, "shader profile: helper has no concrete plan")
+                })?;
+            out.push_str(&emit_fn_def_with(
+                ws,
+                interner,
+                href,
+                &self.ir.bodies[href],
+                None,
+                Some(body_plan),
+            )?);
             out.push('\n');
         }
         Ok(out)
@@ -3432,7 +3571,7 @@ fn plan_stage_from_view(
     scx: &ScalarCtx,
     view: &ShaderStageView,
     expected: Stage,
-    concrete_plans: &ConcretePlans,
+    concrete_plans: &Arc<ConcretePlans>,
 ) -> Result<StagePlan, CompilerError> {
     let expected_ir = match expected {
         Stage::Vertex => ShaderStage::Vertex,
@@ -3484,7 +3623,7 @@ fn plan_stage_from_view(
         )
     })?;
     let mut entry_callees = Vec::new();
-    profile_body(ws, entry_f, &entry_body, &mut entry_callees)?;
+    profile_body(ws, entry_f, &entry_body, &mut entry_callees, true)?;
 
     let mut allowed: HashSet<ShaderInstance> = HashSet::default();
     allowed.insert(entry.clone());
@@ -3522,7 +3661,7 @@ fn plan_stage_from_view(
             )
         })?;
         let mut callees = Vec::new();
-        profile_body(ws, f, &body, &mut callees)?;
+        profile_body(ws, f, &body, &mut callees, true)?;
         calls.insert(
             helper.clone(),
             checked_view_callees(
@@ -3572,7 +3711,13 @@ fn plan_stage_from_view(
             "shader graph/view hot-reload dependencies differ from lowered order".to_string(),
         ));
     }
-    Ok(StagePlan { ir, uses_idiv, uses_imod, dependencies: view.dependencies.clone() })
+    Ok(StagePlan {
+        ir,
+        uses_idiv,
+        uses_imod,
+        dependencies: view.dependencies.clone(),
+        concrete_plans: Arc::clone(concrete_plans),
+    })
 }
 
 fn checked_view_callees(
@@ -3685,7 +3830,7 @@ fn plan_shader_entry_from_view(
     ws: &Workspace,
     scx: &ScalarCtx,
     view: &ShaderStageView,
-    concrete_plans: &ConcretePlans,
+    concrete_plans: &Arc<ConcretePlans>,
 ) -> Result<EntryPlan, CompilerError> {
     plan_shader_entry_inner(ws, scx, view.entry.func, view, concrete_plans)
 }
@@ -3695,7 +3840,7 @@ fn plan_shader_entry_inner(
     scx: &ScalarCtx,
     fref: FuncRef,
     stage_view: &ShaderStageView,
-    concrete_plans: &ConcretePlans,
+    concrete_plans: &Arc<ConcretePlans>,
 ) -> Result<EntryPlan, CompilerError> {
     let f = &ws.module(fref.module).functions[fref.func];
     match shader_stage(f) {
@@ -3850,7 +3995,19 @@ fn render_shader_entry(
     }
     px.push('\n');
     px.push_str(&plan.stage.render_helpers(ws, interner)?);
-    px.push_str(&emit_fn_def_with(ws, interner, &plan.stage.ir.entry, &plan.stage.ir.body, Some(shape))?);
+    let entry_plan = plan
+        .stage
+        .concrete_plans
+        .get(&plan.stage.ir.entry.inst)
+        .ok_or_else(|| err(f.name_span, "shader profile: entry has no concrete plan"))?;
+    px.push_str(&emit_fn_def_with(
+        ws,
+        interner,
+        &plan.stage.ir.entry,
+        &plan.stage.ir.body,
+        Some(shape),
+        Some(entry_plan),
+    )?);
     px.push('\n');
     px.push_str(&format!("void main() {{\n  FragColor = {}(TexCoord);\n}}\n", f.name));
 
@@ -4584,7 +4741,21 @@ fn emit_vertex_stage(
     }
     out.push('\n');
     out.push_str(&helpers);
-    out.push_str(&emit_fn_def_with(ws, interner, &stage.ir.entry, mf, Some(&shape))?);
+    let entry_plan = stage
+        .concrete_plans
+        .get(&stage.ir.entry.inst)
+        .ok_or_else(|| {
+            let f = &ws.module(stage.ir.entry.fref().module).functions[stage.ir.entry.fref().func];
+            err(f.name_span, "shader profile: entry has no concrete plan")
+        })?;
+    out.push_str(&emit_fn_def_with(
+        ws,
+        interner,
+        &stage.ir.entry,
+        mf,
+        Some(&shape),
+        Some(entry_plan),
+    )?);
     Ok((out, dependencies))
 }
 
@@ -4665,7 +4836,18 @@ fn emit_fragment_stage(
     }
     out.push('\n');
     out.push_str(&helpers);
-    out.push_str(&emit_fn_def_with(ws, interner, &stage.ir.entry, mf, Some(&shape))?);
+    let entry_plan = stage
+        .concrete_plans
+        .get(&stage.ir.entry.inst)
+        .ok_or_else(|| err(span, "shader profile: entry has no concrete plan"))?;
+    out.push_str(&emit_fn_def_with(
+        ws,
+        interner,
+        &stage.ir.entry,
+        mf,
+        Some(&shape),
+        Some(entry_plan),
+    )?);
     // Single-output: the entry fn returns Vec4; main() forwards it to FragColor.
     // MRT: the entry IS `void main()` (destructured), so no wrapper.
     if !matches!(iface.fragment_output, FragmentOutput::Mrt(_)) {
@@ -4853,7 +5035,7 @@ fn plan_shader_pipeline_inner(
     vfref: FuncRef,
     ffref: FuncRef,
     stage_views: (&ShaderStageView, &ShaderStageView),
-    concrete_plans: &ConcretePlans,
+    concrete_plans: &Arc<ConcretePlans>,
 ) -> Result<PipelinePlan, CompilerError> {
     let vf = &ws.module(vfref.module).functions[vfref.func];
     let ff = &ws.module(ffref.module).functions[ffref.func];
@@ -5782,6 +5964,88 @@ mod assertion_flip_tests {
                 "the {label} rejection does not name the callee: {msg}"
             );
         }
+    }
+
+    #[test]
+    fn production_shader_body_consumes_the_concrete_result_plan() {
+        let (ws, mid) = build_ws(
+            "fn passthrough<T>(x: T) -> T { return x }\n\
+             fn caller(x: float) -> float { return passthrough(x) }",
+        );
+        let caller = resolve_root(&ws, mid, "caller").expect("root");
+        let session = shader_library_session(&ws, vec![caller]).expect("shader session");
+        let mut view = session.view.clone();
+        let passthrough = view
+            .order
+            .iter()
+            .find(|inst| ws.module(inst.func.module).functions[inst.func.func].name == "passthrough")
+            .cloned()
+            .expect("generic helper is retained");
+        let plan = Arc::make_mut(&mut view.concrete_plans)
+            .get_mut(&passthrough)
+            .expect("generic helper has a concrete plan");
+        plan.signature.result = Some(session.scx.interner().intern(MonoTy::String));
+
+        let err = emit_shader_library_with_view(&ws, &session.scx, &view)
+            .expect_err("a non-tier-0 concrete result plan must reject GLSL emission");
+        assert!(err.message.contains("not tier 0"), "unexpected error: {}", err.message);
+    }
+
+    #[test]
+    fn production_shader_calls_use_concrete_signature_and_instance_records() {
+        let (ws, mid) = build_ws(
+            "fn passthrough<T>(x: T) -> T { return x }\n\
+             fn caller(x: float) -> float { return passthrough(x) }",
+        );
+        let caller = resolve_root(&ws, mid, "caller").expect("root");
+        let session = shader_library_session(&ws, vec![caller]).expect("shader session");
+        let caller_inst = session.view.roots.first().expect("caller root").clone();
+        let caller_plan = session
+            .view
+            .concrete_plans
+            .get(&caller_inst)
+            .expect("caller has a concrete plan");
+        assert!(!caller_plan.callee_signatures.is_empty(), "call signature population is empty");
+
+        let scx = &session.scx;
+        let mut body = skull_mir::lower::lower_instance_with_plans(
+            &ws,
+            scx,
+            caller_plan,
+            &session.view.concrete_plans,
+        )
+        .expect("caller lowering");
+        let call = body
+            .insts
+            .iter()
+            .find_map(|(iid, inst)| matches!(inst, Inst::Call { .. }).then_some(iid))
+            .expect("caller has a direct call");
+        assert!(body.callee_instances.contains_key(&call), "concrete call has no instance record");
+        body.callee_instances.clear();
+        let missing_owner = emit_fn_def_with(
+            &ws,
+            scx.interner(),
+            &ShaderInstance::new(caller_inst.clone()),
+            &body,
+            None,
+            Some(caller_plan),
+        )
+        .expect_err("a concrete call without its instance record must reject");
+        assert!(missing_owner.message.contains("no recorded instantiation"), "{missing_owner}");
+
+        let mut view = session.view.clone();
+        let caller_plan = Arc::make_mut(&mut view.concrete_plans)
+            .get_mut(&caller_inst)
+            .expect("caller plan");
+        let signature = caller_plan
+            .callee_signatures
+            .values_mut()
+            .next()
+            .expect("call signature");
+        signature.result = Some(scx.interner().intern(MonoTy::String));
+        let bad_signature = emit_shader_library_with_view(&ws, scx, &view)
+            .expect_err("a non-tier-0 concrete call result must reject GLSL emission");
+        assert!(bad_signature.message.contains("call result") || bad_signature.message.contains("not tier 0"), "{bad_signature}");
     }
 
     // A partial key -- a recorded instantiation with an unreified slot -- used to

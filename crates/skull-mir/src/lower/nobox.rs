@@ -625,7 +625,7 @@ impl Builder<'_> {
         struct_name: Ustr,
         field: Ustr,
     ) -> Result<ValueRepr, CompilerError> {
-        let expected = if self.concrete_plan.is_some() {
+        let expected = if self.concrete_plan.is_some() && self.struct_field_ty(struct_name, field).is_some() {
             let literal = self
                 .cur_expr
                 .ok_or_else(|| self.gap_here("concrete struct field has no literal expression"))?;
@@ -793,6 +793,9 @@ impl Builder<'_> {
     }
 
     pub(crate) fn nobox_shape_of_ty(&self, ty: TyId) -> Option<ValueShape> {
+        if self.scx.values_first_class {
+            return None;
+        }
         if let Some(concrete) = self.concrete_ty_id(ty) {
             return mono_nobox_value_shape(self.ws, &concrete);
         }
@@ -804,17 +807,14 @@ impl Builder<'_> {
         // one real difference -- it also honours `scx.values_first_class`, which
         // the GLSL backend sets -- so the guard stays here and the core sees an
         // already-filtered nominal.
-        if !self.scx.values_first_class {
-            let mut shape = nullable_nominal_shape(self.ws, ty, &|t| {
-                self.ty_node(self.resolve_tyid(t)?)
-            })?;
-            // A generic bound to `E?` reaches the core as its payload nominal, so
-            // the `?` has to be re-applied from the binding. Idempotent for a
-            // spelled-out `E?`, which the core already marked.
-            shape.nullable |= self.is_nullable_ty(ty);
-            return Some(shape);
-        }
-        None
+        let mut shape = nullable_nominal_shape(self.ws, ty, &|t| {
+            self.ty_node(self.resolve_tyid(t)?)
+        })?;
+        // A generic bound to `E?` reaches the core as its payload nominal, so
+        // the `?` has to be re-applied from the binding. Idempotent for a
+        // spelled-out `E?`, which the core already marked.
+        shape.nullable |= self.is_nullable_ty(ty);
+        Some(shape)
     }
 
     /// The leaf globals a place rooted at a `nobox` global denotes, plus the

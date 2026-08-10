@@ -88,7 +88,7 @@ fn function_library_requires_concrete_body_plans() {
     let session = skull_codegen_glsl::shader_library_session(&ws, vec![root]).expect("session");
     let mut poisoned = session.view.clone();
     assert!(!poisoned.concrete_plans.is_empty(), "fixture must retain a concrete plan population");
-    poisoned.concrete_plans.clear();
+    std::sync::Arc::make_mut(&mut poisoned.concrete_plans).clear();
     let error = skull_codegen_glsl::emit_shader_library_with_view(&ws, &session.scx, &poisoned)
         .expect_err("emission must consume the concrete plan population");
     assert!(error.message.contains("concrete plan"), "unexpected error: {}", error.message);
