@@ -6,6 +6,8 @@ mod common;
 
 #[path = "backend_externs.rs"]
 mod backend_externs;
+#[path = "bounded_standalone_emission.rs"]
+mod bounded_standalone_emission;
 #[path = "closure.rs"]
 mod closure;
 #[path = "deepcopy.rs"]
@@ -36,6 +38,8 @@ mod log_dedup;
 mod loops;
 #[path = "publisher_abi.rs"]
 mod publisher_abi;
+#[path = "scalar_abi_arity.rs"]
+mod scalar_abi_arity;
 #[path = "map_iter.rs"]
 mod map_iter;
 #[path = "map_key_admission.rs"]
@@ -71,6 +75,8 @@ mod overlay;
 mod parse_float;
 #[path = "prelude_decl_arity.rs"]
 mod prelude_decl_arity;
+#[path = "polymorphic_recursion.rs"]
+mod polymorphic_recursion;
 #[path = "program.rs"]
 mod program;
 #[path = "put.rs"]

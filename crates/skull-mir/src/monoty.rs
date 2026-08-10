@@ -3,16 +3,16 @@
 //! substitutions specialized lowering reads, the symbols the emitters mangle,
 //! and the instance graph.
 //!
-//! It replaced a second, PARTIAL tree that answered `None` for valid `any`,
-//! unit, never and function types and let that `None` become a key slot rather
-//! than a rejection -- so `f<Vec2, unit>`, `f<Vec2, any>` and
-//! `f<Vec2, fn(int)->int>` shared one identity, and `string` had to be added
-//! one observed symptom at a time.
-//!
-//! Admission to a `SpecKey` is still conditional, and that policy now lives
-//! ALONE in [`reify_type`](crate::lower::shape::reify_type) where it can be
-//! read, rather than inside the type tree where it was invisible. Stage 4
-//! deletes it with the rest of the conditional-specialization mechanism.
+//! There is ONE of these walks, and that is the point: a second, narrower one
+//! is free to answer `None` for a type it does not admit, and `None` is not a
+//! type -- it is the absence of one, which every binding that lands in it
+//! shares. `f<Vec2, unit>`, `f<Vec2, any>` and `f<Vec2, fn(int)->int>` are three
+//! instantiations, and a partial walk gives them one identity and one emitted
+//! body. So `SpecKey` slots are built from this conversion too
+//! ([`reify_type`](crate::lower::shape::reify_type)): WHETHER a call
+//! specializes is conditional (the `@inline`/`@pure` opt-in, the storage
+//! trigger), WHICH instantiation it names is not. Stage 4 deletes the rest of
+//! the policy.
 //!
 //! Three properties, in the order they matter:
 //!
@@ -420,11 +420,12 @@ impl<'a> TyEnv<'a> {
         }
     }
 
-    fn solved(self, var: VarId, name: Ustr) -> Result<TyId, MonoTyReason> {
+    /// The type inference solved `var` to, `None` when it left the slot open.
+    /// An open slot is not an error here -- a caller's substitution may still
+    /// answer it (see the `Infer` arm of `convert_at`).
+    fn solved(self, var: VarId) -> Result<Option<TyId>, MonoTyReason> {
         match self {
-            TyEnv::Body(inf) => {
-                inf.substitutions.get(var).ok_or(MonoTyReason::UnresolvedInfer(name))
-            }
+            TyEnv::Body(inf) => Ok(inf.substitutions.get(var)),
             TyEnv::Decl => Err(MonoTyReason::NotADeclarationType),
         }
     }
@@ -437,6 +438,24 @@ impl<'a> TyEnv<'a> {
 pub fn generic_var_of(ws: &Workspace, inf: &BodyInference, ty: TyId) -> Option<VarId> {
     match crate::lower::ty_node(ws, inf, ty)? {
         TypeExpr::Generic(var, _) => Some(var),
+        _ => None,
+    }
+}
+
+/// The `VarId` an INFERENCE variable's `TyId` names, read straight out of the
+/// body's own arena.
+///
+/// The `Infer` twin of [`generic_var_of`], for the slots a struct's defaults
+/// body publishes. Deliberately does NOT chase `substitutions`: a slot that
+/// inference already solved is not a hole a caller may fill, and binding it
+/// would overwrite the solution.
+pub fn infer_var_of(inf: &BodyInference, ty: TyId) -> Option<VarId> {
+    let idx = match ty {
+        TyId::Local(idx) => idx,
+        TyId::Static(..) => return None,
+    };
+    match inf.ty_arena[idx] {
+        TypeExpr::Infer(var, _) => Some(var),
         _ => None,
     }
 }
@@ -648,8 +667,24 @@ fn convert_at<S: std::hash::BuildHasher>(
             BuiltinTy::Error => return Err(MonoTyReason::RecoveryError),
         },
         TypeExpr::Infer(var, name) => {
-            let next = env.solved(var, name)?;
-            return convert_at(ws, env, next, subst, depth + 1, bound);
+            // An unbound var the CALLER can answer. A struct's field default is
+            // checked with the struct's declared generics replaced by fresh
+            // inference vars, so the type an injection has to resolve is an
+            // `Infer`, not a `Generic` -- the caller binds those slots from the
+            // literal's arguments (`Builder::with_struct_default`).
+            //
+            // Safe to consult one map for both arms: `Gamma` mints inference
+            // vars from `lower_var_high_water` up, so a `VarId` is a declared
+            // generic or an inference var, never both.
+            match env.solved(var)? {
+                Some(next) => return convert_at(ws, env, next, subst, depth + 1, bound),
+                None => {
+                    let bound_to =
+                        subst.get(&var).cloned().ok_or(MonoTyReason::UnresolvedInfer(name))?;
+                    *bound += 1;
+                    return Ok(bound_to);
+                }
+            }
         }
         TypeExpr::Generic(var, name) => {
             let bound_to = subst.get(&var).cloned().ok_or(MonoTyReason::UnboundGeneric(name))?;
@@ -687,4 +722,43 @@ fn convert_at<S: std::hash::BuildHasher>(
             MonoTy::Function { params: ps, ret: Box::new(ret) }
         }
     })
+}
+
+/// Polymorphic recursion (`f<T> -> f<[T]>`) does not terminate under
+/// demand-driven instantiation (plan S 7). The cap turns divergence into a
+/// REPORT: a capped instance is a changing-instance recursion candidate.
+///
+/// It caps the STRUCTURAL DEPTH of the instantiation types, not the path length
+/// from a root. A path length is a property of how the walk arrived, so capping
+/// on it makes graph MEMBERSHIP depend on discovery order -- measured: with a
+/// path cap, `games/little-knights` produced two different manifests under
+/// forward and reversed root order, failing plan S 20g.4. Type depth is a
+/// property of the instance itself, so the same instance is capped or not
+/// regardless of how it was reached.
+///
+/// It lives HERE, in the lowest crate that owns [`MonoTy`], so the instance
+/// graph and BOTH emitters read one decision. Sharing only the constant is not
+/// enough: three call sites each aggregating depth their own way is three
+/// implementations that can drift, and the one that lacked the check entirely
+/// did not miscompile -- it HUNG.
+pub const MAX_INSTANTIATION_DEPTH: u32 = 12;
+
+/// **THE admissibility decision for an instantiation's type arguments.**
+///
+/// Returns the offending argument -- the deepest one past the cap -- or `None`
+/// when the instantiation is admissible. Callers differ only in what they DO
+/// with the answer: the instance graph declines to expand and records a
+/// changing-instance-recursion candidate, while emission REJECTS, because a call
+/// site has already spelled the specialized name and skipping the body would
+/// ship a call to a definition nothing writes.
+///
+/// Takes `&MonoTy` rather than a depth so the aggregation is here too. The graph
+/// holds `MonoTyId`s and reaches these through `MonoArena::get`; emission holds
+/// the owned trees of a `SpecKey` directly.
+pub fn too_deep_to_instantiate<'a>(
+    args: impl IntoIterator<Item = &'a MonoTy>,
+) -> Option<&'a MonoTy> {
+    args.into_iter()
+        .filter(|t| t.depth() > MAX_INSTANTIATION_DEPTH)
+        .max_by_key(|t| t.depth())
 }

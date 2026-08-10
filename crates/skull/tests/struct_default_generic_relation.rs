@@ -1,32 +1,25 @@
-//! **What bone DOES record for a generic struct's field defaults, and what it
-//! does not** (plan S 9 / Stage 3, the C+D prerequisite).
+//! **What bone records for a generic struct's field defaults** (plan S 9 /
+//! Stage 3).
 //!
-//! Read-only about `bone-inference`. The generic struct-default gap looks like
-//! missing inference and is not, and a fix designed from that reading would be
-//! built in the wrong crate -- so what bone does and does not do is asserted
-//! here rather than assumed.
+//! Read-only about `bone-inference`. This gap looked like missing inference and
+//! was not -- a fix designed from that reading would have been built in the
+//! wrong crate -- so what bone does is asserted here rather than assumed.
 //!
-//! `check_struct_defaults` DOES propagate the field's declared type into the
+//! `check_struct_defaults` propagates the field's declared type into the
 //! initializer: it calls `instantiate_generics` on the struct's generics --
 //! which replaces each declared `Generic(T)` with a FRESH inference variable --
 //! substitutes the field type through that map, infers the default, and
 //! `coerce`s the two, which unifies through `Nullable` on both sides. So the
 //! callee's generic and the field's `T` end up in ONE symbolic inference class.
 //!
-//! What is missing is a durable relation from that class back to the struct's
-//! declared generic SLOT. The map `instantiate_generics` returns is local to
-//! the check and is not published, so a later consumer holding `Box<int>` has
-//! no way to say "inference variable N is this struct's generic 0" and resolve
-//! it. That, not "bone leaves it unsolved", is what the cut needs.
+//! A consumer holding `Box<int>` also needs to say "inference variable N is
+//! this struct's generic 0", which the class alone does not tell it.
 //!
-//! There is deliberately NO bone-level sentinel for that absence here. A test
-//! that reads today's `BodyInference` can only assert a structural zero over
-//! fields that already exist, which stays green forever no matter what a future
-//! recording adds -- it would be a gate with no population, not a sentinel. The
-//! RED for it has to come after the intended recording/query seam exists and
-//! returns empty, and that seam is in bone, which is author-owned. The CURRENT
-//! symptom is guarded end-to-end by
-//! `site_domain::a_generic_structs_field_default_names_no_instance_sentinel`.
+//! `BodyInference::struct_default_generic_slots` is that relation, and the
+//! slot arms below are what say it names the right class rather than merely
+//! being present. What CONSUMES it -- distinct sites, distinct concrete
+//! instances -- is asserted end-to-end by
+//! `site_domain::a_generic_structs_field_default_names_its_own_instance`.
 
 use std::sync::LazyLock;
 
@@ -180,4 +173,138 @@ fn a_generic_field_default_and_its_declared_type_share_one_inference_class() {
          inference classes -- `coerce` did not link them, and the gap is in \
          bone-inference rather than in the site domain"
     );
+}
+
+/// The published relation NAMES that class: slot `i` of
+/// `struct_default_generic_slots` is the var the struct's declared generic `i`
+/// was instantiated to.
+///
+/// This is the half the test above exists to contrast with. Asserting the arity
+/// alone would pass on any vector of the right length, so the slot is compared
+/// against the class the sibling reference and the call binding already agree
+/// on -- if the recording published some other var, the two disagree.
+#[test]
+fn the_defaults_body_publishes_its_declared_generic_slots() {
+    let ws = check(SRC);
+    let (mid, inf) = defaults_inference(&ws);
+    let sidx = ws
+        .module(mid)
+        .structs
+        .iter()
+        .find(|(_, s)| s.name.as_str() == "Box")
+        .map(|(i, _)| i)
+        .expect("Box");
+    let def = &ws.module(mid).structs[sidx];
+
+    assert_eq!(
+        inf.struct_default_generic_slots.len(),
+        def.generics.len(),
+        "one slot per DECLARED generic, or a consumer cannot index by position"
+    );
+
+    let body = &ws.module(mid).bodies[&BodyOwner::StructDefaults(sidx)];
+    let value_default =
+        *body.field_defaults.get(&Ustr::from("value")).expect("`value` has a default");
+    let class = unresolved_var(
+        &ws,
+        inf,
+        *inf.call_generic_bindings
+            .get(&value_default)
+            .and_then(|b| b.first())
+            .expect("the call records a binding for `seed`'s generic"),
+    );
+    assert!(class.is_some(), "the fixture is no longer the generic case");
+
+    assert_eq!(
+        unresolved_var(&ws, inf, inf.struct_default_generic_slots[0]),
+        class,
+        "slot 0 is not the class `Box`'s `T` was instantiated to, so a consumer \
+         holding `Box<int>` would bind the wrong variable"
+    );
+}
+
+/// Two generics, and the slots are in DECLARATION order.
+///
+/// One generic cannot distinguish an ordered vector from a set, and the
+/// consumer indexes by position: a reversed recording binds `A` to `B`'s
+/// argument silently, since both slots are inference vars of the same shape.
+#[test]
+fn the_slots_are_in_declaration_order() {
+    const PAIR: &str = r#"
+fn seed<T>() -> T? { return null }
+
+struct Pair<A, B> { a: A? = seed(), b: B? = seed() }
+
+fn main() {
+    let p: Pair<int, string> = Pair {}
+    print("{p.a} {p.b}")
+}
+"#;
+    let ws = check(PAIR);
+    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    let sidx = ws
+        .module(mid)
+        .structs
+        .iter()
+        .find(|(_, s)| s.name.as_str() == "Pair")
+        .map(|(i, _)| i)
+        .expect("Pair");
+    let inf = ws
+        .inference(mid)
+        .and_then(|ir| ir.per_fn.get(&BodyOwner::StructDefaults(sidx)))
+        .expect("Pair has a defaults body inference");
+    let body = &ws.module(mid).bodies[&BodyOwner::StructDefaults(sidx)];
+
+    assert_eq!(inf.struct_default_generic_slots.len(), 2);
+
+    for (slot, field) in [(0usize, "a"), (1, "b")] {
+        let default = *body.field_defaults.get(&Ustr::from(field)).expect("default");
+        let class = unresolved_var(
+            &ws,
+            inf,
+            *inf.call_generic_bindings
+                .get(&default)
+                .and_then(|b| b.first())
+                .expect("binding"),
+        );
+        assert!(class.is_some(), "field `{field}` is no longer the generic case");
+        assert_eq!(
+            unresolved_var(&ws, inf, inf.struct_default_generic_slots[slot]),
+            class,
+            "slot {slot} does not match field `{field}`'s class -- the slots are \
+             not in declaration order"
+        );
+    }
+}
+
+/// A non-generic struct's defaults body publishes NO slots.
+///
+/// Without this the field could be populated unconditionally and every arm
+/// above would still pass; the consumer needs the empty case to mean "nothing
+/// to bind" rather than "not recorded yet".
+#[test]
+fn a_non_generic_structs_defaults_body_publishes_no_slots() {
+    const PLAIN: &str = r#"
+struct Plain { n: int = 3 }
+
+fn main() {
+    let p: Plain = Plain {}
+    print("{p.n}")
+}
+"#;
+    let ws = check(PLAIN);
+    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    let sidx = ws
+        .module(mid)
+        .structs
+        .iter()
+        .find(|(_, s)| s.name.as_str() == "Plain")
+        .map(|(i, _)| i)
+        .expect("Plain");
+    let inf = ws
+        .inference(mid)
+        .and_then(|ir| ir.per_fn.get(&BodyOwner::StructDefaults(sidx)))
+        .expect("Plain has a defaults body inference");
+
+    assert!(inf.struct_default_generic_slots.is_empty());
 }

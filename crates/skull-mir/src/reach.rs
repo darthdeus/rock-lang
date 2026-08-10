@@ -18,7 +18,8 @@
 //! exit frame sits below its children), and a deep call graph cannot blow the
 //! native stack.
 
-use crate::mir::{FuncRef, Inst, MirFunc};
+use crate::mir::{Block, FuncRef, Inst, MirFunc};
+use comfy_la_arena::Idx;
 use ustr::Ustr;
 use bone_semantic::prelude::CompilerError;
 use rustc_hash::FxHashSet as HashSet;
@@ -113,6 +114,66 @@ pub fn walk<P: ReachPolicy>(policy: &mut P) -> Result<Vec<P::Node>, CompilerErro
     Ok(order)
 }
 
+/// THE blocks of `mf` that emission renders -- one oracle, because "which
+/// blocks count" was answered three different ways and two of them were wrong.
+///
+/// A body is not one CFG. It is a set of REGIONS, each entered on its own:
+///
+/// - the body proper, reachable from `mf.entry`;
+/// - every `Inst::Lambda` region reached from a block already in the set,
+///   transitively. In an ordinary fn `convert_closures` has already hoisted
+///   these into `nested_fns` and none remain; in a `co fn` they stay in the
+///   arena by design, including the lifecycle-hook bodies `transform_coroutine`
+///   peels to the constructor;
+/// - every `coro_defers` region.
+///
+/// That is the same set `coroutine_emit` renders -- the step, its hoisted
+/// siblings, one aux fn per defer entry, and one per hook lambda entry. The
+/// defer arm is completeness against THAT list, not a measured fix: deleting it
+/// leaves every gate green, so a defer region is reachable some other way
+/// today. The hook arm is the opposite -- delete it and the hook fixture goes
+/// red on both backends.
+///
+/// NOT every block in the arena, which is the tempting shortcut and is
+/// incorrect: a hoisted lambda body is a full arena clone of its parent that
+/// differs only in `entry`, so it carries the parent's unreachable blocks, and
+/// judging those attributes to this body calls it does not contain.
+///
+/// Reaching a lambda through the blocks that MENTION it is what separates the
+/// two: a live region is named by an `Inst::Lambda` in a block that is itself
+/// emitted, and a clone's leftovers are named by nothing.
+pub fn emitted_blocks(mf: &MirFunc) -> Vec<Idx<Block>> {
+    let mut seen: HashSet<Idx<Block>> = HashSet::default();
+    let mut out: Vec<Idx<Block>> = Vec::new();
+    let mut regions: Vec<Idx<Block>> = vec![mf.entry];
+    regions.extend(mf.coro_defers.iter().map(|&(_, entry)| entry));
+    while let Some(entry) = regions.pop() {
+        if !mf.blocks.iter().any(|(id, _)| id == entry) {
+            continue;
+        }
+        for bid in crate::cfg::reachable_blocks_from(mf, entry) {
+            if !seen.insert(bid) {
+                continue;
+            }
+            out.push(bid);
+            for &iid in &mf.blocks[bid].insts {
+                // `CoroHook` names its body through an operand rather than by
+                // sitting in the block list, so following only the block's own
+                // `Inst::Lambda`s reaches a `co fn`'s ordinary lambdas and
+                // misses every lifecycle hook.
+                let lambda = match &mf.insts[iid] {
+                    Inst::CoroHook { lambda, .. } => *lambda,
+                    _ => iid,
+                };
+                if let Inst::Lambda { entry, .. } = &mf.insts[lambda] {
+                    regions.push(*entry);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Every module-global name `mf` reads or writes, main body and hoisted nested
 /// fns, deduped in source order.
 ///
@@ -144,14 +205,36 @@ pub fn global_ref_names(mf: &MirFunc) -> Vec<Ustr> {
     out
 }
 
-/// Every statically-resolved call target in `mf`, walking BLOCK inst-lists (not
-/// the raw arena) so a spliced-away call's stale arena inst is not re-discovered
-/// -- only the calls that survive inlining co-emit. Hoisted closure bodies are
-/// separate `nested_fns` after `convert_closures`, so their calls are walked too.
+/// Every call target in `mf` that is reached through the callee's DECLARATION
+/// body, walking BLOCK inst-lists (not the raw arena) so a spliced-away call's
+/// stale arena inst is not re-discovered -- only the calls that survive inlining
+/// co-emit. Hoisted closure bodies are separate `nested_fns` after
+/// `convert_closures`, so their calls are walked too.
+///
+/// Deliberately NOT [`emitted_blocks`], and the asymmetry is the point: this
+/// walk decides what stays ALIVE, where over-approximating costs an unused
+/// definition, while `spec_bound_calls` decides what gets DEFINED, where
+/// under-approximating ships a call to nothing. Measured over the 18 bin
+/// projects plus `tests/` -- 260,154 bodies, 260,076 agreeing as sets, and in
+/// `keys` and `run_into` the oracle misses a callee this walk finds. Until
+/// those two are explained, the safe side of the asymmetry is where each walk
+/// already sits. (The 2,876 multiset disagreements are just the clone re-walk:
+/// a hoisted body is a full arena copy, so its parent's calls are counted
+/// twice, and reachability dedups them anyway.)
+///
+/// A site carrying a `spec_bindings` entry names a SPECIALIZED body, and
+/// [`spec_bound_calls`] emits that edge as a `SpecDemand`. Yielding its
+/// declaration here as well would keep the callee's shared body reachable on
+/// the strength of a call that does not target it -- which is how a generic
+/// declaration stayed live with every one of its call sites specialized. The
+/// two functions partition one edge set; neither is the whole of it.
 pub fn call_targets(mf: &MirFunc) -> Vec<FuncRef> {
     fn walk(mf: &MirFunc, out: &mut Vec<FuncRef>) {
         for (_, block) in mf.blocks.iter() {
             for &iid in &block.insts {
+                if mf.spec_bindings.contains_key(&iid) {
+                    continue;
+                }
                 match &mf.insts[iid] {
                     Inst::Call { func, .. } | Inst::CallMulti { func, .. } => out.push(*func),
                     _ => {}
@@ -173,24 +256,71 @@ pub fn call_targets(mf: &MirFunc) -> Vec<FuncRef> {
 /// and a column-stored element's storage has no `_data` the shared body could
 /// read -- so each pair needs its own standalone emitted copy.
 ///
-/// REACHABLE blocks only: a hoisted lambda body is a full arena clone of its
-/// parent that differs only in `entry`, so it carries the parent's unreachable
-/// blocks and their bindings. Judging those would specialize for a call the body
-/// does not contain.
+/// EMITTED blocks only ([`emitted_blocks`]): a hoisted lambda body is a full
+/// arena clone of its parent that differs only in `entry`, so it carries the
+/// parent's unreachable blocks and their bindings. Judging those would
+/// specialize for a call the body does not contain.
+///
+/// Entry-reachability alone was too NARROW in the other direction, and silently:
+/// a `co fn`'s lambda and lifecycle-hook regions are entered through
+/// `Inst::Lambda`, never a terminator, so their demands were never filed while
+/// their ordinary callees were discovered normally. The emitted chunk then
+/// called a specialization nothing defined -- a nil global on luajit, a refusal
+/// to emit on JS.
 ///
 /// Per BODY, not per tree -- the caller recurses into `nested_fns` itself. A
 /// nested `fn` and a `co fn`'s state machine are their own emitted callables, and
 /// leaving them unchecked makes a missing splice silent (the nested fn dies at
 /// runtime on a nil `_data`).
-pub fn spec_bound_calls(mf: &MirFunc, out: &mut Vec<(FuncRef, crate::lower::SpecKey)>) {
-    for bid in crate::cfg::reachable_blocks_from(mf, mf.entry) {
+/// Each demand also carries the bound-conformance tree the callee's own
+/// placeholders resolve through, resolved HERE -- in the body that records it,
+/// where its inference arena is in scope. That is what lets a demand travel to
+/// a standalone emission at all: a raw [`bone_semantic::prelude::BoundTree`] is
+/// stated in this body's `TyId`s and means nothing anywhere else.
+pub fn spec_bound_calls(
+    ws: &bone_semantic::inference::Workspace,
+    ctx: &crate::bound::BoundCtx,
+    mf: &MirFunc,
+    out: &mut Vec<crate::bound::SpecDemand>,
+) -> Result<(), CompilerError> {
+    let empty = bone_semantic::prelude::BoundTree::default();
+    for bid in emitted_blocks(mf) {
         for &iid in &mf.blocks[bid].insts {
             let Some(key) = mf.spec_bindings.get(&iid) else { continue };
             let fref = match &mf.insts[iid] {
                 Inst::Call { func, .. } | Inst::CallMulti { func, .. } => *func,
                 _ => continue,
             };
-            out.push((fref, key.clone()));
+            // An already-RESOLVED tree wins: this call was retargeted by a
+            // standalone substitution, whose leaf carried the callee's own
+            // resolution. Re-deriving it from `bound_trees` is not possible --
+            // there is no raw entry, and this body's arena cannot state a tree
+            // that came from another instantiation.
+            let tree = match mf.resolved_bound_trees.get(&iid) {
+                Some(t) => t.clone(),
+                None => {
+                    let raw = mf.bound_trees.get(&iid).unwrap_or(&empty);
+                    crate::bound::resolve_bound_tree(ws, ctx.inf, ctx.subst, raw, ctx.incoming)?
+                }
+            };
+            // The premise the Instance re-key rests on, checked where every
+            // specialized site passes regardless of which path wrote it. Two
+            // writers derive the instance differently -- lowering beside the
+            // delivery decision, `substitute_bound_call` from the key -- so
+            // "they agree" is a measurement, not a convention, and a site with
+            // no instance at all is the shape that actually occurred.
+            debug_assert!(
+                mf.callee_instances.get(&iid).is_some_and(|oi| {
+                    oi.func == fref
+                        && crate::lower::spec_key_from_subst(ws, fref, &oi.subst)
+                            .is_some_and(|k| &k == key)
+                }),
+                "specialized call to `{}` in `{}` records no agreeing instance",
+                ws.module(fref.module).functions[fref.func].name,
+                mf.name,
+            );
+            out.push(crate::bound::SpecDemand { func: fref, key: key.clone(), tree });
         }
     }
+    Ok(())
 }

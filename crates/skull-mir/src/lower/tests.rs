@@ -941,8 +941,6 @@ fn f(c0) {
             e,
             spec_fn(&ws, mid, "id"),
             &SpecSubst::default(),
-            bone_semantic::hir::FnBackend::Lua,
-            false,
         )
         .expect_err("a generic callee with no recorded bindings must reject");
         assert!(err.message.contains("no recorded generic bindings"), "{}", err.message);
@@ -960,7 +958,6 @@ fn f(c0) {
             spec_fn(&ws, mid, "id"),
             &[],
             &SpecSubst::default(),
-            false,
         )
         .expect_err("0 bindings against a 1-generic callee must reject");
         assert!(err.message.contains("declares 1 generic"), "{}", err.message);
@@ -983,7 +980,6 @@ fn f(c0) {
             fref,
             &[int_ty],
             &SpecSubst::default(),
-            false,
         )
         .expect_err("a non-generic declared generic must reject");
         assert!(err.message.contains("is not a generic type variable"), "{}", err.message);

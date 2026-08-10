@@ -1,15 +1,17 @@
 //! Stage-0e totality ablation (`docs/monomorphization-plan.md` S 0e).
 //!
-//! The mode is process-global, so every test here serializes on one mutex and
-//! restores the flag on the way out. Without that, a parallel test would see the
-//! flag flipped under it and the fatals of one fixture would land in another's
-//! census.
+//! The mode is process-global, so every test here holds `common::AblationGuard`
+//! and restores the flag on the way out. That guard's lock is shared with every
+//! other file in this binary that touches the mode -- a per-file `static MODE`
+//! serializes a file against itself and against nothing else.
 
-use std::sync::{LazyLock, Mutex, MutexGuard};
+use std::sync::LazyLock;
 
 use bone_semantic::inference::Workspace;
 use skull_mir::ablation::{self, FatalCategory};
 use ustr::Ustr;
+
+use crate::common::AblationGuard as ModeGuard;
 
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
     rock_host::stdlib_loader::stdlib_files()
@@ -20,34 +22,6 @@ static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         })
         .collect()
 });
-
-static MODE: Mutex<()> = Mutex::new(());
-
-/// Hold the mode for one test. `Drop` restores it even on a panicking assert,
-/// so a failing test cannot leave the flag on for the next one.
-struct ModeGuard(#[allow(dead_code)] MutexGuard<'static, ()>);
-
-impl ModeGuard {
-    fn on() -> Self {
-        let g = MODE.lock().unwrap_or_else(|e| e.into_inner());
-        ablation::clear();
-        ablation::set_enabled(true);
-        ModeGuard(g)
-    }
-    fn off() -> Self {
-        let g = MODE.lock().unwrap_or_else(|e| e.into_inner());
-        ablation::clear();
-        ablation::set_enabled(false);
-        ModeGuard(g)
-    }
-}
-
-impl Drop for ModeGuard {
-    fn drop(&mut self) {
-        ablation::set_enabled(false);
-        ablation::clear();
-    }
-}
 
 fn check(src: &str) -> Workspace {
     let mut modules = STDLIB.clone();
@@ -70,36 +44,92 @@ fn fatals_of(src: &str) -> Vec<ablation::Fatal> {
     ablation::take()
 }
 
-/// A generic `co fn` must produce a classified fatal under the mode.
-/// `compute_call_spec` bails on `is_coroutine` before it can build a SpecKey, so
-/// every instantiation shares one body -- exactly the "shared generic Rock body"
-/// the target invariant forbids, and the shape
-/// `generic_coroutine_column_param_sentinel` already pins as a live miscompile.
+/// An `Iterator`-bounded body has a concrete form now (plan S 12, mono cut C+D
+/// step D-1): it is emitted STANDALONE at each instantiation, with its
+/// placeholder `next` calls resolved from the tree its specialization demand
+/// carries. So under the mode it must record nothing at all.
 ///
-/// RED CONTROL: `the_mode_off_records_nothing` is the same fixture with the mode
-/// off, and it must find zero. Together they show the mode is what produces the
-/// record, not the fixture.
+/// The growth call is the ADMISSION CONTROL, and it is a `polymorphic-growth`
+/// one on purpose: that is an S 0h REJECT, permanent by decision, so it cannot
+/// close underneath this fixture the way the bounded surface just did -- which
+/// is exactly how this test's own control rotted (it was `total` itself).
 #[test]
-fn a_generic_coroutine_is_an_unsupported_surface_fatal() {
+fn a_bounded_body_is_no_longer_an_unsupported_surface() {
+    let _g = ModeGuard::on();
+    let fatals = fatals_of(
+        r#"
+fn depth<T>(x: T, n: int) -> int {
+    if n <= 0 { return 0 }
+    let wrapped: [T] = [x]
+    return 1 + depth(wrapped, n - 1)
+}
+fn total<I: Iterator<int>>(it: I) -> int {
+    let s = 0
+    for v in it { s = s + v }
+    return s
+}
+fn main() {
+    depth(1, 12)
+    let xs: [int] = [1, 2, 3]
+    let n = total(xs.iter())
+}
+"#,
+    );
+    assert!(
+        fatals.iter().any(|f| f.category == FatalCategory::PolymorphicGrowth),
+        "the control did not fire, so this fixture proves nothing about `total`; got {:?}",
+        fatals.iter().map(|f| (f.category, &f.callee)).collect::<Vec<_>>()
+    );
+    let hit: Vec<&ablation::Fatal> = fatals.iter().filter(|f| f.callee == "total").collect();
+    assert!(
+        hit.is_empty(),
+        "an `Iterator`-bounded body is emitted standalone now, so a call to one \
+         must record no fatal; got {:?}",
+        hit.iter().map(|f| (f.category, f.detail.as_str())).collect::<Vec<_>>()
+    );
+}
+
+/// The other half of the same axis, and the reason the control above moved: a
+/// generic `co fn` USED to be the unsupported surface. D-3 gave it a concrete
+/// form -- a standalone specialized definition through `coro_transform` -- so
+/// under the mode it must now record nothing at all.
+///
+/// The growth call in the same fixture is the admission control: without it a
+/// zero for `stream` would be indistinguishable from a fixture the ablation
+/// never saw. It is a `polymorphic-growth` call because that is an S 0h REJECT
+/// and therefore permanent -- the bounded call that used to stand here stopped
+/// firing the moment D-1 landed.
+#[test]
+fn a_generic_coroutine_is_no_longer_an_unsupported_surface() {
     let _g = ModeGuard::on();
     let fatals = fatals_of(
         r#"
 co fn stream<T>(v: T) {
     yield
 }
-fn main() { let c = stream(1) }
+fn depth<T>(x: T, n: int) -> int {
+    if n <= 0 { return 0 }
+    let wrapped: [T] = [x]
+    return 1 + depth(wrapped, n - 1)
+}
+fn main() {
+    let c = stream(1)
+    depth(1, 12)
+}
 "#,
     );
-    let hit: Vec<&ablation::Fatal> = fatals
-        .iter()
-        .filter(|f| f.callee == "stream" && f.category == FatalCategory::UnsupportedSurface)
-        .collect();
     assert!(
-        !hit.is_empty(),
-        "a generic `co fn` produced no unsupported-surface fatal; got {:?}",
+        fatals.iter().any(|f| f.category == FatalCategory::PolymorphicGrowth),
+        "the control did not fire, so this fixture proves nothing about `stream`; got {:?}",
         fatals.iter().map(|f| (f.category, &f.callee)).collect::<Vec<_>>()
     );
-    assert_eq!(hit[0].caller, "main", "the fatal must name the CALLER");
+    let hit: Vec<&ablation::Fatal> = fatals.iter().filter(|f| f.callee == "stream").collect();
+    assert!(
+        hit.is_empty(),
+        "a generic `co fn` specializes now, so a call to one must record no \
+         fatal; got {:?}",
+        hit.iter().map(|f| (f.category, f.detail.as_str())).collect::<Vec<_>>()
+    );
 }
 
 /// A generic `inline(lua)` body is a real boundary, not a missing edge. It must
@@ -142,15 +172,17 @@ fn the_mode_off_records_nothing() {
     let _g = ModeGuard::off();
     let fatals = fatals_of(
         r#"
-co fn stream<T>(v: T) {
-    yield
+fn total<I: Iterator<int>>(it: I) -> int {
+    let s = 0
+    for v in it { s = s + v }
+    return s
 }
 inline(lua) fn probe_len<T>(v: [T]) -> int = """
     return #v._data
 """
 fn main() {
-    let c = stream(1)
     let xs: [int] = [1, 2, 3]
+    let t = total(xs.iter())
     let n = probe_len(xs)
 }
 "#,
@@ -251,56 +283,64 @@ fn main() {
     );
 }
 
-/// A generic call whose binding is a valid type specialization does not admit
-/// (`unit`, a function type, `any`) must produce a classified fatal.
+/// A generic call whose binding is `unit`, `any` or a function type is NOT a
+/// fatal: those are valid logical types with a `MonoTy` constructor apiece, so
+/// the key names them and each call has its own instantiation (plan S 2a/S 2b).
 ///
-/// It does not today: `compute_spec_from_bindings` pushes `None` into the key
-/// for such a slot and the ablation arm returns that PARTIAL key as a successful
-/// specialization, so `call_spec` never reaches the decline classifier -- and an
-/// all-`None` key maps straight back to the shared body (`spec_fn_name`). Plan
-/// S 2a's `f<Vec2, unit>` / `f<Vec2, any>` / `f<Vec2, fn(int)->int` collision,
-/// realized INSIDE the mode whose whole job is to reject shared generic bodies.
+/// This test used to assert the opposite, and that is what it was for. While the
+/// key was built by a second, narrower walk than the identity oracle, such a slot
+/// was `None` -- and `None` is the absence of a type, shared by every binding
+/// that landed in it, so `f<Vec2, unit>`, `f<Vec2, any>` and
+/// `f<Vec2, fn(int)->int>` all mangled to one symbol. Both walks are now
+/// [`skull_mir::monoty::convert`], so the category has no population by
+/// construction rather than by policy.
+///
+/// The `depth` call is the ADMISSION CONTROL, and it is what makes `ident`'s
+/// zero mean something: polymorphic growth is an S 0h REJECT and therefore
+/// permanent, so the mode is demonstrably live over this very program. Without
+/// it a zero here would be indistinguishable from a fixture the ablation never
+/// saw. It used to be an `Iterator`-bounded call, which D-1 closed.
+/// The emitted-identity half -- that the three calls name three different bodies
+/// -- is `valid_type_identity.rs`; this asserts only that they stopped being
+/// reported as unrepresentable.
 #[test]
-fn an_unadmitted_binding_is_a_classified_fatal() {
+fn an_unadmitted_binding_is_no_longer_a_fatal() {
     let _g = ModeGuard::on();
     let fatals = fatals_of(
         r#"
 fn ident<T>(x: T) -> T { return x }
 fn nothing() {}
 fn twice(n: int) -> int { return n * 2 }
+fn depth<T>(x: T, n: int) -> int {
+    if n <= 0 { return 0 }
+    let wrapped: [T] = [x]
+    return 1 + depth(wrapped, n - 1)
+}
 fn main() {
     let u = ident(nothing())
     let a: any = 1
     let b = ident(a)
     let f: fn(int) -> int = twice
     let g = ident(f)
+    depth(1, 12)
 }
 "#,
     );
-    let hit: Vec<&ablation::Fatal> = fatals.iter().filter(|f| f.callee == "ident").collect();
+    let control: Vec<&ablation::Fatal> = fatals
+        .iter()
+        .filter(|f| f.category == FatalCategory::PolymorphicGrowth)
+        .collect();
     assert!(
-        !hit.is_empty(),
-        "a generic call at unit / any / a function type produced NO fatal -- it rode a \
-         partial key to the shared body; got {:?}",
+        !control.is_empty(),
+        "the control did not fire, so this fixture proves nothing about `ident`: \
+         polymorphic growth must still be a fatal; got {:?}",
         fatals.iter().map(|f| (f.category, &f.callee)).collect::<Vec<_>>()
     );
-    let sites: std::collections::BTreeSet<(ustr::Ustr, (usize, usize))> =
-        hit.iter().map(|f| (f.span.file, f.span.offset_range)).collect();
-    assert_eq!(sites.len(), 3, "expected one fatal SITE per unrepresentable binding; got {hit:?}");
-    for f in &hit {
-        assert_eq!(
-            f.category,
-            FatalCategory::UnsupportedSurface,
-            "a VALID type specialization does not admit is a surface gap, not a missing \
-             record: the graph edge exists and bone recorded the binding"
-        );
-    }
-    let rendered: std::collections::BTreeSet<&str> =
-        hit.iter().map(|f| f.detail.as_str()).collect();
-    assert_eq!(
-        rendered.len(),
-        3,
-        "the three bindings must be DISTINGUISHED by the detail -- a shared detail would \
-         mean the classifier is not reading the type; got {rendered:?}"
+    let hit: Vec<&ablation::Fatal> = fatals.iter().filter(|f| f.callee == "ident").collect();
+    assert!(
+        hit.is_empty(),
+        "`unit`, `any` and `fn(int) -> int` are valid types the key now names, so a call \
+         bound to one must record no fatal; got {:?}",
+        hit.iter().map(|f| (f.category, f.detail.as_str())).collect::<Vec<_>>()
     );
 }

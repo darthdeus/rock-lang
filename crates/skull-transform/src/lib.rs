@@ -32,6 +32,7 @@ use comfy_la_arena::{Idx, RawIdx};
 use skull_mir::mir::*;
 use ustr::Ustr;
 
+pub mod bound;
 mod closure;
 mod forl;
 mod inline;

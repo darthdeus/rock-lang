@@ -40,8 +40,9 @@ use ustr::Ustr;
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum FatalCategory {
     /// The graph cannot name the instantiation: no recorded bindings, a binding
-    /// that does not reify, or a synthesized call with no binding record. These
-    /// are Stage-2 work -- the record has to be added.
+    /// naming a generic the enclosing substitution does not bind, or a
+    /// synthesized call with no binding record. These are Stage-2 work -- the
+    /// record has to be added.
     MissingGraphEdge,
     /// The callee is legitimately a foreign body (`extern`, `inline(lua)`,
     /// `inline(js)`). Under totality it must become an explicit `BoundaryId`

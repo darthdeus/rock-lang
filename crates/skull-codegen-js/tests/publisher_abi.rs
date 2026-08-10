@@ -67,7 +67,7 @@ fn lanes(src: &str, name: &str) -> usize {
         &scx,
         FuncRef { module: mid, func: fid },
     )
-    .result_lanes
+    .result_lanes()
 }
 
 /// The LEGACY sizing, reproduced here as a SEPARATE structure: the widest

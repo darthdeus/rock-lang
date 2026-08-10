@@ -50,7 +50,7 @@ pub(crate) fn exec_luajit_file(
 
     rock_host::process_management::unregister_child_process(pid);
     if !status.success() {
-        std::process::exit(status.code().unwrap_or(1));
+        crate::ablation_report::exit_with_census(status.code().unwrap_or(1));
     }
     Ok(())
 }

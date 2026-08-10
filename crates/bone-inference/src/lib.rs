@@ -592,7 +592,11 @@ pub fn check_struct_defaults(
 
     let mut gamma = Gamma::new(ws, body, mid);
 
-    let (subs, _arg_tys) = gamma.instantiate_generics(&def.generics, def.span)?;
+    let (subs, arg_tys) = gamma.instantiate_generics(&def.generics, def.span)?;
+
+    // Published so a consumer holding `Box<int>` can bind the defaults body's
+    // inference class; `subs` alone is keyed by `VarId` and dies with the check.
+    gamma.out.struct_default_generic_slots = arg_tys;
 
     let mut sib = FxHashMap::default();
     for f in def.fields.iter() {

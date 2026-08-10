@@ -393,6 +393,7 @@ pub fn convert_closures_framed(
             coro_defers: Vec::new(),
             for_iter_headers: mf.for_iter_headers.clone(),
             bound_trees: mf.bound_trees.clone(),
+            resolved_bound_trees: mf.resolved_bound_trees.clone(),
             // The split is a full arena clone sharing `mf`'s `Idx` space, so the
             // parent's keys stay valid and the entries for this lambda's own calls
             // come across with them. Dropping them stranded every specialized call

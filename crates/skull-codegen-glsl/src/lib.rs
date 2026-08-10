@@ -33,7 +33,7 @@ use skull_mir::gpu_layout::{
     texture_slots, uniform_array_block, vertex_attrs,
 };
 use skull_mir::intrinsics::{Emission, IntrinsicEntry, IntrinsicTable};
-use skull_mir::lower::{lower_function_spec, ScalarCtx, SpecSubst};
+use skull_mir::lower::{lower_emitted_body, ScalarCtx, SpecSubst};
 use skull_mir::monoty::{MonoCtor, MonoTy};
 use skull_mir::shader_ir::{
     FragmentOutput, LogicalSampler, ShaderIR, ShaderStageIr,
@@ -356,7 +356,7 @@ impl skull_mir::reach::ReachPolicy for Reach<'_> {
         // Signature must be tier 0 UNDER this instantiation.
         check_tier0_signature_spec(self.ws, &subst, f)?;
         // Lower to MIR (values-first-class) and profile-check the body.
-        let mf = lower_function_spec(self.ws, self.scx, inst.fref.module, inst.fref.func, &subst)
+        let mf = lower_emitted_body(self.ws, self.scx, &inst.emitted_body())
             .map_err(|e| {
                 err(f.name_span, format!("shader profile: `{}` cannot lower for GLSL: {}", f.name, e.message))
             })?;
@@ -735,13 +735,19 @@ fn callee_inst_at(
     if renders_inline(cf) || cf.generics.is_empty() {
         return Ok(ShaderInstance { fref: func, key });
     }
+    // Covers both shapes: a call that recorded nothing, and one whose key the
+    // producer declined to build because a type parameter did not reify. Those
+    // used to be two arms, the second scanning for a `None` slot; a key is
+    // total now, so that state is unrepresentable rather than merely unreached,
+    // and its message is folded in here.
     if key.is_empty() {
         return Err(err(
             span,
             format!(
-                "shader profile: the call to generic `{}` has no recorded instantiation, so GLSL \
-                 has no concrete shape to emit it at. A GPU has no boxed representation for an \
-                 unreified generic, so this cannot fall back to the declaration",
+                "shader profile: the call to generic `{}` has no recorded instantiation -- either \
+                 none was recorded, or a type parameter was left uninstantiated -- so GLSL has no \
+                 concrete shape to emit it at. A GPU has no boxed representation for an unreified \
+                 generic, so this cannot fall back to the declaration",
                 cf.name
             ),
         ));
@@ -759,17 +765,6 @@ fn callee_inst_at(
                 cf.name,
                 key.len(),
                 cf.generics.len()
-            ),
-        ));
-    }
-    if let Some(i) = key.iter().position(Option::is_none) {
-        let g = cf.generics.get(i).map_or_else(|| format!("#{i}"), |_| format!("#{i}"));
-        return Err(err(
-            span,
-            format!(
-                "shader profile: the call to generic `{}` left type parameter {g} uninstantiated, \
-                 so GLSL has no concrete shape to emit it at",
-                cf.name
             ),
         ));
     }
@@ -2984,7 +2979,7 @@ fn plan_stage(
 ) -> Result<StagePlan, CompilerError> {
     let f = &ws.module(fref.module).functions[fref.func];
     let entry = ShaderInstance::plain(fref);
-    let mf = lower_function_spec(ws, scx, fref.module, fref.func, &entry.subst(ws)).map_err(|e| {
+    let mf = lower_emitted_body(ws, scx, &entry.emitted_body()).map_err(|e| {
         err(f.name_span, format!("shader profile: `{}` cannot lower for GLSL: {}", f.name, e.message))
     })?;
     let mut callees: Vec<ShaderInstance> = Vec::new();
@@ -4535,7 +4530,7 @@ mod assertion_flip_tests {
         let scx = ScalarCtx::new_values_first_class(&ws);
         let fref = resolve_root(&ws, mid, "f").expect("root");
         let mut mf =
-            lower_function_spec(&ws, &scx, fref.module, fref.func, &SpecSubst::default())
+            lower_emitted_body(&ws, &scx, &skull_mir::lower::EmittedBodyId::Shared(fref))
                 .expect("lower");
 
         // The coercion is present today (regression pin for the return sink).
@@ -4583,7 +4578,7 @@ mod assertion_flip_tests {
         let scx = ScalarCtx::new_values_first_class(&ws);
         let fref = resolve_root(&ws, mid, "caller").expect("root");
         let mut mf =
-            lower_function_spec(&ws, &scx, fref.module, fref.func, &SpecSubst::default())
+            lower_emitted_body(&ws, &scx, &skull_mir::lower::EmittedBodyId::Shared(fref))
                 .expect("lower");
 
         // CONTROL: the record exists and the body emits against it.
@@ -4613,7 +4608,7 @@ mod assertion_flip_tests {
         );
         let scx = ScalarCtx::new_values_first_class(&ws);
         let fref = resolve_root(&ws, mid, "caller").expect("root");
-        let mf = lower_function_spec(&ws, &scx, fref.module, fref.func, &SpecSubst::default())
+        let mf = lower_emitted_body(&ws, &scx, &skull_mir::lower::EmittedBodyId::Shared(fref))
             .expect("lower");
 
         // The fixture really does exercise the gate: a call is present, and it
@@ -4980,7 +4975,7 @@ mod assertion_flip_tests {
         );
         let scx = ScalarCtx::new_values_first_class(&ws);
         let fref = resolve_root(&ws, mid, "caller").expect("root");
-        let base = lower_function_spec(&ws, &scx, fref.module, fref.func, &SpecSubst::default())
+        let base = lower_emitted_body(&ws, &scx, &skull_mir::lower::EmittedBodyId::Shared(fref))
             .expect("lower");
 
         // CONTROL: the recorded key has the declared arity, and the body emits.
@@ -4990,9 +4985,9 @@ mod assertion_flip_tests {
             .expect("the fixture must emit with a well-formed key");
 
         for (label, key) in [
-            ("too long", vec![Some(MonoTy::Float), Some(MonoTy::Int), Some(MonoTy::Int)]),
+            ("too long", vec![MonoTy::Float, MonoTy::Int, MonoTy::Int]),
             // Non-empty and short: the case an `is_empty` check cannot see.
-            ("too short", vec![Some(MonoTy::Float)]),
+            ("too short", vec![MonoTy::Float]),
         ] {
             let mut mf = base.clone();
             mf.spec_bindings.insert(iid, key);
@@ -5007,30 +5002,13 @@ mod assertion_flip_tests {
         }
     }
 
-    /// **A generic callee whose key is PARTIAL rejects too.** A `None` slot is
-    /// a generic that did not reify, so the key names the shared body -- the
-    /// same fallback as an absent record, reached a different way.
-    #[test]
-    fn a_partially_instantiated_generic_callee_rejects() {
-        let (ws, mid) = build_ws(
-            "@pure fn passthrough<T>(x: T) -> T { return x }\n             @pure fn caller(x: float) -> float { return passthrough(x) }",
-        );
-        let scx = ScalarCtx::new_values_first_class(&ws);
-        let fref = resolve_root(&ws, mid, "caller").expect("root");
-        let mut mf =
-            lower_function_spec(&ws, &scx, fref.module, fref.func, &SpecSubst::default())
-                .expect("lower");
-
-        let iid = *mf.spec_bindings.keys().next().expect("a recorded instantiation");
-        mf.spec_bindings.insert(iid, vec![None]);
-        let msg = emit_fn_def(&ws, &ShaderInstance::plain(fref), &mf)
-            .expect_err("a partial key must reject")
-            .message;
-        assert!(
-            msg.contains("uninstantiated") && msg.contains("passthrough"),
-            "unexpected rejection: {msg}"
-        );
-    }
+    // A partial key -- a recorded instantiation with an unreified slot -- used to
+    // be pinned here as its own rejection. A key is TOTAL now, so the producer
+    // returns no key at all rather than one with a hole, and the state arrives
+    // as an absent record. That is
+    // `a_generic_callee_with_no_recorded_instantiation_rejects` above, which is
+    // the surviving coverage; a second test inserting an empty key would assert
+    // the same arm twice.
 }
 
 #[cfg(test)]

@@ -68,21 +68,15 @@ fn main() {
     assert_eq!(called.len(), 2, "each call names its own instance, got {called:?} of {defs:?}");
 }
 
-/// SENTINEL -- flip when instance-owned definition emission lands (mono Stage 3
-/// cut B-F, `docs/monomorphization-plan.md` S 11).
+/// The same generic at two concrete types with the SAME ABI width. Identity is
+/// the INSTANCE, not the wire: `T = int` and `T = string` are two concrete
+/// bodies whatever they splat to, so nothing about equal widths lets one
+/// definition serve both.
 ///
-/// The same generic at two concrete types with the SAME ABI width. CORRECT
-/// behavior is two definitions, one per instance, each call naming its own:
-/// the two instances have different concrete bodies (`T` is `int` in one and
-/// `string` in the other). TODAY nothing splats, so the conditional
-/// specialization declines and ONE shared body mangled on the DECLARED
-/// signature (`identity_T_ret_T`) serves both -- which is exactly the
-/// declaration ownership Stage 3 cuts.
-///
-/// This is inverted to pin that. When the cut lands this goes red: replace the
-/// `1`s with `2`s and delete this paragraph.
+/// This is the case declaration ownership got wrong, and it is why width is not
+/// the discriminant -- its sibling above already passed on differing widths.
 #[test]
-fn same_abi_width_instances_share_one_declaration_body_sentinel() {
+fn two_same_abi_width_instances_emit_two_definitions() {
     let lua = emit_module(
         r#"
 fn identity<T>(x: T) -> T { return x }
@@ -95,15 +89,14 @@ fn main() {
 "#,
     );
     let defs = definitions_of(&lua, "identity");
-    assert_eq!(
-        defs,
-        vec!["identity_T_ret_T".to_string()],
-        "PINNED BEHAVIOR (declaration ownership): both instances share one body \
-         mangled on the DECLARED signature. If this is now two definitions, the \
-         instance-owned cut landed -- flip to `defs.len() == 2`."
+    assert_eq!(defs.len(), 2, "one definition per instance, got {defs:?}");
+    assert!(
+        !defs.contains(&"identity_T_ret_T".to_string()),
+        "no body is mangled on the DECLARED signature -- there is no shared \
+         generic snapshot to be one, got {defs:?}"
     );
     let called = callees_named_in(&lua, "main", "identity");
-    assert_eq!(called.len(), 1, "PINNED: both calls name the one shared body, got {called:?}");
+    assert_eq!(called.len(), 2, "each call names its own instance, got {called:?} of {defs:?}");
 }
 
 /// ADMISSION CONTROL for both cases above. A non-generic declaration has one
@@ -127,20 +120,17 @@ fn main() {
     assert_eq!(callees_named_in(&lua, "main", "plain"), vec!["plain_int_ret_int".to_string()]);
 }
 
-/// SENTINEL -- flip when instance-owned definition emission lands (same cut as
-/// the sibling above).
+/// A generic caller invoking a generic callee: the callee instance is selected
+/// by the CALLER's instance. Two `outer` instances each reach their own
+/// `inner`, so there are two of each.
 ///
-/// A generic caller invoking a generic callee. CORRECT behavior is that the
-/// callee instance is selected by the CALLER's instance: two `outer` instances
-/// each reach their own `inner`, so there are two of each and each `outer` body
-/// names its own. TODAY there is one `outer` and one `inner`, both mangled on
-/// their declared signatures, and the single `outer` body names the single
-/// `inner` -- the nested case of the same declaration ownership.
-///
-/// When the cut lands this goes red: assert two of each, and that the two
-/// `outer` bodies name DIFFERENT `inner` symbols.
+/// The load-bearing arm is the LAST one. Two of each is equally satisfied by an
+/// emitter that duplicated bodies without threading the caller's substitution
+/// into the callee it names -- both `outer`s naming one `inner` would still
+/// count 2 and 2. Asserting the two spellings DIFFER is what says the selection
+/// happened.
 #[test]
-fn a_nested_generic_caller_shares_one_callee_body_sentinel() {
+fn a_nested_generic_caller_names_its_own_callee_instance() {
     let lua = emit_module(
         r#"
 fn inner<T>(x: T) -> T { return x }
@@ -155,14 +145,71 @@ fn main() {
     );
     let outers = definitions_of(&lua, "outer");
     let inners = definitions_of(&lua, "inner");
-    assert_eq!(outers, vec!["outer_T_ret_T".to_string()], "PINNED: one shared `outer`");
-    assert_eq!(inners, vec!["inner_T_ret_T".to_string()], "PINNED: one shared `inner`");
-    // The one `outer` body names the one `inner`. Read from the body, so this
-    // still proves the call EDGE exists rather than that the name occurs.
-    assert_eq!(
-        callees_named_in(&lua, &outers[0], "inner"),
-        vec!["inner_T_ret_T".to_string()],
-        "PINNED: the shared `outer` names the shared `inner`. Two distinct names \
-         here means the instance-owned cut landed -- flip this test."
+    assert_eq!(outers.len(), 2, "one `outer` per instance, got {outers:?}");
+    assert_eq!(inners.len(), 2, "one `inner` per instance, got {inners:?}");
+    // Read from each caller's body, so this proves the call EDGE rather than
+    // that the name occurs somewhere in the chunk.
+    let first = callees_named_in(&lua, &outers[0], "inner");
+    let second = callees_named_in(&lua, &outers[1], "inner");
+    assert_eq!(first.len(), 1, "each `outer` names exactly one `inner`, got {first:?}");
+    assert_eq!(second.len(), 1, "each `outer` names exactly one `inner`, got {second:?}");
+    assert_ne!(
+        first, second,
+        "the two `outer` instances must name DIFFERENT `inner` instances -- \
+         naming one shared `inner` is declaration ownership one level down"
     );
+}
+
+/// The `iter` symbol the body of `caller` calls, whatever it is spelled.
+///
+/// Deliberately NOT filtered to known definitions the way `callees_named_in`
+/// is: the property here is that the spelling names something that EXISTS, so
+/// filtering by the definition set first would answer the question by
+/// construction and pass on a call to a nil global.
+fn iter_called_in(lua: &str, caller: &str) -> String {
+    let body = function_body(lua, caller);
+    let at = body.find("iter_").unwrap_or_else(|| panic!("no `iter` call in `{caller}`:\n{body}"));
+    let rest = &body[at..];
+    rest[..rest.find('(').expect("a call has `(`")].to_string()
+}
+
+/// An `iter` witness names an INSTANCE in both call forms it has.
+///
+/// Two forms reach the generic stdlib `iter`: a `for` head's witness, and the
+/// implicit iterable->iterator coercion at a bounded call argument
+/// (`a.map(..)`, where `a` is `[T]` and `map` takes an `Iterator`). Under
+/// instance-owned emission the generic declaration has no body, so a witness
+/// that records identity without DELIVERING its instantiation spells a name
+/// nothing defines -- a nil global at runtime, with no compiler diagnostic,
+/// because the Lua emitter does not check that a call resolves.
+///
+/// The `for` arm is the control: it delivers, so a failure in the coercion arm
+/// is about the call FORM and not about `iter` witnesses in general.
+#[test]
+fn both_iter_witness_forms_name_a_definition_that_exists() {
+    let coerced = emit_module(
+        r#"
+fn main() {
+    let a: [int] = [1, 2]
+    print("{a.map(_ * 2).sum()}")
+}
+"#,
+    );
+    let looped = emit_module(
+        r#"
+fn main() {
+    let a: [int] = [1, 2]
+    let s = 0
+    for v in a.iter().map(_ * 2) { s = s + v }
+    print("{s}")
+}
+"#,
+    );
+    for (form, lua) in [("implicit coercion", &coerced), ("`for` head", &looped)] {
+        let called = iter_called_in(lua, "main");
+        assert!(
+            definition_symbols(lua).iter().any(|d| *d == called),
+            "the {form} witness calls `{called}`, which no definition defines"
+        );
+    }
 }

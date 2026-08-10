@@ -88,21 +88,42 @@ impl SiteOp {
 ///
 /// The domain is part of the KEY, not a flag beside it, so the two arenas
 /// cannot collide even when they hand out the same numeric index.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum SiteDomain {
     /// The owner instance's own body.
     Own,
-    /// A struct's field-default initializers, by declaring module and struct.
-    StructDefaults(bone_semantic::prelude::ModuleId, Idx<bone_semantic::hir::StructDef>),
+    /// A struct's field-default initializers, by declaring module and struct,
+    /// plus the ARGUMENTS this injection instantiated the struct with -- in
+    /// declared-generic order, empty for a non-generic struct.
+    ///
+    /// The arguments are part of the key because they select the callee.
+    /// `Box<int> {}` and `Box<string> {}` inject the same declaration's
+    /// initializers and resolve `seed<int>` and `seed<string>` from them, so a
+    /// declaration-keyed domain collapses two obligations onto one and the
+    /// second silently reads the first's answer.
+    StructDefaults(
+        bone_semantic::prelude::ModuleId,
+        Idx<bone_semantic::hir::StructDef>,
+        Vec<crate::monoty::MonoTy>,
+    ),
 }
 
 impl SiteDomain {
     /// A total order. `ModuleId` has none of its own, so the key is its index;
     /// sites are sorted for reproducible reports, not for identity.
-    fn ord_key(&self) -> (u8, usize, u32) {
+    ///
+    /// The arguments order by their CANONICAL encoding -- the same string
+    /// identity is keyed on, so two domains compare equal here exactly when
+    /// they are equal.
+    fn ord_key(&self) -> (u8, usize, u32, Vec<String>) {
         match self {
-            Self::Own => (0, 0, 0),
-            Self::StructDefaults(m, d) => (1, m.index(), d.into_raw().into_u32()),
+            Self::Own => (0, 0, 0, Vec::new()),
+            Self::StructDefaults(m, d, args) => (
+                1,
+                m.index(),
+                d.into_raw().into_u32(),
+                args.iter().map(|a| a.canonical()).collect(),
+            ),
         }
     }
 }
@@ -170,6 +191,39 @@ pub fn intern_owner(table: &mut Vec<OwnerInstance>, owner: OwnerInstance) -> Own
     }
     table.push(owner);
     OwnerRef((table.len() - 1) as u32)
+}
+
+/// Record that `call` is served by the `key` instantiation of `callee`.
+///
+/// The writer for the RETARGETING path. There are deliberately two writers of
+/// this pair, not one: lowering derives the instance INDEPENDENTLY of the
+/// delivery decision (`Builder::callee_instance_for`) and writes both through
+/// `record_call`, while this path has no independent source and derives the
+/// instance from the key through the documented `spec_subst_from_key`
+/// round-trip. Keeping the second opinion is worth more than collapsing to a
+/// single writer.
+///
+/// What the two must never do is write one record and not the other. The
+/// delivery key and the callee instance are one fact, so a path that writes
+/// half of it leaves a site whose instantiation is knowable and unrecorded.
+/// Measured over the 18 bin projects plus `tests/`: **128,956 specialized
+/// demand sites agreed on both records and 373 had no instance at all**, every
+/// one of them a bounded `next` retargeted here, back when this wrote only the
+/// key.
+///
+/// What makes the two writers an AGREEMENT rather than a convention is the
+/// assertion in [`crate::reach::spec_bound_calls`], which sees every site
+/// either writer produced.
+pub fn record_specialized_call(
+    func: &mut crate::mir::MirFunc,
+    ws: &bone_semantic::inference::Workspace,
+    call: Idx<crate::mir::Inst>,
+    callee: crate::mir::FuncRef,
+    key: crate::lower::SpecKey,
+) {
+    let subst = crate::lower::spec_subst_from_key(ws, callee, &key);
+    func.spec_bindings.insert(call, key);
+    func.callee_instances.insert(call, OwnerInstance { func: callee, subst });
 }
 
 /// A [`Site`] plus the owner it belongs to.

@@ -29,8 +29,8 @@ const SEP: &str = "_";
 ///
 /// Derived from [`mangle_fn`] plus the reified type trees in declaration order, so the
 /// definition and every call site agree without a side table, exactly as the base
-/// mangle does. `None` for an all-`None` key: that is the shared snapshot, which
-/// keeps the base name.
+/// mangle does. `None` for an EMPTY key -- no instantiation to spell -- which
+/// producers no longer hand out, so this is the floor rather than a decision.
 ///
 /// An exempt (`@nomangle`, `extern`, ...) callee still gets a suffixed name here.
 /// Its bare name belongs to the ONE body the author owns; a specialized copy is a
@@ -38,20 +38,17 @@ const SEP: &str = "_";
 pub fn spec_fn_name(
     ws: &Workspace,
     f: &Function,
-    key: &[Option<crate::monoty::MonoTy>],
+    key: &[crate::monoty::MonoTy],
 ) -> Option<String> {
-    if key.iter().all(Option::is_none) {
+    if key.is_empty() {
         return None;
     }
     let mut out = mangle_fn(ws, f);
     out.push_str(SEP);
     out.push_str("spec");
-    for leaf in key {
+    for ty in key {
         out.push_str(SEP);
-        match leaf {
-            Some(ty) => encode_mono_type(ty, &mut out),
-            None => out.push_str("any"),
-        }
+        encode_mono_type(ty, &mut out);
     }
     Some(out)
 }
