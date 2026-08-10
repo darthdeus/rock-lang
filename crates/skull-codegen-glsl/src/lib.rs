@@ -3716,7 +3716,7 @@ fn plan_shader_entry_inner(
 /// Validate one shader ENTRY exactly as emission does, without emitting.
 ///
 /// Published for the mono SHADER ARTIFACT VIEW, which must not be able to admit
-/// what emission refuses. It IS emission's preparation ([`plan_shader_entry`]),
+/// what emission refuses. It is the view-fed entry plan used by emission,
 /// not a summary of it: the only thing left out below this point is the GLSL
 /// text itself.
 ///
