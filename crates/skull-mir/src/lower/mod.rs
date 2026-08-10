@@ -2925,6 +2925,72 @@ pub fn uniform_expand_rejection(ws: &Workspace, mid: ModuleId) -> Option<Compile
     None
 }
 
+/// Emit-time validation for `@uniform_values`: the call must have one concrete
+/// uniform group and the declared result must be the compiler-owned canonical
+/// packet shape. Lowering repeats these predicates for the active specialization.
+pub fn uniform_values_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerError> {
+    let module = ws.module(mid);
+    let ir = ws.inference(mid)?;
+    for (owner, body) in module.bodies.iter() {
+        let Some(inf) = ir.per_fn.get(owner) else { continue };
+        for (e, expr) in body.expr_arena.iter() {
+            let Expr::Call { callee: Callee::Unresolved { name, .. }, args } = expr else {
+                continue;
+            };
+            let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else { continue };
+            let f = &ws.module(fmod).functions[fid];
+            if !matches!(crate::intrinsics::expand_kind(f), Some(ExpandKind::UniformValues)) {
+                continue;
+            }
+            let fname = f.name;
+            let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
+            let [u] = arg_idxs[..] else {
+                return Some(CompilerError::new_with_label(
+                    body.expr_spans[e],
+                    format!("`@uniform_values` fn `{fname}` takes exactly one uniform group"),
+                ));
+            };
+            let Some(sname) = value_struct_name_at(ws, inf, u) else {
+                return Some(CompilerError::new_with_label(
+                    body.expr_spans[u],
+                    format!("`@uniform_values` fn `{fname}`'s argument must be a concrete value struct"),
+                ));
+            };
+            if let Err(msg) = uniform_semantic_checked(ws, sname) {
+                return Some(CompilerError::new_with_label(
+                    body.expr_spans[u],
+                    format!("`@uniform_values`: {msg}"),
+                ));
+            }
+            let Some(&ret_ty) = inf.expr_types.get(e) else {
+                return Some(CompilerError::new_with_label(
+                    body.expr_spans[e],
+                    format!("`@uniform_values` fn `{fname}` has no inferred packet result"),
+                ));
+            };
+            let Some(ret_ty) = resolve_tyid(ws, inf, ret_ty) else {
+                return Some(CompilerError::new_with_label(
+                    body.expr_spans[e],
+                    format!("`@uniform_values` fn `{fname}` has no concrete packet result"),
+                ));
+            };
+            let Some(TypeExpr::App { ctor: TypeCtor::Nominal(block_name), .. }) = static_ty(ws, ret_ty) else {
+                return Some(CompilerError::new_with_label(
+                    body.expr_spans[e],
+                    format!("`@uniform_values` fn `{fname}` must return the canonical packet struct"),
+                ));
+            };
+            if let Err(msg) = uniform_values_return_shape(ws, block_name) {
+                return Some(CompilerError::new_with_label(
+                    body.expr_spans[e],
+                    format!("`@uniform_values`: {msg}"),
+                ));
+            }
+        }
+    }
+    None
+}
+
 /// Emit-time validation for `@vertex_expand` calls: misuse is a spanned
 /// compile error, never a call that reaches the fn's error body.
 pub fn vertex_expand_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerError> {

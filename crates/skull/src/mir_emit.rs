@@ -2318,6 +2318,9 @@ pub fn emit_full_in_for_renderer(
     if let Some(err) = skull_mir::lower::uniform_expand_rejection(ws, user_mid) {
         return Err(err);
     }
+    if let Some(err) = skull_mir::lower::uniform_values_rejection(ws, user_mid) {
+        return Err(err);
+    }
     if let Some(err) = skull_mir::intrinsics::intrinsic_rejection(ws, user_mid) {
         return Err(err);
     }

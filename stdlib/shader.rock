@@ -125,6 +125,24 @@ value Bvec3 { x: bool, y: bool, z: bool }
     error("rock_shader is a compile-time shader-pipeline intrinsic (expanded at compile time)")
 """
 
+// The one compiler-owned logical value packet shared by GL, WebGL and wgpu.
+// Its leaves contain values and kinds only; physical offsets and padding belong
+// to each backend's ABI projection.
+enum CanonicalUniformLeaf {
+    Float(float),
+    Int(int),
+    Bool(bool),
+}
+
+struct SemanticUniformBlock {
+    fingerprint: int,
+    leaves: [CanonicalUniformLeaf],
+}
+
+@uniform_values inline(lua) fn uniform_values<T>(u: T) -> SemanticUniformBlock = """
+    error("uniform_values is compiler-expanded (docs/shader-binding-layout-plan.md)")
+"""
+
 // Pack `u` into a std140 uniform block: one direct typed store per primitive
 // leaf, at that leaf's std140 element index, through the two views the caller
 // passes. Never a per-leaf helper call and never a pack -- the leaves go from

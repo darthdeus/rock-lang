@@ -164,6 +164,34 @@ pub struct LogicalUniformGroup {
     pub members: Vec<(Ustr, WireKind)>,
 }
 
+/// The identity of a logical uniform value group. Physical offsets, padding,
+/// bindings and block size are deliberately absent.
+pub fn semantic_uniform_group_fingerprint(
+    struct_name: Ustr,
+    members: &[(Ustr, WireKind)],
+) -> u64 {
+    let mut hash = 0xa5a5_5a5a_c3c3_3c3cu64;
+    for byte in struct_name.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    for (name, kind) in members {
+        for byte in name.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash ^= u64::from(kind.code());
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    (hash ^ (hash >> 53)) & ((1 << 53) - 1)
+}
+
+impl LogicalUniformGroup {
+    pub fn semantic_fingerprint(&self) -> u64 {
+        semantic_uniform_group_fingerprint(self.struct_name, &self.members)
+    }
+}
+
 /// A stage's `UniformArray<T>` members. Separate from the scalar group for a
 /// LIFETIME reason rather than a typing one -- see `ShaderAbiPlan`'s note on
 /// whole-block uploads.
@@ -351,7 +379,7 @@ impl ShaderInterfacePlan {
 
         writeln!(out, "groups {}", self.uniform_groups.len()).unwrap();
         for group in &self.uniform_groups {
-            writeln!(out, "group {} {} {}", uniform_role_name(group.role), group.struct_name, group.members.len()).unwrap();
+            writeln!(out, "group {} {} {} {}", uniform_role_name(group.role), group.struct_name, group.semantic_fingerprint(), group.members.len()).unwrap();
             for (name, kind) in &group.members {
                 writeln!(out, "member {} {}", name, kind.code()).unwrap();
             }
