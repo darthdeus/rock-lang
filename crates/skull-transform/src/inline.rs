@@ -31,6 +31,7 @@ use comfy_la_arena::Idx;
 use skull_mir::instance::Instance;
 use skull_mir::lower::{lower_instance, BackendFnAbiPlan, ScalarCtx, SpecSubst};
 use skull_mir::mir::*;
+use ustr::Ustr;
 
 use crate::top_level_blocks;
 
@@ -859,6 +860,80 @@ fn resolve_cloned_bound_calls(
     Ok(())
 }
 
+fn collect_nested_names(nested: &[MirFunc], out: &mut Vec<Ustr>) {
+    for nf in nested {
+        out.push(nf.name);
+        collect_nested_names(&nf.nested_fns, out);
+    }
+}
+
+fn remap_nested_global(inst: &mut Inst, names: &HashMap<Ustr, Ustr>) {
+    if let Inst::Global(name) = inst {
+        if let Some(&new) = names.get(name) {
+            *name = new;
+        }
+    }
+}
+
+fn rename_nested_tree(nested: &mut [MirFunc], names: &HashMap<Ustr, Ustr>) {
+    for nf in nested {
+        if let Some(&new) = names.get(&nf.name) {
+            nf.name = new;
+        }
+        for (_, inst) in nf.insts.iter_mut() {
+            remap_nested_global(inst, names);
+        }
+        nf.hoisted_fn_globals = nf
+            .hoisted_fn_globals
+            .iter()
+            .map(|name| names.get(name).copied().unwrap_or(*name))
+            .collect();
+        rename_nested_tree(&mut nf.nested_fns, names);
+    }
+}
+
+/// Carry named nested bodies across a splice. Their names are private globals,
+/// so each splice needs a fresh namespace and every reference in the cloned
+/// parent and child arenas must move with it.
+fn import_nested_fns(
+    func: &mut MirFunc,
+    callee: &MirFunc,
+    inst_map: &HashMap<Idx<Inst>, Idx<Inst>>,
+) -> HashMap<Ustr, Ustr> {
+    if callee.nested_fns.is_empty() {
+        return HashMap::default();
+    }
+    let mut old_names = Vec::new();
+    collect_nested_names(&callee.nested_fns, &mut old_names);
+    let mut used = Vec::new();
+    collect_nested_names(&func.nested_fns, &mut used);
+    used.extend(func.hoisted_fn_globals.iter().copied());
+    used.extend(old_names.iter().copied());
+    let mut used: HashSet<Ustr> = used.into_iter().collect();
+    let mut names = HashMap::default();
+    let mut nonce = func.nested_fns.len();
+    for old in old_names {
+        if names.contains_key(&old) {
+            continue;
+        }
+        loop {
+            let new = Ustr::from(format!("{old}__inline{nonce}").as_str());
+            nonce += 1;
+            if used.insert(new) {
+                names.insert(old, new);
+                break;
+            }
+        }
+    }
+    for new_id in inst_map.values() {
+        remap_nested_global(&mut func.insts[*new_id], &names);
+    }
+    let mut nested = callee.nested_fns.clone();
+    rename_nested_tree(&mut nested, &names);
+    func.nested_fns.extend(nested);
+    names
+}
+
 /// Import the cloned callee body's `spec_bindings` into the caller (keys remapped
 /// through the clone) so a specialized call INSIDE a spliced body is itself found
 /// and specialized by the fixpoint -- the `spec_bindings` analogue of
@@ -871,6 +946,7 @@ fn import_spec_bindings(
     func: &mut MirFunc,
     callee: &MirFunc,
     inst_map: &HashMap<Idx<Inst>, Idx<Inst>>,
+    nested_names: &HashMap<Ustr, Ustr>,
 ) {
     for (old_id, key) in &callee.spec_bindings {
         if let Some(&new_id) = inst_map.get(old_id) {
@@ -905,8 +981,9 @@ fn import_spec_bindings(
         }
     }
     for n in &callee.hoisted_fn_globals {
-        if !func.hoisted_fn_globals.contains(n) {
-            func.hoisted_fn_globals.push(*n);
+        let n = nested_names.get(n).copied().unwrap_or(*n);
+        if !func.hoisted_fn_globals.contains(&n) {
+            func.hoisted_fn_globals.push(n);
         }
     }
     // The callee's instruction spans come across with its body, so a rejection
@@ -993,7 +1070,8 @@ fn splice_straight(
         caller_inf,
         caller_subst,
     )?;
-    import_spec_bindings(func, callee, &inst_map);
+    let nested_names = import_nested_fns(func, callee, &inst_map);
+    import_spec_bindings(func, callee, &inst_map, &nested_names);
 
     // Arg -> param-cell stores (coalesced params are aliased to the caller cell,
     // so they need no copy).
@@ -1084,7 +1162,8 @@ fn splice_general(
         caller_inf,
         caller_subst,
     )?;
-    import_spec_bindings(func, callee, &inst_map);
+    let nested_names = import_nested_fns(func, callee, &inst_map);
+    import_spec_bindings(func, callee, &inst_map, &nested_names);
     let entry_clone = block_map[&callee.entry];
 
     // Split the caller block at the call.
@@ -1379,5 +1458,51 @@ mod tests {
         assert_eq!(annotation_gate(true, false, true), Some(true));   // @inline -> forced
         assert_eq!(annotation_gate(false, true, true), Some(false));  // @pure inert in this mode
         assert_eq!(annotation_gate(true, true, true), Some(true));
+    }
+
+    fn resolved_tree_count(mf: &MirFunc) -> (usize, usize) {
+        let mut bodies = 1;
+        let mut trees = mf.resolved_bound_trees.len();
+        for nf in &mf.nested_fns {
+            let (child_bodies, child_trees) = resolved_tree_count(nf);
+            bodies += child_bodies;
+            trees += child_trees;
+        }
+        (bodies, trees)
+    }
+
+    #[test]
+    fn fresh_candidates_have_no_resolved_bound_trees_including_nested_bodies() {
+        let mut modules = vec![
+            skull_parser::parse_module_clean(
+                r#"
+@inline
+fn outer(x: int) -> int {
+    fn inner(y: int) -> int { return y }
+    return inner(x)
+}
+"#,
+                Ustr::from("<inline-test>"),
+            )
+            .expect("parse"),
+        ];
+        let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic");
+        let mid = *ws.module_ids.get(&Ustr::from("<inline-test>")).expect("module");
+        let (fid, _) = ws
+            .module(mid)
+            .functions
+            .iter()
+            .find(|(_, f)| f.name.as_str() == "outer")
+            .expect("outer");
+        let scx = ScalarCtx::new(&ws);
+        let candidate = classify(
+            &ws,
+            &scx,
+            &Instance::base(FuncRef { module: mid, func: fid }),
+        )
+        .expect("the inline fixture must produce a candidate");
+        let (bodies, trees) = resolved_tree_count(&candidate.func);
+        assert!(bodies > 1, "the candidate census did not include its nested body");
+        assert_eq!(trees, 0, "fresh candidate lowering already carried resolved trees");
     }
 }

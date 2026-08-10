@@ -408,6 +408,59 @@ fn main() {
     }
 }
 
+#[test]
+fn named_nested_functions_in_a_spliced_body_are_preserved() {
+    let ws = check(
+        r#"
+@inline
+fn outer(x: int) -> int {
+    fn inner(y: int) -> int {
+        fn child(z: int) -> int { return z + 1 }
+        return child(y)
+    }
+    return inner(x)
+}
+
+fn top(x: int) -> int { return outer(x) + outer(x) }
+fn main() { print("{top(2)}") }
+"#,
+    );
+    let mf = prepared_body(&ws, "top");
+    assert!(!mf.nested_fns.is_empty(), "the spliced named nested body was dropped");
+    let names: Vec<_> = mf.nested_fns.iter().map(|nf| nf.name).collect();
+    assert_eq!(names.len(), names.iter().collect::<std::collections::BTreeSet<_>>().len());
+    assert!(!mf.nested_fns[0].nested_fns.is_empty(), "nested child body was dropped");
+    let child_name = mf.nested_fns[0].nested_fns[0].name;
+    assert!(
+        mf.nested_fns[0].hoisted_fn_globals.contains(&child_name),
+        "the nested parent kept no reference to its preserved child"
+    );
+    assert!(
+        mf.hoisted_fn_globals.iter().any(|name| names.contains(name)),
+        "the spliced body kept no reference to its preserved nested symbol"
+    );
+    let lua = crate::common::try_emit_module(
+        r#"
+@inline
+fn outer(x: int) -> int {
+    fn inner(y: int) -> int {
+        fn child(z: int) -> int { return z + 1 }
+        return child(y)
+    }
+    return inner(x)
+}
+
+fn top(x: int) -> int { return outer(x) + outer(x) }
+fn main() { print("{top(2)} {top(3)}") }
+"#,
+    )
+    .expect("a spliced named nested body must emit");
+    assert_eq!(
+        crate::common::run_luajit(&format!("{lua}\nmain()\n"), "spliced_nested"),
+        "6 8"
+    );
+}
+
 /// A synthesized column-storage call joins ONLY under its own operation.
 ///
 /// A column-stored `Map` rewrites `m[k] = v` and `table_unset` into runtime
