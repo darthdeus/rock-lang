@@ -14,11 +14,11 @@ use bone_semantic::{
 };
 use comfy_la_arena::Idx;
 use skull_codegen_shader::{ShaderArtifactPlan, ShaderPlannerPolicy};
-use skull_mir::gpu_layout::{SamplerKind, WireKind};
+use skull_mir::gpu_layout::{AttrKind, SamplerKind, WireKind};
 use skull_mir::mir::{Inst, Lit, MirFunc, Term};
 use skull_mir::shader_ir::{
     FragmentOutput, LogicalTextureGroup, LogicalUniformGroup, ShaderIR, ShaderInstance,
-    ShaderInterfacePlan, ShaderStage, ShaderStageIr, UniformRole,
+    ShaderInterfacePlan, ShaderStage, ShaderStageIr, UniformRole, VertexRate,
 };
 use skull_parser::CompilerError;
 use std::collections::{HashMap, HashSet};
@@ -327,11 +327,47 @@ pub struct WgslFragmentIo {
     pub output: WireKind,
 }
 
+/// A compiler-assigned vertex attribute in an explicit pipeline. The byte
+/// offset and stride stay with the submitted buffer: they are C-layout facts,
+/// while this is the shader's logical location and kind.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WgslVertexAttribute {
+    pub location: u32,
+    pub name: Ustr,
+    pub kind: AttrKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WgslVertexInput {
+    pub struct_name: Ustr,
+    pub rate: VertexRate,
+    pub attrs: Vec<WgslVertexAttribute>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WgslVarying {
+    pub location: u32,
+    pub name: Ustr,
+    pub kind: WireKind,
+    pub flat: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WgslGeometryKind {
+    Fullscreen,
+    Triangles,
+}
+
 /// WGSL's physical answer to one target-neutral fullscreen interface.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WgslAbiPlan {
     pub semantic_fingerprint: u64,
     pub bind_group: u32,
+    pub geometry: WgslGeometryKind,
+    pub vertex_entry: String,
+    pub fragment_entry: String,
+    pub vertex_inputs: Vec<WgslVertexInput>,
+    pub varyings: Vec<WgslVarying>,
     pub fullscreen_vertex: WgslFullscreenVertex,
     pub fragment: WgslFragmentIo,
     pub fullscreen_uniform: WgslUniformBlock,
@@ -393,6 +429,11 @@ impl WgslAbiPlan {
         Ok(Self {
             semantic_fingerprint,
             bind_group: WGSL_BIND_GROUP,
+            geometry: WgslGeometryKind::Fullscreen,
+            vertex_entry: "fullscreen_vertex".into(),
+            fragment_entry: "fragment_main".into(),
+            vertex_inputs: Vec::new(),
+            varyings: Vec::new(),
             fullscreen_vertex: WgslFullscreenVertex {
                 topology: WgslPrimitiveTopology::TriangleStrip,
                 vertex_count: 4,
@@ -409,6 +450,113 @@ impl WgslAbiPlan {
         })
     }
 
+    /// Derive the explicit non-indexed triangle ABI from the same neutral
+    /// interface used by the GLSL pipeline. Physical C offsets are supplied by
+    /// the caller's checked vertex layout; this plan owns locations, kinds and
+    /// stage visibility.
+    pub fn explicit(
+        iface: &ShaderInterfacePlan,
+        vertex_entry: &str,
+        fragment_entry: &str,
+        span: Span,
+    ) -> Result<Self, CompilerError> {
+        validate_explicit_interface(iface, span)?;
+        if vertex_entry.is_empty() || fragment_entry.is_empty() {
+            return Err(err(span, "WGSL explicit pipeline entry names cannot be empty"));
+        }
+        let mut vertex_inputs = Vec::new();
+        let mut next_location = 0u32;
+        for input in &iface.vertex_inputs {
+            let mut attrs = Vec::new();
+            for (name, kind) in &input.attrs {
+                attrs.push(WgslVertexAttribute {
+                    location: next_location,
+                    name: *name,
+                    kind: *kind,
+                });
+                next_location += 1;
+            }
+            vertex_inputs.push(WgslVertexInput {
+                struct_name: input.struct_name,
+                rate: input.rate,
+                attrs,
+            });
+        }
+        let varyings = iface
+            .varyings
+            .iter()
+            .enumerate()
+            .map(|(location, varying)| WgslVarying {
+                location: location as u32,
+                name: varying.name,
+                kind: varying.kind,
+                flat: varying.flat,
+            })
+            .collect::<Vec<_>>();
+
+        let mut groups = iface.uniform_groups.clone();
+        groups.sort_by_key(|group| uniform_role_key(group.role));
+        let mut uniform_blocks = Vec::with_capacity(groups.len());
+        for (binding, group) in groups.iter().enumerate() {
+            uniform_blocks.push(layout_uniform_group(
+                group,
+                binding as u32,
+                visibility_for_role(group.role),
+                span,
+            )?);
+        }
+        let texture_base = uniform_blocks.len() as u32;
+        let textures = iface
+            .textures
+            .as_ref()
+            .map(|group| {
+                layout_textures(
+                    group,
+                    texture_base,
+                    WgslStageVisibility {
+                        vertex: group.stages.contains(&ShaderStage::Vertex),
+                        fragment: group.stages.contains(&ShaderStage::Fragment),
+                    },
+                    span,
+                )
+            })
+            .transpose()?
+            .unwrap_or_default();
+        let output = match iface.fragment_output {
+            FragmentOutput::Single(kind) => kind,
+            _ => unreachable!("validate_explicit_interface admits only one output"),
+        };
+        Ok(Self {
+            semantic_fingerprint: iface.semantic_fingerprint(false),
+            bind_group: WGSL_BIND_GROUP,
+            geometry: WgslGeometryKind::Triangles,
+            vertex_entry: vertex_entry.to_string(),
+            fragment_entry: fragment_entry.to_string(),
+            vertex_inputs,
+            varyings,
+            fullscreen_vertex: WgslFullscreenVertex {
+                topology: WgslPrimitiveTopology::TriangleStrip,
+                vertex_count: 0,
+                varying_location: 0,
+            },
+            fragment: WgslFragmentIo {
+                uv_location: 0,
+                output_location: 0,
+                output,
+            },
+            fullscreen_uniform: WgslUniformBlock {
+                role: UniformRole::Stage(ShaderStage::Vertex),
+                struct_name: Ustr::from("FullscreenU"),
+                binding: 0,
+                size: 16,
+                members: vec![],
+                visibility: WgslStageVisibility { vertex: false, fragment: false },
+            },
+            uniform_blocks,
+            textures,
+        })
+    }
+
     /// Alias named after the target, for call sites that construct several
     /// physical projections beside one interface.
     pub fn from_interface(iface: &ShaderInterfacePlan, span: Span) -> Result<Self, CompilerError> {
@@ -419,7 +567,12 @@ impl WgslAbiPlan {
     /// full comparison: changing one offset, pair binding or visibility must
     /// not be accepted merely because the rest of the plan still agrees.
     pub fn validate(&self, iface: &ShaderInterfacePlan, span: Span) -> Result<(), CompilerError> {
-        let expected = Self::wgsl(iface, span)?;
+        let expected = match self.geometry {
+            WgslGeometryKind::Fullscreen => Self::wgsl(iface, span)?,
+            WgslGeometryKind::Triangles => {
+                Self::explicit(iface, &self.vertex_entry, &self.fragment_entry, span)?
+            }
+        };
         if self != &expected {
             return Err(err(
                 span,
@@ -447,28 +600,81 @@ impl WgslAbiPlan {
         let mut payload = String::new();
         writeln!(payload, "semantic {}", self.semantic_fingerprint).unwrap();
         writeln!(payload, "group {}", self.bind_group).unwrap();
-        let topology = match self.fullscreen_vertex.topology {
-            WgslPrimitiveTopology::TriangleStrip => "triangle_strip",
-        };
-        writeln!(
-            payload,
-            "vertex {} {} {}",
-            topology,
-            self.fullscreen_vertex.vertex_count,
-            self.fullscreen_vertex.varying_location
-        )
-        .unwrap();
-        writeln!(
-            payload,
-            "fragment {} {} {}",
-            self.fragment.uv_location,
-            self.fragment.output_location,
-            self.fragment.output.code()
-        )
-        .unwrap();
-        writeln!(payload, "fullscreen FullscreenU 0 16 v 2").unwrap();
-        writeln!(payload, "member uv0 1 0 8 8").unwrap();
-        writeln!(payload, "member uv1 1 8 8 8").unwrap();
+        match self.geometry {
+            WgslGeometryKind::Fullscreen => {
+                let topology = match self.fullscreen_vertex.topology {
+                    WgslPrimitiveTopology::TriangleStrip => "triangle_strip",
+                };
+                writeln!(
+                    payload,
+                    "vertex {} {} {}",
+                    topology,
+                    self.fullscreen_vertex.vertex_count,
+                    self.fullscreen_vertex.varying_location
+                )
+                .unwrap();
+                writeln!(
+                    payload,
+                    "fragment {} {} {}",
+                    self.fragment.uv_location,
+                    self.fragment.output_location,
+                    self.fragment.output.code()
+                )
+                .unwrap();
+                writeln!(payload, "fullscreen FullscreenU 0 16 v 2").unwrap();
+                writeln!(payload, "member uv0 1 0 8 8").unwrap();
+                writeln!(payload, "member uv1 1 8 8 8").unwrap();
+            }
+            WgslGeometryKind::Triangles => {
+                writeln!(payload, "geometry triangles").unwrap();
+                writeln!(payload, "entries {} {}", self.vertex_entry, self.fragment_entry).unwrap();
+                writeln!(payload, "vertex_inputs {}", self.vertex_inputs.len()).unwrap();
+                for (index, input) in self.vertex_inputs.iter().enumerate() {
+                    let rate = match input.rate {
+                        VertexRate::PerVertex => "vertex",
+                        VertexRate::PerInstance => "instance",
+                    };
+                    writeln!(
+                        payload,
+                        "vertex_input {} {} {} {}",
+                        index,
+                        input.struct_name,
+                        rate,
+                        input.attrs.len()
+                    )
+                    .unwrap();
+                    for attr in &input.attrs {
+                        writeln!(
+                            payload,
+                            "attr {} {} {}",
+                            attr.location,
+                            attr.name,
+                            attr_kind_wire(attr.kind)
+                        )
+                        .unwrap();
+                    }
+                }
+                writeln!(payload, "varyings {}", self.varyings.len()).unwrap();
+                for varying in &self.varyings {
+                    writeln!(
+                        payload,
+                        "varying {} {} {} {}",
+                        varying.location,
+                        varying.name,
+                        varying.kind.code(),
+                        if varying.flat { 1 } else { 0 }
+                    )
+                    .unwrap();
+                }
+                writeln!(
+                    payload,
+                    "fragment {} {}",
+                    self.fragment.output_location,
+                    self.fragment.output.code()
+                )
+                .unwrap();
+            }
+        }
         writeln!(payload, "blocks {}", self.uniform_blocks.len()).unwrap();
         for block in &self.uniform_blocks {
             writeln!(
@@ -530,6 +736,16 @@ fn sampler_kind_wire(kind: SamplerKind) -> &'static str {
     match kind {
         SamplerKind::Float => "float",
         SamplerKind::Int => "int",
+    }
+}
+
+fn attr_kind_wire(kind: AttrKind) -> &'static str {
+    match kind {
+        AttrKind::F32 => "f32",
+        AttrKind::F32x2 => "f32x2",
+        AttrKind::F32x3 => "f32x3",
+        AttrKind::F32x4 => "f32x4",
+        AttrKind::I32 => "i32",
     }
 }
 
@@ -655,6 +871,102 @@ fn validate_fullscreen_interface(
 
     if let Some(group) = &iface.textures {
         validate_texture_group(group, span)?;
+    }
+    Ok(())
+}
+
+fn visibility_for_role(role: UniformRole) -> WgslStageVisibility {
+    match role {
+        UniformRole::Engine => WgslStageVisibility { vertex: true, fragment: true },
+        UniformRole::Stage(ShaderStage::Vertex) => {
+            WgslStageVisibility { vertex: true, fragment: false }
+        }
+        UniformRole::Stage(ShaderStage::Fragment) => {
+            WgslStageVisibility { vertex: false, fragment: true }
+        }
+    }
+}
+
+fn validate_explicit_interface(
+    iface: &ShaderInterfacePlan,
+    span: Span,
+) -> Result<(), CompilerError> {
+    if iface.stages != [ShaderStage::Vertex, ShaderStage::Fragment] {
+        return Err(err(
+            span,
+            "WGSL explicit projection admits one vertex stage followed by one fragment stage",
+        ));
+    }
+    if iface.vertex_inputs.len() != 1 {
+        return Err(err(
+            span,
+            "WGSL explicit projection currently admits one vertex input stream",
+        ));
+    }
+    let input = &iface.vertex_inputs[0];
+    if input.rate != VertexRate::PerVertex || input.attrs.is_empty() {
+        return Err(err(
+            span,
+            "WGSL explicit projection currently admits non-empty per-vertex attributes only",
+        ));
+    }
+    identifier(input.struct_name, "vertex input name", span)?;
+    for (name, kind) in &input.attrs {
+        identifier(*name, "vertex attribute name", span)?;
+        if matches!(kind, AttrKind::I32) {
+            return Err(err(
+                span,
+                "WGSL explicit projection currently admits float vertex attributes only",
+            ));
+        }
+    }
+    if iface.varyings.is_empty() {
+        return Err(err(span, "WGSL explicit projection requires fragment varyings"));
+    }
+    for varying in &iface.varyings {
+        identifier(varying.name, "varying name", span)?;
+        if matches!(varying.kind, WireKind::Bool32 | WireKind::I32 | WireKind::F32x3) {
+            return Err(err(
+                span,
+                "WGSL explicit projection currently admits float scalar/vector varyings other than vec3",
+            ));
+        }
+    }
+    if !iface.array_groups.is_empty() || !iface.bare_samplers.is_empty() {
+        return Err(err(
+            span,
+            "WGSL explicit projection does not admit uniform arrays or bare samplers",
+        ));
+    }
+    if iface
+        .uniform_groups
+        .iter()
+        .filter(|group| group.role == UniformRole::Engine)
+        .count()
+        > 1
+    {
+        return Err(err(span, "WGSL interface contains more than one engine uniform group"));
+    }
+    if iface
+        .uniform_groups
+        .iter()
+        .any(|group| matches!(group.role, UniformRole::Stage(_)))
+    {
+        return Err(err(
+            span,
+            "WGSL explicit projection currently admits the engine block only",
+        ));
+    }
+    if !matches!(iface.fragment_output, FragmentOutput::Single(WireKind::F32x4)) {
+        return Err(err(
+            span,
+            "WGSL explicit projection requires one vec4<f32> fragment output",
+        ));
+    }
+    if let Some(group) = &iface.textures {
+        validate_texture_group(group, span)?;
+    } else {
+        return Err(err(span, "WGSL explicit projection requires a grouped texture input"));
     }
     Ok(())
 }
@@ -866,6 +1178,297 @@ pub fn emit_fullscreen_shader(
     })
 }
 
+pub fn emit_explicit_shader(
+    ws: &Workspace,
+    ir: &ShaderIR,
+    iface: &ShaderInterfacePlan,
+    abi: &WgslAbiPlan,
+    span: Span,
+) -> Result<WgslShaderEmission, CompilerError> {
+    if abi.geometry != WgslGeometryKind::Triangles {
+        return Err(err(span, "WGSL explicit emission requires the triangles ABI"));
+    }
+    abi.validate(iface, span)?;
+    validate_explicit_ir_shape(ir, span)?;
+    let vertex = &ir.stages[0];
+    let fragment = &ir.stages[1];
+    let vertex_fn = function_for_instance(ws, &vertex.entry);
+    let fragment_fn = function_for_instance(ws, &fragment.entry);
+    let vertex_roles = explicit_entry_param_roles(
+        ws,
+        vertex_fn,
+        &vertex.body,
+        iface,
+        ShaderStage::Vertex,
+        span,
+    )?;
+    let fragment_roles = explicit_entry_param_roles(
+        ws,
+        fragment_fn,
+        &fragment.body,
+        iface,
+        ShaderStage::Fragment,
+        span,
+    )?;
+    validate_known_bodies(vertex, span)?;
+    validate_known_bodies(fragment, span)?;
+
+    let mut source = String::new();
+    emit_explicit_types(&mut source, ws, vertex_fn, abi, span)?;
+    emit_explicit_uniforms(&mut source, abi);
+    emit_textures(&mut source, abi);
+
+    for stage in [vertex, fragment] {
+        for instance in &stage.order {
+            let body = stage.bodies.get(instance).ok_or_else(|| {
+                err(
+                    span,
+                    format!(
+                        "WGSL IR order names {} without a lowered body",
+                        instance.symbol(ws)
+                    ),
+                )
+            })?;
+            let function = function_for_instance(ws, instance);
+            let emitter = FunctionEmitter::new(
+                ws,
+                stage,
+                instance,
+                body,
+                abi,
+                HashMap::new(),
+                span,
+            )?;
+            source.push_str(&emitter.emit_function(function, false)?);
+        }
+    }
+
+    let emitter = FunctionEmitter::new(
+        ws,
+        vertex,
+        &vertex.entry,
+        &vertex.body,
+        abi,
+        vertex_roles,
+        span,
+    )?;
+    source.push_str(&emitter.emit_function(vertex_fn, true)?);
+    let emitter = FunctionEmitter::new(
+        ws,
+        fragment,
+        &fragment.entry,
+        &fragment.body,
+        abi,
+        fragment_roles,
+        span,
+    )?;
+    source.push_str(&emitter.emit_function(fragment_fn, true)?);
+    emit_explicit_entries(&mut source, ws, vertex, fragment, abi, span)?;
+
+    Ok(WgslShaderEmission {
+        source,
+        dependencies: ir.declarations(),
+        interface: iface.clone(),
+        abi: abi.clone(),
+        ir: ir.clone(),
+    })
+}
+
+fn validate_explicit_ir_shape(ir: &ShaderIR, span: Span) -> Result<(), CompilerError> {
+    if ir.stages.len() != 2
+        || ir.stages[0].stage != ShaderStage::Vertex
+        || ir.stages[1].stage != ShaderStage::Fragment
+    {
+        return Err(err(
+            span,
+            "WGSL explicit emission requires one vertex and one fragment IR stage",
+        ));
+    }
+    Ok(())
+}
+
+fn explicit_struct_fields(
+    ws: &Workspace,
+    name: Ustr,
+    span: Span,
+) -> Result<Vec<(Ustr, ValueKind)>, CompilerError> {
+    let Some(&sid) = ws.struct_by_name.get(&name) else {
+        return Err(err(span, format!("WGSL value struct {name} is not declared")));
+    };
+    ws.modules[sid.module.index()].structs[sid.def]
+        .fields
+        .iter()
+        .map(|field| {
+            let kind = value_kind_for_type(ws, field.ty).ok_or_else(|| {
+                err(
+                    span,
+                    format!(
+                        "WGSL value struct {name} field {} has no admitted type",
+                        field.name
+                    ),
+                )
+            })?;
+            Ok((field.name, kind))
+        })
+        .collect()
+}
+
+fn emit_value_struct(
+    out: &mut String,
+    name: Ustr,
+    fields: &[(Ustr, ValueKind)],
+    span: Span,
+) -> Result<(), CompilerError> {
+    writeln!(out, "struct {} {{", name).unwrap();
+    for (field, kind) in fields {
+        let ty = wgsl_value_type(*kind)
+            .ok_or_else(|| err(span, format!("WGSL value struct field {field} has no type")))?;
+        writeln!(out, "  {field}: {ty},").unwrap();
+    }
+    out.push_str("}\n\n");
+    Ok(())
+}
+
+fn attr_wgsl_type(kind: AttrKind) -> &'static str {
+    match kind {
+        AttrKind::F32 => "f32",
+        AttrKind::F32x2 => "vec2<f32>",
+        AttrKind::F32x3 => "vec3<f32>",
+        AttrKind::F32x4 => "vec4<f32>",
+        AttrKind::I32 => "i32",
+    }
+}
+
+fn varying_output_name(
+    ws: &Workspace,
+    vertex: &ShaderStageIr,
+    span: Span,
+) -> Result<String, CompilerError> {
+    let function = function_for_instance(ws, &vertex.entry);
+    let ty = function
+        .return_ty
+        .and_then(|ty| nominal_name(ws, ty))
+        .ok_or_else(|| err(span, "WGSL explicit vertex return is not a named varying struct"))?;
+    Ok(ty.to_string())
+}
+
+fn emit_explicit_types(
+    out: &mut String,
+    ws: &Workspace,
+    vertex_fn: &Function,
+    abi: &WgslAbiPlan,
+    span: Span,
+) -> Result<(), CompilerError> {
+    for input in &abi.vertex_inputs {
+        let fields = input
+            .attrs
+            .iter()
+            .map(|attr| (attr.name, attr_value_kind(attr.kind)))
+            .collect::<Vec<_>>();
+        emit_value_struct(out, input.struct_name, &fields, span)?;
+    }
+    let varying = vertex_fn
+        .return_ty
+        .and_then(|ty| nominal_name(ws, ty))
+        .ok_or_else(|| err(span, "WGSL explicit vertex return is not a varying struct"))?;
+    let fields = explicit_struct_fields(ws, varying, span)?;
+    emit_value_struct(out, varying, &fields, span)?;
+    writeln!(out, "struct {varying}Out {{").unwrap();
+    writeln!(out, "  @builtin(position) position: vec4<f32>,").unwrap();
+    for field in &abi.varyings {
+        let kind = fields
+            .iter()
+            .find(|(name, _)| *name == field.name)
+            .map(|(_, kind)| *kind)
+            .ok_or_else(|| err(span, format!("WGSL varying {} is absent from its struct", field.name)))?;
+        let ty = wgsl_value_type(kind).unwrap();
+        writeln!(out, "  @location({}) {}: {},", field.location, field.name, ty).unwrap();
+    }
+    out.push_str("}\n\n");
+    Ok(())
+}
+
+fn emit_explicit_uniforms(out: &mut String, abi: &WgslAbiPlan) {
+    for block in &abi.uniform_blocks {
+        writeln!(out, "struct {} {{", block.struct_name).unwrap();
+        for member in &block.members {
+            writeln!(out, "  {}: {},", member.name, wgsl_type(member.kind).unwrap()).unwrap();
+        }
+        out.push_str("}\n\n");
+        writeln!(
+            out,
+            "@group({}) @binding({}) var<uniform> u_{}: {};",
+            abi.bind_group,
+            block.binding,
+            block.struct_name,
+            block.struct_name
+        )
+        .unwrap();
+    }
+    if !abi.uniform_blocks.is_empty() {
+        out.push('\n');
+    }
+}
+
+fn emit_explicit_entries(
+    out: &mut String,
+    ws: &Workspace,
+    vertex: &ShaderStageIr,
+    fragment: &ShaderStageIr,
+    abi: &WgslAbiPlan,
+    span: Span,
+) -> Result<(), CompilerError> {
+    let varying = varying_output_name(ws, vertex, span)?;
+    let output = format!("{varying}Out");
+    let input = abi
+        .vertex_inputs
+        .first()
+        .ok_or_else(|| err(span, "WGSL explicit ABI has no vertex input"))?;
+    writeln!(out, "@vertex\nfn {}(", abi.vertex_entry).unwrap();
+    for attr in &input.attrs {
+        writeln!(
+            out,
+            "  @location({}) input_{}: {},",
+            attr.location,
+            attr.location,
+            attr_wgsl_type(attr.kind)
+        )
+        .unwrap();
+    }
+    writeln!(out, ") -> {output} {{").unwrap();
+    let args = input
+        .attrs
+        .iter()
+        .map(|attr| format!("input_{}", attr.location))
+        .collect::<Vec<_>>()
+        .join(", ");
+    writeln!(out, "  let attrs = {}({});", input.struct_name, args).unwrap();
+    writeln!(out, "  let result = {}(attrs);", vertex.entry.symbol(ws)).unwrap();
+    writeln!(out, "  var output: {output};").unwrap();
+    out.push_str("  output.position = result.position;\n");
+    for field in &abi.varyings {
+        writeln!(out, "  output.{} = result.{};", field.name, field.name).unwrap();
+    }
+    out.push_str("  return output;\n}\n\n");
+
+    writeln!(
+        out,
+        "@fragment\nfn {}(input: {output}) -> @location({}) {} {{",
+        abi.fragment_entry,
+        abi.fragment.output_location,
+        wgsl_type(abi.fragment.output).unwrap()
+    )
+    .unwrap();
+    let varying_args = std::iter::once("input.position".to_string())
+        .chain(abi.varyings.iter().map(|field| format!("input.{}", field.name)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    writeln!(out, "  let vary = {varying}({varying_args});").unwrap();
+    writeln!(out, "  return {}(vary);", fragment.entry.symbol(ws)).unwrap();
+    out.push_str("}\n");
+    Ok(())
+}
+
 fn validate_ir_shape(ir: &ShaderIR, span: Span) -> Result<(), CompilerError> {
     if ir.stages.len() != 1 || ir.stages[0].stage != ShaderStage::Fragment {
         return Err(err(
@@ -1008,6 +1611,7 @@ enum ValueKind {
     Vec3,
     Vec4,
     Mat4,
+    Struct(Ustr),
     Sampler(SamplerKind),
 }
 
@@ -1021,6 +1625,7 @@ impl ValueKind {
             Self::Vec3 => Some(WireKind::F32x3),
             Self::Vec4 => Some(WireKind::F32x4),
             Self::Mat4 => Some(WireKind::Mat4),
+            Self::Struct(_) => None,
             Self::Sampler(_) => None,
         }
     }
@@ -1035,13 +1640,15 @@ impl ValueKind {
             Self::Vec2 => 2,
             Self::Vec3 => 3,
             Self::Vec4 => 4,
-            Self::Mat4 | Self::Sampler(_) => 0,
+            Self::Mat4 | Self::Struct(_) | Self::Sampler(_) => 0,
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ParamRole {
+    Attribute,
+    Varying,
     Texture,
     Uniform(UniformRole),
     TexCoord,
@@ -1083,10 +1690,37 @@ fn value_kind_for_type(ws: &Workspace, ty: TyId) -> Option<ValueKind> {
             "Mat4" => Some(ValueKind::Mat4),
             "Sampler2D" => Some(ValueKind::Sampler(SamplerKind::Float)),
             "ISampler2D" => Some(ValueKind::Sampler(SamplerKind::Int)),
-            _ => None,
+            _ => Some(ValueKind::Struct(name)),
         },
         _ => None,
     }
+}
+
+fn wgsl_value_type(kind: ValueKind) -> Option<String> {
+    match kind {
+        ValueKind::Struct(name) => Some(name.to_string()),
+        other => other.wgsl().map(str::to_string),
+    }
+}
+
+fn attr_value_kind(kind: AttrKind) -> ValueKind {
+    match kind {
+        AttrKind::F32 => ValueKind::F32,
+        AttrKind::F32x2 => ValueKind::Vec2,
+        AttrKind::F32x3 => ValueKind::Vec3,
+        AttrKind::F32x4 => ValueKind::Vec4,
+        AttrKind::I32 => ValueKind::I32,
+    }
+}
+
+fn struct_field_kind(ws: &Workspace, ty: TyId, field: Ustr) -> Option<ValueKind> {
+    let name = nominal_name(ws, ty)?;
+    let sid = *ws.struct_by_name.get(&name)?;
+    let def = &ws.modules[sid.module.index()].structs[sid.def];
+    def.fields
+        .iter()
+        .find(|candidate| candidate.name == field)
+        .and_then(|candidate| value_kind_for_type(ws, candidate.ty))
 }
 
 fn wire_value_kind(kind: WireKind) -> Option<ValueKind> {
@@ -1183,6 +1817,60 @@ fn entry_param_roles(
         ));
     }
     let _ = abi;
+    Ok(roles)
+}
+
+fn explicit_entry_param_roles(
+    ws: &Workspace,
+    function: &Function,
+    body: &MirFunc,
+    iface: &ShaderInterfacePlan,
+    stage: ShaderStage,
+    span: Span,
+) -> Result<HashMap<Idx<skull_mir::mir::Cell>, ParamRole>, CompilerError> {
+    if function.param_decls.len() != body.params.len() {
+        return Err(err(
+            span,
+            "WGSL explicit entry declaration and IR parameter populations disagree",
+        ));
+    }
+    let mut roles = HashMap::new();
+    for (index, cell) in body.params.iter().enumerate() {
+        let param = &function.param_decls[index];
+        let role = if stage == ShaderStage::Vertex && has_anno(function, index, "attr") {
+            if iface.vertex_inputs.len() != 1
+                || iface.vertex_inputs[0].struct_name != nominal_name(ws, param.ty).unwrap_or_default()
+            {
+                return Err(err(span, "WGSL explicit attribute parameter is absent from the interface plan"));
+            }
+            ParamRole::Attribute
+        } else if has_anno(function, index, "engine") {
+            check_uniform_param(ws, param.ty, UniformRole::Engine, iface, param_span(function, index))?;
+            ParamRole::Uniform(UniformRole::Engine)
+        } else if stage == ShaderStage::Fragment && index == 0 {
+            if nominal_name(ws, param.ty).is_none() {
+                return Err(err(span, "WGSL explicit fragment entry does not take a varying struct"));
+            }
+            ParamRole::Varying
+        } else if stage == ShaderStage::Fragment && has_anno(function, index, "textures") {
+            let name = nominal_name(ws, param.ty).ok_or_else(|| {
+                err(param_span(function, index), "WGSL texture parameter is not a named group")
+            })?;
+            if iface.textures.as_ref().and_then(|group| group.struct_name) != Some(name) {
+                return Err(err(span, "WGSL explicit texture parameter is absent from the interface plan"));
+            }
+            ParamRole::Texture
+        } else {
+            return Err(err(
+                param_span(function, index),
+                format!(
+                    "WGSL explicit parameter `{}` has no admitted attribute, engine, varying, or texture role",
+                    param.name
+                ),
+            ));
+        };
+        roles.insert(*cell, role);
+    }
     Ok(roles)
 }
 
@@ -1311,7 +1999,7 @@ impl<'a> FunctionEmitter<'a> {
             ));
         }
         let return_kind = self.value_kind(values[0])?;
-        let return_ty = return_kind.wgsl().ok_or_else(|| {
+        let return_ty = wgsl_value_type(return_kind).ok_or_else(|| {
             err(
                 self.span,
                 format!(
@@ -1325,12 +2013,19 @@ impl<'a> FunctionEmitter<'a> {
         } else {
             self.instance.symbol(self.ws)
         };
-        let param = if entry {
+        let param = if entry && self.param_roles.values().any(|role| matches!(role, ParamRole::TexCoord)) {
             "uv: vec2<f32>".to_string()
         } else {
             self.body
                 .params
                 .iter()
+                .filter(|cell| {
+                    !entry
+                        || !matches!(
+                            self.param_roles.get(cell),
+                            Some(ParamRole::Texture | ParamRole::Uniform(_))
+                        )
+                })
                 .map(|cell| {
                     let kind = self.cell_kinds.get(cell).copied().ok_or_else(|| {
                         err(
@@ -1341,7 +2036,7 @@ impl<'a> FunctionEmitter<'a> {
                             ),
                         )
                     })?;
-                    let ty = kind.wgsl().ok_or_else(|| {
+                    let ty = wgsl_value_type(kind).ok_or_else(|| {
                         err(
                             self.span,
                             format!(
@@ -1370,7 +2065,7 @@ impl<'a> FunctionEmitter<'a> {
                 out,
                 "  var {}: {} = {};",
                 self.cell_names[&cell],
-                kind.wgsl().unwrap(),
+                wgsl_value_type(kind).unwrap(),
                 zero_value(kind)
             )
             .unwrap();
@@ -1544,7 +2239,20 @@ impl<'a> FunctionEmitter<'a> {
                         )
                     });
                 }
-                Some(ParamRole::TexCoord) | None => {}
+                Some(ParamRole::Attribute) | Some(ParamRole::Varying) | Some(ParamRole::TexCoord) => {
+                    if let Some(ty) = self.body.cells[cell].ty {
+                        if let Some(kind) = struct_field_kind(self.ws, ty, field) {
+                            return Ok(kind);
+                        }
+                    }
+                }
+                None => {
+                    if let Some(ty) = self.body.cells[cell].ty {
+                        if let Some(kind) = struct_field_kind(self.ws, ty, field) {
+                            return Ok(kind);
+                        }
+                    }
+                }
             }
         }
         match self.value_kind(base)? {
@@ -1553,9 +2261,13 @@ impl<'a> FunctionEmitter<'a> {
             {
                 Ok(ValueKind::F32)
             }
+            ValueKind::Struct(_) => Err(err(
+                self.span,
+                format!("WGSL field `{field}` is not present in the compiler-owned value struct"),
+            )),
             _ => Err(err(
                 self.span,
-                format!("WGSL field `{field}` is not a supported fullscreen projection"),
+                format!("WGSL field `{field}` is not a supported projection"),
             )),
         }
     }
@@ -1675,6 +2387,9 @@ impl<'a> FunctionEmitter<'a> {
                         self.cell_names[cell]
                     ),
                 )),
+                Some(ParamRole::Attribute) | Some(ParamRole::Varying) => {
+                    Ok(self.cell_names[cell].clone())
+                }
                 None => Ok(self.cell_names[cell].clone()),
             },
             Inst::Field { base, field } => {
@@ -1696,7 +2411,10 @@ impl<'a> FunctionEmitter<'a> {
                             }
                             return Ok(format!("u_{}.{}", block.struct_name, field));
                         }
-                        Some(ParamRole::TexCoord) | None => {}
+                        Some(ParamRole::Attribute)
+                        | Some(ParamRole::Varying)
+                        | Some(ParamRole::TexCoord)
+                        | None => {}
                     }
                 }
                 Ok(format!("{}.{}", self.render_val(*base)?, field))
@@ -1704,16 +2422,13 @@ impl<'a> FunctionEmitter<'a> {
             Inst::MakeValueStruct { name, fields }
             | Inst::MaterializeValueStruct { name, fields } => {
                 let kind = value_struct_kind(*name).ok_or_else(|| {
-                    err(
-                        self.span,
-                        format!("WGSL does not support value struct `{name}`"),
-                    )
+                    err(self.span, format!("WGSL does not support value struct `{name}`"))
                 })?;
                 let args = fields
                     .iter()
                     .map(|(_, value)| self.render_val(*value))
                     .collect::<Result<Vec<_>, _>>()?;
-                Ok(format!("{}({})", kind.wgsl().unwrap(), args.join(", ")))
+                Ok(format!("{}({})", wgsl_value_type(kind).unwrap(), args.join(", ")))
             }
             Inst::Call { func, args } => self.render_call(iid, *func, args),
             Inst::IntAdd(a, b) | Inst::FloatAdd(a, b) => self.binary(*a, "+", *b),
@@ -1790,7 +2505,7 @@ impl<'a> FunctionEmitter<'a> {
                     .iter()
                     .map(|arg| self.render_val(*arg))
                     .collect::<Result<Vec<_>, _>>()?;
-                Ok(format!("{}({})", kind.wgsl().unwrap(), rendered.join(", ")))
+            Ok(format!("{}({})", wgsl_value_type(kind).unwrap(), rendered.join(", ")))
             }
             Some(WgslIntrinsic::Builtin(builtin)) => {
                 let target = self.value_kind(
@@ -1836,7 +2551,7 @@ impl<'a> FunctionEmitter<'a> {
     ) -> Result<String, CompilerError> {
         let rendered = self.render_val(arg)?;
         if target.components() > 1 && self.value_kind(arg)? == ValueKind::F32 {
-            Ok(format!("{}({})", target.wgsl().unwrap(), rendered))
+            Ok(format!("{}({})", wgsl_value_type(target).unwrap(), rendered))
         } else {
             Ok(rendered)
         }
@@ -1883,20 +2598,21 @@ fn value_struct_kind(name: Ustr) -> Option<ValueKind> {
         "Vec3" => Some(ValueKind::Vec3),
         "Vec4" => Some(ValueKind::Vec4),
         "Mat4" => Some(ValueKind::Mat4),
-        _ => None,
+        _ => Some(ValueKind::Struct(name)),
     }
 }
 
-fn zero_value(kind: ValueKind) -> &'static str {
+fn zero_value(kind: ValueKind) -> String {
     match kind {
-        ValueKind::F32 => "0.0",
-        ValueKind::I32 => "0",
-        ValueKind::Bool => "false",
-        ValueKind::Vec2 => "vec2<f32>(0.0)",
-        ValueKind::Vec3 => "vec3<f32>(0.0)",
-        ValueKind::Vec4 => "vec4<f32>(0.0)",
-        ValueKind::Mat4 => "mat4x4<f32>(0.0)",
-        ValueKind::Sampler(_) => "0.0",
+        ValueKind::F32 => "0.0".into(),
+        ValueKind::I32 => "0".into(),
+        ValueKind::Bool => "false".into(),
+        ValueKind::Vec2 => "vec2<f32>(0.0)".into(),
+        ValueKind::Vec3 => "vec3<f32>(0.0)".into(),
+        ValueKind::Vec4 => "vec4<f32>(0.0)".into(),
+        ValueKind::Mat4 => "mat4x4<f32>(0.0)".into(),
+        ValueKind::Struct(name) => format!("{}()", name),
+        ValueKind::Sampler(_) => "0.0".into(),
     }
 }
 

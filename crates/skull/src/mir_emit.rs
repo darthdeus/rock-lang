@@ -2257,7 +2257,12 @@ fn lua_long_bracket(s: &str) -> String {
 /// only the resolved `FuncRef`s (the layering constraint). An emit error (tier
 /// violation, stage/collision) is a spanned `CompilerError` failing the compile,
 /// never skip-and-continue.
-const WGSL_FULLSCREEN_ROOTS: [&str; 3] = ["blit_frag", "present_frag", "tonemap_frag"];
+const WGSL_SELECTED_ARTIFACTS: [(&str, bool); 4] = [
+    ("blit_frag", true),
+    ("present_frag", true),
+    ("tonemap_frag", true),
+    ("sprite_basic_vert+sprite_basic_frag", false),
+];
 
 fn shader_registration_lines(
     ws: &Workspace,
@@ -2328,48 +2333,88 @@ fn shader_registration_lines(
     }
     if renderer_target == RendererTarget::Wgpu {
         let mut admitted = 0usize;
-        for root in WGSL_FULLSCREEN_ROOTS {
-            let Some(pair) = collection.pairs.iter().find(|pair| pair.key == root) else {
+        for (key, fullscreen) in WGSL_SELECTED_ARTIFACTS {
+            let Some(pair) = collection.pairs.iter().find(|pair| pair.key == key) else {
                 return Err(CompilerError::new_no_location(format!(
-                    "selected wgpu fullscreen root `{root}` was not admitted by rock_shader"
+                    "selected wgpu artifact {key} was not admitted by rock_shader"
                 )));
             };
-            if let Some(vert) = pair.vert {
+            let (shader_key, source, wire, semantic_wire, emission_dependencies) = if fullscreen {
+                if pair.vert.is_some() {
+                    return Err(CompilerError::new_no_location(format!(
+                        "selected wgpu artifact {key} is marked fullscreen but has an explicit vertex stage"
+                    )));
+                }
+                let neutral = skull_codegen_wgsl::plan_fullscreen_artifact(ws, pair.frag)?;
+                let abi = skull_codegen_wgsl::WgslAbiPlan::wgsl(
+                    &neutral.interface,
+                    bone_semantic::prelude::Span::default(),
+                )?;
+                let emission = skull_codegen_wgsl::emit_fullscreen_shader(
+                    ws,
+                    &neutral.ir,
+                    &neutral.interface,
+                    &abi,
+                    bone_semantic::prelude::Span::default(),
+                )?;
+                (
+                    key,
+                    emission.source,
+                    emission.abi.wire(),
+                    neutral.interface.semantic_wire(true),
+                    emission.dependencies,
+                )
+            } else {
+                let Some(vert) = pair.vert else {
+                    return Err(CompilerError::new_no_location(format!(
+                        "selected wgpu artifact {key} has no explicit vertex stage"
+                    )));
+                };
                 let vname = ws.module(vert.module).functions[vert.func].name;
-                return Err(CompilerError::new_no_location(format!(
-                    "selected wgpu fullscreen root `{root}` has explicit vertex stage `{vname}`; \
-                     only compiler-owned fullscreen geometry is supported"
-                )));
-            }
-            let neutral = skull_codegen_wgsl::plan_fullscreen_artifact(ws, pair.frag)?;
-            let abi = skull_codegen_wgsl::WgslAbiPlan::wgsl(
-                &neutral.interface,
-                bone_semantic::prelude::Span::default(),
-            )?;
-            let emission = skull_codegen_wgsl::emit_fullscreen_shader(
-                ws,
-                &neutral.ir,
-                &neutral.interface,
-                &abi,
-                bone_semantic::prelude::Span::default(),
-            )?;
-            dependencies.extend(emission.dependencies.iter().copied());
-            let wire = emission.abi.wire();
-            let semantic_wire = neutral.interface.semantic_wire(true);
+                let fname = ws.module(pair.frag.module).functions[pair.frag.func].name;
+                let glsl = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
+                    ws,
+                    vert.module,
+                    vname.as_str(),
+                    fname.as_str(),
+                    profile,
+                )?;
+                let abi = skull_codegen_wgsl::WgslAbiPlan::explicit(
+                    &glsl.interface,
+                    "vertex_main",
+                    "fragment_main",
+                    bone_semantic::prelude::Span::default(),
+                )?;
+                let emission = skull_codegen_wgsl::emit_explicit_shader(
+                    ws,
+                    &glsl.ir,
+                    &glsl.interface,
+                    &abi,
+                    bone_semantic::prelude::Span::default(),
+                )?;
+                (
+                    key,
+                    emission.source,
+                    emission.abi.wire(),
+                    glsl.interface.semantic_wire(false),
+                    emission.dependencies,
+                )
+            };
+            dependencies.extend(emission_dependencies);
             let _ = writeln!(
                 out,
                 "__rock_wgpu_shader_register({}, {}, {}, {})",
-                skull_codegen_lua::lua_string(root),
-                skull_codegen_lua::lua_string(&emission.source),
+                skull_codegen_lua::lua_string(shader_key),
+                skull_codegen_lua::lua_string(&source),
                 skull_codegen_lua::lua_string(&wire),
                 skull_codegen_lua::lua_string(&semantic_wire),
             );
             admitted += 1;
         }
-        if admitted != WGSL_FULLSCREEN_ROOTS.len() {
+        if admitted != WGSL_SELECTED_ARTIFACTS.len() {
             return Err(CompilerError::new_no_location(format!(
-                "selected wgpu fullscreen registration admitted {admitted} roots, expected {}",
-                WGSL_FULLSCREEN_ROOTS.len()
+                "selected wgpu artifact registration admitted {admitted} artifacts, expected {}",
+                WGSL_SELECTED_ARTIFACTS.len()
             )));
         }
     }

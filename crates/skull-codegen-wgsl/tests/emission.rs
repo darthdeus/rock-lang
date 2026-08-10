@@ -68,6 +68,52 @@ fn artifact(root: &str, source: &str) -> skull_codegen_wgsl::WgslShaderEmission 
     emission
 }
 
+#[test]
+fn selected_sprite_basic_pipeline_is_admitted_by_wgsl() {
+    let source = format!(
+        "{}\n{}\n{}",
+        include_str!("../../../stone/engine/rendering/engine_uniforms.rock"),
+        include_str!("../../../stone/engine/shaders/common/pass_textures.rock"),
+        include_str!("../../../stone/engine/shaders/rendering/sprite_basic_shader.rock"),
+    );
+    let (ws, mid) = workspace(&source);
+    let glsl = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
+        &ws,
+        mid,
+        "sprite_basic_vert",
+        "sprite_basic_frag",
+        skull_codegen_glsl::GlslProfile::Core330,
+    )
+    .expect("the existing paired compiler plan");
+    let abi = WgslAbiPlan::explicit(
+        &glsl.interface,
+        "vertex_main",
+        "fragment_main",
+        Span::default(),
+    )
+        .expect("selected sprite_basic must have a WGSL ABI");
+    let artifact = skull_codegen_wgsl::emit_explicit_shader(
+        &ws,
+        &glsl.ir,
+        &glsl.interface,
+        &abi,
+        Span::default(),
+    )
+    .expect("selected sprite_basic must emit WGSL");
+    assert_eq!(glsl.interface.vertex_inputs.len(), 1);
+    assert_eq!(glsl.interface.varyings.len(), 2);
+    assert_eq!(abi.textures.len(), 1);
+    assert!(artifact.source.contains("@vertex"));
+    assert!(artifact.source.contains("@fragment"));
+    let module = naga::front::wgsl::parse_str(&artifact.source).expect("WGSL parses");
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .expect("WGSL validates");
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 struct OperationCensus {
     calls: usize,
@@ -109,7 +155,7 @@ fn operation_census(emission: &skull_codegen_wgsl::WgslShaderEmission) -> Operat
 }
 
 #[test]
-fn neutral_ir_operation_census_covers_the_three_selected_migration_roots() {
+fn neutral_ir_operation_census_covers_the_three_fullscreen_fixture_roots() {
     let expected = [
         (
             "blit_frag",
@@ -160,7 +206,7 @@ fn neutral_ir_operation_census_covers_the_three_selected_migration_roots() {
         assert_eq!(operation_census(&artifact(root, source)), expected_census);
         examined += 1;
     }
-    assert_eq!(examined, 3, "all selected migration roots were censused");
+    assert_eq!(examined, 3, "all fullscreen fixture roots were censused");
 }
 
 #[test]
@@ -223,7 +269,7 @@ fn source_goldens_and_physical_structure_are_deterministic() {
 }
 
 #[test]
-fn naga_validates_all_three_generated_modules_3_of_3() {
+fn naga_validates_all_three_fullscreen_fixture_modules_3_of_3() {
     let mut examined = 0;
     let mut validated = 0;
     let mut errors = Vec::new();
@@ -245,7 +291,7 @@ fn naga_validates_all_three_generated_modules_3_of_3() {
             Err(error) => errors.push(format!("{root}: {error}")),
         }
     }
-    assert_eq!(examined, 3, "WGSL validator examined every selected root");
+    assert_eq!(examined, 3, "WGSL validator examined every fullscreen fixture root");
     assert_eq!(validated, 3, "WGSL validator errors: {errors:?}");
     assert!(
         errors.is_empty(),
