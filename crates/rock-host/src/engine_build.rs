@@ -78,10 +78,15 @@ pub fn game_engine_libs(game_path: &str) -> Result<Vec<&'static EngineLib>> {
         return Ok(Vec::new());
     };
     cfg.validate_engine_needs()?;
+    cfg.validate_renderer()?;
     cfg.validate_ios()?;
+    let renderer = cfg.renderer_backend()?;
     Ok(OPTIONAL_ENGINE_LIBS
         .iter()
-        .filter(|lib| cfg.needs_engine_lib(lib.need))
+        .filter(|lib| {
+            cfg.needs_engine_lib(lib.need)
+                || (lib.need == "wgpu" && renderer == crate::stick::RendererBackend::Wgpu)
+        })
         .collect())
 }
 
@@ -115,6 +120,16 @@ mod tests {
         assert_eq!(resolved[0].crate_name, "stone-wgpu");
         assert_eq!(resolved[0].src_stem, "stone_wgpu");
         assert_eq!(resolved[0].dst_stem, "stone_wgpu");
+    }
+
+    #[test]
+    fn renderer_selection_resolves_wgpu_without_a_compute_need() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs_err::write(
+            dir.path().join("stick.toml"),
+            "[package]\nname = \"g\"\n[renderer]\nbackend = \"wgpu\"\n",
+        ).expect("write manifest");
+        assert_eq!(libs(&dir), vec!["wgpu"]);
     }
 
     /// The negative side: a game asking for one lib must not drag in the other.

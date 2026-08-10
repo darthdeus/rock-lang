@@ -2286,7 +2286,18 @@ fn skull_game_preamble(dir: &str) -> String {
     use std::path::PathBuf;
     let abs = PathBuf::from(dir).canonicalize().unwrap_or_else(|_| PathBuf::from(dir));
     let escaped = abs.display().to_string().replace('\\', "\\\\").replace('"', "\\\"");
-    let mut full = format!("__ROCK_GAME_SOURCE_DIR = \"{escaped}\"\n");
+    let renderer = match rock_host::stick::StickConfig::find_from_dir(&abs) {
+        Ok(Some((_, cfg))) => match cfg.renderer_backend() {
+            Ok(rock_host::stick::RendererBackend::Gl) => "gl",
+            Ok(rock_host::stick::RendererBackend::Wgpu) => "wgpu",
+            Err(e) => panic!("invalid renderer selection for {dir}: {e}"),
+        },
+        Ok(None) => "gl",
+        Err(e) => panic!("cannot read renderer selection for {dir}: {e}"),
+    };
+    let mut full = format!(
+        "__ROCK_GAME_SOURCE_DIR = \"{escaped}\"\n__ROCK_RENDERER_BACKEND = \"{renderer}\"\n"
+    );
     full.push_str(&rock_host::cimgui_embed::build_prelude());
     if !full.ends_with('\n') {
         full.push('\n');
