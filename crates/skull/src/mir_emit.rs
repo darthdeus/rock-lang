@@ -1816,24 +1816,6 @@ fn emit_specialized_callees(
 /// Everything after this point is rendering: `validate_emitted_body`,
 /// `emit_named` and the nested-fn emission. Nothing here mints a name or
 /// touches a `CodegenCtx`, which is what lets a read-only consumer run it.
-pub fn prepare_instance_body(
-    ws: &Workspace,
-    scx: &skull_mir::lower::ScalarCtx,
-    fref: FuncRef,
-    subst: &skull_mir::lower::SpecSubst,
-    name: &str,
-    mf: &mut skull_mir::mir::MirFunc,
-    cache: &mut skull_transform::InlineCache,
-) -> Result<FxHashSet<FuncRef>, CompilerError> {
-    let (spliced, _records) = skull_transform::inline_functions_with_subst(
-        ws, scx, fref, mf, cache, subst,
-    )?;
-    skull_transform::cleanup_with_nobox(ws, mf);
-    skull_transform::convert_closures(mf, name);
-    skull_transform::recover_counted_loops(ws, mf);
-    Ok(spliced.into_iter().collect())
-}
-
 pub fn prepare_instance_body_with_plans(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,

@@ -44,6 +44,11 @@ fn graph_of(src: &str) -> (Workspace, InstanceGraph) {
     (ws, g)
 }
 
+fn graph_of_ws(ws: &Workspace) -> InstanceGraph {
+    let roots = skull::mir_emit::emission_roots(ws, None);
+    instance_graph::build(ws, roots, false)
+}
+
 fn census_of(src: &str) -> SiteJoinCensus {
     let (ws, mut g) = graph_of(src);
     let bodies = skull::concrete_body::build(&ws, &mut g);
@@ -74,15 +79,25 @@ fn prepared_body(ws: &Workspace, name: &str) -> MirFunc {
         .find(|(_, f)| f.name.as_str() == name)
         .expect("fn not found");
     let fref = skull_mir::mir::FuncRef { module: mid, func: fid };
-    let scx = ScalarCtx::new(ws);
-    let subst = skull_mir::lower::SpecSubst::default();
-    let mut mf =
-        skull_mir::lower::lower_instance(ws, &scx, &skull_mir::instance::Instance::base(fref))
-            .expect("lower");
+    let graph = graph_of_ws(ws);
+    let bodies = skull::concrete_body::build(ws, &graph);
+    let scx = ScalarCtx::new(ws).sharing(graph.interner().clone());
+    let instance = skull_mir::instance::Instance::base(fref);
+    let plan = bodies.plans.get(&instance).expect("concrete plan");
+    let mut mf = skull_mir::lower::lower_instance_with_plans(ws, &scx, plan, &bodies.plans)
+        .expect("lower");
     let mangled = skull_mir::mangle::mangle_fn(ws, f);
     let mut cache = skull_transform::InlineCache::default();
-    skull::mir_emit::prepare_instance_body(ws, &scx, fref, &subst, &mangled, &mut mf, &mut cache)
-        .expect("prepare");
+    skull::mir_emit::prepare_instance_body_with_plans(
+        ws,
+        &scx,
+        fref,
+        &mangled,
+        &mut mf,
+        &mut cache,
+        &bodies.plans,
+    )
+    .expect("prepare");
     mf
 }
 
@@ -160,7 +175,23 @@ fn sum_all<I: Iterator<int>>(it: I) -> int {
 fn main() { print("{sum_all(Counter { n: 0 })}") }
 "#,
     );
-    let mf = prepared_body(&ws, "sum_all");
+    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
+    let (sum_fid, _) = ws
+        .module(mid)
+        .functions
+        .iter()
+        .find(|(_, f)| f.name.as_str() == "sum_all")
+        .expect("sum_all");
+    let scx = ScalarCtx::new(&ws);
+    let mf = skull_mir::lower::lower_instance(
+        &ws,
+        &scx,
+        &skull_mir::instance::Instance::base(skull_mir::mir::FuncRef {
+            module: mid,
+            func: sum_fid,
+        }),
+    )
+    .expect("lower bounded source body");
     // The fixture must actually CONTAIN the form. Without this the assertion
     // below is satisfied by any body with no bounded loop at all.
     let bound_calls = count_bound_multi(&mf);
@@ -945,11 +976,16 @@ fn main() { print("{top()}") }
         .find(|(_, f)| f.name.as_str() == "top")
         .expect("top");
     let fref = skull_mir::mir::FuncRef { module: mid, func: fid };
-    let scx = ScalarCtx::new(&ws);
-    let mut mf = skull_mir::lower::lower_instance(
+    let graph = graph_of_ws(&ws);
+    let bodies = skull::concrete_body::build(&ws, &graph);
+    let scx = ScalarCtx::new(&ws).sharing(graph.interner().clone());
+    let top = skull_mir::instance::Instance::base(fref);
+    let top_plan = bodies.plans.get(&top).expect("top concrete plan");
+    let mut mf = skull_mir::lower::lower_instance_with_plans(
         &ws,
         &scx,
-        &skull_mir::instance::Instance::base(fref),
+        top_plan,
+        &bodies.plans,
     )
     .expect("lower top");
     let (call, owner): (_, skull::instance_graph::Instance) = mf
@@ -969,14 +1005,14 @@ fn main() { print("{top()}") }
 
     let mangled = skull_mir::mangle::mangle_fn(&ws, f);
     let mut cache = skull_transform::InlineCache::default();
-    skull::mir_emit::prepare_instance_body(
+    skull::mir_emit::prepare_instance_body_with_plans(
         &ws,
         &scx,
         fref,
-        &Default::default(),
         &mangled,
         &mut mf,
         &mut cache,
+        &bodies.plans,
     )
     .expect("prepare");
 
@@ -1020,11 +1056,16 @@ fn main() { print("{top()}") }
         .find(|(_, f)| f.name.as_str() == "top")
         .expect("top");
     let fref = skull_mir::mir::FuncRef { module: mid, func: fid };
-    let scx = ScalarCtx::new(&ws);
-    let mut mf = skull_mir::lower::lower_instance(
+    let graph = graph_of_ws(&ws);
+    let bodies = skull::concrete_body::build(&ws, &graph);
+    let scx = ScalarCtx::new(&ws).sharing(graph.interner().clone());
+    let top = skull_mir::instance::Instance::base(fref);
+    let top_plan = bodies.plans.get(&top).expect("top concrete plan");
+    let mut mf = skull_mir::lower::lower_instance_with_plans(
         &ws,
         &scx,
-        &skull_mir::instance::Instance::base(fref),
+        top_plan,
+        &bodies.plans,
     )
     .expect("lower top");
     let call = mf
@@ -1050,14 +1091,14 @@ fn main() { print("{top()}") }
 
     let mangled = skull_mir::mangle::mangle_fn(&ws, f);
     let mut cache = skull_transform::InlineCache::default();
-    skull::mir_emit::prepare_instance_body(
+    skull::mir_emit::prepare_instance_body_with_plans(
         &ws,
         &scx,
         fref,
-        &Default::default(),
         &mangled,
         &mut mf,
         &mut cache,
+        &bodies.plans,
     )
     .expect("an ABI mismatch declines rather than corrupting MIR");
     let residual_wrap = mf.blocks.iter().flat_map(|(_, block)| block.insts.iter()).filter(|id| {
