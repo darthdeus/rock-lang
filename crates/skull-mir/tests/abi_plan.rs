@@ -138,7 +138,11 @@ fn main() {
         owner: ConcreteOwner::Function(Instance::base(sink)),
         types: ConcreteTypeTables::default(),
         foreign_domains: Default::default(),
-        signature: ConcreteSignature { params: vec![v2], result: Some(v2) },
+        signature: ConcreteSignature {
+            params: vec![v2],
+            param_tuple_spelled: vec![false],
+            result: Some(v2),
+        },
         callees: Default::default(),
         callee_signatures: Default::default(),
         failed_sites: Default::default(),
@@ -151,4 +155,66 @@ fn main() {
         "a fixed-name body must retain its boxed ABI even when taken by reference"
     );
     assert_eq!(abi.result_lanes(), 1);
+}
+
+#[test]
+fn concrete_plan_keeps_a_generic_bound_tuple_parameter_opaque() {
+    let ws = ws_of(
+        r#"
+nobox value V2 { x: float, y: float }
+@scalar_abi fn generic_tuple_take<T>(value: T) -> T { return value }
+@scalar_abi fn written_tuple(value: (V2, float)) -> (V2, float) { return value }
+fn main() { print("{generic_tuple_take((V2 { x: 1.0, y: 2.0 }, 3.0)).0.x}") }
+"#,
+    );
+    let scx = ScalarCtx::new(&ws);
+    let take = func_ref(&ws, "generic_tuple_take");
+    let v2_ty = nominal("V2");
+    let tuple = scx.interner().intern(MonoTy::Tuple(vec![v2_ty, MonoTy::Float]));
+    let plan = ConcreteBodyPlan {
+        owner: ConcreteOwner::Function(Instance::intern(
+            scx.interner(),
+            take,
+            vec![MonoTy::Tuple(vec![MonoTy::App {
+                ctor: MonoCtor::Nominal(Ustr::from("V2")),
+                params: Vec::new(),
+            }])],
+        )),
+        types: ConcreteTypeTables::default(),
+        foreign_domains: Default::default(),
+        signature: ConcreteSignature {
+            params: vec![tuple],
+            param_tuple_spelled: vec![false],
+            result: Some(tuple),
+        },
+        callees: Default::default(),
+        callee_signatures: Default::default(),
+        failed_sites: Default::default(),
+        bound_tree: Default::default(),
+    };
+    let abi = BackendFnAbiPlan::for_concrete_plan(&ws, &scx, &plan);
+    assert_eq!(
+        abi.param_leaf_widths(),
+        None,
+        "a tuple supplied through generic T must keep the generic boundary boxed"
+    );
+    assert_eq!(abi.result_lanes(), 3, "a generic tuple result keeps its multi-value return shape");
+
+    let written = func_ref(&ws, "written_tuple");
+    let written_plan = ConcreteBodyPlan {
+        owner: ConcreteOwner::Function(Instance::base(written)),
+        types: ConcreteTypeTables::default(),
+        foreign_domains: Default::default(),
+        signature: ConcreteSignature {
+            params: vec![tuple],
+            param_tuple_spelled: vec![true],
+            result: Some(tuple),
+        },
+        callees: Default::default(),
+        callee_signatures: Default::default(),
+        failed_sites: Default::default(),
+        bound_tree: Default::default(),
+    };
+    let written_abi = BackendFnAbiPlan::for_concrete_plan(&ws, &scx, &written_plan);
+    assert_eq!(written_abi.param_leaf_widths(), Some(vec![3]));
 }

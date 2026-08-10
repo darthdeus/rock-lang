@@ -66,6 +66,11 @@ impl ConcreteTypeTables {
 #[derive(Clone, Default, Debug, PartialEq, Eq)]
 pub struct ConcreteSignature {
     pub params: Vec<MonoTyId>,
+    /// Whether each declared parameter was written as a tuple (including a
+    /// nullable tuple). A concrete tuple bound to a generic parameter remains
+    /// one boxed boundary slot; its reified children do not change that source
+    /// ABI choice.
+    pub param_tuple_spelled: Vec<bool>,
     pub result: Option<MonoTyId>,
 }
 

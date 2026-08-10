@@ -24,8 +24,8 @@ use bone_semantic::inference::Workspace;
 
 use super::{
     nobox_declared_shape_spec, nobox_param_slot_spec, sig_param_slot_spec, sig_value_shape_spec,
-    mono_ret_slot, mono_sig_param_slot, mono_tuple_ret_shape,
-    mono_value_shape, slot_param_names,
+    mono_concrete_param_slot, mono_tuple_ret_shape,
+    mono_nobox_value_shape, mono_value_shape, slot_param_names,
     tuple_ret_shape, RetSlot, ScalarCtx, SpecSubst, TupleRetShape, ValueShape,
 };
 use crate::concrete::ConcreteBodyPlan;
@@ -183,16 +183,29 @@ fn fn_scalar_abi_concrete(
         .iter()
         .map(|id| scx.interner().get(*id))
         .collect::<Vec<_>>();
-    let param_shapes: Vec<RetSlot> = if nobox_only {
-        params.iter().map(|ty| mono_ret_slot(ws, ty)).collect()
-    } else {
-        params.iter().map(|ty| mono_sig_param_slot(ws, ty)).collect()
-    };
+    let param_shapes: Vec<RetSlot> = params
+        .iter()
+        .enumerate()
+        .map(|(index, ty)| {
+            let tuple_spelled = *plan
+                .signature
+                .param_tuple_spelled
+                .get(index)
+                .expect("concrete signature is missing parameter ABI provenance");
+            mono_concrete_param_slot(ws, ty, tuple_spelled, nobox_only)
+        })
+        .collect();
     let ret_shape = plan
         .signature
         .result
         .map(|id| scx.interner().get(id))
-        .and_then(|ty| mono_value_shape(ws, &ty));
+        .and_then(|ty| {
+            if nobox_only {
+                mono_nobox_value_shape(ws, &ty)
+            } else {
+                mono_value_shape(ws, &ty)
+            }
+        });
     (ret_shape.is_some() || param_shapes.iter().any(RetSlot::splats))
         .then_some(FnScalarAbi { param_shapes, ret_shape })
 }

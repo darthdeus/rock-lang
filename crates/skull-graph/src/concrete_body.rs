@@ -660,12 +660,31 @@ fn concrete_signature(
             .iter()
             .map(|param| arena.convert_decl(ws, param.ty, subst))
             .collect::<Result<Vec<_>, _>>()?;
+        let param_tuple_spelled = f
+            .param_decls
+            .iter()
+            .map(|param| declared_tuple_param(ws, param.ty))
+            .collect::<Result<Vec<_>, _>>()?;
         let result = f
             .return_ty
             .map(|ty| arena.convert_decl(ws, ty, subst))
             .transpose()?;
-        Ok(ConcreteSignature { params, result })
+        Ok(ConcreteSignature { params, param_tuple_spelled, result })
     })
+}
+
+fn declared_tuple_param(ws: &Workspace, ty: TyId) -> Result<bool, MonoTyReason> {
+    match TyEnv::Decl.decl_node(ws, ty)? {
+        TypeExpr::Tuple { .. } => Ok(true),
+        TypeExpr::Nullable(inner) => {
+            Ok(matches!(TyEnv::Decl.decl_node(ws, ty.with_idx(inner))?, TypeExpr::Tuple { .. }))
+        }
+        TypeExpr::Builtin(_)
+        | TypeExpr::App { .. }
+        | TypeExpr::Generic(..)
+        | TypeExpr::Infer(..)
+        | TypeExpr::Function { .. } => Ok(false),
+    }
 }
 
 /// Resolve the concrete signature a graph instance owns before a consumer
@@ -932,7 +951,11 @@ fn concrete_always_plan(
             let result = g.interner().with_mut(|arena| {
                 arena.convert_decl(ws, ws.module(module).globals[gid].ty, &MonoSubst::default())
             })?;
-            ConcreteSignature { params: Vec::new(), result: Some(result) }
+            ConcreteSignature {
+                params: Vec::new(),
+                param_tuple_spelled: Vec::new(),
+                result: Some(result),
+            }
         }
         BodyOwner::Decorator(did) => {
             let mut params = Vec::new();
@@ -943,7 +966,11 @@ fn concrete_always_plan(
                 params.push(*types.binding_types.get(binding).ok_or(MonoTyReason::NoNode)?);
             }
             let _ = did;
-            ConcreteSignature { params, result: None }
+            ConcreteSignature {
+                param_tuple_spelled: vec![false; params.len()],
+                params,
+                result: None,
+            }
         }
         _ => return Ok(None),
     };

@@ -121,7 +121,11 @@ mod tests {
             ctor: MonoCtor::Nominal(Ustr::from("Coroutine")),
             params: vec![interner.get(event)],
         });
-        let signature = ConcreteSignature { params: Vec::new(), result: Some(result) };
+        let signature = ConcreteSignature {
+            params: Vec::new(),
+            param_tuple_spelled: Vec::new(),
+            result: Some(result),
+        };
         let plan = CoroutinePlan::from_concrete_signature(
             &ws,
             &interner,
