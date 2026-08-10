@@ -19,6 +19,10 @@ fn function(ws: &bone_semantic::inference::Workspace, name: &str) -> FuncRef {
     FuncRef { module: mid, func: fid }
 }
 
+fn instance_count(cache: &skull_codegen_js::emit::JsEmitCache, func: FuncRef) -> usize {
+    cache.graph().instances.iter().filter(|instance| instance.func == func).count()
+}
+
 /// The cached session keeps one arena while the retained graph is rebuilt.
 #[test]
 fn the_cache_keeps_one_arena_across_an_overlay_edit() {
@@ -36,12 +40,13 @@ fn main() { print(hot() + other()) }\n";
     let before = ws_with(BEFORE);
     let after = ws_with(AFTER);
     let mid = function(&before, "main").module;
+    let pick = function(&before, "pick");
     let (_, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
 
     let handle = cache.interner_handle();
-    // Non-vacuous: the arena holds the `pick<float>` instantiation, so this is a
-    // real population and not an empty one any two arenas would share.
-    assert_eq!(handle.len(), 1, "one generic instantiation was interned");
+    assert!(handle.len() > 0, "the shared arena has no interned concrete types");
+    assert_eq!(instance_count(&cache, pick), 1, "one generic instantiation was retained");
+    let type_population = handle.len();
 
     let hot = function(&after, "hot");
     skull_codegen_js::emit::emit_overlay(
@@ -57,7 +62,8 @@ fn main() { print(hot() + other()) }\n";
         std::sync::Arc::ptr_eq(&handle, &cache.interner_handle()),
         "the cache must keep ONE arena across the edit"
     );
-    assert_eq!(cache.interner_handle().len(), 1, "and the population it already had");
+    assert_eq!(cache.interner_handle().len(), type_population, "the edit added no type");
+    assert_eq!(instance_count(&cache, pick), 1, "the edit kept one generic instantiation");
 }
 
 #[test]
@@ -74,8 +80,10 @@ fn main() { print(hot()) }\n";
     let before = ws_with(BEFORE);
     let after = ws_with(AFTER);
     let mid = function(&before, "main").module;
+    let pick = function(&before, "pick");
     let (_, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
-    assert_eq!(cache.interner_handle().len(), 1, "one instantiation before the edit");
+    assert!(cache.interner_handle().len() > 0, "the shared arena has no concrete types");
+    assert_eq!(instance_count(&cache, pick), 1, "one instantiation before the edit");
     let initial_population = cache.graph_population();
     assert!(
         initial_population > 0,
@@ -94,10 +102,7 @@ fn main() { print(hot()) }\n";
         matches!(reload, skull_codegen_js::emit::JsReload::Overlay(_)),
         "an edit that adds a retained instance must produce an overlay"
     );
-    assert!(
-        cache.interner_handle().len() >= 2,
-        "the edit must add an instance type"
-    );
+    assert_eq!(instance_count(&cache, pick), 2, "the edit must add an instance");
     let added = cache.graph_update().expect("graph update after addition");
     assert!(added.added > 0, "the edit must add a graph instance");
     assert_eq!(
@@ -143,6 +148,7 @@ fn main() { print(hot()) }\n";
         "every published removed instance must leave the session graph"
     );
     assert_eq!(removed.added, 0, "the removal arm must not add an instance");
+    assert_eq!(instance_count(&cache, pick), 1, "the removed instance must leave the graph");
     let removal_population = cache.graph_population();
     assert!(
         removal_population < added.after,
@@ -174,6 +180,7 @@ fn main() { print(hot()) }\n";
     assert_eq!(readded.added_instances.len(), readded.added);
     assert!(readded.removed_instances.is_empty());
     assert_eq!(readded.removed, 0, "reintroduction must not hide a removal");
+    assert_eq!(instance_count(&cache, pick), 2, "reintroduction must restore the instance");
     assert!(
         cache.graph_population() > removal_population,
         "reintroduction must grow the live graph population"

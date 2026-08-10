@@ -819,7 +819,7 @@ pub fn census_detailed(
             skip(&mut c, BodySkip::LowerFailed);
             continue;
         };
-        let mut mf = match skull_mir::lower::lower_instance_with_plan(ws, scx, plan) {
+        let mut mf = match skull_mir::lower::lower_instance_with_plans(ws, scx, plan, &bodies.plans) {
             Ok(mf) => mf,
             Err(_) => {
                 skip(&mut c, BodySkip::LowerFailed);

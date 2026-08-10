@@ -547,10 +547,11 @@ fn emit_decorator_unit(
             CompilerError::new_with_label(d.span, "no concrete plan for decorator".to_string())
         })
         .and_then(|plan| {
-            skull_mir::lower::lower_decorator_with_plan(
+            skull_mir::lower::lower_decorator_with_plans(
                 ws,
                 scx,
                 plan,
+                &concrete.plans,
                 ustr::Ustr::from(deco_name.as_str()),
             )
         });
@@ -623,10 +624,11 @@ fn emit_global_unit(
         index: gid.into_raw().into_u32(),
     };
     let lowered = match concrete.plan_for_owner(&owner) {
-        Some(plan) => skull_mir::lower::lower_global_with_plan(
+        Some(plan) => skull_mir::lower::lower_global_with_plans(
             ws,
             scx,
             plan,
+            &concrete.plans,
             ustr::Ustr::from(init_name.as_str()),
         ),
         None if ws
@@ -1374,7 +1376,7 @@ fn emit_body_chunk_with_mutation(
     let plan = concrete
         .plan_for(&shared(self_ref))
         .ok_or_else(|| CompilerError::new_with_label(f.name_span, format!("no concrete plan for `{}`", f.name)))?;
-    let mut mf = skull_mir::lower::lower_function_with_plan(ws, scx, plan)?;
+    let mut mf = skull_mir::lower::lower_function_with_plans(ws, scx, plan, &concrete.plans)?;
     times.lower = tl.elapsed();
     match mutation {
         BodyMutation::None => {}
@@ -1666,13 +1668,20 @@ fn emit_spec_chunk(
     let plan = concrete
         .plan_for(body)
         .ok_or_else(|| CompilerError::new_with_label(f.name_span, format!("no concrete plan for `{name}`")))?;
-    let mut mf = skull_mir::lower::lower_instance_with_plan(ws, scx, plan)
+    let mut mf = skull_mir::lower::lower_instance_with_plans(ws, scx, plan, &concrete.plans)
         .map_err(|e| CompilerError::new_with_label(f.name_span, e.message))?;
     // BEFORE every transform: an `Iterator`-bounded body's placeholders are what
     // make it unemittable on its own, and the demand that reached here is what
     // resolves them. The splice path does the same substitution at the moment it
     // clones the body into a caller.
-    skull_transform::bound::resolve_standalone_bound_calls(ws, scx, scx.interner(), &mut mf, tree)
+    skull_transform::bound::resolve_standalone_bound_calls_with_plans(
+        ws,
+        scx,
+        scx.interner(),
+        &mut mf,
+        tree,
+        &concrete.plans,
+    )
         .map_err(|e| CompilerError::new_with_label(f.name_span, e.message))?;
     let owner = BodyOwner::Function(fref.func);
     let ctx = skull_mir::bound::body_ctx(ws, fref.module, owner, &subst, tree, scx.interner());

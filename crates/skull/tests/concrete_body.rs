@@ -88,6 +88,41 @@ fn main() {
 }
 
 #[test]
+fn production_call_abi_requires_the_selected_callee_plan() {
+    let (ws, g, bodies) = bodies_of(
+        r#"
+value V2 { x: int, y: int }
+fn id<T>(x: T) -> T { return x }
+fn main() {
+    let v = id(V2 { x: 1, y: 2 })
+    print("{v.x}")
+}
+"#,
+    );
+    let main_plan = bodies
+        .plans
+        .iter()
+        .find(|(inst, _)| ws.module(inst.func.module).functions[inst.func.func].name.as_str() == "main")
+        .map(|(_, plan)| plan)
+        .expect("main has no concrete plan");
+    let callee = main_plan
+        .callees
+        .values()
+        .find(|inst| ws.module(inst.func.module).functions[inst.func.func].name.as_str() == "id")
+        .cloned()
+        .expect("main has no concrete id call");
+    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    skull_mir::lower::lower_instance_with_plans(&ws, &scx, main_plan, &bodies.plans)
+        .expect("call lowering rejected the intact selected callee plan");
+    let mut plans = bodies.plans.clone();
+    assert!(plans.remove(&callee).is_some(), "the fixture has no selected id plan");
+    assert!(
+        skull_mir::lower::lower_instance_with_plans(&ws, &scx, main_plan, &plans).is_err(),
+        "call lowering fell back after the selected callee ABI plan was removed"
+    );
+}
+
+#[test]
 fn production_plan_keeps_distinct_struct_default_domains() {
     let (ws, g, bodies) = bodies_of(
         r#"

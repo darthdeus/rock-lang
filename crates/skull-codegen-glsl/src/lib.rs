@@ -38,7 +38,9 @@ use skull_mir::gpu_layout::{
 };
 use skull_mir::intrinsics::{Emission, IntrinsicEntry, IntrinsicTable};
 use skull_mir::concrete::ConcretePlans;
-use skull_mir::lower::{lower_instance_with_plan, ScalarCtx, SpecSubst};
+use skull_mir::lower::{ScalarCtx, SpecSubst};
+#[cfg(test)]
+use skull_mir::lower::lower_instance;
 use skull_mir::instance::Instance;
 use skull_mir::monoty::MonoInterner;
 use skull_mir::monoty::{MonoCtor, MonoTy};
@@ -2334,7 +2336,7 @@ pub fn emit_shader_library_with_view(
         let plan = view.concrete_plans.get(raw).ok_or_else(|| {
             err(f.name_span, format!("shader profile: no concrete plan for `{}`", f.name))
         })?;
-        let body = lower_instance_with_plan(ws, scx, plan).map_err(|e| {
+        let body = skull_mir::lower::lower_instance_with_plans(ws, scx, plan, &view.concrete_plans).map_err(|e| {
             err(
                 f.name_span,
                 format!("shader profile: `{}` cannot lower for GLSL: {}", f.name, e.message),
@@ -3466,7 +3468,13 @@ fn plan_stage_from_view(
             format!("shader profile: no concrete plan for `{}`", entry_f.name),
         )
     })?;
-    let entry_body = lower_instance_with_plan(ws, scx, entry_plan).map_err(|e| {
+    let entry_body = skull_mir::lower::lower_instance_with_plans(
+        ws,
+        scx,
+        entry_plan,
+        concrete_plans,
+    )
+    .map_err(|e| {
         err(
             entry_f.name_span,
             format!(
@@ -3501,7 +3509,13 @@ fn plan_stage_from_view(
         let helper_plan = concrete_plans.get(raw).ok_or_else(|| {
             err(f.name_span, format!("shader profile: no concrete plan for `{}`", f.name))
         })?;
-        let body = lower_instance_with_plan(ws, scx, helper_plan).map_err(|e| {
+        let body = skull_mir::lower::lower_instance_with_plans(
+            ws,
+            scx,
+            helper_plan,
+            concrete_plans,
+        )
+        .map_err(|e| {
             err(
                 f.name_span,
                 format!("shader profile: `{}` cannot lower for GLSL: {}", f.name, e.message),

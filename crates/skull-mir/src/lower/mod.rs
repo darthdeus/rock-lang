@@ -30,7 +30,7 @@ use skull_parser::CompilerError;
 
 use crate::intrinsics::ExpandKind;
 use crate::mir::*;
-use crate::concrete::{ConcreteBodyPlan, ConcreteOwner};
+use crate::concrete::{ConcreteBodyPlan, ConcreteOwner, ConcretePlans};
 
 fn gap(msg: impl std::fmt::Display) -> CompilerError {
     CompilerError::new_no_location(format!("skull-mir: lowering gap: {msg}"))
@@ -67,7 +67,7 @@ pub use shape::*;
 /// is private to it, so a definition and the call that targets it cannot reach
 /// it from two places.
 mod abi;
-pub use abi::BackendFnAbiPlan;
+pub use abi::{requires_concrete_body_plan, BackendFnAbiPlan};
 
 mod coroutine;
 pub use coroutine::{plan_coroutine, CoroutinePlan};
@@ -1006,6 +1006,15 @@ pub fn lower_function_with_plan(
     lower_instance_with_plan(ws, scx, plan)
 }
 
+pub fn lower_function_with_plans(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    plan: &ConcreteBodyPlan,
+    concrete_plans: &ConcretePlans,
+) -> Result<MirFunc, CompilerError> {
+    lower_instance_with_plans(ws, scx, plan, concrete_plans)
+}
+
 /// **Lower the definition emission writes for `inst`.**
 ///
 /// The body as if hand-written for that instantiation
@@ -1022,7 +1031,7 @@ pub fn lower_instance(
     inst: &crate::instance::Instance,
 ) -> Result<MirFunc, CompilerError> {
     let subst = inst.subst(ws, scx.interner());
-    lower_body(ws, scx, inst.func, inst.clone(), &subst, None)
+    lower_body(ws, scx, inst.func, inst.clone(), &subst, None, None)
 }
 
 /// Lower an ordinary function from its graph-owned concrete body plan.
@@ -1035,6 +1044,27 @@ pub fn lower_instance_with_plan(
     ws: &Workspace,
     scx: &ScalarCtx,
     plan: &ConcreteBodyPlan,
+) -> Result<MirFunc, CompilerError> {
+    lower_instance_with_plan_inner(ws, scx, plan, None)
+}
+
+/// Lower an ordinary function while resolving every concrete callee ABI from
+/// the same graph-owned plan set. A missing selected callee is an error rather
+/// than a fallback to declaration-shaped ABI facts.
+pub fn lower_instance_with_plans(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    plan: &ConcreteBodyPlan,
+    concrete_plans: &ConcretePlans,
+) -> Result<MirFunc, CompilerError> {
+    lower_instance_with_plan_inner(ws, scx, plan, Some(concrete_plans))
+}
+
+fn lower_instance_with_plan_inner(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    plan: &ConcreteBodyPlan,
+    concrete_plans: Option<&ConcretePlans>,
 ) -> Result<MirFunc, CompilerError> {
     let inst = plan
         .function_instance()
@@ -1070,7 +1100,7 @@ pub fn lower_instance_with_plan(
         }
     }
     let subst = inst.subst(ws, scx.interner());
-    lower_body(ws, scx, inst.func, inst.clone(), &subst, Some(plan))
+    lower_body(ws, scx, inst.func, inst.clone(), &subst, Some(plan), concrete_plans)
 }
 
 fn lower_body(
@@ -1080,6 +1110,7 @@ fn lower_body(
     subject: crate::instance::Instance,
     subst: &SpecSubst,
     concrete_plan: Option<&ConcreteBodyPlan>,
+    concrete_plans: Option<&ConcretePlans>,
 ) -> Result<MirFunc, CompilerError> {
     let (mid, fid) = (self_ref.module, self_ref.func);
     let module = ws.module(mid);
@@ -1120,6 +1151,7 @@ fn lower_body(
         ws,
         scx,
         concrete_plan,
+        concrete_plans,
         spec_subst: subst,
         struct_default_subst: None,
         generic_bounds: &func.generic_bounds,
@@ -1183,7 +1215,7 @@ pub fn lower_global(
     gid: Idx<bone_semantic::hir::GlobalDef>,
     name: Ustr,
 ) -> Result<Option<MirFunc>, CompilerError> {
-    lower_global_inner(ws, scx, mid, gid, name, None)
+    lower_global_inner(ws, scx, mid, gid, name, None, None)
 }
 
 /// Lower an always-emitted global from its graph-owned concrete plan.
@@ -1202,7 +1234,26 @@ pub fn lower_global_with_plan(
     }
     let gid = Idx::from_raw(RawIdx::from_u32(*index));
     validate_always_plan(ws, *module, BodyOwner::Global(gid), plan)?;
-    lower_global_inner(ws, scx, *module, gid, name, Some(plan))
+    lower_global_inner(ws, scx, *module, gid, name, Some(plan), None)
+}
+
+pub fn lower_global_with_plans(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    plan: &ConcreteBodyPlan,
+    concrete_plans: &ConcretePlans,
+    name: Ustr,
+) -> Result<Option<MirFunc>, CompilerError> {
+    let ConcreteOwner::Global { module, index } = &plan.owner else {
+        return Err(gap("concrete plan does not own a global"));
+    };
+    let module_ref = ws.module(*module);
+    if *index as usize >= module_ref.globals.len() {
+        return Err(gap("concrete global plan has an invalid global index"));
+    }
+    let gid = Idx::from_raw(RawIdx::from_u32(*index));
+    validate_always_plan(ws, *module, BodyOwner::Global(gid), plan)?;
+    lower_global_inner(ws, scx, *module, gid, name, Some(plan), Some(concrete_plans))
 }
 
 fn lower_global_inner(
@@ -1212,6 +1263,7 @@ fn lower_global_inner(
     gid: Idx<bone_semantic::hir::GlobalDef>,
     name: Ustr,
     concrete_plan: Option<&ConcreteBodyPlan>,
+    concrete_plans: Option<&ConcretePlans>,
 ) -> Result<Option<MirFunc>, CompilerError> {
     let module = ws.module(mid);
     let body = module
@@ -1231,6 +1283,7 @@ fn lower_global_inner(
         ws,
         scx,
         concrete_plan,
+        concrete_plans,
         spec_subst: &empty_subst,
         struct_default_subst: None,
         generic_bounds: &[],
@@ -1290,7 +1343,7 @@ pub fn lower_decorator(
     did: Idx<bone_semantic::hir::DecoratorDef>,
     name: Ustr,
 ) -> Result<MirFunc, CompilerError> {
-    lower_decorator_inner(ws, scx, mid, did, name, None)
+    lower_decorator_inner(ws, scx, mid, did, name, None, None)
 }
 
 /// Lower an always-emitted decorator from its graph-owned concrete plan.
@@ -1309,7 +1362,26 @@ pub fn lower_decorator_with_plan(
     }
     let did = Idx::from_raw(RawIdx::from_u32(*index));
     validate_always_plan(ws, *module, BodyOwner::Decorator(did), plan)?;
-    lower_decorator_inner(ws, scx, *module, did, name, Some(plan))
+    lower_decorator_inner(ws, scx, *module, did, name, Some(plan), None)
+}
+
+pub fn lower_decorator_with_plans(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    plan: &ConcreteBodyPlan,
+    concrete_plans: &ConcretePlans,
+    name: Ustr,
+) -> Result<MirFunc, CompilerError> {
+    let ConcreteOwner::Decorator { module, index } = &plan.owner else {
+        return Err(gap("concrete plan does not own a decorator"));
+    };
+    let module_ref = ws.module(*module);
+    if *index as usize >= module_ref.decorators.len() {
+        return Err(gap("concrete decorator plan has an invalid decorator index"));
+    }
+    let did = Idx::from_raw(RawIdx::from_u32(*index));
+    validate_always_plan(ws, *module, BodyOwner::Decorator(did), plan)?;
+    lower_decorator_inner(ws, scx, *module, did, name, Some(plan), Some(concrete_plans))
 }
 
 fn validate_always_plan(
@@ -1356,6 +1428,7 @@ fn lower_decorator_inner(
     did: Idx<bone_semantic::hir::DecoratorDef>,
     name: Ustr,
     concrete_plan: Option<&ConcreteBodyPlan>,
+    concrete_plans: Option<&ConcretePlans>,
 ) -> Result<MirFunc, CompilerError> {
     let module = ws.module(mid);
     let body = module
@@ -1375,6 +1448,7 @@ fn lower_decorator_inner(
         ws,
         scx,
         concrete_plan,
+        concrete_plans,
         spec_subst: &empty_subst,
         struct_default_subst: None,
         generic_bounds: &[],
@@ -1423,6 +1497,7 @@ struct Builder<'a> {
     ws: &'a Workspace,
     scx: &'a ScalarCtx,
     concrete_plan: Option<&'a ConcreteBodyPlan>,
+    concrete_plans: Option<&'a ConcretePlans>,
     /// Per-instantiation generic substitution (`docs/flatvec-plan.md` call-site
     /// specialization). Empty for the shared generic / non-generic snapshot; a
     /// value-instantiated splice carries `callee generic VarId -> concrete type`

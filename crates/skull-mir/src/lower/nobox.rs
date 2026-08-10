@@ -660,6 +660,10 @@ impl Builder<'_> {
     /// re-ABI every lambda in the tree for no correctness gain. Both ends
     /// compute the same predicate from the same type, so they still agree.
     pub(crate) fn fn_value_abi(&self, ty: TyId) -> Option<(Vec<RetSlot>, Option<ValueShape>)> {
+        if self.concrete_plan.is_some() {
+            let ty = self.concrete_ty_id(ty)?;
+            return self.fn_value_abi_mono(&ty);
+        }
         let ty = self.resolve_tyid(ty)?;
         // Nullability lives on the REFERENCE, not on the call ABI: an absent fn
         // value is never called, and a present one is a callable with exactly the
@@ -680,6 +684,29 @@ impl Builder<'_> {
             return None;
         }
         Some((ps, rs))
+    }
+
+    fn fn_value_abi_mono(
+        &self,
+        ty: &crate::monoty::MonoTy,
+    ) -> Option<(Vec<RetSlot>, Option<ValueShape>)> {
+        let (ty, _) = ty.peel_nullable();
+        let crate::monoty::MonoTy::Function { params, ret } = ty else { return None };
+        let ps = params
+            .iter()
+            .map(|ty| {
+                mono_nobox_value_shape(self.ws, ty)
+                    .map(RetSlot::Leaves)
+                    .or_else(|| {
+                        mono_tuple_ret_shape(self.ws, ty)
+                            .filter(TupleRetShape::splats)
+                            .map(RetSlot::Nested)
+                    })
+                    .unwrap_or(RetSlot::Opaque)
+            })
+            .collect::<Vec<_>>();
+        let rs = mono_nobox_value_shape(self.ws, ret);
+        (rs.is_some() || ps.iter().any(RetSlot::splats)).then_some((ps, rs))
     }
 
     /// [`Self::nobox_shape_of_ty`] widened to the param SLOT vocabulary, so a

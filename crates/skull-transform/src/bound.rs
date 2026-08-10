@@ -36,6 +36,28 @@ pub fn resolve_standalone_bound_calls(
     mf: &mut MirFunc,
     incoming: &skull_mir::bound::ResolvedBoundTree,
 ) -> Result<(), CompilerError> {
+    resolve_standalone_bound_calls_inner(ws, scx, interner, mf, incoming, None)
+}
+
+pub fn resolve_standalone_bound_calls_with_plans(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    interner: &MonoInterner,
+    mf: &mut MirFunc,
+    incoming: &skull_mir::bound::ResolvedBoundTree,
+    concrete_plans: &skull_mir::concrete::ConcretePlans,
+) -> Result<(), CompilerError> {
+    resolve_standalone_bound_calls_inner(ws, scx, interner, mf, incoming, Some(concrete_plans))
+}
+
+fn resolve_standalone_bound_calls_inner(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    interner: &MonoInterner,
+    mf: &mut MirFunc,
+    incoming: &skull_mir::bound::ResolvedBoundTree,
+    concrete_plans: Option<&skull_mir::concrete::ConcretePlans>,
+) -> Result<(), CompilerError> {
     let ids: Vec<(Idx<Inst>, usize)> = mf
         .insts
         .iter()
@@ -64,10 +86,23 @@ pub fn resolve_standalone_bound_calls(
                 mf.resolved_bound_trees.insert(id, sub.clone());
             }
         }
-        substitute_bound_call(mf, id, split, &leaf, scx, ws, interner, "in this instantiation")?;
+        match concrete_plans {
+            Some(plans) => substitute_bound_call_with_plans(
+                mf,
+                id,
+                split,
+                &leaf,
+                scx,
+                ws,
+                interner,
+                plans,
+                "in this instantiation",
+            )?,
+            None => substitute_bound_call(mf, id, split, &leaf, scx, ws, interner, "in this instantiation")?,
+        }
     }
     for nf in &mut mf.nested_fns {
-        resolve_standalone_bound_calls(ws, scx, interner, nf, incoming)?;
+        resolve_standalone_bound_calls_inner(ws, scx, interner, nf, incoming, concrete_plans)?;
     }
     Ok(())
 }
@@ -92,6 +127,44 @@ pub fn substitute_bound_call(
     interner: &MonoInterner,
     what: &str,
 ) -> Result<(), CompilerError> {
+    substitute_bound_call_inner(func, call, already_split, leaf, scx, ws, interner, None, what)
+}
+
+pub fn substitute_bound_call_with_plans(
+    func: &mut MirFunc,
+    call: Idx<Inst>,
+    already_split: bool,
+    leaf: &ResolvedBoundNext,
+    scx: &skull_mir::lower::ScalarCtx,
+    ws: &Workspace,
+    interner: &MonoInterner,
+    concrete_plans: &skull_mir::concrete::ConcretePlans,
+    what: &str,
+) -> Result<(), CompilerError> {
+    substitute_bound_call_inner(
+        func,
+        call,
+        already_split,
+        leaf,
+        scx,
+        ws,
+        interner,
+        Some(concrete_plans),
+        what,
+    )
+}
+
+fn substitute_bound_call_inner(
+    func: &mut MirFunc,
+    call: Idx<Inst>,
+    already_split: bool,
+    leaf: &ResolvedBoundNext,
+    scx: &skull_mir::lower::ScalarCtx,
+    ws: &Workspace,
+    interner: &MonoInterner,
+    concrete_plans: Option<&skull_mir::concrete::ConcretePlans>,
+    what: &str,
+) -> Result<(), CompilerError> {
     let (concrete, spec) = match leaf {
         ResolvedBoundNext::Concrete { func, spec, .. } => (*func, spec),
         ResolvedBoundNext::CallerGeneric(g) => {
@@ -110,8 +183,23 @@ pub fn substitute_bound_call(
         .clone()
         .unwrap_or_else(|| Instance::intern(interner, concrete, Vec::new()));
     skull_mir::site::record_call_owner(func, call, &owner);
-    func.call_abi_plans
-        .insert(call, skull_mir::lower::BackendFnAbiPlan::for_instance(ws, scx, &owner));
+    let abi = match concrete_plans {
+        Some(plans) => {
+            if !skull_mir::lower::requires_concrete_body_plan(ws, &owner) {
+                skull_mir::lower::BackendFnAbiPlan::for_instance(ws, scx, &owner)
+            } else {
+                let plan = plans.get(&owner).ok_or_else(|| {
+                    CompilerError::new_no_location(format!(
+                        "internal: concrete ABI plan is missing for bound callee `{}`",
+                        owner.func.func.into_raw().into_u32()
+                    ))
+                })?;
+                skull_mir::lower::BackendFnAbiPlan::for_concrete_plan(ws, scx, plan)
+            }
+        }
+        None => skull_mir::lower::BackendFnAbiPlan::for_instance(ws, scx, &owner),
+    };
+    func.call_abi_plans.insert(call, abi);
     if let Some(inst) = spec.clone() {
         func.spec_bindings.insert(call, inst);
     }

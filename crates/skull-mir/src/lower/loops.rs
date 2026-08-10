@@ -236,7 +236,7 @@ impl Builder<'_> {
                 }
                 self.f
                     .call_abi_plans
-                    .insert(call, crate::lower::BackendFnAbiPlan::for_instance(self.ws, self.scx, &witness));
+                    .insert(call, self.callee_abi_plan_for_instance(&witness)?);
                 call
             }
             None => self.lower_expr(iter_expr)?,
@@ -335,10 +335,9 @@ impl Builder<'_> {
                         call,
                         &owner,
                     );
-                    self.f.call_abi_plans.insert(
-                        call,
-                        crate::lower::BackendFnAbiPlan::for_instance(self.ws, self.scx, &owner),
-                    );
+                    self.f
+                        .call_abi_plans
+                        .insert(call, self.callee_abi_plan_for_instance(&owner)?);
                 } else {
                     self.f.call_abi_plans.insert(
                         call,

@@ -2886,10 +2886,11 @@ fn assemble_program_core(
                 .get(&owner)
                 .ok_or_else(|| err(format!("JS: no concrete plan for decorator `{}`", d.name)))
                 .and_then(|plan| {
-                    skull_mir::lower::lower_decorator_with_plan(
+                    skull_mir::lower::lower_decorator_with_plans(
                         ws,
                         scx,
                         plan,
+                        &st.concrete,
                         ustr::Ustr::from(deco_name.as_str()),
                     )
                 });
@@ -3768,7 +3769,12 @@ impl JsDelivery<'_> {
                 return Ok(());
             }
         };
-        let mut mf = match skull_mir::lower::lower_function_with_plan(self.ws, self.scx, plan) {
+        let mut mf = match skull_mir::lower::lower_function_with_plans(
+            self.ws,
+            self.scx,
+            plan,
+            &self.st.concrete,
+        ) {
             Ok(mf) => mf,
             Err(e) => {
                 self.st.reject(&name, e);
@@ -3891,7 +3897,12 @@ impl JsDelivery<'_> {
                 return Ok(());
             }
         };
-        let mut mf = match skull_mir::lower::lower_instance_with_plan(self.ws, self.scx, plan) {
+        let mut mf = match skull_mir::lower::lower_instance_with_plans(
+            self.ws,
+            self.scx,
+            plan,
+            &self.st.concrete,
+        ) {
             Ok(mf) => mf,
             Err(e) => {
                 self.st.reject(&name, e);
@@ -3914,12 +3925,13 @@ impl JsDelivery<'_> {
             );
             return Ok(());
         }
-        if let Err(e) = skull_transform::bound::resolve_standalone_bound_calls(
+        if let Err(e) = skull_transform::bound::resolve_standalone_bound_calls_with_plans(
             self.ws,
             self.scx,
             self.scx.interner(),
             &mut mf,
             &tree,
+            &self.st.concrete,
         ) {
             self.st.reject(&name, e);
             return Ok(());
@@ -3982,10 +3994,11 @@ impl JsDelivery<'_> {
             index: site.gid.into_raw().into_u32(),
         };
         let lowered = match self.st.always.get(&owner) {
-            Some(plan) => skull_mir::lower::lower_global_with_plan(
+            Some(plan) => skull_mir::lower::lower_global_with_plans(
                 self.ws,
                 self.scx,
                 plan,
+                &self.st.concrete,
                 ustr::Ustr::from(init_name.as_str()),
             ),
             None

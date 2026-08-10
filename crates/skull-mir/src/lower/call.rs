@@ -27,6 +27,33 @@ pub(crate) struct DirectCall {
 }
 
 impl Builder<'_> {
+    pub(crate) fn callee_abi_plan_for_instance(
+        &self,
+        inst: &crate::instance::Instance,
+    ) -> Result<BackendFnAbiPlan, CompilerError> {
+        if let Some(plans) = self.concrete_plans {
+            if !crate::lower::requires_concrete_body_plan(self.ws, inst) {
+                return Ok(BackendFnAbiPlan::for_instance(self.ws, self.scx, inst));
+            }
+            if crate::monoty::too_deep_to_instantiate(
+                inst.arg_types(self.scx.interner()).iter(),
+            )
+            .is_some()
+            {
+                return Ok(BackendFnAbiPlan::for_instance(self.ws, self.scx, inst));
+            }
+            let plan = plans.get(inst).ok_or_else(|| {
+                let name = self.ws.module(inst.func.module).functions[inst.func.func].name;
+                gap(format!(
+                    "concrete ABI plan is missing for callee `{name}` ({})",
+                    inst.func.func.into_raw().into_u32()
+                ))
+            })?;
+            return Ok(BackendFnAbiPlan::for_concrete_plan(self.ws, self.scx, plan));
+        }
+        Ok(BackendFnAbiPlan::for_instance(self.ws, self.scx, inst))
+    }
+
     /// Lower a call to a (boxed) single value — the scalar-ABI Group result is
     /// `pack`ed to a cdata. ABI-boundary callers use [`Self::lower_call_repr`].
     pub(crate) fn lower_call(
@@ -481,7 +508,7 @@ impl Builder<'_> {
         let empty_subst = SpecSubst::default();
         let subst = spec.as_ref().map_or(&empty_subst, |(_, s)| s);
         let plan = if let Some(owner) = &callee_inst {
-            BackendFnAbiPlan::for_instance(self.ws, self.scx, owner)
+            self.callee_abi_plan_for_instance(owner)?
         } else {
             self.callee_abi_plan(func, spec.as_ref(), subst)
         };

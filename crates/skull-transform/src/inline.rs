@@ -30,7 +30,7 @@ use bone_semantic::prelude::{BoundNext, BoundTree, CompilerError};
 use comfy_la_arena::Idx;
 use skull_mir::concrete::ConcretePlans;
 use skull_mir::instance::Instance;
-use skull_mir::lower::{lower_instance, lower_instance_with_plan, BackendFnAbiPlan, ScalarCtx, SpecSubst};
+use skull_mir::lower::{lower_instance, BackendFnAbiPlan, ScalarCtx, SpecSubst};
 use skull_mir::mir::*;
 use ustr::Ustr;
 
@@ -192,7 +192,7 @@ fn classify(
             let plan = plans.get(inst)?;
             (
                 BackendFnAbiPlan::for_concrete_plan(ws, scx, plan),
-                lower_instance_with_plan(ws, scx, plan).ok()?,
+                skull_mir::lower::lower_instance_with_plans(ws, scx, plan, plans).ok()?,
             )
         }
         None => (
@@ -784,6 +784,7 @@ fn resolve_cloned_bound_calls(
     scx: &ScalarCtx,
     caller_inf: Option<&BodyInference>,
     caller_subst: &SpecSubst,
+    concrete_plans: Option<&ConcretePlans>,
 ) -> Result<(), CompilerError> {
     let empty = BoundTree::default();
     let n = site_tree.unwrap_or(&empty);
@@ -843,16 +844,29 @@ fn resolve_cloned_bound_calls(
                 func.resolved_bound_trees.insert(new_id, sub.clone());
             }
         }
-        crate::bound::substitute_bound_call(
-            func,
-            new_id,
-            callee.bound_next_split.contains(&old_id),
-            &leaf,
-            scx,
-            ws,
-            scx.interner(),
-            "at this splice site",
-        )?;
+        match concrete_plans {
+            Some(plans) => crate::bound::substitute_bound_call_with_plans(
+                func,
+                new_id,
+                callee.bound_next_split.contains(&old_id),
+                &leaf,
+                scx,
+                ws,
+                scx.interner(),
+                plans,
+                "at this splice site",
+            )?,
+            None => crate::bound::substitute_bound_call(
+                func,
+                new_id,
+                callee.bound_next_split.contains(&old_id),
+                &leaf,
+                scx,
+                ws,
+                scx.interner(),
+                "at this splice site",
+            )?,
+        }
     }
     if let Some((&old_id, &new_id)) = inst_map.iter().find(|(_, new_id)| {
         matches!(func.insts[**new_id], Inst::CallBoundMulti { .. })
@@ -1032,13 +1046,14 @@ fn splice(
     scx: &ScalarCtx,
     caller_inf: Option<&BodyInference>,
     caller_subst: &SpecSubst,
+    concrete_plans: Option<&ConcretePlans>,
 ) -> Result<Vec<Idx<Block>>, CompilerError> {
     match cand.kind {
         Kind::Straight => {
-            splice_straight(func, site, cand, ws, scx, caller_inf, caller_subst)?;
+            splice_straight(func, site, cand, ws, scx, caller_inf, caller_subst, concrete_plans)?;
             Ok(Vec::new())
         }
-        Kind::General => splice_general(func, site, cand, ws, scx, caller_inf, caller_subst),
+        Kind::General => splice_general(func, site, cand, ws, scx, caller_inf, caller_subst, concrete_plans),
     }
 }
 
@@ -1054,6 +1069,7 @@ fn splice_straight(
     scx: &ScalarCtx,
     caller_inf: Option<&BodyInference>,
     caller_subst: &SpecSubst,
+    concrete_plans: Option<&ConcretePlans>,
 ) -> Result<(), CompilerError> {
     let callee = &cand.func;
     let (bid, idx, args) = match &site {
@@ -1074,6 +1090,7 @@ fn splice_straight(
         scx,
         caller_inf,
         caller_subst,
+        concrete_plans,
     )?;
     let nested_names = import_nested_fns(func, callee, &inst_map);
     import_spec_bindings(func, callee, &inst_map, &nested_names);
@@ -1146,6 +1163,7 @@ fn splice_general(
     scx: &ScalarCtx,
     caller_inf: Option<&BodyInference>,
     caller_subst: &SpecSubst,
+    concrete_plans: Option<&ConcretePlans>,
 ) -> Result<Vec<Idx<Block>>, CompilerError> {
     let callee = &cand.func;
     let (bid, idx, args) = match &site {
@@ -1166,6 +1184,7 @@ fn splice_general(
         scx,
         caller_inf,
         caller_subst,
+        concrete_plans,
     )?;
     let nested_names = import_nested_fns(func, callee, &inst_map);
     import_spec_bindings(func, callee, &inst_map, &nested_names);
@@ -1355,7 +1374,7 @@ pub fn inline_functions_with_subst_and_plans(
             forced: cand.forced,
             callee_insts: cand.insts,
         });
-        let added = splice(func, site, cand, ws, scx, caller_inf, caller_subst)?;
+        let added = splice(func, site, cand, ws, scx, caller_inf, caller_subst, concrete_plans)?;
         // The callee's `static` cells now live in THIS body: the spliced code
         // reads and writes them, and a `static` is one cell per owning fn, so
         // the cell is the same one every call site shares. Carrying them here is

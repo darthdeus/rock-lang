@@ -31,6 +31,22 @@ use super::{
 use crate::concrete::ConcreteBodyPlan;
 use crate::mir::FuncRef;
 
+/// Whether a callee is a Rock body subject that the concrete registry must
+/// contain. Foreign and erased declarations still have an ABI, but no body
+/// plan exists for them because their backend supplies the body itself.
+pub fn requires_concrete_body_plan(
+    ws: &Workspace,
+    inst: &crate::instance::Instance,
+) -> bool {
+    let f = &ws.module(inst.func.module).functions[inst.func.func];
+    !f.is_extern
+        && f.inline_body.is_none()
+        && ws
+            .module(inst.func.module)
+            .bodies
+            .contains_key(&bone_semantic::hir::BodyOwner::Function(inst.func.func))
+}
+
 /// The scalarized wire of one emitted body: what each declared param occupies,
 /// and what the return carries. `None` for the whole plan means the boxed ABI.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -70,7 +70,7 @@ impl Builder<'_> {
                 );
             }
             let abi = if iter_decl.generics.is_empty() || !witness.args.is_empty() {
-                crate::lower::BackendFnAbiPlan::for_instance(self.ws, self.scx, &witness)
+                self.callee_abi_plan_for_instance(&witness)?
             } else {
                 self.callee_abi_plan(iter_ref, None, &SpecSubst::default())
             };
