@@ -200,6 +200,7 @@ pub fn realize_shader_with_context(
     }
 
     let mut program_views = Vec::with_capacity(req.programs.len());
+    let concrete_plans = skull_graph::concrete_body::build(ws, g).plans;
     for program in req.programs {
         let entry_of = |r: FuncRef| -> Option<&Instance> {
             let key = DeclKey(skull_mir::lower::canonical_variant(ws, r));
@@ -224,7 +225,11 @@ pub fn realize_shader_with_context(
                 ShaderStage::Fragment,
             ));
         }
-        program_views.push(ShaderProgramView { program: *program, stages });
+        program_views.push(ShaderProgramView {
+            program: *program,
+            stages,
+            concrete_plans: concrete_plans.clone(),
+        });
     }
 
     // THE PROFILE PASS IS EMISSION'S OWN, run per ENTRY.

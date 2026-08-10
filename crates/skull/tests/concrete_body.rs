@@ -13,7 +13,7 @@ use bone_semantic::inference::Workspace;
 use comfy_la_arena::{ArenaMap, Idx};
 use skull::concrete_body::{self, Callee, ConcreteBodies, ConcreteBody, IteratorOpKind, Slot};
 use skull::instance_graph::{self, InstanceGraph, Site, SiteOp, SiteOutcome};
-use skull_mir::monoty::{MonoTyId, MonoTyReason};
+use skull_mir::monoty::{MonoTy, MonoTyId, MonoTyReason};
 use ustr::Ustr;
 
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
@@ -43,6 +43,115 @@ fn bodies_of(src: &str) -> (Workspace, InstanceGraph, ConcreteBodies) {
 fn assert_arena_tables(body: &ConcreteBody) {
     let _: &ArenaMap<Idx<Expr>, MonoTyId> = &body.expr_types;
     let _: &ArenaMap<Idx<BindingInfo>, MonoTyId> = &body.binding_types;
+}
+
+/// The first production consumer of the concrete plan must see the complete
+/// logical tree. Replacing the plan's child list with the old source-shaped
+/// adapter makes this arm fail at the inner application.
+#[test]
+fn production_lowering_consumes_nested_concrete_type_plan() {
+    let (ws, g, bodies) = bodies_of(
+        r#"
+fn keep<T>(x: T) -> T { return x }
+fn main() {
+    let xs: [[int]] = []
+    let out = keep(xs)
+}
+"#,
+    );
+    let inst = bodies
+        .bodies
+        .keys()
+        .find(|i| g.identity(&ws, i).starts_with("keep"))
+        .cloned()
+        .expect("keep has no concrete instance");
+    let plan = bodies.plan_for(&inst).expect("keep has no production plan");
+    let nested = plan
+        .types
+        .expr_types
+        .values()
+        .chain(plan.types.binding_types.values())
+        .map(|id| g.interner().get(*id))
+        .find(|ty| matches!(ty, MonoTy::App { params, .. } if matches!(params.first(), Some(MonoTy::App { .. }))));
+    assert!(nested.is_some(), "the concrete plan lost the nested application tree");
+
+    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    skull_mir::lower::lower_instance_with_plan(&ws, &scx, plan)
+        .expect("plan-driven lowering failed");
+
+    let mut poisoned = plan.clone();
+    poisoned.types.expr_types = ArenaMap::default();
+    assert!(
+        skull_mir::lower::lower_instance_with_plan(&ws, &scx, &poisoned).is_err(),
+        "lowering accepted a plan after its concrete expression table was removed"
+    );
+}
+
+#[test]
+fn production_plan_keeps_distinct_struct_default_domains() {
+    let (ws, g, bodies) = bodies_of(
+        r#"
+fn seed<T>() -> T? { return null }
+struct Box<T> { value: T? = seed() }
+fn main() {
+    let a: Box<int> = Box {}
+    let b: Box<string> = Box {}
+    print("{a.value} {b.value}")
+}
+"#,
+    );
+    let main = bodies
+        .plans
+        .iter()
+        .find(|(inst, _)| g.identity(&ws, inst).starts_with("main"))
+        .map(|(_, plan)| plan)
+        .expect("main has no concrete plan");
+    assert_eq!(main.foreign_domains.len(), 2, "expected both Box instantiation domains");
+    let mut rendered = main
+        .foreign_domains
+        .values()
+        .flat_map(|tables| tables.expr_types.values())
+        .map(|id| g.interner().render(*id))
+        .collect::<Vec<_>>();
+    rendered.sort();
+    assert!(rendered.iter().any(|ty| ty == "int?"), "missing int default table: {rendered:?}");
+    assert!(rendered.iter().any(|ty| ty == "string?"), "missing string default table: {rendered:?}");
+
+    let mut poisoned = main.clone();
+    let domain = poisoned.foreign_domains.keys().next().cloned().expect("domain");
+    poisoned.foreign_domains.remove(&domain);
+    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    assert!(
+        skull_mir::lower::lower_instance_with_plan(&ws, &scx, &poisoned).is_err(),
+        "lowering accepted a plan after its struct-default domain was removed"
+    );
+}
+
+#[test]
+fn production_plan_covers_an_always_emitted_global() {
+    let (ws, g, bodies) = bodies_of(
+        r#"
+global startup: int = 7
+fn main() { print("{startup}") }
+"#,
+    );
+    let (owner, plan) = bodies
+        .always_plans
+        .iter()
+        .find(|(owner, _)| matches!(owner, skull_mir::concrete::ConcreteOwner::Global { .. }))
+        .expect("global has no concrete plan");
+    assert!(plan.signature.result.is_some(), "global plan lost its concrete result type");
+    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    skull_mir::lower::lower_global_with_plan(&ws, &scx, plan, Ustr::from("__test_ginit"))
+        .expect("plan-driven global lowering failed");
+    let mut poisoned = plan.clone();
+    poisoned.types.expr_types = ArenaMap::default();
+    assert!(
+        skull_mir::lower::lower_global_with_plan(&ws, &scx, &poisoned, Ustr::from("__test_ginit"))
+            .is_err(),
+        "global lowering ignored its concrete type plan"
+    );
+    let _ = owner;
 }
 
 /// Every instance the walk EXPANDED gets a body, and every one of its slots is

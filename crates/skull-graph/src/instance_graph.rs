@@ -3674,6 +3674,9 @@ fn dispatched_sites(
         ws,
         inf: Some(inf),
         body,
+        concrete_plan: None,
+        concrete_types: None,
+        interner: None,
         subst,
         values_first_class: false,
     };

@@ -24,8 +24,11 @@ use bone_semantic::inference::Workspace;
 
 use super::{
     nobox_declared_shape_spec, nobox_param_slot_spec, sig_param_slot_spec, sig_value_shape_spec,
-    slot_param_names, tuple_ret_shape, RetSlot, ScalarCtx, SpecSubst, TupleRetShape, ValueShape,
+    mono_nobox_value_shape, mono_ret_slot, mono_sig_param_slot, mono_tuple_ret_shape,
+    mono_value_shape, slot_param_names,
+    tuple_ret_shape, RetSlot, ScalarCtx, SpecSubst, TupleRetShape, ValueShape,
 };
+use crate::concrete::ConcreteBodyPlan;
 use crate::mir::FuncRef;
 
 /// The scalarized wire of one emitted body: what each declared param occupies,
@@ -128,6 +131,74 @@ pub struct BackendFnAbiPlan {
     has_return: bool,
 }
 
+fn fn_scalar_abi_concrete(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    plan: &ConcreteBodyPlan,
+) -> Option<FnScalarAbi> {
+    if scx.values_first_class {
+        return None;
+    }
+    let inst = plan.function_instance()?;
+    let f = &ws.module(inst.func.module).functions[inst.func.func];
+    if f.is_extern {
+        return None;
+    }
+    let has_scalar_abi = f.annotations.iter().any(|a| a.name.name.as_str() == "scalar_abi");
+    let nobox_only = if has_scalar_abi {
+        false
+    } else {
+        let name_is_fixed = f.annotations.iter().any(|a| match a.name.name.as_str() {
+            "nomangle" => inst.args.is_empty(),
+            "test" => true,
+            _ => false,
+        });
+        if f.inline_body.is_some() || f.name.as_str() == "main" || name_is_fixed {
+            return None;
+        }
+        scx.taken_by_ref.contains(&f.name)
+    };
+    let params = plan
+        .signature
+        .params
+        .iter()
+        .map(|id| scx.interner().get(*id))
+        .collect::<Vec<_>>();
+    let param_shapes: Vec<RetSlot> = if nobox_only {
+        params.iter().map(|ty| mono_ret_slot(ws, ty)).collect()
+    } else {
+        params.iter().map(|ty| mono_sig_param_slot(ws, ty)).collect()
+    };
+    let ret_shape = plan
+        .signature
+        .result
+        .map(|id| scx.interner().get(id))
+        .and_then(|ty| mono_value_shape(ws, &ty));
+    (ret_shape.is_some() || param_shapes.iter().any(RetSlot::splats))
+        .then_some(FnScalarAbi { param_shapes, ret_shape })
+}
+
+fn fn_value_nobox_abi_concrete(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    plan: &ConcreteBodyPlan,
+) -> Option<FnScalarAbi> {
+    let params = plan
+        .signature
+        .params
+        .iter()
+        .map(|id| scx.interner().get(*id))
+        .collect::<Vec<_>>();
+    let param_shapes: Vec<RetSlot> = params.iter().map(|ty| mono_ret_slot(ws, ty)).collect();
+    let ret_shape = plan
+        .signature
+        .result
+        .map(|id| scx.interner().get(id))
+        .and_then(|ty| mono_nobox_value_shape(ws, &ty));
+    (ret_shape.is_some() || param_shapes.iter().any(RetSlot::splats))
+        .then_some(FnScalarAbi { param_shapes, ret_shape })
+}
+
 impl BackendFnAbiPlan {
     /// **THE constructor: one plan per (execution target, concrete body).**
     ///
@@ -143,6 +214,44 @@ impl BackendFnAbiPlan {
     ) -> Self {
         let subst = inst.subst(ws, scx.interner());
         Self::assemble(ws, scx, inst.clone(), &subst)
+    }
+
+    /// Build the ABI from the graph-owned concrete signature. No declaration
+    /// substitution is reconstructed on this path.
+    pub fn for_concrete_plan(
+        ws: &Workspace,
+        scx: &ScalarCtx,
+        plan: &ConcreteBodyPlan,
+    ) -> Self {
+        let inst = plan
+            .function_instance()
+            .expect("a function ABI plan needs an ordinary concrete owner");
+        let f = &ws.module(inst.func.module).functions[inst.func.func];
+        let scalar = if f
+            .annotations
+            .iter()
+            .any(|a| a.name.name.as_str() == "scalar_abi")
+        {
+            fn_scalar_abi_concrete(ws, scx, plan)
+        } else if scx.values_first_class {
+            None
+        } else if scx.taken_by_ref.contains(&f.name) {
+            fn_value_nobox_abi_concrete(ws, scx, plan)
+        } else {
+            fn_scalar_abi_concrete(ws, scx, plan)
+        };
+        let ret_tuple = plan
+            .signature
+            .result
+            .map(|id| scx.interner().get(id))
+            .and_then(|ty| mono_tuple_ret_shape(ws, &ty));
+        Self {
+            subject: inst.clone(),
+            target: scx.target,
+            scalar,
+            ret_tuple,
+            has_return: plan.signature.result.is_some(),
+        }
     }
 
     /// [`Self::for_instance`] for a caller that already resolved the

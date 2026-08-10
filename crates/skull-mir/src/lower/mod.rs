@@ -25,11 +25,12 @@ use bone_semantic::hir::{
 use ustr::Ustr;
 use bone_semantic::inference::{BodyInference, Workspace};
 use bone_semantic::prelude::{BoundNext, ForIterInfo, ModuleId, Span};
-use comfy_la_arena::{Idx, IdxRange};
+use comfy_la_arena::{Idx, IdxRange, RawIdx};
 use skull_parser::CompilerError;
 
 use crate::intrinsics::ExpandKind;
 use crate::mir::*;
+use crate::concrete::{ConcreteBodyPlan, ConcreteOwner};
 
 fn gap(msg: impl std::fmt::Display) -> CompilerError {
     CompilerError::new_no_location(format!("skull-mir: lowering gap: {msg}"))
@@ -997,6 +998,14 @@ pub fn lower_function(
     lower_instance(ws, scx, &crate::instance::Instance::base(FuncRef { module: mid, func: fid }))
 }
 
+pub fn lower_function_with_plan(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    plan: &ConcreteBodyPlan,
+) -> Result<MirFunc, CompilerError> {
+    lower_instance_with_plan(ws, scx, plan)
+}
+
 /// **Lower the definition emission writes for `inst`.**
 ///
 /// The body as if hand-written for that instantiation
@@ -1013,7 +1022,55 @@ pub fn lower_instance(
     inst: &crate::instance::Instance,
 ) -> Result<MirFunc, CompilerError> {
     let subst = inst.subst(ws, scx.interner());
-    lower_body(ws, scx, inst.func, inst.clone(), &subst)
+    lower_body(ws, scx, inst.func, inst.clone(), &subst, None)
+}
+
+/// Lower an ordinary function from its graph-owned concrete body plan.
+///
+/// The legacy instance entry point remains for the source-shaped test and
+/// always-emitted paths while their owners are migrated. Production callers
+/// of an ordinary instance use this entry point so missing or mismatched plans
+/// are located before lowering can reconstruct a type from HIR.
+pub fn lower_instance_with_plan(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    plan: &ConcreteBodyPlan,
+) -> Result<MirFunc, CompilerError> {
+    let inst = plan
+        .function_instance()
+        .ok_or_else(|| gap("concrete plan does not own a function instance"))?;
+    let (mid, fid) = (inst.func.module, inst.func.func);
+    let module = ws.module(mid);
+    if !module.bodies.contains_key(&BodyOwner::Function(fid)) {
+        return Err(gap("concrete plan function has no body"));
+    }
+    let inf = ws
+        .inference(mid)
+        .and_then(|ir| ir.per_fn.get(&BodyOwner::Function(fid)));
+    if let Some(inf) = inf {
+        for (expr, _) in inf.expr_types.iter() {
+            if plan.types.expr_types.get(expr).is_none() {
+                return Err(gap(format!("concrete plan is missing expression type {expr:?}")));
+            }
+        }
+        for (binding, _) in inf.binding_types.iter() {
+            if plan.types.binding_types.get(binding).is_none() {
+                return Err(gap(format!("concrete plan is missing binding type {binding:?}")));
+            }
+        }
+    }
+    for site in plan.callees.keys() {
+        if !matches!(site.domain, crate::site::SiteDomain::Own)
+            && plan.domain_types(&site.domain).is_none()
+        {
+            return Err(gap(format!(
+                "concrete plan is missing type tables for site domain {:?}",
+                site.domain
+            )));
+        }
+    }
+    let subst = inst.subst(ws, scx.interner());
+    lower_body(ws, scx, inst.func, inst.clone(), &subst, Some(plan))
 }
 
 fn lower_body(
@@ -1022,6 +1079,7 @@ fn lower_body(
     self_ref: FuncRef,
     subject: crate::instance::Instance,
     subst: &SpecSubst,
+    concrete_plan: Option<&ConcreteBodyPlan>,
 ) -> Result<MirFunc, CompilerError> {
     let (mid, fid) = (self_ref.module, self_ref.func);
     let module = ws.module(mid);
@@ -1052,13 +1110,16 @@ fn lower_body(
     // instantiation additionally treats a generic param/return bound to a value
     // leaf as that value (`sig_value_shape_spec`), so it joins the scalar ABI.
     // This body's own ABI, from the one plan the calls that target it read.
-    let abi = BackendFnAbiPlan::for_instance_with_subst(ws, scx, &subject, subst);
+    let abi = concrete_plan
+        .map(|plan| BackendFnAbiPlan::for_concrete_plan(ws, scx, plan))
+        .unwrap_or_else(|| BackendFnAbiPlan::for_instance_with_subst(ws, scx, &subject, subst));
     let param_shapes = abi.param_shapes();
     let ret_shape = abi.ret_shape().cloned();
     let ret_tuple = abi.ret_tuple().cloned();
     let mut b = Builder {
         ws,
         scx,
+        concrete_plan,
         spec_subst: subst,
         struct_default_subst: None,
         generic_bounds: &func.generic_bounds,
@@ -1125,6 +1186,36 @@ pub fn lower_global(
     gid: Idx<bone_semantic::hir::GlobalDef>,
     name: Ustr,
 ) -> Result<Option<MirFunc>, CompilerError> {
+    lower_global_inner(ws, scx, mid, gid, name, None)
+}
+
+/// Lower an always-emitted global from its graph-owned concrete plan.
+pub fn lower_global_with_plan(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    plan: &ConcreteBodyPlan,
+    name: Ustr,
+) -> Result<Option<MirFunc>, CompilerError> {
+    let ConcreteOwner::Global { module, index } = &plan.owner else {
+        return Err(gap("concrete plan does not own a global"));
+    };
+    let module_ref = ws.module(*module);
+    if *index as usize >= module_ref.globals.len() {
+        return Err(gap("concrete global plan has an invalid global index"));
+    }
+    let gid = Idx::from_raw(RawIdx::from_u32(*index));
+    validate_always_plan(ws, *module, BodyOwner::Global(gid), plan)?;
+    lower_global_inner(ws, scx, *module, gid, name, Some(plan))
+}
+
+fn lower_global_inner(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    mid: ModuleId,
+    gid: Idx<bone_semantic::hir::GlobalDef>,
+    name: Ustr,
+    concrete_plan: Option<&ConcreteBodyPlan>,
+) -> Result<Option<MirFunc>, CompilerError> {
     let module = ws.module(mid);
     let body = module
         .bodies
@@ -1142,6 +1233,7 @@ pub fn lower_global(
     let mut b = Builder {
         ws,
         scx,
+        concrete_plan,
         spec_subst: &empty_subst,
         struct_default_subst: None,
         generic_bounds: &[],
@@ -1201,6 +1293,73 @@ pub fn lower_decorator(
     did: Idx<bone_semantic::hir::DecoratorDef>,
     name: Ustr,
 ) -> Result<MirFunc, CompilerError> {
+    lower_decorator_inner(ws, scx, mid, did, name, None)
+}
+
+/// Lower an always-emitted decorator from its graph-owned concrete plan.
+pub fn lower_decorator_with_plan(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    plan: &ConcreteBodyPlan,
+    name: Ustr,
+) -> Result<MirFunc, CompilerError> {
+    let ConcreteOwner::Decorator { module, index } = &plan.owner else {
+        return Err(gap("concrete plan does not own a decorator"));
+    };
+    let module_ref = ws.module(*module);
+    if *index as usize >= module_ref.decorators.len() {
+        return Err(gap("concrete decorator plan has an invalid decorator index"));
+    }
+    let did = Idx::from_raw(RawIdx::from_u32(*index));
+    validate_always_plan(ws, *module, BodyOwner::Decorator(did), plan)?;
+    lower_decorator_inner(ws, scx, *module, did, name, Some(plan))
+}
+
+fn validate_always_plan(
+    ws: &Workspace,
+    mid: ModuleId,
+    owner: BodyOwner,
+    plan: &ConcreteBodyPlan,
+) -> Result<(), CompilerError> {
+    let inf = ws
+        .inference(mid)
+        .and_then(|ir| ir.per_fn.get(&owner))
+        .ok_or_else(|| gap("concrete always-emitted plan has no inference"))?;
+    for (expr, _) in inf.expr_types.iter() {
+        if plan.types.expr_types.get(expr).is_none() {
+            return Err(gap(format!(
+                "concrete always-emitted plan is missing expression type {expr:?}"
+            )));
+        }
+    }
+    for (binding, _) in inf.binding_types.iter() {
+        if plan.types.binding_types.get(binding).is_none() {
+            return Err(gap(format!(
+                "concrete always-emitted plan is missing binding type {binding:?}"
+            )));
+        }
+    }
+    for site in plan.callees.keys() {
+        if !matches!(site.domain, crate::site::SiteDomain::Own)
+            && plan.domain_types(&site.domain).is_none()
+        {
+            return Err(gap(format!(
+                "concrete always-emitted plan is missing type tables for site domain {:?}",
+                site.domain
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn lower_decorator_inner(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    mid: ModuleId,
+    did: Idx<bone_semantic::hir::DecoratorDef>,
+    name: Ustr,
+    concrete_plan: Option<&ConcreteBodyPlan>,
+) -> Result<MirFunc, CompilerError> {
     let module = ws.module(mid);
     let body = module
         .bodies
@@ -1218,6 +1377,7 @@ pub fn lower_decorator(
     let mut b = Builder {
         ws,
         scx,
+        concrete_plan,
         spec_subst: &empty_subst,
         struct_default_subst: None,
         generic_bounds: &[],
@@ -1265,6 +1425,7 @@ pub fn lower_decorator(
 struct Builder<'a> {
     ws: &'a Workspace,
     scx: &'a ScalarCtx,
+    concrete_plan: Option<&'a ConcreteBodyPlan>,
     /// Per-instantiation generic substitution (`docs/flatvec-plan.md` call-site
     /// specialization). Empty for the shared generic / non-generic snapshot; a
     /// value-instantiated splice carries `callee generic VarId -> concrete type`
@@ -1494,6 +1655,11 @@ impl Builder<'_> {
             ws: self.ws,
             inf: self.inf,
             body: self.body,
+            concrete_plan: self.concrete_plan,
+            concrete_types: self
+                .concrete_plan
+                .and_then(|plan| plan.domain_types(&self.cur_domain)),
+            interner: Some(self.scx.interner()),
             subst: self.subst(),
             values_first_class: self.scx.values_first_class,
         }

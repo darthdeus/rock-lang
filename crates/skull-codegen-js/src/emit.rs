@@ -9,7 +9,7 @@
 //! `CompilerError` (reject, don't emit-and-hope); the subset grows with the
 //! backend.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use bone_semantic::inference::Workspace;
 use comfy_la_arena::Idx;
@@ -2494,6 +2494,8 @@ pub fn emit_with_closure(
         false,
         &session.graph,
         &session.view,
+        std::sync::Arc::clone(&session.concrete),
+        std::sync::Arc::clone(&session.always),
         scx.interner_handle(),
     )?;
     drain_worklists(ws, &scx, &mut st)?;
@@ -2607,6 +2609,8 @@ struct JsSession {
     roots: Vec<FuncRef>,
     graph: InstanceGraph,
     view: ArtifactView,
+    concrete: std::sync::Arc<BTreeMap<Instance, skull_mir::concrete::ConcreteBodyPlan>>,
+    always: std::sync::Arc<skull_mir::concrete::ConcreteAlwaysPlans>,
     last_update: Option<JsGraphUpdate>,
 }
 
@@ -2688,7 +2692,7 @@ fn new_js_session(
     scx: &skull_mir::lower::ScalarCtx,
     roots: &[FuncRef],
 ) -> JsSession {
-    let graph = skull_graph::instance_graph::build_in(
+    let mut graph = skull_graph::instance_graph::build_in(
         ws,
         roots.to_vec(),
         false,
@@ -2703,7 +2707,15 @@ fn new_js_session(
             .with_mappings(mappings)
             .with_symbols(&artifact::REALIZED_SYMBOLS),
     );
-    JsSession { roots: roots.to_vec(), graph, view, last_update: None }
+    let concrete = skull_graph::concrete_body::build(ws, &mut graph);
+    JsSession {
+        roots: roots.to_vec(),
+        graph,
+        view,
+        concrete: std::sync::Arc::new(concrete.plans),
+        always: std::sync::Arc::new(concrete.always_plans),
+        last_update: None,
+    }
 }
 
 fn update_js_session(
@@ -2714,6 +2726,7 @@ fn update_js_session(
 ) {
     let before = session.graph.instances.len();
     let update = session.graph.update_bodies(ws, roots.to_vec(), changed);
+    let concrete = skull_graph::concrete_body::build(ws, &mut session.graph);
     let mappings = artifact::ArtifactMappings::for_backend(bone_semantic::hir::FnBackend::Js)
         .with_supply(&crate::JsBackendRealization);
     session.view = artifact::realize(
@@ -2723,6 +2736,8 @@ fn update_js_session(
             .with_mappings(mappings)
             .with_symbols(&artifact::REALIZED_SYMBOLS),
     );
+    session.concrete = std::sync::Arc::new(concrete.plans);
+    session.always = std::sync::Arc::new(concrete.always_plans);
     session.roots = roots.to_vec();
     session.last_update = Some(JsGraphUpdate {
         before,
@@ -2840,6 +2855,8 @@ fn assemble_program_core(
         true,
         &session.graph,
         &session.view,
+        std::sync::Arc::clone(&session.concrete),
+        std::sync::Arc::clone(&session.always),
         scx.interner_handle(),
     )?;
 
@@ -2861,9 +2878,22 @@ fn assemble_program_core(
                 continue;
             }
             let deco_name = decorator_js_name(d.name.as_str());
-            let lowered = skull_mir::lower::lower_decorator(
-                ws, scx, module.id, did, ustr::Ustr::from(deco_name.as_str()),
-            );
+            let owner = skull_mir::concrete::ConcreteOwner::Decorator {
+                module: module.id,
+                index: did.into_raw().into_u32(),
+            };
+            let lowered = st
+                .always
+                .get(&owner)
+                .ok_or_else(|| err(format!("JS: no concrete plan for decorator `{}`", d.name)))
+                .and_then(|plan| {
+                    skull_mir::lower::lower_decorator_with_plan(
+                        ws,
+                        scx,
+                        plan,
+                        ustr::Ustr::from(deco_name.as_str()),
+                    )
+                });
             let mut mf = match lowered {
                 Ok(mf) => mf,
                 Err(e) => {
@@ -2872,7 +2902,14 @@ fn assemble_program_core(
                 }
             };
             let self_ref = safe_self_ref(ws, &mf);
-            if let Err(e) = skull_transform::inline_functions(ws, scx, self_ref, &mut mf, &mut st.cache)
+            if let Err(e) = skull_transform::inline_functions_with_plans(
+                ws,
+                scx,
+                self_ref,
+                &mut mf,
+                &mut st.cache,
+                &st.concrete,
+            )
             {
                 st.reject(&deco_name, e);
                 continue;
@@ -3447,6 +3484,8 @@ struct JsInlineBody {
 }
 
 struct WorklistState {
+    concrete: std::sync::Arc<BTreeMap<Instance, skull_mir::concrete::ConcreteBodyPlan>>,
+    always: std::sync::Arc<skull_mir::concrete::ConcreteAlwaysPlans>,
     cache: skull_transform::InlineCache,
     names: CalleeNames,
     queue: Vec<FuncRef>,
@@ -3495,6 +3534,8 @@ impl WorklistState {
         program_mode: bool,
         graph: &InstanceGraph,
         view: &ArtifactView,
+        concrete: std::sync::Arc<BTreeMap<Instance, skull_mir::concrete::ConcreteBodyPlan>>,
+        always: std::sync::Arc<skull_mir::concrete::ConcreteAlwaysPlans>,
         _interner: std::sync::Arc<skull_mir::monoty::MonoInterner>,
     ) -> Result<Self, CompilerError> {
         let mut names = CalleeNames::from_graph(graph);
@@ -3554,6 +3595,8 @@ impl WorklistState {
             .map(|(inst, realized)| (inst.clone(), realized.decl))
             .collect();
         Ok(WorklistState {
+            concrete,
+            always,
             standalone_specs: Vec::new(),
             standalone_seen: HashSet::new(),
             view_instances: view.instances.clone(),
@@ -3719,7 +3762,14 @@ impl JsDelivery<'_> {
             .name_for_decl(self.ws, fr)
             .expect("queued fn has a name")
             .clone();
-        let mut mf = match skull_mir::lower::lower_function(self.ws, self.scx, fr.module, fr.func) {
+        let plan = match self.st.concrete.get(&Instance::base(fr)) {
+            Some(plan) => plan,
+            None => {
+                self.st.reject(&name, err("JS: no concrete plan for the retained function body"));
+                return Ok(());
+            }
+        };
+        let mut mf = match skull_mir::lower::lower_function_with_plan(self.ws, self.scx, plan) {
             Ok(mf) => mf,
             Err(e) => {
                 self.st.reject(&name, e);
@@ -3729,9 +3779,14 @@ impl JsDelivery<'_> {
         if mf.is_coroutine {
             skull_transform::cleanup_with_nobox(self.ws, &mut mf);
         } else {
-            if let Err(e) =
-                skull_transform::inline_functions(self.ws, self.scx, fr, &mut mf, &mut self.st.cache)
-            {
+            if let Err(e) = skull_transform::inline_functions_with_plans(
+                self.ws,
+                self.scx,
+                fr,
+                &mut mf,
+                &mut self.st.cache,
+                &self.st.concrete,
+            ) {
                 self.st.reject(&name, e);
                 return Ok(());
             }
@@ -3828,9 +3883,16 @@ impl JsDelivery<'_> {
             return Ok(());
         };
         let lowered_inst = Instance { func: fr, args: inst.args.clone() };
-        let subst = lowered_inst.subst(self.ws, self.scx.interner());
         let body = inst.clone();
-        let mut mf = match skull_mir::lower::lower_instance(self.ws, self.scx, &lowered_inst) {
+        let subst = lowered_inst.subst(self.ws, self.scx.interner());
+        let plan = match self.st.concrete.get(&lowered_inst) {
+            Some(plan) => plan,
+            None => {
+                self.st.reject(&name, err("JS: no concrete plan for the selected retained body"));
+                return Ok(());
+            }
+        };
+        let mut mf = match skull_mir::lower::lower_instance_with_plan(self.ws, self.scx, plan) {
             Ok(mf) => mf,
             Err(e) => {
                 self.st.reject(&name, e);
@@ -3870,8 +3932,14 @@ impl JsDelivery<'_> {
         // trampoline's own framed conversion is idempotent over what
         // `convert_closures` already hoisted. Left as one path rather than a
         // branch no fixture can distinguish.
-        if let Err(e) = skull_transform::inline_functions_with_subst(
-            self.ws, self.scx, fr, &mut mf, &mut self.st.cache, &subst,
+        if let Err(e) = skull_transform::inline_functions_with_subst_and_plans(
+            self.ws,
+            self.scx,
+            fr,
+            &mut mf,
+            &mut self.st.cache,
+            &subst,
+            Some(&self.st.concrete),
         ) {
             self.st.reject(&name, e);
             return Ok(());
@@ -3910,9 +3978,27 @@ impl JsDelivery<'_> {
     fn visit_ginit(&mut self, gname: ustr::Ustr) -> Result<(), CompilerError> {
         let site = self.st.state_index[&gname];
         let init_name = global_init_js_name(gname);
-        let lowered = skull_mir::lower::lower_global(
-            self.ws, self.scx, site.module, site.gid, ustr::Ustr::from(init_name.as_str()),
-        );
+        let owner = skull_mir::concrete::ConcreteOwner::Global {
+            module: site.module,
+            index: site.gid.into_raw().into_u32(),
+        };
+        let lowered = match self.st.always.get(&owner) {
+            Some(plan) => skull_mir::lower::lower_global_with_plan(
+                self.ws,
+                self.scx,
+                plan,
+                ustr::Ustr::from(init_name.as_str()),
+            ),
+            None
+                if self
+                    .ws
+                    .module(site.module)
+                    .bodies
+                    .get(&bone_semantic::hir::BodyOwner::Global(site.gid))
+                    .and_then(|body| body.root)
+                    .is_none() => Ok(None),
+            None => Err(err(format!("JS: no concrete plan for global `{gname}`"))),
+        };
         let lowered = match lowered {
             Ok(l) => l,
             Err(e) => {
@@ -6229,6 +6315,8 @@ mod tests {
             false,
             &graph,
             &view,
+            std::sync::Arc::new(BTreeMap::new()),
+            std::sync::Arc::new(skull_mir::concrete::ConcreteAlwaysPlans::default()),
             interner,
         );
         let error = match result {

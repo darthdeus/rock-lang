@@ -48,7 +48,7 @@ fn graph_of(src: &str) -> (Workspace, InstanceGraph) {
 fn census_of(src: &str) -> SiteJoinCensus {
     let (ws, mut g) = graph_of(src);
     let bodies = skull::concrete_body::build(&ws, &mut g);
-    let scx = ScalarCtx::new(&ws);
+    let scx = ScalarCtx::new(&ws).sharing(g.interner().clone());
     site_join::census(&ws, &scx, &g, &bodies)
 }
 
@@ -878,7 +878,7 @@ fn main() { print("{top()}") }
     let c = {
         let mut graph = g;
         let bodies = skull::concrete_body::build(&ws, &mut graph);
-        let scx = ScalarCtx::new(&ws);
+        let scx = ScalarCtx::new(&ws).sharing(graph.interner().clone());
         site_join::census(&ws, &scx, &graph, &bodies)
     };
     assert!(c.joined_instance_verified >= 2, "{c:?}");
@@ -1135,7 +1135,7 @@ fn main() { print("{top()}") }
 "#;
     let (ws, mut g) = graph_of(src);
     let bodies = skull::concrete_body::build(&ws, &mut g);
-    let scx = ScalarCtx::new(&ws);
+    let scx = ScalarCtx::new(&ws).sharing(g.interner().clone());
     // CONTROL: with every substitution present, nothing is refused for want of
     // an owner. Without this the refusal below could be any other failure.
     // CONTROL: the calls `main` owns all join before the mutation. The fixture's
@@ -1214,7 +1214,7 @@ fn main() { print("{use_both()}") }
     let c = {
         let mut graph = g;
         let bodies = skull::concrete_body::build(&ws, &mut graph);
-        let scx = ScalarCtx::new(&ws);
+        let scx = ScalarCtx::new(&ws).sharing(graph.interner().clone());
         site_join::census(&ws, &scx, &graph, &bodies)
     };
     assert!(c.obligations_examined > 0, "fixture examined no calls: {c:?}");
@@ -1433,7 +1433,8 @@ fn main() { print("{apply(add_one, 1)}") }
     );
 
     // CONTROL: unmodified, the mint is in the denominator and it JOINS.
-    let before = skull::site_join::measure_prepared_body(&ws, &ScalarCtx::new(&ws), &g, &bodies, &main_inst, &mf);
+    let scx = ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let before = skull::site_join::measure_prepared_body(&ws, &scx, &g, &bodies, &main_inst, &mf);
     assert_eq!(before.symbol_mints, 1, "the mint left the denominator: {before:?}");
     assert_eq!(
         before.joined_by_op.get("fn-value").copied().unwrap_or(0),
@@ -1458,7 +1459,7 @@ fn main() { print("{apply(add_one, 1)}") }
     assert_ne!(alien, recorded, "the alien must differ, or the swap is a no-op");
     mf.fn_value_symbols.insert(mint, alien);
 
-    let after = skull::site_join::measure_prepared_body(&ws, &ScalarCtx::new(&ws), &g, &bodies, &main_inst, &mf);
+    let after = skull::site_join::measure_prepared_body(&ws, &scx, &g, &bodies, &main_inst, &mf);
     // The mint is still EXAMINED -- a corrupted record must not drop out of the
     // denominator, which would look like agreement.
     assert_eq!(

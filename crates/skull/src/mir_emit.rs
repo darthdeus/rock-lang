@@ -529,6 +529,7 @@ fn emit_decorator_unit(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
     cg: &CodegenCtx,
+    concrete: &crate::concrete_body::ConcreteBodies,
     mid: ModuleId,
     did: Idx<bone_semantic::hir::DecoratorDef>,
 ) -> UnitOut {
@@ -536,8 +537,23 @@ fn emit_decorator_unit(
     let d = &ws.module(mid).decorators[did];
     let deco_name = crate::decorator_fn_name(d.name.as_str());
     let tl = Instant::now();
-    let lowered =
-        skull_mir::lower::lower_decorator(ws, scx, mid, did, ustr::Ustr::from(deco_name.as_str()));
+    let owner = skull_mir::concrete::ConcreteOwner::Decorator {
+        module: mid,
+        index: did.into_raw().into_u32(),
+    };
+    let lowered = concrete
+        .plan_for_owner(&owner)
+        .ok_or_else(|| {
+            CompilerError::new_with_label(d.span, "no concrete plan for decorator".to_string())
+        })
+        .and_then(|plan| {
+            skull_mir::lower::lower_decorator_with_plan(
+                ws,
+                scx,
+                plan,
+                ustr::Ustr::from(deco_name.as_str()),
+            )
+        });
     out.times.lower = tl.elapsed();
     match lowered {
         Ok(mut mf) => {
@@ -594,6 +610,7 @@ fn emit_global_unit(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
     cg: &CodegenCtx,
+    concrete: &crate::concrete_body::ConcreteBodies,
     mid: ModuleId,
     gid: Idx<bone_semantic::hir::GlobalDef>,
 ) -> UnitOut {
@@ -601,8 +618,28 @@ fn emit_global_unit(
     let g = &ws.module(mid).globals[gid];
     let init_name = crate::global_init_fn_name(g.name.as_str());
     let tl = Instant::now();
-    let lowered =
-        skull_mir::lower::lower_global(ws, scx, mid, gid, ustr::Ustr::from(init_name.as_str()));
+    let owner = skull_mir::concrete::ConcreteOwner::Global {
+        module: mid,
+        index: gid.into_raw().into_u32(),
+    };
+    let lowered = match concrete.plan_for_owner(&owner) {
+        Some(plan) => skull_mir::lower::lower_global_with_plan(
+            ws,
+            scx,
+            plan,
+            ustr::Ustr::from(init_name.as_str()),
+        ),
+        None if ws
+            .module(mid)
+            .bodies
+            .get(&bone_semantic::hir::BodyOwner::Global(gid))
+            .and_then(|body| body.root)
+            .is_none() => Ok(None),
+        None => Err(CompilerError::new_with_label(
+            g.name_span,
+            "no concrete plan for global initializer".to_string(),
+        )),
+    };
     out.times.lower = tl.elapsed();
     match lowered {
         Ok(Some(mut mf)) => {
@@ -927,7 +964,7 @@ fn view_driven_specialized_chunks(
         }
         let name = inst.symbol(ws, scx.interner());
         let mut specs = Vec::new();
-        match emit_spec_chunk(ws, cg, scx, &inst, subst, &tree, &name, &mut inline_cache, &mut specs) {
+        match emit_spec_chunk(ws, cg, scx, &cache.concrete, &inst, subst, &tree, &name, &mut inline_cache, &mut specs) {
             Ok(chunk) => {
                 pending.extend(chunk.specs.iter().map(|d| d.inst.clone()));
                 built.insert(inst, chunk);
@@ -1099,12 +1136,13 @@ fn rebuild_chunk(
     cg: &CodegenCtx,
     scx: &skull_mir::lower::ScalarCtx,
     graph: &crate::instance_graph::InstanceGraph,
+    concrete: &crate::concrete_body::ConcreteBodies,
     body: &Instance,
     f: &bone_semantic::hir::Function,
     inline_cache: &mut skull_transform::InlineCache,
 ) -> Result<Chunk, CompilerError> {
     match body.args.is_empty() {
-        true => emit_body_chunk(ws, cg, scx, body.func, f, inline_cache),
+        true => emit_body_chunk(ws, cg, scx, concrete, body.func, f, inline_cache),
         false => {
             // A rebuild that cannot emit DROPS the entry rather than storing the
             // rejection: assembly rebuilds a miss and reports the error from
@@ -1125,7 +1163,7 @@ fn rebuild_chunk(
                     format!("graph has no resolved bound tree for specialized `{name}`"),
                 ));
             }
-            emit_spec_chunk(ws, cg, scx, body, subst, &tree, &name, inline_cache, &mut specs)
+            emit_spec_chunk(ws, cg, scx, concrete, body, subst, &tree, &name, inline_cache, &mut specs)
         }
     }
 }
@@ -1136,6 +1174,7 @@ fn rebuild_chunk(
 /// [`assemble`] every time. See `docs/skull-incremental-emit-plan.md`.
 pub struct SkullEmitCache {
     chunks: FxHashMap<Instance, Result<Chunk, CompilerError>>,
+    concrete: crate::concrete_body::ConcreteBodies,
     /// **The authoritative instance graph, built EAGERLY by `emit_full_in`
     /// before any chunk is lowered, and retained across body edits.**
     ///
@@ -1312,17 +1351,19 @@ fn emit_body_chunk(
     ws: &Workspace,
     cg: &CodegenCtx,
     scx: &skull_mir::lower::ScalarCtx,
+    concrete: &crate::concrete_body::ConcreteBodies,
     self_ref: FuncRef,
     f: &bone_semantic::hir::Function,
     inline_cache: &mut skull_transform::InlineCache,
 ) -> Result<Chunk, CompilerError> {
-    emit_body_chunk_with_mutation(ws, cg, scx, self_ref, f, inline_cache, BodyMutation::None)
+    emit_body_chunk_with_mutation(ws, cg, scx, concrete, self_ref, f, inline_cache, BodyMutation::None)
 }
 
 fn emit_body_chunk_with_mutation(
     ws: &Workspace,
     cg: &CodegenCtx,
     scx: &skull_mir::lower::ScalarCtx,
+    concrete: &crate::concrete_body::ConcreteBodies,
     self_ref: FuncRef,
     f: &bone_semantic::hir::Function,
     inline_cache: &mut skull_transform::InlineCache,
@@ -1330,7 +1371,10 @@ fn emit_body_chunk_with_mutation(
 ) -> Result<Chunk, CompilerError> {
     let mut times = PhaseTimes::default();
     let tl = Instant::now();
-    let mut mf = skull_mir::lower::lower_function(ws, scx, self_ref.module, self_ref.func)?;
+    let plan = concrete
+        .plan_for(&shared(self_ref))
+        .ok_or_else(|| CompilerError::new_with_label(f.name_span, format!("no concrete plan for `{}`", f.name)))?;
+    let mut mf = skull_mir::lower::lower_function_with_plan(ws, scx, plan)?;
     times.lower = tl.elapsed();
     match mutation {
         BodyMutation::None => {}
@@ -1382,8 +1426,14 @@ fn emit_body_chunk_with_mutation(
     }
     // Inline eligible direct calls before cleanup so a hot loop traces with no
     // per-call frame (`docs/skull-inlining-plan.md`).
-    let (spliced, _splices) =
-        skull_transform::inline_functions(ws, scx, self_ref, &mut mf, inline_cache)?;
+    let (spliced, _splices) = skull_transform::inline_functions_with_plans(
+        ws,
+        scx,
+        self_ref,
+        &mut mf,
+        inline_cache,
+        &concrete.plans,
+    )?;
     let mut deps: FxHashSet<FuncRef> = spliced.into_iter().collect();
     let tc = Instant::now();
     skull_transform::cleanup_with_nobox(ws, &mut mf); // drop dead values + dead-cell stores
@@ -1414,7 +1464,15 @@ fn emit_body_chunk_with_mutation(
     // Correctness, not just an optimization: a call the lowerer gave the
     // specialized scalar ABI has no serviceable shared body, and for a
     // column-stored element the shared `next` reads a `_data` that does not exist.
-    inline_hoisted_bodies(ws, scx, self_ref, &mut mf.nested_fns, inline_cache, &mut deps)
+    inline_hoisted_bodies(
+        ws,
+        scx,
+        self_ref,
+        &mut mf.nested_fns,
+        inline_cache,
+        &concrete.plans,
+        &mut deps,
+    )
         .map_err(|msg| CompilerError::new_with_label(f.name_span, msg))?;
     times.cleanup = tc.elapsed();
     skull_transform::validate_no_residual_bound_calls(ws, f, &mf)?;
@@ -1594,6 +1652,7 @@ fn emit_spec_chunk(
     ws: &Workspace,
     cg: &CodegenCtx,
     scx: &skull_mir::lower::ScalarCtx,
+    concrete: &crate::concrete_body::ConcreteBodies,
     body: &Instance,
     subst: &skull_mir::monoty::MonoSubst,
     tree: &skull_mir::bound::ResolvedBoundTree,
@@ -1603,7 +1662,10 @@ fn emit_spec_chunk(
 ) -> Result<Chunk, CompilerError> {
     let fref = body.func;
     let f = &ws.module(fref.module).functions[fref.func];
-    let mut mf = skull_mir::lower::lower_instance(ws, scx, body)
+    let plan = concrete
+        .plan_for(body)
+        .ok_or_else(|| CompilerError::new_with_label(f.name_span, format!("no concrete plan for `{name}`")))?;
+    let mut mf = skull_mir::lower::lower_instance_with_plan(ws, scx, plan)
         .map_err(|e| CompilerError::new_with_label(f.name_span, e.message))?;
     // BEFORE every transform: an `Iterator`-bounded body's placeholders are what
     // make it unemittable on its own, and the demand that reached here is what
@@ -1616,7 +1678,16 @@ fn emit_spec_chunk(
     if f.is_coroutine {
         return emit_coroutine_chunk(ws, cg, scx, &ctx, body, f, &mut mf, PhaseTimes::default());
     }
-    let mut deps = prepare_instance_body(ws, scx, fref, &subst, name, &mut mf, inline_cache)
+    let mut deps = prepare_instance_body_with_plans(
+        ws,
+        scx,
+        fref,
+        &subst,
+        name,
+        &mut mf,
+        inline_cache,
+        Some(&concrete.plans),
+    )
         .map_err(|e| CompilerError::new_with_label(f.name_span, e.message))?;
     let before = specs.len();
     // Discovered BEFORE the verdict, and handed back through `specs` even when
@@ -1725,8 +1796,28 @@ pub fn prepare_instance_body(
     mf: &mut skull_mir::mir::MirFunc,
     cache: &mut skull_transform::InlineCache,
 ) -> Result<FxHashSet<FuncRef>, CompilerError> {
-    let (spliced, _records) =
-        skull_transform::inline_functions_with_subst(ws, scx, fref, mf, cache, subst)?;
+    prepare_instance_body_with_plans(ws, scx, fref, subst, name, mf, cache, None)
+}
+
+pub fn prepare_instance_body_with_plans(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    fref: FuncRef,
+    subst: &skull_mir::lower::SpecSubst,
+    name: &str,
+    mf: &mut skull_mir::mir::MirFunc,
+    cache: &mut skull_transform::InlineCache,
+    concrete_plans: Option<&skull_mir::concrete::ConcretePlans>,
+) -> Result<FxHashSet<FuncRef>, CompilerError> {
+    let (spliced, _records) = skull_transform::inline_functions_with_subst_and_plans(
+        ws,
+        scx,
+        fref,
+        mf,
+        cache,
+        subst,
+        concrete_plans,
+    )?;
     skull_transform::cleanup_with_nobox(ws, mf);
     skull_transform::convert_closures(mf, name);
     skull_transform::recover_counted_loops(ws, mf);
@@ -1780,15 +1871,23 @@ fn inline_hoisted_bodies(
     self_ref: FuncRef,
     nested: &mut [MirFunc],
     inline_cache: &mut skull_transform::InlineCache,
+    concrete_plans: &skull_mir::concrete::ConcretePlans,
     deps: &mut FxHashSet<FuncRef>,
 ) -> Result<(), String> {
     for nf in nested.iter_mut() {
-        let (spliced, _) = skull_transform::inline_functions(ws, scx, self_ref, nf, inline_cache)
-            .map_err(|e| e.message)?;
+        let (spliced, _) = skull_transform::inline_functions_with_plans(
+            ws,
+            scx,
+            self_ref,
+            nf,
+            inline_cache,
+            concrete_plans,
+        )
+        .map_err(|e| e.message)?;
         deps.extend(spliced);
         skull_transform::cleanup_with_nobox(ws, nf);
         let mut children = std::mem::take(&mut nf.nested_fns);
-        inline_hoisted_bodies(ws, scx, self_ref, &mut children, inline_cache, deps)?;
+        inline_hoisted_bodies(ws, scx, self_ref, &mut children, inline_cache, concrete_plans, deps)?;
         nf.nested_fns = children;
     }
     Ok(())
@@ -2350,7 +2449,7 @@ fn assemble(
     // module; the definition bodies themselves lower+emit in parallel.
     let (deco_map, deco_items) = build_deco_map(ws);
     let deco_results = par_map(deco_items, |(mid, did)| {
-        emit_decorator_unit(ws, scx, cg, mid, did)
+        emit_decorator_unit(ws, scx, cg, &cache.concrete, mid, did)
     });
     rejections.extend(unit_errors(&deco_results));
     needed_specs.extend(deco_results.iter().flat_map(|u| u.specs.iter().cloned()));
@@ -2379,7 +2478,7 @@ fn assemble(
         })
         .collect();
     let global_results = par_map(global_items, |(mid, gid)| {
-        emit_global_unit(ws, scx, cg, mid, gid)
+        emit_global_unit(ws, scx, cg, &cache.concrete, mid, gid)
     });
     rejections.extend(unit_errors(&global_results));
     needed_specs.extend(global_results.iter().flat_map(|u| u.specs.iter().cloned()));
@@ -2930,7 +3029,20 @@ fn emit_full_in_with_mutation(
         .flat_map(|program| program.vert.into_iter().chain(std::iter::once(program.frag)))
         .collect();
     let emission_roots = all_roots(ws, project_root, &shader_roots);
-    let graph = crate::instance_graph::build(ws, emission_roots.clone(), false);
+    let mut graph = crate::instance_graph::build(ws, emission_roots.clone(), false);
+    let concrete = crate::concrete_body::build(ws, &mut graph);
+    if let Some((instance, reason)) = concrete.plan_failures.first() {
+        let f = &ws.module(instance.func.module).functions[instance.func.func];
+        return Err(CompilerError::new_with_label(
+            f.name_span,
+            format!("cannot build concrete lowering plan for `{}`: {:?}", f.name, reason),
+        ));
+    }
+    if let Some((owner, reason)) = concrete.always_plan_failures.first() {
+        return Err(CompilerError::new_no_location(format!(
+            "cannot build concrete always-emitted lowering plan for {owner:?}: {reason:?}"
+        )));
+    }
     // The overload set lives in `cg` (computed once there); borrow it rather than
     // rescanning the workspace.
     let scx =
@@ -2970,7 +3082,7 @@ fn emit_full_in_with_mutation(
         |inline_cache, (self_ref, f)| {
             (
                 shared(self_ref),
-                emit_body_chunk_with_mutation(ws, &cg, &scx, self_ref, f, inline_cache, mutation),
+                emit_body_chunk_with_mutation(ws, &cg, &scx, &concrete, self_ref, f, inline_cache, mutation),
             )
         },
     );
@@ -3004,6 +3116,7 @@ fn emit_full_in_with_mutation(
     );
     let cache = SkullEmitCache {
         chunks,
+        concrete,
         graph,
         lua_view,
         changed_since_full: FxHashSet::default(),
@@ -3198,6 +3311,7 @@ fn build_graph_added_chunks(
                 &cache.cg,
                 &cache.scx,
                 &cache.graph,
+                &cache.concrete,
                 &body,
                 f,
                 &mut cache.inline_cache,
@@ -3230,6 +3344,7 @@ fn build_graph_added_chunks(
                 ws,
                 &cache.cg,
                 &cache.scx,
+                &cache.concrete,
                 &body,
                 subst,
                 &tree,
@@ -3327,6 +3442,7 @@ fn update_chunk_cache(
         &cache.shader_registrations.roots,
     );
     let update = cache.graph.update_bodies(ws, roots.clone(), reinferred);
+    cache.concrete = crate::concrete_body::build(ws, &mut cache.graph);
     let _graph_ms = _t_graph.elapsed();
 
     // Before any borrow of the cache's own fields, because it mutates several.
@@ -3414,7 +3530,7 @@ fn update_chunk_cache(
         // An edit can flip a body between cached (ordinary/coroutine) and
         // regenerated (extern / inline(lua)); only the former has a chunk.
         if is_cached_emitted_body(f, body) {
-            let chunk = rebuild_chunk(ws, cg, scx, &cache.graph, body, f, &mut cache.inline_cache);
+            let chunk = rebuild_chunk(ws, cg, scx, &cache.graph, &cache.concrete, body, f, &mut cache.inline_cache);
             if let Ok(c) = &chunk {
                 let new_deps: Vec<FuncRef> = c.deps.iter().copied().collect();
                 for d in new_deps {
@@ -3610,7 +3726,14 @@ fn assemble_overlay(
         let mut inits: Vec<GlobalInit> = Vec::new();
         for a in &affected {
             let line = if a.changed {
-                let unit = emit_global_unit(ws, &cache.scx, &cache.cg, a.mid, a.gid);
+                let unit = emit_global_unit(
+                    ws,
+                    &cache.scx,
+                    &cache.cg,
+                    &cache.concrete,
+                    a.mid,
+                    a.gid,
+                );
                 out.push_str(&unit.lua); // the (new) ginit fn def
                 if let Some(s) = unit.skipped {
                     skipped.push(s);

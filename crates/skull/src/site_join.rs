@@ -816,7 +816,11 @@ pub fn census_detailed(
             skip(&mut c, BodySkip::NoLoweredBody);
             continue;
         }
-        let mut mf = match skull_mir::lower::lower_instance(ws, scx, inst) {
+        let Some(plan) = bodies.plan_for(inst) else {
+            skip(&mut c, BodySkip::LowerFailed);
+            continue;
+        };
+        let mut mf = match skull_mir::lower::lower_instance_with_plan(ws, scx, plan) {
             Ok(mf) => mf,
             Err(_) => {
                 skip(&mut c, BodySkip::LowerFailed);
@@ -825,7 +829,7 @@ pub fn census_detailed(
         };
         // THE emitted body: the same sequence `emit_specialized_callees` runs.
         let name = skull_mir::mangle::mangle_fn(ws, f);
-        if crate::mir_emit::prepare_instance_body(
+        if crate::mir_emit::prepare_instance_body_with_plans(
             ws,
             scx,
             inst.func,
@@ -833,6 +837,7 @@ pub fn census_detailed(
             &name,
             &mut mf,
             &mut cache,
+            Some(&bodies.plans),
         )
         .is_err()
         {

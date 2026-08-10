@@ -15,6 +15,14 @@ impl Builder<'_> {
         self.dispatch().expr_is_nullable(e)
     }
 
+    pub(crate) fn concrete_expr_ty(&self, e: Idx<Expr>) -> Option<MonoTy> {
+        self.dispatch().concrete_expr_ty(e)
+    }
+
+    pub(crate) fn concrete_ty_id(&self, ty: TyId) -> Option<MonoTy> {
+        self.dispatch().concrete_ty(ty)
+    }
+
     pub(crate) fn is_nullable_ty(&self, ty: TyId) -> bool {
         self.dispatch().is_nullable_ty(ty)
     }
@@ -184,6 +192,9 @@ impl Builder<'_> {
         if let Some(&gidx) = self.inf?.bound_calls.get(&e) {
             return Some(self.bound_next_tuple_shape(gidx));
         }
+        if let Some(MonoTy::Tuple(parts)) = self.concrete_expr_ty(e) {
+            return Some(mono_tuple_shape(self.ws, &parts));
+        }
         self.tyid_tuple_ret_shape(self.resolve_tyid(*self.inf?.expr_types.get(e)?)?)
     }
 
@@ -245,6 +256,12 @@ impl Builder<'_> {
     /// them (multi-return ABI). Read off the lambda's inferred `fn(..) -> (..)`
     /// type so it agrees with the call site's `expr_tuple_shape`.
     pub(crate) fn lambda_ret_tuple_shape(&self, e: Idx<Expr>) -> Option<TupleRetShape> {
+        if let Some(MonoTy::Function { ret, .. }) = self.concrete_expr_ty(e) {
+            if let MonoTy::Tuple(parts) = *ret {
+                return Some(mono_tuple_shape(self.ws, &parts));
+            }
+            return None;
+        }
         let ty = self.resolve_tyid(*self.inf?.expr_types.get(e)?)?;
         let TypeExpr::Function { ret, .. } = self.ty_node(ty)? else { return None };
         self.tyid_tuple_ret_shape(self.resolve_tyid(ty.with_idx(ret))?)
@@ -252,12 +269,18 @@ impl Builder<'_> {
 
     /// [`tuple_ret_shape`] for a type that may live in the BODY's inference arena
     /// (a call expression's own type, a lambda's return) rather than the
-    /// workspace one. `ty_node` applies the enclosing specialization
-    /// substitution, so a generic element resolves to the same slot the
-    /// signature-side walker sees.
+    /// workspace one. Concrete expression tables resolve generic elements from
+    /// the same plan the signature-side walker sees.
     pub(crate) fn tyid_tuple_ret_shape(&self, ty: TyId) -> Option<TupleRetShape> {
-        // A generic bound to a TUPLE is the one binding `ty_node` cannot answer
-        // (see `mono_type_node`), so it is read off the substitution here --
+        if let Some(concrete) = self.concrete_ty_id(ty) {
+            return match concrete {
+                MonoTy::Tuple(parts) => Some(mono_tuple_shape(self.ws, &parts)),
+                MonoTy::Nullable(_) => None,
+                _ => None,
+            };
+        }
+        // A generic bound to a TUPLE has no source node for its concrete
+        // children, so it is read from the concrete binding here --
         // the same source `body_ret_slot` reads. Without it a specialized body's
         // indirect call sees a bare `Generic` and declines to splat, while the
         // fn value it calls splats from its own concrete type.
@@ -372,8 +395,8 @@ impl Builder<'_> {
     }
 
     pub(crate) fn body_ret_slot(&self, ty: TyId) -> RetSlot {
-        // A generic bound to a TUPLE is the one binding `ty_node` cannot answer
-        // (see `mono_type_node`), so it is read off the substitution directly.
+        // A generic bound to a TUPLE has no source node for its concrete
+        // children, so it is read from the concrete binding directly.
         if let Some(bound @ MonoTy::Tuple(_)) = self.bound_generic_subst(ty) {
             return mono_ret_slot(self.ws, bound);
         }
@@ -389,6 +412,19 @@ impl Builder<'_> {
     /// [`Self::body_sig_value_shape`] narrowed to `nobox` nominals -- the splat
     /// gate, mirroring [`nobox_sig_shape_spec`] on the body arena.
     pub(crate) fn body_nobox_shape(&self, ty: TyId) -> Option<ValueShape> {
+        if let Some(concrete) = self.concrete_ty_id(ty) {
+            let (payload, nullable) = concrete.peel_nullable();
+            if let MonoTy::App { ctor: crate::monoty::MonoCtor::Nominal(n), .. } = payload {
+                if self.is_nobox_struct(n.to_owned().into()) {
+                    return if nullable {
+                        sig_shape_of_nullable_nominal(self.ws, n.to_owned().into())
+                    } else {
+                        sig_shape_of_nominal(self.ws, n.to_owned().into())
+                    };
+                }
+            }
+            return None;
+        }
         let ty = self.resolve_tyid(ty)?;
         match self.ty_node(ty)? {
             TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } if self.is_nobox_struct(n) => {

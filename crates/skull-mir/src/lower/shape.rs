@@ -12,7 +12,7 @@ use super::*;
 
 use bone_semantic::hir::{BuiltinTy, Expr, TyId, TypeCtor, TypeExpr, VariantPayload};
 use bone_semantic::inference::Workspace;
-use comfy_la_arena::{Idx, IdxRange};
+use comfy_la_arena::Idx;
 use ustr::Ustr;
 
 use crate::monoty::{MonoCtor, MonoTy};
@@ -1592,51 +1592,6 @@ pub(crate) fn columns_available(
 /// conversion that could lose or reorder them.
 pub type SpecSubst = crate::monoty::MonoSubst;
 
-/// The root `TypeExpr` a substituted generic resolves to. Nested arguments stay
-/// in [`SpecSubst`] for recursive call specialization; the synthesized root has
-/// no arena range of its own.
-/// A NULLABLE binding substitutes to its PAYLOAD, which is what the arena spells
-/// for a written-out `E?` too: `resolve_ty` peels `Nullable`, so `expr_ty` at a
-/// `E?` expression already answers `E`, and nullability is a separate question
-/// ([`Builder::is_nullable_ty`], which grows the matching generic arm). Modelling
-/// it any other way would need a `TypeExpr::Nullable` node, and that holds an
-/// arena index this has no arena to mint.
-/// The substituted type NODE for a binding, or `None` where no node can stand
-/// for it.
-///
-/// A tuple is the `None`: `TypeExpr::Tuple` holds an `IdxRange` into a type
-/// arena, and there is none to mint here. Answering with an EMPTY range would be
-/// far worse than answering nothing -- `tyid_tuple_ret_shape` would read a
-/// 0-slot tuple and `unit_ty` would read the binding as unit, both silently. The
-/// caller falls back to the unsubstituted generic, which is exactly what it saw
-/// before tuples reified at all; the consumers that need a tuple's slots read
-/// the binding directly through [`mono_ret_slot`].
-///
-/// `any`, unit, `never` and a function type answer `None` on the same terms.
-/// They are perfectly good [`Vec<MonoTy>`] slots -- identity names them -- but the
-/// arena has no node to spell them with here, and inventing one would be a
-/// guess. The caller falls back to the unsubstituted generic, which is what a
-/// consumer reading a CONSTRUCTOR or a NOMINAL wants anyway.
-pub(crate) fn mono_type_node(ty: &MonoTy) -> Option<TypeExpr> {
-    Some(match ty {
-        MonoTy::Nullable(inner) => return mono_type_node(inner),
-        MonoTy::Tuple(_) => return None,
-        MonoTy::Any | MonoTy::Unit | MonoTy::Never | MonoTy::Function { .. } => return None,
-        MonoTy::App { ctor, .. } => TypeExpr::App {
-            ctor: match ctor {
-                MonoCtor::Array => TypeCtor::Array,
-                MonoCtor::Map => TypeCtor::Map,
-                MonoCtor::Nominal(name) => TypeCtor::Nominal(*name),
-            },
-            params: IdxRange::new_empty(),
-        },
-        MonoTy::Int => TypeExpr::Builtin(BuiltinTy::Int),
-        MonoTy::Float => TypeExpr::Builtin(BuiltinTy::Float),
-        MonoTy::Bool => TypeExpr::Builtin(BuiltinTy::Bool),
-        MonoTy::String => TypeExpr::Builtin(BuiltinTy::String),
-    })
-}
-
 /// The [`RetSlot`] of a binding, read straight off the reified type.
 ///
 /// The counterpart to [`ret_slot`] for the one case that has no type node to go
@@ -1672,6 +1627,52 @@ pub(crate) fn mono_ret_slot(ws: &Workspace, ty: &MonoTy) -> RetSlot {
 pub(crate) fn mono_tuple_shape(ws: &Workspace, parts: &[MonoTy]) -> TupleRetShape {
     let slots = parts.iter().map(|part| mono_ret_slot(ws, part)).collect();
     TupleRetShape { slots, nullable: false }
+}
+
+pub(crate) fn mono_value_shape(ws: &Workspace, ty: &MonoTy) -> Option<ValueShape> {
+    let (payload, nullable) = ty.peel_nullable();
+    let MonoTy::App { ctor: MonoCtor::Nominal(name), .. } = payload else {
+        return None;
+    };
+    if nullable {
+        sig_shape_of_nullable_nominal(ws, *name)
+    } else {
+        value_shape_of_nominal(ws, *name)
+    }
+}
+
+pub(crate) fn mono_nobox_value_shape(ws: &Workspace, ty: &MonoTy) -> Option<ValueShape> {
+    let (payload, nullable) = ty.peel_nullable();
+    let MonoTy::App { ctor: MonoCtor::Nominal(name), .. } = payload else {
+        return None;
+    };
+    is_nobox_nominal(ws, *name).then(|| {
+        if nullable {
+            sig_shape_of_nullable_nominal(ws, *name)
+        } else {
+            sig_shape_of_nominal(ws, *name)
+        }
+    })?
+}
+
+pub(crate) fn mono_tuple_ret_shape(ws: &Workspace, ty: &MonoTy) -> Option<TupleRetShape> {
+    let (parts, nullable) = match ty {
+        MonoTy::Tuple(parts) => (parts.as_slice(), false),
+        MonoTy::Nullable(inner) => {
+            let MonoTy::Tuple(parts) = inner.as_ref() else { return None };
+            (parts.as_slice(), true)
+        }
+        _ => return None,
+    };
+    let shape = TupleRetShape { slots: parts.iter().map(|part| mono_ret_slot(ws, part)).collect(), nullable };
+    (shape.splats() || !nullable).then_some(shape)
+}
+
+pub(crate) fn mono_sig_param_slot(ws: &Workspace, ty: &MonoTy) -> RetSlot {
+    mono_value_shape(ws, ty)
+        .map(RetSlot::Leaves)
+        .or_else(|| mono_tuple_ret_shape(ws, ty).filter(TupleRetShape::splats).map(RetSlot::Nested))
+        .unwrap_or(RetSlot::Opaque)
 }
 
 /// The concrete binding for `ty` under `enclosing`, or `None` when no concrete
@@ -2287,8 +2288,8 @@ impl TupleRetShape {
 /// boxed table (and `nil`), byte-for-byte the pre-existing ABI. THE declared-type
 /// entry point: `TupleRetShape::nullable` is set here and nowhere else.
 pub(crate) fn tuple_ret_shape(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> Option<TupleRetShape> {
-    // A generic bound to a tuple has no type node to read (see
-    // `mono_type_node`), so its slots come off the binding itself. Only here:
+    // A generic bound to a tuple has no source node for its concrete children,
+    // so its slots come off the binding itself. Only here:
     // this is the sole consumer that needs a tuple's arity, and answering it
     // from the binding keeps `ty_node` honest about what it cannot mint.
     if let Some(TypeExpr::Generic(var, _)) = static_ty(ws, ty) {
@@ -2330,9 +2331,8 @@ pub(crate) fn tuple_ret_shape(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> Op
 /// specialized at a value element splits `E` into leaf cells there
 /// (`MirFunc::bound_next_split`) and this only CHECKS the two agree. What is
 /// left is a generic bound to a TUPLE: it reifies and is in the key like any
-/// other type, but [`mono_type_node`] has no arena to mint its node in, so
-/// lowering saw an unsubstituted generic and left the element opaque for the
-/// rebuild below.
+/// other type, but its children live in the concrete plan rather than a source
+/// type arena, so the rebuild below owns that shape directly.
 ///
 /// The three cases are kept DISTINCT on purpose: "nothing to repack" and "a shape
 /// the flat repack cannot express" must not collapse into one `None`, or an
@@ -2348,9 +2348,8 @@ pub enum BoundNextElem {
     /// value into another field, silently.
     ///
     /// Reached only when the lowering left the element opaque, which for a
-    /// nullable value now means a TUPLE element (`zip`'s pair): a generic bound
-    /// to a tuple has no [`mono_type_node`], so lowering read it as an
-    /// unsubstituted generic.
+    /// nullable value now means a TUPLE element (`zip`'s pair): its concrete
+    /// tuple shape is carried by the binding plan rather than a source node.
     Unsupported,
 }
 
@@ -2968,37 +2967,4 @@ pub fn coroutine_yield_channel(ws: &Workspace, return_ty: TyId) -> Option<YieldC
 /// positional, then record leaves -- `value_shape` leaf order).
 pub fn yield_slot(i: usize) -> Ustr {
     Ustr::from(format!("__y{i}").as_str())
-}
-
-#[cfg(test)]
-mod adapter_tests {
-    use super::*;
-
-    /// A primitive binding's node is that primitive. `string` in particular is
-    /// NOT the recovery builtin: recovery poison means "inference failed", and
-    /// answering it for a valid `string` hands every consumer a type that names
-    /// no value. The other three are here as the controls that say this test is
-    /// about the mapping rather than about one arm.
-    #[test]
-    fn a_primitive_binding_maps_to_its_own_builtin() {
-        for (bound, want) in [
-            (MonoTy::Int, BuiltinTy::Int),
-            (MonoTy::Float, BuiltinTy::Float),
-            (MonoTy::Bool, BuiltinTy::Bool),
-            (MonoTy::String, BuiltinTy::String),
-        ] {
-            assert_eq!(
-                mono_type_node(&bound),
-                Some(TypeExpr::Builtin(want)),
-                "{bound:?} must substitute to its own builtin"
-            );
-        }
-        assert!(
-            !matches!(
-                mono_type_node(&MonoTy::String),
-                Some(TypeExpr::Builtin(BuiltinTy::Error))
-            ),
-            "a valid `string` binding must never be spelled as recovery poison"
-        );
-    }
 }

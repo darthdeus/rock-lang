@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 
 use skull_mir::mir::FuncRef;
 use skull_mir::shader_ir::ShaderStage;
+use skull_mir::concrete::ConcretePlans;
 
 use crate::instance_graph::Instance;
 
@@ -33,6 +34,7 @@ pub struct ShaderStageView {
 pub struct ShaderProgramView {
     pub program: ShaderProgram,
     pub stages: Vec<ShaderStageView>,
+    pub concrete_plans: ConcretePlans,
 }
 
 /// The graph-owned population for an explicit-root GLSL function library.
@@ -46,4 +48,5 @@ pub struct ShaderLibraryView {
     pub builtins: BTreeSet<Instance>,
     pub order: Vec<Instance>,
     pub dependencies: Vec<FuncRef>,
+    pub concrete_plans: ConcretePlans,
 }

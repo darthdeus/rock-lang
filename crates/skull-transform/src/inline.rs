@@ -28,8 +28,9 @@ use bone_semantic::hir::BodyOwner;
 use bone_semantic::inference::{BodyInference, Workspace};
 use bone_semantic::prelude::{BoundNext, BoundTree, CompilerError};
 use comfy_la_arena::Idx;
+use skull_mir::concrete::ConcretePlans;
 use skull_mir::instance::Instance;
-use skull_mir::lower::{lower_instance, BackendFnAbiPlan, ScalarCtx, SpecSubst};
+use skull_mir::lower::{lower_instance, lower_instance_with_plan, BackendFnAbiPlan, ScalarCtx, SpecSubst};
 use skull_mir::mir::*;
 use ustr::Ustr;
 
@@ -161,7 +162,12 @@ fn annotation_gate(has_inline: bool, has_pure: bool, size_heuristic: bool) -> Op
 /// eligible. Hard exclusions: extern, `inline(lua)`, `co fn`, lambda-bearing,
 /// self-recursive, or any reachable non-`Return`/`Goto`/`Branch`/`Switch`
 /// terminator (a reachable `Unreachable`/`Yield` would mis-lower to a bare
-fn classify(ws: &Workspace, scx: &ScalarCtx, inst: &Instance) -> Option<CalleeBody> {
+fn classify(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    inst: &Instance,
+    concrete_plans: Option<&ConcretePlans>,
+) -> Option<CalleeBody> {
     let fref = inst.func;
     let f = &ws.module(fref.module).functions[fref.func];
     if f.is_extern || f.inline_body.is_some() || f.is_coroutine {
@@ -181,8 +187,19 @@ fn classify(ws: &Workspace, scx: &ScalarCtx, inst: &Instance) -> Option<CalleeBo
     // A snapshot lowers the body as if hand-written for the concrete
     // instantiation (`docs/flatvec-plan.md`); a non-generic instance's is the
     // declaration's own body.
-    let abi = BackendFnAbiPlan::for_instance(ws, scx, inst);
-    let mut mf = lower_instance(ws, scx, inst).ok()?;
+    let (abi, mut mf) = match concrete_plans {
+        Some(plans) => {
+            let plan = plans.get(inst)?;
+            (
+                BackendFnAbiPlan::for_concrete_plan(ws, scx, plan),
+                lower_instance_with_plan(ws, scx, plan).ok()?,
+            )
+        }
+        None => (
+            BackendFnAbiPlan::for_instance(ws, scx, inst),
+            lower_instance(ws, scx, inst).ok()?,
+        ),
+    };
     // Cleanup first so the size gate reflects emitted size and the splice clones
     // a tight body (the caller re-runs cleanup over the whole result anyway).
     crate::cleanup(&mut mf);
@@ -305,9 +322,10 @@ fn get<'a>(
     ws: &Workspace,
     scx: &ScalarCtx,
     inst: &Instance,
+    concrete_plans: Option<&ConcretePlans>,
 ) -> Option<&'a CalleeBody> {
     if !cache.cands.contains_key(inst) {
-        let v = classify(ws, scx, inst);
+        let v = classify(ws, scx, inst, concrete_plans);
         cache.cands.insert(inst.clone(), v);
     }
     cache.cands[inst].as_ref()
@@ -452,6 +470,7 @@ fn find_site(
     self_ref: FuncRef,
     top: &HashSet<Idx<Block>>,
     resume: Option<(Idx<Block>, usize)>,
+    concrete_plans: Option<&ConcretePlans>,
 ) -> Result<Option<Site>, CompilerError> {
     let mut started = resume.is_none();
     for (bid, _) in func.blocks.iter() {
@@ -495,7 +514,7 @@ fn find_site(
                 _ => continue,
             };
             let cell_count = func.cells.len();
-            match get(cache, ws, scx, site.inst()) {
+            match get(cache, ws, scx, site.inst(), concrete_plans) {
                 // Decline a splice that would breach the per-caller cell budget
                 // (keep scanning — a smaller candidate may still fit). A SPECIALIZED
                 // call (non-empty spec key) is exempt: its args are splatted to
@@ -1252,7 +1271,26 @@ pub fn inline_functions(
     func: &mut MirFunc,
     cache: &mut InlineCache,
 ) -> Result<(HashSet<FuncRef>, Vec<SpliceRecord>), CompilerError> {
-    inline_functions_with_subst(ws, scx, self_ref, func, cache, &SpecSubst::default())
+    inline_functions_with_subst_and_plans(ws, scx, self_ref, func, cache, &SpecSubst::default(), None)
+}
+
+pub fn inline_functions_with_plans(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    self_ref: FuncRef,
+    func: &mut MirFunc,
+    cache: &mut InlineCache,
+    concrete_plans: &ConcretePlans,
+) -> Result<(HashSet<FuncRef>, Vec<SpliceRecord>), CompilerError> {
+    inline_functions_with_subst_and_plans(
+        ws,
+        scx,
+        self_ref,
+        func,
+        cache,
+        &SpecSubst::default(),
+        Some(concrete_plans),
+    )
 }
 
 pub fn inline_functions_with_subst(
@@ -1262,6 +1300,18 @@ pub fn inline_functions_with_subst(
     func: &mut MirFunc,
     cache: &mut InlineCache,
     caller_subst: &SpecSubst,
+) -> Result<(HashSet<FuncRef>, Vec<SpliceRecord>), CompilerError> {
+    inline_functions_with_subst_and_plans(ws, scx, self_ref, func, cache, caller_subst, None)
+}
+
+pub fn inline_functions_with_subst_and_plans(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    self_ref: FuncRef,
+    func: &mut MirFunc,
+    cache: &mut InlineCache,
+    caller_subst: &SpecSubst,
+    concrete_plans: Option<&ConcretePlans>,
 ) -> Result<(HashSet<FuncRef>, Vec<SpliceRecord>), CompilerError> {
     let mut spliced = HashSet::default();
     let mut records: Vec<SpliceRecord> = Vec::new();
@@ -1281,7 +1331,16 @@ pub fn inline_functions_with_subst(
     let mut resume: Option<(Idx<Block>, usize)> = None;
     let mut budget = MAX_INLINES_PER_FN;
     while budget > 0 {
-        let Some(site) = find_site(func, ws, scx, cache, self_ref, &top, resume)? else {
+        let Some(site) = find_site(
+            func,
+            ws,
+            scx,
+            cache,
+            self_ref,
+            &top,
+            resume,
+            concrete_plans,
+        )? else {
             break;
         };
         let pos = site.pos();
@@ -1489,6 +1548,7 @@ fn outer(x: int) -> int {
             &ws,
             &scx,
             &Instance::base(FuncRef { module: mid, func: fid }),
+            None,
         )
         .expect("the inline fixture must produce a candidate");
         let (bodies, trees) = resolved_tree_count(&candidate.func);

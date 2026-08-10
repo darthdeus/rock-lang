@@ -6,6 +6,15 @@ use crate::monoty::MonoTy;
 
 impl Builder<'_> {
     pub(crate) fn expr_is_flat_vec(&self, e: Idx<Expr>) -> bool {
+        if let Some(ty) = self.concrete_expr_ty(e) {
+            let (payload, _) = ty.peel_nullable();
+            return matches!(
+                payload,
+                MonoTy::App {
+                    ctor: crate::monoty::MonoCtor::Nominal(n), ..
+                } if n.as_str() == "FlatVec"
+            );
+        }
         matches!(self.expr_ty(e),
             Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. }) if n.as_str() == "FlatVec")
     }
@@ -146,6 +155,12 @@ impl Builder<'_> {
     ///   teeth without a population.
     pub(crate) fn concrete_ty(&self, e: Idx<Expr>) -> Result<Option<MonoTy>, CompilerError> {
         use crate::monoty::MonoTyReason as R;
+        if self.concrete_plan.is_some() {
+            return self
+                .concrete_expr_ty(e)
+                .map(Some)
+                .ok_or_else(|| self.gap_here("concrete plan has no type for this expression"));
+        }
         // Neither of these is a storage answer. A body being lowered without
         // inference, or an expression bone typed nothing for, is a
         // front-end/back-end disagreement -- answering "boxed" would pick a

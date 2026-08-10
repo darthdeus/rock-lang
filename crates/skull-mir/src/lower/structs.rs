@@ -2,6 +2,7 @@
 //! value-struct predicates the walk consults, enum-variant packing, swizzles,
 //! and the compile-time `@struct_expand` / `@shader_expand` expansions.
 use super::*;
+use crate::monoty::MonoTy;
 
 impl Builder<'_> {
     pub(crate) fn lower_exprs(
@@ -293,16 +294,21 @@ impl Builder<'_> {
     /// types return false (conservative).
     ///
     /// Nullability is asked through [`Self::is_nullable_ty`] and NOT off the
-    /// resolved node. An earlier spelling relied on "`resolve_tyid` chases
-    /// `Infer` but keeps `Nullable`", which held for a spelled-out `V?` and
-    /// stopped holding once a GENERIC could be bound to one: `ty_node` applies
-    /// the substitution and `mono_type_node` erases the `?`, so a `T` bound to
-    /// `BV2?` answered as a bare `BV2` and licensed SROA to rebuild an absent row
-    /// as `BV2_ct(nil, nil)`. `is_nullable_ty` reads `raw_ty_node` before the
-    /// substitution erases anything and consults the binding, which is why
-    /// `nobox_shape_of_ty` already routes this same question through it.
+    /// resolved node. The concrete slot is checked before structural source
+    /// lookup, so a generic bound to `BV2?` cannot be mistaken for a bare `BV2`
+    /// and license SROA to rebuild an absent row as `BV2_ct(nil, nil)`.
     pub(crate) fn binding_is_nonnull_value_struct(&self, b: Idx<BindingInfo>) -> bool {
         let Some(ty) = self.binding_ty(b) else { return false };
+        if let Some(concrete) = self.concrete_ty_id(ty) {
+            let (payload, nullable) = concrete.peel_nullable();
+            return !nullable
+                && matches!(
+                    payload,
+                    MonoTy::App {
+                        ctor: crate::monoty::MonoCtor::Nominal(name), ..
+                    } if self.is_value_struct(name.to_owned().into())
+                );
+        }
         if self.is_nullable_ty(ty) {
             return false;
         }

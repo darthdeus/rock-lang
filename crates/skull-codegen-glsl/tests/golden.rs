@@ -75,6 +75,26 @@ fn function_library_preserves_no_version_contract() {
 }
 
 #[test]
+fn function_library_requires_concrete_body_plans() {
+    let src = r#"
+        @pure fn identity<T>(value: T) -> T { return value }
+        @pure fn root(value: float) -> float { return identity(value) }
+    "#;
+    let mut modules = STDLIB.clone();
+    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>" )).expect("parse"));
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    let root = skull_codegen_glsl::resolve_root(&ws, mid, "root").expect("root");
+    let session = skull_codegen_glsl::shader_library_session(&ws, vec![root]).expect("session");
+    let mut poisoned = session.view.clone();
+    assert!(!poisoned.concrete_plans.is_empty(), "fixture must retain a concrete plan population");
+    poisoned.concrete_plans.clear();
+    let error = skull_codegen_glsl::emit_shader_library_with_view(&ws, &session.scx, &poisoned)
+        .expect_err("emission must consume the concrete plan population");
+    assert!(error.message.contains("concrete plan"), "unexpected error: {}", error.message);
+}
+
+#[test]
 fn scalar_remap() {
     let src = r#"
         @pure fn remap(value: float, min1: float, max1: float, min2: float, max2: float) -> float {

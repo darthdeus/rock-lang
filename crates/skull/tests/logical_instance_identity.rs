@@ -47,7 +47,7 @@ fn census_of(src: &str) -> SiteJoinCensus {
     let ws = check(src);
     let mut g = graph_of(&ws);
     let bodies = skull::concrete_body::build(&ws, &mut g);
-    let scx = ScalarCtx::new(&ws);
+    let scx = ScalarCtx::new(&ws).sharing(g.interner().clone());
     site_join::census(&ws, &scx, &g, &bodies)
 }
 

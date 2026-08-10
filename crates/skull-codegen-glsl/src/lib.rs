@@ -37,7 +37,8 @@ use skull_mir::gpu_layout::{
     texture_slots, uniform_array_block, vertex_attrs,
 };
 use skull_mir::intrinsics::{Emission, IntrinsicEntry, IntrinsicTable};
-use skull_mir::lower::{lower_instance, ScalarCtx, SpecSubst};
+use skull_mir::concrete::ConcretePlans;
+use skull_mir::lower::{lower_instance_with_plan, ScalarCtx, SpecSubst};
 use skull_mir::instance::Instance;
 use skull_mir::monoty::MonoInterner;
 use skull_mir::monoty::{MonoCtor, MonoTy};
@@ -2028,12 +2029,14 @@ pub fn realize_shader_library_view(
             dependencies.push(instance.func);
         }
     }
+    let concrete_plans = skull_graph::concrete_body::build(ws, graph).plans;
     Ok(ShaderLibraryView {
         roots: root_instances,
         retained,
         builtins,
         order,
         dependencies,
+        concrete_plans,
     })
 }
 
@@ -2231,7 +2234,8 @@ fn realize_shader_program_view(
             ShaderStage::Fragment,
         )],
     };
-    Ok(ShaderProgramView { program, stages })
+    let concrete_plans = skull_graph::concrete_body::build(ws, graph).plans;
+    Ok(ShaderProgramView { program, stages, concrete_plans })
 }
 
 /// Build a registered-program view from the shared graph. The returned session
@@ -2327,7 +2331,10 @@ pub fn emit_shader_library_with_view(
         let f = &ws.module(instance.fref().module).functions[instance.fref().func];
         let subst = instance.subst(ws, scx.interner());
         check_tier0_signature_spec(ws, &subst, f)?;
-        let body = lower_instance(ws, scx, &instance.inst).map_err(|e| {
+        let plan = view.concrete_plans.get(raw).ok_or_else(|| {
+            err(f.name_span, format!("shader profile: no concrete plan for `{}`", f.name))
+        })?;
+        let body = lower_instance_with_plan(ws, scx, plan).map_err(|e| {
             err(
                 f.name_span,
                 format!("shader profile: `{}` cannot lower for GLSL: {}", f.name, e.message),
@@ -3423,6 +3430,7 @@ fn plan_stage_from_view(
     scx: &ScalarCtx,
     view: &ShaderStageView,
     expected: Stage,
+    concrete_plans: &ConcretePlans,
 ) -> Result<StagePlan, CompilerError> {
     let expected_ir = match expected {
         Stage::Vertex => ShaderStage::Vertex,
@@ -3452,7 +3460,13 @@ fn plan_stage_from_view(
 
     let entry = ShaderInstance::new(view.entry.clone());
     let entry_f = &ws.module(entry.fref().module).functions[entry.fref().func];
-    let entry_body = lower_instance(ws, scx, &entry.inst).map_err(|e| {
+    let entry_plan = concrete_plans.get(&view.entry).ok_or_else(|| {
+        err(
+            entry_f.name_span,
+            format!("shader profile: no concrete plan for `{}`", entry_f.name),
+        )
+    })?;
+    let entry_body = lower_instance_with_plan(ws, scx, entry_plan).map_err(|e| {
         err(
             entry_f.name_span,
             format!(
@@ -3484,7 +3498,10 @@ fn plan_stage_from_view(
         let f = &ws.module(helper.fref().module).functions[helper.fref().func];
         let subst = helper.subst(ws, scx.interner());
         check_tier0_signature_spec(ws, &subst, f)?;
-        let body = lower_instance(ws, scx, &helper.inst).map_err(|e| {
+        let helper_plan = concrete_plans.get(raw).ok_or_else(|| {
+            err(f.name_span, format!("shader profile: no concrete plan for `{}`", f.name))
+        })?;
+        let body = lower_instance_with_plan(ws, scx, helper_plan).map_err(|e| {
             err(
                 f.name_span,
                 format!("shader profile: `{}` cannot lower for GLSL: {}", f.name, e.message),
@@ -3654,8 +3671,9 @@ fn plan_shader_entry_from_view(
     ws: &Workspace,
     scx: &ScalarCtx,
     view: &ShaderStageView,
+    concrete_plans: &ConcretePlans,
 ) -> Result<EntryPlan, CompilerError> {
-    plan_shader_entry_inner(ws, scx, view.entry.func, view)
+    plan_shader_entry_inner(ws, scx, view.entry.func, view, concrete_plans)
 }
 
 fn plan_shader_entry_inner(
@@ -3663,6 +3681,7 @@ fn plan_shader_entry_inner(
     scx: &ScalarCtx,
     fref: FuncRef,
     stage_view: &ShaderStageView,
+    concrete_plans: &ConcretePlans,
 ) -> Result<EntryPlan, CompilerError> {
     let f = &ws.module(fref.module).functions[fref.func];
     match shader_stage(f) {
@@ -3679,7 +3698,7 @@ fn plan_shader_entry_inner(
     // and is not a tier-0 leaf (asking the library check of an entry rejected
     // 1,539 real shaders).
     let class = classify_entry(ws, f)?;
-    let stage = plan_stage_from_view(ws, scx, stage_view, Stage::Fragment)?;
+    let stage = plan_stage_from_view(ws, scx, stage_view, Stage::Fragment, concrete_plans)?;
     let interface = ShaderInterfacePlan {
         stages: vec![IrStage::Fragment],
         uniform_groups: class
@@ -3743,7 +3762,7 @@ pub fn check_entry_profile_with_view(
                 "shader graph/view has no fragment stage for a single-entry shader".to_string(),
             )
         })?;
-    plan_shader_entry_from_view(ws, scx, stage).map(|_| ())
+    plan_shader_entry_from_view(ws, scx, stage, &view.concrete_plans).map(|_| ())
 }
 
 pub fn emit_shader_entry_with_dependencies(
@@ -3781,7 +3800,7 @@ pub fn emit_shader_entry_with_view(
                 "shader graph/view has no fragment stage for a single-entry shader".to_string(),
             )
         })?;
-    let plan = plan_shader_entry_from_view(ws, scx, stage)?;
+    let plan = plan_shader_entry_from_view(ws, scx, stage, &view.concrete_plans)?;
     render_shader_entry(ws, scx.interner(), &plan, profile)
 }
 
@@ -4810,6 +4829,7 @@ fn plan_shader_pipeline_from_view(
         vertex.entry.func,
         fragment.entry.func,
         (vertex, fragment),
+        &view.concrete_plans,
     )
 }
 
@@ -4819,6 +4839,7 @@ fn plan_shader_pipeline_inner(
     vfref: FuncRef,
     ffref: FuncRef,
     stage_views: (&ShaderStageView, &ShaderStageView),
+    concrete_plans: &ConcretePlans,
 ) -> Result<PipelinePlan, CompilerError> {
     let vf = &ws.module(vfref.module).functions[vfref.func];
     let ff = &ws.module(ffref.module).functions[ffref.func];
@@ -4939,8 +4960,8 @@ fn plan_shader_pipeline_inner(
         vf.name_span,
     )?;
 
-    let vert = plan_stage_from_view(ws, scx, stage_views.0, Stage::Vertex)?;
-    let frag = plan_stage_from_view(ws, scx, stage_views.1, Stage::Fragment)?;
+    let vert = plan_stage_from_view(ws, scx, stage_views.0, Stage::Vertex, concrete_plans)?;
+    let frag = plan_stage_from_view(ws, scx, stage_views.1, Stage::Fragment, concrete_plans)?;
     reject_position_read(ws, &frag.ir.body, frag.ir.body.params[fshape.varyings_param], ff.name_span)?;
 
     Ok(PipelinePlan { vshape, fshape, vert, frag, interface, abi })
