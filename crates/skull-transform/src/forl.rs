@@ -63,7 +63,7 @@ use comfy_la_arena::Idx;
 use skull_mir::mir::*;
 
 /// Rewrite every tagged, matching desugared-iterator loop in `func` into the
-/// codegen `CountedLoop` shape. Run after `inline_functions` + `cleanup` (the
+/// codegen `CountedLoop` shape. Run after `inline_functions_with_plans` + `cleanup` (the
 /// slot only exists as a scalar cell once SROA has peeled the cursor struct).
 pub fn recover_counted_loops(ws: &Workspace, func: &mut MirFunc) {
     if func.for_iter_headers.is_empty() {

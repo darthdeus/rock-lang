@@ -1283,7 +1283,7 @@ fn collect_callee_frefs(mf: &MirFunc, out: &mut FxHashSet<FuncRef>) {
 /// coroutine object rather than running the body, which is why specialization
 /// here is delivered by a standalone definition instead of a splice. That is the
 /// whole difference from an ordinary specialization, and it is why this is not
-/// [`prepare_instance_body`] -- there is no inline pass, no `convert_closures`
+/// [`prepare_instance_body_with_plans`] -- there is no inline pass, no `convert_closures`
 /// (the step's lambdas convert framed, inside `emit_coroutine`) and no FORL
 /// recovery (codegen's relooper does it).
 ///

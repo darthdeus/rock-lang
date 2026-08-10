@@ -9,7 +9,7 @@
 //! though they are not calls.
 //!
 //! **The phase is POST-TRANSFORM, and that is load-bearing.** Emission renders
-//! the body that comes out of [`crate::mir_emit::prepare_instance_body`] --
+//! the body that comes out of [`crate::mir_emit::prepare_instance_body_with_plans`] --
 //! inlined, cleaned, closure-converted, FORL-recovered -- so that is the only
 //! body whose calls are the ones actually emitted. Measuring the raw lowering
 //! output would count calls inlining deletes and miss calls it splices in, and
@@ -628,7 +628,7 @@ fn has_lowered_body(ws: &Workspace, fref: skull_mir::mir::FuncRef) -> bool {
 /// mutation that stops at [`check_callee`] proves the comparison rather than
 /// that the corrupted record travels through `reachable_call_rows` and lands in
 /// a census bucket. `mf` must already be through
-/// [`crate::mir_emit::prepare_instance_body`], which is the phase the join is
+/// [`crate::mir_emit::prepare_instance_body_with_plans`], which is the phase the join is
 /// measured at.
 pub fn measure_prepared_body(
     ws: &Workspace,

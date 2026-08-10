@@ -96,7 +96,7 @@ struct CalleeBody {
 }
 
 /// One splice the inliner performed, for the `skull-inline-stats` diagnostic
-/// (`inline_functions` returns these alongside its dependency set). Records the
+/// (`inline_functions_with_plans` returns these alongside its dependency set). Records the
 /// callee whose body was copied in, its shape, and how much code it added.
 pub struct SpliceRecord {
     pub callee: FuncRef,

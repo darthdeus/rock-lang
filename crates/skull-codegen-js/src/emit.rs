@@ -4549,7 +4549,7 @@ fn nullary_main(ws: &Workspace, user_mid: bone_semantic::prelude::ModuleId) -> O
 }
 
 /// A `self_ref` for inlining a body that is NOT a function (a `deco` def): any
-/// workspace `FuncRef` the body does not itself call, so [`inline_functions`]'s
+/// workspace `FuncRef` the body does not itself call, so [`inline_functions_with_plans`]'s
 /// self-call skip (`fref != self_ref`) never suppresses a callee the body wants
 /// inlined. Deco bodies never call a decorated user fn, but computing the actual
 /// call set makes the choice provably safe regardless.
