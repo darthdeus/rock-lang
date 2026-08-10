@@ -1,10 +1,9 @@
 //! Phase-4 GLSL corpus oracle.
 //!
-//! The private GLSL emitter is the expected side for this landing. The other
-//! side is the shared InstanceGraph/ShaderArtifactView population, compared
-//! per registered program and stage before production ownership moves. The
-//! committed row digest is an explicit canonical encoding; it never hashes a
-//! `Debug` rendering of a plan.
+//! The committed canonical rows are the independent expected side for the
+//! graph/view driver. Each live row also compares the compatibility emission
+//! against `emit_shader_*_with_view`; the row encoding is explicit and never
+//! hashes a `Debug` rendering of a plan.
 
 use rock_cli::glsl_test::validate_workspace;
 use skull_codegen_glsl::{BlockWire, GlslProfile, ShaderAbiPlan};
@@ -176,6 +175,13 @@ impl Canonical {
         self.u32(values.len() as u32);
         for value in values {
             self.string(value);
+        }
+    }
+
+    fn nested_strings(&mut self, values: &[Vec<String>]) {
+        self.u32(values.len() as u32);
+        for value in values {
+            self.strings(value);
         }
     }
 }
@@ -767,6 +773,13 @@ fn canonical_fingerprint(row: &ShaderRow) -> u64 {
     out.string(&row.key.shader);
     out.string(row.key.profile);
     out.u64(row.stage_sections as u64);
+    out.strings(&row.graph_roots);
+    out.strings(&row.graph_helpers);
+    out.strings(&row.entries);
+    out.nested_strings(&row.stage_populations);
+    out.strings(&row.helper_instances);
+    out.strings(&row.builtin_instances);
+    out.nested_strings(&row.emission_order);
     out.u64(row.glsl_fingerprint);
     out.u64(row.interface_fingerprint);
     out.u64(row.abi_fingerprint);
