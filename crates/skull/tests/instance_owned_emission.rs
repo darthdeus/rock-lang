@@ -274,18 +274,29 @@ fn main() {
     assert!(generic_count >= 2, "expected >=2 generic instances (identity<int>, identity<string>), got {generic_count}");
     assert!(nongeneric_count >= 1, "expected >=1 non-generic instance, got {nongeneric_count}");
 
-    // Every retained Rock instance's symbol names an emitted Lua definition --
-    // the transitively-reached leaf included, so a root-only implementation
-    // fails this loop.
+    // Retention and standalone delivery are separate. Roots and function-value
+    // targets must have definitions; a residual call below is the other
+    // delivery obligation. Fully spliced or bounded instances may be retained
+    // without a standalone definition.
     let defs = definition_symbols(&emit.lua);
     let mut checked_transitive_leaf = false;
     let mut checked_residual_calls = 0;
-    for inst in &view.instances {
+    let mut checked_delivery = 0;
+    for inst in view
+        .declared_roots
+        .iter()
+        .chain(view.fn_value_targets.iter())
+        .filter(|inst| view.instances.contains(*inst))
+    {
         let sym = view.symbols.get(inst).expect("every retained instance has a symbol");
         assert!(
             defs.contains(sym),
-            "retained instance `{sym}` has no emitted definition -- production is not driven by the graph/view population"
+            "delivered instance `{sym}` has no emitted definition -- production is not driven by the graph/view population"
         );
+        checked_delivery += 1;
+    }
+    assert!(checked_delivery > 0, "fixture defect: no root or function-value delivery population");
+    for inst in &view.instances {
         if graph.logical_symbol(&ws, inst).contains("leaf_only_reached_via_helper") {
             checked_transitive_leaf = true;
         }
