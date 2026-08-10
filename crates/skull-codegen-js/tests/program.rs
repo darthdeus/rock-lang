@@ -81,7 +81,7 @@ fn application_line_content() {
     assert!(beta_app.trim_end().ends_with(", null);"), "defaulted stage -> null: {beta_app}");
 }
 
-/// A specialization whose ONLY caller is a decorator body still gets emitted.
+/// A concrete operation whose ONLY caller is a decorator body is still served.
 ///
 /// A `deco` body is a third body kind beside plain fns and global initializers,
 /// and it went through a hand-written subset of the shared discovery step --
@@ -90,9 +90,9 @@ fn application_line_content() {
 /// spelled its specialized name, and emission rejected with `JS subset: no
 /// specialized body emitted`.
 ///
-/// `main` deliberately does NOT push, so the demand has exactly one origin. The
-/// assertion is that the DEFINITION exists, not merely that emission succeeded:
-/// a build that dropped the call would also not reject.
+/// `main` deliberately does NOT push, so the demand has exactly one origin.
+/// Normal inlining may consume the specialized call entirely; in that case the
+/// decorator body must contain the concrete append rather than silently losing it.
 #[test]
 fn a_specialization_demanded_only_by_a_decorator_body_is_emitted() {
     let ws = ws_with(
@@ -105,9 +105,6 @@ fn main() { print("{XS.len}") }
 "#,
     );
     let js = emit_program(&ws);
-    assert!(
-        js.contains("function push_"),
-        "no `push` definition emitted for the demand the deco body is the only \
-         origin of:\n{js}"
-    );
+    let body = &js[js.find("function __deco_reg(").expect("decorator body")..];
+    assert!(body.contains("_data") && body.contains("len"), "decorator lost the concrete push: {body}");
 }

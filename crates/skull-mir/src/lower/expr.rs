@@ -40,6 +40,9 @@ impl Builder<'_> {
                 .unwrap_or(self.ws.module(m).functions[f].name_span);
             let witness = match self.next_call_spec(iter_ref, &generics, span)? {
                 Some(key) => crate::instance::Instance::intern(self.scx.interner(), iter_ref, key),
+                None if self.ws.module(m).functions[f].generics.is_empty() => {
+                    crate::instance::Instance::intern(self.scx.interner(), iter_ref, Vec::new())
+                }
                 None => crate::instance::Instance::base(iter_ref),
             };
             let call = self.with_site_op(crate::site::SiteOp::ImplicitIter, |b| {
@@ -58,19 +61,22 @@ impl Builder<'_> {
             // unstated, which the census reports as `callee-no-instance` -- it
             // was invisible only because the census runs POST-TRANSFORM and a
             // splice removed the site before it could be examined.
-            if let Some(inf) = self.inf {
-                if let Some(subst) = crate::lower::shape::witness_instance_subst(
+            let iter_decl = &self.ws.module(m).functions[f];
+            if iter_decl.generics.is_empty() || !witness.args.is_empty() {
+                crate::site::record_call_owner(
+                    &mut self.f,
                     self.ws,
-                    inf,
-                    iter_ref,
-                    &generics,
-                    self.subst(),
-                )? {
-                    self.f
-                        .callee_instances
-                        .insert(call, crate::site::OwnerInstance { func: iter_ref, subst });
-                }
+                    self.scx.interner(),
+                    call,
+                    &witness,
+                );
             }
+            let abi = if iter_decl.generics.is_empty() || !witness.args.is_empty() {
+                crate::lower::BackendFnAbiPlan::for_instance(self.ws, self.scx, &witness)
+            } else {
+                self.callee_abi_plan(iter_ref, None, &SpecSubst::default())
+            };
+            self.f.call_abi_plans.insert(call, abi);
             self.cur_expr = outer_expr;
             return Ok(call);
         }

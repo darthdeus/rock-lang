@@ -196,8 +196,18 @@ impl Builder<'_> {
                                 iter_ref,
                                 key,
                             ),
+                            None if self.ws.module(m).functions[f].generics.is_empty() => {
+                                crate::instance::Instance::intern(
+                                    self.scx.interner(),
+                                    iter_ref,
+                                    Vec::new(),
+                                )
+                            }
                             None => crate::instance::Instance::base(iter_ref),
                         }
+                    }
+                    None if self.ws.module(m).functions[f].generics.is_empty() => {
+                        crate::instance::Instance::intern(self.scx.interner(), iter_ref, Vec::new())
                     }
                     None => crate::instance::Instance::base(iter_ref),
                 };
@@ -217,20 +227,18 @@ impl Builder<'_> {
                 if !witness.args.is_empty() {
                     self.f.spec_bindings.insert(call, witness.clone());
                 }
-                if let (Some(inf), Some(w)) = (self.inf, info.iter.as_ref()) {
-                    if let Some(subst) = crate::lower::shape::witness_instance_subst(
+                if self.ws.module(m).functions[f].generics.is_empty() || !witness.args.is_empty() {
+                    crate::site::record_call_owner(
+                        &mut self.f,
                         self.ws,
-                        inf,
-                        iter_ref,
-                        &w.generics,
-                        self.subst(),
-                    )? {
-                        self.f.callee_instances.insert(
-                            call,
-                            crate::site::OwnerInstance { func: iter_ref, subst },
-                        );
-                    }
+                        self.scx.interner(),
+                        call,
+                        &witness,
+                    );
                 }
+                self.f
+                    .call_abi_plans
+                    .insert(call, crate::lower::BackendFnAbiPlan::for_instance(self.ws, self.scx, &witness));
                 call
             }
             None => self.lower_expr(iter_expr)?,
@@ -293,7 +301,7 @@ impl Builder<'_> {
         let it_load = self.emit_cur(Inst::Load(it_cell));
         let dests: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
         match &info.next {
-            BoundNext::Concrete { func: (m, f), sub, next_generics, .. } => {
+            BoundNext::Concrete { func: (m, f), sub, .. } => {
                 let func = FuncRef { module: *m, func: *f };
                 // The synthesized `next` call has no expr to key
                 // `call_generic_bindings` by, so its instantiation comes from
@@ -313,23 +321,33 @@ impl Builder<'_> {
                 if !sub.is_empty() {
                     self.f.bound_trees.insert(call, sub.clone());
                 }
-                if let Some(key) = spec {
-                    let inst =
-                        crate::instance::Instance::intern(self.scx.interner(), func, key);
-                    self.f.spec_bindings.insert(call, inst);
+                let callee_decl = &self.ws.module(func.module).functions[func.func];
+                let owner = spec.as_ref().map(|key| {
+                    crate::instance::Instance::intern(self.scx.interner(), func, key.clone())
+                });
+                if spec.is_some() {
+                    self.f.spec_bindings.insert(call, owner.clone().expect("spec has owner"));
                 }
-                if let Some(inf) = self.inf {
-                    if let Some(subst) = crate::lower::shape::witness_instance_subst(
+                if callee_decl.generics.is_empty() || owner.is_some() {
+                    let owner = owner.unwrap_or_else(|| {
+                        crate::instance::Instance::intern(self.scx.interner(), func, Vec::new())
+                    });
+                    crate::site::record_call_owner(
+                        &mut self.f,
                         self.ws,
-                        inf,
-                        func,
-                        next_generics,
-                        self.subst(),
-                    )? {
-                        self.f
-                            .callee_instances
-                            .insert(call, crate::site::OwnerInstance { func, subst });
-                    }
+                        self.scx.interner(),
+                        call,
+                        &owner,
+                    );
+                    self.f.call_abi_plans.insert(
+                        call,
+                        crate::lower::BackendFnAbiPlan::for_instance(self.ws, self.scx, &owner),
+                    );
+                } else {
+                    self.f.call_abi_plans.insert(
+                        call,
+                        self.callee_abi_plan(func, None, &SpecSubst::default()),
+                    );
                 }
             }
             BoundNext::CallerGeneric(gidx) => {

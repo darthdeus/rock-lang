@@ -732,6 +732,11 @@ pub struct MirFunc {
     /// made a declined specialization indistinguishable from an unknown callee.
     pub callee_instances:
         bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::site::OwnerInstance>,
+    /// The ABI plan the call lowering used for each direct call. This is kept
+    /// beside identity because reconstructing it from a later, possibly mutated
+    /// owner would make an ABI corruption look self-consistent.
+    pub call_abi_plans:
+        bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::lower::BackendFnAbiPlan>,
     /// Placeholder [`Inst::CallBoundMulti`]s whose element the LOWERING already
     /// split into leaf cells: `dests` is sized to the real return arity and the
     /// loop pattern is bound to the leaves, so the splice must leave both alone.
@@ -815,6 +820,7 @@ impl MirFunc {
             inst_spans: Default::default(),
             call_sites: Default::default(),
             callee_instances: Default::default(),
+            call_abi_plans: Default::default(),
             fn_value_symbols: Default::default(),
             hoisted_fn_globals: Vec::new(),
             site_owners: Vec::new(),

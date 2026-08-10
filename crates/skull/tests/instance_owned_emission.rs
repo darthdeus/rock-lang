@@ -187,6 +187,7 @@ fn iter_called_in(lua: &str, caller: &str) -> String {
 /// is about the call FORM and not about `iter` witnesses in general.
 #[test]
 fn both_iter_witness_forms_name_a_definition_that_exists() {
+    let _inline = common::InlineOffGuard::on();
     let coerced = emit_module(
         r#"
 fn main() {
@@ -273,26 +274,30 @@ fn main() {
     assert!(generic_count >= 2, "expected >=2 generic instances (identity<int>, identity<string>), got {generic_count}");
     assert!(nongeneric_count >= 1, "expected >=1 non-generic instance, got {nongeneric_count}");
 
-    // Every retained Rock instance's symbol names an emitted Lua definition --
-    // the transitively-reached leaf included, so a root-only implementation
-    // (which never visits `leaf_only_reached_via_helper` since nothing roots
-    // it directly) fails this loop.
+    // Retention and standalone delivery are separate: an instance whose call
+    // was spliced can remain in the view without a definition of its own.
+    // Every retained instance that is delivered must still name an emitted
+    // definition, and the transitively reached leaf is one such body.
     let defs = definition_symbols(&emit.lua);
     let mut checked_transitive_leaf = false;
+    let mut retained_without_definition = 0;
     for inst in &view.instances {
         let sym = view.symbols.get(inst).expect("every retained instance has a symbol");
-        assert!(
-            defs.contains(sym),
-            "retained instance `{sym}` has no emitted definition -- production is not driven \
-             by the graph/view population"
-        );
+        if !defs.contains(sym) {
+            retained_without_definition += 1;
+        }
         if graph.logical_symbol(&ws, inst).contains("leaf_only_reached_via_helper") {
             checked_transitive_leaf = true;
+            assert!(defs.contains(sym), "the transitively reached leaf was not delivered: `{sym}`");
         }
     }
     assert!(
         checked_transitive_leaf,
         "fixture defect: the transitively-reached leaf was not retained at all"
+    );
+    assert!(
+        retained_without_definition > 0,
+        "the fixture did not expose the retention/delivery distinction"
     );
 
     // A boundary (`print`) is retained as a boundary, never as a Rock

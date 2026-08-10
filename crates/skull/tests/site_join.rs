@@ -13,6 +13,8 @@ use skull::instance_graph::{self, InstanceGraph};
 use skull::site_join::{self, SiteJoinCensus, Unjoined};
 use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::{Inst, MirFunc};
+use skull_mir::monoty::{MonoCtor, MonoTy};
+use skull_mir::site::OwnerInstance;
 use skull_mir::site::{Site, SiteDomain, SiteOp};
 use ustr::Ustr;
 
@@ -693,6 +695,157 @@ fn main() { print("{top()}") }
     assert_eq!(c.unjoined.get(&Unjoined::OwnerNotInTable), None, "{c:?}");
 }
 
+/// Candidate identity comes from `callee_instances`, not from the optional
+/// standalone-delivery entry. Removing delivery from a concrete value call must
+/// still splice that instance, and the spliced site's owner must remain the
+/// callee declaration rather than the caller's slot.
+#[test]
+fn concrete_inline_uses_owner_when_delivery_is_absent() {
+    let ws = check(
+        r#"
+@inline
+fn wrap<T>(x: T) -> T { return id2(x) }
+fn id2<T>(x: T) -> T { return x }
+fn top() -> float {
+    let b = wrap(Vec2 { x: 1, y: 2 })
+    return b.x
+}
+fn main() { print("{top()}") }
+"#,
+    );
+    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
+    let (fid, f) = ws
+        .module(mid)
+        .functions
+        .iter()
+        .find(|(_, f)| f.name.as_str() == "top")
+        .expect("top");
+    let fref = skull_mir::mir::FuncRef { module: mid, func: fid };
+    let scx = ScalarCtx::new(&ws);
+    let mut mf = skull_mir::lower::lower_instance(
+        &ws,
+        &scx,
+        &skull_mir::instance::Instance::base(fref),
+    )
+    .expect("lower top");
+    let (call, owner) = mf
+        .insts
+        .iter()
+        .find_map(|(id, inst)| match inst {
+            Inst::Call { func, .. } | Inst::CallMulti { func, .. }
+                if ws.module(func.module).functions[func.func].name.as_str() == "wrap" =>
+            {
+                Some((id, mf.callee_instances.get(&id).cloned().expect("wrap owner")))
+            }
+            _ => None,
+        })
+        .expect("concrete wrap call");
+    assert!(!owner.subst.is_empty(), "the fixture must have a concrete wrap owner: {owner:?}");
+    assert!(mf.spec_bindings.remove(&call).is_some(), "the fixture must have delivery to remove");
+
+    let mangled = skull_mir::mangle::mangle_fn(&ws, f);
+    let mut cache = skull_transform::InlineCache::default();
+    skull::mir_emit::prepare_instance_body(
+        &ws,
+        &scx,
+        fref,
+        &Default::default(),
+        &mangled,
+        &mut mf,
+        &mut cache,
+    )
+    .expect("prepare");
+
+    let residual_wrap = mf.blocks.iter().flat_map(|(_, block)| block.insts.iter()).filter(|id| {
+        matches!(&mf.insts[**id], Inst::Call { func, .. } | Inst::CallMulti { func, .. }
+            if ws.module(func.module).functions[func.func].name.as_str() == "wrap")
+    }).count();
+    assert_eq!(residual_wrap, 0, "the concrete owner did not admit the splice");
+    assert!(
+        mf.call_sites.values().any(|cs| {
+            let owner = &mf.site_owners[cs.owner.0 as usize];
+            ws.module(owner.func.module).functions[owner.func.func].name.as_str() == "wrap"
+        }),
+        "the spliced body lost its concrete callee owner"
+    );
+}
+
+/// Same-width value instances are still different ABIs. Repointing the call's
+/// owner from `Vec2` to a two-int `Pair` must decline the splice even though the
+/// result lane count and call form match; otherwise a plausible scalar shape
+/// hides a semantically different concrete body.
+#[test]
+fn concrete_inline_declines_same_width_incompatible_abi() {
+    let ws = check(
+        r#"
+value Pair { x: int, y: int }
+@inline
+fn wrap<T>(x: T) -> T { return x }
+fn top() -> float {
+    let b = wrap(Vec2 { x: 1, y: 2 })
+    return b.x
+}
+fn main() { print("{top()}") }
+"#,
+    );
+    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
+    let (fid, f) = ws
+        .module(mid)
+        .functions
+        .iter()
+        .find(|(_, f)| f.name.as_str() == "top")
+        .expect("top");
+    let fref = skull_mir::mir::FuncRef { module: mid, func: fid };
+    let scx = ScalarCtx::new(&ws);
+    let mut mf = skull_mir::lower::lower_instance(
+        &ws,
+        &scx,
+        &skull_mir::instance::Instance::base(fref),
+    )
+    .expect("lower top");
+    let call = mf
+        .insts
+        .iter()
+        .find_map(|(id, inst)| match inst {
+            Inst::CallMulti { func, .. }
+                if ws.module(func.module).functions[func.func].name.as_str() == "wrap" =>
+            {
+                Some(id)
+            }
+            _ => None,
+        })
+        .expect("value call must use the multi-lane ABI");
+    let wrap = mf.callee_instances[&call].func;
+    let pair = skull_mir::instance::Instance::intern(
+        scx.interner(),
+        wrap,
+        vec![MonoTy::App { ctor: MonoCtor::Nominal(Ustr::from("Pair")), params: Vec::new() }],
+    );
+    mf.callee_instances.insert(
+        call,
+        OwnerInstance { func: pair.func, subst: pair.subst(&ws, scx.interner()) },
+    );
+    assert!(mf.spec_bindings.remove(&call).is_some(), "the negative arm must remove delivery");
+
+    let mangled = skull_mir::mangle::mangle_fn(&ws, f);
+    let mut cache = skull_transform::InlineCache::default();
+    skull::mir_emit::prepare_instance_body(
+        &ws,
+        &scx,
+        fref,
+        &Default::default(),
+        &mangled,
+        &mut mf,
+        &mut cache,
+    )
+    .expect("an ABI mismatch declines rather than corrupting MIR");
+    let residual_wrap = mf.blocks.iter().flat_map(|(_, block)| block.insts.iter()).filter(|id| {
+        matches!(&mf.insts[**id], Inst::CallMulti { func, .. }
+            if ws.module(func.module).functions[func.func].name.as_str() == "wrap")
+    }).count();
+    assert_eq!(residual_wrap, 1, "an incompatible same-width owner was spliced");
+}
+
 /// Every call instruction that survives to the emitted body carries a site.
 /// Stated over this fixture's own population rather than as a general claim:
 /// the corpus census reports a real `no-site` bucket, so "always" would be
@@ -823,7 +976,6 @@ fn main() { print("{top()}") }
     let removed = g.index.subst.remove(&victim);
     g.root_instances.remove(&victim);
     assert!(removed.is_some(), "nothing was removed, so the arm below is untested");
-
     let after = site_join::census(&ws, &scx, &g, &bodies);
     let refused_after =
         after.unjoined.get(&Unjoined::OwnerNotAnInstance).copied().unwrap_or(0);

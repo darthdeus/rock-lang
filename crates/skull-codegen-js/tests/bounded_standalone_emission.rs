@@ -15,14 +15,16 @@ use crate::common::ws_with;
 /// per-file `static` serializes a file against itself and against nothing else.
 static ABLATION_MODE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-struct ModeGuard(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+struct ModeGuard(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>, Option<String>);
 
 impl ModeGuard {
     fn on() -> Self {
         let g = ABLATION_MODE.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var("SKULL_INLINE_OFF").ok();
+        unsafe { std::env::set_var("SKULL_INLINE_OFF", "1") };
         skull_mir::ablation::clear();
         skull_mir::ablation::set_enabled(true);
-        ModeGuard(g)
+        ModeGuard(g, previous)
     }
 }
 
@@ -30,6 +32,10 @@ impl Drop for ModeGuard {
     fn drop(&mut self) {
         skull_mir::ablation::set_enabled(false);
         skull_mir::ablation::clear();
+        match &self.1 {
+            Some(value) => unsafe { std::env::set_var("SKULL_INLINE_OFF", value) },
+            None => unsafe { std::env::remove_var("SKULL_INLINE_OFF") },
+        }
     }
 }
 

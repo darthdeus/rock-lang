@@ -31,6 +31,7 @@ use skull_mir::mir::*;
 /// tree, and leaving them out makes the residue surface at runtime.
 pub fn resolve_standalone_bound_calls(
     ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
     interner: &MonoInterner,
     mf: &mut MirFunc,
     incoming: &skull_mir::bound::ResolvedBoundTree,
@@ -63,10 +64,10 @@ pub fn resolve_standalone_bound_calls(
                 mf.resolved_bound_trees.insert(id, sub.clone());
             }
         }
-        substitute_bound_call(mf, id, split, &leaf, ws, interner, "in this instantiation")?;
+        substitute_bound_call(mf, id, split, &leaf, scx, ws, interner, "in this instantiation")?;
     }
     for nf in &mut mf.nested_fns {
-        resolve_standalone_bound_calls(ws, interner, nf, incoming)?;
+        resolve_standalone_bound_calls(ws, scx, interner, nf, incoming)?;
     }
     Ok(())
 }
@@ -86,6 +87,7 @@ pub fn substitute_bound_call(
     call: Idx<Inst>,
     already_split: bool,
     leaf: &ResolvedBoundNext,
+    scx: &skull_mir::lower::ScalarCtx,
     ws: &Workspace,
     interner: &MonoInterner,
     what: &str,
@@ -104,8 +106,14 @@ pub fn substitute_bound_call(
     };
     let (dests, args) = (dests.clone(), args.clone());
     func.insts[call] = Inst::CallMulti { dests, func: concrete, args };
+    let owner = spec
+        .clone()
+        .unwrap_or_else(|| Instance::intern(interner, concrete, Vec::new()));
+    skull_mir::site::record_call_owner(func, ws, interner, call, &owner);
+    func.call_abi_plans
+        .insert(call, skull_mir::lower::BackendFnAbiPlan::for_instance(ws, scx, &owner));
     if let Some(inst) = spec.clone() {
-        skull_mir::site::record_specialized_call(func, ws, interner, call, inst);
+        func.spec_bindings.insert(call, inst);
     }
     // The placeholder's arity is `(bool, E)` because bound conformance
     // fixes it there; the CONCRETE callee is only known here. When its

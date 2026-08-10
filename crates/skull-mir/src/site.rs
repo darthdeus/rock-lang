@@ -221,9 +221,21 @@ pub fn record_specialized_call(
     call: Idx<crate::mir::Inst>,
     inst: crate::instance::Instance,
 ) {
+    record_call_owner(func, ws, interner, call, &inst);
+    func.spec_bindings.insert(call, inst);
+}
+
+/// Record the concrete owner of a call, including a non-generic witness whose
+/// delivery map has no specialized entry.
+pub fn record_call_owner(
+    func: &mut crate::mir::MirFunc,
+    ws: &bone_semantic::inference::Workspace,
+    interner: &crate::monoty::MonoInterner,
+    call: Idx<crate::mir::Inst>,
+    inst: &crate::instance::Instance,
+) {
     let subst = inst.subst(ws, interner);
     func.callee_instances.insert(call, OwnerInstance { func: inst.func, subst });
-    func.spec_bindings.insert(call, inst);
 }
 
 /// A [`Site`] plus the owner it belongs to.

@@ -480,7 +480,24 @@ impl Builder<'_> {
         let callee_inst = self.callee_instance_for(e, func)?;
         let empty_subst = SpecSubst::default();
         let subst = spec.as_ref().map_or(&empty_subst, |(_, s)| s);
-        let plan = self.callee_abi_plan(func, spec.as_ref(), subst);
+        let plan = if let Some(owner_subst) = &callee_inst {
+            let f = &self.ws.module(func.module).functions[func.func];
+            let owner = if f.generics.is_empty() {
+                crate::instance::Instance::intern(self.scx.interner(), func, Vec::new())
+            } else {
+                let key = crate::lower::spec_key_from_subst(self.ws, func, owner_subst)
+                    .ok_or_else(|| {
+                        CompilerError::new_with_label(
+                            self.body.expr_spans[e],
+                            format!("internal: concrete call to `{}` has an incomplete owner", f.name),
+                        )
+                    })?;
+                crate::instance::Instance::intern(self.scx.interner(), func, key)
+            };
+            BackendFnAbiPlan::for_instance(self.ws, self.scx, &owner)
+        } else {
+            self.callee_abi_plan(func, spec.as_ref(), subst)
+        };
         Ok(DirectCall { tree, spec, callee_inst, plan })
     }
 
@@ -501,6 +518,7 @@ impl Builder<'_> {
                 .callee_instances
                 .insert(call, crate::site::OwnerInstance { func, subst: subst.clone() });
         }
+        self.f.call_abi_plans.insert(call, dc.plan.clone());
     }
 
     /// The concrete instance a call at `e` to `func` names -- the IDENTITY
@@ -517,6 +535,9 @@ impl Builder<'_> {
         e: Idx<Expr>,
         func: FuncRef,
     ) -> Result<Option<crate::monoty::MonoSubst>, CompilerError> {
+        if self.ws.module(func.module).functions[func.func].generics.is_empty() {
+            return Ok(Some(crate::monoty::MonoSubst::default()));
+        }
         match self.inf {
             Some(inf) => {
                 crate::lower::shape::callee_instance_subst(self.ws, inf, e, func, self.subst())
@@ -747,12 +768,6 @@ impl Builder<'_> {
         // specialized body still differs (e.g. a `native_buffer_alloc<T>` ctype
         // resolves) though the param/return ABI is unchanged.
         let dc = self.plan_direct_call(e, func)?;
-        let ret_tuple = dc.plan.ret_tuple().cloned();
-        if let Some(shape) = &ret_tuple {
-            self.reject_nobox_opaque_tuple_return(e, func, shape)?;
-        } else {
-            self.reject_nobox_opaque_value_return(e, func)?;
-        }
         let callee = &self.ws.module(func.module).functions[func.func];
         // Resolve phantom before tuple flattening can project from its nil placeholder.
         if arg_idxs.is_empty()
@@ -760,6 +775,17 @@ impl Builder<'_> {
         {
             return Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))));
         }
+        let declared_ret_tuple = dc.plan.ret_tuple().cloned();
+        if let Some(shape) = &declared_ret_tuple {
+            self.reject_nobox_opaque_tuple_return(e, func, shape)?;
+        } else {
+            self.reject_nobox_opaque_value_return(e, func)?;
+        }
+        let lua_opaque = self.scx.target() == bone_semantic::hir::FnBackend::Lua
+            && callee.inline_body.is_some()
+            && !callee.generics.is_empty()
+            && !callee.annotations.iter().any(|a| a.name.name.as_str() == "scalar_abi");
+        let ret_tuple = (!lua_opaque).then_some(declared_ret_tuple).flatten();
         let Some(scalar_abi) = dc.plan.scalar().cloned() else {
             self.reject_nobox_boxed_call_args(func, arg_idxs)?;
             self.reject_column_container_opaque_slots(e, func)?;

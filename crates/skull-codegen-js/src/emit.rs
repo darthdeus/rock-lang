@@ -3855,6 +3855,7 @@ impl JsDelivery<'_> {
         }
         if let Err(e) = skull_transform::bound::resolve_standalone_bound_calls(
             self.ws,
+            self.scx,
             self.scx.interner(),
             &mut mf,
             &tree,

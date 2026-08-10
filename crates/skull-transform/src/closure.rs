@@ -414,6 +414,7 @@ pub fn convert_closures_framed(
             // dropping them would strand their site identity here.
             call_sites: mf.call_sites.clone(),
             callee_instances: mf.callee_instances.clone(),
+            call_abi_plans: mf.call_abi_plans.clone(),
             fn_value_symbols: mf.fn_value_symbols.clone(),
             hoisted_fn_globals: mf.hoisted_fn_globals.clone(),
             // The owner table comes across with the entries that index it;

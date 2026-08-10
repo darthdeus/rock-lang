@@ -587,6 +587,7 @@ fn main() {{
 /// unjoined. The `for` arm is the control that already worked.
 #[test]
 fn both_iter_witness_forms_state_the_instance_they_target() {
+    let _inline = crate::common::InlineOffGuard::on();
     for (form, src) in [
         ("implicit coercion", "fn main() { let a: [int] = [1, 2]\n  print(\"{a.map(_ * 2).sum()}\") }"),
         ("`for` head", "fn main() { let a: [int] = [1, 2]\n  let s = 0\n  for v in a { s = s + v }\n  print(\"{s}\") }"),

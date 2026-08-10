@@ -1547,7 +1547,7 @@ fn emit_spec_chunk(
     // make it unemittable on its own, and the demand that reached here is what
     // resolves them. The splice path does the same substitution at the moment it
     // clones the body into a caller.
-    skull_transform::bound::resolve_standalone_bound_calls(ws, scx.interner(), &mut mf, tree)
+    skull_transform::bound::resolve_standalone_bound_calls(ws, scx, scx.interner(), &mut mf, tree)
         .map_err(|e| CompilerError::new_with_label(f.name_span, e.message))?;
     let owner = BodyOwner::Function(fref.func);
     let ctx = skull_mir::bound::body_ctx(ws, fref.module, owner, &subst, tree, scx.interner());

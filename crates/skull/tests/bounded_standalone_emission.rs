@@ -17,7 +17,7 @@ use std::sync::LazyLock;
 use bone_semantic::inference::Workspace;
 use ustr::Ustr;
 
-use crate::common::AblationGuard as ModeGuard;
+use crate::common::{AblationGuard as ModeGuard, InlineOffGuard};
 
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
     rock_host::stdlib_loader::stdlib_files()
@@ -117,6 +117,7 @@ fn body_of<'a>(lua: &'a str, header: &str) -> Vec<&'a str> {
 /// emitted with the placeholder still in it would pass the first two.
 #[test]
 fn a_bounded_body_emits_standalone_with_inlining_disabled() {
+    let _inline = InlineOffGuard::on();
     let _g = ModeGuard::on();
     let lua = emit(BOUNDED).expect("a bounded body must emit standalone under its demand");
     let def = lua
@@ -150,6 +151,7 @@ fn a_bounded_body_emits_standalone_with_inlining_disabled() {
 /// absence of an error.
 #[test]
 fn a_witness_that_is_itself_bounded_resolves_from_the_leafs_sub_tree() {
+    let _inline = InlineOffGuard::on();
     let _g = ModeGuard::on();
     let lua = emit(NESTED).expect("a bounded witness of a bounded body must emit standalone");
     let def = lua
@@ -171,6 +173,7 @@ fn a_witness_that_is_itself_bounded_resolves_from_the_leafs_sub_tree() {
 /// program, which would say nothing about bounded bodies.
 #[test]
 fn an_unbounded_body_emits_with_inlining_disabled() {
+    let _inline = InlineOffGuard::on();
     let _g = ModeGuard::on();
     let err = emit_err(CONCRETE);
     assert!(

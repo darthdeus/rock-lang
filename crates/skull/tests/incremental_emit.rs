@@ -692,6 +692,7 @@ fn an_edit_that_introduces_a_new_specialization_demand_builds_from_graph_delta()
 /// fall back on -- and is what E1 does by construction.
 #[test]
 fn a_standalone_bounded_body_survives_an_incremental_rebuild() {
+    let _inline = crate::common::InlineOffGuard::on();
     let _g = crate::common::AblationGuard::on();
     let v1 = "fn total<I: Iterator<int>>(it: I) -> int {\n\
               \x20   let s = 0\n\

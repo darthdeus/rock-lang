@@ -267,3 +267,22 @@ impl Drop for AblationGuard {
         skull_mir::ablation::clear();
     }
 }
+
+pub struct InlineOffGuard(Option<String>);
+
+impl InlineOffGuard {
+    pub fn on() -> Self {
+        let previous = std::env::var("SKULL_INLINE_OFF").ok();
+        unsafe { std::env::set_var("SKULL_INLINE_OFF", "1") };
+        InlineOffGuard(previous)
+    }
+}
+
+impl Drop for InlineOffGuard {
+    fn drop(&mut self) {
+        match &self.0 {
+            Some(value) => unsafe { std::env::set_var("SKULL_INLINE_OFF", value) },
+            None => unsafe { std::env::remove_var("SKULL_INLINE_OFF") },
+        }
+    }
+}

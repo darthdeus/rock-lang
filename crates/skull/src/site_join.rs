@@ -803,10 +803,6 @@ pub fn census_detailed(
             skip(&mut c, BodySkip::Coroutine);
             continue;
         }
-        if !has_lowered_body(ws, inst.func) {
-            skip(&mut c, BodySkip::NoLoweredBody);
-            continue;
-        }
         // The graph must have a record, or this body is `NoSubstitution` rather
         // than a lowering. The lowering itself then goes through the ONE entry
         // every emitted body takes, against the arena this graph and `scx`
@@ -816,6 +812,10 @@ pub fn census_detailed(
             skip(&mut c, BodySkip::NoSubstitution);
             continue;
         };
+        if !has_lowered_body(ws, inst.func) {
+            skip(&mut c, BodySkip::NoLoweredBody);
+            continue;
+        }
         let mut mf = match skull_mir::lower::lower_instance(ws, scx, inst) {
             Ok(mf) => mf,
             Err(_) => {
