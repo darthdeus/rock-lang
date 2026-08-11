@@ -2,7 +2,7 @@
 //!
 //! `__sw_sync_canvas_size` runs once per rAF. Adopting the container's size is
 //! what a resizable game wants and exactly what a non-resizable one must not get:
-//! a game that explicitly opts out may lay out against its configured
+//! a game that does not opt in may lay out against its configured
 //! `screen_size()`, and a responsive container must not silently move it.
 //!
 //! dpr is orthogonal and tracked for both -- it scales the buffer's resolution,
