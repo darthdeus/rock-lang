@@ -703,7 +703,7 @@ struct FnEmit<'a> {
     /// The INSTANCE being emitted: this body's own generic bindings. Every
     /// declared type it renders resolves through this, so `T` is `float` here
     /// and `int` in the sibling instance of the same declaration.
-    subst: SpecSubst,
+    subst: Option<SpecSubst>,
     /// Every direct call in this body, resolved to its callee INSTANCE by
     /// [`callee_inst_at`]. Built once so the name a call renders and the type
     /// its result takes come from one answer.
@@ -881,7 +881,7 @@ fn emit_fn_def_with(
     concrete_plan: Option<&ConcreteBodyPlan>,
 ) -> Result<String, CompilerError> {
     let fref = inst.fref();
-    let subst = inst.subst(ws, interner);
+    let subst = concrete_plan.is_none().then(|| inst.subst(ws, interner));
     let f = &ws.module(fref.module).functions[fref.func];
     let emits_main = entry.is_some_and(|s| s.main_out.is_some());
     let name = if emits_main {
@@ -903,7 +903,13 @@ fn emit_fn_def_with(
                 .transpose()?
         } else {
             match f.return_ty {
-                Some(rt) => Some(glsl_ty(ws, &subst, rt, f.name_span, "return")?),
+                Some(rt) => Some(glsl_ty(
+                    ws,
+                    subst.as_ref().expect("source GLSL emission has a substitution"),
+                    rt,
+                    f.name_span,
+                    "return",
+                )?),
                 None => None,
             }
         }
@@ -1005,7 +1011,13 @@ fn emit_fn_def_with(
             })?;
             concrete_glsl_ty(interner, id, f.name_span, "parameter")?
         } else {
-            glsl_ty(ws, &subst, f.param_decls[i].ty, f.name_span, "parameter")?
+            glsl_ty(
+                ws,
+                subst.as_ref().expect("source GLSL emission has a substitution"),
+                f.param_decls[i].ty,
+                f.name_span,
+                "parameter",
+            )?
         };
         e.cell_ty.insert(c, ty);
     }
@@ -1107,7 +1119,13 @@ impl FnEmit<'_> {
                     })?;
                     concrete_glsl_ty(self.interner, id, self.span(), "local")?
                 } else {
-                    match glsl_ty(self.ws, &self.subst, ty, Span::default(), "local") {
+                    match glsl_ty(
+                        self.ws,
+                        self.subst.as_ref().expect("source GLSL emission has a substitution"),
+                        ty,
+                        Span::default(),
+                        "local",
+                    ) {
                         Ok(g) => g,
                         Err(_) => continue,
                     }
