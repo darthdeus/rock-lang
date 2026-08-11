@@ -674,6 +674,7 @@ fn recorded_keys_cannot_toggle_engine_debug_windows() {
     let diag = &replayed["__stone_diag"];
     let declared = diag["TOOL_KEYS_DECLARED"].as_i64().expect("declared tool keys");
     assert!(declared > 0, "the probe must declare keys: {diag}");
+    assert_eq!(declared, 34, "the typed census must cover every fixed and dynamic tool binding: {diag}");
     assert_eq!(
         diag["TOOL_KEYS_PROBED"].as_i64(), Some(declared),
         "every declared tool key must have been probed: {diag}"
@@ -692,6 +693,15 @@ fn recorded_keys_cannot_toggle_engine_debug_windows() {
         injected["stone"]["ENGINE"]["show_graphics_stats_window"].as_bool(), Some(true),
         "a live 'o' must still open the graphics stats window: {}",
         injected["stone"]["ENGINE"]
+    );
+
+    let dynamic = run_frame_stderr(
+        "bitgun", 20, &[],
+        &[("STONE_TIMELINE_KEY_AT", "5"), ("STONE_TIMELINE_KEY", "not-a-key")],
+    );
+    assert!(
+        dynamic.contains("tool key 'not-a-key' has no ImGui mapping"),
+        "dynamic tool input must retain its per-key unmapped diagnostic: {dynamic}"
     );
 }
 
