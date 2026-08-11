@@ -296,6 +296,26 @@ pub fn default_main_lua_path() -> PathBuf {
     PathBuf::from(DEFAULT_OUTPUT_DIR).join(MAIN_LUA_FILENAME)
 }
 
+/// Root for `rock stone` session output. Everything else -- `run`, `frame`,
+/// `perf`, the game tests -- writes `tmp/main.lua`, and the running game
+/// reloads whatever lands at the path it was launched from, so a live session
+/// keeps its build out of that shared slot
+/// (`docs/hot-reload-chunk-identity.md`).
+pub const STONE_SESSION_DIR: &str = "tmp/stone";
+
+/// This session's private `main.lua`, one directory per (game, pid). Nothing
+/// sweeps these; `rock stone` warns once the root grows past its budget.
+pub fn stone_session_main_lua_path(game: &str, pid: u32) -> PathBuf {
+    let name = Path::new(game)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| "game".to_string());
+    PathBuf::from(STONE_SESSION_DIR)
+        .join(format!("{name}-{pid}"))
+        .join(MAIN_LUA_FILENAME)
+}
+
 /// Write `contents` to `path` atomically: write to a uniquely-named temp
 /// file in the same directory, then `rename(2)` into place (atomic on
 /// macOS + Linux). A concurrent reader -- a running game polling main.lua
