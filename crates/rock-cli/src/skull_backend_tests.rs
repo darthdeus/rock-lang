@@ -2800,6 +2800,72 @@ fn main() { print(choose_a()); print(choose_b()) }
 }
 
 #[cfg(test)]
+mod compute_registration_contract_tests {
+    use super::super::{SkullReload, SkullStone};
+    use std::path::PathBuf;
+
+    const V0: &str = r#"
+value Params { n: int }
+
+@shader(compute)
+@workgroup(64, 1, 1)
+@dispatch(1)
+fn copy_values(
+    @storage(read) input: StorageBuffer<int>,
+    @storage(read_write) output: StorageBuffer<int>,
+    @uniform params: Params,
+) {
+    let i = global_invocation_id().x
+    if i >= params.n { return }
+    storage_store(output, i, storage_load(input, i))
+}
+
+global COPY_VALUES: string = rock_compute(copy_values)
+fn main() { }
+"#;
+
+    fn boot(source: &str) -> (tempfile::TempDir, SkullStone, PathBuf, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().to_str().expect("tempdir path").to_string();
+        let main = dir.path().join("main.lua");
+        let incremental = dir.path().join("incremental.lua");
+        let rock = dir.path().join("main.rock");
+        std::fs::write(&rock, source).expect("source");
+        let stone = SkullStone::init(&root, &main, &incremental).expect("initial compile");
+        (dir, stone, main, incremental, rock)
+    }
+
+    #[test]
+    fn compute_abi_edit_requires_restart_and_does_not_write_old_process_files() {
+        let (_dir, mut stone, main, incremental, rock) = boot(V0);
+        let baseline = std::fs::read_to_string(&main).expect("baseline");
+        let v1 = V0.replace("@workgroup(64, 1, 1)", "@workgroup(32, 1, 1)");
+        std::fs::write(&rock, v1).expect("edited source");
+
+        let reload = stone
+            .recompile(std::slice::from_ref(&rock), &main, &incremental)
+            .expect("compute ABI recompile");
+        match reload {
+            SkullReload::FullRequired { reasons } => assert!(
+                reasons.iter().any(|reason| reason == "shader registration ABI changed"),
+                "the restart reason must identify the ABI contract: {reasons:?}"
+            ),
+            other => panic!("a compute workgroup ABI edit must require restart, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read_to_string(&main).expect("main after rejected reload"),
+            baseline,
+            "a FullRequired compute edit must not write the program for the old process"
+        );
+
+        stone.force_full(&main, &incremental).expect("canonicalize ABI edit");
+        let current = std::fs::read_to_string(&main).expect("canonicalized main");
+        assert_ne!(current, baseline, "force_full must materialize the new ABI after restart");
+        assert!(current.contains("@workgroup_size(32, 1, 1)"), "new compute ABI was not materialized");
+    }
+}
+
+#[cfg(test)]
 mod force_full_tests {
     //! `force_full` is the stone restart-path canonicalizer: after body edits
     //! have accumulated into `incremental.lua` (overlaying a stale `main.lua`),

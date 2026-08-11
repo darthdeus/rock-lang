@@ -27,7 +27,7 @@ use skull_codegen_lua::{emit_function, emit_named, mangle_fn, CodegenCtx};
 use skull_mir::instance::Instance;
 use skull_mir::mir::{FuncRef, Inst, MirFunc, Term};
 use skull_parser::CompilerError;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 use ustr::Ustr;
@@ -1272,6 +1272,7 @@ struct ShaderRegistrations {
     callsites: FxHashSet<(ModuleId, BodyOwner)>,
     roots: Vec<FuncRef>,
     keys: BTreeSet<String>,
+    abi_wires: BTreeMap<String, String>,
 }
 
 /// A `static` cell's reload key: rendered type + initializer content hash. Equal
@@ -2477,6 +2478,7 @@ fn shader_registration_lines(
     }
     let mut out = String::new();
     let mut dependencies = FxHashSet::default();
+    let mut abi_wires = BTreeMap::new();
     for (pair, program_view) in collection.pairs.iter().zip(&view.program_views) {
         // vert=None is the A3c single-arg fullscreen form -> the A1 single-entry
         // emitter (PIXEL body + fullscreen VERTEX passthrough).
@@ -2621,6 +2623,7 @@ fn shader_registration_lines(
                 )
             };
             dependencies.extend(emission_dependencies);
+            abi_wires.insert(shader_key.to_string(), wire.clone());
             let _ = writeln!(
                 out,
                 "__rock_wgpu_shader_register({}, {}, {}, {})",
@@ -2669,12 +2672,14 @@ fn shader_registration_lines(
             bone_semantic::prelude::Span::default(),
         )?;
         dependencies.extend(emission.dependencies);
+        let wire = emission.abi.wire();
+        abi_wires.insert(entry.key.clone(), wire.clone());
         let _ = writeln!(
             out,
             "__rock_wgpu_compute_register({}, {}, {}, {})",
             skull_codegen_lua::lua_string(&entry.key),
             skull_codegen_lua::lua_string(&emission.source),
-            skull_codegen_lua::lua_string(&emission.abi.wire()),
+            skull_codegen_lua::lua_string(&wire),
             skull_codegen_lua::lua_string(&neutral.interface.semantic_wire(false)),
         );
     }
@@ -2693,6 +2698,7 @@ fn shader_registration_lines(
             .chain(compute_collection.entries.iter().map(|entry| entry.entry))
             .collect(),
         keys,
+        abi_wires,
     })
 }
 
@@ -3574,6 +3580,13 @@ impl SkullEmitCache {
             .map(|entry| entry.key);
         let current: BTreeSet<String> = graphics.chain(compute).collect();
         Ok(current != self.shader_registrations.keys)
+    }
+
+    /// The compiler-owned ABI contract for every WGPU artifact registered by
+    /// this cache. Body edits may replace source under the same contract; a
+    /// changed wire cannot be applied to a live registry/pipeline safely.
+    pub fn shader_registration_contracts(&self) -> BTreeMap<String, String> {
+        self.shader_registrations.abi_wires.clone()
     }
 
 

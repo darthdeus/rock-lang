@@ -2624,6 +2624,7 @@ impl SkullStone {
         };
 
         let t_emit = Instant::now();
+        let old_shader_contracts = self.cache.shader_registration_contracts();
         if self
             .cache
             .shader_registration_keys_changed(self.project.workspace())
@@ -2659,6 +2660,11 @@ impl SkullStone {
                     self.renderer_target,
                 )
                     .map_err(|e| anyhow::anyhow!("{}", render_project_err(self.project.sources(), &e)))?;
+                if old_shader_contracts != c.shader_registration_contracts() {
+                    return Ok(SkullReload::FullRequired {
+                        reasons: vec!["shader registration ABI changed".to_string()],
+                    });
+                }
                 self.cache = c; // resets changed_since_full
                 // `_G.__ROCK_GLOBALS` for `--dump-state` (see `skull_emit_project`):
                 // a structural edit can add/remove globals, so recompute on full.
@@ -2678,6 +2684,11 @@ impl SkullStone {
                 skull::mir_emit::emit_overlay(ws, &mut self.cache, &reinferred)
                     .map_err(|e| anyhow::anyhow!("{}", render_project_err(self.project.sources(), &e)))?
             };
+            if old_shader_contracts != self.cache.shader_registration_contracts() {
+                return Ok(SkullReload::FullRequired {
+                    reasons: vec!["shader registration ABI changed".to_string()],
+                });
+            }
             let bytes = overlay.lua.len();
             let emit_ms = t_emit.elapsed().as_secs_f64() * 1000.0;
             let t_write = Instant::now();

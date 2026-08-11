@@ -746,6 +746,7 @@ fn compute_body_edit_reloads_the_compiler_artifact_through_the_overlay() {
         skull::mir_emit::RendererTarget::Wgpu,
     )
     .expect("initial compute emit");
+    let initial_contracts = cache.shader_registration_contracts();
     let source2 = SAXPY.replace(
         "params.a * storage_load(x, i) + storage_load(y, i)",
         "(params.a + 1) * storage_load(x, i) + storage_load(y, i)",
@@ -757,6 +758,81 @@ fn compute_body_edit_reloads_the_compiler_artifact_through_the_overlay() {
     assert_eq!(overlay.lua.matches("__rock_wgpu_compute_snapshot_begin()").count(), 1);
     assert_eq!(overlay.lua.matches("__rock_wgpu_compute_snapshot_end()").count(), 1);
     assert!(overlay.lua.contains("(u_SaxpyParams.a + 1)"), "edited compute source missing:\n{}", overlay.lua);
+    assert_eq!(cache.shader_registration_contracts(), initial_contracts, "body edit changed the ABI contract");
+}
+
+#[test]
+fn compute_helper_body_edit_updates_the_same_registered_key() {
+    let source1 = SAXPY
+        .replace(
+            "value SaxpyParams { a: int, n: int }",
+            "value SaxpyParams { a: int, n: int }\n\nfn saxpy_bias(v: int) -> int { return v }",
+        )
+        .replace(
+            "params.a * storage_load(x, i) + storage_load(y, i)",
+            "params.a * saxpy_bias(storage_load(x, i)) + storage_load(y, i)",
+        );
+    let source2 = source1.replace("fn saxpy_bias(v: int) -> int { return v }", "fn saxpy_bias(v: int) -> int { return v + 1 }");
+    let ws1 = common::ws_with_stdlib(&source1);
+    let mut cache = skull::mir_emit::emit_full_in_for_renderer(
+        &ws1,
+        test_mid(&ws1),
+        None,
+        skull::mir_emit::RendererTarget::Wgpu,
+    )
+    .expect("initial helper compute emit")
+    .1;
+    let initial_contracts = cache.shader_registration_contracts();
+    let ws2 = common::ws_with_stdlib(&source2);
+    let overlay = skull::mir_emit::emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "saxpy_bias")])
+        .expect("helper body overlay");
+    assert_eq!(overlay.lua.matches("__rock_wgpu_compute_register(\"saxpy\"").count(), 1);
+    assert!(overlay.lua.contains("+ 1"), "edited helper body missing from compiler artifact:\n{}", overlay.lua);
+    assert_eq!(cache.shader_registration_contracts(), initial_contracts, "helper body edit changed the ABI contract");
+}
+
+#[test]
+fn compute_interface_contract_changes_are_not_overlay_compatible() {
+    let ws1 = common::ws_with_stdlib(SAXPY);
+    let cache1 = skull::mir_emit::emit_full_in_for_renderer(
+        &ws1,
+        test_mid(&ws1),
+        None,
+        skull::mir_emit::RendererTarget::Wgpu,
+    )
+    .expect("initial compute emit")
+    .1;
+    let workgroup = SAXPY.replace("@workgroup(64, 1, 1)", "@workgroup(32, 1, 1)");
+    let ws2 = common::ws_with_stdlib(&workgroup);
+    let cache2 = skull::mir_emit::emit_full_in_for_renderer(
+        &ws2,
+        test_mid(&ws2),
+        None,
+        skull::mir_emit::RendererTarget::Wgpu,
+    )
+    .expect("workgroup ABI edit remains compilable")
+    .1;
+    assert_ne!(
+        cache1.shader_registration_contracts(),
+        cache2.shader_registration_contracts(),
+        "workgroup size change was not recorded in the compiler ABI contract"
+    );
+
+    let dispatch = SAXPY.replace("@dispatch(1)", "@dispatch(2)");
+    let ws3 = common::ws_with_stdlib(&dispatch);
+    let cache3 = skull::mir_emit::emit_full_in_for_renderer(
+        &ws3,
+        test_mid(&ws3),
+        None,
+        skull::mir_emit::RendererTarget::Wgpu,
+    )
+    .expect("dispatch ABI edit remains compilable")
+    .1;
+    assert_ne!(
+        cache1.shader_registration_contracts(),
+        cache3.shader_registration_contracts(),
+        "dispatch dimensionality change was not recorded in the compiler ABI contract"
+    );
 }
 
 #[test]
