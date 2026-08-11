@@ -2,9 +2,8 @@
 //!
 //! `__sw_sync_canvas_size` runs once per rAF. Adopting the container's size is
 //! what a resizable game wants and exactly what a non-resizable one must not get:
-//! games authored in absolute pixels (`games/sample-game-b`,
-//! `games/sample-game` boot 1280x720 with `resizable` unset) lay out against
-//! a literal screen_size(), and a responsive container silently moves it.
+//! a game that explicitly opts out may lay out against its configured
+//! `screen_size()`, and a responsive container must not silently move it.
 //!
 //! dpr is orthogonal and tracked for both -- it scales the buffer's resolution,
 //! not the extent games measure against, and the output-density font atlas
@@ -82,8 +81,8 @@ fn a_non_resizable_game_keeps_its_configured_extent() {
 // dpr is NOT gated: a non-resizable game still gets a HiDPI buffer, because the
 // output-density font atlas reads its density from exactly this. Without this
 // arm the gate above passes on a sync that ignores dpr entirely -- which is what
-// gating the whole function on `resizable` would have done, and no game in this
-// repo sets `resizable`, so it would have been dead everywhere.
+// gating the whole function on `resizable` would have done, and the non-resizable
+// arm would then have been the only thing left to catch it.
 #[test]
 fn a_non_resizable_game_still_tracks_dpr() {
     if !node_available() {
