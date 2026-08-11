@@ -2257,11 +2257,12 @@ fn lua_long_bracket(s: &str) -> String {
 /// only the resolved `FuncRef`s (the layering constraint). An emit error (tier
 /// violation, stage/collision) is a spanned `CompilerError` failing the compile,
 /// never skip-and-continue.
-const WGSL_SELECTED_ARTIFACTS: [(&str, bool); 4] = [
+const WGSL_SELECTED_ARTIFACTS: [(&str, bool); 5] = [
     ("blit_frag", true),
     ("present_frag", true),
     ("tonemap_frag", true),
     ("sprite_basic_vert+sprite_basic_frag", false),
+    ("sprite_batch_vert+sprite_batch_frag", false),
 ];
 
 fn shader_registration_lines(

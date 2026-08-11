@@ -401,6 +401,7 @@ pub struct WgslArrayMember {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WgslArrayBlock {
     pub stage: ShaderStage,
+    pub logical_name: Ustr,
     pub struct_name: Ustr,
     pub binding: u32,
     pub size: u32,
@@ -825,6 +826,7 @@ fn shared_uniform_block(block: &WgslUniformBlock) -> SharedWgslUniformBlock {
 fn shared_array_block(block: &WgslArrayBlock) -> SharedWgslArrayBlock {
     SharedWgslArrayBlock {
         stage: block.stage.name().into(),
+        logical_name: block.logical_name.to_string(),
         struct_name: block.struct_name.to_string(),
         binding: block.binding,
         size: block.size,
@@ -1266,6 +1268,7 @@ fn layout_array_group(
     }
     Ok(WgslArrayBlock {
         stage: group.stage,
+        logical_name: group.owner,
         struct_name,
         binding,
         size: plan.size,

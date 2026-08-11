@@ -92,6 +92,7 @@ pub struct WgslArrayMember {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WgslArrayBlock {
     pub stage: String,
+    pub logical_name: String,
     pub struct_name: String,
     pub binding: u32,
     pub size: u32,
@@ -348,9 +349,9 @@ impl WgslAbi {
         )?;
         let mut array_blocks = Vec::with_capacity(array_count);
         for _ in 0..array_count {
-            let block = fields(next_line(&mut payload_lines, "array_block")?, "array_block", 7)?;
-            let binding = parse_u32(block[3], "uniform array binding")?;
-            let member_count = parse_count(block[6], "uniform array member count")?;
+            let block = fields(next_line(&mut payload_lines, "array_block")?, "array_block", 8)?;
+            let binding = parse_u32(block[4], "uniform array binding")?;
+            let member_count = parse_count(block[7], "uniform array member count")?;
             if member_count == 0 {
                 return Err(wire_error("uniform array block has no members"));
             }
@@ -368,10 +369,11 @@ impl WgslAbi {
             stage_name(block[1])?;
             array_blocks.push(WgslArrayBlock {
                 stage: block[1].to_string(),
-                struct_name: identifier(block[2], "uniform array block name")?,
+                logical_name: identifier(block[2], "uniform array logical name")?,
+                struct_name: identifier(block[3], "uniform array block name")?,
                 binding,
-                size: parse_u32(block[4], "uniform array block size")?,
-                visibility: parse_visibility(block[5])?,
+                size: parse_u32(block[5], "uniform array block size")?,
+                visibility: parse_visibility(block[6])?,
                 members,
             });
         }
@@ -526,8 +528,9 @@ impl WgslAbi {
             push_line(
                 &mut payload,
                 format_args!(
-                    "array_block {} {} {} {} {} {}",
+                    "array_block {} {} {} {} {} {} {}",
                     block.stage,
+                    block.logical_name,
                     block.struct_name,
                     block.binding,
                     block.size,
@@ -656,6 +659,7 @@ impl WgslAbi {
 
         for block in &self.array_blocks {
             stage_name(&block.stage)?;
+            identifier(&block.logical_name, "uniform array logical name")?;
             identifier(&block.struct_name, "uniform array block name")?;
             if block.members.is_empty() {
                 return Err(wire_error("uniform array block has no members"));
@@ -1114,6 +1118,7 @@ mod tests {
             }],
             array_blocks: vec![WgslArrayBlock {
                 stage: "fragment".into(),
+                logical_name: "Frag".into(),
                 struct_name: "Frag_Arrays".into(),
                 binding: 1,
                 size: 32,
@@ -1194,8 +1199,8 @@ mod tests {
             ("output 1 FragId 4", "output 2 FragId 4"),
             ("output 0 FragColor 3", "output 0 FragColor 0"),
             (
-                "array_block fragment Frag_Arrays 1 32 f 1",
-                "array_block fragment Frag_Arrays 2 32 f 1",
+                "array_block fragment Frag Frag_Arrays 1 32 f 1",
+                "array_block fragment Frag Frag_Arrays 2 32 f 1",
             ),
             ("array_member lights 0 2 0 16", "array_member lights 0 2 16 16"),
             ("array_member lights 0 2 0 16", "array_member lights 0 2 0 8"),

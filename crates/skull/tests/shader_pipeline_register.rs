@@ -385,6 +385,17 @@ fn sprite_basic_vert(@attr a: SpriteBasicVert, @engine e: EngineU) -> SpriteBasi
 fn sprite_basic_frag(vary: SpriteBasicVary, @textures t: MainTex) -> Vec4 {
     return texture(t.uTexture, vary.TexCoord) * vary.VertexColor
 }
+value SpriteBatchVert { aPos: Vec2 }
+value SpriteBatchVary { position: Vec4, TexCoord: Vec2 }
+struct SpriteBatchTex { uTexture: Sampler2D }
+@shader(vertex)
+fn sprite_batch_vert(@attr a: SpriteBatchVert) -> SpriteBatchVary {
+    return SpriteBatchVary { position: v(a.aPos, 0.0, 1.0), TexCoord: a.aPos }
+}
+@shader(fragment)
+fn sprite_batch_frag(vary: SpriteBatchVary, @textures t: SpriteBatchTex) -> Vec4 {
+    return texture(t.uTexture, vary.TexCoord)
+}
 @shader(fragment)
 fn blit_frag(tc: Vec2) -> Vec4 { return Vec4 { x: tc.x, y: 0.0, z: 1.0, w: 1.0 } }
 @shader(fragment)
@@ -396,19 +407,20 @@ fn use_all() -> string {
     let a = rock_shader(blit_frag)
     let b = rock_shader(present_frag)
     let c = rock_shader(tonemap_frag)
-    return rock_shader(sprite_basic_vert, sprite_basic_frag)
+    let d = rock_shader(sprite_basic_vert, sprite_basic_frag)
+    return rock_shader(sprite_batch_vert, sprite_batch_frag)
 }
 "#;
 
 #[test]
-fn selected_wgpu_registration_is_exactly_the_four_selected_artifacts() {
+fn selected_wgpu_registration_is_exactly_the_five_selected_artifacts() {
     let ws = ws_with_stdlib(WGPU_FULLSCREEN_SRC);
     let mid = test_mid(&ws);
     let (emit, _) = emit_full_in_for_renderer(&ws, mid, None, RendererTarget::Wgpu)
         .expect("selected artifacts emit");
     assert_eq!(
         emit.lua.matches("__rock_wgpu_shader_register(").count(),
-        4,
+        5,
         "the selected renderer admits a non-zero, exact WGSL artifact population"
     );
     for root in [
@@ -416,6 +428,7 @@ fn selected_wgpu_registration_is_exactly_the_four_selected_artifacts() {
         "present_frag",
         "tonemap_frag",
         "sprite_basic_vert+sprite_basic_frag",
+        "sprite_batch_vert+sprite_batch_frag",
     ] {
         assert!(
             emit.lua.contains(&format!("__rock_wgpu_shader_register(\"{root}\"")),
