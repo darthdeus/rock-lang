@@ -756,19 +756,17 @@ impl CalleeNames {
         iid: Idx<Inst>,
         requested: FuncRef,
     ) -> Option<Instance> {
+        if let Some(owner) = mf.callee_instances.get(&iid) {
+            return self.instance_for_owner(ws, owner);
+        }
         if let Some(instance) = self.instance_for_site(ws, mf, iid) {
             return Some(instance);
         }
-        mf.callee_instances
-            .get(&iid)
-            .and_then(|owner| self.instance_for_owner(ws, owner))
-            .or_else(|| {
-                ws.module(requested.module).functions[requested.func]
-                    .generics
-                    .is_empty()
-                    .then(|| self.base_instance(ws, requested))
-                    .flatten()
-            })
+        ws.module(requested.module).functions[requested.func]
+            .generics
+            .is_empty()
+            .then(|| self.base_instance(ws, requested))
+            .flatten()
     }
 
     fn instance_for_site(&self, ws: &Workspace, mf: &MirFunc, iid: Idx<Inst>) -> Option<Instance> {
