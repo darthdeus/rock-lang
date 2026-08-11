@@ -4255,14 +4255,22 @@ fn discover_globals(
         } else if let Some(&[(module, func)]) =
             ws.functions_by_name.get(&name).map(|l| l.as_slice())
         {
-            // A NON-overloaded top-level fn used as a value.
-            let fr = FuncRef { module, func };
-            let jsname = callee_js_name(ws, fr);
-            gctx.fns.entry(name).or_insert_with(|| jsname.clone());
-            if seen.insert(fr) {
-                names.insert(EmittedBodyId::Shared(fr), jsname);
-                queue.push(fr);
-            }
+            // A NON-overloaded top-level fn used as a value. Routed through the
+            // same registration as a sibling group so BOTH fn-value paths ask one
+            // admission question -- this arm used to lower whatever it was handed
+            // as if it were portable Rock, so a lua-only `extern` taken as a value
+            // emitted a reference to a body that never existed and answered
+            // `undefined` at the call.
+            register_fn_value_variant(
+                ws,
+                name,
+                FuncRef { module, func },
+                gctx,
+                names,
+                queue,
+                seen,
+                inline_js,
+            )?;
         } else if let Some(cands) = ws.functions_by_name.get(&name) {
             // A backend-variant sibling pair (same name, same signature,
             // different backend) used as a VALUE. bone accepts it (collapses to
@@ -4272,7 +4280,7 @@ fn discover_globals(
             // emit, so `select_js_value_variant` only ever sees a sibling group
             // here; it returns `None` (leave rejecting) for a lua-only group.
             if let Some(fr) = select_js_value_variant(ws, &cands) {
-                register_fn_value_variant(ws, name, fr, gctx, names, queue, seen, inline_js);
+                register_fn_value_variant(ws, name, fr, gctx, names, queue, seen, inline_js)?;
             }
         }
     }
@@ -4299,11 +4307,19 @@ fn select_js_value_variant(
         .map(|&(module, func)| FuncRef { module, func })
 }
 
-/// Register a fn-value variant `fr` (already selected for this target) the same
-/// way `discover_callees` registers a callee by kind: an inline(js) body co-emits
+/// Register a fn-value variant `fr` (already selected for this target) by the
+/// same kinds `discover_callees` admits a CALLEE by: an inline(js) body co-emits
 /// verbatim, an extern(js) decl binds its bare driver name (no def), a plain-Rock
-/// fn lowers normally. In every case `gctx.fns[name]` maps the surface name (what
-/// the `Inst::Global` read carries) to the emitted JS identifier.
+/// fn lowers normally, and a host-bodied decl nothing supplies REJECTS. In every
+/// admitted case `gctx.fns[name]` maps the surface name (what the `Inst::Global`
+/// read carries) to the emitted JS identifier.
+///
+/// The rejection is the load-bearing arm and it must agree with the call path: a
+/// direct call to a lua-only `extern` is refused at emit, so taking the same fn
+/// as a VALUE cannot quietly succeed. It used to, by falling through to the
+/// plain-Rock arm and lowering a declaration with no body -- the reference then
+/// answered `undefined` at the call, which reads as a wrong ANSWER rather than
+/// an unsupported program (`tests/extern_fn_value.rock`, 7 such tests).
 #[allow(clippy::too_many_arguments)]
 fn register_fn_value_variant(
     ws: &Workspace,
@@ -4314,7 +4330,7 @@ fn register_fn_value_variant(
     queue: &mut Vec<FuncRef>,
     seen: &mut HashSet<FuncRef>,
     inline_js: &mut Vec<FuncRef>,
-) {
+) -> Result<(), CompilerError> {
     use bone_semantic::hir::FnBackend;
     let cf = &ws.module(fr.module).functions[fr.func];
     if matches!(cf.inline_body, Some((FnBackend::Js, _))) {
@@ -4328,6 +4344,19 @@ fn register_fn_value_variant(
     } else if cf.is_extern && cf.backend == FnBackend::Js {
         gctx.fns.entry(name).or_insert_with(|| cf.name.to_string());
         names.entry_or_insert_with(fr, || cf.name.to_string());
+    } else if let Some(JsSupply::Global(g)) = js_supply(ws, cf) {
+        // The backend supplies this one as a real JS global, so it is a callable
+        // VALUE. A `JsSupply::Template` is not: an expression template has no
+        // identity to pass around, so it falls to the rejection below rather
+        // than rendering as a name that does not exist.
+        gctx.fns.entry(name).or_insert_with(|| g.to_string());
+        names.entry_or_insert_with(fr, || g.to_string());
+    } else if cf.inline_body.is_some() || cf.is_extern {
+        return Err(err(format!(
+            "JS subset: `{}` is a host-bodied declaration with no JS binding, \
+             so it cannot be used as a function value",
+            cf.name
+        )));
     } else {
         // A portable (`Any`) Rock body -- lower it to JS like any other callee.
         let jsname = callee_js_name(ws, fr);
@@ -4337,6 +4366,7 @@ fn register_fn_value_variant(
             queue.push(fr);
         }
     }
+    Ok(())
 }
 
 /// Static callee emit-names of `mf` (`Call`/`CallMulti`), resolved through
