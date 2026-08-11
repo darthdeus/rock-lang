@@ -17,6 +17,7 @@ use skull_codegen_shader::structure::{LoopRegion, Structure};
 use skull_codegen_shader::{ShaderArtifactPlan, ShaderPlannerPolicy};
 use skull_mir::gpu_layout::{AttrKind, SamplerKind, WireKind};
 use skull_mir::mir::{Block, Cell, Inst, Lit, MirFunc, Term};
+use skull_mir::monoty::MonoInterner;
 use skull_mir::shader_ir::{
     FragmentOutput, LogicalArrayGroup, LogicalTextureGroup, LogicalUniformGroup, ShaderIR,
     ShaderInstance, ShaderInterfacePlan, ShaderStage, ShaderStageIr, UniformRole, VertexRate,
@@ -1413,19 +1414,41 @@ pub fn emit_fullscreen_shader(
                 span,
                 format!(
                     "WGSL IR order names `{}` without a lowered body",
-                    instance.symbol(ws)
+                    instance.inst.symbol(ws, &ir.interner)
                 ),
             )
         })?;
         let f = function_for_instance(ws, instance);
-        let emitter = FunctionEmitter::new(ws, stage, instance, body, abi, HashMap::new(), span)?;
+        let emitter = FunctionEmitter::new(
+            ws,
+            &ir.interner,
+            stage,
+            instance,
+            body,
+            abi,
+            HashMap::new(),
+            span,
+        )?;
         source.push_str(&emitter.emit_function(f, false)?);
     }
 
     let emitter =
-        FunctionEmitter::new(ws, stage, &stage.entry, &stage.body, abi, entry_roles, span)?;
+        FunctionEmitter::new(
+            ws,
+            &ir.interner,
+            stage,
+            &stage.entry,
+            &stage.body,
+            abi,
+            entry_roles,
+            span,
+        )?;
     source.push_str(&emitter.emit_function(entry_fn, true)?);
-    emit_fullscreen_entries(&mut source, abi, stage.entry.symbol(ws));
+    emit_fullscreen_entries(
+        &mut source,
+        abi,
+        stage.entry.inst.symbol(ws, &ir.interner),
+    );
 
     Ok(WgslShaderEmission {
         source,
@@ -1484,13 +1507,14 @@ pub fn emit_explicit_shader(
                     span,
                     format!(
                         "WGSL IR order names {} without a lowered body",
-                        instance.symbol(ws)
+                        instance.inst.symbol(ws, &ir.interner)
                     ),
                 )
             })?;
             let function = function_for_instance(ws, instance);
             let emitter = FunctionEmitter::new(
                 ws,
+                &ir.interner,
                 stage,
                 instance,
                 body,
@@ -1504,6 +1528,7 @@ pub fn emit_explicit_shader(
 
     let emitter = FunctionEmitter::new(
         ws,
+        &ir.interner,
         vertex,
         &vertex.entry,
         &vertex.body,
@@ -1514,6 +1539,7 @@ pub fn emit_explicit_shader(
     source.push_str(&emitter.emit_function(vertex_fn, true)?);
     let emitter = FunctionEmitter::new(
         ws,
+        &ir.interner,
         fragment,
         &fragment.entry,
         &fragment.body,
@@ -1525,7 +1551,7 @@ pub fn emit_explicit_shader(
         fragment_reads_frag_coord(ws, fragment).then(|| FRAG_COORD_PARAM.to_string()),
     );
     source.push_str(&emitter.emit_function(fragment_fn, true)?);
-    emit_explicit_entries(&mut source, ws, vertex, fragment, abi, span)?;
+    emit_explicit_entries(&mut source, ws, &ir.interner, vertex, fragment, abi, span)?;
 
     Ok(WgslShaderEmission {
         source,
@@ -1728,6 +1754,7 @@ fn emit_explicit_uniforms(out: &mut String, abi: &WgslAbiPlan) {
 fn emit_explicit_entries(
     out: &mut String,
     ws: &Workspace,
+    interner: &MonoInterner,
     vertex: &ShaderStageIr,
     fragment: &ShaderStageIr,
     abi: &WgslAbiPlan,
@@ -1758,7 +1785,7 @@ fn emit_explicit_entries(
         .collect::<Vec<_>>()
         .join(", ");
     writeln!(out, "  let attrs = {}({});", input.struct_name, args).unwrap();
-    writeln!(out, "  let result = {}(attrs);", vertex.entry.symbol(ws)).unwrap();
+    writeln!(out, "  let result = {}(attrs);", vertex.entry.inst.symbol(ws, interner)).unwrap();
     writeln!(out, "  var output: {output};").unwrap();
     out.push_str("  output.position = result.position;\n");
     for field in &abi.varyings {
@@ -1814,14 +1841,14 @@ fn emit_explicit_entries(
         "vary".to_string()
     };
     if mrt {
-        writeln!(out, "  let result = {}({call_args});", fragment.entry.symbol(ws)).unwrap();
+        writeln!(out, "  let result = {}({call_args});", fragment.entry.inst.symbol(ws, interner)).unwrap();
         writeln!(out, "  var targets: {result_ty};").unwrap();
         for output in outputs {
             writeln!(out, "  targets.{0} = result.{0};", output.name).unwrap();
         }
         out.push_str("  return targets;\n}\n");
     } else {
-        writeln!(out, "  return {}({call_args});", fragment.entry.symbol(ws)).unwrap();
+        writeln!(out, "  return {}({call_args});", fragment.entry.inst.symbol(ws, interner)).unwrap();
         out.push_str("}\n");
     }
     Ok(())
@@ -2040,7 +2067,7 @@ enum ParamRole {
 }
 
 fn function_for_instance<'a>(ws: &'a Workspace, instance: &ShaderInstance) -> &'a Function {
-    &ws.module(instance.fref.module).functions[instance.fref.func]
+    &ws.module(instance.fref().module).functions[instance.fref().func]
 }
 
 fn type_expr(ws: &Workspace, ty: TyId) -> Option<TypeExpr> {
@@ -2344,6 +2371,7 @@ struct LoopInfo {
 
 struct FunctionEmitter<'a> {
     ws: &'a Workspace,
+    interner: &'a MonoInterner,
     stage: &'a ShaderStageIr,
     instance: &'a ShaderInstance,
     body: &'a MirFunc,
@@ -2372,6 +2400,7 @@ struct FunctionEmitter<'a> {
 impl<'a> FunctionEmitter<'a> {
     fn new(
         ws: &'a Workspace,
+        interner: &'a MonoInterner,
         stage: &'a ShaderStageIr,
         instance: &'a ShaderInstance,
         body: &'a MirFunc,
@@ -2417,6 +2446,7 @@ impl<'a> FunctionEmitter<'a> {
         }
         let mut emitter = Self {
             ws,
+            interner,
             stage,
             instance,
             body,
@@ -2521,7 +2551,7 @@ impl<'a> FunctionEmitter<'a> {
             }
             None => String::new(),
         };
-        let name = self.instance.symbol(self.ws);
+        let name = self.instance.inst.symbol(self.ws, self.interner);
         let params = self.render_params(entry)?;
 
         let mut head = String::new();
@@ -2927,7 +2957,7 @@ impl<'a> FunctionEmitter<'a> {
                     format!(
                         "WGSL load of `{}` in `{}` has no neutral type",
                         self.cell_names[cell],
-                        self.instance.symbol(self.ws)
+                        self.instance.inst.symbol(self.ws, self.interner)
                     ),
                 )
             }),
@@ -3223,16 +3253,17 @@ impl<'a> FunctionEmitter<'a> {
         func: skull_mir::mir::FuncRef,
     ) -> Result<ShaderInstance, CompilerError> {
         let function = &self.ws.module(func.module).functions[func.func];
-        let key = self
+        let instance = self
             .body
-            .spec_bindings
+            .callee_instances
             .get(&iid)
             .cloned()
-            .unwrap_or_default();
-        if let Some(instance) = self.stage.order.iter().find(|instance| {
-            instance.fref == func && (instance.key == key || function.generics.is_empty())
-        }) {
-            return Ok(instance.clone());
+            .map(ShaderInstance::new)
+            .or_else(|| function.generics.is_empty().then(|| ShaderInstance::plain(func)));
+        if let Some(instance) = instance {
+            if self.stage.order.iter().any(|candidate| candidate == &instance) {
+                return Ok(instance);
+            }
         }
         Err(err(
             self.span,
@@ -3510,7 +3541,7 @@ impl<'a> FunctionEmitter<'a> {
             )),
             None => {
                 let instance = self.resolve_callee(iid, func)?;
-                let self_name = instance.symbol(self.ws);
+                let self_name = instance.inst.symbol(self.ws, self.interner);
                 let rendered = args
                     .iter()
                     .map(|arg| self.render_val(*arg))

@@ -16,6 +16,9 @@ use skull::mir_emit::{
     emit_full, emit_full_in_for_renderer, emit_incremental,
     emit_overlay as emit_overlay_result, MirEmit, RendererTarget, SkullEmitCache,
 };
+use skull_codegen_shader::ConcreteStageInput;
+use skull_mir::shader_ir::ShaderStage;
+use std::sync::Arc;
 
 fn emit_overlay(
     ws: &Workspace,
@@ -394,8 +397,9 @@ fn sprite_basic_vert(@attr a: SpriteBasicVert, @engine e: EngineU) -> SpriteBasi
 fn sprite_basic_frag(vary: SpriteBasicVary, @textures t: MainTex) -> Vec4 {
     return texture(t.uTexture, vary.TexCoord) * vary.VertexColor
 }
+fn shader_channel(x: float) -> float { return x }
 @shader(fragment)
-fn blit_frag(tc: Vec2) -> Vec4 { return Vec4 { x: tc.x, y: 0.0, z: 1.0, w: 1.0 } }
+fn blit_frag(tc: Vec2) -> Vec4 { return Vec4 { x: shader_channel(tc.x), y: 0.0, z: 1.0, w: 1.0 } }
 @shader(fragment)
 fn present_frag(tc: Vec2) -> Vec4 { return Vec4 { x: 0.0, y: tc.y, z: 1.0, w: 1.0 } }
 @shader(fragment)
@@ -431,4 +435,93 @@ fn selected_wgpu_registration_is_exactly_the_four_selected_artifacts() {
             "selected root {root} is missing from WGSL registration"
         );
     }
+}
+
+#[test]
+fn selected_wgpu_planning_reads_the_exact_graph_instance_and_concrete_plan() {
+    let ws = ws_with_stdlib(WGPU_FULLSCREEN_SRC);
+    let mid = test_mid(&ws);
+    let (emit, cache) = emit_full_in_for_renderer(&ws, mid, None, RendererTarget::Wgpu)
+        .expect("selected artifacts emit");
+    assert_eq!(emit.lua.matches("__rock_wgpu_shader_register(").count(), 4);
+
+    let blit = cache
+        .shader_view()
+        .roots
+        .iter()
+        .find(|instance| {
+            ws.module(instance.func.module).functions[instance.func.func].name.as_str()
+                == "blit_frag"
+        })
+        .expect("blit root");
+    let program_view = cache
+        .shader_view()
+        .program_views
+        .iter()
+        .find(|view| view.program.frag == blit.func)
+        .expect("blit program view");
+    let stage = program_view
+        .stages
+        .iter()
+        .find(|stage| stage.stage == ShaderStage::Fragment)
+        .expect("blit fragment view");
+    assert!(cache.graph().instances.contains(&stage.entry));
+    assert_eq!(stage.retained.len(), stage.helpers.len() + 1);
+    assert_eq!(stage.order.len(), stage.helpers.len());
+
+    let entry_plan = program_view
+        .concrete_plans
+        .get(&stage.entry)
+        .expect("the retained entry has a concrete body plan");
+    assert_eq!(entry_plan.function_instance(), Some(&stage.entry));
+    assert!(!entry_plan.signature.params.is_empty());
+    assert!(!entry_plan.callees.is_empty());
+
+    let interner = Arc::clone(cache.graph().interner());
+    let scx = skull_mir::lower::ScalarCtx::new_values_first_class(&ws)
+        .sharing(Arc::clone(&interner));
+    assert!(Arc::ptr_eq(&interner, &scx.interner_handle()));
+    let input = ConcreteStageInput {
+        stage: stage.stage,
+        entry: stage.entry.clone(),
+        retained: stage.retained.iter().cloned().collect(),
+        helpers: stage.helpers.iter().cloned().collect(),
+        builtins: stage.builtins.iter().cloned().collect(),
+        order: stage.order.clone(),
+        dependencies: stage.dependencies.clone(),
+        concrete_plans: Arc::clone(&program_view.concrete_plans),
+    };
+    let neutral = skull_codegen_shader::plan_fullscreen_fragment_from_concrete(
+        &ws,
+        &scx,
+        &input,
+        &skull_codegen_wgsl::WgslShaderPolicy,
+    )
+    .expect("the selected registration uses the graph-backed concrete plan");
+    assert_eq!(neutral.entry.inst, stage.entry);
+    assert!(Arc::ptr_eq(&neutral.ir.interner, &interner));
+    assert_eq!(neutral.dependencies, stage.dependencies);
+    let abi = skull_codegen_wgsl::WgslAbiPlan::wgsl(
+        &neutral.interface,
+        bone_semantic::prelude::Span::default(),
+    )
+    .expect("WGSL ABI");
+    assert!(!abi.wire().is_empty());
+    assert!(!abi.fragment_outputs.is_empty());
+
+    let mut missing = (*program_view.concrete_plans).clone();
+    assert!(missing.remove(&stage.entry).is_some());
+    let rejected = match skull_codegen_shader::plan_fullscreen_fragment_from_concrete(
+        &ws,
+        &scx,
+        &ConcreteStageInput {
+            concrete_plans: Arc::new(missing),
+            ..input
+        },
+        &skull_codegen_wgsl::WgslShaderPolicy,
+    ) {
+        Ok(_) => panic!("a missing concrete plan must fail closed"),
+        Err(error) => error,
+    };
+    assert!(rejected.message.contains("no concrete plan"), "{rejected}");
 }

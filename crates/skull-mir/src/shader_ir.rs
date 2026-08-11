@@ -43,7 +43,9 @@ pub enum GlslProfile {
 use crate::gpu_layout::{ArrayMemberDecl, AttrKind, SamplerKind, WireKind};
 use crate::instance::Instance;
 use crate::mir::{FuncRef, MirFunc};
+use crate::monoty::MonoInterner;
 use bone_semantic::inference::Workspace;
+use std::sync::Arc;
 
 /// A logical pipeline stage. Compute joins this enum rather than arriving as a
 /// GLSL qualifier or a string (plan Stage 3).
@@ -152,6 +154,9 @@ impl ShaderStageIr {
 /// second backend renders these rather than re-walking the entry.
 #[derive(Clone)]
 pub struct ShaderIR {
+    /// The arena that minted every `Instance` in these stages. A target emitter
+    /// must use this same handle for specialization symbols and substitutions.
+    pub interner: Arc<MonoInterner>,
     pub stages: Vec<ShaderStageIr>,
 }
 

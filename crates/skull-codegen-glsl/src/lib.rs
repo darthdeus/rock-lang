@@ -611,6 +611,38 @@ pub fn is_lowered_native_operator(
         ) || matches!(ws.render(None, param.ty).as_str(), "float" | "int")
     })
 }
+
+pub struct GlslShaderPolicy;
+
+impl skull_codegen_shader::ShaderPlannerPolicy for GlslShaderPolicy {
+    fn inline_call(&self, function: &Function) -> bool {
+        renders_inline(function)
+    }
+
+    fn backend_name(&self) -> &'static str {
+        "GLSL"
+    }
+
+    fn inline_instance(
+        &self,
+        ws: &Workspace,
+        function: &Function,
+        instance: &Instance,
+        interner: &MonoInterner,
+    ) -> bool {
+        renders_inline_instance(ws, function, instance, interner)
+    }
+
+    fn lowered_native_operator(
+        &self,
+        ws: &Workspace,
+        function: &Function,
+        instance: &Instance,
+        interner: &MonoInterner,
+    ) -> bool {
+        is_lowered_native_operator(ws, function, instance, interner)
+    }
+}
 /// The GLSL infix operator symbol for a non-scalar `__op_*` (Vec operator) call.
 fn vec_op_symbol(name: &str) -> Option<&'static str> {
     match name {
@@ -3446,23 +3478,10 @@ struct StagePlan {
     uses_imod: bool,
     dependencies: Vec<FuncRef>,
     concrete_plans: Arc<ConcretePlans>,
+    concrete_interner: Arc<MonoInterner>,
 }
 
 impl StagePlan {
-    fn from_ir(ir: ShaderStageIr) -> Self {
-        let (mut uses_idiv, mut uses_imod) = (false, false);
-        for body in ir.bodies.values().chain(std::iter::once(&ir.body)) {
-            for (_, instruction) in body.insts.iter() {
-                match instruction {
-                    Inst::IntDiv(..) => uses_idiv = true,
-                    Inst::IntMod(..) => uses_imod = true,
-                    _ => {}
-                }
-            }
-        }
-        Self { ir, uses_idiv, uses_imod }
-    }
-
     /// The helpers this stage emits: the int-div/mod prelude the reachable
     /// bodies need, then each helper definition in emission order.
     fn render_helpers(
@@ -3522,114 +3541,24 @@ fn plan_stage_from_view(
             view.stage
         )));
     }
-    if view.order.iter().any(|instance| instance == &view.entry)
-        || view.order.len() != view.helpers.len()
-        || view.order.iter().cloned().collect::<std::collections::BTreeSet<_>>() != view.helpers
-    {
-        return Err(CompilerError::new_no_location(
-            "shader graph/view helper order is not the retained helper population".to_string(),
-        ));
-    }
-    let mut expected_retained = view.helpers.clone();
-    expected_retained.insert(view.entry.clone());
-    if expected_retained != view.retained {
-        return Err(CompilerError::new_no_location(
-            "shader graph/view retained population is not entry plus helpers".to_string(),
-        ));
-    }
-
-    let entry = ShaderInstance::new(view.entry.clone());
-    let entry_f = &ws.module(entry.fref().module).functions[entry.fref().func];
-    let entry_plan = concrete_plans.get(&view.entry).ok_or_else(|| {
-        err(
-            entry_f.name_span,
-            format!("shader profile: no concrete plan for `{}`", entry_f.name),
-        )
-    })?;
-    let entry_body = skull_mir::lower::lower_instance_with_plans(
+    let input = skull_codegen_shader::ConcreteStageInput {
+        stage: expected_ir,
+        entry: view.entry.clone(),
+        retained: view.retained.iter().cloned().collect(),
+        helpers: view.helpers.iter().cloned().collect(),
+        builtins: view.builtins.iter().cloned().collect(),
+        order: view.order.clone(),
+        dependencies: view.dependencies.clone(),
+        concrete_plans: Arc::clone(concrete_plans),
+    };
+    let ir = skull_codegen_shader::plan_stage_from_concrete(
         ws,
         scx,
-        entry_plan,
-        concrete_plans,
-    )
-    .map_err(|e| {
-        err(
-            entry_f.name_span,
-            format!(
-                "shader profile: `{}` cannot lower for GLSL: {}",
-                entry_f.name, e.message
-            ),
-        )
-    })?;
-    let mut entry_callees = Vec::new();
-    profile_body(ws, entry_f, &entry_body, &mut entry_callees, true)?;
-
-    let mut allowed: HashSet<ShaderInstance> = HashSet::default();
-    allowed.insert(entry.clone());
-    allowed.extend(view.order.iter().cloned().map(ShaderInstance::new));
-    let mut discovered_builtins: HashSet<FuncRef> = HashSet::default();
-    let entry_calls = checked_view_callees(
-        ws,
-        &entry,
-        entry_callees,
-        &allowed,
-        scx.interner(),
-        &mut discovered_builtins,
+        &input,
+        &GlslShaderPolicy,
     )?;
-    let mut calls: HashMap<ShaderInstance, Vec<ShaderInstance>> = HashMap::default();
-    calls.insert(entry.clone(), entry_calls);
-    let mut bodies: HashMap<ShaderInstance, MirFunc> = HashMap::default();
-    for raw in &view.order {
-        let helper = ShaderInstance::new(raw.clone());
-        let f = &ws.module(helper.fref().module).functions[helper.fref().func];
-        let helper_plan = concrete_plans.get(raw).ok_or_else(|| {
-            err(f.name_span, format!("shader profile: no concrete plan for `{}`", f.name))
-        })?;
-        check_tier0_signature_concrete(scx.interner(), &helper_plan.signature, f.name_span)?;
-        let body = skull_mir::lower::lower_instance_with_plans(
-            ws,
-            scx,
-            helper_plan,
-            concrete_plans,
-        )
-        .map_err(|e| {
-            err(
-                f.name_span,
-                format!("shader profile: `{}` cannot lower for GLSL: {}", f.name, e.message),
-            )
-        })?;
-        let mut callees = Vec::new();
-        profile_body(ws, f, &body, &mut callees, true)?;
-        calls.insert(
-            helper.clone(),
-            checked_view_callees(
-                ws,
-                &helper,
-                callees,
-                &allowed,
-                scx.interner(),
-                &mut discovered_builtins,
-            )?,
-        );
-        bodies.insert(helper, body);
-    }
-    let expected_builtins: HashSet<_> = view.builtins.iter().map(|instance| instance.func).collect();
-    if discovered_builtins != expected_builtins {
-        return Err(CompilerError::new_no_location(
-            "shader graph/view builtin declaration population differs from lowered calls"
-                .to_string(),
-        ));
-    }
-    reject_population_cycles(ws, &calls)?;
-    reject_stage_violations(
-        ws,
-        expected,
-        bodies.values().chain(std::iter::once(&entry_body)),
-        entry_f.name_span,
-    )?;
-
     let (mut uses_idiv, mut uses_imod) = (false, false);
-    for body in bodies.values().chain(std::iter::once(&entry_body)) {
+    for body in ir.bodies.values().chain(std::iter::once(&ir.body)) {
         for (_, inst) in body.insts.iter() {
             match inst {
                 Inst::IntDiv(..) => uses_idiv = true,
@@ -3638,66 +3567,14 @@ fn plan_stage_from_view(
             }
         }
     }
-    let order: Vec<ShaderInstance> = view.order.iter().cloned().map(ShaderInstance::new).collect();
-    let ir_stage = match expected {
-        Stage::Vertex => IrStage::Vertex,
-        Stage::Fragment => IrStage::Fragment,
-    };
-    let ir = ShaderStageIr { stage: ir_stage, entry, body: entry_body, order, bodies };
-    if ir.declarations() != view.dependencies {
-        return Err(CompilerError::new_no_location(
-            "shader graph/view hot-reload dependencies differ from lowered order".to_string(),
-        ));
-    }
     Ok(StagePlan {
         ir,
         uses_idiv,
         uses_imod,
         dependencies: view.dependencies.clone(),
         concrete_plans: Arc::clone(concrete_plans),
+        concrete_interner: scx.interner_handle(),
     })
-}
-
-fn checked_view_callees(
-    ws: &Workspace,
-    caller: &ShaderInstance,
-    callees: Vec<ShaderInstance>,
-    allowed: &HashSet<ShaderInstance>,
-    interner: &MonoInterner,
-    builtins: &mut HashSet<FuncRef>,
-) -> Result<Vec<ShaderInstance>, CompilerError> {
-    let caller_f = &ws.module(caller.fref().module).functions[caller.fref().func];
-    let mut retained = Vec::new();
-    for callee in callees {
-        let f = &ws.module(callee.fref().module).functions[callee.fref().func];
-        if renders_inline_instance(ws, f, &callee.inst, interner) {
-            builtins.insert(callee.fref());
-            continue;
-        }
-        if is_lowered_native_operator(ws, f, &callee.inst, interner) {
-            continue;
-        }
-        if f.is_extern || f.inline_body.is_some() {
-            return Err(err(
-                f.name_span,
-                format!(
-                    "shader profile: `{}` has no emittable body and no GLSL intrinsic mapping",
-                    f.name
-                ),
-            ));
-        }
-        if !allowed.contains(&callee) {
-            return Err(err(
-                caller_f.name_span,
-                format!(
-                    "shader graph/view omitted the concrete callee `{}` reached by `{}`",
-                    f.name, caller_f.name
-                ),
-            ));
-        }
-        retained.push(callee);
-    }
-    Ok(retained)
 }
 
 fn reject_population_cycles(
@@ -3794,7 +3671,7 @@ fn plan_shader_entry_inner(
     // the fn-library tier-0 leaf check: an `@uniform` block param is legal here
     // and is not a tier-0 leaf (asking the library check of an entry rejected
     // 1,539 real shaders).
-    let class = classify_entry(ws, f)?;
+    let class = skull_codegen_shader::classify_entry(ws, f)?;
     let stage = plan_stage_from_view(ws, scx, stage_view, Stage::Fragment, concrete_plans)?;
     let interface = ShaderInterfacePlan {
         stages: vec![IrStage::Fragment],
@@ -3823,9 +3700,9 @@ fn plan_shader_entry_inner(
         // an A2 feature, so these are absences rather than omissions.
         ..Default::default()
     };
-    check_entry_collisions(&interface, f.name_span)?;
+    skull_codegen_shader::check_entry_collisions(&interface, f.name_span)?;
     let abi = ShaderAbiPlan::glsl(&interface, f.name_span)?;
-    let shape = entry_shape(&class, &interface);
+    let shape = entry_shape(&class.global_params, &class.sampler_params, &interface);
     Ok(EntryPlan { fref, shape, stage, interface, abi })
 }
 
@@ -3962,7 +3839,10 @@ fn render_shader_entry(
         dependencies: plan.stage.dependencies(),
         interface: plan.interface.clone(),
         abi: plan.abi.clone(),
-        ir: ShaderIR { stages: vec![plan.stage.ir.clone()] },
+        ir: ShaderIR {
+            interner: std::sync::Arc::clone(&plan.stage.concrete_interner),
+            stages: vec![plan.stage.ir.clone()],
+        },
     })
 }
 
@@ -4559,33 +4439,6 @@ fn classify_pipeline_fragment(ws: &Workspace, f: &Function, vert_varyings_ty: Ty
         arrays,
         output,
     })
-}
-
-/// Reject GPU builtins reached from the wrong stage: frag_coord/fwidth/discard
-/// are fragment-only, vertex_id is vertex-only.
-fn reject_stage_violations<'a>(
-    ws: &Workspace,
-    stage: Stage,
-    bodies: impl Iterator<Item = &'a MirFunc>,
-    span: Span,
-) -> Result<(), CompilerError> {
-    for mf in bodies {
-        for (_, inst) in mf.insts.iter() {
-            if let Inst::Call { func, .. } = inst {
-                let n = ws.module(func.module).functions[func.func].name;
-                match (stage, n.as_str()) {
-                    (Stage::Vertex, "fwidth" | "frag_coord" | "discard") => {
-                        return Err(err(span, format!("shader vertex: `{n}()` is a fragment-stage builtin, not available in the vertex stage")));
-                    }
-                    (Stage::Fragment, "vertex_id") => {
-                        return Err(err(span, format!("shader fragment: `{n}()` is a vertex-stage builtin, not available in the fragment stage")));
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-    Ok(())
 }
 
 /// Reject a fragment-stage read of the varyings `position` field: it is
@@ -5220,7 +5073,10 @@ fn render_shader_pipeline(
         dependencies,
         interface: plan.interface.clone(),
         abi: plan.abi.clone(),
-        ir: ShaderIR { stages: vec![plan.vert.ir.clone(), plan.frag.ir.clone()] },
+        ir: ShaderIR {
+            interner: std::sync::Arc::clone(&plan.vert.concrete_interner),
+            stages: vec![plan.vert.ir.clone(), plan.frag.ir.clone()],
+        },
     })
 }
 

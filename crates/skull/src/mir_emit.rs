@@ -2423,6 +2423,22 @@ const WGSL_SELECTED_ARTIFACTS: [(&str, bool); 4] = [
     ("sprite_basic_vert+sprite_basic_frag", false),
 ];
 
+fn concrete_stage_input(
+    view: &skull_graph::shader::ShaderStageView,
+    concrete_plans: &std::sync::Arc<skull_mir::concrete::ConcretePlans>,
+) -> skull_codegen_shader::ConcreteStageInput {
+    skull_codegen_shader::ConcreteStageInput {
+        stage: view.stage,
+        entry: view.entry.clone(),
+        retained: view.retained.iter().cloned().collect(),
+        helpers: view.helpers.iter().cloned().collect(),
+        builtins: view.builtins.iter().cloned().collect(),
+        order: view.order.clone(),
+        dependencies: view.dependencies.clone(),
+        concrete_plans: std::sync::Arc::clone(concrete_plans),
+    }
+}
+
 fn shader_registration_lines(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
@@ -2497,13 +2513,39 @@ fn shader_registration_lines(
                     "selected wgpu artifact {key} was not admitted by rock_shader"
                 )));
             };
+            let program_view = view
+                .program_views
+                .iter()
+                .find(|candidate| {
+                    candidate.program.vert == pair.vert && candidate.program.frag == pair.frag
+                })
+                .ok_or_else(|| {
+                    CompilerError::new_no_location(format!(
+                        "selected wgpu artifact {key} has no graph-owned shader view"
+                    ))
+                })?;
             let (shader_key, source, wire, semantic_wire, emission_dependencies) = if fullscreen {
                 if pair.vert.is_some() {
                     return Err(CompilerError::new_no_location(format!(
                         "selected wgpu artifact {key} is marked fullscreen but has an explicit vertex stage"
                     )));
                 }
-                let neutral = skull_codegen_wgsl::plan_fullscreen_artifact(ws, pair.frag)?;
+                let stage_view = program_view
+                    .stages
+                    .iter()
+                    .find(|stage| stage.stage == skull_mir::shader_ir::ShaderStage::Fragment)
+                    .ok_or_else(|| {
+                        CompilerError::new_no_location(format!(
+                            "selected wgpu artifact {key} has no fragment stage view"
+                        ))
+                    })?;
+                let input = concrete_stage_input(stage_view, &program_view.concrete_plans);
+                let neutral = skull_codegen_shader::plan_fullscreen_fragment_from_concrete(
+                    ws,
+                    scx,
+                    &input,
+                    &skull_codegen_wgsl::WgslShaderPolicy,
+                )?;
                 let abi = skull_codegen_wgsl::WgslAbiPlan::wgsl(
                     &neutral.interface,
                     bone_semantic::prelude::Span::default(),
@@ -2523,18 +2565,15 @@ fn shader_registration_lines(
                     emission.dependencies,
                 )
             } else {
-                let Some(vert) = pair.vert else {
+                if pair.vert.is_none() {
                     return Err(CompilerError::new_no_location(format!(
                         "selected wgpu artifact {key} has no explicit vertex stage"
                     )));
-                };
-                let vname = ws.module(vert.module).functions[vert.func].name;
-                let fname = ws.module(pair.frag.module).functions[pair.frag.func].name;
-                let glsl = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
+                }
+                let glsl = skull_codegen_glsl::emit_shader_pipeline_with_view(
                     ws,
-                    vert.module,
-                    vname.as_str(),
-                    fname.as_str(),
+                    scx,
+                    program_view,
                     profile,
                 )?;
                 let abi = skull_codegen_wgsl::WgslAbiPlan::explicit(
@@ -3428,6 +3467,11 @@ impl SkullEmitCache {
     /// present -- there is no build in which production has no graph.
     pub fn graph(&self) -> &crate::instance_graph::InstanceGraph {
         &self.graph
+    }
+
+    /// The shader artifact view used by the current renderer registration.
+    pub fn shader_view(&self) -> &crate::shader_artifact::ShaderArtifactView {
+        &self.shader_view
     }
 
     /// The Lua artifact's realization of [`Self::graph`], from the same roots

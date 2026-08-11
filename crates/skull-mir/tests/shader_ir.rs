@@ -96,7 +96,10 @@ fn a_program_reload_set_dedups_across_stages() {
     let vert = stage_ir(ShaderInstance::plain(fref(0, 1)), vec![inst(0, 7, Some(MonoTy::Float))]);
     let mut frag = stage_ir(ShaderInstance::plain(fref(0, 2)), vec![inst(0, 7, Some(MonoTy::Int))]);
     frag.stage = ShaderStage::Fragment;
-    let ir = ShaderIR { stages: vec![vert, frag] };
+    let ir = ShaderIR {
+        interner: std::sync::Arc::new(skull_mir::monoty::MonoInterner::new()),
+        stages: vec![vert, frag],
+    };
 
     let decls = ir.declarations();
     assert_eq!(

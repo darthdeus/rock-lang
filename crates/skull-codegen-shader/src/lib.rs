@@ -14,7 +14,9 @@ use bone_semantic::prelude::{FnList, ModuleId, Span};
 use comfy_la_arena::Idx;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use skull_mir::gpu_layout::{SamplerKind, WireKind, texture_slots};
-use skull_mir::lower::{ScalarCtx, SpecSubst, lower_instance_body};
+use skull_mir::concrete::ConcretePlans;
+use skull_mir::instance::Instance;
+use skull_mir::lower::{ScalarCtx, SpecSubst, lower_instance_source};
 use skull_mir::mir::{FuncRef, Inst, Lit, MirFunc};
 use skull_mir::monoty::{MonoCtor, MonoTy};
 use skull_mir::shader_ir::{
@@ -22,6 +24,7 @@ use skull_mir::shader_ir::{
     ShaderInstance, ShaderInterfacePlan, ShaderStage, ShaderStageIr, UniformRole,
 };
 use skull_parser::CompilerError;
+use std::sync::Arc;
 use ustr::Ustr;
 
 /// The target-specific part of planning: whether a call is rendered inline by
@@ -30,6 +33,40 @@ use ustr::Ustr;
 pub trait ShaderPlannerPolicy {
     fn inline_call(&self, function: &Function) -> bool;
     fn backend_name(&self) -> &'static str;
+
+    fn inline_instance(
+        &self,
+        _ws: &Workspace,
+        function: &Function,
+        _instance: &Instance,
+        _interner: &skull_mir::monoty::MonoInterner,
+    ) -> bool {
+        self.inline_call(function)
+    }
+
+    fn lowered_native_operator(
+        &self,
+        _ws: &Workspace,
+        _function: &Function,
+        _instance: &Instance,
+        _interner: &skull_mir::monoty::MonoInterner,
+    ) -> bool {
+        false
+    }
+}
+
+/// The graph/view facts translated by the driver for one retained shader stage.
+/// The neutral planner never discovers a second population from declarations.
+#[derive(Clone)]
+pub struct ConcreteStageInput {
+    pub stage: ShaderStage,
+    pub entry: Instance,
+    pub retained: Vec<Instance>,
+    pub helpers: Vec<Instance>,
+    pub builtins: Vec<Instance>,
+    pub order: Vec<Instance>,
+    pub dependencies: Vec<FuncRef>,
+    pub concrete_plans: Arc<ConcretePlans>,
 }
 
 /// A neutral fullscreen fragment artifact. The parameter indices are logical
@@ -294,6 +331,8 @@ fn profile_body(
     body: &MirFunc,
     callees: &mut Vec<ShaderInstance>,
     policy: &dyn ShaderPlannerPolicy,
+    concrete: bool,
+    interner: &skull_mir::monoty::MonoInterner,
 ) -> Result<(), CompilerError> {
     for (instruction_id, instruction) in body.insts.iter() {
         match instruction {
@@ -305,6 +344,8 @@ fn profile_body(
                     *func,
                     function.name_span,
                     policy,
+                    concrete,
+                    interner,
                 )?);
             }
             Inst::Global(name) => {
@@ -391,20 +432,39 @@ fn callee_instance(
     function: FuncRef,
     span: Span,
     policy: &dyn ShaderPlannerPolicy,
+    concrete: bool,
+    interner: &skull_mir::monoty::MonoInterner,
 ) -> Result<ShaderInstance, CompilerError> {
     let callee = &ws.module(function.module).functions[function.func];
-    let key = body
-        .spec_bindings
-        .get(&instruction_id)
-        .cloned()
-        .unwrap_or_default();
-    if policy.inline_call(callee) || callee.generics.is_empty() {
-        return Ok(ShaderInstance {
-            fref: function,
-            key,
-        });
+    let key = if concrete {
+        body.callee_instances.get(&instruction_id).cloned()
+    } else {
+        body.spec_bindings.get(&instruction_id).cloned()
+    };
+    let instance = match key {
+        Some(instance) => instance,
+        None => {
+            let base = Instance::base(function);
+            if callee.generics.is_empty() || policy.inline_instance(ws, callee, &base, interner) {
+                base
+            } else {
+                return Err(err(
+                    span,
+                    format!(
+                        "shader profile: the call to generic `{}` has no recorded instantiation, so {} has no concrete shape to emit",
+                        callee.name,
+                        policy.backend_name()
+                    ),
+                ));
+            }
+        }
+    };
+    if policy.inline_instance(ws, callee, &instance, interner)
+        || callee.generics.is_empty()
+    {
+        return Ok(ShaderInstance::new(instance));
     }
-    if key.is_empty() {
+    if instance.args.is_empty() {
         return Err(err(
             span,
             format!(
@@ -414,21 +474,18 @@ fn callee_instance(
             ),
         ));
     }
-    if key.len() != callee.generics.len() {
+    if instance.args.len() != callee.generics.len() {
         return Err(err(
             span,
             format!(
                 "shader profile: the call to generic `{}` recorded {} type argument(s) for {} declared generic(s)",
                 callee.name,
-                key.len(),
+                instance.args.len(),
                 callee.generics.len()
             ),
         ));
     }
-    Ok(ShaderInstance {
-        fref: function,
-        key,
-    })
+    Ok(ShaderInstance::new(instance))
 }
 
 struct Reach<'a> {
@@ -458,7 +515,7 @@ impl skull_mir::reach::ReachPolicy for Reach<'_> {
     }
 
     fn is_leaf(&mut self, instance: ShaderInstance) -> Result<bool, CompilerError> {
-        let function = &self.ws.module(instance.fref.module).functions[instance.fref.func];
+        let function = &self.ws.module(instance.fref().module).functions[instance.fref().func];
         if self.policy.inline_call(function) {
             return Ok(true);
         }
@@ -476,7 +533,7 @@ impl skull_mir::reach::ReachPolicy for Reach<'_> {
     }
 
     fn on_cycle(&mut self, instance: ShaderInstance) -> Result<(), CompilerError> {
-        let function = &self.ws.module(instance.fref.module).functions[instance.fref.func];
+        let function = &self.ws.module(instance.fref().module).functions[instance.fref().func];
         Err(err(
             function.name_span,
             format!(
@@ -488,16 +545,10 @@ impl skull_mir::reach::ReachPolicy for Reach<'_> {
     }
 
     fn visit(&mut self, instance: ShaderInstance) -> Result<Vec<ShaderInstance>, CompilerError> {
-        let function = &self.ws.module(instance.fref.module).functions[instance.fref.func];
-        let subst = instance.subst(self.ws);
+        let function = &self.ws.module(instance.fref().module).functions[instance.fref().func];
+        let subst = instance.subst(self.ws, self.scx.interner());
         check_tier0_signature_spec(self.ws, &subst, function, self.policy)?;
-        let body = lower_instance_body(
-            self.ws,
-            self.scx,
-            instance.fref.module,
-            instance.fref.func,
-            &subst,
-        )
+        let body = lower_instance_source(self.ws, self.scx, &instance.inst)
         .map_err(|error| {
             err(
                 function.name_span,
@@ -510,7 +561,15 @@ impl skull_mir::reach::ReachPolicy for Reach<'_> {
             )
         })?;
         let mut callees = Vec::new();
-        profile_body(self.ws, function, &body, &mut callees, self.policy)?;
+        profile_body(
+            self.ws,
+            function,
+            &body,
+            &mut callees,
+            self.policy,
+            false,
+            self.scx.interner(),
+        )?;
         self.bodies.insert(instance, body);
         Ok(callees)
     }
@@ -526,7 +585,7 @@ fn plan_stage(
 ) -> Result<ShaderStageIr, CompilerError> {
     let function = &ws.module(fref.module).functions[fref.func];
     let entry = ShaderInstance::plain(fref);
-    let body = lower_instance_body(ws, scx, fref.module, fref.func, &entry.subst(ws)).map_err(
+    let body = lower_instance_source(ws, scx, &entry.inst).map_err(
         |error| {
             err(
                 function.name_span,
@@ -540,7 +599,15 @@ fn plan_stage(
         },
     )?;
     let mut callees = Vec::new();
-    profile_body(ws, function, &body, &mut callees, policy)?;
+    profile_body(
+        ws,
+        function,
+        &body,
+        &mut callees,
+        policy,
+        false,
+        scx.interner(),
+    )?;
     let mut reach = Reach {
         ws,
         scx,
@@ -563,6 +630,254 @@ fn plan_stage(
         order,
         bodies: reach.bodies,
     })
+}
+
+fn checked_concrete_callees(
+    ws: &Workspace,
+    caller: &ShaderInstance,
+    callees: Vec<ShaderInstance>,
+    allowed: &HashSet<ShaderInstance>,
+    policy: &dyn ShaderPlannerPolicy,
+    interner: &skull_mir::monoty::MonoInterner,
+    builtins: &mut HashSet<FuncRef>,
+) -> Result<Vec<ShaderInstance>, CompilerError> {
+    let caller_f = &ws.module(caller.fref().module).functions[caller.fref().func];
+    let mut retained = Vec::new();
+    for callee in callees {
+        let f = &ws.module(callee.fref().module).functions[callee.fref().func];
+        if policy.inline_instance(ws, f, &callee.inst, interner) {
+            builtins.insert(callee.fref());
+            continue;
+        }
+        if policy.lowered_native_operator(ws, f, &callee.inst, interner) {
+            continue;
+        }
+        if f.is_extern || f.inline_body.is_some() {
+            return Err(err(
+                f.name_span,
+                format!(
+                    "shader profile: `{}` has no emittable body and no {} intrinsic mapping",
+                    f.name,
+                    policy.backend_name()
+                ),
+            ));
+        }
+        if !allowed.contains(&callee) {
+            return Err(err(
+                caller_f.name_span,
+                format!(
+                    "shader graph/view omitted the concrete callee `{}` reached by `{}`",
+                    f.name, caller_f.name
+                ),
+            ));
+        }
+        retained.push(callee);
+    }
+    Ok(retained)
+}
+
+fn reject_concrete_cycles(
+    ws: &Workspace,
+    calls: &HashMap<ShaderInstance, Vec<ShaderInstance>>,
+    policy: &dyn ShaderPlannerPolicy,
+) -> Result<(), CompilerError> {
+    fn visit(
+        ws: &Workspace,
+        calls: &HashMap<ShaderInstance, Vec<ShaderInstance>>,
+        policy: &dyn ShaderPlannerPolicy,
+        node: &ShaderInstance,
+        active: &mut HashSet<ShaderInstance>,
+        done: &mut HashSet<ShaderInstance>,
+    ) -> Result<(), CompilerError> {
+        if !active.insert(node.clone()) {
+            let f = &ws.module(node.fref().module).functions[node.fref().func];
+            return Err(err(
+                f.name_span,
+                format!(
+                    "shader profile: recursion through `{}` is not allowed on {}",
+                    f.name,
+                    policy.backend_name()
+                ),
+            ));
+        }
+        if !done.insert(node.clone()) {
+            active.remove(node);
+            return Ok(());
+        }
+        for callee in calls.get(node).into_iter().flatten() {
+            visit(ws, calls, policy, callee, active, done)?;
+        }
+        active.remove(node);
+        Ok(())
+    }
+
+    let mut active = HashSet::default();
+    let mut done = HashSet::default();
+    for node in calls.keys() {
+        visit(ws, calls, policy, node, &mut active, &mut done)?;
+    }
+    Ok(())
+}
+
+/// Lower and profile one graph-retained shader stage using its mandatory
+/// concrete plans. The driver supplies the population; this crate supplies the
+/// one target-neutral body/interface planner.
+pub fn plan_stage_from_concrete(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    input: &ConcreteStageInput,
+    policy: &dyn ShaderPlannerPolicy,
+) -> Result<ShaderStageIr, CompilerError> {
+    let order_set: HashSet<Instance> = input.order.iter().cloned().collect();
+    let helper_set: HashSet<Instance> = input.helpers.iter().cloned().collect();
+    if order_set.len() != input.order.len()
+        || helper_set.len() != input.helpers.len()
+        || order_set != helper_set
+        || input.order.iter().any(|instance| instance == &input.entry)
+    {
+        return Err(CompilerError::new_no_location(
+            "shader graph/view helper order is not a unique retained helper population"
+                .to_string(),
+        ));
+    }
+    let mut expected_retained: HashSet<Instance> = input.order.iter().cloned().collect();
+    expected_retained.insert(input.entry.clone());
+    let retained_set: HashSet<Instance> = input.retained.iter().cloned().collect();
+    if retained_set.len() != input.retained.len() || retained_set != expected_retained {
+        return Err(CompilerError::new_no_location(
+            "shader graph/view retained population is not entry plus helpers".to_string(),
+        ));
+    }
+
+    let entry = ShaderInstance::new(input.entry.clone());
+    let entry_function = &ws.module(entry.fref().module).functions[entry.fref().func];
+    let entry_plan = input.concrete_plans.get(&input.entry).ok_or_else(|| {
+        err(
+            entry_function.name_span,
+            format!("shader profile: no concrete plan for `{}`", entry_function.name),
+        )
+    })?;
+    let entry_body = skull_mir::lower::lower_instance_with_plans(
+        ws,
+        scx,
+        entry_plan,
+        &input.concrete_plans,
+    )
+    .map_err(|e| {
+        err(
+            entry_function.name_span,
+            format!(
+                "shader profile: `{}` cannot lower for {}: {}",
+                entry_function.name,
+                policy.backend_name(),
+                e.message
+            ),
+        )
+    })?;
+    let mut entry_callees = Vec::new();
+    profile_body(
+        ws,
+        entry_function,
+        &entry_body,
+        &mut entry_callees,
+        policy,
+        true,
+        scx.interner(),
+    )?;
+
+    let mut allowed: HashSet<ShaderInstance> = HashSet::default();
+    allowed.insert(entry.clone());
+    allowed.extend(input.order.iter().cloned().map(ShaderInstance::new));
+    let mut discovered_builtins = HashSet::default();
+    let entry_calls = checked_concrete_callees(
+        ws,
+        &entry,
+        entry_callees,
+        &allowed,
+        policy,
+        scx.interner(),
+        &mut discovered_builtins,
+    )?;
+    let mut calls = HashMap::default();
+    calls.insert(entry.clone(), entry_calls);
+    let mut bodies = HashMap::default();
+    for raw in &input.order {
+        let helper = ShaderInstance::new(raw.clone());
+        let function = &ws.module(helper.fref().module).functions[helper.fref().func];
+        let plan = input.concrete_plans.get(raw).ok_or_else(|| {
+            err(
+                function.name_span,
+                format!("shader profile: no concrete plan for `{}`", function.name),
+            )
+        })?;
+        let body = skull_mir::lower::lower_instance_with_plans(
+            ws,
+            scx,
+            plan,
+            &input.concrete_plans,
+        )
+        .map_err(|e| {
+            err(
+                function.name_span,
+                format!(
+                    "shader profile: `{}` cannot lower for {}: {}",
+                    function.name,
+                    policy.backend_name(),
+                    e.message
+                ),
+            )
+        })?;
+        let mut callees = Vec::new();
+        profile_body(
+            ws,
+            function,
+            &body,
+            &mut callees,
+            policy,
+            true,
+            scx.interner(),
+        )?;
+        let checked = checked_concrete_callees(
+            ws,
+            &helper,
+            callees,
+            &allowed,
+            policy,
+            scx.interner(),
+            &mut discovered_builtins,
+        )?;
+        calls.insert(helper.clone(), checked);
+        bodies.insert(helper, body);
+    }
+    let expected_builtins: HashSet<FuncRef> = input.builtins.iter().map(|instance| instance.func).collect();
+    if discovered_builtins != expected_builtins {
+        return Err(CompilerError::new_no_location(
+            "shader graph/view builtin declaration population differs from lowered calls"
+                .to_string(),
+        ));
+    }
+    reject_concrete_cycles(ws, &calls, policy)?;
+    reject_stage_violations(
+        ws,
+        input.stage,
+        bodies.values().chain(std::iter::once(&entry_body)),
+        entry_function.name_span,
+    )?;
+
+    let order = input.order.iter().cloned().map(ShaderInstance::new).collect();
+    let ir = ShaderStageIr {
+        stage: input.stage,
+        entry,
+        body: entry_body,
+        order,
+        bodies,
+    };
+    if ir.declarations() != input.dependencies {
+        return Err(CompilerError::new_no_location(
+            "shader graph/view hot-reload dependencies differ from lowered order".to_string(),
+        ));
+    }
+    Ok(ir)
 }
 
 fn reject_stage_violations<'a>(
@@ -601,12 +916,12 @@ fn reject_stage_violations<'a>(
     Ok(())
 }
 
-struct EntryClass {
-    global_params: Vec<usize>,
-    sampler_params: Vec<usize>,
-    samplers: Vec<(usize, Ustr, SamplerKind)>,
-    texture_group: Option<Ustr>,
-    uniform_group: Option<Ustr>,
+pub struct EntryClass {
+    pub global_params: Vec<usize>,
+    pub sampler_params: Vec<usize>,
+    pub samplers: Vec<(usize, Ustr, SamplerKind)>,
+    pub texture_group: Option<Ustr>,
+    pub uniform_group: Option<Ustr>,
 }
 
 fn has_anno(function: &Function, index: usize, name: &str) -> bool {
@@ -685,7 +1000,7 @@ fn reject_conflicting_texture_role(
     Ok(())
 }
 
-fn classify_entry(ws: &Workspace, function: &Function) -> Result<EntryClass, CompilerError> {
+pub fn classify_entry(ws: &Workspace, function: &Function) -> Result<EntryClass, CompilerError> {
     let span = function.name_span;
     let mut uniform_param = None;
     let mut samplers = Vec::new();
@@ -833,7 +1148,7 @@ fn bare_sampler_list(
         .collect()
 }
 
-fn check_entry_collisions(
+pub fn check_entry_collisions(
     interface: &ShaderInterfacePlan,
     span: Span,
 ) -> Result<(), CompilerError> {
@@ -866,6 +1181,82 @@ fn check_entry_collisions(
 
 /// Build the first target-neutral artifact shape: one compiler-owned fragment
 /// entry plus the fullscreen vertex supplied by a physical backend.
+pub fn plan_fullscreen_fragment_from_concrete(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    input: &ConcreteStageInput,
+    policy: &dyn ShaderPlannerPolicy,
+) -> Result<ShaderArtifactPlan, CompilerError> {
+    if input.stage != ShaderStage::Fragment {
+        return Err(CompilerError::new_no_location(
+            "shader artifact: fullscreen input must be a fragment stage".to_string(),
+        ));
+    }
+    let function = &ws.module(input.entry.func.module).functions[input.entry.func.func];
+    match shader_stage(function) {
+        Some("fragment") => {}
+        Some(stage) => {
+            return Err(err(
+                function.name_span,
+                format!(
+                    "shader entry: @shader({stage}) is not supported by the fullscreen artifact; only @shader(fragment) is admitted"
+                ),
+            ));
+        }
+        None => {
+            return Err(err(
+                function.name_span,
+                format!(
+                    "shader entry: `{}` has no @shader(fragment) annotation",
+                    function.name
+                ),
+            ));
+        }
+    }
+    let class = classify_entry(ws, function)?;
+    let stage = plan_stage_from_concrete(ws, scx, input, policy)?;
+    let interface = ShaderInterfacePlan {
+        stages: vec![ShaderStage::Fragment],
+        uniform_groups: class
+            .uniform_group
+            .map(|group| {
+                logical_uniform_group(
+                    ws,
+                    UniformRole::Stage(ShaderStage::Fragment),
+                    group,
+                    function.name_span,
+                )
+            })
+            .transpose()?
+            .into_iter()
+            .collect(),
+        textures: logical_textures(
+            ws,
+            class.texture_group,
+            class
+                .samplers
+                .iter()
+                .any(|(index, _, _)| !class.global_params.contains(index)),
+            function.name_span,
+        )?,
+        bare_samplers: bare_sampler_list(&class.samplers, &class.global_params),
+        fragment_output: FragmentOutput::Single(WireKind::F32x4),
+        ..Default::default()
+    };
+    check_entry_collisions(&interface, function.name_span)?;
+    Ok(ShaderArtifactPlan {
+        entry: stage.entry.clone(),
+        ir: ShaderIR {
+            interner: scx.interner_handle(),
+            stages: vec![stage],
+        },
+        interface,
+        dependencies: input.dependencies.clone(),
+        global_params: class.global_params,
+        sampler_params: class.sampler_params,
+    })
+}
+
 pub fn plan_fullscreen_fragment(
     ws: &Workspace,
     fref: FuncRef,
@@ -928,6 +1319,7 @@ pub fn plan_fullscreen_fragment(
     Ok(ShaderArtifactPlan {
         entry: stage.entry.clone(),
         ir: ShaderIR {
+            interner: scx.interner_handle(),
             stages: vec![stage],
         },
         interface,
