@@ -387,7 +387,10 @@ impl<'a> DispatchCtx<'a> {
 
     pub fn nobox_value_name(&self, e: Idx<Expr>) -> Option<Ustr> {
         if let Some(ty) = self.concrete_expr_ty(e) {
-            let (payload, _) = ty.peel_nullable();
+            let mut payload = &ty;
+            while let crate::monoty::MonoTy::Nullable(inner) = payload {
+                payload = inner.as_ref();
+            }
             return match payload {
                 crate::monoty::MonoTy::App {
                     ctor: crate::monoty::MonoCtor::Nominal(name), ..

@@ -1755,7 +1755,10 @@ fn main() { }
 fn an_always_emitted_call_hole_keeps_its_reason_and_span() {
     let ws = check(
         r#"
-fn pick<T>() -> int { return 1 }
+fn pick<T>() -> int {
+    let unused: T = 1
+    return 1
+}
 global G: int = pick()
 fn main() { let x = G }
 "#,
@@ -1771,10 +1774,10 @@ fn main() { let x = G }
         "expected exactly the one failing site: {hole:?}"
     );
     let site = &hole.always_emitted_sites[0];
-    // The CLASSIFICATION, not a reason string. `pick<T>()` with nothing
-    // constraining `T` is the decided `UnconstrainedTypeVar` rejection whether
-    // or not the body it appears in has an instance -- the control below is the
-    // same call from a function body, which becomes exactly that rejection.
+    // The CLASSIFICATION, not a reason string. `pick<T>()` reads `T` in its
+    // body, but this call provides no binding for it, so it is an
+    // `UnconstrainedTypeVar` rejection. The control below is the same call
+    // from a function body, which becomes exactly that rejection.
     // Recording only a reason forced Stage 3 to recover this by parsing it.
     assert_eq!(
         site.outcome,
@@ -1799,7 +1802,10 @@ fn main() { let x = G }
     // classification -- a rejection with a span -- and must not be filed here.
     let (_ws2, g2) = graph_of(
         r#"
-fn pick<T>() -> int { return 1 }
+fn pick<T>() -> int {
+    let unused: T = 1
+    return 1
+}
 fn main() { let x = pick() }
 "#,
     );

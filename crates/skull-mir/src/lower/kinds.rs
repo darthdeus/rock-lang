@@ -178,6 +178,9 @@ impl Builder<'_> {
     pub(crate) fn concrete_ty(&self, e: Idx<Expr>) -> Result<Option<MonoTy>, CompilerError> {
         use crate::monoty::MonoTyReason as R;
         if self.concrete_plan.is_some() {
+            if self.concrete_expr_is_untyped(e) {
+                return Ok(None);
+            }
             return self
                 .concrete_expr_ty(e)
                 .map(Some)
@@ -264,6 +267,11 @@ impl Builder<'_> {
             };
         }
         if self.concrete_plan.is_some() {
+            if self.concrete_expr_is_untyped(base)
+                && matches!(self.body.expr_arena[base], Expr::Array(..))
+            {
+                return Ok(ContainerKind::Vec);
+            }
             return Err(self.gap_here("container expression is missing from the concrete type plan"));
         }
         Ok(match self.expr_ty(base) {

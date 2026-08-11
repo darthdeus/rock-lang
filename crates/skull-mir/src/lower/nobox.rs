@@ -498,7 +498,7 @@ impl Builder<'_> {
         Err(CompilerError::new_with_label(
             self.body.expr_spans[e],
             format!(
-                "`{}` cannot be used as a fn value because its fixed ABI does not match the \
+                "`{}` cannot be taken as a fn value because its fixed ABI does not match the \
                  type-derived `nobox` fn-value ABI",
                 callee.name,
             ),

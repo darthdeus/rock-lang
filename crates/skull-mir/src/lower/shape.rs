@@ -1610,7 +1610,7 @@ pub(crate) fn mono_ret_slot(ws: &Workspace, ty: &MonoTy) -> RetSlot {
         let shape = mono_tuple_shape(ws, parts);
         return if shape.splats() { RetSlot::Nested(shape) } else { RetSlot::Opaque };
     }
-    let (payload, nullable) = ty.peel_nullable();
+    let (payload, nullable) = peel_nullable_layers(ty);
     let Some(nominal) = payload.nominal().filter(|n| is_nobox_nominal(ws, *n)) else {
         return RetSlot::Opaque;
     };
@@ -1631,7 +1631,7 @@ pub(crate) fn mono_tuple_shape(ws: &Workspace, parts: &[MonoTy]) -> TupleRetShap
 }
 
 pub(crate) fn mono_value_shape(ws: &Workspace, ty: &MonoTy) -> Option<ValueShape> {
-    let (payload, nullable) = ty.peel_nullable();
+    let (payload, nullable) = peel_nullable_layers(ty);
     let MonoTy::App { ctor: MonoCtor::Nominal(name), .. } = payload else {
         return None;
     };
@@ -1643,7 +1643,7 @@ pub(crate) fn mono_value_shape(ws: &Workspace, ty: &MonoTy) -> Option<ValueShape
 }
 
 pub(crate) fn mono_nobox_value_shape(ws: &Workspace, ty: &MonoTy) -> Option<ValueShape> {
-    let (payload, nullable) = ty.peel_nullable();
+    let (payload, nullable) = peel_nullable_layers(ty);
     let MonoTy::App { ctor: MonoCtor::Nominal(name), .. } = payload else {
         return None;
     };
@@ -1654,6 +1654,15 @@ pub(crate) fn mono_nobox_value_shape(ws: &Workspace, ty: &MonoTy) -> Option<Valu
             sig_shape_of_nominal(ws, *name)
         }
     })?
+}
+
+fn peel_nullable_layers(mut ty: &MonoTy) -> (&MonoTy, bool) {
+    let mut nullable = false;
+    while let MonoTy::Nullable(inner) = ty {
+        nullable = true;
+        ty = inner.as_ref();
+    }
+    (ty, nullable)
 }
 
 pub(crate) fn mono_tuple_ret_shape(ws: &Workspace, ty: &MonoTy) -> Option<TupleRetShape> {

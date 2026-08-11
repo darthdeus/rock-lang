@@ -489,6 +489,7 @@ impl Builder<'_> {
                 defaults_body,
                 tables,
                 "concrete struct-default plan",
+                std::iter::empty(),
             )?;
         }
         // Lower the default expr in the defaults body's context, into the current

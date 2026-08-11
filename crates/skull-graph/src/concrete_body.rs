@@ -158,6 +158,8 @@ pub struct ConcreteBody {
     pub instance: Instance,
     pub expr_types: ArenaMap<Idx<Expr>, MonoTyId>,
     pub binding_types: ArenaMap<Idx<BindingInfo>, MonoTyId>,
+    pub untyped_exprs: FxHashSet<Idx<Expr>>,
+    pub untyped_bindings: FxHashSet<Idx<BindingInfo>>,
     pub direct_calls: BTreeMap<Site, Callee>,
     pub fn_values: BTreeMap<Site, Callee>,
     pub iterator_ops: BTreeMap<Site, ConcreteIteratorOp>,
@@ -705,16 +707,34 @@ fn concrete_tables(
     inf: &BodyInference,
     body: &Body,
     subst: &MonoSubst,
+    declared_types: impl IntoIterator<Item = TyId>,
 ) -> Result<ConcreteTypeTables, MonoTyReason> {
     let converted = g.interner().with_mut(|arena| convert_body(arena, ws, inf, body, subst));
-    if let Some(failure) = converted.failures.first() {
-        return Err(failure.reason.clone());
+    for failure in &converted.failures {
+        if !matches!(failure.reason, MonoTyReason::UnresolvedInfer(_)) {
+            return Err(failure.reason.clone());
+        }
     }
-    let ty_types = concrete_ty_types(ws, g, inf, subst)?;
+    let ty_types = concrete_ty_types(ws, g, inf, body, subst, declared_types)?;
     let struct_field_types = concrete_struct_field_types(ws, g, body, &converted.expr_types)?;
+    let mut untyped_exprs: FxHashSet<_> = converted.untyped_exprs.iter().map(|u| u.expr).collect();
+    let mut untyped_bindings: FxHashSet<_> = converted.untyped_bindings.iter().copied().collect();
+    for failure in &converted.failures {
+        match (&failure.slot, &failure.reason) {
+            (Slot::Expr(expr), MonoTyReason::UnresolvedInfer(_)) => {
+                untyped_exprs.insert(*expr);
+            }
+            (Slot::Binding(binding), MonoTyReason::UnresolvedInfer(_)) => {
+                untyped_bindings.insert(*binding);
+            }
+            _ => {}
+        }
+    }
     Ok(ConcreteTypeTables {
         expr_types: converted.expr_types,
         binding_types: converted.binding_types,
+        untyped_exprs,
+        untyped_bindings,
         ty_types,
         struct_field_types,
     })
@@ -772,16 +792,35 @@ fn concrete_ty_types(
     ws: &Workspace,
     g: &InstanceGraph,
     inf: &BodyInference,
+    body: &Body,
     subst: &MonoSubst,
+    declared_types: impl IntoIterator<Item = TyId>,
 ) -> Result<rustc_hash::FxHashMap<TyId, MonoTyId>, MonoTyReason> {
     let mut nodes = FxHashSet::default();
     for ty in inf.expr_types.values().chain(inf.binding_types.values()) {
         collect_type_nodes(ws, inf, *ty, &mut nodes);
     }
+    for ty in declared_types {
+        collect_type_nodes(ws, inf, ty, &mut nodes);
+    }
+    for (_, binding) in body.binding_arena.iter() {
+        if let Some(ty) = binding.declared_ty {
+            collect_type_nodes(ws, inf, ty, &mut nodes);
+        }
+    }
+    for (_, expr) in body.expr_arena.iter() {
+        if let Expr::As { target, .. } = expr {
+            collect_type_nodes(ws, inf, *target, &mut nodes);
+        }
+    }
     g.interner().with_mut(|arena| {
         nodes
             .into_iter()
-            .map(|ty| arena.convert(ws, inf, ty, subst).map(|id| (ty, id)))
+            .filter_map(|ty| match arena.convert(ws, inf, ty, subst) {
+                Ok(id) => Some(Ok((ty, id))),
+                Err(MonoTyReason::UnresolvedInfer(_)) => None,
+                Err(reason) => Some(Err(reason)),
+            })
             .collect::<Result<rustc_hash::FxHashMap<_, _>, _>>()
     })
 }
@@ -848,7 +887,14 @@ where
             .and_then(|ir| ir.per_fn.get(&owner))
             .ok_or(MonoTyReason::NoNode)?;
         let defaults_subst = skull_mir::struct_defaults::slot_subst(Some(defaults_inf), &args);
-        let tables = concrete_tables(ws, g, defaults_inf, defaults_body, &defaults_subst)?;
+        let tables = concrete_tables(
+            ws,
+            g,
+            defaults_inf,
+            defaults_body,
+            &defaults_subst,
+            std::iter::empty(),
+        )?;
         out.insert(SiteDomain::StructDefaults(module, def, args), tables);
     }
     Ok(out)
@@ -880,7 +926,13 @@ fn concrete_plan(
             SiteOutcome::Resolved(_) => None,
         })
         .collect();
-    let ty_types = concrete_ty_types(ws, g, inf, subst)?;
+    let f = &ws.module(inst.func.module).functions[inst.func.func];
+    let declared_types = f
+        .param_decls
+        .iter()
+        .map(|param| param.ty)
+        .chain(f.return_ty);
+    let ty_types = concrete_ty_types(ws, g, inf, hir_body, subst, declared_types)?;
     let struct_field_types = concrete_struct_field_types(ws, g, hir_body, &body.expr_types)?;
     let default_domains = g
         .contributions
@@ -894,6 +946,8 @@ fn concrete_plan(
         types: ConcreteTypeTables {
             expr_types: body.expr_types.clone(),
             binding_types: body.binding_types.clone(),
+            untyped_exprs: body.untyped_exprs.clone(),
+            untyped_bindings: body.untyped_bindings.clone(),
             ty_types,
             struct_field_types,
         },
@@ -920,7 +974,19 @@ fn concrete_always_plan(
         .inference(module)
         .and_then(|ir| ir.per_fn.get(&owner))
         .ok_or(MonoTyReason::NoNode)?;
-    let types = concrete_tables(ws, g, inf, body, &MonoSubst::default())?;
+    let types = concrete_tables(
+        ws,
+        g,
+        inf,
+        body,
+        &MonoSubst::default(),
+        match owner {
+            BodyOwner::Global(index) => std::iter::once(ws.module(module).globals[index].ty)
+                .collect::<Vec<_>>()
+                .into_iter(),
+            _ => Vec::new().into_iter(),
+        },
+    )?;
     let contribution = g
         .contributions
         .get(&Owner::AlwaysEmitted(module, owner))
@@ -1037,18 +1103,32 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
         out.untyped_bindings += c.untyped_bindings.len();
         out.expr_slots += body.expr_arena.len();
         out.binding_slots += body.binding_arena.len();
-        for f in c.failures {
-            out.free_types.push((inst.clone(), f));
+        let failures = c.failures;
+        for f in &failures {
+            out.free_types.push((inst.clone(), f.clone()));
         }
         let mut concrete = ConcreteBody {
             instance: inst.clone(),
             expr_types: c.expr_types,
             binding_types: c.binding_types,
+            untyped_exprs: untyped.iter().map(|u| u.expr).collect(),
+            untyped_bindings: c.untyped_bindings.iter().copied().collect(),
             direct_calls: BTreeMap::new(),
             fn_values: BTreeMap::new(),
             iterator_ops: BTreeMap::new(),
             synthesized_calls: BTreeMap::new(),
         };
+        for failure in failures {
+            match (failure.slot, failure.reason) {
+                (Slot::Expr(expr), MonoTyReason::UnresolvedInfer(_)) => {
+                    concrete.untyped_exprs.insert(expr);
+                }
+                (Slot::Binding(binding), MonoTyReason::UnresolvedInfer(_)) => {
+                    concrete.untyped_bindings.insert(binding);
+                }
+                _ => {}
+            }
+        }
         callee_tables(ws, g, &inst, &mut concrete, &mut out);
 
         // The question the type-table slice deferred: does a callee entry need

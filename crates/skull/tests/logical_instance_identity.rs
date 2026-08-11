@@ -149,7 +149,7 @@ fn a_coroutine_typed_instantiation_records_a_distinct_instance() {
     let src = r#"
 fn ident<T>(x: T) -> T { return x }
 
-co fn counter() -> int {
+co fn counter() -> Coroutine<int, int, ()> {
     yield 1
     return 2
 }

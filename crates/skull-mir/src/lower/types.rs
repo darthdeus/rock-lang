@@ -23,6 +23,12 @@ impl Builder<'_> {
         self.dispatch().concrete_ty(ty)
     }
 
+    pub(crate) fn concrete_expr_is_untyped(&self, e: Idx<Expr>) -> bool {
+        self.dispatch()
+            .concrete_types
+            .is_some_and(|types| types.is_untyped_expr(e))
+    }
+
     pub(crate) fn is_nullable_ty(&self, ty: TyId) -> bool {
         self.dispatch().is_nullable_ty(ty)
     }

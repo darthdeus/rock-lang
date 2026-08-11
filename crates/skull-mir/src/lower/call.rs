@@ -25,6 +25,45 @@ pub(crate) struct DirectCall {
 }
 
 impl Builder<'_> {
+    fn record_concrete_ablation(&self, e: Idx<Expr>, func: FuncRef) {
+        if !crate::ablation::enabled() {
+            return;
+        }
+        let callee = &self.ws.module(func.module).functions[func.func];
+        if callee.generics.is_empty() {
+            return;
+        }
+        crate::ablation::note_examined();
+        let Some(plan) = self.concrete_plan else { return };
+        let site = crate::site::Site {
+            domain: self.cur_domain.clone(),
+            expr: e,
+            op: self.cur_op.clone(),
+        };
+        let span = self.body.expr_spans.get(e).copied().unwrap_or(callee.name_span);
+        let (category, detail) = if callee.inline_body.is_some() || callee.is_extern {
+            (
+                crate::ablation::FatalCategory::TargetBoundary,
+                "the selected body is supplied by a target boundary rather than a Rock instance",
+            )
+        } else if let Some(reason) = plan.failed_sites.get(&site) {
+            let category = if reason.contains("recursion") || reason.contains("depth") {
+                crate::ablation::FatalCategory::PolymorphicGrowth
+            } else if reason.contains("unconstrained") {
+                crate::ablation::FatalCategory::MissingGraphEdge
+            } else {
+                crate::ablation::FatalCategory::CompilerInvariant
+            };
+            (
+                category,
+                "the concrete graph recorded a failed generic call site before MIR lowering",
+            )
+        } else {
+            return;
+        };
+        crate::ablation::record(category, callee.name.as_str(), self.f.name.as_str(), span, detail);
+    }
+
     fn selected_abi_instance(
         &self,
         inst: &crate::instance::Instance,
@@ -92,6 +131,7 @@ impl Builder<'_> {
         inst: &crate::instance::Instance,
         pidx: usize,
     ) -> Result<Option<crate::monoty::MonoTy>, CompilerError> {
+        let callee = &self.ws.module(inst.func.module).functions[inst.func.func];
         if let Some(plan) = self.concrete_plan {
             let site = crate::site::Site {
                 domain: self.cur_domain.clone(),
@@ -122,14 +162,26 @@ impl Builder<'_> {
                     self.gap_here("concrete callee signature is missing for its site")
                 })?
             };
-            let id = signature.params.get(pidx).ok_or_else(|| {
+            let slot = signature.params.get(pidx).or_else(|| {
+                callee
+                    .is_variadic
+                    .then(|| signature.params.last())
+                    .flatten()
+            });
+            let id = slot.ok_or_else(|| {
                 self.gap_here("concrete callee signature has no parameter for this argument")
             })?;
             return Ok(Some(self.concrete_mono(*id)));
         }
         let Some(plans) = self.concrete_plans else { return Ok(None) };
         let Some(plan) = plans.get(inst) else { return Ok(None) };
-        let id = plan.signature.params.get(pidx).ok_or_else(|| {
+        let slot = plan.signature.params.get(pidx).or_else(|| {
+            callee
+                .is_variadic
+                .then(|| plan.signature.params.last())
+                .flatten()
+        });
+        let id = slot.ok_or_else(|| {
             gap(format!(
                 "concrete ABI plan has no parameter {pidx} for callee instance"
             ))
@@ -662,6 +714,7 @@ impl Builder<'_> {
         // A call the policy declines to specialize still names exactly one
         // concrete instance, and this is where it says which.
         let callee_inst = if self.concrete_plan.is_some() {
+            self.record_concrete_ablation(e, func);
             self.concrete_callee_for_site(e)?
         } else {
             self.callee_instance_for(e, func)?

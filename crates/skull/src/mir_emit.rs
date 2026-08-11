@@ -2337,6 +2337,55 @@ fn realize_shader_view(
     .ok_or_else(|| CompilerError::new_no_location("GLSL shader view is unavailable".to_string()))
 }
 
+fn graph_rejection_error(
+    ws: &Workspace,
+    graph: &crate::instance_graph::InstanceGraph,
+) -> Option<CompilerError> {
+    for rejection in graph.rejections() {
+        let caller = &ws.module(rejection.at.func.module).functions[rejection.at.func.func];
+        if skull_mir::ablation::enabled() {
+            let category = match rejection.kind {
+                crate::instance_graph::RejectionKind::ChangingInstanceRecursion => {
+                    skull_mir::ablation::FatalCategory::PolymorphicGrowth
+                }
+                crate::instance_graph::RejectionKind::GenericFnValue
+                | crate::instance_graph::RejectionKind::UnconstrainedTypeVar => {
+                    skull_mir::ablation::FatalCategory::MissingGraphEdge
+                }
+                crate::instance_graph::RejectionKind::ConcreteTypeUnavailable => {
+                    skull_mir::ablation::FatalCategory::CompilerInvariant
+                }
+            };
+            skull_mir::ablation::note_examined();
+            skull_mir::ablation::record(
+                category,
+                if rejection.kind == crate::instance_graph::RejectionKind::ChangingInstanceRecursion {
+                    caller.name.as_str().to_string()
+                } else {
+                    rejection
+                        .message
+                        .split('`')
+                        .nth(1)
+                        .unwrap_or(caller.name.as_str())
+                        .to_string()
+                },
+                caller.name.as_str(),
+                rejection.span,
+                rejection.message.clone(),
+            );
+            continue;
+        }
+        if is_stdlib_module_file(ws.module(rejection.at.func.module).file.as_str()) {
+            continue;
+        }
+        return Some(CompilerError::new_with_label(
+            rejection.span,
+            rejection.message.clone(),
+        ));
+    }
+    None
+}
+
 /// `__rock_shader_register("<key>", <glsl>)` for every distinct `rock_shader`
 /// pair (docs/shaders.md). Emitted at module-init time after
 /// the `@sim` registrations, at chunk top level, so a reload re-`dofile`s them
@@ -3040,6 +3089,9 @@ fn emit_full_in_with_mutation(
         .collect();
     let emission_roots = all_roots(ws, project_root, &shader_roots);
     let mut graph = crate::instance_graph::build(ws, emission_roots.clone(), false);
+    if let Some(err) = graph_rejection_error(ws, &graph) {
+        return Err(err);
+    }
     #[allow(unused_mut)]
     let mut concrete = crate::concrete_body::build(ws, &mut graph);
     #[cfg(test)]

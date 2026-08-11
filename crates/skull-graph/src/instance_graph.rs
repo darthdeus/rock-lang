@@ -34,9 +34,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use bone_semantic::hir::{Body, BodyOwner, Function};
+use bone_semantic::hir::{Body, BodyOwner, Function, TypeExpr, VarId};
 use bone_semantic::inference::{BodyInference, Workspace};
-use bone_semantic::prelude::{BoundNext, IterWitness, ModuleId, Span};
+use bone_semantic::prelude::{BoundNext, IterWitness, ModuleId, Span, TyId};
 use comfy_la_arena::Idx;
 use rustc_hash::{FxHashMap, FxHashSet};
 use skull_mir::mangle::mangle_fn;
@@ -2734,7 +2734,9 @@ fn record_call(
         w.out.always_emitted_seeds += 1;
     }
     let cf = &ws.module(callee.module).functions[callee.func];
-    let (args, callee_subst) = match w.interner.with_mut(|a| instantiate(a, ws, inf, cf, bindings, subst)) {
+    let (args, callee_subst) = match w.interner.with_mut(|a| {
+        instantiate(a, ws, inf, callee.module, callee.func, cf, bindings, subst)
+    }) {
         Ok(v) => v,
         // An always-emitted body has no `from` to file against, but the
         // CLASSIFICATION is the same one an instantiated body's call gets:
@@ -3301,6 +3303,8 @@ fn instantiate(
     arena: &mut MonoArena,
     ws: &Workspace,
     inf: &BodyInference,
+    callee_module: ModuleId,
+    callee_func: Idx<Function>,
     callee: &Function,
     bindings: Option<&Vec<bone_semantic::prelude::TyId>>,
     caller_subst: &MonoSubst,
@@ -3318,11 +3322,103 @@ fn instantiate(
         let Some(var) = skull_mir::monoty::generic_var_of(ws, inf, *g) else {
             return Err(Fail::Unresolved("declared-generic-not-generic"));
         };
-        let ty = skull_mir::monoty::convert(ws, inf, *b, caller_subst).map_err(convert_fail)?;
+        let ty = match skull_mir::monoty::convert(ws, inf, *b, caller_subst) {
+            Ok(ty) => ty,
+            Err(reason)
+                if matches!(
+                    reason,
+                    MonoTyReason::UnresolvedInfer(_) | MonoTyReason::UnboundGeneric(_)
+                ) && !generic_parameter_is_observable(ws, callee_module, callee_func, callee, var) =>
+            {
+                // A generic slot that appears nowhere in the callee's signature,
+                // bounds, or inferred body cannot affect its concrete plan. Keep
+                // the instance total with an explicit erased logical type; an
+                // unresolved slot that the body can read still rejects below.
+                skull_mir::monoty::MonoTy::Any
+            }
+            Err(reason) => return Err(convert_fail(reason)),
+        };
         args.push(arena.intern(ty.clone()));
         callee_subst.insert(var, ty);
     }
     Ok((args, callee_subst))
+}
+
+fn generic_parameter_is_observable(
+    ws: &Workspace,
+    callee_module: ModuleId,
+    callee_func: Idx<Function>,
+    callee: &Function,
+    var: VarId,
+) -> bool {
+    fn mentions(
+        ws: &Workspace,
+        inf: Option<&BodyInference>,
+        ty: TyId,
+        wanted: VarId,
+        seen: &mut FxHashSet<TyId>,
+    ) -> bool {
+        if !seen.insert(ty) {
+            return false;
+        }
+        let node = match ty {
+            TyId::Static(mid, idx) => ws.module(mid).ty_arena[idx],
+            TyId::Local(idx) => {
+                let Some(inf) = inf else { return false };
+                inf.ty_arena[idx]
+            }
+        };
+        match node {
+            TypeExpr::Generic(found, _) => found == wanted,
+            TypeExpr::Nullable(inner) => mentions(ws, inf, ty.with_idx(inner), wanted, seen),
+            TypeExpr::App { params, .. } => params
+                .into_iter()
+                .any(|param| mentions(ws, inf, ty.with_idx(param), wanted, seen)),
+            TypeExpr::Function { params, ret } => {
+                params
+                    .into_iter()
+                    .any(|param| mentions(ws, inf, ty.with_idx(param), wanted, seen))
+                    || mentions(ws, inf, ty.with_idx(ret), wanted, seen)
+            }
+            TypeExpr::Tuple { elements } => elements
+                .into_iter()
+                .any(|element| mentions(ws, inf, ty.with_idx(element), wanted, seen)),
+            TypeExpr::Infer(next, _) => inf
+                .and_then(|inf| inf.substitutions.get(next))
+                .is_some_and(|next| mentions(ws, inf, next, wanted, seen)),
+            TypeExpr::Builtin(_) => false,
+        }
+    }
+
+    let mut seen = FxHashSet::default();
+    let mut declaration_types = callee
+        .param_decls
+        .iter()
+        .map(|param| param.ty)
+        .chain(callee.return_ty)
+        .chain(callee.generic_bounds.iter().flatten().copied());
+    if declaration_types.any(|ty| mentions(ws, None, ty, var, &mut seen)) {
+        return true;
+    }
+
+    let owner = BodyOwner::Function(callee_func);
+    let Some(inf) = ws.inference(callee_module).and_then(|ir| ir.per_fn.get(&owner)) else {
+        return false;
+    };
+    if inf
+        .expr_types
+        .values()
+        .chain(inf.binding_types.values())
+        .any(|ty| mentions(ws, Some(inf), *ty, var, &mut seen))
+    {
+        return true;
+    }
+    ws.module(callee_module)
+        .bodies
+        .get(&owner)
+        .into_iter()
+        .flat_map(|body| body.binding_arena.iter().filter_map(|(_, binding)| binding.declared_ty))
+        .any(|ty| mentions(ws, Some(inf), ty, var, &mut seen))
 }
 
 /// A SYNTHESIZED call's instantiation, from the record bone kept for it: the

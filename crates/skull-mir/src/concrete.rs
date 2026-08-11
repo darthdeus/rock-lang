@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use bone_semantic::hir::{BindingInfo, Expr};
 use bone_semantic::prelude::ModuleId;
 use comfy_la_arena::{ArenaMap, Idx};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use ustr::Ustr;
 
 use crate::bound::ResolvedBoundTree;
@@ -33,6 +33,11 @@ pub enum ConcreteOwner {
 pub struct ConcreteTypeTables {
     pub expr_types: ArenaMap<Idx<Expr>, MonoTyId>,
     pub binding_types: ArenaMap<Idx<BindingInfo>, MonoTyId>,
+    /// Slots that inference deliberately left without a concrete answer.
+    /// Their absence is a planned untyped operation, not an implicit boxed
+    /// value or a source-type fallback.
+    pub untyped_exprs: FxHashSet<Idx<Expr>>,
+    pub untyped_bindings: FxHashSet<Idx<BindingInfo>>,
     /// Inference TyIds are the bridge for declaration-shaped helpers that are
     /// being migrated. The expression and binding maps remain the primary
     /// ownership; this index prevents a second substitution lookup while a
@@ -55,6 +60,14 @@ impl ConcreteTypeTables {
 
     pub fn ty_type(&self, ty: bone_semantic::prelude::TyId) -> Option<MonoTyId> {
         self.ty_types.get(&ty).copied()
+    }
+
+    pub fn is_untyped_expr(&self, expr: Idx<Expr>) -> bool {
+        self.untyped_exprs.contains(&expr)
+    }
+
+    pub fn is_untyped_binding(&self, binding: Idx<BindingInfo>) -> bool {
+        self.untyped_bindings.contains(&binding)
     }
 
     pub fn struct_field_type(&self, literal: Idx<Expr>, field: Ustr) -> Option<MonoTyId> {

@@ -232,6 +232,65 @@ fn main() {
 }
 
 #[test]
+fn production_lowering_rejects_a_signature_type_missing_from_the_plan() {
+    let (mut ws, g, bodies) = bodies_of(
+        r#"
+fn id(value: int) -> int { return value }
+fn main() { print("{id(1)}") }
+"#,
+    );
+    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
+    let (inst, plan) = bodies
+        .plans
+        .iter()
+        .find(|(inst, _)| g.identity(&ws, inst).starts_with("id"))
+        .map(|(inst, plan)| (inst.clone(), plan.clone()))
+        .expect("id has no concrete plan");
+    let extra = ws.modules[mid.index()]
+        .ty_arena
+        .alloc(TypeExpr::Builtin(bone_semantic::hir::BuiltinTy::Float));
+    ws.modules[mid.index()].functions[inst.func.func].param_decls[0].ty =
+        bone_semantic::prelude::TyId::Static(mid, extra);
+
+    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let err = skull_mir::lower::lower_instance_with_plans(&ws, &scx, &plan, &bodies.plans)
+        .expect_err("lowering accepted a signature type absent from its concrete plan");
+    assert!(err.message.contains("missing concrete type node"), "{err:?}");
+}
+
+#[test]
+fn production_plan_marks_unresolved_slots_as_explicitly_untyped() {
+    let (ws, g, bodies) = bodies_of(
+        r#"
+fn main() {
+    let value = null
+    print("{value}")
+}
+"#,
+    );
+    let (inst, plan) = bodies
+        .plans
+        .iter()
+        .find(|(inst, _)| g.identity(&ws, inst).starts_with("main"))
+        .expect("main has no concrete plan");
+    let body = ws.module(inst.func.module).bodies.get(&BodyOwner::Function(inst.func.func)).unwrap();
+    let null = body
+        .expr_arena
+        .iter()
+        .find(|(_, expr)| matches!(expr, Expr::Null))
+        .map(|(expr, _)| expr)
+        .expect("fixture has no null expression");
+    assert!(plan.types.is_untyped_expr(null), "unresolved null slot was not recorded");
+
+    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let mut poisoned = plan.clone();
+    poisoned.types.untyped_exprs.clear();
+    let err = skull_mir::lower::lower_instance_with_plans(&ws, &scx, &poisoned, &bodies.plans)
+        .expect_err("lowering accepted an untyped slot after its plan marker was removed");
+    assert!(err.message.contains("missing concrete type node"), "{err:?}");
+}
+
+#[test]
 fn production_lowering_concrete_struct_literal_coerces_declared_float_fields() {
     let (ws, g, bodies) = bodies_of(
         r#"
@@ -683,7 +742,10 @@ fn main() { print("{G.x}") }
 fn always_emitted_plan_retains_a_failed_callee_site() {
     let ws = check(
         r#"
-fn pick<T>() -> int { return 1 }
+fn pick<T>() -> int {
+    let unused: T = 1
+    return 1
+}
 global G: int = pick()
 fn main() { let x = G }
 "#,

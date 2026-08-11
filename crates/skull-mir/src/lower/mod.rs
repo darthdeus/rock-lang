@@ -1069,14 +1069,27 @@ fn lower_instance_with_plan_inner(
         .inference(mid)
         .and_then(|ir| ir.per_fn.get(&BodyOwner::Function(fid)));
     if let Some(inf) = inf {
-        validate_concrete_type_tables(ws, inf, body, &plan.types, "concrete plan")?;
+        let func = &module.functions[fid];
+        validate_concrete_type_tables(
+            ws,
+            inf,
+            body,
+            &plan.types,
+            "concrete plan",
+            func.param_decls
+                .iter()
+                .map(|param| param.ty)
+                .chain(func.return_ty),
+        )?;
         for (expr, _) in inf.expr_types.iter() {
-            if plan.types.expr_types.get(expr).is_none() {
+            if plan.types.expr_type(expr).is_none() && !plan.types.is_untyped_expr(expr) {
                 return Err(gap(format!("concrete plan is missing expression type {expr:?}")));
             }
         }
         for (binding, _) in inf.binding_types.iter() {
-            if plan.types.binding_types.get(binding).is_none() {
+            if plan.types.binding_type(binding).is_none()
+                && !plan.types.is_untyped_binding(binding)
+            {
                 return Err(gap(format!("concrete plan is missing binding type {binding:?}")));
             }
         }
@@ -1340,16 +1353,37 @@ fn validate_always_plan(
         .bodies
         .get(&owner)
         .ok_or_else(|| gap("concrete always-emitted plan has no body"))?;
-    validate_concrete_type_tables(ws, inf, body, &plan.types, "concrete always-emitted plan")?;
+    let declared_types = match owner {
+        BodyOwner::Global(index) => vec![ws.module(mid).globals[index].ty],
+        BodyOwner::Decorator(index) => ws.module(mid).decorators[index]
+            .param_decls
+            .iter()
+            .map(|param| param.ty)
+            .collect(),
+        BodyOwner::Function(_)
+        | BodyOwner::StructDefaults(_)
+        | BodyOwner::Enum(_)
+        | BodyOwner::Newtype(_) => Vec::new(),
+    };
+    validate_concrete_type_tables(
+        ws,
+        inf,
+        body,
+        &plan.types,
+        "concrete always-emitted plan",
+        declared_types,
+    )?;
     for (expr, _) in inf.expr_types.iter() {
-        if plan.types.expr_types.get(expr).is_none() {
+        if plan.types.expr_type(expr).is_none() && !plan.types.is_untyped_expr(expr) {
             return Err(gap(format!(
                 "concrete always-emitted plan is missing expression type {expr:?}"
             )));
         }
     }
     for (binding, _) in inf.binding_types.iter() {
-        if plan.types.binding_types.get(binding).is_none() {
+        if plan.types.binding_type(binding).is_none()
+            && !plan.types.is_untyped_binding(binding)
+        {
             return Err(gap(format!(
                 "concrete always-emitted plan is missing binding type {binding:?}"
             )));
@@ -1415,6 +1449,7 @@ fn validate_concrete_type_tables(
     body: &Body,
     tables: &ConcreteTypeTables,
     label: &str,
+    declared_types: impl IntoIterator<Item = TyId>,
 ) -> Result<(), CompilerError> {
     fn visit(
         ws: &Workspace,
@@ -1463,12 +1498,29 @@ fn validate_concrete_type_tables(
     }
 
     let mut seen = HashSet::new();
-    for ty in inf.expr_types.values().chain(inf.binding_types.values()) {
+    for (expr, ty) in inf.expr_types.iter() {
+        if tables.is_untyped_expr(expr) {
+            continue;
+        }
         visit(ws, inf, tables, label, *ty, &mut seen)?;
+    }
+    for (binding, ty) in inf.binding_types.iter() {
+        if tables.is_untyped_binding(binding) {
+            continue;
+        }
+        visit(ws, inf, tables, label, *ty, &mut seen)?;
+    }
+    for ty in declared_types {
+        visit(ws, inf, tables, label, ty, &mut seen)?;
     }
     for (_, binding) in body.binding_arena.iter() {
         if let Some(ty) = binding.declared_ty {
             visit(ws, inf, tables, label, ty, &mut seen)?;
+        }
+    }
+    for (_, node) in body.expr_arena.iter() {
+        if let Expr::As { target, .. } = node {
+            visit(ws, inf, tables, label, *target, &mut seen)?;
         }
     }
     for (expr, node) in body.expr_arena.iter() {
