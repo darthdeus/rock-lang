@@ -13,8 +13,8 @@ use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::{FnList, ModuleId, Span};
 use comfy_la_arena::Idx;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use skull_mir::concrete::{ConcretePlans, ConcreteSignature};
 use skull_mir::gpu_layout::{SamplerKind, WireKind, texture_slots};
-use skull_mir::concrete::ConcretePlans;
 use skull_mir::instance::Instance;
 use skull_mir::lower::{ScalarCtx, SpecSubst, lower_instance_source};
 use skull_mir::mir::{FuncRef, Inst, Lit, MirFunc};
@@ -33,6 +33,15 @@ use ustr::Ustr;
 pub trait ShaderPlannerPolicy {
     fn inline_call(&self, function: &Function) -> bool;
     fn backend_name(&self) -> &'static str;
+
+    fn validate_concrete_signature(
+        &self,
+        _interner: &skull_mir::monoty::MonoInterner,
+        _signature: &ConcreteSignature,
+        _span: Span,
+    ) -> Result<(), CompilerError> {
+        Ok(())
+    }
 
     fn inline_instance(
         &self,
@@ -810,6 +819,7 @@ pub fn plan_stage_from_concrete(
                 format!("shader profile: no concrete plan for `{}`", function.name),
             )
         })?;
+        policy.validate_concrete_signature(scx.interner(), &plan.signature, function.name_span)?;
         let body = skull_mir::lower::lower_instance_with_plans(
             ws,
             scx,

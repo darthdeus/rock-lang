@@ -623,6 +623,15 @@ impl skull_codegen_shader::ShaderPlannerPolicy for GlslShaderPolicy {
         "GLSL"
     }
 
+    fn validate_concrete_signature(
+        &self,
+        interner: &MonoInterner,
+        signature: &ConcreteSignature,
+        span: Span,
+    ) -> Result<(), CompilerError> {
+        check_tier0_signature_concrete(interner, signature, span)
+    }
+
     fn inline_instance(
         &self,
         ws: &Workspace,
