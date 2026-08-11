@@ -904,12 +904,9 @@ fn parse_compute_abi<'a>(
         "compute resource count",
     )?;
     let mut resources = Vec::with_capacity(resource_count);
-    for expected_binding in 0..resource_count {
+    for _ in 0..resource_count {
         let resource = fields(next_line(lines, "storage")?, "storage", 5)?;
         let binding = parse_u32(resource[1], "compute storage binding")?;
-        if binding != expected_binding as u32 {
-            return Err(wire_error("compute storage resources are not in binding order"));
-        }
         let access = match resource[3] {
             "read" => WgslStorageAccess::Read,
             "read_write" => WgslStorageAccess::ReadWrite,
