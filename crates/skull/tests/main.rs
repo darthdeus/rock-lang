@@ -184,6 +184,8 @@ mod synthetic_name_collision;
 mod tuple_scalarize;
 #[path = "uniform_block_pack.rs"]
 mod uniform_block_pack;
+#[path = "uint_surface.rs"]
+mod uint_surface;
 #[path = "user_fn_emit_rejection.rs"]
 mod user_fn_emit_rejection;
 #[path = "value_leaf_layout.rs"]

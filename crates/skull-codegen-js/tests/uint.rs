@@ -1,4 +1,5 @@
 use crate::common::{node, ws_with};
+use skull_mir::mir::FuncRef;
 
 fn node_available() -> bool {
     node().arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
@@ -15,6 +16,41 @@ fn eval(src: &str, expr: &str, expected: &str) {
         return;
     }
     let js = emit_root(src, "root");
+    let program = format!(
+        "{}{}{}\n{}\nconsole.log({expr});",
+        skull_codegen_js::JS_NB_CHECK_SHIMS,
+        skull_codegen_js::JS_VEC_CHECK_SHIMS,
+        skull_codegen_js::JS_STRING_RUNTIME,
+        js,
+    );
+    let out = node().arg("-e").arg(&program).output().expect("spawn node");
+    assert!(
+        out.status.success(),
+        "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), expected, "{program}");
+}
+
+fn eval_closure(src: &str, expr: &str, expected: &str) {
+    if !node_available() {
+        eprintln!("SKIP uint JS execution: node not found");
+        return;
+    }
+    let ws = ws_with(src);
+    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let fid = ws
+        .module(mid)
+        .functions
+        .iter()
+        .find(|(_, f)| f.name.as_str() == "root")
+        .map(|(fid, _)| fid)
+        .expect("root");
+    let js = skull_codegen_js::emit::emit_with_closure(
+        &ws,
+        &[(FuncRef { module: mid, func: fid }, "root".to_string())],
+    )
+    .unwrap_or_else(|e| panic!("closure emit: {}", e.message));
     let program = format!(
         "{}{}{}\n{}\nconsole.log({expr});",
         skull_codegen_js::JS_NB_CHECK_SHIMS,
@@ -101,6 +137,30 @@ fn uint_dynamic_shift_checks_the_runtime_count() {
 }
 
 #[test]
+fn uint_formatting_and_interpolation_preserve_the_unsigned_value() {
+    let src = "fn root() -> string { tostring(4294967295 as uint) }";
+    eval(src, "root()", "4294967295");
+
+    let src = "fn root() -> string { let value: uint = 4294967295 as uint; \"{value}\" }";
+    eval(src, "root()", "4294967295");
+}
+
+#[test]
+fn uint_survives_generic_value_struct_array_and_nullable_paths() {
+    let src = "
+value UintRecord { payload: uint }
+fn identity<T>(value: T) -> T { return value }
+fn root() -> uint {
+    let record = UintRecord { payload: 4294967295 as uint }
+    let values: [uint] = [4294967295 as uint]
+    let maybe: uint? = 4294967295 as uint
+    if maybe != null { return identity(record).payload & values[0] }
+    return 0 as uint
+}";
+    eval_closure(src, "root()", "4294967295");
+}
+
+#[test]
 fn native_buffer_uint_uses_unsigned_storage() {
     let src = "
 fn root() -> uint {
@@ -108,5 +168,7 @@ fn root() -> uint {
     b[0] = 4294967295
     b[0]
 }";
+    let js = emit_root(src, "root");
+    assert!(js.contains("new Uint32Array"), "uint buffer lost its physical type:\n{js}");
     eval(src, "root()", "4294967295");
 }
