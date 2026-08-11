@@ -167,8 +167,8 @@ fn line_covers(batch: StorageBuffer<uint>, base: uint, px: uint, py: uint) -> bo
     let ht = bitcast<int>(storage_load(batch, base + (5 as uint)))
     if ht <= 0 { return false }
 
-    let cx = (px as int) * 16 + 8
-    let cy = (py as int) * 16 + 8
+    let cx = bitcast<int>(px) * 16 + 8
+    let cy = bitcast<int>(py) * 16 + 8
     let ax = x1 - cx
     let ay = y1 - cy
     let dx = x2 - x1
