@@ -206,9 +206,6 @@ fn max_published_lanes(
             if let Some(&lanes) = view.publisher_lanes.get(&body.instance) {
                 return Ok(lanes);
             }
-            if view.missing_substitutions.contains(&body.instance) {
-                return Ok(0);
-            }
             Err(err(format!(
                 "JS: inline body `{:?}` has no artifact publisher lane plan",
                 body.decl,
@@ -6433,6 +6430,69 @@ mod tests {
         assert!(
             error.message.contains("root `root` has no base InstanceGraph instance"),
             "missing-root rejection should name the graph invariant: {}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn a_missing_inline_publisher_plan_rejects_instead_of_becoming_zero_width() {
+        let ws = workspace(
+            r#"
+inline(js) fn wired_pair(v: float) -> (bool, float) = "return __rock_publish(false, v);"
+fn main() {
+    let (ok, v) = wired_pair(1.0)
+}
+"#,
+        );
+        let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
+        let main = ws
+            .module(mid)
+            .functions
+            .iter()
+            .find(|(_, f)| f.name.as_str() == "main")
+            .map(|(func, _)| FuncRef { module: mid, func })
+            .expect("main");
+        let interner = std::sync::Arc::new(skull_mir::monoty::MonoInterner::new());
+        let mut graph = skull_graph::instance_graph::build_in(&ws, vec![main], false, interner);
+        let before = artifact::realize(
+            &ws,
+            &graph,
+            &artifact::ArtifactRequest::new(target_projection::JAVASCRIPT_WEB, &[main])
+                .with_mappings(artifact::ArtifactMappings::for_backend(
+                    bone_semantic::hir::FnBackend::Js,
+                ))
+                .with_symbols(&artifact::REALIZED_SYMBOLS),
+        );
+        let instance = before
+            .publisher_lanes
+            .keys()
+            .find(|instance| {
+                ws.module(instance.func.module).functions[instance.func.func].name.as_str()
+                    == "wired_pair"
+            })
+            .expect("publisher instance")
+            .clone();
+        let removed = graph.index.subst.remove(&instance).is_some()
+            | graph.root_instances.remove(&instance);
+        assert!(removed, "publisher instance had no graph substitution record");
+        let after = artifact::realize(
+            &ws,
+            &graph,
+            &artifact::ArtifactRequest::new(target_projection::JAVASCRIPT_WEB, &[main])
+                .with_mappings(artifact::ArtifactMappings::for_backend(
+                    bone_semantic::hir::FnBackend::Js,
+                ))
+                .with_symbols(&artifact::REALIZED_SYMBOLS),
+        );
+        assert!(after.missing_substitutions.contains(&instance));
+        let error = max_published_lanes(
+            &after,
+            &[JsInlineBody { decl: instance.func, instance }],
+        )
+        .expect_err("a missing publisher plan must not become a zero-width answer");
+        assert!(
+            error.message.contains("no artifact publisher lane plan"),
+            "unexpected missing-plan rejection: {}",
             error.message
         );
     }
