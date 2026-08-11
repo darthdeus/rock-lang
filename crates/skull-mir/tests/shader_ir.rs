@@ -8,6 +8,8 @@ use comfy_la_arena::Idx;
 use skull_mir::gpu_layout::{SamplerKind, WireKind};
 use skull_mir::mir::FuncRef;
 use skull_mir::shader_ir::{
+    ComputeAccess, ComputeAddressSpace, ComputeBuiltin, ComputeDispatchContract,
+    ComputeResourceShape, ComputeValueKind, ComputeWorkgroupSize, LogicalComputeResource,
     LogicalTextureGroup, LogicalUniformGroup, ShaderIR, ShaderInstance, ShaderInterfacePlan,
     ShaderStage, ShaderStageIr, UniformRole,
 };
@@ -158,4 +160,42 @@ fn semantic_wire_is_neutral_and_fingerprint_tracks_logical_shape() {
     swapped.textures.as_mut().unwrap().samplers.swap(0, 1);
     assert_ne!(base.semantic_fingerprint(true), swapped.semantic_fingerprint(true));
     assert_ne!(base.semantic_fingerprint(true), base.semantic_fingerprint(false));
+}
+
+#[test]
+fn compute_interface_keeps_storage_contract_neutral_and_complete() {
+    let plan = ShaderInterfacePlan {
+        stages: vec![ShaderStage::Compute],
+        compute: Some(skull_mir::shader_ir::ComputeInterfacePlan {
+            resources: vec![
+                LogicalComputeResource {
+                    name: Ustr::from("x"),
+                    shape: ComputeResourceShape::Array(ComputeValueKind::U32),
+                    address_space: ComputeAddressSpace::Storage,
+                    access: ComputeAccess::Read,
+                },
+                LogicalComputeResource {
+                    name: Ustr::from("out"),
+                    shape: ComputeResourceShape::Array(ComputeValueKind::U32),
+                    address_space: ComputeAddressSpace::Storage,
+                    access: ComputeAccess::ReadWrite,
+                },
+            ],
+            builtins: vec![ComputeBuiltin::GlobalInvocationId],
+            workgroup_size: ComputeWorkgroupSize { x: 64, y: 1, z: 1 },
+            dispatch: ComputeDispatchContract::Runtime { dimensions: 1 },
+        }),
+        ..Default::default()
+    };
+
+    assert_eq!(plan.stages, [ShaderStage::Compute]);
+    let compute = plan.compute.as_ref().expect("compute contract");
+    assert_eq!(compute.resources.len(), 2, "two storage resources are examined");
+    assert_eq!(compute.resources[1].access, ComputeAccess::ReadWrite);
+    assert_eq!(compute.workgroup_size.x, 64);
+    assert_eq!(compute.dispatch, ComputeDispatchContract::Runtime { dimensions: 1 });
+    let wire = plan.semantic_wire(false);
+    assert!(wire.contains("stage compute"), "stage identity is retained: {wire}");
+    assert!(wire.contains("compute"), "compute contract is retained: {wire}");
+    assert!(!wire.contains("binding"), "compute wire leaked target binding: {wire}");
 }

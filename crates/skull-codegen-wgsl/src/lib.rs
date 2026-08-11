@@ -863,6 +863,7 @@ fn uniform_role_wire(role: UniformRole) -> &'static str {
         UniformRole::Engine => "engine",
         UniformRole::Stage(ShaderStage::Fragment) => "fragment",
         UniformRole::Stage(ShaderStage::Vertex) => "vertex",
+        UniformRole::Stage(ShaderStage::Compute) => "compute",
     }
 }
 
@@ -881,6 +882,7 @@ fn uniform_role_key(role: UniformRole) -> u8 {
         UniformRole::Engine => 0,
         UniformRole::Stage(ShaderStage::Fragment) => 1,
         UniformRole::Stage(ShaderStage::Vertex) => 2,
+        UniformRole::Stage(ShaderStage::Compute) => 3,
     }
 }
 
@@ -888,6 +890,12 @@ fn validate_fullscreen_interface(
     iface: &ShaderInterfacePlan,
     span: Span,
 ) -> Result<(), CompilerError> {
+    if iface.compute.is_some() || iface.stages.contains(&ShaderStage::Compute) {
+        return Err(err(
+            span,
+            "WGSL graphics projection does not admit compute interfaces yet",
+        ));
+    }
     if iface.stages != [ShaderStage::Fragment] {
         return Err(err(
             span,
@@ -993,6 +1001,9 @@ fn visibility_for_role(role: UniformRole) -> WgslStageVisibility {
         UniformRole::Stage(ShaderStage::Fragment) => {
             WgslStageVisibility { vertex: false, fragment: true }
         }
+        UniformRole::Stage(ShaderStage::Compute) => {
+            panic!("compute uniform roles must be lowered through the compute ABI")
+        }
     }
 }
 
@@ -1000,6 +1011,12 @@ fn validate_explicit_interface(
     iface: &ShaderInterfacePlan,
     span: Span,
 ) -> Result<(), CompilerError> {
+    if iface.compute.is_some() || iface.stages.contains(&ShaderStage::Compute) {
+        return Err(err(
+            span,
+            "WGSL graphics projection does not admit compute interfaces yet",
+        ));
+    }
     if iface.stages != [ShaderStage::Vertex, ShaderStage::Fragment] {
         return Err(err(
             span,
@@ -1274,6 +1291,9 @@ fn layout_array_group(
         visibility: match group.stage {
             ShaderStage::Vertex => WgslStageVisibility { vertex: true, fragment: false },
             ShaderStage::Fragment => WgslStageVisibility { vertex: false, fragment: true },
+            ShaderStage::Compute => {
+                return Err(err(span, "WGSL uniform array blocks do not admit compute stages yet"));
+            }
         },
     })
 }
@@ -1304,6 +1324,7 @@ fn stage_key(stage: ShaderStage) -> u8 {
     match stage {
         ShaderStage::Vertex => 0,
         ShaderStage::Fragment => 1,
+        ShaderStage::Compute => 2,
     }
 }
 
