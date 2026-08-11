@@ -801,6 +801,39 @@ fn a_replay_names_the_environment_it_disagrees_with() {
     );
 }
 
+#[test]
+fn mag_screenshot_environment_reaches_header_and_mismatch_warning() {
+    let rock_bin = env!("CARGO_BIN_EXE_rock");
+    let dir = tempfile::tempdir().expect("dir");
+    let log = dir.path().join("mag-screenshot.replay");
+    let scratch = tempfile::tempdir().expect("scratch");
+    let out = Command::new(rock_bin)
+        .args([
+            "frame", "mag", "-n", "3", "--record", &log.to_string_lossy(),
+            "--output", &scratch.path().to_string_lossy(),
+        ])
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .env("MAG_SCREENSHOT", "1")
+        .current_dir(workspace_root())
+        .output()
+        .expect("spawn Mag record");
+    assert!(out.status.success(), "record failed: {}", String::from_utf8_lossy(&out.stderr));
+
+    let text = std::fs::read_to_string(&log).expect("read log");
+    assert!(
+        text.lines().any(|line| line == "env MAG_SCREENSHOT 1 31"),
+        "MAG_SCREENSHOT must be recorded as a game environment key:\n{text}"
+    );
+
+    let mismatch = run_frame_stderr(
+        "mag", 3, &["--replay", &log.to_string_lossy()], &[("MAG_SCREENSHOT", "0")],
+    );
+    assert!(
+        mismatch.contains("recorded environment differs: MAG_SCREENSHOT"),
+        "a changed screenshot mode must be named by replay env checking:\n{mismatch}"
+    );
+}
+
 /// The v5 environment encoding has to survive arbitrary values, because an env
 /// var is arbitrary bytes. Each of these breaks a `K=V` pairs-joined-by-spaces
 /// encoding: a value with a space or an `=` is silently truncated or

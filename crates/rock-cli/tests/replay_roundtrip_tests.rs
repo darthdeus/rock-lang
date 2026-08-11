@@ -331,3 +331,51 @@ fn replay_rejects_corrupt_log() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+#[test]
+fn replay_rejects_malformed_v5_environment_records() {
+    let cases = [
+        ("missing payload", "env STONE_QUIET 1"),
+        ("extra field", "env STONE_QUIET 1 31 extra"),
+        ("invalid presence", "env STONE_QUIET 2 31"),
+        ("odd hex", "env STONE_QUIET 1 3"),
+        ("non-hex payload", "env STONE_QUIET 1 gg"),
+        ("value on absent record", "env STONE_QUIET 0 31"),
+    ];
+
+    for (label, env_line) in cases {
+        let dir = tempfile::tempdir().expect("dir");
+        let log = dir.path().join("malformed-env.replay");
+        let text = format!(
+            "STONE_REPLAY 5\nseed 42\nwindow 0x1p9 0x1p9\ngame bitgun\nbuild dev\ncheckpoint 60\n{env_line}\nt 0x0p+0 0x0p+0 0x0p+0 0 0 - -\n"
+        );
+        std::fs::write(&log, text).expect("write malformed env log");
+
+        let out = run_frame_raw("bitgun", 1, &["--replay", &log.to_string_lossy()]);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{label} must refuse the log\nstderr:\n{stderr}");
+        assert!(
+            stderr.contains("malformed replay records"),
+            "{label} must use the replay load failure path\nstderr:\n{stderr}"
+        );
+    }
+}
+
+#[test]
+fn replay_preserves_v1_to_v4_load_compatibility() {
+    for version in 1..=4 {
+        let dir = tempfile::tempdir().expect("dir");
+        let log = dir.path().join(format!("v{version}.replay"));
+        let text = format!(
+            "STONE_REPLAY {version}\nseed 42\nwindow 0x1p9 0x1p9\ngame bitgun\nt 0x0p+0 0x0p+0 0x0p+0 0 0 - -\n"
+        );
+        std::fs::write(&log, text).expect("write legacy log");
+
+        let out = run_frame_raw("bitgun", 1, &["--replay", &log.to_string_lossy()]);
+        assert!(
+            out.status.success(),
+            "v{version} replay must remain loadable\nstderr:\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
