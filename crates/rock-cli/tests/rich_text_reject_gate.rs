@@ -1,7 +1,7 @@
 //! Every rich-text rejection, one bounded run per subject.
 //!
 //! The rich path raises rather than dropping a glyph or a call: an unsupported
-//! byte, a line control or a world destination is a program bug, and the plain
+//! byte, a line control or a deferred world-overlay destination is a program bug, and the plain
 //! path's silent no-op on a stale font handle is exactly what the rich boundary
 //! is not allowed to inherit.
 //!
@@ -119,13 +119,8 @@ fn an_undeclared_face_in_a_later_span_rejects() {
 }
 
 #[test]
-fn a_world_draw_list_rejects() {
-    assert_rejects("dl_world", "only Output and Composite");
-}
-
-#[test]
 fn a_deferred_world_overlay_draw_list_rejects() {
-    assert_rejects("dl_world_overlay", "only Output and Composite");
+    assert_rejects("dl_world_overlay", "unsupported list World/Output");
 }
 
 /// The control. Without the injection the same command must pass, so the arms
