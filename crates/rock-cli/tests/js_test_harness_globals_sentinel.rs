@@ -1,25 +1,17 @@
-//! SENTINEL for a `--backend js` TEST-EXECUTOR bug (not a language one).
+//! The `--backend js` test executor emits ONE program for a file, so a global
+//! derived from shared mutable state is computed once -- the same model luajit
+//! and `rock run --backend js` use.
 //!
-//! With no decorator-dependent test in a file, `js_test.rs` emits each `@test`
-//! in isolation and CONCATENATES the results. Every block carries its own copy
-//! of the global initializers, so at load they run once per test block. A global
-//! whose value derives from SHARED MUTABLE state therefore restarts: the counter
-//! below is reset by the second block before `g2` is computed, and `g2` comes
-//! out 1 instead of 2.
+//! This was a sentinel: the executor used to emit each `@test` in isolation and
+//! CONCATENATE, giving every block its own copy of the global initializers, so
+//! the counter below restarted and `g2` came out 1 instead of 2. Per-test
+//! emission is still what CLASSIFIES a test as supported (so an unsupported one
+//! skips alone rather than taking the file down), but assembly is now always the
+//! whole program.
 //!
-//! This is the emission model, not a backend semantics divergence: luajit runs
-//! the file as one program and gets 1 and 2, and `rock run --backend js` -- which
-//! also emits one program -- gets 1 and 2 as well. Both arms are asserted below,
-//! so a fix that made luajit agree with the buggy JS answer would fail here too.
-//!
-//! Measured on the pristine tree at `84edfd16b`, so it predates the Session
-//! Arena registry; the registry is simply the first stdlib state to depend on
-//! cross-global sharing. It is why four arena iteration tests fail under
-//! `rock test tests/ --backend js` (`docs/known-failing-tests.md`).
-//!
-//! PINNED BUG: the JS executor should report `2`. When the harness emits globals
-//! once, `js_executor_restarts_shared_global_state` goes red -- flip its
-//! expectation to a pass and update this comment in the same commit.
+//! All three arms assert the SAME answer across the two backends and the two JS
+//! entry points, so a regression that made any one of them disagree fails here
+//! -- including one that "fixed" luajit to match a broken JS.
 
 use std::path::Path;
 use std::process::Command;
@@ -86,27 +78,25 @@ fn rock(cmd: &str, src: &str, args: &[&str]) -> (bool, String) {
     (out.status.success(), text)
 }
 
-/// PINNED BUG: the second test reads a restarted counter, so `second_global`
-/// fails with `1`. Flip to an all-pass assertion when the harness is fixed.
+/// Both globals see one run of the initializers, so the second reads `2`.
 #[test]
-fn js_executor_restarts_shared_global_state() {
+fn js_executor_keeps_shared_global_state() {
     let (ok, text) = rock("test", FIXTURE, &["--backend", "js"]);
     assert!(
-        !ok,
-        "PINNED BEHAVIOR (BUG): the JS test executor is expected to fail this \
-         fixture because it re-runs global initializers per test block. It \
-         passed -- the harness fix landed; flip this assertion.\n{text}"
+        ok,
+        "the JS test executor must compute a shared-state global ONCE per file; \
+         `second_global` reading 1 is the per-test-block restart this file \
+         exists to catch:\n{text}"
     );
     assert!(
-        text.contains("second_global") && text.contains("got <1>"),
-        "the failure must be the shared-counter restart (`second_global` got 1), \
-         not some other error -- otherwise this sentinel is pinning the wrong \
-         thing:\n{text}"
+        !text.contains("got <1>"),
+        "`second_global` read a restarted counter:\n{text}"
     );
+    // Denominator: both tests must actually have RUN. A file whose tests all
+    // skipped would satisfy the assertions above while measuring nothing.
     assert!(
-        !text.contains("FAIL first_global"),
-        "the first block's initializers ran last before it, so `first_global` is \
-         the control and must still pass:\n{text}"
+        text.contains("2/2"),
+        "both tests must run, not skip -- got:\n{text}"
     );
 }
 
