@@ -837,6 +837,9 @@ impl WgslAbi {
                 return Err(wire_error("compute storage resources are not in binding order"));
             }
             identifier(&resource.name, "compute storage name")?;
+            if compute.resources[..binding].iter().any(|candidate| candidate.name == resource.name) {
+                return Err(wire_error("compute storage resource names are repeated"));
+            }
         }
         if !self.vertex_inputs.is_empty()
             || !self.varyings.is_empty()
@@ -1551,6 +1554,7 @@ mod tests {
             ("workgroup 64 1 1", "workgroup 0 1 1"),
             ("builtin global_invocation_id", "builtin local_invocation_id"),
             ("storage 0 x read i32", "storage 1 x read i32"),
+            ("storage 1 y read i32", "storage 1 x read i32"),
             ("block compute SaxpyParams 3 16 none 2", "block fragment SaxpyParams 3 16 none 2"),
             ("storage 2 out read_write i32", "storage 1 out read_write i32"),
         ];
