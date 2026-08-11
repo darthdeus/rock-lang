@@ -13,10 +13,10 @@
 //! passing for the wrong reason.
 //!
 //! `assert_booted` is load-bearing. Without the Vulkan loader on this box the
-//! game never initializes, no draw system runs, the probe is inert -- and
-//! `rock frame` still prints `3 frames executed successfully` and exits 0. A
-//! gate that only read the exit status would pass vacuously in exactly the
-//! environment where it measures nothing.
+//! game never initializes and no draw system runs. Bounded `rock frame` now
+//! exits non-zero and does not print `3 frames executed successfully`, but a
+//! gate must retain the boot marker as an independent non-vacuity assertion:
+//! exit status alone does not prove that the measured process initialized.
 
 use std::process::Command;
 
