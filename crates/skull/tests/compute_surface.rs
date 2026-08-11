@@ -274,6 +274,14 @@ global RECT_LOSS: string = rock_compute(rect_loss)
 "#;
 
 #[test]
+fn non_compute_programs_do_not_emit_compute_runtime_calls() {
+    let ws = common::ws_with_stdlib("fn root() {}");
+    let (emit, _) = skull::mir_emit::emit_full(&ws, test_mid(&ws)).expect("plain Lua program emits");
+    assert!(!emit.lua.contains("__rock_wgpu_compute_snapshot_begin()"));
+    assert!(!emit.lua.contains("__rock_wgpu_compute_snapshot_end()"));
+}
+
+#[test]
 fn uint_atomic_workgroup_compute_surface_is_admitted() {
     let ws = common::ws_with_stdlib(UINT_COMPUTE_SURFACE);
     skull::mir_emit::emit_full_in_for_renderer(

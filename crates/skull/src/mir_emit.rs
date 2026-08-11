@@ -2648,7 +2648,10 @@ fn shader_registration_lines(
             compute_collection.entries.len()
         )));
     }
-    out.push_str("__rock_wgpu_compute_snapshot_begin()\n");
+    let has_compute = !compute_collection.entries.is_empty();
+    if has_compute {
+        out.push_str("__rock_wgpu_compute_snapshot_begin()\n");
+    }
     for (entry, compute_view) in compute_collection.entries.iter().zip(&view.compute_views) {
         let input = concrete_stage_input(&compute_view.stage, &compute_view.concrete_plans);
         let neutral = skull_codegen_shader::plan_compute_from_concrete(
@@ -2683,7 +2686,9 @@ fn shader_registration_lines(
             skull_codegen_lua::lua_string(&neutral.interface.semantic_wire(false)),
         );
     }
-    out.push_str("if not __rock_wgpu_compute_snapshot_end() then error(\"compiler compute snapshot failed\") end\n");
+    if has_compute {
+        out.push_str("if not __rock_wgpu_compute_snapshot_end() then error(\"compiler compute snapshot failed\") end\n");
+    }
     Ok(ShaderRegistrations {
         lua: out,
         dependencies,
