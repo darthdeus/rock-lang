@@ -4139,13 +4139,26 @@ impl<'a> FunctionEmitter<'a> {
             Inst::UintShr(a, b) => self.binary(*a, ">>", *b),
             Inst::Eq(a, b) => self.binary(*a, "==", *b),
             Inst::NotEq(a, b) => self.binary(*a, "!=", *b),
-            Inst::FloatToInt(value) => Ok(format!("i32({})", self.render_val(*value)?)),
-            Inst::IntToFloat(value) => Ok(format!("f32({})", self.render_val(*value)?)),
-            Inst::UintToFloat(value) => Ok(format!("f32({})", self.render_val(*value)?)),
+            Inst::FloatToInt(value) => {
+                self.reject_compute_numeric_conversion("float as int")?;
+                Ok(format!("i32({})", self.render_val(*value)?))
+            }
+            Inst::IntToFloat(value) => {
+                self.reject_compute_numeric_conversion("int as float")?;
+                Ok(format!("f32({})", self.render_val(*value)?))
+            }
+            Inst::UintToFloat(value) => {
+                self.reject_compute_numeric_conversion("uint as float")?;
+                Ok(format!("f32({})", self.render_val(*value)?))
+            }
             Inst::IntToUint(value) | Inst::FloatToUint(value) => {
+                self.reject_compute_numeric_conversion("numeric as uint")?;
                 Ok(format!("u32({})", self.render_val(*value)?))
             }
-            Inst::UintToInt(value) => Ok(format!("i32({})", self.render_val(*value)?)),
+            Inst::UintToInt(value) => {
+                self.reject_compute_numeric_conversion("uint as int")?;
+                Ok(format!("i32({})", self.render_val(*value)?))
+            }
             Inst::UintBitcastInt(value) => {
                 Ok(format!("bitcast<i32>({})", self.render_val(*value)?))
             }
@@ -4163,6 +4176,18 @@ impl<'a> FunctionEmitter<'a> {
                 ),
             )),
         }
+    }
+
+    fn reject_compute_numeric_conversion(&self, conversion: &str) -> Result<(), CompilerError> {
+        if self.stage.stage == ShaderStage::Compute {
+            return Err(err(
+                self.span,
+                format!(
+                    "WGSL compute does not support dynamic numeric conversion `{conversion}`; use bitcast<int> or bitcast<uint> for bit reinterpretation"
+                ),
+            ));
+        }
+        Ok(())
     }
 
     /// A WGSL struct constructor is POSITIONAL, so the literal's field order is

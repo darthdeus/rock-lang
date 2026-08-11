@@ -396,6 +396,26 @@ fn compiler_authored_rect_loss_fixture_is_naga_validated() {
 }
 
 #[test]
+fn compute_numeric_conversion_is_rejected_before_backend_specific_wrapping() {
+    let source = REAL_RECT_LOSS.replace(
+        "let candidate = bitcast<uint>(group.y)",
+        "let candidate = group.y as uint",
+    );
+    let ws = common::ws_with_stdlib(&source);
+    let error = match skull::mir_emit::emit_full_in_for_renderer(
+        &ws,
+        test_mid(&ws),
+        None,
+        skull::mir_emit::RendererTarget::Wgpu,
+    )
+    {
+        Ok(_) => panic!("compute numeric casts must not silently wrap in WGSL"),
+        Err(error) => error,
+    };
+    assert!(error.message.contains("numeric conversion") || error.message.contains("compute"), "{error}");
+}
+
+#[test]
 fn compute_helper_resource_reordering_is_rejected() {
     let source = REAL_RECT_LOSS.replace(
         "line_covers(batch, base, px, py)",
