@@ -19,16 +19,23 @@ use skull_mir::gpu_layout::{AttrKind, SamplerKind, WireKind};
 use skull_mir::mir::{Block, Cell, Inst, Lit, MirFunc, Term};
 use skull_mir::monoty::MonoInterner;
 use skull_mir::shader_ir::{
-    FragmentOutput, LogicalArrayGroup, LogicalTextureGroup, LogicalUniformGroup, ShaderIR,
-    ShaderInstance, ShaderInterfacePlan, ShaderStage, ShaderStageIr, UniformRole, VertexRate,
+    ComputeAccess, ComputeAddressSpace, ComputeBuiltin, ComputeDispatchContract,
+    ComputeResourceShape, ComputeValueKind, FragmentOutput, LogicalArrayGroup,
+    LogicalTextureGroup, LogicalUniformGroup, ShaderIR, ShaderInstance, ShaderInterfacePlan,
+    ShaderStage, ShaderStageIr, UniformRole, VertexRate,
 };
 use skull_parser::CompilerError;
 use skull_wgsl_abi::{
+    WgslArtifactKind as SharedWgslArtifactKind, WgslComputeInfo as SharedWgslComputeInfo,
     WgslAbi as SharedWgslAbi, WgslArrayBlock as SharedWgslArrayBlock,
     WgslArrayMember as SharedWgslArrayMember, WgslFragmentIo as SharedWgslFragmentIo,
     WgslFragmentOutput as SharedWgslFragmentOutput, WgslFullscreenVertex as SharedWgslFullscreenVertex,
     WgslGeometryKind as SharedWgslGeometryKind, WgslPrimitiveTopology as SharedWgslPrimitiveTopology,
     WgslTextureBinding as SharedWgslTextureBinding, WgslTextureKind as SharedWgslTextureKind,
+    WgslComputeBuiltin as SharedWgslComputeBuiltin,
+    WgslComputeResource as SharedWgslComputeResource,
+    WgslStorageAccess as SharedWgslStorageAccess,
+    WgslStorageElementKind as SharedWgslStorageElementKind,
     WgslUniformBlock as SharedWgslUniformBlock, WgslUniformMember as SharedWgslUniformMember,
     WgslVertexAttribute as SharedWgslVertexAttribute, WgslVertexInput as SharedWgslVertexInput,
     WgslVarying as SharedWgslVarying, WgslVisibility as SharedWgslVisibility,
@@ -450,6 +457,7 @@ pub enum WgslGeometryKind {
 /// WGSL's physical answer to one target-neutral fullscreen interface.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WgslAbiPlan {
+    pub artifact: SharedWgslArtifactKind,
     pub semantic_fingerprint: u64,
     pub bind_group: u32,
     pub geometry: WgslGeometryKind,
@@ -464,6 +472,7 @@ pub struct WgslAbiPlan {
     pub uniform_blocks: Vec<WgslUniformBlock>,
     pub array_blocks: Vec<WgslArrayBlock>,
     pub textures: Vec<WgslTextureBinding>,
+    pub compute: Option<SharedWgslComputeInfo>,
 }
 
 impl WgslAbiPlan {
@@ -518,6 +527,7 @@ impl WgslAbiPlan {
             .unwrap_or_default();
 
         Ok(Self {
+            artifact: SharedWgslArtifactKind::Graphics,
             semantic_fingerprint,
             bind_group: WGSL_BIND_GROUP,
             geometry: WgslGeometryKind::Fullscreen,
@@ -542,6 +552,7 @@ impl WgslAbiPlan {
             uniform_blocks,
             array_blocks: Vec::new(),
             textures,
+            compute: None,
         })
     }
 
@@ -647,6 +658,7 @@ impl WgslAbiPlan {
             }
         };
         Ok(Self {
+            artifact: SharedWgslArtifactKind::Graphics,
             semantic_fingerprint: iface.semantic_fingerprint(false),
             bind_group: WGSL_BIND_GROUP,
             geometry: WgslGeometryKind::Triangles,
@@ -672,6 +684,131 @@ impl WgslAbiPlan {
             uniform_blocks,
             array_blocks,
             textures,
+            compute: None,
+        })
+    }
+
+    /// Derive the first compute ABI from the neutral compute interface. The
+    /// binding order is the declaration order: storage resources first, then
+    /// the one stage uniform block. No runtime type dispatch is needed because
+    /// the interface has already fixed every resource's logical kind.
+    pub fn compute(
+        iface: &ShaderInterfacePlan,
+        entry: &str,
+        span: Span,
+    ) -> Result<Self, CompilerError> {
+        let Some(compute) = iface.compute.as_ref() else {
+            return Err(err(span, "WGSL compute projection requires a compute interface"));
+        };
+        if iface.stages != [ShaderStage::Compute]
+            || iface.fragment_output != FragmentOutput::None
+            || !iface.vertex_inputs.is_empty()
+            || !iface.varyings.is_empty()
+            || !iface.array_groups.is_empty()
+            || iface.textures.is_some()
+            || !iface.bare_samplers.is_empty()
+        {
+            return Err(err(span, "WGSL compute projection received graphics interface records"));
+        }
+        if entry.is_empty() {
+            return Err(err(span, "WGSL compute entry name cannot be empty"));
+        }
+        identifier(Ustr::from(entry), "compute entry", span)?;
+        if compute.dispatch != (ComputeDispatchContract::Runtime { dimensions: 1 }) {
+            return Err(err(span, "the first WGSL compute ABI requires a one-dimensional runtime dispatch"));
+        }
+        if compute.workgroup_size.y != 1 || compute.workgroup_size.z != 1 {
+            return Err(err(span, "the first WGSL compute ABI requires y=1 and z=1 workgroup dimensions"));
+        }
+        let mut resources = Vec::with_capacity(compute.resources.len());
+        for (binding, resource) in compute.resources.iter().enumerate() {
+            if resource.address_space != ComputeAddressSpace::Storage {
+                return Err(err(span, "the first WGSL compute ABI only admits storage resources"));
+            }
+            let ComputeResourceShape::Array(ComputeValueKind::I32) = resource.shape else {
+                return Err(err(span, "the first WGSL compute ABI only admits StorageBuffer<int>"));
+            };
+            let access = match resource.access {
+                ComputeAccess::Read => SharedWgslStorageAccess::Read,
+                ComputeAccess::ReadWrite => SharedWgslStorageAccess::ReadWrite,
+                ComputeAccess::Write => {
+                    return Err(err(span, "WGSL storage resources do not admit write-only access"));
+                }
+            };
+            identifier(resource.name, "compute storage resource", span)?;
+            resources.push(SharedWgslComputeResource {
+                binding: binding as u32,
+                name: resource.name.to_string(),
+                access,
+                element: SharedWgslStorageElementKind::I32,
+            });
+        }
+        let mut groups = iface
+            .uniform_groups
+            .iter()
+            .filter(|group| group.role == UniformRole::Stage(ShaderStage::Compute))
+            .cloned()
+            .collect::<Vec<_>>();
+        groups.sort_by_key(|group| uniform_role_key(group.role));
+        let uniform_blocks = groups
+            .iter()
+            .enumerate()
+            .map(|(binding, group)| {
+                layout_uniform_group(
+                    group,
+                    resources.len() as u32 + binding as u32,
+                    WgslStageVisibility { vertex: false, fragment: false },
+                    span,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let builtins = compute
+            .builtins
+            .iter()
+            .map(|builtin| match builtin {
+                ComputeBuiltin::GlobalInvocationId => SharedWgslComputeBuiltin::GlobalInvocationId,
+                _ => {
+                    unreachable!("unsupported compute builtin passed neutral validation")
+                }
+            })
+            .collect();
+        Ok(Self {
+            artifact: SharedWgslArtifactKind::Compute,
+            semantic_fingerprint: iface.semantic_fingerprint(false),
+            bind_group: WGSL_BIND_GROUP,
+            geometry: WgslGeometryKind::Triangles,
+            vertex_entry: String::new(),
+            fragment_entry: String::new(),
+            vertex_inputs: Vec::new(),
+            varyings: Vec::new(),
+            fullscreen_vertex: WgslFullscreenVertex {
+                topology: WgslPrimitiveTopology::TriangleStrip,
+                vertex_count: 0,
+                varying_location: 0,
+            },
+            fragment: WgslFragmentIo { uv_location: 0 },
+            fragment_outputs: Vec::new(),
+            fullscreen_uniform: WgslUniformBlock {
+                role: UniformRole::Stage(ShaderStage::Compute),
+                struct_name: Ustr::from("FullscreenU"),
+                binding: 0,
+                size: 0,
+                members: Vec::new(),
+                visibility: WgslStageVisibility { vertex: false, fragment: false },
+            },
+            uniform_blocks,
+            array_blocks: Vec::new(),
+            textures: Vec::new(),
+            compute: Some(SharedWgslComputeInfo {
+                entry: entry.to_string(),
+                workgroup_size: [
+                    compute.workgroup_size.x,
+                    compute.workgroup_size.y,
+                    compute.workgroup_size.z,
+                ],
+                builtins,
+                resources,
+            }),
         })
     }
 
@@ -685,6 +822,19 @@ impl WgslAbiPlan {
     /// full comparison: changing one offset, pair binding or visibility must
     /// not be accepted merely because the rest of the plan still agrees.
     pub fn validate(&self, iface: &ShaderInterfacePlan, span: Span) -> Result<(), CompilerError> {
+        if self.artifact == SharedWgslArtifactKind::Compute {
+            let entry = self
+                .compute
+                .as_ref()
+                .ok_or_else(|| err(span, "compute ABI plan is missing compute metadata"))?
+                .entry
+                .clone();
+            let expected = Self::compute(iface, &entry, span)?;
+            if self != &expected {
+                return Err(err(span, "WGSL compute ABI plan no longer matches its interface projection"));
+            }
+            return Ok(());
+        }
         let expected = match self.geometry {
             WgslGeometryKind::Fullscreen => Self::wgsl(iface, span)?,
             WgslGeometryKind::Triangles => {
@@ -713,6 +863,7 @@ impl WgslAbiPlan {
     /// This is deliberately a small versioned wire rather than WGSL metadata
     pub fn to_shared_abi(&self) -> SharedWgslAbi {
         SharedWgslAbi {
+            artifact: self.artifact,
             semantic_fingerprint: self.semantic_fingerprint,
             bind_group: self.bind_group,
             geometry: match self.geometry {
@@ -787,6 +938,7 @@ impl WgslAbiPlan {
             uniform_blocks: self.uniform_blocks.iter().map(shared_uniform_block).collect(),
             array_blocks: self.array_blocks.iter().map(shared_array_block).collect(),
             textures: self.textures.iter().map(shared_texture_binding).collect(),
+            compute: self.compute.clone(),
         }
     }
 
@@ -1592,6 +1744,126 @@ pub fn emit_explicit_shader(
     })
 }
 
+/// Emit one compute module from the retained, concrete stage plan. The logical
+/// entry receives only the builtin packet; storage and uniform parameters are
+/// physical globals owned by this ABI projection.
+pub fn emit_compute_shader(
+    ws: &Workspace,
+    ir: &ShaderIR,
+    iface: &ShaderInterfacePlan,
+    abi: &WgslAbiPlan,
+    span: Span,
+) -> Result<WgslShaderEmission, CompilerError> {
+    if abi.artifact != SharedWgslArtifactKind::Compute {
+        return Err(err(span, "WGSL compute emission requires a compute ABI"));
+    }
+    abi.validate(iface, span)?;
+    validate_compute_ir_shape(ir, span)?;
+    let stage = &ir.stages[0];
+    let expected_entry = format!("{}_compute", stage.entry.inst.symbol(ws, &ir.interner));
+    let entry_fn = function_for_instance(ws, &stage.entry);
+    let entry_roles = compute_entry_param_roles(ws, entry_fn, &stage.body, iface, abi, span)?;
+    validate_known_bodies(stage, span)?;
+    let compute = abi
+        .compute
+        .as_ref()
+        .ok_or_else(|| err(span, "WGSL compute ABI is missing compute metadata"))?;
+    if compute.entry != expected_entry {
+        return Err(err(
+            span,
+            format!(
+                "WGSL compute entry `{}` does not name retained instance `{expected_entry}`",
+                compute.entry
+            ),
+        ));
+    }
+
+    let mut source = String::new();
+    source.push_str("struct GlobalInvocationId {\n");
+    source.push_str("  x: i32,\n  y: i32,\n  z: i32,\n}\n\n");
+    for resource in &compute.resources {
+        let access = match resource.access {
+            SharedWgslStorageAccess::Read => "read",
+            SharedWgslStorageAccess::ReadWrite => "read_write",
+        };
+        writeln!(
+            source,
+            "@group({}) @binding({}) var<storage, {}> s_{}: array<i32>;",
+            abi.bind_group, resource.binding, access, resource.name
+        )
+        .unwrap();
+    }
+    if !compute.resources.is_empty() {
+        source.push('\n');
+    }
+    emit_explicit_uniforms(&mut source, abi);
+
+    for instance in &stage.order {
+        let body = stage.bodies.get(instance).ok_or_else(|| {
+            err(
+                span,
+                format!(
+                    "WGSL IR order names `{}` without a lowered body",
+                    instance.inst.symbol(ws, &ir.interner)
+                ),
+            )
+        })?;
+        let function = function_for_instance(ws, instance);
+        if body.insts.values().any(|instruction| {
+            matches!(instruction, Inst::Call { func, .. } if WgslIntrinsic::classify(&ws.module(func.module).functions[func.func]) == Some(WgslIntrinsic::GlobalInvocationId))
+        }) {
+            return Err(err(
+                span,
+                "global_invocation_id is only available in the compute entry",
+            ));
+        }
+        let emitter = FunctionEmitter::new(
+            ws,
+            &ir.interner,
+            stage,
+            instance,
+            body,
+            abi,
+            HashMap::new(),
+            span,
+        )?;
+        source.push_str(&emitter.emit_function(function, false)?);
+    }
+
+    let emitter = FunctionEmitter::new(
+        ws,
+        &ir.interner,
+        stage,
+        &stage.entry,
+        &stage.body,
+        abi,
+        entry_roles,
+        span,
+    )?
+    .with_compute_invocation(Some("global_id".to_string()));
+    source.push_str(&emitter.emit_function(entry_fn, true)?);
+    writeln!(
+        source,
+        "@compute @workgroup_size({}, {}, {})\nfn {}(@builtin(global_invocation_id) global_id: vec3<u32>) {{",
+        compute.workgroup_size[0],
+        compute.workgroup_size[1],
+        compute.workgroup_size[2],
+        compute.entry
+    )
+    .unwrap();
+    writeln!(source, "  {}(global_id);", stage.entry.inst.symbol(ws, &ir.interner)).unwrap();
+    source.push_str("}\n");
+    validate_wgsl_source(&source, span)?;
+
+    Ok(WgslShaderEmission {
+        source,
+        dependencies: ir.declarations(),
+        interface: iface.clone(),
+        abi: abi.clone(),
+        ir: ir.clone(),
+    })
+}
+
 fn validate_explicit_ir_shape(ir: &ShaderIR, span: Span) -> Result<(), CompilerError> {
     if ir.stages.len() != 2
         || ir.stages[0].stage != ShaderStage::Vertex
@@ -1602,6 +1874,28 @@ fn validate_explicit_ir_shape(ir: &ShaderIR, span: Span) -> Result<(), CompilerE
             "WGSL explicit emission requires one vertex and one fragment IR stage",
         ));
     }
+    Ok(())
+}
+
+fn validate_compute_ir_shape(ir: &ShaderIR, span: Span) -> Result<(), CompilerError> {
+    if ir.stages.len() != 1 || ir.stages[0].stage != ShaderStage::Compute {
+        return Err(err(
+            span,
+            "WGSL compute emission requires exactly one compute IR stage",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_wgsl_source(source: &str, span: Span) -> Result<(), CompilerError> {
+    let module = naga::front::wgsl::parse_str(source)
+        .map_err(|error| err(span, format!("WGSL parse failed: {error}")))?;
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .map_err(|error| err(span, format!("WGSL validation failed: {error:?}")))?;
     Ok(())
 }
 
@@ -2090,6 +2384,7 @@ impl ValueKind {
 enum ParamRole {
     Attribute,
     Varying,
+    Storage,
     Texture,
     Uniform(UniformRole),
     UniformArray,
@@ -2349,6 +2644,60 @@ fn explicit_entry_param_roles(
     Ok(roles)
 }
 
+fn compute_entry_param_roles(
+    ws: &Workspace,
+    function: &Function,
+    body: &MirFunc,
+    iface: &ShaderInterfacePlan,
+    abi: &WgslAbiPlan,
+    span: Span,
+) -> Result<HashMap<Idx<Cell>, ParamRole>, CompilerError> {
+    if function.param_decls.len() != body.params.len() {
+        return Err(err(
+            span,
+            "WGSL compute entry declaration and IR parameter populations disagree",
+        ));
+    }
+    let compute = iface
+        .compute
+        .as_ref()
+        .ok_or_else(|| err(span, "WGSL compute entry has no compute interface"))?;
+    let mut roles = HashMap::new();
+    for (index, cell) in body.params.iter().enumerate() {
+        let param = &function.param_decls[index];
+        if has_anno(function, index, "storage") {
+            if !compute.resources.iter().any(|resource| resource.name == param.name) {
+                return Err(err(
+                    param_span(function, index),
+                    format!("WGSL compute storage parameter `{}` is absent from the interface", param.name),
+                ));
+            }
+            roles.insert(*cell, ParamRole::Storage);
+        } else if has_anno(function, index, "uniform") {
+            check_uniform_param(
+                ws,
+                param.ty,
+                UniformRole::Stage(ShaderStage::Compute),
+                iface,
+                param_span(function, index),
+            )?;
+            if abi.uniform_block(UniformRole::Stage(ShaderStage::Compute)).is_none() {
+                return Err(err(
+                    param_span(function, index),
+                    format!("WGSL compute uniform `{}` is absent from the ABI", param.name),
+                ));
+            }
+            roles.insert(*cell, ParamRole::Uniform(UniformRole::Stage(ShaderStage::Compute)));
+        } else {
+            return Err(err(
+                param_span(function, index),
+                format!("WGSL compute parameter `{}` has no storage or uniform role", param.name),
+            ));
+        }
+    }
+    Ok(roles)
+}
+
 fn param_span(function: &Function, _index: usize) -> Span {
     function.name_span
 }
@@ -2414,6 +2763,7 @@ struct FunctionEmitter<'a> {
     /// the entry wrapper. `None` in every body that cannot receive it, which is
     /// what makes a helper's `frag_coord()` a rejection rather than a guess.
     frag_coord: Option<String>,
+    compute_invocation: Option<String>,
     out: String,
     indent: usize,
     visited: HashSet<Idx<Block>>,
@@ -2486,6 +2836,7 @@ impl<'a> FunctionEmitter<'a> {
             cell_kinds,
             span,
             frag_coord: None,
+            compute_invocation: None,
             out: String::new(),
             indent: 1,
             visited: HashSet::new(),
@@ -2501,6 +2852,11 @@ impl<'a> FunctionEmitter<'a> {
 
     fn with_frag_coord(mut self, name: Option<String>) -> Self {
         self.frag_coord = name;
+        self
+    }
+
+    fn with_compute_invocation(mut self, name: Option<String>) -> Self {
+        self.compute_invocation = name;
         self
     }
 
@@ -2541,6 +2897,7 @@ impl<'a> FunctionEmitter<'a> {
             };
             let found = match values.as_slice() {
                 [] => None,
+                [value] if self.is_void_call(*value) => None,
                 [value] => Some(self.value_kind(*value)?),
                 _ => return Err(err(self.span, "WGSL does not admit a multi-value return")),
             };
@@ -2633,7 +2990,8 @@ impl<'a> FunctionEmitter<'a> {
                 && matches!(
                     self.param_roles.get(cell),
                     Some(
-                        ParamRole::Texture
+                        ParamRole::Storage
+                            | ParamRole::Texture
                             | ParamRole::Uniform(_)
                             | ParamRole::UniformArray
                     )
@@ -2663,6 +3021,9 @@ impl<'a> FunctionEmitter<'a> {
         }
         if let Some(name) = &self.frag_coord {
             rendered.push(format!("{name}: vec4<f32>"));
+        }
+        if let Some(name) = &self.compute_invocation {
+            rendered.push(format!("{name}: vec3<u32>"));
         }
         Ok(rendered.join(", "))
     }
@@ -2872,6 +3233,10 @@ impl<'a> FunctionEmitter<'a> {
         match values {
             [] => self.push("return;"),
             [value] => {
+                if self.is_void_call(*value) {
+                    self.push("return;");
+                    return Ok(());
+                }
                 let rendered = self.render_val(*value)?;
                 self.push(&format!("return {rendered};"));
             }
@@ -3085,6 +3450,12 @@ impl<'a> FunctionEmitter<'a> {
                         ),
                     ));
                 }
+                Some(ParamRole::Storage) => {
+                    return Err(err(
+                        self.span,
+                        format!("WGSL storage resource `{}` is only accessed through storage intrinsics", self.cell_names[&cell]),
+                    ));
+                }
                 Some(ParamRole::Attribute) | Some(ParamRole::Varying) | Some(ParamRole::TexCoord) | None => {
                     if let Some(ty) = self.body.cells[cell].ty {
                         if let Some(kind) = struct_field_kind(self.ws, ty, field) {
@@ -3124,10 +3495,7 @@ impl<'a> FunctionEmitter<'a> {
                 Ok(ValueKind::Struct(Ustr::from("GlobalInvocationId")))
             }
             Some(WgslIntrinsic::StorageLoad) => Ok(ValueKind::I32),
-            Some(WgslIntrinsic::StorageStore) => Err(err(
-                self.span,
-                "WGSL `storage_store` produces no value and cannot be used in an expression",
-            )),
+            Some(WgslIntrinsic::StorageStore) => Ok(ValueKind::I32),
             Some(WgslIntrinsic::Texture) => Ok(ValueKind::Vec4),
             Some(WgslIntrinsic::TextureSize) => Ok(ValueKind::Vec2),
             Some(WgslIntrinsic::FragCoord) => Ok(ValueKind::Vec4),
@@ -3323,7 +3691,9 @@ impl<'a> FunctionEmitter<'a> {
             )),
             Inst::Load(cell) => match self.param_roles.get(cell).copied() {
                 Some(ParamRole::TexCoord) => Ok("uv".to_string()),
-                Some(ParamRole::Texture) | Some(ParamRole::Uniform(_)) => Err(err(
+                Some(ParamRole::Storage)
+                | Some(ParamRole::Texture)
+                | Some(ParamRole::Uniform(_)) => Err(err(
                     self.span,
                     format!(
                         "WGSL resource cell `{}` must be accessed through a field",
@@ -3387,6 +3757,12 @@ impl<'a> FunctionEmitter<'a> {
                                 WireKind::Bool32 => format!("({read} != 0u)"),
                                 _ => read,
                             });
+                        }
+                        Some(ParamRole::Storage) => {
+                            return Err(err(
+                                self.span,
+                                format!("WGSL storage resource `{}` is only accessed through storage intrinsics", self.cell_names[&cell]),
+                            ));
                         }
                         Some(ParamRole::Attribute)
                         | Some(ParamRole::Varying)
@@ -3483,6 +3859,23 @@ impl<'a> FunctionEmitter<'a> {
         ))
     }
 
+    fn compute_resource(
+        &self,
+        cell: Idx<Cell>,
+    ) -> Result<&SharedWgslComputeResource, CompilerError> {
+        let name = &self.cell_names[&cell];
+        self.abi
+            .compute
+            .as_ref()
+            .and_then(|compute| compute.resources.iter().find(|resource| resource.name == *name))
+            .ok_or_else(|| {
+                err(
+                    self.span,
+                    format!("WGSL compute resource `{name}` is absent from the ABI"),
+                )
+            })
+    }
+
     fn render_call(
         &self,
         iid: Idx<Inst>,
@@ -3492,12 +3885,57 @@ impl<'a> FunctionEmitter<'a> {
         let function = &self.ws.module(func.module).functions[func.func];
         let name = function.name.as_str();
         match WgslIntrinsic::classify(function) {
-            Some(WgslIntrinsic::GlobalInvocationId)
-            | Some(WgslIntrinsic::StorageLoad)
-            | Some(WgslIntrinsic::StorageStore) => Err(err(
-                self.span,
-                format!("WGSL compute intrinsic `{name}` requires the compute emitter"),
-            )),
+            Some(WgslIntrinsic::GlobalInvocationId) => {
+                if !args.is_empty() {
+                    return Err(err(self.span, "WGSL global_invocation_id takes no arguments"));
+                }
+                let Some(invocation) = &self.compute_invocation else {
+                    return Err(err(
+                        self.span,
+                        "global_invocation_id is only available in a compute entry",
+                    ));
+                };
+                Ok(format!(
+                    "GlobalInvocationId(i32({invocation}.x), i32({invocation}.y), i32({invocation}.z))"
+                ))
+            }
+            Some(WgslIntrinsic::StorageLoad) => {
+                let [buffer, index] = args else {
+                    return Err(err(self.span, "WGSL storage_load requires a buffer and index"));
+                };
+                let Inst::Load(cell) = self.body.insts[*buffer] else {
+                    return Err(err(self.span, "WGSL storage_load requires a direct storage parameter"));
+                };
+                if !matches!(self.param_roles.get(&cell), Some(ParamRole::Storage)) {
+                    return Err(err(self.span, "WGSL storage_load requires a StorageBuffer parameter"));
+                }
+                let resource = self.compute_resource(cell)?;
+                Ok(format!("s_{}[{}]", resource.name, self.render_val(*index)?))
+            }
+            Some(WgslIntrinsic::StorageStore) => {
+                let [buffer, index, value] = args else {
+                    return Err(err(self.span, "WGSL storage_store requires a buffer, index, and value"));
+                };
+                let Inst::Load(cell) = self.body.insts[*buffer] else {
+                    return Err(err(self.span, "WGSL storage_store requires a direct storage parameter"));
+                };
+                if !matches!(self.param_roles.get(&cell), Some(ParamRole::Storage)) {
+                    return Err(err(self.span, "WGSL storage_store requires a StorageBuffer parameter"));
+                }
+                let resource = self.compute_resource(cell)?;
+                if resource.access != SharedWgslStorageAccess::ReadWrite {
+                    return Err(err(
+                        self.span,
+                        format!("WGSL storage_store requires read_write resource `{}`", resource.name),
+                    ));
+                }
+                Ok(format!(
+                    "s_{}[{}] = {}",
+                    resource.name,
+                    self.render_val(*index)?,
+                    self.render_val(*value)?
+                ))
+            }
             Some(WgslIntrinsic::Texture) => {
                 if args.len() != 2 {
                     return Err(err(

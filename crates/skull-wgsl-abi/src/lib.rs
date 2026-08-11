@@ -6,8 +6,14 @@
 
 use std::fmt;
 
-pub const WGSL_ABI_V2: &str = "WGSL_ABI_V2";
+pub const WGSL_ABI_V3: &str = "WGSL_ABI_V3";
 const MAX_RECORDS: u64 = 1_000_000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WgslArtifactKind {
+    Graphics,
+    Compute,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WgslGeometryKind {
@@ -61,6 +67,38 @@ pub struct WgslUniformBlock {
 pub enum WgslTextureKind {
     Float,
     Int,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WgslStorageAccess {
+    Read,
+    ReadWrite,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WgslStorageElementKind {
+    I32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WgslComputeBuiltin {
+    GlobalInvocationId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WgslComputeResource {
+    pub binding: u32,
+    pub name: String,
+    pub access: WgslStorageAccess,
+    pub element: WgslStorageElementKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WgslComputeInfo {
+    pub entry: String,
+    pub workgroup_size: [u32; 3],
+    pub builtins: Vec<WgslComputeBuiltin>,
+    pub resources: Vec<WgslComputeResource>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -125,6 +163,7 @@ pub struct WgslVarying {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WgslAbi {
+    pub artifact: WgslArtifactKind,
     pub semantic_fingerprint: u64,
     pub bind_group: u32,
     pub geometry: WgslGeometryKind,
@@ -139,6 +178,7 @@ pub struct WgslAbi {
     pub uniform_blocks: Vec<WgslUniformBlock>,
     pub array_blocks: Vec<WgslArrayBlock>,
     pub textures: Vec<WgslTextureBinding>,
+    pub compute: Option<WgslComputeInfo>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -171,11 +211,11 @@ impl WgslAbi {
             .ok_or_else(|| wire_error("missing WGSL ABI version"))?
             .strip_suffix('\n')
             .ok_or_else(|| wire_error("WGSL ABI version is missing a newline"))?;
-        if version == "WGSL_ABI_V1" {
-            return Err(wire_error("WGSL_ABI_V1 is rejected; expected WGSL_ABI_V2"));
+        if version == "WGSL_ABI_V1" || version == "WGSL_ABI_V2" {
+            return Err(wire_error("older WGSL ABI versions are rejected; expected WGSL_ABI_V3"));
         }
-        if version != WGSL_ABI_V2 {
-            return Err(wire_error(format!("expected {WGSL_ABI_V2}, got {version}")));
+        if version != WGSL_ABI_V3 {
+            return Err(wire_error(format!("expected {WGSL_ABI_V3}, got {version}")));
         }
 
         let checksum_line = lines
@@ -192,10 +232,23 @@ impl WgslAbi {
         }
 
         let mut payload_lines = payload.lines();
+        let artifact_line = fields(next_line(&mut payload_lines, "artifact")?, "artifact", 2)?;
+        let artifact = match artifact_line[1] {
+            "graphics" => WgslArtifactKind::Graphics,
+            "compute" => WgslArtifactKind::Compute,
+            other => return Err(wire_error(format!("unknown WGSL artifact kind {other}"))),
+        };
         let semantic = fields(next_line(&mut payload_lines, "semantic")?, "semantic", 2)?;
         let semantic_fingerprint = parse_u64(semantic[1], "semantic fingerprint")?;
         let group = fields(next_line(&mut payload_lines, "group")?, "group", 2)?;
         let bind_group = parse_u32(group[1], "bind group")?;
+        if artifact == WgslArtifactKind::Compute {
+            return parse_compute_abi(
+                &mut payload_lines,
+                semantic_fingerprint,
+                bind_group,
+            );
+        }
         let geometry_line = fields(next_line(&mut payload_lines, "geometry")?, "geometry", 2)?;
         let geometry = match geometry_line[1] {
             "fullscreen" => WgslGeometryKind::Fullscreen,
@@ -433,6 +486,7 @@ impl WgslAbi {
         }
 
         let abi = Self {
+            artifact,
             semantic_fingerprint,
             bind_group,
             geometry,
@@ -447,6 +501,7 @@ impl WgslAbi {
             uniform_blocks,
             array_blocks,
             textures,
+            compute: None,
         };
         abi.validate()?;
         Ok(abi)
@@ -455,8 +510,71 @@ impl WgslAbi {
     pub fn serialize(&self) -> Result<String, AbiError> {
         self.validate()?;
         let mut payload = String::new();
+        push_line(
+            &mut payload,
+            format_args!(
+                "artifact {}",
+                match self.artifact {
+                    WgslArtifactKind::Graphics => "graphics",
+                    WgslArtifactKind::Compute => "compute",
+                }
+            ),
+        );
         push_line(&mut payload, format_args!("semantic {}", self.semantic_fingerprint));
         push_line(&mut payload, format_args!("group {}", self.bind_group));
+        if self.artifact == WgslArtifactKind::Compute {
+            let compute = self
+                .compute
+                .as_ref()
+                .ok_or_else(|| wire_error("compute artifact is missing compute metadata"))?;
+            push_line(&mut payload, format_args!("compute_entry {}", compute.entry));
+            push_line(
+                &mut payload,
+                format_args!(
+                    "workgroup {} {} {}",
+                    compute.workgroup_size[0], compute.workgroup_size[1], compute.workgroup_size[2]
+                ),
+            );
+            push_line(&mut payload, format_args!("builtins {}", compute.builtins.len()));
+            for builtin in &compute.builtins {
+                push_line(
+                    &mut payload,
+                    format_args!(
+                        "builtin {}",
+                        match builtin {
+                            WgslComputeBuiltin::GlobalInvocationId => "global_invocation_id",
+                        }
+                    ),
+                );
+            }
+            push_line(&mut payload, format_args!("resources {}", compute.resources.len()));
+            for resource in &compute.resources {
+                push_line(
+                    &mut payload,
+                    format_args!(
+                        "storage {} {} {} {}",
+                        resource.binding,
+                        resource.name,
+                        storage_access_wire(resource.access),
+                        storage_element_wire(resource.element),
+                    ),
+                );
+            }
+            push_line(&mut payload, format_args!("blocks {}", self.uniform_blocks.len()));
+            for block in &self.uniform_blocks {
+                write_uniform_block(&mut payload, "block", block)?;
+            }
+            push_line(&mut payload, format_args!("outputs 0"));
+            push_line(&mut payload, format_args!("array_blocks 0"));
+            push_line(&mut payload, format_args!("textures 0"));
+            push_line(&mut payload, format_args!("end"));
+            return Ok(format!(
+                "{}\nchecksum {}\n{}",
+                WGSL_ABI_V3,
+                wire_checksum(payload.as_bytes()),
+                payload
+            ));
+        }
         push_line(
             &mut payload,
             format_args!(
@@ -570,7 +688,7 @@ impl WgslAbi {
         push_line(&mut payload, format_args!("end"));
         Ok(format!(
             "{}\nchecksum {}\n{}",
-            WGSL_ABI_V2,
+            WGSL_ABI_V3,
             wire_checksum(payload.as_bytes()),
             payload
         ))
@@ -579,6 +697,12 @@ impl WgslAbi {
     pub fn validate(&self) -> Result<(), AbiError> {
         if self.bind_group != 0 {
             return Err(wire_error("WGSL artifacts must use bind group 0"));
+        }
+        if self.artifact == WgslArtifactKind::Compute {
+            return self.validate_compute();
+        }
+        if self.compute.is_some() {
+            return Err(wire_error("graphics artifact carries compute metadata"));
         }
         identifier(&self.vertex_entry, "vertex entry")?;
         identifier(&self.fragment_entry, "fragment entry")?;
@@ -690,6 +814,178 @@ impl WgslAbi {
         }
         Ok(())
     }
+
+    fn validate_compute(&self) -> Result<(), AbiError> {
+        let compute = self
+            .compute
+            .as_ref()
+            .ok_or_else(|| wire_error("compute artifact is missing compute metadata"))?;
+        identifier(&compute.entry, "compute entry")?;
+        if compute.workgroup_size[0] == 0
+            || compute.workgroup_size[1] != 1
+            || compute.workgroup_size[2] != 1
+        {
+            return Err(wire_error("compute workgroup size must be x>0, y=1, z=1"));
+        }
+        for (index, builtin) in compute.builtins.iter().enumerate() {
+            if compute.builtins[..index].contains(builtin) {
+                return Err(wire_error("compute builtins are repeated"));
+            }
+        }
+        for (binding, resource) in compute.resources.iter().enumerate() {
+            if resource.binding != binding as u32 {
+                return Err(wire_error("compute storage resources are not in binding order"));
+            }
+            identifier(&resource.name, "compute storage name")?;
+        }
+        if !self.vertex_inputs.is_empty()
+            || !self.varyings.is_empty()
+            || !self.fragment_outputs.is_empty()
+            || !self.array_blocks.is_empty()
+            || !self.textures.is_empty()
+            || !self.fullscreen_uniform.members.is_empty()
+            || self.fullscreen_uniform.size != 0
+        {
+            return Err(wire_error("compute artifact carries graphics-only records"));
+        }
+        for (index, block) in self.uniform_blocks.iter().enumerate() {
+            validate_uniform_block(
+                block,
+                compute.resources.len() as u32 + index as u32,
+                "compute",
+            )?;
+        }
+        Ok(())
+    }
+}
+
+fn parse_compute_abi<'a>(
+    lines: &mut impl Iterator<Item = &'a str>,
+    semantic_fingerprint: u64,
+    bind_group: u32,
+) -> Result<WgslAbi, AbiError> {
+    let entry = fields(next_line(lines, "compute_entry")?, "compute_entry", 2)?;
+    let entry = identifier(entry[1], "compute entry")?;
+    let workgroup = fields(next_line(lines, "workgroup")?, "workgroup", 4)?;
+    let workgroup_size = [
+        parse_u32(workgroup[1], "workgroup x")?,
+        parse_u32(workgroup[2], "workgroup y")?,
+        parse_u32(workgroup[3], "workgroup z")?,
+    ];
+    if workgroup_size == [0, 0, 0]
+        || workgroup_size.contains(&0)
+        || workgroup_size[1..] != [1, 1]
+    {
+        return Err(wire_error("compute workgroup size must be x>0, y=1, z=1"));
+    }
+
+    let builtin_count = parse_count(
+        fields(next_line(lines, "builtins")?, "builtins", 2)?[1],
+        "compute builtin count",
+    )?;
+    let mut builtins = Vec::with_capacity(builtin_count);
+    for _ in 0..builtin_count {
+        let builtin = fields(next_line(lines, "builtin")?, "builtin", 2)?;
+        let value = match builtin[1] {
+            "global_invocation_id" => WgslComputeBuiltin::GlobalInvocationId,
+            other => return Err(wire_error(format!("unsupported compute builtin {other}"))),
+        };
+        if builtins.contains(&value) {
+            return Err(wire_error("compute builtins are repeated"));
+        }
+        builtins.push(value);
+    }
+
+    let resource_count = parse_count(
+        fields(next_line(lines, "resources")?, "resources", 2)?[1],
+        "compute resource count",
+    )?;
+    let mut resources = Vec::with_capacity(resource_count);
+    for expected_binding in 0..resource_count {
+        let resource = fields(next_line(lines, "storage")?, "storage", 5)?;
+        let binding = parse_u32(resource[1], "compute storage binding")?;
+        if binding != expected_binding as u32 {
+            return Err(wire_error("compute storage resources are not in binding order"));
+        }
+        let access = match resource[3] {
+            "read" => WgslStorageAccess::Read,
+            "read_write" => WgslStorageAccess::ReadWrite,
+            other => return Err(wire_error(format!("unsupported compute storage access {other}"))),
+        };
+        let element = match resource[4] {
+            "i32" => WgslStorageElementKind::I32,
+            other => return Err(wire_error(format!("unsupported compute storage element {other}"))),
+        };
+        resources.push(WgslComputeResource {
+            binding,
+            name: identifier(resource[2], "compute storage name")?,
+            access,
+            element,
+        });
+    }
+
+    let uniform_count = parse_count(
+        fields(next_line(lines, "blocks")?, "blocks", 2)?[1],
+        "compute uniform block count",
+    )?;
+    let mut uniform_blocks = Vec::with_capacity(uniform_count);
+    for expected_binding in 0..uniform_count {
+        uniform_blocks.push(parse_uniform_block(
+            lines,
+            "block",
+            "compute",
+            resource_count as u32 + expected_binding as u32,
+        )?);
+    }
+    let output_count = parse_count(
+        fields(next_line(lines, "outputs")?, "outputs", 2)?[1],
+        "compute output count",
+    )?;
+    if output_count != 0 {
+        return Err(wire_error("compute ABI cannot carry fragment outputs"));
+    }
+    if next_line(lines, "array_blocks")? != "array_blocks 0" {
+        return Err(wire_error("compute ABI cannot carry uniform array blocks"));
+    }
+    if next_line(lines, "textures")? != "textures 0" {
+        return Err(wire_error("compute ABI cannot carry textures"));
+    }
+    if next_line(lines, "end")? != "end" {
+        return Err(wire_error("missing ABI end record"));
+    }
+    if next_line_optional(lines)?.is_some() {
+        return Err(wire_error("trailing ABI records"));
+    }
+
+    let abi = WgslAbi {
+        artifact: WgslArtifactKind::Compute,
+        semantic_fingerprint,
+        bind_group,
+        geometry: WgslGeometryKind::Triangles,
+        vertex_entry: String::new(),
+        fragment_entry: String::new(),
+        vertex_inputs: Vec::new(),
+        varyings: Vec::new(),
+        fullscreen_vertex: WgslFullscreenVertex {
+            topology: WgslPrimitiveTopology::TriangleStrip,
+            vertex_count: 0,
+            varying_location: 0,
+        },
+        fragment: WgslFragmentIo { uv_location: 0 },
+        fragment_outputs: Vec::new(),
+        fullscreen_uniform: empty_uniform_block(),
+        uniform_blocks,
+        array_blocks: Vec::new(),
+        textures: Vec::new(),
+        compute: Some(WgslComputeInfo {
+            entry,
+            workgroup_size,
+            builtins,
+            resources,
+        }),
+    };
+    abi.validate()?;
+    Ok(abi)
 }
 
 fn write_uniform_block(
@@ -741,6 +1037,8 @@ fn parse_uniform_block<'a>(
             if !matches!(role, "engine" | "fragment" | "vertex") {
                 return Err(wire_error(format!("unknown uniform role {role}")));
             }
+        } else if role != expected_role {
+            return Err(wire_error(format!("uniform role {role} is not {expected_role}")));
         }
         role.to_string()
     };
@@ -778,6 +1076,9 @@ fn validate_uniform_block(
     identifier(&block.struct_name, "uniform block name")?;
     if name == "ordinary" && !matches!(block.role.as_str(), "engine" | "fragment" | "vertex") {
         return Err(wire_error(format!("unknown uniform role {}", block.role)));
+    }
+    if name != "ordinary" && name != "FullscreenU" && block.role != name {
+        return Err(wire_error(format!("uniform role {} is not {name}", block.role)));
     }
     if name == "FullscreenU" && block.role != "fullscreen" {
         return Err(wire_error("fullscreen uniform has the wrong role"));
@@ -986,6 +1287,19 @@ fn texture_kind_wire(kind: WgslTextureKind) -> &'static str {
     }
 }
 
+fn storage_access_wire(access: WgslStorageAccess) -> &'static str {
+    match access {
+        WgslStorageAccess::Read => "read",
+        WgslStorageAccess::ReadWrite => "read_write",
+    }
+}
+
+fn storage_element_wire(element: WgslStorageElementKind) -> &'static str {
+    match element {
+        WgslStorageElementKind::I32 => "i32",
+    }
+}
+
 fn visibility_wire(visibility: WgslVisibility) -> &'static str {
     match (visibility.vertex, visibility.fragment) {
         (false, false) => "none",
@@ -1033,6 +1347,7 @@ mod tests {
 
     fn fullscreen() -> WgslAbi {
         WgslAbi {
+            artifact: WgslArtifactKind::Graphics,
             semantic_fingerprint: 7,
             bind_group: 0,
             geometry: WgslGeometryKind::Fullscreen,
@@ -1065,11 +1380,13 @@ mod tests {
             uniform_blocks: Vec::new(),
             array_blocks: Vec::new(),
             textures: Vec::new(),
+            compute: None,
         }
     }
 
     fn triangles() -> WgslAbi {
         WgslAbi {
+            artifact: WgslArtifactKind::Graphics,
             semantic_fingerprint: 11,
             bind_group: 0,
             geometry: WgslGeometryKind::Triangles,
@@ -1139,6 +1456,66 @@ mod tests {
                 sampler_binding: 3,
                 visibility: WgslVisibility { vertex: false, fragment: true },
             }],
+            compute: None,
+        }
+    }
+
+    fn compute() -> WgslAbi {
+        WgslAbi {
+            artifact: WgslArtifactKind::Compute,
+            semantic_fingerprint: 41,
+            bind_group: 0,
+            geometry: WgslGeometryKind::Triangles,
+            vertex_entry: String::new(),
+            fragment_entry: String::new(),
+            vertex_inputs: Vec::new(),
+            varyings: Vec::new(),
+            fullscreen_vertex: WgslFullscreenVertex {
+                topology: WgslPrimitiveTopology::TriangleStrip,
+                vertex_count: 0,
+                varying_location: 0,
+            },
+            fragment: WgslFragmentIo { uv_location: 0 },
+            fragment_outputs: Vec::new(),
+            fullscreen_uniform: empty_uniform_block(),
+            uniform_blocks: vec![WgslUniformBlock {
+                role: "compute".into(),
+                struct_name: "SaxpyParams".into(),
+                binding: 3,
+                size: 16,
+                visibility: WgslVisibility { vertex: false, fragment: false },
+                members: vec![
+                    WgslUniformMember { name: "a".into(), kind: 4, offset: 0, align: 4, size: 4 },
+                    WgslUniformMember { name: "n".into(), kind: 4, offset: 4, align: 4, size: 4 },
+                ],
+            }],
+            array_blocks: Vec::new(),
+            textures: Vec::new(),
+            compute: Some(WgslComputeInfo {
+                entry: "saxpy_compute".into(),
+                workgroup_size: [64, 1, 1],
+                builtins: vec![WgslComputeBuiltin::GlobalInvocationId],
+                resources: vec![
+                    WgslComputeResource {
+                        binding: 0,
+                        name: "x".into(),
+                        access: WgslStorageAccess::Read,
+                        element: WgslStorageElementKind::I32,
+                    },
+                    WgslComputeResource {
+                        binding: 1,
+                        name: "y".into(),
+                        access: WgslStorageAccess::Read,
+                        element: WgslStorageElementKind::I32,
+                    },
+                    WgslComputeResource {
+                        binding: 2,
+                        name: "out".into(),
+                        access: WgslStorageAccess::ReadWrite,
+                        element: WgslStorageElementKind::I32,
+                    },
+                ],
+            }),
         }
     }
 
@@ -1159,11 +1536,28 @@ mod tests {
     }
 
     #[test]
-    fn v2_round_trips_and_v1_is_explicitly_rejected() {
+    fn v3_round_trips_and_older_versions_are_explicitly_rejected() {
         let wire = fullscreen().serialize().expect("serialize");
-        assert!(wire.starts_with("WGSL_ABI_V2\n"));
+        assert!(wire.starts_with("WGSL_ABI_V3\n"));
         assert_eq!(WgslAbi::parse(&wire).expect("parse"), fullscreen());
-        assert!(WgslAbi::parse(&wire.replacen("WGSL_ABI_V2", "WGSL_ABI_V1", 1)).is_err());
+        assert!(WgslAbi::parse(&wire.replacen("WGSL_ABI_V3", "WGSL_ABI_V1", 1)).is_err());
+    }
+
+    #[test]
+    fn compute_v3_round_trips_and_rejects_physical_mutations() {
+        let wire = compute().serialize().expect("compute serializes");
+        assert_eq!(WgslAbi::parse(&wire).expect("compute parses"), compute());
+        let mutations = [
+            ("workgroup 64 1 1", "workgroup 0 1 1"),
+            ("builtin global_invocation_id", "builtin local_invocation_id"),
+            ("storage 0 x read i32", "storage 1 x read i32"),
+            ("block compute SaxpyParams 3 16 none 2", "block fragment SaxpyParams 3 16 none 2"),
+            ("storage 2 out read_write i32", "storage 1 out read_write i32"),
+        ];
+        for (old, new) in mutations {
+            let mutated = rechecksum(&replace_once(&wire, old, new));
+            assert!(WgslAbi::parse(&mutated).is_err(), "compute mutation `{old}` was accepted");
+        }
     }
 
     #[test]
@@ -1178,9 +1572,9 @@ mod tests {
     }
 
     #[test]
-    fn physical_v2_mutations_are_rejected_after_rechecksum() {
+    fn physical_v3_mutations_are_rejected_after_rechecksum() {
         let wire = triangles().serialize().expect("serialize");
-        assert!(WgslAbi::parse(&wire.replacen("WGSL_ABI_V2", "WGSL_ABI_V1", 1)).is_err());
+        assert!(WgslAbi::parse(&wire.replacen("WGSL_ABI_V3", "WGSL_ABI_V2", 1)).is_err());
         let (version, rest) = wire.split_once('\n').expect("version");
         let (checksum, payload) = rest.split_once('\n').expect("checksum");
         let checksum = checksum

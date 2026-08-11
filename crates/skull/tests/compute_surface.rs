@@ -1,3 +1,6 @@
+use bone_semantic::hir::BodyOwner;
+use bone_semantic::inference::Workspace;
+use bone_semantic::prelude::ModuleId;
 use super::common;
 use skull_codegen_shader::{ConcreteStageInput, ShaderPlannerPolicy};
 use ustr::Ustr;
@@ -9,6 +12,20 @@ fn emit_errors(src: &str) -> Vec<String> {
         Ok(_) => Vec::new(),
         Err(error) => vec![error.message],
     }
+}
+
+fn test_mid(ws: &Workspace) -> ModuleId {
+    *ws.module_ids.get(&Ustr::from("<test>")).expect("test module")
+}
+
+fn body_id(ws: &Workspace, name: &str) -> (ModuleId, BodyOwner) {
+    let mid = test_mid(ws);
+    for (fid, function) in ws.module(mid).functions.iter() {
+        if function.name.as_str() == name {
+            return (mid, BodyOwner::Function(fid));
+        }
+    }
+    panic!("no function named {name}");
 }
 
 const SAXPY: &str = r#"
@@ -146,6 +163,133 @@ fn dropping_a_retained_compute_helper_rejects_graph_view_disagreement() {
         Err(error) => error,
     };
     assert!(rejected.message.contains("helper order") || rejected.message.contains("entry plus helpers"), "{rejected}");
+}
+
+#[test]
+fn saxpy_compute_emits_deterministic_wgsl_and_v3_abi() {
+    let ws = common::ws_with_stdlib(SAXPY);
+    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
+    let (_emit, cache) = skull::mir_emit::emit_full(&ws, mid).expect("compute emit admission");
+    let compute = &cache.shader_view().compute_views[0];
+    let input = ConcreteStageInput {
+        stage: compute.stage.stage,
+        entry: compute.stage.entry.clone(),
+        retained: compute.stage.retained.iter().cloned().collect(),
+        helpers: compute.stage.helpers.iter().cloned().collect(),
+        builtins: compute.stage.builtins.iter().cloned().collect(),
+        order: compute.stage.order.clone(),
+        dependencies: compute.stage.dependencies.clone(),
+        concrete_plans: compute.concrete_plans.clone(),
+    };
+    let scx = skull_mir::lower::ScalarCtx::new_values_first_class(&ws)
+        .sharing(cache.graph().interner().clone());
+    let neutral = skull_codegen_shader::plan_compute_from_concrete(
+        &ws,
+        &scx,
+        &input,
+        &skull_codegen_wgsl::WgslShaderPolicy,
+    )
+    .expect("compute neutral plan");
+    let logical_entry = neutral.entry.inst.symbol(&ws, &scx.interner());
+    let abi = skull_codegen_wgsl::WgslAbiPlan::compute(
+        &neutral.interface,
+        &format!("{logical_entry}_compute"),
+        bone_semantic::prelude::Span::default(),
+    )
+    .expect("compute ABI");
+    assert_eq!(abi.compute.as_ref().unwrap().resources.iter().map(|resource| resource.name.as_str()).collect::<Vec<_>>(), ["x", "y", "out"]);
+    assert_eq!(abi.compute.as_ref().unwrap().resources[0].binding, 0);
+    assert_eq!(abi.compute.as_ref().unwrap().resources[2].binding, 2);
+    let emission = skull_codegen_wgsl::emit_compute_shader(
+        &ws,
+        &neutral.ir,
+        &neutral.interface,
+        &abi,
+        bone_semantic::prelude::Span::default(),
+    )
+    .expect("compute WGSL emission");
+    assert!(emission.source.contains("@compute @workgroup_size(64, 1, 1)"));
+    assert!(emission.source.contains("@builtin(global_invocation_id) global_id: vec3<u32>"));
+    assert!(emission.source.contains("var<storage, read> s_x: array<i32>"));
+    assert!(emission.source.contains("var<storage, read_write> s_out: array<i32>"));
+    assert!(emission.source.contains("s_out[i] = ((u_SaxpyParams.a * s_x[i]) + s_y[i])"));
+    let wire = abi.wire();
+    assert!(wire.starts_with("WGSL_ABI_V3\n"));
+
+    let mut wrong_symbol = abi.clone();
+    wrong_symbol.compute.as_mut().unwrap().entry = "wrong_instance".into();
+    let rejected = match skull_codegen_wgsl::emit_compute_shader(
+        &ws,
+        &neutral.ir,
+        &neutral.interface,
+        &wrong_symbol,
+        bone_semantic::prelude::Span::default(),
+    ) {
+        Ok(_) => panic!("a physical entry symbol detached from the retained instance must reject"),
+        Err(error) => error,
+    };
+    assert!(rejected.message.contains("retained instance"), "{rejected}");
+}
+
+#[test]
+fn wgpu_renderer_registers_the_compute_artifact_from_the_view() {
+    let ws = common::ws_with_stdlib(SAXPY);
+    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
+    let (emit, cache) = skull::mir_emit::emit_full_in_for_renderer(
+        &ws,
+        mid,
+        None,
+        skull::mir_emit::RendererTarget::Wgpu,
+    )
+    .expect("compute WGPU registration");
+    assert_eq!(cache.shader_view().compute_views.len(), 1);
+    assert_eq!(emit.lua.matches("__rock_wgpu_compute_register(").count(), 1);
+    assert!(emit.lua.contains("__rock_wgpu_compute_register(\"saxpy\""));
+}
+
+#[test]
+fn compute_body_edit_reloads_the_compiler_artifact_through_the_overlay() {
+    let ws1 = common::ws_with_stdlib(SAXPY);
+    let mid1 = test_mid(&ws1);
+    let (_full, mut cache) = skull::mir_emit::emit_full_in_for_renderer(
+        &ws1,
+        mid1,
+        None,
+        skull::mir_emit::RendererTarget::Wgpu,
+    )
+    .expect("initial compute emit");
+    let source2 = SAXPY.replace(
+        "params.a * storage_load(x, i) + storage_load(y, i)",
+        "(params.a + 1) * storage_load(x, i) + storage_load(y, i)",
+    );
+    let ws2 = common::ws_with_stdlib(&source2);
+    let overlay = skull::mir_emit::emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "saxpy")])
+        .expect("compute body overlay");
+    assert_eq!(overlay.lua.matches("__rock_wgpu_compute_register(\"saxpy\"").count(), 1);
+    assert!(overlay.lua.contains("(u_SaxpyParams.a + 1)"), "edited compute source missing:\n{}", overlay.lua);
+}
+
+#[test]
+fn compute_root_addition_and_removal_request_a_full_reload() {
+    let ws = common::ws_with_stdlib(SAXPY);
+    let mid = test_mid(&ws);
+    let (_full, cache) = skull::mir_emit::emit_full_in_for_renderer(
+        &ws,
+        mid,
+        None,
+        skull::mir_emit::RendererTarget::Wgpu,
+    )
+    .expect("initial compute emit");
+
+    let removed = common::ws_with_stdlib(&SAXPY.replace("global SAXPY: string = rock_compute(saxpy)", ""));
+    assert!(cache.shader_registration_keys_changed(&removed).expect("removed key set"));
+
+    let added_source = format!(
+        "{}\n\n@shader(compute)\n@workgroup(64)\nfn saxpy_extra(\n    @storage(read) x: StorageBuffer<int>,\n    @storage(read) y: StorageBuffer<int>,\n    @storage(read_write) out: StorageBuffer<int>,\n    @uniform params: SaxpyParams,\n) {{\n    let i = global_invocation_id().x\n    if i >= params.n {{ return }}\n    storage_store(out, i, params.a * storage_load(x, i) + storage_load(y, i))\n}}\n\nglobal SAXPY_EXTRA: string = rock_compute(saxpy_extra)\n",
+        SAXPY
+    );
+    let added = common::ws_with_stdlib(&added_source);
+    assert!(cache.shader_registration_keys_changed(&added).expect("added key set"));
 }
 
 #[test]

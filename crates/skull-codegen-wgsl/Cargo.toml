@@ -10,10 +10,10 @@ skull-mir = { path = "../skull-mir" }
 skull-parser = { path = "../skull-parser" }
 skull-codegen-shader = { path = "../skull-codegen-shader" }
 skull-wgsl-abi = { path = "../skull-wgsl-abi" }
+naga = { version = "27", features = ["wgsl-in"] }
 ustr = { workspace = true }
 
 [dev-dependencies]
-naga = { version = "27", features = ["wgsl-in"] }
 rock-host = { path = "../rock-host" }
 skull-codegen-glsl = { path = "../skull-codegen-glsl" }
 

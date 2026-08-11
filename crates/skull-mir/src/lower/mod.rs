@@ -3409,6 +3409,34 @@ pub fn body_has_shader_pipeline_call(
     })
 }
 
+pub fn body_has_compute_artifact_call(
+    ws: &Workspace,
+    mid: ModuleId,
+    owner: BodyOwner,
+) -> bool {
+    let module = ws.module(mid);
+    let Some(body) = module.bodies.get(&owner) else { return false };
+    let inf = ws.inference(mid).and_then(|ir| ir.per_fn.get(&owner));
+    body.expr_arena.iter().any(|(e, expr)| {
+        let Expr::Call { callee: Callee::Unresolved { name, .. }, .. } = expr else {
+            return false;
+        };
+        let resolved = match inf {
+            Some(inf) => resolve_call_fn(ws, inf, e, *name),
+            None => match ws.functions_by_name.get(name).map(|list| list.as_slice()) {
+                Some([single]) => Some(*single),
+                _ => None,
+            },
+        };
+        resolved.is_some_and(|(fmod, fid)| {
+            matches!(
+                crate::intrinsics::expand_kind(&ws.module(fmod).functions[fid]),
+                Some(ExpandKind::ComputeArtifact)
+            )
+        })
+    })
+}
+
 pub fn collect_shader_collection(ws: &Workspace) -> Result<ShaderCollection, CompilerError> {
     let mut by_key: std::collections::BTreeMap<String, ShaderPair> =
         std::collections::BTreeMap::new();

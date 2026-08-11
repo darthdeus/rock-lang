@@ -2518,8 +2518,13 @@ fn shader_registration_lines(
         .iter()
         .flat_map(|pair| pair.vert.into_iter().chain(std::iter::once(pair.frag)))
         .collect();
-    let keys = collection.pairs.iter().map(|pair| pair.key.clone()).collect();
-    if renderer_target == RendererTarget::Wgpu {
+    let keys = collection
+        .pairs
+        .iter()
+        .map(|pair| pair.key.clone())
+        .chain(compute_collection.entries.iter().map(|entry| entry.key.clone()))
+        .collect();
+    if renderer_target == RendererTarget::Wgpu && !collection.pairs.is_empty() {
         let mut admitted = 0usize;
         for (key, fullscreen) in WGSL_SELECTED_ARTIFACTS {
             let Some(pair) = collection.pairs.iter().find(|pair| pair.key == key) else {
@@ -2645,12 +2650,28 @@ fn shader_registration_lines(
             &skull_codegen_wgsl::WgslShaderPolicy,
         )?;
         dependencies.extend(neutral.dependencies);
-        if renderer_target == RendererTarget::Wgpu {
-            return Err(CompilerError::new_no_location(
-                "WGSL compute ABI/emission is not wired yet".to_string(),
-            ));
-        }
-        let _ = entry;
+        let logical_entry = neutral.entry.inst.symbol(ws, &neutral.ir.interner);
+        let abi = skull_codegen_wgsl::WgslAbiPlan::compute(
+            &neutral.interface,
+            &format!("{logical_entry}_compute"),
+            bone_semantic::prelude::Span::default(),
+        )?;
+        let emission = skull_codegen_wgsl::emit_compute_shader(
+            ws,
+            &neutral.ir,
+            &neutral.interface,
+            &abi,
+            bone_semantic::prelude::Span::default(),
+        )?;
+        dependencies.extend(emission.dependencies);
+        let _ = writeln!(
+            out,
+            "__rock_wgpu_compute_register({}, {}, {}, {})",
+            skull_codegen_lua::lua_string(&entry.key),
+            skull_codegen_lua::lua_string(&emission.source),
+            skull_codegen_lua::lua_string(&emission.abi.wire()),
+            skull_codegen_lua::lua_string(&neutral.interface.semantic_wire(false)),
+        );
     }
     Ok(ShaderRegistrations {
         lua: out,
@@ -3537,10 +3558,14 @@ impl SkullEmitCache {
         &self,
         ws: &Workspace,
     ) -> Result<bool, CompilerError> {
-        let current: BTreeSet<String> = skull_mir::lower::collect_shader_pairs(ws)?
+        let graphics = skull_mir::lower::collect_shader_pairs(ws)?
             .into_iter()
-            .map(|pair| pair.key)
-            .collect();
+            .map(|pair| pair.key);
+        let compute = skull_mir::lower::collect_compute_collection(ws)?
+            .entries
+            .into_iter()
+            .map(|entry| entry.key);
+        let current: BTreeSet<String> = graphics.chain(compute).collect();
         Ok(current != self.shader_registrations.keys)
     }
 
@@ -3561,17 +3586,25 @@ fn update_shader_registrations(
                         .contains(&FuncRef { module: mid, func: fid })
             )
             || skull_mir::lower::body_has_shader_pipeline_call(ws, mid, owner)
+            || skull_mir::lower::body_has_compute_artifact_call(ws, mid, owner)
     });
     if !affected {
         return Ok(false);
     }
     let collection = skull_mir::lower::collect_shader_collection(ws)?;
+    let compute_collection = skull_mir::lower::collect_compute_collection(ws)?;
     self.shader_registrations.roots = collection
         .pairs
         .iter()
         .flat_map(|pair| pair.vert.into_iter().chain(std::iter::once(pair.frag)))
+        .chain(compute_collection.entries.iter().map(|entry| entry.entry))
         .collect();
-    self.shader_registrations.callsites = collection.callsites.iter().copied().collect();
+    self.shader_registrations.callsites = collection
+        .callsites
+        .iter()
+        .copied()
+        .chain(compute_collection.callsites.iter().copied())
+        .collect();
     Ok(true)
 }
 

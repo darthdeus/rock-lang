@@ -1159,8 +1159,6 @@ fn compute_storage_element(
     };
     match ty_expr(ws, element) {
         Some(TypeExpr::Builtin(BuiltinTy::Int)) => Ok(ComputeValueKind::I32),
-        Some(TypeExpr::Builtin(BuiltinTy::Float)) => Ok(ComputeValueKind::F32),
-        Some(TypeExpr::Builtin(BuiltinTy::Bool)) => Ok(ComputeValueKind::Bool),
         _ => Err(err(
             span,
             "the first compute storage element type is Rock int (WGSL i32)",

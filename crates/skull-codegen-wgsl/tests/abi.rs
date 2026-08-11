@@ -3,7 +3,9 @@ use skull_codegen_glsl::ShaderAbiPlan;
 use skull_codegen_wgsl::WgslAbiPlan;
 use skull_mir::gpu_layout::{ArrayMemberDecl, AttrKind, SamplerKind, WireKind};
 use skull_mir::shader_ir::{
-    FragmentOutput, LogicalArrayGroup, LogicalTextureGroup, LogicalUniformGroup,
+    ComputeAccess, ComputeAddressSpace, ComputeDispatchContract, ComputeInterfacePlan,
+    ComputeResourceShape, ComputeValueKind, ComputeBuiltin, ComputeWorkgroupSize, FragmentOutput,
+    LogicalArrayGroup, LogicalComputeResource, LogicalTextureGroup, LogicalUniformGroup,
     LogicalVarying, LogicalVertexInput, ShaderInterfacePlan, ShaderStage, UniformRole, VertexRate,
 };
 use skull_wgsl_abi::WgslAbi;
@@ -180,7 +182,7 @@ fn a_bool_uniform_member_is_laid_out_and_declared_as_u32() {
 fn abi_wire_is_deterministic_and_carries_physical_order() {
     let plan = WgslAbiPlan::wgsl(&fixture(), Span::default()).expect("WGSL projection");
     let wire = plan.wire();
-    assert!(wire.starts_with("WGSL_ABI_V2\nchecksum "));
+    assert!(wire.starts_with("WGSL_ABI_V3\nchecksum "));
     assert!(wire.contains("geometry fullscreen"));
     assert!(wire.contains("entries fullscreen_vertex fragment_main"));
     assert!(wire.contains("fullscreen_vertex triangle_strip 4 0"));
@@ -198,6 +200,74 @@ fn abi_wire_is_deterministic_and_carries_physical_order() {
     assert_eq!(parsed.fragment_outputs.len(), 1);
     assert_eq!(parsed.array_blocks.len(), 0);
     assert_eq!(wire, plan.wire(), "the compiler wire must be deterministic");
+}
+
+fn compute_fixture() -> ShaderInterfacePlan {
+    ShaderInterfacePlan {
+        stages: vec![ShaderStage::Compute],
+        uniform_groups: vec![LogicalUniformGroup {
+            role: UniformRole::Stage(ShaderStage::Compute),
+            struct_name: Ustr::from("SaxpyParams"),
+            members: vec![(Ustr::from("a"), WireKind::I32), (Ustr::from("n"), WireKind::I32)],
+        }],
+        compute: Some(ComputeInterfacePlan {
+            resources: vec![
+                LogicalComputeResource {
+                    name: Ustr::from("x"),
+                    shape: ComputeResourceShape::Array(ComputeValueKind::I32),
+                    address_space: ComputeAddressSpace::Storage,
+                    access: ComputeAccess::Read,
+                },
+                LogicalComputeResource {
+                    name: Ustr::from("out"),
+                    shape: ComputeResourceShape::Array(ComputeValueKind::I32),
+                    address_space: ComputeAddressSpace::Storage,
+                    access: ComputeAccess::ReadWrite,
+                },
+            ],
+            builtins: vec![ComputeBuiltin::GlobalInvocationId],
+            workgroup_size: ComputeWorkgroupSize { x: 64, y: 1, z: 1 },
+            dispatch: ComputeDispatchContract::Runtime { dimensions: 1 },
+        }),
+        fragment_output: FragmentOutput::None,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn compute_abi_round_trips_resources_workgroup_and_builtin() {
+    let plan = WgslAbiPlan::compute(&compute_fixture(), "saxpy_compute", Span::default())
+        .expect("compute ABI projection");
+    assert_eq!(plan.compute.as_ref().unwrap().resources[0].binding, 0);
+    assert_eq!(plan.compute.as_ref().unwrap().resources[1].binding, 1);
+    assert_eq!(plan.uniform_blocks[0].binding, 2);
+    let wire = plan.wire();
+    assert!(wire.contains("artifact compute"));
+    assert!(wire.contains("compute_entry saxpy_compute"));
+    assert!(wire.contains("workgroup 64 1 1"));
+    assert!(wire.contains("builtin global_invocation_id"));
+    assert!(wire.contains("storage 0 x read i32"));
+    assert!(wire.contains("storage 1 out read_write i32"));
+    let parsed = WgslAbi::parse(&wire).expect("compute ABI parser");
+    assert_eq!(parsed.artifact, skull_wgsl_abi::WgslArtifactKind::Compute);
+    assert_eq!(parsed.compute.unwrap().resources.len(), 2);
+    assert_eq!(wire, plan.wire(), "compute wire order is deterministic");
+}
+
+#[test]
+fn compute_projection_mutations_are_rejected_against_the_neutral_plan() {
+    let iface = compute_fixture();
+    let mut workgroup = WgslAbiPlan::compute(&iface, "saxpy_compute", Span::default()).unwrap();
+    workgroup.compute.as_mut().unwrap().workgroup_size[0] = 32;
+    assert!(workgroup.validate(&iface, Span::default()).is_err());
+
+    let mut access = WgslAbiPlan::compute(&iface, "saxpy_compute", Span::default()).unwrap();
+    access.compute.as_mut().unwrap().resources[0].access = skull_wgsl_abi::WgslStorageAccess::ReadWrite;
+    assert!(access.validate(&iface, Span::default()).is_err());
+
+    let mut binding = WgslAbiPlan::compute(&iface, "saxpy_compute", Span::default()).unwrap();
+    binding.compute.as_mut().unwrap().resources[1].binding = 0;
+    assert!(binding.validate(&iface, Span::default()).is_err());
 }
 
 fn explicit_fixture(arrays: Vec<ArrayMemberDecl>) -> ShaderInterfacePlan {
