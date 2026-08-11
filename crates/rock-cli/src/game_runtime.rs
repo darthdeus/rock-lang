@@ -133,10 +133,12 @@ impl GameCompiler for SkullGameCompiler {
     }
 }
 
-/// Construct the `GameCompiler` for a backend. `output_path` is `tmp/main.lua`;
-/// the skull overlay is its `incremental.lua` sibling. Only skull serves the
-/// game commands now (bone has no codegen, rock is gone), so anything else is a
-/// dispatch bug.
+/// Construct the `GameCompiler` for a backend. `output_path` is the caller's
+/// `main.lua` -- `tmp/main.lua` for run/frame/perf, a private
+/// `tmp/stone/<game>-<pid>/main.lua` per `rock stone` session
+/// (`docs/hot-reload-chunk-identity.md`) -- and the skull overlay is its
+/// `incremental.lua` sibling. Only skull serves the game commands now (bone has
+/// no codegen, rock is gone), so anything else is a dispatch bug.
 pub fn game_compiler_for(
     backend: crate::Backend,
     path: &str,
