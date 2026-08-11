@@ -99,11 +99,25 @@ fn validate_one(
         }
         "workgroup" => {
             at(anno, pos, AnnoPos::FnItem)?;
+            let ok = anno.args.len() == 3
+                && anno.args[0].name.is_none()
+                && matches!(anno.args[0].value, AnnoValue::Int(_))
+                && anno.args[1].name.is_none()
+                && matches!(anno.args[1].value, AnnoValue::Int(_))
+                && anno.args[2].name.is_none()
+                && matches!(anno.args[2].value, AnnoValue::Int(_));
+            if !ok {
+                comp_error!(anno.span, "`@workgroup` takes exactly three integer sizes: @workgroup(64, 1, 1)");
+            }
+            Ok(())
+        }
+        "dispatch" => {
+            at(anno, pos, AnnoPos::FnItem)?;
             let ok = anno.args.len() == 1
                 && anno.args[0].name.is_none()
                 && matches!(anno.args[0].value, AnnoValue::Int(_));
             if !ok {
-                comp_error!(anno.span, "`@workgroup` takes exactly one integer x size: @workgroup(64)");
+                comp_error!(anno.span, "`@dispatch` takes exactly one integer dimension: @dispatch(1)");
             }
             Ok(())
         }

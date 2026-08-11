@@ -490,7 +490,7 @@ fn a_resolvable_conversion_removes_its_stale_storage_failure() {
             use bone_semantic::hir::{Callee, Expr as E};
             let mut n = 0;
             for (_, expr) in body.expr_arena.iter() {
-                let E::Call { callee: Callee::Unresolved { name, .. }, args } = expr else {
+                let E::Call { callee: Callee::Unresolved { name, .. }, args, .. } = expr else {
                     continue;
                 };
                 if name.as_str() != "len" {

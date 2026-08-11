@@ -120,6 +120,7 @@ pub(crate) fn infer_for_elem(
         Expr::Call {
             callee: Callee::Unresolved { name, .. },
             args,
+            ..
         } if name.as_str() == "enumerate"
             && args.len() == 1
             && {

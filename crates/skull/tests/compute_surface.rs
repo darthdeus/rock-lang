@@ -32,7 +32,8 @@ const SAXPY: &str = r#"
 value SaxpyParams { a: int, n: int }
 
 @shader(compute)
-@workgroup(64)
+@workgroup(64, 1, 1)
+@dispatch(1)
 fn saxpy(
     @storage(read) x: StorageBuffer<int>,
     @storage(read) y: StorageBuffer<int>,
@@ -56,7 +57,8 @@ fn rect_loss_helper(a: int, b: int, c: int) -> int {
 }
 
 @shader(compute)
-@workgroup(64)
+@workgroup(64, 1, 1)
+@dispatch(1)
 fn rect_loss_shaped(
     @storage(read) backdrop: StorageBuffer<int>,
     @storage(read) reference: StorageBuffer<int>,
@@ -74,6 +76,58 @@ fn rect_loss_shaped(
 
 global RECT_LOSS: string = rock_compute(rect_loss_shaped)
 "#;
+
+const UINT_COMPUTE_SURFACE: &str = r#"
+value RectLossParams {
+    width: uint,
+    region_x: uint,
+    region_y: uint,
+    region_w: uint,
+    region_h: uint,
+    bg_r: uint,
+    bg_g: uint,
+    bg_b: uint,
+}
+
+@shader(compute)
+@workgroup(64, 1, 1)
+@dispatch(2)
+fn rect_loss_surface(
+    @storage(read) backdrop: StorageBuffer<uint>,
+    @storage(read) reference: StorageBuffer<uint>,
+    @storage(read) batch: StorageBuffer<uint>,
+    @storage(read_write) loss: AtomicStorageBuffer<uint>,
+    @uniform params: RectLossParams,
+) {
+    let local = local_invocation_id()
+    let group = workgroup_id()
+    let groups = num_workgroups()
+    let partial = workgroup_array<uint>(64)
+    let i = local_invocation_index()
+    if local.x < 0 || group.y < 0 || groups.x < 0 { return }
+    if i >= params.width { return }
+    workgroup_store(partial, i, storage_load(backdrop, i) +
+        storage_load(reference, i) + storage_load(batch, i))
+    workgroup_barrier()
+    if i == 0 {
+        atomic_add(loss, bitcast<uint>(group.y), workgroup_load(partial, 0))
+    }
+}
+
+global UINT_COMPUTE_SURFACE: string = rock_compute(rect_loss_surface)
+"#;
+
+#[test]
+fn uint_atomic_workgroup_compute_surface_is_admitted() {
+    let ws = common::ws_with_stdlib(UINT_COMPUTE_SURFACE);
+    skull::mir_emit::emit_full_in_for_renderer(
+        &ws,
+        test_mid(&ws),
+        None,
+        skull::mir_emit::RendererTarget::Wgpu,
+    )
+    .unwrap_or_else(|error| panic!("the intended compiler-authored compute surface is still RED: {error}"));
+}
 
 #[test]
 fn valid_saxpy_compute_declaration_is_admitted() {
@@ -231,11 +285,11 @@ fn rect_loss_non_i32_storage_shape_is_a_nonempty_fail_closed_rejection() {
 
 #[test]
 fn rect_loss_multidimensional_workgroup_shape_is_a_nonempty_rejection() {
-    let source = RECT_LOSS_SHAPED.replace("@workgroup(64)", "@workgroup(64, 1, 1)");
+    let source = RECT_LOSS_SHAPED.replace("@workgroup(64, 1, 1)", "@workgroup(64, 1)");
     let errors = emit_errors(&source);
     assert!(!errors.is_empty(), "the multidimensional workgroup fixture must report an error");
     assert!(
-        errors.iter().any(|error| error.contains("@workgroup") && error.contains("exactly one")),
+        errors.iter().any(|error| error.contains("@workgroup") && error.contains("exactly three")),
         "the current workgroup rejection must name its contract: {errors:#?}"
     );
 }
@@ -423,6 +477,10 @@ fn compute_root_addition_and_removal_request_a_full_reload() {
         "{}\n\n@shader(compute)\n@workgroup(64)\nfn saxpy_extra(\n    @storage(read) x: StorageBuffer<int>,\n    @storage(read) y: StorageBuffer<int>,\n    @storage(read_write) out: StorageBuffer<int>,\n    @uniform params: SaxpyParams,\n) {{\n    let i = global_invocation_id().x\n    if i >= params.n {{ return }}\n    storage_store(out, i, params.a * storage_load(x, i) + storage_load(y, i))\n}}\n\nglobal SAXPY_EXTRA: string = rock_compute(saxpy_extra)\n",
         SAXPY
     );
+    let added_source = added_source.replace(
+        "@workgroup(64)",
+        "@workgroup(64, 1, 1)\n@dispatch(1)",
+    );
     let added = common::ws_with_stdlib(&added_source);
     assert!(cache.shader_registration_keys_changed(&added).expect("added key set"));
 }
@@ -451,7 +509,7 @@ fn an_indirect_compute_root_is_rejected() {
 
 #[test]
 fn zero_workgroup_size_is_rejected() {
-    let source = SAXPY.replace("@workgroup(64)", "@workgroup(0)");
+    let source = SAXPY.replace("@workgroup(64, 1, 1)", "@workgroup(0, 1, 1)");
     let errors = emit_errors(&source);
     assert!(
         errors.iter().any(|error| error.contains("workgroup size")),

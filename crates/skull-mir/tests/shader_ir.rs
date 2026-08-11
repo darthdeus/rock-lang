@@ -182,6 +182,7 @@ fn compute_interface_keeps_storage_contract_neutral_and_complete() {
                     access: ComputeAccess::ReadWrite,
                 },
             ],
+            workgroup: Vec::new(),
             builtins: vec![ComputeBuiltin::GlobalInvocationId],
             workgroup_size: ComputeWorkgroupSize { x: 64, y: 1, z: 1 },
             dispatch: ComputeDispatchContract::Runtime { dimensions: 1 },

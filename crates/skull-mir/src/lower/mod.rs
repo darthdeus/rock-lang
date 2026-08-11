@@ -895,7 +895,7 @@ fn hash_init_expr(body: &Body, e: Idx<Expr>, h: &mut std::collections::hash_map:
                 go!(arm.body);
             }
         }
-        Expr::Call { callee, args } => {
+        Expr::Call { callee, args, .. } => {
             tag!(38);
             match callee {
                 Callee::Unresolved { name, .. } => {
@@ -3346,7 +3346,7 @@ pub fn expansion_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerErro
     for (owner, body) in module.bodies.iter() {
         let Some(inf) = ir.per_fn.get(owner) else { continue };
         for (e, expr) in body.expr_arena.iter() {
-            let Expr::Call { callee: Callee::Unresolved { name, .. }, args } = expr else {
+            let Expr::Call { callee: Callee::Unresolved { name, .. }, args, .. } = expr else {
                 continue;
             };
             let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else { continue };
@@ -3455,7 +3455,7 @@ pub fn collect_shader_collection(ws: &Workspace) -> Result<ShaderCollection, Com
         for (owner, body) in module.bodies.iter() {
             let inf = ir.and_then(|ir| ir.per_fn.get(owner));
             for (e, expr) in body.expr_arena.iter() {
-                let Expr::Call { callee: Callee::Unresolved { name, .. }, args } = expr else {
+                let Expr::Call { callee: Callee::Unresolved { name, .. }, args, .. } = expr else {
                     continue;
                 };
                 let resolved = match inf {
@@ -3494,7 +3494,7 @@ pub fn collect_compute_collection(ws: &Workspace) -> Result<ComputeCollection, C
         for (owner, body) in module.bodies.iter() {
             let inf = ir.and_then(|ir| ir.per_fn.get(owner));
             for (e, expr) in body.expr_arena.iter() {
-                let Expr::Call { callee: Callee::Unresolved { name, .. }, args } = expr else {
+                let Expr::Call { callee: Callee::Unresolved { name, .. }, args, .. } = expr else {
                     continue;
                 };
                 let resolved = match inf {
@@ -3540,6 +3540,7 @@ pub fn gpu_only_call_rejection(ws: &Workspace, mid: ModuleId) -> Option<Compiler
             let Expr::Call {
                 callee: Callee::Unresolved { name, .. },
                 args,
+                ..
             } = expr
             else {
                 continue;
@@ -3625,7 +3626,7 @@ pub fn string_char_literal_out_of_range(ws: &Workspace, mid: ModuleId) -> Option
     let module = ws.module(mid);
     for (_owner, body) in module.bodies.iter() {
         for (_e, expr) in body.expr_arena.iter() {
-            let Expr::Call { callee: Callee::Unresolved { name, .. }, args } = *expr else {
+            let Expr::Call { callee: Callee::Unresolved { name, .. }, args, .. } = *expr else {
                 continue;
             };
             if name.as_str() != "string_char" {

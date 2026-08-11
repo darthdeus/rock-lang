@@ -3705,7 +3705,7 @@ fn compiler_generated_sites(
     let mut out: Vec<GeneratedSite> = Vec::new();
     for (e, expr) in body.expr_arena.iter() {
         match expr {
-            E::Call { callee: Callee::Unresolved { name, .. }, args } => {
+            E::Call { callee: Callee::Unresolved { name, .. }, args, .. } => {
                 let Some((trigger, cond, names)) =
                     COMPILER_GENERATED_TRIGGERS.iter().find(|(t, _, _)| *t == name.as_str())
                 else {

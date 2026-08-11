@@ -865,6 +865,14 @@ mod tests {
     }
 
     #[test]
+    fn explicit_generic_call_preserves_type_arguments() {
+        assert_eq!(
+            body_sexp("fn f() { workgroup_array<uint>(64) }"),
+            "(block (call (generic workgroup_array uint) 64))",
+        );
+    }
+
+    #[test]
     fn leading_operator_continues_across_newline() {
         // An unambiguous binary op on a fresh line continues the expression,
         // even inside a `{ }` block -- matching rock's newline rule.

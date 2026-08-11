@@ -348,7 +348,7 @@ impl Ast {
                 format!("(index {} {})", self.expr_sexp(*obj), self.expr_sexp(*idx))
             }
 
-            ExprKind::FunctionCall { func, args, syntax } => {
+            ExprKind::FunctionCall { func, generic_args, args, syntax } => {
                 // Operator-origin calls render in infix form: `a + b` is
                 // `__op_add(a, b)` but shows as `(+ a b)`.
                 if let CallSyntax::Binary(op) = syntax {
@@ -361,8 +361,21 @@ impl Ast {
                         );
                     }
                 }
+                let callee = if generic_args.is_empty() {
+                    self.expr_sexp(*func)
+                } else {
+                    format!(
+                        "(generic {} {})",
+                        self.expr_sexp(*func),
+                        generic_args
+                            .iter()
+                            .map(|arg| self.type_sexp(*arg))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    )
+                };
                 if args.is_empty() {
-                    format!("(call {})", self.expr_sexp(*func))
+                    format!("(call {})", callee)
                 } else {
                     let args_str = args
                         .iter()
@@ -377,7 +390,7 @@ impl Ast {
                         })
                         .collect::<Vec<_>>()
                         .join(" ");
-                    format!("(call {} {})", self.expr_sexp(*func), args_str)
+                    format!("(call {} {})", callee, args_str)
                 }
             }
 

@@ -410,7 +410,7 @@ impl Builder<'_> {
                 let cells = self.lower_flat_value(&shape, e)?;
                 Ok(self.flat_cells_to_repr(&shape, cells))
             }
-            Expr::Call { callee, args } => self.lower_call_repr(e, callee, args),
+            Expr::Call { callee, args, .. } => self.lower_call_repr(e, callee, args),
             // A COLUMN element read routes on the container, ahead of the
             // element-type guard below: column storage has no element slot at
             // all, and inside a body specialized at `T = E?` the element type is

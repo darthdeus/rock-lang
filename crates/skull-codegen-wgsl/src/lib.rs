@@ -21,7 +21,8 @@ use skull_mir::monoty::MonoInterner;
 use skull_mir::shader_ir::{
     ComputeAccess, ComputeAddressSpace, ComputeBuiltin, ComputeDispatchContract,
     ComputeResourceShape, ComputeValueKind, FragmentOutput, LogicalArrayGroup,
-    LogicalTextureGroup, LogicalUniformGroup, ShaderIR, ShaderInstance, ShaderInterfacePlan,
+    LogicalComputeWorkgroup, LogicalTextureGroup, LogicalUniformGroup, ShaderIR, ShaderInstance,
+    ShaderInterfacePlan,
     ShaderStage, ShaderStageIr, UniformRole, VertexRate,
 };
 use skull_parser::CompilerError;
@@ -117,8 +118,17 @@ const WGSL_BUILTINS: &[(&str, usize, &str, ResultKind)] = &[
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WgslIntrinsic {
     GlobalInvocationId,
+    LocalInvocationId,
+    WorkgroupId,
+    LocalInvocationIndex,
+    NumWorkgroups,
     StorageLoad,
     StorageStore,
+    WorkgroupArray,
+    WorkgroupLoad,
+    WorkgroupStore,
+    AtomicAdd,
+    WorkgroupBarrier,
     Texture,
     TextureSize,
     At,
@@ -154,8 +164,17 @@ impl WgslIntrinsic {
         }
         Some(match (name, arity) {
             ("global_invocation_id", 0) => Self::GlobalInvocationId,
+            ("local_invocation_id", 0) => Self::LocalInvocationId,
+            ("workgroup_id", 0) => Self::WorkgroupId,
+            ("local_invocation_index", 0) => Self::LocalInvocationIndex,
+            ("num_workgroups", 0) => Self::NumWorkgroups,
             ("storage_load", 2) => Self::StorageLoad,
             ("storage_store", 3) => Self::StorageStore,
+            ("workgroup_array", 1) => Self::WorkgroupArray,
+            ("workgroup_load", 2) => Self::WorkgroupLoad,
+            ("workgroup_store", 3) => Self::WorkgroupStore,
+            ("atomic_add", 3) => Self::AtomicAdd,
+            ("workgroup_barrier", 0) => Self::WorkgroupBarrier,
             ("round", 1) => Self::Round,
             ("v", 0..=4) => Self::VectorConstructor,
             ("zero", 0) => Self::Zero,
@@ -1783,6 +1802,10 @@ pub fn emit_compute_shader(
         .compute
         .as_ref()
         .ok_or_else(|| err(span, "WGSL compute ABI is missing compute metadata"))?;
+    let logical_compute = iface
+        .compute
+        .as_ref()
+        .ok_or_else(|| err(span, "WGSL compute interface is missing logical metadata"))?;
     if compute.entry != expected_entry {
         return Err(err(
             span,
@@ -1818,6 +1841,27 @@ pub fn emit_compute_shader(
     }
     emit_explicit_uniforms(&mut source, abi);
 
+    for workgroup in &logical_compute.workgroup {
+        let kind = match workgroup.kind {
+            ComputeValueKind::F32 => ValueKind::F32,
+            ComputeValueKind::I32 => ValueKind::I32,
+            ComputeValueKind::U32 => ValueKind::U32,
+            ComputeValueKind::Bool => ValueKind::Bool,
+            ComputeValueKind::AtomicU32 => {
+                return Err(err(span, "workgroup arrays cannot contain atomic values"));
+            }
+        };
+        let ty = wgsl_value_type(kind).ok_or_else(|| {
+            err(span, format!("compute workgroup `{}` has no WGSL element type", workgroup.name))
+        })?;
+        identifier(workgroup.name, "compute workgroup", span)?;
+        writeln!(source, "var<workgroup> wg_{}: array<{}, {}>;", workgroup.name, ty, workgroup.size)
+            .unwrap();
+    }
+    if !logical_compute.workgroup.is_empty() {
+        source.push('\n');
+    }
+
     for instance in &stage.order {
         let body = stage.bodies.get(instance).ok_or_else(|| {
             err(
@@ -1846,7 +1890,8 @@ pub fn emit_compute_shader(
             abi,
             HashMap::new(),
             span,
-        )?;
+        )?
+        .with_workgroup_cells(compute_workgroup_cells(body, &logical_compute.workgroup));
         source.push_str(&emitter.emit_function(function, false)?);
     }
 
@@ -1860,18 +1905,51 @@ pub fn emit_compute_shader(
         entry_roles,
         span,
     )?
-    .with_compute_invocation(Some("global_id".to_string()));
+    .with_compute_invocation(
+        logical_compute
+            .builtins
+            .contains(&ComputeBuiltin::GlobalInvocationId)
+            .then(|| "global_id".to_string()),
+    )
+    .with_compute_builtins(&logical_compute.builtins)
+    .with_workgroup_cells(compute_workgroup_cells(&stage.body, &logical_compute.workgroup));
     source.push_str(&emitter.emit_function(entry_fn, true)?);
+    let mut wrapper_params = Vec::new();
+    let mut wrapper_args = Vec::new();
+    for builtin in &logical_compute.builtins {
+        let (attribute, name, ty) = match builtin {
+            ComputeBuiltin::GlobalInvocationId => {
+                ("global_invocation_id", "global_id", "vec3<u32>")
+            }
+            ComputeBuiltin::LocalInvocationId => {
+                ("local_invocation_id", "local_id", "vec3<u32>")
+            }
+            ComputeBuiltin::WorkgroupId => ("workgroup_id", "workgroup_id", "vec3<u32>"),
+            ComputeBuiltin::LocalInvocationIndex => {
+                ("local_invocation_index", "local_index", "u32")
+            }
+            ComputeBuiltin::NumWorkgroups => ("num_workgroups", "num_workgroups", "vec3<u32>"),
+        };
+        wrapper_params.push(format!("@builtin({attribute}) {name}: {ty}"));
+        wrapper_args.push(name);
+    }
     writeln!(
         source,
-        "@compute @workgroup_size({}, {}, {})\nfn {}(@builtin(global_invocation_id) global_id: vec3<u32>) {{",
+        "@compute @workgroup_size({}, {}, {})\nfn {}({}) {{",
         compute.workgroup_size[0],
         compute.workgroup_size[1],
         compute.workgroup_size[2],
-        compute.entry
+        compute.entry,
+        wrapper_params.join(", ")
     )
     .unwrap();
-    writeln!(source, "  {}(global_id);", stage.entry.inst.symbol(ws, &ir.interner)).unwrap();
+    writeln!(
+        source,
+        "  {}({});",
+        stage.entry.inst.symbol(ws, &ir.interner),
+        wrapper_args.join(", ")
+    )
+    .unwrap();
     source.push_str("}\n");
     validate_wgsl_source(&source, span)?;
 
@@ -2417,6 +2495,27 @@ fn function_for_instance<'a>(ws: &'a Workspace, instance: &ShaderInstance) -> &'
     &ws.module(instance.fref().module).functions[instance.fref().func]
 }
 
+fn compute_workgroup_cells(
+    body: &MirFunc,
+    workgroups: &[LogicalComputeWorkgroup],
+) -> HashMap<Idx<Cell>, (String, ValueKind)> {
+    body.cells
+        .iter()
+        .filter_map(|(cell, data)| {
+            let source_name = data.name?;
+            let logical = workgroups.iter().find(|workgroup| workgroup.name == source_name)?;
+            let kind = match logical.kind {
+                ComputeValueKind::F32 => ValueKind::F32,
+                ComputeValueKind::I32 => ValueKind::I32,
+                ComputeValueKind::U32 => ValueKind::U32,
+                ComputeValueKind::Bool => ValueKind::Bool,
+                ComputeValueKind::AtomicU32 => return None,
+            };
+            Some((cell, (format!("wg_{source_name}"), kind)))
+        })
+        .collect()
+}
+
 fn type_expr(ws: &Workspace, ty: TyId) -> Option<TypeExpr> {
     match ty {
         TyId::Static(module, index) => Some(ws.module(module).ty_arena[index]),
@@ -2788,6 +2887,12 @@ struct FunctionEmitter<'a> {
     /// what makes a helper's `frag_coord()` a rejection rather than a guess.
     frag_coord: Option<String>,
     compute_invocation: Option<String>,
+    compute_local_invocation: Option<String>,
+    compute_workgroup_id: Option<String>,
+    compute_local_index: Option<String>,
+    compute_num_workgroups: Option<String>,
+    workgroup_cells: HashMap<Idx<Cell>, (String, ValueKind)>,
+    unit_return: bool,
     out: String,
     indent: usize,
     visited: HashSet<Idx<Block>>,
@@ -2823,6 +2928,11 @@ impl<'a> FunctionEmitter<'a> {
                 || format!("cell_{}", cell.into_raw().into_u32()),
                 |name| name.to_string(),
             );
+            let base = if base.starts_with("__") {
+                format!("rock{base}")
+            } else {
+                base
+            };
             let mut name = base.clone();
             let mut suffix = 0;
             while !used.insert(name.clone()) {
@@ -2861,6 +2971,12 @@ impl<'a> FunctionEmitter<'a> {
             span,
             frag_coord: None,
             compute_invocation: None,
+            compute_local_invocation: None,
+            compute_workgroup_id: None,
+            compute_local_index: None,
+            compute_num_workgroups: None,
+            workgroup_cells: HashMap::new(),
+            unit_return: false,
             out: String::new(),
             indent: 1,
             visited: HashSet::new(),
@@ -2884,6 +3000,30 @@ impl<'a> FunctionEmitter<'a> {
         self
     }
 
+    fn with_compute_builtins(mut self, builtins: &[ComputeBuiltin]) -> Self {
+        if builtins.contains(&ComputeBuiltin::LocalInvocationId) {
+            self.compute_local_invocation = Some("local_id".to_string());
+        }
+        if builtins.contains(&ComputeBuiltin::WorkgroupId) {
+            self.compute_workgroup_id = Some("workgroup_id".to_string());
+        }
+        if builtins.contains(&ComputeBuiltin::LocalInvocationIndex) {
+            self.compute_local_index = Some("local_index".to_string());
+        }
+        if builtins.contains(&ComputeBuiltin::NumWorkgroups) {
+            self.compute_num_workgroups = Some("num_workgroups".to_string());
+        }
+        self
+    }
+
+    fn with_workgroup_cells(
+        mut self,
+        cells: HashMap<Idx<Cell>, (String, ValueKind)>,
+    ) -> Self {
+        self.workgroup_cells = cells;
+        self
+    }
+
     fn infer_local_kinds(&mut self) -> Result<(), CompilerError> {
         for (bid, block) in self.body.blocks.iter() {
             if !self.reachable.contains(&bid) {
@@ -2891,6 +3031,9 @@ impl<'a> FunctionEmitter<'a> {
             }
             for iid in &block.insts {
                 if let Inst::Store { cell, value } = self.body.insts[*iid] {
+                    if matches!(self.body.insts[value], Inst::Const(Lit::Nil)) {
+                        continue;
+                    }
                     let kind = self.value_kind(value)?;
                     if let Some(old) = self.cell_kinds.insert(cell, kind) {
                         if old != kind {
@@ -2910,6 +3053,9 @@ impl<'a> FunctionEmitter<'a> {
     /// body whose returns disagree has no one WGSL result type, and picking the
     /// first would emit a coercion nothing asked for.
     fn resolve_return_kind(&self) -> Result<Option<ValueKind>, CompilerError> {
+        if self.unit_return {
+            return Ok(None);
+        }
         let mut kind: Option<ValueKind> = None;
         let mut seen = false;
         for (bid, block) in self.body.blocks.iter() {
@@ -2921,7 +3067,7 @@ impl<'a> FunctionEmitter<'a> {
             };
             let found = match values.as_slice() {
                 [] => None,
-                [value] if self.is_void_call(*value) => None,
+                [value] if self.is_void_value(*value) => None,
                 [value] => Some(self.value_kind(*value)?),
                 _ => return Err(err(self.span, "WGSL does not admit a multi-value return")),
             };
@@ -2946,6 +3092,7 @@ impl<'a> FunctionEmitter<'a> {
     }
 
     fn emit_function(mut self, function: &Function, entry: bool) -> Result<String, CompilerError> {
+        self.unit_return = function.return_ty.is_none();
         let return_kind = self.resolve_return_kind()?;
         let signature = match return_kind {
             Some(kind) => {
@@ -2972,6 +3119,7 @@ impl<'a> FunctionEmitter<'a> {
         for (cell, _) in self.body.cells.iter() {
             if self.cell_kinds.contains_key(&cell)
                 && !parameters.contains(&cell)
+                && !self.workgroup_cells.contains_key(&cell)
                 && self.is_stored_cell(cell)
             {
                 declarations.push(cell);
@@ -3047,6 +3195,18 @@ impl<'a> FunctionEmitter<'a> {
             rendered.push(format!("{name}: vec4<f32>"));
         }
         if let Some(name) = &self.compute_invocation {
+            rendered.push(format!("{name}: vec3<u32>"));
+        }
+        if let Some(name) = &self.compute_local_invocation {
+            rendered.push(format!("{name}: vec3<u32>"));
+        }
+        if let Some(name) = &self.compute_workgroup_id {
+            rendered.push(format!("{name}: vec3<u32>"));
+        }
+        if let Some(name) = &self.compute_local_index {
+            rendered.push(format!("{name}: u32"));
+        }
+        if let Some(name) = &self.compute_num_workgroups {
             rendered.push(format!("{name}: vec3<u32>"));
         }
         Ok(rendered.join(", "))
@@ -3145,6 +3305,10 @@ impl<'a> FunctionEmitter<'a> {
         }
     }
 
+    fn is_void_value(&self, iid: Idx<Inst>) -> bool {
+        self.is_void_call(iid) || matches!(self.body.insts[iid], Inst::Const(Lit::Nil))
+    }
+
     fn emit_branch(
         &mut self,
         blk: Idx<Block>,
@@ -3193,11 +3357,27 @@ impl<'a> FunctionEmitter<'a> {
             let line = match &self.body.insts[iid] {
                 Inst::Store { cell, value } => {
                     let (cell, value) = (*cell, *value);
-                    Some(format!(
-                        "{} = {};",
-                        self.cell_names[&cell],
-                        self.render_val(value)?
-                    ))
+                    if matches!(self.body.insts[value], Inst::Const(Lit::Nil)) {
+                        None
+                    } else if self.workgroup_cells.contains_key(&cell) {
+                        if matches!(self.body.insts[value], Inst::Call { func, .. }
+                            if WgslIntrinsic::classify(&self.ws.module(func.module).functions[func.func])
+                                == Some(WgslIntrinsic::WorkgroupArray))
+                        {
+                            None
+                        } else {
+                            return Err(err(
+                                self.span,
+                                "workgroup array handles cannot be assigned after declaration",
+                            ));
+                        }
+                    } else {
+                        Some(format!(
+                            "{} = {};",
+                            self.cell_names[&cell],
+                            self.render_val(value)?
+                        ))
+                    }
                 }
                 Inst::Call { func, args } => {
                     let target = &self.ws.module(func.module).functions[func.func];
@@ -3275,10 +3455,22 @@ impl<'a> FunctionEmitter<'a> {
     }
 
     fn emit_return(&mut self, values: &[Idx<Inst>]) -> Result<(), CompilerError> {
+        if self.unit_return {
+            if let [value] = values {
+                if let Inst::Call { func, args } = &self.body.insts[*value] {
+                    let target = &self.ws.module(func.module).functions[func.func];
+                    if target.return_ty.is_some() {
+                        self.push(&format!("{};", self.render_call(*value, *func, args)?));
+                    }
+                }
+            }
+            self.push("return;");
+            return Ok(());
+        }
         match values {
             [] => self.push("return;"),
             [value] => {
-                if self.is_void_call(*value) {
+                if self.is_void_value(*value) {
                     self.push("return;");
                     return Ok(());
                 }
@@ -3557,11 +3749,40 @@ impl<'a> FunctionEmitter<'a> {
     ) -> Result<ValueKind, CompilerError> {
         let function = &self.ws.module(func.module).functions[func.func];
         match WgslIntrinsic::classify(function) {
-            Some(WgslIntrinsic::GlobalInvocationId) => {
+            Some(
+                WgslIntrinsic::GlobalInvocationId
+                | WgslIntrinsic::LocalInvocationId
+                | WgslIntrinsic::WorkgroupId
+                | WgslIntrinsic::NumWorkgroups,
+            ) => {
                 Ok(ValueKind::Struct(Ustr::from("GlobalInvocationId")))
             }
-            Some(WgslIntrinsic::StorageLoad) => Ok(ValueKind::I32),
+            Some(WgslIntrinsic::LocalInvocationIndex) => Ok(ValueKind::U32),
+            Some(WgslIntrinsic::StorageLoad) => {
+                let cell = self.direct_resource_cell(args, "storage_load")?;
+                match self.compute_resource(cell)?.element {
+                    SharedWgslStorageElementKind::I32 => Ok(ValueKind::I32),
+                    SharedWgslStorageElementKind::U32 => Ok(ValueKind::U32),
+                    SharedWgslStorageElementKind::AtomicU32 => Err(err(
+                        self.span,
+                        "storage_load cannot read an AtomicStorageBuffer; use atomic_add",
+                    )),
+                }
+            }
             Some(WgslIntrinsic::StorageStore) => Ok(ValueKind::I32),
+            Some(WgslIntrinsic::WorkgroupArray) => {
+                Ok(ValueKind::Struct(Ustr::from("WorkgroupArray")))
+            }
+            Some(WgslIntrinsic::WorkgroupLoad) => {
+                let cell = self.direct_workgroup_cell(args, "workgroup_load")?;
+                Ok(self.workgroup_cells[&cell].1)
+            }
+            Some(WgslIntrinsic::WorkgroupStore) => Ok(ValueKind::I32),
+            Some(WgslIntrinsic::AtomicAdd) => Ok(ValueKind::U32),
+            Some(WgslIntrinsic::WorkgroupBarrier) => Err(err(
+                self.span,
+                "workgroup_barrier produces no value",
+            )),
             Some(WgslIntrinsic::Texture) => Ok(ValueKind::Vec4),
             Some(WgslIntrinsic::TextureSize) => Ok(ValueKind::Vec2),
             Some(WgslIntrinsic::FragCoord) => Ok(ValueKind::Vec4),
@@ -3756,7 +3977,11 @@ impl<'a> FunctionEmitter<'a> {
                 self.span,
                 "WGSL emission does not support null or string literals",
             )),
-            Inst::Load(cell) => match self.param_roles.get(cell).copied() {
+            Inst::Load(cell) => {
+                if let Some((name, _)) = self.workgroup_cells.get(cell) {
+                    return Ok(name.clone());
+                }
+                match self.param_roles.get(cell).copied() {
                 Some(ParamRole::TexCoord) => Ok("uv".to_string()),
                 Some(ParamRole::Storage)
                 | Some(ParamRole::Texture)
@@ -3777,7 +4002,8 @@ impl<'a> FunctionEmitter<'a> {
                 Some(ParamRole::Attribute) | Some(ParamRole::Varying) | None => {
                     Ok(self.cell_names[cell].clone())
                 }
-            },
+                }
+            }
             Inst::Field { base, field } => {
                 if let Inst::Load(cell) = self.body.insts[*base] {
                     match self.param_roles.get(&cell).copied() {
@@ -3969,6 +4195,52 @@ impl<'a> FunctionEmitter<'a> {
             })
     }
 
+    fn direct_resource_cell(
+        &self,
+        args: &[Idx<Inst>],
+        intrinsic: &str,
+    ) -> Result<Idx<Cell>, CompilerError> {
+        let Some(first) = args.first() else {
+            return Err(err(self.span, format!("WGSL {intrinsic} has no resource argument")));
+        };
+        let Inst::Load(cell) = self.body.insts[*first] else {
+            return Err(err(
+                self.span,
+                format!("WGSL {intrinsic} requires a direct storage parameter"),
+            ));
+        };
+        if !matches!(self.param_roles.get(&cell), Some(ParamRole::Storage)) {
+            return Err(err(
+                self.span,
+                format!("WGSL {intrinsic} requires a storage parameter"),
+            ));
+        }
+        Ok(cell)
+    }
+
+    fn direct_workgroup_cell(
+        &self,
+        args: &[Idx<Inst>],
+        intrinsic: &str,
+    ) -> Result<Idx<Cell>, CompilerError> {
+        let Some(first) = args.first() else {
+            return Err(err(self.span, format!("WGSL {intrinsic} has no workgroup argument")));
+        };
+        let Inst::Load(cell) = self.body.insts[*first] else {
+            return Err(err(
+                self.span,
+                format!("WGSL {intrinsic} requires a direct WorkgroupArray value"),
+            ));
+        };
+        if !self.workgroup_cells.contains_key(&cell) {
+            return Err(err(
+                self.span,
+                format!("WGSL {intrinsic} received a non-workgroup value"),
+            ));
+        }
+        Ok(cell)
+    }
+
     fn render_call(
         &self,
         iid: Idx<Inst>,
@@ -3978,44 +4250,60 @@ impl<'a> FunctionEmitter<'a> {
         let function = &self.ws.module(func.module).functions[func.func];
         let name = function.name.as_str();
         match WgslIntrinsic::classify(function) {
-            Some(WgslIntrinsic::GlobalInvocationId) => {
+            Some(
+                WgslIntrinsic::GlobalInvocationId
+                | WgslIntrinsic::LocalInvocationId
+                | WgslIntrinsic::WorkgroupId
+                | WgslIntrinsic::NumWorkgroups,
+            ) => {
                 if !args.is_empty() {
-                    return Err(err(self.span, "WGSL global_invocation_id takes no arguments"));
+                    return Err(err(self.span, format!("WGSL {name} takes no arguments")));
                 }
-                let Some(invocation) = &self.compute_invocation else {
+                let invocation = match WgslIntrinsic::classify(function) {
+                    Some(WgslIntrinsic::GlobalInvocationId) => self.compute_invocation.as_ref(),
+                    Some(WgslIntrinsic::LocalInvocationId) => self.compute_local_invocation.as_ref(),
+                    Some(WgslIntrinsic::WorkgroupId) => self.compute_workgroup_id.as_ref(),
+                    Some(WgslIntrinsic::NumWorkgroups) => self.compute_num_workgroups.as_ref(),
+                    _ => None,
+                };
+                let Some(invocation) = invocation else {
                     return Err(err(
                         self.span,
-                        "global_invocation_id is only available in a compute entry",
+                        format!("{name} is only available in a compute entry"),
                     ));
                 };
                 Ok(format!(
                     "GlobalInvocationId(i32({invocation}.x), i32({invocation}.y), i32({invocation}.z))"
                 ))
             }
+            Some(WgslIntrinsic::LocalInvocationIndex) => {
+                if !args.is_empty() {
+                    return Err(err(self.span, "WGSL local_invocation_index takes no arguments"));
+                }
+                self.compute_local_index.clone().ok_or_else(|| {
+                    err(self.span, "local_invocation_index is only available in a compute entry")
+                })
+            }
             Some(WgslIntrinsic::StorageLoad) => {
                 let [buffer, index] = args else {
                     return Err(err(self.span, "WGSL storage_load requires a buffer and index"));
                 };
-                let Inst::Load(cell) = self.body.insts[*buffer] else {
-                    return Err(err(self.span, "WGSL storage_load requires a direct storage parameter"));
-                };
-                if !matches!(self.param_roles.get(&cell), Some(ParamRole::Storage)) {
-                    return Err(err(self.span, "WGSL storage_load requires a StorageBuffer parameter"));
-                }
+                let cell = self.direct_resource_cell(args, "storage_load")?;
                 let resource = self.compute_resource(cell)?;
+                if resource.element == SharedWgslStorageElementKind::AtomicU32 {
+                    return Err(err(self.span, "storage_load cannot access AtomicStorageBuffer"));
+                }
                 Ok(format!("s_{}[{}]", resource.name, self.render_val(*index)?))
             }
             Some(WgslIntrinsic::StorageStore) => {
                 let [buffer, index, value] = args else {
                     return Err(err(self.span, "WGSL storage_store requires a buffer, index, and value"));
                 };
-                let Inst::Load(cell) = self.body.insts[*buffer] else {
-                    return Err(err(self.span, "WGSL storage_store requires a direct storage parameter"));
-                };
-                if !matches!(self.param_roles.get(&cell), Some(ParamRole::Storage)) {
-                    return Err(err(self.span, "WGSL storage_store requires a StorageBuffer parameter"));
-                }
+                let cell = self.direct_resource_cell(args, "storage_store")?;
                 let resource = self.compute_resource(cell)?;
+                if resource.element == SharedWgslStorageElementKind::AtomicU32 {
+                    return Err(err(self.span, "storage_store cannot access AtomicStorageBuffer"));
+                }
                 if resource.access != SharedWgslStorageAccess::ReadWrite {
                     return Err(err(
                         self.span,
@@ -4028,6 +4316,51 @@ impl<'a> FunctionEmitter<'a> {
                     self.render_val(*index)?,
                     self.render_val(*value)?
                 ))
+            }
+            Some(WgslIntrinsic::WorkgroupArray) => Err(err(
+                self.span,
+                "WorkgroupArray handles may only initialize a named local workgroup declaration",
+            )),
+            Some(WgslIntrinsic::WorkgroupLoad) => {
+                let [array, index] = args else {
+                    return Err(err(self.span, "WGSL workgroup_load requires an array and index"));
+                };
+                let cell = self.direct_workgroup_cell(args, "workgroup_load")?;
+                let (name, _) = &self.workgroup_cells[&cell];
+                Ok(format!("{}[{}]", name, self.render_val(*index)?))
+            }
+            Some(WgslIntrinsic::WorkgroupStore) => {
+                let [array, index, value] = args else {
+                    return Err(err(self.span, "WGSL workgroup_store requires an array, index, and value"));
+                };
+                let cell = self.direct_workgroup_cell(args, "workgroup_store")?;
+                let (name, _) = &self.workgroup_cells[&cell];
+                Ok(format!("{}[{}] = {}", name, self.render_val(*index)?, self.render_val(*value)?))
+            }
+            Some(WgslIntrinsic::AtomicAdd) => {
+                let [buffer, index, value] = args else {
+                    return Err(err(self.span, "WGSL atomic_add requires a buffer, index, and value"));
+                };
+                let cell = self.direct_resource_cell(args, "atomic_add")?;
+                let resource = self.compute_resource(cell)?;
+                if resource.element != SharedWgslStorageElementKind::AtomicU32 {
+                    return Err(err(self.span, "atomic_add requires AtomicStorageBuffer<uint>"));
+                }
+                if resource.access != SharedWgslStorageAccess::ReadWrite {
+                    return Err(err(self.span, "atomic_add requires a read_write atomic resource"));
+                }
+                Ok(format!(
+                    "atomicAdd(&s_{}[{}], {})",
+                    resource.name,
+                    self.render_val(*index)?,
+                    self.render_val(*value)?
+                ))
+            }
+            Some(WgslIntrinsic::WorkgroupBarrier) => {
+                if !args.is_empty() {
+                    return Err(err(self.span, "WGSL workgroup_barrier takes no arguments"));
+                }
+                Ok("workgroupBarrier()".to_string())
             }
             Some(WgslIntrinsic::Texture) => {
                 if args.len() != 2 {

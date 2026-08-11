@@ -690,6 +690,9 @@ pub enum Expr {
     Call {
         callee: Callee,
         args: IdxRange<Expr>,
+        /// Explicit type arguments from `f<A, B>(...)`; empty when generic
+        /// inference supplies the callee's instance.
+        generic_args: IdxRange<TypeExpr>,
     },
 
     Array(IdxRange<Expr>),

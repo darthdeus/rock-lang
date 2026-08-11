@@ -290,8 +290,9 @@ fn graft_expr_kind(src: &Ast, dst: &mut Ast, kind: &ExprKind) -> ExprKind {
         ExprKind::ReturnExpr(o) => ExprKind::ReturnExpr(o.map(|e| ge(dst, e))),
         ExprKind::Yield(o) => ExprKind::Yield(o.map(|e| ge(dst, e))),
 
-        ExprKind::FunctionCall { func, args, syntax } => ExprKind::FunctionCall {
+        ExprKind::FunctionCall { func, generic_args, args, syntax } => ExprKind::FunctionCall {
             func: ge(dst, *func),
+            generic_args: generic_args.iter().map(|t| graft_type(src, dst, *t)).collect(),
             args: args
                 .iter()
                 .map(|a| FunctionCallArg {

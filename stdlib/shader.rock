@@ -63,18 +63,76 @@ struct UniformArray<T> { }
 
 struct StorageBuffer<T> { }
 
+struct AtomicStorageBuffer<T> { }
+
+struct WorkgroupArray<T> { }
+
 value GlobalInvocationId { x: int, y: int, z: int }
 
 @intrinsic @gpu_only inline(lua) fn global_invocation_id() -> GlobalInvocationId = """
     error("global_invocation_id() is GPU-only (compute shader builtin)")
 """
 
+@intrinsic @gpu_only inline(lua) fn local_invocation_id() -> GlobalInvocationId = """
+    error("local_invocation_id() is GPU-only (compute shader builtin)")
+"""
+
+@intrinsic @gpu_only inline(lua) fn workgroup_id() -> GlobalInvocationId = """
+    error("workgroup_id() is GPU-only (compute shader builtin)")
+"""
+
+@intrinsic @gpu_only inline(lua) fn num_workgroups() -> GlobalInvocationId = """
+    error("num_workgroups() is GPU-only (compute shader builtin)")
+"""
+
+@intrinsic @gpu_only inline(lua) fn local_invocation_index() -> uint = """
+    error("local_invocation_index() is GPU-only (compute shader builtin)")
+"""
+
 @intrinsic @gpu_only inline(lua) fn storage_load<T>(buffer: StorageBuffer<T>, index: int) -> T = """
+    error("storage_load() is GPU-only (compute storage intrinsic)")
+"""
+
+@intrinsic @gpu_only inline(lua) fn storage_load<T>(buffer: StorageBuffer<T>, index: uint) -> T = """
     error("storage_load() is GPU-only (compute storage intrinsic)")
 """
 
 @intrinsic @gpu_only inline(lua) fn storage_store<T>(buffer: StorageBuffer<T>, index: int, value: T) = """
     error("storage_store() is GPU-only (compute storage intrinsic)")
+"""
+
+@intrinsic @gpu_only inline(lua) fn storage_store<T>(buffer: StorageBuffer<T>, index: uint, value: T) = """
+    error("storage_store() is GPU-only (compute storage intrinsic)")
+"""
+
+@intrinsic @gpu_only inline(lua) fn workgroup_array<T>(size: int) -> WorkgroupArray<T> = """
+    error("workgroup_array() is GPU-only (compute workgroup memory intrinsic)")
+"""
+
+@intrinsic @gpu_only inline(lua) fn workgroup_load<T>(array: WorkgroupArray<T>, index: int) -> T = """
+    error("workgroup_load() is GPU-only (compute workgroup memory intrinsic)")
+"""
+
+@intrinsic @gpu_only inline(lua) fn workgroup_load<T>(array: WorkgroupArray<T>, index: uint) -> T = """
+    error("workgroup_load() is GPU-only (compute workgroup memory intrinsic)")
+"""
+
+@intrinsic @gpu_only inline(lua) fn workgroup_store<T>(array: WorkgroupArray<T>, index: int, value: T) = """
+    error("workgroup_store() is GPU-only (compute workgroup memory intrinsic)")
+"""
+
+@intrinsic @gpu_only inline(lua) fn workgroup_store<T>(array: WorkgroupArray<T>, index: uint, value: T) = """
+    error("workgroup_store() is GPU-only (compute workgroup memory intrinsic)")
+"""
+
+@intrinsic @gpu_only inline(lua) fn atomic_add(
+    buffer: AtomicStorageBuffer<uint>, index: uint, value: uint
+) -> uint = """
+    error("atomic_add() is GPU-only (compute atomic storage intrinsic)")
+"""
+
+@intrinsic @gpu_only inline(lua) fn workgroup_barrier() = """
+    error("workgroup_barrier() is GPU-only (compute workgroup barrier intrinsic)")
 """
 
 // IEEE non-finite predicates. GLES 3.00 has isnan/isinf natively (the GLSL

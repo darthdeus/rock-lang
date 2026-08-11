@@ -1048,12 +1048,21 @@ pub fn infer_expr_used(
             tuple_of(gamma, &tys, expr_span)
         }
 
-        Expr::Call { callee, args } => {
+        Expr::Call { callee, args, generic_args } => {
             let args = *args;
 
             match callee {
                 hir::Callee::Unresolved { name, .. } => {
-                    resolve_named_call(gamma, c, *name, None, args, e, expr_span)?
+                    resolve_named_call_with_generics(
+                        gamma,
+                        c,
+                        *name,
+                        None,
+                        args,
+                        *generic_args,
+                        e,
+                        expr_span,
+                    )?
                 }
 
                 hir::Callee::Local(binding) => {
@@ -1074,11 +1083,17 @@ pub fn infer_expr_used(
                             )
                         })?;
 
+                    if !generic_args.is_empty() {
+                        comp_error!(expr_span, "explicit type arguments require a named function call");
+                    }
                     call_fn_value(c, gamma, fn_ty, args, expr_span)?
                 }
 
                 hir::Callee::Value(callee) => {
                     let fn_ty = infer_expr(c, gamma, *callee)?;
+                    if !generic_args.is_empty() {
+                        comp_error!(expr_span, "explicit type arguments require a named function call");
+                    }
                     call_fn_value(c, gamma, fn_ty, args, expr_span)?
                 }
             }
@@ -2191,6 +2206,7 @@ pub(crate) fn find_float_div_span_rec(c: BodyCtx, e: Idx<Expr>, depth: usize) ->
         Expr::Call {
             callee: Callee::Unresolved { name, .. },
             args,
+            ..
         } => {
             let name = *name;
             let args = *args;

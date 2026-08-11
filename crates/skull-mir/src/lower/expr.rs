@@ -252,7 +252,7 @@ impl Builder<'_> {
                 Ok(self.pack(repr))
             }
 
-            Expr::Call { callee, args } => self.lower_call(e, callee, args),
+            Expr::Call { callee, args, .. } => self.lower_call(e, callee, args),
 
             // --- aggregates + projections + container reads ---
             // A BOXED tuple slot can be observed for nil-ness (`t.0 == null`), so

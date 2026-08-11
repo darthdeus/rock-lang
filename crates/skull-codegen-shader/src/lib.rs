@@ -22,7 +22,7 @@ use skull_mir::monoty::{MonoCtor, MonoTy};
 use skull_mir::shader_ir::{
     ComputeAccess, ComputeAddressSpace, ComputeBuiltin, ComputeDispatchContract,
     ComputeInterfacePlan, ComputeResourceShape, ComputeValueKind, ComputeWorkgroupSize,
-    FragmentOutput, LogicalComputeResource, LogicalSampler, LogicalTextureGroup,
+    FragmentOutput, LogicalComputeResource, LogicalComputeWorkgroup, LogicalSampler, LogicalTextureGroup,
     LogicalUniformGroup, ShaderIR, ShaderInstance, ShaderInterfacePlan, ShaderStage,
     ShaderStageIr, UniformRole,
 };
@@ -402,6 +402,11 @@ fn profile_body(
             | Inst::IntMul(..)
             | Inst::IntDiv(..)
             | Inst::IntMod(..)
+            | Inst::UintAdd(..)
+            | Inst::UintSub(..)
+            | Inst::UintMul(..)
+            | Inst::UintDiv(..)
+            | Inst::UintMod(..)
             | Inst::FloatAdd(..)
             | Inst::FloatSub(..)
             | Inst::FloatMul(..)
@@ -411,6 +416,10 @@ fn profile_body(
             | Inst::IntLeq(..)
             | Inst::IntGt(..)
             | Inst::IntGeq(..)
+            | Inst::UintLt(..)
+            | Inst::UintLeq(..)
+            | Inst::UintGt(..)
+            | Inst::UintGeq(..)
             | Inst::FloatLt(..)
             | Inst::FloatLeq(..)
             | Inst::FloatGt(..)
@@ -421,6 +430,18 @@ fn profile_body(
             | Inst::Not(_)
             | Inst::FloatToInt(_)
             | Inst::IntToFloat(_)
+            | Inst::UintToFloat(_)
+            | Inst::IntToUint(_)
+            | Inst::UintToInt(_)
+            | Inst::FloatToUint(_)
+            | Inst::UintBitcastInt(_)
+            | Inst::IntBitcastUint(_)
+            | Inst::UintBitNot(_)
+            | Inst::UintBitAnd(..)
+            | Inst::UintBitOr(..)
+            | Inst::UintBitXor(..)
+            | Inst::UintShl(..)
+            | Inst::UintShr(..)
             | Inst::MakeValueStruct { .. }
             | Inst::MaterializeValueStruct { .. }
             | Inst::Field { .. }
@@ -1113,6 +1134,7 @@ struct ComputeEntryClass {
     resources: Vec<LogicalComputeResource>,
     uniform_group: Option<Ustr>,
     workgroup_size: ComputeWorkgroupSize,
+    dispatch_dimensions: u8,
 }
 
 fn anno_span(function: &Function, index: usize, name: &str) -> Span {
@@ -1129,7 +1151,7 @@ fn compute_access(function: &Function, index: usize) -> Result<ComputeAccess, Co
         .annotations
         .iter()
         .find(|annotation| annotation.name.name.as_str() == "storage")
-        .ok_or_else(|| err(function.name_span, "compute StorageBuffer parameters require @storage(access)"))?;
+        .ok_or_else(|| err(function.name_span, "compute storage parameters require @storage(access)"))?;
     let [argument] = annotation.args.as_slice() else {
         return Err(err(annotation.span, "@storage requires exactly one access argument"));
     };
@@ -1153,19 +1175,26 @@ fn compute_storage_element(
     span: Span,
 ) -> Result<ComputeValueKind, CompilerError> {
     let Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), params }) = ty_expr(ws, ty) else {
-        return Err(err(span, "compute storage parameters must be StorageBuffer<int>"));
+        return Err(err(span, "compute storage parameters must be StorageBuffer<T> or AtomicStorageBuffer<uint>"));
     };
-    if name.as_str() != "StorageBuffer" {
-        return Err(err(span, "compute storage parameters must be StorageBuffer<int>"));
+    let atomic = name.as_str() == "AtomicStorageBuffer";
+    if !atomic && name.as_str() != "StorageBuffer" {
+        return Err(err(span, "compute storage parameters must be StorageBuffer<T> or AtomicStorageBuffer<uint>"));
     }
     let Some(element) = params.into_iter().next().map(|index| ty.with_idx(index)) else {
         return Err(err(span, "StorageBuffer is missing its element type"));
     };
     match ty_expr(ws, element) {
-        Some(TypeExpr::Builtin(BuiltinTy::Int)) => Ok(ComputeValueKind::I32),
+        Some(TypeExpr::Builtin(BuiltinTy::Int)) if !atomic => Ok(ComputeValueKind::I32),
+        Some(TypeExpr::Builtin(BuiltinTy::Uint)) if !atomic => Ok(ComputeValueKind::U32),
+        Some(TypeExpr::Builtin(BuiltinTy::Uint)) if atomic => Ok(ComputeValueKind::AtomicU32),
         _ => Err(err(
             span,
-            "the first compute storage element type is Rock int (WGSL i32)",
+            if atomic {
+                "AtomicStorageBuffer's element type is Rock uint (WGSL atomic<u32>)"
+            } else {
+                "the first compute storage element type must be Rock int or uint"
+            },
         )),
     }
 }
@@ -1178,19 +1207,43 @@ fn compute_workgroup(function: &Function) -> Result<ComputeWorkgroupSize, Compil
     else {
         return Err(err(
             function.name_span,
-            "@shader(compute) entries require @workgroup(x)",
+            "@shader(compute) entries require @workgroup(x, y, z)",
+        ));
+    };
+    let [x, y, z] = annotation.args.as_slice() else {
+        return Err(err(annotation.span, "@workgroup takes exactly three integer sizes"));
+    };
+    let (x, y, z) = match (&x.value, &y.value, &z.value) {
+        (AnnoValue::Int(x), AnnoValue::Int(y), AnnoValue::Int(z)) => (*x, *y, *z),
+        _ => return Err(err(annotation.span, "@workgroup takes exactly three integer sizes")),
+    };
+    if ![x, y, z].into_iter().all(|size| (1..=u32::MAX as i64).contains(&size)) {
+        return Err(err(annotation.span, "compute workgroup size must be non-zero and fit u32"));
+    }
+    Ok(ComputeWorkgroupSize { x: x as u32, y: y as u32, z: z as u32 })
+}
+
+fn compute_dispatch(function: &Function) -> Result<u8, CompilerError> {
+    let Some(annotation) = function
+        .annotations
+        .iter()
+        .find(|annotation| annotation.name.name.as_str() == "dispatch")
+    else {
+        return Err(err(
+            function.name_span,
+            "@shader(compute) entries require @dispatch(1), @dispatch(2), or @dispatch(3)",
         ));
     };
     let [argument] = annotation.args.as_slice() else {
-        return Err(err(annotation.span, "@workgroup takes exactly one integer x size"));
+        return Err(err(annotation.span, "@dispatch takes exactly one dimension"));
     };
-    let AnnoValue::Int(x) = argument.value else {
-        return Err(err(annotation.span, "@workgroup takes exactly one integer x size"));
+    let AnnoValue::Int(dimensions) = argument.value else {
+        return Err(err(annotation.span, "@dispatch dimension must be an integer from 1 through 3"));
     };
-    if !(1..=u32::MAX as i64).contains(&x) {
-        return Err(err(annotation.span, "compute workgroup size must be non-zero and fit u32"));
+    if !(1..=3).contains(&dimensions) {
+        return Err(err(annotation.span, "@dispatch dimension must be an integer from 1 through 3"));
     }
-    Ok(ComputeWorkgroupSize { x: x as u32, y: 1, z: 1 })
+    Ok(dimensions as u8)
 }
 
 fn classify_compute_entry(
@@ -1205,6 +1258,7 @@ fn classify_compute_entry(
         ));
     }
     let workgroup_size = compute_workgroup(function)?;
+    let dispatch_dimensions = compute_dispatch(function)?;
     let mut resources = Vec::new();
     let mut uniform_group = None;
     for (index, param) in function.param_decls.iter().enumerate() {
@@ -1253,14 +1307,23 @@ fn classify_compute_entry(
     if function.return_ty.is_some() {
         return Err(err(span, "compute entries must return unit"));
     }
-    Ok(ComputeEntryClass { resources, uniform_group, workgroup_size })
+    for resource in &resources {
+        if resource.shape == ComputeResourceShape::Array(ComputeValueKind::AtomicU32)
+            && resource.access != ComputeAccess::ReadWrite
+        {
+            return Err(err(
+                span,
+                format!("atomic compute resource `{}` must use @storage(read_write)", resource.name),
+            ));
+        }
+    }
+    Ok(ComputeEntryClass { resources, uniform_group, workgroup_size, dispatch_dimensions })
 }
 
 fn compute_builtin_calls(
     ws: &Workspace,
     stage: &ShaderStageIr,
-    span: Span,
-) -> Result<Vec<ComputeBuiltin>, CompilerError> {
+) -> Vec<ComputeBuiltin> {
     let mut names = HashSet::default();
     for body in stage.bodies.values().chain(std::iter::once(&stage.body)) {
         for (_, instruction) in body.insts.iter() {
@@ -1270,17 +1333,23 @@ fn compute_builtin_calls(
                 "global_invocation_id" => {
                     names.insert(ComputeBuiltin::GlobalInvocationId);
                 }
-                "local_invocation_id" | "workgroup_id" | "local_invocation_index" | "num_workgroups" => {
-                    return Err(err(
-                        span,
-                        format!("compute builtin `{name}()` is not supported in the first slice"),
-                    ));
+                "local_invocation_id" => {
+                    names.insert(ComputeBuiltin::LocalInvocationId);
+                }
+                "workgroup_id" => {
+                    names.insert(ComputeBuiltin::WorkgroupId);
+                }
+                "local_invocation_index" => {
+                    names.insert(ComputeBuiltin::LocalInvocationIndex);
+                }
+                "num_workgroups" => {
+                    names.insert(ComputeBuiltin::NumWorkgroups);
                 }
                 _ => {}
             }
         }
     }
-    Ok([
+    [
         ComputeBuiltin::GlobalInvocationId,
         ComputeBuiltin::LocalInvocationId,
         ComputeBuiltin::WorkgroupId,
@@ -1289,24 +1358,30 @@ fn compute_builtin_calls(
     ]
     .into_iter()
     .filter(|builtin| names.contains(builtin))
-    .collect())
+    .collect()
 }
 
 fn validate_compute_access(
     ws: &Workspace,
     stage: &ShaderStageIr,
     class: &ComputeEntryClass,
+    workgroups: &[LogicalComputeWorkgroup],
     entry_function: &Function,
     span: Span,
 ) -> Result<(), CompilerError> {
     let entry_params = &entry_function.param_decls;
     let entry_cells = stage.body.params.clone();
-    let resource_access = |cell| {
-        entry_cells.iter().position(|candidate| *candidate == cell).and_then(|index| {
-            entry_params.get(index).and_then(|param| {
-                class.resources.iter().find(|resource| resource.name == param.name).map(|resource| resource.access)
-            })
-        })
+    let resource_for_cell = |body: &MirFunc, cell: Idx<skull_mir::mir::Cell>| {
+        if !std::ptr::eq(body, &stage.body) {
+            return None;
+        }
+        let index = entry_cells.iter().position(|candidate| *candidate == cell)?;
+        let param = entry_params.get(index)?;
+        class.resources.iter().find(|resource| resource.name == param.name)
+    };
+    let workgroup_for_cell = |body: &MirFunc, cell: Idx<skull_mir::mir::Cell>| {
+        let name = body.cells[cell].name?;
+        workgroups.iter().find(|workgroup| workgroup.name == name)
     };
     for (instance, body) in stage
         .bodies
@@ -1317,35 +1392,125 @@ fn validate_compute_access(
         for (_, instruction) in body.insts.iter() {
             let Inst::Call { func, args } = instruction else { continue };
             let name = ws.module(func.module).functions[func.func].name;
-            if !matches!(name.as_str(), "storage_load" | "storage_store") {
-                continue;
-            }
-            if instance.is_some() {
-                return Err(err(
-                    span,
-                    "storage intrinsics in helpers are not supported until resource forwarding is explicit",
-                ));
-            }
-            let Some(Inst::Load(cell)) = args.first().map(|arg| &stage.body.insts[*arg]) else {
-                return Err(err(span, format!("{name} must receive a direct StorageBuffer parameter")));
-            };
-            let Some(access) = resource_access(*cell) else {
-                return Err(err(span, format!("{name} received a resource absent from the compute interface")));
-            };
-            let allowed = match name.as_str() {
-                "storage_load" => access != ComputeAccess::Write,
-                "storage_store" => access != ComputeAccess::Read,
-                _ => true,
-            };
-            if !allowed {
-                return Err(err(
-                    span,
-                    format!("{name} is incompatible with the resource's {:?} access", access),
-                ));
+            match name.as_str() {
+                "storage_load" | "storage_store" | "atomic_add" => {
+                    if instance.is_some() {
+                        return Err(err(
+                            span,
+                            "storage intrinsics in helpers are not supported until resource forwarding is explicit",
+                        ));
+                    }
+                    let Some(Inst::Load(cell)) = args.first().map(|arg| &body.insts[*arg]) else {
+                        return Err(err(span, format!("{name} must receive a direct storage parameter")));
+                    };
+                    let Some(resource) = resource_for_cell(body, *cell) else {
+                        return Err(err(span, format!("{name} received a resource absent from the compute interface")));
+                    };
+                    let access = resource.access;
+                    let element = match resource.shape {
+                        ComputeResourceShape::Array(element) => element,
+                        ComputeResourceShape::Scalar(_) => {
+                            return Err(err(span, format!("{name} requires an array storage resource")));
+                        }
+                    };
+                    match name.as_str() {
+                        "storage_load" => {
+                            if element == ComputeValueKind::AtomicU32 {
+                                return Err(err(span, "storage_load cannot access AtomicStorageBuffer"));
+                            }
+                            if access == ComputeAccess::Write {
+                                return Err(err(
+                                    span,
+                                    format!("storage_load is incompatible with the resource's {:?} access", access),
+                                ));
+                            }
+                        }
+                        "storage_store" => {
+                            if element == ComputeValueKind::AtomicU32 {
+                                return Err(err(span, "storage_store cannot access AtomicStorageBuffer"));
+                            }
+                            if access == ComputeAccess::Read {
+                                return Err(err(
+                                    span,
+                                    format!("storage_store is incompatible with the resource's {:?} access", access),
+                                ));
+                            }
+                        }
+                        "atomic_add" => {
+                            if element != ComputeValueKind::AtomicU32 {
+                                return Err(err(span, "atomic_add requires AtomicStorageBuffer<uint>"));
+                            }
+                            if access != ComputeAccess::ReadWrite {
+                                return Err(err(span, "atomic_add requires a read_write atomic resource"));
+                            }
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                "workgroup_load" | "workgroup_store" => {
+                    let Some(Inst::Load(cell)) = args.first().map(|arg| &body.insts[*arg]) else {
+                        return Err(err(span, format!("{name} must receive a direct WorkgroupArray value")));
+                    };
+                    if workgroup_for_cell(body, *cell).is_none() {
+                        return Err(err(span, format!("{name} received a value that is not workgroup memory")));
+                    }
+                }
+                "workgroup_barrier" => {}
+                _ => {}
             }
         }
     }
     Ok(())
+}
+
+fn compute_workgroup_arrays(
+    ws: &Workspace,
+    stage: &ShaderStageIr,
+    interner: &skull_mir::monoty::MonoInterner,
+    span: Span,
+) -> Result<Vec<LogicalComputeWorkgroup>, CompilerError> {
+    let mut arrays = Vec::new();
+    let mut seen = HashSet::default();
+    for body in stage.bodies.values().chain(std::iter::once(&stage.body)) {
+        for (_iid, instruction) in body.insts.iter() {
+            let Inst::Store { cell, value } = instruction else { continue };
+            let Inst::Call { func, args } = &body.insts[*value] else { continue };
+            let name = ws.module(func.module).functions[func.func].name;
+            if name.as_str() != "workgroup_array" {
+                continue;
+            }
+            let [size] = args.as_slice() else {
+                return Err(err(span, "workgroup_array requires one constant size"));
+            };
+            let size = match body.insts[*size] {
+                Inst::Const(Lit::Int(value)) if value > 0 && value <= u32::MAX as i64 => value as u32,
+                Inst::Const(Lit::Uint(value)) if value != 0 => value,
+                Inst::Const(_) => return Err(err(span, "workgroup_array size must be a positive u32 constant")),
+                _ => return Err(err(span, "workgroup_array size must be a compile-time constant")),
+            };
+            let Some(instance) = body.callee_instances.get(value) else {
+                return Err(err(span, "workgroup_array has no concrete generic instance"));
+            };
+            let [element] = instance.args.as_slice() else {
+                return Err(err(span, "workgroup_array requires exactly one concrete element type"));
+            };
+            let kind = match interner.get(*element) {
+                MonoTy::Float => ComputeValueKind::F32,
+                MonoTy::Int => ComputeValueKind::I32,
+                MonoTy::Uint => ComputeValueKind::U32,
+                MonoTy::Bool => ComputeValueKind::Bool,
+                _ => return Err(err(span, "workgroup_array element type is not a compute scalar")),
+            };
+            let name = body.cells[*cell]
+                .name
+                .unwrap_or_else(|| Ustr::from(format!("workgroup_{}", cell.into_raw().into_u32()).as_str()));
+            if !seen.insert(name) {
+                return Err(err(span, format!("duplicate compute workgroup array `{name}`")));
+            }
+            arrays.push(LogicalComputeWorkgroup { name, kind, size });
+        }
+    }
+    Ok(arrays)
 }
 
 fn logical_members(
@@ -1533,13 +1698,15 @@ pub fn plan_compute_from_concrete(
     let function = &ws.module(input.entry.func.module).functions[input.entry.func.func];
     let class = classify_compute_entry(ws, function)?;
     let stage = plan_stage_from_concrete(ws, scx, input, policy)?;
-    validate_compute_access(ws, &stage, &class, function, function.name_span)?;
-    let builtins = compute_builtin_calls(ws, &stage, function.name_span)?;
+    let workgroup = compute_workgroup_arrays(ws, &stage, scx.interner(), function.name_span)?;
+    validate_compute_access(ws, &stage, &class, &workgroup, function, function.name_span)?;
+    let builtins = compute_builtin_calls(ws, &stage);
     let compute = ComputeInterfacePlan {
         resources: class.resources,
+        workgroup,
         builtins,
         workgroup_size: class.workgroup_size,
-        dispatch: ComputeDispatchContract::Runtime { dimensions: 1 },
+        dispatch: ComputeDispatchContract::Runtime { dimensions: class.dispatch_dimensions },
     };
     compute.validate().map_err(|message| err(function.name_span, message))?;
     let uniform_groups = class

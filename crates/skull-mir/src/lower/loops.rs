@@ -82,6 +82,7 @@ impl Builder<'_> {
         if let Expr::Call {
             callee: Callee::Unresolved { name, .. },
             args,
+            ..
         } = self.body.expr_arena[iter].clone()
         {
             if name.as_str() == "enumerate" {

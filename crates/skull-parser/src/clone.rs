@@ -168,8 +168,9 @@ fn clone_expr_kind(ast: &mut Ast, kind: ExprKind) -> ExprKind {
         ExprKind::ReturnExpr(o) => ExprKind::ReturnExpr(o.map(|e| ce(ast, e))),
         ExprKind::Yield(o) => ExprKind::Yield(o.map(|e| ce(ast, e))),
 
-        ExprKind::FunctionCall { func, args, syntax } => ExprKind::FunctionCall {
+        ExprKind::FunctionCall { func, generic_args, args, syntax } => ExprKind::FunctionCall {
             func: ce(ast, func),
+            generic_args: generic_args.into_iter().map(|t| ct(ast, t)).collect(),
             args: args
                 .into_iter()
                 .map(|a| FunctionCallArg {

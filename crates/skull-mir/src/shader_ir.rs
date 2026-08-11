@@ -204,9 +204,20 @@ pub struct LogicalComputeResource {
     pub access: ComputeAccess,
 }
 
+/// One compiler-owned workgroup-memory declaration. It is not a bindable
+/// resource: the neutral plan retains its element kind and fixed population so
+/// a target cannot reconstruct it from source text or a second side table.
+#[derive(Clone, PartialEq, Eq, Debug, Hash)]
+pub struct LogicalComputeWorkgroup {
+    pub name: Ustr,
+    pub kind: ComputeValueKind,
+    pub size: u32,
+}
+
 #[derive(Clone, PartialEq, Eq, Debug, Hash)]
 pub struct ComputeInterfacePlan {
     pub resources: Vec<LogicalComputeResource>,
+    pub workgroup: Vec<LogicalComputeWorkgroup>,
     pub builtins: Vec<ComputeBuiltin>,
     pub workgroup_size: ComputeWorkgroupSize,
     pub dispatch: ComputeDispatchContract,
@@ -238,6 +249,11 @@ impl ComputeInterfacePlan {
                     || resource.access != ComputeAccess::ReadWrite)
         }) {
             return Err("atomic compute resources must be read_write storage arrays");
+        }
+        if self.workgroup.iter().any(|memory| {
+            memory.size == 0 || matches!(memory.kind, ComputeValueKind::AtomicU32)
+        }) {
+            return Err("compute workgroup arrays must have a positive non-atomic element kind");
         }
         Ok(())
     }
@@ -627,6 +643,10 @@ impl ShaderInterfacePlan {
                 for resource in &compute.resources {
                     let (shape, kind) = resource.shape.code();
                     writeln!(out, "compute_resource {} {} {} {} {}", resource.name, resource.address_space.name(), resource.access.name(), shape, kind.code()).unwrap();
+                }
+                writeln!(out, "compute_workgroup_arrays {}", compute.workgroup.len()).unwrap();
+                for memory in &compute.workgroup {
+                    writeln!(out, "compute_workgroup_array {} {} {}", memory.name, memory.kind.code(), memory.size).unwrap();
                 }
             }
             None => {}

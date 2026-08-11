@@ -1196,7 +1196,7 @@ fn empty_uniform_block() -> WgslUniformBlock {
 
 fn uniform_layout(kind: u32) -> Result<(u32, u32), AbiError> {
     match kind {
-        0 | 4 | 5 => Ok((4, 4)),
+        0 | 4 | 5 | 7 => Ok((4, 4)),
         1 => Ok((8, 8)),
         2 => Ok((16, 12)),
         3 => Ok((16, 16)),
@@ -1207,14 +1207,14 @@ fn uniform_layout(kind: u32) -> Result<(u32, u32), AbiError> {
 
 fn validate_array_kind(kind: u32) -> Result<(), AbiError> {
     match kind {
-        0 | 1 | 3 | 4 => Ok(()),
+        0 | 1 | 3 | 4 | 7 => Ok(()),
         _ => Err(wire_error(format!("unsupported uniform array element kind {kind}"))),
     }
 }
 
 fn validate_kind(kind: u32, what: &str) -> Result<(), AbiError> {
     match kind {
-        0..=6 => Ok(()),
+        0..=7 => Ok(()),
         _ => Err(wire_error(format!("{what} {kind} is unsupported"))),
     }
 }
@@ -1622,6 +1622,20 @@ mod tests {
         let mut wrong_access = abi;
         wrong_access.compute.as_mut().unwrap().resources[2].access = WgslStorageAccess::Read;
         assert!(wrong_access.serialize().is_err(), "atomic access mutation must reject");
+    }
+
+    #[test]
+    fn u32_uniform_members_use_the_pinned_four_byte_wire_layout() {
+        let mut abi = compute();
+        abi.uniform_blocks[0].members.push(WgslUniformMember {
+            name: "width".into(),
+            kind: 7,
+            offset: 8,
+            align: 4,
+            size: 4,
+        });
+        let wire = abi.serialize().expect("u32 uniform ABI serializes");
+        assert_eq!(WgslAbi::parse(&wire).expect("u32 uniform ABI parses"), abi);
     }
 
     #[test]

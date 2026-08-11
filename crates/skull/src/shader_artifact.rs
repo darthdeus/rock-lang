@@ -36,6 +36,24 @@ use skull_parser::Span;
 use crate::instance_graph::{Concreteness, DeclKey, Instance, InstanceGraph, SiteOutcome};
 use crate::target_projection::{ShaderTargetSpec, TargetSpec};
 
+fn is_compute_builtin_name(name: &str) -> bool {
+    matches!(
+        name,
+        "global_invocation_id"
+            | "local_invocation_id"
+            | "workgroup_id"
+            | "local_invocation_index"
+            | "num_workgroups"
+            | "storage_load"
+            | "storage_store"
+            | "workgroup_array"
+            | "workgroup_load"
+            | "workgroup_store"
+            | "atomic_add"
+            | "workgroup_barrier"
+    )
+}
+
 pub use crate::shader::{ComputeProgram, ComputeProgramView, ShaderProgram, ShaderProgramView, ShaderStageView};
 
 /// Everything one shader artifact view is taken through.
@@ -197,10 +215,7 @@ pub fn realize_shader_with_context_and_compute(
             sites_walked += 1;
             let SiteOutcome::Resolved(callee) = &rec.outcome else { continue };
             let f = &ws.module(callee.func.module).functions[callee.func.func];
-            let compute_builtin = matches!(
-                f.name.as_str(),
-                "global_invocation_id" | "storage_load" | "storage_store"
-            );
+            let compute_builtin = is_compute_builtin_name(f.name.as_str());
             if compute_builtin || skull_codegen_glsl::renders_inline_instance(ws, f, callee, g.interner()) {
                 builtins.insert(callee.clone());
                 continue;
@@ -413,10 +428,7 @@ fn stage_view(
         for rec in sites.values() {
             let SiteOutcome::Resolved(callee) = &rec.outcome else { continue };
             let f = &ws.module(callee.func.module).functions[callee.func.func];
-            let compute_builtin = matches!(
-                f.name.as_str(),
-                "global_invocation_id" | "storage_load" | "storage_store"
-            );
+            let compute_builtin = is_compute_builtin_name(f.name.as_str());
             if compute_builtin
                 || (stage == ShaderStage::Compute && skull_mir::intrinsics::is_intrinsic(f))
                 || skull_codegen_glsl::renders_inline_instance(ws, f, callee, g.interner())

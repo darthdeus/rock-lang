@@ -155,7 +155,16 @@ fn retry_pending(gamma: &mut Gamma, p: Pending) -> Result<(), CompilerError> {
             ) {
                 Ok((mid, fid)) => {
                     let ret = commit_selected_call(
-                        c, gamma, name, mid, fid, recv_override, &args, &preinferred, call_expr,
+                        c,
+                        gamma,
+                        name,
+                        mid,
+                        fid,
+                        recv_override,
+                        &args,
+                        &preinferred,
+                        IdxRange::new_empty(),
+                        call_expr,
                         span,
                     )?;
                     // `result` is the hole the deferred expression left; a use

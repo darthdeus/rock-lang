@@ -169,6 +169,9 @@ pub enum ExprKind {
 
     FunctionCall {
         func: Idx<ExprData>,
+        /// Explicit type arguments in `f<A, B>(...)`. Empty for inferred
+        /// calls and for every operator/macro call that has no written types.
+        generic_args: Vec<Idx<TypeExprData>>,
         args: Vec<FunctionCallArg>,
         syntax: CallSyntax,
     },
