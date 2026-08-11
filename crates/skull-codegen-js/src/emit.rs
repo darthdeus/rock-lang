@@ -185,24 +185,21 @@ fn max_multi_wire(bodies: &[&MirFunc]) -> usize {
 /// definition and call site reads, so a publisher and the caller capturing it
 /// cannot disagree (`docs/boundary-contracts.md` 1.2).
 fn max_published_lanes(
-    ws: &Workspace,
-    scx: &skull_mir::lower::ScalarCtx,
+    view: &ArtifactView,
     inline_js: &[JsInlineBody],
-) -> usize {
+) -> Result<usize, CompilerError> {
     inline_js
         .iter()
-        .filter(|body| {
-            matches!(
-                ws.module(body.decl.module).functions[body.decl.func].inline_body,
-                Some((bone_semantic::hir::FnBackend::Js, _))
-            )
-        })
         .map(|body| {
-            let selected = Instance { func: body.decl, args: body.instance.args.clone() };
-            skull_mir::lower::BackendFnAbiPlan::for_instance(ws, scx, &selected).result_lanes()
+            view.publisher_lanes.get(&body.instance).copied().ok_or_else(|| {
+                err(format!(
+                    "JS: inline body `{:?}` has no artifact publisher lane plan",
+                    body.decl
+                ))
+            })
         })
-        .max()
-        .unwrap_or(0)
+        .collect::<Result<Vec<_>, _>>()
+        .map(|lanes| lanes.into_iter().max().unwrap_or(0))
 }
 
 /// `body` with every comment and string/template literal replaced by spaces of
@@ -2521,7 +2518,7 @@ pub fn emit_with_closure(
     out.push_str(&emit_inspect_ty(ws, &bodies)?);
     out.push_str(&emit_col_mat(ws, &bodies)?);
     out.push_str(&ret_slot_decls(
-        max_multi_wire(&bodies).max(max_published_lanes(ws, &scx, &st.inline_js)),
+        max_multi_wire(&bodies).max(max_published_lanes(&session.view, &st.inline_js)?),
     ));
     // Global initializers first (`function __ginit_<name>() {...}`), then the
     // load-time assignment lines in dependency order, then the fn defs. (The
@@ -2993,8 +2990,9 @@ fn assemble_program_core(
     let col_mat = emit_col_mat(ws, &bodies)?;
     out.push_str(&col_mat);
     stable.push_str(&col_mat);
-    let ret_slots =
-        ret_slot_decls(max_multi_wire(&bodies).max(max_published_lanes(ws, scx, &st.inline_js)));
+    let ret_slots = ret_slot_decls(
+        max_multi_wire(&bodies).max(max_published_lanes(&session.view, &st.inline_js)?),
+    );
     out.push_str(&ret_slots);
     stable.push_str(&ret_slots);
     // 1. deco def fns.
