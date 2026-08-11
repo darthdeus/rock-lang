@@ -93,7 +93,17 @@ fn validate_one(
                 && anno.args[0].name.is_none()
                 && matches!(anno.args[0].value, AnnoValue::Ident(_));
             if !ok {
-                comp_error!(anno.span, "`@shader` takes exactly one stage argument: @shader(fragment)");
+                comp_error!(anno.span, "`@shader` takes exactly one stage argument: @shader(compute)");
+            }
+            Ok(())
+        }
+        "workgroup" => {
+            at(anno, pos, AnnoPos::FnItem)?;
+            let ok = anno.args.len() == 1
+                && anno.args[0].name.is_none()
+                && matches!(anno.args[0].value, AnnoValue::Int(_));
+            if !ok {
+                comp_error!(anno.span, "`@workgroup` takes exactly one integer x size: @workgroup(64)");
             }
             Ok(())
         }
@@ -179,6 +189,16 @@ fn validate_one(
         "attr" | "uniform" | "textures" | "engine" => {
             at(anno, pos, AnnoPos::Param)?;
             no_args(anno)
+        }
+        "storage" => {
+            at(anno, pos, AnnoPos::Param)?;
+            let ok = anno.args.len() == 1
+                && anno.args[0].name.is_none()
+                && matches!(anno.args[0].value, AnnoValue::Ident(_));
+            if !ok {
+                comp_error!(anno.span, "`@storage` takes one access argument: @storage(read_write)");
+            }
+            Ok(())
         }
         "flat" => {
             at(anno, pos, AnnoPos::StructField)?;

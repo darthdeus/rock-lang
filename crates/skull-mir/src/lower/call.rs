@@ -603,6 +603,9 @@ impl Builder<'_> {
                     Some(ExpandKind::ShaderPipeline) => {
                         self.expand_shader_pipeline(e, &arg_idxs)
                     }
+                    Some(ExpandKind::ComputeArtifact) => {
+                        self.expand_compute_artifact(e, &arg_idxs)
+                    }
                     Some(ExpandKind::VertexLayout) => {
                         self.expand_vertex_layout(e, func, &arg_idxs)
                     }

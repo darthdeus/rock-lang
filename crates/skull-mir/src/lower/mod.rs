@@ -2985,7 +2985,18 @@ pub struct ShaderCollection {
     pub callsites: Vec<(ModuleId, BodyOwner)>,
 }
 
-/// The `@shader(<stage>)` stage of `f` (`"vertex"`/`"fragment"`), else `None`.
+#[derive(Clone, Debug)]
+pub struct ComputeEntry {
+    pub key: String,
+    pub entry: FuncRef,
+}
+
+pub struct ComputeCollection {
+    pub entries: Vec<ComputeEntry>,
+    pub callsites: Vec<(ModuleId, BodyOwner)>,
+}
+
+/// The `@shader(<stage>)` stage of `f`, else `None`.
 /// A local read of the annotation (skull-codegen-glsl has the same helper, but
 /// skull-mir must not depend on it -- the layering constraint).
 fn shader_stage_of(f: &Function) -> Option<&'static str> {
@@ -2995,7 +3006,49 @@ fn shader_stage_of(f: &Function) -> Option<&'static str> {
         Some(bone_semantic::hir::AnnoValue::Ident(id)) if id.name.as_str() == "fragment" => {
             Some("fragment")
         }
+        Some(bone_semantic::hir::AnnoValue::Ident(id)) if id.name.as_str() == "compute" => {
+            Some("compute")
+        }
         _ => None,
+    }
+}
+
+pub fn resolve_compute_entry(
+    ws: &Workspace,
+    body: &Body,
+    call_expr: Idx<Expr>,
+    args: &[Idx<Expr>],
+) -> Result<FuncRef, CompilerError> {
+    let span = body.expr_spans[call_expr];
+    let reject = |message: String| CompilerError::new_with_label(span, message);
+    let [arg] = args else {
+        return Err(reject(
+            "`rock_compute` takes exactly one direct @shader(compute) reference".to_string(),
+        ));
+    };
+    let Expr::Global(name) = body.expr_arena[*arg] else {
+        return Err(reject(
+            "`rock_compute` argument must be a direct reference to a top-level @shader(compute) fn"
+                .to_string(),
+        ));
+    };
+    let fref = match ws.functions_by_name.get(&name).map(|list| list.as_slice()) {
+        Some([(module, func)]) => FuncRef { module: *module, func: *func },
+        _ => {
+            return Err(reject(format!(
+                "`rock_compute` argument `{name}` must be a direct reference to a unique top-level fn"
+            )))
+        }
+    };
+    let function = &ws.module(fref.module).functions[fref.func];
+    match shader_stage_of(function) {
+        Some("compute") => Ok(fref),
+        Some(stage) => Err(reject(format!(
+            "`rock_compute` expects a @shader(compute) fn here, but `{name}` is @shader({stage})"
+        ))),
+        None => Err(reject(format!(
+            "`rock_compute` argument `{name}` is not a @shader(compute) fn"
+        ))),
     }
 }
 
@@ -3027,7 +3080,23 @@ fn resolve_shader_arg(
     };
     let f = &ws.module(fref.module).functions[fref.func];
     match shader_stage_of(f) {
-        Some(stage) if stage == want_stage => Ok(fref),
+        Some(stage) if stage == want_stage => {
+            if let Some(annotation) = f
+                .param_decls
+                .iter()
+                .flat_map(|param| param.annotations.iter())
+                .find(|annotation| annotation.name.name.as_str() == "storage")
+            {
+                return Err(CompilerError::new_with_label(
+                    annotation.span,
+                    format!(
+                        "graphics entry `{}` cannot declare @storage resources; storage resources are compute-only",
+                        f.name
+                    ),
+                ));
+            }
+            Ok(fref)
+        }
         Some(other) => Err(reject(format!(
             "`rock_shader` expects a `@shader({want_stage})` fn here, but `{name}` is `@shader({other})`"
         ))),
@@ -3219,6 +3288,7 @@ fn vertex_expand_rejection_for_call(
 struct ExpansionRejections {
     struct_pairs: Option<CompilerError>,
     shader_pipeline: Option<CompilerError>,
+    compute_artifact: Option<CompilerError>,
     vertex_layout: Option<CompilerError>,
     uniform_block: Option<CompilerError>,
     uniform_values: Option<CompilerError>,
@@ -3230,6 +3300,7 @@ impl ExpansionRejections {
         let slot = match kind {
             ExpandKind::StructPairs => &mut self.struct_pairs,
             ExpandKind::ShaderPipeline => &mut self.shader_pipeline,
+            ExpandKind::ComputeArtifact => &mut self.compute_artifact,
             ExpandKind::VertexLayout => &mut self.vertex_layout,
             ExpandKind::UniformBlock => &mut self.uniform_block,
             ExpandKind::UniformValues => &mut self.uniform_values,
@@ -3243,6 +3314,7 @@ impl ExpansionRejections {
     fn finish(self) -> Option<CompilerError> {
         self.struct_pairs
             .or(self.shader_pipeline)
+            .or(self.compute_artifact)
             .or(self.vertex_layout)
             .or(self.uniform_block)
             .or(self.uniform_values)
@@ -3258,6 +3330,7 @@ pub fn expansion_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerErro
     let mut rejections = ExpansionRejections {
         struct_pairs: None,
         shader_pipeline: None,
+        compute_artifact: None,
         vertex_layout: None,
         uniform_block: None,
         uniform_values: None,
@@ -3278,6 +3351,9 @@ pub fn expansion_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerErro
                 }
                 ExpandKind::ShaderPipeline => {
                     shader_expand_rejection_for_call(ws, body, e, &arg_idxs)
+                }
+                ExpandKind::ComputeArtifact => {
+                    resolve_compute_entry(ws, body, e, &arg_idxs).err()
                 }
                 ExpandKind::VertexLayout => {
                     vertex_expand_rejection_for_call(ws, inf, body, e, f, &arg_idxs)
@@ -3373,6 +3449,41 @@ pub fn collect_shader_collection(ws: &Workspace) -> Result<ShaderCollection, Com
     })
 }
 
+pub fn collect_compute_collection(ws: &Workspace) -> Result<ComputeCollection, CompilerError> {
+    let mut by_key = std::collections::BTreeMap::<String, ComputeEntry>::new();
+    let mut callsites = HashSet::new();
+    for (_, &mid) in ws.module_ids.iter() {
+        let module = ws.module(mid);
+        let ir = ws.inference(mid);
+        for (owner, body) in module.bodies.iter() {
+            let inf = ir.and_then(|ir| ir.per_fn.get(owner));
+            for (e, expr) in body.expr_arena.iter() {
+                let Expr::Call { callee: Callee::Unresolved { name, .. }, args } = expr else {
+                    continue;
+                };
+                let resolved = match inf {
+                    Some(inf) => resolve_call_fn(ws, inf, e, *name),
+                    None => match ws.functions_by_name.get(name).map(|list| list.as_slice()) {
+                        Some([single]) => Some(*single),
+                        _ => None,
+                    },
+                };
+                let Some((fmod, fid)) = resolved else { continue };
+                let function = &ws.module(fmod).functions[fid];
+                if !matches!(crate::intrinsics::expand_kind(function), Some(ExpandKind::ComputeArtifact)) {
+                    continue;
+                }
+                callsites.insert((mid, *owner));
+                let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
+                let entry = resolve_compute_entry(ws, body, e, &arg_idxs)?;
+                let key = ws.module(entry.module).functions[entry.func].name.to_string();
+                by_key.entry(key.clone()).or_insert(ComputeEntry { key, entry });
+            }
+        }
+    }
+    Ok(ComputeCollection { entries: by_key.into_values().collect(), callsites: callsites.into_iter().collect() })
+}
+
 /// Reject CPU-side calls to `@gpu_only` intrinsics and references to GPU-side
 /// functions as runtime fn values. Shader-pipeline expansion arguments are names,
 /// not runtime values, and remain legal.
@@ -3403,7 +3514,7 @@ pub fn gpu_only_call_rejection(ws: &Workspace, mid: ModuleId) -> Option<Compiler
             let f = &ws.module(fmod).functions[fid];
             if matches!(
                 crate::intrinsics::expand_kind(f),
-                Some(ExpandKind::ShaderPipeline)
+                Some(ExpandKind::ShaderPipeline | ExpandKind::ComputeArtifact)
             ) {
                 shader_expansion_args.extend(args.clone().into_iter());
             }

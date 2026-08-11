@@ -109,6 +109,9 @@ const WGSL_BUILTINS: &[(&str, usize, &str, ResultKind)] = &[
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WgslIntrinsic {
+    GlobalInvocationId,
+    StorageLoad,
+    StorageStore,
     Texture,
     TextureSize,
     At,
@@ -143,6 +146,9 @@ impl WgslIntrinsic {
             return Some(Self::Builtin(spelling, *result));
         }
         Some(match (name, arity) {
+            ("global_invocation_id", 0) => Self::GlobalInvocationId,
+            ("storage_load", 2) => Self::StorageLoad,
+            ("storage_store", 3) => Self::StorageStore,
             ("round", 1) => Self::Round,
             ("v", 0..=4) => Self::VectorConstructor,
             ("zero", 0) => Self::Zero,
@@ -3114,6 +3120,14 @@ impl<'a> FunctionEmitter<'a> {
     ) -> Result<ValueKind, CompilerError> {
         let function = &self.ws.module(func.module).functions[func.func];
         match WgslIntrinsic::classify(function) {
+            Some(WgslIntrinsic::GlobalInvocationId) => {
+                Ok(ValueKind::Struct(Ustr::from("GlobalInvocationId")))
+            }
+            Some(WgslIntrinsic::StorageLoad) => Ok(ValueKind::I32),
+            Some(WgslIntrinsic::StorageStore) => Err(err(
+                self.span,
+                "WGSL `storage_store` produces no value and cannot be used in an expression",
+            )),
             Some(WgslIntrinsic::Texture) => Ok(ValueKind::Vec4),
             Some(WgslIntrinsic::TextureSize) => Ok(ValueKind::Vec2),
             Some(WgslIntrinsic::FragCoord) => Ok(ValueKind::Vec4),
@@ -3478,6 +3492,12 @@ impl<'a> FunctionEmitter<'a> {
         let function = &self.ws.module(func.module).functions[func.func];
         let name = function.name.as_str();
         match WgslIntrinsic::classify(function) {
+            Some(WgslIntrinsic::GlobalInvocationId)
+            | Some(WgslIntrinsic::StorageLoad)
+            | Some(WgslIntrinsic::StorageStore) => Err(err(
+                self.span,
+                format!("WGSL compute intrinsic `{name}` requires the compute emitter"),
+            )),
             Some(WgslIntrinsic::Texture) => {
                 if args.len() != 2 {
                     return Err(err(

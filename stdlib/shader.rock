@@ -61,6 +61,22 @@ struct UniformArray<T> { }
     error("at() is GPU-only (uniform-array indexing)")
 """
 
+struct StorageBuffer<T> { }
+
+value GlobalInvocationId { x: int, y: int, z: int }
+
+@intrinsic @gpu_only inline(lua) fn global_invocation_id() -> GlobalInvocationId = """
+    error("global_invocation_id() is GPU-only (compute shader builtin)")
+"""
+
+@intrinsic @gpu_only inline(lua) fn storage_load<T>(buffer: StorageBuffer<T>, index: int) -> T = """
+    error("storage_load() is GPU-only (compute storage intrinsic)")
+"""
+
+@intrinsic @gpu_only inline(lua) fn storage_store<T>(buffer: StorageBuffer<T>, index: int, value: T) = """
+    error("storage_store() is GPU-only (compute storage intrinsic)")
+"""
+
 // IEEE non-finite predicates. GLES 3.00 has isnan/isinf natively (the GLSL
 // templates map straight through). NOT @gpu_only -- CPU-callable, so the
 // value-test corpus exercises them on luajit and JS; the inline(lua) body IS
@@ -123,6 +139,10 @@ value Bvec3 { x: bool, y: bool, z: bool }
 // passthrough). Same @shader_expand, so resolution stays annotation-keyed.
 @shader_expand inline(lua) fn rock_shader<F>(frag: F) -> string = """
     error("rock_shader is a compile-time shader-pipeline intrinsic (expanded at compile time)")
+"""
+
+@shader_expand inline(lua) fn rock_compute<F>(entry: F) -> string = """
+    error("rock_compute is a compile-time compute-artifact intrinsic (expanded at compile time)")
 """
 
 // The one compiler-owned logical value packet shared by GL, WebGL and wgpu.

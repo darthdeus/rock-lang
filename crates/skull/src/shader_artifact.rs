@@ -36,7 +36,7 @@ use skull_parser::Span;
 use crate::instance_graph::{Concreteness, DeclKey, Instance, InstanceGraph, SiteOutcome};
 use crate::target_projection::{ShaderTargetSpec, TargetSpec};
 
-pub use crate::shader::{ShaderProgram, ShaderProgramView, ShaderStageView};
+pub use crate::shader::{ComputeProgram, ComputeProgramView, ShaderProgram, ShaderProgramView, ShaderStageView};
 
 /// Everything one shader artifact view is taken through.
 pub struct ShaderArtifactRequest<'a> {
@@ -111,6 +111,7 @@ pub struct ShaderArtifactView {
     /// `programs` slice. Missing graph roots remain represented by an empty
     /// stage list so a denominator cannot silently shrink.
     pub program_views: Vec<ShaderProgramView>,
+    pub compute_views: Vec<ComputeProgramView>,
 }
 
 impl ShaderArtifactView {
@@ -142,7 +143,7 @@ pub fn realize_shader(
 ) -> Option<ShaderArtifactView> {
     let scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
         .sharing(std::sync::Arc::clone(g.interner()));
-    realize_shader_with_context(ws, g, req, &scx)
+    realize_shader_with_context_and_compute(ws, g, req, &scx, &[])
 }
 
 /// Realize a shader view with the lowering context that shares the graph's
@@ -153,6 +154,16 @@ pub fn realize_shader_with_context(
     g: &InstanceGraph,
     req: &ShaderArtifactRequest<'_>,
     scx: &skull_mir::lower::ScalarCtx,
+) -> Option<ShaderArtifactView> {
+    realize_shader_with_context_and_compute(ws, g, req, scx, &[])
+}
+
+pub fn realize_shader_with_context_and_compute(
+    ws: &Workspace,
+    g: &InstanceGraph,
+    req: &ShaderArtifactRequest<'_>,
+    scx: &skull_mir::lower::ScalarCtx,
+    compute_programs: &[ComputeProgram],
 ) -> Option<ShaderArtifactView> {
     // The typed axis value. A non-GLSL shader target packages no GLSL artifact
     // -- and says so by being absent here rather than by defaulting to a
@@ -166,6 +177,7 @@ pub fn realize_shader_with_context(
         .programs
         .iter()
         .flat_map(|p| p.vert.into_iter().chain(std::iter::once(p.frag)))
+        .chain(compute_programs.iter().map(|p| p.entry))
         .map(|r| DeclKey(skull_mir::lower::canonical_variant(ws, r)))
         .collect();
     let roots: BTreeSet<Instance> =
@@ -185,7 +197,11 @@ pub fn realize_shader_with_context(
             sites_walked += 1;
             let SiteOutcome::Resolved(callee) = &rec.outcome else { continue };
             let f = &ws.module(callee.func.module).functions[callee.func.func];
-            if skull_codegen_glsl::renders_inline_instance(ws, f, callee, g.interner()) {
+            let compute_builtin = matches!(
+                f.name.as_str(),
+                "global_invocation_id" | "storage_load" | "storage_store"
+            );
+            if compute_builtin || skull_codegen_glsl::renders_inline_instance(ws, f, callee, g.interner()) {
                 builtins.insert(callee.clone());
                 continue;
             }
@@ -231,6 +247,17 @@ pub fn realize_shader_with_context(
             stages,
             concrete_plans: Arc::clone(&concrete_plans),
         });
+    }
+    let mut compute_views = Vec::with_capacity(compute_programs.len());
+    for program in compute_programs {
+        let key = DeclKey(skull_mir::lower::canonical_variant(ws, program.entry));
+        if let Some(entry) = roots.iter().find(|instance| DeclKey(instance.func) == key) {
+            compute_views.push(ComputeProgramView {
+                program: *program,
+                stage: stage_view(ws, g, &edges, entry, ShaderStage::Compute),
+                concrete_plans: Arc::clone(&concrete_plans),
+            });
+        }
     }
 
     // THE PROFILE PASS IS EMISSION'S OWN, run per ENTRY.
@@ -363,6 +390,7 @@ pub fn realize_shader_with_context(
         programs: req.programs.len(),
         sites_walked,
         program_views,
+        compute_views,
     })
 }
 
@@ -385,7 +413,14 @@ fn stage_view(
         for rec in sites.values() {
             let SiteOutcome::Resolved(callee) = &rec.outcome else { continue };
             let f = &ws.module(callee.func.module).functions[callee.func.func];
-            if skull_codegen_glsl::renders_inline_instance(ws, f, callee, g.interner()) {
+            let compute_builtin = matches!(
+                f.name.as_str(),
+                "global_invocation_id" | "storage_load" | "storage_store"
+            );
+            if compute_builtin
+                || (stage == ShaderStage::Compute && skull_mir::intrinsics::is_intrinsic(f))
+                || skull_codegen_glsl::renders_inline_instance(ws, f, callee, g.interner())
+            {
                 builtins.insert(callee.clone());
             }
             if skull_codegen_glsl::is_lowered_native_operator(ws, f, callee, g.interner()) {

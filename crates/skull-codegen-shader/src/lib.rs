@@ -8,7 +8,7 @@
 
 pub mod structure;
 
-use bone_semantic::hir::{BodyOwner, BuiltinTy, Expr, Function, TyId, TypeCtor, TypeExpr};
+use bone_semantic::hir::{AnnoValue, BodyOwner, BuiltinTy, Expr, Function, TyId, TypeCtor, TypeExpr};
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::{FnList, ModuleId, Span};
 use comfy_la_arena::Idx;
@@ -20,8 +20,11 @@ use skull_mir::lower::{ScalarCtx, SpecSubst, lower_instance_source};
 use skull_mir::mir::{FuncRef, Inst, Lit, MirFunc};
 use skull_mir::monoty::{MonoCtor, MonoTy};
 use skull_mir::shader_ir::{
-    FragmentOutput, LogicalSampler, LogicalTextureGroup, LogicalUniformGroup, ShaderIR,
-    ShaderInstance, ShaderInterfacePlan, ShaderStage, ShaderStageIr, UniformRole,
+    ComputeAccess, ComputeAddressSpace, ComputeBuiltin, ComputeDispatchContract,
+    ComputeInterfacePlan, ComputeResourceShape, ComputeValueKind, ComputeWorkgroupSize,
+    FragmentOutput, LogicalComputeResource, LogicalSampler, LogicalTextureGroup,
+    LogicalUniformGroup, ShaderIR, ShaderInstance, ShaderInterfacePlan, ShaderStage,
+    ShaderStageIr, UniformRole,
 };
 use skull_parser::CompilerError;
 use std::sync::Arc;
@@ -967,6 +970,11 @@ fn shader_stage(function: &Function) -> Option<&'static str> {
         {
             Some("vertex")
         }
+        Some(bone_semantic::hir::AnnoValue::Ident(identifier))
+            if identifier.name.as_str() == "compute" =>
+        {
+            Some("compute")
+        }
         _ => Some("<unknown>"),
     }
 }
@@ -1094,6 +1102,248 @@ pub fn classify_entry(ws: &Workspace, function: &Function) -> Result<EntryClass,
         texture_group,
         uniform_group,
     })
+}
+
+#[derive(Clone)]
+struct ComputeEntryClass {
+    resources: Vec<LogicalComputeResource>,
+    uniform_group: Option<Ustr>,
+    workgroup_size: ComputeWorkgroupSize,
+}
+
+fn anno_span(function: &Function, index: usize, name: &str) -> Span {
+    function.param_decls[index]
+        .annotations
+        .iter()
+        .find(|annotation| annotation.name.name.as_str() == name)
+        .map(|annotation| annotation.span)
+        .unwrap_or(function.name_span)
+}
+
+fn compute_access(function: &Function, index: usize) -> Result<ComputeAccess, CompilerError> {
+    let annotation = function.param_decls[index]
+        .annotations
+        .iter()
+        .find(|annotation| annotation.name.name.as_str() == "storage")
+        .ok_or_else(|| err(function.name_span, "compute StorageBuffer parameters require @storage(access)"))?;
+    let [argument] = annotation.args.as_slice() else {
+        return Err(err(annotation.span, "@storage requires exactly one access argument"));
+    };
+    let AnnoValue::Ident(access) = &argument.value else {
+        return Err(err(annotation.span, "@storage access must be read, write, or read_write"));
+    };
+    match access.name.as_str() {
+        "read" => Ok(ComputeAccess::Read),
+        "write" => Ok(ComputeAccess::Write),
+        "read_write" => Ok(ComputeAccess::ReadWrite),
+        other => Err(err(
+            annotation.span,
+            format!("unsupported @storage access `{other}`; use read, write, or read_write"),
+        )),
+    }
+}
+
+fn compute_storage_element(
+    ws: &Workspace,
+    ty: TyId,
+    span: Span,
+) -> Result<ComputeValueKind, CompilerError> {
+    let Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), params }) = ty_expr(ws, ty) else {
+        return Err(err(span, "compute storage parameters must be StorageBuffer<int>"));
+    };
+    if name.as_str() != "StorageBuffer" {
+        return Err(err(span, "compute storage parameters must be StorageBuffer<int>"));
+    }
+    let Some(element) = params.into_iter().next().map(|index| ty.with_idx(index)) else {
+        return Err(err(span, "StorageBuffer is missing its element type"));
+    };
+    match ty_expr(ws, element) {
+        Some(TypeExpr::Builtin(BuiltinTy::Int)) => Ok(ComputeValueKind::I32),
+        Some(TypeExpr::Builtin(BuiltinTy::Float)) => Ok(ComputeValueKind::F32),
+        Some(TypeExpr::Builtin(BuiltinTy::Bool)) => Ok(ComputeValueKind::Bool),
+        _ => Err(err(
+            span,
+            "the first compute storage element type is Rock int (WGSL i32)",
+        )),
+    }
+}
+
+fn compute_workgroup(function: &Function) -> Result<ComputeWorkgroupSize, CompilerError> {
+    let Some(annotation) = function
+        .annotations
+        .iter()
+        .find(|annotation| annotation.name.name.as_str() == "workgroup")
+    else {
+        return Err(err(
+            function.name_span,
+            "@shader(compute) entries require @workgroup(x)",
+        ));
+    };
+    let [argument] = annotation.args.as_slice() else {
+        return Err(err(annotation.span, "@workgroup takes exactly one integer x size"));
+    };
+    let AnnoValue::Int(x) = argument.value else {
+        return Err(err(annotation.span, "@workgroup takes exactly one integer x size"));
+    };
+    if !(1..=u32::MAX as i64).contains(&x) {
+        return Err(err(annotation.span, "compute workgroup size must be non-zero and fit u32"));
+    }
+    Ok(ComputeWorkgroupSize { x: x as u32, y: 1, z: 1 })
+}
+
+fn classify_compute_entry(
+    ws: &Workspace,
+    function: &Function,
+) -> Result<ComputeEntryClass, CompilerError> {
+    let span = function.name_span;
+    if shader_stage(function) != Some("compute") {
+        return Err(err(
+            span,
+            format!("compute entry `{}` must carry @shader(compute)", function.name),
+        ));
+    }
+    let workgroup_size = compute_workgroup(function)?;
+    let mut resources = Vec::new();
+    let mut uniform_group = None;
+    for (index, param) in function.param_decls.iter().enumerate() {
+        let storage = has_anno(function, index, "storage");
+        let uniform = has_anno(function, index, "uniform");
+        if storage && uniform {
+            return Err(err(
+                anno_span(function, index, "storage"),
+                format!("compute parameter `{}` cannot be both @storage and @uniform", param.name),
+            ));
+        }
+        if storage {
+            let kind = compute_storage_element(ws, param.ty, anno_span(function, index, "storage"))?;
+            let access = compute_access(function, index)?;
+            resources.push(LogicalComputeResource {
+                name: param.name,
+                shape: ComputeResourceShape::Array(kind),
+                address_space: ComputeAddressSpace::Storage,
+                access,
+            });
+            continue;
+        }
+        if uniform {
+            let Some(group) = nominal_name(ws, param.ty) else {
+                return Err(err(
+                    anno_span(function, index, "uniform"),
+                    format!("compute uniform `{}` must be a named value struct", param.name),
+                ));
+            };
+            if uniform_group.replace(group).is_some() {
+                return Err(err(span, "compute entries admit exactly one @uniform parameter"));
+            }
+            continue;
+        }
+        return Err(err(
+            function.name_span,
+            format!(
+                "compute parameter `{}` must be @storage(access) or @uniform",
+                param.name
+            ),
+        ));
+    }
+    if resources.is_empty() {
+        return Err(err(span, "compute entry must declare at least one @storage parameter"));
+    }
+    if function.return_ty.is_some() {
+        return Err(err(span, "compute entries must return unit"));
+    }
+    Ok(ComputeEntryClass { resources, uniform_group, workgroup_size })
+}
+
+fn compute_builtin_calls(
+    ws: &Workspace,
+    stage: &ShaderStageIr,
+    span: Span,
+) -> Result<Vec<ComputeBuiltin>, CompilerError> {
+    let mut names = HashSet::default();
+    for body in stage.bodies.values().chain(std::iter::once(&stage.body)) {
+        for (_, instruction) in body.insts.iter() {
+            let Inst::Call { func, .. } = instruction else { continue };
+            let name = ws.module(func.module).functions[func.func].name;
+            match name.as_str() {
+                "global_invocation_id" => {
+                    names.insert(ComputeBuiltin::GlobalInvocationId);
+                }
+                "local_invocation_id" | "workgroup_id" | "local_invocation_index" | "num_workgroups" => {
+                    return Err(err(
+                        span,
+                        format!("compute builtin `{name}()` is not supported in the first slice"),
+                    ));
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok([
+        ComputeBuiltin::GlobalInvocationId,
+        ComputeBuiltin::LocalInvocationId,
+        ComputeBuiltin::WorkgroupId,
+        ComputeBuiltin::LocalInvocationIndex,
+        ComputeBuiltin::NumWorkgroups,
+    ]
+    .into_iter()
+    .filter(|builtin| names.contains(builtin))
+    .collect())
+}
+
+fn validate_compute_access(
+    ws: &Workspace,
+    stage: &ShaderStageIr,
+    class: &ComputeEntryClass,
+    entry_function: &Function,
+    span: Span,
+) -> Result<(), CompilerError> {
+    let entry_params = &entry_function.param_decls;
+    let entry_cells = stage.body.params.clone();
+    let resource_access = |cell| {
+        entry_cells.iter().position(|candidate| *candidate == cell).and_then(|index| {
+            entry_params.get(index).and_then(|param| {
+                class.resources.iter().find(|resource| resource.name == param.name).map(|resource| resource.access)
+            })
+        })
+    };
+    for (instance, body) in stage
+        .bodies
+        .iter()
+        .map(|(instance, body)| (Some(instance), body))
+        .chain(std::iter::once((None, &stage.body)))
+    {
+        for (_, instruction) in body.insts.iter() {
+            let Inst::Call { func, args } = instruction else { continue };
+            let name = ws.module(func.module).functions[func.func].name;
+            if !matches!(name.as_str(), "storage_load" | "storage_store") {
+                continue;
+            }
+            if instance.is_some() {
+                return Err(err(
+                    span,
+                    "storage intrinsics in helpers are not supported until resource forwarding is explicit",
+                ));
+            }
+            let Some(Inst::Load(cell)) = args.first().map(|arg| &stage.body.insts[*arg]) else {
+                return Err(err(span, format!("{name} must receive a direct StorageBuffer parameter")));
+            };
+            let Some(access) = resource_access(*cell) else {
+                return Err(err(span, format!("{name} received a resource absent from the compute interface")));
+            };
+            let allowed = match name.as_str() {
+                "storage_load" => access != ComputeAccess::Write,
+                "storage_store" => access != ComputeAccess::Read,
+                _ => true,
+            };
+            if !allowed {
+                return Err(err(
+                    span,
+                    format!("{name} is incompatible with the resource's {:?} access", access),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn logical_members(
@@ -1264,6 +1514,62 @@ pub fn plan_fullscreen_fragment_from_concrete(
         dependencies: input.dependencies.clone(),
         global_params: class.global_params,
         sampler_params: class.sampler_params,
+    })
+}
+
+pub fn plan_compute_from_concrete(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    input: &ConcreteStageInput,
+    policy: &dyn ShaderPlannerPolicy,
+) -> Result<ShaderArtifactPlan, CompilerError> {
+    if input.stage != ShaderStage::Compute {
+        return Err(CompilerError::new_no_location(
+            "compute artifact input must be a compute stage".to_string(),
+        ));
+    }
+    let function = &ws.module(input.entry.func.module).functions[input.entry.func.func];
+    let class = classify_compute_entry(ws, function)?;
+    let stage = plan_stage_from_concrete(ws, scx, input, policy)?;
+    validate_compute_access(ws, &stage, &class, function, function.name_span)?;
+    let builtins = compute_builtin_calls(ws, &stage, function.name_span)?;
+    let compute = ComputeInterfacePlan {
+        resources: class.resources,
+        builtins,
+        workgroup_size: class.workgroup_size,
+        dispatch: ComputeDispatchContract::Runtime { dimensions: 1 },
+    };
+    compute.validate().map_err(|message| err(function.name_span, message))?;
+    let uniform_groups = class
+        .uniform_group
+        .map(|group| {
+            logical_uniform_group(
+                ws,
+                UniformRole::Stage(ShaderStage::Compute),
+                group,
+                function.name_span,
+            )
+        })
+        .transpose()?
+        .into_iter()
+        .collect();
+    let interface = ShaderInterfacePlan {
+        stages: vec![ShaderStage::Compute],
+        uniform_groups,
+        compute: Some(compute),
+        fragment_output: FragmentOutput::None,
+        ..Default::default()
+    };
+    Ok(ShaderArtifactPlan {
+        entry: stage.entry.clone(),
+        ir: ShaderIR {
+            interner: scx.interner_handle(),
+            stages: vec![stage],
+        },
+        interface,
+        dependencies: input.dependencies.clone(),
+        global_params: (0..function.param_decls.len()).collect(),
+        sampler_params: Vec::new(),
     })
 }
 

@@ -2335,13 +2335,24 @@ fn shader_programs(
         .collect()
 }
 
+fn compute_programs(
+    collection: &skull_mir::lower::ComputeCollection,
+) -> Vec<crate::shader_artifact::ComputeProgram> {
+    collection
+        .entries
+        .iter()
+        .map(|entry| crate::shader_artifact::ComputeProgram { entry: entry.entry })
+        .collect()
+}
+
 fn realize_shader_view(
     ws: &Workspace,
     graph: &crate::instance_graph::InstanceGraph,
     programs: &[crate::shader_artifact::ShaderProgram],
+    compute: &[crate::shader_artifact::ComputeProgram],
     scx: &skull_mir::lower::ScalarCtx,
 ) -> Result<crate::shader_artifact::ShaderArtifactView, CompilerError> {
-    crate::shader_artifact::realize_shader_with_context(
+    crate::shader_artifact::realize_shader_with_context_and_compute(
         ws,
         graph,
         &crate::shader_artifact::ShaderArtifactRequest {
@@ -2354,6 +2365,7 @@ fn realize_shader_view(
             programs,
         },
         scx,
+        compute,
     )
     .ok_or_else(|| CompilerError::new_no_location("GLSL shader view is unavailable".to_string()))
 }
@@ -2444,6 +2456,7 @@ fn shader_registration_lines(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
     collection: &skull_mir::lower::ShaderCollection,
+    compute_collection: &skull_mir::lower::ComputeCollection,
     view: &crate::shader_artifact::ShaderArtifactView,
     renderer_target: RendererTarget,
 ) -> Result<ShaderRegistrations, CompilerError> {
@@ -2500,7 +2513,7 @@ fn shader_registration_lines(
             lua_long_bracket(&semantic_wire),
         );
     }
-    let roots = collection
+    let roots: Vec<FuncRef> = collection
         .pairs
         .iter()
         .flat_map(|pair| pair.vert.into_iter().chain(std::iter::once(pair.frag)))
@@ -2616,11 +2629,42 @@ fn shader_registration_lines(
             )));
         }
     }
+    if view.compute_views.len() != compute_collection.entries.len() {
+        return Err(CompilerError::new_no_location(format!(
+            "compute graph/view registration denominator differs: {} views for {} roots",
+            view.compute_views.len(),
+            compute_collection.entries.len()
+        )));
+    }
+    for (entry, compute_view) in compute_collection.entries.iter().zip(&view.compute_views) {
+        let input = concrete_stage_input(&compute_view.stage, &compute_view.concrete_plans);
+        let neutral = skull_codegen_shader::plan_compute_from_concrete(
+            ws,
+            scx,
+            &input,
+            &skull_codegen_wgsl::WgslShaderPolicy,
+        )?;
+        dependencies.extend(neutral.dependencies);
+        if renderer_target == RendererTarget::Wgpu {
+            return Err(CompilerError::new_no_location(
+                "WGSL compute ABI/emission is not wired yet".to_string(),
+            ));
+        }
+        let _ = entry;
+    }
     Ok(ShaderRegistrations {
         lua: out,
         dependencies,
-        callsites: collection.callsites.iter().copied().collect(),
-        roots,
+        callsites: collection
+            .callsites
+            .iter()
+            .copied()
+            .chain(compute_collection.callsites.iter().copied())
+            .collect(),
+        roots: roots
+            .into_iter()
+            .chain(compute_collection.entries.iter().map(|entry| entry.entry))
+            .collect(),
         keys,
     })
 }
@@ -3251,9 +3295,12 @@ fn emit_full_in_with_mutation(
     // the retained instances.
     let shader_collection = skull_mir::lower::collect_shader_collection(ws)?;
     let shader_programs = shader_programs(&shader_collection);
+    let compute_collection = skull_mir::lower::collect_compute_collection(ws)?;
+    let compute_programs = compute_programs(&compute_collection);
     let shader_roots: Vec<FuncRef> = shader_programs
         .iter()
         .flat_map(|program| program.vert.into_iter().chain(std::iter::once(program.frag)))
+        .chain(compute_programs.iter().map(|program| program.entry))
         .collect();
     let emission_roots = all_roots(ws, project_root, &shader_roots);
     let mut graph = crate::instance_graph::build(ws, emission_roots.clone(), false);
@@ -3356,11 +3403,12 @@ fn emit_full_in_with_mutation(
         skull_mir::lower::ScalarCtx::new(ws).sharing(std::sync::Arc::clone(graph.interner()));
     let shader_scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
         .sharing(std::sync::Arc::clone(graph.interner()));
-    let shader_view = realize_shader_view(ws, &graph, &shader_programs, &shader_scx)?;
+    let shader_view = realize_shader_view(ws, &graph, &shader_programs, &compute_programs, &shader_scx)?;
     let shader_registrations = shader_registration_lines(
         ws,
         &shader_scx,
         &shader_collection,
+        &compute_collection,
         &shader_view,
         renderer_target,
     )?;
@@ -3533,13 +3581,16 @@ fn update_shader_registrations(
     ) -> Result<(), CompilerError> {
     let collection = skull_mir::lower::collect_shader_collection(ws)?;
     let programs = shader_programs(&collection);
+    let compute_collection = skull_mir::lower::collect_compute_collection(ws)?;
+    let compute = compute_programs(&compute_collection);
     let shader_scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
         .sharing(std::sync::Arc::clone(self.graph.interner()));
-    let view = realize_shader_view(ws, &self.graph, &programs, &shader_scx)?;
+    let view = realize_shader_view(ws, &self.graph, &programs, &compute, &shader_scx)?;
     let registrations = shader_registration_lines(
         ws,
         &shader_scx,
         &collection,
+        &compute_collection,
         &view,
         self.renderer_target,
     )?;

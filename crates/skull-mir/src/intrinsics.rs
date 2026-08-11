@@ -50,6 +50,9 @@ pub enum ExpandKind {
     /// `__rock_shader_register(key, glsl)` per distinct pair
     /// (docs/shaders.md).
     ShaderPipeline,
+    /// `@shader_expand fn rock_compute<F>(entry: F) -> string` -> the direct
+    /// compute entry key; the driver owns its retained artifact.
+    ComputeArtifact,
     /// `@vertex_expand fn f<T>(v: FlatVec<T>) -> int | [int]` -> the element's
     /// vertex layout as a literal: the stride for an `int` return, the
     /// per-attribute component counts for `[int]`. Both from one
@@ -86,7 +89,10 @@ pub fn expand_kind(f: &Function) -> Option<ExpandKind> {
         return Some(ExpandKind::StructPairs);
     }
     if has_anno(f, "shader_expand") {
-        return Some(ExpandKind::ShaderPipeline);
+        return match f.name.as_str() {
+            "rock_compute" => Some(ExpandKind::ComputeArtifact),
+            _ => Some(ExpandKind::ShaderPipeline),
+        };
     }
     if has_anno(f, "vertex_expand") {
         return Some(ExpandKind::VertexLayout);
