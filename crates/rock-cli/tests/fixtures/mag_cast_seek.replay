@@ -4,14 +4,6 @@ window 0x1.ep+11 0x1.0ep+11
 game MAG
 build b8d96d9969e45428
 checkpoint 0
-env STONE_QUIET 0 
-env STONE_HEADLESS 0 
-env ROCK_RUN_SIM 0 
-env STONE_AUDIO_STUB 0 
-env SIM_SKIP_RENDER 0 
-env ROCK_RELEASE 0 
-env MAG_BOOT_MENU 0 
-env MAG_SCENE 0 
 t 0x1.9d770d975c1p-12 0x0p+0 0x1.038p+10 0 0 - -
 t 0x1.1d86e40a561a5p-4 0x0p+0 0x1.038p+10 0 0 - -
 t 0x1.6abfeff828a38p-6 0x0p+0 0x1.038p+10 0 0 - -
