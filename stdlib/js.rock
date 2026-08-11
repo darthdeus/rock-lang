@@ -217,19 +217,24 @@ inline(js) fn ffi_string(ptr: any, len: int?) -> string = """
 // The ONE representation difference that matters: a Vec's `_data` is 1-based on
 // luajit and 0-BASED here, so the free-list push/pop are spelled in the other
 // order. Everything else is the luajit body transliterated.
-// Object.create(null), NOT {}: a spine key is DATA. An object literal inherits
-// Object.prototype, so "constructor" / "toString" / "valueOf" read back as
-// occupied slots that were never stored, and "__proto__" is not a data key at
-// all -- assigning it re-points the prototype instead of storing. A
-// null-prototype object has neither problem, which is why every lookup below
-// can stay a plain `m.spine[key]` rather than an ownership check.
-// Pinned by tests/map_prototype_keys.rock.
+// A native `Map`, NOT a plain object: a spine key is DATA, and a plain object
+// coerces every key to a string -- so a `Map<int, V>` would read back string
+// keys, and `1` and `"1"` would collide. (An object literal is worse still: it
+// inherits Object.prototype, so "constructor"/"toString" read back as occupied
+// slots and "__proto__" re-points the prototype instead of storing.) A native
+// Map has none of these problems, and it is what `__map_next` already walks --
+// which is what makes a column Map ITERABLE here rather than a rejection.
+// Pinned by tests/map_prototype_keys.rock and tests/nobox_map_value.rock.
+//
+// The luajit sibling keeps a plain table, whose keys are already typed. Only the
+// spelling differs; the structure (`spine` of key -> slot, column `data`, a
+// `free_indices` Vec, a live count) is the same on both backends.
 @nomangle inline(js) fn __map_col_new_spine() -> any = """
-  return Object.create(null);
+  return new Map();
 """
 
 @nomangle inline(js) fn __map_col_slot(m: any, key: any) -> int = """
-  var s = m.spine[key];
+  var s = m.spine.get(key);
   if (s !== undefined) return s;
   var fi = m.free_indices;
   if (fi.len > 0) {
@@ -240,26 +245,26 @@ inline(js) fn ffi_string(ptr: any, len: int?) -> string = """
     s = m.data.len;
     m.data.len = m.data.len + 1;
   }
-  m.spine[key] = s;
+  m.spine.set(key, s);
   m.occupied_count = m.occupied_count + 1;
   return s;
 """
 
 @nomangle inline(js) fn __map_col_slot_of(m: any, key: any) -> int = """
-  var s = m.spine[key];
+  var s = m.spine.get(key);
   return s === undefined ? -1 : s;
 """
 
 @nomangle inline(js) fn __map_col_slot_checked(m: any, key: any) -> int = """
-  var s = m.spine[key];
+  var s = m.spine.get(key);
   if (s === undefined) throw new Error("Map key not found");
   return s;
 """
 
 @nomangle inline(js) fn __map_col_free(m: any, key: any) -> int = """
-  var s = m.spine[key];
+  var s = m.spine.get(key);
   if (s === undefined) return -1;
-  delete m.spine[key];
+  m.spine.delete(key);
   var fi = m.free_indices;
   fi._data[fi.len] = s;
   fi.len = fi.len + 1;
@@ -272,25 +277,22 @@ inline(js) fn ffi_string(ptr: any, len: int?) -> string = """
 """
 
 @nomangle inline(js) fn __map_col_contains(m: any, key: any) -> bool = """
-  return m.spine[key] !== undefined;
+  return m.spine.has(key);
 """
 
 @nomangle inline(js) fn __map_col_clear(m: any) = """
   var fi = m.free_indices;
-  for (var k in m.spine) {
-    if (!Object.prototype.hasOwnProperty.call(m.spine, k)) continue;
-    fi._data[fi.len] = m.spine[k];
+  var it = m.spine.values();
+  for (var r = it.next(); !r.done; r = it.next()) {
+    fi._data[fi.len] = r.value;
     fi.len = fi.len + 1;
-    delete m.spine[k];
   }
+  m.spine.clear();
   m.occupied_count = 0;
 """
 
-// Rejects rather than answering wrongly. The iteration lowering feeds this to
-// `MapNext`, which on JS walks a NATIVE Map (`m.keys()`); the spine is a plain
-// object, so returning it would iterate nothing and read as an empty Map. No
-// column Map is iterated today; teaching `__map_next` the spine shape is the
-// fix when one is.
+// The spine, for the iteration lowering to walk with `MapNext`. It is already a
+// native Map, so `__map_next` needs no column-specific case.
 @nomangle inline(js) fn __map_col_spine(m: any) -> any = """
-  throw new Error("iterating a column-stored Map is unimplemented on the JS backend (the spine is a plain object; __map_next walks a native Map)");
+  return m.spine;
 """
