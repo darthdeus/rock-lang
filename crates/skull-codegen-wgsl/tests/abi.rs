@@ -182,7 +182,7 @@ fn a_bool_uniform_member_is_laid_out_and_declared_as_u32() {
 fn abi_wire_is_deterministic_and_carries_physical_order() {
     let plan = WgslAbiPlan::wgsl(&fixture(), Span::default()).expect("WGSL projection");
     let wire = plan.wire();
-    assert!(wire.starts_with("WGSL_ABI_V3\nchecksum "));
+    assert!(wire.starts_with("WGSL_ABI_V4\nchecksum "));
     assert!(wire.contains("geometry fullscreen"));
     assert!(wire.contains("entries fullscreen_vertex fragment_main"));
     assert!(wire.contains("fullscreen_vertex triangle_strip 4 0"));
@@ -232,6 +232,144 @@ fn compute_fixture() -> ShaderInterfacePlan {
         fragment_output: FragmentOutput::None,
         ..Default::default()
     }
+}
+
+fn rect_loss_interface_fixture() -> ShaderInterfacePlan {
+    ShaderInterfacePlan {
+        stages: vec![ShaderStage::Compute],
+        uniform_groups: vec![LogicalUniformGroup {
+            role: UniformRole::Stage(ShaderStage::Compute),
+            struct_name: Ustr::from("RectLossParams"),
+            members: vec![
+                (Ustr::from("width"), WireKind::I32),
+                (Ustr::from("region_x"), WireKind::I32),
+                (Ustr::from("region_y"), WireKind::I32),
+                (Ustr::from("region_w"), WireKind::I32),
+                (Ustr::from("region_h"), WireKind::I32),
+            ],
+        }],
+        compute: Some(ComputeInterfacePlan {
+            resources: vec![
+                LogicalComputeResource {
+                    name: Ustr::from("backdrop"),
+                    shape: ComputeResourceShape::Array(ComputeValueKind::U32),
+                    address_space: ComputeAddressSpace::Storage,
+                    access: ComputeAccess::Read,
+                },
+                LogicalComputeResource {
+                    name: Ustr::from("reference"),
+                    shape: ComputeResourceShape::Array(ComputeValueKind::U32),
+                    address_space: ComputeAddressSpace::Storage,
+                    access: ComputeAccess::Read,
+                },
+                LogicalComputeResource {
+                    name: Ustr::from("batch"),
+                    shape: ComputeResourceShape::Array(ComputeValueKind::U32),
+                    address_space: ComputeAddressSpace::Storage,
+                    access: ComputeAccess::Read,
+                },
+                LogicalComputeResource {
+                    name: Ustr::from("loss"),
+                    shape: ComputeResourceShape::Array(ComputeValueKind::AtomicU32),
+                    address_space: ComputeAddressSpace::Storage,
+                    access: ComputeAccess::ReadWrite,
+                },
+            ],
+            builtins: vec![
+                ComputeBuiltin::GlobalInvocationId,
+                ComputeBuiltin::LocalInvocationId,
+                ComputeBuiltin::WorkgroupId,
+            ],
+            workgroup_size: ComputeWorkgroupSize { x: 64, y: 1, z: 1 },
+            dispatch: ComputeDispatchContract::Runtime { dimensions: 2 },
+        }),
+        fragment_output: FragmentOutput::None,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn rect_loss_neutral_plan_has_ordered_resources_builtins_and_2d_dispatch() {
+    let abi = WgslAbiPlan::compute(&rect_loss_interface_fixture(), "rect_loss_compute", Span::default())
+        .expect("rect-loss neutral interface is representable without source syntax");
+    let compute = abi.compute.as_ref().unwrap();
+    assert_eq!(compute.dispatch_dimensions, 2);
+    assert_eq!(compute.workgroup_size, [64, 1, 1]);
+    assert_eq!(compute.builtins.len(), 3);
+    assert_eq!(compute.resources.len(), 4, "the complete storage population is examined");
+    assert_eq!(compute.resources.iter().map(|resource| resource.binding).collect::<Vec<_>>(), [0, 1, 2, 3]);
+    assert_eq!(compute.resources[3].element, skull_wgsl_abi::WgslStorageElementKind::AtomicU32);
+    assert_eq!(abi.uniform_blocks[0].binding, 4);
+}
+
+#[test]
+fn compute_abi_preserves_unsigned_storage_without_reinterpreting_it() {
+    let mut iface = compute_fixture();
+    iface.compute.as_mut().unwrap().resources[0].shape =
+        ComputeResourceShape::Array(ComputeValueKind::U32);
+
+    WgslAbiPlan::compute(&iface, "rect_loss_compute", Span::default())
+        .expect("neutral U32 storage must have a physical ABI representation");
+}
+
+#[test]
+fn compute_abi_carries_multidimensional_dispatch_and_builtin_delivery() {
+    let mut iface = compute_fixture();
+    let compute = iface.compute.as_mut().unwrap();
+    compute.builtins = vec![
+        ComputeBuiltin::GlobalInvocationId,
+        ComputeBuiltin::LocalInvocationId,
+        ComputeBuiltin::WorkgroupId,
+    ];
+    compute.dispatch = ComputeDispatchContract::Runtime { dimensions: 2 };
+
+    WgslAbiPlan::compute(&iface, "rect_loss_compute", Span::default())
+        .expect("neutral 2D dispatch and invocation builtins must have an ABI representation");
+}
+
+#[test]
+fn compute_abi_preserves_atomic_output_element_identity() {
+    let mut iface = compute_fixture();
+    let output = &mut iface.compute.as_mut().unwrap().resources[1];
+    output.shape = ComputeResourceShape::Array(ComputeValueKind::AtomicU32);
+
+    let abi = WgslAbiPlan::compute(&iface, "rect_loss_compute", Span::default())
+        .expect("atomic output must retain its element identity in the ABI");
+    assert_eq!(
+        abi.compute.as_ref().unwrap().resources[1].element,
+        skull_wgsl_abi::WgslStorageElementKind::AtomicU32
+    );
+}
+
+#[test]
+fn compute_abi_retains_four_ordered_storage_resources() {
+    let mut iface = compute_fixture();
+    iface.compute.as_mut().unwrap().resources.push(LogicalComputeResource {
+        name: Ustr::from("scratch_input"),
+        shape: ComputeResourceShape::Array(ComputeValueKind::I32),
+        address_space: ComputeAddressSpace::Storage,
+        access: ComputeAccess::Read,
+    });
+    iface.compute.as_mut().unwrap().resources.push(LogicalComputeResource {
+        name: Ustr::from("scratch_output"),
+        shape: ComputeResourceShape::Array(ComputeValueKind::I32),
+        address_space: ComputeAddressSpace::Storage,
+        access: ComputeAccess::ReadWrite,
+    });
+
+    let abi = WgslAbiPlan::compute(&iface, "rect_loss_compute", Span::default())
+        .expect("four ordinary storage resources are already representable");
+    assert_eq!(
+        abi.compute
+            .as_ref()
+            .unwrap()
+            .resources
+            .iter()
+            .map(|resource| resource.name.as_str())
+            .collect::<Vec<_>>(),
+        ["x", "out", "scratch_input", "scratch_output"],
+        "the fixture must expose the actual declaration order"
+    );
 }
 
 #[test]

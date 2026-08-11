@@ -688,10 +688,10 @@ impl WgslAbiPlan {
         })
     }
 
-    /// Derive the first compute ABI from the neutral compute interface. The
-    /// binding order is the declaration order: storage resources first, then
-    /// the one stage uniform block. No runtime type dispatch is needed because
-    /// the interface has already fixed every resource's logical kind.
+    /// Derive the compute ABI from the neutral compute interface. The binding
+    /// order is the declaration order: storage resources first, then the
+    /// stage uniform block. No runtime type dispatch is needed because the
+    /// interface has already fixed every resource's logical kind.
     pub fn compute(
         iface: &ShaderInterfacePlan,
         entry: &str,
@@ -714,19 +714,30 @@ impl WgslAbiPlan {
             return Err(err(span, "WGSL compute entry name cannot be empty"));
         }
         identifier(Ustr::from(entry), "compute entry", span)?;
-        if compute.dispatch != (ComputeDispatchContract::Runtime { dimensions: 1 }) {
-            return Err(err(span, "the first WGSL compute ABI requires a one-dimensional runtime dispatch"));
-        }
-        if compute.workgroup_size.y != 1 || compute.workgroup_size.z != 1 {
-            return Err(err(span, "the first WGSL compute ABI requires y=1 and z=1 workgroup dimensions"));
-        }
+        compute
+            .validate()
+            .map_err(|message| err(span, format!("invalid compute interface: {message}")))?;
+        let dispatch_dimensions = match compute.dispatch {
+            ComputeDispatchContract::Runtime { dimensions } => dimensions,
+            ComputeDispatchContract::Fixed { .. } => {
+                return Err(err(span, "WGSL compute ABI requires a runtime dispatch contract"));
+            }
+        };
         let mut resources = Vec::with_capacity(compute.resources.len());
         for (binding, resource) in compute.resources.iter().enumerate() {
             if resource.address_space != ComputeAddressSpace::Storage {
-                return Err(err(span, "the first WGSL compute ABI only admits storage resources"));
+                return Err(err(span, "WGSL compute ABI only admits storage resources"));
             }
-            let ComputeResourceShape::Array(ComputeValueKind::I32) = resource.shape else {
-                return Err(err(span, "the first WGSL compute ABI only admits StorageBuffer<int>"));
+            let ComputeResourceShape::Array(kind) = resource.shape else {
+                return Err(err(span, "WGSL compute storage resources must be arrays"));
+            };
+            let element = match kind {
+                ComputeValueKind::I32 => SharedWgslStorageElementKind::I32,
+                ComputeValueKind::U32 => SharedWgslStorageElementKind::U32,
+                ComputeValueKind::AtomicU32 => SharedWgslStorageElementKind::AtomicU32,
+                ComputeValueKind::F32 | ComputeValueKind::Bool => {
+                    return Err(err(span, "WGSL compute storage resources require an integer element kind"));
+                }
             };
             let access = match resource.access {
                 ComputeAccess::Read => SharedWgslStorageAccess::Read,
@@ -740,7 +751,7 @@ impl WgslAbiPlan {
                 binding: binding as u32,
                 name: resource.name.to_string(),
                 access,
-                element: SharedWgslStorageElementKind::I32,
+                element,
             });
         }
         let mut groups = iface
@@ -767,9 +778,10 @@ impl WgslAbiPlan {
             .iter()
             .map(|builtin| match builtin {
                 ComputeBuiltin::GlobalInvocationId => SharedWgslComputeBuiltin::GlobalInvocationId,
-                _ => {
-                    unreachable!("unsupported compute builtin passed neutral validation")
-                }
+                ComputeBuiltin::LocalInvocationId => SharedWgslComputeBuiltin::LocalInvocationId,
+                ComputeBuiltin::WorkgroupId => SharedWgslComputeBuiltin::WorkgroupId,
+                ComputeBuiltin::LocalInvocationIndex => SharedWgslComputeBuiltin::LocalInvocationIndex,
+                ComputeBuiltin::NumWorkgroups => SharedWgslComputeBuiltin::NumWorkgroups,
             })
             .collect();
         Ok(Self {
@@ -806,6 +818,7 @@ impl WgslAbiPlan {
                     compute.workgroup_size.y,
                     compute.workgroup_size.z,
                 ],
+                dispatch_dimensions,
                 builtins,
                 resources,
             }),
@@ -1786,10 +1799,15 @@ pub fn emit_compute_shader(
             SharedWgslStorageAccess::Read => "read",
             SharedWgslStorageAccess::ReadWrite => "read_write",
         };
+        let element = match resource.element {
+            SharedWgslStorageElementKind::I32 => "i32",
+            SharedWgslStorageElementKind::U32 => "u32",
+            SharedWgslStorageElementKind::AtomicU32 => "atomic<u32>",
+        };
         writeln!(
             source,
-            "@group({}) @binding({}) var<storage, {}> s_{}: array<i32>;",
-            abi.bind_group, resource.binding, access, resource.name
+            "@group({}) @binding({}) var<storage, {}> s_{}: array<{}>;",
+            abi.bind_group, resource.binding, access, resource.name, element
         )
         .unwrap();
     }

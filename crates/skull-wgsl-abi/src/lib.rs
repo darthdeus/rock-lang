@@ -6,7 +6,7 @@
 
 use std::fmt;
 
-pub const WGSL_ABI_V3: &str = "WGSL_ABI_V3";
+pub const WGSL_ABI_V4: &str = "WGSL_ABI_V4";
 const MAX_RECORDS: u64 = 1_000_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,11 +78,17 @@ pub enum WgslStorageAccess {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WgslStorageElementKind {
     I32,
+    U32,
+    AtomicU32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WgslComputeBuiltin {
     GlobalInvocationId,
+    LocalInvocationId,
+    WorkgroupId,
+    LocalInvocationIndex,
+    NumWorkgroups,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -97,6 +103,7 @@ pub struct WgslComputeResource {
 pub struct WgslComputeInfo {
     pub entry: String,
     pub workgroup_size: [u32; 3],
+    pub dispatch_dimensions: u8,
     pub builtins: Vec<WgslComputeBuiltin>,
     pub resources: Vec<WgslComputeResource>,
 }
@@ -211,11 +218,11 @@ impl WgslAbi {
             .ok_or_else(|| wire_error("missing WGSL ABI version"))?
             .strip_suffix('\n')
             .ok_or_else(|| wire_error("WGSL ABI version is missing a newline"))?;
-        if version == "WGSL_ABI_V1" || version == "WGSL_ABI_V2" {
-            return Err(wire_error("older WGSL ABI versions are rejected; expected WGSL_ABI_V3"));
+        if version == "WGSL_ABI_V1" || version == "WGSL_ABI_V2" || version == "WGSL_ABI_V3" {
+            return Err(wire_error("older WGSL ABI versions are rejected; expected WGSL_ABI_V4"));
         }
-        if version != WGSL_ABI_V3 {
-            return Err(wire_error(format!("expected {WGSL_ABI_V3}, got {version}")));
+        if version != WGSL_ABI_V4 {
+            return Err(wire_error(format!("expected {WGSL_ABI_V4}, got {version}")));
         }
 
         let checksum_line = lines
@@ -535,6 +542,10 @@ impl WgslAbi {
                     compute.workgroup_size[0], compute.workgroup_size[1], compute.workgroup_size[2]
                 ),
             );
+            push_line(
+                &mut payload,
+                format_args!("dispatch {}", compute.dispatch_dimensions),
+            );
             push_line(&mut payload, format_args!("builtins {}", compute.builtins.len()));
             for builtin in &compute.builtins {
                 push_line(
@@ -543,6 +554,10 @@ impl WgslAbi {
                         "builtin {}",
                         match builtin {
                             WgslComputeBuiltin::GlobalInvocationId => "global_invocation_id",
+                            WgslComputeBuiltin::LocalInvocationId => "local_invocation_id",
+                            WgslComputeBuiltin::WorkgroupId => "workgroup_id",
+                            WgslComputeBuiltin::LocalInvocationIndex => "local_invocation_index",
+                            WgslComputeBuiltin::NumWorkgroups => "num_workgroups",
                         }
                     ),
                 );
@@ -570,7 +585,7 @@ impl WgslAbi {
             push_line(&mut payload, format_args!("end"));
             return Ok(format!(
                 "{}\nchecksum {}\n{}",
-                WGSL_ABI_V3,
+                WGSL_ABI_V4,
                 wire_checksum(payload.as_bytes()),
                 payload
             ));
@@ -688,7 +703,7 @@ impl WgslAbi {
         push_line(&mut payload, format_args!("end"));
         Ok(format!(
             "{}\nchecksum {}\n{}",
-            WGSL_ABI_V3,
+            WGSL_ABI_V4,
             wire_checksum(payload.as_bytes()),
             payload
         ))
@@ -821,11 +836,11 @@ impl WgslAbi {
             .as_ref()
             .ok_or_else(|| wire_error("compute artifact is missing compute metadata"))?;
         identifier(&compute.entry, "compute entry")?;
-        if compute.workgroup_size[0] == 0
-            || compute.workgroup_size[1] != 1
-            || compute.workgroup_size[2] != 1
-        {
-            return Err(wire_error("compute workgroup size must be x>0, y=1, z=1"));
+        if compute.workgroup_size.contains(&0) {
+            return Err(wire_error("compute workgroup dimensions must be non-zero"));
+        }
+        if !(1..=3).contains(&compute.dispatch_dimensions) {
+            return Err(wire_error("compute dispatch dimensions must be 1, 2, or 3"));
         }
         for (index, builtin) in compute.builtins.iter().enumerate() {
             if compute.builtins[..index].contains(builtin) {
@@ -839,6 +854,11 @@ impl WgslAbi {
             identifier(&resource.name, "compute storage name")?;
             if compute.resources[..binding].iter().any(|candidate| candidate.name == resource.name) {
                 return Err(wire_error("compute storage resource names are repeated"));
+            }
+            if resource.element == WgslStorageElementKind::AtomicU32
+                && resource.access != WgslStorageAccess::ReadWrite
+            {
+                return Err(wire_error("atomic compute storage must be read_write"));
             }
         }
         if !self.vertex_inputs.is_empty()
@@ -875,11 +895,13 @@ fn parse_compute_abi<'a>(
         parse_u32(workgroup[2], "workgroup y")?,
         parse_u32(workgroup[3], "workgroup z")?,
     ];
-    if workgroup_size == [0, 0, 0]
-        || workgroup_size.contains(&0)
-        || workgroup_size[1..] != [1, 1]
-    {
-        return Err(wire_error("compute workgroup size must be x>0, y=1, z=1"));
+    if workgroup_size.contains(&0) {
+        return Err(wire_error("compute workgroup dimensions must be non-zero"));
+    }
+    let dispatch = fields(next_line(lines, "dispatch")?, "dispatch", 2)?;
+    let dispatch_dimensions = parse_u8(dispatch[1], "compute dispatch dimensions")?;
+    if !(1..=3).contains(&dispatch_dimensions) {
+        return Err(wire_error("compute dispatch dimensions must be 1, 2, or 3"));
     }
 
     let builtin_count = parse_count(
@@ -891,6 +913,10 @@ fn parse_compute_abi<'a>(
         let builtin = fields(next_line(lines, "builtin")?, "builtin", 2)?;
         let value = match builtin[1] {
             "global_invocation_id" => WgslComputeBuiltin::GlobalInvocationId,
+            "local_invocation_id" => WgslComputeBuiltin::LocalInvocationId,
+            "workgroup_id" => WgslComputeBuiltin::WorkgroupId,
+            "local_invocation_index" => WgslComputeBuiltin::LocalInvocationIndex,
+            "num_workgroups" => WgslComputeBuiltin::NumWorkgroups,
             other => return Err(wire_error(format!("unsupported compute builtin {other}"))),
         };
         if builtins.contains(&value) {
@@ -914,6 +940,8 @@ fn parse_compute_abi<'a>(
         };
         let element = match resource[4] {
             "i32" => WgslStorageElementKind::I32,
+            "u32" => WgslStorageElementKind::U32,
+            "atomic_u32" => WgslStorageElementKind::AtomicU32,
             other => return Err(wire_error(format!("unsupported compute storage element {other}"))),
         };
         resources.push(WgslComputeResource {
@@ -980,6 +1008,7 @@ fn parse_compute_abi<'a>(
         compute: Some(WgslComputeInfo {
             entry,
             workgroup_size,
+            dispatch_dimensions,
             builtins,
             resources,
         }),
@@ -1238,6 +1267,11 @@ fn parse_u32(value: &str, what: &str) -> Result<u32, AbiError> {
     u32::try_from(value).map_err(|_| wire_error(format!("{what} {value} does not fit in u32")))
 }
 
+fn parse_u8(value: &str, what: &str) -> Result<u8, AbiError> {
+    let value = parse_u32(value, what)?;
+    u8::try_from(value).map_err(|_| wire_error(format!("{what} {value} does not fit in u8")))
+}
+
 fn parse_u64(value: &str, what: &str) -> Result<u64, AbiError> {
     value
         .parse()
@@ -1297,6 +1331,8 @@ fn storage_access_wire(access: WgslStorageAccess) -> &'static str {
 fn storage_element_wire(element: WgslStorageElementKind) -> &'static str {
     match element {
         WgslStorageElementKind::I32 => "i32",
+        WgslStorageElementKind::U32 => "u32",
+        WgslStorageElementKind::AtomicU32 => "atomic_u32",
     }
 }
 
@@ -1494,6 +1530,7 @@ mod tests {
             compute: Some(WgslComputeInfo {
                 entry: "saxpy_compute".into(),
                 workgroup_size: [64, 1, 1],
+                dispatch_dimensions: 1,
                 builtins: vec![WgslComputeBuiltin::GlobalInvocationId],
                 resources: vec![
                     WgslComputeResource {
@@ -1536,20 +1573,23 @@ mod tests {
     }
 
     #[test]
-    fn v3_round_trips_and_older_versions_are_explicitly_rejected() {
+    fn v4_round_trips_and_older_versions_are_explicitly_rejected() {
         let wire = fullscreen().serialize().expect("serialize");
-        assert!(wire.starts_with("WGSL_ABI_V3\n"));
+        assert!(wire.starts_with("WGSL_ABI_V4\n"));
         assert_eq!(WgslAbi::parse(&wire).expect("parse"), fullscreen());
-        assert!(WgslAbi::parse(&wire.replacen("WGSL_ABI_V3", "WGSL_ABI_V1", 1)).is_err());
+        assert!(WgslAbi::parse(&wire.replacen("WGSL_ABI_V4", "WGSL_ABI_V1", 1)).is_err());
     }
 
     #[test]
-    fn compute_v3_round_trips_and_rejects_physical_mutations() {
+    fn compute_v4_round_trips_and_rejects_physical_mutations() {
         let wire = compute().serialize().expect("compute serializes");
         assert_eq!(WgslAbi::parse(&wire).expect("compute parses"), compute());
         let mutations = [
             ("workgroup 64 1 1", "workgroup 0 1 1"),
-            ("builtin global_invocation_id", "builtin local_invocation_id"),
+            (
+                "builtins 1\nbuiltin global_invocation_id\nresources",
+                "builtins 2\nbuiltin global_invocation_id\nbuiltin global_invocation_id\nresources",
+            ),
             ("storage 0 x read i32", "storage 1 x read i32"),
             ("storage 1 y read i32", "storage 1 x read i32"),
             ("block compute SaxpyParams 3 16 none 2", "block fragment SaxpyParams 3 16 none 2"),
@@ -1559,6 +1599,29 @@ mod tests {
             let mutated = rechecksum(&replace_once(&wire, old, new));
             assert!(WgslAbi::parse(&mutated).is_err(), "compute mutation `{old}` was accepted");
         }
+    }
+
+    #[test]
+    fn compute_v4_carries_2d_unsigned_and_atomic_contracts() {
+        let mut abi = compute();
+        let compute = abi.compute.as_mut().unwrap();
+        compute.dispatch_dimensions = 2;
+        compute.builtins = vec![
+            WgslComputeBuiltin::GlobalInvocationId,
+            WgslComputeBuiltin::LocalInvocationId,
+            WgslComputeBuiltin::WorkgroupId,
+        ];
+        compute.resources[0].element = WgslStorageElementKind::U32;
+        compute.resources[2].element = WgslStorageElementKind::AtomicU32;
+        let wire = abi.serialize().expect("extended compute ABI serializes");
+        let parsed = WgslAbi::parse(&wire).expect("extended compute ABI parses");
+        assert_eq!(parsed, abi);
+        assert!(wire.contains("dispatch 2"));
+        assert!(wire.contains("storage 2 out read_write atomic_u32"));
+
+        let mut wrong_access = abi;
+        wrong_access.compute.as_mut().unwrap().resources[2].access = WgslStorageAccess::Read;
+        assert!(wrong_access.serialize().is_err(), "atomic access mutation must reject");
     }
 
     #[test]
@@ -1573,9 +1636,9 @@ mod tests {
     }
 
     #[test]
-    fn physical_v3_mutations_are_rejected_after_rechecksum() {
+    fn physical_v4_mutations_are_rejected_after_rechecksum() {
         let wire = triangles().serialize().expect("serialize");
-        assert!(WgslAbi::parse(&wire.replacen("WGSL_ABI_V3", "WGSL_ABI_V2", 1)).is_err());
+        assert!(WgslAbi::parse(&wire.replacen("WGSL_ABI_V4", "WGSL_ABI_V2", 1)).is_err());
         let (version, rest) = wire.split_once('\n').expect("version");
         let (checksum, payload) = rest.split_once('\n').expect("checksum");
         let checksum = checksum

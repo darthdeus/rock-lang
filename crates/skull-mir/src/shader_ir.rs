@@ -73,6 +73,10 @@ pub enum ComputeValueKind {
     F32,
     I32,
     U32,
+    /// A storage element whose access is governed by WGSL atomic rules.
+    /// Atomicity is an interface property, not a use-site reinterpretation of
+    /// an ordinary `u32` resource.
+    AtomicU32,
     Bool,
 }
 
@@ -82,7 +86,8 @@ impl ComputeValueKind {
             ComputeValueKind::F32 => 0,
             ComputeValueKind::I32 => 1,
             ComputeValueKind::U32 => 2,
-            ComputeValueKind::Bool => 3,
+            ComputeValueKind::AtomicU32 => 3,
+            ComputeValueKind::Bool => 4,
         }
     }
 }
@@ -220,6 +225,19 @@ impl ComputeInterfacePlan {
                 && resource.access != ComputeAccess::Read
         }) {
             return Err("uniform compute resources are read-only");
+        }
+        if self.resources.iter().any(|resource| {
+            let atomic = matches!(
+                resource.shape,
+                ComputeResourceShape::Array(ComputeValueKind::AtomicU32)
+                    | ComputeResourceShape::Scalar(ComputeValueKind::AtomicU32)
+            );
+            atomic
+                && (resource.address_space != ComputeAddressSpace::Storage
+                    || resource.shape != ComputeResourceShape::Array(ComputeValueKind::AtomicU32)
+                    || resource.access != ComputeAccess::ReadWrite)
+        }) {
+            return Err("atomic compute resources must be read_write storage arrays");
         }
         Ok(())
     }
