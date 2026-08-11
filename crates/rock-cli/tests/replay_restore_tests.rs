@@ -1781,15 +1781,21 @@ fn a_second_rewind_after_a_branch_sees_only_the_branched_history() {
         game, 160, &log_s,
         &[
             ("STONE_LIVE_REWIND", "1"),
+            ("STONE_LIVE_REWIND_CADENCE_SECONDS", "0.05"),
+            ("STONE_LIVE_REWIND_WINDOW_SECONDS", "0.5"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
             ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
             ("STONE_BRANCH_AT_FRAME", "70"),
             ("STONE_TIMELINE_SEEK_AT_FRAME_2", "110"),
-            ("STONE_TIMELINE_SEEK_TO_TICK_2", "30"),
+            ("STONE_TIMELINE_SEEK_TO_TICK_2", "40"),
         ],
     );
     let diag = &live["__stone_diag"];
     assert_eq!(diag["STONE_BRANCH_COUNT"].as_i64(), Some(1), "{diag}");
+    assert_eq!(diag["STONE_LIVE_REWIND_BRANCH_CADENCE_REBASED"].as_i64(), Some(1), "branch must reset the live cadence clock: {diag}");
+    assert_eq!(diag["STONE_LIVE_REWIND_BRANCH_FLOOR_TICK"].as_i64(), Some(0), "branch must recompute the retained floor from restored time: {diag}");
+    assert!(diag["STONE_LIVE_REWIND_POST_BRANCH_CAPTURES"].as_i64().unwrap_or(0) > 0, "the new live branch must capture cadence keyframes: {diag}");
+    assert!(diag["STONE_LIVE_REWIND_POST_BRANCH_LAST_CAPTURE_TICK"].as_i64().is_some_and(|tick| tick > 25), "post-branch cadence population must be in the surviving future: {diag}");
     assert_eq!(diag["STONE_LIVE_REWIND_COUNT"].as_i64(), Some(2), "both rewinds must fire: {diag}");
     let horizon = diag["STONE_LIVE_REWIND_HORIZON"].as_i64().expect("horizon");
     assert!(horizon > 25, "the branched session must have recorded past T (got {horizon})");
@@ -1797,7 +1803,37 @@ fn a_second_rewind_after_a_branch_sees_only_the_branched_history() {
         horizon, recorded_tick_lines(&log_s) as i64,
         "the second rewind's horizon must be the branched history, not the discarded future: {diag}"
     );
-    assert_eq!(current_tick(&live), 30, "the second rewind must land at its target: {diag}");
+    let restore_tick = diag["STONE_LIVE_REWIND_RESTORE_TICK"].as_i64().expect("second restore tick");
+    assert!(restore_tick > 25 && restore_tick <= 40, "the second rewind must select a newly captured post-branch keyframe: {diag}");
+    assert_eq!(current_tick(&live), 40, "the second rewind must land at its target: {diag}");
+}
+
+#[test]
+fn branch_rebases_live_rewind_floor_before_an_immediate_second_seek() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_s = dir.path().join("rebranch-floor.replay").to_string_lossy().into_owned();
+    let live = run_record_dump(
+        "bitgun",
+        90,
+        &log_s,
+        &[
+            ("STONE_LIVE_REWIND", "1"),
+            ("STONE_LIVE_REWIND_CADENCE_SECONDS", "0.01"),
+            ("STONE_LIVE_REWIND_WINDOW_SECONDS", "0.3"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
+            ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
+            ("STONE_BRANCH_AT_FRAME", "70"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME_2", "72"),
+            ("STONE_TIMELINE_SEEK_TO_TICK_2", "10"),
+        ],
+    );
+    let diag = &live["__stone_diag"];
+    let floor = diag["STONE_LIVE_REWIND_BRANCH_FLOOR_TICK"].as_i64().unwrap_or_else(|| panic!("branch floor: {diag}"));
+    assert!(floor >= 0 && floor < 25, "the rebased floor must come from surviving pre-branch images: {diag}");
+    assert_eq!(diag["STONE_LIVE_REWIND_FLOOR_AT_SEEK"].as_i64(), Some(floor), "the published floor must be the one the second seek admits against: {diag}");
+    assert_eq!(diag["STONE_LIVE_REWIND_COUNT"].as_i64(), Some(2), "the immediate second seek must be admitted: {diag}");
+    assert_eq!(diag["STONE_LIVE_REWIND_REFUSED"].as_i64(), Some(0), "floor rebasing must not refuse the surviving boundary: {diag}");
+    assert_eq!(current_tick(&live), 10, "the immediate second rewind must land at its target: {diag}");
 }
 
 /// Transient correctness against REAL state, not just the seam's call count.
