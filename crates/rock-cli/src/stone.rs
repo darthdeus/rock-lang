@@ -960,6 +960,12 @@ fn frame_timeout(frames: usize, dump_state: bool, app_args: &[String]) -> Durati
     (STARTUP + PER_FRAME * frames as u32).max(floor)
 }
 
+fn apply_headless_audio_env(cmd: &mut Command) {
+    if std::env::var_os("STONE_AUDIO_STUB").is_none() {
+        cmd.env("STONE_AUDIO_STUB", "1");
+    }
+}
+
 /// Run the game for a specified number of frames and take a screenshot
 ///
 /// This is useful for debugging and testing - compiles the game and runs it
@@ -991,6 +997,7 @@ pub fn do_one_frame(
     cmd.env("FRAME_COUNT", frames.to_string())
         .env("TAKE_SCREENSHOT", "1")  // Always take screenshot when running frames
         .env("STONE_HEADLESS", "1");  // No visible window for frame runs
+    apply_headless_audio_env(&mut cmd);
     // Replay record/playback (docs/replay-scrub-plan.md). The game process
     // reads these env vars in stone/engine/replay.rock, same pattern as
     // DUMP_STATE / SIM_DT.
@@ -1114,6 +1121,9 @@ pub fn do_replay_window(
     info!("Replaying {} in a window (close the window to exit)", replay_file);
 
     let mut cmd = rock_host::project::build_luajit_command(&lua_file, app_args);
+    if std::env::var("STONE_HEADLESS").as_deref() == Ok("1") {
+        apply_headless_audio_env(&mut cmd);
+    }
     cmd.env("STONE_REPLAY", replay_file)
         .env("STONE_REPLAY_WINDOW", "1")
         // Stamp the CURRENT build so replay_init can warn when the log was

@@ -228,6 +228,39 @@ fn audio_muted_only_while_seeking() {
     );
 }
 
+/// `rock frame` owns `STONE_HEADLESS`; ordinary headless playback must pass
+/// through the same audio gate even when it is not currently seeking.
+#[test]
+fn headless_frame_runs_are_quiet() {
+    let state = run_frame_env(
+        "bitgun",
+        5,
+        &[],
+        &[("STONE_AUDIO_PROBE", "1"), ("STONE_AUDIO_AUTHORITY_PROBE", "1")],
+    );
+    let mutes = state["__stone_diag"]["AUDIO_QUIET_MUTES"].as_i64().unwrap_or(0);
+    assert!(mutes > 0, "a headless frame run must suppress its audio probe");
+    assert_eq!(
+        state["__stone_diag"]["AUDIO_STUB_ACTIVE"].as_i64(),
+        Some(1),
+        "a headless frame run must not open the native audio path"
+    );
+}
+
+#[test]
+fn headless_audio_quiet_does_not_suppress_mag_vfx() {
+    let state = run_frame_env(
+        "mag",
+        2,
+        &[],
+        &[("MAG_SCREENSHOT", "1"), ("MAG_HEADLESS_VFX_PROBE", "1")],
+    );
+    assert!(
+        state["__stone_diag"]["MAG_HEADLESS_VFX_SPLASHES"].as_i64().unwrap_or(0) > 0,
+        "headless audio muting must not suppress Mag's decorative spell VFX"
+    );
+}
+
 /// P4 item 5: a BACKWARD scrub mutes audio through the SAME single gate as a
 /// forward seek (no second gate). The scrub's resim (from the restored keyframe
 /// forward to the target) runs render-skipped with `timeline_seeking()` true, so
@@ -550,4 +583,348 @@ fn save_repro_writes_a_replayable_from_boot_log() {
         "the saved repro must replay cleanly\nstderr:\n{}",
         String::from_utf8_lossy(&rep.stderr)
     );
+}
+
+// --- tool input vs game input ----------------------------------------------
+
+/// Record `game` and rewrite every tick's held-key field, so the log carries a
+/// keypress the recording session never made. The `t` line is
+/// `t <dt> <mx> <my> <wheel> <imgui-capture> <keys> <buttons>`; only field 6
+/// moves, so the run is otherwise the one that was recorded.
+fn record_log_with_keys(game: &str, frames: u32, keys_at: &[(usize, &str)]) -> tempfile::TempDir {
+    let rock_bin = env!("CARGO_BIN_EXE_rock");
+    let dir = tempfile::tempdir().expect("dir");
+    let log = dir.path().join("keys.replay");
+    let scratch = tempfile::tempdir().expect("scratch");
+    let out = Command::new(rock_bin)
+        .args([
+            "frame", game, "-n", &frames.to_string(),
+            "--record", &log.to_string_lossy(),
+            "--output", &scratch.path().to_string_lossy(),
+        ])
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .current_dir(workspace_root())
+        .output()
+        .expect("spawn record");
+    assert!(out.status.success(), "record failed: {}", String::from_utf8_lossy(&out.stderr));
+
+    let text = std::fs::read_to_string(&log).expect("read log");
+    let mut tick = 0usize;
+    let mut planted = 0usize;
+    let rewritten = text
+        .lines()
+        .map(|line| {
+            if !line.starts_with("t ") {
+                return line.to_string();
+            }
+            let mut fields: Vec<&str> = line.split_whitespace().collect();
+            assert_eq!(fields.len(), 8, "recorded tick shape changed: {line}");
+            if let Some((_, key)) = keys_at.iter().find(|(at, _)| *at == tick) {
+                fields[6] = key;
+                planted += 1;
+            }
+            tick += 1;
+            fields.join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(planted, keys_at.len(), "every planted key must land on a recorded tick");
+    std::fs::write(&log, rewritten + "\n").expect("write log");
+    dir
+}
+
+/// A recorded keypress drives the GAME, never the developer's tools. Engine
+/// debug windows are session state: they must not be toggled by a log, because
+/// a hidden seek skips the phase that toggles them, so a recorded toggle is a
+/// divergence between ordinary playback and seek resimulation by construction.
+///
+/// Both sides of the gate: the recorded arm must not fire, and the live ImGui
+/// arm must -- otherwise "the shortcut is dead" would pass as "the log is
+/// ignored".
+#[test]
+fn recorded_keys_cannot_toggle_engine_debug_windows() {
+    let dir = record_log_with_keys("bitgun", 40, &[(20, "o"), (25, "f8"), (30, "f6")]);
+    let log = dir.path().join("keys.replay");
+    let log_s = log.to_string_lossy().into_owned();
+
+    let replayed = run_frame_env(
+        "bitgun", 40, &["--replay", &log_s], &[("STONE_TOOL_KEY_PROBE", "1")],
+    );
+    let engine = &replayed["stone"]["ENGINE"];
+    // Every field these keys reach, not only the windows: f6 and f8 are each
+    // bound TWICE (sfx browser + KEY_DEBUG_VISIBILITY, pipeline inspector +
+    // KEY_DEBUG_PROFILER), so asserting the window alone would pass with the
+    // lights.rock half still reading recorded input -- which it was.
+    for (field, key) in [
+        ("show_graphics_stats_window", "o"),
+        ("show_pipeline_inspector", "f8"),
+        ("show_sfx_browser", "f6"),
+        ("debug_draw_visibility", "f6"),
+        ("profiler_enabled", "f8"),
+    ] {
+        assert_eq!(
+            engine[field].as_bool(), Some(false),
+            "a recorded '{key}' must not toggle {field}: {engine}"
+        );
+    }
+
+    // A tool key whose name the map does not know is a silently DEAD shortcut
+    // (the time-scale ladder's `[`, `]` and `\\` were exactly that), so every
+    // bound key is resolved and counted against its own declared total.
+    let diag = &replayed["__stone_diag"];
+    let declared = diag["TOOL_KEYS_DECLARED"].as_i64().expect("declared tool keys");
+    assert!(declared > 0, "the probe must declare keys: {diag}");
+    assert_eq!(declared, 35, "the typed census must cover every fixed and dynamic tool binding: {diag}");
+    assert_eq!(
+        diag["TOOL_KEYS_PROBED"].as_i64(), Some(declared),
+        "every declared tool key must have been probed: {diag}"
+    );
+    assert_eq!(
+        diag["TOOL_KEYS_UNMAPPED"].as_i64(), Some(0),
+        "every bound tool key must resolve to an ImGui key: {diag}"
+    );
+
+    // The live arm, through the same ImGui IO the timeline shortcuts use.
+    let injected = run_frame_env(
+        "bitgun", 20, &[],
+        &[("STONE_TIMELINE_KEY_AT", "5"), ("STONE_TIMELINE_KEY", "o")],
+    );
+    assert_eq!(
+        injected["stone"]["ENGINE"]["show_graphics_stats_window"].as_bool(), Some(true),
+        "a live 'o' must still open the graphics stats window: {}",
+        injected["stone"]["ENGINE"]
+    );
+
+    let dynamic = run_frame_stderr(
+        "bitgun", 20, &[],
+        &[("STONE_TIMELINE_KEY_AT", "5"), ("STONE_TIMELINE_KEY", "not-a-key")],
+    );
+    assert!(
+        dynamic.contains("tool key 'not-a-key' has no ImGui mapping"),
+        "dynamic tool input must retain its per-key unmapped diagnostic: {dynamic}"
+    );
+}
+
+// --- recorded environment ---------------------------------------------------
+
+/// `rock frame` with extra env, returning stderr (where the logger writes).
+fn run_frame_stderr(game: &str, frames: u32, extra: &[&str], env: &[(&str, &str)]) -> String {
+    let rock_bin = env!("CARGO_BIN_EXE_rock");
+    let scratch = tempfile::tempdir().expect("scratch dir");
+    let scratch_path = scratch.path().to_string_lossy().into_owned();
+    let frames_s = frames.to_string();
+    let mut args: Vec<&str> = vec!["frame", game, "-n", &frames_s, "--output", &scratch_path];
+    args.extend_from_slice(extra);
+    let out = Command::new(rock_bin)
+        .args(&args)
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .envs(env.iter().copied())
+        .current_dir(workspace_root())
+        .output()
+        .expect("failed to spawn rock frame");
+    assert!(
+        out.status.success(),
+        "rock frame {game} {extra:?} exited {:?}\nstderr:\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+/// A replay is only deterministic with respect to the environment it was
+/// recorded in: env vars gate real simulation (`STONE_QUIET` reached a game's
+/// `@update` system), and nothing in the log recorded them. The header carries
+/// the declared set and a mismatch is named, the same way a build change is.
+///
+/// Both sides: a differing value must warn AND name the variable, and a
+/// matching one must stay silent -- a warning that always fires is not a gate.
+#[test]
+fn a_replay_names_the_environment_it_disagrees_with() {
+    let rock_bin = env!("CARGO_BIN_EXE_rock");
+    let dir = tempfile::tempdir().expect("dir");
+    let log = dir.path().join("env.replay");
+    let log_s = log.to_string_lossy().into_owned();
+    let scratch = tempfile::tempdir().expect("scratch");
+    let rec = Command::new(rock_bin)
+        .args([
+            "frame", "bitgun", "-n", "10", "--record", &log_s,
+            "--output", &scratch.path().to_string_lossy(),
+        ])
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .env("STONE_QUIET", "1")
+        .current_dir(workspace_root())
+        .output()
+        .expect("spawn record");
+    assert!(rec.status.success(), "record failed: {}", String::from_utf8_lossy(&rec.stderr));
+
+    let text = std::fs::read_to_string(&log).expect("read log");
+    let env_lines: Vec<&str> = text.lines().filter(|l| l.starts_with("env ")).collect();
+    assert!(
+        !env_lines.is_empty(),
+        "the header must record the declared environment"
+    );
+    let quiet = env_lines
+        .iter()
+        .find(|l| l.starts_with("env STONE_QUIET "))
+        .expect("STONE_QUIET must be recorded");
+    assert_eq!(
+        *quiet, "env STONE_QUIET 1 31",
+        "a present value is recorded as a presence bit plus hex"
+    );
+    // The effective quiet is DERIVED from these too, and it is not readable at
+    // header time (replay_init precedes the @early_init that computes it), so
+    // the sensor has to name the derivation's inputs or a windowed record and a
+    // headless replay would agree while running the gate in opposite states.
+    // Structural, not behavioral: `rock frame` always sets STONE_HEADLESS, so a
+    // headless test cannot produce the windowed arm.
+    for derived in ["STONE_HEADLESS", "ROCK_RUN_SIM"] {
+        assert!(
+            env_lines.iter().any(|l| l.starts_with(&format!("env {derived} "))),
+            "the recorded environment must name {derived}, which the quiet gate derives from: {env_lines:?}"
+        );
+    }
+
+    let mismatch = run_frame_stderr(
+        "bitgun", 10, &["--replay", &log_s], &[("STONE_QUIET", "0")],
+    );
+    assert!(
+        mismatch.contains("STONE_QUIET"),
+        "a differing environment must be named: stderr:\n{mismatch}"
+    );
+
+    let matching = run_frame_stderr(
+        "bitgun", 10, &["--replay", &log_s], &[("STONE_QUIET", "1")],
+    );
+    assert!(
+        !matching.contains("recorded environment"),
+        "a matching environment must not warn: stderr:\n{matching}"
+    );
+}
+
+#[test]
+fn mag_screenshot_environment_reaches_header_and_mismatch_warning() {
+    let rock_bin = env!("CARGO_BIN_EXE_rock");
+    let dir = tempfile::tempdir().expect("dir");
+    let log = dir.path().join("mag-screenshot.replay");
+    let scratch = tempfile::tempdir().expect("scratch");
+    let out = Command::new(rock_bin)
+        .args([
+            "frame", "mag", "-n", "3", "--record", &log.to_string_lossy(),
+            "--output", &scratch.path().to_string_lossy(),
+        ])
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .env("MAG_SCREENSHOT", "1")
+        .current_dir(workspace_root())
+        .output()
+        .expect("spawn Mag record");
+    assert!(out.status.success(), "record failed: {}", String::from_utf8_lossy(&out.stderr));
+
+    let text = std::fs::read_to_string(&log).expect("read log");
+    assert!(
+        text.lines().any(|line| line == "env MAG_SCREENSHOT 1 31"),
+        "MAG_SCREENSHOT must be recorded as a game environment key:\n{text}"
+    );
+
+    let mismatch = run_frame_stderr(
+        "mag", 3, &["--replay", &log.to_string_lossy()], &[("MAG_SCREENSHOT", "0")],
+    );
+    assert!(
+        mismatch.contains("recorded environment differs: MAG_SCREENSHOT"),
+        "a changed screenshot mode must be named by replay env checking:\n{mismatch}"
+    );
+}
+
+/// The v5 environment encoding has to survive arbitrary values, because an env
+/// var is arbitrary bytes. Each of these breaks a `K=V` pairs-joined-by-spaces
+/// encoding: a value with a space or an `=` is silently truncated or
+/// mis-split, and unset / empty / a literal `-` are three different runs that a
+/// `-` sentinel collapses into one.
+///
+/// `MAG_SCENE` is the vehicle because it is a GAME-declared key
+/// (`GameConfig.replay_env_keys`), so the same run proves the game's
+/// contribution reaches the header at all.
+#[test]
+fn the_recorded_environment_survives_awkward_values() {
+    let rock_bin = env!("CARGO_BIN_EXE_rock");
+    let cases: [(&str, Option<&str>, &str); 5] = [
+        ("unset", None, "env MAG_SCENE 0 "),
+        ("empty", Some(""), "env MAG_SCENE 1 "),
+        ("a literal dash", Some("-"), "env MAG_SCENE 1 2d"),
+        ("spaces", Some("two words"), "env MAG_SCENE 1 74776f20776f726473"),
+        ("an equals sign", Some("k=v"), "env MAG_SCENE 1 6b3d76"),
+    ];
+    for (label, value, expected) in cases {
+        let dir = tempfile::tempdir().expect("dir");
+        let log = dir.path().join("awkward.replay");
+        let scratch = tempfile::tempdir().expect("scratch");
+        let mut cmd = Command::new(rock_bin);
+        cmd.args([
+            "frame", "mag", "-n", "3", "--record", &log.to_string_lossy(),
+            "--output", &scratch.path().to_string_lossy(),
+        ])
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .current_dir(workspace_root());
+        match value {
+            Some(v) => { cmd.env("MAG_SCENE", v); }
+            None => { cmd.env_remove("MAG_SCENE"); }
+        }
+        let out = cmd.output().expect("spawn record");
+        assert!(out.status.success(), "{label}: record failed: {}", String::from_utf8_lossy(&out.stderr));
+
+        let text = std::fs::read_to_string(&log).expect("read log");
+        let line = text
+            .lines()
+            .find(|l| l.starts_with("env MAG_SCENE "))
+            .unwrap_or_else(|| panic!("{label}: the game-declared key must reach the header:\n{text}"));
+        assert_eq!(line, expected, "{label}: value must round-trip exactly");
+
+        // And the decode side agrees: replaying under the SAME value is silent.
+        let same = run_frame_stderr_env(
+            "mag", 3, &["--replay", &log.to_string_lossy()], value,
+        );
+        assert!(
+            !same.contains("MAG_SCENE"),
+            "{label}: an identical environment must not warn: stderr:\n{same}"
+        );
+        // Changing it to a value the encoding could confuse with this one must warn.
+        let other = run_frame_stderr_env("mag", 3, &["--replay", &log.to_string_lossy()], Some("-"));
+        if value != Some("-") {
+            assert!(
+                other.contains("MAG_SCENE"),
+                "{label}: a differing environment must be named: stderr:\n{other}"
+            );
+        }
+    }
+}
+
+/// `run_frame_stderr`, but MAG_SCENE is set to an exact value or removed --
+/// `envs()` cannot express "unset", which is one of the cases under test.
+fn run_frame_stderr_env(
+    game: &str,
+    frames: u32,
+    extra: &[&str],
+    mag_scene: Option<&str>,
+) -> String {
+    let rock_bin = env!("CARGO_BIN_EXE_rock");
+    let scratch = tempfile::tempdir().expect("scratch dir");
+    let scratch_path = scratch.path().to_string_lossy().into_owned();
+    let frames_s = frames.to_string();
+    let mut args: Vec<&str> = vec!["frame", game, "-n", &frames_s, "--output", &scratch_path];
+    args.extend_from_slice(extra);
+    let mut cmd = Command::new(rock_bin);
+    cmd.args(&args)
+        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
+        .current_dir(workspace_root());
+    match mag_scene {
+        Some(v) => { cmd.env("MAG_SCENE", v); }
+        None => { cmd.env_remove("MAG_SCENE"); }
+    }
+    let out = cmd.output().expect("failed to spawn rock frame");
+    assert!(
+        out.status.success(),
+        "rock frame {game} {extra:?} exited {:?}\nstderr:\n{}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stderr).into_owned()
 }
