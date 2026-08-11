@@ -456,7 +456,7 @@ fn selected_wgpu_planning_reads_the_exact_graph_instance_and_concrete_plan() {
     let mid = test_mid(&ws);
     let (emit, cache) = emit_full_in_for_renderer(&ws, mid, None, RendererTarget::Wgpu)
         .expect("selected artifacts emit");
-    assert_eq!(emit.lua.matches("__rock_wgpu_shader_register(").count(), 4);
+    assert_eq!(emit.lua.matches("__rock_wgpu_shader_register(").count(), 5);
 
     let blit = cache
         .shader_view()
