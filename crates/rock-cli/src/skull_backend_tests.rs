@@ -2863,6 +2863,46 @@ fn main() { }
         assert_ne!(current, baseline, "force_full must materialize the new ABI after restart");
         assert!(current.contains("@workgroup_size(32, 1, 1)"), "new compute ABI was not materialized");
     }
+
+    #[test]
+    fn compute_root_addition_and_removal_require_restart() {
+        let (_dir_removed, mut removed_stone, removed_main, removed_incremental, removed_rock) = boot(V0);
+        let removed_baseline = std::fs::read_to_string(&removed_main).expect("removed baseline");
+        std::fs::write(
+            &removed_rock,
+            V0.replace("global COPY_VALUES: string = rock_compute(copy_values)", ""),
+        )
+        .expect("removed compute root");
+        let removed = removed_stone
+            .recompile(std::slice::from_ref(&removed_rock), &removed_main, &removed_incremental)
+            .expect("removed compute root reload");
+        match removed {
+            SkullReload::FullRequired { reasons } => assert!(
+                reasons.iter().any(|reason| reason == "shader registration key set changed"),
+                "root removal must identify the registration key set: {reasons:?}"
+            ),
+            other => panic!("removing a compute root must require restart, got {other:?}"),
+        }
+        assert_eq!(std::fs::read_to_string(&removed_main).unwrap(), removed_baseline);
+
+        let (_dir_added, mut added_stone, added_main, added_incremental, added_rock) = boot(V0);
+        let added_baseline = std::fs::read_to_string(&added_main).expect("added baseline");
+        let addition = format!(
+            "{V0}\n\n@shader(compute)\n@workgroup(64, 1, 1)\n@dispatch(1)\nfn copy_values_extra(\n    @storage(read) input: StorageBuffer<int>,\n    @storage(read_write) output: StorageBuffer<int>,\n    @uniform params: Params,\n) {{\n    let i = global_invocation_id().x\n    if i >= params.n {{ return }}\n    storage_store(output, i, storage_load(input, i))\n}}\n\nglobal EXTRA_COPY_VALUES: string = rock_compute(copy_values_extra)\n"
+        );
+        std::fs::write(&added_rock, addition).expect("added compute root");
+        let added = added_stone
+            .recompile(std::slice::from_ref(&added_rock), &added_main, &added_incremental)
+            .expect("added compute root reload");
+        match added {
+            SkullReload::FullRequired { reasons } => assert!(
+                reasons.iter().any(|reason| reason == "shader registration key set changed"),
+                "root addition must identify the registration key set: {reasons:?}"
+            ),
+            other => panic!("adding a compute root must require restart, got {other:?}"),
+        }
+        assert_eq!(std::fs::read_to_string(&added_main).unwrap(), added_baseline);
+    }
 }
 
 #[cfg(test)]
