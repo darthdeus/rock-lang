@@ -96,6 +96,17 @@ fn current_tick(s: &serde_json::Value) -> i64 {
     s["stone"]["current_tick"].as_i64().expect("current_tick")
 }
 
+fn strip_scheduler_frame_stamps(value: &mut serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Array(values) => values.iter_mut().map(strip_scheduler_frame_stamps).sum(),
+        serde_json::Value::Object(fields) => {
+            let removed = usize::from(fields.remove("last_tick_frame").is_some());
+            removed + fields.values_mut().map(strip_scheduler_frame_stamps).sum::<usize>()
+        }
+        _ => 0,
+    }
+}
+
 #[test]
 fn restore_returns_to_snapshot_tick_state() {
     let game = "bitgun";
@@ -164,7 +175,10 @@ fn assert_sim_state_matches(
             if !sim.contains(name) {
                 continue;
             }
-            let (a, b) = (val.clone(), want_pkg[name].clone());
+            let mut a = val.clone();
+            let mut b = want_pkg[name].clone();
+            strip_scheduler_frame_stamps(&mut a);
+            strip_scheduler_frame_stamps(&mut b);
             stripped += crate::stone_harness::count_host_projections(&a);
             stripped += crate::stone_harness::count_host_projections(&b);
             assert_eq!(a, b, "sim-state {pkg}.{name} must match {label}");
@@ -237,6 +251,62 @@ fn assert_mag_seek_state_matches(
         assert_f32_state_matches(&got["mag"][name], &want["mag"][name], &format!("mag.{name}"));
     }
     assert_sim_state_matches(got, want, &exact, label);
+}
+
+#[test]
+fn mag_cast_seek_restores_scheduler_owner() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mag_cast_seek.replay");
+    let fixture_s = fixture.to_string_lossy().into_owned();
+    let fixture_text = std::fs::read_to_string(&fixture).expect("tracked Mag replay fixture");
+    let ticks: Vec<&str> = fixture_text.lines().filter(|line| line.starts_with("t ")).collect();
+    assert!(ticks.len() > 566, "fixture must reach the later Lightning cast");
+    assert_eq!(ticks[292].split_whitespace().nth(6), Some("2"), "tick 292 starts Flamestrike");
+    assert_eq!(ticks[566].split_whitespace().nth(6), Some("1"), "tick 566 starts Lightning");
+
+    let ordinary = run_replay_dump(
+        "mag", 360, &fixture_s,
+        &[
+            ("STONE_START_PAUSED", "1"),
+            ("STONE_STEP_FRAMES", "350"),
+            ("STONE_KEYFRAME_INTERVAL", "60"),
+        ],
+    );
+    assert_eq!(current_tick(&ordinary), 350);
+    assert_eq!(ordinary["mag"]["player"]["spell_state.#"], "Casting");
+    assert_eq!(ordinary["mag"]["player"]["spell_state.0"], 1);
+    assert!(ordinary["mag"]["player"]["spell_state.1"].as_f64().unwrap() > 0.0);
+    assert_eq!(ordinary["mag"]["player"]["spell_state.2"], 2);
+    assert_eq!(ordinary["mag"]["player"]["mana_cur"], 100);
+    assert_eq!(ordinary["mag"]["player"]["reagents"]["counts"]["data"], serde_json::json!([50, 50, 50, 50, 50, 50]));
+    assert!(ordinary["mag"]["player"]["cast_co"].is_object());
+    assert_eq!(ordinary["mag"]["player"]["cast_co"]["last_tick_frame"], 350);
+    assert!(ordinary["stone"]["POLLER"]["coroutines"].as_array().unwrap().len() > 0,
+        "ordinary playback must have live scheduler rows");
+
+    let sought = run_replay_dump(
+        "mag", 700, &fixture_s,
+        &[
+            ("STONE_KEYFRAME_INTERVAL", "60"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME", "600"),
+            ("STONE_TIMELINE_SEEK_TO_TICK", "350"),
+        ],
+    );
+    assert_eq!(current_tick(&sought), 350);
+    assert_eq!(sought["mag"]["player"]["spell_state.#"], ordinary["mag"]["player"]["spell_state.#"]);
+    assert_eq!(sought["mag"]["player"]["spell_state.0"], ordinary["mag"]["player"]["spell_state.0"]);
+    assert_eq!(sought["mag"]["player"]["spell_state.1"], ordinary["mag"]["player"]["spell_state.1"]);
+    assert_eq!(sought["mag"]["player"]["mana_cur"], ordinary["mag"]["player"]["mana_cur"]);
+    assert_eq!(sought["mag"]["player"]["reagents"], ordinary["mag"]["player"]["reagents"]);
+    assert!(sought["stone"]["POLLER"]["coroutines"].as_array().unwrap().len() > 0,
+        "a seek landing must retain nonempty scheduler population");
+    assert!(sought["mag"]["player"]["cast_co"]["last_tick_frame"].as_i64().unwrap() > 600,
+        "the restored task must be pumped after the seek, not left at its keyframe frame");
+    assert!(strip_scheduler_frame_stamps(&mut sought.clone()) > 0,
+        "named exclusion Task.last_tick_frame must have a nonzero population");
+
+    let sim = sim_state_names("mag", 60);
+    assert!(sim.contains("POLLER"), "POLLER must be in the admitted sim-state oracle");
+    assert_mag_seek_state_matches(&sought, &ordinary, &sim, "Mag scheduler seek");
 }
 
 /// P4 item 2: scrub to an ARBITRARY earlier tick. Cadence keyframes (every
