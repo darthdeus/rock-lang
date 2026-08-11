@@ -179,33 +179,78 @@ impl StoneHarness {
         }
     }
 
-    /// Wait for the system to *settle*: keep checking until the reload
-    /// log hasn't grown for `quiescent` ms, or `timeout` elapses.
+    /// Count completion events, including failed compiles.
+    pub fn event_count(&self) -> usize {
+        self.events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| matches!(event, Event::Reload(_) | Event::CompileError(_)))
+            .count()
+    }
+
+    /// Wait for the system to *settle*: keep checking until the completion
+    /// event stream hasn't grown for `quiescent` ms, or `timeout` elapses.
     /// Returns the full reload log at that point.
     ///
     /// Use this for "make N writes, then assert how many reloads
     /// coalesced": the exact final count is host-dependent, but the
     /// settled count once events stop arriving is stable.
     pub fn await_settled(&self, quiescent: Duration, timeout: Duration) -> Vec<ReloadEvent> {
+        self.await_settled_impl(None, quiescent, timeout)
+    }
+
+    /// Wait for at least one completion event after `baseline`, then wait for
+    /// the event stream to become quiet.
+    ///
+    /// A quiet stream before the first event is not a settled stream: under
+    /// load, the child may still be starting or compiling the requested
+    /// change. This barrier keeps that delay inside `timeout` instead of
+    /// turning it into a false empty result.
+    pub fn await_settled_after(
+        &self,
+        baseline: usize,
+        quiescent: Duration,
+        timeout: Duration,
+    ) -> Vec<ReloadEvent> {
+        self.await_settled_impl(Some(baseline), quiescent, timeout)
+    }
+
+    fn await_settled_impl(
+        &self,
+        baseline: Option<usize>,
+        quiescent: Duration,
+        timeout: Duration,
+    ) -> Vec<ReloadEvent> {
         let deadline = Instant::now() + timeout;
-        let mut last_count = self.reload_log().len();
+        let mut last_count = self.event_count();
+        let mut saw_required_event = baseline.map_or(true, |n| last_count > n);
         let mut last_change = Instant::now();
         loop {
             std::thread::sleep(Duration::from_millis(20));
-            let now_count = self.reload_log().len();
+            let now_count = self.event_count();
             if now_count != last_count {
                 last_count = now_count;
+                if baseline.map_or(true, |n| now_count > n) {
+                    saw_required_event = true;
+                }
                 last_change = Instant::now();
             }
-            if last_change.elapsed() >= quiescent {
+            if saw_required_event && last_change.elapsed() >= quiescent {
                 return self.reload_log();
             }
             if Instant::now() >= deadline {
+                let expectation = baseline.map_or_else(
+                    || "the event stream to settle".to_string(),
+                    |n| format!("an event after baseline {n}"),
+                );
                 panic!(
-                    "await_settled: never quiet for {}ms within {}ms (last_count={})",
+                    "await_settled: expected {}, never quiet for {}ms within {}ms (last_count={}, saw_required_event={})",
+                    expectation,
                     quiescent.as_millis(),
                     timeout.as_millis(),
                     last_count,
+                    saw_required_event,
                 );
             }
         }
