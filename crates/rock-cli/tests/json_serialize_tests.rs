@@ -32,6 +32,7 @@ fn dump_match3_state() -> serde_json::Value {
     let output = Command::new(rock_bin)
         .args(["frame", "games/match3", "-n", "1", "--dump-state"])
         .env("ROCK_TEST_SEED", "42")
+        .env("STONE_TOOL_KEY_PROBE", "1")
         .current_dir(workspace_root())
         .output()
         .expect("failed to spawn rock frame");
@@ -86,13 +87,14 @@ fn serializer_branch_coverage() {
     );
 
     // ── string escaping: backslash ───────────────────────────────────────
-    // stone's time-reset keybinding is a literal backslash. An unescaped one
-    // truncates the enclosing JSON string and invalidates the WHOLE dump, so
-    // this asserts the round trip rather than just the shape.
+    // The tool authority's public name is a genuine string containing a
+    // backslash. An unescaped one truncates the enclosing JSON string and
+    // invalidates the WHOLE dump, so this asserts the round trip rather than
+    // just the shape.
     assert_eq!(
-        state["stone"]["KEY_DEBUG_TIME_RESET"], "\\",
-        "backslash string global must round-trip: got {}",
-        state["stone"]["KEY_DEBUG_TIME_RESET"]
+        state["__stone_diag"]["TOOL_KEY_BACKSLASH_NAME"], "\\",
+        "ToolKey::Backslash's public name must round-trip through dump-state: {}",
+        state["__stone_diag"]["TOOL_KEY_BACKSLASH_NAME"]
     );
 
     // ── empty Vec envelope ───────────────────────────────────────────────
