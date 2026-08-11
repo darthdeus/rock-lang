@@ -201,7 +201,7 @@ fn main() {
 }
 "#,
     );
-    let r = instance_graph::reconcile(&ws, &g, bone_semantic::hir::FnBackend::Lua);
+    let r = instance_graph::reconcile(&ws, &g);
     assert!(r.today > 0, "the fixture produced no specializations to reconcile");
     assert!(
         r.missing.is_empty(),
@@ -2336,4 +2336,82 @@ fn main() {{
         "the shared walk should resolve every synthesized entry: {:?}",
         clean.unresolved.iter().map(|u| u.reason).collect::<Vec<_>>()
     );
+}
+
+/// **The recursion pass may not search from an instance whose declaration has
+/// exactly one instance graph-wide.**
+///
+/// `detect_changing_instance_recursion` looks for `f<A>` reaching some `f<B>`
+/// with `A != B`, and the reachable set only ever contains instances the graph
+/// HOLDS -- so a declaration with a single instance cannot satisfy it and its
+/// search is fruitless by construction.
+///
+/// This is structural on purpose. The pass's OUTPUT is empty on every program
+/// without polymorphic recursion, so a rejection-output test passes whether the
+/// search is bounded or exhaustive; it cannot be the red for a cost change.
+/// `recursion_starts` can.
+///
+/// The population is counted over ALL instances, leaves included: a declaration's
+/// second instance may have no outgoing edges of its own and so never appear
+/// among the candidate starts, while still being exactly what makes the first
+/// one's search worth running.
+#[test]
+fn the_recursion_search_skips_single_instance_declarations() {
+    let (_ws, g) = graph_of(
+        r#"
+fn passthru<T>(x: T) -> T { return x }
+// Two instances, and each has an outgoing edge of its own -- a leaf pair would
+// never appear among the candidate starts at all.
+fn ident<T>(x: T) -> T { return passthru(x) }
+
+fn only_once(a: int) -> int { return a + 1 }
+fn also_once(a: int) -> int { return only_once(a) + 1 }
+fn third(a: int) -> int { return also_once(a) + 1 }
+
+fn main() {
+    print("{ident(1)} {ident("s")} {third(2)}")
+}
+"#,
+    );
+
+    // Declarations with more than one instance, over EVERY instance the graph
+    // holds rather than only those with outgoing edges.
+    let mut per_decl: std::collections::BTreeMap<(u32, u32), usize> = Default::default();
+    for i in &g.instances {
+        *per_decl
+            .entry((i.func.module.raw(), i.func.func.into_raw().into_u32()))
+            .or_default() += 1;
+    }
+    let multi: std::collections::BTreeSet<(u32, u32)> =
+        per_decl.iter().filter(|(_, n)| **n > 1).map(|(k, _)| *k).collect();
+
+    // The candidate starts are instances with outgoing edges -- what the pass
+    // would search from with no filter at all.
+    let mut candidates: std::collections::BTreeSet<&instance_graph::Instance> = Default::default();
+    for e in &g.edges {
+        candidates.insert(&e.from);
+    }
+    let admissible = candidates
+        .iter()
+        .filter(|i| multi.contains(&(i.func.module.raw(), i.func.func.into_raw().into_u32())))
+        .count();
+
+    // The fixture must actually contain both populations, or this asserts
+    // nothing: single-instance declarations to skip, and a multi-instance one
+    // (`ident`) to keep.
+    assert!(
+        admissible < candidates.len(),
+        "fixture has no single-instance declarations to skip ({admissible} of {})",
+        candidates.len()
+    );
+    assert!(admissible > 0, "fixture has no multi-instance declaration to keep");
+
+    assert_eq!(
+        g.recursion_starts, admissible,
+        "the pass searched from {} instances but only {admissible} of {} candidates \
+         belong to a declaration with more than one instance",
+        g.recursion_starts,
+        candidates.len()
+    );
+
 }

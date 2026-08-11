@@ -48,6 +48,7 @@ pub mod glsl_test;
 pub mod js_test;
 pub mod live_project;
 pub mod web;
+pub mod zip_writer;
 mod test_protocol;
 mod lint_cmd;
 pub(crate) mod lint_union;
@@ -573,6 +574,11 @@ pub struct Args {
     pub watch: bool,
     pub port: u16,
 
+    /// `rock web` delivery shape: `--single-file` embeds assets into one html.
+    pub single_file: bool,
+    /// `rock web`: wrap the build in an itch.io-ready zip.
+    pub itch: bool,
+
     /// Resolved compiler backend for this invocation (default `skull`; see
     /// `from_matches`). `skull` is bone type-check + skull codegen; `bone` is
     /// type-check only. Override with `--backend` or `ROCK_BACKEND=bone|skull`.
@@ -603,7 +609,7 @@ pub struct Args {
     pub union: bool,
     /// Where `--union` looks for consumers. Defaults to the lib's parent, which
     /// is right when the lib sits beside its consumers (`stone/`); a nested lib
-    /// (`libs/json`) needs the repo root passed explicitly.
+    /// (`libs/chess-core`) needs the repo root passed explicitly.
     pub consumers: Option<String>,
 
     /// For `rock test`: force package-aware compilation (the surrounding
@@ -726,6 +732,10 @@ impl Args {
             .arg(Arg::new("port").long("port").default_value("8000")
                 .value_parser(clap::value_parser!(u16))
                 .help("For `rock web --watch`: loopback HTTP port. Use 0 to choose an available port."))
+            .arg(Arg::new("single-file").long("single-file").action(ArgAction::SetTrue)
+                .help("For `rock web`: emit ONE self-contained .html with every asset base64-embedded. Runs from file:// with no server. Not for large games -- base64 costs +33% and the whole payload is one file."))
+            .arg(Arg::new("itch").long("itch").action(ArgAction::SetTrue)
+                .help("For `rock web`: emit an itch.io-ready .zip with index.html at the archive root. Combine with --single-file for a one-entry archive."))
             .arg(Arg::new("package").long("package").action(ArgAction::SetTrue)
                 .help("For `rock test`: compile the surrounding stick.toml package (and its deps) so @test files can call sibling-file symbols. Auto-detected when the path lives inside a package; pass --package=false (or env ROCK_TEST_NO_PACKAGE=1) to force single-file mode."))
             .arg(Arg::new("no-lints").long("no-lints").action(ArgAction::SetTrue)
@@ -741,7 +751,7 @@ impl Args {
             .arg(Arg::new("union").long("union").action(ArgAction::SetTrue)
                 .help("For `rock lint <lib>`: judge a library's reachability against every consumer in the repo at once, reporting only functions that NONE of them reach. The only sound way to run unused_fn on a lib."))
             .arg(Arg::new("consumers").long("consumers")
-                .help("For `rock lint --union`: directory to search for consumers (default: the lib's parent). Pass the repo root for a nested lib like `libs/json`."))
+                .help("For `rock lint --union`: directory to search for consumers (default: the lib's parent). Pass the repo root for a nested lib like `libs/chess-core`."))
             .arg(Arg::new("backend").long("backend")
                 .value_parser(clap::value_parser!(Backend))
                 .help("Compiler backend: `skull` (default -- bone type-check + skull codegen, runs Lua), `bone` (type-check only, no codegen), `js` (test only -- JS-subset @test execution under node, SKIP(reason) outside the subset), or `glsl` (test only -- GLSL value-test execution on the GPU, both 330core+300es profiles). Can also be set via ROCK_BACKEND=bone|skull|js|glsl."))
@@ -800,6 +810,8 @@ impl Args {
             jv: m.get_flag("jv"),
             watch: m.get_flag("watch"),
             port: *m.get_one::<u16>("port").unwrap(),
+            single_file: m.get_flag("single-file"),
+            itch: m.get_flag("itch"),
             package: m.get_flag("package"),
             no_lints: m.get_flag("no-lints"),
             lint_summary: m.get_flag("lint-summary"),

@@ -338,7 +338,7 @@ impl Builder<'_> {
     /// keeps correcting it.
     pub(crate) fn bound_next_elem_slot(&self, gidx: usize) -> RetSlot {
         match self.generic_bounds.get(gidx).copied().flatten() {
-            Some(elem) => ret_slot(self.ws, self.spec_subst, elem),
+            Some(elem) => ret_slot(self.ws, self.subst(), elem),
             None => RetSlot::Opaque,
         }
     }
@@ -368,7 +368,7 @@ impl Builder<'_> {
             },
             _ => return None,
         };
-        self.spec_subst.get(&var)
+        self.subst().get(&var)
     }
 
     pub(crate) fn body_ret_slot(&self, ty: TyId) -> RetSlot {
@@ -443,10 +443,10 @@ impl Builder<'_> {
         // In a specialized splice the `NativeBuffer<T>` element resolves through
         // `spec_subst` to a concrete type, so the intrinsic can name the ctype the
         // shared generic body could not. An empty subst is exactly the shared path.
-        let r = if self.spec_subst.is_empty() {
+        let r = if self.subst().is_empty() {
             native_buffer_alloc_elem_ctype(self.ws, inf, ret)
         } else {
-            native_buffer_alloc_elem_ctype_spec(self.ws, inf, ret, self.spec_subst)
+            native_buffer_alloc_elem_ctype_spec(self.ws, inf, ret, self.subst())
         };
         r.map_err(|msg| CompilerError::new_with_label(span, msg))
     }

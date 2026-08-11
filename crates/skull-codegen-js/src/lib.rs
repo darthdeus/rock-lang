@@ -31,8 +31,15 @@ pub const JS_INTRINSICS: &[(&str, usize, &str)] = &[
     // base math
     ("sin", 1, "Math.sin($1)"),
     ("cos", 1, "Math.cos($1)"),
+    ("tan", 1, "Math.tan($1)"),
     ("sqrt", 1, "Math.sqrt($1)"),
     ("exp", 1, "Math.exp($1)"),
+    // `log` is the NATURAL log on both hosts (Lua `math.log`, JS `Math.log`).
+    // `log2` gets `Math.log2` rather than a mirror of luajit's
+    // `math.log(x) / 0.6931471805599453`: it is the same function computed
+    // better, exact on powers of two where the division is a bit short.
+    ("log", 1, "Math.log($1)"),
+    ("log2", 1, "Math.log2($1)"),
     ("abs", 1, "Math.abs($1)"),
     ("floor", 1, "Math.floor($1)"),
     ("ceil", 1, "Math.ceil($1)"),
@@ -47,6 +54,10 @@ pub const JS_INTRINSICS: &[(&str, usize, &str)] = &[
     ("round", 1, "Math.floor($1 + 0.5)"),
     ("sign", 1, "Math.sign($1)"),
     ("fract", 1, "($1 - Math.floor($1))"),
+    // `join` over a `[string]`: the backing array IS the input both hosts want,
+    // so this is one `Array.prototype.join` here and one `table.concat` on
+    // luajit. `_data` is 0-based and may be longer than `len`, hence the slice.
+    ("join", 2, "$1._data.slice(0, $1.len).join($2)"),
     // Reference identity (stdlib `same_ref`). `===` on two objects is JS
     // identity, the same question luajit's `rawequal` answers; on primitives
     // both reduce to value equality, which is also what identity means there.
@@ -2608,10 +2619,21 @@ function __rock_web_boot(mainFn) {
     return;
   }
   Promise.all(pre.map(function (path) {
-    return fetch(path).then(function (r) {
-      if (!r.ok) throw new Error(path + " -> HTTP " + r.status);
-      return r.arrayBuffer();
-    }).then(function (buf) {
+    // A single-file build (`rock web --single-file`) has already populated
+    // __ROCK_WEB_ASSETS from base64 embedded in the page, so there is nothing
+    // to fetch -- and under file:// a fetch would fail outright. Take the bytes
+    // and fall through to the SAME decode chain: the font and image rungs below
+    // are what make an asset usable, so skipping them would leave a preloaded
+    // font unregistered and a preloaded image undecoded.
+    var __inlined = __ROCK_WEB_ASSETS[path];
+    var __bytes = __inlined
+      ? Promise.resolve(__inlined.buffer.slice(
+          __inlined.byteOffset, __inlined.byteOffset + __inlined.byteLength))
+      : fetch(path).then(function (r) {
+          if (!r.ok) throw new Error(path + " -> HTTP " + r.status);
+          return r.arrayBuffer();
+        });
+    return __bytes.then(function (buf) {
       __ROCK_WEB_ASSETS[path] = new Uint8Array(buf);
       if (/\.(ttf|otf)$/i.test(path) && typeof FontFace !== "undefined") {
         var fam = "__sw_font_" + path.replace(/[^A-Za-z0-9]/g, "_");
@@ -2762,6 +2784,12 @@ function lua_tostring(x) {
   return String(x);
 }
 function __rock_format_float(v) {
+  // Non-finite first: C `%.2g` renders these as inf/-inf/nan, and __c_g below
+  // reconstructs a value from its mantissa bits, so it would reach BigInt() with
+  // Infinity and throw rather than format. Same spellings lua_tostring uses.
+  if (v !== v) return "nan";
+  if (v === Infinity) return "inf";
+  if (v === -Infinity) return "-inf";
   var av = Math.abs(v);
   if (av !== 0 && (av < 0.0001 || av >= 1000000)) {
     return __c_g(v, 2);

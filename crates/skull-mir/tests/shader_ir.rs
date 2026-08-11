@@ -20,8 +20,11 @@ fn fref(module: u32, func: u32) -> FuncRef {
     }
 }
 
+/// `None` is a NON-GENERIC instance -- an empty key, not a one-slot key holding
+/// nothing. Those were the same value while a key slot was optional; they are
+/// different lengths now, which is the point of the narrowing.
 fn inst(module: u32, func: u32, tag: Option<skull_mir::monoty::MonoTy>) -> ShaderInstance {
-    ShaderInstance { fref: fref(module, func), key: vec![tag] }
+    ShaderInstance { fref: fref(module, func), key: tag.into_iter().collect() }
 }
 
 fn stage_ir(entry: ShaderInstance, order: Vec<ShaderInstance>) -> ShaderStageIr {

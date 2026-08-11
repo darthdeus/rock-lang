@@ -22,6 +22,7 @@ impl Builder<'_> {
         // (the call-arg analog of `lower_for_user_iter`'s `iter_fn`).
         if let Some(w) = self.inf.and_then(|i| i.implicit_iter_args.get(&e)) {
             let (m, f) = w.func;
+            let generics = w.generics.clone();
             let iter_ref = FuncRef { module: m, func: f };
             // This coercion belongs to `e`, but the cursor was already restored
             // to the ENCLOSING expression above -- so set both halves of the
@@ -30,10 +31,41 @@ impl Builder<'_> {
             let outer_expr = self.cur_expr.replace(e);
             let call = self.with_site_op(crate::site::SiteOp::ImplicitIter, |b| {
                 let args = b.iter_witness_args(iter_ref, ValueRepr::Scalar(v))?;
-                Ok(b.emit_cur(Inst::Call { func: iter_ref, args }))
-            });
+                Ok::<_, CompilerError>(b.emit_cur(Inst::Call { func: iter_ref, args }))
+            })?;
+            // DELIVERY, exactly as the `for` head's witness does it. Both forms
+            // are ordinary calls to a generic `iter`, so under instance-owned
+            // emission both must name an instance; recording identity without
+            // delivering it spells a symbol nothing defines.
+            let span = self
+                .body
+                .expr_spans
+                .get(e)
+                .copied()
+                .unwrap_or(self.ws.module(m).functions[f].name_span);
+            if let Some(key) = self.next_call_spec(iter_ref, &generics, span)? {
+                self.f.spec_bindings.insert(call, key);
+            }
+            // IDENTITY beside delivery, the plan's split, and the same pair the
+            // `for` witness records. Delivery alone leaves the site's own claim
+            // unstated, which the census reports as `callee-no-instance` -- it
+            // was invisible only because the census runs POST-TRANSFORM and a
+            // splice removed the site before it could be examined.
+            if let Some(inf) = self.inf {
+                if let Some(subst) = crate::lower::shape::witness_instance_subst(
+                    self.ws,
+                    inf,
+                    iter_ref,
+                    &generics,
+                    self.subst(),
+                )? {
+                    self.f
+                        .callee_instances
+                        .insert(call, crate::site::OwnerInstance { func: iter_ref, subst });
+                }
+            }
             self.cur_expr = outer_expr;
-            return call;
+            return Ok(call);
         }
         Ok(v)
     }
@@ -1007,49 +1039,13 @@ impl Builder<'_> {
             self.emit_call_value_n(shape, fieldv, argv)
         } else {
             // `recv?.method(args)` UFCS: `method(recv, args)`, recv as arg 0.
+            // The whole call -- both ABIs, the delivery key, the bound tree, the
+            // callee instance and the target ABI plan -- is the ordinary direct
+            // call's business, so it happens there rather than being reassembled
+            // here from the DECLARATION's plan.
             let func = self.resolve_funcref(e, method)?;
             let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
-            if let Some(abi) = fn_scalar_abi(self.ws, self.scx, func) {
-                // Scalar-ABI callee: splat the value receiver + value args into
-                // leaves (a value return packs to the single safe-nav result).
-                return self.scalar_ufcs_call_repr(e, func, recv, &arg_idxs, &abi)
-            } else {
-                let mut argv = vec![recv];
-                for a in arg_idxs {
-                    argv.push(self.lower_expr(a)?);
-                }
-                // The instantiation key travels through `?.` like it does through a
-                // plain call: a storage the shared generic body cannot serve --
-                // a column-stored element, or a leaf-addressed buffer element on
-                // JS -- keeps its spec binding.
-                let key = self
-                    .call_spec(e, func)?
-                    .filter(|(k, _)| {
-                        !self.in_unspliced_ctx
-                            || spec_key_has_target_storage(self.ws, k, self.scx.target)
-                    })
-                    .map(|(k, _)| k);
-                let callee_inst = self.callee_instance_for(e, func)?;
-                // A tuple-returning method splats N values, and they are handed on
-                // UNPACKED: the per-slot join stores them slot-wise, so packing
-                // here would box a `nobox` element the wire just kept unboxed.
-                // A method whose own return is `(..)?` carries its presence tag in
-                // the repr, and the join forwards that tag rather than minting
-                // `true` -- `a?.m()` is absent when either link is.
-                let ret_ty = self.ws.module(func.module).functions[func.func].return_ty;
-                match ret_ty.and_then(|t| tuple_ret_shape(self.ws, self.spec_subst, t)) {
-                    Some(shape) => {
-                        return Ok(self.emit_tuple_call_tree(
-                            func, argv, &shape, None, key, callee_inst,
-                        ));
-                    }
-                    None => {
-                        let call = self.emit_cur(Inst::Call { func, args: argv });
-                        self.record_call(call, func, None, key, callee_inst);
-                        call
-                    }
-                }
-            }
+            return self.ufcs_call_repr(e, func, recv, &arg_idxs);
         };
         Ok(ValueRepr::Scalar(cv))
     }

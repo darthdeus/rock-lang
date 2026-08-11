@@ -88,7 +88,7 @@ pub fn do_fmt(path: &str, in_place: bool, check: bool) -> Result<()> {
     }
 
     if check && needs_formatting {
-        std::process::exit(1);
+        crate::ablation_report::exit_with_census(1);
     }
 
     if in_place && !check && formatted_count > 0 {

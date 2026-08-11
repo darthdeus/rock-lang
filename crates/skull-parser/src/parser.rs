@@ -463,7 +463,7 @@ impl<'a> Parser<'a> {
     fn skip_comments_as_items(&mut self) {
         while let TokenKind::Comment(text) = self.kind() {
             let span = self.span();
-            self.ast.items.push(Item { annotations: Vec::new(),
+            self.ast.items.push(Item { annotations: Vec::new(), is_global_write: false,
                 span,
                 kind: ItemKind::Comment(text),
             });
@@ -496,9 +496,11 @@ impl<'a> Parser<'a> {
         // etc.) and drops them from the annotation list — mirror that so they
         // don't render.
         let is_guarded = annotations.iter().any(|a| a.name.name.as_str() == "guarded");
+        let is_global_write = annotations.iter().any(|a| a.name.name.as_str() == "global_write");
         annotations.retain(|a| !matches!(a.name.name.as_str(), "guarded" | "global_write"));
         self.last_was_operator = false;
         let mut item = self.parse_item_inner()?;
+        item.is_global_write = is_global_write;
         if is_guarded {
             if let ItemKind::Global(g) = &mut item.kind {
                 g.is_guarded = true;
@@ -623,7 +625,7 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::CloseParen)?;
         let span = self.span_from(start);
         Ok(Item {
-            annotations: Vec::new(),
+            annotations: Vec::new(), is_global_write: false,
             span,
             kind: ItemKind::MacroInvocation { name, args, sigil },
         })
@@ -1069,7 +1071,7 @@ impl<'a> Parser<'a> {
             );
             self.ast.macro_param_refs.extend(refs);
         }
-        Ok(Item { annotations: Vec::new(),
+        Ok(Item { annotations: Vec::new(), is_global_write: false,
             span,
             kind: ItemKind::Function(FunctionDef {
                 span,
@@ -1269,7 +1271,7 @@ impl<'a> Parser<'a> {
         let fields = self.parse_field_block()?;
         let span = self.span_from(start);
         Ok(Item {
-            annotations: Vec::new(),
+            annotations: Vec::new(), is_global_write: false,
             span,
             kind: ItemKind::Struct(StructDef {
                 span,
@@ -1371,7 +1373,7 @@ impl<'a> Parser<'a> {
         self.delimiter_depth -= 1;
         self.expect(TokenKind::CloseCurly)?;
         let span = self.span_from(start);
-        Ok(Item { annotations: Vec::new(), span, kind: ItemKind::Enum(EnumDef { span, keyword_span: Some(start), name, generics, variants }) })
+        Ok(Item { annotations: Vec::new(), is_global_write: false, span, kind: ItemKind::Enum(EnumDef { span, keyword_span: Some(start), name, generics, variants }) })
     }
 
     /// `newtype Name<gen>(WrappedType)`.
@@ -1391,7 +1393,7 @@ impl<'a> Parser<'a> {
         }
         self.expect(TokenKind::CloseParen)?;
         let span = self.span_from(start);
-        Ok(Item { annotations: Vec::new(), span, kind: ItemKind::Newtype(NewtypeDef { span, name, generics, wrapped }) })
+        Ok(Item { annotations: Vec::new(), is_global_write: false, span, kind: ItemKind::Newtype(NewtypeDef { span, name, generics, wrapped }) })
     }
 
     /// `deco init Name[(params)] { body }` — the `init` category keyword is
@@ -1412,7 +1414,7 @@ impl<'a> Parser<'a> {
         };
         let body = self.parse_block()?;
         let span = self.span_from(start);
-        Ok(Item { annotations: Vec::new(), span, kind: ItemKind::Decorator(DecoratorDef { span, name, params, body }) })
+        Ok(Item { annotations: Vec::new(), is_global_write: false, span, kind: ItemKind::Decorator(DecoratorDef { span, name, params, body }) })
     }
 
     /// `global|const Name [: T] [= value]`.
@@ -1433,7 +1435,7 @@ impl<'a> Parser<'a> {
         let span = self.span_from(start);
         // `is_guarded` is set by `parse_item` from a leading `@guarded` (the
         // annotation is consumed there before it reaches the item).
-        Ok(Item { annotations: Vec::new(), span, kind: ItemKind::Global(GlobalDef { span, keyword_span: Some(start), name, ty, value, is_const, is_guarded: false }) })
+        Ok(Item { annotations: Vec::new(), is_global_write: false, span, kind: ItemKind::Global(GlobalDef { span, keyword_span: Some(start), name, ty, value, is_const, is_guarded: false }) })
     }
 
     /// `#if cond` / `#elseif cond` / `#else` / `#end` (cond is a bare ident).
@@ -1454,7 +1456,7 @@ impl<'a> Parser<'a> {
             _ => CompilerDirective::End,
         };
         let span = self.span_from(start);
-        Ok(Item { annotations: Vec::new(), span, kind: ItemKind::CompilerDirective(directive) })
+        Ok(Item { annotations: Vec::new(), is_global_write: false, span, kind: ItemKind::CompilerDirective(directive) })
     }
 
     fn directive_condition(&mut self) -> Ustr {

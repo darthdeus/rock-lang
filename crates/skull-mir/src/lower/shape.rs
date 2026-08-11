@@ -1515,54 +1515,12 @@ pub fn growth_depth(t: &MonoTy) -> u32 {
 /// diagnostic mode, never a limit on what compiles.
 pub const ABLATION_GROWTH_DEPTH: u32 = 8;
 
-/// Whether any generic in `key` binds a type whose STORAGE the shared generic
-/// body cannot serve -- i.e. whether specializing is a CORRECTNESS requirement
-/// rather than an optimization.
-///
-/// In a context the inliner never enters, an ordinary call simply forgoes the
-/// scalar ABI (`in_unspliced_ctx`) because the shared generic body still serves a
-/// boxed value correctly. The `for`-protocol `next` can only do the same for an
-/// element the boxed representation still stores: under column storage the shared
-/// body reads a `_data` that does not exist. So an unspliceable `next` keeps its
-/// spec binding exactly when the element is column-stored, and the post-emit
-/// validator turns that into a rejection instead of a miscompile.
-///
-/// Two storage forms qualify, and the key cannot tell which position the type is
-/// used in -- so it over-approximates, which costs an extra specialized copy and
-/// can never cost correctness:
-///
-/// - a column-stored `Vec` element, where the shared body reads a missing `_data`
-/// - on JS ONLY, a leaf-addressed `NativeBuffer` element. luajit's `.ptr` is a
-///   `T*`, so `p[i]` yields an element reference and the shared body is right;
-///   JS backs the buffer with a TypedArray, so `ptr[i]` is a NUMBER and a whole
-///   element read from an opaque `T` silently returns a leaf. That is a
-///   miscompile, not a slowdown, so it does not wait for an annotation.
-pub(crate) fn spec_key_has_target_storage(
-    ws: &Workspace,
-    key: &SpecKey,
-    target: bone_semantic::hir::FnBackend,
-) -> bool {
-    let js = target == bone_semantic::hir::FnBackend::Js;
-    key.iter().flatten().any(|ty| {
-        ty.any_nominal(&|name| {
-            // Either flavour counts: the question is whether the shared boxed
-            // body would read a `_data` the storage does not have, and a
-            // nullable element is column-stored on exactly the same terms.
-            ((vec_column_elem(ws, name, false).is_some()
-                || vec_column_elem(ws, name, true).is_some())
-                && columns_available(ws, target, name))
-                || (js && leaf_addr_plan(ws, name).is_ok())
-        })
-    })
-}
-
 /// The physical form an opaque body would WRONGLY assume for a container
 /// parameter, or `None` when the boxed assumption still holds.
 ///
 /// One oracle for every container constructor 2.4 names
 /// (`docs/boundary-contracts.md`), so the rejection rule cannot drift from the
-/// storage lowering actually selects -- it composes exactly the two predicates
-/// [`spec_key_has_target_storage`] does, for the same reason.
+/// storage lowering actually selects.
 ///
 /// The split is not stylistic:
 ///
@@ -1595,10 +1553,9 @@ pub fn opaque_container_hazard(
     nullable: bool,
 ) -> Option<&'static str> {
     let js = target == bone_semantic::hir::FnBackend::Js;
-    // The element's own nullability, NOT either flavour.
-    // [`spec_key_has_target_storage`] may over-approximate -- an extra
-    // specialized copy costs nothing -- and a REJECTION may not: an unmarked
-    // `[BV2?]` is a boxed vec while its non-nullable twin `[BV2]` is columns.
+    // The element's own nullability, NOT either flavour: an unmarked `[BV2?]`
+    // is a boxed vec while its non-nullable twin `[BV2]` is columns, and a
+    // REJECTION may not over-approximate the way a spec-key trigger could.
     let columns =
         vec_column_elem(ws, elem, nullable).is_some() && columns_available(ws, target, elem);
     match container.as_str() {
@@ -1615,9 +1572,8 @@ pub fn opaque_container_hazard(
 /// Whether `[elem]` takes column storage when lowering for `target`.
 ///
 /// Every target now serves columns, so this is unconditional. It survives as a
-/// named predicate because [`spec_key_has_target_storage`] asks the question for a
-/// DIFFERENT reason -- whether specializing a generic callee is a correctness
-/// requirement -- and that reasoning is only sound while the two agree.
+/// named predicate because [`opaque_container_hazard`] asks it per container
+/// constructor, where the answer decides a rejection.
 pub(crate) fn columns_available(
     _ws: &Workspace,
     _target: bone_semantic::hir::FnBackend,
@@ -1626,13 +1582,31 @@ pub(crate) fn columns_available(
     true
 }
 
-/// A callee's per-generic instantiation at one call site, in declaration order.
-/// `None` = that generic did not reify (no specialization for it).
-/// The snapshot cache key alongside the `FuncRef`.
-pub type SpecKey = Vec<Option<MonoTy>>;
+/// A callee's instantiation at one call site: one concrete type per declared
+/// generic, in declaration order. TOTAL by construction.
+///
+/// Absence lives OUTSIDE this type, in the `Option<SpecKey>` every producer
+/// returns -- `None` means no specialized delivery. It used to live inside, as
+/// a per-slot `Option`, and that shape admitted two things nothing wanted. A
+/// PARTIAL key named neither the shared body nor one instantiation (measured:
+/// 267,671 total constructions and zero partial), and an EMPTY key was the
+/// shared-body sentinel for a non-generic callee -- 756 of them, normalized
+/// back to `Shared` by `EmittedBodyId::new` rather than decided by whoever
+/// built it.
+///
+/// The empty case is the one that had to go. A non-generic concrete instance
+/// legitimately has no arguments, so "empty means shared" is a conflation that
+/// cannot survive into an `Instance`-keyed identity. Producers decide absence
+/// now; nothing normalizes it afterwards.
+///
+/// This is `skull::instance_graph::Instance`'s `args` in everything but
+/// interning -- a PREMISE that the narrowing is safe, not evidence the two
+/// identities are one. That convergence is the cache-key step, and it is named
+/// in `docs/parked/mono.md`.
+pub type SpecKey = Vec<MonoTy>;
 
 /// Callee generic `VarId` -> its concrete type tree, for specialized lowering.
-/// Only the reified generics appear; a `None` in the [`SpecKey`] is absent here.
+/// Total against the declaration's generics, exactly as [`SpecKey`] is.
 ///
 /// THE SAME TYPE as [`crate::monoty::MonoSubst`], which is what an instance of
 /// the mono graph carries. One substitution vocabulary, so an instance's own
@@ -1660,9 +1634,11 @@ pub type SpecSubst = crate::monoty::MonoSubst;
 /// before tuples reified at all; the consumers that need a tuple's slots read
 /// the binding directly through [`mono_ret_slot`].
 ///
-/// The constructors [`reify_type`] declines to admit answer `None` on the same
-/// terms, and for the same reason: they reach a SpecKey slot through no route
-/// today, and inventing a node for one would be a guess.
+/// `any`, unit, `never` and a function type answer `None` on the same terms.
+/// They are perfectly good [`SpecKey`] slots -- identity names them -- but the
+/// arena has no node to spell them with here, and inventing one would be a
+/// guess. The caller falls back to the unsubstituted generic, which is what a
+/// consumer reading a CONSTRUCTOR or a NOMINAL wants anyway.
 pub(crate) fn mono_type_node(ty: &MonoTy) -> Option<TypeExpr> {
     Some(match ty {
         MonoTy::Nullable(inner) => return mono_type_node(inner),
@@ -1720,66 +1696,31 @@ pub(crate) fn mono_tuple_shape(ws: &Workspace, parts: &[MonoTy]) -> TupleRetShap
     TupleRetShape { slots, nullable: false }
 }
 
-/// The concrete binding for `ty` under `enclosing`, or `None` when the
-/// CONDITIONAL specialization mechanism does not admit one.
+/// The concrete binding for `ty` under `enclosing`, or `None` when no concrete
+/// type exists here at all.
 ///
-/// The type tree is total ([`MonoTy`]); the admission is not, and that is the
-/// whole of what `None` means here. `any`, unit, `never` and function types are
-/// valid logical types this declines to key on, so their generics ride a shared
-/// body rather than a specialized copy -- the conditional-specialization policy
-/// plan S 2a measures and Stage 4 deletes outright, once the instance graph
-/// makes every instantiation concrete. Deciding it HERE, in one place, is what
-/// keeps it from living inside the type tree as a representational hole.
+/// ONE oracle answers this and the identity question alike
+/// ([`crate::monoty::convert`]), which is the whole content of plan S 2a/S 2b.
+/// It used to be a second, narrower walk whose `_ => None` arm declined valid
+/// `any`, unit, `never` and function types -- and `None` is not a type, it is the
+/// ABSENCE of one, shared by every binding that landed in it. So three
+/// instantiations at `unit`, `any` and `fn(int) -> int` mangled to one symbol
+/// and one emitted body served three representations. `MonoTy` has a
+/// constructor for each of the four, so there was never anything to represent;
+/// the hole was the admission.
 ///
-/// A genuine compiler state (an unresolvable `TyId`, an unbound generic) is also
-/// `None`; [`ablation_partial_key_decline`] is the discriminant that tells the
-/// two apart, because they call for opposite repairs.
+/// `None` now means exactly what [`crate::monoty::MonoTyReason`] means: a
+/// generic absent from `enclosing` (this is a shared generic body), an
+/// unresolved inference var, recovery poison, or a missing node. Those are
+/// compiler states, not language surface, and [`ablation_partial_key_decline`]
+/// reads the reason rather than re-deriving the predicate.
 pub(crate) fn reify_type(
     ws: &Workspace,
     inf: &BodyInference,
     ty: TyId,
     enclosing: &SpecSubst,
 ) -> Option<MonoTy> {
-    let ty = resolve_tyid(ws, inf, ty)?;
-    match ty_node(ws, inf, ty)? {
-        TypeExpr::Builtin(BuiltinTy::Int) => Some(MonoTy::Int),
-        TypeExpr::Builtin(BuiltinTy::Float) => Some(MonoTy::Float),
-        TypeExpr::Builtin(BuiltinTy::Bool) => Some(MonoTy::Bool),
-        // A string leaf is opaque to every shape decision, but it still has to
-        // REIFY: a tuple reifies only when all its parts do, so leaving this out
-        // made `(T, string)` unreifiable and the substitution then had no entry
-        // for the generic bound to it -- which is the one thing `ty_node` cannot
-        // answer. It cannot widen specialization on its own (`any_value` gates
-        // that on a value-struct leaf, which a prim is not).
-        TypeExpr::Builtin(BuiltinTy::String) => Some(MonoTy::String),
-        TypeExpr::Generic(var, _) => enclosing.get(&var).cloned(),
-        TypeExpr::Tuple { elements } => {
-            let parts = elements
-                .into_iter()
-                .map(|el| reify_type(ws, inf, ty.with_idx(el), enclosing))
-                .collect::<Option<Vec<_>>>()?;
-            Some(MonoTy::Tuple(parts))
-        }
-        TypeExpr::Nullable(inner) => Some(MonoTy::Nullable(Box::new(reify_type(
-            ws,
-            inf,
-            ty.with_idx(inner),
-            enclosing,
-        )?))),
-        TypeExpr::App { ctor, params } => {
-            let ctor = match ctor {
-                TypeCtor::Array => MonoCtor::Array,
-                TypeCtor::Map => MonoCtor::Map,
-                TypeCtor::Nominal(name) => MonoCtor::Nominal(name),
-            };
-            let params = params
-                .into_iter()
-                .map(|param| reify_type(ws, inf, ty.with_idx(param), enclosing))
-                .collect::<Option<Vec<_>>>()?;
-            Some(MonoTy::App { ctor, params })
-        }
-        _ => None,
-    }
+    crate::monoty::convert(ws, inf, ty, enclosing).ok()
 }
 
 /// The specialization decision for a call `e` (in a body with inference `inf`) to
@@ -1825,14 +1766,10 @@ pub fn callee_instance_subst(
 
 /// The concrete instance a set of generic bindings resolves to.
 ///
-/// IDENTITY, not delivery, and that is why it converts through
-/// [`crate::monoty::convert`] -- the one TOTAL logical-type oracle, and the same
-/// one `skull::instance_graph::instantiate` uses -- rather than through
-/// [`reify_type`], whose `_ => None` arm silently declines a function type.
-/// Six bitgun calls had a graph instance and no recorded claim because of it:
-/// `unwrap<fn()>`, `tick`/`start` over a coroutine payload, and `clear` over a
-/// `Map` of them. Two converters for one question is what let the record and
-/// the graph disagree while both looked complete.
+/// Converts through [`crate::monoty::convert`] -- the one TOTAL logical-type
+/// oracle, which `skull::instance_graph::instantiate` and the delivery-side
+/// [`reify_type`] also read. Two converters for one question is what lets a
+/// record and the graph disagree while both look complete.
 ///
 /// The two UNCONSTRAINED reasons are legitimate `None`s, and they are exactly
 /// the pair `instance_graph::convert_fail` calls `Fail::Unconstrained`:
@@ -1904,23 +1841,18 @@ pub(crate) fn compute_call_spec(
     e: Idx<Expr>,
     func: FuncRef,
     enclosing: &SpecSubst,
-    target: bone_semantic::hir::FnBackend,
-    total: bool,
 ) -> Result<Option<(SpecKey, SpecSubst)>, CompilerError> {
     let f = &ws.module(func.module).functions[func.func];
     if f.generics.is_empty() {
         return Ok(None);
     }
-    // `is_coroutine` is NOT an arbitrary exclusion, and deleting it does not
-    // "let coroutines specialize" -- it panics codegen with `Yield must be
-    // removed by the coroutine transform before codegen` (measured). Eligibility
-    // here is deliberately a SUBSET of the inliner's `classify`, because
-    // specialization is DELIVERED by inline-splicing a specialized clone, and a
-    // `co fn` cannot be spliced into its caller: the call constructs a coroutine
-    // object rather than running the body. A specialized clone would need to be
-    // emitted as its own top-level coroutine and put through `coro_transform`,
-    // which is a mechanism that does not exist yet.
-    if f.is_extern || f.inline_body.is_some() || f.is_coroutine {
+    // A `co fn` IS eligible, and it is the one eligible callee the inliner never
+    // sees: the call constructs a coroutine object rather than running the body,
+    // so specialization is delivered by a standalone definition put through
+    // `coro_transform` (`skull::mir_emit::emit_coroutine_chunk`) rather than by a
+    // splice. `extern` and `inline(..)` stay excluded -- an opaque body has no
+    // Rock CFG to specialize at all.
+    if f.is_extern || f.inline_body.is_some() {
         return Ok(None);
     }
     let Some(bindings) = inf.call_generic_bindings.get(&e) else {
@@ -1934,37 +1866,12 @@ pub(crate) fn compute_call_spec(
             ),
         ));
     };
-    let Some((key, subst)) = compute_spec_from_bindings(ws, inf, func, bindings, enclosing, total)?
-    else {
-        return Ok(None);
-    };
-    // A total-specialization target has no shared body to decline to, so the
-    // optimization gates below do not apply to it.
-    if total {
-        return Ok(Some((key, subst)));
-    }
-    // `@inline`/`@pure` is the OPT-IN gate: those callees specialize for speed, and
-    // whether it happens is the author's call.
-    //
-    // A column-eligible element is not an optimization. The shared body reads a
-    // `_data` that this instantiation's storage does not have, so it is WRONG, not
-    // slow -- the same asymmetry that decides whether an unspliceable call may
-    // fall back to the shared body. Specializing is the only correct lowering, so
-    // it does not wait for an annotation. This is what makes the plain-generic
-    // stdlib Vec surface (`clear`, `pop`, `remove_at`, ...) work over columns.
-    let opted_in =
-        f.annotations.iter().any(|a| matches!(a.name.name.as_str(), "inline" | "pure"));
-    // Stage-0e: the opt-in and the storage trigger are OPTIMIZATION gates, not
-    // correctness ones, so the ablation bypasses them to hold every reachable
-    // generic call to its complete instantiation. The gates are not deleted;
-    // with the mode off this is the untouched default path.
-    if crate::ablation::enabled() {
-        return Ok(Some((key, subst)));
-    }
-    if !opted_in && !spec_key_has_target_storage(ws, &key, target) {
-        return Ok(None);
-    }
-    Ok(Some((key, subst)))
+    // Every complete instantiation specializes. The `@inline`/`@pure` opt-in and
+    // the column-storage trigger were OPTIMIZATION gates over a shared generic
+    // body, choosing when a second definition was worth minting; with emission
+    // owned by the instance there is no shared body for a declined call to reach,
+    // so there is nothing left to gate.
+    Ok(compute_spec_from_bindings(ws, inf, func, bindings, enclosing)?)
 }
 
 /// Why a generic Rock call would keep the SHARED body, classified into an S 0e
@@ -1987,15 +1894,6 @@ pub(crate) fn ablation_decline(
     let f = &ws.module(func.module).functions[func.func];
     if f.generics.is_empty() {
         return None;
-    }
-    if f.is_coroutine {
-        return Some((
-            C::UnsupportedSurface,
-            "a generic `co fn` has no concrete form: `compute_call_spec` bails on \
-             `is_coroutine` before building a SpecKey, so every instantiation shares one \
-             body and one set of `__step`/`__resume` symbols"
-                .to_string(),
-        ));
     }
     if f.is_extern || f.inline_body.is_some() {
         return Some((
@@ -2046,18 +1944,18 @@ pub(crate) fn ablation_decline(
 }
 
 /// Why a binding list cannot produce a COMPLETE [`SpecKey`] -- or `None` when
-/// every slot reifies and the key names exactly one instantiation.
+/// every slot converts and the key names exactly one instantiation.
 ///
-/// A slot `reify_type` answers `None` for is not one thing. Its admission is
-/// PARTIAL (plan S 2a): it declines valid `any`, unit, never and function
-/// types, and it also answers `None` for genuine compiler states. Reporting both
-/// as "the graph is missing a record" sends Stage 2 to add a record for a call
-/// whose record already exists, and hides that the defect is the KEY.
+/// There is no "valid type the key cannot name" arm, and its absence is
+/// structural rather than an omission: the key is built from
+/// [`crate::monoty::convert`] (see [`reify_type`]), so a binding that converts
+/// IS in the key. Plan S 2a's category emptied when the two walks became one --
+/// while they were separate, this function's discriminant was the disagreement
+/// between them, and there is none to read now.
 ///
-/// [`crate::monoty::convert`] is total, so it is the discriminant: a binding it
-/// CAN convert is a valid type the current identity mechanism has no name for
-/// (plan S 2b, "valid type absent from the key -> TOTAL `MonoTy`; never a
-/// fallback"), and one it cannot carries its own reason.
+/// So every remaining reason is a compiler state, and the split is which repair
+/// it calls for: an unbound generic says the CALLER is a shared generic body
+/// (Stage 3 work), and everything else is an invariant failure.
 pub(crate) fn ablation_partial_key_decline(
     ws: &Workspace,
     inf: &BodyInference,
@@ -2065,22 +1963,14 @@ pub(crate) fn ablation_partial_key_decline(
     enclosing: &SpecSubst,
 ) -> Option<(crate::ablation::FatalCategory, String)> {
     use crate::ablation::FatalCategory as C;
-    use crate::monoty::{MonoSubst, MonoTyReason};
-    let b = *bindings.iter().find(|b| reify_type(ws, inf, **b, enclosing).is_none())?;
-    let subst: MonoSubst = enclosing.iter().map(|(v, t)| (*v, t.clone())).collect();
-    Some(match crate::monoty::convert(ws, inf, b, &subst) {
-        Ok(ty) => (
-            C::UnsupportedSurface,
-            format!(
-                "a binding of `{}` is a VALID type that specialization does not admit \
-                 (plan S 2a), so its key slot is `None`: the call would ride a PARTIAL key \
-                 naming a family of instantiations rather than one",
-                ty.render()
-            ),
-        ),
+    use crate::monoty::MonoTyReason;
+    let reason = bindings
+        .iter()
+        .find_map(|b| crate::monoty::convert(ws, inf, *b, enclosing).err())?;
+    Some(match reason {
         // The enclosing instance never named this generic, so the caller itself
         // is a shared generic body -- a graph gap, not a key gap.
-        Err(MonoTyReason::UnboundGeneric(name)) => (
+        MonoTyReason::UnboundGeneric(name) => (
             C::MissingGraphEdge,
             format!(
                 "the binding names generic `{name}`, absent from the enclosing \
@@ -2088,10 +1978,10 @@ pub(crate) fn ablation_partial_key_decline(
                  no instantiation exists to key on"
             ),
         ),
-        Err(r) => (
+        r => (
             C::CompilerInvariant,
             format!(
-                "a generic binding is neither reifiable nor convertible ({}): inference \
+                "a generic binding does not convert to a logical type ({}): inference \
                  state, not a language surface",
                 r.bucket()
             ),
@@ -2117,7 +2007,6 @@ pub(crate) fn compute_spec_from_bindings(
     func: FuncRef,
     bindings: &[TyId],
     enclosing: &SpecSubst,
-    total: bool,
 ) -> Result<Option<(SpecKey, SpecSubst)>, CompilerError> {
     let f = &ws.module(func.module).functions[func.func];
     if bindings.len() != f.generics.len() {
@@ -2131,10 +2020,19 @@ pub(crate) fn compute_spec_from_bindings(
             ),
         ));
     }
+    // A non-generic declaration has no instantiation to name. It used to return
+    // `Some(vec![])` and rely on `EmittedBodyId::new` reading empty as "the
+    // shared body" -- absence decided two layers away from the producer, by a
+    // sentinel that a non-generic `Instance` legitimately collides with.
+    // A non-generic declaration has no instantiation to name. It used to return
+    // `Some(vec![])` and rely on `EmittedBodyId::new` reading empty as "the
+    // shared body" -- absence decided two layers away from the producer, by a
+    // sentinel that a non-generic `Instance` legitimately collides with.
+    if f.generics.is_empty() {
+        return Ok(None);
+    }
     let mut key: SpecKey = Vec::with_capacity(bindings.len());
     let mut subst = SpecSubst::default();
-    let mut any_value = false;
-    let mut complete = true;
     for (g, b) in f.generics.iter().zip(bindings) {
         let Some(TypeExpr::Generic(var, _)) = ty_node(ws, inf, *g) else {
             return Err(CompilerError::new_with_label(
@@ -2145,39 +2043,20 @@ pub(crate) fn compute_spec_from_bindings(
                 ),
             ));
         };
-        match reify_type(ws, inf, *b, enclosing) {
-            Some(ty) => {
-                any_value |= ty.any_nominal(&|name| map_is_value_struct(ws, name));
-                subst.insert(var, ty.clone());
-                key.push(Some(ty));
-            }
-            None => {
-                key.push(None);
-                complete = false;
-            }
-        }
+        // One unreified slot and there is no key at all. A partial key named the
+        // DECLARATION through `spec_fn_name`, i.e. the same absent body a
+        // missing key names, so building one was never a third answer.
+        let Some(ty) = reify_type(ws, inf, *b, enclosing) else { return Ok(None) };
+        subst.insert(var, ty.clone());
+        key.push(ty);
     }
-    // A target with NO shared generic body needs every complete key: there is
-    // no boxed representation on a GPU for an unreified `T` to take, so a
-    // partial answer is not a slower lowering, it is no lowering. Same rule the
-    // Stage-0e ablation applies workspace-wide, asked per lowering.
-    if total {
-        return Ok(complete.then_some((key, subst)));
-    }
-    // Stage-0e: `any_value` is the conditional trigger -- specialize only when
-    // some binding names a value struct. Totality has no such condition, so the
-    // ablation keeps every COMPLETE key.
+    // EVERY complete key specializes. There is no shared generic body to decline
+    // to any more, so a declined key is not a slower lowering -- it is a call
+    // spelling a name nothing defines.
     //
-    // A partial key is not a specialization. Every `None` slot maps back to the
-    // shared body through `spec_fn_name`, so returning one here would report a
-    // shared generic body as a success and skip the decline classifier entirely
-    // -- the mode's own blind spot, and exactly the uninterpretable result plan
-    // S 0f forbids ("dropping `any_value` with partial keys"). The default path
-    // below is untouched: it still accepts a partial key when `any_value` holds.
-    if crate::ablation::enabled() {
-        return Ok(complete.then_some((key, subst)));
-    }
-    Ok(any_value.then_some((key, subst)))
+    // An INCOMPLETE instantiation is the Stage-2 `ConcreteTypeUnavailable`
+    // rejection's business, and it left through the `reify_type` arm above.
+    Ok(Some((key, subst)))
 }
 
 /// The CONCRETE INSTANCE an iterator-protocol WITNESS resolves to, from the
@@ -2236,7 +2115,7 @@ pub fn spec_key_from_next_generics(
         let Some(bound) = next_generics.get(&var).copied() else { return Ok(None) };
         bindings.push(bound);
     }
-    Ok(compute_spec_from_bindings(ws, inf, func, &bindings, enclosing, false)?.map(|(key, _)| key))
+    Ok(compute_spec_from_bindings(ws, inf, func, &bindings, enclosing)?.map(|(key, _)| key))
 }
 
 /// [`ablation_decline`] for the for-protocol `next` witness, whose bindings come
@@ -2282,13 +2161,38 @@ pub(crate) fn ablation_next_decline(
 /// Rebuild the [`SpecSubst`] (callee generic `VarId` -> concrete type) for `fref`
 /// from a [`SpecKey`] (trees in declaration order). The inliner holds only the
 /// arena-free key in its cache; this re-pairs it with the callee's generic
-/// `VarId`s to drive [`lower_function_spec`]. An empty / all-`None` key yields an
+/// `VarId`s to drive [`lower_emitted_body`]. An empty / all-`None` key yields an
 /// empty subst (the shared snapshot).
+/// The inverse of [`spec_subst_from_key`], and the E1 cut's premise: for a body
+/// emission actually writes, a [`SpecKey`] carries nothing the [`SpecSubst`]
+/// does not.
+///
+/// `Some` only for a TOTAL rebuild -- every declared generic present in `subst`
+/// -- so the caller cannot mistake a partial answer for a key. That is the same
+/// completeness `compute_spec_from_bindings` demands before it returns a key at
+/// all, and it is what makes the two directions a round trip rather than a pair
+/// of lossy projections.
+///
+/// The declaration supplies the ORDER, which is the only thing a substitution
+/// lacks: a key is positional over `f.generics` and a subst is keyed by `VarId`.
+pub fn spec_key_from_subst(ws: &Workspace, fref: FuncRef, subst: &SpecSubst) -> Option<SpecKey> {
+    let f = &ws.module(fref.module).functions[fref.func];
+    if f.generics.is_empty() {
+        return None;
+    }
+    let mut key = SpecKey::with_capacity(f.generics.len());
+    for g in f.generics.iter() {
+        let Some(TypeExpr::Generic(var, _)) = static_ty(ws, *g) else { return None };
+        key.push(subst.get(&var)?.clone());
+    }
+    Some(key)
+}
+
 pub fn spec_subst_from_key(ws: &Workspace, fref: FuncRef, key: &SpecKey) -> SpecSubst {
     let f = &ws.module(fref.module).functions[fref.func];
     let mut subst = SpecSubst::default();
-    for (g, ty) in f.generics.iter().zip(key) {
-        if let (Some(TypeExpr::Generic(var, _)), Some(reified)) = (static_ty(ws, *g), ty) {
+    for (g, reified) in f.generics.iter().zip(key) {
+        if let Some(TypeExpr::Generic(var, _)) = static_ty(ws, *g) {
             subst.insert(var, reified.clone());
         }
     }
@@ -2447,8 +2351,10 @@ pub(crate) fn tuple_ret_shape(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> Op
 /// Read only where the LOWERING could not resolve the element itself: a body
 /// specialized at a value element splits `E` into leaf cells there
 /// (`MirFunc::bound_next_split`) and this only CHECKS the two agree. What is
-/// left is the case specialization cannot express -- a generic bound to a tuple,
-/// which does not reify -- so the element stays opaque and has to be rebuilt.
+/// left is a generic bound to a TUPLE: it reifies and is in the key like any
+/// other type, but [`mono_type_node`] has no arena to mint its node in, so
+/// lowering saw an unsubstituted generic and left the element opaque for the
+/// rebuild below.
 ///
 /// The three cases are kept DISTINCT on purpose: "nothing to repack" and "a shape
 /// the flat repack cannot express" must not collapse into one `None`, or an
@@ -2465,7 +2371,8 @@ pub enum BoundNextElem {
     ///
     /// Reached only when the lowering left the element opaque, which for a
     /// nullable value now means a TUPLE element (`zip`'s pair): a generic bound
-    /// to a tuple does not reify, so the body never specialized.
+    /// to a tuple has no [`mono_type_node`], so lowering read it as an
+    /// unsubstituted generic.
     Unsupported,
 }
 

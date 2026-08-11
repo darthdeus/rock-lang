@@ -696,6 +696,18 @@ pub struct MirFunc {
     /// itself spliced at a concrete root.
     pub bound_trees:
         bone_semantic::prelude::FxHashMap<Idx<Inst>, bone_semantic::prelude::BoundTree>,
+    /// The same fact for a call a STANDALONE substitution produced: the `sub` of
+    /// the resolved leaf that retargeted it, so the demand this body files for
+    /// that callee carries the callee's own resolution.
+    ///
+    /// Separate from [`Self::bound_trees`] because it is already RESOLVED. A raw
+    /// `BoundTree`'s `next_generics` are `TyId`s in the arena that recorded it,
+    /// so a tree arriving from another instantiation cannot be stated as one --
+    /// which is the whole reason a demand carries a `ResolvedBoundTree`. The
+    /// splice path has no need of it: it clones the callee in place, so its
+    /// sub-tree is grafted as a raw tree in the caller's own arena.
+    pub resolved_bound_trees:
+        bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::bound::ResolvedBoundTree>,
     /// Per call inst that the caller lowered with the SPECIALIZED scalar ABI: the
     /// callee's per-generic instantiation key (`docs/flatvec-plan.md` call-site
     /// specialization). The inliner reads it to splice the matching specialized
@@ -791,6 +803,7 @@ impl MirFunc {
             coro_defers: Vec::new(),
             for_iter_headers: Vec::new(),
             bound_trees: Default::default(),
+            resolved_bound_trees: Default::default(),
             spec_bindings: Default::default(),
             bound_next_split: Default::default(),
             nested_fns: Vec::new(),

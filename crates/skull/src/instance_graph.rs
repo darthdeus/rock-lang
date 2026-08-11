@@ -42,60 +42,11 @@ use skull_mir::mangle::mangle_fn;
 use skull_mir::monoty::{MonoArena, MonoSubst, MonoTyId, MonoTyReason};
 use skull_mir::mir::FuncRef;
 
-/// A function at one concrete instantiation. Non-generic functions get an
-/// instance too (empty `args`), so no consumer can reintroduce `if generic`.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub struct Instance {
-    pub func: FuncRef,
-    pub args: Vec<MonoTyId>,
-}
-
-/// A `FuncRef` as an ORDERED map key.
-///
-/// `FuncRef` is not `Ord`, and ordering by it would be ordering by arena
-/// position anyway. This is `(module, function index)` -- stable within a build
-/// and used only to make iteration deterministic, the same contract
-/// [`ord_key`] states for an [`Instance`].
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct DeclKey(pub FuncRef);
-
-impl DeclKey {
-    pub fn raw(self) -> (u32, u32) {
-        (self.0.module.raw(), self.0.func.into_raw().into_u32())
-    }
-}
-
-impl Ord for DeclKey {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.raw().cmp(&other.raw())
-    }
-}
-
-impl PartialOrd for DeclKey {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-/// `FuncRef` is not `Ord`, and ordering by it would be ordering by arena
-/// position anyway. The key is `(module, function index, args)` -- stable within
-/// a build, and only ever used to make iteration order deterministic; the
-/// MANIFEST is sorted by rendered symbol, which is stable across builds.
-fn ord_key(i: &Instance) -> (u32, u32, &[MonoTyId]) {
-    (i.func.module.raw(), i.func.func.into_raw().into_u32(), &i.args)
-}
-
-impl Ord for Instance {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        ord_key(self).cmp(&ord_key(other))
-    }
-}
-
-impl PartialOrd for Instance {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
+/// The identity vocabulary now lives in `skull-mir` ([`skull_mir::instance`]),
+/// low enough that emission can key its bodies on it. This module remains the
+/// AUTHORITY that builds instances and owns the [`MonoArena`] their `args`
+/// index into; only the type's placement moved.
+pub use skull_mir::instance::{DeclKey, Instance};
 
 /// Why one instance depends on another. The plan's edge kinds; the histogram of
 /// these is what makes an absent edge class visible.
@@ -450,6 +401,16 @@ pub struct InstanceGraph {
     /// Every site the walk ATTEMPTED, including the ones with no `from`
     /// instance to record against. The denominator for `call_sites`.
     pub sites_attempted: usize,
+    /// Instances [`detect_changing_instance_recursion`] actually searched FROM.
+    ///
+    /// Published for the same reason `sites_attempted` is: the pass is a
+    /// whole-graph search whose cost is invisible from its own output, which is
+    /// EMPTY on every program without polymorphic recursion -- so a
+    /// rejection-output test passes whether the search is bounded or
+    /// exhaustive. This is an OPERATIONAL counter, describing work performed
+    /// rather than the graph produced, so it belongs in a census assertion and
+    /// never in a comparison of two graphs.
+    pub recursion_starts: usize,
     /// Callees seeded from an ALWAYS-EMITTED body (a decorator definition or a
     /// global initializer) rather than from a function root. Production treats
     /// their call edges as reachability roots (`mir_emit::reachable_fns`'s
@@ -582,18 +543,9 @@ fn generic_root_obligation(ws: &Workspace, r: FuncRef, f: &Function) -> Option<&
     None
 }
 
-/// Polymorphic recursion (`f<T> -> f<[T]>`) does not terminate under
-/// demand-driven instantiation (plan S 7). The cap turns divergence into a
-/// REPORT: a capped instance is a changing-instance recursion candidate.
-///
-/// It caps the STRUCTURAL DEPTH of the instantiation types, not the path length
-/// from a root. A path length is a property of how the walk arrived, so capping
-/// on it makes graph MEMBERSHIP depend on discovery order -- measured: with a
-/// path cap, `games/little-knights` produced two different manifests under
-/// forward and reversed root order, failing plan S 20g.4. Type depth is a
-/// property of the instance itself, so the same instance is capped or not
-/// regardless of how it was reached.
-pub const MAX_INSTANTIATION_DEPTH: u32 = 12;
+/// Re-exported from [`skull_mir::monoty`], which owns the decision so the graph
+/// and both emitters cannot drift. See `too_deep_to_instantiate` there.
+pub use skull_mir::monoty::MAX_INSTANTIATION_DEPTH;
 
 /// Whether an instance's substitution makes it a CONCRETE shape -- the one
 /// question every declaration-based pass has to ask before it may answer.
@@ -724,8 +676,8 @@ impl InstanceGraph {
         if i.args.is_empty() {
             return mangle_fn(ws, f);
         }
-        let key: Vec<Option<skull_mir::monoty::MonoTy>> =
-            i.args.iter().map(|a| Some(self.arena.get(*a).clone())).collect();
+        let key: skull_mir::lower::SpecKey =
+            i.args.iter().map(|a| self.arena.get(*a).clone()).collect();
         skull_mir::mangle::spec_fn_name(ws, f, &key)
             .expect("an instance with arguments always has a specialized symbol")
     }
@@ -1257,6 +1209,7 @@ pub fn build(ws: &Workspace, roots: Vec<FuncRef>, perturb: bool) -> InstanceGrap
         call_sites: BTreeMap::new(),
         duplicate_sites: Vec::new(),
         sites_attempted: 0,
+        recursion_starts: 0,
         substitutions: BTreeMap::new(),
         subst_disagreements: Vec::new(),
         subst_comparisons: 0,
@@ -1298,15 +1251,20 @@ pub fn build(ws: &Workspace, roots: Vec<FuncRef>, perturb: bool) -> InstanceGrap
             let body = module.bodies.get(&owner);
             walk_body_edges(
                 &mut g, &mut work, ws, inf, body, None, &MonoSubst::default(), 0,
-                SiteDomain::Own, None,
+                &SiteDomain::Own, None,
             );
         }
     }
 
     while let Some((inst, subst, depth)) = work.pop() {
-        let ty_depth =
-            inst.args.iter().map(|a| g.arena.depth(*a)).max().unwrap_or(0);
-        if ty_depth > MAX_INSTANTIATION_DEPTH {
+        // The one admissibility oracle, shared with both emitters. The graph
+        // DECLINES to expand where they reject: a capped instance is a
+        // changing-instance-recursion candidate, not yet a verdict.
+        if skull_mir::monoty::too_deep_to_instantiate(
+            inst.args.iter().map(|a| g.arena.get(*a)),
+        )
+        .is_some()
+        {
             g.depth_capped.push(inst);
             continue;
         }
@@ -1328,7 +1286,7 @@ pub fn build(ws: &Workspace, roots: Vec<FuncRef>, perturb: bool) -> InstanceGrap
 
         walk_body_edges(
             &mut g, &mut work, ws, inf, Some(body), Some(&inst), &subst, depth,
-            SiteDomain::Own, None,
+            &SiteDomain::Own, None,
         );
         walk_struct_default_edges(&mut g, &mut work, ws, body, &inst, &subst, depth);
     }
@@ -1369,7 +1327,7 @@ fn walk_body_edges(
     // WHICH arena the sites recorded here index, and -- for a foreign one --
     // which of its expressions this owner actually reaches. `None` is the whole
     // body, which is what an own-domain walk always wants.
-    domain: SiteDomain,
+    domain: &SiteDomain,
     only: Option<&FxHashSet<Idx<bone_semantic::hir::Expr>>>,
 ) {
     let reached = |e: Idx<bone_semantic::hir::Expr>| only.is_none_or(|s| s.contains(&e));
@@ -1390,7 +1348,7 @@ fn walk_body_edges(
         let kind = if bindings.is_some() { EdgeKind::GenericCall } else { EdgeKind::DirectCall };
         if let Some(to) = record_call(
             g, work, ws, inf, from, subst, depth, callee, bindings, kind, span,
-            Site { domain, expr: e, op: SiteOp::DirectCall },
+            Site { domain: domain.clone(), expr: e, op: SiteOp::DirectCall },
         ) {
             resolved_calls.insert(e, to);
         }
@@ -1403,12 +1361,12 @@ fn walk_body_edges(
             if cf.generics.is_empty() {
                 record_call(
                     g, work, ws, inf, from, subst, depth, callee, None, EdgeKind::FnValue, span,
-                    Site { domain, expr: e, op: SiteOp::FnValue },
+                    Site { domain: domain.clone(), expr: e, op: SiteOp::FnValue },
                 );
             } else if let Some(from) = from {
                 g.record_site(
                     Some(from),
-                    Site { domain, expr: e, op: SiteOp::FnValue },
+                    Site { domain: domain.clone(), expr: e, op: SiteOp::FnValue },
                     SiteOutcome::Failed("generic-fn-value"),
                     span,
                 );
@@ -1471,7 +1429,7 @@ fn walk_body_edges(
         let generated = sites
             .into_iter()
             .map(|GeneratedSite { expr, name }| {
-                (Site { domain, expr, op: SiteOp::Synthesized(name) }, name, true)
+                (Site { domain: domain.clone(), expr, op: SiteOp::Synthesized(name) }, name, true)
             })
             .chain(dispatched)
             .filter(|(site, _, _)| reached(site.expr));
@@ -1520,7 +1478,7 @@ fn walk_body_edges(
         let span = body.and_then(|b| b.expr_spans.get(e).copied()).unwrap_or_else(Span::unknown);
         record_witness(
             g, work, ws, inf, from, subst, depth, witness, span, EdgeKind::ImplicitIter,
-            Site { domain, expr: e, op: SiteOp::ImplicitIter },
+            Site { domain: domain.clone(), expr: e, op: SiteOp::ImplicitIter },
         );
     }
 
@@ -1542,7 +1500,7 @@ fn walk_body_edges(
     bound_calls.sort_by_key(|(e, _)| *e);
     for (e, gidx) in bound_calls.into_iter().filter(|(e, _)| reached(*e)) {
         let span = body.and_then(|b| b.expr_spans.get(e).copied()).unwrap_or_else(Span::unknown);
-        let site = Site { domain, expr: e, op: SiteOp::DirectCall };
+        let site = Site { domain: domain.clone(), expr: e, op: SiteOp::DirectCall };
         let resolved = from
             .and_then(|i| g.bound_trees.get(i))
             .and_then(|tree| tree.next.get(&gidx))
@@ -1570,7 +1528,7 @@ fn walk_body_edges(
         if let Some(witness) = &info.iter {
             record_witness(
                 g, work, ws, inf, from, subst, depth, witness, span,
-                EdgeKind::IteratorIter, Site { domain, expr: e, op: SiteOp::ForIter },
+                EdgeKind::IteratorIter, Site { domain: domain.clone(), expr: e, op: SiteOp::ForIter },
             );
         }
         let _ = record_bound_next(
@@ -1687,15 +1645,47 @@ fn detect_changing_instance_recursion(g: &mut InstanceGraph, ws: &Workspace) {
         succ.entry(&e.from).or_default().push((&e.to, e.span));
     }
 
-    let mut order: Vec<&Instance> = succ.keys().copied().collect();
+    // A declaration with exactly ONE instance graph-wide can never satisfy the
+    // predicate below -- the search looks for a DIFFERENT instantiation of the
+    // start's own declaration, and the only reachable nodes are instances the
+    // graph holds. Skipping those starts is exact, not an approximation.
+    //
+    // It is most of the work, because the `already` skip further down engages
+    // only AFTER a finding: without this, a program with no polymorphic
+    // recursion -- the normal case -- runs a full DFS from every instance with
+    // an outgoing edge, over the whole edge set, O(V.E).
+    //
+    // Counted over ALL instances, not over `succ`: a declaration's second
+    // instance can be a LEAF with no outgoing edges, so it never appears as a
+    // candidate start while being exactly what makes the first one's search
+    // worth running. Counting over the starts would silently re-admit nothing
+    // and skip the pair that matters.
+    //
+    // Measurements in `docs/parked/mono.md`.
+    let mut per_decl: FxHashMap<(u32, u32), usize> = FxHashMap::default();
+    for i in &g.instances {
+        *per_decl.entry((i.func.module.raw(), i.func.func.into_raw().into_u32())).or_default() += 1;
+    }
+
+    let mut order: Vec<&Instance> = succ
+        .keys()
+        .copied()
+        .filter(|i| {
+            per_decl
+                .get(&(i.func.module.raw(), i.func.func.into_raw().into_u32()))
+                .is_some_and(|n| *n > 1)
+        })
+        .collect();
     order.sort();
     let mut found: Vec<(Instance, Span, String)> = Vec::new();
     let mut already: BTreeSet<(u32, u32)> = BTreeSet::new();
+    let mut starts = 0usize;
     for start in order {
         let key = (start.func.module.raw(), start.func.func.into_raw().into_u32());
         if already.contains(&key) {
             continue;
         }
+        starts += 1;
         let mut seen: BTreeSet<&Instance> = BTreeSet::new();
         let mut queue: Vec<(&Instance, Span)> = vec![(start, Span::unknown())];
         while let Some((node, via)) = queue.pop() {
@@ -1720,6 +1710,7 @@ fn detect_changing_instance_recursion(g: &mut InstanceGraph, ws: &Workspace) {
             }
         }
     }
+    g.recursion_starts = starts;
     for (at, span, message) in found {
         g.rejections.push(Rejection {
             kind: RejectionKind::ChangingInstanceRecursion,
@@ -1841,27 +1832,51 @@ fn walk_struct_default_edges(
     depth: u32,
 ) {
     use bone_semantic::hir::Expr as E;
-    // One entry per (struct, omitted field) this instance reaches, deduplicated:
-    // two literals of one struct omitting one field are one obligation set.
-    // Keyed by module INDEX rather than `ModuleId`, which has no `Ord`; the
-    // `ModuleId` itself travels in the value so the domain keeps it.
+    // One entry per (struct, ARGUMENTS, omitted field) this instance reaches,
+    // deduplicated: two literals of one struct omitting one field are one
+    // obligation set, but `Box<int> {}` and `Box<string> {}` are two -- the
+    // initializers are shared text resolving different callees.
+    //
+    // Keyed by module INDEX rather than `ModuleId`, which has no `Ord`, and by
+    // the arguments' CANONICAL encoding, which is what identity keys on; the
+    // `ModuleId` and the arguments themselves travel in the value so the domain
+    // keeps them.
+    type Key = (usize, u32, Vec<String>);
     let mut omitted: BTreeMap<
-        (usize, u32),
-        (ModuleId, Idx<bone_semantic::hir::StructDef>, BTreeSet<ustr::Ustr>),
+        Key,
+        (
+            ModuleId,
+            Idx<bone_semantic::hir::StructDef>,
+            Vec<skull_mir::monoty::MonoTy>,
+            BTreeSet<ustr::Ustr>,
+        ),
     > = BTreeMap::new();
     // A DEFAULT can itself be a struct literal that omits a field --
     // `timers: MobTimers = MobTimers {}` inside `Mob`, whose own
     // `idle_timer = random_range(1, 4)` is the call two arenas down -- so the
     // scan is a worklist over bodies, not one pass over the instance's own.
-    let mut pending: Vec<(&Body, Option<FxHashSet<Idx<bone_semantic::hir::Expr>>>)> =
-        vec![(body, None)];
-    // How many omitted fields each struct was last scanned with. A second
-    // literal of one struct can omit a field the first wrote, so a set that
-    // GREW must be rescanned -- a plain visited-set would stop at the first
-    // literal and miss the sub-literals only the wider set reaches.
-    let mut scanned: BTreeMap<(usize, u32), usize> = BTreeMap::new();
-    while let Some((scan, reached)) = pending.pop() {
-        let mut fresh: Vec<(usize, u32)> = Vec::new();
+    //
+    // Each entry carries the inference and SUBSTITUTION in force for that body,
+    // exactly as `Builder::with_struct_default` nests them: a nested defaults
+    // body resolves under its own struct's slot bindings, not the outer one's.
+    let Some(top_inf) = ws.inference(inst.func.module).and_then(|ir| {
+        ir.per_fn.get(&BodyOwner::Function(inst.func.func))
+    }) else {
+        return;
+    };
+    let mut pending: Vec<(
+        &Body,
+        &BodyInference,
+        MonoSubst,
+        Option<FxHashSet<Idx<bone_semantic::hir::Expr>>>,
+    )> = vec![(body, top_inf, subst.clone(), None)];
+    // How many omitted fields each key was last scanned with. A second literal
+    // of one struct can omit a field the first wrote, so a set that GREW must be
+    // rescanned -- a plain visited-set would stop at the first literal and miss
+    // the sub-literals only the wider set reaches.
+    let mut scanned: BTreeMap<Key, usize> = BTreeMap::new();
+    while let Some((scan, scan_inf, scan_subst, reached)) = pending.pop() {
+        let mut fresh: Vec<Key> = Vec::new();
         for (e, expr) in scan.expr_arena.iter() {
             if reached.as_ref().is_some_and(|r| !r.contains(&e)) {
                 continue;
@@ -1873,38 +1888,58 @@ fn walk_struct_default_edges(
                 continue;
             }
             let Some(sid) = ws.struct_by_name.get(name) else { continue };
+            // The same oracle lowering stamps the domain with, INCLUDING its
+            // shared-body fallback -- a literal keyed one way here and the
+            // other way there would report a hole that is really a
+            // disagreement. A hard error records no obligation: lowering
+            // rejects that program outright, so there is nothing to join.
+            let generics = skull_mir::struct_defaults::declared_generics(ws, *sid);
+            let Ok(args) = skull_mir::struct_defaults::args_at(
+                ws, scan_inf, &scan_subst, e, *name, generics,
+            ) else {
+                continue;
+            };
+            let args = args.to_vec();
             let written: BTreeSet<ustr::Ustr> =
                 fields.clone().map(|f| scan.struct_lit_field_arena[f].name).collect();
             let decl = &ws.modules[sid.module.index()].structs[sid.def];
-            let key = (sid.module.index(), sid.def.into_raw().into_u32());
+            let key: Key = (
+                sid.module.index(),
+                sid.def.into_raw().into_u32(),
+                args.iter().map(|a| a.canonical()).collect(),
+            );
             for f in &decl.fields {
                 if !written.contains(&f.name) && f.has_default {
                     omitted
-                        .entry(key)
-                        .or_insert_with(|| (sid.module, sid.def, BTreeSet::new()))
-                        .2
+                        .entry(key.clone())
+                        .or_insert_with(|| (sid.module, sid.def, args.clone(), BTreeSet::new()))
+                        .3
                         .insert(f.name);
                 }
             }
-            let now = omitted.get(&key).map(|(_, _, f)| f.len()).unwrap_or(0);
-            if now > 0 && scanned.insert(key, now).unwrap_or(0) < now {
+            let now = omitted.get(&key).map(|(_, _, _, f)| f.len()).unwrap_or(0);
+            if now > 0 && scanned.insert(key.clone(), now).unwrap_or(0) < now {
                 fresh.push(key);
             }
         }
         for key in fresh {
-            let (module, def, fields) = &omitted[&key];
+            let (module, def, args, fields) = &omitted[&key];
             let owner = BodyOwner::StructDefaults(*def);
             let Some(defaults) = ws.modules[module.index()].bodies.get(&owner) else { continue };
+            let Some(dinf) = ws.inference(*module).and_then(|ir| ir.per_fn.get(&owner)) else {
+                continue;
+            };
             let mut sub: FxHashSet<Idx<bone_semantic::hir::Expr>> = FxHashSet::default();
             for f in fields {
                 let Some(root) = defaults.field_defaults.get(f) else { continue };
                 sub.extend(crate::expr_subtree::expr_subtree(defaults, *root));
             }
-            pending.push((defaults, Some(sub)));
+            let inner = skull_mir::struct_defaults::slot_subst(Some(dinf), args);
+            pending.push((defaults, dinf, inner, Some(sub)));
         }
     }
 
-    for (_, (module, def, fields)) in omitted {
+    for (_, (module, def, args, fields)) in omitted {
         let owner = BodyOwner::StructDefaults(def);
         let Some(defaults) = ws.modules[module.index()].bodies.get(&owner) else { continue };
         let Some(inf) = ws.inference(module).and_then(|ir| ir.per_fn.get(&owner)) else {
@@ -1915,6 +1950,9 @@ fn walk_struct_default_edges(
             let Some(root) = defaults.field_defaults.get(f) else { continue };
             reached.extend(crate::expr_subtree::expr_subtree(defaults, *root));
         }
+        // The initializers resolve under the STRUCT's slot bindings, not the
+        // enclosing instance's -- the two are keyed in different bodies.
+        let inner = skull_mir::struct_defaults::slot_subst(Some(inf), &args);
         walk_body_edges(
             g,
             work,
@@ -1922,9 +1960,9 @@ fn walk_struct_default_edges(
             inf,
             Some(defaults),
             Some(inst),
-            subst,
+            &inner,
             depth,
-            SiteDomain::StructDefaults(module, def),
+            &SiteDomain::StructDefaults(module, def, args),
             Some(&reached),
         );
     }
@@ -1949,10 +1987,10 @@ fn record_bound_next(
     kind: EdgeKind,
     expr: Idx<bone_semantic::hir::Expr>,
     root: BoundRoot,
-    domain: SiteDomain,
+    domain: &SiteDomain,
     path: &[usize],
 ) -> Option<InstanceBoundNext> {
-    let site = root.site(domain, expr, path.to_vec());
+    let site = root.site(domain.clone(), expr, path.to_vec());
     if let BoundNext::CallerGeneric(gidx) = next {
         let resolved = from
             .and_then(|i| g.bound_trees.get(i))
@@ -2063,7 +2101,7 @@ fn walk_bound_tree(
     span: Span,
     expr: Idx<bone_semantic::hir::Expr>,
     root: BoundRoot,
-    domain: SiteDomain,
+    domain: &SiteDomain,
     path: &[usize],
 ) -> InstanceBoundTree {
     let mut resolved = InstanceBoundTree::default();
@@ -2463,7 +2501,7 @@ fn dispatched_sites(
     inf: &BodyInference,
     body: &bone_semantic::hir::Body,
     subst: &MonoSubst,
-    domain: SiteDomain,
+    domain: &SiteDomain,
 ) -> Vec<(Site, &'static str)> {
     use bone_semantic::hir::{BinOp, Expr as E, InterpPart};
     let dcx = skull_mir::lower::DispatchCtx {
@@ -2483,7 +2521,7 @@ fn dispatched_sites(
                     };
                     for (path, name) in dcx.hole_plan(*hole, spec.as_ref()).obligations() {
                         out.push((
-                            Site { domain, expr: *hole, op: SiteOp::Dispatched { name, path } },
+                            Site { domain: domain.clone(), expr: *hole, op: SiteOp::Dispatched { name, path } },
                             name,
                         ));
                     }
@@ -2492,7 +2530,7 @@ fn dispatched_sites(
             E::BinOp { op: op @ (BinOp::Eq | BinOp::NotEq), lhs, rhs } => {
                 if let Some(name) = dcx.eq_route(*lhs, *rhs).synthesized_callee(*op) {
                     out.push((
-                        Site { domain, expr: e, op: SiteOp::Dispatched { name, path: Vec::new() } },
+                        Site { domain: domain.clone(), expr: e, op: SiteOp::Dispatched { name, path: Vec::new() } },
                         name,
                     ));
                 }
@@ -2662,13 +2700,21 @@ fn classify_boundaries(g: &mut InstanceGraph, ws: &Workspace) {
 
 /// The helper symbols each coroutine instance owns.
 ///
-/// `__step` and `__resume` are unconditional; `__advance` exists only on the
-/// frame-slot channel, which `coroutine_yield_channel` reads from the DECLARED
-/// return type -- a declaration, not the body's own inference, per the standing
-/// rule. Defers (`__defer<k>`) and lifecycle hooks (`__on_*`) are NOT counted:
-/// they come from `CoroLowered`, which exists only after the MIR transform, so
-/// there is no HIR-level oracle for them and guessing would be a fabricated
-/// number.
+/// The suffix list comes from the instance's own [`CoroutinePlan`], which is the
+/// emitters' input too -- `__step` and `__resume` are unconditional and
+/// `__advance` exists only on the frame-slot channel, and that condition has one
+/// home rather than a restatement here. The channel is read from the DECLARED
+/// return type, per the standing rule.
+///
+/// The BASE is the declaration's, deliberately: the graph reaches logical
+/// instances, and whether emission gives an instance its own specialized base is
+/// the lowerer's policy, which the graph does not model before plan step E1. So
+/// the symbol recorded here is what a DECLINED instantiation gets, and the
+/// collisions below are exactly the declined population.
+///
+/// Defers (`__defer<k>`) and lifecycle hooks (`__on_*`) are NOT counted: they
+/// come from `CoroLowered`, which exists only after the MIR transform, so there
+/// is no HIR-level oracle for them and guessing would be a fabricated number.
 fn record_coroutine_helpers(g: &mut InstanceGraph, ws: &Workspace) {
     let mut out = BTreeSet::new();
     for i in &g.instances {
@@ -2676,20 +2722,13 @@ fn record_coroutine_helpers(g: &mut InstanceGraph, ws: &Workspace) {
         if !f.is_coroutine {
             continue;
         }
-        let base = mangle_fn(ws, f);
+        let plan = skull_mir::lower::CoroutinePlan::new(ws, i.func, mangle_fn(ws, f));
         let owner_identity = g.identity(ws, i);
-        let mut suffixes: Vec<&'static str> = vec!["__step", "__resume"];
-        if f.return_ty
-            .and_then(|t| skull_mir::lower::coroutine_yield_channel(ws, t))
-            .is_some()
-        {
-            suffixes.push("__advance");
-        }
-        for suffix in suffixes {
+        for suffix in plan.declared_suffixes() {
             out.insert(CoroutineHelper {
                 owner_identity: owner_identity.clone(),
                 suffix,
-                symbol_today: format!("{base}{suffix}"),
+                symbol_today: format!("{}{suffix}", plan.base()),
             });
         }
     }
@@ -2699,11 +2738,11 @@ fn record_coroutine_helpers(g: &mut InstanceGraph, ws: &Workspace) {
 impl InstanceGraph {
     /// Helper symbols that more than one INSTANCE claims.
     ///
-    /// Each is a Stage-3 collision: `emit_coroutine` names helpers from the
-    /// source `FuncRef`, so every instance of one generic `co fn` produces the
-    /// same `<name>__step` / `__resume` / `__advance`. The current specializer
-    /// does not specialize coroutines, so the graph exposes collisions that the
-    /// Stage-3 cutover must prevent.
+    /// A generic `co fn` whose call site SPECIALIZES gets its own base
+    /// (`spec_fn_name`) and no longer collides; one whose specialization the
+    /// lowerer declined still shares the declaration's, so this reports the
+    /// declined population. E1 removes the category by making every instance an
+    /// emitted body.
     pub fn colliding_coroutine_helpers(&self) -> BTreeMap<String, BTreeSet<String>> {
         let mut by_symbol: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for h in &self.coroutine_helpers {
@@ -2807,24 +2846,21 @@ pub struct Reconciliation {
     pub shadow_only: usize,
 }
 
-/// A today-slot matches a shadow arg when the slot is `None` (the partial key
-/// erased it, so it constrains nothing) or the canonical types are equal. Both
+/// A today-slot matches a shadow arg when the slot is `None` (no concrete type
+/// reaches it, so it constrains nothing) or the canonical types are equal. Both
 /// sides encode with `MonoTy::canonical`, so a pretty-printing ambiguity cannot
 /// match two different types to each other.
-fn slots_match(slots: &[Option<String>], shadow: &[String]) -> bool {
-    slots.len() == shadow.len()
-        && slots
-            .iter()
-            .zip(shadow)
-            .all(|(s, a)| s.as_ref().is_none_or(|s| s == a))
+/// Positional equality. It used to treat a `None` slot as matching ANYTHING,
+/// which a total key cannot express -- and never had to: the corpus produced no
+/// partial key, so the wildcard arm matched nothing it would not have matched
+/// exactly. Strictly narrower, and the census below is the measurement that
+/// says so.
+fn slots_match(slots: &[String], shadow: &[String]) -> bool {
+    slots == shadow
 }
 
-pub fn reconcile(
-    ws: &Workspace,
-    g: &InstanceGraph,
-    target: bone_semantic::hir::FnBackend,
-) -> Reconciliation {
-    let (today, rejected_sites) = skull_mir::spec_census::today_specializations(ws, target);
+pub fn reconcile(ws: &Workspace, g: &InstanceGraph) -> Reconciliation {
+    let (today, rejected_sites) = skull_mir::spec_census::today_specializations(ws);
 
     // Shadow instances grouped by function, as canonical argument lists.
     let mut by_func: FxHashMap<(u32, u32), Vec<Vec<String>>> = FxHashMap::default();
@@ -2857,8 +2893,7 @@ pub fn reconcile(
                 }
                 let f = &ws.module(t.func.module).functions[t.func.func];
                 let caller = &ws.module(t.caller.module).functions[t.caller.func];
-                let slots: Vec<&str> =
-                    t.slots.iter().map(|s| s.as_deref().unwrap_or("<erased>")).collect();
+                let slots: Vec<&str> = t.slots.iter().map(String::as_str).collect();
                 r.missing.push(format!(
                     "{}<{}> (called from `{}`)",
                     f.name,

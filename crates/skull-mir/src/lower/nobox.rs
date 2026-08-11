@@ -7,7 +7,8 @@
 use super::*;
 
 impl Builder<'_> {
-    /// The caller reaches this only when [`fn_scalar_abi_spec`] returns `None`.
+    /// The caller reaches this only when the body keeps the boxed ABI
+    /// (`BackendFnAbiPlan::scalar` is `None`).
     /// Under `values_first_class`, a `value` struct is already a first-class
     /// `vecN`, so there is no box to authorize.
     /// Re-mark a nobox box packed for a `@gpu_only` callee as an EXPLICIT one.
@@ -282,7 +283,7 @@ impl Builder<'_> {
         let inf = self
             .inf
             .ok_or_else(|| refuse("this body has no inference".into()))?;
-        let mut subst = self.spec_subst.clone();
+        let mut subst = self.subst().clone();
         // Why a generic could NOT be converted, kept per name rather than acted
         // on here: a generic the slot does not mention is none of its business,
         // and rejecting in this loop would let an unrelated variable disarm the
@@ -294,7 +295,7 @@ impl Builder<'_> {
                 unconverted.push((name, "no recorded binding"));
                 continue;
             };
-            match crate::monoty::convert(self.ws, inf, bound, &self.spec_subst) {
+            match crate::monoty::convert(self.ws, inf, bound, &self.subst()) {
                 Ok(m) => {
                     subst.insert(var, m);
                 }
@@ -387,9 +388,9 @@ impl Builder<'_> {
 
     /// A fn taken BY VALUE must have the ABI an indirect caller can derive.
     ///
-    /// A definition reads [`fn_scalar_abi`]; an indirect call site has only the fn
-    /// TYPE, so it reads [`Self::fn_value_abi`]. Those agree by construction for
-    /// an ordinary body -- `fn_scalar_abi` narrows an address-taken one to exactly
+    /// A definition reads its [`BackendFnAbiPlan`]; an indirect call site has only
+    /// the fn TYPE, so it reads [`Self::fn_value_abi`]. Those agree by construction
+    /// for an ordinary body -- the plan narrows an address-taken one to exactly
     /// the `nobox` shapes the type yields. `@scalar_abi` is the one thing that
     /// bypasses that narrowing, because its hand-written `inline(lua)` body
     /// literally spells the leaf params, so narrowing it would break the body
@@ -407,8 +408,9 @@ impl Builder<'_> {
         let callee = &self.ws.module(func.module).functions[func.func];
         let arity = callee.param_decls.len();
         let boxed = || (vec![RetSlot::Opaque; arity], None);
-        let (def_params, def_ret) = match fn_scalar_abi(self.ws, self.scx, func) {
-            Some(abi) => (abi.param_shapes, abi.ret_shape),
+        let plan = BackendFnAbiPlan::for_declaration(self.ws, self.scx, func);
+        let (def_params, def_ret) = match plan.scalar() {
+            Some(abi) => (abi.param_shapes.clone(), abi.ret_shape.clone()),
             None => boxed(),
         };
         let (val_params, val_ret) = self.expr_fn_value_abi(e).unwrap_or_else(boxed);
@@ -639,8 +641,11 @@ impl Builder<'_> {
             let Some(overloads) = self.ws.functions_by_name.get(name) else { continue };
             let incompatible = overloads.iter().any(|(mid, fid)| {
                 let fref = FuncRef { module: *mid, func: *fid };
-                let expected = fn_nobox_abi_spec(self.ws, fref, &SpecSubst::default());
-                expected.is_some() && fn_scalar_abi(self.ws, self.scx, fref) != expected
+                let expected =
+                    super::abi::fn_value_nobox_abi(self.ws, fref, &SpecSubst::default());
+                let emitted =
+                    BackendFnAbiPlan::for_declaration(self.ws, self.scx, fref).scalar().cloned();
+                expected.is_some() && emitted != expected
             });
             if incompatible {
                 return Err(CompilerError::new_with_label(

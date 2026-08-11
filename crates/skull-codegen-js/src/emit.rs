@@ -14,7 +14,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use bone_semantic::inference::Workspace;
 use comfy_la_arena::Idx;
 use skull_mir::intrinsics::{Emission, IntrinsicTable};
-use skull_mir::lower::SpecKey;
+use skull_mir::lower::{EmittedBodyId, SpecKey};
 use skull_mir::mir::{Block, Cell, ContainerKind, FuncRef, Inst, Lit, MirFunc, Term};
 use skull_parser::{CompilerError, Span};
 use ustr::Ustr;
@@ -194,7 +194,7 @@ fn max_published_lanes(
                 Some((bone_semantic::hir::FnBackend::Js, _))
             )
         })
-        .map(|fr| skull_mir::lower::BackendFnAbiPlan::for_declaration(ws, scx, *fr).result_lanes)
+        .map(|fr| skull_mir::lower::BackendFnAbiPlan::for_declaration(ws, scx, *fr).result_lanes())
         .max()
         .unwrap_or(0)
 }
@@ -683,23 +683,26 @@ fn finalize_labels(mut s: String, markers: &[Idx<Block>], used: &HashSet<Idx<Blo
 /// standalone copy (`spec_fn_name`) -- for a column-stored element the shared
 /// body reads a `_data` the layout does not have, so it cannot serve the call at
 /// all. Same split the luajit emitter makes in `callee_name`.
+///
+/// ONE map over [`EmittedBodyId`], not a shared map beside a specialized one.
+/// The two were asking one question -- which definition serves this call -- and
+/// a caller had to know the all-`None` rule to join them.
 #[derive(Default)]
 pub struct CalleeNames {
-    plain: HashMap<FuncRef, String>,
-    spec: HashMap<(FuncRef, SpecKey), String>,
+    names: HashMap<EmittedBodyId, String>,
 }
 
 impl CalleeNames {
-    fn get(&self, fr: &FuncRef) -> Option<&String> {
-        self.plain.get(fr)
+    fn get(&self, body: &EmittedBodyId) -> Option<&String> {
+        self.names.get(body)
     }
 
-    fn insert(&mut self, fr: FuncRef, name: String) {
-        self.plain.insert(fr, name);
+    fn insert(&mut self, body: EmittedBodyId, name: String) {
+        self.names.insert(body, name);
     }
 
     fn entry_or_insert_with(&mut self, fr: FuncRef, f: impl FnOnce() -> String) {
-        self.plain.entry(fr).or_insert_with(f);
+        self.names.entry(EmittedBodyId::Shared(fr)).or_insert_with(f);
     }
 }
 
@@ -2233,21 +2236,14 @@ impl Emitter<'_> {
     /// rather than silently reaching the boxed shared body. Mirrors the luajit
     /// emitter's `callee_name`.
     fn callee_name(&self, iid: Idx<Inst>, func: FuncRef) -> Option<&String> {
-        match self.mf.spec_bindings.get(&iid) {
-            Some(key) => self.callees.spec.get(&(func, key.clone())).or_else(|| {
-                // An all-`None` key names no instantiation (`spec_fn_name` ->
-                // `None`); the shared body already serves it.
-                skull_mir::mangle::spec_fn_name(
-                    self.ws,
-                    &self.ws.module(func.module).functions[func.func],
-                    key,
-                )
-                .is_none()
-                .then(|| self.callees.get(&func))
-                .flatten()
-            }),
-            None => self.callees.get(&func),
-        }
+        // One lookup: `EmittedBodyId::new` IS the all-`None` rule -- a key that
+        // names no instantiation resolves to the shared body, which is what the
+        // fallback used to restate by re-asking `spec_fn_name`.
+        let body = match self.mf.spec_bindings.get(&iid) {
+            Some(key) => EmittedBodyId::new(func, key.clone()),
+            None => EmittedBodyId::Shared(func),
+        };
+        self.callees.get(&body)
     }
 
     fn render_call(
@@ -2439,9 +2435,9 @@ pub fn emit_with_closure(
         out.push_str(&init.js);
     }
     for (fr, mf) in &st.lowered {
-        match emit_lowered_fn(ws, *fr, mf, st.names.get(fr).expect("emitted body has a name"), &st.names, &hoisted, &st.gctx) {
+        match emit_lowered_fn(ws, *fr, mf, st.names.get(&EmittedBodyId::Shared(*fr)).expect("emitted body has a name"), &st.names, &hoisted, &st.gctx) {
             Ok(js) => out.push_str(&js),
-            Err(e) => rejections.push((st.names.get(fr).expect("emitted body has a name").clone(), e)),
+            Err(e) => rejections.push((st.names.get(&EmittedBodyId::Shared(*fr)).expect("emitted body has a name").clone(), e)),
         }
     }
     out.push_str(&emit_spec_bodies(ws, &st, &hoisted, &mut rejections));
@@ -2451,7 +2447,7 @@ pub fn emit_with_closure(
             ws,
             scx,
             *fr,
-            st.names.get(fr).expect("emitted body has a name"),
+            st.names.get(&EmittedBodyId::Shared(*fr)).expect("emitted body has a name"),
         )?);
     }
     Ok(out)
@@ -2651,17 +2647,18 @@ fn build_program_core(
             for nf in &mut mf.nested_fns {
                 skull_transform::recover_counted_loops(ws, nf);
             }
-            register_statics(&mf, &mut st.gctx);
-            let mut findings: Vec<CompilerError> = Vec::new();
-            collect(
-                &mut findings,
-                discover_callees(ws, &mf, &mut st.names, &mut st.queue, &mut st.seen, &mut st.inline_js),
+            // THE shared discovery step, not a restatement of the parts of it a
+            // decorator was thought to need. Enumerating callees and globals by
+            // hand here left out the third thing `discover` does -- filing this
+            // body's `spec_bindings` as demands -- so a specialization a deco
+            // body was the only caller of was never queued, and the call site
+            // spelled a name nothing emitted.
+            let (subst, incoming) = Default::default();
+            let ctx = skull_mir::bound::body_ctx(
+                ws, module.id, bone_semantic::hir::BodyOwner::Decorator(did), &subst, &incoming,
             );
-            discover_globals(
-                ws, &mf, &st.state_index, &st.nobox_leaf_globals, &st.deco_globals, &st.enum_defs, &mut st.gctx,
-                &mut st.ginit_queue, &mut st.ginit_seen, &mut st.names, &mut st.queue, &mut st.seen,
-                &mut st.inline_js,
-            )?;
+            let mut findings: Vec<CompilerError> = Vec::new();
+            findings.extend((JsReach { ws, scx, st: &mut st }).discover(&ctx, &mf)?);
             match merge_findings(findings) {
                 Some(e) => st.reject(&deco_name, e),
                 None => deco_bodies.push((deco_name, mf)),
@@ -2709,12 +2706,12 @@ fn build_program_core(
     // 2. fn defs (main, decorated fns, transitive callees).
     let mut chunks = HashMap::new();
     for (fr, mf) in &st.lowered {
-        match emit_lowered_fn(ws, *fr, mf, st.names.get(fr).expect("emitted body has a name"), &st.names, &hoisted, &st.gctx) {
+        match emit_lowered_fn(ws, *fr, mf, st.names.get(&EmittedBodyId::Shared(*fr)).expect("emitted body has a name"), &st.names, &hoisted, &st.gctx) {
             Ok(js) => {
                 out.push_str(&js);
                 chunks.insert(*fr, JsChunk { js, statics: collect_statics(mf) });
             }
-            Err(e) => rejections.push((st.names.get(fr).expect("emitted body has a name").clone(), e)),
+            Err(e) => rejections.push((st.names.get(&EmittedBodyId::Shared(*fr)).expect("emitted body has a name").clone(), e)),
         }
     }
     // 2a. standalone specialized copies. STABLE, not a chunk: a chunk is keyed by
@@ -2725,7 +2722,7 @@ fn build_program_core(
     stable.push_str(&spec_bodies);
     // 2b. inline(js) fns, emitted verbatim.
     for fr in &st.inline_js {
-        let name = st.names.get(fr).expect("emitted body has a name");
+        let name = st.names.get(&EmittedBodyId::Shared(*fr)).expect("emitted body has a name");
         match emit_inline_js_fn(ws, scx, *fr, name) {
             Ok(definition) => {
                 out.push_str(&definition);
@@ -2826,7 +2823,7 @@ fn force_shader_register_sibling(
     let fr = FuncRef { module: m, func: f };
     if st.seen.insert(fr) {
         // Bare @nomangle name: the driver register lines call it verbatim.
-        st.names.insert(fr, name.to_string());
+        st.names.insert(EmittedBodyId::Shared(fr), name.to_string());
         let cf = &ws.module(m).functions[f];
         if matches!(cf.inline_body, Some((bone_semantic::hir::FnBackend::Js, _))) {
             st.inline_js.push(fr);
@@ -3066,7 +3063,11 @@ struct WorklistState {
     /// Standalone specialized copies, one per distinct `(callee, instantiation)`
     /// a body's `spec_bindings` still asks for after inlining.
     spec_lowered: Vec<(FuncRef, SpecKey, MirFunc)>,
-    spec_queue: Vec<(FuncRef, SpecKey)>,
+    spec_queue: Vec<skull_mir::bound::SpecDemand>,
+    /// The bound-conformance tree each demanded specialization is emitted under,
+    /// with the agreement check `skull_mir::bound::DemandMap` carries -- the same
+    /// object the luajit walk files its demands in.
+    spec_trees: skull_mir::bound::DemandMap,
     /// `inline(js)` callees, emitted verbatim (their raw JS body, not MIR-lowered).
     inline_js: Vec<FuncRef>,
     state_index: HashMap<ustr::Ustr, GlobalSite>,
@@ -3088,8 +3089,14 @@ struct WorklistState {
 impl WorklistState {
     fn new(ws: &Workspace, roots: &[(FuncRef, String)], program_mode: bool) -> Self {
         WorklistState {
+            spec_trees: Default::default(),
             cache: skull_transform::InlineCache::default(),
-            names: CalleeNames { plain: roots.iter().cloned().collect(), spec: HashMap::new() },
+            names: CalleeNames {
+                names: roots
+                    .iter()
+                    .map(|(fr, name)| (EmittedBodyId::Shared(*fr), name.clone()))
+                    .collect(),
+            },
             queue: roots.iter().map(|(fr, _)| *fr).collect(),
             seen: roots.iter().map(|(fr, _)| *fr).collect(),
             lowered: Vec::new(),
@@ -3156,7 +3163,8 @@ fn emit_inline_js_fn(
     // `<name>__<leaf>` scalars, same as the lua path, so the exploded call
     // sites and the raw body's leaf names agree.
     let abi = skull_mir::lower::BackendFnAbiPlan::for_declaration(ws, scx, fr);
-    let params = match &abi.lua_param_names {
+    let lua_param_names = abi.lua_param_names(ws);
+    let params = match &lua_param_names {
         Some(names) => names.join(", "),
         None => f
             .param_decls
@@ -3171,7 +3179,7 @@ fn emit_inline_js_fn(
     };
     // The publisher contract, checked and lowered against the declaration's
     // own concrete result ABI.
-    let src = lower_publisher(&src, abi.result_lanes, f.name.as_str())?;
+    let src = lower_publisher(&src, abi.result_lanes(), f.name.as_str())?;
     Ok(format!("function {js_name}({params}) {{\n{src}\n}}\n"))
 }
 
@@ -3198,11 +3206,17 @@ fn register_statics(mf: &MirFunc, gctx: &mut GlobalCtx) {
 /// The `(callee, instantiation)` pairs `mf` and its hoisted bodies still ask for
 /// after inlining. Per-BODY in `skull_mir`, so the nested walk is here: a hoisted
 /// lambda is its own emitted callable and its residual bindings are its own.
-fn collect_spec_bound_calls(mf: &MirFunc, out: &mut Vec<(FuncRef, SpecKey)>) {
-    skull_mir::reach::spec_bound_calls(mf, out);
+fn collect_spec_bound_calls(
+    ws: &Workspace,
+    ctx: &skull_mir::bound::BoundCtx,
+    mf: &MirFunc,
+    out: &mut Vec<skull_mir::bound::SpecDemand>,
+) -> Result<(), CompilerError> {
+    skull_mir::reach::spec_bound_calls(ws, ctx, mf, out)?;
     for nf in &mf.nested_fns {
-        collect_spec_bound_calls(nf, out);
+        collect_spec_bound_calls(ws, ctx, nf, out)?;
     }
+    Ok(())
 }
 
 /// A unit of JS reachability work. The search walks TWO node kinds -- a
@@ -3247,9 +3261,37 @@ impl JsReach<'_> {
         out.extend(
             std::mem::take(&mut self.st.ginit_queue).into_iter().map(|(gname, _)| JsNode::Ginit(gname)),
         );
-        out.extend(
-            std::mem::take(&mut self.st.spec_queue).into_iter().map(|(fr, key)| JsNode::Spec(fr, key)),
-        );
+        // The SAME admissibility oracle the Lua walk and the instance graph
+        // read. Without it this queue drains a changing-instance recursion
+        // forever: every demand names a strictly deeper instantiation, so each
+        // node is distinct and the walk's dedup never fires. Lua rejected and JS
+        // HUNG -- a rejection added to one emitter leaves the sibling on the
+        // default, and here the default was non-termination rather than a wrong
+        // answer.
+        for d in std::mem::take(&mut self.st.spec_queue) {
+            match skull_mir::monoty::too_deep_to_instantiate(d.key.iter()) {
+                Some(at) => {
+                    let f = &self.ws.module(d.func.module).functions[d.func.func];
+                    let at = at.render();
+                    self.st.reject(
+                        &f.name.to_string(),
+                        CompilerError::new_with_label(
+                            f.name_span,
+                            format!(
+                                "polymorphic recursion: instantiating `{}` at `{at}` exceeds \
+                                 the instantiation depth limit of {}. A recursive call whose \
+                                 type arguments GROW never terminates -- each call needs a new \
+                                 body -- so it is rejected rather than expanded. Same-instance \
+                                 recursion (type arguments unchanged) is unaffected.",
+                                f.name,
+                                skull_mir::monoty::MAX_INSTANTIATION_DEPTH,
+                            ),
+                        ),
+                    );
+                }
+                None => out.push(JsNode::Spec(d.func, d.key)),
+            }
+        }
         out
     }
 
@@ -3263,7 +3305,8 @@ impl JsReach<'_> {
     /// itself is not recorded as lowered, so it contributes no JS.
     fn visit_fn(&mut self, fr: FuncRef) -> Result<(), CompilerError> {
         let f = &self.ws.module(fr.module).functions[fr.func];
-        let name = self.st.names.get(&fr).expect("queued fn has a name").clone();
+        let name =
+            self.st.names.get(&EmittedBodyId::Shared(fr)).expect("queued fn has a name").clone();
         let mut mf = match skull_mir::lower::lower_function(self.ws, self.scx, fr.module, fr.func) {
             Ok(mf) => mf,
             Err(e) => {
@@ -3293,7 +3336,11 @@ impl JsReach<'_> {
         for nf in &mf.nested_fns {
             collect(&mut findings, nobox_errs(self.ws, nf));
         }
-        findings.extend(self.discover(&mf)?);
+        let (subst, incoming) = Default::default();
+        let ctx = skull_mir::bound::body_ctx(
+            self.ws, fr.module, bone_semantic::hir::BodyOwner::Function(fr.func), &subst, &incoming,
+        );
+        findings.extend(self.discover(&ctx, &mf)?);
         match merge_findings(findings) {
             Some(e) => self.st.reject(&name, e),
             None => self.st.lowered.push((fr, mf)),
@@ -3313,15 +3360,30 @@ impl JsReach<'_> {
             return Ok(()); // all-`None` key: the shared body already serves it
         };
         let subst = skull_mir::lower::spec_subst_from_key(self.ws, fr, &key);
-        let mut mf = match skull_mir::lower::lower_function_spec(
-            self.ws, self.scx, fr.module, fr.func, &subst,
-        ) {
+        let body = skull_mir::lower::EmittedBodyId::new(fr, key.clone());
+        let mut mf = match skull_mir::lower::lower_emitted_body(self.ws, self.scx, &body) {
             Ok(mf) => mf,
             Err(e) => {
                 self.st.reject(&name, e);
                 return Ok(());
             }
         };
+        // BEFORE every transform, and for the same reason as the luajit path:
+        // an `Iterator`-bounded body's placeholders are what make it unemittable
+        // on its own, and the demand that reached here is what resolves them.
+        let tree = self.st.spec_trees.tree_of(&body);
+        if let Err(e) = skull_transform::bound::resolve_standalone_bound_calls(self.ws, &mut mf, &tree)
+        {
+            self.st.reject(&name, e);
+            return Ok(());
+        }
+        // A specialized `co fn` takes this same sequence, unlike luajit's, which
+        // routes coroutines around it. Measured, not assumed: forcing the two to
+        // agree changed no result on a column instantiation, one carrying a
+        // capturing lambda, or one inlining an `@inline` callee -- the
+        // trampoline's own framed conversion is idempotent over what
+        // `convert_closures` already hoisted. Left as one path rather than a
+        // branch no fixture can distinguish.
         if let Err(e) = skull_transform::inline_functions_with_subst(
             self.ws, self.scx, fr, &mut mf, &mut self.st.cache, &subst,
         ) {
@@ -3340,8 +3402,11 @@ impl JsReach<'_> {
             collect(&mut findings, nobox_errs(self.ws, nf));
         }
         mf.name = ustr::Ustr::from(name.as_str());
-        self.st.names.spec.insert((fr, key.clone()), name.clone());
-        findings.extend(self.discover(&mf)?);
+        self.st.names.insert(EmittedBodyId::new(fr, key.clone()), name.clone());
+        let ctx = skull_mir::bound::body_ctx(
+            self.ws, fr.module, bone_semantic::hir::BodyOwner::Function(fr.func), &subst, &tree,
+        );
+        findings.extend(self.discover(&ctx, &mf)?);
         match merge_findings(findings) {
             Some(e) => self.st.reject(&name, e),
             None => self.st.spec_lowered.push((fr, key, mf)),
@@ -3376,7 +3441,11 @@ impl JsReach<'_> {
         for nf in &mf.nested_fns {
             collect(&mut findings, nobox_errs(self.ws, nf));
         }
-        findings.extend(self.discover(&mf)?);
+        let (subst, incoming) = Default::default();
+        let ctx = skull_mir::bound::body_ctx(
+            self.ws, site.module, bone_semantic::hir::BodyOwner::Global(site.gid), &subst, &incoming,
+        );
+        findings.extend(self.discover(&ctx, &mf)?);
         if let Some(e) = merge_findings(findings) {
             self.st.reject(&init_name, e);
             return Ok(());
@@ -3404,11 +3473,37 @@ impl JsReach<'_> {
     /// to RETRY the file in program mode (where the applications are emitted).
     /// Demoting it to a sibling would turn a test that lifts into a test that
     /// skips, so it aborts the emission immediately as before.
-    fn discover(&mut self, mf: &MirFunc) -> Result<Vec<CompilerError>, CompilerError> {
+    fn discover(
+        &mut self,
+        ctx: &skull_mir::bound::BoundCtx,
+        mf: &MirFunc,
+    ) -> Result<Vec<CompilerError>, CompilerError> {
+        let ws = self.ws;
         let st = &mut *self.st;
         register_statics(mf, &mut st.gctx);
-        collect_spec_bound_calls(mf, &mut st.spec_queue);
         let mut findings = Vec::new();
+        let mut demands = Vec::new();
+        // A demand this body cannot state in self-contained terms is a finding,
+        // not a demand dropped: the callee would be reached by nothing while its
+        // call site still spells the specialized name.
+        collect(&mut findings, collect_spec_bound_calls(ws, ctx, mf, &mut demands));
+        for body in st.spec_trees.record(&demands) {
+            let fref = body.decl();
+            let f = &ws.module(fref.module).functions[fref.func];
+            collect::<()>(
+                &mut findings,
+                Err(CompilerError::new_with_label(
+                    f.name_span,
+                    format!(
+                        "internal: two call sites demand a specialization of `{}` with \
+                         different `Iterator` bound resolutions, so one emitted \
+                         definition cannot serve both",
+                        f.name
+                    ),
+                )),
+            );
+        }
+        st.spec_queue.extend(demands);
         collect(
             &mut findings,
             discover_callees(self.ws, mf, &mut st.names, &mut st.queue, &mut st.seen, &mut st.inline_js),
@@ -3471,7 +3566,8 @@ fn emit_lowered_fn(
     gctx: &GlobalCtx,
 ) -> Result<String, CompilerError> {
     if mf.is_coroutine {
-        return emit_coroutine_js(ws, fr, mf, js_name, names, hoisted, gctx);
+        let plan = skull_mir::lower::CoroutinePlan::new(ws, fr, js_name.to_string());
+        return emit_coroutine_js(ws, &plan, mf, names, hoisted, gctx);
     }
     let mut out = emit_fn_with_callees(ws, mf, js_name, names, hoisted, gctx)?;
     for nf in &mf.nested_fns {
@@ -3489,7 +3585,10 @@ fn emit_spec_bodies(
 ) -> String {
     let mut out = String::new();
     for (fr, key, mf) in &st.spec_lowered {
-        let name = &st.names.spec[&(*fr, key.clone())];
+        let name = st
+            .names
+            .get(&EmittedBodyId::new(*fr, key.clone()))
+            .expect("a lowered specialization has a name");
         match emit_lowered_fn(ws, *fr, mf, name, &st.names, hoisted, &st.gctx) {
             Ok(js) => out.push_str(&js),
             Err(e) => rejections.push((name.clone(), e)),
@@ -3532,33 +3631,37 @@ fn check_scalar_abi(
                     Inst::Call { func, args } | Inst::CallMulti { func, args, .. } => (func, args.len()),
                     _ => continue,
                 };
-                if let Some(key) = mf.spec_bindings.get(&iid) {
-                    match spec_arities.get(&(*callee, key.clone())) {
-                        // An unemitted specialization is `callee_name`'s rejection
-                        // to make -- it knows which name went missing.
-                        None => {}
-                        Some(&arity) if argc == arity => {}
+                // ONE admission rule, over the EMITTED BODY the call targets.
+                // The two arms decide only WHICH body that is; the arity window
+                // is then the same question of both, asked through the same ABI
+                // plan. Stating the rule twice is how the specialized arm came
+                // to demand `argc == arity`: it lost the omitted-defaulted-
+                // argument window the shared arm allowed, so the one shape that
+                // exists only at a specialization -- a defaulted param behind a
+                // scalarized value-struct one -- rejected while luajit compiled
+                // and ran it.
+                let (body, arity, what) = match mf.spec_bindings.get(&iid) {
+                    Some(key) => match spec_arities.get(&(*callee, key.clone())) {
+                        // An unemitted specialization is `callee_name`'s
+                        // rejection to make -- it knows which name went missing.
+                        None => continue,
                         Some(&arity) => {
-                            let cf = &ws.module(callee.module).functions[callee.func];
-                            findings.push(err(format!(
-                                "JS subset: value-struct scalar ABI mismatch calling specialized \
-                                 `{}` ({argc} args vs {arity} params)",
-                                cf.name
-                            )));
+                            (EmittedBodyId::new(*callee, key.clone()), arity, "specialized ")
                         }
-                    }
-                    continue;
-                }
-                if let Some(&arity) = arities.get(callee) {
-                    let required = required_arg_count(ws, scx, *callee, arity);
-                    if argc < required || argc > arity {
-                        let cf = &ws.module(callee.module).functions[callee.func];
-                        findings.push(err(format!(
-                            "JS subset: value-struct scalar ABI mismatch calling `{}` \
-                             ({argc} args vs {required}..={arity} params; callee not inlined)",
-                            cf.name
-                        )));
-                    }
+                    },
+                    None => match arities.get(callee) {
+                        None => continue,
+                        Some(&arity) => (EmittedBodyId::Shared(*callee), arity, ""),
+                    },
+                };
+                let required = required_arg_count(ws, scx, body, arity);
+                if argc < required || argc > arity {
+                    let cf = &ws.module(callee.module).functions[callee.func];
+                    findings.push(err(format!(
+                        "JS subset: value-struct scalar ABI mismatch calling {what}`{}` \
+                         ({argc} args vs {required}..={arity} params)",
+                        cf.name
+                    )));
                 }
             }
         }
@@ -3860,7 +3963,7 @@ fn decorator_application_lines_js(
                 let &(dmid, did) = deco_map.get(&ann.name.name).expect("decorator name resolves");
                 let d = &ws.module(dmid).decorators[did];
                 let fr = FuncRef { module: module.id, func: fid };
-                let js_fn = names.get(&fr).ok_or_else(|| {
+                let js_fn = names.get(&EmittedBodyId::Shared(fr)).ok_or_else(|| {
                     err(format!(
                         "JS subset: decorated fn `{}` was not emitted (not a program root)",
                         f.name
@@ -3990,12 +4093,26 @@ fn discover_callees(
         if js_supply(ws, cf).is_some() {
             continue;
         }
+        // An `Iterator`-bounded fn has no SHARED body: its placeholder `next`
+        // calls are resolved per instantiation, so what a call site names is the
+        // specialized copy, queued as a `JsNode::Spec` by that site's demand.
+        // Queuing the declaration here would lower the unresolved body and
+        // reject on its own placeholder. The luajit sibling is
+        // `skull::mir_emit::is_cached_body`, which excludes it from the chunk
+        // cache for the same reason.
+        //
+        // A residual call to one that carries NO specialization is still a
+        // rejection, and it stays with `validate_no_residual_bound_calls` rather
+        // than turning into a silently missing definition here.
+        if skull_transform::fn_has_bounds(cf) {
+            continue;
+        }
         // `inline(js)`: co-emit its raw JS body verbatim (never MIR-lowered). The
         // FuncRef is already the JS variant of a same-name pair (`resolve_funcref`
         // swapped it at lowering).
         if matches!(cf.inline_body, Some((bone_semantic::hir::FnBackend::Js, _))) {
             if seen.insert(callee) {
-                names.insert(callee, callee_js_name(ws, callee));
+                names.insert(EmittedBodyId::Shared(callee), callee_js_name(ws, callee));
                 inline_js.push(callee);
                 scan_inline_js_body(ws, callee, names, queue, seen, inline_js);
             }
@@ -4018,7 +4135,7 @@ fn discover_callees(
             continue;
         }
         if seen.insert(callee) {
-            names.insert(callee, callee_js_name(ws, callee));
+            names.insert(EmittedBodyId::Shared(callee), callee_js_name(ws, callee));
             queue.push(callee);
         }
     }
@@ -4075,13 +4192,13 @@ fn scan_inline_js_body(
             let target = FuncRef { module: m, func: fid };
             if matches!(cf.inline_body, Some((bone_semantic::hir::FnBackend::Js, _))) {
                 if seen.insert(target) {
-                    names.insert(target, cf.name.to_string());
+                    names.insert(EmittedBodyId::Shared(target), cf.name.to_string());
                     inline_js.push(target);
                     scan_inline_js_body(ws, target, names, queue, seen, inline_js);
                 }
             } else if cf.inline_body.is_none() && !cf.is_extern {
                 if seen.insert(target) {
-                    names.insert(target, cf.name.to_string());
+                    names.insert(EmittedBodyId::Shared(target), cf.name.to_string());
                     queue.push(target);
                 }
             }
@@ -4138,14 +4255,22 @@ fn discover_globals(
         } else if let Some(&[(module, func)]) =
             ws.functions_by_name.get(&name).map(|l| l.as_slice())
         {
-            // A NON-overloaded top-level fn used as a value.
-            let fr = FuncRef { module, func };
-            let jsname = callee_js_name(ws, fr);
-            gctx.fns.entry(name).or_insert_with(|| jsname.clone());
-            if seen.insert(fr) {
-                names.insert(fr, jsname);
-                queue.push(fr);
-            }
+            // A NON-overloaded top-level fn used as a value. Routed through the
+            // same registration as a sibling group so BOTH fn-value paths ask one
+            // admission question -- this arm used to lower whatever it was handed
+            // as if it were portable Rock, so a lua-only `extern` taken as a value
+            // emitted a reference to a body that never existed and answered
+            // `undefined` at the call.
+            register_fn_value_variant(
+                ws,
+                name,
+                FuncRef { module, func },
+                gctx,
+                names,
+                queue,
+                seen,
+                inline_js,
+            )?;
         } else if let Some(cands) = ws.functions_by_name.get(&name) {
             // A backend-variant sibling pair (same name, same signature,
             // different backend) used as a VALUE. bone accepts it (collapses to
@@ -4155,7 +4280,7 @@ fn discover_globals(
             // emit, so `select_js_value_variant` only ever sees a sibling group
             // here; it returns `None` (leave rejecting) for a lua-only group.
             if let Some(fr) = select_js_value_variant(ws, &cands) {
-                register_fn_value_variant(ws, name, fr, gctx, names, queue, seen, inline_js);
+                register_fn_value_variant(ws, name, fr, gctx, names, queue, seen, inline_js)?;
             }
         }
     }
@@ -4182,11 +4307,19 @@ fn select_js_value_variant(
         .map(|&(module, func)| FuncRef { module, func })
 }
 
-/// Register a fn-value variant `fr` (already selected for this target) the same
-/// way `discover_callees` registers a callee by kind: an inline(js) body co-emits
+/// Register a fn-value variant `fr` (already selected for this target) by the
+/// same kinds `discover_callees` admits a CALLEE by: an inline(js) body co-emits
 /// verbatim, an extern(js) decl binds its bare driver name (no def), a plain-Rock
-/// fn lowers normally. In every case `gctx.fns[name]` maps the surface name (what
-/// the `Inst::Global` read carries) to the emitted JS identifier.
+/// fn lowers normally, and a host-bodied decl nothing supplies REJECTS. In every
+/// admitted case `gctx.fns[name]` maps the surface name (what the `Inst::Global`
+/// read carries) to the emitted JS identifier.
+///
+/// The rejection is the load-bearing arm and it must agree with the call path: a
+/// direct call to a lua-only `extern` is refused at emit, so taking the same fn
+/// as a VALUE cannot quietly succeed. It used to, by falling through to the
+/// plain-Rock arm and lowering a declaration with no body -- the reference then
+/// answered `undefined` at the call, which reads as a wrong ANSWER rather than
+/// an unsupported program (`tests/extern_fn_value.rock`, 7 such tests).
 #[allow(clippy::too_many_arguments)]
 fn register_fn_value_variant(
     ws: &Workspace,
@@ -4197,29 +4330,43 @@ fn register_fn_value_variant(
     queue: &mut Vec<FuncRef>,
     seen: &mut HashSet<FuncRef>,
     inline_js: &mut Vec<FuncRef>,
-) {
+) -> Result<(), CompilerError> {
     use bone_semantic::hir::FnBackend;
     let cf = &ws.module(fr.module).functions[fr.func];
     if matches!(cf.inline_body, Some((FnBackend::Js, _))) {
         let jsname = callee_js_name(ws, fr);
         gctx.fns.entry(name).or_insert_with(|| jsname.clone());
         if seen.insert(fr) {
-            names.insert(fr, jsname);
+            names.insert(EmittedBodyId::Shared(fr), jsname);
             inline_js.push(fr);
             scan_inline_js_body(ws, fr, names, queue, seen, inline_js);
         }
     } else if cf.is_extern && cf.backend == FnBackend::Js {
         gctx.fns.entry(name).or_insert_with(|| cf.name.to_string());
         names.entry_or_insert_with(fr, || cf.name.to_string());
+    } else if let Some(JsSupply::Global(g)) = js_supply(ws, cf) {
+        // The backend supplies this one as a real JS global, so it is a callable
+        // VALUE. A `JsSupply::Template` is not: an expression template has no
+        // identity to pass around, so it falls to the rejection below rather
+        // than rendering as a name that does not exist.
+        gctx.fns.entry(name).or_insert_with(|| g.to_string());
+        names.entry_or_insert_with(fr, || g.to_string());
+    } else if cf.inline_body.is_some() || cf.is_extern {
+        return Err(err(format!(
+            "JS subset: `{}` is a host-bodied declaration with no JS binding, \
+             so it cannot be used as a function value",
+            cf.name
+        )));
     } else {
         // A portable (`Any`) Rock body -- lower it to JS like any other callee.
         let jsname = callee_js_name(ws, fr);
         gctx.fns.entry(name).or_insert_with(|| jsname.clone());
         if seen.insert(fr) {
-            names.insert(fr, jsname);
+            names.insert(EmittedBodyId::Shared(fr), jsname);
             queue.push(fr);
         }
     }
+    Ok(())
 }
 
 /// Static callee emit-names of `mf` (`Call`/`CallMulti`), resolved through
@@ -4234,7 +4381,7 @@ fn direct_callees(mf: &MirFunc, names: &CalleeNames) -> Vec<ustr::Ustr> {
                     Inst::Call { func, .. } | Inst::CallMulti { func, .. } => *func,
                     _ => continue,
                 };
-                if let Some(n) = names.get(&fr) {
+                if let Some(n) = names.get(&EmittedBodyId::Shared(fr)) {
                     out.push(ustr::Ustr::from(n.as_str()));
                 }
             }
@@ -4272,7 +4419,7 @@ fn order_global_inits(
     // Key by the EMIT name (`names[fr]`, mangled) -- that is what `direct_callees`
     // resolves a call to, NOT the unmangled `mf.name`.
     for (fr, mf) in lowered {
-        if let Some(emit_name) = names.get(fr) {
+        if let Some(emit_name) = names.get(&EmittedBodyId::Shared(*fr)) {
             record(ustr::Ustr::from(emit_name.as_str()), mf);
         }
     }
@@ -4719,18 +4866,16 @@ fn build_vt_eq_defs(ws: &Workspace, names: &BTreeSet<ustr::Ustr>) -> Result<Stri
 /// `__rock_coroutine_kill`/`__rock_coroutine_run_defers`/`error`).
 fn emit_coroutine_js(
     ws: &Workspace,
-    fr: FuncRef,
+    plan: &skull_mir::lower::CoroutinePlan,
     mf: &MirFunc,
-    js_name: &str,
     callees: &CalleeNames,
     hoisted: &HashSet<ustr::Ustr>,
     globals: &GlobalCtx,
 ) -> Result<String, CompilerError> {
-    let f = &ws.module(fr.module).functions[fr.func];
-    let channel = f.return_ty.and_then(|t| skull_mir::lower::coroutine_yield_channel(ws, t));
-    let mut lowered = skull_transform::transform_coroutine(mf, channel.as_ref());
+    let channel = plan.channel.as_ref();
+    let mut lowered = skull_transform::transform_coroutine(mf, channel);
     let resume_arg = mf.resume_arg.ok_or_else(|| err("co fn must carry a resume-arg cell"))?;
-    let step_name = format!("{js_name}__step");
+    let step_name = plan.step();
     // Aux slot map BEFORE the closure pass mutates the arena (mirrors the Lua
     // driver); hook/defer regions are untouched by the pass, so the map stays valid.
     let aux_slots = lowered.aux_all_cells_slots(resume_arg);
@@ -4794,7 +4939,7 @@ fn emit_coroutine_js(
         out.push_str(&emit_fn_trampoline(
             ws,
             &lowered.step,
-            &format!("{js_name}__defer{k}"),
+            &plan.defer(k),
             callees,
             &hoisted,
             globals,
@@ -4807,7 +4952,7 @@ fn emit_coroutine_js(
         out.push_str(&emit_fn_trampoline(
             ws,
             &lowered.step,
-            &format!("{js_name}{slot}"),
+            &plan.hook(slot),
             callees,
             &hoisted,
             globals,
@@ -4816,7 +4961,7 @@ fn emit_coroutine_js(
             false,
         )?);
     }
-    out.push_str(&emit_js_constructor(js_name, &step_name, &lowered, channel.as_ref())?);
+    out.push_str(&emit_js_constructor(plan, &step_name, &lowered)?);
     Ok(out)
 }
 
@@ -4825,12 +4970,13 @@ fn emit_coroutine_js(
 /// `try/catch` is the `pcall`; `undefined -> null` on the step's value so a
 /// bare terminal return reads as nil.
 fn emit_js_constructor(
-    name: &str,
+    plan: &skull_mir::lower::CoroutinePlan,
     step_name: &str,
     lowered: &skull_transform::CoroLowered,
-    channel: Option<&skull_mir::lower::YieldChannel>,
 ) -> Result<String, CompilerError> {
     use std::fmt::Write as _;
+    let name = plan.base();
+    let channel = plan.channel.as_ref();
     let param_fields: Vec<String> = lowered
         .params
         .iter()
@@ -4852,12 +4998,12 @@ fn emit_js_constructor(
     }
     let n_defers = lowered.step.coro_defers.len();
     if n_defers > 0 {
-        let list: Vec<String> = (0..n_defers).map(|k| format!("{name}__defer{k}")).collect();
+        let list: Vec<String> = (0..n_defers).map(|k| plan.defer(k)).collect();
         init.push(format!("__defers: [{}]", list.join(", ")));
     }
     for (kind, _) in &lowered.hooks {
         let field = kind.slot();
-        init.push(format!("{field}: {name}{field}"));
+        init.push(format!("{field}: {}", plan.hook(field)));
     }
     // The step-raise recovery shared by both resume shapes: errored terminal,
     // kill the delegated inner, run defers LIFO, fire on_killed.
@@ -4885,26 +5031,29 @@ fn emit_js_constructor(
             );
         }
         box_fields.push_str(" }");
+        let advance = plan.advance().expect("a channel is what makes `__advance` exist");
+        let resume = plan.resume();
         return Ok(format!(
-            "function {name}__advance(s, arg) {{\n\
+            "function {advance}(s, arg) {{\n\
              \x20 if (s.__state < 0) return true;\n\
              \x20 if (s.__on_resume) s.__on_resume(s);\n\
              \x20 try {{ {step_name}(s, arg); }} catch (e) {{ {catch_body} return true; }}\n\
              \x20 return s.__state < 0;\n\
              }}\n\
-             function {name}__resume(s, arg) {{\n\
-             \x20 if ({name}__advance(s, arg)) return null;\n\
+             function {resume}(s, arg) {{\n\
+             \x20 if ({advance}(s, arg)) return null;\n\
              \x20 return {box_fields};\n\
              }}\n\
              function {name}({paramlist}) {{\n\
-             \x20 return {{ {fields}, __advance: {name}__advance, __resume: {name}__resume }};\n\
+             \x20 return {{ {fields}, __advance: {advance}, __resume: {resume} }};\n\
              }}\n",
             paramlist = param_fields.join(", "),
             fields = init.join(", "),
         ));
     }
+    let resume = plan.resume();
     Ok(format!(
-        "function {name}__resume(s, arg) {{\n\
+        "function {resume}(s, arg) {{\n\
          \x20 if (s.__state < 0) return null;\n\
          \x20 if (s.__on_resume) s.__on_resume(s);\n\
          \x20 var val;\n\
@@ -4912,7 +5061,7 @@ fn emit_js_constructor(
          \x20 return val === undefined ? null : val;\n\
          }}\n\
          function {name}({paramlist}) {{\n\
-         \x20 return {{ {fields}, __resume: {name}__resume }};\n\
+         \x20 return {{ {fields}, __resume: {resume} }};\n\
          }}\n",
         paramlist = param_fields.join(", "),
         fields = init.join(", "),
@@ -4953,13 +5102,14 @@ fn global_refs(mf: &MirFunc) -> Vec<ustr::Ustr> {
 /// MIR param slot. A GC value-struct default would break the 1:1 assumption, but
 /// value-struct construction rejects at emit independently, so no such call is
 /// admitted here.
-fn required_arg_count(
+pub fn required_arg_count(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
-    fr: FuncRef,
+    body: EmittedBodyId,
     arity: usize,
 ) -> usize {
     use bone_semantic::hir::BodyOwner;
+    let fr = body.decl();
     let defaults: Vec<bool> = ws
         .module(fr.module)
         .bodies
@@ -4968,7 +5118,10 @@ fn required_arg_count(
         .unwrap_or_default();
     // Scalar ABI: a defaulted value-struct param explodes to N leaf slots and
     // all N are omittable together -- subtract per-param LEAF widths, not 1.
-    if let Some(widths) = skull_mir::lower::BackendFnAbiPlan::for_declaration(ws, scx, fr).param_leaf_widths {
+    // The widths come from the EMITTED BODY's own plan: a specialization's
+    // instantiation is exactly where a param's leaf width differs from the
+    // declaration's, so asking the declaration would answer for another ABI.
+    if let Some(widths) = skull_mir::lower::BackendFnAbiPlan::for_body(ws, scx, body).param_leaf_widths() {
         let omittable: usize = widths
             .iter()
             .zip(defaults.iter().chain(std::iter::repeat(&false)))
@@ -5126,6 +5279,12 @@ fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
         ("from_codepoint", 1) => Some("__from_codepoint($1)"),
         // `tonumber(s)` -> a strict numeric parse (null on non-numeric / empty).
         ("parse_float", 1) => Some("__parse_float($1)"),
+        // `parse_float_at(s, start, end)` reads a pre-validated literal in place.
+        // luajit skips the slice via strtod over an offset; JS has no such call,
+        // so it slices -- the win is luajit-only, the semantics are the contract.
+        // `Number` is locale-independent here, which is the property the luajit
+        // side has to pin a "C" locale to get.
+        ("parse_float_at", 3) => Some("__parse_float($1.slice($2, $3))"),
         // RNG -> the `JS_RNG_RUNTIME` mulberry32 port (stream differs from Lua's
         // splitmix by doctrine; the seedable/deterministic/serializable semantics
         // hold). `env_var` -> the driver-provided node glue (`process.env`).

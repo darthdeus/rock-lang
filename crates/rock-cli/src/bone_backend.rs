@@ -447,13 +447,13 @@ pub fn bone_parse(path: &str) -> Result<()> {
             Ok(m) => m,
             Err(e) => {
                 eprintln!("{}", render_source_errs(&src, &[e]));
-                std::process::exit(1);
+                crate::ablation_report::exit_with_census(1);
             }
         };
         // No stdlib here (this path checks a single module in isolation).
         if let Err(errs) = check_modules(&mut [module]) {
             eprintln!("{}", render_source_errs(&src, &errs));
-            std::process::exit(1);
+            crate::ablation_report::exit_with_census(1);
         }
     }
     Ok(())
@@ -482,7 +482,7 @@ pub fn bone_check_single(path: &str, command: &str, iters: usize) -> Result<()> 
         Ok(s) => s,
         Err(e) => {
             log::error!(target: "BONE", "cannot read {}: {}", path, e);
-            std::process::exit(1);
+            crate::ablation_report::exit_with_census(1);
         }
     };
 
@@ -501,7 +501,7 @@ pub fn bone_check_single(path: &str, command: &str, iters: usize) -> Result<()> 
 
     if let Some(errs) = first_err {
         eprintln!("{}", render_source_errs(&src, &errs));
-        std::process::exit(1);
+        crate::ablation_report::exit_with_census(1);
     }
 
     log::info!(target: "BONE", "{} type-checks ({})", path, command);
@@ -551,7 +551,7 @@ fn bone_check_project(path: &str, command: &str, iters: usize) -> Result<()> {
 
     if let Some(errs) = first_err {
         eprintln!("{}", render_errs(&sources, &errs));
-        std::process::exit(1);
+        crate::ablation_report::exit_with_census(1);
     }
 
     log::info!(target: "BONE", "{} type-checks ({})", path, command);
@@ -653,7 +653,7 @@ pub fn bone_iter_inference(path: &str, iters: usize, warmup: usize) -> Result<()
             Ok(v) => v,
             Err(errs) => {
                 eprintln!("{}", render_errs(&sources, &errs));
-                std::process::exit(1);
+                crate::ablation_report::exit_with_census(1);
             }
         };
         // Bench harness: build the workspace once for the inference loop; no
@@ -663,7 +663,7 @@ pub fn bone_iter_inference(path: &str, iters: usize, warmup: usize) -> Result<()
             Ok(ws) => ws,
             Err(e) => {
                 eprintln!("{}", e.render(&sources));
-                std::process::exit(1);
+                crate::ablation_report::exit_with_census(1);
             }
         }
     };
@@ -685,7 +685,7 @@ pub fn bone_iter_inference(path: &str, iters: usize, warmup: usize) -> Result<()
             .try_for_each(|module| bone_semantic::semantic_passes::check_module(&ws, module.id, module).map(|_| ()));
         if let Err(e) = res {
             eprintln!("{}", e.render(&sources));
-            std::process::exit(1);
+            crate::ablation_report::exit_with_census(1);
         }
         t.elapsed().as_secs_f64() * 1000.0
     };

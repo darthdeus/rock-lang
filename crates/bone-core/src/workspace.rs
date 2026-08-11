@@ -389,6 +389,21 @@ pub struct BodyInference {
     /// wraps the lowered arg value in this call (the call-argument analog of
     /// `for_iter_protocol`'s `iter`).
     pub implicit_iter_args: FxHashMap<Idx<Expr>, IterWitness>,
+    /// `StructDefaults` bodies only: the fresh inference var each of the
+    /// struct's DECLARED generics was instantiated to, in declaration order.
+    /// Empty for every other body owner.
+    ///
+    /// Checking a field default replaces the declared `Generic(T)` with a fresh
+    /// var and coerces the initializer against the substituted field type, so
+    /// the default's own generic joins that var's class. Without this the map
+    /// is local to the check, and a consumer holding `Box<int>` cannot say
+    /// which var is `Box`'s generic 0 -- so the default lowers to the SHARED
+    /// generic body and names no instance. skull's `with_struct_default` binds
+    /// these to the literal's concrete arguments.
+    ///
+    /// Entries may still be unbound vars at record time; readers resolve
+    /// through `substitutions`, like `expr_types`.
+    pub struct_default_generic_slots: Vec<TyId>,
 
     pub ty_arena: Arena<TypeExpr>,
     pub ty_spans: ArenaMap<Idx<TypeExpr>, Span>,

@@ -42,9 +42,24 @@ fn main() {{
 }
 
 /// Column storage writes a leaf per column keyed by its dotted path; a boxed
-/// element calls the leaf ctor and stores one table.
+/// element CALLS the leaf ctor and stores one table. So the tier is "is the leaf
+/// ctor called at all", which is a property of the storage.
+///
+/// It deliberately does NOT match the ctor's ARGUMENTS. The previous form asked
+/// for `Opt_lct((true)`, pinning the presence leaf as a literal constant at the
+/// call -- and under instance-owned emission the same boxed store arrives as
+/// `Opt_lct(r1, .., r5)` with the leaves in registers. That read as
+/// "column-stored" for every row above the threshold and looked exactly like the
+/// storage tier having moved, when `Opt_lct` was still being called and every
+/// round-trip row above still passed. A spelling is not a tier.
+///
+/// `__op_eq` lines are excluded because the fixture's `V[1] == V[0]` MATERIALIZES
+/// both operands through the same ctor whatever the storage is -- at 3 leaves
+/// that comparison is the only `Opt_lct(` in the chunk. Matching the bare name
+/// therefore reports "boxed" for every row, which is the same failure from the
+/// other side. The tier is whether the STORE builds an element.
 fn is_column_stored(lua: &str) -> bool {
-    !lua.contains("Opt_lct((true)")
+    !lua.lines().filter(|l| !l.contains("__op_eq")).any(|l| l.contains("Opt_lct("))
 }
 
 #[test]

@@ -177,31 +177,7 @@ impl Builder<'_> {
     ) -> Result<(), CompilerError> {
         let it_val = match info.iter.as_ref().map(|w| w.func) {
             Some((m, f)) => {
-                // Stage-0e: the `iter` witness is emitted with NO spec binding,
-                // so a generic one still reaches the shared generic body here.
-                // bone now records the witness's own instantiation
-                // (`IterWitness::generics`), and the instance graph consumes it;
-                // EMISSION consumes it at the Stage-3 cutover, not before.
                 let iter_ref = FuncRef { module: m, func: f };
-                if crate::ablation::enabled() {
-                    let cf = &self.ws.module(m).functions[f];
-                    if !cf.generics.is_empty() {
-                        crate::ablation::record(
-                            crate::ablation::FatalCategory::MissingGraphEdge,
-                            cf.name.as_str(),
-                            self.f.name.as_str(),
-                            self.body
-                                .expr_spans
-                                .get(iter_expr)
-                                .copied()
-                                .unwrap_or(cf.name_span),
-                            "the `for`-protocol `iter` witness has no instantiation record \
-                             in emission: the recorded `IterWitness::generics` is not \
-                             consumed here until the Stage-3 cutover, so this call is \
-                             emitted with no spec binding",
-                        );
-                    }
-                }
                 let repr = self.lower_expr_repr(iter_expr)?;
                 let args = self.iter_witness_args(iter_ref, repr)?;
                 // The `for` head's `iter` witness, not the head expression's
@@ -210,17 +186,30 @@ impl Builder<'_> {
                 let call = self.with_site_op(crate::site::SiteOp::ForIter, |b| {
                     b.emit_cur(Inst::Call { func: iter_ref, args })
                 });
-                // The Stage-3 cutover the note above described: bone records the
-                // witness's own instantiation and emission consumes it HERE, as
-                // identity. What it does NOT do is decide delivery -- the
-                // witness still reaches whatever body the specializer chose.
+                // DELIVERY, from the same `IterWitness::generics` the identity
+                // record below reads. The witness is an ordinary call to a
+                // generic `iter`, so under instance-owned emission it must name
+                // an instance like any other -- it was the last call form still
+                // reaching a shared generic body by construction, and once that
+                // body stopped being emitted it named a nil global.
+                if let Some(w) = info.iter.as_ref() {
+                    let span = self
+                        .body
+                        .expr_spans
+                        .get(iter_expr)
+                        .copied()
+                        .unwrap_or(self.ws.module(m).functions[f].name_span);
+                    if let Some(key) = self.next_call_spec(iter_ref, &w.generics, span)? {
+                        self.f.spec_bindings.insert(call, key);
+                    }
+                }
                 if let (Some(inf), Some(w)) = (self.inf, info.iter.as_ref()) {
                     if let Some(subst) = crate::lower::shape::witness_instance_subst(
                         self.ws,
                         inf,
                         iter_ref,
                         &w.generics,
-                        self.spec_subst,
+                        self.subst(),
                     )? {
                         self.f.callee_instances.insert(
                             call,
@@ -250,11 +239,7 @@ impl Builder<'_> {
                         .get(iter_expr)
                         .copied()
                         .unwrap_or(self.ws.module(*m).functions[*f].name_span),
-                )?
-                .filter(|k| {
-                    !self.in_unspliced_ctx
-                        || spec_key_has_target_storage(self.ws, k, self.scx.target)
-                }),
+                )?,
             BoundNext::CallerGeneric(_) => None,
         };
         // A placeholder next is `(bool, E)` by bound conformance, but `E`'s SHAPE
@@ -323,7 +308,7 @@ impl Builder<'_> {
                         inf,
                         func,
                         next_generics,
-                        self.spec_subst,
+                        self.subst(),
                     )? {
                         self.f
                             .callee_instances

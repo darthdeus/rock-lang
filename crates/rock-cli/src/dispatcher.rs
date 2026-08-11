@@ -196,7 +196,7 @@ impl CommandContext {
 
         log::error!(target: "FRAME", "usage: rock frame [GAME_DIR] [OUTPUT_DIR]");
         log::error!(target: "FRAME", "example: rock frame bitgun tmp");
-        std::process::exit(1);
+        crate::ablation_report::exit_with_census(1);
     }
 
     pub fn get_path_or_current(&self) -> Result<String> {
@@ -536,6 +536,12 @@ impl CommandContext {
                 self.args.output.as_deref(),
                 self.args.watch,
                 self.args.port,
+                if self.args.single_file {
+                    crate::web::WebPackage::SingleFile
+                } else {
+                    crate::web::WebPackage::Directory
+                },
+                self.args.itch,
             );
         }
         // shader is GLSL fn-library emission (route B); it type-checks a single
@@ -684,7 +690,7 @@ impl CommandContext {
                 Ok(_) => Ok(()),
                 Err(e) => {
                     log::error!(target: "FMT", "{}", e);
-                    std::process::exit(1);
+                    crate::ablation_report::exit_with_census(1);
                 }
             };
         }

@@ -12,6 +12,8 @@ mod arena_column_oracle;
 mod backend_variant_mangling;
 #[path = "bounded_lambda_inline.rs"]
 mod bounded_lambda_inline;
+#[path = "bounded_standalone_emission.rs"]
+mod bounded_standalone_emission;
 #[path = "capture_free_hoist.rs"]
 mod capture_free_hoist;
 #[path = "closure_snapshot.rs"]
@@ -20,6 +22,8 @@ mod closure_snapshot;
 mod coalesce_value_struct_literal_field_sentinel;
 #[path = "concrete_body.rs"]
 mod concrete_body;
+#[path = "concrete_coroutine_emission.rs"]
+mod concrete_coroutine_emission;
 #[path = "const_hoist.rs"]
 mod const_hoist;
 #[path = "const_hot_reload.rs"]
@@ -52,8 +56,8 @@ mod fn_record_mt;
 mod frame_lambda_hoist;
 #[path = "frame_slot_naming.rs"]
 mod frame_slot_naming;
-#[path = "generic_coroutine_column_param_sentinel.rs"]
-mod generic_coroutine_column_param_sentinel;
+#[path = "generic_coroutine_column_param.rs"]
+mod generic_coroutine_column_param;
 #[path = "hole_runtime_error.rs"]
 mod hole_runtime_error;
 #[path = "incremental_emit.rs"]
@@ -77,6 +81,9 @@ mod inline_body_column_map_param;
 mod inline_lua_column_container_param_sentinel;
 #[path = "inline_value_specialization.rs"]
 mod inline_value_specialization;
+#[path = "graph_snapshot.rs"]
+mod graph_snapshot;
+
 #[path = "instance_graph.rs"]
 mod instance_graph;
 #[path = "instance_owned_emission.rs"]
@@ -169,6 +176,8 @@ mod value_push_generic_boundary;
 mod value_scalarize;
 #[path = "value_test_discovery.rs"]
 mod value_test_discovery;
+#[path = "valid_type_identity.rs"]
+mod valid_type_identity;
 #[path = "vec_value_columns.rs"]
 mod vec_value_columns;
 #[path = "vertex_plan.rs"]

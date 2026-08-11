@@ -11,12 +11,12 @@
 //! unambiguous, so the two sides are comparable and no pretty-printing
 //! ambiguity can match two different types to each other.
 //!
-//! A `None` slot is the partial key's erasure: `reify_type` declined to admit
-//! that generic (a valid `any`, unit, never or function type). It is treated as
-//! a WILDCARD when reconciling -- the shadow side is total, so it always has a
-//! concrete type where this side has a hole.
+//! A `None` slot means the key names no instantiation for that generic, which
+//! now happens only inside a SHARED generic body (the enclosing substitution
+//! does not bind it). It is treated as a WILDCARD when reconciling -- the shadow
+//! side is total, so it always has a concrete type where this side has a hole.
 
-use bone_semantic::hir::{BodyOwner, FnBackend};
+use bone_semantic::hir::BodyOwner;
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
 
@@ -31,14 +31,15 @@ pub struct TodaySpec {
     /// difference in reachability, not a missing instance.
     pub caller: FuncRef,
     pub func: FuncRef,
-    /// Per declared generic, in declaration order. `None` = the partial key
-    /// erased this slot.
-    pub slots: Vec<Option<String>>,
+    /// Per declared generic, in declaration order. Total: a site with any
+    /// unreified slot produces no key at all, so there is nothing partial to
+    /// record here.
+    pub slots: Vec<String>,
 }
 
 /// `FuncRef` is not `Ord`; sort by its raw indices so the census output is
 /// order-stable.
-fn key(t: &TodaySpec) -> (u32, u32, u32, u32, &[Option<String>]) {
+fn key(t: &TodaySpec) -> (u32, u32, u32, u32, &[String]) {
     (
         t.func.module.raw(),
         t.func.func.into_raw().into_u32(),
@@ -66,7 +67,7 @@ impl PartialOrd for TodaySpec {
 /// The enclosing substitution is empty, matching the site-aware validator
 /// (`native_buffer_alloc_reject`): a call inside a generic body is read without
 /// an instantiation, which is exactly the shared-body condition being measured.
-pub fn today_specializations(ws: &Workspace, target: FnBackend) -> (Vec<TodaySpec>, usize) {
+pub fn today_specializations(ws: &Workspace) -> (Vec<TodaySpec>, usize) {
     let mut out = Vec::new();
     let mut rejected = 0usize;
     for module in ws.modules.iter() {
@@ -77,13 +78,13 @@ pub fn today_specializations(ws: &Workspace, target: FnBackend) -> (Vec<TodaySpe
         for (owner, inf) in ir.per_fn.iter() {
             let BodyOwner::Function(caller_fid) = owner else { continue };
             let caller = FuncRef { module: module.id, func: *caller_fid };
-            let (specs, rej) = specializations_in_body(ws, inf, target);
+            let (specs, rej) = specializations_in_body(ws, inf);
             rejected += rej;
             for (func, key) in specs {
                 out.push(TodaySpec {
                     caller,
                     func,
-                    slots: key.iter().map(|s| s.as_ref().map(crate::monoty::MonoTy::canonical)).collect(),
+                    slots: key.iter().map(crate::monoty::MonoTy::canonical).collect(),
                 });
             }
         }

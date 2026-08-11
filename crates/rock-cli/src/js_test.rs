@@ -105,6 +105,7 @@ pub fn js_test(paths: &[String]) -> Result<()> {
     let ablation_fatals = crate::ablation_report::report("rock test --backend js");
 
     if summary.tests_failed > 0 || summary.unit_failures > 0 || ablation_fatals {
+        // Plain exit: the census above already drained the registry.
         std::process::exit(1);
     }
     Ok(())
@@ -344,25 +345,33 @@ fn js_run_tests(
         }
     }
 
-    // Assemble the shared defs + the runnable test index list (test order). With
-    // no deco-dependent test this is the per-test isolated concatenation
-    // (byte-identical to the pre-lift path); otherwise the whole file emits as
-    // ONE program (`emit_program_with_roots`) so decorator applications run once
-    // at load and populate the registries those tests read.
+    // Assemble the shared defs + the runnable test index list (test order).
+    //
+    // The per-test emission above is the CLASSIFIER -- it decides, one test at a
+    // time, which tests the JS subset can serve, so an unsupported one skips by
+    // itself instead of taking the file down with it. Assembly is a separate
+    // question, and the answer is always ONE program over the surviving roots:
+    // concatenating the per-test closures gives every block its own copy of the
+    // global initializers, so a global derived from shared mutable state is
+    // recomputed per block and comes out wrong. That is the model luajit and
+    // `rock run --backend js` already use, and it is what makes the Session
+    // Arena registry (four arena iteration tests) agree across backends.
     let mut run_idxs: Vec<usize> = supported.iter().map(|(i, _)| *i).collect();
-    let shared_defs = if deco_pending.is_empty() {
-        supported.iter().map(|(_, d)| d.as_str()).collect::<String>()
+    run_idxs.extend(deco_pending.iter().copied());
+    run_idxs.sort_unstable();
+    let shared_defs = if run_idxs.is_empty() {
+        String::new()
     } else {
-        run_idxs.extend(deco_pending.iter().copied());
-        run_idxs.sort_unstable();
         let roots: Vec<(FuncRef, String)> =
             run_idxs.iter().map(|&i| (tests[i].0, format!("__t{i}"))).collect();
         match skull_codegen_js::emit::emit_program_with_roots(ws, &scx, &roots) {
             Ok(blob) => blob,
             Err(e) => {
-                // Whole-file emission rejected (a deco-dependent test also hits an
-                // unsupported construct past the deco-global read): keep the
-                // individually-supported tests, skip the deco-dependent ones.
+                // Whole-file emission rejected for something no single test hit
+                // on its own (a deco-dependent test that also reaches an
+                // unsupported construct, or a construct only the shared program
+                // reaches): keep the individually-supported tests by falling back
+                // to the concatenation, and skip the deco-dependent ones.
                 for &i in &deco_pending {
                     skips.push((tests[i].1.name.clone(), all_reasons(&e)));
                 }
@@ -456,10 +465,10 @@ pub fn js_run(path: &str) -> Result<()> {
     let program = build_run_program(&emitted);
     match rock_host::js_runner::run_node_code_streaming(&program) {
         Ok(0) => Ok(()),
-        Ok(code) => std::process::exit(code),
+        Ok(code) => crate::ablation_report::exit_with_census(code),
         Err(e) => {
             log::error!(target: "JS", "node run failed: {}", e.message);
-            std::process::exit(1);
+            crate::ablation_report::exit_with_census(1);
         }
     }
 }
@@ -471,14 +480,14 @@ fn emit_js_program_single(path: &str) -> skull_codegen_js::emit::JsProgram {
         Ok(s) => s,
         Err(e) => {
             log::error!(target: "JS", "cannot read {}: {}", path, e);
-            std::process::exit(1);
+            crate::ablation_report::exit_with_census(1);
         }
     };
     let user = match skull_parser::parse_module(&src, ustr::Ustr::from(path)) {
         Ok(u) => u,
         Err(e) => {
             eprintln!("{}", crate::skull_backend::render_file_errs(path, &src, &[e]));
-            std::process::exit(1);
+            crate::ablation_report::exit_with_census(1);
         }
     };
     let user_file = user.file;
@@ -486,7 +495,7 @@ fn emit_js_program_single(path: &str) -> skull_codegen_js::emit::JsProgram {
         Ok(ws) => ws,
         Err(errs) => {
             eprintln!("{}", crate::skull_backend::render_file_errs(path, &src, &errs));
-            std::process::exit(1);
+            crate::ablation_report::exit_with_census(1);
         }
     };
     let user_mid = crate::bone_backend::entry_module_id(&ws, user_file);
@@ -495,7 +504,7 @@ fn emit_js_program_single(path: &str) -> skull_codegen_js::emit::JsProgram {
         Ok(p) => p,
         Err(e) => {
             eprintln!("{}", crate::skull_backend::render_file_errs(path, &src, &[e]));
-            std::process::exit(1);
+            crate::ablation_report::exit_with_census(1);
         }
     }
 }
@@ -514,7 +523,7 @@ pub(crate) fn emit_js_program_project(
         Ok(emitted) => emitted,
         Err(e) => {
             eprintln!("{e}");
-            std::process::exit(1);
+            crate::ablation_report::exit_with_census(1);
         }
     }
 }

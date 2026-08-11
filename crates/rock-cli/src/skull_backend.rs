@@ -161,14 +161,14 @@ pub fn skull_iter_codegen(path: &str, iters: usize) -> Result<()> {
         Ok(v) => v,
         Err(errs) => {
             eprintln!("{}", render_project_errs(&sources, &errs));
-            std::process::exit(1);
+            crate::ablation_report::exit_with_census(1);
         }
     };
     let ws = match crate::bone_backend::check_modules(&mut modules) {
         Ok(ws) => ws,
         Err(errs) => {
             eprintln!("{}", render_project_errs(&sources, &errs));
-            std::process::exit(1);
+            crate::ablation_report::exit_with_census(1);
         }
     };
     let entry_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
@@ -176,7 +176,7 @@ pub fn skull_iter_codegen(path: &str, iters: usize) -> Result<()> {
     // Warm-up emit outside the timed loop (catch any gap, prime the allocator).
     if let Err(e) = skull::mir_emit::emit_workspace_mir(&ws, entry_mid) {
         eprintln!("{}", render_project_err(&sources, &e));
-        std::process::exit(1);
+        crate::ablation_report::exit_with_census(1);
     }
 
     let t = Instant::now();
@@ -186,7 +186,7 @@ pub fn skull_iter_codegen(path: &str, iters: usize) -> Result<()> {
             Ok(e) => bytes = e.lua.len(),
             Err(e) => {
                 eprintln!("{}", render_project_err(&sources, &e));
-                std::process::exit(1);
+                crate::ablation_report::exit_with_census(1);
             }
         }
     }
@@ -217,14 +217,14 @@ pub fn skull_inline_stats(path: &str) -> Result<()> {
         Ok(v) => v,
         Err(errs) => {
             eprintln!("{}", render_project_errs(&sources, &errs));
-            std::process::exit(1);
+            crate::ablation_report::exit_with_census(1);
         }
     };
     let ws = match crate::bone_backend::check_modules(&mut modules) {
         Ok(ws) => ws,
         Err(errs) => {
             eprintln!("{}", render_project_errs(&sources, &errs));
-            std::process::exit(1);
+            crate::ablation_report::exit_with_census(1);
         }
     };
 
@@ -269,7 +269,7 @@ pub fn skull_iter_cook(path: &str, iters: usize) -> Result<()> {
         Ok(v) => v,
         Err(errs) => {
             eprintln!("{}", render_project_errs(&sources, &errs));
-            std::process::exit(1);
+            crate::ablation_report::exit_with_census(1);
         }
     };
 
@@ -764,14 +764,14 @@ pub fn skull_shader(files: &[String], output: Option<String>, profile: Option<St
         Ok(s) => s,
         Err(e) => {
             log::error!(target: "SHADER", "cannot read {}: {}", path, e);
-            std::process::exit(1);
+            crate::ablation_report::exit_with_census(1);
         }
     };
     let user = match skull_parser::parse_module(&src, ustr::Ustr::from(path.as_str())) {
         Ok(u) => u,
         Err(e) => {
             eprintln!("{}", render_file_errs(path, &src, &[e]));
-            std::process::exit(1);
+            crate::ablation_report::exit_with_census(1);
         }
     };
     let user_file = user.file;
@@ -779,7 +779,7 @@ pub fn skull_shader(files: &[String], output: Option<String>, profile: Option<St
         Ok(ws) => ws,
         Err(errs) => {
             eprintln!("{}", render_file_errs(path, &src, &errs));
-            std::process::exit(1);
+            crate::ablation_report::exit_with_census(1);
         }
     };
     let user_mid = crate::bone_backend::entry_module_id(&ws, user_file);
@@ -799,7 +799,7 @@ pub fn skull_shader(files: &[String], output: Option<String>, profile: Option<St
             Ok(g) => g,
             Err(e) => {
                 eprintln!("{}", render_file_errs(path, &src, &[e]));
-                std::process::exit(1);
+                crate::ablation_report::exit_with_census(1);
             }
         }
     } else {
@@ -816,7 +816,7 @@ pub fn skull_shader(files: &[String], output: Option<String>, profile: Option<St
             Ok(g) => g,
             Err(e) => {
                 eprintln!("{}", render_file_errs(path, &src, &[e]));
-                std::process::exit(1);
+                crate::ablation_report::exit_with_census(1);
             }
         }
     };
@@ -862,7 +862,7 @@ pub fn skull_compile_single(path: &str, output: Option<String>) -> Result<()> {
         Ok(s) => s,
         Err(e) => {
             log::error!(target: "SKULL", "cannot read {}: {}", path, e);
-            std::process::exit(1);
+            crate::ablation_report::exit_with_census(1);
         }
     };
     match skull_emit(path, &src) {
@@ -881,7 +881,7 @@ pub fn skull_compile_single(path: &str, output: Option<String>) -> Result<()> {
         }
         Err(errs) => {
             eprintln!("{}", render_file_errs(path, &src, &errs));
-            std::process::exit(1);
+            crate::ablation_report::exit_with_census(1);
         }
     }
 }
@@ -1087,14 +1087,14 @@ pub fn skull_run(path: &str) -> Result<()> {
         Ok(s) => s,
         Err(e) => {
             log::error!(target: "SKULL", "cannot read {}: {}", path, e);
-            std::process::exit(1);
+            crate::ablation_report::exit_with_census(1);
         }
     };
     let lua = match skull_emit(path, &src) {
         Ok(l) => l,
         Err(errs) => {
             eprintln!("{}", render_file_errs(path, &src, &errs));
-            std::process::exit(1);
+            crate::ablation_report::exit_with_census(1);
         }
     };
     let program = if lua.contains("function main(") {
@@ -1112,13 +1112,13 @@ pub fn skull_run(path: &str) -> Result<()> {
             // returning Ok is how `rock run` used to exit 0 on a dead program.
             if !run.success {
                 log::error!(target: "SKULL", "program exited with a runtime error");
-                std::process::exit(1);
+                crate::ablation_report::exit_with_census(1);
             }
             Ok(())
         }
         Err(e) => {
             log::error!(target: "SKULL", "runtime error: {}", e.message);
-            std::process::exit(1);
+            crate::ablation_report::exit_with_census(1);
         }
     }
 }
@@ -1169,7 +1169,7 @@ fn skull_emit_project(dir: &str) -> String {
         Ok(s) => s,
         Err(e) => {
             log::error!(target: "SKULL", "cannot load project {}: {}", dir, e);
-            std::process::exit(1);
+            crate::ablation_report::exit_with_census(1);
         }
     };
     // Game build: drop test-only files (tests/ dirs) so a compile error in a
@@ -1185,7 +1185,7 @@ fn skull_emit_project(dir: &str) -> String {
         Ok(v) => v,
         Err(errs) => {
             eprintln!("{}", render_project_errs(&sources, &errs));
-            std::process::exit(1);
+            crate::ablation_report::exit_with_census(1);
         }
     };
 
@@ -1194,7 +1194,7 @@ fn skull_emit_project(dir: &str) -> String {
         Err(errs) => {
             eprintln!("{}", render_project_errs(&sources, &errs));
             log::error!(target: "SKULL", "bone type-check failed for project {}", dir);
-            std::process::exit(1);
+            crate::ablation_report::exit_with_census(1);
         }
     };
     let user_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
@@ -1212,7 +1212,7 @@ fn skull_emit_project(dir: &str) -> String {
     if !lint_errs.is_empty() {
         eprintln!("{}", render_project_errs(&sources, &lint_errs));
         log::error!(target: "SKULL", "{} lint error(s) in project {}", lint_errs.len(), dir);
-        std::process::exit(1);
+        crate::ablation_report::exit_with_census(1);
     }
 
     // Project build: modules outside `dir` (the `stone` dependency, stdlib) are
@@ -1222,7 +1222,7 @@ fn skull_emit_project(dir: &str) -> String {
         Err(e) => {
             eprintln!("{}", render_project_err(&sources, &e));
             log::error!(target: "SKULL", "skull emit failed for project {}", dir);
-            std::process::exit(1);
+            crate::ablation_report::exit_with_census(1);
         }
     };
     let compile = t.elapsed();
@@ -1393,7 +1393,7 @@ fn build_nobox_global_accessors(ws: &bone_semantic::inference::Workspace) -> Str
                      mismatched pair would write one leaf's value into another",
                     g.name, leaves.len(), paths.len()
                 );
-                std::process::exit(1);
+                crate::ablation_report::exit_with_census(1);
             }
             // Both accessor directions are POSITIONAL over the leaf sequence, so
             // they are sound only where the ctor is too. `nobox_global_accessor_shape`
@@ -1407,7 +1407,7 @@ fn build_nobox_global_accessors(ws: &bone_semantic::inference::Workspace) -> Str
                      rebuildable shapes only.",
                     g.name
                 );
-                std::process::exit(1);
+                crate::ablation_report::exit_with_census(1);
             }
             let _ = presence_path;
             let args = leaves.iter().map(|l| l.to_string()).collect::<Vec<_>>().join(", ");
@@ -1565,7 +1565,7 @@ fn skull_run_project(dir: &str) -> Result<()> {
         if !std::env::var("ROCK_SKIP_ENGINE_BUILD").is_ok_and(|v| v == "1") {
             if let Err(e) = rock_host::engine_build::build_engine_libs(dir) {
                 log::error!(target: "SKULL", "engine build failed: {}", e);
-                std::process::exit(1);
+                crate::ablation_report::exit_with_census(1);
             }
         }
         // Game preamble + `__rock_main_wrapper(main)` entry, built by the same
@@ -1581,7 +1581,7 @@ fn skull_run_project(dir: &str) -> Result<()> {
             &lua_file.with_file_name("incremental.lua"),
         ) {
             log::error!(target: "SKULL", "cannot write {}: {}", lua_file.display(), e);
-            std::process::exit(1);
+            crate::ablation_report::exit_with_census(1);
         }
         // No timeout: games run an infinite frame loop.
         return crate::compile_cmd::exec_luajit_file(&lua_file, None, &[]);
@@ -1603,13 +1603,13 @@ fn skull_run_project(dir: &str) -> Result<()> {
             // returning Ok is how `rock run` used to exit 0 on a dead program.
             if !run.success {
                 log::error!(target: "SKULL", "program exited with a runtime error");
-                std::process::exit(1);
+                crate::ablation_report::exit_with_census(1);
             }
             Ok(())
         }
         Err(e) => {
             log::error!(target: "SKULL", "runtime error: {}", e.message);
-            std::process::exit(1);
+            crate::ablation_report::exit_with_census(1);
         }
     }
 }
@@ -1825,6 +1825,8 @@ pub fn skull_test(paths: &[String]) -> Result<()> {
         || err_failed > 0
         || ablation_fatals
     {
+        // Plain exit: the census above already drained the registry, so routing
+        // this through `exit_with_census` would print an empty second one.
         std::process::exit(1);
     }
     Ok(())
@@ -2077,7 +2079,7 @@ pub fn skull_incremental_profile(path: &str) -> Result<()> {
         for r in &diffs {
             eprintln!("   {}", r.name);
         }
-        std::process::exit(1);
+        crate::ablation_report::exit_with_census(1);
     }
 }
 
