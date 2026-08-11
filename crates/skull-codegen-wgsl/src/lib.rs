@@ -4140,23 +4140,27 @@ impl<'a> FunctionEmitter<'a> {
             Inst::Eq(a, b) => self.binary(*a, "==", *b),
             Inst::NotEq(a, b) => self.binary(*a, "!=", *b),
             Inst::FloatToInt(value) => {
-                self.reject_compute_numeric_conversion("float as int")?;
+                self.reject_compute_numeric_conversion("float as int", *value)?;
                 Ok(format!("i32({})", self.render_val(*value)?))
             }
             Inst::IntToFloat(value) => {
-                self.reject_compute_numeric_conversion("int as float")?;
+                self.reject_compute_numeric_conversion("int as float", *value)?;
                 Ok(format!("f32({})", self.render_val(*value)?))
             }
             Inst::UintToFloat(value) => {
-                self.reject_compute_numeric_conversion("uint as float")?;
+                self.reject_compute_numeric_conversion("uint as float", *value)?;
                 Ok(format!("f32({})", self.render_val(*value)?))
             }
-            Inst::IntToUint(value) | Inst::FloatToUint(value) => {
-                self.reject_compute_numeric_conversion("numeric as uint")?;
+            Inst::IntToUint(value) => {
+                self.reject_compute_numeric_conversion("int as uint", *value)?;
+                Ok(format!("u32({})", self.render_val(*value)?))
+            }
+            Inst::FloatToUint(value) => {
+                self.reject_compute_numeric_conversion("float as uint", *value)?;
                 Ok(format!("u32({})", self.render_val(*value)?))
             }
             Inst::UintToInt(value) => {
-                self.reject_compute_numeric_conversion("uint as int")?;
+                self.reject_compute_numeric_conversion("uint as int", *value)?;
                 Ok(format!("i32({})", self.render_val(*value)?))
             }
             Inst::UintBitcastInt(value) => {
@@ -4178,8 +4182,12 @@ impl<'a> FunctionEmitter<'a> {
         }
     }
 
-    fn reject_compute_numeric_conversion(&self, conversion: &str) -> Result<(), CompilerError> {
-        if self.stage.stage == ShaderStage::Compute {
+    fn reject_compute_numeric_conversion(
+        &self,
+        conversion: &str,
+        value: Idx<Inst>,
+    ) -> Result<(), CompilerError> {
+        if self.stage.stage == ShaderStage::Compute && !self.safe_compute_numeric_constant(conversion, value) {
             return Err(err(
                 self.span,
                 format!(
@@ -4188,6 +4196,24 @@ impl<'a> FunctionEmitter<'a> {
             ));
         }
         Ok(())
+    }
+
+    fn safe_compute_numeric_constant(&self, conversion: &str, value: Idx<Inst>) -> bool {
+        match (conversion, &self.body.insts[value]) {
+            ("float as int", Inst::Const(Lit::Float(value))) => {
+                value.is_finite() && value.fract() == 0.0 && *value >= 0.0 && *value <= i32::MAX as f64
+            }
+            ("int as float", Inst::Const(Lit::Int(value))) => {
+                (-16_777_216..=16_777_216).contains(value)
+            }
+            ("uint as float", Inst::Const(Lit::Uint(value))) => *value <= 16_777_216,
+            ("int as uint", Inst::Const(Lit::Int(value))) => (0..=u32::MAX as i64).contains(value),
+            ("float as uint", Inst::Const(Lit::Float(value))) => {
+                value.is_finite() && value.fract() == 0.0 && *value >= 0.0 && *value <= 16_777_216.0
+            }
+            ("uint as int", Inst::Const(Lit::Uint(value))) => *value <= i32::MAX as u32,
+            _ => false,
+        }
     }
 
     /// A WGSL struct constructor is POSITIONAL, so the literal's field order is
