@@ -197,6 +197,48 @@ fn assert_sim_state_matches_exact(
     assert!(compared > 0, "must compare at least one sim-state global");
 }
 
+fn assert_f32_state_matches(got: &serde_json::Value, want: &serde_json::Value, path: &str) {
+    match (got, want) {
+        (serde_json::Value::Number(a), serde_json::Value::Number(b)) => {
+            if let (Some(a), Some(b)) = (a.as_i64(), b.as_i64()) {
+                assert_eq!(a, b, "integer state must match at {path}");
+            } else {
+                let a = a.as_f64().expect("JSON number");
+                let b = b.as_f64().expect("JSON number");
+                assert_eq!((a as f32).to_bits(), (b as f32).to_bits(), "f32 state must match at {path}");
+            }
+        }
+        (serde_json::Value::Array(a), serde_json::Value::Array(b)) => {
+            assert_eq!(a.len(), b.len(), "array length must match at {path}");
+            for (i, (a, b)) in a.iter().zip(b).enumerate() {
+                assert_f32_state_matches(a, b, &format!("{path}[{i}]"));
+            }
+        }
+        (serde_json::Value::Object(a), serde_json::Value::Object(b)) => {
+            assert_eq!(a.len(), b.len(), "object shape must match at {path}");
+            for (name, a) in a {
+                let b = b.get(name).unwrap_or_else(|| panic!("missing {path}.{name}"));
+                assert_f32_state_matches(a, b, &format!("{path}.{name}"));
+            }
+        }
+        _ => assert_eq!(got, want, "state must match at {path}"),
+    }
+}
+
+fn assert_mag_seek_state_matches(
+    got: &serde_json::Value,
+    want: &serde_json::Value,
+    sim: &std::collections::HashSet<String>,
+    label: &str,
+) {
+    let mut exact = sim.clone();
+    for name in ["DROP_PARTICLES", "WISPS"] {
+        assert!(exact.remove(name), "{name} must be admitted as simulation state");
+        assert_f32_state_matches(&got["mag"][name], &want["mag"][name], &format!("mag.{name}"));
+    }
+    assert_sim_state_matches(got, want, &exact, label);
+}
+
 /// P4 item 2: scrub to an ARBITRARY earlier tick. Cadence keyframes (every
 /// `STONE_KEYFRAME_INTERVAL` ticks during replay) let a backward scrub restore
 /// the nearest keyframe <= T and render-skipped-resim forward to T. Landing at
@@ -400,7 +442,7 @@ fn live_record_rewind_matches_plain_replay_at_target() {
 
 /// Seek resimulation must run the same game semantics as ordinary playback.
 /// Mag's main-menu interaction and Play action live in `@late_draw`, so this is the
-/// concrete integration case that render-skipped resimulation currently loses.
+/// concrete integration case that render-skipped resimulation used to lose.
 #[test]
 fn mag_main_menu_transition_survives_seek_resimulation() {
     let game = "mag";
@@ -434,6 +476,11 @@ fn mag_main_menu_transition_survives_seek_resimulation() {
             fields[1] = "0x1.999999999999ap-4";
             fields[2] = "960";
             fields[3] = "432";
+            fields[6] = match tick {
+                20 => "o",
+                50 => "escape",
+                _ => "-",
+            };
             fields[7] = if tick == 30 { "1" } else { "-" };
             tick += 1;
             fields.join(" ")
@@ -449,12 +496,44 @@ fn mag_main_menu_transition_survives_seek_resimulation() {
         &log_s,
         &[
             ("MAG_BOOT_MENU", "1"),
+            ("MAG_SCREENSHOT", "1"),
             ("STONE_START_PAUSED", "1"),
             ("STONE_STEP_FRAMES", &target.to_string()),
         ],
     );
     assert_eq!(current_tick(&reference), i64::from(target));
     assert_eq!(reference["mag"]["SCREEN"].as_i64(), Some(2), "ordinary playback must activate Play");
+    // The recorded 'o' at tick 20 reaches the GAME and no longer reaches the
+    // engine's debug toggles, which read tool input: whether a recorded key can
+    // drive a tool is owned by
+    // `replay_timeline_tests::recorded_keys_cannot_toggle_engine_debug_windows`,
+    // which drives both sides. What stays asserted here is the classification
+    // that made the divergence harmless in the first place.
+    assert_eq!(
+        reference["stone"]["WORLD_MODE"]["game_paused"].as_bool(),
+        Some(false),
+        "the reference target precedes the pause input"
+    );
+    let sim = sim_state_names(game, frames);
+    for name in ["WORLD_MODE", "MOTES"] {
+        assert!(sim.contains(name), "{name} must be admitted as simulation state");
+    }
+    assert!(!sim.contains("ENGINE"), "render-only ENGINE settings must not be checkpointed");
+    let drops = reference["mag"]["DROP_PARTICLES"].as_array().expect("drop particle arena");
+    for kind in ["Fire", "Mend"] {
+        assert!(
+            drops.iter().any(|p| p["kind"]["__variant"].as_str() == Some(kind)),
+            "the reference must populate the {kind} producer moved out of @draw"
+        );
+    }
+    let wisps = reference["mag"]["WISPS"]["data"].as_array().expect("wisp vector");
+    assert!(!wisps.is_empty(), "the reference must contain gameplay Motes");
+    assert!(
+        wisps[0]["trail"]["depth_ys"]["data"]
+            .as_array()
+            .is_some_and(|points| !points.is_empty()),
+        "the reference must populate trail history outside @draw"
+    );
 
     let sought = run_replay_dump(
         game,
@@ -478,6 +557,18 @@ fn mag_main_menu_transition_survives_seek_resimulation() {
         sought["mag"]["SCREEN"], reference["mag"]["SCREEN"],
         "seek resimulation must preserve Mag's @late_draw Play transition"
     );
+    assert_eq!(
+        sought["stone"]["WORLD_MODE"]["game_paused"],
+        reference["stone"]["WORLD_MODE"]["game_paused"],
+        "a from-boot seek must restore engine-owned pause state from before the horizon"
+    );
+    assert_eq!(sought["stone"]["PRESENTED_VIEW"], reference["stone"]["PRESENTED_VIEW"]);
+    assert_eq!(sought["stone"]["CAMERA_TRAUMA"], reference["stone"]["CAMERA_TRAUMA"]);
+    assert_eq!(
+        sought["stone"]["CAMERA_SHAKE_OFFSET"],
+        reference["stone"]["CAMERA_SHAKE_OFFSET"]
+    );
+    assert_mag_seek_state_matches(&sought, &reference, &sim, "Mag from-boot menu seek");
 
     let cadence_sought = run_replay_dump(
         game,
@@ -500,6 +591,12 @@ fn mag_main_menu_transition_survives_seek_resimulation() {
         cadence_sought["mag"]["SCREEN"], reference["mag"]["SCREEN"],
         "a cadence-keyframe seek must restore Mag's retained mouse state"
     );
+    assert_eq!(
+        cadence_sought["stone"]["WORLD_MODE"]["game_paused"],
+        reference["stone"]["WORLD_MODE"]["game_paused"],
+        "a cadence-keyframe seek must restore engine-owned pause state"
+    );
+    assert_mag_seek_state_matches(&cadence_sought, &reference, &sim, "Mag cadence menu seek");
 
     let keyboard_log = dir.path().join("menu-keyboard.replay");
     let keyboard_log_s = keyboard_log.to_string_lossy().into_owned();
@@ -511,6 +608,7 @@ fn mag_main_menu_transition_survives_seek_resimulation() {
                 return line.to_string();
             }
             let mut fields: Vec<&str> = line.split_whitespace().collect();
+            assert_eq!(fields.len(), 8, "recorded tick shape changed: {line}");
             fields[1] = "0x1.999999999999ap-4";
             fields[2] = "0";
             fields[3] = "0";
@@ -551,6 +649,7 @@ fn mag_main_menu_transition_survives_seek_resimulation() {
         &keyboard_log_s,
         &[
             ("MAG_BOOT_MENU", "1"),
+            ("MAG_SCREENSHOT", "1"),
             ("STONE_KEYFRAME_INTERVAL", "32"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", &frames.to_string()),
             ("STONE_TIMELINE_SEEK_TO_TICK", &target.to_string()),
