@@ -837,6 +837,82 @@ impl Builder<'_> {
         Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))))
     }
 
+    /// `@uniform_values` -> a typed packet of logical scalar leaves. The
+    /// physical target never sees this representation's offsets because there
+    /// are none; each backend projects the packet through its own live ABI.
+    pub(crate) fn expand_uniform_values(
+        &mut self,
+        call: Idx<Expr>,
+        func: FuncRef,
+        arg_idxs: &[Idx<Expr>],
+    ) -> Result<ValueRepr, CompilerError> {
+        let call_span = self.body.expr_spans[call];
+        let fname = self.ws.module(func.module).functions[func.func].name;
+        let reject = |span: Span, msg: String| CompilerError::new_with_label(span, msg);
+        let [u_e] = arg_idxs else {
+            return Err(reject(
+                call_span,
+                format!("`@uniform_values` fn `{fname}` takes exactly one uniform group"),
+            ));
+        };
+        let u_span = self.body.expr_spans[*u_e];
+        let Some(struct_name) = self.value_struct_name_of(*u_e) else {
+            return Err(reject(
+                u_span,
+                format!("`@uniform_values` fn `{fname}`'s argument must be a concrete value struct"),
+            ));
+        };
+        let members = uniform_semantic_checked(self.ws, struct_name)
+            .map_err(|m| reject(u_span, format!("`@uniform_values`: {m}")))?;
+        let Some(TypeExpr::App { ctor: TypeCtor::Nominal(block_name), .. }) = self.expr_ty(call) else {
+            return Err(reject(
+                call_span,
+                format!("`@uniform_values` fn `{fname}` must return the canonical packet struct"),
+            ));
+        };
+        let packet = uniform_values_return_shape(self.ws, block_name)
+            .map_err(|m| reject(call_span, format!("`@uniform_values`: {m}")))?;
+        let repr = self.lower_expr_repr(*u_e)?;
+        let shape = value_shape(self.ws, struct_name)
+            .ok_or_else(|| reject(u_span, format!("`@uniform_values`: `{struct_name}` has no value shape")))?;
+        let leaves = self.repr_to_leaves(&repr, &shape);
+        let expected: Vec<crate::gpu_layout::WireKind> = members
+            .iter()
+            .flat_map(|(_, kind)| std::iter::repeat(*kind).take(kind.leaf_suffixes().len()))
+            .collect();
+        if leaves.len() != expected.len() {
+            return Err(reject(
+                u_span,
+                format!(
+                    "`@uniform_values`: `{struct_name}` lowered to {} leaves but its logical interface has {}",
+                    leaves.len(),
+                    expected.len()
+                ),
+            ));
+        }
+        let mut canonical = Vec::with_capacity(leaves.len());
+        for (leaf, kind) in leaves.into_iter().zip(expected) {
+            let variant = match kind {
+                crate::gpu_layout::WireKind::I32 => packet.int_variant,
+                crate::gpu_layout::WireKind::Bool32 => packet.bool_variant,
+                crate::gpu_layout::WireKind::F32
+                | crate::gpu_layout::WireKind::F32x2
+                | crate::gpu_layout::WireKind::F32x3
+                | crate::gpu_layout::WireKind::F32x4
+                | crate::gpu_layout::WireKind::Mat4 => packet.float_variant,
+            };
+            canonical.push(self.make_single_payload_variant(packet.leaf_enum, variant, leaf)?);
+        }
+        let fingerprint = self.emit_cur(Inst::Const(Lit::Int(
+            crate::shader_ir::semantic_uniform_group_fingerprint(struct_name, &members) as i64,
+        )));
+        let values = self.emit_cur(Inst::MakeVec(canonical));
+        Ok(ValueRepr::Scalar(self.emit_cur(Inst::MakeStruct {
+            ty: Some(packet.block_name),
+            fields: vec![(packet.fingerprint_field, fingerprint), (packet.leaves_field, values)],
+        })))
+    }
+
     /// `@vertex_expand` -> the element's vertex layout as a literal. The
     /// argument is used for its TYPE only and is deliberately not lowered: the
     /// call collapses to a constant, as `@shader_expand` does.

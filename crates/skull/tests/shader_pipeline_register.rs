@@ -2,7 +2,7 @@
 //! (docs/shaders.md). A call `rock_shader(vert, frag)`
 //! (two direct references to top-level `@shader` fns) collapses at emit to the
 //! pipeline key const `"<vert>+<frag>"`, and the driver emits exactly one
-//! top-level `__rock_shader_register("<key>", <glsl>)` per DISTINCT pair -- N
+//! top-level `__rock_shader_register` carrying the GLSL and semantic wires per DISTINCT pair -- N
 //! call sites of the same pair dedup to one registration. Re-emission is
 //! byte-identical (incremental byte-identity gate).
 //!
@@ -12,7 +12,10 @@ use bone_semantic::hir::BodyOwner;
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
 use crate::common::{emit_module, function_body, ws_with_stdlib};
-use skull::mir_emit::{emit_full, emit_incremental, emit_overlay as emit_overlay_result, MirEmit, SkullEmitCache};
+use skull::mir_emit::{
+    emit_full, emit_full_in_for_renderer, emit_incremental,
+    emit_overlay as emit_overlay_result, MirEmit, RendererTarget, SkullEmitCache,
+};
 
 fn emit_overlay(
     ws: &Workspace,
@@ -71,6 +74,17 @@ fn registration_carries_generated_glsl() {
     for needle in ["#version 330 core", "#ifdef VERTEX", "#ifdef PIXEL", "layout (location = 0) in vec2 aPos;"] {
         assert!(reg.contains(needle), "registration missing `{needle}`:\n{reg}");
     }
+}
+
+#[test]
+fn explicit_vertex_registration_marks_that_it_is_not_fullscreen() {
+    let lua = emit_module(SRC);
+    let at = lua.find("__rock_shader_register(").expect("a registration");
+    let reg = &lua[at..];
+    assert!(
+        reg.contains("false, [[") && reg.contains("fullscreen 0"),
+        "an explicit vertex artifact must register as non-fullscreen:\n{reg}"
+    );
 }
 
 #[test]
@@ -312,6 +326,10 @@ fn single_arg_registration_carries_both_ifdef_blocks() {
     for n in ["#version 330 core", "#ifdef PIXEL", "#ifdef VERTEX"] {
         assert!(reg.contains(n), "single-arg registration missing `{n}`:\n{reg}");
     }
+    assert!(
+        reg.contains("true, [[") && reg.contains("fullscreen 1"),
+        "a fragment-only artifact must register as compiler-owned fullscreen:\n{reg}"
+    );
 }
 
 #[test]
@@ -343,4 +361,74 @@ fn single_arg_overlay_carries_registration() {
         "the incremental overlay must re-run the single-arg registration:\n{}",
         overlay.lua
     );
+}
+
+const WGPU_FULLSCREEN_SRC: &str = r#"
+value EngineU {
+    uProjection: Mat4,
+    uView: Mat4,
+    uYBounds: Vec2,
+    uScreenBounds: Vec2,
+    uEngineTime: float,
+}
+struct MainTex { uTexture: Sampler2D }
+value SpriteBasicVert {
+    aPos: Vec2,
+    aTexCoord: Vec2,
+    aColor: Vec4,
+}
+value SpriteBasicVary {
+    position: Vec4,
+    TexCoord: Vec2,
+    VertexColor: Vec4,
+}
+@shader(vertex)
+fn sprite_basic_vert(@attr a: SpriteBasicVert, @engine e: EngineU) -> SpriteBasicVary {
+    return SpriteBasicVary {
+        position: e.uProjection * e.uView * v(a.aPos, 0.0, 1.0),
+        TexCoord: a.aTexCoord,
+        VertexColor: a.aColor,
+    }
+}
+@shader(fragment)
+fn sprite_basic_frag(vary: SpriteBasicVary, @textures t: MainTex) -> Vec4 {
+    return texture(t.uTexture, vary.TexCoord) * vary.VertexColor
+}
+@shader(fragment)
+fn blit_frag(tc: Vec2) -> Vec4 { return Vec4 { x: tc.x, y: 0.0, z: 1.0, w: 1.0 } }
+@shader(fragment)
+fn present_frag(tc: Vec2) -> Vec4 { return Vec4 { x: 0.0, y: tc.y, z: 1.0, w: 1.0 } }
+@shader(fragment)
+fn tonemap_frag(tc: Vec2) -> Vec4 { return Vec4 { x: 1.0, y: 1.0, z: tc.x, w: 1.0 } }
+
+fn use_all() -> string {
+    let a = rock_shader(blit_frag)
+    let b = rock_shader(present_frag)
+    let c = rock_shader(tonemap_frag)
+    return rock_shader(sprite_basic_vert, sprite_basic_frag)
+}
+"#;
+
+#[test]
+fn selected_wgpu_registration_is_exactly_the_four_selected_artifacts() {
+    let ws = ws_with_stdlib(WGPU_FULLSCREEN_SRC);
+    let mid = test_mid(&ws);
+    let (emit, _) = emit_full_in_for_renderer(&ws, mid, None, RendererTarget::Wgpu)
+        .expect("selected artifacts emit");
+    assert_eq!(
+        emit.lua.matches("__rock_wgpu_shader_register(").count(),
+        4,
+        "the selected renderer admits a non-zero, exact WGSL artifact population"
+    );
+    for root in [
+        "blit_frag",
+        "present_frag",
+        "tonemap_frag",
+        "sprite_basic_vert+sprite_basic_frag",
+    ] {
+        assert!(
+            emit.lua.contains(&format!("__rock_wgpu_shader_register(\"{root}\"")),
+            "selected root {root} is missing from WGSL registration"
+        );
+    }
 }

@@ -92,6 +92,20 @@ pub fn do_lint(
     }
 
     let findings = lint_pass::findings_with(&ws, &sources, &root, Scope::WholeProject, &sel);
+
+    // `row_escape` is a CENSUS, so it reports the population it examined
+    // alongside the findings. A bare zero cannot be read: a project with no
+    // `Arena` at all scores the same as one whose every row stays put, and the
+    // build-or-delete decision this feeds (`docs/scene-system-plan.md` P6)
+    // turns on telling those apart.
+    if sel.enabled(bone_lints::ROW_ESCAPE) {
+        let warm = lint_pass::warm_modules(&ws, &sources);
+        let report = lint_pass::report_files(&sources, &root);
+        let pop = bone_lints::row_population(&ws, &warm, &report);
+        log::info!(target: "LINT", "{}: examined {} row source(s), {} row binding(s) in {} body(ies)",
+            path, pop.sources, pop.bindings, pop.bodies);
+    }
+
     if findings.is_empty() {
         log::info!(target: "LINT", "{}: no findings", path);
         return Ok(());

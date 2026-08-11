@@ -24,6 +24,7 @@ skull-codegen-lua = { path = "../skull-codegen-lua" }
 # (docs/shaders.md). skull (the driver) may depend on the GLSL
 # backend; skull-mir must not -- the layering constraint.
 skull-codegen-glsl = { path = "../skull-codegen-glsl" }
+skull-codegen-wgsl = { path = "../skull-codegen-wgsl" }
 skull-transform = { path = "../skull-transform" }
 skull-parser = { path = "../skull-parser" }
 comfy-la-arena = { workspace = true }

@@ -2853,6 +2853,17 @@ fn build_program_session(
     scx: &skull_mir::lower::ScalarCtx,
     extra_roots: &[(FuncRef, String)],
 ) -> Result<(ProgramBuild, JsSession), CompilerError> {
+    for module in ws.modules.iter() {
+        if module.id == bone_semantic::prelude::ModuleId::builtin() {
+            continue;
+        }
+        if let Some((why, span)) = skull_mir::lower::map_key_rejection(ws, module.id) {
+            return Err(CompilerError::new_with_label(
+                span,
+                format!("this `Map` key is not value-keyed and would silently miss: {why}"),
+            ));
+        }
+    }
     let mut root_plan = js_root_plan(ws, extra_roots)?;
     loop {
         let session = new_js_session(ws, scx, &root_plan.refs);
@@ -5905,6 +5916,12 @@ fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
         ("from_codepoint", 1) => Some("__from_codepoint($1)"),
         // `tonumber(s)` -> a strict numeric parse (null on non-numeric / empty).
         ("parse_float", 1) => Some("__parse_float($1)"),
+        // `parse_float_at(s, start, end)` reads a pre-validated literal in place.
+        // luajit skips the slice via strtod over an offset; JS has no such call,
+        // so it slices -- the win is luajit-only, the semantics are the contract.
+        // `Number` is locale-independent here, which is the property the luajit
+        // side has to pin a "C" locale to get.
+        ("parse_float_at", 3) => Some("__parse_float($1.slice($2, $3))"),
         // RNG -> the `JS_RNG_RUNTIME` mulberry32 port (stream differs from Lua's
         // splitmix by doctrine; the seedable/deterministic/serializable semantics
         // hold). `env_var` -> the driver-provided node glue (`process.env`).

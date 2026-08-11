@@ -304,10 +304,23 @@ struct JsonParser {
     pos: int,
     len: int,
     ok: bool,
+    depth: int,
 }
 
+// Container nesting a document may reach before it is rejected as malformed.
+// The decoder is recursive, so without this a deep document overflows the
+// interpreter stack and takes the process down instead of returning null.
+//
+// Sized for the shallower backend, not the roomier one: measured, LuaJIT
+// overflows near 4500 levels and the JS backend between 900 and 1000 -- and
+// the JS figure is not a constant, it shrinks as the caller's own stack grows,
+// so a limit set just under it would hold from main and fail from inside a
+// game. 256 keeps ~3.7x margin against the shallowest observed ceiling while
+// staying 50x above the deepest JSON in this repo, which is 5.
+fn json_max_depth() -> int { return 256 }
+
 fn json_decode(s: string) -> JsonValue? {
-    let p = JsonParser { src: s, pos: 0, len: s.len(), ok: true }
+    let p = JsonParser { src: s, pos: 0, len: s.len(), ok: true, depth: 0 }
     parse_skip_ws(p)
     let v = parse_value(p)
     parse_skip_ws(p)
@@ -316,6 +329,13 @@ fn json_decode(s: string) -> JsonValue? {
     return v
 }
 
+// Behind this call boundary the loop is an inner loop in whatever root trace
+// luajit is recording, and it resolves as a `loop` trace (fast) or a `return`
+// trace (slow, whitespace then skipped in the interpreter) per process. That
+// is the twitter/citm bimodality. Do NOT "fix" it with `@inline`: that wins on
+// an isolated single payload and costs 3-4x in a process that decodes several
+// documents, which is the shape production has. Two other rewrites are also
+// measured losses. See docs/json-parser-benchmarking-plan.md before touching.
 fn parse_skip_ws(p: JsonParser) {
     while p.pos < p.len {
         let b = p.src.unit_at(p.pos)
@@ -338,8 +358,20 @@ fn parse_value(p: JsonParser) -> JsonValue {
     if b == 116 { return parse_keyword(p, "true", JsonValue::Bool(true)) }
     if b == 102 { return parse_keyword(p, "false", JsonValue::Bool(false)) }
     if b == 34 { return parse_string_value(p) }
-    if b == 91 { return parse_array_value(p) }
-    if b == 123 { return parse_object_value(p) }
+    if b == 91 || b == 123 {
+        // One place owns the depth counter, so the container parsers keep
+        // their many return points. The over-limit path leaves it
+        // un-decremented, which is harmless: p.ok is false and the parse is
+        // already unwinding.
+        p.depth = p.depth + 1
+        if p.depth > json_max_depth() {
+            p.ok = false
+            return JsonValue::Null
+        }
+        let v = if b == 91 { parse_array_value(p) } else { parse_object_value(p) }
+        p.depth = p.depth - 1
+        return v
+    }
     // number: starts with - or 0..9
     if b == 45 || (b >= 48 && b <= 57) {
         return parse_number(p)
@@ -377,14 +409,31 @@ fn parse_string_raw(p: JsonParser) -> string? {
         return null
     }
     p.pos = p.pos + 1
-    let parts: [string] = []
+
+    // `parts` stays null until the literal turns out to carry an escape. Every
+    // object key and most short values have none, and those return a single
+    // substring having allocated neither the array nor the join -- worth 2.1x
+    // on a structure-heavy document (level.json 2.94 -> 1.38ms).
+    let body_start = p.pos
+    let parts: [string]? = null
     while p.pos < p.len {
         let b = p.src.unit_at(p.pos)
         if b == 34 {
+            if parts == null {
+                let plain = p.src.substring(body_start, p.pos)
+                p.pos = p.pos + 1
+                return plain
+            }
             p.pos = p.pos + 1
-            return join(parts, "")
+            return join(parts.unwrap(), "")
         }
         if b == 92 {
+            if parts == null {
+                let fresh: [string] = []
+                if p.pos > body_start { fresh.push(p.src.substring(body_start, p.pos)) }
+                parts = fresh
+            }
+            let acc = parts.unwrap()
             p.pos = p.pos + 1
             if p.pos >= p.len {
                 p.ok = false
@@ -392,14 +441,14 @@ fn parse_string_raw(p: JsonParser) -> string? {
             }
             let esc = p.src.unit_at(p.pos)
             p.pos = p.pos + 1
-            if esc == 34 { parts.push("\"") }
-            else if esc == 92 { parts.push("\\") }
-            else if esc == 47 { parts.push("/") }
-            else if esc == 110 { parts.push("\n") }
-            else if esc == 114 { parts.push("\r") }
-            else if esc == 116 { parts.push("\t") }
-            else if esc == 98 { parts.push(string_char(8)) }
-            else if esc == 102 { parts.push(string_char(12)) }
+            if esc == 34 { acc.push("\"") }
+            else if esc == 92 { acc.push("\\") }
+            else if esc == 47 { acc.push("/") }
+            else if esc == 110 { acc.push("\n") }
+            else if esc == 114 { acc.push("\r") }
+            else if esc == 116 { acc.push("\t") }
+            else if esc == 98 { acc.push(string_char(8)) }
+            else if esc == 102 { acc.push(string_char(12)) }
             else if esc == 117 {
                 if p.pos + 4 > p.len {
                     p.ok = false
@@ -431,14 +480,26 @@ fn parse_string_raw(p: JsonParser) -> string? {
                     p.ok = false
                     return null
                 }
-                parts.push(from_codepoint(cp))
+                acc.push(from_codepoint(cp))
             } else {
                 p.ok = false
                 return null
             }
+        } else if b < 32 {
+            // JSON requires every byte below 0x20 to be escaped. 0x7F (DEL) is
+            // above the range and stays legal raw.
+            p.ok = false
+            return null
         } else {
-            parts.push(p.src.substring(p.pos, p.pos + 1))
-            p.pos = p.pos + 1
+            let start = p.pos
+            while p.pos < p.len {
+                let c = p.src.unit_at(p.pos)
+                if c == 34 || c == 92 || c < 32 { break }
+                p.pos = p.pos + 1
+            }
+            // Only accumulate once an escape has forced the array to exist;
+            // before that the run is still reconstructible from body_start.
+            if parts != null { parts.unwrap().push(p.src.substring(start, p.pos)) }
         }
     }
     p.ok = false
@@ -468,22 +529,26 @@ fn parse_hex4(s: string) -> int? {
 }
 
 fn parse_number(p: JsonParser) -> JsonValue {
+    // The grammar is `[-] int [frac] [exp]`, and it is enforced here rather
+    // than left to parse_float: Lua's tonumber accepts `2.e3`, `.5` and `01`,
+    // so a permissive scan makes the verdict the host runtime's rather than
+    // JSON's.
     let start = p.pos
     let is_float = false
-    if p.src.unit_at(p.pos) == 45 {
+    if p.pos < p.len && p.src.unit_at(p.pos) == 45 {
         p.pos = p.pos + 1
     }
-    while p.pos < p.len {
-        let b = p.src.unit_at(p.pos)
-        if b >= 48 && b <= 57 {
-            p.pos = p.pos + 1
-        } else {
-            break
-        }
+
+    // int: a lone 0, or a nonzero digit followed by any digits. Never empty,
+    // never a leading zero.
+    if p.pos >= p.len {
+        p.ok = false
+        return JsonValue::Null
     }
-    if p.pos < p.len && p.src.unit_at(p.pos) == 46 {
-        is_float = true
+    let lead = p.src.unit_at(p.pos)
+    if lead == 48 {
         p.pos = p.pos + 1
+    } else if lead >= 49 && lead <= 57 {
         while p.pos < p.len {
             let b = p.src.unit_at(p.pos)
             if b >= 48 && b <= 57 {
@@ -492,7 +557,35 @@ fn parse_number(p: JsonParser) -> JsonValue {
                 break
             }
         }
+    } else {
+        p.ok = false
+        return JsonValue::Null
     }
+
+    // frac: the point must be followed by at least one digit.
+    if p.pos < p.len && p.src.unit_at(p.pos) == 46 {
+        is_float = true
+        p.pos = p.pos + 1
+        let frac_start = p.pos
+        while p.pos < p.len {
+            let b = p.src.unit_at(p.pos)
+            if b >= 48 && b <= 57 {
+                p.pos = p.pos + 1
+            } else {
+                break
+            }
+        }
+        if p.pos == frac_start {
+            p.ok = false
+            return JsonValue::Null
+        }
+    }
+
+    // exp: likewise at least one digit, after an optional sign. Measured, this
+    // arm changes no verdict today -- `1e` reaches parse_float, and both
+    // LuaJIT's tonumber and JS's Number reject it. It stays because that makes
+    // the rejection the host runtime's rather than the grammar's, which is the
+    // fallback this rewrite exists to remove.
     if p.pos < p.len {
         let b = p.src.unit_at(p.pos)
         if b == 101 || b == 69 {
@@ -504,6 +597,7 @@ fn parse_number(p: JsonParser) -> JsonValue {
                     p.pos = p.pos + 1
                 }
             }
+            let exp_start = p.pos
             while p.pos < p.len {
                 let b2 = p.src.unit_at(p.pos)
                 if b2 >= 48 && b2 <= 57 {
@@ -512,21 +606,21 @@ fn parse_number(p: JsonParser) -> JsonValue {
                     break
                 }
             }
+            if p.pos == exp_start {
+                p.ok = false
+                return JsonValue::Null
+            }
         }
     }
-    if p.pos == start {
-        p.ok = false
-        return JsonValue::Null
+
+    // The grammar above has already accepted the whole literal, so the float
+    // conversion cannot fail and needs no substring: `parse_float_at` reads the
+    // source in place. That precondition is what lets it return `float` rather
+    // than `float?` -- do not call it on unvalidated bytes.
+    if is_float {
+        return JsonValue::Float(p.src.parse_float_at(start, p.pos))
     }
     let lit = p.src.substring(start, p.pos)
-    if is_float {
-        let f = lit.parse_float()
-        if f == null {
-            p.ok = false
-            return JsonValue::Null
-        }
-        return JsonValue::Float(f.unwrap())
-    }
     let i = lit.parse_int()
     if i == null {
         p.ok = false

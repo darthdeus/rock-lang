@@ -688,6 +688,15 @@ pub struct Item {
     pub span: Span,
     pub annotations: Vec<Annotation>,
     pub kind: ItemKind,
+    /// True if the item was prefixed with `@global_write`. Consumed into a flag
+    /// the way `@guarded` is (`GlobalDef.is_guarded`) rather than left in
+    /// `annotations`, so it does not render as an ordinary annotation.
+    ///
+    /// Nothing enforces it at this position yet -- the marker is author intent
+    /// ("the writes in this body are sanctioned"), and the statement-level form
+    /// is the one bone reads. Recorded so the formatter can round-trip it
+    /// instead of deleting it.
+    pub is_global_write: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

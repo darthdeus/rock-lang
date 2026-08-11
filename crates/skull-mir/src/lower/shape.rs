@@ -1142,6 +1142,115 @@ pub fn uniform_block_checked(
     Ok(plan)
 }
 
+/// The logical uniform group and value walkers agree without consulting a
+/// physical block layout. This is the compiler-owned input to every target's
+/// uniform projection.
+pub(crate) fn uniform_semantic_checked(
+    ws: &Workspace,
+    name: Ustr,
+) -> Result<Vec<(Ustr, crate::gpu_layout::WireKind)>, String> {
+    let members = crate::gpu_layout::uniform_group_members(ws, name)
+        .map_err(|e| e.message.clone())?;
+    let Some(shape) = value_shape(ws, name) else {
+        return Err(format!("`{name}` has a uniform interface but no value shape"));
+    };
+    let want: Vec<String> = value_leaf_paths(&shape).iter().map(|u| u.to_string()).collect();
+    let got: Vec<String> = members
+        .iter()
+        .flat_map(|(field, kind)| kind.leaf_suffixes().into_iter().map(move |suffix| format!("{field}{suffix}")))
+        .collect();
+    if want != got {
+        return Err(format!(
+            "logical uniform and value walkers disagree for `{name}`: value leaves {want:?} vs interface leaves {got:?}"
+        ));
+    }
+    Ok(members)
+}
+
+/// The compiler-owned return shape of `@uniform_values`. Keeping this shape
+/// structural lets tests and backend modules use the same typed packet without
+/// teaching the runtime a second uniform schema.
+pub(crate) struct UniformValuesShape {
+    pub block_name: Ustr,
+    pub fingerprint_field: Ustr,
+    pub leaves_field: Ustr,
+    pub leaf_enum: Ustr,
+    pub float_variant: Ustr,
+    pub int_variant: Ustr,
+    pub bool_variant: Ustr,
+}
+
+pub(crate) fn uniform_values_return_shape(
+    ws: &Workspace,
+    block_name: Ustr,
+) -> Result<UniformValuesShape, String> {
+    let Some(&sid) = ws.struct_by_name.get(&block_name) else {
+        return Err(format!("`@uniform_values` must return a named packet struct, got `{block_name}`"));
+    };
+    let sd = &ws.modules[sid.module.index()].structs[sid.def];
+    let Some(fp) = sd.fields.iter().find(|f| f.name.as_str() == "fingerprint") else {
+        return Err(format!("`{block_name}` needs an `int fingerprint` field"));
+    };
+    if !matches!(static_ty(ws, fp.ty), Some(TypeExpr::Builtin(BuiltinTy::Int))) {
+        return Err(format!("`{block_name}.fingerprint` must be an int"));
+    }
+    let Some(leaves) = sd.fields.iter().find(|f| f.name.as_str() == "leaves") else {
+        return Err(format!("`{block_name}` needs a `[CanonicalUniformLeaf] leaves` field"));
+    };
+    let Some(TypeExpr::App { ctor: TypeCtor::Array, params }) = static_ty(ws, leaves.ty) else {
+        return Err(format!("`{block_name}.leaves` must be an array of canonical leaves"));
+    };
+    let elem = leaves.ty.with_idx(params.into_iter().next().ok_or_else(|| {
+        format!("`{block_name}.leaves` must name its canonical leaf type")
+    })?);
+    let TypeExpr::App { ctor: TypeCtor::Nominal(leaf_enum), .. } = static_ty(ws, elem).ok_or_else(|| {
+        format!("`{block_name}.leaves` must contain a named canonical leaf enum")
+    })? else {
+        return Err(format!("`{block_name}.leaves` must contain a named canonical leaf enum"));
+    };
+    let Some(&eid) = ws.enums_by_name.get(&leaf_enum) else {
+        return Err(format!("canonical leaf type `{leaf_enum}` is not an enum"));
+    };
+    let ed = &ws.modules[eid.module.index()].enums[eid.def];
+    if ed.variants.len() != 3 {
+        return Err(format!("canonical leaf enum `{leaf_enum}` must have float, int and bool variants"));
+    }
+    let mut float_variant = None;
+    let mut int_variant = None;
+    let mut bool_variant = None;
+    for variant in &ed.variants {
+        let VariantPayload::Tuple(types) = &variant.payload else {
+            return Err(format!("canonical leaf `{}` must carry one primitive payload", variant.name));
+        };
+        let Some(&ty) = types.first() else {
+            return Err(format!("canonical leaf `{}` must carry one primitive payload", variant.name));
+        };
+        if types.len() != 1 {
+            return Err(format!("canonical leaf `{}` must carry one primitive payload", variant.name));
+        }
+        match static_ty(ws, ty) {
+            Some(TypeExpr::Builtin(BuiltinTy::Float)) => float_variant = Some(variant.name),
+            Some(TypeExpr::Builtin(BuiltinTy::Int)) => int_variant = Some(variant.name),
+            Some(TypeExpr::Builtin(BuiltinTy::Bool)) => bool_variant = Some(variant.name),
+            _ => return Err(format!("canonical leaf `{}` must carry float, int or bool", variant.name)),
+        }
+    }
+    let (Some(float_variant), Some(int_variant), Some(bool_variant)) =
+        (float_variant, int_variant, bool_variant)
+    else {
+        return Err(format!("canonical leaf enum `{leaf_enum}` needs float, int and bool variants"));
+    };
+    Ok(UniformValuesShape {
+        block_name,
+        fingerprint_field: fp.name,
+        leaves_field: leaves.name,
+        leaf_enum,
+        float_variant,
+        int_variant,
+        bool_variant,
+    })
+}
+
 /// The value-struct name of expression `e` outside a lowering [`Builder`].
 /// Mirrors [`Builder::value_struct_name_of`] minus the specialization
 /// substitution, which the validator has no active specialization for -- an

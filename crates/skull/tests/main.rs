@@ -34,6 +34,8 @@ mod coroutine_hook_hoist;
 mod dead_lambda_scope;
 #[path = "embed_scalarize.rs"]
 mod embed_scalarize;
+#[path = "expansion_admission.rs"]
+mod expansion_admission;
 #[path = "enum_cdata.rs"]
 mod enum_cdata;
 #[path = "enum_payload_sroa.rs"]
@@ -144,6 +146,8 @@ mod nobox_arena_random_sentinel;
 mod nobox_column_threshold;
 #[path = "nobox_fn_value_nullable_return_sentinel.rs"]
 mod nobox_fn_value_nullable_return_sentinel;
+#[path = "nobox_generic_return_boundary_sentinel.rs"]
+mod nobox_generic_return_boundary_sentinel;
 #[path = "nobox_global_accessor_shape.rs"]
 mod nobox_global_accessor_shape;
 #[path = "nobox_nested_ctor.rs"]

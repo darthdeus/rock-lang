@@ -124,8 +124,10 @@ pub const KNOWN_LINTS: &[&str] = &[
     UNUSED_FN,
     UNUSED_PURE_EXPR,
     TRANSMUTE_OF_NULLABLE,
+    TASK_NULL_ABANDON,
     BACKEND_SIBLING_MISMATCH,
     METHOD_SYNTAX,
+    ROW_ESCAPE,
 ];
 
 /// Lints that are OFF unless the invocation names them. A MIGRATION lint has a
@@ -135,7 +137,7 @@ pub const KNOWN_LINTS: &[&str] = &[
 /// (`rock lint <path> --lints=method_syntax`) is what a file-at-a-time
 /// conversion needs: the sweep is readable, and the build/LSP surfaces stay
 /// quiet the whole time.
-pub const OPT_IN_LINTS: &[&str] = &[METHOD_SYNTAX];
+pub const OPT_IN_LINTS: &[&str] = &[METHOD_SYNTAX, ROW_ESCAPE];
 
 /// What an invocation asks of the lint engine: which lints run, and the knobs
 /// the lints themselves take. The default tier is the catalog minus
@@ -307,19 +309,40 @@ fn inference_findings_with(
     src: &str,
     sel: &LintOptions,
 ) -> Vec<Finding> {
-    if warm.contains(&mid) || !sel.enabled(TRANSMUTE_OF_NULLABLE) {
+    if warm.contains(&mid) {
         return Vec::new();
     }
     let module = ws.module(mid);
     let inf = ws.inference(mid);
-    let findings: Vec<_> = module
-        .bodies
-        .iter()
-        .flat_map(|(owner, body)| {
-            transmute_of_nullable_in_body(ws, inf.and_then(|i| i.per_fn.get(owner)), body)
-        })
-        .collect();
-    filter_suppressed(findings, src).iter().map(Finding::of).collect()
+    let bi = |owner: &BodyOwner| inf.and_then(|i| i.per_fn.get(owner));
+    let mut out: Vec<Finding> = Vec::new();
+    if sel.enabled(TRANSMUTE_OF_NULLABLE) {
+        let found: Vec<_> = module
+            .bodies
+            .iter()
+            .flat_map(|(owner, body)| transmute_of_nullable_in_body(ws, bi(owner), body))
+            .collect();
+        out.extend(filter_suppressed(found, src).iter().map(Finding::of));
+    }
+    if sel.enabled(TASK_NULL_ABANDON) {
+        let found: Vec<_> = module
+            .bodies
+            .iter()
+            .flat_map(|(owner, body)| task_null_abandon_in_body(ws, bi(owner), body))
+            .collect();
+        out.extend(filter_suppressed(found, src).iter().map(Finding::of));
+    }
+    if sel.enabled(ROW_ESCAPE) {
+        let found: Vec<_> = module
+            .bodies
+            .iter()
+            .flat_map(|(owner, body)| {
+                row_escapes_in_body(ws, bi(owner), body, tail_sink(module, owner))
+            })
+            .collect();
+        out.extend(filter_suppressed(found, src).iter().map(Finding::of));
+    }
+    out
 }
 
 /// The whole-workspace lints, grouped by the file each finding sits in. A
@@ -802,7 +825,9 @@ pub fn unused_fns_by_file(
     let mut out: FxHashMap<Ustr, Vec<UnusedFn>> = FxHashMap::default();
     for module in user_modules(ws, warm) {
         for (fid, f) in module.functions.iter() {
-            if !reachable.contains(&(module.id, fid)) {
+            // A derived newtype operator is not user surface: there is no
+            // declaration to delete and its span points at the `newtype` line.
+            if !reachable.contains(&(module.id, fid)) && !f.is_synthetic {
                 out.entry(module.file)
                     .or_default()
                     .push(UnusedFn { name: f.name, span: f.name_span });
@@ -815,7 +840,30 @@ pub fn unused_fns_by_file(
 /// A function is a reachability root iff it can be entered from outside the
 /// in-project call graph. See `unused_fns` for the rationale on each arm.
 fn is_root(f: &Function) -> bool {
-    f.is_extern || f.name.as_str() == "main" || !f.annotations.is_empty()
+    f.is_extern
+        || f.name.as_str() == "main"
+        || f.annotations.iter().any(|a| !is_implementation_anno(a.name.name.as_str()))
+}
+
+/// Builtin fn annotations that describe how a function is COMPILED, not how it
+/// is entered. Everything else -- `@test`/`@sim`, `@shader`, `@nomangle`, and
+/// every user `deco` -- is a root, so an annotation this list doesn't know
+/// keeps the conservative bias (root, no warning). Without the split, `@inline`
+/// or `@pure` alone silently exempts a fn from `unused_fn`.
+fn is_implementation_anno(name: &str) -> bool {
+    matches!(
+        name,
+        "pure"
+            | "debug_impure"
+            | "inline"
+            | "intrinsic"
+            | "native_required"
+            | "gpu_only"
+            | "scalar_abi"
+            | "struct_expand"
+            | "shader_expand"
+            | "consume"
+    )
 }
 
 /// Every function one body references: the resolved-call edges in its inference
@@ -1141,7 +1189,16 @@ fn is_nullable(ws: &Workspace, bi: &BodyInference, ty: TyId) -> bool {
 /// `Workspace::render`'s `Infer` arm). An unbound var resolves to itself, so a
 /// genuinely-unknown type reads as non-nullable -- the conservative side (a
 /// missed warning, never a false strip).
-fn head_type(ws: &Workspace, bi: &BodyInference, ty: TyId) -> TypeExpr {
+pub(crate) fn head_type(ws: &Workspace, bi: &BodyInference, ty: TyId) -> TypeExpr {
+    head_ty(ws, bi, ty).1
+}
+
+/// [`head_type`] keeping the resolved id. A nested `Idx<TypeExpr>` (a
+/// `Nullable`'s inner, an `App`'s params) indexes the arena of the type that
+/// CONTAINS it -- which substitution-following may have moved to another module
+/// -- so descending needs `resolved.with_idx(inner)`, never a bare
+/// `TyId::Local`.
+fn head_ty(ws: &Workspace, bi: &BodyInference, ty: TyId) -> (TyId, TypeExpr) {
     let mut cur = ty;
     loop {
         let te = match cur {
@@ -1151,9 +1208,9 @@ fn head_type(ws: &Workspace, bi: &BodyInference, ty: TyId) -> TypeExpr {
         match te {
             TypeExpr::Infer(var, _) => match bi.substitutions.get(var) {
                 Some(sub) => cur = sub,
-                None => return te,
+                None => return (cur, te),
             },
-            _ => return te,
+            _ => return (cur, te),
         }
     }
 }
@@ -1335,12 +1392,284 @@ pub fn unknown_type_names(
     names.iter().copied().filter(|n| !known.contains(n)).collect()
 }
 
+/// How a row place left the scope its arena's lifetime governs. One kind per
+/// storage class the scoped-place rules in `docs/scene-system-plan.md` list, so
+/// a census can report the shape of the escape population and not just its size.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum EscapeKind {
+    StoreGlobal,
+    StoreStatic,
+    StoreField,
+    StoreCollection,
+    Return,
+    ClosureCapture,
+    AnyErasure,
+    AcrossYield,
+    FfiArg,
+}
+
+/// How much a kind actually claims. A row's validity runs from the `get()`
+/// until something invalidates the slot -- `remove`, `clear`, Scene unload --
+/// so what matters is whether the row is HELD across such a point, not which
+/// direction the reference travelled.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum EscapeClass {
+    /// The row outlives an invalidation point unconditionally. A defect.
+    Hazard,
+    /// A hazard only if the consumer RETAINS the row. Nothing here computes a
+    /// retain summary, so these are reported without the claim: a lambda
+    /// consumed synchronously by `any(..)` and one stashed in a Scene closer
+    /// are the same shape to this lint.
+    Unprovable,
+    /// Not a hazard. The row moved somewhere still governed by the program's
+    /// own rules -- the escape question simply moves with it. Reported because
+    /// it is where an intraprocedural check STOPS, which is what bounds the
+    /// census, not because the code is wrong.
+    Propagation,
+}
+
+impl EscapeKind {
+    pub fn class(self) -> EscapeClass {
+        match self {
+            EscapeKind::StoreGlobal
+            | EscapeKind::StoreStatic
+            | EscapeKind::StoreField
+            | EscapeKind::StoreCollection
+            | EscapeKind::AcrossYield => EscapeClass::Hazard,
+            EscapeKind::ClosureCapture | EscapeKind::FfiArg | EscapeKind::AnyErasure => {
+                EscapeClass::Unprovable
+            }
+            // A `return` runs nothing, so it cannot invalidate the slot: what
+            // crosses it is the reference, never the validity window. The
+            // accessor shape (`wall_at`, `Sound.data`) is CORRECT code.
+            EscapeKind::Return => EscapeClass::Propagation,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EscapeKind::StoreGlobal => "store_global",
+            EscapeKind::StoreStatic => "store_static",
+            EscapeKind::StoreField => "store_field",
+            EscapeKind::StoreCollection => "store_collection",
+            EscapeKind::Return => "return",
+            EscapeKind::ClosureCapture => "closure_capture",
+            EscapeKind::AnyErasure => "any_erasure",
+            EscapeKind::AcrossYield => "across_yield",
+            EscapeKind::FfiArg => "ffi_arg",
+        }
+    }
+}
+
+/// A `row_escape` finding: a row place -- a `T` read out of an `Arena<T>` or a
+/// `Scene<T>` root -- reaching storage that outlives the borrow.
+#[derive(Clone, Debug)]
+pub struct RowEscape {
+    pub kind: EscapeKind,
+    /// Rendered type of the escaping row (`Mob`, `TrActor`).
+    pub row_type: String,
+    pub span: Span,
+}
+
+/// Canonical lint name for suppression: `// rock: allow(row_escape)`.
+pub const ROW_ESCAPE: &str = "row_escape";
+
+impl LintFinding for RowEscape {
+    const LINT: &'static str = ROW_ESCAPE;
+    fn line(&self) -> usize {
+        self.span.line_range.0
+    }
+    fn to_diagnostic(&self) -> CompilerError {
+        let (ty, kind) = (&self.row_type, self.kind.as_str());
+        let msg = match self.kind.class() {
+            EscapeClass::Hazard => format!(
+                "row of `{ty}` is held past an invalidation point here ({kind}) -- \
+                 the slot can be removed or the Scene unloaded before the next read; \
+                 hold the `Entity` and re-`get()` instead"
+            ),
+            EscapeClass::Unprovable => format!(
+                "row of `{ty}` leaves the checked region here ({kind}) -- safe only if \
+                 the consumer does not retain it, which nothing here proves"
+            ),
+            EscapeClass::Propagation => format!(
+                "row of `{ty}` is returned here -- not a defect: a `return` invalidates \
+                 nothing. The row becomes the CALLER's to account for, and this check \
+                 does not cross the boundary, so audit the callers"
+            ),
+        };
+        CompilerError::new_with_label(self.span, msg).with_level(CompilerErrorLevel::Advice)
+    }
+}
+
+mod row_escape;
+pub use row_escape::{row_escapes_in_body, row_population, RowPopulation};
+
+/// Where a body's TRAILING expression ends up, so `row_escape` can tell a
+/// returned row from a discarded one. A unit function's tail goes nowhere --
+/// `fn unload_sound(s: Sound) { s.handle.remove() }` drops the `T?` it produced.
+fn tail_sink(module: &Module, owner: &BodyOwner) -> Option<EscapeKind> {
+    match owner {
+        BodyOwner::Function(fid) => {
+            module.functions[*fid].return_ty.map(|_| EscapeKind::Return)
+        }
+        BodyOwner::Global(_) => Some(EscapeKind::StoreGlobal),
+        // A struct default / enum / newtype body's value is stored in the
+        // aggregate it belongs to.
+        _ => Some(EscapeKind::StoreField),
+    }
+}
+
+/// `row_escape` findings across every non-stdlib body in the workspace.
+pub fn row_escapes(ws: &Workspace) -> Vec<RowEscape> {
+    let warm = FxHashSet::default();
+    let mut out = Vec::new();
+    for module in user_modules(ws, &warm) {
+        let inf = ws.inference(module.id);
+        for (owner, body) in module.bodies.iter() {
+            let bi = inf.and_then(|i| i.per_fn.get(owner));
+            out.extend(row_escapes_in_body(ws, bi, body, tail_sink(module, owner)));
+        }
+    }
+    out
+}
+
 pub fn nominal_type_names(ws: &Workspace, warm: &FxHashSet<ModuleId>) -> FxHashSet<Ustr> {
     let mut out = FxHashSet::default();
     for m in user_modules(ws, warm) {
         out.extend(m.struct_by_name.keys().copied());
         out.extend(m.enums_by_name.keys().copied());
         out.extend(m.newtypes_by_name.keys().copied());
+    }
+    out
+}
+
+/// A `task_null_abandon` finding: a plain `= null` over a `Task?` place.
+/// `place` is the rendered target (`m.co`), which the diagnostic names so the
+/// fix (`stop(m, .co)`) is spellable from the message alone.
+#[derive(Clone, Debug)]
+pub struct TaskNullAbandon {
+    pub place: Option<String>,
+    pub span: Span,
+}
+
+/// Canonical lint name for suppression: `// rock: allow(task_null_abandon)`.
+pub const TASK_NULL_ABANDON: &str = "task_null_abandon";
+
+impl LintFinding for TaskNullAbandon {
+    const LINT: &'static str = TASK_NULL_ABANDON;
+    fn line(&self) -> usize {
+        self.span.line_range.0
+    }
+    fn to_diagnostic(&self) -> CompilerError {
+        let what = match &self.place {
+            Some(p) => format!("`{p} = null`"),
+            None => "assigning `null` to a `Task?` slot".to_string(),
+        };
+        CompilerError::new_with_label(
+            self.span,
+            format!(
+                "{what} abandons the coroutine mid-stack -- it is dropped where it stands, \
+                 so its terminal `defer`s never run; use `stop` to cancel it (or `replace` \
+                 to swap one in), which kill the coroutine first"
+            ),
+        )
+        // `Warning`, not `Error`: nulling a slot just observed terminal, and
+        // cleanup inside the task's own terminal defer, are both legal and
+        // indistinguishable without liveness -- so the allow comment must stay
+        // reachable.
+        .with_level(CompilerErrorLevel::Warning)
+    }
+}
+
+/// `task_null_abandon` for one body. A flat scan, not a walk: v1 asks only
+/// "does a `= null` land on a `Task?` place", and every such assignment is
+/// judged the same wherever it sits.
+///
+/// Deliberately NOT covered: overwriting a live slot with a *new* task
+/// (`m.co = start(...)`, which `replace` exists for). Distinguishing that from
+/// the first store into an empty slot needs liveness-at-assignment, and a false
+/// positive on every initial store would be worse than the miss. The two LEGAL
+/// null-assign shapes -- nulling a task just observed terminal, and completion
+/// cleanup inside the task's own terminal defer -- are equally invisible here,
+/// which is why the lint reports at `Warning` with the allow comment legal.
+pub fn task_null_abandon_in_body(
+    ws: &Workspace,
+    bi: Option<&BodyInference>,
+    body: &Body,
+) -> Vec<TaskNullAbandon> {
+    let Some(bi) = bi else { return Vec::new() };
+    let mut out = Vec::new();
+    for (_, expr) in body.expr_arena.iter() {
+        let Expr::Assign { target, value } = *expr else { continue };
+        if !matches!(body.expr_arena[value], Expr::Null) {
+            continue;
+        }
+        let Some(ty) = place_type(bi, body, target) else { continue };
+        if !is_task_slot(ws, bi, ty) {
+            continue;
+        }
+        out.push(TaskNullAbandon {
+            place: render_place(body, target),
+            span: body.expr_spans[target],
+        });
+    }
+    out
+}
+
+/// The type of an assignment TARGET. A bare local target carries no
+/// `expr_types` entry -- a `Var` is a reference to a binding, and the binding
+/// arena is where its type lives -- so the two shapes read different tables.
+fn place_type(bi: &BodyInference, body: &Body, target: Idx<Expr>) -> Option<TyId> {
+    match body.expr_arena[target] {
+        Expr::Var(b) => bi.binding_types.get(b).copied(),
+        _ => bi.expr_types.get(target).copied(),
+    }
+}
+
+/// A `Task<R>?` place. The `?` is required: a non-nullable `Task` field cannot
+/// take a `null` at all, so bone has already rejected that program.
+fn is_task_slot(ws: &Workspace, bi: &BodyInference, ty: TyId) -> bool {
+    let (id, TypeExpr::Nullable(inner)) = head_ty(ws, bi, ty) else { return false };
+    matches!(
+        head_type(ws, bi, id.with_idx(inner)),
+        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } if n.as_str() == "Task"
+    )
+}
+
+/// Re-spell an assignment target for the diagnostic (`m.co`, `e.get()?.co`,
+/// `SLOT`). `None` for a shape not covered here, which the diagnostic phrases
+/// around rather than naming wrongly -- the span already points at the place.
+fn render_place(body: &Body, e: Idx<Expr>) -> Option<String> {
+    Some(match body.expr_arena[e] {
+        Expr::Var(b) => body.binding_arena[b].name.to_string(),
+        Expr::Global(n) => n.to_string(),
+        Expr::FieldAccess { base, field } => {
+            format!("{}.{}", render_place(body, base)?, field)
+        }
+        Expr::SafeNav { base, field } => format!("{}?.{}", render_place(body, base)?, field),
+        Expr::SafeNavCall { receiver, method, .. } => {
+            format!("{}?.{}()", render_place(body, receiver)?, method)
+        }
+        // UFCS: `e.get()` lowers to a call whose first arg is the receiver.
+        Expr::Call { callee: Callee::Unresolved { name, .. }, args } => {
+            let recv = args.into_iter().next()?;
+            format!("{}.{}()", render_place(body, recv)?, name)
+        }
+        _ => return None,
+    })
+}
+
+/// `task_null_abandon` findings across every non-stdlib body in the workspace.
+/// Convenience for tests and whole-workspace CLI runs; the surfaces go through
+/// [`inference_findings`].
+pub fn task_null_abandon(ws: &Workspace) -> Vec<TaskNullAbandon> {
+    let warm = FxHashSet::default();
+    let mut out = Vec::new();
+    for module in user_modules(ws, &warm) {
+        let inf = ws.inference(module.id);
+        for (owner, body) in module.bodies.iter() {
+            out.extend(task_null_abandon_in_body(ws, inf.and_then(|i| i.per_fn.get(owner)), body));
+        }
     }
     out
 }

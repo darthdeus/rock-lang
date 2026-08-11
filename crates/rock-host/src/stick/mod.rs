@@ -13,12 +13,67 @@ pub struct StickConfig {
     /// bindgen — slow, only anvil needs it). Default: empty
     /// list = stone-rs only.
     pub engine: Option<EngineConfig>,
+    /// The renderer is a build-time choice, independent of optional engine
+    /// capabilities such as wgpu compute.
+    pub renderer: Option<RendererConfig>,
+    /// Optional iOS bundle settings. Read by the deploy scripts
+    /// (`tools/ios/*.sh`) when they write Info.plist -- orientation is a
+    /// build-time property of the bundle, not something the running game can
+    /// choose, so it cannot live in `GameConfig`. Default: landscape.
+    pub ios: Option<IosConfig>,
     pub dependencies: HashMap<String, Dependency>,
 }
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     pub needs: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RendererConfig {
+    pub backend: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RendererBackend {
+    Gl,
+    Wgpu,
+}
+
+#[derive(Debug, Clone)]
+pub struct IosConfig {
+    /// `landscape` | `portrait` | `all`. None = unset, deploy uses landscape.
+    pub orientation: Option<String>,
+}
+
+impl<'de> serde::Deserialize<'de> for IosConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Vis;
+        impl<'de> serde::de::Visitor<'de> for Vis {
+            type Value = IosConfig;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                write!(f, "IosConfig struct")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<IosConfig, A::Error> {
+                let mut orientation: Option<String> = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "orientation" => { orientation = Some(map.next_value()?); }
+                        other => {
+                            // Fail closed: a misspelled key here would silently
+                            // ship the default orientation, and the only symptom
+                            // is a phone that rotates when it shouldn't.
+                            return Err(serde::de::Error::custom(format!(
+                                "unknown key `{other}` in [ios]; known keys: orientation"
+                            )));
+                        }
+                    }
+                }
+                Ok(IosConfig { orientation })
+            }
+        }
+        d.deserialize_map(Vis)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -177,6 +232,33 @@ impl<'de> serde::Deserialize<'de> for EngineConfig {
     }
 }
 
+impl<'de> serde::Deserialize<'de> for RendererConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Vis;
+        impl<'de> serde::de::Visitor<'de> for Vis {
+            type Value = RendererConfig;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                write!(f, "RendererConfig struct")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<RendererConfig, A::Error> {
+                let mut backend: Option<String> = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "backend" => { backend = Some(map.next_value()?); }
+                        other => {
+                            return Err(serde::de::Error::custom(format!(
+                                "unknown key `{other}` in [renderer]; known keys: backend"
+                            )));
+                        }
+                    }
+                }
+                Ok(RendererConfig { backend })
+            }
+        }
+        d.deserialize_map(Vis)
+    }
+}
+
 impl<'de> serde::Deserialize<'de> for Package {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         struct Vis;
@@ -216,6 +298,8 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
             fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<StickConfig, A::Error> {
                 let mut package: Option<Package> = None;
                 let mut engine: Option<EngineConfig> = None;
+                let mut renderer: Option<RendererConfig> = None;
+                let mut ios: Option<IosConfig> = None;
                 let mut dependencies: HashMap<String, Dependency> = HashMap::new();
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
@@ -232,12 +316,14 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                             ));
                         }
                         "engine" => { engine = map.next_value()?; }
+                        "renderer" => { renderer = map.next_value()?; }
+                        "ios" => { ios = map.next_value()?; }
                         "dependencies" => { dependencies = map.next_value()?; }
                         _ => { let _ = map.next_value::<serde::de::IgnoredAny>()?; }
                     }
                 }
                 let package = package.ok_or_else(|| serde::de::Error::missing_field("package"))?;
-                Ok(StickConfig { package, engine, dependencies })
+                Ok(StickConfig { package, engine, renderer, ios, dependencies })
             }
         }
         d.deserialize_map(Vis)
@@ -341,22 +427,73 @@ impl StickConfig {
             .unwrap_or(false)
     }
 
-    /// Recognised values for `[engine] needs = [...]`. Keep in sync with
-    /// `build_engine_libs` in `cli/stone.rs`.
-    pub const KNOWN_ENGINE_NEEDS: &'static [&'static str] = &["video"];
+    pub fn renderer_backend(&self) -> Result<RendererBackend> {
+        match self.renderer.as_ref().and_then(|r| r.backend.as_deref()).unwrap_or("gl") {
+            "gl" => Ok(RendererBackend::Gl),
+            "wgpu" => Ok(RendererBackend::Wgpu),
+            backend => anyhow::bail!(
+                "stick.toml: unknown [renderer] backend {:?}. Known: \"gl\", \"wgpu\"",
+                backend
+            ),
+        }
+    }
+
+    pub fn validate_renderer(&self) -> Result<()> {
+        self.renderer_backend().map(|_| ())
+    }
+
+    /// Recognised values for `[engine] needs = [...]`, read off the build table
+    /// rather than restated. A hand-maintained copy drifts silently, and in the
+    /// direction that looks like the user's fault: a need the table can build
+    /// but the validator rejects reads as a typo in their manifest.
+    pub fn known_engine_needs() -> Vec<&'static str> {
+        crate::engine_build::OPTIONAL_ENGINE_LIBS
+            .iter()
+            .map(|l| l.need)
+            .collect()
+    }
 
     /// Reject typos in `[engine] needs = [...]` (e.g. "vidoe") so the
     /// build doesn't silently skip an optional cdylib the user asked for.
+    /// Recognised values for `[ios] orientation`. Keep in sync with the case
+    /// arms in `tools/ios/run-game-device.sh`.
+    pub const KNOWN_IOS_ORIENTATIONS: [&'static str; 3] = ["landscape", "portrait", "all"];
+
+    /// The orientation the iOS bundle should pin, if the manifest sets one.
+    /// The deploy scripts default to landscape when this is None.
+    pub fn ios_orientation(&self) -> Option<&str> {
+        self.ios.as_ref()?.orientation.as_deref()
+    }
+
+    /// Reject a bad `[ios] orientation` at build time. Without this the deploy
+    /// script sees an unrecognised string; the failure mode is a phone that
+    /// rotates freely, which thrashes canvas re-init hard enough to look like
+    /// a hang (docs/ios-bringup.md).
+    pub fn validate_ios(&self) -> Result<()> {
+        let Some(orientation) = self.ios_orientation() else {
+            return Ok(());
+        };
+        if !Self::KNOWN_IOS_ORIENTATIONS.contains(&orientation) {
+            anyhow::bail!(
+                "stick.toml: unknown [ios] orientation {:?}. Known: {:?}",
+                orientation,
+                Self::KNOWN_IOS_ORIENTATIONS
+            );
+        }
+        Ok(())
+    }
+
     pub fn validate_engine_needs(&self) -> Result<()> {
         let Some(engine) = self.engine.as_ref() else {
             return Ok(());
         };
+        let known = Self::known_engine_needs();
         for entry in &engine.needs {
-            if !Self::KNOWN_ENGINE_NEEDS.contains(&entry.as_str()) {
+            if !known.contains(&entry.as_str()) {
                 anyhow::bail!(
                     "stick.toml: unknown [engine] needs entry {:?}. Known: {:?}",
                     entry,
-                    Self::KNOWN_ENGINE_NEEDS
+                    known
                 );
             }
         }
@@ -593,6 +730,41 @@ mod tests {
         assert_eq!(cfg.package.version(), "1.2.3");
     }
 
+    /// Every lib the build table can produce must be ACCEPTED by the validator,
+    /// and a non-entry must still be rejected. Asserting the accept side alone
+    /// passes on a validator that accepts everything.
+    #[test]
+    fn the_validator_admits_exactly_the_build_table() {
+        let table = crate::engine_build::OPTIONAL_ENGINE_LIBS;
+        assert!(!table.is_empty(), "no optional libs to check");
+        for lib in table {
+            let cfg = StickConfig::new_from_str(&format!(
+                "[package]\nname = \"x\"\n[engine]\nneeds = [\"{}\"]\n",
+                lib.need
+            ))
+            .unwrap();
+            cfg.validate_engine_needs()
+                .unwrap_or_else(|e| panic!("table lib {:?} rejected: {e}", lib.need));
+            assert!(cfg.needs_engine_lib(lib.need));
+        }
+        let cfg = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[engine]\nneeds = [\"not-a-lib\"]\n",
+        )
+        .unwrap();
+        cfg.validate_engine_needs()
+            .expect_err("a need outside the table must be rejected");
+    }
+
+    #[test]
+    fn validate_engine_needs_accepts_wgpu() {
+        let cfg = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[engine]\nneeds = [\"wgpu\"]\n",
+        ).unwrap();
+        cfg.validate_engine_needs().expect("wgpu is a known need");
+        assert!(cfg.needs_engine_lib("wgpu"));
+        assert!(!cfg.needs_engine_lib("video"));
+    }
+
     #[test]
     fn validate_engine_needs_accepts_known_entry() {
         let cfg = StickConfig::new_from_str(
@@ -616,9 +788,70 @@ mod tests {
     }
 
     #[test]
+    fn ios_orientation_round_trips() {
+        let cfg = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[ios]\norientation = \"portrait\"\n",
+        ).unwrap();
+        assert_eq!(cfg.ios_orientation(), Some("portrait"));
+        cfg.validate_ios().expect("portrait is a known orientation");
+    }
+
+    #[test]
+    fn ios_orientation_defaults_to_unset() {
+        let cfg = StickConfig::new_from_str("[package]\nname = \"x\"\n").unwrap();
+        assert_eq!(cfg.ios_orientation(), None);
+        cfg.validate_ios().expect("no ios section is fine");
+    }
+
+    #[test]
+    fn validate_ios_rejects_bad_orientation() {
+        // The deploy script would otherwise write an Info.plist with no
+        // recognised orientation and the phone rotates freely -- which thrashes
+        // canvas re-init hard enough to look like a hang.
+        let cfg = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[ios]\norientation = \"sideways\"\n",
+        ).unwrap();
+        let err = cfg.validate_ios().expect_err("bad orientation must be rejected");
+        let msg = format!("{}", err);
+        assert!(msg.contains("sideways"), "error mentions the bad value: {msg}");
+        assert!(msg.contains("portrait"), "error suggests the known list: {msg}");
+    }
+
+    #[test]
+    fn ios_section_rejects_unknown_key() {
+        // A misspelled key would ship the default orientation silently.
+        let err = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[ios]\norientaton = \"portrait\"\n",
+        ).expect_err("unknown [ios] key must be rejected");
+        let msg = format!("{}", err);
+        assert!(msg.contains("orientaton"), "error names the bad key: {msg}");
+    }
+
+    #[test]
     fn validate_engine_needs_empty_is_ok() {
         let cfg = StickConfig::new_from_str("[package]\nname = \"x\"\n").unwrap();
         cfg.validate_engine_needs().expect("no engine section is fine");
+    }
+
+    #[test]
+    fn renderer_defaults_to_gl_and_accepts_wgpu() {
+        let gl = StickConfig::new_from_str("[package]\nname = \"x\"\n").unwrap();
+        assert_eq!(gl.renderer_backend().unwrap(), RendererBackend::Gl);
+
+        let wgpu = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[renderer]\nbackend = \"wgpu\"\n",
+        ).unwrap();
+        assert_eq!(wgpu.renderer_backend().unwrap(), RendererBackend::Wgpu);
+        wgpu.validate_renderer().expect("wgpu is a known renderer");
+    }
+
+    #[test]
+    fn renderer_rejects_unknown_backend() {
+        let cfg = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[renderer]\nbackend = \"vulkan\"\n",
+        ).unwrap();
+        let err = cfg.validate_renderer().expect_err("unknown renderer must reject");
+        assert!(format!("{err}").contains("vulkan"));
     }
 
     // RED-then-GREEN: from_path_optional must distinguish "no manifest"

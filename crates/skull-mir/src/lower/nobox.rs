@@ -46,6 +46,22 @@ impl Builder<'_> {
         self.f.insts[inst] = Inst::MaterializeValueStruct { name, fields };
     }
 
+    /// ARGUMENTS ONLY -- there is no return-position sibling, and that is an
+    /// open hole, not a decision.
+    ///
+    /// A generic `-> V` instantiated at a `nobox` value crosses an opaque
+    /// boundary unrejected and reads a key that does not exist: a `nobox` field
+    /// flattens to per-leaf keys, so `field_get(row, .pos)` for a `Vec2` field
+    /// emits `o["pos"]` and dies on nil, while `field_set` of that same field
+    /// IS rejected here. The opaque-CONTAINER check below reads declared slots
+    /// INCLUDING the return through [`Self::declared_slot_hazard`]; this one
+    /// stops at the caller's argument expressions.
+    ///
+    /// Pinned with its controls and the measured exempt population in
+    /// `crates/skull/tests/nobox_generic_return_boundary_sentinel.rs`. Owner:
+    /// the `mono` branch (`docs/parked/mono.md` -> `docs/parked/inline-lua.md`).
+    /// It blocks `docs/scene-system-plan.md` P4's FieldRef pull model, whose
+    /// position descriptor is exactly `ReadFieldRef<T, Vec2>`.
     pub(crate) fn reject_nobox_boxed_call_args(
         &self,
         func: FuncRef,

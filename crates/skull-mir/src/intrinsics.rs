@@ -63,6 +63,9 @@ pub enum ExpandKind {
     /// runtime field; the `set_uniform_block` macro is what pairs them with one
     /// scratch (docs/shader-binding-layout-plan.md).
     UniformBlock,
+    /// `@uniform_values fn f<T>(u: T) -> SemanticUniformBlock` -> one
+    /// compiler-owned canonical scalar leaf per logical uniform leaf.
+    UniformValues,
 }
 
 /// True iff `f` is an intrinsic in the mechanism's sense: declared `@intrinsic`,
@@ -90,6 +93,9 @@ pub fn expand_kind(f: &Function) -> Option<ExpandKind> {
     }
     if has_anno(f, "uniform_expand") {
         return Some(ExpandKind::UniformBlock);
+    }
+    if has_anno(f, "uniform_values") {
+        return Some(ExpandKind::UniformValues);
     }
     None
 }

@@ -445,6 +445,7 @@ pub fn do_run_named_sims(
         compile_sims(backend, project_path, PathBuf::from(&output))?;
     sim_spawn_barrier();
 
+    let mode = resolve_exec_mode(mode, update_snapshots, quiet)?;
     if mode != SimExecMode::Isolated {
         let results = run_specs_worker_mode(
             &project,
@@ -455,7 +456,6 @@ pub fn do_run_named_sims(
             update_snapshots,
             jobs,
             &mut stone,
-            mode,
         )?;
         let mut passed = 0usize;
         let mut failed: Vec<String> = Vec::new();
@@ -643,6 +643,7 @@ pub fn do_run_all_sims(
         return Err(anyhow!("no @sim coroutines found in project `{project}`"));
     }
 
+    let mode = resolve_exec_mode(mode, update_snapshots, quiet)?;
     if mode != SimExecMode::Isolated {
         let results = run_specs_worker_mode(
             &project,
@@ -653,7 +654,6 @@ pub fn do_run_all_sims(
             update_snapshots,
             jobs,
             &mut stone,
-            mode,
         )?;
         let mut passed = 0usize;
         let mut failed: Vec<String> = Vec::new();
@@ -813,6 +813,49 @@ pub fn do_run_all_sims(
 ///   deterministic, and a record has to be emitted whole.
 ///
 /// Returns one summary per spec, in spec order.
+/// Why worker mode cannot run here, if it cannot.
+///
+/// One place, so the DEFAULT and an explicit `--workers` cannot disagree about
+/// what is possible -- they differ only in what they do about it.
+fn worker_mode_unavailable(update_snapshots: bool) -> Option<String> {
+    if cfg!(windows) {
+        return Some(
+            "worker mode is not available on Windows: the per-entry environment reaches \
+             only the CRT view, so a native reader using the Win32 environment block \
+             would see the previous entry's $OUT"
+                .to_string(),
+        );
+    }
+    if update_snapshots {
+        return Some(
+            "worker mode cannot rewrite snapshot baselines: the runner does not yet \
+             prove every destination path is unique"
+                .to_string(),
+        );
+    }
+    None
+}
+
+/// Resolve the mode actually used. A DEFAULT degrades to the oracle and SAYS SO
+/// -- an unreported downgrade reads as a worker result, which is the same trap
+/// the isolated-entry reasons exist to avoid. An explicit `--workers` errors
+/// instead, because it was asked for on purpose.
+fn resolve_exec_mode(mode: SimExecMode, update_snapshots: bool, quiet: bool) -> Result<SimExecMode> {
+    let Some(reason) = worker_mode_unavailable(update_snapshots) else {
+        return Ok(mode);
+    };
+    match mode {
+        SimExecMode::Workers => Err(anyhow!("--workers: {reason}")),
+        SimExecMode::Default => {
+            if !quiet {
+                println!("[sim] running isolated: {reason}");
+            }
+            Ok(SimExecMode::Isolated)
+        }
+        SimExecMode::Isolated => Ok(SimExecMode::Isolated),
+    }
+}
+
 fn run_specs_worker_mode(
     project: &str,
     output: &str,
@@ -822,24 +865,10 @@ fn run_specs_worker_mode(
     update_snapshots: bool,
     jobs: Option<usize>,
     stone: &mut crate::skull_backend::SkullStone,
-    mode: SimExecMode,
 ) -> Result<Vec<(String, SimSummary)>> {
-    if cfg!(windows) {
-        return Err(anyhow!(
-            "--workers is not available on Windows: the per-entry environment reaches \
-             only the CRT view, so a native reader using the Win32 environment block \
-             would see the previous entry's $OUT"
-        ));
-    }
-    if update_snapshots {
-        return Err(anyhow!(
-            "--workers cannot rewrite snapshot baselines: the runner does not yet prove \
-             every destination path is unique. Run --update-snapshots isolated."
-        ));
-    }
 
     let jobs = resolve_jobs(jobs, update_snapshots);
-    let (groups, isolated) = group_worker_specs(specs, env_by_wire, mode);
+    let (groups, isolated) = group_worker_specs(specs, env_by_wire);
     // One slot per spec POSITION: the same sim can be named twice, and each
     // occurrence is its own entry with its own result.
     let mut slots: Vec<Option<SimSummary>> = specs.iter().map(|_| None).collect();
@@ -870,9 +899,20 @@ fn run_specs_worker_mode(
     });
 
     if !quiet {
+        // EVERY lane is a boot, so every lane reports one. A singleton lane
+        // printed nothing, which made a sim that silently got its own process
+        // indistinguishable in the log from one sharing a 46-way worker -- the
+        // same thing the isolation reasons below exist to prevent, on the path
+        // they do not cover. Measured on mag: 18 lines printed against 43 boots.
+        //
+        // A group larger than the job count splits into contiguous lanes, and
+        // that split CHANGES PREDECESSORS, so it decides which entries are
+        // boundary-crossing evidence. Say so rather than leaving it to be
+        // derived from `--jobs`.
         for lane in &lanes {
-            if lane.len() > 1 {
-                println!("[sim] worker: {} entries share one booted process", lane.len());
+            match lane.len() {
+                1 => println!("[sim] worker: 1 entry in its own booted process"),
+                n => println!("[sim] worker: {n} entries share one booted process"),
             }
         }
         for (i, reason) in poolable.iter().chain(exclusive.iter()) {
@@ -1114,6 +1154,26 @@ fn writes_live(buffered: bool) -> bool {
 /// value would isolate sims for nothing.
 const RUNNER_OWNED_ENV_KEYS: &[&str] = &["FRAME_COUNT", "ROCK_MASK_WALL_CLOCK"];
 
+/// Fixed values the runner publishes to EVERY sim child, layered BEFORE
+/// `preset_env` so a declaration still wins.
+///
+/// One source, read by the spawn that applies them and by `boot_signature`
+/// which discounts them: a sim that restates one of these gets a byte-identical
+/// child environment to a sim that declares nothing, so the pair cannot stand
+/// for a difference between two entries. Splitting a group on it isolates sims
+/// for nothing -- the `ROCK_MASK_WALL_CLOCK` argument above, for a key whose
+/// DECLARED VALUE happens to equal the baseline.
+///
+/// Matched as (key, value) and not by key, which is the whole point: a
+/// different value is a real boot difference. Putting the key in
+/// `RUNNER_OWNED_ENV_KEYS` instead would silently run a seed-7 sim in a
+/// seed-42 process.
+///
+/// Only fixed literals belong here. `STONE_ASSET_STUB` and `STONE_AUDIO_STUB`
+/// are computed from the group's own composition, so discounting them would be
+/// circular -- the value depends on the grouping this decides.
+const RUNNER_BASELINE_ENV: &[(&str, &str)] = &[("ROCK_TEST_SEED", "42"), ("STONE_HEADLESS", "1")];
+
 /// The part of a sim's `@sim_env` that is consumed during global init, engine
 /// init and `@init` -- what a shared process cannot vary between entries.
 ///
@@ -1125,6 +1185,9 @@ fn boot_signature(env_pairs: &[(String, String)]) -> Vec<(String, String)> {
     let mut sig: Vec<(String, String)> = env_pairs
         .iter()
         .filter(|(k, _)| !RUNNER_OWNED_ENV_KEYS.contains(&k.as_str()))
+        .filter(|(k, v)| {
+            !RUNNER_BASELINE_ENV.iter().any(|(bk, bv)| *bk == k.as_str() && *bv == v.as_str())
+        })
         .cloned()
         .collect();
     sig.sort_by(|a, b| a.0.cmp(&b.0));
@@ -1132,7 +1195,7 @@ fn boot_signature(env_pairs: &[(String, String)]) -> Vec<(String, String)> {
 }
 
 /// How `rock sim` maps entries to processes.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SimExecMode {
     /// One fresh process per entry: the permanent reference oracle, and what
     /// `--isolated` selects. Never inferred -- it is always the caller's word.
@@ -1142,15 +1205,18 @@ pub enum SimExecMode {
     /// rendered sim gets measured in a worker at all, which the differential
     /// and the multi-order gate both need.
     Workers,
-    /// The DEFAULT. Render-skipped entries go to boot-checkpoint workers;
-    /// entries that render run in fresh processes with a REPORTED reason.
+    /// The DEFAULT: workers for every eligible entry, RENDERED INCLUDED,
+    /// falling back to `Isolated` where worker mode cannot run at all.
     ///
-    /// The split is drawn where the evidence is. On the merged mag corpus every
-    /// divergence among boundary-crossing comparisons belonged to a sim that
-    /// renders, and the one render-skipped sim that diverged did so on a
-    /// NON-crossing comparison from an intermittent log record -- fresh-process
-    /// nondeterminism, which isolating it would not cure.
-    Hybrid,
+    /// It differs from `Workers` only in what happens when the mode is
+    /// unavailable -- a default degrades with a reported reason, an explicit
+    /// request errors, because someone who typed `--workers` is measuring
+    /// something and a silent downgrade would answer the wrong question.
+    ///
+    /// Rendered sims run in workers too. The evidence is `--multi-order` on the
+    /// mag corpus, which compares 840 boundary-crossing entries across
+    /// registry, reverse and a seeded shuffle and finds zero divergences.
+    Default,
 }
 
 /// Resolve the two CLI flags. clap already rejects the combination.
@@ -1159,7 +1225,7 @@ pub fn exec_mode(isolated: bool, workers: bool) -> SimExecMode {
     match (isolated, workers) {
         (true, _) => SimExecMode::Isolated,
         (_, true) => SimExecMode::Workers,
-        _ => SimExecMode::Hybrid,
+        _ => SimExecMode::Default,
     }
 }
 
@@ -1186,9 +1252,9 @@ fn entry_renders(env: &[(String, String)]) -> bool {
 /// ANY rendering entry opts the WHOLE process in to real pixels. The parts of a
 /// comma-separated chain share one process and therefore one image cache, so a
 /// per-entry answer is not available to give -- the first entry's uploads are
-/// still resident when the second runs. Deciding it per process, off the same
-/// `entry_renders` the isolation split uses, is what keeps a sim from counting
-/// as non-rendering here and rendering there.
+/// still resident when the second runs. Deciding it per process, off one
+/// `entry_renders` oracle, is what keeps a sim from counting as non-rendering
+/// here and rendering there.
 fn asset_stub_value(parts: &[WorkerPart]) -> &'static str {
     if parts.iter().any(|p| entry_renders(&p.env)) {
         return "0";
@@ -1222,7 +1288,6 @@ fn unstub_from(inherited: Option<&str>) -> &'static str {
 fn worker_ineligibility(
     spec: &str,
     env_by_wire: &HashMap<String, Vec<(String, String)>>,
-    mode: SimExecMode,
 ) -> Option<String> {
     let parts = parse_sim_chain(spec);
     // A spec with no parts has nothing to agree on; the isolated path rejects
@@ -1244,21 +1309,6 @@ fn worker_ineligibility(
         if let Some((k, v)) = env.iter().find(|(_, v)| v.contains("$OUT")) {
             return Some(format!(
                 "@sim_env(\"{k}\", \"{v}\") interpolates $OUT, which resolves before the process starts"
-            ));
-        }
-        // The hybrid default's one extra rule. ANY rendered part isolates the
-        // whole chain: a chain runs as consecutive entries of one queue, so a
-        // rendered part would render inside a worker however the other parts
-        // are classified.
-        //
-        // `--workers` deliberately does NOT apply it. That mode exists to
-        // measure rendered sims in a worker, which is what the differential and
-        // the multi-order gate are for; a rule that isolated them there would
-        // make the gate unable to see the class it was built to see.
-        if mode == SimExecMode::Hybrid && entry_renders(env) {
-            return Some(format!(
-                "`{part}` renders (SIM_SKIP_RENDER=0); rendered sims run isolated by \
-                 default -- use --workers to measure one in a worker"
             ));
         }
     }
@@ -1287,12 +1337,11 @@ fn worker_ineligibility(
 fn group_worker_specs(
     specs: &[String],
     env_by_wire: &HashMap<String, Vec<(String, String)>>,
-    mode: SimExecMode,
 ) -> (Vec<Vec<usize>>, Vec<(usize, String)>) {
     let mut groups: Vec<(Vec<(String, String)>, Vec<usize>)> = Vec::new();
     let mut isolated: Vec<(usize, String)> = Vec::new();
     for (i, spec) in specs.iter().enumerate() {
-        if let Some(reason) = worker_ineligibility(spec, env_by_wire, mode) {
+        if let Some(reason) = worker_ineligibility(spec, env_by_wire) {
             isolated.push((i, reason));
             continue;
         }
@@ -1647,15 +1696,15 @@ fn run_worker(
     cmd.env("ROCK_SIM_ENTRY_PLAN", plan_file.path())
         .env("ROCK_RUN_SIM", &first.name)
         .env("FRAME_COUNT", first.frame_budget.to_string())
-        .env("STONE_HEADLESS", "1")
         .env("OUT", &first.out_dir)
-        // Default deterministic seed for sims. An explicit
-        // `@sim_env("ROCK_TEST_SEED", ...)` in a sim still overrides
-        // because `preset_env` is layered after this baseline.
-        .env("ROCK_TEST_SEED", "42")
+        // `STONE_HEADLESS` and the deterministic sim seed. Applied from the same
+        // table `boot_signature` discounts, so the baseline a sim can restate
+        // for free is stated once. An explicit `@sim_env` still overrides,
+        // because `preset_env` is layered after this.
+        .envs(RUNNER_BASELINE_ENV.iter().copied())
         // Headers-only assets unless something in this process renders. Decided
-        // by `entry_renders`, the same oracle the isolation split uses, so a sim
-        // cannot count as non-rendering here and rendering there. ANY rendering
+        // by `entry_renders`, the one oracle for the question, so a sim cannot
+        // count as non-rendering here and rendering there. ANY rendering
         // entry in a chain opts the whole process in: one process, one image
         // cache, and the first entry's loads are still resident for the second.
         // Layered before `preset_env` so an explicit
@@ -2203,6 +2252,19 @@ fn run_specs_recovering(
     while base < plans.len() {
         let parts: Vec<WorkerPart> =
             plans[base..].iter().flat_map(|p| p.parts.iter().cloned()).collect();
+        // Every round past the first boots ANOTHER process, so it is a third
+        // source of boots beside the lane plan and the isolated entries -- and
+        // the only one decided at runtime, which no static grouping can predict.
+        // Without this line the boot count does not reconcile with the log:
+        // measured on testbed, 89 boots against 70 reported, the 19 missing
+        // being exactly the entries that ended their worker.
+        if base > 0 {
+            println!(
+                "[sim] worker: rebooting for {} unstarted entr{}",
+                plans.len() - base,
+                if plans.len() - base == 1 { "y" } else { "ies" }
+            );
+        }
         let summaries =
             run_worker(project, &parts, false, true, update_snapshots, output, record_manifest, None)?;
 
@@ -2311,10 +2373,7 @@ fn run_worker_arm(
     env_by_wire: &HashMap<String, Vec<(String, String)>>,
     ordered: &[String],
 ) -> Result<Vec<(crate::sim_record::SimRecord, bool)>> {
-    // The GATE measures rendered sims in workers on purpose: the hybrid
-    // default isolates them, and a gate that inherited that rule could never
-    // see the class it exists to watch.
-    let (groups, isolated) = group_worker_specs(ordered, env_by_wire, SimExecMode::Workers);
+    let (groups, isolated) = group_worker_specs(ordered, env_by_wire);
     let mut out: Vec<Option<(crate::sim_record::SimRecord, bool)>> = vec![None; ordered.len()];
 
     for members in groups {
@@ -2370,13 +2429,24 @@ fn run_worker_arm(
 ///
 /// `errors` counts runner/sim `error` ops, and every op that emits one also
 /// FAILS its sim -- a fixture built to populate it would be a permanently red
-/// entry in `rock sim testbed`, and mag's known reds fail expects rather than
-/// erroring. The arm is still guarded twice over: `Comparison::population`
-/// panics on an arm that is absent rather than reading as "nothing to see", and
-/// `sim_record`'s synthetic per-arm tests fail when an arm is censused but no
-/// longer compared. Encoded here so that "permanently empty" is a stated
-/// exception with a reason, not a gate everyone learns to ignore.
-const ARMS_WITHOUT_A_CORPUS: &[&str] = &["errors"];
+/// entry in `rock sim testbed`.
+///
+/// `expects_fail` is the same shape for the same reason: the only thing that
+/// populates it is a sim whose expect FAILS, so a corpus for it is a
+/// deliberately red sim kept alive to feed a gate. A healthy project has none,
+/// and mag is 299/299 -- degrading the normal suite to populate one arm trades
+/// a real signal for a bookkeeping one. What this arm can be wrong about is
+/// covered where a failing expect is a fixture rather than a regression: the
+/// targeted `sim_worker_differential` gates drive failing entries directly and
+/// compare them across the boundary.
+///
+/// Both arms are still guarded twice over: `Comparison::population` panics on
+/// an arm that is ABSENT rather than reading as "nothing to see", so an arm
+/// that stops being censused at all is still a hard failure, and `sim_record`'s
+/// synthetic per-arm tests fail when an arm is censused but no longer compared.
+/// Encoded here so that "permanently empty" is a stated exception with a
+/// reason, not a gate everyone learns to ignore.
+const ARMS_WITHOUT_A_CORPUS: &[&str] = &["errors", "expects_fail"];
 
 /// Whether an empty comparison arm should stop the gate, given which arms came
 /// back empty and whether this run measured a named SUBSET.
@@ -3448,6 +3518,58 @@ mod tests {
         select_gate_corpus(&corpus(), &selected)
     }
 
+    fn sig(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        boot_signature(
+            &pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<Vec<_>>(),
+        )
+    }
+
+    /// A declaration that RESTATES the runner's own baseline produces a
+    /// byte-identical child environment, so it cannot stand for a difference
+    /// between two entries -- the same argument `RUNNER_OWNED_ENV_KEYS` already
+    /// makes for `ROCK_MASK_WALL_CLOCK`. mag declares `ROCK_TEST_SEED=42` in 182
+    /// sims and nothing in 73, and splitting those cost 6 of its 43 boots.
+    #[test]
+    fn a_declaration_at_the_runner_baseline_does_not_split_a_group() {
+        for (key, value) in RUNNER_BASELINE_ENV {
+            assert_eq!(
+                sig(&[(key, value)]),
+                sig(&[]),
+                "`{key}={value}` restates the runner's baseline, so it is not a boot difference"
+            );
+        }
+    }
+
+    /// The other side, and the reason this is a (key, value) match rather than
+    /// an entry in `RUNNER_OWNED_ENV_KEYS`: a DIFFERENT value is a real boot
+    /// difference and must still refuse to share a process. Dropping the key
+    /// outright would silently run a seed-7 sim in a seed-42 process.
+    #[test]
+    fn a_declaration_away_from_the_baseline_still_splits_a_group() {
+        assert_ne!(
+            sig(&[("ROCK_TEST_SEED", "7")]),
+            sig(&[]),
+            "a seed the runner did not publish is a genuine boot difference"
+        );
+        assert_ne!(
+            sig(&[("ROCK_TEST_SEED", "7")]),
+            sig(&[("ROCK_TEST_SEED", "42")]),
+            "two different declared seeds are two different boot worlds"
+        );
+    }
+
+    /// The canonicalization must not swallow a neighbour: a signature keeps
+    /// every pair that is not a baseline restatement.
+    #[test]
+    fn canonicalizing_the_baseline_leaves_other_pairs_alone() {
+        assert_eq!(
+            sig(&[("ROCK_TEST_SEED", "42"), ("SIM_SKIP_RENDER", "0")]),
+            sig(&[("SIM_SKIP_RENDER", "0")]),
+            "only the inert pair comes out"
+        );
+        assert_eq!(sig(&[("SIM_SKIP_RENDER", "0")]).len(), 1);
+    }
+
     /// Assets are stubbed per PROCESS, not per entry: a chain shares one image
     /// cache, so one rendering part means the whole child needs real pixels.
     #[test]
@@ -3486,10 +3608,11 @@ mod tests {
         );
     }
 
-    /// The hybrid split reads the EFFECTIVE value, last-wins. `@sim_render` is
+    /// `entry_renders` reads the EFFECTIVE value, last-wins. `@sim_render` is
     /// lowered to `SIM_SKIP_RENDER=0` before an explicit `@sim_env` is appended,
     /// so a sim carrying both is whatever it says last -- and that is the value
-    /// its child actually boots with.
+    /// its child actually boots with. Nothing schedules on it now, but the
+    /// census and the capability docs classify sims by it.
     #[test]
     fn rendering_is_the_effective_last_wins_value() {
         let pair = |k: &str, v: &str| (k.to_string(), v.to_string());
@@ -3508,12 +3631,58 @@ mod tests {
         assert!(!entry_renders(&[pair("MAG_FORCE_VFX", "1")]), "an unrelated key is not it");
     }
 
-    /// The default isolates a rendered entry and admits a render-skipped one,
-    /// and BOTH populations are non-empty -- a split that admitted everything,
-    /// or nothing, would be reported the same way by a test that only checked
-    /// one side.
+    /// The default DEGRADES where worker mode cannot run and an explicit
+    /// `--workers` REJECTS, which is the only difference between them. Both
+    /// arms are here because a resolver that always degraded, or always
+    /// rejected, would satisfy a test that checked one side.
     #[test]
-    fn the_hybrid_default_splits_rendered_from_render_skipped() {
+    fn the_default_degrades_where_workers_rejects() {
+        let degraded = resolve_exec_mode(SimExecMode::Default, true, true)
+            .expect("the default falls back rather than failing the run");
+        assert_eq!(
+            degraded,
+            SimExecMode::Isolated,
+            "and it falls back to the ORACLE, not to some third behaviour"
+        );
+
+        let err = resolve_exec_mode(SimExecMode::Workers, true, true)
+            .expect_err("--workers was asked for on purpose and must not be downgraded");
+        assert!(
+            err.to_string().contains("--workers"),
+            "the error names the flag that was refused: {err}"
+        );
+    }
+
+    /// The control for the pair above: with no constraint in play the default
+    /// stays in worker mode. Without this, a resolver that degraded
+    /// unconditionally would pass the degrade arm and silently cost the 4.3x.
+    #[test]
+    fn the_default_stays_in_worker_mode_when_nothing_blocks_it() {
+        assert_eq!(
+            resolve_exec_mode(SimExecMode::Default, false, true).expect("no constraint"),
+            SimExecMode::Default,
+        );
+        assert_eq!(
+            resolve_exec_mode(SimExecMode::Workers, false, true).expect("no constraint"),
+            SimExecMode::Workers,
+        );
+    }
+
+    /// `--isolated` is unreachable by either path: it is already the oracle, so
+    /// there is nothing to degrade to and nothing to refuse.
+    #[test]
+    fn isolated_is_unaffected_by_the_availability_check() {
+        assert_eq!(
+            resolve_exec_mode(SimExecMode::Isolated, true, true).expect("isolated always runs"),
+            SimExecMode::Isolated,
+        );
+    }
+
+    /// The default admits a RENDERED entry as readily as a render-skipped one.
+    /// Both populations are present in the input, so a rule that admitted only
+    /// one kind would be visible here rather than reading as a green.
+    #[test]
+    fn the_default_admits_rendered_and_render_skipped_alike() {
         let mut wires: HashMap<String, Vec<(String, String)>> = HashMap::new();
         wires.insert("logic".to_string(), vec![]);
         wires.insert(
@@ -3522,62 +3691,66 @@ mod tests {
         );
         let specs = vec!["logic".to_string(), "pixel".to_string()];
 
-        let (groups, isolated) = group_worker_specs(&specs, &wires, SimExecMode::Hybrid);
-        assert_eq!(groups.len(), 1, "the render-skipped entry is admitted: {groups:?}");
-        assert_eq!(groups[0], vec![0], "and it is the logic one");
-        assert_eq!(isolated.len(), 1, "the rendered entry is isolated: {isolated:?}");
-        assert_eq!(isolated[0].0, 1);
-        assert!(
-            isolated[0].1.contains("renders"),
-            "with a REPORTED reason, since a silently isolated entry reads as a \
-             worker result: {}",
-            isolated[0].1
+        let (groups, isolated) = group_worker_specs(&specs, &wires);
+        assert_eq!(isolated.len(), 0, "neither entry is isolated: {isolated:?}");
+        assert_eq!(
+            groups.iter().map(Vec::len).sum::<usize>(),
+            2,
+            "both entries are admitted, the rendered one included: {groups:?}"
         );
-
-        // `--workers` is the force/diagnostic spelling and must still admit the
-        // rendered one, or the differential and multi-order gates could never
-        // measure the class they exist for.
-        let (groups, isolated) = group_worker_specs(&specs, &wires, SimExecMode::Workers);
-        assert_eq!(isolated.len(), 0, "--workers admits rendered sims: {isolated:?}");
-        assert_eq!(groups.iter().map(Vec::len).sum::<usize>(), 2);
     }
 
-    /// ANY rendered part isolates the whole chain: a chain runs as consecutive
-    /// entries of ONE queue, so a rendered part renders inside the worker
-    /// however its neighbours are classified.
+    /// A RENDERED chain is admitted whole. It used to be isolated for rendering;
+    /// what still isolates a chain is its parts DISAGREEING, which is a
+    /// different rule with its own test -- and why both parts render here, since
+    /// a rendered part beside a render-skipped one disagrees by construction and
+    /// would be isolated for that reason instead.
     #[test]
-    fn one_rendered_part_isolates_its_whole_chain() {
+    fn a_rendered_chain_is_admitted() {
         let mut wires: HashMap<String, Vec<(String, String)>> = HashMap::new();
-        wires.insert("head".to_string(), vec![]);
+        wires.insert(
+            "head".to_string(),
+            vec![("SIM_SKIP_RENDER".to_string(), "0".to_string())],
+        );
         wires.insert(
             "tail".to_string(),
             vec![("SIM_SKIP_RENDER".to_string(), "0".to_string())],
         );
         let (groups, isolated) =
-            group_worker_specs(&["head,tail".to_string()], &wires, SimExecMode::Hybrid);
-        assert!(groups.is_empty(), "the chain cannot be admitted: {groups:?}");
-        assert_eq!(isolated.len(), 1);
-        assert!(isolated[0].1.contains("tail"), "names the rendered part: {}", isolated[0].1);
+            group_worker_specs(&["head,tail".to_string()], &wires);
+        assert_eq!(isolated.len(), 0, "the chain is admitted: {isolated:?}");
+        assert_eq!(groups.len(), 1, "as one queue: {groups:?}");
     }
 
     /// A hole in the full-corpus gate stops it: the run would otherwise print a
     /// green over an arm it never compared.
+    ///
+    /// The fixture arm is `verdict` because it is non-exempt PERMANENTLY: a run
+    /// that compared no verdicts compared nothing, so it can never join
+    /// `ARMS_WITHOUT_A_CORPUS`. An arm that is merely unpopulated today would
+    /// disarm this test the moment it was exempted, which is exactly what
+    /// happened when `expects_fail` stood here.
     #[test]
     fn the_full_corpus_refuses_an_arm_it_could_not_populate() {
-        let reason = population_refusal(&["expects_fail"], false).expect("must refuse");
-        assert!(reason.contains("expects_fail"), "names the arm: {reason}");
+        let reason = population_refusal(&["verdict"], false).expect("must refuse");
+        assert!(reason.contains("verdict"), "names the arm: {reason}");
     }
 
-    /// `errors` is the one arm no corpus in this tree can populate -- every op
-    /// that emits an `error` also fails its sim -- so it is a stated permanent
-    /// exception rather than a gate everyone learns to ignore.
+    /// The arms no corpus in this tree can populate are stated permanent
+    /// exceptions rather than a gate everyone learns to ignore: an `error` op
+    /// also fails its sim, and only a deliberately red sim populates
+    /// `expects_fail`.
     #[test]
     fn a_permanently_unpopulatable_arm_is_not_a_hole() {
         assert!(population_refusal(&["errors"], false).is_none());
-        // ... and it does not launder a real hole reported beside it.
-        let reason = population_refusal(&["errors", "expects_fail"], false).expect("must refuse");
-        assert!(reason.contains("expects_fail"), "names the real hole: {reason}");
+        assert!(population_refusal(&["expects_fail"], false).is_none());
+        assert!(population_refusal(&["errors", "expects_fail"], false).is_none());
+        // ... and neither launders a real hole reported beside it.
+        let reason =
+            population_refusal(&["errors", "expects_fail", "verdict"], false).expect("must refuse");
+        assert!(reason.contains("verdict"), "names the real hole: {reason}");
         assert!(!reason.contains("errors"), "does not name the exception: {reason}");
+        assert!(!reason.contains("expects_fail"), "does not name the exception: {reason}");
     }
 
     /// A subset is chosen to re-measure ONE class. Whether that pair happens to
@@ -3859,9 +4032,7 @@ mod tests {
         ]);
         let (groups, isolated) = group_worker_specs(
             &specs(&["plain_a", "plain_b", "fx_off", "reload", "outref", "machinery"]),
-            &wires,
-            SimExecMode::Workers,
-        );
+            &wires);
 
         // FRAME_COUNT is runner-owned, so plain_a and plain_b share a group;
         // fx_off's boot-consumed value is its own.
@@ -3889,7 +4060,7 @@ mod tests {
         let wires = wires(&[("plain", &[]), ("reload", &[("STONE_HOT_RELOAD", "1")])]);
 
         let (groups, isolated) =
-            group_worker_specs(&specs(&["plain", "plain", "reload", "reload"]), &wires, SimExecMode::Workers);
+            group_worker_specs(&specs(&["plain", "plain", "reload", "reload"]), &wires);
         assert_eq!(groups, vec![vec![0, 1]]);
         assert_eq!(isolated.iter().map(|(i, _)| *i).collect::<Vec<_>>(), vec![2, 3]);
 
@@ -3910,11 +4081,11 @@ mod tests {
         ]);
 
         let (groups, isolated) =
-            group_worker_specs(&specs(&["head,tail_same", "plain"]), &wires, SimExecMode::Workers);
+            group_worker_specs(&specs(&["head,tail_same", "plain"]), &wires);
         assert_eq!(groups, vec![vec![0], vec![1]]);
         assert!(isolated.is_empty());
 
-        let (groups, isolated) = group_worker_specs(&specs(&["head,tail_other"]), &wires, SimExecMode::Workers);
+        let (groups, isolated) = group_worker_specs(&specs(&["head,tail_other"]), &wires);
         assert!(groups.is_empty());
         assert_eq!(isolated.len(), 1);
         assert!(
@@ -3930,10 +4101,10 @@ mod tests {
     fn an_empty_spec_is_classified_not_indexed() {
         let wires = wires(&[("plain", &[])]);
 
-        assert!(worker_ineligibility("", &wires, SimExecMode::Workers).is_some());
-        assert!(worker_ineligibility(" , ", &wires, SimExecMode::Workers).is_some());
+        assert!(worker_ineligibility("", &wires).is_some());
+        assert!(worker_ineligibility(" , ", &wires).is_some());
 
-        let (groups, isolated) = group_worker_specs(&specs(&["plain", ""]), &wires, SimExecMode::Workers);
+        let (groups, isolated) = group_worker_specs(&specs(&["plain", ""]), &wires);
         assert_eq!(groups, vec![vec![0]]);
         assert_eq!(isolated.len(), 1);
         assert_eq!(isolated[0].0, 1);

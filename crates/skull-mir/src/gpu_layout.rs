@@ -270,7 +270,9 @@ impl WireKind {
     /// std140 slots positionally, so that would permute bytes while keeping
     /// every count equal. `uniform_block_checked` compares this against the
     /// value walker, which is what turns the claim into a checked one.
-    fn leaf_suffixes(self) -> Vec<String> {
+    /// Logical scalar leaves in declaration order. This is independent of the
+    /// target's offsets; the physical block uses the same order when it packs.
+    pub fn leaf_suffixes(self) -> Vec<String> {
         match self {
             WireKind::F32 | WireKind::I32 | WireKind::Bool32 => vec![String::new()],
             WireKind::F32x2 => ["x", "y"].iter().map(|k| format!(".{k}")).collect(),

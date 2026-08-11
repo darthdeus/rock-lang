@@ -572,7 +572,7 @@ fn leaf_operand(
 /// every pass that runs in between (`convert_closures`, `recover_counted_loops`,
 /// `inline_hoisted_bodies`, the verifier) remaps operands or matches the struct
 /// NAME only -- none interpret field names.
-pub fn flatten_nobox_nested_ctors(ws: &Workspace, func: &mut MirFunc) {
+pub fn flatten_nobox_nested_ctors(ws: &Workspace, func: &mut MirFunc) -> bool {
     let all: Vec<Idx<Inst>> =
         func.blocks.iter().flat_map(|(_, b)| b.insts.iter().copied()).collect();
     // A ctor used as a field operand of another ctor is not the outermost one.
@@ -590,7 +590,7 @@ pub fn flatten_nobox_nested_ctors(ws: &Workspace, func: &mut MirFunc) {
         .filter(|i| !inner.contains(i) && ctor_tree_has_implicit_nobox(ws, func, *i))
         .collect();
     if targets.is_empty() {
-        return;
+        return false;
     }
     let mut replacement: HashMap<Idx<Inst>, Vec<Idx<Inst>>> = HashMap::default();
     for t in targets {
@@ -620,6 +620,18 @@ pub fn flatten_nobox_nested_ctors(ws: &Workspace, func: &mut MirFunc) {
         if !ok {
             continue;
         }
+        // An already-flat ctor rewrites to ITSELF -- a `nobox` name is its own
+        // trigger, so `materialize(Color { .. })` is a target on every pass. The
+        // rewrite is harmless but the "changed" answer is not: `cleanup_with_nobox`
+        // iterates on it, so reporting a no-op as progress never terminates.
+        let unchanged = matches!(
+            &func.insts[t],
+            Inst::MakeValueStruct { fields, .. } | Inst::MaterializeValueStruct { fields, .. }
+                if *fields == leaves
+        );
+        if unchanged {
+            continue;
+        }
         let span = func.inst_spans.get(t).copied();
         // Preserve the variant: an explicit box stays explicit, it just stops
         // building a nested one on the way.
@@ -639,7 +651,7 @@ pub fn flatten_nobox_nested_ctors(ws: &Workspace, func: &mut MirFunc) {
         replacement.insert(t, pre);
     }
     if replacement.is_empty() {
-        return;
+        return false;
     }
     // The flattened ctor takes the original's slot, so every existing user of
     // `t` now reads the flat form.
@@ -670,6 +682,7 @@ pub fn flatten_nobox_nested_ctors(ws: &Workspace, func: &mut MirFunc) {
         }
         func.blocks[bid].insts = new;
     }
+    true
 }
 
 /// [`cleanup`] plus nobox nested-ctor normalization and the DCE that clears the
@@ -685,7 +698,15 @@ pub fn flatten_nobox_nested_ctors(ws: &Workspace, func: &mut MirFunc) {
 /// CLOSED -- a spurious rejection from the verifier, never a silent miscompile.
 pub fn cleanup_with_nobox(ws: &Workspace, func: &mut MirFunc) {
     cleanup(func);
-    flatten_nobox_nested_ctors(ws, func);
+    // INTERLEAVED, not once each. Flattening replaces a nested nobox ctor's
+    // users with leaf reads, and that is exactly the shape SROA needs to split
+    // the field cell the ctor is stored to: while the outer ctor still reads the
+    // nested one whole, the nested ctor has more than one user and SROA leaves
+    // the field cell alone, so the box survives. Terminates because the pass is
+    // idempotent -- a flattened ctor no longer matches the trigger.
+    while flatten_nobox_nested_ctors(ws, func) {
+        cleanup(func);
+    }
     dce(func);
 }
 
@@ -1307,6 +1328,24 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
     for i in alias_deletions {
         replacement.insert(i, Vec::new());
     }
+    // A field cell that ALWAYS holds a value-struct ctor inherits the parent's
+    // non-null licence, so a later round can split it in turn instead of
+    // disqualifying its family when the field escapes whole (`Outer { ..o }`
+    // rebuilds `o.inner` as one operand). Nullable fields are excluded by
+    // construction: a nil store expands to `Const(Nil)` per field, which is not
+    // a ctor -- the licence `nonnull_value_struct` grants is exactly "this cell
+    // can be rebuilt from its leaves", and nil cannot be.
+    let mut nn_field: HashMap<(Idx<Cell>, ustr::Ustr), bool> = HashMap::default();
+    for (_, c, fields) in &store_expansions {
+        if !func.cells[*c].nonnull_value_struct {
+            continue;
+        }
+        for (fname, src) in fields {
+            let is_value_ctor = matches!(src,
+                FieldSrc::Operand(v) if matches!(&func.insts[*v], Inst::MakeValueStruct { .. }));
+            *nn_field.entry((*c, *fname)).or_insert(true) &= is_value_ctor;
+        }
+    }
     for (store_i, c, fields) in store_expansions {
         let mut news = Vec::with_capacity(fields.len());
         for (fname, src) in fields {
@@ -1328,6 +1367,9 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> bool {
                 }
             };
             let fc = get_field_cell(func, c, fname);
+            if nn_field.get(&(c, fname)).copied().unwrap_or(false) {
+                func.mark_nonnull_value_struct(fc);
+            }
             news.push(func.insts.alloc(Inst::Store { cell: fc, value: fval }));
         }
         replacement.insert(store_i, news);

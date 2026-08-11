@@ -23,6 +23,7 @@
 //! interface plan was a GLSL plan wearing another name.
 
 use ustr::Ustr;
+use std::fmt::Write as _;
 
 /// Which GLSL dialect an artifact packages (docs/shaders.md): the `#version`
 /// line plus the builtin/precision differences that follow from it. `Core330`
@@ -191,6 +192,34 @@ pub struct LogicalUniformGroup {
     pub members: Vec<(Ustr, WireKind)>,
 }
 
+/// The identity of a logical uniform value group. Physical offsets, padding,
+/// bindings and block size are deliberately absent.
+pub fn semantic_uniform_group_fingerprint(
+    struct_name: Ustr,
+    members: &[(Ustr, WireKind)],
+) -> u64 {
+    let mut hash = 0xa5a5_5a5a_c3c3_3c3cu64;
+    for byte in struct_name.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    for (name, kind) in members {
+        for byte in name.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash ^= u64::from(kind.code());
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    (hash ^ (hash >> 53)) & ((1 << 53) - 1)
+}
+
+impl LogicalUniformGroup {
+    pub fn semantic_fingerprint(&self) -> u64 {
+        semantic_uniform_group_fingerprint(self.struct_name, &self.members)
+    }
+}
+
 /// A stage's `UniformArray<T>` members. Separate from the scalar group for a
 /// LIFETIME reason rather than a typing one -- see `ShaderAbiPlan`'s note on
 /// whole-block uploads.
@@ -322,5 +351,134 @@ impl ShaderInterfacePlan {
             self.bare_samplers.iter().filter(|s| s.stage == stage).map(|s| (s.name, s.kind)),
         );
         out
+    }
+
+    /// A stable identity for the logical interface plus the geometry form the
+    /// caller is allowed to submit. This deliberately hashes names, roles,
+    /// order and neutral kinds only; target bindings, offsets, sizes and
+    /// source text are not part of the semantic interface.
+    pub fn semantic_fingerprint(&self, fullscreen: bool) -> u64 {
+        let payload = self.semantic_payload(fullscreen);
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        for byte in payload.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        let folded = hash ^ (hash >> 53);
+        folded & ((1 << 53) - 1)
+    }
+
+    /// Serialize the compiler-owned logical interface for a runtime
+    /// registration. It is intentionally a separate wire from every target's
+    /// physical ABI wire; the runtime never parses GLSL or WGSL to recover it.
+    pub fn semantic_wire(&self, fullscreen: bool) -> String {
+        format!(
+            "SHADER_INTERFACE_V1\nfingerprint {}\n{}end\n",
+            self.semantic_fingerprint(fullscreen),
+            self.semantic_payload(fullscreen)
+        )
+    }
+
+    fn semantic_payload(&self, fullscreen: bool) -> String {
+        let mut out = String::new();
+        writeln!(out, "fullscreen {}", if fullscreen { 1 } else { 0 }).unwrap();
+
+        writeln!(out, "stages {}", self.stages.len()).unwrap();
+        for stage in &self.stages {
+            writeln!(out, "stage {}", stage.name()).unwrap();
+        }
+
+        writeln!(out, "vertex_inputs {}", self.vertex_inputs.len()).unwrap();
+        for input in &self.vertex_inputs {
+            let rate = match input.rate {
+                VertexRate::PerVertex => "vertex",
+                VertexRate::PerInstance => "instance",
+            };
+            writeln!(out, "vertex_input {} {} {}", input.struct_name, rate, input.attrs.len()).unwrap();
+            for (name, kind) in &input.attrs {
+                writeln!(out, "attr {} {}", name, attr_kind_code(*kind)).unwrap();
+            }
+        }
+
+        writeln!(out, "varyings {}", self.varyings.len()).unwrap();
+        for varying in &self.varyings {
+            writeln!(out, "varying {} {} {}", varying.name, varying.kind.code(), if varying.flat { 1 } else { 0 }).unwrap();
+        }
+
+        writeln!(out, "groups {}", self.uniform_groups.len()).unwrap();
+        for group in &self.uniform_groups {
+            writeln!(out, "group {} {} {} {}", uniform_role_name(group.role), group.struct_name, group.semantic_fingerprint(), group.members.len()).unwrap();
+            for (name, kind) in &group.members {
+                writeln!(out, "member {} {}", name, kind.code()).unwrap();
+            }
+        }
+
+        writeln!(out, "arrays {}", self.array_groups.len()).unwrap();
+        for group in &self.array_groups {
+            writeln!(out, "array {} {} {}", group.stage.name(), group.owner, group.members.len()).unwrap();
+            for member in &group.members {
+                writeln!(out, "array_member {} {} {}", member.name, member.elem.code(), member.capacity).unwrap();
+            }
+        }
+
+        match &self.textures {
+            Some(group) => {
+                let struct_name = group.struct_name.map(|name| name.as_str()).unwrap_or("none");
+                writeln!(out, "textures {} {}", struct_name, group.samplers.len()).unwrap();
+                for (name, kind) in &group.samplers {
+                    writeln!(out, "texture {} {}", name, sampler_kind_code(*kind)).unwrap();
+                }
+                writeln!(out, "texture_stages {}", group.stages.len()).unwrap();
+                for stage in &group.stages {
+                    writeln!(out, "texture_stage {}", stage.name()).unwrap();
+                }
+            }
+            None => {
+                writeln!(out, "textures none 0").unwrap();
+                writeln!(out, "texture_stages 0").unwrap();
+            }
+        }
+
+        writeln!(out, "bare_samplers {}", self.bare_samplers.len()).unwrap();
+        for sampler in &self.bare_samplers {
+            writeln!(out, "bare_sampler {} {} {}", sampler.stage.name(), sampler.name, sampler_kind_code(sampler.kind)).unwrap();
+        }
+
+        match &self.fragment_output {
+            FragmentOutput::None => writeln!(out, "output none").unwrap(),
+            FragmentOutput::Single(kind) => writeln!(out, "output single {}", kind.code()).unwrap(),
+            FragmentOutput::Mrt(outputs) => {
+                writeln!(out, "output mrt {}", outputs.len()).unwrap();
+                for (name, kind) in outputs {
+                    writeln!(out, "output_member {} {}", name, kind.code()).unwrap();
+                }
+            }
+        }
+        out
+    }
+}
+
+fn uniform_role_name(role: UniformRole) -> &'static str {
+    match role {
+        UniformRole::Engine => "engine",
+        UniformRole::Stage(ShaderStage::Vertex) => "vertex",
+        UniformRole::Stage(ShaderStage::Fragment) => "fragment",
+    }
+}
+
+fn sampler_kind_code(kind: SamplerKind) -> u32 {
+    match kind {
+        SamplerKind::Float => 0,
+        SamplerKind::Int => 1,
+    }
+}
+
+fn attr_kind_code(kind: AttrKind) -> u32 {
+    match kind {
+        AttrKind::F32 => 0,
+        AttrKind::F32x2 => 1,
+        AttrKind::F32x3 => 2,
+        AttrKind::F32x4 => 3,
+        AttrKind::I32 => 4,
     }
 }

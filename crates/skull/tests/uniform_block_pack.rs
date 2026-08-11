@@ -9,7 +9,52 @@
 //! the divergence is visible as a skipped index rather than as a number that
 //! happens to agree.
 
-use crate::common::{emit_module, run_luajit};
+use crate::common::{bone_rejections, emit_module, run_luajit};
+
+const CANONICAL_VALUES: &str = r#"
+value ProbeUniform {
+    radius: float,
+    direction: Vec2,
+    enabled: bool,
+    count: int,
+}
+
+fn main() {
+    let b = uniform_values(ProbeUniform {
+        radius: 1.0,
+        direction: v(2.0, 3.0),
+        enabled: true,
+        count: 7,
+    })
+    print(b.fingerprint != 0)
+    print(b.leaves.len())
+}
+"#;
+
+/// The submitted packet is a compiler-owned logical value: it has scalar
+/// leaves and a semantic group fingerprint, but no std140 offsets or padding.
+/// The first assertion is deliberately the RED gate for the new intrinsic;
+/// the old compiler rejects its annotation before it can emit anything.
+#[test]
+fn uniform_values_expands_to_canonical_leaves() {
+    let rejects = bone_rejections(CANONICAL_VALUES);
+    assert!(rejects.is_empty(), "uniform_values was rejected: {rejects:#?}");
+
+    let lua = emit_module(CANONICAL_VALUES);
+    let body = main_body(&lua);
+    assert!(!body.contains("uniform_values("), "the compiler-owned call survived:\n{body}");
+    for forbidden in ["std140", "offset", "padding", "binding"] {
+        assert!(!body.contains(forbidden), "canonical values leaked {forbidden}:\n{body}");
+    }
+    for variant in ["Float", "Bool", "Int"] {
+        assert!(
+            body.contains(&format!("__variant = \"{variant}\"")),
+            "canonical `{variant}` leaf was not built:\n{body}"
+        );
+    }
+    let out = run_luajit(&format!("{lua}\nmain()\n"), "canonical_uniform_values");
+    assert_eq!(out.split_whitespace().collect::<Vec<_>>(), ["true", "5"]);
+}
 
 /// `radius: float, direction: Vec2, resolution: float` -> std140 offsets
 /// 0, 8, 12, 16 -> element indices 0, 2, 3, 4. Index 1 is the four-byte hole

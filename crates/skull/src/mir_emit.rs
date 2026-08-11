@@ -989,7 +989,17 @@ pub fn emit_workspace_mir_in(
     user_mid: ModuleId,
     project_root: Option<&str>,
 ) -> Result<MirEmit, CompilerError> {
-    emit_full_in(ws, user_mid, project_root).map(|(emit, _cache)| emit)
+    emit_workspace_mir_in_for_renderer(ws, user_mid, project_root, RendererTarget::Gl)
+}
+
+pub fn emit_workspace_mir_in_for_renderer(
+    ws: &Workspace,
+    user_mid: ModuleId,
+    project_root: Option<&str>,
+    renderer_target: RendererTarget,
+) -> Result<MirEmit, CompilerError> {
+    emit_full_in_for_renderer(ws, user_mid, project_root, renderer_target)
+        .map(|(emit, _cache)| emit)
 }
 
 /// One emitted ordinary/coroutine function definition plus the facts incremental
@@ -1242,6 +1252,13 @@ pub struct SkullEmitCache {
     emitted: FxHashSet<Instance>,
     /// The compilation target's root directory; see [`is_library_module`].
     project_root: Option<String>,
+    renderer_target: RendererTarget,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RendererTarget {
+    Gl,
+    Wgpu,
 }
 
 #[derive(Default)]
@@ -1616,6 +1633,10 @@ fn fn_has_bounds(f: &bone_semantic::hir::Function) -> bool {
 /// parity list and stay lenient skips; a USER fn that cannot emit is a hard
 /// error — the lenient channel shipped callers of bounded fns as missing
 /// globals that died as runtime nil calls.
+///
+/// NOTE: this does NOT cover every way the stdlib gets loaded — `bone-query`
+/// warms it from its real filesystem path, which matches neither prefix. Do not
+/// reuse this as a general "is this the stdlib" oracle.
 fn is_stdlib_module_file(file: &str) -> bool {
     file.starts_with("<bone-stdlib:") || file.starts_with("<stdlib")
 }
@@ -2395,11 +2416,19 @@ fn graph_rejection_error(
 /// it to GLSL; skull-mir still surfaces only the resolved `FuncRef`s. An emit
 /// error (tier violation, stage/collision) is a spanned `CompilerError` failing
 /// the compile, never skip-and-continue.
+const WGSL_SELECTED_ARTIFACTS: [(&str, bool); 4] = [
+    ("blit_frag", true),
+    ("present_frag", true),
+    ("tonemap_frag", true),
+    ("sprite_basic_vert+sprite_basic_frag", false),
+];
+
 fn shader_registration_lines(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
     collection: &skull_mir::lower::ShaderCollection,
     view: &crate::shader_artifact::ShaderArtifactView,
+    renderer_target: RendererTarget,
 ) -> Result<ShaderRegistrations, CompilerError> {
     // Always Core330. The profile is a property of the GL context, which a build
     // cannot know: the engine rewrites #version + precision for GLES at
@@ -2432,9 +2461,11 @@ fn shader_registration_lines(
         // with no group sends empty lists, which are still arguments; a short
         // call is what rock-cli/tests/shader_register_arity_gate.rs catches.
         let w = skull_codegen_glsl::BlockWire::of(emission.abi.uniform_blocks.iter(), emission.abi.uniform_array_blocks.iter());
+        let fullscreen = pair.vert.is_none();
+        let semantic_wire = emission.interface.semantic_wire(fullscreen);
         let _ = writeln!(
             out,
-            "__rock_shader_register({:?}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
+            "__rock_shader_register({:?}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
             pair.key,
             lua_long_bracket(&emission.source),
             skull_codegen_lua::lua_string_vec(&slot_names),
@@ -2448,6 +2479,8 @@ fn shader_registration_lines(
             skull_codegen_lua::lua_int_vec(&w.member_kinds),
             skull_codegen_lua::lua_int_vec(&w.member_capacities),
             skull_codegen_lua::lua_int_vec(&w.member_strides),
+            fullscreen,
+            lua_long_bracket(&semantic_wire),
         );
     }
     let roots = collection
@@ -2456,6 +2489,93 @@ fn shader_registration_lines(
         .flat_map(|pair| pair.vert.into_iter().chain(std::iter::once(pair.frag)))
         .collect();
     let keys = collection.pairs.iter().map(|pair| pair.key.clone()).collect();
+    if renderer_target == RendererTarget::Wgpu {
+        let mut admitted = 0usize;
+        for (key, fullscreen) in WGSL_SELECTED_ARTIFACTS {
+            let Some(pair) = collection.pairs.iter().find(|pair| pair.key == key) else {
+                return Err(CompilerError::new_no_location(format!(
+                    "selected wgpu artifact {key} was not admitted by rock_shader"
+                )));
+            };
+            let (shader_key, source, wire, semantic_wire, emission_dependencies) = if fullscreen {
+                if pair.vert.is_some() {
+                    return Err(CompilerError::new_no_location(format!(
+                        "selected wgpu artifact {key} is marked fullscreen but has an explicit vertex stage"
+                    )));
+                }
+                let neutral = skull_codegen_wgsl::plan_fullscreen_artifact(ws, pair.frag)?;
+                let abi = skull_codegen_wgsl::WgslAbiPlan::wgsl(
+                    &neutral.interface,
+                    bone_semantic::prelude::Span::default(),
+                )?;
+                let emission = skull_codegen_wgsl::emit_fullscreen_shader(
+                    ws,
+                    &neutral.ir,
+                    &neutral.interface,
+                    &abi,
+                    bone_semantic::prelude::Span::default(),
+                )?;
+                (
+                    key,
+                    emission.source,
+                    emission.abi.wire(),
+                    neutral.interface.semantic_wire(true),
+                    emission.dependencies,
+                )
+            } else {
+                let Some(vert) = pair.vert else {
+                    return Err(CompilerError::new_no_location(format!(
+                        "selected wgpu artifact {key} has no explicit vertex stage"
+                    )));
+                };
+                let vname = ws.module(vert.module).functions[vert.func].name;
+                let fname = ws.module(pair.frag.module).functions[pair.frag.func].name;
+                let glsl = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
+                    ws,
+                    vert.module,
+                    vname.as_str(),
+                    fname.as_str(),
+                    profile,
+                )?;
+                let abi = skull_codegen_wgsl::WgslAbiPlan::explicit(
+                    &glsl.interface,
+                    "vertex_main",
+                    "fragment_main",
+                    bone_semantic::prelude::Span::default(),
+                )?;
+                let emission = skull_codegen_wgsl::emit_explicit_shader(
+                    ws,
+                    &glsl.ir,
+                    &glsl.interface,
+                    &abi,
+                    bone_semantic::prelude::Span::default(),
+                )?;
+                (
+                    key,
+                    emission.source,
+                    emission.abi.wire(),
+                    glsl.interface.semantic_wire(false),
+                    emission.dependencies,
+                )
+            };
+            dependencies.extend(emission_dependencies);
+            let _ = writeln!(
+                out,
+                "__rock_wgpu_shader_register({}, {}, {}, {})",
+                skull_codegen_lua::lua_string(shader_key),
+                skull_codegen_lua::lua_string(&source),
+                skull_codegen_lua::lua_string(&wire),
+                skull_codegen_lua::lua_string(&semantic_wire),
+            );
+            admitted += 1;
+        }
+        if admitted != WGSL_SELECTED_ARTIFACTS.len() {
+            return Err(CompilerError::new_no_location(format!(
+                "selected wgpu artifact registration admitted {admitted} artifacts, expected {}",
+                WGSL_SELECTED_ARTIFACTS.len()
+            )));
+        }
+    }
     Ok(ShaderRegistrations {
         lua: out,
         dependencies,
@@ -2972,7 +3092,7 @@ pub fn emit_full(
     ws: &Workspace,
     user_mid: ModuleId,
 ) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
-    emit_full_in(ws, user_mid, None)
+    emit_full_in_for_renderer(ws, user_mid, None, RendererTarget::Gl)
 }
 
 /// Absolutize `project_root` so it can be prefix-matched against module file
@@ -3010,7 +3130,22 @@ pub fn emit_full_in(
     user_mid: ModuleId,
     project_root: Option<&str>,
 ) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
-    emit_full_in_with_mutation(ws, user_mid, project_root, BodyMutation::None)
+    emit_full_in_for_renderer(ws, user_mid, project_root, RendererTarget::Gl)
+}
+
+pub fn emit_full_in_for_renderer(
+    ws: &Workspace,
+    user_mid: ModuleId,
+    project_root: Option<&str>,
+    renderer_target: RendererTarget,
+) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
+    emit_full_in_with_mutation(
+        ws,
+        user_mid,
+        project_root,
+        BodyMutation::None,
+        renderer_target,
+    )
 }
 
 #[cfg(test)]
@@ -3019,7 +3154,7 @@ fn emit_full_in_with_test_mutation(
     user_mid: ModuleId,
     mutation: BodyMutation,
 ) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
-    emit_full_in_with_mutation(ws, user_mid, None, mutation)
+    emit_full_in_with_mutation(ws, user_mid, None, mutation, RendererTarget::Gl)
 }
 
 fn emit_full_in_with_mutation(
@@ -3027,6 +3162,7 @@ fn emit_full_in_with_mutation(
     user_mid: ModuleId,
     project_root: Option<&str>,
     mutation: BodyMutation,
+    renderer_target: RendererTarget,
 ) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
     let project_root = canonical_project_root(ws, project_root)?;
     let project_root = project_root.as_deref();
@@ -3038,16 +3174,7 @@ fn emit_full_in_with_mutation(
                 .to_string(),
         ));
     }
-    if let Some(err) = skull_mir::lower::struct_expand_rejection(ws, user_mid) {
-        return Err(err);
-    }
-    if let Some(err) = skull_mir::lower::shader_expand_rejection(ws, user_mid) {
-        return Err(err);
-    }
-    if let Some(err) = skull_mir::lower::vertex_expand_rejection(ws, user_mid) {
-        return Err(err);
-    }
-    if let Some(err) = skull_mir::lower::uniform_expand_rejection(ws, user_mid) {
+    if let Some(err) = skull_mir::lower::expansion_rejection(ws, user_mid) {
         return Err(err);
     }
     if let Some(err) = skull_mir::intrinsics::intrinsic_rejection(ws, user_mid) {
@@ -3056,14 +3183,15 @@ fn emit_full_in_with_mutation(
     if let Some(err) = skull_mir::lower::gpu_only_call_rejection(ws, user_mid) {
         return Err(err);
     }
-    if let Some((key, span)) = skull_mir::lower::value_struct_map_key(ws, user_mid) {
+    if let Some((why, span)) = skull_mir::lower::map_key_rejection(ws, user_mid) {
         return Err(CompilerError::new_with_label(
             span,
             format!(
-                "`{key}` is a `value` struct and cannot be a `Map` key -- value structs hash by \
-                 cdata pointer identity, so a runtime-built key silently misses an entry stored \
-                 under an equal-by-value instance. Use an int/string/bool/float/newtype key, or a \
-                 string key derived from the struct's fields."
+                "this `Map` key is not value-keyed and would silently miss: {why}. A runtime-built \
+                 key does not find the entry stored under an equal-by-value one, so an insert at \
+                 an equal key grows the map instead of replacing. Use an int, string, bool or \
+                 float key -- or a newtype over one of those -- or derive a string key from the \
+                 value's fields."
             ),
         ));
     }
@@ -3189,8 +3317,13 @@ fn emit_full_in_with_mutation(
     let shader_scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
         .sharing(std::sync::Arc::clone(graph.interner()));
     let shader_view = realize_shader_view(ws, &graph, &shader_programs, &shader_scx)?;
-    let shader_registrations =
-        shader_registration_lines(ws, &shader_scx, &shader_collection, &shader_view)?;
+    let shader_registrations = shader_registration_lines(
+        ws,
+        &shader_scx,
+        &shader_collection,
+        &shader_view,
+        renderer_target,
+    )?;
 
     // The emitted param list must be injective. Checked per SIGNATURE, over every
     // function rather than just the emitted set: a duplicate Lua param is illegal
@@ -3263,6 +3396,7 @@ fn emit_full_in_with_mutation(
         shader_view,
         emitted: FxHashSet::default(),
         project_root: project_root.map(str::to_string),
+        renderer_target,
     };
     let mut built_specs: Vec<(Instance, Chunk)> = Vec::new();
     let (emit, emitted) = assemble(ws, &cache.cg, &cache.scx, &cache, &mut built_specs)?;
@@ -3357,7 +3491,13 @@ fn update_shader_registrations(
     let shader_scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
         .sharing(std::sync::Arc::clone(self.graph.interner()));
     let view = realize_shader_view(ws, &self.graph, &programs, &shader_scx)?;
-    let registrations = shader_registration_lines(ws, &shader_scx, &collection, &view)?;
+    let registrations = shader_registration_lines(
+        ws,
+        &shader_scx,
+        &collection,
+        &view,
+        self.renderer_target,
+    )?;
     self.shader_view = view;
         self.shader_registrations = registrations;
         Ok(())

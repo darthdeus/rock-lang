@@ -77,16 +77,28 @@ fn string.trim(s) -> string {
 // Join a vector of strings with a separator. Named `join` because the receiver
 // is `[string]` -- UFCS keys the method namespace off the first param's type,
 // so `strings.join(", ")` dispatches through `vec_*` to match LSP completion.
-fn join(parts: [string], separator: string) -> string {
-    let sb = sb_new()
-    let first = true
-    for p in parts {
-        if !first { sb_push(sb, separator) }
-        sb_push(sb, p)
-        first = false
-    }
-    return sb_build(sb)
-}
+// The backing array is already the exact input `table.concat` wants, so the
+// join is one C call. Copying it element by element into a StringBuilder first
+// -- which is what this did -- cost a Lua call and an O(log n) `#sb` per part:
+// measured, 1.98x on twitter.json and 1.38x on a 227KB level.json, and it was
+// also what made the escaped-string payload bimodal (the copy loop's trace is
+// the fragile one, so the same bytes decoded in either 1.6ms or 5.2ms). See
+// docs/json-parser-benchmarking-plan.md.
+//
+// The explicit (1, parts.len) range rather than letting concat use `#_data`:
+// equivalent today, because pop and clear both nil the slot they release, so
+// the border and the length agree. It does not depend on that discipline
+// holding, and it is an integer the Vec already knows instead of a border
+// search. A mutation dropping it survives the suite, as it should.
+//
+// JS mapping is the JS_INTRINSICS row in crates/skull-codegen-js: it routes
+// through js_supply, the one oracle that the call rendering, callee discovery
+// and the artifact view all share. A plain inline(js) sibling in js.rock works
+// for a whole-program compile but is invisible to the closure walk, which is
+// two seams answering one question.
+@intrinsic inline(lua) fn join(parts: [string], separator: string) -> string = """
+    return table.concat(parts._data, separator, 1, parts.len)
+"""
 
 // Code-point iterator over the native units (UTF-8 decode on luajit). Yields
 // code points as ints; the portable way to walk real characters. Costs

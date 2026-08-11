@@ -20,6 +20,7 @@
 mod structure;
 
 pub use skull_mir::shader_ir::GlslProfile;
+
 use bone_semantic::hir::{
     AnnoValue, BodyOwner, BuiltinTy, Expr, Function, StructDef, TyId, TypeCtor, TypeExpr,
 };
@@ -610,7 +611,6 @@ pub fn is_lowered_native_operator(
         ) || matches!(ws.render(None, param.ty).as_str(), "float" | "int")
     })
 }
-
 /// The GLSL infix operator symbol for a non-scalar `__op_*` (Vec operator) call.
 fn vec_op_symbol(name: &str) -> Option<&'static str> {
     match name {
@@ -2618,131 +2618,20 @@ fn nominal_name(ws: &Workspace, ty: TyId) -> Option<Ustr> {
     }
 }
 
-/// A1's own classification: param roles and group names, in the neutral
-/// vocabulary. The body-emission view ([`EntryShape`]) is derived from the
-/// completed INTERFACE afterwards, exactly as A2's is -- building it here
-/// would be a second uniform classification beside `uniform_group_members`.
-struct EntryClass {
-    global_params: Vec<usize>,
-    sampler_params: Vec<usize>,
-    samplers: Vec<(usize, Ustr, SamplerKind)>,
-    texture_group: Option<Ustr>,
-    uniform_group: Option<Ustr>,
-}
-
-/// Classify an entry fn's params against the A1 contract: at most one uniform
-/// value struct (every field tier 0), any number of `Sampler2D`, exactly one
-/// `Vec2` (the fullscreen TexCoord varying); return `Vec4`.
-fn classify_entry(ws: &Workspace, f: &Function) -> Result<EntryClass, CompilerError> {
-    let span = f.name_span;
-    let mut uniform_param = None;
-    let mut samplers: Vec<(usize, Ustr, SamplerKind)> = Vec::new();
-    let mut tc = None;
-    let mut texture_params: Vec<usize> = Vec::new();
-    let mut texture_group: Option<Ustr> = None;
-    let mut uniform_group: Option<Ustr> = None;
-    for (i, pd) in f.param_decls.iter().enumerate() {
-        if has_anno(&pd.annotations, "textures") {
-            reject_conflicting_texture_role(&pd.annotations, pd.name, span, "entry")?;
-            if texture_group.is_some() {
-                return Err(err(span, "shader entry: at most one @textures group param is allowed -- one group is the binding set"));
-            }
-            texture_group = nominal_name(ws, pd.ty);
-            samplers.extend(texture_group_samplers(ws, pd.ty, i, span, "entry")?);
-            texture_params.push(i);
-            continue;
-        }
-        match glsl_ty(ws, &SpecSubst::default(), pd.ty, span, "parameter") {
-            Ok(t) if t.is_sampler() => samplers.push((i, pd.name, sampler_kind_of(t))),
-            Ok(GlslTy::Vec2) => {
-                if tc.is_some() {
-                    return Err(err(span, "shader entry: exactly one Vec2 param (the fullscreen TexCoord varying) is allowed"));
-                }
-                tc = Some(i);
-            }
-            Ok(other) => {
-                return Err(err(span, format!(
-                    "shader entry: param `{}` ({}) is not allowed -- A1 uniforms go in one uniform struct param, plus Sampler2D params and one Vec2",
-                    pd.name, other.name()
-                )));
-            }
-            Err(e) => {
-                // Not a tier-0 leaf: a value struct here is the uniform struct,
-                // which must carry @uniform (one rule everywhere with the A2
-                // pipeline -- attributes/uniforms are never silently inferred).
-                let Some(sname) = nominal_name(ws, pd.ty) else { return Err(e) };
-                let Some(&sid) = ws.struct_by_name.get(&sname) else { return Err(e) };
-                if !has_anno(&pd.annotations, "uniform") {
-                    return Err(err(span, format!(
-                        "shader entry: value-struct param `{}` needs @uniform (the uniform block marker)",
-                        pd.name
-                    )));
-                }
-                if uniform_param.is_some() {
-                    return Err(err(span, "shader entry: at most one uniform struct param is allowed"));
-                }
-                // The group's members are classified where they become the
-                // interface's (`uniform_group_members`), which is the same
-                // oracle the std140 packer reads. A `glsl_ty` walk here could
-                // reject BEFORE it and was free to disagree -- it admits
-                // Sampler2D and Bvec3, which no uniform block can pack.
-                let _ = sid;
-                uniform_param = Some(i);
-                uniform_group = Some(sname);
-            }
-        }
-    }
-    if tc.is_none() {
-        return Err(err(span, "shader entry: a Vec2 param (the fullscreen TexCoord varying) is required"));
-    }
-    match f.return_ty.map(|rt| glsl_ty(ws, &SpecSubst::default(), rt, span, "return")) {
-        Some(Ok(GlslTy::Vec4)) => {}
-        _ => return Err(err(span, "shader entry: the return type must be Vec4 (FragColor)")),
-    }
-    Ok(EntryClass {
-        global_params: uniform_param.into_iter().chain(texture_params).collect(),
-        sampler_params: samplers.iter().map(|&(i, _, _)| i).collect(),
-        samplers,
-        texture_group,
-        uniform_group,
-    })
-}
-
-/// A1's global namespace census, over its completed INTERFACE.
-///
-/// Uniform members, samplers and the reserved `TexCoord`/`FragColor` share one
-/// GLSL global namespace. Run over the interface rather than over a walk of the
-/// source struct, so it censuses the same members the block is packed from.
-fn check_entry_collisions(
-    iface: &ShaderInterfacePlan,
-    span: Span,
-) -> Result<(), CompilerError> {
-    let mut seen: HashSet<Ustr> =
-        [Ustr::from("TexCoord"), Ustr::from("FragColor")].into_iter().collect();
-    let names = iface
-        .uniform_groups
-        .iter()
-        .flat_map(|g| g.members.iter().map(|(n, _)| *n))
-        .chain(iface.textures.iter().flat_map(|t| t.samplers.iter().map(|(n, _)| *n)))
-        .chain(iface.bare_samplers.iter().map(|s| s.name));
-    for name in names {
-        if !seen.insert(name) {
-            return Err(err(span, format!("shader entry: uniform name `{name}` would collide (fields, samplers, TexCoord and FragColor share the GLSL global namespace)")));
-        }
-    }
-    Ok(())
-}
-
 /// A1's body-emission view, derived from its completed interface.
 ///
 /// The uniform field types come from `iface`, which got them from
 /// `uniform_group_members` -- the same classifier the std140 packer reads, so a
 /// body's typing and a block's bytes cannot disagree about a field.
-fn entry_shape(class: &EntryClass, iface: &ShaderInterfacePlan) -> EntryShape {
+fn entry_shape(
+    global_params: &[usize],
+    sampler_params: &[usize],
+    iface: &ShaderInterfacePlan,
+) -> EntryShape {
     EntryShape {
-        global_params: class.global_params.clone(),
+        global_params: global_params.to_vec(),
         uniform_fields: stage_uniform_fields(iface, IrStage::Fragment),
-        sampler_params: class.sampler_params.clone(),
+        sampler_params: sampler_params.to_vec(),
         arrays: Vec::new(),
         main_out: None,
     }
@@ -3560,6 +3449,20 @@ struct StagePlan {
 }
 
 impl StagePlan {
+    fn from_ir(ir: ShaderStageIr) -> Self {
+        let (mut uses_idiv, mut uses_imod) = (false, false);
+        for body in ir.bodies.values().chain(std::iter::once(&ir.body)) {
+            for (_, instruction) in body.insts.iter() {
+                match instruction {
+                    Inst::IntDiv(..) => uses_idiv = true,
+                    Inst::IntMod(..) => uses_imod = true,
+                    _ => {}
+                }
+            }
+        }
+        Self { ir, uses_idiv, uses_imod }
+    }
+
     /// The helpers this stage emits: the int-div/mod prelude the reachable
     /// bodies need, then each helper definition in emission order.
     fn render_helpers(

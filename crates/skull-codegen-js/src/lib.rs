@@ -47,6 +47,10 @@ pub const JS_INTRINSICS: &[(&str, usize, &str)] = &[
     ("round", 1, "Math.floor($1 + 0.5)"),
     ("sign", 1, "Math.sign($1)"),
     ("fract", 1, "($1 - Math.floor($1))"),
+    // `join` over a `[string]`: the backing array IS the input both hosts want,
+    // so this is one `Array.prototype.join` here and one `table.concat` on
+    // luajit. `_data` is 0-based and may be longer than `len`, hence the slice.
+    ("join", 2, "$1._data.slice(0, $1.len).join($2)"),
     // Reference identity (stdlib `same_ref`). `===` on two objects is JS
     // identity, the same question luajit's `rawequal` answers; on primitives
     // both reduce to value equality, which is also what identity means there.
@@ -942,6 +946,9 @@ function stone_get_window_size(pw, ph) { pw[0] = __SW.logicalW; ph[0] = __SW.log
 function stone_get_drawable_size(pw, ph) {
   pw[0] = Math.round(__SW.logicalW * __SW.dpr); ph[0] = Math.round(__SW.logicalH * __SW.dpr);
 }
+// A canvas has no notch: the insets are zero, as on desktop. A viewport that
+// grew one would read env(safe-area-inset-*) off the document element here.
+function stone_get_safe_area(pt, pr, pb, pl) { pt[0] = 0; pr[0] = 0; pb[0] = 0; pl[0] = 0; }
 function stone_get_dpi_scale() { return __SW.dpr; }
 function stone_take_window_resized() { var r = __SW.resized; __SW.resized = false; return r; }
 function stone_gl_finish() { if (__SW.gl && __SW.gl.finish) __SW.gl.finish(); }
@@ -1357,6 +1364,24 @@ function stone_set_canvas(h) {
     gl.disable(gl.SCISSOR_TEST);
   }
 }
+// The rendering path's canvas verbs: the handle is resolved here and no
+// texture name reaches Rock. Twins of the native ones in stone-rs/src/canvas.rs.
+function stone_bind_canvas_texture_to_unit(h, unit) {
+  var c = __SW.canvases[h];
+  return c ? stone_bind_texture_to_unit(c.tex, unit) !== 0 : false;
+}
+function stone_bind_canvas_depth_to_unit(h, unit) {
+  var c = __SW.canvases[h];
+  return c && c.depthTex ? stone_bind_texture_to_unit(c.depthTex, unit) !== 0 : false;
+}
+function stone_canvas_exists(h) { return !!__SW.canvases[h]; }
+function stone_canvas_has_depth(h) { var c = __SW.canvases[h]; return !!(c && c.depthTex); }
+function stone_sprite_draw_canvas(shader, h, tw, th, x, y, w, hh, sx, sy, sw, sh) {
+  var c = __SW.canvases[h];
+  if (!c) return;
+  stone_sprite_draw_texture(shader, c.tex, tw, th, x, y, w, hh, sx, sy, sw, sh, 0, 1, 1, 1, 1, 1, 1);
+}
+// GL names, for the imgui path only.
 function stone_get_canvas_texture(h) { var c = __SW.canvases[h]; return c ? c.tex : 0; }
 function stone_get_canvas_depth_texture(h) { var c = __SW.canvases[h]; return c ? (c.depthTex || 0) : 0; }
 // Sub-rect of the bound target, logical top-left px -> GL bottom-origin.
@@ -1373,6 +1398,12 @@ function stone_set_viewport_rect(x, y, w, h) {
   var wh = __sw_target_size();
   var gw = Math.round(w * s), gh = Math.round(h * s);
   __SW.gl.viewport(Math.round(x * s), wh[1] - Math.round(y * s) - gh, gw, gh);
+}
+// The semantic submission's GpuRect: bottom-left, the bound target's own
+// pixels, verbatim. Unlike stone_set_viewport_rect above it neither scales by
+// dpr nor flips Y -- the caller stated the rect in GL's own convention.
+function stone_set_gl_viewport(x, y, w, h) {
+  __SW.gl.viewport(x, y, w, h);
 }
 // mode: 0 = nearest, 1 = linear. Integer formats refuse -- a linear-filtered
 // integer texture samples zero.
@@ -1790,6 +1821,7 @@ function stone_shader_set_vec2_array(h, name, values, count) {
 function stone_shader_set_vec4_array(h, name, values, count) {
   __sw_with_shader_uniform(h, name, function (gl, l) { gl.uniform4fv(l, values.subarray ? values.subarray(0, count * 4) : values); });
 }
+function stone_bind_image_texture_to_unit(h, unit) { return stone_bind_texture_to_unit(h, unit) !== 0; }
 function stone_bind_texture_to_unit(tex, unit) {
   var gl = __SW.gl, t = __SW.textures[tex];
   if (!gl || !t || unit < 0) return 0;
@@ -1835,14 +1867,53 @@ var __sw_fsq_uv = [1, 1];
 function stone_set_fullscreen_uv_scale(sx, sy) {
   __sw_fsq_uv = [Math.max(sx, 0), Math.max(sy, 0)];
 }
+// The imperative fullscreen path's geometry -- the static buffers and the
+// scaled respecification read it. The semantic submission does NOT: it goes
+// through stone_draw_fullscreen_rect, which takes the corner mapping.
+function __sw_fsq_verts(flipped, sx, sy) {
+  var v0 = (flipped ? 1 : 0) * sy, v1 = (flipped ? 0 : 1) * sy;
+  return new Float32Array([
+    -1, -1, 0, v0,  1, -1, sx, v0,  1, 1, sx, v1,
+    -1, -1, 0, v0,  1, 1, sx, v1,  -1, 1, 0, v1,
+  ]);
+}
+// THIS tier's tessellation of the fullscreen rectangle for the corner UV
+// mapping a semantic submission resolved: (u0,v0) at NDC (-1,-1), (u1,v1) at
+// NDC (+1,+1). The order and the diagonal are deliberately NOT the native
+// tier's (sprite.rs fs_rect_data splits the other way) -- the mapping is the
+// contract, the tessellation is backend implementation data.
+function __sw_fsq_rect(u0, v0, u1, v1) {
+  return new Float32Array([
+    -1, -1, u0, v0,   1, -1, u1, v0,   1, 1, u1, v1,
+    -1, -1, u0, v0,   1,  1, u1, v1,  -1, 1, u0, v1,
+  ]);
+}
+// Culling is disabled HERE rather than assumed: the two tiers wind opposite
+// ways, so "no culling" is state this draw states.
+function stone_draw_fullscreen_rect(u0, v0, u1, v1) {
+  var gl = __SW.gl;
+  var sh = __SW.shaders[__SW.curShader];
+  if (!gl || !sh) return;
+  gl.useProgram(sh.prog);
+  __sw_fix_stale_int_units(gl, sh);
+  if (!__sw_fsq_scaled) __sw_fsq_scaled = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, __sw_fsq_scaled);
+  gl.bufferData(gl.ARRAY_BUFFER, __sw_fsq_rect(u0, v0, u1, v1), gl.DYNAMIC_DRAW);
+  gl.disable(gl.CULL_FACE);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 16, 0);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 16, 8);
+  gl.enableVertexAttribArray(1);
+  gl.disableVertexAttribArray(2);
+  gl.disableVertexAttribArray(3);
+  gl.disableVertexAttribArray(4);
+  gl.drawArrays(gl.TRIANGLES, 0, 6);
+  __sw_mark_drawn(sh);
+}
 function __sw_fsq_buffer(gl, flipped) {
   var b = gl.createBuffer();
   gl.bindBuffer(gl.ARRAY_BUFFER, b);
-  var v0 = flipped ? 1 : 0, v1 = flipped ? 0 : 1;
-  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
-    -1, -1, 0, v0,  1, -1, 1, v0,  1, 1, 1, v1,
-    -1, -1, 0, v0,  1, 1, 1, v1,  -1, 1, 0, v1,
-  ]), gl.STATIC_DRAW);
+  gl.bufferData(gl.ARRAY_BUFFER, __sw_fsq_verts(flipped, 1, 1), gl.STATIC_DRAW);
   return b;
 }
 function stone_draw_fullscreen_quad() {
@@ -1862,13 +1933,9 @@ function stone_draw_fullscreen_quad() {
     // Re-specify the scaled quad; six vertices, and it reaches custom vertex
     // stages the way a uniform would not.
     if (!__sw_fsq_scaled) __sw_fsq_scaled = gl.createBuffer();
-    var flipped = __SW.boundCanvas === 0;
-    var v0 = flipped ? 1 : 0, v1 = flipped ? 0 : 1;
     gl.bindBuffer(gl.ARRAY_BUFFER, __sw_fsq_scaled);
-    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
-      -1, -1, 0, v0 * sy,  1, -1, sx, v0 * sy,  1, 1, sx, v1 * sy,
-      -1, -1, 0, v0 * sy,  1, 1, sx, v1 * sy,  -1, 1, 0, v1 * sy,
-    ]), gl.DYNAMIC_DRAW);
+    gl.bufferData(gl.ARRAY_BUFFER,
+      __sw_fsq_verts(__SW.boundCanvas === 0, sx, sy), gl.DYNAMIC_DRAW);
   }
   gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 16, 0);
   gl.enableVertexAttribArray(0);
@@ -2298,9 +2365,22 @@ function stone_stop_music() {
   var A = __SW.audio;
   if (A.musicSrc) { try { A.musicSrc.stop(); } catch (e) {} A.musicSrc = null; }
 }
-function stone_set_music_volume(v) { var A = __SW.audio; A.musicVol = v; if (A.musicGain) A.musicGain.gain.value = v; }
-function stone_set_sound_volume(v) { var A = __SW.audio; A.sfxVol = v; if (A.sfxGain) A.sfxGain.gain.value = v; }
-// No convolver graph on web v1 (zero game callers); silent stub.
+// No bus graph on web v1 (mixer.rock's five strips have no WebAudio
+// counterpart yet); every bus/voice op below is a silent stub, same tier as
+// the convolver reverb has always been.
+function stone_bus_set_gain(bus, gain) { return false; }
+function stone_bus_samples_pulled(bus) { return 0; }
+function stone_bus_duck_count(bus) { return 0; }
+function stone_bus_gain(bus) { return 1; }
+function stone_bus_peak(bus) { return 0; }
+function stone_bus_set_lowpass(bus, cutoff_hz, q) { return false; }
+function stone_bus_set_distortion(bus, drive, mix) { return false; }
+function stone_bus_set_reverb(bus, enabled, room_size, damping, wet, dry, width) { return false; }
+function stone_bus_duck(bus, depth, attack_secs, release_secs) { return false; }
+function stone_voice_active(voice) { return false; }
+function stone_voice_stop(voice) { return false; }
+function stone_voice_set_gain(voice, gain) { return false; }
+function stone_voice_set_speed(voice, speed) { return false; }
 
 // --- uniform introspection / gpu timer / delay / cursors / retained mesh ---
 function stone_shader_uniform_count(h) {
@@ -2686,6 +2766,12 @@ function lua_tostring(x) {
   return String(x);
 }
 function __rock_format_float(v) {
+  // Non-finite first: C `%.2g` renders these as inf/-inf/nan, and __c_g below
+  // reconstructs a value from its mantissa bits, so it would reach BigInt() with
+  // Infinity and throw rather than format. Same spellings lua_tostring uses.
+  if (v !== v) return "nan";
+  if (v === Infinity) return "inf";
+  if (v === -Infinity) return "-inf";
   var av = Math.abs(v);
   if (av !== 0 && (av < 0.0001 || av >= 1000000)) {
     return __c_g(v, 2);

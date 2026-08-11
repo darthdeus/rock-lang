@@ -121,6 +121,10 @@ fn main() { print("{SHADER_KEY}") }
         slots.starts_with(r#"{_data: ["uTexture", "mask_tex", "shadowmap_tex"], len: 3, __ty: "Vec"}"#),
         "registration slots drifted (field order IS the texture unit):\n{slots}"
     );
+    assert!(
+        line.contains("false, "),
+        "an explicit vertex artifact must register as non-fullscreen:\n{line}"
+    );
     // The `@uniform` blocks travel as parallel FLAT lists: names, sizes,
     // fingerprints, per-block member counts, then members and their std140
     // offsets concatenated. This fixture's group is on the VERTEX stage, which
@@ -146,7 +150,7 @@ fn main() { print("{SHADER_KEY}") }
         // host's payload pushes refuse a capacity-0 target rather than treating
         // it as a one-element array.
         r#"{_data: [6, 6, 6], len: 3, __ty: "Vec"}"#,
-        r#"{_data: [0, 0, 0], len: 3, __ty: "Vec"}, {_data: [0, 0, 0], len: 3, __ty: "Vec"});"#,
+        r#"{_data: [0, 0, 0], len: 3, __ty: "Vec"}, {_data: [0, 0, 0], len: 3, __ty: "Vec"}, false,"#,
     ] {
         assert!(
             line.contains(expected),
