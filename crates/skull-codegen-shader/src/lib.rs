@@ -6,6 +6,8 @@
 //! own emitters render inline; no target ABI, source text or backend crate enters
 //! the plan.
 
+pub mod structure;
+
 use bone_semantic::hir::{BodyOwner, BuiltinTy, Expr, Function, TyId, TypeCtor, TypeExpr};
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::{FnList, ModuleId, Span};

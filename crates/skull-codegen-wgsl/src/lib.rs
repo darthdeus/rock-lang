@@ -13,14 +13,25 @@ use bone_semantic::{
     inference::Workspace,
 };
 use comfy_la_arena::Idx;
+use skull_codegen_shader::structure::{LoopRegion, Structure};
 use skull_codegen_shader::{ShaderArtifactPlan, ShaderPlannerPolicy};
 use skull_mir::gpu_layout::{AttrKind, SamplerKind, WireKind};
-use skull_mir::mir::{Inst, Lit, MirFunc, Term};
+use skull_mir::mir::{Block, Cell, Inst, Lit, MirFunc, Term};
 use skull_mir::shader_ir::{
-    FragmentOutput, LogicalTextureGroup, LogicalUniformGroup, ShaderIR, ShaderInstance,
-    ShaderInterfacePlan, ShaderStage, ShaderStageIr, UniformRole, VertexRate,
+    FragmentOutput, LogicalArrayGroup, LogicalTextureGroup, LogicalUniformGroup, ShaderIR,
+    ShaderInstance, ShaderInterfacePlan, ShaderStage, ShaderStageIr, UniformRole, VertexRate,
 };
 use skull_parser::CompilerError;
+use skull_wgsl_abi::{
+    WgslAbi as SharedWgslAbi, WgslArrayBlock as SharedWgslArrayBlock,
+    WgslArrayMember as SharedWgslArrayMember, WgslFragmentIo as SharedWgslFragmentIo,
+    WgslFragmentOutput as SharedWgslFragmentOutput, WgslFullscreenVertex as SharedWgslFullscreenVertex,
+    WgslGeometryKind as SharedWgslGeometryKind, WgslPrimitiveTopology as SharedWgslPrimitiveTopology,
+    WgslTextureBinding as SharedWgslTextureBinding, WgslTextureKind as SharedWgslTextureKind,
+    WgslUniformBlock as SharedWgslUniformBlock, WgslUniformMember as SharedWgslUniformMember,
+    WgslVertexAttribute as SharedWgslVertexAttribute, WgslVertexInput as SharedWgslVertexInput,
+    WgslVarying as SharedWgslVarying, WgslVisibility as SharedWgslVisibility,
+};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use ustr::Ustr;
@@ -28,33 +39,12 @@ use ustr::Ustr;
 pub const WGSL_BIND_GROUP: u32 = 0;
 pub const FULLSCREEN_VARYING_LOCATION: u32 = 0;
 pub const FRAGMENT_OUTPUT_LOCATION: u32 = 0;
-pub const WGSL_ABI_WIRE_VERSION: &str = "WGSL_ABI_V1";
+/// The name the fragment entry receives `@builtin(position)` under. WGSL has no
+/// global fragment position, so `frag_coord()` resolves to this parameter.
+pub const FRAG_COORD_PARAM: &str = "frag_coord_in";
 
 fn err(span: Span, message: impl Into<String>) -> CompilerError {
     CompilerError::new_with_label(span, message.into())
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum WgslBuiltin {
-    Clamp,
-    Floor,
-    Fract,
-    Max,
-    Min,
-    Abs,
-}
-
-impl WgslBuiltin {
-    fn name(self) -> &'static str {
-        match self {
-            Self::Clamp => "clamp",
-            Self::Floor => "floor",
-            Self::Fract => "fract",
-            Self::Max => "max",
-            Self::Min => "min",
-            Self::Abs => "abs",
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,39 +66,95 @@ impl WgslOperator {
     }
 }
 
+/// What an admitted builtin call evaluates to. `FirstArg` is the elementwise
+/// shape (`clamp`, `min`, `pow`); the rest name their own result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResultKind {
+    FirstArg,
+    Fixed(ValueKind),
+}
+
+/// The WGSL tier-0 builtin table: one row per (name, arity) -> WGSL spelling and
+/// result shape. This is the twin of `GLSL_INTRINSICS`, and it is deliberately
+/// NOT a superset: a GLSL row with no faithful WGSL spelling (`isnan`, `bvec3`,
+/// `vertex_id`) is absent so the call REJECTS rather than emitting something
+/// that merely parses.
+const WGSL_BUILTINS: &[(&str, usize, &str, ResultKind)] = &[
+    ("sin", 1, "sin", ResultKind::FirstArg),
+    ("cos", 1, "cos", ResultKind::FirstArg),
+    ("tan", 1, "tan", ResultKind::FirstArg),
+    ("sqrt", 1, "sqrt", ResultKind::FirstArg),
+    ("exp", 1, "exp", ResultKind::FirstArg),
+    ("abs", 1, "abs", ResultKind::FirstArg),
+    ("floor", 1, "floor", ResultKind::FirstArg),
+    ("ceil", 1, "ceil", ResultKind::FirstArg),
+    ("fract", 1, "fract", ResultKind::FirstArg),
+    ("sign", 1, "sign", ResultKind::FirstArg),
+    ("fwidth", 1, "fwidth", ResultKind::FirstArg),
+    ("pow", 2, "pow", ResultKind::FirstArg),
+    ("atan2", 2, "atan2", ResultKind::FirstArg),
+    ("min", 2, "min", ResultKind::FirstArg),
+    ("max", 2, "max", ResultKind::FirstArg),
+    ("clamp", 3, "clamp", ResultKind::FirstArg),
+    ("lerp", 3, "mix", ResultKind::FirstArg),
+    ("smoothstep", 3, "smoothstep", ResultKind::FirstArg),
+    ("dot", 2, "dot", ResultKind::Fixed(ValueKind::F32)),
+    ("length", 1, "length", ResultKind::Fixed(ValueKind::F32)),
+    ("distance", 2, "distance", ResultKind::Fixed(ValueKind::F32)),
+    ("int_to_float", 1, "f32", ResultKind::Fixed(ValueKind::F32)),
+    ("float", 1, "f32", ResultKind::Fixed(ValueKind::F32)),
+    ("to_float", 1, "f32", ResultKind::Fixed(ValueKind::F32)),
+];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WgslIntrinsic {
     Texture,
+    TextureSize,
+    At,
+    FragCoord,
+    Discard,
     VectorConstructor,
-    Builtin(WgslBuiltin),
+    Zero,
+    /// GLSL pins `round` to `floor(x + 0.5)` because half-way rounding is
+    /// implementation-defined; WGSL's `round` is round-half-to-even, so the same
+    /// pin is emitted here rather than trusting the two to agree.
+    Round,
+    Builtin(&'static str, ResultKind),
     Operator(WgslOperator),
     UnsupportedOperator,
 }
 
 impl WgslIntrinsic {
     fn classify(function: &Function) -> Option<Self> {
-        let intrinsic = Self::classify_name(function.name.as_str());
-        if matches!(intrinsic, Some(Self::Operator(_))) && function.param_decls.len() != 2 {
+        let arity = function.param_decls.len();
+        let intrinsic = Self::classify_name_arity(function.name.as_str(), arity);
+        if matches!(intrinsic, Some(Self::Operator(_))) && arity != 2 {
             return Some(Self::UnsupportedOperator);
         }
         intrinsic
     }
 
-    fn classify_name(name: &str) -> Option<Self> {
-        Some(match name {
-            "texture" => Self::Texture,
-            "v" => Self::VectorConstructor,
-            "clamp" => Self::Builtin(WgslBuiltin::Clamp),
-            "floor" => Self::Builtin(WgslBuiltin::Floor),
-            "fract" => Self::Builtin(WgslBuiltin::Fract),
-            "max" => Self::Builtin(WgslBuiltin::Max),
-            "min" => Self::Builtin(WgslBuiltin::Min),
-            "abs" => Self::Builtin(WgslBuiltin::Abs),
-            "__op_add" => Self::Operator(WgslOperator::Add),
-            "__op_sub" => Self::Operator(WgslOperator::Sub),
-            "__op_mul" => Self::Operator(WgslOperator::Mul),
-            "__op_div" => Self::Operator(WgslOperator::Div),
-            name if name.starts_with("__op_") => Self::UnsupportedOperator,
+    fn classify_name_arity(name: &str, arity: usize) -> Option<Self> {
+        if let Some((_, _, spelling, result)) = WGSL_BUILTINS
+            .iter()
+            .find(|(candidate, ar, _, _)| *candidate == name && *ar == arity)
+        {
+            return Some(Self::Builtin(spelling, *result));
+        }
+        Some(match (name, arity) {
+            ("round", 1) => Self::Round,
+            ("v", 0..=4) => Self::VectorConstructor,
+            ("zero", 0) => Self::Zero,
+            ("texture", 2) => Self::Texture,
+            ("texture_size", 1) => Self::TextureSize,
+            ("frag_coord", 0) => Self::FragCoord,
+            ("discard", 0) => Self::Discard,
+            ("at", 2) => Self::At,
+            ("__op_add", _) => Self::Operator(WgslOperator::Add),
+            ("__op_sub", _) => Self::Operator(WgslOperator::Sub),
+            ("__op_mul", _) => Self::Operator(WgslOperator::Mul),
+            ("__op_div", _) => Self::Operator(WgslOperator::Div),
+            (name, _) if name.starts_with("__op_") => Self::UnsupportedOperator,
             _ => return None,
         })
     }
@@ -319,12 +365,47 @@ pub struct WgslFullscreenVertex {
     pub varying_location: u32,
 }
 
-/// The fragment input/output locations for the admitted fullscreen shape.
+/// The fragment input locations for the admitted fullscreen shape. The colour
+/// outputs live in [`WgslAbiPlan::fragment_outputs`], which is one list for the
+/// single and MRT shapes alike.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WgslFragmentIo {
     pub uv_location: u32,
-    pub output_location: u32,
-    pub output: WireKind,
+}
+
+/// One `@location(n)` colour output of the fragment stage.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WgslFragmentOutput {
+    pub name: Ustr,
+    pub location: u32,
+    pub kind: WireKind,
+}
+
+/// One `UniformArray<T>` member in a WGSL array block.
+///
+/// `stride` is the std140 stride the CPU writer already fills, and WGSL's
+/// uniform address space demands the same 16: an `array<f32, N>` is illegal
+/// there, so every element is declared as a 4-component vector and read through
+/// [`array_element_projection`]. The offset comes from the shared layout in
+/// `skull_mir::gpu_layout`, not from a second computation here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WgslArrayMember {
+    pub name: Ustr,
+    pub elem: WireKind,
+    pub capacity: u32,
+    pub offset: u32,
+    pub stride: u32,
+}
+
+/// One stage's `UniformArray<T>` params at their own binding.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WgslArrayBlock {
+    pub stage: ShaderStage,
+    pub struct_name: Ustr,
+    pub binding: u32,
+    pub size: u32,
+    pub members: Vec<WgslArrayMember>,
+    pub visibility: WgslStageVisibility,
 }
 
 /// A compiler-assigned vertex attribute in an explicit pipeline. The byte
@@ -370,8 +451,10 @@ pub struct WgslAbiPlan {
     pub varyings: Vec<WgslVarying>,
     pub fullscreen_vertex: WgslFullscreenVertex,
     pub fragment: WgslFragmentIo,
+    pub fragment_outputs: Vec<WgslFragmentOutput>,
     pub fullscreen_uniform: WgslUniformBlock,
     pub uniform_blocks: Vec<WgslUniformBlock>,
+    pub array_blocks: Vec<WgslArrayBlock>,
     pub textures: Vec<WgslTextureBinding>,
 }
 
@@ -441,11 +524,15 @@ impl WgslAbiPlan {
             },
             fragment: WgslFragmentIo {
                 uv_location: FULLSCREEN_VARYING_LOCATION,
-                output_location: FRAGMENT_OUTPUT_LOCATION,
-                output: WireKind::F32x4,
             },
+            fragment_outputs: vec![WgslFragmentOutput {
+                name: Ustr::from("color"),
+                location: FRAGMENT_OUTPUT_LOCATION,
+                kind: WireKind::F32x4,
+            }],
             fullscreen_uniform,
             uniform_blocks,
+            array_blocks: Vec::new(),
             textures,
         })
     }
@@ -505,7 +592,17 @@ impl WgslAbiPlan {
                 span,
             )?);
         }
-        let texture_base = uniform_blocks.len() as u32;
+        let mut array_groups = iface.array_groups.clone();
+        array_groups.sort_by_key(|group| stage_key(group.stage));
+        let mut array_blocks = Vec::with_capacity(array_groups.len());
+        for (index, group) in array_groups.iter().enumerate() {
+            array_blocks.push(layout_array_group(
+                group,
+                uniform_blocks.len() as u32 + index as u32,
+                span,
+            )?);
+        }
+        let texture_base = uniform_blocks.len() as u32 + array_blocks.len() as u32;
         let textures = iface
             .textures
             .as_ref()
@@ -522,9 +619,24 @@ impl WgslAbiPlan {
             })
             .transpose()?
             .unwrap_or_default();
-        let output = match iface.fragment_output {
-            FragmentOutput::Single(kind) => kind,
-            _ => unreachable!("validate_explicit_interface admits only one output"),
+        let fragment_outputs = match &iface.fragment_output {
+            FragmentOutput::Single(kind) => vec![WgslFragmentOutput {
+                name: Ustr::from("color"),
+                location: FRAGMENT_OUTPUT_LOCATION,
+                kind: *kind,
+            }],
+            FragmentOutput::Mrt(outputs) => outputs
+                .iter()
+                .enumerate()
+                .map(|(location, (name, kind))| WgslFragmentOutput {
+                    name: *name,
+                    location: location as u32,
+                    kind: *kind,
+                })
+                .collect(),
+            FragmentOutput::None => {
+                unreachable!("validate_explicit_interface requires a fragment output")
+            }
         };
         Ok(Self {
             semantic_fingerprint: iface.semantic_fingerprint(false),
@@ -539,11 +651,8 @@ impl WgslAbiPlan {
                 vertex_count: 0,
                 varying_location: 0,
             },
-            fragment: WgslFragmentIo {
-                uv_location: 0,
-                output_location: 0,
-                output,
-            },
+            fragment: WgslFragmentIo { uv_location: 0 },
+            fragment_outputs,
             fullscreen_uniform: WgslUniformBlock {
                 role: UniformRole::Stage(ShaderStage::Vertex),
                 struct_name: Ustr::from("FullscreenU"),
@@ -553,6 +662,7 @@ impl WgslAbiPlan {
                 visibility: WgslStageVisibility { vertex: false, fragment: false },
             },
             uniform_blocks,
+            array_blocks,
             textures,
         })
     }
@@ -593,134 +703,157 @@ impl WgslAbiPlan {
     /// Serialize the physical projection for the runtime boundary.
     ///
     /// This is deliberately a small versioned wire rather than WGSL metadata
-    /// recovered by the runtime. The checksum covers every physical field, so
-    /// a stale or independently edited binding/order/offset/visibility answer
-    /// is rejected before a backend can consume the source.
+    pub fn to_shared_abi(&self) -> SharedWgslAbi {
+        SharedWgslAbi {
+            semantic_fingerprint: self.semantic_fingerprint,
+            bind_group: self.bind_group,
+            geometry: match self.geometry {
+                WgslGeometryKind::Fullscreen => SharedWgslGeometryKind::Fullscreen,
+                WgslGeometryKind::Triangles => SharedWgslGeometryKind::Triangles,
+            },
+            vertex_entry: self.vertex_entry.clone(),
+            fragment_entry: self.fragment_entry.clone(),
+            vertex_inputs: self
+                .vertex_inputs
+                .iter()
+                .enumerate()
+                .map(|(index, input)| SharedWgslVertexInput {
+                    index: index as u32,
+                    struct_name: input.struct_name.to_string(),
+                    rate: match input.rate {
+                        VertexRate::PerVertex => "vertex".into(),
+                        VertexRate::PerInstance => "instance".into(),
+                    },
+                    attrs: input
+                        .attrs
+                        .iter()
+                        .map(|attr| SharedWgslVertexAttribute {
+                            location: attr.location,
+                            name: attr.name.to_string(),
+                            kind: attr_kind_wire(attr.kind).into(),
+                        })
+                        .collect(),
+                })
+                .collect(),
+            varyings: self
+                .varyings
+                .iter()
+                .map(|varying| SharedWgslVarying {
+                    location: varying.location,
+                    name: varying.name.to_string(),
+                    kind: varying.kind.code(),
+                    flat: varying.flat,
+                })
+                .collect(),
+            fullscreen_vertex: SharedWgslFullscreenVertex {
+                topology: match self.fullscreen_vertex.topology {
+                    WgslPrimitiveTopology::TriangleStrip => SharedWgslPrimitiveTopology::TriangleStrip,
+                },
+                vertex_count: self.fullscreen_vertex.vertex_count,
+                varying_location: self.fullscreen_vertex.varying_location,
+            },
+            fragment: SharedWgslFragmentIo {
+                uv_location: self.fragment.uv_location,
+            },
+            fragment_outputs: self
+                .fragment_outputs
+                .iter()
+                .map(|output| SharedWgslFragmentOutput {
+                    name: output.name.to_string(),
+                    location: output.location,
+                    kind: output.kind.code(),
+                })
+                .collect(),
+            fullscreen_uniform: if self.geometry == WgslGeometryKind::Fullscreen {
+                shared_uniform_block_with_role(&self.fullscreen_uniform, "fullscreen")
+            } else {
+                SharedWgslUniformBlock {
+                    role: "fullscreen".into(),
+                    struct_name: "FullscreenU".into(),
+                    binding: 0,
+                    size: 0,
+                    visibility: SharedWgslVisibility { vertex: false, fragment: false },
+                    members: Vec::new(),
+                }
+            },
+            uniform_blocks: self.uniform_blocks.iter().map(shared_uniform_block).collect(),
+            array_blocks: self.array_blocks.iter().map(shared_array_block).collect(),
+            textures: self.textures.iter().map(shared_texture_binding).collect(),
+        }
+    }
+
+    /// Serialize through the one shared producer/consumer wire owner.
     pub fn wire(&self) -> String {
-        let mut payload = String::new();
-        writeln!(payload, "semantic {}", self.semantic_fingerprint).unwrap();
-        writeln!(payload, "group {}", self.bind_group).unwrap();
-        match self.geometry {
-            WgslGeometryKind::Fullscreen => {
-                let topology = match self.fullscreen_vertex.topology {
-                    WgslPrimitiveTopology::TriangleStrip => "triangle_strip",
-                };
-                writeln!(
-                    payload,
-                    "vertex {} {} {}",
-                    topology,
-                    self.fullscreen_vertex.vertex_count,
-                    self.fullscreen_vertex.varying_location
-                )
-                .unwrap();
-                writeln!(
-                    payload,
-                    "fragment {} {} {}",
-                    self.fragment.uv_location,
-                    self.fragment.output_location,
-                    self.fragment.output.code()
-                )
-                .unwrap();
-                writeln!(payload, "fullscreen FullscreenU 0 16 v 2").unwrap();
-                writeln!(payload, "member uv0 1 0 8 8").unwrap();
-                writeln!(payload, "member uv1 1 8 8 8").unwrap();
-            }
-            WgslGeometryKind::Triangles => {
-                writeln!(payload, "geometry triangles").unwrap();
-                writeln!(payload, "entries {} {}", self.vertex_entry, self.fragment_entry).unwrap();
-                writeln!(payload, "vertex_inputs {}", self.vertex_inputs.len()).unwrap();
-                for (index, input) in self.vertex_inputs.iter().enumerate() {
-                    let rate = match input.rate {
-                        VertexRate::PerVertex => "vertex",
-                        VertexRate::PerInstance => "instance",
-                    };
-                    writeln!(
-                        payload,
-                        "vertex_input {} {} {} {}",
-                        index,
-                        input.struct_name,
-                        rate,
-                        input.attrs.len()
-                    )
-                    .unwrap();
-                    for attr in &input.attrs {
-                        writeln!(
-                            payload,
-                            "attr {} {} {}",
-                            attr.location,
-                            attr.name,
-                            attr_kind_wire(attr.kind)
-                        )
-                        .unwrap();
-                    }
-                }
-                writeln!(payload, "varyings {}", self.varyings.len()).unwrap();
-                for varying in &self.varyings {
-                    writeln!(
-                        payload,
-                        "varying {} {} {} {}",
-                        varying.location,
-                        varying.name,
-                        varying.kind.code(),
-                        if varying.flat { 1 } else { 0 }
-                    )
-                    .unwrap();
-                }
-                writeln!(
-                    payload,
-                    "fragment {} {}",
-                    self.fragment.output_location,
-                    self.fragment.output.code()
-                )
-                .unwrap();
-            }
-        }
-        writeln!(payload, "blocks {}", self.uniform_blocks.len()).unwrap();
-        for block in &self.uniform_blocks {
-            writeln!(
-                payload,
-                "block {} {} {} {} {} {}",
-                uniform_role_wire(block.role),
-                block.struct_name,
-                block.binding,
-                block.size,
-                visibility_wire(block.visibility),
-                block.members.len()
-            )
-            .unwrap();
-            for member in &block.members {
-                writeln!(
-                    payload,
-                    "member {} {} {} {} {}",
-                    member.name,
-                    member.kind.code(),
-                    member.offset,
-                    member.align,
-                    member.size
-                )
-                .unwrap();
-            }
-        }
-        writeln!(payload, "textures {}", self.textures.len()).unwrap();
-        for texture in &self.textures {
-            writeln!(
-                payload,
-                "texture {} {} {} {} {} {}",
-                texture.slot,
-                texture.name,
-                sampler_kind_wire(texture.kind),
-                texture.texture_binding,
-                texture.sampler_binding,
-                visibility_wire(texture.visibility)
-            )
-            .unwrap();
-        }
-        format!(
-            "{}\nchecksum {}\n{}",
-            WGSL_ABI_WIRE_VERSION,
-            wire_checksum(payload.as_bytes()),
-            payload
-        )
+        self.to_shared_abi()
+            .serialize()
+            .expect("validated WGSL ABI plan must serialize")
+    }
+}
+
+fn shared_visibility(visibility: WgslStageVisibility) -> SharedWgslVisibility {
+    SharedWgslVisibility {
+        vertex: visibility.vertex,
+        fragment: visibility.fragment,
+    }
+}
+
+fn shared_uniform_block_with_role(block: &WgslUniformBlock, role: &str) -> SharedWgslUniformBlock {
+    SharedWgslUniformBlock {
+        role: role.into(),
+        struct_name: block.struct_name.to_string(),
+        binding: block.binding,
+        size: block.size,
+        visibility: shared_visibility(block.visibility),
+        members: block
+            .members
+            .iter()
+            .map(|member| SharedWgslUniformMember {
+                name: member.name.to_string(),
+                kind: member.kind.code(),
+                offset: member.offset,
+                align: member.align,
+                size: member.size,
+            })
+            .collect(),
+    }
+}
+
+fn shared_uniform_block(block: &WgslUniformBlock) -> SharedWgslUniformBlock {
+    shared_uniform_block_with_role(block, uniform_role_wire(block.role))
+}
+
+fn shared_array_block(block: &WgslArrayBlock) -> SharedWgslArrayBlock {
+    SharedWgslArrayBlock {
+        stage: block.stage.name().into(),
+        struct_name: block.struct_name.to_string(),
+        binding: block.binding,
+        size: block.size,
+        visibility: shared_visibility(block.visibility),
+        members: block
+            .members
+            .iter()
+            .map(|member| SharedWgslArrayMember {
+                name: member.name.to_string(),
+                elem: member.elem.code(),
+                capacity: member.capacity,
+                offset: member.offset,
+                stride: member.stride,
+            })
+            .collect(),
+    }
+}
+
+fn shared_texture_binding(texture: &WgslTextureBinding) -> SharedWgslTextureBinding {
+    SharedWgslTextureBinding {
+        slot: texture.slot,
+        name: texture.name.to_string(),
+        kind: match texture.kind {
+            SamplerKind::Float => SharedWgslTextureKind::Float,
+            SamplerKind::Int => SharedWgslTextureKind::Int,
+        },
+        texture_binding: texture.texture_binding,
+        sampler_binding: texture.sampler_binding,
+        visibility: shared_visibility(texture.visibility),
     }
 }
 
@@ -732,13 +865,6 @@ fn uniform_role_wire(role: UniformRole) -> &'static str {
     }
 }
 
-fn sampler_kind_wire(kind: SamplerKind) -> &'static str {
-    match kind {
-        SamplerKind::Float => "float",
-        SamplerKind::Int => "int",
-    }
-}
-
 fn attr_kind_wire(kind: AttrKind) -> &'static str {
     match kind {
         AttrKind::F32 => "f32",
@@ -747,24 +873,6 @@ fn attr_kind_wire(kind: AttrKind) -> &'static str {
         AttrKind::F32x4 => "f32x4",
         AttrKind::I32 => "i32",
     }
-}
-
-fn visibility_wire(visibility: WgslStageVisibility) -> &'static str {
-    match (visibility.vertex, visibility.fragment) {
-        (false, false) => "none",
-        (true, false) => "v",
-        (false, true) => "f",
-        (true, true) => "vf",
-    }
-}
-
-fn wire_checksum(bytes: &[u8]) -> u64 {
-    let mut hash = 0xcbf29ce484222325u64;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    hash
 }
 
 fn uniform_role_key(role: UniformRole) -> u8 {
@@ -932,36 +1040,81 @@ fn validate_explicit_interface(
             ));
         }
     }
-    if !iface.array_groups.is_empty() || !iface.bare_samplers.is_empty() {
+    if !iface.bare_samplers.is_empty() {
         return Err(err(
             span,
-            "WGSL explicit projection does not admit uniform arrays or bare samplers",
+            "WGSL explicit projection does not admit bare samplers",
         ));
     }
-    if iface
-        .uniform_groups
-        .iter()
-        .filter(|group| group.role == UniformRole::Engine)
-        .count()
-        > 1
-    {
-        return Err(err(span, "WGSL interface contains more than one engine uniform group"));
+    for stage in [ShaderStage::Vertex, ShaderStage::Fragment] {
+        if iface
+            .array_groups
+            .iter()
+            .filter(|group| group.stage == stage)
+            .count()
+            > 1
+        {
+            return Err(err(
+                span,
+                format!(
+                    "WGSL interface contains more than one {} uniform array group",
+                    stage.name()
+                ),
+            ));
+        }
     }
-    if iface
-        .uniform_groups
-        .iter()
-        .any(|group| matches!(group.role, UniformRole::Stage(_)))
-    {
-        return Err(err(
-            span,
-            "WGSL explicit projection currently admits the engine block only",
-        ));
+    for role in [
+        UniformRole::Engine,
+        UniformRole::Stage(ShaderStage::Vertex),
+        UniformRole::Stage(ShaderStage::Fragment),
+    ] {
+        if iface
+            .uniform_groups
+            .iter()
+            .filter(|group| group.role == role)
+            .count()
+            > 1
+        {
+            return Err(err(
+                span,
+                format!(
+                    "WGSL interface contains more than one {} uniform group",
+                    uniform_role_wire(role)
+                ),
+            ));
+        }
     }
-    if !matches!(iface.fragment_output, FragmentOutput::Single(WireKind::F32x4)) {
-        return Err(err(
-            span,
-            "WGSL explicit projection requires one vec4<f32> fragment output",
-        ));
+    match &iface.fragment_output {
+        FragmentOutput::Single(WireKind::F32x4) => {}
+        FragmentOutput::Single(kind) => {
+            return Err(err(
+                span,
+                format!(
+                    "WGSL explicit projection requires a vec4<f32> single fragment output, found {}",
+                    kind.code()
+                ),
+            ));
+        }
+        FragmentOutput::Mrt(outputs) => {
+            if outputs.is_empty() {
+                return Err(err(span, "WGSL explicit MRT output has no members"));
+            }
+            for (name, kind) in outputs {
+                identifier(*name, "fragment output name", span)?;
+                if wgsl_type(*kind).is_none() {
+                    return Err(err(
+                        span,
+                        format!(
+                            "WGSL fragment output `{name}` has unsupported wire kind {}",
+                            kind.code()
+                        ),
+                    ));
+                }
+            }
+        }
+        FragmentOutput::None => {
+            return Err(err(span, "WGSL explicit projection requires a fragment output"));
+        }
     }
     if let Some(group) = &iface.textures {
         validate_texture_group(group, span)?;
@@ -1060,6 +1213,99 @@ fn layout_uniform_group(
     })
 }
 
+/// The WGSL block name for a stage's array block, minted from its owner exactly
+/// as the GLSL lane does -- one program's two stages cannot collide, and a clash
+/// with a user `@uniform` group is rejected by `identifier`/emission rather than
+/// renamed around.
+fn array_block_name(owner: Ustr) -> Ustr {
+    Ustr::from(&format!("{owner}_Arrays"))
+}
+
+fn layout_array_group(
+    group: &LogicalArrayGroup,
+    binding: u32,
+    span: Span,
+) -> Result<WgslArrayBlock, CompilerError> {
+    let struct_name = array_block_name(group.owner);
+    identifier(struct_name, "uniform array block name", span)?;
+    // One layout authority: capacities come from `@size(N)` in program text, and
+    // this is where they are computed wide and rejected before narrowing.
+    let plan = skull_mir::gpu_layout::uniform_array_block(struct_name, &group.members)?;
+    let mut members = Vec::with_capacity(plan.members.len());
+    for member in &plan.members {
+        identifier(member.name, "uniform array member name", span)?;
+        if members
+            .iter()
+            .any(|seen: &WgslArrayMember| seen.name == member.name)
+        {
+            return Err(err(
+                span,
+                format!(
+                    "WGSL uniform array member `{}` is declared more than once",
+                    member.name
+                ),
+            ));
+        }
+        if array_element_type(member.elem).is_none() {
+            return Err(err(
+                span,
+                format!(
+                    "WGSL uniform array member `{}` has unsupported element kind {}",
+                    member.name,
+                    member.elem.code()
+                ),
+            ));
+        }
+        members.push(WgslArrayMember {
+            name: member.name,
+            elem: member.elem,
+            capacity: member.capacity,
+            offset: member.offset,
+            stride: member.stride,
+        });
+    }
+    Ok(WgslArrayBlock {
+        stage: group.stage,
+        struct_name,
+        binding,
+        size: plan.size,
+        members,
+        visibility: match group.stage {
+            ShaderStage::Vertex => WgslStageVisibility { vertex: true, fragment: false },
+            ShaderStage::Fragment => WgslStageVisibility { vertex: false, fragment: true },
+        },
+    })
+}
+
+/// The declared WGSL element type of a uniform array. WGSL's uniform address
+/// space requires a 16-byte element stride, which std140 already gives every
+/// admitted kind, so each element is declared as its 4-component vector and the
+/// read projects back down.
+pub fn array_element_type(elem: WireKind) -> Option<&'static str> {
+    match elem {
+        WireKind::F32 | WireKind::F32x2 | WireKind::F32x4 => Some("vec4<f32>"),
+        WireKind::I32 => Some("vec4<i32>"),
+        WireKind::F32x3 | WireKind::Mat4 | WireKind::Bool32 => None,
+    }
+}
+
+/// The swizzle that recovers one element's declared value from its padded slot.
+pub fn array_element_projection(elem: WireKind) -> Option<&'static str> {
+    match elem {
+        WireKind::F32 | WireKind::I32 => Some(".x"),
+        WireKind::F32x2 => Some(".xy"),
+        WireKind::F32x4 => Some(""),
+        WireKind::F32x3 | WireKind::Mat4 | WireKind::Bool32 => None,
+    }
+}
+
+fn stage_key(stage: ShaderStage) -> u8 {
+    match stage {
+        ShaderStage::Vertex => 0,
+        ShaderStage::Fragment => 1,
+    }
+}
+
 fn layout_textures(
     group: &LogicalTextureGroup,
     base: u32,
@@ -1092,7 +1338,19 @@ pub fn uniform_layout(kind: WireKind) -> Option<(u32, u32)> {
         WireKind::F32x3 => Some((16, 12)),
         WireKind::F32x4 => Some((16, 16)),
         WireKind::Mat4 => Some((16, 64)),
-        WireKind::Bool32 => None,
+        // WGSL has no `bool` in the uniform address space -- a `bool` member is
+        // the 4-byte integer the CPU already writes, compared at every read.
+        WireKind::Bool32 => Some((4, 4)),
+    }
+}
+
+/// A uniform block member's declared WGSL type. Distinct from [`wgsl_type`]
+/// because the uniform address space cannot hold a `bool`: the member is `u32`
+/// there and only the READ recovers the boolean.
+pub fn uniform_member_type(kind: WireKind) -> Option<&'static str> {
+    match kind {
+        WireKind::Bool32 => Some("u32"),
+        other => wgsl_type(other),
     }
 }
 
@@ -1214,8 +1472,9 @@ pub fn emit_explicit_shader(
     validate_known_bodies(fragment, span)?;
 
     let mut source = String::new();
-    emit_explicit_types(&mut source, ws, vertex_fn, abi, span)?;
+    emit_explicit_types(&mut source, ws, vertex_fn, fragment_fn, abi, span)?;
     emit_explicit_uniforms(&mut source, abi);
+    emit_array_blocks(&mut source, abi, span)?;
     emit_textures(&mut source, abi);
 
     for stage in [vertex, fragment] {
@@ -1261,7 +1520,10 @@ pub fn emit_explicit_shader(
         abi,
         fragment_roles,
         span,
-    )?;
+    )?
+    .with_frag_coord(
+        fragment_reads_frag_coord(ws, fragment).then(|| FRAG_COORD_PARAM.to_string()),
+    );
     source.push_str(&emitter.emit_function(fragment_fn, true)?);
     emit_explicit_entries(&mut source, ws, vertex, fragment, abi, span)?;
 
@@ -1356,6 +1618,7 @@ fn emit_explicit_types(
     out: &mut String,
     ws: &Workspace,
     vertex_fn: &Function,
+    fragment_fn: &Function,
     abi: &WgslAbiPlan,
     span: Span,
 ) -> Result<(), CompilerError> {
@@ -1382,9 +1645,61 @@ fn emit_explicit_types(
             .map(|(_, kind)| *kind)
             .ok_or_else(|| err(span, format!("WGSL varying {} is absent from its struct", field.name)))?;
         let ty = wgsl_value_type(kind).unwrap();
-        writeln!(out, "  @location({}) {}: {},", field.location, field.name, ty).unwrap();
+        let interpolate = if field.flat { "@interpolate(flat) " } else { "" };
+        writeln!(
+            out,
+            "  @location({}) {interpolate}{}: {},",
+            field.location, field.name, ty
+        )
+        .unwrap();
     }
     out.push_str("}\n\n");
+    // The fragment's own returned struct: an MRT entry returns a named value
+    // struct, and the located target struct is built from it in the wrapper.
+    if let Some(name) = fragment_fn.return_ty.and_then(|ty| nominal_name(ws, ty)) {
+        if value_struct_kind(name) == Some(ValueKind::Struct(name)) && name != varying {
+            let fields = explicit_struct_fields(ws, name, span)?;
+            emit_value_struct(out, name, &fields, span)?;
+        }
+    }
+    Ok(())
+}
+
+fn emit_array_blocks(
+    out: &mut String,
+    abi: &WgslAbiPlan,
+    span: Span,
+) -> Result<(), CompilerError> {
+    for block in &abi.array_blocks {
+        writeln!(out, "struct {} {{", block.struct_name).unwrap();
+        for member in &block.members {
+            let elem = array_element_type(member.elem).ok_or_else(|| {
+                err(
+                    span,
+                    format!(
+                        "WGSL uniform array member `{}` has no emitted element type",
+                        member.name
+                    ),
+                )
+            })?;
+            writeln!(
+                out,
+                "  {}: array<{}, {}>,",
+                member.name, elem, member.capacity
+            )
+            .unwrap();
+        }
+        out.push_str("}\n\n");
+        writeln!(
+            out,
+            "@group({}) @binding({}) var<uniform> u_{}: {};",
+            abi.bind_group, block.binding, block.struct_name, block.struct_name
+        )
+        .unwrap();
+    }
+    if !abi.array_blocks.is_empty() {
+        out.push('\n');
+    }
     Ok(())
 }
 
@@ -1392,7 +1707,7 @@ fn emit_explicit_uniforms(out: &mut String, abi: &WgslAbiPlan) {
     for block in &abi.uniform_blocks {
         writeln!(out, "struct {} {{", block.struct_name).unwrap();
         for member in &block.members {
-            writeln!(out, "  {}: {},", member.name, wgsl_type(member.kind).unwrap()).unwrap();
+            writeln!(out, "  {}: {},", member.name, uniform_member_type(member.kind).unwrap()).unwrap();
         }
         out.push_str("}\n\n");
         writeln!(
@@ -1451,22 +1766,91 @@ fn emit_explicit_entries(
     }
     out.push_str("  return output;\n}\n\n");
 
+    let outputs = &abi.fragment_outputs;
+    let mrt = outputs.len() > 1;
+    let result_ty = if mrt {
+        let targets = format!("{}Targets", fragment_result_struct(ws, fragment, span)?);
+        writeln!(out, "struct {targets} {{").unwrap();
+        for output in outputs {
+            writeln!(
+                out,
+                "  @location({}) {}: {},",
+                output.location,
+                output.name,
+                wgsl_type(output.kind).ok_or_else(|| err(
+                    span,
+                    format!("WGSL fragment output `{}` has no emitted type", output.name)
+                ))?
+            )
+            .unwrap();
+        }
+        out.push_str("}\n\n");
+        targets
+    } else {
+        let output = &outputs[0];
+        format!(
+            "@location({}) {}",
+            output.location,
+            wgsl_type(output.kind).ok_or_else(|| err(
+                span,
+                "WGSL single fragment output has no emitted type"
+            ))?
+        )
+    };
     writeln!(
         out,
-        "@fragment\nfn {}(input: {output}) -> @location({}) {} {{",
+        "@fragment\nfn {}(input: {output}) -> {result_ty} {{",
         abi.fragment_entry,
-        abi.fragment.output_location,
-        wgsl_type(abi.fragment.output).unwrap()
     )
     .unwrap();
-    let varying_args = std::iter::once("input.position".to_string())
+    let mut varying_args = std::iter::once("input.position".to_string())
         .chain(abi.varyings.iter().map(|field| format!("input.{}", field.name)))
-        .collect::<Vec<_>>()
-        .join(", ");
-    writeln!(out, "  let vary = {varying}({varying_args});").unwrap();
-    writeln!(out, "  return {}(vary);", fragment.entry.symbol(ws)).unwrap();
-    out.push_str("}\n");
+        .collect::<Vec<_>>();
+    writeln!(out, "  let vary = {varying}({});", varying_args.join(", ")).unwrap();
+    varying_args.clear();
+    let call_args = if fragment_reads_frag_coord(ws, fragment) {
+        "vary, input.position".to_string()
+    } else {
+        "vary".to_string()
+    };
+    if mrt {
+        writeln!(out, "  let result = {}({call_args});", fragment.entry.symbol(ws)).unwrap();
+        writeln!(out, "  var targets: {result_ty};").unwrap();
+        for output in outputs {
+            writeln!(out, "  targets.{0} = result.{0};", output.name).unwrap();
+        }
+        out.push_str("  return targets;\n}\n");
+    } else {
+        writeln!(out, "  return {}({call_args});", fragment.entry.symbol(ws)).unwrap();
+        out.push_str("}\n");
+    }
     Ok(())
+}
+
+/// The named value struct the fragment entry returns, which is what an MRT
+/// target struct is minted from.
+fn fragment_result_struct(
+    ws: &Workspace,
+    fragment: &ShaderStageIr,
+    span: Span,
+) -> Result<Ustr, CompilerError> {
+    function_for_instance(ws, &fragment.entry)
+        .return_ty
+        .and_then(|ty| nominal_name(ws, ty))
+        .ok_or_else(|| err(span, "WGSL MRT fragment entry does not return a named struct"))
+}
+
+/// Whether the fragment stage calls `frag_coord()`. WGSL has no global fragment
+/// position, so the entry takes it as a parameter and only when it is read --
+/// an unused parameter would otherwise sit in every emitted pipeline.
+fn fragment_reads_frag_coord(ws: &Workspace, fragment: &ShaderStageIr) -> bool {
+    fragment.body.insts.values().any(|inst| match inst {
+        Inst::Call { func, .. } => {
+            let function = &ws.module(func.module).functions[func.func];
+            WgslIntrinsic::classify(function) == Some(WgslIntrinsic::FragCoord)
+        }
+        _ => false,
+    })
 }
 
 fn validate_ir_shape(ir: &ShaderIR, span: Span) -> Result<(), CompilerError> {
@@ -1521,7 +1905,7 @@ fn emit_uniforms(out: &mut String, abi: &WgslAbiPlan) {
             out,
             "  {}: {},",
             member.name,
-            wgsl_type(member.kind).unwrap()
+            uniform_member_type(member.kind).unwrap()
         )
         .unwrap();
     }
@@ -1541,7 +1925,7 @@ fn emit_uniforms(out: &mut String, abi: &WgslAbiPlan) {
                 out,
                 "  {}: {},",
                 member.name,
-                wgsl_type(member.kind).unwrap()
+                uniform_member_type(member.kind).unwrap()
             )
             .unwrap();
         }
@@ -1582,7 +1966,6 @@ fn emit_textures(out: &mut String, abi: &WgslAbiPlan) {
 }
 
 fn emit_fullscreen_entries(out: &mut String, abi: &WgslAbiPlan, entry: String) {
-    let fragment = abi.fragment;
     out.push_str("@vertex\nfn fullscreen_vertex(@builtin(vertex_index) vertex_index: u32) -> FullscreenVertexOut {\n");
     out.push_str("  var output: FullscreenVertexOut;\n");
     out.push_str("  let x = f32(vertex_index & 1u) * 2.0 - 1.0;\n");
@@ -1591,11 +1974,12 @@ fn emit_fullscreen_entries(out: &mut String, abi: &WgslAbiPlan, entry: String) {
     out.push_str("  let corner = vec2<f32>(f32(vertex_index & 1u), f32(vertex_index >> 1u));\n");
     out.push_str("  output.uv = u_FullscreenU.uv0 + corner * (u_FullscreenU.uv1 - u_FullscreenU.uv0);\n");
     out.push_str("  return output;\n}\n\n");
+    let output = &abi.fragment_outputs[0];
     writeln!(
         out,
         "@fragment\nfn fragment_main(input: FullscreenVertexOut) -> @location({}) {} {{",
-        fragment.output_location,
-        wgsl_type(fragment.output).unwrap()
+        output.location,
+        wgsl_type(output.kind).unwrap()
     )
     .unwrap();
     writeln!(out, "  return {}(input.uv);", entry).unwrap();
@@ -1651,6 +2035,7 @@ enum ParamRole {
     Varying,
     Texture,
     Uniform(UniformRole),
+    UniformArray,
     TexCoord,
 }
 
@@ -1696,9 +2081,13 @@ fn value_kind_for_type(ws: &Workspace, ty: TyId) -> Option<ValueKind> {
     }
 }
 
+/// The WGSL spelling of a value in FUNCTION scope. Deliberately not the uniform
+/// spelling: `bool` is a first-class local and has no uniform representation at
+/// all, which is why [`uniform_member_type`] answers that question separately.
 fn wgsl_value_type(kind: ValueKind) -> Option<String> {
     match kind {
         ValueKind::Struct(name) => Some(name.to_string()),
+        ValueKind::Bool => Some("bool".to_string()),
         other => other.wgsl().map(str::to_string),
     }
 }
@@ -1731,7 +2120,7 @@ fn wire_value_kind(kind: WireKind) -> Option<ValueKind> {
         WireKind::F32x4 => Some(ValueKind::Vec4),
         WireKind::I32 => Some(ValueKind::I32),
         WireKind::Mat4 => Some(ValueKind::Mat4),
-        WireKind::Bool32 => None,
+        WireKind::Bool32 => Some(ValueKind::Bool),
     }
 }
 
@@ -1749,7 +2138,7 @@ fn entry_param_roles(
     iface: &ShaderInterfacePlan,
     abi: &WgslAbiPlan,
     span: Span,
-) -> Result<HashMap<Idx<skull_mir::mir::Cell>, ParamRole>, CompilerError> {
+) -> Result<HashMap<Idx<Cell>, ParamRole>, CompilerError> {
     if function.param_decls.len() != body.params.len() {
         return Err(err(
             span,
@@ -1827,7 +2216,7 @@ fn explicit_entry_param_roles(
     iface: &ShaderInterfacePlan,
     stage: ShaderStage,
     span: Span,
-) -> Result<HashMap<Idx<skull_mir::mir::Cell>, ParamRole>, CompilerError> {
+) -> Result<HashMap<Idx<Cell>, ParamRole>, CompilerError> {
     if function.param_decls.len() != body.params.len() {
         return Err(err(
             span,
@@ -1852,6 +2241,35 @@ fn explicit_entry_param_roles(
                 return Err(err(span, "WGSL explicit fragment entry does not take a varying struct"));
             }
             ParamRole::Varying
+        } else if nominal_name(ws, param.ty) == Some(Ustr::from("UniformArray")) {
+            let Some(group) = iface.array_group(stage) else {
+                return Err(err(
+                    param_span(function, index),
+                    format!(
+                        "WGSL uniform array parameter `{}` has no array group in the interface plan",
+                        param.name
+                    ),
+                ));
+            };
+            if !group.members.iter().any(|member| member.name == param.name) {
+                return Err(err(
+                    param_span(function, index),
+                    format!(
+                        "WGSL uniform array parameter `{}` is absent from the interface plan",
+                        param.name
+                    ),
+                ));
+            }
+            ParamRole::UniformArray
+        } else if has_anno(function, index, "uniform") {
+            check_uniform_param(
+                ws,
+                param.ty,
+                UniformRole::Stage(stage),
+                iface,
+                param_span(function, index),
+            )?;
+            ParamRole::Uniform(UniformRole::Stage(stage))
         } else if stage == ShaderStage::Fragment && has_anno(function, index, "textures") {
             let name = nominal_name(ws, param.ty).ok_or_else(|| {
                 err(param_span(function, index), "WGSL texture parameter is not a named group")
@@ -1905,16 +2323,50 @@ fn check_uniform_param(
     Ok(())
 }
 
+/// The enclosing loop's `continue`/`break` targets, threaded through the
+/// structured walk.
+#[derive(Clone, Copy, Default)]
+struct LoopCtx {
+    cont: Option<Idx<Block>>,
+    brk: Option<Idx<Block>>,
+}
+
+/// A recognized `for i in lo..hi` header.
+#[derive(Clone, Copy)]
+struct LoopInfo {
+    slot: Idx<Cell>,
+    bound: Idx<Inst>,
+    inclusive: bool,
+    body_entry: Idx<Block>,
+    latch: Idx<Block>,
+    exit: Idx<Block>,
+}
+
 struct FunctionEmitter<'a> {
     ws: &'a Workspace,
     stage: &'a ShaderStageIr,
     instance: &'a ShaderInstance,
     body: &'a MirFunc,
     abi: &'a WgslAbiPlan,
-    param_roles: HashMap<Idx<skull_mir::mir::Cell>, ParamRole>,
-    cell_names: HashMap<Idx<skull_mir::mir::Cell>, String>,
-    cell_kinds: HashMap<Idx<skull_mir::mir::Cell>, ValueKind>,
+    param_roles: HashMap<Idx<Cell>, ParamRole>,
+    cell_names: HashMap<Idx<Cell>, String>,
+    cell_kinds: HashMap<Idx<Cell>, ValueKind>,
     span: Span,
+    /// The identifier `frag_coord()` renders to, threaded in as a parameter by
+    /// the entry wrapper. `None` in every body that cannot receive it, which is
+    /// what makes a helper's `frag_coord()` a rejection rather than a guess.
+    frag_coord: Option<String>,
+    out: String,
+    indent: usize,
+    visited: HashSet<Idx<Block>>,
+    active: HashSet<Idx<Block>>,
+    structure: Structure,
+    counted: HashMap<Idx<Block>, LoopInfo>,
+    general: HashMap<Idx<Block>, LoopRegion>,
+    /// The blocks reachable from the entry. A tier-0 body carries an
+    /// unreachable trailing `return <result cell>` that nothing ever stores, so
+    /// typing or emitting it would reject a body that is perfectly well formed.
+    reachable: HashSet<Idx<Block>>,
 }
 
 impl<'a> FunctionEmitter<'a> {
@@ -1924,21 +2376,43 @@ impl<'a> FunctionEmitter<'a> {
         instance: &'a ShaderInstance,
         body: &'a MirFunc,
         abi: &'a WgslAbiPlan,
-        param_roles: HashMap<Idx<skull_mir::mir::Cell>, ParamRole>,
+        param_roles: HashMap<Idx<Cell>, ParamRole>,
         span: Span,
     ) -> Result<Self, CompilerError> {
         let mut cell_names = HashMap::new();
         let mut cell_kinds = HashMap::new();
+        // Two cells can share a source name (one `falloff` per arm of an `if`),
+        // and every cell is declared at function scope, so the name has to be
+        // deduped or the second declaration silently shadows the first.
+        let mut used: HashSet<String> = HashSet::new();
         for (cell, data) in body.cells.iter() {
-            cell_names.insert(
-                cell,
-                data.name.map_or_else(
-                    || format!("cell_{}", cell.into_raw().into_u32()),
-                    |name| name.to_string(),
-                ),
+            let base = data.name.map_or_else(
+                || format!("cell_{}", cell.into_raw().into_u32()),
+                |name| name.to_string(),
             );
+            let mut name = base.clone();
+            let mut suffix = 0;
+            while !used.insert(name.clone()) {
+                suffix += 1;
+                name = format!("{base}_{suffix}");
+            }
+            cell_names.insert(cell, name);
             if let Some(ty) = data.ty.and_then(|ty| value_kind_for_type(ws, ty)) {
                 cell_kinds.insert(cell, ty);
+            }
+        }
+        let reachable = reachable_blocks(body);
+        let structure = skull_codegen_shader::structure::analyze(body);
+        let mut counted = HashMap::new();
+        let mut general = HashMap::new();
+        for (header, region) in structure.loops.iter() {
+            match match_counted_loop(body, *header) {
+                Some(info) => {
+                    counted.insert(*header, info);
+                }
+                None => {
+                    general.insert(*header, region.clone());
+                }
             }
         }
         let mut emitter = Self {
@@ -1951,13 +2425,30 @@ impl<'a> FunctionEmitter<'a> {
             cell_names,
             cell_kinds,
             span,
+            frag_coord: None,
+            out: String::new(),
+            indent: 1,
+            visited: HashSet::new(),
+            active: HashSet::new(),
+            structure,
+            counted,
+            general,
+            reachable,
         };
         emitter.infer_local_kinds()?;
         Ok(emitter)
     }
 
+    fn with_frag_coord(mut self, name: Option<String>) -> Self {
+        self.frag_coord = name;
+        self
+    }
+
     fn infer_local_kinds(&mut self) -> Result<(), CompilerError> {
-        for (_, block) in self.body.blocks.iter() {
+        for (bid, block) in self.body.blocks.iter() {
+            if !self.reachable.contains(&bid) {
+                continue;
+            }
             for iid in &block.insts {
                 if let Inst::Store { cell, value } = self.body.insts[*iid] {
                     let kind = self.value_kind(value)?;
@@ -1975,111 +2466,300 @@ impl<'a> FunctionEmitter<'a> {
         Ok(())
     }
 
-    fn emit_function(self, function: &Function, entry: bool) -> Result<String, CompilerError> {
-        if self.body.blocks.len() != 1 {
-            return Err(err(
-                self.span,
-                format!(
-                    "WGSL function `{}` uses control flow outside the admitted straight-line slice",
-                    function.name
-                ),
-            ));
-        }
-        let block = &self.body.blocks[self.body.entry];
-        let Term::Return(values) = &block.term else {
-            return Err(err(
-                self.span,
-                format!("WGSL function `{}` does not end in a return", function.name),
-            ));
-        };
-        if values.len() != 1 {
-            return Err(err(
-                self.span,
-                format!("WGSL function `{}` has a multi-value return", function.name),
-            ));
-        }
-        let return_kind = self.value_kind(values[0])?;
-        let return_ty = wgsl_value_type(return_kind).ok_or_else(|| {
-            err(
-                self.span,
-                format!(
-                    "WGSL function `{}` returns an unsupported value",
-                    function.name
-                ),
-            )
-        })?;
-        let name = if entry {
-            self.instance.symbol(self.ws)
-        } else {
-            self.instance.symbol(self.ws)
-        };
-        let param = if entry && self.param_roles.values().any(|role| matches!(role, ParamRole::TexCoord)) {
-            "uv: vec2<f32>".to_string()
-        } else {
-            self.body
-                .params
-                .iter()
-                .filter(|cell| {
-                    !entry
-                        || !matches!(
-                            self.param_roles.get(cell),
-                            Some(ParamRole::Texture | ParamRole::Uniform(_))
-                        )
-                })
-                .map(|cell| {
-                    let kind = self.cell_kinds.get(cell).copied().ok_or_else(|| {
-                        err(
-                            self.span,
-                            format!(
-                                "WGSL parameter `{}` has no neutral type",
-                                self.cell_names[cell]
-                            ),
-                        )
-                    })?;
-                    let ty = wgsl_value_type(kind).ok_or_else(|| {
-                        err(
-                            self.span,
-                            format!(
-                                "WGSL parameter `{}` is not a value parameter",
-                                self.cell_names[cell]
-                            ),
-                        )
-                    })?;
-                    Ok(format!("{}: {}", self.cell_names[cell], ty))
-                })
-                .collect::<Result<Vec<_>, CompilerError>>()?
-                .join(", ")
-        };
-
-        let mut out = String::new();
-        writeln!(out, "fn {}({}) -> {} {{", name, param, return_ty).unwrap();
-        let parameters: HashSet<_> = self.body.params.iter().copied().collect();
-        for (cell, _) in self.body.cells.iter() {
-            let Some(kind) = self.cell_kinds.get(&cell).copied() else {
-                continue;
-            };
-            if parameters.contains(&cell) || !self.is_stored_cell(cell) {
+    /// The declared result of every `Return` in the body. They must agree: a
+    /// body whose returns disagree has no one WGSL result type, and picking the
+    /// first would emit a coercion nothing asked for.
+    fn resolve_return_kind(&self) -> Result<Option<ValueKind>, CompilerError> {
+        let mut kind: Option<ValueKind> = None;
+        let mut seen = false;
+        for (bid, block) in self.body.blocks.iter() {
+            if !self.reachable.contains(&bid) {
                 continue;
             }
-            writeln!(
-                out,
-                "  var {}: {} = {};",
-                self.cell_names[&cell],
-                wgsl_value_type(kind).unwrap(),
-                zero_value(kind)
-            )
-            .unwrap();
+            let Term::Return(values) = &block.term else {
+                continue;
+            };
+            let found = match values.as_slice() {
+                [] => None,
+                [value] => Some(self.value_kind(*value)?),
+                _ => return Err(err(self.span, "WGSL does not admit a multi-value return")),
+            };
+            if seen && kind != found {
+                return Err(err(
+                    self.span,
+                    "WGSL function returns values of disagreeing types",
+                ));
+            }
+            kind = found;
+            seen = true;
         }
-        for iid in &block.insts {
-            match &self.body.insts[*iid] {
+        Ok(kind)
+    }
+
+    fn push(&mut self, line: &str) {
+        for _ in 0..self.indent {
+            self.out.push_str("  ");
+        }
+        self.out.push_str(line);
+        self.out.push('\n');
+    }
+
+    fn emit_function(mut self, function: &Function, entry: bool) -> Result<String, CompilerError> {
+        let return_kind = self.resolve_return_kind()?;
+        let signature = match return_kind {
+            Some(kind) => {
+                let ty = wgsl_value_type(kind).ok_or_else(|| {
+                    err(
+                        self.span,
+                        format!(
+                            "WGSL function `{}` returns an unsupported value",
+                            function.name
+                        ),
+                    )
+                })?;
+                format!(" -> {ty}")
+            }
+            None => String::new(),
+        };
+        let name = self.instance.symbol(self.ws);
+        let params = self.render_params(entry)?;
+
+        let mut head = String::new();
+        writeln!(head, "fn {}({}){} {{", name, params, signature).unwrap();
+        let parameters: HashSet<_> = self.body.params.iter().copied().collect();
+        let mut declarations: Vec<Idx<Cell>> = Vec::new();
+        for (cell, _) in self.body.cells.iter() {
+            if self.cell_kinds.contains_key(&cell)
+                && !parameters.contains(&cell)
+                && self.is_stored_cell(cell)
+            {
+                declarations.push(cell);
+            }
+        }
+        for cell in declarations {
+            let kind = self.cell_kinds[&cell];
+            let ty = wgsl_value_type(kind).ok_or_else(|| {
+                err(
+                    self.span,
+                    format!(
+                        "WGSL local `{}` has no emitted type",
+                        self.cell_names[&cell]
+                    ),
+                )
+            })?;
+            let line = format!("  var {}: {} = {};", self.cell_names[&cell], ty, zero_value(kind));
+            head.push_str(&line);
+            head.push('\n');
+        }
+
+        self.emit_seq(self.body.entry, None, LoopCtx::default())?;
+        head.push_str(&self.out);
+        head.push_str("}\n\n");
+        Ok(head)
+    }
+
+    fn render_params(&self, entry: bool) -> Result<String, CompilerError> {
+        if entry
+            && self
+                .param_roles
+                .values()
+                .any(|role| matches!(role, ParamRole::TexCoord))
+        {
+            return Ok("uv: vec2<f32>".to_string());
+        }
+        let mut rendered = Vec::new();
+        for cell in &self.body.params {
+            if entry
+                && matches!(
+                    self.param_roles.get(cell),
+                    Some(
+                        ParamRole::Texture
+                            | ParamRole::Uniform(_)
+                            | ParamRole::UniformArray
+                    )
+                )
+            {
+                continue;
+            }
+            let kind = self.cell_kinds.get(cell).copied().ok_or_else(|| {
+                err(
+                    self.span,
+                    format!(
+                        "WGSL parameter `{}` has no neutral type",
+                        self.cell_names[cell]
+                    ),
+                )
+            })?;
+            let ty = wgsl_value_type(kind).ok_or_else(|| {
+                err(
+                    self.span,
+                    format!(
+                        "WGSL parameter `{}` is not a value parameter",
+                        self.cell_names[cell]
+                    ),
+                )
+            })?;
+            rendered.push(format!("{}: {}", self.cell_names[cell], ty));
+        }
+        if let Some(name) = &self.frag_coord {
+            rendered.push(format!("{name}: vec4<f32>"));
+        }
+        Ok(rendered.join(", "))
+    }
+
+    /// Emit a structured sequence of blocks from `start`, stopping before
+    /// `stop`. Straight-line code, `if` diamonds, counted `for` loops and
+    /// general loops; anything else rejects rather than emitting a guess.
+    fn emit_seq(
+        &mut self,
+        start: Idx<Block>,
+        stop: Option<Idx<Block>>,
+        ctx: LoopCtx,
+    ) -> Result<(), CompilerError> {
+        let mut cur = start;
+        loop {
+            if Some(cur) == stop {
+                return Ok(());
+            }
+            if !self.active.contains(&cur) {
+                if let Some(info) = self.counted.get(&cur).copied() {
+                    self.emit_counted(info)?;
+                    cur = info.exit;
+                    continue;
+                }
+                if let Some(region) = self.general.get(&cur).cloned() {
+                    self.emit_general(&region, ctx)?;
+                    cur = region.exit;
+                    continue;
+                }
+            }
+            if !self.visited.insert(cur) {
+                return Err(err(
+                    self.span,
+                    "WGSL emission reached unstructured control flow",
+                ));
+            }
+            self.emit_block_effects(cur)?;
+            match self.body.blocks[cur].term.clone() {
+                Term::Return(values) => {
+                    self.emit_return(&values)?;
+                    return Ok(());
+                }
+                Term::Unreachable => return Ok(()),
+                Term::Goto(target) => {
+                    if Some(target) == ctx.cont {
+                        self.push("continue;");
+                        return Ok(());
+                    }
+                    if Some(target) == ctx.brk {
+                        self.push("break;");
+                        return Ok(());
+                    }
+                    if Some(target) == stop {
+                        return Ok(());
+                    }
+                    cur = target;
+                }
+                Term::Branch { cond, then_bb, else_bb } => {
+                    match self.emit_branch(cur, cond, then_bb, else_bb, stop, ctx)? {
+                        Some(merge) => cur = merge,
+                        None => return Ok(()),
+                    }
+                }
+                Term::Switch { .. } => {
+                    return Err(err(self.span, "WGSL emission does not admit `match`"));
+                }
+                Term::Yield { .. } => {
+                    return Err(err(self.span, "WGSL emission does not admit `yield`"));
+                }
+            }
+        }
+    }
+
+    /// Whether `b` produces no statement and just forwards to another block.
+    fn empty_forward(&self, b: Idx<Block>) -> Option<Idx<Block>> {
+        if let Term::Goto(target) = self.body.blocks[b].term {
+            let has_effect = self.body.blocks[b].insts.iter().any(|iid| {
+                matches!(self.body.insts[*iid], Inst::Store { .. }) || self.is_void_call(*iid)
+            });
+            if !has_effect {
+                return Some(target);
+            }
+        }
+        None
+    }
+
+    fn is_void_call(&self, iid: Idx<Inst>) -> bool {
+        match &self.body.insts[iid] {
+            Inst::Call { func, .. } => {
+                self.ws.module(func.module).functions[func.func]
+                    .return_ty
+                    .is_none()
+            }
+            _ => false,
+        }
+    }
+
+    fn emit_branch(
+        &mut self,
+        blk: Idx<Block>,
+        cond: Idx<Inst>,
+        then_bb: Idx<Block>,
+        else_bb: Idx<Block>,
+        stop: Option<Idx<Block>>,
+        ctx: LoopCtx,
+    ) -> Result<Option<Idx<Block>>, CompilerError> {
+        let cond_s = self.render_val(cond)?;
+        if let Some(join) = self.empty_forward(else_bb) {
+            self.push(&format!("if {cond_s} {{"));
+            self.indent += 1;
+            self.emit_seq(then_bb, Some(join), ctx)?;
+            self.indent -= 1;
+            self.push("}");
+            return Ok(Some(join));
+        }
+        if let Some(join) = self.empty_forward(then_bb) {
+            self.push(&format!("if !({cond_s}) {{"));
+            self.indent += 1;
+            self.emit_seq(else_bb, Some(join), ctx)?;
+            self.indent -= 1;
+            self.push("}");
+            return Ok(Some(join));
+        }
+        let merge = self
+            .structure
+            .ipdom(blk)
+            .filter(|m| Some(*m) != ctx.cont && Some(*m) != ctx.brk);
+        let arm_stop = merge.or(stop);
+        self.push(&format!("if {cond_s} {{"));
+        self.indent += 1;
+        self.emit_seq(then_bb, arm_stop, ctx)?;
+        self.indent -= 1;
+        self.push("} else {");
+        self.indent += 1;
+        self.emit_seq(else_bb, arm_stop, ctx)?;
+        self.indent -= 1;
+        self.push("}");
+        Ok(merge)
+    }
+
+    fn emit_block_effects(&mut self, b: Idx<Block>) -> Result<(), CompilerError> {
+        for iid in self.body.blocks[b].insts.clone() {
+            let line = match &self.body.insts[iid] {
                 Inst::Store { cell, value } => {
-                    let rhs = self.render_val(*value)?;
-                    writeln!(out, "  {} = {};", self.cell_names[cell], rhs).unwrap();
+                    let (cell, value) = (*cell, *value);
+                    Some(format!(
+                        "{} = {};",
+                        self.cell_names[&cell],
+                        self.render_val(value)?
+                    ))
                 }
                 Inst::Call { func, args } => {
                     let target = &self.ws.module(func.module).functions[func.func];
                     if target.return_ty.is_none() {
-                        writeln!(out, "  {};", self.render_call(*iid, *func, args)?).unwrap();
+                        Some(format!("{};", self.render_call(iid, *func, args)?))
+                    } else {
+                        None
                     }
                 }
                 Inst::Const(_)
@@ -2110,43 +2790,144 @@ impl<'a> FunctionEmitter<'a> {
                 | Inst::FloatToInt(_)
                 | Inst::IntToFloat(_)
                 | Inst::Neg(_)
-                | Inst::Not(_) => {}
+                | Inst::Not(_) => None,
                 other => {
                     return Err(err(
                         self.span,
                         format!(
-                            "WGSL function `{}` reaches unsupported MIR operation `{}`",
-                            function.name,
+                            "WGSL emission reaches unsupported MIR operation `{}`",
                             mir_kind(other)
                         ),
                     ));
                 }
+            };
+            if let Some(line) = line {
+                self.push(&line);
             }
         }
-        writeln!(out, "  return {};", self.render_val(values[0])?).unwrap();
-        out.push_str("}\n\n");
-        Ok(out)
+        Ok(())
     }
 
-    fn is_stored_cell(&self, cell: Idx<skull_mir::mir::Cell>) -> bool {
-        self.body.blocks.iter().any(|(_, block)| block.insts.iter().any(|iid| matches!(self.body.insts[*iid], Inst::Store { cell: stored, .. } if stored == cell)))
+    fn emit_return(&mut self, values: &[Idx<Inst>]) -> Result<(), CompilerError> {
+        match values {
+            [] => self.push("return;"),
+            [value] => {
+                let rendered = self.render_val(*value)?;
+                self.push(&format!("return {rendered};"));
+            }
+            _ => return Err(err(self.span, "WGSL does not admit a multi-value return")),
+        }
+        Ok(())
     }
 
-    fn value_kind(&self, iid: Idx<skull_mir::mir::Inst>) -> Result<ValueKind, CompilerError> {
+    fn emit_counted(&mut self, info: LoopInfo) -> Result<(), CompilerError> {
+        let slot = self.cell_names[&info.slot].clone();
+        let bound = self.render_val(info.bound)?;
+        let cmp = if info.inclusive { "<=" } else { "<" };
+        self.push(&format!("for (; {slot} {cmp} {bound}; {slot} = {slot} + 1) {{"));
+        self.indent += 1;
+        let body_len = self.out.len();
+        let ctx = LoopCtx { cont: Some(info.latch), brk: Some(info.exit) };
+        self.emit_seq(info.body_entry, None, ctx)?;
+        self.trim_trailing_continue(body_len);
+        self.indent -= 1;
+        self.push("}");
+        Ok(())
+    }
+
+    /// A general loop: `loop { <cond region>; if !(cond) { break; } <body> }`.
+    /// WGSL has no `while`, so the condition is always the explicit break.
+    fn emit_general(
+        &mut self,
+        region: &LoopRegion,
+        outer: LoopCtx,
+    ) -> Result<(), CompilerError> {
+        let header = region.header;
+        let (test, cond, body_start, break_when_true) = self.find_test(region)?;
+
+        self.active.insert(header);
+        self.push("loop {");
+        self.indent += 1;
+
+        self.emit_seq(header, Some(test), outer)?;
+        self.emit_block_effects(test)?;
+        self.visited.insert(test);
+
+        let cond_s = self.render_val(cond)?;
+        if break_when_true {
+            self.push(&format!("if {cond_s} {{ break; }}"));
+        } else {
+            self.push(&format!("if !({cond_s}) {{ break; }}"));
+        }
+
+        let ctx = LoopCtx { cont: Some(header), brk: Some(region.exit) };
+        let body_len = self.out.len();
+        self.emit_seq(body_start, None, ctx)?;
+        self.trim_trailing_continue(body_len);
+
+        self.indent -= 1;
+        self.push("}");
+        self.active.remove(&header);
+        Ok(())
+    }
+
+    fn find_test(
+        &self,
+        region: &LoopRegion,
+    ) -> Result<(Idx<Block>, Idx<Inst>, Idx<Block>, bool), CompilerError> {
+        let mut body: Vec<Idx<Block>> = region.body.iter().copied().collect();
+        body.sort_by_key(|b| b.into_raw().into_u32());
+        for b in body {
+            if let Term::Branch { cond, then_bb, else_bb } = self.body.blocks[b].term {
+                if then_bb == region.exit {
+                    return Ok((b, cond, else_bb, true));
+                }
+                if else_bb == region.exit {
+                    return Ok((b, cond, then_bb, false));
+                }
+            }
+        }
+        Err(err(
+            self.span,
+            "WGSL emission reached a loop with no single condition test",
+        ))
+    }
+
+    fn trim_trailing_continue(&mut self, start: usize) {
+        let line = format!("{}continue;\n", "  ".repeat(self.indent));
+        if self.out.len() >= start + line.len() && self.out.ends_with(&line) {
+            let cut = self.out.len() - line.len();
+            if cut >= start && (cut == 0 || self.out.as_bytes()[cut - 1] == b'\n') {
+                self.out.truncate(cut);
+            }
+        }
+    }
+
+    fn is_stored_cell(&self, cell: Idx<Cell>) -> bool {
+        self.body.blocks.iter().any(|(_, block)| {
+            block
+                .insts
+                .iter()
+                .any(|iid| matches!(self.body.insts[*iid], Inst::Store { cell: stored, .. } if stored == cell))
+        })
+    }
+
+    fn value_kind(&self, iid: Idx<Inst>) -> Result<ValueKind, CompilerError> {
         match &self.body.insts[iid] {
             Inst::Const(Lit::Float(_)) => Ok(ValueKind::F32),
             Inst::Const(Lit::Int(_)) => Ok(ValueKind::I32),
             Inst::Const(Lit::Bool(_)) => Ok(ValueKind::Bool),
             Inst::Const(Lit::Nil) | Inst::Const(Lit::Str(_)) => Err(err(
                 self.span,
-                "WGSL fullscreen emission does not support null or string literals",
+                "WGSL emission does not support null or string literals",
             )),
             Inst::Load(cell) => self.cell_kinds.get(cell).copied().ok_or_else(|| {
                 err(
                     self.span,
                     format!(
-                        "WGSL load of `{}` has no neutral type",
-                        self.cell_names[cell]
+                        "WGSL load of `{}` in `{}` has no neutral type",
+                        self.cell_names[cell],
+                        self.instance.symbol(self.ws)
                     ),
                 )
             }),
@@ -2194,11 +2975,7 @@ impl<'a> FunctionEmitter<'a> {
         }
     }
 
-    fn field_kind(
-        &self,
-        base: Idx<skull_mir::mir::Inst>,
-        field: Ustr,
-    ) -> Result<ValueKind, CompilerError> {
+    fn field_kind(&self, base: Idx<Inst>, field: Ustr) -> Result<ValueKind, CompilerError> {
         if let Inst::Load(cell) = self.body.insts[base] {
             match self.param_roles.get(&cell).copied() {
                 Some(ParamRole::Texture) => {
@@ -2239,14 +3016,16 @@ impl<'a> FunctionEmitter<'a> {
                         )
                     });
                 }
-                Some(ParamRole::Attribute) | Some(ParamRole::Varying) | Some(ParamRole::TexCoord) => {
-                    if let Some(ty) = self.body.cells[cell].ty {
-                        if let Some(kind) = struct_field_kind(self.ws, ty, field) {
-                            return Ok(kind);
-                        }
-                    }
+                Some(ParamRole::UniformArray) => {
+                    return Err(err(
+                        self.span,
+                        format!(
+                            "WGSL uniform array `{}` has no field `{field}`; read it with `at`",
+                            self.cell_names[&cell]
+                        ),
+                    ));
                 }
-                None => {
+                Some(ParamRole::Attribute) | Some(ParamRole::Varying) | Some(ParamRole::TexCoord) | None => {
                     if let Some(ty) = self.body.cells[cell].ty {
                         if let Some(kind) = struct_field_kind(self.ws, ty, field) {
                             return Ok(kind);
@@ -2255,16 +3034,17 @@ impl<'a> FunctionEmitter<'a> {
                 }
             }
         }
-        match self.value_kind(base)? {
-            ValueKind::Vec2 | ValueKind::Vec3 | ValueKind::Vec4
-                if matches!(field.as_str(), "x" | "y" | "z" | "w") =>
-            {
-                Ok(ValueKind::F32)
-            }
-            ValueKind::Struct(_) => Err(err(
-                self.span,
-                format!("WGSL field `{field}` is not present in the compiler-owned value struct"),
-            )),
+        let base_kind = self.value_kind(base)?;
+        if let Some(kind) = swizzle_kind(base_kind, field.as_str()) {
+            return Ok(kind);
+        }
+        match base_kind {
+            ValueKind::Struct(name) => struct_field_kind_by_name(self.ws, name, field).ok_or_else(|| {
+                err(
+                    self.span,
+                    format!("WGSL field `{field}` is not present in value struct `{name}`"),
+                )
+            }),
             _ => Err(err(
                 self.span,
                 format!("WGSL field `{field}` is not a supported projection"),
@@ -2274,13 +3054,29 @@ impl<'a> FunctionEmitter<'a> {
 
     fn call_kind(
         &self,
-        iid: Idx<skull_mir::mir::Inst>,
+        iid: Idx<Inst>,
         func: skull_mir::mir::FuncRef,
-        args: &[Idx<skull_mir::mir::Inst>],
+        args: &[Idx<Inst>],
     ) -> Result<ValueKind, CompilerError> {
         let function = &self.ws.module(func.module).functions[func.func];
         match WgslIntrinsic::classify(function) {
             Some(WgslIntrinsic::Texture) => Ok(ValueKind::Vec4),
+            Some(WgslIntrinsic::TextureSize) => Ok(ValueKind::Vec2),
+            Some(WgslIntrinsic::FragCoord) => Ok(ValueKind::Vec4),
+            Some(WgslIntrinsic::Discard) => Err(err(
+                self.span,
+                "WGSL `discard()` produces no value and cannot be used in an expression",
+            )),
+            Some(WgslIntrinsic::At) => {
+                let member = self.array_member(args)?;
+                wire_value_kind(member.elem).ok_or_else(|| {
+                    err(
+                        self.span,
+                        format!("WGSL uniform array `{}` has no emitted element", member.name),
+                    )
+                })
+            }
+            Some(WgslIntrinsic::Zero) => Ok(ValueKind::Vec2),
             Some(WgslIntrinsic::VectorConstructor) => {
                 let total: usize = args
                     .iter()
@@ -2296,21 +3092,26 @@ impl<'a> FunctionEmitter<'a> {
                     )),
                 }
             }
-            Some(WgslIntrinsic::Builtin(_)) => self.value_kind(
-                args.first()
-                    .copied()
-                    .ok_or_else(|| err(self.span, "WGSL intrinsic call has no operand"))?,
-            ),
-            Some(WgslIntrinsic::Operator(_)) => self.value_kind(
-                args.first()
-                    .copied()
-                    .ok_or_else(|| err(self.span, "WGSL operator call has no operand"))?,
-            ),
+            Some(WgslIntrinsic::Round) => self.first_arg_kind(args),
+            Some(WgslIntrinsic::Builtin(_, ResultKind::Fixed(kind))) => Ok(kind),
+            Some(WgslIntrinsic::Builtin(_, ResultKind::FirstArg)) => {
+                // `clamp(vec, 0.0, 6.0)` splats its scalar bounds, so the widest
+                // operand -- not positionally the first -- is the result.
+                let mut widest = self.first_arg_kind(args)?;
+                for arg in args {
+                    let kind = self.value_kind(*arg)?;
+                    if kind.components() > widest.components() {
+                        widest = kind;
+                    }
+                }
+                Ok(widest)
+            }
+            Some(WgslIntrinsic::Operator(operator)) => self.operator_kind(operator, args),
             Some(WgslIntrinsic::UnsupportedOperator) => Err(err(
                 self.span,
                 format!("WGSL operator `{}` is not admitted", function.name),
             )),
-            _ => {
+            None => {
                 let instance = self.resolve_callee(iid, func)?;
                 let called = self
                     .stage
@@ -2343,9 +3144,82 @@ impl<'a> FunctionEmitter<'a> {
         }
     }
 
+    fn first_arg_kind(&self, args: &[Idx<Inst>]) -> Result<ValueKind, CompilerError> {
+        self.value_kind(
+            args.first()
+                .copied()
+                .ok_or_else(|| err(self.span, "WGSL intrinsic call has no operand"))?,
+        )
+    }
+
+    /// The result of a non-scalar `__op_*`. `mat4 * vec4` is the case a
+    /// first-operand rule gets wrong, and a matrix product is the case a
+    /// widest-operand rule gets wrong, so both are named.
+    fn operator_kind(
+        &self,
+        operator: WgslOperator,
+        args: &[Idx<Inst>],
+    ) -> Result<ValueKind, CompilerError> {
+        if args.len() != 2 {
+            return Err(err(self.span, "WGSL operator requires two operands"));
+        }
+        let a = self.value_kind(args[0])?;
+        let b = self.value_kind(args[1])?;
+        Ok(match (operator, a, b) {
+            (WgslOperator::Mul, ValueKind::Mat4, ValueKind::Mat4) => ValueKind::Mat4,
+            (WgslOperator::Mul, ValueKind::Mat4, other) | (WgslOperator::Mul, other, ValueKind::Mat4) => {
+                other
+            }
+            _ if a.components() >= b.components() => a,
+            _ => b,
+        })
+    }
+
+    fn array_member(&self, args: &[Idx<Inst>]) -> Result<&WgslArrayMember, CompilerError> {
+        let Some(&target) = args.first() else {
+            return Err(err(self.span, "WGSL `at` has no array operand"));
+        };
+        let Inst::Load(cell) = self.body.insts[target] else {
+            return Err(err(
+                self.span,
+                "WGSL `at` did not receive a uniform array parameter",
+            ));
+        };
+        if !matches!(self.param_roles.get(&cell), Some(ParamRole::UniformArray)) {
+            return Err(err(
+                self.span,
+                "WGSL `at` did not receive a uniform array parameter",
+            ));
+        }
+        let name = Ustr::from(&self.cell_names[&cell]);
+        self.array_block()?
+            .members
+            .iter()
+            .find(|member| member.name == name)
+            .ok_or_else(|| {
+                err(
+                    self.span,
+                    format!("WGSL uniform array `{name}` is absent from the ABI plan"),
+                )
+            })
+    }
+
+    fn array_block(&self) -> Result<&WgslArrayBlock, CompilerError> {
+        self.abi
+            .array_blocks
+            .iter()
+            .find(|block| block.stage == self.stage.stage)
+            .ok_or_else(|| {
+                err(
+                    self.span,
+                    "WGSL stage reads a uniform array with no array block in the ABI plan",
+                )
+            })
+    }
+
     fn resolve_callee(
         &self,
-        iid: Idx<skull_mir::mir::Inst>,
+        iid: Idx<Inst>,
         func: skull_mir::mir::FuncRef,
     ) -> Result<ShaderInstance, CompilerError> {
         let function = &self.ws.module(func.module).functions[func.func];
@@ -2369,14 +3243,14 @@ impl<'a> FunctionEmitter<'a> {
         ))
     }
 
-    fn render_val(&self, iid: Idx<skull_mir::mir::Inst>) -> Result<String, CompilerError> {
+    fn render_val(&self, iid: Idx<Inst>) -> Result<String, CompilerError> {
         match &self.body.insts[iid] {
             Inst::Const(Lit::Float(value)) => Ok(format_float(*value)),
             Inst::Const(Lit::Int(value)) => Ok(value.to_string()),
             Inst::Const(Lit::Bool(value)) => Ok(value.to_string()),
             Inst::Const(Lit::Nil) | Inst::Const(Lit::Str(_)) => Err(err(
                 self.span,
-                "WGSL fullscreen emission does not support null or string literals",
+                "WGSL emission does not support null or string literals",
             )),
             Inst::Load(cell) => match self.param_roles.get(cell).copied() {
                 Some(ParamRole::TexCoord) => Ok("uv".to_string()),
@@ -2387,33 +3261,68 @@ impl<'a> FunctionEmitter<'a> {
                         self.cell_names[cell]
                     ),
                 )),
-                Some(ParamRole::Attribute) | Some(ParamRole::Varying) => {
+                Some(ParamRole::UniformArray) => Err(err(
+                    self.span,
+                    format!(
+                        "WGSL uniform array `{}` must be read through `at`",
+                        self.cell_names[cell]
+                    ),
+                )),
+                Some(ParamRole::Attribute) | Some(ParamRole::Varying) | None => {
                     Ok(self.cell_names[cell].clone())
                 }
-                None => Ok(self.cell_names[cell].clone()),
             },
             Inst::Field { base, field } => {
                 if let Inst::Load(cell) = self.body.insts[*base] {
                     match self.param_roles.get(&cell).copied() {
                         Some(ParamRole::Texture) => {
-                            self.abi.textures.iter().find(|texture| texture.name == *field).ok_or_else(|| err(self.span, format!("WGSL texture field `{field}` is absent from the ABI plan")))?;
+                            self.abi
+                                .textures
+                                .iter()
+                                .find(|texture| texture.name == *field)
+                                .ok_or_else(|| {
+                                    err(
+                                        self.span,
+                                        format!(
+                                            "WGSL texture field `{field}` is absent from the ABI plan"
+                                        ),
+                                    )
+                                })?;
                             return Ok(format!("tex_{field}"));
                         }
                         Some(ParamRole::Uniform(role)) => {
-                            let block = self.abi.uniform_block(role).ok_or_else(|| err(self.span, format!("WGSL uniform role for `{field}` is absent from the ABI plan")))?;
-                            if !block.members.iter().any(|member| member.name == *field) {
-                                return Err(err(
+                            let block = self.abi.uniform_block(role).ok_or_else(|| {
+                                err(
                                     self.span,
                                     format!(
-                                        "WGSL uniform field `{field}` is absent from the ABI plan"
+                                        "WGSL uniform role for `{field}` is absent from the ABI plan"
                                     ),
-                                ));
-                            }
-                            return Ok(format!("u_{}.{}", block.struct_name, field));
+                                )
+                            })?;
+                            let member = block
+                                .members
+                                .iter()
+                                .find(|member| member.name == *field)
+                                .ok_or_else(|| {
+                                    err(
+                                        self.span,
+                                        format!(
+                                            "WGSL uniform field `{field}` is absent from the ABI plan"
+                                        ),
+                                    )
+                                })?;
+                            let read = format!("u_{}.{}", block.struct_name, field);
+                            // A `bool` uniform crosses as the u32 the CPU wrote;
+                            // the boolean is recovered here and nowhere else.
+                            return Ok(match member.kind {
+                                WireKind::Bool32 => format!("({read} != 0u)"),
+                                _ => read,
+                            });
                         }
                         Some(ParamRole::Attribute)
                         | Some(ParamRole::Varying)
                         | Some(ParamRole::TexCoord)
+                        | Some(ParamRole::UniformArray)
                         | None => {}
                     }
                 }
@@ -2424,11 +3333,8 @@ impl<'a> FunctionEmitter<'a> {
                 let kind = value_struct_kind(*name).ok_or_else(|| {
                     err(self.span, format!("WGSL does not support value struct `{name}`"))
                 })?;
-                let args = fields
-                    .iter()
-                    .map(|(_, value)| self.render_val(*value))
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(format!("{}({})", wgsl_value_type(kind).unwrap(), args.join(", ")))
+                let ordered = self.ordered_struct_args(*name, kind, fields)?;
+                Ok(format!("{}({})", wgsl_value_type(kind).unwrap(), ordered.join(", ")))
             }
             Inst::Call { func, args } => self.render_call(iid, *func, args),
             Inst::IntAdd(a, b) | Inst::FloatAdd(a, b) => self.binary(*a, "+", *b),
@@ -2456,12 +3362,50 @@ impl<'a> FunctionEmitter<'a> {
         }
     }
 
-    fn binary(
+    /// A WGSL struct constructor is POSITIONAL, so the literal's field order is
+    /// not enough -- the declaration's is. A field the declaration does not name
+    /// rejects rather than landing in a neighbouring slot.
+    fn ordered_struct_args(
         &self,
-        a: Idx<skull_mir::mir::Inst>,
-        op: &str,
-        b: Idx<skull_mir::mir::Inst>,
-    ) -> Result<String, CompilerError> {
+        name: Ustr,
+        kind: ValueKind,
+        fields: &[(Ustr, Idx<Inst>)],
+    ) -> Result<Vec<String>, CompilerError> {
+        let ValueKind::Struct(_) = kind else {
+            return fields
+                .iter()
+                .map(|(_, value)| self.render_val(*value))
+                .collect();
+        };
+        let declared = explicit_struct_fields(self.ws, name, self.span)?;
+        if declared.len() != fields.len() {
+            return Err(err(
+                self.span,
+                format!(
+                    "WGSL value struct `{name}` literal has {} fields, declaration has {}",
+                    fields.len(),
+                    declared.len()
+                ),
+            ));
+        }
+        declared
+            .iter()
+            .map(|(field, _)| {
+                let value = fields
+                    .iter()
+                    .find(|(candidate, _)| candidate == field)
+                    .ok_or_else(|| {
+                        err(
+                            self.span,
+                            format!("WGSL value struct `{name}` literal is missing field `{field}`"),
+                        )
+                    })?;
+                self.render_val(value.1)
+            })
+            .collect()
+    }
+
+    fn binary(&self, a: Idx<Inst>, op: &str, b: Idx<Inst>) -> Result<String, CompilerError> {
         Ok(format!(
             "({} {} {})",
             self.render_val(a)?,
@@ -2472,9 +3416,9 @@ impl<'a> FunctionEmitter<'a> {
 
     fn render_call(
         &self,
-        iid: Idx<skull_mir::mir::Inst>,
+        iid: Idx<Inst>,
         func: skull_mir::mir::FuncRef,
-        args: &[Idx<skull_mir::mir::Inst>],
+        args: &[Idx<Inst>],
     ) -> Result<String, CompilerError> {
         let function = &self.ws.module(func.module).functions[func.func];
         let name = function.name.as_str();
@@ -2490,7 +3434,7 @@ impl<'a> FunctionEmitter<'a> {
                 if texture.kind != SamplerKind::Float {
                     return Err(err(
                         self.span,
-                        "WGSL fullscreen emission does not yet admit integer texture sampling",
+                        "WGSL emission does not yet admit integer texture sampling",
                     ));
                 }
                 Ok(format!(
@@ -2499,25 +3443,57 @@ impl<'a> FunctionEmitter<'a> {
                     self.render_val(args[1])?
                 ))
             }
+            Some(WgslIntrinsic::TextureSize) => {
+                let texture = self.sampler_binding(args[0])?;
+                Ok(format!("vec2<f32>(textureDimensions(tex_{}))", texture.name))
+            }
+            Some(WgslIntrinsic::FragCoord) => self.frag_coord.clone().ok_or_else(|| {
+                err(
+                    self.span,
+                    "WGSL `frag_coord()` is only available in the fragment entry, which is where \
+                     the builtin position enters; a helper cannot reach it",
+                )
+            }),
+            Some(WgslIntrinsic::Discard) => Ok("discard".to_string()),
+            Some(WgslIntrinsic::At) => {
+                let member = self.array_member(args)?;
+                let block = self.array_block()?;
+                let projection = array_element_projection(member.elem).ok_or_else(|| {
+                    err(
+                        self.span,
+                        format!(
+                            "WGSL uniform array `{}` has no element projection",
+                            member.name
+                        ),
+                    )
+                })?;
+                Ok(format!(
+                    "u_{}.{}[{}]{}",
+                    block.struct_name,
+                    member.name,
+                    self.render_val(args[1])?,
+                    projection
+                ))
+            }
+            Some(WgslIntrinsic::Zero) => Ok("vec2<f32>(0.0)".to_string()),
             Some(WgslIntrinsic::VectorConstructor) => {
                 let kind = self.call_kind(iid, func, args)?;
                 let rendered = args
                     .iter()
                     .map(|arg| self.render_val(*arg))
                     .collect::<Result<Vec<_>, _>>()?;
-            Ok(format!("{}({})", wgsl_value_type(kind).unwrap(), rendered.join(", ")))
+                Ok(format!("{}({})", wgsl_value_type(kind).unwrap(), rendered.join(", ")))
             }
-            Some(WgslIntrinsic::Builtin(builtin)) => {
-                let target = self.value_kind(
-                    args.first()
-                        .copied()
-                        .ok_or_else(|| err(self.span, "WGSL intrinsic call has no operand"))?,
-                )?;
+            Some(WgslIntrinsic::Round) => {
+                Ok(format!("floor({} + 0.5)", self.render_val(args[0])?))
+            }
+            Some(WgslIntrinsic::Builtin(spelling, _)) => {
+                let target = self.call_kind(iid, func, args)?;
                 let rendered = args
                     .iter()
                     .map(|arg| self.render_intrinsic_arg(*arg, target))
                     .collect::<Result<Vec<_>, _>>()?;
-                Ok(format!("{}({})", builtin.name(), rendered.join(", ")))
+                Ok(format!("{}({})", spelling, rendered.join(", ")))
             }
             Some(WgslIntrinsic::Operator(operator)) => {
                 if args.len() != 2 {
@@ -2532,7 +3508,7 @@ impl<'a> FunctionEmitter<'a> {
                 self.span,
                 format!("WGSL operator `{name}` is not admitted"),
             )),
-            _ => {
+            None => {
                 let instance = self.resolve_callee(iid, func)?;
                 let self_name = instance.symbol(self.ws);
                 let rendered = args
@@ -2546,21 +3522,18 @@ impl<'a> FunctionEmitter<'a> {
 
     fn render_intrinsic_arg(
         &self,
-        arg: Idx<skull_mir::mir::Inst>,
+        arg: Idx<Inst>,
         target: ValueKind,
     ) -> Result<String, CompilerError> {
         let rendered = self.render_val(arg)?;
-        if target.components() > 1 && self.value_kind(arg)? == ValueKind::F32 {
+        if target.components() > 1 && self.value_kind(arg)?.components() == 1 {
             Ok(format!("{}({})", wgsl_value_type(target).unwrap(), rendered))
         } else {
             Ok(rendered)
         }
     }
 
-    fn sampler_binding(
-        &self,
-        iid: Idx<skull_mir::mir::Inst>,
-    ) -> Result<&WgslTextureBinding, CompilerError> {
+    fn sampler_binding(&self, iid: Idx<Inst>) -> Result<&WgslTextureBinding, CompilerError> {
         let Inst::Field { base, field } = &self.body.insts[iid] else {
             return Err(err(
                 self.span,
@@ -2592,6 +3565,131 @@ impl<'a> FunctionEmitter<'a> {
     }
 }
 
+/// `Some(LoopInfo)` iff `header` is a `for i in lo..hi` header, mirroring the
+/// GLSL lane's recognition: a `Branch` on `IntLt/IntLeq(load slot, bound)` whose
+/// slot carries `lower_for_range`'s `loop_binding` provenance, entered by a
+/// pure-increment latch.
+fn match_counted_loop(f: &MirFunc, header: Idx<Block>) -> Option<LoopInfo> {
+    let Term::Branch { cond, then_bb, else_bb } = f.blocks[header].term else {
+        return None;
+    };
+    let (slot, bound, inclusive) = match &f.insts[cond] {
+        Inst::IntLt(a, b) => (load_cell(f, *a)?, *b, false),
+        Inst::IntLeq(a, b) => (load_cell(f, *a)?, *b, true),
+        _ => return None,
+    };
+    if !f.cells[slot].loop_binding {
+        return None;
+    }
+    let mut latch = None;
+    for (bid, block) in f.blocks.iter() {
+        if block.term == Term::Goto(header) && is_incr_latch(f, bid, slot) {
+            latch = Some(bid);
+        }
+    }
+    Some(LoopInfo {
+        slot,
+        bound,
+        inclusive,
+        body_entry: then_bb,
+        latch: latch?,
+        exit: else_bb,
+    })
+}
+
+/// The blocks reachable from the entry, by forward walk.
+fn reachable_blocks(f: &MirFunc) -> HashSet<Idx<Block>> {
+    let mut seen = HashSet::new();
+    let mut stack = vec![f.entry];
+    while let Some(b) = stack.pop() {
+        if !seen.insert(b) {
+            continue;
+        }
+        match &f.blocks[b].term {
+            Term::Goto(t) => stack.push(*t),
+            Term::Branch { then_bb, else_bb, .. } => {
+                stack.push(*then_bb);
+                stack.push(*else_bb);
+            }
+            Term::Switch { cases, default, .. } => {
+                stack.extend(cases.iter().map(|(_, b)| *b));
+                stack.push(*default);
+            }
+            Term::Yield { resume, .. } => stack.push(*resume),
+            Term::Return(_) | Term::Unreachable => {}
+        }
+    }
+    seen
+}
+
+fn load_cell(f: &MirFunc, iid: Idx<Inst>) -> Option<Idx<Cell>> {
+    match f.insts[iid] {
+        Inst::Load(cell) => Some(cell),
+        _ => None,
+    }
+}
+
+fn is_incr_latch(f: &MirFunc, p: Idx<Block>, slot: Idx<Cell>) -> bool {
+    for &iid in &f.blocks[p].insts {
+        if let Inst::Store { cell, value } = f.insts[iid] {
+            if cell == slot {
+                if let Inst::IntAdd(a, b) = f.insts[value] {
+                    let is_one = |x: Idx<Inst>| matches!(f.insts[x], Inst::Const(Lit::Int(1)));
+                    let loads_slot = |x: Idx<Inst>| matches!(f.insts[x], Inst::Load(c) if c == slot);
+                    return (loads_slot(a) && is_one(b)) || (loads_slot(b) && is_one(a));
+                }
+                return false;
+            }
+        }
+    }
+    false
+}
+
+/// The kind of `base.<swizzle>` for a vector base, over both the `xyzw` and
+/// `rgba` component sets. A mixed or out-of-range swizzle is not a projection.
+fn swizzle_kind(base: ValueKind, field: &str) -> Option<ValueKind> {
+    let width = match base {
+        ValueKind::Vec2 => 2,
+        ValueKind::Vec3 => 3,
+        ValueKind::Vec4 => 4,
+        _ => return None,
+    };
+    if field.is_empty() || field.len() > 4 {
+        return None;
+    }
+    let position = |c: char| "xyzw".find(c).or_else(|| "rgba".find(c));
+    let mut set = None;
+    for c in field.chars() {
+        let in_xyzw = "xyzw".contains(c);
+        let in_rgba = "rgba".contains(c);
+        if !in_xyzw && !in_rgba {
+            return None;
+        }
+        match set {
+            Some(previous) if previous != in_xyzw => return None,
+            _ => set = Some(in_xyzw),
+        }
+        if position(c)? >= width {
+            return None;
+        }
+    }
+    match field.len() {
+        1 => Some(ValueKind::F32),
+        2 => Some(ValueKind::Vec2),
+        3 => Some(ValueKind::Vec3),
+        _ => Some(ValueKind::Vec4),
+    }
+}
+
+fn struct_field_kind_by_name(ws: &Workspace, name: Ustr, field: Ustr) -> Option<ValueKind> {
+    let sid = *ws.struct_by_name.get(&name)?;
+    let def = &ws.modules[sid.module.index()].structs[sid.def];
+    def.fields
+        .iter()
+        .find(|candidate| candidate.name == field)
+        .and_then(|candidate| value_kind_for_type(ws, candidate.ty))
+}
+
 fn value_struct_kind(name: Ustr) -> Option<ValueKind> {
     match name.as_str() {
         "Vec2" => Some(ValueKind::Vec2),
@@ -2618,23 +3716,55 @@ fn zero_value(kind: ValueKind) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{WgslIntrinsic, WgslOperator};
+    use super::{ResultKind, ValueKind, WgslIntrinsic, WgslOperator, swizzle_kind};
 
     #[test]
     fn intrinsic_classifier_matches_the_admitted_wgsl_surface() {
-        assert!(WgslIntrinsic::classify_name("texture").is_some_and(WgslIntrinsic::is_admitted));
-        assert!(WgslIntrinsic::classify_name("v").is_some_and(WgslIntrinsic::is_admitted));
-        assert!(WgslIntrinsic::classify_name("clamp").is_some_and(WgslIntrinsic::is_admitted));
-        assert!(WgslIntrinsic::classify_name("__op_add").is_some_and(WgslIntrinsic::is_admitted));
+        assert!(
+            WgslIntrinsic::classify_name_arity("texture", 2).is_some_and(WgslIntrinsic::is_admitted)
+        );
+        assert!(WgslIntrinsic::classify_name_arity("v", 2).is_some_and(WgslIntrinsic::is_admitted));
         assert_eq!(
-            WgslIntrinsic::classify_name("__op_pow"),
+            WgslIntrinsic::classify_name_arity("clamp", 3),
+            Some(WgslIntrinsic::Builtin("clamp", ResultKind::FirstArg))
+        );
+        assert_eq!(
+            WgslIntrinsic::classify_name_arity("length", 1),
+            Some(WgslIntrinsic::Builtin(
+                "length",
+                ResultKind::Fixed(ValueKind::F32)
+            ))
+        );
+        assert_eq!(
+            WgslIntrinsic::classify_name_arity("__op_pow", 2),
             Some(WgslIntrinsic::UnsupportedOperator)
         );
         assert_eq!(
-            WgslIntrinsic::classify_name("__op_add"),
+            WgslIntrinsic::classify_name_arity("__op_add", 2),
             Some(WgslIntrinsic::Operator(WgslOperator::Add))
         );
-        assert_eq!(WgslIntrinsic::classify_name("helper"), None);
+        assert_eq!(WgslIntrinsic::classify_name_arity("helper", 1), None);
+        // Present in the GLSL table with no faithful WGSL spelling: absent here
+        // so the call rejects rather than emitting a plausible substitute.
+        for absent in ["isnan", "isinf", "any", "vertex_id", "texture_id", "greater_than"] {
+            for arity in 0..=3 {
+                assert_eq!(
+                    WgslIntrinsic::classify_name_arity(absent, arity),
+                    None,
+                    "`{absent}` must not be admitted"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn swizzles_mix_neither_component_set_nor_exceed_the_base() {
+        assert_eq!(swizzle_kind(ValueKind::Vec4, "rgb"), Some(ValueKind::Vec3));
+        assert_eq!(swizzle_kind(ValueKind::Vec4, "xy"), Some(ValueKind::Vec2));
+        assert_eq!(swizzle_kind(ValueKind::Vec4, "w"), Some(ValueKind::F32));
+        assert_eq!(swizzle_kind(ValueKind::Vec2, "z"), None);
+        assert_eq!(swizzle_kind(ValueKind::Vec4, "xg"), None);
+        assert_eq!(swizzle_kind(ValueKind::F32, "x"), None);
     }
 }
 

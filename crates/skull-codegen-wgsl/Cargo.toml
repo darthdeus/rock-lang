@@ -9,6 +9,7 @@ comfy-la-arena = { workspace = true }
 skull-mir = { path = "../skull-mir" }
 skull-parser = { path = "../skull-parser" }
 skull-codegen-shader = { path = "../skull-codegen-shader" }
+skull-wgsl-abi = { path = "../skull-wgsl-abi" }
 ustr = { workspace = true }
 
 [dev-dependencies]

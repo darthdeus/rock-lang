@@ -17,8 +17,6 @@
 //! spec from `docs/shaders.md`, keyed by the callee's mangled signature (name +
 //! GLSL param types) -- the future `@intrinsic` GLSL column.
 
-mod structure;
-
 use bone_semantic::hir::{
     AnnoValue, BodyOwner, BuiltinTy, Expr, Function, StructDef, TyId, TypeCtor, TypeExpr,
 };
@@ -44,7 +42,7 @@ use skull_mir::shader_ir::{
 };
 use skull_mir::mir::*;
 use skull_parser::CompilerError;
-use structure::{LoopRegion, Structure};
+use skull_codegen_shader::structure::{self, LoopRegion, Structure};
 use ustr::Ustr;
 
 /// A tier-0 GLSL type. Everything else is rejected by the profile pass.

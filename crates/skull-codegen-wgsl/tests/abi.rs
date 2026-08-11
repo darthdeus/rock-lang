@@ -1,11 +1,12 @@
 use bone_semantic::prelude::Span;
 use skull_codegen_glsl::ShaderAbiPlan;
 use skull_codegen_wgsl::WgslAbiPlan;
-use skull_mir::gpu_layout::{SamplerKind, WireKind};
+use skull_mir::gpu_layout::{ArrayMemberDecl, AttrKind, SamplerKind, WireKind};
 use skull_mir::shader_ir::{
-    FragmentOutput, LogicalTextureGroup, LogicalUniformGroup, ShaderInterfacePlan, ShaderStage,
-    UniformRole,
+    FragmentOutput, LogicalArrayGroup, LogicalTextureGroup, LogicalUniformGroup,
+    LogicalVarying, LogicalVertexInput, ShaderInterfacePlan, ShaderStage, UniformRole, VertexRate,
 };
+use skull_wgsl_abi::WgslAbi;
 use ustr::Ustr;
 
 fn fixture() -> ShaderInterfacePlan {
@@ -152,24 +153,139 @@ fn unsupported_fullscreen_shapes_are_spanned_rejections() {
     assert!(error.message.contains("explicit vertex"));
 
     let mut iface = fixture();
+    iface.uniform_groups[0].members[0].1 = WireKind::Mat4;
+    iface.uniform_groups[0].members[0].0 = ustr::Ustr::from("mat");
+    let plan = WgslAbiPlan::wgsl(&iface, Span::default()).expect("mat4 uniform is admitted");
+    assert_eq!(plan.uniform_blocks[0].members[0].size, 64);
+}
+
+/// A bool uniform crosses as the 4-byte integer the CPU writes: WGSL's uniform
+/// address space has no `bool` at all, so the member is `u32` and the boolean is
+/// recovered at the read.
+#[test]
+fn a_bool_uniform_member_is_laid_out_and_declared_as_u32() {
+    let mut iface = fixture();
     iface.uniform_groups[0].members[0].1 = WireKind::Bool32;
-    let error =
-        WgslAbiPlan::wgsl(&iface, Span::default()).expect_err("bool uniform must be rejected");
-    assert!(error.message.contains("unsupported wire kind"));
+    let plan = WgslAbiPlan::wgsl(&iface, Span::default()).expect("bool uniform is admitted");
+    let member = &plan.uniform_blocks[0].members[0];
+    assert_eq!((member.offset, member.align, member.size), (0, 4, 4));
+    assert_eq!(
+        skull_codegen_wgsl::uniform_member_type(WireKind::Bool32),
+        Some("u32")
+    );
+    assert_eq!(skull_codegen_wgsl::wgsl_type(WireKind::Bool32), None);
 }
 
 #[test]
 fn abi_wire_is_deterministic_and_carries_physical_order() {
     let plan = WgslAbiPlan::wgsl(&fixture(), Span::default()).expect("WGSL projection");
     let wire = plan.wire();
-    assert!(wire.starts_with("WGSL_ABI_V1\nchecksum "));
-    assert!(wire.contains("vertex triangle_strip 4 0"));
-    assert!(wire.contains("fragment 0 0 3"));
-    assert!(wire.contains("fullscreen FullscreenU 0 16 v 2"));
+    assert!(wire.starts_with("WGSL_ABI_V2\nchecksum "));
+    assert!(wire.contains("geometry fullscreen"));
+    assert!(wire.contains("entries fullscreen_vertex fragment_main"));
+    assert!(wire.contains("fullscreen_vertex triangle_strip 4 0"));
+    assert!(wire.contains("fullscreen_fragment 0"));
+    assert!(wire.contains("fullscreen_uniform fullscreen FullscreenU 0 16 v 2"));
+    assert!(wire.contains("output 0 color 3"));
+    assert!(wire.contains("array_blocks 0"));
     assert!(wire.contains("block fragment FragU 1 16 f 2"));
     assert!(wire.contains("member cutoff 0 0 4 4"));
     assert!(wire.contains("member resolution 1 8 8 8"));
     assert!(wire.contains("texture 0 scene float 2 3 f"));
     assert!(wire.contains("texture 1 bloom float 4 5 f"));
+    assert!(wire.ends_with("end\n"));
+    let parsed = WgslAbi::parse(&wire).expect("compiler output uses the production parser");
+    assert_eq!(parsed.fragment_outputs.len(), 1);
+    assert_eq!(parsed.array_blocks.len(), 0);
     assert_eq!(wire, plan.wire(), "the compiler wire must be deterministic");
+}
+
+fn explicit_fixture(arrays: Vec<ArrayMemberDecl>) -> ShaderInterfacePlan {
+    ShaderInterfacePlan {
+        stages: vec![ShaderStage::Vertex, ShaderStage::Fragment],
+        vertex_inputs: vec![LogicalVertexInput {
+            struct_name: Ustr::from("Vtx"),
+            rate: VertexRate::PerVertex,
+            attrs: vec![(Ustr::from("pos"), AttrKind::F32x2)],
+        }],
+        varyings: vec![LogicalVarying {
+            name: Ustr::from("uv"),
+            kind: WireKind::F32x2,
+            flat: false,
+        }],
+        array_groups: vec![LogicalArrayGroup {
+            stage: ShaderStage::Fragment,
+            owner: Ustr::from("frag"),
+            members: arrays,
+        }],
+        textures: Some(LogicalTextureGroup {
+            struct_name: Some(Ustr::from("Tex")),
+            samplers: vec![(Ustr::from("scene"), SamplerKind::Float)],
+            stages: vec![ShaderStage::Fragment],
+        }),
+        fragment_output: FragmentOutput::Single(WireKind::F32x4),
+        ..Default::default()
+    }
+}
+
+fn decl(name: &str, elem: WireKind, capacity: u32) -> ArrayMemberDecl {
+    ArrayMemberDecl {
+        name: Ustr::from(name),
+        elem,
+        capacity,
+        span: Span::default(),
+    }
+}
+
+/// `@size(N)` is program text, so `N * stride` is source-controlled and must be
+/// computed wide and refused before it narrows -- a wrap would land on a small
+/// size that passes the very budget it evades. The WGSL lane does not recompute
+/// it: it delegates to the one layout authority, which is what this asserts.
+#[test]
+fn an_oversized_uniform_array_is_rejected_rather_than_narrowed() {
+    let plan = WgslAbiPlan::explicit(
+        &explicit_fixture(vec![decl("lights", WireKind::F32x4, 16)]),
+        "vertex_main",
+        "fragment_main",
+        Span::default(),
+    )
+    .expect("an in-budget array is admitted");
+    assert_eq!(plan.array_blocks[0].size, 256);
+    assert_eq!(plan.array_blocks[0].members[0].stride, 16);
+    // The budget is a size the block may REACH: 1024 * 16 is exactly it.
+    let edge = WgslAbiPlan::explicit(
+        &explicit_fixture(vec![decl("lights", WireKind::F32x4, 1024)]),
+        "vertex_main",
+        "fragment_main",
+        Span::default(),
+    )
+    .expect("the block may reach the budget");
+    assert_eq!(edge.array_blocks[0].size, 16384);
+
+    // 2^28 elements at stride 16 is 2^32 bytes: exactly the product that wraps
+    // to a passing size in 32 bits.
+    for capacity in [1u32 << 28, 1025, u32::MAX] {
+        let error = WgslAbiPlan::explicit(
+            &explicit_fixture(vec![decl("lights", WireKind::F32x4, capacity)]),
+            "vertex_main",
+            "fragment_main",
+            Span::default(),
+        )
+        .expect_err("an over-budget `@size` must be rejected");
+        assert!(
+            error.message.contains("uniform array block"),
+            "capacity {capacity}: {}",
+            error.message
+        );
+    }
+
+    // A `Vec3` array has no consistent stride and is refused by both lanes.
+    let error = WgslAbiPlan::explicit(
+        &explicit_fixture(vec![decl("bad", WireKind::F32x3, 4)]),
+        "vertex_main",
+        "fragment_main",
+        Span::default(),
+    )
+    .expect_err("a Vec3 array element must be rejected");
+    assert!(error.message.contains("Vec3"), "{}", error.message);
 }

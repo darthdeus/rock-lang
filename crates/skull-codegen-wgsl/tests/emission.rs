@@ -114,6 +114,272 @@ fn selected_sprite_basic_pipeline_is_admitted_by_wgsl() {
     .expect("WGSL validates");
 }
 
+// Mirrors rect_batch.rock's `Vertex`; rect_batch itself drags in `DepthMode`,
+// which this workspace's semantic pass cannot resolve.
+const SPRITE_BATCH_VERTEX: &str = "value Vertex { pos: Vec2, uv: Vec2, color: Vec4, pivot_y: float, entity_id: float }";
+
+fn sprite_batch_source() -> String {
+    format!(
+        "{}\n{}\n{}\n{}",
+        include_str!("../../../stone/engine/rendering/engine_uniforms.rock"),
+        SPRITE_BATCH_VERTEX,
+        include_str!("../../../stone/engine/shaders/common/pass_textures.rock"),
+        include_str!("../../../stone/engine/shaders/rendering/sprite_batch_shader.rock"),
+    )
+}
+
+fn sprite_batch_artifact() -> (
+    skull_codegen_glsl::ShaderEmission,
+    skull_codegen_wgsl::WgslShaderEmission,
+) {
+    let source = sprite_batch_source();
+    let (ws, mid) = workspace(&source);
+    let glsl = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
+        &ws,
+        mid,
+        "sprite_batch_vert",
+        "sprite_batch_frag",
+        skull_codegen_glsl::GlslProfile::Core330,
+    )
+    .expect("the existing paired compiler plan");
+    let abi = WgslAbiPlan::explicit(
+        &glsl.interface,
+        "vertex_main",
+        "fragment_main",
+        Span::default(),
+    )
+    .expect("selected sprite_batch must have a WGSL ABI");
+    let emission = skull_codegen_wgsl::emit_explicit_shader(
+        &ws,
+        &glsl.ir,
+        &glsl.interface,
+        &abi,
+        Span::default(),
+    )
+    .expect("selected sprite_batch must emit WGSL");
+    (glsl, emission)
+}
+
+fn naga_validate(source: &str) {
+    let module = naga::front::wgsl::parse_str(source)
+        .unwrap_or_else(|error| panic!("WGSL parses: {error}\n{source}"));
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap_or_else(|error| panic!("WGSL validates: {error:?}\n{source}"));
+}
+
+#[test]
+fn selected_sprite_batch_pipeline_is_admitted_by_wgsl() {
+    let (_, artifact) = sprite_batch_artifact();
+    naga_validate(&artifact.source);
+}
+
+/// Naga proves well-formedness, not that the right target got the right
+/// location. `FragId` is the entity-id attachment: emitting it at location 0
+/// would validate and paint ids into the colour buffer.
+#[test]
+fn the_mrt_outputs_keep_their_declaration_order_and_locations() {
+    let (glsl, artifact) = sprite_batch_artifact();
+    assert!(
+        matches!(
+            &glsl.interface.fragment_output,
+            skull_mir::shader_ir::FragmentOutput::Mrt(outputs) if outputs.len() == 2
+        ),
+        "the fixture must present an MRT interface: {:?}",
+        glsl.interface.fragment_output
+    );
+    let outputs = &artifact.abi.fragment_outputs;
+    assert_eq!(outputs.len(), 2);
+    assert_eq!(
+        (outputs[0].name.as_str(), outputs[0].location),
+        ("FragColor", 0)
+    );
+    assert_eq!((outputs[1].name.as_str(), outputs[1].location), ("FragId", 1));
+    assert!(
+        artifact
+            .source
+            .contains("  @location(0) FragColor: vec4<f32>,"),
+        "{}",
+        artifact.source
+    );
+    assert!(
+        artifact.source.contains("  @location(1) FragId: i32,"),
+        "{}",
+        artifact.source
+    );
+}
+
+/// `EntityId` is an integer id carried as a float: interpolating it across the
+/// triangle produces ids no entity has, and every other varying must NOT be
+/// flat or the sprite loses its gradients.
+#[test]
+fn only_the_flat_varying_carries_the_flat_interpolation_attribute() {
+    let (_, artifact) = sprite_batch_artifact();
+    let flat: Vec<&str> = artifact
+        .abi
+        .varyings
+        .iter()
+        .filter(|varying| varying.flat)
+        .map(|varying| varying.name.as_str())
+        .collect();
+    assert_eq!(flat, ["EntityId"], "exactly one flat varying is declared");
+    assert_eq!(artifact.abi.varyings.len(), 4, "and three that are not");
+    assert!(
+        artifact
+            .source
+            .contains("@location(3) @interpolate(flat) EntityId: f32,"),
+        "{}",
+        artifact.source
+    );
+    assert_eq!(
+        artifact.source.matches("@interpolate(flat)").count(),
+        1,
+        "no other varying may be flat: {}",
+        artifact.source
+    );
+}
+
+/// std140 gives every uniform-array element a 16-byte stride, and WGSL's uniform
+/// address space demands the same -- so each element is declared as its padded
+/// 4-component vector and the read projects back down. A declaration that packed
+/// tightly would validate and then read the wrong element of the CPU's buffer.
+#[test]
+fn uniform_array_elements_are_padded_to_the_std140_stride_and_projected_back() {
+    let (_, artifact) = sprite_batch_artifact();
+    assert_eq!(artifact.abi.array_blocks.len(), 1);
+    let block = &artifact.abi.array_blocks[0];
+    assert_eq!(block.members.len(), 7, "seven light arrays");
+    for (index, member) in block.members.iter().enumerate() {
+        assert_eq!(member.capacity, 16, "`{}` capacity", member.name);
+        assert_eq!(member.stride, 16, "`{}` stride", member.name);
+        assert_eq!(
+            member.offset,
+            index as u32 * 16 * 16,
+            "`{}` offset",
+            member.name
+        );
+    }
+    assert_eq!(block.size, 7 * 16 * 16);
+    // The element type is the PADDED vector, per element kind.
+    assert!(
+        artifact
+            .source
+            .contains("  uLightTypes: array<vec4<i32>, 16>,"),
+        "{}",
+        artifact.source
+    );
+    assert!(
+        artifact
+            .source
+            .contains("  uLightRadii: array<vec4<f32>, 16>,"),
+        "{}",
+        artifact.source
+    );
+    // ... and the read projects it back to the DECLARED element width.
+    for (read, kind) in [
+        ("u_sprite_batch_frag_Arrays.uLightTypes[i].x", "int"),
+        ("u_sprite_batch_frag_Arrays.uLightRadii[i].x", "float"),
+        ("u_sprite_batch_frag_Arrays.uLightPositions[i].xy", "Vec2"),
+        ("u_sprite_batch_frag_Arrays.uLightColors[i]", "Vec4"),
+    ] {
+        assert!(
+            artifact.source.contains(read),
+            "a {kind} array element reads as `{read}`: {}",
+            artifact.source
+        );
+    }
+    // A Vec4 element takes the whole slot, so it must NOT be projected.
+    assert!(
+        !artifact
+            .source
+            .contains("u_sprite_batch_frag_Arrays.uLightColors[i].x"),
+        "a Vec4 element must not be narrowed: {}",
+        artifact.source
+    );
+}
+
+/// WGSL's uniform address space has no `bool`, so the member crosses as the u32
+/// the CPU already writes. A `bool` declaration would not compile; a u32 member
+/// read as if it were a bool would be a type error -- but a u32 member compared
+/// against the wrong thing would not, so the comparison is asserted here.
+#[test]
+fn bool_uniforms_cross_as_u32_and_are_compared_at_every_read() {
+    let (_, artifact) = sprite_batch_artifact();
+    let block = artifact
+        .abi
+        .uniform_block(skull_mir::shader_ir::UniformRole::Stage(
+            skull_mir::shader_ir::ShaderStage::Fragment,
+        ))
+        .expect("the fragment uniform block");
+    let bools: Vec<&str> = block
+        .members
+        .iter()
+        .filter(|member| member.kind == skull_mir::gpu_layout::WireKind::Bool32)
+        .map(|member| member.name.as_str())
+        .collect();
+    assert_eq!(bools, ["uLightsEnabled", "uUnlit", "uGlowEnabled", "uHasNormalTex"]);
+    for name in &bools {
+        assert!(
+            artifact.source.contains(&format!("  {name}: u32,")),
+            "`{name}` is declared u32: {}",
+            artifact.source
+        );
+        assert!(
+            artifact
+                .source
+                .contains(&format!("(u_SpriteFragU.{name} != 0u)")),
+            "`{name}` is compared at its read: {}",
+            artifact.source
+        );
+    }
+}
+
+/// The fragment's own control flow: the light loop is a counted `for`, the
+/// alpha cutoff is a `discard`, and `frag_coord()` arrives as the entry's
+/// parameter because WGSL has no global fragment position.
+#[test]
+fn the_fragment_control_flow_and_builtins_reach_wgsl() {
+    let (_, artifact) = sprite_batch_artifact();
+    assert_eq!(
+        artifact.source.matches("  for (; i < cell_22; i = i + 1) {").count(),
+        1,
+        "the light loop is a counted for: {}",
+        artifact.source
+    );
+    assert_eq!(
+        artifact.source.matches("discard;").count(),
+        1,
+        "the alpha cutoff discards: {}",
+        artifact.source
+    );
+    assert_eq!(
+        artifact
+            .source
+            .matches(&format!("{}: vec4<f32>", skull_codegen_wgsl::FRAG_COORD_PARAM))
+            .count(),
+        1,
+        "the fragment entry takes the builtin position: {}",
+        artifact.source
+    );
+    assert!(
+        artifact.source.contains("(vary, input.position)"),
+        "and the wrapper passes it: {}",
+        artifact.source
+    );
+    assert_eq!(
+        artifact
+            .source
+            .matches("vec2<f32>(textureDimensions(tex_uShadowmapTex))")
+            .count(),
+        1,
+        "texture_size reaches textureDimensions: {}",
+        artifact.source
+    );
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 struct OperationCensus {
     calls: usize,
@@ -249,7 +515,8 @@ fn source_goldens_and_physical_structure_are_deterministic() {
         );
         assert!(artifact.source.contains("@builtin(vertex_index)"));
         assert!(!artifact.source.contains("FullscreenVertexIn"));
-        assert_eq!(artifact.abi.fragment.output_location, 0);
+        assert_eq!(artifact.abi.fragment_outputs.len(), 1);
+        assert_eq!(artifact.abi.fragment_outputs[0].location, 0);
         assert!(
             artifact
                 .abi
