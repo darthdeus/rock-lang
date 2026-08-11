@@ -1455,7 +1455,7 @@ impl<'a> Printer<'a> {
                 }
             }
 
-            ExprKind::FunctionCall { func, args, syntax } => match syntax {
+            ExprKind::FunctionCall { func, args, syntax, .. } => match syntax {
                 // Overloadable operators (`+ - * / %` ...) are parsed as calls
                 // with binary syntax -- render them infix. A multi-line binary is
                 // kept verbatim (see ExprKind::BinOp above).
@@ -1917,6 +1917,7 @@ impl<'a> Printer<'a> {
                 func: rf,
                 args: ra,
                 syntax: CallSyntax::Normal,
+                ..
             } = &self.ast.e(recv).kind
             {
                 if matches!(&self.ast.e(rf).kind, ExprKind::FieldAccess(..)) {

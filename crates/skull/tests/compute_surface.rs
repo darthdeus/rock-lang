@@ -730,6 +730,8 @@ fn wgpu_renderer_registers_the_compute_artifact_from_the_view() {
     .expect("compute WGPU registration");
     assert_eq!(cache.shader_view().compute_views.len(), 1);
     assert_eq!(emit.lua.matches("__rock_wgpu_compute_register(").count(), 1);
+    assert_eq!(emit.lua.matches("__rock_wgpu_compute_snapshot_begin()").count(), 1);
+    assert_eq!(emit.lua.matches("__rock_wgpu_compute_snapshot_end()").count(), 1);
     assert!(emit.lua.contains("__rock_wgpu_compute_register(\"saxpy\""));
 }
 
@@ -752,6 +754,8 @@ fn compute_body_edit_reloads_the_compiler_artifact_through_the_overlay() {
     let overlay = skull::mir_emit::emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "saxpy")])
         .expect("compute body overlay");
     assert_eq!(overlay.lua.matches("__rock_wgpu_compute_register(\"saxpy\"").count(), 1);
+    assert_eq!(overlay.lua.matches("__rock_wgpu_compute_snapshot_begin()").count(), 1);
+    assert_eq!(overlay.lua.matches("__rock_wgpu_compute_snapshot_end()").count(), 1);
     assert!(overlay.lua.contains("(u_SaxpyParams.a + 1)"), "edited compute source missing:\n{}", overlay.lua);
 }
 

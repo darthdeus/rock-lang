@@ -839,7 +839,7 @@ impl YieldWalk<'_> {
                 self.expr(target, f);
             }
 
-            Expr::Call { callee, args } => {
+            Expr::Call { callee, args, .. } => {
                 if let Callee::Value(v) = callee {
                     self.expr(v, f);
                 }

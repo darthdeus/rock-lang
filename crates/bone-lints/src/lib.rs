@@ -1159,7 +1159,7 @@ pub fn transmute_of_nullable_in_body(
 
     let mut out = Vec::new();
     for (idx, expr) in body.expr_arena.iter() {
-        let Expr::Call { callee: Callee::Unresolved { name, .. }, args } = expr else { continue };
+        let Expr::Call { callee: Callee::Unresolved { name, .. }, args, .. } = expr else { continue };
         if (*name != cast && *name != transmute) || args.len() != 1 {
             continue;
         }
@@ -1651,7 +1651,7 @@ fn render_place(body: &Body, e: Idx<Expr>) -> Option<String> {
             format!("{}?.{}()", render_place(body, receiver)?, method)
         }
         // UFCS: `e.get()` lowers to a call whose first arg is the receiver.
-        Expr::Call { callee: Callee::Unresolved { name, .. }, args } => {
+        Expr::Call { callee: Callee::Unresolved { name, .. }, args, .. } => {
             let recv = args.into_iter().next()?;
             format!("{}.{}()", render_place(body, recv)?, name)
         }

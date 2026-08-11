@@ -4197,7 +4197,7 @@ pub fn generate_function(
         }
     }
     let (_, e) = best?;
-    let hir::Expr::Call { callee: hir::Callee::Unresolved { name, .. }, args } =
+    let hir::Expr::Call { callee: hir::Callee::Unresolved { name, .. }, args, .. } =
         &body.expr_arena[e]
     else {
         return None;
@@ -4896,7 +4896,7 @@ pub fn signature_help(
     let call_span = *body.expr_spans.get(e)?;
 
     match &body.expr_arena[e] {
-        hir::Expr::Call { callee, args } => {
+        hir::Expr::Call { callee, args, .. } => {
             // Tier 1: the overload bone nailed down.
             if let Some((cmid, fid)) = inf
                 .and_then(|inf| inf.per_fn.get(&owner))

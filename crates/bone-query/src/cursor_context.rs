@@ -687,7 +687,7 @@ impl CursorAst {
             {
                 return None;
             }
-            let ExprKind::FunctionCall { func, args, syntax } = &self.expr(node).kind else {
+            let ExprKind::FunctionCall { func, args, syntax, .. } = &self.expr(node).kind else {
                 continue;
             };
             // Operator calls (`a + |`) and the no-parens surface form are not
