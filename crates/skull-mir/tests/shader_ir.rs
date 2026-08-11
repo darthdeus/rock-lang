@@ -152,6 +152,7 @@ fn semantic_wire_is_neutral_and_fingerprint_tracks_logical_shape() {
     for forbidden in ["offset", "binding", "std140", "WGSL", "GLSL"] {
         assert!(!wire.contains(forbidden), "semantic wire leaked {forbidden}: {wire}");
     }
+    assert!(!wire.contains("compute"), "graphics semantic wire changed without a compute contract: {wire}");
     let mut renamed = base.clone();
     renamed.uniform_groups[0].members[0].0 = Ustr::from("b");
     assert_ne!(base.semantic_fingerprint(true), renamed.semantic_fingerprint(true));

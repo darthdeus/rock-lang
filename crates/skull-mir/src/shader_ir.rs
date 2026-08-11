@@ -611,7 +611,7 @@ impl ShaderInterfacePlan {
                     writeln!(out, "compute_resource {} {} {} {} {}", resource.name, resource.address_space.name(), resource.access.name(), shape, kind.code()).unwrap();
                 }
             }
-            None => writeln!(out, "compute none").unwrap(),
+            None => {}
         }
 
         match &self.textures {
