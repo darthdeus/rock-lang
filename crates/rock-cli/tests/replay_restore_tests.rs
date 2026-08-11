@@ -1540,13 +1540,8 @@ fn draw_phase_branch_while_playing_includes_the_request_frame_tick() {
 
 #[test]
 fn branch_projects_game_input_authority_and_drops_replay_latches() {
-    let dir = tempfile::tempdir().unwrap();
-    let log_s = dir.path().join("input-authority.replay").to_string_lossy().into_owned();
-    let state = run_record_dump(
-        "bitgun",
-        120,
-        &log_s,
-        &[
+    let run_probe = |log_s: &str, fresh_mouse: bool| {
+        let mut env = vec![
             ("STONE_INPUT_PROBE_KEY", "input_probe"),
             ("STONE_INPUT_PROBE_MOUSE_BUTTON", "1"),
             ("STONE_LIVE_REWIND", "1"),
@@ -1561,23 +1556,44 @@ fn branch_projects_game_input_authority_and_drops_replay_latches() {
             ("STONE_PHYSICAL_KEY_RELEASE_AT_2", "83"),
             ("STONE_PHYSICAL_MOUSE_PRESS_AT", "80"),
             ("STONE_PHYSICAL_MOUSE_CAPTURED_AT", "80"),
-            ("STONE_PHYSICAL_MOUSE_RELEASE_AT", "81"),
-            // These are the first fresh live mouse events after the successful handoff.
-            ("STONE_PHYSICAL_MOUSE_PRESS_AT_2", "82"),
-            ("STONE_PHYSICAL_MOUSE_RELEASE_AT_2", "83"),
-        ],
-    );
-    let diag = &state["__stone_diag"];
-    assert_eq!(diag["STONE_BRANCH_COUNT"].as_i64(), Some(1), "input handoff needs a successful branch: {diag}");
-    assert_eq!(diag["STONE_INPUT_CAPTURED_MOUSE_INJECTED"].as_i64(), Some(1), "the captured-click control must run: {diag}");
-    assert_eq!(diag["STONE_INPUT_PROBE_REPLAY_KEY_DOWN"].as_i64().unwrap_or(0), 0, "physical held input must not reach replay game logic: {diag}");
-    assert_eq!(diag["STONE_INPUT_PROBE_REPLAY_KEY_PRESSED"].as_i64().unwrap_or(0), 0, "physical key latches must not reach replay game logic: {diag}");
+            // Keep the captured Resume Live Here press physically held for
+            // four live frames after handoff before releasing it.
+            ("STONE_PHYSICAL_MOUSE_RELEASE_AT", "85"),
+        ];
+        if fresh_mouse {
+            env.push(("STONE_PHYSICAL_MOUSE_PRESS_AT_2", "87"));
+            env.push(("STONE_PHYSICAL_MOUSE_RELEASE_AT_2", "89"));
+        }
+        run_record_dump("bitgun", 120, log_s, &env)
+    };
+
+    let captured_dir = tempfile::tempdir().unwrap();
+    let captured_log = captured_dir.path().join("captured-hold.replay").to_string_lossy().into_owned();
+    let captured = run_probe(&captured_log, false);
+    let captured_diag = &captured["__stone_diag"];
+    assert_eq!(captured_diag["STONE_BRANCH_COUNT"].as_i64(), Some(1), "input handoff needs a successful branch: {captured_diag}");
+    assert_eq!(captured_diag["STONE_INPUT_CAPTURED_MOUSE_INJECTED"].as_i64(), Some(1), "the captured-click control must run: {captured_diag}");
+    assert_eq!(captured_diag["STONE_INPUT_PROBE_REPLAY_KEY_DOWN"].as_i64().unwrap_or(0), 0, "physical held input must not reach replay game logic: {captured_diag}");
+    assert_eq!(captured_diag["STONE_INPUT_PROBE_REPLAY_KEY_PRESSED"].as_i64().unwrap_or(0), 0, "physical key latches must not reach replay game logic: {captured_diag}");
+    assert_eq!(captured_diag["STONE_INPUT_PROBE_LIVE_KEY_PRESSED"].as_i64(), Some(1), "fresh keyboard input must reach the first eligible live tick: {captured_diag}");
+    assert_eq!(captured_diag["STONE_INPUT_PROBE_REPLAY_MOUSE_DOWN"].as_i64().unwrap_or(0), 0, "physical mouse input must not reach replay game logic: {captured_diag}");
+    assert_eq!(captured_diag["STONE_INPUT_PROBE_REPLAY_MOUSE_PRESSED"].as_i64().unwrap_or(0), 0, "a captured UI click must not reach replay game logic: {captured_diag}");
+    assert_eq!(captured_diag["STONE_INPUT_PROBE_LIVE_MOUSE_DOWN"].as_i64().unwrap_or(0), 0, "the captured physical hold must stay out of live game input: {captured_diag}");
+    assert_eq!(captured_diag["STONE_INPUT_PROBE_LIVE_MOUSE_PRESSED"].as_i64().unwrap_or(0), 0, "the captured physical press must not create a live press edge: {captured_diag}");
+    assert_eq!(captured_diag["STONE_INPUT_PROBE_LIVE_MOUSE_RELEASED"].as_i64().unwrap_or(0), 0, "releasing the unseen captured press must not create a live release edge: {captured_diag}");
+
+    let fresh_dir = tempfile::tempdir().unwrap();
+    let fresh_log = fresh_dir.path().join("fresh-after-capture.replay").to_string_lossy().into_owned();
+    let fresh = run_probe(&fresh_log, true);
+    let diag = &fresh["__stone_diag"];
+    assert_eq!(diag["STONE_BRANCH_COUNT"].as_i64(), Some(1), "fresh input arm needs a successful branch: {diag}");
     assert_eq!(diag["STONE_INPUT_PROBE_REPLAY_MOUSE_DOWN"].as_i64().unwrap_or(0), 0, "physical mouse input must not reach replay game logic: {diag}");
     assert_eq!(diag["STONE_INPUT_PROBE_REPLAY_MOUSE_PRESSED"].as_i64().unwrap_or(0), 0, "a captured UI click must not reach replay game logic: {diag}");
-    assert_eq!(diag["STONE_INPUT_PROBE_LIVE_KEY_PRESSED"].as_i64(), Some(1), "fresh keyboard input must reach the first eligible live tick: {diag}");
-    assert_eq!(diag["STONE_INPUT_PROBE_LIVE_MOUSE_PRESSED"].as_i64(), Some(1), "only the fresh mouse press, not the captured UI press, reaches game logic: {diag}");
-    assert_eq!(state["stone"]["sim_mouse_override"], serde_json::Value::Null, "handoff clears replay mouse authority");
-    assert_eq!(state["stone"]["IMGUI_MOUSE_CAPTURE_OVERRIDE"], serde_json::Value::Null, "handoff clears replay UI capture authority");
+    assert_eq!(diag["STONE_INPUT_PROBE_LIVE_MOUSE_PRESSED"].as_i64(), Some(1), "a fresh post-release mouse press must create exactly one live press edge: {diag}");
+    assert!(diag["STONE_INPUT_PROBE_LIVE_MOUSE_DOWN"].as_i64().is_some_and(|n| n > 0), "the fresh mouse press must reach live game logic as down: {diag}");
+    assert_eq!(diag["STONE_INPUT_PROBE_LIVE_MOUSE_RELEASED"].as_i64(), Some(1), "only the fresh release may reach live game logic: {diag}");
+    assert_eq!(fresh["stone"]["sim_mouse_override"], serde_json::Value::Null, "handoff clears replay mouse authority");
+    assert_eq!(fresh["stone"]["IMGUI_MOUSE_CAPTURE_OVERRIDE"], serde_json::Value::Null, "handoff clears replay UI capture authority");
 }
 
 #[test]
