@@ -116,6 +116,16 @@ fn cell_name<T>(cell: Idx<T>) -> String {
     format!("c{}", raw(cell))
 }
 
+fn cell_is_uint(ws: &Workspace, ty: Option<bone_semantic::prelude::TyId>) -> bool {
+    let Some(bone_semantic::prelude::TyId::Static(module, index)) = ty else {
+        return false;
+    };
+    matches!(
+        ws.module(module).ty_arena[index],
+        bone_semantic::hir::TypeExpr::Builtin(bone_semantic::hir::BuiltinTy::Uint)
+    )
+}
+
 /// The compiler-owned temp holding publisher argument `i` while the remaining
 /// arguments evaluate. In the shared `__rock_` global space and outside the
 /// reserved body namespace, like [`ret_slot`]; a body naming one rejects.
@@ -540,6 +550,11 @@ pub fn emit_fn_with_callees(
 
     let params: Vec<String> = mf.params.iter().map(|&c| cell_name(c)).collect();
     let mut header = format!("function {js_name}({}) {{\n", params.join(", "));
+    for &c in &mf.params {
+        if cell_is_uint(ws, mf.cells[c].ty) {
+            header.push_str(&format!("  {} = {} >>> 0;\n", cell_name(c), cell_name(c)));
+        }
+    }
 
     // Hoist declarations for every stored cell that is not a param (JS block
     // scope would otherwise not carry a cell written in one arm and read in the
@@ -1679,6 +1694,7 @@ impl Emitter<'_> {
                     let cmp = match lit {
                         Lit::Nil => format!("{d} == null"),
                         Lit::Int(i) => format!("{d} === {i}"),
+                        Lit::Uint(i) => format!("{d} === {i}"),
                         Lit::Bool(v) => format!("{d} === {v}"),
                         Lit::Float(f) => format!("{d} === {}", js_number(*f)?),
                         Lit::Str(v) => format!("{d} === {}", js_string_lit(v.as_str())?),
@@ -1724,6 +1740,20 @@ impl Emitter<'_> {
 
     /// The JS expression for a value operand: the bound `v<raw>` temp if the
     /// inst was materialized at its position, else its expression folded inline.
+    fn checked_uint_shift(
+        &self,
+        value: Idx<Inst>,
+        count: Idx<Inst>,
+        op: &str,
+    ) -> Result<String, CompilerError> {
+        let value = self.render_val(value)?;
+        let count = self.render_val(count)?;
+        let shifted = format!("((value {op} count) >>> 0)");
+        Ok(format!(
+            "((value, count) => count <= 31 ? {shifted} : (() => {{ throw new Error('uint shift count out of range'); }})())({value}, {count})"
+        ))
+    }
+
     fn render_val(&self, iid: Idx<Inst>) -> Result<String, CompilerError> {
         if self.inlinable[raw(iid) as usize] {
             self.render_inst_expr(iid)
@@ -1742,6 +1772,7 @@ impl Emitter<'_> {
         };
         Ok(match &self.mf.insts[iid] {
             Inst::Const(Lit::Int(i)) => i.to_string(),
+            Inst::Const(Lit::Uint(i)) => i.to_string(),
             Inst::Const(Lit::Float(f)) => js_number(*f)?,
             Inst::Const(Lit::Bool(b)) => b.to_string(),
             Inst::Const(Lit::Nil) => "null".to_string(),
@@ -1750,6 +1781,11 @@ impl Emitter<'_> {
             Inst::IntAdd(a, b) | Inst::FloatAdd(a, b) => bin(a, "+", b, self)?,
             Inst::IntSub(a, b) | Inst::FloatSub(a, b) => bin(a, "-", b, self)?,
             Inst::IntMul(a, b) | Inst::FloatMul(a, b) => bin(a, "*", b, self)?,
+            Inst::UintAdd(a, b) => format!("(({} + {}) >>> 0)", self.render_val(*a)?, self.render_val(*b)?),
+            Inst::UintSub(a, b) => format!("(({} - {}) >>> 0)", self.render_val(*a)?, self.render_val(*b)?),
+            Inst::UintMul(a, b) => format!("(Math.imul({}, {}) >>> 0)", self.render_val(*a)?, self.render_val(*b)?),
+            Inst::UintDiv(a, b) => format!("(Math.floor({} / {}) >>> 0)", self.render_val(*a)?, self.render_val(*b)?),
+            Inst::UintMod(a, b) => format!("(({} % {}) >>> 0)", self.render_val(*a)?, self.render_val(*b)?),
             Inst::FloatDiv(a, b) => bin(a, "/", b, self)?,
             // Rock int `/` floors toward -inf (Lua); JS `/` is real division.
             Inst::IntDiv(a, b) => format!("Math.floor({} / {})", self.render_val(*a)?, self.render_val(*b)?),
@@ -1757,6 +1793,10 @@ impl Emitter<'_> {
             Inst::IntLeq(a, b) | Inst::FloatLeq(a, b) => bin(a, "<=", b, self)?,
             Inst::IntGt(a, b) | Inst::FloatGt(a, b) => bin(a, ">", b, self)?,
             Inst::IntGeq(a, b) | Inst::FloatGeq(a, b) => bin(a, ">=", b, self)?,
+            Inst::UintLt(a, b) => bin(a, "<", b, self)?,
+            Inst::UintLeq(a, b) => bin(a, "<=", b, self)?,
+            Inst::UintGt(a, b) => bin(a, ">", b, self)?,
+            Inst::UintGeq(a, b) => bin(a, ">=", b, self)?,
             // Loose `== null` / `!= null` when either side is `nil`: it matches
             // JS `undefined` too, so an OMITTED defaulted arg (JS passes nothing
             // -> `undefined`, not `null`) still trips the callee's `x == nil`
@@ -1784,8 +1824,24 @@ impl Emitter<'_> {
                 format!("(({} >>> {}) | 0)", self.render_val(*a)?, self.render_val(*b)?)
             }
             Inst::BitNot(x) => format!("(~{})", self.render_val(*x)?),
+            Inst::UintBitNot(x) => format!("((~{}) >>> 0)", self.render_val(*x)?),
+            Inst::UintBitAnd(a, b) => format!("(({} & {}) >>> 0)", self.render_val(*a)?, self.render_val(*b)?),
+            Inst::UintBitOr(a, b) => format!("(({} | {}) >>> 0)", self.render_val(*a)?, self.render_val(*b)?),
+            Inst::UintBitXor(a, b) => format!("(({} ^ {}) >>> 0)", self.render_val(*a)?, self.render_val(*b)?),
+            Inst::UintShl(a, b) => self.checked_uint_shift(*a, *b, "<<")?,
+            Inst::UintShr(a, b) => self.checked_uint_shift(*a, *b, ">>>")?,
             // Identity on JS (all doubles), like codegen-lua on luajit.
             Inst::IntToFloat(x) => self.render_val(*x)?,
+            Inst::UintToFloat(x) => self.render_val(*x)?,
+            Inst::IntToUint(x) | Inst::FloatToUint(x) => {
+                let value = self.render_val(*x)?;
+                format!(
+                    "((value) => (value >= 0 && value <= 4294967295 ? Math.trunc(value) : (() => {{ throw new Error(\"uint conversion out of range\"); }})()))({value})"
+                )
+            }
+            Inst::UintToInt(x) => self.render_val(*x)?,
+            Inst::UintBitcastInt(x) => format!("({} | 0)", self.render_val(*x)?),
+            Inst::IntBitcastUint(x) => format!("({} >>> 0)", self.render_val(*x)?),
             // Rock float->int truncates toward -inf == floor.
             Inst::FloatToInt(x) => format!("Math.floor({})", self.render_val(*x)?),
             // Lua `..` coerces each operand via `tostring` (number formatting is
@@ -2018,6 +2074,7 @@ impl Emitter<'_> {
             Inst::FfiNewArray { ctype, count } => match ctype.as_str() {
                 "float" => format!("new Float32Array({})", self.render_val(*count)?),
                 "int" => format!("new Int32Array({})", self.render_val(*count)?),
+                "uint32_t" => format!("new Uint32Array({})", self.render_val(*count)?),
                 // A value struct has no per-struct ctype on JS: back it onto one
                 // flat `Float32Array(n * size/4)` laid out in the SAME C bytes
                 // luajit uses, which the per-leaf views (`FfiViewCast`) then alias
@@ -2052,6 +2109,7 @@ impl Emitter<'_> {
                 let array = match cty.as_str() {
                     "float" => "Float32Array",
                     "int" => "Int32Array",
+                    "uint32_t" => "Uint32Array",
                     // C `bool` is one byte. Reads coerce back to a JS boolean at
                     // the leaf `Index` (`!== 0`); writes coerce implicitly.
                     "bool" => "Uint8Array",
@@ -5964,6 +6022,7 @@ fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
         ("tuple_second", 1) => Some("$1[1]"),
         // Materialized `a..b` range -> a Vec-shaped object (runtime helper).
         ("__range", 2) => Some("__range($1, $2)"),
+        ("__range_uint", 2) => Some("__range($1, $2)"),
         // The JS harness has no release mode (`_G.__ROCK_RELEASE` is never set).
         ("is_release_mode", 0) => Some("false"),
         // `pcall(f); return not ok` -- did `f` error? A JS throw is the failure.
@@ -6158,6 +6217,11 @@ fn for_each_operand(inst: &Inst, f: &mut impl FnMut(Idx<Inst>)) {
         | Inst::IntMul(a, b)
         | Inst::IntDiv(a, b)
         | Inst::IntMod(a, b)
+        | Inst::UintAdd(a, b)
+        | Inst::UintSub(a, b)
+        | Inst::UintMul(a, b)
+        | Inst::UintDiv(a, b)
+        | Inst::UintMod(a, b)
         | Inst::FloatAdd(a, b)
         | Inst::FloatSub(a, b)
         | Inst::FloatMul(a, b)
@@ -6168,6 +6232,10 @@ fn for_each_operand(inst: &Inst, f: &mut impl FnMut(Idx<Inst>)) {
         | Inst::IntLeq(a, b)
         | Inst::IntGt(a, b)
         | Inst::IntGeq(a, b)
+        | Inst::UintLt(a, b)
+        | Inst::UintLeq(a, b)
+        | Inst::UintGt(a, b)
+        | Inst::UintGeq(a, b)
         | Inst::FloatLt(a, b)
         | Inst::FloatLeq(a, b)
         | Inst::FloatGt(a, b)
@@ -6178,13 +6246,25 @@ fn for_each_operand(inst: &Inst, f: &mut impl FnMut(Idx<Inst>)) {
         | Inst::BitOr(a, b)
         | Inst::BitXor(a, b)
         | Inst::Shl(a, b)
-        | Inst::Shr(a, b) => mark(&[*a, *b]),
+        | Inst::Shr(a, b)
+        | Inst::UintBitAnd(a, b)
+        | Inst::UintBitOr(a, b)
+        | Inst::UintBitXor(a, b)
+        | Inst::UintShl(a, b)
+        | Inst::UintShr(a, b) => mark(&[*a, *b]),
         Inst::ToString(x)
         | Inst::FloatToInt(x)
         | Inst::IntToFloat(x)
+        | Inst::UintToFloat(x)
+        | Inst::IntToUint(x)
+        | Inst::UintToInt(x)
+        | Inst::FloatToUint(x)
+        | Inst::UintBitcastInt(x)
+        | Inst::IntBitcastUint(x)
         | Inst::Neg(x)
         | Inst::Not(x)
         | Inst::BitNot(x)
+        | Inst::UintBitNot(x)
         | Inst::CoroSetInner(x) => mark(&[*x]),
         Inst::Format { value, .. } => mark(&[*value]),
         Inst::FormatDyn { value, fmt } => mark(&[*value, *fmt]),
@@ -6257,13 +6337,18 @@ fn always_inlinable(inst: &Inst) -> bool {
         inst,
         Inst::Const(_)
             | Inst::IntAdd(..) | Inst::IntSub(..) | Inst::IntMul(..) | Inst::IntDiv(..) | Inst::IntMod(..)
+            | Inst::UintAdd(..) | Inst::UintSub(..) | Inst::UintMul(..) | Inst::UintDiv(..) | Inst::UintMod(..)
             | Inst::FloatAdd(..) | Inst::FloatSub(..) | Inst::FloatMul(..) | Inst::FloatDiv(..) | Inst::FloatMod(..)
             | Inst::StringConcat(..)
             | Inst::IntLt(..) | Inst::IntLeq(..) | Inst::IntGt(..) | Inst::IntGeq(..)
+            | Inst::UintLt(..) | Inst::UintLeq(..) | Inst::UintGt(..) | Inst::UintGeq(..)
             | Inst::FloatLt(..) | Inst::FloatLeq(..) | Inst::FloatGt(..) | Inst::FloatGeq(..)
             | Inst::Eq(..) | Inst::NotEq(..)
             | Inst::BitAnd(..) | Inst::BitOr(..) | Inst::BitXor(..) | Inst::Shl(..) | Inst::Shr(..)
-            | Inst::Neg(_) | Inst::Not(_) | Inst::BitNot(_) | Inst::ToString(_) | Inst::FloatToInt(_) | Inst::IntToFloat(_)
+            | Inst::UintBitAnd(..) | Inst::UintBitOr(..) | Inst::UintBitXor(..) | Inst::UintShl(..) | Inst::UintShr(..)
+            | Inst::Neg(_) | Inst::Not(_) | Inst::BitNot(_) | Inst::UintBitNot(_) | Inst::ToString(_)
+            | Inst::FloatToInt(_) | Inst::IntToFloat(_) | Inst::UintToFloat(_) | Inst::IntToUint(_)
+            | Inst::UintToInt(_) | Inst::FloatToUint(_) | Inst::UintBitcastInt(_) | Inst::IntBitcastUint(_)
             | Inst::Format { .. } | Inst::FormatDyn { .. }
             | Inst::MakeTuple(_) | Inst::MakeVec(_)
             | Inst::MakeStruct { .. } | Inst::MakeValueStruct { .. } | Inst::MakeEnum { .. } | Inst::MakeEnumDyn { .. }

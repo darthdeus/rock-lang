@@ -1,0 +1,68 @@
+//- uint_annotation_and_literal
+fn f() -> uint { 42 }
+             //^ uint
+
+//- uint_param_and_call
+fn id(x: uint) -> uint { x }
+fn call() -> uint { id(42) }
+                      //^ uint
+
+//- uint_bitwise_and_ordering
+fn bits(x: uint) -> uint { (x | 1) >> 1 }
+                         //^ uint
+fn ordered(x: uint, y: uint) -> bool { x > y }
+                                      //^ bool
+fn ordered_literal(x: uint) -> bool { x > 0 }
+                                      //^ bool
+
+//- uint_arithmetic
+operator +(a: uint, b: uint) -> uint { return a }
+operator -(a: uint, b: uint) -> uint { return a }
+operator *(a: uint, b: uint) -> uint { return a }
+operator ./(a: uint, b: uint) -> uint { return a }
+operator %(a: uint, b: uint) -> uint { return a }
+fn arithmetic(x: uint, y: uint) -> uint { x + y * 2 }
+                                           //^ uint
+fn arithmetic_literal(x: uint) -> uint { x + 1 }
+                                           //^ uint
+
+//- uint_range
+fn range(lo: uint, hi: uint) -> uint {
+    for i in lo..hi {
+        let x = i
+          //^ uint
+    }
+    lo
+}
+
+//- negative_uint_literal @fail
+fn f() -> uint { -1 }
+             //^ uint
+
+//- oversized_uint_literal @fail
+fn f() -> uint { 4294967296 }
+             //^ uint
+
+//- uint_is_not_int @fail
+fn f(x: uint) -> int { x }
+                    //^ uint
+
+//- uint_bitcast
+fn as_signed(x: uint) -> int { bitcast<int>(x) }
+                                //^ int
+
+//- uint_shift_count @fail
+fn bad_shift(x: uint) -> uint { x << 32 }
+                                  //^ uint
+
+//- negative_uint_cast @fail
+fn bad_cast() -> uint { -1 as uint }
+                        //^ uint
+
+//- mixed_uint_int @fail
+fn mixed(x: uint, y: int) -> uint { x + y }
+                                      //^ uint
+
+//- mixed_uint_int_equality @fail
+fn mixed_eq(x: uint, y: int) -> bool { x == y }
+                                          //^ bool

@@ -680,6 +680,7 @@ impl Builder<'_> {
     pub(crate) fn arith_ty_of(&self, te: TypeExpr) -> Option<ArithTy> {
         match te {
             TypeExpr::Builtin(BuiltinTy::Int) => Some(ArithTy::Int),
+            TypeExpr::Builtin(BuiltinTy::Uint) => Some(ArithTy::Uint),
             TypeExpr::Builtin(BuiltinTy::Float) => Some(ArithTy::Float),
             TypeExpr::Builtin(BuiltinTy::String) => Some(ArithTy::Str),
             TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }

@@ -69,6 +69,7 @@ pub enum MonoCtor {
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum MonoTy {
     Int,
+    Uint,
     Float,
     Bool,
     String,
@@ -97,6 +98,7 @@ impl MonoTy {
     fn write(&self, out: &mut String) {
         match self {
             MonoTy::Int => out.push_str("int"),
+            MonoTy::Uint => out.push_str("uint"),
             MonoTy::Float => out.push_str("float"),
             MonoTy::Bool => out.push_str("bool"),
             MonoTy::String => out.push_str("string"),
@@ -155,6 +157,7 @@ impl MonoTy {
     pub fn depth(&self) -> u32 {
         match self {
             MonoTy::Int
+            | MonoTy::Uint
             | MonoTy::Float
             | MonoTy::Bool
             | MonoTy::String
@@ -201,6 +204,7 @@ impl MonoTy {
         };
         match self {
             MonoTy::Int => prim(out, "int"),
+            MonoTy::Uint => prim(out, "uint"),
             MonoTy::Float => prim(out, "float"),
             MonoTy::Bool => prim(out, "bool"),
             MonoTy::String => prim(out, "string"),
@@ -292,6 +296,7 @@ impl MonoTy {
     pub fn prim_name(&self) -> Option<&'static str> {
         match self {
             Self::Int => Some("int"),
+            Self::Uint => Some("uint"),
             Self::Float => Some("float"),
             Self::Bool => Some("bool"),
             Self::String => Some("string"),
@@ -311,6 +316,7 @@ impl MonoTy {
     pub fn any_nominal(&self, pred: &impl Fn(Ustr) -> bool) -> bool {
         match self {
             Self::Int
+            | Self::Uint
             | Self::Float
             | Self::Bool
             | Self::String
@@ -763,6 +769,7 @@ fn convert_at<S: std::hash::BuildHasher>(
     Ok(match node {
         TypeExpr::Builtin(b) => match b {
             BuiltinTy::Int => MonoTy::Int,
+            BuiltinTy::Uint => MonoTy::Uint,
             BuiltinTy::Float => MonoTy::Float,
             BuiltinTy::Bool => MonoTy::Bool,
             BuiltinTy::String => MonoTy::String,

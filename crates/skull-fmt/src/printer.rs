@@ -1418,6 +1418,13 @@ impl<'a> Printer<'a> {
             ExprKind::As(x, ty) => {
                 Doc::concat([self.expr(*x), Doc::text(" as "), self.type_expr(*ty)])
             }
+            ExprKind::Bitcast(x, ty) => Doc::concat([
+                Doc::text("bitcast<"),
+                self.type_expr(*ty),
+                Doc::text(">("),
+                self.expr(*x),
+                Doc::text(")"),
+            ]),
             ExprKind::TypeAscription(x, ty) => {
                 Doc::concat([self.expr(*x), Doc::text(" :: "), self.type_expr(*ty)])
             }
@@ -2365,6 +2372,7 @@ impl<'a> Printer<'a> {
             TypeExprKind::Unit => Doc::text("()"),
             TypeExprKind::String => Doc::text("string"),
             TypeExprKind::Int => Doc::text("int"),
+            TypeExprKind::Uint => Doc::text("uint"),
             TypeExprKind::Float => Doc::text("float"),
             TypeExprKind::Bool => Doc::text("bool"),
             TypeExprKind::Ident(id) => Doc::text(kw(id.name)),

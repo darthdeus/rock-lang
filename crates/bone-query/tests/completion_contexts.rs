@@ -73,6 +73,13 @@ fn struct_literal_required_fields_rank_above_defaulted() {
 }
 
 #[test]
+fn type_completion_offers_uint_with_its_source_spelling() {
+    let src = "fn r(x: u) {}\n";
+    let l = labels(src, 0, 9);
+    assert!(l.contains(&"uint".to_string()), "uint type completion missing: {l:?}");
+}
+
+#[test]
 fn member_ufcs_overloads_dedup_to_one_item() {
     // Two overloads of `rotate` on the receiver struct must surface as ONE
     // member item (same label, same insert -- the duplicate is popup noise;

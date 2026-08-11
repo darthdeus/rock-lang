@@ -340,6 +340,7 @@ pub(crate) fn leaf_names_rec(shape: &ValueShape, prefix: &str, sep: &str, out: &
 pub const LEAF_VIEWS: &[(&str, &str, &str)] = &[
     ("float", "__vf", "float*"),
     ("int", "__vi", "int*"),
+    ("uint32_t", "__vu", "uint32_t*"),
     ("bool", "__vb", "bool*"),
 ];
 
@@ -449,12 +450,12 @@ pub fn leaf_view_ctys(ws: &Workspace, elem: Ustr) -> Result<Vec<&'static str>, S
 pub const NB_PRIM_ELEMS: &[(&str, usize)] = &[
     ("float", 4),
     ("int", 4),
+    ("uint32_t", 4),
     ("bool", 1),
     ("uint8_t", 1),
     ("int8_t", 1),
     ("uint16_t", 2),
     ("int16_t", 2),
-    ("uint32_t", 4),
 ];
 
 /// One `_G.__ROCK_NB_STORAGE` registration: `__rock_nb_storage(<ctype>, <byte
@@ -528,7 +529,7 @@ pub struct LeafSlot {
 /// types [`value_field_c_type`] admits as leaves.
 pub(crate) fn c_prim_size_align(cty: &str) -> Option<(usize, usize)> {
     match cty {
-        "int" | "float" => Some((4, 4)),
+        "int" | "uint32_t" | "float" => Some((4, 4)),
         "bool" => Some((1, 1)),
         _ => None,
     }
@@ -644,6 +645,7 @@ pub(crate) fn layout_rec(
                 // literals `value_field_c_type` returns for primitives.
                 let cty: &'static str = match cty.as_str() {
                     "int" => "int",
+                    "uint32_t" => "uint32_t",
                     "float" => "float",
                     "bool" => "bool",
                     _ => return None,
@@ -874,7 +876,7 @@ pub(crate) fn value_shape_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ust
     let mut fields = Vec::with_capacity(sd.fields.len());
     for f in &sd.fields {
         let fs = match static_ty(ws, f.ty)? {
-            TypeExpr::Builtin(BuiltinTy::Int | BuiltinTy::Float | BuiltinTy::Bool) => FieldShape::Prim,
+            TypeExpr::Builtin(BuiltinTy::Int | BuiltinTy::Uint | BuiltinTy::Float | BuiltinTy::Bool) => FieldShape::Prim,
             TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => {
                 // A payload-free enum is an `int` value GLOBALLY (the variant's
                 // declaration-order tag), so as a field it is just a `Prim` int --
@@ -1177,6 +1179,7 @@ pub(crate) struct UniformValuesShape {
     pub leaf_enum: Ustr,
     pub float_variant: Ustr,
     pub int_variant: Ustr,
+    pub uint_variant: Ustr,
     pub bool_variant: Ustr,
 }
 
@@ -1212,11 +1215,12 @@ pub(crate) fn uniform_values_return_shape(
         return Err(format!("canonical leaf type `{leaf_enum}` is not an enum"));
     };
     let ed = &ws.modules[eid.module.index()].enums[eid.def];
-    if ed.variants.len() != 3 {
-        return Err(format!("canonical leaf enum `{leaf_enum}` must have float, int and bool variants"));
+    if ed.variants.len() != 4 {
+        return Err(format!("canonical leaf enum `{leaf_enum}` must have float, int, uint and bool variants"));
     }
     let mut float_variant = None;
     let mut int_variant = None;
+    let mut uint_variant = None;
     let mut bool_variant = None;
     for variant in &ed.variants {
         let VariantPayload::Tuple(types) = &variant.payload else {
@@ -1231,14 +1235,15 @@ pub(crate) fn uniform_values_return_shape(
         match static_ty(ws, ty) {
             Some(TypeExpr::Builtin(BuiltinTy::Float)) => float_variant = Some(variant.name),
             Some(TypeExpr::Builtin(BuiltinTy::Int)) => int_variant = Some(variant.name),
+            Some(TypeExpr::Builtin(BuiltinTy::Uint)) => uint_variant = Some(variant.name),
             Some(TypeExpr::Builtin(BuiltinTy::Bool)) => bool_variant = Some(variant.name),
-            _ => return Err(format!("canonical leaf `{}` must carry float, int or bool", variant.name)),
+            _ => return Err(format!("canonical leaf `{}` must carry float, int, uint or bool", variant.name)),
         }
     }
-    let (Some(float_variant), Some(int_variant), Some(bool_variant)) =
-        (float_variant, int_variant, bool_variant)
+    let (Some(float_variant), Some(int_variant), Some(uint_variant), Some(bool_variant)) =
+        (float_variant, int_variant, uint_variant, bool_variant)
     else {
-        return Err(format!("canonical leaf enum `{leaf_enum}` needs float, int and bool variants"));
+        return Err(format!("canonical leaf enum `{leaf_enum}` needs float, int, uint and bool variants"));
     };
     Ok(UniformValuesShape {
         block_name,
@@ -1247,6 +1252,7 @@ pub(crate) fn uniform_values_return_shape(
         leaf_enum,
         float_variant,
         int_variant,
+        uint_variant,
         bool_variant,
     })
 }
@@ -1600,6 +1606,7 @@ pub fn nobox_global_accessor_shape(ws: &Workspace, ty: TyId) -> Option<NoboxGlob
 pub fn growth_depth(t: &MonoTy) -> u32 {
     match t {
         MonoTy::Int
+        | MonoTy::Uint
         | MonoTy::Float
         | MonoTy::Bool
         | MonoTy::String
@@ -2749,6 +2756,7 @@ pub(crate) fn slot_name(suffix: &str) -> Ustr {
 pub(crate) fn scalar_c_type(ws: &Workspace, ty: TyId) -> Option<&'static str> {
     match static_ty(ws, ty)? {
         TypeExpr::Builtin(BuiltinTy::Int) => Some("int"),
+        TypeExpr::Builtin(BuiltinTy::Uint) => Some("uint32_t"),
         TypeExpr::Builtin(BuiltinTy::Float) => Some("float"),
         TypeExpr::Builtin(BuiltinTy::Bool) => Some("bool"),
         _ => None,
@@ -2813,6 +2821,7 @@ pub fn value_field_c_type(ws: &Workspace, ty: TyId) -> Option<String> {
 pub(crate) fn value_field_c_type_guarded(ws: &Workspace, ty: TyId, stack: &mut Vec<Ustr>) -> Option<String> {
     match static_ty(ws, ty)? {
         TypeExpr::Builtin(BuiltinTy::Int) => Some("int".into()),
+        TypeExpr::Builtin(BuiltinTy::Uint) => Some("uint32_t".into()),
         TypeExpr::Builtin(BuiltinTy::Float) => Some("float".into()),
         TypeExpr::Builtin(BuiltinTy::Bool) => Some("bool".into()),
         // A nested value struct is C-mappable iff it is itself FFI-clean; a

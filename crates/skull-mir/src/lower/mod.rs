@@ -655,6 +655,7 @@ fn is_native_buffer(name: &str) -> bool {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ArithTy {
     Int,
+    Uint,
     Float,
     Str,
 }
@@ -666,17 +667,22 @@ fn arith_inst(op: &str, lt: ArithTy, rt: ArithTy, lv: Idx<Inst>, rv: Idx<Inst>) 
     Ok(match op {
         "__op_add" if lt == ArithTy::Str || rt == ArithTy::Str => Inst::StringConcat(lv, rv),
         "__op_add" if float => Inst::FloatAdd(lv, rv),
+        "__op_add" if lt == ArithTy::Uint && rt == ArithTy::Uint => Inst::UintAdd(lv, rv),
         "__op_add" => Inst::IntAdd(lv, rv),
         "__op_sub" if float => Inst::FloatSub(lv, rv),
+        "__op_sub" if lt == ArithTy::Uint && rt == ArithTy::Uint => Inst::UintSub(lv, rv),
         "__op_sub" => Inst::IntSub(lv, rv),
         "__op_mul" if float => Inst::FloatMul(lv, rv),
+        "__op_mul" if lt == ArithTy::Uint && rt == ArithTy::Uint => Inst::UintMul(lv, rv),
         "__op_mul" => Inst::IntMul(lv, rv),
         // `/` is always float division (Lua `/` promotes int operands);
         // integer floor division is the separate `./` -> `__op_idiv`, which
         // codegen renders `math.floor(a / b)`.
         "__op_div" => Inst::FloatDiv(lv, rv),
+        "__op_idiv" if lt == ArithTy::Uint && rt == ArithTy::Uint => Inst::UintDiv(lv, rv),
         "__op_idiv" => Inst::IntDiv(lv, rv),
         "__op_mod" if float => Inst::FloatMod(lv, rv),
+        "__op_mod" if lt == ArithTy::Uint && rt == ArithTy::Uint => Inst::UintMod(lv, rv),
         "__op_mod" => Inst::IntMod(lv, rv),
         _ => return Err(gap(format!("native arith op {op}"))),
     })
@@ -2372,6 +2378,7 @@ fn map_key_rejection_reason(
     match ty_node(ws, inf, k)? {
         TypeExpr::Builtin(
             BuiltinTy::Int
+            | BuiltinTy::Uint
             | BuiltinTy::Float
             | BuiltinTy::Bool
             | BuiltinTy::String
@@ -2529,6 +2536,7 @@ fn native_buffer_alloc_elem_ctype(
         .ok_or_else(|| "`NativeBuffer` element type is missing".to_string())?;
     match ty_node(ws, inf, elem) {
         Some(TypeExpr::Builtin(BuiltinTy::Int)) => Ok(Ustr::from("int")),
+        Some(TypeExpr::Builtin(BuiltinTy::Uint)) => Ok(Ustr::from("uint32_t")),
         Some(TypeExpr::Builtin(BuiltinTy::Float)) => Ok(Ustr::from("float")),
         Some(TypeExpr::Builtin(BuiltinTy::Bool)) => Ok(Ustr::from("bool")),
         Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) if map_is_value_struct(ws, name) => {
@@ -2677,7 +2685,7 @@ fn native_buffer_alloc_elem_ctype_spec(
         _ => None,
     };
     if let Some(prim) = leaf.as_ref().and_then(crate::monoty::MonoTy::prim_name) {
-        return Ok(Ustr::from(prim));
+        return Ok(Ustr::from(if prim == "uint" { "uint32_t" } else { prim }));
     }
     match leaf.as_ref().map(|ty| (ty, ty.nominal())) {
         Some((_, Some(n))) => {

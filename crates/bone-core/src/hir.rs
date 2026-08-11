@@ -9,6 +9,7 @@ use crate::prelude::*;
 #[derive(Copy, Clone, Debug)]
 pub struct Builtins {
     pub int: Idx<TypeExpr>,
+    pub uint: Idx<TypeExpr>,
     pub float: Idx<TypeExpr>,
     pub bool: Idx<TypeExpr>,
     pub string: Idx<TypeExpr>,
@@ -21,6 +22,10 @@ pub struct Builtins {
 impl Builtins {
     pub fn int(&self) -> TyId {
         TyId::Static(ModuleId::builtin(), self.int)
+    }
+
+    pub fn uint(&self) -> TyId {
+        TyId::Static(ModuleId::builtin(), self.uint)
     }
 
     pub fn float(&self) -> TyId {
@@ -84,6 +89,7 @@ pub enum BuiltinTy {
     Any,
     Unit,
     Int,
+    Uint,
     Float,
     Bool,
     String,
@@ -582,6 +588,7 @@ pub struct InterpSpec {
 pub enum AsKind {
     Ascribe,
     Cast,
+    Bitcast,
 }
 
 #[derive(Copy, Clone, Debug)]

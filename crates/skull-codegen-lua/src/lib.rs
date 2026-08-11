@@ -632,6 +632,16 @@ fn write_cell_local(out: &mut String, colors: &[u32], c: Idx<Cell>) {
     }
 }
 
+fn cell_is_uint(ws: &Workspace, ty: Option<bone_semantic::prelude::TyId>) -> bool {
+    let Some(bone_semantic::prelude::TyId::Static(module, index)) = ty else {
+        return false;
+    };
+    matches!(
+        ws.module(module).ty_arena[index],
+        bone_semantic::hir::TypeExpr::Builtin(bone_semantic::hir::BuiltinTy::Uint)
+    )
+}
+
 // --- relooper: counted-`for` recovery (structured control flow) ------------
 //
 // A `for i in lo..hi` / `for x in xs` / `enumerate(..)` lowers to a canonical
@@ -989,13 +999,18 @@ fn always_inlinable(inst: &Inst) -> bool {
         inst,
         Inst::Const(_)
             | Inst::IntAdd(..) | Inst::IntSub(..) | Inst::IntMul(..) | Inst::IntDiv(..) | Inst::IntMod(..)
+            | Inst::UintAdd(..) | Inst::UintSub(..) | Inst::UintMul(..) | Inst::UintDiv(..) | Inst::UintMod(..)
             | Inst::FloatAdd(..) | Inst::FloatSub(..) | Inst::FloatMul(..) | Inst::FloatDiv(..) | Inst::FloatMod(..)
             | Inst::StringConcat(..)
             | Inst::IntLt(..) | Inst::IntLeq(..) | Inst::IntGt(..) | Inst::IntGeq(..)
+            | Inst::UintLt(..) | Inst::UintLeq(..) | Inst::UintGt(..) | Inst::UintGeq(..)
             | Inst::FloatLt(..) | Inst::FloatLeq(..) | Inst::FloatGt(..) | Inst::FloatGeq(..)
             | Inst::Eq(..) | Inst::NotEq(..)
             | Inst::BitAnd(..) | Inst::BitOr(..) | Inst::BitXor(..) | Inst::Shl(..) | Inst::Shr(..)
-            | Inst::Neg(_) | Inst::Not(_) | Inst::BitNot(_) | Inst::ToString(_) | Inst::FloatToInt(_) | Inst::IntToFloat(_)
+            | Inst::UintBitAnd(..) | Inst::UintBitOr(..) | Inst::UintBitXor(..) | Inst::UintShl(..) | Inst::UintShr(..)
+            | Inst::Neg(_) | Inst::Not(_) | Inst::BitNot(_) | Inst::UintBitNot(_) | Inst::ToString(_)
+            | Inst::FloatToInt(_) | Inst::IntToFloat(_) | Inst::UintToFloat(_) | Inst::IntToUint(_)
+            | Inst::UintToInt(_) | Inst::FloatToUint(_) | Inst::UintBitcastInt(_) | Inst::IntBitcastUint(_)
             | Inst::Format { .. } | Inst::FormatDyn { .. }
             | Inst::MakeTuple(_) | Inst::MakeVec(_)
             | Inst::MakeStruct { .. } | Inst::MakeValueStruct { .. } | Inst::MakeEnum { .. }
@@ -1117,6 +1132,16 @@ fn render_scope(
         write_cell_local(out, cell_colors, c);
     }
     out.push_str(")\n");
+
+    for &c in params {
+        if cell_is_uint(ws, func.cells[c].ty) {
+            out.push_str("  ");
+            write_cell_local(out, cell_colors, c);
+            out.push_str(" = ((");
+            write_cell_local(out, cell_colors, c);
+            out.push_str(" % 4294967296) + 4294967296) % 4294967296\n");
+        }
+    }
 
     // Declare registers in sorted color order (the dense table holds `u32::MAX`
     // for uncolored slots — inlined / non-value insts — which we skip), then the
@@ -1535,6 +1560,9 @@ impl Emitter<'_> {
             Inst::IntAdd(a, b) | Inst::FloatAdd(a, b) => self.write_bin(out, "+", a, b),
             Inst::IntSub(a, b) | Inst::FloatSub(a, b) => self.write_bin(out, "-", a, b),
             Inst::IntMul(a, b) | Inst::FloatMul(a, b) => self.write_bin(out, "*", a, b),
+            Inst::UintAdd(a, b) => self.write_u32_bin(out, "+", a, b),
+            Inst::UintSub(a, b) => self.write_u32_bin(out, "-", a, b),
+            Inst::UintMul(a, b) => self.write_u32_mul(out, a, b),
             // int `/` is floor-division (rock semantics); float `/` is real.
             Inst::IntDiv(a, b) => {
                 out.push_str("math.floor(");
@@ -1545,6 +1573,14 @@ impl Emitter<'_> {
             }
             Inst::FloatDiv(a, b) => self.write_bin(out, "/", a, b),
             Inst::IntMod(a, b) | Inst::FloatMod(a, b) => self.write_bin(out, "%", a, b),
+            Inst::UintDiv(a, b) => {
+                out.push_str("math.floor(");
+                self.write_opnd(out, *a);
+                out.push_str(" / ");
+                self.write_opnd(out, *b);
+                out.push(')');
+            }
+            Inst::UintMod(a, b) => self.write_u32_bin(out, "%", a, b),
             Inst::StringConcat(a, b) => {
                 // Emit the whole inlinable concat tree as ONE flat `..` run
                 // (`x .. y .. z`) rather than left-nested binary concats
@@ -1591,11 +1627,29 @@ impl Emitter<'_> {
             // pass ever materializes one; the operand path (`write_opnd`) folds it
             // away. `write_value` (not `write_opnd`) to avoid a double wrap.
             Inst::IntToFloat(x) => self.write_value(out, *x, &self.func.insts[*x]),
+            Inst::UintToFloat(x) => self.write_value(out, *x, &self.func.insts[*x]),
+            Inst::IntToUint(x) => self.write_checked_u32(out, *x, "uint conversion out of range"),
+            Inst::FloatToUint(x) => self.write_checked_u32(out, *x, "uint conversion out of range"),
+            Inst::UintToInt(x) => self.write_value(out, *x, &self.func.insts[*x]),
+            Inst::UintBitcastInt(x) => {
+                out.push_str("(((");
+                self.write_opnd(out, *x);
+                out.push_str(" + 2147483648) % 4294967296) - 2147483648)");
+            }
+            Inst::IntBitcastUint(x) => {
+                out.push_str("((");
+                self.write_opnd(out, *x);
+                out.push_str(") % 4294967296)");
+            }
 
             Inst::IntLt(a, b) | Inst::FloatLt(a, b) => self.write_bin(out, "<", a, b),
             Inst::IntLeq(a, b) | Inst::FloatLeq(a, b) => self.write_bin(out, "<=", a, b),
             Inst::IntGt(a, b) | Inst::FloatGt(a, b) => self.write_bin(out, ">", a, b),
             Inst::IntGeq(a, b) | Inst::FloatGeq(a, b) => self.write_bin(out, ">=", a, b),
+            Inst::UintLt(a, b) => self.write_bin(out, "<", a, b),
+            Inst::UintLeq(a, b) => self.write_bin(out, "<=", a, b),
+            Inst::UintGt(a, b) => self.write_bin(out, ">", a, b),
+            Inst::UintGeq(a, b) => self.write_bin(out, ">=", a, b),
             Inst::Eq(a, b) => self.write_bin(out, "==", a, b),
             Inst::NotEq(a, b) => self.write_bin(out, "~=", a, b),
 
@@ -1612,12 +1666,28 @@ impl Emitter<'_> {
                 self.write_opnd(out, *x);
                 out.push(')');
             }
+            Inst::UintBitNot(x) => {
+                out.push_str("(bit.bnot(");
+                self.write_opnd(out, *x);
+                out.push_str(")) % 4294967296");
+            }
 
             Inst::BitAnd(a, b) => self.write_bitfn(out, "bit.band", a, b),
             Inst::BitOr(a, b) => self.write_bitfn(out, "bit.bor", a, b),
             Inst::BitXor(a, b) => self.write_bitfn(out, "bit.bxor", a, b),
             Inst::Shl(a, b) => self.write_bitfn(out, "bit.lshift", a, b),
             Inst::Shr(a, b) => self.write_bitfn(out, "bit.rshift", a, b),
+            Inst::UintBitAnd(a, b) => self.write_u32_bitfn(out, "bit.band", a, b),
+            Inst::UintBitOr(a, b) => self.write_u32_bitfn(out, "bit.bor", a, b),
+            Inst::UintBitXor(a, b) => self.write_u32_bitfn(out, "bit.bxor", a, b),
+            Inst::UintShl(a, b) => self.write_u32_shift(out, "bit.lshift", a, b),
+            Inst::UintShr(a, b) => {
+                out.push_str("(function(value, count) return math.floor(value / (2 ^ (count <= 31 and count or error('uint shift count out of range')))) end)(");
+                self.write_opnd(out, *a);
+                out.push_str(", ");
+                self.write_opnd(out, *b);
+                out.push(')');
+            }
 
             Inst::Call { func, args } => {
                 let callee = self.callee_name(id, *func);
@@ -1900,6 +1970,54 @@ impl Emitter<'_> {
         out.push(')');
     }
 
+    fn write_u32_bin(&self, out: &mut String, op: &str, a: &Idx<Inst>, b: &Idx<Inst>) {
+        out.push_str("(");
+        self.write_bin(out, op, a, b);
+        out.push_str(") % 4294967296");
+    }
+
+    fn write_u32_bitfn(&self, out: &mut String, f: &str, a: &Idx<Inst>, b: &Idx<Inst>) {
+        out.push('(');
+        self.write_bitfn(out, f, a, b);
+        out.push_str(" % 4294967296)");
+    }
+
+    fn write_u32_shift(&self, out: &mut String, f: &str, a: &Idx<Inst>, b: &Idx<Inst>) {
+        out.push_str("(function(value, count) return ");
+        out.push_str(f);
+        out.push_str("(value, (count <= 31 and count or error('uint shift count out of range'))) % 4294967296 end)(");
+        self.write_opnd(out, *a);
+        out.push_str(", ");
+        self.write_opnd(out, *b);
+        out.push(')');
+    }
+
+    fn write_u32_mul(&self, out: &mut String, a: &Idx<Inst>, b: &Idx<Inst>) {
+        // Every product here is below 2^53. Splitting at 16 bits avoids the
+        // double-rounding that a direct Lua multiplication would incur.
+        out.push_str("((");
+        self.write_opnd(out, *a);
+        out.push_str(" % 65536) * (");
+        self.write_opnd(out, *b);
+        out.push_str(" % 65536) + ((math.floor(");
+        self.write_opnd(out, *a);
+        out.push_str(" / 65536) * (");
+        self.write_opnd(out, *b);
+        out.push_str(" % 65536) + (");
+        self.write_opnd(out, *a);
+        out.push_str(" % 65536) * math.floor(");
+        self.write_opnd(out, *b);
+        out.push_str(" / 65536)) % 65536) * 65536) % 4294967296");
+    }
+
+    fn write_checked_u32(&self, out: &mut String, x: Idx<Inst>, message: &str) {
+        out.push_str("(function(value) if value >= 0 and value <= 4294967295 then return math.floor(value) else error(");
+        write_lua_string(out, message);
+        out.push_str(") end end)(");
+        self.write_opnd(out, x);
+        out.push(')');
+    }
+
     /// READ index `base[index]`. NativeBuffer and Vec go through the
     /// debug-mode bounds-checked stdlib helpers (`__nb_checked_get` /
     /// `__vec_checked_get`) — skull runs debug; release stripping is future
@@ -2172,6 +2290,9 @@ impl Emitter<'_> {
 fn write_lit(out: &mut String, l: &Lit) {
     match l {
         Lit::Int(i) => {
+            let _ = write!(out, "{i}");
+        }
+        Lit::Uint(i) => {
             let _ = write!(out, "{i}");
         }
         Lit::Float(x) => {

@@ -838,11 +838,16 @@ impl Builder<'_> {
             let base = match store.view {
                 crate::gpu_layout::WireView::Float => fv,
                 crate::gpu_layout::WireView::Int => iv,
+                crate::gpu_layout::WireView::Uint => iv,
+            };
+            let leaf = match store.view {
+                crate::gpu_layout::WireView::Uint => self.emit_cur(Inst::UintBitcastInt(*leaf)),
+                _ => *leaf,
             };
             self.emit_cur(Inst::StoreIndex {
                 base,
                 index: idx,
-                value: *leaf,
+                value: leaf,
                 kind: ContainerKind::NativeBufferLeaf,
             });
         }
@@ -906,6 +911,7 @@ impl Builder<'_> {
         for (leaf, kind) in leaves.into_iter().zip(expected) {
             let variant = match kind {
                 crate::gpu_layout::WireKind::I32 => packet.int_variant,
+                crate::gpu_layout::WireKind::U32 => packet.uint_variant,
                 crate::gpu_layout::WireKind::Bool32 => packet.bool_variant,
                 crate::gpu_layout::WireKind::F32
                 | crate::gpu_layout::WireKind::F32x2

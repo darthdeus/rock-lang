@@ -668,7 +668,7 @@ fn native_buffer_alloc_elem_ctype_mono(
         return Err("`NativeBuffer` element type is missing".to_string());
     };
     if let Some(prim) = elem.prim_name() {
-        return Ok(Ustr::from(prim));
+        return Ok(Ustr::from(if prim == "uint" { "uint32_t" } else { prim }));
     }
     let Some(name) = elem.nominal() else {
         return Err(

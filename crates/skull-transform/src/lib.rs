@@ -1744,10 +1744,17 @@ pub(crate) fn value_operands(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
         | Inst::IntMod(a, b) | Inst::FloatAdd(a, b) | Inst::FloatSub(a, b) | Inst::FloatMul(a, b)
         | Inst::FloatDiv(a, b) | Inst::FloatMod(a, b) | Inst::StringConcat(a, b)
         | Inst::IntLt(a, b) | Inst::IntLeq(a, b) | Inst::IntGt(a, b) | Inst::IntGeq(a, b)
+        | Inst::UintAdd(a, b) | Inst::UintSub(a, b) | Inst::UintMul(a, b) | Inst::UintDiv(a, b)
+        | Inst::UintMod(a, b) | Inst::UintLt(a, b) | Inst::UintLeq(a, b) | Inst::UintGt(a, b)
+        | Inst::UintGeq(a, b)
         | Inst::FloatLt(a, b) | Inst::FloatLeq(a, b) | Inst::FloatGt(a, b) | Inst::FloatGeq(a, b)
         | Inst::Eq(a, b) | Inst::NotEq(a, b) | Inst::BitAnd(a, b) | Inst::BitOr(a, b)
-        | Inst::BitXor(a, b) | Inst::Shl(a, b) | Inst::Shr(a, b) => { p(a); p(b); }
-        Inst::Neg(x) | Inst::Not(x) | Inst::BitNot(x) | Inst::ToString(x) | Inst::FloatToInt(x) | Inst::IntToFloat(x)
+        | Inst::BitXor(a, b) | Inst::Shl(a, b) | Inst::Shr(a, b)
+        | Inst::UintBitAnd(a, b) | Inst::UintBitOr(a, b) | Inst::UintBitXor(a, b)
+        | Inst::UintShl(a, b) | Inst::UintShr(a, b) => { p(a); p(b); }
+        Inst::Neg(x) | Inst::Not(x) | Inst::BitNot(x) | Inst::UintBitNot(x) | Inst::ToString(x)
+        | Inst::FloatToInt(x) | Inst::IntToFloat(x) | Inst::UintToFloat(x) | Inst::IntToUint(x)
+        | Inst::UintToInt(x) | Inst::FloatToUint(x) | Inst::UintBitcastInt(x) | Inst::IntBitcastUint(x)
         | Inst::CoroSetInner(x) => p(x),
         Inst::Format { value, .. } => p(value),
         Inst::FormatDyn { value, fmt } => { p(value); p(fmt); }
@@ -1799,10 +1806,17 @@ pub(crate) fn remap_inst(inst: &mut Inst, m: &impl Fn(Idx<Inst>) -> Idx<Inst>) {
         | Inst::IntMod(a, b) | Inst::FloatAdd(a, b) | Inst::FloatSub(a, b) | Inst::FloatMul(a, b)
         | Inst::FloatDiv(a, b) | Inst::FloatMod(a, b) | Inst::StringConcat(a, b)
         | Inst::IntLt(a, b) | Inst::IntLeq(a, b) | Inst::IntGt(a, b) | Inst::IntGeq(a, b)
+        | Inst::UintAdd(a, b) | Inst::UintSub(a, b) | Inst::UintMul(a, b) | Inst::UintDiv(a, b)
+        | Inst::UintMod(a, b) | Inst::UintLt(a, b) | Inst::UintLeq(a, b) | Inst::UintGt(a, b)
+        | Inst::UintGeq(a, b)
         | Inst::FloatLt(a, b) | Inst::FloatLeq(a, b) | Inst::FloatGt(a, b) | Inst::FloatGeq(a, b)
         | Inst::Eq(a, b) | Inst::NotEq(a, b) | Inst::BitAnd(a, b) | Inst::BitOr(a, b)
-        | Inst::BitXor(a, b) | Inst::Shl(a, b) | Inst::Shr(a, b) => { f(a); f(b); }
-        Inst::Neg(x) | Inst::Not(x) | Inst::BitNot(x) | Inst::ToString(x) | Inst::FloatToInt(x) | Inst::IntToFloat(x)
+        | Inst::BitXor(a, b) | Inst::Shl(a, b) | Inst::Shr(a, b)
+        | Inst::UintBitAnd(a, b) | Inst::UintBitOr(a, b) | Inst::UintBitXor(a, b)
+        | Inst::UintShl(a, b) | Inst::UintShr(a, b) => { f(a); f(b); }
+        Inst::Neg(x) | Inst::Not(x) | Inst::BitNot(x) | Inst::UintBitNot(x) | Inst::ToString(x)
+        | Inst::FloatToInt(x) | Inst::IntToFloat(x) | Inst::UintToFloat(x) | Inst::IntToUint(x)
+        | Inst::UintToInt(x) | Inst::FloatToUint(x) | Inst::UintBitcastInt(x) | Inst::IntBitcastUint(x)
         | Inst::CoroSetInner(x) => f(x),
         Inst::Format { value, .. } => f(value),
         Inst::FormatDyn { value, fmt } => { f(value); f(fmt); }

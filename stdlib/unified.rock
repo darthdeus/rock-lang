@@ -86,7 +86,7 @@ struct PtrU32 { }
 //   stone_submit_verts(verts.ptr, verts.len)  // extern takes (Ptr<float>, int)
 //
 // Bounds: reads/writes past `len` yield LuaJIT garbage; indexing is 0-based.
-// T ∈ {int, float}; extend with more primitives as needed.
+// T ∈ {int, uint, float}; extend with more primitives as needed.
 
 struct NativeBuffer<T> {
     ptr: Ptr<T>,
@@ -109,6 +109,9 @@ inline(lua) fn native_buffer_alloc<T>(n: int) -> NativeBuffer<T> = "error('nativ
 @inline fn native_buffer_int(n: int) -> NativeBuffer<int> {
     return native_buffer_alloc(n)
 }
+@intrinsic @inline fn native_buffer_uint(n: int) -> NativeBuffer<uint> {
+    return native_buffer_alloc(n)
+}
 
 // Single-hop accessors: the inline(lua) body reaches into the Rock struct's
 // .ptr field directly. This avoids the extra Lua call frame a wrapper would
@@ -117,6 +120,8 @@ inline(lua) fn native_buffer_alloc<T>(n: int) -> NativeBuffer<T> = "error('nativ
 @intrinsic @native_required inline(lua) fn nb_set(b: NativeBuffer<float>, i: int, v: float) = "b.ptr[i] = v"
 @intrinsic @native_required inline(lua) fn nb_get(b: NativeBuffer<int>, i: int) -> int = "return b.ptr[i]"
 @intrinsic @native_required inline(lua) fn nb_set(b: NativeBuffer<int>, i: int, v: int) = "b.ptr[i] = v"
+@intrinsic @native_required inline(lua) fn nb_get(b: NativeBuffer<uint>, i: int) -> uint = "return b.ptr[i]"
+@intrinsic @native_required inline(lua) fn nb_set(b: NativeBuffer<uint>, i: int, v: uint) = "b.ptr[i] = v"
 
 // Safe accessor matching the unified `.get(i) -> T?` surface used across
 // all collection types. Returns null on out-of-range; `buf[i]` is the
@@ -126,6 +131,10 @@ inline(lua) fn native_buffer_alloc<T>(n: int) -> NativeBuffer<T> = "error('nativ
     return b.ptr[i]
 """
 @intrinsic @native_required inline(lua) fn get(b: NativeBuffer<int>, i: int) -> int? = """
+    if i < 0 or i >= b.len then return nil end
+    return b.ptr[i]
+"""
+@intrinsic @native_required inline(lua) fn get(b: NativeBuffer<uint>, i: int) -> uint? = """
     if i < 0 or i >= b.len then return nil end
     return b.ptr[i]
 """
@@ -851,7 +860,15 @@ inline(lua) fn same_ref(a: any, b: any) -> bool = "rawequal(a, b)"
 // `for x in 0..10 {}`, loops.rs strips the `__range(a,b)` marker and emits a
 // native numeric for — this function body is unreachable there. Returns a
 // Vec-shaped `{_data, len}` so the result iterates and indexes like a Vec.
-@nomangle inline(lua) fn __range(start_val: int, end_val: int) -> any = """
+@nomangle @inline inline(lua) fn __range(start_val: int, end_val: int) -> any = """
+    local t = {}
+    for i = start_val, end_val - 1 do
+        table.insert(t, i)
+    end
+    return { _data = t, len = end_val - start_val }
+"""
+
+@nomangle @inline inline(lua) fn __range_uint(start_val: uint, end_val: uint) -> any = """
     local t = {}
     for i = start_val, end_val - 1 do
         table.insert(t, i)
@@ -868,9 +885,11 @@ inline(lua) fn same_ref(a: any, b: any) -> bool = "rawequal(a, b)"
 // functions now; precise overloads replace the old operator-registry
 // special disambiguation.
 @pure @inline operator(lua) ==(a: int, b: int) -> bool = "return a == b"
+@pure @inline operator(lua) ==(a: uint, b: uint) -> bool = "return a == b"
 @pure @inline operator(lua) ==(a: float, b: float) -> bool = "return a == b"
 @pure @inline operator(lua) ==(a: bool, b: bool) -> bool = "return a == b"
 @pure @inline operator(lua) !=(a: int, b: int) -> bool = "return a ~= b"
+@pure @inline operator(lua) !=(a: uint, b: uint) -> bool = "return a ~= b"
 @pure @inline operator(lua) !=(a: float, b: float) -> bool = "return a ~= b"
 @pure @inline operator(lua) !=(a: bool, b: bool) -> bool = "return a ~= b"
 @pure @inline operator(lua) ==(a: any, b: any) -> bool = "return a == b"
@@ -878,24 +897,33 @@ inline(lua) fn same_ref(a: any, b: any) -> bool = "rawequal(a, b)"
 
 // Arithmetic operators
 @pure @inline operator(lua) +(a: int, b: int) -> int = "return a + b"
+@pure @inline operator(lua) +(a: uint, b: uint) -> uint = "return a + b"
 @pure @inline operator(lua) +(a: float, b: float) -> float = "return a + b"
 @pure @inline operator(lua) -(a: int, b: int) -> int = "return a - b"
+@pure @inline operator(lua) -(a: uint, b: uint) -> uint = "return a - b"
 @pure @inline operator(lua) -(a: float, b: float) -> float = "return a - b"
 @pure @inline operator(lua) *(a: int, b: int) -> int = "return a * b"
+@pure @inline operator(lua) *(a: uint, b: uint) -> uint = "return a * b"
 @pure @inline operator(lua) *(a: float, b: float) -> float = "return a * b"
 @pure @inline operator(lua) /(a: float, b: float) -> float = "return a / b"
 @pure @inline operator(lua) ./(a: int, b: int) -> int = "return math.floor(a / b)"
+@pure @inline operator(lua) ./(a: uint, b: uint) -> uint = "return math.floor(a / b)"
 @pure @inline operator(lua) %(a: int, b: int) -> int = "return a % b"
+@pure @inline operator(lua) %(a: uint, b: uint) -> uint = "return a % b"
 @pure @inline operator(lua) %(a: float, b: float) -> float = "return a % b"
 
 // Less than, greater than operators
 @pure @inline operator(lua) <(a: int, b: int) -> bool = "return a < b"
+@pure @inline operator(lua) <(a: uint, b: uint) -> bool = "return a < b"
 @pure @inline operator(lua) <(a: float, b: float) -> bool = "return a < b"
 @pure @inline operator(lua) <=(a: int, b: int) -> bool = "return a <= b"
+@pure @inline operator(lua) <=(a: uint, b: uint) -> bool = "return a <= b"
 @pure @inline operator(lua) <=(a: float, b: float) -> bool = "return a <= b"
 @pure @inline operator(lua) >(a: int, b: int) -> bool = "return a > b"
+@pure @inline operator(lua) >(a: uint, b: uint) -> bool = "return a > b"
 @pure @inline operator(lua) >(a: float, b: float) -> bool = "return a > b"
 @pure @inline operator(lua) >=(a: int, b: int) -> bool = "return a >= b"
+@pure @inline operator(lua) >=(a: uint, b: uint) -> bool = "return a >= b"
 @pure @inline operator(lua) >=(a: float, b: float) -> bool = "return a >= b"
 
 // Logical operators
@@ -915,10 +943,15 @@ inline(lua) fn same_ref(a: any, b: any) -> bool = "rawequal(a, b)"
 
 // Bitwise operators (integers only)
 @pure @inline operator(lua) &(a: int, b: int) -> int = "return bit.band(a, b)"
+@pure @inline operator(lua) &(a: uint, b: uint) -> uint = "return bit.band(a, b)"
 @pure @inline operator(lua) |(a: int, b: int) -> int = "return bit.bor(a, b)"
+@pure @inline operator(lua) |(a: uint, b: uint) -> uint = "return bit.bor(a, b)"
 @pure @inline operator(lua) ^(a: int, b: int) -> int = "return bit.bxor(a, b)"
+@pure @inline operator(lua) ^(a: uint, b: uint) -> uint = "return bit.bxor(a, b)"
 @pure @inline operator(lua) <<(a: int, b: int) -> int = "return bit.lshift(a, b)"
+@pure @inline operator(lua) <<(a: uint, b: uint) -> uint = "return bit.lshift(a, b)"
 @pure @inline operator(lua) >>(a: int, b: int) -> int = "return bit.rshift(a, b)"
+@pure @inline operator(lua) >>(a: uint, b: uint) -> uint = "return bit.rshift(a, b)"
 
 // Safe navigation (?.field, ?.method(), ?.let) is handled natively by the
 // compiler — no runtime functions needed. The codegen emits inline nil checks.
@@ -943,6 +976,8 @@ extern(lua) fn tostring(value: any) -> string
 
 // Method versions of tostring for basic types
 fn to_string(value: int) -> string { return tostring(value) }
+
+fn to_string(value: uint) -> string { return tostring(value) }
 
 fn to_string(value: float) -> string {
     let str_value = tostring(value)

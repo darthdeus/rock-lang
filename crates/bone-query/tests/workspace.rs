@@ -34,6 +34,21 @@ fn hover_reports_inferred_type() {
 }
 
 #[test]
+fn hover_reports_uint_without_erasing_its_signedness() {
+    let src = "fn main() {\n  let x: uint = 42\n  x\n}\n";
+    let bone = fresh(src);
+    let hover = bone
+        .hover(PATH, Position::new(1, 6))
+        .expect("hover should resolve on the uint binding");
+    let text = match hover.contents {
+        lsp_types::HoverContents::Markup(m) => m.value,
+        other => panic!("expected markup hover, got {other:?}"),
+    };
+    assert!(text.contains("uint"), "uint hover must keep the unsigned spelling: {text:?}");
+    assert!(!text.contains("Type: int"), "uint hover must not erase to int: {text:?}");
+}
+
+#[test]
 fn hover_on_type_hole_reports_hole_and_scope() {
     // Hovering the `?` in `let x: ? = count + 1` (line 2, char 9) yields the
     // typed-hole report (kind label + inferred type + in-scope bindings) -- the

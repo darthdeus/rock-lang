@@ -1385,6 +1385,7 @@ fn reflect_field_type(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> (Stri
     };
     match resolve(ty) {
         Some(TypeExpr::Builtin(BuiltinTy::Int)) => ("int".into(), false),
+        Some(TypeExpr::Builtin(BuiltinTy::Uint)) => ("uint".into(), false),
         Some(TypeExpr::Builtin(BuiltinTy::Float)) => ("float".into(), false),
         Some(TypeExpr::Builtin(BuiltinTy::Bool)) => ("bool".into(), false),
         Some(TypeExpr::Builtin(BuiltinTy::String)) => ("string".into(), false),

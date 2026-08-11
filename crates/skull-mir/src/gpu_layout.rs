@@ -216,6 +216,7 @@ pub enum WireKind {
     F32x3,
     F32x4,
     I32,
+    U32,
     Bool32,
     Mat4,
 }
@@ -235,6 +236,7 @@ impl WireKind {
             WireKind::F32x3 => 2,
             WireKind::F32x4 => 3,
             WireKind::I32 => 4,
+            WireKind::U32 => 7,
             WireKind::Bool32 => 5,
             WireKind::Mat4 => 6,
         }
@@ -243,7 +245,7 @@ impl WireKind {
     /// std140 base alignment (OpenGL 4.5 core, 7.6.2.2).
     fn align(self) -> u32 {
         match self {
-            WireKind::F32 | WireKind::I32 | WireKind::Bool32 => 4,
+            WireKind::F32 | WireKind::I32 | WireKind::U32 | WireKind::Bool32 => 4,
             WireKind::F32x2 => 8,
             WireKind::F32x3 | WireKind::F32x4 | WireKind::Mat4 => 16,
         }
@@ -253,7 +255,7 @@ impl WireKind {
     /// following scalar takes the fourth lane rather than starting a new one.
     fn size(self) -> u32 {
         match self {
-            WireKind::F32 | WireKind::I32 | WireKind::Bool32 => 4,
+            WireKind::F32 | WireKind::I32 | WireKind::U32 | WireKind::Bool32 => 4,
             WireKind::F32x2 => 8,
             WireKind::F32x3 => 12,
             WireKind::F32x4 => 16,
@@ -274,7 +276,7 @@ impl WireKind {
     /// target's offsets; the physical block uses the same order when it packs.
     pub fn leaf_suffixes(self) -> Vec<String> {
         match self {
-            WireKind::F32 | WireKind::I32 | WireKind::Bool32 => vec![String::new()],
+            WireKind::F32 | WireKind::I32 | WireKind::U32 | WireKind::Bool32 => vec![String::new()],
             WireKind::F32x2 => ["x", "y"].iter().map(|k| format!(".{k}")).collect(),
             WireKind::F32x3 => ["x", "y", "z"].iter().map(|k| format!(".{k}")).collect(),
             WireKind::F32x4 => ["x", "y", "z", "w"].iter().map(|k| format!(".{k}")).collect(),
@@ -289,6 +291,7 @@ impl WireKind {
     fn view(self) -> WireView {
         match self {
             WireKind::I32 | WireKind::Bool32 => WireView::Int,
+            WireKind::U32 => WireView::Uint,
             _ => WireView::Float,
         }
     }
@@ -301,6 +304,7 @@ impl WireKind {
 pub enum WireView {
     Float,
     Int,
+    Uint,
 }
 
 /// One primitive store the packer emits: a byte offset into the block and the
@@ -428,6 +432,7 @@ pub fn wire_kind(ws: &Workspace, ty: TyId) -> Option<WireKind> {
     match ty_expr(ws, ty) {
         Some(TypeExpr::Builtin(BuiltinTy::Float)) => Some(WireKind::F32),
         Some(TypeExpr::Builtin(BuiltinTy::Int)) => Some(WireKind::I32),
+        Some(TypeExpr::Builtin(BuiltinTy::Uint)) => Some(WireKind::U32),
         Some(TypeExpr::Builtin(BuiltinTy::Bool)) => Some(WireKind::Bool32),
         Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. }) => match n.as_str() {
             "Vec2" => Some(WireKind::F32x2),
@@ -687,7 +692,7 @@ pub fn uniform_array_block(
 
     for d in decls {
         let stride = match d.elem {
-            WireKind::F32 | WireKind::I32 | WireKind::F32x2 | WireKind::F32x4 => {
+            WireKind::F32 | WireKind::I32 | WireKind::U32 | WireKind::F32x2 | WireKind::F32x4 => {
                 // An array's stride is its element's base alignment rounded up
                 // to 16. Every kind here rounds to 16; computed rather than
                 // written as a literal so a new kind cannot inherit it silently.

@@ -313,6 +313,9 @@ enum ExternRet {
     /// so a handle used as a `Map<int, V>` key only ever hits on the box that
     /// was inserted (`b1_ffi_handle.rock`).
     Int,
+    /// Rock `uint` uses the same numeric bridge, but remains a distinct static
+    /// type so its caller-side normalization and ABI identity are preserved.
+    Uint,
     /// A `value` struct returned BY VALUE; the C ABI is then
     /// `void f(T* out, ..)`, so the wrapper bridges an out-param.
     ValueStruct(String),
@@ -383,6 +386,7 @@ fn extern_ret(
     for _ in 0..MAX_ALIAS_STEPS {
         let (name, params) = match arena.get(cur) {
             MonoTy::Int => return Ok(ExternRet::Int),
+            MonoTy::Uint => return Ok(ExternRet::Uint),
             MonoTy::App { ctor: MonoCtor::Nominal(name), params } => (*name, params.clone()),
             _ => return Ok(ExternRet::AsIs),
         };
@@ -2875,6 +2879,7 @@ fn assemble(
                             )
                         }
                         ExternRet::Int => format!("  return tonumber({lib}.{nm}({params}))"),
+                        ExternRet::Uint => format!("  return tonumber({lib}.{nm}({params}))"),
                         ExternRet::AsIs => format!("  return {lib}.{nm}({params})"),
                         ExternRet::None => format!("  {lib}.{nm}({params})"),
                     };

@@ -93,7 +93,13 @@ impl Builder<'_> {
     pub(crate) fn lower_expr_inner(&mut self, e: Idx<Expr>) -> Result<Idx<Inst>, CompilerError> {
         match self.body.expr_arena[e].clone() {
             Expr::Unit | Expr::Null => Ok(self.emit_cur(Inst::Const(Lit::Nil))),
-            Expr::Int(i) => Ok(self.emit_cur(Inst::Const(Lit::Int(i)))),
+            Expr::Int(i) => {
+                if self.arith_ty(e) == Some(ArithTy::Uint) {
+                    Ok(self.emit_cur(Inst::Const(Lit::Uint(i as u32))))
+                } else {
+                    Ok(self.emit_cur(Inst::Const(Lit::Int(i))))
+                }
+            }
             Expr::Float(of) => Ok(self.emit_cur(Inst::Const(Lit::Float(of.0)))),
             Expr::Bool(x) => Ok(self.emit_cur(Inst::Const(Lit::Bool(x)))),
             Expr::String(s) => Ok(self.emit_cur(Inst::Const(Lit::Str(s)))),
@@ -203,6 +209,9 @@ impl Builder<'_> {
                 let v = self.lower_expr(x)?;
                 match self.overload_target(e) {
                     Some(func) => Ok(self.emit_cur(Inst::Call { func, args: vec![v] })),
+                    None if self.arith_ty(x) == Some(ArithTy::Uint) => {
+                        Ok(self.emit_cur(Inst::UintBitNot(v)))
+                    }
                     None => Ok(self.emit_cur(Inst::BitNot(v))),
                 }
             }
@@ -506,7 +515,7 @@ impl Builder<'_> {
 
             // `as` is identity at runtime EXCEPT `float as int`, which floors
             // (Lua numbers are all doubles) — mirrors rock-codegen.
-            Expr::As { value, target, .. } => {
+            Expr::As { value, target, kind } => {
                 let v = self.lower_expr(value)?;
                 let to_int = self
                     .concrete_ty_id(target)
@@ -518,8 +527,45 @@ impl Builder<'_> {
                     .is_some_and(|ty| matches!(ty.peel_nullable().0, crate::monoty::MonoTy::Float))
                     || (self.concrete_plan.is_none()
                         && matches!(self.expr_ty(value), Some(TypeExpr::Builtin(BuiltinTy::Float))));
-                if to_int && from_float {
+                let to_uint = self
+                    .concrete_ty_id(target)
+                    .is_some_and(|ty| matches!(ty.peel_nullable().0, crate::monoty::MonoTy::Uint))
+                    || (self.concrete_plan.is_none()
+                        && matches!(self.resolve_ty(target), Some(TypeExpr::Builtin(BuiltinTy::Uint))));
+                let from_uint = self
+                    .concrete_expr_ty(value)
+                    .is_some_and(|ty| matches!(ty.peel_nullable().0, crate::monoty::MonoTy::Uint))
+                    || (self.concrete_plan.is_none()
+                        && matches!(self.expr_ty(value), Some(TypeExpr::Builtin(BuiltinTy::Uint))));
+                let from_int = self
+                    .concrete_expr_ty(value)
+                    .is_some_and(|ty| matches!(ty.peel_nullable().0, crate::monoty::MonoTy::Int))
+                    || (self.concrete_plan.is_none()
+                        && matches!(self.expr_ty(value), Some(TypeExpr::Builtin(BuiltinTy::Int))));
+                let to_float = self
+                    .concrete_ty_id(target)
+                    .is_some_and(|ty| matches!(ty.peel_nullable().0, crate::monoty::MonoTy::Float))
+                    || (self.concrete_plan.is_none()
+                        && matches!(self.resolve_ty(target), Some(TypeExpr::Builtin(BuiltinTy::Float))));
+                if kind == bone_semantic::hir::AsKind::Bitcast && to_int && from_uint {
+                    Ok(self.emit_cur(Inst::UintBitcastInt(v)))
+                } else if kind == bone_semantic::hir::AsKind::Bitcast && to_uint && from_int {
+                    Ok(self.emit_cur(Inst::IntBitcastUint(v)))
+                } else if kind == bone_semantic::hir::AsKind::Bitcast {
+                    Err(CompilerError::new_with_label(
+                        self.cur_span.unwrap_or_else(Span::unknown),
+                        "bitcast requires an `int` and a `uint` operand/target".to_string(),
+                    ))
+                } else if to_int && from_float {
                     Ok(self.emit_cur(Inst::FloatToInt(v)))
+                } else if to_uint && from_int {
+                    Ok(self.emit_cur(Inst::IntToUint(v)))
+                } else if to_int && from_uint {
+                    Ok(self.emit_cur(Inst::UintToInt(v)))
+                } else if to_uint && from_float {
+                    Ok(self.emit_cur(Inst::FloatToUint(v)))
+                } else if to_float && from_uint {
+                    Ok(self.emit_cur(Inst::UintToFloat(v)))
                 } else {
                     Ok(v)
                 }
@@ -575,9 +621,11 @@ impl Builder<'_> {
             // A range used as a VALUE (not a `for` iterable — `lower_for`
             // intercepts that) materializes to the stdlib Vec-shaped `__range`.
             Expr::Range { low, high } => {
+                let is_uint = matches!(self.arith_ty(low), Some(ArithTy::Uint))
+                    || matches!(self.arith_ty(high), Some(ArithTy::Uint));
                 let lo = self.lower_expr(low)?;
                 let hi = self.lower_expr(high)?;
-                let func = self.resolve_global_fn("__range")?;
+                let func = self.resolve_global_fn(if is_uint { "__range_uint" } else { "__range" })?;
                 Ok(self.emit_cur(Inst::Call { func, args: vec![lo, hi] }))
             }
 
@@ -946,8 +994,8 @@ impl Builder<'_> {
         }
     }
 
-    /// `target++` / `target--` (prefix or postfix). Reads the target, adds +/-1
-    /// (typed: `IntAdd`/`FloatAdd` per the target's scalar type), writes it back,
+    /// `target++` / `target--` (prefix or postfix). Reads the target, adds or
+    /// subtracts one with the target's scalar instruction family, writes it back,
     /// and yields the OLD value (postfix) or NEW value (prefix). Var / global /
     /// field / index targets, mirroring assignment.
     pub(crate) fn lower_incdec(
@@ -958,20 +1006,23 @@ impl Builder<'_> {
     ) -> Result<Idx<Inst>, CompilerError> {
         let ty = self
             .arith_ty(target)
-            .filter(|t| matches!(t, ArithTy::Int | ArithTy::Float))
-            .ok_or_else(|| gap("inc/dec of a non-int/float target"))?;
+            .filter(|t| matches!(t, ArithTy::Int | ArithTy::Uint | ArithTy::Float))
+            .ok_or_else(|| gap("inc/dec of a non-numeric target"))?;
         let bump = |s: &mut Self, old: Idx<Inst>| -> Idx<Inst> {
             let delta = match (ty, decrement) {
                 (ArithTy::Float, false) => Inst::Const(Lit::Float(1.0)),
                 (ArithTy::Float, true) => Inst::Const(Lit::Float(-1.0)),
+                (ArithTy::Uint, _) => Inst::Const(Lit::Uint(1)),
                 (_, false) => Inst::Const(Lit::Int(1)),
                 (_, true) => Inst::Const(Lit::Int(-1)),
             };
             let d = s.emit_cur(delta);
-            let inst = if ty == ArithTy::Float {
-                Inst::FloatAdd(old, d)
-            } else {
-                Inst::IntAdd(old, d)
+            let inst = match (ty, decrement) {
+                (ArithTy::Float, _) => Inst::FloatAdd(old, d),
+                (ArithTy::Uint, false) => Inst::UintAdd(old, d),
+                (ArithTy::Uint, true) => Inst::UintSub(old, d),
+                (ArithTy::Int, _) => Inst::IntAdd(old, d),
+                (ArithTy::Str, _) => unreachable!("inc/dec scalar filter admitted a string"),
             };
             s.emit_cur(inst)
         };
@@ -994,7 +1045,7 @@ impl Builder<'_> {
                 Ok(if postfix { old } else { new })
             }
             // A primitive leaf of a `nobox` global (`SPOT.x++`) is its own global.
-            // `arith_ty` already restricted the target to int/float, so a whole
+            // `arith_ty` already restricted the target to a scalar, so a whole
             // group can never reach here.
             _ if matches!(self.nobox_global_place(target), Some((_, None))) => {
                 let (leaves, _) = self.nobox_global_place(target).expect("guard matched");

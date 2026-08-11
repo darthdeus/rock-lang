@@ -574,7 +574,7 @@ pub fn coerce(gamma: &mut Gamma, from: TyId, to: TyId, span: Span) -> Result<(),
         return Ok(());
     }
 
-    if matches!(from_ty, TypeExpr::Builtin(BuiltinTy::Int))
+    if matches!(from_ty, TypeExpr::Builtin(BuiltinTy::Int | BuiltinTy::Uint))
         && matches!(to_ty, TypeExpr::Builtin(BuiltinTy::Float))
     {
         return Ok(());
@@ -680,8 +680,14 @@ pub fn join(gamma: &mut Gamma, a: TyId, b: TyId, span: Span) -> Result<TyId, Com
     }
 
     match (gamma.get(ar), gamma.get(br)) {
-        (TypeExpr::Builtin(BuiltinTy::Int), TypeExpr::Builtin(BuiltinTy::Float))
-        | (TypeExpr::Builtin(BuiltinTy::Float), TypeExpr::Builtin(BuiltinTy::Int)) => {
+        (
+            TypeExpr::Builtin(BuiltinTy::Int | BuiltinTy::Uint),
+            TypeExpr::Builtin(BuiltinTy::Float),
+        )
+        | (
+            TypeExpr::Builtin(BuiltinTy::Float),
+            TypeExpr::Builtin(BuiltinTy::Int | BuiltinTy::Uint),
+        ) => {
             Ok(gamma.workspace.builtins.float())
         }
 

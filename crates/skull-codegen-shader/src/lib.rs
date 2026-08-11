@@ -134,6 +134,7 @@ pub fn resolve_root(
 enum ShaderTy {
     Float,
     Int,
+    Uint,
     Bool,
     Vec2,
     Vec3,
@@ -152,6 +153,7 @@ impl ShaderTy {
         match self {
             Self::Float => "float",
             Self::Int => "int",
+            Self::Uint => "uint",
             Self::Bool => "bool",
             Self::Vec2 => "Vec2",
             Self::Vec3 => "Vec3",
@@ -188,6 +190,7 @@ fn mono_ty(ty: &MonoTy) -> Option<ShaderTy> {
     match ty {
         MonoTy::Float => Some(ShaderTy::Float),
         MonoTy::Int => Some(ShaderTy::Int),
+        MonoTy::Uint => Some(ShaderTy::Uint),
         MonoTy::Bool => Some(ShaderTy::Bool),
         MonoTy::App {
             ctor: MonoCtor::Nominal(name),
@@ -215,6 +218,7 @@ fn shader_ty(
     match ty_expr(ws, ty) {
         Some(TypeExpr::Builtin(BuiltinTy::Float)) => Ok(ShaderTy::Float),
         Some(TypeExpr::Builtin(BuiltinTy::Int)) => Ok(ShaderTy::Int),
+        Some(TypeExpr::Builtin(BuiltinTy::Uint)) => Ok(ShaderTy::Uint),
         Some(TypeExpr::Builtin(BuiltinTy::Bool)) => Ok(ShaderTy::Bool),
         Some(TypeExpr::Generic(var, name)) => subst.get(&var).and_then(mono_ty).ok_or_else(|| {
             err(

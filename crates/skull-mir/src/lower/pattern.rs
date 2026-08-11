@@ -902,7 +902,13 @@ impl Builder<'_> {
         self.cur = header;
         let i_v = self.emit_cur(Inst::Load(i_cell));
         let h_v = self.emit_cur(Inst::Load(hi_cell));
-        let cmp = self.emit_cur(Inst::IntLt(i_v, h_v));
+        let is_uint = matches!(self.arith_ty(low), Some(ArithTy::Uint))
+            || matches!(self.arith_ty(high), Some(ArithTy::Uint));
+        let cmp = if is_uint {
+            self.emit_cur(Inst::UintLt(i_v, h_v))
+        } else {
+            self.emit_cur(Inst::IntLt(i_v, h_v))
+        };
         self.f.set_term(
             self.cur,
             Term::Branch {
@@ -922,8 +928,12 @@ impl Builder<'_> {
 
         self.cur = latch;
         let i_v2 = self.emit_cur(Inst::Load(i_cell));
-        let one = self.emit_cur(Inst::Const(Lit::Int(1)));
-        let inc = self.emit_cur(Inst::IntAdd(i_v2, one));
+        let one = self.emit_cur(Inst::Const(if is_uint { Lit::Uint(1) } else { Lit::Int(1) }));
+        let inc = if is_uint {
+            self.emit_cur(Inst::UintAdd(i_v2, one))
+        } else {
+            self.emit_cur(Inst::IntAdd(i_v2, one))
+        };
         self.emit_cur(Inst::Store {
             cell: i_cell,
             value: inc,

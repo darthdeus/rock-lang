@@ -442,7 +442,8 @@ impl<'a> DispatchCtx<'a> {
             return matches!(
                 payload,
                 crate::monoty::MonoTy::Int
-                    | crate::monoty::MonoTy::Float
+                | crate::monoty::MonoTy::Uint
+                | crate::monoty::MonoTy::Float
                     | crate::monoty::MonoTy::Bool
                     | crate::monoty::MonoTy::String
             ) || self.is_payloadless_enum(e);
@@ -453,7 +454,7 @@ impl<'a> DispatchCtx<'a> {
         matches!(
             self.expr_ty(e),
             Some(TypeExpr::Builtin(
-                BuiltinTy::Int | BuiltinTy::Float | BuiltinTy::Bool | BuiltinTy::String
+                BuiltinTy::Int | BuiltinTy::Uint | BuiltinTy::Float | BuiltinTy::Bool | BuiltinTy::String
             ))
         ) || self.is_payloadless_enum(e)
     }
@@ -492,6 +493,7 @@ impl<'a> DispatchCtx<'a> {
             let (payload, _) = ty.peel_nullable();
             return match payload {
                 crate::monoty::MonoTy::Int
+                | crate::monoty::MonoTy::Uint
                 | crate::monoty::MonoTy::Bool
                 | crate::monoty::MonoTy::String => StringifyRoute::ToString,
                 crate::monoty::MonoTy::Float => StringifyRoute::FormatFloat,
@@ -519,7 +521,7 @@ impl<'a> DispatchCtx<'a> {
             return StringifyRoute::Unsupported;
         }
         match self.expr_ty(expr) {
-            Some(TypeExpr::Builtin(BuiltinTy::Int | BuiltinTy::Bool | BuiltinTy::String)) => {
+            Some(TypeExpr::Builtin(BuiltinTy::Int | BuiltinTy::Uint | BuiltinTy::Bool | BuiltinTy::String)) => {
                 StringifyRoute::ToString
             }
             Some(TypeExpr::Builtin(BuiltinTy::Float)) => StringifyRoute::FormatFloat,
@@ -559,7 +561,7 @@ impl<'a> DispatchCtx<'a> {
             return StringifyRoute::Inspect;
         }
         match self.resolve_ty(ty) {
-            Some(TypeExpr::Builtin(BuiltinTy::Int | BuiltinTy::Bool)) => StringifyRoute::ToString,
+            Some(TypeExpr::Builtin(BuiltinTy::Int | BuiltinTy::Uint | BuiltinTy::Bool)) => StringifyRoute::ToString,
             Some(TypeExpr::Builtin(BuiltinTy::String)) => StringifyRoute::QuotedString,
             Some(TypeExpr::Builtin(BuiltinTy::Float)) => StringifyRoute::FormatFloat,
             Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. })
@@ -656,10 +658,12 @@ impl<'a> DispatchCtx<'a> {
         let inferred = if self.concrete_plan.is_some() {
             match self.concrete_expr_ty(hole) {
                 Some(crate::monoty::MonoTy::Int) => Some('d'),
+                Some(crate::monoty::MonoTy::Uint) => Some('d'),
                 Some(crate::monoty::MonoTy::Float) => Some('f'),
                 Some(crate::monoty::MonoTy::String | crate::monoty::MonoTy::Bool) => Some('s'),
                 Some(crate::monoty::MonoTy::Nullable(inner)) => match *inner {
                     crate::monoty::MonoTy::Int => Some('d'),
+                    crate::monoty::MonoTy::Uint => Some('d'),
                     crate::monoty::MonoTy::Float => Some('f'),
                     crate::monoty::MonoTy::String | crate::monoty::MonoTy::Bool => Some('s'),
                     _ => None,
@@ -668,7 +672,7 @@ impl<'a> DispatchCtx<'a> {
             }
         } else {
             match self.expr_ty(hole) {
-                Some(TypeExpr::Builtin(BuiltinTy::Int)) => Some('d'),
+                Some(TypeExpr::Builtin(BuiltinTy::Int | BuiltinTy::Uint)) => Some('d'),
                 Some(TypeExpr::Builtin(BuiltinTy::Float)) => Some('f'),
                 Some(TypeExpr::Builtin(BuiltinTy::String | BuiltinTy::Bool)) => Some('s'),
                 _ => None,

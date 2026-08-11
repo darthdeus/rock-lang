@@ -33,6 +33,7 @@ fn trailing_generic_defaults(
         }
         let classified = match &te.kind {
             TypeExprKind::Int => GenericDefault::Builtin(BuiltinTy::Int),
+            TypeExprKind::Uint => GenericDefault::Builtin(BuiltinTy::Uint),
             TypeExprKind::Float => GenericDefault::Builtin(BuiltinTy::Float),
             TypeExprKind::Bool => GenericDefault::Builtin(BuiltinTy::Bool),
             TypeExprKind::String => GenericDefault::Builtin(BuiltinTy::String),
@@ -759,6 +760,7 @@ pub fn pass_lower_functions(a: &Ast, ctx: &mut LowerCtx) -> Result<(), CompilerE
                     matches!(
                         a.types[p.ty].kind,
                         skull_parser::TypeExprKind::Int
+                            | skull_parser::TypeExprKind::Uint
                             | skull_parser::TypeExprKind::Float
                             | skull_parser::TypeExprKind::String
                             | skull_parser::TypeExprKind::Bool

@@ -303,6 +303,9 @@ impl Ast {
             ExprKind::UnaryMinus(inner) => format!("(- {})", self.expr_sexp(*inner)),
             ExprKind::Paren(inner) => format!("(paren {})", self.expr_sexp(*inner)),
             ExprKind::As(inner, ty) => format!("(as {} {})", self.expr_sexp(*inner), self.type_sexp(*ty)),
+            ExprKind::Bitcast(inner, ty) => {
+                format!("(bitcast {} {})", self.type_sexp(*ty), self.expr_sexp(*inner))
+            }
             ExprKind::TypeAscription(inner, ty) => {
                 format!("(:: {} {})", self.expr_sexp(*inner), self.type_sexp(*ty))
             }
@@ -542,6 +545,7 @@ impl Ast {
             TypeExprKind::Unit => "unit".to_string(),
             TypeExprKind::String => "string".to_string(),
             TypeExprKind::Int => "int".to_string(),
+            TypeExprKind::Uint => "uint".to_string(),
             TypeExprKind::Float => "float".to_string(),
             TypeExprKind::Bool => "bool".to_string(),
             TypeExprKind::Ident(id) => id.name.to_string(),
@@ -584,6 +588,7 @@ impl Ast {
             TypeExprKind::Unit => "()".to_string(),
             TypeExprKind::String => "string".to_string(),
             TypeExprKind::Int => "int".to_string(),
+            TypeExprKind::Uint => "uint".to_string(),
             TypeExprKind::Float => "float".to_string(),
             TypeExprKind::Bool => "bool".to_string(),
             TypeExprKind::Hole(..) => "?".to_string(),

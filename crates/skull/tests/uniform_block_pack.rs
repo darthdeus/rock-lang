@@ -17,6 +17,7 @@ value ProbeUniform {
     direction: Vec2,
     enabled: bool,
     count: int,
+    packed: uint,
 }
 
 fn main() {
@@ -25,6 +26,7 @@ fn main() {
         direction: v(2.0, 3.0),
         enabled: true,
         count: 7,
+        packed: 0xffffffff,
     })
     print(b.fingerprint != 0)
     print(b.leaves.len())
@@ -46,14 +48,14 @@ fn uniform_values_expands_to_canonical_leaves() {
     for forbidden in ["std140", "offset", "padding", "binding"] {
         assert!(!body.contains(forbidden), "canonical values leaked {forbidden}:\n{body}");
     }
-    for variant in ["Float", "Bool", "Int"] {
+    for variant in ["Float", "Bool", "Int", "Uint"] {
         assert!(
             body.contains(&format!("__variant = \"{variant}\"")),
             "canonical `{variant}` leaf was not built:\n{body}"
         );
     }
     let out = run_luajit(&format!("{lua}\nmain()\n"), "canonical_uniform_values");
-    assert_eq!(out.split_whitespace().collect::<Vec<_>>(), ["true", "5"]);
+    assert_eq!(out.split_whitespace().collect::<Vec<_>>(), ["true", "6"]);
 }
 
 /// `radius: float, direction: Vec2, resolution: float` -> std140 offsets
@@ -111,6 +113,7 @@ fn main() {
     let u = Flags { scale: 1.5, on: true, count: 7 }
     pack_uniform_block(f.ptr, i.ptr, u)
 }
+
 "#,
     ));
     let fbuf = body
@@ -131,6 +134,22 @@ fn main() {
     for store in [format!("{ibuf}[(1)] = "), format!("{ibuf}[(2)] = ")] {
         assert!(body.contains(&store), "missing int-view store `{store}`:\n{body}");
     }
+}
+
+#[test]
+fn uint_uniform_leaves_preserve_the_low_bits_in_the_int_view() {
+    let src = r#"
+value Packed { value: uint }
+
+fn main() {
+    let f = native_buffer_float(1)
+    let i = native_buffer_int(1)
+    pack_uniform_block(f.ptr, i.ptr, Packed { value: 0xffffffff })
+    print(i[0])
+}
+"#;
+    let out = run_luajit(&format!("{}\nmain()\n", emit_module(src)), "uint_uniform_bits");
+    assert_eq!(out.split_whitespace().collect::<Vec<_>>(), ["-1"]);
 }
 
 /// Each leaf goes straight from a register into the view. Two ways that could

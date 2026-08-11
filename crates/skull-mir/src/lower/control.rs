@@ -20,8 +20,8 @@ impl Builder<'_> {
         // int ops leave their operands untouched.
         let str_op = op == "__op_add" && (lt == ArithTy::Str || rt == ArithTy::Str);
         let to_float = !str_op && (op == "__op_div" || lt == ArithTy::Float || rt == ArithTy::Float);
-        let lv = self.coerce_i2f(lv, lt == ArithTy::Int, to_float);
-        let rv = self.coerce_i2f(rv, rt == ArithTy::Int, to_float);
+        let lv = self.coerce_numeric_to_float(lv, lt, to_float);
+        let rv = self.coerce_numeric_to_float(rv, rt, to_float);
         let inst = arith_inst(op, lt, rt, lv, rv)?;
         Ok(self.emit_cur(inst))
     }
@@ -43,22 +43,27 @@ impl Builder<'_> {
                 let lf = self.arith_ty(lhs);
                 let rf = self.arith_ty(rhs);
                 let float = lf == Some(ArithTy::Float) || rf == Some(ArithTy::Float);
+                let uint = lf == Some(ArithTy::Uint) || rf == Some(ArithTy::Uint);
                 let lv = self.lower_expr(lhs)?;
                 let rv = self.lower_expr(rhs)?;
                 // A mixed float compare (`x > 0`, `i < f`) promotes its int side --
                 // both Float* operands must arrive float (GLSL ES has no implicit
                 // int->float in a compare).
-                let lv = self.coerce_i2f(lv, lf == Some(ArithTy::Int), float);
-                let rv = self.coerce_i2f(rv, rf == Some(ArithTy::Int), float);
-                let inst = match (op, float) {
-                    (BinOp::Lt, false) => Inst::IntLt(lv, rv),
-                    (BinOp::Lt, true) => Inst::FloatLt(lv, rv),
-                    (BinOp::Leq, false) => Inst::IntLeq(lv, rv),
-                    (BinOp::Leq, true) => Inst::FloatLeq(lv, rv),
-                    (BinOp::Gt, false) => Inst::IntGt(lv, rv),
-                    (BinOp::Gt, true) => Inst::FloatGt(lv, rv),
-                    (BinOp::Geq, false) => Inst::IntGeq(lv, rv),
-                    (BinOp::Geq, true) => Inst::FloatGeq(lv, rv),
+                let lv = self.coerce_numeric_to_float(lv, lf.map_or(ArithTy::Str, |x| x), float);
+                let rv = self.coerce_numeric_to_float(rv, rf.map_or(ArithTy::Str, |x| x), float);
+                let inst = match (op, float, uint) {
+                    (BinOp::Lt, false, true) => Inst::UintLt(lv, rv),
+                    (BinOp::Lt, false, false) => Inst::IntLt(lv, rv),
+                    (BinOp::Lt, true, _) => Inst::FloatLt(lv, rv),
+                    (BinOp::Leq, false, true) => Inst::UintLeq(lv, rv),
+                    (BinOp::Leq, false, false) => Inst::IntLeq(lv, rv),
+                    (BinOp::Leq, true, _) => Inst::FloatLeq(lv, rv),
+                    (BinOp::Gt, false, true) => Inst::UintGt(lv, rv),
+                    (BinOp::Gt, false, false) => Inst::IntGt(lv, rv),
+                    (BinOp::Gt, true, _) => Inst::FloatGt(lv, rv),
+                    (BinOp::Geq, false, true) => Inst::UintGeq(lv, rv),
+                    (BinOp::Geq, false, false) => Inst::IntGeq(lv, rv),
+                    (BinOp::Geq, true, _) => Inst::FloatGeq(lv, rv),
                     _ => unreachable!(),
                 };
                 Ok(self.emit_cur(inst))
@@ -193,8 +198,8 @@ impl Builder<'_> {
                 let lf = self.arith_ty(lhs);
                 let rf = self.arith_ty(rhs);
                 let float = lf == Some(ArithTy::Float) || rf == Some(ArithTy::Float);
-                let lv = self.coerce_i2f(lv, lf == Some(ArithTy::Int), float);
-                let rv = self.coerce_i2f(rv, rf == Some(ArithTy::Int), float);
+                let lv = self.coerce_numeric_to_float(lv, lf.map_or(ArithTy::Str, |x| x), float);
+                let rv = self.coerce_numeric_to_float(rv, rf.map_or(ArithTy::Str, |x| x), float);
                 Ok(self.emit_cur(if matches!(op, BinOp::Eq) {
                     Inst::Eq(lv, rv)
                 } else {
@@ -204,7 +209,14 @@ impl Builder<'_> {
             BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => {
                 let lv = self.lower_expr(lhs)?;
                 let rv = self.lower_expr(rhs)?;
+                let uint = self.arith_ty(lhs) == Some(ArithTy::Uint)
+                    || self.arith_ty(rhs) == Some(ArithTy::Uint);
                 let inst = match op {
+                    BinOp::BitAnd if uint => Inst::UintBitAnd(lv, rv),
+                    BinOp::BitOr if uint => Inst::UintBitOr(lv, rv),
+                    BinOp::BitXor if uint => Inst::UintBitXor(lv, rv),
+                    BinOp::Shl if uint => Inst::UintShl(lv, rv),
+                    BinOp::Shr if uint => Inst::UintShr(lv, rv),
                     BinOp::BitAnd => Inst::BitAnd(lv, rv),
                     BinOp::BitOr => Inst::BitOr(lv, rv),
                     BinOp::BitXor => Inst::BitXor(lv, rv),

@@ -145,6 +145,7 @@ fn clone_expr_kind(ast: &mut Ast, kind: ExprKind) -> ExprKind {
         ),
         ExprKind::Paren(x) => ExprKind::Paren(ce(ast, x)),
         ExprKind::As(x, t) => ExprKind::As(ce(ast, x), ct(ast, t)),
+        ExprKind::Bitcast(x, t) => ExprKind::Bitcast(ce(ast, x), ct(ast, t)),
         ExprKind::TypeAscription(x, t) => ExprKind::TypeAscription(ce(ast, x), ct(ast, t)),
         ExprKind::Not(x) => ExprKind::Not(ce(ast, x)),
         ExprKind::BitNot(x) => ExprKind::BitNot(ce(ast, x)),
@@ -295,6 +296,7 @@ fn clone_type_kind(ast: &mut Ast, kind: TypeExprKind) -> TypeExprKind {
         | TypeExprKind::Unit
         | TypeExprKind::String
         | TypeExprKind::Int
+        | TypeExprKind::Uint
         | TypeExprKind::Float
         | TypeExprKind::Bool
         | TypeExprKind::Hole(_, _)

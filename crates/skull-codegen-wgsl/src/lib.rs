@@ -1480,6 +1480,7 @@ pub fn array_element_type(elem: WireKind) -> Option<&'static str> {
     match elem {
         WireKind::F32 | WireKind::F32x2 | WireKind::F32x4 => Some("vec4<f32>"),
         WireKind::I32 => Some("vec4<i32>"),
+        WireKind::U32 => Some("vec4<u32>"),
         WireKind::F32x3 | WireKind::Mat4 | WireKind::Bool32 => None,
     }
 }
@@ -1487,7 +1488,7 @@ pub fn array_element_type(elem: WireKind) -> Option<&'static str> {
 /// The swizzle that recovers one element's declared value from its padded slot.
 pub fn array_element_projection(elem: WireKind) -> Option<&'static str> {
     match elem {
-        WireKind::F32 | WireKind::I32 => Some(".x"),
+        WireKind::F32 | WireKind::I32 | WireKind::U32 => Some(".x"),
         WireKind::F32x2 => Some(".xy"),
         WireKind::F32x4 => Some(""),
         WireKind::F32x3 | WireKind::Mat4 | WireKind::Bool32 => None,
@@ -1529,7 +1530,7 @@ fn layout_textures(
 /// where the numbers coincide for this first population.
 pub fn uniform_layout(kind: WireKind) -> Option<(u32, u32)> {
     match kind {
-        WireKind::F32 | WireKind::I32 => Some((4, 4)),
+        WireKind::F32 | WireKind::I32 | WireKind::U32 => Some((4, 4)),
         WireKind::F32x2 => Some((8, 8)),
         WireKind::F32x3 => Some((16, 12)),
         WireKind::F32x4 => Some((16, 16)),
@@ -1557,6 +1558,7 @@ pub fn wgsl_type(kind: WireKind) -> Option<&'static str> {
         WireKind::F32x3 => Some("vec3<f32>"),
         WireKind::F32x4 => Some("vec4<f32>"),
         WireKind::I32 => Some("i32"),
+        WireKind::U32 => Some("u32"),
         WireKind::Mat4 => Some("mat4x4<f32>"),
         WireKind::Bool32 => None,
     }
@@ -2359,6 +2361,7 @@ fn emit_fullscreen_entries(out: &mut String, abi: &WgslAbiPlan, entry: String) {
 enum ValueKind {
     F32,
     I32,
+    U32,
     Bool,
     Vec2,
     Vec3,
@@ -2373,6 +2376,7 @@ impl ValueKind {
         match self {
             Self::F32 => Some(WireKind::F32),
             Self::I32 => Some(WireKind::I32),
+            Self::U32 => Some(WireKind::U32),
             Self::Bool => None,
             Self::Vec2 => Some(WireKind::F32x2),
             Self::Vec3 => Some(WireKind::F32x3),
@@ -2389,7 +2393,7 @@ impl ValueKind {
 
     fn components(self) -> usize {
         match self {
-            Self::F32 | Self::I32 | Self::Bool => 1,
+            Self::F32 | Self::I32 | Self::U32 | Self::Bool => 1,
             Self::Vec2 => 2,
             Self::Vec3 => 3,
             Self::Vec4 => 4,
@@ -2434,6 +2438,7 @@ fn value_kind_for_type(ws: &Workspace, ty: TyId) -> Option<ValueKind> {
     match type_expr(ws, ty)? {
         TypeExpr::Builtin(BuiltinTy::Float) => Some(ValueKind::F32),
         TypeExpr::Builtin(BuiltinTy::Int) => Some(ValueKind::I32),
+        TypeExpr::Builtin(BuiltinTy::Uint) => Some(ValueKind::U32),
         TypeExpr::Builtin(BuiltinTy::Bool) => Some(ValueKind::Bool),
         TypeExpr::App {
             ctor: TypeCtor::Nominal(name),
@@ -2489,6 +2494,7 @@ fn wire_value_kind(kind: WireKind) -> Option<ValueKind> {
         WireKind::F32x3 => Some(ValueKind::Vec3),
         WireKind::F32x4 => Some(ValueKind::Vec4),
         WireKind::I32 => Some(ValueKind::I32),
+        WireKind::U32 => Some(ValueKind::U32),
         WireKind::Mat4 => Some(ValueKind::Mat4),
         WireKind::Bool32 => Some(ValueKind::Bool),
     }
@@ -3211,6 +3217,11 @@ impl<'a> FunctionEmitter<'a> {
                 | Inst::IntMul(..)
                 | Inst::IntDiv(..)
                 | Inst::IntMod(..)
+                | Inst::UintAdd(..)
+                | Inst::UintSub(..)
+                | Inst::UintMul(..)
+                | Inst::UintDiv(..)
+                | Inst::UintMod(..)
                 | Inst::FloatAdd(..)
                 | Inst::FloatSub(..)
                 | Inst::FloatMul(..)
@@ -3220,6 +3231,10 @@ impl<'a> FunctionEmitter<'a> {
                 | Inst::IntLeq(..)
                 | Inst::IntGt(..)
                 | Inst::IntGeq(..)
+                | Inst::UintLt(..)
+                | Inst::UintLeq(..)
+                | Inst::UintGt(..)
+                | Inst::UintGeq(..)
                 | Inst::FloatLt(..)
                 | Inst::FloatLeq(..)
                 | Inst::FloatGt(..)
@@ -3228,8 +3243,20 @@ impl<'a> FunctionEmitter<'a> {
                 | Inst::NotEq(..)
                 | Inst::FloatToInt(_)
                 | Inst::IntToFloat(_)
+                | Inst::UintToFloat(_)
+                | Inst::IntToUint(_)
+                | Inst::UintToInt(_)
+                | Inst::FloatToUint(_)
+                | Inst::UintBitcastInt(_)
+                | Inst::IntBitcastUint(_)
                 | Inst::Neg(_)
-                | Inst::Not(_) => None,
+                | Inst::Not(_)
+                | Inst::UintBitNot(_)
+                | Inst::UintBitAnd(..)
+                | Inst::UintBitOr(..)
+                | Inst::UintBitXor(..)
+                | Inst::UintShl(..)
+                | Inst::UintShr(..) => None,
                 other => {
                     return Err(err(
                         self.span,
@@ -3359,6 +3386,7 @@ impl<'a> FunctionEmitter<'a> {
         match &self.body.insts[iid] {
             Inst::Const(Lit::Float(_)) => Ok(ValueKind::F32),
             Inst::Const(Lit::Int(_)) => Ok(ValueKind::I32),
+            Inst::Const(Lit::Uint(_)) => Ok(ValueKind::U32),
             Inst::Const(Lit::Bool(_)) => Ok(ValueKind::Bool),
             Inst::Const(Lit::Nil) | Inst::Const(Lit::Str(_)) => Err(err(
                 self.span,
@@ -3389,6 +3417,11 @@ impl<'a> FunctionEmitter<'a> {
             | Inst::IntMul(..)
             | Inst::IntDiv(..)
             | Inst::IntMod(..) => Ok(ValueKind::I32),
+            Inst::UintAdd(..)
+            | Inst::UintSub(..)
+            | Inst::UintMul(..)
+            | Inst::UintDiv(..)
+            | Inst::UintMod(..) => Ok(ValueKind::U32),
             Inst::FloatAdd(..)
             | Inst::FloatSub(..)
             | Inst::FloatMul(..)
@@ -3398,6 +3431,10 @@ impl<'a> FunctionEmitter<'a> {
             | Inst::IntLeq(..)
             | Inst::IntGt(..)
             | Inst::IntGeq(..)
+            | Inst::UintLt(..)
+            | Inst::UintLeq(..)
+            | Inst::UintGt(..)
+            | Inst::UintGeq(..)
             | Inst::FloatLt(..)
             | Inst::FloatLeq(..)
             | Inst::FloatGt(..)
@@ -3407,6 +3444,17 @@ impl<'a> FunctionEmitter<'a> {
             | Inst::Not(_) => Ok(ValueKind::Bool),
             Inst::FloatToInt(_) => Ok(ValueKind::I32),
             Inst::IntToFloat(_) => Ok(ValueKind::F32),
+            Inst::UintToFloat(_) => Ok(ValueKind::F32),
+            Inst::IntToUint(_) | Inst::FloatToUint(_) | Inst::IntBitcastUint(_) => {
+                Ok(ValueKind::U32)
+            }
+            Inst::UintToInt(_) | Inst::UintBitcastInt(_) => Ok(ValueKind::I32),
+            Inst::UintBitNot(_)
+            | Inst::UintBitAnd(..)
+            | Inst::UintBitOr(..)
+            | Inst::UintBitXor(..)
+            | Inst::UintShl(..)
+            | Inst::UintShr(..) => Ok(ValueKind::U32),
             Inst::Neg(value) => self.value_kind(*value),
             other => Err(err(
                 self.span,
@@ -3702,6 +3750,7 @@ impl<'a> FunctionEmitter<'a> {
         match &self.body.insts[iid] {
             Inst::Const(Lit::Float(value)) => Ok(format_float(*value)),
             Inst::Const(Lit::Int(value)) => Ok(value.to_string()),
+            Inst::Const(Lit::Uint(value)) => Ok(format!("{value}u")),
             Inst::Const(Lit::Bool(value)) => Ok(value.to_string()),
             Inst::Const(Lit::Nil) | Inst::Const(Lit::Str(_)) => Err(err(
                 self.span,
@@ -3801,20 +3850,46 @@ impl<'a> FunctionEmitter<'a> {
             }
             Inst::Call { func, args } => self.render_call(iid, *func, args),
             Inst::IntAdd(a, b) | Inst::FloatAdd(a, b) => self.binary(*a, "+", *b),
+            Inst::UintAdd(a, b) => self.binary(*a, "+", *b),
             Inst::IntSub(a, b) | Inst::FloatSub(a, b) => self.binary(*a, "-", *b),
+            Inst::UintSub(a, b) => self.binary(*a, "-", *b),
             Inst::IntMul(a, b) | Inst::FloatMul(a, b) => self.binary(*a, "*", *b),
+            Inst::UintMul(a, b) => self.binary(*a, "*", *b),
             Inst::IntDiv(a, b) | Inst::FloatDiv(a, b) => self.binary(*a, "/", *b),
+            Inst::UintDiv(a, b) => self.binary(*a, "/", *b),
             Inst::IntMod(a, b) | Inst::FloatMod(a, b) => self.binary(*a, "%", *b),
+            Inst::UintMod(a, b) => self.binary(*a, "%", *b),
             Inst::IntLt(a, b) | Inst::FloatLt(a, b) => self.binary(*a, "<", *b),
+            Inst::UintLt(a, b) => self.binary(*a, "<", *b),
             Inst::IntLeq(a, b) | Inst::FloatLeq(a, b) => self.binary(*a, "<=", *b),
+            Inst::UintLeq(a, b) => self.binary(*a, "<=", *b),
             Inst::IntGt(a, b) | Inst::FloatGt(a, b) => self.binary(*a, ">", *b),
+            Inst::UintGt(a, b) => self.binary(*a, ">", *b),
             Inst::IntGeq(a, b) | Inst::FloatGeq(a, b) => self.binary(*a, ">=", *b),
+            Inst::UintGeq(a, b) => self.binary(*a, ">=", *b),
+            Inst::UintBitAnd(a, b) => self.binary(*a, "&", *b),
+            Inst::UintBitOr(a, b) => self.binary(*a, "|", *b),
+            Inst::UintBitXor(a, b) => self.binary(*a, "^", *b),
+            Inst::UintShl(a, b) => self.binary(*a, "<<", *b),
+            Inst::UintShr(a, b) => self.binary(*a, ">>", *b),
             Inst::Eq(a, b) => self.binary(*a, "==", *b),
             Inst::NotEq(a, b) => self.binary(*a, "!=", *b),
             Inst::FloatToInt(value) => Ok(format!("i32({})", self.render_val(*value)?)),
             Inst::IntToFloat(value) => Ok(format!("f32({})", self.render_val(*value)?)),
+            Inst::UintToFloat(value) => Ok(format!("f32({})", self.render_val(*value)?)),
+            Inst::IntToUint(value) | Inst::FloatToUint(value) => {
+                Ok(format!("u32({})", self.render_val(*value)?))
+            }
+            Inst::UintToInt(value) => Ok(format!("i32({})", self.render_val(*value)?)),
+            Inst::UintBitcastInt(value) => {
+                Ok(format!("bitcast<i32>({})", self.render_val(*value)?))
+            }
+            Inst::IntBitcastUint(value) => {
+                Ok(format!("bitcast<u32>({})", self.render_val(*value)?))
+            }
             Inst::Neg(value) => Ok(format!("(-{})", self.render_val(*value)?)),
             Inst::Not(value) => Ok(format!("(!{})", self.render_val(*value)?)),
+            Inst::UintBitNot(value) => Ok(format!("(~{})", self.render_val(*value)?)),
             other => Err(err(
                 self.span,
                 format!(
@@ -4235,6 +4310,7 @@ fn zero_value(kind: ValueKind) -> String {
     match kind {
         ValueKind::F32 => "0.0".into(),
         ValueKind::I32 => "0".into(),
+        ValueKind::U32 => "0u".into(),
         ValueKind::Bool => "false".into(),
         ValueKind::Vec2 => "vec2<f32>(0.0)".into(),
         ValueKind::Vec3 => "vec3<f32>(0.0)".into(),

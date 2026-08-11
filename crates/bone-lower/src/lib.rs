@@ -281,6 +281,7 @@ pub fn lower_type_expr_in(
 
     let idx = match &te.kind {
         TypeExprKind::Int => ctx.workspace.builtins.int(),
+        TypeExprKind::Uint => ctx.workspace.builtins.uint(),
         TypeExprKind::Float => ctx.workspace.builtins.float(),
         TypeExprKind::Bool => ctx.workspace.builtins.bool(),
         TypeExprKind::String => ctx.workspace.builtins.string(),
@@ -1366,6 +1367,12 @@ pub fn lower_expr_value(
             value: lower_expr(ctx, a, body, scope, a.e(inner))?,
             target: lower_type_expr_local(ctx, a, body, a.te(ty))?,
             kind: AsKind::Cast,
+        },
+
+        ExprKind::Bitcast(inner, ty) => Expr::As {
+            value: lower_expr(ctx, a, body, scope, a.e(inner))?,
+            target: lower_type_expr_local(ctx, a, body, a.te(ty))?,
+            kind: AsKind::Bitcast,
         },
 
         ExprKind::Index(base, index) => Expr::Index {
@@ -2962,6 +2969,7 @@ fn pl_chain(a: &Ast, e: &Idx<ExprData>) -> bool {
         | ExprKind::PreDecrement(i)
         | ExprKind::PostDecrement(i)
         | ExprKind::As(i, _)
+        | ExprKind::Bitcast(i, _)
         | ExprKind::TypeAscription(i, _) => pl_chain(a, i),
 
         ExprKind::BinOp { left, right, .. } => pl_chain(a, left) || pl_chain(a, right),

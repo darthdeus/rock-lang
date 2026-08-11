@@ -314,6 +314,7 @@ impl Builder<'_> {
         let (payload, _) = ty.peel_nullable();
         match payload {
             MonoTy::Int => Some(ArithTy::Int),
+            MonoTy::Uint => Some(ArithTy::Uint),
             MonoTy::Float => Some(ArithTy::Float),
             MonoTy::String => Some(ArithTy::Str),
             MonoTy::App { ctor: crate::monoty::MonoCtor::Nominal(name), .. }
@@ -346,7 +347,11 @@ impl Builder<'_> {
                     .flatten()
             })
             == Some(ArithTy::Float);
-        self.coerce_i2f(value, self.arith_ty(value_expr) == Some(ArithTy::Int), to_float)
+        self.coerce_numeric_to_float(
+            value,
+            self.arith_ty(value_expr).unwrap_or(ArithTy::Str),
+            to_float,
+        )
     }
 
     pub(crate) fn coerced_mono(
@@ -355,9 +360,9 @@ impl Builder<'_> {
         value_expr: Idx<Expr>,
         expected: &MonoTy,
     ) -> Idx<Inst> {
-        self.coerce_i2f(
+        self.coerce_numeric_to_float(
             value,
-            self.arith_ty(value_expr) == Some(ArithTy::Int),
+            self.arith_ty(value_expr).unwrap_or(ArithTy::Str),
             self.arith_ty_of_mono(expected) == Some(ArithTy::Float),
         )
     }
@@ -379,14 +384,19 @@ impl Builder<'_> {
         }
     }
 
-    /// [`Self::coerced`] keyed on already-computed operand classes -- the scalar-op
-    /// path knows the operand's [`ArithTy`] and whether the resolved op is float,
-    /// but has no single expected `TyId` to pass to `coerced`.
-    pub(crate) fn coerce_i2f(&mut self, value: Idx<Inst>, from_int: bool, to_float: bool) -> Idx<Inst> {
-        if from_int && to_float {
-            self.emit_cur(Inst::IntToFloat(value))
-        } else {
-            value
+    pub(crate) fn coerce_numeric_to_float(
+        &mut self,
+        value: Idx<Inst>,
+        from: ArithTy,
+        to_float: bool,
+    ) -> Idx<Inst> {
+        if !to_float {
+            return value;
+        }
+        match from {
+            ArithTy::Int => self.emit_cur(Inst::IntToFloat(value)),
+            ArithTy::Uint => self.emit_cur(Inst::UintToFloat(value)),
+            _ => value,
         }
     }
 

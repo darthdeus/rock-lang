@@ -139,6 +139,8 @@ pub enum ExprKind {
 
     /// `expr as Type`
     As(Idx<ExprData>, Idx<TypeExprData>),
+    /// bitcast<Type>(expr) preserves the low 32 bits between int and uint.
+    Bitcast(Idx<ExprData>, Idx<TypeExprData>),
     /// `expr :: Type` type ascription
     TypeAscription(Idx<ExprData>, Idx<TypeExprData>),
 
@@ -463,6 +465,7 @@ pub enum TypeExprKind {
     Unit,
     String,
     Int,
+    Uint,
     Float,
     Bool,
     Ident(Ident),

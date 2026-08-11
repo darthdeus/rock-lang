@@ -116,6 +116,8 @@ mod table_unset;
 mod trampoline_fallback;
 #[path = "try_call.rs"]
 mod try_call;
+#[path = "uint.rs"]
+mod uint;
 #[path = "value_gc_eq.rs"]
 mod value_gc_eq;
 #[path = "value_structs.rs"]

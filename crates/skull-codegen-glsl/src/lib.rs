@@ -64,6 +64,7 @@ use ustr::Ustr;
 enum GlslTy {
     Float,
     Int,
+    Uint,
     Bool,
     Vec2,
     Vec3,
@@ -84,6 +85,7 @@ impl GlslTy {
         match self {
             GlslTy::Float => "float",
             GlslTy::Int => "int",
+            GlslTy::Uint => "uint",
             GlslTy::Bool => "bool",
             GlslTy::Vec2 => "vec2",
             GlslTy::Vec3 => "vec3",
@@ -143,6 +145,7 @@ fn mono_glsl_ty(t: &MonoTy) -> Option<GlslTy> {
     match t {
         MonoTy::Float => Some(GlslTy::Float),
         MonoTy::Int => Some(GlslTy::Int),
+        MonoTy::Uint => Some(GlslTy::Uint),
         MonoTy::Bool => Some(GlslTy::Bool),
         MonoTy::App { ctor: MonoCtor::Nominal(n), .. } => nominal_glsl_ty(n.as_str()),
         _ => None,
@@ -160,7 +163,7 @@ fn concrete_glsl_ty(
         err(
             span,
             format!(
-                "shader profile: {what} type `{}` is not tier 0 (only float/int/bool/Vec2/Vec3/Vec4)",
+                "shader profile: {what} type `{}` is not tier 0 (only float/int/uint/bool/Vec2/Vec3/Vec4)",
                 ty.render()
             ),
         )
@@ -180,17 +183,18 @@ fn glsl_ty(
     what: &str,
 ) -> Result<GlslTy, CompilerError> {
     let reject = || {
-        err(span, format!("shader profile: {what} type is not tier 0 (only float/int/bool/Vec2/Vec3/Vec4)"))
+        err(span, format!("shader profile: {what} type is not tier 0 (only float/int/uint/bool/Vec2/Vec3/Vec4)"))
     };
     match ty_expr(ws, ty) {
         Some(TypeExpr::Builtin(BuiltinTy::Float)) => Ok(GlslTy::Float),
         Some(TypeExpr::Builtin(BuiltinTy::Int)) => Ok(GlslTy::Int),
+        Some(TypeExpr::Builtin(BuiltinTy::Uint)) => Ok(GlslTy::Uint),
         Some(TypeExpr::Builtin(BuiltinTy::Bool)) => Ok(GlslTy::Bool),
         Some(TypeExpr::Generic(var, name)) => match subst.get(&var) {
             Some(bound) => mono_glsl_ty(bound).ok_or_else(|| {
                 err(span, format!(
                     "shader profile: {what} type `{name}` is bound to `{}`, which is not tier 0 \
-                     (only float/int/bool/Vec2/Vec3/Vec4)",
+                    (only float/int/uint/bool/Vec2/Vec3/Vec4)",
                     bound.render()
                 ))
             }),
@@ -198,7 +202,7 @@ fn glsl_ty(
         },
         Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. }) => nominal_glsl_ty(n.as_str())
             .ok_or_else(|| err(span, format!(
-                "shader profile: {what} type `{n}` is not tier 0 (only float/int/bool/Vec2/Vec3/Vec4)"
+                "shader profile: {what} type `{n}` is not tier 0 (only float/int/uint/bool/Vec2/Vec3/Vec4)"
             ))),
         _ => Err(reject()),
     }
@@ -281,6 +285,7 @@ fn fold_const_expr(
 fn const_lit_ty(lit: &Lit) -> GlslTy {
     match lit {
         Lit::Int(_) => GlslTy::Int,
+        Lit::Uint(_) => GlslTy::Uint,
         Lit::Bool(_) => GlslTy::Bool,
         _ => GlslTy::Float,
     }
@@ -291,6 +296,7 @@ fn render_const_lit(lit: &Lit) -> Option<String> {
     match lit {
         Lit::Float(f) => Some(fmt_float(*f)),
         Lit::Int(i) => Some(i.to_string()),
+        Lit::Uint(i) => Some(i.to_string()),
         Lit::Bool(b) => Some(b.to_string()),
         Lit::Nil | Lit::Str(_) => None,
     }
@@ -396,11 +402,18 @@ fn profile_body(
             Inst::Const(_)
             | Inst::Load(_)
             | Inst::IntAdd(..) | Inst::IntSub(..) | Inst::IntMul(..) | Inst::IntDiv(..) | Inst::IntMod(..)
+            | Inst::UintAdd(..) | Inst::UintSub(..) | Inst::UintMul(..) | Inst::UintDiv(..) | Inst::UintMod(..)
             | Inst::FloatAdd(..) | Inst::FloatSub(..) | Inst::FloatMul(..) | Inst::FloatDiv(..) | Inst::FloatMod(..)
             | Inst::IntLt(..) | Inst::IntLeq(..) | Inst::IntGt(..) | Inst::IntGeq(..)
+            | Inst::UintLt(..) | Inst::UintLeq(..) | Inst::UintGt(..) | Inst::UintGeq(..)
             | Inst::FloatLt(..) | Inst::FloatLeq(..) | Inst::FloatGt(..) | Inst::FloatGeq(..)
             | Inst::Eq(..) | Inst::NotEq(..)
-            | Inst::Neg(_) | Inst::Not(_) | Inst::FloatToInt(_) | Inst::IntToFloat(_)
+            | Inst::BitAnd(..) | Inst::BitOr(..) | Inst::BitXor(..) | Inst::Shl(..) | Inst::Shr(..)
+            | Inst::UintBitAnd(..) | Inst::UintBitOr(..) | Inst::UintBitXor(..)
+            | Inst::UintShl(..) | Inst::UintShr(..)
+            | Inst::Neg(_) | Inst::Not(_) | Inst::BitNot(_) | Inst::UintBitNot(_)
+            | Inst::FloatToInt(_) | Inst::IntToFloat(_) | Inst::UintToFloat(_) | Inst::IntToUint(_)
+            | Inst::UintToInt(_) | Inst::FloatToUint(_) | Inst::UintBitcastInt(_) | Inst::IntBitcastUint(_)
             | Inst::MakeValueStruct { .. }
             | Inst::MaterializeValueStruct { .. }
             | Inst::Field { .. }
@@ -423,7 +436,9 @@ fn inst_kind(inst: &Inst) -> &'static str {
     match inst {
         Inst::Global(_) => "global read",
         Inst::StringConcat(..) | Inst::ToString(_) | Inst::Format { .. } | Inst::FormatDyn { .. } => "string",
-        Inst::BitAnd(..) | Inst::BitOr(..) | Inst::BitXor(..) | Inst::Shl(..) | Inst::Shr(..) | Inst::BitNot(_) => "bitwise op",
+        Inst::BitAnd(..) | Inst::BitOr(..) | Inst::BitXor(..) | Inst::Shl(..) | Inst::Shr(..)
+        | Inst::BitNot(_) | Inst::UintBitAnd(..) | Inst::UintBitOr(..) | Inst::UintBitXor(..)
+        | Inst::UintShl(..) | Inst::UintShr(..) | Inst::UintBitNot(_) => "bitwise op",
         Inst::CallMulti { .. } | Inst::CallValue { .. } | Inst::CallValueMulti { .. } | Inst::CallBoundMulti { .. } => "indirect/multi-value call",
         Inst::Lambda { .. } => "closure",
         Inst::MakeTuple(_) => "tuple",
@@ -607,8 +622,8 @@ pub fn is_lowered_native_operator(
     f.param_decls.iter().all(|param| {
         matches!(
             glsl_ty(ws, &subst, param.ty, f.name_span, "operator").ok(),
-            Some(GlslTy::Float | GlslTy::Int)
-        ) || matches!(ws.render(None, param.ty).as_str(), "float" | "int")
+            Some(GlslTy::Float | GlslTy::Int | GlslTy::Uint)
+        ) || matches!(ws.render(None, param.ty).as_str(), "float" | "int" | "uint")
     })
 }
 
@@ -1375,16 +1390,25 @@ impl FnEmit<'_> {
         Ok(match &self.f.insts[iid] {
             Inst::Const(Lit::Float(_)) => GlslTy::Float,
             Inst::Const(Lit::Int(_)) => GlslTy::Int,
+            Inst::Const(Lit::Uint(_)) => GlslTy::Uint,
             Inst::Const(Lit::Bool(_)) => GlslTy::Bool,
             Inst::Const(Lit::Nil) | Inst::Const(Lit::Str(_)) => GlslTy::Float, // rejected earlier
             Inst::FloatAdd(..) | Inst::FloatSub(..) | Inst::FloatMul(..) | Inst::FloatDiv(..) | Inst::FloatMod(..) => GlslTy::Float,
             Inst::IntAdd(..) | Inst::IntSub(..) | Inst::IntMul(..) | Inst::IntDiv(..) | Inst::IntMod(..) => GlslTy::Int,
+            Inst::UintAdd(..) | Inst::UintSub(..) | Inst::UintMul(..) | Inst::UintDiv(..) | Inst::UintMod(..) => GlslTy::Uint,
             Inst::IntLt(..) | Inst::IntLeq(..) | Inst::IntGt(..) | Inst::IntGeq(..)
+            | Inst::UintLt(..) | Inst::UintLeq(..) | Inst::UintGt(..) | Inst::UintGeq(..)
             | Inst::FloatLt(..) | Inst::FloatLeq(..) | Inst::FloatGt(..) | Inst::FloatGeq(..)
             | Inst::Eq(..) | Inst::NotEq(..) | Inst::Not(_) => GlslTy::Bool,
-            Inst::Neg(x) => self.ty_of(*x)?,
+            Inst::Neg(x) | Inst::BitNot(x) | Inst::UintBitNot(x) => self.ty_of(*x)?,
             Inst::FloatToInt(_) => GlslTy::Int,
             Inst::IntToFloat(_) => GlslTy::Float,
+            Inst::UintToFloat(_) => GlslTy::Float,
+            Inst::IntToUint(_) | Inst::FloatToUint(_) | Inst::IntBitcastUint(_) => GlslTy::Uint,
+            Inst::UintToInt(_) | Inst::UintBitcastInt(_) => GlslTy::Int,
+            Inst::BitAnd(..) | Inst::BitOr(..) | Inst::BitXor(..) | Inst::Shl(..) | Inst::Shr(..) => GlslTy::Int,
+            Inst::UintBitAnd(..) | Inst::UintBitOr(..) | Inst::UintBitXor(..)
+            | Inst::UintShl(..) | Inst::UintShr(..) => GlslTy::Uint,
             Inst::Load(c) => self.cell_ty.get(c).copied().unwrap_or(GlslTy::Float),
             Inst::Global(name) => {
                 const_lit(self.ws, *name).as_ref().map_or(GlslTy::Float, const_lit_ty)
@@ -1471,6 +1495,7 @@ impl FnEmit<'_> {
         Ok(match &self.f.insts[iid] {
             Inst::Const(Lit::Float(f)) => fmt_float(*f),
             Inst::Const(Lit::Int(i)) => i.to_string(),
+            Inst::Const(Lit::Uint(i)) => format!("{i}u"),
             Inst::Const(Lit::Bool(b)) => b.to_string(),
             Inst::Const(Lit::Nil) => return Err(err(self.span(), "shader profile: null literal is not tier 0")),
             Inst::Const(Lit::Str(_)) => return Err(err(self.span(), "shader profile: string literal is not tier 0")),
@@ -1507,6 +1532,11 @@ impl FnEmit<'_> {
             Inst::FloatSub(a, b) => fbin(a, "-", b, self)?,
             Inst::IntMul(a, b) => bin(a, "*", b, self)?,
             Inst::FloatMul(a, b) => fbin(a, "*", b, self)?,
+            Inst::UintAdd(a, b) => bin(a, "+", b, self)?,
+            Inst::UintSub(a, b) => bin(a, "-", b, self)?,
+            Inst::UintMul(a, b) => bin(a, "*", b, self)?,
+            Inst::UintDiv(a, b) => bin(a, "/", b, self)?,
+            Inst::UintMod(a, b) => bin(a, "%", b, self)?,
             Inst::FloatDiv(a, b) => fbin(a, "/", b, self)?,
             Inst::FloatMod(a, b) => format!(
                 "mod({}, {})",
@@ -1524,12 +1554,22 @@ impl FnEmit<'_> {
             Inst::FloatGt(a, b) => fbin(a, ">", b, self)?,
             Inst::IntGeq(a, b) => bin(a, ">=", b, self)?,
             Inst::FloatGeq(a, b) => fbin(a, ">=", b, self)?,
+            Inst::UintLt(a, b) => bin(a, "<", b, self)?,
+            Inst::UintLeq(a, b) => bin(a, "<=", b, self)?,
+            Inst::UintGt(a, b) => bin(a, ">", b, self)?,
+            Inst::UintGeq(a, b) => bin(a, ">=", b, self)?,
             // Untyped Eq/NotEq: operands arrive same-typed (a mixed `float == int`
             // was int->float-coerced at lowering), so render a plain compare.
             Inst::Eq(a, b) => bin(a, "==", b, self)?,
             Inst::NotEq(a, b) => bin(a, "!=", b, self)?,
             Inst::Neg(x) => format!("(-{})", self.render_val(*x)?),
             Inst::Not(x) => format!("(!{})", self.render_val(*x)?),
+            Inst::BitNot(x) | Inst::UintBitNot(x) => format!("(~{})", self.render_val(*x)?),
+            Inst::BitAnd(a, b) | Inst::UintBitAnd(a, b) => bin(a, "&", b, self)?,
+            Inst::BitOr(a, b) | Inst::UintBitOr(a, b) => bin(a, "|", b, self)?,
+            Inst::BitXor(a, b) | Inst::UintBitXor(a, b) => bin(a, "^", b, self)?,
+            Inst::Shl(a, b) | Inst::UintShl(a, b) => bin(a, "<<", b, self)?,
+            Inst::Shr(a, b) | Inst::UintShr(a, b) => bin(a, ">>", b, self)?,
             Inst::FloatToInt(x) => format!("int({})", self.render_val(*x)?),
             // int->float subsumption (inserted at lowering): fold an int literal
             // to float text, else materialize the `float(...)` conversion.
@@ -1537,6 +1577,11 @@ impl FnEmit<'_> {
                 Inst::Const(Lit::Int(i)) => fmt_float(*i as f64),
                 _ => format!("float({})", self.render_val(*x)?),
             },
+            Inst::UintToFloat(x) => format!("float({})", self.render_val(*x)?),
+            Inst::IntToUint(x) | Inst::FloatToUint(x) => format!("uint({})", self.render_val(*x)?),
+            Inst::UintToInt(x) => format!("int({})", self.render_val(*x)?),
+            Inst::UintBitcastInt(x) => format!("uintBitsToInt({})", self.render_val(*x)?),
+            Inst::IntBitcastUint(x) => format!("intBitsToUint({})", self.render_val(*x)?),
             Inst::Field { base, field } => {
                 if self.is_uniform_base(*base) {
                     field.as_str().to_string() // uniform global, not a struct member
@@ -2818,6 +2863,7 @@ fn wire_kind_of(t: GlslTy) -> WireKind {
     match t {
         GlslTy::Float => WireKind::F32,
         GlslTy::Int => WireKind::I32,
+        GlslTy::Uint => WireKind::U32,
         GlslTy::Bool => WireKind::Bool32,
         GlslTy::Vec2 => WireKind::F32x2,
         GlslTy::Vec3 | GlslTy::Bvec3 => WireKind::F32x3,
@@ -2870,6 +2916,7 @@ fn wire_glsl(k: WireKind) -> GlslTy {
     match k {
         WireKind::F32 => GlslTy::Float,
         WireKind::I32 => GlslTy::Int,
+        WireKind::U32 => GlslTy::Uint,
         WireKind::Bool32 => GlslTy::Bool,
         WireKind::F32x2 => GlslTy::Vec2,
         WireKind::F32x3 => GlslTy::Vec3,
@@ -4084,6 +4131,7 @@ fn wire_glsl_ty(k: WireKind) -> &'static str {
         WireKind::F32x3 => "vec3",
         WireKind::F32x4 => "vec4",
         WireKind::I32 => "int",
+        WireKind::U32 => "uint",
         WireKind::Bool32 => "bool",
         WireKind::Mat4 => "mat4",
     }

@@ -106,7 +106,7 @@ fn run(src: &str, driver: &str) -> String {
     // runtime prelude, which this bare harness does not emit -- pull in the
     // canonical definition (one copy, shared with `skull::runtime_prelude`).
     let mut lua = format!(
-        "local bit = require('bit')\n{}\n{}\n",
+        "local bit = require('bit')\nlocal ffi = require('ffi')\n{}\n{}\nfunction __nb_checked_get(b, i) if i < 0 or i >= b.len then error('NativeBuffer index out of bounds') end return b.ptr[i] end\nfunction __nb_checked_set(b, i, v) if i < 0 or i >= b.len then error('NativeBuffer index out of bounds') end b.ptr[i] = v end\n",
         skull_codegen_lua::FN_MT_PRELUDE,
         skull_codegen_lua::VEC_CHECK_SHIMS
     );
@@ -452,6 +452,78 @@ fn exec_cast_float_to_int() {
     assert_eq!(run("fn f(x: float) -> int { x as int }", "f(3.9)"), "3");
     assert_eq!(run("fn f(x: float) -> int { x as int }", "f(-1.2)"), "-2");
     assert_eq!(run("fn f(x: int) -> float { x as float }", "f(5)"), "5");
+}
+
+#[test]
+fn exec_uint_exact_wrapping_and_ordering() {
+    let src = "
+fn add(a: uint, b: uint) -> uint { a + b }
+fn mul(a: uint, b: uint) -> uint { a * b }
+fn bitnot(a: uint) -> uint { ~a }
+fn logical_shift(a: uint) -> uint { a >> 31 }
+fn above_signed_half(a: uint, b: uint) -> bool { a > b }";
+    assert_eq!(run(src, "add(4294967295, 1)"), "0");
+    assert_eq!(run(src, "mul(4294967295, 4294967295)"), "1");
+    assert_eq!(run(src, "bitnot(0)"), "4294967295");
+    assert_eq!(run(src, "logical_shift(2147483648)"), "1");
+    assert_eq!(run(src, "above_signed_half(2147483648, 0)"), "true");
+}
+
+#[test]
+fn exec_uint_entry_values_are_normalized() {
+    let src = "fn root(a: uint) -> uint { a }";
+    assert_eq!(run(src, "root(-1)"), "4294967295");
+}
+
+#[test]
+fn exec_uint_numeric_conversion_differs_from_bitcast() {
+    let src = "
+fn numeric(a: uint) -> int { a as int }
+fn bits(a: uint) -> int { bitcast<int>(a) }";
+    assert_eq!(run(src, "numeric(2147483648)"), "2147483648");
+    assert_eq!(run(src, "bits(2147483648)"), "-2147483648");
+}
+
+#[test]
+fn exec_uint_ranges_keep_unsigned_loop_and_materialized_types() {
+    let src = "
+fn last(lo: uint, hi: uint) -> uint {
+    let result: uint = 0
+    for i in lo..hi { result = i }
+    result
+}
+fn escaped() -> uint {
+    let values = 2147483648..2147483651
+    values[2]
+}";
+    assert_eq!(run(src, "last(2147483648, 2147483651)"), "2147483650");
+    assert_eq!(run(src, "escaped()"), "2147483650");
+}
+
+#[test]
+fn exec_uint_incdec_wraps() {
+    let src = "
+fn dec() -> uint { let x: uint = 0; x--; x }
+fn inc() -> uint { let x: uint = 4294967295; x++; x }";
+    assert_eq!(run(src, "dec()"), "4294967295");
+    assert_eq!(run(src, "inc()"), "0");
+}
+
+#[test]
+fn exec_uint_dynamic_shift_checks_the_runtime_count() {
+    let src = "fn shift(value: uint, count: uint) -> uint { value << count }";
+    assert_eq!(run(src, "shift(1, 31)"), "2147483648");
+}
+
+#[test]
+fn exec_native_buffer_uint_uses_unsigned_four_byte_storage() {
+    let src = "
+fn root() -> uint {
+    let b = native_buffer_uint(1)
+    b[0] = 4294967295
+    b[0]
+}";
+    assert_eq!(run(src, "root()"), "4294967295");
 }
 
 #[test]

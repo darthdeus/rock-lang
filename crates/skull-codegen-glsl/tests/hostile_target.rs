@@ -84,7 +84,7 @@ struct HostileAbi {
 
 fn tight_size(k: WireKind) -> u32 {
     match k {
-        WireKind::F32 | WireKind::I32 | WireKind::Bool32 => 4,
+        WireKind::F32 | WireKind::I32 | WireKind::U32 | WireKind::Bool32 => 4,
         WireKind::F32x2 => 8,
         WireKind::F32x3 => 12,
         WireKind::F32x4 => 16,

@@ -1187,6 +1187,7 @@ impl<'a> Parser<'a> {
                 "any" => TypeExprKind::Any,
                 "string" => TypeExprKind::String,
                 "int" => TypeExprKind::Int,
+                "uint" => TypeExprKind::Uint,
                 "float" => TypeExprKind::Float,
                 "bool" => TypeExprKind::Bool,
                 _ => TypeExprKind::Ident(ident.clone()),
@@ -1545,6 +1546,7 @@ impl<'a> Parser<'a> {
                     "any" => TypeExprKind::Any,
                     "string" => TypeExprKind::String,
                     "int" => TypeExprKind::Int,
+                    "uint" => TypeExprKind::Uint,
                     "float" => TypeExprKind::Float,
                     "bool" => TypeExprKind::Bool,
                     _ => {
@@ -2518,6 +2520,18 @@ impl<'a> Parser<'a> {
             TokenKind::Ident(name) => {
                 self.advance();
                 let base = Ident { span: start, name };
+                if name.as_str() == "bitcast" && self.kind() == TokenKind::LessThan {
+                    self.advance();
+                    let target = self.parse_type()?;
+                    self.expect_generic_close()?;
+                    self.expect(TokenKind::OpenParen)?;
+                    self.delimiter_depth += 1;
+                    let value = self.with_allow_literals(true, |p| p.parse_expr(0))?;
+                    self.delimiter_depth -= 1;
+                    self.expect(TokenKind::CloseParen)?;
+                    let span = self.span_from(start);
+                    return Ok(self.ast.expr(span, ExprKind::Bitcast(value, target)));
+                }
                 // `x => body` single-parameter lambda. Suppressed in a match-arm
                 // guard so the arm's `=>` survives (`docs/match-guard-parse-ambiguity.md`).
                 if !self.arrow_lambda_blocked && self.kind() == TokenKind::FatArrow {

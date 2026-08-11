@@ -84,6 +84,7 @@ pub struct FuncRef {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Lit {
     Int(i64),
+    Uint(u32),
     Float(f64),
     Bool(bool),
     Str(Ustr),
@@ -210,6 +211,11 @@ pub enum Inst {
     IntMul(Idx<Inst>, Idx<Inst>),
     IntDiv(Idx<Inst>, Idx<Inst>),
     IntMod(Idx<Inst>, Idx<Inst>),
+    UintAdd(Idx<Inst>, Idx<Inst>),
+    UintSub(Idx<Inst>, Idx<Inst>),
+    UintMul(Idx<Inst>, Idx<Inst>),
+    UintDiv(Idx<Inst>, Idx<Inst>),
+    UintMod(Idx<Inst>, Idx<Inst>),
     FloatAdd(Idx<Inst>, Idx<Inst>),
     FloatSub(Idx<Inst>, Idx<Inst>),
     FloatMul(Idx<Inst>, Idx<Inst>),
@@ -236,6 +242,10 @@ pub enum Inst {
     IntLeq(Idx<Inst>, Idx<Inst>),
     IntGt(Idx<Inst>, Idx<Inst>),
     IntGeq(Idx<Inst>, Idx<Inst>),
+    UintLt(Idx<Inst>, Idx<Inst>),
+    UintLeq(Idx<Inst>, Idx<Inst>),
+    UintGt(Idx<Inst>, Idx<Inst>),
+    UintGeq(Idx<Inst>, Idx<Inst>),
     FloatLt(Idx<Inst>, Idx<Inst>),
     FloatLeq(Idx<Inst>, Idx<Inst>),
     FloatGt(Idx<Inst>, Idx<Inst>),
@@ -259,11 +269,18 @@ pub enum Inst {
     /// materialize the conversion (GLSL: fold an int Const to float text, else
     /// wrap `float(...)`). See `docs/shaders.md`.
     IntToFloat(Idx<Inst>),
+    UintToFloat(Idx<Inst>),
+    IntToUint(Idx<Inst>),
+    UintToInt(Idx<Inst>),
+    FloatToUint(Idx<Inst>),
+    UintBitcastInt(Idx<Inst>),
+    IntBitcastUint(Idx<Inst>),
 
     // --- unary ---
     Neg(Idx<Inst>),
     Not(Idx<Inst>),
     BitNot(Idx<Inst>),
+    UintBitNot(Idx<Inst>),
 
     // --- bitwise (LuaJIT `bit.*`) ---
     BitAnd(Idx<Inst>, Idx<Inst>),
@@ -271,6 +288,11 @@ pub enum Inst {
     BitXor(Idx<Inst>, Idx<Inst>),
     Shl(Idx<Inst>, Idx<Inst>),
     Shr(Idx<Inst>, Idx<Inst>),
+    UintBitAnd(Idx<Inst>, Idx<Inst>),
+    UintBitOr(Idx<Inst>, Idx<Inst>),
+    UintBitXor(Idx<Inst>, Idx<Inst>),
+    UintShl(Idx<Inst>, Idx<Inst>),
+    UintShr(Idx<Inst>, Idx<Inst>),
 
     // --- calls ---
     // NOTE: args are a `Vec<Idx<Inst>>`, not the `IdxRange<Inst>` bone-mir-design

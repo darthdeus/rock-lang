@@ -410,6 +410,12 @@ fn int_and_bool_leaves_store_through_the_int_view() {
     );
 }
 
+#[test]
+fn uint_leaves_keep_a_distinct_unsigned_view_kind() {
+    let p = plan_of("value U { packed: uint, count: int }", "U");
+    assert_eq!(stores(&p), vec![(0, WireView::Uint), (4, WireView::Int)]);
+}
+
 /// The std140 gap is visible at LEAF level, which is the level the packer
 /// writes at: `direction`'s two floats sit at 8 and 12, where the C layout
 /// would have put them at 4 and 8.

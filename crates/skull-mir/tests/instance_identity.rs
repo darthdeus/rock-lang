@@ -67,6 +67,7 @@ fn v2() -> MonoTy {
 fn arg_shapes() -> Vec<(&'static str, MonoTy)> {
     vec![
         ("scalar", MonoTy::Int),
+        ("unsigned scalar", MonoTy::Uint),
         ("value struct", v2()),
         ("tuple", MonoTy::Tuple(vec![MonoTy::Int, MonoTy::Float])),
         ("nullable", MonoTy::Nullable(Box::new(MonoTy::Int))),
@@ -90,7 +91,7 @@ fn interning_an_argument_list_round_trips_and_shares_ids_by_type() {
     let ident = decl(&ws, "ident");
     let interner = MonoInterner::new();
     let shapes = arg_shapes();
-    assert_eq!(shapes.len(), 8, "the shape table is the population under test");
+    assert_eq!(shapes.len(), 9, "the shape table is the population under test");
 
     for (what, ty) in &shapes {
         let inst = Instance::intern(&interner, ident, vec![ty.clone()]);
@@ -106,7 +107,7 @@ fn interning_an_argument_list_round_trips_and_shares_ids_by_type() {
     assert_eq!(
         interner.len(),
         shapes.len(),
-        "8 distinct argument types over 16 interns -- the arena shares by type"
+        "9 distinct argument types over 18 interns -- the arena shares by type"
     );
 }
 
@@ -124,12 +125,19 @@ fn equal_abi_arguments_are_distinct_instances_with_distinct_symbols() {
     let interner = MonoInterner::new();
 
     let i = Instance::intern(&interner, ident, vec![MonoTy::Int]);
+    let u = Instance::intern(&interner, ident, vec![MonoTy::Uint]);
     let s = Instance::intern(&interner, ident, vec![MonoTy::String]);
     assert_ne!(i, s, "two concrete types are two instances whatever they splat to");
+    assert_ne!(i, u, "signed and unsigned scalars are distinct concrete instances");
     assert_ne!(
         i.symbol(&ws, &interner),
         s.symbol(&ws, &interner),
         "and two instances are two symbols"
+    );
+    assert_ne!(
+        i.symbol(&ws, &interner),
+        u.symbol(&ws, &interner),
+        "signed and unsigned scalars have distinct symbols"
     );
 }
 

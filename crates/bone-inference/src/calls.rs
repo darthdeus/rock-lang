@@ -81,7 +81,10 @@ pub(crate) fn fit_cost(gamma: &mut Gamma, arg: TyId, param: TyId, span: Span) ->
     let p = resolve(gamma, param, span);
 
     match (gamma.get(a), gamma.get(p)) {
-        (TypeExpr::Builtin(BuiltinTy::Int), TypeExpr::Builtin(BuiltinTy::Float)) => Some(1),
+        (
+            TypeExpr::Builtin(BuiltinTy::Int | BuiltinTy::Uint),
+            TypeExpr::Builtin(BuiltinTy::Float),
+        ) => Some(1),
         (_, TypeExpr::Builtin(BuiltinTy::Any)) => Some(2),
         _ => {
             let p_is_iface = match *gamma.get(p) {
@@ -543,7 +546,16 @@ pub(crate) fn score_candidate(
 
                 let db =
                     declared_is_bounded_generic(gamma, declared[offset + i], &bounded_vars);
-                match fit_cost_with_iter_coercion(c, gamma, aty, pty, db, span) {
+                let pty_r = resolve(gamma, pty, span);
+                let contextual_uint = matches!(fill, SlotFill::Direct(arg)
+                    if matches!(c.body.expr_arena[*arg], Expr::Int(value)
+                        if (0..=u32::MAX as i64).contains(&value))
+                    && matches!(gamma.get(pty_r), TypeExpr::Builtin(BuiltinTy::Uint)));
+                match if contextual_uint {
+                    Some(1)
+                } else {
+                    fit_cost_with_iter_coercion(c, gamma, aty, pty, db, span)
+                } {
                     Some(c) => total += c,
                     None => {
                         gamma.out.rollback_to(snap);
