@@ -461,11 +461,15 @@ fn add(a: uint, b: uint) -> uint { a + b }
 fn mul(a: uint, b: uint) -> uint { a * b }
 fn bitnot(a: uint) -> uint { ~a }
 fn logical_shift(a: uint) -> uint { a >> 31 }
+fn logical_shift_half(a: uint) -> uint { a >> 1 }
+fn logical_shift_identity(a: uint) -> uint { a >> 0 }
 fn above_signed_half(a: uint, b: uint) -> bool { a > b }";
     assert_eq!(run(src, "add(4294967295, 1)"), "0");
     assert_eq!(run(src, "mul(4294967295, 4294967295)"), "1");
     assert_eq!(run(src, "bitnot(0)"), "4294967295");
     assert_eq!(run(src, "logical_shift(2147483648)"), "1");
+    assert_eq!(run(src, "logical_shift_half(2147483648)"), "1073741824");
+    assert_eq!(run(src, "logical_shift_identity(2147483648)"), "2147483648");
     assert_eq!(run(src, "above_signed_half(2147483648, 0)"), "true");
 }
 

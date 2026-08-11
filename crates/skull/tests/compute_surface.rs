@@ -386,6 +386,11 @@ fn compiler_authored_rect_loss_fixture_is_naga_validated() {
     assert!(emission.source.contains("var<storage, read_write> s_loss: array<atomic<u32>>"));
     assert!(emission.source.contains("var<workgroup> wg_partial: array<u32, 64>"));
     assert!(emission.source.contains("atomicAdd(&s_loss"));
+    assert_eq!(
+        emission.source.matches("workgroupBarrier()").count(),
+        2,
+        "the reduction keeps both uniform-control-flow barriers"
+    );
     assert!(emission.source.contains("fn"));
     assert!(emission.abi.wire().starts_with("WGSL_ABI_V4\n"));
 }
@@ -911,6 +916,29 @@ fn storage_load_rejects_write_only_access() {
     assert!(
         errors.iter().any(|error| error.contains("storage_load") && error.contains("Write")),
         "load through a write-only resource must reject: {errors:#?}"
+    );
+}
+
+#[test]
+fn atomic_storage_rejects_ordinary_load_and_store() {
+    let load_source = REAL_RECT_LOSS.replace(
+        "if reduction_lane == (0 as uint) { atomic_add(loss, candidate, workgroup_load(partial, 0)) }",
+        "let rejected = storage_load(loss, candidate)\n    if reduction_lane == (0 as uint) { atomic_add(loss, candidate, workgroup_load(partial, 0)) }",
+    );
+    let load_bone_errors = common::bone_rejections(&load_source);
+    assert!(
+        load_bone_errors.iter().any(|error| error.contains("AtomicStorageBuffer")),
+        "ordinary load through atomic storage must reject: {load_bone_errors:#?}"
+    );
+
+    let store_source = REAL_RECT_LOSS.replace(
+        "if reduction_lane == (0 as uint) { atomic_add(loss, candidate, workgroup_load(partial, 0)) }",
+        "storage_store(loss, candidate, (0 as uint))\n    if reduction_lane == (0 as uint) { atomic_add(loss, candidate, workgroup_load(partial, 0)) }",
+    );
+    let store_errors = common::bone_rejections(&store_source);
+    assert!(
+        store_errors.iter().any(|error| error.contains("AtomicStorageBuffer")),
+        "ordinary store through atomic storage must reject: {store_errors:#?}"
     );
 }
 
