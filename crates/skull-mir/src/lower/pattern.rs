@@ -657,11 +657,23 @@ impl Builder<'_> {
     ) -> Result<Option<TupleRetShape>, CompilerError> {
         let Expr::Call {
             callee: Callee::Unresolved { name, .. },
+            args,
             ..
         } = self.body.expr_arena[e]
         else {
             return Ok(None);
         };
+        let arg_idxs: Vec<_> = args.into_iter().collect();
+        let any_named = arg_idxs
+            .iter()
+            .any(|a| self.body.arg_names.contains_key(a) || self.body.spread_args.contains(a));
+        if !any_named
+            && arg_idxs
+                .first()
+                .is_some_and(|&recv| self.struct_field_is_fn(recv, name))
+        {
+            return Ok(None);
+        }
         let Ok(func) = self.resolve_funcref(e, name) else { return Ok(None) };
         // The CALLEE's instantiation, via the same oracle `lower_call` uses --
         // not the enclosing body's `spec_subst`, which is empty in a
