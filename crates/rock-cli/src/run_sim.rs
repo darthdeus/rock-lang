@@ -245,10 +245,8 @@ pub fn do_run_sim_opts(backend: crate::Backend, project: &str, sim_name: &str, q
         ));
     }
     if summary.has_failures() {
-        // Caller decides exit code. The standalone `rock sim` CLI maps
-        // this to a non-zero process exit in `dispatcher.rs`; the
-        // `rock stone --sim` watcher path logs and keeps running so the
-        // user can fix and recompile.
+        // Caller decides exit code; `rock sim` maps this to a non-zero
+        // process exit in `dispatcher.rs`.
         let fails = summary.expects_fail.len();
         let errs = summary.errors.len();
         return Err(anyhow!(
