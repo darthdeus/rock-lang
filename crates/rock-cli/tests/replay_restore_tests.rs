@@ -1205,20 +1205,16 @@ fn explicit_branch_truncates_every_future_bearing_surface_together() {
     );
 
     // End to end: the rewritten from-boot file must reproduce the live branched
-    // state in a fresh process. This second run is the SAME scenario minus the
-    // window resize, because replaying any log that carries a mid-run resize
-    // already diverges today -- replay overrides `WINDOW_SIZE` but never resizes
-    // the real window, so anything reading the drawable drifts. That is a
-    // pre-existing defect, pinned by
-    // `replay_of_a_log_with_a_midrun_resize_desyncs_sentinel`, not something the
-    // branch introduces: the branch re-emits the resize at the branch tick and
-    // the assertions above cover its truncation.
+    // state in a fresh process, including a resize retained before the branch.
     let replayable_s = dir.path().join("branch-replayable.replay").to_string_lossy().into_owned();
     let live2 = run_record_dump(
         game, 120, &replayable_s,
         &[
             ("STONE_LIVE_REWIND", "1"),
             ("STONE_CHECKPOINT_INTERVAL", "5"),
+            ("STONE_RESIZE_AT_FRAME", "10"),
+            ("STONE_RESIZE_W", "1000"),
+            ("STONE_RESIZE_H", "700"),
             ("STONE_RELOAD_AT_FRAME", "32"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
             ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
@@ -1235,6 +1231,10 @@ fn explicit_branch_truncates_every_future_bearing_surface_together() {
         );
     }
     let after2 = recorded_tick_lines(&replayable_s);
+    assert!(
+        replay_lines(&replayable_s).iter().any(|l| l.starts_with("r ")),
+        "the retained branch prefix must carry its resize record"
+    );
     let replayed = run_replay_dump(game, after2 as u32 + 5, &replayable_s, &[]);
     assert_eq!(
         current_tick(&replayed), current_tick(&live2),
@@ -1243,62 +1243,124 @@ fn explicit_branch_truncates_every_future_bearing_surface_together() {
     let mut sim = sim_state_names(game, 40);
     sim.remove("dt");
     assert_sim_state_matches(&live2, &replayed, &sim, "branched from-boot replay");
+    for name in ["WINDOW_SIZE", "DRAWABLE_SIZE", "SCENE_CAPACITY"] {
+        assert_eq!(
+            live2["stone"][name], replayed["stone"][name],
+            "branch replay must reproduce the retained resize's {name}"
+        );
+    }
 }
 
-/// PINNED BUG. A replay applies a recorded resize by overriding `WINDOW_SIZE`
-/// only -- it never resizes the real window -- so any state derived from the
-/// actual drawable drifts from the recorded run, and the desync detector aborts
-/// with exit 5. Correct behavior is for a replay of a log carrying an `r` line
-/// to reproduce the recorded run exactly.
-///
-/// This is inverted: it asserts the divergence that happens today. When the
-/// replay path starts resizing the window (or otherwise reproducing the
-/// recorded drawable), this test goes red -- flip it to assert success and
-/// delete the carve-out in
-/// `explicit_branch_truncates_every_future_bearing_surface_together`.
 #[test]
-fn replay_of_a_log_with_a_midrun_resize_desyncs_sentinel() {
+fn replay_of_a_log_with_a_midrun_resize_matches_recording() {
     let game = "bitgun";
     let dir = tempfile::tempdir().unwrap();
     let log_s = dir.path().join("resize.replay").to_string_lossy().into_owned();
-    let scratch = tempfile::tempdir().unwrap();
-
-    let rec = Command::new(env!("CARGO_BIN_EXE_rock"))
-        .args([
-            "frame", game, "-n", "60", "--record", &log_s,
-            "--output", &scratch.path().to_string_lossy(),
-        ])
-        .envs([
+    let recorded = run_record_dump(
+        game,
+        60,
+        &log_s,
+        &[
             ("STONE_CHECKPOINT_INTERVAL", "1"),
             ("STONE_RESIZE_AT_FRAME", "30"),
             ("STONE_RESIZE_W", "1000"),
             ("STONE_RESIZE_H", "700"),
-        ])
-        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
-        .current_dir(workspace_root())
-        .output()
-        .expect("spawn record");
-    assert!(rec.status.success(), "record failed: {}", String::from_utf8_lossy(&rec.stderr));
+        ],
+    );
     assert!(
         replay_lines(&log_s).iter().any(|l| l.starts_with("r ")),
         "the fixture must actually carry a resize line"
     );
+    assert_eq!(recorded["stone"]["WINDOW_SIZE"]["x"], 1000);
+    assert_eq!(recorded["stone"]["WINDOW_SIZE"]["y"], 700);
+    assert_eq!(recorded["stone"]["DRAWABLE_SIZE"]["x"], 1000);
+    assert_eq!(recorded["stone"]["DRAWABLE_SIZE"]["y"], 700);
 
-    let out = Command::new(env!("CARGO_BIN_EXE_rock"))
-        .args([
-            "frame", game, "-n", "70", "--replay", &log_s,
-            "--output", &scratch.path().to_string_lossy(),
-        ])
-        .env("ROCK_FRAME_TIMEOUT_SECS", "60")
-        .current_dir(workspace_root())
-        .output()
-        .expect("spawn replay");
-    let stderr = String::from_utf8_lossy(&out.stderr);
+    let replayed = run_replay_dump(game, 70, &log_s, &[]);
+    assert_eq!(
+        current_tick(&replayed),
+        current_tick(&recorded),
+        "ordinary from-boot replay must reach the recorded horizon"
+    );
+    for name in ["WINDOW_SIZE", "DRAWABLE_SIZE", "SCENE_CAPACITY"] {
+        assert_eq!(
+            replayed["stone"][name], recorded["stone"][name],
+            "replay must reproduce the real {name} after the resize"
+        );
+    }
+    let sim = sim_state_names(game, 60);
+    assert_sim_state_matches(&replayed, &recorded, &sim, "ordinary mid-run resize replay");
+}
+
+#[test]
+fn seek_across_midrun_resize_matches_plain_playback() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_s = dir.path().join("resize-seek.replay").to_string_lossy().into_owned();
+    let _recorded = run_record_dump(
+        "bitgun",
+        60,
+        &log_s,
+        &[
+            ("STONE_CHECKPOINT_INTERVAL", "1"),
+            ("STONE_RESIZE_AT_FRAME", "30"),
+            ("STONE_RESIZE_W", "1000"),
+            ("STONE_RESIZE_H", "700"),
+        ],
+    );
+    let reference = run_replay_dump(
+        "bitgun",
+        70,
+        &log_s,
+        &[("STONE_START_PAUSED", "1"), ("STONE_STEP_FRAMES", "45")],
+    );
+    let sought = run_replay_dump(
+        "bitgun",
+        120,
+        &log_s,
+        &[
+            ("STONE_KEYFRAME_INTERVAL", "60"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME", "60"),
+            ("STONE_TIMELINE_SEEK_TO_TICK", "45"),
+        ],
+    );
+    assert_eq!(current_tick(&reference), 45);
+    assert_eq!(current_tick(&sought), 45);
+    assert_eq!(reference["stone"]["WINDOW_SIZE"]["x"], 1000);
+    assert_eq!(reference["stone"]["WINDOW_SIZE"]["y"], 700);
+    assert_eq!(reference["stone"]["DRAWABLE_SIZE"]["x"], 1000);
+    assert_eq!(reference["stone"]["DRAWABLE_SIZE"]["y"], 700);
+    for name in ["WINDOW_SIZE", "DRAWABLE_SIZE", "SCENE_CAPACITY"] {
+        assert_eq!(
+            sought["stone"][name], reference["stone"][name],
+            "seek across resize must retain the real {name}"
+        );
+    }
+    let sim = sim_state_names("bitgun", 60);
+    assert_sim_state_matches(&sought, &reference, &sim, "seek across mid-run resize");
+}
+
+#[test]
+fn screenshot_after_render_skipped_seek_reaches_its_frame_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_s = dir.path().join("screenshot-seek.replay").to_string_lossy().into_owned();
+    let state = run_record_dump(
+        "bitgun",
+        75,
+        &log_s,
+        &[
+            ("STONE_LIVE_REWIND", "1"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
+            ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
+        ],
+    );
+    assert_eq!(
+        state["stone"]["screenshot_taken_via_env"], true,
+        "TAKE_SCREENSHOT must complete after the hidden seek"
+    );
     assert!(
-        !out.status.success() && stderr.contains("desync"),
-        "PINNED BEHAVIOR (BUG): replaying a log with a mid-run resize must desync today. \
-         If this replay now succeeds, the fix landed -- flip this assertion and drop the \
-         carve-out in the branch oracle. stderr: {stderr}"
+        state["stone"]["screenshot_frame_counter"].as_i64().unwrap_or(0) >= 75,
+        "the screenshot counter must reach the FRAME_COUNT budget: {}",
+        state["stone"]["screenshot_frame_counter"]
     );
 }
 
