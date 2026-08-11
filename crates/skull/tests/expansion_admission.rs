@@ -7,9 +7,8 @@ use ustr::Ustr;
 
 const MIXED_INVALID: &str = r#"
 enum Pairs { F(float), I(int) }
-value BadPairs { flag: bool }
 
-@struct_expand inline(lua) fn pairs<T>(u: T) -> [(string, Pairs)] = """
+@struct_expand inline(lua) fn pairs<T>(u: T) -> int = """
     error("pairs must be compiler-expanded")
 """
 
@@ -20,12 +19,12 @@ value BadPairs { flag: bool }
 fn main() {
     // Lexically first, but lower priority than the struct expansion below.
     let _ = stride(3)
-    let _ = pairs(BadPairs { flag: true })
+    let _ = pairs(3)
 }
 "#;
 
 const VERTEX_INVALID: &str = r#"
-@vertex_expand inline(lua) fn stride<T>(u: T) -> int = """
+@vertex_expand inline(lua) fn stride<T>(u: T) -> float = """
     error("stride must be compiler-expanded")
 """
 
@@ -36,15 +35,14 @@ fn main() {
 
 const SHADER_AND_STRUCT_INVALID: &str = r#"
 enum Pairs { F(float), I(int) }
-value BadPairs { flag: bool }
 
-@struct_expand inline(lua) fn pairs<T>(u: T) -> [(string, Pairs)] = """
+@struct_expand inline(lua) fn pairs<T>(u: T) -> int = """
     error("pairs must be compiler-expanded")
 """
 
 fn main() {
     let _ = rock_shader(3)
-    let _ = pairs(BadPairs { flag: true })
+    let _ = pairs(3)
 }
 "#;
 

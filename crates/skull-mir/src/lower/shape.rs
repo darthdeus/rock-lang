@@ -1071,9 +1071,8 @@ pub(crate) fn vertex_expand_return(ws: &Workspace, ret: TyId) -> Option<VertexEx
     }
 }
 
-/// The two rejection messages, shared so the emit-time validator
-/// ([`super::vertex_expand_rejection`]) and the lowering expander cannot diverge
-/// in what they accept.
+/// The return-shape rejection message shared by source admission and the
+/// lowering expander.
 pub(crate) fn vertex_expand_ret_msg(ws: &Workspace, fname: Ustr, ret: Option<TyId>) -> String {
     format!(
         "`@vertex_expand` fn `{fname}` must return `int` (the stride in floats) or `[int]` \
@@ -1085,33 +1084,8 @@ pub(crate) fn vertex_expand_ret_msg(ws: &Workspace, fname: Ustr, ret: Option<TyI
 pub(crate) fn vertex_expand_arg_msg(fname: Ustr) -> String {
     format!(
         "`@vertex_expand` fn `{fname}` argument must be a `FlatVec<E>` or `NativeBuffer<E>` \
-         whose element is a concrete `value` struct -- the layout is derived from that \
-         element, so an unsubstituted generic has no layout to derive"
+         whose element is a concrete `value` struct -- the layout is derived from that element"
     )
-}
-
-/// The `value`-struct element of a `FlatVec<E>` / `NativeBuffer<E>` expression,
-/// outside a lowering [`Builder`]. Mirrors [`Builder::nb_value_elem`] minus the
-/// specialization substitution, which the validator has no active
-/// specialization for -- an unsubstituted generic is exactly what this must
-/// reject anyway.
-///
-/// PREMISE (pre-monomorphization): source bodies can hold an
-/// unsubstituted generic. Under totality none exist, this rejects a now-legal
-/// program, and the validator must become instance-driven or be deleted.
-pub(crate) fn flat_elem_of(ws: &Workspace, inf: &BodyInference, arg: Idx<Expr>) -> Option<Ustr> {
-    let ty = resolve_tyid(ws, inf, *inf.expr_types.get(arg)?)?;
-    let TypeExpr::App { ctor: TypeCtor::Nominal(n), params } = ty_node(ws, inf, ty)? else {
-        return None;
-    };
-    if !matches!(n.as_str(), "NativeBuffer" | "FlatVec") {
-        return None;
-    }
-    let elem = resolve_tyid(ws, inf, ty.with_idx(params.into_iter().next()?))?;
-    match ty_node(ws, inf, elem)? {
-        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => Some(n),
-        _ => None,
-    }
 }
 
 /// [`crate::gpu_layout::uniform_block`] with the two-walker agreement enforced:
@@ -1257,29 +1231,8 @@ pub(crate) fn uniform_values_return_shape(
     })
 }
 
-/// The value-struct name of expression `e` outside a lowering [`Builder`].
-/// Mirrors [`Builder::value_struct_name_of`] minus the specialization
-/// substitution, which the validator has no active specialization for -- an
-/// unsubstituted generic is exactly what this must reject anyway.
-///
-/// PREMISE (pre-monomorphization): source bodies can hold an
-/// unsubstituted generic. Under totality none exist, this rejects a now-legal
-/// program, and the validator must become instance-driven or be deleted.
-pub(crate) fn value_struct_name_at(
-    ws: &Workspace,
-    inf: &BodyInference,
-    e: Idx<Expr>,
-) -> Option<Ustr> {
-    let ty = resolve_tyid(ws, inf, *inf.expr_types.get(e)?)?;
-    let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = ty_node(ws, inf, ty)? else {
-        return None;
-    };
-    let sid = *ws.struct_by_name.get(&name)?;
-    ws.modules[sid.module.index()].structs[sid.def].is_value.then_some(name)
-}
-
-/// The two `@uniform_expand` rejection messages, shared so the emit-time
-/// validator and the lowering expander cannot diverge in what they accept.
+/// The arity rejection message shared by source admission and the lowering
+/// expander.
 pub(crate) fn uniform_expand_arity_msg(fname: Ustr) -> String {
     format!(
         "`@uniform_expand` fn `{fname}` takes either three arguments -- the float view, the \
@@ -1291,8 +1244,7 @@ pub(crate) fn uniform_expand_arity_msg(fname: Ustr) -> String {
 pub(crate) fn uniform_expand_arg_msg(fname: Ustr) -> String {
     format!(
         "`@uniform_expand` fn `{fname}`'s uniform-group argument must be a concrete `value` struct -- the \
-         std140 layout is derived from it, so an unsubstituted generic has none. Reach this \
-         through the `set_uniform_block` macro, which expands at the call site"
+         std140 layout is derived from it"
     )
 }
 

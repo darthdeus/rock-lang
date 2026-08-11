@@ -36,6 +36,8 @@ mod dead_lambda_scope;
 mod embed_scalarize;
 #[path = "expansion_admission.rs"]
 mod expansion_admission;
+#[path = "concrete_expansion.rs"]
+mod concrete_expansion;
 #[path = "enum_cdata.rs"]
 mod enum_cdata;
 #[path = "enum_payload_sroa.rs"]

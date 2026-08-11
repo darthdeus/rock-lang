@@ -63,7 +63,7 @@ pub enum ExpandKind {
     /// DIRECT typed store per primitive leaf of `u`, at the std140 offsets
     /// `gpu_layout::uniform_block` computes. Never a per-leaf helper call. The
     /// views are params rather than looked up here, so the compiler names no
-    /// runtime field; the `set_uniform_block` macro is what pairs them with one
+    /// runtime field; the public generic setter is what pairs them with one
     /// scratch (docs/shader-binding-layout-plan.md).
     UniformBlock,
     /// `@uniform_values fn f<T>(u: T) -> SemanticUniformBlock` -> one
