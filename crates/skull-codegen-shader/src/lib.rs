@@ -1366,24 +1366,32 @@ fn validate_compute_access(
     stage: &ShaderStageIr,
     class: &ComputeEntryClass,
     workgroups: &[LogicalComputeWorkgroup],
-    entry_function: &Function,
+    _entry_function: &Function,
     span: Span,
 ) -> Result<(), CompilerError> {
-    let entry_params = &entry_function.param_decls;
-    let entry_cells = stage.body.params.clone();
     let resource_for_cell = |body: &MirFunc, cell: Idx<skull_mir::mir::Cell>| {
-        if !std::ptr::eq(body, &stage.body) {
+        if !body.params.contains(&cell) {
             return None;
         }
-        let index = entry_cells.iter().position(|candidate| *candidate == cell)?;
-        let param = entry_params.get(index)?;
-        class.resources.iter().find(|resource| resource.name == param.name)
+        let name = body.cells[cell].name?;
+        class.resources.iter().find(|resource| resource.name == name)
     };
     let workgroup_for_cell = |body: &MirFunc, cell: Idx<skull_mir::mir::Cell>| {
         let name = body.cells[cell].name?;
+        let declared = body.insts.iter().any(|(_, instruction)| {
+            let Inst::Store { cell: stored, value } = instruction else { return false };
+            if *stored != cell {
+                return false;
+            }
+            let Inst::Call { func, .. } = body.insts[*value] else { return false };
+            ws.module(func.module).functions[func.func].name.as_str() == "workgroup_array"
+        });
+        if !declared {
+            return None;
+        }
         workgroups.iter().find(|workgroup| workgroup.name == name)
     };
-    for (instance, body) in stage
+        for (_instance, body) in stage
         .bodies
         .iter()
         .map(|(instance, body)| (Some(instance), body))
@@ -1394,12 +1402,6 @@ fn validate_compute_access(
             let name = ws.module(func.module).functions[func.func].name;
             match name.as_str() {
                 "storage_load" | "storage_store" | "atomic_add" => {
-                    if instance.is_some() {
-                        return Err(err(
-                            span,
-                            "storage intrinsics in helpers are not supported until resource forwarding is explicit",
-                        ));
-                    }
                     let Some(Inst::Load(cell)) = args.first().map(|arg| &body.insts[*arg]) else {
                         return Err(err(span, format!("{name} must receive a direct storage parameter")));
                     };
@@ -1459,8 +1461,75 @@ fn validate_compute_access(
                 _ => {}
             }
         }
+
+        let mut legal_workgroup_loads = HashSet::default();
+        for (_, instruction) in body.insts.iter() {
+            let Inst::Call { func, args } = instruction else { continue };
+            let name = ws.module(func.module).functions[func.func].name;
+            if !matches!(name.as_str(), "workgroup_load" | "workgroup_store") {
+                continue;
+            }
+            let Some(Inst::Load(cell)) = args.first().map(|arg| &body.insts[*arg]) else {
+                continue;
+            };
+            if workgroup_for_cell(body, *cell).is_some() {
+                legal_workgroup_loads.insert(args[0]);
+            }
+        }
+        for (iid, instruction) in body.insts.iter() {
+            let Inst::Load(cell) = instruction else { continue };
+            if workgroup_for_cell(body, *cell).is_some() && !legal_workgroup_loads.contains(&iid) {
+                return Err(err(
+                    span,
+                    format!(
+                        "compute workgroup array `{}` cannot escape workgroup memory",
+                        body.cells[*cell].name.map(|name| name.to_string()).unwrap_or_default()
+                    ),
+                ));
+            }
+        }
+
+        for (_, instruction) in body.insts.iter() {
+            let Inst::Call { func, args } = instruction else { continue };
+            let callee = &ws.module(func.module).functions[func.func];
+            if skull_mir::intrinsics::is_intrinsic(callee) {
+                continue;
+            }
+            for (index, param) in callee.param_decls.iter().enumerate() {
+                if !is_compute_resource_type(ws, param.ty) {
+                    continue;
+                }
+                let Some(argument) = args.get(index) else {
+                    return Err(err(span, format!("compute helper `{}` is missing resource argument `{}`", callee.name, param.name)));
+                };
+                let Inst::Load(cell) = body.insts[*argument] else {
+                    return Err(err(span, format!("compute helper resource `{}` must be forwarded directly", param.name)));
+                };
+                let Some(resource) = resource_for_cell(body, cell) else {
+                    return Err(err(span, format!("compute helper resource `{}` is not an entry resource", param.name)));
+                };
+                if resource.name != param.name {
+                    return Err(err(
+                        span,
+                        format!(
+                            "compute helper resource forwarding changed `{}` to `{}`",
+                            param.name, resource.name
+                        ),
+                    ));
+                }
+            }
+        }
     }
     Ok(())
+}
+
+fn is_compute_resource_type(ws: &Workspace, ty: TyId) -> bool {
+    let TyId::Static(module, index) = ty else { return false };
+    matches!(
+        ws.module(module).ty_arena[index],
+        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }
+            if matches!(name.as_str(), "StorageBuffer" | "AtomicStorageBuffer")
+    )
 }
 
 fn compute_workgroup_arrays(

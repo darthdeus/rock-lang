@@ -612,7 +612,7 @@ pub fn is_lowered_native_operator(
 ) -> bool {
     if !matches!(
         f.name.as_str(),
-        "__op_add" | "__op_sub" | "__op_mul" | "__op_div" | "__op_mod"
+        "__op_add" | "__op_sub" | "__op_mul" | "__op_div" | "__op_idiv" | "__op_mod"
     ) || f.param_decls.iter().count() != 2
         || renders_inline_instance(ws, f, inst, interner)
     {

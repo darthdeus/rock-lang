@@ -352,7 +352,7 @@ impl Builder<'_> {
             let n = name.as_str();
             if matches!(
                 n,
-                "__op_add" | "__op_sub" | "__op_mul" | "__op_div" | "__op_mod"
+                "__op_add" | "__op_sub" | "__op_mul" | "__op_div" | "__op_idiv" | "__op_mod"
             ) {
                 if let [a, b] = arg_idxs[..] {
                     if let (Some(lt), Some(rt)) = (self.arith_ty(a), self.arith_ty(b)) {

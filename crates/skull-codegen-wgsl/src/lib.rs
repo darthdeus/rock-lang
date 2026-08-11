@@ -20,7 +20,7 @@ use skull_mir::mir::{Block, Cell, Inst, Lit, MirFunc, Term};
 use skull_mir::monoty::MonoInterner;
 use skull_mir::shader_ir::{
     ComputeAccess, ComputeAddressSpace, ComputeBuiltin, ComputeDispatchContract,
-    ComputeResourceShape, ComputeValueKind, FragmentOutput, LogicalArrayGroup,
+    ComputeInterfacePlan, ComputeResourceShape, ComputeValueKind, FragmentOutput, LogicalArrayGroup,
     LogicalComputeWorkgroup, LogicalTextureGroup, LogicalUniformGroup, ShaderIR, ShaderInstance,
     ShaderInterfacePlan,
     ShaderStage, ShaderStageIr, UniformRole, VertexRate,
@@ -187,6 +187,7 @@ impl WgslIntrinsic {
             ("__op_sub", _) => Self::Operator(WgslOperator::Sub),
             ("__op_mul", _) => Self::Operator(WgslOperator::Mul),
             ("__op_div", _) => Self::Operator(WgslOperator::Div),
+            ("__op_idiv", _) => Self::Operator(WgslOperator::Div),
             (name, _) if name.starts_with("__op_") => Self::UnsupportedOperator,
             _ => return None,
         })
@@ -1881,6 +1882,7 @@ pub fn emit_compute_shader(
                 "global_invocation_id is only available in the compute entry",
             ));
         }
+        let helper_roles = compute_helper_param_roles(ws, function, body, logical_compute, span)?;
         let emitter = FunctionEmitter::new(
             ws,
             &ir.interner,
@@ -1888,7 +1890,7 @@ pub fn emit_compute_shader(
             instance,
             body,
             abi,
-            HashMap::new(),
+            helper_roles,
             span,
         )?
         .with_workgroup_cells(compute_workgroup_cells(body, &logical_compute.workgroup));
@@ -2821,6 +2823,43 @@ fn compute_entry_param_roles(
     Ok(roles)
 }
 
+fn compute_helper_param_roles(
+    ws: &Workspace,
+    function: &Function,
+    body: &MirFunc,
+    iface: &ComputeInterfacePlan,
+    span: Span,
+) -> Result<HashMap<Idx<Cell>, ParamRole>, CompilerError> {
+    if function.param_decls.len() != body.params.len() {
+        return Err(err(
+            span,
+            "WGSL compute helper declaration and IR parameter populations disagree",
+        ));
+    }
+    let mut roles = HashMap::new();
+    for (index, cell) in body.params.iter().enumerate() {
+        let param = &function.param_decls[index];
+        if !is_compute_resource_type(ws, param.ty) {
+            continue;
+        }
+        if !iface.resources.iter().any(|resource| resource.name == param.name) {
+            return Err(err(
+                param_span(function, index),
+                format!(
+                    "WGSL compute helper resource `{}` is absent from the entry interface",
+                    param.name
+                ),
+            ));
+        }
+        roles.insert(*cell, ParamRole::Storage);
+    }
+    Ok(roles)
+}
+
+fn is_compute_resource_type(ws: &Workspace, ty: TyId) -> bool {
+    nominal_name(ws, ty).is_some_and(|name| matches!(name.as_str(), "StorageBuffer" | "AtomicStorageBuffer"))
+}
+
 fn param_span(function: &Function, _index: usize) -> Span {
     function.name_span
 }
@@ -3158,16 +3197,16 @@ impl<'a> FunctionEmitter<'a> {
         }
         let mut rendered = Vec::new();
         for cell in &self.body.params {
-            if entry
-                && matches!(
-                    self.param_roles.get(cell),
-                    Some(
-                        ParamRole::Storage
-                            | ParamRole::Texture
-                            | ParamRole::Uniform(_)
-                            | ParamRole::UniformArray
-                    )
-                )
+            if matches!(self.param_roles.get(cell), Some(ParamRole::Storage))
+                || (entry
+                    && matches!(
+                        self.param_roles.get(cell),
+                        Some(
+                            ParamRole::Texture
+                                | ParamRole::Uniform(_)
+                                | ParamRole::UniformArray
+                        )
+                    ))
             {
                 continue;
             }
@@ -4285,7 +4324,7 @@ impl<'a> FunctionEmitter<'a> {
                 })
             }
             Some(WgslIntrinsic::StorageLoad) => {
-                let [buffer, index] = args else {
+                let [_buffer, index] = args else {
                     return Err(err(self.span, "WGSL storage_load requires a buffer and index"));
                 };
                 let cell = self.direct_resource_cell(args, "storage_load")?;
@@ -4296,7 +4335,7 @@ impl<'a> FunctionEmitter<'a> {
                 Ok(format!("s_{}[{}]", resource.name, self.render_val(*index)?))
             }
             Some(WgslIntrinsic::StorageStore) => {
-                let [buffer, index, value] = args else {
+                let [_buffer, index, value] = args else {
                     return Err(err(self.span, "WGSL storage_store requires a buffer, index, and value"));
                 };
                 let cell = self.direct_resource_cell(args, "storage_store")?;
@@ -4322,7 +4361,7 @@ impl<'a> FunctionEmitter<'a> {
                 "WorkgroupArray handles may only initialize a named local workgroup declaration",
             )),
             Some(WgslIntrinsic::WorkgroupLoad) => {
-                let [array, index] = args else {
+                let [_array, index] = args else {
                     return Err(err(self.span, "WGSL workgroup_load requires an array and index"));
                 };
                 let cell = self.direct_workgroup_cell(args, "workgroup_load")?;
@@ -4330,7 +4369,7 @@ impl<'a> FunctionEmitter<'a> {
                 Ok(format!("{}[{}]", name, self.render_val(*index)?))
             }
             Some(WgslIntrinsic::WorkgroupStore) => {
-                let [array, index, value] = args else {
+                let [_array, index, value] = args else {
                     return Err(err(self.span, "WGSL workgroup_store requires an array, index, and value"));
                 };
                 let cell = self.direct_workgroup_cell(args, "workgroup_store")?;
@@ -4338,7 +4377,7 @@ impl<'a> FunctionEmitter<'a> {
                 Ok(format!("{}[{}] = {}", name, self.render_val(*index)?, self.render_val(*value)?))
             }
             Some(WgslIntrinsic::AtomicAdd) => {
-                let [buffer, index, value] = args else {
+                let [_buffer, index, value] = args else {
                     return Err(err(self.span, "WGSL atomic_add requires a buffer, index, and value"));
                 };
                 let cell = self.direct_resource_cell(args, "atomic_add")?;
@@ -4452,7 +4491,14 @@ impl<'a> FunctionEmitter<'a> {
                 let self_name = instance.inst.symbol(self.ws, self.interner);
                 let rendered = args
                     .iter()
-                    .map(|arg| self.render_val(*arg))
+                    .enumerate()
+                    .filter(|(index, _)| {
+                        function
+                            .param_decls
+                            .get(*index)
+                            .is_none_or(|param| !is_compute_resource_type(self.ws, param.ty))
+                    })
+                    .map(|(_, arg)| self.render_val(*arg))
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(format!("{}({})", self_name, rendered.join(", ")))
             }

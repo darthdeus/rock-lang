@@ -3526,10 +3526,39 @@ pub fn collect_compute_collection(ws: &Workspace) -> Result<ComputeCollection, C
 pub fn gpu_only_call_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerError> {
     let module = ws.module(mid);
     let ir = ws.inference(mid)?;
+    for (_, function) in module.functions.iter() {
+        if function
+            .param_decls
+            .iter()
+            .any(|param| is_workgroup_array_type(ws, param.ty))
+        {
+            return Some(CompilerError::new_with_label(
+                function.name_span,
+                "WorkgroupArray is workgroup memory and cannot cross a function boundary".to_string(),
+            ));
+        }
+        if function.return_ty.is_some_and(|ty| is_workgroup_array_type(ws, ty)) {
+            return Some(CompilerError::new_with_label(
+                function.name_span,
+                "WorkgroupArray is workgroup memory and cannot be returned".to_string(),
+            ));
+        }
+    }
+    for (_, global) in module.globals.iter() {
+        if is_workgroup_array_type(ws, global.ty) {
+            return Some(CompilerError::new_with_label(
+                global.span,
+                "WorkgroupArray is workgroup memory and cannot be stored globally".to_string(),
+            ));
+        }
+    }
     for (owner, body) in module.bodies.iter() {
         let Some(inf) = ir.per_fn.get(owner) else { continue };
         let caller_is_gpu = match owner {
-            BodyOwner::Function(fid) => crate::intrinsics::is_gpu_context(&module.functions[*fid]),
+            BodyOwner::Function(fid) => {
+                let function = &module.functions[*fid];
+                crate::intrinsics::is_gpu_context(function) || function_has_gpu_resource_param(ws, function)
+            }
             _ => false,
         };
         if caller_is_gpu {
@@ -3566,7 +3595,7 @@ pub fn gpu_only_call_rejection(ws: &Workspace, mid: ModuleId) -> Option<Compiler
                         continue;
                     };
                     let f = &ws.module(fmod).functions[fid];
-                    if !crate::intrinsics::is_gpu_only(f) {
+                    if !crate::intrinsics::is_gpu_only(f) && !function_has_gpu_resource_param(ws, f) {
                         continue;
                     }
                     let fname = f.name;
@@ -3584,7 +3613,7 @@ pub fn gpu_only_call_rejection(ws: &Workspace, mid: ModuleId) -> Option<Compiler
                         continue;
                     };
                     let f = &ws.module(fmod).functions[fid];
-                    if !crate::intrinsics::is_gpu_context(f) {
+                    if !crate::intrinsics::is_gpu_context(f) && !function_has_gpu_resource_param(ws, f) {
                         continue;
                     }
                     let fname = f.name;
@@ -3603,6 +3632,24 @@ pub fn gpu_only_call_rejection(ws: &Workspace, mid: ModuleId) -> Option<Compiler
         }
     }
     None
+}
+
+fn function_has_gpu_resource_param(ws: &Workspace, function: &Function) -> bool {
+    function.param_decls.iter().any(|param| {
+        let TyId::Static(module, index) = param.ty else { return false };
+        let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = ws.module(module).ty_arena[index] else {
+            return false;
+        };
+        matches!(name.as_str(), "StorageBuffer" | "AtomicStorageBuffer" | "WorkgroupArray")
+    })
+}
+
+fn is_workgroup_array_type(ws: &Workspace, ty: TyId) -> bool {
+    let TyId::Static(module, index) = ty else { return false };
+    let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = ws.module(module).ty_arena[index] else {
+        return false;
+    };
+    name.as_str() == "WorkgroupArray"
 }
 
 fn const_int(body: &Body, e: Idx<Expr>) -> Option<i64> {

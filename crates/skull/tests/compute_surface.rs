@@ -117,6 +117,162 @@ fn rect_loss_surface(
 global UINT_COMPUTE_SURFACE: string = rock_compute(rect_loss_surface)
 "#;
 
+const REAL_RECT_LOSS: &str = r#"
+value RectLossParams {
+    width: uint,
+    region_x: uint,
+    region_y: uint,
+    region_w: uint,
+    region_h: uint,
+    bg_r: uint,
+    bg_g: uint,
+    bg_b: uint,
+}
+
+fn div255(v: uint) -> uint { return (v + (127 as uint)) ./ (255 as uint) }
+
+fn umin(a: uint, b: uint) -> uint { if a < b { return a } return b }
+fn umax(a: uint, b: uint) -> uint { if a > b { return a } return b }
+fn abs_diff(a: uint, b: uint) -> uint { return umax(a, b) - umin(a, b) }
+
+fn mul64_le(a: uint, b: uint, c: uint, d: uint) -> bool {
+    let a0 = a & (65535 as uint)
+    let a1 = a >> (16 as uint)
+    let b0 = b & (65535 as uint)
+    let b1 = b >> (16 as uint)
+    let p00 = a0 * b0
+    let m1 = a0 * b1 + (p00 >> (16 as uint))
+    let m2 = a1 * b0 + (m1 & (65535 as uint))
+    let alo = (m2 << (16 as uint)) | (p00 & (65535 as uint))
+    let ahi = a1 * b1 + (m1 >> (16 as uint)) + (m2 >> (16 as uint))
+
+    let c0 = c & (65535 as uint)
+    let c1 = c >> (16 as uint)
+    let d0 = d & (65535 as uint)
+    let d1 = d >> (16 as uint)
+    let q00 = c0 * d0
+    let n1 = c0 * d1 + (q00 >> (16 as uint))
+    let n2 = c1 * d0 + (n1 & (65535 as uint))
+    let clo = (n2 << (16 as uint)) | (q00 & (65535 as uint))
+    let chi = c1 * d1 + (n1 >> (16 as uint)) + (n2 >> (16 as uint))
+
+    return ahi < chi || (ahi == chi && alo <= clo)
+}
+
+fn line_covers(batch: StorageBuffer<uint>, base: uint, px: uint, py: uint) -> bool {
+    let x1 = bitcast<int>(storage_load(batch, base + (1 as uint)))
+    let y1 = bitcast<int>(storage_load(batch, base + (2 as uint)))
+    let x2 = bitcast<int>(storage_load(batch, base + (3 as uint)))
+    let y2 = bitcast<int>(storage_load(batch, base + (4 as uint)))
+    let ht = bitcast<int>(storage_load(batch, base + (5 as uint)))
+    if ht <= 0 { return false }
+
+    let cx = (px as int) * 16 + 8
+    let cy = (py as int) * 16 + 8
+    let ax = x1 - cx
+    let ay = y1 - cy
+    let dx = x2 - x1
+    let dy = y2 - y1
+    let length = dx * dx + dy * dy
+    let ht2 = ht * ht
+    if length == 0 { return ax * ax + ay * ay <= ht2 }
+    let u = -(ax * dx + ay * dy)
+    if u <= 0 { return ax * ax + ay * ay <= ht2 }
+    if u >= length {
+        let ex = x2 - cx
+        let ey = y2 - cy
+        return ex * ex + ey * ey <= ht2
+    }
+    let cross = ax * dy - ay * dx
+    let magnitude = if cross < 0 { -cross } else { cross }
+    return mul64_le(
+        bitcast<uint>(magnitude),
+        bitcast<uint>(magnitude),
+        bitcast<uint>(ht2),
+        bitcast<uint>(length))
+}
+
+@shader(compute)
+@workgroup(64, 1, 1)
+@dispatch(2)
+fn rect_loss(
+    @storage(read) backdrop: StorageBuffer<uint>,
+    @storage(read) reference: StorageBuffer<uint>,
+    @storage(read) batch: StorageBuffer<uint>,
+    @storage(read_write) loss: AtomicStorageBuffer<uint>,
+    @uniform params: RectLossParams,
+) {
+    let gid = global_invocation_id()
+    let local = local_invocation_id()
+    let group = workgroup_id()
+    let groups = num_workgroups()
+    let lane = local_invocation_index()
+    let partial = workgroup_array<uint>(64)
+    let candidate = bitcast<uint>(group.y)
+    let scored = params.region_w * params.region_h
+    let slot = bitcast<uint>(gid.x)
+    let reduction_lane = if bitcast<uint>(local.x) == lane { lane } else { 0 as uint }
+    let dispatch_valid = bitcast<uint>(groups.x) > (0 as uint)
+        && bitcast<uint>(groups.y) > candidate
+
+    let sum = if dispatch_valid && slot < scored {
+        let px = params.region_x + slot % params.region_w
+        let py = params.region_y + slot ./ params.region_w
+        let pixel = py * params.width + px
+        let under: uint = storage_load(backdrop, pixel)
+        let mut_r: uint = under & (255 as uint)
+        let mut_g: uint = (under >> (8 as uint)) & (255 as uint)
+        let mut_b: uint = (under >> (16 as uint)) & (255 as uint)
+        let offset = storage_load(batch, candidate * (2 as uint))
+        let count = storage_load(batch, candidate * (2 as uint) + (1 as uint))
+        let k: uint = 0
+        while k < count {
+            let base = offset + k * (10 as uint)
+            let kind = storage_load(batch, base)
+            let hit = if kind == (0 as uint) {
+                px >= storage_load(batch, base + (1 as uint))
+                    && px < storage_load(batch, base + (3 as uint))
+                    && py >= storage_load(batch, base + (2 as uint))
+                    && py < storage_load(batch, base + (4 as uint))
+            } else {
+                line_covers(batch, base, px, py)
+            }
+            if hit {
+                let color = if kind == (0 as uint) { base + (5 as uint) } else { base + (6 as uint) }
+                let alpha = storage_load(batch, color + (3 as uint))
+                let inverse = (255 as uint) - alpha
+                mut_r = div255(storage_load(batch, color) * alpha + mut_r * inverse)
+                mut_g = div255(storage_load(batch, color + (1 as uint)) * alpha + mut_g * inverse)
+                mut_b = div255(storage_load(batch, color + (2 as uint)) * alpha + mut_b * inverse)
+            }
+            k = k + (1 as uint)
+        }
+        let packed = storage_load(reference, pixel)
+        let ref_alpha = (packed >> (24 as uint)) & (255 as uint)
+        let inverse = (255 as uint) - ref_alpha
+        let target_r = div255((packed & (255 as uint)) * ref_alpha + params.bg_r * inverse)
+        let target_g = div255(((packed >> (8 as uint)) & (255 as uint)) * ref_alpha + params.bg_g * inverse)
+        let target_b = div255(((packed >> (16 as uint)) & (255 as uint)) * ref_alpha + params.bg_b * inverse)
+        abs_diff(mut_r, target_r) + abs_diff(mut_g, target_g) + abs_diff(mut_b, target_b)
+    } else { 0 as uint }
+
+    workgroup_store(partial, reduction_lane, sum)
+    workgroup_barrier()
+    let stride: uint = 32
+    while stride > (0 as uint) {
+        if reduction_lane < stride {
+            workgroup_store(partial, reduction_lane,
+                workgroup_load(partial, reduction_lane) + workgroup_load(partial, reduction_lane + stride))
+        }
+        workgroup_barrier()
+        stride = stride >> (1 as uint)
+    }
+    if reduction_lane == (0 as uint) { atomic_add(loss, candidate, workgroup_load(partial, 0)) }
+}
+
+global RECT_LOSS: string = rock_compute(rect_loss)
+"#;
+
 #[test]
 fn uint_atomic_workgroup_compute_surface_is_admitted() {
     let ws = common::ws_with_stdlib(UINT_COMPUTE_SURFACE);
@@ -127,6 +283,147 @@ fn uint_atomic_workgroup_compute_surface_is_admitted() {
         skull::mir_emit::RendererTarget::Wgpu,
     )
     .unwrap_or_else(|error| panic!("the intended compiler-authored compute surface is still RED: {error}"));
+}
+
+#[test]
+fn compiler_authored_rect_loss_fixture_is_naga_validated() {
+    let ws = common::ws_with_stdlib(REAL_RECT_LOSS);
+    let mid = test_mid(&ws);
+    let (emit, cache) = skull::mir_emit::emit_full_in_for_renderer(
+        &ws,
+        mid,
+        None,
+        skull::mir_emit::RendererTarget::Wgpu,
+    )
+    .expect("the faithful compiler-authored rect-loss fixture should emit");
+    let compute = &cache.shader_view().compute_views[0];
+    assert!(!compute.stage.helpers.is_empty(), "helper population is nonzero");
+    assert!(!compute.stage.builtins.is_empty(), "compute builtin population is nonzero");
+    assert!(compute.concrete_plans.contains_key(&compute.stage.entry));
+    assert!(emit.lua.contains("__rock_wgpu_compute_register(\"rect_loss\""));
+
+    let input = ConcreteStageInput {
+        stage: compute.stage.stage,
+        entry: compute.stage.entry.clone(),
+        retained: compute.stage.retained.iter().cloned().collect(),
+        helpers: compute.stage.helpers.iter().cloned().collect(),
+        builtins: compute.stage.builtins.iter().cloned().collect(),
+        order: compute.stage.order.clone(),
+        dependencies: compute.stage.dependencies.clone(),
+        concrete_plans: compute.concrete_plans.clone(),
+    };
+    let scx = skull_mir::lower::ScalarCtx::new_values_first_class(&ws)
+        .sharing(cache.graph().interner().clone());
+    let neutral = skull_codegen_shader::plan_compute_from_concrete(
+        &ws,
+        &scx,
+        &input,
+        &skull_codegen_wgsl::WgslShaderPolicy,
+    )
+    .expect("the faithful fixture has a concrete compute plan");
+    let compute_iface = neutral.interface.compute.as_ref().expect("compute interface");
+    assert_eq!(
+        compute_iface.resources.iter().map(|resource| resource.name.as_str()).collect::<Vec<_>>(),
+        ["backdrop", "reference", "batch", "loss"]
+    );
+    assert_eq!(
+        compute_iface.resources.iter().map(|resource| resource.shape).collect::<Vec<_>>(),
+        [
+            skull_mir::shader_ir::ComputeResourceShape::Array(skull_mir::shader_ir::ComputeValueKind::U32),
+            skull_mir::shader_ir::ComputeResourceShape::Array(skull_mir::shader_ir::ComputeValueKind::U32),
+            skull_mir::shader_ir::ComputeResourceShape::Array(skull_mir::shader_ir::ComputeValueKind::U32),
+            skull_mir::shader_ir::ComputeResourceShape::Array(skull_mir::shader_ir::ComputeValueKind::AtomicU32),
+        ]
+    );
+    assert_eq!(
+        compute_iface.resources.iter().map(|resource| resource.access).collect::<Vec<_>>(),
+        [
+            skull_mir::shader_ir::ComputeAccess::Read,
+            skull_mir::shader_ir::ComputeAccess::Read,
+            skull_mir::shader_ir::ComputeAccess::Read,
+            skull_mir::shader_ir::ComputeAccess::ReadWrite,
+        ]
+    );
+    assert_eq!(
+        compute_iface.builtins,
+        [
+            skull_mir::shader_ir::ComputeBuiltin::GlobalInvocationId,
+            skull_mir::shader_ir::ComputeBuiltin::LocalInvocationId,
+            skull_mir::shader_ir::ComputeBuiltin::WorkgroupId,
+            skull_mir::shader_ir::ComputeBuiltin::LocalInvocationIndex,
+            skull_mir::shader_ir::ComputeBuiltin::NumWorkgroups,
+        ]
+    );
+    assert_eq!(
+        compute_iface.workgroup_size,
+        skull_mir::shader_ir::ComputeWorkgroupSize { x: 64, y: 1, z: 1 }
+    );
+    assert_eq!(
+        compute_iface.dispatch,
+        skull_mir::shader_ir::ComputeDispatchContract::Runtime { dimensions: 2 }
+    );
+    assert_eq!(compute_iface.workgroup.len(), 1);
+    assert_eq!(compute_iface.workgroup[0].name, Ustr::from("partial"));
+    assert_eq!(compute_iface.workgroup[0].kind, skull_mir::shader_ir::ComputeValueKind::U32);
+    assert_eq!(compute_iface.workgroup[0].size, 64);
+
+    let entry = neutral.entry.inst.symbol(&ws, &scx.interner());
+    let abi = skull_codegen_wgsl::WgslAbiPlan::compute(
+        &neutral.interface,
+        &format!("{entry}_compute"),
+        bone_semantic::prelude::Span::default(),
+    )
+    .expect("the faithful fixture has a WGSL ABI");
+    let emission = skull_codegen_wgsl::emit_compute_shader(
+        &ws,
+        &neutral.ir,
+        &neutral.interface,
+        &abi,
+        bone_semantic::prelude::Span::default(),
+    )
+    .expect("Naga validates the faithful compiler-authored rect-loss WGSL");
+    assert!(emission.source.contains("var<storage, read> s_batch: array<u32>"));
+    assert!(emission.source.contains("var<storage, read_write> s_loss: array<atomic<u32>>"));
+    assert!(emission.source.contains("var<workgroup> wg_partial: array<u32, 64>"));
+    assert!(emission.source.contains("atomicAdd(&s_loss"));
+    assert!(emission.source.contains("fn"));
+    assert!(emission.abi.wire().starts_with("WGSL_ABI_V4\n"));
+}
+
+#[test]
+fn compute_helper_resource_reordering_is_rejected() {
+    let source = REAL_RECT_LOSS.replace(
+        "line_covers(batch, base, px, py)",
+        "line_covers(reference, base, px, py)",
+    );
+    let errors = emit_errors(&source);
+    assert!(
+        errors.iter().any(|error| error.contains("resource forwarding changed")),
+        "a helper must not reorder the compiler-owned storage resources: {errors:#?}"
+    );
+}
+
+#[test]
+fn workgroup_memory_cannot_escape_through_a_local_alias() {
+    let source = UINT_COMPUTE_SURFACE.replace(
+        "let partial = workgroup_array<uint>(64)",
+        "let partial = workgroup_array<uint>(64)\n    let alias = partial",
+    );
+    let errors = emit_errors(&source);
+    assert!(
+        errors.iter().any(|error| error.contains("cannot escape workgroup memory")),
+        "a workgroup handle copied into another local must reject: {errors:#?}"
+    );
+}
+
+#[test]
+fn workgroup_memory_cannot_cross_a_function_boundary() {
+    let source = "fn cpu(a: WorkgroupArray<uint>) {}\n";
+    let errors = emit_errors(source);
+    assert!(
+        errors.iter().any(|error| error.contains("cannot cross a function boundary")),
+        "a workgroup handle parameter must reject outside its owning entry: {errors:#?}"
+    );
 }
 
 #[test]
