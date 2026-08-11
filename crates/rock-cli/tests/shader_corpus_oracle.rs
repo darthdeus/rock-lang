@@ -190,6 +190,7 @@ fn stage_code(stage: ShaderStage) -> u8 {
     match stage {
         ShaderStage::Vertex => 0,
         ShaderStage::Fragment => 1,
+        ShaderStage::Compute => 2,
     }
 }
 
