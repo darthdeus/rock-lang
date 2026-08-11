@@ -170,6 +170,8 @@ mod plain_struct_scalarize;
 mod reserved_namespace;
 #[path = "shader_pipeline_register.rs"]
 mod shader_pipeline_register;
+#[path = "compute_surface.rs"]
+mod compute_surface;
 #[path = "static_hot_reload.rs"]
 mod static_hot_reload;
 #[path = "static_registration_coverage.rs"]
