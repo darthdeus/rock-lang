@@ -330,6 +330,25 @@ fn check_tier0_signature_spec(
     Ok(())
 }
 
+fn check_tier0_signature_concrete(
+    interner: &MonoInterner,
+    signature: &ConcreteSignature,
+    span: Span,
+) -> Result<(), CompilerError> {
+    for id in &signature.params {
+        concrete_glsl_ty(interner, *id, span, "parameter")?;
+    }
+    if let Some(id) = signature.result {
+        if concrete_glsl_ty(interner, id, span, "return")?.is_sampler() {
+            return Err(err(
+                span,
+                "shader profile: a sampler cannot be returned (GLSL forbids sampler locals/returns)",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Walk a fn's MIR, rejecting any non-tier-0 instruction and collecting the
 /// INSTANCES it calls directly.
 ///
@@ -2444,11 +2463,10 @@ pub fn emit_shader_library_with_view(
     for raw in &view.order {
         let instance = ShaderInstance::new(raw.clone());
         let f = &ws.module(instance.fref().module).functions[instance.fref().func];
-        let subst = instance.subst(ws, scx.interner());
-        check_tier0_signature_spec(ws, &subst, f)?;
         let plan = view.concrete_plans.get(raw).ok_or_else(|| {
             err(f.name_span, format!("shader profile: no concrete plan for `{}`", f.name))
         })?;
+        check_tier0_signature_concrete(scx.interner(), &plan.signature, f.name_span)?;
         let body = skull_mir::lower::lower_instance_with_plans(ws, scx, plan, &view.concrete_plans).map_err(|e| {
             err(
                 f.name_span,
@@ -3643,11 +3661,10 @@ fn plan_stage_from_view(
     for raw in &view.order {
         let helper = ShaderInstance::new(raw.clone());
         let f = &ws.module(helper.fref().module).functions[helper.fref().func];
-        let subst = helper.subst(ws, scx.interner());
-        check_tier0_signature_spec(ws, &subst, f)?;
         let helper_plan = concrete_plans.get(raw).ok_or_else(|| {
             err(f.name_span, format!("shader profile: no concrete plan for `{}`", f.name))
         })?;
+        check_tier0_signature_concrete(scx.interner(), &helper_plan.signature, f.name_span)?;
         let body = skull_mir::lower::lower_instance_with_plans(
             ws,
             scx,
@@ -5466,6 +5483,19 @@ mod assertion_flip_tests {
         let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
         let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("mid");
         (ws, mid)
+    }
+
+    #[test]
+    fn concrete_signature_tier0_check_rejects_a_non_tier0_plan_type() {
+        let interner = MonoInterner::new();
+        let signature = ConcreteSignature {
+            params: vec![interner.intern(MonoTy::String)],
+            param_tuple_spelled: vec![false],
+            result: Some(interner.intern(MonoTy::Float)),
+        };
+        let err = check_tier0_signature_concrete(&interner, &signature, Span::default())
+            .expect_err("a non-tier-0 concrete parameter passed the signature check");
+        assert!(err.message.contains("string"), "unexpected error: {err:?}");
     }
 
     /// The unfuck's flipped assertion: a MISSED int->float coercion sink reaches
