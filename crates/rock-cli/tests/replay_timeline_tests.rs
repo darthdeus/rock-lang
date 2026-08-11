@@ -511,6 +511,68 @@ fn right_steps_one_tick_via_imgui_not_replayed_input() {
     );
 }
 
+#[test]
+fn shift_right_uses_the_modifier_mapping_for_fast_forward() {
+    let (_dir, log) = record_short_log("bitgun", 100);
+    let jumped = run_frame_env(
+        "bitgun",
+        50,
+        &["--replay", &log],
+        &[
+            ("STONE_REPLAY_WINDOW", "1"),
+            ("STONE_HEADLESS", "1"),
+            ("STONE_START_PAUSED", "1"),
+            ("STONE_TIMELINE_KEY_AT", "3"),
+            ("STONE_TIMELINE_KEY", "right"),
+            ("STONE_TIMELINE_KEY_2", "lshift"),
+        ],
+    );
+    assert_eq!(
+        current_tick(&jumped),
+        30,
+        "Shift+Right must use the live modifier channel for the 30-tick fast-forward"
+    );
+}
+
+#[test]
+fn punctuation_tool_bindings_reach_the_time_scale_ladder() {
+    let slower = run_frame_env(
+        "bitgun",
+        10,
+        &[],
+        &[
+            ("STONE_TIME_SCALE", "1"),
+            ("STONE_TIMELINE_KEY_AT", "3"),
+            ("STONE_TIMELINE_KEY", "["),
+        ],
+    );
+    assert_eq!(slower["stone"]["TIME_SCALE"], 0.5, "[ must select the slower rung");
+
+    let faster = run_frame_env(
+        "bitgun",
+        10,
+        &[],
+        &[
+            ("STONE_TIME_SCALE", "1"),
+            ("STONE_TIMELINE_KEY_AT", "3"),
+            ("STONE_TIMELINE_KEY", "]"),
+        ],
+    );
+    assert_eq!(faster["stone"]["TIME_SCALE"], 2.0, "] must select the faster rung");
+
+    let reset = run_frame_env(
+        "bitgun",
+        10,
+        &[],
+        &[
+            ("STONE_TIME_SCALE", "0.25"),
+            ("STONE_TIMELINE_KEY_AT", "3"),
+            ("STONE_TIMELINE_KEY", "\\"),
+        ],
+    );
+    assert_eq!(reset["stone"]["TIME_SCALE"], 1.0, "\\ must reset the scale");
+}
+
 /// P6: the loop-marker keys go through ImGui IO like the other timeline keys, NOT
 /// the replayed keys_down. Start paused, step to a non-zero tick, inject `b`, and
 /// assert loop marker B was set to that tick (via the non-dumped diag). The
@@ -668,21 +730,14 @@ fn recorded_keys_cannot_toggle_engine_debug_windows() {
         );
     }
 
-    // A tool key whose name the map does not know is a silently DEAD shortcut
-    // (the time-scale ladder's `[`, `]` and `\\` were exactly that), so every
-    // bound key is resolved and counted against its own declared total.
+    // The public typed authority must retain punctuation names. There is no
+    // manually repeated enum census: the exhaustive ToolKey match is the
+    // static source of truth.
     let diag = &replayed["__stone_diag"];
-    let declared = diag["TOOL_KEYS_DECLARED"].as_i64().expect("declared tool keys");
-    assert!(declared > 0, "the probe must declare keys: {diag}");
-    assert_eq!(declared, 34, "the typed census must cover every fixed and dynamic tool binding: {diag}");
-    assert_eq!(
-        diag["TOOL_KEYS_PROBED"].as_i64(), Some(declared),
-        "every declared tool key must have been probed: {diag}"
-    );
-    assert_eq!(
-        diag["TOOL_KEYS_UNMAPPED"].as_i64(), Some(0),
-        "every bound tool key must resolve to an ImGui key: {diag}"
-    );
+    assert_eq!(diag["TOOL_KEY_BACKSLASH_NAME"], "\\");
+    assert!(diag.get("TOOL_KEYS_DECLARED").is_none(), "the false census must be gone: {diag}");
+    assert!(diag.get("TOOL_KEYS_PROBED").is_none(), "the false census must be gone: {diag}");
+    assert!(diag.get("TOOL_KEYS_UNMAPPED").is_none(), "the false census must be gone: {diag}");
 
     // The live arm, through the same ImGui IO the timeline shortcuts use.
     let injected = run_frame_env(
@@ -693,6 +748,16 @@ fn recorded_keys_cannot_toggle_engine_debug_windows() {
         injected["stone"]["ENGINE"]["show_graphics_stats_window"].as_bool(), Some(true),
         "a live 'o' must still open the graphics stats window: {}",
         injected["stone"]["ENGINE"]
+    );
+
+    let injected_function = run_frame_env(
+        "bitgun", 20, &[],
+        &[("STONE_TIMELINE_KEY_AT", "5"), ("STONE_TIMELINE_KEY", "f8")],
+    );
+    assert_eq!(
+        injected_function["stone"]["ENGINE"]["show_pipeline_inspector"].as_bool(), Some(true),
+        "a live F8 must still open the pipeline inspector: {}",
+        injected_function["stone"]["ENGINE"]
     );
 
     let dynamic = run_frame_stderr(
