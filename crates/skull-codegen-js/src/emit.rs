@@ -191,12 +191,28 @@ fn max_published_lanes(
     inline_js
         .iter()
         .map(|body| {
-            view.publisher_lanes.get(&body.instance).copied().ok_or_else(|| {
-                err(format!(
-                    "JS: inline body `{:?}` has no artifact publisher lane plan",
+            let Some(realized) = view.realization.get(&body.instance) else {
+                return Err(err(format!(
+                    "JS: inline body `{:?}` has no artifact realization",
                     body.decl
-                ))
-            })
+                )));
+            };
+            if !matches!(
+                realized.kind,
+                artifact::Realization::ForeignBody(skull_graph::instance_graph::BoundaryClass::InlineBody)
+            ) {
+                return Ok(0);
+            }
+            if let Some(&lanes) = view.publisher_lanes.get(&body.instance) {
+                return Ok(lanes);
+            }
+            if view.missing_substitutions.contains(&body.instance) {
+                return Ok(0);
+            }
+            Err(err(format!(
+                "JS: inline body `{:?}` has no artifact publisher lane plan",
+                body.decl,
+            )))
         })
         .collect::<Result<Vec<_>, _>>()
         .map(|lanes| lanes.into_iter().max().unwrap_or(0))

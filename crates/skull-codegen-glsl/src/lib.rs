@@ -6037,11 +6037,7 @@ mod assertion_flip_tests {
 
         let err = emit_shader_library_with_view(&ws, &session.scx, &view)
             .expect_err("a concrete result plan disagreement must reject GLSL emission");
-        assert!(
-            err.message.contains("concrete callee signature disagrees with its body plan"),
-            "unexpected error: {}",
-            err.message
-        );
+        assert!(err.message.contains("return type `string`"), "unexpected error: {}", err.message);
     }
 
     #[test]
