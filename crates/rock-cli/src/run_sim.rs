@@ -1,5 +1,5 @@
 //! `rock sim <project> <name>` — runner for Rock-native `@sim`
-//! coroutines. See `docs/parked/sim-rock.md` for design history.
+//! coroutines. See `docs/sim-layering.md` for the current sim architecture.
 //!
 //! Orchestrates: compile project + spawn the game with
 //! `ROCK_RUN_SIM=<name>` set, demux `__SIM__`-prefixed JSON lines from
