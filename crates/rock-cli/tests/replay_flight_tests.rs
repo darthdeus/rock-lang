@@ -63,7 +63,7 @@ fn record_stamps_build_id_and_reload_marker() {
         &[("STONE_BUILD_ID", "buildAAA"), ("STONE_RELOAD_AT_FRAME", "5")],
     );
     let text = std::fs::read_to_string(&log).expect("read log");
-    assert!(text.starts_with("STONE_REPLAY 4"), "must be a v4 log\n{text}");
+    assert!(text.starts_with("STONE_REPLAY 5"), "must be a v5 log\n{text}");
     assert!(
         text.lines().any(|l| l == "build buildAAA"),
         "header must carry the build id\n{text}"

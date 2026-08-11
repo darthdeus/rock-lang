@@ -13,9 +13,12 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 /// A backend's incremental game compiler. Owns all cross-reload state and the
-/// output paths; `compile` writes `tmp/main.lua` (+ optional `tmp/incremental.lua`
-/// overlay) that the running engine hot-reloads. Everything around it (watch
-/// loop, process, engine/compiler builds, sims) is the backend-agnostic runtime.
+/// output paths; `compile` writes `<out>/main.lua` (+ optional
+/// `<out>/incremental.lua` overlay) that the running engine hot-reloads. The
+/// caller picks `<out>`: `tmp/` for run/frame/perf, a private
+/// `tmp/stone/<game>-<pid>/` per `rock stone` session
+/// (`docs/hot-reload-chunk-identity.md`). Everything around it (watch loop,
+/// process, engine/compiler builds, sims) is the backend-agnostic runtime.
 /// What a successful (re)compile asks of the runtime beyond hot-reloading.
 #[derive(Default)]
 pub struct CompileOutcome {

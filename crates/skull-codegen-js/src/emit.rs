@@ -4946,9 +4946,23 @@ fn register_fn_values_from_view(
         let Some(js_name) = st.names.get(&instance).cloned() else {
             return Err(err(format!("JS: function value `{surface}` has no artifact symbol")));
         };
-        st.gctx.fns.entry(surface).or_insert(js_name);
         let f = &ws.module(selected.module).functions[selected.func];
-        if js_supply(ws, f).is_some() || (f.is_extern && f.backend == bone_semantic::hir::FnBackend::Js) {
+        match js_supply(ws, f) {
+            Some(JsSupply::Global(global)) => {
+                st.gctx.fns.insert(surface, global.to_string());
+                continue;
+            }
+            Some(JsSupply::Template(_)) => {
+                return Err(err(format!(
+                    "JS subset: `{}` is a host-bodied declaration with no JS binding, \
+                     so it cannot be used as a function value",
+                    f.name
+                )));
+            }
+            None => {}
+        }
+        st.gctx.fns.entry(surface).or_insert(js_name);
+        if f.is_extern && f.backend == bone_semantic::hir::FnBackend::Js {
             continue;
         }
         if matches!(f.inline_body, Some((bone_semantic::hir::FnBackend::Js, _))) {

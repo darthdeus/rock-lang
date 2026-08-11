@@ -18,17 +18,53 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
+/// Above this the base64 page stops being a good delivery shape (parse time and
+/// peak memory, both several times the file). Chosen well above every game that
+/// is a real single-file candidate (chesslings 4.4 MB, chess 19.7 MB) and well
+/// below one that is not (mag, ~240 MB).
+const SINGLE_FILE_WARN_MB: f64 = 32.0;
+
 #[derive(Clone)]
 struct WebAsset {
     key: String,
     source: PathBuf,
 }
 
-pub fn run_web(project: &str, out: Option<&str>, watch: bool, port: u16) -> Result<()> {
+/// What `rock web` produces. The three are distinct DELIVERY shapes, not
+/// formatting options: a directory is what a static host serves, a single file
+/// is what runs from `file://` or an upload with no server, and a zip is what
+/// itch.io ingests.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WebPackage {
+    /// `index.html` + `game.js` + loose assets (the default).
+    Directory,
+    /// One self-contained `.html`, assets base64-embedded.
+    SingleFile,
+}
+
+pub fn run_web(
+    project: &str,
+    out: Option<&str>,
+    watch: bool,
+    port: u16,
+    package: WebPackage,
+    itch: bool,
+) -> Result<()> {
+    if watch && (package != WebPackage::Directory || itch) {
+        anyhow::bail!(
+            "web: --watch serves a live directory over HTTP, so it cannot be \
+             combined with --single-file or --itch"
+        );
+    }
     if watch {
-        watch_web(project, out, port)
-    } else {
-        build_web(project, out)
+        return watch_web(project, out, port);
+    }
+    if itch {
+        return build_itch_zip(project, out, package);
+    }
+    match package {
+        WebPackage::Directory => build_web(project, out),
+        WebPackage::SingleFile => build_single_file(project, out).map(|_| ()),
     }
 }
 
@@ -40,6 +76,220 @@ pub fn build_web(project: &str, out: Option<&str>) -> Result<()> {
 fn web_out_dir(project: &str, out: Option<&str>) -> PathBuf {
     out.map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(project).join("web"))
+}
+
+/// The last path component of a project, as a file stem (`games/match3` ->
+/// `match3`). Used to name the single-file and zip artifacts.
+fn project_stem(project: &str) -> String {
+    Path::new(project)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("game")
+        .to_string()
+}
+
+/// Resolve `--out` for an artifact that is a FILE, not a directory. An `--out`
+/// already carrying the right extension is taken verbatim; anything else is
+/// treated as a directory to put the default-named artifact in.
+fn web_out_file(project: &str, out: Option<&str>, ext: &str) -> PathBuf {
+    let default_name = format!("{}.{ext}", project_stem(project));
+    match out {
+        Some(o) if Path::new(o).extension().and_then(|e| e.to_str()) == Some(ext) => {
+            PathBuf::from(o)
+        }
+        Some(o) => PathBuf::from(o).join(default_name),
+        None => PathBuf::from(project).join("web").join(default_name),
+    }
+}
+
+/// One self-contained `.html`: every asset base64-embedded into
+/// `__ROCK_WEB_ASSETS` before an inlined `game.js` runs, so the page issues no
+/// network request at all and works from `file://`.
+///
+/// Returns the written path and the asset count, so a caller can report and a
+/// test can assert a denominator.
+fn build_single_file(project: &str, out: Option<&str>) -> Result<(PathBuf, usize)> {
+    let (emitted, cache, ws) = crate::js_test::try_emit_js_program_project_cached(project)?;
+    let register_lines = shader_register_lines_js(&ws, &cache)?;
+    let game_dir = web_game_dir(project);
+    let assets = collect_web_assets(Path::new(project), &game_dir)?;
+    let preload: Vec<String> = assets.iter().map(|asset| asset.key.clone()).collect();
+    let game_js = assemble_web_program(&emitted, &register_lines, &preload, &game_dir);
+    let html = single_file_html(&project_stem(project), &assets, &game_js)?;
+
+    let path = web_out_file(project, out, "html");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    rock_host::project::write_atomic(&path, &html)?;
+    let mb = html.len() as f64 / (1024.0 * 1024.0);
+    log::info!(
+        target: "WEB",
+        "{} -> {} (single file, {} assets embedded, {mb:.1} MB)",
+        project,
+        path.display(),
+        assets.len()
+    );
+    // Not a rejection -- the caller may well want this for an offline copy --
+    // but a single-file build is the wrong shape past a point and the failure is
+    // not obvious: the whole page is ONE base64 blob the browser must parse and
+    // decode before the first frame, at several times its size in memory, and
+    // nothing can be cached between loads. A directory build (or `--itch`) keeps
+    // assets separate and incrementally cacheable.
+    if mb > SINGLE_FILE_WARN_MB {
+        log::warn!(
+            target: "WEB",
+            "{:.1} MB is large for a single file (over {SINGLE_FILE_WARN_MB:.0} MB); \
+             prefer the default directory build or --itch for a game this size",
+            mb
+        );
+    }
+    Ok((path, assets.len()))
+}
+
+/// A `</script` inside the emitted program would close the wrapping tag and
+/// leave the rest of the program as page text -- the HTML tokenizer does not
+/// know it is inside a JS string. `<\/script` is the same string to a JS parser
+/// and inert to the tokenizer.
+fn escape_script_close(js: &str) -> String {
+    // Copies unmatched text as SLICES rather than byte-by-byte: `b as char`
+    // reinterprets a UTF-8 continuation byte as a codepoint, which turns every
+    // non-ASCII string literal in the program into mojibake.
+    let mut out = String::with_capacity(js.len() + 16);
+    let bytes = js.as_bytes();
+    let (mut start, mut i) = (0usize, 0usize);
+    while i + 8 <= bytes.len() {
+        // Case-insensitive: the tokenizer ends the element on `</ScRiPt` too,
+        // and does not require a closing `>`.
+        if bytes[i] == b'<'
+            && bytes[i + 1] == b'/'
+            && bytes[i + 2..i + 8].eq_ignore_ascii_case(b"script")
+        {
+            // `<` is ASCII, so `i` is always a char boundary here.
+            out.push_str(&js[start..i]);
+            out.push_str("<\\/");
+            i += 2;
+            start = i;
+        } else {
+            i += 1;
+        }
+    }
+    out.push_str(&js[start..]);
+    out
+}
+
+fn single_file_html(
+    title: &str,
+    assets: &[WebAsset],
+    game_js: &str,
+) -> Result<String> {
+    use base64::Engine as _;
+    let engine = base64::engine::general_purpose::STANDARD;
+
+    let mut embedded = String::new();
+    for asset in assets {
+        let bytes = std::fs::read(&asset.source).map_err(|e| {
+            anyhow::anyhow!("web --single-file: reading {}: {e}", asset.source.display())
+        })?;
+        embedded.push_str(&format!(
+            "{}: \"{}\",\n",
+            crate::js_test::js_str(&asset.key),
+            engine.encode(&bytes)
+        ));
+    }
+
+    Ok(format!(
+        r#"<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title}</title>
+<style>
+  html, body {{ margin: 0; height: 100%; background: #111; }}
+  #stone-canvas {{ display: block; width: 100vw; height: 100vh; }}
+</style>
+</head>
+<body>
+<canvas id="stone-canvas"></canvas>
+<script>
+// Every asset, base64-embedded. The prelude's boot prefers an already-present
+// __ROCK_WEB_ASSETS entry over a fetch, so this page makes no network request
+// and runs from file://.
+globalThis.__ROCK_WEB_ASSETS = (function () {{
+  var b64 = {{
+{embedded}  }};
+  var out = {{}};
+  for (var k in b64) {{
+    var s = atob(b64[k]);
+    var u = new Uint8Array(s.length);
+    for (var i = 0; i < s.length; i++) u[i] = s.charCodeAt(i);
+    out[k] = u;
+  }}
+  return out;
+}})();
+</script>
+<script>
+{game}
+</script>
+</body>
+</html>
+"#,
+        game = escape_script_close(game_js)
+    ))
+}
+
+/// A zip with `index.html` at the ROOT, which is what itch.io requires of an
+/// HTML5 upload. `package` picks what goes in it: a directory build (assets as
+/// separate entries, which the browser caches individually) or the single-file
+/// build (one entry).
+fn build_itch_zip(project: &str, out: Option<&str>, package: WebPackage) -> Result<()> {
+    let staging = tempfile::tempdir()?;
+    let mut zip = crate::zip_writer::ZipWriter::new();
+    let mut entries = 0usize;
+
+    match package {
+        WebPackage::SingleFile => {
+            let (path, _) = build_single_file(project, Some(
+                staging.path().join("single.html").to_str().expect("utf8 temp path"),
+            ))?;
+            zip.add("index.html", &std::fs::read(&path)?)?;
+            entries += 1;
+        }
+        WebPackage::Directory => {
+            build_web_bundle(project, staging.path(), true, false)?;
+            for entry in walkdir::WalkDir::new(staging.path()).sort_by_file_name() {
+                let entry = entry?;
+                if !entry.file_type().is_file() {
+                    continue;
+                }
+                let rel = entry
+                    .path()
+                    .strip_prefix(staging.path())
+                    .expect("under staging")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                zip.add(&rel, &std::fs::read(entry.path())?)?;
+                entries += 1;
+            }
+        }
+    }
+
+    let bytes = zip.finish()?;
+    let path = web_out_file(project, out, "zip");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, &bytes)?;
+    log::info!(
+        target: "WEB",
+        "{} -> {} (itch.io zip, {} entries, {:.1} MB)",
+        project,
+        path.display(),
+        entries,
+        bytes.len() as f64 / (1024.0 * 1024.0)
+    );
+    Ok(())
 }
 
 fn build_web_bundle(
@@ -1002,5 +1252,44 @@ fn main() { print(choose_a()); print(choose_b()) }
             runtime, current,
             "web runtime registration population retained a removed key"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // No game in the tree emits `</script` today, so an integration test on a
+    // real build cannot tell an escaping bug from an absent one. This gates the
+    // pure function at its own granularity, with inputs that actually carry the
+    // sequence.
+    #[test]
+    fn escape_script_close_neutralizes_every_case() {
+        // The HTML tokenizer ends a script at `</script` regardless of case or
+        // what follows, so all of these would truncate the program.
+        assert_eq!(escape_script_close(r#"var s = "</script>";"#), r#"var s = "<\/script>";"#);
+        assert_eq!(escape_script_close("a</SCRIPT>b"), "a<\\/SCRIPT>b");
+        assert_eq!(escape_script_close("a</ScRiPt >b"), "a<\\/ScRiPt >b");
+        // `</script` with no `>` still ends the element.
+        assert_eq!(escape_script_close("x</scriptfoo"), "x<\\/scriptfoo");
+        // Several in one program, and one at the very end.
+        assert_eq!(escape_script_close("</script></script>"), "<\\/script><\\/script>");
+    }
+
+    #[test]
+    fn escape_script_close_leaves_ordinary_program_text_alone() {
+        // A rewrite that fired on any `<` or `</` would corrupt comparisons and
+        // arrow functions, which is most of an emitted program.
+        for src in ["a < b", "a </ b", "x=>x<2", "</style>", "</scrip", "<script>"] {
+            assert_eq!(escape_script_close(src), src, "rewrote {src:?}");
+        }
+    }
+
+    #[test]
+    fn escape_script_close_is_byte_exact_on_multibyte_input() {
+        // The scan walks BYTES; pushing a byte as a char would mangle any
+        // non-ASCII in an emitted string literal into mojibake.
+        let s = "let s = \"\u{00e9}\u{4e2d}\u{1f600}\";";
+        assert_eq!(escape_script_close(s), s);
     }
 }

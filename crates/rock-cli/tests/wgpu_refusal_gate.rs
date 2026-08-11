@@ -2,21 +2,22 @@
 //!
 //! Both subjects used to refuse by CONTINUING. `set_canvas` logged and
 //! returned, so `with_canvas` ran its body with the PREVIOUS target still
-//! bound and the draws landed on the wrong surface; `acquire_mesh` rerouted to
-//! `sprite_mesh_new`, so the refusal surfaced later in `rect_batch`, far from
-//! the call that caused it. Neither is observable from a sim: both now raise,
-//! and Rock has no catch, so the sim would die with them. A bounded run is the
-//! oracle instead -- `stone_run_game` exits non-zero when a frame raised.
+//! bound and the draws landed on the wrong surface. `acquire_mesh` now admits
+//! the engine World+Scene pool, while a target-space acquire remains a
+//! permanent rejection at the public boundary. Neither is observable from a
+//! sim: both now raise, and Rock has no catch, so the sim would die with them.
+//! A bounded run is the oracle instead -- `stone_run_game` exits non-zero when
+//! a frame raised.
 //!
 //! The probe lives in `games/wgpu_renderer/refusal_probe.rock` behind two env
 //! vars. The control run (same command, no probe) is what keeps this from
 //! passing for the wrong reason.
 //!
 //! `assert_booted` is load-bearing. Without the Vulkan loader on this box the
-//! game never initializes, no draw system runs, the probe is inert -- and
-//! `rock frame` still prints `3 frames executed successfully` and exits 0. A
-//! gate that only read the exit status would pass vacuously in exactly the
-//! environment where it measures nothing.
+//! game never initializes and no draw system runs. Bounded `rock frame` now
+//! exits non-zero and does not print `3 frames executed successfully`, but a
+//! gate must retain the boot marker as an independent non-vacuity assertion:
+//! exit status alone does not prove that the measured process initialized.
 
 use std::process::Command;
 
@@ -116,15 +117,15 @@ fn set_canvas_refuses_before_running_the_with_canvas_body() {
 }
 
 #[test]
-fn acquire_mesh_refuses_at_the_acquire_rather_than_rerouting() {
+fn acquire_mesh_refuses_a_non_world_destination_at_the_boundary() {
     let (text, ok) = run_frame(Some("WGPU_PROBE_ACQUIRE_MESH"));
     assert_booted(&text, "acquire_mesh probe");
     assert!(
-        text.contains("does not admit acquired meshes"),
-        "the refusal did not reach acquire_mesh:\n{text}"
+        text.contains("acquired meshes require a World+Scene DrawList"),
+        "the permanent destination refusal did not reach acquire_mesh:\n{text}"
     );
     assert!(
-        !text.contains("acquire_mesh returned a mesh"),
+        !text.contains("pixel_screen acquire_mesh returned a mesh"),
         "acquire_mesh refused but still handed back a mesh to fill:\n{text}"
     );
     assert!(!ok, "a raised frame must fail a bounded run:\n{text}");

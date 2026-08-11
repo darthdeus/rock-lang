@@ -78,5 +78,7 @@ mod mono_js_backend_realization;
 mod web_build_gate;
 #[path = "web_fake_gl_tests.rs"]
 mod web_fake_gl_tests;
+#[path = "web_package_tests.rs"]
+mod web_package_tests;
 #[path = "web_watch_tests.rs"]
 mod web_watch_tests;
