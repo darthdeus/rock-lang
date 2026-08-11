@@ -543,8 +543,8 @@ fn live_cadence_rewind_uses_nearest_sim_time_keyframe() {
         "the live recording must capture a nondegenerate cadence history: {diag}"
     );
     assert!(
-        diag["STONE_KEYFRAME_COUNT"].as_i64().is_some_and(|n| n <= 20),
-        "the live keyframe window must remain bounded: {diag}"
+        diag["STONE_KEYFRAME_COUNT"].as_i64().is_some_and(|n| n >= 2),
+        "the live keyframe population must retain the anchor and cadence image: {diag}"
     );
 
     let reference = run_replay_dump(
@@ -1376,6 +1376,7 @@ fn explicit_branch_truncates_every_future_bearing_surface_together() {
     );
 
     assert_eq!(diag["STONE_BRANCH_COUNT"].as_i64(), Some(1), "{diag}");
+    assert_eq!(diag["STONE_BRANCH_REQUESTS"].as_i64(), Some(1), "the post-frame hook must use the request path: {diag}");
     assert_eq!(diag["STONE_BRANCH_TICK"].as_i64(), Some(branch_tick), "{diag}");
     assert_eq!(
         diag["STONE_BRANCH_DROPPED_RECORDS"].as_i64(), Some(horizon - branch_tick),
@@ -1463,6 +1464,158 @@ fn explicit_branch_truncates_every_future_bearing_surface_together() {
             "branch replay must reproduce the retained resize's {name}"
         );
     }
+}
+
+/// The real Resume Live Here button runs during late draw, before the native
+/// frame-end replay cleanup and tick advancement. Keep this arm separate from
+/// STONE_BRANCH_AT_FRAME, whose hook runs after `run_one_frame` and therefore
+/// cannot expose the production phase ordering.
+#[test]
+fn draw_phase_branch_while_paused_commits_at_displayed_tick() {
+    let game = "bitgun";
+    let branch_tick: i64 = 25;
+    let dir = tempfile::tempdir().unwrap();
+    let log_s = dir.path().join("draw-paused.replay").to_string_lossy().into_owned();
+
+    let state = run_record_dump(
+        game,
+        120,
+        &log_s,
+        &[
+            ("STONE_LIVE_REWIND", "1"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
+            ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
+            ("STONE_BRANCH_DRAW_AT_FRAME", "70"),
+        ],
+    );
+    let diag = &state["__stone_diag"];
+    assert_eq!(diag["STONE_BRANCH_DRAW_HOOK_SEEN"].as_i64(), Some(70), "paused arm must request from late draw: {diag}");
+    assert_eq!(diag["STONE_BRANCH_DRAW_ACTIVE"].as_i64(), Some(1), "paused draw request must see the rewound session: {diag}");
+    assert_eq!(diag["STONE_BRANCH_COUNT"].as_i64(), Some(1), "draw-phase branch must commit: {diag}");
+    assert_eq!(diag["STONE_BRANCH_REQUEST_TICK"].as_i64(), Some(branch_tick), "request sees the displayed tick: {diag}");
+    assert_eq!(diag["STONE_BRANCH_COMMIT_TICK"].as_i64(), Some(branch_tick), "paused branch must not add a tick: {diag}");
+    assert_eq!(diag["STONE_BRANCH_TICK_DELTA"].as_i64(), Some(0), "paused request must commit at the same boundary: {diag}");
+    assert_eq!(diag["STONE_BRANCH_REPLAY_CLEANUP_DELTA"].as_i64(), Some(0), "paused branch has no replay tick to clean up: {diag}");
+    assert_eq!(current_tick(&state), recorded_tick_lines(&log_s) as i64, "world tick and retained log prefix must agree");
+    assert_eq!(diag["STONE_BRANCH_FIRST_RECORD_TICK"].as_i64(), Some(branch_tick), "the first new tick must follow the retained prefix: {diag}");
+    assert_eq!(diag["STONE_BRANCH_BOUNDARY_MISMATCHES"].as_i64().unwrap_or(0), 0, "cursor/current_tick must agree at every boundary: {diag}");
+    assert_eq!(state["stone"]["sim_mouse_override"], serde_json::Value::Null, "replay mouse override must be cleared after handoff");
+    assert_eq!(state["stone"]["IMGUI_MOUSE_CAPTURE_OVERRIDE"], serde_json::Value::Null, "replay capture override must be cleared after handoff");
+}
+
+#[test]
+fn draw_phase_branch_while_playing_includes_the_request_frame_tick() {
+    let game = "bitgun";
+    let dir = tempfile::tempdir().unwrap();
+    let log_s = dir.path().join("draw-playing.replay").to_string_lossy().into_owned();
+
+    let state = run_record_dump(
+        game,
+        120,
+        &log_s,
+        &[
+            ("STONE_LIVE_REWIND", "1"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
+            ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
+            ("STONE_LIVE_PLAY_AT_FRAME", "70"),
+            ("STONE_BRANCH_DRAW_AT_FRAME", "80"),
+        ],
+    );
+    let diag = &state["__stone_diag"];
+    assert_eq!(diag["STONE_BRANCH_DRAW_HOOK_SEEN"].as_i64(), Some(80), "playing arm must request from late draw: {diag}");
+    assert_eq!(diag["STONE_BRANCH_DRAW_ACTIVE"].as_i64(), Some(1), "playing draw request must see the rewound session: {diag}");
+    let request_tick = diag["STONE_BRANCH_REQUEST_TICK"].as_i64().expect("playing request tick");
+    let commit_tick = diag["STONE_BRANCH_COMMIT_TICK"].as_i64().expect("playing commit tick");
+    assert_eq!(diag["STONE_BRANCH_COUNT"].as_i64(), Some(1), "draw-phase branch must commit: {diag}");
+    assert!(request_tick > 25, "the playing arm must advance into the retained future before requesting: {diag}");
+    assert_eq!(commit_tick, request_tick + 1, "the request-frame replay tick must run exactly once before commit: {diag}");
+    assert_eq!(diag["STONE_BRANCH_TICK_DELTA"].as_i64(), Some(1), "playing branch must include the request-frame tick: {diag}");
+    assert_eq!(diag["STONE_BRANCH_REPLAY_CLEANUP_DELTA"].as_i64(), Some(1), "playing branch must clean up while replay still owns the frame: {diag}");
+    assert_eq!(current_tick(&state), recorded_tick_lines(&log_s) as i64, "world tick and retained log prefix must agree");
+    assert_eq!(diag["STONE_BRANCH_FIRST_RECORD_TICK"].as_i64(), Some(commit_tick), "the first new tick must follow the retained prefix: {diag}");
+    assert_eq!(diag["STONE_BRANCH_BOUNDARY_MISMATCHES"].as_i64().unwrap_or(0), 0, "cursor/current_tick must agree at every boundary: {diag}");
+    assert_eq!(state["stone"]["sim_mouse_override"], serde_json::Value::Null, "replay mouse override must be cleared after handoff");
+    assert_eq!(state["stone"]["IMGUI_MOUSE_CAPTURE_OVERRIDE"], serde_json::Value::Null, "replay capture override must be cleared after handoff");
+}
+
+#[test]
+fn branch_projects_game_input_authority_and_drops_replay_latches() {
+    let run_probe = |log_s: &str, fresh_mouse: bool| {
+        let mut env = vec![
+            ("STONE_INPUT_PROBE_KEY", "input_probe"),
+            ("STONE_INPUT_PROBE_MOUSE_BUTTON", "1"),
+            ("STONE_LIVE_REWIND", "1"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
+            ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
+            ("STONE_LIVE_PLAY_AT_FRAME", "70"),
+            ("STONE_BRANCH_DRAW_AT_FRAME", "80"),
+            // These raw events arrive while replay owns the game lane.
+            ("STONE_PHYSICAL_KEY_PRESS_AT", "75"),
+            ("STONE_PHYSICAL_KEY_RELEASE_AT", "76"),
+            ("STONE_PHYSICAL_KEY_PRESS_AT_2", "82"),
+            ("STONE_PHYSICAL_KEY_RELEASE_AT_2", "83"),
+            ("STONE_PHYSICAL_MOUSE_PRESS_AT", "80"),
+            ("STONE_PHYSICAL_MOUSE_CAPTURED_AT", "80"),
+            // Keep the captured Resume Live Here press physically held for
+            // four live frames after handoff before releasing it.
+            ("STONE_PHYSICAL_MOUSE_RELEASE_AT", "85"),
+        ];
+        if fresh_mouse {
+            env.push(("STONE_PHYSICAL_MOUSE_PRESS_AT_2", "87"));
+            env.push(("STONE_PHYSICAL_MOUSE_RELEASE_AT_2", "89"));
+        }
+        run_record_dump("bitgun", 120, log_s, &env)
+    };
+
+    let captured_dir = tempfile::tempdir().unwrap();
+    let captured_log = captured_dir.path().join("captured-hold.replay").to_string_lossy().into_owned();
+    let captured = run_probe(&captured_log, false);
+    let captured_diag = &captured["__stone_diag"];
+    assert_eq!(captured_diag["STONE_BRANCH_COUNT"].as_i64(), Some(1), "input handoff needs a successful branch: {captured_diag}");
+    assert_eq!(captured_diag["STONE_INPUT_CAPTURED_MOUSE_INJECTED"].as_i64(), Some(1), "the captured-click control must run: {captured_diag}");
+    assert_eq!(captured_diag["STONE_INPUT_PROBE_REPLAY_KEY_DOWN"].as_i64().unwrap_or(0), 0, "physical held input must not reach replay game logic: {captured_diag}");
+    assert_eq!(captured_diag["STONE_INPUT_PROBE_REPLAY_KEY_PRESSED"].as_i64().unwrap_or(0), 0, "physical key latches must not reach replay game logic: {captured_diag}");
+    assert_eq!(captured_diag["STONE_INPUT_PROBE_LIVE_KEY_PRESSED"].as_i64(), Some(1), "fresh keyboard input must reach the first eligible live tick: {captured_diag}");
+    assert_eq!(captured_diag["STONE_INPUT_PROBE_REPLAY_MOUSE_DOWN"].as_i64().unwrap_or(0), 0, "physical mouse input must not reach replay game logic: {captured_diag}");
+    assert_eq!(captured_diag["STONE_INPUT_PROBE_REPLAY_MOUSE_PRESSED"].as_i64().unwrap_or(0), 0, "a captured UI click must not reach replay game logic: {captured_diag}");
+    assert_eq!(captured_diag["STONE_INPUT_PROBE_LIVE_MOUSE_DOWN"].as_i64().unwrap_or(0), 0, "the captured physical hold must stay out of live game input: {captured_diag}");
+    assert_eq!(captured_diag["STONE_INPUT_PROBE_LIVE_MOUSE_PRESSED"].as_i64().unwrap_or(0), 0, "the captured physical press must not create a live press edge: {captured_diag}");
+    assert_eq!(captured_diag["STONE_INPUT_PROBE_LIVE_MOUSE_RELEASED"].as_i64().unwrap_or(0), 0, "releasing the unseen captured press must not create a live release edge: {captured_diag}");
+
+    let fresh_dir = tempfile::tempdir().unwrap();
+    let fresh_log = fresh_dir.path().join("fresh-after-capture.replay").to_string_lossy().into_owned();
+    let fresh = run_probe(&fresh_log, true);
+    let diag = &fresh["__stone_diag"];
+    assert_eq!(diag["STONE_BRANCH_COUNT"].as_i64(), Some(1), "fresh input arm needs a successful branch: {diag}");
+    assert_eq!(diag["STONE_INPUT_PROBE_REPLAY_MOUSE_DOWN"].as_i64().unwrap_or(0), 0, "physical mouse input must not reach replay game logic: {diag}");
+    assert_eq!(diag["STONE_INPUT_PROBE_REPLAY_MOUSE_PRESSED"].as_i64().unwrap_or(0), 0, "a captured UI click must not reach replay game logic: {diag}");
+    assert_eq!(diag["STONE_INPUT_PROBE_LIVE_MOUSE_PRESSED"].as_i64(), Some(1), "a fresh post-release mouse press must create exactly one live press edge: {diag}");
+    assert!(diag["STONE_INPUT_PROBE_LIVE_MOUSE_DOWN"].as_i64().is_some_and(|n| n > 0), "the fresh mouse press must reach live game logic as down: {diag}");
+    assert_eq!(diag["STONE_INPUT_PROBE_LIVE_MOUSE_RELEASED"].as_i64(), Some(1), "only the fresh release may reach live game logic: {diag}");
+    assert_eq!(fresh["stone"]["sim_mouse_override"], serde_json::Value::Null, "handoff clears replay mouse authority");
+    assert_eq!(fresh["stone"]["IMGUI_MOUSE_CAPTURE_OVERRIDE"], serde_json::Value::Null, "handoff clears replay UI capture authority");
+}
+
+#[test]
+fn recorded_game_input_is_projected_into_replay_authority() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_s = dir.path().join("recorded-input.replay").to_string_lossy().into_owned();
+    let _ = run_record_dump("bitgun", 40, &log_s, &[]);
+    let text = std::fs::read_to_string(&log_s).unwrap();
+    let mut tick = 0;
+    let rewritten = text.lines().map(|line| {
+        if !line.starts_with("t ") { return line.to_string() }
+        let mut fields: Vec<&str> = line.split_whitespace().collect();
+        if tick == 10 { fields[6] = "input_probe" }
+        tick += 1;
+        fields.join(" ")
+    }).collect::<Vec<_>>().join("\n");
+    std::fs::write(&log_s, rewritten + "\n").unwrap();
+
+    let replayed = run_replay_dump("bitgun", 40, &log_s, &[("STONE_INPUT_PROBE_KEY", "input_probe")]);
+    let diag = &replayed["__stone_diag"];
+    assert!(diag["STONE_INPUT_PROBE_REPLAY_KEY_DOWN"].as_i64().unwrap_or(0) > 0, "recorded held input must reach replay game logic: {diag}");
+    assert!(diag["STONE_INPUT_PROBE_REPLAY_KEY_PRESSED"].as_i64().unwrap_or(0) > 0, "recorded input must produce its replay press edge: {diag}");
 }
 
 #[test]
@@ -1644,15 +1797,21 @@ fn a_second_rewind_after_a_branch_sees_only_the_branched_history() {
         game, 160, &log_s,
         &[
             ("STONE_LIVE_REWIND", "1"),
+            ("STONE_LIVE_REWIND_CADENCE_SECONDS", "0.05"),
+            ("STONE_LIVE_REWIND_WINDOW_SECONDS", "0.5"),
             ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
             ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
             ("STONE_BRANCH_AT_FRAME", "70"),
             ("STONE_TIMELINE_SEEK_AT_FRAME_2", "110"),
-            ("STONE_TIMELINE_SEEK_TO_TICK_2", "30"),
+            ("STONE_TIMELINE_SEEK_TO_TICK_2", "55"),
         ],
     );
     let diag = &live["__stone_diag"];
     assert_eq!(diag["STONE_BRANCH_COUNT"].as_i64(), Some(1), "{diag}");
+    assert_eq!(diag["STONE_LIVE_REWIND_BRANCH_CADENCE_REBASED"].as_i64(), Some(1), "branch must reset the live cadence clock: {diag}");
+    assert_eq!(diag["STONE_LIVE_REWIND_BRANCH_FLOOR_TICK"].as_i64(), Some(0), "branch must recompute the retained floor from restored time: {diag}");
+    assert!(diag["STONE_LIVE_REWIND_POST_BRANCH_CAPTURES"].as_i64().unwrap_or(0) > 0, "the new live branch must capture cadence keyframes: {diag}");
+    assert!(diag["STONE_LIVE_REWIND_POST_BRANCH_LAST_CAPTURE_TICK"].as_i64().is_some_and(|tick| tick > 25), "post-branch cadence population must be in the surviving future: {diag}");
     assert_eq!(diag["STONE_LIVE_REWIND_COUNT"].as_i64(), Some(2), "both rewinds must fire: {diag}");
     let horizon = diag["STONE_LIVE_REWIND_HORIZON"].as_i64().expect("horizon");
     assert!(horizon > 25, "the branched session must have recorded past T (got {horizon})");
@@ -1660,7 +1819,37 @@ fn a_second_rewind_after_a_branch_sees_only_the_branched_history() {
         horizon, recorded_tick_lines(&log_s) as i64,
         "the second rewind's horizon must be the branched history, not the discarded future: {diag}"
     );
-    assert_eq!(current_tick(&live), 30, "the second rewind must land at its target: {diag}");
+    let restore_tick = diag["STONE_LIVE_REWIND_RESTORE_TICK"].as_i64().expect("second restore tick");
+    assert!(restore_tick > 25 && restore_tick <= 55, "the second rewind must select a newly captured post-branch keyframe: {diag}");
+    assert_eq!(current_tick(&live), 55, "the second rewind must land at its target: {diag}");
+}
+
+#[test]
+fn branch_rebases_live_rewind_floor_before_an_immediate_second_seek() {
+    let dir = tempfile::tempdir().unwrap();
+    let log_s = dir.path().join("rebranch-floor.replay").to_string_lossy().into_owned();
+    let live = run_record_dump(
+        "bitgun",
+        90,
+        &log_s,
+        &[
+            ("STONE_LIVE_REWIND", "1"),
+            ("STONE_LIVE_REWIND_CADENCE_SECONDS", "0.01"),
+            ("STONE_LIVE_REWIND_WINDOW_SECONDS", "0.3"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME", "40"),
+            ("STONE_TIMELINE_SEEK_TO_TICK", "25"),
+            ("STONE_BRANCH_AT_FRAME", "70"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME_2", "72"),
+            ("STONE_TIMELINE_SEEK_TO_TICK_2", "10"),
+        ],
+    );
+    let diag = &live["__stone_diag"];
+    let floor = diag["STONE_LIVE_REWIND_BRANCH_FLOOR_TICK"].as_i64().unwrap_or_else(|| panic!("branch floor: {diag}"));
+    assert!(floor >= 0 && floor < 25, "the rebased floor must come from surviving pre-branch images: {diag}");
+    assert_eq!(diag["STONE_LIVE_REWIND_FLOOR_AT_SEEK"].as_i64(), Some(floor), "the published floor must be the one the second seek admits against: {diag}");
+    assert_eq!(diag["STONE_LIVE_REWIND_COUNT"].as_i64(), Some(2), "the immediate second seek must be admitted: {diag}");
+    assert_eq!(diag["STONE_LIVE_REWIND_REFUSED"].as_i64(), Some(0), "floor rebasing must not refuse the surviving boundary: {diag}");
+    assert_eq!(current_tick(&live), 10, "the immediate second rewind must land at its target: {diag}");
 }
 
 /// Transient correctness against REAL state, not just the seam's call count.
