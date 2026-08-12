@@ -194,6 +194,13 @@ impl RepPlan {
         self.nobox
     }
 
+    pub fn leaf_paths(&self) -> Option<Vec<Ustr>> {
+        match &self.layout {
+            RepLayout::Leaves(shape) => Some(crate::lower::value_leaf_paths(shape)),
+            RepLayout::Opaque | RepLayout::Tuple { .. } | RepLayout::Foreign { .. } => None,
+        }
+    }
+
     pub fn lanes(&self, arena: &RepArena) -> usize {
         match &self.layout {
             RepLayout::Opaque | RepLayout::Foreign { .. } => 1,
@@ -484,6 +491,16 @@ impl RepArena {
     ) -> Option<ValueStorage> {
         let id = self.plan_nominal_value(ws, target, name).ok()?;
         self.get(id).value_storage()
+    }
+
+    pub fn nominal_value_leaf_paths(
+        &self,
+        ws: &Workspace,
+        target: FnBackend,
+        name: Ustr,
+    ) -> Option<Vec<Ustr>> {
+        let id = self.plan_nominal_value(ws, target, name).ok()?;
+        self.get(id).leaf_paths()
     }
 
     pub(crate) fn ret_slot(&self, id: RepId) -> RetSlot {

@@ -610,7 +610,13 @@ pub fn flatten_nobox_nested_ctors(ws: &Workspace, func: &mut MirFunc) -> bool {
         ) {
             continue;
         }
-        let Some(paths) = skull_mir::lower::value_leaf_paths_of(ws, name) else { continue };
+        let Some(paths) = rep_arena.nominal_value_leaf_paths(
+            ws,
+            bone_semantic::hir::FnBackend::Lua,
+            name,
+        ) else {
+            continue;
+        };
         let mut pre: Vec<Idx<Inst>> = Vec::new();
         let mut leaves: Vec<(Ustr, Idx<Inst>)> = Vec::with_capacity(paths.len());
         let mut ok = true;

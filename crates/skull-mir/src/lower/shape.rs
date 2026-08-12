@@ -370,13 +370,6 @@ pub fn nb_value_storage_lua(elem: Ustr, leaves: &[LeafSlot], size: usize) -> Str
     nb_storage_call(elem.as_str(), size, &views)
 }
 
-/// [`value_leaf_paths`] by type name -- the `ValueShape`-side leaf order, for
-/// callers outside this module that need to compare it against a layout walk
-/// (`value_shape` itself is internal).
-pub fn value_leaf_paths_of(ws: &Workspace, name: Ustr) -> Option<Vec<Ustr>> {
-    Some(value_leaf_paths(&value_shape(ws, name)?))
-}
-
 /// One primitive leaf of an FFI-clean value struct's C layout: its dotted path
 /// (the same key [`value_leaf_paths`] produces), its C type, and its BYTE offset
 /// from the start of the struct.

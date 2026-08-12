@@ -442,8 +442,8 @@ pub enum Inst {
         /// exists only between the end of `cleanup` and emit, so no MIR pass sees
         /// it; luajit emits a generated `<name>_lct` and JS rebuilds the nested
         /// objects. Partial flattening is invalid: when any name is dotted the
-        /// sequence must equal `value_leaf_paths_of` exactly, which the Lua
-        /// emitter asserts.
+        /// sequence must equal the owned representation plan's leaf paths exactly, which the
+        /// Lua emitter asserts.
         fields: Vec<(Ustr, Idx<Inst>)>,
     },
     /// A value-struct box that is AUTHORIZED rather than implicit: requested by

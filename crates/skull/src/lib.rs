@@ -698,7 +698,11 @@ fn value_struct_defs(
                 // write leaves instead, hoisting each nested reference once.
                 // Used by the normalization that keeps a `nobox` field from
                 // materializing when its parent boxes.
-                if let Some(paths) = skull_mir::lower::value_leaf_paths_of(ws, s.name) {
+                if let Some(paths) = rep_arena.nominal_value_leaf_paths(
+                    ws,
+                    bone_semantic::hir::FnBackend::Lua,
+                    s.name,
+                ) {
                     if paths.iter().any(|p| p.contains('.')) {
                         ctors.push_str(&leaf_ctor_def(s.name, &paths));
                     }
@@ -815,7 +819,9 @@ fn value_struct_gc_defs(ws: &Workspace, gc: &rustc_hash::FxHashSet<ustr::Ustr>) 
             rep_arena.nominal_value_storage(ws, bone_semantic::hir::FnBackend::Lua, n),
             Some(skull_mir::lower::ValueStorage::LeafTable)
         ) {
-            let paths = skull_mir::lower::value_leaf_paths_of(ws, n).unwrap_or_default();
+            let paths = rep_arena
+                .nominal_value_leaf_paths(ws, bone_semantic::hir::FnBackend::Lua, n)
+                .unwrap_or_default();
             out.push_str(&format!("{mt}.__eq = function(a, b)\n"));
             out.push_str(
                 "  if type(a) ~= \"table\" or type(b) ~= \"table\" then return false end\n",

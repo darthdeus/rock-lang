@@ -10,7 +10,7 @@
 //! Design: docs/native-buffer-leaf-addressing-plan.md.
 
 use crate::common::ws_of;
-use skull_mir::lower::{value_leaf_layout_checked, value_leaf_paths_of, LeafSlot};
+use skull_mir::lower::{value_leaf_layout_checked, LeafSlot, RepArena};
 use ustr::Ustr;
 
 fn layout(ws: &bone_semantic::inference::Workspace, name: &str) -> Vec<LeafSlot> {
@@ -39,7 +39,13 @@ fn leaf_walkers_agree_on_path_order() {
         // Ok IS the assertion -- but compare explicitly too, so a future
         // refactor that weakens the check does not silently pass this test.
         let got: Vec<Ustr> = layout(&ws, name).iter().map(|l| l.path).collect();
-        let want = value_leaf_paths_of(&ws, Ustr::from(name)).expect("value shape");
+        let want = RepArena::default()
+            .nominal_value_leaf_paths(
+                &ws,
+                bone_semantic::hir::FnBackend::Any,
+                Ustr::from(name),
+            )
+            .expect("value shape");
         assert_eq!(want, got, "leaf order disagreement for `{name}`");
     }
 }

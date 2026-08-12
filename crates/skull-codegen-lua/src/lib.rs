@@ -465,7 +465,7 @@ fn const_hoist_uses_are_read_only(ws: &Workspace, func: &MirFunc, cand: Idx<Inst
 /// naming primitive leaves) rather than the declared-field form.
 ///
 /// Deliberately NOT "some name contains a dot": the sequence must equal
-/// `value_leaf_paths_of` EXACTLY. The ctor is positional, so a partially or
+/// the owned representation plan EXACTLY. The ctor is positional, so a partially or
 /// wrongly flattened field list would emit silently against the wrong
 /// signature; requiring the canonical sequence turns that into a loud panic at
 /// emit instead -- the same fail-closed move `value_leaf_layout_checked` makes.
@@ -487,7 +487,9 @@ pub fn leaf_form_violation(
     name: ustr::Ustr,
     got: &[ustr::Ustr],
 ) -> Option<CompilerError> {
-    let canonical = skull_mir::lower::value_leaf_paths_of(ws, name).unwrap_or_default();
+    let canonical = skull_mir::lower::RepArena::default()
+        .nominal_value_leaf_paths(ws, bone_semantic::hir::FnBackend::Lua, name)
+        .unwrap_or_default();
     if got == canonical {
         return None;
     }

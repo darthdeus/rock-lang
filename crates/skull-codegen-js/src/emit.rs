@@ -1975,8 +1975,13 @@ impl Emitter<'_> {
                 if fields.iter().any(|(f, _)| f.contains('.')) {
                     // Same strictness as the Lua emitter: a PARTIAL flattening
                     // must reject, not silently emit a half-shaped object.
-                    let canonical =
-                        skull_mir::lower::value_leaf_paths_of(self.ws, *name).unwrap_or_default();
+                    let canonical = skull_mir::lower::RepArena::default()
+                        .nominal_value_leaf_paths(
+                            self.ws,
+                            bone_semantic::hir::FnBackend::Js,
+                            *name,
+                        )
+                        .unwrap_or_default();
                     let got: Vec<ustr::Ustr> = fields.iter().map(|(f, _)| *f).collect();
                     if got != canonical {
                         return Err(CompilerError::new_no_location(format!(
@@ -4508,7 +4513,7 @@ fn emit_col_mat(ws: &Workspace, bodies: &[&MirFunc]) -> Result<String, CompilerE
 /// Emit `__rock_col_mat["<E>"] = function(v, i) { return {...}; };` -- one
 /// element rebuilt from its leaf columns, nested objects and all.
 ///
-/// The leaf paths come from `value_leaf_paths_of`, THE column-key source (the
+/// The leaf paths come from the owned representation plan, THE column-key source (the
 /// lowering writes the same paths), so the reader cannot drift from the writer.
 /// A column element is a GC-free `value` struct by construction
 /// (`vec_column_elem`), so the rebuilt object is a plain `{__ty, ..}` -- the same
@@ -4519,6 +4524,7 @@ fn build_col_mat_defs(
     plans: &std::collections::BTreeMap<ustr::Ustr, bool>,
 ) -> Result<String, CompilerError> {
     let mut out = String::new();
+    let rep_arena = skull_mir::lower::RepArena::default();
     for (name, nobox) in plans {
         // A `nobox` element has no materializer BY CONSTRUCTION: every op that
         // would need one (inspect, sort, the Lua-array bridge) is a spanned
@@ -4527,7 +4533,11 @@ fn build_col_mat_defs(
         if *nobox {
             continue;
         }
-        let Some(paths) = skull_mir::lower::value_leaf_paths_of(ws, *name) else {
+        let Some(paths) = rep_arena.nominal_value_leaf_paths(
+            ws,
+            bone_semantic::hir::FnBackend::Js,
+            *name,
+        ) else {
             // An enum value-shape has leaf paths but no struct declaration to
             // rebuild against: its `{__tag, _n}` leaves cannot reproduce the
             // named variant a JS enum box carries. Same honest rejection the
