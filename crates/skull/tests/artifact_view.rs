@@ -18,7 +18,7 @@ use bone_semantic::inference::Workspace;
 use skull::artifact::{self, ArtifactMappings, ArtifactRequest, Exclusion, Unrealizable};
 use skull::artifact::RealizedCallee;
 use skull::instance_graph::{self, Instance, InstanceGraph};
-use skull::target_projection::{JAVASCRIPT_WEB, LUAJIT_DESKTOP, NATIVE_C64_DESKTOP};
+use skull::target_projection::{JAVASCRIPT_WEB, LUAJIT_DESKTOP, NATIVE_C64_DESKTOP, WASM32_WASI};
 use skull_mir::intrinsics::BackendRealization;
 use ustr::Ustr;
 
@@ -867,6 +867,53 @@ fn a_target_with_no_backend_keeps_only_portable_bodies() {
             g.identity(&ws, i)
         );
     }
+}
+
+#[test]
+fn synthetic_targets_share_instances_and_diverge_in_physical_obligations() {
+    let ws = check(
+        r#"
+extern(ffi, "stone") fn host_tick(n: int) -> int
+fn main() { let x = 1; host_tick(x) }
+"#,
+    );
+    let (g, roots) = graph_for(&ws);
+    assert!(g.instances.len() > 1, "the synthetic-target graph has no nonzero population");
+
+    let c64 = artifact::realize(&ws, &g, &ArtifactRequest::new(NATIVE_C64_DESKTOP, &roots));
+    let wasm = artifact::realize(&ws, &g, &ArtifactRequest::new(WASM32_WASI, &roots));
+    let shared = c64.retained().filter(|i| wasm.retains(i)).count();
+    let c64_only = c64.retained().filter(|i| !wasm.retains(i)).count();
+    let wasm_only = wasm.retained().filter(|i| !c64.retains(i)).count();
+
+    assert!(shared > 0, "the two projections share no logical instances");
+    assert_eq!(c64_only, 0, "C64 changed the shared logical realization population");
+    assert_eq!(wasm_only, 0, "Wasm32 changed the shared logical realization population");
+    assert_eq!(c64.realization, wasm.realization);
+    assert_eq!(c64.excluded, wasm.excluded);
+    assert_eq!(c64.severed, wasm.severed);
+    assert_ne!(c64.deferred, wasm.deferred, "the physical target obligations are identical");
+    assert!(
+        c64.deferred.iter().any(|d| d.contains("pointer width")),
+        "C64 has no target-specific physical obligation"
+    );
+    assert!(c64.deferred.iter().any(|d| d.contains("64-bit")), "C64 float width is not projected");
+    assert!(
+        wasm.deferred.iter().any(|d| d.contains("import entry")),
+        "Wasm32 has no target-specific boundary obligation"
+    );
+    assert_eq!(c64.shared_instances, g.instances.len());
+    assert_eq!(wasm.shared_instances, g.instances.len());
+    assert_eq!(
+        c64.census().retained + c64.excluded.len(),
+        g.instances.len(),
+        "C64 did not account for every shared instance"
+    );
+    assert_eq!(
+        wasm.census().retained + wasm.excluded.len(),
+        g.instances.len(),
+        "Wasm32 did not account for every shared instance"
+    );
 }
 
 /// The ambiguity arm's PRECONDITION, measured rather than assumed.
