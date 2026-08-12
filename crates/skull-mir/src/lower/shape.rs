@@ -1228,24 +1228,6 @@ pub(crate) fn nobox_declared_shape(ws: &Workspace, ty: TyId) -> Option<ValueShap
     nullable_nominal_shape(ws, ty, &|t| static_ty(ws, t))
 }
 
-/// The value-struct type a `nobox` global's logical value has, plus its leaf
-/// PATHS in ctor order -- what reflection needs to rebuild the logical value from
-/// the leaf globals and to take it apart again. `None` for every other global,
-/// on the same declared-type gate as the target-specific [`GlobalPlan`], so
-/// accessors exist for exactly the globals whose storage IS leaves.
-///
-/// Paths, not just an arity, because both directions address by path: the ctor is
-/// positional over this sequence, and the write side assigns `v.<path>` per leaf.
-///
-/// The `bool` is whether the global is NULLABLE. Its presence leaf leads the
-/// leaves but has no path -- presence is not addressable as `v.<something>` --
-/// so the accessor must branch on it rather than read it, and the caller needs
-/// to know the two sequences line up only from leaf 1 on.
-pub fn nobox_global_shape_paths(ws: &Workspace, ty: TyId) -> Option<(Ustr, Vec<Ustr>, bool)> {
-    let shape = nobox_declared_shape(ws, ty)?;
-    Some((shape.name, value_leaf_paths(&shape), shape.nullable))
-}
-
 /// Everything the reflection accessor for a `nobox` global decides, answered
 /// from the SAME oracles the emitter uses rather than from the leaf paths'
 /// punctuation.

@@ -1467,9 +1467,9 @@ fn build_rock_globals_registry(
 /// reach it by name; these two closures are what `__rock_global_get`/`_set` call
 /// so every consumer addresses the LOGICAL value under the LOGICAL name.
 ///
-/// Both directions come off one canonical leaf-path sequence
-/// (`nobox_global_shape_paths`), so they cannot drift from each other or from the
-/// storage: `get` is the positional leaf ctor over the leaves in that order, and
+/// Both directions consume one canonical accessor plan
+/// (`nobox_global_accessor_shape`), so they cannot drift from each other or from the
+/// storage: `get` is the positional leaf ctor over the plan's paths, and
 /// `set` assigns `v.<path>` per leaf in the same order. The ctor suffix follows
 /// the same three-way rule as every other pack site (`skull-codegen-lua`'s
 /// `_lct` / `_vt` / `_ct` choice) -- dotted paths mean the flattened leaf ctor,
