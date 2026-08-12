@@ -275,6 +275,7 @@ pub fn supports(target: &CpuTargetSpec, class: BoundaryClass) -> bool {
         }
         BoundaryClass::Intrinsic => true,
         BoundaryClass::ErasedRuntimeEntry => true,
+        BoundaryClass::Invalid => false,
     }
 }
 

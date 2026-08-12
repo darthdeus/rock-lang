@@ -72,8 +72,9 @@ pub use shape::*;
 /// it from two places.
 mod abi;
 pub use abi::{
-    requires_concrete_body_plan, BackendFnAbiPlan, FunctionRepPlan, RepArena, RepError, RepId,
-    RepLayout, RepGuarantees, RepPlan, RepUse, RepUseFacts,
+    boundary_requires_boxed_representation, declared_boundary_class, requires_concrete_body_plan,
+    BackendFnAbiPlan, BoundaryClass, FunctionRepPlan, RepArena, RepError, RepId, RepLayout,
+    RepGuarantees, RepPlan, RepUse, RepUseFacts,
 };
 
 mod coroutine;

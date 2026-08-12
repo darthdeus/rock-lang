@@ -108,32 +108,9 @@ impl EdgeKind {
     }
 }
 
-/// The boundary classes of `docs/boundary-contracts.md` Part 1. A boundary is a
-/// callee whose body skull does not lower to MIR; plan S 9 requires every call
-/// to resolve to exactly one `InstanceId` OR one `BoundaryId`.
-///
-/// [`BoundaryClass::Invalid`] is not a body kind but a required OUTCOME -- the
-/// class a boundary takes on a target that cannot supply its contract. The
-/// shader-interface class (S 1.5) has no member here: GLSL is not a `FnBackend`
-/// the instance walk runs for, so no call in this graph resolves to one.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-pub enum BoundaryClass {
-    Extern,
-    InlineBody,
-    Intrinsic,
-    ErasedRuntimeEntry,
-}
-
-impl BoundaryClass {
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Extern => "extern",
-            Self::InlineBody => "inline-body",
-            Self::Intrinsic => "intrinsic",
-            Self::ErasedRuntimeEntry => "erased-runtime-entry",
-        }
-    }
-}
+/// The boundary classifier lives below the graph, so artifact projection and
+/// lowering-side rejection cannot drift into separate vocabularies.
+pub use skull_mir::lower::BoundaryClass;
 
 /// One reached boundary, classified from the DECLARATION alone.
 ///
@@ -3920,30 +3897,12 @@ pub fn boundary_class_for(
 /// A target artifact view may still REPLACE an expanded fallback with that
 /// target's mapping. That is an artifact decision, not a shared-graph one.
 fn declared_boundary(f: &Function) -> Option<BoundaryClass> {
-    if f.is_extern {
-        return Some(BoundaryClass::Extern);
-    }
-    if skull_mir::intrinsics::expand_kind(f).is_some() {
-        return Some(BoundaryClass::Intrinsic);
-    }
-    if f.annotations.iter().any(|a| a.name.name.as_str() == "intrinsic") {
-        // `inline_body` is the luajit MAPPING; a Rock body is the fallback.
-        return (skull_mir::intrinsics::is_native_required(f) || !has_rock_body(f))
-            .then_some(BoundaryClass::Intrinsic);
-    }
-    if f.inline_body.is_some() {
-        return Some(BoundaryClass::InlineBody);
-    }
-    None
+    skull_mir::lower::declared_boundary_class(f)
 }
 
 /// Whether the declaration carries a portable Rock body, as opposed to only a
 /// foreign one. `has_body` on the module is the walk's own question; this is the
 /// declaration-level form the classifier needs before any module lookup.
-fn has_rock_body(f: &Function) -> bool {
-    f.inline_body.is_none() && !f.is_extern
-}
-
 /// Runtime entries an opaque inline body CALLS.
 ///
 /// An inline body is foreign text, so the walk cannot lower it -- but emission

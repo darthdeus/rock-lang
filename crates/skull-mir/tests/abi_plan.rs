@@ -18,7 +18,8 @@ use skull_mir::instance::Instance;
 use skull_mir::concrete::{ConcreteBodyPlan, ConcreteOwner, ConcreteSignature, ConcreteTypeTables};
 use skull_mir::lower::{
     BackendFnAbiPlan, ContainerFamily, ContainerPlan, ContainerStorage, RepArena, RepGuarantees,
-    EnumLayout, EnumPlan, RepUse, RepUseFacts, ScalarCtx,
+    declared_boundary_class, boundary_requires_boxed_representation, BoundaryClass, EnumLayout,
+    EnumPlan, RepUse, RepUseFacts, ScalarCtx,
 };
 use skull_mir::mir::FuncRef;
 use skull_mir::monoty::{MonoCtor, MonoTy};
@@ -414,6 +415,23 @@ fn enum_layout_is_selected_by_one_owned_plan() {
     let unit = EnumPlan::for_name(&unit_ws, Ustr::from("E")).expect("enum plan");
     assert!(unit.is_payload_free());
     assert!(matches!(unit.layout(), EnumLayout::PayloadFree));
+}
+
+#[test]
+fn boundary_class_and_transport_contract_have_one_owner() {
+    let ws = ws_of(
+        r#"
+@nomangle inline(lua) fn boxed(v: int) -> int = "return v"
+@nomangle @scalar_abi inline(lua) fn scalar(v: int) -> int = "return v"
+fn main() { print("{boxed(1)} {scalar(2)}") }
+"#,
+    );
+    let boxed = &ws.module(func_ref(&ws, "boxed").module).functions[func_ref(&ws, "boxed").func];
+    let scalar = &ws.module(func_ref(&ws, "scalar").module).functions[func_ref(&ws, "scalar").func];
+    assert_eq!(declared_boundary_class(boxed), Some(BoundaryClass::InlineBody));
+    assert_eq!(declared_boundary_class(scalar), Some(BoundaryClass::InlineBody));
+    assert!(boundary_requires_boxed_representation(boxed));
+    assert!(!boundary_requires_boxed_representation(scalar));
 }
 
 #[test]

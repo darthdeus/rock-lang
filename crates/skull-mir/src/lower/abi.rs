@@ -22,7 +22,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use bone_semantic::hir::FnBackend;
+use bone_semantic::hir::{FnBackend, Function};
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::Span;
 use ustr::Ustr;
@@ -35,6 +35,61 @@ use super::{
 };
 use crate::concrete::ConcreteBodyPlan;
 use crate::mir::FuncRef;
+
+/// The one declaration-level classification shared by the instance graph,
+/// artifact projection, and representation-boundary validation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum BoundaryClass {
+    Extern,
+    InlineBody,
+    Intrinsic,
+    ErasedRuntimeEntry,
+    Invalid,
+}
+
+impl BoundaryClass {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Extern => "extern",
+            Self::InlineBody => "inline-body",
+            Self::Intrinsic => "intrinsic",
+            Self::ErasedRuntimeEntry => "erased-runtime-entry",
+            Self::Invalid => "invalid",
+        }
+    }
+}
+
+/// Classify only declaration-owned boundaries. Target capability and erased
+/// runtime membership are supplied by the graph/artifact owner; keeping those
+/// inputs out of this function prevents `@inline` from becoming an identity or
+/// representation decision.
+pub fn declared_boundary_class(f: &Function) -> Option<BoundaryClass> {
+    if f.is_extern {
+        return Some(BoundaryClass::Extern);
+    }
+    if crate::intrinsics::expand_kind(f).is_some() {
+        return Some(BoundaryClass::Intrinsic);
+    }
+    if f.annotations.iter().any(|a| a.name.name.as_str() == "intrinsic") {
+        let native_required = crate::intrinsics::is_native_required(f);
+        let has_rock_body = f.inline_body.is_none() && !f.is_extern;
+        return (native_required || !has_rock_body).then_some(BoundaryClass::Intrinsic);
+    }
+    f.inline_body.is_some().then_some(BoundaryClass::InlineBody)
+}
+
+/// Whether a declaration is an opaque boundary for scalarized value transport.
+/// `@scalar_abi` is a transport contract for inline text; it does not create an
+/// instance or change the declaration's boundary class.
+pub fn boundary_requires_boxed_representation(f: &Function) -> bool {
+    match declared_boundary_class(f) {
+        Some(BoundaryClass::Extern) => true,
+        Some(BoundaryClass::InlineBody) => {
+            !f.annotations.iter().any(|a| a.name.name.as_str() == "scalar_abi")
+        }
+        _ => false,
+    }
+}
 
 /// An interned physical representation.  Its numeric identity is meaningful
 /// only through the build-scoped arena carried by [`ScalarCtx`].

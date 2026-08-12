@@ -596,9 +596,7 @@ impl Builder<'_> {
             return Ok(());
         }
         let callee = &self.ws.module(func.module).functions[func.func];
-        let opaque = callee.is_extern
-            || (callee.inline_body.is_some()
-                && !callee.annotations.iter().any(|a| a.name.name.as_str() == "scalar_abi"));
+        let opaque = crate::lower::boundary_requires_boxed_representation(callee);
         if !opaque {
             return Ok(());
         }
@@ -637,9 +635,7 @@ impl Builder<'_> {
         if crate::intrinsics::is_gpu_only(callee) {
             return Ok(());
         }
-        let opaque = callee.is_extern
-            || (callee.inline_body.is_some()
-                && !callee.annotations.iter().any(|a| a.name.name.as_str() == "scalar_abi"));
+        let opaque = crate::lower::boundary_requires_boxed_representation(callee);
         if !opaque {
             return Ok(());
         }
