@@ -3233,8 +3233,8 @@ pub fn string_char_literal_out_of_range(ws: &Workspace, mid: ModuleId) -> Option
 #[cfg(test)]
 mod tests;
 
-/// Support for `crate::spec_census`: expose complete generic call identities
-/// without giving the diagnostic census its own type or specialization walk.
+/// Support for `crate::spec_census`: expose concrete generic call identities
+/// without giving the diagnostic census its own type conversion.
 pub(crate) mod shape_census_support {
     use super::shape::{callee_instance_subst, spec_key_from_subst, SpecSubst};
     use crate::monoty::MonoTy;
@@ -3243,7 +3243,7 @@ pub(crate) mod shape_census_support {
 
     /// Every complete generic call identity in this body, plus the count of
     /// compiler-state sites that could not state one.
-    pub(crate) fn specializations_in_body(
+    pub(crate) fn concrete_calls_in_body(
         ws: &Workspace,
         inf: &BodyInference,
     ) -> (Vec<(FuncRef, Vec<MonoTy>)>, usize) {

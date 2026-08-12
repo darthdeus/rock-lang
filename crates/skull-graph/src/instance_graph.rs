@@ -1,7 +1,6 @@
-//! The SHADOW instance graph (`docs/monomorphization-plan.md` Stage 0d).
+//! The target-neutral instance graph (`docs/monomorphization-plan.md` Stage 0d).
 //!
-//! Read-only with respect to emission: it observes what a monomorphizing
-//! compiler WOULD instantiate, and changes nothing about what is emitted today.
+//! It owns logical instance reachability below the target artifact views.
 //!
 //! An [`Instance`] is `(FuncRef, Vec<MonoTyId>)` -- a function plus the total
 //! logical types of its generic arguments, keyed on
@@ -17,8 +16,7 @@
 //!
 //! **Transitive instantiation is the core.** Walking a callee's body under the
 //! CALLER's substitution is what makes `count<I>` at `I = VecIter<Vec2>` a
-//! different instance from the same fn at `VecIter<int>`, and it is what today's
-//! conditional specializer only does when `any_value` happens to hold.
+//! different instance from the same fn at `VecIter<int>`.
 //!
 //! **Two outcomes are not the same.** [`Unresolved`] is a construction the walk
 //! could not complete -- data. [`Rejection`] is one the concrete-program model
@@ -4142,48 +4140,36 @@ pub fn instance_count(g: &InstanceGraph) -> usize {
     g.instances.len()
 }
 
-/// Reconciliation of the current conditional specializer against the shadow graph
-/// (plan S 15a). Equality is NOT expected -- the current mechanism is conditional,
-/// so the shadow side is strictly larger. What must hold is that nothing today's
-/// machinery produces is MISSING from the shadow graph; an absence in that
-/// direction means the shadow walk cannot see an edge production already takes.
+/// Coverage of concrete generic call identities by the instance graph.
 #[derive(Default, Debug)]
-pub struct Reconciliation {
-    /// Specializations the current machinery produces.
-    pub today: usize,
-    /// ...of which the shadow graph contains a matching instance.
-    pub matched: usize,
-    /// ...of which it does NOT, and whose CALLER the shadow walk did reach.
+pub struct CallIdentityCensus {
+    /// Complete generic call identities recovered from typed bindings.
+    pub calls: usize,
+    /// ...of which the instance graph contains a matching instance.
+    pub matched_instances: usize,
+    /// ...of which it does NOT, and whose CALLER the instance graph did reach.
     /// Each of these is a failure, not a difference.
     pub missing: Vec<String>,
-    /// ...of which it does not, but whose caller the shadow walk never reached
-    /// either. A reachability difference, explained rather than unexplained.
-    pub missing_unreached_caller: usize,
-    /// Call sites whose current spec decision was a Stage-0b invariant
-    /// rejection. Expected to be zero on a valid corpus.
-    pub rejected_sites: usize,
-    /// Shadow instances with no counterpart today. These are the EXPECTED
-    /// difference: instances the conditional specializer declines to make.
-    pub shadow_only: usize,
+    /// ...of which it does not, but whose caller the instance graph never
+    /// reached either. This is a reachability difference, not a missing
+    /// instance.
+    pub unreached_callers: usize,
+    /// Call sites whose identity could not be stated from compiler state.
+    pub unresolved_sites: usize,
+    /// Graph instances with no counterpart in the direct-call census.
+    pub graph_only: usize,
 }
 
-/// A today-slot matches a shadow arg when the slot is `None` (no concrete type
-/// reaches it, so it constrains nothing) or the canonical types are equal. Both
-/// sides encode with `MonoTy::canonical`, so a pretty-printing ambiguity cannot
-/// match two different types to each other.
-/// Positional equality. It used to treat a `None` slot as matching ANYTHING,
-/// which a total key cannot express -- and never had to: the corpus produced no
-/// partial key, so the wildcard arm matched nothing it would not have matched
-/// exactly. Strictly narrower, and the census below is the measurement that
-/// says so.
-fn slots_match(slots: &[String], shadow: &[String]) -> bool {
-    slots == shadow
+/// Both sides encode with `MonoTy::canonical`, so a pretty-printing ambiguity
+/// cannot match two different types to each other.
+fn slots_match(slots: &[String], instance: &[String]) -> bool {
+    slots == instance
 }
 
-pub fn reconcile(ws: &Workspace, g: &InstanceGraph) -> Reconciliation {
-    let (today, rejected_sites) = skull_mir::spec_census::today_specializations(ws);
+pub fn reconcile_call_identities(ws: &Workspace, g: &InstanceGraph) -> CallIdentityCensus {
+    let (calls, unresolved_sites) = skull_mir::spec_census::concrete_calls(ws);
 
-    // Shadow instances grouped by function, as canonical argument lists.
+    // Graph instances grouped by function, as canonical argument lists.
     let mut by_func: FxHashMap<(u32, u32), Vec<Vec<String>>> = FxHashMap::default();
     for i in &g.instances {
         by_func
@@ -4192,10 +4178,14 @@ pub fn reconcile(ws: &Workspace, g: &InstanceGraph) -> Reconciliation {
             .push(i.args.iter().map(|a| g.interner.canonical(*a)).collect());
     }
 
-    let mut r = Reconciliation { today: today.len(), rejected_sites, ..Default::default() };
-    let mut matched_shadow: std::collections::HashSet<(u32, u32, Vec<String>)> =
+    let mut r = CallIdentityCensus {
+        calls: calls.len(),
+        unresolved_sites,
+        ..Default::default()
+    };
+    let mut matched_instances: std::collections::HashSet<(u32, u32, Vec<String>)> =
         Default::default();
-    for t in &today {
+    for t in &calls {
         let k = (t.func.module.raw(), t.func.func.into_raw().into_u32());
         let hit = by_func
             .get(&k)
@@ -4203,13 +4193,13 @@ pub fn reconcile(ws: &Workspace, g: &InstanceGraph) -> Reconciliation {
             .unwrap_or(None);
         match hit {
             Some(a) => {
-                r.matched += 1;
-                matched_shadow.insert((k.0, k.1, a.clone()));
+                r.matched_instances += 1;
+                matched_instances.insert((k.0, k.1, a.clone()));
             }
             None => {
                 let ck = (t.caller.module.raw(), t.caller.func.into_raw().into_u32());
                 if !by_func.contains_key(&ck) {
-                    r.missing_unreached_caller += 1;
+                    r.unreached_callers += 1;
                     continue;
                 }
                 let f = &ws.module(t.func.module).functions[t.func.func];
@@ -4226,13 +4216,13 @@ pub fn reconcile(ws: &Workspace, g: &InstanceGraph) -> Reconciliation {
     }
     r.missing.sort();
     r.missing.dedup();
-    r.shadow_only = g
+    r.graph_only = g
         .instances
         .iter()
         .filter(|i| {
             let k = (i.func.module.raw(), i.func.func.into_raw().into_u32());
             let args: Vec<String> = i.args.iter().map(|a| g.interner.canonical(*a)).collect();
-            !matched_shadow.contains(&(k.0, k.1, args))
+            !matched_instances.contains(&(k.0, k.1, args))
         })
         .count();
     r

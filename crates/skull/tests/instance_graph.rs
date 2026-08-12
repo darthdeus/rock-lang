@@ -30,9 +30,8 @@ fn graph_of(src: &str) -> (Workspace, instance_graph::InstanceGraph) {
     (ws, g)
 }
 
-/// One generic function called at two element types is TWO instances. Today's
-/// `compute_call_spec` produces at most one specialization here (and usually
-/// none, because `any_value` does not hold for primitives).
+/// One generic function called at two element types is TWO instances, even
+/// when neither argument requires a representation-specific lowering.
 #[test]
 fn one_generic_two_arguments_is_two_instances() {
     let (ws, g) = graph_of(
@@ -176,18 +175,12 @@ fn main() {
     );
 }
 
-/// Plan S 15a: every specialization the conditional machinery produces must
-/// appear in the shadow graph as a complete instance. Equality is NOT expected
-/// -- the shadow side is strictly larger, because the current mechanism is
-/// conditional -- but an absence in THAT direction means the shadow walk cannot
-/// see an edge production already takes.
-///
-/// A miss whose CALLING body the walk never reached is classified separately:
-/// that is a reachability difference (dead code, or a shared generic body no
-/// instance reaches), not a missing instance. Over the whole closed world the
-/// unexplained count is 0 and the classified count is 569.
+/// Every complete generic call identity recovered from typed bindings must
+/// appear in the instance graph. A miss whose CALLING body the graph never
+/// reached is classified separately from an identity missing in a reached
+/// body.
 #[test]
-fn every_current_specialization_appears_in_the_shadow_graph() {
+fn every_concrete_call_identity_appears_in_the_instance_graph() {
     let (ws, g) = graph_of(
         r#"
 value P { x: float, y: float }
@@ -200,16 +193,15 @@ fn main() {
 }
 "#,
     );
-    let r = instance_graph::reconcile(&ws, &g);
-    assert!(r.today > 0, "the fixture produced no specializations to reconcile");
+    let r = instance_graph::reconcile_call_identities(&ws, &g);
+    assert!(r.calls > 0, "the fixture produced no concrete calls to reconcile");
     assert!(
         r.missing.is_empty(),
-        "current specializations absent from the shadow graph: {:?}",
+        "concrete call identities absent from the instance graph: {:?}",
         r.missing
     );
-    assert_eq!(r.rejected_sites, 0, "a Stage-0b invariant fired on a valid program");
-    // The expected direction: the shadow graph is strictly larger.
-    assert!(r.shadow_only > 0, "shadow graph added nothing over today's specializer");
+    assert_eq!(r.unresolved_sites, 0, "a valid call identity could not be stated");
+    assert!(r.graph_only > 0, "the graph had no identities beyond direct calls");
 }
 
 /// A Rock function taken as a VALUE is an edge. The known-positive fixture

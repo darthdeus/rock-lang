@@ -408,10 +408,9 @@ impl Builder<'_> {
             }
             // `vec_new()` is the fourth boundary primitive, and the odd one out:
             // its element type comes from the CALL's own type, not a receiver, so
-            // it cannot be read off an argument. It is also `inline(lua)`, so it
-            // never specializes (`compute_call_spec` bails on an inline body) --
-            // the opaque body would hand back a `_data` table that every later
-            // column access then indexes as nil.
+            // it cannot be read off an argument. It is also an opaque Lua
+            // boundary; the concrete plan must select the column representation
+            // before the body would otherwise expose a table-backed `_data`.
             if name.as_str() == "__vec_data_alloc" && arg_idxs.len() == 1 {
                 if let Some(elem) = self.vec_column_elem_of(e)? {
                     let capacity = self.lower_expr(arg_idxs[0])?;
