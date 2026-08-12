@@ -24,6 +24,7 @@ use std::sync::{Arc, Mutex};
 
 use bone_semantic::hir::FnBackend;
 use bone_semantic::inference::Workspace;
+use bone_semantic::prelude::Span;
 use ustr::Ustr;
 
 use super::{
@@ -57,10 +58,41 @@ pub enum RepUse {
     Boundary,
 }
 
+#[derive(Clone, Debug)]
+pub struct RepUseFacts {
+    pub tuple_spelled: bool,
+    pub span: Option<Span>,
+}
+
+impl Default for RepUseFacts {
+    fn default() -> Self {
+        Self { tuple_spelled: false, span: None }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RepGuarantees {
+    pub nobox: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct RepError {
+    pub span: Option<Span>,
+    pub message: String,
+}
+
+impl std::fmt::Display for RepError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for RepError {}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum RepLayout {
     Opaque,
-    Leaves(usize),
+    Leaves(ValueShape),
     Tuple { slots: Vec<RepId>, nullable: bool },
     Foreign { reason: Ustr },
 }
@@ -95,7 +127,7 @@ impl RepPlan {
     pub fn lanes(&self, arena: &RepArena) -> usize {
         match &self.layout {
             RepLayout::Opaque | RepLayout::Foreign { .. } => 1,
-            RepLayout::Leaves(width) => *width,
+            RepLayout::Leaves(shape) => shape.leaf_count(),
             RepLayout::Tuple { slots, nullable } => {
                 slots.iter().map(|slot| arena.get(*slot).lanes(arena)).sum::<usize>()
                     + usize::from(*nullable)
@@ -109,6 +141,7 @@ pub struct FunctionRepPlan {
     params: Vec<RepId>,
     result: Option<RepId>,
     return_lanes: usize,
+    scalar_abi: bool,
 }
 
 impl FunctionRepPlan {
@@ -126,6 +159,10 @@ impl FunctionRepPlan {
 
     pub fn return_lanes(&self) -> usize {
         self.return_lanes
+    }
+
+    pub fn uses_scalar_abi(&self) -> bool {
+        self.scalar_abi
     }
 }
 
@@ -166,13 +203,136 @@ impl RepArena {
             .expect("RepId must belong to its build arena")
     }
 
+    /// Total physical planning for one concrete logical type. `Opaque` is an
+    /// explicit representation, not an absent answer; only a guarantee that
+    /// forbids that representation can produce an error.
+    pub fn plan(
+        &self,
+        ws: &Workspace,
+        target: FnBackend,
+        ty: &crate::monoty::MonoTy,
+        use_context: RepUse,
+        facts: &RepUseFacts,
+        guarantees: RepGuarantees,
+    ) -> Result<RepId, RepError> {
+        use crate::monoty::{MonoCtor, MonoTy};
+
+        let reject = |message: String| RepError { span: facts.span, message };
+        match ty {
+            MonoTy::Nullable(inner) => match inner.as_ref() {
+                MonoTy::Tuple(parts) => {
+                    let slots = parts
+                        .iter()
+                        .map(|part| {
+                            self.plan(
+                                ws,
+                                target,
+                                part,
+                                RepUse::TupleElement,
+                                facts,
+                                guarantees,
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let splats = slots.iter().any(|id| self.get(*id).lanes(self) > 1);
+                    if matches!(use_context, RepUse::Return) || (facts.tuple_spelled && splats) {
+                        return Ok(self.intern(
+                            target,
+                            use_context,
+                            RepLayout::Tuple { slots, nullable: true },
+                        ));
+                    }
+                    if guarantees.nobox {
+                        return Err(reject("nullable tuple cannot cross a nobox boundary without a physical tuple plan".into()));
+                    }
+                    Ok(self.intern(target, use_context, RepLayout::Opaque))
+                }
+                _ => {
+                    let shape = if guarantees.nobox {
+                        crate::lower::mono_nobox_value_shape(ws, ty)
+                    } else {
+                        crate::lower::mono_value_shape(ws, ty)
+                    };
+                    if let Some(shape) = shape {
+                        return Ok(self.intern(target, use_context, RepLayout::Leaves(shape)));
+                    }
+                    if guarantees.nobox {
+                        return Err(reject(format!(
+                            "{} has no concrete nobox representation",
+                            ty.render()
+                        )));
+                    }
+                    Ok(self.intern(target, use_context, RepLayout::Opaque))
+                }
+            },
+            MonoTy::Tuple(parts) => {
+                let slots = parts
+                    .iter()
+                    .map(|part| {
+                        self.plan(
+                            ws,
+                            target,
+                            part,
+                            RepUse::TupleElement,
+                            facts,
+                            guarantees,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let splats = slots.iter().any(|id| self.get(*id).lanes(self) > 1);
+                if matches!(use_context, RepUse::Return) || (facts.tuple_spelled && splats) {
+                    return Ok(self.intern(
+                        target,
+                        use_context,
+                        RepLayout::Tuple { slots, nullable: false },
+                    ));
+                }
+                if guarantees.nobox && !facts.tuple_spelled {
+                    return Err(reject("tuple parameter is not physically spelled at a nobox boundary".into()));
+                }
+                Ok(self.intern(target, use_context, RepLayout::Opaque))
+            }
+            MonoTy::App { ctor: MonoCtor::Nominal(_), .. } => {
+                let shape = if guarantees.nobox {
+                    crate::lower::mono_nobox_value_shape(ws, ty)
+                } else {
+                    crate::lower::mono_value_shape(ws, ty)
+                };
+                if let Some(shape) = shape {
+                    return Ok(self.intern(target, use_context, RepLayout::Leaves(shape)));
+                }
+                if guarantees.nobox {
+                    return Err(reject(format!("{} has no concrete nobox representation", ty.render())));
+                }
+                Ok(self.intern(target, use_context, RepLayout::Opaque))
+            }
+            MonoTy::App { .. } => {
+                if guarantees.nobox {
+                    return Err(reject(format!("{} cannot cross a nobox boundary", ty.render())));
+                }
+                Ok(self.intern(target, use_context, RepLayout::Opaque))
+            }
+            MonoTy::Int
+            | MonoTy::Uint
+            | MonoTy::Float
+            | MonoTy::Bool
+            | MonoTy::String
+            | MonoTy::Any
+            | MonoTy::Unit
+            | MonoTy::Never
+            | MonoTy::Function { .. } => {
+                Ok(self.intern(target, use_context, RepLayout::Opaque))
+            }
+        }
+    }
+
     fn slot(&self, target: FnBackend, slot: &RetSlot) -> RepId {
         match slot {
             RetSlot::Opaque => self.intern(target, RepUse::TupleElement, RepLayout::Opaque),
             RetSlot::Leaves(shape) => self.intern(
                 target,
                 RepUse::TupleElement,
-                RepLayout::Leaves(shape.leaf_count()),
+                RepLayout::Leaves(shape.clone()),
             ),
             RetSlot::Nested(shape) => self.tuple(target, RepUse::TupleElement, shape),
         }
@@ -200,7 +360,7 @@ impl RepArena {
                     RetSlot::Leaves(shape) => self.intern(
                         target,
                         RepUse::Parameter,
-                        RepLayout::Leaves(shape.leaf_count()),
+                        RepLayout::Leaves(shape.clone()),
                     ),
                     RetSlot::Nested(shape) => self.tuple(target, RepUse::Parameter, shape),
                 })
@@ -214,12 +374,82 @@ impl RepArena {
         } else if let Some(shape) = ret_tuple {
             Some(self.tuple(target, RepUse::Return, shape))
         } else if let Some(shape) = scalar.and_then(|abi| abi.ret_shape.as_ref()) {
-            Some(self.intern(target, RepUse::Return, RepLayout::Leaves(shape.leaf_count())))
+            Some(self.intern(target, RepUse::Return, RepLayout::Leaves(shape.clone())))
         } else {
             Some(self.intern(target, RepUse::Return, RepLayout::Opaque))
         };
         let return_lanes = result.map_or(0, |id| self.get(id).lanes(self));
-        FunctionRepPlan { params, result, return_lanes }
+        FunctionRepPlan { params, result, return_lanes, scalar_abi: scalar.is_some() }
+    }
+
+    fn function_from_concrete(
+        &self,
+        ws: &Workspace,
+        target: FnBackend,
+        params: &[crate::monoty::MonoTy],
+        result_ty: Option<&crate::monoty::MonoTy>,
+        scalar: Option<&FnScalarAbi>,
+        ret_tuple: Option<&TupleRetShape>,
+    ) -> FunctionRepPlan {
+        let params = if let Some(scalar) = scalar {
+            params
+                .iter()
+                .enumerate()
+                .map(|(index, ty)| {
+                    let tuple_spelled = scalar
+                        .param_shapes
+                        .get(index)
+                        .is_some_and(|slot| !matches!(slot, RetSlot::Opaque));
+                    self.plan(
+                        ws,
+                        target,
+                        ty,
+                        RepUse::Parameter,
+                        &RepUseFacts { tuple_spelled, span: None },
+                        RepGuarantees { nobox: scalar.nobox_only },
+                    )
+                    .expect("concrete ABI planner must accept a validated parameter")
+                })
+                .collect()
+        } else {
+            params
+                .iter()
+                .map(|_| self.intern(target, RepUse::Parameter, RepLayout::Opaque))
+                .collect()
+        };
+        let result = match (result_ty, ret_tuple, scalar.and_then(|abi| abi.ret_shape.as_ref())) {
+            (Some(ty), Some(_), _) => Some(
+                self.plan(
+                    ws,
+                    target,
+                    ty,
+                    RepUse::Return,
+                    &RepUseFacts { tuple_spelled: true, span: None },
+                    RepGuarantees::default(),
+                )
+                .expect("concrete ABI planner must accept a validated tuple return"),
+            ),
+            (Some(ty), None, Some(_)) => Some(
+                self.plan(
+                    ws,
+                    target,
+                    ty,
+                    RepUse::Return,
+                    &RepUseFacts::default(),
+                    RepGuarantees { nobox: scalar.is_some_and(|abi| abi.nobox_only) },
+                )
+                .expect("concrete ABI planner must accept a validated value return"),
+            ),
+            (Some(_), None, None) => Some(self.intern(target, RepUse::Return, RepLayout::Opaque)),
+            (None, _, _) => None,
+        };
+        let return_lanes = result.map_or(0, |id| self.get(id).lanes(self));
+        FunctionRepPlan {
+            params,
+            result,
+            return_lanes,
+            scalar_abi: scalar.is_some(),
+        }
     }
 }
 
@@ -248,6 +478,7 @@ pub fn requires_concrete_body_plan(
 pub(super) struct FnScalarAbi {
     pub(super) param_shapes: Vec<RetSlot>,
     pub(super) ret_shape: Option<ValueShape>,
+    pub(super) nobox_only: bool,
 }
 
 /// The one ABI policy. PRIVATE: every consumer reads a [`BackendFnAbiPlan`].
@@ -288,7 +519,7 @@ fn fn_scalar_abi_spec(
         f.param_decls.iter().map(|pd| sig_param_slot_spec(ws, subst, pd.ty)).collect();
     let ret_shape = f.return_ty.and_then(|ty| sig_value_shape_spec(ws, subst, ty));
     (ret_shape.is_some() || param_shapes.iter().any(RetSlot::splats))
-        .then_some(FnScalarAbi { param_shapes, ret_shape })
+        .then_some(FnScalarAbi { param_shapes, ret_shape, nobox_only })
 }
 
 /// The ABI an INDIRECT caller derives from a fn TYPE alone -- the `nobox` shapes
@@ -311,7 +542,7 @@ pub(super) fn fn_value_nobox_abi(
         .collect();
     let ret_shape = f.return_ty.and_then(|ty| nobox_declared_shape_spec(ws, subst, ty));
     (ret_shape.is_some() || param_shapes.iter().any(RetSlot::splats))
-        .then_some(FnScalarAbi { param_shapes, ret_shape })
+        .then_some(FnScalarAbi { param_shapes, ret_shape, nobox_only: true })
 }
 
 /// **The backend ABI of one emitted body**, under one execution target.
@@ -418,7 +649,7 @@ fn fn_scalar_abi_concrete(
             }
         });
     (ret_shape.is_some() || param_shapes.iter().any(RetSlot::splats))
-        .then_some(FnScalarAbi { param_shapes, ret_shape })
+        .then_some(FnScalarAbi { param_shapes, ret_shape, nobox_only })
 }
 
 impl BackendFnAbiPlan {
@@ -454,13 +685,21 @@ impl BackendFnAbiPlan {
             .result
             .map(|id| scx.interner().get(id))
             .and_then(|ty| mono_tuple_ret_shape(ws, &ty));
+        let params = plan
+            .signature
+            .params
+            .iter()
+            .map(|id| scx.interner().get(*id))
+            .collect::<Vec<_>>();
+        let result_ty = plan.signature.result.map(|id| scx.interner().get(id));
         let arena = scx.rep_arena();
-        let representation = arena.function(
+        let representation = arena.function_from_concrete(
+            ws,
             scx.target,
+            &params,
+            result_ty.as_ref(),
             scalar.as_ref(),
             ret_tuple.as_ref(),
-            plan.signature.params.len(),
-            plan.signature.result.is_some(),
         );
         Self {
             subject: inst.clone(),

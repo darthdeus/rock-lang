@@ -713,14 +713,14 @@ pub(crate) fn round_up(n: usize, align: usize) -> usize {
 
 /// The static, recursive shape of a scalarizable `value` struct: declared fields,
 /// each a primitive leaf or a nested (also-scalarizable) value struct.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ValueShape {
     pub(crate) name: Ustr,
     pub(crate) fields: Vec<(Ustr, FieldShape)>,
     pub(crate) nullable: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum FieldShape {
     Prim,
     Nested(ValueShape),

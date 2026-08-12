@@ -16,7 +16,9 @@ use std::sync::LazyLock;
 
 use skull_mir::instance::Instance;
 use skull_mir::concrete::{ConcreteBodyPlan, ConcreteOwner, ConcreteSignature, ConcreteTypeTables};
-use skull_mir::lower::{BackendFnAbiPlan, ScalarCtx};
+use skull_mir::lower::{
+    BackendFnAbiPlan, RepArena, RepGuarantees, RepUse, RepUseFacts, ScalarCtx,
+};
 use skull_mir::mir::FuncRef;
 use skull_mir::monoty::{MonoCtor, MonoTy};
 use ustr::Ustr;
@@ -246,6 +248,7 @@ fn main() {
     let _ = nullable(leaf)
     let _ = boxed(Boxed { text: "boxed", tag: 5 })
 }
+
 "#,
     );
     let scx = ScalarCtx::new(&ws);
@@ -307,4 +310,51 @@ fn main() {
         .expect("caller must retain the concrete nested ABI plan");
     let entry = entry.abi_plan.as_ref().expect("callee entry must retain its ABI plan");
     assert_eq!(entry.representation(), call.representation());
+}
+
+#[test]
+fn concrete_rep_planner_is_total_over_the_logical_type_vocabulary() {
+    let ws = ws_of("nobox value V2 { x: float, y: float }");
+    let arena = RepArena::default();
+    let valid = vec![
+        MonoTy::Int,
+        MonoTy::Uint,
+        MonoTy::Float,
+        MonoTy::Bool,
+        MonoTy::String,
+        MonoTy::Any,
+        MonoTy::Unit,
+        MonoTy::Never,
+        MonoTy::Nullable(Box::new(MonoTy::Int)),
+        MonoTy::Tuple(vec![MonoTy::Int, MonoTy::Float]),
+        MonoTy::App { ctor: MonoCtor::Array, params: vec![MonoTy::Int] },
+        MonoTy::Function { params: vec![MonoTy::Int], ret: Box::new(MonoTy::Bool) },
+        nominal("V2"),
+    ];
+    assert_eq!(valid.len(), 13, "the valid-type denominator must stay nonzero");
+    let facts = RepUseFacts::default();
+    let guarantees = RepGuarantees::default();
+    for ty in &valid {
+        arena
+            .plan(
+                &ws,
+                bone_semantic::hir::FnBackend::Lua,
+                ty,
+                RepUse::Parameter,
+                &facts,
+                guarantees,
+            )
+            .unwrap_or_else(|e| panic!("valid logical type `{}` was rejected: {e}", ty.render()));
+    }
+    let rejected = arena
+        .plan(
+            &ws,
+            bone_semantic::hir::FnBackend::Lua,
+            &MonoTy::App { ctor: MonoCtor::Array, params: vec![MonoTy::Int] },
+            RepUse::Parameter,
+            &facts,
+            RepGuarantees { nobox: true },
+        )
+        .expect_err("a nobox container must not silently become an opaque slot");
+    assert!(rejected.message.contains("nobox"));
 }
