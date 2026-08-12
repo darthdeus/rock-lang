@@ -845,8 +845,9 @@ fn value_struct_gc_defs(ws: &Workspace, gc: &rustc_hash::FxHashSet<ustr::Ustr>) 
             // and an absent literal both store. The scalar ABI spells absence
             // `false` on the wire, and two logically-equal absent values then
             // compared unequal (`__eq` is a per-key compare, and `false ~= nil`).
-            let presence =
-                skull_mir::lower::value_leaf_presence_flags_of(ws, n).unwrap_or_default();
+            let presence = rep_arena
+                .nominal_value_leaf_presence_flags(ws, bone_semantic::hir::FnBackend::Lua, n)
+                .unwrap_or_default();
             let assigns: Vec<String> = paths
                 .iter()
                 .enumerate()

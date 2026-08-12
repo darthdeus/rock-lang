@@ -149,10 +149,6 @@ pub(crate) fn presence_flags_rec(shape: &ValueShape, nested: bool, out: &mut Vec
 }
 
 /// [`value_leaf_presence_flags`] by type name.
-pub fn value_leaf_presence_flags_of(ws: &Workspace, name: Ustr) -> Option<Vec<bool>> {
-    Some(value_leaf_presence_flags(&value_shape(ws, name)?))
-}
-
 /// THE leaf traversal: every primitive leaf of `shape` in declaration order,
 /// each named by joining its ancestor field names with `sep` under `prefix`.
 /// `sep = "."` yields the column keys / dotted source paths, `sep = "__"` the

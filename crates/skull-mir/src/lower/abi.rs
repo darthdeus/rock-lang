@@ -201,6 +201,13 @@ impl RepPlan {
         }
     }
 
+    pub fn presence_flags(&self) -> Option<Vec<bool>> {
+        match &self.layout {
+            RepLayout::Leaves(shape) => Some(crate::lower::value_leaf_presence_flags(shape)),
+            RepLayout::Opaque | RepLayout::Tuple { .. } | RepLayout::Foreign { .. } => None,
+        }
+    }
+
     pub fn lanes(&self, arena: &RepArena) -> usize {
         match &self.layout {
             RepLayout::Opaque | RepLayout::Foreign { .. } => 1,
@@ -501,6 +508,16 @@ impl RepArena {
     ) -> Option<Vec<Ustr>> {
         let id = self.plan_nominal_value(ws, target, name).ok()?;
         self.get(id).leaf_paths()
+    }
+
+    pub fn nominal_value_leaf_presence_flags(
+        &self,
+        ws: &Workspace,
+        target: FnBackend,
+        name: Ustr,
+    ) -> Option<Vec<bool>> {
+        let id = self.plan_nominal_value(ws, target, name).ok()?;
+        self.get(id).presence_flags()
     }
 
     pub(crate) fn ret_slot(&self, id: RepId) -> RetSlot {

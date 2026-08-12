@@ -828,3 +828,19 @@ fn nominal_value_leaf_paths_are_owned_by_the_rep_plan() {
         Some(vec![Ustr::from("child.x"), Ustr::from("child.y"), Ustr::from("tag")])
     );
 }
+
+#[test]
+fn nominal_value_presence_flags_are_owned_by_the_rep_plan() {
+    let ws = ws_of(
+        "nobox value V2 { x: float, y: float }\nvalue Boxed { child: V2?, tag: int }\n",
+    );
+    let arena = RepArena::default();
+    assert_eq!(
+        arena.nominal_value_leaf_presence_flags(
+            &ws,
+            bone_semantic::hir::FnBackend::Lua,
+            Ustr::from("Boxed"),
+        ),
+        Some(vec![true, false, false, false])
+    );
+}
