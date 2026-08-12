@@ -754,7 +754,7 @@ pub(crate) fn value_shape(ws: &Workspace, name: Ustr) -> Option<ValueShape> {
 /// The target/context-specific physical storage of a nominal value. This is
 /// the one classification used by RepPlan projections and backend scaffolding;
 /// callers must not rediscover `_ct`, `_vt` or `_lct` from field syntax.
-pub fn value_storage_for_nominal(
+pub(crate) fn declared_value_storage(
     ws: &Workspace,
     _target: bone_semantic::hir::FnBackend,
     name: Ustr,
@@ -782,7 +782,7 @@ pub fn value_storage_for_nominal(
 }
 
 /// Declaration field order of `name` iff it is a GC-free value STRUCT proper --
-/// NOT an enum value-shape (which `value_storage_for_nominal` also classifies via
+/// NOT an enum value-shape (which `declared_value_storage` also classifies via
 /// the enum layout). `value_shape_rec` is struct-only (it requires a
 /// `struct_by_name` entry), so this cleanly separates the two: a genuine value
 /// struct renders `Name { f: v }` colon-format on JS, an enum box still rejects.
@@ -1374,7 +1374,11 @@ pub fn nobox_global_accessor_shape(ws: &Workspace, ty: TyId) -> Option<NoboxGlob
     let flags = if shape.nullable { &flags[1..] } else { &flags[..] };
     let presence_path =
         flags.iter().zip(paths.iter()).find(|(is_tag, _)| **is_tag).map(|(_, p)| *p);
-    let storage = value_storage_for_nominal(ws, bone_semantic::hir::FnBackend::Lua, shape.name)?;
+    let storage = RepArena::default().nominal_value_storage(
+        ws,
+        bone_semantic::hir::FnBackend::Lua,
+        shape.name,
+    )?;
     let ctor_suffix = match storage {
         ValueStorage::LeafTable => "_lct",
         ValueStorage::GcTable => "_vt",

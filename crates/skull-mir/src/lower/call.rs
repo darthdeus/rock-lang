@@ -1270,7 +1270,7 @@ impl Builder<'_> {
             // GC-tier at all.
             ValueRepr::Group { name, .. }
                 if matches!(
-                    value_storage_for_nominal(self.ws, self.scx.target, name),
+                    self.scx.rep_arena().nominal_value_storage(self.ws, self.scx.target, name),
                     Some(ValueStorage::LeafTable)
                 ) =>
             {
@@ -1537,7 +1537,7 @@ impl Builder<'_> {
         // reads -- the exact inverse of the `<Name>_lct` ctor, including the
         // presence key at a nullable child's own name.
         if matches!(
-            value_storage_for_nominal(self.ws, self.scx.target, shape.name),
+            self.scx.rep_arena().nominal_value_storage(self.ws, self.scx.target, shape.name),
             Some(ValueStorage::LeafTable)
         ) && !shape.nullable
         {

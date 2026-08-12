@@ -2427,9 +2427,10 @@ pub fn map_key_rejection(ws: &Workspace, mid: ModuleId) -> Option<(String, Span)
 /// position. Not a legal C boundary type: no `ffi.cdef` typedef exists, so
 /// `ffi.new`/`sizeof`/`ffi.istype`/the extern ABI cannot name it.
 fn nominal_is_gc_value(ws: &Workspace, name: Ustr) -> bool {
+    let rep_arena = RepArena::default();
     map_is_value_struct(ws, name)
         && !matches!(
-            value_storage_for_nominal(ws, bone_semantic::hir::FnBackend::Lua, name),
+            rep_arena.nominal_value_storage(ws, bone_semantic::hir::FnBackend::Lua, name),
             Some(ValueStorage::CData)
         )
 }
@@ -2465,6 +2466,7 @@ fn native_buffer_alloc_elem_ctype(
     inf: &BodyInference,
     ret: TyId,
 ) -> Result<Ustr, String> {
+    let rep_arena = RepArena::default();
     let ret = resolve_tyid(ws, inf, ret)
         .ok_or_else(|| "`native_buffer_alloc` result type could not be resolved".to_string())?;
     let TypeExpr::App { ctor: TypeCtor::Nominal(nb), params } = ty_node(ws, inf, ret)
@@ -2487,7 +2489,7 @@ fn native_buffer_alloc_elem_ctype(
         Some(TypeExpr::Builtin(BuiltinTy::Bool)) => Ok(Ustr::from("bool")),
         Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) if map_is_value_struct(ws, name) => {
             if !matches!(
-                value_storage_for_nominal(ws, bone_semantic::hir::FnBackend::Lua, name),
+                rep_arena.nominal_value_storage(ws, bone_semantic::hir::FnBackend::Lua, name),
                 Some(ValueStorage::CData)
             ) {
                 Err(format!(
@@ -2617,6 +2619,7 @@ fn native_buffer_alloc_elem_ctype_spec(
     ret: TyId,
     subst: &SpecSubst,
 ) -> Result<Ustr, String> {
+    let rep_arena = RepArena::default();
     let Some(ret) = resolve_tyid(ws, inf, ret) else {
         return native_buffer_alloc_elem_ctype(ws, inf, ret);
     };
@@ -2641,7 +2644,7 @@ fn native_buffer_alloc_elem_ctype_spec(
             if !map_is_value_struct(ws, n) {
                 Err(format!("`native_buffer_alloc<{n}>` is invalid: `{n}` is not a `value` struct."))
             } else if !matches!(
-                value_storage_for_nominal(ws, bone_semantic::hir::FnBackend::Lua, n),
+                rep_arena.nominal_value_storage(ws, bone_semantic::hir::FnBackend::Lua, n),
                 Some(ValueStorage::CData)
             ) {
                 Err(format!(

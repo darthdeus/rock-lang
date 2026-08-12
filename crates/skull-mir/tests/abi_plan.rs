@@ -796,3 +796,19 @@ fn main() {
     assert_eq!(plans.get(&Ustr::from("NV2")), Some(&true));
     assert!(plans.len() >= 2, "the column plan population must be nonzero");
 }
+
+#[test]
+fn nominal_value_storage_is_owned_by_the_rep_plan() {
+    let ws = ws_of("value Boxed { text: string, tag: int }\n");
+    let arena = RepArena::default();
+    let id = arena
+        .plan_nominal_value(&ws, bone_semantic::hir::FnBackend::Lua, Ustr::from("Boxed"))
+        .expect("a GC-carrying value must have an explicit physical plan");
+    let plan = arena.get(id);
+    assert_eq!(plan.value_storage(), Some(ValueStorage::GcTable));
+    assert!(matches!(plan.layout(), RepLayout::Leaves(_)));
+    assert_eq!(
+        arena.nominal_value_storage(&ws, bone_semantic::hir::FnBackend::Lua, Ustr::from("Boxed")),
+        Some(ValueStorage::GcTable)
+    );
+}

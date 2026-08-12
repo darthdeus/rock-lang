@@ -505,7 +505,11 @@ fn native_buffer_alloc_elem_ctype_mono(
         return Err(format!("`native_buffer_alloc<{name}>` is invalid: `{name}` is not a `value` struct."));
     }
     if !matches!(
-        value_storage_for_nominal(ws, bone_semantic::hir::FnBackend::Lua, name),
+        crate::lower::RepArena::default().nominal_value_storage(
+            ws,
+            bone_semantic::hir::FnBackend::Lua,
+            name,
+        ),
         Some(ValueStorage::CData)
     ) {
         return Err(format!(

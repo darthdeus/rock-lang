@@ -421,7 +421,7 @@ fn const_hoist_uses_are_read_only(ws: &Workspace, func: &MirFunc, cand: Idx<Inst
             | Inst::MaterializeValueStruct { name, fields } => {
                 !fields.iter().any(|(_, v)| *v == cand)
                     || !matches!(
-                        skull_mir::lower::value_storage_for_nominal(
+                        skull_mir::lower::RepArena::default().nominal_value_storage(
                             ws,
                             bone_semantic::hir::FnBackend::Lua,
                             *name,
@@ -593,7 +593,7 @@ fn collect_const_hoists(
         let suffix = if *leaf_form {
             "_lct"
         } else if matches!(
-            skull_mir::lower::value_storage_for_nominal(
+            skull_mir::lower::RepArena::default().nominal_value_storage(
                 ws,
                 bone_semantic::hir::FnBackend::Lua,
                 *name,
@@ -1824,7 +1824,7 @@ impl Emitter<'_> {
                 // the leaf sequence is textually identical to the declared field
                 // list and no operand-shape test can tell them apart.
                 let suffix = if matches!(
-                    skull_mir::lower::value_storage_for_nominal(
+                    skull_mir::lower::RepArena::default().nominal_value_storage(
                         self.ws,
                         bone_semantic::hir::FnBackend::Lua,
                         *name,
@@ -1835,7 +1835,7 @@ impl Emitter<'_> {
                 } else if is_leaf_form(fields) {
                     "_lct"
                 } else if matches!(
-                    skull_mir::lower::value_storage_for_nominal(
+                    skull_mir::lower::RepArena::default().nominal_value_storage(
                         self.ws,
                         bone_semantic::hir::FnBackend::Lua,
                         *name,

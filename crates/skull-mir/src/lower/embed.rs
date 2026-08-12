@@ -79,7 +79,7 @@ impl Builder<'_> {
         if !spliced
             && self.is_value_struct(sname)
             && !matches!(
-                value_storage_for_nominal(self.ws, self.scx.target, sname),
+                self.scx.rep_arena().nominal_value_storage(self.ws, self.scx.target, sname),
                 Some(ValueStorage::LeafTable)
             )
         {

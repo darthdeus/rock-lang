@@ -27,7 +27,8 @@ use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::Span;
 use ustr::Ustr;
 
-use super::{slot_param_names, value_storage_for_nominal, RetSlot, ScalarCtx, SpecSubst, TupleRetShape, ValueShape, ValueStorage};
+use super::{slot_param_names, RetSlot, ScalarCtx, SpecSubst, TupleRetShape, ValueShape, ValueStorage};
+use super::shape::declared_value_storage;
 use crate::concrete::{ConcreteBodyPlan, ConcreteSignature};
 use crate::mir::FuncRef;
 
@@ -354,7 +355,7 @@ fn mono_value_storage(
     else {
         return None;
     };
-    value_storage_for_nominal(ws, target, *name)
+    declared_value_storage(ws, target, *name)
 }
 
 fn declared_nobox(ws: &Workspace, ty: &crate::monoty::MonoTy) -> bool {
@@ -451,6 +452,38 @@ impl RepArena {
             .get(id.0 as usize)
             .cloned()
             .expect("RepId must belong to its build arena")
+    }
+
+    /// Plan the physical value representation of a nominal without letting a
+    /// backend recover storage from the declaration after lowering.
+    pub fn plan_nominal_value(
+        &self,
+        ws: &Workspace,
+        target: FnBackend,
+        name: Ustr,
+    ) -> Result<RepId, RepError> {
+        let ty = crate::monoty::MonoTy::App {
+            ctor: crate::monoty::MonoCtor::Nominal(name),
+            params: Vec::new(),
+        };
+        self.plan(
+            ws,
+            target,
+            &ty,
+            RepUse::Value,
+            &RepUseFacts::default(),
+            RepGuarantees { nobox: false, allow_opaque: true },
+        )
+    }
+
+    pub fn nominal_value_storage(
+        &self,
+        ws: &Workspace,
+        target: FnBackend,
+        name: Ustr,
+    ) -> Option<ValueStorage> {
+        let id = self.plan_nominal_value(ws, target, name).ok()?;
+        self.get(id).value_storage()
     }
 
     pub(crate) fn ret_slot(&self, id: RepId) -> RetSlot {

@@ -2448,7 +2448,7 @@ impl Emitter<'_> {
                     // not a struct): its numeric tag / named variant cannot be rebuilt
                     // from the `{__tag, _n}` object -- reject honestly.
                     if matches!(
-                        skull_mir::lower::value_storage_for_nominal(
+                        skull_mir::lower::RepArena::default().nominal_value_storage(
                             self.ws,
                             bone_semantic::hir::FnBackend::Js,
                             *name,
@@ -5333,7 +5333,7 @@ fn collect_gc_value_structs(ws: &Workspace, mf: &MirFunc, out: &mut BTreeSet<ust
     for inst in mf.insts.values() {
         if let Inst::MakeValueStruct { name, .. } = inst {
             if !matches!(
-                skull_mir::lower::value_storage_for_nominal(
+                skull_mir::lower::RepArena::default().nominal_value_storage(
                     ws,
                     bone_semantic::hir::FnBackend::Js,
                     *name,
@@ -5360,7 +5360,7 @@ fn close_gc_value_struct_fields(ws: &Workspace, names: &mut BTreeSet<ustr::Ustr>
         for f in &s.fields {
             if let Some(field_struct) = value_struct_field_name(ws, f.ty) {
                 if !matches!(
-                    skull_mir::lower::value_storage_for_nominal(
+                    skull_mir::lower::RepArena::default().nominal_value_storage(
                         ws,
                         bone_semantic::hir::FnBackend::Js,
                         field_struct,
@@ -5521,7 +5521,7 @@ fn build_inspect_ty_defs(
         let header = js_string_lit(name.as_str())?;
         if s.is_value
             && matches!(
-                skull_mir::lower::value_storage_for_nominal(
+                skull_mir::lower::RepArena::default().nominal_value_storage(
                     ws,
                     bone_semantic::hir::FnBackend::Js,
                     *name,

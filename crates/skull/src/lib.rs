@@ -644,6 +644,7 @@ fn value_struct_defs(
 ) -> Result<(String, rustc_hash::FxHashSet<ustr::Ustr>, rustc_hash::FxHashSet<ustr::Ustr>), CompilerError>
 {
     let vstructs = canonical_value_structs(ws);
+    let rep_arena = skull_mir::lower::RepArena::default();
     let mut emitted: rustc_hash::FxHashSet<ustr::Ustr> = Default::default();
     let mut gc: rustc_hash::FxHashSet<ustr::Ustr> = Default::default();
     if vstructs.is_empty() {
@@ -655,11 +656,7 @@ fn value_struct_defs(
     let mut ffi_structs = Vec::new();
     for s in vstructs {
         if !matches!(
-            skull_mir::lower::value_storage_for_nominal(
-                ws,
-                bone_semantic::hir::FnBackend::Lua,
-                s.name,
-            ),
+            rep_arena.nominal_value_storage(ws, bone_semantic::hir::FnBackend::Lua, s.name),
             Some(skull_mir::lower::ValueStorage::CData)
         ) {
             gc.insert(s.name);
@@ -804,6 +801,7 @@ fn value_leaf_layout_checks(
 /// table), so no `__ROCK_C_STRUCT` (ffi.istype) entry is needed.
 fn value_struct_gc_defs(ws: &Workspace, gc: &rustc_hash::FxHashSet<ustr::Ustr>) -> String {
     let mut out = String::new();
+    let rep_arena = skull_mir::lower::RepArena::default();
     for s in canonical_value_structs(ws) {
         if !gc.contains(&s.name) {
             continue;
@@ -814,11 +812,7 @@ fn value_struct_gc_defs(ws: &Workspace, gc: &rustc_hash::FxHashSet<ustr::Ustr>) 
         // A leaf-table struct has no declared-field keys to compare or print, so
         // both metamethods and its ctor run off the leaf paths instead.
         if matches!(
-            skull_mir::lower::value_storage_for_nominal(
-                ws,
-                bone_semantic::hir::FnBackend::Lua,
-                n,
-            ),
+            rep_arena.nominal_value_storage(ws, bone_semantic::hir::FnBackend::Lua, n),
             Some(skull_mir::lower::ValueStorage::LeafTable)
         ) {
             let paths = skull_mir::lower::value_leaf_paths_of(ws, n).unwrap_or_default();

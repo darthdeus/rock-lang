@@ -575,6 +575,7 @@ fn leaf_operand(
 /// `inline_hoisted_bodies`, the verifier) remaps operands or matches the struct
 /// NAME only -- none interpret field names.
 pub fn flatten_nobox_nested_ctors(ws: &Workspace, func: &mut MirFunc) -> bool {
+    let rep_arena = skull_mir::lower::RepArena::default();
     let all: Vec<Idx<Inst>> =
         func.blocks.iter().flat_map(|(_, b)| b.insts.iter().copied()).collect();
     // A ctor used as a field operand of another ctor is not the outermost one.
@@ -604,11 +605,7 @@ pub fn flatten_nobox_nested_ctors(ws: &Workspace, func: &mut MirFunc) -> bool {
         // A GC-tier outer stores fields as table entries, so there is no cdata
         // to write leaves into; leave it for the verifier to reject.
         if !matches!(
-            skull_mir::lower::value_storage_for_nominal(
-                ws,
-                bone_semantic::hir::FnBackend::Lua,
-                name,
-            ),
+            rep_arena.nominal_value_storage(ws, bone_semantic::hir::FnBackend::Lua, name),
             Some(skull_mir::lower::ValueStorage::CData)
         ) {
             continue;

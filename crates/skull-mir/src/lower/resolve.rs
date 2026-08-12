@@ -340,7 +340,7 @@ impl Builder<'_> {
                         .value_struct_name_of(base)
                         .filter(|n| {
                             matches!(
-                                value_storage_for_nominal(self.ws, self.scx.target, *n),
+                                self.scx.rep_arena().nominal_value_storage(self.ws, self.scx.target, *n),
                                 Some(ValueStorage::LeafTable)
                             )
                         })
