@@ -153,14 +153,7 @@ impl ContainerPlan {
         } else {
             element.clone()
         };
-        let element_rep = arena.plan(
-            ws,
-            target,
-            &physical_element,
-            RepUse::Boundary,
-            &RepUseFacts::default(),
-            RepGuarantees::default(),
-        )?;
+        let element_rep = arena.plan_container_element(ws, target, &physical_element)?;
         let shape = arena.value_shape(element_rep);
         let column_eligible = arena.column_eligible(element_rep);
         let columns = match (family, shape.as_ref()) {
@@ -229,6 +222,7 @@ impl ContainerPlan {
             shape.name,
             shape.nullable,
             self.element_rep(),
+            arena.get(self.element_rep()).nobox(),
         ))
     }
 

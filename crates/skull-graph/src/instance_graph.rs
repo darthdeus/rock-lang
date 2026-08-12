@@ -3565,13 +3565,8 @@ enum CondVerdict {
 /// `nobox` element applies the key to the LEAVES, everything else to the
 /// materialized element.
 ///
-/// Lowering asks `is_nobox_struct`, which is `is_nobox_nominal` plus the
-/// `values_first_class` gate. That flag is set only by the GLSL emitter, and
-/// GLSL is not an `FnBackend` this walk runs for, so the two agree on every
-/// target an `InstanceGraph` is built for -- and on a target where they would
-/// not, an `is_nobox_nominal` answer is the wrong one to bake in here.
-fn sort_entry(ws: &Workspace, elem: &skull_mir::mir::ColumnElem) -> &'static str {
-    if skull_mir::lower::is_nobox_nominal(ws, elem.name) {
+fn sort_entry(elem: &skull_mir::mir::ColumnElem) -> &'static str {
+    if elem.is_nobox() {
         "__rock_col_sort_leaves"
     } else {
         "__rock_col_sort"
@@ -3724,7 +3719,7 @@ fn compiler_generated_sites(
                 // The one trigger with alternatives: the element decides which.
                 if *trigger == "__vec_data_sort" {
                     let Some(elem) = elem else { continue };
-                    out.push(GeneratedSite { expr: e, name: sort_entry(ws, &elem) });
+                    out.push(GeneratedSite { expr: e, name: sort_entry(&elem) });
                     continue;
                 }
                 out.extend(names.iter().map(|n| GeneratedSite { expr: e, name: n }));

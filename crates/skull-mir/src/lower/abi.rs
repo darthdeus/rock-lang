@@ -161,6 +161,7 @@ pub struct RepPlan {
     layout: RepLayout,
     storage: Option<ValueStorage>,
     column_eligible: bool,
+    nobox: bool,
 }
 
 impl RepPlan {
@@ -186,6 +187,10 @@ impl RepPlan {
 
     pub fn column_eligible(&self) -> bool {
         self.column_eligible
+    }
+
+    pub fn nobox(&self) -> bool {
+        self.nobox
     }
 
     pub fn lanes(&self, arena: &RepArena) -> usize {
@@ -326,7 +331,7 @@ impl FunctionRepPlan {
 #[derive(Debug, Default)]
 struct RepArenaInner {
     plans: Vec<RepPlan>,
-    by_key: HashMap<(FnBackend, RepUse, RepLayout, Option<ValueStorage>, bool), RepId>,
+    by_key: HashMap<(FnBackend, RepUse, RepLayout, Option<ValueStorage>, bool, bool), RepId>,
 }
 
 /// The one build-scoped physical representation arena.  `ScalarCtx` owns the
@@ -350,6 +355,17 @@ fn mono_value_storage(
         return None;
     };
     value_storage_for_nominal(ws, target, *name)
+}
+
+fn declared_nobox(ws: &Workspace, ty: &crate::monoty::MonoTy) -> bool {
+    let (payload, _) = ty.peel_nullable();
+    let crate::monoty::MonoTy::App {
+        ctor: crate::monoty::MonoCtor::Nominal(name), ..
+    } = payload
+    else {
+        return false;
+    };
+    crate::lower::is_nobox_nominal(ws, *name)
 }
 
 fn column_eligible_for_shape(
@@ -376,7 +392,7 @@ impl RepArena {
         layout: RepLayout,
         storage: Option<ValueStorage>,
     ) -> RepId {
-        self.intern_with_facts(target, use_context, layout, storage, false)
+        self.intern_with_facts(target, use_context, layout, storage, false, false)
     }
 
     fn intern_with_facts(
@@ -386,9 +402,10 @@ impl RepArena {
         layout: RepLayout,
         storage: Option<ValueStorage>,
         column_eligible: bool,
+        nobox: bool,
     ) -> RepId {
         let mut inner = self.inner.lock().expect("RepArena lock poisoned");
-        let key = (target, use_context, layout.clone(), storage, column_eligible);
+        let key = (target, use_context, layout.clone(), storage, column_eligible, nobox);
         if let Some(id) = inner.by_key.get(&key) {
             return *id;
         }
@@ -400,6 +417,7 @@ impl RepArena {
             layout,
             storage,
             column_eligible,
+            nobox,
         });
         inner.by_key.insert(key, id);
         id
@@ -407,6 +425,22 @@ impl RepArena {
 
     pub(crate) fn column_eligible(&self, id: RepId) -> bool {
         self.get(id).column_eligible()
+    }
+
+    pub(crate) fn plan_container_element(
+        &self,
+        ws: &Workspace,
+        target: FnBackend,
+        ty: &crate::monoty::MonoTy,
+    ) -> Result<RepId, RepError> {
+        self.plan(
+            ws,
+            target,
+            ty,
+            RepUse::Boundary,
+            &RepUseFacts::default(),
+            RepGuarantees { nobox: declared_nobox(ws, ty), allow_opaque: false },
+        )
     }
 
     pub fn get(&self, id: RepId) -> RepPlan {
@@ -523,6 +557,7 @@ impl RepArena {
                             RepLayout::Leaves(shape),
                             storage,
                             column_eligible,
+                            declared_nobox(ws, ty),
                         ));
                     }
                     if guarantees.nobox && !guarantees.allow_opaque {
@@ -579,6 +614,7 @@ impl RepArena {
                         RepLayout::Leaves(shape),
                         storage,
                         column_eligible,
+                        declared_nobox(ws, ty),
                     ));
                 }
                 if guarantees.nobox && !guarantees.allow_opaque {

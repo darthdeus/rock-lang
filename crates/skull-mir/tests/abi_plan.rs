@@ -511,6 +511,45 @@ fn element_rep_plan_owns_ffi_column_admission() {
 }
 
 #[test]
+fn column_element_plan_carries_the_nobox_guarantee() {
+    let ws = ws_of(
+        "nobox value N { x: float, y: float }\n\
+         value B { x: float, y: float }\n",
+    );
+    let arena = RepArena::default();
+    let marked = MonoTy::App {
+        ctor: MonoCtor::Array,
+        params: vec![nominal("N")],
+    };
+    let unmarked = MonoTy::App {
+        ctor: MonoCtor::Array,
+        params: vec![nominal("B")],
+    };
+    let marked = ContainerPlan::for_type(
+        &ws,
+        bone_semantic::hir::FnBackend::Lua,
+        &arena,
+        ContainerFamily::Vec,
+        &marked,
+    )
+    .expect("marked value vector must have a plan")
+    .column_elem(&arena)
+    .expect("marked value vector must use columns");
+    let unmarked = ContainerPlan::for_type(
+        &ws,
+        bone_semantic::hir::FnBackend::Lua,
+        &arena,
+        ContainerFamily::Vec,
+        &unmarked,
+    )
+    .expect("unmarked value vector must have a plan")
+    .column_elem(&arena)
+    .expect("unmarked value vector must use columns");
+    assert!(marked.is_nobox(), "the marked element population must be nonzero");
+    assert!(!unmarked.is_nobox(), "the unmarked control must stay boxed at element use sites");
+}
+
+#[test]
 fn missing_bound_result_plan_is_an_explicit_error() {
     let ws = ws_of("fn main() { print(\"ok\") }\n");
     let scx = ScalarCtx::new(&ws);

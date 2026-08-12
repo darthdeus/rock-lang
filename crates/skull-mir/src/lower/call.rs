@@ -273,7 +273,7 @@ impl Builder<'_> {
             if matches!(name.as_str(), "inspect" | "inspect_formatted") {
                 if let Some(&arg) = arg_idxs.first() {
                     if let Some(elem) = self.vec_column_elem_of(arg)? {
-                        if self.is_nobox_struct(elem.name) {
+                        if elem.is_nobox() {
                             return Err(CompilerError::new_with_label(
                                 self.body.expr_spans[e],
                                 format!(

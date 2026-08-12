@@ -144,6 +144,7 @@ pub struct ColumnElem {
     pub name: Ustr,
     pub nullable: bool,
     representation: crate::lower::RepId,
+    nobox: bool,
 }
 
 impl ColumnElem {
@@ -151,12 +152,17 @@ impl ColumnElem {
         name: Ustr,
         nullable: bool,
         representation: crate::lower::RepId,
+        nobox: bool,
     ) -> Self {
-        ColumnElem { name, nullable, representation }
+        ColumnElem { name, nullable, representation, nobox }
     }
 
     pub fn representation(&self) -> crate::lower::RepId {
         self.representation
+    }
+
+    pub fn is_nobox(&self) -> bool {
+        self.nobox
     }
 }
 

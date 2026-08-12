@@ -574,7 +574,7 @@ impl Builder<'_> {
                 let Some(elem) = self.vec_column_elem_of(*recv)? else { return Ok(None) };
                 let vec = self.lower_expr(*recv)?;
                 let k = self.lower_expr(*key_fn)?;
-                if !self.is_nobox_struct(elem.name) {
+                if !elem.is_nobox() {
                     return Ok(Some(ValueRepr::Scalar(
                         self.call_spine("__rock_col_sort", vec![vec, k])?,
                     )));
@@ -594,7 +594,7 @@ impl Builder<'_> {
             }
             ("__rock_vec_to_lua_array", [recv]) => {
                 let Some(elem) = self.vec_column_elem_of(*recv)? else { return Ok(None) };
-                if self.is_nobox_struct(elem.name) {
+                if elem.is_nobox() {
                     return Err(CompilerError::new_with_label(
                         self.body.expr_spans[*recv],
                         format!(
@@ -1069,7 +1069,7 @@ impl Builder<'_> {
         elem: ColumnElem,
     ) -> Result<ValueRepr, CompilerError> {
         let shape = self.column_shape(elem)?;
-        let unboxed = self.is_nobox_struct(elem.name);
+        let unboxed = elem.is_nobox();
         let slot = self.call_spine("__map_col_slot_of", vec![m, key])?;
         let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
         let present = self.emit_cur(Inst::IntGeq(slot, zero));
