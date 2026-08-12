@@ -218,3 +218,74 @@ fn main() { print("{generic_tuple_take((V2 { x: 1.0, y: 2.0 }, 3.0)).0.x}") }
     let written_abi = BackendFnAbiPlan::for_concrete_plan(&ws, &scx, &written_plan);
     assert_eq!(written_abi.param_leaf_widths(), Some(vec![3]));
 }
+
+/// The first RepPlan cut has to join every physical consumer of a concrete
+/// function signature.  These are deliberately different shapes, not a
+/// single scalar control: a plain scalar, a nested value, a tuple, a nullable
+/// value, and a GC-carrying value exercise boxed and multi-lane answers.
+#[test]
+fn one_owned_representation_reaches_body_call_return_and_publisher() {
+    let ws = ws_of(
+        r#"
+nobox value Leaf { x: float, y: float }
+nobox value Nested { leaf: Leaf, z: float }
+struct Boxed { text: string, tag: int }
+
+@scalar_abi fn scalar(v: int) -> int { return v }
+@scalar_abi fn nested(v: Nested) -> Nested { return v }
+@scalar_abi fn tuple(v: (Leaf, float)) -> (Leaf, float) { return v }
+@scalar_abi fn nullable(v: Leaf?) -> Leaf? { return v }
+fn boxed(v: Boxed) -> Boxed { return v }
+
+fn main() {
+    let leaf = Leaf { x: 1.0, y: 2.0 }
+    let nested_value = Nested { leaf: leaf, z: 3.0 }
+    let _ = scalar(1)
+    let _ = nested(nested_value)
+    let _ = tuple((leaf, 4.0))
+    let _ = nullable(leaf)
+    let _ = boxed(Boxed { text: "boxed", tag: 5 })
+}
+"#,
+    );
+    let scx = ScalarCtx::new(&ws);
+    let cases = ["scalar", "nested", "tuple", "nullable", "boxed"];
+    assert_eq!(cases.len(), 5, "the RED population must remain nonzero");
+
+    for name in cases {
+        let subject = Instance::base(func_ref(&ws, name));
+        let body = BackendFnAbiPlan::for_instance(&ws, &scx, &subject);
+        let call = BackendFnAbiPlan::for_instance(&ws, &scx, &subject);
+
+        assert_eq!(
+            body.representation(),
+            call.representation(),
+            "call and callee entry must consume one owned representation for {name}"
+        );
+        assert_eq!(
+            body.representation().result(),
+            body.representation().publisher_result(),
+            "return lowering and the backend publisher must read the same result plan for {name}"
+        );
+        assert_eq!(
+            body.representation().return_lanes(),
+            body.result_lanes(),
+            "publisher lane sizing must be derived from the owned result plan for {name}"
+        );
+    }
+
+    let scalar = BackendFnAbiPlan::for_instance(&ws, &scx, &Instance::base(func_ref(&ws, "nested")));
+    let boxed = BackendFnAbiPlan::for_instance(&ws, &scx, &Instance::base(func_ref(&ws, "boxed")));
+    assert!(scalar.param_leaf_widths().is_some(), "nested aggregate must use a scalar representation");
+    assert!(
+        boxed.param_leaf_widths().is_none(),
+        "opaque aggregate must retain a boxed representation, got {:?}",
+        boxed.param_leaf_widths()
+    );
+    assert!(
+        BackendFnAbiPlan::for_instance(&ws, &scx, &Instance::base(func_ref(&ws, "tuple")))
+            .result_lanes()
+            > 1,
+        "tuple return must have multiple physical lanes"
+    );
+}

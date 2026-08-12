@@ -19,8 +19,12 @@
 //! `lua_param_names` spells a foreign body's params. One physical plan shared
 //! across targets would be answering with another target's ABI.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
 use bone_semantic::hir::FnBackend;
 use bone_semantic::inference::Workspace;
+use ustr::Ustr;
 
 use super::{
     nobox_declared_shape_spec, nobox_param_slot_spec, sig_param_slot_spec, sig_value_shape_spec,
@@ -30,6 +34,194 @@ use super::{
 };
 use crate::concrete::ConcreteBodyPlan;
 use crate::mir::FuncRef;
+
+/// An interned physical representation.  Its numeric identity is meaningful
+/// only through the build-scoped arena carried by [`ScalarCtx`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct RepId(u32);
+
+impl RepId {
+    pub fn raw(self) -> u32 {
+        self.0
+    }
+}
+
+/// The use site is part of a representation key: a return tuple's element is
+/// not allowed to silently become a function parameter merely because its
+/// payload has the same leaves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum RepUse {
+    Parameter,
+    Return,
+    TupleElement,
+    Boundary,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum RepLayout {
+    Opaque,
+    Leaves(usize),
+    Tuple { slots: Vec<RepId>, nullable: bool },
+    Foreign { reason: Ustr },
+}
+
+/// One concrete physical answer in the target/use context supplied by the
+/// planner.  Backends may inspect it, but they do not derive another answer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RepPlan {
+    id: RepId,
+    target: FnBackend,
+    use_context: RepUse,
+    layout: RepLayout,
+}
+
+impl RepPlan {
+    pub fn id(&self) -> RepId {
+        self.id
+    }
+
+    pub fn target(&self) -> FnBackend {
+        self.target
+    }
+
+    pub fn use_context(&self) -> RepUse {
+        self.use_context
+    }
+
+    pub fn layout(&self) -> &RepLayout {
+        &self.layout
+    }
+
+    pub fn lanes(&self, arena: &RepArena) -> usize {
+        match &self.layout {
+            RepLayout::Opaque | RepLayout::Foreign { .. } => 1,
+            RepLayout::Leaves(width) => *width,
+            RepLayout::Tuple { slots, nullable } => {
+                slots.iter().map(|slot| arena.get(*slot).lanes(arena)).sum::<usize>()
+                    + usize::from(*nullable)
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FunctionRepPlan {
+    params: Vec<RepId>,
+    result: Option<RepId>,
+    return_lanes: usize,
+}
+
+impl FunctionRepPlan {
+    pub fn params(&self) -> &[RepId] {
+        &self.params
+    }
+
+    pub fn result(&self) -> Option<RepId> {
+        self.result
+    }
+
+    pub fn publisher_result(&self) -> Option<RepId> {
+        self.result
+    }
+
+    pub fn return_lanes(&self) -> usize {
+        self.return_lanes
+    }
+}
+
+#[derive(Debug, Default)]
+struct RepArenaInner {
+    plans: Vec<RepPlan>,
+    by_key: HashMap<(FnBackend, RepUse, RepLayout), RepId>,
+}
+
+/// The one build-scoped physical representation arena.  `ScalarCtx` owns the
+/// handle and every ABI plan references the same arena, so equal answers are
+/// equal identities rather than merely equal cloned shapes.
+#[derive(Debug, Default)]
+pub struct RepArena {
+    inner: Mutex<RepArenaInner>,
+}
+
+impl RepArena {
+    fn intern(&self, target: FnBackend, use_context: RepUse, layout: RepLayout) -> RepId {
+        let mut inner = self.inner.lock().expect("RepArena lock poisoned");
+        let key = (target, use_context, layout.clone());
+        if let Some(id) = inner.by_key.get(&key) {
+            return *id;
+        }
+        let id = RepId(inner.plans.len() as u32);
+        inner.plans.push(RepPlan { id, target, use_context, layout });
+        inner.by_key.insert(key, id);
+        id
+    }
+
+    pub fn get(&self, id: RepId) -> RepPlan {
+        self.inner
+            .lock()
+            .expect("RepArena lock poisoned")
+            .plans
+            .get(id.0 as usize)
+            .cloned()
+            .expect("RepId must belong to its build arena")
+    }
+
+    fn slot(&self, target: FnBackend, slot: &RetSlot) -> RepId {
+        match slot {
+            RetSlot::Opaque => self.intern(target, RepUse::TupleElement, RepLayout::Opaque),
+            RetSlot::Leaves(shape) => self.intern(
+                target,
+                RepUse::TupleElement,
+                RepLayout::Leaves(shape.leaf_count()),
+            ),
+            RetSlot::Nested(shape) => self.tuple(target, RepUse::TupleElement, shape),
+        }
+    }
+
+    fn tuple(&self, target: FnBackend, use_context: RepUse, shape: &TupleRetShape) -> RepId {
+        let slots = shape.slots.iter().map(|slot| self.slot(target, slot)).collect();
+        self.intern(target, use_context, RepLayout::Tuple { slots, nullable: shape.nullable })
+    }
+
+    fn function(
+        &self,
+        target: FnBackend,
+        scalar: Option<&FnScalarAbi>,
+        ret_tuple: Option<&TupleRetShape>,
+        param_count: usize,
+        has_return: bool,
+    ) -> FunctionRepPlan {
+        let params = match scalar {
+            Some(abi) => abi
+                .param_shapes
+                .iter()
+                .map(|slot| match slot {
+                    RetSlot::Opaque => self.intern(target, RepUse::Parameter, RepLayout::Opaque),
+                    RetSlot::Leaves(shape) => self.intern(
+                        target,
+                        RepUse::Parameter,
+                        RepLayout::Leaves(shape.leaf_count()),
+                    ),
+                    RetSlot::Nested(shape) => self.tuple(target, RepUse::Parameter, shape),
+                })
+                .collect(),
+            None => (0..param_count)
+                .map(|_| self.intern(target, RepUse::Parameter, RepLayout::Opaque))
+                .collect(),
+        };
+        let result = if !has_return {
+            None
+        } else if let Some(shape) = ret_tuple {
+            Some(self.tuple(target, RepUse::Return, shape))
+        } else if let Some(shape) = scalar.and_then(|abi| abi.ret_shape.as_ref()) {
+            Some(self.intern(target, RepUse::Return, RepLayout::Leaves(shape.leaf_count())))
+        } else {
+            Some(self.intern(target, RepUse::Return, RepLayout::Opaque))
+        };
+        let return_lanes = result.map_or(0, |id| self.get(id).lanes(self));
+        FunctionRepPlan { params, result, return_lanes }
+    }
+}
 
 /// Whether a callee is a Rock body subject that the concrete registry must
 /// contain. Foreign, compile-time expansion, and native-required intrinsic
@@ -132,7 +324,7 @@ pub(super) fn fn_value_nobox_abi(
 /// The derived spellings are METHODS, not fields, so the ordinary lowering path
 /// -- which needs only the wire shapes -- never pays for the leaf-name strings
 /// that exist for foreign bodies.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct BackendFnAbiPlan {
     pub subject: crate::instance::Instance,
     /// The codegen backend this plan was built for. Part of the key: the same
@@ -148,7 +340,26 @@ pub struct BackendFnAbiPlan {
     /// fact no shape can carry, since both shapes answer `None` for a plain
     /// scalar return and for no return.
     has_return: bool,
+    /// The physical function signature. Every call, entry binder, return
+    /// lowerer, and publisher keeps these identities rather than rebuilding a
+    /// shape from the declaration.
+    representation: FunctionRepPlan,
+    arena: Arc<RepArena>,
 }
+
+impl PartialEq for BackendFnAbiPlan {
+    fn eq(&self, other: &Self) -> bool {
+        self.subject == other.subject
+            && self.target == other.target
+            && self.scalar == other.scalar
+            && self.ret_tuple == other.ret_tuple
+            && self.has_return == other.has_return
+            && self.representation == other.representation
+            && Arc::ptr_eq(&self.arena, &other.arena)
+    }
+}
+
+impl Eq for BackendFnAbiPlan {}
 
 fn fn_scalar_abi_concrete(
     ws: &Workspace,
@@ -243,12 +454,22 @@ impl BackendFnAbiPlan {
             .result
             .map(|id| scx.interner().get(id))
             .and_then(|ty| mono_tuple_ret_shape(ws, &ty));
+        let arena = scx.rep_arena();
+        let representation = arena.function(
+            scx.target,
+            scalar.as_ref(),
+            ret_tuple.as_ref(),
+            plan.signature.params.len(),
+            plan.signature.result.is_some(),
+        );
         Self {
             subject: inst.clone(),
             target: scx.target,
             scalar,
             ret_tuple,
             has_return: plan.signature.result.is_some(),
+            representation,
+            arena,
         }
     }
 
@@ -295,7 +516,23 @@ impl BackendFnAbiPlan {
         let f = &ws.module(decl.module).functions[decl.func];
         let scalar = fn_scalar_abi_spec(ws, scx, decl, subst);
         let ret_tuple = f.return_ty.and_then(|ty| tuple_ret_shape(ws, subst, ty));
-        Self { subject, target: scx.target, scalar, ret_tuple, has_return: f.return_ty.is_some() }
+        let arena = scx.rep_arena();
+        let representation = arena.function(
+            scx.target,
+            scalar.as_ref(),
+            ret_tuple.as_ref(),
+            f.param_decls.len(),
+            f.return_ty.is_some(),
+        );
+        Self {
+            subject,
+            target: scx.target,
+            scalar,
+            ret_tuple,
+            has_return: f.return_ty.is_some(),
+            representation,
+            arena,
+        }
     }
 
     pub fn decl(&self) -> FuncRef {
@@ -305,6 +542,14 @@ impl BackendFnAbiPlan {
     /// The scalarized wire, or `None` for the boxed ABI.
     pub(super) fn scalar(&self) -> Option<&FnScalarAbi> {
         self.scalar.as_ref()
+    }
+
+    pub fn representation(&self) -> &FunctionRepPlan {
+        &self.representation
+    }
+
+    pub fn rep_plan(&self, id: RepId) -> RepPlan {
+        self.arena.get(id)
     }
 
     /// Per declared param, what it occupies on the wire. Empty when this body
@@ -342,16 +587,7 @@ impl BackendFnAbiPlan {
     /// every artifact, because it is a property of the wire rather than of the
     /// backend that happens to need it spelled out.
     pub fn result_lanes(&self) -> usize {
-        if !self.has_return {
-            return 0;
-        }
-        match &self.ret_tuple {
-            Some(shape) => shape.slot_count(),
-            None => match self.ret_shape() {
-                Some(vs) => vs.leaf_count(),
-                None => 1,
-            },
-        }
+        self.representation.return_lanes()
     }
 
     /// Depth-first leaf names for a scalar-ABI FOREIGN body (`@scalar_abi`):

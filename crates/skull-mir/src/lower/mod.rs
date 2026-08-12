@@ -71,7 +71,10 @@ pub use shape::*;
 /// is private to it, so a definition and the call that targets it cannot reach
 /// it from two places.
 mod abi;
-pub use abi::{requires_concrete_body_plan, BackendFnAbiPlan};
+pub use abi::{
+    requires_concrete_body_plan, BackendFnAbiPlan, FunctionRepPlan, RepArena, RepId, RepLayout,
+    RepPlan, RepUse,
+};
 
 mod coroutine;
 pub use coroutine::CoroutinePlan;
@@ -239,6 +242,10 @@ pub struct ScalarCtx {
     /// `MonoTyId`s dangling, and copying it would be the second identity this
     /// stage exists to remove. [`ScalarCtx::sharing`] is how the two are joined.
     interner: std::sync::Arc<crate::monoty::MonoInterner>,
+    /// The build's one physical representation arena. It follows this context
+    /// so target-specific ABI identities survive from body entry through calls
+    /// and publishers.
+    rep_arena: std::sync::Arc<abi::RepArena>,
 }
 
 /// The fn-names a single body references by value (`Expr::Global(name)` whose
@@ -283,6 +290,7 @@ impl ScalarCtx {
             values_first_class: false,
             target: bone_semantic::hir::FnBackend::Lua,
             interner: std::sync::Arc::new(crate::monoty::MonoInterner::new()),
+            rep_arena: std::sync::Arc::new(abi::RepArena::default()),
         }
     }
 
@@ -310,6 +318,10 @@ impl ScalarCtx {
     /// later -- an `InstanceGraph` built on demand rather than up front.
     pub fn interner_handle(&self) -> std::sync::Arc<crate::monoty::MonoInterner> {
         std::sync::Arc::clone(&self.interner)
+    }
+
+    pub(crate) fn rep_arena(&self) -> std::sync::Arc<abi::RepArena> {
+        std::sync::Arc::clone(&self.rep_arena)
     }
 
     /// Set the codegen backend this lowering feeds (see [`target`]).
