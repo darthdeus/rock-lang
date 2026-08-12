@@ -491,13 +491,23 @@ fn emit_js_program_single(path: &str) -> skull_codegen_js::emit::JsProgram {
         }
     };
     let user_file = user.file;
-    let ws = match crate::bone_backend::check_with_stdlib([user]) {
+    let mut ws = match crate::bone_backend::check_with_stdlib([user]) {
         Ok(ws) => ws,
         Err(errs) => {
             eprintln!("{}", crate::skull_backend::render_file_errs(path, &src, &errs));
             crate::ablation_report::exit_with_census(1);
         }
     };
+    // Single-file runs resolve from the file's enclosing project (walk-up), so
+    // a file inside a [build.vars] project behaves the same on both backends.
+    let parent = std::path::Path::new(path).parent().unwrap_or(std::path::Path::new("."));
+    match crate::comptime::inputs_for_project_dir(parent) {
+        Ok(inputs) => ws.comptime_inputs = inputs,
+        Err(e) => {
+            log::error!(target: "JS", "build var resolution failed for {}: {:#}", path, e);
+            crate::ablation_report::exit_with_census(1);
+        }
+    }
     let user_mid = crate::bone_backend::entry_module_id(&ws, user_file);
     let scx = ScalarCtx::new(&ws).with_target(bone_semantic::hir::FnBackend::Js);
     match skull_codegen_js::emit::emit_program(&ws, &scx, user_mid) {
@@ -547,13 +557,14 @@ pub(crate) fn try_emit_js_program_project(
             crate::skull_backend::render_project_errs(&sources, &errs)
         )),
     };
-    let ws = match crate::bone_backend::check_modules(&mut modules) {
+    let mut ws = match crate::bone_backend::check_modules(&mut modules) {
         Ok(ws) => ws,
         Err(errs) => return Err(anyhow::anyhow!(
             "{}",
             crate::skull_backend::render_project_errs(&sources, &errs)
         )),
     };
+    ws.comptime_inputs = crate::comptime::inputs_for_project_dir(std::path::Path::new(dir))?;
     let user_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
     let scx = ScalarCtx::new(&ws).with_target(bone_semantic::hir::FnBackend::Js);
     let prog = match skull_codegen_js::emit::emit_program(&ws, &scx, user_mid) {

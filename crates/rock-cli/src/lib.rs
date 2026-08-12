@@ -33,6 +33,7 @@ pub mod bone_backend;
 pub mod skull_backend;
 pub mod common;
 mod compile_cmd;
+pub mod comptime;
 mod dispatcher;
 mod error_test;
 mod file_watcher;
@@ -509,6 +510,11 @@ pub struct Args {
     pub lib: Option<String>,
     pub clean: bool,
     pub release: bool,
+    /// `--channel`: release channel for `[build.vars]` resolution
+    /// (docs/comptime-plan.md). None = the project's default_channel.
+    pub channel: Option<String>,
+    /// `--var NAME=VALUE` overrides, raw; parsed/validated at resolution.
+    pub build_var_overrides: Vec<String>,
     pub trace: bool,
     pub timeout: u64,
     pub no_timeout: bool,
@@ -688,6 +694,11 @@ impl Args {
                 .help("Force a clean build by clearing the cache before compilation"))
             .arg(Arg::new("release").long("release").action(ArgAction::SetTrue)
                 .help("Compile in release mode — strips debug-time runtime checks. Can also be set via ROCK_RELEASE=1."))
+            .arg(Arg::new("channel").long("channel").value_name("CHANNEL")
+                .help("Release channel for [build.vars] resolution (must be declared in the project's [build] channels)"))
+            .arg(Arg::new("var").long("var").value_name("NAME=VALUE")
+                .action(ArgAction::Append)
+                .help("Override a declared [build.vars] entry for this invocation (repeatable)"))
             .arg(Arg::new("trace").long("trace").action(ArgAction::SetTrue)
                 .help("Enable trace file generation (trace.folded and trace.perfetto) for profiling"))
             .arg(Arg::new("timeout").long("timeout").default_value("60")
@@ -790,6 +801,11 @@ impl Args {
             lib: m.get_one::<String>("lib").cloned(),
             clean: m.get_flag("clean"),
             release: m.get_flag("release"),
+            channel: m.get_one::<String>("channel").cloned(),
+            build_var_overrides: m
+                .get_many::<String>("var")
+                .map(|vals| vals.cloned().collect())
+                .unwrap_or_default(),
             trace: m.get_flag("trace"),
             timeout: *m.get_one::<u64>("timeout").unwrap(),
             no_timeout: m.get_flag("no-timeout"),

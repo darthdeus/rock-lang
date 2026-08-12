@@ -39,15 +39,27 @@ impl LiveProject {
         let session = crate::bone_backend::bone_session(files).map_err(|e| {
             anyhow::anyhow!("{}", crate::skull_backend::render_project_err(&sources, &e))
         })?;
-        let project = Self {
+        let mut project = Self {
             session,
             dir: dir.to_string(),
             sources,
             entry_path,
             include_tests,
         };
+        project.stamp_comptime_inputs()?;
         project.verdict("in initial build")?;
         Ok(project)
+    }
+
+    /// Resolve `[build.vars]` for this project and stamp the session's
+    /// workspace (docs/comptime-plan.md tier 1). Runs var commands, so it is
+    /// called once per session build -- init and every `rebuild_session` --
+    /// never per incremental update (the Session mutates its ws in place, so
+    /// the stamp survives `update_file`).
+    fn stamp_comptime_inputs(&mut self) -> Result<()> {
+        self.session.ws.comptime_inputs =
+            crate::comptime::inputs_for_project_dir(std::path::Path::new(&self.dir))?;
+        Ok(())
     }
 
     pub fn recompile(&mut self, changed: &[PathBuf]) -> Result<LiveUpdate> {
@@ -191,6 +203,7 @@ impl LiveProject {
                     crate::skull_backend::render_project_err(&self.sources, &error)
                 )
             })?;
+        self.stamp_comptime_inputs()?;
         self.verdict("- serving last good output")
     }
 

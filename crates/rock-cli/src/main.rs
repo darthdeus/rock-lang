@@ -42,6 +42,19 @@ fn main() {
 
     let args = Args::parse();
 
+    // Record the invocation's --channel/--var selection before dispatch; the
+    // compile chokepoints resolve [build.vars] against it per project
+    // (docs/comptime-plan.md). A malformed --var fails here, by name.
+    let implied_channel = matches!(args.command, CliCommand::Web).then(|| "web".to_string());
+    if let Err(e) = rock_cli::comptime::set_invocation_selection(
+        args.channel.clone(),
+        implied_channel,
+        &args.build_var_overrides,
+    ) {
+        eprintln!("Error: {e}");
+        std::process::exit(1);
+    }
+
     // `--verbose` raises the unified logger to debug. (Pre-unification
     // this was env_logger's `default_filter_or("debug")` inside
     // setup_environment; that env_logger is now dead for rock-cli —

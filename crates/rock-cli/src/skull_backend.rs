@@ -1189,7 +1189,7 @@ fn skull_emit_project(dir: &str) -> String {
         }
     };
 
-    let ws = match crate::bone_backend::check_modules(&mut modules) {
+    let mut ws = match crate::bone_backend::check_modules(&mut modules) {
         Ok(ws) => ws,
         Err(errs) => {
             eprintln!("{}", render_project_errs(&sources, &errs));
@@ -1197,6 +1197,13 @@ fn skull_emit_project(dir: &str) -> String {
             crate::ablation_report::exit_with_census(1);
         }
     };
+    match crate::comptime::inputs_for_project_dir(std::path::Path::new(dir)) {
+        Ok(inputs) => ws.comptime_inputs = inputs,
+        Err(e) => {
+            log::error!(target: "SKULL", "build var resolution failed for project {}: {:#}", dir, e);
+            crate::ablation_report::exit_with_census(1);
+        }
+    }
     let user_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
 
     // Lints are a compiler pass, not an editor accessory: they run on the same
