@@ -846,7 +846,7 @@ fn resolve_cloned_bound_calls(
                 func.resolved_bound_trees.insert(new_id, sub.clone());
             }
         }
-        crate::bound::substitute_bound_call_with_plans(
+        crate::bound::substitute_bound_call(
             func,
             new_id,
             callee.bound_next_split.contains(&old_id),

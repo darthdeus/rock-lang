@@ -4050,7 +4050,7 @@ impl JsDelivery<'_> {
             );
             return Ok(());
         }
-        if let Err(e) = skull_transform::bound::resolve_standalone_bound_calls_with_plans(
+        if let Err(e) = skull_transform::bound::resolve_standalone_bound_calls(
             self.ws,
             self.scx,
             self.scx.interner(),

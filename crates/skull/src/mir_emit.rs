@@ -1718,7 +1718,7 @@ fn emit_spec_chunk(
     // make it unemittable on its own, and the demand that reached here is what
     // resolves them. The splice path does the same substitution at the moment it
     // clones the body into a caller.
-    skull_transform::bound::resolve_standalone_bound_calls_with_plans(
+    skull_transform::bound::resolve_standalone_bound_calls(
         ws,
         scx,
         scx.interner(),
