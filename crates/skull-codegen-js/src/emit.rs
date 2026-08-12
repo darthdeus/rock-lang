@@ -2103,10 +2103,17 @@ impl Emitter<'_> {
                 // leaf count, so the vertex pool's storage and its `.ptr` going to
                 // WebGL are unchanged -- pinned by `nb_leaf_layout_premise`.
                 other => {
-                    let size = skull_mir::lower::value_leaf_size(self.ws, *ctype).map_err(|e| {
+                    let size = skull_mir::lower::RepArena::default()
+                        .nominal_leaf_size(
+                            self.ws,
+                            bone_semantic::hir::FnBackend::Js,
+                            *ctype,
+                        )
+                        .map_err(|e| {
                         err(format!(
                             "JS subset: native_buffer_alloc element ctype `{other}` has no C \
-                             leaf layout to back a TypedArray with ({e})"
+                             leaf layout to back a TypedArray with ({})",
+                            e.message
                         ))
                     })?;
                     // A 4-byte-backed array needs a 4-byte multiple. C gives that

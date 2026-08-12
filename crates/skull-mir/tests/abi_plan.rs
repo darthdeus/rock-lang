@@ -580,7 +580,12 @@ fn leaf_places_carry_the_container_element_representation() {
     )
     .expect("a NativeBuffer value must have a concrete container plan");
     assert!(plan.is_leaf_addressed());
-    let address = skull_mir::lower::leaf_addr_plan(&ws, Ustr::from("V2"))
+    let address = arena
+        .nominal_leaf_addresses(
+            &ws,
+            bone_semantic::hir::FnBackend::Lua,
+            Ustr::from("V2"),
+        )
         .expect("V2 has a leaf address plan")
         .into_iter()
         .next()
@@ -843,4 +848,41 @@ fn nominal_value_presence_flags_are_owned_by_the_rep_plan() {
         ),
         Some(vec![true, false, false, false])
     );
+}
+
+#[test]
+fn nominal_leaf_addresses_are_owned_by_the_rep_plan() {
+    let ws = ws_of("value V2 { x: float, y: float }\nvalue Boxed { pos: V2, tag: int }\n");
+    let arena = RepArena::default();
+    let addresses = arena
+        .nominal_leaf_addresses(
+            &ws,
+            bone_semantic::hir::FnBackend::Lua,
+            Ustr::from("Boxed"),
+        )
+        .expect("the concrete value plan must own nonzero leaf addresses");
+    assert_eq!(
+        addresses.iter().map(|address| address.path).collect::<Vec<_>>(),
+        vec![Ustr::from("pos.x"), Ustr::from("pos.y"), Ustr::from("tag")]
+    );
+    assert!(addresses.iter().all(|address| address.stride > 0));
+}
+
+#[test]
+fn nominal_c_layout_is_owned_by_the_rep_plan() {
+    let ws = ws_of("value Mixed { on: bool, count: int, scale: float }");
+    let arena = RepArena::default();
+    let (leaves, size, align) = arena
+        .nominal_leaf_layout(
+            &ws,
+            bone_semantic::hir::FnBackend::Lua,
+            Ustr::from("Mixed"),
+        )
+        .expect("the concrete value plan must own the validated C layout");
+    assert_eq!(
+        leaves.iter().map(|leaf| leaf.path).collect::<Vec<_>>(),
+        vec![Ustr::from("on"), Ustr::from("count"), Ustr::from("scale")]
+    );
+    assert_eq!(size, 12);
+    assert_eq!(align, 4);
 }

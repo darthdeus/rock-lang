@@ -396,7 +396,11 @@ impl Builder<'_> {
     /// access would allocate a pointer cdata each time, which is the allocation
     /// leaf addressing exists to remove.
     pub(crate) fn leaf_view_fields(&mut self, ctype: Ustr, ptr: Idx<Inst>) -> Vec<(Ustr, Idx<Inst>)> {
-        let Ok(ctys) = leaf_view_ctys(self.ws, ctype) else {
+        let Ok(ctys) = self.scx.rep_arena().nominal_leaf_view_ctys(
+            self.ws,
+            self.scx.target,
+            ctype,
+        ) else {
             return Vec::new();
         };
         ctys.into_iter()

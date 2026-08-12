@@ -471,7 +471,7 @@ _G.__ROCK_LEAF_VIEWS = {LEAF_VIEWS}
 assert(next(_G.__ROCK_LEAF_VIEWS), "__ROCK_LEAF_VIEWS is empty; leaf-view refresh would silently do nothing")
 -- Compiler-described NativeBuffer STORAGE, keyed by the ctype LuaJIT gives the
 -- allocation itself. Generated from skull_mir::lower (NB_PRIM_ELEMS for the
--- primitive/sized element types, value_leaf_layout_checked + LEAF_VIEWS for the
+-- primitive/sized element types, the owned RepPlan C layout + LEAF_VIEWS for the
 -- value-struct ones), so a holder of a storage cdata can ask what its bytes mean
 -- -- element ctype, element width, and the views minted over it -- rather than
 -- reading a `__ty` string or re-deriving a layout. An element array whose ctype
@@ -739,7 +739,7 @@ fn value_struct_defs(
 ///
 /// One walk, two emitted views. The registry states what a buffer of this
 /// element is made of; the assertions state that the model producing it agrees
-/// with LuaJIT. Deriving both from the same `value_leaf_layout_checked` result
+/// with LuaJIT. Deriving both from the same owned RepPlan C-layout result
 /// is what keeps them from describing different layouts.
 ///
 /// Leaf addressing (`docs/native-buffer-leaf-addressing-plan.md`) indexes typed
@@ -760,15 +760,18 @@ fn value_leaf_layout_checks(
     emitted: &rustc_hash::FxHashSet<ustr::Ustr>,
 ) -> Result<(String, String), CompilerError> {
     use std::fmt::Write as _;
+    let rep_arena = skull_mir::lower::RepArena::default();
     let mut names: Vec<ustr::Ustr> = emitted.iter().copied().collect();
     names.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     let mut out = String::new();
     let mut storage = String::new();
     for name in names {
-        let (leaves, size, _align) = skull_mir::lower::value_leaf_layout_checked(ws, name)
+        let (leaves, size, _align) = rep_arena
+            .nominal_leaf_layout(ws, bone_semantic::hir::FnBackend::Lua, name)
             .map_err(|e| {
                 CompilerError::new_no_location(format!(
-                    "skull: cannot validate the C layout of FFI-clean value struct `{name}`: {e}"
+                    "skull: cannot validate the C layout of FFI-clean value struct `{name}`: {}",
+                    e.message
                 ))
             })?;
         let _ = writeln!(

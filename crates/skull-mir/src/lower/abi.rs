@@ -520,6 +520,60 @@ impl RepArena {
         self.get(id).presence_flags()
     }
 
+    pub fn nominal_leaf_addresses(
+        &self,
+        ws: &Workspace,
+        target: FnBackend,
+        name: Ustr,
+    ) -> Result<Vec<crate::lower::LeafAddr>, RepError> {
+        let id = self.plan_nominal_value(ws, target, name)?;
+        self.leaf_addresses(ws, id).ok_or_else(|| RepError {
+            span: None,
+            message: format!("{name} has no concrete leaf-addressed representation"),
+        })
+    }
+
+    pub fn nominal_leaf_layout(
+        &self,
+        ws: &Workspace,
+        target: FnBackend,
+        name: Ustr,
+    ) -> Result<(Vec<crate::lower::LeafSlot>, usize, usize), RepError> {
+        let id = self.plan_nominal_value(ws, target, name)?;
+        if self.value_shape(id).is_none() {
+            return Err(RepError {
+                span: None,
+                message: format!("`{name}` has no value leaf layout"),
+            });
+        }
+        self.leaf_layout(ws, id)
+    }
+
+    pub fn nominal_leaf_size(
+        &self,
+        ws: &Workspace,
+        target: FnBackend,
+        name: Ustr,
+    ) -> Result<usize, RepError> {
+        self.nominal_leaf_layout(ws, target, name).map(|(_, size, _)| size)
+    }
+
+    pub fn nominal_leaf_view_ctys(
+        &self,
+        ws: &Workspace,
+        target: FnBackend,
+        name: Ustr,
+    ) -> Result<Vec<&'static str>, RepError> {
+        let (leaves, _, _) = self.nominal_leaf_layout(ws, target, name)?;
+        let mut out = Vec::new();
+        for leaf in leaves {
+            if !out.contains(&leaf.cty) {
+                out.push(leaf.cty);
+            }
+        }
+        Ok(out)
+    }
+
     pub(crate) fn ret_slot(&self, id: RepId) -> RetSlot {
         match self.get(id).layout().clone() {
             RepLayout::Opaque | RepLayout::Foreign { .. } => RetSlot::Opaque,
@@ -548,6 +602,40 @@ impl RepArena {
         }
     }
 
+    fn leaf_layout(
+        &self,
+        ws: &Workspace,
+        id: RepId,
+    ) -> Result<(Vec<crate::lower::LeafSlot>, usize, usize), RepError> {
+        let plan = self.get(id);
+        let shape = self.value_shape(id).ok_or_else(|| RepError {
+            span: None,
+            message: "the representation has no value leaf layout".into(),
+        })?;
+        if plan.value_storage() != Some(ValueStorage::CData) {
+            return Err(RepError {
+                span: None,
+                message: format!("{} is not an FFI-clean CData representation", shape.name),
+            });
+        }
+        let (leaves, size, align) = crate::lower::value_leaf_layout(ws, shape.name).ok_or_else(|| RepError {
+            span: None,
+            message: format!("`{}` has no C leaf layout", shape.name),
+        })?;
+        let want = crate::lower::value_leaf_paths(&shape);
+        let got: Vec<Ustr> = leaves.iter().map(|leaf| leaf.path).collect();
+        if want != got {
+            return Err(RepError {
+                span: None,
+                message: format!(
+                    "leaf walkers disagree for `{}`: value leaves {want:?} vs C layout {got:?}",
+                    shape.name
+                ),
+            });
+        }
+        Ok((leaves, size, align))
+    }
+
     pub(crate) fn leaf_addresses(
         &self,
         ws: &Workspace,
@@ -556,8 +644,22 @@ impl RepArena {
         if !self.column_eligible(id) {
             return None;
         }
-        let shape = self.value_shape(id)?;
-        crate::lower::leaf_addr_plan(ws, shape.name).ok()
+        let (leaves, size, _) = self.leaf_layout(ws, id).ok()?;
+        leaves
+            .into_iter()
+            .map(|leaf| {
+                let (leaf_size, _) = crate::lower::c_prim_size_align(leaf.cty)?;
+                if size % leaf_size != 0 || leaf.byte_off % leaf_size != 0 {
+                    return None;
+                }
+                Some(crate::lower::LeafAddr {
+                    path: leaf.path,
+                    view_field: crate::lower::leaf_view_field(leaf.cty),
+                    stride: (size / leaf_size) as i64,
+                    offset: (leaf.byte_off / leaf_size) as i64,
+                })
+            })
+            .collect()
     }
 
     /// Total physical planning for one concrete logical type. `Opaque` is an

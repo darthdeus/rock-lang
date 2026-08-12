@@ -468,7 +468,7 @@ fn const_hoist_uses_are_read_only(ws: &Workspace, func: &MirFunc, cand: Idx<Inst
 /// the owned representation plan EXACTLY. The ctor is positional, so a partially or
 /// wrongly flattened field list would emit silently against the wrong
 /// signature; requiring the canonical sequence turns that into a loud panic at
-/// emit instead -- the same fail-closed move `value_leaf_layout_checked` makes.
+/// emit instead -- the same fail-closed move the owned RepPlan C-layout check makes.
 fn is_leaf_form(fields: &[(ustr::Ustr, Idx<Inst>)]) -> bool {
     fields.iter().any(|(n, _)| n.contains('.'))
 }

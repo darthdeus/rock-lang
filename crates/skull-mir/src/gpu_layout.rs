@@ -20,7 +20,7 @@
 //! layout cannot express: the C layout flattens to primitive leaves (`pos.x`,
 //! `pos.y`), while an attribute is the whole top-level field (`pos` = one
 //! `F32x2` at location 0). Offsets and stride come from
-//! `value_leaf_layout_checked`, whose numbers are not taken on trust --
+//! the owned RepPlan C-layout projection, whose numbers are not taken on trust --
 //! `ffi.offsetof`/`ffi.sizeof` assertions are emitted per FFI-clean value
 //! struct and abort at chunk load on drift. Computing a second set of vertex
 //! offsets here is exactly the bypass that walker is private to prevent, and a

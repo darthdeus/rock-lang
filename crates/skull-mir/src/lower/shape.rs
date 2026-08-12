@@ -253,55 +253,11 @@ pub struct LeafAddr {
 /// power of two no larger than that; a leaf's own byte offset is a multiple of
 /// its size because C aligns each member. Both divisions are checked anyway --
 /// an inexact one would silently address the wrong element.
-pub fn leaf_addr_plan(ws: &Workspace, elem: Ustr) -> Result<Vec<LeafAddr>, String> {
-    let (leaves, size, _align) = value_leaf_layout_checked(ws, elem)?;
-    leaves
-        .into_iter()
-        .map(|l| {
-            let (sz, _) = c_prim_size_align(l.cty)
-                .ok_or_else(|| format!("leaf `{}` of `{elem}` is not primitive", l.path))?;
-            if size % sz != 0 || l.byte_off % sz != 0 {
-                return Err(format!(
-                    "leaf `{}` of `{elem}` ({} bytes) does not divide its {sz}-byte view: \
-                     stride {size}, offset {}",
-                    l.path, sz, l.byte_off
-                ));
-            }
-            Ok(LeafAddr {
-                path: l.path,
-                view_field: leaf_view_field(l.cty),
-                stride: (size / sz) as i64,
-                offset: (l.byte_off / sz) as i64,
-            })
-        })
-        .collect()
-}
-
-/// `sizeof(elem)` as LuaJIT lays it out -- the per-element byte stride every
-/// leaf view is strided against. The JS backend sizes its ArrayBuffer with it,
-/// so the two backends' storage is the same bytes in the same places.
-pub fn value_leaf_size(ws: &Workspace, elem: Ustr) -> Result<usize, String> {
-    value_leaf_layout_checked(ws, elem).map(|(_, size, _)| size)
-}
-
 /// The C type a leaf VIEW field carries -- the inverse of [`leaf_view_field`].
 /// The JS emitter needs it to pick the TypedArray and to know a `bool` view
 /// stores 0/1 where the language wants `true`/`false`.
 pub fn leaf_view_cty(field: &str) -> Option<&'static str> {
     LEAF_VIEWS.iter().find(|(_, f, _)| *f == field).map(|(t, ..)| *t)
-}
-
-/// The distinct leaf view C types of `elem`, in first-use order -- the views a
-/// buffer of `elem` must carry.
-pub fn leaf_view_ctys(ws: &Workspace, elem: Ustr) -> Result<Vec<&'static str>, String> {
-    let (leaves, _, _) = value_leaf_layout_checked(ws, elem)?;
-    let mut out: Vec<&'static str> = Vec::new();
-    for l in leaves {
-        if !out.contains(&l.cty) {
-            out.push(l.cty);
-        }
-    }
-    Ok(out)
 }
 
 /// Every element type a `NativeBuffer`'s storage can be allocated with that is
@@ -330,7 +286,7 @@ pub const NB_PRIM_ELEMS: &[(&str, usize)] = &[
 /// element width, and the exact leaf views minted over it -- instead of guessing
 /// from a `__ty` string or re-deriving a layout. The element widths and the view
 /// set come from the same oracles the emitter itself uses
-/// ([`NB_PRIM_ELEMS`], [`value_leaf_layout_checked`], [`LEAF_VIEWS`]), so a
+/// ([`NB_PRIM_ELEMS`], the owned `RepPlan` C layout, [`LEAF_VIEWS`]), so a
 /// registry entry cannot describe a layout the emitter does not produce.
 fn nb_storage_call(ctype: &str, size: usize, views: &[&str]) -> String {
     let views: Vec<String> = views
@@ -410,43 +366,13 @@ pub(crate) fn c_prim_size_align(cty: &str) -> Option<(usize, usize)> {
 /// passes (each path/offset pair is self-consistent) while repr leaves are
 /// written to the wrong addresses.
 ///
-/// [`value_leaf_layout_checked`] is the only way out of this module, and it
-/// REJECTS on drift. Keep it that way -- a `pub` raw walker is an offset source
-/// a future lowering can reach for without the invariant.
+/// `RepArena::nominal_leaf_layout` is the only public way out of this module,
+/// and it rejects on drift. Keep the raw walker private so a future lowering
+/// cannot reach around the representation plan.
 pub(crate) fn value_leaf_layout(ws: &Workspace, name: Ustr) -> Option<(Vec<LeafSlot>, usize, usize)> {
     let mut out = Vec::new();
     let (size, align) = layout_rec(ws, name, "", 0, "", &mut out, &mut Vec::new())?;
     Some((out, size, align))
-}
-
-/// [`value_leaf_layout`] with the two-walker agreement enforced: the layout's
-/// leaf path sequence must equal [`value_leaf_paths`] over the same type, which
-/// is the invariant that lets leaves be matched to offsets positionally.
-///
-/// `Err` on either a missing layout or a disagreement. Both are invariant
-/// failures for a type that reached an offset-consuming site, not conditions to
-/// skip past -- skipping would let leaf addressing run on unvalidated offsets,
-/// which is silent memory corruption rather than a failure.
-pub fn value_leaf_layout_checked(
-    ws: &Workspace,
-    name: Ustr,
-) -> Result<(Vec<LeafSlot>, usize, usize), String> {
-    let Some((leaves, size, align)) = value_leaf_layout(ws, name) else {
-        return Err(format!("`{name}` has no C leaf layout"));
-    };
-    let Some(shape) = value_shape(ws, name) else {
-        return Err(format!("`{name}` has a C leaf layout but no value shape"));
-    };
-    let want = value_leaf_paths(&shape);
-    let got: Vec<Ustr> = leaves.iter().map(|l| l.path).collect();
-    if want != got {
-        return Err(format!(
-            "leaf walkers disagree for `{name}`: value_leaf_paths {want:?} vs \
-             value_leaf_layout {got:?} -- leaves are matched to offsets by \
-             position, so this would write every leaf to the wrong address"
-        ));
-    }
-    Ok((leaves, size, align))
 }
 
 /// Append `name`'s leaves at `base` (a byte offset), returning its `(size, align)`.
@@ -1008,7 +934,7 @@ pub(crate) fn vertex_expand_arg_msg(fname: Ustr) -> String {
 /// and the packer binds one to the other BY POSITION -- so a reordered vector or
 /// matrix keeps every count equal while writing each leaf to the wrong offset.
 ///
-/// The exact twin of [`value_leaf_layout_checked`] for the uniform context, and
+/// The exact twin of the owned RepPlan C-layout projection for the uniform context, and
 /// `Err` for the same reason: a type that reached a packing site and cannot be
 /// walked consistently is an invariant failure, not a case to skip past.
 pub fn uniform_block_checked(

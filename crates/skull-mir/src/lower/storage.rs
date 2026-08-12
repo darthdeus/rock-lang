@@ -130,7 +130,7 @@ impl Builder<'_> {
     ///
     /// Both targets. The views are `ffi.cast` pointers on luajit and TypedArrays
     /// over one ArrayBuffer on JS, but the ADDRESSING is the same C layout either
-    /// way -- `leaf_addr_plan`'s stride and offset are already in units of each
+    /// way -- the owned leaf-address projection's stride and offset are already in units of each
     /// view's own element type, so one lowering serves both.
     fn native_buffer_plan(&self, elem: Ustr) -> Result<ContainerPlan, CompilerError> {
         let ty = MonoTy::App {
