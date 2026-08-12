@@ -18,7 +18,7 @@ use skull_mir::instance::Instance;
 use skull_mir::concrete::{ConcreteBodyPlan, ConcreteOwner, ConcreteSignature, ConcreteTypeTables};
 use skull_mir::lower::{
     BackendFnAbiPlan, ContainerFamily, ContainerPlan, ContainerStorage, RepArena, RepGuarantees,
-    RepUse, RepUseFacts, ScalarCtx,
+    EnumLayout, EnumPlan, RepUse, RepUseFacts, ScalarCtx,
 };
 use skull_mir::mir::FuncRef;
 use skull_mir::monoty::{MonoCtor, MonoTy};
@@ -392,6 +392,28 @@ fn container_storage_uses_the_element_representation_plan() {
         plan.column_elem(&arena),
         Some(skull_mir::mir::ColumnElem { name: Ustr::from("V2"), nullable: false })
     );
+}
+
+#[test]
+fn enum_layout_is_selected_by_one_owned_plan() {
+    let cdata_ws = ws_of("enum E { A(int), B(int), None }");
+    let cdata = EnumPlan::for_name(&cdata_ws, Ustr::from("E")).expect("enum plan");
+    assert!(matches!(cdata.layout(), EnumLayout::Cdata(_)));
+    assert!(cdata.cdata().is_some());
+    assert!(cdata.flat().is_none());
+
+    let flat_ws = ws_of(
+        "nobox value P { x: int, y: int }\nenum E { Has(P), Nope }",
+    );
+    let flat = EnumPlan::for_name(&flat_ws, Ustr::from("E")).expect("enum plan");
+    assert!(matches!(flat.layout(), EnumLayout::Flat(_)));
+    assert!(flat.flat().is_some());
+    assert!(flat.cdata().is_none());
+
+    let unit_ws = ws_of("enum E { A, B }");
+    let unit = EnumPlan::for_name(&unit_ws, Ustr::from("E")).expect("enum plan");
+    assert!(unit.is_payload_free());
+    assert!(matches!(unit.layout(), EnumLayout::PayloadFree));
 }
 
 #[test]

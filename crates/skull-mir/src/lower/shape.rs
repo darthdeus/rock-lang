@@ -2472,6 +2472,7 @@ pub(crate) fn sig_spec_nominal(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> O
 /// sacrificed (no `{__variant}` table); see docs/skull-enum-increment2-plan.md.
 /// Record / ref payloads are NOT yet eligible (cut 2b+). Payload-free enums are
 /// plain ints (increment 1), not this.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EnumCdataShape {
     pub name: Ustr,
     /// Ordered C slots `(slot_name, c_type)` -- `_<i>` for a tuple field at
@@ -2525,7 +2526,7 @@ pub(crate) fn scalar_c_type(ws: &Workspace, ty: TyId) -> Option<&'static str> {
 }
 
 /// `Some(shape)` iff `name` is a cdata-eligible enum (see [`EnumCdataShape`]).
-pub fn enum_value_shape(ws: &Workspace, name: Ustr) -> Option<EnumCdataShape> {
+fn build_enum_cdata_shape(ws: &Workspace, name: Ustr) -> Option<EnumCdataShape> {
     let eid = *ws.enums_by_name.get(&name)?;
     let ed = &ws.modules[eid.module.index()].enums[eid.def];
     let mut slots: Vec<(Ustr, &'static str)> = Vec::new();
@@ -2698,7 +2699,7 @@ pub(crate) fn value_struct_is_gc_guarded(ws: &Workspace, name: Ustr, stack: &mut
 /// discriminant is the variant NAME (a string, mirroring the boxed `__variant`), so
 /// flattened slots are a direct spread of the box's keys; box <-> slot conversion is
 /// a field copy with no name<->ordinal table.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EnumFlatShape {
     pub(crate) name: Ustr,
     /// One entry per payload POSITION, widest variant first-wins. A position is
@@ -2718,7 +2719,7 @@ pub struct EnumFlatShape {
 /// one -- except a `nobox` value, which is several leaves and has no box to sit
 /// in. Widening the position to its leaves is the whole point: the value's
 /// leaves ARE the slots, so an enum payload never materializes one.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum FlatSlot {
     /// One dynamic slot -- today's shape, and what every non-`nobox` payload keeps.
     Opaque,
@@ -2797,10 +2798,10 @@ impl EnumFlatShape {
 }
 
 /// `Some(shape)` iff `name` is a mixed/boxed enum eligible for field flattening.
-pub(crate) fn flat_enum_shape(ws: &Workspace, name: Ustr) -> Option<EnumFlatShape> {
+fn build_flat_enum_shape(ws: &Workspace, name: Ustr) -> Option<EnumFlatShape> {
     let eid = *ws.enums_by_name.get(&name)?;
     // Payload-free enums are ints; cdata-eligible enums scalarize via cdata.
-    if payload_free_enum_variants(ws, name).is_some() || enum_value_shape(ws, name).is_some() {
+    if payload_free_enum_variants(ws, name).is_some() || build_enum_cdata_shape(ws, name).is_some() {
         return None;
     }
     let ed = &ws.modules[eid.module.index()].enums[eid.def];
@@ -2839,6 +2840,75 @@ pub(crate) fn flat_enum_shape(ws: &Workspace, name: Ustr) -> Option<EnumFlatShap
         .map(|w| if w.is_empty() { FlatSlot::Opaque } else { FlatSlot::Leaves(w) })
         .collect();
     Some(EnumFlatShape { name, slots, record_fields })
+}
+
+/// The single static representation decision for an enum. The operational
+/// cdata and flat shapes remain available as views, but neither caller chooses
+/// between them independently.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EnumLayout {
+    PayloadFree,
+    Cdata(EnumCdataShape),
+    Flat(EnumFlatShape),
+    Boxed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnumPlan {
+    name: Ustr,
+    layout: EnumLayout,
+}
+
+impl EnumPlan {
+    pub fn for_name(ws: &Workspace, name: Ustr) -> Option<Self> {
+        ws.enums_by_name.get(&name)?;
+        let layout = if payload_free_enum_variants(ws, name).is_some() {
+            EnumLayout::PayloadFree
+        } else if let Some(shape) = build_enum_cdata_shape(ws, name) {
+            EnumLayout::Cdata(shape)
+        } else if let Some(shape) = build_flat_enum_shape(ws, name) {
+            EnumLayout::Flat(shape)
+        } else {
+            EnumLayout::Boxed
+        };
+        Some(Self { name, layout })
+    }
+
+    pub fn name(&self) -> Ustr {
+        self.name
+    }
+
+    pub fn layout(&self) -> &EnumLayout {
+        &self.layout
+    }
+
+    pub fn cdata(&self) -> Option<&EnumCdataShape> {
+        match &self.layout {
+            EnumLayout::Cdata(shape) => Some(shape),
+            _ => None,
+        }
+    }
+
+    pub fn flat(&self) -> Option<&EnumFlatShape> {
+        match &self.layout {
+            EnumLayout::Flat(shape) => Some(shape),
+            _ => None,
+        }
+    }
+
+    pub fn is_payload_free(&self) -> bool {
+        matches!(self.layout, EnumLayout::PayloadFree)
+    }
+}
+
+/// Operational cdata view of the authoritative [`EnumPlan`].
+pub fn enum_value_shape(ws: &Workspace, name: Ustr) -> Option<EnumCdataShape> {
+    EnumPlan::for_name(ws, name).and_then(|plan| plan.cdata().cloned())
+}
+
+/// Operational flattened view of the authoritative [`EnumPlan`].
+pub(crate) fn flat_enum_shape(ws: &Workspace, name: Ustr) -> Option<EnumFlatShape> {
+    EnumPlan::for_name(ws, name).and_then(|plan| plan.flat().cloned())
 }
 
 /// The leaf shape of a payload type that is a `nobox` value struct, else `None`.
