@@ -54,15 +54,37 @@ pub fn set_invocation_selection(
 /// resolving nothing.
 pub fn inputs_for_project_dir(dir: &Path) -> Result<ComptimeInputs> {
     let selection = SELECTION.get();
-    let mut channel = selection.and_then(|s| s.channel.as_deref());
-    let no_overrides = std::collections::HashMap::new();
-    let overrides = selection.map(|s| &s.overrides).unwrap_or(&no_overrides);
-
     let stick = rock_host::stick::StickConfig::find_from_dir(dir)?;
+    let Some((stick_path, cfg)) = stick else {
+        let channel = selection.and_then(|s| s.channel.as_deref());
+        if let Some(chan) = channel {
+            anyhow::bail!(
+                "--channel {chan:?} given but no stick.toml found at or above {}",
+                dir.display()
+            );
+        }
+        let no_overrides = std::collections::HashMap::new();
+        let overrides = selection.map(|s| &s.overrides).unwrap_or(&no_overrides);
+        if let Some(name) = overrides.keys().next() {
+            anyhow::bail!("--var {name} given but no stick.toml found at or above {}", dir.display());
+        }
+        return Ok(ComptimeInputs::default());
+    };
+    let project_dir = stick_path.parent().expect("stick.toml has a parent dir").to_path_buf();
+    inputs_for_project_with_config(&project_dir, &cfg)
+}
+
+/// Resolve inputs from a config the caller has already parsed. Release
+/// preparation uses this path so `[release]` selection and `[build.vars]`
+/// resolution share one `StickConfig` parse.
+pub fn inputs_for_project_with_config(
+    project_dir: &Path,
+    cfg: &rock_host::stick::StickConfig,
+) -> Result<ComptimeInputs> {
+    let selection = SELECTION.get();
+    let mut channel = selection.and_then(|s| s.channel.as_deref());
     if channel.is_none() {
-        if let (Some(implied), Some((_, cfg))) =
-            (selection.and_then(|s| s.implied_channel.as_deref()), stick.as_ref())
-        {
+        if let Some(implied) = selection.and_then(|s| s.implied_channel.as_deref()) {
             let declared = cfg
                 .build
                 .as_ref()
@@ -72,23 +94,12 @@ pub fn inputs_for_project_dir(dir: &Path) -> Result<ComptimeInputs> {
             }
         }
     }
-    let Some((stick_path, cfg)) = stick else {
-        if let Some(chan) = channel {
-            anyhow::bail!(
-                "--channel {chan:?} given but no stick.toml found at or above {}",
-                dir.display()
-            );
-        }
-        if let Some(name) = overrides.keys().next() {
-            anyhow::bail!("--var {name} given but no stick.toml found at or above {}", dir.display());
-        }
-        return Ok(ComptimeInputs::default());
-    };
-    let project_dir = stick_path.parent().expect("stick.toml has a parent dir").to_path_buf();
+    let no_overrides = std::collections::HashMap::new();
+    let overrides = selection.map(|s| &s.overrides).unwrap_or(&no_overrides);
 
     let resolved = rock_host::stick::build_vars::resolve_build_vars(
-        &cfg,
-        &project_dir,
+        cfg,
+        project_dir,
         channel,
         overrides,
     )?;
@@ -97,7 +108,7 @@ pub fn inputs_for_project_dir(dir: &Path) -> Result<ComptimeInputs> {
     inputs.channel = resolved.channel;
     // Fallback only: an embed normally resolves against the calling file's own
     // package root, and reaches this when the module has no file on disk.
-    inputs.embed_root = Some(project_dir);
+    inputs.embed_root = Some(project_dir.to_path_buf());
     for (name, var) in resolved.vars {
         inputs.vars.insert(
             ustr::Ustr::from(&name),

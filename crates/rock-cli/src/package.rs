@@ -66,7 +66,10 @@ pub fn run_package(project: &str, output: Option<&str>) -> Result<()> {
     // Resolve once for the package and hand the same resolved map to the
     // compiler. In particular, a secret command is never run a second time
     // merely to create the manifest.
-    let inputs = crate::comptime::inputs_for_project_dir(&project_abs)?;
+    let inputs = match config.as_ref() {
+        Some(config) => crate::comptime::inputs_for_project_with_config(&project_abs, config)?,
+        None => crate::comptime::inputs_for_project_dir(&project_abs)?,
+    };
     crate::skull_backend::skull_compile_project_with_inputs(
         &project_abs.to_string_lossy(),
         Some(lua_path.to_string_lossy().into_owned()),

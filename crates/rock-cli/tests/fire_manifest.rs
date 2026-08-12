@@ -48,6 +48,8 @@ fn release_entry_points_use_the_package_manifest() {
     assert!(!justfile.contains("-e ROCK_TELEMETRY_TOKEN"));
     assert!(justfile.contains("fire-release-all steam"));
     assert!(justfile.contains("package-manifest.json"));
+    let cross = std::fs::read_to_string(root.join("Cross.toml")).unwrap();
+    assert!(!cross.contains("FIRE_GAME_DIR"), "Cross still forwards obsolete release identity");
 
     for name in ["build-game-ios.sh", "run-game-sim.sh", "run-game-device.sh"] {
         let source = std::fs::read_to_string(root.join("tools/ios").join(name)).unwrap();
