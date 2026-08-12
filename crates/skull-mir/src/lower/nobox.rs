@@ -219,12 +219,14 @@ impl Builder<'_> {
                 let rendered = match plan.family() {
                     ContainerFamily::Vec => format!("[{}]", elem.name),
                     ContainerFamily::Map => format!("Map<_, {}>", elem.name),
-                    _ => unreachable!("only Vec and Map use column storage"),
+                    ContainerFamily::Arena => format!("Arena<{}>", elem.name),
+                    _ => unreachable!("only Vec, Map, and Arena use column storage"),
                 };
                 let physical = match plan.family() {
                     ContainerFamily::Vec => "`_data`",
                     ContainerFamily::Map => "a bare key table",
-                    _ => unreachable!("only Vec and Map use column storage"),
+                    ContainerFamily::Arena => "column-backed data",
+                    _ => unreachable!("only Vec, Map, and Arena use column storage"),
                 };
                 Ok(Some((rendered, physical)))
             }
