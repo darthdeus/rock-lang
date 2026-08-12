@@ -374,7 +374,10 @@ impl RepArena {
                         })
                         .collect::<Result<Vec<_>, _>>()?;
                     let splats = slots.iter().any(|id| self.get(*id).lanes(self) > 1);
-                    if splats && (matches!(use_context, RepUse::Return) || facts.tuple_spelled) {
+                    if splats
+                        && (matches!(use_context, RepUse::Return | RepUse::TupleElement)
+                            || facts.tuple_spelled)
+                    {
                         return Ok(self.intern(
                             target,
                             use_context,
@@ -419,7 +422,9 @@ impl RepArena {
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 let splats = slots.iter().any(|id| self.get(*id).lanes(self) > 1);
-                if matches!(use_context, RepUse::Return) || (facts.tuple_spelled && splats) {
+                if matches!(use_context, RepUse::Return | RepUse::TupleElement)
+                    || (facts.tuple_spelled && splats)
+                {
                     return Ok(self.intern(
                         target,
                         use_context,

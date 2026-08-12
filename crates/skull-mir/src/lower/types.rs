@@ -23,6 +23,69 @@ impl Builder<'_> {
         self.dispatch().concrete_ty(ty)
     }
 
+    pub(crate) fn concrete_rep_id(
+        &self,
+        ty: &MonoTy,
+        use_context: RepUse,
+        tuple_spelled: bool,
+        nobox: bool,
+    ) -> Result<RepId, CompilerError> {
+        self.scx
+            .rep_arena()
+            .plan(
+                self.ws,
+                self.scx.target(),
+                ty,
+                use_context,
+                &RepUseFacts { tuple_spelled, span: self.cur_span },
+                RepGuarantees { nobox, allow_opaque: true },
+            )
+            .map_err(|error| match error.span.or(self.cur_span) {
+                Some(span) => CompilerError::new_with_label(span, error.message),
+                None => CompilerError::new_no_location(error.message),
+            })
+    }
+
+    pub(crate) fn concrete_rep_slot(
+        &self,
+        ty: &MonoTy,
+        use_context: RepUse,
+        tuple_spelled: bool,
+        nobox: bool,
+    ) -> Result<RetSlot, CompilerError> {
+        let arena = self.scx.rep_arena();
+        let id = self.concrete_rep_id(ty, use_context, tuple_spelled, nobox)?;
+        Ok(arena.ret_slot(id))
+    }
+
+    pub(crate) fn concrete_rep_tuple(
+        &self,
+        ty: &MonoTy,
+        use_context: RepUse,
+        tuple_spelled: bool,
+        nobox: bool,
+    ) -> Result<Option<TupleRetShape>, CompilerError> {
+        let arena = self.scx.rep_arena();
+        let id = self.concrete_rep_id(ty, use_context, tuple_spelled, nobox)?;
+        Ok(arena.tuple_shape(id))
+    }
+
+    pub(crate) fn source_tuple_spelled(&self, ty: TyId) -> bool {
+        let ty = match self.raw_ty_node(ty) {
+            Some(TypeExpr::Infer(..)) => self.resolve_tyid(ty),
+            Some(_) => Some(ty),
+            None => None,
+        };
+        let Some(ty) = ty else { return false };
+        match self.raw_ty_node(ty) {
+            Some(TypeExpr::Tuple { .. }) => true,
+            Some(TypeExpr::Nullable(inner)) => {
+                matches!(self.raw_ty_node(ty.with_idx(inner)), Some(TypeExpr::Tuple { .. }))
+            }
+            _ => false,
+        }
+    }
+
     pub(crate) fn concrete_expr_is_untyped(&self, e: Idx<Expr>) -> bool {
         self.dispatch()
             .concrete_types
@@ -202,7 +265,8 @@ impl Builder<'_> {
             return self.bound_next_tuple_shape(gidx).map(Some);
         }
         if let Some(MonoTy::Tuple(parts)) = self.concrete_expr_ty(e) {
-            return Ok(Some(mono_tuple_shape(self.ws, &parts)));
+            let ty = MonoTy::Tuple(parts);
+            return self.concrete_rep_tuple(&ty, RepUse::Return, true, false);
         }
         if self.concrete_plan.is_some() {
             return Ok(None);
@@ -274,7 +338,10 @@ impl Builder<'_> {
     pub(crate) fn tyid_tuple_ret_shape(&self, ty: TyId) -> Option<TupleRetShape> {
         if let Some(concrete) = self.concrete_ty_id(ty) {
             return match concrete {
-                MonoTy::Tuple(parts) => Some(mono_tuple_shape(self.ws, &parts)),
+                MonoTy::Tuple(_) => self
+                    .concrete_rep_tuple(&concrete, RepUse::Return, true, false)
+                    .ok()
+                    .flatten(),
                 MonoTy::Nullable(_) => None,
                 _ => None,
             };
@@ -346,13 +413,14 @@ impl Builder<'_> {
     fn nullable_tuple_param_shape(&self, ty: TyId) -> Option<TupleRetShape> {
         if let Some(concrete) = self.concrete_ty_id(ty) {
             return match concrete {
-                MonoTy::Nullable(inner) => {
-                    let MonoTy::Tuple(parts) = inner.as_ref() else { return None };
-                    Some(TupleRetShape {
-                        slots: parts.iter().map(|part| mono_ret_slot(self.ws, part)).collect(),
-                        nullable: true,
-                    })
-                    .filter(TupleRetShape::splats)
+                MonoTy::Nullable(ref inner) => {
+                    if !matches!(inner.as_ref(), MonoTy::Tuple(_)) {
+                        return None;
+                    }
+                    self.concrete_rep_tuple(&concrete, RepUse::Parameter, true, true)
+                        .ok()
+                        .flatten()
+                        .filter(TupleRetShape::splats)
                 }
                 _ => None,
             };
@@ -434,7 +502,9 @@ impl Builder<'_> {
 
     pub(crate) fn body_ret_slot(&self, ty: TyId) -> RetSlot {
         if let Some(concrete) = self.concrete_ty_id(ty) {
-            return mono_ret_slot(self.ws, &concrete);
+            return self
+                .concrete_rep_slot(&concrete, RepUse::TupleElement, false, true)
+                .unwrap_or(RetSlot::Opaque);
         }
         if self.concrete_plan.is_some() {
             return RetSlot::Opaque;
@@ -457,17 +527,9 @@ impl Builder<'_> {
     /// gate, mirroring [`nobox_sig_shape_spec`] on the body arena.
     pub(crate) fn body_nobox_shape(&self, ty: TyId) -> Option<ValueShape> {
         if let Some(concrete) = self.concrete_ty_id(ty) {
-            let (payload, nullable) = concrete.peel_nullable();
-            if let MonoTy::App { ctor: crate::monoty::MonoCtor::Nominal(n), .. } = payload {
-                if self.is_nobox_struct(n.to_owned().into()) {
-                    return if nullable {
-                        sig_shape_of_nullable_nominal(self.ws, n.to_owned().into())
-                    } else {
-                        sig_shape_of_nominal(self.ws, n.to_owned().into())
-                    };
-                }
-            }
-            return None;
+            let arena = self.scx.rep_arena();
+            let id = self.concrete_rep_id(&concrete, RepUse::Parameter, false, true).ok()?;
+            return arena.value_shape(id);
         }
         if self.concrete_plan.is_some() {
             return None;
@@ -551,7 +613,10 @@ impl Builder<'_> {
         if let Some(concrete) = self.concrete_expr_ty(e) {
             let (payload, _) = concrete.peel_nullable();
             return match payload {
-                MonoTy::Tuple(parts) => Some(mono_tuple_shape(self.ws, parts)),
+                MonoTy::Tuple(_) => self
+                    .concrete_rep_tuple(&concrete, RepUse::Return, true, false)
+                    .ok()
+                    .flatten(),
                 _ => None,
             };
         }

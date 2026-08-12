@@ -798,7 +798,18 @@ impl Builder<'_> {
     pub(crate) fn fn_value_abi(&self, ty: TyId) -> Option<(Vec<RetSlot>, Option<ValueShape>)> {
         if self.concrete_plan.is_some() {
             let ty = self.concrete_ty_id(ty)?;
-            return self.fn_value_abi_mono(&ty);
+            let representation = BackendFnAbiPlan::for_function_value(self.ws, self.scx, &ty).ok()?;
+            if !representation.uses_scalar_abi() {
+                return None;
+            }
+            let arena = self.scx.rep_arena();
+            let params = representation
+                .params()
+                .iter()
+                .map(|id| arena.ret_slot(*id))
+                .collect();
+            let result = representation.result().and_then(|id| arena.value_shape(id));
+            return Some((params, result));
         }
         let ty = self.resolve_tyid(ty)?;
         // Nullability lives on the REFERENCE, not on the call ABI: an absent fn
@@ -871,34 +882,21 @@ impl Builder<'_> {
         )))
     }
 
-    fn fn_value_abi_mono(
-        &self,
-        ty: &crate::monoty::MonoTy,
-    ) -> Option<(Vec<RetSlot>, Option<ValueShape>)> {
-        let (ty, _) = ty.peel_nullable();
-        let crate::monoty::MonoTy::Function { params, ret } = ty else { return None };
-        let ps = params
-            .iter()
-            .map(|ty| {
-                mono_nobox_value_shape(self.ws, ty)
-                    .map(RetSlot::Leaves)
-                    .or_else(|| {
-                        mono_tuple_ret_shape(self.ws, ty)
-                            .filter(TupleRetShape::splats)
-                            .map(RetSlot::Nested)
-                    })
-                    .unwrap_or(RetSlot::Opaque)
-            })
-            .collect::<Vec<_>>();
-        let rs = mono_nobox_value_shape(self.ws, ret);
-        (rs.is_some() || ps.iter().any(RetSlot::splats)).then_some((ps, rs))
-    }
-
     /// [`Self::nobox_shape_of_ty`] widened to the param SLOT vocabulary, so a
     /// TUPLE param carrying a `nobox` element rides its leaves like any other
     /// splatting slot. Both ends of a fn value read this same predicate off the
     /// same type, so they agree without either seeing the other.
     pub(crate) fn nobox_param_slot_of_ty(&self, ty: TyId) -> RetSlot {
+        if let Some(concrete) = self.concrete_ty_id(ty) {
+            return self
+                .concrete_rep_slot(
+                    &concrete,
+                    RepUse::Parameter,
+                    self.source_tuple_spelled(ty),
+                    true,
+                )
+                .unwrap_or(RetSlot::Opaque);
+        }
         if let Some(shape) = self.nobox_shape_of_ty(ty) {
             return RetSlot::Leaves(shape);
         }
@@ -910,7 +908,11 @@ impl Builder<'_> {
             return None;
         }
         if let Some(concrete) = self.concrete_ty_id(ty) {
-            return mono_nobox_value_shape(self.ws, &concrete);
+            let arena = self.scx.rep_arena();
+            let id = self
+                .concrete_rep_id(&concrete, RepUse::Parameter, self.source_tuple_spelled(ty), true)
+                .ok()?;
+            return arena.value_shape(id);
         }
         if self.concrete_plan.is_some() {
             return None;
