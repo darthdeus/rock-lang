@@ -247,7 +247,7 @@ pub struct GlobalPlan {
 
 impl PartialEq for GlobalPlan {
     fn eq(&self, other: &Self) -> bool {
-        self.representation == other.representation && Arc::ptr_eq(&self.arena, &other.arena)
+        self.representation == other.representation && self.arena.equivalent(&other.arena)
     }
 }
 
@@ -355,7 +355,7 @@ impl FunctionRepPlan {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq, Eq)]
 struct RepArenaInner {
     plans: Vec<RepPlan>,
     by_key: HashMap<(FnBackend, RepUse, RepLayout, Option<ValueStorage>, bool, bool), RepId>,
@@ -406,6 +406,15 @@ fn column_eligible_for_shape(
 }
 
 impl RepArena {
+    fn equivalent(&self, other: &Self) -> bool {
+        if std::ptr::eq(self, other) {
+            return true;
+        }
+        let left = self.inner.lock().expect("RepArena lock poisoned");
+        let right = other.inner.lock().expect("RepArena lock poisoned");
+        *left == *right
+    }
+
     fn intern(&self, target: FnBackend, use_context: RepUse, layout: RepLayout) -> RepId {
         self.intern_with_storage(target, use_context, layout, None)
     }
@@ -1170,7 +1179,7 @@ impl PartialEq for BackendFnAbiPlan {
         self.subject == other.subject
             && self.target == other.target
             && self.representation == other.representation
-            && Arc::ptr_eq(&self.arena, &other.arena)
+            && self.arena.equivalent(&other.arena)
     }
 }
 
