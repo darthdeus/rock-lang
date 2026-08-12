@@ -1404,14 +1404,10 @@ pub fn callee_instance_subst(
 /// Converts through [`crate::monoty::convert`] -- the one TOTAL logical-type
 /// oracle shared by graph construction and delivery.
 ///
-/// The two UNCONSTRAINED reasons are legitimate `None`s, and they are exactly
-/// the pair `instance_graph::convert_fail` calls `Fail::Unconstrained`:
-/// `UnboundGeneric` means the enclosing body is a shared generic snapshot, so
-/// this call site decides no instantiation; `UnresolvedInfer` means no
-/// constraint reaches the slot at all, which plan S 0h decided to REJECT and
-/// deferred to the Stage-3 cutover -- rejecting it here instead would make it
-/// fatal ahead of that decision. Both are what the census's
-/// `callee-no-instance` counts. Every other reason is a compiler-state
+/// `UnboundGeneric` is the one legitimate `None`: the enclosing body is a
+/// shared generic snapshot, so this call site decides no instantiation.
+/// `UnresolvedInfer` is a compiler-state rejection carrying the callee's span;
+/// it is not a partial physical plan. Every other reason is also a compiler-state
 /// rejection carrying the callee's span: a recovery type, a missing node or a
 /// cyclic substitution chain is not a type the program is allowed to have
 /// reached here.
@@ -1450,8 +1446,15 @@ pub(crate) fn instance_subst_from_bindings(
             Ok(ty) => {
                 subst.insert(var, ty);
             }
-            Err(MonoTyReason::UnboundGeneric(_) | MonoTyReason::UnresolvedInfer(_)) => {
-                return Ok(None)
+            Err(MonoTyReason::UnboundGeneric(_)) => return Ok(None),
+            Err(MonoTyReason::UnresolvedInfer(name)) => {
+                return Err(CompilerError::new_with_label(
+                    f.name_span,
+                    format!(
+                        "internal: a call to `{}` has unresolved inference type `{name}`",
+                        f.name
+                    ),
+                ))
             }
             Err(reason) => {
                 return Err(CompilerError::new_with_label(

@@ -1,5 +1,7 @@
 use super::*;
 
+use bone_semantic::hir::{TypeExpr, VarId};
+
 // -- Stage 0b route-table invariants (docs/monomorphization-plan.md S 2b).
 //
 // No Rock program can reach these states, which is why they are rejections
@@ -54,6 +56,44 @@ fn missing_call_generic_bindings_rejects() {
     )
     .expect_err("a generic callee with no recorded bindings must reject");
     assert!(err.message.contains("no recorded generic bindings"), "{}", err.message);
+}
+
+#[test]
+fn invalid_logical_type_bindings_reject_with_callee_spans() {
+    let (mut ws, mid) = spec_ws("fn id<T>(x: T) -> T { x }\nfn main() { let y = 1 }");
+    let fref = spec_fn(&ws, mid, "id");
+    let inf = spec_inf(&ws, mid, "main");
+    let recovery = crate::lower::shape::instance_subst_from_bindings(
+        &ws,
+        inf,
+        fref,
+        &[ws.builtins.error()],
+        &SpecSubst::default(),
+    )
+    .expect_err("inference recovery poison must reject");
+    assert!(recovery.message.contains("not a logical type"), "{}", recovery.message);
+    assert!(!recovery.labels.is_empty(), "recovery rejection lost its source label");
+    assert_ne!(recovery.labels[0].span.file.as_str(), "<unknown>");
+
+    let unresolved = {
+        let owner = BodyOwner::Function(fref.func);
+        let inference = ws.inferences[mid.raw() as usize].as_mut().expect("inference");
+        let body_inf = inference.per_fn.get_mut(&owner).expect("id inference");
+        body_inf
+            .ty_arena
+            .alloc(TypeExpr::Infer(VarId(991), ustr::Ustr::from("unresolved")))
+    };
+    let unresolved_err = crate::lower::shape::instance_subst_from_bindings(
+        &ws,
+        spec_inf(&ws, mid, "id"),
+        fref,
+        &[bone_semantic::prelude::TyId::Local(unresolved)],
+        &SpecSubst::default(),
+    )
+    .expect_err("an unresolved inference variable must reject");
+    assert!(unresolved_err.message.contains("unresolved inference"), "{}", unresolved_err.message);
+    assert!(!unresolved_err.labels.is_empty(), "unresolved rejection lost its source label");
+    assert_ne!(unresolved_err.labels[0].span.file.as_str(), "<unknown>");
 }
 
 /// A binding list whose length differs from the callee's generic count. The
