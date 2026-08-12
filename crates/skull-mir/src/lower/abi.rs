@@ -29,8 +29,7 @@ use ustr::Ustr;
 
 use super::{
     nobox_declared_shape_spec, nobox_param_slot_spec, sig_param_slot_spec, sig_value_shape_spec,
-    mono_concrete_param_slot, mono_tuple_ret_shape,
-    mono_nobox_value_shape, mono_value_shape, slot_param_names,
+    mono_tuple_ret_shape, slot_param_names,
     tuple_ret_shape, RetSlot, ScalarCtx, SpecSubst, TupleRetShape, ValueShape,
 };
 use crate::concrete::ConcreteBodyPlan;
@@ -612,18 +611,17 @@ impl RepArena {
         target: FnBackend,
         params: &[crate::monoty::MonoTy],
         result_ty: Option<&crate::monoty::MonoTy>,
-        scalar: Option<&FnScalarAbi>,
-        ret_tuple: Option<&TupleRetShape>,
+        param_tuple_spelled: &[bool],
+        mode: Option<ConcreteAbiMode>,
     ) -> FunctionRepPlan {
-        let params = if let Some(scalar) = scalar {
+        let params: Vec<RepId> = if let Some(mode) = mode {
             params
                 .iter()
                 .enumerate()
                 .map(|(index, ty)| {
-                    let tuple_spelled = scalar
-                        .param_shapes
+                    let tuple_spelled = *param_tuple_spelled
                         .get(index)
-                        .is_some_and(|slot| !matches!(slot, RetSlot::Opaque));
+                        .expect("concrete signature is missing parameter ABI provenance");
                     self.plan(
                         ws,
                         target,
@@ -631,8 +629,8 @@ impl RepArena {
                         RepUse::Parameter,
                         &RepUseFacts { tuple_spelled, span: None },
                         RepGuarantees {
-                            nobox: scalar.nobox_only,
-                            allow_opaque: scalar.nobox_only,
+                            nobox: mode.nobox_only,
+                            allow_opaque: true,
                         },
                     )
                     .expect("concrete ABI planner must accept a validated parameter")
@@ -644,41 +642,42 @@ impl RepArena {
                 .map(|_| self.intern(target, RepUse::Parameter, RepLayout::Opaque))
                 .collect()
         };
-        let result = match (result_ty, ret_tuple, scalar.and_then(|abi| abi.ret_shape.as_ref())) {
-            (Some(ty), Some(_), _) => Some(
+        let result = result_ty.map(|ty| {
+            let tuple_spelled = match ty {
+                crate::monoty::MonoTy::Tuple(_) => true,
+                crate::monoty::MonoTy::Nullable(inner) => {
+                    matches!(inner.as_ref(), crate::monoty::MonoTy::Tuple(_))
+                }
+                _ => false,
+            };
+            if mode.is_some() || tuple_spelled {
                 self.plan(
                     ws,
                     target,
                     ty,
                     RepUse::Return,
-                    &RepUseFacts { tuple_spelled: true, span: None },
-                    RepGuarantees::default(),
-                )
-                .expect("concrete ABI planner must accept a validated tuple return"),
-            ),
-            (Some(ty), None, Some(_)) => Some(
-                self.plan(
-                    ws,
-                    target,
-                    ty,
-                    RepUse::Return,
-                    &RepUseFacts::default(),
+                    &RepUseFacts { tuple_spelled, span: None },
                     RepGuarantees {
-                        nobox: scalar.is_some_and(|abi| abi.nobox_only),
-                        allow_opaque: scalar.is_some_and(|abi| abi.nobox_only),
+                        nobox: mode.is_some_and(|mode| mode.nobox_only),
+                        allow_opaque: true,
                     },
                 )
-                .expect("concrete ABI planner must accept a validated value return"),
-            ),
-            (Some(_), None, None) => Some(self.intern(target, RepUse::Return, RepLayout::Opaque)),
-            (None, _, _) => None,
-        };
+                .expect("concrete ABI planner must accept a validated result")
+            } else {
+                self.intern(target, RepUse::Return, RepLayout::Opaque)
+            }
+        });
         let return_lanes = result.map_or(0, |id| self.get(id).lanes(self));
+        let scalar_abi = mode.is_some()
+            && (params
+                .iter()
+                .any(|id| !matches!(self.get(*id).layout(), RepLayout::Opaque))
+                || result.is_some_and(|id| matches!(self.get(id).layout(), RepLayout::Leaves(_))));
         FunctionRepPlan {
             params,
             result,
             return_lanes,
-            scalar_abi: scalar.is_some(),
+            scalar_abi,
         }
     }
 }
@@ -810,11 +809,11 @@ impl PartialEq for BackendFnAbiPlan {
 
 impl Eq for BackendFnAbiPlan {}
 
-fn fn_scalar_abi_concrete(
+fn concrete_abi_mode(
     ws: &Workspace,
     scx: &ScalarCtx,
     plan: &ConcreteBodyPlan,
-) -> Option<FnScalarAbi> {
+) -> Option<ConcreteAbiMode> {
     if scx.values_first_class {
         return None;
     }
@@ -837,37 +836,12 @@ fn fn_scalar_abi_concrete(
         }
         scx.taken_by_ref.contains(&f.name)
     };
-    let params = plan
-        .signature
-        .params
-        .iter()
-        .map(|id| scx.interner().get(*id))
-        .collect::<Vec<_>>();
-    let param_shapes: Vec<RetSlot> = params
-        .iter()
-        .enumerate()
-        .map(|(index, ty)| {
-            let tuple_spelled = *plan
-                .signature
-                .param_tuple_spelled
-                .get(index)
-                .expect("concrete signature is missing parameter ABI provenance");
-            mono_concrete_param_slot(ws, ty, tuple_spelled, nobox_only)
-        })
-        .collect();
-    let ret_shape = plan
-        .signature
-        .result
-        .map(|id| scx.interner().get(id))
-        .and_then(|ty| {
-            if nobox_only {
-                mono_nobox_value_shape(ws, &ty)
-            } else {
-                mono_value_shape(ws, &ty)
-            }
-        });
-    (ret_shape.is_some() || param_shapes.iter().any(RetSlot::splats))
-        .then_some(FnScalarAbi { param_shapes, ret_shape, nobox_only })
+    Some(ConcreteAbiMode { nobox_only })
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ConcreteAbiMode {
+    nobox_only: bool,
 }
 
 impl BackendFnAbiPlan {
@@ -897,12 +871,7 @@ impl BackendFnAbiPlan {
         let inst = plan
             .function_instance()
             .expect("a function ABI plan needs an ordinary concrete owner");
-        let scalar = fn_scalar_abi_concrete(ws, scx, plan);
-        let ret_tuple = plan
-            .signature
-            .result
-            .map(|id| scx.interner().get(id))
-            .and_then(|ty| mono_tuple_ret_shape(ws, &ty));
+        let mode = concrete_abi_mode(ws, scx, plan);
         let params = plan
             .signature
             .params
@@ -916,8 +885,8 @@ impl BackendFnAbiPlan {
             scx.target,
             &params,
             result_ty.as_ref(),
-            scalar.as_ref(),
-            ret_tuple.as_ref(),
+            &plan.signature.param_tuple_spelled,
+            mode,
         );
         Self {
             subject: inst.clone(),

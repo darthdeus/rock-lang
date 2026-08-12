@@ -1582,37 +1582,6 @@ pub(crate) fn mono_tuple_ret_shape(ws: &Workspace, ty: &MonoTy) -> Option<TupleR
     (shape.splats() || !nullable).then_some(shape)
 }
 
-pub(crate) fn mono_sig_param_slot(ws: &Workspace, ty: &MonoTy) -> RetSlot {
-    mono_value_shape(ws, ty)
-        .map(RetSlot::Leaves)
-        .or_else(|| mono_tuple_ret_shape(ws, ty).filter(TupleRetShape::splats).map(RetSlot::Nested))
-        .unwrap_or(RetSlot::Opaque)
-}
-
-pub(crate) fn mono_concrete_param_slot(
-    ws: &Workspace,
-    ty: &MonoTy,
-    tuple_spelled: bool,
-    nobox_only: bool,
-) -> RetSlot {
-    let is_tuple = match ty {
-        MonoTy::Tuple(_) => true,
-        MonoTy::Nullable(inner) => matches!(inner.as_ref(), MonoTy::Tuple(_)),
-        _ => false,
-    };
-    if !tuple_spelled && is_tuple {
-        return RetSlot::Opaque;
-    }
-    if nobox_only {
-        mono_nobox_value_shape(ws, ty)
-            .map(RetSlot::Leaves)
-            .or_else(|| mono_tuple_ret_shape(ws, ty).filter(TupleRetShape::splats).map(RetSlot::Nested))
-            .unwrap_or(RetSlot::Opaque)
-    } else {
-        mono_sig_param_slot(ws, ty)
-    }
-}
-
 /// The concrete binding for `ty` under `enclosing`, or `None` when no concrete
 /// type exists here at all.
 ///
