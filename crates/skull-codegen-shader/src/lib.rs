@@ -26,7 +26,7 @@ use skull_mir::shader_ir::{
     LogicalUniformGroup, ShaderIR, ShaderInstance, ShaderInterfacePlan, ShaderStage,
     ShaderStageIr, UniformRole,
 };
-use skull_parser::CompilerError;
+use skull_parser::{CompilerError, CompilerErrorKind};
 use std::sync::Arc;
 use ustr::Ustr;
 
@@ -36,6 +36,12 @@ use ustr::Ustr;
 pub trait ShaderPlannerPolicy {
     fn inline_call(&self, function: &Function) -> bool;
     fn backend_name(&self) -> &'static str;
+
+    /// Return a capability the target deliberately does not project. This is
+    /// the only planner rejection the selected-artifact driver may omit.
+    fn unsupported_capability(&self, _function: &Function) -> Option<String> {
+        None
+    }
 
     fn validate_concrete_signature(
         &self,
@@ -96,6 +102,18 @@ pub struct ShaderArtifactPlan {
 
 fn err(span: Span, message: impl Into<String>) -> CompilerError {
     CompilerError::new_with_label(span, message.into())
+}
+
+fn profile_err(
+    policy: &dyn ShaderPlannerPolicy,
+    function: &Function,
+    message: impl Into<String>,
+) -> CompilerError {
+    let error = err(function.name_span, message);
+    match policy.unsupported_capability(function) {
+        Some(capability) => error.with_kind(CompilerErrorKind::UnsupportedWgslProjection { capability }),
+        None => error,
+    }
 }
 
 /// Resolve a root name to one function, preferring the caller's module.
@@ -557,8 +575,9 @@ impl skull_mir::reach::ReachPolicy for Reach<'_> {
             return Ok(true);
         }
         if function.is_extern || function.inline_body.is_some() {
-            return Err(err(
-                function.name_span,
+            return Err(profile_err(
+                self.policy,
+                function,
                 format!(
                     "shader profile: `{}` has no emittable body and no {} intrinsic mapping",
                     function.name,
@@ -690,8 +709,9 @@ fn checked_concrete_callees(
             continue;
         }
         if f.is_extern || f.inline_body.is_some() {
-            return Err(err(
-                f.name_span,
+            return Err(profile_err(
+                policy,
+                f,
                 format!(
                     "shader profile: `{}` has no emittable body and no {} intrinsic mapping",
                     f.name,

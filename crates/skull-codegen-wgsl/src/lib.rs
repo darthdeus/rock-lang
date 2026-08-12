@@ -25,7 +25,7 @@ use skull_mir::shader_ir::{
     ShaderInterfacePlan,
     ShaderStage, ShaderStageIr, UniformRole, VertexRate,
 };
-use skull_parser::CompilerError;
+use skull_parser::{CompilerError, CompilerErrorKind};
 use skull_wgsl_abi::{
     WgslArtifactKind as SharedWgslArtifactKind, WgslComputeInfo as SharedWgslComputeInfo,
     WgslAbi as SharedWgslAbi, WgslArrayBlock as SharedWgslArrayBlock,
@@ -54,6 +54,16 @@ pub const FRAG_COORD_PARAM: &str = "frag_coord_in";
 
 fn err(span: Span, message: impl Into<String>) -> CompilerError {
     CompilerError::new_with_label(span, message.into())
+}
+
+fn unsupported_err(
+    span: Span,
+    capability: impl Into<String>,
+    message: impl Into<String>,
+) -> CompilerError {
+    err(span, message).with_kind(CompilerErrorKind::UnsupportedWgslProjection {
+        capability: capability.into(),
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -209,6 +219,25 @@ impl ShaderPlannerPolicy for WgslShaderPolicy {
 
     fn backend_name(&self) -> &'static str {
         "WGSL"
+    }
+
+    fn unsupported_capability(&self, function: &Function) -> Option<String> {
+        match WgslIntrinsic::classify(function) {
+            Some(WgslIntrinsic::UnsupportedOperator) => {
+                Some(format!("unsupported WGSL operator `{}`", function.name))
+            }
+            Some(_) => None,
+            None => match function.name.as_str() {
+                "isnan" | "isinf" => Some("non-finite predicate intrinsic".to_string()),
+                "any" => Some("boolean-vector reduction intrinsic".to_string()),
+                "vertex_id" => Some("vertex-id builtin".to_string()),
+                "texture_id" => Some("integer texture sampling intrinsic".to_string()),
+                "greater_than" => Some("boolean-vector comparison intrinsic".to_string()),
+                "bvec3" => Some("boolean-vector constructor".to_string()),
+                "to_vec3" => Some("boolean-vector conversion intrinsic".to_string()),
+                _ => None,
+            },
+        }
     }
 }
 
@@ -1107,14 +1136,16 @@ fn validate_fullscreen_interface(
         ));
     }
     if !iface.array_groups.is_empty() {
-        return Err(err(
+        return Err(unsupported_err(
             span,
+            "fullscreen uniform arrays",
             "WGSL fullscreen projection does not accept uniform arrays yet",
         ));
     }
     if !iface.bare_samplers.is_empty() {
-        return Err(err(
+        return Err(unsupported_err(
             span,
+            "fullscreen bare sampler bindings",
             "WGSL fullscreen projection requires grouped logical textures; bare samplers are unsupported",
         ));
     }
@@ -1156,8 +1187,9 @@ fn validate_fullscreen_interface(
     match &iface.fragment_output {
         FragmentOutput::Single(WireKind::F32x4) => {}
         FragmentOutput::Single(kind) => {
-            return Err(err(
+            return Err(unsupported_err(
                 span,
+                "non-RGBA fullscreen fragment output",
                 format!(
                     "WGSL fullscreen projection requires vec4<f32> output, found {}",
                     kind.code()
@@ -1165,8 +1197,9 @@ fn validate_fullscreen_interface(
             ));
         }
         FragmentOutput::Mrt(_) => {
-            return Err(err(
+            return Err(unsupported_err(
                 span,
+                "fullscreen multiple render targets",
                 "WGSL fullscreen projection does not accept MRT output yet",
             ));
         }
@@ -1251,8 +1284,9 @@ fn validate_explicit_interface(
         }
     }
     if !iface.bare_samplers.is_empty() {
-        return Err(err(
+        return Err(unsupported_err(
             span,
+            "explicit bare sampler bindings",
             "WGSL explicit projection does not admit bare samplers",
         ));
     }
@@ -1297,8 +1331,9 @@ fn validate_explicit_interface(
     match &iface.fragment_output {
         FragmentOutput::Single(WireKind::F32x4) => {}
         FragmentOutput::Single(kind) => {
-            return Err(err(
+            return Err(unsupported_err(
                 span,
+                "non-RGBA single fragment output",
                 format!(
                     "WGSL explicit projection requires a vec4<f32> single fragment output, found {}",
                     kind.code()
@@ -3217,15 +3252,25 @@ impl<'a> FunctionEmitter<'a> {
                     ),
                 )
             })?;
-            let ty = wgsl_value_type(kind).ok_or_else(|| {
-                err(
+            let Some(ty) = wgsl_value_type(kind) else {
+                if matches!(kind, ValueKind::Sampler(_)) {
+                    return Err(unsupported_err(
+                        self.span,
+                        "sampler-valued helper parameters",
+                        format!(
+                            "WGSL parameter `{}` is not a value parameter",
+                            self.cell_names[cell]
+                        ),
+                    ));
+                }
+                return Err(err(
                     self.span,
                     format!(
                         "WGSL parameter `{}` is not a value parameter",
                         self.cell_names[cell]
                     ),
-                )
-            })?;
+                ));
+            };
             rendered.push(format!("{}: {}", self.cell_names[cell], ty));
         }
         if let Some(name) = &self.frag_coord {
@@ -3868,8 +3913,9 @@ impl<'a> FunctionEmitter<'a> {
                 Ok(widest)
             }
             Some(WgslIntrinsic::Operator(operator)) => self.operator_kind(operator, args),
-            Some(WgslIntrinsic::UnsupportedOperator) => Err(err(
+            Some(WgslIntrinsic::UnsupportedOperator) => Err(unsupported_err(
                 self.span,
+                format!("unsupported WGSL operator `{}`", function.name),
                 format!("WGSL operator `{}` is not admitted", function.name),
             )),
             None => {
@@ -3995,6 +4041,16 @@ impl<'a> FunctionEmitter<'a> {
             if self.stage.order.iter().any(|candidate| candidate == &instance) {
                 return Ok(instance);
             }
+        }
+        if let Some(capability) = WgslShaderPolicy.unsupported_capability(function) {
+            return Err(unsupported_err(
+                self.span,
+                capability,
+                format!(
+                    "WGSL call to `{}` has no concrete emitted instance",
+                    function.name
+                ),
+            ));
         }
         Err(err(
             self.span,
@@ -4535,8 +4591,9 @@ impl<'a> FunctionEmitter<'a> {
                 }
                 self.binary(args[0], operator.symbol(), args[1])
             }
-            Some(WgslIntrinsic::UnsupportedOperator) => Err(err(
+            Some(WgslIntrinsic::UnsupportedOperator) => Err(unsupported_err(
                 self.span,
+                format!("unsupported WGSL operator `{name}`"),
                 format!("WGSL operator `{name}` is not admitted"),
             )),
             None => {

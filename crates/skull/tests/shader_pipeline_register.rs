@@ -409,6 +409,10 @@ fn sprite_batch_vert(@attr a: SpriteBatchVert) -> SpriteBatchVary {
 fn sprite_batch_frag(vary: SpriteBatchVary, @textures t: SpriteBatchTex) -> Vec4 {
     return texture(t.uTexture, vary.TexCoord)
 }
+@shader(fragment)
+fn sampler_value_frag(src: Sampler2D, tc: Vec2) -> Vec4 {
+    return texture(src, tc)
+}
 value CustomVert { aPos: Vec2 }
 value CustomVary { position: Vec4, TexCoord: Vec2 }
 @shader(vertex)
@@ -432,6 +436,7 @@ fn use_all() -> string {
     let c = rock_shader(tonemap_frag)
     let d = rock_shader(sprite_basic_vert, sprite_basic_frag)
     let e = rock_shader(sprite_batch_vert, sprite_batch_frag)
+    let f = rock_shader(sampler_value_frag)
     return rock_shader(custom_vert, custom_frag)
 }
 "#;
@@ -440,13 +445,21 @@ fn use_all() -> string {
 fn wgpu_registration_follows_graph_owned_shader_pairs() {
     let ws = ws_with_stdlib(WGPU_FULLSCREEN_SRC);
     let mid = test_mid(&ws);
-    let (emit, _) = emit_full_in_for_renderer(&ws, mid, None, RendererTarget::Wgpu)
+    let (emit, cache) = emit_full_in_for_renderer(&ws, mid, None, RendererTarget::Wgpu)
         .expect("selected artifacts emit");
     assert_eq!(
         emit.lua.matches("__rock_wgpu_shader_register(").count(),
         6,
-        "the selected renderer admits every WGPU-compatible graph pair"
+        "the selected renderer admits six of the seven graph pairs"
     );
+    assert!(emit.lua.contains("__rock_shader_register(\"sampler_value_frag\""),
+        "GL keeps the raw compatibility registration for the omitted WGSL projection");
+    let census = cache.wgpu_projection_census().expect("WGPU projection census");
+    assert_eq!(census.examined, 7);
+    assert_eq!(census.admitted, 6);
+    assert_eq!(census.omitted, 1);
+    assert_eq!(census.admitted + census.omitted, census.examined);
+    assert_eq!(census.omissions.keys().map(String::as_str).collect::<Vec<_>>(), ["sampler_value_frag"]);
     for root in [
         "blit_frag",
         "present_frag",

@@ -26,7 +26,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use skull_codegen_lua::{emit_function, emit_named, mangle_fn, CodegenCtx};
 use skull_mir::instance::Instance;
 use skull_mir::mir::{FuncRef, Inst, MirFunc, Term};
-use skull_parser::CompilerError;
+use skull_parser::{CompilerError, CompilerErrorKind};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
@@ -1265,6 +1265,54 @@ pub enum RendererTarget {
     Wgpu,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WgpuProjectionCensus {
+    pub examined: usize,
+    pub admitted: usize,
+    pub omitted: usize,
+    pub omissions: BTreeMap<String, String>,
+}
+
+enum WgpuProjection<T> {
+    Admitted(T),
+    Unsupported { capability: String },
+}
+
+fn classify_wgpu_projection<T>(result: Result<T, CompilerError>) -> Result<WgpuProjection<T>, CompilerError> {
+    match result {
+        Ok(value) => Ok(WgpuProjection::Admitted(value)),
+        Err(error) => match error.kind {
+            CompilerErrorKind::UnsupportedWgslProjection { capability } => {
+                Ok(WgpuProjection::Unsupported { capability })
+            }
+            _ => Err(error),
+        },
+    }
+}
+
+fn collect_wgpu_projections<T, K>(
+    items: impl IntoIterator<Item = (String, K)>,
+    mut project: impl FnMut(&str, K) -> Result<T, CompilerError>,
+) -> Result<(Vec<(String, T)>, WgpuProjectionCensus), CompilerError> {
+    let mut census = WgpuProjectionCensus::default();
+    let mut admitted = Vec::new();
+    for (key, input) in items {
+        census.examined += 1;
+        match classify_wgpu_projection(project(&key, input))? {
+            WgpuProjection::Admitted(value) => {
+                census.admitted += 1;
+                admitted.push((key, value));
+            }
+            WgpuProjection::Unsupported { capability } => {
+                census.omitted += 1;
+                census.omissions.insert(key, capability);
+            }
+        }
+    }
+    debug_assert_eq!(census.examined, census.admitted + census.omitted);
+    Ok((admitted, census))
+}
+
 #[derive(Default)]
 struct ShaderRegistrations {
     lua: String,
@@ -1273,6 +1321,7 @@ struct ShaderRegistrations {
     roots: Vec<FuncRef>,
     keys: BTreeSet<String>,
     abi_wires: BTreeMap<String, String>,
+    wgpu_projection_census: Option<WgpuProjectionCensus>,
 }
 
 /// A `static` cell's reload key: rendered type + initializer content hash. Equal
@@ -2524,11 +2573,17 @@ fn shader_registration_lines(
         .map(|pair| pair.key.clone())
         .chain(compute_collection.entries.iter().map(|entry| entry.key.clone()))
         .collect();
-    if renderer_target == RendererTarget::Wgpu && !collection.pairs.is_empty() {
-        for (pair, program_view) in collection.pairs.iter().zip(&view.program_views) {
-            let key = pair.key.as_str();
-            let fullscreen = pair.vert.is_none();
-            let emitted = (|| -> Result<(&str, String, String, String, Vec<FuncRef>), CompilerError> {
+    let mut wgpu_projection_census = None;
+    if renderer_target == RendererTarget::Wgpu {
+        let items = collection
+            .pairs
+            .iter()
+            .zip(&view.program_views)
+            .map(|(pair, program_view)| {
+                (pair.key.clone(), (pair.vert.is_none(), program_view))
+            });
+        let (artifacts, census) = collect_wgpu_projections(items, |key, (fullscreen, program_view)| {
+            let emitted = (|| -> Result<(String, String, String, Vec<FuncRef>), CompilerError> {
                 if fullscreen {
                     let stage_view = program_view
                         .stages
@@ -2558,7 +2613,6 @@ fn shader_registration_lines(
                         bone_semantic::prelude::Span::default(),
                     )?;
                     Ok((
-                        key,
                         emission.source,
                         emission.abi.wire(),
                         neutral.interface.semantic_wire(true),
@@ -2585,7 +2639,6 @@ fn shader_registration_lines(
                         bone_semantic::prelude::Span::default(),
                     )?;
                     Ok((
-                        key,
                         emission.source,
                         emission.abi.wire(),
                         glsl.interface.semantic_wire(false),
@@ -2593,24 +2646,21 @@ fn shader_registration_lines(
                     ))
                 }
             })();
-            let (shader_key, source, wire, semantic_wire, emission_dependencies) = match emitted {
-                Ok(value) => value,
-                Err(error) => {
-                    eprintln!("wgsl artifact omitted for {key}: {error}");
-                    continue;
-                }
-            };
+            emitted
+        })?;
+        for (shader_key, (source, wire, semantic_wire, emission_dependencies)) in artifacts {
             dependencies.extend(emission_dependencies);
-            abi_wires.insert(shader_key.to_string(), wire.clone());
+            abi_wires.insert(shader_key.clone(), wire.clone());
             let _ = writeln!(
                 out,
                 "__rock_wgpu_shader_register({}, {}, {}, {})",
-                skull_codegen_lua::lua_string(shader_key),
+                skull_codegen_lua::lua_string(&shader_key),
                 skull_codegen_lua::lua_string(&source),
                 skull_codegen_lua::lua_string(&wire),
                 skull_codegen_lua::lua_string(&semantic_wire),
             );
         }
+        wgpu_projection_census = Some(census);
     }
     if view.compute_views.len() != compute_collection.entries.len() {
         return Err(CompilerError::new_no_location(format!(
@@ -2675,6 +2725,7 @@ fn shader_registration_lines(
             .collect(),
         keys,
         abi_wires,
+        wgpu_projection_census,
     })
 }
 
@@ -3565,6 +3616,10 @@ impl SkullEmitCache {
         self.shader_registrations.abi_wires.clone()
     }
 
+    pub fn wgpu_projection_census(&self) -> Option<&WgpuProjectionCensus> {
+        self.shader_registrations.wgpu_projection_census.as_ref()
+    }
+
 
 fn update_shader_registrations(
     &mut self,
@@ -4261,6 +4316,32 @@ pub fn emit_overlay(
         ("assemble_overlay (+build_deco_map)", t_asm),
     ];
     Ok(emit)
+}
+
+#[cfg(test)]
+mod wgpu_projection_tests {
+    use super::*;
+
+    #[test]
+    fn unexpected_emitter_failure_aborts_after_admission() {
+        let unexpected = CompilerError::new_no_location("unexpected WGSL emitter failure");
+        let mut visited = Vec::new();
+        let result = collect_wgpu_projections(
+            vec![("admitted".to_string(), true), ("unexpected".to_string(), false)],
+            |key, _| {
+                visited.push(key.to_string());
+                if key == "admitted" {
+                    Ok("artifact")
+                } else {
+                    Err(unexpected.clone())
+                }
+            },
+        );
+        let error = result.expect_err("an unexpected emitter error must fail the collection");
+        assert_eq!(error.message, "unexpected WGSL emitter failure");
+        assert_eq!(error.kind, CompilerErrorKind::Generic);
+        assert_eq!(visited, ["admitted", "unexpected"]);
+    }
 }
 
 #[cfg(test)]
