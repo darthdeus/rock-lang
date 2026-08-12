@@ -682,6 +682,9 @@ impl Builder<'_> {
         {
             return Ok(None);
         }
+        if !any_named && self.is_fn_global(name) {
+            return Ok(None);
+        }
         // The CALLEE's instantiation, via the same oracle `lower_call` uses --
         // not the enclosing body's `spec_subst`, which is empty in a
         // non-generic caller and left every slot `Opaque`.
