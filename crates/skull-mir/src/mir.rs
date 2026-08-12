@@ -166,6 +166,33 @@ impl std::fmt::Display for ColumnElem {
     }
 }
 
+/// The capture transport selected for one closure value. The transform owns the
+/// scope analysis; MIR retains the resulting plan so later closure, inline, and
+/// backend stages do not rediscover which cells cross the closure boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClosureEnvPlan {
+    captures: Vec<Idx<Cell>>,
+    env_cell: Option<Idx<Cell>>,
+}
+
+impl ClosureEnvPlan {
+    pub fn new(captures: Vec<Idx<Cell>>, env_cell: Option<Idx<Cell>>) -> Self {
+        Self { captures, env_cell }
+    }
+
+    pub fn captures(&self) -> &[Idx<Cell>] {
+        &self.captures
+    }
+
+    pub fn env_cell(&self) -> Option<Idx<Cell>> {
+        self.env_cell
+    }
+
+    pub fn captures_cell(&self, cell: Idx<Cell>) -> bool {
+        self.captures.contains(&cell)
+    }
+}
+
 impl ContainerKind {
     /// Either NativeBuffer flavor — the `{ ptr, len }` C-array shape.
     pub fn is_native_buffer(self) -> bool {
@@ -783,6 +810,11 @@ pub struct MirFunc {
     /// is carried directly beside the `CallValue`/`CallValueMulti` instruction.
     pub call_rep_plans:
         bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::lower::FunctionRepPlan>,
+    /// The owned capture transport for each closure creation instruction. The
+    /// closure transform consumes this instead of re-deriving captures from the
+    /// rewritten CFG.
+    pub closure_env_plans:
+        bone_semantic::prelude::FxHashMap<Idx<Inst>, ClosureEnvPlan>,
     /// Placeholder [`Inst::CallBoundMulti`]s whose element the LOWERING already
     /// split into leaf cells: `dests` is sized to the real return arity and the
     /// loop pattern is bound to the leaves, so the splice must leave both alone.
@@ -871,6 +903,7 @@ impl MirFunc {
             callee_instances: Default::default(),
             call_abi_plans: Default::default(),
             call_rep_plans: Default::default(),
+            closure_env_plans: Default::default(),
             fn_value_symbols: Default::default(),
             hoisted_fn_globals: Vec::new(),
             site_owners: Vec::new(),

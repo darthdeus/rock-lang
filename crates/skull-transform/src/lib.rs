@@ -1718,6 +1718,23 @@ mod tests {
             "one frame plan must own both membership and physical slots"
         );
     }
+
+    #[test]
+    fn closure_conversion_exposes_one_owned_environment_plan() {
+        let mut func = lower(
+            "fn f() -> int { let captured = 3; let g = () => captured; return g() }",
+            "f",
+        );
+        assert!(
+            func.insts.iter().any(|(_, inst)| matches!(inst, Inst::Lambda { .. })),
+            "the closure fixture must have a nonzero lambda population"
+        );
+        convert_closures(&mut func, "f");
+        assert_eq!(func.closure_env_plans.len(), 1, "one lambda must have one env plan");
+        let plan = func.closure_env_plans.values().next().expect("closure env plan");
+        assert!(!plan.captures().is_empty(), "the closure environment must carry a capture");
+        assert!(plan.env_cell().is_some(), "a capturing closure must own an env cell");
+    }
 }
 
 /// FNV-1a 32 over the canonical layout string. 32-bit so the constant is
