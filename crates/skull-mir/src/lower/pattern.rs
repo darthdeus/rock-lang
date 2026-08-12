@@ -668,6 +668,9 @@ impl Builder<'_> {
         else {
             return Ok(None);
         };
+        if self.ws.newtypes_by_name.contains_key(&name) {
+            return Ok(None);
+        }
         let arg_idxs: Vec<_> = args.into_iter().collect();
         let any_named = arg_idxs
             .iter()

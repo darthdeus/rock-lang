@@ -434,6 +434,23 @@ fn main() {
 }
 
 #[test]
+fn unit_function_values_share_the_no_result_abi() {
+    let ws = ws_of("fn sink() { print(\"ok\") }\n");
+    let scx = ScalarCtx::new(&ws);
+    let sink = func_ref(&ws, "sink");
+    let declaration = BackendFnAbiPlan::for_boundary_declaration(&ws, &scx, sink);
+    let value = BackendFnAbiPlan::for_function_value(
+        &ws,
+        &scx,
+        &MonoTy::Function { params: Vec::new(), ret: Box::new(MonoTy::Unit) },
+    )
+    .expect("a unit function value must have a total physical plan");
+
+    assert_eq!(declaration.representation().result(), None);
+    assert_eq!(value.result(), None);
+}
+
+#[test]
 fn container_storage_uses_the_element_representation_plan() {
     let ws = ws_of("nobox value V2 { x: float, y: float }");
     let arena = RepArena::default();

@@ -870,23 +870,27 @@ impl RepArena {
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let result = self.plan(
-            ws,
-            target,
-            ret,
-            RepUse::Return,
-            &RepUseFacts {
-                tuple_spelled: matches!(ret.peel_nullable().0, crate::monoty::MonoTy::Tuple(_)),
-                span: None,
-            },
-            RepGuarantees { nobox: nobox_only, allow_opaque: true },
-        )?;
+        let result = if matches!(ret.as_ref(), crate::monoty::MonoTy::Unit) {
+            None
+        } else {
+            Some(self.plan(
+                ws,
+                target,
+                ret,
+                RepUse::Return,
+                &RepUseFacts {
+                    tuple_spelled: matches!(ret.peel_nullable().0, crate::monoty::MonoTy::Tuple(_)),
+                    span: None,
+                },
+                RepGuarantees { nobox: nobox_only, allow_opaque: true },
+            )?)
+        };
         let scalar_abi = params.iter().any(|id| !matches!(self.get(*id).layout(), RepLayout::Opaque))
-            || matches!(self.get(result).layout(), RepLayout::Leaves(_));
-        let return_lanes = self.get(result).lanes(self);
+            || result.is_some_and(|id| matches!(self.get(id).layout(), RepLayout::Leaves(_)));
+        let return_lanes = result.map_or(0, |id| self.get(id).lanes(self));
         Ok(FunctionRepPlan {
             params,
-            result: Some(result),
+            result,
             return_lanes,
             scalar_abi,
         })
@@ -922,6 +926,9 @@ impl RepArena {
 
         let result = f.return_ty.map(|return_ty| {
             let ty = declared_mono_type(ws, return_ty, subst)?;
+            if ty.as_ref().is_some_and(|ty| matches!(ty, crate::monoty::MonoTy::Unit)) {
+                return Ok(None);
+            }
             let tuple_spelled = declared_tuple_spelled(ws, return_ty);
             let id = if let Some(ty) = ty {
                 let is_tuple = matches!(ty, crate::monoty::MonoTy::Tuple(_));
@@ -949,8 +956,8 @@ impl RepArena {
             } else {
                 self.intern(target, RepUse::Return, RepLayout::Opaque)
             };
-            Ok(id)
-        }).transpose()?;
+            Ok(Some(id))
+        }).transpose()?.flatten();
         let scalar_abi = mode.is_some()
             && (params
                 .iter()
@@ -1214,7 +1221,10 @@ impl BackendFnAbiPlan {
             .iter()
             .map(|id| scx.interner().get(*id))
             .collect::<Vec<_>>();
-        let result_ty = signature.result.map(|id| scx.interner().get(id));
+        let result_ty = signature
+            .result
+            .map(|id| scx.interner().get(id))
+            .filter(|ty| !matches!(ty, crate::monoty::MonoTy::Unit));
         let arena = scx.rep_arena();
         let representation = arena.function_from_concrete(
             ws,

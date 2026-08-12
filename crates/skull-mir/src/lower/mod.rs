@@ -2072,6 +2072,15 @@ impl Builder<'_> {
     /// single (boxed) value, or empty for a bare return.
     fn return_leaves(&mut self, opt: Option<Idx<Expr>>) -> Result<Vec<Idx<Inst>>, CompilerError> {
         let Some(e) = opt else { return Ok(vec![]) };
+        if self
+            .concrete_plan
+            .signature
+            .result
+            .is_some_and(|id| matches!(self.concrete_mono(id), crate::monoty::MonoTy::Unit))
+        {
+            self.lower_expr(e)?;
+            return Ok(vec![]);
+        }
         if let Some(shape) = self.result_shape() {
             let r = self.lower_expr_repr(e)?;
             let rep = self.ret_rep.expect("result_shape requires an owned result RepId");
