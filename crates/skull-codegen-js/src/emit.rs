@@ -5293,7 +5293,9 @@ fn build_enum_global_defs(ws: &Workspace) -> HashMap<ustr::Ustr, String> {
     let mut out = HashMap::new();
     for module in ws.modules.iter() {
         for (_, e) in module.enums.iter() {
-            if skull_mir::lower::enum_value_shape(ws, e.name).is_some() {
+            if skull_mir::lower::EnumPlan::for_name(ws, e.name)
+                .is_some_and(|plan| plan.cdata().is_some())
+            {
                 continue;
             }
             let all_unit = !e.variants.is_empty()

@@ -25,7 +25,7 @@ use bone_semantic::inference::{BodyInference, Workspace};
 use bone_semantic::prelude::Idx;
 use ustr::Ustr;
 
-use super::shape::{flat_enum_shape, payload_free_enum_variants};
+use super::{EnumPlan, shape::payload_free_enum_variants};
 use crate::concrete::{ConcreteBodyPlan, ConcreteTypeTables};
 use crate::monoty::MonoSubst;
 
@@ -466,7 +466,7 @@ impl<'a> DispatchCtx<'a> {
                 payload,
                 crate::monoty::MonoTy::App {
                     ctor: crate::monoty::MonoCtor::Nominal(n), ..
-                } if flat_enum_shape(self.ws, *n).is_some()
+                } if EnumPlan::for_name(self.ws, *n).is_some_and(|plan| plan.flat().is_some())
             );
         }
         if self.concrete_plan.is_some() {
@@ -475,7 +475,7 @@ impl<'a> DispatchCtx<'a> {
         matches!(
             self.expr_ty(e),
             Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. })
-                if flat_enum_shape(self.ws, n).is_some()
+                if EnumPlan::for_name(self.ws, n).is_some_and(|plan| plan.flat().is_some())
         )
     }
 

@@ -345,7 +345,9 @@ impl Builder<'_> {
             // Lowering the payload args directly instead packs each one on its
             // own, which boxes a `nobox` payload the enum would have stored
             // splat (`tests/nobox_enum_payload_container.rock`).
-            Expr::EnumVariant { enum_name, .. } if flat_enum_shape(self.ws, enum_name).is_some() => {
+            Expr::EnumVariant { enum_name, .. }
+                if EnumPlan::for_name(self.ws, enum_name).is_some_and(|plan| plan.flat().is_some()) =>
+            {
                 let r = self.lower_expr_repr(e)?;
                 Ok(self.pack(r))
             }

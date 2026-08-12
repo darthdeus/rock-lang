@@ -483,7 +483,7 @@ pub(crate) fn layout_rec(
     // A cdata-eligible enum is a struct in its own right (`{ int __tag; <prim>
     // _0; .. }`), not a value struct -- `value_shape_rec` nests it, so this
     // must nest it identically.
-    if let Some(es) = enum_value_shape(ws, name) {
+    if let Some(es) = EnumPlan::for_name(ws, name).and_then(|plan| plan.cdata().cloned()) {
         let mut off = base;
         let mut align = 4; // the `int __tag`
         let mut push = |nm: &str, cty: &'static str, off: &mut usize, align: &mut usize| {
@@ -745,7 +745,9 @@ pub(crate) fn static_ty(ws: &Workspace, ty: TyId) -> Option<TypeExpr> {
 /// types disqualify.
 pub(crate) fn value_shape(ws: &Workspace, name: Ustr) -> Option<ValueShape> {
     value_shape_rec(ws, name, &mut Vec::new())
-        .or_else(|| enum_value_shape(ws, name).map(|e| e.value_shape()))
+        .or_else(|| {
+            EnumPlan::for_name(ws, name).and_then(|plan| plan.cdata().map(|e| e.value_shape()))
+        })
 }
 
 /// Whether `name` is a GC-FREE (all-scalar) value struct: every leaf is a
@@ -787,7 +789,7 @@ pub(crate) fn value_shape_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ust
                 // disqualified.
                 if payload_free_enum_variants(ws, n).is_some() {
                     FieldShape::Prim
-                } else if let Some(es) = enum_value_shape(ws, n) {
+                } else if let Some(es) = EnumPlan::for_name(ws, n).and_then(|plan| plan.cdata().cloned()) {
                     FieldShape::Nested(es.value_shape())
                 } else {
                     FieldShape::Nested(value_shape_rec(ws, n, visiting)?)
@@ -859,7 +861,7 @@ pub(crate) fn value_shape_gc_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<
             Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. }) => {
                 if payload_free_enum_variants(ws, n).is_some() {
                     FieldShape::Prim
-                } else if let Some(es) = enum_value_shape(ws, n) {
+                } else if let Some(es) = EnumPlan::for_name(ws, n).and_then(|plan| plan.cdata().cloned()) {
                     FieldShape::Nested(es.value_shape())
                 } else if map_is_value_struct(ws, n) {
                     // Nested value struct (either tier): thread its own leaves; a
@@ -906,7 +908,7 @@ pub(crate) fn value_shape_gc_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<
 /// value-struct `<Enum>_ct` path). Empty if `name` is neither.
 pub fn struct_field_names(ws: &Workspace, name: Ustr) -> Vec<Ustr> {
     let Some(sid) = ws.struct_by_name.get(&name) else {
-        if let Some(es) = enum_value_shape(ws, name) {
+        if let Some(es) = EnumPlan::for_name(ws, name).and_then(|plan| plan.cdata().cloned()) {
             return es.field_names();
         }
         return Vec::new();
@@ -1233,7 +1235,7 @@ pub(crate) fn sig_value_shape(ws: &Workspace, ty: TyId) -> Option<ValueShape> {
 pub(crate) fn sig_shape_of_nominal(ws: &Workspace, n: Ustr) -> Option<ValueShape> {
     value_shape(ws, n)
         .or_else(|| value_shape_gc(ws, n))
-        .or_else(|| flat_enum_shape(ws, n).map(|s| s.value_shape()))
+        .or_else(|| EnumPlan::for_name(ws, n).and_then(|plan| plan.flat().map(|s| s.value_shape())))
 }
 
 /// [`sig_shape_of_nominal`] for a NULLABLE nominal.
@@ -1247,14 +1249,14 @@ pub(crate) fn sig_shape_of_nullable_nominal(ws: &Workspace, n: Ustr) -> Option<V
         shape.nullable = true;
         return Some(shape);
     }
-    flat_enum_shape(ws, n).map(|s| s.value_shape())
+    EnumPlan::for_name(ws, n).and_then(|plan| plan.flat().map(|s| s.value_shape()))
 }
 
 /// The value shape of a `name` nominal (value struct or flat enum), or `None`.
 pub(crate) fn value_shape_of_nominal(ws: &Workspace, name: Ustr) -> Option<ValueShape> {
     value_shape(ws, name)
         .or_else(|| value_shape_gc(ws, name))
-        .or_else(|| flat_enum_shape(ws, name).map(|s| s.value_shape()))
+        .or_else(|| EnumPlan::for_name(ws, name).and_then(|plan| plan.flat().map(|s| s.value_shape())))
 }
 
 /// The Lua global holding leaf `leaf` of the `nobox` global `base`. A global is
@@ -2627,7 +2629,7 @@ pub(crate) fn value_field_c_type_guarded(ws: &Workspace, ty: TyId, stack: &mut V
             Some("int".into())
         }
         TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }
-            if enum_value_shape(ws, name).is_some() =>
+            if EnumPlan::for_name(ws, name).is_some_and(|plan| plan.cdata().is_some()) =>
         {
             Some(name.as_str().to_string())
         }
@@ -2926,16 +2928,6 @@ impl EnumPlan {
     }
 }
 
-/// Operational cdata view of the authoritative [`EnumPlan`].
-pub fn enum_value_shape(ws: &Workspace, name: Ustr) -> Option<EnumCdataShape> {
-    EnumPlan::for_name(ws, name).and_then(|plan| plan.cdata().cloned())
-}
-
-/// Operational flattened view of the authoritative [`EnumPlan`].
-pub(crate) fn flat_enum_shape(ws: &Workspace, name: Ustr) -> Option<EnumFlatShape> {
-    EnumPlan::for_name(ws, name).and_then(|plan| plan.flat().cloned())
-}
-
 /// The leaf shape of a payload type that is a `nobox` value struct, else `None`.
 ///
 /// Keyed on the DECLARED payload type, like every other splat decision on this
@@ -2995,7 +2987,7 @@ pub fn coroutine_yield_channel(ws: &Workspace, return_ty: TyId) -> Option<YieldC
     let TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } = ws.module(m).ty_arena[y_idx] else {
         return None;
     };
-    let shape = flat_enum_shape(ws, n)?;
+    let shape = EnumPlan::for_name(ws, n).and_then(|plan| plan.flat().cloned())?;
     Some(YieldChannel {
         enum_name: shape.name,
         tuple_width: shape.tuple_width(),
@@ -3028,7 +3020,7 @@ pub fn coroutine_yield_channel_mono(ws: &Workspace, ty: &MonoTy) -> Option<Yield
     else {
         return None;
     };
-    let shape = flat_enum_shape(ws, *yield_name)?;
+    let shape = EnumPlan::for_name(ws, *yield_name).and_then(|plan| plan.flat().cloned())?;
     Some(YieldChannel {
         enum_name: shape.name,
         tuple_width: shape.tuple_width(),

@@ -86,7 +86,9 @@ impl Builder<'_> {
         // spread back out.
         let r = self.lower_expr_repr(value)?;
         match r {
-            ValueRepr::Group { name, parts, .. } if flat_enum_shape(self.ws, name).is_some() => {
+            ValueRepr::Group { name, parts, .. }
+                if EnumPlan::for_name(self.ws, name).is_some_and(|plan| plan.flat().is_some()) =>
+            {
                 Ok(self.repr_group_to_cells(shape, parts))
             }
             other => {
@@ -124,14 +126,14 @@ impl Builder<'_> {
             else {
                 return None;
             };
-            return flat_enum_shape(self.ws, *name).map(|s| s.value_shape());
+            return EnumPlan::for_name(self.ws, *name).and_then(|plan| plan.flat().map(|s| s.value_shape()));
         }
         if self.concrete_plan.is_some() {
             return None;
         }
         match self.expr_ty(e)? {
             TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => {
-                flat_enum_shape(self.ws, n).map(|s| s.value_shape())
+                EnumPlan::for_name(self.ws, n).and_then(|plan| plan.flat().map(|s| s.value_shape()))
             }
             _ => None,
         }
@@ -147,13 +149,15 @@ impl Builder<'_> {
             else {
                 return None;
             };
-            return flat_enum_shape(self.ws, *name);
+            return EnumPlan::for_name(self.ws, *name).and_then(|plan| plan.flat().cloned());
         }
         if self.concrete_plan.is_some() {
             return None;
         }
         match self.expr_ty(e)? {
-            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => flat_enum_shape(self.ws, n),
+            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => {
+                EnumPlan::for_name(self.ws, n).and_then(|plan| plan.flat().cloned())
+            }
             _ => None,
         }
     }

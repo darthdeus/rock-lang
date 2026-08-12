@@ -398,15 +398,23 @@ impl Builder<'_> {
             // A cdata-eligible enum construction stays an unboxed Group `[tag, _0]`
             // (so a callsite/field can splat it without a cdata round-trip); `pack`
             // builds `<Enum>_ct` only if a boxed context needs it.
-            Expr::EnumVariant { enum_name, variant, args, .. } if enum_value_shape(self.ws, enum_name).is_some() => {
-                let shape = enum_value_shape(self.ws, enum_name).unwrap();
+            Expr::EnumVariant { enum_name, variant, args, .. }
+                if EnumPlan::for_name(self.ws, enum_name).is_some_and(|plan| plan.cdata().is_some()) =>
+            {
+                let shape = EnumPlan::for_name(self.ws, enum_name)
+                    .and_then(|plan| plan.cdata().cloned())
+                    .expect("cdata enum plan disappeared");
                 self.enum_cdata_repr(&shape, variant, args)
             }
             // A flat (boxed) enum construction stays an unboxed Group `[tag, _0..,
             // <rec>..]` so a call/return/match can thread it as scalars; `pack`
             // builds the `{__variant}` box only if a boxed context needs it.
-            Expr::EnumVariant { enum_name, .. } if flat_enum_shape(self.ws, enum_name).is_some() => {
-                let shape = flat_enum_shape(self.ws, enum_name).unwrap();
+            Expr::EnumVariant { enum_name, .. }
+                if EnumPlan::for_name(self.ws, enum_name).is_some_and(|plan| plan.flat().is_some()) =>
+            {
+                let shape = EnumPlan::for_name(self.ws, enum_name)
+                    .and_then(|plan| plan.flat().cloned())
+                    .expect("flat enum plan disappeared");
                 let cells = self.lower_flat_value(&shape, e)?;
                 Ok(self.flat_cells_to_repr(&shape, cells))
             }

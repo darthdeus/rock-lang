@@ -17,7 +17,7 @@ impl Builder<'_> {
         let TypeExpr::App { ctor: TypeCtor::Nominal(ename), .. } = static_ty(self.ws, fdef.ty)? else {
             return None;
         };
-        flat_enum_shape(self.ws, ename)
+        EnumPlan::for_name(self.ws, ename).and_then(|plan| plan.flat().cloned())
     }
 
     /// Same as [`Self::flat_field_of`] but for a known struct name + field (used at a
@@ -32,7 +32,7 @@ impl Builder<'_> {
         let TypeExpr::App { ctor: TypeCtor::Nominal(ename), .. } = static_ty(self.ws, fdef.ty)? else {
             return None;
         };
-        flat_enum_shape(self.ws, ename)
+        EnumPlan::for_name(self.ws, ename).and_then(|plan| plan.flat().cloned())
     }
 
     // --- `embed` storage: a child's leaves ARE the parent's physical keys ---

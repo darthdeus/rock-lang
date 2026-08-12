@@ -915,7 +915,9 @@ fn enum_cdata_defs(ws: &Workspace) -> String {
     let mut typedefs = String::new();
     let mut ctors = String::new();
     for name in names {
-        if let Some(shape) = skull_mir::lower::enum_value_shape(ws, name) {
+        if let Some(shape) = skull_mir::lower::EnumPlan::for_name(ws, name)
+            .and_then(|plan| plan.cdata().cloned())
+        {
             let slots: String =
                 shape.slots.iter().map(|(nm, t)| format!(" {t} {nm};")).collect();
             typedefs.push_str(&format!("typedef struct {{ int __tag;{slots} }} {n};\n", n = name));
@@ -940,7 +942,9 @@ fn enum_cdata_metatypes(ws: &Workspace) -> String {
     let mut out = String::new();
     let mut any = false;
     for name in names {
-        let Some(shape) = skull_mir::lower::enum_value_shape(ws, name) else {
+        let Some(shape) = skull_mir::lower::EnumPlan::for_name(ws, name)
+            .and_then(|plan| plan.cdata().cloned())
+        else {
             continue;
         };
         if !any {
@@ -1092,7 +1096,9 @@ fn enum_runtime_defs(ws: &Workspace) -> String {
             // singleton or names table; its ctype defs come from
             // `enum_cdata_defs`, while `type_table_defs` records its physical
             // slots and logical variants for typed runtime consumers.
-            if skull_mir::lower::enum_value_shape(ws, e.name).is_some() {
+            if skull_mir::lower::EnumPlan::for_name(ws, e.name)
+                .is_some_and(|plan| plan.cdata().is_some())
+            {
                 continue;
             }
             let all_unit =
@@ -1146,7 +1152,9 @@ fn c_struct_inspect_defs(ws: &Workspace, emitted: &rustc_hash::FxHashSet<ustr::U
         let mut enums: Vec<ustr::Ustr> = ws.enums_by_name.keys().copied().collect();
         enums.sort_by(|a, b| a.as_str().cmp(b.as_str()));
         for name in enums {
-            let Some(shape) = skull_mir::lower::enum_value_shape(ws, name) else {
+            let Some(shape) = skull_mir::lower::EnumPlan::for_name(ws, name)
+                .and_then(|plan| plan.cdata().cloned())
+            else {
                 continue;
             };
             let copy_args: Vec<String> =
@@ -1505,7 +1513,9 @@ fn type_table_defs(ws: &Workspace, gc: &rustc_hash::FxHashSet<ustr::Ustr>) -> St
         for (_, e) in module.enums.iter() {
             use bone_semantic::hir::VariantPayload;
 
-            let Some(shape) = skull_mir::lower::enum_value_shape(ws, e.name) else {
+            let Some(shape) = skull_mir::lower::EnumPlan::for_name(ws, e.name)
+                .and_then(|plan| plan.cdata().cloned())
+            else {
                 // A BOXED enum has no value shape, and until now no reflection
                 // entry at all -- so a serializer reaching one had nothing to
                 // ask about its payload and rendered every handle in it as a

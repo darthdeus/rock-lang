@@ -1477,8 +1477,12 @@ impl Builder<'_> {
             }
             // A flat-enum Group `[tag, _0.., <rec>..]` packs to the `{__variant}`
             // box (`MakeEnumDyn`), the enum escape -- not a `<name>_ct` cdata.
-            ValueRepr::Group { name, parts, .. } if flat_enum_shape(self.ws, name).is_some() => {
-                let shape = flat_enum_shape(self.ws, name).unwrap();
+            ValueRepr::Group { name, parts, .. }
+                if EnumPlan::for_name(self.ws, name).is_some_and(|plan| plan.flat().is_some()) =>
+            {
+                let shape = EnumPlan::for_name(self.ws, name)
+                    .and_then(|plan| plan.flat().cloned())
+                    .expect("flat enum plan disappeared");
                 let packed: Vec<Idx<Inst>> = parts.into_iter().map(|p| self.pack(p)).collect();
                 let tag = packed[0];
                 let positional = packed[1..1 + shape.tuple_width()].to_vec();
@@ -1750,7 +1754,7 @@ impl Builder<'_> {
     /// keys (`__variant`, positional `[i+1]`, `.recfield`) in shape order; a cdata
     /// value reads its `<name>_ct` fields.
     pub(crate) fn cdata_leaves(&mut self, v: Idx<Inst>, shape: &ValueShape) -> Vec<Idx<Inst>> {
-        if let Some(es) = flat_enum_shape(self.ws, shape.name) {
+        if let Some(es) = EnumPlan::for_name(self.ws, shape.name).and_then(|plan| plan.flat().cloned()) {
             // NIL-SAFE spread: the box may be `nil` (a null nullable enum), and
             // `nil.__variant`/`nil[1]` would fault. Branch on nil -> all-nil leaves
             // (tag = nil, the null sentinel); else spread the box's keys.

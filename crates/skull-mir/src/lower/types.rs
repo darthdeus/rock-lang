@@ -610,7 +610,7 @@ impl Builder<'_> {
             else {
                 return None;
             };
-            return flat_enum_shape(self.ws, *yield_name);
+            return EnumPlan::for_name(self.ws, *yield_name).and_then(|plan| plan.flat().cloned());
         }
         if self.concrete_plan.is_some() {
             return None;
@@ -624,7 +624,9 @@ impl Builder<'_> {
         }
         let y_ty = self.resolve_tyid(ty.with_idx(params.into_iter().next()?))?;
         match self.ty_node(y_ty)? {
-            TypeExpr::App { ctor: TypeCtor::Nominal(yn), .. } => flat_enum_shape(self.ws, yn),
+            TypeExpr::App { ctor: TypeCtor::Nominal(yn), .. } => {
+                EnumPlan::for_name(self.ws, yn).and_then(|plan| plan.flat().cloned())
+            }
             _ => None,
         }
     }

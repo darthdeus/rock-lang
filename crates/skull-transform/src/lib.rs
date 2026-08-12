@@ -69,7 +69,9 @@ pub fn nobox_materialization_violations(
             // unknown name is not a licence to skip: this rung enforces a
             // GUARANTEE, so it is reported rather than passed over.
             let Some(sid) = ws.struct_by_name.get(name) else {
-                if skull_mir::lower::enum_value_shape(ws, *name).is_some() {
+                if skull_mir::lower::EnumPlan::for_name(ws, *name)
+                    .is_some_and(|plan| plan.cdata().is_some())
+                {
                     continue;
                 }
                 out.push((

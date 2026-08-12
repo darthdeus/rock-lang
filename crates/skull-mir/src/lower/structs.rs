@@ -994,7 +994,7 @@ impl Builder<'_> {
         variant: Ustr,
         payload: Idx<Inst>,
     ) -> Result<Idx<Inst>, CompilerError> {
-        if let Some(shape) = enum_value_shape(self.ws, enum_name) {
+        if let Some(shape) = EnumPlan::for_name(self.ws, enum_name).and_then(|plan| plan.cdata().cloned()) {
             let tag = shape
                 .tag_of(variant)
                 .ok_or_else(|| gap("struct_expand: variant not in cdata enum shape"))?;
@@ -1033,7 +1033,7 @@ impl Builder<'_> {
         variant: Ustr,
         args: VariantArgs,
     ) -> Result<Idx<Inst>, CompilerError> {
-        if let Some(shape) = enum_value_shape(self.ws, enum_name) {
+        if let Some(shape) = EnumPlan::for_name(self.ws, enum_name).and_then(|plan| plan.cdata().cloned()) {
             let r = self.enum_cdata_repr(&shape, variant, args)?;
             return Ok(self.pack(r));
         }
