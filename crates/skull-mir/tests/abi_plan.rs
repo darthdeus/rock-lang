@@ -451,6 +451,30 @@ fn unit_function_values_share_the_no_result_abi() {
 }
 
 #[test]
+fn nested_opaque_tuple_elements_keep_one_physical_slot() {
+    let ws = ws_of("fn main() { print(\"ok\") }\n");
+    let arena = RepArena::default();
+    let nested = MonoTy::Tuple(vec![MonoTy::Int, MonoTy::Float]);
+    let outer = MonoTy::Tuple(vec![nested, MonoTy::Bool]);
+    let id = arena
+        .plan(
+            &ws,
+            bone_semantic::hir::FnBackend::Lua,
+            &outer,
+            RepUse::Return,
+            &RepUseFacts { tuple_spelled: true, span: None },
+            RepGuarantees::default(),
+        )
+        .expect("nested tuple representation must be total");
+    let outer_plan = arena.get(id);
+    let RepLayout::Tuple { slots, .. } = outer_plan.layout() else {
+        panic!("outer tuple must retain its top-level return lanes")
+    };
+    assert_eq!(slots.len(), 2, "the outer tuple population must be nonzero");
+    assert!(matches!(arena.get(slots[0]).layout(), RepLayout::Opaque));
+}
+
+#[test]
 fn container_storage_uses_the_element_representation_plan() {
     let ws = ws_of("nobox value V2 { x: float, y: float }");
     let arena = RepArena::default();
