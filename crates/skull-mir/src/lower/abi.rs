@@ -352,6 +352,18 @@ fn mono_value_storage(
     value_storage_for_nominal(ws, target, *name)
 }
 
+fn column_eligible_for_shape(
+    ws: &Workspace,
+    ty: &crate::monoty::MonoTy,
+    shape: &ValueShape,
+    storage: Option<ValueStorage>,
+) -> bool {
+    matches!(ty.peel_nullable().0, crate::monoty::MonoTy::App {
+        ctor: crate::monoty::MonoCtor::Nominal(_), ..
+    }) && matches!(storage, Some(ValueStorage::CData))
+        && ws.struct_by_name.contains_key(&shape.name)
+}
+
 impl RepArena {
     fn intern(&self, target: FnBackend, use_context: RepUse, layout: RepLayout) -> RepId {
         self.intern_with_storage(target, use_context, layout, None)
@@ -503,7 +515,8 @@ impl RepArena {
                     };
                     if let Some(shape) = shape {
                         let storage = mono_value_storage(ws, target, ty);
-                        let column_eligible = crate::lower::is_ffi_clean_value_struct(ws, shape.name);
+                        let column_eligible =
+                            column_eligible_for_shape(ws, ty, &shape, storage);
                         return Ok(self.intern_with_facts(
                             target,
                             use_context,
@@ -558,7 +571,8 @@ impl RepArena {
                 };
                 if let Some(shape) = shape {
                     let storage = mono_value_storage(ws, target, ty);
-                    let column_eligible = crate::lower::is_ffi_clean_value_struct(ws, shape.name);
+                    let column_eligible =
+                        column_eligible_for_shape(ws, ty, &shape, storage);
                     return Ok(self.intern_with_facts(
                         target,
                         use_context,

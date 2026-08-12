@@ -90,15 +90,6 @@ pub fn value_struct_slot_fields(ws: &Workspace, name: Ustr) -> Option<Vec<ValueS
     Some(out)
 }
 
-/// Whether `name` is an FFI-clean value STRUCT proper (C-layout cdata array
-/// element on luajit) -- the element predicate for
-/// [`ContainerKind::NativeBufferValue`](crate::mir::ContainerKind). Struct-only:
-/// a cdata-eligible enum's value shape does not qualify (its element access
-/// goes through match lowering, not `Field`).
-pub fn is_ffi_clean_value_struct(ws: &Workspace, name: Ustr) -> bool {
-    value_shape_rec(ws, name, &mut Vec::new()).is_some()
-}
-
 /// Max leaf count that stores as columns. Above it, columns fall off a measured
 /// write cliff (9.3x on LuaJIT / 9.1x on V8 at K=16, x86; 17.1x / 11.7x on
 /// arm64) and strided AoS wins -- so a wider type keeps today's representation
