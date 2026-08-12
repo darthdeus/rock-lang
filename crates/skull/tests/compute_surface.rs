@@ -424,6 +424,37 @@ fn compute_numeric_conversion_is_rejected_before_backend_specific_wrapping() {
 }
 
 #[test]
+fn compute_dynamic_float_to_int_is_admitted_for_exact_index_state() {
+    let source = r#"
+value Params { n: int }
+
+@shader(compute)
+@workgroup(64, 1, 1)
+@dispatch(1)
+fn cursor(
+    @storage(read) input: StorageBuffer<float>,
+    @storage(read_write) output: StorageBuffer<int>,
+    @uniform params: Params,
+) {
+    let i = global_invocation_id().x
+    if i >= params.n { return }
+    let cursor = storage_load(input, i) as int
+    storage_store(output, cursor, i)
+}
+
+global CURSOR: string = rock_compute(cursor)
+"#;
+    let ws = common::ws_with_stdlib(source);
+    skull::mir_emit::emit_full_in_for_renderer(
+        &ws,
+        test_mid(&ws),
+        None,
+        skull::mir_emit::RendererTarget::Wgpu,
+    )
+    .expect("an exact nonnegative cursor conversion is part of the compute surface");
+}
+
+#[test]
 fn compute_helper_resource_reordering_is_rejected() {
     let source = REAL_RECT_LOSS.replace(
         "line_covers(batch, base, px, py)",
@@ -601,16 +632,25 @@ fn rect_loss_shaped_compute_keeps_root_helper_plan_and_naga_population() {
 }
 
 #[test]
-fn rect_loss_non_i32_storage_shape_is_a_nonempty_fail_closed_rejection() {
+fn float_storage_compute_surface_is_admitted() {
     let source = RECT_LOSS_SHAPED
         .replace("a: int, b: int, c: int) -> int", "a: float, b: float, c: float) -> float")
         .replace("StorageBuffer<int>", "StorageBuffer<float>");
+    let ws = common::ws_with_stdlib(&source);
+    skull::mir_emit::emit_full_in_for_renderer(
+        &ws,
+        test_mid(&ws),
+        None,
+        skull::mir_emit::RendererTarget::Wgpu,
+    )
+    .expect("compiler-authored f32 storage must be admitted");
+}
+
+#[test]
+fn non_numeric_storage_shape_is_a_nonempty_fail_closed_rejection() {
+    let source = RECT_LOSS_SHAPED.replace("StorageBuffer<int>", "StorageBuffer<bool>");
     let errors = emit_errors(&source);
-    assert!(!errors.is_empty(), "the unsigned/storage-kind rejection fixture must compile far enough to report an error");
-    assert!(
-        errors.iter().any(|error| error.contains("StorageBuffer<int>") || error.contains("storage element type")),
-        "the current scalar-kind rejection must be named: {errors:#?}"
-    );
+    assert!(!errors.is_empty(), "the non-numeric storage rejection fixture must report an error");
 }
 
 #[test]

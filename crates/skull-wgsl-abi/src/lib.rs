@@ -77,6 +77,7 @@ pub enum WgslStorageAccess {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WgslStorageElementKind {
+    F32,
     I32,
     U32,
     AtomicU32,
@@ -939,6 +940,7 @@ fn parse_compute_abi<'a>(
             other => return Err(wire_error(format!("unsupported compute storage access {other}"))),
         };
         let element = match resource[4] {
+            "f32" => WgslStorageElementKind::F32,
             "i32" => WgslStorageElementKind::I32,
             "u32" => WgslStorageElementKind::U32,
             "atomic_u32" => WgslStorageElementKind::AtomicU32,
@@ -1330,6 +1332,7 @@ fn storage_access_wire(access: WgslStorageAccess) -> &'static str {
 
 fn storage_element_wire(element: WgslStorageElementKind) -> &'static str {
     match element {
+        WgslStorageElementKind::F32 => "f32",
         WgslStorageElementKind::I32 => "i32",
         WgslStorageElementKind::U32 => "u32",
         WgslStorageElementKind::AtomicU32 => "atomic_u32",

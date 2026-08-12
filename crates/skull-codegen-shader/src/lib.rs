@@ -1185,6 +1185,7 @@ fn compute_storage_element(
         return Err(err(span, "StorageBuffer is missing its element type"));
     };
     match ty_expr(ws, element) {
+        Some(TypeExpr::Builtin(BuiltinTy::Float)) if !atomic => Ok(ComputeValueKind::F32),
         Some(TypeExpr::Builtin(BuiltinTy::Int)) if !atomic => Ok(ComputeValueKind::I32),
         Some(TypeExpr::Builtin(BuiltinTy::Uint)) if !atomic => Ok(ComputeValueKind::U32),
         Some(TypeExpr::Builtin(BuiltinTy::Uint)) if atomic => Ok(ComputeValueKind::AtomicU32),
@@ -1193,7 +1194,7 @@ fn compute_storage_element(
             if atomic {
                 "AtomicStorageBuffer's element type is Rock uint (WGSL atomic<u32>)"
             } else {
-                "the first compute storage element type must be Rock int or uint"
+                "the first compute storage element type must be Rock float, int or uint"
             },
         )),
     }

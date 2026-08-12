@@ -752,12 +752,11 @@ impl WgslAbiPlan {
                 return Err(err(span, "WGSL compute storage resources must be arrays"));
             };
             let element = match kind {
+                ComputeValueKind::F32 => SharedWgslStorageElementKind::F32,
                 ComputeValueKind::I32 => SharedWgslStorageElementKind::I32,
                 ComputeValueKind::U32 => SharedWgslStorageElementKind::U32,
                 ComputeValueKind::AtomicU32 => SharedWgslStorageElementKind::AtomicU32,
-                ComputeValueKind::F32 | ComputeValueKind::Bool => {
-                    return Err(err(span, "WGSL compute storage resources require an integer element kind"));
-                }
+                ComputeValueKind::Bool => return Err(err(span, "WGSL compute storage resources require a numeric element kind")),
             };
             let access = match resource.access {
                 ComputeAccess::Read => SharedWgslStorageAccess::Read,
@@ -1826,6 +1825,7 @@ pub fn emit_compute_shader(
             SharedWgslStorageAccess::ReadWrite => "read_write",
         };
         let element = match resource.element {
+            SharedWgslStorageElementKind::F32 => "f32",
             SharedWgslStorageElementKind::I32 => "i32",
             SharedWgslStorageElementKind::U32 => "u32",
             SharedWgslStorageElementKind::AtomicU32 => "atomic<u32>",
@@ -3800,6 +3800,7 @@ impl<'a> FunctionEmitter<'a> {
             Some(WgslIntrinsic::StorageLoad) => {
                 let cell = self.direct_resource_cell(args, "storage_load")?;
                 match self.compute_resource(cell)?.element {
+                    SharedWgslStorageElementKind::F32 => Ok(ValueKind::F32),
                     SharedWgslStorageElementKind::I32 => Ok(ValueKind::I32),
                     SharedWgslStorageElementKind::U32 => Ok(ValueKind::U32),
                     SharedWgslStorageElementKind::AtomicU32 => Err(err(
@@ -4140,8 +4141,11 @@ impl<'a> FunctionEmitter<'a> {
             Inst::Eq(a, b) => self.binary(*a, "==", *b),
             Inst::NotEq(a, b) => self.binary(*a, "!=", *b),
             Inst::FloatToInt(value) => {
-                self.reject_compute_numeric_conversion("float as int", *value)?;
-                Ok(format!("i32({})", self.render_val(*value)?))
+                if self.stage.stage == ShaderStage::Compute {
+                    Ok(format!("i32({})", self.render_val(*value)?))
+                } else {
+                    Ok(format!("int({})", self.render_val(*value)?))
+                }
             }
             Inst::IntToFloat(value) => {
                 self.reject_compute_numeric_conversion("int as float", *value)?;
