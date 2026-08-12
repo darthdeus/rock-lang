@@ -1,9 +1,8 @@
 //! D-3: a generic `co fn` is emitted CONCRETELY, one body per instantiation.
 //!
-//! `compute_call_spec` (`crates/skull-mir/src/lower/shape.rs`) used to bail on
-//! `is_coroutine` before it could build a `SpecKey`, so every instantiation
-//! shared one erased body and one set of `__step`/`__resume` symbols. Two things
-//! followed, and they are the two arms here:
+//! The concrete graph used to be bypassed for coroutine bodies, so every
+//! instantiation shared one erased body and one set of `__step`/`__resume`
+//! symbols. Two things followed, and they are the two arms here:
 //!
 //! - A COLUMN-stored instantiation would read a `_data` that its representation
 //!   does not have, so the shared body is WRONG rather than slow. It must

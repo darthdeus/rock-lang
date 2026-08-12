@@ -1520,8 +1520,8 @@ pub fn spec_key_from_next_generics(
 /// Rebuild the [`SpecSubst`] (callee generic `VarId` -> concrete type) for `fref`
 /// from a [`Vec<MonoTy>`] (trees in declaration order). The inliner holds only the
 /// arena-free key in its cache; this re-pairs it with the callee's generic
-/// `VarId`s to drive [`lower_emitted_body`]. An empty / all-`None` key yields an
-/// empty subst (the shared snapshot).
+/// `VarId`s to drive concrete lowering. An empty key belongs only to a
+/// non-generic declaration; an incomplete generic substitution has no key.
 /// The inverse of [`spec_subst_from_key`], and the E1 cut's premise: for a body
 /// emission actually writes, a [`Vec<MonoTy>`] carries nothing the [`SpecSubst`]
 /// does not.

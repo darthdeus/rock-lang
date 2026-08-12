@@ -334,16 +334,16 @@ impl MonoTy {
 }
 
 /// Why a type did not convert. Every variant is a distinct census bucket --
-/// `UnboundGeneric` in particular is DATA (it says the reader asked about a
-/// shared generic body), not an error to fold into the others.
+/// `UnboundGeneric` in particular is DATA (it says the reader asked about an
+/// uninstantiated generic context), not an error to fold into the others.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum MonoTyReason {
     /// `BuiltinTy::Error` -- inference recovery poison. An invalid program.
     RecoveryError,
     /// An inference variable with no substitution: inference did not finish.
     UnresolvedInfer(Ustr),
-    /// A declared generic absent from the enclosing substitution. Expected
-    /// wherever a shared generic body is read without an instantiation.
+    /// A declared generic absent from the enclosing substitution. Expected in
+    /// source-shaped generic contexts that have not selected an instance.
     UnboundGeneric(Ustr),
     /// The `TyId` names no node at all.
     NoNode,
@@ -704,8 +704,8 @@ impl MonoInterner {
 ///
 /// `subst` binds declared generics; a generic absent from it is
 /// [`MonoTyReason::UnboundGeneric`] rather than a guess, because the caller is
-/// the only one who knows whether that is expected (a shared generic body) or a
-/// defect (a missing instantiation).
+/// the only one who knows whether that is expected (an uninstantiated generic
+/// context) or a defect (a missing instantiation).
 pub fn convert<S: std::hash::BuildHasher>(
     ws: &Workspace,
     inf: &BodyInference,

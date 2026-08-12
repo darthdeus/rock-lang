@@ -914,9 +914,9 @@ impl Builder<'_> {
     /// `dc` carries the `Iterator`-bound resolution recorded against the emitted
     /// call inst (chain roots like a directly-called bounded `next`).
     ///
-    /// A tuple return does not exempt the call from its instantiation key:
-    /// under column storage the shared generic body reads a `_data` the
-    /// instantiation does not have, so the specialized copy is the only correct
+    /// A tuple return does not exempt the call from its concrete owner:
+    /// under column storage an erased body could read a `_data` the
+    /// instantiation does not have, so the concrete plan is the only correct
     /// target.
     pub(crate) fn emit_tuple_call_tree(
         &mut self,

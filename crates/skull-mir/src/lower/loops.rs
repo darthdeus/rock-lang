@@ -201,9 +201,7 @@ impl Builder<'_> {
                 // DELIVERY, from the same `IterWitness::generics` the identity
                 // record below reads. The witness is an ordinary call to a
                 // generic `iter`, so under instance-owned emission it must name
-                // an instance like any other -- it was the last call form still
-                // reaching a shared generic body by construction, and once that
-                // body stopped being emitted it named a nil global.
+                // a concrete instance like any other.
                 if let Some(delivery) = self.concrete_delivery_instance(&witness) {
                     self.f.spec_bindings.insert(call, delivery);
                 }
@@ -225,10 +223,9 @@ impl Builder<'_> {
         self.emit_cur(Inst::Store { cell: it_cell, value: it_val });
 
         // next returns `(bool, E)` / `(bool, A, B, ...)`. The shape is read under
-        // the SPECIALIZATION the emitted call will carry, not the caller's own:
-        // when the spec is dropped the call reaches the shared generic body,
-        // whose `E` is unbound and therefore never splats -- so the two sides
-        // agree about how many values come back.
+        // the concrete callee the emitted call will carry, not the caller's own:
+        // the witness result plan states how many values come back, so the two
+        // lowering sides agree without re-deriving the shape.
         let concrete_next = if matches!(info.next, BoundNext::Concrete { .. }) {
             self.with_site_op(crate::site::SiteOp::ForNext(Vec::new()), |b| {
                 b.concrete_callee_for_site(iter_expr)

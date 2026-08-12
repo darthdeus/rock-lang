@@ -202,9 +202,9 @@ fn classify(
     }
     let has_inline = f.annotations.iter().any(|a| a.name.name.as_str() == "inline");
     let has_pure = f.annotations.iter().any(|a| a.name.name.as_str() == "pure");
-    // An `Iterator`-bounded fn exists ONLY monomorphized-by-inlining (its body
-    // holds placeholder bound-calls and it is never emitted standalone), so it
-    // is always eligible and always forced, annotation or not.
+    // An `Iterator`-bounded body carries placeholder calls until a concrete
+    // splice or standalone demand resolves them, so inline eligibility forces
+    // the optimization when the body is otherwise eligible.
     let has_bounds = f.generic_bounds.iter().any(Option::is_some);
     let force = match annotation_gate(has_inline, has_pure, size_heuristic()) {
         Some(force) => force || has_bounds,
@@ -531,11 +531,12 @@ fn find_site(
             let cell_count = func.cells.len();
             match get(cache, ws, scx, site.inst(), concrete_plans) {
                 // Decline a splice that would breach the per-caller cell budget
-                // (keep scanning — a smaller candidate may still fit). A SPECIALIZED
-                // call (non-empty spec key) is exempt: its args are splatted to
-                // leaves, so the shared generic body cannot serve it -- it MUST
-                // splice, and eligibility is a subset of `classify` so a candidate
-                // always exists. Declining it would leave a residual miscompile.
+                // (keep scanning — a smaller candidate may still fit). A concrete
+                // call with a scalarized ABI is exempt: its args are splatted to
+                // leaves, so a residual opaque delivery would be invalid -- it
+                // must splice, and eligibility is a subset of `classify` so a
+                // candidate always exists. Declining it would leave a residual
+                // miscompile.
                 Some(cand)
                     if cand.subject == *site.inst()
                         && cand.abi == *site.abi()
@@ -1381,16 +1382,16 @@ pub fn validate_no_residual_bound_calls(
             match &mf.insts[iid] {
                 Inst::CallBoundMulti { .. } => {
                     return Err(CompilerError::new_no_location(format!(
-                        "`{}`: an `Iterator`-bounded call was not monomorphized (a bounded fn \
-                         only works inlined; is this a recursive bounded fn?)",
+                        "`{}`: an `Iterator`-bounded call retained unresolved placeholders \
+                         after neither concrete splicing nor standalone planning (is this a \
+                         recursive bounded fn?)",
                         f.name
                     )));
                 }
                 Inst::Call { func, .. } | Inst::CallMulti { func, .. } => {
                     let callee = &ws.module(func.module).functions[func.func];
-                    // A specialized name is the whole admission: `spec_fn_name`
-                    // is `None` for an all-`None` key, which spells the shared
-                    // body -- and a bounded fn has none.
+                    // A non-empty concrete owner is the admission: a bounded
+                    // call without one would have no resolved standalone body.
                     let named = mf.spec_bindings.get(&iid).is_some_and(|i| !i.args.is_empty());
                     if fn_has_bounds(callee) && !named {
                         // Stage-0e: this rejection IS the ablation's

@@ -785,11 +785,11 @@ pub struct MirFunc {
     /// body's fact.
     pub resolved_bound_trees:
         bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::bound::ResolvedBoundTree>,
-    /// Per call inst that the caller lowered with the SPECIALIZED scalar ABI:
-    /// **the concrete callee body it targets** (`docs/flatvec-plan.md` call-site
-    /// specialization). The inliner reads it to splice the matching specialized
-    /// snapshot; a surviving (un-spliced) entry is a hard site-aware rejection
-    /// (its args are splatted, so the shared generic body cannot serve it).
+    /// Per call inst that the caller lowered with a scalarized delivery ABI:
+    /// **the concrete callee body it targets**. The inliner reads it to splice
+    /// the matching concrete snapshot; a surviving (un-spliced) entry is a
+    /// hard site-aware rejection because an opaque delivery cannot receive its
+    /// splatted args.
     ///
     /// An [`Instance`](crate::instance::Instance) rather than an instantiation
     /// KEY, so the symbol a call renderer spells and the symbol the definition

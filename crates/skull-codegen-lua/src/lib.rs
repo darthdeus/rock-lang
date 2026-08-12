@@ -1453,11 +1453,10 @@ impl Emitter<'_> {
 
     /// Splice an `@inline inline(lua)` `Call` inline, if `id` is one. Returns
     /// true iff it spliced; else the caller emits the normal `callee(args)`.
-    /// The emitted symbol this call targets. A call the lowerer gave a
-    /// specialized instantiation (its value args splatted to leaves) targets the
-    /// SPECIALIZED copy -- the shared generic body takes `T` as one boxed slot and
-    /// could not serve those arguments. Same derivation the specialized definition
-    /// is emitted under, so the two cannot drift.
+    /// The emitted symbol this call targets. A call the lowerer gave a concrete
+    /// instance (its value args splatted to leaves) targets that instance's
+    /// definition. The same instance object drives definition and call spelling,
+    /// so the two cannot drift.
     fn callee_name(&self, id: Idx<Inst>, func: FuncRef) -> String {
         match self.func.spec_bindings.get(&id) {
             Some(inst) => inst.symbol(self.ws, self.interner),

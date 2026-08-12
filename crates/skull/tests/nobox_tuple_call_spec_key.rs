@@ -1,10 +1,9 @@
-//! A tuple-returning call carries its instantiation key, at every call path.
+//! A tuple-returning call carries its concrete owner at every call path.
 //!
-//! A column-stored element cannot be served by the shared generic body -- that
-//! body reads a `_data` leaf the storage does not have -- so dropping the key on
-//! the tuple path is a miscompile, not a missed optimization. These are the three
-//! paths that emit a tuple call; each reached the shared body and died on `_data`
-//! before the key was threaded through.
+//! A column-stored element cannot be served by an erased body -- that body reads
+//! a `_data` leaf the storage does not have -- so dropping the owner on the tuple
+//! path is a miscompile, not a missed optimization. These are the three paths
+//! that emit a tuple call.
 
 
 use std::process::Command;

@@ -830,7 +830,8 @@ fn main() { print("{pair(1, 2.0)} {other(1, 2.0)}") }
          prove nothing"
     );
 
-    // No record at all -- the population conditional specialization used to own.
+    // No record at all -- a concrete call without an owner is an invariant
+    // failure, not an optional specialization result.
     assert_eq!(check(None), skull::site_join::CalleeCheck::NoInstance);
 
     // A record naming ANOTHER declaration. Not a policy outcome: the record is
@@ -1213,11 +1214,9 @@ fn main() {
 /// The join FAILS CLOSED on an owner the graph does not have, proved WITHOUT
 /// depending on a defect being present.
 ///
-/// Its sibling below witnesses the population today's conditional specializer
-/// actually produces. That one silently disarms the day specialization goes
-/// total -- the fixture stops producing a shared splice and the assertion has
-/// nothing to fire on. This one removes an instance's substitution from a cloned
-/// graph instead, so the arm can still be shown to fire once the defect is gone.
+/// Its sibling below witnesses a concrete-owner population. This arm removes an
+/// instance's substitution from a cloned graph instead, so the rejection stays
+/// load-bearing even after concrete planning is total.
 #[test]
 fn an_owner_the_graph_does_not_have_is_refused() {
     // The callee must be one that SPLICES with a concrete owner today, or there
