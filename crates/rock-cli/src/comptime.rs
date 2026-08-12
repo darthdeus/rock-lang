@@ -94,6 +94,8 @@ pub fn inputs_for_project_dir(dir: &Path) -> Result<ComptimeInputs> {
     )?;
 
     let mut inputs = ComptimeInputs::default();
+    // Fallback only: an embed normally resolves against the calling file's own
+    // package root, and reaches this when the module has no file on disk.
     inputs.embed_root = Some(project_dir);
     for (name, var) in resolved.vars {
         inputs.vars.insert(

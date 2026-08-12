@@ -3426,9 +3426,11 @@ struct FunctionCallInfo {
 // Compile-time inputs (docs/comptime-plan.md tier 1). A direct call with a
 // string-literal argument is replaced at MIR lowering with the resolved value:
 // `build_var("NAME")` reads the [build.vars] entry the CLI resolved for this
-// invocation; `embed_string("path")` inlines the file at path relative to the
-// project root. Undeclared name, non-literal argument, missing file, or a path
-// escaping the root all reject with a span. Annotation-keyed like rock_shader,
+// session build; `embed_string("path")` inlines the file at path relative to
+// the CALLING file's own package root -- the nearest stick.toml at or above it
+// -- so a library embeds its own files whatever project consumes it.
+// Undeclared name, non-literal argument, missing file, or a path escaping the
+// root all reject with a span. Annotation-keyed like rock_shader,
 // so a user fn of the same name can't hijack the expansion; the phantom body
 // only fires if the fn is taken as a value.
 @build_var_expand inline(lua) fn build_var(name: string) -> string = """

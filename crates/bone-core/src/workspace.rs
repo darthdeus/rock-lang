@@ -79,16 +79,19 @@ pub struct Workspace {
 #[derive(Clone, Debug, Default)]
 pub struct ComptimeInputs {
     pub vars: FxHashMap<Ustr, ComptimeVarValue>,
-    /// Root that `embed_string(path)` resolves against (the stick.toml dir).
-    /// None = no project context: every embed rejects with a span.
+    /// FALLBACK root for `embed_string(path)`, used only when the calling
+    /// module has no file on disk to resolve from (a synthetic module).
+    /// Normally the path resolves against the nearest stick.toml at or above
+    /// the CALLING file. None and no calling file = every embed rejects.
     pub embed_root: Option<std::path::PathBuf>,
 }
 
 #[derive(Clone, Debug)]
 pub struct ComptimeVarValue {
     pub value: String,
-    /// Hash into cache keys; never write the value into on-disk cache
-    /// artifacts or manifests in plaintext.
+    /// Metadata hygiene, not confidentiality (docs/comptime-plan.md): hashed
+    /// into cache keys, ALLOWED in the compiled program payload, and kept out
+    /// of logs, diagnostics, manifests and cache metadata.
     pub secret: bool,
 }
 

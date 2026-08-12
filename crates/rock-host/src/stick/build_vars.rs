@@ -1,5 +1,6 @@
-//! Resolution of `[build.vars]` into concrete values, once per CLI
-//! invocation, before compilation. Precedence: declaration `default` (for a
+//! Resolution of `[build.vars]` into concrete values, once per session build,
+//! before compilation (a live `rock stone` session re-resolves on every full
+//! rebuild, never per incremental update). Precedence: declaration `default` (for a
 //! channel-restricted var outside its channels) < the var's source < explicit
 //! `--var NAME=value` override. There is deliberately NO ambient-env fallback:
 //! the steam release wrapper's whole job was refusing ambient release identity
@@ -15,7 +16,9 @@ use super::StickConfig;
 #[derive(Debug, Clone)]
 pub struct ResolvedVar {
     pub value: String,
-    /// Hash into cache keys; never write the value into on-disk artifacts.
+    /// Metadata hygiene, not confidentiality (docs/comptime-plan.md): hashed
+    /// into cache keys, ALLOWED in the compiled program payload, and kept out
+    /// of logs, diagnostics, manifests and cache metadata.
     pub secret: bool,
 }
 
@@ -80,7 +83,7 @@ pub fn resolve_build_vars(
         } else if var.builtin.as_deref() == Some("channel") {
             channel.clone()
         } else if let Some(cmd) = var.cmd.as_ref() {
-            run_var_cmd(name, cmd, project_dir, &channel)?
+            run_var_cmd(name, cmd, var.secret, project_dir, &channel)?
         } else {
             // validate_build above rejected sourceless vars.
             unreachable!("[build.vars] {name} has no source past validate_build")
@@ -90,20 +93,33 @@ pub fn resolve_build_vars(
     Ok(ResolvedBuildVars { channel, vars })
 }
 
-fn run_var_cmd(name: &str, cmd: &str, project_dir: &Path, channel: &str) -> Result<String> {
+/// A `secret = true` var's diagnostics are redacted on the failure path: the
+/// command text can carry the credential (`load_key.sh --token abc`) and a
+/// failing fetcher routinely echoes it. The variable NAME and the exit status
+/// always survive -- they say which declaration to look at and how it died,
+/// and neither can carry the value. A non-secret var reports everything.
+fn run_var_cmd(
+    name: &str,
+    cmd: &str,
+    secret: bool,
+    project_dir: &Path,
+    channel: &str,
+) -> Result<String> {
+    let shown = if secret { "<redacted: secret = true>".to_string() } else { format!("{cmd:?}") };
     let output = std::process::Command::new("sh")
         .arg("-c")
         .arg(cmd)
         .current_dir(project_dir)
         .env("ROCK_CHANNEL", channel)
         .output()
-        .map_err(|e| anyhow::anyhow!("[build.vars] {name}: failed to spawn {cmd:?}: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("[build.vars] {name}: failed to spawn {shown}: {e}"))?;
     if !output.status.success() {
-        anyhow::bail!(
-            "[build.vars] {name}: {cmd:?} failed ({}): {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
+        let detail = if secret {
+            "stderr withheld (secret = true)".to_string()
+        } else {
+            String::from_utf8_lossy(&output.stderr).trim().to_string()
+        };
+        anyhow::bail!("[build.vars] {name}: {shown} failed ({}): {detail}", output.status);
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
@@ -164,6 +180,51 @@ mod tests {
         let resolved = resolve_build_vars(&cfg, dir.path(), None, &overrides).unwrap();
         assert_eq!(resolved.vars["TOKEN"].value, "override-value");
         assert!(resolved.vars["TOKEN"].secret, "override keeps the declared secrecy");
+    }
+
+    // A secret var's FAILURE path is the leak: the command text can carry the
+    // credential (`load_key.sh --token abc`) and a failing fetcher routinely
+    // echoes it. Both sides are asserted -- the redaction, and that a
+    // non-secret var still reports everything -- because a redaction that
+    // fired on every var would satisfy the first arm alone.
+    #[test]
+    fn a_failing_secret_cmd_redacts_its_command_and_stderr() {
+        let cfg = fixture(concat!(
+            "[package]\nname = \"x\"\n",
+            "[build]\nchannels = [\"dev\"]\ndefault_channel = \"dev\"\n",
+            "[build.vars]\nTOKEN = { cmd = \"echo s3cr3t-in-stderr >&2; echo s3cr3t-in-cmd >/dev/null; exit 7\", secret = true }\n",
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        let err = resolve_build_vars(&cfg, dir.path(), None, &no_overrides())
+            .expect_err("a failing cmd must fail the invocation");
+        let msg = format!("{err}");
+        assert!(msg.contains("TOKEN"), "the variable NAME survives redaction: {msg}");
+        assert!(msg.contains('7'), "the exit status survives redaction: {msg}");
+        assert!(msg.contains("secret"), "the message says why it is redacted: {msg}");
+        assert!(
+            !msg.contains("s3cr3t-in-stderr"),
+            "stderr of a secret var's cmd leaked: {msg}"
+        );
+        assert!(
+            !msg.contains("s3cr3t-in-cmd"),
+            "the command text of a secret var leaked: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_failing_non_secret_cmd_still_reports_command_and_stderr() {
+        let cfg = fixture(concat!(
+            "[package]\nname = \"x\"\n",
+            "[build]\nchannels = [\"dev\"]\ndefault_channel = \"dev\"\n",
+            "[build.vars]\nSHA = { cmd = \"echo diagnostic-detail >&2; exit 7\" }\n",
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        let err = resolve_build_vars(&cfg, dir.path(), None, &no_overrides())
+            .expect_err("a failing cmd must fail the invocation");
+        let msg = format!("{err}");
+        assert!(msg.contains("SHA"), "error names the var: {msg}");
+        assert!(msg.contains("diagnostic-detail"), "non-secret stderr is retained: {msg}");
+        assert!(msg.contains("echo diagnostic-detail"), "non-secret cmd is retained: {msg}");
     }
 
     #[test]
