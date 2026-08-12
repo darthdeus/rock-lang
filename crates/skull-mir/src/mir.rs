@@ -688,6 +688,11 @@ pub struct MirFunc {
     /// The concrete function representation consumed by entry binding and
     /// return lowering. Calls retain the same plan in `call_abi_plans`.
     pub abi_plan: Option<crate::lower::BackendFnAbiPlan>,
+    /// The owned function representation for bodies without an `Instance`,
+    /// notably hoisted nested functions. Such a body still has a concrete ABI;
+    /// it just has no graph-owned top-level instance to wrap in
+    /// `BackendFnAbiPlan`.
+    pub abi_representation: Option<crate::lower::FunctionRepPlan>,
     /// `static` cells declared in this fn's body (in source order).
     pub statics: Vec<StaticCell>,
     pub insts: Arena<Inst>,
@@ -762,6 +767,11 @@ pub struct MirFunc {
     /// owner would make an ABI corruption look self-consistent.
     pub call_abi_plans:
         bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::lower::BackendFnAbiPlan>,
+    /// The owned function-type representation used by an indirect call. A
+    /// function value has no declaration `Instance`, so its physical signature
+    /// is carried directly beside the `CallValue`/`CallValueMulti` instruction.
+    pub call_rep_plans:
+        bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::lower::FunctionRepPlan>,
     /// Placeholder [`Inst::CallBoundMulti`]s whose element the LOWERING already
     /// split into leaf cells: `dests` is sized to the real return arity and the
     /// loop pattern is bound to the leaves, so the splice must leave both alone.
@@ -829,6 +839,7 @@ impl MirFunc {
             name,
             params: Vec::new(),
             abi_plan: None,
+            abi_representation: None,
             statics: Vec::new(),
             insts: Arena::default(),
             cells: Arena::default(),
@@ -847,6 +858,7 @@ impl MirFunc {
             call_sites: Default::default(),
             callee_instances: Default::default(),
             call_abi_plans: Default::default(),
+            call_rep_plans: Default::default(),
             fn_value_symbols: Default::default(),
             hoisted_fn_globals: Vec::new(),
             site_owners: Vec::new(),

@@ -974,6 +974,11 @@ fn import_spec_bindings(
             func.call_abi_plans.insert(new_id, plan.clone());
         }
     }
+    for (old_id, plan) in &callee.call_rep_plans {
+        if let Some(&new_id) = inst_map.get(old_id) {
+            func.call_rep_plans.insert(new_id, plan.clone());
+        }
+    }
     for (old_id, tree) in &callee.resolved_bound_trees {
         if let Some(&new_id) = inst_map.get(old_id) {
             func.resolved_bound_trees.insert(new_id, tree.clone());

@@ -648,7 +648,8 @@ impl Builder<'_> {
                     };
                     let dests: Vec<Idx<Cell>> =
                         (0..shape.leaf_count()).map(|_| self.f.new_cell(None)).collect();
-                    self.emit_cur(Inst::CallValueMulti { dests: dests.clone(), callee: g, args: arg_vals });
+                    let call = self.emit_cur(Inst::CallValueMulti { dests: dests.clone(), callee: g, args: arg_vals });
+                    self.f.call_rep_plans.insert(call, abi.representation.clone());
                     let leaves: Vec<Idx<Inst>> =
                         dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
                     let mut idx = 0;
@@ -1226,22 +1227,28 @@ impl Builder<'_> {
             argv.extend(self.arg_values_for_slot(&slot, a)?);
         }
         let Some(result) = plan.result() else {
-            return Ok(ValueRepr::Scalar(self.emit_cur(Inst::CallValue { callee, args: argv })));
+            let call = self.emit_cur(Inst::CallValue { callee, args: argv });
+            self.f.call_rep_plans.insert(call, plan.clone());
+            return Ok(ValueRepr::Scalar(call));
         };
         if let Some(shape) = arena.tuple_shape(result) {
             let dests: Vec<Idx<Cell>> =
                 (0..shape.slot_count()).map(|_| self.f.new_cell(None)).collect();
-            self.emit_cur(Inst::CallValueMulti { dests: dests.clone(), callee, args: argv });
+            let call = self.emit_cur(Inst::CallValueMulti { dests: dests.clone(), callee, args: argv });
+            self.f.call_rep_plans.insert(call, plan.clone());
             let loads: Vec<Idx<Inst>> =
                 dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
             return Ok(self.tuple_result(&shape, &loads));
         }
         let Some(shape) = arena.value_shape(result) else {
-            return Ok(ValueRepr::Scalar(self.emit_cur(Inst::CallValue { callee, args: argv })));
+            let call = self.emit_cur(Inst::CallValue { callee, args: argv });
+            self.f.call_rep_plans.insert(call, plan.clone());
+            return Ok(ValueRepr::Scalar(call));
         };
         let dests: Vec<Idx<Cell>> =
             (0..shape.leaf_count()).map(|_| self.f.new_cell(None)).collect();
-        self.emit_cur(Inst::CallValueMulti { dests: dests.clone(), callee, args: argv });
+        let call = self.emit_cur(Inst::CallValueMulti { dests: dests.clone(), callee, args: argv });
+        self.f.call_rep_plans.insert(call, plan);
         let leaves: Vec<Idx<Inst>> =
             dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
         let mut idx = 0;

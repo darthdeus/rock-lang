@@ -166,14 +166,21 @@ fn ret_slot_decls(n: usize) -> String {
 /// becomes an implicit global.
 fn max_multi_wire(bodies: &[&MirFunc]) -> Result<usize, CompilerError> {
     fn of(mf: &MirFunc) -> Result<usize, CompilerError> {
-        let mut n = mf.abi_plan.as_ref().map_or(0, BackendFnAbiPlan::result_lanes);
+        let mut n = mf
+            .abi_representation
+            .as_ref()
+            .map_or(0, skull_mir::lower::FunctionRepPlan::return_lanes);
+        n = n.max(mf.abi_plan.as_ref().map_or(0, BackendFnAbiPlan::result_lanes));
         for (iid, inst) in mf.insts.iter() {
             match inst {
                 Inst::CallMulti { .. } | Inst::CallValueMulti { .. } => {
-                    let plan = mf.call_abi_plans.get(&iid).ok_or_else(|| {
-                        err("JS: multi-value call has no owned ABI plan")
-                    })?;
-                    n = n.max(plan.result_lanes());
+                    if let Some(plan) = mf.call_abi_plans.get(&iid) {
+                        n = n.max(plan.result_lanes());
+                    } else if let Some(plan) = mf.call_rep_plans.get(&iid) {
+                        n = n.max(plan.return_lanes());
+                    } else {
+                        return Err(err("JS: multi-value call has no owned ABI plan"));
+                    }
                 }
                 Inst::CallBoundMulti { .. } => {
                     return Err(err(

@@ -383,7 +383,8 @@ pub fn convert_closures_framed(
         nested.push(MirFunc {
             name: hoisted_name[&sid],
             params,
-            abi_plan: mf.abi_plan.clone(),
+            abi_plan: None,
+            abi_representation: mf.abi_representation.clone(),
             statics: Vec::new(),
             insts: mf.insts.clone(),
             cells: mf.cells.clone(),
@@ -416,6 +417,7 @@ pub fn convert_closures_framed(
             call_sites: mf.call_sites.clone(),
             callee_instances: mf.callee_instances.clone(),
             call_abi_plans: mf.call_abi_plans.clone(),
+            call_rep_plans: mf.call_rep_plans.clone(),
             fn_value_symbols: mf.fn_value_symbols.clone(),
             hoisted_fn_globals: mf.hoisted_fn_globals.clone(),
             // The owner table comes across with the entries that index it;

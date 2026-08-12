@@ -310,6 +310,8 @@ impl Builder<'_> {
             presence_only: None,
         };
 
+        child.f.abi_representation = Some(abi.representation.clone());
+
         for (i, pb) in params.into_iter().enumerate() {
             let pname = child.body.binding_arena[pb].name;
             let slot = child.param_slot(i);
