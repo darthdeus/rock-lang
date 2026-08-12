@@ -544,6 +544,10 @@ impl CommandContext {
                 self.args.itch,
             );
         }
+        if self.args.command == CliCommand::Package {
+            let project = self.get_project_dir_or_current()?;
+            return crate::package::run_package(&project, self.args.output.as_deref());
+        }
         // shader is GLSL fn-library emission (route B); it type-checks a single
         // file against the stdlib and emits GLSL, so it's backend-agnostic and
         // dispatches before the backend switch like fmt/completions.

@@ -49,6 +49,7 @@ pub mod glsl_test;
 pub mod js_test;
 pub mod live_project;
 pub mod web;
+pub mod package;
 pub mod zip_writer;
 mod test_protocol;
 mod lint_cmd;
@@ -274,6 +275,9 @@ pub enum CliCommand {
     /// preludes + `JS_WEB_RUNTIME` + emitted program + a boot line). Serve the
     /// out dir with any static file server. See `docs/stone-web-plan.md` Arc 2.
     Web,
+    /// `rock package <game>` -- stage native release inputs, bake bytecode,
+    /// and write the manifest consumed by Fire and release verification.
+    Package,
 }
 
 impl clap::ValueEnum for CliCommand {
@@ -308,6 +312,7 @@ impl clap::ValueEnum for CliCommand {
             Self::Shader,
             Self::ShaderValidate,
             Self::Web,
+            Self::Package,
         ]
     }
     fn to_possible_value(&self) -> Option<clap::builder::PossibleValue> {
@@ -358,6 +363,7 @@ impl CliCommand {
             Self::Shader => "shader",
             Self::ShaderValidate => "shader-validate",
             Self::Web => "web",
+            Self::Package => "package",
         }
     }
 }

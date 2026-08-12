@@ -13,6 +13,7 @@ pub mod lua_runner;
 pub mod preprocessor;
 pub mod process_management;
 pub mod project;
+pub mod release;
 pub mod source_files;
 pub mod stdlib_loader;
 pub mod stick;

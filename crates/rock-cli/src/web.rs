@@ -24,11 +24,7 @@ use std::sync::{Arc, Mutex, RwLock};
 /// below one that is not (mag, ~240 MB).
 const SINGLE_FILE_WARN_MB: f64 = 32.0;
 
-#[derive(Clone)]
-struct WebAsset {
-    key: String,
-    source: PathBuf,
-}
+type WebAsset = rock_host::release::ReleaseAsset;
 
 /// What `rock web` produces. The three are distinct DELIVERY shapes, not
 /// formatting options: a directory is what a static host serves, a single file
@@ -323,11 +319,11 @@ fn write_web_bundle(
 
     std::fs::create_dir_all(out_dir)?;
     if copy_assets {
-        for asset in &assets {
-            let dst = out_dir.join(&asset.key);
-            std::fs::create_dir_all(dst.parent().expect("asset parent"))?;
-            std::fs::copy(&asset.source, dst)?;
-        }
+        let selection = rock_host::release::AssetSelection {
+            assets: assets.clone(),
+            missing: Vec::new(),
+        };
+        rock_host::release::copy_assets(&selection, out_dir)?;
     }
 
     let game_js_path = out_dir.join("game.js");
@@ -483,92 +479,22 @@ fn web_game_dir(project: &str) -> String {
 }
 
 fn collect_web_assets(project: &Path, game_dir: &str) -> Result<Vec<WebAsset>> {
-    let mut assets = Vec::new();
-    for rel in release_assets(project)? {
-        let src = project.join(&rel);
-        if !src.exists() {
-            log::warn!(target: "WEB", "[release].assets: {} does not exist, skipping", src.display());
-            continue;
-        }
-        if src.is_dir() {
-            for entry in walkdir::WalkDir::new(&src).sort_by_file_name() {
-                let entry = entry?;
-                if !entry.file_type().is_file() {
-                    continue;
-                }
-                let rel_to_game = entry.path().strip_prefix(project).expect("under project");
-                let key = format!(
-                    "{}/{}",
-                    game_dir,
-                    rel_to_game.to_string_lossy().replace('\\', "/")
-                );
-                assets.push(WebAsset {
-                    key,
-                    source: entry.path().to_path_buf(),
-                });
-            }
-        } else {
-            let key = format!("{}/{}", game_dir, rel.replace('\\', "/"));
-            assets.push(WebAsset { key, source: src });
-        }
+    let config = rock_host::stick::StickConfig::find_from_dir(project)?
+        .map(|(_, config)| config);
+    let workspace_root = rock_host::project::find_workspace_root(project)
+        .or_else(|| rock_host::project::find_workspace_root(&std::env::current_dir().unwrap_or_default()))
+        .ok_or_else(|| anyhow::anyhow!("web: cannot find the Rock workspace root for {}", project.display()))?;
+    let selection = rock_host::release::select_assets(
+        project,
+        game_dir,
+        config.as_ref(),
+        &workspace_root,
+        true,
+    )?;
+    for missing in selection.missing {
+        log::warn!(target: "WEB", "release asset {} does not exist, skipping", missing.display());
     }
-
-    let fallback_key = format!("{}/assets/fonts/DroidSans.ttf", game_dir);
-    if !assets.iter().any(|asset| asset.key == fallback_key) {
-        let src = repo_relative("stone-rs/fonts/DroidSans.ttf");
-        if src.is_file() {
-            assets.push(WebAsset {
-                key: fallback_key,
-                source: src,
-            });
-        } else {
-            log::warn!(target: "WEB", "engine fallback font missing at {}; text will not render", src.display());
-        }
-    }
-    assets.sort_by(|a, b| a.key.cmp(&b.key));
-    Ok(assets)
-}
-
-/// The `[release].assets` staging list from a project's stick.toml. Defaults to
-/// `["assets"]` (plus `level.txt` when present) when the table is absent,
-/// mirroring `tools/release/collect_assets.py`. A malformed stick.toml
-/// propagates as an error rather than silently defaulting.
-fn release_assets(project: &Path) -> Result<Vec<String>> {
-    let path = project.join("stick.toml");
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return Ok(default_release_assets(project)),
-    };
-    let value: serde_json::Value = basic_toml::from_str(&content)
-        .map_err(|e| anyhow::anyhow!("web: failed to parse {}: {}", path.display(), e))?;
-    Ok(
-        match value
-            .get("release")
-            .and_then(|r| r.get("assets"))
-            .and_then(|a| a.as_array())
-        {
-            Some(arr) => arr
-                .iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect(),
-            None => default_release_assets(project),
-        },
-    )
-}
-
-fn default_release_assets(project: &Path) -> Vec<String> {
-    let mut items = vec!["assets".to_string()];
-    if project.join("level.txt").exists() {
-        items.push("level.txt".to_string());
-    }
-    items
-}
-
-/// A path relative to the workspace root (the compile runs from anywhere).
-fn repo_relative(rel: &str) -> PathBuf {
-    rock_host::project::find_workspace_root(&std::env::current_dir().unwrap_or_default())
-        .map(|r| r.join(rel))
-        .unwrap_or_else(|| PathBuf::from(rel))
+    Ok(selection.assets)
 }
 
 struct ReloadHub {

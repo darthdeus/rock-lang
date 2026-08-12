@@ -1164,6 +1164,20 @@ pub(crate) fn render_project_errs(sources: &SourceFiles, errs: &[CompilerError])
 /// Renders against the project sources and exits 1 on any discovery / type /
 /// emit failure.
 fn skull_emit_project(dir: &str) -> String {
+    let inputs = match crate::comptime::inputs_for_project_dir(std::path::Path::new(dir)) {
+        Ok(inputs) => inputs,
+        Err(e) => {
+            log::error!(target: "SKULL", "build var resolution failed for project {}: {:#}", dir, e);
+            crate::ablation_report::exit_with_census(1);
+        }
+    };
+    skull_emit_project_with_inputs(dir, inputs)
+}
+
+fn skull_emit_project_with_inputs(
+    dir: &str,
+    inputs: bone_semantic::inference::ComptimeInputs,
+) -> String {
     use std::path::PathBuf;
     let spec = crate::unified_compile::SourceSpec::Directory(PathBuf::from(dir));
     let sources = match crate::unified_compile::discover_sources(&spec) {
@@ -1198,13 +1212,7 @@ fn skull_emit_project(dir: &str) -> String {
             crate::ablation_report::exit_with_census(1);
         }
     };
-    match crate::comptime::inputs_for_project_dir(std::path::Path::new(dir)) {
-        Ok(inputs) => ws.comptime_inputs = inputs,
-        Err(e) => {
-            log::error!(target: "SKULL", "build var resolution failed for project {}: {:#}", dir, e);
-            crate::ablation_report::exit_with_census(1);
-        }
-    }
+    ws.comptime_inputs = inputs;
     let user_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
 
     // Lints are a compiler pass, not an editor accessory: they run on the same
@@ -1535,8 +1543,17 @@ pub fn skull_compile_game_and_collect_sims(
 /// analogue of the single-file [`skull_compile_single`] path; shares
 /// [`skull_emit_project`] with `run`.
 fn skull_compile_project(dir: &str, output: Option<String>) -> Result<()> {
+    let inputs = crate::comptime::inputs_for_project_dir(std::path::Path::new(dir))?;
+    skull_compile_project_with_inputs(dir, output, inputs)
+}
+
+pub fn skull_compile_project_with_inputs(
+    dir: &str,
+    output: Option<String>,
+    inputs: bone_semantic::inference::ComptimeInputs,
+) -> Result<()> {
     use std::path::PathBuf;
-    let emit = skull_emit_project(dir);
+    let emit = skull_emit_project_with_inputs(dir, inputs);
     // A game's runnable main.lua is the same shape run/stone produce via
     // write_full_main: preamble (game source dir) + emit +
     // __rock_main_wrapper(main). Without the preamble game asset paths are

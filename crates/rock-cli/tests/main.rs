@@ -32,6 +32,10 @@ mod cimgui_prelude;
 mod release_mode_deleted;
 #[path = "mag_build_vars.rs"]
 mod mag_build_vars;
+#[path = "package.rs"]
+mod package;
+#[path = "fire_manifest.rs"]
+mod fire_manifest;
 #[path = "js_run_gate.rs"]
 mod js_run_gate;
 #[path = "js_value_tests.rs"]
