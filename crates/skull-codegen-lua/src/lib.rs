@@ -244,14 +244,8 @@ impl CodegenCtx {
 }
 
 /// Cells REFERENCED (Load/Store/`MapNext` or multi-return dest) anywhere the top
-/// scope rooted at `entry` emits: its terminator-reachable blocks PLUS every
-/// inline-lambda sub-region nested within them (reached via `Inst::Lambda`
-/// entries, which a hook/defer body still renders inline). The declaration walk
-/// declares only these -- a hoisted lambda body is a full-arena clone whose dead
-/// enclosing/sibling regions would otherwise declare the WHOLE arena as inert
-/// locals (fatal past LuaJIT's 200-local parse cap on a large co-fn step;
-/// docs/closure-conversion-mir-plan.md S3). Complete by construction: `render_scope`
-/// emits exactly this block set, so every cell it references is included.
+/// scope rooted at `entry` emits. Hoisted closure bodies are separate ordinary
+/// MirFuncs, so the declaration walk only follows this function's CFG.
 fn referenced_cells_in_region(func: &MirFunc, entry: Idx<Block>) -> HashSet<Idx<Cell>> {
     let mut seen: HashSet<Idx<Block>> = HashSet::default();
     let mut stack = vec![entry];
@@ -269,11 +263,6 @@ fn referenced_cells_in_region(func: &MirFunc, entry: Idx<Block>) -> HashSet<Idx<
                 Inst::CallMulti { dests, .. }
                 | Inst::CallValueMulti { dests, .. }
                 | Inst::CallBoundMulti { dests, .. } => cells.extend(dests.iter().copied()),
-                Inst::Lambda { entry: le, .. } => {
-                    if seen.insert(*le) {
-                        stack.push(*le);
-                    }
-                }
                 _ => {}
             }
         }
@@ -284,19 +273,6 @@ fn referenced_cells_in_region(func: &MirFunc, entry: Idx<Block>) -> HashSet<Idx<
         });
     }
     cells
-}
-
-/// Every closure parameter cell in `func` (across all `Lambda` insts). The
-/// enclosing function must NOT declare these as locals — they are each closure's
-/// Lua `function(...)` argument list.
-pub(crate) fn collect_lambda_params(func: &MirFunc) -> HashSet<Idx<Cell>> {
-    let mut out = HashSet::default();
-    for (_, inst) in func.insts.iter() {
-        if let Inst::Lambda { params, .. } = inst {
-            out.extend(params.iter().copied());
-        }
-    }
-    out
 }
 
 /// Emit one MIR function as a top-level Lua `function <name>(...) ... end`.
@@ -323,7 +299,7 @@ pub fn emit_named(
     name: &str,
     func: &MirFunc,
 ) -> String {
-    emit_named_framed(ws, ctx, interner, name, func, None, None)
+    emit_named_framed(ws, ctx, interner, name, func, None)
 }
 
 /// The coroutine state-table context: a `co fn`'s `__step` reads/writes its
@@ -333,16 +309,14 @@ pub fn emit_named(
 /// lambda-cell allocation bumps raw ids but never reorders the frame cells, so
 /// a slot -- and the layout stamp keyed on it -- is invariant under
 /// lambda-internal cell-count edits (the P2 finding in
-/// docs/coroutine-frame-lambda-plan.md). `hoist_lambdas` is true only for the
-/// step emission: lambdas hoist like non-frame ones, with frame captures
-/// collapsing to `s` (P1); the hook/defer emissions keep it false
-/// (mechanism 3, an all-cells frame with no plan).
+/// docs/coroutine-frame-lambda-plan.md). Lambdas are converted before emission;
+/// detached hook/defer regions are ordinary `MirFunc`s by the time they reach
+/// this printer.
 pub struct FrameCtx {
     pub s_cell: Idx<Cell>,
     pub fields: HashSet<Idx<Cell>>,
     /// Frame cell -> dense slot (`c<slot>` field name). Total over `fields`.
     pub slots: HashMap<Idx<Cell>, u32>,
-    pub hoist_lambdas: bool,
 }
 
 /// [`emit_named`] with an optional coroutine frame context (the `__step` fn).
@@ -351,9 +325,7 @@ pub struct FrameCtx {
 /// shared MIR pass) has already rewritten every reachable `Inst::Lambda` into a
 /// `MakeEnv` record / bare `Global` + a hoisted sibling `MirFunc` before emission
 /// (S3, docs/closure-conversion-mir-plan.md). So this fn only renders the given
-/// region; the sole surviving inline `Inst::Lambda` is a lambda nested in a co-fn
-/// hook/defer body (`FrameCtx::hoist_lambdas == false`, a detached region the pass
-/// leaves untouched), rendered by the inline arm in `emit_inst`.
+/// region.
 pub fn emit_named_framed(
     ws: &Workspace,
     ctx: &CodegenCtx,
@@ -361,18 +333,9 @@ pub fn emit_named_framed(
     name: &str,
     func: &MirFunc,
     frame: Option<&FrameCtx>,
-    // A hook/defer body is a detached region of the co-fn step: it lives in the
-    // step's own inst/cell/block arena, entered at its own block with `params =
-    // [s]`. This override renders exactly that region of the SHARED `func` instead
-    // of cloning the whole `MirFunc` just to swap `entry`/`params` (the clone
-    // deep-copied the entire arena per hook/defer). `None` uses `func`'s own
-    // entry/params. Everything else reads the shared arena, so a frame-field cell
-    // renders byte-identically to the pre-elision clone.
-    entry_override: Option<(Idx<Block>, &[Idx<Cell>])>,
 ) -> String {
-    let entry = entry_override.map_or_else(|| func.entry(), |(e, _)| e);
-    let params = entry_override.map_or(func.params.as_slice(), |(_, p)| p);
-    let lambda_params = collect_lambda_params(func);
+    let entry = func.entry();
+    let params = func.params.as_slice();
     // Ordinary functions color cells (collapse them onto luajit's 200-local cap);
     // a coroutine `__step` keeps raw `c<raw>` names (frame-field naming depends on
     // the raw id), so it gets an empty map.
@@ -393,7 +356,7 @@ pub fn emit_named_framed(
         String::with_capacity(hoist_defs.len() + name.len() + 64 + estimated_body_bytes);
     out.push_str(&hoist_defs);
     let _ = write!(out, "function {}", name);
-    render_scope(ws, ctx, interner, func, entry, params, &lambda_params, true, frame, &cell_colors, &hoist, &hoist_names, &mut out);
+    render_scope(ws, interner, func, entry, params, true, frame, &cell_colors, &hoist, &hoist_names, &mut out);
     out.push('\n');
     out
 }
@@ -891,7 +854,7 @@ fn slot_sound(
 /// value operands only (operands are SSA — immutable once computed) with no read
 /// of mutable state (cell/global/heap) and no side effect. Excludes `Load`/
 /// `Global`/`Field`/`Index`/`Len`/`Call` (order-sensitive memory reads / effects)
-/// and `Lambda` (rendered as its own scope) — those keep their register.
+/// and closure records — those keep their register.
 /// The splice-able shape of an `inline(lua)` body (for `@inline` splicing).
 #[derive(Clone, Copy)]
 enum InlineLuaShape {
@@ -1098,25 +1061,15 @@ fn compute_inlinable(func: &MirFunc, scope: &[Idx<Block>]) -> Vec<bool> {
     inl
 }
 
-/// Render `function(<params>) <locals> <blocks> end` for a scope rooted at
-/// `entry` (the top function or a closure body), appending to `out` AFTER its
-/// already-written name. Values are colored over ONLY this scope's reachable
-/// blocks (a closure's values are independent of the enclosing scope; `r<n>`
-/// names shadow safely since only cells cross the boundary). `is_top` declares
-/// the function's cells (a closure declares none — its params are the arg list,
-/// captures/locals are enclosing upvalues).
+/// Render `function(<params>) <locals> <blocks> end` for the ordinary MIR
+/// function rooted at `entry`, appending to `out` after its name.
 #[allow(clippy::too_many_arguments)]
 fn render_scope(
     ws: &Workspace,
-    ctx: &CodegenCtx,
     interner: &MonoInterner,
     func: &MirFunc,
     entry: Idx<Block>,
     params: &[Idx<Cell>],
-    lambda_params: &HashSet<Idx<Cell>>,
-    // `true` for a top-level fn (declares its cells); `false` for an inline
-    // hook/defer lambda body (shares the enclosing fn's cell namespace, declares
-    // nothing).
     is_top: bool,
     frame: Option<&FrameCtx>,
     cell_colors: &[u32],
@@ -1213,7 +1166,7 @@ fn render_scope(
             .collect();
         let mut seen_color: HashSet<u32> = HashSet::default();
         for (cid, _) in func.cells.iter() {
-            if param_cells.contains(&cid) || lambda_params.contains(&cid) || is_frame(&cid) || !referenced.contains(&cid) {
+            if param_cells.contains(&cid) || is_frame(&cid) || !referenced.contains(&cid) {
                 continue;
             }
             let (decl, col) = match cell_colors[raw(cid) as usize] {
@@ -1247,13 +1200,11 @@ fn render_scope(
 
     let mut em = Emitter {
         ws,
-        ctx,
         interner,
         func,
         colors,
         color_scope,
         cell_colors,
-        lambda_params,
         frame,
         loops: &loops,
         rpo: &rpo,
@@ -1295,7 +1246,6 @@ fn write_vname(out: &mut String, colors: &[u32], id: Idx<Inst>) {
 
 struct Emitter<'a> {
     ws: &'a Workspace,
-    ctx: &'a CodegenCtx,
     /// The build's one arena, so the symbol a call spells comes from the same
     /// [`Instance`] object the definition was emitted under rather than from a
     /// second derivation of the same encoder.
@@ -1310,7 +1260,6 @@ struct Emitter<'a> {
     /// get their `local` line inside the `for` block ([`Self::expand_for`]).
     color_scope: Vec<Option<Idx<Block>>>,
     cell_colors: &'a [u32],
-    lambda_params: &'a HashSet<Idx<Cell>>,
     frame: Option<&'a FrameCtx>,
     /// Recognized counted loops, keyed by header — a goto into an un-emitted
     /// header expands a structured `for`.
@@ -1729,19 +1678,8 @@ impl Emitter<'_> {
                 self.write_csv(out, args);
                 out.push(')');
             }
-            Inst::Lambda { params, entry } => {
-                // The ONLY `Inst::Lambda` that reaches codegen is one nested inside
-                // a co-fn hook/defer body (`FrameCtx::hoist_lambdas == false`): the
-                // shared pass leaves that detached region untouched, so the lambda
-                // renders inline `function(<params>) <body> end` (a sanctioned
-                // exception -- the mechanism-1 pocket, docs/coroutine-frame-lambda-plan.md
-                // D5, pinned by `cofn_lambda_in_defer_body`). Captured cells are
-                // frame fields (`c<s>.c<slot>`) handled by the all-cells aux
-                // FrameCtx; the body declares nothing (`is_top = false`). Every
-                // other lambda was already converted to a `MakeEnv` / `Global` +
-                // hoisted sibling by `convert_closures`.
-                out.push_str("function");
-                render_scope(self.ws, self.ctx, self.interner, self.func, *entry, params, self.lambda_params, false, self.frame, self.cell_colors, self.hoist, self.hoist_names, out);
+            Inst::Lambda { .. } => {
+                unreachable!("residual Inst::Lambda reached Lua emission")
             }
 
             Inst::MakeTuple(vs) => {
@@ -1975,8 +1913,7 @@ impl Emitter<'_> {
             // / `{ v = <seed> }`. Field access (`e.c<raw>`, `.v`) already flows
             // through `Inst::Field`/`Inst::StoreField`. EVERY servable path (ordinary
             // fns AND the coroutine step, S2+S3) now routes through the pass, so
-            // `MakeEnv` is the only closure shape codegen sees -- the sole surviving
-            // `Inst::Lambda` is a lambda nested in a hook/defer body (rendered inline).
+            // `MakeEnv` is the only capturing closure shape codegen sees.
             Inst::MakeEnv { fn_ref, fields } => match fn_ref {
                 Some(name) => {
                     out.push_str("setmetatable({ __fn = ");

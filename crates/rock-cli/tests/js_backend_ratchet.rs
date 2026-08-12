@@ -268,3 +268,23 @@ fn js_runnable_coverage_ratchet() {
         "corpus produced no skips -- it no longer exercises the SKIP(reason) path"
     );
 }
+
+#[test]
+fn js_cofn_detached_lambda_is_executed() {
+    if !node_available() {
+        eprintln!("SKIP js_cofn_detached_lambda_is_executed: `node` not on PATH");
+        return;
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("workspace root");
+    let path = root.join("tests/closure_capture_semantics_cofn.rock");
+    let paths = vec![path.to_string_lossy().into_owned()];
+    let summary = rock_cli::js_test::js_test_run(&paths, false).expect("js test run");
+
+    assert_eq!(summary.unit_failures, 0, "detached closure unit must build");
+    assert_eq!(summary.tests_failed, 0, "no detached closure test may fail");
+    assert_eq!(summary.tests_skipped, 0, "detached closures must emit on JS: {:?}", summary.skip_reasons);
+    assert_eq!(summary.tests_passed, 12);
+}

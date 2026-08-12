@@ -5641,14 +5641,42 @@ fn emit_coroutine_js(
     let mut lowered = skull_transform::transform_coroutine(mf, channel);
     let resume_arg = mf.resume_arg.ok_or_else(|| err("co fn must carry a resume-arg cell"))?;
     let step_name = plan.step();
-    // Aux slot map BEFORE the closure pass mutates the arena (mirrors the Lua
-    // driver); hook/defer regions are untouched by the pass, so the map stays valid.
-    let aux_slots = lowered.aux_all_cells_slots(resume_arg);
-    let frame_info = skull_transform::FrameInfo {
-        s_cell: lowered.s_cell,
-        fields: lowered.frame_plan.fields().iter().copied().collect(),
-        slots: lowered.frame_plan.slots().clone(),
-    };
+    // Convert detached hook/defer regions as ordinary functions. Their own
+    // lambda parameters and locals stay ordinary cells; only root-owned cells
+    // are materialized through the coroutine state table.
+    let frame_info = lowered.root_frame_info();
+    let defer_entries: Vec<Idx<Block>> =
+        lowered.step.coro_defers.iter().map(|(_, entry)| *entry).collect();
+    let hook_entries: Vec<(&'static str, Idx<Block>)> = lowered
+        .hooks
+        .iter()
+        .map(|(kind, entry)| (kind.slot(), *entry))
+        .collect();
+    let mut defer_funcs = Vec::with_capacity(defer_entries.len());
+    for (k, &entry) in defer_entries.iter().enumerate() {
+        let aux_name = plan.defer(k);
+        defer_funcs.push(skull_transform::lower_detached_region(
+            &lowered.step,
+            entry,
+            &aux_name,
+            &frame_info,
+        ));
+    }
+    let mut hook_funcs = Vec::with_capacity(hook_entries.len());
+    for &(slot, entry) in &hook_entries {
+        let aux_name = plan.hook(slot);
+        hook_funcs.push((
+            slot,
+            skull_transform::lower_detached_region(&lowered.step, entry, &aux_name, &frame_info),
+        ));
+    }
+    skull_transform::erase_detached_lambdas(
+        &mut lowered.step,
+        defer_entries
+            .iter()
+            .copied()
+            .chain(hook_entries.iter().map(|(_, entry)| *entry)),
+    );
     skull_transform::convert_closures_framed(
         &mut lowered.step,
         &step_name,
@@ -5659,9 +5687,11 @@ fn emit_coroutine_js(
     // bodies, so extend the program set locally.
     let mut hoisted = hoisted.clone();
     hoisted.extend(lowered.step.nested_fns.iter().map(|nf| nf.name));
-    // Materialize the ROOT region's frame accesses, then each detached
-    // hook/defer region with the all-cells aux map (disjoint block sets over
-    // the shared arena).
+    for aux in defer_funcs.iter().chain(hook_funcs.iter().map(|(_, aux)| aux)) {
+        hoisted.extend(aux.nested_fns.iter().map(|nf| nf.name));
+    }
+    // Materialize only the root region; detached regions were materialized when
+    // they were copied into ordinary MirFuncs.
     let step_entry = lowered.step.entry;
     skull_transform::materialize_frame(
         &mut lowered.step,
@@ -5669,22 +5699,6 @@ fn emit_coroutine_js(
         lowered.s_cell,
         lowered.frame_plan.slots(),
     );
-    let mut hook_entries: Vec<(&'static str, Idx<Block>)> = Vec::new();
-    for (kind, lambda) in &lowered.hooks {
-        let Inst::Lambda { params, entry } = &lowered.step.insts[*lambda] else {
-            return Err(err(format!("co-fn hook {} must be an Inst::Lambda", kind.slot())));
-        };
-        if !params.is_empty() {
-            return Err(err("co-fn lifecycle hooks are nullary"));
-        }
-        hook_entries.push((kind.slot(), *entry));
-    }
-    let defer_entries: Vec<Idx<Block>> =
-        lowered.step.coro_defers.iter().map(|(_, e)| *e).collect();
-    for &e in defer_entries.iter().chain(hook_entries.iter().map(|(_, e)| e)) {
-        skull_transform::materialize_frame(&mut lowered.step, e, lowered.s_cell, &aux_slots);
-    }
-
     let mut out = emit_fn_trampoline(
         ws,
         &lowered.step,
@@ -5705,31 +5719,53 @@ fn emit_coroutine_js(
         out.push_str(&emit_fn_with_callees(ws, nf, nf.name.as_str(), callees, &hoisted, globals)?);
     }
     lowered.step.nested_fns = nested;
-    for (k, &entry) in defer_entries.iter().enumerate() {
-        out.push_str(&emit_fn_trampoline(
+    for mut aux in defer_funcs {
+        skull_transform::cleanup_with_nobox(ws, &mut aux);
+        out.push_str(&emit_fn_with_callees(
             ws,
-            &lowered.step,
-            &plan.defer(k),
+            &aux,
+            aux.name.as_str(),
             callees,
             &hoisted,
             globals,
-            entry,
-            &[lowered.s_cell],
-            false,
         )?);
+        let mut nested = std::mem::take(&mut aux.nested_fns);
+        for nf in nested.iter_mut() {
+            skull_transform::cleanup_with_nobox(ws, nf);
+            skull_transform::recover_counted_loops(ws, nf);
+            out.push_str(&emit_fn_with_callees(
+                ws,
+                nf,
+                nf.name.as_str(),
+                callees,
+                &hoisted,
+                globals,
+            )?);
+        }
     }
-    for &(slot, entry) in &hook_entries {
-        out.push_str(&emit_fn_trampoline(
+    for (_, mut aux) in hook_funcs {
+        skull_transform::cleanup_with_nobox(ws, &mut aux);
+        out.push_str(&emit_fn_with_callees(
             ws,
-            &lowered.step,
-            &plan.hook(slot),
+            &aux,
+            aux.name.as_str(),
             callees,
             &hoisted,
             globals,
-            entry,
-            &[lowered.s_cell],
-            false,
         )?);
+        let mut nested = std::mem::take(&mut aux.nested_fns);
+        for nf in nested.iter_mut() {
+            skull_transform::cleanup_with_nobox(ws, nf);
+            skull_transform::recover_counted_loops(ws, nf);
+            out.push_str(&emit_fn_with_callees(
+                ws,
+                nf,
+                nf.name.as_str(),
+                callees,
+                &hoisted,
+                globals,
+            )?);
+        }
     }
     out.push_str(&emit_js_constructor(plan, &step_name, &lowered)?);
     Ok(out)

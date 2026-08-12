@@ -17,7 +17,7 @@ use rustc_hash::FxHashSet as HashSet;
 
 use comfy_la_arena::Idx;
 
-use crate::{collect_lambda_params, reachable_blocks_from, successors};
+use crate::{reachable_blocks_from, successors};
 use skull_mir::mir::{Block, Cell, Inst, MirFunc, Term};
 
 /// A dense fixed-size bit set over `0..n` — used for cell liveness/interference,
@@ -244,8 +244,8 @@ pub(crate) fn inst_uses(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
         }
         Inst::MapNext { table, .. } => push(*table),
         Inst::CoroSetInner(x) => push(*x),
-        // The lambda is rendered inline (like `Inst::Lambda`), not a colored
-        // value; and hooks are peeled to the ctor before codegen anyway.
+        // Hooks are peeled to the constructor before codegen; their detached
+        // bodies are ordinary MirFuncs and are colored independently.
         Inst::CoroHook { .. } => {}
     }
 }
@@ -639,9 +639,8 @@ fn cell_uses(inst: &Inst, push: &mut impl FnMut(Idx<Cell>)) {
 /// pass those an all-`u32::MAX` table so they keep raw `c<raw>` names and the
 /// frame-field naming is preserved). Returns a dense `raw(cell) -> color` table
 /// (`u32::MAX` = uncolored). Non-interfering cells share a color; the caller
-/// renders a colored cell as `c<color>`. A cell a closure touches (captured, a
-/// closure-local store, or a lambda param) is forced to a UNIQUE color: the
-/// closure captures that local by identity, so it must never be reused.
+/// renders a colored cell as `c<color>`. Cells in detached nested CFGs are
+/// forced to a unique color and are never emitted with their enclosing body.
 pub fn color_cells(func: &MirFunc) -> Vec<u32> {
     let top: Vec<Idx<Block>> = reachable_blocks_from(func, func.entry());
     let top_set: HashSet<Idx<Block>> = top.iter().copied().collect();
@@ -654,7 +653,7 @@ pub fn color_cells(func: &MirFunc) -> Vec<u32> {
 
     // Cells any closure sub-CFG touches must stay unique (the closure captures /
     // mutates the local by reference). Closure blocks are those not in `top`.
-    let mut force_unique: HashSet<Idx<Cell>> = collect_lambda_params(func);
+    let mut force_unique: HashSet<Idx<Cell>> = HashSet::default();
     for (bid, b) in func.blocks.iter() {
         if top_set.contains(&bid) {
             continue;

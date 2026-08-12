@@ -6,11 +6,10 @@
 
 use bone_semantic::inference::Workspace;
 use comfy_la_arena::Idx;
-use rustc_hash::FxHashSet as HashSet;
 use skull_codegen_lua::{emit_named_framed, CodegenCtx, FrameCtx};
 use skull_mir::lower::CoroutinePlan;
 use skull_mir::mir::*;
-use skull_transform::{CoroLowered, FrameInfo, STATE};
+use skull_transform::{CoroLowered, STATE};
 
 fn raw<T>(i: Idx<T>) -> u32 {
     i.into_raw().into()
@@ -30,7 +29,6 @@ pub fn emit_coroutine(
     plan: &CoroutinePlan,
     func: &MirFunc,
 ) -> String {
-    let name = plan.base().to_string();
     // A co fn yielding a flat enum threads through the frame-slot channel (0 alloc
     // per yield); the channel's shape drives both the slot writes (transform) and
     // the generic/boxed `resume()` rebuild (constructor).
@@ -40,34 +38,6 @@ pub fn emit_coroutine(
         s_cell: lowered.s_cell,
         fields: lowered.frame_plan.fields().iter().copied().collect(),
         slots: lowered.frame_plan.slots().clone(),
-        hoist_lambdas: true,
-    };
-    // Hooks/defers keep the pre-P1 emission (D5 of
-    // docs/coroutine-frame-lambda-plan.md): an ALL-cells aux frame with
-    // `hoist_lambdas: false`. THE INVARIANT: with hoisting off no cell is ever
-    // hoisted to a lambda body, so a cell that is NOT a frame field would render
-    // as a bare `write_cell_local` (`c<raw>`) -- an undeclared local (these bodies
-    // never bind locals: they are flat detached regions of the step). Making EVERY
-    // step cell (minus `s`/`resume_arg`, which a nullary terminal/pre-step body
-    // never references) a frame field is what keeps every reference resolving to
-    // `s.c<slot>`. This is why ROOT-forcing the hook/defer-owned cells (D5's
-    // alternative) is unnecessary AND would be wrong here: no ownership pass runs
-    // for the aux frame (the no-hoist path skips ScopeTree/Ownership entirely), and
-    // the ownership-based field set the STEP uses would shrink `fields` to co-fn
-    // state -- declaring every lambda-owned cell as a dead local in each body
-    // (LuaJIT 200-local risk). All-cells-framed keeps zero locals and is
-    // byte-identical to what these bodies have always produced.
-    let resume_arg = func.resume_arg.expect("co fn must carry a resume-arg cell");
-    // Aux slots: SHARED frame cells (co-fn state a hook body reads) MUST reuse
-    // the step's slots -- the hook reads the same field the ctor wrote
-    // (`CoroLowered::aux_all_cells_slots`, shared with the JS path).
-    let aux_slots = lowered.aux_all_cells_slots(resume_arg);
-    let aux_fields: HashSet<Idx<Cell>> = aux_slots.keys().copied().collect();
-    let aux_frame = FrameCtx {
-        s_cell: lowered.s_cell,
-        fields: aux_fields,
-        slots: aux_slots,
-        hoist_lambdas: false,
     };
     // `__resume`/`__advance` are minted by `emit_constructor` from the plan --
     // check them here (the only place with `ctx`) for their collision side-effect.
@@ -78,18 +48,39 @@ pub fn emit_coroutine(
         ctx.mint_synthetic(advance);
     }
     let step_name = ctx.mint_synthetic(plan.step());
-    // S3 (docs/closure-conversion-mir-plan.md): route the STEP's lambdas through
-    // the shared closure-conversion pass, with the frame so a captured frame cell
-    // collapses to a capture of `s` (D2/D4(b) of docs/coroutine-frame-lambda-plan.md).
-    // Each lambda becomes a `MakeEnv` record / bare `Global` + a hoisted sibling in
-    // `step.nested_fns` (emitted below). Detached hook/defer lambdas (unreachable
-    // from the step entry) are left as `Inst::Lambda` for their aux emission's
-    // inline arm -- `aux_frame` was built above, before the pass mutated the arena.
-    let frame_info = FrameInfo {
-        s_cell: lowered.s_cell,
-        fields: lowered.frame_plan.fields().iter().copied().collect(),
-        slots: lowered.frame_plan.slots().clone(),
-    };
+    // S3 (docs/closure-conversion-mir-plan.md): route both the STEP and every
+    // detached region through the shared closure-conversion pass. Detached
+    // regions become ordinary MirFuncs, so their own lambda parameters and
+    // locals cannot accidentally be rendered as coroutine frame fields.
+    let frame_info = lowered.root_frame_info();
+    let defer_entries: Vec<Idx<Block>> =
+        lowered.step.coro_defers.iter().map(|(_, entry)| *entry).collect();
+    let hook_entries: Vec<(CoroHookKind, Idx<Block>)> = lowered.hooks.clone();
+    let mut defer_funcs = Vec::with_capacity(defer_entries.len());
+    for (k, &entry) in defer_entries.iter().enumerate() {
+        let dname = ctx.mint_synthetic(plan.defer(k));
+        defer_funcs.push(skull_transform::lower_detached_region(
+            &lowered.step,
+            entry,
+            &dname,
+            &frame_info,
+        ));
+    }
+    let mut hook_funcs = Vec::with_capacity(hook_entries.len());
+    for (kind, entry) in &hook_entries {
+        let hname = ctx.mint_synthetic(plan.hook(kind.slot()));
+        hook_funcs.push((
+            *kind,
+            skull_transform::lower_detached_region(&lowered.step, *entry, &hname, &frame_info),
+        ));
+    }
+    skull_transform::erase_detached_lambdas(
+        &mut lowered.step,
+        defer_entries
+            .iter()
+            .copied()
+            .chain(hook_entries.iter().map(|(_, entry)| *entry)),
+    );
     let pre_nested = lowered.step.nested_fns.len();
     skull_transform::convert_closures_framed(
         &mut lowered.step,
@@ -103,7 +94,7 @@ pub fn emit_coroutine(
         ctx.mint_synthetic(nf.name.to_string());
     }
     let step_lua =
-        emit_named_framed(ws, ctx, interner, &step_name, &lowered.step, Some(&frame), None);
+        emit_named_framed(ws, ctx, interner, &step_name, &lowered.step, Some(&frame));
     // Hoisted lambda bodies: frame-free sibling fns (the pass materialized their
     // frame accesses as `e.c<S>.c<slot>`, so they need no `FrameCtx`). cleanup
     // drops the clone's dead ROOT-region insts; a co fn's loops are recovered by
@@ -117,46 +108,36 @@ pub fn emit_coroutine(
             .push_str(&skull_codegen_lua::emit_named(ws, ctx, interner, nf.name.as_str(), nf));
     }
     lowered.step.nested_fns = hoisted;
-    // Terminal-cleanup defers and lifecycle-hook lambdas
-    // (`on_killed`/`on_resume`/`on_hot_reload`) share one emission shape: a
-    // detached region of the step (`if flag { flag = false; <body> }` for a
-    // defer, the hook lambda's body for a hook) rendered as a standalone
-    // `<name>...(s)` fn over the step's OWN inst/cell/block arena + the all-cells
-    // aux FrameCtx. The entry override enters the shared step at the region's
-    // block with `params = [s]` -- no per-body `step.clone()` (which deep-copied
-    // the whole arena just to swap entry/params). A hook's only upvalue is the
-    // frame `s`, so every captured cell reaches as `c<s>.c<slot>`; the ctor stores
-    // both kinds by value (`__defers` table / `__on_*` fields) so a stale
-    // coroutine runs its own layout's cleanup, zero closures per creation.
-    // `__rock_coroutine_run_defers` iterates the defers LIFO with per-body pcall.
-    let s_params = [lowered.s_cell];
-    let emit_aux = |aux_name: &str, entry: Idx<Block>| {
-        emit_named_framed(
-            ws,
-            ctx,
-            interner,
-            aux_name,
-            &lowered.step,
-            Some(&aux_frame),
-            Some((entry, &s_params)),
-        )
-    };
+    // Terminal-cleanup defers and lifecycle hooks are now ordinary functions,
+    // with their converted lambda siblings emitted beside them. Their function
+    // values are still stored in the coroutine constructor by name.
     let mut defer_luas = String::new();
-    for (k, (_, entry)) in lowered.step.coro_defers.iter().enumerate() {
-        let dname = ctx.mint_synthetic(plan.defer(k));
-        defer_luas.push_str(&emit_aux(&dname, *entry));
+    for mut aux in defer_funcs {
+        skull_transform::cleanup_with_nobox(ws, &mut aux);
+        defer_luas.push_str(&skull_codegen_lua::emit_named(
+            ws, ctx, interner, aux.name.as_str(), &aux,
+        ));
+        let mut nested = std::mem::take(&mut aux.nested_fns);
+        for nf in nested.iter_mut() {
+            skull_transform::cleanup_with_nobox(ws, nf);
+            defer_luas.push_str(&skull_codegen_lua::emit_named(
+                ws, ctx, interner, nf.name.as_str(), nf,
+            ));
+        }
     }
     let mut hook_luas = String::new();
-    for (kind, lambda) in &lowered.hooks {
-        // Reject, don't fall back: the ctor unconditionally emits
-        // `__on_<hook> = <name>__on_<hook>`, so silently skipping here would
-        // leave that global undefined and the hook nil at fire time.
-        let Inst::Lambda { params, entry } = &lowered.step.insts[*lambda] else {
-            panic!("co-fn hook {} of `{name}` must be an Inst::Lambda", kind.slot())
-        };
-        assert!(params.is_empty(), "co-fn lifecycle hooks are nullary (`{name}`)");
-        let hname = ctx.mint_synthetic(plan.hook(kind.slot()));
-        hook_luas.push_str(&emit_aux(&hname, *entry));
+    for (_, mut aux) in hook_funcs {
+        skull_transform::cleanup_with_nobox(ws, &mut aux);
+        hook_luas.push_str(&skull_codegen_lua::emit_named(
+            ws, ctx, interner, aux.name.as_str(), &aux,
+        ));
+        let mut nested = std::mem::take(&mut aux.nested_fns);
+        for nf in nested.iter_mut() {
+            skull_transform::cleanup_with_nobox(ws, nf);
+            hook_luas.push_str(&skull_codegen_lua::emit_named(
+                ws, ctx, interner, nf.name.as_str(), nf,
+            ));
+        }
     }
     let ctor = emit_constructor(plan, &step_name, &lowered);
     let _ = lowered.num_states;

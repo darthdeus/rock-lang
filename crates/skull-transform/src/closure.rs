@@ -14,9 +14,7 @@
 //!
 //! Every servable path routes through this pass (S1 JS, S2 ordinary Lua fns, S3
 //! coroutine steps + global-init/decorator units), so post-pass codegen sees
-//! `MakeEnv`/`Global`, never an `Inst::Lambda` -- except one nested in a co-fn
-//! hook/defer body, a detached region this pass leaves for the inline arm
-//! (`FrameCtx::hoist_lambdas == false`; see `convert_closures_framed`).
+//! `MakeEnv`/`Global`, never an `Inst::Lambda`.
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
@@ -80,10 +78,8 @@ pub fn convert_closures(mf: &mut MirFunc, name_base: &str) {
 /// [`FrameInfo`] for the STEP `MirFunc`). With a frame, captured frame cells
 /// collapse to a capture of `s` (D2) except provenance-tagged loop bindings no
 /// lambda writes, which snapshot by value (D4(b)); a frame-cell access inside a
-/// hoisted body materializes `e.c<S>.c<slot>` (D3). Detached hook/defer lambdas
-/// (unreachable from the step entry) are left untouched -- their bodies still
-/// emit through the inline arm (`FrameCtx::hoist_lambdas == false`), a sanctioned
-/// exception pinned by `cofn_lambda_in_defer_body` (`docs/coroutine-frame-lambda-plan.md`).
+/// hoisted body materializes `e.c<S>.c<slot>` (D3). Detached hook/defer regions
+/// are converted by [`lower_detached_region`] before they reach either backend.
 ///
 /// `precomputed` reuses the coroutine transform's `ScopeTree`+`Ownership` (the
 /// SAME basis `frame.fields` was derived from). This is not merely the P2
@@ -121,7 +117,6 @@ pub fn convert_closures_framed(
         s_cell: f.s_cell,
         fields: f.fields.clone(),
         slots: f.slots.clone(),
-        hoist_lambdas: true,
     });
     let mut boxed: HashSet<Idx<Cell>> = tree.boxed_cells(own);
     // Frame cells are table-mediated (via `s` or a by-value loop-binding snapshot
@@ -360,11 +355,9 @@ pub fn convert_closures_framed(
             );
         }
     }
-    // Under a frame the DETACHED hook/defer blocks (unreachable from the step
-    // entry) still carry `Inst::Lambda`s that their aux emission renders inline
-    // (`FrameCtx::hoist_lambdas == false`), so they must survive -- neutralizing
-    // them would break `cofn_lambda_in_defer_body` (docs/coroutine-frame-lambda-plan.md
-    // D5). Only the frame-less path (ordinary/JS) nils dead residuals.
+    // Detached regions are lowered independently by `lower_detached_region`.
+    // The step arena therefore has no emitted residual closure producers; only
+    // the frame-less path also nils any dead ordinary-function residue.
     if frame.is_none() {
         for (_, inst) in mf.insts.iter_mut() {
             if matches!(inst, Inst::Lambda { .. }) {
@@ -433,10 +426,7 @@ pub fn convert_closures_framed(
     }
     // APPEND, don't overwrite: lowering already hoisted the enclosing fn's named
     // nested `fn`s into `mf.nested_fns`, and clobbering them would drop those
-    // definitions from the chunk (a real bug for the Lua path, where a fn can hold
-    // both a named nested `fn` and a lambda). The named siblings keep their own
-    // `Inst::Lambda`s, which the emitter converts on their own emission -- the pass
-    // only splits THIS fn's direct lambdas.
+    // definitions from the chunk. Detached regions use the same sibling shape.
     mf.nested_fns.extend(nested);
 }
 

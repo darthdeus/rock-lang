@@ -125,13 +125,19 @@ fn run(src: &str, driver: &str) -> String {
         ) {
             skull_transform::cleanup(&mut func);
             skull_transform::recover_counted_loops(&ws, &mut func);
+            let name = inst.symbol(&ws, scx.interner());
+            let pre_nested = func.nested_fns.len();
+            skull_transform::convert_closures(&mut func, &name);
             lua.push_str(&skull_codegen_lua::emit_named(
-                &ws,
-                &ctx,
-                scx.interner(),
-                &inst.symbol(&ws, scx.interner()),
-                &func,
+                &ws, &ctx, scx.interner(), &name, &func,
             ));
+            for nf in func.nested_fns[pre_nested..].iter_mut() {
+                skull_transform::cleanup_with_nobox(&ws, nf);
+                skull_transform::recover_counted_loops(&ws, nf);
+                lua.push_str(&skull_codegen_lua::emit_named(
+                    &ws, &ctx, scx.interner(), nf.name.as_str(), nf,
+                ));
+            }
         }
     }
     // Alias the user module's uniquely-named fns back to their bare source names
@@ -720,6 +726,8 @@ fn emit_inlined(src: &str, fn_name: &str) -> String {
     .expect("inline failed");
     skull_transform::cleanup(&mut func);
     skull_transform::recover_counted_loops(&ws, &mut func);
+    let name = skull_codegen_lua::mangle_fn(&ws, &ws.module(mid).functions[fid]);
+    skull_transform::convert_closures(&mut func, &name);
     let ctx = CodegenCtx::new(&ws);
     emit_function(&ws, &ctx, scx.interner(), self_ref, &func)
 }
