@@ -51,7 +51,7 @@ pub mod web;
 pub mod zip_writer;
 mod test_protocol;
 mod lint_cmd;
-pub(crate) mod lint_union;
+pub mod lint_union;
 pub mod lint_pass;
 pub mod ablation_report;
 mod mono_manifest;

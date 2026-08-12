@@ -754,6 +754,27 @@ pub fn validate_workspace(dir: &str) -> Result<bone_semantic::inference::Workspa
     let spec = crate::unified_compile::SourceSpec::Directory(std::path::PathBuf::from(dir));
     let sources = crate::unified_compile::discover_sources(&spec)
         .map_err(|e| anyhow::anyhow!("{dir}: cannot load project: {e}"))?;
+    validate_sources(sources)
+}
+
+/// Build the source that can contribute registered shaders. Test-only files
+/// without shader declarations cannot affect this corpus and may be broken
+/// independently of the production shader path.
+pub fn validate_shader_workspace(dir: &str) -> Result<bone_semantic::inference::Workspace> {
+    let spec = crate::unified_compile::SourceSpec::Directory(std::path::PathBuf::from(dir));
+    let mut sources = crate::unified_compile::discover_sources(&spec)
+        .map_err(|e| anyhow::anyhow!("{dir}: cannot load project: {e}"))?;
+    sources.files.retain(|file| {
+        let file = file.borrow();
+        !rock_core::SourceFiles::is_test_only_path(&file.file.to_id_path())
+            || file.is_test_util
+            || file.contents.contains("@shader")
+            || file.contents.contains("rock_shader")
+    });
+    validate_sources(sources)
+}
+
+fn validate_sources(sources: rock_core::SourceFiles) -> Result<bone_semantic::inference::Workspace> {
     let (mut modules, _entry) = crate::skull_backend::skull_assemble_project(&sources)
         .map_err(|errs| anyhow::anyhow!("{}", crate::skull_backend::render_project_errs(&sources, &errs)))?;
     crate::bone_backend::check_modules(&mut modules)
