@@ -86,7 +86,7 @@ pub use coroutine::CoroutinePlan;
 /// widening to make the split.
 mod call;
 mod container;
-pub use container::{ContainerFamily, ContainerPlan, ContainerStorage};
+pub use container::{ContainerFamily, ContainerPlan, ContainerStorage, PlaceBundle};
 mod control;
 mod dispatch;
 pub use dispatch::{
@@ -2180,7 +2180,9 @@ impl Builder<'_> {
         let Some(e) = opt else { return Ok(vec![]) };
         if let Some(shape) = self.result_shape() {
             let r = self.lower_expr_repr(e)?;
-            return Ok(self.repr_to_leaves(&r, &shape));
+            let rep = self.ret_rep.expect("result_shape requires an owned result RepId");
+            let bundle = ValueBundle::new(rep, r);
+            return Ok(self.repr_to_leaves_bundle(&bundle, &shape));
         }
         if let Some(shape) = self.result_tuple() {
             if shape.nullable {

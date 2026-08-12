@@ -666,6 +666,31 @@ pub(crate) enum ValueRepr {
     },
 }
 
+/// A runtime value together with the physical plan that authorized its shape.
+/// `ValueRepr` remains the operational carrier; this bundle prevents a caller
+/// from handing a representation to a consumer without stating which RepId it
+/// conforms to.
+#[derive(Clone)]
+pub(crate) struct ValueBundle {
+    representation: RepId,
+    value: ValueRepr,
+}
+
+impl ValueBundle {
+    pub(crate) fn new(representation: RepId, value: ValueRepr) -> Self {
+        Self { representation, value }
+    }
+
+    pub(crate) fn representation(&self) -> RepId {
+        self.representation
+    }
+
+    pub(crate) fn value(&self) -> &ValueRepr {
+        &self.value
+    }
+
+}
+
 /// A safe-nav receiver after lowering: either an ordinary boxed value, or an
 /// UNBOXED nullable value that carries its own presence tag.
 ///

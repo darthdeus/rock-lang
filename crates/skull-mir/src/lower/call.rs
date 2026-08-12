@@ -1732,6 +1732,19 @@ impl Builder<'_> {
         }
     }
 
+    pub(crate) fn repr_to_leaves_bundle(
+        &mut self,
+        bundle: &ValueBundle,
+        shape: &ValueShape,
+    ) -> Vec<Idx<Inst>> {
+        debug_assert_eq!(
+            self.scx.rep_arena().value_shape(bundle.representation()).as_ref(),
+            Some(shape),
+            "operational value does not conform to its RepId"
+        );
+        self.repr_to_leaves(bundle.value(), shape)
+    }
+
     /// Flatten a boxed value to its primitive leaves via chained reads (the inverse
     /// of `pack`, used when a value arrives boxed). A flat ENUM box reads its box
     /// keys (`__variant`, positional `[i+1]`, `.recfield`) in shape order; a cdata

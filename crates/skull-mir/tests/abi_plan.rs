@@ -396,6 +396,32 @@ fn container_storage_uses_the_element_representation_plan() {
 }
 
 #[test]
+fn leaf_places_carry_the_container_element_representation() {
+    let ws = ws_of("nobox value V2 { x: float, y: float }");
+    let arena = RepArena::default();
+    let ty = MonoTy::App {
+        ctor: MonoCtor::Nominal(Ustr::from("NativeBuffer")),
+        params: vec![nominal("V2")],
+    };
+    let plan = ContainerPlan::for_type(
+        &ws,
+        bone_semantic::hir::FnBackend::Lua,
+        &arena,
+        ContainerFamily::NativeBuffer,
+        &ty,
+    )
+    .expect("a NativeBuffer value must have a concrete container plan");
+    assert!(plan.is_leaf_addressed());
+    let address = skull_mir::lower::leaf_addr_plan(&ws, Ustr::from("V2"))
+        .expect("V2 has a leaf address plan")
+        .into_iter()
+        .next()
+        .expect("V2 has a nonzero leaf population");
+    let place = plan.place(address).expect("leaf storage owns the place");
+    assert_eq!(place.representation(), plan.element_rep());
+}
+
+#[test]
 fn enum_layout_is_selected_by_one_owned_plan() {
     let cdata_ws = ws_of("enum E { A(int), B(int), None }");
     let cdata = EnumPlan::for_name(&cdata_ws, Ustr::from("E")).expect("enum plan");

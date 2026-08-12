@@ -933,11 +933,11 @@ impl Builder<'_> {
                 self.emit_cur(Inst::StoreGlobal { name, value: new_v });
             }
             Expr::FieldAccess { base, field } => {
-                if let Some((buf, checked, _, addr)) = self.nb_leaf_rmw_place(target)? {
-                    let cur = self.nb_leaf_load(buf, checked, &addr);
+                if let Some((buf, checked, _, place)) = self.nb_leaf_rmw_place(target)? {
+                    let cur = self.nb_leaf_load(buf, checked, &place);
                     let rv = self.lower_expr(value)?;
                     let new_v = self.compound_combine(scalar, op_fn, overload, cur, rv)?;
-                    self.nb_leaf_store(buf, checked, &addr, new_v);
+                    self.nb_leaf_store(buf, checked, &place, new_v);
                     return Ok(());
                 }
                 let (pbase, key) = self.physical_field(base, field);
@@ -1067,10 +1067,10 @@ impl Builder<'_> {
                 Ok(if postfix { old } else { new })
             }
             Expr::FieldAccess { base, field } => {
-                if let Some((buf, checked, _, addr)) = self.nb_leaf_rmw_place(target)? {
-                    let old = self.nb_leaf_load(buf, checked, &addr);
+                if let Some((buf, checked, _, place)) = self.nb_leaf_rmw_place(target)? {
+                    let old = self.nb_leaf_load(buf, checked, &place);
                     let new = bump(self, old);
-                    self.nb_leaf_store(buf, checked, &addr, new);
+                    self.nb_leaf_store(buf, checked, &place, new);
                     return Ok(if postfix { old } else { new });
                 }
                 let (pbase, key) = self.physical_field(base, field);

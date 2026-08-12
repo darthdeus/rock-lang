@@ -67,12 +67,14 @@ impl Builder<'_> {
         path: &str,
         value: Idx<Expr>,
     ) -> Result<(), CompilerError> {
+        let container = self.native_buffer_plan(elem)?;
         let plan = leaf_addr_plan(self.ws, elem).map_err(gap)?;
         let dot = format!("{path}.");
-        let hit: Vec<LeafAddr> = plan
+        let hit: Vec<PlaceBundle> = plan
             .into_iter()
             .filter(|a| a.path.as_str() == path || a.path.as_str().starts_with(&dot))
-            .collect();
+            .map(|address| container.place(address).map_err(|e| gap(e.message)))
+            .collect::<Result<_, _>>()?;
         if hit.is_empty() {
             return Err(gap(format!("`{path}` is not a leaf of NativeBuffer<{elem}>")));
         }
@@ -81,7 +83,7 @@ impl Builder<'_> {
         // `<path>.<leaf>` -- so discriminating on hit COUNT lowers that field's
         // aggregate RHS as a scalar and writes the whole cdata through a
         // primitive view. Everything that is not an exact leaf is an aggregate.
-        let leaves = if hit.len() == 1 && hit[0].path.as_str() == path {
+        let leaves = if hit.len() == 1 && hit[0].address().path.as_str() == path {
             vec![self.lower_expr(value)?]
         } else {
             let sub = self
@@ -103,7 +105,8 @@ impl Builder<'_> {
             )));
         }
         let mut views = HashMap::new();
-        for (a, leaf) in hit.iter().zip(leaves) {
+        for (place, leaf) in hit.iter().zip(leaves) {
+            let a = place.address();
             let at = self.leaf_index(checked, a);
             let view = self.leaf_view(buf, a.view_field, &mut views);
             self.emit_cur(Inst::StoreIndex {
@@ -126,7 +129,7 @@ impl Builder<'_> {
     /// over one ArrayBuffer on JS, but the ADDRESSING is the same C layout either
     /// way -- `leaf_addr_plan`'s stride and offset are already in units of each
     /// view's own element type, so one lowering serves both.
-    pub(crate) fn is_leaf_addressed(&self, elem: Ustr) -> Result<bool, CompilerError> {
+    fn native_buffer_plan(&self, elem: Ustr) -> Result<ContainerPlan, CompilerError> {
         let ty = MonoTy::App {
             ctor: crate::monoty::MonoCtor::Nominal(Ustr::from("NativeBuffer")),
             params: vec![MonoTy::App {
@@ -134,7 +137,7 @@ impl Builder<'_> {
                 params: Vec::new(),
             }],
         };
-        let plan = ContainerPlan::for_type(
+        ContainerPlan::for_type(
             self.ws,
             self.scx.target,
             &self.scx.rep_arena(),
@@ -144,8 +147,11 @@ impl Builder<'_> {
         .map_err(|error| match error.span.or(self.cur_span) {
             Some(span) => CompilerError::new_with_label(span, error.message),
             None => CompilerError::new_no_location(error.message),
-        })?;
-        Ok(plan.is_leaf_addressed())
+        })
+    }
+
+    pub(crate) fn is_leaf_addressed(&self, elem: Ustr) -> Result<bool, CompilerError> {
+        Ok(self.native_buffer_plan(elem)?.is_leaf_addressed())
     }
 
     /// Read `buf[i].<path>`'s single primitive leaf, for a read-modify-write
@@ -162,7 +168,7 @@ impl Builder<'_> {
     pub(crate) fn nb_leaf_rmw_place(
         &mut self,
         target: Idx<Expr>,
-    ) -> Result<Option<(Idx<Inst>, Idx<Inst>, Ustr, LeafAddr)>, CompilerError> {
+    ) -> Result<Option<(Idx<Inst>, Idx<Inst>, Ustr, PlaceBundle)>, CompilerError> {
         if self.scx.target != bone_semantic::hir::FnBackend::Js {
             return Ok(None);
         }
@@ -172,11 +178,13 @@ impl Builder<'_> {
         let Some((buf, checked, elem, path)) = self.nb_leaf_field_place(base, field)? else {
             return Ok(None);
         };
+        let container = self.native_buffer_plan(elem)?;
         let plan = leaf_addr_plan(self.ws, elem).map_err(gap)?;
         let Some(addr) = plan.into_iter().find(|a| a.path.as_str() == path) else {
             return Ok(None);
         };
-        Ok(Some((buf, checked, elem, addr)))
+        let place = container.place(addr).map_err(|e| gap(e.message))?;
+        Ok(Some((buf, checked, elem, place)))
     }
 
     /// The load half of [`Self::nb_leaf_rmw_place`].
@@ -184,8 +192,9 @@ impl Builder<'_> {
         &mut self,
         buf: Idx<Inst>,
         checked: Idx<Inst>,
-        addr: &LeafAddr,
+        place: &PlaceBundle,
     ) -> Idx<Inst> {
+        let addr = place.address();
         let at = self.leaf_index(checked, addr);
         let view = self.leaf_view(buf, addr.view_field, &mut HashMap::new());
         self.emit_cur(Inst::Index { base: view, index: at, kind: ContainerKind::NativeBufferLeaf })
@@ -196,9 +205,10 @@ impl Builder<'_> {
         &mut self,
         buf: Idx<Inst>,
         checked: Idx<Inst>,
-        addr: &LeafAddr,
+        place: &PlaceBundle,
         value: Idx<Inst>,
     ) {
+        let addr = place.address();
         let at = self.leaf_index(checked, addr);
         let view = self.leaf_view(buf, addr.view_field, &mut HashMap::new());
         self.emit_cur(Inst::StoreIndex {
@@ -222,12 +232,18 @@ impl Builder<'_> {
     ) -> Result<ValueRepr, CompilerError> {
         let shape = value_shape(self.ws, elem)
             .ok_or_else(|| gap("leaf-addressed element is not a value struct"))?;
+        let container = self.native_buffer_plan(elem)?;
         let plan = leaf_addr_plan(self.ws, elem).map_err(gap)?;
+        let plan: Vec<PlaceBundle> = plan
+            .into_iter()
+            .map(|address| container.place(address).map_err(|e| gap(e.message)))
+            .collect::<Result<_, _>>()?;
         let checked = self.nb_checked_index(buf, index)?;
         let mut views = HashMap::new();
         let leaves: Vec<Idx<Inst>> = plan
             .iter()
-            .map(|a| {
+            .map(|place| {
+                let a = place.address();
                 let at = self.leaf_index(checked, a);
                 let view = self.leaf_view(buf, a.view_field, &mut views);
                 self.emit_cur(Inst::Index {
@@ -253,9 +269,15 @@ impl Builder<'_> {
     ) -> Result<(), CompilerError> {
         let shape = value_shape(self.ws, elem)
             .ok_or_else(|| gap("leaf-addressed element is not a value struct"))?;
+        let container = self.native_buffer_plan(elem)?;
         let plan = leaf_addr_plan(self.ws, elem).map_err(gap)?;
+        let plan: Vec<PlaceBundle> = plan
+            .into_iter()
+            .map(|address| container.place(address).map_err(|e| gap(e.message)))
+            .collect::<Result<_, _>>()?;
         let repr = self.lower_expr_repr(value)?;
-        let leaves = self.repr_to_leaves(&repr, &shape);
+        let bundle = ValueBundle::new(container.element_rep(), repr);
+        let leaves = self.repr_to_leaves_bundle(&bundle, &shape);
         if leaves.len() != plan.len() {
             return Err(gap(format!(
                 "leaf store arity mismatch for NativeBuffer<{elem}>: {} leaves vs {} slots",
@@ -267,7 +289,8 @@ impl Builder<'_> {
         // out-of-bounds writes happen first.
         let checked = self.nb_checked_index(buf, index)?;
         let mut views = HashMap::new();
-        for (a, leaf) in plan.iter().zip(leaves) {
+        for (place, leaf) in plan.iter().zip(leaves) {
+            let a = place.address();
             let at = self.leaf_index(checked, a);
             let view = self.leaf_view(buf, a.view_field, &mut views);
             self.emit_cur(Inst::StoreIndex {
