@@ -1641,6 +1641,33 @@ pub struct WgslShaderEmission {
 type SamplerParams = HashSet<Idx<Cell>>;
 type StageSamplerParams = HashMap<ShaderInstance, SamplerParams>;
 
+fn sampler_params_for_body(
+    ws: &Workspace,
+    instance: &ShaderInstance,
+    body: &MirFunc,
+    span: Span,
+) -> Result<SamplerParams, CompilerError> {
+    let function = function_for_instance(ws, instance);
+    if function.param_decls.len() != body.params.len() {
+        return Err(err(
+            span,
+            format!(
+                "WGSL helper `{}` and MIR parameter populations disagree",
+                function.name
+            ),
+        ));
+    }
+    Ok(body
+        .params
+        .iter()
+        .enumerate()
+        .filter_map(|(index, cell)| {
+            matches!(value_kind_for_type(ws, function.param_decls[index].ty), Some(ValueKind::Sampler(_)))
+                .then_some(*cell)
+        })
+        .collect())
+}
+
 fn sampler_params_for_stage(
     ws: &Workspace,
     stage: &ShaderStageIr,
@@ -1657,27 +1684,11 @@ fn sampler_params_for_stage(
                 ),
             )
         })?;
-        let function = function_for_instance(ws, instance);
-        if function.param_decls.len() != body.params.len() {
-            return Err(err(
-                span,
-                format!(
-                    "WGSL helper `{}` and MIR parameter populations disagree",
-                    function.name
-                ),
-            ));
-        }
-        let cells = body
-            .params
-            .iter()
-            .enumerate()
-            .filter_map(|(index, cell)| {
-                matches!(value_kind_for_type(ws, function.param_decls[index].ty), Some(ValueKind::Sampler(_)))
-                    .then_some(*cell)
-            })
-            .collect();
+        let cells = sampler_params_for_body(ws, instance, body, span)?;
         params.insert(instance.clone(), cells);
     }
+    let entry_cells = sampler_params_for_body(ws, &stage.entry, &stage.body, span)?;
+    params.insert(stage.entry.clone(), entry_cells);
     Ok(params)
 }
 
@@ -1700,7 +1711,6 @@ pub fn emit_fullscreen_shader(
     let entry_roles = entry_param_roles(ws, entry_fn, &stage.body, iface, abi, span)?;
     validate_known_bodies(stage, span)?;
     let sampler_params = sampler_params_for_stage(ws, stage, span)?;
-    let empty_params = SamplerParams::new();
 
     let mut source = String::new();
     emit_fullscreen_types(&mut source, abi);
@@ -1718,6 +1728,15 @@ pub fn emit_fullscreen_shader(
             )
         })?;
         let f = function_for_instance(ws, instance);
+        let instance_sampler_params = sampler_params.get(instance).ok_or_else(|| {
+            err(
+                span,
+                format!(
+                    "WGSL sampler lowering has no parameter record for `{}`",
+                    f.name
+                ),
+            )
+        })?;
         let emitter = FunctionEmitter::new(
             ws,
             &ir.interner,
@@ -1728,25 +1747,32 @@ pub fn emit_fullscreen_shader(
             HashMap::new(),
             span,
         )?.with_sampler_params(
-            sampler_params.get(instance).unwrap_or(&empty_params),
+            instance_sampler_params,
             &sampler_params,
         );
         source.push_str(&emitter.emit_function(f, false)?);
     }
 
-    let emitter = FunctionEmitter::new(
-            ws,
-            &ir.interner,
-            stage,
-            &stage.entry,
-            &stage.body,
-            abi,
-            entry_roles,
+    let entry_sampler_params = sampler_params.get(&stage.entry).ok_or_else(|| {
+        err(
             span,
-        )?.with_sampler_params(
-            sampler_params.get(&stage.entry).unwrap_or(&empty_params),
-            &sampler_params,
-        );
+            format!(
+                "WGSL sampler lowering has no parameter record for `{}`",
+                entry_fn.name
+            ),
+        )
+    })?;
+    let emitter = FunctionEmitter::new(
+        ws,
+        &ir.interner,
+        stage,
+        &stage.entry,
+        &stage.body,
+        abi,
+        entry_roles,
+        span,
+    )?
+    .with_sampler_params(entry_sampler_params, &sampler_params);
     source.push_str(&emitter.emit_function(entry_fn, true)?);
     emit_fullscreen_entries(
         &mut source,
