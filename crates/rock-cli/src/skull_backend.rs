@@ -2452,6 +2452,24 @@ impl SkullStone {
         self.project.source_text(path)
     }
 
+    /// Absolute paths of every `embed_string` input baked into the current
+    /// program -- files the stone watcher must treat as sources: an edit to
+    /// one routes as a changed non-source path, which forces the full rebuild
+    /// that re-reads it (docs/comptime-plan.md).
+    pub fn comptime_watch_files(&self) -> Vec<std::path::PathBuf> {
+        let Some(root) = self.project.workspace().comptime_inputs.embed_root.clone() else {
+            return Vec::new();
+        };
+        self.cache
+            .comptime_files()
+            .into_iter()
+            .map(|rel| {
+                let joined = root.join(rel.as_str());
+                joined.canonicalize().unwrap_or(joined)
+            })
+            .collect()
+    }
+
     /// Feed source edits into the Session, route by the worst tier, and write
     /// the output: any interface/structural edit -> full `main.lua` + overlay
     /// wipe (behind the schema-drift gate); body-only edits -> `incremental.lua`

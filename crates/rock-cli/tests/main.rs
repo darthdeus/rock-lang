@@ -60,6 +60,8 @@ mod shader_register_arity_gate;
 mod shader_validate_gate;
 #[path = "shape_oracle.rs"]
 mod shape_oracle;
+#[path = "stone_test_comptime.rs"]
+mod stone_test_comptime;
 #[path = "stone_test_debounce.rs"]
 mod stone_test_debounce;
 #[path = "stone_test_decorator_cleanup.rs"]

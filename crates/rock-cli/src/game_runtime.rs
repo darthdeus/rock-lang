@@ -47,6 +47,13 @@ pub trait GameCompiler {
     fn canonicalize_for_restart(&mut self) -> Result<()> {
         Ok(())
     }
+
+    /// Absolute paths of the comptime file inputs (`embed_string`) baked into
+    /// the current program. The watcher treats them as sources; empty for
+    /// backends without the concept.
+    fn comptime_watch_files(&self) -> Vec<PathBuf> {
+        Vec::new()
+    }
 }
 
 /// Skull backend: bone `Session` + `SkullEmitCache` (the `SkullStone` holder),
@@ -130,6 +137,10 @@ impl GameCompiler for SkullGameCompiler {
             }
         }
         Ok(())
+    }
+
+    fn comptime_watch_files(&self) -> Vec<PathBuf> {
+        self.stone.as_ref().map(|st| st.comptime_watch_files()).unwrap_or_default()
     }
 }
 

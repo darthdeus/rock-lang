@@ -1099,6 +1099,10 @@ pub fn inline_functions_with_subst(
         // `Iterator`-bounded fn -- reaches the emitted program's registry.
         // Deduped below; one callee can be spliced at many sites.
         func.statics.extend(cand.func.statics.iter().cloned());
+        // Same ownership transfer for comptime reads: the callee's baked-in
+        // build_var/embed_string values now live in THIS chunk's Lua, and a
+        // callee inlined everywhere may have no standalone chunk to carry them.
+        func.comptime_reads.extend(cand.func.comptime_reads.iter().cloned());
         top.extend(added);
         spliced.insert(fref);
         resume = Some(pos);

@@ -1219,6 +1219,10 @@ struct Chunk {
     /// `static` cells this body declares -- aggregated at chunk-pull for the
     /// hot-reload preservation preamble + `__rock_known_globals` registration.
     statics: Vec<skull_mir::mir::StaticCell>,
+    /// Comptime inputs baked into this chunk's Lua (build_var/embed_string).
+    /// `update_chunk_cache` compares them against the current inputs and treats
+    /// a stale read as a body edit -- bone's reinferred set cannot see these.
+    comptime_reads: Vec<skull_mir::mir::ComptimeRead>,
     /// The callees this body still CALLS after inlining -- the reachability edge
     /// set. Distinct from `deps`, which is an invalidation superset (it also holds
     /// everything inlined AWAY, and would keep spliced-out callees alive).
@@ -1444,6 +1448,7 @@ fn emit_coroutine_chunk(
         direct_calls: Vec::new(),
         times,
         statics: mf.statics.clone(),
+        comptime_reads: mf.comptime_reads.clone(),
         calls: skull_mir::reach::call_targets(mf),
         global_names: skull_mir::reach::global_ref_names(mf),
         specs,
@@ -1530,7 +1535,7 @@ fn emit_body_chunk(
     times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(times.emit);
     let calls = skull_mir::reach::call_targets(&mf);
     let global_names = skull_mir::reach::global_ref_names(&mf);
-    Ok(Chunk { lua, deps, direct_globals, direct_calls, times, statics, calls, global_names, specs })
+    Ok(Chunk { lua, deps, direct_globals, direct_calls, times, statics, comptime_reads: mf.comptime_reads.clone(), calls, global_names, specs })
 }
 
 /// Emit each hoisted nested `fn` (and its own nested fns, depth-first) as a
@@ -1727,6 +1732,7 @@ fn emit_spec_chunk(
         direct_calls: Vec::new(),
         times: PhaseTimes::default(),
         statics,
+        comptime_reads: mf.comptime_reads.clone(),
         calls: skull_mir::reach::call_targets(&mf),
         global_names: skull_mir::reach::global_ref_names(&mf),
         specs,
@@ -2902,6 +2908,22 @@ pub fn emit_full_in(
 /// `emit_incremental` (full reassembly) and `emit_overlay` (the incremental.lua
 /// split).
 impl SkullEmitCache {
+    /// Project-root-relative paths of every `embed_string` input baked into a
+    /// cached chunk -- the files a watcher must treat as sources
+    /// (docs/comptime-plan.md).
+    pub fn comptime_files(&self) -> Vec<Ustr> {
+        let mut out: FxHashSet<Ustr> = FxHashSet::default();
+        for chunk in self.chunks.values() {
+            let Ok(chunk) = chunk else { continue };
+            for read in &chunk.comptime_reads {
+                if let skull_mir::mir::ComptimeInputId::File(path) = read.input {
+                    out.insert(path);
+                }
+            }
+        }
+        out.into_iter().collect()
+    }
+
 fn update_shader_registrations(
     &mut self,
     ws: &Workspace,
@@ -2976,6 +2998,43 @@ fn update_chunk_cache(
     // Fns whose scalar ABI flipped (a body now takes them by ref, or stopped) must
     // re-emit even if their own body didn't change.
     changed.extend(flipped_frefs.iter().copied());
+
+    // A chunk whose baked comptime input (build_var value / embedded file
+    // content) no longer matches the CURRENT inputs is a body edit bone cannot
+    // see -- reinferred hashes only source text (docs/comptime-plan.md). Seed
+    // the decl so the chunk and every dependent (a caller that inlined the
+    // value) re-emits fresh. An unreadable input hashes as None != recorded,
+    // forcing a re-lower whose spanned rejection reports the real cause.
+    {
+        use skull_mir::mir::{comptime_value_hash, ComptimeInputId};
+        let mut file_hashes: FxHashMap<Ustr, Option<u64>> = FxHashMap::default();
+        for (body, chunk) in cache.chunks.iter() {
+            let Ok(chunk) = chunk else { continue };
+            if chunk.comptime_reads.is_empty() {
+                continue;
+            }
+            let stale = chunk.comptime_reads.iter().any(|read| {
+                let current = match &read.input {
+                    ComptimeInputId::Var(name) => ws
+                        .comptime_inputs
+                        .vars
+                        .get(name)
+                        .map(|v| comptime_value_hash(&v.value)),
+                    ComptimeInputId::File(path) => {
+                        *file_hashes.entry(*path).or_insert_with(|| {
+                            let root = ws.comptime_inputs.embed_root.as_deref()?;
+                            let text = std::fs::read_to_string(root.join(path.as_str())).ok()?;
+                            Some(comptime_value_hash(&text))
+                        })
+                    }
+                };
+                current != Some(read.value_hash)
+            });
+            if stale {
+                changed.insert(body.decl());
+            }
+        }
+    }
 
     // Affected = changed + every chunk that DEPENDS on a changed fn. The reverse
     // `dependents` index turns this O(edit x fan-out) instead of the old O(chunks)

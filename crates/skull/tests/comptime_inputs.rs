@@ -122,6 +122,112 @@ fn broken() -> string {
     );
 }
 
+// --- incremental invalidation: a comptime input change is a body edit ---
+// bone hashes only source text, so a body whose emitted code depends on a
+// build var's value or an embedded file's content never appears in
+// `reinferred`; the cache must detect stale inputs itself, and the change must
+// reach emit_incremental AND emit_overlay (byte-identity gates compare fresh
+// full builds and cannot see this class of staleness).
+
+fn ws_with_inputs(
+    src: &str,
+    inputs: bone_semantic::inference::ComptimeInputs,
+) -> bone_semantic::inference::Workspace {
+    let mut ws = crate::common::ws_with_stdlib(src);
+    ws.comptime_inputs = inputs;
+    ws
+}
+
+fn reinferred_of(
+    ws: &bone_semantic::inference::Workspace,
+    name: &str,
+) -> (bone_semantic::prelude::ModuleId, bone_semantic::hir::BodyOwner) {
+    for module in ws.modules.iter() {
+        for (fid, f) in module.functions.iter() {
+            if f.name.as_str() == name {
+                return (module.id, bone_semantic::hir::BodyOwner::Function(fid));
+            }
+        }
+    }
+    panic!("no fn named {name}");
+}
+
+const INCR_SRC: &str = r#"
+fn tag() -> string {
+    return build_var("SHA")
+}
+fn other() -> int {
+    return 1
+}
+"#;
+
+#[test]
+fn build_var_change_reaches_incremental_and_overlay() {
+    use skull::mir_emit::{emit_full, emit_incremental, emit_overlay};
+
+    let ws1 = ws_with_inputs(INCR_SRC, inputs_with_var("SHA", "first-sha-value"));
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (full1, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    assert!(full1.lua.contains("first-sha-value"), "control: full build inlines v1");
+
+    // Same source; only the resolved value moved. The edit the session saw is
+    // an unrelated body, so only stale-input detection can re-emit `tag`.
+    let ws2 = ws_with_inputs(INCR_SRC, inputs_with_var("SHA", "second-sha-value"));
+    let edit = vec![reinferred_of(&ws2, "other")];
+    let incremental = emit_incremental(&ws2, &mut cache, &edit).expect("emit_incremental");
+    assert!(
+        incremental.lua.contains("second-sha-value") && !incremental.lua.contains("first-sha-value"),
+        "incremental assembly must carry the new value"
+    );
+    let fresh = emit_full(&ws2, skull::user_module_id(&ws2).unwrap()).expect("fresh").0;
+    assert_eq!(incremental.lua, fresh.lua, "incremental != fresh after a var change");
+
+    // Overlay from a fresh cache: full at v1, overlay after the value moved.
+    let ws1b = ws_with_inputs(INCR_SRC, inputs_with_var("SHA", "first-sha-value"));
+    let (_, mut cache2) = emit_full(&ws1b, mid).expect("emit_full v1b");
+    let ws3 = ws_with_inputs(INCR_SRC, inputs_with_var("SHA", "third-sha-value"));
+    let overlay = emit_overlay(&ws3, &mut cache2, &[reinferred_of(&ws3, "other")]);
+    assert!(
+        overlay.lua.contains("third-sha-value"),
+        "the overlay must redefine the body reading the changed var:\n{}",
+        overlay.lua
+    );
+}
+
+#[test]
+fn embed_file_change_reaches_incremental() {
+    use skull::mir_emit::{emit_full, emit_incremental};
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("data.txt"), "embed-v1").unwrap();
+    let src = r#"
+fn data() -> string {
+    return embed_string("data.txt")
+}
+fn other() -> int {
+    return 1
+}
+"#;
+    let mut inputs = ComptimeInputs::default();
+    inputs.embed_root = Some(dir.path().to_path_buf());
+
+    let ws1 = ws_with_inputs(src, inputs.clone());
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (full1, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    assert!(full1.lua.contains("embed-v1"), "control: full build embeds v1");
+
+    std::fs::write(dir.path().join("data.txt"), "embed-v2").unwrap();
+    let ws2 = ws_with_inputs(src, inputs);
+    let edit = vec![reinferred_of(&ws2, "other")];
+    let incremental = emit_incremental(&ws2, &mut cache, &edit).expect("emit_incremental");
+    assert!(
+        incremental.lua.contains("embed-v2") && !incremental.lua.contains("embed-v1"),
+        "incremental assembly must carry the edited file's bytes"
+    );
+    let fresh = emit_full(&ws2, skull::user_module_id(&ws2).unwrap()).expect("fresh").0;
+    assert_eq!(incremental.lua, fresh.lua, "incremental != fresh after a file edit");
+}
+
 #[test]
 fn embed_string_without_project_root_rejects() {
     let src = r#"

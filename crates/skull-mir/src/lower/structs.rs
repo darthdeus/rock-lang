@@ -679,6 +679,16 @@ impl Builder<'_> {
     ) -> Result<ValueRepr, CompilerError> {
         let value =
             super::resolve_comptime_value(self.ws, self.body, call, arg_idxs, kind)?;
+        // The literal arg was just validated by the resolver.
+        let Expr::String(key) = self.body.expr_arena[arg_idxs[0]] else { unreachable!() };
+        let input = match kind {
+            ExpandKind::BuildVar => crate::mir::ComptimeInputId::Var(key),
+            _ => crate::mir::ComptimeInputId::File(key),
+        };
+        self.f.comptime_reads.push(crate::mir::ComptimeRead {
+            input,
+            value_hash: crate::mir::comptime_value_hash(&value),
+        });
         let inst = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(value.as_str()))));
         Ok(ValueRepr::Scalar(inst))
     }
