@@ -401,14 +401,20 @@ struct NestedFn {
     /// Declared param names, so a call site can place named args into slots
     /// (`slotted_call_args`) exactly as a top-level callee's would be.
     param_names: Vec<Ustr>,
-    /// Per-param wire slot; all-`Opaque` when the fn keeps the boxed ABI.
-    param_shapes: Vec<RetSlot>,
-    ret_shape: Option<ValueShape>,
+    representation: FunctionRepPlan,
 }
 
 impl NestedFn {
     fn uses_scalar_abi(&self) -> bool {
-        self.ret_shape.is_some() || self.param_shapes.iter().any(RetSlot::splats)
+        self.representation.uses_scalar_abi()
+    }
+
+    pub(crate) fn param_slots(&self, arena: &RepArena) -> Vec<RetSlot> {
+        self.representation.params().iter().map(|id| arena.ret_slot(*id)).collect()
+    }
+
+    pub(crate) fn result_shape(&self, arena: &RepArena) -> Option<ValueShape> {
+        self.representation.result().and_then(|id| arena.value_shape(id))
     }
 }
 
@@ -1188,9 +1194,8 @@ fn lower_body(
             )
         });
     f.abi_plan = Some(abi.clone());
-    let param_shapes = abi.param_shapes();
-    let ret_shape = abi.ret_shape();
-    let ret_tuple = abi.ret_tuple();
+    let param_reps = abi.representation().params().to_vec();
+    let ret_rep = abi.representation().result();
     let mut b = Builder {
         ws,
         scx,
@@ -1211,9 +1216,8 @@ fn lower_body(
         resume_arg,
         // A coroutine body emits via `emit_coroutine` before `inline_functions`
         // runs, so it is never spliced -- box value args (see field docs).
-        param_shapes,
-        ret_shape,
-        ret_tuple,
+        param_reps,
+        ret_rep,
         ret_ty: func.return_ty,
         fn_name_span: Some(func.name_span),
         cur_span: None,
@@ -1308,9 +1312,8 @@ fn lower_global_inner(
         in_defer_body: false,
         resume_arg: None,
         // Global-init bodies never run `inline_functions` -- box value args.
-        param_shapes: Vec::new(),
-        ret_shape: None,
-        ret_tuple: None,
+        param_reps: Vec::new(),
+        ret_rep: None,
         ret_ty: None,
         fn_name_span: None,
         cur_span: None,
@@ -1330,10 +1333,27 @@ fn lower_global_inner(
     // A `nobox` global is category-2 storage: its concrete plan owns the layout,
     // so the initializer RETURNS leaves and `mir_emit` binds one Lua global per
     // leaf. Without this the body packs a box the verifier then rejects.
-    b.ret_shape = (!scx.values_first_class)
+    b.ret_rep = (!scx.values_first_class)
         .then(|| concrete_plan.signature.result)
         .flatten()
-        .and_then(|id| mono_nobox_value_shape(ws, &b.concrete_mono(id)));
+        .map(|id| {
+            let ty = b.concrete_mono(id);
+            b.scx
+                .rep_arena()
+                .plan(
+                    ws,
+                    scx.target,
+                    &ty,
+                    RepUse::Return,
+                    &RepUseFacts::default(),
+                    RepGuarantees { nobox: true },
+                )
+                .map_err(|error| match error.span.or(b.cur_span) {
+                    Some(span) => CompilerError::new_with_label(span, error.message),
+                    None => CompilerError::new_no_location(error.message),
+                })
+        })
+        .transpose()?;
     b.lower_root()?;
     Ok(Some(b.f))
 }
@@ -1610,9 +1630,8 @@ fn lower_decorator_inner(
         in_defer_body: false,
         resume_arg: None,
         // Decorator bodies never run `inline_functions` -- box value args.
-        param_shapes: Vec::new(),
-        ret_shape: None,
-        ret_tuple: None,
+        param_reps: Vec::new(),
+        ret_rep: None,
         ret_ty: None,
         fn_name_span: None,
         cur_span: None,
@@ -1688,16 +1707,12 @@ struct Builder<'a> {
     /// body -- an unspliced residual would call the SHARED generic body (`T` = one
     /// boxed slot) with splatted args and drop every leaf but the first. Boxing
     /// the value arg matches the shared body exactly.
-    /// Per-param scalarized shape: `Some` for a value param expanded to leaf
-    /// cells (parallel to `body.param_bindings`). Empty when the fn doesn't use
-    /// the scalar ABI (globals, decorators, non-value fns).
-    param_shapes: Vec<RetSlot>,
-    /// `Some` when the fn returns a value struct via the scalar ABI (N leaves).
-    ret_shape: Option<ValueShape>,
-    /// `Some` when the fn's return type is a tuple -- it returns its slots as
-    /// separate values (multi-return ABI), not one heap table. Set for named
-    /// fns; lambdas decide per-body at their own return site.
-    ret_tuple: Option<TupleRetShape>,
+    /// Per-param physical representation identity, parallel to
+    /// `body.param_bindings`. Shape structs are projected only at the
+    /// flatten/rebuild seams; this is the body-owned ABI answer.
+    param_reps: Vec<RepId>,
+    /// The body's physical result representation identity, if it has one.
+    ret_rep: Option<RepId>,
     /// The fn's declared return type -- the expected type at a scalar `return`
     /// sink (int->float subsumption coercion, see [`Builder::coerced`]).
     ret_ty: Option<TyId>,
@@ -1779,6 +1794,26 @@ struct Builder<'a> {
 }
 
 impl Builder<'_> {
+    fn rep_slot(&self, id: RepId) -> RetSlot {
+        self.scx.rep_arena().ret_slot(id)
+    }
+
+    fn param_slot(&self, index: usize) -> RetSlot {
+        self.param_reps
+            .get(index)
+            .copied()
+            .map(|id| self.rep_slot(id))
+            .unwrap_or(RetSlot::Opaque)
+    }
+
+    fn result_shape(&self) -> Option<ValueShape> {
+        self.ret_rep.and_then(|id| self.scx.rep_arena().value_shape(id))
+    }
+
+    fn result_tuple(&self) -> Option<TupleRetShape> {
+        self.ret_rep.and_then(|id| self.scx.rep_arena().tuple_shape(id))
+    }
+
     /// [`gap`] anchored at the construct currently being lowered. Use wherever a
     /// gap names a user-visible type or expression -- an unspanned one leaves the
     /// reader with a whole project to search.
@@ -1946,7 +1981,7 @@ impl Builder<'_> {
         let pbs: Vec<Idx<BindingInfo>> = self.body.param_bindings.into_iter().collect();
         for (i, pb) in pbs.iter().enumerate() {
             let name = self.body.binding_arena[*pb].name;
-            let slot = self.param_shapes.get(i).cloned().unwrap_or(RetSlot::Opaque);
+            let slot = self.param_slot(i);
             self.bind_param_slot(*pb, name, &slot);
         }
     }
@@ -2141,11 +2176,11 @@ impl Builder<'_> {
     /// single (boxed) value, or empty for a bare return.
     fn return_leaves(&mut self, opt: Option<Idx<Expr>>) -> Result<Vec<Idx<Inst>>, CompilerError> {
         let Some(e) = opt else { return Ok(vec![]) };
-        if let Some(shape) = self.ret_shape.clone() {
+        if let Some(shape) = self.result_shape() {
             let r = self.lower_expr_repr(e)?;
             return Ok(self.repr_to_leaves(&r, &shape));
         }
-        if let Some(shape) = self.ret_tuple.clone() {
+        if let Some(shape) = self.result_tuple() {
             if shape.nullable {
                 return self.nullable_tuple_return_slots(e, &shape);
             }

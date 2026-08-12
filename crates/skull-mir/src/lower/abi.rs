@@ -330,7 +330,10 @@ impl RepArena {
                     return Ok(self.intern(target, use_context, RepLayout::Leaves(shape)));
                 }
                 if guarantees.nobox {
-                    return Ok(self.intern(target, use_context, RepLayout::Opaque));
+                    return Err(reject(format!(
+                        "{} has no concrete nobox representation",
+                        ty.render()
+                    )));
                 }
                 Ok(self.intern(target, use_context, RepLayout::Opaque))
             }

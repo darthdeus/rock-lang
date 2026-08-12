@@ -639,9 +639,10 @@ impl Builder<'_> {
                 if let Some(abi) = self.nested_fn_globals.get(&raw(b)).cloned() {
                     self.f.hoisted_fn_globals.push(abi.hoisted);
                     let g = self.emit_cur(Inst::Global(abi.hoisted));
+                    let param_shapes = abi.param_slots(&self.scx.rep_arena());
                     let arg_vals =
-                        self.slotted_call_args(&abi.param_names, &abi.param_shapes, &arg_idxs)?;
-                    let Some(shape) = abi.ret_shape else {
+                        self.slotted_call_args(&abi.param_names, &param_shapes, &arg_idxs)?;
+                    let Some(shape) = abi.result_shape(&self.scx.rep_arena()) else {
                         let v = self.emit_call_value(e, g, arg_vals)?;
                         return Ok(ValueRepr::Scalar(v));
                     };

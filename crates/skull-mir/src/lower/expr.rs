@@ -456,10 +456,9 @@ impl Builder<'_> {
                 // statement, so the return machinery (`return_leaves`) must see the
                 // lambda's own return shape. A tuple-returning lambda splats N values
                 // so an indirect call site can capture them (multi-return ABI); the
-                // enclosing value-struct `ret_shape` never applies (a lambda is
+                // enclosing value-struct result never applies (a lambda is
                 // called through a boxed fn-value). Save/restore around the body.
-                let saved_ret_tuple = self.ret_tuple.take();
-                let saved_ret_shape = self.ret_shape.take();
+                let saved_ret_rep = self.ret_rep.take();
                 // Isolate the defer state, like `lower_nested_fn`. A lambda body
                 // is its OWN fn scope: bone desugars `() => e` to a block with
                 // `return e`, so the body's return runs `run_all_defers` -- which
@@ -478,10 +477,8 @@ impl Builder<'_> {
                 // now -- `convert_closures` splits it out and the inliner runs
                 // over the standalone body -- but that happens after lowering, so
                 // this decision cannot see the specialized callee it would need.
-                let arena = self.scx.rep_arena();
-                self.ret_tuple = lam_plan.result().and_then(|id| arena.tuple_shape(id));
-                self.ret_shape = lam_plan.result().and_then(|id| arena.value_shape(id));
-                if let Some(shape) = self.ret_shape.clone() {
+                self.ret_rep = lam_plan.result();
+                if let Some(shape) = self.result_shape() {
                     let r = self.lower_expr_repr(body)?;
                     if self.is_open() {
                         let leaves = self.repr_to_leaves(&r, &shape);
@@ -489,12 +486,11 @@ impl Builder<'_> {
                     }
                     self.defers = saved_defers;
                     self.in_defer_body = saved_in_defer;
-                    self.ret_tuple = saved_ret_tuple;
-                    self.ret_shape = saved_ret_shape;
+                    self.ret_rep = saved_ret_rep;
                     self.cur = saved;
                     return Ok(self.emit_cur(Inst::Lambda { params: param_cells, entry }));
                 }
-                match self.ret_tuple.clone() {
+                match self.result_tuple() {
                     // A splatting tuple return needs the body as a repr, so a
                     // `nobox` element reaches the wire as leaves.
                     Some(shape) if shape.splats() => {
@@ -517,8 +513,7 @@ impl Builder<'_> {
                 }
                 self.defers = saved_defers;
                 self.in_defer_body = saved_in_defer;
-                self.ret_tuple = saved_ret_tuple;
-                self.ret_shape = saved_ret_shape;
+                self.ret_rep = saved_ret_rep;
                 self.cur = saved;
                 Ok(self.emit_cur(Inst::Lambda { params: param_cells, entry }))
             }

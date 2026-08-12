@@ -304,6 +304,7 @@ fn main() {
     let callee = func_ref(&ws, "nested");
     let entry = skull_mir::lower::lower_function_source(&ws, &scx, callee.module, callee.func)
         .expect("lower callee");
+    assert_eq!(entry.params.len(), 3, "callee entry must bind Nested's three owned lanes");
     let call = caller
         .call_abi_plans
         .values()
@@ -314,8 +315,8 @@ fn main() {
         _ => None,
     });
     assert_eq!(nested_call_args, Some(3), "the direct call must consume Nested's three owned lanes");
-    let entry = entry.abi_plan.as_ref().expect("callee entry must retain its ABI plan");
-    assert_eq!(entry.representation(), call.representation());
+    let entry_abi = entry.abi_plan.as_ref().expect("callee entry must retain its ABI plan");
+    assert_eq!(entry_abi.representation(), call.representation());
 }
 
 #[test]
@@ -395,7 +396,9 @@ fn container_storage_uses_the_element_representation_plan() {
 
 #[test]
 fn concrete_rep_planner_is_total_over_the_logical_type_vocabulary() {
-    let ws = ws_of("nobox value V2 { x: float, y: float }");
+    let ws = ws_of(
+        "nobox value V2 { x: float, y: float }\nvalue Gc { text: string }",
+    );
     let arena = RepArena::default();
     let valid = vec![
         MonoTy::Int,
@@ -438,4 +441,15 @@ fn concrete_rep_planner_is_total_over_the_logical_type_vocabulary() {
         )
         .expect_err("a nobox container must not silently become an opaque slot");
     assert!(rejected.message.contains("nobox"));
+    let rejected_nominal = arena
+        .plan(
+            &ws,
+            bone_semantic::hir::FnBackend::Lua,
+            &nominal("Gc"),
+            RepUse::Parameter,
+            &facts,
+            RepGuarantees { nobox: true },
+        )
+        .expect_err("a GC-carrying nominal must not silently become an opaque nobox slot");
+    assert!(rejected_nominal.message.contains("nobox"));
 }

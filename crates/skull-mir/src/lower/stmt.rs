@@ -71,8 +71,17 @@ impl Builder<'_> {
     ) -> Result<NestedFn, CompilerError> {
         let param_names: Vec<Ustr> =
             params.into_iter().map(|pb| self.body.binding_arena[pb].name).collect();
-        let boxed =
-            NestedFn { hoisted, param_names: param_names.clone(), param_shapes: Vec::new(), ret_shape: None };
+        let boxed = NestedFn {
+            hoisted,
+            param_names: param_names.clone(),
+            representation: self.scx.rep_arena().function_value_legacy(
+                self.scx.target,
+                Vec::new(),
+                None,
+                None,
+                param_names.len(),
+            ),
+        };
         let taken_by_value = self
             .body
             .expr_arena
@@ -103,15 +112,23 @@ impl Builder<'_> {
                     crate::lower::mono_sig_param_slot(self.ws, ty)
                 }
             };
+            let param_shapes: Vec<RetSlot> = params.iter().map(slot_of).collect();
+            let ret_shape = if taken_by_value {
+                crate::lower::mono_nobox_value_shape(self.ws, &ret)
+            } else {
+                crate::lower::mono_value_shape(self.ws, &ret)
+            };
+            let param_count = param_names.len();
             let abi = NestedFn {
                 hoisted,
                 param_names,
-                param_shapes: params.iter().map(slot_of).collect(),
-                ret_shape: if taken_by_value {
-                    crate::lower::mono_nobox_value_shape(self.ws, &ret)
-                } else {
-                    crate::lower::mono_value_shape(self.ws, &ret)
-                },
+                representation: self.scx.rep_arena().function_value_legacy(
+                    self.scx.target,
+                    param_shapes,
+                    ret_shape,
+                    None,
+                    param_count,
+                ),
             };
             return Ok(if abi.uses_scalar_abi() { abi } else { boxed });
         }
@@ -144,18 +161,24 @@ impl Builder<'_> {
                 s.body_sig_value_shape(t)
             }
         };
+        let param_shapes: Vec<RetSlot> = params
+            .into_iter()
+            .map(|pb| self.binding_ty(pb).map_or(RetSlot::Opaque, |t| slot_of(self, t)))
+            .collect();
+        let ret_shape = self
+            .nested_fn_ret_ty(name, ret_ty)
+            .and_then(|t| shape_of(self, t));
+        let param_count = param_names.len();
         let abi = NestedFn {
             hoisted,
             param_names,
-            param_shapes: params
-                .into_iter()
-                .map(|pb| {
-                    self.binding_ty(pb).map_or(RetSlot::Opaque, |t| slot_of(self, t))
-                })
-                .collect(),
-            ret_shape: self
-                .nested_fn_ret_ty(name, ret_ty)
-                .and_then(|t| shape_of(self, t)),
+            representation: self.scx.rep_arena().function_value_legacy(
+                self.scx.target,
+                param_shapes,
+                ret_shape,
+                None,
+                param_count,
+            ),
         };
         Ok(if abi.uses_scalar_abi() { abi } else { boxed })
     }
@@ -262,9 +285,8 @@ impl Builder<'_> {
             resume_arg: None,
             // A hoisted nested fn is emitted via `emit_nested_fns`, which never
             // runs `inline_functions` -- box value args.
-            param_shapes: abi.param_shapes.clone(),
-            ret_shape: abi.ret_shape.clone(),
-            ret_tuple: None,
+            param_reps: abi.representation.params().to_vec(),
+            ret_rep: abi.representation.result(),
             // A nested fn is emitted as a sibling top-level Lua fn and is never a
             // GLSL callee (referenced indirectly), so a return coercion here is
             // Lua-identity only; leaving it off matches today's emitted text.
@@ -290,7 +312,7 @@ impl Builder<'_> {
 
         for (i, pb) in params.into_iter().enumerate() {
             let pname = child.body.binding_arena[pb].name;
-            let slot = child.param_shapes.get(i).cloned().unwrap_or(RetSlot::Opaque);
+            let slot = child.param_slot(i);
             child.bind_param_slot(pb, pname, &slot);
         }
 
