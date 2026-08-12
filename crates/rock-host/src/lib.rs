@@ -2,11 +2,10 @@
 //!
 //! Houses the infra the command surface and every backend need but that has
 //! no business living in the legacy `rock` compiler crate: project discovery,
-//! the libstone/luajit launch recipe, the cimgui prelude, process management.
+//! the libstone/luajit launch recipe, process management.
 //! Leaf crate (no `rock-semantic`/`rock-codegen`/`rock` dep) so bone/skull can
 //! depend on it without the legacy pipeline. See `docs/cli-unification-plan.md`.
 
-pub mod cimgui_embed;
 pub mod compilation_units;
 pub mod engine_build;
 pub mod js_runner;

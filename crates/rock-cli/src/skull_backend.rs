@@ -1151,8 +1151,9 @@ pub(crate) fn render_project_errs(sources: &SourceFiles, errs: &[CompilerError])
 /// bone, emit Lua via skull, and execute it.
 ///
 /// A game project also needs the stone engine runtime (libstone FFI + the frame
-/// loop): the `is_game` branch below stages libstone and the cimgui prelude and
-/// execs luajit on `tmp/main.lua`, reusing the rock backend's run recipe
+/// loop): the `is_game` branch below stages libstone and execs luajit on
+/// `tmp/main.lua`, where stone's global initializer sets up cimgui, reusing the
+/// rock backend's run recipe
 /// (`build_engine_libs`, `exec_luajit_file`). All games run this way (match3,
 /// mag, bitgun, ...). Non-game projects keep the captured-output pipe. See
 /// `docs/skull-plan.md` — whole-game milestone (reached).
@@ -1537,9 +1538,9 @@ fn skull_compile_project(dir: &str, output: Option<String>) -> Result<()> {
     use std::path::PathBuf;
     let emit = skull_emit_project(dir);
     // A game's runnable main.lua is the same shape run/stone produce via
-    // write_full_main: preamble (cimgui bindings + game source dir) + emit +
-    // __rock_main_wrapper(main). Without the preamble the fire build is missing
-    // the imgui bindings (GetStyle etc.); without the wrapper it never starts.
+    // write_full_main: preamble (game source dir) + emit +
+    // __rock_main_wrapper(main). Without the preamble game asset paths are
+    // wrong; without the wrapper it never starts.
     let lua = if rock_host::project::is_game_project(&PathBuf::from(dir)).unwrap_or(false) {
         skull_game_main(&skull_game_preamble(dir), &emit)
     } else if emit.contains("function main(") {
@@ -2288,15 +2289,14 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
 // stone --backend skull: two-file incremental output (main.lua + incremental.lua)
 // ---------------------------------------------------------------------------
 
-/// The game preamble injected at the top of `main.lua`: `GAME_SOURCE_DIR` (asset
-/// resolution) + the embedded cimgui bindings. Factored so `skull_run_project`
-/// and the stone two-file path build it identically.
+/// The game preamble injected at the top of `main.lua`: `GAME_SOURCE_DIR` for
+/// asset resolution. cimgui is initialized by stone's global initializer.
+/// Factored so `skull_run_project` and the stone two-file path build it identically.
 fn skull_game_preamble(dir: &str) -> String {
     use std::path::PathBuf;
     let abs = PathBuf::from(dir).canonicalize().unwrap_or_else(|_| PathBuf::from(dir));
     let escaped = abs.display().to_string().replace('\\', "\\\\").replace('"', "\\\"");
     let mut full = format!("__ROCK_GAME_SOURCE_DIR = \"{escaped}\"\n");
-    full.push_str(&rock_host::cimgui_embed::build_prelude());
     if !full.ends_with('\n') {
         full.push('\n');
     }

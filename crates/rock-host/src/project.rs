@@ -200,9 +200,9 @@ pub fn lib_path_value() -> String {
     }
 
     // Dev layout: relative paths from CWD (which is the workspace root).
-    // The prebuilt lib dir MUST be on the search path — luajit's prelude
-    // (cimgui_embed) does ffi.load("libcimgui_complete.{dylib,so,dll}")
-    // before stone_init has had a chance to dlopen anything via rpath.
+    // The prebuilt lib dir MUST be on the search path: stone's Rock global
+    // initializer does ffi.load("libcimgui_complete.{dylib,so,dll}") before
+    // stone_init has had a chance to dlopen anything via rpath.
     // Without prebuilt on the path, dyld/dl_open cannot find the lib and
     // the prelude silently falls back to a no-op imgui stub — symptom:
     // every imgui.Begin call succeeds but no window ever renders.
@@ -436,14 +436,14 @@ pub fn find_rock_files_at_path(source_dir: impl AsRef<Path>) -> Result<Vec<Strin
 pub fn is_game_project(path: &Path) -> Result<bool> {
     // "Game project" controls three things that all assume Stone:
     //   - engine cdylib build (libstone, optionally libstone_video)
-    //   - cimgui Lua prelude injection at the top of main.lua
+    //   - stone's cimgui global initializer in the emitted program
     //   - GAME_SOURCE_DIR injection for asset path resolution
     //
     // The signal is a `stone` dependency in stick.toml, OR a stone_ffi /
     // main_stone marker file for legacy projects without stick.toml.
     //
     // An earlier version treated *any* `target = "lua"` package as a
-    // game -- but the cimgui prelude tried to `ffi.load("libcimgui_complete")`
+    // game -- but stone's cimgui initializer tries to `ffi.load("libcimgui_complete")`
     // at the top of every output, which fm and the other Lua-target libs
     // (json, fm-core) don't need and can't satisfy. The stub's stderr
     // splat was the user-visible damage.
