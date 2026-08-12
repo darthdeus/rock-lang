@@ -118,25 +118,13 @@ impl Builder<'_> {
     /// The flat-enum `ValueShape` of `e`'s (non-nullable) inferred type, else `None`
     /// -- the gate for threading a `let`/reassign target as leaf cells.
     pub(crate) fn flat_enum_value_shape_of(&self, e: Idx<Expr>) -> Option<ValueShape> {
-        if let Some(ty) = self.concrete_expr_ty(e) {
-            let MonoTy::App {
-                ctor: crate::monoty::MonoCtor::Nominal(name),
-                ..
-            } = ty.peel_nullable().0
-            else {
-                return None;
-            };
-            return EnumPlan::for_name(self.ws, *name).and_then(|plan| plan.flat().map(|s| s.value_shape()));
-        }
-        if self.concrete_plan.is_some() {
+        let id = self.expr_rep_id(e, RepUse::Value, false)?;
+        let mut shape = self.scx.rep_arena().value_shape(id)?;
+        if !EnumPlan::for_name(self.ws, shape.name).is_some_and(|plan| plan.flat().is_some()) {
             return None;
         }
-        match self.expr_ty(e)? {
-            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => {
-                EnumPlan::for_name(self.ws, n).and_then(|plan| plan.flat().map(|s| s.value_shape()))
-            }
-            _ => None,
-        }
+        shape.nullable = false;
+        Some(shape)
     }
 
     /// The `EnumFlatShape` of `e`'s (`Nullable`-peeled) inferred type, else `None`.

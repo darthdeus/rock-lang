@@ -165,7 +165,8 @@ impl Builder<'_> {
                     (self.nobox_value_name(lhs), self.nobox_value_name(rhs))
                 {
                     if ln == rn {
-                        let mut shape = value_shape_of_nominal(self.ws, ln)
+                        let mut shape = self
+                            .nobox_value_shape_of(lhs)
                             .ok_or_else(|| gap(format!("nobox value `{ln}` has no scalar shape")))?;
                         shape.nullable =
                             self.expr_is_nullable(lhs) || self.expr_is_nullable(rhs);

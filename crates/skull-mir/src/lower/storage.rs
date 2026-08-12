@@ -91,7 +91,7 @@ impl Builder<'_> {
         } else {
             let sub = self
                 .value_aggregate_of(value)
-                .and_then(|n| value_shape(self.ws, n))
+                .and_then(|n| self.nominal_rep_shape(n, false))
                 .ok_or_else(|| {
                     gap(format!(
                         "whole write to `{path}` needs a value-struct or cdata-enum RHS"

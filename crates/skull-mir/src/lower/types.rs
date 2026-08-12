@@ -96,6 +96,48 @@ impl Builder<'_> {
             .ok()
     }
 
+    pub(crate) fn expr_rep_id(
+        &self,
+        e: Idx<Expr>,
+        use_context: RepUse,
+        nobox: bool,
+    ) -> Option<RepId> {
+        if let Some(ty) = self.concrete_expr_ty(e) {
+            let tuple_spelled = matches!(ty.peel_nullable().0, MonoTy::Tuple(_));
+            return self.concrete_rep_id(&ty, use_context, tuple_spelled, nobox).ok();
+        }
+        if self.concrete_plan.is_some() {
+            return None;
+        }
+        let ty = *self.inf?.expr_types.get(e)?;
+        self.source_rep_id(ty, use_context, self.source_tuple_spelled(ty), nobox)
+    }
+
+    pub(crate) fn nominal_rep_shape(&self, name: Ustr, nobox: bool) -> Option<ValueShape> {
+        let ty = MonoTy::App {
+            ctor: crate::monoty::MonoCtor::Nominal(name),
+            params: Vec::new(),
+        };
+        let id = self
+            .scx
+            .rep_arena()
+            .plan(
+                self.ws,
+                self.scx.target(),
+                &ty,
+                RepUse::Value,
+                &RepUseFacts::default(),
+                RepGuarantees { nobox, allow_opaque: true },
+            )
+            .ok()?;
+        self.scx.rep_arena().value_shape(id)
+    }
+
+    pub(crate) fn rep_shape_for_ty(&self, ty: TyId, use_context: RepUse, nobox: bool) -> Option<ValueShape> {
+        let id = self.source_rep_id(ty, use_context, self.source_tuple_spelled(ty), nobox)?;
+        self.scx.rep_arena().value_shape(id)
+    }
+
     pub(crate) fn source_rep_slot(
         &self,
         ty: TyId,

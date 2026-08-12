@@ -241,7 +241,7 @@ impl Builder<'_> {
         if !is_nobox_nominal(self.ws, cname) || self.struct_has_flat_field(cname) {
             return None;
         }
-        value_shape_of_nominal(self.ws, cname)
+        self.nominal_rep_shape(cname, true)
     }
 
     /// Whether any field of `cname`, at any depth, flattens to several parent

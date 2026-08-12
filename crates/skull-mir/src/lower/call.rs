@@ -1529,7 +1529,9 @@ impl Builder<'_> {
             // guarantee's violation, and the only reason this struct is
             // GC-tier at all.
             ValueRepr::Group { name, .. } if value_struct_is_leaf_table(self.ws, name) => {
-                let shape = value_shape(self.ws, name).expect("a leaf-table struct has a shape");
+                let shape = self
+                    .nominal_rep_shape(name, false)
+                    .expect("a leaf-table struct has a shape");
                 let leaves = self.repr_to_leaves(&r, &shape);
                 let fields = value_leaf_paths(&shape).into_iter().zip(leaves).collect();
                 self.emit_cur(Inst::MakeValueStruct { name, fields })
@@ -1860,8 +1862,7 @@ impl Builder<'_> {
     /// leaf projection off the `Group` still reads its own slot at its own read
     /// point, and the unread leaves die in DCE.
     pub(crate) fn boxed_value_copy_repr(&mut self, boxed: Idx<Inst>, name: Ustr) -> ValueRepr {
-        let Some(shape) = value_shape(self.ws, name).or_else(|| value_shape_gc(self.ws, name))
-        else {
+        let Some(shape) = self.nominal_rep_shape(name, false) else {
             return ValueRepr::Scalar(boxed);
         };
         let leaves = self.cdata_leaves(boxed, &shape);

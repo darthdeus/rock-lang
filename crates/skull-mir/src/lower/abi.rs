@@ -105,6 +105,7 @@ pub enum RepUse {
     Parameter,
     Return,
     TupleElement,
+    Value,
     Boundary,
 }
 

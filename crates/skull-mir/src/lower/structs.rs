@@ -812,7 +812,8 @@ impl Builder<'_> {
         let plan = uniform_block_checked(self.ws, struct_name)
             .map_err(|m| reject(u_span, format!("`@uniform_expand`: {m}")))?;
 
-        let shape = value_shape(self.ws, struct_name)
+        let shape = self
+            .nominal_rep_shape(struct_name, false)
             .ok_or_else(|| reject(u_span, uniform_expand_arg_msg(fname)))?;
         let leaves = self.repr_to_leaves(&repr, &shape);
         let stores = plan.leaf_stores();
@@ -890,7 +891,8 @@ impl Builder<'_> {
         let packet = uniform_values_return_shape(self.ws, block_name)
             .map_err(|m| reject(call_span, format!("`@uniform_values`: {m}")))?;
         let repr = self.lower_expr_repr(*u_e)?;
-        let shape = value_shape(self.ws, struct_name)
+        let shape = self
+            .nominal_rep_shape(struct_name, false)
             .ok_or_else(|| reject(u_span, format!("`@uniform_values`: `{struct_name}` has no value shape")))?;
         let leaves = self.repr_to_leaves(&repr, &shape);
         let expected: Vec<crate::gpu_layout::WireKind> = members

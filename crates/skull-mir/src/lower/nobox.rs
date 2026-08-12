@@ -763,9 +763,11 @@ impl Builder<'_> {
     }
 
     pub(crate) fn nobox_value_shape_of(&self, e: Idx<Expr>) -> Option<ValueShape> {
-        let mut shape = value_shape_of_nominal(self.ws, self.nobox_value_name(e)?)?;
-        shape.nullable = self.expr_is_nullable(e);
-        Some(shape)
+        if self.scx.values_first_class {
+            return None;
+        }
+        self.expr_rep_id(e, RepUse::Value, true)
+            .and_then(|id| self.scx.rep_arena().value_shape(id))
     }
 
     pub(crate) fn nobox_binding_shape(&self, binding: Idx<BindingInfo>) -> Option<ValueShape> {
@@ -820,29 +822,7 @@ impl Builder<'_> {
         if self.scx.values_first_class {
             return None;
         }
-        if let Some(concrete) = self.concrete_ty_id(ty) {
-            let arena = self.scx.rep_arena();
-            let id = self
-                .concrete_rep_id(&concrete, RepUse::Parameter, self.source_tuple_spelled(ty), true)
-                .ok()?;
-            return arena.value_shape(id);
-        }
-        if self.concrete_plan.is_some() {
-            return None;
-        }
-        // The BODY arena's spelling of [`nullable_nominal_shape`]: same rule, its
-        // own type-node lookup. `is_nobox_struct` (not `is_nobox_nominal`) is the
-        // one real difference -- it also honours `scx.values_first_class`, which
-        // the GLSL backend sets -- so the guard stays here and the core sees an
-        // already-filtered nominal.
-        let mut shape = nullable_nominal_shape(self.ws, ty, &|t| {
-            self.ty_node(self.resolve_tyid(t)?)
-        })?;
-        // A generic bound to `E?` reaches the core as its payload nominal, so
-        // the `?` has to be re-applied from the binding. Idempotent for a
-        // spelled-out `E?`, which the core already marked.
-        shape.nullable |= self.is_nullable_ty(ty);
-        Some(shape)
+        self.rep_shape_for_ty(ty, RepUse::Value, true)
     }
 
     /// The leaf globals a place rooted at a `nobox` global denotes, plus the

@@ -509,7 +509,8 @@ impl Builder<'_> {
         rhs: Idx<Expr>,
     ) -> Result<ValueRepr, CompilerError> {
         let name = self.nobox_value_name(e).expect("caller checked");
-        let shape = value_shape_of_nominal(self.ws, name)
+        let shape = self
+            .nobox_value_shape_of(e)
             .ok_or_else(|| gap(format!("nobox value `{name}` has no scalar shape")))?;
         let mut lhs_shape = shape.clone();
         lhs_shape.nullable = true;

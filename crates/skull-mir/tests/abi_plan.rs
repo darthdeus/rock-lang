@@ -19,7 +19,7 @@ use skull_mir::concrete::{ConcreteBodyPlan, ConcreteOwner, ConcreteSignature, Co
 use skull_mir::lower::{
     BackendFnAbiPlan, ContainerFamily, ContainerPlan, ContainerStorage, RepArena, RepGuarantees,
     declared_boundary_class, boundary_requires_boxed_representation, BoundaryClass, EnumLayout,
-    EnumPlan, RepUse, RepUseFacts, ScalarCtx,
+    EnumPlan, RepLayout, RepUse, RepUseFacts, ScalarCtx,
 };
 use skull_mir::mir::FuncRef;
 use skull_mir::monoty::{MonoCtor, MonoTy};
@@ -572,4 +572,23 @@ fn function_value_plan_mode_is_part_of_the_owned_signature() {
     assert!(direct.uses_scalar_abi(), "direct-only value functions may use their concrete leaves");
     assert!(!taken.uses_scalar_abi(), "taken functions must keep an ordinary value opaque");
     assert_ne!(direct.params(), taken.params(), "the two physical modes must have distinct plans");
+}
+
+#[test]
+fn aggregate_value_projection_has_an_owned_value_context() {
+    let ws = ws_of("nobox value V2 { x: float, y: float }\nfn main() { print(\"ok\") }\n");
+    let arena = RepArena::default();
+    let id = arena
+        .plan(
+            &ws,
+            bone_semantic::hir::FnBackend::Lua,
+            &nominal("V2"),
+            RepUse::Value,
+            &RepUseFacts::default(),
+            RepGuarantees { nobox: true, allow_opaque: true },
+        )
+        .expect("a concrete aggregate value must have a physical plan");
+    let plan = arena.get(id);
+    assert_eq!(plan.use_context(), RepUse::Value);
+    assert!(matches!(plan.layout(), RepLayout::Leaves(_)), "aggregate plan must carry leaves");
 }
