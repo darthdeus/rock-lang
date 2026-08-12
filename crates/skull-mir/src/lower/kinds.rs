@@ -139,9 +139,11 @@ impl Builder<'_> {
     /// shape with presence) and the column keys ([`column_leaf_paths`]) can only
     /// agree.
     pub(crate) fn column_shape(&self, elem: ColumnElem) -> Result<ValueShape, CompilerError> {
-        let mut shape = value_shape(self.ws, elem.name)
+        let shape = self
+            .scx
+            .rep_arena()
+            .value_shape(elem.representation())
             .ok_or_else(|| gap("column element is not a value struct"))?;
-        shape.nullable = elem.nullable;
         Ok(shape)
     }
 

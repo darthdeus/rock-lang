@@ -68,11 +68,14 @@ impl Builder<'_> {
         value: Idx<Expr>,
     ) -> Result<(), CompilerError> {
         let container = self.native_buffer_plan(elem)?;
-        let plan = leaf_addr_plan(self.ws, elem).map_err(gap)?;
+        let plan = container
+            .leaf_addresses()
+            .ok_or_else(|| gap("NativeBuffer element has no owned leaf address plan"))?;
         let dot = format!("{path}.");
         let hit: Vec<PlaceBundle> = plan
             .into_iter()
             .filter(|a| a.path.as_str() == path || a.path.as_str().starts_with(&dot))
+            .cloned()
             .map(|address| container.place(address).map_err(|e| gap(e.message)))
             .collect::<Result<_, _>>()?;
         if hit.is_empty() {
@@ -179,8 +182,11 @@ impl Builder<'_> {
             return Ok(None);
         };
         let container = self.native_buffer_plan(elem)?;
-        let plan = leaf_addr_plan(self.ws, elem).map_err(gap)?;
-        let Some(addr) = plan.into_iter().find(|a| a.path.as_str() == path) else {
+        let Some(addr) = container
+            .leaf_addresses()
+            .and_then(|plan| plan.iter().find(|a| a.path.as_str() == path))
+            .cloned()
+        else {
             return Ok(None);
         };
         let place = container.place(addr).map_err(|e| gap(e.message))?;
@@ -230,12 +236,15 @@ impl Builder<'_> {
         index: Idx<Inst>,
         elem: Ustr,
     ) -> Result<ValueRepr, CompilerError> {
-        let shape = value_shape(self.ws, elem)
-            .ok_or_else(|| gap("leaf-addressed element is not a value struct"))?;
         let container = self.native_buffer_plan(elem)?;
-        let plan = leaf_addr_plan(self.ws, elem).map_err(gap)?;
-        let plan: Vec<PlaceBundle> = plan
-            .into_iter()
+        let shape = container
+            .element_shape(&self.scx.rep_arena())
+            .ok_or_else(|| gap("leaf-addressed element is not a value struct"))?;
+        let plan: Vec<PlaceBundle> = container
+            .leaf_addresses()
+            .ok_or_else(|| gap("leaf-addressed element has no owned leaf address plan"))?
+            .iter()
+            .cloned()
             .map(|address| container.place(address).map_err(|e| gap(e.message)))
             .collect::<Result<_, _>>()?;
         let checked = self.nb_checked_index(buf, index)?;
@@ -267,12 +276,15 @@ impl Builder<'_> {
         value: Idx<Expr>,
         elem: Ustr,
     ) -> Result<(), CompilerError> {
-        let shape = value_shape(self.ws, elem)
-            .ok_or_else(|| gap("leaf-addressed element is not a value struct"))?;
         let container = self.native_buffer_plan(elem)?;
-        let plan = leaf_addr_plan(self.ws, elem).map_err(gap)?;
-        let plan: Vec<PlaceBundle> = plan
-            .into_iter()
+        let shape = container
+            .element_shape(&self.scx.rep_arena())
+            .ok_or_else(|| gap("leaf-addressed element is not a value struct"))?;
+        let plan: Vec<PlaceBundle> = container
+            .leaf_addresses()
+            .ok_or_else(|| gap("leaf-addressed element has no owned leaf address plan"))?
+            .iter()
+            .cloned()
             .map(|address| container.place(address).map_err(|e| gap(e.message)))
             .collect::<Result<_, _>>()?;
         let repr = self.lower_expr_repr(value)?;

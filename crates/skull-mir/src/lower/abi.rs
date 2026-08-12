@@ -356,6 +356,7 @@ impl RepArena {
         use crate::monoty::{MonoCtor, MonoTy};
 
         let reject = |message: String| RepError { span: facts.span, message };
+        let tuple_element_shape = matches!(use_context, RepUse::TupleElement);
         match ty {
             MonoTy::Nullable(inner) => match inner.as_ref() {
                 MonoTy::Tuple(parts) => {
@@ -386,7 +387,7 @@ impl RepArena {
                     Ok(self.intern(target, use_context, RepLayout::Opaque))
                 }
                 _ => {
-                    let shape = if guarantees.nobox {
+                    let shape = if guarantees.nobox || tuple_element_shape {
                         crate::lower::mono_nobox_value_shape(ws, ty)
                     } else {
                         crate::lower::mono_value_shape(ws, ty)
@@ -431,7 +432,7 @@ impl RepArena {
                 Ok(self.intern(target, use_context, RepLayout::Opaque))
             }
             MonoTy::App { ctor: MonoCtor::Nominal(_), .. } => {
-                let shape = if guarantees.nobox {
+                let shape = if guarantees.nobox || tuple_element_shape {
                     crate::lower::mono_nobox_value_shape(ws, ty)
                 } else {
                     crate::lower::mono_value_shape(ws, ty)

@@ -389,10 +389,26 @@ fn container_storage_uses_the_element_representation_plan() {
         matches!(plan.storage(), ContainerStorage::Columns { .. }),
         "the Vec storage decision must be owned by the container plan"
     );
-    assert_eq!(
-        plan.column_elem(&arena),
-        Some(skull_mir::mir::ColumnElem { name: Ustr::from("V2"), nullable: false })
-    );
+    let elem = plan.column_elem(&arena).expect("column element");
+    assert_eq!(elem.name, Ustr::from("V2"));
+    assert!(!elem.nullable);
+    assert_eq!(elem.representation(), plan.element_rep());
+}
+
+#[test]
+fn container_columns_carry_owned_element_identity() {
+    let ws = ws_of("value V2 { x: float, y: float }\nfn main() { print(\"ok\") }\n");
+    let scx = ScalarCtx::new(&ws);
+    let arena = RepArena::default();
+    let ty = MonoTy::App {
+        ctor: MonoCtor::Array,
+        params: vec![nominal("V2")],
+    };
+    let plan = ContainerPlan::for_type(&ws, scx.target(), &arena, ContainerFamily::Vec, &ty)
+        .expect("value vector must have a container plan");
+    let elem = plan.column_elem(&arena).expect("V2 vector must use columns");
+    assert_eq!(elem.representation(), plan.element_rep());
+    assert!(plan.element_shape(&arena).is_some(), "the owned element plan must expose its shape");
 }
 
 #[test]

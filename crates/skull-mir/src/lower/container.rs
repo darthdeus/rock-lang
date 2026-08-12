@@ -40,6 +40,7 @@ pub struct ContainerPlan {
     target: bone_semantic::hir::FnBackend,
     family: ContainerFamily,
     storage: ContainerStorage,
+    leaf_addresses: Option<Vec<LeafAddr>>,
 }
 
 impl ContainerPlan {
@@ -163,7 +164,8 @@ impl ContainerPlan {
         let shape = arena.value_shape(element_rep);
         let columns = match (family, shape.as_ref()) {
             (ContainerFamily::Vec, Some(shape))
-                if !nullable || crate::lower::is_nobox_nominal(ws, shape.name) =>
+                if crate::lower::is_ffi_clean_value_struct(ws, shape.name)
+                    && (!nullable || crate::lower::is_nobox_nominal(ws, shape.name)) =>
             {
                 let paths = crate::lower::value_leaf_paths(shape);
                 (paths.len() + usize::from(nullable)
@@ -171,7 +173,8 @@ impl ContainerPlan {
                     .then(|| !paths.iter().any(|path| path.as_str() == "len"))
                     .unwrap_or(false)
             }
-            (ContainerFamily::Map | ContainerFamily::Arena, Some(shape)) if !nullable =>
+            (ContainerFamily::Map | ContainerFamily::Arena, Some(shape))
+                if !nullable && crate::lower::is_ffi_clean_value_struct(ws, shape.name) =>
             {
                 let paths = crate::lower::value_leaf_paths(shape);
                 paths.len() <= crate::lower::MAX_COLUMN_LEAVES
@@ -179,11 +182,14 @@ impl ContainerPlan {
             }
             _ => false,
         };
-        let leaf_addressed = !nullable
+        let leaf_addresses = if !nullable
             && matches!(family, ContainerFamily::NativeBuffer | ContainerFamily::FlatVec)
-            && shape.is_some_and(|shape| {
-                crate::lower::leaf_addr_plan(ws, shape.name).is_ok()
-            });
+        {
+            shape.as_ref().and_then(|shape| crate::lower::leaf_addr_plan(ws, shape.name).ok())
+        } else {
+            None
+        };
+        let leaf_addressed = leaf_addresses.is_some();
         let storage = if columns {
             ContainerStorage::Columns { element: element_rep }
         } else if leaf_addressed {
@@ -191,7 +197,7 @@ impl ContainerPlan {
         } else {
             ContainerStorage::Boxed { element: element_rep }
         };
-        Ok(Self { target, family, storage })
+        Ok(Self { target, family, storage, leaf_addresses })
     }
 
     pub fn target(&self) -> bone_semantic::hir::FnBackend {
@@ -214,10 +220,18 @@ impl ContainerPlan {
         }
     }
 
+    pub fn element_shape(&self, arena: &RepArena) -> Option<ValueShape> {
+        arena.value_shape(self.element_rep())
+    }
+
     pub fn column_elem(&self, arena: &RepArena) -> Option<crate::mir::ColumnElem> {
         let ContainerStorage::Columns { element } = self.storage else { return None };
         let shape = arena.value_shape(element)?;
-        Some(crate::mir::ColumnElem { name: shape.name, nullable: shape.nullable })
+        Some(crate::mir::ColumnElem::planned(
+            shape.name,
+            shape.nullable,
+            self.element_rep(),
+        ))
     }
 
     pub fn ffi_element_name(
@@ -225,12 +239,12 @@ impl ContainerPlan {
         ws: &bone_semantic::inference::Workspace,
         arena: &RepArena,
     ) -> Option<ustr::Ustr> {
-        let shape = match self.storage {
-            ContainerStorage::Boxed { element }
-            | ContainerStorage::Columns { element }
-            | ContainerStorage::LeafAddressed { element } => arena.value_shape(element)?,
-        };
+        let shape = self.element_shape(arena)?;
         crate::lower::is_ffi_clean_value_struct(ws, shape.name).then_some(shape.name)
+    }
+
+    pub fn leaf_addresses(&self) -> Option<&[LeafAddr]> {
+        self.leaf_addresses.as_deref()
     }
 
     pub fn is_leaf_addressed(&self) -> bool {

@@ -143,11 +143,20 @@ pub enum ContainerKind {
 pub struct ColumnElem {
     pub name: Ustr,
     pub nullable: bool,
+    representation: crate::lower::RepId,
 }
 
 impl ColumnElem {
-    pub fn plain(name: Ustr) -> Self {
-        ColumnElem { name, nullable: false }
+    pub(crate) fn planned(
+        name: Ustr,
+        nullable: bool,
+        representation: crate::lower::RepId,
+    ) -> Self {
+        ColumnElem { name, nullable, representation }
+    }
+
+    pub fn representation(&self) -> crate::lower::RepId {
+        self.representation
     }
 }
 
