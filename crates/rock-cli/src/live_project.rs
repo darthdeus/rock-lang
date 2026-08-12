@@ -305,4 +305,38 @@ mod tests {
             LiveUpdate::Full { .. }
         ));
     }
+
+    #[test]
+    fn build_var_commands_run_once_for_incremental_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("main.rock");
+        let count = dir.path().join("count");
+        std::fs::write(
+            dir.path().join("stick.toml"),
+            format!(
+                "[package]\nname = \"cadence\"\n[build]\n[build.vars]\nCOUNT = {{ cmd = \"n=$(cat {} 2>/dev/null || echo 0); echo $((n + 1)) > {}; echo counted\" }}\n",
+                count.display(), count.display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &source,
+            "fn value() -> int { 1 }\nfn main() { print(build_var(\"COUNT\")) }\n",
+        )
+        .unwrap();
+
+        let mut project = LiveProject::init(dir.path().to_str().unwrap(), false).unwrap();
+        assert_eq!(std::fs::read_to_string(&count).unwrap().trim(), "1");
+
+        std::fs::write(
+            &source,
+            "fn value() -> int { 2 }\nfn main() { print(build_var(\"COUNT\")) }\n",
+        )
+        .unwrap();
+        project.recompile(std::slice::from_ref(&source)).unwrap();
+        assert_eq!(std::fs::read_to_string(&count).unwrap().trim(), "1");
+
+        project.recompile(&[]).unwrap();
+        assert_eq!(std::fs::read_to_string(&count).unwrap().trim(), "2");
+    }
 }

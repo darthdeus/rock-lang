@@ -30,6 +30,8 @@ mod comptime_build_vars;
 mod cimgui_prelude;
 #[path = "release_mode_deleted.rs"]
 mod release_mode_deleted;
+#[path = "mag_build_vars.rs"]
+mod mag_build_vars;
 #[path = "js_run_gate.rs"]
 mod js_run_gate;
 #[path = "js_value_tests.rs"]

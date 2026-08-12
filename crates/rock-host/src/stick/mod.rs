@@ -23,6 +23,8 @@ pub struct StickConfig {
     /// Commands are run by the CLI once per session build, before compilation;
     /// the compiler only ever sees resolved values (docs/comptime-plan.md).
     pub build: Option<BuildConfig>,
+    /// Release asset selection consumed by both `rock package` and `rock web`.
+    pub release: Option<ReleaseConfig>,
     pub dependencies: HashMap<String, Dependency>,
 }
 
@@ -50,7 +52,12 @@ pub struct BuildVar {
     pub secret: bool,
 }
 
-pub const KNOWN_BUILD_BUILTINS: [&str; 1] = ["channel"];
+#[derive(Debug, Clone, Default)]
+pub struct ReleaseConfig {
+    pub assets: Option<Vec<String>>,
+}
+
+pub const KNOWN_BUILD_BUILTINS: [&str; 2] = ["channel", "platform"];
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
@@ -319,6 +326,33 @@ impl<'de> serde::Deserialize<'de> for BuildConfig {
     }
 }
 
+impl<'de> serde::Deserialize<'de> for ReleaseConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct Vis;
+        impl<'de> serde::de::Visitor<'de> for Vis {
+            type Value = ReleaseConfig;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                write!(f, "ReleaseConfig struct")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<ReleaseConfig, A::Error> {
+                let mut release = ReleaseConfig::default();
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "assets" => { release.assets = Some(map.next_value()?); }
+                        other => {
+                            return Err(serde::de::Error::custom(format!(
+                                "unknown key `{other}` in [release]; known keys: assets"
+                            )));
+                        }
+                    }
+                }
+                Ok(release)
+            }
+        }
+        d.deserialize_map(Vis)
+    }
+}
+
 impl<'de> serde::Deserialize<'de> for Package {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         struct Vis;
@@ -360,11 +394,13 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                 let mut engine: Option<EngineConfig> = None;
                 let mut ios: Option<IosConfig> = None;
                 let mut build: Option<BuildConfig> = None;
+                let mut release: Option<ReleaseConfig> = None;
                 let mut dependencies: HashMap<String, Dependency> = HashMap::new();
                 while let Some(key) = map.next_key::<String>()? {
                     match key.as_str() {
                         "package" => { package = Some(map.next_value()?); }
                         "build" => { build = Some(map.next_value()?); }
+                        "release" => { release = Some(map.next_value()?); }
                         "engine" => { engine = map.next_value()?; }
                         "ios" => { ios = map.next_value()?; }
                         "dependencies" => { dependencies = map.next_value()?; }
@@ -372,7 +408,7 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                     }
                 }
                 let package = package.ok_or_else(|| serde::de::Error::missing_field("package"))?;
-                Ok(StickConfig { package, engine, ios, build, dependencies })
+                Ok(StickConfig { package, engine, ios, build, release, dependencies })
             }
         }
         d.deserialize_map(Vis)
@@ -583,6 +619,38 @@ impl StickConfig {
             }
         }
         Ok(())
+    }
+
+    /// Resolve the release asset list once from the already-parsed StickConfig.
+    /// The default mirrors the historical release collector: game `assets/`,
+    /// plus a root-level `level.txt` when present.
+    pub fn release_assets(&self, project_dir: &Path) -> Result<Vec<String>> {
+        let assets = self
+            .release
+            .as_ref()
+            .and_then(|release| release.assets.clone())
+            .unwrap_or_else(|| {
+                let mut defaults = vec!["assets".to_string()];
+                if project_dir.join("level.txt").exists() {
+                    defaults.push("level.txt".to_string());
+                }
+                defaults
+            });
+        for rel in &assets {
+            let path = Path::new(rel);
+            if rel.is_empty()
+                || path.is_absolute()
+                || path
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+            {
+                anyhow::bail!(
+                    "stick.toml: [release].assets entry {:?} must be a non-empty relative path inside the project",
+                    rel
+                );
+            }
+        }
+        Ok(assets)
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -980,6 +1048,38 @@ mod tests {
             "[package]\nname = \"x\"\n[build]\nchanels = [\"dev\"]\n",
         ).expect_err("unknown [build] key must be rejected");
         assert!(format!("{err}").contains("chanels"), "error names the bad key: {err}");
+    }
+
+    #[test]
+    fn release_section_parses_assets_through_stick_config() {
+        let cfg = StickConfig::new_from_str(concat!(
+            "[package]\nname = \"x\"\n",
+            "[release]\nassets = [\"assets\", \"saves/level.json\"]\n",
+        ))
+        .expect("release section must parse");
+        assert_eq!(
+            cfg.release.as_ref().unwrap().assets.as_deref(),
+            Some(&["assets".to_string(), "saves/level.json".to_string()][..])
+        );
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(cfg.release_assets(dir.path()).unwrap(), vec!["assets", "saves/level.json"]);
+    }
+
+    #[test]
+    fn release_section_rejects_unknown_keys_and_escape_paths() {
+        let err = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[release]\nasset = [\"assets\"]\n",
+        )
+        .expect_err("unknown release key must reject");
+        assert!(format!("{err}").contains("asset"), "error names the bad release key: {err}");
+
+        let cfg = StickConfig::new_from_str(
+            "[package]\nname = \"x\"\n[release]\nassets = [\"../outside\"]\n",
+        )
+        .expect("path validation happens when selecting assets");
+        let dir = tempfile::tempdir().unwrap();
+        let err = cfg.release_assets(dir.path()).expect_err("asset escape must reject");
+        assert!(format!("{err}").contains("outside"), "error names the escape: {err}");
     }
 
     #[test]

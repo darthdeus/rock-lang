@@ -79,6 +79,9 @@ pub struct Workspace {
 #[derive(Clone, Debug, Default)]
 pub struct ComptimeInputs {
     pub vars: FxHashMap<Ustr, ComptimeVarValue>,
+    /// Effective declared build channel for package metadata. Empty means a
+    /// synthetic/type-only workspace did not come through CLI resolution.
+    pub channel: String,
     /// FALLBACK root for `embed_string(path)`, used only when the calling
     /// module has no file on disk to resolve from (a synthetic module).
     /// Normally the path resolves against the nearest stick.toml at or above

@@ -80,8 +80,8 @@ pub fn resolve_build_vars(
             }
         } else if let Some(value) = var.value.as_ref() {
             value.clone()
-        } else if var.builtin.as_deref() == Some("channel") {
-            channel.clone()
+        } else if let Some(builtin) = var.builtin.as_deref() {
+            resolve_builtin(builtin, &channel)?
         } else if let Some(cmd) = var.cmd.as_ref() {
             run_var_cmd(name, cmd, var.secret, project_dir, &channel)?
         } else {
@@ -91,6 +91,23 @@ pub fn resolve_build_vars(
         vars.insert(name.clone(), ResolvedVar { value, secret: var.secret });
     }
     Ok(ResolvedBuildVars { channel, vars })
+}
+
+fn resolve_builtin(name: &str, channel: &str) -> Result<String> {
+    match name {
+        "channel" => Ok(channel.to_string()),
+        "platform" => Ok(if channel == "web" {
+            "web".to_string()
+        } else if matches!(channel, "ios" | "ios-dev") {
+            "ios".to_string()
+        } else {
+            match std::env::consts::OS {
+                "macos" => "osx".to_string(),
+                other => other.to_string(),
+            }
+        }),
+        other => anyhow::bail!("unknown [build.vars] builtin {other:?}"),
+    }
 }
 
 /// A `secret = true` var's diagnostics are redacted on the failure path: the
@@ -150,6 +167,26 @@ mod tests {
         assert_eq!(resolved.channel, "steam");
         assert_eq!(resolved.vars["ENDPOINT"].value, "https://example.test");
         assert_eq!(resolved.vars["CHANNEL"].value, "steam");
+    }
+
+    #[test]
+    fn platform_builtin_tracks_web_and_ios_channels() {
+        let cfg = fixture(concat!(
+            "[package]\nname = \"x\"\n",
+            "[build]\nchannels = [\"dev\", \"web\", \"ios-dev\"]\n",
+            "[build.vars]\nPLATFORM = { builtin = \"platform\" }\n",
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        let web = resolve_build_vars(&cfg, dir.path(), Some("web"), &no_overrides()).unwrap();
+        assert_eq!(web.vars["PLATFORM"].value, "web");
+        let ios = resolve_build_vars(&cfg, dir.path(), Some("ios-dev"), &no_overrides()).unwrap();
+        assert_eq!(ios.vars["PLATFORM"].value, "ios");
+        let host = resolve_build_vars(&cfg, dir.path(), Some("dev"), &no_overrides()).unwrap();
+        let expected = match std::env::consts::OS {
+            "macos" => "osx",
+            other => other,
+        };
+        assert_eq!(host.vars["PLATFORM"].value, expected);
     }
 
     #[test]
