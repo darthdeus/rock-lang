@@ -2156,7 +2156,7 @@ impl Emitter<'_> {
             // packed-double arrays beat `Float64Array` for the strided reads
             // this layout exists to make fast (`docs/js-vec-columns-plan.md`).
             // A nested leaf path is dotted (`min.x`), so keys are quoted.
-            Inst::MakeVecColumns { elem, columns, len, capacity } => {
+            Inst::MakeVecColumns { elem, columns, len, capacity, .. } => {
                 let mut s = format!(
                     "{{{}: {{repr: {}, elem: {}, cap: {}}}",
                     js_string_lit(skull_mir::mir::VEC_COLUMN_HEADER_FIELD)?,
@@ -2178,6 +2178,12 @@ impl Emitter<'_> {
                 s.push_str(&format!(", len: {len}, __ty: \"Vec\"}}"));
                 s
             }
+            Inst::MakeVecColumnHeader { elem, capacity, .. } => format!(
+                "{{repr: {}, elem: {}, cap: {}}}",
+                js_string_lit(skull_mir::mir::VEC_COLUMN_REPR)?,
+                js_string_lit(elem.as_str())?,
+                self.render_val(*capacity)?,
+            ),
             // The element index is checked ONCE here; each per-leaf access then
             // indexes its column raw.
             Inst::VecCheckedIndex { vec, index } => format!(
@@ -4492,11 +4498,11 @@ fn emit_inspect_ty(ws: &Workspace, bodies: &[&MirFunc]) -> Result<String, Compil
 /// and the element type is a compile-time fact at every column site anyway --
 /// that is exactly why `spec_key_has_target_storage` forces specialization for one.
 fn emit_col_mat(ws: &Workspace, bodies: &[&MirFunc]) -> Result<String, CompilerError> {
-    let mut names: BTreeSet<ustr::Ustr> = BTreeSet::new();
+    let mut plans = std::collections::BTreeMap::new();
     for mf in bodies {
-        skull_mir::mir::column_elem_types(mf, &mut names);
+        skull_mir::mir::column_elem_plans(mf, &mut plans);
     }
-    build_col_mat_defs(ws, &names)
+    build_col_mat_defs(ws, &plans)
 }
 
 /// Emit `__rock_col_mat["<E>"] = function(v, i) { return {...}; };` -- one
@@ -4510,15 +4516,15 @@ fn emit_col_mat(ws: &Workspace, bodies: &[&MirFunc]) -> Result<String, CompilerE
 /// `E { x: 1, y: 2 }` with no further help.
 fn build_col_mat_defs(
     ws: &Workspace,
-    names: &BTreeSet<ustr::Ustr>,
+    plans: &std::collections::BTreeMap<ustr::Ustr, bool>,
 ) -> Result<String, CompilerError> {
     let mut out = String::new();
-    for name in names {
+    for (name, nobox) in plans {
         // A `nobox` element has no materializer BY CONSTRUCTION: every op that
         // would need one (inspect, sort, the Lua-array bridge) is a spanned
         // rejection in the lowering, so emitting one would be unreachable code
         // that reads as an escape hatch from the guarantee.
-        if skull_mir::lower::is_nobox_nominal(ws, *name) {
+        if *nobox {
             continue;
         }
         let Some(paths) = skull_mir::lower::value_leaf_paths_of(ws, *name) else {
@@ -6317,6 +6323,7 @@ fn for_each_operand(inst: &Inst, f: &mut impl FnMut(Idx<Inst>)) {
             mark(&[*capacity]);
             columns.iter().for_each(|(_, vs)| mark(vs));
         }
+        Inst::MakeVecColumnHeader { capacity, .. } => mark(&[*capacity]),
         Inst::MakeStruct { fields, .. }
         | Inst::MakeValueStruct { fields, .. }
         | Inst::MaterializeValueStruct { fields, .. }

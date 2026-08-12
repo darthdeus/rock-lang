@@ -614,15 +614,10 @@ impl Builder<'_> {
     }
 
     pub(crate) fn make_column_header(&mut self, elem: ColumnElem, capacity: Idx<Inst>) -> Idx<Inst> {
-        let repr = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(VEC_COLUMN_REPR))));
-        let elem = self.emit_cur(Inst::Const(Lit::Str(elem.name)));
-        self.emit_cur(Inst::MakeStruct {
-            ty: None,
-            fields: vec![
-                (Ustr::from("repr"), repr),
-                (Ustr::from("elem"), elem),
-                (Ustr::from("cap"), capacity),
-            ],
+        self.emit_cur(Inst::MakeVecColumnHeader {
+            elem: elem.name,
+            nobox: elem.is_nobox(),
+            capacity,
         })
     }
 
@@ -642,6 +637,7 @@ impl Builder<'_> {
         let columns = column_leaf_paths(&shape).into_iter().map(|p| (p, Vec::new())).collect();
         Ok(self.emit_cur(Inst::MakeVecColumns {
             elem: elem.name,
+            nobox: elem.is_nobox(),
             columns,
             len: 0,
             capacity,

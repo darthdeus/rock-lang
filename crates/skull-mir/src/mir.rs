@@ -35,39 +35,31 @@ pub const VEC_COLUMN_REPR: &str = "columns";
 /// collide with a leaf path, and it shares that property with `@vec`.
 pub const VEC_COLUMN_PRESENCE_FIELD: &str = "@p";
 
-/// Every element type `mf` builds a column-stored `Vec` of, nested fns included.
-///
-/// Lives beside the header constants because it has to recognise BOTH shapes the
-/// header is built in -- the inline one in [`Inst::MakeVecColumns`] and the
-/// separately-emitted `{repr, elem, cap}` struct every other column ctor goes
-/// through -- and a collector that knows only one of them silently under-reports.
-/// The JS backend needs the set to emit its per-type element materializers; on
-/// luajit the runtime type table serves the same role, so nothing calls this.
-pub fn column_elem_types(mf: &MirFunc, out: &mut std::collections::BTreeSet<Ustr>) {
-    let str_const = |id: Idx<Inst>| match &mf.insts[id] {
-        Inst::Const(Lit::Str(s)) => Some(*s),
-        _ => None,
-    };
+/// Every element type `mf` builds a column-stored `Vec` of, nested fns included,
+/// together with the planner's no-box guarantee. The fact is carried by both
+/// column-producing instructions, including a header rebuilt from an input Vec.
+pub fn column_elem_plans(mf: &MirFunc, out: &mut std::collections::BTreeMap<Ustr, bool>) {
     for inst in mf.insts.values() {
         match inst {
-            Inst::MakeVecColumns { elem, .. } => {
-                out.insert(*elem);
-            }
-            Inst::MakeStruct { ty: None, fields } => {
-                let field = |n: &str| fields.iter().find(|(f, _)| f.as_str() == n).map(|(_, v)| *v);
-                let (Some(repr), Some(elem)) = (field("repr"), field("elem")) else { continue };
-                if str_const(repr).is_some_and(|r| r.as_str() == VEC_COLUMN_REPR) {
-                    if let Some(elem) = str_const(elem) {
-                        out.insert(elem);
-                    }
-                }
+            Inst::MakeVecColumns { elem, nobox, .. }
+            | Inst::MakeVecColumnHeader { elem, nobox, .. } => {
+                out.insert(*elem, *nobox);
             }
             _ => {}
         }
     }
     for nf in &mf.nested_fns {
-        column_elem_types(nf, out);
+        column_elem_plans(nf, out);
     }
+}
+
+/// Every element type `mf` builds a column-stored `Vec`, nested fns included.
+/// This is the name-only view used by inspect type definitions; representation
+/// decisions come from [`column_elem_plans`].
+pub fn column_elem_types(mf: &MirFunc, out: &mut std::collections::BTreeSet<Ustr>) {
+    let mut plans = std::collections::BTreeMap::new();
+    column_elem_plans(mf, &mut plans);
+    out.extend(plans.into_keys());
 }
 
 /// A resolved call target: which function in which module. Mangling (rock's
@@ -410,8 +402,17 @@ pub enum Inst {
     /// length `len`, in the element's declaration order.
     MakeVecColumns {
         elem: Ustr,
+        nobox: bool,
         columns: Vec<(Ustr, Vec<Idx<Inst>>)>,
         len: usize,
+        capacity: Idx<Inst>,
+    },
+    /// A column Vec header rebuilt from an existing Vec. It carries the same
+    /// planner fact as [`Inst::MakeVecColumns`] without changing the runtime
+    /// header shape.
+    MakeVecColumnHeader {
+        elem: Ustr,
+        nobox: bool,
         capacity: Idx<Inst>,
     },
     /// A struct value. `ty` is the nominal name for the `__ty` reflective field

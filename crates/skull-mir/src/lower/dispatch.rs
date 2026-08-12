@@ -25,7 +25,7 @@ use bone_semantic::inference::{BodyInference, Workspace};
 use bone_semantic::prelude::Idx;
 use ustr::Ustr;
 
-use super::{EnumPlan, shape::payload_free_enum_variants};
+use super::{EnumPlan, RepArena, RepGuarantees, RepUse, RepUseFacts, shape::payload_free_enum_variants};
 use crate::concrete::{ConcreteBodyPlan, ConcreteTypeTables};
 use crate::monoty::MonoSubst;
 
@@ -45,6 +45,8 @@ pub struct DispatchCtx<'a> {
     pub concrete_types: Option<&'a ConcreteTypeTables>,
     pub concrete_type_cache: Option<&'a super::ConcreteTypeCache>,
     pub interner: Option<&'a crate::monoty::MonoInterner>,
+    pub rep_arena: &'a RepArena,
+    pub target: bone_semantic::hir::FnBackend,
     /// Logical substitution for the target-neutral graph walk. Concrete
     /// lowering sets this to `None` because every type decision must come from
     /// its concrete plan.
@@ -380,10 +382,21 @@ impl<'a> DispatchCtx<'a> {
         if self.values_first_class {
             return false;
         }
-        self.ws
-            .struct_by_name
-            .get(&name)
-            .is_some_and(|sid| self.ws.modules[sid.module.index()].structs[sid.def].is_nobox)
+        let ty = crate::monoty::MonoTy::App {
+            ctor: crate::monoty::MonoCtor::Nominal(name),
+            params: Vec::new(),
+        };
+        self.rep_arena
+            .plan(
+                self.ws,
+                self.target,
+                &ty,
+                RepUse::Value,
+                &RepUseFacts::default(),
+                RepGuarantees { nobox: true, allow_opaque: true },
+            )
+            .map(|id| self.rep_arena.get(id).nobox())
+            .unwrap_or(false)
     }
 
     pub fn nobox_value_name(&self, e: Idx<Expr>) -> Option<Ustr> {

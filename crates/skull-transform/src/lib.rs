@@ -1852,6 +1852,7 @@ pub(crate) fn value_operands(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
             p(capacity);
             columns.iter().flat_map(|(_, vs)| vs).for_each(&mut p)
         }
+        Inst::MakeVecColumnHeader { capacity, .. } => p(capacity),
         Inst::MakeStruct { fields, .. }
         | Inst::MakeValueStruct { fields, .. }
         | Inst::MaterializeValueStruct { fields, .. }
@@ -1914,6 +1915,7 @@ pub(crate) fn remap_inst(inst: &mut Inst, m: &impl Fn(Idx<Inst>) -> Idx<Inst>) {
             f(capacity);
             columns.iter_mut().flat_map(|(_, vs)| vs).for_each(&mut f)
         }
+        Inst::MakeVecColumnHeader { capacity, .. } => f(capacity),
         Inst::MakeStruct { fields, .. }
         | Inst::MakeValueStruct { fields, .. }
         | Inst::MaterializeValueStruct { fields, .. }

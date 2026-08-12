@@ -199,6 +199,7 @@ pub(crate) fn inst_uses(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
             push(*capacity);
             columns.iter().flat_map(|(_, vs)| vs).for_each(|&i| push(i));
         }
+        Inst::MakeVecColumnHeader { capacity, .. } => push(*capacity),
         Inst::MakeTuple(vs) | Inst::MakeVec(vs) => {
             vs.iter().for_each(|a| push(*a))
         }

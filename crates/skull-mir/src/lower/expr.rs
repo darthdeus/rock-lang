@@ -1443,6 +1443,7 @@ impl Builder<'_> {
         let capacity = self.emit_cur(Inst::Const(Lit::Int(elems.len() as i64)));
         Ok(self.emit_cur(Inst::MakeVecColumns {
             elem: elem.name,
+            nobox: elem.is_nobox(),
             columns,
             len: elems.len(),
             capacity,

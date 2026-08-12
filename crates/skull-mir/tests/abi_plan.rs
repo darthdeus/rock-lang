@@ -771,3 +771,28 @@ fn global_storage_uses_an_owned_value_plan() {
     assert_eq!(plan.use_context(), RepUse::Value);
     assert_eq!(plan.lanes(), 2, "the global plan must own both scalar leaves");
 }
+
+#[test]
+fn column_storage_mir_carries_the_owned_nobox_fact() {
+    let ws = ws_of(
+        r#"
+value V2 { x: float, y: float }
+nobox value NV2 { x: float, y: float }
+
+fn main() {
+    let ordinary: [V2] = []
+    ordinary.push(V2 { x: 1.0, y: 2.0 })
+    let marked: [NV2] = []
+    marked.push(NV2 { x: 3.0, y: 4.0 })
+}
+"#,
+    );
+    let main = func_ref(&ws, "main");
+    let (scx, bodies) = lower_test_roots(&ws, &[main]);
+    let mir = lower_test_root(&ws, &scx, &bodies, main);
+    let mut plans = std::collections::BTreeMap::new();
+    skull_mir::mir::column_elem_plans(&mir, &mut plans);
+    assert_eq!(plans.get(&Ustr::from("V2")), Some(&false));
+    assert_eq!(plans.get(&Ustr::from("NV2")), Some(&true));
+    assert!(plans.len() >= 2, "the column plan population must be nonzero");
+}

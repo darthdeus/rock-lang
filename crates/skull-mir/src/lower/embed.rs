@@ -244,7 +244,7 @@ impl Builder<'_> {
     /// sequence that lines up wrong. Rejecting loudly beats a silent
     /// misalignment; the shape has no in-tree instance today.
     pub(crate) fn nobox_embed_group_shape(&self, cname: Ustr) -> Option<ValueShape> {
-        if !is_nobox_nominal(self.ws, cname) || self.struct_has_flat_field(cname) {
+        if !self.is_nobox_struct(cname) || self.struct_has_flat_field(cname) {
             return None;
         }
         self.nominal_rep_shape(cname, true)

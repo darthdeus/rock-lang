@@ -4824,7 +4824,10 @@ fn mir_kind(inst: &Inst) -> &'static str {
         | Inst::CallValue { .. }
         | Inst::CallValueMulti { .. }
         | Inst::CallBoundMulti { .. } => "multi-value call",
-        Inst::MakeTuple(_) | Inst::MakeVec(_) | Inst::MakeVecColumns { .. } => "aggregate",
+        Inst::MakeTuple(_)
+        | Inst::MakeVec(_)
+        | Inst::MakeVecColumns { .. }
+        | Inst::MakeVecColumnHeader { .. } => "aggregate",
         Inst::MakeStruct { .. } | Inst::MakeEnum { .. } | Inst::MakeEnumDyn { .. } => {
             "heap aggregate"
         }

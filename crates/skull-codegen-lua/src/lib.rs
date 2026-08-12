@@ -1761,6 +1761,7 @@ impl Emitter<'_> {
                 columns,
                 len,
                 capacity,
+                ..
             } => {
                 out.push_str("{[");
                 write_lua_string(out, skull_mir::mir::VEC_COLUMN_HEADER_FIELD);
@@ -1779,6 +1780,15 @@ impl Emitter<'_> {
                     out.push_str("}, ");
                 }
                 let _ = write!(out, "len = {len}, __ty = \"Vec\"}}");
+            }
+            Inst::MakeVecColumnHeader { elem, capacity, .. } => {
+                out.push_str("{repr = ");
+                write_lua_string(out, skull_mir::mir::VEC_COLUMN_REPR);
+                out.push_str(", elem = ");
+                write_lua_string(out, elem.as_str());
+                out.push_str(", cap = ");
+                self.write_opnd(out, *capacity);
+                out.push('}');
             }
             Inst::MakeStruct { ty, fields } => {
                 out.push('{');

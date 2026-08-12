@@ -3773,6 +3773,7 @@ fn dispatched_sites(
     domain: &SiteDomain,
 ) -> Vec<(Site, &'static str)> {
     use bone_semantic::hir::{BinOp, Expr as E, InterpPart};
+    let rep_arena = RepArena::default();
     let dcx = skull_mir::lower::DispatchCtx {
         ws,
         inf: Some(inf),
@@ -3781,6 +3782,8 @@ fn dispatched_sites(
         concrete_types: None,
         concrete_type_cache: None,
         interner: None,
+        rep_arena: &rep_arena,
+        target: bone_semantic::hir::FnBackend::Any,
         logical_subst: Some(subst),
         values_first_class: false,
     };
