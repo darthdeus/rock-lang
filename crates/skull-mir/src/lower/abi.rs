@@ -657,15 +657,6 @@ pub struct BackendFnAbiPlan {
     /// body has a different ABI under `values_first_class` (GLSL) than under
     /// luajit, and `result_lanes` is a JS transport fact.
     pub target: FnBackend,
-    /// `None` when this body keeps the boxed ABI.
-    scalar: Option<FnScalarAbi>,
-    /// The declared return's tuple shape under this body's substitution. Read
-    /// by the definition and by every call, which each computed it separately.
-    ret_tuple: Option<TupleRetShape>,
-    /// Whether the declaration returns anything at all -- the one result-wire
-    /// fact no shape can carry, since both shapes answer `None` for a plain
-    /// scalar return and for no return.
-    has_return: bool,
     /// The physical function signature. Every call, entry binder, return
     /// lowerer, and publisher keeps these identities rather than rebuilding a
     /// shape from the declaration.
@@ -677,9 +668,6 @@ impl PartialEq for BackendFnAbiPlan {
     fn eq(&self, other: &Self) -> bool {
         self.subject == other.subject
             && self.target == other.target
-            && self.scalar == other.scalar
-            && self.ret_tuple == other.ret_tuple
-            && self.has_return == other.has_return
             && self.representation == other.representation
             && Arc::ptr_eq(&self.arena, &other.arena)
     }
@@ -799,9 +787,6 @@ impl BackendFnAbiPlan {
         Self {
             subject: inst.clone(),
             target: scx.target,
-            scalar,
-            ret_tuple,
-            has_return: plan.signature.result.is_some(),
             representation,
             arena,
         }
@@ -869,9 +854,6 @@ impl BackendFnAbiPlan {
         Self {
             subject,
             target: scx.target,
-            scalar,
-            ret_tuple,
-            has_return: f.return_ty.is_some(),
             representation,
             arena,
         }
