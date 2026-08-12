@@ -1328,8 +1328,6 @@ fn validate_explicit_interface(
     }
     if let Some(group) = &iface.textures {
         validate_texture_group(group, span)?;
-    } else {
-        return Err(err(span, "WGSL explicit projection requires a grouped texture input"));
     }
     Ok(())
 }

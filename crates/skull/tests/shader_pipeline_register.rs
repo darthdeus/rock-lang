@@ -409,6 +409,16 @@ fn sprite_batch_vert(@attr a: SpriteBatchVert) -> SpriteBatchVary {
 fn sprite_batch_frag(vary: SpriteBatchVary, @textures t: SpriteBatchTex) -> Vec4 {
     return texture(t.uTexture, vary.TexCoord)
 }
+value CustomVert { aPos: Vec2 }
+value CustomVary { position: Vec4, TexCoord: Vec2 }
+@shader(vertex)
+fn custom_vert(@attr a: CustomVert) -> CustomVary {
+    return CustomVary { position: v(a.aPos, 0.0, 1.0), TexCoord: a.aPos }
+}
+@shader(fragment)
+fn custom_frag(_vary: CustomVary) -> Vec4 {
+    return Vec4 { x: 1.0, y: 0.0, z: 1.0, w: 1.0 }
+}
 @shader(fragment)
 fn blit_frag(tc: Vec2) -> Vec4 { return Vec4 { x: shader_channel(tc.x), y: 0.0, z: 1.0, w: 1.0 } }
 @shader(fragment)
@@ -421,20 +431,21 @@ fn use_all() -> string {
     let b = rock_shader(present_frag)
     let c = rock_shader(tonemap_frag)
     let d = rock_shader(sprite_basic_vert, sprite_basic_frag)
-    return rock_shader(sprite_batch_vert, sprite_batch_frag)
+    let e = rock_shader(sprite_batch_vert, sprite_batch_frag)
+    return rock_shader(custom_vert, custom_frag)
 }
 "#;
 
 #[test]
-fn selected_wgpu_registration_is_exactly_the_five_selected_artifacts() {
+fn wgpu_registration_follows_graph_owned_shader_pairs() {
     let ws = ws_with_stdlib(WGPU_FULLSCREEN_SRC);
     let mid = test_mid(&ws);
     let (emit, _) = emit_full_in_for_renderer(&ws, mid, None, RendererTarget::Wgpu)
         .expect("selected artifacts emit");
     assert_eq!(
         emit.lua.matches("__rock_wgpu_shader_register(").count(),
-        5,
-        "the selected renderer admits a non-zero, exact WGSL artifact population"
+        6,
+        "the selected renderer admits every WGPU-compatible graph pair"
     );
     for root in [
         "blit_frag",
@@ -442,6 +453,7 @@ fn selected_wgpu_registration_is_exactly_the_five_selected_artifacts() {
         "tonemap_frag",
         "sprite_basic_vert+sprite_basic_frag",
         "sprite_batch_vert+sprite_batch_frag",
+        "custom_vert+custom_frag",
     ] {
         assert!(
             emit.lua.contains(&format!("__rock_wgpu_shader_register(\"{root}\"")),
@@ -456,7 +468,7 @@ fn selected_wgpu_planning_reads_the_exact_graph_instance_and_concrete_plan() {
     let mid = test_mid(&ws);
     let (emit, cache) = emit_full_in_for_renderer(&ws, mid, None, RendererTarget::Wgpu)
         .expect("selected artifacts emit");
-    assert_eq!(emit.lua.matches("__rock_wgpu_shader_register(").count(), 5);
+    assert_eq!(emit.lua.matches("__rock_wgpu_shader_register(").count(), 6);
 
     let blit = cache
         .shader_view()

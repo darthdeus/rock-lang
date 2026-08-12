@@ -2430,17 +2430,11 @@ fn graph_rejection_error(
 /// with the new source (the hot-reload-parity invariant). Deterministic
 /// sorted-by-key order (from `collect_shader_pairs`) keeps re-emission
 /// byte-identical. The driver realizes the graph-owned shader view and passes
-/// it to GLSL; skull-mir still surfaces only the resolved `FuncRef`s. An emit
-/// error (tier violation, stage/collision) is a spanned `CompilerError` failing
-/// the compile, never skip-and-continue.
-const WGSL_SELECTED_ARTIFACTS: [(&str, bool); 5] = [
-    ("blit_frag", true),
-    ("present_frag", true),
-    ("tonemap_frag", true),
-    ("sprite_basic_vert+sprite_basic_frag", false),
-    ("sprite_batch_vert+sprite_batch_frag", false),
-];
-
+/// it to GLSL; skull-mir still surfaces only the resolved `FuncRef`s. Selected
+/// WGPU projects every graph pair independently: GL registration remains
+/// unconditional, while a pair whose WGSL projection cannot represent its
+/// graph-owned interface is omitted from the WGPU artifact view and rejected
+/// by the runtime before effects.
 fn concrete_stage_input(
     view: &skull_graph::shader::ShaderStageView,
     concrete_plans: &std::sync::Arc<skull_mir::concrete::ConcretePlans>,
@@ -2531,96 +2525,80 @@ fn shader_registration_lines(
         .chain(compute_collection.entries.iter().map(|entry| entry.key.clone()))
         .collect();
     if renderer_target == RendererTarget::Wgpu && !collection.pairs.is_empty() {
-        let mut admitted = 0usize;
-        for (key, fullscreen) in WGSL_SELECTED_ARTIFACTS {
-            let Some(pair) = collection.pairs.iter().find(|pair| pair.key == key) else {
-                return Err(CompilerError::new_no_location(format!(
-                    "selected wgpu artifact {key} was not admitted by rock_shader"
-                )));
-            };
-            let program_view = view
-                .program_views
-                .iter()
-                .find(|candidate| {
-                    candidate.program.vert == pair.vert && candidate.program.frag == pair.frag
-                })
-                .ok_or_else(|| {
-                    CompilerError::new_no_location(format!(
-                        "selected wgpu artifact {key} has no graph-owned shader view"
+        for (pair, program_view) in collection.pairs.iter().zip(&view.program_views) {
+            let key = pair.key.as_str();
+            let fullscreen = pair.vert.is_none();
+            let emitted = (|| -> Result<(&str, String, String, String, Vec<FuncRef>), CompilerError> {
+                if fullscreen {
+                    let stage_view = program_view
+                        .stages
+                        .iter()
+                        .find(|stage| stage.stage == skull_mir::shader_ir::ShaderStage::Fragment)
+                        .ok_or_else(|| {
+                            CompilerError::new_no_location(format!(
+                                "wgsl artifact {key} has no fragment stage view"
+                            ))
+                        })?;
+                    let input = concrete_stage_input(stage_view, &program_view.concrete_plans);
+                    let neutral = skull_codegen_shader::plan_fullscreen_fragment_from_concrete(
+                        ws,
+                        scx,
+                        &input,
+                        &skull_codegen_wgsl::WgslShaderPolicy,
+                    )?;
+                    let abi = skull_codegen_wgsl::WgslAbiPlan::wgsl(
+                        &neutral.interface,
+                        bone_semantic::prelude::Span::default(),
+                    )?;
+                    let emission = skull_codegen_wgsl::emit_fullscreen_shader(
+                        ws,
+                        &neutral.ir,
+                        &neutral.interface,
+                        &abi,
+                        bone_semantic::prelude::Span::default(),
+                    )?;
+                    Ok((
+                        key,
+                        emission.source,
+                        emission.abi.wire(),
+                        neutral.interface.semantic_wire(true),
+                        emission.dependencies,
                     ))
-                })?;
-            let (shader_key, source, wire, semantic_wire, emission_dependencies) = if fullscreen {
-                if pair.vert.is_some() {
-                    return Err(CompilerError::new_no_location(format!(
-                        "selected wgpu artifact {key} is marked fullscreen but has an explicit vertex stage"
-                    )));
+                } else {
+                    let glsl = skull_codegen_glsl::emit_shader_pipeline_with_view(
+                        ws,
+                        scx,
+                        program_view,
+                        profile,
+                    )?;
+                    let abi = skull_codegen_wgsl::WgslAbiPlan::explicit(
+                        &glsl.interface,
+                        "vertex_main",
+                        "fragment_main",
+                        bone_semantic::prelude::Span::default(),
+                    )?;
+                    let emission = skull_codegen_wgsl::emit_explicit_shader(
+                        ws,
+                        &glsl.ir,
+                        &glsl.interface,
+                        &abi,
+                        bone_semantic::prelude::Span::default(),
+                    )?;
+                    Ok((
+                        key,
+                        emission.source,
+                        emission.abi.wire(),
+                        glsl.interface.semantic_wire(false),
+                        emission.dependencies,
+                    ))
                 }
-                let stage_view = program_view
-                    .stages
-                    .iter()
-                    .find(|stage| stage.stage == skull_mir::shader_ir::ShaderStage::Fragment)
-                    .ok_or_else(|| {
-                        CompilerError::new_no_location(format!(
-                            "selected wgpu artifact {key} has no fragment stage view"
-                        ))
-                    })?;
-                let input = concrete_stage_input(stage_view, &program_view.concrete_plans);
-                let neutral = skull_codegen_shader::plan_fullscreen_fragment_from_concrete(
-                    ws,
-                    scx,
-                    &input,
-                    &skull_codegen_wgsl::WgslShaderPolicy,
-                )?;
-                let abi = skull_codegen_wgsl::WgslAbiPlan::wgsl(
-                    &neutral.interface,
-                    bone_semantic::prelude::Span::default(),
-                )?;
-                let emission = skull_codegen_wgsl::emit_fullscreen_shader(
-                    ws,
-                    &neutral.ir,
-                    &neutral.interface,
-                    &abi,
-                    bone_semantic::prelude::Span::default(),
-                )?;
-                (
-                    key,
-                    emission.source,
-                    emission.abi.wire(),
-                    neutral.interface.semantic_wire(true),
-                    emission.dependencies,
-                )
-            } else {
-                if pair.vert.is_none() {
-                    return Err(CompilerError::new_no_location(format!(
-                        "selected wgpu artifact {key} has no explicit vertex stage"
-                    )));
+            })();
+            let (shader_key, source, wire, semantic_wire, emission_dependencies) = match emitted {
+                Ok(value) => value,
+                Err(error) => {
+                    eprintln!("wgsl artifact omitted for {key}: {error}");
+                    continue;
                 }
-                let glsl = skull_codegen_glsl::emit_shader_pipeline_with_view(
-                    ws,
-                    scx,
-                    program_view,
-                    profile,
-                )?;
-                let abi = skull_codegen_wgsl::WgslAbiPlan::explicit(
-                    &glsl.interface,
-                    "vertex_main",
-                    "fragment_main",
-                    bone_semantic::prelude::Span::default(),
-                )?;
-                let emission = skull_codegen_wgsl::emit_explicit_shader(
-                    ws,
-                    &glsl.ir,
-                    &glsl.interface,
-                    &abi,
-                    bone_semantic::prelude::Span::default(),
-                )?;
-                (
-                    key,
-                    emission.source,
-                    emission.abi.wire(),
-                    glsl.interface.semantic_wire(false),
-                    emission.dependencies,
-                )
             };
             dependencies.extend(emission_dependencies);
             abi_wires.insert(shader_key.to_string(), wire.clone());
@@ -2632,13 +2610,6 @@ fn shader_registration_lines(
                 skull_codegen_lua::lua_string(&wire),
                 skull_codegen_lua::lua_string(&semantic_wire),
             );
-            admitted += 1;
-        }
-        if admitted != WGSL_SELECTED_ARTIFACTS.len() {
-            return Err(CompilerError::new_no_location(format!(
-                "selected wgpu artifact registration admitted {admitted} artifacts, expected {}",
-                WGSL_SELECTED_ARTIFACTS.len()
-            )));
         }
     }
     if view.compute_views.len() != compute_collection.entries.len() {

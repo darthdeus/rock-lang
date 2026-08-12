@@ -114,6 +114,48 @@ fn selected_sprite_basic_pipeline_is_admitted_by_wgsl() {
     .expect("WGSL validates");
 }
 
+#[test]
+fn explicit_pipeline_without_texture_group_is_admitted_by_wgsl() {
+    let source = r#"
+value BareVert { aPos: Vec2 }
+value BareVary { position: Vec4, TexCoord: Vec2 }
+@shader(vertex)
+fn bare_vert(@attr a: BareVert) -> BareVary {
+    return BareVary { position: v(a.aPos, 0.0, 1.0), TexCoord: a.aPos }
+}
+@shader(fragment)
+fn bare_frag(_vary: BareVary) -> Vec4 {
+    return Vec4 { x: 1.0, y: 0.0, z: 1.0, w: 1.0 }
+}
+"#;
+    let (ws, mid) = workspace(source);
+    let glsl = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
+        &ws,
+        mid,
+        "bare_vert",
+        "bare_frag",
+        skull_codegen_glsl::GlslProfile::Core330,
+    )
+    .expect("the texture-free paired compiler plan");
+    let abi = WgslAbiPlan::explicit(
+        &glsl.interface,
+        "vertex_main",
+        "fragment_main",
+        Span::default(),
+    )
+    .expect("a texture-free explicit interface is admitted");
+    assert!(abi.textures.is_empty());
+    let artifact = skull_codegen_wgsl::emit_explicit_shader(
+        &ws,
+        &glsl.ir,
+        &glsl.interface,
+        &abi,
+        Span::default(),
+    )
+    .expect("a texture-free explicit shader emits WGSL");
+    naga_validate(&artifact.source);
+}
+
 // Mirrors rect_batch.rock's `Vertex`; rect_batch itself drags in `DepthMode`,
 // which this workspace's semantic pass cannot resolve.
 const SPRITE_BATCH_VERTEX: &str = "value Vertex { pos: Vec2, uv: Vec2, color: Vec4, pivot_y: float, entity_id: float }";
