@@ -20,8 +20,8 @@ use skull_mir::concrete::{ConcreteBodyPlan, ConcreteOwner, ConcreteSignature, Co
 use skull_mir::lower::{
     BackendFnAbiPlan, ContainerFamily, ContainerPlan, ContainerStorage, GlobalPlan, RepArena,
     RepGuarantees,
-    declared_boundary_class, boundary_requires_boxed_representation, BoundaryClass, EnumLayout,
-    EnumPlan, RepLayout, RepUse, RepUseFacts, ScalarCtx, ValueStorage,
+    bound_next_shape_from_concrete, declared_boundary_class, boundary_requires_boxed_representation,
+    BoundaryClass, EnumLayout, EnumPlan, RepLayout, RepUse, RepUseFacts, ScalarCtx, ValueStorage,
 };
 use skull_mir::mir::FuncRef;
 use skull_mir::monoty::{MonoCtor, MonoTy};
@@ -508,6 +508,20 @@ fn element_rep_plan_owns_ffi_column_admission() {
         !arena.get(enum_rep).column_eligible(),
         "the enum control must remain outside the value-struct column population"
     );
+}
+
+#[test]
+fn missing_bound_result_plan_is_an_explicit_error() {
+    let ws = ws_of("fn main() { print(\"ok\") }\n");
+    let scx = ScalarCtx::new(&ws);
+    let interner = skull_mir::monoty::MonoInterner::new();
+    let result = bound_next_shape_from_concrete(
+        &ws,
+        &scx,
+        &interner,
+        &ConcreteSignature::default(),
+    );
+    assert!(result.is_err(), "a missing concrete bound result must not become a no-op");
 }
 
 #[test]

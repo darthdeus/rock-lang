@@ -198,7 +198,7 @@ fn bound_next_shape_for_instance(
     interner: &MonoInterner,
     inst: &Instance,
     concrete_plans: &ConcretePlans,
-) -> Result<Option<skull_mir::lower::BoundNextShape>, CompilerError> {
+) -> Result<skull_mir::lower::BoundNextShape, CompilerError> {
     if !skull_mir::lower::requires_concrete_body_plan(ws, inst) {
         return Err(CompilerError::new_no_location(
             "internal: a bound witness resolved to an opaque boundary without a concrete result shape",
@@ -210,7 +210,8 @@ fn bound_next_shape_for_instance(
             inst.func.func.into_raw().into_u32()
         ))
     })?;
-    Ok(bound_next_shape_from_concrete(ws, scx, interner, &plan.signature))
+    bound_next_shape_from_concrete(ws, scx, interner, &plan.signature)
+        .map_err(|error| CompilerError::new_no_location(error.message))
 }
 
 /// The lowering already split this placeholder's element into leaf cells, so
@@ -231,9 +232,7 @@ fn check_bound_next_split(
     inst: &Instance,
     concrete_plans: &ConcretePlans,
 ) -> Result<(), CompilerError> {
-    let Some(shape) = bound_next_shape_for_instance(ws, scx, interner, inst, concrete_plans)? else {
-        return Ok(());
-    };
+    let shape = bound_next_shape_for_instance(ws, scx, interner, inst, concrete_plans)?;
     let Inst::CallMulti { dests, .. } = &func.insts[call] else {
         return Ok(());
     };
@@ -267,9 +266,7 @@ fn repack_bound_next_element(
     inst: &Instance,
     concrete_plans: &ConcretePlans,
 ) -> Result<(), CompilerError> {
-    let Some(shape) = bound_next_shape_for_instance(ws, scx, interner, inst, concrete_plans)? else {
-        return Ok(());
-    };
+    let shape = bound_next_shape_for_instance(ws, scx, interner, inst, concrete_plans)?;
     let Inst::CallMulti { dests, .. } = &func.insts[call] else {
         return Ok(());
     };

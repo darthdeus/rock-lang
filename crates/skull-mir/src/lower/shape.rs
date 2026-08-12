@@ -1994,8 +1994,11 @@ pub fn bound_next_shape_from_concrete(
     scx: &ScalarCtx,
     interner: &crate::monoty::MonoInterner,
     signature: &ConcreteSignature,
-) -> Option<BoundNextShape> {
-    let result = signature.result.map(|id| interner.get(id))?;
+) -> Result<BoundNextShape, RepError> {
+    let result = signature.result.map(|id| interner.get(id)).ok_or_else(|| RepError {
+        span: None,
+        message: "a concrete bound witness has no result type".into(),
+    })?;
     let id = scx
         .rep_arena()
         .plan(
@@ -2006,17 +2009,28 @@ pub fn bound_next_shape_from_concrete(
             &RepUseFacts { tuple_spelled: true, span: None },
             RepGuarantees { nobox: true, allow_opaque: true },
         )
-        .ok()?;
-    let shape = scx.rep_arena().tuple_shape(id)?;
+        ?;
+    let shape = scx.rep_arena().tuple_shape(id).ok_or_else(|| RepError {
+        span: None,
+        message: format!("bound witness result `{}` has no tuple return plan", result.render()),
+    })?;
     bound_next_shape_from_tuple(shape)
 }
 
-fn bound_next_shape_from_tuple(shape: TupleRetShape) -> Option<BoundNextShape> {
+fn bound_next_shape_from_tuple(shape: TupleRetShape) -> Result<BoundNextShape, RepError> {
     // The element is slot 1 alone, or slots 1.. as a tuple -- the same pairing
     // `lower_for_user_iter` makes when it binds the pattern, so the two paths
     // cannot disagree about what the element IS.
-    let elem_slot = match shape.slots.get(1..)? {
-        [] => return None,
+    let elem_slot = match shape.slots.get(1..).ok_or_else(|| RepError {
+        span: None,
+        message: "bound witness return plan has no success flag and element slots".into(),
+    })? {
+        [] => {
+            return Err(RepError {
+                span: None,
+                message: "bound witness return plan has no element slot".into(),
+            })
+        }
         [one] => one.clone(),
         rest => RetSlot::Nested(TupleRetShape { slots: rest.to_vec(), nullable: false }),
     };
@@ -2028,7 +2042,7 @@ fn bound_next_shape_from_tuple(shape: TupleRetShape) -> Option<BoundNextShape> {
     } else {
         BoundNextElem::Opaque
     };
-    Some(BoundNextShape { slot_count: shape.slot_count(), elem })
+    Ok(BoundNextShape { slot_count: shape.slot_count(), elem })
 }
 
 /// Cdata enum shape: an enum whose every variant is `Unit` or a positional TUPLE
