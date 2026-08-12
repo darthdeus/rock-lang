@@ -775,8 +775,16 @@ function __sw_sdl_keycode(e) {
   return 0;
 }
 
-function __sw_push_event(type, key, btn, x, y) {
-  __SW.events.push({ type: type, key: key, mouse_button: btn, mouse_x: x, mouse_y: y });
+function __sw_push_event(type, key, btn, x, y, scancode, modifiers, repeat) {
+  __SW.events.push({
+    type: type, key: key, scancode: scancode || 0, modifiers: modifiers || 0,
+    repeat: !!repeat, mouse_button: btn, mouse_x: x, mouse_y: y
+  });
+}
+
+function __sw_key_modifiers(e) {
+  return (e.ctrlKey ? 1 : 0) | (e.shiftKey ? 2 : 0) |
+    (e.altKey ? 4 : 0) | (e.metaKey ? 8 : 0);
 }
 
 // Mirror of lib.rock sdl_keycode_to_string: the polled key-state map is keyed by
@@ -873,11 +881,18 @@ function stone_create_window_ex(title, x, y, width, height, display, resizable, 
 
   window.addEventListener("keydown", function (e) {
     var kc = __sw_sdl_keycode(e);
-    if (kc !== 0) { __SW.keysDown[__sw_keycode_to_string(kc)] = true; __sw_push_event(2, kc, 0, 0, 0); e.preventDefault(); }
+    if (kc !== 0) {
+      __SW.keysDown[__sw_keycode_to_string(kc)] = true;
+      __sw_push_event(2, kc, 0, 0, 0, 0, __sw_key_modifiers(e), e.repeat);
+      e.preventDefault();
+    }
   });
   window.addEventListener("keyup", function (e) {
     var kc = __sw_sdl_keycode(e);
-    if (kc !== 0) { __SW.keysDown[__sw_keycode_to_string(kc)] = false; __sw_push_event(3, kc, 0, 0, 0); }
+    if (kc !== 0) {
+      __SW.keysDown[__sw_keycode_to_string(kc)] = false;
+      __sw_push_event(3, kc, 0, 0, 0, 0, __sw_key_modifiers(e), e.repeat);
+    }
   });
   canvas.addEventListener("mousemove", function (e) {
     var r = canvas.getBoundingClientRect();
@@ -940,7 +955,8 @@ function stone_poll_event(ev) {
   if (q.length === 0) return false;
   var e = q.shift();
   ev.type = e.type; ev.key = e.key; ev.mouse_button = e.mouse_button;
-  ev.mouse_x = e.mouse_x; ev.mouse_y = e.mouse_y;
+  ev.scancode = e.scancode || 0; ev.modifiers = e.modifiers || 0;
+  ev.repeat = !!e.repeat; ev.mouse_x = e.mouse_x; ev.mouse_y = e.mouse_y;
   return true;
 }
 function stone_get_mouse_position(px, py) { px[0] = Math.round(__SW.mouseX); py[0] = Math.round(__SW.mouseY); }
