@@ -3042,21 +3042,8 @@ fn assemble_program_core(
             // body's `spec_bindings` as demands -- so a specialization a deco
             // body was the only caller of was never queued, and the call site
             // spelled a name nothing emitted.
-            let incoming = concrete_plan
-                .expect("a lowered decorator has a concrete plan")
-                .bound_tree
-                .clone();
-            let ctx = skull_mir::bound::concrete_body_ctx(
-                ws,
-                module.id,
-                bone_semantic::hir::BodyOwner::Decorator(did),
-                &incoming,
-                scx.interner(),
-            );
             let mut findings: Vec<CompilerError> = Vec::new();
-            findings.extend(
-                JsDelivery { ws, scx, st: &mut st }.schedule_body(&ctx, &mf)?,
-            );
+            findings.extend(JsDelivery { ws, scx, st: &mut st }.schedule_body(&mf)?);
             match merge_findings(findings) {
                 Some(e) => st.reject(&deco_name, e),
                 None => deco_bodies.push((deco_name, mf)),
@@ -3855,13 +3842,12 @@ fn register_statics(mf: &MirFunc, gctx: &mut GlobalCtx) {
 /// lambda is its own emitted callable and its residual bindings are its own.
 fn collect_spec_bound_calls(
     ws: &Workspace,
-    ctx: &skull_mir::bound::BoundCtx,
     mf: &MirFunc,
     out: &mut Vec<skull_mir::bound::SpecDemand>,
 ) -> Result<(), CompilerError> {
-    skull_mir::reach::spec_bound_calls(ws, ctx, mf, out)?;
+    skull_mir::reach::spec_bound_calls(ws, mf, out)?;
     for nf in &mf.nested_fns {
-        collect_spec_bound_calls(ws, ctx, nf, out)?;
+        collect_spec_bound_calls(ws, nf, out)?;
     }
     Ok(())
 }
@@ -3936,15 +3922,7 @@ impl JsDelivery<'_> {
         for nf in &mf.nested_fns {
             collect(&mut findings, nobox_errs(self.ws, nf));
         }
-        let incoming = plan.bound_tree.clone();
-        let ctx = skull_mir::bound::concrete_body_ctx(
-            self.ws,
-            fr.module,
-            bone_semantic::hir::BodyOwner::Function(fr.func),
-            &incoming,
-            self.scx.interner(),
-        );
-        findings.extend(self.schedule_body(&ctx, &mf)?);
+        findings.extend(self.schedule_body(&mf)?);
         match merge_findings(findings) {
             Some(e) => self.st.reject(&name, e),
             None => self.st.lowered.push((fr, mf)),
@@ -4092,14 +4070,7 @@ impl JsDelivery<'_> {
         }
         mf.name = ustr::Ustr::from(name.as_str());
         self.st.names.insert(inst.clone(), name.clone());
-        let ctx = skull_mir::bound::concrete_body_ctx(
-            self.ws,
-            fr.module,
-            bone_semantic::hir::BodyOwner::Function(fr.func),
-            &tree,
-            self.scx.interner(),
-        );
-        findings.extend(self.schedule_body(&ctx, &mf)?);
+        findings.extend(self.schedule_body(&mf)?);
         match merge_findings(findings) {
             Some(e) => self.st.reject(&name, e),
             None => self.st.spec_lowered.push((inst, mf)),
@@ -4154,18 +4125,7 @@ impl JsDelivery<'_> {
         for nf in &mf.nested_fns {
             collect(&mut findings, nobox_errs(self.ws, nf));
         }
-        let incoming = concrete_plan
-            .expect("a lowered global has a concrete plan")
-            .bound_tree
-            .clone();
-        let ctx = skull_mir::bound::concrete_body_ctx(
-            self.ws,
-            site.module,
-            bone_semantic::hir::BodyOwner::Global(site.gid),
-            &incoming,
-            self.scx.interner(),
-        );
-        findings.extend(self.schedule_body(&ctx, &mf)?);
+        findings.extend(self.schedule_body(&mf)?);
         if let Some(e) = merge_findings(findings) {
             self.st.reject(&init_name, e);
             return Ok(());
@@ -4197,7 +4157,6 @@ impl JsDelivery<'_> {
     /// skips, so it aborts the emission immediately as before.
     fn schedule_body(
         &mut self,
-        ctx: &skull_mir::bound::BoundCtx,
         mf: &MirFunc,
     ) -> Result<Vec<CompilerError>, CompilerError> {
         let ws = self.ws;
@@ -4205,7 +4164,7 @@ impl JsDelivery<'_> {
         register_statics(mf, &mut st.gctx);
         let mut findings = Vec::new();
         let mut demands = Vec::new();
-        collect(&mut findings, collect_spec_bound_calls(ws, ctx, mf, &mut demands));
+        collect(&mut findings, collect_spec_bound_calls(ws, mf, &mut demands));
         for demand in demands {
             if st.bound_tree_disagreements.contains(&demand.inst) {
                 let f = &ws.module(demand.inst.func.module).functions[demand.inst.func.func];

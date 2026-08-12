@@ -1829,7 +1829,7 @@ impl Builder<'_> {
             concrete_types: self.concrete_plan.domain_types(&self.cur_domain),
             concrete_type_cache: Some(&self.concrete_type_cache),
             interner: Some(self.scx.interner()),
-            legacy_subst: None,
+            logical_subst: None,
             values_first_class: self.scx.values_first_class,
         }
     }

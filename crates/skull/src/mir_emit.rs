@@ -2068,7 +2068,7 @@ fn validate_emitted_body(
     // A demand this body cannot state in self-contained terms is a rejection,
     // not a demand that is quietly dropped: the callee would then be reached by
     // nothing and its call site would spell a definition the program lacks.
-    if let Err(e) = skull_mir::reach::spec_bound_calls(ws, ctx, mf, specs) {
+    if let Err(e) = skull_mir::reach::spec_bound_calls(ws, mf, specs) {
         acc.absorb(BodyRejection::gap(e.message));
     }
     if let Err(r) = validate_no_whole_element_column_access(mf).map_err(BodyRejection::gap) {

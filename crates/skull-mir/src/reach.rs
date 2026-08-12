@@ -279,7 +279,6 @@ pub fn call_targets(mf: &MirFunc) -> Vec<FuncRef> {
 /// stated in this body's `TyId`s and means nothing anywhere else.
 pub fn spec_bound_calls(
     ws: &bone_semantic::inference::Workspace,
-    ctx: &crate::bound::BoundCtx,
     mf: &MirFunc,
     out: &mut Vec<crate::bound::SpecDemand>,
 ) -> Result<(), CompilerError> {
@@ -315,25 +314,12 @@ pub fn spec_bound_calls(
             let raw = mf.bound_trees.get(&iid).unwrap_or(&empty);
             let tree = match mf.resolved_bound_trees.get(&iid) {
                 Some(t) => t.clone(),
-                None if ctx.is_concrete() && !raw.is_empty() => {
+                None if !raw.is_empty() => {
                     return Err(CompilerError::new_no_location(
                         "concrete specialized call has no resolved bound plan".to_string(),
                     ));
                 }
-                None if ctx.is_concrete() => empty_resolved.clone(),
-                None => {
-                    let subst = ctx
-                        .legacy_subst()
-                        .expect("legacy bound context has a substitution");
-                    crate::bound::resolve_bound_tree(
-                        ws,
-                        ctx.interner,
-                        ctx.inf,
-                        subst,
-                        raw,
-                        ctx.incoming,
-                    )?
-                }
+                None => empty_resolved.clone(),
             };
             out.push(crate::bound::SpecDemand { inst: inst.clone(), tree });
         }
