@@ -3808,7 +3808,7 @@ fn emit_inline_js_fn(
     // `<name>__<leaf>` scalars, same as the lua path, so the exploded call
     // sites and the raw body's leaf names agree.
     let selected = Instance { func: fr, args: instance.args.clone() };
-    let abi = skull_mir::lower::BackendFnAbiPlan::for_instance(ws, scx, &selected);
+    let abi = skull_mir::lower::BackendFnAbiPlan::for_boundary_instance(ws, scx, &selected);
     let lua_param_names = abi.lua_param_names(ws);
     let params = match &lua_param_names {
         Some(names) => names.join(", "),
@@ -4414,25 +4414,36 @@ fn check_scalar_abi(
                     .get(&body)
                     .map(|decl| Instance { func: *decl, args: body.args.clone() });
                 let selected_sibling = selected.as_ref().is_some_and(|inst| inst.func != body.func);
-                let abi = if selected_sibling {
-                    None
-                } else {
-                    concrete.get(&body).or_else(|| {
-                        selected
-                            .as_ref()
-                            .and_then(|inst| concrete.get(inst))
-                    })
-                };
+                let abi = concrete.get(&body).or_else(|| {
+                    selected
+                        .as_ref()
+                        .and_then(|inst| concrete.get(inst))
+                });
                 let required = match abi {
                     Some(plan) => {
-                        let abi = skull_mir::lower::BackendFnAbiPlan::for_concrete_plan(
-                            ws, scx, plan,
-                        );
+                        let abi = if selected_sibling {
+                            let selected = selected.as_ref().expect("selected sibling was checked above");
+                            skull_mir::lower::BackendFnAbiPlan::for_concrete_signature(
+                                ws,
+                                scx,
+                                selected,
+                                &plan.signature,
+                            )
+                        } else {
+                            skull_mir::lower::BackendFnAbiPlan::for_concrete_plan(ws, scx, plan)
+                        };
                         required_arg_count(ws, &abi, arity)
                     }
                     None if selected_sibling => {
                         let selected = selected.expect("selected sibling was checked above");
-                        let abi = skull_mir::lower::BackendFnAbiPlan::for_instance(
+                        if skull_mir::lower::requires_concrete_body_plan(ws, &selected) {
+                            findings.push(err(format!(
+                                "JS subset: no concrete ABI signature for selected {what}`{}`",
+                                ws.module(callee.module).functions[callee.func].name,
+                            )));
+                            continue;
+                        }
+                        let abi = skull_mir::lower::BackendFnAbiPlan::for_boundary_instance(
                             ws, scx, &selected,
                         );
                         required_arg_count(ws, &abi, arity)
@@ -4445,7 +4456,9 @@ fn check_scalar_abi(
                         continue;
                     }
                     None => {
-                        let abi = skull_mir::lower::BackendFnAbiPlan::for_instance(ws, scx, &body);
+                        let abi = skull_mir::lower::BackendFnAbiPlan::for_boundary_instance(
+                            ws, scx, &body,
+                        );
                         required_arg_count(ws, &abi, arity)
                     }
                 };

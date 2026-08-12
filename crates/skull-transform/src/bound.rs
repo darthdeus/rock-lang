@@ -185,7 +185,7 @@ fn substitute_bound_call_inner(
     let abi = match concrete_plans {
         Some(plans) => {
             if !skull_mir::lower::requires_concrete_body_plan(ws, &owner) {
-                skull_mir::lower::BackendFnAbiPlan::for_instance(ws, scx, &owner)
+                skull_mir::lower::BackendFnAbiPlan::for_boundary_instance(ws, scx, &owner)
             } else {
                 let plan = plans.get(&owner).ok_or_else(|| {
                     CompilerError::new_no_location(format!(
@@ -196,7 +196,12 @@ fn substitute_bound_call_inner(
                 skull_mir::lower::BackendFnAbiPlan::for_concrete_plan(ws, scx, plan)
             }
         }
-        None => skull_mir::lower::BackendFnAbiPlan::for_instance(ws, scx, &owner),
+        None if skull_mir::lower::requires_concrete_body_plan(ws, &owner) => {
+            return Err(CompilerError::new_no_location(
+                "internal: concrete bound callee has no concrete ABI plan".to_string(),
+            ));
+        }
+        None => skull_mir::lower::BackendFnAbiPlan::for_boundary_instance(ws, scx, &owner),
     };
     func.call_abi_plans.insert(call, abi);
     if !owner.args.is_empty() {

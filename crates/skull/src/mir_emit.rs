@@ -2929,7 +2929,7 @@ fn assemble(
                 // value-returning bodyless-`return` and prepending default fills.
                 // (Js inline bodies were skipped above via the backend guard.)
                 let name = mangle_fn(ws, f);
-                let params = match skull_mir::lower::BackendFnAbiPlan::for_declaration(ws, scx, self_ref)
+                let params = match skull_mir::lower::BackendFnAbiPlan::for_boundary_declaration(ws, scx, self_ref)
                     .lua_param_names(ws)
                 {
                     Some(names) => names.join(", "),

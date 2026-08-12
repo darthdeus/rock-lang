@@ -110,37 +110,34 @@ fn main() {
 }
 ";
 
-/// The two emitted bodies of one generic declaration have DIFFERENT ABIs, and
-/// the oracle answers for whichever one is being emitted.
-///
-/// The declaration arm is the admission control: it must keep answering the
-/// unsubstituted boxed ABI, so a plan that simply always specialized would fail
-/// here rather than look like success.
+/// A generic call is planned from the concrete instance that the graph retained;
+/// there is no declaration-shaped shared body left to supply a second ABI.
 #[test]
-fn an_emitted_body_states_its_own_abi() {
+fn a_concrete_generic_body_states_its_owned_abi() {
     let ws = ws_of(SRC);
-    let scx = ScalarCtx::new(&ws);
     let ident = func_ref(&ws, "ident");
-
-    // The declaration's own non-generic instance: no substitution, so the
-    // declared `T` stays one boxed slot. This is the arm that would go red if a
-    // plan simply always specialized.
-    let shared = BackendFnAbiPlan::for_instance(&ws, &scx, &Instance::base(ident));
-    assert_eq!(shared.param_leaf_widths(), None, "an unsubstituted `T` is one boxed slot");
-    assert_eq!(shared.result_lanes(), 1);
-
-    let key: Vec<MonoTy> = vec![nominal("V2")];
-    let spec = BackendFnAbiPlan::for_instance(
-        &ws,
-        &scx,
-        &Instance::intern(scx.interner(), ident, key),
-    );
+    let main = func_ref(&ws, "main");
+    let (scx, bodies) = lower_test_roots(&ws, &[main]);
+    let (_, concrete) = bodies
+        .plans
+        .iter()
+        .find(|(instance, _)| instance.func == ident && !instance.args.is_empty())
+        .expect("the graph must retain ident<V2>");
+    let spec = BackendFnAbiPlan::for_concrete_plan(&ws, &scx, concrete);
     assert_eq!(
         spec.param_leaf_widths(),
         Some(vec![2]),
         "`ident<V2>` takes V2's two float leaves"
     );
     assert_eq!(spec.result_lanes(), 2, "and returns them on two lanes");
+    let caller = lower_test_root(&ws, &scx, &bodies, main);
+    let concrete_instance = concrete.function_instance().expect("function concrete owner");
+    let call = caller
+        .call_abi_plans
+        .values()
+        .find(|plan| plan.subject == *concrete_instance)
+        .expect("the direct call must retain ident<V2>'s ABI plan");
+    assert_eq!(call, &spec, "the generic call must consume ident<V2>'s owned plan");
 }
 
 /// The control: a non-generic declaration has exactly one emitted body, and the
@@ -149,10 +146,14 @@ fn an_emitted_body_states_its_own_abi() {
 #[test]
 fn a_non_generic_body_states_its_abi_on_its_base_instance() {
     let ws = ws_of(SRC);
-    let scx = ScalarCtx::new(&ws);
     let shift = func_ref(&ws, "shift");
 
-    let plan = BackendFnAbiPlan::for_instance(&ws, &scx, &Instance::base(shift));
+    let (scx, bodies) = lower_test_roots(&ws, &[shift]);
+    let concrete = bodies
+        .plans
+        .get(&Instance::base(shift))
+        .expect("the graph must retain shift's concrete body");
+    let plan = BackendFnAbiPlan::for_concrete_plan(&ws, &scx, concrete);
     assert_eq!(plan.param_leaf_widths(), Some(vec![2]));
     assert_eq!(plan.result_lanes(), 2);
 }
@@ -288,34 +289,59 @@ fn main() {
 
 "#,
     );
-    let scx = ScalarCtx::new(&ws);
+    let main = func_ref(&ws, "main");
+    let (scx, bodies) = lower_test_roots(&ws, &[main]);
+    let caller = lower_test_root(&ws, &scx, &bodies, main);
     let cases = ["scalar", "nested", "tuple", "nullable", "boxed"];
     assert_eq!(cases.len(), 5, "the RED population must remain nonzero");
 
     for name in cases {
         let subject = Instance::base(func_ref(&ws, name));
-        let body = BackendFnAbiPlan::for_instance(&ws, &scx, &subject);
-        let call = BackendFnAbiPlan::for_instance(&ws, &scx, &subject);
+        let concrete = bodies
+            .plans
+            .get(&subject)
+            .unwrap_or_else(|| panic!("the graph must retain {name}'s concrete body"));
+        let owned = BackendFnAbiPlan::for_concrete_plan(&ws, &scx, concrete);
+        let entry = lower_test_root(&ws, &scx, &bodies, subject.func);
+        let body = entry.abi_plan.as_ref().expect("callee entry must retain its ABI plan");
+        let call = caller
+            .call_abi_plans
+            .values()
+            .find(|plan| plan.subject == subject)
+            .unwrap_or_else(|| panic!("caller must retain {name}'s concrete ABI plan"));
 
         assert_eq!(
-            body.representation(),
-            call.representation(),
+            &owned,
+            body,
+            "body entry must consume the owned representation for {name}"
+        );
+        assert_eq!(
+            &owned,
+            call,
             "call and callee entry must consume one owned representation for {name}"
         );
         assert_eq!(
-            body.representation().result(),
-            body.representation().publisher_result(),
+            owned.representation().result(),
+            owned.representation().publisher_result(),
             "return lowering and the backend publisher must read the same result plan for {name}"
         );
         assert_eq!(
-            body.representation().return_lanes(),
-            body.result_lanes(),
+            owned.representation().return_lanes(),
+            owned.result_lanes(),
             "publisher lane sizing must be derived from the owned result plan for {name}"
         );
     }
 
-    let scalar = BackendFnAbiPlan::for_instance(&ws, &scx, &Instance::base(func_ref(&ws, "nested")));
-    let boxed = BackendFnAbiPlan::for_instance(&ws, &scx, &Instance::base(func_ref(&ws, "boxed")));
+    let scalar = caller
+        .call_abi_plans
+        .values()
+        .find(|plan| plan.subject.func == func_ref(&ws, "nested"))
+        .expect("nested call ABI");
+    let boxed = caller
+        .call_abi_plans
+        .values()
+        .find(|plan| plan.subject.func == func_ref(&ws, "boxed"))
+        .expect("boxed call ABI");
     assert!(scalar.param_leaf_widths().is_some(), "nested aggregate must use a scalar representation");
     assert!(
         boxed.param_leaf_widths().is_none(),
@@ -323,13 +349,21 @@ fn main() {
         boxed.param_leaf_widths()
     );
     assert!(
-        BackendFnAbiPlan::for_instance(&ws, &scx, &Instance::base(func_ref(&ws, "tuple")))
+        caller
+            .call_abi_plans
+            .values()
+            .find(|plan| plan.subject.func == func_ref(&ws, "tuple"))
+            .expect("tuple call ABI")
             .result_lanes()
             > 1,
         "tuple return must have multiple physical lanes"
     );
     assert_eq!(
-        BackendFnAbiPlan::for_instance(&ws, &scx, &Instance::base(func_ref(&ws, "tuple")))
+        caller
+            .call_abi_plans
+            .values()
+            .find(|plan| plan.subject.func == func_ref(&ws, "tuple"))
+            .expect("tuple call ABI")
             .param_leaf_widths(),
         Some(vec![3]),
         "the declaration-spelled tuple parameter must use its owned leaf plan"
@@ -368,12 +402,12 @@ fn main() {
 }
 "#,
     );
-    let scx = ScalarCtx::new(&ws);
-    let nested = BackendFnAbiPlan::for_instance(
-        &ws,
-        &scx,
-        &Instance::base(func_ref(&ws, "nested")),
-    );
+    let apply = func_ref(&ws, "apply");
+    let nested_func = func_ref(&ws, "nested");
+    let (scx, bodies) = lower_test_roots(&ws, &[apply, nested_func]);
+    let nested_instance = Instance::base(nested_func);
+    let nested_plan = bodies.plans.get(&nested_instance).expect("nested concrete plan");
+    let nested = BackendFnAbiPlan::for_concrete_plan(&ws, &scx, nested_plan);
     let leaf = nominal("Leaf");
     let fn_value = BackendFnAbiPlan::for_function_value(
         &ws,
@@ -391,8 +425,6 @@ fn main() {
         nested.representation().result(),
         "an indirect caller must use the callee's result RepId"
     );
-    let apply = func_ref(&ws, "apply");
-    let (scx, bodies) = lower_test_roots(&ws, &[apply, func_ref(&ws, "nested")]);
     let lowered = lower_test_root(&ws, &scx, &bodies, apply);
     let call = lowered.insts.iter().find_map(|(_, inst)| match inst {
         skull_mir::mir::Inst::CallValueMulti { args, .. } => Some(args.len()),
@@ -504,6 +536,22 @@ fn main() { print("{boxed(1)} {scalar(2)}") }
     assert_eq!(declared_boundary_class(scalar), Some(BoundaryClass::InlineBody));
     assert!(boundary_requires_boxed_representation(boxed));
     assert!(!boundary_requires_boxed_representation(scalar));
+}
+
+#[test]
+fn an_opaque_boundary_uses_an_explicit_boundary_abi_plan() {
+    let ws = ws_of(
+        r#"
+nobox value V2 { x: float, y: float }
+@scalar_abi inline(lua) fn boundary(v: V2) -> V2 = "return v"
+fn main() { boundary(V2 { x: 1.0, y: 2.0 }) }
+"#,
+    );
+    let scx = ScalarCtx::new(&ws);
+    let boundary = Instance::base(func_ref(&ws, "boundary"));
+    let abi = BackendFnAbiPlan::for_boundary_instance(&ws, &scx, &boundary);
+    assert_eq!(abi.param_leaf_widths(), Some(vec![2]));
+    assert_eq!(abi.result_lanes(), 2);
 }
 
 #[test]

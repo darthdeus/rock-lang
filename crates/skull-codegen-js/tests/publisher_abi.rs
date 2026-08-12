@@ -60,7 +60,7 @@ fn lanes(src: &str, name: &str) -> usize {
         .find(|(_, f)| f.name.as_str() == name)
         .map(|(fid, _)| fid)
         .expect("fn");
-    skull_mir::lower::BackendFnAbiPlan::for_declaration(
+    skull_mir::lower::BackendFnAbiPlan::for_boundary_declaration(
         &ws,
         &scx,
         FuncRef { module: mid, func: fid },

@@ -679,11 +679,10 @@ impl Builder<'_> {
         {
             return Ok(None);
         }
-        let Ok(func) = self.resolve_funcref(e, name) else { return Ok(None) };
         // The CALLEE's instantiation, via the same oracle `lower_call` uses --
         // not the enclosing body's `spec_subst`, which is empty in a
         // non-generic caller and left every slot `Opaque`.
-        let Some(shape) = self.call_ret_tuple_shape(e, func)? else { return Ok(None) };
+        let Some(shape) = self.call_ret_tuple_shape(e)? else { return Ok(None) };
         Ok(shape.nullable.then_some(shape))
     }
 

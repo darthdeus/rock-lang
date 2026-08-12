@@ -28,7 +28,7 @@ use bone_semantic::prelude::Span;
 use ustr::Ustr;
 
 use super::{slot_param_names, value_storage_for_nominal, RetSlot, ScalarCtx, SpecSubst, TupleRetShape, ValueShape, ValueStorage};
-use crate::concrete::ConcreteBodyPlan;
+use crate::concrete::{ConcreteBodyPlan, ConcreteSignature};
 use crate::mir::FuncRef;
 
 /// The one declaration-level classification shared by the instance graph,
@@ -898,15 +898,14 @@ impl PartialEq for BackendFnAbiPlan {
 
 impl Eq for BackendFnAbiPlan {}
 
-fn concrete_abi_mode(
+fn concrete_abi_mode_for_instance(
     ws: &Workspace,
     scx: &ScalarCtx,
-    plan: &ConcreteBodyPlan,
+    inst: &crate::instance::Instance,
 ) -> Option<ConcreteAbiMode> {
     if scx.values_first_class {
         return None;
     }
-    let inst = plan.function_instance()?;
     let f = &ws.module(inst.func.module).functions[inst.func.func];
     if f.is_extern {
         return None;
@@ -934,14 +933,13 @@ struct ConcreteAbiMode {
 }
 
 impl BackendFnAbiPlan {
-    /// **THE constructor: one plan per (execution target, concrete body).**
+    /// ABI for an explicit opaque boundary instance.
     ///
-    /// Every definition and every call that targets it reaches this with the
-    /// SAME [`Instance`], which is what makes the caller's argument splat and
-    /// the callee's parameter list one derivation rather than two.
-    ///
-    /// [`Instance`]: crate::instance::Instance
-    pub fn for_instance(
+    /// A boundary has no `ConcreteBodyPlan`, but its target-specific transport
+    /// still belongs to the same RepPlan arena. Keeping this entry named for the
+    /// boundary makes it impossible to mistake declaration substitution for a
+    /// Rock-body planning path.
+    pub fn for_boundary_instance(
         ws: &Workspace,
         scx: &ScalarCtx,
         inst: &crate::instance::Instance,
@@ -960,21 +958,33 @@ impl BackendFnAbiPlan {
         let inst = plan
             .function_instance()
             .expect("a function ABI plan needs an ordinary concrete owner");
-        let mode = concrete_abi_mode(ws, scx, plan);
-        let params = plan
-            .signature
+        Self::for_concrete_signature(ws, scx, inst, &plan.signature)
+    }
+
+    /// Build an ABI from a concrete signature owned by a target-selected
+    /// declaration. This covers backend siblings whose body is selected by the
+    /// artifact but whose logical signature was recorded on the canonical graph
+    /// instance.
+    pub fn for_concrete_signature(
+        ws: &Workspace,
+        scx: &ScalarCtx,
+        inst: &crate::instance::Instance,
+        signature: &ConcreteSignature,
+    ) -> Self {
+        let mode = concrete_abi_mode_for_instance(ws, scx, inst);
+        let params = signature
             .params
             .iter()
             .map(|id| scx.interner().get(*id))
             .collect::<Vec<_>>();
-        let result_ty = plan.signature.result.map(|id| scx.interner().get(id));
+        let result_ty = signature.result.map(|id| scx.interner().get(id));
         let arena = scx.rep_arena();
         let representation = arena.function_from_concrete(
             ws,
             scx.target,
             &params,
             result_ty.as_ref(),
-            &plan.signature.param_tuple_spelled,
+            &signature.param_tuple_spelled,
             mode,
         );
         Self {
@@ -985,13 +995,9 @@ impl BackendFnAbiPlan {
         }
     }
 
-    /// The plan of a declaration's own NON-GENERIC instance.
-    ///
-    /// Not "the shared body's plan": a declaration with generics has no body of
-    /// its own to plan for, and asking this about one is a caller bug rather
-    /// than a different answer.
-    pub fn for_declaration(ws: &Workspace, scx: &ScalarCtx, decl: FuncRef) -> Self {
-        Self::for_instance(ws, scx, &crate::instance::Instance::base(decl))
+    /// ABI for a declaration-owned opaque boundary with no instance arguments.
+    pub fn for_boundary_declaration(ws: &Workspace, scx: &ScalarCtx, decl: FuncRef) -> Self {
+        Self::for_boundary_instance(ws, scx, &crate::instance::Instance::base(decl))
     }
 
     pub fn for_function_value(

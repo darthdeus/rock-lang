@@ -455,7 +455,7 @@ pub fn scalar_abi_param_collisions(
     if f.inline_body.is_none() {
         return Vec::new();
     }
-    let plan = BackendFnAbiPlan::for_declaration(ws, scx, fref);
+    let plan = BackendFnAbiPlan::for_boundary_declaration(ws, scx, fref);
     let Some(names) = plan.lua_param_names(ws) else {
         return Vec::new();
     };

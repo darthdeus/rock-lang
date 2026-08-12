@@ -1159,9 +1159,19 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
                 ws.module(i.func.module).functions[i.func.func].generics.len(),
                 "a backend sibling must declare the same generics as the instance it serves",
             );
+            let signature = crate::concrete_body::concrete_signature_for_instance(ws, g, i)
+                .unwrap_or_else(|reason| {
+                    panic!(
+                        "retained inline body {:?} has no concrete publisher signature: {reason:?}",
+                        i
+                    )
+                });
             publisher_lanes.insert(
                 i.clone(),
-                skull_mir::lower::BackendFnAbiPlan::for_instance(ws, scx, &selected).result_lanes(),
+                skull_mir::lower::BackendFnAbiPlan::for_concrete_signature(
+                    ws, scx, &selected, &signature,
+                )
+                .result_lanes(),
             );
         }
     }

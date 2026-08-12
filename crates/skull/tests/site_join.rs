@@ -481,12 +481,13 @@ fn main() {
         .filter_map(|(id, inst)| matches!(inst, Inst::CallBoundMulti { .. }).then_some(id))
         .collect();
     assert!(!placeholder_ids.is_empty(), "the standalone fixture has no placeholder");
-    skull_transform::bound::resolve_standalone_bound_calls(
+    skull_transform::bound::resolve_standalone_bound_calls_with_plans(
         &ws,
         &scx,
         scx.interner(),
         &mut mf,
         &tree,
+        &bodies.plans,
     )
     .expect("resolve bounded instance");
     assert!(

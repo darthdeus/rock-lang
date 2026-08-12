@@ -20,7 +20,7 @@ pub(crate) struct DirectCall {
     /// [`Instance`](crate::instance::Instance) is the delivery identity rather
     /// than a key plus a reconstructed substitution.
     pub(crate) delivery: Option<crate::instance::Instance>,
-    pub(crate) callee_inst: Option<crate::instance::Instance>,
+    pub(crate) callee_inst: crate::instance::Instance,
     pub(crate) plan: BackendFnAbiPlan,
 }
 
@@ -202,10 +202,26 @@ impl Builder<'_> {
         inst: &crate::instance::Instance,
     ) -> Result<BackendFnAbiPlan, CompilerError> {
         let selected = self.selected_abi_instance(inst)?;
-        if !crate::lower::requires_concrete_body_plan(self.ws, inst)
-            || crate::monoty::too_deep_to_instantiate(inst.arg_types(self.scx.interner()).iter()).is_some()
-        {
-            return Ok(BackendFnAbiPlan::for_instance(self.ws, self.scx, &selected));
+        if !crate::lower::requires_concrete_body_plan(self.ws, inst) {
+            return Ok(BackendFnAbiPlan::for_boundary_instance(self.ws, self.scx, &selected));
+        }
+        if let Some(at) = crate::monoty::too_deep_to_instantiate(
+            inst.arg_types(self.scx.interner()).iter(),
+        ) {
+            let f = &self.ws.module(inst.func.module).functions[inst.func.func];
+            return Err(CompilerError::new_with_label(
+                f.name_span,
+                format!(
+                    "polymorphic recursion: instantiating `{}` at `{}` exceeds the \
+                     instantiation depth limit of {}. A recursive call whose type \
+                     arguments GROW never terminates -- each call needs a new body -- so it \
+                     is rejected rather than expanded. Same-instance recursion (type \
+                     arguments unchanged) is unaffected.",
+                    f.name,
+                    at.render(),
+                    crate::monoty::MAX_INSTANTIATION_DEPTH,
+                ),
+            ));
         }
         let plan = self.concrete_plans.get(inst).ok_or_else(|| {
             let name = self.ws.module(inst.func.module).functions[inst.func.func].name;
@@ -215,7 +231,18 @@ impl Builder<'_> {
             ))
         })?;
         if selected.func != inst.func {
-            return Ok(BackendFnAbiPlan::for_instance(self.ws, self.scx, &selected));
+            if !crate::lower::requires_concrete_body_plan(self.ws, &selected) {
+                return Ok(BackendFnAbiPlan::for_boundary_instance(self.ws, self.scx, &selected));
+            }
+            if let Some(selected_plan) = self.concrete_plans.get(&selected) {
+                return Ok(BackendFnAbiPlan::for_concrete_plan(self.ws, self.scx, selected_plan));
+            }
+            return Ok(BackendFnAbiPlan::for_concrete_signature(
+                self.ws,
+                self.scx,
+                &selected,
+                &plan.signature,
+            ));
         }
         Ok(BackendFnAbiPlan::for_concrete_plan(self.ws, self.scx, plan))
     }
@@ -675,13 +702,11 @@ impl Builder<'_> {
         // A call the policy declines to specialize still names exactly one
         // concrete instance, and this is where it says which.
         self.record_concrete_ablation(e, func);
-        let callee_inst = self.concrete_callee_for_site(e)?;
-        let delivery = callee_inst.as_ref().and_then(|inst| self.concrete_delivery_instance(inst));
-        let plan = if let Some(owner) = &callee_inst {
-            self.callee_abi_plan_for_instance(owner)?
-        } else {
-            self.callee_abi_plan(func, delivery.as_ref())
-        };
+        let callee_inst = self
+            .concrete_callee_for_site(e)?
+            .ok_or_else(|| self.gap_here("direct call has no concrete callee identity"))?;
+        let delivery = self.concrete_delivery_instance(&callee_inst);
+        let plan = self.callee_abi_plan_for_instance(&callee_inst)?;
         Ok(DirectCall { tree, delivery, callee_inst, plan })
     }
 
@@ -702,18 +727,17 @@ impl Builder<'_> {
         if let Some(inst) = &dc.delivery {
             self.f.spec_bindings.insert(call, inst.clone());
         }
-        if let Some(owner) = &dc.callee_inst {
-            debug_assert_eq!(
-                crate::lower::canonical_variant(self.ws, owner.func),
-                crate::lower::canonical_variant(self.ws, func)
-            );
-            self.record_callee_bound_tree(
-                call,
-                owner,
-                dc.tree.as_ref().is_some_and(|tree| !tree.is_empty()),
-            )?;
-            self.f.callee_instances.insert(call, owner.clone());
-        }
+        let owner = &dc.callee_inst;
+        debug_assert_eq!(
+            crate::lower::canonical_variant(self.ws, owner.func),
+            crate::lower::canonical_variant(self.ws, func)
+        );
+        self.record_callee_bound_tree(
+            call,
+            owner,
+            dc.tree.as_ref().is_some_and(|tree| !tree.is_empty()),
+        )?;
+        self.f.callee_instances.insert(call, owner.clone());
         self.f.call_abi_plans.insert(call, dc.plan.clone());
         Ok(())
     }
@@ -739,29 +763,6 @@ impl Builder<'_> {
         Ok(())
     }
 
-    /// **The ABI plan of the body this call TARGETS.**
-    ///
-    /// The callee's emitted body is named by the delivery decision that reached
-    /// this call: a served instantiation targets the specialized definition,
-    /// and everything else targets the shared one. That is the same id the
-    /// definition is lowered against, which is what keeps the caller's argument
-    /// splat and the callee's parameter list from being two derivations.
-    pub(crate) fn callee_abi_plan(
-        &self,
-        func: FuncRef,
-        delivery: Option<&crate::instance::Instance>,
-    ) -> BackendFnAbiPlan {
-        let base;
-        let inst = match delivery {
-            Some(inst) => inst,
-            None => {
-                base = crate::instance::Instance::base(func);
-                &base
-            }
-        };
-        BackendFnAbiPlan::for_instance(self.ws, self.scx, inst)
-    }
-
     /// THE tuple-return shape of a call, read off the CALLEE's declared return
     /// type under the CALLEE's instantiation.
     ///
@@ -779,15 +780,11 @@ impl Builder<'_> {
     pub(crate) fn call_ret_tuple_shape(
         &self,
         e: Idx<Expr>,
-        func: FuncRef,
     ) -> Result<Option<TupleRetShape>, CompilerError> {
-        let owner = self.concrete_callee_for_site(e)?;
-        let delivery = owner.as_ref().and_then(|inst| self.concrete_delivery_instance(inst));
-        let abi = if let Some(owner) = owner {
-            self.callee_abi_plan_for_instance(&owner)?
-        } else {
-            self.callee_abi_plan(func, delivery.as_ref())
-        };
+        let owner = self
+            .concrete_callee_for_site(e)?
+            .ok_or_else(|| self.gap_here("tuple-return call has no concrete callee identity"))?;
+        let abi = self.callee_abi_plan_for_instance(&owner)?;
         Ok(abi.ret_tuple())
     }
 
@@ -847,28 +844,20 @@ impl Builder<'_> {
         let ret_tuple = (!lua_opaque).then_some(declared_ret_tuple).flatten();
         if !dc.plan.uses_scalar_abi() {
             self.reject_nobox_boxed_call_args(func, arg_idxs)?;
-            let callee_inst = dc
-                .callee_inst
-                .as_ref()
-                .ok_or_else(|| self.gap_here("boxed direct call has no concrete callee identity"))?;
             self.reject_column_container_opaque_slots(
                 e,
-                callee_inst,
+                &dc.callee_inst,
             )?;
             let args = if any_named {
-                self.reorder_named_args(e, arg_idxs, func, dc.callee_inst.as_ref())?
+                self.reorder_named_args(e, arg_idxs, func, Some(&dc.callee_inst))?
             } else {
                 arg_idxs
                     .iter()
                     .enumerate()
                     .map(|(i, &a)| {
                         let v = self.lower_expr(a)?;
-                        let inst = dc
-                            .callee_inst
-                            .as_ref()
-                            .ok_or_else(|| self.gap_here("concrete call has no callee instance"))?;
                         let t = self
-                            .concrete_callee_param_ty(e, inst, i)?
+                            .concrete_callee_param_ty(e, &dc.callee_inst, i)?
                             .ok_or_else(|| self.gap_here("concrete call has no callee parameter type"))?;
                         Ok(self.coerced_mono(v, a, &t))
                     })

@@ -323,7 +323,7 @@ impl Builder<'_> {
         func: FuncRef,
     ) -> Result<(), CompilerError> {
         let callee = &self.ws.module(func.module).functions[func.func];
-        let plan = BackendFnAbiPlan::for_declaration(self.ws, self.scx, func);
+        let plan = BackendFnAbiPlan::for_boundary_declaration(self.ws, self.scx, func);
         let ty = self
             .inf
             .and_then(|inf| inf.expr_types.get(e))
