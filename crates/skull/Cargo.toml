@@ -32,6 +32,7 @@ smallvec = { workspace = true }
 
 [dev-dependencies]
 rock-host = { path = "../rock-host" }
+tempfile = "3.0"
 
 [lints]
 workspace = true

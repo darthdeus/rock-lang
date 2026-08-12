@@ -63,6 +63,14 @@ pub enum ExpandKind {
     /// runtime field; the `set_uniform_block` macro is what pairs them with one
     /// scratch (docs/shader-binding-layout-plan.md).
     UniformBlock,
+    /// `@build_var_expand fn build_var(name: string) -> string` -> the value
+    /// the host resolved from `[build.vars]` for this invocation, as a string
+    /// const. Undeclared names reject (docs/comptime-plan.md).
+    BuildVar,
+    /// `@embed_expand fn embed_string(path: string) -> string` -> the file's
+    /// contents as a string const, path resolved against
+    /// `Workspace.comptime_inputs.embed_root` (docs/comptime-plan.md).
+    EmbedString,
 }
 
 /// True iff `f` is an intrinsic in the mechanism's sense: declared `@intrinsic`,
@@ -90,6 +98,12 @@ pub fn expand_kind(f: &Function) -> Option<ExpandKind> {
     }
     if has_anno(f, "uniform_expand") {
         return Some(ExpandKind::UniformBlock);
+    }
+    if has_anno(f, "build_var_expand") {
+        return Some(ExpandKind::BuildVar);
+    }
+    if has_anno(f, "embed_expand") {
+        return Some(ExpandKind::EmbedString);
     }
     None
 }

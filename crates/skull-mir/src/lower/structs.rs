@@ -667,6 +667,22 @@ impl Builder<'_> {
         Ok(ValueRepr::Scalar(key))
     }
 
+    /// `build_var("NAME")` / `embed_string("path")` -> the resolved value as a
+    /// string const (docs/comptime-plan.md tier 1). Resolution goes through the
+    /// shared `resolve_comptime_value`; the fatal gate is
+    /// `comptime_input_rejection`.
+    pub(crate) fn expand_comptime_input(
+        &mut self,
+        call: Idx<Expr>,
+        arg_idxs: &[Idx<Expr>],
+        kind: ExpandKind,
+    ) -> Result<ValueRepr, CompilerError> {
+        let value =
+            super::resolve_comptime_value(self.ws, self.body, call, arg_idxs, kind)?;
+        let inst = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(value.as_str()))));
+        Ok(ValueRepr::Scalar(inst))
+    }
+
     /// `@uniform_expand` -> one direct typed store per primitive leaf of `u`,
     /// at its std140 element index. No helper call per leaf, and no pack: the
     /// Group's leaves go straight from registers into the views.

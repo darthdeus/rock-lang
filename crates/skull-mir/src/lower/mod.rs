@@ -2747,6 +2747,108 @@ pub fn uniform_expand_rejection(ws: &Workspace, mid: ModuleId) -> Option<Compile
     None
 }
 
+/// Resolve a `build_var("NAME")` / `embed_string("path")` call to its value
+/// (docs/comptime-plan.md tier 1). THE shared resolver: the lowering expander
+/// and the fatal gate both call it, so they cannot diverge on what they
+/// accept. The argument must be a plain string literal -- interpolation or any
+/// computed expression rejects, because the input has to be knowable without
+/// running the body.
+pub fn resolve_comptime_value(
+    ws: &Workspace,
+    body: &Body,
+    call_expr: Idx<Expr>,
+    args: &[Idx<Expr>],
+    kind: ExpandKind,
+) -> Result<String, CompilerError> {
+    let fname = match kind {
+        ExpandKind::BuildVar => "build_var",
+        ExpandKind::EmbedString => "embed_string",
+        _ => unreachable!("resolve_comptime_value only serves the comptime-input kinds"),
+    };
+    let reject = |span: Idx<Expr>, msg: String| {
+        CompilerError::new_with_label(body.expr_spans[span], msg)
+    };
+    let [arg] = args else {
+        return Err(reject(call_expr, format!("`{fname}` takes exactly one argument")));
+    };
+    let Expr::String(key) = body.expr_arena[*arg] else {
+        return Err(reject(
+            *arg,
+            format!("`{fname}` argument must be a plain string literal (no interpolation)"),
+        ));
+    };
+    match kind {
+        ExpandKind::BuildVar => match ws.comptime_inputs.vars.get(&key) {
+            Some(var) => Ok(var.value.clone()),
+            None => Err(reject(
+                call_expr,
+                format!("`build_var(\"{key}\")`: {key} is not declared in this project's [build.vars]"),
+            )),
+        },
+        ExpandKind::EmbedString => {
+            let Some(root) = ws.comptime_inputs.embed_root.as_deref() else {
+                return Err(reject(
+                    call_expr,
+                    "`embed_string` needs a project root (a stick.toml project); \
+                     none is available in this compilation"
+                        .to_string(),
+                ));
+            };
+            let rel = std::path::Path::new(key.as_str());
+            if rel.is_absolute() {
+                return Err(reject(
+                    *arg,
+                    format!("`embed_string` path must be relative to the project root, got {key:?}"),
+                ));
+            }
+            let joined = root.join(rel);
+            let file = joined.canonicalize().map_err(|e| {
+                reject(*arg, format!("`embed_string(\"{key}\")`: cannot read {key:?}: {e}"))
+            })?;
+            let canon_root = root.canonicalize().map_err(|e| {
+                reject(call_expr, format!("`embed_string`: project root is unreadable: {e}"))
+            })?;
+            if !file.starts_with(&canon_root) {
+                return Err(reject(
+                    *arg,
+                    format!("`embed_string(\"{key}\")`: path escapes the project root"),
+                ));
+            }
+            std::fs::read_to_string(&file).map_err(|e| {
+                reject(*arg, format!("`embed_string(\"{key}\")`: cannot read {key:?}: {e}"))
+            })
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// FATAL gate for `build_var` / `embed_string` misuse (non-literal argument,
+/// undeclared var, unreadable or escaping path): a per-fn lowering error is
+/// only a lenient skip, so validation lives here. Shares
+/// [`resolve_comptime_value`] with the expander.
+pub fn comptime_input_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerError> {
+    let module = ws.module(mid);
+    let ir = ws.inference(mid)?;
+    for (owner, body) in module.bodies.iter() {
+        let Some(inf) = ir.per_fn.get(owner) else { continue };
+        for (e, expr) in body.expr_arena.iter() {
+            let Expr::Call { callee: Callee::Unresolved { name, .. }, args } = expr else {
+                continue;
+            };
+            let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else { continue };
+            let kind = crate::intrinsics::expand_kind(&ws.module(fmod).functions[fid]);
+            let Some(kind @ (ExpandKind::BuildVar | ExpandKind::EmbedString)) = kind else {
+                continue;
+            };
+            let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
+            if let Err(err) = resolve_comptime_value(ws, body, e, &arg_idxs, kind) {
+                return Some(err);
+            }
+        }
+    }
+    None
+}
+
 /// Emit-time validation for `@vertex_expand` calls: misuse is a spanned
 /// compile error, never a call that reaches the fn's error body.
 pub fn vertex_expand_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerError> {

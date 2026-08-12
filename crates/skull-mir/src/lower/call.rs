@@ -364,6 +364,15 @@ impl Builder<'_> {
                 {
                     self.expand_uniform_block(e, func, &arg_idxs)
                 }
+                Ok(func)
+                    if matches!(
+                        self.fn_expand_kind(func),
+                        Some(ExpandKind::BuildVar | ExpandKind::EmbedString)
+                    ) =>
+                {
+                    let kind = self.fn_expand_kind(func).unwrap();
+                    self.expand_comptime_input(e, &arg_idxs, kind)
+                }
                 Ok(func) => self.lower_direct_call_repr(e, func, &arg_idxs, any_named),
                 Err(gap_err) => {
                     if !any_named {

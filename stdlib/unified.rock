@@ -3435,3 +3435,19 @@ struct FunctionCallInfo {
     name: string,
     stage: int,
 }
+
+// Compile-time inputs (docs/comptime-plan.md tier 1). A direct call with a
+// string-literal argument is replaced at MIR lowering with the resolved value:
+// `build_var("NAME")` reads the [build.vars] entry the CLI resolved for this
+// invocation; `embed_string("path")` inlines the file at path relative to the
+// project root. Undeclared name, non-literal argument, missing file, or a path
+// escaping the root all reject with a span. Annotation-keyed like rock_shader,
+// so a user fn of the same name can't hijack the expansion; the phantom body
+// only fires if the fn is taken as a value.
+@build_var_expand inline(lua) fn build_var(name: string) -> string = """
+    error("build_var is a compile-time intrinsic (expanded at compile time)")
+"""
+
+@embed_expand inline(lua) fn embed_string(path: string) -> string = """
+    error("embed_string is a compile-time intrinsic (expanded at compile time)")
+"""

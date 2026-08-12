@@ -152,6 +152,8 @@ mod nullable_value_in_tuple_sentinel;
 mod plain_struct_scalarize;
 #[path = "reserved_namespace.rs"]
 mod reserved_namespace;
+#[path = "comptime_inputs.rs"]
+mod comptime_inputs;
 #[path = "shader_pipeline_register.rs"]
 mod shader_pipeline_register;
 #[path = "static_hot_reload.rs"]

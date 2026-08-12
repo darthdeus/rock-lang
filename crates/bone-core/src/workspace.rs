@@ -64,6 +64,32 @@ pub struct Workspace {
     /// keeps `Workspace: Clone` and lets the parallel dependent re-check (which
     /// holds `&Workspace`) share one counter across threads.
     pub reinferred_body_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+
+    /// Resolved compile-time inputs (docs/comptime-plan.md tier 1), set by the
+    /// host once per invocation before emission. bone itself never reads them
+    /// -- values don't affect types -- but they live here because every
+    /// consumer (skull's `build_var`/`embed_string` expansion at MIR lowering,
+    /// on all backends) already holds a `&Workspace` and nothing else with
+    /// that reach exists. Empty in LSP/typecheck-only contexts, where no
+    /// expansion runs.
+    pub comptime_inputs: ComptimeInputs,
+}
+
+/// See [`Workspace::comptime_inputs`].
+#[derive(Clone, Debug, Default)]
+pub struct ComptimeInputs {
+    pub vars: FxHashMap<Ustr, ComptimeVarValue>,
+    /// Root that `embed_string(path)` resolves against (the stick.toml dir).
+    /// None = no project context: every embed rejects with a span.
+    pub embed_root: Option<std::path::PathBuf>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ComptimeVarValue {
+    pub value: String,
+    /// Hash into cache keys; never write the value into on-disk cache
+    /// artifacts or manifests in plaintext.
+    pub secret: bool,
 }
 
 impl Default for Workspace {
@@ -116,6 +142,7 @@ impl Workspace {
             phase_timings: Default::default(),
 
             reinferred_body_count: Default::default(),
+            comptime_inputs: Default::default(),
         };
 
         ws.module_ids.insert(ustr("$builtin"), ModuleId::builtin());

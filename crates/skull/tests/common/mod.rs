@@ -89,6 +89,22 @@ pub fn emit_module(src: &str) -> String {
     emit_mir(src).lua
 }
 
+/// Like [`try_emit_module`] but with `Workspace.comptime_inputs` set before
+/// emission -- the seam the host CLI uses for `build_var`/`embed_string`
+/// (docs/comptime-plan.md tier 1).
+pub fn try_emit_module_with(
+    src: &str,
+    inputs: bone_semantic::inference::ComptimeInputs,
+) -> Result<String, skull_parser::CompilerError> {
+    let mut modules = STDLIB.clone();
+    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
+    let mut ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    assert_no_bone_errors(&ws);
+    ws.comptime_inputs = inputs;
+    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    skull::mir_emit::emit_workspace_mir(&ws, mid).map(|e| e.lua)
+}
+
 /// Like [`emit_mir`] but surfaces the codegen `Result` (a rejection such as a
 /// reserved synthetic-name collision) instead of `.expect`ing success. Semantic
 /// errors still panic (a malformed test, not what these cases probe).
