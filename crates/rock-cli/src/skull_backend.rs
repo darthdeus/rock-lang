@@ -1486,7 +1486,7 @@ fn build_nobox_global_accessors(
     let mut rows: Vec<String> = Vec::new();
     for m in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
         for (_gid, g) in m.globals.iter() {
-            let Some(acc) = skull_mir::lower::nobox_global_accessor_shape(ws, g.ty) else {
+            let Some(acc) = skull_mir::lower::nobox_global_accessor_shape(ws, scx, g.ty) else {
                 continue;
             };
             let skull_mir::lower::NoboxGlobalAccessorShape {
@@ -1495,7 +1495,7 @@ fn build_nobox_global_accessors(
             let leaves = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty)
                 .ok()
                 .and_then(|plan| plan.leaf_names(g.name))
-                .expect("a shape implies leaves: both gate on `nobox_declared_shape`");
+                .expect("a global plan with leaf paths must own its leaf names");
             // A nullable global leads with a presence leaf that has no path: it is
             // not a field, so it is branched on rather than read. Everything below
             // pairs the REMAINING leaves with the paths.

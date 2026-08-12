@@ -307,6 +307,18 @@ impl GlobalPlan {
         self.arena.value_shape(self.representation)
     }
 
+    pub fn value_storage(&self) -> Option<ValueStorage> {
+        self.arena.get(self.representation).value_storage()
+    }
+
+    pub fn leaf_paths(&self) -> Option<Vec<Ustr>> {
+        self.arena.get(self.representation).leaf_paths()
+    }
+
+    pub fn presence_flags(&self) -> Option<Vec<bool>> {
+        self.arena.get(self.representation).presence_flags()
+    }
+
     pub fn leaf_names(&self, base: Ustr) -> Option<Vec<Ustr>> {
         let shape = self.value_shape()?;
         Some(

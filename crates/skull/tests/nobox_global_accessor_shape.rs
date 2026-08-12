@@ -32,9 +32,7 @@
 //! game emit paths).
 
 
-use skull_mir::lower::{
-    nobox_global_accessor_shape, NoboxGlobalAccessorShape, RepArena, ValueStorage,
-};
+use skull_mir::lower::{nobox_global_accessor_shape, NoboxGlobalAccessorShape, ScalarCtx};
 use bone_semantic::inference::Workspace;
 
 /// The parent must carry more than four leaves so it exceeds the column budget,
@@ -63,12 +61,13 @@ fn main() { print("{H.a}") }
 
 fn accessor_of(src: &str, global: &str) -> (Workspace, NoboxGlobalAccessorShape) {
     let ws = crate::common::ws_with_stdlib(src);
+    let scx = ScalarCtx::new(&ws);
     let shape = ws
         .modules
         .iter()
         .flat_map(|m| m.globals.iter())
         .find(|(_, g)| g.name.as_str() == global)
-        .and_then(|(_, g)| nobox_global_accessor_shape(&ws, g.ty))
+        .and_then(|(_, g)| nobox_global_accessor_shape(&ws, &scx, g.ty))
         .unwrap_or_else(|| panic!("global `{global}` has no nobox accessor shape"));
     (ws, shape)
 }
@@ -79,7 +78,7 @@ fn accessor_of(src: &str, global: &str) -> (Workspace, NoboxGlobalAccessorShape)
 /// where the type is leaf-table.
 #[test]
 fn a_zero_data_leaf_child_defeats_both_punctuation_proxies() {
-    let (ws, acc) = accessor_of(ZERO_LEAF_CHILD, "G");
+    let (_ws, acc) = accessor_of(ZERO_LEAF_CHILD, "G");
     assert_eq!(
         acc.paths.iter().map(|p| p.to_string()).collect::<Vec<_>>(),
         ["m", "a", "b", "c", "d"],
@@ -106,14 +105,6 @@ fn a_zero_data_leaf_child_defeats_both_punctuation_proxies() {
         !acc.paths.iter().any(|p| p.contains('.')),
         "the dotted proxy sees a flat path list here"
     );
-    assert!(matches!(
-        RepArena::default().nominal_value_storage(
-            &ws,
-            bone_semantic::hir::FnBackend::Lua,
-            acc.ty_name,
-        ),
-        Some(ValueStorage::GcTable | ValueStorage::LeafTable)
-    ));
     assert_eq!(
         acc.ctor_suffix, "_lct",
         "the shared physical storage plan says this is a leaf-table value"

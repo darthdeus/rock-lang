@@ -1186,16 +1186,9 @@ pub fn is_nobox_nominal(ws: &Workspace, name: Ustr) -> bool {
         .is_some_and(|sid| ws.modules[sid.module.index()].structs[sid.def].is_nobox)
 }
 
-/// THE nullable-nominal shape rule, arena-independent: a `nobox` nominal resolves
-/// to its leaf shape, and a NULLABLE one to the same shape with `nullable = true`
-/// (presence is leaf 0). Everything else is `None`.
-///
-/// `resolve` is the caller's type-node lookup, which is the only thing that
-/// differed between the copies this replaces: the workspace arena reads through
-/// `static_ty`, a body arena through `resolve_tyid`/`ty_node`. Every context that
-/// needs the rule calls this -- `nobox_declared_shape` (globals + top-level
-/// signatures) and [`Builder::nobox_shape_of_ty`] (body-arena locals) -- so a new
-/// context joins by calling it rather than by copying fifteen lines.
+/// Resolve a nullable nominal through the type-node lookup supplied by the
+/// caller. Body fields and declaration fields use different arenas, but share
+/// this representation rule.
 pub(crate) fn nullable_nominal_shape(
     ws: &Workspace,
     ty: TyId,
@@ -1217,15 +1210,6 @@ pub(crate) fn nullable_nominal_shape(
         }
         _ => None,
     }
-}
-
-/// The leaf shape of a `nobox`-typed DECLARED type (nullable included: presence
-/// is leaf 0), `None` for every other type. bone requires an explicit annotation
-/// on every global, so this is exact for a `GlobalDef`'s `ty`, and equally for a
-/// top-level fn's param/return -- both are workspace-arena types `static_ty` can
-/// see and the body-arena walker cannot.
-pub(crate) fn nobox_declared_shape(ws: &Workspace, ty: TyId) -> Option<ValueShape> {
-    nullable_nominal_shape(ws, ty, &|t| static_ty(ws, t))
 }
 
 /// Everything the reflection accessor for a `nobox` global decides, answered
@@ -1261,21 +1245,22 @@ pub struct NoboxGlobalAccessorShape {
     pub unbuildable: Option<String>,
 }
 
-pub fn nobox_global_accessor_shape(ws: &Workspace, ty: TyId) -> Option<NoboxGlobalAccessorShape> {
-    let shape = nobox_declared_shape(ws, ty)?;
-    let paths = value_leaf_paths(&shape);
+pub fn nobox_global_accessor_shape(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    ty: TyId,
+) -> Option<NoboxGlobalAccessorShape> {
+    let plan = GlobalPlan::for_declared_type(ws, scx, ty).ok()?;
+    let shape = plan.value_shape()?;
+    let paths = plan.leaf_paths()?;
     // The global's OWN presence leaf leads the leaves and has no path, so the
     // flags line up with `paths` from that offset on -- the same offset the
     // caller splits the leaves at.
-    let flags = value_leaf_presence_flags(&shape);
+    let flags = plan.presence_flags()?;
     let flags = if shape.nullable { &flags[1..] } else { &flags[..] };
     let presence_path =
         flags.iter().zip(paths.iter()).find(|(is_tag, _)| **is_tag).map(|(_, p)| *p);
-    let storage = RepArena::default().nominal_value_storage(
-        ws,
-        bone_semantic::hir::FnBackend::Lua,
-        shape.name,
-    )?;
+    let storage = plan.value_storage()?;
     let ctor_suffix = match storage {
         ValueStorage::LeafTable => "_lct",
         ValueStorage::GcTable => "_vt",
