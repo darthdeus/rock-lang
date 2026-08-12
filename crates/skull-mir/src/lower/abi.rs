@@ -160,6 +160,7 @@ pub struct RepPlan {
     use_context: RepUse,
     layout: RepLayout,
     storage: Option<ValueStorage>,
+    column_eligible: bool,
 }
 
 impl RepPlan {
@@ -181,6 +182,10 @@ impl RepPlan {
 
     pub fn value_storage(&self) -> Option<ValueStorage> {
         self.storage
+    }
+
+    pub fn column_eligible(&self) -> bool {
+        self.column_eligible
     }
 
     pub fn lanes(&self, arena: &RepArena) -> usize {
@@ -321,7 +326,7 @@ impl FunctionRepPlan {
 #[derive(Debug, Default)]
 struct RepArenaInner {
     plans: Vec<RepPlan>,
-    by_key: HashMap<(FnBackend, RepUse, RepLayout, Option<ValueStorage>), RepId>,
+    by_key: HashMap<(FnBackend, RepUse, RepLayout, Option<ValueStorage>, bool), RepId>,
 }
 
 /// The one build-scoped physical representation arena.  `ScalarCtx` owns the
@@ -359,15 +364,37 @@ impl RepArena {
         layout: RepLayout,
         storage: Option<ValueStorage>,
     ) -> RepId {
+        self.intern_with_facts(target, use_context, layout, storage, false)
+    }
+
+    fn intern_with_facts(
+        &self,
+        target: FnBackend,
+        use_context: RepUse,
+        layout: RepLayout,
+        storage: Option<ValueStorage>,
+        column_eligible: bool,
+    ) -> RepId {
         let mut inner = self.inner.lock().expect("RepArena lock poisoned");
-        let key = (target, use_context, layout.clone(), storage);
+        let key = (target, use_context, layout.clone(), storage, column_eligible);
         if let Some(id) = inner.by_key.get(&key) {
             return *id;
         }
         let id = RepId(inner.plans.len() as u32);
-        inner.plans.push(RepPlan { id, target, use_context, layout, storage });
+        inner.plans.push(RepPlan {
+            id,
+            target,
+            use_context,
+            layout,
+            storage,
+            column_eligible,
+        });
         inner.by_key.insert(key, id);
         id
+    }
+
+    pub(crate) fn column_eligible(&self, id: RepId) -> bool {
+        self.get(id).column_eligible()
     }
 
     pub fn get(&self, id: RepId) -> RepPlan {
@@ -406,6 +433,18 @@ impl RepArena {
             }),
             _ => None,
         }
+    }
+
+    pub(crate) fn leaf_addresses(
+        &self,
+        ws: &Workspace,
+        id: RepId,
+    ) -> Option<Vec<crate::lower::LeafAddr>> {
+        if !self.column_eligible(id) {
+            return None;
+        }
+        let shape = self.value_shape(id)?;
+        crate::lower::leaf_addr_plan(ws, shape.name).ok()
     }
 
     /// Total physical planning for one concrete logical type. `Opaque` is an
@@ -464,11 +503,13 @@ impl RepArena {
                     };
                     if let Some(shape) = shape {
                         let storage = mono_value_storage(ws, target, ty);
-                        return Ok(self.intern_with_storage(
+                        let column_eligible = crate::lower::is_ffi_clean_value_struct(ws, shape.name);
+                        return Ok(self.intern_with_facts(
                             target,
                             use_context,
                             RepLayout::Leaves(shape),
                             storage,
+                            column_eligible,
                         ));
                     }
                     if guarantees.nobox && !guarantees.allow_opaque {
@@ -517,11 +558,13 @@ impl RepArena {
                 };
                 if let Some(shape) = shape {
                     let storage = mono_value_storage(ws, target, ty);
-                    return Ok(self.intern_with_storage(
+                    let column_eligible = crate::lower::is_ffi_clean_value_struct(ws, shape.name);
+                    return Ok(self.intern_with_facts(
                         target,
                         use_context,
                         RepLayout::Leaves(shape),
                         storage,
+                        column_eligible,
                     ));
                 }
                 if guarantees.nobox && !guarantees.allow_opaque {

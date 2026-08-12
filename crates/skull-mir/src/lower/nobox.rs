@@ -233,7 +233,7 @@ impl Builder<'_> {
             ContainerStorage::LeafAddressed { .. }
                 if self.scx.target == bone_semantic::hir::FnBackend::Js => {
                 let elem = plan
-                    .ffi_element_name(self.ws, &arena)
+                    .ffi_element_name(&arena)
                     .unwrap_or_else(|| Ustr::from("<element>"));
                 let family = match plan.family() {
                     ContainerFamily::NativeBuffer => "NativeBuffer",

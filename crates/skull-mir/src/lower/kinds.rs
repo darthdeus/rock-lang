@@ -41,23 +41,21 @@ impl Builder<'_> {
     /// plain `NativeBuffer` (matching the alloc intrinsic, which also requires a
     /// concrete element).
     pub(crate) fn nb_value_elem(&self, e: Idx<Expr>) -> Option<Ustr> {
-        if let Some(concrete) = self.concrete_expr_ty(e) {
-            let MonoTy::App {
-                ctor: crate::monoty::MonoCtor::Nominal(name),
-                params,
-            } = concrete.peel_nullable().0
-            else {
-                return None;
-            };
-            if !matches!(name.as_str(), "NativeBuffer" | "FlatVec") {
-                return None;
-            }
-            let Some(elem) = params.first().and_then(MonoTy::nominal) else {
-                return None;
-            };
-            return is_ffi_clean_value_struct(self.ws, elem).then_some(elem);
-        }
-        None
+        let concrete = self.concrete_expr_ty(e)?;
+        let family = match concrete.peel_nullable().0 {
+            MonoTy::App {
+                ctor: crate::monoty::MonoCtor::Nominal(name), ..
+            } => match name.as_str() {
+                "NativeBuffer" => ContainerFamily::NativeBuffer,
+                "FlatVec" => ContainerFamily::FlatVec,
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let arena = self.scx.rep_arena();
+        ContainerPlan::for_type(self.ws, self.scx.target, &arena, family, &concrete)
+            .ok()
+            .and_then(|plan| plan.ffi_element_name(&arena))
     }
 
     /// The column-eligible element of `e`'s `Arena<E>` type, if any. The twin of

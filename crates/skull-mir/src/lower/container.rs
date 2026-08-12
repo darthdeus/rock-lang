@@ -162,11 +162,9 @@ impl ContainerPlan {
             RepGuarantees::default(),
         )?;
         let shape = arena.value_shape(element_rep);
+        let column_eligible = arena.column_eligible(element_rep);
         let columns = match (family, shape.as_ref()) {
-            (ContainerFamily::Vec, Some(shape))
-                if crate::lower::is_ffi_clean_value_struct(ws, shape.name)
-                    && (!nullable || crate::lower::is_nobox_nominal(ws, shape.name)) =>
-            {
+            (ContainerFamily::Vec, Some(shape)) if column_eligible => {
                 let paths = crate::lower::value_leaf_paths(shape);
                 (paths.len() + usize::from(nullable)
                     <= crate::lower::MAX_COLUMN_LEAVES)
@@ -174,7 +172,7 @@ impl ContainerPlan {
                     .unwrap_or(false)
             }
             (ContainerFamily::Map | ContainerFamily::Arena, Some(shape))
-                if !nullable && crate::lower::is_ffi_clean_value_struct(ws, shape.name) =>
+                if !nullable && column_eligible =>
             {
                 let paths = crate::lower::value_leaf_paths(shape);
                 paths.len() <= crate::lower::MAX_COLUMN_LEAVES
@@ -185,7 +183,7 @@ impl ContainerPlan {
         let leaf_addresses = if !nullable
             && matches!(family, ContainerFamily::NativeBuffer | ContainerFamily::FlatVec)
         {
-            shape.as_ref().and_then(|shape| crate::lower::leaf_addr_plan(ws, shape.name).ok())
+            arena.leaf_addresses(ws, element_rep)
         } else {
             None
         };
@@ -234,13 +232,9 @@ impl ContainerPlan {
         ))
     }
 
-    pub fn ffi_element_name(
-        &self,
-        ws: &bone_semantic::inference::Workspace,
-        arena: &RepArena,
-    ) -> Option<ustr::Ustr> {
+    pub fn ffi_element_name(&self, arena: &RepArena) -> Option<ustr::Ustr> {
         let shape = self.element_shape(arena)?;
-        crate::lower::is_ffi_clean_value_struct(ws, shape.name).then_some(shape.name)
+        arena.column_eligible(self.element_rep()).then_some(shape.name)
     }
 
     pub fn leaf_addresses(&self) -> Option<&[LeafAddr]> {

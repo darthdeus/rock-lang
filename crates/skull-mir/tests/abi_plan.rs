@@ -474,6 +474,43 @@ fn container_columns_carry_owned_element_identity() {
 }
 
 #[test]
+fn element_rep_plan_owns_ffi_column_admission() {
+    let ws = ws_of("value V2 { x: float, y: float }\nenum E { A(int), B(int), None }\n");
+    let arena = RepArena::default();
+    let vec_ty = MonoTy::App {
+        ctor: MonoCtor::Array,
+        params: vec![nominal("V2")],
+    };
+    let vec = ContainerPlan::for_type(
+        &ws,
+        bone_semantic::hir::FnBackend::Lua,
+        &arena,
+        ContainerFamily::Vec,
+        &vec_ty,
+    )
+    .expect("V2 vector must have a container plan");
+    assert!(
+        arena.get(vec.element_rep()).column_eligible(),
+        "the owned V2 plan must admit a nonzero column population"
+    );
+
+    let enum_rep = arena
+        .plan(
+            &ws,
+            bone_semantic::hir::FnBackend::Lua,
+            &nominal("E"),
+            RepUse::Boundary,
+            &RepUseFacts::default(),
+            RepGuarantees::default(),
+        )
+        .expect("the cdata enum must have an explicit representation plan");
+    assert!(
+        !arena.get(enum_rep).column_eligible(),
+        "the enum control must remain outside the value-struct column population"
+    );
+}
+
+#[test]
 fn leaf_places_carry_the_container_element_representation() {
     let ws = ws_of("nobox value V2 { x: float, y: float }");
     let arena = RepArena::default();
