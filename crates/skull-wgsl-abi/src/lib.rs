@@ -742,10 +742,7 @@ impl WgslAbi {
                 {
                     return Err(wire_error("unsupported fullscreen geometry metadata"));
                 }
-                if !self.vertex_inputs.is_empty()
-                    || !self.varyings.is_empty()
-                    || !self.array_blocks.is_empty()
-                {
+                if !self.vertex_inputs.is_empty() || !self.varyings.is_empty() {
                     return Err(wire_error("fullscreen ABI carries explicit-only records"));
                 }
                 if self.fragment_outputs.len() != 1 {
@@ -760,12 +757,17 @@ impl WgslAbi {
                 }) {
                     return Err(wire_error("fullscreen ordinary uniform has unsupported visibility"));
                 }
+                if self.array_blocks.iter().any(|block| {
+                    block.visibility != (WgslVisibility { vertex: false, fragment: true })
+                }) {
+                    return Err(wire_error("fullscreen uniform array has unsupported visibility"));
+                }
                 if self.textures.iter().any(|texture| {
                     texture.visibility != (WgslVisibility { vertex: false, fragment: true })
                 }) {
                     return Err(wire_error("fullscreen texture has unsupported visibility"));
                 }
-                validate_binding_order(&self.uniform_blocks, &[], 1)?;
+                validate_binding_order(&self.uniform_blocks, &self.array_blocks, 1)?;
             }
             WgslGeometryKind::Triangles => {
                 if self.fullscreen_uniform.size != 0 || !self.fullscreen_uniform.members.is_empty() {
