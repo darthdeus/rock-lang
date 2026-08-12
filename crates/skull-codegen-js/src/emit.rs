@@ -1969,7 +1969,7 @@ impl Emitter<'_> {
                 // struct can reach here with no dot in sight. That is harmless
                 // HERE and nowhere else -- with no data leaves the flat object
                 // and the declared object are the same object, so both arms
-                // agree. luajit had to be re-keyed on `value_struct_is_leaf_table`
+                // agree. luajit had to be re-keyed on the shared leaf-table plan
                 // for exactly this shape, because its two arms are different
                 // FUNCTIONS and one of them is never emitted.
                 if fields.iter().any(|(f, _)| f.contains('.')) {
@@ -2441,7 +2441,14 @@ impl Emitter<'_> {
                     // A scalarized ENUM box reaches here (name is an enum value-shape,
                     // not a struct): its numeric tag / named variant cannot be rebuilt
                     // from the `{__tag, _n}` object -- reject honestly.
-                    if skull_mir::lower::value_struct_is_gc_free(self.ws, *name) {
+                    if matches!(
+                        skull_mir::lower::value_storage_for_nominal(
+                            self.ws,
+                            bone_semantic::hir::FnBackend::Js,
+                            *name,
+                        ),
+                        Some(skull_mir::lower::ValueStorage::CData)
+                    ) {
                         return Err(err(format!(
                             "JS subset: `inspect` of scalarized enum `{name}` \
                              (numeric-tag box cannot reproduce the named variant)"
@@ -5342,12 +5349,19 @@ fn build_enum_global_defs(ws: &Workspace) -> HashMap<ustr::Ustr, String> {
 }
 
 /// Collect every GC-carrying value-struct name a body CONSTRUCTS (an
-/// `Inst::MakeValueStruct` whose type is `value_struct_is_gc`), scanning the
+/// `Inst::MakeValueStruct` whose type is a non-`CData` `ValueStorage`), scanning the
 /// full inst arena so a value struct built as a nested value operand is caught.
 fn collect_gc_value_structs(ws: &Workspace, mf: &MirFunc, out: &mut BTreeSet<ustr::Ustr>) {
     for inst in mf.insts.values() {
         if let Inst::MakeValueStruct { name, .. } = inst {
-            if skull_mir::lower::value_struct_is_gc(ws, *name) {
+            if !matches!(
+                skull_mir::lower::value_storage_for_nominal(
+                    ws,
+                    bone_semantic::hir::FnBackend::Js,
+                    *name,
+                ),
+                Some(skull_mir::lower::ValueStorage::CData)
+            ) {
                 out.insert(*name);
             }
         }
@@ -5367,7 +5381,14 @@ fn close_gc_value_struct_fields(ws: &Workspace, names: &mut BTreeSet<ustr::Ustr>
         let s = &ws.module(sid.module).structs[sid.def];
         for f in &s.fields {
             if let Some(field_struct) = value_struct_field_name(ws, f.ty) {
-                if skull_mir::lower::value_struct_is_gc(ws, field_struct) && names.insert(field_struct)
+                if !matches!(
+                    skull_mir::lower::value_storage_for_nominal(
+                        ws,
+                        bone_semantic::hir::FnBackend::Js,
+                        field_struct,
+                    ),
+                    Some(skull_mir::lower::ValueStorage::CData)
+                ) && names.insert(field_struct)
                 {
                     queue.push(field_struct);
                 }
@@ -5520,7 +5541,16 @@ fn build_inspect_ty_defs(
             out.push_str("var __rock_inspect_ty = __rock_inspect_ty || {};\n");
         }
         let header = js_string_lit(name.as_str())?;
-        if s.is_value && !skull_mir::lower::value_struct_is_gc(ws, *name) {
+        if s.is_value
+            && matches!(
+                skull_mir::lower::value_storage_for_nominal(
+                    ws,
+                    bone_semantic::hir::FnBackend::Js,
+                    *name,
+                ),
+                Some(skull_mir::lower::ValueStorage::CData)
+            )
+        {
             let pairs: Vec<String> = s
                 .fields
                 .iter()

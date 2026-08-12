@@ -420,7 +420,17 @@ fn const_hoist_uses_are_read_only(ws: &Workspace, func: &MirFunc, cand: Idx<Inst
             Inst::MakeValueStruct { name, fields }
             | Inst::MaterializeValueStruct { name, fields } => {
                 !fields.iter().any(|(_, v)| *v == cand)
-                    || !skull_mir::lower::value_struct_is_gc(ws, *name)
+                    || !matches!(
+                        skull_mir::lower::value_storage_for_nominal(
+                            ws,
+                            bone_semantic::hir::FnBackend::Lua,
+                            *name,
+                        ),
+                        Some(
+                            skull_mir::lower::ValueStorage::GcTable
+                                | skull_mir::lower::ValueStorage::LeafTable
+                        )
+                    )
             }
             Inst::StoreField { base, value, .. } => {
                 *value != cand
@@ -580,7 +590,23 @@ fn collect_const_hoists(
     let mut defs = String::new();
     for (g, (name, lits, leaf_form)) in groups.iter().enumerate() {
         let gname = format!("__skull_kc_{base}_{g}");
-        let suffix = if *leaf_form { "_lct" } else if skull_mir::lower::value_struct_is_gc(ws, *name) { "_vt" } else { "_ct" };
+        let suffix = if *leaf_form {
+            "_lct"
+        } else if matches!(
+            skull_mir::lower::value_storage_for_nominal(
+                ws,
+                bone_semantic::hir::FnBackend::Lua,
+                *name,
+            ),
+            Some(
+                skull_mir::lower::ValueStorage::GcTable
+                    | skull_mir::lower::ValueStorage::LeafTable
+            )
+        ) {
+            "_vt"
+        } else {
+            "_ct"
+        };
         let _ = write!(defs, "{gname} = {name}{suffix}(");
         for (i, l) in lits.iter().enumerate() {
             if i > 0 {
@@ -1787,11 +1813,28 @@ impl Emitter<'_> {
                 // leaves contributes one leaf keyed on the field's own name, so
                 // the leaf sequence is textually identical to the declared field
                 // list and no operand-shape test can tell them apart.
-                let suffix = if skull_mir::lower::value_struct_is_leaf_table(self.ws, *name) {
+                let suffix = if matches!(
+                    skull_mir::lower::value_storage_for_nominal(
+                        self.ws,
+                        bone_semantic::hir::FnBackend::Lua,
+                        *name,
+                    ),
+                    Some(skull_mir::lower::ValueStorage::LeafTable)
+                ) {
                     "_lct"
                 } else if is_leaf_form(fields) {
                     "_lct"
-                } else if skull_mir::lower::value_struct_is_gc(self.ws, *name) {
+                } else if matches!(
+                    skull_mir::lower::value_storage_for_nominal(
+                        self.ws,
+                        bone_semantic::hir::FnBackend::Lua,
+                        *name,
+                    ),
+                    Some(
+                        skull_mir::lower::ValueStorage::GcTable
+                            | skull_mir::lower::ValueStorage::LeafTable
+                    )
+                ) {
                     "_vt"
                 } else {
                     "_ct"

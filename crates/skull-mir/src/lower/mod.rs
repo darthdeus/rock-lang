@@ -2529,7 +2529,11 @@ pub fn map_key_rejection(ws: &Workspace, mid: ModuleId) -> Option<(String, Span)
 /// position. Not a legal C boundary type: no `ffi.cdef` typedef exists, so
 /// `ffi.new`/`sizeof`/`ffi.istype`/the extern ABI cannot name it.
 fn nominal_is_gc_value(ws: &Workspace, name: Ustr) -> bool {
-    map_is_value_struct(ws, name) && value_struct_is_gc(ws, name)
+    map_is_value_struct(ws, name)
+        && !matches!(
+            value_storage_for_nominal(ws, bone_semantic::hir::FnBackend::Lua, name),
+            Some(ValueStorage::CData)
+        )
 }
 
 /// When `ty` resolves to `NativeBuffer<E>` with `E` a GC-carrying value struct,
@@ -2584,7 +2588,10 @@ fn native_buffer_alloc_elem_ctype(
         Some(TypeExpr::Builtin(BuiltinTy::Float)) => Ok(Ustr::from("float")),
         Some(TypeExpr::Builtin(BuiltinTy::Bool)) => Ok(Ustr::from("bool")),
         Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) if map_is_value_struct(ws, name) => {
-            if value_struct_is_gc(ws, name) {
+            if !matches!(
+                value_storage_for_nominal(ws, bone_semantic::hir::FnBackend::Lua, name),
+                Some(ValueStorage::CData)
+            ) {
                 Err(format!(
                     "`native_buffer_alloc<{name}>` is invalid: `{name}` is a GC-carrying `value` \
                      struct (immutable Lua table) with no C layout, so `ffi.new(\"{name}[?]\")` \
@@ -2735,7 +2742,10 @@ fn native_buffer_alloc_elem_ctype_spec(
         Some((_, Some(n))) => {
             if !map_is_value_struct(ws, n) {
                 Err(format!("`native_buffer_alloc<{n}>` is invalid: `{n}` is not a `value` struct."))
-            } else if value_struct_is_gc(ws, n) {
+            } else if !matches!(
+                value_storage_for_nominal(ws, bone_semantic::hir::FnBackend::Lua, n),
+                Some(ValueStorage::CData)
+            ) {
                 Err(format!(
                     "`native_buffer_alloc<{n}>` is invalid: `{n}` is a GC-carrying `value` struct \
                      (no C layout), so `ffi.new(\"{n}[?]\")` names no ctype."

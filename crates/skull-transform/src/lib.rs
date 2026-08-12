@@ -603,7 +603,14 @@ pub fn flatten_nobox_nested_ctors(ws: &Workspace, func: &mut MirFunc) -> bool {
         };
         // A GC-tier outer stores fields as table entries, so there is no cdata
         // to write leaves into; leave it for the verifier to reject.
-        if skull_mir::lower::value_struct_is_gc(ws, name) {
+        if !matches!(
+            skull_mir::lower::value_storage_for_nominal(
+                ws,
+                bone_semantic::hir::FnBackend::Lua,
+                name,
+            ),
+            Some(skull_mir::lower::ValueStorage::CData)
+        ) {
             continue;
         }
         let Some(paths) = skull_mir::lower::value_leaf_paths_of(ws, name) else { continue };

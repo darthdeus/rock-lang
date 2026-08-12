@@ -76,7 +76,13 @@ impl Builder<'_> {
         if !(self.ws.has_embed_fields || self.ws.has_nobox_types) {
             return None;
         }
-        if !spliced && self.is_value_struct(sname) && !value_struct_is_leaf_table(self.ws, sname) {
+        if !spliced
+            && self.is_value_struct(sname)
+            && !matches!(
+                value_storage_for_nominal(self.ws, self.scx.target, sname),
+                Some(ValueStorage::LeafTable)
+            )
+        {
             return None;
         }
         let sid = *self.ws.struct_by_name.get(&sname)?;

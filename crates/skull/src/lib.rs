@@ -539,7 +539,7 @@ end
 /// Map a value-struct field type to a C type for `ffi.cdef`, or `None` when the
 /// field is not C-layout-mappable. Delegates to the single mappability oracle
 /// `skull_mir::lower::value_field_c_type` (shared with the GC-tier
-/// classification `value_struct_is_gc`, so the cdef view and the pack-site
+/// shared `ValueStorage` classification, so the cdef view and the pack-site
 /// `_ct`/`_vt` choice can never diverge).
 fn c_field_type(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> Option<String> {
     skull_mir::lower::value_field_c_type(ws, ty)
@@ -630,7 +630,7 @@ fn leaf_ctor_def(name: ustr::Ustr, paths: &[ustr::Ustr]) -> String {
 ///   `ffi.metatype`/`ffi.istype` on an undeclared ctype errors).
 /// - `gc_emitted` -- the GC-carrying (table-repr) names, materialized by
 ///   `value_struct_gc_defs` as `<Name>_vt` table ctors (the tier is decided by
-///   `skull_mir::lower::value_struct_is_gc`; this replaces the old silent
+///   `skull_mir::lower::ValueStorage`; this replaces the old silent
 ///   skip-then-`Name_ct`-nil-crash, unfuck backlog #51).
 ///
 /// C requires a nested struct's typedef to precede its use, so FFI-clean
@@ -654,7 +654,14 @@ fn value_struct_defs(
     // (`_vt`), never as cdef, so only FFI-clean structs enter the ordering.
     let mut ffi_structs = Vec::new();
     for s in vstructs {
-        if skull_mir::lower::value_struct_is_gc(ws, s.name) {
+        if !matches!(
+            skull_mir::lower::value_storage_for_nominal(
+                ws,
+                bone_semantic::hir::FnBackend::Lua,
+                s.name,
+            ),
+            Some(skull_mir::lower::ValueStorage::CData)
+        ) {
             gc.insert(s.name);
         } else {
             ffi_structs.push(s);
@@ -674,9 +681,9 @@ fn value_struct_defs(
             let mut blocked = false;
             for f in &s.fields {
                 // An FFI-clean struct has every field C-mappable by construction
-                // (that is what `value_struct_is_gc == false` means).
+                // (that is what the `CData` storage plan means).
                 let ct = c_field_type(ws, f.ty).expect(
-                    "FFI-clean value-struct field must be C-mappable (value_struct_is_gc invariant)",
+                    "FFI-clean value-struct field must be C-mappable (CData storage invariant)",
                 );
                 let dep = ustr::Ustr::from(ct.as_str());
                 if ffi_names.contains(&dep) && !emitted.contains(&dep) {
@@ -806,7 +813,14 @@ fn value_struct_gc_defs(ws: &Workspace, gc: &rustc_hash::FxHashSet<ustr::Ustr>) 
         out.push_str(&format!("{mt} = {mt} or {{}}\n"));
         // A leaf-table struct has no declared-field keys to compare or print, so
         // both metamethods and its ctor run off the leaf paths instead.
-        if skull_mir::lower::value_struct_is_leaf_table(ws, n) {
+        if matches!(
+            skull_mir::lower::value_storage_for_nominal(
+                ws,
+                bone_semantic::hir::FnBackend::Lua,
+                n,
+            ),
+            Some(skull_mir::lower::ValueStorage::LeafTable)
+        ) {
             let paths = skull_mir::lower::value_leaf_paths_of(ws, n).unwrap_or_default();
             out.push_str(&format!("{mt}.__eq = function(a, b)\n"));
             out.push_str(

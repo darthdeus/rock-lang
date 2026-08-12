@@ -32,7 +32,9 @@
 //! game emit paths).
 
 
-use skull_mir::lower::{nobox_global_accessor_shape, value_struct_is_gc, NoboxGlobalAccessorShape};
+use skull_mir::lower::{
+    nobox_global_accessor_shape, value_storage_for_nominal, NoboxGlobalAccessorShape, ValueStorage,
+};
 use bone_semantic::inference::Workspace;
 
 /// The parent must carry more than four leaves so it exceeds the column budget,
@@ -104,10 +106,13 @@ fn a_zero_data_leaf_child_defeats_both_punctuation_proxies() {
         !acc.paths.iter().any(|p| p.contains('.')),
         "the dotted proxy sees a flat path list here"
     );
-    assert!(value_struct_is_gc(&ws, acc.ty_name), "so the old rule reached its `_vt` arm");
+    assert!(matches!(
+        value_storage_for_nominal(&ws, bone_semantic::hir::FnBackend::Lua, acc.ty_name),
+        Some(ValueStorage::GcTable | ValueStorage::LeafTable)
+    ));
     assert_eq!(
         acc.ctor_suffix, "_lct",
-        "`value_struct_is_leaf_table` -- THE oracle for the `_lct` ctor -- says leaf-table"
+        "the shared physical storage plan says this is a leaf-table value"
     );
     // And a presence tag does NOT make it unbuildable: `_lct` takes tags like any
     // other leaf. Measured end-to-end -- this global round-trips through

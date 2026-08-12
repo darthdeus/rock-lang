@@ -1528,7 +1528,12 @@ impl Builder<'_> {
             // box the nullable `nobox` child under its declared name -- the
             // guarantee's violation, and the only reason this struct is
             // GC-tier at all.
-            ValueRepr::Group { name, .. } if value_struct_is_leaf_table(self.ws, name) => {
+            ValueRepr::Group { name, .. }
+                if matches!(
+                    value_storage_for_nominal(self.ws, self.scx.target, name),
+                    Some(ValueStorage::LeafTable)
+                ) =>
+            {
                 let shape = self
                     .nominal_rep_shape(name, false)
                     .expect("a leaf-table struct has a shape");
@@ -1791,7 +1796,11 @@ impl Builder<'_> {
         // A leaf-table box stores one key per leaf, so the split IS the key
         // reads -- the exact inverse of the `<Name>_lct` ctor, including the
         // presence key at a nullable child's own name.
-        if value_struct_is_leaf_table(self.ws, shape.name) && !shape.nullable {
+        if matches!(
+            value_storage_for_nominal(self.ws, self.scx.target, shape.name),
+            Some(ValueStorage::LeafTable)
+        ) && !shape.nullable
+        {
             return value_leaf_paths(shape)
                 .into_iter()
                 .map(|path| self.emit_cur(Inst::Field { base: v, field: path }))

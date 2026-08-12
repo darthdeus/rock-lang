@@ -20,7 +20,7 @@ use skull_mir::lower::{
     BackendFnAbiPlan, ContainerFamily, ContainerPlan, ContainerStorage, GlobalPlan, RepArena,
     RepGuarantees,
     declared_boundary_class, boundary_requires_boxed_representation, BoundaryClass, EnumLayout,
-    EnumPlan, RepLayout, RepUse, RepUseFacts, ScalarCtx,
+    EnumPlan, RepLayout, RepUse, RepUseFacts, ScalarCtx, ValueStorage,
 };
 use skull_mir::mir::FuncRef;
 use skull_mir::monoty::{MonoCtor, MonoTy};
@@ -591,6 +591,7 @@ fn aggregate_value_projection_has_an_owned_value_context() {
         .expect("a concrete aggregate value must have a physical plan");
     let plan = arena.get(id);
     assert_eq!(plan.use_context(), RepUse::Value);
+    assert_eq!(plan.value_storage(), Some(ValueStorage::CData));
     assert!(matches!(plan.layout(), RepLayout::Leaves(_)), "aggregate plan must carry leaves");
 }
 

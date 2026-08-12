@@ -710,7 +710,10 @@ fn native_buffer_alloc_elem_ctype_mono(
     if !map_is_value_struct(ws, name) {
         return Err(format!("`native_buffer_alloc<{name}>` is invalid: `{name}` is not a `value` struct."));
     }
-    if value_struct_is_gc(ws, name) {
+    if !matches!(
+        value_storage_for_nominal(ws, bone_semantic::hir::FnBackend::Lua, name),
+        Some(ValueStorage::CData)
+    ) {
         return Err(format!(
             "`native_buffer_alloc<{name}>` is invalid: `{name}` is a GC-carrying `value` \
              struct (immutable Lua table) with no C layout, so `ffi.new(\"{name}[?]\")` \

@@ -4,9 +4,9 @@
 //! tier decisions every emitter consults.
 //!
 //! Nothing here builds MIR. It answers "what does this type look like", which is
-//! why four other crates depend on it: `value_struct_is_leaf_table` in particular
-//! documents itself as THE oracle that the `_lct` ctor, the leaf-form pack site
-//! and the flat read all consult, so the write and read encodings cannot diverge.
+//! why four other crates depend on it: the physical value-storage plan is shared
+//! by the ABI planner, pack sites and backend scaffolding, so the write and read
+//! encodings cannot diverge.
 
 use super::*;
 
@@ -597,6 +597,16 @@ pub struct ValueShape {
     pub(crate) nullable: bool,
 }
 
+/// Physical materialization selected for a value-shaped nominal. The target is
+/// carried by the owning `RepPlan`; this enum is the operational vocabulary its
+/// consumers use after planning.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ValueStorage {
+    CData,
+    GcTable,
+    LeafTable,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum FieldShape {
     Prim,
@@ -750,20 +760,39 @@ pub(crate) fn value_shape(ws: &Workspace, name: Ustr) -> Option<ValueShape> {
         })
 }
 
-/// Whether `name` is a GC-FREE (all-scalar) value struct: every leaf is a
-/// primitive or a nested all-scalar value struct, so no field is a boxed
-/// string/array/nullable/generic slot. Such a struct is byte-value comparable,
-/// so a plain-object emission plus structural deep-eq reproduces luajit's
-/// value-eq exactly. Backends (skull-codegen-js T8b) gate value-struct emission
-/// on this: a GC-carrying value struct compares its pointer fields by REFERENCE
-/// on luajit, which a generic contents-eq cannot reproduce.
-pub fn value_struct_is_gc_free(ws: &Workspace, name: Ustr) -> bool {
-    value_shape(ws, name).is_some()
+/// The target/context-specific physical storage of a nominal value. This is
+/// the one classification used by RepPlan projections and backend scaffolding;
+/// callers must not rediscover `_ct`, `_vt` or `_lct` from field syntax.
+pub fn value_storage_for_nominal(
+    ws: &Workspace,
+    _target: bone_semantic::hir::FnBackend,
+    name: Ustr,
+) -> Option<ValueStorage> {
+    if let Some(plan) = EnumPlan::for_name(ws, name) {
+        return match plan.layout() {
+            EnumLayout::Cdata(_) => Some(ValueStorage::CData),
+            EnumLayout::Flat(_) => Some(ValueStorage::GcTable),
+            EnumLayout::PayloadFree | EnumLayout::Boxed => None,
+        };
+    }
+    let sid = *ws.struct_by_name.get(&name)?;
+    let s = &ws.modules[sid.module.index()].structs[sid.def];
+    if !s.is_value {
+        return None;
+    }
+    if !value_storage_is_gc_guarded(ws, name, &mut Vec::new()) {
+        return Some(ValueStorage::CData);
+    }
+    if s.generics.is_empty() && value_shape_rec(ws, name, &mut Vec::new()).is_some() {
+        Some(ValueStorage::LeafTable)
+    } else {
+        Some(ValueStorage::GcTable)
+    }
 }
 
 /// Declaration field order of `name` iff it is a GC-free value STRUCT proper --
-/// NOT an enum value-shape (which `value_struct_is_gc_free` also accepts via the
-/// `enum_value_shape` fallback). `value_shape_rec` is struct-only (it requires a
+/// NOT an enum value-shape (which `value_storage_for_nominal` also classifies via
+/// the enum layout). `value_shape_rec` is struct-only (it requires a
 /// `struct_by_name` entry), so this cleanly separates the two: a genuine value
 /// struct renders `Name { f: v }` colon-format on JS, an enum box still rejects.
 pub fn gc_free_value_struct_field_order(ws: &Workspace, name: Ustr) -> Option<Vec<Ustr>> {
@@ -830,7 +859,7 @@ pub(crate) fn value_shape_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ust
     })
 }
 
-/// The scalar-ABI shape of a GC-CARRYING value struct (`value_struct_is_gc`):
+/// The scalar-ABI shape of a GC-CARRYING value struct:
 /// every declared field is ONE leaf -- a `Prim` for a scalar, generic `T`,
 /// array/arena/map, or string (a single boxed slot), or `Nested` for a nested
 /// value struct / cdata enum field (which threads its own leaves). Uniform
@@ -846,7 +875,7 @@ pub(crate) fn value_shape_gc(ws: &Workspace, name: Ustr) -> Option<ValueShape> {
 }
 
 pub(crate) fn value_shape_gc_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> Option<ValueShape> {
-    if !value_struct_is_gc(ws, name) {
+    if !value_storage_is_gc_guarded(ws, name, &mut Vec::new()) {
         return None;
     }
     let sid = *ws.struct_by_name.get(&name)?;
@@ -1326,8 +1355,8 @@ pub struct NoboxGlobalAccessorShape {
     pub ty_name: Ustr,
     pub paths: Vec<Ustr>,
     pub nullable: bool,
-    /// From [`value_struct_is_leaf_table`] and [`value_struct_is_gc`] -- the
-    /// oracles the `_lct` ctor and the leaf-form pack site already consult.
+    /// From the shared physical storage classification -- the same answer the
+    /// `_lct` ctor and the leaf-form pack site consume.
     pub ctor_suffix: &'static str,
     /// The path of a leaf that is a nullable child's PRESENCE tag, if any. From
     /// [`value_leaf_presence_flags`], positionally. Informational: a leaf-table
@@ -1354,12 +1383,11 @@ pub fn nobox_global_accessor_shape(ws: &Workspace, ty: TyId) -> Option<NoboxGlob
     let flags = if shape.nullable { &flags[1..] } else { &flags[..] };
     let presence_path =
         flags.iter().zip(paths.iter()).find(|(is_tag, _)| **is_tag).map(|(_, p)| *p);
-    let ctor_suffix = if value_struct_is_leaf_table(ws, shape.name) {
-        "_lct"
-    } else if value_struct_is_gc(ws, shape.name) {
-        "_vt"
-    } else {
-        "_ct"
+    let storage = value_storage_for_nominal(ws, bone_semantic::hir::FnBackend::Lua, shape.name)?;
+    let ctor_suffix = match storage {
+        ValueStorage::LeafTable => "_lct",
+        ValueStorage::GcTable => "_vt",
+        ValueStorage::CData => "_ct",
     };
     let unbuildable = (ctor_suffix != "_lct" && paths.iter().any(|p| p.contains('.'))).then(|| {
         format!(
@@ -2297,7 +2325,7 @@ fn build_enum_cdata_shape(ws: &Workspace, name: Ustr) -> Option<EnumCdataShape> 
 /// The C type for a `value`-struct field, or `None` when the field is NOT
 /// C-layout-mappable (`[T]`, `Arena<T>`, `Map`, `string`, a generic `T`, or a
 /// GC-carrying nested value struct). This is the single mappability oracle:
-/// skull's cdef emission uses the string, and [`value_struct_is_gc`] classifies
+/// skull's cdef emission uses the string, and the shared storage plan classifies
 /// a struct GC-carrying when any field maps to `None`. Mirrors rock's
 /// `rock_type_to_c_type`. A nested payload-free enum stores as its int tag; a
 /// cdata-eligible payload enum nests its own `{__tag, _0}` ctype.
@@ -2315,7 +2343,7 @@ pub(crate) fn value_field_c_type_guarded(ws: &Workspace, ty: TyId, stack: &mut V
         // GC-carrying nested value struct makes this field (and its parent)
         // GC-carrying too.
         TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } if map_is_value_struct(ws, name) => {
-            if value_struct_is_gc_guarded(ws, name, stack) {
+            if value_storage_is_gc_guarded(ws, name, stack) {
                 None
             } else {
                 Some(name.as_str().to_string())
@@ -2335,41 +2363,6 @@ pub(crate) fn value_field_c_type_guarded(ws: &Workspace, ty: TyId, stack: &mut V
     }
 }
 
-/// Whether a `value` struct is GC-CARRYING (table-repr tier): it is generic, or
-/// any field is not C-layout-mappable (transitively). FFI-clean is the negation:
-/// non-generic AND every field C-mappable. `false` for a non-value / unknown
-/// name. The tier is static per type and decided once here -- every pack site
-/// (`Name_ct` vs `Name_vt`) and the prelude emission consult this one oracle.
-pub fn value_struct_is_gc(ws: &Workspace, name: Ustr) -> bool {
-    value_struct_is_gc_guarded(ws, name, &mut Vec::new())
-}
-
-/// A GC-tier value struct that nonetheless has a FULL leaf shape, so it stores
-/// flat: one table key per [`value_leaf_paths`] entry (dotted for a nested
-/// field, the field's own name for a nullable child's presence tag) instead of
-/// one key per declared field.
-///
-/// The only shape that lands here is a nullable `nobox` field: presence is not a
-/// C slot, so the outer cannot be cdata, while every leaf below it is still a
-/// primitive. Every other GC cause -- a string/array/generic field -- has no
-/// leaf shape at all and keeps the declared-field `<Name>_vt` table. Generics
-/// are excluded outright: a `value Wrap<T = int> { a: float }` has a leaf shape
-/// and is GC-tier for a reason that has nothing to do with leaves.
-///
-/// This is the ONE oracle: the `<Name>_lct` table ctor, the leaf-form pack site,
-/// and the flat read all consult it, so the write and read encodings cannot
-/// diverge.
-pub fn value_struct_is_leaf_table(ws: &Workspace, name: Ustr) -> bool {
-    if !value_struct_is_gc(ws, name) {
-        return false;
-    }
-    let Some(sid) = ws.struct_by_name.get(&name) else { return false };
-    if !ws.modules[sid.module.index()].structs[sid.def].generics.is_empty() {
-        return false;
-    }
-    value_shape_rec(ws, name, &mut Vec::new()).is_some()
-}
-
 /// Whether a value-struct field is compared STRUCTURALLY in a GC-tier `__eq`
 /// (`==`, which for scalars/enums is value-equality and for a nested value
 /// struct fires that struct's own metatable), versus BY REFERENCE (`rawequal`).
@@ -2379,7 +2372,7 @@ pub fn value_struct_is_leaf_table(ws: &Workspace, name: Ustr) -> bool {
 /// matches), and the contract fixes GC-refs to identity. Consumed by BOTH the
 /// Lua GC-tier `_vt.__eq` emitter (`skull::value_struct_gc_defs`) and the JS
 /// `__rock_vt_eq` registry -- the single field-dispatch oracle, sibling to
-/// [`value_struct_is_gc`].
+/// the shared physical storage plan.
 pub fn gc_eq_is_structural(ws: &Workspace, ty: TyId) -> bool {
     if value_field_c_type(ws, ty).is_some() {
         return true;
@@ -2390,7 +2383,7 @@ pub fn gc_eq_is_structural(ws: &Workspace, ty: TyId) -> bool {
     )
 }
 
-pub(crate) fn value_struct_is_gc_guarded(ws: &Workspace, name: Ustr, stack: &mut Vec<Ustr>) -> bool {
+pub(crate) fn value_storage_is_gc_guarded(ws: &Workspace, name: Ustr, stack: &mut Vec<Ustr>) -> bool {
     let Some(sid) = ws.struct_by_name.get(&name) else {
         return false;
     };

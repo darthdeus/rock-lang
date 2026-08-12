@@ -27,7 +27,7 @@ use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::Span;
 use ustr::Ustr;
 
-use super::{slot_param_names, RetSlot, ScalarCtx, SpecSubst, TupleRetShape, ValueShape};
+use super::{slot_param_names, value_storage_for_nominal, RetSlot, ScalarCtx, SpecSubst, TupleRetShape, ValueShape, ValueStorage};
 use crate::concrete::ConcreteBodyPlan;
 use crate::mir::FuncRef;
 
@@ -159,6 +159,7 @@ pub struct RepPlan {
     target: FnBackend,
     use_context: RepUse,
     layout: RepLayout,
+    storage: Option<ValueStorage>,
 }
 
 impl RepPlan {
@@ -176,6 +177,10 @@ impl RepPlan {
 
     pub fn layout(&self) -> &RepLayout {
         &self.layout
+    }
+
+    pub fn value_storage(&self) -> Option<ValueStorage> {
+        self.storage
     }
 
     pub fn lanes(&self, arena: &RepArena) -> usize {
@@ -316,7 +321,7 @@ impl FunctionRepPlan {
 #[derive(Debug, Default)]
 struct RepArenaInner {
     plans: Vec<RepPlan>,
-    by_key: HashMap<(FnBackend, RepUse, RepLayout), RepId>,
+    by_key: HashMap<(FnBackend, RepUse, RepLayout, Option<ValueStorage>), RepId>,
 }
 
 /// The one build-scoped physical representation arena.  `ScalarCtx` owns the
@@ -327,15 +332,40 @@ pub struct RepArena {
     inner: Mutex<RepArenaInner>,
 }
 
+fn mono_value_storage(
+    ws: &Workspace,
+    target: FnBackend,
+    ty: &crate::monoty::MonoTy,
+) -> Option<ValueStorage> {
+    let (payload, _) = ty.peel_nullable();
+    let crate::monoty::MonoTy::App {
+        ctor: crate::monoty::MonoCtor::Nominal(name), ..
+    } = payload
+    else {
+        return None;
+    };
+    value_storage_for_nominal(ws, target, *name)
+}
+
 impl RepArena {
     fn intern(&self, target: FnBackend, use_context: RepUse, layout: RepLayout) -> RepId {
+        self.intern_with_storage(target, use_context, layout, None)
+    }
+
+    fn intern_with_storage(
+        &self,
+        target: FnBackend,
+        use_context: RepUse,
+        layout: RepLayout,
+        storage: Option<ValueStorage>,
+    ) -> RepId {
         let mut inner = self.inner.lock().expect("RepArena lock poisoned");
-        let key = (target, use_context, layout.clone());
+        let key = (target, use_context, layout.clone(), storage);
         if let Some(id) = inner.by_key.get(&key) {
             return *id;
         }
         let id = RepId(inner.plans.len() as u32);
-        inner.plans.push(RepPlan { id, target, use_context, layout });
+        inner.plans.push(RepPlan { id, target, use_context, layout, storage });
         inner.by_key.insert(key, id);
         id
     }
@@ -433,7 +463,13 @@ impl RepArena {
                         crate::lower::mono_value_shape(ws, ty)
                     };
                     if let Some(shape) = shape {
-                        return Ok(self.intern(target, use_context, RepLayout::Leaves(shape)));
+                        let storage = mono_value_storage(ws, target, ty);
+                        return Ok(self.intern_with_storage(
+                            target,
+                            use_context,
+                            RepLayout::Leaves(shape),
+                            storage,
+                        ));
                     }
                     if guarantees.nobox && !guarantees.allow_opaque {
                         return Err(reject(format!(
@@ -480,7 +516,13 @@ impl RepArena {
                     crate::lower::mono_value_shape(ws, ty)
                 };
                 if let Some(shape) = shape {
-                    return Ok(self.intern(target, use_context, RepLayout::Leaves(shape)));
+                    let storage = mono_value_storage(ws, target, ty);
+                    return Ok(self.intern_with_storage(
+                        target,
+                        use_context,
+                        RepLayout::Leaves(shape),
+                        storage,
+                    ));
                 }
                 if guarantees.nobox && !guarantees.allow_opaque {
                     return Err(reject(format!(

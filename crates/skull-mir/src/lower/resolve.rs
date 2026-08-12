@@ -338,7 +338,12 @@ impl Builder<'_> {
                 if let ValueRepr::Scalar(v) = br {
                     match self
                         .value_struct_name_of(base)
-                        .filter(|n| value_struct_is_leaf_table(self.ws, *n))
+                        .filter(|n| {
+                            matches!(
+                                value_storage_for_nominal(self.ws, self.scx.target, *n),
+                                Some(ValueStorage::LeafTable)
+                            )
+                        })
                     {
                         Some(sname) => br = self.boxed_value_copy_repr(v, sname),
                         None => br = ValueRepr::Scalar(v),
