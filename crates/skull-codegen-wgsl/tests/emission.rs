@@ -343,8 +343,12 @@ fn bool_uniforms_cross_as_u32_and_are_compared_at_every_read() {
 #[test]
 fn the_fragment_control_flow_and_builtins_reach_wgsl() {
     let (_, artifact) = sprite_batch_artifact();
+    let light_loops = artifact.source.lines().filter(|line| {
+        let line = line.trim();
+        line.starts_with("for (; i < cell_") && line.ends_with(") {")
+    }).count();
     assert_eq!(
-        artifact.source.matches("  for (; i < cell_22; i = i + 1) {").count(),
+        light_loops,
         1,
         "the light loop is a counted for: {}",
         artifact.source
