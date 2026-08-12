@@ -4144,7 +4144,7 @@ impl<'a> FunctionEmitter<'a> {
                 if self.stage.stage == ShaderStage::Compute {
                     Ok(format!("i32(floor({}))", self.render_val(*value)?))
                 } else {
-                    Ok(format!("int({})", self.render_val(*value)?))
+                    Ok(format!("i32({})", self.render_val(*value)?))
                 }
             }
             Inst::IntToFloat(value) => {
