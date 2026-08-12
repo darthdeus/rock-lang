@@ -313,6 +313,57 @@ fn main() {
 }
 
 #[test]
+fn function_value_uses_the_owned_signature_representation() {
+    let ws = ws_of(
+        r#"
+nobox value Leaf { x: float, y: float }
+@scalar_abi fn nested(v: Leaf) -> Leaf { return v }
+fn apply(f: (Leaf) -> Leaf, v: Leaf) -> Leaf { return f(v) }
+fn main() {
+    let v = Leaf { x: 1.0, y: 2.0 }
+    print("{apply(nested, v).x}")
+}
+"#,
+    );
+    let scx = ScalarCtx::new(&ws);
+    let nested = BackendFnAbiPlan::for_instance(
+        &ws,
+        &scx,
+        &Instance::base(func_ref(&ws, "nested")),
+    );
+    let leaf = nominal("Leaf");
+    let fn_value = BackendFnAbiPlan::for_function_value(
+        &ws,
+        &scx,
+        &MonoTy::Function { params: vec![leaf.clone()], ret: Box::new(leaf) },
+    )
+    .expect("function type must have a total physical plan");
+    assert_eq!(
+        fn_value.params(),
+        nested.representation().params(),
+        "an indirect caller must use the callee's parameter RepIds"
+    );
+    assert_eq!(
+        fn_value.result(),
+        nested.representation().result(),
+        "an indirect caller must use the callee's result RepId"
+    );
+    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
+    let lowered = skull_mir::lower::lower_function_source(
+        &ws,
+        &scx,
+        mid,
+        func_ref(&ws, "apply").func,
+    )
+    .expect("function-value call must lower");
+    let call = lowered.insts.iter().find_map(|(_, inst)| match inst {
+        skull_mir::mir::Inst::CallValueMulti { args, .. } => Some(args.len()),
+        _ => None,
+    });
+    assert_eq!(call, Some(2), "the indirect callee must splat Leaf through its owned plan");
+}
+
+#[test]
 fn concrete_rep_planner_is_total_over_the_logical_type_vocabulary() {
     let ws = ws_of("nobox value V2 { x: float, y: float }");
     let arena = RepArena::default();

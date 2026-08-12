@@ -267,25 +267,6 @@ impl Builder<'_> {
         }
     }
 
-    /// `Some` iff `e` is a lambda whose RETURN type is a (non-nullable) tuple --
-    /// the lambda body then splats its slots so an indirect call site captures
-    /// them (multi-return ABI). Read off the lambda's inferred `fn(..) -> (..)`
-    /// type so it agrees with the call site's `expr_tuple_shape`.
-    pub(crate) fn lambda_ret_tuple_shape(&self, e: Idx<Expr>) -> Option<TupleRetShape> {
-        if let Some(MonoTy::Function { ret, .. }) = self.concrete_expr_ty(e) {
-            if let MonoTy::Tuple(parts) = *ret {
-                return Some(mono_tuple_shape(self.ws, &parts));
-            }
-            return None;
-        }
-        if self.concrete_plan.is_some() {
-            return None;
-        }
-        let ty = self.resolve_tyid(*self.inf?.expr_types.get(e)?)?;
-        let TypeExpr::Function { ret, .. } = self.ty_node(ty)? else { return None };
-        self.tyid_tuple_ret_shape(self.resolve_tyid(ty.with_idx(ret))?)
-    }
-
     /// [`tuple_ret_shape`] for a type that may live in the BODY's inference arena
     /// (a call expression's own type, a lambda's return) rather than the
     /// workspace one. Concrete expression tables resolve generic elements from

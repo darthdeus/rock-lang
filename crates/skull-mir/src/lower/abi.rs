@@ -203,6 +203,34 @@ impl RepArena {
             .expect("RepId must belong to its build arena")
     }
 
+    pub(crate) fn ret_slot(&self, id: RepId) -> RetSlot {
+        match self.get(id).layout().clone() {
+            RepLayout::Opaque | RepLayout::Foreign { .. } => RetSlot::Opaque,
+            RepLayout::Leaves(shape) => RetSlot::Leaves(shape),
+            RepLayout::Tuple { slots, nullable } => RetSlot::Nested(TupleRetShape {
+                slots: slots.into_iter().map(|slot| self.ret_slot(slot)).collect(),
+                nullable,
+            }),
+        }
+    }
+
+    pub(crate) fn value_shape(&self, id: RepId) -> Option<ValueShape> {
+        match self.get(id).layout() {
+            RepLayout::Leaves(shape) => Some(shape.clone()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn tuple_shape(&self, id: RepId) -> Option<TupleRetShape> {
+        match self.get(id).layout().clone() {
+            RepLayout::Tuple { slots, nullable } => Some(TupleRetShape {
+                slots: slots.into_iter().map(|slot| self.ret_slot(slot)).collect(),
+                nullable,
+            }),
+            _ => None,
+        }
+    }
+
     /// Total physical planning for one concrete logical type. `Opaque` is an
     /// explicit representation, not an absent answer; only a guarantee that
     /// forbids that representation can produce an error.
@@ -235,7 +263,7 @@ impl RepArena {
                         })
                         .collect::<Result<Vec<_>, _>>()?;
                     let splats = slots.iter().any(|id| self.get(*id).lanes(self) > 1);
-                    if matches!(use_context, RepUse::Return) || (facts.tuple_spelled && splats) {
+                    if splats && (matches!(use_context, RepUse::Return) || facts.tuple_spelled) {
                         return Ok(self.intern(
                             target,
                             use_context,
@@ -288,7 +316,7 @@ impl RepArena {
                     ));
                 }
                 if guarantees.nobox && !facts.tuple_spelled {
-                    return Err(reject("tuple parameter is not physically spelled at a nobox boundary".into()));
+                    return Ok(self.intern(target, use_context, RepLayout::Opaque));
                 }
                 Ok(self.intern(target, use_context, RepLayout::Opaque))
             }
@@ -302,7 +330,7 @@ impl RepArena {
                     return Ok(self.intern(target, use_context, RepLayout::Leaves(shape)));
                 }
                 if guarantees.nobox {
-                    return Err(reject(format!("{} has no concrete nobox representation", ty.render())));
+                    return Ok(self.intern(target, use_context, RepLayout::Opaque));
                 }
                 Ok(self.intern(target, use_context, RepLayout::Opaque))
             }
@@ -343,6 +371,56 @@ impl RepArena {
         self.intern(target, use_context, RepLayout::Tuple { slots, nullable: shape.nullable })
     }
 
+    pub fn function_value(
+        &self,
+        ws: &Workspace,
+        target: FnBackend,
+        ty: &crate::monoty::MonoTy,
+    ) -> Result<FunctionRepPlan, RepError> {
+        let (ty, _) = ty.peel_nullable();
+        let crate::monoty::MonoTy::Function { params, ret } = ty else {
+            return Err(RepError {
+                span: None,
+                message: "a function-value representation requires a function type".into(),
+            });
+        };
+        let params = params
+            .iter()
+            .map(|param| {
+                let tuple_spelled = mono_tuple_ret_shape(ws, param)
+                    .is_some_and(|shape| shape.splats());
+                self.plan(
+                    ws,
+                    target,
+                    param,
+                    RepUse::Parameter,
+                    &RepUseFacts { tuple_spelled, span: None },
+                    RepGuarantees { nobox: true },
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let result = self.plan(
+            ws,
+            target,
+            ret,
+            RepUse::Return,
+            &RepUseFacts {
+                tuple_spelled: mono_tuple_ret_shape(ws, ret).is_some(),
+                span: None,
+            },
+            RepGuarantees { nobox: true },
+        )?;
+        let scalar_abi = params.iter().any(|id| !matches!(self.get(*id).layout(), RepLayout::Opaque))
+            || matches!(self.get(result).layout(), RepLayout::Leaves(_));
+        let return_lanes = self.get(result).lanes(self);
+        Ok(FunctionRepPlan {
+            params,
+            result: Some(result),
+            return_lanes,
+            scalar_abi,
+        })
+    }
+
     fn function(
         &self,
         target: FnBackend,
@@ -380,6 +458,23 @@ impl RepArena {
         };
         let return_lanes = result.map_or(0, |id| self.get(id).lanes(self));
         FunctionRepPlan { params, result, return_lanes, scalar_abi: scalar.is_some() }
+    }
+
+    pub(crate) fn function_value_legacy(
+        &self,
+        target: FnBackend,
+        param_shapes: Vec<RetSlot>,
+        ret_shape: Option<ValueShape>,
+        ret_tuple: Option<&TupleRetShape>,
+        param_count: usize,
+    ) -> FunctionRepPlan {
+        let scalar = (ret_shape.is_some() || param_shapes.iter().any(RetSlot::splats))
+            .then_some(FnScalarAbi {
+                param_shapes,
+                ret_shape,
+                nobox_only: true,
+            });
+        self.function(target, scalar.as_ref(), ret_tuple, param_count, true)
     }
 
     fn function_from_concrete(
@@ -743,6 +838,14 @@ impl BackendFnAbiPlan {
     /// than a different answer.
     pub fn for_declaration(ws: &Workspace, scx: &ScalarCtx, decl: FuncRef) -> Self {
         Self::for_instance(ws, scx, &crate::instance::Instance::base(decl))
+    }
+
+    pub fn for_function_value(
+        ws: &Workspace,
+        scx: &ScalarCtx,
+        ty: &crate::monoty::MonoTy,
+    ) -> Result<FunctionRepPlan, RepError> {
+        scx.rep_arena().function_value(ws, scx.target, ty)
     }
 
     fn assemble(

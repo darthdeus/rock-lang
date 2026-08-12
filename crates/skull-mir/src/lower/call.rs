@@ -658,8 +658,10 @@ impl Builder<'_> {
                     .get(&raw(b))
                     .ok_or_else(|| gap("call to an unbound fn-typed local"))?;
                 let callee_v = self.emit_cur(Inst::Load(cell));
-                if let Some(abi) = self.binding_ty(b).and_then(|t| self.fn_value_abi(t)) {
-                    return self.indirect_call_by_abi(abi, callee_v, &arg_idxs);
+                if let Some(abi) = self.fn_value_rep_plan(self.binding_ty(b).ok_or_else(|| {
+                    gap("fn-typed local has no physical function signature")
+                })?)? {
+                    return self.indirect_call_by_plan(abi, callee_v, &arg_idxs);
                 }
                 // Nothing `nobox` in the signature -- args are boxed.
                 let arg_vals: Vec<Idx<Inst>> =
@@ -669,10 +671,12 @@ impl Builder<'_> {
             }
             // A fn-typed expression result: lower it, call through it.
             Callee::Value(ve) => {
-                let abi = self.expr_fn_value_abi(ve);
+                let abi = self.fn_value_rep_plan(*self.inf
+                    .and_then(|inf| inf.expr_types.get(ve))
+                    .ok_or_else(|| gap("fn-valued expression has no physical function signature"))?)?;
                 let callee_v = self.lower_expr(ve)?;
                 if let Some(abi) = abi {
-                    return self.indirect_call_by_abi(abi, callee_v, &arg_idxs);
+                    return self.indirect_call_by_plan(abi, callee_v, &arg_idxs);
                 }
                 let arg_vals: Vec<Idx<Inst>> =
                     arg_idxs.iter().map(|&a| self.lower_expr(a)).collect::<Result<_, _>>()?;
@@ -1203,18 +1207,34 @@ impl Builder<'_> {
     /// `CallValueMulti`, matching what the lambda/nested fn on the other end
     /// emitted from the SAME type. The callee is opaque here by construction --
     /// that is the whole point of keying on the type ([`Self::fn_value_abi`]).
-    pub(crate) fn indirect_call_by_abi(
+    pub(crate) fn indirect_call_by_plan(
         &mut self,
-        (param_shapes, ret_shape): (Vec<RetSlot>, Option<ValueShape>),
+        plan: FunctionRepPlan,
         callee: Idx<Inst>,
         arg_idxs: &[Idx<Expr>],
     ) -> Result<ValueRepr, CompilerError> {
+        let arena = self.scx.rep_arena();
         let mut argv = Vec::new();
         for (i, &a) in arg_idxs.iter().enumerate() {
-            let slot = param_shapes.get(i).cloned().unwrap_or(RetSlot::Opaque);
+            let slot = plan
+                .params()
+                .get(i)
+                .map(|id| arena.ret_slot(*id))
+                .unwrap_or(RetSlot::Opaque);
             argv.extend(self.arg_values_for_slot(&slot, a)?);
         }
-        let Some(shape) = ret_shape else {
+        let Some(result) = plan.result() else {
+            return Ok(ValueRepr::Scalar(self.emit_cur(Inst::CallValue { callee, args: argv })));
+        };
+        if let Some(shape) = arena.tuple_shape(result) {
+            let dests: Vec<Idx<Cell>> =
+                (0..shape.slot_count()).map(|_| self.f.new_cell(None)).collect();
+            self.emit_cur(Inst::CallValueMulti { dests: dests.clone(), callee, args: argv });
+            let loads: Vec<Idx<Inst>> =
+                dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
+            return Ok(self.tuple_result(&shape, &loads));
+        }
+        let Some(shape) = arena.value_shape(result) else {
             return Ok(ValueRepr::Scalar(self.emit_cur(Inst::CallValue { callee, args: argv })));
         };
         let dests: Vec<Idx<Cell>> =

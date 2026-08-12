@@ -500,15 +500,16 @@ impl Builder<'_> {
         func: FuncRef,
     ) -> Result<(), CompilerError> {
         let callee = &self.ws.module(func.module).functions[func.func];
-        let arity = callee.param_decls.len();
-        let boxed = || (vec![RetSlot::Opaque; arity], None);
         let plan = BackendFnAbiPlan::for_declaration(self.ws, self.scx, func);
-        let (def_params, def_ret) = match plan.scalar() {
-            Some(abi) => (abi.param_shapes.clone(), abi.ret_shape.clone()),
-            None => boxed(),
-        };
-        let (val_params, val_ret) = self.expr_fn_value_abi(e).unwrap_or_else(boxed);
-        if def_params == val_params && def_ret == val_ret {
+        let ty = self
+            .inf
+            .and_then(|inf| inf.expr_types.get(e))
+            .copied()
+            .ok_or_else(|| gap("a function value has no inferred function type"))?;
+        let value_plan = self
+            .fn_value_rep_plan(ty)?
+            .ok_or_else(|| gap("a function value does not have a function representation"))?;
+        if plan.representation() == &value_plan {
             return Ok(());
         }
         Err(CompilerError::new_with_label(
@@ -753,9 +754,15 @@ impl Builder<'_> {
         // `Nullable(Function(..))` while the same lambda bound to a local first
         // arrives as `Function(..)`. Without this peel the two spellings get
         // different ABIs and the literal packs its `nobox` return.
-        let ty = match self.ty_node(ty)? {
-            TypeExpr::Nullable(inner) => self.resolve_tyid(ty.with_idx(inner))?,
-            _ => ty,
+        let ty = match self.ty_node(ty) {
+            Some(TypeExpr::Nullable(inner)) => {
+                let Some(inner) = self.resolve_tyid(ty.with_idx(inner)) else {
+                    return None;
+                };
+                inner
+            }
+            Some(_) => ty,
+            None => return None,
         };
         let TypeExpr::Function { params, ret } = self.ty_node(ty)? else { return None };
         let ps: Vec<RetSlot> =
@@ -765,6 +772,49 @@ impl Builder<'_> {
             return None;
         }
         Some((ps, rs))
+    }
+
+    pub(crate) fn fn_value_rep_plan(
+        &self,
+        ty: TyId,
+    ) -> Result<Option<FunctionRepPlan>, CompilerError> {
+        if let Some(concrete) = self.concrete_ty_id(ty) {
+            return BackendFnAbiPlan::for_function_value(self.ws, self.scx, &concrete)
+                .map(Some)
+                .map_err(|error| match error.span.or(self.cur_span) {
+                    Some(span) => CompilerError::new_with_label(span, error.message),
+                    None => CompilerError::new_no_location(error.message),
+                });
+        }
+        if self.concrete_plan.is_some() {
+            return Ok(None);
+        }
+        let Some(ty) = self.resolve_tyid(ty) else { return Ok(None) };
+        let ty = match self.ty_node(ty) {
+            Some(TypeExpr::Nullable(inner)) => {
+                let Some(inner) = self.resolve_tyid(ty.with_idx(inner)) else {
+                    return Ok(None);
+                };
+                inner
+            }
+            Some(_) => ty,
+            None => return Ok(None),
+        };
+        let Some(TypeExpr::Function { params, ret }) = self.ty_node(ty) else {
+            return Ok(None);
+        };
+        let (param_shapes, ret_shape) = self
+            .fn_value_abi(ty)
+            .unwrap_or_else(|| (Vec::new(), None));
+        let ret_ty = ty.with_idx(ret);
+        let ret_tuple = self.tyid_tuple_ret_shape(ret_ty);
+        Ok(Some(self.scx.rep_arena().function_value_legacy(
+            self.scx.target,
+            param_shapes,
+            ret_shape,
+            ret_tuple.as_ref(),
+            params.into_iter().count(),
+        )))
     }
 
     fn fn_value_abi_mono(
@@ -799,14 +849,6 @@ impl Builder<'_> {
             return RetSlot::Leaves(shape);
         }
         self.tuple_param_slot_of_ty(ty)
-    }
-
-    /// [`Self::fn_value_abi`] for the fn VALUE an expression denotes.
-    pub(crate) fn expr_fn_value_abi(
-        &self,
-        e: Idx<Expr>,
-    ) -> Option<(Vec<RetSlot>, Option<ValueShape>)> {
-        self.fn_value_abi(*self.inf?.expr_types.get(e)?)
     }
 
     pub(crate) fn nobox_shape_of_ty(&self, ty: TyId) -> Option<ValueShape> {

@@ -413,7 +413,14 @@ impl Builder<'_> {
                 // gives its params. Decided by the lambda's own fn TYPE, which is
                 // what the call site reads too (`fn_value_abi`), so the two ends
                 // agree without either seeing the other.
-                let lam_abi = self.expr_fn_value_abi(e);
+                let lam_ty = self
+                    .inf
+                    .and_then(|inf| inf.expr_types.get(e))
+                    .copied()
+                    .ok_or_else(|| gap("lambda has no inferred function type"))?;
+                let lam_plan = self
+                    .fn_value_rep_plan(lam_ty)?
+                    .ok_or_else(|| gap("lambda does not have a function representation"))?;
                 // Param shapes come from the param BINDINGS, which is where a
                 // lambda's param types actually land -- its own `fn(..) -> ..`
                 // node can still hold unresolved vars at this point, while the
@@ -421,9 +428,13 @@ impl Builder<'_> {
                 // types the call site reads off the fn type.
                 let param_slots: Vec<RetSlot> = params
                     .into_iter()
-                    .map(|pb| {
-                        self.binding_ty(pb)
-                            .map_or(RetSlot::Opaque, |t| self.nobox_param_slot_of_ty(t))
+                    .enumerate()
+                    .map(|(i, _)| {
+                        lam_plan
+                            .params()
+                            .get(i)
+                            .map(|id| self.scx.rep_arena().ret_slot(*id))
+                            .unwrap_or(RetSlot::Opaque)
                     })
                     .collect();
                 // A lambda's params land in the SAME cell namespace as the
@@ -467,10 +478,9 @@ impl Builder<'_> {
                 // now -- `convert_closures` splits it out and the inliner runs
                 // over the standalone body -- but that happens after lowering, so
                 // this decision cannot see the specialized callee it would need.
-                self.ret_tuple = self.lambda_ret_tuple_shape(e);
-                // A `nobox` return leaves as leaves, same multi-return wire the
-                // tuple ABI uses and the same fn-TYPE key.
-                self.ret_shape = lam_abi.as_ref().and_then(|(_, rs)| rs.clone());
+                let arena = self.scx.rep_arena();
+                self.ret_tuple = lam_plan.result().and_then(|id| arena.tuple_shape(id));
+                self.ret_shape = lam_plan.result().and_then(|id| arena.value_shape(id));
                 if let Some(shape) = self.ret_shape.clone() {
                     let r = self.lower_expr_repr(body)?;
                     if self.is_open() {
