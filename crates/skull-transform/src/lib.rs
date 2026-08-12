@@ -1611,15 +1611,44 @@ fn raw<T>(i: Idx<T>) -> u32 {
     i.into_raw().into()
 }
 
+/// The physical frame layout chosen for one transformed coroutine body.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CoroutineFramePlan {
+    frame_cells: HashSet<Idx<Cell>>,
+    frame_slots: HashMap<Idx<Cell>, u32>,
+    layout_hash: i64,
+}
+
+impl CoroutineFramePlan {
+    fn new(
+        frame_cells: HashSet<Idx<Cell>>,
+        frame_slots: HashMap<Idx<Cell>, u32>,
+        layout_hash: i64,
+    ) -> Self {
+        Self { frame_cells, frame_slots, layout_hash }
+    }
+
+    pub fn fields(&self) -> &HashSet<Idx<Cell>> {
+        &self.frame_cells
+    }
+
+    pub fn slots(&self) -> &HashMap<Idx<Cell>, u32> {
+        &self.frame_slots
+    }
+
+    pub fn slot(&self, cell: Idx<Cell>) -> Option<u32> {
+        self.frame_slots.get(&cell).copied()
+    }
+
+    pub fn layout_hash(&self) -> i64 {
+        self.layout_hash
+    }
+}
+
 pub struct CoroLowered {
     pub step: MirFunc,
     pub s_cell: Idx<Cell>,
-    pub frame_cells: HashSet<Idx<Cell>>,
-    /// Frame cell -> dense slot: frame cells numbered 0.. by raw-id order.
-    /// Lambda-cell allocation shifts raw ids but never reorders existing frame
-    /// cells, so a slot is stable under a lambda-internal edit -- the naming and
-    /// stamp basis the P2 finding needs (docs/coroutine-frame-lambda-plan.md).
-    pub frame_slots: HashMap<Idx<Cell>, u32>,
+    pub frame_plan: CoroutineFramePlan,
     /// Declared param cells (constructor seeds a state-table field for each).
     pub params: Vec<Idx<Cell>>,
     pub num_states: usize,
@@ -1628,9 +1657,6 @@ pub struct CoroLowered {
     /// hoists to a top-level `<name>__on_<hook>` fn in `emit_coroutine`; the ctor
     /// stores that fn by name), just removed from every block's inst list.
     pub hooks: Vec<(CoroHookKind, Idx<Inst>)>,
-    /// Frame layout stamp: the ctor writes it (`__layout`), the step's entry
-    /// checks it. See `layout_stamp_canon` for what it hashes.
-    pub layout_hash: i64,
     /// The scope tree + ownership built (once) for frame membership, threaded to
     /// `emit_named_framed` so the step's hoist plan reuses them instead of
     /// rebuilding on the post-rewrite CFG (they are stable across the rewrite).
@@ -1671,6 +1697,24 @@ mod tests {
             "f",
         );
         assert!(has_scalarizable_store(&aggregate), "{aggregate}");
+    }
+
+    #[test]
+    fn coroutine_transform_exposes_one_owned_frame_plan() {
+        let func = lower(
+            "co fn f(x: int) -> Coroutine<int> { let saved = x yield saved }",
+            "f",
+        );
+        let lowered = transform_coroutine(&func, None);
+        assert!(
+            !lowered.frame_plan.slots().is_empty(),
+            "the coroutine fixture must have a nonzero frame population"
+        );
+        assert_eq!(
+            lowered.frame_plan.slots().len(),
+            lowered.frame_plan.fields().len(),
+            "one frame plan must own both membership and physical slots"
+        );
     }
 }
 
@@ -2271,12 +2315,10 @@ pub fn transform_coroutine(func: &MirFunc, channel: Option<&skull_mir::lower::Yi
     CoroLowered {
         step,
         s_cell,
-        frame_cells,
-        frame_slots,
+        frame_plan: CoroutineFramePlan::new(frame_cells, frame_slots, layout_hash),
         params,
         num_states,
         hooks,
-        layout_hash,
         step_tree: tree,
         step_own: own,
     }
@@ -2329,8 +2371,8 @@ impl CoroLowered {
     /// over every step cell except `s`/`resume_arg` -- so every reference in a
     /// detached hook/defer region resolves to `s.c<slot>`, never a bare local.
     pub fn aux_all_cells_slots(&self, resume_arg: Idx<Cell>) -> HashMap<Idx<Cell>, u32> {
-        let mut s = self.frame_slots.clone();
-        let base = self.frame_slots.len() as u32;
+        let mut s = self.frame_plan.slots().clone();
+        let base = self.frame_plan.slots().len() as u32;
         let mut extra: Vec<Idx<Cell>> = self
             .step
             .cells

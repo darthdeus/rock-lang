@@ -38,8 +38,8 @@ pub fn emit_coroutine(
     let mut lowered = skull_transform::transform_coroutine(func, channel);
     let frame = FrameCtx {
         s_cell: lowered.s_cell,
-        fields: lowered.frame_cells.iter().copied().collect(),
-        slots: lowered.frame_slots.clone(),
+        fields: lowered.frame_plan.fields().iter().copied().collect(),
+        slots: lowered.frame_plan.slots().clone(),
         hoist_lambdas: true,
     };
     // Hooks/defers keep the pre-P1 emission (D5 of
@@ -87,8 +87,8 @@ pub fn emit_coroutine(
     // inline arm -- `aux_frame` was built above, before the pass mutated the arena.
     let frame_info = FrameInfo {
         s_cell: lowered.s_cell,
-        fields: lowered.frame_cells.iter().copied().collect(),
-        slots: lowered.frame_slots.clone(),
+        fields: lowered.frame_plan.fields().iter().copied().collect(),
+        slots: lowered.frame_plan.slots().clone(),
     };
     let pre_nested = lowered.step.nested_fns.len();
     skull_transform::convert_closures_framed(
@@ -183,12 +183,20 @@ fn emit_constructor(plan: &CoroutinePlan, step_name: &str, lowered: &CoroLowered
     let param_fields: Vec<String> = lowered
         .params
         .iter()
-        .map(|p| format!("c{}", lowered.frame_slots.get(p).expect("co-fn param must be a frame cell with a slot")))
+        .map(|p| {
+            format!(
+                "c{}",
+                lowered
+                    .frame_plan
+                    .slot(*p)
+                    .expect("co-fn param must be a frame cell with a slot")
+            )
+        })
         .collect();
     let mut init = vec![
         "__ty = \"Coroutine\"".to_string(),
         format!("{STATE} = 0"),
-        format!("__layout = {}", lowered.layout_hash),
+        format!("__layout = {}", lowered.frame_plan.layout_hash()),
     ];
     for pf in &param_fields {
         init.push(format!("{pf} = {pf}"));

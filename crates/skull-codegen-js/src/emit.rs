@@ -5607,8 +5607,8 @@ fn emit_coroutine_js(
     let aux_slots = lowered.aux_all_cells_slots(resume_arg);
     let frame_info = skull_transform::FrameInfo {
         s_cell: lowered.s_cell,
-        fields: lowered.frame_cells.iter().copied().collect(),
-        slots: lowered.frame_slots.clone(),
+        fields: lowered.frame_plan.fields().iter().copied().collect(),
+        slots: lowered.frame_plan.slots().clone(),
     };
     skull_transform::convert_closures_framed(
         &mut lowered.step,
@@ -5624,7 +5624,12 @@ fn emit_coroutine_js(
     // hook/defer region with the all-cells aux map (disjoint block sets over
     // the shared arena).
     let step_entry = lowered.step.entry;
-    skull_transform::materialize_frame(&mut lowered.step, step_entry, lowered.s_cell, &lowered.frame_slots);
+    skull_transform::materialize_frame(
+        &mut lowered.step,
+        step_entry,
+        lowered.s_cell,
+        lowered.frame_plan.slots(),
+    );
     let mut hook_entries: Vec<(&'static str, Idx<Block>)> = Vec::new();
     for (kind, lambda) in &lowered.hooks {
         let Inst::Lambda { params, entry } = &lowered.step.insts[*lambda] else {
@@ -5708,8 +5713,8 @@ fn emit_js_constructor(
         .iter()
         .map(|p| {
             lowered
-                .frame_slots
-                .get(p)
+                .frame_plan
+                .slot(*p)
                 .map(|s| format!("c{s}"))
                 .ok_or_else(|| err("co-fn param must be a frame cell with a slot"))
         })
@@ -5717,7 +5722,7 @@ fn emit_js_constructor(
     let mut init = vec![
         "__ty: \"Coroutine\"".to_string(),
         "__state: 0".to_string(),
-        format!("__layout: {}", lowered.layout_hash),
+        format!("__layout: {}", lowered.frame_plan.layout_hash()),
     ];
     for pf in &param_fields {
         init.push(format!("{pf}: {pf}"));
