@@ -418,8 +418,32 @@ impl Builder<'_> {
                 "`native_buffer_alloc` call is missing from the concrete type plan".to_string(),
             )
         })?;
-        native_buffer_alloc_elem_ctype_mono(self.ws, &ret)
-            .map_err(|msg| CompilerError::new_with_label(span, msg))
+        let MonoTy::App {
+            ctor: crate::monoty::MonoCtor::Nominal(nb),
+            params,
+        } = ret.peel_nullable().0
+        else {
+            return Err(CompilerError::new_with_label(
+                span,
+                "`native_buffer_alloc` must produce a `NativeBuffer<T>`".to_string(),
+            ));
+        };
+        if nb.as_str() != "NativeBuffer" {
+            return Err(CompilerError::new_with_label(
+                span,
+                format!("`native_buffer_alloc` result is `{nb}`, expected `NativeBuffer<T>`"),
+            ));
+        }
+        let Some(element) = params.first() else {
+            return Err(CompilerError::new_with_label(
+                span,
+                "`NativeBuffer` element type is missing".to_string(),
+            ));
+        };
+        self.scx
+            .rep_arena()
+            .native_buffer_element_ctype(self.ws, self.scx.target, element)
+            .map_err(|error| CompilerError::new_with_label(span, error.message))
     }
 
     /// `Some` iff `e`'s type is a tuple OR a `(tuple)?` -- the nil-peeled form
@@ -476,52 +500,4 @@ impl Builder<'_> {
         };
         EnumPlan::for_name(self.ws, *yield_name).and_then(|plan| plan.flat().cloned())
     }
-}
-
-fn native_buffer_alloc_elem_ctype_mono(
-    ws: &Workspace,
-    ret: &MonoTy,
-) -> Result<Ustr, String> {
-    let crate::monoty::MonoTy::App {
-        ctor: crate::monoty::MonoCtor::Nominal(nb),
-        params,
-    } = ret.peel_nullable().0
-    else {
-        return Err("`native_buffer_alloc` must produce a `NativeBuffer<T>`".to_string());
-    };
-    if nb.as_str() != "NativeBuffer" {
-        return Err(format!("`native_buffer_alloc` result is `{nb}`, expected `NativeBuffer<T>`"));
-    }
-    let Some(elem) = params.first() else {
-        return Err("`NativeBuffer` element type is missing".to_string());
-    };
-    if let Some(prim) = elem.prim_name() {
-        return Ok(Ustr::from(if prim == "uint" { "uint32_t" } else { prim }));
-    }
-    let Some(name) = elem.nominal() else {
-        return Err(
-            "`native_buffer_alloc<T>` requires `T` to be an FFI-clean `value` struct or \
-             `int`/`float`/`bool` -- a heap struct / non-C-array type has no flat layout."
-                .to_string(),
-        );
-    };
-    if !map_is_value_struct(ws, name) {
-        return Err(format!("`native_buffer_alloc<{name}>` is invalid: `{name}` is not a `value` struct."));
-    }
-    if !matches!(
-        crate::lower::RepArena::default().nominal_value_storage(
-            ws,
-            bone_semantic::hir::FnBackend::Lua,
-            name,
-        ),
-        Some(ValueStorage::CData)
-    ) {
-        return Err(format!(
-            "`native_buffer_alloc<{name}>` is invalid: `{name}` is a GC-carrying `value` \
-             struct (immutable Lua table) with no C layout, so `ffi.new(\"{name}[?]\")` \
-             names no ctype. Only FFI-clean value structs (C-mappable fields) and \
-             `int`/`float`/`bool` are allocatable."
-        ));
-    }
-    Ok(name)
 }

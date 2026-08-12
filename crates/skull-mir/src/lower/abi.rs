@@ -519,6 +519,57 @@ impl RepArena {
         self.get(id).value_storage()
     }
 
+    pub fn native_buffer_element_ctype(
+        &self,
+        ws: &Workspace,
+        target: FnBackend,
+        element: &crate::monoty::MonoTy,
+    ) -> Result<Ustr, RepError> {
+        let element_name = element.render();
+        let (element, nullable) = element.peel_nullable();
+        let reject = |reason: String| RepError {
+            span: None,
+            message: format!(
+                "`native_buffer_alloc<{element_name}>` requires a valid native-buffer element ctype: {reason}"
+            ),
+        };
+        if nullable {
+            return Err(reject("nullable elements have no native C-array ctype".into()));
+        }
+        match element {
+            crate::monoty::MonoTy::Int => Ok(Ustr::from("int")),
+            crate::monoty::MonoTy::Uint => Ok(Ustr::from("uint32_t")),
+            crate::monoty::MonoTy::Float => Ok(Ustr::from("float")),
+            crate::monoty::MonoTy::Bool => Ok(Ustr::from("bool")),
+            crate::monoty::MonoTy::App {
+                ctor: crate::monoty::MonoCtor::Nominal(name), ..
+            } => {
+                let id = self
+                    .plan(
+                        ws,
+                        target,
+                        element,
+                        RepUse::Boundary,
+                        &RepUseFacts::default(),
+                        RepGuarantees { nobox: false, allow_opaque: true },
+                    )
+                    .map_err(|error| reject(error.message))?;
+                let plan = self.get(id);
+                if plan.value_storage() != Some(ValueStorage::CData)
+                    || self.value_shape(id).is_none()
+                {
+                    return Err(reject(format!(
+                        "`{name}` is not an FFI-clean value struct with a C leaf layout"
+                    )));
+                }
+                self.leaf_layout(ws, id)
+                    .map_err(|error| reject(error.message))?;
+                Ok(*name)
+            }
+            _ => Err(reject(format!("`{element_name}` is not C-mappable"))),
+        }
+    }
+
     pub fn nominal_value_leaf_paths(
         &self,
         ws: &Workspace,

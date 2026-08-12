@@ -65,6 +65,8 @@ mod nb_differential;
 mod nb_leaf_layout_premise;
 #[path = "nb_value_struct.rs"]
 mod nb_value_struct;
+#[path = "native_buffer_element_admission_js.rs"]
+mod native_buffer_element_admission_js;
 #[path = "no_inline_function.rs"]
 mod no_inline_function;
 #[path = "nomangle_roots.rs"]

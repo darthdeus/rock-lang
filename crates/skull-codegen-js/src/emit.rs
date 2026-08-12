@@ -2091,11 +2091,12 @@ impl Emitter<'_> {
             // The `native_buffer_alloc<T>` primitive lowers to this MIR node
             // (skull-mir intercepts the call and resolves the element ctype).
             // `Ptr<T>` IS a TypedArray on JS, matching the luajit `ffi.new` cdata;
-            // value-struct / bool element ctypes have no TypedArray, so reject.
+            // value-struct elements use the shared flat C layout below.
             Inst::FfiNewArray { ctype, count } => match ctype.as_str() {
                 "float" => format!("new Float32Array({})", self.render_val(*count)?),
                 "int" => format!("new Int32Array({})", self.render_val(*count)?),
                 "uint32_t" => format!("new Uint32Array({})", self.render_val(*count)?),
+                "bool" => format!("new Uint8Array({})", self.render_val(*count)?),
                 // A value struct has no per-struct ctype on JS: back it onto one
                 // flat `Float32Array(n * size/4)` laid out in the SAME C bytes
                 // luajit uses, which the per-leaf views (`FfiViewCast`) then alias
