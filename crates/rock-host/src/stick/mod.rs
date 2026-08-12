@@ -20,7 +20,7 @@ pub struct StickConfig {
     /// choose, so it cannot live in `GameConfig`. Default: landscape.
     pub ios: Option<IosConfig>,
     /// Declared compile-time inputs (`build_var(..)`) and release channels.
-    /// Commands are run by the CLI once per invocation, before compilation;
+    /// Commands are run by the CLI once per session build, before compilation;
     /// the compiler only ever sees resolved values (docs/comptime-plan.md).
     pub build: Option<BuildConfig>,
     pub dependencies: HashMap<String, Dependency>,

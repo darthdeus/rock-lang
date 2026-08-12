@@ -66,7 +66,7 @@ pub struct Workspace {
     pub reinferred_body_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 
     /// Resolved compile-time inputs (docs/comptime-plan.md tier 1), set by the
-    /// host once per invocation before emission. bone itself never reads them
+    /// host once per session build before emission. bone itself never reads them
     /// -- values don't affect types -- but they live here because every
     /// consumer (skull's `build_var`/`embed_string` expansion at MIR lowering,
     /// on all backends) already holds a `&Workspace` and nothing else with

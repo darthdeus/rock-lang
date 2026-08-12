@@ -509,7 +509,6 @@ pub struct Args {
     pub test_threads: Option<usize>,
     pub lib: Option<String>,
     pub clean: bool,
-    pub release: bool,
     /// `--channel`: release channel for `[build.vars]` resolution
     /// (docs/comptime-plan.md). None = the project's default_channel.
     pub channel: Option<String>,
@@ -692,8 +691,6 @@ impl Args {
                 .help("Load a project as a library context when running a Rock file. Usage: rock run --lib game/ test.rock"))
             .arg(Arg::new("clean").long("clean").action(ArgAction::SetTrue)
                 .help("Force a clean build by clearing the cache before compilation"))
-            .arg(Arg::new("release").long("release").action(ArgAction::SetTrue)
-                .help("Compile in release mode — strips debug-time runtime checks. Can also be set via ROCK_RELEASE=1."))
             .arg(Arg::new("channel").long("channel").value_name("CHANNEL")
                 .help("Release channel for [build.vars] resolution (must be declared in the project's [build] channels)"))
             .arg(Arg::new("var").long("var").value_name("NAME=VALUE")
@@ -800,7 +797,6 @@ impl Args {
             test_threads: m.get_one::<usize>("test-threads").copied(),
             lib: m.get_one::<String>("lib").cloned(),
             clean: m.get_flag("clean"),
-            release: m.get_flag("release"),
             channel: m.get_one::<String>("channel").cloned(),
             build_var_overrides: m
                 .get_many::<String>("var")

@@ -1,7 +1,7 @@
 //! Host-side resolution of comptime inputs (docs/comptime-plan.md tier 1):
 //! turn a project's `[build.vars]` plus the invocation's `--channel`/`--var`
 //! selection into the `ComptimeInputs` skull's `build_var`/`embed_string`
-//! expansion reads off the Workspace. Commands run here, once per invocation,
+//! expansion reads off the Workspace. Commands run here, once per session build,
 //! at the compile chokepoints -- never from the LSP, which performs no
 //! emission and so never reaches this module.
 

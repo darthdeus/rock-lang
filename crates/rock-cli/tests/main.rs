@@ -26,6 +26,8 @@ mod js_coroutines;
 mod js_test_harness_globals_sentinel;
 #[path = "comptime_build_vars.rs"]
 mod comptime_build_vars;
+#[path = "release_mode_deleted.rs"]
+mod release_mode_deleted;
 #[path = "js_run_gate.rs"]
 mod js_run_gate;
 #[path = "js_value_tests.rs"]

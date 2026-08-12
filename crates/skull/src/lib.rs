@@ -512,7 +512,6 @@ end
 -- a record { __fn = <top-level fn>, <captures> } is callable as f(...) via __call.
 -- Preserved across reload so pre- and post-reload records share metatable identity.
 {FN_MT}
-if _G.__ROCK_RELEASE == nil then _G.__ROCK_RELEASE = false end
 if not _G.__rock_rng_next then
   local __rock_bit = require("bit")
   local __rock_rng_state = _G.ffi.new("uint64_t", 0)

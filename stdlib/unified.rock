@@ -376,22 +376,17 @@ struct FlatVec<T> { buf: NativeBuffer<T>, len: int }   // buf.len = capacity
     fv.len = fv.len + 1
 }
 
-// Debug-checked index (release strips the check -- inherits the NativeBuffer
-// compile-mode gate, docs/compile-modes.md). `fv.get(i)` / `fv.set(i, v)`.
+// Bounds-checked index. `fv.get(i)` / `fv.set(i, v)`.
 @inline fn FlatVec<T>.get(fv, i: int) -> T {
-    if !is_release_mode() {
-        if i < 0 || i >= fv.len {
-            error("FlatVec.get: index {i} out of range (len {fv.len})")
-        }
+    if i < 0 || i >= fv.len {
+        error("FlatVec.get: index {i} out of range (len {fv.len})")
     }
     return fv.buf[i]
 }
 
 @inline fn FlatVec<T>.set(fv, i: int, v: T) {
-    if !is_release_mode() {
-        if i < 0 || i >= fv.len {
-            error("FlatVec.set: index {i} out of range (len {fv.len})")
-        }
+    if i < 0 || i >= fv.len {
+        error("FlatVec.set: index {i} out of range (len {fv.len})")
     }
     fv.buf[i] = v
 }
@@ -499,10 +494,8 @@ fn native_buffer_u32(n: int) -> NativeBufferU32 { return NativeBufferU32 { ptr: 
     if i < 0 or i >= b.len then return nil end; return b.ptr[i]
 """
 
-// Debug-mode bounds-checked access. The compiler emits calls to these in
-// non-release builds instead of direct buf.ptr[i] access. Release builds
-// (`--release` or `ROCK_RELEASE=1`) skip the check entirely and emit raw
-// ffi access, preserving zero-overhead semantics.
+// Bounds-checked access. The compiler emits calls to these instead of direct
+// buf.ptr[i] access.
 @nomangle inline(lua) fn __nb_checked_get(buf: any, i: int) -> any = """
     if i < 0 or i >= buf.len then
         error("NativeBuffer index out of bounds: index " .. tostring(i) ..
@@ -550,12 +543,6 @@ fn native_buffer_u32(n: int) -> NativeBufferU32 { return NativeBufferU32 { ptr: 
     end
     buf.ptr[i] = v
 """
-
-// True when this build was compiled with --release or ROCK_RELEASE=1.
-// Set by the compiler in the BUILTIN module's init_code. Useful for
-// tests that need to gate expectations on compile mode, and for
-// conditionally expensive invariant checks at the source level.
-@nomangle inline(lua) fn is_release_mode() -> bool = "return _G.__ROCK_RELEASE == true"
 
 // A WEAK handle naming one Arena incarnation in the Session Arena registry.
 // It holds no columns, so it cannot keep backing data alive; the bookkeeping
