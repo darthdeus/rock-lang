@@ -308,6 +308,11 @@ fn main() {
         .values()
         .find(|plan| plan.subject == Instance::base(callee))
         .expect("caller must retain the concrete nested ABI plan");
+    let nested_call_args = caller.insts.iter().find_map(|(_, inst)| match inst {
+        skull_mir::mir::Inst::CallMulti { func, args, .. } if *func == callee => Some(args.len()),
+        _ => None,
+    });
+    assert_eq!(nested_call_args, Some(3), "the direct call must consume Nested's three owned lanes");
     let entry = entry.abi_plan.as_ref().expect("callee entry must retain its ABI plan");
     assert_eq!(entry.representation(), call.representation());
 }

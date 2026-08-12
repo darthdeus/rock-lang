@@ -983,7 +983,7 @@ impl Builder<'_> {
         } else {
             self.callee_abi_plan(func, delivery.as_ref())
         };
-        Ok(abi.ret_tuple().cloned())
+        Ok(abi.ret_tuple())
     }
 
     /// [`Self::call_spec`] for the for-protocol `next` callee, whose bindings
@@ -1078,7 +1078,7 @@ impl Builder<'_> {
         {
             return Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))));
         }
-        let declared_ret_tuple = dc.plan.ret_tuple().cloned();
+        let declared_ret_tuple = dc.plan.ret_tuple();
         if let Some(shape) = &declared_ret_tuple {
             self.reject_nobox_opaque_tuple_return(e, func, shape)?;
         } else {
@@ -1089,7 +1089,7 @@ impl Builder<'_> {
             && !callee.generics.is_empty()
             && !callee.annotations.iter().any(|a| a.name.name.as_str() == "scalar_abi");
         let ret_tuple = (!lua_opaque).then_some(declared_ret_tuple).flatten();
-        let Some(scalar_abi) = dc.plan.scalar().cloned() else {
+        if !dc.plan.uses_scalar_abi() {
             self.reject_nobox_boxed_call_args(func, arg_idxs)?;
             self.reject_column_container_opaque_slots(
                 e,
@@ -1131,14 +1131,15 @@ impl Builder<'_> {
             let call = self.emit_cur(Inst::Call { func, args });
             self.record_call(call, func, &dc)?;
             return Ok(ValueRepr::Scalar(call));
-        };
+        }
+        let param_shapes = dc.plan.param_shapes();
         let args = self.scalar_call_args(
             func,
             arg_idxs,
             any_named,
-            &scalar_abi.param_shapes,
+            &param_shapes,
         )?;
-        let ret_shape = scalar_abi.ret_shape;
+        let ret_shape = dc.plan.ret_shape();
         match ret_shape {
             Some(shape) => {
                 let n = shape.leaf_count();
@@ -1305,7 +1306,7 @@ impl Builder<'_> {
         arg_idxs: &[Idx<Expr>],
     ) -> Result<ValueRepr, CompilerError> {
         let dc = self.plan_direct_call(e, func)?;
-        let Some(abi) = dc.plan.scalar().cloned() else {
+        if !dc.plan.uses_scalar_abi() {
             let mut argv = vec![recv];
             for &a in arg_idxs {
                 argv.push(self.lower_expr(a)?);
@@ -1316,7 +1317,7 @@ impl Builder<'_> {
             // return is `(..)?` carries its presence tag in the repr, and the
             // join forwards that tag rather than minting `true` -- `a?.m()` is
             // absent when either link is.
-            return Ok(match dc.plan.ret_tuple().cloned() {
+            return Ok(match dc.plan.ret_tuple() {
                 Some(shape) => self.emit_tuple_call_tree(func, argv, &shape, &dc)?,
                 None => {
                     let call = self.emit_cur(Inst::Call { func, args: argv });
@@ -1325,11 +1326,12 @@ impl Builder<'_> {
                 }
             });
         };
+        let param_shapes = dc.plan.param_shapes();
         let mut argv = Vec::new();
         // The RECEIVER arrives already lowered, so it cannot go through
         // `arg_values_for_slot`; a tuple receiver has no UFCS spelling, so
         // `Leaves` is the only splatting slot reachable here.
-        match abi.param_shapes.first() {
+        match param_shapes.first() {
             Some(RetSlot::Leaves(shape)) => {
                 let leaves = self.cdata_leaves(recv, &shape.clone());
                 argv.extend(leaves);
@@ -1337,10 +1339,10 @@ impl Builder<'_> {
             _ => argv.push(recv),
         }
         for (i, &a) in arg_idxs.iter().enumerate() {
-            let slot = abi.param_shapes.get(i + 1).cloned().unwrap_or(RetSlot::Opaque);
+            let slot = param_shapes.get(i + 1).cloned().unwrap_or(RetSlot::Opaque);
             argv.extend(self.arg_values_for_slot(&slot, a)?);
         }
-        match abi.ret_shape.clone() {
+        match dc.plan.ret_shape() {
             Some(shape) => {
                 let n = shape.leaf_count();
                 let dests: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
@@ -1623,15 +1625,16 @@ impl Builder<'_> {
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         let iter_ref = inst.func;
         let plan = self.callee_abi_plan_for_instance(inst)?;
-        let slot = match plan.scalar() {
-            None => RetSlot::Opaque,
-            Some(abi) => abi.param_shapes.first().cloned().ok_or_else(|| {
+        let slot = if !plan.uses_scalar_abi() {
+            RetSlot::Opaque
+        } else {
+            plan.param_shapes().first().cloned().ok_or_else(|| {
                 gap(format!(
                     "`for`-protocol iter witness `{}` has a scalar ABI with no parameters, \
                      so it cannot receive the collection",
                     self.ws.module(iter_ref.module).functions[iter_ref.func].name
                 ))
-            })?,
+            })?
         };
         Ok(self.repr_to_slot_values(repr, &slot))
     }

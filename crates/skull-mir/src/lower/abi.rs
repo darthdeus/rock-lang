@@ -882,8 +882,8 @@ impl BackendFnAbiPlan {
     }
 
     /// The scalarized wire, or `None` for the boxed ABI.
-    pub(super) fn scalar(&self) -> Option<&FnScalarAbi> {
-        self.scalar.as_ref()
+    pub(super) fn uses_scalar_abi(&self) -> bool {
+        self.representation.uses_scalar_abi()
     }
 
     pub fn representation(&self) -> &FunctionRepPlan {
@@ -898,23 +898,26 @@ impl BackendFnAbiPlan {
     /// keeps the boxed ABI, which is what the lowering path already treats as
     /// "no splatting".
     pub(super) fn param_shapes(&self) -> Vec<RetSlot> {
-        self.scalar.as_ref().map(|a| a.param_shapes.clone()).unwrap_or_default()
+        if !self.uses_scalar_abi() {
+            return Vec::new();
+        }
+        self.representation
+            .params()
+            .iter()
+            .map(|id| self.arena.ret_slot(*id))
+            .collect()
     }
 
     /// The per-declared-param wire slots, or `None` under the boxed ABI --
     /// distinct from [`Self::param_shapes`], which flattens the distinction
     /// away for the lowering path that treats both as "no splatting".
-    pub(super) fn param_leaf_shapes(&self) -> Option<&[RetSlot]> {
-        self.scalar.as_ref().map(|a| a.param_shapes.as_slice())
-    }
-
-    pub(super) fn ret_shape(&self) -> Option<&ValueShape> {
-        self.scalar.as_ref().and_then(|a| a.ret_shape.as_ref())
+    pub(super) fn ret_shape(&self) -> Option<ValueShape> {
+        self.representation.result().and_then(|id| self.arena.value_shape(id))
     }
 
     /// The declared return's tuple shape under this body's substitution.
-    pub(crate) fn ret_tuple(&self) -> Option<&TupleRetShape> {
-        self.ret_tuple.as_ref()
+    pub(crate) fn ret_tuple(&self) -> Option<TupleRetShape> {
+        self.representation.result().and_then(|id| self.arena.tuple_shape(id))
     }
 
     /// Physical values on the result wire: 0 with no return, 1 for an ordinary
@@ -939,10 +942,13 @@ impl BackendFnAbiPlan {
     /// leaf ORDER matches `repr_to_leaves`, so def params line up with the
     /// callsite splat positionally.
     pub fn lua_param_names(&self, ws: &Workspace) -> Option<Vec<String>> {
-        let abi = self.scalar.as_ref()?;
+        if !self.uses_scalar_abi() {
+            return None;
+        }
+        let shapes = self.param_shapes();
         let f = &ws.module(self.decl().module).functions[self.decl().func];
         let mut names = Vec::new();
-        for (pd, slot) in f.param_decls.iter().zip(abi.param_shapes.iter()) {
+        for (pd, slot) in f.param_decls.iter().zip(shapes.iter()) {
             slot_param_names(pd.name.as_str(), slot, &mut names);
         }
         Some(names)
@@ -952,6 +958,7 @@ impl BackendFnAbiPlan {
     /// count, 1 otherwise). Per declared param rather than per slot so a
     /// defaulted value-struct param counts as its whole leaf group.
     pub fn param_leaf_widths(&self) -> Option<Vec<usize>> {
-        self.scalar.as_ref().map(|a| a.param_shapes.iter().map(RetSlot::slot_count).collect())
+        self.uses_scalar_abi()
+            .then(|| self.param_shapes().iter().map(RetSlot::slot_count).collect())
     }
 }

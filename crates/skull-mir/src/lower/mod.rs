@@ -487,13 +487,14 @@ pub fn scalar_abi_param_collisions(
 /// plan the names come from -- a second plan here would be free to describe a
 /// different parameter list than the one being checked.
 fn scalar_abi_param_origins(ws: &Workspace, plan: &BackendFnAbiPlan) -> Vec<String> {
-    let Some(shapes) = plan.param_leaf_shapes() else {
+    if !plan.uses_scalar_abi() {
         return Vec::new();
-    };
+    }
+    let shapes = plan.param_shapes();
     let decl = plan.decl();
     let f = &ws.module(decl.module).functions[decl.func];
     let mut out = Vec::new();
-    for (pd, slot) in f.param_decls.iter().zip(shapes) {
+    for (pd, slot) in f.param_decls.iter().zip(shapes.iter()) {
         slot_param_origins(pd.name.as_str(), slot, &mut out);
     }
     out
@@ -1186,8 +1187,8 @@ fn lower_body(
         });
     f.abi_plan = Some(abi.clone());
     let param_shapes = abi.param_shapes();
-    let ret_shape = abi.ret_shape().cloned();
-    let ret_tuple = abi.ret_tuple().cloned();
+    let ret_shape = abi.ret_shape();
+    let ret_tuple = abi.ret_tuple();
     let mut b = Builder {
         ws,
         scx,

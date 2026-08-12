@@ -401,7 +401,6 @@ impl Builder<'_> {
             let shape = self
                 .callee_abi_plan_for_instance(&instance)?
                 .ret_tuple()
-                .cloned()
                 .ok_or_else(|| gap("concrete bound `next` must return a tuple"))?;
             if shape.slots.len() < 2 {
                 return Err(gap("concrete bound `next` must return `(bool, E)`"));

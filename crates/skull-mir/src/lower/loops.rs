@@ -299,7 +299,6 @@ impl Builder<'_> {
                 if let Some(owner) = concrete_next.as_ref() {
                     self.callee_abi_plan_for_instance(owner)?
                         .ret_tuple()
-                        .cloned()
                         .ok_or_else(|| gap("for-iter `next` must return a tuple"))?
                 } else {
                     let func = FuncRef { module: *m, func: *f };
