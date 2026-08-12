@@ -971,7 +971,7 @@ impl RepArena {
         params: &[crate::monoty::MonoTy],
         result_ty: Option<&crate::monoty::MonoTy>,
         param_tuple_spelled: &[bool],
-        mode: Option<ConcreteAbiMode>,
+        mode: Option<AbiMode>,
     ) -> FunctionRepPlan {
         let params: Vec<RepId> = if let Some(mode) = mode {
             params
@@ -1160,40 +1160,6 @@ impl PartialEq for BackendFnAbiPlan {
 
 impl Eq for BackendFnAbiPlan {}
 
-fn concrete_abi_mode_for_instance(
-    ws: &Workspace,
-    scx: &ScalarCtx,
-    inst: &crate::instance::Instance,
-) -> Option<ConcreteAbiMode> {
-    if scx.values_first_class {
-        return None;
-    }
-    let f = &ws.module(inst.func.module).functions[inst.func.func];
-    if f.is_extern {
-        return None;
-    }
-    let has_scalar_abi = f.annotations.iter().any(|a| a.name.name.as_str() == "scalar_abi");
-    let nobox_only = if has_scalar_abi {
-        false
-    } else {
-        let name_is_fixed = f.annotations.iter().any(|a| match a.name.name.as_str() {
-            "nomangle" => inst.args.is_empty(),
-            "test" => true,
-            _ => false,
-        });
-        if f.inline_body.is_some() || f.name.as_str() == "main" || name_is_fixed {
-            return None;
-        }
-        scx.taken_by_ref.contains(&f.name)
-    };
-    Some(ConcreteAbiMode { nobox_only })
-}
-
-#[derive(Clone, Copy, Debug)]
-struct ConcreteAbiMode {
-    nobox_only: bool,
-}
-
 impl BackendFnAbiPlan {
     /// ABI for an explicit opaque boundary instance.
     ///
@@ -1233,7 +1199,8 @@ impl BackendFnAbiPlan {
         inst: &crate::instance::Instance,
         signature: &ConcreteSignature,
     ) -> Self {
-        let mode = concrete_abi_mode_for_instance(ws, scx, inst);
+        let subst = inst.subst(ws, scx.interner());
+        let mode = abi_mode_spec(ws, scx, inst.func, &subst);
         let params = signature
             .params
             .iter()
