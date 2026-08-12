@@ -471,7 +471,7 @@ _G.__ROCK_LEAF_VIEWS = {LEAF_VIEWS}
 assert(next(_G.__ROCK_LEAF_VIEWS), "__ROCK_LEAF_VIEWS is empty; leaf-view refresh would silently do nothing")
 -- Compiler-described NativeBuffer STORAGE, keyed by the ctype LuaJIT gives the
 -- allocation itself. Generated from skull_mir::lower (NB_PRIM_ELEMS for the
--- primitive/sized element types, the owned RepPlan C layout + LEAF_VIEWS for the
+-- primitive/sized element types, value_leaf_layout_checked + LEAF_VIEWS for the
 -- value-struct ones), so a holder of a storage cdata can ask what its bytes mean
 -- -- element ctype, element width, and the views minted over it -- rather than
 -- reading a `__ty` string or re-deriving a layout. An element array whose ctype
