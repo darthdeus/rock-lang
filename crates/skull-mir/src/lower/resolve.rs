@@ -452,7 +452,7 @@ impl Builder<'_> {
                 // Leaf addressing: no slot reference, no nested ctor -- each
                 // leaf comes straight from its typed view.
                 if let ContainerKind::NativeBufferValue(elem) = kind {
-                    if self.is_leaf_addressed(elem) {
+                    if self.is_leaf_addressed(elem)? {
                         return self.nb_leaf_element_repr(b, i, elem);
                     }
                 }

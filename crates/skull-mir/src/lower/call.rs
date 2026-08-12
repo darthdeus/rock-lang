@@ -1886,7 +1886,7 @@ impl Builder<'_> {
     ) -> Result<ValueRepr, CompilerError> {
         match kind {
             ContainerKind::VecValueColumns(elem) => self.column_element_repr(arr, index, elem),
-            ContainerKind::NativeBufferValue(elem) if self.is_leaf_addressed(elem) => {
+            ContainerKind::NativeBufferValue(elem) if self.is_leaf_addressed(elem)? => {
                 self.nb_leaf_element_repr(arr, index, elem)
             }
             _ => Ok(ValueRepr::Scalar(self.emit_cur(Inst::Index {

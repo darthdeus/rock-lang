@@ -5,6 +5,23 @@ use super::*;
 use crate::monoty::MonoTy;
 
 impl Builder<'_> {
+    pub(crate) fn container_plan_for(
+        &self,
+        e: Idx<Expr>,
+        family: ContainerFamily,
+    ) -> Result<Option<ContainerPlan>, CompilerError> {
+        let Some(ty) = self.concrete_ty(e)? else { return Ok(None) };
+        if !ContainerPlan::matches_type(family, &ty) {
+            return Ok(None);
+        }
+        ContainerPlan::for_type(self.ws, self.scx.target, &self.scx.rep_arena(), family, &ty)
+            .map(Some)
+            .map_err(|error| match error.span.or(self.cur_span) {
+                Some(span) => CompilerError::new_with_label(span, error.message),
+                None => CompilerError::new_no_location(error.message),
+            })
+    }
+
     pub(crate) fn expr_is_flat_vec(&self, e: Idx<Expr>) -> bool {
         if let Some(ty) = self.concrete_expr_ty(e) {
             let (payload, _) = ty.peel_nullable();
@@ -84,9 +101,9 @@ impl Builder<'_> {
         &self,
         e: Idx<Expr>,
     ) -> Result<Option<ColumnElem>, CompilerError> {
-        Ok(self.concrete_ty(e)?.and_then(|ty| {
-            crate::lower::shape::arena_column_elem_mono(self.ws, self.scx.target, &ty)
-        }))
+        Ok(self
+            .container_plan_for(e, ContainerFamily::Arena)?
+            .and_then(|plan| plan.column_elem(&self.scx.rep_arena())))
     }
 
     /// The Vec container kind for base expr `e`: an all-scalar value-struct
@@ -111,9 +128,9 @@ impl Builder<'_> {
         &self,
         e: Idx<Expr>,
     ) -> Result<Option<ColumnElem>, CompilerError> {
-        Ok(self.concrete_ty(e)?.and_then(|ty| {
-            crate::lower::shape::vec_column_elem_mono(self.ws, self.scx.target, &ty)
-        }))
+        Ok(self
+            .container_plan_for(e, ContainerFamily::Vec)?
+            .and_then(|plan| plan.column_elem(&self.scx.rep_arena())))
     }
 
     /// The column shape of `elem`: its value shape, marked nullable when the
@@ -142,9 +159,9 @@ impl Builder<'_> {
         &self,
         e: Idx<Expr>,
     ) -> Result<Option<ColumnElem>, CompilerError> {
-        Ok(self.concrete_ty(e)?.and_then(|ty| {
-            crate::lower::shape::map_column_value_mono(self.ws, self.scx.target, &ty)
-        }))
+        Ok(self
+            .container_plan_for(e, ContainerFamily::Map)?
+            .and_then(|plan| plan.column_elem(&self.scx.rep_arena())))
     }
 
     /// The expression's CONCRETE type under the active specialization.

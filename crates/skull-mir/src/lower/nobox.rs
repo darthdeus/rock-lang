@@ -232,8 +232,7 @@ impl Builder<'_> {
     /// The hazard a callee's DECLARED type carries at this call, or `None`.
     ///
     /// It converts the declared type to a CONCRETE one and asks the same
-    /// storage oracles the routing asks (`vec_column_elem_mono`,
-    /// `map_column_value_mono`, `opaque_container_hazard`). It never walks the
+    /// `ContainerPlan` storage decision the routing asks. It never walks the
     /// argument list: arguments are in the CALLER's order, so pairing them with
     /// parameter indices is wrong the moment a call names its arguments, and a
     /// defaulted or spread slot has no argument expression to pair with at all.
@@ -250,41 +249,100 @@ impl Builder<'_> {
         ty: TyId,
     ) -> Result<Option<(String, &'static str)>, CompilerError> {
         let Some(mono) = self.declared_slot_mono(e, func, ty)? else { return Ok(None) };
-        Ok(self.slot_hazard_mono(&mono))
+        Ok(self.slot_hazard_mono(&mono)?)
     }
 
     fn slot_hazard_mono(
         &self,
         mono: &crate::monoty::MonoTy,
-    ) -> Option<(String, &'static str)> {
-        use crate::lower::shape::{map_column_value_mono, vec_column_elem_mono};
-        if let Some(el) = vec_column_elem_mono(self.ws, self.scx.target, mono) {
-            return Some((format!("[{}]", el.name), "`_data`"));
-        }
-        if let Some(el) = map_column_value_mono(self.ws, self.scx.target, mono) {
-            return Some((format!("Map<_, {}>", el.name), "a bare key table"));
-        }
-        let crate::monoty::MonoTy::App {
-            ctor: crate::monoty::MonoCtor::Nominal(c),
-            params,
-        } = mono
-        else {
-            return None;
+    ) -> Result<Option<(String, &'static str)>, CompilerError> {
+        let arena = self.scx.rep_arena();
+        let plan = match mono {
+            crate::monoty::MonoTy::App { ctor: crate::monoty::MonoCtor::Array, .. } => {
+                Some(ContainerPlan::for_type(
+                    self.ws,
+                    self.scx.target,
+                    &arena,
+                    ContainerFamily::Vec,
+                    mono,
+                ))
+            }
+            crate::monoty::MonoTy::App { ctor: crate::monoty::MonoCtor::Map, .. } => {
+                Some(ContainerPlan::for_type(
+                    self.ws,
+                    self.scx.target,
+                    &arena,
+                    ContainerFamily::Map,
+                    mono,
+                ))
+            }
+            crate::monoty::MonoTy::App {
+                ctor: crate::monoty::MonoCtor::Nominal(name), ..
+            } => match name.as_str() {
+                "Arena" => Some(ContainerPlan::for_type(
+                    self.ws,
+                    self.scx.target,
+                    &arena,
+                    ContainerFamily::Arena,
+                    mono,
+                )),
+                "NativeBuffer" => Some(ContainerPlan::for_type(
+                    self.ws,
+                    self.scx.target,
+                    &arena,
+                    ContainerFamily::NativeBuffer,
+                    mono,
+                )),
+                "FlatVec" => Some(ContainerPlan::for_type(
+                    self.ws,
+                    self.scx.target,
+                    &arena,
+                    ContainerFamily::FlatVec,
+                    mono,
+                )),
+                _ => None,
+            },
+            _ => None,
         };
-        if !crate::lower::shape::is_nominal_container(*c) {
-            return None;
+        let Some(plan) = plan else { return Ok(None) };
+        let plan = plan.map_err(|error| match error.span.or(self.cur_span) {
+            Some(span) => CompilerError::new_with_label(span, error.message),
+            None => CompilerError::new_no_location(error.message),
+        })?;
+        match plan.storage() {
+            ContainerStorage::Columns { .. } => {
+                let elem = plan
+                    .column_elem(&arena)
+                    .ok_or_else(|| gap("column container plan has no element shape"))?;
+                let rendered = match plan.family() {
+                    ContainerFamily::Vec => format!("[{}]", elem.name),
+                    ContainerFamily::Map => format!("Map<_, {}>", elem.name),
+                    _ => unreachable!("only Vec and Map use column storage"),
+                };
+                let physical = match plan.family() {
+                    ContainerFamily::Vec => "`_data`",
+                    ContainerFamily::Map => "a bare key table",
+                    _ => unreachable!("only Vec and Map use column storage"),
+                };
+                Ok(Some((rendered, physical)))
+            }
+            ContainerStorage::LeafAddressed { .. }
+                if self.scx.target == bone_semantic::hir::FnBackend::Js => {
+                let elem = plan
+                    .ffi_element_name(self.ws, &arena)
+                    .unwrap_or_else(|| Ustr::from("<element>"));
+                let family = match plan.family() {
+                    ContainerFamily::NativeBuffer => "NativeBuffer",
+                    ContainerFamily::FlatVec => "FlatVec",
+                    _ => unreachable!("only native containers are leaf-addressed"),
+                };
+                Ok(Some((
+                    format!("{family}<{elem}>"),
+                    "a per-element view over `ptr`",
+                )))
+            }
+            _ => Ok(None),
         }
-        let [only] = params.as_slice() else { return None };
-        let (payload, nullable) = only.peel_nullable();
-        let Some(elem) = payload.nominal() else { return None };
-        crate::lower::shape::opaque_container_hazard(
-            self.ws,
-            self.scx.target,
-            *c,
-            elem,
-            nullable,
-        )
-        .map(|physical| (format!("{c}<{elem}>"), physical))
     }
 
     fn reject_concrete_column_container_opaque_slots(
@@ -305,7 +363,7 @@ impl Builder<'_> {
                 continue;
             }
             let mono = self.concrete_mono(*id);
-            if let Some((rendered, physical)) = self.slot_hazard_mono(&mono) {
+            if let Some((rendered, physical)) = self.slot_hazard_mono(&mono)? {
                 return Err(CompilerError::new_with_label(
                     self.body.expr_spans[e],
                     format!(
@@ -320,7 +378,7 @@ impl Builder<'_> {
         }
         let Some(id) = signature.result else { return Ok(()) };
         let mono = self.concrete_mono(id);
-        let Some((rendered, physical)) = self.slot_hazard_mono(&mono) else {
+        let Some((rendered, physical)) = self.slot_hazard_mono(&mono)? else {
             return Ok(());
         };
         Err(CompilerError::new_with_label(

@@ -1284,8 +1284,8 @@ fn main() {
 
 // ---------------------------------------------------------------------------
 // Stage 2: synthesized column-intercept calls are gated on the SAME storage
-// oracle lowering uses (`skull_mir::lower::vec_column_elem_mono` /
-// `map_column_value_mono`), not on the trigger name alone.
+// oracle lowering uses (`skull_mir::lower::ContainerPlan`), not on the trigger
+// name alone.
 // ---------------------------------------------------------------------------
 
 fn generated_edges(

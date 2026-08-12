@@ -835,7 +835,7 @@ impl Builder<'_> {
                     return s.map_column_store(b, i, value, elem);
                 }
                 if let ContainerKind::NativeBufferValue(elem) = kind {
-                    if s.is_leaf_addressed(elem) {
+                    if s.is_leaf_addressed(elem)? {
                         return s.nb_leaf_element_store(b, i, value, elem);
                     }
                 }

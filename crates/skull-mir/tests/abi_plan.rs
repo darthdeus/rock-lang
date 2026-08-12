@@ -17,7 +17,8 @@ use std::sync::LazyLock;
 use skull_mir::instance::Instance;
 use skull_mir::concrete::{ConcreteBodyPlan, ConcreteOwner, ConcreteSignature, ConcreteTypeTables};
 use skull_mir::lower::{
-    BackendFnAbiPlan, RepArena, RepGuarantees, RepUse, RepUseFacts, ScalarCtx,
+    BackendFnAbiPlan, ContainerFamily, ContainerPlan, ContainerStorage, RepArena, RepGuarantees,
+    RepUse, RepUseFacts, ScalarCtx,
 };
 use skull_mir::mir::FuncRef;
 use skull_mir::monoty::{MonoCtor, MonoTy};
@@ -366,6 +367,30 @@ fn main() {
         _ => None,
     });
     assert_eq!(call, Some(2), "the indirect callee must splat Leaf through its owned plan");
+}
+
+#[test]
+fn container_storage_uses_the_element_representation_plan() {
+    let ws = ws_of("nobox value V2 { x: float, y: float }");
+    let arena = RepArena::default();
+    let element = nominal("V2");
+    let ty = MonoTy::App { ctor: MonoCtor::Array, params: vec![element] };
+    let plan = ContainerPlan::for_type(
+        &ws,
+        bone_semantic::hir::FnBackend::Lua,
+        &arena,
+        ContainerFamily::Vec,
+        &ty,
+    )
+    .expect("a concrete Vec type must have a total container plan");
+    assert!(
+        matches!(plan.storage(), ContainerStorage::Columns { .. }),
+        "the Vec storage decision must be owned by the container plan"
+    );
+    assert_eq!(
+        plan.column_elem(&arena),
+        Some(skull_mir::mir::ColumnElem { name: Ustr::from("V2"), nullable: false })
+    );
 }
 
 #[test]

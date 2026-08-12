@@ -84,6 +84,8 @@ pub use coroutine::CoroutinePlan;
 /// crate, and a child sees this module's private items, so nothing needed
 /// widening to make the split.
 mod call;
+mod container;
+pub use container::{ContainerFamily, ContainerPlan, ContainerStorage};
 mod control;
 mod dispatch;
 pub use dispatch::{

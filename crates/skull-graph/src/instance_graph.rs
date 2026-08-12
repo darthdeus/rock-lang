@@ -40,6 +40,7 @@ use bone_semantic::prelude::{BoundNext, IterWitness, ModuleId, Span, TyId};
 use comfy_la_arena::Idx;
 use rustc_hash::{FxHashMap, FxHashSet};
 use skull_mir::mangle::mangle_fn;
+use skull_mir::lower::{ContainerFamily, ContainerPlan, RepArena};
 use skull_mir::monoty::{MonoArena, MonoInterner, MonoSubst, MonoTyId, MonoTyReason};
 use skull_mir::mir::FuncRef;
 
@@ -779,9 +780,8 @@ pub enum StorageCond {
 /// `crates/skull-mir/src/lower/storage.rs`; the complete 15-name set is
 /// catalogued in `docs/boundary-contracts.md` S 1.4.
 ///
-/// The condition uses the same
-/// `skull_mir::lower::shape::{vec_column_elem_mono, map_column_value_mono}`
-/// oracle as lowering. The names are the column-path ones only -- a non-column
+/// The condition uses the same `skull_mir::lower::ContainerPlan` as lowering.
+/// The names are the column-path ones only -- a non-column
 /// receiver takes a different route entirely, so `table_len` (the boxed
 /// `__vec_data_capacity` path) is not an edge this arm produces.
 ///
@@ -3634,7 +3634,8 @@ fn compiler_generated_sites(
     failures: &mut Vec<(Idx<bone_semantic::hir::Expr>, MonoTyReason)>,
     approximated: &mut usize,
 ) -> Vec<GeneratedSite> {
-    use bone_semantic::hir::{Callee, Expr as E, FnBackend};
+    use bone_semantic::hir::{Callee, Expr as E};
+    let rep_arena = RepArena::default();
     // The receiver's CONCRETE type under this instance's substitution, which is
     // what the storage condition is asked about.
     let verdict = |recv: Idx<bone_semantic::hir::Expr>, cond: StorageCond| -> CondVerdict {
@@ -3648,19 +3649,39 @@ fn compiler_generated_sites(
             Ok(m) => m,
             Err(r) => return CondVerdict::Failed(r),
         };
-        let elem = match cond {
+        let plan = match cond {
             // `Any`, stated rather than defaulted: this graph selects no
-            // variant. The storage oracle's target argument reaches
-            // `columns_available`, which is unconditionally true, so the two
-            // agree for every target -- and a target-dependent answer here
-            // would be a second target-dependence in a target-neutral walk.
+            // target sibling. The physical target projection happens later;
+            // only the logical container plan is needed for the edge census.
             StorageCond::VecColumn => {
-                skull_mir::lower::vec_column_elem_mono(ws, FnBackend::Any, &mono)
+                if !ContainerPlan::matches_type(ContainerFamily::Vec, &mono) {
+                    return CondVerdict::DoesNot;
+                }
+                ContainerPlan::for_type(
+                    ws,
+                    bone_semantic::hir::FnBackend::Any,
+                    &rep_arena,
+                    ContainerFamily::Vec,
+                    &mono,
+                )
             }
             StorageCond::MapColumn => {
-                skull_mir::lower::map_column_value_mono(ws, FnBackend::Any, &mono)
+                if !ContainerPlan::matches_type(ContainerFamily::Map, &mono) {
+                    return CondVerdict::DoesNot;
+                }
+                ContainerPlan::for_type(
+                    ws,
+                    bone_semantic::hir::FnBackend::Any,
+                    &rep_arena,
+                    ContainerFamily::Map,
+                    &mono,
+                )
             }
             StorageCond::Always => return CondVerdict::Holds(None),
+        };
+        let elem = match plan {
+            Ok(plan) => plan.column_elem(&rep_arena),
+            Err(_) => return CondVerdict::Failed(MonoTyReason::NoNode),
         };
         match elem {
             Some(elem) => CondVerdict::Holds(Some(elem)),

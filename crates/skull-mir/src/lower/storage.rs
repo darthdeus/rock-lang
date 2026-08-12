@@ -38,7 +38,7 @@ impl Builder<'_> {
                     let ContainerKind::NativeBufferValue(elem) = self.nb_kind(ib) else {
                         return Ok(None);
                     };
-                    if !self.is_leaf_addressed(elem) {
+                    if !self.is_leaf_addressed(elem)? {
                         return Ok(None);
                     }
                     let (b, _) = self.lower_index_base(ib)?;
@@ -126,8 +126,26 @@ impl Builder<'_> {
     /// over one ArrayBuffer on JS, but the ADDRESSING is the same C layout either
     /// way -- `leaf_addr_plan`'s stride and offset are already in units of each
     /// view's own element type, so one lowering serves both.
-    pub(crate) fn is_leaf_addressed(&self, elem: Ustr) -> bool {
-        leaf_addr_plan(self.ws, elem).is_ok()
+    pub(crate) fn is_leaf_addressed(&self, elem: Ustr) -> Result<bool, CompilerError> {
+        let ty = MonoTy::App {
+            ctor: crate::monoty::MonoCtor::Nominal(Ustr::from("NativeBuffer")),
+            params: vec![MonoTy::App {
+                ctor: crate::monoty::MonoCtor::Nominal(elem),
+                params: Vec::new(),
+            }],
+        };
+        let plan = ContainerPlan::for_type(
+            self.ws,
+            self.scx.target,
+            &self.scx.rep_arena(),
+            ContainerFamily::NativeBuffer,
+            &ty,
+        )
+        .map_err(|error| match error.span.or(self.cur_span) {
+            Some(span) => CompilerError::new_with_label(span, error.message),
+            None => CompilerError::new_no_location(error.message),
+        })?;
+        Ok(plan.is_leaf_addressed())
     }
 
     /// Read `buf[i].<path>`'s single primitive leaf, for a read-modify-write
