@@ -128,6 +128,9 @@ impl Default for RepUseFacts {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RepGuarantees {
     pub nobox: bool,
+    /// Function-value and mixed scalar ABIs may carry reference types in an
+    /// explicit opaque slot while still flattening eligible value leaves.
+    pub allow_opaque: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -236,7 +239,7 @@ impl GlobalPlan {
                 &ty,
                 RepUse::Return,
                 &RepUseFacts::default(),
-                RepGuarantees { nobox: true },
+                RepGuarantees { nobox: true, allow_opaque: true },
             )?
         };
         Ok(Self { representation, arena })
@@ -377,7 +380,7 @@ impl RepArena {
                             RepLayout::Tuple { slots, nullable: true },
                         ));
                     }
-                    if guarantees.nobox {
+                    if guarantees.nobox && !guarantees.allow_opaque {
                         return Err(reject("nullable tuple cannot cross a nobox boundary without a physical tuple plan".into()));
                     }
                     Ok(self.intern(target, use_context, RepLayout::Opaque))
@@ -391,7 +394,7 @@ impl RepArena {
                     if let Some(shape) = shape {
                         return Ok(self.intern(target, use_context, RepLayout::Leaves(shape)));
                     }
-                    if guarantees.nobox {
+                    if guarantees.nobox && !guarantees.allow_opaque {
                         return Err(reject(format!(
                             "{} has no concrete nobox representation",
                             ty.render()
@@ -436,7 +439,7 @@ impl RepArena {
                 if let Some(shape) = shape {
                     return Ok(self.intern(target, use_context, RepLayout::Leaves(shape)));
                 }
-                if guarantees.nobox {
+                if guarantees.nobox && !guarantees.allow_opaque {
                     return Err(reject(format!(
                         "{} has no concrete nobox representation",
                         ty.render()
@@ -445,7 +448,7 @@ impl RepArena {
                 Ok(self.intern(target, use_context, RepLayout::Opaque))
             }
             MonoTy::App { .. } => {
-                if guarantees.nobox {
+                if guarantees.nobox && !guarantees.allow_opaque {
                     return Err(reject(format!("{} cannot cross a nobox boundary", ty.render())));
                 }
                 Ok(self.intern(target, use_context, RepLayout::Opaque))
@@ -505,7 +508,7 @@ impl RepArena {
                     param,
                     RepUse::Parameter,
                     &RepUseFacts { tuple_spelled, span: None },
-                    RepGuarantees { nobox: true },
+                    RepGuarantees { nobox: true, allow_opaque: true },
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -518,7 +521,7 @@ impl RepArena {
                 tuple_spelled: mono_tuple_ret_shape(ws, ret).is_some(),
                 span: None,
             },
-            RepGuarantees { nobox: true },
+            RepGuarantees { nobox: true, allow_opaque: true },
         )?;
         let scalar_abi = params.iter().any(|id| !matches!(self.get(*id).layout(), RepLayout::Opaque))
             || matches!(self.get(result).layout(), RepLayout::Leaves(_));
@@ -611,7 +614,10 @@ impl RepArena {
                         ty,
                         RepUse::Parameter,
                         &RepUseFacts { tuple_spelled, span: None },
-                        RepGuarantees { nobox: scalar.nobox_only },
+                        RepGuarantees {
+                            nobox: scalar.nobox_only,
+                            allow_opaque: scalar.nobox_only,
+                        },
                     )
                     .expect("concrete ABI planner must accept a validated parameter")
                 })
@@ -641,7 +647,10 @@ impl RepArena {
                     ty,
                     RepUse::Return,
                     &RepUseFacts::default(),
-                    RepGuarantees { nobox: scalar.is_some_and(|abi| abi.nobox_only) },
+                    RepGuarantees {
+                        nobox: scalar.is_some_and(|abi| abi.nobox_only),
+                        allow_opaque: scalar.is_some_and(|abi| abi.nobox_only),
+                    },
                 )
                 .expect("concrete ABI planner must accept a validated value return"),
             ),

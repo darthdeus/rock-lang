@@ -503,7 +503,7 @@ fn concrete_rep_planner_is_total_over_the_logical_type_vocabulary() {
             &MonoTy::App { ctor: MonoCtor::Array, params: vec![MonoTy::Int] },
             RepUse::Parameter,
             &facts,
-            RepGuarantees { nobox: true },
+            RepGuarantees { nobox: true, allow_opaque: false },
         )
         .expect_err("a nobox container must not silently become an opaque slot");
     assert!(rejected.message.contains("nobox"));
@@ -514,8 +514,23 @@ fn concrete_rep_planner_is_total_over_the_logical_type_vocabulary() {
             &nominal("Gc"),
             RepUse::Parameter,
             &facts,
-            RepGuarantees { nobox: true },
+            RepGuarantees { nobox: true, allow_opaque: false },
         )
         .expect_err("a GC-carrying nominal must not silently become an opaque nobox slot");
     assert!(rejected_nominal.message.contains("nobox"));
+}
+
+#[test]
+fn function_value_plan_keeps_opaque_reference_parameters_explicit() {
+    let ws = ws_of("fn main() { print(\"ok\") }\n");
+    let scx = ScalarCtx::new(&ws);
+    let vec_int = MonoTy::App { ctor: MonoCtor::Array, params: vec![MonoTy::Int] };
+    let plan = BackendFnAbiPlan::for_function_value(
+        &ws,
+        &scx,
+        &MonoTy::Function { params: vec![vec_int], ret: Box::new(MonoTy::Int) },
+    )
+    .expect("a function value may carry an opaque container parameter");
+    assert_eq!(plan.params().len(), 1, "the function-value population must be nonzero");
+    assert!(!plan.uses_scalar_abi(), "an opaque container must not acquire a scalar ABI");
 }
