@@ -224,24 +224,28 @@ impl PartialEq for GlobalPlan {
 impl Eq for GlobalPlan {}
 
 impl GlobalPlan {
-    pub(crate) fn for_concrete_result(
+    pub fn for_declared_type(
         ws: &Workspace,
         scx: &ScalarCtx,
-        result: Option<crate::monoty::MonoTy>,
+        ty: bone_semantic::prelude::TyId,
     ) -> Result<Self, RepError> {
-        let arena = scx.rep_arena();
-        let ty = result.ok_or_else(|| RepError {
+        let ty = crate::monoty::convert_decl(ws, ty, &SpecSubst::default()).map_err(|reason| RepError {
             span: None,
-            message: "a global initializer must have a concrete result type".into(),
+            message: format!("global type cannot be planned: {reason:?}"),
         })?;
+        Self::for_mono_type(ws, scx, ty)
+    }
+
+    fn for_mono_type(ws: &Workspace, scx: &ScalarCtx, ty: crate::monoty::MonoTy) -> Result<Self, RepError> {
+        let arena = scx.rep_arena();
         let representation = if scx.values_first_class {
-            arena.intern(scx.target, RepUse::Return, RepLayout::Opaque)
+            arena.intern(scx.target, RepUse::Value, RepLayout::Opaque)
         } else {
             arena.plan(
                 ws,
                 scx.target,
                 &ty,
-                RepUse::Return,
+                RepUse::Value,
                 &RepUseFacts::default(),
                 RepGuarantees { nobox: true, allow_opaque: true },
             )?
@@ -249,8 +253,28 @@ impl GlobalPlan {
         Ok(Self { representation, arena })
     }
 
+    pub(crate) fn for_concrete_result(
+        ws: &Workspace,
+        scx: &ScalarCtx,
+        result: Option<crate::monoty::MonoTy>,
+    ) -> Result<Self, RepError> {
+        let ty = result.ok_or_else(|| RepError {
+            span: None,
+            message: "a global initializer must have a concrete result type".into(),
+        })?;
+        Self::for_mono_type(ws, scx, ty)
+    }
+
     pub fn representation(&self) -> RepId {
         self.representation
+    }
+
+    pub fn use_context(&self) -> RepUse {
+        self.arena.get(self.representation).use_context()
+    }
+
+    pub(crate) fn value_shape(&self) -> Option<ValueShape> {
+        self.arena.value_shape(self.representation)
     }
 
     pub fn lanes(&self) -> usize {

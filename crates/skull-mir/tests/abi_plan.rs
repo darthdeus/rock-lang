@@ -17,7 +17,8 @@ use std::sync::LazyLock;
 use skull_mir::instance::Instance;
 use skull_mir::concrete::{ConcreteBodyPlan, ConcreteOwner, ConcreteSignature, ConcreteTypeTables};
 use skull_mir::lower::{
-    BackendFnAbiPlan, ContainerFamily, ContainerPlan, ContainerStorage, RepArena, RepGuarantees,
+    BackendFnAbiPlan, ContainerFamily, ContainerPlan, ContainerStorage, GlobalPlan, RepArena,
+    RepGuarantees,
     declared_boundary_class, boundary_requires_boxed_representation, BoundaryClass, EnumLayout,
     EnumPlan, RepLayout, RepUse, RepUseFacts, ScalarCtx,
 };
@@ -591,4 +592,20 @@ fn aggregate_value_projection_has_an_owned_value_context() {
     let plan = arena.get(id);
     assert_eq!(plan.use_context(), RepUse::Value);
     assert!(matches!(plan.layout(), RepLayout::Leaves(_)), "aggregate plan must carry leaves");
+}
+
+#[test]
+fn global_storage_uses_an_owned_value_plan() {
+    let ws = ws_of(
+        "nobox value G { x: float, y: float }\n\
+         global state: G = G { x: 1.0, y: 2.0 }\n\
+         fn main() { print(\"ok\") }\n",
+    );
+    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
+    let gid = ws.module(mid).global_by_name[&Ustr::from("state")];
+    let scx = ScalarCtx::new(&ws);
+    let plan = GlobalPlan::for_declared_type(&ws, &scx, ws.module(mid).globals[gid].ty)
+        .expect("a declared global must have a physical storage plan");
+    assert_eq!(plan.use_context(), RepUse::Value);
+    assert_eq!(plan.lanes(), 2, "the global plan must own both scalar leaves");
 }

@@ -831,13 +831,18 @@ impl Builder<'_> {
     /// leaf order is `repr_to_leaves`', so a projection is a slice, never a
     /// scatter. `None` when the place is not rooted at a `nobox` global.
     pub(crate) fn nobox_global_place(&self, e: Idx<Expr>) -> Option<(Vec<Ustr>, Option<ValueShape>)> {
+        if self.scx.values_first_class {
+            return None;
+        }
         match self.body.expr_arena[e].clone() {
             // The DECLARED type, never `e`'s: a refined read of a `global X: NV2?`
             // has expr type `NV2`, whose 2-leaf shape would address the presence
             // leaf as `x`. Storage layout is a property of the global, not of the
             // read site.
             Expr::Global(name) => {
-                let shape = nobox_declared_shape(self.ws, *self.ws.globals_by_name.get(&name)?)?;
+                let ty = *self.ws.globals_by_name.get(&name)?;
+                let plan = GlobalPlan::for_declared_type(self.ws, self.scx, ty).ok()?;
+                let shape = plan.value_shape()?;
                 let leaves =
                     (0..shape.leaf_count()).map(|i| nobox_global_leaf_name(name, i)).collect();
                 Some((leaves, Some(shape)))
