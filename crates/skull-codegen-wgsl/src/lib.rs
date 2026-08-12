@@ -72,6 +72,7 @@ enum WgslOperator {
     Sub,
     Mul,
     Div,
+    Mod,
 }
 
 impl WgslOperator {
@@ -81,6 +82,7 @@ impl WgslOperator {
             Self::Sub => "-",
             Self::Mul => "*",
             Self::Div => "/",
+            Self::Mod => "%",
         }
     }
 }
@@ -139,6 +141,7 @@ enum WgslIntrinsic {
     WorkgroupStore,
     AtomicAdd,
     WorkgroupBarrier,
+    VertexIndex,
     Texture,
     TextureSize,
     At,
@@ -185,6 +188,7 @@ impl WgslIntrinsic {
             ("workgroup_store", 3) => Self::WorkgroupStore,
             ("atomic_add", 3) => Self::AtomicAdd,
             ("workgroup_barrier", 0) => Self::WorkgroupBarrier,
+            ("vertex_id", 0) => Self::VertexIndex,
             ("round", 1) => Self::Round,
             ("v", 0..=4) => Self::VectorConstructor,
             ("zero", 0) => Self::Zero,
@@ -198,6 +202,7 @@ impl WgslIntrinsic {
             ("__op_mul", _) => Self::Operator(WgslOperator::Mul),
             ("__op_div", _) => Self::Operator(WgslOperator::Div),
             ("__op_idiv", _) => Self::Operator(WgslOperator::Div),
+            ("__op_mod", _) => Self::Operator(WgslOperator::Mod),
             (name, _) if name.starts_with("__op_") => Self::UnsupportedOperator,
             _ => return None,
         })
@@ -230,7 +235,6 @@ impl ShaderPlannerPolicy for WgslShaderPolicy {
             None => match function.name.as_str() {
                 "isnan" | "isinf" => Some("non-finite predicate intrinsic".to_string()),
                 "any" => Some("boolean-vector reduction intrinsic".to_string()),
-                "vertex_id" => Some("vertex-id builtin".to_string()),
                 "texture_id" => Some("integer texture sampling intrinsic".to_string()),
                 "greater_than" => Some("boolean-vector comparison intrinsic".to_string()),
                 "bvec3" => Some("boolean-vector constructor".to_string()),
@@ -605,7 +609,7 @@ impl WgslAbiPlan {
         })
     }
 
-    /// Derive the explicit non-indexed triangle ABI from the same neutral
+    /// Derive the explicit triangle ABI from the same neutral
     /// interface used by the GLSL pipeline. Physical C offsets are supplied by
     /// the caller's checked vertex layout; this plan owns locations, kinds and
     /// stage visibility.
@@ -1248,29 +1252,35 @@ fn validate_explicit_interface(
             "WGSL explicit projection admits one vertex stage followed by one fragment stage",
         ));
     }
-    if iface.vertex_inputs.len() != 1 {
+    if iface.vertex_inputs.is_empty() || iface.vertex_inputs.len() > 2 {
         return Err(unsupported_err(
             span,
             "multiple vertex input streams",
-            "WGSL explicit projection currently admits one vertex input stream",
+            "WGSL explicit projection admits one per-vertex stream and at most one per-instance stream",
         ));
     }
-    let input = &iface.vertex_inputs[0];
-    if input.rate != VertexRate::PerVertex || input.attrs.is_empty() {
-        return Err(err(
-            span,
-            "WGSL explicit projection currently admits non-empty per-vertex attributes only",
-        ));
+    if iface.vertex_inputs[0].rate != VertexRate::PerVertex
+        || iface.vertex_inputs[0].attrs.is_empty()
+    {
+        return Err(err(span, "WGSL explicit projection requires a non-empty per-vertex stream first"));
     }
-    identifier(input.struct_name, "vertex input name", span)?;
-    for (name, kind) in &input.attrs {
-        identifier(*name, "vertex attribute name", span)?;
-        if matches!(kind, AttrKind::I32) {
-            return Err(err(
-                span,
-                "WGSL explicit projection currently admits float vertex attributes only",
-            ));
+    for input in &iface.vertex_inputs {
+        identifier(input.struct_name, "vertex input name", span)?;
+        if input.attrs.is_empty() {
+            return Err(err(span, "WGSL explicit projection requires non-empty vertex streams"));
         }
+        for (name, kind) in &input.attrs {
+            identifier(*name, "vertex attribute name", span)?;
+            if matches!(kind, AttrKind::I32) {
+                return Err(err(
+                    span,
+                    "WGSL explicit projection currently admits float vertex attributes only",
+                ));
+            }
+        }
+    }
+    if iface.vertex_inputs.len() == 2 && iface.vertex_inputs[1].rate != VertexRate::PerInstance {
+        return Err(err(span, "WGSL explicit projection requires the second stream to be per-instance"));
     }
     if iface.varyings.is_empty() {
         return Err(unsupported_err(
@@ -2301,30 +2311,35 @@ fn emit_explicit_entries(
 ) -> Result<(), CompilerError> {
     let varying = varying_output_name(ws, vertex, span)?;
     let output = format!("{varying}Out");
-    let input = abi
-        .vertex_inputs
-        .first()
-        .ok_or_else(|| err(span, "WGSL explicit ABI has no vertex input"))?;
     writeln!(out, "@vertex\nfn {}(", abi.vertex_entry).unwrap();
-    for attr in &input.attrs {
-        writeln!(
-            out,
-            "  @location({}) input_{}: {},",
-            attr.location,
-            attr.location,
-            attr_wgsl_type(attr.kind)
-        )
-        .unwrap();
+    for input in &abi.vertex_inputs {
+        for attr in &input.attrs {
+            writeln!(
+                out,
+                "  @location({}) input_{}: {},",
+                attr.location,
+                attr.location,
+                attr_wgsl_type(attr.kind)
+            )
+            .unwrap();
+        }
     }
+    out.push_str("  @builtin(vertex_index) vertex_index: u32,\n");
     writeln!(out, ") -> {output} {{").unwrap();
-    let args = input
-        .attrs
-        .iter()
-        .map(|attr| format!("input_{}", attr.location))
-        .collect::<Vec<_>>()
-        .join(", ");
-    writeln!(out, "  let attrs = {}({});", input.struct_name, args).unwrap();
-    writeln!(out, "  let result = {}(attrs);", vertex.entry.inst.symbol(ws, interner)).unwrap();
+    let mut args = Vec::new();
+    for input in &abi.vertex_inputs {
+        let input_args = input
+            .attrs
+            .iter()
+            .map(|attr| format!("input_{}", attr.location))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let name = format!("{}_attrs", input.struct_name);
+        writeln!(out, "  let {name} = {}({input_args});", input.struct_name).unwrap();
+        args.push(name);
+    }
+    args.push("vertex_index".to_string());
+    writeln!(out, "  let result = {}({});", vertex.entry.inst.symbol(ws, interner), args.join(", ")).unwrap();
     writeln!(out, "  var output: {output};").unwrap();
     out.push_str("  output.position = result.position;\n");
     for field in &abi.varyings {
@@ -2600,6 +2615,7 @@ impl ValueKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ParamRole {
     Attribute,
+    Instance,
     Varying,
     Storage,
     Texture,
@@ -2818,13 +2834,23 @@ fn explicit_entry_param_roles(
     let mut roles = HashMap::new();
     for (index, cell) in body.params.iter().enumerate() {
         let param = &function.param_decls[index];
-        let role = if stage == ShaderStage::Vertex && has_anno(function, index, "attr") {
-            if iface.vertex_inputs.len() != 1
-                || iface.vertex_inputs[0].struct_name != nominal_name(ws, param.ty).unwrap_or_default()
-            {
-                return Err(err(span, "WGSL explicit attribute parameter is absent from the interface plan"));
+        let role = if stage == ShaderStage::Vertex
+            && (has_anno(function, index, "attr") || has_anno(function, index, "instance"))
+        {
+            let rate = if has_anno(function, index, "attr") {
+                VertexRate::PerVertex
+            } else {
+                VertexRate::PerInstance
+            };
+            let name = nominal_name(ws, param.ty).unwrap_or_default();
+            if !iface.vertex_inputs.iter().any(|input| input.struct_name == name && input.rate == rate) {
+                return Err(err(span, "WGSL explicit vertex input parameter is absent from the interface plan"));
             }
-            ParamRole::Attribute
+            if rate == VertexRate::PerInstance {
+                ParamRole::Instance
+            } else {
+                ParamRole::Attribute
+            }
         } else if has_anno(function, index, "engine") {
             check_uniform_param(ws, param.ty, UniformRole::Engine, iface, param_span(function, index))?;
             ParamRole::Uniform(UniformRole::Engine)
@@ -3042,6 +3068,7 @@ struct FunctionEmitter<'a> {
     /// the entry wrapper. `None` in every body that cannot receive it, which is
     /// what makes a helper's `frag_coord()` a rejection rather than a guess.
     frag_coord: Option<String>,
+    vertex_index: Option<String>,
     compute_invocation: Option<String>,
     compute_local_invocation: Option<String>,
     compute_workgroup_id: Option<String>,
@@ -3128,6 +3155,7 @@ impl<'a> FunctionEmitter<'a> {
             cell_kinds,
             span,
             frag_coord: None,
+            vertex_index: None,
             compute_invocation: None,
             compute_local_invocation: None,
             compute_workgroup_id: None,
@@ -3260,6 +3288,9 @@ impl<'a> FunctionEmitter<'a> {
     }
 
     fn emit_function(mut self, function: &Function, entry: bool) -> Result<String, CompilerError> {
+        if entry && self.stage.stage == ShaderStage::Vertex {
+            self.vertex_index = Some("vertex_index".to_string());
+        }
         self.unit_return = function.return_ty.is_none();
         let return_kind = self.resolve_return_kind()?;
         let signature = match return_kind {
@@ -3397,6 +3428,9 @@ impl<'a> FunctionEmitter<'a> {
         }
         if let Some(name) = &self.frag_coord {
             rendered.push(format!("{name}: vec4<f32>"));
+        }
+        if let Some(name) = &self.vertex_index {
+            rendered.push(format!("{name}: u32"));
         }
         if let Some(name) = &self.compute_invocation {
             rendered.push(format!("{name}: vec3<u32>"));
@@ -3918,7 +3952,11 @@ impl<'a> FunctionEmitter<'a> {
                         format!("WGSL storage resource `{}` is only accessed through storage intrinsics", self.cell_names[&cell]),
                     ));
                 }
-                Some(ParamRole::Attribute) | Some(ParamRole::Varying) | Some(ParamRole::TexCoord) | None => {
+                Some(ParamRole::Attribute)
+                | Some(ParamRole::Instance)
+                | Some(ParamRole::Varying)
+                | Some(ParamRole::TexCoord)
+                | None => {
                     if let Some(ty) = self.body.cells[cell].ty {
                         if let Some(kind) = struct_field_kind(self.ws, ty, field) {
                             return Ok(kind);
@@ -3988,6 +4026,7 @@ impl<'a> FunctionEmitter<'a> {
                 self.span,
                 "workgroup_barrier produces no value",
             )),
+            Some(WgslIntrinsic::VertexIndex) => Ok(ValueKind::I32),
             Some(WgslIntrinsic::Texture) => Ok(ValueKind::Vec4),
             Some(WgslIntrinsic::TextureSize) => Ok(ValueKind::Vec2),
             Some(WgslIntrinsic::FragCoord) => Ok(ValueKind::Vec4),
@@ -4218,7 +4257,7 @@ impl<'a> FunctionEmitter<'a> {
                         self.cell_names[cell]
                     ),
                 )),
-                Some(ParamRole::Attribute) | Some(ParamRole::Varying) | None => {
+                Some(ParamRole::Attribute) | Some(ParamRole::Instance) | Some(ParamRole::Varying) | None => {
                     Ok(self.cell_names[cell].clone())
                 }
                 }
@@ -4277,6 +4316,7 @@ impl<'a> FunctionEmitter<'a> {
                             ));
                         }
                         Some(ParamRole::Attribute)
+                        | Some(ParamRole::Instance)
                         | Some(ParamRole::Varying)
                         | Some(ParamRole::TexCoord)
                         | Some(ParamRole::UniformArray)
@@ -4665,6 +4705,15 @@ impl<'a> FunctionEmitter<'a> {
                      the builtin position enters; a helper cannot reach it",
                 )
             }),
+            Some(WgslIntrinsic::VertexIndex) => {
+                if !args.is_empty() {
+                    return Err(err(self.span, "WGSL vertex_id() takes no arguments"));
+                }
+                self.vertex_index
+                    .as_ref()
+                    .map(|name| format!("i32({name})"))
+                    .ok_or_else(|| err(self.span, "WGSL vertex_id() is only available in the vertex entry"))
+            }
             Some(WgslIntrinsic::Discard) => Ok("discard".to_string()),
             Some(WgslIntrinsic::At) => {
                 let member = self.array_member(args)?;
@@ -5032,7 +5081,7 @@ fn main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
         assert_eq!(WgslIntrinsic::classify_name_arity("helper", 1), None);
         // Present in the GLSL table with no faithful WGSL spelling: absent here
         // so the call rejects rather than emitting a plausible substitute.
-        for absent in ["isnan", "isinf", "any", "vertex_id", "texture_id", "greater_than"] {
+        for absent in ["isnan", "isinf", "any", "texture_id", "greater_than"] {
             for arity in 0..=3 {
                 assert_eq!(
                     WgslIntrinsic::classify_name_arity(absent, arity),
@@ -5041,6 +5090,7 @@ fn main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
                 );
             }
         }
+        assert!(WgslIntrinsic::classify_name_arity("vertex_id", 0).is_some());
     }
 
     #[test]

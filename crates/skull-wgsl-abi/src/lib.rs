@@ -308,6 +308,7 @@ impl WgslAbi {
                         "vertex input count",
                     )?;
                     let mut inputs = Vec::with_capacity(input_count);
+                    let mut expected_vertex_location = 0usize;
                     for expected_index in 0..input_count {
                         let input = fields(
                             next_line(&mut payload_lines, "vertex_input")?,
@@ -324,10 +325,10 @@ impl WgslAbi {
                         };
                         let attr_count = parse_count(input[4], "vertex attribute count")?;
                         let mut attrs = Vec::with_capacity(attr_count);
-                        for expected_location in 0..attr_count {
+                        for _ in 0..attr_count {
                             let attr = fields(next_line(&mut payload_lines, "attr")?, "attr", 4)?;
                             let location = parse_u32(attr[1], "vertex attribute location")?;
-                            if location != expected_location as u32 {
+                            if location != expected_vertex_location as u32 {
                                 return Err(wire_error("vertex attributes are not in order"));
                             }
                             attr_kind(attr[3])?;
@@ -336,6 +337,7 @@ impl WgslAbi {
                                 name: identifier(attr[2], "vertex attribute name")?,
                                 kind: attr[3].to_string(),
                             });
+                            expected_vertex_location += 1;
                         }
                         inputs.push(WgslVertexInput {
                             index,
@@ -771,6 +773,7 @@ impl WgslAbi {
                 if self.fullscreen_uniform.size != 0 || !self.fullscreen_uniform.members.is_empty() {
                     return Err(wire_error("explicit ABI carries a fullscreen uniform"));
                 }
+                let mut expected_vertex_location = 0u32;
                 for (index, input) in self.vertex_inputs.iter().enumerate() {
                     if input.index != index as u32 {
                         return Err(wire_error("vertex inputs are not in order"));
@@ -779,12 +782,13 @@ impl WgslAbi {
                     if input.rate != "vertex" && input.rate != "instance" {
                         return Err(wire_error(format!("unknown vertex input rate {}", input.rate)));
                     }
-                    for (location, attr) in input.attrs.iter().enumerate() {
-                        if attr.location != location as u32 {
+                    for attr in &input.attrs {
+                        if attr.location != expected_vertex_location {
                             return Err(wire_error("vertex attributes are not in order"));
                         }
                         identifier(&attr.name, "vertex attribute name")?;
                         attr_kind(&attr.kind)?;
+                        expected_vertex_location += 1;
                     }
                 }
                 for (location, varying) in self.varyings.iter().enumerate() {

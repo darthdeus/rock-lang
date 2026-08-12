@@ -158,14 +158,15 @@ fn bare_frag(_vary: BareVary) -> Vec4 {
 }
 
 #[test]
-fn explicit_multiple_vertex_streams_are_a_typed_wgsl_omission() {
+fn explicit_multiple_vertex_streams_preserve_instance_inputs_and_vertex_index() {
     let source = r#"
 value Quad { pos: Vec2 }
 value Instance { offset: Vec2 }
 value Vary { position: Vec4, uv: Vec2 }
 @shader(vertex)
 fn multi_vert(@attr a: Quad, @instance i: Instance) -> Vary {
-    return Vary { position: v(a.pos.x + i.offset.x, a.pos.y + i.offset.y, 0.0, 1.0), uv: a.pos }
+    let vid = vertex_id() % 2
+    return Vary { position: v(a.pos.x + i.offset.x + int_to_float(vid) * 0.01, a.pos.y + i.offset.y, 0.0, 1.0), uv: a.pos }
 }
 
 @shader(fragment)
@@ -183,19 +184,24 @@ fn multi_frag(vary: Vary) -> Vec4 {
     )
     .expect("the multi-stream compiler plan");
     assert_eq!(glsl.interface.vertex_inputs.len(), 2);
-    let error = WgslAbiPlan::explicit(
+    let abi = WgslAbiPlan::explicit(
         &glsl.interface,
         "vertex_main",
         "fragment_main",
         Span::default(),
     )
-    .expect_err("multiple vertex streams are not yet physically representable");
-    assert_eq!(
-        error.kind,
-        CompilerErrorKind::UnsupportedWgslProjection {
-            capability: "multiple vertex input streams".into(),
-        }
-    );
+    .expect("the measured per-vertex plus per-instance contract");
+    let artifact = skull_codegen_wgsl::emit_explicit_shader(
+        &ws,
+        &glsl.ir,
+        &glsl.interface,
+        &abi,
+        Span::default(),
+    )
+    .expect("the indexed instanced shader emits WGSL");
+    assert!(artifact.source.contains("@builtin(vertex_index)"), "{}", artifact.source);
+    assert!(artifact.source.contains("@location(1) input_1"), "{}", artifact.source);
+    naga_validate(&artifact.source);
 }
 
 #[test]
