@@ -1,6 +1,6 @@
 // Embedded cimgui Lua bindings.
 //
-// The .lua files in prebuilt/lua/cimgui/ are platform-independent text and
+// The .lua files in stone/prebuilt/cimgui/ are platform-independent text and
 // version-controlled. Embedding them via include_str! and emitting a prelude
 // at the top of every game's main.lua eliminates filesystem lookup, the
 // previous package.path patching in stone/engine/lib.rock, and the
@@ -14,13 +14,13 @@ pub struct CimguiFile {
 // Order matters: init.lua require()s the others, but as package.preload
 // entries they're lazily loaded, so listing order is purely cosmetic.
 pub const CIMGUI_FILES: &[CimguiFile] = &[
-    CimguiFile { module: "cimgui.cdef",      contents: include_str!("../../../prebuilt/lua/cimgui/cdef.lua") },
-    CimguiFile { module: "cimgui.master",    contents: include_str!("../../../prebuilt/lua/cimgui/master.lua") },
-    CimguiFile { module: "cimgui.enums",     contents: include_str!("../../../prebuilt/lua/cimgui/enums.lua") },
-    CimguiFile { module: "cimgui.wrap",      contents: include_str!("../../../prebuilt/lua/cimgui/wrap.lua") },
+    CimguiFile { module: "cimgui.cdef",      contents: include_str!("../../../stone/prebuilt/cimgui/cdef.lua") },
+    CimguiFile { module: "cimgui.master",    contents: include_str!("../../../stone/prebuilt/cimgui/master.lua") },
+    CimguiFile { module: "cimgui.enums",     contents: include_str!("../../../stone/prebuilt/cimgui/enums.lua") },
+    CimguiFile { module: "cimgui.wrap",      contents: include_str!("../../../stone/prebuilt/cimgui/wrap.lua") },
 ];
 
-pub const CIMGUI_INIT: &str = include_str!("../../../prebuilt/lua/cimgui/init.lua");
+pub const CIMGUI_INIT: &str = include_str!("../../../stone/prebuilt/cimgui/init.lua");
 
 /// Build the Lua prelude that registers cimgui submodules in package.preload,
 /// then runs init.lua under pcall and assigns the result (or stub) to _G.imgui.
@@ -299,7 +299,7 @@ mod tests {
             missing.is_empty(),
             "these names are not in the cimgui export table (check for an \
              overload suffix such as _Nil / _Str / _Float in \
-             prebuilt/lua/cimgui/wrap.lua):\n  {}",
+             stone/prebuilt/cimgui/wrap.lua):\n  {}",
             missing.join("\n  ")
         );
     }

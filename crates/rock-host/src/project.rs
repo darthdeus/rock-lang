@@ -262,7 +262,9 @@ pub fn lib_path_var() -> &'static str {
 /// In dev layout: `<rock_dir>/?.lua;`
 pub fn lua_path_value() -> String {
     let root = crate::rock_dir();
-    // Both layouts have prebuilt/lua/ for cimgui bindings
+    // Legacy search path. cimgui reaches Lua through the embedded prelude's
+    // package.preload entries, not this path; kept because it is generic
+    // (any module dropped under prebuilt/lua/ resolves through it).
     let mut p =
         format!("{root}/prebuilt/lua/?.lua;{root}/prebuilt/lua/?/init.lua;{root}/?.lua;");
 
