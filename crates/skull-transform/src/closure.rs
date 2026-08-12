@@ -383,6 +383,7 @@ pub fn convert_closures_framed(
         nested.push(MirFunc {
             name: hoisted_name[&sid],
             params,
+            abi_plan: mf.abi_plan.clone(),
             statics: Vec::new(),
             insts: mf.insts.clone(),
             cells: mf.cells.clone(),

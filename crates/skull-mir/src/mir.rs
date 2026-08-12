@@ -685,6 +685,9 @@ pub struct StaticCell {
 pub struct MirFunc {
     pub name: Ustr,
     pub params: Vec<Idx<Cell>>,
+    /// The concrete function representation consumed by entry binding and
+    /// return lowering. Calls retain the same plan in `call_abi_plans`.
+    pub abi_plan: Option<crate::lower::BackendFnAbiPlan>,
     /// `static` cells declared in this fn's body (in source order).
     pub statics: Vec<StaticCell>,
     pub insts: Arena<Inst>,
@@ -825,6 +828,7 @@ impl MirFunc {
         Self {
             name,
             params: Vec::new(),
+            abi_plan: None,
             statics: Vec::new(),
             insts: Arena::default(),
             cells: Arena::default(),

@@ -1184,6 +1184,7 @@ fn lower_body(
                     .expect("legacy lowering needs its source substitution"),
             )
         });
+    f.abi_plan = Some(abi.clone());
     let param_shapes = abi.param_shapes();
     let ret_shape = abi.ret_shape().cloned();
     let ret_tuple = abi.ret_tuple().cloned();

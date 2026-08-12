@@ -288,4 +288,23 @@ fn main() {
             > 1,
         "tuple return must have multiple physical lanes"
     );
+
+    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
+    let caller = skull_mir::lower::lower_function_source(
+        &ws,
+        &scx,
+        mid,
+        func_ref(&ws, "main").func,
+    )
+    .expect("lower caller");
+    let callee = func_ref(&ws, "nested");
+    let entry = skull_mir::lower::lower_function_source(&ws, &scx, callee.module, callee.func)
+        .expect("lower callee");
+    let call = caller
+        .call_abi_plans
+        .values()
+        .find(|plan| plan.subject == Instance::base(callee))
+        .expect("caller must retain the concrete nested ABI plan");
+    let entry = entry.abi_plan.as_ref().expect("callee entry must retain its ABI plan");
+    assert_eq!(entry.representation(), call.representation());
 }
