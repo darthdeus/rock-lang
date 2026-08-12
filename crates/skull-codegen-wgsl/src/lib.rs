@@ -1633,6 +1633,49 @@ pub struct WgslShaderEmission {
     pub ir: ShaderIR,
 }
 
+type SamplerParams = HashSet<Idx<Cell>>;
+type StageSamplerParams = HashMap<ShaderInstance, SamplerParams>;
+
+fn sampler_params_for_stage(
+    ws: &Workspace,
+    stage: &ShaderStageIr,
+    span: Span,
+) -> Result<StageSamplerParams, CompilerError> {
+    let mut params = StageSamplerParams::new();
+    for instance in &stage.order {
+        let body = stage.bodies.get(instance).ok_or_else(|| {
+            err(
+                span,
+                format!(
+                    "WGSL sampler lowering has no body for `{}`",
+                    function_for_instance(ws, instance).name
+                ),
+            )
+        })?;
+        let function = function_for_instance(ws, instance);
+        if function.param_decls.len() != body.params.len() {
+            return Err(err(
+                span,
+                format!(
+                    "WGSL helper `{}` and MIR parameter populations disagree",
+                    function.name
+                ),
+            ));
+        }
+        let cells = body
+            .params
+            .iter()
+            .enumerate()
+            .filter_map(|(index, cell)| {
+                matches!(value_kind_for_type(ws, function.param_decls[index].ty), Some(ValueKind::Sampler(_)))
+                    .then_some(*cell)
+            })
+            .collect();
+        params.insert(instance.clone(), cells);
+    }
+    Ok(params)
+}
+
 /// Emit a compiler-owned fullscreen module directly from neutral MIR.
 ///
 /// `Workspace` supplies neutral declaration names and type metadata for MIR
@@ -1651,6 +1694,8 @@ pub fn emit_fullscreen_shader(
     let entry_fn = function_for_instance(ws, &stage.entry);
     let entry_roles = entry_param_roles(ws, entry_fn, &stage.body, iface, abi, span)?;
     validate_known_bodies(stage, span)?;
+    let sampler_params = sampler_params_for_stage(ws, stage, span)?;
+    let empty_params = SamplerParams::new();
 
     let mut source = String::new();
     emit_fullscreen_types(&mut source, abi);
@@ -1677,12 +1722,14 @@ pub fn emit_fullscreen_shader(
             abi,
             HashMap::new(),
             span,
-        )?;
+        )?.with_sampler_params(
+            sampler_params.get(instance).unwrap_or(&empty_params),
+            &sampler_params,
+        );
         source.push_str(&emitter.emit_function(f, false)?);
     }
 
-    let emitter =
-        FunctionEmitter::new(
+    let emitter = FunctionEmitter::new(
             ws,
             &ir.interner,
             stage,
@@ -1691,13 +1738,17 @@ pub fn emit_fullscreen_shader(
             abi,
             entry_roles,
             span,
-        )?;
+        )?.with_sampler_params(
+            sampler_params.get(&stage.entry).unwrap_or(&empty_params),
+            &sampler_params,
+        );
     source.push_str(&emitter.emit_function(entry_fn, true)?);
     emit_fullscreen_entries(
         &mut source,
         abi,
         stage.entry.inst.symbol(ws, &ir.interner),
     );
+    validate_wgsl_source(&source, span)?;
 
     Ok(WgslShaderEmission {
         source,
@@ -2951,6 +3002,8 @@ struct FunctionEmitter<'a> {
     body: &'a MirFunc,
     abi: &'a WgslAbiPlan,
     param_roles: HashMap<Idx<Cell>, ParamRole>,
+    sampler_params: SamplerParams,
+    stage_sampler_params: StageSamplerParams,
     cell_names: HashMap<Idx<Cell>, String>,
     cell_kinds: HashMap<Idx<Cell>, ValueKind>,
     span: Span,
@@ -3038,6 +3091,8 @@ impl<'a> FunctionEmitter<'a> {
             body,
             abi,
             param_roles,
+            sampler_params: SamplerParams::new(),
+            stage_sampler_params: StageSamplerParams::new(),
             cell_names,
             cell_kinds,
             span,
@@ -3060,6 +3115,16 @@ impl<'a> FunctionEmitter<'a> {
         };
         emitter.infer_local_kinds()?;
         Ok(emitter)
+    }
+
+    fn with_sampler_params(
+        mut self,
+        sampler_params: &SamplerParams,
+        stage_sampler_params: &StageSamplerParams,
+    ) -> Self {
+        self.sampler_params = sampler_params.clone();
+        self.stage_sampler_params = stage_sampler_params.clone();
+        self
     }
 
     fn with_frag_coord(mut self, name: Option<String>) -> Self {
@@ -3230,6 +3295,32 @@ impl<'a> FunctionEmitter<'a> {
         }
         let mut rendered = Vec::new();
         for cell in &self.body.params {
+            if self.sampler_params.contains(cell) {
+                let kind = self.cell_kinds.get(cell).copied().ok_or_else(|| {
+                    err(
+                        self.span,
+                        format!(
+                            "WGSL sampler parameter `{}` has no neutral type",
+                            self.cell_names[cell]
+                        ),
+                    )
+                })?;
+                let ValueKind::Sampler(sampler_kind) = kind else {
+                    return Err(err(
+                        self.span,
+                        format!(
+                            "WGSL sampler parameter `{}` is not a sampler parameter",
+                            self.cell_names[cell]
+                        ),
+                    ));
+                };
+                let (texture, sampler) = self.sampler_param_names(*cell);
+                rendered.push(format!(
+                    "{texture}: {}, {sampler}: sampler",
+                    texture_type(sampler_kind)
+                ));
+                continue;
+            }
             if matches!(self.param_roles.get(cell), Some(ParamRole::Storage))
                 || (entry
                     && matches!(
@@ -4075,6 +4166,9 @@ impl<'a> FunctionEmitter<'a> {
                 if let Some((name, _)) = self.workgroup_cells.get(cell) {
                     return Ok(name.clone());
                 }
+                if self.sampler_params.contains(cell) {
+                    return Ok(self.sampler_param_names(*cell).0);
+                }
                 match self.param_roles.get(cell).copied() {
                 Some(ParamRole::TexCoord) => Ok("uv".to_string()),
                 Some(ParamRole::Storage)
@@ -4517,22 +4611,21 @@ impl<'a> FunctionEmitter<'a> {
                         "WGSL texture intrinsic requires one logical sampler and one UV",
                     ));
                 }
-                let texture = self.sampler_binding(args[0])?;
-                if texture.kind != SamplerKind::Float {
+                if self.value_kind(args[0])? != ValueKind::Sampler(SamplerKind::Float) {
                     return Err(err(
                         self.span,
                         "WGSL emission does not yet admit integer texture sampling",
                     ));
                 }
+                let (texture_arg, sampler_arg) = self.sampler_expressions(args[0])?;
                 Ok(format!(
-                    "textureSample(tex_{0}, samp_{0}, {1})",
-                    texture.name,
+                    "textureSample({texture_arg}, {sampler_arg}, {})",
                     self.render_val(args[1])?
                 ))
             }
             Some(WgslIntrinsic::TextureSize) => {
-                let texture = self.sampler_binding(args[0])?;
-                Ok(format!("vec2<f32>(textureDimensions(tex_{}))", texture.name))
+                let (texture_arg, _) = self.sampler_expressions(args[0])?;
+                Ok(format!("vec2<f32>(textureDimensions({texture_arg}))"))
             }
             Some(WgslIntrinsic::FragCoord) => self.frag_coord.clone().ok_or_else(|| {
                 err(
@@ -4599,17 +4692,37 @@ impl<'a> FunctionEmitter<'a> {
             None => {
                 let instance = self.resolve_callee(iid, func)?;
                 let self_name = instance.inst.symbol(self.ws, self.interner);
-                let rendered = args
-                    .iter()
-                    .enumerate()
-                    .filter(|(index, _)| {
-                        function
-                            .param_decls
-                            .get(*index)
-                            .is_none_or(|param| !is_compute_resource_type(self.ws, param.ty))
-                    })
-                    .map(|(_, arg)| self.render_val(*arg))
-                    .collect::<Result<Vec<_>, _>>()?;
+                let target_body = self.stage.bodies.get(&instance).ok_or_else(|| {
+                    err(
+                        self.span,
+                        format!("WGSL call target `{}` has no emitted body", function.name),
+                    )
+                })?;
+                let target_sampler_params = self.stage_sampler_params.get(&instance);
+                let mut rendered = Vec::new();
+                for (index, arg) in args.iter().enumerate() {
+                    let compute_resource = function
+                        .param_decls
+                        .get(index)
+                        .is_some_and(|param| is_compute_resource_type(self.ws, param.ty));
+                    if compute_resource {
+                        continue;
+                    }
+                    let sampler_resource = target_body
+                        .params
+                        .get(index)
+                        .is_some_and(|cell| {
+                            target_sampler_params
+                                .is_some_and(|params| params.contains(cell))
+                        });
+                    if sampler_resource {
+                        let (texture, sampler) = self.sampler_expressions(*arg)?;
+                        rendered.push(texture);
+                        rendered.push(sampler);
+                    } else {
+                        rendered.push(self.render_val(*arg)?);
+                    }
+                }
                 Ok(format!("{}({})", self_name, rendered.join(", ")))
             }
         }
@@ -4657,6 +4770,28 @@ impl<'a> FunctionEmitter<'a> {
                     format!("WGSL texture slot `{field}` is absent from the ABI plan"),
                 )
             })
+    }
+
+    fn sampler_param_names(&self, cell: Idx<Cell>) -> (String, String) {
+        let suffix = cell.into_raw().into_u32();
+        (
+            format!("rock_sampler_tex_{suffix}"),
+            format!("rock_sampler_samp_{suffix}"),
+        )
+    }
+
+    fn sampler_expressions(&self, iid: Idx<Inst>) -> Result<(String, String), CompilerError> {
+        if let Inst::Load(cell) = self.body.insts[iid] {
+            if self.sampler_params.contains(&cell) {
+                let (texture, sampler) = self.sampler_param_names(cell);
+                return Ok((texture, sampler));
+            }
+        }
+        let texture = self.sampler_binding(iid)?;
+        Ok((
+            format!("tex_{}", texture.name),
+            format!("samp_{}", texture.name),
+        ))
     }
 }
 
@@ -4813,6 +4948,30 @@ fn zero_value(kind: ValueKind) -> String {
 #[cfg(test)]
 mod tests {
     use super::{ResultKind, ValueKind, WgslIntrinsic, WgslOperator, swizzle_kind};
+
+    #[test]
+    fn naga_accepts_opaque_sampler_function_parameters() {
+        let source = r#"
+@group(0) @binding(0) var source_tex: texture_2d<f32>;
+@group(0) @binding(1) var source_sampler: sampler;
+
+fn sample_helper(tex: texture_2d<f32>, samp: sampler, uv: vec2<f32>) -> vec4<f32> {
+    return textureSample(tex, samp, uv);
+}
+
+@fragment
+fn main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
+    return sample_helper(source_tex, source_sampler, position.xy);
+}
+"#;
+        let module = naga::front::wgsl::parse_str(source).expect("WGSL grammar accepts the probe");
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .expect("WGSL resources may cross a helper function boundary");
+    }
 
     #[test]
     fn intrinsic_classifier_matches_the_admitted_wgsl_surface() {

@@ -475,6 +475,49 @@ fn wgpu_registration_follows_graph_owned_shader_pairs() {
     }
 }
 
+const BLOOM_PROJECTION_SRC: &str = r#"
+struct InputTex { input_tex: Sampler2D }
+struct SrcTex { src_tex: Sampler2D }
+value BloomDownU { gain: float }
+
+@shader(fragment)
+fn bloom_down_13(src: Sampler2D, tc: Vec2) -> Vec4 {
+    return texture(src, tc)
+}
+
+@shader(fragment)
+fn blit_frag(@textures t: InputTex, tc: Vec2) -> Vec4 {
+    return texture(t.input_tex, tc)
+}
+
+@shader(fragment)
+fn bloom_down_frag(@textures t: SrcTex, @uniform u: BloomDownU, tc: Vec2) -> Vec4 {
+    return bloom_down_13(t.src_tex, tc) * u.gain
+}
+
+fn use_all() -> string {
+    let a = rock_shader(blit_frag)
+    let b = rock_shader(bloom_down_frag)
+    return b
+}
+"#;
+
+#[test]
+fn bloom_sampler_helper_projection_is_admitted_from_the_graph() {
+    let ws = ws_with_stdlib(BLOOM_PROJECTION_SRC);
+    let mid = test_mid(&ws);
+    let (emit, cache) = emit_full_in_for_renderer(&ws, mid, None, RendererTarget::Wgpu)
+        .expect("selected artifacts emit");
+    let census = cache.wgpu_projection_census().expect("WGPU projection census");
+    assert_eq!(census.examined, 2, "the fixture must exercise both graph roots: {census:?}");
+    assert_eq!(census.admitted, 2, "bloom sampler/helper projection was omitted: {census:?}");
+    assert_eq!(census.omitted, 0, "a valid graph pair entered the omitted population: {census:?}");
+    assert!(
+        emit.lua.contains("__rock_wgpu_shader_register(\"bloom_down_frag\""),
+        "the admitted bloom artifact never reached the registration output"
+    );
+}
+
 #[test]
 fn selected_wgpu_planning_reads_the_exact_graph_instance_and_concrete_plan() {
     let ws = ws_with_stdlib(WGPU_FULLSCREEN_SRC);
