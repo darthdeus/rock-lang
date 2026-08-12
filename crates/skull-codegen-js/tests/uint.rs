@@ -115,7 +115,7 @@ fn root(lo: uint, hi: uint) -> uint {
 
     let src = "
 fn root() -> uint {
-    let values = 2147483648..2147483651
+    let values: [uint] = 2147483648..2147483651
     values[2]
 }";
     eval(src, "root()", "2147483650");

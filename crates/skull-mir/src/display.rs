@@ -178,6 +178,7 @@ fn fmt_inst(
             columns,
             len,
             capacity,
+            ..
         } => format!(
             "vec.columns {elem} len={len} cap=v{} {{{}}}",
             num[capacity],
@@ -187,6 +188,9 @@ fn fmt_inst(
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+        Inst::MakeVecColumnHeader { elem, capacity, .. } => {
+            format!("vec.column_header {elem} cap=v{}", num[capacity])
+        }
         Inst::MakeStruct { ty, fields } => {
             let fs = fields
                 .iter()

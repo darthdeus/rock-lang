@@ -23,6 +23,80 @@ impl Builder<'_> {
         self.dispatch().concrete_ty(ty)
     }
 
+    pub(crate) fn concrete_rep_id(
+        &self,
+        ty: &MonoTy,
+        use_context: RepUse,
+        tuple_spelled: bool,
+        nobox: bool,
+    ) -> Result<RepId, CompilerError> {
+        self.scx
+            .rep_arena()
+            .plan(
+                self.ws,
+                self.scx.target(),
+                ty,
+                use_context,
+                &RepUseFacts { tuple_spelled, span: self.cur_span },
+                RepGuarantees { nobox, allow_opaque: true },
+            )
+            .map_err(|error| match error.span.or(self.cur_span) {
+                Some(span) => CompilerError::new_with_label(span, error.message),
+                None => CompilerError::new_no_location(error.message),
+            })
+    }
+
+    pub(crate) fn concrete_rep_tuple(
+        &self,
+        ty: &MonoTy,
+        use_context: RepUse,
+        tuple_spelled: bool,
+        nobox: bool,
+    ) -> Result<Option<TupleRetShape>, CompilerError> {
+        let arena = self.scx.rep_arena();
+        let id = self.concrete_rep_id(ty, use_context, tuple_spelled, nobox)?;
+        Ok(arena.tuple_shape(id))
+    }
+
+    pub(crate) fn expr_rep_id(
+        &self,
+        e: Idx<Expr>,
+        use_context: RepUse,
+        nobox: bool,
+    ) -> Option<RepId> {
+        if let Some(ty) = self.concrete_expr_ty(e) {
+            let tuple_spelled = matches!(ty.peel_nullable().0, MonoTy::Tuple(_));
+            return self.concrete_rep_id(&ty, use_context, tuple_spelled, nobox).ok();
+        }
+        None
+    }
+
+    pub(crate) fn nominal_rep_shape(&self, name: Ustr, nobox: bool) -> Option<ValueShape> {
+        let ty = MonoTy::App {
+            ctor: crate::monoty::MonoCtor::Nominal(name),
+            params: Vec::new(),
+        };
+        let id = self
+            .scx
+            .rep_arena()
+            .plan(
+                self.ws,
+                self.scx.target(),
+                &ty,
+                RepUse::Value,
+                &RepUseFacts::default(),
+                RepGuarantees { nobox, allow_opaque: true },
+            )
+            .ok()?;
+        self.scx.rep_arena().value_shape(id)
+    }
+
+    pub(crate) fn rep_shape_for_ty(&self, ty: TyId, use_context: RepUse, nobox: bool) -> Option<ValueShape> {
+        let mono = self.concrete_ty_id(ty)?;
+        let id = self.concrete_rep_id(&mono, use_context, false, nobox).ok()?;
+        self.scx.rep_arena().value_shape(id)
+    }
+
     pub(crate) fn concrete_expr_is_untyped(&self, e: Idx<Expr>) -> bool {
         self.dispatch()
             .concrete_types
@@ -202,16 +276,10 @@ impl Builder<'_> {
             return self.bound_next_tuple_shape(gidx).map(Some);
         }
         if let Some(MonoTy::Tuple(parts)) = self.concrete_expr_ty(e) {
-            return Ok(Some(mono_tuple_shape(self.ws, &parts)));
+            let ty = MonoTy::Tuple(parts);
+            return self.concrete_rep_tuple(&ty, RepUse::Return, true, false);
         }
-        if self.concrete_plan.is_some() {
-            return Ok(None);
-        }
-        Ok(self
-            .inf
-            .and_then(|inf| inf.expr_types.get(e))
-            .and_then(|ty| self.resolve_tyid(*ty))
-            .and_then(|ty| self.tyid_tuple_ret_shape(ty)))
+        Ok(None)
     }
 
     pub(crate) fn repr_join_slot(&self, e: Idx<Expr>) -> Result<Option<RetSlot>, CompilerError> {
@@ -267,57 +335,6 @@ impl Builder<'_> {
         }
     }
 
-    /// `Some` iff `e` is a lambda whose RETURN type is a (non-nullable) tuple --
-    /// the lambda body then splats its slots so an indirect call site captures
-    /// them (multi-return ABI). Read off the lambda's inferred `fn(..) -> (..)`
-    /// type so it agrees with the call site's `expr_tuple_shape`.
-    pub(crate) fn lambda_ret_tuple_shape(&self, e: Idx<Expr>) -> Option<TupleRetShape> {
-        if let Some(MonoTy::Function { ret, .. }) = self.concrete_expr_ty(e) {
-            if let MonoTy::Tuple(parts) = *ret {
-                return Some(mono_tuple_shape(self.ws, &parts));
-            }
-            return None;
-        }
-        if self.concrete_plan.is_some() {
-            return None;
-        }
-        let ty = self.resolve_tyid(*self.inf?.expr_types.get(e)?)?;
-        let TypeExpr::Function { ret, .. } = self.ty_node(ty)? else { return None };
-        self.tyid_tuple_ret_shape(self.resolve_tyid(ty.with_idx(ret))?)
-    }
-
-    /// [`tuple_ret_shape`] for a type that may live in the BODY's inference arena
-    /// (a call expression's own type, a lambda's return) rather than the
-    /// workspace one. Concrete expression tables resolve generic elements from
-    /// the same plan the signature-side walker sees.
-    pub(crate) fn tyid_tuple_ret_shape(&self, ty: TyId) -> Option<TupleRetShape> {
-        if let Some(concrete) = self.concrete_ty_id(ty) {
-            return match concrete {
-                MonoTy::Tuple(parts) => Some(mono_tuple_shape(self.ws, &parts)),
-                MonoTy::Nullable(_) => None,
-                _ => None,
-            };
-        }
-        if self.concrete_plan.is_some() {
-            return None;
-        }
-        // A generic bound to a TUPLE has no source node for its concrete
-        // children, so it is read from the concrete binding here --
-        // the same source `body_ret_slot` reads. Without it a specialized body's
-        // indirect call sees a bare `Generic` and declines to splat, while the
-        // fn value it calls splats from its own concrete type.
-        if let Some(MonoTy::Tuple(parts)) = self.bound_generic_subst(ty) {
-            return Some(mono_tuple_shape(self.ws, parts));
-        }
-        let ty = self.resolve_tyid(ty)?;
-        let TypeExpr::Tuple { elements } = self.ty_node(ty)? else { return None };
-        let slots = elements
-            .into_iter()
-            .map(|el| self.body_ret_slot(ty.with_idx(el)))
-            .collect();
-        Some(TupleRetShape { slots, nullable: false })
-    }
-
     /// The slot layout of a tuple's BOX: `Some` exactly when some element splats,
     /// so its `nobox` leaves ride the box instead of a `<name>_ct` inside it.
     ///
@@ -337,177 +354,31 @@ impl Builder<'_> {
         Ok(self.expr_tuple_shape(e)?.filter(|s| s.splats()))
     }
 
-    /// The tuple slot of a declared PARAM on the body arena -- [`tuple_param_slot`]'s
-    /// spelling for a nested fn and for a fn TYPE's params.
-    ///
-    /// Separate from [`Self::tyid_tuple_ret_shape`] because the two answer
-    /// different questions about the same `Nullable(Tuple)`: that one is the CALL
-    /// boundary, where no callee puts a presence on the wire, so it must keep
-    /// declining. A param type is a DECLARATION, which is the one source allowed
-    /// to set the tag -- so `(NV, int)?` splats here, presence first, exactly as
-    /// the matching return does.
-    pub(crate) fn tuple_param_slot_of_ty(&self, ty: TyId) -> RetSlot {
-        // The plain tuple answer FIRST, generic-bound-to-a-tuple included
-        // (`zip`'s pair reaches a combinator param that way, and it has no type
-        // node to read). Only what that declines gets the `?` peel.
-        let shape = self.tyid_tuple_ret_shape(ty).or_else(|| self.nullable_tuple_param_shape(ty));
-        match shape {
-            Some(inner) if inner.splats() => RetSlot::Nested(inner),
-            _ => RetSlot::Opaque,
-        }
-    }
-
-    /// A spelled `(A, B)?` param, with the presence leading its slots. `None`
-    /// unless an element actually splats: a nullable tuple of ordinary elements
-    /// has nothing to gain from the multi-value form and keeps its single boxed
-    /// slot, byte-for-byte the pre-existing ABI ([`tuple_ret_shape`]'s rule,
-    /// restated because this peels the `?` itself).
-    fn nullable_tuple_param_shape(&self, ty: TyId) -> Option<TupleRetShape> {
-        if let Some(concrete) = self.concrete_ty_id(ty) {
-            return match concrete {
-                MonoTy::Nullable(inner) => {
-                    let MonoTy::Tuple(parts) = inner.as_ref() else { return None };
-                    Some(TupleRetShape {
-                        slots: parts.iter().map(|part| mono_ret_slot(self.ws, part)).collect(),
-                        nullable: true,
-                    })
-                    .filter(TupleRetShape::splats)
-                }
-                _ => None,
-            };
-        }
-        if self.concrete_plan.is_some() {
-            return None;
-        }
-        let ty = self.resolve_tyid(ty)?;
-        let TypeExpr::Nullable(inner) = self.ty_node(ty)? else { return None };
-        let inner = self.tyid_tuple_ret_shape(self.resolve_tyid(ty.with_idx(inner))?)?;
-        Some(TupleRetShape { nullable: true, ..inner }).filter(TupleRetShape::splats)
-    }
-
-    /// The element slot of a placeholder `next` on the `Iterator`-bounded generic
-    /// at `gidx` in the legacy shared body. A concrete body uses its resolved
-    /// witness's ABI plan instead.
-    ///
-    /// `Opaque` whenever the shared body's specialization does not resolve the
-    /// element; the splice's repack corrects that shape for the concrete callee.
-    pub(crate) fn bound_next_elem_slot(&self, gidx: usize) -> RetSlot {
-        match self.generic_bounds.get(gidx).copied().flatten() {
-            Some(elem) => ret_slot(self.ws, self.subst(), elem),
-            None => RetSlot::Opaque,
-        }
-    }
-
     /// The full `(bool, E)` shape of a placeholder `next` on the generic at
-    /// `gidx` -- the concrete bound plan or the legacy shared-body rule is the
-    /// oracle every consumer of that call routes through.
+    /// `gidx` from the concrete bound plan.
     pub(crate) fn bound_next_tuple_shape(
         &self,
         gidx: usize,
     ) -> Result<TupleRetShape, CompilerError> {
-        if let Some(plan) = self.concrete_plan {
-            let next = plan.bound_tree.get(gidx).ok_or_else(|| {
-                gap(format!("concrete plan is missing bound `next` witness {gidx}"))
-            })?;
-            let instance = match next {
-                crate::bound::ResolvedBoundNext::Concrete { instance, .. } => instance.clone(),
-                crate::bound::ResolvedBoundNext::CallerGeneric(inner) => {
-                    return Err(gap(format!(
-                        "concrete bound `next` witness {gidx} remains caller-generic at {inner}"
-                    )))
-                }
-            };
-            let shape = self
-                .callee_abi_plan_for_instance(&instance)?
-                .ret_tuple()
-                .cloned()
-                .ok_or_else(|| gap("concrete bound `next` must return a tuple"))?;
-            if shape.slots.len() < 2 {
-                return Err(gap("concrete bound `next` must return `(bool, E)`"));
+        let next = self.concrete_plan.bound_tree.get(gidx).ok_or_else(|| {
+            gap(format!("concrete plan is missing bound `next` witness {gidx}"))
+        })?;
+        let instance = match next {
+            crate::bound::ResolvedBoundNext::Concrete { instance, .. } => instance.clone(),
+            crate::bound::ResolvedBoundNext::CallerGeneric(inner) => {
+                return Err(gap(format!(
+                    "concrete bound `next` witness {gidx} remains caller-generic at {inner}"
+                )))
             }
-            return Ok(shape);
-        }
-        Ok(TupleRetShape {
-            nullable: false,
-            slots: vec![RetSlot::Opaque, self.bound_next_elem_slot(gidx)],
-        })
-    }
-
-    /// What the substitution binds `ty` to, when `ty` is (or resolves to) a
-    /// declared generic. An element of a tuple literal's inferred type arrives as
-    /// the declared generic in one `next` body and as an inference VAR in
-    /// another, so both spellings are chased -- but only to answer THIS question.
-    /// Resolving `ty` for the rest of a caller instead is wrong: it erases a
-    /// `Nullable` binding's `?` on the way through `ty_node`, which silently
-    /// re-planned every nullable-column body to a non-nullable shape.
-    pub(crate) fn bound_generic_subst(&self, ty: TyId) -> Option<&MonoTy> {
-        let var = match self.raw_ty_node(ty) {
-            Some(TypeExpr::Generic(var, _)) => var,
-            Some(TypeExpr::Infer(..)) => match self.resolve_tyid(ty).and_then(|t| self.raw_ty_node(t)) {
-                Some(TypeExpr::Generic(var, _)) => var,
-                _ => return None,
-            },
-            _ => return None,
         };
-        self.subst().get(&var)
-    }
-
-    pub(crate) fn body_ret_slot(&self, ty: TyId) -> RetSlot {
-        if let Some(concrete) = self.concrete_ty_id(ty) {
-            return mono_ret_slot(self.ws, &concrete);
+        let shape = self
+            .callee_abi_plan_for_instance(&instance)?
+            .ret_tuple()
+            .ok_or_else(|| gap("concrete bound `next` must return a tuple"))?;
+        if shape.slots.len() < 2 {
+            return Err(gap("concrete bound `next` must return `(bool, E)`"));
         }
-        if self.concrete_plan.is_some() {
-            return RetSlot::Opaque;
-        }
-        // A generic bound to a TUPLE has no source node for its concrete
-        // children, so it is read from the concrete binding directly.
-        if let Some(bound @ MonoTy::Tuple(_)) = self.bound_generic_subst(ty) {
-            return mono_ret_slot(self.ws, bound);
-        }
-        if let Some(shape) = self.body_nobox_shape(ty) {
-            return RetSlot::Leaves(shape);
-        }
-        match self.tyid_tuple_ret_shape(ty) {
-            Some(inner) if inner.splats() => RetSlot::Nested(inner),
-            _ => RetSlot::Opaque,
-        }
-    }
-
-    /// [`Self::body_sig_value_shape`] narrowed to `nobox` nominals -- the splat
-    /// gate, mirroring [`nobox_sig_shape_spec`] on the body arena.
-    pub(crate) fn body_nobox_shape(&self, ty: TyId) -> Option<ValueShape> {
-        if let Some(concrete) = self.concrete_ty_id(ty) {
-            let (payload, nullable) = concrete.peel_nullable();
-            if let MonoTy::App { ctor: crate::monoty::MonoCtor::Nominal(n), .. } = payload {
-                if self.is_nobox_struct(n.to_owned().into()) {
-                    return if nullable {
-                        sig_shape_of_nullable_nominal(self.ws, n.to_owned().into())
-                    } else {
-                        sig_shape_of_nominal(self.ws, n.to_owned().into())
-                    };
-                }
-            }
-            return None;
-        }
-        if self.concrete_plan.is_some() {
-            return None;
-        }
-        let ty = self.resolve_tyid(ty)?;
-        match self.ty_node(ty)? {
-            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } if self.is_nobox_struct(n) => {
-                sig_shape_of_nominal(self.ws, n)
-            }
-            TypeExpr::Nullable(inner) => {
-                let inner = self.resolve_tyid(ty.with_idx(inner))?;
-                match self.ty_node(inner)? {
-                    TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } if self.is_nobox_struct(n) => {
-                        sig_shape_of_nullable_nominal(self.ws, n)
-                    }
-                    _ => None,
-                }
-            }
-            _ => None,
-        }
+        Ok(shape)
     }
 
     /// The C-array element type name for a `native_buffer_alloc<T>()` call whose
@@ -525,7 +396,11 @@ impl Builder<'_> {
     /// access would allocate a pointer cdata each time, which is the allocation
     /// leaf addressing exists to remove.
     pub(crate) fn leaf_view_fields(&mut self, ctype: Ustr, ptr: Idx<Inst>) -> Vec<(Ustr, Idx<Inst>)> {
-        let Ok(ctys) = leaf_view_ctys(self.ws, ctype) else {
+        let Ok(ctys) = self.scx.rep_arena().nominal_leaf_view_ctys(
+            self.ws,
+            self.scx.target,
+            ctype,
+        ) else {
             return Vec::new();
         };
         ctys.into_iter()
@@ -537,64 +412,57 @@ impl Builder<'_> {
     }
 
     pub(crate) fn native_buffer_alloc_ctype(&self, e: Idx<Expr>, span: Span) -> Result<Ustr, CompilerError> {
-        if let Some(ret) = self.concrete_expr_ty(e) {
-            return native_buffer_alloc_elem_ctype_mono(self.ws, &ret)
-                .map_err(|msg| CompilerError::new_with_label(span, msg));
-        }
-        if self.concrete_plan.is_some() {
-            return Err(CompilerError::new_with_label(
+        let ret = self.concrete_expr_ty(e).ok_or_else(|| {
+            CompilerError::new_with_label(
                 span,
                 "`native_buffer_alloc` call is missing from the concrete type plan".to_string(),
+            )
+        })?;
+        let MonoTy::App {
+            ctor: crate::monoty::MonoCtor::Nominal(nb),
+            params,
+        } = ret.peel_nullable().0
+        else {
+            return Err(CompilerError::new_with_label(
+                span,
+                "`native_buffer_alloc` must produce a `NativeBuffer<T>`".to_string(),
+            ));
+        };
+        if nb.as_str() != "NativeBuffer" {
+            return Err(CompilerError::new_with_label(
+                span,
+                format!("`native_buffer_alloc` result is `{nb}`, expected `NativeBuffer<T>`"),
             ));
         }
-        let inf = self.inf.ok_or_else(|| {
-            CompilerError::new_with_label(span, "`native_buffer_alloc` needs inference".into())
-        })?;
-        let ret = *inf.expr_types.get(e).ok_or_else(|| {
-            CompilerError::new_with_label(span, "`native_buffer_alloc` call is untyped".into())
-        })?;
-        // In a specialized splice the `NativeBuffer<T>` element resolves through
-        // `spec_subst` to a concrete type, so the intrinsic can name the ctype the
-        // shared generic body could not. An empty subst is exactly the shared path.
-        let r = if self.subst().is_empty() {
-            native_buffer_alloc_elem_ctype(self.ws, inf, ret)
-        } else {
-            native_buffer_alloc_elem_ctype_spec(self.ws, inf, ret, self.subst())
+        let Some(element) = params.first() else {
+            return Err(CompilerError::new_with_label(
+                span,
+                "`NativeBuffer` element type is missing".to_string(),
+            ));
         };
-        r.map_err(|msg| CompilerError::new_with_label(span, msg))
+        self.scx
+            .rep_arena()
+            .native_buffer_element_ctype(self.ws, self.scx.target, element)
+            .map_err(|error| CompilerError::new_with_label(span, error.message))
     }
 
     /// `Some` iff `e`'s type is a tuple OR a `(tuple)?` -- the nil-peeled form
     /// for safe-nav calls, whose result type is nullable but whose callee still
     /// splats the inner tuple.
     pub(crate) fn peeled_tuple_shape(&self, e: Idx<Expr>) -> Option<TupleRetShape> {
-        if let Some(concrete) = self.concrete_expr_ty(e) {
-            let (payload, _) = concrete.peel_nullable();
-            return match payload {
-                MonoTy::Tuple(parts) => Some(mono_tuple_shape(self.ws, parts)),
-                _ => None,
-            };
+        let concrete = self.concrete_expr_ty(e)?;
+        let (payload, _) = concrete.peel_nullable();
+        match payload {
+            MonoTy::Tuple(_) => self
+                .concrete_rep_tuple(&concrete, RepUse::Return, true, false)
+                .ok()
+                .flatten(),
+            _ => None,
         }
-        if self.concrete_plan.is_some() {
-            return None;
-        }
-        let ty = self.resolve_tyid(*self.inf?.expr_types.get(e)?)?;
-        let inner = match self.ty_node(ty)? {
-            TypeExpr::Nullable(i) => self.resolve_tyid(ty.with_idx(i))?,
-            _ => ty,
-        };
-        self.tyid_tuple_ret_shape(inner)
     }
 
     pub(crate) fn resolve_ty(&self, ty: TyId) -> Option<TypeExpr> {
         self.dispatch().resolve_ty(ty)
-    }
-
-    /// The stored type node, WITHOUT the specialization substitution -- the only
-    /// place a generic's own identity is still visible, which is what
-    /// [`Self::is_nullable_ty`] needs (the substitution answers with the payload).
-    pub(crate) fn raw_ty_node(&self, ty: TyId) -> Option<TypeExpr> {
-        self.dispatch().raw_ty_node(ty)
     }
 
     pub(crate) fn ty_node(&self, ty: TyId) -> Option<TypeExpr> {
@@ -612,81 +480,24 @@ impl Builder<'_> {
     /// a flat enum -- the shape flowing through a `await` delegation to a flat-enum
     /// coroutine (so the delegate threads the inner's leaves instead of a box).
     pub(crate) fn coroutine_yield_flat_shape(&self, e: Idx<Expr>) -> Option<EnumFlatShape> {
-        if let Some(concrete) = self.concrete_expr_ty(e) {
-            let MonoTy::App {
-                ctor: crate::monoty::MonoCtor::Nominal(name),
-                params,
-            } = concrete.peel_nullable().0
-            else {
-                return None;
-            };
-            if name.as_str() != "Coroutine" {
-                return None;
-            }
-            let Some(MonoTy::App {
-                ctor: crate::monoty::MonoCtor::Nominal(yield_name),
-                ..
-            }) = params.first()
-            else {
-                return None;
-            };
-            return flat_enum_shape(self.ws, *yield_name);
-        }
-        if self.concrete_plan.is_some() {
-            return None;
-        }
-        let ty = self.resolve_tyid(*self.inf?.expr_types.get(e)?)?;
-        let TypeExpr::App { ctor: TypeCtor::Nominal(n), params } = self.ty_node(ty)? else {
+        let concrete = self.concrete_expr_ty(e)?;
+        let MonoTy::App {
+            ctor: crate::monoty::MonoCtor::Nominal(name),
+            params,
+        } = concrete.peel_nullable().0
+        else {
             return None;
         };
-        if n.as_str() != "Coroutine" {
+        if name.as_str() != "Coroutine" {
             return None;
         }
-        let y_ty = self.resolve_tyid(ty.with_idx(params.into_iter().next()?))?;
-        match self.ty_node(y_ty)? {
-            TypeExpr::App { ctor: TypeCtor::Nominal(yn), .. } => flat_enum_shape(self.ws, yn),
-            _ => None,
-        }
+        let Some(MonoTy::App {
+            ctor: crate::monoty::MonoCtor::Nominal(yield_name),
+            ..
+        }) = params.first()
+        else {
+            return None;
+        };
+        EnumPlan::for_name(self.ws, *yield_name).and_then(|plan| plan.flat().cloned())
     }
-}
-
-fn native_buffer_alloc_elem_ctype_mono(
-    ws: &Workspace,
-    ret: &MonoTy,
-) -> Result<Ustr, String> {
-    let crate::monoty::MonoTy::App {
-        ctor: crate::monoty::MonoCtor::Nominal(nb),
-        params,
-    } = ret.peel_nullable().0
-    else {
-        return Err("`native_buffer_alloc` must produce a `NativeBuffer<T>`".to_string());
-    };
-    if nb.as_str() != "NativeBuffer" {
-        return Err(format!("`native_buffer_alloc` result is `{nb}`, expected `NativeBuffer<T>`"));
-    }
-    let Some(elem) = params.first() else {
-        return Err("`NativeBuffer` element type is missing".to_string());
-    };
-    if let Some(prim) = elem.prim_name() {
-        return Ok(Ustr::from(if prim == "uint" { "uint32_t" } else { prim }));
-    }
-    let Some(name) = elem.nominal() else {
-        return Err(
-            "`native_buffer_alloc<T>` requires `T` to be an FFI-clean `value` struct or \
-             `int`/`float`/`bool` -- a heap struct / non-C-array type has no flat layout."
-                .to_string(),
-        );
-    };
-    if !map_is_value_struct(ws, name) {
-        return Err(format!("`native_buffer_alloc<{name}>` is invalid: `{name}` is not a `value` struct."));
-    }
-    if value_struct_is_gc(ws, name) {
-        return Err(format!(
-            "`native_buffer_alloc<{name}>` is invalid: `{name}` is a GC-carrying `value` \
-             struct (immutable Lua table) with no C layout, so `ffi.new(\"{name}[?]\")` \
-             names no ctype. Only FFI-clean value structs (C-mappable fields) and \
-             `int`/`float`/`bool` are allocatable."
-        ));
-    }
-    Ok(name)
 }

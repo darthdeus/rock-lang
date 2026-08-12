@@ -6,11 +6,10 @@
 //! per instance. Those two carry the same information for every body emission
 //! writes, or the cut silently changes which definitions exist.
 //!
-//! `compute_spec_from_bindings` builds the argument list and the substitution in
-//! ONE loop from one `reify_type`, and since E1 a PARTIAL list names no body at
-//! all: "EVERY complete key specializes. There is no shared generic body to
-//! decline to any more", so an unresolved slot is an incomplete instantiation
-//! owned by the Stage-2 `ConcreteTypeUnavailable` rejection rather than a body
+//! Graph construction builds the argument list and substitution through the one
+//! total `MonoTy` converter, and since E1 a PARTIAL list names no body at all:
+//! every complete key is a concrete instance, while an unresolved slot is an
+//! incomplete instantiation owned by the graph rejection rather than a body
 //! identity.
 //!
 //! `instance_identity.rs` is the other half: that going through the ARENA loses
@@ -167,8 +166,8 @@ fn an_incomplete_substitution_rebuilds_no_key() {
 }
 
 /// The producer, not the constructor, is what decides a non-generic callee has
-/// no key. This is the population the old all-`None` normalization stood in
-/// for, asserted where the decision now lives.
+/// no key. This is the population an incomplete identity must not silently
+/// normalize into, asserted where the decision now lives.
 #[test]
 fn a_non_generic_declaration_rebuilds_no_key() {
     let ws = ws_of(SRC);

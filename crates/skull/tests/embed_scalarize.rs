@@ -77,6 +77,26 @@ fn embed_leaf_write_stores_into_the_parent() {
     );
 }
 
+const EMBED_NOBOX_VALUE: &str = r#"
+nobox value Pt { x: int, y: int }
+struct Holder { embed p: Pt?, tag: int }
+
+fn mk(a: int, b: int) -> Holder {
+    return Holder { p: Pt { x: a, y: b }, tag: 3 }
+}
+
+fn read_leaf(h: Holder) -> int { return (h.p?.x ?? 0) + (h.p?.y ?? 0) + h.tag }
+fn main() { let _ = read_leaf(mk(1, 2)) }
+"#;
+
+#[test]
+fn embed_nobox_value_uses_the_owned_representation_fact() {
+    let lua = emit_module(EMBED_NOBOX_VALUE);
+    let body = function_body(&lua, "mk");
+    assert!(body.contains(r#"["p.x"]"#) && body.contains(r#"["p.y"]"#));
+    assert!(!body.contains(r#""Pt""#), "the embedded nobox value acquired a box:\n{body}");
+}
+
 // Recursive: an embed chain composes the whole path, so the deepest leaf is a
 // single key on the outermost parent -- no intermediate box at any level.
 const EMBED_NESTED: &str = r#"

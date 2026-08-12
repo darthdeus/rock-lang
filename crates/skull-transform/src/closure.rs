@@ -156,12 +156,10 @@ pub fn convert_closures_framed(
     // Per live lambda scope: hoisted name, sorted captures, an env param cell
     // (only when it captures anything -- a capture-free body takes no env).
     let mut hoisted_name: HashMap<ScopeId, Ustr> = HashMap::default();
-    let mut env_cell: HashMap<ScopeId, Idx<Cell>> = HashMap::default();
-    let mut captures_sorted: HashMap<ScopeId, Vec<Idx<Cell>>> = HashMap::default();
+    let mut env_plans: HashMap<ScopeId, ClosureEnvPlan> = HashMap::default();
     // Post-partition capture set per scope, for O(1) membership in the block loop:
     // a member is captured DIRECTLY (env field `e.c<raw>`); a frame cell NOT in the
     // set (collapsed to `s`) reaches via `e.c<S>.c<slot>` instead.
-    let mut caps_set: HashMap<ScopeId, HashSet<Idx<Cell>>> = HashMap::default();
     for &(k, sid) in &ordered {
         hoisted_name.insert(sid, Ustr::from(format!("{name_base}__lambda{k}").as_str()));
         let mut caps: Vec<Idx<Cell>> = own.captures[sid].iter().copied().collect();
@@ -194,11 +192,13 @@ pub fn convert_closures_framed(
             }
         }
         caps.sort_by_key(|c| raw(*c));
-        if !caps.is_empty() {
-            env_cell.insert(sid, mf.new_cell(Some(Ustr::from("__rock_env"))));
+        let env_cell = (!caps.is_empty()).then(|| mf.new_cell(Some(Ustr::from("__rock_env"))));
+        env_plans.insert(sid, ClosureEnvPlan::new(caps, env_cell));
+    }
+    for (&lambda, &sid) in &lambda_sid {
+        if let Some(plan) = env_plans.get(&sid) {
+            mf.closure_env_plans.insert(lambda, plan.clone());
         }
-        caps_set.insert(sid, caps.iter().copied().collect());
-        captures_sorted.insert(sid, caps);
     }
 
     // --- Rewrite every scoped block: captured/boxed cell accesses become env /
@@ -214,7 +214,7 @@ pub fn convert_closures_framed(
         for id in orig {
             match mf.insts[id].clone() {
                 Inst::Load(c) => {
-                    let captured = caps_set.get(&s).is_some_and(|cs| cs.contains(&c));
+                    let captured = env_plans.get(&s).is_some_and(|plan| plan.captures_cell(c));
                     let boxed_c = boxed.contains(&c);
                     // A frame cell accessed in a LAMBDA scope but NOT captured
                     // directly (collapsed to `s`): reach it as `e.c<S>.c<slot>`.
@@ -232,12 +232,14 @@ pub fn convert_closures_framed(
                     // resolves to the projected value.
                     if frame_via_s {
                         let f = frame.unwrap();
-                        let sbase = env_frame_base(mf, env_cell[&s], f.s_cell, &mut new);
+                        let env = env_plans[&s].env_cell().expect("frame capture has an env plan");
+                        let sbase = env_frame_base(mf, env, f.s_cell, &mut new);
                         mf.insts[id] = Inst::Field { base: sbase, field: frame_field(f.slots[&c]) };
                     } else if captured {
                         // A boxed cell reads `.v` on its box table; a by-value
                         // capture is the env field directly.
-                        let il = mf.insts.alloc(Inst::Load(env_cell[&s]));
+                        let env = env_plans[&s].env_cell().expect("capture has an env plan");
+                        let il = mf.insts.alloc(Inst::Load(env));
                         new.push(il);
                         if boxed_c {
                             let f = mf.insts.alloc(Inst::Field { base: il, field: field_of(c) });
@@ -256,7 +258,7 @@ pub fn convert_closures_framed(
                 }
                 Inst::Store { cell: c, value } => {
                     let boxed_c = boxed.contains(&c);
-                    let captured = caps_set.get(&s).is_some_and(|cs| cs.contains(&c));
+                    let captured = env_plans.get(&s).is_some_and(|plan| plan.captures_cell(c));
                     // A lambda WRITING a frame cell collapses to `s` (D4(b)): the
                     // write steers the shared frame field `e.c<S>.c<slot> = ..`.
                     let frame_via_s = !boxed_c
@@ -269,10 +271,12 @@ pub fn convert_closures_framed(
                     }
                     let (base, field) = if frame_via_s {
                         let f = frame.unwrap();
-                        let sbase = env_frame_base(mf, env_cell[&s], f.s_cell, &mut new);
+                        let env = env_plans[&s].env_cell().expect("frame capture has an env plan");
+                        let sbase = env_frame_base(mf, env, f.s_cell, &mut new);
                         (sbase, frame_field(f.slots[&c]))
                     } else if captured {
-                        let il = mf.insts.alloc(Inst::Load(env_cell[&s]));
+                        let env = env_plans[&s].env_cell().expect("capture has an env plan");
+                        let il = mf.insts.alloc(Inst::Load(env));
                         new.push(il);
                         let f = mf.insts.alloc(Inst::Field { base: il, field: field_of(c) });
                         new.push(f);
@@ -287,7 +291,7 @@ pub fn convert_closures_framed(
                 }
                 Inst::Lambda { .. } => {
                     let child = lambda_sid[&id];
-                    let caps = &captures_sorted[&child];
+                    let caps = env_plans[&child].captures();
                     if caps.is_empty() {
                         let hoisted = hoisted_name[&child];
                         // A capture-free lambda becomes a top-level fn of THIS
@@ -305,7 +309,7 @@ pub fn convert_closures_framed(
                     // this scope's own env.
                     let mut fields: Vec<(Ustr, Idx<Inst>)> = Vec::with_capacity(caps.len());
                     for &cc in caps {
-                        let slot = slot_in_scope(mf, own, &env_cell, s, cc, &mut new);
+                        let slot = slot_in_scope(mf, own, &env_plans, s, cc, &mut new);
                         fields.push((field_of(cc), slot));
                     }
                     mf.insts[id] = Inst::MakeEnv { fn_ref: Some(hoisted_name[&child]), fields };
@@ -376,13 +380,16 @@ pub fn convert_closures_framed(
     let mut nested: Vec<MirFunc> = Vec::with_capacity(ordered.len());
     for &(_k, sid) in &ordered {
         let mut params: Vec<Idx<Cell>> = Vec::new();
-        if let Some(&e) = env_cell.get(&sid) {
+        if let Some(e) = env_plans.get(&sid).and_then(ClosureEnvPlan::env_cell) {
             params.push(e);
         }
         params.extend(tree.scopes[sid].params.iter().copied());
         nested.push(MirFunc {
             name: hoisted_name[&sid],
             params,
+            abi_plan: None,
+            abi_representation: mf.abi_representation.clone(),
+            global_plan: mf.global_plan.clone(),
             statics: Vec::new(),
             insts: mf.insts.clone(),
             cells: mf.cells.clone(),
@@ -415,6 +422,8 @@ pub fn convert_closures_framed(
             call_sites: mf.call_sites.clone(),
             callee_instances: mf.callee_instances.clone(),
             call_abi_plans: mf.call_abi_plans.clone(),
+            call_rep_plans: mf.call_rep_plans.clone(),
+            closure_env_plans: mf.closure_env_plans.clone(),
             fn_value_symbols: mf.fn_value_symbols.clone(),
             hoisted_fn_globals: mf.hoisted_fn_globals.clone(),
             // The owner table comes across with the entries that index it;
@@ -449,7 +458,7 @@ fn env_frame_base(mf: &mut MirFunc, env: Idx<Cell>, s_cell: Idx<Cell>, new: &mut
 fn slot_in_scope(
     mf: &mut MirFunc,
     own: &Ownership,
-    env_cell: &HashMap<ScopeId, Idx<Cell>>,
+    env_plans: &HashMap<ScopeId, ClosureEnvPlan>,
     s: ScopeId,
     cc: Idx<Cell>,
     new: &mut Vec<Idx<Inst>>,
@@ -469,7 +478,8 @@ fn slot_in_scope(
         l
     } else {
         // Transitive capture: threads through THIS scope's env.
-        let il = mf.insts.alloc(Inst::Load(env_cell[&s]));
+        let env = env_plans[&s].env_cell().expect("transitive capture has an env plan");
+        let il = mf.insts.alloc(Inst::Load(env));
         new.push(il);
         let f = mf.insts.alloc(Inst::Field { base: il, field: field_of(cc) });
         new.push(f);

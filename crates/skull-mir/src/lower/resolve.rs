@@ -338,7 +338,12 @@ impl Builder<'_> {
                 if let ValueRepr::Scalar(v) = br {
                     match self
                         .value_struct_name_of(base)
-                        .filter(|n| value_struct_is_leaf_table(self.ws, *n))
+                        .filter(|n| {
+                            matches!(
+                                self.scx.rep_arena().nominal_value_storage(self.ws, self.scx.target, *n),
+                                Some(ValueStorage::LeafTable)
+                            )
+                        })
                     {
                         Some(sname) => br = self.boxed_value_copy_repr(v, sname),
                         None => br = ValueRepr::Scalar(v),
@@ -398,15 +403,23 @@ impl Builder<'_> {
             // A cdata-eligible enum construction stays an unboxed Group `[tag, _0]`
             // (so a callsite/field can splat it without a cdata round-trip); `pack`
             // builds `<Enum>_ct` only if a boxed context needs it.
-            Expr::EnumVariant { enum_name, variant, args, .. } if enum_value_shape(self.ws, enum_name).is_some() => {
-                let shape = enum_value_shape(self.ws, enum_name).unwrap();
+            Expr::EnumVariant { enum_name, variant, args, .. }
+                if EnumPlan::for_name(self.ws, enum_name).is_some_and(|plan| plan.cdata().is_some()) =>
+            {
+                let shape = EnumPlan::for_name(self.ws, enum_name)
+                    .and_then(|plan| plan.cdata().cloned())
+                    .expect("cdata enum plan disappeared");
                 self.enum_cdata_repr(&shape, variant, args)
             }
             // A flat (boxed) enum construction stays an unboxed Group `[tag, _0..,
             // <rec>..]` so a call/return/match can thread it as scalars; `pack`
             // builds the `{__variant}` box only if a boxed context needs it.
-            Expr::EnumVariant { enum_name, .. } if flat_enum_shape(self.ws, enum_name).is_some() => {
-                let shape = flat_enum_shape(self.ws, enum_name).unwrap();
+            Expr::EnumVariant { enum_name, .. }
+                if EnumPlan::for_name(self.ws, enum_name).is_some_and(|plan| plan.flat().is_some()) =>
+            {
+                let shape = EnumPlan::for_name(self.ws, enum_name)
+                    .and_then(|plan| plan.flat().cloned())
+                    .expect("flat enum plan disappeared");
                 let cells = self.lower_flat_value(&shape, e)?;
                 Ok(self.flat_cells_to_repr(&shape, cells))
             }
@@ -452,7 +465,7 @@ impl Builder<'_> {
                 // Leaf addressing: no slot reference, no nested ctor -- each
                 // leaf comes straight from its typed view.
                 if let ContainerKind::NativeBufferValue(elem) = kind {
-                    if self.is_leaf_addressed(elem) {
+                    if self.is_leaf_addressed(elem)? {
                         return self.nb_leaf_element_repr(b, i, elem);
                     }
                 }
@@ -501,7 +514,8 @@ impl Builder<'_> {
         rhs: Idx<Expr>,
     ) -> Result<ValueRepr, CompilerError> {
         let name = self.nobox_value_name(e).expect("caller checked");
-        let shape = value_shape_of_nominal(self.ws, name)
+        let shape = self
+            .nobox_value_shape_of(e)
             .ok_or_else(|| gap(format!("nobox value `{name}` has no scalar shape")))?;
         let mut lhs_shape = shape.clone();
         lhs_shape.nullable = true;
@@ -720,13 +734,9 @@ impl Builder<'_> {
                 .flatten()
             {
                 Some(t) => self.coerced_mono(v, a, &t),
-                None if self.concrete_plan.is_some() => {
+                None => {
                     return Err(self.gap_here("concrete call has no callee parameter type"));
                 }
-                None => match self.param_ty(func, pidx) {
-                    Some(t) => self.coerced(v, a, t),
-                    None => v,
-                },
             };
             slots[pidx] = Some(v);
         }

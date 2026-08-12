@@ -13,9 +13,10 @@ use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::CompilerError;
 use comfy_la_arena::Idx;
 use skull_mir::bound::ResolvedBoundNext;
+use skull_mir::concrete::ConcretePlans;
 use skull_mir::instance::Instance;
 use skull_mir::lower::{
-    bound_next_shape, bound_next_shape_from_concrete, BoundNextElem, ElemRebuild,
+    bound_next_shape_from_concrete, BoundNextElem, ElemRebuild,
 };
 use skull_mir::monoty::MonoInterner;
 use skull_mir::mir::*;
@@ -37,19 +38,9 @@ pub fn resolve_standalone_bound_calls(
     interner: &MonoInterner,
     mf: &mut MirFunc,
     incoming: &skull_mir::bound::ResolvedBoundTree,
+    concrete_plans: &ConcretePlans,
 ) -> Result<(), CompilerError> {
-    resolve_standalone_bound_calls_inner(ws, scx, interner, mf, incoming, None)
-}
-
-pub fn resolve_standalone_bound_calls_with_plans(
-    ws: &Workspace,
-    scx: &skull_mir::lower::ScalarCtx,
-    interner: &MonoInterner,
-    mf: &mut MirFunc,
-    incoming: &skull_mir::bound::ResolvedBoundTree,
-    concrete_plans: &skull_mir::concrete::ConcretePlans,
-) -> Result<(), CompilerError> {
-    resolve_standalone_bound_calls_inner(ws, scx, interner, mf, incoming, Some(concrete_plans))
+    resolve_standalone_bound_calls_inner(ws, scx, interner, mf, incoming, concrete_plans)
 }
 
 fn resolve_standalone_bound_calls_inner(
@@ -58,7 +49,7 @@ fn resolve_standalone_bound_calls_inner(
     interner: &MonoInterner,
     mf: &mut MirFunc,
     incoming: &skull_mir::bound::ResolvedBoundTree,
-    concrete_plans: Option<&skull_mir::concrete::ConcretePlans>,
+    concrete_plans: &ConcretePlans,
 ) -> Result<(), CompilerError> {
     let ids: Vec<(Idx<Inst>, usize)> = mf
         .insts
@@ -88,20 +79,17 @@ fn resolve_standalone_bound_calls_inner(
                 mf.resolved_bound_trees.insert(id, sub.clone());
             }
         }
-        match concrete_plans {
-            Some(plans) => substitute_bound_call_with_plans(
-                mf,
-                id,
-                split,
-                &leaf,
-                scx,
-                ws,
-                interner,
-                plans,
-                "in this instantiation",
-            )?,
-            None => substitute_bound_call(mf, id, split, &leaf, scx, ws, interner, "in this instantiation")?,
-        }
+        substitute_bound_call(
+            mf,
+            id,
+            split,
+            &leaf,
+            scx,
+            ws,
+            interner,
+            concrete_plans,
+            "in this instantiation",
+        )?;
     }
     for nf in &mut mf.nested_fns {
         resolve_standalone_bound_calls_inner(ws, scx, interner, nf, incoming, concrete_plans)?;
@@ -127,20 +115,7 @@ pub fn substitute_bound_call(
     scx: &skull_mir::lower::ScalarCtx,
     ws: &Workspace,
     interner: &MonoInterner,
-    what: &str,
-) -> Result<(), CompilerError> {
-    substitute_bound_call_inner(func, call, already_split, leaf, scx, ws, interner, None, what)
-}
-
-pub fn substitute_bound_call_with_plans(
-    func: &mut MirFunc,
-    call: Idx<Inst>,
-    already_split: bool,
-    leaf: &ResolvedBoundNext,
-    scx: &skull_mir::lower::ScalarCtx,
-    ws: &Workspace,
-    interner: &MonoInterner,
-    concrete_plans: &skull_mir::concrete::ConcretePlans,
+    concrete_plans: &ConcretePlans,
     what: &str,
 ) -> Result<(), CompilerError> {
     substitute_bound_call_inner(
@@ -151,7 +126,7 @@ pub fn substitute_bound_call_with_plans(
         scx,
         ws,
         interner,
-        Some(concrete_plans),
+        concrete_plans,
         what,
     )
 }
@@ -164,7 +139,7 @@ fn substitute_bound_call_inner(
     scx: &skull_mir::lower::ScalarCtx,
     ws: &Workspace,
     interner: &MonoInterner,
-    concrete_plans: Option<&skull_mir::concrete::ConcretePlans>,
+    concrete_plans: &ConcretePlans,
     what: &str,
 ) -> Result<(), CompilerError> {
     let owner = match leaf {
@@ -182,21 +157,16 @@ fn substitute_bound_call_inner(
     let (dests, args) = (dests.clone(), args.clone());
     func.insts[call] = Inst::CallMulti { dests, func: owner.func, args };
     skull_mir::site::record_call_owner(func, call, &owner);
-    let abi = match concrete_plans {
-        Some(plans) => {
-            if !skull_mir::lower::requires_concrete_body_plan(ws, &owner) {
-                skull_mir::lower::BackendFnAbiPlan::for_instance(ws, scx, &owner)
-            } else {
-                let plan = plans.get(&owner).ok_or_else(|| {
-                    CompilerError::new_no_location(format!(
-                        "internal: concrete ABI plan is missing for bound callee `{}`",
-                        owner.func.func.into_raw().into_u32()
-                    ))
-                })?;
-                skull_mir::lower::BackendFnAbiPlan::for_concrete_plan(ws, scx, plan)
-            }
-        }
-        None => skull_mir::lower::BackendFnAbiPlan::for_instance(ws, scx, &owner),
+    let abi = if !skull_mir::lower::requires_concrete_body_plan(ws, &owner) {
+        skull_mir::lower::BackendFnAbiPlan::for_boundary_instance(ws, scx, &owner)
+    } else {
+        let plan = concrete_plans.get(&owner).ok_or_else(|| {
+            CompilerError::new_no_location(format!(
+                "internal: concrete ABI plan is missing for bound callee `{}`",
+                owner.func.func.into_raw().into_u32()
+            ))
+        })?;
+        skull_mir::lower::BackendFnAbiPlan::for_concrete_plan(ws, scx, plan)
     };
     func.call_abi_plans.insert(call, abi);
     if !owner.args.is_empty() {
@@ -216,30 +186,32 @@ fn substitute_bound_call_inner(
     // The instance the shape is read at is carried by the resolved leaf.
     let inst = owner;
     if already_split {
-        check_bound_next_split(func, call, ws, interner, &inst, concrete_plans)
+        check_bound_next_split(func, call, scx, ws, interner, &inst, concrete_plans)
     } else {
-        repack_bound_next_element(func, call, ws, interner, &inst, concrete_plans)
+        repack_bound_next_element(func, call, scx, ws, interner, &inst, concrete_plans)
     }
 }
 
 fn bound_next_shape_for_instance(
     ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
     interner: &MonoInterner,
     inst: &Instance,
-    concrete_plans: Option<&skull_mir::concrete::ConcretePlans>,
-) -> Result<Option<skull_mir::lower::BoundNextShape>, CompilerError> {
-    if let Some(plans) = concrete_plans {
-        if skull_mir::lower::requires_concrete_body_plan(ws, inst) {
-            let plan = plans.get(inst).ok_or_else(|| {
-                CompilerError::new_no_location(format!(
-                    "internal: concrete body plan is missing for bound witness `{}`",
-                    inst.func.func.into_raw().into_u32()
-                ))
-            })?;
-            return Ok(bound_next_shape_from_concrete(ws, interner, &plan.signature));
-        }
+    concrete_plans: &ConcretePlans,
+) -> Result<skull_mir::lower::BoundNextShape, CompilerError> {
+    if !skull_mir::lower::requires_concrete_body_plan(ws, inst) {
+        return Err(CompilerError::new_no_location(
+            "internal: a bound witness resolved to an opaque boundary without a concrete result shape",
+        ));
     }
-    Ok(bound_next_shape(ws, interner, inst))
+    let plan = concrete_plans.get(inst).ok_or_else(|| {
+        CompilerError::new_no_location(format!(
+            "internal: concrete body plan is missing for bound witness `{}`",
+            inst.func.func.into_raw().into_u32()
+        ))
+    })?;
+    bound_next_shape_from_concrete(ws, scx, interner, &plan.signature)
+        .map_err(|error| CompilerError::new_no_location(error.message))
 }
 
 /// The lowering already split this placeholder's element into leaf cells, so
@@ -254,14 +226,13 @@ fn bound_next_shape_for_instance(
 fn check_bound_next_split(
     func: &MirFunc,
     call: Idx<Inst>,
+    scx: &skull_mir::lower::ScalarCtx,
     ws: &Workspace,
     interner: &MonoInterner,
     inst: &Instance,
-    concrete_plans: Option<&skull_mir::concrete::ConcretePlans>,
+    concrete_plans: &ConcretePlans,
 ) -> Result<(), CompilerError> {
-    let Some(shape) = bound_next_shape_for_instance(ws, interner, inst, concrete_plans)? else {
-        return Ok(());
-    };
+    let shape = bound_next_shape_for_instance(ws, scx, interner, inst, concrete_plans)?;
     let Inst::CallMulti { dests, .. } = &func.insts[call] else {
         return Ok(());
     };
@@ -289,14 +260,13 @@ fn check_bound_next_split(
 fn repack_bound_next_element(
     func: &mut MirFunc,
     call: Idx<Inst>,
+    scx: &skull_mir::lower::ScalarCtx,
     ws: &Workspace,
     interner: &MonoInterner,
     inst: &Instance,
-    concrete_plans: Option<&skull_mir::concrete::ConcretePlans>,
+    concrete_plans: &ConcretePlans,
 ) -> Result<(), CompilerError> {
-    let Some(shape) = bound_next_shape_for_instance(ws, interner, inst, concrete_plans)? else {
-        return Ok(());
-    };
+    let shape = bound_next_shape_for_instance(ws, scx, interner, inst, concrete_plans)?;
     let Inst::CallMulti { dests, .. } = &func.insts[call] else {
         return Ok(());
     };

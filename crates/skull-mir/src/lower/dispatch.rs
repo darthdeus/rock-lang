@@ -25,7 +25,7 @@ use bone_semantic::inference::{BodyInference, Workspace};
 use bone_semantic::prelude::Idx;
 use ustr::Ustr;
 
-use super::shape::{flat_enum_shape, payload_free_enum_variants};
+use super::{EnumPlan, RepArena, RepGuarantees, RepUse, RepUseFacts, shape::payload_free_enum_variants};
 use crate::concrete::{ConcreteBodyPlan, ConcreteTypeTables};
 use crate::monoty::MonoSubst;
 
@@ -45,9 +45,12 @@ pub struct DispatchCtx<'a> {
     pub concrete_types: Option<&'a ConcreteTypeTables>,
     pub concrete_type_cache: Option<&'a super::ConcreteTypeCache>,
     pub interner: Option<&'a crate::monoty::MonoInterner>,
-    /// Source substitution for the graph's legacy view. Concrete lowering sets
-    /// this to `None` because every type decision must come from its plan.
-    pub legacy_subst: Option<&'a MonoSubst>,
+    pub rep_arena: &'a RepArena,
+    pub target: bone_semantic::hir::FnBackend,
+    /// Logical substitution for the target-neutral graph walk. Concrete
+    /// lowering sets this to `None` because every type decision must come from
+    /// its concrete plan.
+    pub logical_subst: Option<&'a MonoSubst>,
     pub values_first_class: bool,
 }
 
@@ -343,7 +346,7 @@ impl<'a> DispatchCtx<'a> {
         // A generic bound to `E?` is nullable and `ty_node` cannot say so: it
         // substitutes the PAYLOAD. Read the raw node before that erases the `?`.
         if let Some(TypeExpr::Generic(var, _)) = self.raw_ty_node(ty) {
-            if let Some(b) = self.legacy_subst.and_then(|subst| subst.get(&var)) {
+            if let Some(b) = self.logical_subst.and_then(|subst| subst.get(&var)) {
                 return b.peel_nullable().1;
             }
         }
@@ -379,10 +382,21 @@ impl<'a> DispatchCtx<'a> {
         if self.values_first_class {
             return false;
         }
-        self.ws
-            .struct_by_name
-            .get(&name)
-            .is_some_and(|sid| self.ws.modules[sid.module.index()].structs[sid.def].is_nobox)
+        let ty = crate::monoty::MonoTy::App {
+            ctor: crate::monoty::MonoCtor::Nominal(name),
+            params: Vec::new(),
+        };
+        self.rep_arena
+            .plan(
+                self.ws,
+                self.target,
+                &ty,
+                RepUse::Value,
+                &RepUseFacts::default(),
+                RepGuarantees { nobox: true, allow_opaque: true },
+            )
+            .map(|id| self.rep_arena.get(id).nobox())
+            .unwrap_or(false)
     }
 
     pub fn nobox_value_name(&self, e: Idx<Expr>) -> Option<Ustr> {
@@ -466,7 +480,7 @@ impl<'a> DispatchCtx<'a> {
                 payload,
                 crate::monoty::MonoTy::App {
                     ctor: crate::monoty::MonoCtor::Nominal(n), ..
-                } if flat_enum_shape(self.ws, *n).is_some()
+                } if EnumPlan::for_name(self.ws, *n).is_some_and(|plan| plan.flat().is_some())
             );
         }
         if self.concrete_plan.is_some() {
@@ -475,7 +489,7 @@ impl<'a> DispatchCtx<'a> {
         matches!(
             self.expr_ty(e),
             Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. })
-                if flat_enum_shape(self.ws, n).is_some()
+                if EnumPlan::for_name(self.ws, n).is_some_and(|plan| plan.flat().is_some())
         )
     }
 

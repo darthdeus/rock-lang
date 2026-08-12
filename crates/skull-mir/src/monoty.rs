@@ -4,16 +4,13 @@
 //! substitutions specialized lowering reads, the symbols the emitters mangle,
 //! and the instance graph.
 //!
-//! There is ONE of these walks, and that is the point: a second, narrower one
-//! is free to answer `None` for a type it does not admit, and `None` is not a
-//! type -- it is the absence of one, which every binding that lands in it
-//! shares. `f<Vec2, unit>`, `f<Vec2, any>` and `f<Vec2, fn(int)->int>` are three
-//! instantiations, and a partial walk gives them one identity and one emitted
-//! body. So an instance's arguments are built from this conversion too
-//! ([`reify_type`](crate::lower::shape::reify_type)): WHETHER a call
-//! specializes is conditional (the `@inline`/`@pure` opt-in, the storage
-//! trigger), WHICH instantiation it names is not. Stage 4 deletes the rest of
-//! the policy.
+//! There is ONE logical-type conversion, and that is the point: a second,
+//! narrower walk is free to answer `None` for a type it does not admit, and
+//! `None` is not a type -- it is the absence of one, which every binding that
+//! lands in it shares. `f<Vec2, unit>`, `f<Vec2, any>` and
+//! `f<Vec2, fn(int)->int>` are three instantiations. Instance arguments and
+//! concrete lowering substitutions therefore use this conversion directly;
+//! representation and optimization policy are decided later by target plans.
 //!
 //! Three properties, in the order they matter:
 //!
@@ -337,16 +334,16 @@ impl MonoTy {
 }
 
 /// Why a type did not convert. Every variant is a distinct census bucket --
-/// `UnboundGeneric` in particular is DATA (it says the reader asked about a
-/// shared generic body), not an error to fold into the others.
+/// `UnboundGeneric` in particular is DATA (it says the reader asked about an
+/// uninstantiated generic context), not an error to fold into the others.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum MonoTyReason {
     /// `BuiltinTy::Error` -- inference recovery poison. An invalid program.
     RecoveryError,
     /// An inference variable with no substitution: inference did not finish.
     UnresolvedInfer(Ustr),
-    /// A declared generic absent from the enclosing substitution. Expected
-    /// wherever a shared generic body is read without an instantiation.
+    /// A declared generic absent from the enclosing substitution. Expected in
+    /// source-shaped generic contexts that have not selected an instance.
     UnboundGeneric(Ustr),
     /// The `TyId` names no node at all.
     NoNode,
@@ -707,8 +704,8 @@ impl MonoInterner {
 ///
 /// `subst` binds declared generics; a generic absent from it is
 /// [`MonoTyReason::UnboundGeneric`] rather than a guess, because the caller is
-/// the only one who knows whether that is expected (a shared generic body) or a
-/// defect (a missing instantiation).
+/// the only one who knows whether that is expected (an uninstantiated generic
+/// context) or a defect (a missing instantiation).
 pub fn convert<S: std::hash::BuildHasher>(
     ws: &Workspace,
     inf: &BodyInference,

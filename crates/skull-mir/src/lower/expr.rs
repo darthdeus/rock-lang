@@ -22,7 +22,6 @@ impl Builder<'_> {
         // (the call-arg analog of `lower_for_user_iter`'s `iter_fn`).
         if let Some(w) = self.inf.and_then(|i| i.implicit_iter_args.get(&e)) {
             let (m, f) = w.func;
-            let generics = w.generics.clone();
             let iter_ref = FuncRef { module: m, func: f };
             // This coercion belongs to `e`, but the cursor was already restored
             // to the ENCLOSING expression above -- so set both halves of the
@@ -32,26 +31,9 @@ impl Builder<'_> {
             // The instance is resolved BEFORE the arguments are shaped: they are
             // splatted against the ABI of the body the call targets, not the
             // declaration's.
-            let span = self
-                .body
-                .expr_spans
-                .get(e)
-                .copied()
-                .unwrap_or(self.ws.module(m).functions[f].name_span);
-            let witness = if self.concrete_plan.is_some() {
-                self.with_site_op(crate::site::SiteOp::ImplicitIter, |b| {
-                    b.concrete_callee_for_site(e)
-                })?
-                .ok_or_else(|| gap("implicit iterator has no concrete callee"))?
-            } else {
-                match self.next_call_spec(iter_ref, &generics, span)? {
-                    Some(key) => crate::instance::Instance::intern(self.scx.interner(), iter_ref, key),
-                    None if self.ws.module(m).functions[f].generics.is_empty() => {
-                        crate::instance::Instance::intern(self.scx.interner(), iter_ref, Vec::new())
-                    }
-                    None => crate::instance::Instance::base(iter_ref),
-                }
-            };
+            let witness = self
+                .with_site_op(crate::site::SiteOp::ImplicitIter, |b| b.concrete_callee_for_site(e))?
+                .ok_or_else(|| gap("implicit iterator has no concrete callee"))?;
             let call = self.with_site_op(crate::site::SiteOp::ImplicitIter, |b| {
                 let args = b.iter_witness_args(&witness, ValueRepr::Scalar(v))?;
                 Ok::<_, CompilerError>(b.emit_cur(Inst::Call { func: iter_ref, args }))
@@ -62,8 +44,6 @@ impl Builder<'_> {
             // delivering it spells a symbol nothing defines.
             if let Some(delivery) = self.concrete_delivery_instance(&witness) {
                 self.f.spec_bindings.insert(call, delivery);
-            } else if self.concrete_plan.is_none() && !witness.args.is_empty() {
-                self.f.spec_bindings.insert(call, witness.clone());
             }
             // IDENTITY beside delivery, the plan's split, and the same pair the
             // `for` witness records. Delivery alone leaves the site's own claim
@@ -78,11 +58,7 @@ impl Builder<'_> {
                     &witness,
                 );
             }
-            let abi = if iter_decl.generics.is_empty() || !witness.args.is_empty() {
-                self.callee_abi_plan_for_instance(&witness)?
-            } else {
-                self.callee_abi_plan(iter_ref, None)
-            };
+            let abi = self.callee_abi_plan_for_instance(&witness)?;
             self.f.call_abi_plans.insert(call, abi);
             self.cur_expr = outer_expr;
             return Ok(call);
@@ -345,7 +321,9 @@ impl Builder<'_> {
             // Lowering the payload args directly instead packs each one on its
             // own, which boxes a `nobox` payload the enum would have stored
             // splat (`tests/nobox_enum_payload_container.rock`).
-            Expr::EnumVariant { enum_name, .. } if flat_enum_shape(self.ws, enum_name).is_some() => {
+            Expr::EnumVariant { enum_name, .. }
+                if EnumPlan::for_name(self.ws, enum_name).is_some_and(|plan| plan.flat().is_some()) =>
+            {
                 let r = self.lower_expr_repr(e)?;
                 Ok(self.pack(r))
             }
@@ -410,10 +388,16 @@ impl Builder<'_> {
             Expr::Lambda { params, body } => {
                 // A `nobox` param arrives as leaves, so the lambda binds a Group
                 // over N cells instead of one -- the same shape a scalar-ABI fn
-                // gives its params. Decided by the lambda's own fn TYPE, which is
-                // what the call site reads too (`fn_value_abi`), so the two ends
-                // agree without either seeing the other.
-                let lam_abi = self.expr_fn_value_abi(e);
+                // gives its params. The lambda and call site read the same
+                // function-value representation plan.
+                let lam_ty = self
+                    .inf
+                    .and_then(|inf| inf.expr_types.get(e))
+                    .copied()
+                    .ok_or_else(|| gap("lambda has no inferred function type"))?;
+                let lam_plan = self
+                    .fn_value_rep_plan(lam_ty)?
+                    .ok_or_else(|| gap("lambda does not have a function representation"))?;
                 // Param shapes come from the param BINDINGS, which is where a
                 // lambda's param types actually land -- its own `fn(..) -> ..`
                 // node can still hold unresolved vars at this point, while the
@@ -421,9 +405,13 @@ impl Builder<'_> {
                 // types the call site reads off the fn type.
                 let param_slots: Vec<RetSlot> = params
                     .into_iter()
-                    .map(|pb| {
-                        self.binding_ty(pb)
-                            .map_or(RetSlot::Opaque, |t| self.nobox_param_slot_of_ty(t))
+                    .enumerate()
+                    .map(|(i, _)| {
+                        lam_plan
+                            .params()
+                            .get(i)
+                            .map(|id| self.scx.rep_arena().ret_slot(*id))
+                            .unwrap_or(RetSlot::Opaque)
                     })
                     .collect();
                 // A lambda's params land in the SAME cell namespace as the
@@ -445,10 +433,9 @@ impl Builder<'_> {
                 // statement, so the return machinery (`return_leaves`) must see the
                 // lambda's own return shape. A tuple-returning lambda splats N values
                 // so an indirect call site can capture them (multi-return ABI); the
-                // enclosing value-struct `ret_shape` never applies (a lambda is
+                // enclosing value-struct result never applies (a lambda is
                 // called through a boxed fn-value). Save/restore around the body.
-                let saved_ret_tuple = self.ret_tuple.take();
-                let saved_ret_shape = self.ret_shape.take();
+                let saved_ret_rep = self.ret_rep.take();
                 // Isolate the defer state, like `lower_nested_fn`. A lambda body
                 // is its OWN fn scope: bone desugars `() => e` to a block with
                 // `return e`, so the body's return runs `run_all_defers` -- which
@@ -467,11 +454,8 @@ impl Builder<'_> {
                 // now -- `convert_closures` splits it out and the inliner runs
                 // over the standalone body -- but that happens after lowering, so
                 // this decision cannot see the specialized callee it would need.
-                self.ret_tuple = self.lambda_ret_tuple_shape(e);
-                // A `nobox` return leaves as leaves, same multi-return wire the
-                // tuple ABI uses and the same fn-TYPE key.
-                self.ret_shape = lam_abi.as_ref().and_then(|(_, rs)| rs.clone());
-                if let Some(shape) = self.ret_shape.clone() {
+                self.ret_rep = lam_plan.result();
+                if let Some(shape) = self.result_shape() {
                     let r = self.lower_expr_repr(body)?;
                     if self.is_open() {
                         let leaves = self.repr_to_leaves(&r, &shape);
@@ -479,12 +463,11 @@ impl Builder<'_> {
                     }
                     self.defers = saved_defers;
                     self.in_defer_body = saved_in_defer;
-                    self.ret_tuple = saved_ret_tuple;
-                    self.ret_shape = saved_ret_shape;
+                    self.ret_rep = saved_ret_rep;
                     self.cur = saved;
                     return Ok(self.emit_cur(Inst::Lambda { params: param_cells, entry }));
                 }
-                match self.ret_tuple.clone() {
+                match self.result_tuple() {
                     // A splatting tuple return needs the body as a repr, so a
                     // `nobox` element reaches the wire as leaves.
                     Some(shape) if shape.splats() => {
@@ -507,8 +490,7 @@ impl Builder<'_> {
                 }
                 self.defers = saved_defers;
                 self.in_defer_body = saved_in_defer;
-                self.ret_tuple = saved_ret_tuple;
-                self.ret_shape = saved_ret_shape;
+                self.ret_rep = saved_ret_rep;
                 self.cur = saved;
                 Ok(self.emit_cur(Inst::Lambda { params: param_cells, entry }))
             }
@@ -519,34 +501,22 @@ impl Builder<'_> {
                 let v = self.lower_expr(value)?;
                 let to_int = self
                     .concrete_ty_id(target)
-                    .is_some_and(|ty| matches!(ty.peel_nullable().0, crate::monoty::MonoTy::Int))
-                    || (self.concrete_plan.is_none()
-                        && matches!(self.resolve_ty(target), Some(TypeExpr::Builtin(BuiltinTy::Int))));
+                    .is_some_and(|ty| matches!(ty.peel_nullable().0, crate::monoty::MonoTy::Int));
                 let from_float = self
                     .concrete_expr_ty(value)
-                    .is_some_and(|ty| matches!(ty.peel_nullable().0, crate::monoty::MonoTy::Float))
-                    || (self.concrete_plan.is_none()
-                        && matches!(self.expr_ty(value), Some(TypeExpr::Builtin(BuiltinTy::Float))));
+                    .is_some_and(|ty| matches!(ty.peel_nullable().0, crate::monoty::MonoTy::Float));
                 let to_uint = self
                     .concrete_ty_id(target)
-                    .is_some_and(|ty| matches!(ty.peel_nullable().0, crate::monoty::MonoTy::Uint))
-                    || (self.concrete_plan.is_none()
-                        && matches!(self.resolve_ty(target), Some(TypeExpr::Builtin(BuiltinTy::Uint))));
+                    .is_some_and(|ty| matches!(ty.peel_nullable().0, crate::monoty::MonoTy::Uint));
                 let from_uint = self
                     .concrete_expr_ty(value)
-                    .is_some_and(|ty| matches!(ty.peel_nullable().0, crate::monoty::MonoTy::Uint))
-                    || (self.concrete_plan.is_none()
-                        && matches!(self.expr_ty(value), Some(TypeExpr::Builtin(BuiltinTy::Uint))));
+                    .is_some_and(|ty| matches!(ty.peel_nullable().0, crate::monoty::MonoTy::Uint));
                 let from_int = self
                     .concrete_expr_ty(value)
-                    .is_some_and(|ty| matches!(ty.peel_nullable().0, crate::monoty::MonoTy::Int))
-                    || (self.concrete_plan.is_none()
-                        && matches!(self.expr_ty(value), Some(TypeExpr::Builtin(BuiltinTy::Int))));
+                    .is_some_and(|ty| matches!(ty.peel_nullable().0, crate::monoty::MonoTy::Int));
                 let to_float = self
                     .concrete_ty_id(target)
-                    .is_some_and(|ty| matches!(ty.peel_nullable().0, crate::monoty::MonoTy::Float))
-                    || (self.concrete_plan.is_none()
-                        && matches!(self.resolve_ty(target), Some(TypeExpr::Builtin(BuiltinTy::Float))));
+                    .is_some_and(|ty| matches!(ty.peel_nullable().0, crate::monoty::MonoTy::Float));
                 if kind == bone_semantic::hir::AsKind::Bitcast && to_int && from_uint {
                     Ok(self.emit_cur(Inst::UintBitcastInt(v)))
                 } else if kind == bone_semantic::hir::AsKind::Bitcast && to_uint && from_int {
@@ -825,7 +795,7 @@ impl Builder<'_> {
                     return s.map_column_store(b, i, value, elem);
                 }
                 if let ContainerKind::NativeBufferValue(elem) = kind {
-                    if s.is_leaf_addressed(elem) {
+                    if s.is_leaf_addressed(elem)? {
                         return s.nb_leaf_element_store(b, i, value, elem);
                     }
                 }
@@ -928,11 +898,11 @@ impl Builder<'_> {
                 self.emit_cur(Inst::StoreGlobal { name, value: new_v });
             }
             Expr::FieldAccess { base, field } => {
-                if let Some((buf, checked, _, addr)) = self.nb_leaf_rmw_place(target)? {
-                    let cur = self.nb_leaf_load(buf, checked, &addr);
+                if let Some((buf, checked, _, place)) = self.nb_leaf_rmw_place(target)? {
+                    let cur = self.nb_leaf_load(buf, checked, &place);
                     let rv = self.lower_expr(value)?;
                     let new_v = self.compound_combine(scalar, op_fn, overload, cur, rv)?;
-                    self.nb_leaf_store(buf, checked, &addr, new_v);
+                    self.nb_leaf_store(buf, checked, &place, new_v);
                     return Ok(());
                 }
                 let (pbase, key) = self.physical_field(base, field);
@@ -1062,10 +1032,10 @@ impl Builder<'_> {
                 Ok(if postfix { old } else { new })
             }
             Expr::FieldAccess { base, field } => {
-                if let Some((buf, checked, _, addr)) = self.nb_leaf_rmw_place(target)? {
-                    let old = self.nb_leaf_load(buf, checked, &addr);
+                if let Some((buf, checked, _, place)) = self.nb_leaf_rmw_place(target)? {
+                    let old = self.nb_leaf_load(buf, checked, &place);
                     let new = bump(self, old);
-                    self.nb_leaf_store(buf, checked, &addr, new);
+                    self.nb_leaf_store(buf, checked, &place, new);
                     return Ok(if postfix { old } else { new });
                 }
                 let (pbase, key) = self.physical_field(base, field);
@@ -1473,6 +1443,7 @@ impl Builder<'_> {
         let capacity = self.emit_cur(Inst::Const(Lit::Int(elems.len() as i64)));
         Ok(self.emit_cur(Inst::MakeVecColumns {
             elem: elem.name,
+            nobox: elem.is_nobox(),
             columns,
             len: elems.len(),
             capacity,
@@ -1586,32 +1557,7 @@ impl Builder<'_> {
                 _ => Err(gap("spread of an unsupported type")),
             };
         }
-        if self.concrete_plan.is_some() {
-            return Err(gap("spread expression is missing from the concrete type plan"));
-        }
-        match self.expr_ty(inner) {
-            Some(TypeExpr::Tuple { elements }) => {
-                for i in 0..elements.into_iter().count() {
-                    let value = self.emit_cur(Inst::TupleIndex { base: v, index: i });
-                    self.append_spread_repr(arr, ValueRepr::Scalar(value), dest)?;
-                }
-                Ok(())
-            }
-            Some(TypeExpr::App { ctor: TypeCtor::Array | TypeCtor::Map, .. }) => {
-                self.spread_array_loop(arr, inner, v, dest)
-            }
-            Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) => {
-                let fields = self
-                    .struct_field_names(name)
-                    .ok_or_else(|| gap("spread of a non-struct nominal type"))?;
-                for field in fields {
-                    let value = self.emit_cur(Inst::Field { base: v, field });
-                    self.append_spread_repr(arr, ValueRepr::Scalar(value), dest)?;
-                }
-                Ok(())
-            }
-            _ => Err(gap("spread of an unsupported type")),
-        }
+        Err(gap("spread expression is missing from the concrete type plan"))
     }
 
     /// Runtime copy of every element of `src` (read per its `coll_kind`) into

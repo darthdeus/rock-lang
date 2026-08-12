@@ -955,12 +955,10 @@ pub fn check_callee(
         return CalleeCheck::NonGeneric;
     }
     // A complete instance has one argument per declared generic. Each way of
-    // falling short is its own answer: they have different causes and only one
-    // of them is conditional specialization.
-    // The call's OWN claim, in the graph's vocabulary. Not the delivery record: that
-    // is the delivery record, present only where the policy chose to specialize,
-    // so reading it as identity made a DECLINED specialization look exactly like
-    // an uninferred callee.
+    // falling short is its own answer: they have different causes.
+    // The call's OWN claim, in the graph's vocabulary. Not the delivery record:
+    // delivery is an optimization artifact, while identity is recorded for the
+    // concrete callee even when no splice is selected.
     let Some(claim) = call_inst else { return CalleeCheck::NoInstance };
     // A claim for another declaration is an invariant break, not a policy
     // consequence -- the record is written beside the call it belongs to.

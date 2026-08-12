@@ -1,34 +1,29 @@
-//! What today's conditional specializer ACTUALLY produces, in a form the
-//! Stage-0d shadow graph can be reconciled against
-//! (`docs/monomorphization-plan.md` S 15a: "every current specialized edge
-//! appears in the complete graph, and every additional graph edge is
-//! classified").
+//! Concrete generic call identities recovered from typed call bindings, in a
+//! form the instance graph can be checked against.
 //!
-//! Lives in `skull-mir` because `compute_call_spec` is internal to
-//! `lower::shape`; this exposes the RESULT encoded as strings rather than
-//! widening that module. The encoding is
+//! This stays in `skull-mir` because the binding records are owned by lowering;
+//! it exposes identity data without giving the diagnostic census a second
+//! type conversion. The encoding is
 //! [`MonoTy::canonical`](crate::monoty::MonoTy::canonical), which is
 //! unambiguous, so the two sides are comparable and no pretty-printing
 //! ambiguity can match two different types to each other.
 //!
-//! A `None` slot means the key names no instantiation for that generic, which
-//! now happens only inside a SHARED generic body (the enclosing substitution
-//! does not bind it). It is treated as a WILDCARD when reconciling -- the shadow
-//! side is total, so it always has a concrete type where this side has a hole.
+//! A call with an incomplete enclosing substitution has no concrete identity
+//! and is omitted; it is counted as unresolved by the caller-side census.
 
 use bone_semantic::hir::BodyOwner;
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
 
-use crate::lower::shape_census_support::specializations_in_body;
+use crate::lower::shape_census_support::concrete_calls_in_body;
 use crate::mir::FuncRef;
 
-/// One specialization today's `compute_call_spec` decides to perform.
+/// One concrete generic call identity recovered from typed bindings.
 #[derive(Clone, PartialEq, Eq, Debug)]
-pub struct TodaySpec {
-    /// The body the call site lives in. Needed to classify a reconciliation
-    /// miss: a specialization inside a body the shadow walk never REACHED is a
-    /// difference in reachability, not a missing instance.
+pub struct ConcreteCall {
+    /// The body containing the call. This distinguishes an identity in a body
+    /// the instance graph did not reach from an identity missing in a reached
+    /// body.
     pub caller: FuncRef,
     pub func: FuncRef,
     /// Per declared generic, in declaration order. Total: a site with any
@@ -39,7 +34,7 @@ pub struct TodaySpec {
 
 /// `FuncRef` is not `Ord`; sort by its raw indices so the census output is
 /// order-stable.
-fn key(t: &TodaySpec) -> (u32, u32, u32, u32, &[String]) {
+fn key(t: &ConcreteCall) -> (u32, u32, u32, u32, &[String]) {
     (
         t.func.module.raw(),
         t.func.func.into_raw().into_u32(),
@@ -49,25 +44,24 @@ fn key(t: &TodaySpec) -> (u32, u32, u32, u32, &[String]) {
     )
 }
 
-impl Ord for TodaySpec {
+impl Ord for ConcreteCall {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         key(self).cmp(&key(other))
     }
 }
 
-impl PartialOrd for TodaySpec {
+impl PartialOrd for ConcreteCall {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
-/// Every specialization the CURRENT machinery produces over `ws`, plus the
-/// number of call sites whose spec decision was an outright rejection.
+/// Every complete generic call identity over `ws`, plus unresolved call sites.
 ///
-/// The enclosing substitution is empty, matching the site-aware validator
-/// (`native_buffer_alloc_reject`): a call inside a generic body is read without
-/// an instantiation, which is exactly the shared-body condition being measured.
-pub fn today_specializations(ws: &Workspace) -> (Vec<TodaySpec>, usize) {
+/// The enclosing substitution is empty, matching the historical lowering
+/// census: a call inside a generic body is read without an instantiation, so
+/// this reports source-level identities independently of concrete body planning.
+pub fn concrete_calls(ws: &Workspace) -> (Vec<ConcreteCall>, usize) {
     let mut out = Vec::new();
     let mut rejected = 0usize;
     for module in ws.modules.iter() {
@@ -78,10 +72,10 @@ pub fn today_specializations(ws: &Workspace) -> (Vec<TodaySpec>, usize) {
         for (owner, inf) in ir.per_fn.iter() {
             let BodyOwner::Function(caller_fid) = owner else { continue };
             let caller = FuncRef { module: module.id, func: *caller_fid };
-            let (specs, rej) = specializations_in_body(ws, inf);
+            let (specs, rej) = concrete_calls_in_body(ws, inf);
             rejected += rej;
             for (func, key) in specs {
-                out.push(TodaySpec {
+                out.push(ConcreteCall {
                     caller,
                     func,
                     slots: key.iter().map(crate::monoty::MonoTy::canonical).collect(),

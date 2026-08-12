@@ -2,9 +2,9 @@
 //!
 //! It used to iterate ZERO times: the loop body never ran, the coroutine yielded
 //! nothing, and the fn answered 0 for a 2-element vec -- compile-clean, no
-//! diagnostic, a silent wrong answer. `compute_call_spec` bailed on
-//! `is_coroutine` before it could build a `SpecKey`, so the body lowered ERASED
-//! and read a `_data` that a column vec does not have.
+//! diagnostic, a silent wrong answer. The coroutine now owns a concrete frame
+//! and element representation plan, so it cannot lower erased and read a
+//! `_data` that a column vec does not have.
 //!
 //! Specialization is DELIVERED by inline-splicing a specialized clone, and a
 //! `co fn` cannot be spliced into its caller: the call constructs a coroutine

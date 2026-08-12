@@ -220,7 +220,12 @@ fn every_js_production_route_enters_the_shared_session() {
         source.contains("update.added") && source.contains("update.removed"),
         "the session must publish the graph's exact delta populations"
     );
-    let overlay = &source[source.find("pub fn emit_overlay(").unwrap()..];
+    let overlay_start = source.find("pub fn emit_overlay(").unwrap();
+    let overlay_end = source[overlay_start..]
+        .find("\nfn shader_registration_keys(")
+        .map(|offset| overlay_start + offset)
+        .expect("emit_overlay has a following private helper");
+    let overlay = &source[overlay_start..overlay_end];
     assert!(
         overlay.contains("added_instances") && overlay.contains("removed_instances"),
         "the JS overlay must consume graph-added and graph-removed populations"

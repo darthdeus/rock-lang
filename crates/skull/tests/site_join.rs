@@ -182,16 +182,23 @@ fn main() { print("{sum_all(Counter { n: 0 })}") }
         .iter()
         .find(|(_, f)| f.name.as_str() == "sum_all")
         .expect("sum_all");
-    let scx = ScalarCtx::new(&ws);
-    let mf = skull_mir::lower::lower_instance_source(
+    let graph = graph_of_ws(&ws);
+    let bodies = skull::concrete_body::build(&ws, &graph);
+    let scx = ScalarCtx::new(&ws).sharing(graph.interner().clone());
+    let sum_ref = skull_mir::mir::FuncRef { module: mid, func: sum_fid };
+    let inst = bodies
+        .plans
+        .keys()
+        .find(|inst| inst.func == sum_ref && !inst.args.is_empty())
+        .cloned()
+        .expect("concrete bounded sum_all instance");
+    let mf = skull_mir::lower::lower_instance_with_plans(
         &ws,
         &scx,
-        &skull_mir::instance::Instance::base(skull_mir::mir::FuncRef {
-            module: mid,
-            func: sum_fid,
-        }),
+        bodies.plans.get(&inst).expect("bounded plan"),
+        &bodies.plans,
     )
-    .expect("lower bounded source body");
+    .expect("lower bounded concrete body");
     // The fixture must actually CONTAIN the form. Without this the assertion
     // below is satisfied by any body with no bounded loop at all.
     let bound_calls = count_bound_multi(&mf);
@@ -354,14 +361,21 @@ fn main() {
         .iter()
         .find(|(_, f)| f.name.as_str() == "sum_all")
         .expect("sum_all");
-    let scx = ScalarCtx::new(&ws);
-    let raw = skull_mir::lower::lower_instance_source(
+    let graph = graph_of_ws(&ws);
+    let bodies = skull::concrete_body::build(&ws, &graph);
+    let scx = ScalarCtx::new(&ws).sharing(graph.interner().clone());
+    let sum_ref = skull_mir::mir::FuncRef { module: mid, func: sum_fid };
+    let inst = bodies
+        .plans
+        .keys()
+        .find(|inst| inst.func == sum_ref && !inst.args.is_empty())
+        .cloned()
+        .expect("concrete bounded sum_all instance");
+    let raw = skull_mir::lower::lower_instance_with_plans(
         &ws,
         &scx,
-        &skull_mir::instance::Instance::base(skull_mir::mir::FuncRef {
-            module: mid,
-            func: sum_fid,
-        }),
+        bodies.plans.get(&inst).expect("bounded plan"),
+        &bodies.plans,
     )
     .expect("lower sum_all");
     assert!(count_bound_multi(&raw) > 0, "fixture has no bounded placeholder");
@@ -404,6 +418,7 @@ fn main() { print("{sum_all([1, 2, 3].iter())}") }
         .values()
         .find_map(|inst| bodies.plans.get(inst).filter(|plan| !plan.bound_tree.is_empty()))
         .expect("main does not retain a bounded callee plan");
+    let bodies = skull::concrete_body::build(&ws, &g);
     let scx = ScalarCtx::new(&ws).sharing(g.interner().clone());
     let mf = skull_mir::lower::lower_instance_with_plans(&ws, &scx, main.1, &bodies.plans)
         .expect("lower main with concrete plans");
@@ -426,6 +441,7 @@ fn main() {
 }
 "#;
     let (ws, g) = graph_of(src);
+    let bodies = skull::concrete_body::build(&ws, &g);
     let scx = ScalarCtx::new(&ws).sharing(g.interner().clone());
     let mut picked = None;
     for (candidate, candidate_tree) in g.bound_trees() {
@@ -438,14 +454,26 @@ fn main() {
         {
             continue;
         }
-        let Ok(mf) = skull_mir::lower::lower_instance_source(&ws, &scx, candidate) else { continue };
+        let Some(plan) = bodies.plans.get(candidate) else { continue };
+        let Ok(mf) = skull_mir::lower::lower_instance_with_plans(
+            &ws,
+            &scx,
+            plan,
+            &bodies.plans,
+        ) else { continue };
         if count_bound_multi(&mf) > 0 {
             picked = Some((candidate.clone(), candidate_tree.to_resolved()));
             break;
         }
     }
     let (inst, tree) = picked.expect("the fixture has no prepared bounded body with a tree");
-    let mut mf = skull_mir::lower::lower_instance_source(&ws, &scx, &inst).expect("lower bounded instance");
+    let mut mf = skull_mir::lower::lower_instance_with_plans(
+        &ws,
+        &scx,
+        bodies.plans.get(&inst).expect("bounded plan"),
+        &bodies.plans,
+    )
+    .expect("lower bounded instance");
     assert!(!tree.is_empty(), "the prepared bounded fixture has no incoming tree");
     let placeholder_ids: Vec<_> = mf
         .insts
@@ -459,6 +487,7 @@ fn main() {
         scx.interner(),
         &mut mf,
         &tree,
+        &bodies.plans,
     )
     .expect("resolve bounded instance");
     assert!(
@@ -801,7 +830,8 @@ fn main() { print("{pair(1, 2.0)} {other(1, 2.0)}") }
          prove nothing"
     );
 
-    // No record at all -- the population conditional specialization used to own.
+    // No record at all -- a concrete call without an owner is an invariant
+    // failure, not an optional specialization result.
     assert_eq!(check(None), skull::site_join::CalleeCheck::NoInstance);
 
     // A record naming ANOTHER declaration. Not a policy outcome: the record is
@@ -1184,11 +1214,9 @@ fn main() {
 /// The join FAILS CLOSED on an owner the graph does not have, proved WITHOUT
 /// depending on a defect being present.
 ///
-/// Its sibling below witnesses the population today's conditional specializer
-/// actually produces. That one silently disarms the day specialization goes
-/// total -- the fixture stops producing a shared splice and the assertion has
-/// nothing to fire on. This one removes an instance's substitution from a cloned
-/// graph instead, so the arm can still be shown to fire once the defect is gone.
+/// Its sibling below witnesses a concrete-owner population. This arm removes an
+/// instance's substitution from a cloned graph instead, so the rejection stays
+/// load-bearing even after concrete planning is total.
 #[test]
 fn an_owner_the_graph_does_not_have_is_refused() {
     // The callee must be one that SPLICES with a concrete owner today, or there

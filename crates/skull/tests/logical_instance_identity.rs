@@ -214,10 +214,11 @@ fn main() {
 /// Asserted directly on the oracle, because the corpus has no program that
 /// reaches a recovery type here -- `semantic_pass` rejects first -- and a
 /// control that never fires proves nothing about the arm. `UnboundGeneric` is
-/// the one reason that stays a legitimate `None`: a shared generic body decides
-/// no instantiation, and that IS what `callee-no-instance` means.
+/// the one source-shaped reason that stays a legitimate `None`: an
+/// uninstantiated generic body context has no concrete callee, and that IS what
+/// `callee-no-instance` means.
 #[test]
-fn a_shared_generic_body_decides_no_instantiation_and_says_so() {
+fn an_uninstantiated_generic_body_context_reports_no_instance() {
     let src = r#"
 fn ident<T>(x: T) -> T { return x }
 fn pass<U>(y: U) -> U { return ident(y) }
@@ -258,7 +259,7 @@ fn main() { print("{pass(1)}") }
     .expect("an unbound declared generic is not a rejection");
     assert!(
         got.is_none(),
-        "a shared generic body claimed an instantiation it cannot know: {got:?}"
+        "an uninstantiated generic body context claimed an instance it cannot know: {got:?}"
     );
 
     // CONTROL: under a substitution that binds `U`, the SAME call resolves.

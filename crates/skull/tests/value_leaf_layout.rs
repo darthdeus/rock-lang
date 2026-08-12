@@ -10,12 +10,13 @@
 //! Design: docs/native-buffer-leaf-addressing-plan.md.
 
 use crate::common::ws_of;
-use skull_mir::lower::{value_leaf_layout_checked, value_leaf_paths_of, LeafSlot};
+use skull_mir::lower::{LeafSlot, RepArena};
 use ustr::Ustr;
 
 fn layout(ws: &bone_semantic::inference::Workspace, name: &str) -> Vec<LeafSlot> {
-    value_leaf_layout_checked(ws, Ustr::from(name))
-        .unwrap_or_else(|e| panic!("{name}: {e}"))
+    RepArena::default()
+        .nominal_leaf_layout(ws, bone_semantic::hir::FnBackend::Any, Ustr::from(name))
+        .unwrap_or_else(|e| panic!("{name}: {}", e.message))
         .0
 }
 
@@ -35,11 +36,17 @@ fn main() { }
 fn leaf_walkers_agree_on_path_order() {
     let ws = ws_of(SHAPES);
     for name in ["Flat", "Nested", "Mixed", "DeepMixed", "Bools", "Deep3"] {
-        // `value_leaf_layout_checked` returns Err on disagreement, so reaching
+        // the owned leaf-layout projection returns an error on disagreement, so reaching
         // Ok IS the assertion -- but compare explicitly too, so a future
         // refactor that weakens the check does not silently pass this test.
         let got: Vec<Ustr> = layout(&ws, name).iter().map(|l| l.path).collect();
-        let want = value_leaf_paths_of(&ws, Ustr::from(name)).expect("value shape");
+        let want = RepArena::default()
+            .nominal_value_leaf_paths(
+                &ws,
+                bone_semantic::hir::FnBackend::Any,
+                Ustr::from(name),
+            )
+            .expect("value shape");
         assert_eq!(want, got, "leaf order disagreement for `{name}`");
     }
 }
@@ -52,9 +59,14 @@ fn leaf_walkers_agree_on_path_order() {
 #[test]
 fn a_type_without_a_c_layout_rejects_by_name() {
     let ws = ws_of(SHAPES);
-    let err = value_leaf_layout_checked(&ws, Ustr::from("NotAType"))
+    let err = RepArena::default()
+        .nominal_leaf_layout(
+            &ws,
+            bone_semantic::hir::FnBackend::Any,
+            Ustr::from("NotAType"),
+        )
         .expect_err("a non-value type must not produce a layout");
-    assert!(err.contains("NotAType"), "the rejection must name the type, got: {err}");
+    assert!(err.message.contains("NotAType"), "the rejection must name the type, got: {}", err.message);
 }
 
 /// Offsets follow C rules, not declaration index: `Mixed` packs float@0, int@4,

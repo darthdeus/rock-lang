@@ -1,12 +1,10 @@
 //! A specialized generic callee must be REACHED on JS.
 //!
-//! `compute_call_spec` decides specialization per target and says yes for a
-//! column-eligible element on JS. That decision is a CORRECTNESS one, not an
-//! optimization: for a column-stored element the shared generic body reads a
-//! `_data` the layout does not have. So the emitter must resolve such a call to
-//! the instantiation's own standalone copy (`spec_fn_name`) exactly as the
-//! luajit emitter's `callee_name` does, and a call whose specialization was not
-//! emitted must reject rather than fall back to the boxed shared body.
+//! A column-eligible element on JS has a concrete instance and an owned
+//! representation plan. That decision is a CORRECTNESS one, not an
+//! optimization: a column-stored element has no `_data` for an erased body to
+//! read. The emitter must resolve the call to the instance's own standalone
+//! copy and reject a missing plan rather than fall back to a boxed body.
 //!
 //! `sort` reaches the leaves through `__rock_col_sort_leaves`, which now has a
 //! JS body too; it rejected here for as long as that body was missing, which was

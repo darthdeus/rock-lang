@@ -35,39 +35,31 @@ pub const VEC_COLUMN_REPR: &str = "columns";
 /// collide with a leaf path, and it shares that property with `@vec`.
 pub const VEC_COLUMN_PRESENCE_FIELD: &str = "@p";
 
-/// Every element type `mf` builds a column-stored `Vec` of, nested fns included.
-///
-/// Lives beside the header constants because it has to recognise BOTH shapes the
-/// header is built in -- the inline one in [`Inst::MakeVecColumns`] and the
-/// separately-emitted `{repr, elem, cap}` struct every other column ctor goes
-/// through -- and a collector that knows only one of them silently under-reports.
-/// The JS backend needs the set to emit its per-type element materializers; on
-/// luajit the runtime type table serves the same role, so nothing calls this.
-pub fn column_elem_types(mf: &MirFunc, out: &mut std::collections::BTreeSet<Ustr>) {
-    let str_const = |id: Idx<Inst>| match &mf.insts[id] {
-        Inst::Const(Lit::Str(s)) => Some(*s),
-        _ => None,
-    };
+/// Every element type `mf` builds a column-stored `Vec` of, nested fns included,
+/// together with the planner's no-box guarantee. The fact is carried by both
+/// column-producing instructions, including a header rebuilt from an input Vec.
+pub fn column_elem_plans(mf: &MirFunc, out: &mut std::collections::BTreeMap<Ustr, bool>) {
     for inst in mf.insts.values() {
         match inst {
-            Inst::MakeVecColumns { elem, .. } => {
-                out.insert(*elem);
-            }
-            Inst::MakeStruct { ty: None, fields } => {
-                let field = |n: &str| fields.iter().find(|(f, _)| f.as_str() == n).map(|(_, v)| *v);
-                let (Some(repr), Some(elem)) = (field("repr"), field("elem")) else { continue };
-                if str_const(repr).is_some_and(|r| r.as_str() == VEC_COLUMN_REPR) {
-                    if let Some(elem) = str_const(elem) {
-                        out.insert(elem);
-                    }
-                }
+            Inst::MakeVecColumns { elem, nobox, .. }
+            | Inst::MakeVecColumnHeader { elem, nobox, .. } => {
+                out.insert(*elem, *nobox);
             }
             _ => {}
         }
     }
     for nf in &mf.nested_fns {
-        column_elem_types(nf, out);
+        column_elem_plans(nf, out);
     }
+}
+
+/// Every element type `mf` builds a column-stored `Vec`, nested fns included.
+/// This is the name-only view used by inspect type definitions; representation
+/// decisions come from [`column_elem_plans`].
+pub fn column_elem_types(mf: &MirFunc, out: &mut std::collections::BTreeSet<Ustr>) {
+    let mut plans = std::collections::BTreeMap::new();
+    column_elem_plans(mf, &mut plans);
+    out.extend(plans.into_keys());
 }
 
 /// A resolved call target: which function in which module. Mangling (rock's
@@ -143,17 +135,59 @@ pub enum ContainerKind {
 pub struct ColumnElem {
     pub name: Ustr,
     pub nullable: bool,
+    representation: crate::lower::RepId,
+    nobox: bool,
 }
 
 impl ColumnElem {
-    pub fn plain(name: Ustr) -> Self {
-        ColumnElem { name, nullable: false }
+    pub(crate) fn planned(
+        name: Ustr,
+        nullable: bool,
+        representation: crate::lower::RepId,
+        nobox: bool,
+    ) -> Self {
+        ColumnElem { name, nullable, representation, nobox }
+    }
+
+    pub fn representation(&self) -> crate::lower::RepId {
+        self.representation
+    }
+
+    pub fn is_nobox(&self) -> bool {
+        self.nobox
     }
 }
 
 impl std::fmt::Display for ColumnElem {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}{}", self.name, if self.nullable { "?" } else { "" })
+    }
+}
+
+/// The capture transport selected for one closure value. The transform owns the
+/// scope analysis; MIR retains the resulting plan so later closure, inline, and
+/// backend stages do not rediscover which cells cross the closure boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClosureEnvPlan {
+    captures: Vec<Idx<Cell>>,
+    env_cell: Option<Idx<Cell>>,
+}
+
+impl ClosureEnvPlan {
+    pub fn new(captures: Vec<Idx<Cell>>, env_cell: Option<Idx<Cell>>) -> Self {
+        Self { captures, env_cell }
+    }
+
+    pub fn captures(&self) -> &[Idx<Cell>] {
+        &self.captures
+    }
+
+    pub fn env_cell(&self) -> Option<Idx<Cell>> {
+        self.env_cell
+    }
+
+    pub fn captures_cell(&self, cell: Idx<Cell>) -> bool {
+        self.captures.contains(&cell)
     }
 }
 
@@ -368,8 +402,17 @@ pub enum Inst {
     /// length `len`, in the element's declaration order.
     MakeVecColumns {
         elem: Ustr,
+        nobox: bool,
         columns: Vec<(Ustr, Vec<Idx<Inst>>)>,
         len: usize,
+        capacity: Idx<Inst>,
+    },
+    /// A column Vec header rebuilt from an existing Vec. It carries the same
+    /// planner fact as [`Inst::MakeVecColumns`] without changing the runtime
+    /// header shape.
+    MakeVecColumnHeader {
+        elem: Ustr,
+        nobox: bool,
         capacity: Idx<Inst>,
     },
     /// A struct value. `ty` is the nominal name for the `__ty` reflective field
@@ -399,8 +442,8 @@ pub enum Inst {
         /// exists only between the end of `cleanup` and emit, so no MIR pass sees
         /// it; luajit emits a generated `<name>_lct` and JS rebuilds the nested
         /// objects. Partial flattening is invalid: when any name is dotted the
-        /// sequence must equal `value_leaf_paths_of` exactly, which the Lua
-        /// emitter asserts.
+        /// sequence must equal the owned representation plan's leaf paths exactly, which the
+        /// Lua emitter asserts.
         fields: Vec<(Ustr, Idx<Inst>)>,
     },
     /// A value-struct box that is AUTHORIZED rather than implicit: requested by
@@ -685,6 +728,16 @@ pub struct StaticCell {
 pub struct MirFunc {
     pub name: Ustr,
     pub params: Vec<Idx<Cell>>,
+    /// The concrete function representation consumed by entry binding and
+    /// return lowering. Calls retain the same plan in `call_abi_plans`.
+    pub abi_plan: Option<crate::lower::BackendFnAbiPlan>,
+    /// The owned function representation for bodies without an `Instance`,
+    /// notably hoisted nested functions. Such a body still has a concrete ABI;
+    /// it just has no graph-owned top-level instance to wrap in
+    /// `BackendFnAbiPlan`.
+    pub abi_representation: Option<crate::lower::FunctionRepPlan>,
+    /// The owned result representation of an always-emitted global initializer.
+    pub global_plan: Option<crate::lower::GlobalPlan>,
     /// `static` cells declared in this fn's body (in source order).
     pub statics: Vec<StaticCell>,
     pub insts: Arena<Inst>,
@@ -732,11 +785,11 @@ pub struct MirFunc {
     /// body's fact.
     pub resolved_bound_trees:
         bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::bound::ResolvedBoundTree>,
-    /// Per call inst that the caller lowered with the SPECIALIZED scalar ABI:
-    /// **the concrete callee body it targets** (`docs/flatvec-plan.md` call-site
-    /// specialization). The inliner reads it to splice the matching specialized
-    /// snapshot; a surviving (un-spliced) entry is a hard site-aware rejection
-    /// (its args are splatted, so the shared generic body cannot serve it).
+    /// Per call inst that the caller lowered with a scalarized delivery ABI:
+    /// **the concrete callee body it targets**. The inliner reads it to splice
+    /// the matching concrete snapshot; a surviving (un-spliced) entry is a
+    /// hard site-aware rejection because an opaque delivery cannot receive its
+    /// splatted args.
     ///
     /// An [`Instance`](crate::instance::Instance) rather than an instantiation
     /// KEY, so the symbol a call renderer spells and the symbol the definition
@@ -759,6 +812,16 @@ pub struct MirFunc {
     /// owner would make an ABI corruption look self-consistent.
     pub call_abi_plans:
         bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::lower::BackendFnAbiPlan>,
+    /// The owned function-type representation used by an indirect call. A
+    /// function value has no declaration `Instance`, so its physical signature
+    /// is carried directly beside the `CallValue`/`CallValueMulti` instruction.
+    pub call_rep_plans:
+        bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::lower::FunctionRepPlan>,
+    /// The owned capture transport for each closure creation instruction. The
+    /// closure transform consumes this instead of re-deriving captures from the
+    /// rewritten CFG.
+    pub closure_env_plans:
+        bone_semantic::prelude::FxHashMap<Idx<Inst>, ClosureEnvPlan>,
     /// Placeholder [`Inst::CallBoundMulti`]s whose element the LOWERING already
     /// split into leaf cells: `dests` is sized to the real return arity and the
     /// loop pattern is bound to the leaves, so the splice must leave both alone.
@@ -825,6 +888,9 @@ impl MirFunc {
         Self {
             name,
             params: Vec::new(),
+            abi_plan: None,
+            abi_representation: None,
+            global_plan: None,
             statics: Vec::new(),
             insts: Arena::default(),
             cells: Arena::default(),
@@ -843,6 +909,8 @@ impl MirFunc {
             call_sites: Default::default(),
             callee_instances: Default::default(),
             call_abi_plans: Default::default(),
+            call_rep_plans: Default::default(),
+            closure_env_plans: Default::default(),
             fn_value_symbols: Default::default(),
             hoisted_fn_globals: Vec::new(),
             site_owners: Vec::new(),

@@ -137,7 +137,7 @@ fn generic_inline_instances_keep_abi_publishers_calls_and_runtime_together() {
         if declaration.name.as_str() != "probe" {
             continue;
         }
-        let plan = skull_mir::lower::BackendFnAbiPlan::for_instance(&ws, &scx, instance);
+        let plan = skull_mir::lower::BackendFnAbiPlan::for_boundary_instance(&ws, &scx, instance);
         let symbol = view
             .symbols
             .get(instance)

@@ -27,6 +27,7 @@ use std::sync::LazyLock;
 use ustr::Ustr;
 
 use skull_mir::gpu_layout::{uniform_block, LeafStore, UniformBlockPlan, WireKind, WireView};
+use skull_mir::lower::RepArena;
 
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
     rock_host::stdlib_loader::stdlib_files()
@@ -255,7 +256,7 @@ fn a_mat4_members_leaf_paths_are_its_columns_in_order() {
 
 /// The agreement itself, over every std140-expressible shape: what the wire side
 /// thinks the leaves are must equal what the value side flattens to. This is the
-/// check `value_leaf_layout_checked` performs for the C/vertex context, and the
+/// check the owned RepPlan C-layout projection performs for the C/vertex context, and the
 /// reason is identical -- position is what binds a leaf to an offset.
 #[test]
 fn the_wire_and_value_walkers_agree_on_every_shape() {
@@ -271,7 +272,12 @@ fn the_wire_and_value_walkers_agree_on_every_shape() {
             .unwrap_or_else(|e| panic!("`{name}` must pass the agreement check: {e}"));
         assert_eq!(
             plan.leaf_paths(),
-            skull_mir::lower::value_leaf_paths_of(&ws, n)
+            RepArena::default()
+                .nominal_value_leaf_paths(
+                    &ws,
+                    bone_semantic::hir::FnBackend::Any,
+                    n,
+                )
                 .expect("a value struct has leaf paths")
                 .iter()
                 .map(|u| u.to_string())

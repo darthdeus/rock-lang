@@ -66,13 +66,15 @@ impl Builder<'_> {
         &self,
         name: Idx<BindingInfo>,
         params: IdxRange<BindingInfo>,
-        ret_ty: Option<TyId>,
         hoisted: Ustr,
     ) -> Result<NestedFn, CompilerError> {
         let param_names: Vec<Ustr> =
             params.into_iter().map(|pb| self.body.binding_arena[pb].name).collect();
-        let boxed =
-            NestedFn { hoisted, param_names: param_names.clone(), param_shapes: Vec::new(), ret_shape: None };
+        let boxed = NestedFn {
+            hoisted,
+            param_names: param_names.clone(),
+            representation: self.scx.rep_arena().boxed_function(self.scx.target, param_names.len()),
+        };
         let taken_by_value = self
             .body
             .expr_arena
@@ -81,139 +83,22 @@ impl Builder<'_> {
         if self.scx.values_first_class {
             return Ok(boxed);
         }
-        if self.concrete_plan.is_some() {
-            let fn_ty = self
-                .binding_ty(name)
-                .and_then(|ty| self.concrete_ty_id(ty))
-                .ok_or_else(|| gap("concrete nested function binding has no type plan"))?;
-            let crate::monoty::MonoTy::Function { params, ret } = fn_ty else {
-                return Err(gap("concrete nested function binding is not a function type"));
-            };
-            let slot_of = |ty: &crate::monoty::MonoTy| {
-                if taken_by_value {
-                    crate::lower::mono_nobox_value_shape(self.ws, ty)
-                        .map(RetSlot::Leaves)
-                        .or_else(|| {
-                            crate::lower::mono_tuple_ret_shape(self.ws, ty)
-                                .filter(TupleRetShape::splats)
-                                .map(RetSlot::Nested)
-                        })
-                        .unwrap_or(RetSlot::Opaque)
-                } else {
-                    crate::lower::mono_sig_param_slot(self.ws, ty)
-                }
-            };
-            let abi = NestedFn {
-                hoisted,
-                param_names,
-                param_shapes: params.iter().map(slot_of).collect(),
-                ret_shape: if taken_by_value {
-                    crate::lower::mono_nobox_value_shape(self.ws, &ret)
-                } else {
-                    crate::lower::mono_value_shape(self.ws, &ret)
-                },
-            };
-            return Ok(if abi.uses_scalar_abi() { abi } else { boxed });
-        }
-        // TAKEN BY VALUE: the ABI narrows to what an indirect call site can
-        // compute from the fn TYPE alone ([`Self::fn_value_abi`]), which is
-        // `nobox` values only. Both ends must run the SAME predicate -- using
-        // the wider `body_sig_value_shape` here would scalarize an ordinary
-        // value param that an opaque call site still boxes, and the two would
-        // disagree exactly where neither can see the other. Dropping to the
-        // boxed ABI entirely, which is what this used to do, is the same
-        // disagreement in the other direction: it is what made a `nobox` param
-        // reject once the fn was taken by value.
-        let slot_of = |s: &Self, t: TyId| {
-            if taken_by_value {
-                s.nobox_param_slot_of_ty(t)
-            } else {
-                // A direct-only nested fn may use every scalarizable value
-                // shape, but the TUPLE rule is the same either way -- only a
-                // `nobox` element splats -- so both branches share it.
-                match s.body_sig_value_shape(t) {
-                    Some(shape) => RetSlot::Leaves(shape),
-                    None => s.tuple_param_slot_of_ty(t),
-                }
-            }
-        };
-        let shape_of = |s: &Self, t: TyId| {
-            if taken_by_value {
-                s.nobox_shape_of_ty(t)
-            } else {
-                s.body_sig_value_shape(t)
-            }
-        };
-        let abi = NestedFn {
-            hoisted,
-            param_names,
-            param_shapes: params
-                .into_iter()
-                .map(|pb| {
-                    self.binding_ty(pb).map_or(RetSlot::Opaque, |t| slot_of(self, t))
-                })
-                .collect(),
-            ret_shape: self
-                .nested_fn_ret_ty(name, ret_ty)
-                .and_then(|t| shape_of(self, t)),
-        };
+        let fn_ty = self
+            .binding_ty(name)
+            .and_then(|ty| self.concrete_ty_id(ty))
+            .ok_or_else(|| gap("concrete nested function binding has no type plan"))?;
+        let representation = BackendFnAbiPlan::for_function_value_with_mode(
+            self.ws,
+            self.scx,
+            &fn_ty,
+            taken_by_value,
+        )
+        .map_err(|error| match error.span.or(self.cur_span) {
+            Some(span) => CompilerError::new_with_label(span, error.message),
+            None => CompilerError::new_no_location(error.message),
+        })?;
+        let abi = NestedFn { hoisted, param_names, representation };
         Ok(if abi.uses_scalar_abi() { abi } else { boxed })
-    }
-
-    /// A nested `fn`'s return type. An ANNOTATION is authoritative when present;
-    /// without one the type is inferred, and it must be read off the binding's own
-    /// `fn(..) -> R` type rather than defaulted away -- an inferred value return is
-    /// as much a part of the signature as a written one, and treating it as absent
-    /// silently drops the callee back to the boxed ABI.
-    pub(crate) fn nested_fn_ret_ty(&self, name: Idx<BindingInfo>, ret_ty: Option<TyId>) -> Option<TyId> {
-        if ret_ty.is_some() {
-            return ret_ty;
-        }
-        let fty = self.resolve_tyid(self.binding_ty(name)?)?;
-        match self.ty_node(fty)? {
-            TypeExpr::Function { ret, .. } => Some(fty.with_idx(ret)),
-            _ => None,
-        }
-    }
-
-    /// [`sig_value_shape`] for a type that may live in the BODY's inference arena
-    /// rather than the workspace one -- a nested `fn`'s params are declared inside
-    /// the enclosing body, so `static_ty` cannot see them. Same shape policy
-    /// (`sig_shape_of_nominal`), reached through `ty_node`, which also applies the
-    /// enclosing specialization substitution.
-    pub(crate) fn body_sig_value_shape(&self, ty: TyId) -> Option<ValueShape> {
-        if let Some(concrete) = self.concrete_ty_id(ty) {
-            let (payload, nullable) = concrete.peel_nullable();
-            let crate::monoty::MonoTy::App {
-                ctor: crate::monoty::MonoCtor::Nominal(name),
-                ..
-            } = payload
-            else {
-                return None;
-            };
-            return if nullable {
-                sig_shape_of_nullable_nominal(self.ws, *name)
-            } else {
-                sig_shape_of_nominal(self.ws, *name)
-            };
-        }
-        if self.concrete_plan.is_some() {
-            return None;
-        }
-        let ty = self.resolve_tyid(ty)?;
-        match self.ty_node(ty)? {
-            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => sig_shape_of_nominal(self.ws, n),
-            TypeExpr::Nullable(inner) => {
-                let inner = self.resolve_tyid(ty.with_idx(inner))?;
-                match self.ty_node(inner)? {
-                    TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => {
-                        sig_shape_of_nullable_nominal(self.ws, n)
-                    }
-                    _ => None,
-                }
-            }
-            _ => None,
-        }
     }
 
     /// Hoist a nested `fn` to a private top-level [`MirFunc`] `__local_<owner>_
@@ -224,7 +109,6 @@ impl Builder<'_> {
         &mut self,
         name: Idx<BindingInfo>,
         params: IdxRange<BindingInfo>,
-        ret_ty: Option<TyId>,
         body: Idx<Expr>,
     ) -> Result<(), CompilerError> {
         let sname = self.body.binding_arena[name].name;
@@ -235,7 +119,7 @@ impl Builder<'_> {
             v
         };
         let hoisted = Ustr::from(format!("__local_{}_{}_{}", self.static_owner, sname, ctr).as_str());
-        let abi = self.nested_fn_abi(name, params, ret_ty, hoisted)?;
+        let abi = self.nested_fn_abi(name, params, hoisted)?;
         self.nested_fn_globals.insert(raw(name), abi.clone());
 
         let mf = MirFunc::new(hoisted);
@@ -245,10 +129,7 @@ impl Builder<'_> {
             scx: self.scx,
             concrete_plan: self.concrete_plan,
             concrete_plans: self.concrete_plans,
-            concrete_type_cache: self
-                .concrete_plan
-                .map(|_| std::cell::RefCell::new(rustc_hash::FxHashMap::default())),
-            legacy_subst: self.legacy_subst.clone(),
+            concrete_type_cache: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
             generic_bounds: self.generic_bounds,
             body: self.body,
             inf: self.inf,
@@ -262,13 +143,11 @@ impl Builder<'_> {
             resume_arg: None,
             // A hoisted nested fn is emitted via `emit_nested_fns`, which never
             // runs `inline_functions` -- box value args.
-            param_shapes: abi.param_shapes.clone(),
-            ret_shape: abi.ret_shape.clone(),
-            ret_tuple: None,
+            param_reps: abi.representation.params().to_vec(),
+            ret_rep: abi.representation.result(),
             // A nested fn is emitted as a sibling top-level Lua fn and is never a
             // GLSL callee (referenced indirectly), so a return coercion here is
             // Lua-identity only; leaving it off matches today's emitted text.
-            ret_ty: None,
             fn_name_span: None,
             cur_span: None,
             cur_expr: None,
@@ -288,9 +167,11 @@ impl Builder<'_> {
             presence_only: None,
         };
 
+        child.f.abi_representation = Some(abi.representation.clone());
+
         for (i, pb) in params.into_iter().enumerate() {
             let pname = child.body.binding_arena[pb].name;
-            let slot = child.param_shapes.get(i).cloned().unwrap_or(RetSlot::Opaque);
+            let slot = child.param_slot(i);
             child.bind_param_slot(pb, pname, &slot);
         }
 
@@ -420,8 +301,8 @@ impl Builder<'_> {
                 Statement::Static { name, value } => {
                     self.lower_static(name, value)?;
                 }
-                Statement::Fn { name, params, ret_ty, body } => {
-                    self.lower_nested_fn(name, params, ret_ty, body)?;
+                Statement::Fn { name, params, body, .. } => {
+                    self.lower_nested_fn(name, params, body)?;
                 }
                 Statement::Comment(_) => {}
                 Statement::While { cond, body } => {

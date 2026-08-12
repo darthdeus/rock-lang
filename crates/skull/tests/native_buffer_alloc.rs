@@ -55,3 +55,23 @@ fn primitive_elements_are_subsumed() {
         "float element must emit `ffi.new(\"float[?]\", ...)`"
     );
 }
+
+const GENERIC_PRIMITIVE_ELEM: &str = r#"
+fn generic_native_buffer<T>(cap: int) -> NativeBuffer<T> {
+    return native_buffer_alloc(cap)
+}
+
+fn main() {
+    let b: NativeBuffer<int> = generic_native_buffer(8)
+    print("{b.len}")
+}
+"#;
+
+#[test]
+fn complete_generic_primitive_instance_owns_native_buffer_ctype() {
+    let lua = emit_module(GENERIC_PRIMITIVE_ELEM);
+    assert!(
+        lua.contains(r#"ffi.new("int[?]"#),
+        "the concrete primitive instance must publish its own native-buffer ctype, got:\n{lua}"
+    );
+}

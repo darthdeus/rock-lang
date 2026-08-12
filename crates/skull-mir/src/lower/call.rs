@@ -20,7 +20,7 @@ pub(crate) struct DirectCall {
     /// [`Instance`](crate::instance::Instance) is the delivery identity rather
     /// than a key plus a reconstructed substitution.
     pub(crate) delivery: Option<crate::instance::Instance>,
-    pub(crate) callee_inst: Option<crate::instance::Instance>,
+    pub(crate) callee_inst: crate::instance::Instance,
     pub(crate) plan: BackendFnAbiPlan,
 }
 
@@ -34,7 +34,7 @@ impl Builder<'_> {
             return;
         }
         crate::ablation::note_examined();
-        let Some(plan) = self.concrete_plan else { return };
+        let plan = self.concrete_plan;
         let site = crate::site::Site {
             domain: self.cur_domain.clone(),
             expr: e,
@@ -95,7 +95,7 @@ impl Builder<'_> {
         e: Idx<Expr>,
         op: crate::site::SiteOp,
     ) -> Result<Option<crate::instance::Instance>, CompilerError> {
-        let Some(plan) = self.concrete_plan else { return Ok(None) };
+        let plan = self.concrete_plan;
         let site = crate::site::Site {
             domain: self.cur_domain.clone(),
             expr: e,
@@ -121,8 +121,7 @@ impl Builder<'_> {
         if inst.args.is_empty() {
             return None;
         }
-        self.concrete_plans
-            .and_then(|plans| plans.contains_key(inst).then(|| inst.clone()))
+        self.concrete_plans.contains_key(inst).then(|| inst.clone())
     }
 
     pub(crate) fn concrete_callee_param_ty(
@@ -132,59 +131,36 @@ impl Builder<'_> {
         pidx: usize,
     ) -> Result<Option<crate::monoty::MonoTy>, CompilerError> {
         let callee = &self.ws.module(inst.func.module).functions[inst.func.func];
-        if let Some(plan) = self.concrete_plan {
-            let site = crate::site::Site {
-                domain: self.cur_domain.clone(),
-                expr: e,
-                op: self.cur_op.clone(),
-            };
-            if plan.callees.get(&site) != Some(inst) {
-                return Err(self.gap_here("concrete callee identity disagrees with its site plan"));
-            }
-            let signature = if let Some(plans) = self.concrete_plans {
-                let needs_plan = crate::lower::requires_concrete_body_plan(self.ws, inst)
-                    && crate::monoty::too_deep_to_instantiate(
-                        inst.arg_types(self.scx.interner()).iter(),
-                    )
-                    .is_none();
-                if needs_plan {
-                    &plans.get(inst).ok_or_else(|| {
-                        self.gap_here("concrete callee body plan is missing for its site")
-                    })?
-                    .signature
-                } else {
-                    plan.callee_signatures.get(&site).ok_or_else(|| {
-                        self.gap_here("concrete callee signature is missing for its site")
-                    })?
-                }
-            } else {
-                plan.callee_signatures.get(&site).ok_or_else(|| {
-                    self.gap_here("concrete callee signature is missing for its site")
-                })?
-            };
-            let slot = signature.params.get(pidx).or_else(|| {
-                callee
-                    .is_variadic
-                    .then(|| signature.params.last())
-                    .flatten()
-            });
-            let id = slot.ok_or_else(|| {
-                self.gap_here("concrete callee signature has no parameter for this argument")
-            })?;
-            return Ok(Some(self.concrete_mono(*id)));
+        let plan = self.concrete_plan;
+        let site = crate::site::Site {
+            domain: self.cur_domain.clone(),
+            expr: e,
+            op: self.cur_op.clone(),
+        };
+        if plan.callees.get(&site) != Some(inst) {
+            return Err(self.gap_here("concrete callee identity disagrees with its site plan"));
         }
-        let Some(plans) = self.concrete_plans else { return Ok(None) };
-        let Some(plan) = plans.get(inst) else { return Ok(None) };
-        let slot = plan.signature.params.get(pidx).or_else(|| {
+        let signature = if crate::lower::requires_concrete_body_plan(self.ws, inst)
+            && crate::monoty::too_deep_to_instantiate(inst.arg_types(self.scx.interner()).iter()).is_none()
+        {
+            &self
+                .concrete_plans
+                .get(inst)
+                .ok_or_else(|| self.gap_here("concrete callee body plan is missing for its site"))?
+                .signature
+        } else {
+            plan.callee_signatures
+                .get(&site)
+                .ok_or_else(|| self.gap_here("concrete callee signature is missing for its site"))?
+        };
+        let slot = signature.params.get(pidx).or_else(|| {
             callee
                 .is_variadic
-                .then(|| plan.signature.params.last())
+                .then(|| signature.params.last())
                 .flatten()
         });
         let id = slot.ok_or_else(|| {
-            gap(format!(
-                "concrete ABI plan has no parameter {pidx} for callee instance"
-            ))
+            self.gap_here("concrete callee signature has no parameter for this argument")
         })?;
         Ok(Some(self.concrete_mono(*id)))
     }
@@ -193,26 +169,24 @@ impl Builder<'_> {
         &self,
         receiver: Idx<Expr>,
     ) -> Result<Option<crate::lower::YieldChannel>, CompilerError> {
-        let Some(body_plan) = self.concrete_plan else { return Ok(None) };
+        let body_plan = self.concrete_plan;
         let site = crate::site::Site {
             domain: self.cur_domain.clone(),
             expr: receiver,
             op: crate::site::SiteOp::DirectCall,
         };
         let result = if let Some(owner) = body_plan.callees.get(&site) {
-            let signature = match self.concrete_plans {
-                Some(plans)
-                    if crate::lower::requires_concrete_body_plan(self.ws, owner)
-                        && crate::monoty::too_deep_to_instantiate(
-                            owner.arg_types(self.scx.interner()).iter(),
-                        )
-                        .is_none() => &plans.get(owner).ok_or_else(|| {
-                        self.gap_here("concrete coroutine callee body plan is missing")
-                    })?
-                    .signature,
-                Some(_) | None => body_plan.callee_signatures.get(&site).ok_or_else(|| {
+            let signature = if crate::lower::requires_concrete_body_plan(self.ws, owner)
+                && crate::monoty::too_deep_to_instantiate(owner.arg_types(self.scx.interner()).iter()).is_none()
+            {
+                &self.concrete_plans.get(owner).ok_or_else(|| {
+                    self.gap_here("concrete coroutine callee body plan is missing")
+                })?
+                .signature
+            } else {
+                body_plan.callee_signatures.get(&site).ok_or_else(|| {
                     self.gap_here("concrete coroutine callee signature is missing")
-                })?,
+                })?
             };
             signature.result.map(|id| self.concrete_mono(id))
         } else {
@@ -228,30 +202,49 @@ impl Builder<'_> {
         inst: &crate::instance::Instance,
     ) -> Result<BackendFnAbiPlan, CompilerError> {
         let selected = self.selected_abi_instance(inst)?;
-        if let Some(plans) = self.concrete_plans {
-            if !crate::lower::requires_concrete_body_plan(self.ws, inst) {
-                return Ok(BackendFnAbiPlan::for_instance(self.ws, self.scx, &selected));
-            }
-            if crate::monoty::too_deep_to_instantiate(
-                inst.arg_types(self.scx.interner()).iter(),
-            )
-            .is_some()
-            {
-                return Ok(BackendFnAbiPlan::for_instance(self.ws, self.scx, &selected));
-            }
-            let plan = plans.get(inst).ok_or_else(|| {
-                let name = self.ws.module(inst.func.module).functions[inst.func.func].name;
-                gap(format!(
-                    "concrete ABI plan is missing for callee `{name}` ({})",
-                    inst.func.func.into_raw().into_u32()
-                ))
-            })?;
-            if selected.func != inst.func {
-                return Ok(BackendFnAbiPlan::for_instance(self.ws, self.scx, &selected));
-            }
-            return Ok(BackendFnAbiPlan::for_concrete_plan(self.ws, self.scx, plan));
+        if !crate::lower::requires_concrete_body_plan(self.ws, inst) {
+            return Ok(BackendFnAbiPlan::for_boundary_instance(self.ws, self.scx, &selected));
         }
-        Ok(BackendFnAbiPlan::for_instance(self.ws, self.scx, &selected))
+        if let Some(at) = crate::monoty::too_deep_to_instantiate(
+            inst.arg_types(self.scx.interner()).iter(),
+        ) {
+            let f = &self.ws.module(inst.func.module).functions[inst.func.func];
+            return Err(CompilerError::new_with_label(
+                f.name_span,
+                format!(
+                    "polymorphic recursion: instantiating `{}` at `{}` exceeds the \
+                     instantiation depth limit of {}. A recursive call whose type \
+                     arguments GROW never terminates -- each call needs a new body -- so it \
+                     is rejected rather than expanded. Same-instance recursion (type \
+                     arguments unchanged) is unaffected.",
+                    f.name,
+                    at.render(),
+                    crate::monoty::MAX_INSTANTIATION_DEPTH,
+                ),
+            ));
+        }
+        let plan = self.concrete_plans.get(inst).ok_or_else(|| {
+            let name = self.ws.module(inst.func.module).functions[inst.func.func].name;
+            gap(format!(
+                "concrete ABI plan is missing for callee `{name}` ({})",
+                inst.func.func.into_raw().into_u32()
+            ))
+        })?;
+        if selected.func != inst.func {
+            if !crate::lower::requires_concrete_body_plan(self.ws, &selected) {
+                return Ok(BackendFnAbiPlan::for_boundary_instance(self.ws, self.scx, &selected));
+            }
+            if let Some(selected_plan) = self.concrete_plans.get(&selected) {
+                return Ok(BackendFnAbiPlan::for_concrete_plan(self.ws, self.scx, selected_plan));
+            }
+            return Ok(BackendFnAbiPlan::for_concrete_signature(
+                self.ws,
+                self.scx,
+                &selected,
+                &plan.signature,
+            ));
+        }
+        Ok(BackendFnAbiPlan::for_concrete_plan(self.ws, self.scx, plan))
     }
 
     /// Lower a call to a (boxed) single value — the scalar-ABI Group result is
@@ -280,7 +273,7 @@ impl Builder<'_> {
             if matches!(name.as_str(), "inspect" | "inspect_formatted") {
                 if let Some(&arg) = arg_idxs.first() {
                     if let Some(elem) = self.vec_column_elem_of(arg)? {
-                        if self.is_nobox_struct(elem.name) {
+                        if elem.is_nobox() {
                             return Err(CompilerError::new_with_label(
                                 self.body.expr_spans[e],
                                 format!(
@@ -415,10 +408,9 @@ impl Builder<'_> {
             }
             // `vec_new()` is the fourth boundary primitive, and the odd one out:
             // its element type comes from the CALL's own type, not a receiver, so
-            // it cannot be read off an argument. It is also `inline(lua)`, so it
-            // never specializes (`compute_call_spec` bails on an inline body) --
-            // the opaque body would hand back a `_data` table that every later
-            // column access then indexes as nil.
+            // it cannot be read off an argument. It is also an opaque Lua
+            // boundary; the concrete plan must select the column representation
+            // before the body would otherwise expose a table-backed `_data`.
             if name.as_str() == "__vec_data_alloc" && arg_idxs.len() == 1 {
                 if let Some(elem) = self.vec_column_elem_of(e)? {
                     let capacity = self.lower_expr(arg_idxs[0])?;
@@ -498,28 +490,15 @@ impl Builder<'_> {
         // per-yield allocation.
         if let Callee::Unresolved { name, .. } = callee {
             if name.as_str() == "resume" && !arg_idxs.is_empty() {
-                if self.concrete_plan.is_some() {
-                    if let Some(channel) = self.concrete_coroutine_channel(arg_idxs[0])? {
-                        let recv = self.lower_expr(arg_idxs[0])?;
-                        let advance = self.emit_cur(Inst::Field { base: recv, field: Ustr::from("__advance") });
-                        let mut cargs: Vec<Idx<Inst>> = vec![recv];
-                        if let Some(&a) = arg_idxs.get(1) {
-                            cargs.push(self.lower_expr(a)?);
-                        }
-                        self.emit_cur(Inst::CallValue { callee: advance, args: cargs });
-                        return Ok(self.resume_frame_read_channel(recv, &channel));
+                if let Some(channel) = self.concrete_coroutine_channel(arg_idxs[0])? {
+                    let recv = self.lower_expr(arg_idxs[0])?;
+                    let advance = self.emit_cur(Inst::Field { base: recv, field: Ustr::from("__advance") });
+                    let mut cargs: Vec<Idx<Inst>> = vec![recv];
+                    if let Some(&a) = arg_idxs.get(1) {
+                        cargs.push(self.lower_expr(a)?);
                     }
-                } else if self.is_coroutine_recv(arg_idxs[0]) {
-                    if let Some(shape) = self.flat_enum_shape_of_expr(e) {
-                        let recv = self.lower_expr(arg_idxs[0])?;
-                        let advance = self.emit_cur(Inst::Field { base: recv, field: Ustr::from("__advance") });
-                        let mut cargs: Vec<Idx<Inst>> = vec![recv];
-                        if let Some(&a) = arg_idxs.get(1) {
-                            cargs.push(self.lower_expr(a)?);
-                        }
-                        self.emit_cur(Inst::CallValue { callee: advance, args: cargs });
-                        return Ok(self.resume_frame_read(recv, &shape));
-                    }
+                    self.emit_cur(Inst::CallValue { callee: advance, args: cargs });
+                    return Ok(self.resume_frame_read_channel(recv, &channel));
                 }
             }
         }
@@ -639,15 +618,17 @@ impl Builder<'_> {
                 if let Some(abi) = self.nested_fn_globals.get(&raw(b)).cloned() {
                     self.f.hoisted_fn_globals.push(abi.hoisted);
                     let g = self.emit_cur(Inst::Global(abi.hoisted));
+                    let param_shapes = abi.param_slots(&self.scx.rep_arena());
                     let arg_vals =
-                        self.slotted_call_args(&abi.param_names, &abi.param_shapes, &arg_idxs)?;
-                    let Some(shape) = abi.ret_shape else {
+                        self.slotted_call_args(&abi.param_names, &param_shapes, &arg_idxs)?;
+                    let Some(shape) = abi.result_shape(&self.scx.rep_arena()) else {
                         let v = self.emit_call_value(e, g, arg_vals)?;
                         return Ok(ValueRepr::Scalar(v));
                     };
                     let dests: Vec<Idx<Cell>> =
                         (0..shape.leaf_count()).map(|_| self.f.new_cell(None)).collect();
-                    self.emit_cur(Inst::CallValueMulti { dests: dests.clone(), callee: g, args: arg_vals });
+                    let call = self.emit_cur(Inst::CallValueMulti { dests: dests.clone(), callee: g, args: arg_vals });
+                    self.f.call_rep_plans.insert(call, abi.representation.clone());
                     let leaves: Vec<Idx<Inst>> =
                         dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
                     let mut idx = 0;
@@ -658,8 +639,10 @@ impl Builder<'_> {
                     .get(&raw(b))
                     .ok_or_else(|| gap("call to an unbound fn-typed local"))?;
                 let callee_v = self.emit_cur(Inst::Load(cell));
-                if let Some(abi) = self.binding_ty(b).and_then(|t| self.fn_value_abi(t)) {
-                    return self.indirect_call_by_abi(abi, callee_v, &arg_idxs);
+                if let Some(abi) = self.fn_value_rep_plan(self.binding_ty(b).ok_or_else(|| {
+                    gap("fn-typed local has no physical function signature")
+                })?)? {
+                    return self.indirect_call_by_plan(abi, callee_v, &arg_idxs);
                 }
                 // Nothing `nobox` in the signature -- args are boxed.
                 let arg_vals: Vec<Idx<Inst>> =
@@ -669,10 +652,12 @@ impl Builder<'_> {
             }
             // A fn-typed expression result: lower it, call through it.
             Callee::Value(ve) => {
-                let abi = self.expr_fn_value_abi(ve);
+                let abi = self.fn_value_rep_plan(*self.inf
+                    .and_then(|inf| inf.expr_types.get(ve))
+                    .ok_or_else(|| gap("fn-valued expression has no physical function signature"))?)?;
                 let callee_v = self.lower_expr(ve)?;
                 if let Some(abi) = abi {
-                    return self.indirect_call_by_abi(abi, callee_v, &arg_idxs);
+                    return self.indirect_call_by_plan(abi, callee_v, &arg_idxs);
                 }
                 let arg_vals: Vec<Idx<Inst>> =
                     arg_idxs.iter().map(|&a| self.lower_expr(a)).collect::<Result<_, _>>()?;
@@ -715,22 +700,12 @@ impl Builder<'_> {
         // IDENTITY, computed beside the delivery decision and independent of it.
         // A call the policy declines to specialize still names exactly one
         // concrete instance, and this is where it says which.
-        let callee_inst = if self.concrete_plan.is_some() {
-            self.record_concrete_ablation(e, func);
-            self.concrete_callee_for_site(e)?
-        } else {
-            self.callee_instance_for(e, func)?
-        };
-        let delivery = if self.concrete_plan.is_some() {
-            callee_inst.as_ref().and_then(|inst| self.concrete_delivery_instance(inst))
-        } else {
-            self.call_spec_for_target(e, func)?
-        };
-        let plan = if let Some(owner) = &callee_inst {
-            self.callee_abi_plan_for_instance(owner)?
-        } else {
-            self.callee_abi_plan(func, delivery.as_ref())
-        };
+        self.record_concrete_ablation(e, func);
+        let callee_inst = self
+            .concrete_callee_for_site(e)?
+            .ok_or_else(|| self.gap_here("direct call has no concrete callee identity"))?;
+        let delivery = self.concrete_delivery_instance(&callee_inst);
+        let plan = self.callee_abi_plan_for_instance(&callee_inst)?;
         Ok(DirectCall { tree, delivery, callee_inst, plan })
     }
 
@@ -751,18 +726,17 @@ impl Builder<'_> {
         if let Some(inst) = &dc.delivery {
             self.f.spec_bindings.insert(call, inst.clone());
         }
-        if let Some(owner) = &dc.callee_inst {
-            debug_assert_eq!(
-                crate::lower::canonical_variant(self.ws, owner.func),
-                crate::lower::canonical_variant(self.ws, func)
-            );
-            self.record_callee_bound_tree(
-                call,
-                owner,
-                dc.tree.as_ref().is_some_and(|tree| !tree.is_empty()),
-            )?;
-            self.f.callee_instances.insert(call, owner.clone());
-        }
+        let owner = &dc.callee_inst;
+        debug_assert_eq!(
+            crate::lower::canonical_variant(self.ws, owner.func),
+            crate::lower::canonical_variant(self.ws, func)
+        );
+        self.record_callee_bound_tree(
+            call,
+            owner,
+            dc.tree.as_ref().is_some_and(|tree| !tree.is_empty()),
+        )?;
+        self.f.callee_instances.insert(call, owner.clone());
         self.f.call_abi_plans.insert(call, dc.plan.clone());
         Ok(())
     }
@@ -773,8 +747,7 @@ impl Builder<'_> {
         owner: &crate::instance::Instance,
         raw_tree_present: bool,
     ) -> Result<(), CompilerError> {
-        let Some(plans) = self.concrete_plans else { return Ok(()) };
-        let Some(plan) = plans.get(owner) else {
+        let Some(plan) = self.concrete_plans.get(owner) else {
             if raw_tree_present {
                 return Err(self.gap_here("concrete callee bound plan is missing for its site"));
             }
@@ -789,162 +762,6 @@ impl Builder<'_> {
         Ok(())
     }
 
-    /// The concrete instance a call at `e` to `func` names -- the IDENTITY
-    /// record, computed beside the delivery decision and independent of it.
-    ///
-    /// The ONE lowering-side entry to
-    /// [`crate::lower::shape::callee_instance_subst`]. Every emission shape
-    /// asks here and hands the answer to [`Self::record_call`]; a per-shape
-    /// call to the oracle is exactly where one shape forgot it --
-    /// `scalar_ufcs_call_repr` never recorded anything, so `x?.get()` on a
-    /// scalar-ABI receiver had a graph instance and no claim.
-    pub(crate) fn callee_instance_for(
-        &self,
-        e: Idx<Expr>,
-        func: FuncRef,
-    ) -> Result<Option<crate::instance::Instance>, CompilerError> {
-        if self.ws.module(func.module).functions[func.func].generics.is_empty() {
-            return Ok(Some(crate::instance::Instance::base(func)));
-        }
-        match self.inf {
-            Some(inf) => {
-                let Some(subst) = crate::lower::shape::callee_instance_subst(
-                    self.ws,
-                    inf,
-                    e,
-                    func,
-                    self.subst(),
-                )? else {
-                    return Ok(None);
-                };
-                let key = crate::lower::spec_key_from_subst(self.ws, func, &subst).ok_or_else(|| {
-                    CompilerError::new_with_label(
-                        self.body.expr_spans[e],
-                        format!(
-                            "internal: concrete call to `{}` has an incomplete owner",
-                            self.ws.module(func.module).functions[func.func].name
-                        ),
-                    )
-                })?;
-                Ok(Some(crate::instance::Instance::intern(
-                    self.scx.interner(),
-                    func,
-                    key,
-                )))
-            }
-            None => Ok(None),
-        }
-    }
-
-    pub(crate) fn call_spec(
-        &self,
-        e: Idx<Expr>,
-        func: FuncRef,
-    ) -> Result<Option<crate::instance::Instance>, CompilerError> {
-        let Some(inf) = self.inf else { return Ok(None) };
-        // INTERNED HERE, at the one boundary where the build's arena is in
-        // scope: `compute_call_spec` is arena-free shape analysis, and this is
-        // where its answer stops being a list of types and becomes an identity.
-        let spec = compute_call_spec(self.ws, inf, e, func, self.subst())?;
-        // Stage-0e census. Recorded HERE rather than inside `compute_call_spec`
-        // because the classification needs no context and the record needs the
-        // caller's name and the call's span, which only the Builder has.
-        if crate::ablation::enabled() {
-            if !self.ws.module(func.module).functions[func.func].generics.is_empty() {
-                crate::ablation::note_examined();
-            }
-        }
-        // Polymorphic growth: a SUCCESSFUL specialization whose instantiation
-        // type is deep. Recorded on the `Some` side, because growth shows up as
-        // ever-deeper keys that each specialize fine, not as a decline.
-        //
-        // It also CAPS -- past the threshold `spec` becomes `None`, the call
-        // takes the shared body, and the recursion terminates. Without the cap
-        // the mode does not survive the shape it exists to measure: `depth<T>`
-        // wrapping to `[T]` specializes one level deeper per recursive call and
-        // lowering recurses until the stack overflows (measured: SIGABRT).
-        // Plan S 7 predicts exactly this -- polymorphic recursion "does not
-        // terminate under demand-driven instantiation" -- and the Stage-0d
-        // shadow graph's `MAX_INSTANTIATION_DEPTH` caps for the same reason:
-        // the cap turns divergence into a REPORT.
-        let mut spec = spec;
-        if crate::ablation::enabled() {
-            if let Some((key, _)) = &spec {
-                if let Some(d) = key
-                    .iter()
-                    .map(crate::lower::shape::growth_depth)
-                    .max()
-                    .filter(|d| *d > crate::lower::shape::ABLATION_GROWTH_DEPTH)
-                {
-                    let callee = &self.ws.module(func.module).functions[func.func];
-                    crate::ablation::record(
-                        crate::ablation::FatalCategory::PolymorphicGrowth,
-                        callee.name.as_str(),
-                        self.f.name.as_str(),
-                        self.body.expr_spans.get(e).copied().unwrap_or(callee.name_span),
-                        format!(
-                            "instantiation type is {d} levels deep (threshold {}): the \
-                             signature of polymorphic recursion, which does not terminate \
-                             under demand-driven instantiation (plan S 7). Capped here so \
-                             the mode terminates; uncapped this overflows the stack",
-                            crate::lower::shape::ABLATION_GROWTH_DEPTH
-                        ),
-                    );
-                    spec = None;
-                }
-            }
-        }
-        if crate::ablation::enabled() && spec.is_none() {
-            if let Some((category, detail)) =
-                crate::lower::shape::ablation_decline(self.ws, inf, e, func, self.subst())
-            {
-                let callee = &self.ws.module(func.module).functions[func.func];
-                crate::ablation::record(
-                    category,
-                    callee.name.as_str(),
-                    self.f.name.as_str(),
-                    self.body.expr_spans.get(e).copied().unwrap_or(callee.name_span),
-                    detail,
-                );
-            }
-        }
-        Ok(spec.map(|(key, _)| crate::instance::Instance::intern(self.scx.interner(), func, key)))
-    }
-
-    /// [`Self::call_spec`] narrowed by the target's storage filter -- the form
-    /// every consumer of a call's INSTANTIATION must use, so none of them
-    /// disagrees about whether this call specializes.
-    pub(crate) fn call_spec_for_target(
-        &self,
-        e: Idx<Expr>,
-        func: FuncRef,
-    ) -> Result<Option<crate::instance::Instance>, CompilerError> {
-        self.call_spec(e, func)
-    }
-
-    /// **The ABI plan of the body this call TARGETS.**
-    ///
-    /// The callee's emitted body is named by the delivery decision that reached
-    /// this call: a served instantiation targets the specialized definition,
-    /// and everything else targets the shared one. That is the same id the
-    /// definition is lowered against, which is what keeps the caller's argument
-    /// splat and the callee's parameter list from being two derivations.
-    pub(crate) fn callee_abi_plan(
-        &self,
-        func: FuncRef,
-        delivery: Option<&crate::instance::Instance>,
-    ) -> BackendFnAbiPlan {
-        let base;
-        let inst = match delivery {
-            Some(inst) => inst,
-            None => {
-                base = crate::instance::Instance::base(func);
-                &base
-            }
-        };
-        BackendFnAbiPlan::for_instance(self.ws, self.scx, inst)
-    }
-
     /// THE tuple-return shape of a call, read off the CALLEE's declared return
     /// type under the CALLEE's instantiation.
     ///
@@ -952,8 +769,8 @@ impl Builder<'_> {
     /// computed this under the call's own `SpecSubst` while the presence
     /// consumers (`nullable_tuple_call_shape`) computed it under the ENCLOSING
     /// body's -- empty in a non-generic caller, so the callee's generic stayed
-    /// unbound, every slot came back `Opaque`, and `tuple_ret_shape`'s
-    /// `nullable && !splats` guard answered `None`. The callee then faithfully
+    /// unbound, every slot came back `Opaque`, and the tuple-plan guard answered
+    /// `None`. The callee then faithfully
     /// returned its `false` presence slot and the call site threw it away:
     /// `!= null` fell through to packing a `MakeTuple`, which is structurally
     /// never nil, so it const-folded to `true` and `if let` emitted no branch at
@@ -962,73 +779,12 @@ impl Builder<'_> {
     pub(crate) fn call_ret_tuple_shape(
         &self,
         e: Idx<Expr>,
-        func: FuncRef,
     ) -> Result<Option<TupleRetShape>, CompilerError> {
-        let owner = if self.concrete_plan.is_some() {
-            self.concrete_callee_for_site(e)?
-        } else {
-            self.callee_instance_for(e, func)?
-        };
-        let delivery = if self.concrete_plan.is_some() {
-            owner.as_ref().and_then(|inst| self.concrete_delivery_instance(inst))
-        } else {
-            self.call_spec_for_target(e, func)?
-        };
-        let abi = if let Some(owner) = owner {
-            self.callee_abi_plan_for_instance(&owner)?
-        } else {
-            self.callee_abi_plan(func, delivery.as_ref())
-        };
-        Ok(abi.ret_tuple().cloned())
-    }
-
-    /// [`Self::call_spec`] for the for-protocol `next` callee, whose bindings
-    /// come from bone's `next_generics` rather than a call expr. Ordered into
-    /// the callee's generic declaration order, which is what [`Vec<MonoTy>`] is.
-    pub(crate) fn next_call_spec(
-        &self,
-        func: FuncRef,
-        next_generics: &rustc_hash::FxHashMap<bone_semantic::hir::VarId, TyId>,
-        span: bone_semantic::prelude::Span,
-    ) -> Result<Option<Vec<crate::monoty::MonoTy>>, CompilerError> {
-        let Some(inf) = self.inf else { return Ok(None) };
-        let key = spec_key_from_next_generics(self.ws, inf, func, next_generics, self.subst())?;
-        let callee = &self.ws.module(func.module).functions[func.func];
-        if crate::ablation::enabled() && !callee.generics.is_empty() {
-            crate::ablation::note_examined();
-            if key.is_none() {
-                if let Some((category, detail)) = crate::lower::shape::ablation_next_decline(
-                    self.ws,
-                    inf,
-                    func,
-                    next_generics,
-                    self.subst(),
-                ) {
-                    crate::ablation::record(
-                        category,
-                        callee.name.as_str(),
-                        self.f.name.as_str(),
-                        span,
-                        detail,
-                    );
-                }
-            }
-        }
-        // A key that names NO instantiation is not a delivery record, and the
-        // producer now says so rather than handing back an empty vector for a
-        // non-generic callee. This filter was the second half of that decision
-        // and is kept as a FLOOR: filing an empty key as a `spec_bindings` entry
-        // says "this call is served by a specialized snapshot" about a callee
-        // that has none.
-        //
-        // It is not cosmetic. `reach::call_targets` SKIPS any site carrying a
-        // `spec_bindings` entry, because `spec_bound_calls` owns that edge -- so
-        // an empty-key entry removes the callee from ordinary discovery and
-        // hands it to a demand path that resolves it right back to the shared
-        // body. Lua survived that round trip; JS did not, and reported `no
-        // specialized body emitted for the `next` instantiation` about
-        // `CharsIter.next`, which is not generic at all.
-        Ok(key.filter(|k| !k.is_empty()))
+        let owner = self
+            .concrete_callee_for_site(e)?
+            .ok_or_else(|| self.gap_here("tuple-return call has no concrete callee identity"))?;
+        let abi = self.callee_abi_plan_for_instance(&owner)?;
+        Ok(abi.ret_tuple())
     }
 
     /// Lower a direct (statically-resolved) call. When the callee uses the scalar
@@ -1074,7 +830,7 @@ impl Builder<'_> {
         {
             return Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Nil))));
         }
-        let declared_ret_tuple = dc.plan.ret_tuple().cloned();
+        let declared_ret_tuple = dc.plan.ret_tuple();
         if let Some(shape) = &declared_ret_tuple {
             self.reject_nobox_opaque_tuple_return(e, func, shape)?;
         } else {
@@ -1085,35 +841,24 @@ impl Builder<'_> {
             && !callee.generics.is_empty()
             && !callee.annotations.iter().any(|a| a.name.name.as_str() == "scalar_abi");
         let ret_tuple = (!lua_opaque).then_some(declared_ret_tuple).flatten();
-        let Some(scalar_abi) = dc.plan.scalar().cloned() else {
+        if !dc.plan.uses_scalar_abi() {
             self.reject_nobox_boxed_call_args(func, arg_idxs)?;
             self.reject_column_container_opaque_slots(
                 e,
-                func,
-                self.concrete_plan.and_then(|_| dc.callee_inst.as_ref()),
+                &dc.callee_inst,
             )?;
             let args = if any_named {
-                self.reorder_named_args(e, arg_idxs, func, dc.callee_inst.as_ref())?
+                self.reorder_named_args(e, arg_idxs, func, Some(&dc.callee_inst))?
             } else {
                 arg_idxs
                     .iter()
                     .enumerate()
                     .map(|(i, &a)| {
                         let v = self.lower_expr(a)?;
-                        if self.concrete_plan.is_some() {
-                            let inst = dc
-                                .callee_inst
-                                .as_ref()
-                                .ok_or_else(|| self.gap_here("concrete call has no callee instance"))?;
-                            let t = self
-                                .concrete_callee_param_ty(e, inst, i)?
-                                .ok_or_else(|| self.gap_here("concrete call has no callee parameter type"))?;
-                            return Ok(self.coerced_mono(v, a, &t));
-                        }
-                        Ok(match self.param_ty(func, i) {
-                            Some(t) => self.coerced(v, a, t),
-                            None => v,
-                        })
+                        let t = self
+                            .concrete_callee_param_ty(e, &dc.callee_inst, i)?
+                            .ok_or_else(|| self.gap_here("concrete call has no callee parameter type"))?;
+                        Ok(self.coerced_mono(v, a, &t))
                     })
                     .collect::<Result<_, CompilerError>>()?
             };
@@ -1127,14 +872,15 @@ impl Builder<'_> {
             let call = self.emit_cur(Inst::Call { func, args });
             self.record_call(call, func, &dc)?;
             return Ok(ValueRepr::Scalar(call));
-        };
+        }
+        let param_shapes = dc.plan.param_shapes();
         let args = self.scalar_call_args(
             func,
             arg_idxs,
             any_named,
-            &scalar_abi.param_shapes,
+            &param_shapes,
         )?;
-        let ret_shape = scalar_abi.ret_shape;
+        let ret_shape = dc.plan.ret_shape();
         match ret_shape {
             Some(shape) => {
                 let n = shape.leaf_count();
@@ -1168,9 +914,9 @@ impl Builder<'_> {
     /// `dc` carries the `Iterator`-bound resolution recorded against the emitted
     /// call inst (chain roots like a directly-called bounded `next`).
     ///
-    /// A tuple return does not exempt the call from its instantiation key:
-    /// under column storage the shared generic body reads a `_data` the
-    /// instantiation does not have, so the specialized copy is the only correct
+    /// A tuple return does not exempt the call from its concrete owner:
+    /// under column storage an erased body could read a `_data` the
+    /// instantiation does not have, so the concrete plan is the only correct
     /// target.
     pub(crate) fn emit_tuple_call_tree(
         &mut self,
@@ -1202,24 +948,47 @@ impl Builder<'_> {
     /// their leaves and a value return arrives as leaves through
     /// `CallValueMulti`, matching what the lambda/nested fn on the other end
     /// emitted from the SAME type. The callee is opaque here by construction --
-    /// that is the whole point of keying on the type ([`Self::fn_value_abi`]).
-    pub(crate) fn indirect_call_by_abi(
+    /// that is the whole point of keying on the function-value representation
+    /// plan.
+    pub(crate) fn indirect_call_by_plan(
         &mut self,
-        (param_shapes, ret_shape): (Vec<RetSlot>, Option<ValueShape>),
+        plan: FunctionRepPlan,
         callee: Idx<Inst>,
         arg_idxs: &[Idx<Expr>],
     ) -> Result<ValueRepr, CompilerError> {
+        let arena = self.scx.rep_arena();
         let mut argv = Vec::new();
         for (i, &a) in arg_idxs.iter().enumerate() {
-            let slot = param_shapes.get(i).cloned().unwrap_or(RetSlot::Opaque);
+            let slot = plan
+                .params()
+                .get(i)
+                .map(|id| arena.ret_slot(*id))
+                .unwrap_or(RetSlot::Opaque);
             argv.extend(self.arg_values_for_slot(&slot, a)?);
         }
-        let Some(shape) = ret_shape else {
-            return Ok(ValueRepr::Scalar(self.emit_cur(Inst::CallValue { callee, args: argv })));
+        let Some(result) = plan.result() else {
+            let call = self.emit_cur(Inst::CallValue { callee, args: argv });
+            self.f.call_rep_plans.insert(call, plan.clone());
+            return Ok(ValueRepr::Scalar(call));
+        };
+        if let Some(shape) = arena.tuple_shape(result) {
+            let dests: Vec<Idx<Cell>> =
+                (0..shape.slot_count()).map(|_| self.f.new_cell(None)).collect();
+            let call = self.emit_cur(Inst::CallValueMulti { dests: dests.clone(), callee, args: argv });
+            self.f.call_rep_plans.insert(call, plan.clone());
+            let loads: Vec<Idx<Inst>> =
+                dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
+            return Ok(self.tuple_result(&shape, &loads));
+        }
+        let Some(shape) = arena.value_shape(result) else {
+            let call = self.emit_cur(Inst::CallValue { callee, args: argv });
+            self.f.call_rep_plans.insert(call, plan.clone());
+            return Ok(ValueRepr::Scalar(call));
         };
         let dests: Vec<Idx<Cell>> =
             (0..shape.leaf_count()).map(|_| self.f.new_cell(None)).collect();
-        self.emit_cur(Inst::CallValueMulti { dests: dests.clone(), callee, args: argv });
+        let call = self.emit_cur(Inst::CallValueMulti { dests: dests.clone(), callee, args: argv });
+        self.f.call_rep_plans.insert(call, plan);
         let leaves: Vec<Idx<Inst>> =
             dests.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
         let mut idx = 0;
@@ -1285,7 +1054,7 @@ impl Builder<'_> {
         arg_idxs: &[Idx<Expr>],
     ) -> Result<ValueRepr, CompilerError> {
         let dc = self.plan_direct_call(e, func)?;
-        let Some(abi) = dc.plan.scalar().cloned() else {
+        if !dc.plan.uses_scalar_abi() {
             let mut argv = vec![recv];
             for &a in arg_idxs {
                 argv.push(self.lower_expr(a)?);
@@ -1296,7 +1065,7 @@ impl Builder<'_> {
             // return is `(..)?` carries its presence tag in the repr, and the
             // join forwards that tag rather than minting `true` -- `a?.m()` is
             // absent when either link is.
-            return Ok(match dc.plan.ret_tuple().cloned() {
+            return Ok(match dc.plan.ret_tuple() {
                 Some(shape) => self.emit_tuple_call_tree(func, argv, &shape, &dc)?,
                 None => {
                     let call = self.emit_cur(Inst::Call { func, args: argv });
@@ -1305,11 +1074,12 @@ impl Builder<'_> {
                 }
             });
         };
+        let param_shapes = dc.plan.param_shapes();
         let mut argv = Vec::new();
         // The RECEIVER arrives already lowered, so it cannot go through
         // `arg_values_for_slot`; a tuple receiver has no UFCS spelling, so
         // `Leaves` is the only splatting slot reachable here.
-        match abi.param_shapes.first() {
+        match param_shapes.first() {
             Some(RetSlot::Leaves(shape)) => {
                 let leaves = self.cdata_leaves(recv, &shape.clone());
                 argv.extend(leaves);
@@ -1317,10 +1087,10 @@ impl Builder<'_> {
             _ => argv.push(recv),
         }
         for (i, &a) in arg_idxs.iter().enumerate() {
-            let slot = abi.param_shapes.get(i + 1).cloned().unwrap_or(RetSlot::Opaque);
+            let slot = param_shapes.get(i + 1).cloned().unwrap_or(RetSlot::Opaque);
             argv.extend(self.arg_values_for_slot(&slot, a)?);
         }
-        match abi.ret_shape.clone() {
+        match dc.plan.ret_shape() {
             Some(shape) => {
                 let n = shape.leaf_count();
                 let dests: Vec<Idx<Cell>> = (0..n).map(|_| self.f.new_cell(None)).collect();
@@ -1447,8 +1217,12 @@ impl Builder<'_> {
             }
             // A flat-enum Group `[tag, _0.., <rec>..]` packs to the `{__variant}`
             // box (`MakeEnumDyn`), the enum escape -- not a `<name>_ct` cdata.
-            ValueRepr::Group { name, parts, .. } if flat_enum_shape(self.ws, name).is_some() => {
-                let shape = flat_enum_shape(self.ws, name).unwrap();
+            ValueRepr::Group { name, parts, .. }
+                if EnumPlan::for_name(self.ws, name).is_some_and(|plan| plan.flat().is_some()) =>
+            {
+                let shape = EnumPlan::for_name(self.ws, name)
+                    .and_then(|plan| plan.flat().cloned())
+                    .expect("flat enum plan disappeared");
                 let packed: Vec<Idx<Inst>> = parts.into_iter().map(|p| self.pack(p)).collect();
                 let tag = packed[0];
                 let positional = packed[1..1 + shape.tuple_width()].to_vec();
@@ -1493,8 +1267,15 @@ impl Builder<'_> {
             // box the nullable `nobox` child under its declared name -- the
             // guarantee's violation, and the only reason this struct is
             // GC-tier at all.
-            ValueRepr::Group { name, .. } if value_struct_is_leaf_table(self.ws, name) => {
-                let shape = value_shape(self.ws, name).expect("a leaf-table struct has a shape");
+            ValueRepr::Group { name, .. }
+                if matches!(
+                    self.scx.rep_arena().nominal_value_storage(self.ws, self.scx.target, name),
+                    Some(ValueStorage::LeafTable)
+                ) =>
+            {
+                let shape = self
+                    .nominal_rep_shape(name, false)
+                    .expect("a leaf-table struct has a shape");
                 let leaves = self.repr_to_leaves(&r, &shape);
                 let fields = value_leaf_paths(&shape).into_iter().zip(leaves).collect();
                 self.emit_cur(Inst::MakeValueStruct { name, fields })
@@ -1603,15 +1384,16 @@ impl Builder<'_> {
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         let iter_ref = inst.func;
         let plan = self.callee_abi_plan_for_instance(inst)?;
-        let slot = match plan.scalar() {
-            None => RetSlot::Opaque,
-            Some(abi) => abi.param_shapes.first().cloned().ok_or_else(|| {
+        let slot = if !plan.uses_scalar_abi() {
+            RetSlot::Opaque
+        } else {
+            plan.param_shapes().first().cloned().ok_or_else(|| {
                 gap(format!(
                     "`for`-protocol iter witness `{}` has a scalar ABI with no parameters, \
                      so it cannot receive the collection",
                     self.ws.module(iter_ref.module).functions[iter_ref.func].name
                 ))
-            })?,
+            })?
         };
         Ok(self.repr_to_slot_values(repr, &slot))
     }
@@ -1701,12 +1483,25 @@ impl Builder<'_> {
         }
     }
 
+    pub(crate) fn repr_to_leaves_bundle(
+        &mut self,
+        bundle: &ValueBundle,
+        shape: &ValueShape,
+    ) -> Vec<Idx<Inst>> {
+        debug_assert_eq!(
+            self.scx.rep_arena().value_shape(bundle.representation()).as_ref(),
+            Some(shape),
+            "operational value does not conform to its RepId"
+        );
+        self.repr_to_leaves(bundle.value(), shape)
+    }
+
     /// Flatten a boxed value to its primitive leaves via chained reads (the inverse
     /// of `pack`, used when a value arrives boxed). A flat ENUM box reads its box
     /// keys (`__variant`, positional `[i+1]`, `.recfield`) in shape order; a cdata
     /// value reads its `<name>_ct` fields.
     pub(crate) fn cdata_leaves(&mut self, v: Idx<Inst>, shape: &ValueShape) -> Vec<Idx<Inst>> {
-        if let Some(es) = flat_enum_shape(self.ws, shape.name) {
+        if let Some(es) = EnumPlan::for_name(self.ws, shape.name).and_then(|plan| plan.flat().cloned()) {
             // NIL-SAFE spread: the box may be `nil` (a null nullable enum), and
             // `nil.__variant`/`nil[1]` would fault. Branch on nil -> all-nil leaves
             // (tag = nil, the null sentinel); else spread the box's keys.
@@ -1740,7 +1535,11 @@ impl Builder<'_> {
         // A leaf-table box stores one key per leaf, so the split IS the key
         // reads -- the exact inverse of the `<Name>_lct` ctor, including the
         // presence key at a nullable child's own name.
-        if value_struct_is_leaf_table(self.ws, shape.name) && !shape.nullable {
+        if matches!(
+            self.scx.rep_arena().nominal_value_storage(self.ws, self.scx.target, shape.name),
+            Some(ValueStorage::LeafTable)
+        ) && !shape.nullable
+        {
             return value_leaf_paths(shape)
                 .into_iter()
                 .map(|path| self.emit_cur(Inst::Field { base: v, field: path }))
@@ -1811,8 +1610,7 @@ impl Builder<'_> {
     /// leaf projection off the `Group` still reads its own slot at its own read
     /// point, and the unread leaves die in DCE.
     pub(crate) fn boxed_value_copy_repr(&mut self, boxed: Idx<Inst>, name: Ustr) -> ValueRepr {
-        let Some(shape) = value_shape(self.ws, name).or_else(|| value_shape_gc(self.ws, name))
-        else {
+        let Some(shape) = self.nominal_rep_shape(name, false) else {
             return ValueRepr::Scalar(boxed);
         };
         let leaves = self.cdata_leaves(boxed, &shape);
@@ -1863,7 +1661,7 @@ impl Builder<'_> {
     ) -> Result<ValueRepr, CompilerError> {
         match kind {
             ContainerKind::VecValueColumns(elem) => self.column_element_repr(arr, index, elem),
-            ContainerKind::NativeBufferValue(elem) if self.is_leaf_addressed(elem) => {
+            ContainerKind::NativeBufferValue(elem) if self.is_leaf_addressed(elem)? => {
                 self.nb_leaf_element_repr(arr, index, elem)
             }
             _ => Ok(ValueRepr::Scalar(self.emit_cur(Inst::Index {

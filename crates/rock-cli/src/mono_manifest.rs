@@ -124,12 +124,12 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     let mut direct_rec: std::collections::BTreeSet<String> = Default::default();
     let mut mutual_rec: std::collections::BTreeSet<String> = Default::default();
     let mut changing_rec: std::collections::BTreeSet<String> = Default::default();
-    let mut rec_today = 0usize;
-    let mut rec_matched = 0usize;
+    let mut rec_calls = 0usize;
+    let mut rec_matched_instances = 0usize;
     let mut rec_missing: std::collections::BTreeSet<String> = Default::default();
-    let mut rec_rejected = 0usize;
-    let mut rec_shadow_only = 0usize;
-    let mut rec_unreached = 0usize;
+    let mut rec_unresolved = 0usize;
+    let mut rec_graph_only = 0usize;
+    let mut rec_unreached_callers = 0usize;
     let mut boundary_classes: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut boundary_max: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut erased_entries: std::collections::BTreeSet<String> = Default::default();
@@ -249,12 +249,12 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
                 direct_rec.extend(p.census.direct_same_instance);
                 mutual_rec.extend(p.census.mutual_same_instance);
                 changing_rec.extend(p.census.changing_instance);
-                rec_today += p.reconciliation.today;
-                rec_matched += p.reconciliation.matched;
-                rec_rejected += p.reconciliation.rejected_sites;
-                rec_shadow_only += p.reconciliation.shadow_only;
-                rec_unreached += p.reconciliation.missing_unreached_caller;
-                rec_missing.extend(p.reconciliation.missing);
+                rec_calls += p.call_identities.calls;
+                rec_matched_instances += p.call_identities.matched_instances;
+                rec_unresolved += p.call_identities.unresolved_sites;
+                rec_graph_only += p.call_identities.graph_only;
+                rec_unreached_callers += p.call_identities.unreached_callers;
+                rec_missing.extend(p.call_identities.missing);
                 for (k, v) in &p.rejections {
                     *rejection_kinds.entry(k).or_insert(0) += v;
                 }
@@ -850,20 +850,20 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     }
     println!();
 
-    println!("## shadow vs. today's conditional specializer");
+    println!("## concrete call identities vs. instance graph");
     println!();
-    println!("- specializations the CURRENT machinery produces: **{rec_today}**");
-    println!("- ...present in the shadow graph as a complete instance: **{rec_matched}**");
-    println!("- ...MISSING from the shadow graph: **{}**", rec_missing.len());
+    println!("- complete generic call identities: **{rec_calls}**");
+    println!("- ...present in the instance graph: **{rec_matched_instances}**");
+    println!("- ...MISSING from the instance graph: **{}**", rec_missing.len());
     for m in rec_missing.iter().take(10) {
         println!("  - `{m}`");
     }
     println!(
-        "- ...absent because the shadow walk never reached the CALLING body \
-         (a reachability difference, not a missing instance): **{rec_unreached}**"
+        "- ...absent because the instance graph never reached the CALLING body \
+         (a reachability difference, not a missing instance): **{rec_unreached_callers}**"
     );
-    println!("- shadow instances with no counterpart today: **{rec_shadow_only}**");
-    println!("- call sites whose spec decision REJECTED (Stage 0b): **{rec_rejected}**");
+    println!("- graph instances with no direct-call counterpart: **{rec_graph_only}**");
+    println!("- call sites whose identity was unresolved: **{rec_unresolved}**");
     println!();
 
     println!("## foreign boundaries (shared graph)");
@@ -1420,7 +1420,7 @@ struct OneProject {
     site_join: skull::site_join::SiteJoinCensus,
     rejections: BTreeMap<&'static str, usize>,
     rejection_examples: Vec<String>,
-    reconciliation: instance_graph::Reconciliation,
+    call_identities: instance_graph::CallIdentityCensus,
     /// Boundary counts by class, for the graph's own (Lua) target.
     boundaries: BTreeMap<&'static str, usize>,
     /// Boundaries the target cannot serve -- plan S 10's `Invalid boundary`.
@@ -2028,7 +2028,7 @@ fn one_project(
         digest: instance_graph::manifest_digest(&ws, &g),
         stable,
     };
-    let rec = instance_graph::reconcile(&ws, &g);
+    let call_identities = instance_graph::reconcile_call_identities(&ws, &g);
     Ok(OneProject {
         row,
         hist: hist_of(&g),
@@ -2050,7 +2050,7 @@ fn one_project(
         span_census: g.span_census(),
         rejections,
         rejection_examples,
-        reconciliation: rec,
+        call_identities,
         boundaries,
         erased_entries: g.erased_entries.clone(),
         coroutine_helpers: g.coroutine_helpers.len(),

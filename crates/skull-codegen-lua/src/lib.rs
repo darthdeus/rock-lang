@@ -420,7 +420,17 @@ fn const_hoist_uses_are_read_only(ws: &Workspace, func: &MirFunc, cand: Idx<Inst
             Inst::MakeValueStruct { name, fields }
             | Inst::MaterializeValueStruct { name, fields } => {
                 !fields.iter().any(|(_, v)| *v == cand)
-                    || !skull_mir::lower::value_struct_is_gc(ws, *name)
+                    || !matches!(
+                        skull_mir::lower::RepArena::default().nominal_value_storage(
+                            ws,
+                            bone_semantic::hir::FnBackend::Lua,
+                            *name,
+                        ),
+                        Some(
+                            skull_mir::lower::ValueStorage::GcTable
+                                | skull_mir::lower::ValueStorage::LeafTable
+                        )
+                    )
             }
             Inst::StoreField { base, value, .. } => {
                 *value != cand
@@ -455,10 +465,10 @@ fn const_hoist_uses_are_read_only(ws: &Workspace, func: &MirFunc, cand: Idx<Inst
 /// naming primitive leaves) rather than the declared-field form.
 ///
 /// Deliberately NOT "some name contains a dot": the sequence must equal
-/// `value_leaf_paths_of` EXACTLY. The ctor is positional, so a partially or
+/// the owned representation plan EXACTLY. The ctor is positional, so a partially or
 /// wrongly flattened field list would emit silently against the wrong
 /// signature; requiring the canonical sequence turns that into a loud panic at
-/// emit instead -- the same fail-closed move `value_leaf_layout_checked` makes.
+/// emit instead -- the same fail-closed move the owned RepPlan C-layout check makes.
 fn is_leaf_form(fields: &[(ustr::Ustr, Idx<Inst>)]) -> bool {
     fields.iter().any(|(n, _)| n.contains('.'))
 }
@@ -477,7 +487,9 @@ pub fn leaf_form_violation(
     name: ustr::Ustr,
     got: &[ustr::Ustr],
 ) -> Option<CompilerError> {
-    let canonical = skull_mir::lower::value_leaf_paths_of(ws, name).unwrap_or_default();
+    let canonical = skull_mir::lower::RepArena::default()
+        .nominal_value_leaf_paths(ws, bone_semantic::hir::FnBackend::Lua, name)
+        .unwrap_or_default();
     if got == canonical {
         return None;
     }
@@ -580,7 +592,23 @@ fn collect_const_hoists(
     let mut defs = String::new();
     for (g, (name, lits, leaf_form)) in groups.iter().enumerate() {
         let gname = format!("__skull_kc_{base}_{g}");
-        let suffix = if *leaf_form { "_lct" } else if skull_mir::lower::value_struct_is_gc(ws, *name) { "_vt" } else { "_ct" };
+        let suffix = if *leaf_form {
+            "_lct"
+        } else if matches!(
+            skull_mir::lower::RepArena::default().nominal_value_storage(
+                ws,
+                bone_semantic::hir::FnBackend::Lua,
+                *name,
+            ),
+            Some(
+                skull_mir::lower::ValueStorage::GcTable
+                    | skull_mir::lower::ValueStorage::LeafTable
+            )
+        ) {
+            "_vt"
+        } else {
+            "_ct"
+        };
         let _ = write!(defs, "{gname} = {name}{suffix}(");
         for (i, l) in lits.iter().enumerate() {
             if i > 0 {
@@ -1425,11 +1453,10 @@ impl Emitter<'_> {
 
     /// Splice an `@inline inline(lua)` `Call` inline, if `id` is one. Returns
     /// true iff it spliced; else the caller emits the normal `callee(args)`.
-    /// The emitted symbol this call targets. A call the lowerer gave a
-    /// specialized instantiation (its value args splatted to leaves) targets the
-    /// SPECIALIZED copy -- the shared generic body takes `T` as one boxed slot and
-    /// could not serve those arguments. Same derivation the specialized definition
-    /// is emitted under, so the two cannot drift.
+    /// The emitted symbol this call targets. A call the lowerer gave a concrete
+    /// instance (its value args splatted to leaves) targets that instance's
+    /// definition. The same instance object drives definition and call spelling,
+    /// so the two cannot drift.
     fn callee_name(&self, id: Idx<Inst>, func: FuncRef) -> String {
         match self.func.spec_bindings.get(&id) {
             Some(inst) => inst.symbol(self.ws, self.interner),
@@ -1735,6 +1762,7 @@ impl Emitter<'_> {
                 columns,
                 len,
                 capacity,
+                ..
             } => {
                 out.push_str("{[");
                 write_lua_string(out, skull_mir::mir::VEC_COLUMN_HEADER_FIELD);
@@ -1753,6 +1781,15 @@ impl Emitter<'_> {
                     out.push_str("}, ");
                 }
                 let _ = write!(out, "len = {len}, __ty = \"Vec\"}}");
+            }
+            Inst::MakeVecColumnHeader { elem, capacity, .. } => {
+                out.push_str("{repr = ");
+                write_lua_string(out, skull_mir::mir::VEC_COLUMN_REPR);
+                out.push_str(", elem = ");
+                write_lua_string(out, elem.as_str());
+                out.push_str(", cap = ");
+                self.write_opnd(out, *capacity);
+                out.push('}');
             }
             Inst::MakeStruct { ty, fields } => {
                 out.push('{');
@@ -1787,11 +1824,28 @@ impl Emitter<'_> {
                 // leaves contributes one leaf keyed on the field's own name, so
                 // the leaf sequence is textually identical to the declared field
                 // list and no operand-shape test can tell them apart.
-                let suffix = if skull_mir::lower::value_struct_is_leaf_table(self.ws, *name) {
+                let suffix = if matches!(
+                    skull_mir::lower::RepArena::default().nominal_value_storage(
+                        self.ws,
+                        bone_semantic::hir::FnBackend::Lua,
+                        *name,
+                    ),
+                    Some(skull_mir::lower::ValueStorage::LeafTable)
+                ) {
                     "_lct"
                 } else if is_leaf_form(fields) {
                     "_lct"
-                } else if skull_mir::lower::value_struct_is_gc(self.ws, *name) {
+                } else if matches!(
+                    skull_mir::lower::RepArena::default().nominal_value_storage(
+                        self.ws,
+                        bone_semantic::hir::FnBackend::Lua,
+                        *name,
+                    ),
+                    Some(
+                        skull_mir::lower::ValueStorage::GcTable
+                            | skull_mir::lower::ValueStorage::LeafTable
+                    )
+                ) {
                     "_vt"
                 } else {
                     "_ct"

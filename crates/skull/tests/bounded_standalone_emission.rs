@@ -240,7 +240,7 @@ fn main() {
     let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(graph.interner().clone());
     let mut intact = skull_mir::lower::lower_instance_with_plans(&ws, &scx, plan, &bodies.plans)
         .expect("intact bounded body did not lower");
-    skull_transform::bound::resolve_standalone_bound_calls_with_plans(
+    skull_transform::bound::resolve_standalone_bound_calls(
         &ws,
         &scx,
         graph.interner(),
@@ -279,7 +279,7 @@ fn main() {
         &poisoned_plans,
     )
     .expect("plan mutation made the bounded body fail before rewrite");
-    skull_transform::bound::resolve_standalone_bound_calls_with_plans(
+    skull_transform::bound::resolve_standalone_bound_calls(
         &ws,
         &scx,
         graph.interner(),

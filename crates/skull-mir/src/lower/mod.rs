@@ -71,7 +71,12 @@ pub use shape::*;
 /// is private to it, so a definition and the call that targets it cannot reach
 /// it from two places.
 mod abi;
-pub use abi::{requires_concrete_body_plan, BackendFnAbiPlan};
+pub use abi::{
+    boundary_requires_boxed_representation, declared_boundary_class, requires_concrete_body_plan,
+    BackendFnAbiPlan, BoundaryClass, FunctionRepPlan, GlobalPlan, RepArena, RepError, RepId,
+    RepLayout,
+    RepGuarantees, RepPlan, RepUse, RepUseFacts,
+};
 
 mod coroutine;
 pub use coroutine::CoroutinePlan;
@@ -81,6 +86,8 @@ pub use coroutine::CoroutinePlan;
 /// crate, and a child sees this module's private items, so nothing needed
 /// widening to make the split.
 mod call;
+mod container;
+pub use container::{ContainerFamily, ContainerPlan, ContainerStorage, PlaceBundle};
 mod control;
 mod dispatch;
 pub use dispatch::{
@@ -239,6 +246,10 @@ pub struct ScalarCtx {
     /// `MonoTyId`s dangling, and copying it would be the second identity this
     /// stage exists to remove. [`ScalarCtx::sharing`] is how the two are joined.
     interner: std::sync::Arc<crate::monoty::MonoInterner>,
+    /// The build's one physical representation arena. It follows this context
+    /// so target-specific ABI identities survive from body entry through calls
+    /// and publishers.
+    rep_arena: std::sync::Arc<abi::RepArena>,
 }
 
 /// The fn-names a single body references by value (`Expr::Global(name)` whose
@@ -283,6 +294,7 @@ impl ScalarCtx {
             values_first_class: false,
             target: bone_semantic::hir::FnBackend::Lua,
             interner: std::sync::Arc::new(crate::monoty::MonoInterner::new()),
+            rep_arena: std::sync::Arc::new(abi::RepArena::default()),
         }
     }
 
@@ -310,6 +322,10 @@ impl ScalarCtx {
     /// later -- an `InstanceGraph` built on demand rather than up front.
     pub fn interner_handle(&self) -> std::sync::Arc<crate::monoty::MonoInterner> {
         std::sync::Arc::clone(&self.interner)
+    }
+
+    pub(crate) fn rep_arena(&self) -> std::sync::Arc<abi::RepArena> {
+        std::sync::Arc::clone(&self.rep_arena)
     }
 
     /// Set the codegen backend this lowering feeds (see [`target`]).
@@ -387,14 +403,20 @@ struct NestedFn {
     /// Declared param names, so a call site can place named args into slots
     /// (`slotted_call_args`) exactly as a top-level callee's would be.
     param_names: Vec<Ustr>,
-    /// Per-param wire slot; all-`Opaque` when the fn keeps the boxed ABI.
-    param_shapes: Vec<RetSlot>,
-    ret_shape: Option<ValueShape>,
+    representation: FunctionRepPlan,
 }
 
 impl NestedFn {
     fn uses_scalar_abi(&self) -> bool {
-        self.ret_shape.is_some() || self.param_shapes.iter().any(RetSlot::splats)
+        self.representation.uses_scalar_abi()
+    }
+
+    pub(crate) fn param_slots(&self, arena: &RepArena) -> Vec<RetSlot> {
+        self.representation.params().iter().map(|id| arena.ret_slot(*id)).collect()
+    }
+
+    pub(crate) fn result_shape(&self, arena: &RepArena) -> Option<ValueShape> {
+        self.representation.result().and_then(|id| arena.value_shape(id))
     }
 }
 
@@ -433,7 +455,7 @@ pub fn scalar_abi_param_collisions(
     if f.inline_body.is_none() {
         return Vec::new();
     }
-    let plan = BackendFnAbiPlan::for_declaration(ws, scx, fref);
+    let plan = BackendFnAbiPlan::for_boundary_declaration(ws, scx, fref);
     let Some(names) = plan.lua_param_names(ws) else {
         return Vec::new();
     };
@@ -475,13 +497,14 @@ pub fn scalar_abi_param_collisions(
 /// plan the names come from -- a second plan here would be free to describe a
 /// different parameter list than the one being checked.
 fn scalar_abi_param_origins(ws: &Workspace, plan: &BackendFnAbiPlan) -> Vec<String> {
-    let Some(shapes) = plan.param_leaf_shapes() else {
+    if !plan.uses_scalar_abi() {
         return Vec::new();
-    };
+    }
+    let shapes = plan.param_shapes();
     let decl = plan.decl();
     let f = &ws.module(decl.module).functions[decl.func];
     let mut out = Vec::new();
-    for (pd, slot) in f.param_decls.iter().zip(shapes) {
+    for (pd, slot) in f.param_decls.iter().zip(shapes.iter()) {
         slot_param_origins(pd.name.as_str(), slot, &mut out);
     }
     out
@@ -1000,15 +1023,6 @@ fn hash_init_stmt(body: &Body, s: Idx<Statement>, h: &mut std::collections::hash
     }
 }
 
-pub fn lower_function_source(
-    ws: &Workspace,
-    scx: &ScalarCtx,
-    mid: ModuleId,
-    fid: Idx<Function>,
-) -> Result<MirFunc, CompilerError> {
-    lower_instance_source(ws, scx, &crate::instance::Instance::base(FuncRef { module: mid, func: fid }))
-}
-
 pub fn lower_function_with_plans(
     ws: &Workspace,
     scx: &ScalarCtx,
@@ -1016,32 +1030,6 @@ pub fn lower_function_with_plans(
     concrete_plans: &ConcretePlans,
 ) -> Result<MirFunc, CompilerError> {
     lower_instance_with_plans(ws, scx, plan, concrete_plans)
-}
-
-/// **Lower the definition emission writes for `inst`.**
-///
-/// The body as if hand-written for that instantiation
-/// (`docs/flatvec-plan.md`): value params explode field-wise, `buf[i]=v`
-/// scalarizes, `native_buffer_alloc<T>` resolves its ctype. A non-generic
-/// instance substitutes nothing, which is the declaration's own body.
-///
-/// The instance's arguments are ids into `scx`'s arena, so this is only correct
-/// where the caller minted them through the same [`ScalarCtx`] -- which is what
-/// makes there being ONE arena a soundness property rather than a tidiness one.
-pub fn lower_instance_source(
-    ws: &Workspace,
-    scx: &ScalarCtx,
-    inst: &crate::instance::Instance,
-) -> Result<MirFunc, CompilerError> {
-    lower_body(
-        ws,
-        scx,
-        inst.func,
-        inst.clone(),
-        Some(inst.subst(ws, scx.interner())),
-        None,
-        None,
-    )
 }
 
 /// Lower an ordinary function while resolving every concrete callee ABI from
@@ -1053,14 +1041,14 @@ pub fn lower_instance_with_plans(
     plan: &ConcreteBodyPlan,
     concrete_plans: &ConcretePlans,
 ) -> Result<MirFunc, CompilerError> {
-    lower_instance_with_plan_inner(ws, scx, plan, Some(concrete_plans))
+    lower_instance_with_plan_inner(ws, scx, plan, concrete_plans)
 }
 
 fn lower_instance_with_plan_inner(
     ws: &Workspace,
     scx: &ScalarCtx,
     plan: &ConcreteBodyPlan,
-    concrete_plans: Option<&ConcretePlans>,
+    concrete_plans: &ConcretePlans,
 ) -> Result<MirFunc, CompilerError> {
     let inst = plan
         .function_instance()
@@ -1116,10 +1104,8 @@ fn lower_instance_with_plan_inner(
             )));
         }
     }
-    if let Some(concrete_plans) = concrete_plans {
-        validate_concrete_callee_plans(ws, scx, plan, concrete_plans)?;
-    }
-    lower_body(ws, scx, inst.func, inst.clone(), None, Some(plan), concrete_plans)
+    validate_concrete_callee_plans(ws, scx, plan, concrete_plans)?;
+    lower_body(ws, scx, inst.func, inst.clone(), plan, concrete_plans)
 }
 
 fn lower_body(
@@ -1127,9 +1113,8 @@ fn lower_body(
     scx: &ScalarCtx,
     self_ref: FuncRef,
     subject: crate::instance::Instance,
-    legacy_subst: Option<SpecSubst>,
-    concrete_plan: Option<&ConcreteBodyPlan>,
-    concrete_plans: Option<&ConcretePlans>,
+    concrete_plan: &ConcreteBodyPlan,
+    concrete_plans: &ConcretePlans,
 ) -> Result<MirFunc, CompilerError> {
     let (mid, fid) = (self_ref.module, self_ref.func);
     let module = ws.module(mid);
@@ -1156,32 +1141,18 @@ fn lower_body(
     f.resume_arg = resume_arg;
     let cur = f.entry();
     // Scalar value ABI: when this fn participates, each value param expands to
-    // leaf cells and a value return becomes a multi-value `Return`. A specialized
-    // instantiation additionally treats a generic param/return bound to a value
-    // leaf as that value (`sig_value_shape_spec`), so it joins the scalar ABI.
-    // This body's own ABI, from the one plan the calls that target it read.
-    let abi = concrete_plan
-        .map(|plan| BackendFnAbiPlan::for_concrete_plan(ws, scx, plan))
-        .unwrap_or_else(|| {
-            BackendFnAbiPlan::for_instance_with_subst(
-                ws,
-                scx,
-                &subject,
-                legacy_subst
-                    .as_ref()
-                    .expect("legacy lowering needs its source substitution"),
-            )
-        });
-    let param_shapes = abi.param_shapes();
-    let ret_shape = abi.ret_shape().cloned();
-    let ret_tuple = abi.ret_tuple().cloned();
+    // leaf cells and a value return becomes a multi-value `Return`. This body's
+    // own ABI comes from the one plan the calls that target it read.
+    let abi = BackendFnAbiPlan::for_concrete_plan(ws, scx, concrete_plan);
+    f.abi_plan = Some(abi.clone());
+    let param_reps = abi.representation().params().to_vec();
+    let ret_rep = abi.representation().result();
     let mut b = Builder {
         ws,
         scx,
         concrete_plan,
         concrete_plans,
-        concrete_type_cache: concrete_plan.map(|_| RefCell::new(rustc_hash::FxHashMap::default())),
-        legacy_subst,
+        concrete_type_cache: RefCell::new(rustc_hash::FxHashMap::default()),
         generic_bounds: &func.generic_bounds,
         body,
         inf,
@@ -1195,10 +1166,8 @@ fn lower_body(
         resume_arg,
         // A coroutine body emits via `emit_coroutine` before `inline_functions`
         // runs, so it is never spliced -- box value args (see field docs).
-        param_shapes,
-        ret_shape,
-        ret_tuple,
-        ret_ty: func.return_ty,
+        param_reps,
+        ret_rep,
         fn_name_span: Some(func.name_span),
         cur_span: None,
         cur_expr: None,
@@ -1276,10 +1245,9 @@ fn lower_global_inner(
     let mut b = Builder {
         ws,
         scx,
-        concrete_plan: Some(concrete_plan),
-        concrete_plans: Some(concrete_plans),
-        concrete_type_cache: Some(RefCell::new(rustc_hash::FxHashMap::default())),
-        legacy_subst: None,
+        concrete_plan,
+        concrete_plans,
+        concrete_type_cache: RefCell::new(rustc_hash::FxHashMap::default()),
         generic_bounds: &[],
         body,
         inf,
@@ -1292,10 +1260,8 @@ fn lower_global_inner(
         in_defer_body: false,
         resume_arg: None,
         // Global-init bodies never run `inline_functions` -- box value args.
-        param_shapes: Vec::new(),
-        ret_shape: None,
-        ret_tuple: None,
-        ret_ty: None,
+        param_reps: Vec::new(),
+        ret_rep: None,
         fn_name_span: None,
         cur_span: None,
         cur_expr: None,
@@ -1311,13 +1277,21 @@ fn lower_global_inner(
         nested_fn_counters: HashMap::new(),
         presence_only: None,
     };
+    let global_plan = GlobalPlan::for_concrete_result(
+        ws,
+        scx,
+        concrete_plan.signature.result.map(|id| b.concrete_mono(id)),
+    )
+    .map_err(|error| match error.span.or(b.cur_span) {
+        Some(span) => CompilerError::new_with_label(span, error.message),
+        None => CompilerError::new_no_location(error.message),
+    })?;
+    b.f.global_plan = Some(global_plan);
     // A `nobox` global is category-2 storage: its concrete plan owns the layout,
     // so the initializer RETURNS leaves and `mir_emit` binds one Lua global per
     // leaf. Without this the body packs a box the verifier then rejects.
-    b.ret_shape = (!scx.values_first_class)
-        .then(|| concrete_plan.signature.result)
-        .flatten()
-        .and_then(|id| mono_nobox_value_shape(ws, &b.concrete_mono(id)));
+    b.ret_rep = (!scx.values_first_class)
+        .then(|| b.f.global_plan.as_ref().expect("global plan").representation());
     b.lower_root()?;
     Ok(Some(b.f))
 }
@@ -1578,10 +1552,9 @@ fn lower_decorator_inner(
     let mut b = Builder {
         ws,
         scx,
-        concrete_plan: Some(concrete_plan),
-        concrete_plans: Some(concrete_plans),
-        concrete_type_cache: Some(RefCell::new(rustc_hash::FxHashMap::default())),
-        legacy_subst: None,
+        concrete_plan,
+        concrete_plans,
+        concrete_type_cache: RefCell::new(rustc_hash::FxHashMap::default()),
         generic_bounds: &[],
         body,
         inf,
@@ -1594,10 +1567,8 @@ fn lower_decorator_inner(
         in_defer_body: false,
         resume_arg: None,
         // Decorator bodies never run `inline_functions` -- box value args.
-        param_shapes: Vec::new(),
-        ret_shape: None,
-        ret_tuple: None,
-        ret_ty: None,
+        param_reps: Vec::new(),
+        ret_rep: None,
         fn_name_span: None,
         cur_span: None,
         cur_expr: None,
@@ -1626,14 +1597,9 @@ fn lower_decorator_inner(
 struct Builder<'a> {
     ws: &'a Workspace,
     scx: &'a ScalarCtx,
-    concrete_plan: Option<&'a ConcreteBodyPlan>,
-    concrete_plans: Option<&'a ConcretePlans>,
-    concrete_type_cache: Option<ConcreteTypeCache>,
-    /// Legacy source substitution, absent for every concrete-plan builder.
-    /// Struct-default lowering temporarily replaces this one value with the
-    /// defaults body's slot substitution; concrete builders keep it absent and
-    /// read their foreign-domain tables instead.
-    legacy_subst: Option<SpecSubst>,
+    concrete_plan: &'a ConcreteBodyPlan,
+    concrete_plans: &'a ConcretePlans,
+    concrete_type_cache: ConcreteTypeCache,
     /// The enclosing fn's `generic_bounds`, parallel to its `generics`:
     /// `Some(elem)` where a generic is declared `I: Iterator<elem>`. THE declared
     /// source for a placeholder `next`'s element shape -- the call's inferred
@@ -1672,19 +1638,12 @@ struct Builder<'a> {
     /// body -- an unspliced residual would call the SHARED generic body (`T` = one
     /// boxed slot) with splatted args and drop every leaf but the first. Boxing
     /// the value arg matches the shared body exactly.
-    /// Per-param scalarized shape: `Some` for a value param expanded to leaf
-    /// cells (parallel to `body.param_bindings`). Empty when the fn doesn't use
-    /// the scalar ABI (globals, decorators, non-value fns).
-    param_shapes: Vec<RetSlot>,
-    /// `Some` when the fn returns a value struct via the scalar ABI (N leaves).
-    ret_shape: Option<ValueShape>,
-    /// `Some` when the fn's return type is a tuple -- it returns its slots as
-    /// separate values (multi-return ABI), not one heap table. Set for named
-    /// fns; lambdas decide per-body at their own return site.
-    ret_tuple: Option<TupleRetShape>,
-    /// The fn's declared return type -- the expected type at a scalar `return`
-    /// sink (int->float subsumption coercion, see [`Builder::coerced`]).
-    ret_ty: Option<TyId>,
+    /// Per-param physical representation identity, parallel to
+    /// `body.param_bindings`. Shape structs are projected only at the
+    /// flatten/rebuild seams; this is the body-owned ABI answer.
+    param_reps: Vec<RepId>,
+    /// The body's physical result representation identity, if it has one.
+    ret_rep: Option<RepId>,
     /// The fn's name span, for spanned emit-time rejections that have no better
     /// anchor (the non-unit-coroutine fall-off check). `None` for non-fn bodies.
     fn_name_span: Option<Span>,
@@ -1763,6 +1722,26 @@ struct Builder<'a> {
 }
 
 impl Builder<'_> {
+    fn rep_slot(&self, id: RepId) -> RetSlot {
+        self.scx.rep_arena().ret_slot(id)
+    }
+
+    fn param_slot(&self, index: usize) -> RetSlot {
+        self.param_reps
+            .get(index)
+            .copied()
+            .map(|id| self.rep_slot(id))
+            .unwrap_or(RetSlot::Opaque)
+    }
+
+    fn result_shape(&self) -> Option<ValueShape> {
+        self.ret_rep.and_then(|id| self.scx.rep_arena().value_shape(id))
+    }
+
+    fn result_tuple(&self) -> Option<TupleRetShape> {
+        self.ret_rep.and_then(|id| self.scx.rep_arena().tuple_shape(id))
+    }
+
     /// [`gap`] anchored at the construct currently being lowered. Use wherever a
     /// gap names a user-visible type or expression -- an unspanned one leaves the
     /// reader with a whole project to search.
@@ -1831,21 +1810,8 @@ impl Builder<'_> {
     /// predicate below is a delegate: `DispatchCtx` is the one implementation,
     /// so the instance walk asking the same question cannot get a second answer
     /// (`skull_mir::lower::dispatch`).
-    /// The substitution in force: the struct-default override when one is
-    /// installed, else this instance's own.
-    ///
-    /// One oracle, because the two are keyed in DIFFERENT bodies -- see
-    /// Every source-shaped reader goes through this legacy-only adapter.
-    pub(crate) fn subst(&self) -> &SpecSubst {
-        self.legacy_subst
-            .as_ref()
-            .expect("concrete lowering attempted to read a source substitution")
-    }
-
     pub(crate) fn concrete_mono(&self, id: MonoTyId) -> MonoTy {
-        let Some(cache) = &self.concrete_type_cache else {
-            return self.scx.interner().get(id);
-        };
+        let cache = &self.concrete_type_cache;
         if let Some(ty) = cache.borrow().get(&id).cloned() {
             return ty;
         }
@@ -1859,13 +1825,13 @@ impl Builder<'_> {
             ws: self.ws,
             inf: self.inf,
             body: self.body,
-            concrete_plan: self.concrete_plan,
-            concrete_types: self
-                .concrete_plan
-                .and_then(|plan| plan.domain_types(&self.cur_domain)),
-            concrete_type_cache: self.concrete_type_cache.as_ref(),
+            concrete_plan: Some(self.concrete_plan),
+            concrete_types: self.concrete_plan.domain_types(&self.cur_domain),
+            concrete_type_cache: Some(&self.concrete_type_cache),
             interner: Some(self.scx.interner()),
-            legacy_subst: self.legacy_subst.as_ref(),
+            rep_arena: self.scx.rep_arena.as_ref(),
+            target: self.scx.target,
+            logical_subst: None,
             values_first_class: self.scx.values_first_class,
         }
     }
@@ -1930,7 +1896,7 @@ impl Builder<'_> {
         let pbs: Vec<Idx<BindingInfo>> = self.body.param_bindings.into_iter().collect();
         for (i, pb) in pbs.iter().enumerate() {
             let name = self.body.binding_arena[*pb].name;
-            let slot = self.param_shapes.get(i).cloned().unwrap_or(RetSlot::Opaque);
+            let slot = self.param_slot(i);
             self.bind_param_slot(*pb, name, &slot);
         }
     }
@@ -2067,43 +2033,24 @@ impl Builder<'_> {
     /// instantiations are still checked by bone) all stay admitted. Called only
     /// when the body's end is reachable, so `while true` bodies never trip it.
     fn reject_nonunit_coroutine_falloff(&self) -> Result<(), CompilerError> {
-        let nonunit_concrete = if let Some(plan) = self.concrete_plan {
-            let Some(result_id) = plan.signature.result else { return Ok(()) };
-            let result = self.concrete_mono(result_id);
-            let crate::monoty::MonoTy::App {
-                ctor: crate::monoty::MonoCtor::Nominal(name),
-                params,
-            } = result
-            else {
-                return Ok(())
-            };
-            if name.as_str() != "Coroutine" {
-                return Ok(())
-            }
-            let Some(result) = params.get(1) else { return Ok(()) };
-            match result {
-                crate::monoty::MonoTy::Unit | crate::monoty::MonoTy::Nullable(_) => false,
-                crate::monoty::MonoTy::Tuple(parts) => !parts.is_empty(),
-                _ => true,
-            }
-        } else {
-            let Some(ret) = self.ret_ty else { return Ok(()) };
-            let Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), params }) = static_ty(self.ws, ret)
-            else {
-                return Ok(())
-            };
-            if n.as_str() != "Coroutine" {
-                return Ok(())
-            }
-            let TyId::Static(m, _) = ret else { return Ok(()) };
-            let Some(r_idx) = params.into_iter().nth(1) else { return Ok(()) };
-            match self.ws.module(m).ty_arena[r_idx] {
-                TypeExpr::Builtin(BuiltinTy::Unit | BuiltinTy::Error) => false,
-                TypeExpr::Tuple { elements } if elements.into_iter().count() == 0 => false,
-                TypeExpr::Nullable(_) => false,
-                TypeExpr::Generic(..) | TypeExpr::Infer(..) => false,
-                _ => true,
-            }
+        let plan = self.concrete_plan;
+        let Some(result_id) = plan.signature.result else { return Ok(()) };
+        let result = self.concrete_mono(result_id);
+        let crate::monoty::MonoTy::App {
+            ctor: crate::monoty::MonoCtor::Nominal(name),
+            params,
+        } = result
+        else {
+            return Ok(())
+        };
+        if name.as_str() != "Coroutine" {
+            return Ok(())
+        }
+        let Some(result) = params.get(1) else { return Ok(()) };
+        let nonunit_concrete = match result {
+            crate::monoty::MonoTy::Unit | crate::monoty::MonoTy::Nullable(_) => false,
+            crate::monoty::MonoTy::Tuple(parts) => !parts.is_empty(),
+            _ => true,
         };
         if nonunit_concrete {
             let msg = format!(
@@ -2125,11 +2072,22 @@ impl Builder<'_> {
     /// single (boxed) value, or empty for a bare return.
     fn return_leaves(&mut self, opt: Option<Idx<Expr>>) -> Result<Vec<Idx<Inst>>, CompilerError> {
         let Some(e) = opt else { return Ok(vec![]) };
-        if let Some(shape) = self.ret_shape.clone() {
-            let r = self.lower_expr_repr(e)?;
-            return Ok(self.repr_to_leaves(&r, &shape));
+        if self
+            .concrete_plan
+            .signature
+            .result
+            .is_some_and(|id| matches!(self.concrete_mono(id), crate::monoty::MonoTy::Unit))
+        {
+            self.lower_expr(e)?;
+            return Ok(vec![]);
         }
-        if let Some(shape) = self.ret_tuple.clone() {
+        if let Some(shape) = self.result_shape() {
+            let r = self.lower_expr_repr(e)?;
+            let rep = self.ret_rep.expect("result_shape requires an owned result RepId");
+            let bundle = ValueBundle::new(rep, r);
+            return Ok(self.repr_to_leaves_bundle(&bundle, &shape));
+        }
+        if let Some(shape) = self.result_tuple() {
             if shape.nullable {
                 return self.nullable_tuple_return_slots(e, &shape);
             }
@@ -2141,19 +2099,12 @@ impl Builder<'_> {
             return Ok(self.tuple_return_operands(v, shape.slots.len()));
         }
         let v = self.lower_expr(e)?;
-        let v = if let Some(plan) = self.concrete_plan {
-            match plan.signature.result {
-                Some(result) => {
-                    let result = self.concrete_mono(result);
-                    self.coerced_mono(v, e, &result)
-                }
-                None => v,
+        let v = match self.concrete_plan.signature.result {
+            Some(result) => {
+                let result = self.concrete_mono(result);
+                self.coerced_mono(v, e, &result)
             }
-        } else {
-            match self.ret_ty {
-                Some(rt) => self.coerced(v, e, rt),
-                None => v,
-            }
+            None => v,
         };
         Ok(vec![v])
     }
@@ -2485,380 +2436,16 @@ pub fn map_key_rejection(ws: &Workspace, mid: ModuleId) -> Option<(String, Span)
 /// position. Not a legal C boundary type: no `ffi.cdef` typedef exists, so
 /// `ffi.new`/`sizeof`/`ffi.istype`/the extern ABI cannot name it.
 fn nominal_is_gc_value(ws: &Workspace, name: Ustr) -> bool {
-    map_is_value_struct(ws, name) && value_struct_is_gc(ws, name)
-}
-
-/// When `ty` resolves to `NativeBuffer<E>` with `E` a GC-carrying value struct,
-/// returns E's name -- `ffi.new("E[?]")` would name a non-existent ctype.
-fn native_buffer_gc_elem(ws: &Workspace, inf: &BodyInference, ty: TyId) -> Option<Ustr> {
-    let ty = resolve_tyid(ws, inf, ty)?;
-    let TypeExpr::App { ctor: TypeCtor::Nominal(nb), params } = ty_node(ws, inf, ty)? else {
-        return None;
-    };
-    if nb.as_str() != "NativeBuffer" {
-        return None;
-    }
-    let elem = resolve_tyid(ws, inf, ty.with_idx(params.into_iter().next()?))?;
-    match ty_node(ws, inf, elem)? {
-        TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } if nominal_is_gc_value(ws, name) => {
-            Some(name)
-        }
-        _ => None,
-    }
-}
-
-/// The C-array element type name for a `native_buffer_alloc<T>` call whose
-/// result type `ret` is `NativeBuffer<T>`. `Ok` is an FFI-clean value struct's
-/// cdef name, or `int`/`float`/`bool`. `Err(reason)` when `T` is a GC-carrying
-/// value struct, an unresolved generic (opaque `T`), or any non-C-array type --
-/// the intrinsic can only emit `ffi.new("<ctype>[?]")` when the concrete element
-/// is known at the call site. The single source for both the lowering
-/// interception and the hard emit-time [`native_buffer_alloc_reject`] pass.
-fn native_buffer_alloc_elem_ctype(
-    ws: &Workspace,
-    inf: &BodyInference,
-    ret: TyId,
-) -> Result<Ustr, String> {
-    let ret = resolve_tyid(ws, inf, ret)
-        .ok_or_else(|| "`native_buffer_alloc` result type could not be resolved".to_string())?;
-    let TypeExpr::App { ctor: TypeCtor::Nominal(nb), params } = ty_node(ws, inf, ret)
-        .ok_or_else(|| "`native_buffer_alloc` result is not a `NativeBuffer<T>`".to_string())?
-    else {
-        return Err("`native_buffer_alloc` must produce a `NativeBuffer<T>`".to_string());
-    };
-    if nb.as_str() != "NativeBuffer" {
-        return Err(format!("`native_buffer_alloc` result is `{nb}`, expected `NativeBuffer<T>`"));
-    }
-    let elem = params
-        .into_iter()
-        .next()
-        .and_then(|p| resolve_tyid(ws, inf, ret.with_idx(p)))
-        .ok_or_else(|| "`NativeBuffer` element type is missing".to_string())?;
-    match ty_node(ws, inf, elem) {
-        Some(TypeExpr::Builtin(BuiltinTy::Int)) => Ok(Ustr::from("int")),
-        Some(TypeExpr::Builtin(BuiltinTy::Uint)) => Ok(Ustr::from("uint32_t")),
-        Some(TypeExpr::Builtin(BuiltinTy::Float)) => Ok(Ustr::from("float")),
-        Some(TypeExpr::Builtin(BuiltinTy::Bool)) => Ok(Ustr::from("bool")),
-        Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) if map_is_value_struct(ws, name) => {
-            if value_struct_is_gc(ws, name) {
-                Err(format!(
-                    "`native_buffer_alloc<{name}>` is invalid: `{name}` is a GC-carrying `value` \
-                     struct (immutable Lua table) with no C layout, so `ffi.new(\"{name}[?]\")` \
-                     names no ctype. Only FFI-clean value structs (C-mappable fields) and \
-                     `int`/`float`/`bool` are allocatable."
-                ))
-            } else {
-                Ok(name)
-            }
-        }
-        Some(TypeExpr::Generic(..)) | Some(TypeExpr::Infer(..)) => Err(
-            "`native_buffer_alloc<T>` needs a concrete element type here, but `T` is an \
-             unresolved generic. skull emits generic bodies once with `T` opaque, so it cannot \
-             name the ffi ctype -- call it where the element type is concrete (a per-type \
-             wrapper fn), not inside a generic body."
-                .to_string(),
-        ),
-        _ => Err(
-            "`native_buffer_alloc<T>` requires `T` to be an FFI-clean `value` struct or \
-             `int`/`float`/`bool` -- a heap struct / non-C-array type has no flat layout."
-                .to_string(),
-        ),
-    }
-}
-
-/// Whether a `NativeBuffer<E>` result type's element `E` is an unresolved generic
-/// param (in `inf`) -- the opaque-`T` case that call-site specialization resolves,
-/// distinct from a concrete-but-unallocatable element (heap / GC value struct).
-fn native_buffer_elem_is_generic(ws: &Workspace, inf: &BodyInference, ret: TyId) -> bool {
-    let Some(ret) = resolve_tyid(ws, inf, ret) else { return false };
-    let Some(TypeExpr::App { ctor: TypeCtor::Nominal(nb), params }) = ty_node(ws, inf, ret) else {
-        return false;
-    };
-    if nb.as_str() != "NativeBuffer" {
-        return false;
-    }
-    let Some(elem) = params.into_iter().next().map(|p| ret.with_idx(p)) else {
-        return false;
-    };
-    // Peel Infer chains but NOT a Generic -- a Generic is the opaque case.
-    let Some(elem) = resolve_tyid(ws, inf, elem) else { return false };
-    matches!(ty_node(ws, inf, elem), Some(TypeExpr::Generic(..)))
-}
-
-/// The verdict of scanning every workspace call to an intrinsic-bearing generic
-/// `F`: whether its standalone (opaque-`T`) body is reachable un-specialized.
-/// If `fref` is a generic fn whose body DIRECTLY calls `native_buffer_alloc<T>`
-/// with an opaque-generic element (the FlatVec-storage shape), return that call's
-/// `NativeBuffer<T>` result type (in `fref`'s own inference) so a call site can
-/// check its specialization resolves the element ctype. `None` otherwise.
-fn fn_opaque_intrinsic_ret(ws: &Workspace, fref: FuncRef) -> Option<TyId> {
-    let f = &ws.module(fref.module).functions[fref.func];
-    if f.generics.is_empty() || f.inline_body.is_some() {
-        return None;
-    }
-    let body = ws.module(fref.module).bodies.get(&BodyOwner::Function(fref.func))?;
-    let inf = ws.inference(fref.module)?.per_fn.get(&BodyOwner::Function(fref.func))?;
-    for (e, expr) in body.expr_arena.iter() {
-        let Expr::Call { callee: Callee::Unresolved { name, .. }, .. } = expr else {
-            continue;
-        };
-        if name.as_str() != "native_buffer_alloc" {
-            continue;
-        }
-        if let Some(&ret) = inf.expr_types.get(e) {
-            if native_buffer_elem_is_generic(ws, inf, ret) {
-                return Some(ret);
-            }
-        }
-    }
-    None
-}
-
-/// Whether calls to `fref` can reach an opaque-`T` `native_buffer_alloc`
-/// whose element depends on `fref`'s own instantiation: directly
-/// ([`fn_opaque_intrinsic_ret`]) or TRANSITIVELY through a nested generic
-/// call whose bindings do not all reify to concrete leaves (i.e. the nested
-/// call passes `fref`'s generics through -- `push` -> `grow` -> intrinsic).
-/// A nested call whose every binding reifies concrete specializes at any
-/// lowering of this body and is not a pass-through. Cycle-safe; conservative
-/// (does not track WHICH generic flows to the intrinsic).
-fn fn_opaque_intrinsic_transitive(
-    ws: &Workspace,
-    fref: FuncRef,
-    seen: &mut HashSet<FuncRef>,
-) -> bool {
-    if !seen.insert(fref) {
-        return false;
-    }
-    if fn_opaque_intrinsic_ret(ws, fref).is_some() {
-        return true;
-    }
-    let f = &ws.module(fref.module).functions[fref.func];
-    if f.generics.is_empty() || f.inline_body.is_some() {
-        return false;
-    }
-    let Some(inf) = ws
-        .inference(fref.module)
-        .and_then(|ir| ir.per_fn.get(&BodyOwner::Function(fref.func)))
-    else {
-        return false;
-    };
-    for (c, resolved) in inf.resolved_overload_calls.iter() {
-        let callee = FuncRef { module: resolved.0, func: resolved.1 };
-        let Some(bindings) = inf.call_generic_bindings.get(c) else { continue };
-        let empty = SpecSubst::default();
-        if bindings.iter().all(|&b| reify_type(ws, inf, b, &empty).is_some()) {
-            continue;
-        }
-        if fn_opaque_intrinsic_transitive(ws, callee, seen) {
-            return true;
-        }
-    }
-    false
-}
-
-/// [`native_buffer_alloc_elem_ctype`] under a specialization `subst`: a
-/// `NativeBuffer<T>` element that is a generic bound in `subst` resolves to its
-/// concrete type's ctype (FFI-clean value name / `int`/`float`/`bool`), or `Err`
-/// if that type still is not allocatable (a GC-carrying value struct).
-/// A non-substituted element defers to the concrete [`native_buffer_alloc_elem_ctype`].
-fn native_buffer_alloc_elem_ctype_spec(
-    ws: &Workspace,
-    inf: &BodyInference,
-    ret: TyId,
-    subst: &SpecSubst,
-) -> Result<Ustr, String> {
-    let Some(ret) = resolve_tyid(ws, inf, ret) else {
-        return native_buffer_alloc_elem_ctype(ws, inf, ret);
-    };
-    let leaf = match ty_node(ws, inf, ret) {
-        Some(TypeExpr::App { ctor: TypeCtor::Nominal(nb), params }) if nb.as_str() == "NativeBuffer" => {
-            params
-                .into_iter()
-                .next()
-                .and_then(|p| resolve_tyid(ws, inf, ret.with_idx(p)))
-                .and_then(|e| match ty_node(ws, inf, e) {
-                    Some(TypeExpr::Generic(var, _)) => subst.get(&var).cloned(),
-                    _ => None,
-                })
-        }
-        _ => None,
-    };
-    if let Some(prim) = leaf.as_ref().and_then(crate::monoty::MonoTy::prim_name) {
-        return Ok(Ustr::from(if prim == "uint" { "uint32_t" } else { prim }));
-    }
-    match leaf.as_ref().map(|ty| (ty, ty.nominal())) {
-        Some((_, Some(n))) => {
-            if !map_is_value_struct(ws, n) {
-                Err(format!("`native_buffer_alloc<{n}>` is invalid: `{n}` is not a `value` struct."))
-            } else if value_struct_is_gc(ws, n) {
-                Err(format!(
-                    "`native_buffer_alloc<{n}>` is invalid: `{n}` is a GC-carrying `value` struct \
-                     (no C layout), so `ffi.new(\"{n}[?]\")` names no ctype."
-                ))
-            } else {
-                Ok(n)
-            }
-        }
-        Some((_, None)) => Err(
-            "`native_buffer_alloc<T>` requires a primitive or FFI-clean value-struct element"
-                .to_string(),
-        ),
-        None => native_buffer_alloc_elem_ctype(ws, inf, ret),
-    }
-}
-
-/// Hard emit-time rejection for `native_buffer_alloc<T>` uses that would emit
-/// broken / dropped code. Runs as a dedicated pass in `emit_full` (beside
-/// [`gc_value_c_boundary`]) so the error is SURFACED, not swallowed by the lenient
-/// per-body lowering-gap skip. Two scans over `mid`:
-///
-/// 1. A DIRECT intrinsic call in this module whose element is a CONCRETE
-///    unallocatable type (a heap struct / GC value struct -- the P1 cases).
-/// 2. SITE-AWARE (docs/flatvec-plan.md P2): a call to a generic fn whose body
-///    allocates via an opaque-`T` intrinsic (e.g. `flat_vec_new<T>`, possibly in
-///    the stdlib), where THIS call does not specialize the element to an FFI-clean
-///    value struct -- so it would reach the shared generic body that cannot name
-///    the ctype (a primitive, GC-value, or nested-generic instantiation). The call
-///    site is named.
-///
-/// An opaque-generic intrinsic that is never called un-specialized (all callers
-/// specialize, or -- a library fn -- has no callers at all) is exempt: its
-/// standalone body's lowering-gap skip is then correct. Returns the first offender.
-pub fn native_buffer_alloc_reject(ws: &Workspace, mid: ModuleId) -> Option<(String, Span)> {
-    let module = ws.module(mid);
-    let ir = ws.inference(mid)?;
-    // 1. Direct intrinsic calls with a concrete unallocatable element.
-    for (owner, body) in module.bodies.iter() {
-        let Some(inf) = ir.per_fn.get(owner) else { continue };
-        for (e, expr) in body.expr_arena.iter() {
-            let Expr::Call { callee: Callee::Unresolved { name, .. }, .. } = expr else {
-                continue;
-            };
-            if name.as_str() != "native_buffer_alloc" {
-                continue;
-            }
-            let Some(&ret) = inf.expr_types.get(e) else { continue };
-            // Opaque-generic elements are a per-CALL-SITE property (scan 2), never
-            // rejected on the definition body -- specialization may resolve them.
-            if native_buffer_elem_is_generic(ws, inf, ret) {
-                continue;
-            }
-            if let Err(msg) = native_buffer_alloc_elem_ctype(ws, inf, ret) {
-                return Some((msg, body.expr_spans[e]));
-            }
-        }
-    }
-    // 2. Calls to an opaque-`T`-intrinsic-bearing generic fn that this site does
-    //    not specialize to an allocatable element.
-    for (owner, body) in module.bodies.iter() {
-        // A call INSIDE an @inline/@pure generic body (e.g. the stdlib `push`'s
-        // own `fv.grow()`) is not an independent surviving use: it specializes
-        // when the enclosing generic is specialized, and is dead in the enclosing
-        // fn's standalone body otherwise. Its fate is decided at the ENCLOSING
-        // fn's call sites, which are scanned as their own (eventually
-        // non-generic) roots -- skip. A NON-eligible generic is NEVER
-        // specialized (the inliner only splices @inline/@pure), so its standalone
-        // body is the only emission and an intrinsic-bearing call inside it
-        // survives -- gate it like a non-inlined context.
-        // Whether the inliner processes this body -- specialization only happens
-        // via inlining. An ordinary (non-coroutine) function is inlined; a
-        // global initializer / decorator / `co fn` is NOT inlined, so a
-        // specialized call there would SURVIVE un-inlined (dangling nil) and
-        // must reject.
-        let owner_inlined = match owner {
-            BodyOwner::Function(fid) => {
-                let f = &ws.module(mid).functions[*fid];
-                if !f.generics.is_empty() {
-                    if f.annotations
-                        .iter()
-                        .any(|a| matches!(a.name.name.as_str(), "inline" | "pure"))
-                    {
-                        continue;
-                    }
-                    false
-                } else {
-                    !f.is_coroutine
-                }
-            }
-            _ => false,
-        };
-        let Some(inf) = ir.per_fn.get(owner) else { continue };
-        for (c, resolved) in inf.resolved_overload_calls.iter() {
-            let c = *c;
-            let fref = FuncRef { module: resolved.0, func: resolved.1 };
-            let intr_ret = fn_opaque_intrinsic_ret(ws, fref);
-            if intr_ret.is_none()
-                && !fn_opaque_intrinsic_transitive(ws, fref, &mut HashSet::new())
-            {
-                continue;
-            }
-            let Some(fref_inf) = ws
-                .inference(fref.module)
-                .and_then(|ir| ir.per_fn.get(&BodyOwner::Function(fref.func)))
-            else {
-                continue;
-            };
-            let resolves = if !owner_inlined {
-                false
-            } else {
-                let spec = match compute_call_spec(ws, inf, c, fref, &SpecSubst::default()) {
-                    Ok(spec) => spec,
-                    // This pass reads the same instantiation lowering does, so a
-                    // compiler-state rejection is its answer too rather than
-                    // something to score around.
-                    Err(err) => {
-                        let span =
-                            err.labels.first().map_or_else(Span::unknown, |l| l.span);
-                        return Some((err.message, span));
-                    }
-                };
-                match intr_ret {
-                    // Direct: validate the intrinsic's element under this site's subst.
-                    // `Lua` because column storage never changes whether a
-                    // `native_buffer_alloc<T>` site RESOLVES its ctype -- it is
-                    // the FFI-clean element that decides -- so this validator
-                    // stays backend-agnostic by asking the column-bearing target.
-                    Some(intr_ret) => spec.is_some_and(|(_, subst)| {
-                        native_buffer_alloc_elem_ctype_spec(ws, fref_inf, intr_ret, &subst)
-                            .is_ok()
-                    }),
-                    // Transitive (the intrinsic lives deeper in the chain): the
-                    // site must specialize, and conservatively every reified
-                    // leaf must be allocatable (a GC-value leaf reaching the
-                    // intrinsic would fail cdef resolution inside the splice,
-                    // which lowering swallows -- reject it loudly here).
-                    None => spec.is_some_and(|(key, _)| {
-                        key.iter().all(|ty| {
-                            ty.prim_name().is_some()
-                                || !ty.any_nominal(&|name| nominal_is_gc_value(ws, name))
-                        })
-                    }),
-                }
-            };
-            if !resolves {
-                let fname = ws.module(fref.module).functions[fref.func].name;
-                let msg = format!(
-                    "`{fname}` allocates via `native_buffer_alloc<T>` (directly or through \
-                     nested generic calls), which needs a concrete, FFI-clean element type. \
-                     This call does not specialize `{fname}` to an allocatable `value`-struct \
-                     element (its generic binds to a primitive, a GC-carrying value struct, a \
-                     nested generic, or nothing inferrable), so it would reach the shared \
-                     generic body that cannot name the ffi ctype. Call it at a concrete \
-                     FFI-clean `value`-struct instantiation, or use a per-type buffer \
-                     (`native_buffer_int`/`_float`) for primitive elements. If this call is \
-                     inside a generic fn, mark that fn `@inline` so it specializes at its own \
-                     call sites -- a plain generic fn is never specialized."
-                );
-                return Some((msg, body.expr_spans[c]));
-            }
-        }
-    }
-    None
+    let rep_arena = RepArena::default();
+    map_is_value_struct(ws, name)
+        && !matches!(
+            rep_arena.nominal_value_storage(ws, bone_semantic::hir::FnBackend::Lua, name),
+            Some(ValueStorage::CData)
+        )
 }
 
 /// Reject a GC-carrying value struct used at a genuine C boundary (an `extern`
-/// signature, or a `NativeBuffer<T>` element) -- a spanned emit-time error, since
+/// signature) -- a spanned emit-time error, since
 /// the cdef the boundary needs was never emitted for this tier. Replaces the old
 /// silent skip-then-crash (unfuck #51). Returns `(message, span)` for the first
 /// offender, scanning externs then body types. FFI-clean value structs are
@@ -2881,23 +2468,6 @@ pub fn gc_value_c_boundary(ws: &Workspace, mid: ModuleId) -> Option<(String, Spa
                          or pass the fields individually."
                     ), f.name_span));
                 }
-            }
-        }
-    }
-    // 2. NativeBuffer<GcValue> element anywhere in a body's inferred types.
-    let ir = ws.inference(mid)?;
-    for (owner, body) in module.bodies.iter() {
-        let Some(inf) = ir.per_fn.get(owner) else {
-            continue;
-        };
-        for (e, tyid) in inf.expr_types.iter() {
-            if let Some(n) = native_buffer_gc_elem(ws, inf, *tyid) {
-                return Some((format!(
-                    "`NativeBuffer<{n}>` is invalid: `{n}` is a GC-carrying `value` struct \
-                     (immutable Lua table) with no C layout, so `ffi.new(\"{n}[?]\")` names no \
-                     ctype. Only FFI-clean value structs (C-mappable fields) are NativeBuffer \
-                     elements."
-                ), body.expr_spans[e]));
             }
         }
     }
@@ -3636,21 +3206,21 @@ pub fn string_char_literal_out_of_range(ws: &Workspace, mid: ModuleId) -> Option
 #[cfg(test)]
 mod tests;
 
-/// Support for `crate::spec_census` -- the Stage-0d reconciliation needs the
-/// RESULT of `compute_call_spec` without `lower::shape` becoming public.
+/// Support for `crate::spec_census`: expose concrete generic call identities
+/// without giving the diagnostic census its own type conversion.
 pub(crate) mod shape_census_support {
-    use super::shape::{compute_call_spec, SpecSubst};
+    use super::shape::{callee_instance_subst, spec_key_from_subst, SpecSubst};
     use crate::monoty::MonoTy;
     use crate::mir::FuncRef;
     use bone_semantic::inference::{BodyInference, Workspace};
 
-    /// Every call in this body that today's machinery specializes, plus the
-    /// count of sites whose spec decision REJECTED (the Stage-0b invariants).
-    pub(crate) fn specializations_in_body(
+    /// Every complete generic call identity in this body, plus the count of
+    /// compiler-state sites that could not state one.
+    pub(crate) fn concrete_calls_in_body(
         ws: &Workspace,
         inf: &BodyInference,
     ) -> (Vec<(FuncRef, Vec<MonoTy>)>, usize) {
-        // caller is supplied by the census; this returns callee-side data only
+        // caller is supplied by the census; this returns callee-side data only.
         let empty = SpecSubst::default();
         let mut out = Vec::new();
         let mut rejected = 0usize;
@@ -3658,8 +3228,11 @@ pub(crate) mod shape_census_support {
         calls.sort_by_key(|(e, _)| **e);
         for (e, (m, f)) in calls {
             let func = FuncRef { module: *m, func: *f };
-            match compute_call_spec(ws, inf, *e, func, &empty) {
-                Ok(Some((key, _))) => out.push((func, key)),
+            match callee_instance_subst(ws, inf, *e, func, &empty) {
+                Ok(Some(subst)) => match spec_key_from_subst(ws, func, &subst) {
+                    Some(key) => out.push((func, key)),
+                    None => rejected += 1,
+                },
                 Ok(None) => {}
                 Err(_) => rejected += 1,
             }

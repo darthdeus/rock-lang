@@ -1388,6 +1388,7 @@ fn build_rock_globals_registry(
     if package_map.is_empty() {
         return String::new();
     }
+    let scx = skull_mir::lower::ScalarCtx::new(ws);
 
     let mut by_package: BTreeMap<String, Vec<String>> = BTreeMap::new();
     // The RECURSIVE declared shape per global. A global has no reflection
@@ -1457,7 +1458,7 @@ fn build_rock_globals_registry(
     // The accessor table rides WITH the registry, never appended separately: four
     // emit paths append this block, and a registry whose consumers had no
     // accessors would read nil for every `nobox` global.
-    out.push_str(&build_nobox_global_accessors(ws));
+    out.push_str(&build_nobox_global_accessors(ws, &scx));
     out
 }
 
@@ -1466,9 +1467,9 @@ fn build_rock_globals_registry(
 /// reach it by name; these two closures are what `__rock_global_get`/`_set` call
 /// so every consumer addresses the LOGICAL value under the LOGICAL name.
 ///
-/// Both directions come off one canonical leaf-path sequence
-/// (`nobox_global_shape_paths`), so they cannot drift from each other or from the
-/// storage: `get` is the positional leaf ctor over the leaves in that order, and
+/// Both directions consume one canonical accessor plan
+/// (`nobox_global_accessor_shape`), so they cannot drift from each other or from the
+/// storage: `get` is the positional leaf ctor over the plan's paths, and
 /// `set` assigns `v.<path>` per leaf in the same order. The ctor suffix follows
 /// the same three-way rule as every other pack site (`skull-codegen-lua`'s
 /// `_lct` / `_vt` / `_ct` choice) -- dotted paths mean the flattened leaf ctor,
@@ -1476,20 +1477,25 @@ fn build_rock_globals_registry(
 ///
 /// Position past the global defs is irrelevant -- the closures only read the leaf
 /// globals when called (same argument as the registry block it rides with).
-fn build_nobox_global_accessors(ws: &bone_semantic::inference::Workspace) -> String {
+fn build_nobox_global_accessors(
+    ws: &bone_semantic::inference::Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+) -> String {
     use bone_semantic::prelude::ModuleId;
 
     let mut rows: Vec<String> = Vec::new();
     for m in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
         for (_gid, g) in m.globals.iter() {
-            let Some(acc) = skull_mir::lower::nobox_global_accessor_shape(ws, g.ty) else {
+            let Some(acc) = skull_mir::lower::nobox_global_accessor_shape(ws, scx, g.ty) else {
                 continue;
             };
             let skull_mir::lower::NoboxGlobalAccessorShape {
                 ty_name, paths, nullable, ctor_suffix: suffix, presence_path, unbuildable,
             } = acc;
-            let leaves = skull_mir::lower::nobox_global_leaves(ws, g.name, g.ty)
-                .expect("a shape implies leaves: both gate on `nobox_declared_shape`");
+            let leaves = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty)
+                .ok()
+                .and_then(|plan| plan.leaf_names(g.name))
+                .expect("a global plan with leaf paths must own its leaf names");
             // A nullable global leads with a presence leaf that has no path: it is
             // not a field, so it is branched on rather than read. Everything below
             // pairs the REMAINING leaves with the paths.

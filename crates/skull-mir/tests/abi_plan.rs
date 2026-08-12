@@ -13,10 +13,16 @@
 //! cannot come from two derivations that merely agree today.
 
 use std::sync::LazyLock;
+use std::sync::Arc;
 
 use skull_mir::instance::Instance;
 use skull_mir::concrete::{ConcreteBodyPlan, ConcreteOwner, ConcreteSignature, ConcreteTypeTables};
-use skull_mir::lower::{BackendFnAbiPlan, ScalarCtx};
+use skull_mir::lower::{
+    BackendFnAbiPlan, ContainerFamily, ContainerPlan, ContainerStorage, GlobalPlan, RepArena,
+    RepGuarantees,
+    bound_next_shape_from_concrete, declared_boundary_class, boundary_requires_boxed_representation,
+    BoundaryClass, EnumLayout, EnumPlan, RepLayout, RepUse, RepUseFacts, ScalarCtx, ValueStorage,
+};
 use skull_mir::mir::FuncRef;
 use skull_mir::monoty::{MonoCtor, MonoTy};
 use ustr::Ustr;
@@ -51,6 +57,39 @@ fn nominal(name: &str) -> MonoTy {
     MonoTy::App { ctor: MonoCtor::Nominal(Ustr::from(name)), params: Vec::new() }
 }
 
+fn lower_test_roots(
+    ws: &bone_semantic::inference::Workspace,
+    roots: &[FuncRef],
+) -> (
+    ScalarCtx,
+    skull_graph::concrete_body::ConcreteBodies,
+) {
+    let interner = Arc::new(skull_mir::monoty::MonoInterner::new());
+    let graph = skull_graph::instance_graph::build_in(
+        ws,
+        roots.to_vec(),
+        false,
+        Arc::clone(&interner),
+    );
+    let bodies = skull_graph::concrete_body::build(ws, &graph);
+    let scx = ScalarCtx::new(ws).sharing(interner);
+    (scx, bodies)
+}
+
+fn lower_test_root(
+    ws: &bone_semantic::inference::Workspace,
+    scx: &ScalarCtx,
+    bodies: &skull_graph::concrete_body::ConcreteBodies,
+    fref: FuncRef,
+) -> skull_mir::mir::MirFunc {
+    let plan = bodies
+        .plans
+        .get(&Instance::base(fref))
+        .expect("concrete test plan");
+    skull_mir::lower::lower_instance_with_plans(ws, scx, plan, &bodies.plans)
+        .unwrap_or_else(|e| panic!("lower concrete test root: {}", e.message))
+}
+
 /// A generic whose value instantiation splats, plus a non-generic control that
 /// carries the same ABI unconditionally.
 const SRC: &str = "\
@@ -71,37 +110,34 @@ fn main() {
 }
 ";
 
-/// The two emitted bodies of one generic declaration have DIFFERENT ABIs, and
-/// the oracle answers for whichever one is being emitted.
-///
-/// The declaration arm is the admission control: it must keep answering the
-/// unsubstituted boxed ABI, so a plan that simply always specialized would fail
-/// here rather than look like success.
+/// A generic call is planned from the concrete instance that the graph retained;
+/// there is no declaration-shaped shared body left to supply a second ABI.
 #[test]
-fn an_emitted_body_states_its_own_abi() {
+fn a_concrete_generic_body_states_its_owned_abi() {
     let ws = ws_of(SRC);
-    let scx = ScalarCtx::new(&ws);
     let ident = func_ref(&ws, "ident");
-
-    // The declaration's own non-generic instance: no substitution, so the
-    // declared `T` stays one boxed slot. This is the arm that would go red if a
-    // plan simply always specialized.
-    let shared = BackendFnAbiPlan::for_instance(&ws, &scx, &Instance::base(ident));
-    assert_eq!(shared.param_leaf_widths(), None, "an unsubstituted `T` is one boxed slot");
-    assert_eq!(shared.result_lanes(), 1);
-
-    let key: Vec<MonoTy> = vec![nominal("V2")];
-    let spec = BackendFnAbiPlan::for_instance(
-        &ws,
-        &scx,
-        &Instance::intern(scx.interner(), ident, key),
-    );
+    let main = func_ref(&ws, "main");
+    let (scx, bodies) = lower_test_roots(&ws, &[main]);
+    let (_, concrete) = bodies
+        .plans
+        .iter()
+        .find(|(instance, _)| instance.func == ident && !instance.args.is_empty())
+        .expect("the graph must retain ident<V2>");
+    let spec = BackendFnAbiPlan::for_concrete_plan(&ws, &scx, concrete);
     assert_eq!(
         spec.param_leaf_widths(),
         Some(vec![2]),
         "`ident<V2>` takes V2's two float leaves"
     );
     assert_eq!(spec.result_lanes(), 2, "and returns them on two lanes");
+    let caller = lower_test_root(&ws, &scx, &bodies, main);
+    let concrete_instance = concrete.function_instance().expect("function concrete owner");
+    let call = caller
+        .call_abi_plans
+        .values()
+        .find(|plan| plan.subject == *concrete_instance)
+        .expect("the direct call must retain ident<V2>'s ABI plan");
+    assert_eq!(call, &spec, "the generic call must consume ident<V2>'s owned plan");
 }
 
 /// The control: a non-generic declaration has exactly one emitted body, and the
@@ -110,10 +146,14 @@ fn an_emitted_body_states_its_own_abi() {
 #[test]
 fn a_non_generic_body_states_its_abi_on_its_base_instance() {
     let ws = ws_of(SRC);
-    let scx = ScalarCtx::new(&ws);
     let shift = func_ref(&ws, "shift");
 
-    let plan = BackendFnAbiPlan::for_instance(&ws, &scx, &Instance::base(shift));
+    let (scx, bodies) = lower_test_roots(&ws, &[shift]);
+    let concrete = bodies
+        .plans
+        .get(&Instance::base(shift))
+        .expect("the graph must retain shift's concrete body");
+    let plan = BackendFnAbiPlan::for_concrete_plan(&ws, &scx, concrete);
     assert_eq!(plan.param_leaf_widths(), Some(vec![2]));
     assert_eq!(plan.result_lanes(), 2);
 }
@@ -217,4 +257,673 @@ fn main() { print("{generic_tuple_take((V2 { x: 1.0, y: 2.0 }, 3.0)).0.x}") }
     };
     let written_abi = BackendFnAbiPlan::for_concrete_plan(&ws, &scx, &written_plan);
     assert_eq!(written_abi.param_leaf_widths(), Some(vec![3]));
+}
+
+/// The first RepPlan cut has to join every physical consumer of a concrete
+/// function signature.  These are deliberately different shapes, not a
+/// single scalar control: a plain scalar, a nested value, a tuple, a nullable
+/// value, and a GC-carrying value exercise boxed and multi-lane answers.
+#[test]
+fn one_owned_representation_reaches_body_call_return_and_publisher() {
+    let ws = ws_of(
+        r#"
+nobox value Leaf { x: float, y: float }
+nobox value Nested { leaf: Leaf, z: float }
+struct Boxed { text: string, tag: int }
+
+@scalar_abi fn scalar(v: int) -> int { return v }
+@scalar_abi fn nested(v: Nested) -> Nested { return v }
+@scalar_abi fn tuple(v: (Leaf, float)) -> (Leaf, float) { return v }
+@scalar_abi fn nullable(v: Leaf?) -> Leaf? { return v }
+fn boxed(v: Boxed) -> Boxed { return v }
+
+fn main() {
+    let leaf = Leaf { x: 1.0, y: 2.0 }
+    let nested_value = Nested { leaf: leaf, z: 3.0 }
+    let _ = scalar(1)
+    let _ = nested(nested_value)
+    let _ = tuple((leaf, 4.0))
+    let _ = nullable(leaf)
+    let _ = boxed(Boxed { text: "boxed", tag: 5 })
+}
+
+"#,
+    );
+    let main = func_ref(&ws, "main");
+    let (scx, bodies) = lower_test_roots(&ws, &[main]);
+    let caller = lower_test_root(&ws, &scx, &bodies, main);
+    let cases = ["scalar", "nested", "tuple", "nullable", "boxed"];
+    assert_eq!(cases.len(), 5, "the RED population must remain nonzero");
+
+    for name in cases {
+        let subject = Instance::base(func_ref(&ws, name));
+        let concrete = bodies
+            .plans
+            .get(&subject)
+            .unwrap_or_else(|| panic!("the graph must retain {name}'s concrete body"));
+        let owned = BackendFnAbiPlan::for_concrete_plan(&ws, &scx, concrete);
+        let entry = lower_test_root(&ws, &scx, &bodies, subject.func);
+        let body = entry.abi_plan.as_ref().expect("callee entry must retain its ABI plan");
+        let call = caller
+            .call_abi_plans
+            .values()
+            .find(|plan| plan.subject == subject)
+            .unwrap_or_else(|| panic!("caller must retain {name}'s concrete ABI plan"));
+
+        assert_eq!(
+            &owned,
+            body,
+            "body entry must consume the owned representation for {name}"
+        );
+        assert_eq!(
+            &owned,
+            call,
+            "call and callee entry must consume one owned representation for {name}"
+        );
+        assert_eq!(
+            owned.representation().result(),
+            owned.representation().publisher_result(),
+            "return lowering and the backend publisher must read the same result plan for {name}"
+        );
+        assert_eq!(
+            owned.representation().return_lanes(),
+            owned.result_lanes(),
+            "publisher lane sizing must be derived from the owned result plan for {name}"
+        );
+    }
+
+    let scalar = caller
+        .call_abi_plans
+        .values()
+        .find(|plan| plan.subject.func == func_ref(&ws, "nested"))
+        .expect("nested call ABI");
+    let boxed = caller
+        .call_abi_plans
+        .values()
+        .find(|plan| plan.subject.func == func_ref(&ws, "boxed"))
+        .expect("boxed call ABI");
+    assert!(scalar.param_leaf_widths().is_some(), "nested aggregate must use a scalar representation");
+    assert!(
+        boxed.param_leaf_widths().is_none(),
+        "opaque aggregate must retain a boxed representation, got {:?}",
+        boxed.param_leaf_widths()
+    );
+    assert!(
+        caller
+            .call_abi_plans
+            .values()
+            .find(|plan| plan.subject.func == func_ref(&ws, "tuple"))
+            .expect("tuple call ABI")
+            .result_lanes()
+            > 1,
+        "tuple return must have multiple physical lanes"
+    );
+    assert_eq!(
+        caller
+            .call_abi_plans
+            .values()
+            .find(|plan| plan.subject.func == func_ref(&ws, "tuple"))
+            .expect("tuple call ABI")
+            .param_leaf_widths(),
+        Some(vec![3]),
+        "the declaration-spelled tuple parameter must use its owned leaf plan"
+    );
+
+    let callee = func_ref(&ws, "nested");
+    let main = func_ref(&ws, "main");
+    let (scx, bodies) = lower_test_roots(&ws, &[main, callee]);
+    let caller = lower_test_root(&ws, &scx, &bodies, main);
+    let entry = lower_test_root(&ws, &scx, &bodies, callee);
+    assert_eq!(entry.params.len(), 3, "callee entry must bind Nested's three owned lanes");
+    let call = caller
+        .call_abi_plans
+        .values()
+        .find(|plan| plan.subject == Instance::base(callee))
+        .expect("caller must retain the concrete nested ABI plan");
+    let nested_call_args = caller.insts.iter().find_map(|(_, inst)| match inst {
+        skull_mir::mir::Inst::CallMulti { func, args, .. } if *func == callee => Some(args.len()),
+        _ => None,
+    });
+    assert_eq!(nested_call_args, Some(3), "the direct call must consume Nested's three owned lanes");
+    let entry_abi = entry.abi_plan.as_ref().expect("callee entry must retain its ABI plan");
+    assert_eq!(entry_abi.representation(), call.representation());
+}
+
+#[test]
+fn function_value_uses_the_owned_signature_representation() {
+    let ws = ws_of(
+        r#"
+nobox value Leaf { x: float, y: float }
+@scalar_abi fn nested(v: Leaf) -> Leaf { return v }
+fn apply(f: (Leaf) -> Leaf, v: Leaf) -> Leaf { return f(v) }
+fn main() {
+    let v = Leaf { x: 1.0, y: 2.0 }
+    print("{apply(nested, v).x}")
+}
+"#,
+    );
+    let apply = func_ref(&ws, "apply");
+    let nested_func = func_ref(&ws, "nested");
+    let (scx, bodies) = lower_test_roots(&ws, &[apply, nested_func]);
+    let nested_instance = Instance::base(nested_func);
+    let nested_plan = bodies.plans.get(&nested_instance).expect("nested concrete plan");
+    let nested = BackendFnAbiPlan::for_concrete_plan(&ws, &scx, nested_plan);
+    let leaf = nominal("Leaf");
+    let fn_value = BackendFnAbiPlan::for_function_value(
+        &ws,
+        &scx,
+        &MonoTy::Function { params: vec![leaf.clone()], ret: Box::new(leaf) },
+    )
+    .expect("function type must have a total physical plan");
+    assert_eq!(
+        fn_value.params(),
+        nested.representation().params(),
+        "an indirect caller must use the callee's parameter RepIds"
+    );
+    assert_eq!(
+        fn_value.result(),
+        nested.representation().result(),
+        "an indirect caller must use the callee's result RepId"
+    );
+    let lowered = lower_test_root(&ws, &scx, &bodies, apply);
+    let call = lowered.insts.iter().find_map(|(_, inst)| match inst {
+        skull_mir::mir::Inst::CallValueMulti { args, .. } => Some(args.len()),
+        _ => None,
+    });
+    assert_eq!(call, Some(2), "the indirect callee must splat Leaf through its owned plan");
+}
+
+#[test]
+fn unit_function_values_share_the_no_result_abi() {
+    let ws = ws_of("fn sink() { print(\"ok\") }\n");
+    let scx = ScalarCtx::new(&ws);
+    let sink = func_ref(&ws, "sink");
+    let declaration = BackendFnAbiPlan::for_boundary_declaration(&ws, &scx, sink);
+    let value = BackendFnAbiPlan::for_function_value(
+        &ws,
+        &scx,
+        &MonoTy::Function { params: Vec::new(), ret: Box::new(MonoTy::Unit) },
+    )
+    .expect("a unit function value must have a total physical plan");
+
+    assert_eq!(declaration.representation().result(), None);
+    assert_eq!(value.result(), None);
+}
+
+#[test]
+fn nested_opaque_tuple_elements_keep_one_physical_slot() {
+    let ws = ws_of("fn main() { print(\"ok\") }\n");
+    let arena = RepArena::default();
+    let nested = MonoTy::Tuple(vec![MonoTy::Int, MonoTy::Float]);
+    let outer = MonoTy::Tuple(vec![nested, MonoTy::Bool]);
+    let id = arena
+        .plan(
+            &ws,
+            bone_semantic::hir::FnBackend::Lua,
+            &outer,
+            RepUse::Return,
+            &RepUseFacts { tuple_spelled: true, span: None },
+            RepGuarantees::default(),
+        )
+        .expect("nested tuple representation must be total");
+    let outer_plan = arena.get(id);
+    let RepLayout::Tuple { slots, .. } = outer_plan.layout() else {
+        panic!("outer tuple must retain its top-level return lanes")
+    };
+    assert_eq!(slots.len(), 2, "the outer tuple population must be nonzero");
+    assert!(matches!(arena.get(slots[0]).layout(), RepLayout::Opaque));
+}
+
+#[test]
+fn container_storage_uses_the_element_representation_plan() {
+    let ws = ws_of("nobox value V2 { x: float, y: float }");
+    let arena = RepArena::default();
+    let element = nominal("V2");
+    let ty = MonoTy::App { ctor: MonoCtor::Array, params: vec![element] };
+    let plan = ContainerPlan::for_type(
+        &ws,
+        bone_semantic::hir::FnBackend::Lua,
+        &arena,
+        ContainerFamily::Vec,
+        &ty,
+    )
+    .expect("a concrete Vec type must have a total container plan");
+    assert!(
+        matches!(plan.storage(), ContainerStorage::Columns { .. }),
+        "the Vec storage decision must be owned by the container plan"
+    );
+    let elem = plan.column_elem(&arena).expect("column element");
+    assert_eq!(elem.name, Ustr::from("V2"));
+    assert!(!elem.nullable);
+    assert_eq!(elem.representation(), plan.element_rep());
+}
+
+#[test]
+fn container_columns_carry_owned_element_identity() {
+    let ws = ws_of("value V2 { x: float, y: float }\nfn main() { print(\"ok\") }\n");
+    let scx = ScalarCtx::new(&ws);
+    let arena = RepArena::default();
+    let ty = MonoTy::App {
+        ctor: MonoCtor::Array,
+        params: vec![nominal("V2")],
+    };
+    let plan = ContainerPlan::for_type(&ws, scx.target(), &arena, ContainerFamily::Vec, &ty)
+        .expect("value vector must have a container plan");
+    let elem = plan.column_elem(&arena).expect("V2 vector must use columns");
+    assert_eq!(elem.representation(), plan.element_rep());
+    assert!(plan.element_shape(&arena).is_some(), "the owned element plan must expose its shape");
+}
+
+#[test]
+fn element_rep_plan_owns_ffi_column_admission() {
+    let ws = ws_of("value V2 { x: float, y: float }\nenum E { A(int), B(int), None }\n");
+    let arena = RepArena::default();
+    let vec_ty = MonoTy::App {
+        ctor: MonoCtor::Array,
+        params: vec![nominal("V2")],
+    };
+    let vec = ContainerPlan::for_type(
+        &ws,
+        bone_semantic::hir::FnBackend::Lua,
+        &arena,
+        ContainerFamily::Vec,
+        &vec_ty,
+    )
+    .expect("V2 vector must have a container plan");
+    assert!(
+        arena.get(vec.element_rep()).column_eligible(),
+        "the owned V2 plan must admit a nonzero column population"
+    );
+
+    let enum_rep = arena
+        .plan(
+            &ws,
+            bone_semantic::hir::FnBackend::Lua,
+            &nominal("E"),
+            RepUse::Boundary,
+            &RepUseFacts::default(),
+            RepGuarantees::default(),
+        )
+        .expect("the cdata enum must have an explicit representation plan");
+    assert!(
+        !arena.get(enum_rep).column_eligible(),
+        "the enum control must remain outside the value-struct column population"
+    );
+}
+
+#[test]
+fn column_element_plan_carries_the_nobox_guarantee() {
+    let ws = ws_of(
+        "nobox value N { x: float, y: float }\n\
+         value B { x: float, y: float }\n",
+    );
+    let arena = RepArena::default();
+    let marked = MonoTy::App {
+        ctor: MonoCtor::Array,
+        params: vec![nominal("N")],
+    };
+    let unmarked = MonoTy::App {
+        ctor: MonoCtor::Array,
+        params: vec![nominal("B")],
+    };
+    let marked = ContainerPlan::for_type(
+        &ws,
+        bone_semantic::hir::FnBackend::Lua,
+        &arena,
+        ContainerFamily::Vec,
+        &marked,
+    )
+    .expect("marked value vector must have a plan")
+    .column_elem(&arena)
+    .expect("marked value vector must use columns");
+    let unmarked = ContainerPlan::for_type(
+        &ws,
+        bone_semantic::hir::FnBackend::Lua,
+        &arena,
+        ContainerFamily::Vec,
+        &unmarked,
+    )
+    .expect("unmarked value vector must have a plan")
+    .column_elem(&arena)
+    .expect("unmarked value vector must use columns");
+    assert!(marked.is_nobox(), "the marked element population must be nonzero");
+    assert!(!unmarked.is_nobox(), "the unmarked control must stay boxed at element use sites");
+}
+
+#[test]
+fn missing_bound_result_plan_is_an_explicit_error() {
+    let ws = ws_of("fn main() { print(\"ok\") }\n");
+    let scx = ScalarCtx::new(&ws);
+    let interner = skull_mir::monoty::MonoInterner::new();
+    let result = bound_next_shape_from_concrete(
+        &ws,
+        &scx,
+        &interner,
+        &ConcreteSignature::default(),
+    );
+    assert!(result.is_err(), "a missing concrete bound result must not become a no-op");
+}
+
+#[test]
+fn leaf_places_carry_the_container_element_representation() {
+    let ws = ws_of("nobox value V2 { x: float, y: float }");
+    let arena = RepArena::default();
+    let ty = MonoTy::App {
+        ctor: MonoCtor::Nominal(Ustr::from("NativeBuffer")),
+        params: vec![nominal("V2")],
+    };
+    let plan = ContainerPlan::for_type(
+        &ws,
+        bone_semantic::hir::FnBackend::Lua,
+        &arena,
+        ContainerFamily::NativeBuffer,
+        &ty,
+    )
+    .expect("a NativeBuffer value must have a concrete container plan");
+    assert!(plan.is_leaf_addressed());
+    let address = arena
+        .nominal_leaf_addresses(
+            &ws,
+            bone_semantic::hir::FnBackend::Lua,
+            Ustr::from("V2"),
+        )
+        .expect("V2 has a leaf address plan")
+        .into_iter()
+        .next()
+        .expect("V2 has a nonzero leaf population");
+    let place = plan.place(address).expect("leaf storage owns the place");
+    assert_eq!(place.representation(), plan.element_rep());
+}
+
+#[test]
+fn enum_layout_is_selected_by_one_owned_plan() {
+    let cdata_ws = ws_of("enum E { A(int), B(int), None }");
+    let cdata = EnumPlan::for_name(&cdata_ws, Ustr::from("E")).expect("enum plan");
+    assert!(matches!(cdata.layout(), EnumLayout::Cdata(_)));
+    assert!(cdata.cdata().is_some());
+    assert!(cdata.flat().is_none());
+
+    let flat_ws = ws_of(
+        "nobox value P { x: int, y: int }\nenum E { Has(P), Nope }",
+    );
+    let flat = EnumPlan::for_name(&flat_ws, Ustr::from("E")).expect("enum plan");
+    assert!(matches!(flat.layout(), EnumLayout::Flat(_)));
+    assert!(flat.flat().is_some());
+    assert!(flat.cdata().is_none());
+
+    let unit_ws = ws_of("enum E { A, B }");
+    let unit = EnumPlan::for_name(&unit_ws, Ustr::from("E")).expect("enum plan");
+    assert!(unit.is_payload_free());
+    assert!(matches!(unit.layout(), EnumLayout::PayloadFree));
+}
+
+#[test]
+fn boundary_class_and_transport_contract_have_one_owner() {
+    let ws = ws_of(
+        r#"
+@nomangle inline(lua) fn boxed(v: int) -> int = "return v"
+@nomangle @scalar_abi inline(lua) fn scalar(v: int) -> int = "return v"
+fn main() { print("{boxed(1)} {scalar(2)}") }
+"#,
+    );
+    let boxed = &ws.module(func_ref(&ws, "boxed").module).functions[func_ref(&ws, "boxed").func];
+    let scalar = &ws.module(func_ref(&ws, "scalar").module).functions[func_ref(&ws, "scalar").func];
+    assert_eq!(declared_boundary_class(boxed), Some(BoundaryClass::InlineBody));
+    assert_eq!(declared_boundary_class(scalar), Some(BoundaryClass::InlineBody));
+    assert!(boundary_requires_boxed_representation(boxed));
+    assert!(!boundary_requires_boxed_representation(scalar));
+}
+
+#[test]
+fn an_opaque_boundary_uses_an_explicit_boundary_abi_plan() {
+    let ws = ws_of(
+        r#"
+nobox value V2 { x: float, y: float }
+@scalar_abi inline(lua) fn boundary(v: V2) -> V2 = "return v"
+fn main() { boundary(V2 { x: 1.0, y: 2.0 }) }
+"#,
+    );
+    let scx = ScalarCtx::new(&ws);
+    let boundary = Instance::base(func_ref(&ws, "boundary"));
+    let abi = BackendFnAbiPlan::for_boundary_instance(&ws, &scx, &boundary);
+    assert_eq!(abi.param_leaf_widths(), Some(vec![2]));
+    assert_eq!(abi.result_lanes(), 2);
+}
+
+#[test]
+fn concrete_rep_planner_is_total_over_the_logical_type_vocabulary() {
+    let ws = ws_of(
+        "nobox value V2 { x: float, y: float }\nvalue Gc { text: string }",
+    );
+    let arena = RepArena::default();
+    let valid = vec![
+        MonoTy::Int,
+        MonoTy::Uint,
+        MonoTy::Float,
+        MonoTy::Bool,
+        MonoTy::String,
+        MonoTy::Any,
+        MonoTy::Unit,
+        MonoTy::Never,
+        MonoTy::Nullable(Box::new(MonoTy::Int)),
+        MonoTy::Tuple(vec![MonoTy::Int, MonoTy::Float]),
+        MonoTy::App { ctor: MonoCtor::Array, params: vec![MonoTy::Int] },
+        MonoTy::Function { params: vec![MonoTy::Int], ret: Box::new(MonoTy::Bool) },
+        nominal("V2"),
+    ];
+    assert_eq!(valid.len(), 13, "the valid-type denominator must stay nonzero");
+    let facts = RepUseFacts::default();
+    let guarantees = RepGuarantees::default();
+    for ty in &valid {
+        arena
+            .plan(
+                &ws,
+                bone_semantic::hir::FnBackend::Lua,
+                ty,
+                RepUse::Parameter,
+                &facts,
+                guarantees,
+            )
+            .unwrap_or_else(|e| panic!("valid logical type `{}` was rejected: {e}", ty.render()));
+    }
+    let rejected = arena
+        .plan(
+            &ws,
+            bone_semantic::hir::FnBackend::Lua,
+            &MonoTy::App { ctor: MonoCtor::Array, params: vec![MonoTy::Int] },
+            RepUse::Parameter,
+            &facts,
+            RepGuarantees { nobox: true, allow_opaque: false },
+        )
+        .expect_err("a nobox container must not silently become an opaque slot");
+    assert!(rejected.message.contains("nobox"));
+    let rejected_nominal = arena
+        .plan(
+            &ws,
+            bone_semantic::hir::FnBackend::Lua,
+            &nominal("Gc"),
+            RepUse::Parameter,
+            &facts,
+            RepGuarantees { nobox: true, allow_opaque: false },
+        )
+        .expect_err("a GC-carrying nominal must not silently become an opaque nobox slot");
+    assert!(rejected_nominal.message.contains("nobox"));
+}
+
+#[test]
+fn function_value_plan_keeps_opaque_reference_parameters_explicit() {
+    let ws = ws_of("fn main() { print(\"ok\") }\n");
+    let scx = ScalarCtx::new(&ws);
+    let vec_int = MonoTy::App { ctor: MonoCtor::Array, params: vec![MonoTy::Int] };
+    let plan = BackendFnAbiPlan::for_function_value(
+        &ws,
+        &scx,
+        &MonoTy::Function { params: vec![vec_int], ret: Box::new(MonoTy::Int) },
+    )
+    .expect("a function value may carry an opaque container parameter");
+    assert_eq!(plan.params().len(), 1, "the function-value population must be nonzero");
+    assert!(!plan.uses_scalar_abi(), "an opaque container must not acquire a scalar ABI");
+}
+
+#[test]
+fn function_value_plan_mode_is_part_of_the_owned_signature() {
+    let ws = ws_of("value V2 { x: float, y: float }\nfn main() { print(\"ok\") }\n");
+    let scx = ScalarCtx::new(&ws);
+    let ty = MonoTy::Function {
+        params: vec![nominal("V2")],
+        ret: Box::new(nominal("V2")),
+    };
+    let direct = BackendFnAbiPlan::for_function_value_with_mode(&ws, &scx, &ty, false)
+        .expect("direct nested function mode must plan");
+    let taken = BackendFnAbiPlan::for_function_value_with_mode(&ws, &scx, &ty, true)
+        .expect("taken nested function mode must plan");
+    assert!(direct.uses_scalar_abi(), "direct-only value functions may use their concrete leaves");
+    assert!(!taken.uses_scalar_abi(), "taken functions must keep an ordinary value opaque");
+    assert_ne!(direct.params(), taken.params(), "the two physical modes must have distinct plans");
+}
+
+#[test]
+fn aggregate_value_projection_has_an_owned_value_context() {
+    let ws = ws_of("nobox value V2 { x: float, y: float }\nfn main() { print(\"ok\") }\n");
+    let arena = RepArena::default();
+    let id = arena
+        .plan(
+            &ws,
+            bone_semantic::hir::FnBackend::Lua,
+            &nominal("V2"),
+            RepUse::Value,
+            &RepUseFacts::default(),
+            RepGuarantees { nobox: true, allow_opaque: true },
+        )
+        .expect("a concrete aggregate value must have a physical plan");
+    let plan = arena.get(id);
+    assert_eq!(plan.use_context(), RepUse::Value);
+    assert_eq!(plan.value_storage(), Some(ValueStorage::CData));
+    assert!(matches!(plan.layout(), RepLayout::Leaves(_)), "aggregate plan must carry leaves");
+}
+
+#[test]
+fn global_storage_uses_an_owned_value_plan() {
+    let ws = ws_of(
+        "nobox value G { x: float, y: float }\n\
+         global state: G = G { x: 1.0, y: 2.0 }\n\
+         fn main() { print(\"ok\") }\n",
+    );
+    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
+    let gid = ws.module(mid).global_by_name[&Ustr::from("state")];
+    let scx = ScalarCtx::new(&ws);
+    let plan = GlobalPlan::for_declared_type(&ws, &scx, ws.module(mid).globals[gid].ty)
+        .expect("a declared global must have a physical storage plan");
+    assert_eq!(plan.use_context(), RepUse::Value);
+    assert_eq!(plan.lanes(), 2, "the global plan must own both scalar leaves");
+}
+
+#[test]
+fn column_storage_mir_carries_the_owned_nobox_fact() {
+    let ws = ws_of(
+        r#"
+value V2 { x: float, y: float }
+nobox value NV2 { x: float, y: float }
+
+fn main() {
+    let ordinary: [V2] = []
+    ordinary.push(V2 { x: 1.0, y: 2.0 })
+    let marked: [NV2] = []
+    marked.push(NV2 { x: 3.0, y: 4.0 })
+}
+"#,
+    );
+    let main = func_ref(&ws, "main");
+    let (scx, bodies) = lower_test_roots(&ws, &[main]);
+    let mir = lower_test_root(&ws, &scx, &bodies, main);
+    let mut plans = std::collections::BTreeMap::new();
+    skull_mir::mir::column_elem_plans(&mir, &mut plans);
+    assert_eq!(plans.get(&Ustr::from("V2")), Some(&false));
+    assert_eq!(plans.get(&Ustr::from("NV2")), Some(&true));
+    assert!(plans.len() >= 2, "the column plan population must be nonzero");
+}
+
+#[test]
+fn nominal_value_storage_is_owned_by_the_rep_plan() {
+    let ws = ws_of("value Boxed { text: string, tag: int }\n");
+    let arena = RepArena::default();
+    let id = arena
+        .plan_nominal_value(&ws, bone_semantic::hir::FnBackend::Lua, Ustr::from("Boxed"))
+        .expect("a GC-carrying value must have an explicit physical plan");
+    let plan = arena.get(id);
+    assert_eq!(plan.value_storage(), Some(ValueStorage::GcTable));
+    assert!(matches!(plan.layout(), RepLayout::Leaves(_)));
+    assert_eq!(
+        arena.nominal_value_storage(&ws, bone_semantic::hir::FnBackend::Lua, Ustr::from("Boxed")),
+        Some(ValueStorage::GcTable)
+    );
+}
+
+#[test]
+fn nominal_value_leaf_paths_are_owned_by_the_rep_plan() {
+    let ws = ws_of(
+        "value V2 { x: float, y: float }\nvalue Boxed { child: V2, tag: int }\n",
+    );
+    let arena = RepArena::default();
+    assert_eq!(
+        arena.nominal_value_leaf_paths(
+            &ws,
+            bone_semantic::hir::FnBackend::Lua,
+            Ustr::from("Boxed"),
+        ),
+        Some(vec![Ustr::from("child.x"), Ustr::from("child.y"), Ustr::from("tag")])
+    );
+}
+
+#[test]
+fn nominal_value_presence_flags_are_owned_by_the_rep_plan() {
+    let ws = ws_of(
+        "nobox value V2 { x: float, y: float }\nvalue Boxed { child: V2?, tag: int }\n",
+    );
+    let arena = RepArena::default();
+    assert_eq!(
+        arena.nominal_value_leaf_presence_flags(
+            &ws,
+            bone_semantic::hir::FnBackend::Lua,
+            Ustr::from("Boxed"),
+        ),
+        Some(vec![true, false, false, false])
+    );
+}
+
+#[test]
+fn nominal_leaf_addresses_are_owned_by_the_rep_plan() {
+    let ws = ws_of("value V2 { x: float, y: float }\nvalue Boxed { pos: V2, tag: int }\n");
+    let arena = RepArena::default();
+    let addresses = arena
+        .nominal_leaf_addresses(
+            &ws,
+            bone_semantic::hir::FnBackend::Lua,
+            Ustr::from("Boxed"),
+        )
+        .expect("the concrete value plan must own nonzero leaf addresses");
+    assert_eq!(
+        addresses.iter().map(|address| address.path).collect::<Vec<_>>(),
+        vec![Ustr::from("pos.x"), Ustr::from("pos.y"), Ustr::from("tag")]
+    );
+    assert!(addresses.iter().all(|address| address.stride > 0));
+}
+
+#[test]
+fn nominal_c_layout_is_owned_by_the_rep_plan() {
+    let ws = ws_of("value Mixed { on: bool, count: int, scale: float }");
+    let arena = RepArena::default();
+    let (leaves, size, align) = arena
+        .nominal_leaf_layout(
+            &ws,
+            bone_semantic::hir::FnBackend::Lua,
+            Ustr::from("Mixed"),
+        )
+        .expect("the concrete value plan must own the validated C layout");
+    assert_eq!(
+        leaves.iter().map(|leaf| leaf.path).collect::<Vec<_>>(),
+        vec![Ustr::from("on"), Ustr::from("count"), Ustr::from("scale")]
+    );
+    assert_eq!(size, 12);
+    assert_eq!(align, 4);
 }

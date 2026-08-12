@@ -1,7 +1,6 @@
-//! The SHADOW instance graph (`docs/monomorphization-plan.md` Stage 0d).
+//! The target-neutral instance graph (`docs/monomorphization-plan.md` Stage 0d).
 //!
-//! Read-only with respect to emission: it observes what a monomorphizing
-//! compiler WOULD instantiate, and changes nothing about what is emitted today.
+//! It owns logical instance reachability below the target artifact views.
 //!
 //! An [`Instance`] is `(FuncRef, Vec<MonoTyId>)` -- a function plus the total
 //! logical types of its generic arguments, keyed on
@@ -17,8 +16,7 @@
 //!
 //! **Transitive instantiation is the core.** Walking a callee's body under the
 //! CALLER's substitution is what makes `count<I>` at `I = VecIter<Vec2>` a
-//! different instance from the same fn at `VecIter<int>`, and it is what today's
-//! conditional specializer only does when `any_value` happens to hold.
+//! different instance from the same fn at `VecIter<int>`.
 //!
 //! **Two outcomes are not the same.** [`Unresolved`] is a construction the walk
 //! could not complete -- data. [`Rejection`] is one the concrete-program model
@@ -40,6 +38,7 @@ use bone_semantic::prelude::{BoundNext, IterWitness, ModuleId, Span, TyId};
 use comfy_la_arena::Idx;
 use rustc_hash::{FxHashMap, FxHashSet};
 use skull_mir::mangle::mangle_fn;
+use skull_mir::lower::{ContainerFamily, ContainerPlan, RepArena};
 use skull_mir::monoty::{MonoArena, MonoInterner, MonoSubst, MonoTyId, MonoTyReason};
 use skull_mir::mir::FuncRef;
 
@@ -107,32 +106,9 @@ impl EdgeKind {
     }
 }
 
-/// The boundary classes of `docs/boundary-contracts.md` Part 1. A boundary is a
-/// callee whose body skull does not lower to MIR; plan S 9 requires every call
-/// to resolve to exactly one `InstanceId` OR one `BoundaryId`.
-///
-/// [`BoundaryClass::Invalid`] is not a body kind but a required OUTCOME -- the
-/// class a boundary takes on a target that cannot supply its contract. The
-/// shader-interface class (S 1.5) has no member here: GLSL is not a `FnBackend`
-/// the instance walk runs for, so no call in this graph resolves to one.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
-pub enum BoundaryClass {
-    Extern,
-    InlineBody,
-    Intrinsic,
-    ErasedRuntimeEntry,
-}
-
-impl BoundaryClass {
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Extern => "extern",
-            Self::InlineBody => "inline-body",
-            Self::Intrinsic => "intrinsic",
-            Self::ErasedRuntimeEntry => "erased-runtime-entry",
-        }
-    }
-}
+/// The boundary classifier lives below the graph, so artifact projection and
+/// lowering-side rejection cannot drift into separate vocabularies.
+pub use skull_mir::lower::BoundaryClass;
 
 /// One reached boundary, classified from the DECLARATION alone.
 ///
@@ -779,9 +755,8 @@ pub enum StorageCond {
 /// `crates/skull-mir/src/lower/storage.rs`; the complete 15-name set is
 /// catalogued in `docs/boundary-contracts.md` S 1.4.
 ///
-/// The condition uses the same
-/// `skull_mir::lower::shape::{vec_column_elem_mono, map_column_value_mono}`
-/// oracle as lowering. The names are the column-path ones only -- a non-column
+/// The condition uses the same `skull_mir::lower::ContainerPlan` as lowering.
+/// The names are the column-path ones only -- a non-column
 /// receiver takes a different route entirely, so `table_len` (the boxed
 /// `__vec_data_capacity` path) is not an edge this arm produces.
 ///
@@ -3588,13 +3563,8 @@ enum CondVerdict {
 /// `nobox` element applies the key to the LEAVES, everything else to the
 /// materialized element.
 ///
-/// Lowering asks `is_nobox_struct`, which is `is_nobox_nominal` plus the
-/// `values_first_class` gate. That flag is set only by the GLSL emitter, and
-/// GLSL is not an `FnBackend` this walk runs for, so the two agree on every
-/// target an `InstanceGraph` is built for -- and on a target where they would
-/// not, an `is_nobox_nominal` answer is the wrong one to bake in here.
-fn sort_entry(ws: &Workspace, elem: &skull_mir::mir::ColumnElem) -> &'static str {
-    if skull_mir::lower::is_nobox_nominal(ws, elem.name) {
+fn sort_entry(elem: &skull_mir::mir::ColumnElem) -> &'static str {
+    if elem.is_nobox() {
         "__rock_col_sort_leaves"
     } else {
         "__rock_col_sort"
@@ -3634,7 +3604,8 @@ fn compiler_generated_sites(
     failures: &mut Vec<(Idx<bone_semantic::hir::Expr>, MonoTyReason)>,
     approximated: &mut usize,
 ) -> Vec<GeneratedSite> {
-    use bone_semantic::hir::{Callee, Expr as E, FnBackend};
+    use bone_semantic::hir::{Callee, Expr as E};
+    let rep_arena = RepArena::default();
     // The receiver's CONCRETE type under this instance's substitution, which is
     // what the storage condition is asked about.
     let verdict = |recv: Idx<bone_semantic::hir::Expr>, cond: StorageCond| -> CondVerdict {
@@ -3648,19 +3619,39 @@ fn compiler_generated_sites(
             Ok(m) => m,
             Err(r) => return CondVerdict::Failed(r),
         };
-        let elem = match cond {
+        let plan = match cond {
             // `Any`, stated rather than defaulted: this graph selects no
-            // variant. The storage oracle's target argument reaches
-            // `columns_available`, which is unconditionally true, so the two
-            // agree for every target -- and a target-dependent answer here
-            // would be a second target-dependence in a target-neutral walk.
+            // target sibling. The physical target projection happens later;
+            // only the logical container plan is needed for the edge census.
             StorageCond::VecColumn => {
-                skull_mir::lower::vec_column_elem_mono(ws, FnBackend::Any, &mono)
+                if !ContainerPlan::matches_type(ContainerFamily::Vec, &mono) {
+                    return CondVerdict::DoesNot;
+                }
+                ContainerPlan::for_type(
+                    ws,
+                    bone_semantic::hir::FnBackend::Any,
+                    &rep_arena,
+                    ContainerFamily::Vec,
+                    &mono,
+                )
             }
             StorageCond::MapColumn => {
-                skull_mir::lower::map_column_value_mono(ws, FnBackend::Any, &mono)
+                if !ContainerPlan::matches_type(ContainerFamily::Map, &mono) {
+                    return CondVerdict::DoesNot;
+                }
+                ContainerPlan::for_type(
+                    ws,
+                    bone_semantic::hir::FnBackend::Any,
+                    &rep_arena,
+                    ContainerFamily::Map,
+                    &mono,
+                )
             }
             StorageCond::Always => return CondVerdict::Holds(None),
+        };
+        let elem = match plan {
+            Ok(plan) => plan.column_elem(&rep_arena),
+            Err(_) => return CondVerdict::Failed(MonoTyReason::NoNode),
         };
         match elem {
             Some(elem) => CondVerdict::Holds(Some(elem)),
@@ -3726,7 +3717,7 @@ fn compiler_generated_sites(
                 // The one trigger with alternatives: the element decides which.
                 if *trigger == "__vec_data_sort" {
                     let Some(elem) = elem else { continue };
-                    out.push(GeneratedSite { expr: e, name: sort_entry(ws, &elem) });
+                    out.push(GeneratedSite { expr: e, name: sort_entry(&elem) });
                     continue;
                 }
                 out.extend(names.iter().map(|n| GeneratedSite { expr: e, name: n }));
@@ -3780,6 +3771,7 @@ fn dispatched_sites(
     domain: &SiteDomain,
 ) -> Vec<(Site, &'static str)> {
     use bone_semantic::hir::{BinOp, Expr as E, InterpPart};
+    let rep_arena = RepArena::default();
     let dcx = skull_mir::lower::DispatchCtx {
         ws,
         inf: Some(inf),
@@ -3788,7 +3780,9 @@ fn dispatched_sites(
         concrete_types: None,
         concrete_type_cache: None,
         interner: None,
-        legacy_subst: Some(subst),
+        rep_arena: &rep_arena,
+        target: bone_semantic::hir::FnBackend::Any,
+        logical_subst: Some(subst),
         values_first_class: false,
     };
     let mut out: Vec<(Site, &'static str)> = Vec::new();
@@ -3899,30 +3893,12 @@ pub fn boundary_class_for(
 /// A target artifact view may still REPLACE an expanded fallback with that
 /// target's mapping. That is an artifact decision, not a shared-graph one.
 fn declared_boundary(f: &Function) -> Option<BoundaryClass> {
-    if f.is_extern {
-        return Some(BoundaryClass::Extern);
-    }
-    if skull_mir::intrinsics::expand_kind(f).is_some() {
-        return Some(BoundaryClass::Intrinsic);
-    }
-    if f.annotations.iter().any(|a| a.name.name.as_str() == "intrinsic") {
-        // `inline_body` is the luajit MAPPING; a Rock body is the fallback.
-        return (skull_mir::intrinsics::is_native_required(f) || !has_rock_body(f))
-            .then_some(BoundaryClass::Intrinsic);
-    }
-    if f.inline_body.is_some() {
-        return Some(BoundaryClass::InlineBody);
-    }
-    None
+    skull_mir::lower::declared_boundary_class(f)
 }
 
 /// Whether the declaration carries a portable Rock body, as opposed to only a
 /// foreign one. `has_body` on the module is the walk's own question; this is the
 /// declaration-level form the classifier needs before any module lookup.
-fn has_rock_body(f: &Function) -> bool {
-    f.inline_body.is_none() && !f.is_extern
-}
-
 /// Runtime entries an opaque inline body CALLS.
 ///
 /// An inline body is foreign text, so the walk cannot lower it -- but emission
@@ -4164,48 +4140,36 @@ pub fn instance_count(g: &InstanceGraph) -> usize {
     g.instances.len()
 }
 
-/// Reconciliation of the current conditional specializer against the shadow graph
-/// (plan S 15a). Equality is NOT expected -- the current mechanism is conditional,
-/// so the shadow side is strictly larger. What must hold is that nothing today's
-/// machinery produces is MISSING from the shadow graph; an absence in that
-/// direction means the shadow walk cannot see an edge production already takes.
+/// Coverage of concrete generic call identities by the instance graph.
 #[derive(Default, Debug)]
-pub struct Reconciliation {
-    /// Specializations the current machinery produces.
-    pub today: usize,
-    /// ...of which the shadow graph contains a matching instance.
-    pub matched: usize,
-    /// ...of which it does NOT, and whose CALLER the shadow walk did reach.
+pub struct CallIdentityCensus {
+    /// Complete generic call identities recovered from typed bindings.
+    pub calls: usize,
+    /// ...of which the instance graph contains a matching instance.
+    pub matched_instances: usize,
+    /// ...of which it does NOT, and whose CALLER the instance graph did reach.
     /// Each of these is a failure, not a difference.
     pub missing: Vec<String>,
-    /// ...of which it does not, but whose caller the shadow walk never reached
-    /// either. A reachability difference, explained rather than unexplained.
-    pub missing_unreached_caller: usize,
-    /// Call sites whose current spec decision was a Stage-0b invariant
-    /// rejection. Expected to be zero on a valid corpus.
-    pub rejected_sites: usize,
-    /// Shadow instances with no counterpart today. These are the EXPECTED
-    /// difference: instances the conditional specializer declines to make.
-    pub shadow_only: usize,
+    /// ...of which it does not, but whose caller the instance graph never
+    /// reached either. This is a reachability difference, not a missing
+    /// instance.
+    pub unreached_callers: usize,
+    /// Call sites whose identity could not be stated from compiler state.
+    pub unresolved_sites: usize,
+    /// Graph instances with no counterpart in the direct-call census.
+    pub graph_only: usize,
 }
 
-/// A today-slot matches a shadow arg when the slot is `None` (no concrete type
-/// reaches it, so it constrains nothing) or the canonical types are equal. Both
-/// sides encode with `MonoTy::canonical`, so a pretty-printing ambiguity cannot
-/// match two different types to each other.
-/// Positional equality. It used to treat a `None` slot as matching ANYTHING,
-/// which a total key cannot express -- and never had to: the corpus produced no
-/// partial key, so the wildcard arm matched nothing it would not have matched
-/// exactly. Strictly narrower, and the census below is the measurement that
-/// says so.
-fn slots_match(slots: &[String], shadow: &[String]) -> bool {
-    slots == shadow
+/// Both sides encode with `MonoTy::canonical`, so a pretty-printing ambiguity
+/// cannot match two different types to each other.
+fn slots_match(slots: &[String], instance: &[String]) -> bool {
+    slots == instance
 }
 
-pub fn reconcile(ws: &Workspace, g: &InstanceGraph) -> Reconciliation {
-    let (today, rejected_sites) = skull_mir::spec_census::today_specializations(ws);
+pub fn reconcile_call_identities(ws: &Workspace, g: &InstanceGraph) -> CallIdentityCensus {
+    let (calls, unresolved_sites) = skull_mir::spec_census::concrete_calls(ws);
 
-    // Shadow instances grouped by function, as canonical argument lists.
+    // Graph instances grouped by function, as canonical argument lists.
     let mut by_func: FxHashMap<(u32, u32), Vec<Vec<String>>> = FxHashMap::default();
     for i in &g.instances {
         by_func
@@ -4214,10 +4178,14 @@ pub fn reconcile(ws: &Workspace, g: &InstanceGraph) -> Reconciliation {
             .push(i.args.iter().map(|a| g.interner.canonical(*a)).collect());
     }
 
-    let mut r = Reconciliation { today: today.len(), rejected_sites, ..Default::default() };
-    let mut matched_shadow: std::collections::HashSet<(u32, u32, Vec<String>)> =
+    let mut r = CallIdentityCensus {
+        calls: calls.len(),
+        unresolved_sites,
+        ..Default::default()
+    };
+    let mut matched_instances: std::collections::HashSet<(u32, u32, Vec<String>)> =
         Default::default();
-    for t in &today {
+    for t in &calls {
         let k = (t.func.module.raw(), t.func.func.into_raw().into_u32());
         let hit = by_func
             .get(&k)
@@ -4225,13 +4193,13 @@ pub fn reconcile(ws: &Workspace, g: &InstanceGraph) -> Reconciliation {
             .unwrap_or(None);
         match hit {
             Some(a) => {
-                r.matched += 1;
-                matched_shadow.insert((k.0, k.1, a.clone()));
+                r.matched_instances += 1;
+                matched_instances.insert((k.0, k.1, a.clone()));
             }
             None => {
                 let ck = (t.caller.module.raw(), t.caller.func.into_raw().into_u32());
                 if !by_func.contains_key(&ck) {
-                    r.missing_unreached_caller += 1;
+                    r.unreached_callers += 1;
                     continue;
                 }
                 let f = &ws.module(t.func.module).functions[t.func.func];
@@ -4248,13 +4216,13 @@ pub fn reconcile(ws: &Workspace, g: &InstanceGraph) -> Reconciliation {
     }
     r.missing.sort();
     r.missing.dedup();
-    r.shadow_only = g
+    r.graph_only = g
         .instances
         .iter()
         .filter(|i| {
             let k = (i.func.module.raw(), i.func.func.into_raw().into_u32());
             let args: Vec<String> = i.args.iter().map(|a| g.interner.canonical(*a)).collect();
-            !matched_shadow.contains(&(k.0, k.1, args))
+            !matched_instances.contains(&(k.0, k.1, args))
         })
         .count();
     r

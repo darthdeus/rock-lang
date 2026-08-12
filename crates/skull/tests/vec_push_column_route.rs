@@ -111,9 +111,8 @@ fn both_receiver_forms_answer_correctly() {
     assert_eq!(run(BOXED_RECEIVER, "vec_push_boxed_recv"), "7");
 }
 
-/// An opaque body never specializes (`compute_call_spec` bails on
-/// `inline_body.is_some()`), so retyping the payload `T` -> `any` cannot produce
-/// a per-instantiation copy.
+/// An opaque body has one declaration-owned boundary plan, so retyping the
+/// payload `T` -> `any` cannot produce a second Rock body.
 ///
 /// Stated over the definition COUNT, not the spelling. `vec_push` is not
 /// `@nomangle` -- no opaque body names it, so it carries no bare-name obligation
@@ -130,7 +129,7 @@ fn the_boxed_body_has_exactly_one_definition() {
     assert_eq!(
         defs.len(),
         1,
-        "an inline body never specializes, so exactly one `vec_push` definition \
+        "an opaque boundary has one definition, so exactly one `vec_push` definition \
          may exist: {defs:?}"
     );
 }

@@ -289,6 +289,125 @@ fn sprite_batch_artifact() -> (
     (glsl, emission)
 }
 
+const WGSL_NUMERIC_STAGES: &str = r#"
+value MathAttrs { pos: Vec2 }
+value VertexMathUniform { v_int_a: int, v_int_b: int, v_float_a: float, v_float_b: float }
+value FragmentMathUniform { f_int_a: int, f_int_b: int, f_float_a: float, f_float_b: float }
+struct MathTextures { uMathTexture: Sampler2D }
+value MathVary {
+    position: Vec4,
+    idiv: float,
+    imod: float,
+    fmod: float,
+    converted: float,
+}
+
+@shader(vertex)
+fn numeric_vert(@attr a: MathAttrs, @uniform u: VertexMathUniform) -> MathVary {
+    let q = u.v_int_a ./ u.v_int_b
+    let r = u.v_int_a % u.v_int_b
+    let fr = u.v_float_a % u.v_float_b
+    let fi = u.v_float_a as int
+    let marker = 1.0
+    if q < r || fi < 0 { marker = -1.0 }
+    return MathVary {
+        position: v(a.pos, 0.0, 1.0),
+        idiv: marker,
+        imod: marker,
+        fmod: fr,
+        converted: marker,
+    }
+}
+
+@shader(fragment)
+fn numeric_frag(
+    vary: MathVary,
+    @uniform u: FragmentMathUniform,
+    @textures t: MathTextures,
+) -> Vec4 {
+    let q = u.f_int_a ./ u.f_int_b
+    let r = u.f_int_b % u.f_int_a
+    let fr = u.f_float_b % u.f_float_a
+    let fi = u.f_float_a as int
+    let marker = 1.0
+    if q < r || fi < 0 { marker = -1.0 }
+    return v(vary.idiv + marker, vary.imod + marker,
+        vary.fmod + fr, vary.converted + marker)
+}
+"#;
+
+fn explicit_artifact_source(
+    source: &str,
+    vertex_root: &str,
+    fragment_root: &str,
+) -> skull_codegen_wgsl::WgslShaderEmission {
+    let (ws, mid) = workspace(source);
+    let glsl = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
+        &ws,
+        mid,
+        vertex_root,
+        fragment_root,
+        skull_codegen_glsl::GlslProfile::Core330,
+    )
+    .expect("the explicit fixture has a neutral graphics plan");
+    let abi = WgslAbiPlan::explicit(
+        &glsl.interface,
+        "vertex_main",
+        "fragment_main",
+        Span::default(),
+    )
+    .expect("the explicit fixture has a WGSL ABI");
+    skull_codegen_wgsl::emit_explicit_shader(
+        &ws,
+        &glsl.ir,
+        &glsl.interface,
+        &abi,
+        Span::default(),
+    )
+    .expect("the explicit fixture emits WGSL")
+}
+
+#[test]
+fn vertex_and_fragment_preserve_rock_floor_numeric_semantics() {
+    let artifact = explicit_artifact_source(WGSL_NUMERIC_STAGES, "numeric_vert", "numeric_frag");
+    assert_eq!(artifact.source.matches("rock_floor_idiv(").count(), 4, "{0}", artifact.source);
+    assert_eq!(artifact.source.matches("rock_floor_imod(").count(), 3, "{0}", artifact.source);
+    assert_eq!(artifact.source.matches("rock_floor_fmod(").count(), 3, "{0}", artifact.source);
+    assert_eq!(artifact.source.matches("i32(floor(").count(), 2, "{0}", artifact.source);
+    assert!(artifact.source.contains("return select("), "{0}", artifact.source);
+    naga_validate(&artifact.source);
+}
+
+#[test]
+fn explicit_varying_reconstruction_follows_declared_field_names() {
+    let source = r#"
+value ReorderedAttrs { pos: Vec2 }
+value ReorderedVary {
+    uv: Vec2,
+    position: Vec4,
+    tint: Vec4,
+}
+struct ReorderedTextures { uReorderedTexture: Sampler2D }
+
+@shader(vertex)
+fn reordered_vert(@attr a: ReorderedAttrs) -> ReorderedVary {
+    return ReorderedVary {
+        uv: v(0.25, 0.75),
+        position: v(a.pos, 0.0, 1.0),
+        tint: v(1.0, 0.5, 0.25, 1.0),
+    }
+}
+
+@shader(fragment)
+fn reordered_frag(vary: ReorderedVary, @textures t: ReorderedTextures) -> Vec4 {
+    return vary.tint + v(vary.uv, 0.0, 0.0)
+}
+"#;
+    let artifact = explicit_artifact_source(source, "reordered_vert", "reordered_frag");
+    assert!(artifact.source.contains("let vary = ReorderedVary(input.uv, input.position, input.tint);"), "{0}", artifact.source);
+    naga_validate(&artifact.source);
+}
+
 fn naga_validate(source: &str) {
     let module = naga::front::wgsl::parse_str(source)
         .unwrap_or_else(|error| panic!("WGSL parses: {error}\n{source}"));
@@ -472,8 +591,12 @@ fn bool_uniforms_cross_as_u32_and_are_compared_at_every_read() {
 #[test]
 fn the_fragment_control_flow_and_builtins_reach_wgsl() {
     let (_, artifact) = sprite_batch_artifact();
+    let light_loops = artifact.source.lines().filter(|line| {
+        let line = line.trim();
+        line.starts_with("for (; i < cell_") && line.ends_with(") {")
+    }).count();
     assert_eq!(
-        artifact.source.matches("  for (; i < cell_22; i = i + 1) {").count(),
+        light_loops,
         1,
         "the light loop is a counted for: {}",
         artifact.source

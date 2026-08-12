@@ -140,6 +140,8 @@ mod multi_rejection;
 mod nb_storage_registry;
 #[path = "native_buffer_alloc.rs"]
 mod native_buffer_alloc;
+#[path = "native_buffer_element_admission.rs"]
+mod native_buffer_element_admission;
 #[path = "native_buffer_leaf_addressing.rs"]
 mod native_buffer_leaf_addressing;
 #[path = "nobox_arena_random_sentinel.rs"]

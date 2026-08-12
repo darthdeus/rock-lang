@@ -19,6 +19,7 @@ log = { workspace = true }
 
 [dev-dependencies]
 skull-parser = { path = "../skull-parser" }
+skull-graph = { path = "../skull-graph" }
 
 [lints]
 workspace = true

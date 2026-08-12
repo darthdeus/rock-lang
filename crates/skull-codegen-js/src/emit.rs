@@ -15,6 +15,7 @@ use bone_semantic::inference::Workspace;
 use comfy_la_arena::Idx;
 use skull_mir::intrinsics::{Emission, IntrinsicTable};
 use skull_mir::instance::Instance;
+use skull_mir::lower::BackendFnAbiPlan;
 use skull_mir::mir::{Block, Cell, ContainerKind, FuncRef, Inst, Lit, MirFunc, Term};
 use skull_graph::artifact::{self, ArtifactView};
 use skull_graph::instance_graph::{InstanceGraph, Site, SiteOutcome};
@@ -154,34 +155,49 @@ fn ret_slot_decls(n: usize) -> String {
     format!("var {};\n", names.join(", "))
 }
 
-/// The widest multi-value wire in `bodies`: the max leaf count over every
-/// multi-value `Term::Return` and every multi-value call's dests, nested fns
-/// included.
+/// The widest result wire in `bodies`, as recorded by the owning ABI plans.
+/// Call destinations are operational storage; their length is not a second
+/// ABI oracle.
 ///
 /// MIR is not the only writer: an `inline(js)` body publishes its own lanes, so
 /// the bank is sized over [`max_published_lanes`] too. Both paths that assemble
 /// a program take that max -- sizing from MIR alone under-declares silently,
 /// because the emitted program is sloppy-mode and an undeclared write just
 /// becomes an implicit global.
-fn max_multi_wire(bodies: &[&MirFunc]) -> usize {
-    fn of(mf: &MirFunc) -> usize {
-        let mut n = 0usize;
-        for (_, block) in mf.blocks.iter() {
-            if let Term::Return(vs) = &block.term {
-                n = n.max(vs.len());
-            }
-        }
-        for (_, inst) in mf.insts.iter() {
+fn max_multi_wire(bodies: &[&MirFunc]) -> Result<usize, CompilerError> {
+    fn of(mf: &MirFunc) -> Result<usize, CompilerError> {
+        let mut n = mf
+            .abi_representation
+            .as_ref()
+            .map_or(0, skull_mir::lower::FunctionRepPlan::return_lanes);
+        n = n.max(mf.abi_plan.as_ref().map_or(0, BackendFnAbiPlan::result_lanes));
+        for (iid, inst) in mf.insts.iter() {
             match inst {
-                Inst::CallMulti { dests, .. }
-                | Inst::CallValueMulti { dests, .. }
-                | Inst::CallBoundMulti { dests, .. } => n = n.max(dests.len()),
+                Inst::CallMulti { .. } | Inst::CallValueMulti { .. } => {
+                    if let Some(plan) = mf.call_abi_plans.get(&iid) {
+                        n = n.max(plan.result_lanes());
+                    } else if let Some(plan) = mf.call_rep_plans.get(&iid) {
+                        n = n.max(plan.return_lanes());
+                    } else {
+                        return Err(err("JS: multi-value call has no owned ABI plan"));
+                    }
+                }
+                Inst::CallBoundMulti { .. } => {
+                    return Err(err(
+                        "JS: unresolved bound multi-value call has no owned ABI plan",
+                    ));
+                }
                 _ => {}
             }
         }
-        n.max(mf.nested_fns.iter().map(of).max().unwrap_or(0))
+        for nested in &mf.nested_fns {
+            n = n.max(of(nested)?);
+        }
+        Ok(n)
     }
-    bodies.iter().map(|mf| of(mf)).max().unwrap_or(0)
+    bodies.iter().map(|mf| of(mf)).collect::<Result<Vec<_>, _>>().map(|widths| {
+        widths.into_iter().max().unwrap_or(0)
+    })
 }
 
 /// The widest wire any reachable `inline(js)` body PUBLISHES, from the concrete
@@ -1953,14 +1969,19 @@ impl Emitter<'_> {
                 // struct can reach here with no dot in sight. That is harmless
                 // HERE and nowhere else -- with no data leaves the flat object
                 // and the declared object are the same object, so both arms
-                // agree. luajit had to be re-keyed on `value_struct_is_leaf_table`
+                // agree. luajit had to be re-keyed on the shared leaf-table plan
                 // for exactly this shape, because its two arms are different
                 // FUNCTIONS and one of them is never emitted.
                 if fields.iter().any(|(f, _)| f.contains('.')) {
                     // Same strictness as the Lua emitter: a PARTIAL flattening
                     // must reject, not silently emit a half-shaped object.
-                    let canonical =
-                        skull_mir::lower::value_leaf_paths_of(self.ws, *name).unwrap_or_default();
+                    let canonical = skull_mir::lower::RepArena::default()
+                        .nominal_value_leaf_paths(
+                            self.ws,
+                            bone_semantic::hir::FnBackend::Js,
+                            *name,
+                        )
+                        .unwrap_or_default();
                     let got: Vec<ustr::Ustr> = fields.iter().map(|(f, _)| *f).collect();
                     if got != canonical {
                         return Err(CompilerError::new_no_location(format!(
@@ -2070,11 +2091,12 @@ impl Emitter<'_> {
             // The `native_buffer_alloc<T>` primitive lowers to this MIR node
             // (skull-mir intercepts the call and resolves the element ctype).
             // `Ptr<T>` IS a TypedArray on JS, matching the luajit `ffi.new` cdata;
-            // value-struct / bool element ctypes have no TypedArray, so reject.
+            // value-struct elements use the shared flat C layout below.
             Inst::FfiNewArray { ctype, count } => match ctype.as_str() {
                 "float" => format!("new Float32Array({})", self.render_val(*count)?),
                 "int" => format!("new Int32Array({})", self.render_val(*count)?),
                 "uint32_t" => format!("new Uint32Array({})", self.render_val(*count)?),
+                "bool" => format!("new Uint8Array({})", self.render_val(*count)?),
                 // A value struct has no per-struct ctype on JS: back it onto one
                 // flat `Float32Array(n * size/4)` laid out in the SAME C bytes
                 // luajit uses, which the per-leaf views (`FfiViewCast`) then alias
@@ -2082,10 +2104,17 @@ impl Emitter<'_> {
                 // leaf count, so the vertex pool's storage and its `.ptr` going to
                 // WebGL are unchanged -- pinned by `nb_leaf_layout_premise`.
                 other => {
-                    let size = skull_mir::lower::value_leaf_size(self.ws, *ctype).map_err(|e| {
+                    let size = skull_mir::lower::RepArena::default()
+                        .nominal_leaf_size(
+                            self.ws,
+                            bone_semantic::hir::FnBackend::Js,
+                            *ctype,
+                        )
+                        .map_err(|e| {
                         err(format!(
                             "JS subset: native_buffer_alloc element ctype `{other}` has no C \
-                             leaf layout to back a TypedArray with ({e})"
+                             leaf layout to back a TypedArray with ({})",
+                            e.message
                         ))
                     })?;
                     // A 4-byte-backed array needs a 4-byte multiple. C gives that
@@ -2140,7 +2169,7 @@ impl Emitter<'_> {
             // packed-double arrays beat `Float64Array` for the strided reads
             // this layout exists to make fast (`docs/js-vec-columns-plan.md`).
             // A nested leaf path is dotted (`min.x`), so keys are quoted.
-            Inst::MakeVecColumns { elem, columns, len, capacity } => {
+            Inst::MakeVecColumns { elem, columns, len, capacity, .. } => {
                 let mut s = format!(
                     "{{{}: {{repr: {}, elem: {}, cap: {}}}",
                     js_string_lit(skull_mir::mir::VEC_COLUMN_HEADER_FIELD)?,
@@ -2162,6 +2191,12 @@ impl Emitter<'_> {
                 s.push_str(&format!(", len: {len}, __ty: \"Vec\"}}"));
                 s
             }
+            Inst::MakeVecColumnHeader { elem, capacity, .. } => format!(
+                "{{repr: {}, elem: {}, cap: {}}}",
+                js_string_lit(skull_mir::mir::VEC_COLUMN_REPR)?,
+                js_string_lit(elem.as_str())?,
+                self.render_val(*capacity)?,
+            ),
             // The element index is checked ONCE here; each per-leaf access then
             // indexes its column raw.
             Inst::VecCheckedIndex { vec, index } => format!(
@@ -2425,7 +2460,14 @@ impl Emitter<'_> {
                     // A scalarized ENUM box reaches here (name is an enum value-shape,
                     // not a struct): its numeric tag / named variant cannot be rebuilt
                     // from the `{__tag, _n}` object -- reject honestly.
-                    if skull_mir::lower::value_struct_is_gc_free(self.ws, *name) {
+                    if matches!(
+                        skull_mir::lower::RepArena::default().nominal_value_storage(
+                            self.ws,
+                            bone_semantic::hir::FnBackend::Js,
+                            *name,
+                        ),
+                        Some(skull_mir::lower::ValueStorage::CData)
+                    ) {
                         return Err(err(format!(
                             "JS subset: `inspect` of scalarized enum `{name}` \
                              (numeric-tag box cannot reproduce the named variant)"
@@ -2558,6 +2600,7 @@ pub fn emit_with_closure(
     };
     let mut st = WorklistState::new(
         ws,
+        &scx,
         &root_plan.named,
         false,
         &session.graph,
@@ -2587,7 +2630,7 @@ pub fn emit_with_closure(
     out.push_str(&emit_inspect_ty(ws, &bodies)?);
     out.push_str(&emit_col_mat(ws, &bodies)?);
     out.push_str(&ret_slot_decls(
-        max_multi_wire(&bodies).max(max_published_lanes(&session.view, &st.inline_js)?),
+        max_multi_wire(&bodies)?.max(max_published_lanes(&session.view, &st.inline_js)?),
     ));
     // Global initializers first (`function __ginit_<name>() {...}`), then the
     // load-time assignment lines in dependency order, then the fn defs. (The
@@ -2942,6 +2985,7 @@ fn assemble_program_core(
     let deco_names = decorator_names(ws);
     let mut st = WorklistState::new(
         ws,
+        scx,
         roots,
         true,
         &session.graph,
@@ -3017,21 +3061,8 @@ fn assemble_program_core(
             // body's `spec_bindings` as demands -- so a specialization a deco
             // body was the only caller of was never queued, and the call site
             // spelled a name nothing emitted.
-            let incoming = concrete_plan
-                .expect("a lowered decorator has a concrete plan")
-                .bound_tree
-                .clone();
-            let ctx = skull_mir::bound::concrete_body_ctx(
-                ws,
-                module.id,
-                bone_semantic::hir::BodyOwner::Decorator(did),
-                &incoming,
-                scx.interner(),
-            );
             let mut findings: Vec<CompilerError> = Vec::new();
-            findings.extend(
-                JsDelivery { ws, scx, st: &mut st }.schedule_body(&ctx, &mf)?,
-            );
+            findings.extend(JsDelivery { ws, scx, st: &mut st }.schedule_body(&mf)?);
             match merge_findings(findings) {
                 Some(e) => st.reject(&deco_name, e),
                 None => deco_bodies.push((deco_name, mf)),
@@ -3071,7 +3102,7 @@ fn assemble_program_core(
     out.push_str(&col_mat);
     stable.push_str(&col_mat);
     let ret_slots = ret_slot_decls(
-        max_multi_wire(&bodies).max(max_published_lanes(&session.view, &st.inline_js)?),
+        max_multi_wire(&bodies)?.max(max_published_lanes(&session.view, &st.inline_js)?),
     );
     out.push_str(&ret_slots);
     stable.push_str(&ret_slots);
@@ -3635,6 +3666,7 @@ fn add_inline_js_body(bodies: &mut Vec<JsInlineBody>, instance: Instance, decl: 
 impl WorklistState {
     fn new(
         ws: &Workspace,
+        scx: &skull_mir::lower::ScalarCtx,
         roots: &[(FuncRef, String)],
         program_mode: bool,
         graph: &InstanceGraph,
@@ -3710,7 +3742,7 @@ impl WorklistState {
             spec_lowered: Vec::new(),
             inline_js,
             state_index: build_state_index(ws),
-            nobox_leaf_globals: build_nobox_leaf_globals(ws),
+            nobox_leaf_globals: build_nobox_leaf_globals(ws, scx),
             deco_globals: if program_mode { HashSet::new() } else { decorator_populated_globals(ws) },
             enum_defs: build_enum_global_defs(ws),
             gctx: GlobalCtx::default(),
@@ -3782,7 +3814,7 @@ fn emit_inline_js_fn(
     // `<name>__<leaf>` scalars, same as the lua path, so the exploded call
     // sites and the raw body's leaf names agree.
     let selected = Instance { func: fr, args: instance.args.clone() };
-    let abi = skull_mir::lower::BackendFnAbiPlan::for_instance(ws, scx, &selected);
+    let abi = skull_mir::lower::BackendFnAbiPlan::for_boundary_instance(ws, scx, &selected);
     let lua_param_names = abi.lua_param_names(ws);
     let params = match &lua_param_names {
         Some(names) => names.join(", "),
@@ -3829,13 +3861,12 @@ fn register_statics(mf: &MirFunc, gctx: &mut GlobalCtx) {
 /// lambda is its own emitted callable and its residual bindings are its own.
 fn collect_spec_bound_calls(
     ws: &Workspace,
-    ctx: &skull_mir::bound::BoundCtx,
     mf: &MirFunc,
     out: &mut Vec<skull_mir::bound::SpecDemand>,
 ) -> Result<(), CompilerError> {
-    skull_mir::reach::spec_bound_calls(ws, ctx, mf, out)?;
+    skull_mir::reach::spec_bound_calls(ws, mf, out)?;
     for nf in &mf.nested_fns {
-        collect_spec_bound_calls(ws, ctx, nf, out)?;
+        collect_spec_bound_calls(ws, nf, out)?;
     }
     Ok(())
 }
@@ -3910,15 +3941,7 @@ impl JsDelivery<'_> {
         for nf in &mf.nested_fns {
             collect(&mut findings, nobox_errs(self.ws, nf));
         }
-        let incoming = plan.bound_tree.clone();
-        let ctx = skull_mir::bound::concrete_body_ctx(
-            self.ws,
-            fr.module,
-            bone_semantic::hir::BodyOwner::Function(fr.func),
-            &incoming,
-            self.scx.interner(),
-        );
-        findings.extend(self.schedule_body(&ctx, &mf)?);
+        findings.extend(self.schedule_body(&mf)?);
         match merge_findings(findings) {
             Some(e) => self.st.reject(&name, e),
             None => self.st.lowered.push((fr, mf)),
@@ -4024,7 +4047,7 @@ impl JsDelivery<'_> {
             );
             return Ok(());
         }
-        if let Err(e) = skull_transform::bound::resolve_standalone_bound_calls_with_plans(
+        if let Err(e) = skull_transform::bound::resolve_standalone_bound_calls(
             self.ws,
             self.scx,
             self.scx.interner(),
@@ -4066,14 +4089,7 @@ impl JsDelivery<'_> {
         }
         mf.name = ustr::Ustr::from(name.as_str());
         self.st.names.insert(inst.clone(), name.clone());
-        let ctx = skull_mir::bound::concrete_body_ctx(
-            self.ws,
-            fr.module,
-            bone_semantic::hir::BodyOwner::Function(fr.func),
-            &tree,
-            self.scx.interner(),
-        );
-        findings.extend(self.schedule_body(&ctx, &mf)?);
+        findings.extend(self.schedule_body(&mf)?);
         match merge_findings(findings) {
             Some(e) => self.st.reject(&name, e),
             None => self.st.spec_lowered.push((inst, mf)),
@@ -4128,25 +4144,16 @@ impl JsDelivery<'_> {
         for nf in &mf.nested_fns {
             collect(&mut findings, nobox_errs(self.ws, nf));
         }
-        let incoming = concrete_plan
-            .expect("a lowered global has a concrete plan")
-            .bound_tree
-            .clone();
-        let ctx = skull_mir::bound::concrete_body_ctx(
-            self.ws,
-            site.module,
-            bone_semantic::hir::BodyOwner::Global(site.gid),
-            &incoming,
-            self.scx.interner(),
-        );
-        findings.extend(self.schedule_body(&ctx, &mf)?);
+        findings.extend(self.schedule_body(&mf)?);
         if let Some(e) = merge_findings(findings) {
             self.st.reject(&init_name, e);
             return Ok(());
         }
         let gdecl = &self.ws.module(site.module).globals[site.gid];
         let is_const = gdecl.is_const;
-        let leaves = skull_mir::lower::nobox_global_leaves(self.ws, gdecl.name, gdecl.ty);
+        let leaves = skull_mir::lower::GlobalPlan::for_declared_type(self.ws, self.scx, gdecl.ty)
+            .ok()
+            .and_then(|plan| plan.leaf_names(gdecl.name));
         self.st.ginits.push(GlobalInit {
             name: gname,
             init_name,
@@ -4169,7 +4176,6 @@ impl JsDelivery<'_> {
     /// skips, so it aborts the emission immediately as before.
     fn schedule_body(
         &mut self,
-        ctx: &skull_mir::bound::BoundCtx,
         mf: &MirFunc,
     ) -> Result<Vec<CompilerError>, CompilerError> {
         let ws = self.ws;
@@ -4177,7 +4183,7 @@ impl JsDelivery<'_> {
         register_statics(mf, &mut st.gctx);
         let mut findings = Vec::new();
         let mut demands = Vec::new();
-        collect(&mut findings, collect_spec_bound_calls(ws, ctx, mf, &mut demands));
+        collect(&mut findings, collect_spec_bound_calls(ws, mf, &mut demands));
         for demand in demands {
             if st.bound_tree_disagreements.contains(&demand.inst) {
                 let f = &ws.module(demand.inst.func.module).functions[demand.inst.func.func];
@@ -4386,25 +4392,36 @@ fn check_scalar_abi(
                     .get(&body)
                     .map(|decl| Instance { func: *decl, args: body.args.clone() });
                 let selected_sibling = selected.as_ref().is_some_and(|inst| inst.func != body.func);
-                let abi = if selected_sibling {
-                    None
-                } else {
-                    concrete.get(&body).or_else(|| {
-                        selected
-                            .as_ref()
-                            .and_then(|inst| concrete.get(inst))
-                    })
-                };
+                let abi = concrete.get(&body).or_else(|| {
+                    selected
+                        .as_ref()
+                        .and_then(|inst| concrete.get(inst))
+                });
                 let required = match abi {
                     Some(plan) => {
-                        let abi = skull_mir::lower::BackendFnAbiPlan::for_concrete_plan(
-                            ws, scx, plan,
-                        );
+                        let abi = if selected_sibling {
+                            let selected = selected.as_ref().expect("selected sibling was checked above");
+                            skull_mir::lower::BackendFnAbiPlan::for_concrete_signature(
+                                ws,
+                                scx,
+                                selected,
+                                &plan.signature,
+                            )
+                        } else {
+                            skull_mir::lower::BackendFnAbiPlan::for_concrete_plan(ws, scx, plan)
+                        };
                         required_arg_count(ws, &abi, arity)
                     }
                     None if selected_sibling => {
                         let selected = selected.expect("selected sibling was checked above");
-                        let abi = skull_mir::lower::BackendFnAbiPlan::for_instance(
+                        if skull_mir::lower::requires_concrete_body_plan(ws, &selected) {
+                            findings.push(err(format!(
+                                "JS subset: no concrete ABI signature for selected {what}`{}`",
+                                ws.module(callee.module).functions[callee.func].name,
+                            )));
+                            continue;
+                        }
+                        let abi = skull_mir::lower::BackendFnAbiPlan::for_boundary_instance(
                             ws, scx, &selected,
                         );
                         required_arg_count(ws, &abi, arity)
@@ -4417,7 +4434,9 @@ fn check_scalar_abi(
                         continue;
                     }
                     None => {
-                        let abi = skull_mir::lower::BackendFnAbiPlan::for_instance(ws, scx, &body);
+                        let abi = skull_mir::lower::BackendFnAbiPlan::for_boundary_instance(
+                            ws, scx, &body,
+                        );
                         required_arg_count(ws, &abi, arity)
                     }
                 };
@@ -4492,17 +4511,17 @@ fn emit_inspect_ty(ws: &Workspace, bodies: &[&MirFunc]) -> Result<String, Compil
 /// and the element type is a compile-time fact at every column site anyway --
 /// that is exactly why `spec_key_has_target_storage` forces specialization for one.
 fn emit_col_mat(ws: &Workspace, bodies: &[&MirFunc]) -> Result<String, CompilerError> {
-    let mut names: BTreeSet<ustr::Ustr> = BTreeSet::new();
+    let mut plans = std::collections::BTreeMap::new();
     for mf in bodies {
-        skull_mir::mir::column_elem_types(mf, &mut names);
+        skull_mir::mir::column_elem_plans(mf, &mut plans);
     }
-    build_col_mat_defs(ws, &names)
+    build_col_mat_defs(ws, &plans)
 }
 
 /// Emit `__rock_col_mat["<E>"] = function(v, i) { return {...}; };` -- one
 /// element rebuilt from its leaf columns, nested objects and all.
 ///
-/// The leaf paths come from `value_leaf_paths_of`, THE column-key source (the
+/// The leaf paths come from the owned representation plan, THE column-key source (the
 /// lowering writes the same paths), so the reader cannot drift from the writer.
 /// A column element is a GC-free `value` struct by construction
 /// (`vec_column_elem`), so the rebuilt object is a plain `{__ty, ..}` -- the same
@@ -4510,18 +4529,23 @@ fn emit_col_mat(ws: &Workspace, bodies: &[&MirFunc]) -> Result<String, CompilerE
 /// `E { x: 1, y: 2 }` with no further help.
 fn build_col_mat_defs(
     ws: &Workspace,
-    names: &BTreeSet<ustr::Ustr>,
+    plans: &std::collections::BTreeMap<ustr::Ustr, bool>,
 ) -> Result<String, CompilerError> {
     let mut out = String::new();
-    for name in names {
+    let rep_arena = skull_mir::lower::RepArena::default();
+    for (name, nobox) in plans {
         // A `nobox` element has no materializer BY CONSTRUCTION: every op that
         // would need one (inspect, sort, the Lua-array bridge) is a spanned
         // rejection in the lowering, so emitting one would be unreachable code
         // that reads as an escape hatch from the guarantee.
-        if skull_mir::lower::is_nobox_nominal(ws, *name) {
+        if *nobox {
             continue;
         }
-        let Some(paths) = skull_mir::lower::value_leaf_paths_of(ws, *name) else {
+        let Some(paths) = rep_arena.nominal_value_leaf_paths(
+            ws,
+            bone_semantic::hir::FnBackend::Js,
+            *name,
+        ) else {
             // An enum value-shape has leaf paths but no struct declaration to
             // rebuild against: its `{__tag, _n}` leaves cannot reproduce the
             // named variant a JS enum box carries. Same honest rejection the
@@ -4824,11 +4848,17 @@ fn build_state_index(ws: &Workspace) -> HashMap<ustr::Ustr, GlobalSite> {
 /// questions: a leaf is state (a write to it is legal) but owns no INITIALIZER --
 /// the base global's ginit assigns every leaf, so keying a ginit on a leaf would
 /// emit that initializer once per leaf.
-fn build_nobox_leaf_globals(ws: &Workspace) -> HashMap<ustr::Ustr, ustr::Ustr> {
+fn build_nobox_leaf_globals(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+) -> HashMap<ustr::Ustr, ustr::Ustr> {
     let mut m = HashMap::new();
     for module in &ws.modules {
         for (_gid, g) in module.globals.iter() {
-            if let Some(leaves) = skull_mir::lower::nobox_global_leaves(ws, g.name, g.ty) {
+            if let Some(leaves) = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty)
+                .ok()
+                .and_then(|plan| plan.leaf_names(g.name))
+            {
                 for leaf in leaves {
                     m.insert(leaf, g.name);
                 }
@@ -5277,7 +5307,9 @@ fn build_enum_global_defs(ws: &Workspace) -> HashMap<ustr::Ustr, String> {
     let mut out = HashMap::new();
     for module in ws.modules.iter() {
         for (_, e) in module.enums.iter() {
-            if skull_mir::lower::enum_value_shape(ws, e.name).is_some() {
+            if skull_mir::lower::EnumPlan::for_name(ws, e.name)
+                .is_some_and(|plan| plan.cdata().is_some())
+            {
                 continue;
             }
             let all_unit = !e.variants.is_empty()
@@ -5313,12 +5345,19 @@ fn build_enum_global_defs(ws: &Workspace) -> HashMap<ustr::Ustr, String> {
 }
 
 /// Collect every GC-carrying value-struct name a body CONSTRUCTS (an
-/// `Inst::MakeValueStruct` whose type is `value_struct_is_gc`), scanning the
+/// `Inst::MakeValueStruct` whose type is a non-`CData` `ValueStorage`), scanning the
 /// full inst arena so a value struct built as a nested value operand is caught.
 fn collect_gc_value_structs(ws: &Workspace, mf: &MirFunc, out: &mut BTreeSet<ustr::Ustr>) {
     for inst in mf.insts.values() {
         if let Inst::MakeValueStruct { name, .. } = inst {
-            if skull_mir::lower::value_struct_is_gc(ws, *name) {
+            if !matches!(
+                skull_mir::lower::RepArena::default().nominal_value_storage(
+                    ws,
+                    bone_semantic::hir::FnBackend::Js,
+                    *name,
+                ),
+                Some(skull_mir::lower::ValueStorage::CData)
+            ) {
                 out.insert(*name);
             }
         }
@@ -5338,7 +5377,14 @@ fn close_gc_value_struct_fields(ws: &Workspace, names: &mut BTreeSet<ustr::Ustr>
         let s = &ws.module(sid.module).structs[sid.def];
         for f in &s.fields {
             if let Some(field_struct) = value_struct_field_name(ws, f.ty) {
-                if skull_mir::lower::value_struct_is_gc(ws, field_struct) && names.insert(field_struct)
+                if !matches!(
+                    skull_mir::lower::RepArena::default().nominal_value_storage(
+                        ws,
+                        bone_semantic::hir::FnBackend::Js,
+                        field_struct,
+                    ),
+                    Some(skull_mir::lower::ValueStorage::CData)
+                ) && names.insert(field_struct)
                 {
                     queue.push(field_struct);
                 }
@@ -5491,7 +5537,16 @@ fn build_inspect_ty_defs(
             out.push_str("var __rock_inspect_ty = __rock_inspect_ty || {};\n");
         }
         let header = js_string_lit(name.as_str())?;
-        if s.is_value && !skull_mir::lower::value_struct_is_gc(ws, *name) {
+        if s.is_value
+            && matches!(
+                skull_mir::lower::RepArena::default().nominal_value_storage(
+                    ws,
+                    bone_semantic::hir::FnBackend::Js,
+                    *name,
+                ),
+                Some(skull_mir::lower::ValueStorage::CData)
+            )
+        {
             let pairs: Vec<String> = s
                 .fields
                 .iter()
@@ -5591,8 +5646,8 @@ fn emit_coroutine_js(
     let aux_slots = lowered.aux_all_cells_slots(resume_arg);
     let frame_info = skull_transform::FrameInfo {
         s_cell: lowered.s_cell,
-        fields: lowered.frame_cells.iter().copied().collect(),
-        slots: lowered.frame_slots.clone(),
+        fields: lowered.frame_plan.fields().iter().copied().collect(),
+        slots: lowered.frame_plan.slots().clone(),
     };
     skull_transform::convert_closures_framed(
         &mut lowered.step,
@@ -5608,7 +5663,12 @@ fn emit_coroutine_js(
     // hook/defer region with the all-cells aux map (disjoint block sets over
     // the shared arena).
     let step_entry = lowered.step.entry;
-    skull_transform::materialize_frame(&mut lowered.step, step_entry, lowered.s_cell, &lowered.frame_slots);
+    skull_transform::materialize_frame(
+        &mut lowered.step,
+        step_entry,
+        lowered.s_cell,
+        lowered.frame_plan.slots(),
+    );
     let mut hook_entries: Vec<(&'static str, Idx<Block>)> = Vec::new();
     for (kind, lambda) in &lowered.hooks {
         let Inst::Lambda { params, entry } = &lowered.step.insts[*lambda] else {
@@ -5692,8 +5752,8 @@ fn emit_js_constructor(
         .iter()
         .map(|p| {
             lowered
-                .frame_slots
-                .get(p)
+                .frame_plan
+                .slot(*p)
                 .map(|s| format!("c{s}"))
                 .ok_or_else(|| err("co-fn param must be a frame cell with a slot"))
         })
@@ -5701,7 +5761,7 @@ fn emit_js_constructor(
     let mut init = vec![
         "__ty: \"Coroutine\"".to_string(),
         "__state: 0".to_string(),
-        format!("__layout: {}", lowered.layout_hash),
+        format!("__layout: {}", lowered.frame_plan.layout_hash()),
     ];
     for pf in &param_fields {
         init.push(format!("{pf}: {pf}"));
@@ -6281,6 +6341,7 @@ fn for_each_operand(inst: &Inst, f: &mut impl FnMut(Idx<Inst>)) {
             mark(&[*capacity]);
             columns.iter().for_each(|(_, vs)| mark(vs));
         }
+        Inst::MakeVecColumnHeader { capacity, .. } => mark(&[*capacity]),
         Inst::MakeStruct { fields, .. }
         | Inst::MakeValueStruct { fields, .. }
         | Inst::MaterializeValueStruct { fields, .. }
@@ -6517,6 +6578,7 @@ mod tests {
             .expect("root");
         let root = FuncRef { module: mid, func: fid };
         let interner = std::sync::Arc::new(skull_mir::monoty::MonoInterner::new());
+        let scx = js_scx(&ws);
         let graph = skull_graph::instance_graph::build_in(&ws, Vec::new(), false, interner.clone());
         let roots = [root];
         let view = artifact::realize(
@@ -6531,6 +6593,7 @@ mod tests {
 
         let result = WorklistState::new(
             &ws,
+            &scx,
             &[(root, "root".to_string())],
             false,
             &graph,

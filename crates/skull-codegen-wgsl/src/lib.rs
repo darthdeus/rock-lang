@@ -17,7 +17,7 @@ use skull_codegen_shader::structure::{LoopRegion, Structure};
 use skull_codegen_shader::{ShaderArtifactPlan, ShaderPlannerPolicy};
 use skull_mir::gpu_layout::{AttrKind, SamplerKind, WireKind};
 use skull_mir::mir::{Block, Cell, Inst, Lit, MirFunc, Term};
-use skull_mir::monoty::MonoInterner;
+use skull_mir::monoty::{MonoInterner, MonoTy};
 use skull_mir::shader_ir::{
     ComputeAccess, ComputeAddressSpace, ComputeBuiltin, ComputeDispatchContract,
     ComputeInterfacePlan, ComputeResourceShape, ComputeValueKind, FragmentOutput, LogicalArrayGroup,
@@ -224,6 +224,48 @@ impl ShaderPlannerPolicy for WgslShaderPolicy {
 
     fn backend_name(&self) -> &'static str {
         "WGSL"
+    }
+
+    fn inline_instance(
+        &self,
+        ws: &Workspace,
+        function: &Function,
+        instance: &skull_mir::instance::Instance,
+        interner: &skull_mir::monoty::MonoInterner,
+    ) -> bool {
+        match WgslIntrinsic::classify(function) {
+            Some(WgslIntrinsic::Operator(_)) => function.param_decls.iter().any(|param| {
+                matches!(
+                    value_kind_for_instance_type(ws, param.ty, instance, interner),
+                    Some(ValueKind::Vec2 | ValueKind::Vec3 | ValueKind::Vec4 | ValueKind::Mat4)
+                )
+            }),
+            Some(intrinsic) => intrinsic.is_admitted(),
+            None => false,
+        }
+    }
+
+    fn lowered_native_operator(
+        &self,
+        ws: &Workspace,
+        function: &Function,
+        instance: &skull_mir::instance::Instance,
+        interner: &skull_mir::monoty::MonoInterner,
+    ) -> bool {
+        if !matches!(
+            function.name.as_str(),
+            "__op_add" | "__op_sub" | "__op_mul" | "__op_div" | "__op_idiv" | "__op_mod"
+        ) || function.param_decls.len() != 2
+            || self.inline_instance(ws, function, instance, interner)
+        {
+            return false;
+        }
+        function.param_decls.iter().all(|param| {
+            matches!(
+                value_kind_for_instance_type(ws, param.ty, instance, interner),
+                Some(ValueKind::F32 | ValueKind::I32 | ValueKind::U32)
+            )
+        })
     }
 
     fn unsupported_capability(&self, function: &Function) -> Option<String> {
@@ -1702,6 +1744,59 @@ fn sampler_params_for_stage(
     Ok(params)
 }
 
+#[derive(Default)]
+struct NumericHelperNeeds {
+    int_div: bool,
+    int_mod: bool,
+    float_mod: bool,
+}
+
+fn numeric_helper_needs(ir: &ShaderIR) -> NumericHelperNeeds {
+    let mut needs = NumericHelperNeeds::default();
+    for stage in &ir.stages {
+        for body in stage.bodies.values().chain(std::iter::once(&stage.body)) {
+            for instruction in body.insts.values() {
+                match instruction {
+                    Inst::IntDiv(..) => needs.int_div = true,
+                    Inst::IntMod(..) => {
+                        needs.int_mod = true;
+                        needs.int_div = true;
+                    }
+                    Inst::FloatMod(..) => needs.float_mod = true,
+                    _ => {}
+                }
+            }
+        }
+    }
+    needs
+}
+
+fn emit_numeric_helpers(out: &mut String, ir: &ShaderIR) {
+    let needs = numeric_helper_needs(ir);
+    if needs.int_div {
+        out.push_str(
+            "fn rock_floor_idiv(a: i32, b: i32) -> i32 {\n\
+  let q = a / b;\n\
+  let r = a % b;\n\
+  return select(q - 1, q, r == 0 || ((r < 0) == (b < 0)));\n\
+}\n\n",
+        );
+    }
+    if needs.int_mod {
+        out.push_str(
+            "fn rock_floor_imod(a: i32, b: i32) -> i32 {\n\
+  return a - b * rock_floor_idiv(a, b);\n\
+}\n\n",
+        );
+    }
+    if needs.float_mod {
+        out.push_str(
+            "fn rock_floor_fmod(a: f32, b: f32) -> f32 {\n\
+  return a - b * floor(a / b);\n\
+}\n\n",
+        );
+    }
+}
 /// Emit a compiler-owned fullscreen module directly from neutral MIR.
 ///
 /// `Workspace` supplies neutral declaration names and type metadata for MIR
@@ -1726,6 +1821,7 @@ pub fn emit_fullscreen_shader(
     emit_fullscreen_types(&mut source, abi);
     emit_uniforms(&mut source, abi);
     emit_textures(&mut source, abi);
+    emit_numeric_helpers(&mut source, ir);
 
     for instance in &stage.order {
         let body = stage.bodies.get(instance).ok_or_else(|| {
@@ -1840,6 +1936,7 @@ pub fn emit_explicit_shader(
     emit_explicit_uniforms(&mut source, abi);
     emit_array_blocks(&mut source, abi, span)?;
     emit_textures(&mut source, abi);
+    emit_numeric_helpers(&mut source, ir);
 
     for stage in [vertex, fragment] {
         for instance in &stage.order {
@@ -1987,6 +2084,7 @@ pub fn emit_compute_shader(
     if !logical_compute.workgroup.is_empty() {
         source.push('\n');
     }
+    emit_numeric_helpers(&mut source, ir);
 
     for instance in &stage.order {
         let body = stage.bodies.get(instance).ok_or_else(|| {
@@ -2384,11 +2482,24 @@ fn emit_explicit_entries(
         abi.fragment_entry,
     )
     .unwrap();
-    let mut varying_args = std::iter::once("input.position".to_string())
-        .chain(abi.varyings.iter().map(|field| format!("input.{}", field.name)))
-        .collect::<Vec<_>>();
+    let varying_name = Ustr::from(varying.as_str());
+    let declared_fields = explicit_struct_fields(ws, varying_name, span)?;
+    let varying_args = declared_fields
+        .iter()
+        .map(|(name, _)| {
+            if name.as_str() == "position" {
+                Ok("input.position".to_string())
+            } else if abi.varyings.iter().any(|field| field.name == *name) {
+                Ok(format!("input.{name}"))
+            } else {
+                Err(err(
+                    span,
+                    format!("WGSL varying `{name}` is absent from the ABI plan"),
+                ))
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     writeln!(out, "  let vary = {varying}({});", varying_args.join(", ")).unwrap();
-    varying_args.clear();
     let call_args = if fragment_reads_frag_coord(ws, fragment) {
         "vary, input.position".to_string()
     } else {
@@ -2674,6 +2785,38 @@ fn value_kind_for_type(ws: &Workspace, ty: TyId) -> Option<ValueKind> {
         TypeExpr::Builtin(BuiltinTy::Bool) => Some(ValueKind::Bool),
         TypeExpr::App {
             ctor: TypeCtor::Nominal(name),
+            ..
+        } => match name.as_str() {
+            "Vec2" => Some(ValueKind::Vec2),
+            "Vec3" => Some(ValueKind::Vec3),
+            "Vec4" => Some(ValueKind::Vec4),
+            "Mat4" => Some(ValueKind::Mat4),
+            "Sampler2D" => Some(ValueKind::Sampler(SamplerKind::Float)),
+            "ISampler2D" => Some(ValueKind::Sampler(SamplerKind::Int)),
+            _ => Some(ValueKind::Struct(name)),
+        },
+        _ => None,
+    }
+}
+
+fn value_kind_for_instance_type(
+    ws: &Workspace,
+    ty: TyId,
+    instance: &skull_mir::instance::Instance,
+    interner: &MonoInterner,
+) -> Option<ValueKind> {
+    if let Some(kind) = value_kind_for_type(ws, ty) {
+        return Some(kind);
+    }
+    let subst = instance.subst(ws, interner);
+    let mono = skull_mir::monoty::convert_decl(ws, ty, &subst).ok()?;
+    match mono {
+        MonoTy::Float => Some(ValueKind::F32),
+        MonoTy::Int => Some(ValueKind::I32),
+        MonoTy::Uint => Some(ValueKind::U32),
+        MonoTy::Bool => Some(ValueKind::Bool),
+        MonoTy::App {
+            ctor: skull_mir::monoty::MonoCtor::Nominal(name),
             ..
         } => match name.as_str() {
             "Vec2" => Some(ValueKind::Vec2),
@@ -4340,9 +4483,11 @@ impl<'a> FunctionEmitter<'a> {
             Inst::UintSub(a, b) => self.binary(*a, "-", *b),
             Inst::IntMul(a, b) | Inst::FloatMul(a, b) => self.binary(*a, "*", *b),
             Inst::UintMul(a, b) => self.binary(*a, "*", *b),
-            Inst::IntDiv(a, b) | Inst::FloatDiv(a, b) => self.binary(*a, "/", *b),
+            Inst::IntDiv(a, b) => self.numeric_call("rock_floor_idiv", *a, *b),
+            Inst::FloatDiv(a, b) => self.binary(*a, "/", *b),
             Inst::UintDiv(a, b) => self.binary(*a, "/", *b),
-            Inst::IntMod(a, b) | Inst::FloatMod(a, b) => self.binary(*a, "%", *b),
+            Inst::IntMod(a, b) => self.numeric_call("rock_floor_imod", *a, *b),
+            Inst::FloatMod(a, b) => self.numeric_call("rock_floor_fmod", *a, *b),
             Inst::UintMod(a, b) => self.binary(*a, "%", *b),
             Inst::IntLt(a, b) | Inst::FloatLt(a, b) => self.binary(*a, "<", *b),
             Inst::UintLt(a, b) => self.binary(*a, "<", *b),
@@ -4360,11 +4505,7 @@ impl<'a> FunctionEmitter<'a> {
             Inst::Eq(a, b) => self.binary(*a, "==", *b),
             Inst::NotEq(a, b) => self.binary(*a, "!=", *b),
             Inst::FloatToInt(value) => {
-                if self.stage.stage == ShaderStage::Compute {
-                    Ok(format!("i32(floor({}))", self.render_val(*value)?))
-                } else {
-                    Ok(format!("i32({})", self.render_val(*value)?))
-                }
+                Ok(format!("i32(floor({}))", self.render_val(*value)?))
             }
             Inst::IntToFloat(value) => {
                 self.reject_compute_numeric_conversion("int as float", *value)?;
@@ -4487,6 +4628,20 @@ impl<'a> FunctionEmitter<'a> {
             "({} {} {})",
             self.render_val(a)?,
             op,
+            self.render_val(b)?
+        ))
+    }
+
+    fn numeric_call(
+        &self,
+        name: &str,
+        a: Idx<Inst>,
+        b: Idx<Inst>,
+    ) -> Result<String, CompilerError> {
+        Ok(format!(
+            "{}({}, {})",
+            name,
+            self.render_val(a)?,
             self.render_val(b)?
         ))
     }
@@ -5119,7 +5274,10 @@ fn mir_kind(inst: &Inst) -> &'static str {
         | Inst::CallValue { .. }
         | Inst::CallValueMulti { .. }
         | Inst::CallBoundMulti { .. } => "multi-value call",
-        Inst::MakeTuple(_) | Inst::MakeVec(_) | Inst::MakeVecColumns { .. } => "aggregate",
+        Inst::MakeTuple(_)
+        | Inst::MakeVec(_)
+        | Inst::MakeVecColumns { .. }
+        | Inst::MakeVecColumnHeader { .. } => "aggregate",
         Inst::MakeStruct { .. } | Inst::MakeEnum { .. } | Inst::MakeEnumDyn { .. } => {
             "heap aggregate"
         }

@@ -28,6 +28,85 @@ fn body_id(ws: &Workspace, name: &str) -> (ModuleId, BodyOwner) {
     panic!("no function named {name}");
 }
 
+const WGSL_NUMERIC_COMPUTE: &str = r#"
+value NumericParams {
+    int_a: int,
+    int_b: int,
+    float_a: float,
+    float_b: float,
+}
+
+@shader(compute)
+@workgroup(64, 1, 1)
+@dispatch(1)
+fn numeric_compute(
+    @storage(read_write) out: StorageBuffer<float>,
+    @uniform params: NumericParams,
+) {
+    let i = global_invocation_id().x
+    let q = params.int_a ./ params.int_b
+    let r = params.int_b % params.int_a
+    let fr = params.float_a % params.float_b
+    let fi = params.float_a as int
+    let marker = 1.0
+    if q < r || fi < 0 { marker = -1.0 }
+    storage_store(out, i, marker + fr)
+}
+
+global NUMERIC_COMPUTE: string = rock_compute(numeric_compute)
+"#;
+
+fn emit_compute_wgsl(src: &str) -> String {
+    let ws = common::ws_with_stdlib(src);
+    let mid = test_mid(&ws);
+    let (_emit, cache) = skull::mir_emit::emit_full(&ws, mid).expect("compute graph is admitted");
+    let compute = &cache.shader_view().compute_views[0];
+    let input = ConcreteStageInput {
+        stage: compute.stage.stage,
+        entry: compute.stage.entry.clone(),
+        retained: compute.stage.retained.iter().cloned().collect(),
+        helpers: compute.stage.helpers.iter().cloned().collect(),
+        builtins: compute.stage.builtins.iter().cloned().collect(),
+        order: compute.stage.order.clone(),
+        dependencies: compute.stage.dependencies.clone(),
+        concrete_plans: compute.concrete_plans.clone(),
+    };
+    let scx = skull_mir::lower::ScalarCtx::new_values_first_class(&ws)
+        .sharing(cache.graph().interner().clone());
+    let neutral = skull_codegen_shader::plan_compute_from_concrete(
+        &ws,
+        &scx,
+        &input,
+        &skull_codegen_wgsl::WgslShaderPolicy,
+    )
+    .expect("compute neutral plan");
+    let entry = neutral.entry.inst.symbol(&ws, &scx.interner());
+    let abi = skull_codegen_wgsl::WgslAbiPlan::compute(
+        &neutral.interface,
+        &format!("{entry}_compute"),
+        bone_semantic::prelude::Span::default(),
+    )
+    .expect("compute ABI");
+    skull_codegen_wgsl::emit_compute_shader(
+        &ws,
+        &neutral.ir,
+        &neutral.interface,
+        &abi,
+        bone_semantic::prelude::Span::default(),
+    )
+    .expect("compute WGSL emission")
+    .source
+}
+
+#[test]
+fn compute_preserves_rock_floor_numeric_semantics() {
+    let source = emit_compute_wgsl(WGSL_NUMERIC_COMPUTE);
+    assert_eq!(source.matches("rock_floor_idiv(").count(), 3, "{source}");
+    assert_eq!(source.matches("rock_floor_imod(").count(), 2, "{source}");
+    assert_eq!(source.matches("rock_floor_fmod(").count(), 2, "{source}");
+    assert_eq!(source.matches("i32(floor(").count(), 1, "{source}");
+}
+
 const SAXPY: &str = r#"
 value SaxpyParams { a: int, n: int }
 

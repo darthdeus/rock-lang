@@ -5,6 +5,8 @@
 //! Execution under luajit is the deeper oracle, wired at the Phase-6 CLI cutover
 //! (`rock {run,test} --backend skull`); these pin the textual shape until then.
 
+mod common;
+
 use skull_codegen_lua::{emit_function, CodegenCtx};
 use skull_mir::mir::FuncRef;
 
@@ -21,11 +23,10 @@ fn emit_dump(mut modules: Vec<skull_parser::Ast>, fn_name: &str) -> String {
         .iter()
         .find(|(_, f)| f.name.as_str() == fn_name)
         .expect("function by name");
-    let scx = skull_mir::lower::ScalarCtx::new(&ws);
-    let func = skull_mir::lower::lower_function_source(&ws, &scx, mid, fid)
+    let (func, interner) = common::lower_test_ref(&ws, mid, fid)
         .unwrap_or_else(|e| panic!("lower failed: {}", e.message));
     let ctx = CodegenCtx::new(&ws);
-    emit_function(&ws, &ctx, scx.interner(), FuncRef { module: mid, func: fid }, &func)
+    emit_function(&ws, &ctx, &interner, FuncRef { module: mid, func: fid }, &func)
 }
 
 /// Stdlib-free: literals, vars, `let`, builtin comparisons, control flow.
@@ -59,12 +60,11 @@ fn emit_clean(src: &str, fn_name: &str) -> String {
         .iter()
         .find(|(_, f)| f.name.as_str() == fn_name)
         .expect("function by name");
-    let scx = skull_mir::lower::ScalarCtx::new(&ws);
-    let mut func = skull_mir::lower::lower_function_source(&ws, &scx, mid, fid)
+    let (mut func, interner) = common::lower_test_ref(&ws, mid, fid)
         .unwrap_or_else(|e| panic!("lower failed: {}", e.message));
     skull_transform::cleanup(&mut func);
     let ctx = CodegenCtx::new(&ws);
-    emit_function(&ws, &ctx, scx.interner(), FuncRef { module: mid, func: fid }, &func)
+    emit_function(&ws, &ctx, &interner, FuncRef { module: mid, func: fid }, &func)
 }
 
 /// Emit the graph-reached lowerable instances for the `<test>` module's user
@@ -101,6 +101,7 @@ fn run(src: &str, driver: &str) -> String {
     let interner = std::sync::Arc::new(skull_mir::monoty::MonoInterner::new());
     let graph = skull_graph::instance_graph::build_in(&ws, roots, false, interner.clone());
     let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(interner);
+    let concrete = skull_graph::concrete_body::build(&ws, &graph);
     // Capturing lambdas lower to `setmetatable({..}, __rock_fn_mt)` env records
     // (docs/closure-env-records-plan.md); the record metatable lives in skull's
     // runtime prelude, which this bare harness does not emit -- pull in the
@@ -115,7 +116,13 @@ fn run(src: &str, driver: &str) -> String {
         if f.inline_body.is_some() {
             continue;
         }
-        if let Ok(mut func) = skull_mir::lower::lower_instance_source(&ws, &scx, inst) {
+        let Some(plan) = concrete.plans.get(inst) else { continue };
+        if let Ok(mut func) = skull_mir::lower::lower_instance_with_plans(
+            &ws,
+            &scx,
+            plan,
+            &concrete.plans,
+        ) {
             skull_transform::cleanup(&mut func);
             skull_transform::recover_counted_loops(&ws, &mut func);
             lua.push_str(&skull_codegen_lua::emit_named(
@@ -497,7 +504,7 @@ fn last(lo: uint, hi: uint) -> uint {
     result
 }
 fn escaped() -> uint {
-    let values = 2147483648..2147483651
+    let values: [uint] = 2147483648..2147483651
     values[2]
 }";
     assert_eq!(run(src, "last(2147483648, 2147483651)"), "2147483650");

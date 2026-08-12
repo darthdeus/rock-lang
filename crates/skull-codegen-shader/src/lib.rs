@@ -16,9 +16,10 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use skull_mir::concrete::{ConcretePlans, ConcreteSignature};
 use skull_mir::gpu_layout::{SamplerKind, WireKind, texture_slots};
 use skull_mir::instance::Instance;
-use skull_mir::lower::{ScalarCtx, SpecSubst, lower_instance_source};
+use skull_mir::lower::{ScalarCtx, SpecSubst};
 use skull_mir::mir::{FuncRef, Inst, Lit, MirFunc};
 use skull_mir::monoty::{MonoCtor, MonoTy};
+use skull_graph::instance_graph::SiteOutcome;
 use skull_mir::shader_ir::{
     ComputeAccess, ComputeAddressSpace, ComputeBuiltin, ComputeDispatchContract,
     ComputeInterfacePlan, ComputeResourceShape, ComputeValueKind, ComputeWorkgroupSize,
@@ -27,6 +28,7 @@ use skull_mir::shader_ir::{
     ShaderStageIr, UniformRole,
 };
 use skull_parser::{CompilerError, CompilerErrorKind};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use ustr::Ustr;
 
@@ -163,10 +165,6 @@ enum ShaderTy {
 }
 
 impl ShaderTy {
-    fn is_sampler(self) -> bool {
-        matches!(self, Self::Sampler(_))
-    }
-
     fn name(self) -> &'static str {
         match self {
             Self::Float => "float",
@@ -252,35 +250,6 @@ fn shader_ty(
         }) => nominal_ty(name.as_str()).ok_or_else(reject),
         _ => Err(reject()),
     }
-}
-
-fn check_tier0_signature_spec(
-    ws: &Workspace,
-    subst: &SpecSubst,
-    function: &Function,
-    policy: &dyn ShaderPlannerPolicy,
-) -> Result<(), CompilerError> {
-    for param in &function.param_decls {
-        shader_ty(
-            ws,
-            subst,
-            param.ty,
-            function.name_span,
-            &format!("parameter `{}`", param.name),
-        )?;
-    }
-    if let Some(return_ty) = function.return_ty {
-        if shader_ty(ws, subst, return_ty, function.name_span, "return")?.is_sampler() {
-            return Err(err(
-                function.name_span,
-                format!(
-                    "shader artifact: a sampler cannot be returned on {}",
-                    policy.backend_name()
-                ),
-            ));
-        }
-    }
-    Ok(())
 }
 
 const CONST_CHAIN_DEPTH: usize = 16;
@@ -543,149 +512,153 @@ fn callee_instance(
     Ok(ShaderInstance::new(instance))
 }
 
-struct Reach<'a> {
-    ws: &'a Workspace,
-    scx: &'a ScalarCtx,
-    policy: &'a dyn ShaderPlannerPolicy,
-    bodies: HashMap<ShaderInstance, MirFunc>,
-    seeds: Vec<ShaderInstance>,
-    entry: Option<ShaderInstance>,
+/// Build the standalone shader entry's concrete population from the shared
+/// graph. The old entry path lowered a declaration, profiled its MIR, and ran
+/// a second reach walk; this keeps identity and callee ownership in the graph
+/// and leaves body/profile validation to `plan_stage_from_concrete`.
+fn standalone_stage_input(
+    ws: &Workspace,
+    fref: FuncRef,
+    stage: ShaderStage,
+    policy: &dyn ShaderPlannerPolicy,
+) -> Result<(ScalarCtx, ConcreteStageInput), CompilerError> {
+    let interner = Arc::new(skull_mir::monoty::MonoInterner::new());
+    let graph = skull_graph::instance_graph::build_in(ws, vec![fref], false, Arc::clone(&interner));
+    let scx = ScalarCtx::new_values_first_class(ws).sharing(Arc::clone(&interner));
+    let canonical = skull_mir::lower::canonical_variant(ws, fref);
+    let entry = graph
+        .instances
+        .iter()
+        .find(|instance| instance.func == canonical && instance.args.is_empty())
+        .cloned()
+        .ok_or_else(|| CompilerError::new_no_location("shader root has no concrete graph instance".to_string()))?;
+
+    let mut retained = BTreeSet::from([entry.clone()]);
+    let mut builtins = BTreeSet::new();
+    let mut active = BTreeSet::new();
+    let mut done = BTreeSet::new();
+    let mut order = Vec::new();
+    visit_standalone_shader_instance(
+        ws,
+        &graph,
+        &entry,
+        policy,
+        &interner,
+        &mut retained,
+        &mut builtins,
+        &mut active,
+        &mut done,
+        &mut order,
+    )?;
+    order.retain(|instance| instance != &entry);
+    let mut dependencies = Vec::new();
+    let mut seen_declarations = BTreeSet::new();
+    for instance in order.iter().chain(std::iter::once(&entry)) {
+        let key = (instance.func.module.raw(), instance.func.func.into_raw().into_u32());
+        if seen_declarations.insert(key) {
+            dependencies.push(instance.func);
+        }
+    }
+    let concrete_plans = Arc::new(skull_graph::concrete_body::build(ws, &graph).plans);
+    let helpers: BTreeSet<Instance> = retained.iter().filter(|instance| *instance != &entry).cloned().collect();
+    let input = ConcreteStageInput {
+        stage,
+        entry,
+        retained: retained.into_iter().collect(),
+        helpers: helpers.into_iter().collect(),
+        builtins: builtins.into_iter().collect(),
+        order,
+        dependencies,
+        concrete_plans,
+    };
+    Ok((scx, input))
 }
 
-impl<'a> Reach<'a> {
-    fn walk(&mut self) -> Result<Vec<ShaderInstance>, CompilerError> {
-        skull_mir::reach::walk(self)
+fn visit_standalone_shader_instance(
+    ws: &Workspace,
+    graph: &skull_graph::instance_graph::InstanceGraph,
+    instance: &Instance,
+    policy: &dyn ShaderPlannerPolicy,
+    interner: &skull_mir::monoty::MonoInterner,
+    retained: &mut BTreeSet<Instance>,
+    builtins: &mut BTreeSet<Instance>,
+    active: &mut BTreeSet<Instance>,
+    done: &mut BTreeSet<Instance>,
+    order: &mut Vec<Instance>,
+) -> Result<(), CompilerError> {
+    if done.contains(instance) {
+        return Ok(());
     }
-}
-
-impl skull_mir::reach::ReachPolicy for Reach<'_> {
-    type Node = ShaderInstance;
-
-    fn roots(&mut self) -> Result<Vec<Self::Node>, CompilerError> {
-        Ok(std::mem::take(&mut self.seeds))
-    }
-
-    fn initially_in_progress(&mut self) -> Vec<Self::Node> {
-        self.entry.clone().into_iter().collect()
-    }
-
-    fn is_leaf(&mut self, instance: ShaderInstance) -> Result<bool, CompilerError> {
-        let function = &self.ws.module(instance.fref().module).functions[instance.fref().func];
-        if self.policy.inline_call(function) {
-            return Ok(true);
-        }
-        if function.is_extern || function.inline_body.is_some() {
-            return Err(profile_err(
-                self.policy,
-                function,
-                format!(
-                    "shader profile: `{}` has no emittable body and no {} intrinsic mapping",
-                    function.name,
-                    self.policy.backend_name()
-                ),
-            ));
-        }
-        Ok(false)
-    }
-
-    fn on_cycle(&mut self, instance: ShaderInstance) -> Result<(), CompilerError> {
-        let function = &self.ws.module(instance.fref().module).functions[instance.fref().func];
-        Err(err(
+    if !active.insert(instance.clone()) {
+        let function = &ws.module(instance.func.module).functions[instance.func.func];
+        return Err(err(
             function.name_span,
             format!(
                 "shader profile: recursion through `{}` is not allowed on {}",
                 function.name,
-                self.policy.backend_name()
+                policy.backend_name()
             ),
-        ))
+        ));
     }
-
-    fn visit(&mut self, instance: ShaderInstance) -> Result<Vec<ShaderInstance>, CompilerError> {
-        let function = &self.ws.module(instance.fref().module).functions[instance.fref().func];
-        let subst = instance.subst(self.ws, self.scx.interner());
-        check_tier0_signature_spec(self.ws, &subst, function, self.policy)?;
-        let body = lower_instance_source(self.ws, self.scx, &instance.inst)
-        .map_err(|error| {
-            err(
-                function.name_span,
-                format!(
-                    "shader profile: `{}` cannot lower for {}: {}",
-                    function.name,
-                    self.policy.backend_name(),
-                    error.message
-                ),
-            )
-        })?;
-        let mut callees = Vec::new();
-        profile_body(
-            self.ws,
-            function,
-            &body,
-            &mut callees,
-            self.policy,
-            false,
-            self.scx.interner(),
-        )?;
-        self.bodies.insert(instance, body);
-        Ok(callees)
-    }
-}
-
-/// Plan one concrete stage's target-neutral MIR and reachable helpers.
-fn plan_stage(
-    ws: &Workspace,
-    scx: &ScalarCtx,
-    fref: FuncRef,
-    stage: ShaderStage,
-    policy: &dyn ShaderPlannerPolicy,
-) -> Result<ShaderStageIr, CompilerError> {
-    let function = &ws.module(fref.module).functions[fref.func];
-    let entry = ShaderInstance::plain(fref);
-    let body = lower_instance_source(ws, scx, &entry.inst).map_err(
-        |error| {
-            err(
-                function.name_span,
-                format!(
-                    "shader profile: `{}` cannot lower for {}: {}",
-                    function.name,
-                    policy.backend_name(),
-                    error.message
-                ),
-            )
-        },
-    )?;
-    let mut callees = Vec::new();
-    profile_body(
-        ws,
-        function,
-        &body,
-        &mut callees,
-        policy,
-        false,
-        scx.interner(),
-    )?;
-    let mut reach = Reach {
-        ws,
-        scx,
-        policy,
-        bodies: HashMap::default(),
-        seeds: callees,
-        entry: Some(entry.clone()),
+    let Some(sites) = graph.sites_of(instance) else {
+        active.remove(instance);
+        done.insert(instance.clone());
+        order.push(instance.clone());
+        return Ok(());
     };
-    let order = reach.walk()?;
-    reject_stage_violations(
-        ws,
-        stage,
-        reach.bodies.values().chain(std::iter::once(&body)),
-        function.name_span,
-    )?;
-    Ok(ShaderStageIr {
-        stage,
-        entry,
-        body,
-        order,
-        bodies: reach.bodies,
-    })
+    for record in sites.values() {
+        let SiteOutcome::Resolved(callee) = &record.outcome else { continue };
+        let function = &ws.module(callee.func.module).functions[callee.func.func];
+        if policy.inline_instance(ws, function, callee, interner) {
+            builtins.insert(callee.clone());
+            continue;
+        }
+        if policy.lowered_native_operator(ws, function, callee, interner) {
+            continue;
+        }
+        if function.is_extern || function.inline_body.is_some() {
+            return Err(profile_err(
+                policy,
+                function,
+                format!(
+                    "shader profile: `{}` has no emittable body and no {} intrinsic mapping",
+                    function.name,
+                    policy.backend_name()
+                ),
+            ));
+        }
+        if retained.insert(callee.clone()) {
+            visit_standalone_shader_instance(
+                ws,
+                graph,
+                callee,
+                policy,
+                interner,
+                retained,
+                builtins,
+                active,
+                done,
+                order,
+            )?;
+        } else if active.contains(callee) {
+            return visit_standalone_shader_instance(
+                ws,
+                graph,
+                callee,
+                policy,
+                interner,
+                retained,
+                builtins,
+                active,
+                done,
+                order,
+            );
+        }
+    }
+    active.remove(instance);
+    done.insert(instance.clone());
+    order.push(instance.clone());
+    Ok(())
 }
 
 fn checked_concrete_callees(
@@ -1859,8 +1832,8 @@ pub fn plan_fullscreen_fragment(
         }
     }
     let class = classify_entry(ws, function)?;
-    let scx = ScalarCtx::new_values_first_class(ws);
-    let stage = plan_stage(ws, &scx, fref, ShaderStage::Fragment, policy)?;
+    let (scx, input) = standalone_stage_input(ws, fref, ShaderStage::Fragment, policy)?;
+    let stage = plan_stage_from_concrete(ws, &scx, &input, policy)?;
     let interface = ShaderInterfacePlan {
         stages: vec![ShaderStage::Fragment],
         uniform_groups: class
