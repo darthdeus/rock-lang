@@ -693,6 +693,8 @@ pub struct MirFunc {
     /// it just has no graph-owned top-level instance to wrap in
     /// `BackendFnAbiPlan`.
     pub abi_representation: Option<crate::lower::FunctionRepPlan>,
+    /// The owned result representation of an always-emitted global initializer.
+    pub global_plan: Option<crate::lower::GlobalPlan>,
     /// `static` cells declared in this fn's body (in source order).
     pub statics: Vec<StaticCell>,
     pub insts: Arena<Inst>,
@@ -840,6 +842,7 @@ impl MirFunc {
             params: Vec::new(),
             abi_plan: None,
             abi_representation: None,
+            global_plan: None,
             statics: Vec::new(),
             insts: Arena::default(),
             cells: Arena::default(),

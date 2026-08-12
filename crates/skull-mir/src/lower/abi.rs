@@ -199,6 +199,58 @@ pub struct FunctionRepPlan {
     scalar_abi: bool,
 }
 
+/// The physical representation of an always-emitted global initializer.
+/// Globals have no callable `Instance`, so their result plan is carried on the
+/// lowered initializer itself rather than being smuggled through a function ABI.
+#[derive(Clone, Debug)]
+pub struct GlobalPlan {
+    representation: RepId,
+    arena: Arc<RepArena>,
+}
+
+impl PartialEq for GlobalPlan {
+    fn eq(&self, other: &Self) -> bool {
+        self.representation == other.representation && Arc::ptr_eq(&self.arena, &other.arena)
+    }
+}
+
+impl Eq for GlobalPlan {}
+
+impl GlobalPlan {
+    pub(crate) fn for_concrete_result(
+        ws: &Workspace,
+        scx: &ScalarCtx,
+        result: Option<crate::monoty::MonoTy>,
+    ) -> Result<Self, RepError> {
+        let arena = scx.rep_arena();
+        let ty = result.ok_or_else(|| RepError {
+            span: None,
+            message: "a global initializer must have a concrete result type".into(),
+        })?;
+        let representation = if scx.values_first_class {
+            arena.intern(scx.target, RepUse::Return, RepLayout::Opaque)
+        } else {
+            arena.plan(
+                ws,
+                scx.target,
+                &ty,
+                RepUse::Return,
+                &RepUseFacts::default(),
+                RepGuarantees { nobox: true },
+            )?
+        };
+        Ok(Self { representation, arena })
+    }
+
+    pub fn representation(&self) -> RepId {
+        self.representation
+    }
+
+    pub fn lanes(&self) -> usize {
+        self.arena.get(self.representation).lanes(&self.arena)
+    }
+}
+
 impl FunctionRepPlan {
     pub fn params(&self) -> &[RepId] {
         &self.params

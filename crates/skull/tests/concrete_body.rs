@@ -717,6 +717,12 @@ fn main() { print("{G.x}") }
     )
     .expect("intact global plan failed")
     .expect("global initializer disappeared");
+    let global_rep = intact.global_plan.as_ref().expect("global initializer lost its owned plan");
+    assert_eq!(
+        global_rep.lanes(),
+        2,
+        "the global plan must own V's two physical lanes"
+    );
     assert_eq!(return_arity(&intact), 2, "fixture has no multi-leaf global result");
 
     let mut poisoned = plan.clone();

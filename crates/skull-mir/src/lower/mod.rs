@@ -73,7 +73,8 @@ pub use shape::*;
 mod abi;
 pub use abi::{
     boundary_requires_boxed_representation, declared_boundary_class, requires_concrete_body_plan,
-    BackendFnAbiPlan, BoundaryClass, FunctionRepPlan, RepArena, RepError, RepId, RepLayout,
+    BackendFnAbiPlan, BoundaryClass, FunctionRepPlan, GlobalPlan, RepArena, RepError, RepId,
+    RepLayout,
     RepGuarantees, RepPlan, RepUse, RepUseFacts,
 };
 
@@ -1332,30 +1333,21 @@ fn lower_global_inner(
         nested_fn_counters: HashMap::new(),
         presence_only: None,
     };
+    let global_plan = GlobalPlan::for_concrete_result(
+        ws,
+        scx,
+        concrete_plan.signature.result.map(|id| b.concrete_mono(id)),
+    )
+    .map_err(|error| match error.span.or(b.cur_span) {
+        Some(span) => CompilerError::new_with_label(span, error.message),
+        None => CompilerError::new_no_location(error.message),
+    })?;
+    b.f.global_plan = Some(global_plan);
     // A `nobox` global is category-2 storage: its concrete plan owns the layout,
     // so the initializer RETURNS leaves and `mir_emit` binds one Lua global per
     // leaf. Without this the body packs a box the verifier then rejects.
     b.ret_rep = (!scx.values_first_class)
-        .then(|| concrete_plan.signature.result)
-        .flatten()
-        .map(|id| {
-            let ty = b.concrete_mono(id);
-            b.scx
-                .rep_arena()
-                .plan(
-                    ws,
-                    scx.target,
-                    &ty,
-                    RepUse::Return,
-                    &RepUseFacts::default(),
-                    RepGuarantees { nobox: true },
-                )
-                .map_err(|error| match error.span.or(b.cur_span) {
-                    Some(span) => CompilerError::new_with_label(span, error.message),
-                    None => CompilerError::new_no_location(error.message),
-                })
-        })
-        .transpose()?;
+        .then(|| b.f.global_plan.as_ref().expect("global plan").representation());
     b.lower_root()?;
     Ok(Some(b.f))
 }

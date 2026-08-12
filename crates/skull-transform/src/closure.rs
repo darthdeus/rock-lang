@@ -385,6 +385,7 @@ pub fn convert_closures_framed(
             params,
             abi_plan: None,
             abi_representation: mf.abi_representation.clone(),
+            global_plan: mf.global_plan.clone(),
             statics: Vec::new(),
             insts: mf.insts.clone(),
             cells: mf.cells.clone(),
