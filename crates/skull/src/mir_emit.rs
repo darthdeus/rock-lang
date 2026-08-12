@@ -3020,10 +3020,10 @@ fn update_chunk_cache(
                         .vars
                         .get(name)
                         .map(|v| comptime_value_hash(&v.value)),
+                    // File ids are the ABSOLUTE path the resolver landed on.
                     ComptimeInputId::File(path) => {
                         *file_hashes.entry(*path).or_insert_with(|| {
-                            let root = ws.comptime_inputs.embed_root.as_deref()?;
-                            let text = std::fs::read_to_string(root.join(path.as_str())).ok()?;
+                            let text = std::fs::read_to_string(path.as_str()).ok()?;
                             Some(comptime_value_hash(&text))
                         })
                     }

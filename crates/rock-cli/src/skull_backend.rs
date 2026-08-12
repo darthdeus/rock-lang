@@ -2457,16 +2457,11 @@ impl SkullStone {
     /// one routes as a changed non-source path, which forces the full rebuild
     /// that re-reads it (docs/comptime-plan.md).
     pub fn comptime_watch_files(&self) -> Vec<std::path::PathBuf> {
-        let Some(root) = self.project.workspace().comptime_inputs.embed_root.clone() else {
-            return Vec::new();
-        };
+        // File ids are already the absolute canonical path the resolver read.
         self.cache
             .comptime_files()
             .into_iter()
-            .map(|rel| {
-                let joined = root.join(rel.as_str());
-                joined.canonicalize().unwrap_or(joined)
-            })
+            .map(|abs| std::path::PathBuf::from(abs.as_str()))
             .collect()
     }
 

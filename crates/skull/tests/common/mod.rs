@@ -105,6 +105,23 @@ pub fn try_emit_module_with(
     skull::mir_emit::emit_workspace_mir(&ws, mid).map(|e| e.lua)
 }
 
+/// [`try_emit_module_with`] with a caller-chosen module FILE path -- for
+/// fixtures where embed resolution must see a real on-disk file location
+/// (package-relative embeds).
+pub fn try_emit_module_with_file(
+    src: &str,
+    file: &str,
+    inputs: bone_semantic::inference::ComptimeInputs,
+) -> Result<String, skull_parser::CompilerError> {
+    let mut modules = STDLIB.clone();
+    modules.push(skull_parser::parse_module_clean(src, Ustr::from(file)).expect("parse"));
+    let mut ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    assert_no_bone_errors(&ws);
+    ws.comptime_inputs = inputs;
+    let mid = *ws.module_ids.get(&Ustr::from(file)).expect("module id");
+    skull::mir_emit::emit_workspace_mir(&ws, mid).map(|e| e.lua)
+}
+
 /// Like [`emit_mir`] but surfaces the codegen `Result` (a rejection such as a
 /// reserved synthetic-name collision) instead of `.expect`ing success. Semantic
 /// errors still panic (a malformed test, not what these cases probe).

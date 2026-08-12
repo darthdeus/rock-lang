@@ -122,6 +122,38 @@ fn broken() -> string {
     );
 }
 
+#[test]
+fn embed_resolves_against_the_calling_files_own_package() {
+    // A LIBRARY file (stone) embeds relative to its own stick.toml dir, not
+    // the consuming project's embed_root -- the cimgui migration's
+    // prerequisite (docs/comptime-plan.md tier 1.5 item 1). The calling
+    // file's dir has a stick.toml; embed_root points somewhere else entirely.
+    let pkg = tempfile::tempdir().unwrap();
+    std::fs::write(pkg.path().join("stick.toml"), "[package]\nname = \"libpkg\"\ntype = \"lib\"\n").unwrap();
+    std::fs::write(pkg.path().join("payload.txt"), "from-the-library-package").unwrap();
+    let lib_file = pkg.path().join("lib.rock");
+    std::fs::write(&lib_file, "").unwrap();
+
+    let elsewhere = tempfile::tempdir().unwrap();
+    let src = r#"
+fn payload() -> string {
+    return embed_string("payload.txt")
+}
+"#;
+    let mut inputs = ComptimeInputs::default();
+    inputs.embed_root = Some(elsewhere.path().to_path_buf());
+    let lua = crate::common::try_emit_module_with_file(
+        src,
+        lib_file.to_str().unwrap(),
+        inputs,
+    )
+    .expect("package-relative embed resolves");
+    assert!(
+        lua.contains("from-the-library-package"),
+        "embed must resolve against the calling file's package root"
+    );
+}
+
 // --- incremental invalidation: a comptime input change is a body edit ---
 // bone hashes only source text, so a body whose emitted code depends on a
 // build var's value or an embedded file's content never appears in

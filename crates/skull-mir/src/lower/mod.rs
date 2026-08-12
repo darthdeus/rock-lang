@@ -2759,7 +2759,7 @@ pub fn resolve_comptime_value(
     call_expr: Idx<Expr>,
     args: &[Idx<Expr>],
     kind: ExpandKind,
-) -> Result<String, CompilerError> {
+) -> Result<ResolvedComptime, CompilerError> {
     let fname = match kind {
         ExpandKind::BuildVar => "build_var",
         ExpandKind::EmbedString => "embed_string",
@@ -2779,18 +2779,36 @@ pub fn resolve_comptime_value(
     };
     match kind {
         ExpandKind::BuildVar => match ws.comptime_inputs.vars.get(&key) {
-            Some(var) => Ok(var.value.clone()),
+            Some(var) => Ok(ResolvedComptime { value: var.value.clone(), file_abs: None }),
             None => Err(reject(
                 call_expr,
                 format!("`build_var(\"{key}\")`: {key} is not declared in this project's [build.vars]"),
             )),
         },
         ExpandKind::EmbedString => {
-            let Some(root) = ws.comptime_inputs.embed_root.as_deref() else {
+            // Resolution root: the nearest stick.toml at/above the CALLING
+            // file's dir (a library embeds its own files, whatever project is
+            // consuming it -- docs/comptime-plan.md tier 1.5); fall back to
+            // the invocation's embed_root for synthetic/test module files.
+            let call_file = body.expr_spans[call_expr].file;
+            let package_root = std::path::Path::new(call_file.as_str())
+                .exists()
+                .then(|| {
+                    let mut dir = std::path::Path::new(call_file.as_str()).parent();
+                    while let Some(d) = dir {
+                        if d.join("stick.toml").exists() {
+                            return Some(d.to_path_buf());
+                        }
+                        dir = d.parent();
+                    }
+                    None
+                })
+                .flatten();
+            let Some(root) = package_root.or_else(|| ws.comptime_inputs.embed_root.clone()) else {
                 return Err(reject(
                     call_expr,
-                    "`embed_string` needs a project root (a stick.toml project); \
-                     none is available in this compilation"
+                    "`embed_string` needs a package root (a stick.toml at or above the \
+                     calling file, or a project root); none is available in this compilation"
                         .to_string(),
                 ));
             };
@@ -2798,7 +2816,7 @@ pub fn resolve_comptime_value(
             if rel.is_absolute() {
                 return Err(reject(
                     *arg,
-                    format!("`embed_string` path must be relative to the project root, got {key:?}"),
+                    format!("`embed_string` path must be relative to the package root, got {key:?}"),
                 ));
             }
             let joined = root.join(rel);
@@ -2806,20 +2824,31 @@ pub fn resolve_comptime_value(
                 reject(*arg, format!("`embed_string(\"{key}\")`: cannot read {key:?}: {e}"))
             })?;
             let canon_root = root.canonicalize().map_err(|e| {
-                reject(call_expr, format!("`embed_string`: project root is unreadable: {e}"))
+                reject(call_expr, format!("`embed_string`: package root is unreadable: {e}"))
             })?;
             if !file.starts_with(&canon_root) {
                 return Err(reject(
                     *arg,
-                    format!("`embed_string(\"{key}\")`: path escapes the project root"),
+                    format!("`embed_string(\"{key}\")`: path escapes the package root"),
                 ));
             }
-            std::fs::read_to_string(&file).map_err(|e| {
+            let value = std::fs::read_to_string(&file).map_err(|e| {
                 reject(*arg, format!("`embed_string(\"{key}\")`: cannot read {key:?}: {e}"))
+            })?;
+            Ok(ResolvedComptime {
+                value,
+                file_abs: Some(Ustr::from(&file.to_string_lossy())),
             })
         }
         _ => unreachable!(),
     }
+}
+
+/// A resolved comptime input: the value, plus (for embeds) the absolute path
+/// the read landed on -- what invalidation re-reads and the watcher watches.
+pub struct ResolvedComptime {
+    pub value: String,
+    pub file_abs: Option<Ustr>,
 }
 
 /// FATAL gate for `build_var` / `embed_string` misuse (non-literal argument,

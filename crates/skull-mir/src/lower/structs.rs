@@ -677,19 +677,22 @@ impl Builder<'_> {
         arg_idxs: &[Idx<Expr>],
         kind: ExpandKind,
     ) -> Result<ValueRepr, CompilerError> {
-        let value =
+        let resolved =
             super::resolve_comptime_value(self.ws, self.body, call, arg_idxs, kind)?;
         // The literal arg was just validated by the resolver.
         let Expr::String(key) = self.body.expr_arena[arg_idxs[0]] else { unreachable!() };
-        let input = match kind {
-            ExpandKind::BuildVar => crate::mir::ComptimeInputId::Var(key),
-            _ => crate::mir::ComptimeInputId::File(key),
+        let input = match (kind, resolved.file_abs) {
+            (ExpandKind::BuildVar, _) => crate::mir::ComptimeInputId::Var(key),
+            // File reads are keyed by the ABSOLUTE path the resolver landed
+            // on, so invalidation and the watcher need no root re-derivation.
+            (_, Some(abs)) => crate::mir::ComptimeInputId::File(abs),
+            (_, None) => unreachable!("embed resolution always lands on a file"),
         };
         self.f.comptime_reads.push(crate::mir::ComptimeRead {
             input,
-            value_hash: crate::mir::comptime_value_hash(&value),
+            value_hash: crate::mir::comptime_value_hash(&resolved.value),
         });
-        let inst = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(value.as_str()))));
+        let inst = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(resolved.value.as_str()))));
         Ok(ValueRepr::Scalar(inst))
     }
 
