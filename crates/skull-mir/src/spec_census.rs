@@ -64,9 +64,9 @@ impl PartialOrd for TodaySpec {
 /// Every specialization the CURRENT machinery produces over `ws`, plus the
 /// number of call sites whose spec decision was an outright rejection.
 ///
-/// The enclosing substitution is empty, matching the site-aware validator
-/// (`native_buffer_alloc_reject`): a call inside a generic body is read without
-/// an instantiation, which is exactly the shared-body condition being measured.
+/// The enclosing substitution is empty, matching the historical lowering
+/// census: a call inside a generic body is read without an instantiation, so
+/// this reports the policy surface independently of concrete body planning.
 pub fn today_specializations(ws: &Workspace) -> (Vec<TodaySpec>, usize) {
     let mut out = Vec::new();
     let mut rejected = 0usize;

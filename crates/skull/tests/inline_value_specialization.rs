@@ -92,3 +92,25 @@ fn generic_inline_intrinsic_resolves_ctype_at_value_instantiation() {
         "the specialized `flat_vec_new` must be spliced, not left as a call; got:\n{body}"
     );
 }
+
+const TRANSITIVE_CONCRETE_INTRINSIC: &str = r#"
+value TV2 { x: float, y: float }
+
+fn make_indirect<T>(cap: int) -> FlatVec<T> {
+    return flat_vec_new(cap)
+}
+
+fn main() {
+    let fv: FlatVec<TV2> = make_indirect(4)
+    print("{fv.len}")
+}
+"#;
+
+#[test]
+fn non_inline_generic_chain_uses_concrete_native_buffer_instance() {
+    let lua = emit_module(TRANSITIVE_CONCRETE_INTRINSIC);
+    assert!(
+        lua.contains(r#"ffi.new("TV2[?]"#),
+        "the transitive concrete instance must own the native-buffer ctype, got:\n{lua}"
+    );
+}

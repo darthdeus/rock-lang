@@ -3327,9 +3327,6 @@ fn emit_full_in_with_mutation(
     if let Some((msg, span)) = skull_mir::lower::gc_value_c_boundary(ws, user_mid) {
         return Err(CompilerError::new_with_label(span, msg));
     }
-    if let Some((msg, span)) = skull_mir::lower::native_buffer_alloc_reject(ws, user_mid) {
-        return Err(CompilerError::new_with_label(span, msg));
-    }
     let cg = CodegenCtx::new(ws);
     // **The graph is built FIRST, into a fresh arena, and `scx` shares that
     // arena rather than minting its own.** An `Instance` the graph mints has to
