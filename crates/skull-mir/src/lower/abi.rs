@@ -399,12 +399,10 @@ fn column_eligible_for_shape(
     ws: &Workspace,
     ty: &crate::monoty::MonoTy,
     shape: &ValueShape,
-    storage: Option<ValueStorage>,
 ) -> bool {
     matches!(ty.peel_nullable().0, crate::monoty::MonoTy::App {
         ctor: crate::monoty::MonoCtor::Nominal(_), ..
-    }) && matches!(storage, Some(ValueStorage::CData))
-        && ws.struct_by_name.contains_key(&shape.name)
+    }) && super::shape::value_shape_rec(ws, shape.name, &mut Vec::new()).is_some()
 }
 
 impl RepArena {
@@ -730,8 +728,7 @@ impl RepArena {
                     };
                     if let Some(shape) = shape {
                         let storage = mono_value_storage(ws, target, ty);
-                        let column_eligible =
-                            column_eligible_for_shape(ws, ty, &shape, storage);
+                        let column_eligible = column_eligible_for_shape(ws, ty, &shape);
                         return Ok(self.intern_with_facts(
                             target,
                             use_context,
@@ -787,8 +784,7 @@ impl RepArena {
                 };
                 if let Some(shape) = shape {
                     let storage = mono_value_storage(ws, target, ty);
-                    let column_eligible =
-                        column_eligible_for_shape(ws, ty, &shape, storage);
+                    let column_eligible = column_eligible_for_shape(ws, ty, &shape);
                     return Ok(self.intern_with_facts(
                         target,
                         use_context,
