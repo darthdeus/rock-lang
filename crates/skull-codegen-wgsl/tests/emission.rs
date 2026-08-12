@@ -249,6 +249,36 @@ fn vertex_and_fragment_preserve_rock_floor_numeric_semantics() {
     naga_validate(&artifact.source);
 }
 
+#[test]
+fn explicit_varying_reconstruction_follows_declared_field_names() {
+    let source = r#"
+value ReorderedAttrs { pos: Vec2 }
+value ReorderedVary {
+    uv: Vec2,
+    position: Vec4,
+    tint: Vec4,
+}
+struct ReorderedTextures { uReorderedTexture: Sampler2D }
+
+@shader(vertex)
+fn reordered_vert(@attr a: ReorderedAttrs) -> ReorderedVary {
+    return ReorderedVary {
+        uv: v(0.25, 0.75),
+        position: v(a.pos, 0.0, 1.0),
+        tint: v(1.0, 0.5, 0.25, 1.0),
+    }
+}
+
+@shader(fragment)
+fn reordered_frag(vary: ReorderedVary, @textures t: ReorderedTextures) -> Vec4 {
+    return vary.tint + v(vary.uv, 0.0, 0.0)
+}
+"#;
+    let artifact = explicit_artifact_source(source, "reordered_vert", "reordered_frag");
+    assert!(artifact.source.contains("let vary = ReorderedVary(input.uv, input.position, input.tint);"), "{0}", artifact.source);
+    naga_validate(&artifact.source);
+}
+
 fn naga_validate(source: &str) {
     let module = naga::front::wgsl::parse_str(source)
         .unwrap_or_else(|error| panic!("WGSL parses: {error}\n{source}"));

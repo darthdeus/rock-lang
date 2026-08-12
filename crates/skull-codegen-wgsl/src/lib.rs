@@ -2308,11 +2308,24 @@ fn emit_explicit_entries(
         abi.fragment_entry,
     )
     .unwrap();
-    let mut varying_args = std::iter::once("input.position".to_string())
-        .chain(abi.varyings.iter().map(|field| format!("input.{}", field.name)))
-        .collect::<Vec<_>>();
+    let varying_name = Ustr::from(varying.as_str());
+    let declared_fields = explicit_struct_fields(ws, varying_name, span)?;
+    let varying_args = declared_fields
+        .iter()
+        .map(|(name, _)| {
+            if name.as_str() == "position" {
+                Ok("input.position".to_string())
+            } else if abi.varyings.iter().any(|field| field.name == *name) {
+                Ok(format!("input.{name}"))
+            } else {
+                Err(err(
+                    span,
+                    format!("WGSL varying `{name}` is absent from the ABI plan"),
+                ))
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     writeln!(out, "  let vary = {varying}({});", varying_args.join(", ")).unwrap();
-    varying_args.clear();
     let call_args = if fragment_reads_frag_coord(ws, fragment) {
         "vary, input.position".to_string()
     } else {
