@@ -534,3 +534,20 @@ fn function_value_plan_keeps_opaque_reference_parameters_explicit() {
     assert_eq!(plan.params().len(), 1, "the function-value population must be nonzero");
     assert!(!plan.uses_scalar_abi(), "an opaque container must not acquire a scalar ABI");
 }
+
+#[test]
+fn function_value_plan_mode_is_part_of_the_owned_signature() {
+    let ws = ws_of("value V2 { x: float, y: float }\nfn main() { print(\"ok\") }\n");
+    let scx = ScalarCtx::new(&ws);
+    let ty = MonoTy::Function {
+        params: vec![nominal("V2")],
+        ret: Box::new(nominal("V2")),
+    };
+    let direct = BackendFnAbiPlan::for_function_value_with_mode(&ws, &scx, &ty, false)
+        .expect("direct nested function mode must plan");
+    let taken = BackendFnAbiPlan::for_function_value_with_mode(&ws, &scx, &ty, true)
+        .expect("taken nested function mode must plan");
+    assert!(direct.uses_scalar_abi(), "direct-only value functions may use their concrete leaves");
+    assert!(!taken.uses_scalar_abi(), "taken functions must keep an ordinary value opaque");
+    assert_ne!(direct.params(), taken.params(), "the two physical modes must have distinct plans");
+}

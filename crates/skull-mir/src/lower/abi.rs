@@ -490,6 +490,16 @@ impl RepArena {
         target: FnBackend,
         ty: &crate::monoty::MonoTy,
     ) -> Result<FunctionRepPlan, RepError> {
+        self.function_value_with_mode(ws, target, ty, true)
+    }
+
+    pub fn function_value_with_mode(
+        &self,
+        ws: &Workspace,
+        target: FnBackend,
+        ty: &crate::monoty::MonoTy,
+        nobox_only: bool,
+    ) -> Result<FunctionRepPlan, RepError> {
         let (ty, _) = ty.peel_nullable();
         let crate::monoty::MonoTy::Function { params, ret } = ty else {
             return Err(RepError {
@@ -508,7 +518,7 @@ impl RepArena {
                     param,
                     RepUse::Parameter,
                     &RepUseFacts { tuple_spelled, span: None },
-                    RepGuarantees { nobox: true, allow_opaque: true },
+                    RepGuarantees { nobox: nobox_only, allow_opaque: true },
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -521,7 +531,7 @@ impl RepArena {
                 tuple_spelled: mono_tuple_ret_shape(ws, ret).is_some(),
                 span: None,
             },
-            RepGuarantees { nobox: true, allow_opaque: true },
+            RepGuarantees { nobox: nobox_only, allow_opaque: true },
         )?;
         let scalar_abi = params.iter().any(|id| !matches!(self.get(*id).layout(), RepLayout::Opaque))
             || matches!(self.get(result).layout(), RepLayout::Leaves(_));
@@ -950,6 +960,15 @@ impl BackendFnAbiPlan {
         ty: &crate::monoty::MonoTy,
     ) -> Result<FunctionRepPlan, RepError> {
         scx.rep_arena().function_value(ws, scx.target, ty)
+    }
+
+    pub fn for_function_value_with_mode(
+        ws: &Workspace,
+        scx: &ScalarCtx,
+        ty: &crate::monoty::MonoTy,
+        nobox_only: bool,
+    ) -> Result<FunctionRepPlan, RepError> {
+        scx.rep_arena().function_value_with_mode(ws, scx.target, ty, nobox_only)
     }
 
     fn assemble(

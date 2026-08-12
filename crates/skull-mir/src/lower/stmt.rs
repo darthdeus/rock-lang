@@ -95,40 +95,20 @@ impl Builder<'_> {
                 .binding_ty(name)
                 .and_then(|ty| self.concrete_ty_id(ty))
                 .ok_or_else(|| gap("concrete nested function binding has no type plan"))?;
-            let crate::monoty::MonoTy::Function { params, ret } = fn_ty else {
-                return Err(gap("concrete nested function binding is not a function type"));
-            };
-            let slot_of = |ty: &crate::monoty::MonoTy| {
-                if taken_by_value {
-                    crate::lower::mono_nobox_value_shape(self.ws, ty)
-                        .map(RetSlot::Leaves)
-                        .or_else(|| {
-                            crate::lower::mono_tuple_ret_shape(self.ws, ty)
-                                .filter(TupleRetShape::splats)
-                                .map(RetSlot::Nested)
-                        })
-                        .unwrap_or(RetSlot::Opaque)
-                } else {
-                    crate::lower::mono_sig_param_slot(self.ws, ty)
-                }
-            };
-            let param_shapes: Vec<RetSlot> = params.iter().map(slot_of).collect();
-            let ret_shape = if taken_by_value {
-                crate::lower::mono_nobox_value_shape(self.ws, &ret)
-            } else {
-                crate::lower::mono_value_shape(self.ws, &ret)
-            };
-            let param_count = param_names.len();
+            let representation = BackendFnAbiPlan::for_function_value_with_mode(
+                self.ws,
+                self.scx,
+                &fn_ty,
+                taken_by_value,
+            )
+            .map_err(|error| match error.span.or(self.cur_span) {
+                Some(span) => CompilerError::new_with_label(span, error.message),
+                None => CompilerError::new_no_location(error.message),
+            })?;
             let abi = NestedFn {
                 hoisted,
                 param_names,
-                representation: self.scx.rep_arena().function_value_legacy(
-                    self.scx.target,
-                    param_shapes,
-                    ret_shape,
-                    None,
-                    param_count,
-                ),
+                representation,
             };
             return Ok(if abi.uses_scalar_abi() { abi } else { boxed });
         }
