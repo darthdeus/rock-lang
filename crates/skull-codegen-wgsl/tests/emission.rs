@@ -1,4 +1,5 @@
 use bone_semantic::prelude::Span;
+use skull_parser::CompilerErrorKind;
 use skull_codegen_wgsl::{
     WgslAbiPlan, WgslPrimitiveTopology, emit_fullscreen_shader, plan_fullscreen_artifact,
 };
@@ -154,6 +155,86 @@ fn bare_frag(_vary: BareVary) -> Vec4 {
     )
     .expect("a texture-free explicit shader emits WGSL");
     naga_validate(&artifact.source);
+}
+
+#[test]
+fn explicit_multiple_vertex_streams_are_a_typed_wgsl_omission() {
+    let source = r#"
+value Quad { pos: Vec2 }
+value Instance { offset: Vec2 }
+value Vary { position: Vec4, uv: Vec2 }
+@shader(vertex)
+fn multi_vert(@attr a: Quad, @instance i: Instance) -> Vary {
+    return Vary { position: v(a.pos.x + i.offset.x, a.pos.y + i.offset.y, 0.0, 1.0), uv: a.pos }
+}
+
+@shader(fragment)
+fn multi_frag(vary: Vary) -> Vec4 {
+    return v(vary.uv, 0.0, 1.0)
+}
+"#;
+    let (ws, mid) = workspace(source);
+    let glsl = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
+        &ws,
+        mid,
+        "multi_vert",
+        "multi_frag",
+        skull_codegen_glsl::GlslProfile::Core330,
+    )
+    .expect("the multi-stream compiler plan");
+    assert_eq!(glsl.interface.vertex_inputs.len(), 2);
+    let error = WgslAbiPlan::explicit(
+        &glsl.interface,
+        "vertex_main",
+        "fragment_main",
+        Span::default(),
+    )
+    .expect_err("multiple vertex streams are not yet physically representable");
+    assert_eq!(
+        error.kind,
+        CompilerErrorKind::UnsupportedWgslProjection {
+            capability: "multiple vertex input streams".into(),
+        }
+    );
+}
+
+#[test]
+fn explicit_no_fragment_varyings_are_a_typed_wgsl_omission() {
+    let source = r#"
+value Quad { pos: Vec2 }
+value Vary { position: Vec4 }
+@shader(vertex)
+fn solid_vert(@attr a: Quad) -> Vary {
+    return Vary { position: v(a.pos.x, a.pos.y, 0.0, 1.0) }
+}
+@shader(fragment)
+fn solid_frag(vary: Vary) -> Vec4 {
+    return v(1.0, 0.0, 1.0, 1.0)
+}
+"#;
+    let (ws, mid) = workspace(source);
+    let glsl = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
+        &ws,
+        mid,
+        "solid_vert",
+        "solid_frag",
+        skull_codegen_glsl::GlslProfile::Core330,
+    )
+    .expect("the no-varying compiler plan");
+    assert!(glsl.interface.varyings.is_empty());
+    let error = WgslAbiPlan::explicit(
+        &glsl.interface,
+        "vertex_main",
+        "fragment_main",
+        Span::default(),
+    )
+    .expect_err("no fragment varyings are not yet physically representable");
+    assert_eq!(
+        error.kind,
+        CompilerErrorKind::UnsupportedWgslProjection {
+            capability: "fragment varyings".into(),
+        }
+    );
 }
 
 // Mirrors rect_batch.rock's `Vertex`; rect_batch itself drags in `DepthMode`,

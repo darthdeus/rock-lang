@@ -1249,8 +1249,9 @@ fn validate_explicit_interface(
         ));
     }
     if iface.vertex_inputs.len() != 1 {
-        return Err(err(
+        return Err(unsupported_err(
             span,
+            "multiple vertex input streams",
             "WGSL explicit projection currently admits one vertex input stream",
         ));
     }
@@ -1272,7 +1273,11 @@ fn validate_explicit_interface(
         }
     }
     if iface.varyings.is_empty() {
-        return Err(err(span, "WGSL explicit projection requires fragment varyings"));
+        return Err(unsupported_err(
+            span,
+            "fragment varyings",
+            "WGSL explicit projection requires fragment varyings",
+        ));
     }
     for varying in &iface.varyings {
         identifier(varying.name, "varying name", span)?;
