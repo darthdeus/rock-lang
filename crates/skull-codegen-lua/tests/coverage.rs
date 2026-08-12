@@ -8,6 +8,8 @@
 //! skull. Ignored by default (it's a measurement, not a gate); run with:
 //!   cargo test -p skull-codegen-lua --test coverage -- --ignored --nocapture
 
+mod common;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -78,16 +80,15 @@ fn corpus_lowering_coverage() {
             let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).ok()?;
             let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>"))?;
             let ctx = CodegenCtx::new(&ws);
-            let scx = skull_mir::lower::ScalarCtx::new(&ws);
             let mut local_total = 0usize;
             let mut local_ok = 0usize;
             let mut local_gaps: Vec<String> = Vec::new();
             for (fid, _) in ws.module(mid).functions.iter() {
                 local_total += 1;
-                match skull_mir::lower::lower_function_source(&ws, &scx, mid, fid) {
-                    Ok(func) => {
+                match common::lower_test_ref(&ws, mid, fid) {
+                    Ok((func, interner)) => {
                         // Emit too — a lower-OK that panics at emit is not parity.
-                        let _ = emit_function(&ws, &ctx, scx.interner(), FuncRef { module: mid, func: fid }, &func);
+                        let _ = emit_function(&ws, &ctx, &interner, FuncRef { module: mid, func: fid }, &func);
                         local_ok += 1;
                     }
                     Err(e) => local_gaps.push(gap_bucket(&e.message)),

@@ -13,6 +13,7 @@
 //! cannot come from two derivations that merely agree today.
 
 use std::sync::LazyLock;
+use std::sync::Arc;
 
 use skull_mir::instance::Instance;
 use skull_mir::concrete::{ConcreteBodyPlan, ConcreteOwner, ConcreteSignature, ConcreteTypeTables};
@@ -54,6 +55,39 @@ fn func_ref(ws: &bone_semantic::inference::Workspace, name: &str) -> FuncRef {
 
 fn nominal(name: &str) -> MonoTy {
     MonoTy::App { ctor: MonoCtor::Nominal(Ustr::from(name)), params: Vec::new() }
+}
+
+fn lower_test_roots(
+    ws: &bone_semantic::inference::Workspace,
+    roots: &[FuncRef],
+) -> (
+    ScalarCtx,
+    skull_graph::concrete_body::ConcreteBodies,
+) {
+    let interner = Arc::new(skull_mir::monoty::MonoInterner::new());
+    let graph = skull_graph::instance_graph::build_in(
+        ws,
+        roots.to_vec(),
+        false,
+        Arc::clone(&interner),
+    );
+    let bodies = skull_graph::concrete_body::build(ws, &graph);
+    let scx = ScalarCtx::new(ws).sharing(interner);
+    (scx, bodies)
+}
+
+fn lower_test_root(
+    ws: &bone_semantic::inference::Workspace,
+    scx: &ScalarCtx,
+    bodies: &skull_graph::concrete_body::ConcreteBodies,
+    fref: FuncRef,
+) -> skull_mir::mir::MirFunc {
+    let plan = bodies
+        .plans
+        .get(&Instance::base(fref))
+        .expect("concrete test plan");
+    skull_mir::lower::lower_instance_with_plans(ws, scx, plan, &bodies.plans)
+        .unwrap_or_else(|e| panic!("lower concrete test root: {}", e.message))
 }
 
 /// A generic whose value instantiation splats, plus a non-generic control that
@@ -301,17 +335,11 @@ fn main() {
         "the declaration-spelled tuple parameter must use its owned leaf plan"
     );
 
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
-    let caller = skull_mir::lower::lower_function_source(
-        &ws,
-        &scx,
-        mid,
-        func_ref(&ws, "main").func,
-    )
-    .expect("lower caller");
     let callee = func_ref(&ws, "nested");
-    let entry = skull_mir::lower::lower_function_source(&ws, &scx, callee.module, callee.func)
-        .expect("lower callee");
+    let main = func_ref(&ws, "main");
+    let (scx, bodies) = lower_test_roots(&ws, &[main, callee]);
+    let caller = lower_test_root(&ws, &scx, &bodies, main);
+    let entry = lower_test_root(&ws, &scx, &bodies, callee);
     assert_eq!(entry.params.len(), 3, "callee entry must bind Nested's three owned lanes");
     let call = caller
         .call_abi_plans
@@ -363,14 +391,9 @@ fn main() {
         nested.representation().result(),
         "an indirect caller must use the callee's result RepId"
     );
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
-    let lowered = skull_mir::lower::lower_function_source(
-        &ws,
-        &scx,
-        mid,
-        func_ref(&ws, "apply").func,
-    )
-    .expect("function-value call must lower");
+    let apply = func_ref(&ws, "apply");
+    let (scx, bodies) = lower_test_roots(&ws, &[apply, func_ref(&ws, "nested")]);
+    let lowered = lower_test_root(&ws, &scx, &bodies, apply);
     let call = lowered.insts.iter().find_map(|(_, inst)| match inst {
         skull_mir::mir::Inst::CallValueMulti { args, .. } => Some(args.len()),
         _ => None,

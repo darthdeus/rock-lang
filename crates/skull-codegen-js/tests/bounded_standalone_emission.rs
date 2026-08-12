@@ -152,7 +152,7 @@ fn main() {
 "#;
     let js = emit_js(&ws_with(source)).expect("column-map initialization must emit");
     assert!(
-        js.contains("Object.create(null)"),
+        js.contains("__map_col_new_spine") && js.contains("new Map()"),
         "the graph must retain the JS map-spine entry reached by the initializer:\n{js}"
     );
 }

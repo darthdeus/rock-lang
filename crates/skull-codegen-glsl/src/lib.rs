@@ -40,8 +40,6 @@ use skull_mir::gpu_layout::{
 use skull_mir::intrinsics::{Emission, IntrinsicEntry, IntrinsicTable};
 use skull_mir::concrete::{ConcreteBodyPlan, ConcretePlans, ConcreteSignature};
 use skull_mir::lower::{ScalarCtx, SpecSubst};
-#[cfg(test)]
-use skull_mir::lower::lower_instance_source;
 use skull_mir::instance::Instance;
 use skull_mir::monoty::MonoInterner;
 use skull_mir::monoty::{MonoCtor, MonoTy};
@@ -5332,6 +5330,25 @@ mod assertion_flip_tests {
         (ws, mid)
     }
 
+    fn lower_test_instance(ws: &Workspace, fref: FuncRef) -> (ScalarCtx, MirFunc) {
+        let interner = Arc::new(MonoInterner::new());
+        let graph = skull_graph::instance_graph::build_in(
+            ws,
+            vec![fref],
+            false,
+            Arc::clone(&interner),
+        );
+        let concrete = skull_graph::concrete_body::build(ws, &graph);
+        let scx = ScalarCtx::new_values_first_class(ws).sharing(Arc::clone(&interner));
+        let plan = concrete
+            .plans
+            .get(&Instance::base(fref))
+            .expect("shader test concrete plan");
+        let mf = skull_mir::lower::lower_instance_with_plans(ws, &scx, plan, &concrete.plans)
+            .expect("shader test lower");
+        (scx, mf)
+    }
+
     #[test]
     fn concrete_signature_tier0_check_rejects_a_non_tier0_plan_type() {
         let interner = MonoInterner::new();
@@ -5353,11 +5370,8 @@ mod assertion_flip_tests {
     #[test]
     fn missed_sink_is_a_hard_emit_error() {
         let (ws, mid) = build_ws("@pure fn f(i: int) -> float { return i }");
-        let scx = ScalarCtx::new_values_first_class(&ws);
         let fref = resolve_root(&ws, mid, "f").expect("root");
-        let mut mf =
-            lower_instance_source(&ws, &scx, &Instance::base(fref))
-                .expect("lower");
+        let (scx, mut mf) = lower_test_instance(&ws, fref);
 
         // The coercion is present today (regression pin for the return sink).
         assert!(
@@ -5401,11 +5415,8 @@ mod assertion_flip_tests {
         let (ws, mid) = build_ws(
             "@pure fn passthrough<T>(x: T) -> T { return x }\n             @pure fn caller(x: float) -> float { return passthrough(x) }",
         );
-        let scx = ScalarCtx::new_values_first_class(&ws);
         let fref = resolve_root(&ws, mid, "caller").expect("root");
-        let mut mf =
-            lower_instance_source(&ws, &scx, &Instance::base(fref))
-                .expect("lower");
+        let (scx, mut mf) = lower_test_instance(&ws, fref);
 
         // CONTROL: the record exists and the body emits against it.
         assert_eq!(mf.spec_bindings.len(), 1, "the fixture recorded no instantiation to remove");
@@ -5432,10 +5443,8 @@ mod assertion_flip_tests {
         let (ws, mid) = build_ws(
             "@pure fn doubled(x: float) -> float { return x * 2.0 }\n             @pure fn caller(x: float) -> float { return doubled(x) }",
         );
-        let scx = ScalarCtx::new_values_first_class(&ws);
         let fref = resolve_root(&ws, mid, "caller").expect("root");
-        let mf = lower_instance_source(&ws, &scx, &Instance::base(fref))
-            .expect("lower");
+        let (scx, mf) = lower_test_instance(&ws, fref);
 
         // The fixture really does exercise the gate: a call is present, and it
         // carries NO record -- which is the input the generic arm rejects.
@@ -5810,10 +5819,8 @@ mod assertion_flip_tests {
             "@pure fn pick<A, B>(a: A, b: B) -> A { return a }\n\
              @pure fn caller(x: float) -> float { return pick(x, 1) }",
         );
-        let scx = ScalarCtx::new_values_first_class(&ws);
         let fref = resolve_root(&ws, mid, "caller").expect("root");
-        let base = lower_instance_source(&ws, &scx, &Instance::base(fref))
-            .expect("lower");
+        let (scx, base) = lower_test_instance(&ws, fref);
 
         // CONTROL: the recorded key has the declared arity, and the body emits.
         let iid = *base.spec_bindings.keys().next().expect("a recorded instantiation");

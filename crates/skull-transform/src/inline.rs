@@ -1513,13 +1513,22 @@ fn outer(x: int) -> int {
             .iter()
             .find(|(_, f)| f.name.as_str() == "outer")
             .expect("outer");
-        let scx = ScalarCtx::new(&ws);
-        let body = skull_mir::lower::lower_instance_source(
+        let root = FuncRef { module: mid, func: fid };
+        let interner = std::sync::Arc::new(skull_mir::monoty::MonoInterner::new());
+        let graph = skull_graph::instance_graph::build_in(
             &ws,
-            &scx,
-            &Instance::base(FuncRef { module: mid, func: fid }),
-        )
-        .expect("the inline fixture must lower");
+            vec![root],
+            false,
+            std::sync::Arc::clone(&interner),
+        );
+        let concrete = skull_graph::concrete_body::build(&ws, &graph);
+        let scx = ScalarCtx::new(&ws).sharing(interner);
+        let plan = concrete
+            .plans
+            .get(&Instance::base(root))
+            .expect("inline fixture concrete plan");
+        let body = skull_mir::lower::lower_instance_with_plans(&ws, &scx, plan, &concrete.plans)
+            .expect("the inline fixture must lower");
         let (bodies, trees) = resolved_tree_count(&body);
         assert!(bodies > 1, "the candidate census did not include its nested body");
         assert_eq!(trees, 0, "fresh candidate lowering already carried resolved trees");
