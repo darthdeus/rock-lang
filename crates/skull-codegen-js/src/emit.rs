@@ -2574,6 +2574,7 @@ pub fn emit_with_closure(
     };
     let mut st = WorklistState::new(
         ws,
+        &scx,
         &root_plan.named,
         false,
         &session.graph,
@@ -2958,6 +2959,7 @@ fn assemble_program_core(
     let deco_names = decorator_names(ws);
     let mut st = WorklistState::new(
         ws,
+        scx,
         roots,
         true,
         &session.graph,
@@ -3651,6 +3653,7 @@ fn add_inline_js_body(bodies: &mut Vec<JsInlineBody>, instance: Instance, decl: 
 impl WorklistState {
     fn new(
         ws: &Workspace,
+        scx: &skull_mir::lower::ScalarCtx,
         roots: &[(FuncRef, String)],
         program_mode: bool,
         graph: &InstanceGraph,
@@ -3726,7 +3729,7 @@ impl WorklistState {
             spec_lowered: Vec::new(),
             inline_js,
             state_index: build_state_index(ws),
-            nobox_leaf_globals: build_nobox_leaf_globals(ws),
+            nobox_leaf_globals: build_nobox_leaf_globals(ws, scx),
             deco_globals: if program_mode { HashSet::new() } else { decorator_populated_globals(ws) },
             enum_defs: build_enum_global_defs(ws),
             gctx: GlobalCtx::default(),
@@ -4162,7 +4165,9 @@ impl JsDelivery<'_> {
         }
         let gdecl = &self.ws.module(site.module).globals[site.gid];
         let is_const = gdecl.is_const;
-        let leaves = skull_mir::lower::nobox_global_leaves(self.ws, gdecl.name, gdecl.ty);
+        let leaves = skull_mir::lower::GlobalPlan::for_declared_type(self.ws, self.scx, gdecl.ty)
+            .ok()
+            .and_then(|plan| plan.leaf_names(gdecl.name));
         self.st.ginits.push(GlobalInit {
             name: gname,
             init_name,
@@ -4840,11 +4845,17 @@ fn build_state_index(ws: &Workspace) -> HashMap<ustr::Ustr, GlobalSite> {
 /// questions: a leaf is state (a write to it is legal) but owns no INITIALIZER --
 /// the base global's ginit assigns every leaf, so keying a ginit on a leaf would
 /// emit that initializer once per leaf.
-fn build_nobox_leaf_globals(ws: &Workspace) -> HashMap<ustr::Ustr, ustr::Ustr> {
+fn build_nobox_leaf_globals(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+) -> HashMap<ustr::Ustr, ustr::Ustr> {
     let mut m = HashMap::new();
     for module in &ws.modules {
         for (_gid, g) in module.globals.iter() {
-            if let Some(leaves) = skull_mir::lower::nobox_global_leaves(ws, g.name, g.ty) {
+            if let Some(leaves) = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty)
+                .ok()
+                .and_then(|plan| plan.leaf_names(g.name))
+            {
                 for leaf in leaves {
                     m.insert(leaf, g.name);
                 }
@@ -6540,6 +6551,7 @@ mod tests {
             .expect("root");
         let root = FuncRef { module: mid, func: fid };
         let interner = std::sync::Arc::new(skull_mir::monoty::MonoInterner::new());
+        let scx = js_scx(&ws);
         let graph = skull_graph::instance_graph::build_in(&ws, Vec::new(), false, interner.clone());
         let roots = [root];
         let view = artifact::realize(
@@ -6554,6 +6566,7 @@ mod tests {
 
         let result = WorklistState::new(
             &ws,
+            &scx,
             &[(root, "root".to_string())],
             false,
             &graph,

@@ -1293,20 +1293,11 @@ pub(crate) fn nobox_declared_shape(ws: &Workspace, ty: TyId) -> Option<ValueShap
     nullable_nominal_shape(ws, ty, &|t| static_ty(ws, t))
 }
 
-/// The leaf globals a `nobox`-typed global is stored in, `None` for every other
-/// global. THE single source for the emitted binding, the reads and writes, and
-/// the reflection registry -- so `--dump-state` and snapshot restore address the
-/// storage the program actually uses instead of a base name holding nil.
-pub fn nobox_global_leaves(ws: &Workspace, name: Ustr, ty: TyId) -> Option<Vec<Ustr>> {
-    let shape = nobox_declared_shape(ws, ty)?;
-    Some((0..shape.leaf_count()).map(|i| nobox_global_leaf_name(name, i)).collect())
-}
-
 /// The value-struct type a `nobox` global's logical value has, plus its leaf
 /// PATHS in ctor order -- what reflection needs to rebuild the logical value from
 /// the leaf globals and to take it apart again. `None` for every other global,
-/// on the same gate as [`nobox_global_leaves`], so accessors exist for exactly
-/// the globals whose storage IS leaves.
+/// on the same declared-type gate as the target-specific [`GlobalPlan`], so
+/// accessors exist for exactly the globals whose storage IS leaves.
 ///
 /// Paths, not just an arity, because both directions address by path: the ctor is
 /// positional over this sequence, and the write side assigns `v.<path>` per leaf.

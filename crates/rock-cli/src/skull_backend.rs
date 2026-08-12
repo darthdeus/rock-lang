@@ -1388,6 +1388,7 @@ fn build_rock_globals_registry(
     if package_map.is_empty() {
         return String::new();
     }
+    let scx = skull_mir::lower::ScalarCtx::new(ws);
 
     let mut by_package: BTreeMap<String, Vec<String>> = BTreeMap::new();
     // The RECURSIVE declared shape per global. A global has no reflection
@@ -1457,7 +1458,7 @@ fn build_rock_globals_registry(
     // The accessor table rides WITH the registry, never appended separately: four
     // emit paths append this block, and a registry whose consumers had no
     // accessors would read nil for every `nobox` global.
-    out.push_str(&build_nobox_global_accessors(ws));
+    out.push_str(&build_nobox_global_accessors(ws, &scx));
     out
 }
 
@@ -1476,7 +1477,10 @@ fn build_rock_globals_registry(
 ///
 /// Position past the global defs is irrelevant -- the closures only read the leaf
 /// globals when called (same argument as the registry block it rides with).
-fn build_nobox_global_accessors(ws: &bone_semantic::inference::Workspace) -> String {
+fn build_nobox_global_accessors(
+    ws: &bone_semantic::inference::Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+) -> String {
     use bone_semantic::prelude::ModuleId;
 
     let mut rows: Vec<String> = Vec::new();
@@ -1488,7 +1492,9 @@ fn build_nobox_global_accessors(ws: &bone_semantic::inference::Workspace) -> Str
             let skull_mir::lower::NoboxGlobalAccessorShape {
                 ty_name, paths, nullable, ctor_suffix: suffix, presence_path, unbuildable,
             } = acc;
-            let leaves = skull_mir::lower::nobox_global_leaves(ws, g.name, g.ty)
+            let leaves = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty)
+                .ok()
+                .and_then(|plan| plan.leaf_names(g.name))
                 .expect("a shape implies leaves: both gate on `nobox_declared_shape`");
             // A nullable global leads with a presence leaf that has no path: it is
             // not a field, so it is branched on rather than read. Everything below

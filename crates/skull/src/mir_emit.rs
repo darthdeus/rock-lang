@@ -601,10 +601,14 @@ fn emit_decorator_unit(
 /// top-level names, so they go through the collision sink.
 fn global_init_target(
     ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
     cg: &CodegenCtx,
     g: &bone_semantic::hir::GlobalDef,
 ) -> String {
-    match skull_mir::lower::nobox_global_leaves(ws, g.name, g.ty) {
+    match skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty)
+        .ok()
+        .and_then(|plan| plan.leaf_names(g.name))
+    {
         Some(leaves) => leaves
             .iter()
             .map(|l| cg.mint_synthetic(l.to_string()))
@@ -706,7 +710,7 @@ fn emit_global_unit(
             // detect the difference: a layout drift restarts the process upstream
             // (`shape_drift_tests::marking_a_type_nobox_requests_restart`), and a
             // respawn is a cold start that never reaches this branch.
-            let target = global_init_target(ws, cg, g);
+            let target = global_init_target(ws, scx, cg, g);
             let line = if g.is_const {
                 format!("{target} = {init_name}()\n")
             } else {
@@ -3041,7 +3045,9 @@ fn assemble(
         .iter()
         .flat_map(|m| m.globals.iter())
         .flat_map(|(_, g)| {
-            skull_mir::lower::nobox_global_leaves(ws, g.name, g.ty)
+            skull_mir::lower::GlobalPlan::for_declared_type(ws, &cache.scx, g.ty)
+                .ok()
+                .and_then(|plan| plan.leaf_names(g.name))
                 .into_iter()
                 .flatten()
                 .map(move |l| (l, g.name))
@@ -4154,7 +4160,7 @@ fn assemble_overlay(
                 let g = &ws.module(a.mid).globals[a.gid];
                 format!(
                     "{} = {}()\n",
-                    global_init_target(ws, &cache.cg, g),
+                    global_init_target(ws, &cache.scx, &cache.cg, g),
                     crate::global_init_fn_name(a.name.as_str())
                 )
             };

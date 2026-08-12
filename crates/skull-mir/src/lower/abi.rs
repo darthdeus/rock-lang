@@ -277,6 +277,15 @@ impl GlobalPlan {
         self.arena.value_shape(self.representation)
     }
 
+    pub fn leaf_names(&self, base: Ustr) -> Option<Vec<Ustr>> {
+        let shape = self.value_shape()?;
+        Some(
+            (0..shape.leaf_count())
+                .map(|leaf| crate::lower::nobox_global_leaf_name(base, leaf))
+                .collect(),
+        )
+    }
+
     pub fn lanes(&self) -> usize {
         self.arena.get(self.representation).lanes(&self.arena)
     }
