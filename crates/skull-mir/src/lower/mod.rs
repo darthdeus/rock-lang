@@ -1023,15 +1023,6 @@ fn hash_init_stmt(body: &Body, s: Idx<Statement>, h: &mut std::collections::hash
     }
 }
 
-pub fn lower_function_source(
-    ws: &Workspace,
-    scx: &ScalarCtx,
-    mid: ModuleId,
-    fid: Idx<Function>,
-) -> Result<MirFunc, CompilerError> {
-    lower_instance_source(ws, scx, &crate::instance::Instance::base(FuncRef { module: mid, func: fid }))
-}
-
 pub fn lower_function_with_plans(
     ws: &Workspace,
     scx: &ScalarCtx,
@@ -1039,32 +1030,6 @@ pub fn lower_function_with_plans(
     concrete_plans: &ConcretePlans,
 ) -> Result<MirFunc, CompilerError> {
     lower_instance_with_plans(ws, scx, plan, concrete_plans)
-}
-
-/// **Lower the definition emission writes for `inst`.**
-///
-/// The body as if hand-written for that instantiation
-/// (`docs/flatvec-plan.md`): value params explode field-wise, `buf[i]=v`
-/// scalarizes, `native_buffer_alloc<T>` resolves its ctype. A non-generic
-/// instance substitutes nothing, which is the declaration's own body.
-///
-/// The instance's arguments are ids into `scx`'s arena, so this is only correct
-/// where the caller minted them through the same [`ScalarCtx`] -- which is what
-/// makes there being ONE arena a soundness property rather than a tidiness one.
-pub fn lower_instance_source(
-    ws: &Workspace,
-    scx: &ScalarCtx,
-    inst: &crate::instance::Instance,
-) -> Result<MirFunc, CompilerError> {
-    lower_body(
-        ws,
-        scx,
-        inst.func,
-        inst.clone(),
-        Some(inst.subst(ws, scx.interner())),
-        None,
-        None,
-    )
 }
 
 /// Lower an ordinary function while resolving every concrete callee ABI from
