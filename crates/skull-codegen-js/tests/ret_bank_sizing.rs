@@ -93,6 +93,26 @@ fn main() { let _ = seam() }
     );
 }
 
+#[test]
+fn an_owned_mir_result_plan_declares_the_return_bank() {
+    let js = emit(
+        r#"
+nobox value P2 { x: float, y: float }
+@scalar_abi fn pair(p: P2) -> P2 { return p }
+fn main() {
+    let p = P2 { x: 1.0, y: 2.0 }
+    let q = pair(p)
+    print("{q.x}")
+}
+"#,
+        "main",
+    );
+    assert!(
+        js.contains("var __rock_ret1"),
+        "a multi-lane MIR result's owned ABI plan must size the bank:\n{js}"
+    );
+}
+
 /// **The bank is not sized by the body TEXT.** A slot named in a comment widens
 /// nothing -- and writing one directly rejects, which is the legacy mechanism
 /// this sizing replaced.

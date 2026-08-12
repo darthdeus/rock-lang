@@ -15,6 +15,7 @@ use bone_semantic::inference::Workspace;
 use comfy_la_arena::Idx;
 use skull_mir::intrinsics::{Emission, IntrinsicTable};
 use skull_mir::instance::Instance;
+use skull_mir::lower::BackendFnAbiPlan;
 use skull_mir::mir::{Block, Cell, ContainerKind, FuncRef, Inst, Lit, MirFunc, Term};
 use skull_graph::artifact::{self, ArtifactView};
 use skull_graph::instance_graph::{InstanceGraph, Site, SiteOutcome};
@@ -154,34 +155,42 @@ fn ret_slot_decls(n: usize) -> String {
     format!("var {};\n", names.join(", "))
 }
 
-/// The widest multi-value wire in `bodies`: the max leaf count over every
-/// multi-value `Term::Return` and every multi-value call's dests, nested fns
-/// included.
+/// The widest result wire in `bodies`, as recorded by the owning ABI plans.
+/// Call destinations are operational storage; their length is not a second
+/// ABI oracle.
 ///
 /// MIR is not the only writer: an `inline(js)` body publishes its own lanes, so
 /// the bank is sized over [`max_published_lanes`] too. Both paths that assemble
 /// a program take that max -- sizing from MIR alone under-declares silently,
 /// because the emitted program is sloppy-mode and an undeclared write just
 /// becomes an implicit global.
-fn max_multi_wire(bodies: &[&MirFunc]) -> usize {
-    fn of(mf: &MirFunc) -> usize {
-        let mut n = 0usize;
-        for (_, block) in mf.blocks.iter() {
-            if let Term::Return(vs) = &block.term {
-                n = n.max(vs.len());
-            }
-        }
-        for (_, inst) in mf.insts.iter() {
+fn max_multi_wire(bodies: &[&MirFunc]) -> Result<usize, CompilerError> {
+    fn of(mf: &MirFunc) -> Result<usize, CompilerError> {
+        let mut n = mf.abi_plan.as_ref().map_or(0, BackendFnAbiPlan::result_lanes);
+        for (iid, inst) in mf.insts.iter() {
             match inst {
-                Inst::CallMulti { dests, .. }
-                | Inst::CallValueMulti { dests, .. }
-                | Inst::CallBoundMulti { dests, .. } => n = n.max(dests.len()),
+                Inst::CallMulti { .. } | Inst::CallValueMulti { .. } => {
+                    let plan = mf.call_abi_plans.get(&iid).ok_or_else(|| {
+                        err("JS: multi-value call has no owned ABI plan")
+                    })?;
+                    n = n.max(plan.result_lanes());
+                }
+                Inst::CallBoundMulti { .. } => {
+                    return Err(err(
+                        "JS: unresolved bound multi-value call has no owned ABI plan",
+                    ));
+                }
                 _ => {}
             }
         }
-        n.max(mf.nested_fns.iter().map(of).max().unwrap_or(0))
+        for nested in &mf.nested_fns {
+            n = n.max(of(nested)?);
+        }
+        Ok(n)
     }
-    bodies.iter().map(|mf| of(mf)).max().unwrap_or(0)
+    bodies.iter().map(|mf| of(mf)).collect::<Result<Vec<_>, _>>().map(|widths| {
+        widths.into_iter().max().unwrap_or(0)
+    })
 }
 
 /// The widest wire any reachable `inline(js)` body PUBLISHES, from the concrete
@@ -2587,7 +2596,7 @@ pub fn emit_with_closure(
     out.push_str(&emit_inspect_ty(ws, &bodies)?);
     out.push_str(&emit_col_mat(ws, &bodies)?);
     out.push_str(&ret_slot_decls(
-        max_multi_wire(&bodies).max(max_published_lanes(&session.view, &st.inline_js)?),
+        max_multi_wire(&bodies)?.max(max_published_lanes(&session.view, &st.inline_js)?),
     ));
     // Global initializers first (`function __ginit_<name>() {...}`), then the
     // load-time assignment lines in dependency order, then the fn defs. (The
@@ -3071,7 +3080,7 @@ fn assemble_program_core(
     out.push_str(&col_mat);
     stable.push_str(&col_mat);
     let ret_slots = ret_slot_decls(
-        max_multi_wire(&bodies).max(max_published_lanes(&session.view, &st.inline_js)?),
+        max_multi_wire(&bodies)?.max(max_published_lanes(&session.view, &st.inline_js)?),
     );
     out.push_str(&ret_slots);
     stable.push_str(&ret_slots);
