@@ -66,7 +66,6 @@ impl Builder<'_> {
         &self,
         name: Idx<BindingInfo>,
         params: IdxRange<BindingInfo>,
-        ret_ty: Option<TyId>,
         hoisted: Ustr,
     ) -> Result<NestedFn, CompilerError> {
         let param_names: Vec<Ustr> =
@@ -74,13 +73,7 @@ impl Builder<'_> {
         let boxed = NestedFn {
             hoisted,
             param_names: param_names.clone(),
-            representation: self.scx.rep_arena().function_value_legacy(
-                self.scx.target,
-                Vec::new(),
-                None,
-                None,
-                param_names.len(),
-            ),
+            representation: self.scx.rep_arena().boxed_function(self.scx.target, param_names.len()),
         };
         let taken_by_value = self
             .body
@@ -112,111 +105,24 @@ impl Builder<'_> {
             };
             return Ok(if abi.uses_scalar_abi() { abi } else { boxed });
         }
-        // TAKEN BY VALUE: the ABI narrows to what an indirect call site can
-        // compute from the fn TYPE alone ([`Self::fn_value_abi`]), which is
-        // `nobox` values only. Both ends must run the SAME predicate -- using
-        // the wider `body_sig_value_shape` here would scalarize an ordinary
-        // value param that an opaque call site still boxes, and the two would
-        // disagree exactly where neither can see the other. Dropping to the
-        // boxed ABI entirely, which is what this used to do, is the same
-        // disagreement in the other direction: it is what made a `nobox` param
-        // reject once the fn was taken by value.
-        let slot_of = |s: &Self, t: TyId| {
-            if taken_by_value {
-                s.nobox_param_slot_of_ty(t)
-            } else {
-                // A direct-only nested fn may use every scalarizable value
-                // shape, but the TUPLE rule is the same either way -- only a
-                // `nobox` element splats -- so both branches share it.
-                match s.body_sig_value_shape(t) {
-                    Some(shape) => RetSlot::Leaves(shape),
-                    None => s.tuple_param_slot_of_ty(t),
-                }
-            }
+        let Some(fn_ty) = self
+            .binding_ty(name)
+            .and_then(|ty| self.source_mono_type(ty))
+        else {
+            return Ok(boxed);
         };
-        let shape_of = |s: &Self, t: TyId| {
-            if taken_by_value {
-                s.nobox_shape_of_ty(t)
-            } else {
-                s.body_sig_value_shape(t)
-            }
-        };
-        let param_shapes: Vec<RetSlot> = params
-            .into_iter()
-            .map(|pb| self.binding_ty(pb).map_or(RetSlot::Opaque, |t| slot_of(self, t)))
-            .collect();
-        let ret_shape = self
-            .nested_fn_ret_ty(name, ret_ty)
-            .and_then(|t| shape_of(self, t));
-        let param_count = param_names.len();
-        let abi = NestedFn {
-            hoisted,
-            param_names,
-            representation: self.scx.rep_arena().function_value_legacy(
-                self.scx.target,
-                param_shapes,
-                ret_shape,
-                None,
-                param_count,
-            ),
-        };
+        let representation = BackendFnAbiPlan::for_function_value_with_mode(
+            self.ws,
+            self.scx,
+            &fn_ty,
+            taken_by_value,
+        )
+        .map_err(|error| match error.span.or(self.cur_span) {
+            Some(span) => CompilerError::new_with_label(span, error.message),
+            None => CompilerError::new_no_location(error.message),
+        })?;
+        let abi = NestedFn { hoisted, param_names, representation };
         Ok(if abi.uses_scalar_abi() { abi } else { boxed })
-    }
-
-    /// A nested `fn`'s return type. An ANNOTATION is authoritative when present;
-    /// without one the type is inferred, and it must be read off the binding's own
-    /// `fn(..) -> R` type rather than defaulted away -- an inferred value return is
-    /// as much a part of the signature as a written one, and treating it as absent
-    /// silently drops the callee back to the boxed ABI.
-    pub(crate) fn nested_fn_ret_ty(&self, name: Idx<BindingInfo>, ret_ty: Option<TyId>) -> Option<TyId> {
-        if ret_ty.is_some() {
-            return ret_ty;
-        }
-        let fty = self.resolve_tyid(self.binding_ty(name)?)?;
-        match self.ty_node(fty)? {
-            TypeExpr::Function { ret, .. } => Some(fty.with_idx(ret)),
-            _ => None,
-        }
-    }
-
-    /// [`sig_value_shape`] for a type that may live in the BODY's inference arena
-    /// rather than the workspace one -- a nested `fn`'s params are declared inside
-    /// the enclosing body, so `static_ty` cannot see them. Same shape policy
-    /// (`sig_shape_of_nominal`), reached through `ty_node`, which also applies the
-    /// enclosing specialization substitution.
-    pub(crate) fn body_sig_value_shape(&self, ty: TyId) -> Option<ValueShape> {
-        if let Some(concrete) = self.concrete_ty_id(ty) {
-            let (payload, nullable) = concrete.peel_nullable();
-            let crate::monoty::MonoTy::App {
-                ctor: crate::monoty::MonoCtor::Nominal(name),
-                ..
-            } = payload
-            else {
-                return None;
-            };
-            return if nullable {
-                sig_shape_of_nullable_nominal(self.ws, *name)
-            } else {
-                sig_shape_of_nominal(self.ws, *name)
-            };
-        }
-        if self.concrete_plan.is_some() {
-            return None;
-        }
-        let ty = self.resolve_tyid(ty)?;
-        match self.ty_node(ty)? {
-            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => sig_shape_of_nominal(self.ws, n),
-            TypeExpr::Nullable(inner) => {
-                let inner = self.resolve_tyid(ty.with_idx(inner))?;
-                match self.ty_node(inner)? {
-                    TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => {
-                        sig_shape_of_nullable_nominal(self.ws, n)
-                    }
-                    _ => None,
-                }
-            }
-            _ => None,
-        }
     }
 
     /// Hoist a nested `fn` to a private top-level [`MirFunc`] `__local_<owner>_
@@ -227,7 +133,6 @@ impl Builder<'_> {
         &mut self,
         name: Idx<BindingInfo>,
         params: IdxRange<BindingInfo>,
-        ret_ty: Option<TyId>,
         body: Idx<Expr>,
     ) -> Result<(), CompilerError> {
         let sname = self.body.binding_arena[name].name;
@@ -238,7 +143,7 @@ impl Builder<'_> {
             v
         };
         let hoisted = Ustr::from(format!("__local_{}_{}_{}", self.static_owner, sname, ctr).as_str());
-        let abi = self.nested_fn_abi(name, params, ret_ty, hoisted)?;
+        let abi = self.nested_fn_abi(name, params, hoisted)?;
         self.nested_fn_globals.insert(raw(name), abi.clone());
 
         let mf = MirFunc::new(hoisted);
@@ -424,8 +329,8 @@ impl Builder<'_> {
                 Statement::Static { name, value } => {
                     self.lower_static(name, value)?;
                 }
-                Statement::Fn { name, params, ret_ty, body } => {
-                    self.lower_nested_fn(name, params, ret_ty, body)?;
+                Statement::Fn { name, params, body, .. } => {
+                    self.lower_nested_fn(name, params, body)?;
                 }
                 Statement::Comment(_) => {}
                 Statement::While { cond, body } => {

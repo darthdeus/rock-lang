@@ -308,7 +308,7 @@ impl Builder<'_> {
                         .unwrap_or_default();
                     self.ws.module(*m).functions[*f]
                         .return_ty
-                        .and_then(|t| tuple_ret_shape(self.ws, &subst, t))
+                        .and_then(|t| self.declaration_rep_tuple(t, &subst))
                         .ok_or_else(|| gap("for-iter `next` must return a tuple"))?
                 }
             }

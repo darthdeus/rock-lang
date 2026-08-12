@@ -540,18 +540,10 @@ impl Builder<'_> {
 
     /// A fn taken BY VALUE must have the ABI an indirect caller can derive.
     ///
-    /// A definition reads its [`BackendFnAbiPlan`]; an indirect call site has only
-    /// the fn TYPE, so it reads [`Self::fn_value_abi`]. Those agree by construction
-    /// for an ordinary body -- the plan narrows an address-taken one to exactly
-    /// the `nobox` shapes the type yields. `@scalar_abi` is the one thing that
-    /// bypasses that narrowing, because its hand-written `inline(lua)` body
-    /// literally spells the leaf params, so narrowing it would break the body
-    /// instead of the call.
-    ///
-    /// When those two disagree the program cannot be emitted correctly either way:
-    /// the definition took leaf params and the call site packed one cdata, so the
-    /// first leaf got the whole box and the rest went nil. Rejecting is the honest
-    /// answer, and it is what the fn-value ABI comment always claimed held.
+    /// A definition reads its [`BackendFnAbiPlan`]; an indirect call site reads
+    /// the same [`FunctionRepPlan`] projection from the function type. When the
+    /// two disagree the program cannot be emitted correctly, so the mismatch is
+    /// rejected rather than repaired with a second shape calculation.
     pub(crate) fn reject_fn_value_abi_mismatch(
         &self,
         e: Idx<Expr>,
@@ -780,65 +772,6 @@ impl Builder<'_> {
         self.nobox_shape_of_ty(self.binding_ty(binding)?)
     }
 
-    /// The leaf ABI of a FN TYPE, or `None` when nothing in the signature is a
-    /// `nobox` value and the boxed fn-value ABI stands unchanged.
-    ///
-    /// Keyed on the TYPE and nothing else. An indirect call site cannot see its
-    /// callee, so the definition, a direct call and a call through a fn value
-    /// can only agree by all three reading the same signature -- the rule the
-    /// tuple-return ABI already follows (`lambda_ret_tuple_shape` next to
-    /// `expr_tuple_shape`). Any callee-identity test here would make the two
-    /// ends disagree exactly where the callee is opaque, which is the case that
-    /// matters.
-    ///
-    /// Narrowed to `nobox` types on purpose: an ordinary value struct has no
-    /// guarantee to keep, so widening this to every FFI-clean value would
-    /// re-ABI every lambda in the tree for no correctness gain. Both ends
-    /// compute the same predicate from the same type, so they still agree.
-    pub(crate) fn fn_value_abi(&self, ty: TyId) -> Option<(Vec<RetSlot>, Option<ValueShape>)> {
-        if self.concrete_plan.is_some() {
-            let ty = self.concrete_ty_id(ty)?;
-            let representation = BackendFnAbiPlan::for_function_value(self.ws, self.scx, &ty).ok()?;
-            if !representation.uses_scalar_abi() {
-                return None;
-            }
-            let arena = self.scx.rep_arena();
-            let params = representation
-                .params()
-                .iter()
-                .map(|id| arena.ret_slot(*id))
-                .collect();
-            let result = representation.result().and_then(|id| arena.value_shape(id));
-            return Some((params, result));
-        }
-        let ty = self.resolve_tyid(ty)?;
-        // Nullability lives on the REFERENCE, not on the call ABI: an absent fn
-        // value is never called, and a present one is a callable with exactly the
-        // leaf ABI its type spells. A LAMBDA LITERAL at a nullable param unifies
-        // its own expr type with that param, so it arrives here as
-        // `Nullable(Function(..))` while the same lambda bound to a local first
-        // arrives as `Function(..)`. Without this peel the two spellings get
-        // different ABIs and the literal packs its `nobox` return.
-        let ty = match self.ty_node(ty) {
-            Some(TypeExpr::Nullable(inner)) => {
-                let Some(inner) = self.resolve_tyid(ty.with_idx(inner)) else {
-                    return None;
-                };
-                inner
-            }
-            Some(_) => ty,
-            None => return None,
-        };
-        let TypeExpr::Function { params, ret } = self.ty_node(ty)? else { return None };
-        let ps: Vec<RetSlot> =
-            params.into_iter().map(|p| self.nobox_param_slot_of_ty(ty.with_idx(p))).collect();
-        let rs = self.nobox_shape_of_ty(ty.with_idx(ret));
-        if rs.is_none() && !ps.iter().any(RetSlot::splats) {
-            return None;
-        }
-        Some((ps, rs))
-    }
-
     pub(crate) fn fn_value_rep_plan(
         &self,
         ty: TyId,
@@ -854,53 +787,33 @@ impl Builder<'_> {
         if self.concrete_plan.is_some() {
             return Ok(None);
         }
-        let Some(ty) = self.resolve_tyid(ty) else { return Ok(None) };
-        let ty = match self.ty_node(ty) {
-            Some(TypeExpr::Nullable(inner)) => {
-                let Some(inner) = self.resolve_tyid(ty.with_idx(inner)) else {
-                    return Ok(None);
-                };
-                inner
-            }
-            Some(_) => ty,
-            None => return Ok(None),
+        let Some(resolved) = self.resolve_tyid(ty) else { return Ok(None) };
+        let function_ty = match self.ty_node(resolved) {
+            Some(TypeExpr::Nullable(inner)) => self.resolve_tyid(resolved.with_idx(inner)),
+            Some(_) => Some(resolved),
+            None => None,
         };
-        let Some(TypeExpr::Function { params, ret }) = self.ty_node(ty) else {
+        let Some(function_ty) = function_ty else { return Ok(None) };
+        let Some(TypeExpr::Function { params, .. }) = self.ty_node(function_ty) else {
             return Ok(None);
         };
-        let (param_shapes, ret_shape) = self
-            .fn_value_abi(ty)
-            .unwrap_or_else(|| (Vec::new(), None));
-        let ret_ty = ty.with_idx(ret);
-        let ret_tuple = self.tyid_tuple_ret_shape(ret_ty);
-        Ok(Some(self.scx.rep_arena().function_value_legacy(
-            self.scx.target,
-            param_shapes,
-            ret_shape,
-            ret_tuple.as_ref(),
-            params.into_iter().count(),
-        )))
-    }
-
-    /// [`Self::nobox_shape_of_ty`] widened to the param SLOT vocabulary, so a
-    /// TUPLE param carrying a `nobox` element rides its leaves like any other
-    /// splatting slot. Both ends of a fn value read this same predicate off the
-    /// same type, so they agree without either seeing the other.
-    pub(crate) fn nobox_param_slot_of_ty(&self, ty: TyId) -> RetSlot {
-        if let Some(concrete) = self.concrete_ty_id(ty) {
-            return self
-                .concrete_rep_slot(
-                    &concrete,
-                    RepUse::Parameter,
-                    self.source_tuple_spelled(ty),
-                    true,
-                )
-                .unwrap_or(RetSlot::Opaque);
-        }
-        if let Some(shape) = self.nobox_shape_of_ty(ty) {
-            return RetSlot::Leaves(shape);
-        }
-        self.tuple_param_slot_of_ty(ty)
+        let Some(source_ty) = self.source_mono_type(function_ty) else {
+            return Ok(Some(self.scx.rep_arena().boxed_function(
+                self.scx.target,
+                params.into_iter().count(),
+            )));
+        };
+        BackendFnAbiPlan::for_function_value_with_mode(
+            self.ws,
+            self.scx,
+            &source_ty,
+            true,
+        )
+        .map(Some)
+        .map_err(|error| match error.span.or(self.cur_span) {
+            Some(span) => CompilerError::new_with_label(span, error.message),
+            None => CompilerError::new_no_location(error.message),
+        })
     }
 
     pub(crate) fn nobox_shape_of_ty(&self, ty: TyId) -> Option<ValueShape> {

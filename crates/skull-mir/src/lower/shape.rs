@@ -1210,28 +1210,6 @@ pub(crate) fn struct_expand_variants(
     Ok(out)
 }
 
-/// The scalarizable shape of a signature type (a param/return TyId): `Some` iff
-/// it is a NON-nullable nominal value struct OR a flat-eligible (boxed) enum, or a
-/// NULLABLE flat enum -- all thread as leaf scalars. A nullable flat enum threads
-/// with `tag = nil` as the null sentinel (a present variant always has a non-nil
-/// string tag, so no extra null bit is needed). Nullable VALUE structs still keep
-/// the single-cdata ABI (cdata has no spare field for a nil discriminator).
-pub(crate) fn sig_value_shape(ws: &Workspace, ty: TyId) -> Option<ValueShape> {
-    match static_ty(ws, ty)? {
-        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => sig_shape_of_nominal(ws, n),
-        TypeExpr::Nullable(inner) => match static_ty(ws, ty.with_idx(inner))? {
-            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => {
-                sig_shape_of_nullable_nominal(ws, n)
-            }
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-/// The shape policy behind [`sig_value_shape`]'s non-nullable arm, shared with the
-/// body-local walker ([`Builder::body_sig_value_shape`]) so the two arenas can
-/// never disagree about what threads as leaves.
 pub(crate) fn sig_shape_of_nominal(ws: &Workspace, n: Ustr) -> Option<ValueShape> {
     value_shape(ws, n)
         .or_else(|| value_shape_gc(ws, n))
@@ -1313,43 +1291,6 @@ pub(crate) fn nullable_nominal_shape(
 /// see and the body-arena walker cannot.
 pub(crate) fn nobox_declared_shape(ws: &Workspace, ty: TyId) -> Option<ValueShape> {
     nullable_nominal_shape(ws, ty, &|t| static_ty(ws, t))
-}
-
-pub(crate) fn nobox_declared_shape_spec(
-    ws: &Workspace,
-    subst: &SpecSubst,
-    ty: TyId,
-) -> Option<ValueShape> {
-    if let TyId::Static(m, idx) = ty {
-        match ws.module(m).ty_arena[idx] {
-            // A generic bound to `E?` keeps its `?` in the BINDING, so the
-            // declared slot is nullable and leads with a presence leaf. This is
-            // still a DECLARED type read at a declaration (`fn .. -> T` at a site
-            // that bound `T = E?`) -- never a nullability inferred off an
-            // expression, which is what manufactures a phantom presence slot.
-            TypeExpr::Generic(var, _) => {
-                let (inner, nullable) = subst.get(&var)?.peel_nullable();
-                let name = inner.nominal()?;
-                let mut shape = is_nobox_nominal(ws, name)
-                    .then(|| value_shape_of_nominal(ws, name))
-                    .flatten()?;
-                shape.nullable = nullable;
-                return Some(shape);
-            }
-            TypeExpr::Nullable(inner) => {
-                if let Some(TypeExpr::Generic(var, _)) = static_ty(ws, ty.with_idx(inner)) {
-                    let name = spec_nominal(subst, var)?;
-                    let mut shape = is_nobox_nominal(ws, name)
-                        .then(|| value_shape_of_nominal(ws, name))
-                        .flatten()?;
-                    shape.nullable = true;
-                    return Some(shape);
-                }
-            }
-            _ => {}
-        }
-    }
-    nobox_declared_shape(ws, ty)
 }
 
 /// The leaf globals a `nobox`-typed global is stored in, `None` for every other
@@ -1497,43 +1438,6 @@ pub const ABLATION_GROWTH_DEPTH: u32 = 8;
 /// conversion that could lose or reorder them.
 pub type SpecSubst = crate::monoty::MonoSubst;
 
-/// The [`RetSlot`] of a binding, read straight off the reified type.
-///
-/// The counterpart to [`ret_slot`] for the one case that has no type node to go
-/// through: a generic bound to a TUPLE. Mirrors [`nobox_sig_shape_spec`]'s
-/// policy exactly -- only a `nobox` nominal splats, and a nullable one takes the
-/// nullable shape -- so a tuple slot answers the same as the spelled-out type in
-/// that position would.
-pub(crate) fn mono_ret_slot(ws: &Workspace, ty: &MonoTy) -> RetSlot {
-    if let MonoTy::Tuple(parts) = ty {
-        // The same collapse [`ret_slot`] makes: a tuple no part of which splats
-        // is the pre-existing boxed ABI, so it occupies ONE slot. Without it the
-        // two oracles disagree on a NESTED tuple -- the generic side counted an
-        // inner `(Entity<T>, T)` as two wire values while the concrete callee
-        // returned it as one box.
-        let shape = mono_tuple_shape(ws, parts);
-        return if shape.splats() { RetSlot::Nested(shape) } else { RetSlot::Opaque };
-    }
-    let (payload, nullable) = peel_nullable_layers(ty);
-    let Some(nominal) = payload.nominal().filter(|n| is_nobox_nominal(ws, *n)) else {
-        return RetSlot::Opaque;
-    };
-    let shape = if nullable {
-        sig_shape_of_nullable_nominal(ws, nominal)
-    } else {
-        sig_shape_of_nominal(ws, nominal)
-    };
-    shape.map_or(RetSlot::Opaque, RetSlot::Leaves)
-}
-
-/// The per-part slots of a reified tuple, WITHOUT the collapse
-/// [`mono_ret_slot`] applies. Read where the tuple's arity is the question --
-/// a destructure, a `next`'s `(bool, E)` -- rather than what slot it occupies.
-pub(crate) fn mono_tuple_shape(ws: &Workspace, parts: &[MonoTy]) -> TupleRetShape {
-    let slots = parts.iter().map(|part| mono_ret_slot(ws, part)).collect();
-    TupleRetShape { slots, nullable: false }
-}
-
 pub(crate) fn mono_value_shape(ws: &Workspace, ty: &MonoTy) -> Option<ValueShape> {
     let (payload, nullable) = peel_nullable_layers(ty);
     let MonoTy::App { ctor: MonoCtor::Nominal(name), .. } = payload else {
@@ -1567,19 +1471,6 @@ fn peel_nullable_layers(mut ty: &MonoTy) -> (&MonoTy, bool) {
         ty = inner.as_ref();
     }
     (ty, nullable)
-}
-
-pub(crate) fn mono_tuple_ret_shape(ws: &Workspace, ty: &MonoTy) -> Option<TupleRetShape> {
-    let (parts, nullable) = match ty {
-        MonoTy::Tuple(parts) => (parts.as_slice(), false),
-        MonoTy::Nullable(inner) => {
-            let MonoTy::Tuple(parts) = inner.as_ref() else { return None };
-            (parts.as_slice(), true)
-        }
-        _ => return None,
-    };
-    let shape = TupleRetShape { slots: parts.iter().map(|part| mono_ret_slot(ws, part)).collect(), nullable };
-    (shape.splats() || !nullable).then_some(shape)
 }
 
 /// The concrete binding for `ty` under `enclosing`, or `None` when no concrete
@@ -2085,42 +1976,6 @@ pub fn spec_subst_from_key(ws: &Workspace, fref: FuncRef, key: &Vec<MonoTy>) -> 
     subst
 }
 
-/// [`sig_value_shape`] under a specialization substitution: a param/return type
-/// that is a generic bound to a value-struct leaf resolves to that leaf's shape.
-/// A `T?` resolves the same way through the NULLABLE policy, so a generic
-/// nullable inherits the same asymmetry a spelled-out one has
-/// ([`sig_shape_of_nullable_nominal`]) instead of falling through to
-/// [`sig_value_shape`], whose `Nullable` arm matches no nominal for a generic
-/// inner. Every non-generic type falls through to the plain [`sig_value_shape`].
-pub(crate) fn sig_value_shape_spec(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> Option<ValueShape> {
-    if let TyId::Static(m, idx) = ty {
-        match ws.module(m).ty_arena[idx] {
-            // A generic bound to `E?` carries the `?` in the BINDING, so it takes
-            // the nullable policy exactly as a spelled-out one does.
-            TypeExpr::Generic(var, _) => {
-                return match subst.get(&var)?.peel_nullable() {
-                    (inner, false) => value_shape_of_nominal(ws, inner.nominal()?),
-                    (inner, true) => sig_shape_of_nullable_nominal(ws, inner.nominal()?),
-                };
-            }
-            TypeExpr::Nullable(inner) => {
-                if let Some(TypeExpr::Generic(var, _)) = static_ty(ws, ty.with_idx(inner)) {
-                    let (payload, _) = subst.get(&var)?.peel_nullable();
-                    return sig_shape_of_nullable_nominal(ws, payload.nominal()?);
-                }
-            }
-            _ => {}
-        }
-    }
-    sig_value_shape(ws, ty)
-}
-
-/// The nominal `var` is bound to under `subst`, or `None` when it is unbound or
-/// bound to a non-nominal (a tuple, a fn type, a primitive).
-pub(crate) fn spec_nominal(subst: &SpecSubst, var: bone_semantic::hir::VarId) -> Option<Ustr> {
-    subst.get(&var)?.nominal()
-}
-
 /// The wire shape of ONE element of a tuple return.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum RetSlot {
@@ -2165,8 +2020,8 @@ pub(crate) struct TupleRetShape {
     /// slots (`false, nil, ...` when absent). Same presence-leads convention as
     /// `ValueShape::nullable` one level down.
     ///
-    /// Only ever set from a declared return type ([`tuple_ret_shape`]), never
-    /// inferred from an expression's type: safe-nav manufactures the identical
+    /// Only ever set from a declared return type, never inferred from an
+    /// expression's type: safe-nav manufactures the identical
     /// `Nullable(Tuple)` with NO presence slot, so keying on nullability there
     /// would add a phantom slot and corrupt every safe-nav tuple call.
     pub(crate) nullable: bool,
@@ -2183,47 +2038,6 @@ impl TupleRetShape {
     pub(crate) fn splats(&self) -> bool {
         self.slots.iter().any(RetSlot::splats)
     }
-}
-
-/// The multi-return ABI of a tuple RETURN type: `Some` iff `ty` is a tuple
-/// `(A, B, ...)`, which returns its slots as separate values instead of one heap
-/// table (slice 1, `docs/iterator-implementation-plan.md`).
-///
-/// A `Nullable(Tuple)` joins that wire with a presence bool leading its slots --
-/// but ONLY when an element actually splats. A nullable tuple of ordinary
-/// elements has nothing to gain from the multi-value form and keeps its single
-/// boxed table (and `nil`), byte-for-byte the pre-existing ABI. THE declared-type
-/// entry point: `TupleRetShape::nullable` is set here and nowhere else.
-pub(crate) fn tuple_ret_shape(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> Option<TupleRetShape> {
-    // A generic bound to a tuple has no source node for its concrete children,
-    // so its slots come off the binding itself. Only here:
-    // this is the sole consumer that needs a tuple's arity, and answering it
-    // from the binding keeps `ty_node` honest about what it cannot mint.
-    if let Some(TypeExpr::Generic(var, _)) = static_ty(ws, ty) {
-        if let Some(MonoTy::Tuple(parts)) = subst.get(&var) {
-            return Some(mono_tuple_shape(ws, parts));
-        }
-    }
-    let (elem_ty, elements, nullable) = match static_ty(ws, ty)? {
-        TypeExpr::Tuple { elements } => (ty, elements, false),
-        TypeExpr::Nullable(inner) => {
-            let inner_ty = ty.with_idx(inner);
-            let TypeExpr::Tuple { elements } = static_ty(ws, inner_ty)? else {
-                return None;
-            };
-            (inner_ty, elements, true)
-        }
-        _ => return None,
-    };
-    let slots = elements
-        .into_iter()
-        .map(|el| ret_slot(ws, subst, elem_ty.with_idx(el)))
-        .collect();
-    let shape = TupleRetShape { slots, nullable };
-    if nullable && !shape.splats() {
-        return None;
-    }
-    Some(shape)
 }
 
 /// What a concrete `next` actually returns at a splice site, for the placeholder
@@ -2313,13 +2127,26 @@ pub struct BoundNextShape {
 /// pairs the callee's return arity against the body's own split.
 pub fn bound_next_shape(
     ws: &Workspace,
+    scx: &ScalarCtx,
     interner: &crate::monoty::MonoInterner,
     inst: &crate::instance::Instance,
 ) -> Option<BoundNextShape> {
     let fref = inst.func;
     let subst = inst.subst(ws, interner);
     let ret = ws.module(fref.module).functions[fref.func].return_ty?;
-    let shape = tuple_ret_shape(ws, &subst, ret)?;
+    let result = crate::monoty::convert_decl(ws, ret, &subst).ok()?;
+    let id = scx
+        .rep_arena()
+        .plan(
+            ws,
+            scx.target(),
+            &result,
+            RepUse::Return,
+            &RepUseFacts { tuple_spelled: true, span: None },
+            RepGuarantees { nobox: true, allow_opaque: true },
+        )
+        .ok()?;
+    let shape = scx.rep_arena().tuple_shape(id)?;
     bound_next_shape_from_tuple(shape)
 }
 
@@ -2328,11 +2155,23 @@ pub fn bound_next_shape(
 /// it from the witness declaration would reintroduce the source-shaped oracle.
 pub fn bound_next_shape_from_concrete(
     ws: &Workspace,
+    scx: &ScalarCtx,
     interner: &crate::monoty::MonoInterner,
     signature: &ConcreteSignature,
 ) -> Option<BoundNextShape> {
     let result = signature.result.map(|id| interner.get(id))?;
-    let shape = mono_tuple_ret_shape(ws, &result)?;
+    let id = scx
+        .rep_arena()
+        .plan(
+            ws,
+            scx.target(),
+            &result,
+            RepUse::Return,
+            &RepUseFacts { tuple_spelled: true, span: None },
+            RepGuarantees { nobox: true, allow_opaque: true },
+        )
+        .ok()?;
+    let shape = scx.rep_arena().tuple_shape(id)?;
     bound_next_shape_from_tuple(shape)
 }
 
@@ -2354,107 +2193,6 @@ fn bound_next_shape_from_tuple(shape: TupleRetShape) -> Option<BoundNextShape> {
         BoundNextElem::Opaque
     };
     Some(BoundNextShape { slot_count: shape.slot_count(), elem })
-}
-
-/// The wire slot of a PARAM, under the wide (`@scalar_abi`) shape rule.
-///
-/// Same vocabulary as [`ret_slot`], and deliberately the same tuple rule: only a
-/// `nobox` element splats, so params and returns agree about what a tuple of
-/// values is on the wire. Without the `Nested` arm a param could only say
-/// "one box or one value's leaves", and a tuple carrying a `nobox` element had
-/// nowhere to go but the box the mark forbids -- a `ValueShape` is a NAMED
-/// struct shape, which a tuple is not.
-pub(crate) fn sig_param_slot_spec(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> RetSlot {
-    match sig_value_shape_spec(ws, subst, ty) {
-        Some(shape) => RetSlot::Leaves(shape),
-        None => tuple_param_slot(ws, subst, ty),
-    }
-}
-
-/// [`sig_param_slot_spec`] under the `nobox`-only rule (the ABI a fn taken by
-/// reference narrows to).
-pub(crate) fn nobox_param_slot_spec(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> RetSlot {
-    match nobox_declared_shape_spec(ws, subst, ty) {
-        Some(shape) => RetSlot::Leaves(shape),
-        None => tuple_param_slot(ws, subst, ty),
-    }
-}
-
-fn tuple_param_slot(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> RetSlot {
-    // A tuple the signature SPELLS, not a generic that happens to be bound to
-    // one. Both would agree between caller and callee -- they read the same
-    // substitution -- so this is a choice, and it is made on where the box ends
-    // up: a generic param's body is what decides whether the tuple can stay
-    // leaves, and a body that stores it (`Vec<T>.push` -> `vec_push`) boxes it
-    // anyway. Splatting into one only moves the materialization deeper, out of
-    // the caller's line and into the spliced stdlib body, which costs the
-    // diagnostic its span and buys nothing.
-    //
-    // A `(A, B)?` is spelled just as much as a `(A, B)`, and its presence rides
-    // the param list the way it already rides a return -- so it is admitted
-    // here and `tuple_ret_shape` sets the tag, as the sole declared-type entry
-    // point. A generic bound to a nullable tuple is still excluded, for the
-    // reason above.
-    let spelled_tuple = match static_ty(ws, ty) {
-        Some(TypeExpr::Tuple { .. }) => true,
-        Some(TypeExpr::Nullable(inner)) => {
-            matches!(static_ty(ws, ty.with_idx(inner)), Some(TypeExpr::Tuple { .. }))
-        }
-        _ => false,
-    };
-    if !spelled_tuple {
-        return RetSlot::Opaque;
-    }
-    match tuple_ret_shape(ws, subst, ty) {
-        Some(inner) if inner.splats() => RetSlot::Nested(inner),
-        _ => RetSlot::Opaque,
-    }
-}
-
-pub(crate) fn ret_slot(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> RetSlot {
-    if let Some(shape) = nobox_sig_shape_spec(ws, subst, ty) {
-        return RetSlot::Leaves(shape);
-    }
-    match tuple_ret_shape(ws, subst, ty) {
-        Some(inner) if inner.splats() => RetSlot::Nested(inner),
-        _ => RetSlot::Opaque,
-    }
-}
-
-/// [`sig_value_shape_spec`] narrowed to `nobox` nominals -- the splat gate. A
-/// generic resolves through the substitution, so a `VecIter<NV2>.next` reaches
-/// the same answer a spelled-out `-> (bool, NV2)` does.
-pub(crate) fn nobox_sig_shape_spec(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> Option<ValueShape> {
-    let (nominal, nullable) = sig_spec_nominal(ws, subst, ty)?;
-    if !is_nobox_nominal(ws, nominal) {
-        return None;
-    }
-    if nullable {
-        return sig_shape_of_nullable_nominal(ws, nominal);
-    }
-    sig_shape_of_nominal(ws, nominal)
-}
-
-/// `(nominal, nullable)` for a signature slot under a specialization: the type's
-/// own `?` OR-ed with the `?` of whatever a generic is BOUND to.
-///
-/// `T?` at a site that bound `T = E?` is one nullable, not two -- Rock has no
-/// double nullable, and the wire carries one presence leaf either way. Reading
-/// the binding is still reading a DECLARATION (the site's own type argument),
-/// never a nullability inferred from an expression.
-pub(crate) fn sig_spec_nominal(ws: &Workspace, subst: &SpecSubst, ty: TyId) -> Option<(Ustr, bool)> {
-    match static_ty(ws, ty)? {
-        TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => Some((n, false)),
-        TypeExpr::Generic(var, _) => {
-            let (inner, nullable) = subst.get(&var)?.peel_nullable();
-            Some((inner.nominal()?, nullable))
-        }
-        TypeExpr::Nullable(inner) => {
-            let (n, _) = sig_spec_nominal(ws, subst, ty.with_idx(inner))?;
-            Some((n, true))
-        }
-        _ => None,
-    }
 }
 
 /// Cdata enum shape: an enum whose every variant is `Unit` or a positional TUPLE

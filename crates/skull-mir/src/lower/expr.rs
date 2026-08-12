@@ -412,9 +412,8 @@ impl Builder<'_> {
             Expr::Lambda { params, body } => {
                 // A `nobox` param arrives as leaves, so the lambda binds a Group
                 // over N cells instead of one -- the same shape a scalar-ABI fn
-                // gives its params. Decided by the lambda's own fn TYPE, which is
-                // what the call site reads too (`fn_value_abi`), so the two ends
-                // agree without either seeing the other.
+                // gives its params. The lambda and call site read the same
+                // function-value representation plan.
                 let lam_ty = self
                     .inf
                     .and_then(|inf| inf.expr_types.get(e))

@@ -27,11 +27,7 @@ use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::Span;
 use ustr::Ustr;
 
-use super::{
-    nobox_declared_shape_spec, nobox_param_slot_spec, sig_param_slot_spec, sig_value_shape_spec,
-    mono_tuple_ret_shape, slot_param_names,
-    tuple_ret_shape, RetSlot, ScalarCtx, SpecSubst, TupleRetShape, ValueShape,
-};
+use super::{slot_param_names, RetSlot, ScalarCtx, SpecSubst, TupleRetShape, ValueShape};
 use crate::concrete::ConcreteBodyPlan;
 use crate::mir::FuncRef;
 
@@ -189,6 +185,14 @@ impl RepPlan {
                 slots.iter().map(|slot| arena.get(*slot).lanes(arena)).sum::<usize>()
                     + usize::from(*nullable)
             }
+        }
+    }
+
+    fn splats(&self, arena: &RepArena) -> bool {
+        match &self.layout {
+            RepLayout::Leaves(_) => true,
+            RepLayout::Tuple { slots, .. } => slots.iter().any(|slot| arena.get(*slot).splats(arena)),
+            RepLayout::Opaque | RepLayout::Foreign { .. } => false,
         }
     }
 }
@@ -472,23 +476,6 @@ impl RepArena {
         }
     }
 
-    fn slot(&self, target: FnBackend, slot: &RetSlot) -> RepId {
-        match slot {
-            RetSlot::Opaque => self.intern(target, RepUse::TupleElement, RepLayout::Opaque),
-            RetSlot::Leaves(shape) => self.intern(
-                target,
-                RepUse::TupleElement,
-                RepLayout::Leaves(shape.clone()),
-            ),
-            RetSlot::Nested(shape) => self.tuple(target, RepUse::TupleElement, shape),
-        }
-    }
-
-    fn tuple(&self, target: FnBackend, use_context: RepUse, shape: &TupleRetShape) -> RepId {
-        let slots = shape.slots.iter().map(|slot| self.slot(target, slot)).collect();
-        self.intern(target, use_context, RepLayout::Tuple { slots, nullable: shape.nullable })
-    }
-
     pub fn function_value(
         &self,
         ws: &Workspace,
@@ -515,8 +502,18 @@ impl RepArena {
         let params = params
             .iter()
             .map(|param| {
-                let tuple_spelled = mono_tuple_ret_shape(ws, param)
-                    .is_some_and(|shape| shape.splats());
+                let tuple_spelled = matches!(param.peel_nullable().0, crate::monoty::MonoTy::Tuple(_))
+                    && self
+                        .plan(
+                            ws,
+                            target,
+                            param,
+                            RepUse::Return,
+                            &RepUseFacts::default(),
+                            RepGuarantees { nobox: true, allow_opaque: true },
+                        )
+                        .map(|id| self.get(id).splats(self))
+                        .unwrap_or(false);
                 self.plan(
                     ws,
                     target,
@@ -533,7 +530,7 @@ impl RepArena {
             ret,
             RepUse::Return,
             &RepUseFacts {
-                tuple_spelled: mono_tuple_ret_shape(ws, ret).is_some(),
+                tuple_spelled: matches!(ret.peel_nullable().0, crate::monoty::MonoTy::Tuple(_)),
                 span: None,
             },
             RepGuarantees { nobox: nobox_only, allow_opaque: true },
@@ -549,60 +546,84 @@ impl RepArena {
         })
     }
 
-    fn function(
+    fn function_from_declaration(
         &self,
+        ws: &Workspace,
         target: FnBackend,
-        scalar: Option<&FnScalarAbi>,
-        ret_tuple: Option<&TupleRetShape>,
-        param_count: usize,
-        has_return: bool,
-    ) -> FunctionRepPlan {
-        let params = match scalar {
-            Some(abi) => abi
-                .param_shapes
-                .iter()
-                .map(|slot| match slot {
-                    RetSlot::Opaque => self.intern(target, RepUse::Parameter, RepLayout::Opaque),
-                    RetSlot::Leaves(shape) => self.intern(
+        f: &Function,
+        subst: &SpecSubst,
+        mode: Option<AbiMode>,
+    ) -> Result<FunctionRepPlan, RepError> {
+        let mut params = Vec::with_capacity(f.param_decls.len());
+        for param in &f.param_decls {
+            let ty = declared_mono_type(ws, param.ty, subst)?;
+            let id = match (mode, ty) {
+                (Some(mode), Some(ty)) => self.plan(
+                    ws,
+                    target,
+                    &ty,
+                    RepUse::Parameter,
+                    &RepUseFacts {
+                        tuple_spelled: declared_tuple_spelled(ws, param.ty),
+                        span: None,
+                    },
+                    RepGuarantees { nobox: mode.nobox_only, allow_opaque: true },
+                )?,
+                _ => self.intern(target, RepUse::Parameter, RepLayout::Opaque),
+            };
+            params.push(id);
+        }
+
+        let result = f.return_ty.map(|return_ty| {
+            let ty = declared_mono_type(ws, return_ty, subst)?;
+            let tuple_spelled = declared_tuple_spelled(ws, return_ty);
+            let id = if let Some(ty) = ty {
+                let is_tuple = matches!(ty, crate::monoty::MonoTy::Tuple(_));
+                if let Some(mode) = mode {
+                    self.plan(
+                        ws,
                         target,
-                        RepUse::Parameter,
-                        RepLayout::Leaves(shape.clone()),
-                    ),
-                    RetSlot::Nested(shape) => self.tuple(target, RepUse::Parameter, shape),
-                })
-                .collect(),
-            None => (0..param_count)
-                .map(|_| self.intern(target, RepUse::Parameter, RepLayout::Opaque))
-                .collect(),
-        };
-        let result = if !has_return {
-            None
-        } else if let Some(shape) = ret_tuple {
-            Some(self.tuple(target, RepUse::Return, shape))
-        } else if let Some(shape) = scalar.and_then(|abi| abi.ret_shape.as_ref()) {
-            Some(self.intern(target, RepUse::Return, RepLayout::Leaves(shape.clone())))
-        } else {
-            Some(self.intern(target, RepUse::Return, RepLayout::Opaque))
-        };
+                        &ty,
+                        RepUse::Return,
+                        &RepUseFacts { tuple_spelled: tuple_spelled || is_tuple, span: None },
+                        RepGuarantees { nobox: mode.nobox_only, allow_opaque: true },
+                    )?
+                } else if is_tuple {
+                    self.plan(
+                        ws,
+                        target,
+                        &ty,
+                        RepUse::Return,
+                        &RepUseFacts { tuple_spelled: true, span: None },
+                        RepGuarantees::default(),
+                    )?
+                } else {
+                    self.intern(target, RepUse::Return, RepLayout::Opaque)
+                }
+            } else {
+                self.intern(target, RepUse::Return, RepLayout::Opaque)
+            };
+            Ok(id)
+        }).transpose()?;
+        let scalar_abi = mode.is_some()
+            && (params
+                .iter()
+                .any(|id| matches!(self.get(*id).layout(), RepLayout::Leaves(_) | RepLayout::Tuple { .. }))
+                || result.is_some_and(|id| matches!(self.get(id).layout(), RepLayout::Leaves(_))));
         let return_lanes = result.map_or(0, |id| self.get(id).lanes(self));
-        FunctionRepPlan { params, result, return_lanes, scalar_abi: scalar.is_some() }
+        Ok(FunctionRepPlan { params, result, return_lanes, scalar_abi })
     }
 
-    pub(crate) fn function_value_legacy(
+    pub(crate) fn boxed_function(
         &self,
         target: FnBackend,
-        param_shapes: Vec<RetSlot>,
-        ret_shape: Option<ValueShape>,
-        ret_tuple: Option<&TupleRetShape>,
         param_count: usize,
     ) -> FunctionRepPlan {
-        let scalar = (ret_shape.is_some() || param_shapes.iter().any(RetSlot::splats))
-            .then_some(FnScalarAbi {
-                param_shapes,
-                ret_shape,
-                nobox_only: true,
-            });
-        self.function(target, scalar.as_ref(), ret_tuple, param_count, true)
+        let params = (0..param_count)
+            .map(|_| self.intern(target, RepUse::Parameter, RepLayout::Opaque))
+            .collect();
+        let result = self.intern(target, RepUse::Return, RepLayout::Opaque);
+        FunctionRepPlan { params, result: Some(result), return_lanes: 1, scalar_abi: false }
     }
 
     fn function_from_concrete(
@@ -701,25 +722,47 @@ pub fn requires_concrete_body_plan(
             .contains_key(&bone_semantic::hir::BodyOwner::Function(inst.func.func))
 }
 
-/// The scalarized wire of one emitted body: what each declared param occupies,
-/// and what the return carries. `None` for the whole plan means the boxed ABI.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct FnScalarAbi {
-    pub(super) param_shapes: Vec<RetSlot>,
-    pub(super) ret_shape: Option<ValueShape>,
-    pub(super) nobox_only: bool,
+#[derive(Clone, Copy, Debug)]
+struct AbiMode {
+    nobox_only: bool,
+}
+
+fn declared_tuple_spelled(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> bool {
+    match super::static_ty(ws, ty) {
+        Some(bone_semantic::hir::TypeExpr::Tuple { .. }) => true,
+        Some(bone_semantic::hir::TypeExpr::Nullable(inner)) => matches!(
+            super::static_ty(ws, ty.with_idx(inner)),
+            Some(bone_semantic::hir::TypeExpr::Tuple { .. })
+        ),
+        _ => false,
+    }
+}
+
+fn declared_mono_type(
+    ws: &Workspace,
+    ty: bone_semantic::prelude::TyId,
+    subst: &SpecSubst,
+) -> Result<Option<crate::monoty::MonoTy>, RepError> {
+    match crate::monoty::convert_decl(ws, ty, subst) {
+        Ok(ty) => Ok(Some(ty)),
+        Err(crate::monoty::MonoTyReason::UnboundGeneric(_)) => Ok(None),
+        Err(reason) => Err(RepError {
+            span: None,
+            message: format!("declaration type cannot be planned: {reason:?}"),
+        }),
+    }
 }
 
 /// The one ABI policy. PRIVATE: every consumer reads a [`BackendFnAbiPlan`].
 ///
 /// Address-taken Rock bodies narrow to the `nobox` shapes an indirect caller can
 /// derive from the fn type; direct-only bodies may scalarize every eligible value.
-fn fn_scalar_abi_spec(
+fn abi_mode_spec(
     ws: &Workspace,
     scx: &ScalarCtx,
     fref: FuncRef,
     subst: &SpecSubst,
-) -> Option<FnScalarAbi> {
+) -> Option<AbiMode> {
     if scx.values_first_class {
         return None;
     }
@@ -741,37 +784,7 @@ fn fn_scalar_abi_spec(
         }
         scx.taken_by_ref.contains(&f.name)
     };
-    if nobox_only {
-        return fn_value_nobox_abi(ws, fref, subst);
-    }
-    let param_shapes: Vec<RetSlot> =
-        f.param_decls.iter().map(|pd| sig_param_slot_spec(ws, subst, pd.ty)).collect();
-    let ret_shape = f.return_ty.and_then(|ty| sig_value_shape_spec(ws, subst, ty));
-    (ret_shape.is_some() || param_shapes.iter().any(RetSlot::splats))
-        .then_some(FnScalarAbi { param_shapes, ret_shape, nobox_only })
-}
-
-/// The ABI an INDIRECT caller derives from a fn TYPE alone -- the `nobox` shapes
-/// and nothing else.
-///
-/// A different question from [`fn_scalar_abi_spec`], which answers what the
-/// DEFINITION emits, so it stays its own named oracle rather than a mode of the
-/// plan: the two are compared against each other, and a comparison needs two
-/// sides.
-pub(super) fn fn_value_nobox_abi(
-    ws: &Workspace,
-    fref: FuncRef,
-    subst: &SpecSubst,
-) -> Option<FnScalarAbi> {
-    let f = &ws.module(fref.module).functions[fref.func];
-    let param_shapes: Vec<RetSlot> = f
-        .param_decls
-        .iter()
-        .map(|pd| nobox_param_slot_spec(ws, subst, pd.ty))
-        .collect();
-    let ret_shape = f.return_ty.and_then(|ty| nobox_declared_shape_spec(ws, subst, ty));
-    (ret_shape.is_some() || param_shapes.iter().any(RetSlot::splats))
-        .then_some(FnScalarAbi { param_shapes, ret_shape, nobox_only: true })
+    Some(AbiMode { nobox_only })
 }
 
 /// **The backend ABI of one emitted body**, under one execution target.
@@ -954,16 +967,11 @@ impl BackendFnAbiPlan {
     ) -> Self {
         let decl = subject.func;
         let f = &ws.module(decl.module).functions[decl.func];
-        let scalar = fn_scalar_abi_spec(ws, scx, decl, subst);
-        let ret_tuple = f.return_ty.and_then(|ty| tuple_ret_shape(ws, subst, ty));
         let arena = scx.rep_arena();
-        let representation = arena.function(
-            scx.target,
-            scalar.as_ref(),
-            ret_tuple.as_ref(),
-            f.param_decls.len(),
-            f.return_ty.is_some(),
-        );
+        let mode = abi_mode_spec(ws, scx, decl, subst);
+        let representation = arena
+            .function_from_declaration(ws, scx.target, f, subst, mode)
+            .expect("declaration ABI planning must accept a checked signature");
         Self {
             subject,
             target: scx.target,

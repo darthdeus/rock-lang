@@ -293,6 +293,12 @@ fn main() {
             > 1,
         "tuple return must have multiple physical lanes"
     );
+    assert_eq!(
+        BackendFnAbiPlan::for_instance(&ws, &scx, &Instance::base(func_ref(&ws, "tuple")))
+            .param_leaf_widths(),
+        Some(vec![3]),
+        "the declaration-spelled tuple parameter must use its owned leaf plan"
+    );
 
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("test module");
     let caller = skull_mir::lower::lower_function_source(

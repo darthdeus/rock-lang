@@ -958,8 +958,8 @@ impl Builder<'_> {
     /// computed this under the call's own `SpecSubst` while the presence
     /// consumers (`nullable_tuple_call_shape`) computed it under the ENCLOSING
     /// body's -- empty in a non-generic caller, so the callee's generic stayed
-    /// unbound, every slot came back `Opaque`, and `tuple_ret_shape`'s
-    /// `nullable && !splats` guard answered `None`. The callee then faithfully
+    /// unbound, every slot came back `Opaque`, and the tuple-plan guard answered
+    /// `None`. The callee then faithfully
     /// returned its `false` presence slot and the call site threw it away:
     /// `!= null` fell through to packing a `MakeTuple`, which is structurally
     /// never nil, so it const-folded to `true` and `if let` emitted no branch at
@@ -1209,7 +1209,8 @@ impl Builder<'_> {
     /// their leaves and a value return arrives as leaves through
     /// `CallValueMulti`, matching what the lambda/nested fn on the other end
     /// emitted from the SAME type. The callee is opaque here by construction --
-    /// that is the whole point of keying on the type ([`Self::fn_value_abi`]).
+    /// that is the whole point of keying on the function-value representation
+    /// plan.
     pub(crate) fn indirect_call_by_plan(
         &mut self,
         plan: FunctionRepPlan,

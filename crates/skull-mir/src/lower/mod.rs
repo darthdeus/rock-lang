@@ -1179,10 +1179,8 @@ fn lower_body(
     f.resume_arg = resume_arg;
     let cur = f.entry();
     // Scalar value ABI: when this fn participates, each value param expands to
-    // leaf cells and a value return becomes a multi-value `Return`. A specialized
-    // instantiation additionally treats a generic param/return bound to a value
-    // leaf as that value (`sig_value_shape_spec`), so it joins the scalar ABI.
-    // This body's own ABI, from the one plan the calls that target it read.
+    // leaf cells and a value return becomes a multi-value `Return`. This body's
+    // own ABI comes from the one plan the calls that target it read.
     let abi = concrete_plan
         .map(|plan| BackendFnAbiPlan::for_concrete_plan(ws, scx, plan))
         .unwrap_or_else(|| {

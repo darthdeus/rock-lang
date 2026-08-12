@@ -216,14 +216,15 @@ fn substitute_bound_call_inner(
     // The instance the shape is read at is carried by the resolved leaf.
     let inst = owner;
     if already_split {
-        check_bound_next_split(func, call, ws, interner, &inst, concrete_plans)
+        check_bound_next_split(func, call, scx, ws, interner, &inst, concrete_plans)
     } else {
-        repack_bound_next_element(func, call, ws, interner, &inst, concrete_plans)
+        repack_bound_next_element(func, call, scx, ws, interner, &inst, concrete_plans)
     }
 }
 
 fn bound_next_shape_for_instance(
     ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
     interner: &MonoInterner,
     inst: &Instance,
     concrete_plans: Option<&skull_mir::concrete::ConcretePlans>,
@@ -236,10 +237,10 @@ fn bound_next_shape_for_instance(
                     inst.func.func.into_raw().into_u32()
                 ))
             })?;
-            return Ok(bound_next_shape_from_concrete(ws, interner, &plan.signature));
+            return Ok(bound_next_shape_from_concrete(ws, scx, interner, &plan.signature));
         }
     }
-    Ok(bound_next_shape(ws, interner, inst))
+    Ok(bound_next_shape(ws, scx, interner, inst))
 }
 
 /// The lowering already split this placeholder's element into leaf cells, so
@@ -254,12 +255,13 @@ fn bound_next_shape_for_instance(
 fn check_bound_next_split(
     func: &MirFunc,
     call: Idx<Inst>,
+    scx: &skull_mir::lower::ScalarCtx,
     ws: &Workspace,
     interner: &MonoInterner,
     inst: &Instance,
     concrete_plans: Option<&skull_mir::concrete::ConcretePlans>,
 ) -> Result<(), CompilerError> {
-    let Some(shape) = bound_next_shape_for_instance(ws, interner, inst, concrete_plans)? else {
+    let Some(shape) = bound_next_shape_for_instance(ws, scx, interner, inst, concrete_plans)? else {
         return Ok(());
     };
     let Inst::CallMulti { dests, .. } = &func.insts[call] else {
@@ -289,12 +291,13 @@ fn check_bound_next_split(
 fn repack_bound_next_element(
     func: &mut MirFunc,
     call: Idx<Inst>,
+    scx: &skull_mir::lower::ScalarCtx,
     ws: &Workspace,
     interner: &MonoInterner,
     inst: &Instance,
     concrete_plans: Option<&skull_mir::concrete::ConcretePlans>,
 ) -> Result<(), CompilerError> {
-    let Some(shape) = bound_next_shape_for_instance(ws, interner, inst, concrete_plans)? else {
+    let Some(shape) = bound_next_shape_for_instance(ws, scx, interner, inst, concrete_plans)? else {
         return Ok(());
     };
     let Inst::CallMulti { dests, .. } = &func.insts[call] else {
