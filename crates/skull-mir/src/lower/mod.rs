@@ -3233,21 +3233,21 @@ pub fn string_char_literal_out_of_range(ws: &Workspace, mid: ModuleId) -> Option
 #[cfg(test)]
 mod tests;
 
-/// Support for `crate::spec_census` -- the Stage-0d reconciliation needs the
-/// RESULT of `compute_call_spec` without `lower::shape` becoming public.
+/// Support for `crate::spec_census`: expose complete generic call identities
+/// without giving the diagnostic census its own type or specialization walk.
 pub(crate) mod shape_census_support {
-    use super::shape::{compute_call_spec, SpecSubst};
+    use super::shape::{callee_instance_subst, spec_key_from_subst, SpecSubst};
     use crate::monoty::MonoTy;
     use crate::mir::FuncRef;
     use bone_semantic::inference::{BodyInference, Workspace};
 
-    /// Every call in this body that today's machinery specializes, plus the
-    /// count of sites whose spec decision REJECTED (the Stage-0b invariants).
+    /// Every complete generic call identity in this body, plus the count of
+    /// compiler-state sites that could not state one.
     pub(crate) fn specializations_in_body(
         ws: &Workspace,
         inf: &BodyInference,
     ) -> (Vec<(FuncRef, Vec<MonoTy>)>, usize) {
-        // caller is supplied by the census; this returns callee-side data only
+        // caller is supplied by the census; this returns callee-side data only.
         let empty = SpecSubst::default();
         let mut out = Vec::new();
         let mut rejected = 0usize;
@@ -3255,8 +3255,11 @@ pub(crate) mod shape_census_support {
         calls.sort_by_key(|(e, _)| **e);
         for (e, (m, f)) in calls {
             let func = FuncRef { module: *m, func: *f };
-            match compute_call_spec(ws, inf, *e, func, &empty) {
-                Ok(Some((key, _))) => out.push((func, key)),
+            match callee_instance_subst(ws, inf, *e, func, &empty) {
+                Ok(Some(subst)) => match spec_key_from_subst(ws, func, &subst) {
+                    Some(key) => out.push((func, key)),
+                    None => rejected += 1,
+                },
                 Ok(None) => {}
                 Err(_) => rejected += 1,
             }

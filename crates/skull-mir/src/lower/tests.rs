@@ -45,7 +45,7 @@ fn missing_call_generic_bindings_rejects() {
         .expect("main body");
     let e = body.expr_arena.iter().next().expect("an expr in main").0;
     assert!(!inf.call_generic_bindings.contains_key(&e), "the probe expr must have no record");
-    let err = compute_call_spec(
+    let err = crate::lower::shape::callee_instance_subst(
         &ws,
         inf,
         e,
@@ -62,7 +62,7 @@ fn missing_call_generic_bindings_rejects() {
 #[test]
 fn spec_binding_count_mismatch_rejects() {
     let (ws, mid) = spec_ws("fn id<T>(x: T) -> T { x }\nfn main() { let y = 1 }");
-    let err = crate::lower::shape::compute_spec_from_bindings(
+    let err = crate::lower::shape::instance_subst_from_bindings(
         &ws,
         spec_inf(&ws, mid, "main"),
         spec_fn(&ws, mid, "id"),
@@ -84,7 +84,7 @@ fn non_generic_declared_generic_rejects() {
     let int_ty = ws.builtins.int();
     let fref = spec_fn(&ws, mid, "id");
     ws.modules[mid.index()].functions[fref.func].generics[0] = int_ty;
-    let err = crate::lower::shape::compute_spec_from_bindings(
+    let err = crate::lower::shape::instance_subst_from_bindings(
         &ws,
         spec_inf(&ws, mid, "main"),
         fref,

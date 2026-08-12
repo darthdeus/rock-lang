@@ -1384,55 +1384,9 @@ fn peel_nullable_layers(mut ty: &MonoTy) -> (&MonoTy, bool) {
     (ty, nullable)
 }
 
-/// The concrete binding for `ty` under `enclosing`, or `None` when no concrete
-/// type exists here at all.
-///
-/// ONE oracle answers this and the identity question alike
-/// ([`crate::monoty::convert`]), which is the whole content of plan S 2a/S 2b.
-/// It used to be a second, narrower walk whose `_ => None` arm declined valid
-/// `any`, unit, `never` and function types -- and `None` is not a type, it is the
-/// ABSENCE of one, shared by every binding that landed in it. So three
-/// instantiations at `unit`, `any` and `fn(int) -> int` mangled to one symbol
-/// and one emitted body served three representations. `MonoTy` has a
-/// constructor for each of the four, so there was never anything to represent;
-/// the hole was the admission.
-///
-/// `None` now means exactly what [`crate::monoty::MonoTyReason`] means: a
-/// generic absent from `enclosing` (this is a shared generic body), an
-/// unresolved inference var, recovery poison, or a missing node. Those are
-/// compiler states, not language surface, and [`ablation_partial_key_decline`]
-/// reads the reason rather than re-deriving the predicate.
-pub(crate) fn reify_type(
-    ws: &Workspace,
-    inf: &BodyInference,
-    ty: TyId,
-    enclosing: &SpecSubst,
-) -> Option<MonoTy> {
-    crate::monoty::convert(ws, inf, ty, enclosing).ok()
-}
-
-/// The specialization decision for a call `e` (in a body with inference `inf`) to
-/// `func`: `Some((key, subst))` iff `func` is a splice-able generic `@inline`/
-/// `@pure` callee whose per-site bindings (`call_generic_bindings[e]`) include at
-/// least one VALUE-struct leaf. The single source consulted by both the caller
-/// lowering ([`Builder::call_spec`]) and the site-aware rejection pass, so the two
-/// never disagree on which calls specialize.
-///
-/// `Err` is a COMPILER-state rejection, never a language boundary: bone records
-/// `call_generic_bindings` for every successfully resolved generic direct call,
-/// so its absence here means the resolution that produced this `FuncRef` and the
-/// inference that recorded the bindings disagree. The synthesized `for`-protocol
-/// `next` is not caught by that: it carries `next_generics` and never reaches
-/// this function ([`spec_key_from_next_generics`] is its entry).
-/// The CONCRETE INSTANCE a generic direct call targets, independent of whether
-/// the lowerer chooses to deliver a specialized body for it.
-///
-/// [`compute_call_spec`] answers a POLICY question -- is a specialized snapshot
-/// worth splicing here -- and returns `None` when the answer is no. Reading that
-/// `None` as "the callee instance is unknown" is what made a declined
-/// specialization indistinguishable from a call whose instantiation was never
-/// inferred. This answers the IDENTITY question, which has no policy in it: the
-/// call's own bindings, reified under the enclosing substitution.
+/// The concrete instance a generic direct call targets, independently of
+/// inlining or target policy. Missing bindings for a resolved generic call are
+/// compiler-state errors; an incomplete binding is an explicit absent instance.
 ///
 /// `None` means the instantiation is genuinely not complete here -- a callee
 /// with no generics, or one whose bindings do not all reify (a caller-generic
@@ -1448,16 +1402,22 @@ pub fn callee_instance_subst(
     if f.generics.is_empty() {
         return Ok(None);
     }
-    let Some(bindings) = inf.call_generic_bindings.get(&e) else { return Ok(None) };
+    let Some(bindings) = inf.call_generic_bindings.get(&e) else {
+        return Err(CompilerError::new_with_label(
+            f.name_span,
+            format!(
+                "internal: no recorded generic bindings for a resolved call to `{}`",
+                f.name
+            ),
+        ));
+    };
     instance_subst_from_bindings(ws, inf, func, bindings, enclosing)
 }
 
 /// The concrete instance a set of generic bindings resolves to.
 ///
 /// Converts through [`crate::monoty::convert`] -- the one TOTAL logical-type
-/// oracle, which `skull::instance_graph::instantiate` and the delivery-side
-/// [`reify_type`] also read. Two converters for one question is what lets a
-/// record and the graph disagree while both look complete.
+/// oracle shared by graph construction and delivery.
 ///
 /// The two UNCONSTRAINED reasons are legitimate `None`s, and they are exactly
 /// the pair `instance_graph::convert_fail` calls `Fail::Unconstrained`:
@@ -1512,7 +1472,7 @@ pub(crate) fn instance_subst_from_bindings(
                 return Err(CompilerError::new_with_label(
                     f.name_span,
                     format!(
-                        "internal: a call to `{}` supplies a type argument that is not a logical                          type ({}), so the instance it names cannot be stated",
+                        "internal: a call to `{}` supplies a type argument that is not a logical type ({}), so the instance it names cannot be stated",
                         f.name,
                         reason.bucket()
                     ),
@@ -1523,114 +1483,6 @@ pub(crate) fn instance_subst_from_bindings(
     Ok(Some(subst))
 }
 
-pub(crate) fn compute_call_spec(
-    ws: &Workspace,
-    inf: &BodyInference,
-    e: Idx<Expr>,
-    func: FuncRef,
-    enclosing: &SpecSubst,
-) -> Result<Option<(Vec<MonoTy>, SpecSubst)>, CompilerError> {
-    let f = &ws.module(func.module).functions[func.func];
-    if f.generics.is_empty() {
-        return Ok(None);
-    }
-    // A `co fn` IS eligible, and it is the one eligible callee the inliner never
-    // sees: the call constructs a coroutine object rather than running the body,
-    // so specialization is delivered by a standalone definition put through
-    // `coro_transform` (`skull::mir_emit::emit_coroutine_chunk`) rather than by a
-    // splice. `extern` and `inline(..)` stay excluded -- an opaque body has no
-    // Rock CFG to specialize at all.
-    if f.is_extern || f.inline_body.is_some() {
-        return Ok(None);
-    }
-    let Some(bindings) = inf.call_generic_bindings.get(&e) else {
-        return Err(CompilerError::new_with_label(
-            f.name_span,
-            format!(
-                "internal: no recorded generic bindings for a resolved call to generic `{}`. \
-                 Inference records a binding list for every resolved generic direct call, so \
-                 this call resolved to a callee its own instantiation was never inferred for.",
-                f.name
-            ),
-        ));
-    };
-    // Every complete instantiation specializes. The `@inline`/`@pure` opt-in and
-    // the column-storage trigger were OPTIMIZATION gates over a shared generic
-    // body, choosing when a second definition was worth minting; with emission
-    // owned by the instance there is no shared body for a declined call to reach,
-    // so there is nothing left to gate.
-    Ok(compute_spec_from_bindings(ws, inf, func, bindings, enclosing)?)
-}
-
-/// [`compute_call_spec`] against an explicit binding list instead of a call
-/// expr. The for-protocol `next` call is SYNTHESIZED and has no expr to key
-/// `call_generic_bindings` by, so it supplies its bindings from
-/// `BoundNext::Concrete::next_generics` (which bone records at resolution).
-/// Shared body so an iterator call and a direct call can never disagree on
-/// which instantiations specialize.
-///
-/// Both `Err`s are compiler-state rejections: a binding list is built per callee
-/// so it has that callee's arity, and every entry of `Function::generics` is the
-/// `TypeExpr::Generic` the declaration minted. A silent `None` here would leave
-/// the generic absent from the [`SpecSubst`] while the key still claimed the
-/// instantiation.
-pub(crate) fn compute_spec_from_bindings(
-    ws: &Workspace,
-    inf: &BodyInference,
-    func: FuncRef,
-    bindings: &[TyId],
-    enclosing: &SpecSubst,
-) -> Result<Option<(Vec<MonoTy>, SpecSubst)>, CompilerError> {
-    let f = &ws.module(func.module).functions[func.func];
-    if bindings.len() != f.generics.len() {
-        return Err(CompilerError::new_with_label(
-            f.name_span,
-            format!(
-                "internal: `{}` declares {} generic(s) but its call site supplied {} binding(s)",
-                f.name,
-                f.generics.len(),
-                bindings.len()
-            ),
-        ));
-    }
-    // A non-generic declaration has no instantiation to name. It used to return
-    // `Some(vec![])` and rely on the identity constructor reading empty as "the
-    // shared body" -- absence decided two layers away from the producer, by a
-    // sentinel that a non-generic `Instance` legitimately collides with.
-    // A non-generic declaration has no instantiation to name. It used to return
-    // `Some(vec![])` and rely on the identity constructor reading empty as "the
-    // shared body" -- absence decided two layers away from the producer, by a
-    // sentinel that a non-generic `Instance` legitimately collides with.
-    if f.generics.is_empty() {
-        return Ok(None);
-    }
-    let mut key: Vec<MonoTy> = Vec::with_capacity(bindings.len());
-    let mut subst = SpecSubst::default();
-    for (g, b) in f.generics.iter().zip(bindings) {
-        let Some(TypeExpr::Generic(var, _)) = ty_node(ws, inf, *g) else {
-            return Err(CompilerError::new_with_label(
-                f.name_span,
-                format!(
-                    "internal: declared generic of `{}` is not a generic type variable",
-                    f.name
-                ),
-            ));
-        };
-        // One unreified slot and there is no key at all. A partial key named the
-        // DECLARATION through `spec_fn_name`, i.e. the same absent body a
-        // missing key names, so building one was never a third answer.
-        let Some(ty) = reify_type(ws, inf, *b, enclosing) else { return Ok(None) };
-        subst.insert(var, ty.clone());
-        key.push(ty);
-    }
-    // EVERY complete key specializes. There is no shared generic body to decline
-    // to any more, so a declined key is not a slower lowering -- it is a call
-    // spelling a name nothing defines.
-    //
-    // An INCOMPLETE instantiation is the Stage-2 `ConcreteTypeUnavailable`
-    // rejection's business, and it left through the `reify_type` arm above.
-    Ok(Some((key, subst)))
-}
 
 /// The CONCRETE INSTANCE an iterator-protocol WITNESS resolves to, from the
 /// `VarId -> TyId` map bone recorded for it.
@@ -1671,24 +1523,10 @@ pub fn spec_key_from_next_generics(
     next_generics: &rustc_hash::FxHashMap<bone_semantic::hir::VarId, TyId>,
     enclosing: &SpecSubst,
 ) -> Result<Option<Vec<MonoTy>>, CompilerError> {
-    let f = &ws.module(func.module).functions[func.func];
-    let mut bindings = Vec::with_capacity(f.generics.len());
-    for generic in &f.generics {
-        let Some(TypeExpr::Generic(var, _)) = ty_node(ws, inf, *generic) else {
-            return Err(CompilerError::new_with_label(
-                f.name_span,
-                format!(
-                    "internal: declared generic of `{}` is not a generic type variable",
-                    f.name
-                ),
-            ));
-        };
-        // A generic the iterator resolution left unbound is not an invariant
-        // failure -- the `next` witness binds only what its own bound names.
-        let Some(bound) = next_generics.get(&var).copied() else { return Ok(None) };
-        bindings.push(bound);
-    }
-    Ok(compute_spec_from_bindings(ws, inf, func, &bindings, enclosing)?.map(|(key, _)| key))
+    let Some(subst) = witness_instance_subst(ws, inf, func, next_generics, enclosing)? else {
+        return Ok(None);
+    };
+    Ok(spec_key_from_subst(ws, func, &subst))
 }
 
 /// Rebuild the [`SpecSubst`] (callee generic `VarId` -> concrete type) for `fref`
@@ -1701,10 +1539,8 @@ pub fn spec_key_from_next_generics(
 /// does not.
 ///
 /// `Some` only for a TOTAL rebuild -- every declared generic present in `subst`
-/// -- so the caller cannot mistake a partial answer for a key. That is the same
-/// completeness `compute_spec_from_bindings` demands before it returns a key at
-/// all, and it is what makes the two directions a round trip rather than a pair
-/// of lossy projections.
+/// -- so the caller cannot mistake a partial answer for a key. This is what
+/// makes the two directions a round trip rather than a pair of lossy projections.
 ///
 /// The declaration supplies the ORDER, which is the only thing a substitution
 /// lacks: a key is positional over `f.generics` and a subst is keyed by `VarId`.

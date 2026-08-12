@@ -4,16 +4,13 @@
 //! substitutions specialized lowering reads, the symbols the emitters mangle,
 //! and the instance graph.
 //!
-//! There is ONE of these walks, and that is the point: a second, narrower one
-//! is free to answer `None` for a type it does not admit, and `None` is not a
-//! type -- it is the absence of one, which every binding that lands in it
-//! shares. `f<Vec2, unit>`, `f<Vec2, any>` and `f<Vec2, fn(int)->int>` are three
-//! instantiations, and a partial walk gives them one identity and one emitted
-//! body. So an instance's arguments are built from this conversion too
-//! ([`reify_type`](crate::lower::shape::reify_type)): WHETHER a call
-//! specializes is conditional (the `@inline`/`@pure` opt-in, the storage
-//! trigger), WHICH instantiation it names is not. Stage 4 deletes the rest of
-//! the policy.
+//! There is ONE logical-type conversion, and that is the point: a second,
+//! narrower walk is free to answer `None` for a type it does not admit, and
+//! `None` is not a type -- it is the absence of one, which every binding that
+//! lands in it shares. `f<Vec2, unit>`, `f<Vec2, any>` and
+//! `f<Vec2, fn(int)->int>` are three instantiations. Instance arguments and
+//! concrete lowering substitutions therefore use this conversion directly;
+//! representation and optimization policy are decided later by target plans.
 //!
 //! Three properties, in the order they matter:
 //!
