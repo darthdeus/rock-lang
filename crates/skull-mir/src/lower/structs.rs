@@ -194,13 +194,7 @@ impl Builder<'_> {
                 } if self.is_value_struct(name.to_owned().into())
             );
         }
-        if self.concrete_plan.is_some() {
-            return false;
-        }
-        match self.expr_ty(e) {
-            Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) => self.is_value_struct(name),
-            _ => false,
-        }
+        false
     }
 
     pub(crate) fn is_value_struct(&self, name: Ustr) -> bool {
@@ -254,13 +248,7 @@ impl Builder<'_> {
             let name = ty.peel_nullable().0.nominal()?;
             return self.is_value_struct(name).then_some(name);
         }
-        if self.concrete_plan.is_some() {
-            return None;
-        }
-        let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = self.expr_ty(e)? else {
-            return None;
-        };
-        self.is_value_struct(name).then_some(name)
+        None
     }
 
     /// The value-struct type of a NULLABLE whole-value read out of a mutable place
@@ -303,13 +291,7 @@ impl Builder<'_> {
         if let Some(ty) = self.concrete_expr_ty(e) {
             return ty.peel_nullable().0.nominal();
         }
-        if self.concrete_plan.is_some() {
-            return None;
-        }
-        let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = self.expr_ty(e)? else {
-            return None;
-        };
-        Some(name)
+        None
     }
 
     /// Whether binding `b`'s bone type is a NON-nullable value struct -- the one
@@ -401,43 +383,31 @@ impl Builder<'_> {
         if generics == 0 {
             return Ok(Vec::new());
         }
-        let (Some(e), Some(inf)) = (self.cur_expr, self.inf) else {
+        let Some(e) = self.cur_expr else {
             return Err(gap(format!(
                 "generic struct `{struct_name}` injects a field default outside any \
                  typed expression, so its arguments cannot be determined"
             )));
         };
-        if self.concrete_plan.is_some() {
-            let ty = self
-                .concrete_ty(e)?
-                .ok_or_else(|| gap("generic struct default has no concrete literal type"))?;
-            let (payload, _) = ty.peel_nullable();
-            let crate::monoty::MonoTy::App {
-                ctor: crate::monoty::MonoCtor::Nominal(name),
-                params,
-            } = payload
-            else {
-                return Err(gap(format!(
-                    "generic struct default `{struct_name}` has a non-struct concrete type"
-                )));
-            };
-            if name.as_str() != struct_name.as_str() || params.len() != generics {
-                return Err(gap(format!(
-                    "generic struct default `{struct_name}` has mismatched concrete arguments"
-                )));
-            }
-            return Ok(params.to_vec());
+        let ty = self
+            .concrete_ty(e)?
+            .ok_or_else(|| gap("generic struct default has no concrete literal type"))?;
+        let (payload, _) = ty.peel_nullable();
+        let crate::monoty::MonoTy::App {
+            ctor: crate::monoty::MonoCtor::Nominal(name),
+            params,
+        } = payload
+        else {
+            return Err(gap(format!(
+                "generic struct default `{struct_name}` has a non-struct concrete type"
+            )));
+        };
+        if name.as_str() != struct_name.as_str() || params.len() != generics {
+            return Err(gap(format!(
+                "generic struct default `{struct_name}` has mismatched concrete arguments"
+            )));
         }
-        crate::struct_defaults::args_at(
-            self.ws,
-            inf,
-            self.subst(),
-            e,
-            struct_name,
-            generics,
-        )
-        .map(|a| a.to_vec())
-        .map_err(|e| gap(e.render(struct_name)))
+        Ok(params.to_vec())
     }
 
     /// Run `f` on a field's default INITIALIZER EXPRESSION with the defaults
@@ -474,12 +444,9 @@ impl Builder<'_> {
             .inference(sid.module)
             .and_then(|ir| ir.per_fn.get(&owner));
         let args = self.struct_default_args(struct_name, sid)?;
-        let slot_subst = self
-            .concrete_plan
-            .is_none()
-            .then(|| crate::struct_defaults::slot_subst(defaults_inf, &args));
         let domain = crate::site::SiteDomain::StructDefaults(sid.module, sid.def, args);
-        if let (Some(plan), Some(defaults_inf)) = (self.concrete_plan, defaults_inf) {
+        if let Some(defaults_inf) = defaults_inf {
+            let plan = self.concrete_plan;
             let tables = plan
                 .domain_types(&domain)
                 .ok_or_else(|| gap(format!("concrete plan is missing type tables for site domain {domain:?}")))?;
@@ -496,10 +463,8 @@ impl Builder<'_> {
         // block, then restore.
         let saved_body = self.body;
         let saved_inf = self.inf;
-        let saved_subst = self.legacy_subst.take();
         self.body = defaults_body;
         self.inf = defaults_inf;
-        self.legacy_subst = slot_subst;
         // `site_owner` is NOT swapped -- the sites still belong to the enclosing
         // function INSTANCE -- but their `Idx<Expr>` now indexes THIS arena, so
         // they are stamped in the struct's own domain. The walk records the same
@@ -512,7 +477,6 @@ impl Builder<'_> {
         let result = self.in_domain(domain, |s| f(s, def_expr));
         self.body = saved_body;
         self.inf = saved_inf;
-        self.legacy_subst = saved_subst;
         result
     }
 
@@ -1092,13 +1056,7 @@ impl Builder<'_> {
             let Some(name) = ty.peel_nullable().0.nominal() else { return None };
             return bone_semantic::inference::vec_swizzle_components(name.as_str(), field.as_str());
         }
-        if self.concrete_plan.is_some() {
-            return None;
-        }
-        let TypeExpr::App { ctor: TypeCtor::Nominal(sname), .. } = self.expr_ty(base)? else {
-            return None;
-        };
-        bone_semantic::inference::vec_swizzle_components(sname.as_str(), field.as_str())
+        None
     }
 
     /// Component `Field` reads off an already-lowered (packed) vec value, grouped

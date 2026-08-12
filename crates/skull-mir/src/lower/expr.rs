@@ -22,7 +22,6 @@ impl Builder<'_> {
         // (the call-arg analog of `lower_for_user_iter`'s `iter_fn`).
         if let Some(w) = self.inf.and_then(|i| i.implicit_iter_args.get(&e)) {
             let (m, f) = w.func;
-            let generics = w.generics.clone();
             let iter_ref = FuncRef { module: m, func: f };
             // This coercion belongs to `e`, but the cursor was already restored
             // to the ENCLOSING expression above -- so set both halves of the
@@ -32,26 +31,9 @@ impl Builder<'_> {
             // The instance is resolved BEFORE the arguments are shaped: they are
             // splatted against the ABI of the body the call targets, not the
             // declaration's.
-            let span = self
-                .body
-                .expr_spans
-                .get(e)
-                .copied()
-                .unwrap_or(self.ws.module(m).functions[f].name_span);
-            let witness = if self.concrete_plan.is_some() {
-                self.with_site_op(crate::site::SiteOp::ImplicitIter, |b| {
-                    b.concrete_callee_for_site(e)
-                })?
-                .ok_or_else(|| gap("implicit iterator has no concrete callee"))?
-            } else {
-                match self.next_call_spec(iter_ref, &generics, span)? {
-                    Some(key) => crate::instance::Instance::intern(self.scx.interner(), iter_ref, key),
-                    None if self.ws.module(m).functions[f].generics.is_empty() => {
-                        crate::instance::Instance::intern(self.scx.interner(), iter_ref, Vec::new())
-                    }
-                    None => crate::instance::Instance::base(iter_ref),
-                }
-            };
+            let witness = self
+                .with_site_op(crate::site::SiteOp::ImplicitIter, |b| b.concrete_callee_for_site(e))?
+                .ok_or_else(|| gap("implicit iterator has no concrete callee"))?;
             let call = self.with_site_op(crate::site::SiteOp::ImplicitIter, |b| {
                 let args = b.iter_witness_args(&witness, ValueRepr::Scalar(v))?;
                 Ok::<_, CompilerError>(b.emit_cur(Inst::Call { func: iter_ref, args }))
@@ -62,8 +44,6 @@ impl Builder<'_> {
             // delivering it spells a symbol nothing defines.
             if let Some(delivery) = self.concrete_delivery_instance(&witness) {
                 self.f.spec_bindings.insert(call, delivery);
-            } else if self.concrete_plan.is_none() && !witness.args.is_empty() {
-                self.f.spec_bindings.insert(call, witness.clone());
             }
             // IDENTITY beside delivery, the plan's split, and the same pair the
             // `for` witness records. Delivery alone leaves the site's own claim
@@ -78,11 +58,7 @@ impl Builder<'_> {
                     &witness,
                 );
             }
-            let abi = if iter_decl.generics.is_empty() || !witness.args.is_empty() {
-                self.callee_abi_plan_for_instance(&witness)?
-            } else {
-                self.callee_abi_plan(iter_ref, None)
-            };
+            let abi = self.callee_abi_plan_for_instance(&witness)?;
             self.f.call_abi_plans.insert(call, abi);
             self.cur_expr = outer_expr;
             return Ok(call);
@@ -525,34 +501,22 @@ impl Builder<'_> {
                 let v = self.lower_expr(value)?;
                 let to_int = self
                     .concrete_ty_id(target)
-                    .is_some_and(|ty| matches!(ty.peel_nullable().0, crate::monoty::MonoTy::Int))
-                    || (self.concrete_plan.is_none()
-                        && matches!(self.resolve_ty(target), Some(TypeExpr::Builtin(BuiltinTy::Int))));
+                    .is_some_and(|ty| matches!(ty.peel_nullable().0, crate::monoty::MonoTy::Int));
                 let from_float = self
                     .concrete_expr_ty(value)
-                    .is_some_and(|ty| matches!(ty.peel_nullable().0, crate::monoty::MonoTy::Float))
-                    || (self.concrete_plan.is_none()
-                        && matches!(self.expr_ty(value), Some(TypeExpr::Builtin(BuiltinTy::Float))));
+                    .is_some_and(|ty| matches!(ty.peel_nullable().0, crate::monoty::MonoTy::Float));
                 let to_uint = self
                     .concrete_ty_id(target)
-                    .is_some_and(|ty| matches!(ty.peel_nullable().0, crate::monoty::MonoTy::Uint))
-                    || (self.concrete_plan.is_none()
-                        && matches!(self.resolve_ty(target), Some(TypeExpr::Builtin(BuiltinTy::Uint))));
+                    .is_some_and(|ty| matches!(ty.peel_nullable().0, crate::monoty::MonoTy::Uint));
                 let from_uint = self
                     .concrete_expr_ty(value)
-                    .is_some_and(|ty| matches!(ty.peel_nullable().0, crate::monoty::MonoTy::Uint))
-                    || (self.concrete_plan.is_none()
-                        && matches!(self.expr_ty(value), Some(TypeExpr::Builtin(BuiltinTy::Uint))));
+                    .is_some_and(|ty| matches!(ty.peel_nullable().0, crate::monoty::MonoTy::Uint));
                 let from_int = self
                     .concrete_expr_ty(value)
-                    .is_some_and(|ty| matches!(ty.peel_nullable().0, crate::monoty::MonoTy::Int))
-                    || (self.concrete_plan.is_none()
-                        && matches!(self.expr_ty(value), Some(TypeExpr::Builtin(BuiltinTy::Int))));
+                    .is_some_and(|ty| matches!(ty.peel_nullable().0, crate::monoty::MonoTy::Int));
                 let to_float = self
                     .concrete_ty_id(target)
-                    .is_some_and(|ty| matches!(ty.peel_nullable().0, crate::monoty::MonoTy::Float))
-                    || (self.concrete_plan.is_none()
-                        && matches!(self.resolve_ty(target), Some(TypeExpr::Builtin(BuiltinTy::Float))));
+                    .is_some_and(|ty| matches!(ty.peel_nullable().0, crate::monoty::MonoTy::Float));
                 if kind == bone_semantic::hir::AsKind::Bitcast && to_int && from_uint {
                     Ok(self.emit_cur(Inst::UintBitcastInt(v)))
                 } else if kind == bone_semantic::hir::AsKind::Bitcast && to_uint && from_int {
@@ -1592,32 +1556,7 @@ impl Builder<'_> {
                 _ => Err(gap("spread of an unsupported type")),
             };
         }
-        if self.concrete_plan.is_some() {
-            return Err(gap("spread expression is missing from the concrete type plan"));
-        }
-        match self.expr_ty(inner) {
-            Some(TypeExpr::Tuple { elements }) => {
-                for i in 0..elements.into_iter().count() {
-                    let value = self.emit_cur(Inst::TupleIndex { base: v, index: i });
-                    self.append_spread_repr(arr, ValueRepr::Scalar(value), dest)?;
-                }
-                Ok(())
-            }
-            Some(TypeExpr::App { ctor: TypeCtor::Array | TypeCtor::Map, .. }) => {
-                self.spread_array_loop(arr, inner, v, dest)
-            }
-            Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) => {
-                let fields = self
-                    .struct_field_names(name)
-                    .ok_or_else(|| gap("spread of a non-struct nominal type"))?;
-                for field in fields {
-                    let value = self.emit_cur(Inst::Field { base: v, field });
-                    self.append_spread_repr(arr, ValueRepr::Scalar(value), dest)?;
-                }
-                Ok(())
-            }
-            _ => Err(gap("spread of an unsupported type")),
-        }
+        Err(gap("spread expression is missing from the concrete type plan"))
     }
 
     /// Runtime copy of every element of `src` (read per its `coll_kind`) into

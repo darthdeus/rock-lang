@@ -32,11 +32,7 @@ impl Builder<'_> {
                 } if n.as_str() == "FlatVec"
             );
         }
-        if self.concrete_plan.is_some() {
-            return false;
-        }
-        matches!(self.expr_ty(e),
-            Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. }) if n.as_str() == "FlatVec")
+        false
     }
 
     /// The value-STRUCT element of `e`'s `NativeBuffer<E>` / `FlatVec<E>` type,
@@ -61,35 +57,7 @@ impl Builder<'_> {
             };
             return is_ffi_clean_value_struct(self.ws, elem).then_some(elem);
         }
-        if self.concrete_plan.is_some() {
-            return None;
-        }
-        let ty = self.resolve_tyid(*self.inf?.expr_types.get(e)?)?;
-        let TypeExpr::App { ctor: TypeCtor::Nominal(n), params } = self.ty_node(ty)? else {
-            return None;
-        };
-        if !matches!(n.as_str(), "NativeBuffer" | "FlatVec") {
-            return None;
-        }
-        let p = params.into_iter().next()?;
-        let elem = self.resolve_tyid(ty.with_idx(p))?;
-        let en = match self.ty_node(elem)? {
-            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => n,
-            // Resolve through the active specialization, exactly as
-            // `vec_column_elem_of` does. Inside a SPECIALIZED body (the `@inline`
-            // FlatVec surface at a concrete site) the element is the real struct
-            // rather than an opaque `T`; without this the stdlib bodies keep the
-            // boxed path, which for a `nobox` element is not merely slower but a
-            // guarantee violation. An UNSUBSTITUTED generic stays boxed on
-            // purpose -- the shared snapshot must keep the representation every
-            // instantiation can read.
-            TypeExpr::Generic(var, _) => match self.subst().get(&var) {
-                Some(ty) => ty.nominal()?,
-                _ => return None,
-            },
-            _ => return None,
-        };
-        is_ffi_clean_value_struct(self.ws, en).then_some(en)
+        None
     }
 
     /// The column-eligible element of `e`'s `Arena<E>` type, if any. The twin of
@@ -195,41 +163,12 @@ impl Builder<'_> {
     ///   the three occurs over the corpus or the Rock suite, so this arm has
     ///   teeth without a population.
     pub(crate) fn concrete_ty(&self, e: Idx<Expr>) -> Result<Option<MonoTy>, CompilerError> {
-        use crate::monoty::MonoTyReason as R;
-        if self.concrete_plan.is_some() {
-            if self.concrete_expr_is_untyped(e) {
-                return Ok(None);
-            }
-            return self
-                .concrete_expr_ty(e)
-                .map(Some)
-                .ok_or_else(|| self.gap_here("concrete plan has no type for this expression"));
+        if self.concrete_expr_is_untyped(e) {
+            return Ok(None);
         }
-        // Neither of these is a storage answer. A body being lowered without
-        // inference, or an expression bone typed nothing for, is a
-        // front-end/back-end disagreement -- answering "boxed" would pick a
-        // representation from the absence of a type.
-        let Some(inf) = self.inf else {
-            return Err(self.gap_here("container storage asked in a body with no inference"));
-        };
-        let Some(ty) = inf.expr_types.get(e) else {
-            return Err(CompilerError::new_with_label(
-                self.body.expr_spans[e],
-                "cannot decide container storage: bone typed no expression here".to_string(),
-            ));
-        };
-        match crate::monoty::convert(self.ws, inf, *ty, &self.subst()) {
-            Ok(m) => Ok(Some(m)),
-            Err(R::UnboundGeneric(_)) | Err(R::UnresolvedInfer(_)) => Ok(None),
-            Err(r) => Err(CompilerError::new_with_label(
-                self.body.expr_spans[e],
-                format!(
-                    "cannot decide container storage: the receiver's type does not resolve to \
-                     a concrete type here ({})",
-                    r.bucket()
-                ),
-            )),
-        }
+        self.concrete_expr_ty(e)
+            .map(Some)
+            .ok_or_else(|| self.gap_here("concrete plan has no type for this expression"))
     }
 
     /// `m.data`, the column Vec a column-stored Map's values live in. Every
@@ -285,39 +224,10 @@ impl Builder<'_> {
                 _ => Err(self.gap_here("concrete type is not an indexable container")),
             };
         }
-        if self.concrete_plan.is_some() {
-            if self.concrete_expr_is_untyped(base)
-                && matches!(self.body.expr_arena[base], Expr::Array(..))
-            {
-                return Ok(ContainerKind::Vec);
-            }
-            return Err(self.gap_here("container expression is missing from the concrete type plan"));
+        if self.concrete_expr_is_untyped(base) && matches!(self.body.expr_arena[base], Expr::Array(..)) {
+            return Ok(ContainerKind::Vec);
         }
-        Ok(match self.expr_ty(base) {
-            Some(TypeExpr::App {
-                ctor: TypeCtor::Array,
-                ..
-            }) => self.vec_kind(base)?,
-            Some(TypeExpr::App {
-                ctor: TypeCtor::Map,
-                ..
-            }) => ContainerKind::Map,
-            Some(TypeExpr::App {
-                ctor: TypeCtor::Nominal(name),
-                ..
-            }) if is_native_buffer(name.as_str()) => self.nb_kind(base),
-            _ => {
-                let rendered = self
-                    .inf
-                    .and_then(|i| i.expr_types.get(base).copied())
-                    .map(|t| self.ws.render(self.inf, t))
-                    .unwrap_or_else(|| "<unknown>".to_string());
-                unreachable!(
-                    "coll_kind: expected an indexable container (Vec/Map/NativeBuffer); \
-                     bone admitted an index/iter on `{rendered}`"
-                )
-            }
-        })
+        Err(self.gap_here("container expression is missing from the concrete type plan"))
     }
 
     // --- type queries (decision: ops are typed at BUILD time) ---
@@ -360,11 +270,6 @@ impl Builder<'_> {
             .concrete_ty_id(expected)
             .as_ref()
             .and_then(|t| self.arith_ty_of_mono(t))
-            .or_else(|| {
-                (!self.concrete_plan.is_some())
-                    .then(|| self.resolve_ty(expected).and_then(|t| self.arith_ty_of(t)))
-                    .flatten()
-            })
             == Some(ArithTy::Float);
         self.coerce_numeric_to_float(
             value,
@@ -419,12 +324,4 @@ impl Builder<'_> {
         }
     }
 
-    /// The declared type of a callee's positional parameter `pidx` (the expected
-    /// type at a call-arg coercion sink), or `None` past the fixed arity.
-    pub(crate) fn param_ty(&self, func: FuncRef, pidx: usize) -> Option<TyId> {
-        self.ws.module(func.module).functions[func.func]
-            .param_decls
-            .get(pidx)
-            .map(|pd| pd.ty)
-    }
 }

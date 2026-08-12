@@ -985,30 +985,6 @@ impl BackendFnAbiPlan {
         }
     }
 
-    /// [`Self::for_instance`] for a caller that already resolved the
-    /// substitution. A body's lowering and its call sites each hold both, so
-    /// re-deriving one from the other would be work with no second opinion in
-    /// it.
-    ///
-    /// The instance would otherwise be DECORATIVE here -- the ABI comes from
-    /// `subst`, so one naming another instantiation would ride along unnoticed.
-    /// The debug assertion is what makes the two a checked agreement rather
-    /// than a convention; it is off in release, where the compile path pays
-    /// nothing.
-    pub(super) fn for_instance_with_subst(
-        ws: &Workspace,
-        scx: &ScalarCtx,
-        inst: &crate::instance::Instance,
-        subst: &SpecSubst,
-    ) -> Self {
-        debug_assert_eq!(
-            &inst.subst(ws, scx.interner()),
-            subst,
-            "a body's instance and the substitution it lowers under must be one instantiation",
-        );
-        Self::assemble(ws, scx, inst.clone(), subst)
-    }
-
     /// The plan of a declaration's own NON-GENERIC instance.
     ///
     /// Not "the shared body's plan": a declaration with generics has no body of

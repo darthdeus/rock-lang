@@ -734,13 +734,9 @@ impl Builder<'_> {
                 .flatten()
             {
                 Some(t) => self.coerced_mono(v, a, &t),
-                None if self.concrete_plan.is_some() => {
+                None => {
                     return Err(self.gap_here("concrete call has no callee parameter type"));
                 }
-                None => match self.param_ty(func, pidx) {
-                    Some(t) => self.coerced(v, a, t),
-                    None => v,
-                },
             };
             slots[pidx] = Some(v);
         }

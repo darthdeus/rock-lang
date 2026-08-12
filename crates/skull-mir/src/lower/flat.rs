@@ -2,8 +2,6 @@
 //! than a nested table, plus the cell group/repr conversions a coroutine frame
 //! and a flat literal both go through.
 use super::*;
-use crate::monoty::MonoTy;
-
 impl Builder<'_> {
     /// Lower an enum-typed value into its flattened cells: the discriminant
     /// (variant-name string) plus ALL union slots (every positional + every record
@@ -125,61 +123,6 @@ impl Builder<'_> {
         }
         shape.nullable = false;
         Some(shape)
-    }
-
-    /// The `EnumFlatShape` of `e`'s (`Nullable`-peeled) inferred type, else `None`.
-    pub(crate) fn flat_enum_shape_of_expr(&self, e: Idx<Expr>) -> Option<EnumFlatShape> {
-        if let Some(ty) = self.concrete_expr_ty(e) {
-            let MonoTy::App {
-                ctor: crate::monoty::MonoCtor::Nominal(name),
-                ..
-            } = ty.peel_nullable().0
-            else {
-                return None;
-            };
-            return EnumPlan::for_name(self.ws, *name).and_then(|plan| plan.flat().cloned());
-        }
-        if self.concrete_plan.is_some() {
-            return None;
-        }
-        match self.expr_ty(e)? {
-            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => {
-                EnumPlan::for_name(self.ws, n).and_then(|plan| plan.flat().cloned())
-            }
-            _ => None,
-        }
-    }
-
-    /// Whether `e`'s inferred type is a `Coroutine<..>` -- the guard that a
-    /// `resume(e)` call is a real coroutine resume (not a user fn named `resume`).
-    pub(crate) fn is_coroutine_recv(&self, e: Idx<Expr>) -> bool {
-        if let Some(ty) = self.concrete_expr_ty(e) {
-            return matches!(
-                ty.peel_nullable().0,
-                MonoTy::App {
-                    ctor: crate::monoty::MonoCtor::Nominal(name), ..
-                } if name.as_str() == "Coroutine"
-            );
-        }
-        if self.concrete_plan.is_some() {
-            return false;
-        }
-        matches!(
-            self.expr_ty(e),
-            Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. }) if n.as_str() == "Coroutine"
-        )
-    }
-
-    /// Read a resumed flat-enum yield value from the coroutine's frame slots as an
-    /// unboxed `Group` -- the concrete `c.resume()` channel. The object IS the
-    /// frame: `cobj.__y*` holds the leaves the `__step` wrote; when the coroutine
-    /// is terminal (`__state < 0`) the value is null, threaded as an all-nil group
-    /// (`tag = nil` sentinel, matching the nullable flat-enum ABI). The consumer
-    /// must have already advanced the coroutine (`cobj.__advance(cobj, arg)`)
-    /// before this read.
-    pub(crate) fn resume_frame_read(&mut self, cobj: Idx<Inst>, shape: &EnumFlatShape) -> ValueRepr {
-        let value_shape = shape.value_shape();
-        self.resume_frame_read_with_shape(cobj, shape.leaf_count(), &value_shape)
     }
 
     pub(crate) fn resume_frame_read_channel(

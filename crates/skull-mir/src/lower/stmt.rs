@@ -83,34 +83,10 @@ impl Builder<'_> {
         if self.scx.values_first_class {
             return Ok(boxed);
         }
-        if self.concrete_plan.is_some() {
-            let fn_ty = self
-                .binding_ty(name)
-                .and_then(|ty| self.concrete_ty_id(ty))
-                .ok_or_else(|| gap("concrete nested function binding has no type plan"))?;
-            let representation = BackendFnAbiPlan::for_function_value_with_mode(
-                self.ws,
-                self.scx,
-                &fn_ty,
-                taken_by_value,
-            )
-            .map_err(|error| match error.span.or(self.cur_span) {
-                Some(span) => CompilerError::new_with_label(span, error.message),
-                None => CompilerError::new_no_location(error.message),
-            })?;
-            let abi = NestedFn {
-                hoisted,
-                param_names,
-                representation,
-            };
-            return Ok(if abi.uses_scalar_abi() { abi } else { boxed });
-        }
-        let Some(fn_ty) = self
+        let fn_ty = self
             .binding_ty(name)
-            .and_then(|ty| self.source_mono_type(ty))
-        else {
-            return Ok(boxed);
-        };
+            .and_then(|ty| self.concrete_ty_id(ty))
+            .ok_or_else(|| gap("concrete nested function binding has no type plan"))?;
         let representation = BackendFnAbiPlan::for_function_value_with_mode(
             self.ws,
             self.scx,
@@ -153,10 +129,7 @@ impl Builder<'_> {
             scx: self.scx,
             concrete_plan: self.concrete_plan,
             concrete_plans: self.concrete_plans,
-            concrete_type_cache: self
-                .concrete_plan
-                .map(|_| std::cell::RefCell::new(rustc_hash::FxHashMap::default())),
-            legacy_subst: self.legacy_subst.clone(),
+            concrete_type_cache: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
             generic_bounds: self.generic_bounds,
             body: self.body,
             inf: self.inf,
@@ -175,7 +148,6 @@ impl Builder<'_> {
             // A nested fn is emitted as a sibling top-level Lua fn and is never a
             // GLSL callee (referenced indirectly), so a return coercion here is
             // Lua-identity only; leaving it off matches today's emitted text.
-            ret_ty: None,
             fn_name_span: None,
             cur_span: None,
             cur_expr: None,

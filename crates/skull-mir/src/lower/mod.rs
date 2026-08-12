@@ -1041,14 +1041,14 @@ pub fn lower_instance_with_plans(
     plan: &ConcreteBodyPlan,
     concrete_plans: &ConcretePlans,
 ) -> Result<MirFunc, CompilerError> {
-    lower_instance_with_plan_inner(ws, scx, plan, Some(concrete_plans))
+    lower_instance_with_plan_inner(ws, scx, plan, concrete_plans)
 }
 
 fn lower_instance_with_plan_inner(
     ws: &Workspace,
     scx: &ScalarCtx,
     plan: &ConcreteBodyPlan,
-    concrete_plans: Option<&ConcretePlans>,
+    concrete_plans: &ConcretePlans,
 ) -> Result<MirFunc, CompilerError> {
     let inst = plan
         .function_instance()
@@ -1104,10 +1104,8 @@ fn lower_instance_with_plan_inner(
             )));
         }
     }
-    if let Some(concrete_plans) = concrete_plans {
-        validate_concrete_callee_plans(ws, scx, plan, concrete_plans)?;
-    }
-    lower_body(ws, scx, inst.func, inst.clone(), None, Some(plan), concrete_plans)
+    validate_concrete_callee_plans(ws, scx, plan, concrete_plans)?;
+    lower_body(ws, scx, inst.func, inst.clone(), plan, concrete_plans)
 }
 
 fn lower_body(
@@ -1115,9 +1113,8 @@ fn lower_body(
     scx: &ScalarCtx,
     self_ref: FuncRef,
     subject: crate::instance::Instance,
-    legacy_subst: Option<SpecSubst>,
-    concrete_plan: Option<&ConcreteBodyPlan>,
-    concrete_plans: Option<&ConcretePlans>,
+    concrete_plan: &ConcreteBodyPlan,
+    concrete_plans: &ConcretePlans,
 ) -> Result<MirFunc, CompilerError> {
     let (mid, fid) = (self_ref.module, self_ref.func);
     let module = ws.module(mid);
@@ -1146,18 +1143,7 @@ fn lower_body(
     // Scalar value ABI: when this fn participates, each value param expands to
     // leaf cells and a value return becomes a multi-value `Return`. This body's
     // own ABI comes from the one plan the calls that target it read.
-    let abi = concrete_plan
-        .map(|plan| BackendFnAbiPlan::for_concrete_plan(ws, scx, plan))
-        .unwrap_or_else(|| {
-            BackendFnAbiPlan::for_instance_with_subst(
-                ws,
-                scx,
-                &subject,
-                legacy_subst
-                    .as_ref()
-                    .expect("legacy lowering needs its source substitution"),
-            )
-        });
+    let abi = BackendFnAbiPlan::for_concrete_plan(ws, scx, concrete_plan);
     f.abi_plan = Some(abi.clone());
     let param_reps = abi.representation().params().to_vec();
     let ret_rep = abi.representation().result();
@@ -1166,8 +1152,7 @@ fn lower_body(
         scx,
         concrete_plan,
         concrete_plans,
-        concrete_type_cache: concrete_plan.map(|_| RefCell::new(rustc_hash::FxHashMap::default())),
-        legacy_subst,
+        concrete_type_cache: RefCell::new(rustc_hash::FxHashMap::default()),
         generic_bounds: &func.generic_bounds,
         body,
         inf,
@@ -1183,7 +1168,6 @@ fn lower_body(
         // runs, so it is never spliced -- box value args (see field docs).
         param_reps,
         ret_rep,
-        ret_ty: func.return_ty,
         fn_name_span: Some(func.name_span),
         cur_span: None,
         cur_expr: None,
@@ -1261,10 +1245,9 @@ fn lower_global_inner(
     let mut b = Builder {
         ws,
         scx,
-        concrete_plan: Some(concrete_plan),
-        concrete_plans: Some(concrete_plans),
-        concrete_type_cache: Some(RefCell::new(rustc_hash::FxHashMap::default())),
-        legacy_subst: None,
+        concrete_plan,
+        concrete_plans,
+        concrete_type_cache: RefCell::new(rustc_hash::FxHashMap::default()),
         generic_bounds: &[],
         body,
         inf,
@@ -1279,7 +1262,6 @@ fn lower_global_inner(
         // Global-init bodies never run `inline_functions` -- box value args.
         param_reps: Vec::new(),
         ret_rep: None,
-        ret_ty: None,
         fn_name_span: None,
         cur_span: None,
         cur_expr: None,
@@ -1570,10 +1552,9 @@ fn lower_decorator_inner(
     let mut b = Builder {
         ws,
         scx,
-        concrete_plan: Some(concrete_plan),
-        concrete_plans: Some(concrete_plans),
-        concrete_type_cache: Some(RefCell::new(rustc_hash::FxHashMap::default())),
-        legacy_subst: None,
+        concrete_plan,
+        concrete_plans,
+        concrete_type_cache: RefCell::new(rustc_hash::FxHashMap::default()),
         generic_bounds: &[],
         body,
         inf,
@@ -1588,7 +1569,6 @@ fn lower_decorator_inner(
         // Decorator bodies never run `inline_functions` -- box value args.
         param_reps: Vec::new(),
         ret_rep: None,
-        ret_ty: None,
         fn_name_span: None,
         cur_span: None,
         cur_expr: None,
@@ -1617,14 +1597,9 @@ fn lower_decorator_inner(
 struct Builder<'a> {
     ws: &'a Workspace,
     scx: &'a ScalarCtx,
-    concrete_plan: Option<&'a ConcreteBodyPlan>,
-    concrete_plans: Option<&'a ConcretePlans>,
-    concrete_type_cache: Option<ConcreteTypeCache>,
-    /// Legacy source substitution, absent for every concrete-plan builder.
-    /// Struct-default lowering temporarily replaces this one value with the
-    /// defaults body's slot substitution; concrete builders keep it absent and
-    /// read their foreign-domain tables instead.
-    legacy_subst: Option<SpecSubst>,
+    concrete_plan: &'a ConcreteBodyPlan,
+    concrete_plans: &'a ConcretePlans,
+    concrete_type_cache: ConcreteTypeCache,
     /// The enclosing fn's `generic_bounds`, parallel to its `generics`:
     /// `Some(elem)` where a generic is declared `I: Iterator<elem>`. THE declared
     /// source for a placeholder `next`'s element shape -- the call's inferred
@@ -1669,9 +1644,6 @@ struct Builder<'a> {
     param_reps: Vec<RepId>,
     /// The body's physical result representation identity, if it has one.
     ret_rep: Option<RepId>,
-    /// The fn's declared return type -- the expected type at a scalar `return`
-    /// sink (int->float subsumption coercion, see [`Builder::coerced`]).
-    ret_ty: Option<TyId>,
     /// The fn's name span, for spanned emit-time rejections that have no better
     /// anchor (the non-unit-coroutine fall-off check). `None` for non-fn bodies.
     fn_name_span: Option<Span>,
@@ -1838,21 +1810,8 @@ impl Builder<'_> {
     /// predicate below is a delegate: `DispatchCtx` is the one implementation,
     /// so the instance walk asking the same question cannot get a second answer
     /// (`skull_mir::lower::dispatch`).
-    /// The substitution in force: the struct-default override when one is
-    /// installed, else this instance's own.
-    ///
-    /// One oracle, because the two are keyed in DIFFERENT bodies -- see
-    /// Every source-shaped reader goes through this legacy-only adapter.
-    pub(crate) fn subst(&self) -> &SpecSubst {
-        self.legacy_subst
-            .as_ref()
-            .expect("concrete lowering attempted to read a source substitution")
-    }
-
     pub(crate) fn concrete_mono(&self, id: MonoTyId) -> MonoTy {
-        let Some(cache) = &self.concrete_type_cache else {
-            return self.scx.interner().get(id);
-        };
+        let cache = &self.concrete_type_cache;
         if let Some(ty) = cache.borrow().get(&id).cloned() {
             return ty;
         }
@@ -1866,13 +1825,11 @@ impl Builder<'_> {
             ws: self.ws,
             inf: self.inf,
             body: self.body,
-            concrete_plan: self.concrete_plan,
-            concrete_types: self
-                .concrete_plan
-                .and_then(|plan| plan.domain_types(&self.cur_domain)),
-            concrete_type_cache: self.concrete_type_cache.as_ref(),
+            concrete_plan: Some(self.concrete_plan),
+            concrete_types: self.concrete_plan.domain_types(&self.cur_domain),
+            concrete_type_cache: Some(&self.concrete_type_cache),
             interner: Some(self.scx.interner()),
-            legacy_subst: self.legacy_subst.as_ref(),
+            legacy_subst: None,
             values_first_class: self.scx.values_first_class,
         }
     }
@@ -2074,43 +2031,24 @@ impl Builder<'_> {
     /// instantiations are still checked by bone) all stay admitted. Called only
     /// when the body's end is reachable, so `while true` bodies never trip it.
     fn reject_nonunit_coroutine_falloff(&self) -> Result<(), CompilerError> {
-        let nonunit_concrete = if let Some(plan) = self.concrete_plan {
-            let Some(result_id) = plan.signature.result else { return Ok(()) };
-            let result = self.concrete_mono(result_id);
-            let crate::monoty::MonoTy::App {
-                ctor: crate::monoty::MonoCtor::Nominal(name),
-                params,
-            } = result
-            else {
-                return Ok(())
-            };
-            if name.as_str() != "Coroutine" {
-                return Ok(())
-            }
-            let Some(result) = params.get(1) else { return Ok(()) };
-            match result {
-                crate::monoty::MonoTy::Unit | crate::monoty::MonoTy::Nullable(_) => false,
-                crate::monoty::MonoTy::Tuple(parts) => !parts.is_empty(),
-                _ => true,
-            }
-        } else {
-            let Some(ret) = self.ret_ty else { return Ok(()) };
-            let Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), params }) = static_ty(self.ws, ret)
-            else {
-                return Ok(())
-            };
-            if n.as_str() != "Coroutine" {
-                return Ok(())
-            }
-            let TyId::Static(m, _) = ret else { return Ok(()) };
-            let Some(r_idx) = params.into_iter().nth(1) else { return Ok(()) };
-            match self.ws.module(m).ty_arena[r_idx] {
-                TypeExpr::Builtin(BuiltinTy::Unit | BuiltinTy::Error) => false,
-                TypeExpr::Tuple { elements } if elements.into_iter().count() == 0 => false,
-                TypeExpr::Nullable(_) => false,
-                TypeExpr::Generic(..) | TypeExpr::Infer(..) => false,
-                _ => true,
-            }
+        let plan = self.concrete_plan;
+        let Some(result_id) = plan.signature.result else { return Ok(()) };
+        let result = self.concrete_mono(result_id);
+        let crate::monoty::MonoTy::App {
+            ctor: crate::monoty::MonoCtor::Nominal(name),
+            params,
+        } = result
+        else {
+            return Ok(())
+        };
+        if name.as_str() != "Coroutine" {
+            return Ok(())
+        }
+        let Some(result) = params.get(1) else { return Ok(()) };
+        let nonunit_concrete = match result {
+            crate::monoty::MonoTy::Unit | crate::monoty::MonoTy::Nullable(_) => false,
+            crate::monoty::MonoTy::Tuple(parts) => !parts.is_empty(),
+            _ => true,
         };
         if nonunit_concrete {
             let msg = format!(
@@ -2150,19 +2088,12 @@ impl Builder<'_> {
             return Ok(self.tuple_return_operands(v, shape.slots.len()));
         }
         let v = self.lower_expr(e)?;
-        let v = if let Some(plan) = self.concrete_plan {
-            match plan.signature.result {
-                Some(result) => {
-                    let result = self.concrete_mono(result);
-                    self.coerced_mono(v, e, &result)
-                }
-                None => v,
+        let v = match self.concrete_plan.signature.result {
+            Some(result) => {
+                let result = self.concrete_mono(result);
+                self.coerced_mono(v, e, &result)
             }
-        } else {
-            match self.ret_ty {
-                Some(rt) => self.coerced(v, e, rt),
-                None => v,
-            }
+            None => v,
         };
         Ok(vec![v])
     }
