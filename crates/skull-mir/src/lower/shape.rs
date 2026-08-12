@@ -1986,34 +1986,6 @@ pub struct BoundNextShape {
     pub elem: BoundNextElem,
 }
 
-/// Takes the INSTANCE rather than a `(FuncRef, key)` pair: the two halves of
-/// that pair could name different declarations, and the shape this computes
-/// pairs the callee's return arity against the body's own split.
-pub fn bound_next_shape(
-    ws: &Workspace,
-    scx: &ScalarCtx,
-    interner: &crate::monoty::MonoInterner,
-    inst: &crate::instance::Instance,
-) -> Option<BoundNextShape> {
-    let fref = inst.func;
-    let subst = inst.subst(ws, interner);
-    let ret = ws.module(fref.module).functions[fref.func].return_ty?;
-    let result = crate::monoty::convert_decl(ws, ret, &subst).ok()?;
-    let id = scx
-        .rep_arena()
-        .plan(
-            ws,
-            scx.target(),
-            &result,
-            RepUse::Return,
-            &RepUseFacts { tuple_spelled: true, span: None },
-            RepGuarantees { nobox: true, allow_opaque: true },
-        )
-        .ok()?;
-    let shape = scx.rep_arena().tuple_shape(id)?;
-    bound_next_shape_from_tuple(shape)
-}
-
 /// The same bound-`next` shape from the selected concrete body signature.
 /// Production standalone resolution already owns this signature; rebuilding
 /// it from the witness declaration would reintroduce the source-shaped oracle.
