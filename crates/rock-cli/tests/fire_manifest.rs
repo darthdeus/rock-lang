@@ -14,6 +14,7 @@ fn fire_identity_is_consumed_from_package_metadata() {
     for forbidden in [
         "git describe",
         "SystemTime",
+        "std::env::var(\"FIRE_GAME_DIR\")",
         "ROCK_CHANNEL",
         "ROCK_TELEMETRY_ENDPOINT",
         "ROCK_TELEMETRY_TOKEN",
@@ -33,5 +34,26 @@ fn fire_identity_is_consumed_from_package_metadata() {
         "__ROCK_CHANNEL_STAMP",
     ] {
         assert!(!main.contains(forbidden), "Fire runtime still writes obsolete {forbidden}");
+    }
+}
+
+#[test]
+fn release_entry_points_use_the_package_manifest() {
+    let root = repo_root();
+    let justfile = std::fs::read_to_string(root.join("justfile")).unwrap();
+    assert!(!justfile.contains("_fire-prepare"));
+    assert!(!justfile.contains("collect_assets.py"));
+    assert!(!justfile.contains("-e ROCK_CHANNEL"));
+    assert!(!justfile.contains("-e ROCK_TELEMETRY_ENDPOINT"));
+    assert!(!justfile.contains("-e ROCK_TELEMETRY_TOKEN"));
+    assert!(justfile.contains("fire-release-all steam"));
+    assert!(justfile.contains("package-manifest.json"));
+
+    for name in ["build-game-ios.sh", "run-game-sim.sh", "run-game-device.sh"] {
+        let source = std::fs::read_to_string(root.join("tools/ios").join(name)).unwrap();
+        assert!(source.contains("package-manifest.json"), "{name} does not name the manifest");
+        assert!(source.contains("verify_manifest.py"), "{name} does not verify the manifest");
+        assert!(!source.contains("__ROCK_CHANNEL_STAMP"), "{name} retains the channel stamp");
+        assert!(!source.contains("strings "), "{name} retains binary string verification");
     }
 }
