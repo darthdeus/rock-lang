@@ -4142,7 +4142,7 @@ impl<'a> FunctionEmitter<'a> {
             Inst::NotEq(a, b) => self.binary(*a, "!=", *b),
             Inst::FloatToInt(value) => {
                 if self.stage.stage == ShaderStage::Compute {
-                    Ok(format!("i32({})", self.render_val(*value)?))
+                    Ok(format!("i32(floor({}))", self.render_val(*value)?))
                 } else {
                     Ok(format!("int({})", self.render_val(*value)?))
                 }
