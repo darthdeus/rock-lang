@@ -114,6 +114,21 @@ fn main() {
 }
 
 #[test]
+fn a_rooted_mir_body_uses_its_owned_return_plan_without_a_call_site() {
+    let js = emit(
+        r#"
+nobox value P2 { x: float, y: float }
+@scalar_abi fn pair(p: P2) -> P2 { return p }
+"#,
+        "pair",
+    );
+    assert!(
+        js.contains("var __rock_ret1"),
+        "a rooted multi-lane body must size the bank from its owned result plan:\n{js}"
+    );
+}
+
+#[test]
 fn a_hoisted_nested_body_keeps_its_own_return_plan() {
     let js = emit(
         r#"

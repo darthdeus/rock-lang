@@ -1194,7 +1194,6 @@ fn lower_body(
             )
         });
     f.abi_plan = Some(abi.clone());
-    f.abi_representation = Some(abi.representation().clone());
     let param_reps = abi.representation().params().to_vec();
     let ret_rep = abi.representation().result();
     let mut b = Builder {
