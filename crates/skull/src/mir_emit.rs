@@ -497,6 +497,11 @@ struct UnitOut {
     specs: Vec<skull_mir::bound::SpecDemand>,
     /// Module-global names read/written (fn-as-value edges; see `Chunk`).
     global_names: Vec<Ustr>,
+    /// Comptime inputs this unit's body baked in (`build_var`/`embed_string`).
+    /// Always-emitted units have no Chunk to carry these, and ALL in-tree
+    /// production comptime reads are global initializers -- dropping them here
+    /// is how the cimgui embeds went missing from the watch set.
+    comptime_reads: Vec<skull_mir::mir::ComptimeRead>,
     times: PhaseTimes,
 }
 
@@ -518,6 +523,7 @@ fn emit_lowered(
     }
     out.calls = skull_mir::reach::call_targets(mf);
     out.global_names = skull_mir::reach::global_ref_names(mf);
+    out.comptime_reads = mf.comptime_reads.clone();
     out.lua = lua;
     out.times.emit = t_emit;
     out.times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(t_emit);
@@ -1364,6 +1370,11 @@ pub struct SkullEmitCache {
     /// its own definition with its own symbol. Keyed by `FuncRef`, the backfill
     /// walk could only ever answer for shared bodies.
     emitted: FxHashSet<EmittedBodyId>,
+    /// Comptime reads of the always-emitted units (global initializers,
+    /// decorator defs), which have no Chunk. Feeds the watch set
+    /// (`comptime_files`) and the overlay's stale-const re-init; refreshed by
+    /// every `assemble` (full and incremental reassembly re-lower all units).
+    unit_comptime_reads: UnitComptimeReads,
     /// The compilation target's root directory; see [`is_library_module`].
     project_root: Option<String>,
 }
@@ -2314,13 +2325,26 @@ fn shader_registration_lines(ws: &Workspace) -> Result<ShaderRegistrations, Comp
     })
 }
 
+/// Comptime reads made by ALWAYS-EMITTED units, which have no Chunk to carry
+/// them: per-global (keyed so the overlay can re-init exactly the stale one)
+/// plus decorator definitions (files only -- decorators re-apply on full
+/// rebuild, so the watch set is all they need).
+#[derive(Default)]
+pub struct UnitComptimeReads {
+    globals: FxHashMap<
+        (ModuleId, Idx<bone_semantic::hir::GlobalDef>),
+        Vec<skull_mir::mir::ComptimeRead>,
+    >,
+    decorators: Vec<skull_mir::mir::ComptimeRead>,
+}
+
 fn assemble(
     ws: &Workspace,
     cg: &CodegenCtx,
     scx: &skull_mir::lower::ScalarCtx,
     cache: &SkullEmitCache,
     built_specs: &mut Vec<(EmittedBodyId, Chunk)>,
-) -> Result<(MirEmit, FxHashSet<EmittedBodyId>), CompilerError> {
+) -> Result<(MirEmit, FxHashSet<EmittedBodyId>, UnitComptimeReads), CompilerError> {
     // Per-stage lower/cleanup/emit/regalloc times: chunk times (captured during the
     // parallel `emit_full`/`emit_incremental` chunk build) summed in as chunks are
     // pulled, plus the decorator/global units re-emitted here. Under parallel emit
@@ -2361,6 +2385,10 @@ fn assemble(
     });
     rejections.extend(unit_errors(&deco_results));
     needed_specs.extend(deco_results.iter().flat_map(|u| u.specs.iter().cloned()));
+    let mut unit_reads = UnitComptimeReads::default();
+    for u in &deco_results {
+        unit_reads.decorators.extend(u.comptime_reads.iter().cloned());
+    }
     let mut always_emitted_calls: Vec<FuncRef> = Vec::new();
     let mut always_emitted_names: Vec<Ustr> = Vec::new();
     merge_units(deco_results, &mut out, &mut skipped, &mut direct_globals, &mut direct_calls, &mut Vec::new(), &mut always_emitted_calls, &mut always_emitted_names, &mut times);
@@ -2385,9 +2413,17 @@ fn assemble(
             format!("[{:?}] = {:?},", g.name.as_str(), ws.render(None, g.ty))
         })
         .collect();
+    let global_keys = global_items.clone();
     let global_results = par_map(global_items, |(mid, gid)| {
         emit_global_unit(ws, scx, cg, mid, gid)
     });
+    // par_map preserves input order, so keys and results zip positionally --
+    // the same pairing merge_units relies on for output order.
+    for (key, u) in global_keys.iter().zip(global_results.iter()) {
+        if !u.comptime_reads.is_empty() {
+            unit_reads.globals.insert(*key, u.comptime_reads.clone());
+        }
+    }
     rejections.extend(unit_errors(&global_results));
     needed_specs.extend(global_results.iter().flat_map(|u| u.specs.iter().cloned()));
     let mut globals_lua = String::new();
@@ -2680,7 +2716,7 @@ fn assemble(
     if let Some(err) = cg.take_rejection() {
         return Err(err);
     }
-    Ok((MirEmit { lua: out, skipped, phases }, live.emitted_bodies()))
+    Ok((MirEmit { lua: out, skipped, phases }, live.emitted_bodies(), unit_reads))
 }
 
 /// Full emit: populate the chunk cache for every ordinary/coroutine body, then
@@ -2880,12 +2916,14 @@ pub fn emit_full_in(
         static_key_baseline,
         shader_registrations,
         emitted: FxHashSet::default(),
+        unit_comptime_reads: UnitComptimeReads::default(),
         project_root: project_root.map(str::to_string),
     };
     let mut built_specs: Vec<(EmittedBodyId, Chunk)> = Vec::new();
-    let (emit, emitted) = assemble(ws, &cache.cg, &cache.scx, &cache, &mut built_specs)?;
+    let (emit, emitted, unit_reads) = assemble(ws, &cache.cg, &cache.scx, &cache, &mut built_specs)?;
     let mut cache = cache;
     cache.emitted = emitted;
+    cache.unit_comptime_reads = unit_reads;
     cache.absorb_spec_chunks(built_specs);
     Ok((emit, cache))
 }
@@ -2907,18 +2945,54 @@ pub fn emit_full_in(
 /// every shifted fn is in `reinferred` and re-emitted here). Shared by
 /// `emit_incremental` (full reassembly) and `emit_overlay` (the incremental.lua
 /// split).
+/// Whether any of `reads` no longer matches the CURRENT inputs. File ids are
+/// the ABSOLUTE path the resolver landed on; an unreadable input hashes as
+/// None != recorded, forcing a re-lower whose spanned rejection reports the
+/// real cause. `file_hashes` memoizes reads within one staleness sweep.
+fn comptime_reads_stale(
+    ws: &Workspace,
+    reads: &[skull_mir::mir::ComptimeRead],
+    file_hashes: &mut FxHashMap<Ustr, Option<u64>>,
+) -> bool {
+    use skull_mir::mir::{comptime_value_hash, ComptimeInputId};
+    reads.iter().any(|read| {
+        let current = match &read.input {
+            ComptimeInputId::Var(name) => ws
+                .comptime_inputs
+                .vars
+                .get(name)
+                .map(|v| comptime_value_hash(&v.value)),
+            ComptimeInputId::File(path) => *file_hashes.entry(*path).or_insert_with(|| {
+                let text = std::fs::read_to_string(path.as_str()).ok()?;
+                Some(comptime_value_hash(&text))
+            }),
+        };
+        current != Some(read.value_hash)
+    })
+}
+
 impl SkullEmitCache {
-    /// Project-root-relative paths of every `embed_string` input baked into a
-    /// cached chunk -- the files a watcher must treat as sources
-    /// (docs/comptime-plan.md).
+    /// The ABSOLUTE path of every `embed_string` input baked into the program
+    /// -- function chunks AND the always-emitted units (global initializers,
+    /// decorator defs) -- the files a watcher must treat as sources
+    /// (docs/comptime-plan.md). The unit half is load-bearing: all in-tree
+    /// production embeds are global initializers (the cimgui prelude).
     pub fn comptime_files(&self) -> Vec<Ustr> {
         let mut out: FxHashSet<Ustr> = FxHashSet::default();
-        for chunk in self.chunks.values() {
-            let Ok(chunk) = chunk else { continue };
-            for read in &chunk.comptime_reads {
-                if let skull_mir::mir::ComptimeInputId::File(path) = read.input {
-                    out.insert(path);
-                }
+        let chunk_reads = self
+            .chunks
+            .values()
+            .filter_map(|chunk| chunk.as_ref().ok())
+            .flat_map(|chunk| chunk.comptime_reads.iter());
+        let unit_reads = self
+            .unit_comptime_reads
+            .globals
+            .values()
+            .flatten()
+            .chain(self.unit_comptime_reads.decorators.iter());
+        for read in chunk_reads.chain(unit_reads) {
+            if let skull_mir::mir::ComptimeInputId::File(path) = read.input {
+                out.insert(path);
             }
         }
         out.into_iter().collect()
@@ -3003,34 +3077,12 @@ fn update_chunk_cache(
     // content) no longer matches the CURRENT inputs is a body edit bone cannot
     // see -- reinferred hashes only source text (docs/comptime-plan.md). Seed
     // the decl so the chunk and every dependent (a caller that inlined the
-    // value) re-emits fresh. An unreadable input hashes as None != recorded,
-    // forcing a re-lower whose spanned rejection reports the real cause.
+    // value) re-emits fresh.
     {
-        use skull_mir::mir::{comptime_value_hash, ComptimeInputId};
         let mut file_hashes: FxHashMap<Ustr, Option<u64>> = FxHashMap::default();
         for (body, chunk) in cache.chunks.iter() {
             let Ok(chunk) = chunk else { continue };
-            if chunk.comptime_reads.is_empty() {
-                continue;
-            }
-            let stale = chunk.comptime_reads.iter().any(|read| {
-                let current = match &read.input {
-                    ComptimeInputId::Var(name) => ws
-                        .comptime_inputs
-                        .vars
-                        .get(name)
-                        .map(|v| comptime_value_hash(&v.value)),
-                    // File ids are the ABSOLUTE path the resolver landed on.
-                    ComptimeInputId::File(path) => {
-                        *file_hashes.entry(*path).or_insert_with(|| {
-                            let text = std::fs::read_to_string(path.as_str()).ok()?;
-                            Some(comptime_value_hash(&text))
-                        })
-                    }
-                };
-                current != Some(read.value_hash)
-            });
-            if stale {
+            if comptime_reads_stale(ws, &chunk.comptime_reads, &mut file_hashes) {
                 changed.insert(body.decl());
             }
         }
@@ -3114,8 +3166,9 @@ pub fn emit_incremental(
     // The two-file split (`emit_overlay`) avoids it entirely on a body edit.
     let t_asm = Instant::now();
     let mut built_specs: Vec<(EmittedBodyId, Chunk)> = Vec::new();
-    let (mut emit, emitted) = assemble(ws, &cache.cg, &cache.scx, cache, &mut built_specs)?;
+    let (mut emit, emitted, unit_reads) = assemble(ws, &cache.cg, &cache.scx, cache, &mut built_specs)?;
     cache.emitted = emitted;
+    cache.unit_comptime_reads = unit_reads;
     cache.absorb_spec_chunks(built_specs);
     let reassemble = t_asm.elapsed();
     emit.phases.push(("incr: re-emit affected bodies", reemit));
@@ -3501,6 +3554,26 @@ pub fn emit_overlay(
                 cache.changed_consts_since_full.insert((mid, gid));
             }
         }
+    }
+    // A comptime input read by a GLOBAL initializer can go stale with no
+    // reinferred body at all (bone hashes only source text). Route a stale
+    // const through the same changed-consts machinery -- its ginit re-lowers
+    // fresh, re-reading the file / new var value. A stale MUTABLE global is
+    // deliberately left alone: its guarded init preserves the live value on
+    // reload, exactly as a source edit to its initializer does.
+    {
+        let mut file_hashes: FxHashMap<Ustr, Option<u64>> = FxHashMap::default();
+        let stale_consts: Vec<(ModuleId, Idx<bone_semantic::hir::GlobalDef>)> = cache
+            .unit_comptime_reads
+            .globals
+            .iter()
+            .filter(|((mid, gid), reads)| {
+                ws.module(*mid).globals[*gid].is_const
+                    && comptime_reads_stale(ws, reads, &mut file_hashes)
+            })
+            .map(|(key, _)| *key)
+            .collect();
+        cache.changed_consts_since_full.extend(stale_consts);
     }
     // A specialization the edit reached for the FIRST time has no chunk yet, so
     // it must be BUILT before the overlay looks for one. Never swallowed: the

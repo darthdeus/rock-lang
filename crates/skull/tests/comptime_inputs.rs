@@ -261,6 +261,154 @@ fn other() -> int {
 }
 
 #[test]
+fn embed_file_change_reaches_the_overlay() {
+    use skull::mir_emit::{emit_full, emit_overlay};
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("data.txt"), "fn-embed-v1").unwrap();
+    let src = r#"
+fn data() -> string {
+    return embed_string("data.txt")
+}
+fn other() -> int {
+    return 1
+}
+"#;
+    let mut inputs = ComptimeInputs::default();
+    inputs.embed_root = Some(dir.path().to_path_buf());
+    let ws1 = ws_with_inputs(src, inputs.clone());
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (_, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+
+    std::fs::write(dir.path().join("data.txt"), "fn-embed-v2").unwrap();
+    let ws2 = ws_with_inputs(src, inputs);
+    let overlay = emit_overlay(&ws2, &mut cache, &[reinferred_of(&ws2, "other")]);
+    assert!(
+        overlay.lua.contains("fn-embed-v2"),
+        "the overlay must redefine the body embedding the edited file:\n{}",
+        overlay.lua
+    );
+}
+
+// --- global initializers ---
+// ALL in-tree production comptime reads happen in global initializers (mag's
+// telemetry/build_info stamps, the profiler SHA, the cimgui prelude), which
+// emit through `UnitOut`, not a function Chunk. A read recorded only on
+// chunks leaves this whole shape invisible to the watch set and to overlay
+// staleness while every function-body fixture stays green.
+
+#[test]
+fn global_embed_read_joins_the_watch_file_set() {
+    use skull::mir_emit::emit_full;
+
+    let dir = tempfile::tempdir().unwrap();
+    let payload = dir.path().join("payload.txt");
+    std::fs::write(&payload, "global-embed-payload").unwrap();
+    let src = r#"
+const BANNER: string = embed_string("payload.txt")
+fn main() {
+    print(BANNER)
+}
+"#;
+    let mut inputs = ComptimeInputs::default();
+    inputs.embed_root = Some(dir.path().to_path_buf());
+    let ws = ws_with_inputs(src, inputs);
+    let mid = skull::user_module_id(&ws).unwrap();
+    let (full, cache) = emit_full(&ws, mid).expect("emit_full");
+    assert!(full.lua.contains("global-embed-payload"), "control: the embed landed");
+
+    let canonical = payload.canonicalize().unwrap();
+    let files = cache.comptime_files();
+    assert!(
+        files.iter().any(|f| std::path::Path::new(f.as_str()) == canonical),
+        "a global initializer's embed must join the watch set, got {files:?}"
+    );
+}
+
+const GLOBAL_VAR_SRC: &str = r#"
+const TAG: string = build_var("SHA")
+fn other() -> int {
+    return 1
+}
+fn main() {
+    print(TAG)
+}
+"#;
+
+#[test]
+fn global_const_build_var_change_reaches_incremental() {
+    use skull::mir_emit::{emit_full, emit_incremental};
+
+    let ws1 = ws_with_inputs(GLOBAL_VAR_SRC, inputs_with_var("SHA", "first-sha-value"));
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (full1, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    assert!(full1.lua.contains("first-sha-value"), "control: full build inlines v1");
+
+    let ws2 = ws_with_inputs(GLOBAL_VAR_SRC, inputs_with_var("SHA", "second-sha-value"));
+    let edit = vec![reinferred_of(&ws2, "other")];
+    let incremental = emit_incremental(&ws2, &mut cache, &edit).expect("emit_incremental");
+    assert!(
+        incremental.lua.contains("second-sha-value")
+            && !incremental.lua.contains("first-sha-value"),
+        "incremental reassembly re-lowers globals, so the new value must land"
+    );
+}
+
+#[test]
+fn global_const_build_var_change_reaches_the_overlay() {
+    use skull::mir_emit::{emit_full, emit_overlay};
+
+    let ws1 = ws_with_inputs(GLOBAL_VAR_SRC, inputs_with_var("SHA", "first-sha-value"));
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (_, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+
+    // The session saw only an unrelated body edit; the var moved underneath.
+    let ws2 = ws_with_inputs(GLOBAL_VAR_SRC, inputs_with_var("SHA", "second-sha-value"));
+    let overlay = emit_overlay(&ws2, &mut cache, &[reinferred_of(&ws2, "other")]);
+    assert!(
+        overlay.lua.contains("second-sha-value"),
+        "the overlay must re-emit a const init whose build var moved:\n{}",
+        overlay.lua
+    );
+    assert!(
+        overlay.lua.contains("TAG = "),
+        "the overlay must re-run the const's init line:\n{}",
+        overlay.lua
+    );
+}
+
+#[test]
+fn global_const_embed_change_reaches_the_overlay() {
+    use skull::mir_emit::{emit_full, emit_overlay};
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("data.txt"), "overlay-embed-v1").unwrap();
+    let src = r#"
+const DATA: string = embed_string("data.txt")
+fn other() -> int {
+    return 1
+}
+fn main() {
+    print(DATA)
+}
+"#;
+    let mut inputs = ComptimeInputs::default();
+    inputs.embed_root = Some(dir.path().to_path_buf());
+    let ws1 = ws_with_inputs(src, inputs.clone());
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (_, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+
+    std::fs::write(dir.path().join("data.txt"), "overlay-embed-v2").unwrap();
+    let ws2 = ws_with_inputs(src, inputs);
+    let overlay = emit_overlay(&ws2, &mut cache, &[reinferred_of(&ws2, "other")]);
+    assert!(
+        overlay.lua.contains("overlay-embed-v2"),
+        "the overlay must re-emit a const init whose embedded file changed:\n{}",
+        overlay.lua
+    );
+}
+
+#[test]
 fn embed_string_without_project_root_rejects() {
     let src = r#"
 fn broken() -> string {
