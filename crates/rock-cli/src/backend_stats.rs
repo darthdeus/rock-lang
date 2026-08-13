@@ -66,6 +66,9 @@ struct SkullStats {
     /// entries are direct wall-clock measurements; the remaining entries are
     /// per-unit elapsed timers that overlap under parallel emit.
     emit_phases: Vec<(&'static str, Duration)>,
+    /// ABI-plan memo `(hits, misses)` summed across timed runs. Counts, not
+    /// times, so they are load-immune and identical run to run.
+    abi_plan_stats: (u64, u64),
 }
 
 pub fn do_backend_stats(input: &str, iters: usize, warmup: usize) -> Result<()> {
@@ -136,6 +139,8 @@ fn run_skull(sources: &SourceFiles, iters: usize, warmup: usize) -> SkullStats {
         stats.times.semantic += times.semantic;
         stats.times.emit += times.emit;
         merge_phases(&mut stats.emit_phases, &times.emit_phases);
+        stats.abi_plan_stats.0 += times.abi_plan_stats.0;
+        stats.abi_plan_stats.1 += times.abi_plan_stats.1;
     }
     stats.files = sources.files.len();
     stats
@@ -246,6 +251,15 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
             let overhead = emit_body.saturating_sub(phase_sum);
             println!("    {:28} {:>9.3} ms  (timer overhead / unbracketed)", "overhead", ms(overhead));
         }
+    }
+    let (hits, misses) = skull.abi_plan_stats;
+    if hits + misses > 0 {
+        let asked = (hits + misses) / iters as u64;
+        let hit = hits / iters as u64;
+        let rate = hit as f64 / asked as f64 * 100.0;
+        println!(
+            "  abi-plan memo  : {asked} asked, {hit} hit per run ({rate:.1}% hit rate)"
+        );
     }
     println!("  post-parse     : {:>9.3} ms", ms(skull_postparse));
     println!(

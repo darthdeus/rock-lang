@@ -460,6 +460,11 @@ pub struct MirEmit {
     /// are per-unit elapsed timers that overlap under parallel emit and become
     /// wall-clock measurements under `sequential`.
     pub phases: Vec<(&'static str, std::time::Duration)>,
+    /// `(hits, misses)` of the ABI-plan memo over the emitting context's
+    /// lifetime (== this emission for a full build, cumulative across edits on
+    /// the incremental paths). Counts, so load-immune: `hits > 0` on any real
+    /// corpus is the memo's non-vacuity witness. Surfaced by `backend-stats`.
+    pub abi_plan_stats: (u64, u64),
 }
 
 /// Coarse per-stage wall-clock for one emitted definition. Summed across every
@@ -3206,7 +3211,7 @@ fn assemble(
         }
     }
     emitted_bodies.extend(spec_chunks.keys().cloned());
-    Ok((MirEmit { lua: out, skipped, phases }, emitted_bodies))
+    Ok((MirEmit { lua: out, skipped, phases, abi_plan_stats: scx.abi_plan_stats() }, emitted_bodies))
 }
 
 /// Full emit: populate the chunk cache for every retained ordinary/coroutine
@@ -4260,7 +4265,7 @@ fn assemble_overlay(
         out.push_str(&cache.shader_registrations.lua);
     }
 
-    MirEmit { lua: out, skipped, phases: Vec::new() }
+    MirEmit { lua: out, skipped, phases: Vec::new(), abi_plan_stats: cache.scx.abi_plan_stats() }
 }
 
 /// `__rock_rebind_system("<name>", <func>)` for each CHANGED decorated function
@@ -4716,7 +4721,7 @@ fn main() { let result = first() }
         let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic");
         let mid =
             ws.modules.iter().find(|m| m.id != ModuleId::builtin()).expect("test module").id;
-        let (_, cache) = emit_full_in_with_test_mutation(&ws, mid, BodyMutation::None)
+        let (emit, cache) = emit_full_in_with_test_mutation(&ws, mid, BodyMutation::None)
             .expect("intact emission");
         let (hits, misses) = cache.scx.abi_plan_stats();
         assert!(misses > 0, "no ABI-plan question consulted the memo (hits={hits})");
@@ -4724,6 +4729,11 @@ fn main() { let result = first() }
             hits > 0,
             "three helper call sites repeat the callee question; zero hits means the \
              production path is not consulting the memo (misses={misses})"
+        );
+        assert_eq!(
+            emit.abi_plan_stats,
+            (hits, misses),
+            "the reported stats must be the context's own counters"
         );
     }
 

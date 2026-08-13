@@ -93,6 +93,8 @@ pub struct SkullPhaseTimes {
     /// scaffold+misc), from `MirEmit::phases`. Empty if bone rejected the
     /// workspace (emit never ran). Summed element-wise across timed runs.
     pub emit_phases: Vec<(&'static str, Duration)>,
+    /// `(hits, misses)` of skull's ABI-plan memo, from `MirEmit::abi_plan_stats`.
+    pub abi_plan_stats: (u64, u64),
 }
 
 /// Whole-project skull timing: parse all user files, type-check them together
@@ -134,6 +136,7 @@ pub fn skull_workspace_timed(sources: &SourceFiles) -> (bool, SkullPhaseTimes) {
     let emit_ok = match emit {
         Ok(e) => {
             times.emit_phases = e.phases;
+            times.abi_plan_stats = e.abi_plan_stats;
             true
         }
         Err(_) => false,
