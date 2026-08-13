@@ -3130,6 +3130,9 @@ fn assemble(
     // the original slot, so the emitted text is unchanged.)
     out.push_str(&globals_lua);
     skipped.extend(global_skipped);
+    if code_artifact.entries.values().any(|entry| entry.escaping) {
+        out.push_str(skull_codegen_lua::FN_MT_PRELUDE);
+    }
     // Global initializer bodies (including their escaping lambdas) are now
     // defined, so slot staging must follow them but precede initializer calls.
     out.push_str(&code_slot_registration_lua(ws, scx, &code_artifact)?);

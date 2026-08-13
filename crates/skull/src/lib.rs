@@ -429,13 +429,12 @@ fn runtime_prelude() -> &'static str {
     //   2. splitmix64 RNG (stdlib `random_*` inline(lua) bodies call
     //      `__rock_rng_next`/`__rock_rng_seed` by name); seeded from
     //      ROCK_TEST_SEED for deterministic test runs.
-    // The `{FN_MT}` placeholder is filled once from the canonical
-    // `skull_codegen_lua::FN_MT_PRELUDE` constant (one definition, shared with the
-    // codegen test harness) -- the record metatable is where the emitter's
-    // `setmetatable({..}, __rock_fn_mt)` output lands.
+    // The CodeRef runtime is appended by assembly only when this artifact has an
+    // escaping Rock function value. This keeps direct-call-only output free of
+    // slot machinery while retaining one canonical runtime definition.
     static PRELUDE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
         let out = PRELUDE_TEMPLATE
-            .replace("{FN_MT}", skull_codegen_lua::FN_MT_PRELUDE)
+            .replace("{FN_MT}", "")
             .replace("{LEAF_VIEWS}", &skull_mir::lower::leaf_views_lua_table())
             .replace("{NB_PRIM_STORAGE}", &skull_mir::lower::nb_prim_storage_lua());
         // `str::replace` on a placeholder that drifted out of the template is a

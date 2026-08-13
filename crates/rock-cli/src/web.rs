@@ -1019,7 +1019,7 @@ fn assemble_web_program(
     p.push_str(skull_codegen_js::JS_MAP_ITER_RUNTIME);
     p.push_str(skull_codegen_js::JS_STRUCTURAL_EQ);
     p.push_str(skull_codegen_js::JS_ENUM_RUNTIME);
-    p.push_str(skull_codegen_js::JS_CALL_HELPER);
+    crate::js_test::append_call_runtime(&mut p, &emitted.program, &emitted.code_artifact);
     p.push_str(skull_codegen_js::JS_CORO_RUNTIME);
     p.push_str(skull_codegen_js::JS_STRING_RUNTIME);
     p.push_str(skull_codegen_js::JS_INSPECT_RUNTIME);
@@ -1292,5 +1292,36 @@ mod tests {
         // non-ASCII in an emitted string literal into mojibake.
         let s = "let s = \"\u{00e9}\u{4e2d}\u{1f600}\";";
         assert_eq!(escape_script_close(s), s);
+    }
+
+    #[test]
+    fn direct_call_only_web_bundle_omits_code_ref_runtime() {
+        let emitted = skull_codegen_js::emit::JsProgram {
+            program: "function main() {}\n".to_string(),
+            main_js_name: Some("main".to_string()),
+            code_artifact: skull_mir::code_identity::CodeArtifact::default(),
+        };
+        let bundle = assemble_web_program(&emitted, "", &[], "games/test");
+        assert!(!bundle.contains("__rock_code_slot_begin"), "direct-call bundle paid for slots");
+    }
+
+    #[test]
+    fn escaping_artifact_enables_code_ref_runtime() {
+        let mut artifact = skull_mir::code_identity::CodeArtifact::default();
+        artifact.mark_value(skull_mir::code_identity::CodeIdentity::Generated {
+            enclosing: skull_mir::code_identity::CodeOwner::Artifact {
+                kind: skull_mir::code_identity::CodeOwnerKind::Global,
+                module: ustr::Ustr::from("<test>"),
+                name: ustr::Ustr::from("root"),
+            },
+            role: ustr::Ustr::from("callback"),
+        });
+        let emitted = skull_codegen_js::emit::JsProgram {
+            program: "function main() {}\n".to_string(),
+            main_js_name: Some("main".to_string()),
+            code_artifact: artifact,
+        };
+        let bundle = assemble_web_program(&emitted, "", &[], "games/test");
+        assert!(bundle.contains("__rock_code_slot_begin"), "escaping value lost CodeRef runtime");
     }
 }

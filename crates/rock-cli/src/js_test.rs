@@ -357,13 +357,16 @@ fn js_run_tests(
     let mut run_idxs: Vec<usize> = supported.iter().map(|(i, _)| *i).collect();
     run_idxs.extend(deco_pending.iter().copied());
     run_idxs.sort_unstable();
-    let shared_defs = if run_idxs.is_empty() {
-        String::new()
+    let (shared_defs, shared_has_code_refs) = if run_idxs.is_empty() {
+        (String::new(), false)
     } else {
         let roots: Vec<(FuncRef, String)> =
             run_idxs.iter().map(|&i| (tests[i].0, format!("__t{i}"))).collect();
-        match skull_codegen_js::emit::emit_program_with_roots(ws, &roots) {
-            Ok(blob) => blob,
+        match skull_codegen_js::emit::emit_program_with_roots_artifact(ws, &roots) {
+            Ok((blob, artifact)) => {
+                let has_code_refs = artifact.entries.values().any(|entry| entry.escaping);
+                (blob, has_code_refs)
+            }
             Err(e) => {
                 // Whole-file emission rejected for something no single test hit
                 // on its own (a deco-dependent test that also reaches an
@@ -374,7 +377,9 @@ fn js_run_tests(
                     skips.push((tests[i].1.name.clone(), all_reasons(&e)));
                 }
                 run_idxs = supported.iter().map(|(i, _)| *i).collect();
-                supported.iter().map(|(_, d)| d.as_str()).collect::<String>()
+                let blob = supported.iter().map(|(_, d)| d.as_str()).collect::<String>();
+                let has_code_refs = blob.contains("__rock_code_slot_ref(");
+                (blob, has_code_refs)
             }
         }
     };
@@ -392,7 +397,7 @@ fn js_run_tests(
         })
         .collect();
 
-    let program = build_node_program(&shared_defs, &meta);
+    let program = build_node_program(&shared_defs, &meta, shared_has_code_refs);
     let timeout = Some(std::time::Duration::from_secs(15));
     let run = match rock_host::js_runner::run_node_code_with_timeout(&program, timeout) {
         Ok(r) => r,
@@ -598,7 +603,7 @@ fn build_run_program(emitted: &skull_codegen_js::emit::JsProgram) -> String {
     p.push_str(skull_codegen_js::JS_MAP_ITER_RUNTIME);
     p.push_str(skull_codegen_js::JS_STRUCTURAL_EQ);
     p.push_str(skull_codegen_js::JS_ENUM_RUNTIME);
-    p.push_str(skull_codegen_js::JS_CALL_HELPER);
+    append_call_runtime(&mut p, &emitted.program, &emitted.code_artifact);
     p.push_str(skull_codegen_js::JS_CORO_RUNTIME);
     p.push_str(skull_codegen_js::JS_STRING_RUNTIME);
     p.push_str(skull_codegen_js::JS_INSPECT_RUNTIME);
@@ -665,6 +670,7 @@ fn is_decorator_populated_reject(msg: &str) -> bool {
 fn build_node_program(
     shared_defs: &str,
     tests: &[(String, String, Option<String>, bool)],
+    has_code_refs: bool,
 ) -> String {
     let mut p = String::from(skull_codegen_js::JS_NB_CHECK_SHIMS);
     p.push_str(skull_codegen_js::JS_VEC_CHECK_SHIMS);
@@ -672,7 +678,7 @@ fn build_node_program(
     p.push_str(skull_codegen_js::JS_MAP_ITER_RUNTIME);
     p.push_str(skull_codegen_js::JS_STRUCTURAL_EQ);
     p.push_str(skull_codegen_js::JS_ENUM_RUNTIME);
-    p.push_str(skull_codegen_js::JS_CALL_HELPER);
+    append_call_runtime_with_flag(&mut p, shared_defs, has_code_refs);
     p.push_str(skull_codegen_js::JS_CORO_RUNTIME);
     p.push_str(skull_codegen_js::JS_STRING_RUNTIME);
     p.push_str(skull_codegen_js::JS_INSPECT_RUNTIME);
@@ -737,6 +743,26 @@ for (var i = 0; i < __tests.length; i++) {
 "#,
     );
     p
+}
+
+pub(crate) fn append_call_runtime(
+    program: &mut String,
+    emitted: &str,
+    artifact: &skull_mir::code_identity::CodeArtifact,
+) {
+    let has_code_refs = artifact.entries.values().any(|entry| entry.escaping);
+    append_call_runtime_with_flag(program, emitted, has_code_refs);
+}
+
+fn append_call_runtime_with_flag(program: &mut String, emitted: &str, has_code_refs: bool) {
+    let needs_call = has_code_refs
+        || emitted.contains("__rock_call(")
+        || emitted.contains("__try_call(");
+    if has_code_refs {
+        program.push_str(skull_codegen_js::JS_CALL_HELPER);
+    } else if needs_call {
+        program.push_str(skull_codegen_js::JS_FOREIGN_CALL_HELPER);
+    }
 }
 
 /// Keep emitted-JS dumps in error reports manageable.

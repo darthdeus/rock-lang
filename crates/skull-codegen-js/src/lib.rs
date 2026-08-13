@@ -279,6 +279,19 @@ function __try_call(f) {
 }
 "#;
 
+/// The explicit foreign-function boundary used when an artifact has indirect
+/// calls but no escaping Rock CodeRefs.
+pub const JS_FOREIGN_CALL_HELPER: &str = r#"
+function __rock_call(f) {
+  var a = Array.prototype.slice.call(arguments, 1);
+  if (typeof f === "function") return f.apply(null, a);
+  throw new Error("cannot call a value that is not a foreign function");
+}
+function __try_call(f) {
+  try { __rock_call(f); return false; } catch (e) { return true; }
+}
+"#;
+
 /// The `__op_eq` runtime: deep structural equality matching Rock's stdlib
 /// `__op_eq` (verified on luajit: reference structs, value structs, tuples,
 /// enums, newtypes all compare BY CONTENTS; primitives by value). Lua `nil` maps

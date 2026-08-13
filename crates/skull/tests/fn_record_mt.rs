@@ -11,10 +11,16 @@
 //! the design's `setmetatable({..}, __rock_fn_mt)` reference needs.)
 use crate::common::{emit_module, run_luajit};
 
-/// Any emitted program carries the prelude, so `__rock_fn_mt` is present.
+#[test]
+fn no_code_ref_values_omit_code_ref_runtime() {
+    let lua = emit_module("fn main() {}\n");
+    assert!(!lua.contains("if not _G.__rock_code_slot_mt then"));
+}
+
+/// An escaping Rock function value enables the shared CodeRef runtime.
 #[test]
 fn prelude_defines_shared_fn_metatable() {
-    let lua = emit_module("fn main() {}\n");
+    let lua = emit_module("fn main() { let f = () => 1; print(f()) }\n");
     assert!(
         lua.contains("if not _G.__rock_fn_mt then")
             && lua.contains("invalid Rock CodeRef environment")
@@ -31,7 +37,7 @@ fn prelude_defines_shared_fn_metatable() {
 /// to the current slot body, reading its captured field.
 #[test]
 fn record_is_callable_via_call_metamethod() {
-    let lua = emit_module("fn main() {}\n");
+    let lua = emit_module("fn main() { let f = () => 1; print(f()) }\n");
     let driver = "\n\
         __rock_code_slot_begin()\n\
         __rock_code_slot_stage(\"record\", function(e, y) return e.x + y end, \"record-abi\")\n\
@@ -48,7 +54,7 @@ fn record_is_callable_via_call_metamethod() {
 /// snapshot deep-copy to recognize records by `getmetatable(x) == __rock_fn_mt`.
 #[test]
 fn metatable_identity_preserved_across_reload() {
-    let prog = emit_module("fn main() {}\n");
+    let prog = emit_module("fn main() { let f = () => 1; print(f()) }\n");
     let script = format!(
         "_G.HOT_RELOAD = false\n{prog}\n\
          local mt_before = _G.__rock_fn_mt\n\
@@ -68,7 +74,7 @@ fn metatable_identity_preserved_across_reload() {
 
 #[test]
 fn code_slot_publish_is_transactional_and_preserves_slot_identity() {
-    let lua = emit_module("fn main() {}\n");
+    let lua = emit_module("fn main() { let f = () => 1; print(f()) }\n");
     let driver = r#"
 __rock_code_slot_begin()
 __rock_code_slot_stage("probe", function() return 1 end, "abi")

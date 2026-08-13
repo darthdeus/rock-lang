@@ -2993,6 +2993,18 @@ pub fn emit_program_with_roots(
     emit_program_core(ws, &scx, roots)
 }
 
+/// The whole-file test emission plus its compiler-owned callable artifact. The
+/// runtime wrapper uses the artifact to decide whether CodeRef machinery is
+/// needed; the string-only API above remains for callers that only execute it.
+pub fn emit_program_with_roots_artifact(
+    ws: &Workspace,
+    roots: &[(FuncRef, String)],
+) -> Result<(String, CodeArtifact), CompilerError> {
+    let scx = js_scx(ws);
+    let build = build_program_session(ws, &scx, roots)?.0;
+    Ok((build.program, build.code_artifact))
+}
+
 /// The shared program assembly for [`emit_program`] / [`emit_program_with_roots`]:
 /// `extra_roots` (main, or the test fns) plus every DECORATED fn workspace-wide
 /// (its application line names the fn as `func`, so it must be emitted even if no
