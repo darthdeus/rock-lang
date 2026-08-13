@@ -32,12 +32,19 @@ pub fn resolve_build_vars(
     cfg: &StickConfig,
     project_dir: &Path,
     channel_arg: Option<&str>,
+    target_os_arg: Option<&str>,
     overrides: &HashMap<String, String>,
 ) -> Result<ResolvedBuildVars> {
+    let target_os = target_os_arg.map(validate_target_os).transpose()?;
     let Some(build) = cfg.build.as_ref() else {
         if let Some(chan) = channel_arg {
             anyhow::bail!(
                 "--channel {chan:?} given but stick.toml has no [build] section declaring channels"
+            );
+        }
+        if let Some(target) = target_os_arg {
+            anyhow::bail!(
+                "--target-os {target:?} given but stick.toml has no [build] section"
             );
         }
         if let Some(name) = overrides.keys().next() {
@@ -51,7 +58,17 @@ pub fn resolve_build_vars(
         .or(build.default_channel.as_deref())
         .unwrap_or("dev")
         .to_string();
-    if !build.channels.is_empty() && !build.channels.iter().any(|c| c == &channel) {
+    // An EXPLICIT channel is validated even when the project declares no
+    // channels list: an empty list can vouch for nothing, and accepting the
+    // flag anyway stamps a typo into release identity with every gate green.
+    if let Some(explicit) = channel_arg {
+        if !build.channels.iter().any(|c| c == explicit) {
+            anyhow::bail!(
+                "channel {explicit:?} is not declared in [build] channels {:?}",
+                build.channels
+            );
+        }
+    } else if !build.channels.is_empty() && !build.channels.iter().any(|c| c == &channel) {
         anyhow::bail!(
             "channel {channel:?} is not declared in [build] channels {:?}",
             build.channels
@@ -81,7 +98,7 @@ pub fn resolve_build_vars(
         } else if let Some(value) = var.value.as_ref() {
             value.clone()
         } else if let Some(builtin) = var.builtin.as_deref() {
-            resolve_builtin(builtin, &channel)?
+            resolve_builtin(builtin, &channel, target_os)?
         } else if let Some(cmd) = var.cmd.as_ref() {
             run_var_cmd(name, cmd, var.secret, project_dir, &channel)?
         } else {
@@ -93,10 +110,30 @@ pub fn resolve_build_vars(
     Ok(ResolvedBuildVars { channel, vars })
 }
 
-fn resolve_builtin(name: &str, channel: &str) -> Result<String> {
+/// The platform names the runtime distinguishes; `--target-os` accepts
+/// exactly these.
+const TARGET_PLATFORMS: &[&str] = &["linux", "osx", "windows", "ios", "web"];
+
+fn validate_target_os(target: &str) -> Result<&str> {
+    if TARGET_PLATFORMS.contains(&target) {
+        Ok(target)
+    } else {
+        anyhow::bail!(
+            "--target-os {target:?} is not a known platform (expected one of {})",
+            TARGET_PLATFORMS.join(", ")
+        )
+    }
+}
+
+fn resolve_builtin(name: &str, channel: &str, target_os: Option<&str>) -> Result<String> {
     match name {
         "channel" => Ok(channel.to_string()),
-        "platform" => Ok(if channel == "web" {
+        // An explicit target is the artifact truth (a Linux host packaging a
+        // Windows release must bake "windows"); channel inference and the
+        // packaging host are proxies used only when no target was declared.
+        "platform" => Ok(if let Some(target) = target_os {
+            target.to_string()
+        } else if channel == "web" {
             "web".to_string()
         } else if matches!(channel, "ios" | "ios-dev") {
             "ios".to_string()
@@ -163,7 +200,7 @@ mod tests {
             "[build.vars]\nENDPOINT = \"https://example.test\"\nCHANNEL = { builtin = \"channel\" }\n",
         ));
         let dir = tempfile::tempdir().unwrap();
-        let resolved = resolve_build_vars(&cfg, dir.path(), Some("steam"), &no_overrides()).unwrap();
+        let resolved = resolve_build_vars(&cfg, dir.path(), Some("steam"), None, &no_overrides()).unwrap();
         assert_eq!(resolved.channel, "steam");
         assert_eq!(resolved.vars["ENDPOINT"].value, "https://example.test");
         assert_eq!(resolved.vars["CHANNEL"].value, "steam");
@@ -177,16 +214,72 @@ mod tests {
             "[build.vars]\nPLATFORM = { builtin = \"platform\" }\n",
         ));
         let dir = tempfile::tempdir().unwrap();
-        let web = resolve_build_vars(&cfg, dir.path(), Some("web"), &no_overrides()).unwrap();
+        let web = resolve_build_vars(&cfg, dir.path(), Some("web"), None, &no_overrides()).unwrap();
         assert_eq!(web.vars["PLATFORM"].value, "web");
-        let ios = resolve_build_vars(&cfg, dir.path(), Some("ios-dev"), &no_overrides()).unwrap();
+        let ios = resolve_build_vars(&cfg, dir.path(), Some("ios-dev"), None, &no_overrides()).unwrap();
         assert_eq!(ios.vars["PLATFORM"].value, "ios");
-        let host = resolve_build_vars(&cfg, dir.path(), Some("dev"), &no_overrides()).unwrap();
+        let host = resolve_build_vars(&cfg, dir.path(), Some("dev"), None, &no_overrides()).unwrap();
         let expected = match std::env::consts::OS {
             "macos" => "osx",
             other => other,
         };
         assert_eq!(host.vars["PLATFORM"].value, expected);
+    }
+
+    #[test]
+    fn target_os_overrides_the_platform_builtin() {
+        // Cross-builds package on one OS for another; the artifact target,
+        // not the packaging host, is what the builtin must report.
+        let cfg = fixture(concat!(
+            "[package]\nname = \"x\"\n",
+            "[build]\nchannels = [\"dev\", \"steam\", \"web\"]\n",
+            "[build.vars]\nPLATFORM = { builtin = \"platform\" }\n",
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        let win =
+            resolve_build_vars(&cfg, dir.path(), Some("steam"), Some("windows"), &no_overrides())
+                .unwrap();
+        assert_eq!(win.vars["PLATFORM"].value, "windows");
+        // An explicit target also wins over channel inference: the target is
+        // the artifact truth, the channel only a proxy for it.
+        let web =
+            resolve_build_vars(&cfg, dir.path(), Some("web"), Some("windows"), &no_overrides())
+                .unwrap();
+        assert_eq!(web.vars["PLATFORM"].value, "windows");
+    }
+
+    #[test]
+    fn an_unknown_target_os_rejects() {
+        let cfg = fixture(concat!(
+            "[package]\nname = \"x\"\n",
+            "[build]\nchannels = [\"dev\"]\n",
+            "[build.vars]\nPLATFORM = { builtin = \"platform\" }\n",
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        let err = resolve_build_vars(&cfg, dir.path(), None, Some("win64"), &no_overrides())
+            .expect_err("unknown target os must reject");
+        assert!(format!("{err}").contains("win64"), "error names the bad target: {err}");
+    }
+
+    #[test]
+    fn explicit_channel_with_no_declared_channels_rejects() {
+        // A [build] section without a channels list cannot validate an
+        // explicit --channel, so accepting one silently stamps a typo into
+        // release identity. Fail closed instead.
+        let cfg = fixture(concat!(
+            "[package]\nname = \"x\"\n",
+            "[build]\n",
+            "[build.vars]\nCHANNEL = { builtin = \"channel\" }\n",
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        let err = resolve_build_vars(&cfg, dir.path(), Some("stema"), None, &no_overrides())
+            .expect_err("explicit channel with no declared channels must reject");
+        let msg = format!("{err}");
+        assert!(msg.contains("stema"), "error names the channel: {msg}");
+
+        // The implicit default stays usable: no --channel resolves as before.
+        let resolved = resolve_build_vars(&cfg, dir.path(), None, None, &no_overrides()).unwrap();
+        assert_eq!(resolved.vars["CHANNEL"].value, "dev");
     }
 
     #[test]
@@ -198,7 +291,7 @@ mod tests {
         ));
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("marker.txt"), "from-project-dir\n").unwrap();
-        let resolved = resolve_build_vars(&cfg, dir.path(), None, &no_overrides()).unwrap();
+        let resolved = resolve_build_vars(&cfg, dir.path(), None, None, &no_overrides()).unwrap();
         assert_eq!(resolved.vars["MARKER"].value, "from-project-dir");
         assert_eq!(resolved.vars["CHAN"].value, "dev");
     }
@@ -214,7 +307,7 @@ mod tests {
         ));
         let dir = tempfile::tempdir().unwrap();
         let overrides = HashMap::from([("TOKEN".to_string(), "override-value".to_string())]);
-        let resolved = resolve_build_vars(&cfg, dir.path(), None, &overrides).unwrap();
+        let resolved = resolve_build_vars(&cfg, dir.path(), None, None, &overrides).unwrap();
         assert_eq!(resolved.vars["TOKEN"].value, "override-value");
         assert!(resolved.vars["TOKEN"].secret, "override keeps the declared secrecy");
     }
@@ -232,7 +325,7 @@ mod tests {
             "[build.vars]\nTOKEN = { cmd = \"echo s3cr3t-in-stderr >&2; echo s3cr3t-in-cmd >/dev/null; exit 7\", secret = true }\n",
         ));
         let dir = tempfile::tempdir().unwrap();
-        let err = resolve_build_vars(&cfg, dir.path(), None, &no_overrides())
+        let err = resolve_build_vars(&cfg, dir.path(), None, None, &no_overrides())
             .expect_err("a failing cmd must fail the invocation");
         let msg = format!("{err}");
         assert!(msg.contains("TOKEN"), "the variable NAME survives redaction: {msg}");
@@ -256,7 +349,7 @@ mod tests {
             "[build.vars]\nSHA = { cmd = \"echo diagnostic-detail >&2; exit 7\" }\n",
         ));
         let dir = tempfile::tempdir().unwrap();
-        let err = resolve_build_vars(&cfg, dir.path(), None, &no_overrides())
+        let err = resolve_build_vars(&cfg, dir.path(), None, None, &no_overrides())
             .expect_err("a failing cmd must fail the invocation");
         let msg = format!("{err}");
         assert!(msg.contains("SHA"), "error names the var: {msg}");
@@ -269,7 +362,7 @@ mod tests {
         let cfg = fixture("[package]\nname = \"x\"\n[build]\nchannels = [\"dev\"]\n");
         let dir = tempfile::tempdir().unwrap();
         let overrides = HashMap::from([("NOPE".to_string(), "v".to_string())]);
-        let err = resolve_build_vars(&cfg, dir.path(), None, &overrides)
+        let err = resolve_build_vars(&cfg, dir.path(), None, None, &overrides)
             .expect_err("overriding an undeclared var must reject");
         assert!(format!("{err}").contains("NOPE"), "error names the var: {err}");
     }
@@ -283,7 +376,7 @@ mod tests {
             "NEEDED = { cmd = \"false\", channels = [\"steam\"] }\n",
         ));
         let dir = tempfile::tempdir().unwrap();
-        let err = resolve_build_vars(&cfg, dir.path(), Some("dev"), &no_overrides())
+        let err = resolve_build_vars(&cfg, dir.path(), Some("dev"), None, &no_overrides())
             .expect_err("restricted var with no default must reject off-channel");
         assert!(format!("{err}").contains("NEEDED"), "error names the var: {err}");
 
@@ -292,7 +385,7 @@ mod tests {
             "[build]\nchannels = [\"dev\", \"steam\"]\ndefault_channel = \"dev\"\n",
             "[build.vars]\nTOKEN = { cmd = \"false\", channels = [\"steam\"], default = \"none\" }\n",
         ));
-        let resolved = resolve_build_vars(&cfg, dir.path(), Some("dev"), &no_overrides()).unwrap();
+        let resolved = resolve_build_vars(&cfg, dir.path(), Some("dev"), None, &no_overrides()).unwrap();
         assert_eq!(resolved.vars["TOKEN"].value, "none", "off-channel uses default, cmd never runs");
     }
 
@@ -304,7 +397,7 @@ mod tests {
             "[build.vars]\nX = { cmd = \"echo boom >&2; exit 3\" }\n",
         ));
         let dir = tempfile::tempdir().unwrap();
-        let err = resolve_build_vars(&cfg, dir.path(), None, &no_overrides())
+        let err = resolve_build_vars(&cfg, dir.path(), None, None, &no_overrides())
             .expect_err("failing cmd must fail resolution, never default silently");
         let msg = format!("{err:#}");
         assert!(msg.contains("boom") && msg.contains("X"), "error carries var and stderr: {msg}");
@@ -314,7 +407,7 @@ mod tests {
     fn undeclared_channel_rejects() {
         let cfg = fixture("[package]\nname = \"x\"\n[build]\nchannels = [\"dev\"]\n");
         let dir = tempfile::tempdir().unwrap();
-        let err = resolve_build_vars(&cfg, dir.path(), Some("stema"), &no_overrides())
+        let err = resolve_build_vars(&cfg, dir.path(), Some("stema"), None, &no_overrides())
             .expect_err("undeclared channel must reject");
         assert!(format!("{err}").contains("stema"), "error names the channel: {err}");
     }
@@ -323,7 +416,7 @@ mod tests {
     fn channel_arg_without_build_section_rejects() {
         let cfg = StickConfig::new_from_str("[package]\nname = \"x\"\n").unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let err = resolve_build_vars(&cfg, dir.path(), Some("steam"), &no_overrides())
+        let err = resolve_build_vars(&cfg, dir.path(), Some("steam"), None, &no_overrides())
             .expect_err("--channel with no [build] section must reject");
         assert!(format!("{err}").contains("[build]"), "error points at the missing section: {err}");
     }
@@ -332,7 +425,7 @@ mod tests {
     fn no_build_section_resolves_empty() {
         let cfg = StickConfig::new_from_str("[package]\nname = \"x\"\n").unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let resolved = resolve_build_vars(&cfg, dir.path(), None, &no_overrides()).unwrap();
+        let resolved = resolve_build_vars(&cfg, dir.path(), None, None, &no_overrides()).unwrap();
         assert!(resolved.vars.is_empty());
         assert_eq!(resolved.channel, "dev");
     }

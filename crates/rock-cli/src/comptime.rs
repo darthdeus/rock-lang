@@ -101,6 +101,12 @@ pub fn inputs_for_project_dir(dir: &Path) -> Result<ComptimeInputs> {
                 dir.display()
             );
         }
+        if let Some(target) = selection.and_then(|s| s.target_os.as_deref()) {
+            anyhow::bail!(
+                "--target-os {target:?} given but no stick.toml found at or above {}",
+                dir.display()
+            );
+        }
         let no_overrides = std::collections::HashMap::new();
         let overrides = selection.map(|s| &s.overrides).unwrap_or(&no_overrides);
         if let Some(name) = overrides.keys().next() {
@@ -139,6 +145,7 @@ pub fn inputs_for_project_with_config(
         cfg,
         project_dir,
         channel,
+        selection.and_then(|s| s.target_os.as_deref()),
         overrides,
     )?;
 

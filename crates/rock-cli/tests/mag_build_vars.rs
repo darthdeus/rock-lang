@@ -105,25 +105,42 @@ fn mag_lua_and_web_builds_carry_declared_identity() {
     assert!(!lua.contains("__ROCK_BUILD_SHA"), "Lua still reads the old build global");
     assert!(!lua.contains("os.getenv('MAG_TELEMETRY_ENDPOINT')"));
 
-    for (channel, platform) in [("direct", "linux"), ("ios-dev", "ios")] {
-        let path = dir.path().join(format!("mag-{channel}.lua"));
-        let out = run_rock(&[
-            "compile",
-            "mag",
-            "--channel",
-            channel,
-            "--output",
-            path.to_str().unwrap(),
-        ]);
+    // The platform builtin resolves the HOST OS for a plain native channel, so
+    // the expectation is derived from the same mapping -- a literal here is a
+    // test of one machine (this file was red on the macOS hosts as written).
+    let host_platform = match std::env::consts::OS {
+        "macos" => "osx",
+        other => other,
+    };
+    for (channel, target_os, platform) in [
+        ("direct", None, host_platform),
+        ("ios-dev", None, "ios"),
+        // A cross-build packages on one OS for another: the explicit target,
+        // never the packaging host, is what the artifact must carry.
+        ("direct", Some("windows"), "windows"),
+    ] {
+        let suffix = target_os.unwrap_or("native");
+        let path = dir.path().join(format!("mag-{channel}-{suffix}.lua"));
+        let mut args = vec!["compile", "mag", "--channel", channel];
+        if let Some(target) = target_os {
+            args.extend(["--target-os", target]);
+        }
+        let path_str = path.to_str().unwrap().to_string();
+        args.extend(["--output", &path_str]);
+        let out = run_rock(&args);
         assert!(
             out.status.success(),
-            "{channel} mag compile failed\nstdout:\n{}\nstderr:\n{}",
+            "{channel}/{suffix} mag compile failed\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
         let native = std::fs::read_to_string(path).unwrap();
         assert!(native.contains(channel), "Lua did not carry {channel}");
-        assert!(native.contains(platform), "Lua did not carry {platform} platform");
+        // The baked accessor body, not a bare substring: "windows" appears in
+        // unrelated emitted code (measured 5 occurrences without the target),
+        // so contains(platform) alone cannot discriminate.
+        let baked = format!("do return (\"{platform}\") end");
+        assert!(native.contains(&baked), "Lua did not bake the {platform} platform accessor");
     }
 
     let web_dir = dir.path().join("web");
