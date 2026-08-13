@@ -141,6 +141,10 @@ fn assert_scoped(stats: &UpdateStats, label: &str) {
         stats.pruned,
         stats.newly_reached
     );
+    assert!(
+        stats.census.incremental_forced_rewalks > 0,
+        "{label}: the update fixture did not expose an incremental forced re-walk"
+    );
     // **The prune's own cost is NOT asserted here, deliberately.** These
     // fixtures hold ~95 instances, so a whole-graph strand search visits 6 and
     // a correct one visits 7 (one owner can strand a whole iterator chain):

@@ -1456,6 +1456,7 @@ pub fn build_in(
         );
         log::debug!(
             "graph census: first {} ({:.3}ms), duplicate-pending {} ({:.3}ms), \
+             suppressed {} duplicate pending owners, \
              witness-settlement {} ({:.3}ms), incremental-forced {} ({:.3}ms), \
              stranded-skipped {}; phases admissibility {:.3}ms, body-prep {:.3}ms, \
              signature/type {:.3}ms, call-resolution {:.3}ms, witness/bound {:.3}ms, \
@@ -1465,6 +1466,7 @@ pub fn build_in(
             stats.first_owner_ns as f64 / 1_000_000.0,
             stats.duplicate_pending_visits,
             stats.duplicate_pending_ns as f64 / 1_000_000.0,
+            stats.duplicate_pending_suppressed,
             stats.witness_settlement_rewalks,
             stats.witness_settlement_ns as f64 / 1_000_000.0,
             stats.incremental_forced_rewalks,
