@@ -93,6 +93,25 @@ fn wgsl_and_glsl_project_the_same_interface_independently() {
 }
 
 #[test]
+fn fullscreen_uniform_arrays_keep_abi_order() {
+    let mut iface = fixture();
+    iface.array_groups = vec![LogicalArrayGroup {
+        stage: ShaderStage::Fragment,
+        owner: Ustr::from("frag"),
+        members: vec![decl("values", WireKind::F32, 1)],
+    }];
+
+    let plan = WgslAbiPlan::wgsl(&iface, Span::default()).expect("fullscreen array projection");
+    assert_eq!(plan.uniform_blocks[0].binding, 1, "ordinary block binding");
+    assert_eq!(plan.array_blocks.len(), 1, "array block population");
+    assert_eq!(plan.array_blocks[0].binding, 2, "array follows ordinary blocks");
+    assert_eq!(plan.textures[0].texture_binding, 3, "textures follow both block classes");
+    plan.validate(&iface, Span::default()).expect("projection validates");
+    let parsed = WgslAbi::parse(&plan.wire()).expect("fullscreen array ABI parses");
+    assert_eq!(parsed.array_blocks[0].binding, 2, "array binding reaches the runtime wire");
+}
+
+#[test]
 fn semantic_wire_has_no_physical_layout_and_mutations_are_load_bearing() {
     let iface = fixture();
     let wire = iface.semantic_wire(true);

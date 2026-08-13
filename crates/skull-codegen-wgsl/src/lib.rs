@@ -613,7 +613,18 @@ impl WgslAbiPlan {
             )?);
         }
 
-        let texture_base = uniform_blocks.len() as u32 + 1;
+        let mut array_groups = iface.array_groups.clone();
+        array_groups.sort_by_key(|group| stage_key(group.stage));
+        let mut array_blocks = Vec::with_capacity(array_groups.len());
+        for (index, group) in array_groups.iter().enumerate() {
+            array_blocks.push(layout_array_group(
+                group,
+                uniform_blocks.len() as u32 + 1 + index as u32,
+                span,
+            )?);
+        }
+
+        let texture_base = uniform_blocks.len() as u32 + array_blocks.len() as u32 + 1;
         let textures = iface
             .textures
             .as_ref()
@@ -645,7 +656,7 @@ impl WgslAbiPlan {
             }],
             fullscreen_uniform,
             uniform_blocks,
-            array_blocks: Vec::new(),
+            array_blocks,
             textures,
             compute: None,
         })
@@ -1179,13 +1190,6 @@ fn validate_fullscreen_interface(
         return Err(err(
             span,
             "WGSL fullscreen projection owns its UV varying and does not accept explicit varyings yet",
-        ));
-    }
-    if !iface.array_groups.is_empty() {
-        return Err(unsupported_err(
-            span,
-            "fullscreen uniform arrays",
-            "WGSL fullscreen projection does not accept uniform arrays yet",
         ));
     }
     if !iface.bare_samplers.is_empty() {
@@ -1820,6 +1824,7 @@ pub fn emit_fullscreen_shader(
     let mut source = String::new();
     emit_fullscreen_types(&mut source, abi);
     emit_uniforms(&mut source, abi);
+    emit_array_blocks(&mut source, abi, span)?;
     emit_textures(&mut source, abi);
     emit_numeric_helpers(&mut source, ir);
 
@@ -2936,6 +2941,26 @@ fn entry_param_roles(
                 param_span(function, index),
             )?;
             ParamRole::Uniform(UniformRole::Stage(ShaderStage::Fragment))
+        } else if nominal_name(ws, param.ty) == Some(Ustr::from("UniformArray")) {
+            let Some(group) = iface.array_group(ShaderStage::Fragment) else {
+                return Err(err(
+                    param_span(function, index),
+                    format!(
+                        "WGSL uniform array parameter `{}` has no array group in the interface plan",
+                        param.name
+                    ),
+                ));
+            };
+            if !group.members.iter().any(|member| member.name == param.name) {
+                return Err(err(
+                    param_span(function, index),
+                    format!(
+                        "WGSL uniform array parameter `{}` is absent from the interface plan",
+                        param.name
+                    ),
+                ));
+            }
+            ParamRole::UniformArray
         } else if value_kind_for_type(ws, param.ty) == Some(ValueKind::Vec2) {
             uv_count += 1;
             ParamRole::TexCoord

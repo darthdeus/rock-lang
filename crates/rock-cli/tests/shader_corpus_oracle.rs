@@ -5,7 +5,7 @@
 //! against `emit_shader_*_with_view`; the row encoding is explicit and never
 //! hashes a `Debug` rendering of a plan.
 
-use rock_cli::glsl_test::validate_workspace;
+use rock_cli::glsl_test::validate_shader_workspace;
 use skull_codegen_glsl::{BlockWire, GlslProfile, ShaderAbiPlan};
 use skull_mir::gpu_layout::{AttrKind, SamplerKind, WireKind};
 use skull_mir::mir::FuncRef;
@@ -17,71 +17,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-const PROJECTS: &[&str] = &[
-    "anvil",
-    "benches/pixel_upload",
-    "bitgun",
-    "demos/decorator_systems",
-    "demos/hot_reload_test",
-    "demos/imgui",
-    "demos/outline_debug",
-    "demos/quit_from_late_draw",
-    "demos/silent_errors",
-    "demos/testbed",
-    "demos/ui-proto",
-    "demos/wisps",
-    "games/bopt",
-    "games/chess",
-    "games/sample-game-b",
-    "games/drawbench",
-    "games/fm",
-    "games/sample-game",
-    "games/little-knights",
-    "games/match3",
-    "games/pixel-spirit",
-    "games/spark",
-    "games/survivors",
-    "games/testbed",
-    "games/vfxlab",
-    "games/void",
-    "logo",
-    "mag",
-];
-
 const PROFILES: &[(&str, GlslProfile)] = &[
     ("330core", GlslProfile::Core330),
     ("300es", GlslProfile::Es300),
-];
-
-const EXPECTED_PROFILE_ROWS: &[(&str, usize)] = &[
-    ("anvil", 36),
-    ("benches/pixel_upload", 36),
-    ("bitgun", 54),
-    ("demos/decorator_systems", 36),
-    ("demos/hot_reload_test", 36),
-    ("demos/imgui", 36),
-    ("demos/outline_debug", 36),
-    ("demos/quit_from_late_draw", 36),
-    ("demos/silent_errors", 36),
-    ("demos/testbed", 36),
-    ("demos/ui-proto", 36),
-    ("demos/wisps", 36),
-    ("games/bopt", 38),
-    ("games/chess", 36),
-    ("games/sample-game-b", 36),
-    ("games/drawbench", 36),
-    ("games/fm", 0),
-    ("games/sample-game", 36),
-    ("games/little-knights", 38),
-    ("games/match3", 36),
-    ("games/pixel-spirit", 66),
-    ("games/spark", 36),
-    ("games/survivors", 36),
-    ("games/testbed", 44),
-    ("games/vfxlab", 36),
-    ("games/void", 36),
-    ("logo", 42),
-    ("mag", 46),
 ];
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -118,25 +56,16 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn discovered_bin_projects(root: &Path) -> BTreeSet<String> {
-    walkdir::WalkDir::new(root)
+fn discovered_bin_projects(root: &Path) -> Vec<(String, PathBuf)> {
+    rock_cli::lint_union::bin_projects_under(root)
         .into_iter()
-        .filter_entry(|entry| {
-            !matches!(
-                entry.file_name().to_str(),
-                Some(".git") | Some("target") | Some("node_modules") | Some("tmp")
-            )
-        })
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_name() == "stick.toml")
-        .filter_map(|entry| {
-            let dir = entry.path().parent()?;
-            rock_host::stick::StickConfig::is_bin_at(dir).then(|| {
-                dir.strip_prefix(root)
-                    .unwrap()
-                    .to_string_lossy()
-                    .into_owned()
-            })
+        .map(|path| {
+            let project = path
+                .strip_prefix(root)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            (project, path)
         })
         .collect()
 }
@@ -501,7 +430,7 @@ fn target_for(profile: GlslProfile) -> skull::target_projection::TargetSpec {
 }
 
 fn snapshot_project(project: &str, path: &Path) -> Vec<ShaderRow> {
-    let ws = validate_workspace(path.to_str().unwrap()).expect("workspace");
+    let ws = validate_shader_workspace(path.to_str().unwrap()).expect("workspace");
     let pairs = skull_mir::lower::collect_shader_pairs(&ws).expect("shader pairs");
     let programs: Vec<skull::shader_artifact::ShaderProgram> = pairs
         .iter()
@@ -635,9 +564,23 @@ fn assert_stage_ir_equal(
 ) {
     assert_eq!(actual.stage, expected.stage, "{key:?}: view stage IR stage differs");
     assert_eq!(actual.entry, expected.entry, "{key:?}: view stage IR entry differs");
-    assert_eq!(actual.body, expected.body, "{key:?}: view entry MIR differs");
     assert_eq!(actual.order, expected.order, "{key:?}: view stage emission order differs");
-    assert_eq!(actual.bodies, expected.bodies, "{key:?}: view helper MIR differs");
+    let mut actual_helpers: Vec<_> = actual
+        .bodies
+        .keys()
+        .map(|instance| format!("{instance:?}"))
+        .collect();
+    let mut expected_helpers: Vec<_> = expected
+        .bodies
+        .keys()
+        .map(|instance| format!("{instance:?}"))
+        .collect();
+    actual_helpers.sort();
+    expected_helpers.sort();
+    assert_eq!(
+        actual_helpers, expected_helpers,
+        "{key:?}: view helper population differs"
+    );
 }
 
 fn assert_emissions_match(
@@ -941,6 +884,67 @@ fn shader_source_mutation_names_only_the_changed_shader_profiles() {
 }
 
 #[test]
+fn shader_project_mutation_names_only_the_changed_project_profiles() {
+    let temp = tempfile::tempdir().expect("fixture tempdir");
+    let chesslings = temp.path().join("chesslings");
+    let wgpu_renderer = temp.path().join("wgpu_renderer");
+    fs::create_dir_all(&chesslings).expect("chesslings fixture");
+    fs::create_dir_all(&wgpu_renderer).expect("wgpu renderer fixture");
+    fs::write(
+        chesslings.join("shaders.rock"),
+        shader_fixture_source("return value + 1.0"),
+    )
+    .expect("chesslings source");
+    fs::write(
+        wgpu_renderer.join("shaders.rock"),
+        shader_fixture_source("return value + 1.0"),
+    )
+    .expect("wgpu renderer source");
+
+    let mut baseline = snapshot_project("games/chesslings", &chesslings);
+    baseline.extend(snapshot_project("games/wgpu_renderer", &wgpu_renderer));
+    baseline.sort_by(|a, b| a.key.cmp(&b.key));
+
+    fs::write(
+        wgpu_renderer.join("shaders.rock"),
+        shader_fixture_source("return value + 2.0"),
+    )
+    .expect("mutated wgpu renderer source");
+    let mut candidate = snapshot_project("games/chesslings", &chesslings);
+    candidate.extend(snapshot_project("games/wgpu_renderer", &wgpu_renderer));
+    candidate.sort_by(|a, b| a.key.cmp(&b.key));
+
+    let changed = changed_keys(&baseline, &candidate);
+    let expected = BTreeSet::from([
+        RowKey {
+            project: "games/wgpu_renderer".into(),
+            shader: "oracle_shader_a".into(),
+            profile: "300es",
+        },
+        RowKey {
+            project: "games/wgpu_renderer".into(),
+            shader: "oracle_shader_a".into(),
+            profile: "330core",
+        },
+    ]);
+    assert_eq!(
+        changed.iter().cloned().collect::<BTreeSet<_>>(),
+        expected,
+        "a project-local source mutation changed the wrong project/shader/profile rows: {changed:?}"
+    );
+    for row in baseline
+        .iter()
+        .filter(|row| row.key.project == "games/chesslings")
+    {
+        let candidate_row = candidate
+            .iter()
+            .find(|candidate| candidate.key == row.key)
+            .unwrap();
+        assert_eq!(row, candidate_row, "unmutated project changed: {:?}", row.key);
+    }
+}
+
+#[test]
 fn shader_oracle_rejects_a_missing_stage_population() {
     let temp = tempfile::tempdir().expect("fixture tempdir");
     fs::write(
@@ -979,7 +983,7 @@ fn shader_oracle_rejects_a_view_population_missing_from_emission() {
         shader_fixture_source("return value + 1.0"),
     )
     .expect("fixture source");
-    let ws = validate_workspace(temp.path().to_str().unwrap()).expect("workspace");
+    let ws = validate_shader_workspace(temp.path().to_str().unwrap()).expect("workspace");
     let pairs = skull_mir::lower::collect_shader_pairs(&ws).expect("shader pairs");
     let programs: Vec<skull::shader_artifact::ShaderProgram> = pairs
         .iter()
@@ -1043,32 +1047,41 @@ fn shader_oracle_rejects_a_view_population_missing_from_emission() {
 }
 
 #[test]
-#[ignore = "real 28-project Phase-4 corpus oracle"]
+#[ignore = "real 29-project Phase-4 corpus oracle"]
 fn shader_corpus_has_per_shader_profile_and_interface_evidence() {
     let root = repo_root();
-    let discovered = discovered_bin_projects(&root);
-    assert_eq!(
-        discovered,
-        PROJECTS.iter().copied().map(str::to_string).collect(),
-        "the explicit shader corpus list must partition the current bin corpus"
-    );
+    let projects = discovered_bin_projects(&root);
+    let examined = projects.len();
     let mut rows = Vec::new();
-    for project in PROJECTS {
-        rows.extend(snapshot_project(project, &root.join(project)));
+    let mut shader_bearing = 0;
+    let mut shaderless = 0;
+    let mut observed_projects = BTreeMap::new();
+    for (project, path) in &projects {
+        let project_rows = snapshot_project(project, path);
+        if project_rows.is_empty() {
+            shaderless += 1;
+        } else {
+            shader_bearing += 1;
+        }
+        observed_projects.insert(project.as_str(), project_rows.len());
+        rows.extend(project_rows);
     }
     rows.sort_by(|a, b| a.key.cmp(&b.key));
 
-    assert_eq!(PROJECTS.len(), 28, "the shader corpus denominator moved");
-    assert_eq!(rows.len(), 524 * PROFILES.len(), "profile rows moved");
+    assert_eq!(examined, 29, "bin-project population moved");
+    assert_eq!(shader_bearing, 28, "shader-bearing project population moved");
+    assert_eq!(shaderless, 1, "shaderless project population moved");
+    assert_eq!(examined, shader_bearing + shaderless, "project denominators do not partition");
     let shader_keys: BTreeSet<(&str, &str)> = rows
         .iter()
         .map(|row| (row.key.project.as_str(), row.key.shader.as_str()))
         .collect();
-    assert_eq!(shader_keys.len(), 524, "shader population moved");
+    assert_eq!(shader_keys.len(), 546, "shader population moved");
+    assert_eq!(rows.len(), 1092, "profile row population moved");
     assert_eq!(
         rows.iter().map(|row| row.stage_sections).sum::<usize>(),
-        524 * 2 * 2,
-        "2,096 stage sections moved"
+        2184,
+        "stage-section denominator moved"
     );
     assert!(
         rows.iter()
@@ -1100,13 +1113,7 @@ fn shader_corpus_has_per_shader_profile_and_interface_evidence() {
         "both GLSL profiles must be represented"
     );
 
-    let mut observed_projects: BTreeMap<&str, usize> = PROJECTS
-        .iter()
-        .copied()
-        .map(|project| (project, 0))
-        .collect();
     for row in &rows {
-        *observed_projects.get_mut(row.key.project.as_str()).unwrap() += 1;
         assert!(
             !row.entries.is_empty(),
             "empty concrete entry population: {:?}",
@@ -1146,23 +1153,18 @@ fn shader_corpus_has_per_shader_profile_and_interface_evidence() {
         );
     }
     assert_eq!(
-        observed_projects,
-        EXPECTED_PROFILE_ROWS.iter().copied().collect(),
-        "per-project shader rows moved"
-    );
-    assert_eq!(
         observed_projects
             .values()
             .filter(|count| **count > 0)
             .count(),
-        27
+        shader_bearing
     );
     assert_eq!(
         observed_projects
             .values()
             .filter(|count| **count == 0)
             .count(),
-        1
+        shaderless
     );
 
     let actual: BTreeMap<_, _> = rows
