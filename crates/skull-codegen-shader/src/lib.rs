@@ -336,6 +336,7 @@ fn profile_body(
     policy: &dyn ShaderPlannerPolicy,
     concrete: bool,
     interner: &skull_mir::monoty::MonoInterner,
+    const_globals: &mut HashMap<Ustr, Lit>,
 ) -> Result<(), CompilerError> {
     for (instruction_id, instruction) in body.insts.iter() {
         match instruction {
@@ -352,7 +353,9 @@ fn profile_body(
                 )?);
             }
             Inst::Global(name) => {
-                if const_lit(ws, *name).is_none() {
+                if let Some(lit) = const_lit(ws, *name) {
+                    const_globals.insert(*name, lit);
+                } else {
                     if ws.const_globals.contains(name) {
                         return Err(err(
                             function.name_span,
@@ -804,6 +807,7 @@ pub fn plan_stage_from_concrete(
             ),
         )
     })?;
+    let mut const_globals = HashMap::default();
     let mut entry_callees = Vec::new();
     profile_body(
         ws,
@@ -813,6 +817,7 @@ pub fn plan_stage_from_concrete(
         policy,
         true,
         scx.interner(),
+        &mut const_globals,
     )?;
 
     let mut allowed: HashSet<ShaderInstance> = HashSet::default();
@@ -867,6 +872,7 @@ pub fn plan_stage_from_concrete(
             policy,
             true,
             scx.interner(),
+            &mut const_globals,
         )?;
         let checked = checked_concrete_callees(
             ws,
@@ -902,6 +908,7 @@ pub fn plan_stage_from_concrete(
         body: entry_body,
         order,
         bodies,
+        const_globals,
     };
     if ir.declarations() != input.dependencies {
         return Err(CompilerError::new_no_location(
