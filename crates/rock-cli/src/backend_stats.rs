@@ -290,12 +290,21 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
         );
         println!(
             "                   {} shared lookups: {} hits, {} misses per run; {} plan clones \
-             ({} param slots)",
+                 ({} param slots)",
             per_run(memo.shared_lookups),
             per_run(memo.shared_hits),
             per_run(memo.shared_misses),
             per_run(memo.plan_clones),
             per_run(memo.plan_clone_param_slots),
+        );
+        println!(
+            "                   published table: {} hits, {} misses; {} warm keys, {} published \
+             keys ({} warm failures) per run",
+            per_run(memo.published_hits),
+            per_run(memo.published_misses),
+            per_run(memo.warm_keys),
+            per_run(memo.published_keys),
+            per_run(memo.warm_failures),
         );
         println!(
             "                   plan sizes p50/p95/max: {}/{}/{} over {} returned plans per run",

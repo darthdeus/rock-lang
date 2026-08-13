@@ -360,7 +360,7 @@ impl FunctionRepPlan {
 /// differently: `Callee` is "the ABI a call site uses for the requested
 /// instance" (backend-variant selection included), `Owner` is "the ABI of this
 /// already-selected owner's own definition".
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub enum AbiPlanKey {
     Callee(crate::instance::Instance),
     Owner(crate::instance::Instance),
@@ -395,6 +395,11 @@ pub struct AbiPlanMemoStats {
     pub local_clone_ns: u64,
     pub shared_clone_ns: u64,
     pub derivation_ns: u64,
+    pub published_hits: u64,
+    pub published_misses: u64,
+    pub warm_keys: u64,
+    pub warm_failures: u64,
+    pub published_keys: u64,
     pub plan_size_histogram: [u64; ABI_PLAN_SIZE_BUCKETS],
     pub plan_size_max: u64,
 }
@@ -422,6 +427,11 @@ impl Default for AbiPlanMemoStats {
             local_clone_ns: 0,
             shared_clone_ns: 0,
             derivation_ns: 0,
+            published_hits: 0,
+            published_misses: 0,
+            warm_keys: 0,
+            warm_failures: 0,
+            published_keys: 0,
             plan_size_histogram: [0; ABI_PLAN_SIZE_BUCKETS],
             plan_size_max: 0,
         }
@@ -470,6 +480,11 @@ impl AbiPlanMemoStats {
         self.local_clone_ns += other.local_clone_ns;
         self.shared_clone_ns += other.shared_clone_ns;
         self.derivation_ns += other.derivation_ns;
+        self.published_hits += other.published_hits;
+        self.published_misses += other.published_misses;
+        self.warm_keys += other.warm_keys;
+        self.warm_failures += other.warm_failures;
+        self.published_keys += other.published_keys;
         for (dst, src) in self.plan_size_histogram.iter_mut().zip(other.plan_size_histogram) {
             *dst += src;
         }
@@ -519,7 +534,7 @@ impl AbiPlanMemoStats {
 #[derive(Default)]
 struct AbiPlanLocalCache {
     epoch: u64,
-    plans: rustc_hash::FxHashMap<AbiPlanKey, BackendFnAbiPlan>,
+    plans: rustc_hash::FxHashMap<AbiPlanKey, BackendFnAbiPlanHandle>,
 }
 
 impl AbiPlanLocalCache {
@@ -543,7 +558,10 @@ fn next_abi_epoch() -> u64 {
 
 #[derive(Debug)]
 pub(super) struct AbiPlanCache {
-    plans: Mutex<HashMap<AbiPlanKey, BackendFnAbiPlan>>,
+    plans: Mutex<HashMap<AbiPlanKey, BackendFnAbiPlanHandle>>,
+    // Publication happens before the context enters the parallel fanout;
+    // `clear` takes `&mut self`, so readers never race this pointer.
+    published: Option<Arc<HashMap<AbiPlanKey, BackendFnAbiPlanHandle>>>,
     epoch: std::sync::atomic::AtomicU64,
     owner_hits: std::sync::atomic::AtomicU64,
     owner_misses: std::sync::atomic::AtomicU64,
@@ -562,6 +580,11 @@ pub(super) struct AbiPlanCache {
     local_clone_ns: std::sync::atomic::AtomicU64,
     shared_clone_ns: std::sync::atomic::AtomicU64,
     derivation_ns: std::sync::atomic::AtomicU64,
+    warm_keys: std::sync::atomic::AtomicU64,
+    warm_failures: std::sync::atomic::AtomicU64,
+    published_hits: std::sync::atomic::AtomicU64,
+    published_misses: std::sync::atomic::AtomicU64,
+    published_keys: std::sync::atomic::AtomicU64,
     plan_size_histogram: [std::sync::atomic::AtomicU64; ABI_PLAN_SIZE_BUCKETS],
     plan_size_max: std::sync::atomic::AtomicU64,
 }
@@ -570,6 +593,7 @@ impl Default for AbiPlanCache {
     fn default() -> Self {
         Self {
             plans: Mutex::default(),
+            published: None,
             epoch: std::sync::atomic::AtomicU64::new(next_abi_epoch()),
             owner_hits: Default::default(),
             owner_misses: Default::default(),
@@ -588,6 +612,11 @@ impl Default for AbiPlanCache {
             local_clone_ns: Default::default(),
             shared_clone_ns: Default::default(),
             derivation_ns: Default::default(),
+            warm_keys: Default::default(),
+            warm_failures: Default::default(),
+            published_hits: Default::default(),
+            published_misses: Default::default(),
+            published_keys: Default::default(),
             plan_size_histogram: std::array::from_fn(|_| std::sync::atomic::AtomicU64::new(0)),
             plan_size_max: Default::default(),
         }
@@ -595,13 +624,6 @@ impl Default for AbiPlanCache {
 }
 
 impl AbiPlanCache {
-    fn record_plan_clone(&self, plan: &BackendFnAbiPlan) {
-        use std::sync::atomic::Ordering;
-        self.plan_clones.fetch_add(1, Ordering::Relaxed);
-        self.plan_clone_param_slots
-            .fetch_add(plan.representation.params.len() as u64, Ordering::Relaxed);
-    }
-
     fn record_plan_size(&self, plan: &BackendFnAbiPlan) {
         use std::sync::atomic::Ordering;
         let size = plan.representation.params.len();
@@ -610,42 +632,44 @@ impl AbiPlanCache {
         self.plan_size_max.fetch_max(size as u64, Ordering::Relaxed);
     }
 
-    pub(super) fn lookup(&self, key: &AbiPlanKey) -> Option<BackendFnAbiPlan> {
+    pub(super) fn lookup(&self, key: &AbiPlanKey) -> Option<BackendFnAbiPlanHandle> {
         use std::sync::atomic::Ordering;
-        let epoch = self.epoch.load(Ordering::Acquire);
-        let found = ABI_PLAN_LOCAL.with(|cache| {
-            let mut cache = cache.borrow_mut();
-            cache.reset_for(epoch);
-            if let Some(plan) = cache.plans.get(key) {
-                let clone_start = abi_plan_timing_enabled().then(Instant::now);
-                let plan = plan.clone();
-                self.record_plan_clone(&plan);
-                add_elapsed(&self.local_clone_ns, clone_start);
-                self.local_hits.fetch_add(1, Ordering::Relaxed);
-                return Some(plan);
+        let published = match self.published.as_ref().and_then(|plans| plans.get(key)) {
+            Some(plan) => {
+                self.published_hits.fetch_add(1, Ordering::Relaxed);
+                Some(Arc::clone(plan))
             }
-            self.shared_lookups.fetch_add(1, Ordering::Relaxed);
-            let lock_start = abi_plan_timing_enabled().then(Instant::now);
-            let found = {
-                let plans = self.plans.lock().expect("abi plan cache poisoned");
-                let Some(plan) = plans.get(key) else {
-                    self.shared_misses.fetch_add(1, Ordering::Relaxed);
-                    add_elapsed(&self.shared_lock_ns, lock_start);
-                    return None;
+            None if self.published.is_some() => {
+                self.published_misses.fetch_add(1, Ordering::Relaxed);
+                None
+            }
+            None => None,
+        };
+        let found = published.or_else(|| {
+            let epoch = self.epoch.load(Ordering::Acquire);
+            ABI_PLAN_LOCAL.with(|cache| {
+                let mut cache = cache.borrow_mut();
+                cache.reset_for(epoch);
+                if let Some(plan) = cache.plans.get(key) {
+                    self.local_hits.fetch_add(1, Ordering::Relaxed);
+                    return Some(Arc::clone(plan));
+                }
+                self.shared_lookups.fetch_add(1, Ordering::Relaxed);
+                let lock_start = abi_plan_timing_enabled().then(Instant::now);
+                let found = {
+                    let plans = self.plans.lock().expect("abi plan cache poisoned");
+                    let Some(plan) = plans.get(key) else {
+                        self.shared_misses.fetch_add(1, Ordering::Relaxed);
+                        add_elapsed(&self.shared_lock_ns, lock_start);
+                        return None;
+                    };
+                    Arc::clone(plan)
                 };
-                let clone_start = abi_plan_timing_enabled().then(Instant::now);
-                let plan = plan.clone();
-                self.record_plan_clone(&plan);
-                add_elapsed(&self.shared_clone_ns, clone_start);
-                plan
-            };
-            add_elapsed(&self.shared_lock_ns, lock_start);
-            self.shared_hits.fetch_add(1, Ordering::Relaxed);
-            let clone_start = abi_plan_timing_enabled().then(Instant::now);
-            cache.plans.insert(key.clone(), found.clone());
-            self.record_plan_clone(&found);
-            add_elapsed(&self.shared_clone_ns, clone_start);
-            Some(found)
+                add_elapsed(&self.shared_lock_ns, lock_start);
+                self.shared_hits.fetch_add(1, Ordering::Relaxed);
+                cache.plans.insert(key.clone(), Arc::clone(&found));
+                Some(found)
+            })
         });
         let (hits, misses) = match key {
             AbiPlanKey::Owner(_) => (&self.owner_hits, &self.owner_misses),
@@ -654,9 +678,7 @@ impl AbiPlanCache {
         match &found {
             Some(plan) => {
                 hits.fetch_add(1, Ordering::Relaxed);
-                self.record_plan_size(plan);
-                self.cloned_param_slots
-                    .fetch_add(plan.representation.params.len() as u64, Ordering::Relaxed);
+                self.record_plan_size(plan.as_ref());
             }
             None => {
                 misses.fetch_add(1, Ordering::Relaxed);
@@ -672,15 +694,15 @@ impl AbiPlanCache {
         );
     }
 
-    pub(super) fn store(&self, key: AbiPlanKey, plan: &BackendFnAbiPlan) {
+    pub(super) fn store(&self, key: AbiPlanKey, plan: &BackendFnAbiPlanHandle) {
         use std::sync::atomic::Ordering;
         let epoch = self.epoch.load(Ordering::Acquire);
         let replaced =
-            self.plans.lock().expect("abi plan cache poisoned").insert(key.clone(), plan.clone());
+            self.plans.lock().expect("abi plan cache poisoned").insert(key.clone(), Arc::clone(plan));
         ABI_PLAN_LOCAL.with(|cache| {
             let mut cache = cache.borrow_mut();
             cache.reset_for(epoch);
-            cache.plans.insert(key, plan.clone());
+            cache.plans.insert(key, Arc::clone(plan));
         });
         self.stores.fetch_add(1, Ordering::Relaxed);
         if replaced.is_some() {
@@ -688,11 +710,23 @@ impl AbiPlanCache {
         }
     }
 
-    pub(super) fn clear(&self) {
+    pub(super) fn clear(&mut self) {
         // New epoch FIRST: a worker that raced the old epoch into its mirror
         // re-reads the shared map (now cleared) rather than serving stale plans.
         self.epoch.store(next_abi_epoch(), std::sync::atomic::Ordering::Release);
         self.plans.lock().expect("abi plan cache poisoned").clear();
+        self.published = None;
+        self.warm_keys.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.published_keys.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.warm_failures.store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub(super) fn publish(&mut self, warm_keys: u64, warm_failures: u64) {
+        let plans = std::mem::take(&mut *self.plans.lock().expect("abi plan cache poisoned"));
+        self.published_keys.store(plans.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        self.warm_keys.store(warm_keys, std::sync::atomic::Ordering::Relaxed);
+        self.warm_failures.store(warm_failures, std::sync::atomic::Ordering::Relaxed);
+        self.published = Some(Arc::new(plans));
     }
 
     /// Lifetime counters plus the table's current population. Lookups are
@@ -708,7 +742,8 @@ impl AbiPlanCache {
             worker_local_hits: self.local_hits.load(Ordering::Relaxed),
             stores: self.stores.load(Ordering::Relaxed),
             duplicate_cold_stores: self.duplicate_cold_stores.load(Ordering::Relaxed),
-            unique_keys: self.plans.lock().expect("abi plan cache poisoned").len() as u64,
+            unique_keys: self.published.as_ref().map_or(0, |plans| plans.len() as u64)
+                + self.plans.lock().expect("abi plan cache poisoned").len() as u64,
             cloned_param_slots: self.cloned_param_slots.load(Ordering::Relaxed),
             shared_lookups: self.shared_lookups.load(Ordering::Relaxed),
             shared_hits: self.shared_hits.load(Ordering::Relaxed),
@@ -719,6 +754,11 @@ impl AbiPlanCache {
             local_clone_ns: self.local_clone_ns.load(Ordering::Relaxed),
             shared_clone_ns: self.shared_clone_ns.load(Ordering::Relaxed),
             derivation_ns: self.derivation_ns.load(Ordering::Relaxed),
+            published_hits: self.published_hits.load(Ordering::Relaxed),
+            published_misses: self.published_misses.load(Ordering::Relaxed),
+            warm_keys: self.warm_keys.load(Ordering::Relaxed),
+            warm_failures: self.warm_failures.load(Ordering::Relaxed),
+            published_keys: self.published_keys.load(Ordering::Relaxed),
             plan_size_histogram: std::array::from_fn(|i| {
                 self.plan_size_histogram[i].load(Ordering::Relaxed)
             }),
@@ -1624,7 +1664,7 @@ pub fn owner_abi_plan(
     scx: &ScalarCtx,
     plans: &crate::concrete::ConcretePlans,
     owner: &crate::instance::Instance,
-) -> Result<BackendFnAbiPlan, skull_parser::CompilerError> {
+) -> Result<BackendFnAbiPlanHandle, skull_parser::CompilerError> {
     owner_abi_plan_impl(ws, scx, plans, owner, None)
 }
 
@@ -1637,7 +1677,7 @@ pub fn owner_abi_plan_for_body(
     plans: &crate::concrete::ConcretePlans,
     owner: &crate::instance::Instance,
     body_plan: &ConcreteBodyPlan,
-) -> Result<BackendFnAbiPlan, skull_parser::CompilerError> {
+) -> Result<BackendFnAbiPlanHandle, skull_parser::CompilerError> {
     owner_abi_plan_impl(ws, scx, plans, owner, Some(body_plan))
 }
 
@@ -1647,7 +1687,7 @@ fn owner_abi_plan_impl(
     plans: &crate::concrete::ConcretePlans,
     owner: &crate::instance::Instance,
     in_hand: Option<&ConcreteBodyPlan>,
-) -> Result<BackendFnAbiPlan, skull_parser::CompilerError> {
+) -> Result<BackendFnAbiPlanHandle, skull_parser::CompilerError> {
     let key = AbiPlanKey::Owner(owner.clone());
     if let Some(plan) = scx.abi_plan_cached(&key) {
         return Ok(plan);
@@ -1664,6 +1704,81 @@ fn owner_abi_plan_impl(
             ))
         })?;
         BackendFnAbiPlan::for_concrete_plan(ws, scx, plan)
+    };
+    let derived = Arc::new(derived);
+    scx.abi_plan_record_derivation(derivation_start);
+    scx.abi_plan_store(key, &derived);
+    Ok(derived)
+}
+
+/// Resolve the declaration variant serving a requested call instance. JS keeps
+/// host mappings that have no Rock declaration, so it deliberately retains the
+/// requested instance for the emitter to handle later.
+pub(super) fn selected_abi_instance(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    inst: &crate::instance::Instance,
+) -> Result<crate::instance::Instance, skull_parser::CompilerError> {
+    match super::backend_variant_instance(ws, inst, scx.target) {
+        Ok(selected) => Ok(selected),
+        Err(_) if scx.target == FnBackend::Js => Ok(inst.clone()),
+        Err(_) => Err(super::gap(format!(
+            "callee `{}` has no body serving the {:?} target",
+            ws.module(inst.func.module).functions[inst.func.func].name,
+            scx.target,
+        ))),
+    }
+}
+
+/// The one memoized callee ABI question. It includes backend-variant selection,
+/// polymorphic-recursion rejection, and the sibling-signature fallback, so a
+/// warm lookup and a body-lowering lookup cannot silently ask different ABI
+/// questions.
+pub(super) fn callee_abi_plan_for_instance(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    plans: &crate::concrete::ConcretePlans,
+    inst: &crate::instance::Instance,
+) -> Result<BackendFnAbiPlanHandle, skull_parser::CompilerError> {
+    let key = AbiPlanKey::Callee(inst.clone());
+    if let Some(plan) = scx.abi_plan_cached(&key) {
+        return Ok(plan);
+    }
+    let derivation_start = abi_plan_timing_enabled().then(Instant::now);
+    let selected = selected_abi_instance(ws, scx, inst)?;
+    let derived = if !requires_concrete_body_plan(ws, inst) {
+        Arc::new(BackendFnAbiPlan::for_boundary_instance(ws, scx, &selected))
+    } else {
+        if let Some(at) = crate::monoty::too_deep_to_instantiate(
+            inst.arg_types(scx.interner()).iter(),
+        ) {
+            let f = &ws.module(inst.func.module).functions[inst.func.func];
+            return Err(skull_parser::CompilerError::new_with_label(
+                f.name_span,
+                format!(
+                    "polymorphic recursion: instantiating `{}` at `{}` exceeds the \
+                     instantiation depth limit of {}. A recursive call whose type \
+                     arguments GROW never terminates -- each call needs a new body -- so it \
+                     is rejected rather than expanded. Same-instance recursion (type \
+                     arguments unchanged) is unaffected.",
+                    f.name,
+                    at.render(),
+                    crate::monoty::MAX_INSTANTIATION_DEPTH,
+                ),
+            ));
+        }
+        let plan = plans.get(inst).ok_or_else(|| {
+            let name = ws.module(inst.func.module).functions[inst.func.func].name;
+            super::gap(format!(
+                "concrete ABI plan is missing for callee `{name}` ({})",
+                inst.func.func.into_raw().into_u32()
+            ))
+        })?;
+        if selected.func != inst.func {
+            selected_sibling_abi_plan(ws, scx, plans, &selected, plan)
+        } else {
+            Arc::new(BackendFnAbiPlan::for_concrete_plan(ws, scx, plan))
+        }
     };
     scx.abi_plan_record_derivation(derivation_start);
     scx.abi_plan_store(key, &derived);
@@ -1685,14 +1800,14 @@ pub fn selected_sibling_abi_plan(
     plans: &crate::concrete::ConcretePlans,
     selected: &crate::instance::Instance,
     canonical: &ConcreteBodyPlan,
-) -> BackendFnAbiPlan {
+) -> BackendFnAbiPlanHandle {
     if !requires_concrete_body_plan(ws, selected) {
-        return BackendFnAbiPlan::for_boundary_instance(ws, scx, selected);
+        return Arc::new(BackendFnAbiPlan::for_boundary_instance(ws, scx, selected));
     }
     if let Some(selected_plan) = plans.get(selected) {
-        return BackendFnAbiPlan::for_concrete_plan(ws, scx, selected_plan);
+        return Arc::new(BackendFnAbiPlan::for_concrete_plan(ws, scx, selected_plan));
     }
-    BackendFnAbiPlan::for_concrete_signature(ws, scx, selected, &canonical.signature)
+    Arc::new(BackendFnAbiPlan::for_concrete_signature(ws, scx, selected, &canonical.signature))
 }
 
 pub fn requires_concrete_body_plan(
@@ -1798,6 +1913,11 @@ pub struct BackendFnAbiPlan {
     representation: FunctionRepPlan,
     arena: Arc<RepArena>,
 }
+
+/// Shared immutable ABI plan returned by cache-eligible consumers. The value
+/// constructors remain owned because boundary-only callers do not enter the
+/// build memo.
+pub type BackendFnAbiPlanHandle = Arc<BackendFnAbiPlan>;
 
 impl PartialEq for BackendFnAbiPlan {
     fn eq(&self, other: &Self) -> bool {

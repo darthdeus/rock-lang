@@ -1086,6 +1086,8 @@ enum BodyMutation {
     ClearCoroutineResultPlan { body: FuncRef },
     #[cfg(test)]
     ClearIteratorWitnessInstance { body: FuncRef },
+    #[cfg(test)]
+    SkipAbiPlanPublish,
 }
 
 /// The shared body of `fref` -- the id under which a declaration's own
@@ -1524,7 +1526,8 @@ fn emit_body_chunk_with_mutation(
                 BodyMutation::None => unreachable!(),
                 BodyMutation::ClearBoundPlan { .. } => unreachable!(),
                 BodyMutation::ClearCoroutineResultPlan { .. } => unreachable!(),
-                BodyMutation::ClearIteratorWitnessInstance { .. } => unreachable!(),
+                BodyMutation::ClearIteratorWitnessInstance { .. }
+                | BodyMutation::SkipAbiPlanPublish => unreachable!(),
             }
         }
         #[cfg(test)]
@@ -3525,7 +3528,7 @@ fn emit_full_in_with_mutation(
     // intern new types through the graph's shared `MonoInterner` (same
     // lock-safe monotonic arena the body fanout later races).
     let shader_plans = std::sync::Arc::clone(&concrete.plans);
-    let ((lua_view, scx, cpu_elapsed), (shader_result, shader_elapsed)) = parallel_join(
+    let ((lua_view, mut scx, cpu_elapsed), (shader_result, shader_elapsed)) = parallel_join(
         || {
             let t_branch = Instant::now();
             let lua_view = crate::artifact::realize(
@@ -3574,6 +3577,16 @@ fn emit_full_in_with_mutation(
     // reported under a distinct prefix and never added into the setup total.
     setup_phases.push(("join: cpu artifact branch", cpu_elapsed));
     setup_phases.push(("join: shader view branch", shader_elapsed));
+
+    let t_setup = Instant::now();
+    #[cfg(test)]
+    let skip_abi_plan_publish = matches!(mutation, BodyMutation::SkipAbiPlanPublish);
+    #[cfg(not(test))]
+    let skip_abi_plan_publish = false;
+    if !skip_abi_plan_publish {
+        scx.warm_abi_plans(ws, &concrete.plans, &concrete.always_plans);
+    }
+    setup_phases.push(("setup: ABI plan warm", t_setup.elapsed()));
 
     // The emitted param list must be injective. Checked per SIGNATURE, over every
     // function rather than just the emitted set: a duplicate Lua param is illegal
@@ -4825,8 +4838,20 @@ fn main() { let result = first() }
             "shared lookup accounting lost a route: {stats:?}"
         );
         assert!(
-            stats.plan_clones >= stats.hits(),
-            "the current cache witness must count every returned plan clone: {stats:?}"
+            stats.published_hits > 0,
+            "the production consumers must reach the immutable published plan table: {stats:?}"
+        );
+        assert_eq!(
+            stats.published_misses, 0,
+            "a published-table miss would fall back to the old shared route: {stats:?}"
+        );
+        assert_eq!(
+            stats.plan_clones, 0,
+            "cached plan consumers must share immutable handles rather than clone plans: {stats:?}"
+        );
+        assert_eq!(
+            stats.cloned_param_slots, 0,
+            "cached plan consumers must not clone parameter-slot vectors: {stats:?}"
         );
         assert!(
             stats.plan_size_samples() > 0
@@ -4838,6 +4863,34 @@ fn main() { let result = first() }
             emit.abi_plan_stats, stats,
             "the reported stats must be the context's own counters"
         );
+    }
+
+    #[test]
+    fn abi_plan_publication_witness_catches_a_bypassed_publish() {
+        let mut modules = vec![
+            skull_parser::parse_module_clean(
+                "fn helper(x: int) -> int { return x }\nfn main() { let result = helper(1) }",
+                Ustr::from("<abi-publish-bypass-test>"),
+            )
+            .expect("parse"),
+        ];
+        let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic");
+        let mid = ws
+            .modules
+            .iter()
+            .find(|m| m.id != ModuleId::builtin())
+            .expect("test module")
+            .id;
+        let (_, cache) = emit_full_in_with_test_mutation(&ws, mid, BodyMutation::SkipAbiPlanPublish)
+            .expect("the bypass must still take the fallback path");
+        let stats = cache.scx.abi_plan_stats();
+        let witness = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            assert!(
+                stats.published_hits > 0,
+                "the publication witness must fail when the publish step is bypassed: {stats:?}"
+            );
+        }));
+        assert!(witness.is_err(), "the publication witness did not see its bypass: {stats:?}");
     }
 
     #[test]
@@ -4856,6 +4909,7 @@ fn main() { let result = first() }
                 "setup: graph",
                 "setup: concrete plans",
                 "setup: artifact+shader views",
+                "setup: ABI plan warm",
                 "setup: ABI validation",
             ]
         );

@@ -21,7 +21,7 @@ pub(crate) struct DirectCall {
     /// than a key plus a reconstructed substitution.
     pub(crate) delivery: Option<crate::instance::Instance>,
     pub(crate) callee_inst: crate::instance::Instance,
-    pub(crate) plan: BackendFnAbiPlan,
+    pub(crate) plan: BackendFnAbiPlanHandle,
 }
 
 impl Builder<'_> {
@@ -62,25 +62,6 @@ impl Builder<'_> {
             return;
         };
         crate::ablation::record(category, callee.name.as_str(), self.f.name.as_str(), span, detail);
-    }
-
-    fn selected_abi_instance(
-        &self,
-        inst: &crate::instance::Instance,
-    ) -> Result<crate::instance::Instance, CompilerError> {
-        match crate::lower::backend_variant_instance(self.ws, inst, self.scx.target) {
-            Ok(selected) => Ok(selected),
-            Err(_) if self.scx.target == bone_semantic::hir::FnBackend::Js => {
-                // JS host mappings deliberately defer body selection to the JS
-                // emitter when no Rock declaration serves this target.
-                Ok(inst.clone())
-            }
-            Err(_) => Err(gap(format!(
-                "callee `{}` has no body serving the {:?} target",
-                self.ws.module(inst.func.module).functions[inst.func.func].name,
-                self.scx.target,
-            ))),
-        }
     }
 
     pub(crate) fn concrete_callee_for_site(
@@ -200,66 +181,13 @@ impl Builder<'_> {
     pub(crate) fn callee_abi_plan_for_instance(
         &self,
         inst: &crate::instance::Instance,
-    ) -> Result<BackendFnAbiPlan, CompilerError> {
-        // The derivation below is a pure function of the requested instance
-        // under this build's context, and the same instance is requested at
-        // every one of its call sites -- memoize the Ok side. Errors re-derive
-        // so rejection spans and messages are untouched.
-        let key = crate::lower::AbiPlanKey::Callee(inst.clone());
-        if let Some(plan) = self.scx.abi_plan_cached(&key) {
-            return Ok(plan);
-        }
-        let derivation_start = crate::lower::abi::abi_plan_timing_enabled()
-            .then(std::time::Instant::now);
-        let plan = self.callee_abi_plan_uncached(inst)?;
-        self.scx.abi_plan_record_derivation(derivation_start);
-        self.scx.abi_plan_store(key, &plan);
-        Ok(plan)
-    }
-
-    fn callee_abi_plan_uncached(
-        &self,
-        inst: &crate::instance::Instance,
-    ) -> Result<BackendFnAbiPlan, CompilerError> {
-        let selected = self.selected_abi_instance(inst)?;
-        if !crate::lower::requires_concrete_body_plan(self.ws, inst) {
-            return Ok(BackendFnAbiPlan::for_boundary_instance(self.ws, self.scx, &selected));
-        }
-        if let Some(at) = crate::monoty::too_deep_to_instantiate(
-            inst.arg_types(self.scx.interner()).iter(),
-        ) {
-            let f = &self.ws.module(inst.func.module).functions[inst.func.func];
-            return Err(CompilerError::new_with_label(
-                f.name_span,
-                format!(
-                    "polymorphic recursion: instantiating `{}` at `{}` exceeds the \
-                     instantiation depth limit of {}. A recursive call whose type \
-                     arguments GROW never terminates -- each call needs a new body -- so it \
-                     is rejected rather than expanded. Same-instance recursion (type \
-                     arguments unchanged) is unaffected.",
-                    f.name,
-                    at.render(),
-                    crate::monoty::MAX_INSTANTIATION_DEPTH,
-                ),
-            ));
-        }
-        let plan = self.concrete_plans.get(inst).ok_or_else(|| {
-            let name = self.ws.module(inst.func.module).functions[inst.func.func].name;
-            gap(format!(
-                "concrete ABI plan is missing for callee `{name}` ({})",
-                inst.func.func.into_raw().into_u32()
-            ))
-        })?;
-        if selected.func != inst.func {
-            return Ok(crate::lower::selected_sibling_abi_plan(
-                self.ws,
-                self.scx,
-                self.concrete_plans,
-                &selected,
-                plan,
-            ));
-        }
-        Ok(BackendFnAbiPlan::for_concrete_plan(self.ws, self.scx, plan))
+    ) -> Result<BackendFnAbiPlanHandle, CompilerError> {
+        crate::lower::abi::callee_abi_plan_for_instance(
+            self.ws,
+            self.scx,
+            self.concrete_plans,
+            inst,
+        )
     }
 
     /// Lower a call to a (boxed) single value — the scalar-ABI Group result is

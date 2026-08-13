@@ -30,7 +30,7 @@ use bone_semantic::prelude::{BoundTree, CompilerError};
 use comfy_la_arena::Idx;
 use skull_mir::concrete::ConcretePlans;
 use skull_mir::instance::Instance;
-use skull_mir::lower::{BackendFnAbiPlan, ScalarCtx};
+use skull_mir::lower::{BackendFnAbiPlan, BackendFnAbiPlanHandle, ScalarCtx};
 use skull_mir::mir::*;
 use ustr::Ustr;
 
@@ -97,7 +97,7 @@ struct CalleeBody {
     /// snapshot is not a valid source for a concrete splice.
     subject: Instance,
     /// The one ABI plan both the snapshot and its call site must use.
-    abi: BackendFnAbiPlan,
+    abi: BackendFnAbiPlanHandle,
     kind: Kind,
     /// Uniform `Return` value count (0 for void, 1 for a scalar, N for a
     /// scalarized value struct). Matched against the call site's result shape.
@@ -361,7 +361,7 @@ enum Site {
         call_id: Idx<Inst>,
         args: Vec<Idx<Inst>>,
         inst: Instance,
-        abi: BackendFnAbiPlan,
+        abi: BackendFnAbiPlanHandle,
     },
     /// `Inst::CallMulti` — N leaves bound positionally into `dests`.
     Multi {
@@ -371,7 +371,7 @@ enum Site {
         dests: Vec<Idx<Cell>>,
         args: Vec<Idx<Inst>>,
         inst: Instance,
-        abi: BackendFnAbiPlan,
+        abi: BackendFnAbiPlanHandle,
     },
 }
 
@@ -410,7 +410,7 @@ fn call_target(
     call_id: Idx<Inst>,
     fref: FuncRef,
     ws: &Workspace,
-) -> Result<Option<(Instance, BackendFnAbiPlan)>, CompilerError> {
+) -> Result<Option<(Instance, BackendFnAbiPlanHandle)>, CompilerError> {
     let Some(owner) = func.callee_instances.get(&call_id) else {
         return Ok(None);
     };
@@ -539,7 +539,7 @@ fn find_site(
                 // miscompile.
                 Some(cand)
                     if cand.subject == *site.inst()
-                        && cand.abi == *site.abi()
+                        && cand.abi.as_ref() == site.abi()
                         && cand.abi.result_lanes() == site.abi().result_lanes()
                         && arity_ok(cand, &site)
                         && (!site.inst().args.is_empty()

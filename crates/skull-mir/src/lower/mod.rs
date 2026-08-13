@@ -74,7 +74,8 @@ mod abi;
 pub use abi::{
     boundary_requires_boxed_representation, declared_boundary_class, owner_abi_plan,
     owner_abi_plan_for_body, requires_concrete_body_plan, selected_sibling_abi_plan,
-    AbiPlanKey, AbiPlanMemoStats, BackendFnAbiPlan, BoundaryClass, FunctionRepPlan, GlobalPlan,
+    AbiPlanKey, AbiPlanMemoStats, BackendFnAbiPlan, BackendFnAbiPlanHandle, BoundaryClass,
+    FunctionRepPlan, GlobalPlan,
     RepArena, RepArenaStats, RepError,
     RepId, RepLayout,
     RepGuarantees, RepPlan, RepUse, RepUseFacts,
@@ -336,11 +337,11 @@ impl ScalarCtx {
         std::sync::Arc::clone(&self.rep_arena)
     }
 
-    pub(crate) fn abi_plan_cached(&self, key: &AbiPlanKey) -> Option<BackendFnAbiPlan> {
+    pub(crate) fn abi_plan_cached(&self, key: &AbiPlanKey) -> Option<BackendFnAbiPlanHandle> {
         self.abi_plans.lookup(key)
     }
 
-    pub(crate) fn abi_plan_store(&self, key: AbiPlanKey, plan: &BackendFnAbiPlan) {
+    pub(crate) fn abi_plan_store(&self, key: AbiPlanKey, plan: &BackendFnAbiPlanHandle) {
         self.abi_plans.store(key, plan);
     }
 
@@ -353,6 +354,40 @@ impl ScalarCtx {
     /// normal case, not an optimization corner.
     pub fn abi_plan_stats(&self) -> AbiPlanMemoStats {
         self.abi_plans.stats()
+    }
+
+    /// Derive every ABI question the concrete plans can present to production
+    /// lowering, in deterministic key order, then publish the successful plans
+    /// as immutable handles for the parallel fanout. Errors are intentionally
+    /// not cached: the original consumer still re-derives them at its own span.
+    pub fn warm_abi_plans(
+        &mut self,
+        ws: &Workspace,
+        plans: &crate::concrete::ConcretePlans,
+        always: &crate::concrete::ConcreteAlwaysPlans,
+    ) {
+        let mut keys = Vec::new();
+        keys.extend(plans.keys().cloned().map(AbiPlanKey::Owner));
+        for body in plans.values().chain(always.values()) {
+            keys.extend(body.callees.values().cloned().map(AbiPlanKey::Callee));
+        }
+        keys.sort();
+        keys.dedup();
+
+        let warm_keys = keys.len() as u64;
+        let mut warm_failures = 0;
+        for key in &keys {
+            let result = match key {
+                AbiPlanKey::Owner(owner) => owner_abi_plan(ws, self, plans, owner).map(|_| ()),
+                AbiPlanKey::Callee(callee) => {
+                    abi::callee_abi_plan_for_instance(ws, self, plans, callee).map(|_| ())
+                }
+            };
+            if result.is_err() {
+                warm_failures += 1;
+            }
+        }
+        self.abi_plans.publish(warm_keys, warm_failures);
     }
 
     /// Traffic counters of this context's representation arena.

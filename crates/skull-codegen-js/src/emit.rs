@@ -15,7 +15,6 @@ use bone_semantic::inference::Workspace;
 use comfy_la_arena::Idx;
 use skull_mir::intrinsics::{Emission, IntrinsicTable};
 use skull_mir::instance::Instance;
-use skull_mir::lower::BackendFnAbiPlan;
 use skull_mir::mir::{Block, Cell, ContainerKind, FuncRef, Inst, Lit, MirFunc, Term};
 use skull_graph::artifact::{self, ArtifactView};
 use skull_graph::instance_graph::{InstanceGraph, Site, SiteOutcome};
@@ -170,7 +169,7 @@ fn max_multi_wire(bodies: &[&MirFunc]) -> Result<usize, CompilerError> {
             .abi_representation
             .as_ref()
             .map_or(0, skull_mir::lower::FunctionRepPlan::return_lanes);
-        n = n.max(mf.abi_plan.as_ref().map_or(0, BackendFnAbiPlan::result_lanes));
+        n = n.max(mf.abi_plan.as_ref().map_or(0, |plan| plan.result_lanes()));
         for (iid, inst) in mf.insts.iter() {
             match inst {
                 Inst::CallMulti { .. } | Inst::CallValueMulti { .. } => {

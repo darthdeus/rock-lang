@@ -730,7 +730,7 @@ pub struct MirFunc {
     pub params: Vec<Idx<Cell>>,
     /// The concrete function representation consumed by entry binding and
     /// return lowering. Calls retain the same plan in `call_abi_plans`.
-    pub abi_plan: Option<crate::lower::BackendFnAbiPlan>,
+    pub abi_plan: Option<crate::lower::BackendFnAbiPlanHandle>,
     /// The owned function representation for bodies without an `Instance`,
     /// notably hoisted nested functions. Such a body still has a concrete ABI;
     /// it just has no graph-owned top-level instance to wrap in
@@ -811,7 +811,7 @@ pub struct MirFunc {
     /// beside identity because reconstructing it from a later, possibly mutated
     /// owner would make an ABI corruption look self-consistent.
     pub call_abi_plans:
-        bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::lower::BackendFnAbiPlan>,
+        bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::lower::BackendFnAbiPlanHandle>,
     /// The owned function-type representation used by an indirect call. A
     /// function value has no declaration `Instance`, so its physical signature
     /// is carried directly beside the `CallValue`/`CallValueMulti` instruction.
