@@ -20,7 +20,8 @@
 //! across targets would be answering with another target's ABI.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Instant;
 
 use bone_semantic::hir::{FnBackend, Function};
 use bone_semantic::inference::Workspace;
@@ -372,7 +373,7 @@ pub enum AbiPlanKey {
 /// already present -- two workers racing the same cold key, each deriving.
 /// `cloned_param_slots` is the `Vec<RepId>` slots cloned by memo hits, a cheap
 /// proxy for what serving plans by handle instead of by clone would save.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AbiPlanMemoStats {
     pub owner_hits: u64,
     pub owner_misses: u64,
@@ -385,6 +386,60 @@ pub struct AbiPlanMemoStats {
     pub duplicate_cold_stores: u64,
     pub unique_keys: u64,
     pub cloned_param_slots: u64,
+    pub shared_lookups: u64,
+    pub shared_hits: u64,
+    pub shared_misses: u64,
+    pub plan_clones: u64,
+    pub plan_clone_param_slots: u64,
+    pub shared_lock_ns: u64,
+    pub local_clone_ns: u64,
+    pub shared_clone_ns: u64,
+    pub derivation_ns: u64,
+    pub plan_size_histogram: [u64; ABI_PLAN_SIZE_BUCKETS],
+    pub plan_size_max: u64,
+}
+
+const ABI_PLAN_SIZE_BUCKETS: usize = 256;
+
+impl Default for AbiPlanMemoStats {
+    fn default() -> Self {
+        Self {
+            owner_hits: 0,
+            owner_misses: 0,
+            callee_hits: 0,
+            callee_misses: 0,
+            worker_local_hits: 0,
+            stores: 0,
+            duplicate_cold_stores: 0,
+            unique_keys: 0,
+            cloned_param_slots: 0,
+            shared_lookups: 0,
+            shared_hits: 0,
+            shared_misses: 0,
+            plan_clones: 0,
+            plan_clone_param_slots: 0,
+            shared_lock_ns: 0,
+            local_clone_ns: 0,
+            shared_clone_ns: 0,
+            derivation_ns: 0,
+            plan_size_histogram: [0; ABI_PLAN_SIZE_BUCKETS],
+            plan_size_max: 0,
+        }
+    }
+}
+
+pub(super) fn abi_plan_timing_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("STONE_LOG").is_ok_and(|value| value == "debug"))
+}
+
+fn add_elapsed(counter: &std::sync::atomic::AtomicU64, start: Option<Instant>) {
+    if let Some(start) = start {
+        counter.fetch_add(
+            start.elapsed().as_nanos() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
 }
 
 impl AbiPlanMemoStats {
@@ -406,6 +461,47 @@ impl AbiPlanMemoStats {
         self.duplicate_cold_stores += other.duplicate_cold_stores;
         self.unique_keys += other.unique_keys;
         self.cloned_param_slots += other.cloned_param_slots;
+        self.shared_lookups += other.shared_lookups;
+        self.shared_hits += other.shared_hits;
+        self.shared_misses += other.shared_misses;
+        self.plan_clones += other.plan_clones;
+        self.plan_clone_param_slots += other.plan_clone_param_slots;
+        self.shared_lock_ns += other.shared_lock_ns;
+        self.local_clone_ns += other.local_clone_ns;
+        self.shared_clone_ns += other.shared_clone_ns;
+        self.derivation_ns += other.derivation_ns;
+        for (dst, src) in self.plan_size_histogram.iter_mut().zip(other.plan_size_histogram) {
+            *dst += src;
+        }
+        self.plan_size_max = self.plan_size_max.max(other.plan_size_max);
+    }
+
+    pub fn plan_size_samples(&self) -> u64 {
+        self.plan_size_histogram.iter().sum()
+    }
+
+    fn plan_size_percentile(&self, numerator: u64, denominator: u64) -> u64 {
+        let samples = self.plan_size_samples();
+        if samples == 0 {
+            return 0;
+        }
+        let rank = (samples * numerator).div_ceil(denominator).max(1);
+        let mut seen = 0;
+        for (size, count) in self.plan_size_histogram.iter().enumerate() {
+            seen += count;
+            if seen >= rank {
+                return size as u64;
+            }
+        }
+        (ABI_PLAN_SIZE_BUCKETS - 1) as u64
+    }
+
+    pub fn plan_size_p50(&self) -> u64 {
+        self.plan_size_percentile(50, 100)
+    }
+
+    pub fn plan_size_p95(&self) -> u64 {
+        self.plan_size_percentile(95, 100)
     }
 }
 
@@ -457,6 +553,17 @@ pub(super) struct AbiPlanCache {
     stores: std::sync::atomic::AtomicU64,
     duplicate_cold_stores: std::sync::atomic::AtomicU64,
     cloned_param_slots: std::sync::atomic::AtomicU64,
+    shared_lookups: std::sync::atomic::AtomicU64,
+    shared_hits: std::sync::atomic::AtomicU64,
+    shared_misses: std::sync::atomic::AtomicU64,
+    plan_clones: std::sync::atomic::AtomicU64,
+    plan_clone_param_slots: std::sync::atomic::AtomicU64,
+    shared_lock_ns: std::sync::atomic::AtomicU64,
+    local_clone_ns: std::sync::atomic::AtomicU64,
+    shared_clone_ns: std::sync::atomic::AtomicU64,
+    derivation_ns: std::sync::atomic::AtomicU64,
+    plan_size_histogram: [std::sync::atomic::AtomicU64; ABI_PLAN_SIZE_BUCKETS],
+    plan_size_max: std::sync::atomic::AtomicU64,
 }
 
 impl Default for AbiPlanCache {
@@ -472,11 +579,37 @@ impl Default for AbiPlanCache {
             stores: Default::default(),
             duplicate_cold_stores: Default::default(),
             cloned_param_slots: Default::default(),
+            shared_lookups: Default::default(),
+            shared_hits: Default::default(),
+            shared_misses: Default::default(),
+            plan_clones: Default::default(),
+            plan_clone_param_slots: Default::default(),
+            shared_lock_ns: Default::default(),
+            local_clone_ns: Default::default(),
+            shared_clone_ns: Default::default(),
+            derivation_ns: Default::default(),
+            plan_size_histogram: std::array::from_fn(|_| std::sync::atomic::AtomicU64::new(0)),
+            plan_size_max: Default::default(),
         }
     }
 }
 
 impl AbiPlanCache {
+    fn record_plan_clone(&self, plan: &BackendFnAbiPlan) {
+        use std::sync::atomic::Ordering;
+        self.plan_clones.fetch_add(1, Ordering::Relaxed);
+        self.plan_clone_param_slots
+            .fetch_add(plan.representation.params.len() as u64, Ordering::Relaxed);
+    }
+
+    fn record_plan_size(&self, plan: &BackendFnAbiPlan) {
+        use std::sync::atomic::Ordering;
+        let size = plan.representation.params.len();
+        self.plan_size_histogram[size.min(ABI_PLAN_SIZE_BUCKETS - 1)]
+            .fetch_add(1, Ordering::Relaxed);
+        self.plan_size_max.fetch_max(size as u64, Ordering::Relaxed);
+    }
+
     pub(super) fn lookup(&self, key: &AbiPlanKey) -> Option<BackendFnAbiPlan> {
         use std::sync::atomic::Ordering;
         let epoch = self.epoch.load(Ordering::Acquire);
@@ -484,14 +617,35 @@ impl AbiPlanCache {
             let mut cache = cache.borrow_mut();
             cache.reset_for(epoch);
             if let Some(plan) = cache.plans.get(key) {
+                let clone_start = abi_plan_timing_enabled().then(Instant::now);
+                let plan = plan.clone();
+                self.record_plan_clone(&plan);
+                add_elapsed(&self.local_clone_ns, clone_start);
                 self.local_hits.fetch_add(1, Ordering::Relaxed);
-                return Some(plan.clone());
+                return Some(plan);
             }
-            let found = self.plans.lock().expect("abi plan cache poisoned").get(key).cloned();
-            if let Some(plan) = &found {
-                cache.plans.insert(key.clone(), plan.clone());
-            }
-            found
+            self.shared_lookups.fetch_add(1, Ordering::Relaxed);
+            let lock_start = abi_plan_timing_enabled().then(Instant::now);
+            let found = {
+                let plans = self.plans.lock().expect("abi plan cache poisoned");
+                let Some(plan) = plans.get(key) else {
+                    self.shared_misses.fetch_add(1, Ordering::Relaxed);
+                    add_elapsed(&self.shared_lock_ns, lock_start);
+                    return None;
+                };
+                let clone_start = abi_plan_timing_enabled().then(Instant::now);
+                let plan = plan.clone();
+                self.record_plan_clone(&plan);
+                add_elapsed(&self.shared_clone_ns, clone_start);
+                plan
+            };
+            add_elapsed(&self.shared_lock_ns, lock_start);
+            self.shared_hits.fetch_add(1, Ordering::Relaxed);
+            let clone_start = abi_plan_timing_enabled().then(Instant::now);
+            cache.plans.insert(key.clone(), found.clone());
+            self.record_plan_clone(&found);
+            add_elapsed(&self.shared_clone_ns, clone_start);
+            Some(found)
         });
         let (hits, misses) = match key {
             AbiPlanKey::Owner(_) => (&self.owner_hits, &self.owner_misses),
@@ -500,6 +654,7 @@ impl AbiPlanCache {
         match &found {
             Some(plan) => {
                 hits.fetch_add(1, Ordering::Relaxed);
+                self.record_plan_size(plan);
                 self.cloned_param_slots
                     .fetch_add(plan.representation.params.len() as u64, Ordering::Relaxed);
             }
@@ -508,6 +663,13 @@ impl AbiPlanCache {
             }
         };
         found
+    }
+
+    pub(super) fn record_derivation(&self, elapsed: Option<Instant>) {
+        self.derivation_ns.fetch_add(
+            elapsed.map_or(0, |start| start.elapsed().as_nanos() as u64),
+            std::sync::atomic::Ordering::Relaxed,
+        );
     }
 
     pub(super) fn store(&self, key: AbiPlanKey, plan: &BackendFnAbiPlan) {
@@ -548,6 +710,19 @@ impl AbiPlanCache {
             duplicate_cold_stores: self.duplicate_cold_stores.load(Ordering::Relaxed),
             unique_keys: self.plans.lock().expect("abi plan cache poisoned").len() as u64,
             cloned_param_slots: self.cloned_param_slots.load(Ordering::Relaxed),
+            shared_lookups: self.shared_lookups.load(Ordering::Relaxed),
+            shared_hits: self.shared_hits.load(Ordering::Relaxed),
+            shared_misses: self.shared_misses.load(Ordering::Relaxed),
+            plan_clones: self.plan_clones.load(Ordering::Relaxed),
+            plan_clone_param_slots: self.plan_clone_param_slots.load(Ordering::Relaxed),
+            shared_lock_ns: self.shared_lock_ns.load(Ordering::Relaxed),
+            local_clone_ns: self.local_clone_ns.load(Ordering::Relaxed),
+            shared_clone_ns: self.shared_clone_ns.load(Ordering::Relaxed),
+            derivation_ns: self.derivation_ns.load(Ordering::Relaxed),
+            plan_size_histogram: std::array::from_fn(|i| {
+                self.plan_size_histogram[i].load(Ordering::Relaxed)
+            }),
+            plan_size_max: self.plan_size_max.load(Ordering::Relaxed),
         }
     }
 }
@@ -1477,6 +1652,7 @@ fn owner_abi_plan_impl(
     if let Some(plan) = scx.abi_plan_cached(&key) {
         return Ok(plan);
     }
+    let derivation_start = abi_plan_timing_enabled().then(Instant::now);
     let derived = if !requires_concrete_body_plan(ws, owner) {
         BackendFnAbiPlan::for_boundary_instance(ws, scx, owner)
     } else {
@@ -1489,6 +1665,7 @@ fn owner_abi_plan_impl(
         })?;
         BackendFnAbiPlan::for_concrete_plan(ws, scx, plan)
     };
+    scx.abi_plan_record_derivation(derivation_start);
     scx.abi_plan_store(key, &derived);
     Ok(derived)
 }

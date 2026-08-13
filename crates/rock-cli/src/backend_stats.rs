@@ -288,6 +288,32 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
             per_run(memo.duplicate_cold_stores),
             per_run(memo.cloned_param_slots),
         );
+        println!(
+            "                   {} shared lookups: {} hits, {} misses per run; {} plan clones \
+             ({} param slots)",
+            per_run(memo.shared_lookups),
+            per_run(memo.shared_hits),
+            per_run(memo.shared_misses),
+            per_run(memo.plan_clones),
+            per_run(memo.plan_clone_param_slots),
+        );
+        println!(
+            "                   plan sizes p50/p95/max: {}/{}/{} over {} returned plans per run",
+            memo.plan_size_p50(),
+            memo.plan_size_p95(),
+            memo.plan_size_max,
+            per_run(memo.plan_size_samples()),
+        );
+        if memo.shared_lock_ns > 0 || memo.local_clone_ns > 0 || memo.shared_clone_ns > 0 {
+            println!(
+                "                   timed (STONE_LOG=debug): shared lock {:.3} ms, local clone {:.3} ms, \
+                 shared clone {:.3} ms, derivation {:.3} ms per run",
+                memo.shared_lock_ns as f64 / per / 1_000_000.0,
+                memo.local_clone_ns as f64 / per / 1_000_000.0,
+                memo.shared_clone_ns as f64 / per / 1_000_000.0,
+                memo.derivation_ns as f64 / per / 1_000_000.0,
+            );
+        }
     }
     let traffic = &skull.arena_traffic;
     if traffic.rep_final.get_calls > 0 {

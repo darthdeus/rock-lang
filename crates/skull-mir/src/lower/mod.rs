@@ -344,6 +344,10 @@ impl ScalarCtx {
         self.abi_plans.store(key, plan);
     }
 
+    pub(crate) fn abi_plan_record_derivation(&self, started: Option<std::time::Instant>) {
+        self.abi_plans.record_derivation(started);
+    }
+
     /// ABI-plan memo counters. A full emission over a real workspace must show
     /// hits: the duplicate-derivation population it exists to remove is the
     /// normal case, not an optimization corner.

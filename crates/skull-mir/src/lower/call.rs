@@ -209,7 +209,10 @@ impl Builder<'_> {
         if let Some(plan) = self.scx.abi_plan_cached(&key) {
             return Ok(plan);
         }
+        let derivation_start = crate::lower::abi::abi_plan_timing_enabled()
+            .then(std::time::Instant::now);
         let plan = self.callee_abi_plan_uncached(inst)?;
+        self.scx.abi_plan_record_derivation(derivation_start);
         self.scx.abi_plan_store(key, &plan);
         Ok(plan)
     }
