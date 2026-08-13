@@ -17,6 +17,8 @@ mod replay_desync_tests;
 mod replay_flight_tests;
 #[path = "replay_bindings_tests.rs"]
 mod replay_bindings_tests;
+#[path = "action_layer_v2_landing_gaps.rs"]
+mod action_layer_v2_landing_gaps;
 #[path = "replay_restore_tests.rs"]
 mod replay_restore_tests;
 #[path = "replay_roundtrip_tests.rs"]
