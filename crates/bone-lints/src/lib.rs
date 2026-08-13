@@ -128,6 +128,7 @@ pub const KNOWN_LINTS: &[&str] = &[
     BACKEND_SIBLING_MISMATCH,
     METHOD_SYNTAX,
     ROW_ESCAPE,
+    RAW_INPUT_MIGRATION,
 ];
 
 /// Lints that are OFF unless the invocation names them. A MIGRATION lint has a
@@ -137,7 +138,7 @@ pub const KNOWN_LINTS: &[&str] = &[
 /// (`rock lint <path> --lints=method_syntax`) is what a file-at-a-time
 /// conversion needs: the sweep is readable, and the build/LSP surfaces stay
 /// quiet the whole time.
-pub const OPT_IN_LINTS: &[&str] = &[METHOD_SYNTAX, ROW_ESCAPE];
+pub const OPT_IN_LINTS: &[&str] = &[METHOD_SYNTAX, ROW_ESCAPE, RAW_INPUT_MIGRATION];
 
 /// What an invocation asks of the lint engine: which lints run, and the knobs
 /// the lints themselves take. The default tier is the catalog minus
@@ -285,6 +286,10 @@ fn flat_findings_with(
     }
     if sel.enabled(METHOD_SYNTAX) {
         let found = method_syntax_in_module(ws, module, types, src);
+        out.extend(filter_suppressed(found, src).iter().map(Finding::of));
+    }
+    if sel.enabled(RAW_INPUT_MIGRATION) {
+        let found = raw_input_sites_in_module(module);
         out.extend(filter_suppressed(found, src).iter().map(Finding::of));
     }
     out
@@ -1258,6 +1263,73 @@ impl LintFinding for MethodSyntax {
             format!(
                 "`{}` takes `{}` as its first parameter -- declare it as `fn {}.{}({})`",
                 self.name, self.receiver, self.receiver, self.name, self.params
+            ),
+        )
+        .with_level(CompilerErrorLevel::Advice)
+    }
+}
+
+/// One direct call to an input observation primitive in a cold module. This
+/// is an opt-in migration census: the checked HIR has already resolved scopes
+/// and rejected malformed calls, while the source span identifies the caller
+/// that still needs an action/editor/tool/text classification.
+#[derive(Clone, Debug)]
+pub struct RawInputSite {
+    pub name: Ustr,
+    pub span: Span,
+}
+
+/// Canonical lint name for the Phase 6 raw-input migration census.
+pub const RAW_INPUT_MIGRATION: &str = "action_layer_raw_input";
+
+const RAW_INPUT_NAMES: &[&str] = &[
+    "is_key_down",
+    "is_key_pressed",
+    "is_key_released",
+    "is_scancode_down",
+    "is_scancode_pressed",
+    "is_scancode_released",
+    "is_mouse_down",
+    "is_mouse_pressed",
+    "is_mouse_released",
+    "mouse_screen",
+    "stone_get_mouse_position",
+    "stone_get_global_mouse_position",
+    "is_pad_down",
+    "is_pad_pressed",
+    "is_pad_released",
+    "pad_axis_value",
+];
+
+/// Direct input observations are the census population. Action calls, input
+/// event injection, and tool-input helpers are intentionally separate APIs and
+/// therefore do not appear here.
+pub fn raw_input_sites_in_module(module: &Module) -> Vec<RawInputSite> {
+    let mut out = Vec::new();
+    for body in module.bodies.values() {
+        for (idx, expr) in body.expr_arena.iter() {
+            let Expr::Call { callee: Callee::Unresolved { name, .. }, .. } = expr else {
+                continue;
+            };
+            if RAW_INPUT_NAMES.contains(&name.as_str()) {
+                out.push(RawInputSite { name: *name, span: body.expr_spans[idx] });
+            }
+        }
+    }
+    out
+}
+
+impl LintFinding for RawInputSite {
+    const LINT: &'static str = RAW_INPUT_MIGRATION;
+    fn line(&self) -> usize {
+        self.span.line_range.0
+    }
+    fn to_diagnostic(&self) -> CompilerError {
+        CompilerError::new_with_label(
+            self.span,
+            format!(
+                "raw input query `{}` needs an action, editor/tool, text-input, or deliberate-remainder classification",
+                self.name
             ),
         )
         .with_level(CompilerErrorLevel::Advice)
