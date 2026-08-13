@@ -457,6 +457,7 @@ impl WebCompiler {
         let emitted = skull_codegen_js::emit::JsProgram {
             program: self.cache.current_program().to_string(),
             main_js_name: self.main_js_name.clone(),
+            code_artifact: self.cache.code_artifact().clone(),
         };
         let register_lines = shader_register_lines_js(self.project.workspace(), &self.cache)?;
         let game_js = assemble_web_program(&emitted, &register_lines, &preload, &game_dir);

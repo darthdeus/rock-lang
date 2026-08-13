@@ -7,6 +7,7 @@
 use bone_semantic::inference::Workspace;
 use comfy_la_arena::Idx;
 use skull_codegen_lua::{emit_named_framed, CodegenCtx, FrameCtx};
+use skull_mir::code_identity::CodeArtifact;
 use skull_mir::lower::CoroutinePlan;
 use skull_mir::mir::*;
 use skull_transform::{CoroLowered, STATE};
@@ -29,6 +30,16 @@ pub fn emit_coroutine(
     plan: &CoroutinePlan,
     func: &MirFunc,
 ) -> String {
+    emit_coroutine_with_artifact(ws, ctx, interner, plan, func).0
+}
+
+pub fn emit_coroutine_with_artifact(
+    ws: &Workspace,
+    ctx: &CodegenCtx,
+    interner: &skull_mir::monoty::MonoInterner,
+    plan: &CoroutinePlan,
+    func: &MirFunc,
+) -> (String, CodeArtifact) {
     // A co fn yielding a flat enum threads through the frame-slot channel (0 alloc
     // per yield); the channel's shape drives both the slot writes (transform) and
     // the generic/boxed `resume()` rebuild (constructor).
@@ -111,6 +122,13 @@ pub fn emit_coroutine(
     // Terminal-cleanup defers and lifecycle hooks are now ordinary functions,
     // with their converted lambda siblings emitted beside them. Their function
     // values are still stored in the coroutine constructor by name.
+    let mut code_artifact = CodeArtifact::from_mir_tree(&lowered.step);
+    for aux in &defer_funcs {
+        code_artifact.merge(CodeArtifact::from_mir_tree(aux));
+    }
+    for (_, aux) in &hook_funcs {
+        code_artifact.merge(CodeArtifact::from_mir_tree(aux));
+    }
     let mut defer_luas = String::new();
     for mut aux in defer_funcs {
         skull_transform::cleanup_with_nobox(ws, &mut aux);
@@ -141,7 +159,10 @@ pub fn emit_coroutine(
     }
     let ctor = emit_constructor(plan, &step_name, &lowered);
     let _ = lowered.num_states;
-    format!("{step_lua}{nested_luas}{defer_luas}{hook_luas}{ctor}")
+    (
+        format!("{step_lua}{nested_luas}{defer_luas}{hook_luas}{ctor}"),
+        code_artifact,
+    )
 }
 
 /// The constructor: build the state table (seed param fields + relocated

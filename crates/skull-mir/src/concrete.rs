@@ -91,6 +91,9 @@ pub struct ConcreteSignature {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConcreteBodyPlan {
     pub owner: ConcreteOwner,
+    /// The logical identity the concrete lowering belongs to. Function plans
+    /// carry their mono instance; global/decorator plans leave this empty.
+    pub code_identity: Option<crate::code_identity::CodeIdentity>,
     /// The owner's own expression and binding arena.
     pub types: ConcreteTypeTables,
     /// Struct-default domains entered while lowering this owner. The key is

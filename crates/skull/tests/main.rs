@@ -18,6 +18,8 @@ mod bounded_standalone_emission;
 mod capture_free_hoist;
 #[path = "closure_snapshot.rs"]
 mod closure_snapshot;
+#[path = "code_identity_artifact.rs"]
+mod code_identity_artifact;
 #[path = "coalesce_value_struct_literal_field_sentinel.rs"]
 mod coalesce_value_struct_literal_field_sentinel;
 #[path = "concrete_body.rs"]

@@ -727,6 +727,24 @@ pub struct StaticCell {
 #[derive(Clone, Debug, PartialEq)]
 pub struct MirFunc {
     pub name: Ustr,
+    /// Compiler-owned identity of the callable body, when this MIR is a
+    /// concrete Rock function or a closure/nested-function sibling.
+    pub code_identity: Option<crate::code_identity::CodeIdentity>,
+    /// Canonical ABI witness used to build `code_compatibility` after closure
+    /// conversion. It contains no backend symbol or build-local RepId.
+    pub code_abi_fingerprint: Option<String>,
+    /// Function-value ABI witnesses keyed by the pre-conversion lambda inst.
+    pub lambda_abi_fingerprints:
+        bone_semantic::prelude::FxHashMap<Idx<Inst>, String>,
+    /// Concrete logical target for each named function-value mint.
+    pub code_value_identities:
+        bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::code_identity::CodeIdentity>,
+    /// Identities of source-named nested functions keyed by their hoisted
+    /// backend spelling. The spelling is only the lookup key during lowering;
+    /// the stored value remains compiler-owned.
+    pub nested_fn_identities:
+        bone_semantic::prelude::FxHashMap<Ustr, crate::code_identity::CodeIdentity>,
+    pub code_compatibility: Option<crate::code_identity::CodeCompatibility>,
     pub params: Vec<Idx<Cell>>,
     /// The concrete function representation consumed by entry binding and
     /// return lowering. Calls retain the same plan in `call_abi_plans`.
@@ -887,6 +905,12 @@ impl MirFunc {
         let entry = blocks.alloc(Block::new());
         Self {
             name,
+            code_identity: None,
+            code_abi_fingerprint: None,
+            lambda_abi_fingerprints: Default::default(),
+            code_value_identities: Default::default(),
+            nested_fn_identities: Default::default(),
+            code_compatibility: None,
             params: Vec::new(),
             abi_plan: None,
             abi_representation: None,

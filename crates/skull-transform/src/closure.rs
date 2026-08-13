@@ -21,6 +21,10 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use comfy_la_arena::Idx;
 use crate::scope::{non_dominating_by_value_captures, Ownership, ScopeId, ScopeTree};
 use skull_mir::cfg::reachable_blocks_from;
+use skull_mir::code_identity::{
+    CaptureField, CaptureMode, CaptureSchema, CodeCompatibility, CodeIdentity, FrameSchema,
+    LambdaSiteId, LambdaTopologyFingerprint,
+};
 use skull_mir::mir::*;
 use ustr::Ustr;
 
@@ -95,6 +99,7 @@ pub fn convert_closures_framed(
     precomputed: Option<(&ScopeTree, &Ownership)>,
 ) {
     if !mf.insts.iter().any(|(_, i)| matches!(i, Inst::Lambda { .. })) {
+        refresh_owner_compatibility(mf, None, LambdaTopologyFingerprint::default());
         return;
     }
 
@@ -147,6 +152,22 @@ pub fn convert_closures_framed(
             }
         }
     }
+
+    let topology_sites: Vec<(LambdaSiteId, usize)> = ordered
+        .iter()
+        .filter_map(|&(_, sid)| {
+            let lambda = tree.scopes[sid].lambda?;
+            let site = mf
+                .inst_spans
+                .get(lambda)
+                .copied()
+                .and_then(LambdaSiteId::from_span)?;
+            let Inst::Lambda { params, .. } = &mf.insts[lambda] else { return None };
+            Some((site, params.len()))
+        })
+        .collect();
+    let topology = LambdaTopologyFingerprint::from_sites(&topology_sites);
+    refresh_owner_compatibility(mf, frame, topology);
 
     // Per live lambda scope: hoisted name, sorted captures, an env param cell
     // (only when it captures anything -- a capture-free body takes no env).
@@ -372,13 +393,43 @@ pub fn convert_closures_framed(
     // enclosing + sibling regions go unreachable, exactly as they do in `mf`. ---
     let mut nested: Vec<MirFunc> = Vec::with_capacity(ordered.len());
     for &(_k, sid) in &ordered {
+        let lambda = tree.scopes[sid].lambda.expect("ordered lambda scope has a creator");
         let mut params: Vec<Idx<Cell>> = Vec::new();
         if let Some(e) = env_plans.get(&sid).and_then(ClosureEnvPlan::env_cell) {
             params.push(e);
         }
         params.extend(tree.scopes[sid].params.iter().copied());
+        let code_identity = mf
+            .code_identity
+            .as_ref()
+            .and_then(CodeIdentity::enclosing)
+            .cloned()
+            .zip(
+                mf.inst_spans
+                    .get(lambda)
+                    .copied()
+                    .and_then(LambdaSiteId::from_span),
+            )
+            .map(|(enclosing, site)| CodeIdentity::Lambda { enclosing, site });
+        let capture = capture_schema(mf, env_plans[&sid].captures(), &boxed, frame);
+        let compatibility = Some(CodeCompatibility {
+            call_abi: mf
+                .lambda_abi_fingerprints
+                .get(&lambda)
+                .cloned()
+                .unwrap_or_else(|| "missing-lambda-abi".to_string()),
+            capture,
+            frame: frame_schema(frame),
+            lambda_topology: topology,
+        });
         nested.push(MirFunc {
             name: hoisted_name[&sid],
+            code_identity,
+            code_abi_fingerprint: mf.lambda_abi_fingerprints.get(&lambda).cloned(),
+            lambda_abi_fingerprints: mf.lambda_abi_fingerprints.clone(),
+            code_value_identities: mf.code_value_identities.clone(),
+            nested_fn_identities: mf.nested_fn_identities.clone(),
+            code_compatibility: compatibility,
             params,
             abi_plan: None,
             abi_representation: mf.abi_representation.clone(),
@@ -428,6 +479,63 @@ pub fn convert_closures_framed(
     // nested `fn`s into `mf.nested_fns`, and clobbering them would drop those
     // definitions from the chunk. Detached regions use the same sibling shape.
     mf.nested_fns.extend(nested);
+}
+
+fn frame_schema(frame: Option<&FrameInfo>) -> Option<FrameSchema> {
+    frame.map(|frame| {
+        let mut slots: Vec<u32> = frame.slots.values().copied().collect();
+        slots.sort_unstable();
+        FrameSchema { slots }
+    })
+}
+
+fn refresh_owner_compatibility(
+    mf: &mut MirFunc,
+    frame: Option<&FrameInfo>,
+    topology: LambdaTopologyFingerprint,
+) {
+    if mf.code_identity.is_none() {
+        return;
+    }
+    mf.code_compatibility = Some(CodeCompatibility {
+        call_abi: mf
+            .code_abi_fingerprint
+            .clone()
+            .unwrap_or_else(|| "missing-code-abi".to_string()),
+        capture: CaptureSchema::empty(),
+        frame: frame_schema(frame),
+        lambda_topology: topology,
+    });
+}
+
+fn capture_schema(
+    mf: &MirFunc,
+    captures: &[Idx<Cell>],
+    boxed: &HashSet<Idx<Cell>>,
+    frame: Option<&FrameInfo>,
+) -> CaptureSchema {
+    let mut complete = true;
+    let mut seen = HashSet::default();
+    let fields = captures
+        .iter()
+        .map(|cell| {
+            let name = mf.cells[*cell]
+                .name
+                .unwrap_or_else(|| Ustr::from("<unknown-capture>"));
+            if name == "<unknown-capture>" || !seen.insert(name) {
+                complete = false;
+            }
+            let mode = if frame.is_some_and(|f| f.s_cell == *cell || f.fields.contains(cell)) {
+                CaptureMode::Frame
+            } else if boxed.contains(cell) {
+                CaptureMode::Shared
+            } else {
+                CaptureMode::ByValue
+            };
+            CaptureField { name, mode }
+        })
+        .collect();
+    CaptureSchema { fields, complete }
 }
 
 /// Materialize `e.c<S>` -- a load of the env record `env` then its `s`-cell field

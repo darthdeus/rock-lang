@@ -442,6 +442,8 @@ fn extern_ret(
 /// The assembled new-path program plus the parity gap.
 pub struct MirEmit {
     pub lua: String,
+    /// Artifact-owned callable identities and their self-validating census.
+    pub code_artifact: skull_mir::code_identity::CodeArtifact,
     /// `(lua_name, reason)` for every definition the new path skipped.
     pub skipped: Vec<(String, String)>,
     /// Coarse per-stage time for the emit, in run order: HIR->MIR lowering, MIR
@@ -500,6 +502,8 @@ struct UnitOut {
     calls: Vec<FuncRef>,
     /// Specialized callees this definition needs emitted (see `Chunk::specs`).
     specs: Vec<skull_mir::bound::SpecDemand>,
+    /// Compiler-owned logical callable identities in this emitted body.
+    code_artifact: skull_mir::code_identity::CodeArtifact,
     /// Module-global names read/written (fn-as-value edges; see `Chunk`).
     global_names: Vec<Ustr>,
     times: PhaseTimes,
@@ -524,6 +528,7 @@ fn emit_lowered(
     out.calls = skull_mir::reach::call_targets(mf);
     out.global_names = skull_mir::reach::global_ref_names(mf);
     out.lua = lua;
+    out.code_artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree(mf);
     out.times.emit = t_emit;
     out.times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(t_emit);
 }
@@ -745,6 +750,7 @@ fn merge_units(
     pending_inits: &mut Vec<(Ustr, Ustr, String)>,
     calls: &mut Vec<FuncRef>,
     global_names: &mut Vec<Ustr>,
+    code_artifact: &mut skull_mir::code_identity::CodeArtifact,
     times: &mut PhaseTimes,
 ) {
     for u in results {
@@ -761,6 +767,7 @@ fn merge_units(
         }
         calls.extend(u.calls);
         global_names.extend(u.global_names);
+        code_artifact.merge(u.code_artifact);
         times.add(&u.times);
     }
 }
@@ -1039,6 +1046,8 @@ struct Chunk {
     /// Deduplicated program-wide by [`assemble`] -- many bodies ask for the same
     /// one, and it must be defined exactly once.
     specs: Vec<skull_mir::bound::SpecDemand>,
+    /// Compiler-owned logical callable identities in this emitted body.
+    code_artifact: skull_mir::code_identity::CodeArtifact,
 }
 
 #[derive(Clone, Copy)]
@@ -1258,6 +1267,9 @@ pub struct SkullEmitCache {
     /// By emitted body rather than by declaration, because a specialization is
     /// its own definition with its own symbol.
     emitted: FxHashSet<Instance>,
+    /// Logical callable table from the last complete assembly. Body overlays
+    /// preserve this identity table; a full/incremental assembly refreshes it.
+    code_artifact: skull_mir::code_identity::CodeArtifact,
     /// The compilation target's root directory; see [`is_library_module`].
     project_root: Option<String>,
     renderer_target: RendererTarget,
@@ -1350,7 +1362,13 @@ fn emit_coroutine_chunk(
             format!("cannot build concrete coroutine plan for `{}`: {}", f.name, reason.bucket()),
         )
     })?;
-    let lua = crate::coroutine_emit::emit_coroutine(ws, cg, scx.interner(), &plan, mf);
+    let (lua, code_artifact) = crate::coroutine_emit::emit_coroutine_with_artifact(
+        ws,
+        cg,
+        scx.interner(),
+        &plan,
+        mf,
+    );
     times.emit = te.elapsed();
     times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(times.emit);
     // No declaration edge here: "this instance instantiates that declaration" is
@@ -1367,6 +1385,7 @@ fn emit_coroutine_chunk(
         statics: mf.statics.clone(),
         calls: skull_mir::reach::call_targets(mf),
         specs,
+        code_artifact,
     })
 }
 
@@ -1522,6 +1541,7 @@ fn emit_body_chunk_with_mutation(
     );
     validate_emitted_body(ws, &ctx, &mf, &mut specs).map_err(|r| r.into_error(f.name_span, ""))?;
     collect_callee_frefs(&mf, &mut deps);
+    let code_artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree(&mf);
     let (direct_globals, direct_calls) = direct_refs(ws, &mf);
     skull_codegen_lua::regalloc_time_reset();
     let te = Instant::now();
@@ -1535,7 +1555,17 @@ fn emit_body_chunk_with_mutation(
     times.emit = te.elapsed();
     times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(times.emit);
     let calls = skull_mir::reach::call_targets(&mf);
-    Ok(Chunk { lua, deps, direct_globals, direct_calls, times, statics, calls, specs })
+    Ok(Chunk {
+        lua,
+        deps,
+        direct_globals,
+        direct_calls,
+        times,
+        statics,
+        calls,
+        specs,
+        code_artifact,
+    })
 }
 
 /// Emit each hoisted nested `fn` (and its own nested fns, depth-first) as a
@@ -1755,6 +1785,7 @@ fn emit_spec_chunk(
     validate_emitted_body(ws, &ctx, &mf, specs)
         .map_err(|r| r.into_error(f.name_span, &format!("cannot emit specialized `{name}`: ")))?;
     let specs = specs[before..].to_vec();
+    let code_artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree(&mf);
     let mut lua = emit_named(ws, cg, scx.interner(), name, &mf);
     let mut statics = mf.statics.clone();
     let mut nested = std::mem::take(&mut mf.nested_fns);
@@ -1770,6 +1801,7 @@ fn emit_spec_chunk(
         statics,
         calls: skull_mir::reach::call_targets(&mf),
         specs,
+        code_artifact,
     })
 }
 
@@ -2733,6 +2765,7 @@ fn assemble(
     let mut direct_globals: FxHashMap<Ustr, Vec<Ustr>> = FxHashMap::default();
     let mut direct_calls: FxHashMap<Ustr, Vec<Ustr>> = FxHashMap::default();
     let mut all_statics: Vec<skull_mir::mir::StaticCell> = Vec::new();
+    let mut code_artifact = skull_mir::code_identity::CodeArtifact::default();
 
     // IR-agnostic load-time scaffolding (shared with the old backend).
     let ts = Instant::now();
@@ -2760,7 +2793,18 @@ fn assemble(
     needed_specs.extend(deco_results.iter().flat_map(|u| u.specs.iter().cloned()));
     let mut always_emitted_calls: Vec<FuncRef> = Vec::new();
     let mut always_emitted_names: Vec<Ustr> = Vec::new();
-    merge_units(deco_results, &mut out, &mut skipped, &mut direct_globals, &mut direct_calls, &mut Vec::new(), &mut always_emitted_calls, &mut always_emitted_names, &mut times);
+    merge_units(
+        deco_results,
+        &mut out,
+        &mut skipped,
+        &mut direct_globals,
+        &mut direct_calls,
+        &mut Vec::new(),
+        &mut always_emitted_calls,
+        &mut always_emitted_names,
+        &mut code_artifact,
+        &mut times,
+    );
 
     // Global initializers are emitted below, in their original slot, but they are
     // LOWERED here: their call edges are reachability roots (a global init is
@@ -2791,7 +2835,18 @@ fn assemble(
     // Held back and appended after the fn-def skips so the reported order is
     // unchanged by the hoist.
     let mut global_skipped: Vec<(String, String)> = Vec::new();
-    merge_units(global_results, &mut globals_lua, &mut global_skipped, &mut direct_globals, &mut direct_calls, &mut pending_inits, &mut always_emitted_calls, &mut always_emitted_names, &mut times);
+    merge_units(
+        global_results,
+        &mut globals_lua,
+        &mut global_skipped,
+        &mut direct_globals,
+        &mut direct_calls,
+        &mut pending_inits,
+        &mut always_emitted_calls,
+        &mut always_emitted_names,
+        &mut code_artifact,
+        &mut times,
+    );
 
     // **Whole-program population, driven by `cache.lua_view` -- Phase 2.**
     // `should_emit_via_view` decides every ordinary/coroutine/inline
@@ -2974,6 +3029,7 @@ fn assemble(
                     times.add(&chunk.times);
                     if emit_def {
                         out.push_str(&chunk.lua);
+                        code_artifact.merge(chunk.code_artifact.clone());
                         // A dropped definition's `static` cells do not exist, so
                         // they must not be registered for hot-reload preservation.
                         all_statics.extend(chunk.statics.iter().cloned());
@@ -3019,6 +3075,9 @@ fn assemble(
         &mut all_statics,
         &mut out,
     ));
+    for (_, chunk) in built_specs.iter() {
+        code_artifact.merge(chunk.code_artifact.clone());
+    }
 
     // Every emitted definition has now been visited, so this is the earliest
     // point where the whole rejection list exists. Anything past here is
@@ -3173,7 +3232,7 @@ fn assemble(
         }
     }
     emitted_bodies.extend(spec_chunks.keys().cloned());
-    Ok((MirEmit { lua: out, skipped, phases }, emitted_bodies))
+    Ok((MirEmit { lua: out, code_artifact, skipped, phases }, emitted_bodies))
 }
 
 /// Full emit: populate the chunk cache for every retained ordinary/coroutine
@@ -3525,6 +3584,7 @@ fn emit_full_in_with_mutation(
         shader_registrations,
         shader_view,
         emitted: FxHashSet::default(),
+        code_artifact: skull_mir::code_identity::CodeArtifact::default(),
         project_root: project_root.map(str::to_string),
         renderer_target,
     };
@@ -3532,6 +3592,7 @@ fn emit_full_in_with_mutation(
     let (emit, emitted) = assemble(ws, &cache.cg, &cache.scx, &cache, &mut built_specs)?;
     let mut cache = cache;
     cache.emitted = emitted;
+    cache.code_artifact = emit.code_artifact.clone();
     cache.absorb_spec_chunks(built_specs);
     Ok((emit, cache))
 }
@@ -3997,6 +4058,7 @@ pub fn emit_incremental(
     let mut built_specs: Vec<(Instance, Chunk)> = Vec::new();
     let (mut emit, emitted) = assemble(ws, &cache.cg, &cache.scx, cache, &mut built_specs)?;
     cache.emitted = emitted;
+    cache.code_artifact = emit.code_artifact.clone();
     cache.absorb_spec_chunks(built_specs);
     let reassemble = t_asm.elapsed();
     emit.phases.push(("incr: re-emit affected bodies", reemit));
@@ -4195,7 +4257,12 @@ fn assemble_overlay(
         out.push_str(&cache.shader_registrations.lua);
     }
 
-    MirEmit { lua: out, skipped, phases: Vec::new() }
+    MirEmit {
+        lua: out,
+        code_artifact: cache.code_artifact.clone(),
+        skipped,
+        phases: Vec::new(),
+    }
 }
 
 /// `__rock_rebind_system("<name>", <func>)` for each CHANGED decorated function

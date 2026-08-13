@@ -943,6 +943,7 @@ fn concrete_plan(
     let foreign_domains = foreign_domain_tables(ws, g, default_domains.chain(site_domains))?;
     Ok(ConcreteBodyPlan {
         owner: ConcreteOwner::Function(inst.clone()),
+        code_identity: Some(skull_mir::code_identity::CodeIdentity::Named(inst.clone())),
         types: ConcreteTypeTables {
             expr_types: body.expr_types.clone(),
             binding_types: body.binding_types.clone(),
@@ -1053,6 +1054,7 @@ fn concrete_always_plan(
     };
     Ok(Some(ConcreteBodyPlan {
         owner,
+        code_identity: None,
         types,
         foreign_domains,
         signature,

@@ -1145,6 +1145,8 @@ fn lower_body(
     // own ABI comes from the one plan the calls that target it read.
     let abi = BackendFnAbiPlan::for_concrete_plan(ws, scx, concrete_plan);
     f.abi_plan = Some(abi.clone());
+    f.code_identity = Some(crate::code_identity::CodeIdentity::Named(subject.clone()));
+    f.code_abi_fingerprint = Some(abi.logical_fingerprint());
     let param_reps = abi.representation().params().to_vec();
     let ret_rep = abi.representation().result();
     let mut b = Builder {

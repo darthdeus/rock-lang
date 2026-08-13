@@ -1000,6 +1000,15 @@ fn import_spec_bindings(
             func.fn_value_symbols.insert(new_id, *fref);
         }
     }
+    for (old_id, identity) in &callee.code_value_identities {
+        if let Some(&new_id) = inst_map.get(old_id) {
+            func.code_value_identities.insert(new_id, identity.clone());
+        }
+    }
+    for (name, identity) in &callee.nested_fn_identities {
+        let name = nested_names.get(name).copied().unwrap_or(*name);
+        func.nested_fn_identities.insert(name, identity.clone());
+    }
     for n in &callee.hoisted_fn_globals {
         let n = nested_names.get(n).copied().unwrap_or(*n);
         if !func.hoisted_fn_globals.contains(&n) {

@@ -99,7 +99,11 @@ impl Builder<'_> {
             Expr::Var(b) if self.nested_fn_globals.contains_key(&raw(b)) => {
                 let hoisted = self.nested_fn_globals[&raw(b)].hoisted;
                 self.f.hoisted_fn_globals.push(hoisted);
-                Ok(self.emit_cur(Inst::Global(hoisted)))
+                let id = self.emit_cur(Inst::Global(hoisted));
+                if let Some(identity) = self.f.nested_fn_identities.get(&hoisted).cloned() {
+                    self.f.code_value_identities.insert(id, identity);
+                }
+                Ok(id)
             }
             // A whole-tuple use of a name bound to slot cells: rebuild and pack.
             // Packing a `nobox` element here is exactly how a whole-tuple escape
@@ -138,6 +142,19 @@ impl Builder<'_> {
                 // and a name comparison could not tell them apart.
                 if let Some(fref) = fref {
                     self.f.fn_value_symbols.insert(id, fref);
+                    if let Some(instance) = self
+                        .concrete_callee_for_site_op(e, crate::site::SiteOp::FnValue)?
+                    {
+                        // Foreign, inline and intrinsic values remain explicit
+                        // backend boundaries; only a compiler-owned Rock body
+                        // gets a logical CodeIdentity.
+                        if crate::lower::requires_concrete_body_plan(self.ws, &instance) {
+                            self.f.code_value_identities.insert(
+                                id,
+                                crate::code_identity::CodeIdentity::Named(instance),
+                            );
+                        }
+                    }
                 }
                 Ok(id)
             }
@@ -465,7 +482,12 @@ impl Builder<'_> {
                     self.in_defer_body = saved_in_defer;
                     self.ret_rep = saved_ret_rep;
                     self.cur = saved;
-                    return Ok(self.emit_cur(Inst::Lambda { params: param_cells, entry }));
+                    let id = self.emit_cur(Inst::Lambda { params: param_cells, entry });
+                    self.f.lambda_abi_fingerprints.insert(
+                        id,
+                        lam_plan.logical_fingerprint(&self.scx.rep_arena()),
+                    );
+                    return Ok(id);
                 }
                 match self.result_tuple() {
                     // A splatting tuple return needs the body as a repr, so a
@@ -492,7 +514,12 @@ impl Builder<'_> {
                 self.in_defer_body = saved_in_defer;
                 self.ret_rep = saved_ret_rep;
                 self.cur = saved;
-                Ok(self.emit_cur(Inst::Lambda { params: param_cells, entry }))
+                let id = self.emit_cur(Inst::Lambda { params: param_cells, entry });
+                self.f.lambda_abi_fingerprints.insert(
+                    id,
+                    lam_plan.logical_fingerprint(&self.scx.rep_arena()),
+                );
+                Ok(id)
             }
 
             // `as` is identity at runtime EXCEPT `float as int`, which floors

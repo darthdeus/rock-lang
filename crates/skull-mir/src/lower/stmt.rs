@@ -123,6 +123,15 @@ impl Builder<'_> {
         self.nested_fn_globals.insert(raw(name), abi.clone());
 
         let mf = MirFunc::new(hoisted);
+        let nested_identity = self
+            .site_owner
+            .clone()
+            .zip(crate::code_identity::LambdaSiteId::from_span(self.body.expr_spans[body]))
+            .map(|(enclosing, site)| crate::code_identity::CodeIdentity::Nested {
+                enclosing,
+                site,
+                name: sname,
+            });
         let entry = mf.entry();
         let mut child = Builder {
             ws: self.ws,
@@ -168,6 +177,26 @@ impl Builder<'_> {
         };
 
         child.f.abi_representation = Some(abi.representation.clone());
+        child.f.code_identity = nested_identity;
+        child.f.code_abi_fingerprint = Some(
+            abi.representation.logical_fingerprint(&self.scx.rep_arena()),
+        );
+        if child.f.code_identity.is_some() {
+            child.f.code_compatibility = Some(crate::code_identity::CodeCompatibility {
+                call_abi: child
+                    .f
+                    .code_abi_fingerprint
+                    .clone()
+                    .expect("nested ABI fingerprint"),
+                capture: crate::code_identity::CaptureSchema::empty(),
+                frame: None,
+                lambda_topology: Default::default(),
+            });
+        }
+        if let Some(identity) = child.f.code_identity.clone() {
+            self.f.nested_fn_identities.insert(hoisted, identity);
+        }
+        child.f.nested_fn_identities = self.f.nested_fn_identities.clone();
 
         for (i, pb) in params.into_iter().enumerate() {
             let pname = child.body.binding_arena[pb].name;

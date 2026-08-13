@@ -176,6 +176,7 @@ fn main() {
     let v2 = scx.interner().intern(nominal("V2"));
     let plan = ConcreteBodyPlan {
         owner: ConcreteOwner::Function(Instance::base(sink)),
+        code_identity: Some(skull_mir::code_identity::CodeIdentity::Named(Instance::base(sink))),
         types: ConcreteTypeTables::default(),
         foreign_domains: Default::default(),
         signature: ConcreteSignature {
@@ -211,15 +212,17 @@ fn main() { print("{generic_tuple_take((V2 { x: 1.0, y: 2.0 }, 3.0)).0.x}") }
     let take = func_ref(&ws, "generic_tuple_take");
     let v2_ty = nominal("V2");
     let tuple = scx.interner().intern(MonoTy::Tuple(vec![v2_ty, MonoTy::Float]));
+    let take_instance = Instance::intern(
+        scx.interner(),
+        take,
+        vec![MonoTy::Tuple(vec![MonoTy::App {
+            ctor: MonoCtor::Nominal(Ustr::from("V2")),
+            params: Vec::new(),
+        }])],
+    );
     let plan = ConcreteBodyPlan {
-        owner: ConcreteOwner::Function(Instance::intern(
-            scx.interner(),
-            take,
-            vec![MonoTy::Tuple(vec![MonoTy::App {
-                ctor: MonoCtor::Nominal(Ustr::from("V2")),
-                params: Vec::new(),
-            }])],
-        )),
+        owner: ConcreteOwner::Function(take_instance.clone()),
+        code_identity: Some(skull_mir::code_identity::CodeIdentity::Named(take_instance)),
         types: ConcreteTypeTables::default(),
         foreign_domains: Default::default(),
         signature: ConcreteSignature {
@@ -243,6 +246,7 @@ fn main() { print("{generic_tuple_take((V2 { x: 1.0, y: 2.0 }, 3.0)).0.x}") }
     let written = func_ref(&ws, "written_tuple");
     let written_plan = ConcreteBodyPlan {
         owner: ConcreteOwner::Function(Instance::base(written)),
+        code_identity: Some(skull_mir::code_identity::CodeIdentity::Named(Instance::base(written))),
         types: ConcreteTypeTables::default(),
         foreign_domains: Default::default(),
         signature: ConcreteSignature {

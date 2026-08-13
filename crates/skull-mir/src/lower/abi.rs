@@ -353,6 +353,24 @@ impl FunctionRepPlan {
     pub fn uses_scalar_abi(&self) -> bool {
         self.scalar_abi
     }
+
+    /// A build-independent description of the function-value wire. `RepId`s
+    /// are only lookup handles into `arena`; the returned string contains the
+    /// recursive layouts they name, so a later artifact can compare it without
+    /// depending on arena allocation order.
+    pub fn logical_fingerprint(&self, arena: &RepArena) -> String {
+        let params = self
+            .params
+            .iter()
+            .map(|id| rep_logical_fingerprint(arena, *id))
+            .collect::<Vec<_>>()
+            .join(",");
+        let result = self
+            .result
+            .map(|id| rep_logical_fingerprint(arena, id))
+            .unwrap_or_else(|| "none".to_string());
+        format!("params=[{params}];result={result};lanes={};scalar={}", self.return_lanes, self.scalar_abi)
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -1359,6 +1377,12 @@ impl BackendFnAbiPlan {
         &self.representation
     }
 
+    /// The ABI compatibility witness for a code slot. It deliberately expands
+    /// the representation through the arena instead of retaining a `RepId`.
+    pub fn logical_fingerprint(&self) -> String {
+        format!("target={:?};{}", self.target, self.representation.logical_fingerprint(&self.arena))
+    }
+
     pub fn rep_plan(&self, id: RepId) -> RepPlan {
         self.arena.get(id)
     }
@@ -1430,4 +1454,32 @@ impl BackendFnAbiPlan {
         self.uses_scalar_abi()
             .then(|| self.param_shapes().iter().map(RetSlot::slot_count).collect())
     }
+}
+
+fn rep_logical_fingerprint(arena: &RepArena, id: RepId) -> String {
+    let plan = arena.get(id);
+    let layout = match plan.layout() {
+        RepLayout::Opaque => "opaque".to_string(),
+        RepLayout::Foreign { reason } => format!("foreign:{reason}"),
+        RepLayout::Leaves(_) => format!(
+            "leaves:{:?}:{:?}",
+            plan.leaf_paths().unwrap_or_default(),
+            plan.presence_flags().unwrap_or_default()
+        ),
+        RepLayout::Tuple { slots, nullable } => format!(
+            "tuple(nullable={nullable};[{}])",
+            slots
+                .iter()
+                .map(|slot| rep_logical_fingerprint(arena, *slot))
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+    };
+    format!(
+        "{layout};storage={:?};column={};nobox={};lanes={}",
+        plan.value_storage(),
+        plan.column_eligible(),
+        plan.nobox(),
+        plan.lanes(arena)
+    )
 }

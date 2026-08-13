@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use bone_semantic::inference::Workspace;
 use comfy_la_arena::Idx;
+use skull_mir::code_identity::CodeArtifact;
 use skull_mir::intrinsics::{Emission, IntrinsicTable};
 use skull_mir::instance::Instance;
 use skull_mir::lower::BackendFnAbiPlan;
@@ -2651,7 +2652,7 @@ pub fn emit_with_closure(
             .get(&Instance::base(*fr))
             .ok_or_else(|| err(format!("JS: no concrete plan for `{name}`")))?;
         match emit_lowered_fn(ws, scx.interner(), mf, name, plan, &st.names, &hoisted, &st.gctx) {
-            Ok(js) => out.push_str(&js),
+            Ok((js, _code_artifact)) => out.push_str(&js),
             Err(e) => rejections.push((name.clone(), e)),
         }
     }
@@ -2887,7 +2888,11 @@ pub fn emit_program(
         nm
     });
     let (build, _) = build_program_session(ws, &scx, &extra)?;
-    Ok(JsProgram { program: build.program, main_js_name })
+    Ok(JsProgram {
+        program: build.program,
+        main_js_name,
+        code_artifact: build.code_artifact,
+    })
 }
 
 pub fn emit_program_cached(
@@ -2911,6 +2916,7 @@ pub fn emit_program_cached(
     let program = JsProgram {
         program: build.program.clone(),
         main_js_name,
+        code_artifact: build.code_artifact.clone(),
     };
     let cache = JsEmitCache {
         build,
@@ -3089,6 +3095,10 @@ fn assemble_program_core(
 
     let mut out = String::new();
     let mut stable = String::new();
+    let mut code_artifact = CodeArtifact::default();
+    for (_, mf) in &deco_bodies {
+        code_artifact.merge(CodeArtifact::from_mir_tree(mf));
+    }
     let enum_singletons = emit_enum_singletons(&st.gctx, &st.enum_defs);
     out.push_str(&enum_singletons);
     stable.push_str(&enum_singletons);
@@ -3125,9 +3135,13 @@ fn assemble_program_core(
             .get(&Instance::base(*fr))
             .ok_or_else(|| err(format!("JS: no concrete plan for `{name}`")))?;
         match emit_lowered_fn(ws, scx.interner(), mf, name, plan, &st.names, &hoisted, &st.gctx) {
-            Ok(js) => {
+            Ok((js, artifact)) => {
                 out.push_str(&js);
-                chunks.insert(*fr, JsChunk { js, statics: collect_statics(mf) });
+                code_artifact.merge(artifact.clone());
+                chunks.insert(
+                    *fr,
+                    JsChunk { js, statics: collect_statics(mf) },
+                );
             }
             Err(e) => rejections.push((name.clone(), e)),
         }
@@ -3138,6 +3152,7 @@ fn assemble_program_core(
     let spec_chunks = emit_spec_chunks(ws, scx.interner(), &st, &hoisted, &mut rejections);
     for chunk in ordered_spec_chunks(&spec_chunks, &st.spec_lowered) {
         out.push_str(&chunk.js);
+        code_artifact.merge(chunk.code_artifact.clone());
     }
     // 2b. inline(js) fns, emitted verbatim.
     for body in &st.inline_js {
@@ -3161,6 +3176,7 @@ fn assemble_program_core(
             }
         };
         out.push_str(&definition);
+        code_artifact.merge(CodeArtifact::from_mir_tree(&g.mf));
         if g.is_const {
             const_chunks.entry(g.name).or_insert_with(String::new).push_str(&definition);
         } else {
@@ -3194,6 +3210,7 @@ fn assemble_program_core(
         stable,
         chunks,
         spec_chunks,
+        code_artifact,
         const_chunks,
         const_order,
     })
@@ -3266,6 +3283,8 @@ fn force_shader_register_sibling(
 pub struct JsProgram {
     pub program: String,
     pub main_js_name: Option<String>,
+    /// Compiler-owned logical callable identities for the emitted JS artifact.
+    pub code_artifact: CodeArtifact,
 }
 
 struct JsChunk {
@@ -3276,6 +3295,7 @@ struct JsChunk {
 struct JsSpecChunk {
     name: String,
     js: String,
+    code_artifact: CodeArtifact,
 }
 
 struct ProgramBuild {
@@ -3283,6 +3303,7 @@ struct ProgramBuild {
     stable: String,
     chunks: HashMap<FuncRef, JsChunk>,
     spec_chunks: HashMap<Instance, JsSpecChunk>,
+    code_artifact: CodeArtifact,
     const_chunks: HashMap<ustr::Ustr, String>,
     const_order: Vec<ustr::Ustr>,
 }
@@ -3318,6 +3339,10 @@ impl JsEmitCache {
 
     pub fn graph_update(&self) -> Option<JsGraphUpdate> {
         self.session.last_update.clone()
+    }
+
+    pub fn code_artifact(&self) -> &CodeArtifact {
+        &self.build.code_artifact
     }
 }
 
@@ -4250,7 +4275,7 @@ fn emit_lowered_fn(
     names: &CalleeNames,
     hoisted: &HashSet<ustr::Ustr>,
     gctx: &GlobalCtx,
-) -> Result<String, CompilerError> {
+) -> Result<(String, CodeArtifact), CompilerError> {
     if mf.is_coroutine {
         let plan = skull_mir::lower::CoroutinePlan::from_concrete_plan(
             ws,
@@ -4265,7 +4290,7 @@ fn emit_lowered_fn(
     for nf in &mf.nested_fns {
         out.push_str(&emit_fn_with_callees(ws, nf, nf.name.as_str(), names, hoisted, gctx)?);
     }
-    Ok(out)
+    Ok((out, CodeArtifact::from_mir_tree(mf)))
 }
 
 /// The standalone specialized copies, each under its `spec_fn_name`.
@@ -4295,8 +4320,11 @@ fn emit_spec_chunks(
             }
         };
         match emit_lowered_fn(ws, interner, mf, name, plan, &st.names, hoisted, &st.gctx) {
-            Ok(js) => {
-                chunks.insert(inst.clone(), JsSpecChunk { name: name.clone(), js });
+            Ok((js, code_artifact)) => {
+                chunks.insert(
+                    inst.clone(),
+                    JsSpecChunk { name: name.clone(), js, code_artifact },
+                );
             }
             Err(e) => rejections.push((name.clone(), e)),
         }
@@ -5636,7 +5664,7 @@ fn emit_coroutine_js(
     callees: &CalleeNames,
     hoisted: &HashSet<ustr::Ustr>,
     globals: &GlobalCtx,
-) -> Result<String, CompilerError> {
+) -> Result<(String, CodeArtifact), CompilerError> {
     let channel = plan.channel.as_ref();
     let mut lowered = skull_transform::transform_coroutine(mf, channel);
     let resume_arg = mf.resume_arg.ok_or_else(|| err("co fn must carry a resume-arg cell"))?;
@@ -5699,6 +5727,13 @@ fn emit_coroutine_js(
         lowered.s_cell,
         lowered.frame_plan.slots(),
     );
+    let mut code_artifact = CodeArtifact::from_mir_tree(&lowered.step);
+    for aux in &defer_funcs {
+        code_artifact.merge(CodeArtifact::from_mir_tree(aux));
+    }
+    for (_, aux) in &hook_funcs {
+        code_artifact.merge(CodeArtifact::from_mir_tree(aux));
+    }
     let mut out = emit_fn_trampoline(
         ws,
         &lowered.step,
@@ -5768,7 +5803,7 @@ fn emit_coroutine_js(
         }
     }
     out.push_str(&emit_js_constructor(plan, &step_name, &lowered)?);
-    Ok(out)
+    Ok((out, code_artifact))
 }
 
 /// The JS Coroutine constructor + per-co-fn `__resume` (and `__advance` on the
