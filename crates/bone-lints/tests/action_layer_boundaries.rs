@@ -3,6 +3,8 @@ use bone_lints::{
     RAW_INPUT_MIGRATION,
 };
 use bone_semantic::prelude::*;
+use std::fs;
+use std::path::Path;
 
 fn findings(file: &str, src: &str, lint: &str) -> Vec<Finding> {
     let ast = skull_parser::parse_module_clean(src, Ustr::from(file)).expect("parse");
@@ -16,6 +18,62 @@ fn findings(file: &str, src: &str, lint: &str) -> Vec<Finding> {
         &sources,
         &LintOptions::only([lint.to_owned()]),
     )
+}
+
+fn quoted_after(line: &str, marker: &str) -> Option<String> {
+    let start = line.find(marker)? + marker.len();
+    let end = line[start..].find('"')?;
+    Some(line[start..start + end].to_owned())
+}
+
+#[test]
+fn mag_action_globals_are_keyed_to_the_canonical_specs() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../mag/actions.rock");
+    let source = fs::read_to_string(path).expect("mag action source");
+    let specs: Vec<String> = source
+        .lines()
+        .filter_map(|line| quoted_after(line, "MagActionSpec { name: \""))
+        .collect();
+    let globals: Vec<(String, String)> = source
+        .lines()
+        .filter(|line| line.starts_with("global ACT_"))
+        .filter_map(|line| {
+            let global = line
+                .strip_prefix("global ACT_")?
+                .split_once(':')?
+                .0
+                .to_lowercase();
+            Some((global, quoted_after(line, "= mag_action(\"")?))
+        })
+        .collect();
+
+    assert_eq!(specs.len(), 39, "canonical spec population must be exact");
+    assert_eq!(
+        globals.len(),
+        39,
+        "production global population must be exact"
+    );
+    assert_eq!(specs.iter().collect::<FxHashSet<_>>().len(), 39);
+    assert_eq!(
+        globals
+            .iter()
+            .map(|(_, key)| key)
+            .collect::<FxHashSet<_>>()
+            .len(),
+        39
+    );
+    let mut reordered_specs = specs.clone();
+    reordered_specs.reverse();
+    for (global_name, key) in &globals {
+        assert_eq!(
+            global_name, key,
+            "global identity must be keyed by its action name"
+        );
+        assert!(
+            reordered_specs.contains(key),
+            "global key is not a canonical spec: {key}"
+        );
+    }
 }
 
 #[test]
@@ -58,8 +116,15 @@ fn main() { gameplay() }
 #[test]
 fn caller_census_rejects_an_empty_production_declaration_population() {
     let found = findings("mag/empty.rock", "fn main() {}", ACTION_CALLERS);
-    assert_eq!(found.len(), 1, "empty population must not be 0/0: {found:?}");
-    assert!(found[0].error.message.contains("no production Mag ACT_* declarations"));
+    assert_eq!(
+        found.len(),
+        1,
+        "empty population must not be 0/0: {found:?}"
+    );
+    assert!(found[0]
+        .error
+        .message
+        .contains("no production Mag ACT_* declarations"));
 }
 
 #[test]
@@ -78,7 +143,11 @@ fn main() { gameplay() }
     assert!(classified.is_empty(), "classified site: {classified:?}");
 
     let census = findings("mag/editor_tools.rock", src, RAW_INPUT_MIGRATION);
-    assert_eq!(census.len(), 1, "the live census remains unsuppressed: {census:?}");
+    assert_eq!(
+        census.len(),
+        1,
+        "the live census remains unsuppressed: {census:?}"
+    );
 
     let mutated = src.replace("// action-layer: editor_tool_debug\n", "");
     let found = findings("mag/editor_tools.rock", &mutated, RAW_INPUT_CLASSIFICATION);
@@ -114,5 +183,9 @@ fn gameplay() {
 fn main() { gameplay() }
 "#;
     let found = findings("mag/editor_tools.rock", src, RAW_INPUT_CLASSIFICATION);
-    assert_eq!(found.len(), 2, "one marker cannot classify two sites: {found:?}");
+    assert_eq!(
+        found.len(),
+        2,
+        "one marker cannot classify two sites: {found:?}"
+    );
 }
