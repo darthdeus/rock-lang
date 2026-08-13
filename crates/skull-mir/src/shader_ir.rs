@@ -42,7 +42,7 @@ pub enum GlslProfile {
 
 use crate::gpu_layout::{ArrayMemberDecl, AttrKind, SamplerKind, WireKind};
 use crate::instance::Instance;
-use crate::mir::{FuncRef, MirFunc};
+use crate::mir::{FuncRef, Lit, MirFunc};
 use crate::monoty::MonoInterner;
 use bone_semantic::inference::Workspace;
 use std::sync::Arc;
@@ -318,6 +318,9 @@ pub struct ShaderStageIr {
     /// GLSL happens to need it because it has no forward declarations.
     pub order: Vec<ShaderInstance>,
     pub bodies: rustc_hash::FxHashMap<ShaderInstance, MirFunc>,
+    /// Literals proven by the target-neutral shader planner for immutable
+    /// globals read by this stage.
+    pub const_globals: rustc_hash::FxHashMap<Ustr, Lit>,
 }
 
 impl ShaderStageIr {
