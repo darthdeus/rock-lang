@@ -1076,11 +1076,11 @@ fn shader_corpus_has_per_shader_profile_and_interface_evidence() {
         .iter()
         .map(|row| (row.key.project.as_str(), row.key.shader.as_str()))
         .collect();
-    assert_eq!(shader_keys.len(), 546, "shader population moved");
-    assert_eq!(rows.len(), 1092, "profile row population moved");
+    assert_eq!(shader_keys.len(), 547, "shader population moved");
+    assert_eq!(rows.len(), 1094, "profile row population moved");
     assert_eq!(
         rows.iter().map(|row| row.stage_sections).sum::<usize>(),
-        2184,
+        2188,
         "stage-section denominator moved"
     );
     assert!(

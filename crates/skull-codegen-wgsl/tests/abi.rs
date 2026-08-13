@@ -70,9 +70,9 @@ fn wgsl_and_glsl_project_the_same_interface_independently() {
         vec![Ustr::from("scene"), Ustr::from("bloom")]
     );
     assert_eq!(wgsl.textures[0].texture_binding, 2);
-    assert_eq!(wgsl.textures[0].sampler_binding, 3);
+    assert_eq!(wgsl.textures[0].sampler_binding, Some(3));
     assert_eq!(wgsl.textures[1].texture_binding, 4);
-    assert_eq!(wgsl.textures[1].sampler_binding, 5);
+    assert_eq!(wgsl.textures[1].sampler_binding, Some(5));
     assert_eq!(
         glsl_block.0, wgsl.textures[0].texture_binding,
         "the independent target projections use different binding spaces"
@@ -152,6 +152,28 @@ fn abi_validation_rejects_swapped_texture_bindings() {
         plan.validate(&iface, Span::default()).is_err(),
         "swapped logical texture slots must be rejected"
     );
+}
+
+#[test]
+fn integer_texture_slots_are_sampler_free_and_keep_logical_order() {
+    let mut iface = fixture();
+    iface.textures.as_mut().unwrap().samplers = vec![
+        (Ustr::from("ids"), SamplerKind::Int),
+        (Ustr::from("scene"), SamplerKind::Float),
+    ];
+    let plan = WgslAbiPlan::wgsl(&iface, Span::default()).expect("integer texture projection");
+    assert_eq!(plan.textures[0].slot, 0);
+    assert_eq!(plan.textures[0].texture_binding, 2);
+    assert_eq!(plan.textures[0].sampler_binding, None);
+    assert_eq!(plan.textures[1].slot, 1);
+    assert_eq!(plan.textures[1].texture_binding, 3);
+    assert_eq!(plan.textures[1].sampler_binding, Some(4));
+    let wire = plan.wire();
+    assert!(wire.contains("texture 0 ids int 2 none f"));
+    assert!(wire.contains("texture 1 scene float 3 4 f"));
+    let parsed = WgslAbi::parse(&wire).expect("sampler-free integer wire parses");
+    assert_eq!(parsed.textures[0].sampler_binding, None);
+    assert_eq!(parsed.textures[1].sampler_binding, Some(4));
 }
 
 #[test]

@@ -518,12 +518,13 @@ pub struct Args {
     /// conservative default in `run_sim::resolve_jobs`.
     pub jobs: Option<usize>,
     /// For `rock sim`: force one fresh process per entry. This is the permanent
-    /// reference-oracle surface (`docs/sim-speed-plan.md`), today also the
-    /// default; it stays meaningful when boot-checkpoint workers become one.
+    /// fresh-process reference oracle; the ordinary default uses eligible
+    /// boot-checkpoint workers, including rendered sims.
     pub isolated: bool,
-    /// For `rock sim`: opt into boot-checkpoint workers -- eligible entries
-    /// grouped by boot signature share one booted process with the B2 restore
-    /// boundary between them. Ineligible entries stay isolated with a reason.
+    /// For `rock sim`: explicitly force the boot-checkpoint worker path. The
+    /// default already uses it where eligible; this spelling makes fallback a
+    /// rejection for diagnostics. Ineligible entries stay isolated with a
+    /// reason.
     pub workers: bool,
     /// For `rock sim <project>`: the B4 corpus gate. Runs the whole project in
     /// three predecessor orders and compares every sim against its own
@@ -704,9 +705,9 @@ impl Args {
                 .help("For `rock sim`: run up to N sim children concurrently (default 4, 1 = serial). Applies to the whole-suite and multi-name forms."))
             .arg(Arg::new("isolated").long("isolated").action(ArgAction::SetTrue)
                 .conflicts_with("workers")
-                .help("For `rock sim`: force one fresh process per entry -- the permanent reference oracle. The default is the hybrid: render-skipped entries share boot-checkpoint workers, rendered entries run isolated with a reported reason."))
+                .help("For `rock sim`: force one fresh process per entry -- the permanent fresh-process reference oracle. The default uses eligible boot-checkpoint workers, including rendered sims."))
             .arg(Arg::new("workers").long("workers").action(ArgAction::SetTrue)
-                .help("For `rock sim`: force RENDERED sims into shared boot-checkpoint workers too, which the hybrid default isolates -- the diagnostic spelling, and how the differential and multi-order gates measure that class. Hot-reload sims, $OUT-interpolating env and SIM_WORKER_ISOLATED still run isolated with a reported reason."))
+                .help("For `rock sim`: explicitly require boot-checkpoint workers. The default already uses the same worker policy, including eligible rendered sims; this diagnostic/force spelling rejects where the default may fall back. Hot-reload sims, $OUT-interpolating env and SIM_WORKER_ISOLATED still run isolated with a reported reason."))
             .arg(Arg::new("multi-order").long("multi-order").action(ArgAction::SetTrue)
                 .conflicts_with_all(["isolated", "workers"])
                 .help("For `rock sim <project> [name...]`: the B4 corpus gate -- run the corpus in registry, reverse and one fixed shuffled order and compare every sim against its own fresh-process reference. With no names it runs the whole project and is an arc checkpoint (slow); with names it runs the same four arms over just those sims, which confirms an already-isolated divergence in seconds but cannot discover a new one."))
@@ -855,6 +856,23 @@ mod arg_tests {
         };
         assert!(parse(&["rock", "stone", "bitgun", "--no-record"]).no_record);
         assert!(!parse(&["rock", "stone", "bitgun"]).no_record);
+    }
+
+    #[test]
+    fn sim_worker_help_names_the_current_default_and_force_spelling() {
+        let help = Args::command().render_help().to_string();
+        assert!(
+            help.contains("default uses eligible boot-checkpoint workers, including rendered sims"),
+            "sim help lost the worker default wording:\n{help}"
+        );
+        assert!(
+            help.contains("diagnostic/force spelling rejects where the default may fall back"),
+            "sim help lost the explicit --workers distinction:\n{help}"
+        );
+        assert!(
+            !help.contains("rendered entries run isolated with a reported reason"),
+            "sim help still describes the superseded rendered-isolated default:\n{help}"
+        );
     }
 }
 

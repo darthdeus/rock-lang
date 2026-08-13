@@ -71,6 +71,10 @@ end
 function __rock_code_slot_abort()
   _G.__rock_code_slot_pending = nil
   _G.__rock_code_slot_pending_slots = nil
+  local pending_wgpu = rawget(_G, "PENDING_WGPU_SHADER_SRCS")
+  if pending_wgpu then
+    for key in pairs(pending_wgpu) do pending_wgpu[key] = nil end
+  end
 end
 function __rock_code_slot_stage(key, body, abi)
   local old = _G.__rock_code_slots[key]
@@ -79,6 +83,25 @@ function __rock_code_slot_stage(key, body, abi)
   _G.__rock_code_slot_pending[key] = { body = body, abi = abi }
 end
 function __rock_code_slot_publish()
+  local pending_wgpu = rawget(_G, "PENDING_WGPU_SHADER_SRCS")
+  if pending_wgpu and next(pending_wgpu) ~= nil then
+    local register_wgpu = rawget(_G, "stone_wgpu_renderer_register_pending")
+    if not register_wgpu then
+      register_wgpu = rawget(_G, "stone_wgpu_renderer_register_pending_ret_bool")
+    end
+    if not register_wgpu or not register_wgpu() then
+      error("WGPU shader registration did not complete", 0)
+    end
+    local publish_wgpu = rawget(_G, "stone_wgpu_renderer_publish_pending")
+    if not publish_wgpu then
+      publish_wgpu = rawget(_G, "stone_wgpu_renderer_publish_pending_ret_bool")
+    end
+    if publish_wgpu then
+      if not publish_wgpu() then error("WGPU shader registration did not complete", 0) end
+    else
+      error("WGPU shader registration did not complete", 0)
+    end
+  end
   local stage = _G.__rock_code_slot_pending
   if not stage then error("Rock code slot stage not open", 0) end
   for key, staged in pairs(stage) do
