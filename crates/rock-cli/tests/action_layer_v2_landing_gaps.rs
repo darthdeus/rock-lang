@@ -103,3 +103,9 @@ fn binding_changes_survive_a_fresh_process() {
     let reader = run("bindings_restart_reader");
     assert_sim_pass("bindings_restart_reader", &reader);
 }
+
+#[test]
+fn controller_only_traversal_reaches_production_consumers() {
+    let output = run_sim("controller_traversal");
+    assert_eq!(assert_sim_pass("controller_traversal", &output), (39, 39));
+}
