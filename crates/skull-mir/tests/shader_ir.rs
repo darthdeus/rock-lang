@@ -5,11 +5,13 @@
 //! use of it.
 
 use comfy_la_arena::Idx;
-use skull_mir::gpu_layout::WireKind;
+use skull_mir::gpu_layout::{SamplerKind, WireKind};
 use skull_mir::mir::FuncRef;
 use skull_mir::shader_ir::{
-    LogicalUniformGroup, ShaderIR, ShaderInstance, ShaderInterfacePlan, ShaderStage,
-    ShaderStageIr, UniformRole,
+    ComputeAccess, ComputeAddressSpace, ComputeBuiltin, ComputeDispatchContract,
+    ComputeResourceShape, ComputeValueKind, ComputeWorkgroupSize, LogicalComputeResource,
+    LogicalTextureGroup, LogicalUniformGroup, ShaderIR, ShaderInstance, ShaderInterfacePlan,
+    ShaderStage, ShaderStageIr, UniformRole,
 };
 use ustr::Ustr;
 
@@ -24,7 +26,13 @@ fn fref(module: u32, func: u32) -> FuncRef {
 /// nothing. Those were the same value while a key slot was optional; they are
 /// different lengths now, which is the point of the narrowing.
 fn inst(module: u32, func: u32, tag: Option<skull_mir::monoty::MonoTy>) -> ShaderInstance {
-    ShaderInstance { fref: fref(module, func), key: tag.into_iter().collect() }
+    static ARENA: std::sync::LazyLock<skull_mir::monoty::MonoInterner> =
+        std::sync::LazyLock::new(skull_mir::monoty::MonoInterner::new);
+    ShaderInstance::new(skull_mir::instance::Instance::intern(
+        &ARENA,
+        fref(module, func),
+        tag.into_iter().collect(),
+    ))
 }
 
 fn stage_ir(entry: ShaderInstance, order: Vec<ShaderInstance>) -> ShaderStageIr {
@@ -68,7 +76,7 @@ fn a_stage_reload_set_dedups_a_nonadjacent_repeat() {
 
     // The denominator: the order really does hold the repeat this is about.
     assert_eq!(ir.order.len(), 3);
-    assert_eq!(ir.order.iter().filter(|i| i.fref == helper).count(), 2);
+    assert_eq!(ir.order.iter().filter(|i| i.fref() == helper).count(), 2);
 
     let decls = ir.declarations();
     assert_eq!(
@@ -90,7 +98,10 @@ fn a_program_reload_set_dedups_across_stages() {
     let vert = stage_ir(ShaderInstance::plain(fref(0, 1)), vec![inst(0, 7, Some(MonoTy::Float))]);
     let mut frag = stage_ir(ShaderInstance::plain(fref(0, 2)), vec![inst(0, 7, Some(MonoTy::Int))]);
     frag.stage = ShaderStage::Fragment;
-    let ir = ShaderIR { stages: vec![vert, frag] };
+    let ir = ShaderIR {
+        interner: std::sync::Arc::new(skull_mir::monoty::MonoInterner::new()),
+        stages: vec![vert, frag],
+    };
 
     let decls = ir.declarations();
     assert_eq!(
@@ -117,4 +128,76 @@ fn perturbing_an_interface_member_changes_the_interface() {
     let mut widened = base.clone();
     widened.uniform_groups[0].members[0].1 = WireKind::F32x4;
     assert_ne!(base, widened, "the interface plan does not distinguish its own members");
+}
+
+#[test]
+fn semantic_wire_is_neutral_and_fingerprint_tracks_logical_shape() {
+    let base = ShaderInterfacePlan {
+        uniform_groups: vec![LogicalUniformGroup {
+            role: UniformRole::Stage(ShaderStage::Fragment),
+            struct_name: Ustr::from("U"),
+            members: vec![(Ustr::from("a"), WireKind::F32)],
+        }],
+        textures: Some(LogicalTextureGroup {
+            struct_name: Some(Ustr::from("Textures")),
+            samplers: vec![
+                (Ustr::from("scene"), SamplerKind::Float),
+                (Ustr::from("bloom"), SamplerKind::Float),
+            ],
+            stages: vec![ShaderStage::Fragment],
+        }),
+        ..Default::default()
+    };
+    let wire = base.semantic_wire(true);
+    for forbidden in ["offset", "binding", "std140", "WGSL", "GLSL"] {
+        assert!(!wire.contains(forbidden), "semantic wire leaked {forbidden}: {wire}");
+    }
+    assert!(!wire.contains("compute"), "graphics semantic wire changed without a compute contract: {wire}");
+    let mut renamed = base.clone();
+    renamed.uniform_groups[0].members[0].0 = Ustr::from("b");
+    assert_ne!(base.semantic_fingerprint(true), renamed.semantic_fingerprint(true));
+
+    let mut swapped = base.clone();
+    swapped.textures.as_mut().unwrap().samplers.swap(0, 1);
+    assert_ne!(base.semantic_fingerprint(true), swapped.semantic_fingerprint(true));
+    assert_ne!(base.semantic_fingerprint(true), base.semantic_fingerprint(false));
+}
+
+#[test]
+fn compute_interface_keeps_storage_contract_neutral_and_complete() {
+    let plan = ShaderInterfacePlan {
+        stages: vec![ShaderStage::Compute],
+        compute: Some(skull_mir::shader_ir::ComputeInterfacePlan {
+            resources: vec![
+                LogicalComputeResource {
+                    name: Ustr::from("x"),
+                    shape: ComputeResourceShape::Array(ComputeValueKind::U32),
+                    address_space: ComputeAddressSpace::Storage,
+                    access: ComputeAccess::Read,
+                },
+                LogicalComputeResource {
+                    name: Ustr::from("out"),
+                    shape: ComputeResourceShape::Array(ComputeValueKind::U32),
+                    address_space: ComputeAddressSpace::Storage,
+                    access: ComputeAccess::ReadWrite,
+                },
+            ],
+            workgroup: Vec::new(),
+            builtins: vec![ComputeBuiltin::GlobalInvocationId],
+            workgroup_size: ComputeWorkgroupSize { x: 64, y: 1, z: 1 },
+            dispatch: ComputeDispatchContract::Runtime { dimensions: 1 },
+        }),
+        ..Default::default()
+    };
+
+    assert_eq!(plan.stages, [ShaderStage::Compute]);
+    let compute = plan.compute.as_ref().expect("compute contract");
+    assert_eq!(compute.resources.len(), 2, "two storage resources are examined");
+    assert_eq!(compute.resources[1].access, ComputeAccess::ReadWrite);
+    assert_eq!(compute.workgroup_size.x, 64);
+    assert_eq!(compute.dispatch, ComputeDispatchContract::Runtime { dimensions: 1 });
+    let wire = plan.semantic_wire(false);
+    assert!(wire.contains("stage compute"), "stage identity is retained: {wire}");
+    assert!(wire.contains("compute"), "compute contract is retained: {wire}");
+    assert!(!wire.contains("binding"), "compute wire leaked target binding: {wire}");
 }

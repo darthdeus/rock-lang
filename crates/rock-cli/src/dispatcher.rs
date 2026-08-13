@@ -536,6 +536,12 @@ impl CommandContext {
                 self.args.output.as_deref(),
                 self.args.watch,
                 self.args.port,
+                if self.args.single_file {
+                    crate::web::WebPackage::SingleFile
+                } else {
+                    crate::web::WebPackage::Directory
+                },
+                self.args.itch,
             );
         }
         // shader is GLSL fn-library emission (route B); it type-checks a single

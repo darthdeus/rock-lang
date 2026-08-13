@@ -281,6 +281,7 @@ pub fn lower_type_expr_in(
 
     let idx = match &te.kind {
         TypeExprKind::Int => ctx.workspace.builtins.int(),
+        TypeExprKind::Uint => ctx.workspace.builtins.uint(),
         TypeExprKind::Float => ctx.workspace.builtins.float(),
         TypeExprKind::Bool => ctx.workspace.builtins.bool(),
         TypeExprKind::String => ctx.workspace.builtins.string(),
@@ -869,6 +870,7 @@ pub fn lower_statement_value(
                             name_span: keyword_span.unwrap_or(s.span),
                         },
                         args,
+                        generic_args: IdxRange::new_empty(),
                     },
                     s.span,
                 );
@@ -965,9 +967,18 @@ pub fn lower_expr_value(
 
         ExprKind::FunctionCall {
             func,
+            generic_args,
             args,
             syntax: _,
-        } => match &a.e(func).kind {
+        } => {
+            let generic_args = ctx.lower_type_exprs_to_range(
+                a,
+                body,
+                TyPos::Body,
+                generic_args,
+                e.span,
+            )?;
+            match &a.e(func).kind {
             ExprKind::Ident(name) => {
                 let args_range = lower_exprs(ctx, a, body, scope, args.iter().map(|x| &x.value))?;
 
@@ -993,10 +1004,14 @@ pub fn lower_expr_value(
                 Expr::Call {
                     callee,
                     args: args_range,
+                    generic_args,
                 }
             }
 
             ExprKind::FieldAccess(receiver, method) => {
+                if !generic_args.is_empty() {
+                    comp_error!(e.span, "explicit type arguments are only supported on named function calls");
+                }
                 let all = std::iter::once(receiver).chain(args.iter().map(|a| &a.value));
 
                 let args_range = lower_exprs(ctx, a, body, scope, all)?;
@@ -1018,12 +1033,16 @@ pub fn lower_expr_value(
                         name_span: method.span,
                     },
                     args: args_range,
+                    generic_args: IdxRange::new_empty(),
                 }
             }
 
             ExprKind::QualifiedIdent { base, member }
                 if ctx.workspace.enums_by_name.contains_key(&base.name) =>
             {
+                if !generic_args.is_empty() {
+                    comp_error!(e.span, "explicit type arguments are not supported on enum constructors");
+                }
                 let args_range = lower_exprs(ctx, a, body, scope, args.iter().map(|x| &x.value))?;
 
                 Expr::EnumVariant {
@@ -1053,12 +1072,16 @@ pub fn lower_expr_value(
             }
 
             _ => {
+                if !generic_args.is_empty() {
+                    comp_error!(e.span, "explicit type arguments require a named function callee");
+                }
                 let callee = lower_expr(ctx, a, body, scope, a.e(func))?;
                 let args_range = lower_exprs(ctx, a, body, scope, args.iter().map(|a| &a.value))?;
 
                 Expr::Call {
                     callee: hir::Callee::Value(callee),
                     args: args_range,
+                    generic_args: IdxRange::new_empty(),
                 }
 
                 // comp_error!(
@@ -1067,7 +1090,8 @@ pub fn lower_expr_value(
                 //     func.kind
                 // );
             }
-        },
+            }
+        }
 
         ExprKind::ArrayLiteral(elems) => {
             let elems = lower_exprs(ctx, a, body, scope, elems.iter())?;
@@ -1165,6 +1189,7 @@ pub fn lower_expr_value(
                             name_span: e.span,
                         },
                         args,
+                        generic_args: IdxRange::new_empty(),
                     },
                     e.span,
                 );
@@ -1366,6 +1391,12 @@ pub fn lower_expr_value(
             value: lower_expr(ctx, a, body, scope, a.e(inner))?,
             target: lower_type_expr_local(ctx, a, body, a.te(ty))?,
             kind: AsKind::Cast,
+        },
+
+        ExprKind::Bitcast(inner, ty) => Expr::As {
+            value: lower_expr(ctx, a, body, scope, a.e(inner))?,
+            target: lower_type_expr_local(ctx, a, body, a.te(ty))?,
+            kind: AsKind::Bitcast,
         },
 
         ExprKind::Index(base, index) => Expr::Index {
@@ -2962,11 +2993,12 @@ fn pl_chain(a: &Ast, e: &Idx<ExprData>) -> bool {
         | ExprKind::PreDecrement(i)
         | ExprKind::PostDecrement(i)
         | ExprKind::As(i, _)
+        | ExprKind::Bitcast(i, _)
         | ExprKind::TypeAscription(i, _) => pl_chain(a, i),
 
         ExprKind::BinOp { left, right, .. } => pl_chain(a, left) || pl_chain(a, right),
 
-        ExprKind::FunctionCall { func, args, syntax } => {
+        ExprKind::FunctionCall { func, args, syntax, .. } => {
             if matches!(syntax, skull_parser::CallSyntax::Binary(_)) {
                 args.iter().any(|x| pl_chain(a, &x.value))
             } else {
@@ -2988,7 +3020,7 @@ fn is_placeholder_lambda(a: &Ast, e: &ExprData) -> bool {
 
         ExprKind::Index(o, i) => pl_is_us(a, o) || pl_is_us(a, i),
 
-        ExprKind::FunctionCall { func, args, syntax } => {
+        ExprKind::FunctionCall { func, args, syntax, .. } => {
             if matches!(syntax, skull_parser::CallSyntax::Binary(_)) {
                 args.iter().any(|x| pl_chain(a, &x.value))
             } else {

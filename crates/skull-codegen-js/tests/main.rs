@@ -20,6 +20,8 @@ mod emit;
 mod enum_boxes;
 #[path = "format_specs.rs"]
 mod format_specs;
+#[path = "generic_inline.rs"]
+mod generic_inline;
 #[path = "inline_pipeline.rs"]
 mod inline_pipeline;
 #[path = "inspect.rs"]
@@ -63,12 +65,17 @@ mod nb_differential;
 mod nb_leaf_layout_premise;
 #[path = "nb_value_struct.rs"]
 mod nb_value_struct;
+#[path = "native_buffer_element_admission_js.rs"]
+mod native_buffer_element_admission_js;
 #[path = "no_inline_function.rs"]
 mod no_inline_function;
 #[path = "nomangle_roots.rs"]
 mod nomangle_roots;
 #[path = "number_format.rs"]
 mod number_format;
+#[path = "session_arena.rs"]
+mod session_arena;
+
 #[path = "overlay.rs"]
 mod overlay;
 #[path = "parse_float.rs"]
@@ -111,6 +118,8 @@ mod table_unset;
 mod trampoline_fallback;
 #[path = "try_call.rs"]
 mod try_call;
+#[path = "uint.rs"]
+mod uint;
 #[path = "value_gc_eq.rs"]
 mod value_gc_eq;
 #[path = "value_structs.rs"]

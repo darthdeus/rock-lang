@@ -8,7 +8,7 @@
 //! are read out of the caller's body via `function_body`.
 
 mod common;
-use common::{emit_module, function_body};
+use common::{emit_module, function_body, ws_with_stdlib};
 
 /// Every emitted top-level definition symbol, from its `function <sym>(`
 /// header. The header IS the definition, so this cannot be satisfied by a
@@ -187,6 +187,7 @@ fn iter_called_in(lua: &str, caller: &str) -> String {
 /// is about the call FORM and not about `iter` witnesses in general.
 #[test]
 fn both_iter_witness_forms_name_a_definition_that_exists() {
+    let _inline = common::InlineOffGuard::on();
     let coerced = emit_module(
         r#"
 fn main() {
@@ -212,4 +213,133 @@ fn main() {
             "the {form} witness calls `{called}`, which no definition defines"
         );
     }
+}
+
+/// **The first coherent E1 landing: production emission is DRIVEN by its own
+/// authoritative graph, not merely capable of building one beside itself.**
+///
+/// This is the RED that a lazy `Option<InstanceGraph>` plus a private
+/// discovery walk (`LuaReach`, deleted -- population is now driven by
+/// `cache.lua_view` end to end) fails and a production-owned graph/view
+/// passes. It proves, in one fixture:
+///
+/// - `emit_full`'s cache always carries a graph (never absent) whose instance
+///   population is non-empty.
+/// - the Lua artifact view realized from that SAME graph has a non-zero
+///   retained Rock-instance population.
+/// - every emitted Rock DEFINITION symbol corresponds to one of the view's
+///   retained instances (root-only would fail here: `leaf_only_reached_via_helper`
+///   is reached transitively through `helper`, never rooted directly, and a
+///   root-only population would omit it).
+/// - a target BOUNDARY (`print`, `extern(lua)`) is never emitted as a Rock
+///   definition, even though it is retained (as a boundary, not an instance).
+/// - both a generic instance (`identity<int>`, `identity<string>`) and a
+///   non-generic one (`helper`) participate.
+#[test]
+fn full_emission_is_driven_by_its_own_production_graph() {
+    let ws = ws_with_stdlib(
+        r#"
+fn identity<T>(x: T) -> T { return x }
+
+fn leaf_only_reached_via_helper() -> int { return 99 }
+
+fn helper() -> int {
+    return leaf_only_reached_via_helper()
+}
+
+fn main() {
+    let a = identity(7)
+    let b = identity("s")
+    let h = helper()
+    print("{a} {b} {h}")
+}
+"#,
+    );
+    let mid = skull::user_module_id(&ws).expect("user module");
+    let (emit, cache) = skull::mir_emit::emit_full(&ws, mid).expect("emit_full");
+
+    // The graph is authoritative and non-empty -- not `None`, not deferred.
+    let graph = cache.graph();
+    assert!(!graph.instances.is_empty(), "the eager graph must be built by emit_full, not deferred");
+
+    // The Lua view realized from that same graph retains a non-zero Rock
+    // population.
+    let view = cache.lua_view();
+    assert!(!view.instances.is_empty(), "the Lua artifact view must retain Rock instances");
+
+    // Both a generic and a non-generic instance participate in the retained
+    // population.
+    let generic_count = view.instances.iter().filter(|i| !i.args.is_empty()).count();
+    let nongeneric_count = view.instances.iter().filter(|i| i.args.is_empty()).count();
+    assert!(generic_count >= 2, "expected >=2 generic instances (identity<int>, identity<string>), got {generic_count}");
+    assert!(nongeneric_count >= 1, "expected >=1 non-generic instance, got {nongeneric_count}");
+
+    // Retention and standalone delivery are separate. Roots and function-value
+    // targets must have definitions; a residual call below is the other
+    // delivery obligation. Fully spliced or bounded instances may be retained
+    // without a standalone definition.
+    let defs = definition_symbols(&emit.lua);
+    let mut checked_transitive_leaf = false;
+    let mut checked_residual_calls = 0;
+    let mut checked_delivery = 0;
+    for inst in view
+        .declared_roots
+        .iter()
+        .chain(view.fn_value_targets.iter())
+        .filter(|inst| view.instances.contains(*inst))
+    {
+        let sym = view.symbols.get(inst).expect("every retained instance has a symbol");
+        assert!(
+            defs.contains(sym),
+            "delivered instance `{sym}` has no emitted definition -- production is not driven by the graph/view population"
+        );
+        checked_delivery += 1;
+    }
+    assert!(checked_delivery > 0, "fixture defect: no root or function-value delivery population");
+    for inst in &view.instances {
+        if graph.logical_symbol(&ws, inst).contains("leaf_only_reached_via_helper") {
+            checked_transitive_leaf = true;
+        }
+    }
+    for caller in &defs {
+        let body = function_body(&emit.lua, caller);
+        for (inst, sym) in &view.symbols {
+            if !view.instances.contains(inst) {
+                continue;
+            }
+            if body.contains(&format!("{sym}(")) {
+                checked_residual_calls += 1;
+                assert!(
+                    defs.contains(sym),
+                    "a residual call names Rock instance `{sym}` without an emitted definition"
+                );
+            }
+        }
+    }
+    assert!(
+        checked_transitive_leaf,
+        "fixture defect: the transitively-reached leaf was not retained at all"
+    );
+    assert!(
+        checked_residual_calls > 0,
+        "fixture defect: no retained Rock call crossed a residual emission boundary"
+    );
+
+    // A boundary (`print`) is retained as a boundary, never as a Rock
+    // definition: it must not appear in `view.instances`, and its logical
+    // symbol must not be an emitted definition header.
+    let boundary = view
+        .boundaries
+        .keys()
+        .find(|i| graph.logical_symbol(&ws, i).contains("print"))
+        .expect("print must be retained as a boundary");
+    assert!(
+        !view.instances.contains(boundary),
+        "a boundary must never be a retained Rock instance"
+    );
+    let boundary_sym = graph.logical_symbol(&ws, boundary);
+    assert!(
+        !defs.iter().any(|d| *d == boundary_sym),
+        "a boundary (`{boundary_sym}`) must not be emitted as a Rock definition"
+    );
 }

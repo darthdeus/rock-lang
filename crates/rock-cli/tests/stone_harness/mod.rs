@@ -200,6 +200,12 @@ impl StoneHarness {
         self.await_settled_impl(None, quiescent, timeout)
     }
 
+    /// Like `await_settled`, but require an event after the call begins.
+    /// Compile errors count as events even though they are not reloads.
+    pub fn await_write_settled(&self, quiescent: Duration, timeout: Duration) -> Vec<ReloadEvent> {
+        self.await_settled_after(self.event_count(), quiescent, timeout)
+    }
+
     /// Wait for at least one completion event after `baseline`, then wait for
     /// the event stream to become quiet.
     ///

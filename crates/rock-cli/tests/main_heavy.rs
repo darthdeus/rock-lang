@@ -28,6 +28,8 @@ mod engine_cdylib_freshness_gate;
 
 #[path = "frame_error_gate.rs"]
 mod frame_error_gate;
+#[path = "wgpu_refusal_gate.rs"]
+mod wgpu_refusal_gate;
 #[path = "rich_text_reject_gate.rs"]
 mod rich_text_reject_gate;
 #[path = "shader_failure_gate.rs"]
@@ -51,3 +53,8 @@ mod web_smoke_tests;
 
 #[path = "shader_texture_census.rs"]
 mod shader_texture_census;
+#[path = "shader_corpus_oracle.rs"]
+mod shader_corpus_oracle;
+
+#[path = "graph_update_projects.rs"]
+mod graph_update_projects;

@@ -1,5 +1,13 @@
 use std::time::Duration;
 
+fn emit_overlay_checked(
+    ws: &bone_semantic::inference::Workspace,
+    cache: &mut skull::mir_emit::SkullEmitCache,
+    reinferred: &[(bone_semantic::prelude::ModuleId, bone_semantic::hir::BodyOwner)],
+) -> skull::mir_emit::MirEmit {
+    skull::mir_emit::emit_overlay(ws, cache, reinferred).expect("emit_overlay")
+}
+
 #[cfg(test)]
 enum ExecOutcome {
     /// Clean run; holds full stdout (module load prints + test prints).
@@ -385,7 +393,7 @@ mod overlay_runtime_tests {
     //! cache, and compose `frozen_baseline ++ overlay` against a fresh `emit_full`.
 
     use crate::bone_backend::bone_session;
-    use super::{exec_lua, normalize_stdout, ExecOutcome};
+    use super::{emit_overlay_checked, exec_lua, normalize_stdout, ExecOutcome};
 
     /// Standalone `@test`/synthetic programs have no engine, but the overlay
     /// always calls `clear_all_systems()` (the system rebind). Stub it so the
@@ -515,7 +523,7 @@ mod overlay_runtime_tests {
             "constructing an already-defined value struct is a body edit, got {:?}",
             result.tier
         );
-        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
         assert!(overlay.lua.contains("P_ct"), "overlay's edited body must reference P_ct");
         let fresh = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1").0;
 
@@ -547,7 +555,7 @@ mod overlay_runtime_tests {
             "literal edit should be BodyOnly, got {:?}",
             result.tier
         );
-        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
         let fresh = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1").0;
 
         // Sanity: the stale baseline alone prints 1,1 -- so a leak is observable.
@@ -581,7 +589,7 @@ mod overlay_runtime_tests {
             "const value edit should be BodyOnly, got {:?}",
             result.tier
         );
-        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
         let fresh = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1").0;
 
         // Sanity: the stale baseline alone prints the OLD const, so a leak is observable.
@@ -623,7 +631,7 @@ mod overlay_runtime_tests {
             "static initializer edit should be BodyOnly, got {:?}",
             result.tier
         );
-        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
 
         // Warm the static in the frozen baseline (first main() -> inits x=5, sets
         // the done-flag), THEN load the overlay + call again. The bug is observable
@@ -661,7 +669,7 @@ mod overlay_runtime_tests {
             "nested static init edit should be BodyOnly, got {:?}",
             result.tier
         );
-        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
 
         let composed = run_parts(&[&stale_main, SYS_STUB, "main()", &overlay.lua, "main()"]);
         match composed {
@@ -696,9 +704,9 @@ mod overlay_runtime_tests {
         let stale_main = full0.lua;
 
         let r1 = session.update_file("main.rock", v1).expect("update v1");
-        let overlay1 = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &r1.reinferred);
+        let overlay1 = emit_overlay_checked(session.workspace(), &mut cache, &r1.reinferred);
         let r2 = session.update_file("main.rock", v2).expect("update v2");
-        let overlay2 = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &r2.reinferred);
+        let overlay2 = emit_overlay_checked(session.workspace(), &mut cache, &r2.reinferred);
 
         // Models the live game: main.lua(v0) loaded once; each overlay dofile'd in
         // turn; probe reached (accumulating) between reloads. n: inits 0 -> 1,2 ->
@@ -750,7 +758,7 @@ mod overlay_runtime_tests {
             "unrelated body edit should be BodyOnly, got {:?}",
             result.tier
         );
-        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
 
         // Warm the static to 99 (DO_SET=true, one call), load the overlay, then call
         // again with DO_SET=false: an unrelated edit must PRESERVE n -> still 99.
@@ -787,7 +795,7 @@ mod overlay_runtime_tests {
             "const value edit should be BodyOnly, got {:?}",
             result.tier
         );
-        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
         let fresh = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1").0;
 
         // Sanity: the stale baseline prints the OLD downstream value (B = old A + 1).
@@ -815,7 +823,7 @@ mod overlay_runtime_tests {
         let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
 
         let result = session.update_file("main.rock", v1).expect("update v1");
-        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
 
         // A changed -> its ginit fn + line re-emitted. DEP reads A -> its line
         // re-emitted (ginit unchanged, lives in main.lua). UNRELATED is independent
@@ -949,7 +957,7 @@ mod overlay_runtime_tests {
                 diags.iter().map(|d| d.message.clone()).collect::<Vec<_>>()
             );
 
-            let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+            let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
             let fresh = skull::mir_emit::emit_full(session.workspace(), mid)
                 .unwrap_or_else(|e| panic!("seed {seed} step {step}: emit_full vk: {}", e.message))
                 .0;
@@ -1037,7 +1045,7 @@ mod overlay_runtime_tests {
             .iter()
             .map(|(fid, _)| (mid, BodyOwner::Function(fid)))
             .collect();
-        let overlay = skull::mir_emit::emit_overlay(&ws, &mut cache, &reinferred);
+        let overlay = emit_overlay_checked(&ws, &mut cache, &reinferred);
 
         // The overlay rebind calls `__rock_rebind_system` (an engine fn absent in
         // a standalone @test compile) for each changed decorated fn. Files with
@@ -1208,7 +1216,7 @@ mod overlay_runtime_tests {
             result.reinferred.len(), 1,
             "a decorated-fn body edit must re-infer exactly the edited body"
         );
-        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
         // The overlay carries the redefined body AND a targeted rebind of just the
         // changed decorated fn (in-place, not clear-all + re-register-all).
         assert!(
@@ -1284,7 +1292,7 @@ mod overlay_runtime_tests {
         // The co fn body edit must re-infer exactly the edited body.
         assert_eq!(result.reinferred.len(), 1, "a co fn body edit re-infers exactly one body");
 
-        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
         // The overlay must carry the re-emitted coroutine (its top-level step fn).
         assert!(
             overlay.lua.contains("counter_ret_Coroutine_int_unit_unit__step("),
@@ -1340,7 +1348,7 @@ mod overlay_runtime_tests {
         }
 
         let result = session.update_file("main.rock", &v1).expect("update v1");
-        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
         // The overlay must re-emit the whole frame-slot channel.
         assert!(overlay.lua.contains("gen_ret_Coroutine_Ev_unit_unit__step("), "overlay must re-emit the step fn:\n{}", overlay.lua);
         assert!(overlay.lua.contains(".__y0 = "), "overlay step must write yield leaves to frame slots:\n{}", overlay.lua);
@@ -1400,7 +1408,7 @@ mod overlay_runtime_tests {
         let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
 
         let result = session.update_file("main.rock", &v1).expect("update v1");
-        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
 
         // start() + pump() under v0 (Tick(1)=1), then overlay, then pump() x3 on the
         // SAME live coroutine under v1: Pair(10,20)=30, Done=100, then done -> -1.
@@ -1469,7 +1477,7 @@ mod overlay_runtime_tests {
             "inserting a let is a body edit -- must be BodyOnly (the premise), got {:?}",
             result.tier
         );
-        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
 
         // start() + pump() under v0 (Tick(7)=7, suspended at state 1), overlay,
         // then pump() again on the SAME live coroutine. The frame layout stamp
@@ -1522,7 +1530,7 @@ mod overlay_runtime_tests {
             "adding a yield is a body edit -- must be BodyOnly (the premise), got {:?}",
             result.tier
         );
-        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
 
         // v0: pump() -> Tick(1)=1, suspended at state 1 (before print("fire")).
         // Overlay renumbers: the new Ev::Done yield becomes state 1, so the live
@@ -1574,7 +1582,7 @@ mod overlay_runtime_tests {
             "a constant tweak in the inner co fn must be BodyOnly, got {:?}",
             result.tier
         );
-        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
 
         // pump #1 under v0: outer primes inner, re-yields inner's Tick(1). Overlay
         // (layout-stable: constants only). pump #2 resumes the live chain: the
@@ -1627,7 +1635,7 @@ mod overlay_runtime_tests {
             "outer's added local must be BodyOnly, got {:?}",
             result.tier
         );
-        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
 
         // pump #1: outer primes inner -> Tick(1). Overlay shifts OUTER's layout.
         // pump #2: outer stamp-killed -> -1, and the inner's on_killed must fire.
@@ -1676,7 +1684,7 @@ mod overlay_runtime_tests {
         let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
         let result = session.update_file("main.rock", &v1).expect("update v1");
         assert!(matches!(result.tier, bone_incremental::session::UpdateTier::BodyOnly));
-        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
 
         // pump #1: Tick(7), BUSY=1, suspended. Overlay (cell shift). pump #2:
         // stamp-kill -> -1, and the v0 defer must have cleared BUSY.
@@ -2082,9 +2090,9 @@ mod overlay_runtime_tests {
         let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
 
         let r1 = session.update_file("main.rock", &v1).expect("update v1");
-        let overlay1 = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &r1.reinferred);
+        let overlay1 = emit_overlay_checked(session.workspace(), &mut cache, &r1.reinferred);
         let r2 = session.update_file("main.rock", &v2).expect("update v2");
-        let overlay2 = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &r2.reinferred);
+        let overlay2 = emit_overlay_checked(session.workspace(), &mut cache, &r2.reinferred);
 
         // full0 registers bump_fire_count via @on_reload. Each overlay is a body
         // edit of `unrelated` (bump_fire_count is NEVER in the changed set), then a
@@ -2134,7 +2142,7 @@ mod overlay_runtime_tests {
         let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
 
         let r1 = session.update_file("main.rock", &v1).expect("update v1");
-        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &r1.reinferred);
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &r1.reinferred);
 
         // full0 registers `refresh` by name. The overlay redefines the `refresh`
         // global (new body); the fire must resolve and run the NEW body -> OUT == 2.
@@ -2282,7 +2290,7 @@ mod overlay_runtime_tests {
             "editing a lambda operator is a body edit, got {:?}",
             result.tier
         );
-        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
         assert!(
             overlay.lua.contains("gen_ret_Coroutine_Ev_unit_unit__step__lambda0"),
             "the overlay must carry the hoisted lambda body (const-hoist precedent); \
@@ -2343,7 +2351,7 @@ mod overlay_runtime_tests {
         );
 
         let result = session.update_file("main.rock", &v1).expect("update v1");
-        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
         assert!(overlay.lua.contains("gen_ret_Coroutine_Ev_unit_unit__step__lambda1"), "overlay must carry the hoisted g body");
 
         // start() + pump() under v0: f = record snapshotting the OLD lambda0
@@ -2405,7 +2413,7 @@ mod overlay_runtime_tests {
             "adding a lambda-local is a body edit, got {:?}",
             result.tier
         );
-        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
         let fresh = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1").0;
 
         // Dense slots leave the stamp fixed under a lambda-internal cell edit.
@@ -2462,7 +2470,7 @@ mod overlay_runtime_tests {
             "adding a co-fn local is a body edit, got {:?}",
             result.tier
         );
-        let overlay = skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
         let fresh = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1").0;
 
         assert_ne!(
@@ -2617,6 +2625,284 @@ mod shape_drift_tests {
             "a signature-only edit carries no data-shape drift -- full reload, NOT a restart, got {reload:?}"
         );
     }
+
+    #[test]
+    fn shader_resource_interface_edit_requests_full_reload() {
+        let v0 = "@shader(fragment)\n\
+                  fn frag(tc: Vec2) -> Vec4 {\n\
+                    return Vec4 { x: tc.x, y: 0.0, z: 1.0, w: 1.0 }\n\
+                  }\n\
+                  global KEY: string = rock_shader(frag)\n\
+                  fn main() { }\n";
+        let v1 = "@shader(fragment)\n\
+                  fn frag(tex: Sampler2D, tc: Vec2) -> Vec4 {\n\
+                    return texture(tex, tc)\n\
+                  }\n\
+                  global KEY: string = rock_shader(frag)\n\
+                  fn main() { }\n";
+        let (_dir, mut stone, main_lua, inc_lua, rock) = boot(v0);
+        let baseline = std::fs::read_to_string(&main_lua).unwrap();
+        assert!(baseline.contains("__rock_shader_register(\"frag\""));
+
+        std::fs::write(&rock, v1).unwrap();
+        let reload = stone.recompile(&[rock], &main_lua, &inc_lua).expect("shader recompile");
+        assert!(
+            matches!(reload, SkullReload::Full { .. }),
+            "a shader resource/interface change must use the full path, got {reload:?}"
+        );
+        let current = std::fs::read_to_string(&main_lua).unwrap();
+        assert!(
+            current.contains("texture("),
+            "the full shader reassembly must carry the new resource-consuming source"
+        );
+        assert_ne!(current, baseline, "the resource edit must change the registered artifact");
+    }
+}
+
+#[cfg(test)]
+mod shader_registration_removal_tests {
+    use super::super::{SkullReload, SkullStone};
+    use std::collections::BTreeSet;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    const V0: &str = r#"
+@shader(fragment)
+fn frag_a(tc: Vec2) -> Vec4 {
+    return Vec4 { x: tc.x, y: 0.0, z: 0.0, w: 1.0 }
+}
+
+@shader(fragment)
+fn frag_b(tc: Vec2) -> Vec4 {
+    return Vec4 { x: 0.0, y: tc.x, z: 0.0, w: 1.0 }
+}
+
+fn choose_a() -> string { return rock_shader(frag_a) }
+fn choose_b() -> string { return rock_shader(frag_b) }
+fn main() { print(choose_a()); print(choose_b()) }
+"#;
+
+    fn v1() -> String {
+        V0.replace("return rock_shader(frag_b)", "return \"removed\"")
+    }
+
+    fn key(
+        ws: &bone_semantic::inference::Workspace,
+        program: &skull::shader_artifact::ShaderProgram,
+    ) -> String {
+        let name = |fref: skull_mir::mir::FuncRef| {
+            ws.module(fref.module).functions[fref.func].name.to_string()
+        };
+        match program.vert {
+            Some(vert) => format!("{}+{}", name(vert), name(program.frag)),
+            None => name(program.frag),
+        }
+    }
+
+    fn logical_keys(
+        ws: &bone_semantic::inference::Workspace,
+        graph: &skull::instance_graph::InstanceGraph,
+    ) -> BTreeSet<String> {
+        let collection =
+            skull_mir::lower::collect_shader_collection(ws).expect("shader collection");
+        let programs: Vec<_> = collection
+            .pairs
+            .iter()
+            .map(|pair| skull::shader_artifact::ShaderProgram {
+                vert: pair.vert,
+                frag: pair.frag,
+            })
+            .collect();
+        let scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
+            .sharing(Arc::clone(graph.interner()));
+        let view = skull::shader_artifact::realize_shader_with_context(
+            ws,
+            graph,
+            &skull::shader_artifact::ShaderArtifactRequest {
+                spec: skull::target_projection::TargetSpec {
+                    shader: Some(skull::target_projection::ShaderTargetSpec::Glsl(
+                        skull_codegen_glsl::GlslProfile::Core330,
+                    )),
+                    ..skull::target_projection::LUAJIT_DESKTOP
+                },
+                programs: &programs,
+            },
+            &scx,
+        )
+        .expect("shader artifact view");
+        assert!(
+            view.program_views
+                .iter()
+                .all(|program| !program.stages.is_empty())
+        );
+        view.program_views
+            .iter()
+            .map(|program| key(ws, &program.program))
+            .collect()
+    }
+
+    fn registration_keys(text: &str) -> BTreeSet<String> {
+        let prefix = "__rock_shader_register(\"";
+        text.lines()
+            .filter_map(|line| {
+                let start = line.find(prefix).map(|index| index + prefix.len())?;
+                let end = line[start..].find('"')?;
+                Some(line[start..start + end].to_string())
+            })
+            .collect()
+    }
+
+    fn boot(source: &str) -> (tempfile::TempDir, SkullStone, PathBuf, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().to_str().expect("tempdir path").to_string();
+        let main = dir.path().join("main.lua");
+        let incremental = dir.path().join("incremental.lua");
+        let rock = dir.path().join("main.rock");
+        std::fs::write(&rock, source).expect("source");
+        let stone = SkullStone::init(&root, &main, &incremental).expect("initial compile");
+        (dir, stone, main, incremental, rock)
+    }
+
+    #[test]
+    fn native_reload_removing_one_shader_callsite_removes_one_runtime_key() {
+        let (_dir, mut stone, main, incremental, rock) = boot(V0);
+        let wanted = BTreeSet::from(["frag_a".to_string(), "frag_b".to_string()]);
+        let baseline = std::fs::read_to_string(&main).unwrap();
+        assert_eq!(registration_keys(&baseline), wanted);
+        assert_eq!(logical_keys(stone.project.workspace(), stone.cache.graph()), wanted);
+
+        std::fs::write(&rock, v1()).expect("edited source");
+        let reload = stone
+            .recompile(std::slice::from_ref(&rock), &main, &incremental)
+            .expect("reload");
+        assert!(
+            matches!(reload, SkullReload::FullRequired { .. }),
+            "a shader key removal must require a process restart: {reload:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&main).unwrap(),
+            baseline,
+            "FullRequired must not write a program for the old live process"
+        );
+
+        stone
+            .force_full(&main, &incremental)
+            .expect("canonicalize shader removal");
+
+        let current = BTreeSet::from(["frag_a".to_string()]);
+        assert_eq!(logical_keys(stone.project.workspace(), stone.cache.graph()), current);
+        let runtime = registration_keys(&std::fs::read_to_string(&main).unwrap());
+        assert_eq!(
+            runtime, current,
+            "native runtime registration population retained a removed key"
+        );
+    }
+}
+
+#[cfg(test)]
+mod compute_registration_contract_tests {
+    use super::super::{SkullReload, SkullStone};
+    use std::path::PathBuf;
+
+    const V0: &str = r#"
+value Params { n: int }
+
+@shader(compute)
+@workgroup(64, 1, 1)
+@dispatch(1)
+fn copy_values(
+    @storage(read) input: StorageBuffer<int>,
+    @storage(read_write) output: StorageBuffer<int>,
+    @uniform params: Params,
+) {
+    let i = global_invocation_id().x
+    if i >= params.n { return }
+    storage_store(output, i, storage_load(input, i))
+}
+
+global COPY_VALUES: string = rock_compute(copy_values)
+fn main() { }
+"#;
+
+    fn boot(source: &str) -> (tempfile::TempDir, SkullStone, PathBuf, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().to_str().expect("tempdir path").to_string();
+        let main = dir.path().join("main.lua");
+        let incremental = dir.path().join("incremental.lua");
+        let rock = dir.path().join("main.rock");
+        std::fs::write(&rock, source).expect("source");
+        let stone = SkullStone::init(&root, &main, &incremental).expect("initial compile");
+        (dir, stone, main, incremental, rock)
+    }
+
+    #[test]
+    fn compute_abi_edit_requires_restart_and_does_not_write_old_process_files() {
+        let (_dir, mut stone, main, incremental, rock) = boot(V0);
+        let baseline = std::fs::read_to_string(&main).expect("baseline");
+        let v1 = V0.replace("@workgroup(64, 1, 1)", "@workgroup(32, 1, 1)");
+        std::fs::write(&rock, v1).expect("edited source");
+
+        let reload = stone
+            .recompile(std::slice::from_ref(&rock), &main, &incremental)
+            .expect("compute ABI recompile");
+        match reload {
+            SkullReload::FullRequired { reasons } => assert!(
+                reasons.iter().any(|reason| reason == "shader registration ABI changed"),
+                "the restart reason must identify the ABI contract: {reasons:?}"
+            ),
+            other => panic!("a compute workgroup ABI edit must require restart, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read_to_string(&main).expect("main after rejected reload"),
+            baseline,
+            "a FullRequired compute edit must not write the program for the old process"
+        );
+
+        stone.force_full(&main, &incremental).expect("canonicalize ABI edit");
+        let current = std::fs::read_to_string(&main).expect("canonicalized main");
+        assert_ne!(current, baseline, "force_full must materialize the new ABI after restart");
+        assert!(current.contains("@workgroup_size(32, 1, 1)"), "new compute ABI was not materialized");
+    }
+
+    #[test]
+    fn compute_root_addition_and_removal_require_restart() {
+        let (_dir_removed, mut removed_stone, removed_main, removed_incremental, removed_rock) = boot(V0);
+        let removed_baseline = std::fs::read_to_string(&removed_main).expect("removed baseline");
+        std::fs::write(
+            &removed_rock,
+            V0.replace("global COPY_VALUES: string = rock_compute(copy_values)", ""),
+        )
+        .expect("removed compute root");
+        let removed = removed_stone
+            .recompile(std::slice::from_ref(&removed_rock), &removed_main, &removed_incremental)
+            .expect("removed compute root reload");
+        match removed {
+            SkullReload::FullRequired { reasons } => assert!(
+                reasons.iter().any(|reason| reason == "shader registration key set changed"),
+                "root removal must identify the registration key set: {reasons:?}"
+            ),
+            other => panic!("removing a compute root must require restart, got {other:?}"),
+        }
+        assert_eq!(std::fs::read_to_string(&removed_main).unwrap(), removed_baseline);
+
+        let (_dir_added, mut added_stone, added_main, added_incremental, added_rock) = boot(V0);
+        let added_baseline = std::fs::read_to_string(&added_main).expect("added baseline");
+        let addition = format!(
+            "{V0}\n\n@shader(compute)\n@workgroup(64, 1, 1)\n@dispatch(1)\nfn copy_values_extra(\n    @storage(read) input: StorageBuffer<int>,\n    @storage(read_write) output: StorageBuffer<int>,\n    @uniform params: Params,\n) {{\n    let i = global_invocation_id().x\n    if i >= params.n {{ return }}\n    storage_store(output, i, storage_load(input, i))\n}}\n\nglobal EXTRA_COPY_VALUES: string = rock_compute(copy_values_extra)\n"
+        );
+        std::fs::write(&added_rock, addition).expect("added compute root");
+        let added = added_stone
+            .recompile(std::slice::from_ref(&added_rock), &added_main, &added_incremental)
+            .expect("added compute root reload");
+        match added {
+            SkullReload::FullRequired { reasons } => assert!(
+                reasons.iter().any(|reason| reason == "shader registration key set changed"),
+                "root addition must identify the registration key set: {reasons:?}"
+            ),
+            other => panic!("adding a compute root must require restart, got {other:?}"),
+        }
+        assert_eq!(std::fs::read_to_string(&added_main).unwrap(), added_baseline);
+    }
 }
 
 #[cfg(test)]
@@ -2719,10 +3005,10 @@ mod force_full_tests {
     /// Global DCE prunes a fn no root reaches, so main.lua does NOT define it.
     /// A later BODY edit that adds the first call to that fn must still leave it
     /// defined somewhere: the overlay redefines only CHANGED fns, so without the
-    /// newly-reachable backfill (`newly_reachable`) the composed program calls a
+    /// graph-delta construction the composed program calls a
     /// global that exists in neither file and dies on load.
     #[test]
-    fn overlay_backfills_a_fn_the_edit_makes_reachable() {
+    fn overlay_delivers_a_graph_added_fn_the_edit_makes_reachable() {
         let dir = tempfile::tempdir().expect("tempdir");
         let dir_str = dir.path().to_str().unwrap().to_string();
         let src = |p: &str| dir.path().join(p);

@@ -303,6 +303,9 @@ impl Ast {
             ExprKind::UnaryMinus(inner) => format!("(- {})", self.expr_sexp(*inner)),
             ExprKind::Paren(inner) => format!("(paren {})", self.expr_sexp(*inner)),
             ExprKind::As(inner, ty) => format!("(as {} {})", self.expr_sexp(*inner), self.type_sexp(*ty)),
+            ExprKind::Bitcast(inner, ty) => {
+                format!("(bitcast {} {})", self.type_sexp(*ty), self.expr_sexp(*inner))
+            }
             ExprKind::TypeAscription(inner, ty) => {
                 format!("(:: {} {})", self.expr_sexp(*inner), self.type_sexp(*ty))
             }
@@ -345,7 +348,7 @@ impl Ast {
                 format!("(index {} {})", self.expr_sexp(*obj), self.expr_sexp(*idx))
             }
 
-            ExprKind::FunctionCall { func, args, syntax } => {
+            ExprKind::FunctionCall { func, generic_args, args, syntax } => {
                 // Operator-origin calls render in infix form: `a + b` is
                 // `__op_add(a, b)` but shows as `(+ a b)`.
                 if let CallSyntax::Binary(op) = syntax {
@@ -358,8 +361,21 @@ impl Ast {
                         );
                     }
                 }
+                let callee = if generic_args.is_empty() {
+                    self.expr_sexp(*func)
+                } else {
+                    format!(
+                        "(generic {} {})",
+                        self.expr_sexp(*func),
+                        generic_args
+                            .iter()
+                            .map(|arg| self.type_sexp(*arg))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    )
+                };
                 if args.is_empty() {
-                    format!("(call {})", self.expr_sexp(*func))
+                    format!("(call {})", callee)
                 } else {
                     let args_str = args
                         .iter()
@@ -374,7 +390,7 @@ impl Ast {
                         })
                         .collect::<Vec<_>>()
                         .join(" ");
-                    format!("(call {} {})", self.expr_sexp(*func), args_str)
+                    format!("(call {} {})", callee, args_str)
                 }
             }
 
@@ -542,6 +558,7 @@ impl Ast {
             TypeExprKind::Unit => "unit".to_string(),
             TypeExprKind::String => "string".to_string(),
             TypeExprKind::Int => "int".to_string(),
+            TypeExprKind::Uint => "uint".to_string(),
             TypeExprKind::Float => "float".to_string(),
             TypeExprKind::Bool => "bool".to_string(),
             TypeExprKind::Ident(id) => id.name.to_string(),
@@ -584,6 +601,7 @@ impl Ast {
             TypeExprKind::Unit => "()".to_string(),
             TypeExprKind::String => "string".to_string(),
             TypeExprKind::Int => "int".to_string(),
+            TypeExprKind::Uint => "uint".to_string(),
             TypeExprKind::Float => "float".to_string(),
             TypeExprKind::Bool => "bool".to_string(),
             TypeExprKind::Hole(..) => "?".to_string(),

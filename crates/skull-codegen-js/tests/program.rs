@@ -7,13 +7,11 @@
 //! (`crates/rock-cli/tests/js_run_gate.rs`); this file pins the assembly ORDER
 //! and application-line CONTENT in the emitted string.
 
-use skull_mir::lower::ScalarCtx;
 use crate::common::ws_with;
 
 fn emit_program(ws: &bone_semantic::inference::Workspace) -> String {
-    let scx = ScalarCtx::new(ws);
     let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
-    skull_codegen_js::emit::emit_program(ws, &scx, mid)
+    skull_codegen_js::emit::emit_program(ws, mid)
         .unwrap_or_else(|e| panic!("emit_program rejected: {}", e.message))
         .program
 }
@@ -83,7 +81,7 @@ fn application_line_content() {
     assert!(beta_app.trim_end().ends_with(", null);"), "defaulted stage -> null: {beta_app}");
 }
 
-/// A specialization whose ONLY caller is a decorator body still gets emitted.
+/// A concrete operation whose ONLY caller is a decorator body is still served.
 ///
 /// A `deco` body is a third body kind beside plain fns and global initializers,
 /// and it went through a hand-written subset of the shared discovery step --
@@ -92,9 +90,9 @@ fn application_line_content() {
 /// spelled its specialized name, and emission rejected with `JS subset: no
 /// specialized body emitted`.
 ///
-/// `main` deliberately does NOT push, so the demand has exactly one origin. The
-/// assertion is that the DEFINITION exists, not merely that emission succeeded:
-/// a build that dropped the call would also not reject.
+/// `main` deliberately does NOT push, so the demand has exactly one origin.
+/// The normal lane may inline the specialized call; a no-inline lane must retain
+/// the standalone specialized definition and its concrete append.
 #[test]
 fn a_specialization_demanded_only_by_a_decorator_body_is_emitted() {
     let ws = ws_with(
@@ -107,9 +105,21 @@ fn main() { print("{XS.len}") }
 "#,
     );
     let js = emit_program(&ws);
+    let body = &js[js.find("function __deco_reg(").expect("decorator body")..];
     assert!(
-        js.contains("function push_"),
-        "no `push` definition emitted for the demand the deco body is the only \
-         origin of:\n{js}"
+        body.contains("_data[v0.len] = 1") && body.contains("v0.len = v0.len + 1"),
+        "decorator lost the concrete inline push operation: {body}"
+    );
+
+    let _inline = crate::common::InlineOffGuard::on();
+    let standalone = emit_program(&ws);
+    assert!(
+        standalone.contains("function push_"),
+        "decorator-only specialization did not emit the concrete push definition:\n{standalone}"
+    );
+    let push = &standalone[standalone.find("function push_").expect("push definition")..];
+    assert!(
+        push.contains("_data[v0.len] = v1") && push.contains("v0.len = v0.len + 1"),
+        "standalone decorator specialization lost the concrete push operation: {push}"
     );
 }

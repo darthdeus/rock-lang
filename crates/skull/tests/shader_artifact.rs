@@ -40,7 +40,7 @@ fn check(src: &str) -> Workspace {
 }
 
 fn graph_for(ws: &Workspace) -> (InstanceGraph, Vec<skull_mir::mir::FuncRef>) {
-    let roots = instance_graph::emission_roots(ws, None);
+    let roots = skull::mir_emit::emission_roots(ws, None);
     (instance_graph::build(ws, roots.clone(), false), roots)
 }
 
@@ -494,7 +494,7 @@ fn main() {
     );
     for i in &generic_insts {
         assert!(
-            !g.substitutions.get(i).expect("a recorded substitution").is_empty(),
+            !g.substitution(i).expect("a recorded substitution").is_empty(),
             "a `passthrough` instance carries an EMPTY substitution, so it is not generic"
         );
     }
@@ -549,7 +549,8 @@ fn a_missing_substitution_record_is_a_finding_not_a_concrete_shape() {
         .find(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "probe_frag")
         .expect("the entry instance")
         .clone();
-    assert!(g.substitutions.remove(&entry).is_some(), "the entry had no substitution to remove");
+    let removed = g.index.subst.remove(&entry).is_some() | g.root_instances.remove(&entry);
+    assert!(removed, "the entry had no substitution to remove");
 
     let after = shader_artifact::realize_shader(
         &ws,

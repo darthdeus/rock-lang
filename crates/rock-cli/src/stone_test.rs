@@ -237,6 +237,10 @@ pub fn run_stone_test(root: &Path) -> Result<()> {
                                 st.force_full(&main_path, &incremental_path)?;
                                 Ok(Some("restart"))
                             }
+                            SkullReload::FullRequired { .. } => {
+                                st.force_full(&main_path, &incremental_path)?;
+                                Ok(Some("restart"))
+                            }
                             SkullReload::NoChange => Ok(None),
                         }),
                     None => SkullStone::init(&dir, &main_path, &incremental_path).map(|st| {
@@ -318,4 +322,3 @@ fn collect_rock_files(root: &Path) -> Vec<PathBuf> {
     }
     out
 }
-

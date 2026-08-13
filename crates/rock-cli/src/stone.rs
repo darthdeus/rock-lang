@@ -146,7 +146,15 @@ pub fn do_stone_watch(
     // perceived startup pause and streams progress to the user.
     build_all_for_game(path)?;
 
-    let output_path = rock_host::project::default_main_lua_path();
+    let output_path =
+        rock_host::project::stone_session_main_lua_path(path, std::process::id());
+    if let Some(parent) = output_path.parent() {
+        fs_err::create_dir_all(parent)?;
+    }
+    if !quiet {
+        info!("Session output: {}", output_path.display());
+    }
+    report_session_usage();
 
     // The backend-specific incremental game compiler (skull: SkullStone two-file
     // split). It is the ONLY backend-specific piece of this loop; everything else
@@ -183,7 +191,7 @@ pub fn do_stone_watch(
 
     // Start the game process only if initial compilation succeeded
     let mut game_process = if initial_compilation_success {
-        Some(start_game_process(app_args, flight.as_ref(), None)?)
+        Some(start_game_process(&output_path, app_args, flight.as_ref(), None)?)
     } else {
         None
     };
@@ -364,10 +372,10 @@ pub fn do_stone_watch(
                     changed_paths.clear();
                     compilation_succeeded = true;
                     clear_error_file();
-                    if !outcome.restart_types.is_empty() {
+                    if !outcome.restart_reasons.is_empty() {
                         info!(
-                            "type shape changed ({}) -- live state cannot be migrated, restarting game process",
-                            outcome.restart_types.join(", ")
+                            "live reload requires a process restart ({})",
+                            outcome.restart_reasons.join(", ")
                         );
                         should_restart = true;
                     }
@@ -389,7 +397,7 @@ pub fn do_stone_watch(
                 error!("fold before start failed: {} (start may load a stale main.lua)", e);
             }
             info!("First successful compilation! Starting game...");
-            game_process = Some(start_game_process(app_args, flight.as_ref(), None)?);
+            game_process = Some(start_game_process(&output_path, app_args, flight.as_ref(), None)?);
             info!("Game started successfully");
         }
         // Restart the game process if a rebuild actually produced new
@@ -425,7 +433,7 @@ pub fn do_stone_watch(
                     }
                 }
                 game_process =
-                    Some(start_game_process(app_args, flight.as_ref(), replay_request.as_ref())?);
+                    Some(start_game_process(&output_path, app_args, flight.as_ref(), replay_request.as_ref())?);
                 info!("Game process restarted");
             }
         } else if has_game_changes && game_process.is_some() {
@@ -638,15 +646,71 @@ fn consume_request_file(path: &std::path::Path) -> Option<String> {
     Some(trimmed.to_string())
 }
 
+/// Session output is never swept, so the only thing between the author and a
+/// full disk is this line. 2 GB is ~400 mag builds (5.3 MB each) -- a lot of
+/// sessions, and still small next to `target/`.
+const SESSION_USAGE_WARN_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Bytes under `root` and how many session directories they are spread over.
+/// An unreadable entry is skipped: this is a courtesy warning, and failing a
+/// stone launch over a stat error would be worse than under-reporting.
+fn session_usage(root: &std::path::Path) -> (u64, usize) {
+    fn bytes_under(dir: &std::path::Path) -> u64 {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return 0;
+        };
+        entries
+            .flatten()
+            .map(|e| match e.file_type() {
+                Ok(t) if t.is_dir() => bytes_under(&e.path()),
+                Ok(t) if t.is_file() => e.metadata().map(|m| m.len()).unwrap_or(0),
+                _ => 0,
+            })
+            .sum()
+    }
+    let sessions = std::fs::read_dir(root)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+                .count()
+        })
+        .unwrap_or(0);
+    (bytes_under(root), sessions)
+}
+
+fn session_usage_warning(bytes: u64, sessions: usize) -> Option<String> {
+    if bytes < SESSION_USAGE_WARN_BYTES {
+        return None;
+    }
+    let gb = bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+    Some(format!(
+        "{} holds {gb:.1} GB across {sessions} session(s). Nothing here is ever \
+         deleted -- old sessions are kept on purpose. Delete the ones you don't \
+         need: rm -rf {}/*",
+        rock_host::project::STONE_SESSION_DIR,
+        rock_host::project::STONE_SESSION_DIR
+    ))
+}
+
+fn report_session_usage() {
+    let (bytes, sessions) = session_usage(std::path::Path::new(
+        rock_host::project::STONE_SESSION_DIR,
+    ));
+    if let Some(warning) = session_usage_warning(bytes, sessions) {
+        log::warn!(target: "STONE", "{warning}");
+    }
+}
+
 /// Start the game process with the correct library path and robust process
 /// management. `replay` Some => relaunch as a windowed replay (in-session load)
 /// instead of the flight-recorded live game.
 fn start_game_process(
+    lua_file: &std::path::Path,
     app_args: &[String],
     flight: Option<&FlightRecorder>,
     replay: Option<&ReplayRequest>,
 ) -> Result<Child> {
-    let lua_file = rock_host::project::default_main_lua_path();
 
     // Platform-specific process management for orphan prevention
     #[cfg(not(windows))]
@@ -960,6 +1024,12 @@ fn frame_timeout(frames: usize, dump_state: bool, app_args: &[String]) -> Durati
     (STARTUP + PER_FRAME * frames as u32).max(floor)
 }
 
+fn apply_headless_audio_env(cmd: &mut Command) {
+    if std::env::var_os("STONE_AUDIO_STUB").is_none() {
+        cmd.env("STONE_AUDIO_STUB", "1");
+    }
+}
+
 /// Run the game for a specified number of frames and take a screenshot
 ///
 /// This is useful for debugging and testing - compiles the game and runs it
@@ -991,6 +1061,7 @@ pub fn do_one_frame(
     cmd.env("FRAME_COUNT", frames.to_string())
         .env("TAKE_SCREENSHOT", "1")  // Always take screenshot when running frames
         .env("STONE_HEADLESS", "1");  // No visible window for frame runs
+    apply_headless_audio_env(&mut cmd);
     // Replay record/playback (docs/replay-scrub-plan.md). The game process
     // reads these env vars in stone/engine/replay.rock, same pattern as
     // DUMP_STATE / SIM_DT.
@@ -1114,6 +1185,9 @@ pub fn do_replay_window(
     info!("Replaying {} in a window (close the window to exit)", replay_file);
 
     let mut cmd = rock_host::project::build_luajit_command(&lua_file, app_args);
+    if std::env::var("STONE_HEADLESS").as_deref() == Ok("1") {
+        apply_headless_audio_env(&mut cmd);
+    }
     cmd.env("STONE_REPLAY", replay_file)
         .env("STONE_REPLAY_WINDOW", "1")
         // Stamp the CURRENT build so replay_init can warn when the log was
@@ -1136,10 +1210,91 @@ pub fn do_replay_window(
 mod tests {
     use super::{
         apply_run_env, build_id_for_lua, consume_request_file, ensure_flight_dir,
-        flight_recorder_for, frame_exit_result, frame_timeout,
-        FlightRecorder,
+        flight_recorder_for, frame_exit_result, frame_timeout, session_usage,
+        session_usage_warning, FlightRecorder, SESSION_USAGE_WARN_BYTES,
     };
     use crate::watch::is_compiler_source;
+
+    /// The whole point of the private session dir: `rock stone` must not write
+    /// the slot every other command writes. A shared `tmp/main.lua` is loaded
+    /// into the live game by the watcher (docs/hot-reload-chunk-identity.md).
+    #[test]
+    fn a_stone_session_never_writes_the_shared_main_lua() {
+        let shared = rock_host::project::default_main_lua_path();
+        let session = rock_host::project::stone_session_main_lua_path("games/match3", 4242);
+        assert_ne!(session, shared, "the session must have its own main.lua");
+        assert!(
+            session.starts_with(rock_host::project::STONE_SESSION_DIR),
+            "session output belongs under {}: {}",
+            rock_host::project::STONE_SESSION_DIR,
+            session.display()
+        );
+        assert!(
+            !shared.starts_with(rock_host::project::STONE_SESSION_DIR),
+            "the shared slot must stay outside the session root"
+        );
+    }
+
+    /// Two concurrent sessions must not share a slot, and a session must keep
+    /// the same one across its own recompiles (the path is recomputed nowhere,
+    /// but a pid-stable name is what makes a restart land where the watcher
+    /// is looking).
+    #[test]
+    fn session_dirs_separate_by_game_and_pid() {
+        let p = |game, pid| rock_host::project::stone_session_main_lua_path(game, pid);
+        assert_ne!(p("mag", 1), p("mag", 2), "two sessions of one game differ");
+        assert_ne!(p("mag", 1), p("bitgun", 1), "two games differ");
+        assert_eq!(p("mag", 1), p("mag", 1), "the same session is stable");
+        // A nested project path contributes its name, not its separators.
+        let nested = p("games/match3", 7);
+        assert!(
+            nested.to_string_lossy().contains("match3"),
+            "the dir should name the game: {}",
+            nested.display()
+        );
+        assert_eq!(
+            nested.components().count(),
+            p("match3", 7).components().count(),
+            "a nested game path must not deepen the session dir"
+        );
+    }
+
+    /// Nothing is ever deleted, so the warning is the only thing standing
+    /// between the author and a full disk. Both sides, and the threshold is
+    /// asserted from the constant rather than a literal repeated here.
+    #[test]
+    fn session_usage_warns_only_past_the_budget() {
+        assert!(
+            session_usage_warning(SESSION_USAGE_WARN_BYTES - 1, 100).is_none(),
+            "under budget must stay quiet"
+        );
+        let warning = session_usage_warning(SESSION_USAGE_WARN_BYTES, 154)
+            .expect("at the budget the warning fires");
+        assert!(warning.contains("154"), "name the session count: {warning}");
+        assert!(
+            warning.contains(rock_host::project::STONE_SESSION_DIR),
+            "name the directory to clean: {warning}"
+        );
+        assert!(warning.contains("2.0 GB"), "name the size: {warning}");
+    }
+
+    /// The scan must count bytes in nested session dirs, not just the top
+    /// level, and report the session count it measured over.
+    #[test]
+    fn session_usage_counts_every_session() {
+        let root = tempfile::tempdir().expect("tempdir");
+        for (session, bytes) in [("mag-1", 300usize), ("mag-2", 700), ("bitgun-9", 24)] {
+            let dir = root.path().join(session);
+            std::fs::create_dir_all(&dir).expect("mkdir session");
+            std::fs::write(dir.join("main.lua"), vec![b'x'; bytes]).expect("write main");
+        }
+        // A stray file at the root is not a session and contributes no count.
+        std::fs::write(root.path().join("notes.txt"), b"hi").expect("write stray");
+
+        let (bytes, sessions) = session_usage(root.path());
+        assert_eq!(sessions, 3, "three session dirs");
+        assert_eq!(bytes, 300 + 700 + 24 + 2, "every byte under the root");
+    }
 
     /// `--no-record` disables the flight recorder outright: no config, and no
     /// side effects either -- the replays dir must not be created (the check

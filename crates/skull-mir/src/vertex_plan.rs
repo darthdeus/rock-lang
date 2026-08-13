@@ -3,7 +3,7 @@
 //!
 //! This is the join between the two halves that neither owns alone:
 //! [`crate::gpu_layout`] gives the GROUPING (a top-level field is one attribute
-//! at one location, `pos` = `F32x2`), and [`value_leaf_layout_checked`] gives
+//! at one location, `pos` = `F32x2`), and the owned RepPlan C layout gives
 //! the OFFSETS (the C layout, flattened to primitive leaves `pos.x`, `pos.y`).
 //!
 //! # Why the offsets come from there and not from arithmetic here
@@ -15,7 +15,7 @@
 //! packed-u8 colour or `bool`-adjacent attribute breaks it silently, and a
 //! wrong vertex offset corrupts geometry rather than failing.
 //!
-//! `value_leaf_layout_checked` is the offset model the emitted chunk
+//! the RepPlan C-layout projection is the offset model the emitted chunk
 //! cross-checks against LuaJIT (`ffi.offsetof` / `ffi.sizeof` assertions per
 //! FFI-clean value struct, aborting at load on drift). Taking offsets from
 //! anywhere else is a second, unvalidated model -- the bypass the raw walker is
@@ -26,7 +26,7 @@
 //! bytes with the next attribute immediately after.
 
 use crate::gpu_layout::{vertex_attrs, AttrKind};
-use crate::lower::value_leaf_layout_checked;
+use crate::lower::RepArena;
 use bone_semantic::inference::Workspace;
 use skull_parser::CompilerError;
 use ustr::Ustr;
@@ -146,9 +146,10 @@ impl VertexPlan {
 /// The buffer plan for `struct_name`, or a spanned rejection.
 pub fn vertex_plan(ws: &Workspace, struct_name: Ustr) -> Result<VertexPlan, CompilerError> {
     let attrs = vertex_attrs(ws, struct_name)?;
-    let (leaves, byte_stride, _align) = value_leaf_layout_checked(ws, struct_name)
+    let (leaves, byte_stride, _align) = RepArena::default()
+        .nominal_leaf_layout(ws, skull_parser::ast::FnBackend::Any, struct_name)
         .map_err(|e| {
-            CompilerError::new_no_location(format!("vertex plan: `{struct_name}`: {e}"))
+            CompilerError::new_no_location(format!("vertex plan: `{struct_name}`: {}", e.message))
         })?;
 
     let reject = |msg: String| CompilerError::new_no_location(format!("vertex plan: {msg}"));

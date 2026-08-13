@@ -18,7 +18,7 @@ use bone_semantic::inference::Workspace;
 use skull::artifact::{self, ArtifactMappings, ArtifactRequest, Exclusion, Unrealizable};
 use skull::artifact::RealizedCallee;
 use skull::instance_graph::{self, Instance, InstanceGraph};
-use skull::target_projection::{JAVASCRIPT_WEB, LUAJIT_DESKTOP, NATIVE_C64_DESKTOP};
+use skull::target_projection::{JAVASCRIPT_WEB, LUAJIT_DESKTOP, NATIVE_C64_DESKTOP, WASM32_WASI};
 use skull_mir::intrinsics::BackendRealization;
 use ustr::Ustr;
 
@@ -45,7 +45,7 @@ fn check(src: &str) -> Workspace {
 /// There is ONE graph. It takes no target, and the same value serves every
 /// artifact -- selecting the backend sibling is `realize_decl`'s job.
 fn graph_for(ws: &Workspace) -> (InstanceGraph, Vec<skull_mir::mir::FuncRef>) {
-    let roots = instance_graph::emission_roots(ws, None);
+    let roots = skull::mir_emit::emission_roots(ws, None);
     (instance_graph::build(ws, roots.clone(), false), roots)
 }
 
@@ -54,7 +54,13 @@ fn graph_for(ws: &Workspace) -> (InstanceGraph, Vec<skull_mir::mir::FuncRef>) {
 /// identity property: plan S 0h puts the spelling under the ARTIFACT.
 struct Prefixed(&'static str);
 impl artifact::SymbolPlanner for Prefixed {
-    fn symbol(&self, ws: &Workspace, g: &InstanceGraph, i: &Instance) -> String {
+    fn symbol(
+        &self,
+        ws: &Workspace,
+        g: &InstanceGraph,
+        i: &Instance,
+        _realized: artifact::Realized,
+    ) -> String {
         format!("{}${}", self.0, g.logical_symbol(ws, i))
     }
     fn describe(&self) -> &'static str {
@@ -157,6 +163,37 @@ fn an_artifact_realizes_the_shared_instance_to_the_sibling_that_serves_it() {
     assert_eq!(lid.symbol, jid.symbol, "the fixture no longer shares an emitted symbol");
     assert_ne!(lid.declaration, jid.declaration, "one declaration served both artifacts");
     assert_ne!(lid, jid, "target-distinct boundary contracts collapsed to one id");
+}
+
+#[test]
+fn an_artifact_symbol_follows_the_declaration_it_selected() {
+    let ws = check(
+        r#"
+@nomangle inline(lua) fn sibling_probe(x: int) -> int = "return x"
+inline(js) fn sibling_probe(x: int) -> int = "return x"
+fn main() { let x = sibling_probe(1) }
+"#,
+    );
+    let (g, roots) = graph_for(&ws);
+    let js = artifact::realize(
+        &ws,
+        &g,
+        &ArtifactRequest::new(JAVASCRIPT_WEB, &roots).with_symbols(&artifact::REALIZED_SYMBOLS),
+    );
+    let (instance, realized) = js
+        .realization
+        .iter()
+        .find(|(i, r)| {
+            ws.module(i.func.module).functions[i.func.func].name.as_str() == "sibling_probe"
+                && r.decl != i.func
+        })
+        .expect("the fixture did not select a JS sibling");
+    let selected = Instance { func: realized.decl, args: instance.args.clone() };
+    assert_eq!(
+        js.symbols[instance],
+        selected.symbol(&ws, g.interner()),
+        "the artifact symbol came from the target-neutral representative"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -534,7 +571,7 @@ fn retention_is_reachability_not_a_declaration_filter() {
         .iter()
         .filter(|i| {
             (i.func == main_only[0] && i.args.is_empty())
-                || g.always_emitted_targets.contains(*i)
+                || g.is_always_emitted_target(i)
         })
         .collect();
     assert_eq!(
@@ -832,6 +869,53 @@ fn a_target_with_no_backend_keeps_only_portable_bodies() {
     }
 }
 
+#[test]
+fn synthetic_targets_share_instances_and_diverge_in_physical_obligations() {
+    let ws = check(
+        r#"
+extern(ffi, "stone") fn host_tick(n: int) -> int
+fn main() { let x = 1; host_tick(x) }
+"#,
+    );
+    let (g, roots) = graph_for(&ws);
+    assert!(g.instances.len() > 1, "the synthetic-target graph has no nonzero population");
+
+    let c64 = artifact::realize(&ws, &g, &ArtifactRequest::new(NATIVE_C64_DESKTOP, &roots));
+    let wasm = artifact::realize(&ws, &g, &ArtifactRequest::new(WASM32_WASI, &roots));
+    let shared = c64.retained().filter(|i| wasm.retains(i)).count();
+    let c64_only = c64.retained().filter(|i| !wasm.retains(i)).count();
+    let wasm_only = wasm.retained().filter(|i| !c64.retains(i)).count();
+
+    assert!(shared > 0, "the two projections share no logical instances");
+    assert_eq!(c64_only, 0, "C64 changed the shared logical realization population");
+    assert_eq!(wasm_only, 0, "Wasm32 changed the shared logical realization population");
+    assert_eq!(c64.realization, wasm.realization);
+    assert_eq!(c64.excluded, wasm.excluded);
+    assert_eq!(c64.severed, wasm.severed);
+    assert_ne!(c64.deferred, wasm.deferred, "the physical target obligations are identical");
+    assert!(
+        c64.deferred.iter().any(|d| d.contains("pointer width")),
+        "C64 has no target-specific physical obligation"
+    );
+    assert!(c64.deferred.iter().any(|d| d.contains("64-bit")), "C64 float width is not projected");
+    assert!(
+        wasm.deferred.iter().any(|d| d.contains("import entry")),
+        "Wasm32 has no target-specific boundary obligation"
+    );
+    assert_eq!(c64.shared_instances, g.instances.len());
+    assert_eq!(wasm.shared_instances, g.instances.len());
+    assert_eq!(
+        c64.census().retained + c64.excluded.len(),
+        g.instances.len(),
+        "C64 did not account for every shared instance"
+    );
+    assert_eq!(
+        wasm.census().retained + wasm.excluded.len(),
+        g.instances.len(),
+        "Wasm32 did not account for every shared instance"
+    );
+}
+
 /// The ambiguity arm's PRECONDITION, measured rather than assumed.
 ///
 /// `InlineDep` must name one instance, not one declaration, so `realize` refuses
@@ -948,7 +1032,9 @@ fn main() { let a = only_lua(1) }
     assert_eq!(severed[0].cause, Unrealizable::ForeignToArtifact);
     // Located: a rejection with no span cannot become a compile error at the
     // Stage-3 cutover. The span is the walk's, read back at the severed SITE.
-    let span = g.call_sites[&severed[0].caller][&severed[0].site].span;
+    let span = g.sites_of(&severed[0].caller).expect("the caller's sites")
+        [&severed[0].site]
+        .span;
     assert!(!instance_graph::is_spanless(&span), "the severed call carries no source span");
     // And it is NOT retained: a consumer must not be able to read a callable
     // entry for it.
@@ -1543,7 +1629,8 @@ fn main() {
         .find(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "wired_pair")
         .expect("the publisher instance")
         .clone();
-    assert!(g.substitutions.remove(&inst).is_some(), "there was no record to remove");
+    let removed = g.index.subst.remove(&inst).is_some() | g.root_instances.remove(&inst);
+    assert!(removed, "there was no record to remove");
 
     let after = artifact::realize(&ws, &g, &ArtifactRequest::new(JAVASCRIPT_WEB, &roots));
     assert_eq!(
@@ -1671,7 +1758,7 @@ fn main() {
         .filter(|(i, _)| {
             ws.module(i.func.module).functions[i.func.func].name.as_str() == "wired"
         })
-        .map(|(i, n)| (g.arena.render(i.args[0]), *n))
+        .map(|(i, n)| (g.interner().render(i.args[0]), *n))
         .collect();
 
     // The DENOMINATOR: the fixture has a real generic population, so a zero
@@ -1697,4 +1784,161 @@ fn main() {
         "a generic instance went unanswered for a reason other than its own width"
     );
     assert_eq!(js.census().widest_result_lanes, 2);
+}
+
+// ---------------------------------------------------------------------------
+// PUBLICATION obligations: an `@nomangle` root's bare-name promise is a
+// DIFFERENT question from which declaration serves a resolved call.
+// ---------------------------------------------------------------------------
+
+const PUBLICATION_FIXTURE: &str = r#"
+@nomangle fn portable(x: int) -> int { return x + 1 }
+inline(lua) fn portable(x: int) -> int = """
+    return x + 2
+"""
+fn caller() -> int { return portable(5) }
+
+fn plain(x: int) -> int { return x + 1 }
+inline(lua) fn plain(x: int) -> int = """
+    return x + 2
+"""
+fn other_caller() -> int { return plain(5) }
+
+fn main() { print("{caller()} {other_caller()}") }
+"#;
+
+/// The compact fixture: an `@nomangle` portable declaration with a same-name
+/// `inline(lua)` sibling, plus an ordinary call, plus a sibling control (the
+/// SAME shape with no `@nomangle`) that must not acquire a publication.
+#[test]
+fn a_nomangle_root_publishes_its_own_body_beside_the_calls_sibling_serves() {
+    let ws = check(PUBLICATION_FIXTURE);
+    let (g, roots) = graph_for(&ws);
+    let lua = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
+
+    // Nonzero ordinary-call population: the artifact retains real Rock work.
+    assert!(!lua.instances.is_empty(), "the fixture retained no ordinary Rock instances at all");
+    // Nonzero exact-publication population: the `@nomangle` root's promise is
+    // modeled at all.
+    assert!(
+        !lua.publications.is_empty(),
+        "the `@nomangle` root produced no publication obligation"
+    );
+    // `portable` specifically is represented (the stdlib carries its own
+    // `@nomangle` declarations, some of them GENERIC -- a generic declaration
+    // has no concrete base `Instance` at all in this model, which is a real,
+    // separate, expected member of `unrepresented_publications` and not what
+    // this fixture is testing).
+    assert!(
+        !lua.unrepresented_publications.iter().any(|r| ws.module(r.module).functions[r.func]
+            .name
+            .as_str()
+            == "portable"),
+        "portable's own declaration should be its group's representative (Any \
+         is the lowest backend rank): {:?}",
+        lua.unrepresented_publications
+    );
+
+    // The ordinary call resolves through the Lua sibling: `caller`'s realized
+    // callee is the `inline(lua)` declaration, not the `@nomangle` one.
+    let nomangle_fid = ws
+        .modules
+        .iter()
+        .find_map(|m| {
+            m.functions
+                .iter()
+                .find(|(_, f)| {
+                    f.name.as_str() == "portable"
+                        && f.annotations.iter().any(|a| a.name.name.as_str() == "nomangle")
+                })
+                .map(|(fid, _)| (m.id, fid))
+        })
+        .expect("the @nomangle declaration exists");
+    let portable_canonical = lua
+        .realization
+        .keys()
+        .find(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "portable")
+        .cloned()
+        .expect("the canonical `portable` instance is retained");
+    let served_backend =
+        ws.module(lua.realization[&portable_canonical].decl.module).functions
+            [lua.realization[&portable_canonical].decl.func]
+            .backend;
+    assert_eq!(
+        served_backend,
+        FnBackend::Lua,
+        "the ordinary call to `portable` must be served by the Lua sibling, not the \
+         @nomangle Any-backed declaration"
+    );
+    assert_ne!(
+        lua.realization[&portable_canonical].decl,
+        skull_mir::mir::FuncRef { module: nomangle_fid.0, func: nomangle_fid.1 },
+        "call-serving realization selected the @nomangle declaration itself, not its sibling"
+    );
+
+    // The bare `@nomangle` Rock definition remains a publication obligation for
+    // its OWN declaration -- the canonical Instance IS the @nomangle instance
+    // here (Any is always the lowest backend rank), so this is the SAME key as
+    // `portable_canonical` above, naming a DIFFERENT thing (its own body, not
+    // whichever declaration serves calls).
+    assert_eq!(
+        lua.publications.get(&portable_canonical).map(String::as_str),
+        Some("portable"),
+        "the @nomangle root's own bare-name publication is missing or misnamed: {:?}",
+        lua.publications
+    );
+
+    // The sibling control (same shape, no `@nomangle`) must NOT acquire a
+    // publication obligation -- ordinary same-name siblings stay exactly as
+    // sibling-collapse always treated them.
+    let plain_canonical = lua
+        .realization
+        .keys()
+        .find(|i| ws.module(i.func.module).functions[i.func.func].name.as_str() == "plain")
+        .cloned()
+        .expect("the canonical `plain` instance is retained");
+    assert!(
+        !lua.publications.contains_key(&plain_canonical),
+        "a same-name sibling pair with no @nomangle root acquired a publication obligation"
+    );
+    assert!(
+        lua.publication_collisions.is_empty(),
+        "the compact fixture has no colliding publication pair: {:?}",
+        lua.publication_collisions
+    );
+}
+
+/// Two INDEPENDENT `@nomangle` declarations sharing one bare name (different
+/// signatures, so `backend_variant_group` never groups them -- this collision
+/// is not routed through sibling selection at all) must REJECT rather than let
+/// one publication silently overwrite the other.
+const PUBLICATION_COLLISION_FIXTURE: &str = r#"
+@nomangle fn dup(x: int) -> int { return x }
+@nomangle fn dup(x: string) -> string { return x }
+fn main() { print("{dup(1)} {dup(\"s\")}") }
+"#;
+
+#[test]
+fn two_nomangle_roots_sharing_a_bare_name_collide_rather_than_overwrite() {
+    let ws = check(PUBLICATION_COLLISION_FIXTURE);
+    let (g, roots) = graph_for(&ws);
+    let lua = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
+
+    assert_eq!(
+        lua.publication_collisions.len(),
+        1,
+        "two independent @nomangle roots named `dup` did not collide: {:?}",
+        lua.publication_collisions
+    );
+    let collision = &lua.publication_collisions[0];
+    assert_eq!(collision.symbol, "dup");
+    assert_eq!(collision.instances.len(), 2, "the collision did not name both instances");
+    // Neither colliding instance is silently admitted as a resolved publication
+    // -- a reject beats a last-writer-wins guess.
+    for i in &collision.instances {
+        assert!(
+            !lua.publications.contains_key(i),
+            "a colliding publication was admitted anyway: {i:?}"
+        );
+    }
 }

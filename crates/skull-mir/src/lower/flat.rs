@@ -2,7 +2,6 @@
 //! than a nested table, plus the cell group/repr conversions a coroutine frame
 //! and a flat literal both go through.
 use super::*;
-
 impl Builder<'_> {
     /// Lower an enum-typed value into its flattened cells: the discriminant
     /// (variant-name string) plus ALL union slots (every positional + every record
@@ -85,7 +84,9 @@ impl Builder<'_> {
         // spread back out.
         let r = self.lower_expr_repr(value)?;
         match r {
-            ValueRepr::Group { name, parts, .. } if flat_enum_shape(self.ws, name).is_some() => {
+            ValueRepr::Group { name, parts, .. }
+                if EnumPlan::for_name(self.ws, name).is_some_and(|plan| plan.flat().is_some()) =>
+            {
                 Ok(self.repr_group_to_cells(shape, parts))
             }
             other => {
@@ -115,40 +116,30 @@ impl Builder<'_> {
     /// The flat-enum `ValueShape` of `e`'s (non-nullable) inferred type, else `None`
     /// -- the gate for threading a `let`/reassign target as leaf cells.
     pub(crate) fn flat_enum_value_shape_of(&self, e: Idx<Expr>) -> Option<ValueShape> {
-        match self.expr_ty(e)? {
-            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => {
-                flat_enum_shape(self.ws, n).map(|s| s.value_shape())
-            }
-            _ => None,
+        let id = self.expr_rep_id(e, RepUse::Value, false)?;
+        let mut shape = self.scx.rep_arena().value_shape(id)?;
+        if !EnumPlan::for_name(self.ws, shape.name).is_some_and(|plan| plan.flat().is_some()) {
+            return None;
         }
+        shape.nullable = false;
+        Some(shape)
     }
 
-    /// The `EnumFlatShape` of `e`'s (`Nullable`-peeled) inferred type, else `None`.
-    pub(crate) fn flat_enum_shape_of_expr(&self, e: Idx<Expr>) -> Option<EnumFlatShape> {
-        match self.expr_ty(e)? {
-            TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } => flat_enum_shape(self.ws, n),
-            _ => None,
-        }
+    pub(crate) fn resume_frame_read_channel(
+        &mut self,
+        cobj: Idx<Inst>,
+        channel: &YieldChannel,
+    ) -> ValueRepr {
+        let value_shape = channel.value_shape();
+        self.resume_frame_read_with_shape(cobj, channel.leaf_count(), &value_shape)
     }
 
-    /// Whether `e`'s inferred type is a `Coroutine<..>` -- the guard that a
-    /// `resume(e)` call is a real coroutine resume (not a user fn named `resume`).
-    pub(crate) fn is_coroutine_recv(&self, e: Idx<Expr>) -> bool {
-        matches!(
-            self.expr_ty(e),
-            Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. }) if n.as_str() == "Coroutine"
-        )
-    }
-
-    /// Read a resumed flat-enum yield value from the coroutine's frame slots as an
-    /// unboxed `Group` -- the concrete `c.resume()` channel. The object IS the
-    /// frame: `cobj.__y*` holds the leaves the `__step` wrote; when the coroutine
-    /// is terminal (`__state < 0`) the value is null, threaded as an all-nil group
-    /// (`tag = nil` sentinel, matching the nullable flat-enum ABI). The consumer
-    /// must have already advanced the coroutine (`cobj.__advance(cobj, arg)`)
-    /// before this read.
-    pub(crate) fn resume_frame_read(&mut self, cobj: Idx<Inst>, shape: &EnumFlatShape) -> ValueRepr {
-        let n = shape.leaf_count();
+    fn resume_frame_read_with_shape(
+        &mut self,
+        cobj: Idx<Inst>,
+        n: usize,
+        value_shape: &ValueShape,
+    ) -> ValueRepr {
         let frame = cobj;
         let state = self.emit_cur(Inst::Field { base: frame, field: Ustr::from("__state") });
         let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
@@ -175,7 +166,7 @@ impl Builder<'_> {
         self.cur = join;
         let leaves: Vec<Idx<Inst>> = cells.iter().map(|c| self.emit_cur(Inst::Load(*c))).collect();
         let mut idx = 0;
-        self.rebuild_from_leaves(&shape.value_shape(), &leaves, &mut idx)
+        self.rebuild_from_leaves(value_shape, &leaves, &mut idx)
     }
 
     /// Split a flat-enum `ValueRepr::Group` into its cells (the inverse of

@@ -21,7 +21,6 @@ use crate::common::ws_with;
 
 fn emit_res(src: &str, root: &str) -> Result<String, String> {
     let ws = ws_with(src);
-    let scx = ScalarCtx::new(&ws).with_target(bone_semantic::hir::FnBackend::Js);
     let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
     let fid = ws
         .module(mid)
@@ -32,7 +31,6 @@ fn emit_res(src: &str, root: &str) -> Result<String, String> {
         .expect("root fn");
     skull_codegen_js::emit::emit_with_closure(
         &ws,
-        &scx,
         &[(FuncRef { module: mid, func: fid }, root.to_string())],
     )
     .map_err(|e| e.message)
@@ -62,7 +60,7 @@ fn lanes(src: &str, name: &str) -> usize {
         .find(|(_, f)| f.name.as_str() == name)
         .map(|(fid, _)| fid)
         .expect("fn");
-    skull_mir::lower::BackendFnAbiPlan::for_declaration(
+    skull_mir::lower::BackendFnAbiPlan::for_boundary_declaration(
         &ws,
         &scx,
         FuncRef { module: mid, func: fid },
@@ -276,5 +274,62 @@ fn main() { let (a, b) = collides(1.0) }
 "#,
         "main",
         "compiler-owned",
+    );
+}
+
+#[test]
+fn selected_js_sibling_owns_the_inline_abi() {
+    let js = emit(
+        r#"
+value Pair { x: float, y: float }
+
+inline(lua) fn probe<T>(value: T) -> int = "return 0"
+@scalar_abi inline(js) fn probe<T>(value: T) -> int = "return 0;"
+
+fn main() {
+    let p = Pair { x: 1.0, y: 2.0 }
+    let _ = probe(p)
+}
+"#,
+        "main",
+    );
+    let definitions: Vec<&str> = js
+        .lines()
+        .filter(|line| line.starts_with("function probe_"))
+        .collect();
+    assert_eq!(definitions.len(), 1, "the fixture needs one selected JS body:\n{js}");
+    assert!(
+        definitions[0].contains("value__x, value__y"),
+        "the selected @scalar_abi JS sibling did not own its concrete parameter ABI:\n{js}"
+    );
+    assert!(
+        js.lines().any(|line| line.contains("probe_") && line.contains("1, 2")),
+        "the call site did not use the selected sibling's scalar parameter ABI:\n{js}"
+    );
+}
+
+#[test]
+fn selected_js_sibling_owns_result_lanes_and_the_return_bank() {
+    let js = emit(
+        r#"
+value Pair { x: float, y: float }
+
+inline(lua) fn publish<T>(value: T) -> Pair = "return 0"
+@scalar_abi inline(js) fn publish<T>(value: T) -> Pair = "return __rock_publish(0.0, 0.0);"
+
+fn main() {
+    let p = Pair { x: 1.0, y: 2.0 }
+    let _ = publish(p)
+}
+"#,
+        "main",
+    );
+    assert!(
+        js.contains("var __rock_ret1"),
+        "the selected sibling's concrete result ABI did not size the return bank:\n{js}"
+    );
+    assert!(
+        js.contains("__rock_ret1 = __rock_lane1"),
+        "the selected sibling's publisher did not lower to its concrete result lane:\n{js}"
     );
 }

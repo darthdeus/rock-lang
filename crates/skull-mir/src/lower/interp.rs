@@ -52,7 +52,7 @@ impl Builder<'_> {
             // emitting <fn>`) and the per-body sibling accumulation that a fresh
             // lowering-time error would lose. Pinned by `multi_rejection` and
             // `nobox_diagnostic_attribution`.
-            None if self.tuple_box_shape(expr).is_some() => {
+            None if self.tuple_box_shape(expr)?.is_some() => {
                 let r = self.lower_expr_repr(expr)?;
                 let v = self.pack(r);
                 self.stringify(expr, v)

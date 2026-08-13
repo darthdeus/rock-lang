@@ -84,6 +84,7 @@ impl Workspace {
 
         let builtins = Builtins {
             int: bm.ty_arena.alloc(TypeExpr::Builtin(BuiltinTy::Int)),
+            uint: bm.ty_arena.alloc(TypeExpr::Builtin(BuiltinTy::Uint)),
             float: bm.ty_arena.alloc(TypeExpr::Builtin(BuiltinTy::Float)),
             bool: bm.ty_arena.alloc(TypeExpr::Builtin(BuiltinTy::Bool)),
             string: bm.ty_arena.alloc(TypeExpr::Builtin(BuiltinTy::String)),
@@ -199,6 +200,7 @@ impl Workspace {
         match te {
             TypeExpr::Builtin(b) => match b {
                 BuiltinTy::Int => "int".into(),
+                BuiltinTy::Uint => "uint".into(),
                 BuiltinTy::Float => "float".into(),
                 BuiltinTy::Bool => "bool".into(),
                 BuiltinTy::String => "string".into(),

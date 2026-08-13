@@ -17,7 +17,7 @@ impl Builder<'_> {
         let TypeExpr::App { ctor: TypeCtor::Nominal(ename), .. } = static_ty(self.ws, fdef.ty)? else {
             return None;
         };
-        flat_enum_shape(self.ws, ename)
+        EnumPlan::for_name(self.ws, ename).and_then(|plan| plan.flat().cloned())
     }
 
     /// Same as [`Self::flat_field_of`] but for a known struct name + field (used at a
@@ -32,7 +32,7 @@ impl Builder<'_> {
         let TypeExpr::App { ctor: TypeCtor::Nominal(ename), .. } = static_ty(self.ws, fdef.ty)? else {
             return None;
         };
-        flat_enum_shape(self.ws, ename)
+        EnumPlan::for_name(self.ws, ename).and_then(|plan| plan.flat().cloned())
     }
 
     // --- `embed` storage: a child's leaves ARE the parent's physical keys ---
@@ -76,7 +76,13 @@ impl Builder<'_> {
         if !(self.ws.has_embed_fields || self.ws.has_nobox_types) {
             return None;
         }
-        if !spliced && self.is_value_struct(sname) && !value_struct_is_leaf_table(self.ws, sname) {
+        if !spliced
+            && self.is_value_struct(sname)
+            && !matches!(
+                self.scx.rep_arena().nominal_value_storage(self.ws, self.scx.target, sname),
+                Some(ValueStorage::LeafTable)
+            )
+        {
             return None;
         }
         let sid = *self.ws.struct_by_name.get(&sname)?;
@@ -238,10 +244,10 @@ impl Builder<'_> {
     /// sequence that lines up wrong. Rejecting loudly beats a silent
     /// misalignment; the shape has no in-tree instance today.
     pub(crate) fn nobox_embed_group_shape(&self, cname: Ustr) -> Option<ValueShape> {
-        if !is_nobox_nominal(self.ws, cname) || self.struct_has_flat_field(cname) {
+        if !self.is_nobox_struct(cname) || self.struct_has_flat_field(cname) {
             return None;
         }
-        value_shape_of_nominal(self.ws, cname)
+        self.nominal_rep_shape(cname, true)
     }
 
     /// Whether any field of `cname`, at any depth, flattens to several parent

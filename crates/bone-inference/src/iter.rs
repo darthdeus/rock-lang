@@ -109,13 +109,7 @@ pub(crate) fn infer_for_elem(
 ) -> Result<TyId, CompilerError> {
     match c.body.expr_arena[iter] {
         Expr::Range { low, high } => {
-            let low_ty = infer_expr(c, gamma, low)?;
-            unify(gamma, low_ty, gamma.workspace.builtins.int(), span)?;
-
-            let high_ty = infer_expr(c, gamma, high)?;
-            unify(gamma, high_ty, gamma.workspace.builtins.int(), span)?;
-
-            Ok(gamma.workspace.builtins.int())
+            infer_range_bounds(c, gamma, low, high)
         }
 
         // Builtin-collection `enumerate(coll)` keeps its template lowering
@@ -126,6 +120,7 @@ pub(crate) fn infer_for_elem(
         Expr::Call {
             callee: Callee::Unresolved { name, .. },
             args,
+            ..
         } if name.as_str() == "enumerate"
             && args.len() == 1
             && {

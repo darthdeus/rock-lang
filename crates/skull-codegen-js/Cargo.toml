@@ -12,6 +12,7 @@ autotests = false
 
 [dependencies]
 skull-mir = { path = "../skull-mir" }
+skull-graph = { path = "../skull-graph" }
 rustc-hash = { workspace = true }
 skull-transform = { path = "../skull-transform" }
 bone-semantic = { path = "../bone-semantic" }

@@ -117,6 +117,7 @@ fn encode_into(ws: &Workspace, ty: TyId, out: &mut String) {
             hir::BuiltinTy::Any => "any",
             hir::BuiltinTy::Unit => "unit",
             hir::BuiltinTy::Int => "int",
+            hir::BuiltinTy::Uint => "uint",
             hir::BuiltinTy::Float => "float",
             hir::BuiltinTy::Bool => "bool",
             hir::BuiltinTy::String => "string",
@@ -388,7 +389,7 @@ mod tests {
             "a_n6_Entity_1_a_n3_Mob_0_z_z"
         );
 
-        // Totality: no SpecKey slot carries these today, and each still has one
+        // Totality: no instantiation carries these today, and each still has one
         // symbol of its own rather than colliding with a neighbour.
         assert_eq!(enc(&MonoTy::Any), "p_any");
         assert_eq!(enc(&MonoTy::Unit), "p_unit");

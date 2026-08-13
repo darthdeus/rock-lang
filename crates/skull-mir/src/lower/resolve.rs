@@ -63,6 +63,18 @@ pub fn backend_variant(
     Err(NoServingBinding)
 }
 
+/// The target-selected declaration for one target-neutral concrete instance.
+/// The arguments remain the graph's identity; only the body sibling changes.
+pub fn backend_variant_instance(
+    ws: &Workspace,
+    inst: &crate::instance::Instance,
+    target: bone_semantic::hir::FnBackend,
+) -> Result<crate::instance::Instance, NoServingBinding> {
+    let f = &ws.module(inst.func.module).functions[inst.func.func];
+    let func = backend_variant(ws, f.name, inst.func, target)?;
+    Ok(crate::instance::Instance { func, args: inst.args.clone() })
+}
+
 /// The backend-variant group representative of `rep` -- the declaration bone
 /// would have collapsed the group to, whichever member a caller happens to hold.
 ///
@@ -163,6 +175,8 @@ impl Builder<'_> {
                 return self.nullcoalesce_tuple_repr(lhs, rhs);
             }
         }
+        let expr_tuple_shape = self.expr_tuple_shape(e)?;
+        let tuple_box_shape = expr_tuple_shape.clone().filter(TupleRetShape::splats);
         match self.body.expr_arena[e].clone() {
             Expr::Block { statements, tail } => self.lower_block_repr(statements, tail),
             Expr::If {
@@ -197,7 +211,7 @@ impl Builder<'_> {
             // A tuple literal whose type splats stays a `Tuple` repr, so a
             // `nobox` element reaches the return boundary as leaves instead of
             // being packed into the table first.
-            Expr::Tuple(elems) if self.expr_tuple_shape(e).is_some_and(|s| s.splats()) => {
+            Expr::Tuple(elems) if expr_tuple_shape.as_ref().is_some_and(TupleRetShape::splats) => {
                 let parts = elems
                     .into_iter()
                     .map(|el| self.lower_expr_repr(el))
@@ -324,7 +338,12 @@ impl Builder<'_> {
                 if let ValueRepr::Scalar(v) = br {
                     match self
                         .value_struct_name_of(base)
-                        .filter(|n| value_struct_is_leaf_table(self.ws, *n))
+                        .filter(|n| {
+                            matches!(
+                                self.scx.rep_arena().nominal_value_storage(self.ws, self.scx.target, *n),
+                                Some(ValueStorage::LeafTable)
+                            )
+                        })
                     {
                         Some(sname) => br = self.boxed_value_copy_repr(v, sname),
                         None => br = ValueRepr::Scalar(v),
@@ -384,19 +403,27 @@ impl Builder<'_> {
             // A cdata-eligible enum construction stays an unboxed Group `[tag, _0]`
             // (so a callsite/field can splat it without a cdata round-trip); `pack`
             // builds `<Enum>_ct` only if a boxed context needs it.
-            Expr::EnumVariant { enum_name, variant, args, .. } if enum_value_shape(self.ws, enum_name).is_some() => {
-                let shape = enum_value_shape(self.ws, enum_name).unwrap();
+            Expr::EnumVariant { enum_name, variant, args, .. }
+                if EnumPlan::for_name(self.ws, enum_name).is_some_and(|plan| plan.cdata().is_some()) =>
+            {
+                let shape = EnumPlan::for_name(self.ws, enum_name)
+                    .and_then(|plan| plan.cdata().cloned())
+                    .expect("cdata enum plan disappeared");
                 self.enum_cdata_repr(&shape, variant, args)
             }
             // A flat (boxed) enum construction stays an unboxed Group `[tag, _0..,
             // <rec>..]` so a call/return/match can thread it as scalars; `pack`
             // builds the `{__variant}` box only if a boxed context needs it.
-            Expr::EnumVariant { enum_name, .. } if flat_enum_shape(self.ws, enum_name).is_some() => {
-                let shape = flat_enum_shape(self.ws, enum_name).unwrap();
+            Expr::EnumVariant { enum_name, .. }
+                if EnumPlan::for_name(self.ws, enum_name).is_some_and(|plan| plan.flat().is_some()) =>
+            {
+                let shape = EnumPlan::for_name(self.ws, enum_name)
+                    .and_then(|plan| plan.flat().cloned())
+                    .expect("flat enum plan disappeared");
                 let cells = self.lower_flat_value(&shape, e)?;
                 Ok(self.flat_cells_to_repr(&shape, cells))
             }
-            Expr::Call { callee, args } => self.lower_call_repr(e, callee, args),
+            Expr::Call { callee, args, .. } => self.lower_call_repr(e, callee, args),
             // A COLUMN element read routes on the container, ahead of the
             // element-type guard below: column storage has no element slot at
             // all, and inside a body specialized at `T = E?` the element type is
@@ -438,7 +465,7 @@ impl Builder<'_> {
                 // Leaf addressing: no slot reference, no nested ctor -- each
                 // leaf comes straight from its typed view.
                 if let ContainerKind::NativeBufferValue(elem) = kind {
-                    if self.is_leaf_addressed(elem) {
+                    if self.is_leaf_addressed(elem)? {
                         return self.nb_leaf_element_repr(b, i, elem);
                     }
                 }
@@ -463,8 +490,8 @@ impl Builder<'_> {
             // honest: slot projection, `let (a, b) =`, and the `for` destructure
             // all already consume a `ValueRepr::Tuple`, so none of them needs to
             // know the box widened. Slots the consumer ignores are DCE'd.
-            _ if self.tuple_box_shape(e).is_some() => {
-                let shape = self.tuple_box_shape(e).expect("guard matched");
+            _ if tuple_box_shape.is_some() => {
+                let shape = tuple_box_shape.expect("guard matched");
                 let base = self.lower_expr(e)?;
                 let slots: Vec<Idx<Inst>> = (0..shape.slot_count())
                     .map(|i| self.emit_cur(Inst::TupleIndex { base, index: i }))
@@ -487,7 +514,8 @@ impl Builder<'_> {
         rhs: Idx<Expr>,
     ) -> Result<ValueRepr, CompilerError> {
         let name = self.nobox_value_name(e).expect("caller checked");
-        let shape = value_shape_of_nominal(self.ws, name)
+        let shape = self
+            .nobox_value_shape_of(e)
             .ok_or_else(|| gap(format!("nobox value `{name}` has no scalar shape")))?;
         let mut lhs_shape = shape.clone();
         lhs_shape.nullable = true;
@@ -604,7 +632,7 @@ impl Builder<'_> {
                     r
                 }
             };
-            let r = self.coerce_field_repr(r, lf.value, name, lf.name);
+            let r = self.coerce_field_repr(r, lf.value, name, lf.name)?;
             litmap.push((lf.name, r));
         }
         let parts: Vec<ValueRepr> = match self.struct_field_names(name) {
@@ -651,8 +679,10 @@ impl Builder<'_> {
     /// them).
     pub(crate) fn reorder_named_args(
         &mut self,
+        e: Idx<Expr>,
         arg_idxs: &[Idx<Expr>],
         func: FuncRef,
+        callee_inst: Option<&crate::instance::Instance>,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         let param_names: Vec<Ustr> = self
             .ws
@@ -698,9 +728,15 @@ impl Builder<'_> {
                     slots.len()
                 )));
             }
-            let v = match self.param_ty(func, pidx) {
-                Some(t) => self.coerced(v, a, t),
-                None => v,
+            let v = match callee_inst
+                .map(|inst| self.concrete_callee_param_ty(e, inst, pidx))
+                .transpose()?
+                .flatten()
+            {
+                Some(t) => self.coerced_mono(v, a, &t),
+                None => {
+                    return Err(self.gap_here("concrete call has no callee parameter type"));
+                }
             };
             slots[pidx] = Some(v);
         }

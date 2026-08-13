@@ -13,7 +13,8 @@
 //! program with two call sites at one instantiation.
 
 use skull_mir::bound::{DemandMap, ResolvedBoundNext, ResolvedBoundTree, SpecDemand};
-use skull_mir::lower::EmittedBodyId;
+use skull_mir::instance::Instance;
+use skull_mir::monoty::MonoInterner;
 use skull_mir::mir::FuncRef;
 use skull_mir::monoty::{MonoCtor, MonoTy};
 use ustr::Ustr;
@@ -30,21 +31,28 @@ fn fref(n: u32) -> FuncRef {
 }
 
 /// A one-leaf tree resolving generic #0 to witness `witness`.
-fn tree(witness: u32) -> ResolvedBoundTree {
+fn tree(i: &MonoInterner, witness: u32) -> ResolvedBoundTree {
     let mut t = ResolvedBoundTree::default();
     t.next.insert(
         0,
         ResolvedBoundNext::Concrete {
-            func: fref(witness),
-            spec: None,
+            instance: Instance::intern(i, fref(witness), vec![nominal("float")]),
             sub: ResolvedBoundTree::default(),
         },
     );
     t
 }
 
-fn demand(callee: u32, ty: &str, tree: ResolvedBoundTree) -> SpecDemand {
-    SpecDemand { func: fref(callee), key: vec![nominal(ty)], tree }
+fn interner() -> MonoInterner {
+    MonoInterner::new()
+}
+
+fn inst(i: &MonoInterner, callee: u32, ty: &str) -> Instance {
+    Instance::intern(i, fref(callee), vec![nominal(ty)])
+}
+
+fn demand(i: &MonoInterner, callee: u32, ty: &str, tree: ResolvedBoundTree) -> SpecDemand {
+    SpecDemand { inst: inst(i, callee, ty), tree }
 }
 
 /// Two sites demanding ONE emitted body with DIFFERENT trees is a clash: one
@@ -52,13 +60,14 @@ fn demand(callee: u32, ty: &str, tree: ResolvedBoundTree) -> SpecDemand {
 /// first would silently win.
 #[test]
 fn two_sites_demanding_one_body_with_different_trees_clash() {
+    let i = interner();
     let mut map = DemandMap::default();
-    assert!(map.record(&[demand(1, "int", tree(7))]).is_empty(), "a first sighting is not a clash");
+    assert!(map.record(&[demand(&i, 1, "int", tree(&i, 7))]).is_empty(), "a first sighting is not a clash");
 
-    let clashes = map.record(&[demand(1, "int", tree(9))]);
+    let clashes = map.record(&[demand(&i, 1, "int", tree(&i, 9))]);
     assert_eq!(
         clashes,
-        vec![EmittedBodyId::new(fref(1), vec![nominal("int")])],
+        vec![inst(&i, 1, "int")],
         "a second demand for the same emitted body with a different tree must clash, \
          and must name the body"
     );
@@ -69,10 +78,11 @@ fn two_sites_demanding_one_body_with_different_trees_clash() {
 /// after the first agrees. If those clashed the check would reject everything.
 #[test]
 fn a_repeated_demand_that_agrees_is_silent() {
+    let i = interner();
     let mut map = DemandMap::default();
-    map.record(&[demand(1, "int", tree(7))]);
+    map.record(&[demand(&i, 1, "int", tree(&i, 7))]);
     assert!(
-        map.record(&[demand(1, "int", tree(7)), demand(1, "int", tree(7))]).is_empty(),
+        map.record(&[demand(&i, 1, "int", tree(&i, 7)), demand(&i, 1, "int", tree(&i, 7))]).is_empty(),
         "agreeing repeats must be silent"
     );
 }
@@ -83,11 +93,15 @@ fn a_repeated_demand_that_agrees_is_silent() {
 /// `filter<string>` in one program would clash.
 #[test]
 fn two_instantiations_of_one_declaration_may_differ() {
+    let i = interner();
     let mut map = DemandMap::default();
-    let clashes = map.record(&[demand(1, "int", tree(7)), demand(1, "string", tree(9))]);
+    let clashes = map.record(&[
+        demand(&i, 1, "int", tree(&i, 7)),
+        demand(&i, 1, "string", tree(&i, 9)),
+    ]);
     assert!(clashes.is_empty(), "distinct instantiations are distinct bodies: {clashes:?}");
-    assert_eq!(map.tree_of(&EmittedBodyId::new(fref(1), vec![nominal("int")])), tree(7));
-    assert_eq!(map.tree_of(&EmittedBodyId::new(fref(1), vec![nominal("string")])), tree(9));
+    assert_eq!(map.tree_of(&inst(&i, 1, "int")), tree(&i, 7));
+    assert_eq!(map.tree_of(&inst(&i, 1, "string")), tree(&i, 9));
 }
 
 /// An unrecorded body reads as the EMPTY tree rather than as an error here.
@@ -97,6 +111,7 @@ fn two_instantiations_of_one_declaration_may_differ() {
 /// placeholder it cannot resolve rather than emitting it.
 #[test]
 fn an_unrecorded_body_reads_as_the_empty_tree() {
+    let i = interner();
     let map = DemandMap::default();
-    assert!(map.tree_of(&EmittedBodyId::new(fref(3), vec![nominal("int")])).is_empty());
+    assert!(map.tree_of(&inst(&i, 3, "int")).is_empty());
 }

@@ -40,7 +40,8 @@ pub mod scope;
 pub use closure::{convert_closures, convert_closures_framed, FrameInfo};
 pub use forl::recover_counted_loops;
 pub use inline::{
-    fn_has_bounds, inline_functions, inline_functions_with_subst, validate_no_residual_bound_calls,
+    fn_has_bounds, inline_functions_with_plans, inline_off_guard, InlineOffGuard,
+    validate_no_residual_bound_calls,
     InlineCache, SpliceRecord,
 };
 
@@ -68,7 +69,9 @@ pub fn nobox_materialization_violations(
             // unknown name is not a licence to skip: this rung enforces a
             // GUARANTEE, so it is reported rather than passed over.
             let Some(sid) = ws.struct_by_name.get(name) else {
-                if skull_mir::lower::enum_value_shape(ws, *name).is_some() {
+                if skull_mir::lower::EnumPlan::for_name(ws, *name)
+                    .is_some_and(|plan| plan.cdata().is_some())
+                {
                     continue;
                 }
                 out.push((
@@ -572,6 +575,7 @@ fn leaf_operand(
 /// `inline_hoisted_bodies`, the verifier) remaps operands or matches the struct
 /// NAME only -- none interpret field names.
 pub fn flatten_nobox_nested_ctors(ws: &Workspace, func: &mut MirFunc) -> bool {
+    let rep_arena = skull_mir::lower::RepArena::default();
     let all: Vec<Idx<Inst>> =
         func.blocks.iter().flat_map(|(_, b)| b.insts.iter().copied()).collect();
     // A ctor used as a field operand of another ctor is not the outermost one.
@@ -600,10 +604,19 @@ pub fn flatten_nobox_nested_ctors(ws: &Workspace, func: &mut MirFunc) -> bool {
         };
         // A GC-tier outer stores fields as table entries, so there is no cdata
         // to write leaves into; leave it for the verifier to reject.
-        if skull_mir::lower::value_struct_is_gc(ws, name) {
+        if !matches!(
+            rep_arena.nominal_value_storage(ws, bone_semantic::hir::FnBackend::Lua, name),
+            Some(skull_mir::lower::ValueStorage::CData)
+        ) {
             continue;
         }
-        let Some(paths) = skull_mir::lower::value_leaf_paths_of(ws, name) else { continue };
+        let Some(paths) = rep_arena.nominal_value_leaf_paths(
+            ws,
+            bone_semantic::hir::FnBackend::Lua,
+            name,
+        ) else {
+            continue;
+        };
         let mut pre: Vec<Idx<Inst>> = Vec::new();
         let mut leaves: Vec<(Ustr, Idx<Inst>)> = Vec::with_capacity(paths.len());
         let mut ok = true;
@@ -1610,15 +1623,44 @@ fn raw<T>(i: Idx<T>) -> u32 {
     i.into_raw().into()
 }
 
+/// The physical frame layout chosen for one transformed coroutine body.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CoroutineFramePlan {
+    frame_cells: HashSet<Idx<Cell>>,
+    frame_slots: HashMap<Idx<Cell>, u32>,
+    layout_hash: i64,
+}
+
+impl CoroutineFramePlan {
+    fn new(
+        frame_cells: HashSet<Idx<Cell>>,
+        frame_slots: HashMap<Idx<Cell>, u32>,
+        layout_hash: i64,
+    ) -> Self {
+        Self { frame_cells, frame_slots, layout_hash }
+    }
+
+    pub fn fields(&self) -> &HashSet<Idx<Cell>> {
+        &self.frame_cells
+    }
+
+    pub fn slots(&self) -> &HashMap<Idx<Cell>, u32> {
+        &self.frame_slots
+    }
+
+    pub fn slot(&self, cell: Idx<Cell>) -> Option<u32> {
+        self.frame_slots.get(&cell).copied()
+    }
+
+    pub fn layout_hash(&self) -> i64 {
+        self.layout_hash
+    }
+}
+
 pub struct CoroLowered {
     pub step: MirFunc,
     pub s_cell: Idx<Cell>,
-    pub frame_cells: HashSet<Idx<Cell>>,
-    /// Frame cell -> dense slot: frame cells numbered 0.. by raw-id order.
-    /// Lambda-cell allocation shifts raw ids but never reorders existing frame
-    /// cells, so a slot is stable under a lambda-internal edit -- the naming and
-    /// stamp basis the P2 finding needs (docs/coroutine-frame-lambda-plan.md).
-    pub frame_slots: HashMap<Idx<Cell>, u32>,
+    pub frame_plan: CoroutineFramePlan,
     /// Declared param cells (constructor seeds a state-table field for each).
     pub params: Vec<Idx<Cell>>,
     pub num_states: usize,
@@ -1627,9 +1669,6 @@ pub struct CoroLowered {
     /// hoists to a top-level `<name>__on_<hook>` fn in `emit_coroutine`; the ctor
     /// stores that fn by name), just removed from every block's inst list.
     pub hooks: Vec<(CoroHookKind, Idx<Inst>)>,
-    /// Frame layout stamp: the ctor writes it (`__layout`), the step's entry
-    /// checks it. See `layout_stamp_canon` for what it hashes.
-    pub layout_hash: i64,
     /// The scope tree + ownership built (once) for frame membership, threaded to
     /// `emit_named_framed` so the step's hoist plan reuses them instead of
     /// rebuilding on the post-rewrite CFG (they are stable across the rewrite).
@@ -1651,8 +1690,22 @@ mod tests {
             .iter()
             .find(|(_, f)| f.name.as_str() == fn_name)
             .expect("function");
-        let scx = skull_mir::lower::ScalarCtx::new(&ws);
-        skull_mir::lower::lower_function(&ws, &scx, mid, fid).expect("lower")
+        let root = skull_mir::mir::FuncRef { module: mid, func: fid };
+        let interner = std::sync::Arc::new(skull_mir::monoty::MonoInterner::new());
+        let graph = skull_graph::instance_graph::build_in(
+            &ws,
+            vec![root],
+            false,
+            std::sync::Arc::clone(&interner),
+        );
+        let concrete = skull_graph::concrete_body::build(&ws, &graph);
+        let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(interner);
+        let plan = concrete
+            .plans
+            .get(&skull_mir::instance::Instance::base(root))
+            .expect("test fixture concrete plan");
+        skull_mir::lower::lower_instance_with_plans(&ws, &scx, plan, &concrete.plans)
+            .expect("lower")
     }
 
     #[test]
@@ -1670,6 +1723,41 @@ mod tests {
             "f",
         );
         assert!(has_scalarizable_store(&aggregate), "{aggregate}");
+    }
+
+    #[test]
+    fn coroutine_transform_exposes_one_owned_frame_plan() {
+        let func = lower(
+            "co fn f(x: int) -> Coroutine<int> { let saved = x yield saved }",
+            "f",
+        );
+        let lowered = transform_coroutine(&func, None);
+        assert!(
+            !lowered.frame_plan.slots().is_empty(),
+            "the coroutine fixture must have a nonzero frame population"
+        );
+        assert_eq!(
+            lowered.frame_plan.slots().len(),
+            lowered.frame_plan.fields().len(),
+            "one frame plan must own both membership and physical slots"
+        );
+    }
+
+    #[test]
+    fn closure_conversion_exposes_one_owned_environment_plan() {
+        let mut func = lower(
+            "fn f() -> int { let captured = 3; let g = () => captured; return g() }",
+            "f",
+        );
+        assert!(
+            func.insts.iter().any(|(_, inst)| matches!(inst, Inst::Lambda { .. })),
+            "the closure fixture must have a nonzero lambda population"
+        );
+        convert_closures(&mut func, "f");
+        assert_eq!(func.closure_env_plans.len(), 1, "one lambda must have one env plan");
+        let plan = func.closure_env_plans.values().next().expect("closure env plan");
+        assert!(!plan.captures().is_empty(), "the closure environment must carry a capture");
+        assert!(plan.env_cell().is_some(), "a capturing closure must own an env cell");
     }
 }
 
@@ -1743,10 +1831,17 @@ pub(crate) fn value_operands(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
         | Inst::IntMod(a, b) | Inst::FloatAdd(a, b) | Inst::FloatSub(a, b) | Inst::FloatMul(a, b)
         | Inst::FloatDiv(a, b) | Inst::FloatMod(a, b) | Inst::StringConcat(a, b)
         | Inst::IntLt(a, b) | Inst::IntLeq(a, b) | Inst::IntGt(a, b) | Inst::IntGeq(a, b)
+        | Inst::UintAdd(a, b) | Inst::UintSub(a, b) | Inst::UintMul(a, b) | Inst::UintDiv(a, b)
+        | Inst::UintMod(a, b) | Inst::UintLt(a, b) | Inst::UintLeq(a, b) | Inst::UintGt(a, b)
+        | Inst::UintGeq(a, b)
         | Inst::FloatLt(a, b) | Inst::FloatLeq(a, b) | Inst::FloatGt(a, b) | Inst::FloatGeq(a, b)
         | Inst::Eq(a, b) | Inst::NotEq(a, b) | Inst::BitAnd(a, b) | Inst::BitOr(a, b)
-        | Inst::BitXor(a, b) | Inst::Shl(a, b) | Inst::Shr(a, b) => { p(a); p(b); }
-        Inst::Neg(x) | Inst::Not(x) | Inst::BitNot(x) | Inst::ToString(x) | Inst::FloatToInt(x) | Inst::IntToFloat(x)
+        | Inst::BitXor(a, b) | Inst::Shl(a, b) | Inst::Shr(a, b)
+        | Inst::UintBitAnd(a, b) | Inst::UintBitOr(a, b) | Inst::UintBitXor(a, b)
+        | Inst::UintShl(a, b) | Inst::UintShr(a, b) => { p(a); p(b); }
+        Inst::Neg(x) | Inst::Not(x) | Inst::BitNot(x) | Inst::UintBitNot(x) | Inst::ToString(x)
+        | Inst::FloatToInt(x) | Inst::IntToFloat(x) | Inst::UintToFloat(x) | Inst::IntToUint(x)
+        | Inst::UintToInt(x) | Inst::FloatToUint(x) | Inst::UintBitcastInt(x) | Inst::IntBitcastUint(x)
         | Inst::CoroSetInner(x) => p(x),
         Inst::Format { value, .. } => p(value),
         Inst::FormatDyn { value, fmt } => { p(value); p(fmt); }
@@ -1760,6 +1855,7 @@ pub(crate) fn value_operands(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
             p(capacity);
             columns.iter().flat_map(|(_, vs)| vs).for_each(&mut p)
         }
+        Inst::MakeVecColumnHeader { capacity, .. } => p(capacity),
         Inst::MakeStruct { fields, .. }
         | Inst::MakeValueStruct { fields, .. }
         | Inst::MaterializeValueStruct { fields, .. }
@@ -1798,10 +1894,17 @@ pub(crate) fn remap_inst(inst: &mut Inst, m: &impl Fn(Idx<Inst>) -> Idx<Inst>) {
         | Inst::IntMod(a, b) | Inst::FloatAdd(a, b) | Inst::FloatSub(a, b) | Inst::FloatMul(a, b)
         | Inst::FloatDiv(a, b) | Inst::FloatMod(a, b) | Inst::StringConcat(a, b)
         | Inst::IntLt(a, b) | Inst::IntLeq(a, b) | Inst::IntGt(a, b) | Inst::IntGeq(a, b)
+        | Inst::UintAdd(a, b) | Inst::UintSub(a, b) | Inst::UintMul(a, b) | Inst::UintDiv(a, b)
+        | Inst::UintMod(a, b) | Inst::UintLt(a, b) | Inst::UintLeq(a, b) | Inst::UintGt(a, b)
+        | Inst::UintGeq(a, b)
         | Inst::FloatLt(a, b) | Inst::FloatLeq(a, b) | Inst::FloatGt(a, b) | Inst::FloatGeq(a, b)
         | Inst::Eq(a, b) | Inst::NotEq(a, b) | Inst::BitAnd(a, b) | Inst::BitOr(a, b)
-        | Inst::BitXor(a, b) | Inst::Shl(a, b) | Inst::Shr(a, b) => { f(a); f(b); }
-        Inst::Neg(x) | Inst::Not(x) | Inst::BitNot(x) | Inst::ToString(x) | Inst::FloatToInt(x) | Inst::IntToFloat(x)
+        | Inst::BitXor(a, b) | Inst::Shl(a, b) | Inst::Shr(a, b)
+        | Inst::UintBitAnd(a, b) | Inst::UintBitOr(a, b) | Inst::UintBitXor(a, b)
+        | Inst::UintShl(a, b) | Inst::UintShr(a, b) => { f(a); f(b); }
+        Inst::Neg(x) | Inst::Not(x) | Inst::BitNot(x) | Inst::UintBitNot(x) | Inst::ToString(x)
+        | Inst::FloatToInt(x) | Inst::IntToFloat(x) | Inst::UintToFloat(x) | Inst::IntToUint(x)
+        | Inst::UintToInt(x) | Inst::FloatToUint(x) | Inst::UintBitcastInt(x) | Inst::IntBitcastUint(x)
         | Inst::CoroSetInner(x) => f(x),
         Inst::Format { value, .. } => f(value),
         Inst::FormatDyn { value, fmt } => { f(value); f(fmt); }
@@ -1815,6 +1918,7 @@ pub(crate) fn remap_inst(inst: &mut Inst, m: &impl Fn(Idx<Inst>) -> Idx<Inst>) {
             f(capacity);
             columns.iter_mut().flat_map(|(_, vs)| vs).for_each(&mut f)
         }
+        Inst::MakeVecColumnHeader { capacity, .. } => f(capacity),
         Inst::MakeStruct { fields, .. }
         | Inst::MakeValueStruct { fields, .. }
         | Inst::MaterializeValueStruct { fields, .. }
@@ -2256,12 +2360,10 @@ pub fn transform_coroutine(func: &MirFunc, channel: Option<&skull_mir::lower::Yi
     CoroLowered {
         step,
         s_cell,
-        frame_cells,
-        frame_slots,
+        frame_plan: CoroutineFramePlan::new(frame_cells, frame_slots, layout_hash),
         params,
         num_states,
         hooks,
-        layout_hash,
         step_tree: tree,
         step_own: own,
     }
@@ -2314,8 +2416,8 @@ impl CoroLowered {
     /// over every step cell except `s`/`resume_arg` -- so every reference in a
     /// detached hook/defer region resolves to `s.c<slot>`, never a bare local.
     pub fn aux_all_cells_slots(&self, resume_arg: Idx<Cell>) -> HashMap<Idx<Cell>, u32> {
-        let mut s = self.frame_slots.clone();
-        let base = self.frame_slots.len() as u32;
+        let mut s = self.frame_plan.slots().clone();
+        let base = self.frame_plan.slots().len() as u32;
         let mut extra: Vec<Idx<Cell>> = self
             .step
             .cells

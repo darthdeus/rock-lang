@@ -123,6 +123,11 @@ pub(crate) fn inst_uses(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
         | Inst::IntMul(a, b)
         | Inst::IntDiv(a, b)
         | Inst::IntMod(a, b)
+        | Inst::UintAdd(a, b)
+        | Inst::UintSub(a, b)
+        | Inst::UintMul(a, b)
+        | Inst::UintDiv(a, b)
+        | Inst::UintMod(a, b)
         | Inst::FloatAdd(a, b)
         | Inst::FloatSub(a, b)
         | Inst::FloatMul(a, b)
@@ -133,6 +138,10 @@ pub(crate) fn inst_uses(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
         | Inst::IntLeq(a, b)
         | Inst::IntGt(a, b)
         | Inst::IntGeq(a, b)
+        | Inst::UintLt(a, b)
+        | Inst::UintLeq(a, b)
+        | Inst::UintGt(a, b)
+        | Inst::UintGeq(a, b)
         | Inst::FloatLt(a, b)
         | Inst::FloatLeq(a, b)
         | Inst::FloatGt(a, b)
@@ -143,7 +152,12 @@ pub(crate) fn inst_uses(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
         | Inst::BitOr(a, b)
         | Inst::BitXor(a, b)
         | Inst::Shl(a, b)
-        | Inst::Shr(a, b) => {
+        | Inst::Shr(a, b)
+        | Inst::UintBitAnd(a, b)
+        | Inst::UintBitOr(a, b)
+        | Inst::UintBitXor(a, b)
+        | Inst::UintShl(a, b)
+        | Inst::UintShr(a, b) => {
             push(*a);
             push(*b);
         }
@@ -152,7 +166,19 @@ pub(crate) fn inst_uses(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
             push(*value);
             push(*fmt);
         }
-        Inst::Neg(x) | Inst::Not(x) | Inst::BitNot(x) | Inst::ToString(x) | Inst::FloatToInt(x) | Inst::IntToFloat(x) => {
+        Inst::Neg(x)
+        | Inst::Not(x)
+        | Inst::BitNot(x)
+        | Inst::UintBitNot(x)
+        | Inst::ToString(x)
+        | Inst::FloatToInt(x)
+        | Inst::IntToFloat(x)
+        | Inst::UintToFloat(x)
+        | Inst::IntToUint(x)
+        | Inst::UintToInt(x)
+        | Inst::FloatToUint(x)
+        | Inst::UintBitcastInt(x)
+        | Inst::IntBitcastUint(x) => {
             push(*x)
         }
         Inst::Call { args, .. } | Inst::CallMulti { args, .. } | Inst::CallBoundMulti { args, .. } => args.iter().for_each(|a| push(*a)),
@@ -173,6 +199,7 @@ pub(crate) fn inst_uses(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
             push(*capacity);
             columns.iter().flat_map(|(_, vs)| vs).for_each(|&i| push(i));
         }
+        Inst::MakeVecColumnHeader { capacity, .. } => push(*capacity),
         Inst::MakeTuple(vs) | Inst::MakeVec(vs) => {
             vs.iter().for_each(|a| push(*a))
         }

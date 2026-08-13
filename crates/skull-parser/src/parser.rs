@@ -463,7 +463,7 @@ impl<'a> Parser<'a> {
     fn skip_comments_as_items(&mut self) {
         while let TokenKind::Comment(text) = self.kind() {
             let span = self.span();
-            self.ast.items.push(Item { annotations: Vec::new(),
+            self.ast.items.push(Item { annotations: Vec::new(), is_global_write: false,
                 span,
                 kind: ItemKind::Comment(text),
             });
@@ -496,9 +496,11 @@ impl<'a> Parser<'a> {
         // etc.) and drops them from the annotation list — mirror that so they
         // don't render.
         let is_guarded = annotations.iter().any(|a| a.name.name.as_str() == "guarded");
+        let is_global_write = annotations.iter().any(|a| a.name.name.as_str() == "global_write");
         annotations.retain(|a| !matches!(a.name.name.as_str(), "guarded" | "global_write"));
         self.last_was_operator = false;
         let mut item = self.parse_item_inner()?;
+        item.is_global_write = is_global_write;
         if is_guarded {
             if let ItemKind::Global(g) = &mut item.kind {
                 g.is_guarded = true;
@@ -623,7 +625,7 @@ impl<'a> Parser<'a> {
         self.expect(TokenKind::CloseParen)?;
         let span = self.span_from(start);
         Ok(Item {
-            annotations: Vec::new(),
+            annotations: Vec::new(), is_global_write: false,
             span,
             kind: ItemKind::MacroInvocation { name, args, sigil },
         })
@@ -652,7 +654,12 @@ impl<'a> Parser<'a> {
         self.delimiter_depth -= 1;
         self.expect(TokenKind::CloseParen)?;
         let span = self.span_from(start);
-        Ok(self.ast.expr(span, ExprKind::FunctionCall { func, args, syntax: CallSyntax::Normal }))
+        Ok(self.ast.expr(span, ExprKind::FunctionCall {
+            func,
+            generic_args: Vec::new(),
+            args,
+            syntax: CallSyntax::Normal,
+        }))
     }
 
     /// One macro-invocation argument. Non-sigil args are ordinary expressions;
@@ -722,7 +729,12 @@ impl<'a> Parser<'a> {
                 let span = self.span_from(start);
                 Ok(self.ast.expr(
                     span,
-                    ExprKind::FunctionCall { func, args: targs, syntax: CallSyntax::Normal },
+                    ExprKind::FunctionCall {
+                        func,
+                        generic_args: Vec::new(),
+                        args: targs,
+                        syntax: CallSyntax::Normal,
+                    },
                 ))
             }
             TokenKind::OpenSquare => {
@@ -1069,7 +1081,7 @@ impl<'a> Parser<'a> {
             );
             self.ast.macro_param_refs.extend(refs);
         }
-        Ok(Item { annotations: Vec::new(),
+        Ok(Item { annotations: Vec::new(), is_global_write: false,
             span,
             kind: ItemKind::Function(FunctionDef {
                 span,
@@ -1185,6 +1197,7 @@ impl<'a> Parser<'a> {
                 "any" => TypeExprKind::Any,
                 "string" => TypeExprKind::String,
                 "int" => TypeExprKind::Int,
+                "uint" => TypeExprKind::Uint,
                 "float" => TypeExprKind::Float,
                 "bool" => TypeExprKind::Bool,
                 _ => TypeExprKind::Ident(ident.clone()),
@@ -1269,7 +1282,7 @@ impl<'a> Parser<'a> {
         let fields = self.parse_field_block()?;
         let span = self.span_from(start);
         Ok(Item {
-            annotations: Vec::new(),
+            annotations: Vec::new(), is_global_write: false,
             span,
             kind: ItemKind::Struct(StructDef {
                 span,
@@ -1371,7 +1384,7 @@ impl<'a> Parser<'a> {
         self.delimiter_depth -= 1;
         self.expect(TokenKind::CloseCurly)?;
         let span = self.span_from(start);
-        Ok(Item { annotations: Vec::new(), span, kind: ItemKind::Enum(EnumDef { span, keyword_span: Some(start), name, generics, variants }) })
+        Ok(Item { annotations: Vec::new(), is_global_write: false, span, kind: ItemKind::Enum(EnumDef { span, keyword_span: Some(start), name, generics, variants }) })
     }
 
     /// `newtype Name<gen>(WrappedType)`.
@@ -1391,7 +1404,7 @@ impl<'a> Parser<'a> {
         }
         self.expect(TokenKind::CloseParen)?;
         let span = self.span_from(start);
-        Ok(Item { annotations: Vec::new(), span, kind: ItemKind::Newtype(NewtypeDef { span, name, generics, wrapped }) })
+        Ok(Item { annotations: Vec::new(), is_global_write: false, span, kind: ItemKind::Newtype(NewtypeDef { span, name, generics, wrapped }) })
     }
 
     /// `deco init Name[(params)] { body }` — the `init` category keyword is
@@ -1412,7 +1425,7 @@ impl<'a> Parser<'a> {
         };
         let body = self.parse_block()?;
         let span = self.span_from(start);
-        Ok(Item { annotations: Vec::new(), span, kind: ItemKind::Decorator(DecoratorDef { span, name, params, body }) })
+        Ok(Item { annotations: Vec::new(), is_global_write: false, span, kind: ItemKind::Decorator(DecoratorDef { span, name, params, body }) })
     }
 
     /// `global|const Name [: T] [= value]`.
@@ -1433,7 +1446,7 @@ impl<'a> Parser<'a> {
         let span = self.span_from(start);
         // `is_guarded` is set by `parse_item` from a leading `@guarded` (the
         // annotation is consumed there before it reaches the item).
-        Ok(Item { annotations: Vec::new(), span, kind: ItemKind::Global(GlobalDef { span, keyword_span: Some(start), name, ty, value, is_const, is_guarded: false }) })
+        Ok(Item { annotations: Vec::new(), is_global_write: false, span, kind: ItemKind::Global(GlobalDef { span, keyword_span: Some(start), name, ty, value, is_const, is_guarded: false }) })
     }
 
     /// `#if cond` / `#elseif cond` / `#else` / `#end` (cond is a bare ident).
@@ -1454,7 +1467,7 @@ impl<'a> Parser<'a> {
             _ => CompilerDirective::End,
         };
         let span = self.span_from(start);
-        Ok(Item { annotations: Vec::new(), span, kind: ItemKind::CompilerDirective(directive) })
+        Ok(Item { annotations: Vec::new(), is_global_write: false, span, kind: ItemKind::CompilerDirective(directive) })
     }
 
     fn directive_condition(&mut self) -> Ustr {
@@ -1543,6 +1556,7 @@ impl<'a> Parser<'a> {
                     "any" => TypeExprKind::Any,
                     "string" => TypeExprKind::String,
                     "int" => TypeExprKind::Int,
+                    "uint" => TypeExprKind::Uint,
                     "float" => TypeExprKind::Float,
                     "bool" => TypeExprKind::Bool,
                     _ => {
@@ -1973,7 +1987,11 @@ impl<'a> Parser<'a> {
                 }
             }
 
-            // Postfix: call `(`, index `[`.
+            if let Some(generic_args) = self.try_generic_call_args()? {
+                left = self.parse_call_with_generics(left, generic_args)?;
+                continue;
+            }
+
             if let Some((l_bp, ())) = op.postfix_bp() {
                 if l_bp < min_bp {
                     break;
@@ -2166,7 +2184,12 @@ impl<'a> Parser<'a> {
         let span = self.node_span(func, self.prev_span());
         Ok(Some(self.ast.expr(
             span,
-            ExprKind::FunctionCall { func, args, syntax: CallSyntax::NoParens },
+            ExprKind::FunctionCall {
+                func,
+                generic_args: Vec::new(),
+                args,
+                syntax: CallSyntax::NoParens,
+            },
         )))
     }
 
@@ -2203,6 +2226,7 @@ impl<'a> Parser<'a> {
                 span,
                 ExprKind::FunctionCall {
                     func: left,
+                    generic_args: Vec::new(),
                     args: vec![FunctionCallArg { name: None, value: right, is_splat: false, is_spread: false }],
                     syntax: CallSyntax::Normal,
                 },
@@ -2222,6 +2246,7 @@ impl<'a> Parser<'a> {
                 span,
                 ExprKind::FunctionCall {
                     func: callee,
+                    generic_args: Vec::new(),
                     args: vec![
                         FunctionCallArg { name: None, value: left, is_splat: false, is_spread: false },
                         FunctionCallArg { name: None, value: right, is_splat: false, is_spread: false },
@@ -2267,6 +2292,45 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_call(&mut self, func: Idx<ExprData>) -> PResult<Idx<ExprData>> {
+        self.parse_call_with_generics(func, Vec::new())
+    }
+
+    fn try_generic_call_args(&mut self) -> PResult<Option<Vec<Idx<TypeExprData>>>> {
+        if self.kind() != TokenKind::LessThan {
+            return Ok(None);
+        }
+        let saved = self.pos;
+        self.advance();
+        let mut args = Vec::new();
+        let parsed: PResult<Option<Vec<Idx<TypeExprData>>>> = (|| {
+            while !matches!(self.kind(), TokenKind::GreaterThan | TokenKind::RightShift)
+                && !self.at_end()
+            {
+                args.push(self.parse_type()?);
+                if !self.eat(TokenKind::Comma) {
+                    break;
+                }
+            }
+            self.expect_generic_close()?;
+            if self.kind() != TokenKind::OpenParen {
+                return Ok(None);
+            }
+            Ok(Some(args))
+        })();
+        match parsed {
+            Ok(Some(args)) => Ok(Some(args)),
+            Ok(None) | Err(_) => {
+                self.pos = saved;
+                Ok(None)
+            }
+        }
+    }
+
+    fn parse_call_with_generics(
+        &mut self,
+        func: Idx<ExprData>,
+        generic_args: Vec<Idx<TypeExprData>>,
+    ) -> PResult<Idx<ExprData>> {
         self.advance(); // consume `(`
         self.delimiter_depth += 1;
         let mut args = Vec::new();
@@ -2313,7 +2377,12 @@ impl<'a> Parser<'a> {
         let span = self.node_span(func, end);
         Ok(self.ast.expr(
             span,
-            ExprKind::FunctionCall { func, args, syntax: CallSyntax::Normal },
+            ExprKind::FunctionCall {
+                func,
+                generic_args,
+                args,
+                syntax: CallSyntax::Normal,
+            },
         ))
     }
 
@@ -2356,7 +2425,12 @@ impl<'a> Parser<'a> {
             let span = self.node_span(left, body_span);
             Ok(self.ast.expr(
                 span,
-                ExprKind::FunctionCall { func: left, args: vec![lambda_arg], syntax: CallSyntax::At },
+                ExprKind::FunctionCall {
+                    func: left,
+                    generic_args: Vec::new(),
+                    args: vec![lambda_arg],
+                    syntax: CallSyntax::At,
+                },
             ))
         }
     }
@@ -2516,6 +2590,18 @@ impl<'a> Parser<'a> {
             TokenKind::Ident(name) => {
                 self.advance();
                 let base = Ident { span: start, name };
+                if name.as_str() == "bitcast" && self.kind() == TokenKind::LessThan {
+                    self.advance();
+                    let target = self.parse_type()?;
+                    self.expect_generic_close()?;
+                    self.expect(TokenKind::OpenParen)?;
+                    self.delimiter_depth += 1;
+                    let value = self.with_allow_literals(true, |p| p.parse_expr(0))?;
+                    self.delimiter_depth -= 1;
+                    self.expect(TokenKind::CloseParen)?;
+                    let span = self.span_from(start);
+                    return Ok(self.ast.expr(span, ExprKind::Bitcast(value, target)));
+                }
                 // `x => body` single-parameter lambda. Suppressed in a match-arm
                 // guard so the arm's `=>` survives (`docs/match-guard-parse-ambiguity.md`).
                 if !self.arrow_lambda_blocked && self.kind() == TokenKind::FatArrow {

@@ -24,8 +24,9 @@ fn main() {
 fn a_non_canonical_leaf_sequence_rejects() {
     let ws = ws_with_stdlib(NESTED_NOBOX);
     let name = Ustr::from("E5");
-    let canonical =
-        skull_mir::lower::value_leaf_paths_of(&ws, name).expect("E5 has a leaf layout");
+    let canonical = skull_mir::lower::RepArena::default()
+        .nominal_value_leaf_paths(&ws, bone_semantic::hir::FnBackend::Lua, name)
+        .expect("E5 has a leaf layout");
     assert!(canonical.len() > 2, "need a multi-leaf type to reorder: {canonical:?}");
 
     assert!(

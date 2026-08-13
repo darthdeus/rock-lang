@@ -687,7 +687,7 @@ impl CursorAst {
             {
                 return None;
             }
-            let ExprKind::FunctionCall { func, args, syntax } = &self.expr(node).kind else {
+            let ExprKind::FunctionCall { func, args, syntax, .. } = &self.expr(node).kind else {
                 continue;
             };
             // Operator calls (`a + |`) and the no-parens surface form are not
@@ -788,6 +788,18 @@ impl CursorAst {
             .filter(|(s, e)| *s <= self.probe && self.probe < *e)
             .min_by_key(|(s, e)| e - s);
         let Some((ts, te)) = ty else { return false };
+        let chain = self.expr_chain();
+        if let Some(&inner) = chain.first()
+            && chain.iter().skip(1).any(|i| {
+                matches!(
+                    &self.expr(*i).kind,
+                    ExprKind::BinOp { right, op: TokenKind::LessThan, .. } if *right == inner
+                )
+            })
+        {
+            // The parser also builds a type-shaped RHS for an unspaced `<` comparison.
+            return false;
+        }
         match self.expr_chain().first() {
             None => true,
             Some(&e) => {

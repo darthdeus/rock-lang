@@ -1,13 +1,9 @@
 //! An `Iterator`-bounded body emits STANDALONE to JS at each instantiation
 //! (`docs/monomorphization-plan.md` S 12, mono cut C+D step D-1).
 //!
-//! The JS SIBLING of `crates/skull/tests/bounded_standalone_emission.rs`, and it
-//! exists because the Lua one does not cover this backend. JS keeps its own
-//! specialization queue (`spec_queue` / `collect_spec_bound_calls` in
-//! `emit.rs`), so the Lua-side plumbing does not reach it -- two populations for
-//! one question, which is the shape this arc keeps finding. Both now carry the
-//! demand's `ResolvedBoundTree` and drive the one substitution in
-//! `skull_transform::bound`.
+//! The JS sibling of `crates/skull/tests/bounded_standalone_emission.rs`.
+//! JS retains a delivery queue, while the shared graph owns each instance and
+//! its resolved bound tree.
 //!
 //! The ablation flag is process-global. `cargo test` runs this crate's tests as
 //! threads in one binary, so the guard below holds a lock shared by every test
@@ -15,20 +11,23 @@
 
 use crate::common::ws_with;
 
-use skull_mir::lower::ScalarCtx;
-
 /// THE ablation lock for this test binary. One mutex, not one per file: a
 /// per-file `static` serializes a file against itself and against nothing else.
 static ABLATION_MODE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-struct ModeGuard(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+struct ModeGuard(
+    #[allow(dead_code)] std::sync::MutexGuard<'static, ()>,
+    #[allow(dead_code)]
+    crate::common::InlineOffGuard,
+);
 
 impl ModeGuard {
     fn on() -> Self {
         let g = ABLATION_MODE.lock().unwrap_or_else(|e| e.into_inner());
+        let inline = crate::common::InlineOffGuard::on();
         skull_mir::ablation::clear();
         skull_mir::ablation::set_enabled(true);
-        ModeGuard(g)
+        ModeGuard(g, inline)
     }
 }
 
@@ -40,9 +39,8 @@ impl Drop for ModeGuard {
 }
 
 fn emit_js(ws: &bone_semantic::inference::Workspace) -> Result<String, String> {
-    let scx = ScalarCtx::new(ws).with_target(bone_semantic::hir::FnBackend::Js);
     let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
-    skull_codegen_js::emit::emit_program(ws, &scx, mid)
+    skull_codegen_js::emit::emit_program(ws, mid)
         .map(|p| p.program)
         .map_err(|e| e.message)
 }
@@ -122,5 +120,56 @@ fn an_unbounded_body_emits_to_js_with_inlining_disabled() {
         "the same program without a bounded generic must still emit to JS with \
          inlining disabled, or the sentinel cannot attribute its rejection to the \
          bound; got {err:?}"
+    );
+}
+
+#[test]
+fn js_specializations_consume_concrete_plan_bound_trees() {
+    let source = include_str!("../src/emit.rs");
+    assert!(
+        !source.contains("graph_trees"),
+        "JS must not retain a second graph-tree delivery map"
+    );
+    assert!(
+        source.contains("plan.bound_tree"),
+        "JS standalone lowering must read the selected concrete plan tree"
+    );
+    assert!(
+        source.contains("concrete plan has no resolved bound tree"),
+        "JS must reject a missing plan tree rather than fabricate an empty one"
+    );
+}
+
+#[test]
+fn a_column_map_initializer_reaches_its_graph_runtime_entry() {
+    let source = r#"
+nobox value Cell { x: float, y: float }
+global CELLS: Map<int, Cell> = map_new()
+
+fn main() {
+    CELLS.insert(1, Cell { x: 2.0, y: 3.0 })
+}
+"#;
+    let js = emit_js(&ws_with(source)).expect("column-map initialization must emit");
+    assert!(
+        js.contains("__map_col_new_spine") && js.contains("new Map()"),
+        "the graph must retain the JS map-spine entry reached by the initializer:\n{js}"
+    );
+}
+
+#[test]
+fn a_generic_inline_js_boundary_is_emitted_per_instance() {
+    let source = r#"
+struct Point { x: int }
+
+fn main() {
+    let p = Point { x: 7 }
+    print("{field_get(p, .x)}")
+}
+"#;
+    let js = emit_js(&ws_with(source)).expect("the retained field_get boundary must emit");
+    assert!(
+        js.lines().any(|line| line.starts_with("function field_get_") && line.contains("_spec_")),
+        "the concrete inline(js) instance must have its own definition:\n{js}"
     );
 }

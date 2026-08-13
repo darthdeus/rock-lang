@@ -25,7 +25,8 @@ use bone_semantic::inference::{BodyInference, Workspace};
 use bone_semantic::prelude::Idx;
 use ustr::Ustr;
 
-use super::shape::{flat_enum_shape, payload_free_enum_variants};
+use super::{EnumPlan, RepArena, RepGuarantees, RepUse, RepUseFacts, shape::payload_free_enum_variants};
+use crate::concrete::{ConcreteBodyPlan, ConcreteTypeTables};
 use crate::monoty::MonoSubst;
 
 /// The resolution context a lowering DISPATCH decision reads.
@@ -40,7 +41,16 @@ pub struct DispatchCtx<'a> {
     pub ws: &'a Workspace,
     pub inf: Option<&'a BodyInference>,
     pub body: &'a Body,
-    pub subst: &'a MonoSubst,
+    pub concrete_plan: Option<&'a ConcreteBodyPlan>,
+    pub concrete_types: Option<&'a ConcreteTypeTables>,
+    pub concrete_type_cache: Option<&'a super::ConcreteTypeCache>,
+    pub interner: Option<&'a crate::monoty::MonoInterner>,
+    pub rep_arena: &'a RepArena,
+    pub target: bone_semantic::hir::FnBackend,
+    /// Logical substitution for the target-neutral graph walk. Concrete
+    /// lowering sets this to `None` because every type decision must come from
+    /// its concrete plan.
+    pub logical_subst: Option<&'a MonoSubst>,
     pub values_first_class: bool,
 }
 
@@ -273,17 +283,36 @@ impl<'a> DispatchCtx<'a> {
         })
     }
 
-    /// The stored node WITH the instance substitution applied to a generic. See
-    /// `Builder::ty_node` for why the substituted node is sound only for
-    /// consumers that read a CONSTRUCTOR or a NOMINAL from it.
-    pub fn ty_node(&self, ty: TyId) -> Option<TypeExpr> {
-        let node = self.raw_ty_node(ty)?;
-        if let TypeExpr::Generic(var, _) = node {
-            if let Some(sub) = self.subst.get(&var).and_then(super::mono_type_node) {
-                return Some(sub);
+    /// The concrete logical type for a plan-owned slot. This is deliberately
+    /// separate from `TypeExpr`: a `MonoTy` owns all children and does not need
+    /// an HIR arena to fabricate a partial node.
+    pub fn concrete_ty(&self, ty: TyId) -> Option<crate::monoty::MonoTy> {
+        let id = self.concrete_types?.ty_type(ty)?;
+        self.concrete_mono(id)
+    }
+
+    pub fn concrete_expr_ty(&self, expr: Idx<Expr>) -> Option<crate::monoty::MonoTy> {
+        let id = self.concrete_types?.expr_type(expr)?;
+        self.concrete_mono(id)
+    }
+
+    pub(crate) fn concrete_mono(&self, id: crate::monoty::MonoTyId) -> Option<crate::monoty::MonoTy> {
+        if let Some(cache) = self.concrete_type_cache {
+            if let Some(ty) = cache.borrow().get(&id).cloned() {
+                return Some(ty);
             }
+            let ty = self.interner?.get(id);
+            cache.borrow_mut().insert(id, ty.clone());
+            return Some(ty);
         }
-        Some(node)
+        Some(self.interner?.get(id))
+    }
+
+    /// The stored HIR node. Concrete plan consumers use `concrete_ty` or
+    /// `concrete_expr_ty` for resolved facts; this accessor never fabricates a
+    /// partial HIR node for a concrete generic argument.
+    pub fn ty_node(&self, ty: TyId) -> Option<TypeExpr> {
+        self.raw_ty_node(ty)
     }
 
     /// Chase `Infer` and peel `Nullable`.
@@ -308,10 +337,16 @@ impl<'a> DispatchCtx<'a> {
     }
 
     pub fn is_nullable_ty(&self, ty: TyId) -> bool {
+        if let Some(ty) = self.concrete_ty(ty) {
+            return ty.peel_nullable().1;
+        }
+        if self.concrete_plan.is_some() {
+            return false;
+        }
         // A generic bound to `E?` is nullable and `ty_node` cannot say so: it
         // substitutes the PAYLOAD. Read the raw node before that erases the `?`.
         if let Some(TypeExpr::Generic(var, _)) = self.raw_ty_node(ty) {
-            if let Some(b) = self.subst.get(&var) {
+            if let Some(b) = self.logical_subst.and_then(|subst| subst.get(&var)) {
                 return b.peel_nullable().1;
             }
         }
@@ -327,6 +362,12 @@ impl<'a> DispatchCtx<'a> {
     }
 
     pub fn expr_is_nullable(&self, e: Idx<Expr>) -> bool {
+        if let Some(ty) = self.concrete_expr_ty(e) {
+            return ty.peel_nullable().1;
+        }
+        if self.concrete_plan.is_some() {
+            return false;
+        }
         self.inf
             .and_then(|i| i.expr_types.get(e).copied())
             .map(|ty| self.is_nullable_ty(ty))
@@ -341,13 +382,39 @@ impl<'a> DispatchCtx<'a> {
         if self.values_first_class {
             return false;
         }
-        self.ws
-            .struct_by_name
-            .get(&name)
-            .is_some_and(|sid| self.ws.modules[sid.module.index()].structs[sid.def].is_nobox)
+        let ty = crate::monoty::MonoTy::App {
+            ctor: crate::monoty::MonoCtor::Nominal(name),
+            params: Vec::new(),
+        };
+        self.rep_arena
+            .plan(
+                self.ws,
+                self.target,
+                &ty,
+                RepUse::Value,
+                &RepUseFacts::default(),
+                RepGuarantees { nobox: true, allow_opaque: true },
+            )
+            .map(|id| self.rep_arena.get(id).nobox())
+            .unwrap_or(false)
     }
 
     pub fn nobox_value_name(&self, e: Idx<Expr>) -> Option<Ustr> {
+        if let Some(ty) = self.concrete_expr_ty(e) {
+            let mut payload = &ty;
+            while let crate::monoty::MonoTy::Nullable(inner) = payload {
+                payload = inner.as_ref();
+            }
+            return match payload {
+                crate::monoty::MonoTy::App {
+                    ctor: crate::monoty::MonoCtor::Nominal(name), ..
+                } => self.is_nobox_struct(*name).then_some(*name),
+                _ => None,
+            };
+        }
+        if self.concrete_plan.is_some() {
+            return None;
+        }
         let TypeExpr::App { ctor: TypeCtor::Nominal(name), .. } = self.expr_ty(e)? else {
             return None;
         };
@@ -359,6 +426,20 @@ impl<'a> DispatchCtx<'a> {
     /// reference-equal across uses -- so `==`/`!=` is native Lua `==`/`~=`, not
     /// the dynamic `__op_eq` (`type()`/`pairs()`) walk.
     pub fn is_payloadless_enum(&self, e: Idx<Expr>) -> bool {
+        if let Some(ty) = self.concrete_expr_ty(e) {
+            let (payload, _) = ty.peel_nullable();
+            let crate::monoty::MonoTy::App {
+                ctor: crate::monoty::MonoCtor::Nominal(name), ..
+            } = payload else {
+                return false;
+            };
+            let Some(eid) = self.ws.enums_by_name.get(name) else { return false };
+            let ed = &self.ws.modules[eid.module.index()].enums[eid.def];
+            return ed.variants.iter().all(|v| matches!(v.payload, bone_semantic::hir::VariantPayload::Unit));
+        }
+        if self.concrete_plan.is_some() {
+            return false;
+        }
         let Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }) = self.expr_ty(e) else {
             return false;
         };
@@ -370,19 +451,45 @@ impl<'a> DispatchCtx<'a> {
     }
 
     pub fn eq_is_scalar(&self, e: Idx<Expr>) -> bool {
+        if let Some(ty) = self.concrete_expr_ty(e) {
+            let (payload, _) = ty.peel_nullable();
+            return matches!(
+                payload,
+                crate::monoty::MonoTy::Int
+                | crate::monoty::MonoTy::Uint
+                | crate::monoty::MonoTy::Float
+                    | crate::monoty::MonoTy::Bool
+                    | crate::monoty::MonoTy::String
+            ) || self.is_payloadless_enum(e);
+        }
+        if self.concrete_plan.is_some() {
+            return false;
+        }
         matches!(
             self.expr_ty(e),
             Some(TypeExpr::Builtin(
-                BuiltinTy::Int | BuiltinTy::Float | BuiltinTy::Bool | BuiltinTy::String
+                BuiltinTy::Int | BuiltinTy::Uint | BuiltinTy::Float | BuiltinTy::Bool | BuiltinTy::String
             ))
         ) || self.is_payloadless_enum(e)
     }
 
     pub fn expr_is_flat_enum(&self, e: Idx<Expr>) -> bool {
+        if let Some(ty) = self.concrete_expr_ty(e) {
+            let (payload, _) = ty.peel_nullable();
+            return matches!(
+                payload,
+                crate::monoty::MonoTy::App {
+                    ctor: crate::monoty::MonoCtor::Nominal(n), ..
+                } if EnumPlan::for_name(self.ws, *n).is_some_and(|plan| plan.flat().is_some())
+            );
+        }
+        if self.concrete_plan.is_some() {
+            return false;
+        }
         matches!(
             self.expr_ty(e),
             Some(TypeExpr::App { ctor: TypeCtor::Nominal(n), .. })
-                if flat_enum_shape(self.ws, n).is_some()
+                if EnumPlan::for_name(self.ws, n).is_some_and(|plan| plan.flat().is_some())
         )
     }
 
@@ -396,8 +503,39 @@ impl<'a> DispatchCtx<'a> {
         if self.is_null_lit(expr) {
             return StringifyRoute::ToString;
         }
+        if let Some(ty) = self.concrete_expr_ty(expr) {
+            let (payload, _) = ty.peel_nullable();
+            return match payload {
+                crate::monoty::MonoTy::Int
+                | crate::monoty::MonoTy::Uint
+                | crate::monoty::MonoTy::Bool
+                | crate::monoty::MonoTy::String => StringifyRoute::ToString,
+                crate::monoty::MonoTy::Float => StringifyRoute::FormatFloat,
+                crate::monoty::MonoTy::Tuple(_)
+                | crate::monoty::MonoTy::App {
+                    ctor: crate::monoty::MonoCtor::Array | crate::monoty::MonoCtor::Map,
+                    ..
+                } => StringifyRoute::Inspect,
+                crate::monoty::MonoTy::App {
+                    ctor: crate::monoty::MonoCtor::Nominal(name), ..
+                } if self.ws.newtypes_by_name.contains_key(name) => StringifyRoute::Newtype(*name),
+                crate::monoty::MonoTy::App {
+                    ctor: crate::monoty::MonoCtor::Nominal(name), ..
+                } if payload_free_enum_variants(self.ws, *name).is_some() => {
+                    StringifyRoute::EnumNames(*name)
+                }
+                crate::monoty::MonoTy::App {
+                    ctor: crate::monoty::MonoCtor::Nominal(name), ..
+                } if self.ws.struct_by_name.contains_key(name)
+                    || self.ws.enums_by_name.contains_key(name) => StringifyRoute::Inspect,
+                _ => StringifyRoute::Unsupported,
+            };
+        }
+        if self.concrete_plan.is_some() {
+            return StringifyRoute::Unsupported;
+        }
         match self.expr_ty(expr) {
-            Some(TypeExpr::Builtin(BuiltinTy::Int | BuiltinTy::Bool | BuiltinTy::String)) => {
+            Some(TypeExpr::Builtin(BuiltinTy::Int | BuiltinTy::Uint | BuiltinTy::Bool | BuiltinTy::String)) => {
                 StringifyRoute::ToString
             }
             Some(TypeExpr::Builtin(BuiltinTy::Float)) => StringifyRoute::FormatFloat,
@@ -437,7 +575,7 @@ impl<'a> DispatchCtx<'a> {
             return StringifyRoute::Inspect;
         }
         match self.resolve_ty(ty) {
-            Some(TypeExpr::Builtin(BuiltinTy::Int | BuiltinTy::Bool)) => StringifyRoute::ToString,
+            Some(TypeExpr::Builtin(BuiltinTy::Int | BuiltinTy::Uint | BuiltinTy::Bool)) => StringifyRoute::ToString,
             Some(TypeExpr::Builtin(BuiltinTy::String)) => StringifyRoute::QuotedString,
             Some(TypeExpr::Builtin(BuiltinTy::Float)) => StringifyRoute::FormatFloat,
             Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. })
@@ -458,6 +596,24 @@ impl<'a> DispatchCtx<'a> {
     /// Whether `e`'s type is a composite (tuple/array/map/struct/enum) -- what
     /// `inspect`/`inspect_formatted` render structurally.
     pub fn is_composite_expr(&self, e: Idx<Expr>) -> bool {
+        if let Some(ty) = self.concrete_expr_ty(e) {
+            let (payload, _) = ty.peel_nullable();
+            return match payload {
+                crate::monoty::MonoTy::Tuple(_)
+                | crate::monoty::MonoTy::App {
+                    ctor: crate::monoty::MonoCtor::Array | crate::monoty::MonoCtor::Map,
+                    ..
+                } => true,
+                crate::monoty::MonoTy::App {
+                    ctor: crate::monoty::MonoCtor::Nominal(name), ..
+                } => self.ws.struct_by_name.contains_key(name)
+                    || self.ws.enums_by_name.contains_key(name),
+                _ => false,
+            };
+        }
+        if self.concrete_plan.is_some() {
+            return false;
+        }
         match self.expr_ty(e) {
             Some(TypeExpr::Tuple { .. }) => true,
             Some(TypeExpr::App { ctor: TypeCtor::Array | TypeCtor::Map, .. }) => true,
@@ -513,11 +669,28 @@ impl<'a> DispatchCtx<'a> {
     /// THE plan for a `{x:spec}` hole. Every branch that decides a stdlib call
     /// is here; the printf conversion STRING is not, because it emits no call.
     pub fn format_plan(&self, hole: Idx<Expr>, spec: &InterpSpec) -> FormatPlan {
-        let inferred = match self.expr_ty(hole) {
-            Some(TypeExpr::Builtin(BuiltinTy::Int)) => Some('d'),
-            Some(TypeExpr::Builtin(BuiltinTy::Float)) => Some('f'),
-            Some(TypeExpr::Builtin(BuiltinTy::String | BuiltinTy::Bool)) => Some('s'),
-            _ => None,
+        let inferred = if self.concrete_plan.is_some() {
+            match self.concrete_expr_ty(hole) {
+                Some(crate::monoty::MonoTy::Int) => Some('d'),
+                Some(crate::monoty::MonoTy::Uint) => Some('d'),
+                Some(crate::monoty::MonoTy::Float) => Some('f'),
+                Some(crate::monoty::MonoTy::String | crate::monoty::MonoTy::Bool) => Some('s'),
+                Some(crate::monoty::MonoTy::Nullable(inner)) => match *inner {
+                    crate::monoty::MonoTy::Int => Some('d'),
+                    crate::monoty::MonoTy::Uint => Some('d'),
+                    crate::monoty::MonoTy::Float => Some('f'),
+                    crate::monoty::MonoTy::String | crate::monoty::MonoTy::Bool => Some('s'),
+                    _ => None,
+                },
+                Some(_) | None => None,
+            }
+        } else {
+            match self.expr_ty(hole) {
+                Some(TypeExpr::Builtin(BuiltinTy::Int | BuiltinTy::Uint)) => Some('d'),
+                Some(TypeExpr::Builtin(BuiltinTy::Float)) => Some('f'),
+                Some(TypeExpr::Builtin(BuiltinTy::String | BuiltinTy::Bool)) => Some('s'),
+                _ => None,
+            }
         };
         let has_precision = spec.precision.is_some() || spec.precision_expr.is_some();
         // A composite has no printf conversion. The numeric-presentation flags
@@ -542,7 +715,11 @@ impl<'a> DispatchCtx<'a> {
         let has_width = spec.width.is_some() || spec.width_expr.is_some();
         let ty = spec.format_type.or(inferred);
         let special_conv = matches!(spec.format_type, Some('b') | Some('%'));
-        let val_is_float = matches!(self.expr_ty(hole), Some(TypeExpr::Builtin(BuiltinTy::Float)));
+        let val_is_float = if self.concrete_plan.is_some() {
+            matches!(self.concrete_expr_ty(hole), Some(crate::monoty::MonoTy::Float))
+        } else {
+            matches!(self.expr_ty(hole), Some(TypeExpr::Builtin(BuiltinTy::Float)))
+        };
         let needs_pad = spec.fill.is_some()
             || matches!(spec.alignment, Some('^'))
             || ((grouping_sep.is_some() || special_conv) && has_width);

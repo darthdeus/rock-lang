@@ -7,7 +7,7 @@
 //! If this ever stops holding, the switch silently reinterprets every vertex
 //! buffer in the web renderer.
 
-use skull_mir::lower::{leaf_addr_plan, value_struct_all_float_leaf_count};
+use skull_mir::lower::{value_struct_all_float_leaf_count, RepArena};
 
 use crate::common::ws_with;
 
@@ -23,7 +23,9 @@ fn an_all_float_element_plans_exactly_the_flat_slot_scheme() {
     let ws = ws_with(SRC);
     let name = ustr::Ustr::from("Vertex");
     let k = value_struct_all_float_leaf_count(&ws, name).expect("Vertex is all-float");
-    let plan = leaf_addr_plan(&ws, name).expect("Vertex has a leaf plan");
+    let plan = RepArena::default()
+        .nominal_leaf_addresses(&ws, bone_semantic::hir::FnBackend::Js, name)
+        .expect("Vertex has a leaf plan");
     assert_eq!(plan.len(), k, "one leaf per float slot");
     for (i, a) in plan.iter().enumerate() {
         assert_eq!(a.view_field.as_str(), "__vf", "leaf {i} is not a float view");
@@ -38,7 +40,13 @@ fn an_all_float_element_plans_exactly_the_flat_slot_scheme() {
 #[test]
 fn a_mixed_width_element_strides_each_view_in_its_own_units() {
     let ws = ws_with(SRC);
-    let plan = leaf_addr_plan(&ws, ustr::Ustr::from("Flags")).expect("Flags has a leaf plan");
+    let plan = RepArena::default()
+        .nominal_leaf_addresses(
+            &ws,
+            bone_semantic::hir::FnBackend::Js,
+            ustr::Ustr::from("Flags"),
+        )
+        .expect("Flags has a leaf plan");
     let fields: Vec<&str> = plan.iter().map(|a| a.view_field.as_str()).collect();
     assert_eq!(fields, vec!["__vb", "__vi", "__vb", "__vf"], "one view per leaf C type");
     // C lays `Flags` out as bool(1) pad(3) int(4) bool(1) pad(3) float(4) = 16.

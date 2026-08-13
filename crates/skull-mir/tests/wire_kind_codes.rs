@@ -20,12 +20,13 @@ use std::collections::BTreeMap;
 /// Every kind, so a new variant cannot be added without deciding its code.
 /// Written out rather than iterated, because there is no iterator over the enum
 /// -- a new variant makes this fail to compile, which is the intent.
-const ALL: [(WireKind, &str); 7] = [
+const ALL: [(WireKind, &str); 8] = [
     (WireKind::F32, "WIRE_KIND_F32"),
     (WireKind::F32x2, "WIRE_KIND_F32X2"),
     (WireKind::F32x3, "WIRE_KIND_F32X3"),
     (WireKind::F32x4, "WIRE_KIND_F32X4"),
     (WireKind::I32, "WIRE_KIND_I32"),
+    (WireKind::U32, "WIRE_KIND_U32"),
     (WireKind::Bool32, "WIRE_KIND_BOOL32"),
     (WireKind::Mat4, "WIRE_KIND_MAT4"),
 ];
@@ -51,6 +52,7 @@ fn the_codes_are_the_documented_numbers() {
     assert_eq!(WireKind::F32x3.code(), 2);
     assert_eq!(WireKind::F32x4.code(), 3);
     assert_eq!(WireKind::I32.code(), 4);
+    assert_eq!(WireKind::U32.code(), 7);
     assert_eq!(WireKind::Bool32.code(), 5);
     assert_eq!(WireKind::Mat4.code(), 6);
 }
@@ -70,6 +72,7 @@ fn the_rock_constants_match_the_compilers_codes() {
         (WireKind::F32x2, "WIRE_KIND_F32X2"),
         (WireKind::F32x4, "WIRE_KIND_F32X4"),
         (WireKind::I32, "WIRE_KIND_I32"),
+        (WireKind::U32, "WIRE_KIND_U32"),
     ] {
         let declared = rock_global(&src, name)
             .unwrap_or_else(|| panic!("`{name}` is not declared in uniform_block.rock"));

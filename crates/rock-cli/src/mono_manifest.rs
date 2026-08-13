@@ -124,12 +124,12 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     let mut direct_rec: std::collections::BTreeSet<String> = Default::default();
     let mut mutual_rec: std::collections::BTreeSet<String> = Default::default();
     let mut changing_rec: std::collections::BTreeSet<String> = Default::default();
-    let mut rec_today = 0usize;
-    let mut rec_matched = 0usize;
+    let mut rec_calls = 0usize;
+    let mut rec_matched_instances = 0usize;
     let mut rec_missing: std::collections::BTreeSet<String> = Default::default();
-    let mut rec_rejected = 0usize;
-    let mut rec_shadow_only = 0usize;
-    let mut rec_unreached = 0usize;
+    let mut rec_unresolved = 0usize;
+    let mut rec_graph_only = 0usize;
+    let mut rec_unreached_callers = 0usize;
     let mut boundary_classes: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut boundary_max: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut erased_entries: std::collections::BTreeSet<String> = Default::default();
@@ -249,12 +249,12 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
                 direct_rec.extend(p.census.direct_same_instance);
                 mutual_rec.extend(p.census.mutual_same_instance);
                 changing_rec.extend(p.census.changing_instance);
-                rec_today += p.reconciliation.today;
-                rec_matched += p.reconciliation.matched;
-                rec_rejected += p.reconciliation.rejected_sites;
-                rec_shadow_only += p.reconciliation.shadow_only;
-                rec_unreached += p.reconciliation.missing_unreached_caller;
-                rec_missing.extend(p.reconciliation.missing);
+                rec_calls += p.call_identities.calls;
+                rec_matched_instances += p.call_identities.matched_instances;
+                rec_unresolved += p.call_identities.unresolved_sites;
+                rec_graph_only += p.call_identities.graph_only;
+                rec_unreached_callers += p.call_identities.unreached_callers;
+                rec_missing.extend(p.call_identities.missing);
                 for (k, v) in &p.rejections {
                     *rejection_kinds.entry(k).or_insert(0) += v;
                 }
@@ -850,20 +850,20 @@ pub fn do_mono_manifest(root: Option<&str>, dump: Option<&str>) -> Result<()> {
     }
     println!();
 
-    println!("## shadow vs. today's conditional specializer");
+    println!("## concrete call identities vs. instance graph");
     println!();
-    println!("- specializations the CURRENT machinery produces: **{rec_today}**");
-    println!("- ...present in the shadow graph as a complete instance: **{rec_matched}**");
-    println!("- ...MISSING from the shadow graph: **{}**", rec_missing.len());
+    println!("- complete generic call identities: **{rec_calls}**");
+    println!("- ...present in the instance graph: **{rec_matched_instances}**");
+    println!("- ...MISSING from the instance graph: **{}**", rec_missing.len());
     for m in rec_missing.iter().take(10) {
         println!("  - `{m}`");
     }
     println!(
-        "- ...absent because the shadow walk never reached the CALLING body \
-         (a reachability difference, not a missing instance): **{rec_unreached}**"
+        "- ...absent because the instance graph never reached the CALLING body \
+         (a reachability difference, not a missing instance): **{rec_unreached_callers}**"
     );
-    println!("- shadow instances with no counterpart today: **{rec_shadow_only}**");
-    println!("- call sites whose spec decision REJECTED (Stage 0b): **{rec_rejected}**");
+    println!("- graph instances with no direct-call counterpart: **{rec_graph_only}**");
+    println!("- call sites whose identity was unresolved: **{rec_unresolved}**");
     println!();
 
     println!("## foreign boundaries (shared graph)");
@@ -1420,7 +1420,7 @@ struct OneProject {
     site_join: skull::site_join::SiteJoinCensus,
     rejections: BTreeMap<&'static str, usize>,
     rejection_examples: Vec<String>,
-    reconciliation: instance_graph::Reconciliation,
+    call_identities: instance_graph::CallIdentityCensus,
     /// Boundary counts by class, for the graph's own (Lua) target.
     boundaries: BTreeMap<&'static str, usize>,
     /// Boundaries the target cannot serve -- plan S 10's `Invalid boundary`.
@@ -1580,7 +1580,7 @@ fn one_project(
         .map_err(|errs| anyhow::anyhow!("{} type errors", errs.len()))?;
 
     let project_root = dir.display().to_string();
-    let roots = instance_graph::emission_roots(&ws, Some(&project_root));
+    let roots = skull::mir_emit::emission_roots(&ws, Some(&project_root));
 
     let mut g = instance_graph::build(&ws, roots.clone(), false);
     // S 20g.4: perturbing discovery order may not change the manifest.
@@ -1854,7 +1854,7 @@ fn one_project(
         let mut seen: std::collections::BTreeSet<(u32, u32, u32, &'static str)> =
             Default::default();
         let mut synth: BTreeMap<&'static str, usize> = BTreeMap::new();
-        for (inst, sites) in &g.call_sites {
+        for (inst, sites) in g.call_sites() {
             for site in sites.keys() {
                 let skull::instance_graph::SiteOp::Synthesized(n) = site.op else { continue };
                 let key = (
@@ -1869,7 +1869,7 @@ fn one_project(
             }
         }
         let mut synth_sites: BTreeMap<&'static str, Vec<String>> = BTreeMap::new();
-        for sites in g.call_sites.values() {
+        for (_, sites) in g.call_sites() {
             for (site, rec) in sites {
                 let skull::instance_graph::SiteOp::Synthesized(n) = site.op else { continue };
                 synth_sites.entry(n).or_default().push(format!(
@@ -1893,12 +1893,12 @@ fn one_project(
     }
 
     let mut reasons: BTreeMap<String, usize> = BTreeMap::new();
-    for u in &g.unresolved {
+    for u in g.unresolved() {
         *reasons.entry(u.reason.to_string()).or_insert(0) += 1;
     }
     // A few examples per reason: one can be an accident, three show a pattern.
     let mut examples: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for u in &g.unresolved {
+    for u in g.unresolved() {
         let e = examples.entry(u.reason.to_string()).or_default();
         let f = &ws.module(u.callee.module).functions[u.callee.func];
         let file = relativize(u.span.file.as_str(), root);
@@ -1913,7 +1913,7 @@ fn one_project(
     }
     let mut rejections: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut rejection_examples: Vec<String> = Vec::new();
-    for r in &g.rejections {
+    for r in g.rejections() {
         *rejections.entry(r.kind.name()).or_insert(0) += 1;
         let file = relativize(r.span.file.as_str(), root);
         if rejection_examples.len() < 3 {
@@ -1934,7 +1934,9 @@ fn one_project(
     let body_census = bodies.census();
     // The MIR-call -> ConcreteBody join, over production's own expanded set.
     let site_join = {
-        let scx = skull_mir::lower::ScalarCtx::new(&ws);
+        // Shares the graph's arena: the instances handed to `lower_instance_source`
+        // carry ids only this arena can resolve.
+        let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
         skull::site_join::census_detailed(&ws, &scx, &g, &bodies, dump.is_some())
     };
     if let Some((path, name)) = dump {
@@ -1951,7 +1953,7 @@ fn one_project(
             .map_err(|e| anyhow::anyhow!("writing {stem}.join: {e}"))?;
     }
     let bodies_missing_for_expanded =
-        g.expanded.iter().filter(|i| !bodies.bodies.contains_key(*i)).count();
+        g.expanded().filter(|i| !bodies.bodies.contains_key(*i)).count();
     let body_free_examples: Vec<String> = bodies
         .free_types
         .iter()
@@ -1988,9 +1990,8 @@ fn one_project(
         .collect();
 
     let sites_resolved = g
-        .call_sites
-        .values()
-        .flat_map(|m| m.values())
+        .call_sites()
+        .flat_map(|(_, m)| m.values())
         .filter(|r| matches!(r.outcome, skull::instance_graph::SiteOutcome::Resolved(_)))
         .count();
     let callee_hole_examples: Vec<String> = bodies
@@ -2021,13 +2022,13 @@ fn one_project(
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
         generic_instances: g.instances.iter().filter(|i| !i.args.is_empty()).count(),
-        edges: g.edges.len(),
-        unresolved: g.unresolved.len(),
+        edges: g.edges().count(),
+        unresolved: g.unresolved().count(),
         uninstantiated_roots: g.uninstantiated_roots.len(),
         digest: instance_graph::manifest_digest(&ws, &g),
         stable,
     };
-    let rec = instance_graph::reconcile(&ws, &g);
+    let call_identities = instance_graph::reconcile_call_identities(&ws, &g);
     Ok(OneProject {
         row,
         hist: hist_of(&g),
@@ -2040,7 +2041,7 @@ fn one_project(
         synthesized_examined: g.synthesized_examined,
         storage_failures: {
             let mut m: BTreeMap<&'static str, usize> = BTreeMap::new();
-            for r in &g.storage_failures {
+            for r in g.storage_failures() {
                 *m.entry(r.bucket()).or_insert(0) += 1;
             }
             m
@@ -2049,34 +2050,32 @@ fn one_project(
         span_census: g.span_census(),
         rejections,
         rejection_examples,
-        reconciliation: rec,
+        call_identities,
         boundaries,
         erased_entries: g.erased_entries.clone(),
         coroutine_helpers: g.coroutine_helpers.len(),
         coroutine_helper_collisions: g.colliding_coroutine_helpers().len(),
         always_emitted_seeds: g.always_emitted_seeds,
-        subst_disagreements: g.subst_disagreements.len(),
+        subst_disagreements: g.subst_disagreements().count(),
         subst_disagreeing_instances: g
-            .subst_disagreements
-            .iter()
+            .subst_disagreements()
             .map(|d| g.identity(&ws, &d.instance))
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
         instances_without_substitution: g.instances_without_substitution(&ws),
-        substitutions_recorded: g.substitutions.len(),
-        subst_comparisons: g.subst_comparisons,
-        bound_tree_disagreements: g.bound_tree_disagreements.len(),
-        bound_tree_comparisons: g.bound_tree_comparisons,
-        bound_trees_recorded: g.bound_trees.len(),
+        substitutions_recorded: g.substitutions().count(),
+        subst_comparisons: g.subst_comparisons(),
+        bound_tree_disagreements: g.bound_tree_disagreements().count(),
+        bound_tree_comparisons: g.bound_tree_comparisons(),
+        bound_trees_recorded: g.bound_trees().count(),
         subst_examples: g
-            .subst_disagreements
-            .iter()
+            .subst_disagreements()
             .take(3)
             .map(|d| g.identity(&ws, &d.instance))
             .collect(),
         sites_resolved,
-        sites_edges: g.edges.len(),
-        duplicate_sites: g.duplicate_sites.len(),
+        sites_edges: g.edges().count(),
+        duplicate_sites: g.duplicate_sites().count(),
         callee_hole_examples,
         synthesized_approximated: g.synthesized_approximated,
         body_census,

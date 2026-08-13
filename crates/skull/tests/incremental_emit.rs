@@ -8,8 +8,16 @@
 use bone_semantic::hir::BodyOwner;
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
-use skull::mir_emit::{emit_full, emit_incremental, emit_overlay};
+use skull::mir_emit::{emit_full, emit_incremental, emit_overlay as emit_overlay_result, MirEmit};
 use crate::common::ws_of;
+
+fn emit_overlay(
+    ws: &Workspace,
+    cache: &mut skull::mir_emit::SkullEmitCache,
+    reinferred: &[(ModuleId, BodyOwner)],
+) -> MirEmit {
+    emit_overlay_result(ws, cache, reinferred).expect("emit_overlay")
+}
 
 /// The `(ModuleId, BodyOwner)` reinferred-id for the named function in `ws`.
 fn body_id(ws: &Workspace, name: &str) -> (ModuleId, BodyOwner) {
@@ -201,20 +209,20 @@ fn an_overlay_redefines_a_changed_specialization() {
     );
 }
 
-/// The OVERLAY carries a specialization the edit made NEWLY reachable
-/// (mono cut C+D, `B*-backfill`).
+/// The OVERLAY carries a specialization the graph added for the edit
+/// (graph-delta overlay construction).
 ///
 /// The sibling above edits a body whose specialization already exists, so the
 /// overlay only has to REDEFINE it. Here the edit adds the first call to a new
-/// instantiation, so the definition has to be ADDED -- and a reload dofiles the
-/// overlay after `main.lua`, which carries no such definition. The edited
+/// instantiation, so the graph delta has to add its definition -- and a reload
+/// dofiles the overlay after `main.lua`, which carries no such definition. The edited
 /// caller's call spells `..._spec_...`, so omitting it is a nil global at
 /// reload rather than a stale body.
 ///
 /// The two populations are asserted in the same test: the P specialization must
-/// already exist (so this is about the NEW one) and the Q one must not.
+/// already exist (so this is about the graph addition) and the Q one must not.
 #[test]
-fn an_overlay_carries_a_newly_reachable_specialization() {
+fn an_overlay_carries_a_graph_added_specialization() {
     let types = "value P { x: float, y: float }\n\
                  value Q { a: float, b: float, c: float }\n\
                  fn tally_of<T>(xs: [T]) -> T { return xs[0] }\n";
@@ -244,51 +252,290 @@ fn an_overlay_carries_a_newly_reachable_specialization() {
     );
 }
 
-/// The overlay backfills a newly-reachable `Iterator`-BOUNDED body, which is
-/// the case its demand tree is load-bearing for (mono cut C+D, D-1 +
-/// `B*-backfill`).
+/// **A SECOND edit to a generic re-emits the instantiation a FIRST edit added**
+/// -- which is only true if the graph is MAINTAINED across edits rather than
+/// frozen at the last full build (mono cut C+D, E1 graph ownership).
 ///
-/// A bounded body cannot be lowered from its declaration alone: its placeholder
-/// `next` calls are resolved by the demand, not by the body. So this is the arm
-/// that says the backfill carries the TREE and not just the key -- a backfill
-/// that rebuilt from the declaration would reject rather than emit.
+/// `update_chunk_cache` maps a changed declaration to its live instances
+/// through `InstanceGraph::instances_of`. A graph left at its full-build state
+/// still answers, and answers plausibly -- it just does not know about `Q`,
+/// which the first edit introduced. So the second edit re-emits `P` and leaves
+/// the reload running the OLD `Q` body: a stale specialization, silently, with
+/// every existing arm green.
 ///
-/// Runs with inlining DISABLED, where a bounded call has no splice to fall back
-/// on.
+/// Both populations are asserted: the first overlay must actually add `Q` (or
+/// the second overlay has nothing to be stale about), and the second must carry
+/// the edited body at BOTH instantiations.
 #[test]
-fn an_overlay_carries_a_newly_reachable_bounded_body() {
-    let _g = crate::common::AblationGuard::on();
-    let common = "fn total<I: Iterator<int>>(it: I) -> int {\n\
-                  \x20   let s = 0\n\
-                  \x20   for v in it { s = s + v }\n\
-                  \x20   return s\n\
+fn a_later_edit_to_a_generic_reaches_an_instantiation_an_earlier_edit_added() {
+    let types = "value P { x: float, y: float }\n\
+                 value Q { a: float, b: float, c: float }\n";
+    let generic = |marker: &str| {
+        format!("fn tally_of<T>(xs: [T]) -> T {{ print(\"{marker}\") return xs[0] }}\n")
+    };
+    let v1 = types.to_string()
+        + &generic("MARK1")
+        + "global G1: float = tally_of([P { x: 1.0, y: 0.0 }]).x\n\
+           fn use_it() -> float { return G1 }";
+    // Edit 1: `use_it` gains the first call at `Q`.
+    let v2 = types.to_string()
+        + &generic("MARK1")
+        + "global G1: float = tally_of([P { x: 1.0, y: 0.0 }]).x\n\
+           fn use_it() -> float { return tally_of([Q { a: 1.0, b: 2.0, c: 3.0 }]).a }";
+    // Edit 2: the GENERIC's own body changes. Both instantiations must move.
+    let v3 = types.to_string()
+        + &generic("MARK2")
+        + "global G1: float = tally_of([P { x: 1.0, y: 0.0 }]).x\n\
+           fn use_it() -> float { return tally_of([Q { a: 1.0, b: 2.0, c: 3.0 }]).a }";
+
+    let ws1 = crate::common::ws_with_stdlib(&v1);
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (_full, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+
+    let ws2 = crate::common::ws_with_stdlib(&v2);
+    let o1 = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "use_it")]);
+    let defines_q = |lua: &str| {
+        lua.lines().any(|l| l.starts_with("function tally_of_") && l.contains("Q"))
+    };
+    assert!(defines_q(&o1.lua), "control: edit 1 must add the Q instantiation:\n{}", o1.lua);
+
+    let ws3 = crate::common::ws_with_stdlib(&v3);
+    let o2 = emit_overlay(&ws3, &mut cache, &[body_id(&ws3, "tally_of")]);
+    // The marker is what makes "re-emitted" observable; a name-only check would
+    // pass on the stale definition.
+    let bodies: Vec<&str> =
+        o2.lua.lines().filter(|l| l.starts_with("function tally_of_")).collect();
+    assert_eq!(bodies.len(), 2, "both instantiations must be redefined, got {bodies:?}");
+    assert_eq!(
+        o2.lua.matches("MARK2").count(),
+        2,
+        "each redefined body must carry the EDITED marker, or one instantiation \
+         was served from a chunk the stale graph never invalidated:\n{}",
+        o2.lua
+    );
+}
+
+/// **A pruned instance's chunk is FORGOTTEN, so a later edit that brings the
+/// instantiation back rebuilds it instead of serving the stale body.**
+///
+/// Removal is the direction emission cannot see on its own: nothing on the
+/// chunk side knows an instance was stranded, so without
+/// `SkullEmitCache::forget_instance` the entry simply stays. That is harmless
+/// for a full reassembly -- the liveness walk does not reach it -- which is
+/// exactly why it needs its own arm: the damage only appears when the
+/// instantiation comes BACK, because a stale chunk would otherwise survive the
+/// graph removal and the reload then run a definition built
+/// from the pre-edit source.
+///
+/// The three populations are asserted in order: `Q` present, `Q` stranded, `Q`
+/// back and carrying the EDITED body.
+#[test]
+fn an_instantiation_that_returns_after_being_pruned_is_rebuilt_not_reused() {
+    let types = "value P { x: float, y: float }\n\
+                 value Q { a: float, b: float, c: float }\n";
+    let generic = |marker: &str| {
+        format!("fn tally_of<T>(xs: [T]) -> T {{ print(\"{marker}\") return xs[0] }}\n")
+    };
+    let keep_alive = "global G1: float = tally_of([P { x: 1.0, y: 0.0 }]).x\n";
+    let calls_q = "fn use_it() -> float { return tally_of([Q { a: 1.0, b: 2.0, c: 3.0 }]).a }";
+    let no_q = "fn use_it() -> float { return G1 }";
+
+    let v1 = types.to_string() + &generic("MARK1") + keep_alive + calls_q;
+    let v2 = types.to_string() + &generic("MARK1") + keep_alive + no_q; // strands Q
+    let v3 = types.to_string() + &generic("MARK2") + keep_alive + no_q; // edits the generic
+    let v4 = types.to_string() + &generic("MARK2") + keep_alive + calls_q; // Q returns
+
+    let ws1 = crate::common::ws_with_stdlib(&v1);
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (full, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    let q_bodies = |lua: &str| -> Vec<String> {
+        lua.lines()
+            .filter(|l| l.starts_with("function tally_of_") && l.contains("Q"))
+            .map(str::to_string)
+            .collect()
+    };
+    assert_eq!(q_bodies(&full.lua).len(), 1, "control: v1 defines the Q instantiation");
+
+    let ws2 = crate::common::ws_with_stdlib(&v2);
+    let removal = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "use_it")]);
+    assert_eq!(
+        q_bodies(&removal.lua).len(),
+        0,
+        "the removal overlay must remove the stranded Q specialization:\n{}",
+        removal.lua
+    );
+    let ws3 = crate::common::ws_with_stdlib(&v3);
+    let _ = emit_overlay(&ws3, &mut cache, &[body_id(&ws3, "tally_of")]);
+
+    let ws4 = crate::common::ws_with_stdlib(&v4);
+    let back = emit_overlay(&ws4, &mut cache, &[body_id(&ws4, "use_it")]);
+    assert_eq!(
+        q_bodies(&back.lua).len(),
+        1,
+        "control: the returning instantiation must be defined again:\n{}",
+        back.lua
+    );
+    let text = &back.lua;
+    let start = text.find("function tally_of_").map(|i| &text[i..]).unwrap_or(text);
+    let q_start = text
+        .find(q_bodies(text)[0].as_str())
+        .map(|i| &text[i..])
+        .unwrap_or(start);
+    let q_body: String = q_start.lines().take_while(|l| *l != "end").collect();
+    assert!(
+        q_body.contains("MARK2"),
+        "the returning instantiation must be REBUILT from the edited generic, not \
+         served from the chunk it had before it was pruned:\n{q_body}"
+    );
+}
+
+#[test]
+fn an_overlay_reemits_a_definition_after_a_scalar_abi_width_flip() {
+    let v1 = "value V2 { x: float, y: float }\n\
+              fn foo(v: V2) -> float { v.x }\n\
+              fn other() -> float { foo(V2 { x: 2.0, y: 3.0 }) }\n\
+              fn use_ref() -> float { other() }";
+    let v2 = "value V2 { x: float, y: float }\n\
+              fn foo(v: V2) -> float { v.x }\n\
+              fn other() -> float { foo(V2 { x: 2.0, y: 3.0 }) }\n\
+              fn use_ref() -> float {\n\
+                let f = foo\n\
+                f(V2 { x: 1.0, y: 2.0 })\
+              }";
+    let ws1 = crate::common::ws_with_stdlib(v1);
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (full1, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    assert!(full1.lua.contains("function foo_"), "v1 must emit foo");
+
+    let ws2 = crate::common::ws_with_stdlib(v2);
+    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "use_ref")]);
+    assert!(
+        overlay.lua.contains("function foo_") && overlay.lua.contains("function use_ref"),
+        "the ABI-width flip must re-emit foo and its caller in the overlay:\n{}",
+        overlay.lua
+    );
+}
+
+/// The overlay carries a NON-GENERIC LIBRARY body the graph added for the edit
+/// (graph-delta overlay construction).
+///
+/// Its two siblings above both add a SPECIALIZATION, and those reach the overlay
+/// through the graph-added chunk path, which builds the chunk and files it in
+/// `changed_since_full`. This is the arm that has no other route.
+///
+/// The subject must live in a LIBRARY module, and that is the whole reason this
+/// fixture uses a stdlib fn: `is_library_module` makes the compiled unit's own
+/// sources roots, so a fn in the fixture text is emitted whether or not anything
+/// calls it and could never be graph-added. `is_ascii_ws` is a plain
+/// `@pure` stdlib fn -- with inlining off it is emitted standalone -- and no
+/// trivial program reaches it.
+///
+/// Both populations are asserted in the same run: it must be ABSENT from the
+/// full build, or "the overlay adds it" is satisfied by a definition that was
+/// already there.
+#[test]
+fn an_overlay_carries_a_graph_added_library_body() {
+    let v1 = "fn use_it(c: int) -> bool { return c == 32 }\n\
+              fn main() { print(\"{use_it(9)}\") }";
+    let v2 = "fn use_it(c: int) -> bool { return is_ascii_ws(c) }\n\
+              fn main() { print(\"{use_it(9)}\") }";
+
+    let ws1 = crate::common::ws_with_stdlib(v1);
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (full, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    let defines =
+        |lua: &str| lua.lines().any(|l| l.starts_with("function is_ascii_ws_int_ret_bool("));
+    assert!(
+        !defines(&full.lua),
+        "control: v1 must not define `is_ascii_ws`, or the overlay assertion below \
+         is about a definition that already existed"
+    );
+
+    let ws2 = crate::common::ws_with_stdlib(v2);
+    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "use_it")]);
+    assert!(
+        overlay.lua.contains("is_ascii_ws_int_ret_bool("),
+        "control: the edited body must actually call it:\n{}",
+        overlay.lua
+    );
+    assert!(
+        defines(&overlay.lua),
+        "the overlay must DEFINE the library body the edit made reachable, or the \
+         reload calls a nil global:\n{}",
+        overlay.lua
+    );
+}
+
+/// A graph-added specialization whose user body fails construction must make
+/// both reload paths fail closed.
+#[test]
+fn an_overlay_rejects_a_failed_graph_added_body() {
+    let common = "nobox value NV2 { x: float, y: float }\n\
+                  fn bad<T>(xs: [T]) -> int {\n\
+                  \x20   let t = (xs[0], 1.0)\n\
+                  \x20   print(\"{t}\")\n\
+                  \x20   return 0\n\
                   }\n";
     let v1 = common.to_string() + "fn use_it() -> int { return 0 }";
     let v2 = common.to_string()
         + "fn use_it() -> int {\n\
-           \x20   let xs: [int] = [1, 2, 3]\n\
-           \x20   return total(xs.iter())\n\
+           \x20   let xs: [NV2] = [NV2 { x: 1.0, y: 2.0 }]\n\
+           \x20   return bad(xs)\n\
            }";
 
     let ws1 = crate::common::ws_with_stdlib(&v1);
     let mid = skull::user_module_id(&ws1).unwrap();
     let (full, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
-    let standalone = |lua: &str| {
-        lua.lines().any(|l| l.starts_with("function total_") && l.contains("_spec_"))
-    };
-    assert!(
-        !standalone(&full.lua),
-        "control: v1 must NOT already define the bounded body, or the backfill has \
-         nothing to add"
-    );
+    assert!(!full.lua.contains("function bad_"), "v1 must not emit the specialization");
 
     let ws2 = crate::common::ws_with_stdlib(&v2);
-    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "use_it")]);
+    let err = match emit_overlay_result(&ws2, &mut cache, &[body_id(&ws2, "use_it")]) {
+        Ok(_) => panic!("a failed graph-added construction must trigger FullRequired"),
+        Err(err) => err,
+    };
     assert!(
-        standalone(&overlay.lua),
-        "the overlay must ADD the bounded body the edit made reachable, with its \
-         placeholders resolved from the demand's tree:\n{}",
-        overlay.lua
+        err.message.contains("nobox") && err.message.contains("bad"),
+        "the overlay failure must identify the graph-added construction: {}",
+        err.message
+    );
+}
+
+#[test]
+fn graph_added_construction_failure_is_propagated_by_incremental() {
+    let common = "nobox value NV2 { x: float, y: float }\n\
+                  fn bad<T>(xs: [T]) -> int {\n\
+                  \x20   let t = (xs[0], 1.0)\n\
+                  \x20   print(\"{t}\")\n\
+                  \x20   return 0\n\
+                  }\n";
+    let v1 = common.to_string() + "fn use_it() -> int { return 0 }";
+    let v2 = common.to_string()
+        + "fn use_it() -> int {\n\
+           \x20   let xs: [NV2] = [NV2 { x: 1.0, y: 2.0 }]\n\
+           \x20   return bad(xs)\n\
+           }";
+
+    let ws1 = crate::common::ws_with_stdlib(&v1);
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let ws2 = crate::common::ws_with_stdlib(&v2);
+    let full_err = match emit_full(&ws2, skull::user_module_id(&ws2).unwrap()) {
+        Ok(_) => panic!("a full build must reject the failed graph-added construction"),
+        Err(err) => err,
+    };
+    assert!(
+        full_err.message.contains("nobox") && full_err.message.contains("bad"),
+        "the full-build failure must identify the rejected specialization: {}",
+        full_err.message
+    );
+    let (_, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    let err = match emit_incremental(&ws2, &mut cache, &[body_id(&ws2, "use_it")]) {
+        Ok(_) => panic!("a failed graph-added construction must not be printed and ignored"),
+        Err(err) => err,
+    };
+    assert!(
+        err.message.contains("nobox") && err.message.contains("bad"),
+        "the propagated error must identify the failed graph-added construction: {}",
+        err.message
     );
 }
 
@@ -332,7 +579,8 @@ fn one_liveness_walk_decides_the_specialized_bodies() {
 /// invalidate rather than one shared body.
 #[test]
 fn a_body_edit_to_a_generic_coroutine_reemits_its_specializations() {
-    let v1 = "nobox value P { x: float, y: float }\n\
+    let v1 = "struct Vec<T> { _data: any, len: int }\n\
+              nobox value P { x: float, y: float }\n\
               co fn walk<T>(v: [T]) -> Coroutine<int, int, ()> {\n\
               \x20   let n = v.len\n\
               \x20   yield n\n\
@@ -358,27 +606,25 @@ fn a_body_edit_to_a_generic_coroutine_reemits_its_specializations() {
     check_edit(v1, &v2, &["walk"]);
 }
 
-/// An edit that introduces a NEW specialization demand must BACKFILL it
+/// An edit that introduces a NEW specialization demand must MATERIALIZE it
 /// (mono cut C+D, the item B\* left open and D-1 absorbs).
 ///
-/// Invalidation and backfill are different failures. The sibling above edits a
+/// Invalidation and graph addition are different failures. The sibling above edits a
 /// callee whose specializations already exist, so the cache knows the key set and
 /// only has to re-emit; here the edit is in the CALLER and produces a key the
 /// cache has never seen. A cache that only re-emits what it already holds is
 /// green on that one and silently short a definition on this one -- the caller
 /// would then spell a specialized symbol nothing defines.
 ///
-/// It works because backfill is NOT a second mechanism: `emit_incremental`
-/// reassembles through the same `live_bodies` walk `emit_full` runs, so a demand
-/// that appears for the first time is discovered and BUILT there. Pinning it
-/// here is what keeps a future "only reassemble what changed" optimization from
-/// removing that without noticing.
+/// The graph update now reports the new instance and the cache builds it from
+/// the graph's substitution and bound tree before overlay assembly. The same
+/// `assemble` path still remains the incremental oracle for parity.
 ///
 /// Asserted on the incremental output's own definition COUNT as well as against
 /// a fresh build. Equality alone would be satisfied by two builds that both lack
 /// the new body, and the count alone would not catch a stale one.
 #[test]
-fn an_edit_that_introduces_a_new_specialization_demand_backfills_it() {
+fn an_edit_that_introduces_a_new_specialization_demand_builds_from_graph_delta() {
     let types = "value P { x: float, y: float }\n\
                  value Q { a: float, b: float, c: float }\n\
                  fn tally_of<T>(xs: [T]) -> T { return xs[0] }\n";
@@ -426,7 +672,7 @@ fn an_edit_that_introduces_a_new_specialization_demand_backfills_it() {
         .count();
     assert_eq!(
         defs, 2,
-        "the incremental assembly must BACKFILL the specialization the edit introduced"
+        "the incremental assembly must materialize the specialization the edit introduced"
     );
 }
 
@@ -447,6 +693,7 @@ fn an_edit_that_introduces_a_new_specialization_demand_backfills_it() {
 /// fall back on -- and is what E1 does by construction.
 #[test]
 fn a_standalone_bounded_body_survives_an_incremental_rebuild() {
+    let _inline = crate::common::InlineOffGuard::on();
     let _g = crate::common::AblationGuard::on();
     let v1 = "fn total<I: Iterator<int>>(it: I) -> int {\n\
               \x20   let s = 0\n\
@@ -481,5 +728,82 @@ fn a_standalone_bounded_body_survives_an_incremental_rebuild() {
     assert_eq!(
         incremental.lua, fresh.lua,
         "incremental assembly != fresh emit after editing a bounded body"
+    );
+}
+
+/// **An edit that REMOVES the last call to an instantiation must prune it**,
+/// leaving no stale definition live -- the direction the graph-addition arms above do
+/// not cover.
+///
+/// The sibling declaration instance is what makes it a per-INSTANCE question
+/// rather than a per-declaration one: `tally_of<P>` stays reached throughout, so
+/// an implementation that invalidated by DECLARATION would either keep both or
+/// drop both, and only one is correct.
+///
+/// Both populations are asserted from fresh builds first, in the same run: v1
+/// must hold two specializations and v2 exactly one, or the edit removes nothing
+/// and the arm proves nothing.
+#[test]
+fn an_edit_that_removes_the_last_call_to_an_instantiation_prunes_it() {
+    let types = "value P { x: float, y: float }\n\
+                 value Q { a: float, b: float, c: float }\n\
+                 fn tally_of<T>(xs: [T]) -> T { return xs[0] }\n";
+    let with_both = types.to_string()
+        + "fn use_it() -> float {\n\
+           \x20   let ps: [P] = [P { x: 1.0, y: 0.0 }]\n\
+           \x20   let qs: [Q] = [Q { a: 1.0, b: 2.0, c: 3.0 }]\n\
+           \x20   return tally_of(ps).x + tally_of(qs).a\n\
+           }";
+    let with_one = types.to_string()
+        + "fn use_it() -> float {\n\
+           \x20   let ps: [P] = [P { x: 1.0, y: 0.0 }]\n\
+           \x20   return tally_of(ps).x\n\
+           }";
+    let specs_in = |lua: &str| {
+        lua.lines().filter(|l| l.starts_with("function tally_of_") && l.contains("_spec_")).count()
+    };
+    let fresh_specs = |src: &str| {
+        let ws = crate::common::ws_with_stdlib(src);
+        let mid = skull::user_module_id(&ws).unwrap();
+        specs_in(&emit_full(&ws, mid).expect("emit_full").0.lua)
+    };
+    assert_eq!(fresh_specs(&with_both), 2, "v1 must hold TWO specialized `tally_of`");
+    assert_eq!(
+        fresh_specs(&with_one),
+        1,
+        "v2 must hold ONE -- the sibling instance stays reached, so this is per-instance"
+    );
+
+    check_edit_with(crate::common::ws_with_stdlib, &with_both, &with_one, &["use_it"]);
+
+    // The direct arm. `check_edit_with` compares against a fresh emit, which is
+    // the strongest oracle available, but it cannot say WHICH of the two
+    // instances survived -- both counts moving together would still match.
+    let ws1 = crate::common::ws_with_stdlib(&with_both);
+    let mid1 = skull::user_module_id(&ws1).unwrap();
+    let (_, mut cache) = emit_full(&ws1, mid1).expect("emit_full v1");
+    let ws2 = crate::common::ws_with_stdlib(&with_one);
+    let reinferred = vec![body_id(&ws2, "use_it")];
+    let incremental = emit_incremental(&ws2, &mut cache, &reinferred).expect("emit_incremental");
+    assert_eq!(
+        specs_in(&incremental.lua),
+        1,
+        "the incremental assembly kept a definition nothing calls any more:\n{}",
+        incremental.lua
+    );
+    // ...and it is the one still called, not merely one of the two.
+    let ws_one = crate::common::ws_with_stdlib(&with_one);
+    let mid_one = skull::user_module_id(&ws_one).unwrap();
+    let fresh_lua = emit_full(&ws_one, mid_one).expect("emit_full v2").0.lua;
+    let surviving = |lua: &str| {
+        lua.lines()
+            .filter(|l| l.starts_with("function tally_of_") && l.contains("_spec_"))
+            .map(|l| l.to_string())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        surviving(&incremental.lua),
+        surviving(&fresh_lua),
+        "the surviving instance is not the one a fresh build keeps"
     );
 }

@@ -5,6 +5,8 @@
 //! Execution under luajit is the deeper oracle, wired at the Phase-6 CLI cutover
 //! (`rock {run,test} --backend skull`); these pin the textual shape until then.
 
+mod common;
+
 use skull_codegen_lua::{emit_function, CodegenCtx};
 use skull_mir::mir::FuncRef;
 
@@ -21,11 +23,10 @@ fn emit_dump(mut modules: Vec<skull_parser::Ast>, fn_name: &str) -> String {
         .iter()
         .find(|(_, f)| f.name.as_str() == fn_name)
         .expect("function by name");
-    let scx = skull_mir::lower::ScalarCtx::new(&ws);
-    let func = skull_mir::lower::lower_function(&ws, &scx, mid, fid)
+    let (func, interner) = common::lower_test_ref(&ws, mid, fid)
         .unwrap_or_else(|e| panic!("lower failed: {}", e.message));
     let ctx = CodegenCtx::new(&ws);
-    emit_function(&ws, &ctx, FuncRef { module: mid, func: fid }, &func)
+    emit_function(&ws, &ctx, &interner, FuncRef { module: mid, func: fid }, &func)
 }
 
 /// Stdlib-free: literals, vars, `let`, builtin comparisons, control flow.
@@ -59,21 +60,18 @@ fn emit_clean(src: &str, fn_name: &str) -> String {
         .iter()
         .find(|(_, f)| f.name.as_str() == fn_name)
         .expect("function by name");
-    let scx = skull_mir::lower::ScalarCtx::new(&ws);
-    let mut func = skull_mir::lower::lower_function(&ws, &scx, mid, fid)
+    let (mut func, interner) = common::lower_test_ref(&ws, mid, fid)
         .unwrap_or_else(|e| panic!("lower failed: {}", e.message));
     skull_transform::cleanup(&mut func);
     let ctx = CodegenCtx::new(&ws);
-    emit_function(&ws, &ctx, FuncRef { module: mid, func: fid }, &func)
+    emit_function(&ws, &ctx, &interner, FuncRef { module: mid, func: fid }, &func)
 }
 
-/// Emit EVERY lowerable function in the `<test>` module, run a Lua `driver`
-/// expression (e.g. `"sign(-5)"`) under luajit, and return its trimmed stdout.
-/// The deeper oracle: it proves the emitted Lua is valid AND computes correctly,
-/// not just that its text matches. Stdlib is loaded so `__op_*` resolves; only
-/// snippets whose ops fold to inline Lua (arith / control flow / aggregates /
-/// indexing — no stdlib *fn* calls) run self-contained. Skips if luajit is
-/// absent so the suite still runs on a bare box.
+/// Emit the graph-reached lowerable instances for the `<test>` module's user
+/// roots, run a Lua `driver` expression (e.g. `"sign(-5)"`) under luajit, and
+/// return its trimmed stdout. This keeps inlining disabled and delivers the
+/// residual stdlib instances instead of depending on a splice for completeness.
+/// Skips if luajit is absent so the suite still runs on a bare box.
 fn run(src: &str, driver: &str) -> String {
     use std::sync::LazyLock;
     static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
@@ -94,27 +92,46 @@ fn run(src: &str, driver: &str) -> String {
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
     let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("user module id");
     let ctx = CodegenCtx::new(&ws);
-    let scx = skull_mir::lower::ScalarCtx::new(&ws);
+    let roots = ws
+        .module(mid)
+        .functions
+        .iter()
+        .map(|(fid, _)| FuncRef { module: mid, func: fid })
+        .collect();
+    let interner = std::sync::Arc::new(skull_mir::monoty::MonoInterner::new());
+    let graph = skull_graph::instance_graph::build_in(&ws, roots, false, interner.clone());
+    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(interner);
+    let concrete = skull_graph::concrete_body::build(&ws, &graph);
     // Capturing lambdas lower to `setmetatable({..}, __rock_fn_mt)` env records
     // (docs/closure-env-records-plan.md); the record metatable lives in skull's
     // runtime prelude, which this bare harness does not emit -- pull in the
     // canonical definition (one copy, shared with `skull::runtime_prelude`).
     let mut lua = format!(
-        "local bit = require('bit')\n{}\n{}\n",
+        "local bit = require('bit')\nlocal ffi = require('ffi')\n{}\n{}\nfunction __nb_checked_get(b, i) if i < 0 or i >= b.len then error('NativeBuffer index out of bounds') end return b.ptr[i] end\nfunction __nb_checked_set(b, i, v) if i < 0 or i >= b.len then error('NativeBuffer index out of bounds') end b.ptr[i] = v end\n",
         skull_codegen_lua::FN_MT_PRELUDE,
         skull_codegen_lua::VEC_CHECK_SHIMS
     );
-    let mut cache = skull_transform::InlineCache::default();
-    for (fid, _) in ws.module(mid).functions.iter() {
-        let fref = FuncRef { module: mid, func: fid };
-        if let Ok(mut func) = skull_mir::lower::lower_function(&ws, &scx, mid, fid) {
-            // The real pipeline: stdlib callees (VecIter's iter/next under a
-            // `for x in vec`) inline away, so the chunk stays self-contained.
-            skull_transform::inline_functions(&ws, &scx, fref, &mut func, &mut cache)
-                .expect("inline failed");
+    for inst in graph.expanded() {
+        let f = &ws.module(inst.func.module).functions[inst.func.func];
+        if f.inline_body.is_some() {
+            continue;
+        }
+        let Some(plan) = concrete.plans.get(inst) else { continue };
+        if let Ok(mut func) = skull_mir::lower::lower_instance_with_plans(
+            &ws,
+            &scx,
+            plan,
+            &concrete.plans,
+        ) {
             skull_transform::cleanup(&mut func);
             skull_transform::recover_counted_loops(&ws, &mut func);
-            lua.push_str(&emit_function(&ws, &ctx, fref, &func));
+            lua.push_str(&skull_codegen_lua::emit_named(
+                &ws,
+                &ctx,
+                scx.interner(),
+                &inst.symbol(&ws, scx.interner()),
+                &func,
+            ));
         }
     }
     // Alias the user module's uniquely-named fns back to their bare source names
@@ -288,8 +305,8 @@ fn exec_vec_index() {
 
 #[test]
 fn exec_for_over_array() {
-    // `[T]` iterates via the stdlib VecIter protocol; the inline pass splices
-    // iter/next away so the emitted fn is still self-contained.
+    // `[T]` iterates via concrete stdlib VecIter instances delivered beside the
+    // user body; this fixture must work with inlining disabled.
     let src = "
 fn total(xs: [int]) -> int {
     let s = 0;
@@ -445,6 +462,82 @@ fn exec_cast_float_to_int() {
 }
 
 #[test]
+fn exec_uint_exact_wrapping_and_ordering() {
+    let src = "
+fn add(a: uint, b: uint) -> uint { a + b }
+fn mul(a: uint, b: uint) -> uint { a * b }
+fn bitnot(a: uint) -> uint { ~a }
+fn logical_shift(a: uint) -> uint { a >> 31 }
+fn logical_shift_half(a: uint) -> uint { a >> 1 }
+fn logical_shift_identity(a: uint) -> uint { a >> 0 }
+fn above_signed_half(a: uint, b: uint) -> bool { a > b }";
+    assert_eq!(run(src, "add(4294967295, 1)"), "0");
+    assert_eq!(run(src, "mul(4294967295, 4294967295)"), "1");
+    assert_eq!(run(src, "bitnot(0)"), "4294967295");
+    assert_eq!(run(src, "logical_shift(2147483648)"), "1");
+    assert_eq!(run(src, "logical_shift_half(2147483648)"), "1073741824");
+    assert_eq!(run(src, "logical_shift_identity(2147483648)"), "2147483648");
+    assert_eq!(run(src, "above_signed_half(2147483648, 0)"), "true");
+}
+
+#[test]
+fn exec_uint_entry_values_are_normalized() {
+    let src = "fn root(a: uint) -> uint { a }";
+    assert_eq!(run(src, "root(-1)"), "4294967295");
+}
+
+#[test]
+fn exec_uint_numeric_conversion_differs_from_bitcast() {
+    let src = "
+fn numeric(a: uint) -> int { a as int }
+fn bits(a: uint) -> int { bitcast<int>(a) }";
+    assert_eq!(run(src, "numeric(2147483648)"), "2147483648");
+    assert_eq!(run(src, "bits(2147483648)"), "-2147483648");
+}
+
+#[test]
+fn exec_uint_ranges_keep_unsigned_loop_and_materialized_types() {
+    let src = "
+fn last(lo: uint, hi: uint) -> uint {
+    let result: uint = 0
+    for i in lo..hi { result = i }
+    result
+}
+fn escaped() -> uint {
+    let values: [uint] = 2147483648..2147483651
+    values[2]
+}";
+    assert_eq!(run(src, "last(2147483648, 2147483651)"), "2147483650");
+    assert_eq!(run(src, "escaped()"), "2147483650");
+}
+
+#[test]
+fn exec_uint_incdec_wraps() {
+    let src = "
+fn dec() -> uint { let x: uint = 0; x--; x }
+fn inc() -> uint { let x: uint = 4294967295; x++; x }";
+    assert_eq!(run(src, "dec()"), "4294967295");
+    assert_eq!(run(src, "inc()"), "0");
+}
+
+#[test]
+fn exec_uint_dynamic_shift_checks_the_runtime_count() {
+    let src = "fn shift(value: uint, count: uint) -> uint { value << count }";
+    assert_eq!(run(src, "shift(1, 31)"), "2147483648");
+}
+
+#[test]
+fn exec_native_buffer_uint_uses_unsigned_four_byte_storage() {
+    let src = "
+fn root() -> uint {
+    let b = native_buffer_uint(1)
+    b[0] = 4294967295
+    b[0]
+}";
+    assert_eq!(run(src, "root()"), "4294967295");
+}
+
+#[test]
 fn exec_interpolation_scalars() {
     // `{x}` holes for int/string/bool fold to `tostring(..)` and `..` concat.
     let src = "fn label(n: int, name: string, ok: bool) -> string { \"n={n} {name} ok={ok}\" }";
@@ -572,7 +665,7 @@ end
     );
 }
 
-/// Full pre-emit pipeline (mirrors `mir_emit.rs`): lower -> `inline_functions`
+/// Full pre-emit pipeline (mirrors `mir_emit.rs`): plan-backed lower -> inline
 /// -> `cleanup` -> emit. The honest artifact for zero-alloc claims: an `@inline`
 /// `iter`/`next` is only spliced (and its cursor struct scalarized) once the
 /// inliner has run, which `emit_clean` does NOT do.
@@ -597,17 +690,38 @@ fn emit_inlined(src: &str, fn_name: &str) -> String {
         .iter()
         .find(|(_, f)| f.name.as_str() == fn_name)
         .expect("function by name");
-    let scx = skull_mir::lower::ScalarCtx::new(&ws);
+    let interner = std::sync::Arc::new(skull_mir::monoty::MonoInterner::new());
+    let graph = skull_graph::instance_graph::build_in(
+        &ws,
+        ws.module(mid)
+            .functions
+            .iter()
+            .map(|(fid, _)| FuncRef { module: mid, func: fid })
+            .collect(),
+        false,
+        interner.clone(),
+    );
+    let bodies = skull_graph::concrete_body::build(&ws, &graph);
+    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(interner);
     let self_ref = FuncRef { module: mid, func: fid };
-    let mut func = skull_mir::lower::lower_function(&ws, &scx, mid, fid)
+    let self_inst = skull_mir::instance::Instance::base(self_ref);
+    let plan = bodies.plans.get(&self_inst).expect("concrete self plan");
+    let mut func = skull_mir::lower::lower_instance_with_plans(&ws, &scx, plan, &bodies.plans)
         .unwrap_or_else(|e| panic!("lower failed: {}", e.message));
     let mut cache = skull_transform::InlineCache::default();
-    skull_transform::inline_functions(&ws, &scx, self_ref, &mut func, &mut cache)
-        .expect("inline failed");
+    skull_transform::inline_functions_with_plans(
+        &ws,
+        &scx,
+        self_ref,
+        &mut func,
+        &mut cache,
+        &bodies.plans,
+    )
+    .expect("inline failed");
     skull_transform::cleanup(&mut func);
     skull_transform::recover_counted_loops(&ws, &mut func);
     let ctx = CodegenCtx::new(&ws);
-    emit_function(&ws, &ctx, self_ref, &func)
+    emit_function(&ws, &ctx, scx.interner(), self_ref, &func)
 }
 
 // --- Slice 4 acceptance gate: an @inline user iterator driven by `for`

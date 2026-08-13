@@ -145,6 +145,7 @@ fn clone_expr_kind(ast: &mut Ast, kind: ExprKind) -> ExprKind {
         ),
         ExprKind::Paren(x) => ExprKind::Paren(ce(ast, x)),
         ExprKind::As(x, t) => ExprKind::As(ce(ast, x), ct(ast, t)),
+        ExprKind::Bitcast(x, t) => ExprKind::Bitcast(ce(ast, x), ct(ast, t)),
         ExprKind::TypeAscription(x, t) => ExprKind::TypeAscription(ce(ast, x), ct(ast, t)),
         ExprKind::Not(x) => ExprKind::Not(ce(ast, x)),
         ExprKind::BitNot(x) => ExprKind::BitNot(ce(ast, x)),
@@ -167,8 +168,9 @@ fn clone_expr_kind(ast: &mut Ast, kind: ExprKind) -> ExprKind {
         ExprKind::ReturnExpr(o) => ExprKind::ReturnExpr(o.map(|e| ce(ast, e))),
         ExprKind::Yield(o) => ExprKind::Yield(o.map(|e| ce(ast, e))),
 
-        ExprKind::FunctionCall { func, args, syntax } => ExprKind::FunctionCall {
+        ExprKind::FunctionCall { func, generic_args, args, syntax } => ExprKind::FunctionCall {
             func: ce(ast, func),
+            generic_args: generic_args.into_iter().map(|t| ct(ast, t)).collect(),
             args: args
                 .into_iter()
                 .map(|a| FunctionCallArg {
@@ -295,6 +297,7 @@ fn clone_type_kind(ast: &mut Ast, kind: TypeExprKind) -> TypeExprKind {
         | TypeExprKind::Unit
         | TypeExprKind::String
         | TypeExprKind::Int
+        | TypeExprKind::Uint
         | TypeExprKind::Float
         | TypeExprKind::Bool
         | TypeExprKind::Hole(_, _)

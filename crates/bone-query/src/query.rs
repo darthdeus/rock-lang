@@ -2590,6 +2590,7 @@ fn render_type_expr(ast: &Ast, idx: skull_parser::Idx<skull_parser::TypeExprData
         K::Unit => "()".to_string(),
         K::String => "string".to_string(),
         K::Int => "int".to_string(),
+        K::Uint => "uint".to_string(),
         K::Float => "float".to_string(),
         K::Bool => "bool".to_string(),
         K::Ident(id) => id.name.to_string(),
@@ -4196,7 +4197,7 @@ pub fn generate_function(
         }
     }
     let (_, e) = best?;
-    let hir::Expr::Call { callee: hir::Callee::Unresolved { name, .. }, args } =
+    let hir::Expr::Call { callee: hir::Callee::Unresolved { name, .. }, args, .. } =
         &body.expr_arena[e]
     else {
         return None;
@@ -4692,7 +4693,7 @@ pub fn completion(
 /// builtins (`Coroutine`, `Map`) and the scalar primitives have no workspace
 /// name-index entry.
 const BUILTIN_TYPE_NAMES: &[&str] =
-    &["Coroutine", "Map", "int", "float", "string", "bool", "any"];
+    &["Coroutine", "Map", "int", "uint", "float", "string", "bool", "any"];
 
 /// Whether the body enclosing `offset` is a `co fn`. Drives `yield`/`await`
 /// keyword completion (and -- in the facade -- coroutine-fn ranking after a
@@ -4895,7 +4896,7 @@ pub fn signature_help(
     let call_span = *body.expr_spans.get(e)?;
 
     match &body.expr_arena[e] {
-        hir::Expr::Call { callee, args } => {
+        hir::Expr::Call { callee, args, .. } => {
             // Tier 1: the overload bone nailed down.
             if let Some((cmid, fid)) = inf
                 .and_then(|inf| inf.per_fn.get(&owner))

@@ -745,6 +745,53 @@ pub(crate) fn parse_glsl_profile(s: Option<&str>) -> Result<skull_codegen_glsl::
     }
 }
 
+fn emit_shader_program_with_view(
+    ws: &bone_semantic::inference::Workspace,
+    program: skull::shader_artifact::ShaderProgram,
+    profile: skull_codegen_glsl::GlslProfile,
+) -> std::result::Result<skull_codegen_glsl::ShaderEmission, skull_parser::CompilerError> {
+    let roots: Vec<skull_mir::mir::FuncRef> = program
+        .vert
+        .into_iter()
+        .chain(std::iter::once(program.frag))
+        .collect();
+    let graph = skull::instance_graph::build(ws, roots, false);
+    let shader_scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
+        .sharing(std::sync::Arc::clone(graph.interner()));
+    let programs = [program];
+    let view = skull::shader_artifact::realize_shader_with_context(
+        ws,
+        &graph,
+        &skull::shader_artifact::ShaderArtifactRequest {
+            spec: skull::target_projection::TargetSpec {
+                shader: Some(skull::target_projection::ShaderTargetSpec::Glsl(profile)),
+                ..skull::target_projection::LUAJIT_DESKTOP
+            },
+            programs: &programs,
+        },
+        &shader_scx,
+    )
+    .ok_or_else(|| skull_parser::CompilerError::new_no_location("GLSL shader view is unavailable".to_string()))?;
+    let program_view = view
+        .program_views
+        .first()
+        .ok_or_else(|| skull_parser::CompilerError::new_no_location("GLSL shader view has no program".to_string()))?;
+    match program.vert {
+        Some(_) => skull_codegen_glsl::emit_shader_pipeline_with_view(
+            ws,
+            &shader_scx,
+            program_view,
+            profile,
+        ),
+        None => skull_codegen_glsl::emit_shader_entry_with_view(
+            ws,
+            &shader_scx,
+            program_view,
+            profile,
+        ),
+    }
+}
+
 /// `rock shader <file.rock> <fn> [fn...] [--output <file.glsl>]` -- GLSL emission.
 /// Three forms:
 ///   - fn library (route B): plain roots, no `#version` line -- `--profile`
@@ -795,7 +842,27 @@ pub fn skull_shader(files: &[String], output: Option<String>, profile: Option<St
             anyhow::bail!("rock shader: the vertex+fragment pipeline form takes exactly two roots: <vert_fn> <frag_fn>");
         }
         let prof = parse_glsl_profile(profile.as_deref())?;
-        match skull_codegen_glsl::emit_shader_pipeline(&ws, user_mid, &roots[0], &roots[1], prof) {
+        let vert = match skull_codegen_glsl::resolve_root(&ws, user_mid, &roots[0]) {
+            Ok(root) => root,
+            Err(e) => {
+                eprintln!("{}", render_file_errs(path, &src, &[e]));
+                crate::ablation_report::exit_with_census(1);
+            }
+        };
+        let frag = match skull_codegen_glsl::resolve_root(&ws, user_mid, &roots[1]) {
+            Ok(root) => root,
+            Err(e) => {
+                eprintln!("{}", render_file_errs(path, &src, &[e]));
+                crate::ablation_report::exit_with_census(1);
+            }
+        };
+        match emit_shader_program_with_view(
+            &ws,
+            skull::shader_artifact::ShaderProgram { vert: Some(vert), frag },
+            prof,
+        )
+        .map(|emission| emission.source)
+        {
             Ok(g) => g,
             Err(e) => {
                 eprintln!("{}", render_file_errs(path, &src, &[e]));
@@ -812,7 +879,42 @@ pub fn skull_shader(files: &[String], output: Option<String>, profile: Option<St
             anyhow::bail!("rock shader: --profile applies to shader entries (pipeline or @shader(fragment) fullscreen), not the route-B fn library (it emits no #version line)");
         }
         let prof = parse_glsl_profile(profile.as_deref())?;
-        match skull_codegen_glsl::emit_shader(&ws, user_mid, &roots, prof) {
+        let glsl = if is_entry {
+            let frag = match skull_codegen_glsl::resolve_root(&ws, user_mid, &roots[0]) {
+                Ok(root) => root,
+                Err(e) => {
+                    eprintln!("{}", render_file_errs(path, &src, &[e]));
+                    crate::ablation_report::exit_with_census(1);
+                }
+            };
+            emit_shader_program_with_view(
+                &ws,
+                skull::shader_artifact::ShaderProgram { vert: None, frag },
+                prof,
+            )
+            .map(|emission| emission.source)
+        } else {
+            let root_refs = roots
+                .iter()
+                .map(|root| skull_codegen_glsl::resolve_root(&ws, user_mid, root))
+                .collect::<std::result::Result<Vec<_>, _>>();
+            let root_refs = match root_refs {
+                Ok(root_refs) => root_refs,
+                Err(e) => {
+                    eprintln!("{}", render_file_errs(path, &src, &[e]));
+                    crate::ablation_report::exit_with_census(1);
+                }
+            };
+            let session = match skull_codegen_glsl::shader_library_session(&ws, root_refs) {
+                Ok(session) => session,
+                Err(e) => {
+                    eprintln!("{}", render_file_errs(path, &src, &[e]));
+                    crate::ablation_report::exit_with_census(1);
+                }
+            };
+            skull_codegen_glsl::emit_shader_library_with_view(&ws, &session.scx, &session.view)
+        };
+        match glsl {
             Ok(g) => g,
             Err(e) => {
                 eprintln!("{}", render_file_errs(path, &src, &[e]));
@@ -1164,6 +1266,13 @@ pub(crate) fn render_project_errs(sources: &SourceFiles, errs: &[CompilerError])
 /// emit failure.
 fn skull_emit_project(dir: &str) -> String {
     use std::path::PathBuf;
+    let renderer_target = match skull_renderer_target(dir) {
+        Ok(target) => target,
+        Err(e) => {
+            log::error!(target: "SKULL", "invalid renderer selection for {}: {}", dir, e);
+            std::process::exit(1);
+        }
+    };
     let spec = crate::unified_compile::SourceSpec::Directory(PathBuf::from(dir));
     let sources = match crate::unified_compile::discover_sources(&spec) {
         Ok(s) => s,
@@ -1217,7 +1326,12 @@ fn skull_emit_project(dir: &str) -> String {
 
     // Project build: modules outside `dir` (the `stone` dependency, stdlib) are
     // libraries and prune to what the project reaches.
-    let (lua, skipped) = match skull::mir_emit::emit_workspace_mir_in(&ws, user_mid, Some(dir)) {
+    let (lua, skipped) = match skull::mir_emit::emit_workspace_mir_in_for_renderer(
+        &ws,
+        user_mid,
+        Some(dir),
+        renderer_target,
+    ) {
         Ok(e) => (e.lua, e.skipped),
         Err(e) => {
             eprintln!("{}", render_project_err(&sources, &e));
@@ -1274,6 +1388,7 @@ fn build_rock_globals_registry(
     if package_map.is_empty() {
         return String::new();
     }
+    let scx = skull_mir::lower::ScalarCtx::new(ws);
 
     let mut by_package: BTreeMap<String, Vec<String>> = BTreeMap::new();
     // The RECURSIVE declared shape per global. A global has no reflection
@@ -1343,7 +1458,7 @@ fn build_rock_globals_registry(
     // The accessor table rides WITH the registry, never appended separately: four
     // emit paths append this block, and a registry whose consumers had no
     // accessors would read nil for every `nobox` global.
-    out.push_str(&build_nobox_global_accessors(ws));
+    out.push_str(&build_nobox_global_accessors(ws, &scx));
     out
 }
 
@@ -1352,9 +1467,9 @@ fn build_rock_globals_registry(
 /// reach it by name; these two closures are what `__rock_global_get`/`_set` call
 /// so every consumer addresses the LOGICAL value under the LOGICAL name.
 ///
-/// Both directions come off one canonical leaf-path sequence
-/// (`nobox_global_shape_paths`), so they cannot drift from each other or from the
-/// storage: `get` is the positional leaf ctor over the leaves in that order, and
+/// Both directions consume one canonical accessor plan
+/// (`nobox_global_accessor_shape`), so they cannot drift from each other or from the
+/// storage: `get` is the positional leaf ctor over the plan's paths, and
 /// `set` assigns `v.<path>` per leaf in the same order. The ctor suffix follows
 /// the same three-way rule as every other pack site (`skull-codegen-lua`'s
 /// `_lct` / `_vt` / `_ct` choice) -- dotted paths mean the flattened leaf ctor,
@@ -1362,20 +1477,25 @@ fn build_rock_globals_registry(
 ///
 /// Position past the global defs is irrelevant -- the closures only read the leaf
 /// globals when called (same argument as the registry block it rides with).
-fn build_nobox_global_accessors(ws: &bone_semantic::inference::Workspace) -> String {
+fn build_nobox_global_accessors(
+    ws: &bone_semantic::inference::Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+) -> String {
     use bone_semantic::prelude::ModuleId;
 
     let mut rows: Vec<String> = Vec::new();
     for m in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
         for (_gid, g) in m.globals.iter() {
-            let Some(acc) = skull_mir::lower::nobox_global_accessor_shape(ws, g.ty) else {
+            let Some(acc) = skull_mir::lower::nobox_global_accessor_shape(ws, scx, g.ty) else {
                 continue;
             };
             let skull_mir::lower::NoboxGlobalAccessorShape {
                 ty_name, paths, nullable, ctor_suffix: suffix, presence_path, unbuildable,
             } = acc;
-            let leaves = skull_mir::lower::nobox_global_leaves(ws, g.name, g.ty)
-                .expect("a shape implies leaves: both gate on `nobox_declared_shape`");
+            let leaves = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty)
+                .ok()
+                .and_then(|plan| plan.leaf_names(g.name))
+                .expect("a global plan with leaf paths must own its leaf names");
             // A nullable global leads with a presence leaf that has no path: it is
             // not a field, so it is branched on rather than read. Everything below
             // pairs the REMAINING leaves with the paths.
@@ -1929,6 +2049,7 @@ pub(crate) fn body_digit_flip(text: &str, name: &str) -> Option<String> {
 pub fn skull_incremental_profile(path: &str) -> Result<()> {
     use std::path::PathBuf;
 
+    let renderer_target = skull_renderer_target(path)?;
     let spec = crate::unified_compile::SourceSpec::Directory(PathBuf::from(path));
     let sources = crate::unified_compile::discover_sources(&spec)?;
     let files: Vec<(String, String)> = sources
@@ -1952,7 +2073,12 @@ pub fn skull_incremental_profile(path: &str) -> Result<()> {
         let mid = skull::user_module_id(ws)
             .map_err(no_user_module)?;
         let t_full = Instant::now();
-        let (emit, c) = skull::mir_emit::emit_full_in(ws, mid, Some(path))
+        let (emit, c) = skull::mir_emit::emit_full_in_for_renderer(
+            ws,
+            mid,
+            Some(path),
+            renderer_target,
+        )
             .map_err(|e| anyhow::anyhow!("{}", render_project_err(&sources, &e)))?;
         (emit.lua, c, ms(t_full))
     };
@@ -2103,6 +2229,7 @@ pub fn skull_incremental_profile(path: &str) -> Result<()> {
 pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result<()> {
     use std::path::PathBuf;
 
+    let renderer_target = skull_renderer_target(path)?;
     let spec = crate::unified_compile::SourceSpec::Directory(PathBuf::from(path));
     let sources = crate::unified_compile::discover_sources(&spec)?;
     let files: Vec<(String, String)> = sources
@@ -2121,7 +2248,12 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
         let ws = session.workspace();
         let mid = skull::user_module_id(ws)
             .map_err(no_user_module)?;
-        let (_emit, c) = skull::mir_emit::emit_full_in(ws, mid, Some(path))
+        let (_emit, c) = skull::mir_emit::emit_full_in_for_renderer(
+            ws,
+            mid,
+            Some(path),
+            renderer_target,
+        )
             .map_err(|e| anyhow::anyhow!("{}", render_project_err(&sources, &e)))?;
         c
     };
@@ -2226,7 +2358,8 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
         let (emit_ms, overlay_bytes, phases) = {
             let ws = session.workspace();
             let t_e = Instant::now();
-            let e = skull::mir_emit::emit_overlay(ws, &mut cache, &upd.reinferred);
+            let e = skull::mir_emit::emit_overlay(ws, &mut cache, &upd.reinferred)
+                .map_err(|e| anyhow::anyhow!("emit_overlay: {}", e.message))?;
             (ms(t_e), e.lua.len(), e.phases)
         };
 
@@ -2288,12 +2421,34 @@ fn skull_game_preamble(dir: &str) -> String {
     use std::path::PathBuf;
     let abs = PathBuf::from(dir).canonicalize().unwrap_or_else(|_| PathBuf::from(dir));
     let escaped = abs.display().to_string().replace('\\', "\\\\").replace('"', "\\\"");
+    let renderer = match skull_renderer_target(dir) {
+        Ok(skull::mir_emit::RendererTarget::Gl) => "gl",
+        Ok(skull::mir_emit::RendererTarget::Wgpu) => "wgpu",
+        Err(e) => panic!("cannot read renderer selection for {dir}: {e}"),
+    };
     let mut full = format!("__ROCK_GAME_SOURCE_DIR = \"{escaped}\"\n");
+    if renderer == "wgpu" {
+        full.push_str("__ROCK_RENDERER_BACKEND = \"wgpu\"\n");
+    }
     full.push_str(&rock_host::cimgui_embed::build_prelude());
     if !full.ends_with('\n') {
         full.push('\n');
     }
     full
+}
+
+fn skull_renderer_target(dir: &str) -> Result<skull::mir_emit::RendererTarget> {
+    let abs = std::path::Path::new(dir)
+        .canonicalize()
+        .unwrap_or_else(|_| std::path::PathBuf::from(dir));
+    let backend = match rock_host::stick::StickConfig::find_from_dir(&abs)? {
+        Some((_, cfg)) => cfg.renderer_backend()?,
+        None => rock_host::stick::RendererBackend::Gl,
+    };
+    Ok(match backend {
+        rock_host::stick::RendererBackend::Gl => skull::mir_emit::RendererTarget::Gl,
+        rock_host::stick::RendererBackend::Wgpu => skull::mir_emit::RendererTarget::Wgpu,
+    })
 }
 
 /// Game-shaped `main.lua`: preamble + emit + `__rock_main_wrapper(main)` entry.
@@ -2353,6 +2508,10 @@ pub enum SkullReload {
     /// pure `emit_overlay` (directly comparable to `iter-incremental`); `write_ms`
     /// is the separate disk write of the overlay.
     Incremental { bytes: usize, reinferred: usize, cook_ms: f64, emit_ms: f64, write_ms: f64 },
+    /// The live process cannot remove a shader registration. The caller must
+    /// restart it, then call [`SkullStone::force_full`] to materialize the
+    /// current program; no output was written on this path.
+    FullRequired { reasons: Vec<String> },
     /// A type's runtime SHAPE changed (docs/hot-reload-schema-drift-plan.md):
     /// live state cannot be migrated, so the game process must RESTART.
     /// Nothing was written -- the running process must never dofile the
@@ -2372,6 +2531,7 @@ pub struct SkullStone {
     project: crate::live_project::LiveProject,
     cache: skull::mir_emit::SkullEmitCache,
     preamble: String,
+    renderer_target: skull::mir_emit::RendererTarget,
     /// Per-type layout hashes of the last program the game process could have
     /// loaded. A full recompile whose hashes drifted returns
     /// `SkullReload::ShapeChanged` (restart request) instead of writing
@@ -2396,12 +2556,18 @@ impl SkullStone {
     }
 
     fn init_impl(dir: &str, main_path: &std::path::Path, incremental_path: &std::path::Path, include_tests: bool) -> Result<SkullStone> {
+        let renderer_target = skull_renderer_target(dir)?;
         let project = crate::live_project::LiveProject::init(dir, include_tests)?;
         let (lua, cache) = {
             let ws = project.workspace();
             let mid = skull::user_module_id(ws)
                 .map_err(no_user_module)?;
-            let (emit, c) = skull::mir_emit::emit_full_in(ws, mid, Some(dir))
+            let (emit, c) = skull::mir_emit::emit_full_in_for_renderer(
+                ws,
+                mid,
+                Some(dir),
+                renderer_target,
+            )
                 .map_err(|e| anyhow::anyhow!("{}", render_project_err(project.sources(), &e)))?;
             // `_G.__ROCK_GLOBALS` for `--dump-state` (see `skull_emit_project`).
             let spec = crate::unified_compile::SourceSpec::Directory(
@@ -2413,7 +2579,7 @@ impl SkullStone {
         let preamble = skull_game_preamble(dir);
         write_full_main(&preamble, &lua, main_path, incremental_path)?;
         let shape_hashes = skull::type_shape_hashes(project.workspace());
-        Ok(SkullStone { project, cache, preamble, shape_hashes })
+        Ok(SkullStone { project, cache, preamble, renderer_target, shape_hashes })
     }
 
     /// On a watch event: refresh the cached sources (re-read only `changed` off
@@ -2464,6 +2630,16 @@ impl SkullStone {
         };
 
         let t_emit = Instant::now();
+        let old_shader_contracts = self.cache.shader_registration_contracts();
+        if self
+            .cache
+            .shader_registration_keys_changed(self.project.workspace())
+            .map_err(|e| anyhow::anyhow!("{}", render_project_err(self.project.sources(), &e)))?
+        {
+            return Ok(SkullReload::FullRequired {
+                reasons: vec!["shader registration key set changed".to_string()],
+            });
+        }
         if full {
             // Schema-drift gate (docs/hot-reload-schema-drift-plan.md): live
             // data outlives every reload tier, so if any type's runtime layout
@@ -2483,8 +2659,18 @@ impl SkullStone {
                 let ws = self.project.workspace();
                 let mid = skull::user_module_id(ws)
                     .map_err(no_user_module)?;
-                let (emit, c) = skull::mir_emit::emit_full_in(ws, mid, Some(self.project.dir()))
+                let (emit, c) = skull::mir_emit::emit_full_in_for_renderer(
+                    ws,
+                    mid,
+                    Some(self.project.dir()),
+                    self.renderer_target,
+                )
                     .map_err(|e| anyhow::anyhow!("{}", render_project_err(self.project.sources(), &e)))?;
+                if old_shader_contracts != c.shader_registration_contracts() {
+                    return Ok(SkullReload::FullRequired {
+                        reasons: vec!["shader registration ABI changed".to_string()],
+                    });
+                }
                 self.cache = c; // resets changed_since_full
                 // `_G.__ROCK_GLOBALS` for `--dump-state` (see `skull_emit_project`):
                 // a structural edit can add/remove globals, so recompute on full.
@@ -2502,7 +2688,13 @@ impl SkullStone {
             let overlay = {
                 let ws = self.project.workspace();
                 skull::mir_emit::emit_overlay(ws, &mut self.cache, &reinferred)
+                    .map_err(|e| anyhow::anyhow!("{}", render_project_err(self.project.sources(), &e)))?
             };
+            if old_shader_contracts != self.cache.shader_registration_contracts() {
+                return Ok(SkullReload::FullRequired {
+                    reasons: vec!["shader registration ABI changed".to_string()],
+                });
+            }
             let bytes = overlay.lua.len();
             let emit_ms = t_emit.elapsed().as_secs_f64() * 1000.0;
             let t_write = Instant::now();
@@ -2534,7 +2726,12 @@ impl SkullStone {
             let ws = self.project.workspace();
             let mid = skull::user_module_id(ws)
                 .map_err(no_user_module)?;
-            let (emit, c) = skull::mir_emit::emit_full_in(ws, mid, Some(self.project.dir()))
+            let (emit, c) = skull::mir_emit::emit_full_in_for_renderer(
+                ws,
+                mid,
+                Some(self.project.dir()),
+                self.renderer_target,
+            )
                 .map_err(|e| anyhow::anyhow!("skull force_full emit: {}", e.message))?;
             self.cache = c; // resets changed_since_full -- the overlay is now folded in
             // `_G.__ROCK_GLOBALS` for `--dump-state` (see `skull_emit_project`).

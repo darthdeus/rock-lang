@@ -34,6 +34,10 @@ mod coroutine_hook_hoist;
 mod dead_lambda_scope;
 #[path = "embed_scalarize.rs"]
 mod embed_scalarize;
+#[path = "expansion_admission.rs"]
+mod expansion_admission;
+#[path = "concrete_expansion.rs"]
+mod concrete_expansion;
 #[path = "enum_cdata.rs"]
 mod enum_cdata;
 #[path = "enum_payload_sroa.rs"]
@@ -81,6 +85,20 @@ mod inline_body_column_map_param;
 mod inline_lua_column_container_param_sentinel;
 #[path = "inline_value_specialization.rs"]
 mod inline_value_specialization;
+#[path = "inline_stats.rs"]
+mod inline_stats;
+#[path = "graph_contributions.rs"]
+mod graph_contributions;
+
+#[path = "foreign_fn_value_delivery.rs"]
+mod foreign_fn_value_delivery;
+
+#[path = "generated_glue_roots.rs"]
+mod generated_glue_roots;
+
+#[path = "graph_update.rs"]
+mod graph_update;
+
 #[path = "graph_snapshot.rs"]
 mod graph_snapshot;
 
@@ -122,6 +140,8 @@ mod multi_rejection;
 mod nb_storage_registry;
 #[path = "native_buffer_alloc.rs"]
 mod native_buffer_alloc;
+#[path = "native_buffer_element_admission.rs"]
+mod native_buffer_element_admission;
 #[path = "native_buffer_leaf_addressing.rs"]
 mod native_buffer_leaf_addressing;
 #[path = "nobox_arena_random_sentinel.rs"]
@@ -154,6 +174,8 @@ mod plain_struct_scalarize;
 mod reserved_namespace;
 #[path = "shader_pipeline_register.rs"]
 mod shader_pipeline_register;
+#[path = "compute_surface.rs"]
+mod compute_surface;
 #[path = "static_hot_reload.rs"]
 mod static_hot_reload;
 #[path = "static_registration_coverage.rs"]
@@ -166,6 +188,8 @@ mod synthetic_name_collision;
 mod tuple_scalarize;
 #[path = "uniform_block_pack.rs"]
 mod uniform_block_pack;
+#[path = "uint_surface.rs"]
+mod uint_surface;
 #[path = "user_fn_emit_rejection.rs"]
 mod user_fn_emit_rejection;
 #[path = "value_leaf_layout.rs"]

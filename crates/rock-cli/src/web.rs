@@ -18,17 +18,53 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
+/// Above this the base64 page stops being a good delivery shape (parse time and
+/// peak memory, both several times the file). Chosen well above every game that
+/// is a real single-file candidate (chesslings 4.4 MB, chess 19.7 MB) and well
+/// below one that is not (mag, ~240 MB).
+const SINGLE_FILE_WARN_MB: f64 = 32.0;
+
 #[derive(Clone)]
 struct WebAsset {
     key: String,
     source: PathBuf,
 }
 
-pub fn run_web(project: &str, out: Option<&str>, watch: bool, port: u16) -> Result<()> {
+/// What `rock web` produces. The three are distinct DELIVERY shapes, not
+/// formatting options: a directory is what a static host serves, a single file
+/// is what runs from `file://` or an upload with no server, and a zip is what
+/// itch.io ingests.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WebPackage {
+    /// `index.html` + `game.js` + loose assets (the default).
+    Directory,
+    /// One self-contained `.html`, assets base64-embedded.
+    SingleFile,
+}
+
+pub fn run_web(
+    project: &str,
+    out: Option<&str>,
+    watch: bool,
+    port: u16,
+    package: WebPackage,
+    itch: bool,
+) -> Result<()> {
+    if watch && (package != WebPackage::Directory || itch) {
+        anyhow::bail!(
+            "web: --watch serves a live directory over HTTP, so it cannot be \
+             combined with --single-file or --itch"
+        );
+    }
     if watch {
-        watch_web(project, out, port)
-    } else {
-        build_web(project, out)
+        return watch_web(project, out, port);
+    }
+    if itch {
+        return build_itch_zip(project, out, package);
+    }
+    match package {
+        WebPackage::Directory => build_web(project, out),
+        WebPackage::SingleFile => build_single_file(project, out).map(|_| ()),
     }
 }
 
@@ -42,14 +78,228 @@ fn web_out_dir(project: &str, out: Option<&str>) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(project).join("web"))
 }
 
+/// The last path component of a project, as a file stem (`games/match3` ->
+/// `match3`). Used to name the single-file and zip artifacts.
+fn project_stem(project: &str) -> String {
+    Path::new(project)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("game")
+        .to_string()
+}
+
+/// Resolve `--out` for an artifact that is a FILE, not a directory. An `--out`
+/// already carrying the right extension is taken verbatim; anything else is
+/// treated as a directory to put the default-named artifact in.
+fn web_out_file(project: &str, out: Option<&str>, ext: &str) -> PathBuf {
+    let default_name = format!("{}.{ext}", project_stem(project));
+    match out {
+        Some(o) if Path::new(o).extension().and_then(|e| e.to_str()) == Some(ext) => {
+            PathBuf::from(o)
+        }
+        Some(o) => PathBuf::from(o).join(default_name),
+        None => PathBuf::from(project).join("web").join(default_name),
+    }
+}
+
+/// One self-contained `.html`: every asset base64-embedded into
+/// `__ROCK_WEB_ASSETS` before an inlined `game.js` runs, so the page issues no
+/// network request at all and works from `file://`.
+///
+/// Returns the written path and the asset count, so a caller can report and a
+/// test can assert a denominator.
+fn build_single_file(project: &str, out: Option<&str>) -> Result<(PathBuf, usize)> {
+    let (emitted, cache, ws) = crate::js_test::try_emit_js_program_project_cached(project)?;
+    let register_lines = shader_register_lines_js(&ws, &cache)?;
+    let game_dir = web_game_dir(project);
+    let assets = collect_web_assets(Path::new(project), &game_dir)?;
+    let preload: Vec<String> = assets.iter().map(|asset| asset.key.clone()).collect();
+    let game_js = assemble_web_program(&emitted, &register_lines, &preload, &game_dir);
+    let html = single_file_html(&project_stem(project), &assets, &game_js)?;
+
+    let path = web_out_file(project, out, "html");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    rock_host::project::write_atomic(&path, &html)?;
+    let mb = html.len() as f64 / (1024.0 * 1024.0);
+    log::info!(
+        target: "WEB",
+        "{} -> {} (single file, {} assets embedded, {mb:.1} MB)",
+        project,
+        path.display(),
+        assets.len()
+    );
+    // Not a rejection -- the caller may well want this for an offline copy --
+    // but a single-file build is the wrong shape past a point and the failure is
+    // not obvious: the whole page is ONE base64 blob the browser must parse and
+    // decode before the first frame, at several times its size in memory, and
+    // nothing can be cached between loads. A directory build (or `--itch`) keeps
+    // assets separate and incrementally cacheable.
+    if mb > SINGLE_FILE_WARN_MB {
+        log::warn!(
+            target: "WEB",
+            "{:.1} MB is large for a single file (over {SINGLE_FILE_WARN_MB:.0} MB); \
+             prefer the default directory build or --itch for a game this size",
+            mb
+        );
+    }
+    Ok((path, assets.len()))
+}
+
+/// A `</script` inside the emitted program would close the wrapping tag and
+/// leave the rest of the program as page text -- the HTML tokenizer does not
+/// know it is inside a JS string. `<\/script` is the same string to a JS parser
+/// and inert to the tokenizer.
+fn escape_script_close(js: &str) -> String {
+    // Copies unmatched text as SLICES rather than byte-by-byte: `b as char`
+    // reinterprets a UTF-8 continuation byte as a codepoint, which turns every
+    // non-ASCII string literal in the program into mojibake.
+    let mut out = String::with_capacity(js.len() + 16);
+    let bytes = js.as_bytes();
+    let (mut start, mut i) = (0usize, 0usize);
+    while i + 8 <= bytes.len() {
+        // Case-insensitive: the tokenizer ends the element on `</ScRiPt` too,
+        // and does not require a closing `>`.
+        if bytes[i] == b'<'
+            && bytes[i + 1] == b'/'
+            && bytes[i + 2..i + 8].eq_ignore_ascii_case(b"script")
+        {
+            // `<` is ASCII, so `i` is always a char boundary here.
+            out.push_str(&js[start..i]);
+            out.push_str("<\\/");
+            i += 2;
+            start = i;
+        } else {
+            i += 1;
+        }
+    }
+    out.push_str(&js[start..]);
+    out
+}
+
+fn single_file_html(
+    title: &str,
+    assets: &[WebAsset],
+    game_js: &str,
+) -> Result<String> {
+    use base64::Engine as _;
+    let engine = base64::engine::general_purpose::STANDARD;
+
+    let mut embedded = String::new();
+    for asset in assets {
+        let bytes = std::fs::read(&asset.source).map_err(|e| {
+            anyhow::anyhow!("web --single-file: reading {}: {e}", asset.source.display())
+        })?;
+        embedded.push_str(&format!(
+            "{}: \"{}\",\n",
+            crate::js_test::js_str(&asset.key),
+            engine.encode(&bytes)
+        ));
+    }
+
+    Ok(format!(
+        r#"<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title}</title>
+<style>
+  html, body {{ margin: 0; height: 100%; background: #111; }}
+  #stone-canvas {{ display: block; width: 100vw; height: 100vh; }}
+</style>
+</head>
+<body>
+<canvas id="stone-canvas"></canvas>
+<script>
+// Every asset, base64-embedded. The prelude's boot prefers an already-present
+// __ROCK_WEB_ASSETS entry over a fetch, so this page makes no network request
+// and runs from file://.
+globalThis.__ROCK_WEB_ASSETS = (function () {{
+  var b64 = {{
+{embedded}  }};
+  var out = {{}};
+  for (var k in b64) {{
+    var s = atob(b64[k]);
+    var u = new Uint8Array(s.length);
+    for (var i = 0; i < s.length; i++) u[i] = s.charCodeAt(i);
+    out[k] = u;
+  }}
+  return out;
+}})();
+</script>
+<script>
+{game}
+</script>
+</body>
+</html>
+"#,
+        game = escape_script_close(game_js)
+    ))
+}
+
+/// A zip with `index.html` at the ROOT, which is what itch.io requires of an
+/// HTML5 upload. `package` picks what goes in it: a directory build (assets as
+/// separate entries, which the browser caches individually) or the single-file
+/// build (one entry).
+fn build_itch_zip(project: &str, out: Option<&str>, package: WebPackage) -> Result<()> {
+    let staging = tempfile::tempdir()?;
+    let mut zip = crate::zip_writer::ZipWriter::new();
+    let mut entries = 0usize;
+
+    match package {
+        WebPackage::SingleFile => {
+            let (path, _) = build_single_file(project, Some(
+                staging.path().join("single.html").to_str().expect("utf8 temp path"),
+            ))?;
+            zip.add("index.html", &std::fs::read(&path)?)?;
+            entries += 1;
+        }
+        WebPackage::Directory => {
+            build_web_bundle(project, staging.path(), true, false)?;
+            for entry in walkdir::WalkDir::new(staging.path()).sort_by_file_name() {
+                let entry = entry?;
+                if !entry.file_type().is_file() {
+                    continue;
+                }
+                let rel = entry
+                    .path()
+                    .strip_prefix(staging.path())
+                    .expect("under staging")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                zip.add(&rel, &std::fs::read(entry.path())?)?;
+                entries += 1;
+            }
+        }
+    }
+
+    let bytes = zip.finish()?;
+    let path = web_out_file(project, out, "zip");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, &bytes)?;
+    log::info!(
+        target: "WEB",
+        "{} -> {} (itch.io zip, {} entries, {:.1} MB)",
+        project,
+        path.display(),
+        entries,
+        bytes.len() as f64 / (1024.0 * 1024.0)
+    );
+    Ok(())
+}
+
 fn build_web_bundle(
     project: &str,
     out_dir: &Path,
     copy_assets: bool,
     watch: bool,
 ) -> Result<Vec<WebAsset>> {
-    let (emitted, ws) = crate::js_test::try_emit_js_program_project(project)?;
-    write_web_bundle(project, out_dir, copy_assets, watch, &emitted, &ws)
+    let (emitted, cache, ws) = crate::js_test::try_emit_js_program_project_cached(project)?;
+    write_web_bundle(project, out_dir, copy_assets, watch, &emitted, &ws, &cache)
 }
 
 fn write_web_bundle(
@@ -59,8 +309,9 @@ fn write_web_bundle(
     watch: bool,
     emitted: &skull_codegen_js::emit::JsProgram,
     ws: &bone_semantic::inference::Workspace,
+    cache: &skull_codegen_js::emit::JsEmitCache,
 ) -> Result<Vec<WebAsset>> {
-    let register_lines = shader_register_lines_js(&ws)?;
+    let register_lines = shader_register_lines_js(ws, cache)?;
     let game_dir = web_game_dir(project);
     let assets = collect_web_assets(Path::new(project), &game_dir)?;
     let preload: Vec<String> = assets.iter().map(|asset| asset.key.clone()).collect();
@@ -108,19 +359,23 @@ impl WebCompiler {
         let include_tests =
             !rock_host::project::is_game_project(&PathBuf::from(project)).unwrap_or(false);
         let live = crate::live_project::LiveProject::init(project, include_tests)?;
-        let scx = skull_mir::lower::ScalarCtx::new(live.workspace())
-            .with_target(bone_semantic::hir::FnBackend::Js);
         let (emitted, cache) = skull_codegen_js::emit::emit_program_cached(
             live.workspace(),
-            &scx,
             live.entry_module(),
         )
         .map_err(|error| anyhow::anyhow!(
             "{}",
             crate::skull_backend::render_project_err(live.sources(), &error)
         ))?;
-        let assets =
-            write_web_bundle(project, out_dir, false, true, &emitted, live.workspace())?;
+        let assets = write_web_bundle(
+            project,
+            out_dir,
+            false,
+            true,
+            &emitted,
+            live.workspace(),
+            &cache,
+        )?;
         let main_js_name = emitted.main_js_name.clone();
         Ok((Self { project: live, cache, main_js_name }, assets))
     }
@@ -139,11 +394,8 @@ impl WebCompiler {
                 Ok(WebCompile::Reload)
             }
             crate::live_project::LiveUpdate::BodyOnly { reinferred, .. } => {
-                let scx = skull_mir::lower::ScalarCtx::new(self.project.workspace())
-                    .with_target(bone_semantic::hir::FnBackend::Js);
                 match skull_codegen_js::emit::emit_overlay(
                     self.project.workspace(),
-                    &scx,
                     self.project.entry_module(),
                     &mut self.cache,
                     &reinferred,
@@ -153,7 +405,10 @@ impl WebCompiler {
                     crate::skull_backend::render_project_err(self.project.sources(), &error)
                 ))? {
                     skull_codegen_js::emit::JsReload::Overlay(mut overlay) => {
-                        overlay.push_str(&shader_register_lines_js(self.project.workspace())?);
+                        overlay.push_str(&shader_register_lines_js(
+                            self.project.workspace(),
+                            &self.cache,
+                        )?);
                         rock_host::project::write_atomic(
                             &out_dir.join("incremental.js"),
                             &overlay,
@@ -173,11 +428,8 @@ impl WebCompiler {
     }
 
     fn emit_full(&mut self, project: &str, out_dir: &Path) -> Result<Vec<WebAsset>> {
-        let scx = skull_mir::lower::ScalarCtx::new(self.project.workspace())
-            .with_target(bone_semantic::hir::FnBackend::Js);
         let (emitted, cache) = skull_codegen_js::emit::emit_program_cached(
             self.project.workspace(),
-            &scx,
             self.project.entry_module(),
         )
         .map_err(|error| anyhow::anyhow!(
@@ -191,6 +443,7 @@ impl WebCompiler {
             true,
             &emitted,
             self.project.workspace(),
+            &cache,
         )?;
         self.main_js_name = emitted.main_js_name;
         self.cache = cache;
@@ -205,7 +458,7 @@ impl WebCompiler {
             program: self.cache.current_program().to_string(),
             main_js_name: self.main_js_name.clone(),
         };
-        let register_lines = shader_register_lines_js(self.project.workspace())?;
+        let register_lines = shader_register_lines_js(self.project.workspace(), &self.cache)?;
         let game_js = assemble_web_program(&emitted, &register_lines, &preload, &game_dir);
         rock_host::project::write_atomic(&out_dir.join("game.js"), &game_js)?;
         Ok(())
@@ -660,29 +913,54 @@ fn js_int_vec(items: &[i64]) -> String {
 /// rewrite at shader-compile time, like the native GLES path). Emitted after
 /// the program (module load), before the boot line, so registrations queue in
 /// PENDING_SHADER_SRCS pre-GL exactly as on a native cold start.
-fn shader_register_lines_js(ws: &bone_semantic::inference::Workspace) -> Result<String> {
+fn shader_register_lines_js(
+    ws: &bone_semantic::inference::Workspace,
+    cache: &skull_codegen_js::emit::JsEmitCache,
+) -> Result<String> {
     use std::fmt::Write as _;
     let pairs =
         skull_mir::lower::collect_shader_pairs(ws).map_err(|e| anyhow::anyhow!(e.message))?;
+    let programs: Vec<skull::shader_artifact::ShaderProgram> = pairs
+        .iter()
+        .map(|pair| skull::shader_artifact::ShaderProgram {
+            vert: pair.vert,
+            frag: pair.frag,
+        })
+        .collect();
+    let shader_scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
+        .sharing(cache.interner_handle());
+    let view = skull::shader_artifact::realize_shader_with_context(
+        ws,
+        cache.graph(),
+        &skull::shader_artifact::ShaderArtifactRequest {
+            spec: skull::target_projection::TargetSpec {
+                shader: Some(skull::target_projection::ShaderTargetSpec::Glsl(
+                    skull_codegen_glsl::GlslProfile::Core330,
+                )),
+                ..skull::target_projection::LUAJIT_DESKTOP
+            },
+            programs: &programs,
+        },
+        &shader_scx,
+    )
+    .ok_or_else(|| anyhow::anyhow!("GLSL shader view is unavailable for the JS session"))?;
+    if view.program_views.len() != pairs.len() {
+        anyhow::bail!("GLSL shader view/collection denominator differs for the JS session");
+    }
     let mut out = String::new();
     let profile = skull_codegen_glsl::GlslProfile::Core330;
-    for pair in pairs {
-        let fname = ws.module(pair.frag.module).functions[pair.frag.func].name;
+    for (pair, program_view) in pairs.iter().zip(&view.program_views) {
         let emission = match pair.vert {
-            Some(vert) => {
-                let vname = ws.module(vert.module).functions[vert.func].name;
-                skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
-                    ws,
-                    vert.module,
-                    vname.as_str(),
-                    fname.as_str(),
-                    profile,
-                )
-            }
-            None => skull_codegen_glsl::emit_shader_entry_with_dependencies(
+            Some(_) => skull_codegen_glsl::emit_shader_pipeline_with_view(
                 ws,
-                pair.frag.module,
-                fname.as_str(),
+                &shader_scx,
+                program_view,
+                profile,
+            ),
+            None => skull_codegen_glsl::emit_shader_entry_with_view(
+                ws,
+                &shader_scx,
+                program_view,
                 profile,
             ),
         }
@@ -696,9 +974,11 @@ fn shader_register_lines_js(ws: &bone_semantic::inference::Workspace) -> Result<
             emission.abi.uniform_blocks.iter(),
             emission.abi.uniform_array_blocks.iter(),
         );
+        let fullscreen = pair.vert.is_none();
+        let semantic_wire = emission.interface.semantic_wire(fullscreen);
         let _ = writeln!(
             out,
-            "__rock_shader_register({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {});",
+            "__rock_shader_register({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {});",
             crate::js_test::js_str(&pair.key),
             crate::js_test::js_str(&emission.source),
             js_string_vec(&emission.abi.texture_units),
@@ -712,7 +992,8 @@ fn shader_register_lines_js(ws: &bone_semantic::inference::Workspace) -> Result<
             js_int_vec(&w.member_kinds),
             js_int_vec(&w.member_capacities),
             js_int_vec(&w.member_strides),
-            pair.vert.is_none(),
+            fullscreen,
+            crate::js_test::js_str(&semantic_wire),
         );
     }
     Ok(out)
@@ -822,4 +1103,193 @@ fn index_html(title: &str, watch: bool) -> String {
 </html>
 "#
     )
+}
+
+#[cfg(test)]
+mod shader_registration_removal_tests {
+    use super::*;
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+
+    const V0: &str = r#"
+@shader(fragment)
+fn frag_a(tc: Vec2) -> Vec4 {
+    return Vec4 { x: tc.x, y: 0.0, z: 0.0, w: 1.0 }
+}
+
+@shader(fragment)
+fn frag_b(tc: Vec2) -> Vec4 {
+    return Vec4 { x: 0.0, y: tc.x, z: 0.0, w: 1.0 }
+}
+
+fn choose_a() -> string { return rock_shader(frag_a) }
+fn choose_b() -> string { return rock_shader(frag_b) }
+fn main() { print(choose_a()); print(choose_b()) }
+
+@nomangle inline(js) fn __rock_shader_register(
+    key: string,
+    src: string,
+    texture_slots: [string],
+    names: [string],
+    bindings: [int],
+    sizes: [int],
+    fingerprints: [int],
+    counts: [int],
+    member_names: [string],
+    member_offsets: [int],
+    member_kinds: [int],
+    member_capacities: [int],
+    member_strides: [int]
+) = """
+    (globalThis.__ROCK_SHADERS = globalThis.__ROCK_SHADERS || {})[key] = src;
+"""
+"#;
+
+    fn v1() -> String {
+        V0.replace("return rock_shader(frag_b)", "return \"removed\"")
+    }
+
+    fn key(
+        ws: &bone_semantic::inference::Workspace,
+        program: &skull::shader_artifact::ShaderProgram,
+    ) -> String {
+        let name = |fref: skull_mir::mir::FuncRef| {
+            ws.module(fref.module).functions[fref.func].name.to_string()
+        };
+        match program.vert {
+            Some(vert) => format!("{}+{}", name(vert), name(program.frag)),
+            None => name(program.frag),
+        }
+    }
+
+    fn logical_keys(
+        ws: &bone_semantic::inference::Workspace,
+        graph: &skull::instance_graph::InstanceGraph,
+    ) -> BTreeSet<String> {
+        let pairs = skull_mir::lower::collect_shader_pairs(ws).expect("shader collection");
+        let programs: Vec<_> = pairs
+            .iter()
+            .map(|pair| skull::shader_artifact::ShaderProgram {
+                vert: pair.vert,
+                frag: pair.frag,
+            })
+            .collect();
+        let scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
+            .sharing(Arc::clone(graph.interner()));
+        let view = skull::shader_artifact::realize_shader_with_context(
+            ws,
+            graph,
+            &skull::shader_artifact::ShaderArtifactRequest {
+                spec: skull::target_projection::TargetSpec {
+                    shader: Some(skull::target_projection::ShaderTargetSpec::Glsl(
+                        skull_codegen_glsl::GlslProfile::Core330,
+                    )),
+                    ..skull::target_projection::LUAJIT_DESKTOP
+                },
+                programs: &programs,
+            },
+            &scx,
+        )
+        .expect("shader artifact view");
+        assert!(
+            view.program_views
+                .iter()
+                .all(|program| !program.stages.is_empty())
+        );
+        view.program_views
+            .iter()
+            .map(|program| key(ws, &program.program))
+            .collect()
+    }
+
+    fn registration_keys(text: &str) -> BTreeSet<String> {
+        let prefix = "__rock_shader_register(\"";
+        text.lines()
+            .filter_map(|line| {
+                let start = line.find(prefix).map(|index| index + prefix.len())?;
+                let end = line[start..].find('"')?;
+                Some(line[start..start + end].to_string())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn web_reload_removing_one_shader_callsite_removes_one_runtime_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = dir.path().join("project");
+        let output = dir.path().join("web");
+        std::fs::create_dir_all(&project).expect("project");
+        std::fs::write(project.join("stick.toml"), "[package]\nname = \"shader-removal\"\n")
+            .expect("manifest");
+        let source = project.join("main.rock");
+        std::fs::write(&source, V0).expect("source");
+        let project_name = project.to_str().expect("project path");
+        let (mut compiler, _) =
+            WebCompiler::init(project_name, &output).expect("initial web build");
+        let baseline = std::fs::read_to_string(output.join("game.js")).expect("baseline game");
+        let wanted = BTreeSet::from(["frag_a".to_string(), "frag_b".to_string()]);
+        assert_eq!(registration_keys(&baseline), wanted);
+        assert_eq!(logical_keys(compiler.project.workspace(), compiler.cache.graph()), wanted);
+
+        std::fs::write(&source, v1()).expect("edited source");
+        let reload = compiler
+            .recompile(project_name, &output, std::slice::from_ref(&source))
+            .expect("web reload");
+        assert!(
+            matches!(reload, WebCompile::Reload),
+            "a shader key removal must require a page reload"
+        );
+
+        let current = BTreeSet::from(["frag_a".to_string()]);
+        assert_eq!(logical_keys(compiler.project.workspace(), compiler.cache.graph()), current);
+        let mut runtime = registration_keys(
+            &std::fs::read_to_string(output.join("game.js")).unwrap(),
+        );
+        let incremental = std::fs::read_to_string(output.join("incremental.js"))
+            .expect("incremental web artifact");
+        runtime.extend(registration_keys(&incremental));
+        assert_eq!(
+            runtime, current,
+            "web runtime registration population retained a removed key"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // No game in the tree emits `</script` today, so an integration test on a
+    // real build cannot tell an escaping bug from an absent one. This gates the
+    // pure function at its own granularity, with inputs that actually carry the
+    // sequence.
+    #[test]
+    fn escape_script_close_neutralizes_every_case() {
+        // The HTML tokenizer ends a script at `</script` regardless of case or
+        // what follows, so all of these would truncate the program.
+        assert_eq!(escape_script_close(r#"var s = "</script>";"#), r#"var s = "<\/script>";"#);
+        assert_eq!(escape_script_close("a</SCRIPT>b"), "a<\\/SCRIPT>b");
+        assert_eq!(escape_script_close("a</ScRiPt >b"), "a<\\/ScRiPt >b");
+        // `</script` with no `>` still ends the element.
+        assert_eq!(escape_script_close("x</scriptfoo"), "x<\\/scriptfoo");
+        // Several in one program, and one at the very end.
+        assert_eq!(escape_script_close("</script></script>"), "<\\/script><\\/script>");
+    }
+
+    #[test]
+    fn escape_script_close_leaves_ordinary_program_text_alone() {
+        // A rewrite that fired on any `<` or `</` would corrupt comparisons and
+        // arrow functions, which is most of an emitted program.
+        for src in ["a < b", "a </ b", "x=>x<2", "</style>", "</scrip", "<script>"] {
+            assert_eq!(escape_script_close(src), src, "rewrote {src:?}");
+        }
+    }
+
+    #[test]
+    fn escape_script_close_is_byte_exact_on_multibyte_input() {
+        // The scan walks BYTES; pushing a byte as a char would mangle any
+        // non-ASCII in an emitted string literal into mojibake.
+        let s = "let s = \"\u{00e9}\u{4e2d}\u{1f600}\";";
+        assert_eq!(escape_script_close(s), s);
+    }
 }

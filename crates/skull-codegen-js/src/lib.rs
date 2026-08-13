@@ -31,8 +31,15 @@ pub const JS_INTRINSICS: &[(&str, usize, &str)] = &[
     // base math
     ("sin", 1, "Math.sin($1)"),
     ("cos", 1, "Math.cos($1)"),
+    ("tan", 1, "Math.tan($1)"),
     ("sqrt", 1, "Math.sqrt($1)"),
     ("exp", 1, "Math.exp($1)"),
+    // `log` is the NATURAL log on both hosts (Lua `math.log`, JS `Math.log`).
+    // `log2` gets `Math.log2` rather than a mirror of luajit's
+    // `math.log(x) / 0.6931471805599453`: it is the same function computed
+    // better, exact on powers of two where the division is a bit short.
+    ("log", 1, "Math.log($1)"),
+    ("log2", 1, "Math.log2($1)"),
     ("abs", 1, "Math.abs($1)"),
     ("floor", 1, "Math.floor($1)"),
     ("ceil", 1, "Math.ceil($1)"),
@@ -72,6 +79,7 @@ pub const JS_INTRINSICS: &[(&str, usize, &str)] = &[
     ("__nb_alloc_u16", 1, "new Uint16Array($1)"),
     ("__nb_alloc_i16", 1, "new Int16Array($1)"),
     ("__nb_alloc_u32", 1, "new Uint32Array($1)"),
+    ("native_buffer_uint", 1, "({ptr: new Uint32Array($1), len: $1})"),
     ("nb_get", 2, "$1.ptr[$2]"),
     ("nb_set", 3, "($1.ptr[$2] = $3)"),
     // StringBuilder: a Lua table used as an array accumulator IS a JS array.
@@ -2612,10 +2620,21 @@ function __rock_web_boot(mainFn) {
     return;
   }
   Promise.all(pre.map(function (path) {
-    return fetch(path).then(function (r) {
-      if (!r.ok) throw new Error(path + " -> HTTP " + r.status);
-      return r.arrayBuffer();
-    }).then(function (buf) {
+    // A single-file build (`rock web --single-file`) has already populated
+    // __ROCK_WEB_ASSETS from base64 embedded in the page, so there is nothing
+    // to fetch -- and under file:// a fetch would fail outright. Take the bytes
+    // and fall through to the SAME decode chain: the font and image rungs below
+    // are what make an asset usable, so skipping them would leave a preloaded
+    // font unregistered and a preloaded image undecoded.
+    var __inlined = __ROCK_WEB_ASSETS[path];
+    var __bytes = __inlined
+      ? Promise.resolve(__inlined.buffer.slice(
+          __inlined.byteOffset, __inlined.byteOffset + __inlined.byteLength))
+      : fetch(path).then(function (r) {
+          if (!r.ok) throw new Error(path + " -> HTTP " + r.status);
+          return r.arrayBuffer();
+        });
+    return __bytes.then(function (buf) {
       __ROCK_WEB_ASSETS[path] = new Uint8Array(buf);
       if (/\.(ttf|otf)$/i.test(path) && typeof FontFace !== "undefined") {
         var fam = "__sw_font_" + path.replace(/[^A-Za-z0-9]/g, "_");

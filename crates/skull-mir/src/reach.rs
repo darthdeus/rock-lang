@@ -33,7 +33,7 @@ use std::hash::Hash;
 /// policy is free to record whatever else expanding a node produced.
 pub trait ReachPolicy {
     /// A unit of work. `Clone + Eq + Hash` because the driver marks every node.
-    /// Not `Copy`: JS's specialized-callee node carries a `SpecKey`.
+    /// Not `Copy`: JS's specialized-callee node carries an `Instance`.
     type Node: Clone + Eq + Hash;
 
     /// Where the search starts. Called once, before any expansion.
@@ -279,47 +279,49 @@ pub fn call_targets(mf: &MirFunc) -> Vec<FuncRef> {
 /// stated in this body's `TyId`s and means nothing anywhere else.
 pub fn spec_bound_calls(
     ws: &bone_semantic::inference::Workspace,
-    ctx: &crate::bound::BoundCtx,
     mf: &MirFunc,
     out: &mut Vec<crate::bound::SpecDemand>,
 ) -> Result<(), CompilerError> {
     let empty = bone_semantic::prelude::BoundTree::default();
+    let empty_resolved = crate::bound::ResolvedBoundTree::default();
     for bid in emitted_blocks(mf) {
         for &iid in &mf.blocks[bid].insts {
-            let Some(key) = mf.spec_bindings.get(&iid) else { continue };
+            let Some(inst) = mf.spec_bindings.get(&iid) else { continue };
             let fref = match &mf.insts[iid] {
                 Inst::Call { func, .. } | Inst::CallMulti { func, .. } => *func,
                 _ => continue,
             };
+            // Check the delivery identity before reading the bound plan. A
+            // broken owner is the primary invariant at this site; otherwise a
+            // missing secondary bound fact would mask the owner disagreement.
+            let owner_agrees = inst.func == fref
+                && mf.callee_instances.get(&iid).is_some_and(|oi| {
+                    oi == inst
+                });
+            if !owner_agrees {
+                return Err(CompilerError::new_no_location(format!(
+                    "specialized call to `{}` in `{}` has no concrete owner agreeing with its \
+                     delivery instance",
+                    ws.module(fref.module).functions[fref.func].name,
+                    mf.name,
+                )));
+            }
             // An already-RESOLVED tree wins: this call was retargeted by a
             // standalone substitution, whose leaf carried the callee's own
             // resolution. Re-deriving it from `bound_trees` is not possible --
             // there is no raw entry, and this body's arena cannot state a tree
             // that came from another instantiation.
+            let raw = mf.bound_trees.get(&iid).unwrap_or(&empty);
             let tree = match mf.resolved_bound_trees.get(&iid) {
                 Some(t) => t.clone(),
-                None => {
-                    let raw = mf.bound_trees.get(&iid).unwrap_or(&empty);
-                    crate::bound::resolve_bound_tree(ws, ctx.inf, ctx.subst, raw, ctx.incoming)?
+                None if !raw.is_empty() => {
+                    return Err(CompilerError::new_no_location(
+                        "concrete specialized call has no resolved bound plan".to_string(),
+                    ));
                 }
+                None => empty_resolved.clone(),
             };
-            // The premise the Instance re-key rests on, checked where every
-            // specialized site passes regardless of which path wrote it. Two
-            // writers derive the instance differently -- lowering beside the
-            // delivery decision, `substitute_bound_call` from the key -- so
-            // "they agree" is a measurement, not a convention, and a site with
-            // no instance at all is the shape that actually occurred.
-            debug_assert!(
-                mf.callee_instances.get(&iid).is_some_and(|oi| {
-                    oi.func == fref
-                        && crate::lower::spec_key_from_subst(ws, fref, &oi.subst)
-                            .is_some_and(|k| &k == key)
-                }),
-                "specialized call to `{}` in `{}` records no agreeing instance",
-                ws.module(fref.module).functions[fref.func].name,
-                mf.name,
-            );
-            out.push(crate::bound::SpecDemand { func: fref, key: key.clone(), tree });
+            out.push(crate::bound::SpecDemand { inst: inst.clone(), tree });
         }
     }
     Ok(())

@@ -32,6 +32,7 @@ use skull_mir::cfg::{
     PredMap, predecessors, reachable_blocks_from, reverse_postorder, successors,
 };
 use skull_mir::mir::*;
+use skull_mir::monoty::MonoInterner;
 
 pub use skull_mir::mangle::mangle_fn;
 
@@ -304,18 +305,25 @@ pub(crate) fn collect_lambda_params(func: &MirFunc) -> HashSet<Idx<Cell>> {
 pub fn emit_function(
     ws: &Workspace,
     ctx: &CodegenCtx,
+    interner: &MonoInterner,
     self_ref: FuncRef,
     func: &MirFunc,
 ) -> String {
     let name = mangle_fn(ws, func_of(ws, self_ref));
-    emit_named(ws, ctx, &name, func)
+    emit_named(ws, ctx, interner, &name, func)
 }
 
 /// Emit a MIR function under the EXACT Lua name `name` (no mangling) — for
 /// synthetic functions with an already-final name (a global-initializer fn).
 /// Calls inside the body still mangle their `FuncRef`s via `ctx`.
-pub fn emit_named(ws: &Workspace, ctx: &CodegenCtx, name: &str, func: &MirFunc) -> String {
-    emit_named_framed(ws, ctx, name, func, None, None)
+pub fn emit_named(
+    ws: &Workspace,
+    ctx: &CodegenCtx,
+    interner: &MonoInterner,
+    name: &str,
+    func: &MirFunc,
+) -> String {
+    emit_named_framed(ws, ctx, interner, name, func, None, None)
 }
 
 /// The coroutine state-table context: a `co fn`'s `__step` reads/writes its
@@ -349,6 +357,7 @@ pub struct FrameCtx {
 pub fn emit_named_framed(
     ws: &Workspace,
     ctx: &CodegenCtx,
+    interner: &MonoInterner,
     name: &str,
     func: &MirFunc,
     frame: Option<&FrameCtx>,
@@ -384,7 +393,7 @@ pub fn emit_named_framed(
         String::with_capacity(hoist_defs.len() + name.len() + 64 + estimated_body_bytes);
     out.push_str(&hoist_defs);
     let _ = write!(out, "function {}", name);
-    render_scope(ws, ctx, func, entry, params, &lambda_params, true, frame, &cell_colors, &hoist, &hoist_names, &mut out);
+    render_scope(ws, ctx, interner, func, entry, params, &lambda_params, true, frame, &cell_colors, &hoist, &hoist_names, &mut out);
     out.push('\n');
     out
 }
@@ -411,7 +420,17 @@ fn const_hoist_uses_are_read_only(ws: &Workspace, func: &MirFunc, cand: Idx<Inst
             Inst::MakeValueStruct { name, fields }
             | Inst::MaterializeValueStruct { name, fields } => {
                 !fields.iter().any(|(_, v)| *v == cand)
-                    || !skull_mir::lower::value_struct_is_gc(ws, *name)
+                    || !matches!(
+                        skull_mir::lower::RepArena::default().nominal_value_storage(
+                            ws,
+                            bone_semantic::hir::FnBackend::Lua,
+                            *name,
+                        ),
+                        Some(
+                            skull_mir::lower::ValueStorage::GcTable
+                                | skull_mir::lower::ValueStorage::LeafTable
+                        )
+                    )
             }
             Inst::StoreField { base, value, .. } => {
                 *value != cand
@@ -446,10 +465,10 @@ fn const_hoist_uses_are_read_only(ws: &Workspace, func: &MirFunc, cand: Idx<Inst
 /// naming primitive leaves) rather than the declared-field form.
 ///
 /// Deliberately NOT "some name contains a dot": the sequence must equal
-/// `value_leaf_paths_of` EXACTLY. The ctor is positional, so a partially or
+/// the owned representation plan EXACTLY. The ctor is positional, so a partially or
 /// wrongly flattened field list would emit silently against the wrong
 /// signature; requiring the canonical sequence turns that into a loud panic at
-/// emit instead -- the same fail-closed move `value_leaf_layout_checked` makes.
+/// emit instead -- the same fail-closed move the owned RepPlan C-layout check makes.
 fn is_leaf_form(fields: &[(ustr::Ustr, Idx<Inst>)]) -> bool {
     fields.iter().any(|(n, _)| n.contains('.'))
 }
@@ -468,7 +487,9 @@ pub fn leaf_form_violation(
     name: ustr::Ustr,
     got: &[ustr::Ustr],
 ) -> Option<CompilerError> {
-    let canonical = skull_mir::lower::value_leaf_paths_of(ws, name).unwrap_or_default();
+    let canonical = skull_mir::lower::RepArena::default()
+        .nominal_value_leaf_paths(ws, bone_semantic::hir::FnBackend::Lua, name)
+        .unwrap_or_default();
     if got == canonical {
         return None;
     }
@@ -571,7 +592,23 @@ fn collect_const_hoists(
     let mut defs = String::new();
     for (g, (name, lits, leaf_form)) in groups.iter().enumerate() {
         let gname = format!("__skull_kc_{base}_{g}");
-        let suffix = if *leaf_form { "_lct" } else if skull_mir::lower::value_struct_is_gc(ws, *name) { "_vt" } else { "_ct" };
+        let suffix = if *leaf_form {
+            "_lct"
+        } else if matches!(
+            skull_mir::lower::RepArena::default().nominal_value_storage(
+                ws,
+                bone_semantic::hir::FnBackend::Lua,
+                *name,
+            ),
+            Some(
+                skull_mir::lower::ValueStorage::GcTable
+                    | skull_mir::lower::ValueStorage::LeafTable
+            )
+        ) {
+            "_vt"
+        } else {
+            "_ct"
+        };
         let _ = write!(defs, "{gname} = {name}{suffix}(");
         for (i, l) in lits.iter().enumerate() {
             if i > 0 {
@@ -621,6 +658,16 @@ fn write_cell_local(out: &mut String, colors: &[u32], c: Idx<Cell>) {
         u32::MAX => push_uint(out, raw(c)),
         col => push_uint(out, col),
     }
+}
+
+fn cell_is_uint(ws: &Workspace, ty: Option<bone_semantic::prelude::TyId>) -> bool {
+    let Some(bone_semantic::prelude::TyId::Static(module, index)) = ty else {
+        return false;
+    };
+    matches!(
+        ws.module(module).ty_arena[index],
+        bone_semantic::hir::TypeExpr::Builtin(bone_semantic::hir::BuiltinTy::Uint)
+    )
 }
 
 // --- relooper: counted-`for` recovery (structured control flow) ------------
@@ -980,13 +1027,18 @@ fn always_inlinable(inst: &Inst) -> bool {
         inst,
         Inst::Const(_)
             | Inst::IntAdd(..) | Inst::IntSub(..) | Inst::IntMul(..) | Inst::IntDiv(..) | Inst::IntMod(..)
+            | Inst::UintAdd(..) | Inst::UintSub(..) | Inst::UintMul(..) | Inst::UintDiv(..) | Inst::UintMod(..)
             | Inst::FloatAdd(..) | Inst::FloatSub(..) | Inst::FloatMul(..) | Inst::FloatDiv(..) | Inst::FloatMod(..)
             | Inst::StringConcat(..)
             | Inst::IntLt(..) | Inst::IntLeq(..) | Inst::IntGt(..) | Inst::IntGeq(..)
+            | Inst::UintLt(..) | Inst::UintLeq(..) | Inst::UintGt(..) | Inst::UintGeq(..)
             | Inst::FloatLt(..) | Inst::FloatLeq(..) | Inst::FloatGt(..) | Inst::FloatGeq(..)
             | Inst::Eq(..) | Inst::NotEq(..)
             | Inst::BitAnd(..) | Inst::BitOr(..) | Inst::BitXor(..) | Inst::Shl(..) | Inst::Shr(..)
-            | Inst::Neg(_) | Inst::Not(_) | Inst::BitNot(_) | Inst::ToString(_) | Inst::FloatToInt(_) | Inst::IntToFloat(_)
+            | Inst::UintBitAnd(..) | Inst::UintBitOr(..) | Inst::UintBitXor(..) | Inst::UintShl(..) | Inst::UintShr(..)
+            | Inst::Neg(_) | Inst::Not(_) | Inst::BitNot(_) | Inst::UintBitNot(_) | Inst::ToString(_)
+            | Inst::FloatToInt(_) | Inst::IntToFloat(_) | Inst::UintToFloat(_) | Inst::IntToUint(_)
+            | Inst::UintToInt(_) | Inst::FloatToUint(_) | Inst::UintBitcastInt(_) | Inst::IntBitcastUint(_)
             | Inst::Format { .. } | Inst::FormatDyn { .. }
             | Inst::MakeTuple(_) | Inst::MakeVec(_)
             | Inst::MakeStruct { .. } | Inst::MakeValueStruct { .. } | Inst::MakeEnum { .. }
@@ -1057,6 +1109,7 @@ fn compute_inlinable(func: &MirFunc, scope: &[Idx<Block>]) -> Vec<bool> {
 fn render_scope(
     ws: &Workspace,
     ctx: &CodegenCtx,
+    interner: &MonoInterner,
     func: &MirFunc,
     entry: Idx<Block>,
     params: &[Idx<Cell>],
@@ -1107,6 +1160,16 @@ fn render_scope(
         write_cell_local(out, cell_colors, c);
     }
     out.push_str(")\n");
+
+    for &c in params {
+        if cell_is_uint(ws, func.cells[c].ty) {
+            out.push_str("  ");
+            write_cell_local(out, cell_colors, c);
+            out.push_str(" = ((");
+            write_cell_local(out, cell_colors, c);
+            out.push_str(" % 4294967296) + 4294967296) % 4294967296\n");
+        }
+    }
 
     // Declare registers in sorted color order (the dense table holds `u32::MAX`
     // for uncolored slots — inlined / non-value insts — which we skip), then the
@@ -1185,6 +1248,7 @@ fn render_scope(
     let mut em = Emitter {
         ws,
         ctx,
+        interner,
         func,
         colors,
         color_scope,
@@ -1232,6 +1296,12 @@ fn write_vname(out: &mut String, colors: &[u32], id: Idx<Inst>) {
 struct Emitter<'a> {
     ws: &'a Workspace,
     ctx: &'a CodegenCtx,
+    /// The build's one arena, so the symbol a call spells comes from the same
+    /// [`Instance`] object the definition was emitted under rather than from a
+    /// second derivation of the same encoder.
+    ///
+    /// [`Instance`]: skull_mir::instance::Instance
+    interner: &'a MonoInterner,
     func: &'a MirFunc,
     /// Dense `raw(inst) -> color` (`u32::MAX` = uncolored); read per operand by
     /// [`write_vname`] as `colors[raw(id)]` instead of a hash probe.
@@ -1383,18 +1453,15 @@ impl Emitter<'_> {
 
     /// Splice an `@inline inline(lua)` `Call` inline, if `id` is one. Returns
     /// true iff it spliced; else the caller emits the normal `callee(args)`.
-    /// The emitted symbol this call targets. A call the lowerer gave a
-    /// specialized instantiation (its value args splatted to leaves) targets the
-    /// SPECIALIZED copy -- the shared generic body takes `T` as one boxed slot and
-    /// could not serve those arguments. Same derivation the specialized definition
-    /// is emitted under, so the two cannot drift.
+    /// The emitted symbol this call targets. A call the lowerer gave a concrete
+    /// instance (its value args splatted to leaves) targets that instance's
+    /// definition. The same instance object drives definition and call spelling,
+    /// so the two cannot drift.
     fn callee_name(&self, id: Idx<Inst>, func: FuncRef) -> String {
-        let callee = func_of(self.ws, func);
-        self.func
-            .spec_bindings
-            .get(&id)
-            .and_then(|key| skull_mir::mangle::spec_fn_name(self.ws, callee, key))
-            .unwrap_or_else(|| mangle_fn(self.ws, callee))
+        match self.func.spec_bindings.get(&id) {
+            Some(inst) => inst.symbol(self.ws, self.interner),
+            None => mangle_fn(self.ws, func_of(self.ws, func)),
+        }
     }
 
     fn try_emit_inline_lua_splice(&self, out: &mut String, id: Idx<Inst>) -> bool {
@@ -1520,6 +1587,9 @@ impl Emitter<'_> {
             Inst::IntAdd(a, b) | Inst::FloatAdd(a, b) => self.write_bin(out, "+", a, b),
             Inst::IntSub(a, b) | Inst::FloatSub(a, b) => self.write_bin(out, "-", a, b),
             Inst::IntMul(a, b) | Inst::FloatMul(a, b) => self.write_bin(out, "*", a, b),
+            Inst::UintAdd(a, b) => self.write_u32_bin(out, "+", a, b),
+            Inst::UintSub(a, b) => self.write_u32_bin(out, "-", a, b),
+            Inst::UintMul(a, b) => self.write_u32_mul(out, a, b),
             // int `/` is floor-division (rock semantics); float `/` is real.
             Inst::IntDiv(a, b) => {
                 out.push_str("math.floor(");
@@ -1530,6 +1600,14 @@ impl Emitter<'_> {
             }
             Inst::FloatDiv(a, b) => self.write_bin(out, "/", a, b),
             Inst::IntMod(a, b) | Inst::FloatMod(a, b) => self.write_bin(out, "%", a, b),
+            Inst::UintDiv(a, b) => {
+                out.push_str("math.floor(");
+                self.write_opnd(out, *a);
+                out.push_str(" / ");
+                self.write_opnd(out, *b);
+                out.push(')');
+            }
+            Inst::UintMod(a, b) => self.write_u32_bin(out, "%", a, b),
             Inst::StringConcat(a, b) => {
                 // Emit the whole inlinable concat tree as ONE flat `..` run
                 // (`x .. y .. z`) rather than left-nested binary concats
@@ -1576,11 +1654,29 @@ impl Emitter<'_> {
             // pass ever materializes one; the operand path (`write_opnd`) folds it
             // away. `write_value` (not `write_opnd`) to avoid a double wrap.
             Inst::IntToFloat(x) => self.write_value(out, *x, &self.func.insts[*x]),
+            Inst::UintToFloat(x) => self.write_value(out, *x, &self.func.insts[*x]),
+            Inst::IntToUint(x) => self.write_checked_u32(out, *x, "uint conversion out of range"),
+            Inst::FloatToUint(x) => self.write_checked_u32(out, *x, "uint conversion out of range"),
+            Inst::UintToInt(x) => self.write_value(out, *x, &self.func.insts[*x]),
+            Inst::UintBitcastInt(x) => {
+                out.push_str("(((");
+                self.write_opnd(out, *x);
+                out.push_str(" + 2147483648) % 4294967296) - 2147483648)");
+            }
+            Inst::IntBitcastUint(x) => {
+                out.push_str("((");
+                self.write_opnd(out, *x);
+                out.push_str(") % 4294967296)");
+            }
 
             Inst::IntLt(a, b) | Inst::FloatLt(a, b) => self.write_bin(out, "<", a, b),
             Inst::IntLeq(a, b) | Inst::FloatLeq(a, b) => self.write_bin(out, "<=", a, b),
             Inst::IntGt(a, b) | Inst::FloatGt(a, b) => self.write_bin(out, ">", a, b),
             Inst::IntGeq(a, b) | Inst::FloatGeq(a, b) => self.write_bin(out, ">=", a, b),
+            Inst::UintLt(a, b) => self.write_bin(out, "<", a, b),
+            Inst::UintLeq(a, b) => self.write_bin(out, "<=", a, b),
+            Inst::UintGt(a, b) => self.write_bin(out, ">", a, b),
+            Inst::UintGeq(a, b) => self.write_bin(out, ">=", a, b),
             Inst::Eq(a, b) => self.write_bin(out, "==", a, b),
             Inst::NotEq(a, b) => self.write_bin(out, "~=", a, b),
 
@@ -1597,12 +1693,28 @@ impl Emitter<'_> {
                 self.write_opnd(out, *x);
                 out.push(')');
             }
+            Inst::UintBitNot(x) => {
+                out.push_str("(bit.bnot(");
+                self.write_opnd(out, *x);
+                out.push_str(")) % 4294967296");
+            }
 
             Inst::BitAnd(a, b) => self.write_bitfn(out, "bit.band", a, b),
             Inst::BitOr(a, b) => self.write_bitfn(out, "bit.bor", a, b),
             Inst::BitXor(a, b) => self.write_bitfn(out, "bit.bxor", a, b),
             Inst::Shl(a, b) => self.write_bitfn(out, "bit.lshift", a, b),
             Inst::Shr(a, b) => self.write_bitfn(out, "bit.rshift", a, b),
+            Inst::UintBitAnd(a, b) => self.write_u32_bitfn(out, "bit.band", a, b),
+            Inst::UintBitOr(a, b) => self.write_u32_bitfn(out, "bit.bor", a, b),
+            Inst::UintBitXor(a, b) => self.write_u32_bitfn(out, "bit.bxor", a, b),
+            Inst::UintShl(a, b) => self.write_u32_shift(out, "bit.lshift", a, b),
+            Inst::UintShr(a, b) => {
+                out.push_str("(function(value, count) return math.floor(value / (2 ^ (count <= 31 and count or error('uint shift count out of range')))) end)(");
+                self.write_opnd(out, *a);
+                out.push_str(", ");
+                self.write_opnd(out, *b);
+                out.push(')');
+            }
 
             Inst::Call { func, args } => {
                 let callee = self.callee_name(id, *func);
@@ -1629,7 +1741,7 @@ impl Emitter<'_> {
                 // other lambda was already converted to a `MakeEnv` / `Global` +
                 // hoisted sibling by `convert_closures`.
                 out.push_str("function");
-                render_scope(self.ws, self.ctx, self.func, *entry, params, self.lambda_params, false, self.frame, self.cell_colors, self.hoist, self.hoist_names, out);
+                render_scope(self.ws, self.ctx, self.interner, self.func, *entry, params, self.lambda_params, false, self.frame, self.cell_colors, self.hoist, self.hoist_names, out);
             }
 
             Inst::MakeTuple(vs) => {
@@ -1650,6 +1762,7 @@ impl Emitter<'_> {
                 columns,
                 len,
                 capacity,
+                ..
             } => {
                 out.push_str("{[");
                 write_lua_string(out, skull_mir::mir::VEC_COLUMN_HEADER_FIELD);
@@ -1668,6 +1781,15 @@ impl Emitter<'_> {
                     out.push_str("}, ");
                 }
                 let _ = write!(out, "len = {len}, __ty = \"Vec\"}}");
+            }
+            Inst::MakeVecColumnHeader { elem, capacity, .. } => {
+                out.push_str("{repr = ");
+                write_lua_string(out, skull_mir::mir::VEC_COLUMN_REPR);
+                out.push_str(", elem = ");
+                write_lua_string(out, elem.as_str());
+                out.push_str(", cap = ");
+                self.write_opnd(out, *capacity);
+                out.push('}');
             }
             Inst::MakeStruct { ty, fields } => {
                 out.push('{');
@@ -1702,11 +1824,28 @@ impl Emitter<'_> {
                 // leaves contributes one leaf keyed on the field's own name, so
                 // the leaf sequence is textually identical to the declared field
                 // list and no operand-shape test can tell them apart.
-                let suffix = if skull_mir::lower::value_struct_is_leaf_table(self.ws, *name) {
+                let suffix = if matches!(
+                    skull_mir::lower::RepArena::default().nominal_value_storage(
+                        self.ws,
+                        bone_semantic::hir::FnBackend::Lua,
+                        *name,
+                    ),
+                    Some(skull_mir::lower::ValueStorage::LeafTable)
+                ) {
                     "_lct"
                 } else if is_leaf_form(fields) {
                     "_lct"
-                } else if skull_mir::lower::value_struct_is_gc(self.ws, *name) {
+                } else if matches!(
+                    skull_mir::lower::RepArena::default().nominal_value_storage(
+                        self.ws,
+                        bone_semantic::hir::FnBackend::Lua,
+                        *name,
+                    ),
+                    Some(
+                        skull_mir::lower::ValueStorage::GcTable
+                            | skull_mir::lower::ValueStorage::LeafTable
+                    )
+                ) {
                     "_vt"
                 } else {
                     "_ct"
@@ -1882,6 +2021,54 @@ impl Emitter<'_> {
         self.write_opnd(out, *a);
         out.push_str(", ");
         self.write_opnd(out, *b);
+        out.push(')');
+    }
+
+    fn write_u32_bin(&self, out: &mut String, op: &str, a: &Idx<Inst>, b: &Idx<Inst>) {
+        out.push_str("(");
+        self.write_bin(out, op, a, b);
+        out.push_str(") % 4294967296");
+    }
+
+    fn write_u32_bitfn(&self, out: &mut String, f: &str, a: &Idx<Inst>, b: &Idx<Inst>) {
+        out.push('(');
+        self.write_bitfn(out, f, a, b);
+        out.push_str(" % 4294967296)");
+    }
+
+    fn write_u32_shift(&self, out: &mut String, f: &str, a: &Idx<Inst>, b: &Idx<Inst>) {
+        out.push_str("(function(value, count) return ");
+        out.push_str(f);
+        out.push_str("(value, (count <= 31 and count or error('uint shift count out of range'))) % 4294967296 end)(");
+        self.write_opnd(out, *a);
+        out.push_str(", ");
+        self.write_opnd(out, *b);
+        out.push(')');
+    }
+
+    fn write_u32_mul(&self, out: &mut String, a: &Idx<Inst>, b: &Idx<Inst>) {
+        // Every product here is below 2^53. Splitting at 16 bits avoids the
+        // double-rounding that a direct Lua multiplication would incur.
+        out.push_str("((");
+        self.write_opnd(out, *a);
+        out.push_str(" % 65536) * (");
+        self.write_opnd(out, *b);
+        out.push_str(" % 65536) + ((math.floor(");
+        self.write_opnd(out, *a);
+        out.push_str(" / 65536) * (");
+        self.write_opnd(out, *b);
+        out.push_str(" % 65536) + (");
+        self.write_opnd(out, *a);
+        out.push_str(" % 65536) * math.floor(");
+        self.write_opnd(out, *b);
+        out.push_str(" / 65536)) % 65536) * 65536) % 4294967296");
+    }
+
+    fn write_checked_u32(&self, out: &mut String, x: Idx<Inst>, message: &str) {
+        out.push_str("(function(value) if value >= 0 and value <= 4294967295 then return math.floor(value) else error(");
+        write_lua_string(out, message);
+        out.push_str(") end end)(");
+        self.write_opnd(out, x);
         out.push(')');
     }
 
@@ -2157,6 +2344,9 @@ impl Emitter<'_> {
 fn write_lit(out: &mut String, l: &Lit) {
     match l {
         Lit::Int(i) => {
+            let _ = write!(out, "{i}");
+        }
+        Lit::Uint(i) => {
             let _ = write!(out, "{i}");
         }
         Lit::Float(x) => {

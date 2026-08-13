@@ -54,7 +54,7 @@ impl Builder<'_> {
     /// flattens to per-leaf keys, so `field_get(row, .pos)` for a `Vec2` field
     /// emits `o["pos"]` and dies on nil, while `field_set` of that same field
     /// IS rejected here. The opaque-CONTAINER check below reads declared slots
-    /// INCLUDING the return through [`Self::declared_slot_hazard`]; this one
+    /// INCLUDING the return through the concrete callee signature; this one
     /// stops at the caller's argument expressions.
     ///
     /// Pinned with its controls and the measured exempt population in
@@ -85,24 +85,19 @@ impl Builder<'_> {
             if self.is_explicit_materialize_call(arg) {
                 continue;
             }
-            let Some(TypeExpr::App {
-                ctor: TypeCtor::Nominal(name),
-                ..
-            }) = self.expr_ty(arg)
-            else {
+            if let Some(ty) = self.concrete_expr_ty(arg) {
+                let Some(name) = ty.peel_nullable().0.nominal() else { continue };
+                let Some(sid) = self.ws.struct_by_name.get(&name) else { continue };
+                if self.ws.modules[sid.module.index()].structs[sid.def].is_nobox {
+                    return Err(CompilerError::new_with_label(
+                        self.body.expr_spans[arg],
+                        format!(
+                            "nobox value `{name}` cannot cross boxed call boundary `{}`",
+                            callee.name
+                        ),
+                    ));
+                }
                 continue;
-            };
-            let Some(sid) = self.ws.struct_by_name.get(&name) else {
-                continue;
-            };
-            if self.ws.modules[sid.module.index()].structs[sid.def].is_nobox {
-                return Err(CompilerError::new_with_label(
-                    self.body.expr_spans[arg],
-                    format!(
-                        "nobox value `{name}` cannot cross boxed call boundary `{}`",
-                        callee.name
-                    ),
-                ));
             }
         }
         Ok(())
@@ -142,234 +137,164 @@ impl Builder<'_> {
     pub(crate) fn reject_column_container_opaque_slots(
         &self,
         e: Idx<Expr>,
+        concrete_callee: &crate::instance::Instance,
+    ) -> Result<(), CompilerError> {
+        let plan = self.concrete_plan;
+        let site = crate::site::Site {
+            domain: self.cur_domain.clone(),
+            expr: e,
+            op: self.cur_op.clone(),
+        };
+        if plan.callees.get(&site) != Some(concrete_callee) {
+            return Err(self.gap_here("concrete callee identity disagrees with its site plan"));
+        }
+        let signature = plan.callee_signatures.get(&site).ok_or_else(|| {
+            self.gap_here("concrete callee signature is missing for its site")
+        })?;
+        self.reject_concrete_column_container_opaque_slots(e, concrete_callee.func, signature)
+    }
+
+    fn slot_hazard_mono(
+        &self,
+        mono: &crate::monoty::MonoTy,
+    ) -> Result<Option<(String, &'static str)>, CompilerError> {
+        let arena = self.scx.rep_arena();
+        let plan = match mono {
+            crate::monoty::MonoTy::App { ctor: crate::monoty::MonoCtor::Array, .. } => {
+                Some(ContainerPlan::for_type(
+                    self.ws,
+                    self.scx.target,
+                    &arena,
+                    ContainerFamily::Vec,
+                    mono,
+                ))
+            }
+            crate::monoty::MonoTy::App { ctor: crate::monoty::MonoCtor::Map, .. } => {
+                Some(ContainerPlan::for_type(
+                    self.ws,
+                    self.scx.target,
+                    &arena,
+                    ContainerFamily::Map,
+                    mono,
+                ))
+            }
+            crate::monoty::MonoTy::App {
+                ctor: crate::monoty::MonoCtor::Nominal(name), ..
+            } => match name.as_str() {
+                "Arena" => Some(ContainerPlan::for_type(
+                    self.ws,
+                    self.scx.target,
+                    &arena,
+                    ContainerFamily::Arena,
+                    mono,
+                )),
+                "NativeBuffer" => Some(ContainerPlan::for_type(
+                    self.ws,
+                    self.scx.target,
+                    &arena,
+                    ContainerFamily::NativeBuffer,
+                    mono,
+                )),
+                "FlatVec" => Some(ContainerPlan::for_type(
+                    self.ws,
+                    self.scx.target,
+                    &arena,
+                    ContainerFamily::FlatVec,
+                    mono,
+                )),
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some(plan) = plan else { return Ok(None) };
+        let plan = plan.map_err(|error| match error.span.or(self.cur_span) {
+            Some(span) => CompilerError::new_with_label(span, error.message),
+            None => CompilerError::new_no_location(error.message),
+        })?;
+        match plan.storage() {
+            ContainerStorage::Columns { .. } => {
+                let elem = plan
+                    .column_elem(&arena)
+                    .ok_or_else(|| gap("column container plan has no element shape"))?;
+                let rendered = match plan.family() {
+                    ContainerFamily::Vec => format!("[{}]", elem.name),
+                    ContainerFamily::Map => format!("Map<_, {}>", elem.name),
+                    ContainerFamily::Arena => format!("Arena<{}>", elem.name),
+                    _ => unreachable!("only Vec, Map, and Arena use column storage"),
+                };
+                let physical = match plan.family() {
+                    ContainerFamily::Vec => "`_data`",
+                    ContainerFamily::Map => "a bare key table",
+                    ContainerFamily::Arena => "column-backed data",
+                    _ => unreachable!("only Vec, Map, and Arena use column storage"),
+                };
+                Ok(Some((rendered, physical)))
+            }
+            ContainerStorage::LeafAddressed { .. }
+                if self.scx.target == bone_semantic::hir::FnBackend::Js => {
+                let elem = plan
+                    .ffi_element_name(&arena)
+                    .unwrap_or_else(|| Ustr::from("<element>"));
+                let family = match plan.family() {
+                    ContainerFamily::NativeBuffer => "NativeBuffer",
+                    ContainerFamily::FlatVec => "FlatVec",
+                    _ => unreachable!("only native containers are leaf-addressed"),
+                };
+                Ok(Some((
+                    format!("{family}<{elem}>"),
+                    "a per-element view over `ptr`",
+                )))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn reject_concrete_column_container_opaque_slots(
+        &self,
+        e: Idx<Expr>,
         func: FuncRef,
+        signature: &crate::concrete::ConcreteSignature,
     ) -> Result<(), CompilerError> {
         let callee = &self.ws.module(func.module).functions[func.func];
         if callee.inline_body.is_none() && !callee.is_extern {
             return Ok(());
         }
-        let name = callee.name;
-        let params = callee.param_decls.len();
-        let ret = callee.return_ty;
-        for i in 0..params {
-            // `@repr(opaque)` is keyed to the DECLARED index, so it follows the
-            // signature rather than the call's argument order. PER PARAMETER: a
-            // waiver on one must not disarm the call, which is what
-            // `vec_push(sink, @repr(opaque) item)` needs.
+        if callee.param_decls.len() != signature.params.len() {
+            return Err(self.gap_here("concrete callee signature has the wrong parameter count"));
+        }
+        for (i, id) in signature.params.iter().enumerate() {
             if self.param_is_repr_opaque(func, i) {
                 continue;
             }
-            let Some(ty) = self.param_ty(func, i) else { continue };
-            if let Some((rendered, physical)) = self.declared_slot_hazard(e, func, ty)? {
+            let mono = self.concrete_mono(*id);
+            if let Some((rendered, physical)) = self.slot_hazard_mono(&mono)? {
                 return Err(CompilerError::new_with_label(
                     self.body.expr_spans[e],
                     format!(
                         "column-stored `{rendered}` cannot cross opaque body boundary \
-                         `{name}` (an inline/extern body sees per-leaf columns, not \
+                         `{}` (an inline/extern body sees per-leaf columns, not \
                          {physical}; take `any` if the body reads the column layout \
-                         itself, else use a boxed element type)"
+                         itself, else use a boxed element type)",
+                        callee.name
                     ),
                 ));
             }
         }
-        // The constructor mirror: an opaque body whose RETURN is a container
-        // builds that physical form BY HAND, so it can mint boxed storage for a
-        // column-planned result.
-        let Some(ret) = ret else { return Ok(()) };
-        let Some((rendered, physical)) = self.declared_slot_hazard(e, func, ret)? else {
+        let Some(id) = signature.result else { return Ok(()) };
+        let mono = self.concrete_mono(id);
+        let Some((rendered, physical)) = self.slot_hazard_mono(&mono)? else {
             return Ok(());
         };
         Err(CompilerError::new_with_label(
             self.body.expr_spans[e],
             format!(
-                "opaque body boundary `{name}` cannot BUILD column-stored \
+                "opaque body boundary `{}` cannot BUILD column-stored \
                  `{rendered}` (an inline/extern body hand-builds {physical}, which \
                  a column-planned result does not have; return `any` if the body \
-                 builds the column layout itself, else use a boxed element type)"
+                 builds the column layout itself, else use a boxed element type)",
+                callee.name
             ),
         ))
-    }
-
-    /// The hazard a callee's DECLARED type carries at this call, or `None`.
-    ///
-    /// It converts the declared type to a CONCRETE one and asks the same
-    /// storage oracles the routing asks (`vec_column_elem_mono`,
-    /// `map_column_value_mono`, `opaque_container_hazard`). It never walks the
-    /// argument list: arguments are in the CALLER's order, so pairing them with
-    /// parameter indices is wrong the moment a call names its arguments, and a
-    /// defaulted or spread slot has no argument expression to pair with at all.
-    ///
-    /// It goes through `MonoTy` rather than walking `TypeExpr`, because that is
-    /// what carries NULLABILITY: a generic bound to `E?` substitutes to its
-    /// PAYLOAD (a `Nullable` node needs an arena index), and an unmarked
-    /// nullable element is a BOXED vec while its non-nullable twin is columns
-    /// (`nullable_generic_binding_sroa`).
-    fn declared_slot_hazard(
-        &self,
-        e: Idx<Expr>,
-        func: FuncRef,
-        ty: TyId,
-    ) -> Result<Option<(String, &'static str)>, CompilerError> {
-        let Some(mono) = self.declared_slot_mono(e, func, ty)? else { return Ok(None) };
-        use crate::lower::shape::{map_column_value_mono, vec_column_elem_mono};
-        if let Some(el) = vec_column_elem_mono(self.ws, self.scx.target, &mono) {
-            return Ok(Some((format!("[{}]", el.name), "`_data`")));
-        }
-        if let Some(el) = map_column_value_mono(self.ws, self.scx.target, &mono) {
-            return Ok(Some((format!("Map<_, {}>", el.name), "a bare key table")));
-        }
-        let crate::monoty::MonoTy::App { ctor: crate::monoty::MonoCtor::Nominal(c), params } =
-            &mono
-        else {
-            return Ok(None);
-        };
-        if !crate::lower::shape::is_nominal_container(*c) {
-            return Ok(None);
-        }
-        let [only] = params.as_slice() else { return Ok(None) };
-        let (payload, nullable) = only.peel_nullable();
-        let Some(elem) = payload.nominal() else { return Ok(None) };
-        Ok(
-            crate::lower::shape::opaque_container_hazard(
-                self.ws,
-                self.scx.target,
-                *c,
-                elem,
-                nullable,
-            )
-            .map(|physical| (format!("{c}<{elem}>"), physical)),
-        )
-    }
-
-    /// A callee-declared type as a CONCRETE type at this call site.
-    ///
-    /// Two substitutions compose. The callee's own generics bind from bone's
-    /// `call_generic_bindings`; the types they bind TO belong to the caller and
-    /// may name the CALLER's generics, which only the enclosing `SpecSubst`
-    /// resolves. So each binding is converted under the enclosing substitution
-    /// first, and the declared slot is then converted under the result.
-    ///
-    /// The substitution is deliberately PARTIAL. A generic the call never pins
-    /// is skipped rather than abandoning the call, because it may have nothing
-    /// to do with the slot being asked about -- `fn probe<T, U>(sink: [T])`
-    /// determines `sink` whether or not `U` is ever bound, and abandoning the
-    /// call let an unrelated variable disarm the rule.
-    ///
-    /// Two reasons are out of scope BY DECISION, matching `concrete_ty` arm for
-    /// arm so the two cannot disagree: `UnboundGeneric` is the shared generic
-    /// body Stage 2 owns, and `UnresolvedInfer` is the S 0h decided rejection
-    /// the instance graph already records and Stage 3 raises. The rest --
-    /// recovery poison, a `TyId` naming no node, a cyclic substitution chain,
-    /// missing inference -- refuse the call with its span rather than picking a
-    /// representation from a failure.
-    fn declared_slot_mono(
-        &self,
-        e: Idx<Expr>,
-        func: FuncRef,
-        ty: TyId,
-    ) -> Result<Option<crate::monoty::MonoTy>, CompilerError> {
-        use crate::monoty::MonoTyReason as R;
-        let f = &self.ws.module(func.module).functions[func.func];
-        let refuse = |what: String| {
-            CompilerError::new_with_label(
-                self.body.expr_spans[e],
-                format!(
-                    "cannot decide the representation contract of opaque callee \
-                     `{}`: {what}. The call is refused rather than admitted.",
-                    f.name
-                ),
-            )
-        };
-        let inf = self
-            .inf
-            .ok_or_else(|| refuse("this body has no inference".into()))?;
-        let mut subst = self.subst().clone();
-        // Why a generic could NOT be converted, kept per name rather than acted
-        // on here: a generic the slot does not mention is none of its business,
-        // and rejecting in this loop would let an unrelated variable disarm the
-        // rule. The reason is consulted only if the slot turns out to need it.
-        let mut unconverted: Vec<(Ustr, &'static str)> = Vec::new();
-        for (i, g) in f.generics.iter().enumerate() {
-            let Some(TypeExpr::Generic(var, name)) = self.raw_ty_node(*g) else { continue };
-            let Some(bound) = self.callee_binding_at(e, func, i)? else {
-                unconverted.push((name, "no recorded binding"));
-                continue;
-            };
-            match crate::monoty::convert(self.ws, inf, bound, &self.subst()) {
-                Ok(m) => {
-                    subst.insert(var, m);
-                }
-                // `UnresolvedInfer` is the S 0h DECIDED rejection (a type
-                // argument no constraint reaches), already recorded by the
-                // instance graph as `UnconstrainedTypeVar` and landing with
-                // Stage 3. Raising it here too would reject it twice on two
-                // schedules -- measured: `tests/vec_sort_test.rock`.
-                // `concrete_ty` answers `None` for it for the same reason.
-                Err(R::UnboundGeneric(_)) | Err(R::UnresolvedInfer(_)) => {}
-                Err(r) => unconverted.push((name, r.bucket())),
-            }
-        }
-        match crate::monoty::convert(self.ws, inf, ty, &subst) {
-            Ok(m) => Ok(Some(m)),
-            Err(R::UnboundGeneric(missing)) => {
-                // The slot needs a generic that did not convert. If it failed for
-                // a reason other than being unbound, that reason is the answer --
-                // reporting "out of scope" here would hide unfinished inference
-                // behind the Stage-2 exemption.
-                match unconverted.iter().find(|(n, _)| *n == missing) {
-                    Some((_, why)) => Err(refuse(format!(
-                        "the slot needs generic `{missing}`, which resolves to {why}"
-                    ))),
-                    // Genuinely still generic: the shared generic body, which
-                    // Stage 2 owns and this rule does not answer for.
-                    None => Ok(None),
-                }
-            }
-            Err(R::UnresolvedInfer(_)) => Ok(None),
-            Err(r) => Err(refuse(format!("the slot resolves to {}", r.bucket()))),
-        }
-    }
-
-    /// What this call binds a CALLEE generic to. Fails CLOSED: a generic whose
-    /// binding cannot be resolved is a slot whose representation is unknown,
-    /// and admitting it is how the silent wrong answer gets back in.
-    fn callee_binding_at(
-        &self,
-        e: Idx<Expr>,
-        func: FuncRef,
-        at: usize,
-    ) -> Result<Option<TyId>, CompilerError> {
-        let f = &self.ws.module(func.module).functions[func.func];
-        let refuse = |what: String| {
-            CompilerError::new_with_label(
-                self.body.expr_spans[e],
-                format!(
-                    "internal: cannot resolve a generic of opaque callee `{}`: {what}. \
-                     Its representation contract cannot be checked, so the call is \
-                     refused rather than admitted.",
-                    f.name
-                ),
-            )
-        };
-        let inf = self.inf.ok_or_else(|| refuse("this body has no inference".into()))?;
-        let Some(bindings) = inf.call_generic_bindings.get(&e) else {
-            // Not every opaque callee is generic; only a generic one owes a
-            // binding list. A non-generic callee reaching here has no `var` to
-            // resolve in the first place.
-            return if f.generics.is_empty() {
-                Ok(None)
-            } else {
-                Err(refuse("inference recorded no generic bindings for this call".into()))
-            };
-        };
-        if bindings.len() != f.generics.len() {
-            return Err(refuse(format!(
-                "the call supplied {} binding(s) for {} declared generic(s)",
-                bindings.len(),
-                f.generics.len()
-            )));
-        }
-        Ok(bindings.get(at).copied())
     }
 
     /// Whether parameter `i` of `func` carries the `@repr(opaque)` contract.
@@ -388,43 +313,33 @@ impl Builder<'_> {
 
     /// A fn taken BY VALUE must have the ABI an indirect caller can derive.
     ///
-    /// A definition reads its [`BackendFnAbiPlan`]; an indirect call site has only
-    /// the fn TYPE, so it reads [`Self::fn_value_abi`]. Those agree by construction
-    /// for an ordinary body -- the plan narrows an address-taken one to exactly
-    /// the `nobox` shapes the type yields. `@scalar_abi` is the one thing that
-    /// bypasses that narrowing, because its hand-written `inline(lua)` body
-    /// literally spells the leaf params, so narrowing it would break the body
-    /// instead of the call.
-    ///
-    /// When those two disagree the program cannot be emitted correctly either way:
-    /// the definition took leaf params and the call site packed one cdata, so the
-    /// first leaf got the whole box and the rest went nil. Rejecting is the honest
-    /// answer, and it is what the fn-value ABI comment always claimed held.
+    /// A definition reads its [`BackendFnAbiPlan`]; an indirect call site reads
+    /// the same [`FunctionRepPlan`] projection from the function type. When the
+    /// two disagree the program cannot be emitted correctly, so the mismatch is
+    /// rejected rather than repaired with a second shape calculation.
     pub(crate) fn reject_fn_value_abi_mismatch(
         &self,
         e: Idx<Expr>,
         func: FuncRef,
     ) -> Result<(), CompilerError> {
         let callee = &self.ws.module(func.module).functions[func.func];
-        let arity = callee.param_decls.len();
-        let boxed = || (vec![RetSlot::Opaque; arity], None);
-        let plan = BackendFnAbiPlan::for_declaration(self.ws, self.scx, func);
-        let (def_params, def_ret) = match plan.scalar() {
-            Some(abi) => (abi.param_shapes.clone(), abi.ret_shape.clone()),
-            None => boxed(),
-        };
-        let (val_params, val_ret) = self.expr_fn_value_abi(e).unwrap_or_else(boxed);
-        if def_params == val_params && def_ret == val_ret {
+        let plan = BackendFnAbiPlan::for_boundary_declaration(self.ws, self.scx, func);
+        let ty = self
+            .inf
+            .and_then(|inf| inf.expr_types.get(e))
+            .copied()
+            .ok_or_else(|| gap("a function value has no inferred function type"))?;
+        let value_plan = self
+            .fn_value_rep_plan(ty)?
+            .ok_or_else(|| gap("a function value does not have a function representation"))?;
+        if plan.representation() == &value_plan {
             return Ok(());
         }
         Err(CompilerError::new_with_label(
             self.body.expr_spans[e],
             format!(
-                "`{}` cannot be taken as a fn value: its `@scalar_abi` definition \
-                 takes leaf params, but an indirect call derives the ABI from the \
-                 fn TYPE alone, which boxes them -- so the first leaf would get \
-                 the whole box and the rest nil (mark the value type `nobox` so \
-                 both ends agree, or call it directly)",
+                "`{}` cannot be taken as a fn value because its fixed ABI does not match the \
+                 type-derived `nobox` fn-value ABI",
                 callee.name,
             ),
         ))
@@ -446,9 +361,7 @@ impl Builder<'_> {
             return Ok(());
         }
         let callee = &self.ws.module(func.module).functions[func.func];
-        let opaque = callee.is_extern
-            || (callee.inline_body.is_some()
-                && !callee.annotations.iter().any(|a| a.name.name.as_str() == "scalar_abi"));
+        let opaque = crate::lower::boundary_requires_boxed_representation(callee);
         if !opaque {
             return Ok(());
         }
@@ -487,9 +400,7 @@ impl Builder<'_> {
         if crate::intrinsics::is_gpu_only(callee) {
             return Ok(());
         }
-        let opaque = callee.is_extern
-            || (callee.inline_body.is_some()
-                && !callee.annotations.iter().any(|a| a.name.name.as_str() == "scalar_abi"));
+        let opaque = crate::lower::boundary_requires_boxed_representation(callee);
         if !opaque {
             return Ok(());
         }
@@ -543,13 +454,42 @@ impl Builder<'_> {
     /// Coerce a value-struct field's repr int->float at CONSTRUCTION (before any
     /// scalar-ABI splat, per the plan): only a `Scalar` leaf can be an int; a
     /// `Group` / nested-value repr is already composite.
-    pub(crate) fn coerce_field_repr(&mut self, r: ValueRepr, value_expr: Idx<Expr>, struct_name: Ustr, field: Ustr) -> ValueRepr {
+    pub(crate) fn coerce_field_repr(
+        &mut self,
+        r: ValueRepr,
+        value_expr: Idx<Expr>,
+        struct_name: Ustr,
+        field: Ustr,
+    ) -> Result<ValueRepr, CompilerError> {
+        let expected = if self.struct_field_ty(struct_name, field).is_some() {
+            let literal = self
+                .cur_expr
+                .ok_or_else(|| self.gap_here("concrete struct field has no literal expression"))?;
+            let id = self
+                .dispatch()
+                .concrete_types
+                .and_then(|tables| tables.struct_field_type(literal, field))
+                .ok_or_else(|| {
+                    self.gap_here(format!(
+                        "concrete struct field plan is missing `{struct_name}.{field}`"
+                    ))
+                })?;
+            Some(self.concrete_mono(id))
+        } else {
+            None
+        };
         match r {
-            ValueRepr::Scalar(s) => match self.struct_field_ty(struct_name, field) {
-                Some(fty) => ValueRepr::Scalar(self.coerced(s, value_expr, fty)),
-                None => ValueRepr::Scalar(s),
-            },
-            other => other,
+            ValueRepr::Scalar(s) => {
+                let s = match expected {
+                    Some(ref ty) => self.coerced_mono(s, value_expr, ty),
+                    None => match self.struct_field_ty(struct_name, field) {
+                        Some(fty) => self.coerced(s, value_expr, fty),
+                        None => s,
+                    },
+                };
+                Ok(ValueRepr::Scalar(s))
+            }
+            other => Ok(other),
         }
     }
 
@@ -560,6 +500,7 @@ impl Builder<'_> {
     pub(crate) fn arith_ty_of(&self, te: TypeExpr) -> Option<ArithTy> {
         match te {
             TypeExpr::Builtin(BuiltinTy::Int) => Some(ArithTy::Int),
+            TypeExpr::Builtin(BuiltinTy::Uint) => Some(ArithTy::Uint),
             TypeExpr::Builtin(BuiltinTy::Float) => Some(ArithTy::Float),
             TypeExpr::Builtin(BuiltinTy::String) => Some(ArithTy::Str),
             TypeExpr::App { ctor: TypeCtor::Nominal(name), .. }
@@ -595,145 +536,37 @@ impl Builder<'_> {
     }
 
     pub(crate) fn nobox_value_shape_of(&self, e: Idx<Expr>) -> Option<ValueShape> {
-        let mut shape = value_shape_of_nominal(self.ws, self.nobox_value_name(e)?)?;
-        shape.nullable = self.expr_is_nullable(e);
-        Some(shape)
+        if self.scx.values_first_class {
+            return None;
+        }
+        self.expr_rep_id(e, RepUse::Value, true)
+            .and_then(|id| self.scx.rep_arena().value_shape(id))
     }
 
     pub(crate) fn nobox_binding_shape(&self, binding: Idx<BindingInfo>) -> Option<ValueShape> {
         self.nobox_shape_of_ty(self.binding_ty(binding)?)
     }
 
-    /// The leaf shape of a `nobox`-typed `ty` (nullable included: presence is
-    /// leaf 0), `None` for every other type.
-    /// Argument positions of a `ShaderPipeline` expansion, where a bare fn name is
-    /// consumed by the compiler and never becomes a runtime fn value:
-    /// `rock_shader(frag)` lowers its argument to the entry's NAME as a string
-    /// literal, so no function-value ABI applies there.
-    pub(crate) fn expansion_arg_exprs(&self) -> HashSet<Idx<Expr>> {
-        let mut out = HashSet::new();
-        for (e, expr) in self.body.expr_arena.iter() {
-            let Expr::Call { callee, args } = expr else { continue };
-            let Callee::Unresolved { name, .. } = callee else { continue };
-            let Ok(func) = self.resolve_funcref(e, *name) else { continue };
-            // ONLY `ShaderPipeline`. It resolves its argument to a fn NAME and emits a
-            // string literal, so the name never becomes a runtime value. The sibling
-            // kinds evaluate theirs -- `expand_materialize` calls `lower_expr_repr` on
-            // it -- so exempting them let `materialize(<nobox-carrying fn>)` bypass the
-            // ABI rejection entirely, which is a hole, not a narrowing.
-            if matches!(self.fn_expand_kind(func), Some(ExpandKind::ShaderPipeline)) {
-                out.extend(args.clone().into_iter());
-            }
-        }
-        out
-    }
-
-    pub(crate) fn reject_incompatible_nobox_fn_value_abi(&self) -> Result<(), CompilerError> {
-        if self.scx.values_first_class {
-            return Ok(());
-        }
-        let expansion_args = self.expansion_arg_exprs();
-        for (e, expr) in self.body.expr_arena.iter() {
-            let Expr::Global(name) = expr else { continue };
-            if expansion_args.contains(&e) {
-                continue;
-            }
-            let Some(overloads) = self.ws.functions_by_name.get(name) else { continue };
-            let incompatible = overloads.iter().any(|(mid, fid)| {
-                let fref = FuncRef { module: *mid, func: *fid };
-                let expected =
-                    super::abi::fn_value_nobox_abi(self.ws, fref, &SpecSubst::default());
-                let emitted =
-                    BackendFnAbiPlan::for_declaration(self.ws, self.scx, fref).scalar().cloned();
-                expected.is_some() && emitted != expected
-            });
-            if incompatible {
-                return Err(CompilerError::new_with_label(
-                    self.body.expr_spans[e],
-                    format!(
-                        "`{name}` cannot be used as a fn value because its fixed ABI does not \
-                         match the type-derived `nobox` fn-value ABI"
-                    ),
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    /// The leaf ABI of a FN TYPE, or `None` when nothing in the signature is a
-    /// `nobox` value and the boxed fn-value ABI stands unchanged.
-    ///
-    /// Keyed on the TYPE and nothing else. An indirect call site cannot see its
-    /// callee, so the definition, a direct call and a call through a fn value
-    /// can only agree by all three reading the same signature -- the rule the
-    /// tuple-return ABI already follows (`lambda_ret_tuple_shape` next to
-    /// `expr_tuple_shape`). Any callee-identity test here would make the two
-    /// ends disagree exactly where the callee is opaque, which is the case that
-    /// matters.
-    ///
-    /// Narrowed to `nobox` types on purpose: an ordinary value struct has no
-    /// guarantee to keep, so widening this to every FFI-clean value would
-    /// re-ABI every lambda in the tree for no correctness gain. Both ends
-    /// compute the same predicate from the same type, so they still agree.
-    pub(crate) fn fn_value_abi(&self, ty: TyId) -> Option<(Vec<RetSlot>, Option<ValueShape>)> {
-        let ty = self.resolve_tyid(ty)?;
-        // Nullability lives on the REFERENCE, not on the call ABI: an absent fn
-        // value is never called, and a present one is a callable with exactly the
-        // leaf ABI its type spells. A LAMBDA LITERAL at a nullable param unifies
-        // its own expr type with that param, so it arrives here as
-        // `Nullable(Function(..))` while the same lambda bound to a local first
-        // arrives as `Function(..)`. Without this peel the two spellings get
-        // different ABIs and the literal packs its `nobox` return.
-        let ty = match self.ty_node(ty)? {
-            TypeExpr::Nullable(inner) => self.resolve_tyid(ty.with_idx(inner))?,
-            _ => ty,
-        };
-        let TypeExpr::Function { params, ret } = self.ty_node(ty)? else { return None };
-        let ps: Vec<RetSlot> =
-            params.into_iter().map(|p| self.nobox_param_slot_of_ty(ty.with_idx(p))).collect();
-        let rs = self.nobox_shape_of_ty(ty.with_idx(ret));
-        if rs.is_none() && !ps.iter().any(RetSlot::splats) {
-            return None;
-        }
-        Some((ps, rs))
-    }
-
-    /// [`Self::nobox_shape_of_ty`] widened to the param SLOT vocabulary, so a
-    /// TUPLE param carrying a `nobox` element rides its leaves like any other
-    /// splatting slot. Both ends of a fn value read this same predicate off the
-    /// same type, so they agree without either seeing the other.
-    pub(crate) fn nobox_param_slot_of_ty(&self, ty: TyId) -> RetSlot {
-        if let Some(shape) = self.nobox_shape_of_ty(ty) {
-            return RetSlot::Leaves(shape);
-        }
-        self.tuple_param_slot_of_ty(ty)
-    }
-
-    /// [`Self::fn_value_abi`] for the fn VALUE an expression denotes.
-    pub(crate) fn expr_fn_value_abi(
+    pub(crate) fn fn_value_rep_plan(
         &self,
-        e: Idx<Expr>,
-    ) -> Option<(Vec<RetSlot>, Option<ValueShape>)> {
-        self.fn_value_abi(*self.inf?.expr_types.get(e)?)
+        ty: TyId,
+    ) -> Result<Option<FunctionRepPlan>, CompilerError> {
+        if let Some(concrete) = self.concrete_ty_id(ty) {
+            return BackendFnAbiPlan::for_function_value(self.ws, self.scx, &concrete)
+                .map(Some)
+                .map_err(|error| match error.span.or(self.cur_span) {
+                    Some(span) => CompilerError::new_with_label(span, error.message),
+                    None => CompilerError::new_no_location(error.message),
+                });
+        }
+        Ok(None)
     }
 
     pub(crate) fn nobox_shape_of_ty(&self, ty: TyId) -> Option<ValueShape> {
-        // The BODY arena's spelling of [`nullable_nominal_shape`]: same rule, its
-        // own type-node lookup. `is_nobox_struct` (not `is_nobox_nominal`) is the
-        // one real difference -- it also honours `scx.values_first_class`, which
-        // the GLSL backend sets -- so the guard stays here and the core sees an
-        // already-filtered nominal.
-        if !self.scx.values_first_class {
-            let mut shape = nullable_nominal_shape(self.ws, ty, &|t| {
-                self.ty_node(self.resolve_tyid(t)?)
-            })?;
-            // A generic bound to `E?` reaches the core as its payload nominal, so
-            // the `?` has to be re-applied from the binding. Idempotent for a
-            // spelled-out `E?`, which the core already marked.
-            shape.nullable |= self.is_nullable_ty(ty);
-            return Some(shape);
+        if self.scx.values_first_class {
+            return None;
         }
-        None
+        self.rep_shape_for_ty(ty, RepUse::Value, true)
     }
 
     /// The leaf globals a place rooted at a `nobox` global denotes, plus the
@@ -742,13 +575,18 @@ impl Builder<'_> {
     /// leaf order is `repr_to_leaves`', so a projection is a slice, never a
     /// scatter. `None` when the place is not rooted at a `nobox` global.
     pub(crate) fn nobox_global_place(&self, e: Idx<Expr>) -> Option<(Vec<Ustr>, Option<ValueShape>)> {
+        if self.scx.values_first_class {
+            return None;
+        }
         match self.body.expr_arena[e].clone() {
             // The DECLARED type, never `e`'s: a refined read of a `global X: NV2?`
             // has expr type `NV2`, whose 2-leaf shape would address the presence
             // leaf as `x`. Storage layout is a property of the global, not of the
             // read site.
             Expr::Global(name) => {
-                let shape = nobox_declared_shape(self.ws, *self.ws.globals_by_name.get(&name)?)?;
+                let ty = *self.ws.globals_by_name.get(&name)?;
+                let plan = GlobalPlan::for_declared_type(self.ws, self.scx, ty).ok()?;
+                let shape = plan.value_shape()?;
                 let leaves =
                     (0..shape.leaf_count()).map(|i| nobox_global_leaf_name(name, i)).collect();
                 Some((leaves, Some(shape)))

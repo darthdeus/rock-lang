@@ -17,7 +17,6 @@ use crate::bone_backend::{categorize, short_path};
 use crate::test_protocol::{parse_skull_markers, reason_histogram};
 use crate::Result;
 use colored::Colorize;
-use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::FuncRef;
 use std::time::Instant;
 
@@ -317,7 +316,6 @@ fn js_run_tests(
     let mut fails: Vec<String> = Vec::new();
     let mut skips: Vec<(String, Vec<String>)> = Vec::new();
 
-    let scx = ScalarCtx::new(ws).with_target(bone_semantic::hir::FnBackend::Js);
     // (test index, per-test isolated defs) for tests emittable in ISOLATION.
     let mut supported: Vec<(usize, String)> = Vec::new();
     // Test indices that reject ONLY because they read a decorator-populated
@@ -328,7 +326,7 @@ fn js_run_tests(
         let js_name = format!("__t{i}");
         let roots = [(*fr, js_name)];
         let emitted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            skull_codegen_js::emit::emit_with_closure(ws, &scx, &roots)
+            skull_codegen_js::emit::emit_with_closure(ws, &roots)
         }));
         match emitted {
             Ok(Ok(js)) => supported.push((i, js)),
@@ -345,25 +343,33 @@ fn js_run_tests(
         }
     }
 
-    // Assemble the shared defs + the runnable test index list (test order). With
-    // no deco-dependent test this is the per-test isolated concatenation
-    // (byte-identical to the pre-lift path); otherwise the whole file emits as
-    // ONE program (`emit_program_with_roots`) so decorator applications run once
-    // at load and populate the registries those tests read.
+    // Assemble the shared defs + the runnable test index list (test order).
+    //
+    // The per-test emission above is the CLASSIFIER -- it decides, one test at a
+    // time, which tests the JS subset can serve, so an unsupported one skips by
+    // itself instead of taking the file down with it. Assembly is a separate
+    // question, and the answer is always ONE program over the surviving roots:
+    // concatenating the per-test closures gives every block its own copy of the
+    // global initializers, so a global derived from shared mutable state is
+    // recomputed per block and comes out wrong. That is the model luajit and
+    // `rock run --backend js` already use, and it is what makes the Session
+    // Arena registry (four arena iteration tests) agree across backends.
     let mut run_idxs: Vec<usize> = supported.iter().map(|(i, _)| *i).collect();
-    let shared_defs = if deco_pending.is_empty() {
-        supported.iter().map(|(_, d)| d.as_str()).collect::<String>()
+    run_idxs.extend(deco_pending.iter().copied());
+    run_idxs.sort_unstable();
+    let shared_defs = if run_idxs.is_empty() {
+        String::new()
     } else {
-        run_idxs.extend(deco_pending.iter().copied());
-        run_idxs.sort_unstable();
         let roots: Vec<(FuncRef, String)> =
             run_idxs.iter().map(|&i| (tests[i].0, format!("__t{i}"))).collect();
-        match skull_codegen_js::emit::emit_program_with_roots(ws, &scx, &roots) {
+        match skull_codegen_js::emit::emit_program_with_roots(ws, &roots) {
             Ok(blob) => blob,
             Err(e) => {
-                // Whole-file emission rejected (a deco-dependent test also hits an
-                // unsupported construct past the deco-global read): keep the
-                // individually-supported tests, skip the deco-dependent ones.
+                // Whole-file emission rejected for something no single test hit
+                // on its own (a deco-dependent test that also reaches an
+                // unsupported construct, or a construct only the shared program
+                // reaches): keep the individually-supported tests by falling back
+                // to the concatenation, and skip the deco-dependent ones.
                 for &i in &deco_pending {
                     skips.push((tests[i].1.name.clone(), all_reasons(&e)));
                 }
@@ -491,8 +497,7 @@ fn emit_js_program_single(path: &str) -> skull_codegen_js::emit::JsProgram {
         }
     };
     let user_mid = crate::bone_backend::entry_module_id(&ws, user_file);
-    let scx = ScalarCtx::new(&ws).with_target(bone_semantic::hir::FnBackend::Js);
-    match skull_codegen_js::emit::emit_program(&ws, &scx, user_mid) {
+    match skull_codegen_js::emit::emit_program(&ws, user_mid) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("{}", crate::skull_backend::render_file_errs(path, &src, &[e]));
@@ -523,6 +528,17 @@ pub(crate) fn emit_js_program_project(
 pub(crate) fn try_emit_js_program_project(
     dir: &str,
 ) -> Result<(skull_codegen_js::emit::JsProgram, bone_semantic::inference::Workspace)> {
+    let (program, _cache, ws) = try_emit_js_program_project_cached(dir)?;
+    Ok((program, ws))
+}
+
+pub(crate) fn try_emit_js_program_project_cached(
+    dir: &str,
+) -> Result<(
+    skull_codegen_js::emit::JsProgram,
+    skull_codegen_js::emit::JsEmitCache,
+    bone_semantic::inference::Workspace,
+)> {
     use std::path::PathBuf;
     let spec = crate::unified_compile::SourceSpec::Directory(PathBuf::from(dir));
     let sources = crate::unified_compile::discover_sources(&spec)
@@ -547,15 +563,14 @@ pub(crate) fn try_emit_js_program_project(
         )),
     };
     let user_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
-    let scx = ScalarCtx::new(&ws).with_target(bone_semantic::hir::FnBackend::Js);
-    let prog = match skull_codegen_js::emit::emit_program(&ws, &scx, user_mid) {
+    let (prog, cache) = match skull_codegen_js::emit::emit_program_cached(&ws, user_mid) {
         Ok(p) => p,
         Err(e) => return Err(anyhow::anyhow!(
             "{}",
             crate::skull_backend::render_project_err(&sources, &e)
         )),
     };
-    Ok((prog, ws))
+    Ok((prog, cache, ws))
 }
 
 /// Node-specific glue for the engine-agnostic RNG prelude (`JS_RNG_RUNTIME`) and

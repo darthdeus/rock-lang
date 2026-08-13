@@ -205,11 +205,17 @@ fn every_fatal_is_classified_with_a_span_and_a_reason() {
         r#"
 fn ident<T>(x: T) -> T { return x }
 co fn stream<T>(v: T) { yield }
+fn depth<T>(x: T, n: int) -> int {
+    if n <= 0 { return 0 }
+    let wrapped: [T] = [x]
+    return 1 + depth(wrapped, n - 1)
+}
 fn main() {
     let a = ident(1)
     let c = stream(2)
     let xs: [int] = [1, 2, 3]
     for v in xs.iter().map(_ + 1) { let _ = v }
+    depth(1, 12)
 }
 "#,
     );

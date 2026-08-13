@@ -7,7 +7,6 @@
 //! expectations to rot. Gated on `node` AND `luajit`; absent, skip WITH A LOG.
 
 use bone_semantic::inference::Workspace;
-use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::FuncRef;
 
 const FIXTURE: &str = include_str!("fixtures/number_format.rock");
@@ -88,9 +87,8 @@ fn number_tostring_parity_luajit_vs_node() {
     lua.push_str(&format!("\n{name}()\n"));
     let lua_lines = run_lines("luajit", "battery", "lua", &lua);
 
-    let scx = ScalarCtx::new(&ws);
     let roots = [(find_fn(&ws, name), name.to_string())];
-    let defs = skull_codegen_js::emit::emit_with_closure(&ws, &scx, &roots)
+    let defs = skull_codegen_js::emit::emit_with_closure(&ws, &roots)
         .unwrap_or_else(|e| panic!("closure emit: {}", e.message));
     // A stdout-writing `print` (Lua-parity: args lua_tostring-joined by TAB, one
     // line per call) -- the same runtime `lua_tostring` the harness uses.

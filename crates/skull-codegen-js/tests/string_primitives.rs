@@ -6,7 +6,6 @@
 //! (indexOf reads that as 0). Node-executed checks are the correctness oracle;
 //! `tests/js_string_primitives.rock` cross-checks against luajit.
 
-use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::FuncRef;
 use crate::common::ws_with;
 
@@ -15,7 +14,6 @@ fn node_available() -> bool {
 }
 
 fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<String, String> {
-    let scx = ScalarCtx::new(ws);
     let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
     let mut r = None;
     for (fid, f) in ws.module(mid).functions.iter() {
@@ -23,7 +21,7 @@ fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<
             r = Some(FuncRef { module: mid, func: fid });
         }
     }
-    skull_codegen_js::emit::emit_with_closure(ws, &scx, &[(r.unwrap(), root.to_string())])
+    skull_codegen_js::emit::emit_with_closure(ws, &[(r.unwrap(), root.to_string())])
         .map_err(|e| e.message)
 }
 
