@@ -75,7 +75,7 @@ pub use abi::{
     boundary_requires_boxed_representation, declared_boundary_class, owner_abi_plan,
     owner_abi_plan_for_body, requires_concrete_body_plan, selected_sibling_abi_plan,
     AbiPlanKey, AbiPlanMemoStats, BackendFnAbiPlan, BoundaryClass, FunctionRepPlan, GlobalPlan,
-    RepArena, RepError,
+    RepArena, RepArenaStats, RepError,
     RepId, RepLayout,
     RepGuarantees, RepPlan, RepUse, RepUseFacts,
 };
@@ -349,6 +349,11 @@ impl ScalarCtx {
     /// normal case, not an optimization corner.
     pub fn abi_plan_stats(&self) -> AbiPlanMemoStats {
         self.abi_plans.stats()
+    }
+
+    /// Traffic counters of this context's representation arena.
+    pub fn rep_arena_stats(&self) -> abi::RepArenaStats {
+        self.rep_arena.stats()
     }
 
     /// Set the codegen backend this lowering feeds (see [`target`]).

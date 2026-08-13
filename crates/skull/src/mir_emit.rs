@@ -465,6 +465,23 @@ pub struct MirEmit {
     /// paths). Counts, so load-immune: `hits() > 0` on any real corpus is the
     /// memo's non-vacuity witness. Surfaced by `backend-stats`.
     pub abi_plan_stats: skull_mir::lower::AbiPlanMemoStats,
+    /// Shared-arena traffic split at the setup/fanout boundary (full builds;
+    /// zeroed on paths without a fresh setup phase). The `*_final - *_setup`
+    /// deltas are the post-setup traffic a frozen read view would serve.
+    pub arena_traffic: ArenaTraffic,
+}
+
+/// Counter totals of the build's shared `RepArena` and `MonoInterner`, taken
+/// when the body-lowering fanout began (`setup`) and again at emission end
+/// (`final`). Surfaced by `backend-stats`; the freeze-premise gate for
+/// publishing lock-free read views is `intern_new`/`write_acqs` deltas near
+/// zero after setup.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ArenaTraffic {
+    pub rep_setup: skull_mir::lower::RepArenaStats,
+    pub rep_final: skull_mir::lower::RepArenaStats,
+    pub mono_setup: skull_mir::monoty::MonoInternerStats,
+    pub mono_final: skull_mir::monoty::MonoInternerStats,
 }
 
 /// Coarse per-stage wall-clock for one emitted definition. Summed across every
@@ -3211,7 +3228,16 @@ fn assemble(
         }
     }
     emitted_bodies.extend(spec_chunks.keys().cloned());
-    Ok((MirEmit { lua: out, skipped, phases, abi_plan_stats: scx.abi_plan_stats() }, emitted_bodies))
+    Ok((
+        MirEmit {
+            lua: out,
+            skipped,
+            phases,
+            abi_plan_stats: scx.abi_plan_stats(),
+            arena_traffic: ArenaTraffic::default(),
+        },
+        emitted_bodies,
+    ))
 }
 
 /// Full emit: populate the chunk cache for every retained ordinary/coroutine
@@ -3532,6 +3558,8 @@ fn emit_full_in_with_mutation(
     }
     setup_phases.push(("setup: ABI validation", t_setup.elapsed()));
 
+    let setup_traffic = (scx.rep_arena_stats(), scx.interner().stats());
+
     let fn_items: Vec<(FuncRef, &bone_semantic::hir::Function)> = ws
         .modules
         .iter()
@@ -3598,6 +3626,12 @@ fn emit_full_in_with_mutation(
     let mut phases = setup_phases;
     phases.extend(emit.phases);
     emit.phases = phases;
+    emit.arena_traffic = ArenaTraffic {
+        rep_setup: setup_traffic.0,
+        rep_final: cache.scx.rep_arena_stats(),
+        mono_setup: setup_traffic.1,
+        mono_final: cache.scx.interner().stats(),
+    };
     let mut cache = cache;
     cache.emitted = emitted;
     cache.absorb_spec_chunks(built_specs);
@@ -4267,7 +4301,13 @@ fn assemble_overlay(
         out.push_str(&cache.shader_registrations.lua);
     }
 
-    MirEmit { lua: out, skipped, phases: Vec::new(), abi_plan_stats: cache.scx.abi_plan_stats() }
+    MirEmit {
+        lua: out,
+        skipped,
+        phases: Vec::new(),
+        abi_plan_stats: cache.scx.abi_plan_stats(),
+        arena_traffic: ArenaTraffic::default(),
+    }
 }
 
 /// `__rock_rebind_system("<name>", <func>)` for each CHANGED decorated function

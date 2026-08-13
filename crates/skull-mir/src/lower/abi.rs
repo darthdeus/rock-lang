@@ -485,9 +485,26 @@ struct RepArenaInner {
 /// The one build-scoped physical representation arena.  `ScalarCtx` owns the
 /// handle and every ABI plan references the same arena, so equal answers are
 /// equal identities rather than merely equal cloned shapes.
+///
+/// The counters ride outside `inner` so [`RepArenaInner`]'s derived equality
+/// (the [`BackendFnAbiPlan`] identity check) never compares them.
 #[derive(Debug, Default)]
 pub struct RepArena {
     inner: Mutex<RepArenaInner>,
+    get_calls: std::sync::atomic::AtomicU64,
+    intern_attempts: std::sync::atomic::AtomicU64,
+    intern_new: std::sync::atomic::AtomicU64,
+}
+
+/// Lifetime traffic counters for one [`RepArena`]: every [`RepArena::get`] is
+/// a mutex acquisition plus a deep [`RepPlan`] clone, so `get_calls` is also
+/// the cloned-plan population a frozen read view would serve borrow-free.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RepArenaStats {
+    pub get_calls: u64,
+    pub intern_attempts: u64,
+    pub intern_new: u64,
+    pub plans: u64,
 }
 
 fn mono_value_storage(
@@ -559,11 +576,13 @@ impl RepArena {
         column_eligible: bool,
         nobox: bool,
     ) -> RepId {
+        self.intern_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut inner = self.inner.lock().expect("RepArena lock poisoned");
         let key = (target, use_context, layout.clone(), storage, column_eligible, nobox);
         if let Some(id) = inner.by_key.get(&key) {
             return *id;
         }
+        self.intern_new.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let id = RepId(inner.plans.len() as u32);
         inner.plans.push(RepPlan {
             id,
@@ -599,6 +618,7 @@ impl RepArena {
     }
 
     pub fn get(&self, id: RepId) -> RepPlan {
+        self.get_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.inner
             .lock()
             .expect("RepArena lock poisoned")
@@ -606,6 +626,16 @@ impl RepArena {
             .get(id.0 as usize)
             .cloned()
             .expect("RepId must belong to its build arena")
+    }
+
+    pub fn stats(&self) -> RepArenaStats {
+        use std::sync::atomic::Ordering;
+        RepArenaStats {
+            get_calls: self.get_calls.load(Ordering::Relaxed),
+            intern_attempts: self.intern_attempts.load(Ordering::Relaxed),
+            intern_new: self.intern_new.load(Ordering::Relaxed),
+            plans: self.inner.lock().expect("RepArena lock poisoned").plans.len() as u64,
+        }
     }
 
     /// Plan the physical value representation of a nominal without letting a

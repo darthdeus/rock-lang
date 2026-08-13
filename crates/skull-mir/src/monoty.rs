@@ -470,6 +470,8 @@ pub fn infer_var_of(inf: &BodyInference, ty: TyId) -> Option<VarId> {
 pub struct MonoArena {
     tys: Vec<MonoTy>,
     interned: FxHashMap<MonoTy, MonoTyId>,
+    intern_attempts: u64,
+    intern_new: u64,
 }
 
 impl MonoArena {
@@ -490,13 +492,22 @@ impl MonoArena {
     }
 
     pub fn intern(&mut self, ty: MonoTy) -> MonoTyId {
+        self.intern_attempts += 1;
         if let Some(id) = self.interned.get(&ty) {
             return *id;
         }
+        self.intern_new += 1;
         let id = MonoTyId(self.tys.len() as u32);
         self.tys.push(ty.clone());
         self.interned.insert(ty, id);
         id
+    }
+
+    /// `(attempts, new entries)` across this arena's lifetime, whichever path
+    /// reached [`Self::intern`] -- the graph's direct walk and the shared
+    /// interner handle alike.
+    pub fn intern_stats(&self) -> (u64, u64) {
+        (self.intern_attempts, self.intern_new)
     }
 
     /// The display rendering of an interned type. Not an identity -- see
@@ -616,6 +627,21 @@ impl MonoArena {
 /// property `InstanceGraph::update_bodies` rests on.
 pub struct MonoInterner {
     arena: std::sync::RwLock<MonoArena>,
+    read_acqs: std::sync::atomic::AtomicU64,
+    write_acqs: std::sync::atomic::AtomicU64,
+}
+
+/// Lifetime traffic counters for one [`MonoInterner`]: lock acquisitions by
+/// kind, plus the inner arena's intern attempt/new-entry split. Reads clone
+/// owned [`MonoTy`] values out, so `read_acqs` bounds the population a frozen
+/// indexed view would serve borrow-free.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MonoInternerStats {
+    pub read_acqs: u64,
+    pub write_acqs: u64,
+    pub intern_attempts: u64,
+    pub intern_new: u64,
+    pub types: u64,
 }
 
 impl Default for MonoInterner {
@@ -632,14 +658,18 @@ impl std::fmt::Debug for MonoInterner {
 
 impl MonoInterner {
     pub fn new() -> Self {
-        Self { arena: std::sync::RwLock::new(MonoArena::new()) }
+        Self::from_arena(MonoArena::new())
     }
 
     /// Adopt an arena an [`InstanceGraph`](../../skull/src/instance_graph.rs)
     /// build already filled. The graph and emission share ONE arena; a second
     /// one would give the same type two ids and the same body two identities.
     pub fn from_arena(arena: MonoArena) -> Self {
-        Self { arena: std::sync::RwLock::new(arena) }
+        Self {
+            arena: std::sync::RwLock::new(arena),
+            read_acqs: std::sync::atomic::AtomicU64::new(0),
+            write_acqs: std::sync::atomic::AtomicU64::new(0),
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -651,12 +681,14 @@ impl MonoInterner {
     }
 
     pub fn intern(&self, ty: MonoTy) -> MonoTyId {
+        self.write_acqs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.arena.write().expect("mono arena poisoned").intern(ty)
     }
 
     /// One lock acquisition for a whole argument list, which is how an
     /// instance's arguments arrive.
     pub fn intern_all(&self, tys: impl IntoIterator<Item = MonoTy>) -> Vec<MonoTyId> {
+        self.write_acqs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut arena = self.arena.write().expect("mono arena poisoned");
         tys.into_iter().map(|ty| arena.intern(ty)).collect()
     }
@@ -687,12 +719,28 @@ impl MonoInterner {
 
     /// Read-only access under one lock, for a caller doing several reads.
     pub fn with<R>(&self, f: impl FnOnce(&MonoArena) -> R) -> R {
+        self.read_acqs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         f(&self.arena.read().expect("mono arena poisoned"))
     }
 
     /// Mutable access under one lock, for a caller doing several interns.
     pub fn with_mut<R>(&self, f: impl FnOnce(&mut MonoArena) -> R) -> R {
+        self.write_acqs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         f(&mut self.arena.write().expect("mono arena poisoned"))
+    }
+
+    pub fn stats(&self) -> MonoInternerStats {
+        use std::sync::atomic::Ordering;
+        let (intern_attempts, intern_new, types) =
+            self.with(|a| { let (at, new) = a.intern_stats(); (at, new, a.len() as u64) });
+        MonoInternerStats {
+            // Subtract the read this snapshot itself just took.
+            read_acqs: self.read_acqs.load(Ordering::Relaxed).saturating_sub(1),
+            write_acqs: self.write_acqs.load(Ordering::Relaxed),
+            intern_attempts,
+            intern_new,
+            types,
+        }
     }
 
     pub fn into_arena(self) -> MonoArena {

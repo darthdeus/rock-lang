@@ -95,6 +95,9 @@ pub struct SkullPhaseTimes {
     pub emit_phases: Vec<(&'static str, Duration)>,
     /// skull's ABI-plan memo counters, from `MirEmit::abi_plan_stats`.
     pub abi_plan_stats: skull_mir::lower::AbiPlanMemoStats,
+    /// Shared-arena traffic split at the setup/fanout boundary, from
+    /// `MirEmit::arena_traffic`.
+    pub arena_traffic: skull::mir_emit::ArenaTraffic,
 }
 
 /// Whole-project skull timing: parse all user files, type-check them together
@@ -137,6 +140,7 @@ pub fn skull_workspace_timed(sources: &SourceFiles) -> (bool, SkullPhaseTimes) {
         Ok(e) => {
             times.emit_phases = e.phases;
             times.abi_plan_stats = e.abi_plan_stats;
+            times.arena_traffic = e.arena_traffic;
             true
         }
         Err(_) => false,
