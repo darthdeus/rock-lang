@@ -20,6 +20,44 @@ use skull_codegen_shader::ConcreteStageInput;
 use skull_mir::shader_ir::ShaderStage;
 use std::sync::Arc;
 
+const TYPED_PROJECTION_REFUSAL_SRC: &str = r#"
+struct EntityIdTex { id_buffer: ISampler2D }
+
+@shader(fragment)
+fn entity_id_debug_frag(@textures t: EntityIdTex, tc: Vec2) -> Vec4 {
+    let id = texture_id(t.id_buffer, tc)
+    if id <= 0 { discard() }
+    let x = int_to_float(id)
+    return v(x, x, x, 1.0)
+}
+
+value Quad { aPos: Vec2, aTexCoord: Vec2 }
+value Vary { position: Vec4, TexCoord: Vec2 }
+struct OutlineTex { target_mask: ISampler2D, visible_id: ISampler2D }
+
+@shader(vertex)
+fn outline_detect_vert(@attr a: Quad) -> Vary {
+    return Vary {
+        position: v(a.aPos, 0.0, 1.0),
+        TexCoord: a.aTexCoord,
+    }
+}
+
+@shader(fragment)
+fn outline_detect_frag(vary: Vary, @textures t: OutlineTex) -> Vec4 {
+    let target = texture_id(t.target_mask, vary.TexCoord)
+    let visible = texture_id(t.visible_id, vary.TexCoord)
+    if target == visible { return v(0.0, 1.0, 0.0, 1.0) }
+    return v(1.0, 0.0, 0.0, 1.0)
+}
+
+fn use_all() -> string {
+    let entity = rock_shader(entity_id_debug_frag)
+    let outline = rock_shader(outline_detect_vert, outline_detect_frag)
+    return entity + outline
+}
+"#;
+
 fn emit_overlay(
     ws: &Workspace,
     cache: &mut SkullEmitCache,
@@ -605,4 +643,35 @@ fn selected_wgpu_planning_reads_the_exact_graph_instance_and_concrete_plan() {
         Err(error) => error,
     };
     assert!(rejected.message.contains("no concrete plan"), "{rejected}");
+}
+
+#[test]
+fn typed_projection_census_admits_the_current_entity_and_outline_projections() {
+    let ws = ws_with_stdlib(TYPED_PROJECTION_REFUSAL_SRC);
+    let mid = test_mid(&ws);
+    let (emit, cache) = emit_full_in_for_renderer(&ws, mid, None, RendererTarget::Wgpu)
+        .expect("the typed refusal census must compile its GL controls");
+    let census = cache.wgpu_projection_census().expect("WGPU projection census");
+    println!("typed projection census: {census:?}");
+    assert_eq!(census.examined, 2);
+    assert_eq!(census.admitted, 2, "entity-id and outline projections must be admitted: {census:?}");
+    assert_eq!(census.omitted, 0, "typed projection omissions remain: {census:?}");
+    assert!(census.omissions.is_empty());
+    assert!(emit.lua.contains("__rock_shader_register(\"entity_id_debug_frag\""));
+    assert!(emit.lua.contains("__rock_shader_register(\"outline_detect_vert+outline_detect_frag\""));
+    assert!(emit.lua.contains("__rock_wgpu_shader_register(\"entity_id_debug_frag\""));
+    assert!(emit.lua.contains("__rock_wgpu_shader_register(\"outline_detect_vert+outline_detect_frag\""));
+}
+
+#[test]
+fn selected_wgpu_entity_id_projection_is_admitted() {
+    let ws = ws_with_stdlib(TYPED_PROJECTION_REFUSAL_SRC);
+    let mid = test_mid(&ws);
+    let (emit, cache) = emit_full_in_for_renderer(&ws, mid, None, RendererTarget::Wgpu)
+        .expect("the entity-id fixture must reach projection census");
+    let census = cache.wgpu_projection_census().expect("WGPU projection census");
+    assert_eq!(census.examined, 2);
+    assert_eq!(census.admitted, 2, "entity-id and its real outline consumer must be admitted: {census:?}");
+    assert_eq!(census.omitted, 0, "typed projection omissions remain: {census:?}");
+    assert!(emit.lua.contains("__rock_wgpu_shader_register(\"entity_id_debug_frag\""));
 }

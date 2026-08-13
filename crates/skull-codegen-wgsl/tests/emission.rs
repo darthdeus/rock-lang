@@ -4,6 +4,7 @@ use skull_codegen_wgsl::{
     WgslAbiPlan, WgslPrimitiveTopology, emit_fullscreen_shader, plan_fullscreen_artifact,
 };
 use skull_mir::mir::{Inst, Term};
+use skull_mir::gpu_layout::SamplerKind;
 use std::sync::LazyLock;
 use ustr::Ustr;
 
@@ -39,6 +40,8 @@ const ROOTS: &[(&str, &str, &str)] = &[
     ),
 ];
 
+const ENTITY_ID_DEBUG: &str = include_str!("../../../stone/engine/shaders/rendering/entity_id_debug_shader.rock");
+
 fn workspace(
     src: &str,
 ) -> (
@@ -52,21 +55,26 @@ fn workspace(
     (ws, mid)
 }
 
-fn artifact(root: &str, source: &str) -> skull_codegen_wgsl::WgslShaderEmission {
+fn try_artifact(
+    root: &str,
+    source: &str,
+) -> Result<skull_codegen_wgsl::WgslShaderEmission, skull_parser::CompilerError> {
     let source = format!(
         "{}\n{}",
         include_str!("../../../stone/engine/shaders/common/pass_textures.rock"),
         source
     );
     let (ws, mid) = workspace(&source);
-    let fref = skull_codegen_shader::resolve_root(&ws, mid, root).expect("root");
-    let neutral = plan_fullscreen_artifact(&ws, fref).expect("neutral ShaderIR/interface");
-    let abi = WgslAbiPlan::wgsl(&neutral.interface, Span::default()).expect("WGSL ABI");
-    let emission =
-        emit_fullscreen_shader(&ws, &neutral.ir, &neutral.interface, &abi, Span::default())
-            .expect("WGSL emission");
+    let fref = skull_codegen_shader::resolve_root(&ws, mid, root)?;
+    let neutral = plan_fullscreen_artifact(&ws, fref)?;
+    let abi = WgslAbiPlan::wgsl(&neutral.interface, Span::default())?;
+    let emission = emit_fullscreen_shader(&ws, &neutral.ir, &neutral.interface, &abi, Span::default())?;
     assert_eq!(emission.dependencies, neutral.dependencies);
-    emission
+    Ok(emission)
+}
+
+fn artifact(root: &str, source: &str) -> skull_codegen_wgsl::WgslShaderEmission {
+    try_artifact(root, source).expect("WGSL artifact")
 }
 
 #[test]
@@ -113,6 +121,41 @@ fn selected_sprite_basic_pipeline_is_admitted_by_wgsl() {
     )
     .validate(&module)
     .expect("WGSL validates");
+}
+
+#[test]
+fn integer_texture_id_emits_sampler_free_load_and_validates() {
+    let artifact = artifact("entity_id_debug_frag", ENTITY_ID_DEBUG);
+    let module = naga::front::wgsl::parse_str(&artifact.source).expect("WGSL parses");
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .expect("integer texture WGSL validates");
+    assert_eq!(artifact.abi.textures.len(), 1);
+    assert_eq!(artifact.abi.textures[0].kind, SamplerKind::Int);
+    assert_eq!(artifact.abi.textures[0].sampler_binding, None);
+    assert!(artifact.source.contains("var tex_id_buffer: texture_2d<i32>"));
+    assert!(artifact.source.contains("textureLoad(tex_id_buffer"));
+    assert!(!artifact.source.contains("samp_id_buffer"));
+}
+
+#[test]
+fn integer_texture_id_rejects_a_float_sampler() {
+    let source = r#"
+struct BadEntityIdTex {
+    id_buffer: Sampler2D,
+}
+
+@shader(fragment)
+fn bad_entity_id_frag(@textures t: BadEntityIdTex, tc: Vec2) -> Vec4 {
+    let id = texture_id(t.id_buffer, tc)
+    return v(int_to_float(id), 0.0, 0.0, 1.0)
+}
+"#;
+    let result = try_artifact("bad_entity_id_frag", source);
+    assert!(result.is_err(), "texture_id must reject a filterable float sampler");
 }
 
 #[test]
@@ -782,7 +825,7 @@ fn source_goldens_and_physical_structure_are_deterministic() {
                 texture.texture_binding,
                 artifact.abi.uniform_blocks.len() as u32 + 1 + slot as u32 * 2
             );
-            assert_eq!(texture.sampler_binding, texture.texture_binding + 1);
+            assert_eq!(texture.sampler_binding, Some(texture.texture_binding + 1));
         }
     }
 }

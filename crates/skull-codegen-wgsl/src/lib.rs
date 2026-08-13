@@ -143,6 +143,7 @@ enum WgslIntrinsic {
     WorkgroupBarrier,
     VertexIndex,
     Texture,
+    TextureId,
     TextureSize,
     At,
     FragCoord,
@@ -193,6 +194,7 @@ impl WgslIntrinsic {
             ("v", 0..=4) => Self::VectorConstructor,
             ("zero", 0) => Self::Zero,
             ("texture", 2) => Self::Texture,
+            ("texture_id", 2) => Self::TextureId,
             ("texture_size", 1) => Self::TextureSize,
             ("frag_coord", 0) => Self::FragCoord,
             ("discard", 0) => Self::Discard,
@@ -456,7 +458,7 @@ pub struct WgslTextureBinding {
     pub name: Ustr,
     pub kind: SamplerKind,
     pub texture_binding: u32,
-    pub sampler_binding: u32,
+    pub sampler_binding: Option<u32>,
     pub visibility: WgslStageVisibility,
 }
 
@@ -1623,19 +1625,37 @@ fn layout_textures(
     span: Span,
 ) -> Result<Vec<WgslTextureBinding>, CompilerError> {
     validate_texture_group(group, span)?;
-    Ok(group
+    let mut next_binding = base;
+    group
         .samplers
         .iter()
         .enumerate()
-        .map(|(slot, (name, kind))| WgslTextureBinding {
-            slot: slot as u32,
-            name: *name,
-            kind: *kind,
-            texture_binding: base + slot as u32 * 2,
-            sampler_binding: base + slot as u32 * 2 + 1,
-            visibility,
+        .map(|(slot, (name, kind))| {
+            let texture_binding = next_binding;
+            let sampler_binding = match kind {
+                SamplerKind::Float => {
+                    next_binding = next_binding
+                        .checked_add(2)
+                        .ok_or_else(|| err(span, "WGSL texture binding base overflows"))?;
+                    Some(texture_binding + 1)
+                }
+                SamplerKind::Int => {
+                    next_binding = next_binding
+                        .checked_add(1)
+                        .ok_or_else(|| err(span, "WGSL texture binding base overflows"))?;
+                    None
+                }
+            };
+            Ok(WgslTextureBinding {
+                slot: slot as u32,
+                name: *name,
+                kind: *kind,
+                texture_binding,
+                sampler_binding,
+                visibility,
+            })
         })
-        .collect())
+        .collect()
 }
 
 /// WGSL's host-shareable scalar/vector/matrix layout for the admitted wire
@@ -2650,12 +2670,14 @@ fn emit_textures(out: &mut String, abi: &WgslAbiPlan) {
             texture_type(texture.kind)
         )
         .unwrap();
-        writeln!(
-            out,
-            "@group({}) @binding({}) var samp_{}: sampler;",
-            abi.bind_group, texture.sampler_binding, texture.name
-        )
-        .unwrap();
+        if let Some(sampler_binding) = texture.sampler_binding {
+            writeln!(
+                out,
+                "@group({}) @binding({}) var samp_{}: sampler;",
+                abi.bind_group, sampler_binding, texture.name
+            )
+            .unwrap();
+        }
     }
     if !abi.textures.is_empty() {
         out.push('\n');
@@ -3545,10 +3567,10 @@ impl<'a> FunctionEmitter<'a> {
                     ));
                 };
                 let (texture, sampler) = self.sampler_param_names(*cell);
-                rendered.push(format!(
-                    "{texture}: {}, {sampler}: sampler",
-                    texture_type(sampler_kind)
-                ));
+                rendered.push(format!("{texture}: {}", texture_type(sampler_kind)));
+                if sampler_kind == SamplerKind::Float {
+                    rendered.push(format!("{sampler}: sampler"));
+                }
                 continue;
             }
             if matches!(self.param_roles.get(cell), Some(ParamRole::Storage))
@@ -4196,6 +4218,10 @@ impl<'a> FunctionEmitter<'a> {
             )),
             Some(WgslIntrinsic::VertexIndex) => Ok(ValueKind::I32),
             Some(WgslIntrinsic::Texture) => Ok(ValueKind::Vec4),
+            Some(WgslIntrinsic::TextureId) => {
+                self.validate_texture_id_args(args)?;
+                Ok(ValueKind::I32)
+            }
             Some(WgslIntrinsic::TextureSize) => Ok(ValueKind::Vec2),
             Some(WgslIntrinsic::FragCoord) => Ok(ValueKind::Vec4),
             Some(WgslIntrinsic::Discard) => Err(err(
@@ -4874,8 +4900,17 @@ impl<'a> FunctionEmitter<'a> {
                     self.render_val(args[1])?
                 ))
             }
+            Some(WgslIntrinsic::TextureId) => {
+                self.validate_texture_id_args(args)?;
+                let texture_arg = self.texture_expression(args[0])?;
+                let uv = self.render_val(args[1])?;
+                let dimensions = format!("textureDimensions({texture_arg})");
+                Ok(format!(
+                    "textureLoad({texture_arg}, clamp(vec2<i32>(i32(floor(clamp({uv}.x, 0.0, 1.0) * f32({dimensions}.x))), i32(floor(clamp({uv}.y, 0.0, 1.0) * f32({dimensions}.y)))), vec2<i32>(0, 0), vec2<i32>(i32({dimensions}.x) - 1, i32({dimensions}.y) - 1)), 0).x"
+                ))
+            }
             Some(WgslIntrinsic::TextureSize) => {
-                let (texture_arg, _) = self.sampler_expressions(args[0])?;
+                let texture_arg = self.texture_expression(args[0])?;
                 Ok(format!("vec2<f32>(textureDimensions({texture_arg}))"))
             }
             Some(WgslIntrinsic::FragCoord) => self.frag_coord.clone().ok_or_else(|| {
@@ -4976,9 +5011,10 @@ impl<'a> FunctionEmitter<'a> {
                                 .is_some_and(|params| params.contains(cell))
                         });
                     if sampler_resource {
-                        let (texture, sampler) = self.sampler_expressions(*arg)?;
-                        rendered.push(texture);
-                        rendered.push(sampler);
+                        rendered.push(self.texture_expression(*arg)?);
+                        if self.value_kind(*arg)? == ValueKind::Sampler(SamplerKind::Float) {
+                            rendered.push(self.sampler_expressions(*arg)?.1);
+                        }
                     } else {
                         rendered.push(self.render_val(*arg)?);
                     }
@@ -5032,6 +5068,38 @@ impl<'a> FunctionEmitter<'a> {
             })
     }
 
+    fn validate_texture_id_args(&self, args: &[Idx<Inst>]) -> Result<(), CompilerError> {
+        if args.len() != 2 {
+            return Err(err(
+                self.span,
+                "WGSL texture_id requires one integer sampler and one UV",
+            ));
+        }
+        if self.value_kind(args[0])? != ValueKind::Sampler(SamplerKind::Int) {
+            return Err(err(
+                self.span,
+                "WGSL texture_id requires an ISampler2D argument",
+            ));
+        }
+        if self.value_kind(args[1])? != ValueKind::Vec2 {
+            return Err(err(
+                self.span,
+                "WGSL texture_id requires a Vec2 normalized coordinate",
+            ));
+        }
+        Ok(())
+    }
+
+    fn texture_expression(&self, iid: Idx<Inst>) -> Result<String, CompilerError> {
+        if let Inst::Load(cell) = self.body.insts[iid] {
+            if self.sampler_params.contains(&cell) {
+                return Ok(self.sampler_param_names(cell).0);
+            }
+        }
+        let texture = self.sampler_binding(iid)?;
+        Ok(format!("tex_{}", texture.name))
+    }
+
     fn sampler_param_names(&self, cell: Idx<Cell>) -> (String, String) {
         let suffix = cell.into_raw().into_u32();
         (
@@ -5044,10 +5112,22 @@ impl<'a> FunctionEmitter<'a> {
         if let Inst::Load(cell) = self.body.insts[iid] {
             if self.sampler_params.contains(&cell) {
                 let (texture, sampler) = self.sampler_param_names(cell);
+                if self.value_kind(iid)? != ValueKind::Sampler(SamplerKind::Float) {
+                    return Err(err(
+                        self.span,
+                        "WGSL integer texture has no sampler binding",
+                    ));
+                }
                 return Ok((texture, sampler));
             }
         }
         let texture = self.sampler_binding(iid)?;
+        if texture.sampler_binding.is_none() {
+            return Err(err(
+                self.span,
+                "WGSL integer texture has no sampler binding",
+            ));
+        }
         Ok((
             format!("tex_{}", texture.name),
             format!("samp_{}", texture.name),
@@ -5238,6 +5318,9 @@ fn main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
         assert!(
             WgslIntrinsic::classify_name_arity("texture", 2).is_some_and(WgslIntrinsic::is_admitted)
         );
+        assert!(
+            WgslIntrinsic::classify_name_arity("texture_id", 2).is_some_and(WgslIntrinsic::is_admitted)
+        );
         assert!(WgslIntrinsic::classify_name_arity("v", 2).is_some_and(WgslIntrinsic::is_admitted));
         assert_eq!(
             WgslIntrinsic::classify_name_arity("clamp", 3),
@@ -5261,7 +5344,7 @@ fn main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
         assert_eq!(WgslIntrinsic::classify_name_arity("helper", 1), None);
         // Present in the GLSL table with no faithful WGSL spelling: absent here
         // so the call rejects rather than emitting a plausible substitute.
-        for absent in ["isnan", "isinf", "any", "texture_id", "greater_than"] {
+        for absent in ["isnan", "isinf", "any", "greater_than"] {
             for arity in 0..=3 {
                 assert_eq!(
                     WgslIntrinsic::classify_name_arity(absent, arity),

@@ -115,7 +115,7 @@ pub struct WgslTextureBinding {
     pub name: String,
     pub kind: WgslTextureKind,
     pub texture_binding: u32,
-    pub sampler_binding: u32,
+    pub sampler_binding: Option<u32>,
     pub visibility: WgslVisibility,
 }
 
@@ -460,7 +460,7 @@ impl WgslAbi {
             fields(next_line(&mut payload_lines, "textures")?, "textures", 2)?[1],
             "texture count",
         )?;
-        let texture_base = expected_block_start
+        let mut texture_base = expected_block_start
             .checked_add(block_count as u32)
             .and_then(|base| base.checked_add(array_count as u32))
             .ok_or_else(|| wire_error("texture binding base overflows"))?;
@@ -471,22 +471,31 @@ impl WgslAbi {
             if slot != expected_slot as u32 {
                 return Err(wire_error("textures are not in slot order"));
             }
-            let base = texture_base
-                .checked_add((expected_slot as u32).checked_mul(2).ok_or_else(|| wire_error("texture binding overflows"))?)
-                .ok_or_else(|| wire_error("texture binding overflows"))?;
+            let kind = texture_kind(texture[3])?;
+            let base = texture_base;
             let texture_binding = parse_u32(texture[4], "texture view binding")?;
-            let sampler_binding = parse_u32(texture[5], "sampler binding")?;
-            if (texture_binding, sampler_binding) != (base, base + 1) {
+            let sampler_binding = parse_optional_u32(texture[5], "sampler binding")?;
+            let expected_sampler = match kind {
+                WgslTextureKind::Float => Some(
+                    base.checked_add(1)
+                        .ok_or_else(|| wire_error("texture binding overflows"))?,
+                ),
+                WgslTextureKind::Int => None,
+            };
+            if texture_binding != base || sampler_binding != expected_sampler {
                 return Err(wire_error("texture bindings are not in physical order"));
             }
             textures.push(WgslTextureBinding {
                 slot,
                 name: identifier(texture[2], "texture name")?,
-                kind: texture_kind(texture[3])?,
+                kind,
                 texture_binding,
                 sampler_binding,
                 visibility: parse_visibility(texture[6])?,
             });
+            texture_base = texture_base
+                .checked_add(if expected_sampler.is_some() { 2 } else { 1 })
+                .ok_or_else(|| wire_error("texture binding base overflows"))?;
         }
         if next_line(&mut payload_lines, "end")? != "end" {
             return Err(wire_error("missing ABI end record"));
@@ -698,7 +707,7 @@ impl WgslAbi {
                     texture.name,
                     texture_kind_wire(texture.kind),
                     texture.texture_binding,
-                    texture.sampler_binding,
+                    optional_u32_wire(texture.sampler_binding),
                     visibility_wire(texture.visibility)
                 ),
             );
@@ -818,7 +827,7 @@ impl WgslAbi {
         let expected_block_start = if self.geometry == WgslGeometryKind::Fullscreen { 1 } else { 0 };
         validate_binding_order(&self.uniform_blocks, &self.array_blocks, expected_block_start)?;
 
-        let texture_base = expected_block_start
+        let mut texture_base = expected_block_start
             .checked_add(self.uniform_blocks.len() as u32)
             .and_then(|base| base.checked_add(self.array_blocks.len() as u32))
             .ok_or_else(|| wire_error("texture binding base overflows"))?;
@@ -827,12 +836,20 @@ impl WgslAbi {
                 return Err(wire_error("textures are not in slot order"));
             }
             identifier(&texture.name, "texture name")?;
-            let base = texture_base
-                .checked_add((slot as u32).checked_mul(2).ok_or_else(|| wire_error("texture binding overflows"))?)
-                .ok_or_else(|| wire_error("texture binding overflows"))?;
-            if (texture.texture_binding, texture.sampler_binding) != (base, base + 1) {
+            let base = texture_base;
+            let expected_sampler = match texture.kind {
+                WgslTextureKind::Float => Some(
+                    base.checked_add(1)
+                        .ok_or_else(|| wire_error("texture binding overflows"))?,
+                ),
+                WgslTextureKind::Int => None,
+            };
+            if texture.texture_binding != base || texture.sampler_binding != expected_sampler {
                 return Err(wire_error("texture bindings are not in physical order"));
             }
+            texture_base = texture_base
+                .checked_add(if expected_sampler.is_some() { 2 } else { 1 })
+                .ok_or_else(|| wire_error("texture binding base overflows"))?;
         }
         Ok(())
     }
@@ -1275,6 +1292,14 @@ fn parse_u32(value: &str, what: &str) -> Result<u32, AbiError> {
     u32::try_from(value).map_err(|_| wire_error(format!("{what} {value} does not fit in u32")))
 }
 
+fn parse_optional_u32(value: &str, what: &str) -> Result<Option<u32>, AbiError> {
+    if value == "none" {
+        Ok(None)
+    } else {
+        parse_u32(value, what).map(Some)
+    }
+}
+
 fn parse_u8(value: &str, what: &str) -> Result<u8, AbiError> {
     let value = parse_u32(value, what)?;
     u8::try_from(value).map_err(|_| wire_error(format!("{what} {value} does not fit in u8")))
@@ -1327,6 +1352,10 @@ fn texture_kind_wire(kind: WgslTextureKind) -> &'static str {
         WgslTextureKind::Float => "float",
         WgslTextureKind::Int => "int",
     }
+}
+
+fn optional_u32_wire(value: Option<u32>) -> String {
+    value.map_or_else(|| "none".to_string(), |value| value.to_string())
 }
 
 fn storage_access_wire(access: WgslStorageAccess) -> &'static str {
@@ -1498,7 +1527,7 @@ mod tests {
                 name: "scene".into(),
                 kind: WgslTextureKind::Float,
                 texture_binding: 2,
-                sampler_binding: 3,
+                sampler_binding: Some(3),
                 visibility: WgslVisibility { vertex: false, fragment: true },
             }],
             compute: None,
@@ -1686,6 +1715,7 @@ mod tests {
             ("array_member lights 0 2 0 16", "array_member lights 0 2 16 16"),
             ("array_member lights 0 2 0 16", "array_member lights 0 2 0 8"),
             ("array_member lights 0 2 0 16", "array_member lights 0 3 0 16"),
+            ("texture 0 scene float 2 3 f", "texture 0 scene int 2 3 f"),
         ];
         for (old, new) in mutations {
             let mutated = rechecksum(&replace_once(&wire, old, new));
