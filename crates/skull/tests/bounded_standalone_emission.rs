@@ -251,7 +251,7 @@ fn main() {
     .expect("intact bounded body did not resolve");
     assert_eq!(first_call_multi_arity(&intact), 2, "the control lost (ok, int)");
 
-    let mut poisoned_plans = bodies.plans.clone();
+    let mut poisoned_plans = (*bodies.plans).clone();
     let pair = MonoTy::App {
         ctor: MonoCtor::Nominal(Ustr::from("Pair")),
         params: Vec::new(),

@@ -478,7 +478,7 @@ fn main() { let c = ticker(); let _ = c.resume() }
     );
     let bodies = skull::concrete_body::build(&ws, &mut g);
     let mut compared = 0;
-    for (inst, concrete) in &bodies.plans {
+    for (inst, concrete) in bodies.plans.iter() {
         let f = &ws.module(inst.func.module).functions[inst.func.func];
         if !f.is_coroutine {
             continue;

@@ -2442,6 +2442,7 @@ fn realize_shader_view(
     programs: &[crate::shader_artifact::ShaderProgram],
     compute: &[crate::shader_artifact::ComputeProgram],
     scx: &skull_mir::lower::ScalarCtx,
+    plans: std::sync::Arc<skull_mir::concrete::ConcretePlans>,
 ) -> Result<crate::shader_artifact::ShaderArtifactView, CompilerError> {
     crate::shader_artifact::realize_shader_with_context_and_compute(
         ws,
@@ -2457,6 +2458,7 @@ fn realize_shader_view(
         },
         scx,
         compute,
+        Some(plans),
     )
     .ok_or_else(|| CompilerError::new_no_location("GLSL shader view is unavailable".to_string()))
 }
@@ -3426,7 +3428,10 @@ fn emit_full_in_with_mutation(
     #[cfg(test)]
     if let BodyMutation::ClearBoundPlan { body } = mutation {
         let mut matched = 0;
-        for (instance, plan) in &mut concrete.plans {
+        for (instance, plan) in std::sync::Arc::get_mut(&mut concrete.plans)
+            .expect("concrete plans are unshared before the setup join")
+            .iter_mut()
+        {
             if instance.func != body || instance.args.is_empty() {
                 continue;
             }
@@ -3450,7 +3455,10 @@ fn emit_full_in_with_mutation(
     #[cfg(test)]
     if let BodyMutation::ClearCoroutineResultPlan { body } = mutation {
         let mut matched = 0;
-        for (instance, plan) in &mut concrete.plans {
+        for (instance, plan) in std::sync::Arc::get_mut(&mut concrete.plans)
+            .expect("concrete plans are unshared before the setup join")
+            .iter_mut()
+        {
             if instance.func == body {
                 assert!(
                     plan.signature.result.is_some(),
@@ -3468,7 +3476,10 @@ fn emit_full_in_with_mutation(
     #[cfg(test)]
     if let BodyMutation::ClearIteratorWitnessInstance { body } = mutation {
         let mut matched = 0;
-        for (instance, plan) in &mut concrete.plans {
+        for (instance, plan) in std::sync::Arc::get_mut(&mut concrete.plans)
+            .expect("concrete plans are unshared before the setup join")
+            .iter_mut()
+        {
             if instance.func != body {
                 continue;
             }
@@ -3510,6 +3521,7 @@ fn emit_full_in_with_mutation(
     // independently -- but they are not read-only: CPU artifact realization can
     // intern new types through the graph's shared `MonoInterner` (same
     // lock-safe monotonic arena the body fanout later races).
+    let shader_plans = std::sync::Arc::clone(&concrete.plans);
     let ((lua_view, scx, cpu_elapsed), (shader_result, shader_elapsed)) = parallel_join(
         || {
             let t_branch = Instant::now();
@@ -3532,7 +3544,14 @@ fn emit_full_in_with_mutation(
             let shader_scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
                 .sharing(std::sync::Arc::clone(graph.interner()));
             let result = (|| {
-                let shader_view = realize_shader_view(ws, &graph, &shader_programs, &compute_programs, &shader_scx)?;
+                let shader_view = realize_shader_view(
+                    ws,
+                    &graph,
+                    &shader_programs,
+                    &compute_programs,
+                    &shader_scx,
+                    shader_plans,
+                )?;
                 let shader_registrations = shader_registration_lines(
                     ws,
                     &shader_scx,
@@ -3761,7 +3780,14 @@ fn update_shader_registrations(
     let compute = compute_programs(&compute_collection);
     let shader_scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
         .sharing(std::sync::Arc::clone(self.graph.interner()));
-    let view = realize_shader_view(ws, &self.graph, &programs, &compute, &shader_scx)?;
+    let view = realize_shader_view(
+        ws,
+        &self.graph,
+        &programs,
+        &compute,
+        &shader_scx,
+        std::sync::Arc::clone(&self.concrete.plans),
+    )?;
     let registrations = shader_registration_lines(
         ws,
         &shader_scx,

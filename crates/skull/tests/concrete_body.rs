@@ -342,7 +342,7 @@ fn main() {
     let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
     skull_mir::lower::lower_instance_with_plans(&ws, &scx, main_plan, &bodies.plans)
         .expect("call lowering rejected the intact selected callee plan");
-    let mut plans = bodies.plans.clone();
+    let mut plans = (*bodies.plans).clone();
     assert!(plans.remove(&callee).is_some(), "the fixture has no selected id plan");
     assert!(
         skull_mir::lower::lower_instance_with_plans(&ws, &scx, main_plan, &plans).is_err(),
@@ -426,7 +426,7 @@ fn main() {
         .get_mut(site)
         .expect("id call signature disappeared")
         .params[0] = float;
-    let mut plans = bodies.plans.clone();
+    let mut plans = (*bodies.plans).clone();
     plans
         .get_mut(&callee)
         .expect("selected callee plan disappeared")
@@ -464,7 +464,7 @@ fn main() {
         .find(|inst| ws.module(inst.func.module).functions[inst.func.func].name.as_str() == "id")
         .cloned()
         .expect("main has no concrete id call");
-    let mut plans = bodies.plans.clone();
+    let mut plans = (*bodies.plans).clone();
     plans
         .get_mut(&callee)
         .expect("selected callee plan disappeared")
@@ -656,7 +656,7 @@ fn main() { print("{startup}") }
     );
     let call_site = plan.callees.keys().next().expect("global call site");
     let callee = plan.callees[call_site].clone();
-    let mut mismatched_plans = bodies.plans.clone();
+    let mut mismatched_plans = (*bodies.plans).clone();
     mismatched_plans
         .get_mut(&callee)
         .expect("global callee plan disappeared")

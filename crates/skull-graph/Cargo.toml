@@ -16,6 +16,7 @@ skull-parser = { path = "../skull-parser" }
 comfy-la-arena = { workspace = true }
 ustr = { workspace = true }
 rustc-hash = { workspace = true }
+log = { workspace = true }
 
 [lints]
 workspace = true

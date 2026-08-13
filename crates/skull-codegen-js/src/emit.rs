@@ -2836,7 +2836,7 @@ fn new_js_session(
         roots: roots.to_vec(),
         graph,
         view,
-        concrete: std::sync::Arc::new(concrete.plans),
+        concrete: concrete.plans,
         always: std::sync::Arc::new(concrete.always_plans),
         last_update: None,
     }
@@ -2860,7 +2860,7 @@ fn update_js_session(
             .with_mappings(mappings)
             .with_symbols(&artifact::REALIZED_SYMBOLS),
     );
-    session.concrete = std::sync::Arc::new(concrete.plans);
+    session.concrete = concrete.plans;
     session.always = std::sync::Arc::new(concrete.always_plans);
     session.roots = roots.to_vec();
     session.last_update = Some(JsGraphUpdate {

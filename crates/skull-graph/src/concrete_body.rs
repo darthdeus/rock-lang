@@ -34,7 +34,8 @@ use bone_semantic::inference::{BodyInference, Workspace};
 use bone_semantic::prelude::{Span, TyId};
 use comfy_la_arena::{ArenaMap, Idx};
 use skull_mir::concrete::{
-    ConcreteAlwaysPlans, ConcreteBodyPlan, ConcreteOwner, ConcreteSignature, ConcreteTypeTables,
+    ConcreteAlwaysPlans, ConcreteBodyPlan, ConcreteOwner, ConcretePlans, ConcreteSignature,
+    ConcreteTypeTables,
 };
 use skull_mir::monoty::{MonoArena, MonoCtor, MonoSubst, MonoTy, MonoTyId, MonoTyReason, TyEnv};
 use skull_mir::mir::FuncRef;
@@ -251,8 +252,10 @@ pub struct MissingBody {
 pub struct ConcreteBodies {
     pub bodies: BTreeMap<Instance, ConcreteBody>,
     /// The plan production lowering consumes. It is stored beside the census
-    /// body so a graph update can retract a plan with its instance.
-    pub plans: BTreeMap<Instance, ConcreteBodyPlan>,
+    /// body so a graph update can retract a plan with its instance. Behind an
+    /// `Arc` so the shader artifact view and the JS session can consume the
+    /// SAME table instead of rebuilding it from the graph.
+    pub plans: std::sync::Arc<ConcretePlans>,
     pub always_plans: ConcreteAlwaysPlans,
     pub plan_failures: Vec<(Instance, MonoTyReason)>,
     pub always_plan_failures: Vec<(ConcreteOwner, MonoTyReason)>,
@@ -1068,9 +1071,19 @@ fn concrete_always_plan(
 /// The tables intern into the graph's arena: a second arena would hand out ids
 /// that mean nothing beside `Instance::args`.
 pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
+    let t_build = std::time::Instant::now();
+    let intern_before = g.interner().stats();
+    let mut t_convert = std::time::Duration::ZERO;
+    let mut t_callee = std::time::Duration::ZERO;
+    let mut t_plan = std::time::Duration::ZERO;
+    let mut per_inst: Vec<(Instance, std::time::Duration)> = Vec::new();
+    let mut unique_decls: FxHashSet<FuncRef> = FxHashSet::default();
     let mut out = ConcreteBodies::default();
+    let mut plans = skull_mir::concrete::ConcretePlans::new();
     let expanded: Vec<Instance> = g.expanded().cloned().collect();
     for inst in expanded {
+        let t_inst = std::time::Instant::now();
+        unique_decls.insert(inst.func);
         if g.has_bound_tree_disagreement(&inst) {
             out.gaps.push(MissingBody { instance: inst, gap: BodyGap::InconsistentBounds });
             continue;
@@ -1094,7 +1107,9 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
                 continue;
             }
         };
+        let t = std::time::Instant::now();
         let c = g.interner().with_mut(|a| convert_body(a, ws, inf, body, &subst));
+        t_convert += t.elapsed();
         out.expr_examined += c.expr_examined;
         out.binding_examined += c.binding_examined;
         out.generics_bound += c.generics_bound;
@@ -1129,7 +1144,9 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
                 _ => {}
             }
         }
+        let t = std::time::Instant::now();
         callee_tables(ws, g, &inst, &mut concrete, &mut out);
+        t_callee += t.elapsed();
 
         // The question the type-table slice deferred: does a callee entry need
         // an expression type for a slot inference recorded none for? Answered by
@@ -1146,12 +1163,15 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
         for u in untyped {
             out.untyped.push((inst.clone(), u));
         }
+        let t = std::time::Instant::now();
         match concrete_plan(ws, g, &inst, &subst, inf, body, &concrete) {
             Ok(plan) => {
-                out.plans.insert(inst.clone(), plan);
+                plans.insert(inst.clone(), plan);
             }
             Err(reason) => out.plan_failures.push((inst.clone(), reason)),
         }
+        t_plan += t.elapsed();
+        per_inst.push((inst.clone(), t_inst.elapsed()));
         out.bodies.insert(inst, concrete);
     }
     for owner in g.contributions.keys() {
@@ -1176,6 +1196,51 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
                 out.always_plan_failures.push((owner, reason));
             }
         }
+    }
+    out.plans = std::sync::Arc::new(plans);
+    if log::log_enabled!(log::Level::Debug) {
+        let intern_after = g.interner().stats();
+        per_inst.sort_by_key(|(_, d)| *d);
+        let pct = |p: usize| {
+            per_inst
+                .get((per_inst.len().saturating_sub(1)) * p / 100)
+                .map_or(std::time::Duration::ZERO, |(_, d)| *d)
+        };
+        let top: Vec<String> = per_inst
+            .iter()
+            .rev()
+            .take(3)
+            .map(|(inst, d)| {
+                format!(
+                    "{}={:?}",
+                    ws.module(inst.func.module).functions[inst.func.func].name,
+                    d
+                )
+            })
+            .collect();
+        log::debug!(
+            "concrete build: {} expanded over {} decls ({} generic bodies), {} plans, {} gaps; \
+             slots {} expr + {} binding; convert {:?}, callee tables {:?}, plans {:?}, \
+             total {:?}; per-instance p50 {:?} p95 {:?} max {:?}, top [{}]; \
+             mono interns {} attempts -> {} new during build",
+            per_inst.len(),
+            unique_decls.len(),
+            out.generic_bodies,
+            out.plans.len(),
+            out.gaps.len(),
+            out.expr_examined,
+            out.binding_examined,
+            t_convert,
+            t_callee,
+            t_plan,
+            t_build.elapsed(),
+            pct(50),
+            pct(95),
+            pct(100),
+            top.join(", "),
+            intern_after.intern_attempts - intern_before.intern_attempts,
+            intern_after.intern_new - intern_before.intern_new,
+        );
     }
     out
 }
