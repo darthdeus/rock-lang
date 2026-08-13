@@ -22,6 +22,10 @@ struct CliSelection {
     /// explicit `--channel` must reject when undeclared, but a command
     /// implication must not break projects that never opted into channels.
     implied_channel: Option<String>,
+    /// `--target-os`: the artifact target for the `platform` builtin. A
+    /// cross-build packages on one OS for another, so the packaging host is
+    /// only a proxy used when this is absent.
+    target_os: Option<String>,
     overrides: std::collections::HashMap<String, String>,
 }
 
@@ -33,6 +37,7 @@ static SELECTION: OnceLock<CliSelection> = OnceLock::new();
 pub fn set_invocation_selection(
     channel: Option<String>,
     implied_channel: Option<String>,
+    target_os: Option<String>,
     overrides: &[String],
 ) -> Result<()> {
     let mut parsed = std::collections::HashMap::new();
@@ -42,8 +47,41 @@ pub fn set_invocation_selection(
         };
         parsed.insert(name.to_string(), value.to_string());
     }
-    let _ = SELECTION.set(CliSelection { channel, implied_channel, overrides: parsed });
+    let _ = SELECTION.set(CliSelection { channel, implied_channel, target_os, overrides: parsed });
     Ok(())
+}
+
+/// Stamp `ws` with the inputs resolved from `anchor`'s enclosing project.
+/// This is the ONE resolution seam every EMITTING entry point routes through
+/// -- per-site `ws.comptime_inputs = ...` assignments are how `rock test`,
+/// `rock watch` and the profiling tools shipped broken (each new entry point
+/// silently forgot the obligation). Type-check-only paths never need values
+/// and the LSP never runs commands, so neither reaches this.
+pub fn stamp_workspace(
+    ws: &mut bone_semantic::inference::Workspace,
+    anchor: &Path,
+) -> Result<()> {
+    ws.comptime_inputs = inputs_for_entry_path(anchor)?;
+    Ok(())
+}
+
+/// [`inputs_for_project_dir`] keyed by the invocation's entry path: a file
+/// anchors at its parent (so a single file inside a `[build.vars]` project
+/// behaves the same as the project build, on both backends), a directory at
+/// itself. A path that does not exist on disk (synthetic in-memory module)
+/// has no enclosing project and resolves empty.
+pub fn inputs_for_entry_path(anchor: &Path) -> Result<ComptimeInputs> {
+    let dir = if anchor.is_dir() {
+        anchor
+    } else if anchor.is_file() {
+        match anchor.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            _ => Path::new("."),
+        }
+    } else {
+        return Ok(ComptimeInputs::default());
+    };
+    inputs_for_project_dir(dir)
 }
 
 /// Resolve the comptime inputs for the project at/above `dir`: find its

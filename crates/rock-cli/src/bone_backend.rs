@@ -166,10 +166,30 @@ pub(crate) fn check_with_stdlib(
 /// A bone incremental `Session` warmed with the stdlib — the watch/hot-reload
 /// counterpart to [`check_with_stdlib`]. Every `Session::new` site passes the
 /// same `bone_stdlib_modules()` warm set; funnel them here.
+///
+/// This form does NOT resolve comptime inputs; it is for type-check-only
+/// sessions (bone watch, iter benches, LSP survey, tests). A session whose
+/// workspace will be EMITTED constructs through [`bone_session_for_emission`].
 pub(crate) fn bone_session(
     files: Vec<(String, String)>,
 ) -> std::result::Result<bone_incremental::session::Session, CompilerError> {
     bone_incremental::session::Session::new(bone_stdlib_modules(), files)
+}
+
+/// [`bone_session`] plus comptime-input stamping against `anchor`'s enclosing
+/// project -- the session counterpart of `comptime::stamp_workspace`, so every
+/// emitting session flow (skull watch, LiveProject, the incremental profilers)
+/// resolves declared inputs once per SESSION BUILD at construction. The stamp
+/// survives `update_file` (the Session mutates its ws in place); a full
+/// session rebuild constructs a new one through here and so re-resolves.
+pub(crate) fn bone_session_for_emission(
+    files: Vec<(String, String)>,
+    anchor: &std::path::Path,
+) -> std::result::Result<bone_incremental::session::Session, CompilerError> {
+    let mut session = bone_session(files)?;
+    session.ws.comptime_inputs = crate::comptime::inputs_for_entry_path(anchor)
+        .map_err(|e| CompilerError::new_no_location(format!("build var resolution failed: {e:#}")))?;
+    Ok(session)
 }
 
 /// Run bone's full pipeline once, timing each stage separately. This is the one

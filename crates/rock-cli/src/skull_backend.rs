@@ -57,7 +57,16 @@ fn skull_emit_full(
     let user = skull_parser::parse_module(src, ustr::Ustr::from(file))
         .map_err(|e| EmitFullErr::Compile(vec![e]))?;
     let user_file = user.file;
-    let ws = crate::bone_backend::check_with_stdlib([user]).map_err(EmitFullErr::Compile)?;
+    let mut ws = crate::bone_backend::check_with_stdlib([user]).map_err(EmitFullErr::Compile)?;
+    // Single-file emission resolves from the file's enclosing project
+    // (walk-up), matching the JS single-file path -- the same source must
+    // agree across backends (crates/rock-cli/tests/js_run_gate.rs).
+    crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(file)).map_err(|e| {
+        EmitFullErr::Compile(vec![CompilerError::new_no_location(format!(
+            "build var resolution failed: {e:#}"
+        ))])
+    })?;
+    let ws = ws;
     // The build lint pass (`docs/lint-future-plan.md`): soft findings report,
     // `Error` findings refuse the program through the same path a type error
     // takes.
@@ -164,13 +173,17 @@ pub fn skull_iter_codegen(path: &str, iters: usize) -> Result<()> {
             crate::ablation_report::exit_with_census(1);
         }
     };
-    let ws = match crate::bone_backend::check_modules(&mut modules) {
+    let mut ws = match crate::bone_backend::check_modules(&mut modules) {
         Ok(ws) => ws,
         Err(errs) => {
             eprintln!("{}", render_project_errs(&sources, &errs));
             crate::ablation_report::exit_with_census(1);
         }
     };
+    if let Err(e) = crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(path)) {
+        eprintln!("Error: build var resolution failed for {path}: {e:#}");
+        crate::ablation_report::exit_with_census(1);
+    }
     let entry_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
 
     // Warm-up emit outside the timed loop (catch any gap, prime the allocator).
@@ -220,13 +233,17 @@ pub fn skull_inline_stats(path: &str) -> Result<()> {
             crate::ablation_report::exit_with_census(1);
         }
     };
-    let ws = match crate::bone_backend::check_modules(&mut modules) {
+    let mut ws = match crate::bone_backend::check_modules(&mut modules) {
         Ok(ws) => ws,
         Err(errs) => {
             eprintln!("{}", render_project_errs(&sources, &errs));
             crate::ablation_report::exit_with_census(1);
         }
     };
+    if let Err(e) = crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(path)) {
+        eprintln!("Error: build var resolution failed for {path}: {e:#}");
+        crate::ablation_report::exit_with_census(1);
+    }
 
     let r = skull::inline_stats::report(&ws);
     let out = "skull-inline-stats.txt";
@@ -659,9 +676,15 @@ fn skull_build_package(dir: &str) -> std::result::Result<SkullOutcome, SkullFail
         reason: categorize(&errs[0].message),
         rendered: render_project_errs(&sources, &errs),
     })?;
-    let ws = crate::bone_backend::check_modules(&mut modules).map_err(|errs| SkullFailure {
+    let mut ws = crate::bone_backend::check_modules(&mut modules).map_err(|errs| SkullFailure {
         reason: categorize(&errs[0].message),
         rendered: render_project_errs(&sources, &errs),
+    })?;
+    crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(dir)).map_err(|e| {
+        SkullFailure {
+            reason: "build var resolution failed".to_string(),
+            rendered: format!("build var resolution failed for {dir}: {e:#}"),
+        }
     })?;
     let entry_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
     let lua = match skull::mir_emit::emit_workspace_mir(&ws, entry_mid) {
@@ -948,7 +971,10 @@ pub fn skull_watch(path: &str, output: Option<String>) -> Result<()> {
         let mut update_failed = false;
 
         match session {
-            None => match crate::bone_backend::bone_session(files.clone()) {
+            None => match crate::bone_backend::bone_session_for_emission(
+                files.clone(),
+                std::path::Path::new(path),
+            ) {
                 Ok(s) => {
                     *session = Some(s);
                     full = true; // first build: populate the cache
@@ -1968,8 +1994,9 @@ pub fn skull_incremental_profile(path: &str) -> Result<()> {
     eprintln!("=== Skull Incremental Profile: {path} ===\n");
 
     let t_warm = Instant::now();
-    let mut session = crate::bone_backend::bone_session(files.clone())
-        .map_err(|e| anyhow::anyhow!("session warm failed: {}", e.message))?;
+    let mut session =
+        crate::bone_backend::bone_session_for_emission(files.clone(), std::path::Path::new(path))
+            .map_err(|e| anyhow::anyhow!("session warm failed: {}", e.message))?;
     let warm_ms = ms(t_warm);
 
     let (baseline_lua, mut cache, full_ms) = {
@@ -2139,8 +2166,9 @@ pub fn skull_iter_incremental(path: &str, iters: usize, warmup: usize) -> Result
         })
         .collect();
 
-    let mut session = crate::bone_backend::bone_session(files.clone())
-        .map_err(|e| anyhow::anyhow!("session warm failed: {}", e.message))?;
+    let mut session =
+        crate::bone_backend::bone_session_for_emission(files.clone(), std::path::Path::new(path))
+            .map_err(|e| anyhow::anyhow!("session warm failed: {}", e.message))?;
 
     let mut cache = {
         let ws = session.workspace();

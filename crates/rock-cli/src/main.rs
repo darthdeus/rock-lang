@@ -49,6 +49,7 @@ fn main() {
     if let Err(e) = rock_cli::comptime::set_invocation_selection(
         args.channel.clone(),
         implied_channel,
+        args.target_os.clone(),
         &args.build_var_overrides,
     ) {
         eprintln!("Error: {e}");

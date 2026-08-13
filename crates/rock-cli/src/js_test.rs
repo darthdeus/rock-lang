@@ -224,10 +224,16 @@ fn js_build_file(file: &str) -> JsUnitOutcome {
         Err(e) => return js_compile_failure(file, &src, &[e]),
     };
     let user_file = user.file;
-    let ws = match crate::bone_backend::check_with_stdlib([user]) {
+    let mut ws = match crate::bone_backend::check_with_stdlib([user]) {
         Ok(ws) => ws,
         Err(errs) => return js_compile_failure(file, &src, &errs),
     };
+    if let Err(e) = crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(file)) {
+        return JsUnitOutcome::UnitFail {
+            reason: "build var resolution failed".to_string(),
+            rendered: format!("build var resolution failed for {file}: {e:#}"),
+        };
+    }
     let user_mid = crate::bone_backend::entry_module_id(&ws, user_file);
     // A discovery error (malformed `@test` annotation on a bone-accepted file)
     // is a rejection, never an expected compile failure -- so it does NOT route
@@ -270,7 +276,7 @@ fn js_build_package(dir: &str) -> JsUnitOutcome {
             }
         }
     };
-    let ws = match crate::bone_backend::check_modules(&mut modules) {
+    let mut ws = match crate::bone_backend::check_modules(&mut modules) {
         Ok(ws) => ws,
         Err(errs) => {
             return JsUnitOutcome::UnitFail {
@@ -279,6 +285,12 @@ fn js_build_package(dir: &str) -> JsUnitOutcome {
             }
         }
     };
+    if let Err(e) = crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(dir)) {
+        return JsUnitOutcome::UnitFail {
+            reason: "build var resolution failed".to_string(),
+            rendered: format!("build var resolution failed for {dir}: {e:#}"),
+        };
+    }
     let tests = match crate::skull_backend::collect_package_test_fns(&ws, dir) {
         Ok(tests) => tests,
         Err(e) => {
@@ -500,13 +512,9 @@ fn emit_js_program_single(path: &str) -> skull_codegen_js::emit::JsProgram {
     };
     // Single-file runs resolve from the file's enclosing project (walk-up), so
     // a file inside a [build.vars] project behaves the same on both backends.
-    let parent = std::path::Path::new(path).parent().unwrap_or(std::path::Path::new("."));
-    match crate::comptime::inputs_for_project_dir(parent) {
-        Ok(inputs) => ws.comptime_inputs = inputs,
-        Err(e) => {
-            log::error!(target: "JS", "build var resolution failed for {}: {:#}", path, e);
-            crate::ablation_report::exit_with_census(1);
-        }
+    if let Err(e) = crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(path)) {
+        log::error!(target: "JS", "build var resolution failed for {}: {:#}", path, e);
+        crate::ablation_report::exit_with_census(1);
     }
     let user_mid = crate::bone_backend::entry_module_id(&ws, user_file);
     let scx = ScalarCtx::new(&ws).with_target(bone_semantic::hir::FnBackend::Js);
@@ -564,7 +572,7 @@ pub(crate) fn try_emit_js_program_project(
             crate::skull_backend::render_project_errs(&sources, &errs)
         )),
     };
-    ws.comptime_inputs = crate::comptime::inputs_for_project_dir(std::path::Path::new(dir))?;
+    crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(dir))?;
     let user_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
     let scx = ScalarCtx::new(&ws).with_target(bone_semantic::hir::FnBackend::Js);
     let prog = match skull_codegen_js::emit::emit_program(&ws, &scx, user_mid) {

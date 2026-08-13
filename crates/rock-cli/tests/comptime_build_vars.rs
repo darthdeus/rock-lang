@@ -35,6 +35,11 @@ fn main() {
     print(build_var("SHA"))
     print(embed_string("data.txt"))
 }
+
+@test(output = "hello-from-vars")
+fn build_var_reaches_package_tests() {
+    print(build_var("GREETING"))
+}
 "#;
 
 fn project(tag: &str) -> std::path::PathBuf {
@@ -91,6 +96,80 @@ fn var_flag_overrides_the_source() {
     let (stdout, stderr, ok) = run(&dir, &["--var", "GREETING=overridden"]);
     assert!(ok, "rock run --var failed:\nstdout:{stdout}\nstderr:{stderr}");
     assert!(stdout.starts_with("overridden\n"), "override wins:\n{stdout}");
+}
+
+fn run_cmd(args: &[&str]) -> (String, String, bool) {
+    let out = Command::new(rock_bin()).args(args).output().expect("spawn rock");
+    (
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        out.status.success(),
+    )
+}
+
+// `rock test <package>` shipped broken for every [build.vars] project (the
+// package path never stamped comptime inputs and reported the deceptive
+// `0/0 @tests passed (0 failed)` shape). Assert the DENOMINATOR, never the
+// "0 failed" (CLAUDE.md).
+#[test]
+fn rock_test_runs_a_build_vars_package() {
+    let dir = project("pkg_test");
+    let (stdout, stderr, ok) = run_cmd(&["test", dir.to_str().unwrap()]);
+    assert!(ok, "rock test failed:\nstdout:{stdout}\nstderr:{stderr}");
+    assert!(
+        stdout.contains("1/1 @tests passed"),
+        "package test must RUN (denominator 1), not emit-fail:\n{stdout}\n{stderr}"
+    );
+    assert!(stdout.contains("0 emit-fail"), "no emit failures:\n{stdout}");
+}
+
+#[test]
+fn rock_test_runs_a_build_vars_package_on_js() {
+    if !node_available() {
+        eprintln!("SKIP: node not found");
+        return;
+    }
+    let dir = project("pkg_test_js");
+    let (stdout, stderr, ok) =
+        run_cmd(&["test", dir.to_str().unwrap(), "--backend", "js"]);
+    assert!(ok, "rock test --backend js failed:\nstdout:{stdout}\nstderr:{stderr}");
+    assert!(
+        stdout.contains("1/1 @tests passed"),
+        "js package test must RUN (denominator 1):\n{stdout}\n{stderr}"
+    );
+}
+
+// A single FILE inside a [build.vars] project resolves from its enclosing
+// project on BOTH backends. The Lua path shipped without the walk-up the JS
+// path had, so the same source rejected on luajit and ran on JS.
+#[test]
+fn single_file_inside_a_project_resolves_on_both_backends() {
+    let dir = project("single_file");
+    let main = dir.join("main.rock");
+    let (stdout, stderr, ok) = run_cmd(&["run", main.to_str().unwrap()]);
+    assert!(ok, "single-file lua run failed:\nstdout:{stdout}\nstderr:{stderr}");
+    assert_eq!(stdout, EXPECTED_DEV);
+
+    if node_available() {
+        let (js_out, js_err, js_ok) =
+            run_cmd(&["run", main.to_str().unwrap(), "--backend", "js"]);
+        assert!(js_ok, "single-file js run failed:\nstdout:{js_out}\nstderr:{js_err}");
+        assert_eq!(js_out, stdout, "backends must agree on a single file");
+    }
+}
+
+// The profiling tools build their own workspace; an unstamped one rejects
+// every [build.vars] project and (worse) iter-codegen once exited 0 while
+// measuring nothing.
+#[test]
+fn iter_codegen_measures_a_build_vars_project() {
+    let dir = project("iter_codegen");
+    let (stdout, stderr, ok) =
+        run_cmd(&["iter-codegen", dir.to_str().unwrap(), "--iters", "1"]);
+    assert!(ok, "iter-codegen failed:\nstdout:{stdout}\nstderr:{stderr}");
+    let all = format!("{stdout}{stderr}");
+    assert!(!all.contains("not declared"), "no undeclared-var rejection:\n{all}");
+    assert!(all.contains("ms/iter"), "a measurement was actually taken:\n{all}");
 }
 
 #[test]

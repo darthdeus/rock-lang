@@ -518,6 +518,9 @@ pub struct Args {
     /// `--channel`: release channel for `[build.vars]` resolution
     /// (docs/comptime-plan.md). None = the project's default_channel.
     pub channel: Option<String>,
+    /// `--target-os`: artifact target for the `platform` builtin. Cross-builds
+    /// package on one OS for another; None = infer from channel, then host.
+    pub target_os: Option<String>,
     /// `--var NAME=VALUE` overrides, raw; parsed/validated at resolution.
     pub build_var_overrides: Vec<String>,
     pub trace: bool,
@@ -702,6 +705,8 @@ impl Args {
             .arg(Arg::new("var").long("var").value_name("NAME=VALUE")
                 .action(ArgAction::Append)
                 .help("Override a declared [build.vars] entry for this invocation (repeatable)"))
+            .arg(Arg::new("target-os").long("target-os").value_name("OS")
+                .help("Artifact target for the `platform` builtin (linux, osx, windows, ios, web). Cross-builds package on one OS for another; default infers from channel, then the host."))
             .arg(Arg::new("trace").long("trace").action(ArgAction::SetTrue)
                 .help("Enable trace file generation (trace.folded and trace.perfetto) for profiling"))
             .arg(Arg::new("timeout").long("timeout").default_value("60")
@@ -804,6 +809,7 @@ impl Args {
             lib: m.get_one::<String>("lib").cloned(),
             clean: m.get_flag("clean"),
             channel: m.get_one::<String>("channel").cloned(),
+            target_os: m.get_one::<String>("target-os").cloned(),
             build_var_overrides: m
                 .get_many::<String>("var")
                 .map(|vals| vals.cloned().collect())
