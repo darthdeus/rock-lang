@@ -107,7 +107,9 @@ local ok = pcall(function()
   __rock_code_slot_stage("probe", function() return 2 end, "changed-abi")
   __rock_code_slot_publish()
 end)
-if not ok and _G.__ROCK_LIFECYCLE_PLAN == old_plan and old_plan.update.len == 1
+__rock_code_slot_abort()
+if not ok and _G.__rock_lifecycle_plan_pending == nil
+   and _G.__ROCK_LIFECYCLE_PLAN == old_plan and old_plan.update.len == 1
    and __rock_code_slot_ref("probe")() == 1 then print("PASS") else print("FAIL") end
 "#;
     let out = run_luajit(&format!("{lua}{driver}"), "lifecycle_transaction");
