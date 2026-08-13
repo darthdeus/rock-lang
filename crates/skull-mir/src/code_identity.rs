@@ -612,7 +612,6 @@ fn body_fingerprint(mf: &MirFunc) -> u64 {
     // This is a duplicate-body witness only. It intentionally excludes the
     // identity/compatibility fields and is canonicalized across MIR clones;
     // it is never used to find a slot.
-    let mut normalized = mf.clone();
     let aliases: BTreeMap<Ustr, Ustr> = mf
         .nested_fn_identities
         .iter()
@@ -620,25 +619,33 @@ fn body_fingerprint(mf: &MirFunc) -> u64 {
             (*name, Ustr::from(format!("__rock_nested_{identity:?}").as_str()))
         })
         .collect();
-    for (_, inst) in normalized.insts.iter_mut() {
-        match inst {
-            Inst::Global(name) => {
-                if let Some(alias) = aliases.get(name) {
-                    *name = *alias;
+
+    // Generic inlining can leave unrelated cloned lowering artifacts in the
+    // same arenas. Hash only the reachable body so those artifacts cannot make
+    // two copies of one lambda look like different bodies.
+    let mut body = String::new();
+    for block in crate::cfg::reachable_blocks_from(mf, mf.entry) {
+        body.push_str("block:");
+        for inst_id in &mf.blocks[block].insts {
+            let mut inst = mf.insts[*inst_id].clone();
+            match &mut inst {
+                Inst::Global(name) => {
+                    if let Some(alias) = aliases.get(name) {
+                        *name = *alias;
+                    }
                 }
-            }
-            Inst::MakeEnv { fn_ref: Some(name), .. } => {
-                if let Some(alias) = aliases.get(name) {
-                    *name = *alias;
+                Inst::MakeEnv { fn_ref: Some(name), .. } => {
+                    if let Some(alias) = aliases.get(name) {
+                        *name = *alias;
+                    }
                 }
+                _ => {}
             }
-            _ => {}
+            body.push_str(&format!("{inst:?};"));
         }
+        body.push_str(&format!("term:{:?};", mf.blocks[block].term));
     }
-    let debug = canonicalize_arena_indices(&format!(
-        "{:?}{:?}{:?}",
-        normalized.blocks, normalized.insts, normalized.cells
-    ));
+    let debug = canonicalize_arena_indices(&body);
     let mut h = Fnv64::new();
     h.write_str(&debug);
     h.finish()

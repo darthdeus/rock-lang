@@ -3124,13 +3124,15 @@ fn assemble(
     // unrelated to a body that cannot emit.
     rejections.into_result()?;
     mark_generated_code_values(ws, &mut code_artifact);
-    out.push_str(&code_slot_registration_lua(ws, scx, &code_artifact)?);
 
     // Globals: an init fn + a dependency-ordered `<NAME> = __skull_ginit_<NAME>()`.
     // (Lowered above, so the walk could see their call edges; appended here, in
     // the original slot, so the emitted text is unchanged.)
     out.push_str(&globals_lua);
     skipped.extend(global_skipped);
+    // Global initializer bodies (including their escaping lambdas) are now
+    // defined, so slot staging must follow them but precede initializer calls.
+    out.push_str(&code_slot_registration_lua(ws, scx, &code_artifact)?);
 
     // Order the init lines by their transitive global-read closure over the full
     // call graph (now that every fn's direct facts are recorded).
