@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 pub mod resolver;
 
@@ -38,6 +39,32 @@ pub struct RendererConfig {
 pub enum RendererBackend {
     Gl,
     Wgpu,
+}
+
+static RENDERER_OVERRIDE: OnceLock<Mutex<Option<RendererBackend>>> = OnceLock::new();
+
+fn renderer_override_slot() -> &'static Mutex<Option<RendererBackend>> {
+    RENDERER_OVERRIDE.get_or_init(|| Mutex::new(None))
+}
+
+/// Process-local selection installed by a CLI invocation. It is read by the
+/// same manifest resolver used by compiler, engine build, and generated game
+/// preamble, so an override cannot affect only the runtime half.
+pub struct RendererOverrideGuard {
+    previous: Option<RendererBackend>,
+}
+
+impl Drop for RendererOverrideGuard {
+    fn drop(&mut self) {
+        *renderer_override_slot().lock().expect("renderer override lock") = self.previous;
+    }
+}
+
+pub fn install_renderer_override(backend: Option<RendererBackend>) -> RendererOverrideGuard {
+    let mut slot = renderer_override_slot().lock().expect("renderer override lock");
+    let previous = *slot;
+    *slot = backend;
+    RendererOverrideGuard { previous }
 }
 
 #[derive(Debug, Clone)]
@@ -428,6 +455,9 @@ impl StickConfig {
     }
 
     pub fn renderer_backend(&self) -> Result<RendererBackend> {
+        if let Some(backend) = *renderer_override_slot().lock().expect("renderer override lock") {
+            return Ok(backend);
+        }
         match self.renderer.as_ref().and_then(|r| r.backend.as_deref()).unwrap_or("gl") {
             "gl" => Ok(RendererBackend::Gl),
             "wgpu" => Ok(RendererBackend::Wgpu),
