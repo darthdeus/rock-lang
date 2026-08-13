@@ -395,16 +395,12 @@ mod overlay_runtime_tests {
     use crate::bone_backend::bone_session;
     use super::{emit_overlay_checked, exec_lua, normalize_stdout, ExecOutcome};
 
-    /// Standalone `@test`/synthetic programs have no engine, but the overlay
-    /// always calls `clear_all_systems()` (the system rebind). Stub it so the
-    /// overlay loads; these programs register no systems, so the stub is a
-    /// faithful no-op.
+    /// Standalone `@test`/synthetic programs have no engine. Stub the full-reload
+    /// registry reset only when a fixture emits one; body overlays refresh the
+    /// CodeRefs already stored in registries.
     const SYS_STUB: &str = "function clear_all_systems() end\n";
 
-    /// The stub ONLY when the program doesn't define its own `clear_all_systems`.
-    /// Files exercising the decorator/system machinery emit a REAL one (+ the
-    /// registries); stubbing it as a no-op there would shadow it (later-wins) and
-    /// double-register on the rebind. Empty string when a real one is present.
+    /// The stub is omitted when a fixture defines its own reset function.
     fn stub_for(full_lua: &str) -> &'static str {
         if full_lua.contains("function clear_all_systems") { "" } else { SYS_STUB }
     }
@@ -992,7 +988,7 @@ mod overlay_runtime_tests {
     // the overlay (the maximal body edit) and assert each `@test` prints the same
     // composed (baseline ++ overlay) as it does from the baseline alone. Identity
     // bodies mean any divergence is a COMPOSITION bug -- redefining a real-shaped
-    // function after main.lua, or the `clear_all_systems` rebind, breaking it.
+    // function after main.lua, or stale slot publication, breaking it.
 
     use bone_semantic::hir::BodyOwner;
 
@@ -1014,10 +1010,6 @@ mod overlay_runtime_tests {
     struct FileResult {
         compared: usize,
         divergences: Vec<(String, String, String)>,
-        /// Skipped because the overlay's rebind re-registers engine systems -- the
-        /// corpus tier has no real `clear_all_systems`/registries, so the rebind
-        /// double-registers. These belong to the SIM tier (real engine).
-        skipped_system: bool,
     }
 
     /// Compare overlay-composed vs full-build execution for one file. A file that
@@ -1046,15 +1038,6 @@ mod overlay_runtime_tests {
             .map(|(fid, _)| (mid, BodyOwner::Function(fid)))
             .collect();
         let overlay = emit_overlay_checked(&ws, &mut cache, &reinferred);
-
-        // The overlay rebind calls `__rock_rebind_system` (an engine fn absent in
-        // a standalone @test compile) for each changed decorated fn. Files with
-        // decorated systems are the SIM tier's job -- skip them here rather than
-        // error on the undefined helper.
-        if overlay.lua.contains("__rock_rebind_system(") {
-            r.skipped_system = true;
-            return r;
-        }
 
         let stub = stub_for(&full.lua);
         for t in &tests {
@@ -1089,7 +1072,6 @@ mod overlay_runtime_tests {
     struct SweepTotals {
         files_with_tests: usize,
         compared: usize,
-        skipped_system: usize,
         divergences: Vec<(String, String, String)>,
     }
 
@@ -1110,7 +1092,6 @@ mod overlay_runtime_tests {
         SweepTotals {
             compared: per.iter().map(|r| r.compared).sum(),
             files_with_tests: per.iter().filter(|r| r.compared > 0).count(),
-            skipped_system: per.iter().filter(|r| r.skipped_system).count(),
             divergences: per.into_iter().flat_map(|r| r.divergences).collect(),
         }
     }
@@ -1146,16 +1127,12 @@ mod overlay_runtime_tests {
         );
     }
 
-    // --- sim tier: the overlay rebind re-points the system registry ------------
+    // --- sim tier: a registry retains and observes a CodeRef -------------------
     //
     // The corpus tier can't reach this: a `@update`/`@draw` decorator registers a
-    // function VALUE into a registry (`UpdateSystem { func, name, stage }`), so
-    // later-wins on the global does NOT update the copy already in the registry.
-    // The overlay's rebind (`clear_all_systems()` + re-apply every decorator) is
-    // what re-points it. This needs a running system loop + real registries --
-    // here a SELF-CONTAINED fixture with the genuine engine `deco`/registry/clear
-    // shapes (copied from `stone/engine/systems/systems.rock`), driven through the
-    // REAL `emit_overlay`, executed under luajit. (`docs/skull-incremental-emit-split.md`.)
+    // function VALUE into a registry (`UpdateSystem { func, name, stage }`). The
+    // stored value is a CodeRef, so an overlay must refresh it without a
+    // name-based registry repair.
 
     /// A minimal game-shaped module: one `@update` system whose body writes
     /// `tick_val` to an observable global, plus the engine's deco/registry/clear
@@ -1168,11 +1145,6 @@ mod overlay_runtime_tests {
              deco init update(stage: int = 100) {{\n\
                 UPDATE_SYSTEMS.push(UpdateSystem {{ func: transmute(target.func), name: transmute(target.name), stage: stage }})\n\
              }}\n\
-             @nomangle\n\
-             inline(lua) fn __rock_rebind_system(name: string, f: any) = \"\"\"\n\
-                for i = 1, UPDATE_SYSTEMS.len do if UPDATE_SYSTEMS._data[i].name == name then UPDATE_SYSTEMS._data[i].func = f end end\n\
-                return nil\n\
-             \"\"\"\n\
              global TICK_OUT: int = 0\n\
              @update\n\
              fn tick() {{ TICK_OUT = {tick_val} }}\n\
@@ -1184,18 +1156,10 @@ mod overlay_runtime_tests {
     /// Run the registry-driving frame and report the observable global.
     const SIM_DRIVER: &str = "run_frame() print(TICK_OUT)";
 
-    /// The real overlay's rebind must re-point the registry at the EDITED system
-    /// body. Editing a decorated `@update` body, delivered as an overlay, must
-    /// make the frame loop run the NEW body (== a fresh full build), not the stale
-    /// function value the registry captured when `main.lua` registered it at load.
-    ///
-    /// Regression guard for the full chain: bone reports the decorated body in
-    /// `reinferred` (`lower.rs` footprint fix), skull re-emits it into the overlay,
-    /// and the rebind (`clear_all_systems()` + `__deco_update`) re-registers the
-    /// fresh `tick`. `sim_without_rebind_runs_stale_body` is the negative control
-    /// proving the rebind (not just later-wins) is what makes this work.
+    /// An existing lifecycle entry must invoke the edited body through its
+    /// retained CodeRef. The overlay contains no decorator rebind call.
     #[test]
-    fn sim_overlay_rebind_runs_new_system_body() {
+    fn sim_overlay_refreshes_existing_code_ref_registry_entry() {
         let v0 = sim_fixture(1);
         let v1 = sim_fixture(2);
 
@@ -1217,12 +1181,11 @@ mod overlay_runtime_tests {
             "a decorated-fn body edit must re-infer exactly the edited body"
         );
         let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
-        // The overlay carries the redefined body AND a targeted rebind of just the
-        // changed decorated fn (in-place, not clear-all + re-register-all).
+        // The overlay carries the redefined body and slot publication only.
         assert!(
             overlay.lua.contains("function tick_ret_unit()")
-                && overlay.lua.contains("__rock_rebind_system(\"tick\""),
-            "overlay must redefine the body AND rebind the changed system:\n{}",
+                && !overlay.lua.contains("__rock_rebind_system"),
+            "overlay must redefine the body without a name-based registry repair:\n{}",
             overlay.lua
         );
         let fresh = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1").0;
@@ -1235,35 +1198,10 @@ mod overlay_runtime_tests {
                 assert_eq!(
                     normalize_stdout(&c).trim(),
                     "2",
-                    "overlay rebind must run the EDITED decorated body, not the stale registry func"
+                    "the retained registry CodeRef must run the EDITED decorated body"
                 );
             }
             _ => panic!("composed or fresh run errored"),
-        }
-    }
-
-    /// Positive control: WITHOUT the rebind -- a naive global redefinition (what
-    /// later-wins alone gives) -- the registry keeps its stale func value and the
-    /// frame loop runs the OLD body. Proves the rebind is load-bearing and a
-    /// regression that dropped it would be caught by the test above.
-    #[test]
-    fn sim_without_rebind_runs_stale_body() {
-        let v0 = sim_fixture(1);
-        let session = bone_session(files(&v0)).expect("session");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        let full = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full").0;
-
-        // Redefine the emitted `tick` symbol globally but do NOT clear+re-register
-        // (no rebind): the registry captured the OLD func VALUE, so the redefinition
-        // does not reach it.
-        let naive_redef = "function tick_ret_unit() TICK_OUT = 2 end";
-        match run_parts(&[&full.lua, naive_redef, SIM_DRIVER]) {
-            ExecOutcome::Output(o) => assert_eq!(
-                normalize_stdout(&o).trim(),
-                "1",
-                "without the rebind the registry must run the STALE body (this is the bug the rebind fixes)"
-            ),
-            ExecOutcome::Errored(_) => panic!("fixture failed to run"),
         }
     }
 
@@ -1317,8 +1255,8 @@ mod overlay_runtime_tests {
     }
 
     /// A FLAT-ENUM-yielding `co fn` body edit, through the overlay, must re-emit the
-    /// frame-slot yield channel (the `__step`'s `s.__y*` slot writes + the ctor's
-    /// `__advance`/`__resume` fields on the merged frame) and a freshly-created coroutine must run the new body,
+    /// frame-slot yield channel and CodeRefs for the ctor's `__advance`/`__resume`
+    /// fields, then a freshly-created coroutine must run the new body,
     /// threading the yield through the slots -- no `{__variant}` box on the concrete
     /// consumer path. Guards the frame-slot channel (`docs/coroutine-allocation-plan.md`
     /// Part A) against a hot-reload regression; the scalar-yield test above does not
@@ -1354,9 +1292,9 @@ mod overlay_runtime_tests {
         assert!(overlay.lua.contains(".__y0 = "), "overlay step must write yield leaves to frame slots:\n{}", overlay.lua);
         assert!(
             overlay.lua.contains("function gen_ret_Coroutine_Ev_unit_unit__advance(")
-                && overlay.lua.contains("__advance = gen_ret_Coroutine_Ev_unit_unit__advance")
-                && overlay.lua.contains("__resume = gen_ret_Coroutine_Ev_unit_unit__resume"),
-            "overlay must re-emit the per-co-fn __advance/__resume fns + the ctor storing them as fields:\n{}",
+                && overlay.lua.contains("__rock_code_slot_ref(\"generated:main.rock::gen<>::advance\")")
+                && overlay.lua.contains("__rock_code_slot_ref(\"generated:main.rock::gen<>::resume\")"),
+            "overlay must re-emit the per-co-fn __advance/__resume fns + CodeRefs in the ctor:\n{}",
             overlay.lua
         );
 
@@ -2117,18 +2055,12 @@ mod overlay_runtime_tests {
     }
 
     /// Editing the BODY of an `@on_reload` fn, delivered as an overlay, must run
-    /// the NEW body on the next fire -- the name-lookup trick. `@on_reload`
-    /// registers the fn's NAME (not its value), and `__rock_fire_hot_reload_callbacks`
-    /// resolves `_G[name]` at fire time, so a redefined global propagates to the
-    /// already-registered entry (same mechanic as a coroutine's `__step`). Requires
-    /// `@nomangle` so the Lua global == the source name. Pre-fix the deco captured
-    /// the function VALUE, so a body edit ran the stale original.
+    /// the NEW body on the next fire through the retained CodeRef.
     #[test]
-    fn on_reload_body_edit_runs_new_body_via_name_lookup() {
+    fn on_reload_body_edit_runs_new_body_via_code_ref() {
         let prog = |v: i32| {
             format!(
                 "global OUT: int = 0\n\
-                 @nomangle\n\
                  @on_reload\n\
                  fn refresh() {{ OUT = {v} }}\n\
                  @nomangle\n\
@@ -2144,14 +2076,11 @@ mod overlay_runtime_tests {
         let r1 = session.update_file("main.rock", &v1).expect("update v1");
         let overlay = emit_overlay_checked(session.workspace(), &mut cache, &r1.reinferred);
 
-        // full0 registers `refresh` by name. The overlay redefines the `refresh`
-        // global (new body); the fire must resolve and run the NEW body -> OUT == 2.
-        // `refresh` is decorated, so the overlay emits a `__rock_rebind_system`
-        // rebind (engine-provided; a no-op for the hot-reload list) -- stub it.
+        // full0 registers the CodeRef. The overlay stages the edited body, and
+        // the existing callback entry must invoke it.
         let composed = run_parts(&[
             &full0.lua,
             stub_for(&full0.lua),
-            "function __rock_rebind_system(name, f) end",
             &overlay.lua,
             "__rock_fire_hot_reload_callbacks()",
             "report()",
@@ -2160,39 +2089,22 @@ mod overlay_runtime_tests {
             ExecOutcome::Output(o) => assert_eq!(
                 normalize_stdout(&o).trim(),
                 "2",
-                "fire must run the EDITED @on_reload body (name-lookup), not the stale original"
+                "fire must run the EDITED @on_reload body through its CodeRef"
             ),
             ExecOutcome::Errored(_) => panic!("on_reload body-edit fixture failed to run"),
         }
     }
 
-    /// `@on_reload` registers by NAME and re-resolves `_G[name]` at fire time, so
-    /// the Lua global must equal the source name -- i.e. the fn must be `@nomangle`
-    /// (else a same-named overload could mangle it and the lookup would silently
-    /// miss). skull rejects a `@on_reload` fn that isn't `@nomangle` at emit time.
+    /// `@on_reload` stores a function value, so ordinary name mangling does not
+    /// affect callback freshness.
     #[test]
-    fn on_reload_without_nomangle_is_a_compile_error() {
+    fn on_reload_without_nomangle_emits_ok() {
         let prog = "@on_reload\nfn refresh() {}\nfn main() {}\n";
-        let session = bone_session(files(prog)).expect("session");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        let res = skull::mir_emit::emit_full(session.workspace(), mid);
-        let err = res.err().expect("@on_reload without @nomangle must be a compile error");
-        assert!(
-            err.message.contains("nomangle"),
-            "error should name the @nomangle requirement, got: {}",
-            err.message
-        );
-    }
-
-    /// The positive control: `@nomangle @on_reload` emits cleanly.
-    #[test]
-    fn on_reload_with_nomangle_emits_ok() {
-        let prog = "@nomangle\n@on_reload\nfn refresh() {}\nfn main() {}\n";
         let session = bone_session(files(prog)).expect("session");
         let mid = skull::user_module_id(session.workspace()).unwrap();
         assert!(
             skull::mir_emit::emit_full(session.workspace(), mid).is_ok(),
-            "@nomangle @on_reload must emit cleanly"
+            "@on_reload without @nomangle must emit cleanly"
         );
     }
 
@@ -2208,8 +2120,8 @@ mod overlay_runtime_tests {
         let files: Vec<String> = files.into_iter().filter(|f| !f.contains("/benches/")).collect();
         let t = sweep(&files);
         eprintln!(
-            "overlay corpus sweep: {} files, {} with tests, {} tests compared, {} skipped (system/sim-tier), {} divergences",
-            files.len(), t.files_with_tests, t.compared, t.skipped_system, t.divergences.len()
+            "overlay corpus sweep: {} files, {} with tests, {} tests compared, {} divergences",
+            files.len(), t.files_with_tests, t.compared, t.divergences.len()
         );
         assert!(
             t.divergences.is_empty(),
@@ -2413,23 +2325,11 @@ mod overlay_runtime_tests {
         }
     }
 
-    /// A lambda-local-only edit is layout-stable: dense per-frame slot naming
-    /// (docs/coroutine-frame-lambda-plan.md "P2 finding", now FIXED) keys both
-    /// the emitted `s.c<slot>` field names AND the layout stamp on a dense
-    /// ordinal that lambda-internal cell allocation cannot perturb, so a live
-    /// coroutine SURVIVES the edit instead of stamp-killing. Was a sentinel
-    /// (`assert_ne`, "7\n-1\n-1") pinning the two raw-id-perturbation causes it
-    /// fixes:
-    ///   (A) the canon hashed frame cells by RAW cell-arena id; lowering
-    ///       allocates a lambda's internal cells BEFORE the enclosing `let`'s
-    ///       cell, so adding `let y` inside the lambda shifted the raw id of
-    ///       every frame cell after it (record `f`: c3 -> c4). Slots absorb it.
-    ///   (B) an UNUSED lambda-local fell back to ROOT ownership and became a
-    ///       frame cell outright. The ghost-cell drop (referenced-nowhere ->
-    ///       out of the frame) removes it. (This test uses a USED local, so it
-    ///       exercises (A); the ghost drop has its own structural test.)
+    /// A lambda-local edit leaves the coroutine frame stamp stable, but changes
+    /// the compatibility record for its escaping lambda body. It must request a
+    /// safe restart rather than redirect a retained CodeRef.
     #[test]
-    fn cofn_lambda_local_edit_shifts_layout_live_survives() {
+    fn cofn_lambda_local_edit_requests_safe_restart() {
         // v0 body: `x + base`; v1 body: `{ let y = base + base; x + y }` (used
         // local -- reason (A): raw-id shift, not the dead-cell fallback (B)).
         let prog = |body: &str| {
@@ -2457,36 +2357,28 @@ mod overlay_runtime_tests {
             "adding a lambda-local is a body edit, got {:?}",
             result.tier
         );
-        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
         let fresh = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1").0;
 
-        // Dense slots leave the stamp fixed under a lambda-internal cell edit.
         assert_eq!(
             layout_stamp(&full0.lua, "gen"),
             layout_stamp(&fresh.lua, "gen"),
-            "a lambda-local edit must be layout-stable (dense slots absorb the raw-id shift)"
+            "the lambda-local edit must not change the coroutine frame stamp"
         );
-
-        // pump #1 under v0: f(3)=7. Overlay. pump #2 on the live coroutine: the
-        // stamp still matches -> survives -> f is unchanged (x+base=7) so 3+4+4=11
-        // via the new body path; pump #3 done -> -1.
-        let composed = run_parts(&[&full0.lua, stub_for(&full0.lua), "start()", "pump()", &overlay.lua, "pump()", "pump()"]);
-        match composed {
-            ExecOutcome::Output(o) => assert_eq!(
-                normalize_stdout(&o).trim(),
-                "7\n11\n-1",
-                "a layout-stable lambda-local edit keeps the live coroutine running (7 then 11)"
-            ),
-            ExecOutcome::Errored(_) => panic!("lambda-local edit scenario crashed instead of surviving"),
-        }
+        let err = match skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred) {
+            Ok(_) => panic!("a changed escaping lambda body must not overlay across its compatibility record"),
+            Err(err) => err,
+        };
+        assert!(
+            err.message.contains("safe restart"),
+            "incompatible lambda body must request the safe restart path, got: {}",
+            err.message
+        );
     }
 
-    /// The converse: adding a co-fn-LEVEL local DOES shift the frame layout, so
-    /// a live coroutine across that overlay is stamp-killed cleanly. Pairs with
-    /// the lambda-local test to pin that P1 moved ONLY lambda-owned cells out of
-    /// the canon, not co-fn-level ones.
+    /// A co-fn-level local changes the coroutine-frame schema, so the overlay
+    /// must request a safe restart before publishing any CodeRef body.
     #[test]
-    fn cofn_toplevel_local_edit_shifts_layout_live_killed() {
+    fn cofn_toplevel_local_edit_requests_safe_restart() {
         // `mk()` keeps the inserted co-fn local as a real call so DCE can't
         // erase its frame cell (same guard as the cell-shift stamp test).
         let prog = |extra: &str| {
@@ -2514,7 +2406,6 @@ mod overlay_runtime_tests {
             "adding a co-fn local is a body edit, got {:?}",
             result.tier
         );
-        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
         let fresh = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1").0;
 
         assert_ne!(
@@ -2523,18 +2414,15 @@ mod overlay_runtime_tests {
             "a co-fn-level local must shift the frame layout stamp"
         );
 
-        // pump #1 under v0: f(3)=7. Overlay (z shifts the frame). pump #2 on the
-        // live coroutine: the stamp mismatch errors inside the pcall -> clean
-        // kill -> -1; subsequent pumps stay -1 (dead).
-        let composed = run_parts(&[&full0.lua, stub_for(&full0.lua), "start()", "pump()", &overlay.lua, "pump()", "pump()"]);
-        match composed {
-            ExecOutcome::Output(o) => assert_eq!(
-                normalize_stdout(&o).trim(),
-                "7\n-1\n-1",
-                "a co-fn-level local shift must stamp-kill the live coroutine cleanly"
-            ),
-            ExecOutcome::Errored(_) => panic!("co-fn local shift + live resume crashed instead of clean kill"),
-        }
+        let err = match skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred) {
+            Ok(_) => panic!("a changed coroutine frame schema must not overlay"),
+            Err(err) => err,
+        };
+        assert!(
+            err.message.contains("safe restart"),
+            "incompatible coroutine frame must request the safe restart path, got: {}",
+            err.message
+        );
     }
 }
 #[cfg(test)]

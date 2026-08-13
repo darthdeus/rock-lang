@@ -327,7 +327,7 @@ fn changed_static_initializer_resets_only_its_live_cell() {
 }
 
 #[test]
-fn decorated_function_overlay_rebinds_the_registered_function_value() {
+fn decorated_function_overlay_refreshes_the_registered_code_ref() {
     let source = |message: &str| {
         format!(
             "struct System {{ func: fn() -> (), name: string }}\n\
@@ -335,11 +335,6 @@ fn decorated_function_overlay_rebinds_the_registered_function_value() {
              deco init system {{\n\
                  SYSTEMS.push(System {{ func: transmute(target.func), name: transmute(target.name) }})\n\
              }}\n\
-             @nomangle inline(js) fn __rock_rebind_system(name: string, f: any) = \"\"\"\n\
-                 for (var i = 0; i < __G.SYSTEMS.len; i++) {{\n\
-                     if (__G.SYSTEMS._data[i].name === name) __G.SYSTEMS._data[i].func = f;\n\
-                 }}\n\
-             \"\"\"\n\
              @system\n\
              @nomangle fn hot() {{ print(\"{message}\") }}\n\
              fn main() {{ hot() }}\n"
@@ -359,6 +354,7 @@ fn decorated_function_overlay_rebinds_the_registered_function_value() {
     )
     .unwrap()
     .expect_overlay();
+    assert!(!overlay.contains("__rock_rebind_system"), "CodeRef overlays must not emit a registry repair");
 
     let output = node(&format!(
         "var output = [];\n\

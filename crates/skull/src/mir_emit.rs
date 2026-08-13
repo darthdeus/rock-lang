@@ -788,9 +788,10 @@ fn merge_units(
 /// fn is called by its ORIGINAL name from outside the MIR call graph" (CLAUDE.md:
 /// from another `inline(lua)` body, from compiler codegen, or from itself), so
 /// rooting all of them covers every invisible edge class at once -- including the
-/// two string-keyed dispatch sites, `@on_reload` (via `on_hot_reload_by_name`) and
-/// `on_loop_jump`, whose targets appear only as string literals. Measured cost on
-/// match3: 24 fns / 7.2 KB, 0.3% of the chunk. Sound beats clever at that price.
+/// the string-keyed `on_loop_jump` dispatch site, whose targets appear only as
+/// string literals. CodeRef-backed `@on_reload` values are rooted by their
+/// decorator application. Measured cost on match3: 24 fns / 7.2 KB, 0.3% of the
+/// chunk. Sound beats clever at that price.
 ///
 /// The rest name a fn from generated top-level text rather than from a body:
 /// `main` (the CLI appends `__rock_main_wrapper(main)`), a decorated fn (its
@@ -3356,38 +3357,6 @@ fn mark_generated_code_values(
 /// `--features sequential` forces single-threaded iteration. The cache is keyed by
 /// [`FuncRef`], so the (nondeterministic) insertion order never reaches the output
 /// — `assemble` walks modules in source order and pulls by key.
-/// `@on_reload` registers its callback BY NAME (re-resolved via `_G[name]` on
-/// each fire so an edited body propagates -- see `on_hot_reload_by_name` in the
-/// stdlib), so the Lua global must keep the source name -- i.e. the fn must be
-/// `@nomangle`. A same-named overload would otherwise mangle it and the lookup
-/// would silently miss. Reject before emit; runs on every full/interface build
-/// (adding `@on_reload` is a structural edit -> full rebuild).
-fn validate_on_reload_nomangle(ws: &Workspace) -> Result<(), CompilerError> {
-    for module in ws.modules.iter() {
-        if module.id == ModuleId::builtin() {
-            continue;
-        }
-        for (_fid, f) in module.functions.iter() {
-            let Some(ann) = f.annotations.iter().find(|a| a.name.name.as_str() == "on_reload")
-            else {
-                continue;
-            };
-            if !f.annotations.iter().any(|a| a.name.name.as_str() == "nomangle") {
-                return Err(CompilerError::new_with_label(
-                    ann.span,
-                    format!(
-                        "`@on_reload` requires `@nomangle` on `{}`: the callback is re-resolved \
-                         by name on each hot reload, so its Lua global must keep the source name. \
-                         Add `@nomangle`.",
-                        f.name.as_str()
-                    ),
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
 pub fn emit_full(
     ws: &Workspace,
     user_mid: ModuleId,
@@ -3466,7 +3435,6 @@ fn emit_full_in_with_mutation(
 ) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
     let project_root = canonical_project_root(ws, project_root)?;
     let project_root = project_root.as_deref();
-    validate_on_reload_nomangle(ws)?;
     if let Some(span) = skull_mir::lower::string_char_literal_out_of_range(ws, user_mid) {
         return Err(CompilerError::new_with_label(
             span,
@@ -4179,9 +4147,8 @@ pub fn emit_incremental(
 }
 
 /// Assemble the incremental OVERLAY (`incremental.lua`): the cached chunks of the
-/// functions changed since the last full build, then a system rebind
-/// (`clear_all_systems()` + every decorator application) so the system registries
-/// re-point at the CURRENT globals (the changed fns, redefined above, win).
+/// functions changed since the last full build, then slot publication for their
+/// current CodeRefs. Registries retain those logical values across the overlay.
 /// Loaded AFTER `main.lua`; redefined globals override their stale defs. Emits NO
 /// scaffold/globals -- those are unchanged on a body edit and live in main.lua.
 /// `docs/skull-incremental-emit-split.md`.
@@ -4351,21 +4318,6 @@ fn assemble_overlay(
         }
     }
 
-    // Rebind: re-point ONLY the changed decorated functions' registry entries at
-    // their redefined globals, in place (`__rock_rebind_system`). A registry holds
-    // a system's function VALUE, so redefining a decorated global leaves the entry
-    // stale -- but only for the functions that actually changed. Re-pointing just
-    // those (vs clear-all + re-register-all) keeps the rebind proportional to the
-    // edit, not the whole system count, and a body edit touching no decorated fn
-    // emits no rebind at all. (`docs/skull-incremental-emit-split.md`.)
-    let (deco_map, _) = build_deco_map(ws);
-    // A decorator rebind is a DECLARATION fact -- it names the system by its
-    // source name -- so specializations of one declaration contribute it once.
-    let mut rebind_decls: Vec<FuncRef> = order.iter().map(|i| i.func).collect();
-    rebind_decls.sort_by_key(|fr| (fr.module.index(), u32::from(fr.func.into_raw())));
-    rebind_decls.dedup();
-    out.push_str(&decorator_rebind_lines(ws, &deco_map, &rebind_decls));
-
     if shader_changed {
         out.push_str(&cache.shader_registrations.lua);
     }
@@ -4376,28 +4328,6 @@ fn assemble_overlay(
         skipped,
         phases: Vec::new(),
     })
-}
-
-/// `__rock_rebind_system("<name>", <func>)` for each CHANGED decorated function
-/// (those in the overlay's changed set that carry a decorator) -- re-points its
-/// system-registry entry at the redefined global, in place. The real engine's
-/// decorators all register into the system registries, so the one helper covers
-/// them; a changed non-decorated function (or none) emits nothing here.
-fn decorator_rebind_lines(
-    ws: &Workspace,
-    deco_map: &DecoMap,
-    changed: &[FuncRef],
-) -> String {
-    let mut out = String::new();
-    for &fref in changed {
-        let f = &ws.module(fref.module).functions[fref.func];
-        if !f.annotations.iter().any(|ann| deco_map.contains_key(&ann.name.name)) {
-            continue;
-        }
-        let mangled = mangle_fn(ws, f);
-        let _ = writeln!(out, "__rock_rebind_system({:?}, {})", f.name.as_str(), mangled);
-    }
-    out
 }
 
 /// Incremental OVERLAY emit for a body edit: update the chunk cache for the

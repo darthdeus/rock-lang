@@ -102,6 +102,7 @@ fn run(src: &str, driver: &str) -> String {
     let graph = skull_graph::instance_graph::build_in(&ws, roots, false, interner.clone());
     let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(interner);
     let concrete = skull_graph::concrete_body::build(&ws, &graph);
+    let mut code_artifact = skull_mir::code_identity::CodeArtifact::default();
     // Capturing lambdas lower to `setmetatable({..}, __rock_fn_mt)` env records
     // (docs/closure-env-records-plan.md); the record metatable lives in skull's
     // runtime prelude, which this bare harness does not emit -- pull in the
@@ -128,6 +129,9 @@ fn run(src: &str, driver: &str) -> String {
             let name = inst.symbol(&ws, scx.interner());
             let pre_nested = func.nested_fns.len();
             skull_transform::convert_closures(&mut func, &name);
+            let mut unit_artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree(&func);
+            unit_artifact.set_body_names(&func, &name);
+            code_artifact.merge(unit_artifact);
             lua.push_str(&skull_codegen_lua::emit_named(
                 &ws, &ctx, scx.interner(), &name, &func,
             ));
@@ -139,6 +143,32 @@ fn run(src: &str, driver: &str) -> String {
                 ));
             }
         }
+    }
+    assert!(
+        code_artifact.census.is_total(),
+        "incomplete Rock CodeRef census in emitter harness: {:?}",
+        code_artifact.census
+    );
+    let mut entries: Vec<_> = code_artifact
+        .entries
+        .values()
+        .filter(|entry| entry.escaping)
+        .collect();
+    entries.sort_by_key(|entry| entry.identity.logical_key(&ws, scx.interner()));
+    if !entries.is_empty() {
+        lua.push_str("__rock_code_slot_begin()\n");
+        for entry in entries {
+            let body = entry.body_name.expect("escaping CodeRef has no emitted body");
+            lua.push_str(&format!(
+                "__rock_code_slot_stage({}, {}, {})\n",
+                skull_codegen_lua::lua_string(
+                    &entry.identity.logical_key(&ws, scx.interner())
+                ),
+                body,
+                skull_codegen_lua::lua_string(&entry.compatibility.call_abi),
+            ));
+        }
+        lua.push_str("__rock_code_slot_publish()\n");
     }
     // Alias the user module's uniquely-named fns back to their bare source names
     // so the `driver` can call them by source name (every non-exempt fn mangles).

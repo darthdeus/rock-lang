@@ -3627,39 +3627,6 @@ pub fn emit_overlay(
         &current.code_artifact,
     )?);
 
-    let decorator_names = decorator_names(ws);
-    let decorated: Vec<FuncRef> = order
-        .iter()
-        .copied()
-        .filter(|fref| {
-            ws.module(fref.module).functions[fref.func]
-                .annotations
-                .iter()
-                .any(|annotation| decorator_names.contains(&annotation.name.name))
-        })
-        .collect();
-    if !decorated.is_empty() {
-        let Some(rebind) = exact_inline_js(ws, "__rock_rebind_system") else {
-            return Ok(JsReload::FullRequired);
-        };
-        let rebind_instance = Instance::base(rebind);
-        out.push_str(&emit_inline_js_fn(
-            ws,
-            &cache.scx,
-            &rebind_instance,
-            rebind,
-            "__rock_rebind_system",
-        )?);
-        for fref in decorated {
-            let function = &ws.module(fref.module).functions[fref.func];
-            out.push_str(&format!(
-                "__rock_rebind_system({}, {});\n",
-                js_string_lit(function.name.as_str())?,
-                callee_js_name(ws, fref)
-            ));
-        }
-    }
-
     if let Some(wire) = find_plain_function(ws, "run_wire_systems") {
         let wire_name = callee_js_name(ws, wire);
         if current.chunks.contains_key(&wire) {
@@ -3688,19 +3655,6 @@ fn collect_statics(function: &MirFunc) -> Vec<skull_mir::mir::StaticCell> {
         cells.extend(collect_statics(nested));
     }
     cells
-}
-
-fn exact_inline_js(ws: &Workspace, name: &str) -> Option<FuncRef> {
-    ws.functions_by_name
-        .get(&ustr::Ustr::from(name))?
-        .iter()
-        .find_map(|(module, function)| {
-            matches!(
-                ws.module(*module).functions[*function].inline_body,
-                Some((bone_semantic::hir::FnBackend::Js, _))
-            )
-            .then_some(FuncRef { module: *module, func: *function })
-        })
 }
 
 fn find_plain_function(ws: &Workspace, name: &str) -> Option<FuncRef> {
