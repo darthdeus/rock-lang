@@ -1098,6 +1098,7 @@ pub fn do_one_frame(
     if !process_result.output.stdout.is_empty() {
         let stdout_str = String::from_utf8_lossy(&process_result.output.stdout);
         const DELIMITER: &str = "--- DUMP_STATE ---";
+        const PERF_DELIMITER: &str = "--- PERF_SUMMARY ---";
         if dump_state {
             if let Some(idx) = stdout_str.find(DELIMITER) {
                 let before = stdout_str[..idx].trim();
@@ -1106,10 +1107,17 @@ pub fn do_one_frame(
                     // game's own stdout (pre-JSON) verbatim.
                     eprint!("{}", before);
                 }
-                let json = stdout_str[idx + DELIMITER.len()..].trim();
+                let after = &stdout_str[idx + DELIMITER.len()..];
+                let (json, trailing) = after.find(PERF_DELIMITER).map_or((after, ""), |perf_idx| {
+                    (&after[..perf_idx], &after[perf_idx..])
+                });
                 // Result output, NOT logging: the dumped state JSON is the
                 // command's answer, written to stdout for consumption.
-                println!("{}", json);
+                println!("{}", json.trim());
+                let trailing = trailing.trim();
+                if !trailing.is_empty() {
+                    eprint!("{}", trailing);
+                }
             } else {
                 // Result output, NOT logging: raw game stdout passthrough.
                 print!("{}", stdout_str);

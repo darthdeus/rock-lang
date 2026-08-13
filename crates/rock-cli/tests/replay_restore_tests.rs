@@ -660,29 +660,38 @@ fn live_full_reload_refuses_after_invalidating_all_keyframes() {
 #[test]
 fn long_live_bitgun_rewind_resimulates_materially_fewer_frames() {
     let game = "bitgun";
-    let target: i64 = 900;
+    let seek_frame: u32 = 900;
+    let target: i64 = 605;
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("long-live.replay");
     let log_s = log.to_string_lossy().into_owned();
 
     let rewound = run_record_dump(
         game,
-        2800,
+        seek_frame + 100,
         &log_s,
         &[
+            ("PERF_MODE", "1"),
+            ("PERF_DT", "0.008333333333333333"),
             ("STONE_LIVE_REWIND", "1"),
             ("STONE_LIVE_REWIND_CADENCE_SECONDS", "0.5"),
             ("STONE_LIVE_REWIND_WINDOW_SECONDS", "5.0"),
-            ("STONE_TIMELINE_SEEK_AT_FRAME", "1800"),
-            ("STONE_TIMELINE_SEEK_TO_TICK", "900"),
+            ("STONE_TIMELINE_SEEK_AT_FRAME", "900"),
+            ("STONE_TIMELINE_SEEK_TO_TICK", "605"),
         ],
     );
-    assert_eq!(current_tick(&rewound), target);
     let diag = &rewound["__stone_diag"];
+    assert_eq!(current_tick(&rewound), target, "long live rewind must land at its requested target: {diag}");
+    assert_eq!(diag["STONE_LIVE_REWIND_REFUSED"].as_i64(), Some(0), "the in-window target must be admitted: {diag}");
+    assert!(
+        diag["STONE_LIVE_REWIND_FLOOR_AT_SEEK"].as_i64().is_some_and(|floor| floor > 0 && floor <= target),
+        "the fixed game-time window must evict old history while retaining the requested target: {diag}"
+    );
     let resim = diag["STONE_SEEK_RESIM_FRAMES"].as_i64().expect("resim frame count");
-    assert!(resim * 2 < target, "the bounded live cadence must materially reduce resimulation: {diag}");
+    assert!(resim > 0 && resim * 2 < target, "the bounded live cadence must exercise and materially reduce resimulation: {diag}");
     assert!(diag["STONE_KEYFRAME_CADENCE_CAPTURES"].as_i64().is_some_and(|n| n >= 4), "{diag}");
-    assert!(diag["STONE_KEYFRAME_COUNT"].as_i64().is_some_and(|n| n >= 2), "{diag}");
+    assert!(diag["STONE_KEYFRAME_EVICTIONS"].as_i64().is_some_and(|n| n > 0), "{diag}");
+    assert!(diag["STONE_KEYFRAME_COUNT"].as_i64().is_some_and(|n| (2..=14).contains(&n)), "{diag}");
     let cadence_ms = diag["STONE_KEYFRAME_CADENCE_MS"].as_f64().expect("cadence cost");
     let capture_max_ms = diag["STONE_KEYFRAME_CAPTURE_MAX_MS"].as_f64().expect("capture hitch");
     assert!(cadence_ms > 0.0, "{diag}");
@@ -691,7 +700,7 @@ fn long_live_bitgun_rewind_resimulates_materially_fewer_frames() {
         "[live-rewind-costs] target={target} resim={resim} keyframes={} cadence_ms={cadence_ms:.2} capture_max_ms={capture_max_ms:.2}",
         diag["STONE_KEYFRAME_COUNT"]
     );
-    assert_eq!(recorded_tick_lines(&log_s), 1800, "the retained future must remain the one recorded input stream");
+    assert_eq!(recorded_tick_lines(&log_s), seek_frame as usize, "the retained future must remain the one recorded input stream");
 }
 
 /// Seek resimulation must run the same game semantics as ordinary playback.
@@ -2075,15 +2084,42 @@ fn replay_reports_its_own_costs() {
         diag["STONE_REPLAY_SAVE_MS"].as_f64().unwrap()
     );
 
-    // Keyframe BYTES are only honest where real memory was imaged. bitgun holds
-    // no buffer storage in sim state, so its figure is a truthful zero; bopt
-    // holds a NativeBuffer, so its keyframe reports the bytes it copied.
+    // Keyframe BYTES are only honest where real memory was imaged. Bitgun and
+    // bopt both hold NativeBuffers; a minimal game with no buffer declarations
+    // is the zero control.
     let seek_diag = &seeked["__stone_diag"];
-    assert_eq!(
-        seek_diag.get("STONE_KEYFRAME_STORAGE_BYTES").and_then(serde_json::Value::as_i64),
-        Some(0),
-        "bitgun images no buffer storage, so its byte figure must be a real zero: {seek_diag}"
+    let bitgun_bytes = seek_diag["STONE_KEYFRAME_STORAGE_BYTES"].as_i64().expect("bitgun storage bytes");
+    assert!(
+        bitgun_bytes > 0,
+        "bitgun holds buffer storage in sim state, so its keyframe must report imaged bytes: {seek_diag}"
     );
+
+    let zero_game = tempfile::tempdir().unwrap();
+    std::fs::write(
+        zero_game.path().join("stick.toml"),
+        format!(
+            "[package]\nname = \"replay_storage_zero\"\nversion = \"0.1.0\"\ntype = \"bin\"\n\n\
+             [dependencies]\nstone = {{ path = \"{}\" }}\n",
+            workspace_root().parent().expect("repo root").join("stone").display()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        zero_game.path().join("main.rock"),
+        "fn main() {\n    stone_run_game(GameConfig { title: \"replay storage zero\", width: 64, height: 64 })\n}\n",
+    )
+    .unwrap();
+    let zero_game_s = zero_game.path().to_string_lossy().into_owned();
+    let zero_log = dir.path().join("zero-storage.replay").to_string_lossy().into_owned();
+    run_record_dump(&zero_game_s, 25, &zero_log, &[]);
+    let zero = run_replay_dump(&zero_game_s, 30, &zero_log, &[("STONE_KEYFRAME_INTERVAL", "10")]);
+    let zero_diag = &zero["__stone_diag"];
+    assert_eq!(
+        zero_diag["STONE_KEYFRAME_STORAGE_BYTES"].as_i64(),
+        Some(0),
+        "a game with no buffer declarations must report a real zero: {zero_diag}"
+    );
+
     let bopt_log = dir.path().join("bopt.replay").to_string_lossy().into_owned();
     let bopt_rec = Command::new(env!("CARGO_BIN_EXE_rock"))
         .args([
@@ -2102,7 +2138,9 @@ fn replay_reports_its_own_costs() {
         "bopt holds buffer storage in sim state, so its keyframe must report imaged bytes: {}",
         bopt["__stone_diag"]
     );
-    println!("[replay-costs] bopt keyframe imaged {bytes} bytes of buffer storage");
+    println!(
+        "[replay-costs] keyframe buffer storage: zero-control 0B, bitgun {bitgun_bytes}B, bopt {bytes}B"
+    );
 }
 
 fn keyframe_count(s: &serde_json::Value) -> i64 {
