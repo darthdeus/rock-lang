@@ -2265,13 +2265,44 @@ mod overlay_runtime_tests {
         // start() + pump() under v0: f(3)=8. Overlay (op *). The same stored
         // record now resolves lambda0's edited body, then g uses lambda1.
         let composed = run_parts(&[&full0.lua, stub_for(&full0.lua), "start()", "pump()", &overlay.lua, "pump()", "pump()", "pump()"]);
-        match composed {
-            ExecOutcome::Output(o) => assert_eq!(
-                normalize_stdout(&o).trim(),
-                "8\n15\n15\n-1",
-                "both pre- and post-reload records must resolve compatible edited bodies"
-            ),
-            ExecOutcome::Errored(_) => panic!("live coroutine CodeRef record failed to run"),
+        let fresh_session = bone_session(files(&v1)).expect("fresh session v1");
+        let fresh_mid = skull::user_module_id(fresh_session.workspace()).unwrap();
+        let fresh = skull::mir_emit::emit_full(fresh_session.workspace(), fresh_mid)
+            .expect("emit fresh v1")
+            .0;
+        let fresh_run = run_parts(&[
+            &fresh.lua,
+            stub_for(&fresh.lua),
+            "start()",
+            "pump()",
+            "pump()",
+            "pump()",
+            "pump()",
+        ]);
+        match (composed, fresh_run) {
+            (ExecOutcome::Output(composed), ExecOutcome::Output(fresh)) => {
+                let composed = normalize_stdout(&composed);
+                let fresh = normalize_stdout(&fresh);
+                assert_eq!(fresh.trim(), "15\n15\n15\n-1", "fresh v1 build output");
+                let mut post_reload = composed.lines();
+                assert_eq!(post_reload.next(), Some("8"), "the pre-reload record ran v0");
+                let mut fresh_after_first = fresh.lines();
+                assert_eq!(fresh_after_first.next(), Some("15"), "fresh v1 first yield");
+                assert_eq!(
+                    post_reload.collect::<Vec<_>>().join("\n"),
+                    fresh_after_first.collect::<Vec<_>>().join("\n"),
+                    "the retained records after reload must match a fresh v1 build"
+                );
+            }
+            (ExecOutcome::Output(_), ExecOutcome::Errored(_)) => {
+                panic!("fresh v1 CodeRef build failed to run")
+            }
+            (ExecOutcome::Errored(_), ExecOutcome::Output(_)) => {
+                panic!("live coroutine CodeRef record failed to run")
+            }
+            (ExecOutcome::Errored(_), ExecOutcome::Errored(_)) => {
+                panic!("both live and fresh CodeRef records failed to run")
+            }
         }
     }
 
