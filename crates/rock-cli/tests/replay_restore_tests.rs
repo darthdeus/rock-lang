@@ -60,9 +60,17 @@ fn replay_snapshot_oracle_includes_effective_pad_state_only() {
     let names = sim_state_names("bitgun", 3);
     assert!(names.contains("pad_down"), "effective pad buttons must be replay state: {names:?}");
     assert!(names.contains("pad_axes"), "effective pad axes must be replay state: {names:?}");
+    assert!(names.contains("ACTION_RUNTIME"), "action runtime must be replay state: {names:?}");
     assert!(!names.contains("physical_pad_down"), "physical pad lane must not be snapshotted: {names:?}");
+    assert!(!names.contains("physical_pad_active_instance"), "controller handles must not be snapshotted: {names:?}");
     assert!(!names.contains("replay_pad_down"), "replay scratch must not be snapshotted: {names:?}");
+    assert!(!names.contains("replay_scancodes_down"), "replay keyboard scratch must not be snapshotted: {names:?}");
     assert!(!names.contains("pad_axis_motion_this_frame"), "capture scratch must not be snapshotted: {names:?}");
+    assert!(!names.contains("ACTIONS"), "binding configuration must not be snapshotted: {names:?}");
+    assert!(!names.contains("ACTION_NAMES"), "binding registry scratch must not be snapshotted: {names:?}");
+    assert!(!names.contains("BINDING_RAW_ACTIONS"), "unknown binding scratch must not be snapshotted: {names:?}");
+    assert!(!names.contains("LAST_INPUT_DEVICE"), "glyph modality must not be snapshotted: {names:?}");
+    assert!(!names.contains("UI_INPUT_CAPTURE"), "capture mode must not be snapshotted: {names:?}");
 }
 
 /// `rock frame <game> -n N --replay <log> --dump-state [env]` -> parsed JSON.

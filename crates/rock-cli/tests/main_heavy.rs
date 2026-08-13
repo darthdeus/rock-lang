@@ -15,6 +15,8 @@ mod quit_teardown_test;
 mod replay_desync_tests;
 #[path = "replay_flight_tests.rs"]
 mod replay_flight_tests;
+#[path = "replay_bindings_tests.rs"]
+mod replay_bindings_tests;
 #[path = "replay_restore_tests.rs"]
 mod replay_restore_tests;
 #[path = "replay_roundtrip_tests.rs"]
