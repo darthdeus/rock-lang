@@ -3510,8 +3510,9 @@ fn emit_full_in_with_mutation(
     // independently -- but they are not read-only: CPU artifact realization can
     // intern new types through the graph's shared `MonoInterner` (same
     // lock-safe monotonic arena the body fanout later races).
-    let ((lua_view, scx), shader_result) = parallel_join(
+    let ((lua_view, scx, cpu_elapsed), (shader_result, shader_elapsed)) = parallel_join(
         || {
+            let t_branch = Instant::now();
             let lua_view = crate::artifact::realize(
                 ws,
                 &graph,
@@ -3522,27 +3523,35 @@ fn emit_full_in_with_mutation(
             );
             let scx =
                 skull_mir::lower::ScalarCtx::new(ws).sharing(std::sync::Arc::clone(graph.interner()));
-            (lua_view, scx)
+            (lua_view, scx, t_branch.elapsed())
         },
         || {
+            let t_branch = Instant::now();
             // The overload set lives in `cg` (computed once there); borrow it
             // rather than rescanning the workspace.
             let shader_scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
                 .sharing(std::sync::Arc::clone(graph.interner()));
-            let shader_view = realize_shader_view(ws, &graph, &shader_programs, &compute_programs, &shader_scx)?;
-            let shader_registrations = shader_registration_lines(
-                ws,
-                &shader_scx,
-                &shader_collection,
-                &compute_collection,
-                &shader_view,
-                renderer_target,
-            )?;
-            Ok::<_, CompilerError>((shader_view, shader_registrations))
+            let result = (|| {
+                let shader_view = realize_shader_view(ws, &graph, &shader_programs, &compute_programs, &shader_scx)?;
+                let shader_registrations = shader_registration_lines(
+                    ws,
+                    &shader_scx,
+                    &shader_collection,
+                    &compute_collection,
+                    &shader_view,
+                    renderer_target,
+                )?;
+                Ok::<_, CompilerError>((shader_view, shader_registrations))
+            })();
+            (result, t_branch.elapsed())
         },
     );
     let (shader_view, shader_registrations) = shader_result?;
     setup_phases.push(("setup: artifact+shader views", t_setup.elapsed()));
+    // Child branch times of the joined group above: they OVERLAP, so they are
+    // reported under a distinct prefix and never added into the setup total.
+    setup_phases.push(("join: cpu artifact branch", cpu_elapsed));
+    setup_phases.push(("join: shader view branch", shader_elapsed));
 
     // The emitted param list must be injective. Checked per SIGNATURE, over every
     // function rather than just the emitted set: a duplicate Lua param is illegal
@@ -4802,5 +4811,17 @@ fn main() { let result = first() }
             ]
         );
         assert!(setup.iter().all(|(_, duration)| *duration > Duration::ZERO));
+        // The joined group's children report under their own prefix so no
+        // consumer can sum them into the sequential setup rows.
+        let join = emit
+            .phases
+            .iter()
+            .filter(|(name, _)| name.starts_with("join: "))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            join.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+            ["join: cpu artifact branch", "join: shader view branch"]
+        );
+        assert!(join.iter().all(|(_, duration)| *duration > Duration::ZERO));
     }
 }

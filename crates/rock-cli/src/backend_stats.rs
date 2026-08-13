@@ -209,13 +209,21 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
         let emit_phases: Vec<_> = skull
             .emit_phases
             .iter()
-            .filter(|(name, _)| !name.starts_with("setup: "))
+            .filter(|(name, _)| !name.starts_with("setup: ") && !name.starts_with("join: "))
             .collect();
         if setup_sum > Duration::ZERO {
             println!("  emit setup (direct wall-clock):");
             for (name, dur) in &skull.emit_phases {
                 if name.starts_with("setup: ") {
                     println!("    {:28} {:>9.3} ms", name, ms(*dur));
+                }
+            }
+            // Joined-group children: they overlap each other (and the group
+            // row above already holds the joined wall time), so they are
+            // labeled and NEVER added into the setup total.
+            for (name, dur) in &skull.emit_phases {
+                if name.starts_with("join: ") {
+                    println!("    {:28} {:>9.3} ms  (overlapping child)", name, ms(*dur));
                 }
             }
             println!("    {:28} {:>9.3} ms", "= setup total", ms(setup_sum));
