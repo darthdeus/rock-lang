@@ -1583,3 +1583,91 @@ fn main() { let a = body([1, 2]) }
     );
     assert_eq!(g.storage_failures().count(), 0, "a synthesized receiver had no concrete type");
 }
+
+/// A normal full emission builds the concrete-plan table ONCE and shares it;
+/// the shader branch consuming `ConcreteBodies::plans` by handle is what this
+/// pins -- byte identity cannot see a rebuild, because a rebuild produces the
+/// same plans. The fixture registers a real shader pipeline so the branch
+/// that historically rebuilt is exercised, and asserts that population.
+#[test]
+fn a_full_emission_builds_the_concrete_plan_table_exactly_once() {
+    let src = r#"
+struct SrcTex { src_tex: Sampler2D }
+
+@shader(fragment)
+fn probe_frag(@textures t: SrcTex, tc: Vec2) -> Vec4 {
+    return texture(t.src_tex, tc)
+}
+
+fn main() { let key = rock_shader(probe_frag) print("{key}") }
+"#;
+    let ws = check(src);
+    let mid = skull::user_module_id(&ws).unwrap();
+    let before = concrete_body::build_invocations();
+    let (emit, _cache) = skull::mir_emit::emit_full(&ws, mid).expect("emit_full");
+    assert!(
+        emit.lua.contains("__rock_shader_register"),
+        "the fixture must reach shader registration, or a shader-branch rebuild is invisible here"
+    );
+    assert_eq!(
+        concrete_body::build_invocations() - before,
+        1,
+        "a full emission must build the concrete-plan table exactly once and share it"
+    );
+}
+
+/// Derivations strictly below requests is the signature memo's effectiveness
+/// witness: `helper` is asked once per call site plus once as its own plan's
+/// signature, so a bypass answers every request by deriving and the counts
+/// collapse to equality.
+#[test]
+fn the_signature_memo_serves_repeated_callee_questions() {
+    let (_, _, bodies) = bodies_of(
+        "fn helper(x: int) -> int { return x }\n\
+         fn first() -> int { return helper(1) }\n\
+         fn second() -> int { return helper(2) }\n\
+         fn main() { let r = first() + second() print(\"{r}\") }",
+    );
+    assert!(bodies.signature_requests > 0, "no signature question was asked");
+    assert!(
+        bodies.signature_derivations < bodies.signature_requests,
+        "every request derived ({} of {}) -- per-site callee questions bypassed the memo",
+        bodies.signature_derivations,
+        bodies.signature_requests,
+    );
+}
+
+/// The per-body TyId memo runs strictly fewer conversions than the per-slot
+/// examined census, while that census itself stays per-slot -- `generics_bound`
+/// is pinned to its exact per-slot value on a stdlib-free fixture, measured
+/// identical with the memo bypassed, so a hit that stops replaying its delta
+/// goes red here.
+#[test]
+fn the_tyid_memo_deduplicates_conversions_and_replays_the_census() {
+    let mut modules = vec![skull_parser::parse_module(
+        "fn id<T>(x: T) -> T { x }\nfn main() { let a = id(1)\n let b = id(2) }",
+        Ustr::from("<tyid-memo-test>"),
+    )
+    .expect("parse")];
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let roots = skull::mir_emit::emission_roots(&ws, None);
+    let mut g = instance_graph::build(&ws, roots, false);
+    let bodies = concrete_body::build(&ws, &mut g);
+    let slots = bodies.expr_examined + bodies.binding_examined;
+    assert!(slots > 0, "the fixture lost its slots");
+    assert!(
+        bodies.slot_conversions < slots,
+        "every slot converted ({} of {slots}) -- repeated TyIds bypassed the per-body memo",
+        bodies.slot_conversions,
+    );
+    assert!(bodies.generics_bound > 0, "the fixture must bind generics through the substitution");
+    assert_eq!(
+        bodies.generics_bound, GENERICS_BOUND_PER_SLOT,
+        "generics_bound counts per SLOT; a memo hit must replay its cached delta"
+    );
+}
+
+/// Measured on the fixture above with the TyId memo enabled AND bypassed --
+/// the number is the same on both arms, which is what makes it a pin on the
+/// per-slot replay rather than on the memo's presence.
+const GENERICS_BOUND_PER_SLOT: usize = 3;

@@ -291,6 +291,15 @@ pub struct ConcreteBodies {
     /// a non-zero count here has a callee entry built for an expression with no
     /// inferred type, so the entry names the oracle that answered instead.
     pub untyped_as_callee_key: BTreeMap<&'static str, usize>,
+    /// Signature-memo effectiveness over this build: questions asked vs
+    /// signatures actually derived. Derivations strictly below requests is the
+    /// witness that per-site callee questions were served from the memo.
+    pub signature_requests: usize,
+    pub signature_derivations: usize,
+    /// Conversions the per-body TyId memos actually ran over the EXPANDED
+    /// instances (always-emitted bodies excluded); `expr_examined +
+    /// binding_examined` is the per-slot denominator it deduplicates.
+    pub slot_conversions: usize,
 }
 
 impl ConcreteBodies {
@@ -500,6 +509,10 @@ pub struct Converted {
     /// measured over the wrong space -- both a body that was already concrete
     /// and one whose generics were all supplied report no failures.
     pub generics_bound: usize,
+    /// Conversions the per-body TyId memo actually RAN (misses). Examined
+    /// counts stay per-slot; this strictly below them is the memo's
+    /// effectiveness witness.
+    pub conversions: usize,
 }
 
 impl Converted {
@@ -530,6 +543,8 @@ pub fn convert_body(
     // per-slot failure entries are unchanged.
     let mut memo: FxHashMap<TyId, Result<(MonoTyId, usize), MonoTyReason>> =
         FxHashMap::default();
+    let mut conversions = 0usize;
+    let conversions_ref = &mut conversions;
     let mut convert_memo = |arena: &mut MonoArena, ty: TyId, generics_bound: &mut usize| {
         match memo.entry(ty) {
             std::collections::hash_map::Entry::Occupied(hit) => match hit.get() {
@@ -540,6 +555,7 @@ pub fn convert_body(
                 Err(reason) => Err(reason.clone()),
             },
             std::collections::hash_map::Entry::Vacant(slot) => {
+                *conversions_ref += 1;
                 let mut delta = 0usize;
                 let converted = arena.convert_counting(ws, inf, ty, subst, &mut delta);
                 *generics_bound += delta;
@@ -590,6 +606,8 @@ pub fn convert_body(
             }),
         }
     }
+    drop(convert_memo);
+    c.conversions = conversions;
     c
 }
 
@@ -933,8 +951,15 @@ where
 /// same callee instance appears at every one of its call sites, so computing
 /// it per site re-converts and re-interns identical declaration types
 /// thousands of times. Errors are never cached, so failure reasons re-derive
-/// exactly as before.
-type SignatureCache = FxHashMap<Instance, ConcreteSignature>;
+/// exactly as before. `requests`/`derivations` are the effectiveness witness
+/// [`ConcreteBodies`] publishes: derivations strictly below requests is what
+/// distinguishes "memo consulted" from a bypass that still answers correctly.
+#[derive(Default)]
+struct SignatureCache {
+    map: FxHashMap<Instance, ConcreteSignature>,
+    requests: usize,
+    derivations: usize,
+}
 
 fn cached_concrete_signature(
     ws: &Workspace,
@@ -942,12 +967,14 @@ fn cached_concrete_signature(
     instance: &Instance,
     cache: &mut SignatureCache,
 ) -> Result<ConcreteSignature, MonoTyReason> {
-    if let Some(sig) = cache.get(instance) {
+    cache.requests += 1;
+    if let Some(sig) = cache.map.get(instance) {
         return Ok(sig.clone());
     }
+    cache.derivations += 1;
     let subst = g.substitution(instance).cloned().ok_or(MonoTyReason::NoNode)?;
     let sig = concrete_signature(ws, g, instance, &subst)?;
-    cache.insert(instance.clone(), sig.clone());
+    cache.map.insert(instance.clone(), sig.clone());
     Ok(sig)
 }
 
@@ -1119,7 +1146,18 @@ fn concrete_always_plan(
 ///
 /// The tables intern into the graph's arena: a second arena would hand out ids
 /// that mean nothing beside `Instance::args`.
+/// Process-lifetime count of [`build`] invocations. A normal full emission
+/// builds the table exactly ONCE and shares it (the shader view and the JS
+/// session consume `ConcreteBodies::plans` by handle); a second build inside
+/// one emission is the duplicate-work regression this counter exists to gate.
+pub fn build_invocations() -> u64 {
+    BUILD_INVOCATIONS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+static BUILD_INVOCATIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
+    BUILD_INVOCATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let t_build = std::time::Instant::now();
     let intern_before = g.interner().stats();
     let mut t_convert = std::time::Duration::ZERO;
@@ -1175,6 +1213,7 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
         out.expr_examined += c.expr_examined;
         out.binding_examined += c.binding_examined;
         out.generics_bound += c.generics_bound;
+        out.slot_conversions += c.conversions;
         out.generic_bodies += usize::from(!subst.is_empty());
         let untyped = c.untyped_exprs;
         out.untyped_bindings += c.untyped_bindings.len();
@@ -1260,6 +1299,8 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
         }
     }
     out.plans = std::sync::Arc::new(plans);
+    out.signature_requests = sig_cache.requests;
+    out.signature_derivations = sig_cache.derivations;
     if log::log_enabled!(log::Level::Debug) {
         let intern_after = g.interner().stats();
         per_inst.sort_by_key(|(_, d)| *d);
