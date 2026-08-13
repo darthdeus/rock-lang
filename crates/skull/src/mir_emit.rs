@@ -3470,7 +3470,7 @@ fn emit_full_in_with_mutation(
                     plan.signature.result.is_some(),
                     "coroutine-plan mutation found a body with no concrete result witness"
                 );
-                plan.signature.result = None;
+                std::sync::Arc::make_mut(&mut plan.signature).result = None;
                 matched += 1;
             }
         }

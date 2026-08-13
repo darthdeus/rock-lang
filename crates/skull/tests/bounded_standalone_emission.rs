@@ -257,19 +257,23 @@ fn main() {
         params: Vec::new(),
     };
     let wrong_result = graph.interner().intern(MonoTy::Tuple(vec![MonoTy::Bool, pair]));
-    poisoned_plans
-        .get_mut(&witness)
-        .expect("witness plan disappeared")
-        .signature
-        .result = Some(wrong_result);
+    std::sync::Arc::make_mut(
+        &mut poisoned_plans
+            .get_mut(&witness)
+            .expect("witness plan disappeared")
+            .signature,
+    )
+    .result = Some(wrong_result);
     let mut poisoned_owner = plan.clone();
     for (site, callee) in &poisoned_owner.callees {
         if callee == &witness {
-            poisoned_owner
-                .callee_signatures
-                .get_mut(site)
-                .expect("witness signature disappeared")
-                .result = Some(wrong_result);
+            std::sync::Arc::make_mut(
+                poisoned_owner
+                    .callee_signatures
+                    .get_mut(site)
+                    .expect("witness signature disappeared"),
+            )
+            .result = Some(wrong_result);
         }
     }
     let mut poisoned = skull_mir::lower::lower_instance_with_plans(

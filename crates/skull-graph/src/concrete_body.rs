@@ -35,7 +35,7 @@ use bone_semantic::prelude::{Span, TyId};
 use comfy_la_arena::{ArenaMap, Idx};
 use skull_mir::concrete::{
     ConcreteAlwaysPlans, ConcreteBodyPlan, ConcreteOwner, ConcretePlans, ConcreteSignature,
-    ConcreteTypeTables,
+    ConcreteSignatureHandle, ConcreteTypeTables,
 };
 use skull_mir::monoty::{MonoArena, MonoCtor, MonoSubst, MonoTy, MonoTyId, MonoTyReason, TyEnv};
 use skull_mir::mir::FuncRef;
@@ -170,6 +170,8 @@ pub struct ConcreteBody {
     pub synthesized_calls: BTreeMap<Site, Callee>,
 }
 
+type TypeConversionMemo = FxHashMap<TyId, Result<(MonoTyId, usize), MonoTyReason>>;
+
 impl ConcreteBody {
     /// Every callee this body names, with the site that named it.
     pub fn callees(&self) -> Vec<(Site, &Callee)> {
@@ -296,10 +298,31 @@ pub struct ConcreteBodies {
     /// witness that per-site callee questions were served from the memo.
     pub signature_requests: usize,
     pub signature_derivations: usize,
+    pub signature_slots_cloned: usize,
     /// Conversions the per-body TyId memos actually ran over the EXPANDED
     /// instances (always-emitted bodies excluded); `expr_examined +
     /// binding_examined` is the per-slot denominator it deduplicates.
     pub slot_conversions: usize,
+    /// The component census for the concrete-plan build. These counters are
+    /// deliberately separate from the semantic body census: the same body
+    /// can be re-read by type-node, field, domain, and signature consumers.
+    pub build_stats: ConcreteBuildStats,
+}
+
+#[derive(Default, Debug, Clone, Copy)]
+pub struct ConcreteBuildStats {
+    pub type_nodes_examined: usize,
+    pub type_node_memo_hits: usize,
+    pub type_node_conversion_attempts: usize,
+    pub type_node_unresolved: usize,
+    pub struct_literals_examined: usize,
+    pub struct_field_conversion_attempts: usize,
+    pub foreign_domain_requests: usize,
+    pub foreign_domain_unique: usize,
+    pub signature_ns: u64,
+    pub type_nodes_ns: u64,
+    pub struct_fields_ns: u64,
+    pub foreign_domains_ns: u64,
 }
 
 impl ConcreteBodies {
@@ -325,6 +348,14 @@ impl ConcreteBodies {
             sites_examined: self.sites_examined,
             unknown_rock_callees: self.unknown_rock_callees.len(),
             untyped_as_callee_key: self.untyped_as_callee_key.clone(),
+            type_nodes_examined: self.build_stats.type_nodes_examined,
+            type_node_memo_hits: self.build_stats.type_node_memo_hits,
+            type_node_conversion_attempts: self.build_stats.type_node_conversion_attempts,
+            type_node_unresolved: self.build_stats.type_node_unresolved,
+            struct_literals_examined: self.build_stats.struct_literals_examined,
+            struct_field_conversion_attempts: self.build_stats.struct_field_conversion_attempts,
+            foreign_domain_requests: self.build_stats.foreign_domain_requests,
+            foreign_domain_unique: self.build_stats.foreign_domain_unique,
             ..Default::default()
         };
         for b in self.bodies.values() {
@@ -441,6 +472,14 @@ pub struct BodyCensus {
     pub callee_holes: BTreeMap<&'static str, (usize, usize)>,
     pub unknown_rock_callees: usize,
     pub untyped_as_callee_key: BTreeMap<&'static str, usize>,
+    pub type_nodes_examined: usize,
+    pub type_node_memo_hits: usize,
+    pub type_node_conversion_attempts: usize,
+    pub type_node_unresolved: usize,
+    pub struct_literals_examined: usize,
+    pub struct_field_conversion_attempts: usize,
+    pub foreign_domain_requests: usize,
+    pub foreign_domain_unique: usize,
 }
 
 impl BodyCensus {
@@ -513,6 +552,7 @@ pub struct Converted {
     /// counts stay per-slot; this strictly below them is the memo's
     /// effectiveness witness.
     pub conversions: usize,
+    pub(crate) type_memo: TypeConversionMemo,
 }
 
 impl Converted {
@@ -541,8 +581,7 @@ pub fn convert_body(
     // body. The `generics_bound` census counts PER SLOT exactly as before --
     // each hit replays the cached delta -- and an error replays its reason, so
     // per-slot failure entries are unchanged.
-    let mut memo: FxHashMap<TyId, Result<(MonoTyId, usize), MonoTyReason>> =
-        FxHashMap::default();
+    let mut memo: TypeConversionMemo = FxHashMap::default();
     let mut conversions = 0usize;
     let conversions_ref = &mut conversions;
     let mut convert_memo = |arena: &mut MonoArena, ty: TyId, generics_bound: &mut usize| {
@@ -608,6 +647,7 @@ pub fn convert_body(
     }
     drop(convert_memo);
     c.conversions = conversions;
+    c.type_memo = memo;
     c
 }
 
@@ -754,15 +794,28 @@ fn concrete_tables(
     body: &Body,
     subst: &MonoSubst,
     declared_types: impl IntoIterator<Item = TyId>,
+    stats: &mut ConcreteBuildStats,
+    timing_enabled: bool,
 ) -> Result<ConcreteTypeTables, MonoTyReason> {
-    let converted = g.interner().with_mut(|arena| convert_body(arena, ws, inf, body, subst));
+    let mut converted = g.interner().with_mut(|arena| convert_body(arena, ws, inf, body, subst));
     for failure in &converted.failures {
         if !matches!(failure.reason, MonoTyReason::UnresolvedInfer(_)) {
             return Err(failure.reason.clone());
         }
     }
-    let ty_types = concrete_ty_types(ws, g, inf, body, subst, declared_types)?;
-    let struct_field_types = concrete_struct_field_types(ws, g, body, &converted.expr_types)?;
+    let ty_types = concrete_ty_types(
+        ws,
+        g,
+        inf,
+        body,
+        subst,
+        declared_types,
+        &mut converted.type_memo,
+        stats,
+        timing_enabled,
+    )?;
+    let struct_field_types =
+        concrete_struct_field_types(ws, g, body, &converted.expr_types, stats, timing_enabled)?;
     let mut untyped_exprs: FxHashSet<_> = converted.untyped_exprs.iter().map(|u| u.expr).collect();
     let mut untyped_bindings: FxHashSet<_> = converted.untyped_bindings.iter().copied().collect();
     for failure in &converted.failures {
@@ -791,10 +844,14 @@ fn concrete_struct_field_types(
     g: &InstanceGraph,
     body: &Body,
     expr_types: &ArenaMap<Idx<Expr>, MonoTyId>,
+    stats: &mut ConcreteBuildStats,
+    timing_enabled: bool,
 ) -> Result<ArenaMap<Idx<Expr>, FxHashMap<Ustr, MonoTyId>>, MonoTyReason> {
     let mut out = ArenaMap::default();
+    let started = timing_enabled.then(std::time::Instant::now);
     for (expr, node) in body.expr_arena.iter() {
         let Expr::StructLiteral { name, .. } = node else { continue };
+        stats.struct_literals_examined += 1;
         let sid = *ws.struct_by_name.get(&name).ok_or(MonoTyReason::NoNode)?;
         let def = &ws.modules[sid.module.index()].structs[sid.def];
         let params = match expr_types.get(expr).copied() {
@@ -823,6 +880,7 @@ fn concrete_struct_field_types(
             def.fields
                 .iter()
                 .map(|field| {
+                    stats.struct_field_conversion_attempts += 1;
                     arena
                         .convert_decl(ws, field.ty, &subst)
                         .map(|ty| (field.name, ty))
@@ -830,6 +888,9 @@ fn concrete_struct_field_types(
                 .collect::<Result<FxHashMap<_, _>, _>>()
         })?;
         out.insert(expr, fields);
+    }
+    if let Some(started) = started {
+        stats.struct_fields_ns += started.elapsed().as_nanos() as u64;
     }
     Ok(out)
 }
@@ -841,6 +902,9 @@ fn concrete_ty_types(
     body: &Body,
     subst: &MonoSubst,
     declared_types: impl IntoIterator<Item = TyId>,
+    memo: &mut TypeConversionMemo,
+    stats: &mut ConcreteBuildStats,
+    timing_enabled: bool,
 ) -> Result<rustc_hash::FxHashMap<TyId, MonoTyId>, MonoTyReason> {
     let mut nodes = FxHashSet::default();
     for ty in inf.expr_types.values().chain(inf.binding_types.values()) {
@@ -859,15 +923,36 @@ fn concrete_ty_types(
             collect_type_nodes(ws, inf, *target, &mut nodes);
         }
     }
+    stats.type_nodes_examined += nodes.len();
+    let started = timing_enabled.then(std::time::Instant::now);
     g.interner().with_mut(|arena| {
         nodes
             .into_iter()
-            .filter_map(|ty| match arena.convert(ws, inf, ty, subst) {
-                Ok(id) => Some(Ok((ty, id))),
-                Err(MonoTyReason::UnresolvedInfer(_)) => None,
-                Err(reason) => Some(Err(reason)),
+            .filter_map(|ty| {
+                let converted = if let Some(cached) = memo.get(&ty) {
+                    stats.type_node_memo_hits += 1;
+                    cached.clone()
+                } else {
+                    stats.type_node_conversion_attempts += 1;
+                    let converted = arena.convert(ws, inf, ty, subst);
+                    memo.insert(ty, converted.clone().map(|id| (id, 0)));
+                    converted.map(|id| (id, 0))
+                };
+                match converted {
+                    Ok((id, _)) => Some(Ok((ty, id))),
+                    Err(MonoTyReason::UnresolvedInfer(_)) => {
+                        stats.type_node_unresolved += 1;
+                        None
+                    }
+                    Err(reason) => Some(Err(reason)),
+                }
             })
             .collect::<Result<rustc_hash::FxHashMap<_, _>, _>>()
+    }).map(|types| {
+        if let Some(started) = started {
+            stats.type_nodes_ns += started.elapsed().as_nanos() as u64;
+        }
+        types
     })
 }
 
@@ -915,12 +1000,19 @@ fn foreign_domain_tables<I>(
     ws: &Workspace,
     g: &InstanceGraph,
     domains: I,
+    stats: &mut ConcreteBuildStats,
+    timing_enabled: bool,
 ) -> Result<BTreeMap<SiteDomain, ConcreteTypeTables>, MonoTyReason>
 where
     I: IntoIterator<Item = SiteDomain>,
 {
     let mut out = BTreeMap::new();
+    let started = timing_enabled.then(std::time::Instant::now);
     for domain in domains {
+        stats.foreign_domain_requests += 1;
+        if !out.contains_key(&domain) {
+            stats.foreign_domain_unique += 1;
+        }
         let SiteDomain::StructDefaults(module, def, args) = domain else { continue };
         let owner = BodyOwner::StructDefaults(def);
         let defaults_body = ws
@@ -940,8 +1032,13 @@ where
             defaults_body,
             &defaults_subst,
             std::iter::empty(),
+            stats,
+            timing_enabled,
         )?;
         out.insert(SiteDomain::StructDefaults(module, def, args), tables);
+    }
+    if let Some(started) = started {
+        stats.foreign_domains_ns += started.elapsed().as_nanos() as u64;
     }
     Ok(out)
 }
@@ -956,9 +1053,10 @@ where
 /// distinguishes "memo consulted" from a bypass that still answers correctly.
 #[derive(Default)]
 struct SignatureCache {
-    map: FxHashMap<Instance, ConcreteSignature>,
+    map: FxHashMap<Instance, ConcreteSignatureHandle>,
     requests: usize,
     derivations: usize,
+    slots_cloned: usize,
 }
 
 fn cached_concrete_signature(
@@ -966,14 +1064,14 @@ fn cached_concrete_signature(
     g: &InstanceGraph,
     instance: &Instance,
     cache: &mut SignatureCache,
-) -> Result<ConcreteSignature, MonoTyReason> {
+) -> Result<ConcreteSignatureHandle, MonoTyReason> {
     cache.requests += 1;
     if let Some(sig) = cache.map.get(instance) {
         return Ok(sig.clone());
     }
     cache.derivations += 1;
     let subst = g.substitution(instance).cloned().ok_or(MonoTyReason::NoNode)?;
-    let sig = concrete_signature(ws, g, instance, &subst)?;
+    let sig = std::sync::Arc::new(concrete_signature(ws, g, instance, &subst)?);
     cache.map.insert(instance.clone(), sig.clone());
     Ok(sig)
 }
@@ -987,14 +1085,22 @@ fn concrete_plan(
     hir_body: &Body,
     body: &ConcreteBody,
     sig_cache: &mut SignatureCache,
+    memo: &mut TypeConversionMemo,
+    stats: &mut ConcreteBuildStats,
+    timing_enabled: bool,
 ) -> Result<ConcreteBodyPlan, MonoTyReason> {
     let mut callees = BTreeMap::new();
     let mut callee_signatures = BTreeMap::new();
+    let signature_started = timing_enabled.then(std::time::Instant::now);
     for (site, callee) in body.callees() {
         let instance = callee.instance().clone();
         callee_signatures
             .insert(site.clone(), cached_concrete_signature(ws, g, &instance, sig_cache)?);
         callees.insert(site, instance);
+    }
+    let signature = cached_concrete_signature(ws, g, inst, sig_cache)?;
+    if let Some(started) = signature_started {
+        stats.signature_ns += started.elapsed().as_nanos() as u64;
     }
     let failed_sites = g
         .sites_of(inst)
@@ -1011,15 +1117,38 @@ fn concrete_plan(
         .iter()
         .map(|param| param.ty)
         .chain(f.return_ty);
-    let ty_types = concrete_ty_types(ws, g, inf, hir_body, subst, declared_types)?;
-    let struct_field_types = concrete_struct_field_types(ws, g, hir_body, &body.expr_types)?;
+    let ty_types = concrete_ty_types(
+        ws,
+        g,
+        inf,
+        hir_body,
+        subst,
+        declared_types,
+        memo,
+        stats,
+        timing_enabled,
+    )?;
+    let struct_field_types = concrete_struct_field_types(
+        ws,
+        g,
+        hir_body,
+        &body.expr_types,
+        stats,
+        timing_enabled,
+    )?;
     let default_domains = g
         .contributions
         .get(&Owner::Instance(inst.clone()))
         .into_iter()
         .flat_map(|c| c.struct_default_domains.iter().cloned());
     let site_domains = body.callees().into_iter().map(|(site, _)| site.domain);
-    let foreign_domains = foreign_domain_tables(ws, g, default_domains.chain(site_domains))?;
+    let foreign_domains = foreign_domain_tables(
+        ws,
+        g,
+        default_domains.chain(site_domains),
+        stats,
+        timing_enabled,
+    )?;
     Ok(ConcreteBodyPlan {
         owner: ConcreteOwner::Function(inst.clone()),
         types: ConcreteTypeTables {
@@ -1031,7 +1160,7 @@ fn concrete_plan(
             struct_field_types,
         },
         foreign_domains,
-        signature: cached_concrete_signature(ws, g, inst, sig_cache)?,
+        signature,
         callees,
         callee_signatures,
         failed_sites,
@@ -1045,6 +1174,8 @@ fn concrete_always_plan(
     module: bone_semantic::prelude::ModuleId,
     owner: BodyOwner,
     sig_cache: &mut SignatureCache,
+    stats: &mut ConcreteBuildStats,
+    timing_enabled: bool,
 ) -> Result<Option<ConcreteBodyPlan>, MonoTyReason> {
     let body = ws.module(module).bodies.get(&owner).ok_or(MonoTyReason::NoNode)?;
     if matches!(owner, BodyOwner::Global(_)) && body.root.is_none() {
@@ -1066,6 +1197,8 @@ fn concrete_always_plan(
                 .into_iter(),
             _ => Vec::new().into_iter(),
         },
+        stats,
+        timing_enabled,
     )?;
     let contribution = g
         .contributions
@@ -1090,17 +1223,27 @@ fn concrete_always_plan(
     }
     let default_domains = contribution.struct_default_domains.iter().cloned();
     let site_domains = contribution.always_call_sites.keys().map(|site| site.domain.clone());
-    let foreign_domains = foreign_domain_tables(ws, g, default_domains.chain(site_domains))?;
+    let foreign_domains = foreign_domain_tables(
+        ws,
+        g,
+        default_domains.chain(site_domains),
+        stats,
+        timing_enabled,
+    )?;
     let signature = match owner {
         BodyOwner::Global(gid) => {
+            let started = timing_enabled.then(std::time::Instant::now);
             let result = g.interner().with_mut(|arena| {
                 arena.convert_decl(ws, ws.module(module).globals[gid].ty, &MonoSubst::default())
             })?;
-            ConcreteSignature {
+            if let Some(started) = started {
+                stats.signature_ns += started.elapsed().as_nanos() as u64;
+            }
+            std::sync::Arc::new(ConcreteSignature {
                 params: Vec::new(),
                 param_tuple_spelled: Vec::new(),
                 result: Some(result),
-            }
+            })
         }
         BodyOwner::Decorator(did) => {
             let mut params = Vec::new();
@@ -1111,11 +1254,11 @@ fn concrete_always_plan(
                 params.push(*types.binding_types.get(binding).ok_or(MonoTyReason::NoNode)?);
             }
             let _ = did;
-            ConcreteSignature {
+            std::sync::Arc::new(ConcreteSignature {
                 param_tuple_spelled: vec![false; params.len()],
                 params,
                 result: None,
-            }
+            })
         }
         _ => return Ok(None),
     };
@@ -1166,6 +1309,8 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
     let mut per_inst: Vec<(Instance, std::time::Duration)> = Vec::new();
     let mut unique_decls: FxHashSet<FuncRef> = FxHashSet::default();
     let mut out = ConcreteBodies::default();
+    let timing_enabled = log::log_enabled!(log::Level::Debug);
+    let mut build_stats = ConcreteBuildStats::default();
     let mut plans = skull_mir::concrete::ConcretePlans::new();
     let mut sig_cache = SignatureCache::default();
     let expanded: Vec<Instance> = g.expanded().cloned().collect();
@@ -1223,6 +1368,7 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
         for f in &failures {
             out.free_types.push((inst.clone(), f.clone()));
         }
+        let mut type_memo = c.type_memo;
         let mut concrete = ConcreteBody {
             instance: inst.clone(),
             expr_types: c.expr_types,
@@ -1265,7 +1411,19 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
             out.untyped.push((inst.clone(), u));
         }
         let t = std::time::Instant::now();
-        match concrete_plan(ws, g, &inst, &subst, inf, body, &concrete, &mut sig_cache) {
+        match concrete_plan(
+            ws,
+            g,
+            &inst,
+            &subst,
+            inf,
+            body,
+            &concrete,
+            &mut sig_cache,
+            &mut type_memo,
+            &mut build_stats,
+            timing_enabled,
+        ) {
             Ok(plan) => {
                 plans.insert(inst.clone(), plan);
             }
@@ -1277,7 +1435,15 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
     }
     for owner in g.contributions.keys() {
         let Owner::AlwaysEmitted(module, body_owner) = owner else { continue };
-        match concrete_always_plan(ws, g, *module, *body_owner, &mut sig_cache) {
+        match concrete_always_plan(
+            ws,
+            g,
+            *module,
+            *body_owner,
+            &mut sig_cache,
+            &mut build_stats,
+            timing_enabled,
+        ) {
             Ok(Some(plan)) => {
                 out.always_plans.insert(plan.owner.clone(), plan);
             }
@@ -1299,8 +1465,10 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
         }
     }
     out.plans = std::sync::Arc::new(plans);
+    out.build_stats = build_stats;
     out.signature_requests = sig_cache.requests;
     out.signature_derivations = sig_cache.derivations;
+    out.signature_slots_cloned = sig_cache.slots_cloned;
     if log::log_enabled!(log::Level::Debug) {
         let intern_after = g.interner().stats();
         per_inst.sort_by_key(|(_, d)| *d);
@@ -1325,7 +1493,9 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
             "concrete build: {} expanded over {} decls ({} generic bodies), {} plans, {} gaps; \
              slots {} expr + {} binding; convert {:?}, callee tables {:?}, plans {:?}, \
              total {:?}; per-instance p50 {:?} p95 {:?} max {:?}, top [{}]; \
-             slot tyids {} / {} unique per-body; mono interns {} attempts -> {} new during build",
+             slot tyids {} / {} unique per-body; mono interns {} attempts -> {} new during build; \
+             type nodes {}/{} ({} memo hits, {} unresolved, {:?}), struct literals {} fields {} ({:?}), \
+             foreign domains {}/{} ({:?}), signatures {}/{} cloned-slots {} ({:?})",
             per_inst.len(),
             unique_decls.len(),
             out.generic_bodies,
@@ -1345,6 +1515,21 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
             unique_slot_tyids,
             intern_after.intern_attempts - intern_before.intern_attempts,
             intern_after.intern_new - intern_before.intern_new,
+            build_stats.type_nodes_examined,
+            build_stats.type_node_conversion_attempts,
+            build_stats.type_node_memo_hits,
+            build_stats.type_node_unresolved,
+            std::time::Duration::from_nanos(build_stats.type_nodes_ns),
+            build_stats.struct_literals_examined,
+            build_stats.struct_field_conversion_attempts,
+            std::time::Duration::from_nanos(build_stats.struct_fields_ns),
+            build_stats.foreign_domain_requests,
+            build_stats.foreign_domain_unique,
+            std::time::Duration::from_nanos(build_stats.foreign_domains_ns),
+            sig_cache.requests,
+            sig_cache.derivations,
+            sig_cache.slots_cloned,
+            std::time::Duration::from_nanos(build_stats.signature_ns),
         );
     }
     out

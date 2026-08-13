@@ -788,7 +788,7 @@ impl FnEmit<'_> {
             .ok_or_else(|| err(self.span(), "shader profile: concrete call has no site identity"))?;
         plan.callee_signatures.get(&site.site).ok_or_else(|| {
             err(self.span(), "shader profile: concrete call has no signature in the body plan")
-        })
+        }).map(std::sync::Arc::as_ref)
     }
 
     fn call_param_types(
@@ -5869,7 +5869,8 @@ mod assertion_flip_tests {
         let plan = Arc::make_mut(&mut view.concrete_plans)
             .get_mut(&passthrough)
             .expect("generic helper has a concrete plan");
-        plan.signature.result = Some(session.scx.interner().intern(MonoTy::String));
+        std::sync::Arc::make_mut(&mut plan.signature).result =
+            Some(session.scx.interner().intern(MonoTy::String));
 
         let err = emit_shader_library_with_view(&ws, &session.scx, &view)
             .expect_err("a concrete result plan disagreement must reject GLSL emission");
@@ -5927,7 +5928,7 @@ mod assertion_flip_tests {
             .values_mut()
             .next()
             .expect("call signature");
-        signature.result = Some(scx.interner().intern(MonoTy::String));
+        Arc::make_mut(signature).result = Some(scx.interner().intern(MonoTy::String));
         let bad_signature = emit_shader_library_with_view(&ws, scx, &view)
             .expect_err("a non-tier-0 concrete call result must reject GLSL emission");
         assert!(

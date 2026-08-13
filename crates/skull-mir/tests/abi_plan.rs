@@ -137,7 +137,7 @@ fn a_concrete_generic_body_states_its_owned_abi() {
         .values()
         .find(|plan| plan.subject == *concrete_instance)
         .expect("the direct call must retain ident<V2>'s ABI plan");
-    assert_eq!(call, &spec, "the generic call must consume ident<V2>'s owned plan");
+    assert_eq!(call.as_ref(), &spec, "the generic call must consume ident<V2>'s owned plan");
 }
 
 /// The control: a non-generic declaration has exactly one emitted body, and the
@@ -178,11 +178,11 @@ fn main() {
         owner: ConcreteOwner::Function(Instance::base(sink)),
         types: ConcreteTypeTables::default(),
         foreign_domains: Default::default(),
-        signature: ConcreteSignature {
+        signature: std::sync::Arc::new(ConcreteSignature {
             params: vec![v2],
             param_tuple_spelled: vec![false],
             result: Some(v2),
-        },
+        }),
         callees: Default::default(),
         callee_signatures: Default::default(),
         failed_sites: Default::default(),
@@ -222,11 +222,11 @@ fn main() { print("{generic_tuple_take((V2 { x: 1.0, y: 2.0 }, 3.0)).0.x}") }
         )),
         types: ConcreteTypeTables::default(),
         foreign_domains: Default::default(),
-        signature: ConcreteSignature {
+        signature: std::sync::Arc::new(ConcreteSignature {
             params: vec![tuple],
             param_tuple_spelled: vec![false],
             result: Some(tuple),
-        },
+        }),
         callees: Default::default(),
         callee_signatures: Default::default(),
         failed_sites: Default::default(),
@@ -245,11 +245,11 @@ fn main() { print("{generic_tuple_take((V2 { x: 1.0, y: 2.0 }, 3.0)).0.x}") }
         owner: ConcreteOwner::Function(Instance::base(written)),
         types: ConcreteTypeTables::default(),
         foreign_domains: Default::default(),
-        signature: ConcreteSignature {
+        signature: std::sync::Arc::new(ConcreteSignature {
             params: vec![tuple],
             param_tuple_spelled: vec![true],
             result: Some(tuple),
-        },
+        }),
         callees: Default::default(),
         callee_signatures: Default::default(),
         failed_sites: Default::default(),
@@ -312,12 +312,12 @@ fn main() {
 
         assert_eq!(
             &owned,
-            body,
+            body.as_ref(),
             "body entry must consume the owned representation for {name}"
         );
         assert_eq!(
             &owned,
-            call,
+            call.as_ref(),
             "call and callee entry must consume one owned representation for {name}"
         );
         assert_eq!(

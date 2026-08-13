@@ -421,17 +421,21 @@ fn main() {
         .find_map(|(site, inst)| (inst == &callee).then_some(site))
         .expect("id call site disappeared");
     let mut caller = main_plan.clone();
-    caller
-        .callee_signatures
-        .get_mut(site)
-        .expect("id call signature disappeared")
-        .params[0] = float;
+    std::sync::Arc::make_mut(
+        caller
+            .callee_signatures
+            .get_mut(site)
+            .expect("id call signature disappeared"),
+    )
+    .params[0] = float;
     let mut plans = (*bodies.plans).clone();
-    plans
-        .get_mut(&callee)
-        .expect("selected callee plan disappeared")
-        .signature
-        .params[0] = float;
+    std::sync::Arc::make_mut(
+        &mut plans
+            .get_mut(&callee)
+            .expect("selected callee plan disappeared")
+            .signature,
+    )
+    .params[0] = float;
     let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
     let mir = skull_mir::lower::lower_instance_with_plans(&ws, &scx, &caller, &plans)
         .expect("plan-driven call lowering failed");
@@ -465,11 +469,13 @@ fn main() {
         .cloned()
         .expect("main has no concrete id call");
     let mut plans = (*bodies.plans).clone();
-    plans
-        .get_mut(&callee)
-        .expect("selected callee plan disappeared")
-        .signature
-        .params[0] = g.interner().intern(MonoTy::Float);
+    std::sync::Arc::make_mut(
+        &mut plans
+            .get_mut(&callee)
+            .expect("selected callee plan disappeared")
+            .signature,
+    )
+    .params[0] = g.interner().intern(MonoTy::Float);
     let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
     let err = skull_mir::lower::lower_instance_with_plans(&ws, &scx, main_plan, &plans)
         .expect_err("lowering accepted a mismatched callee body plan");
@@ -498,7 +504,7 @@ fn main() {
         .expect("id has no concrete plan");
     let mut plan = bodies.plans.get(&callee).expect("id plan disappeared").clone();
     assert!(plan.signature.result.is_some(), "body signature has no result population");
-    plan.signature.result = Some(g.interner().intern(MonoTy::Float));
+    std::sync::Arc::make_mut(&mut plan.signature).result = Some(g.interner().intern(MonoTy::Float));
     let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
     let mir = skull_mir::lower::lower_instance_with_plans(&ws, &scx, &plan, &bodies.plans)
         .expect("plan-driven return lowering failed");
@@ -520,6 +526,29 @@ fn main() {
     print("{a.value} {b.value}")
 }
 "#,
+    );
+    let census = bodies.census();
+    assert!(census.type_nodes_examined > 0, "the type-node population is empty: {census:?}");
+    assert!(
+        census.type_node_conversion_attempts > 0,
+        "the type-node conversion population is empty: {census:?}"
+    );
+    assert!(
+        census.type_node_memo_hits > 0,
+        "the body conversion memo did not reach the type-table pass: {census:?}"
+    );
+    assert!(
+        census.type_node_conversion_attempts < census.type_nodes_examined,
+        "the type-table pass re-converted every node: {census:?}"
+    );
+    assert!(
+        census.struct_literals_examined > 0 && census.struct_field_conversion_attempts > 0,
+        "the struct-field population is empty: {census:?}"
+    );
+    assert!(
+        census.foreign_domain_requests >= census.foreign_domain_unique
+            && census.foreign_domain_unique > 0,
+        "the foreign-domain denominator is empty or inconsistent: {census:?}"
     );
     let main = bodies
         .plans
@@ -657,11 +686,13 @@ fn main() { print("{startup}") }
     let call_site = plan.callees.keys().next().expect("global call site");
     let callee = plan.callees[call_site].clone();
     let mut mismatched_plans = (*bodies.plans).clone();
-    mismatched_plans
-        .get_mut(&callee)
-        .expect("global callee plan disappeared")
-        .signature
-        .result = Some(g.interner().intern(MonoTy::Float));
+    std::sync::Arc::make_mut(
+        &mut mismatched_plans
+            .get_mut(&callee)
+            .expect("global callee plan disappeared")
+            .signature,
+    )
+    .result = Some(g.interner().intern(MonoTy::Float));
     let err = skull_mir::lower::lower_global_with_plans(
         &ws,
         &scx,
@@ -726,7 +757,7 @@ fn main() { print("{G.x}") }
     assert_eq!(return_arity(&intact), 2, "fixture has no multi-leaf global result");
 
     let mut poisoned = plan.clone();
-    poisoned.signature.result = Some(g.interner().intern(MonoTy::Float));
+    std::sync::Arc::make_mut(&mut poisoned.signature).result = Some(g.interner().intern(MonoTy::Float));
     let lowered = skull_mir::lower::lower_global_with_plans(
         &ws,
         &scx,
@@ -1634,6 +1665,11 @@ fn the_signature_memo_serves_repeated_callee_questions() {
         "every request derived ({} of {}) -- per-site callee questions bypassed the memo",
         bodies.signature_derivations,
         bodies.signature_requests,
+    );
+    assert_eq!(
+        bodies.signature_slots_cloned, 0,
+        "signature memo hits must use the shared immutable representation, not clone {} slots",
+        bodies.signature_slots_cloned
     );
 }
 
