@@ -347,6 +347,10 @@ struct WebCompiler {
     project: crate::live_project::LiveProject,
     cache: skull_codegen_js::emit::JsEmitCache,
     main_js_name: Option<String>,
+    /// The program's `embed_string` inputs (absolute), refreshed per build:
+    /// an edit to one is a SOURCE change the extension filter can't know,
+    /// exactly as in `rock stone` (docs/comptime-plan.md).
+    comptime_files: std::collections::HashSet<PathBuf>,
 }
 
 impl WebCompiler {
@@ -368,10 +372,37 @@ impl WebCompiler {
         let assets =
             write_web_bundle(project, out_dir, false, true, &emitted, live.workspace())?;
         let main_js_name = emitted.main_js_name.clone();
-        Ok((Self { project: live, cache, main_js_name }, assets))
+        let mut compiler = Self {
+            project: live,
+            cache,
+            main_js_name,
+            comptime_files: Default::default(),
+        };
+        compiler.refresh_comptime_files();
+        Ok((compiler, assets))
+    }
+
+    fn refresh_comptime_files(&mut self) {
+        self.comptime_files = skull_mir::lower::comptime_embed_files(self.project.workspace())
+            .into_iter()
+            .map(|p| PathBuf::from(p.as_str()))
+            .collect();
     }
 
     fn recompile(
+        &mut self,
+        project: &str,
+        out_dir: &Path,
+        changed: &[PathBuf],
+    ) -> Result<WebCompile> {
+        let outcome = self.recompile_inner(project, out_dir, changed);
+        if outcome.is_ok() {
+            self.refresh_comptime_files();
+        }
+        outcome
+    }
+
+    fn recompile_inner(
         &mut self,
         project: &str,
         out_dir: &Path,
@@ -565,6 +596,61 @@ fn asset_map(assets: Vec<WebAsset>) -> HashMap<String, PathBuf> {
         .collect()
 }
 
+/// Split a watch event into recompile-driving SOURCE paths (`.rock`,
+/// `stick.toml`, `embed_string` inputs) and whether any plain asset changed.
+/// An embed or stick.toml edit must go THROUGH recompile: classifying it as
+/// an asset published a bare browser Reload that served the old bundle --
+/// stale JS presented as a successful hot update. A stick.toml or comptime
+/// path is not a discovered `.rock` source, so `LiveProject::recompile` takes
+/// the full-rebuild arm, whose session rebuild re-resolves declared inputs.
+fn partition_web_event(
+    paths: &std::collections::HashSet<PathBuf>,
+    comptime_files: &std::collections::HashSet<PathBuf>,
+) -> (Vec<PathBuf>, bool) {
+    let mut sources = Vec::new();
+    let mut has_asset_changes = false;
+    for path in paths {
+        let is_rock = path.extension().is_some_and(|extension| extension == "rock");
+        let is_stick = path.file_name().and_then(|n| n.to_str()) == Some("stick.toml");
+        if is_rock || is_stick || comptime_files.contains(path) {
+            sources.push(path.clone());
+        } else {
+            has_asset_changes = true;
+        }
+    }
+    (sources, has_asset_changes)
+}
+
+#[cfg(test)]
+mod partition_tests {
+    use super::partition_web_event;
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+
+    fn set(paths: &[&str]) -> HashSet<PathBuf> {
+        paths.iter().map(PathBuf::from).collect()
+    }
+
+    #[test]
+    fn embeds_and_stick_toml_are_sources_not_assets() {
+        let comptime = set(&["/proj/prebuilt/table.lua"]);
+        let (sources, assets) = partition_web_event(
+            &set(&["/proj/main.rock", "/proj/stick.toml", "/proj/prebuilt/table.lua"]),
+            &comptime,
+        );
+        assert_eq!(sources.len(), 3, "all three drive a recompile: {sources:?}");
+        assert!(!assets, "none of these is a bare asset");
+    }
+
+    #[test]
+    fn a_plain_asset_still_reloads_without_recompiling() {
+        let (sources, assets) =
+            partition_web_event(&set(&["/proj/assets/sprite.png"]), &Default::default());
+        assert!(sources.is_empty());
+        assert!(assets);
+    }
+}
+
 fn watch_web(project: &str, out: Option<&str>, port: u16) -> Result<()> {
     rock_host::project::ensure_workspace_root()?;
     let out_dir = web_out_dir(project, out);
@@ -608,26 +694,24 @@ fn watch_web(project: &str, out: Option<&str>, port: u16) -> Result<()> {
             continue;
         }
 
-        let rock_paths: Vec<PathBuf> = event
-            .paths
-            .iter()
-            .filter(|path| path.extension().is_some_and(|extension| extension == "rock"))
-            .cloned()
-            .collect();
-        let has_asset_changes = rock_paths.len() != event.paths.len();
+        let no_comptime = Default::default();
+        let (source_paths, has_asset_changes) = partition_web_event(
+            &event.paths,
+            compiler.as_ref().map(|c| &c.comptime_files).unwrap_or(&no_comptime),
+        );
         let outcome = if compiler.is_none() {
             WebCompiler::init(project, &state.out_dir).map(|(new_compiler, assets)| {
                 compiler = Some(new_compiler);
                 state.publish_assets(assets);
                 WebCompile::Reload
             })
-        } else if rock_paths.is_empty() {
+        } else if source_paths.is_empty() {
             Ok(WebCompile::NoChange)
         } else {
             compiler
                 .as_mut()
                 .expect("checked above")
-                .recompile(project, &state.out_dir, &rock_paths)
+                .recompile(project, &state.out_dir, &source_paths)
         };
 
         match outcome {

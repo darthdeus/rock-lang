@@ -297,6 +297,14 @@ pub fn do_stone_watch(
                 // which re-reads the file (docs/comptime-plan.md).
                 changed_paths.insert(path.clone());
                 changed_game.push(filename);
+            } else if filename == "stick.toml" {
+                // A [build.vars]/[engine]/[release] edit mid-session: route as
+                // a changed non-source path so LiveProject takes the
+                // full-rebuild arm, whose session rebuild re-resolves declared
+                // inputs. Dropping it here left stale vars until the next
+                // structural edit.
+                changed_paths.insert(path.clone());
+                changed_game.push(filename);
             }
         }
 

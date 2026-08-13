@@ -112,6 +112,9 @@ pub fn run_stone_test(root: &Path) -> Result<()> {
         let (fc_tx, fc_rx) = channel::<crate::file_watcher::FileChangeEvent>();
         let watcher = crate::file_watcher::FileWatcher::new()
             .with_metadata_filter(true)
+            // "toml" mirrors `rock stone`: a stick.toml edit is a session
+            // rebuild (declared inputs re-resolve), not a dropped event.
+            .with_extensions(vec!["rock".to_string(), "toml".to_string()])
             .with_shared_extra_files(comptime_watch.clone());
         let debouncer = watcher.watch(vec![root.clone()], fc_tx)?;
         let ctl_tx = ctl_tx.clone();
