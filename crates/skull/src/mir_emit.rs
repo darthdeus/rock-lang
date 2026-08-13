@@ -460,11 +460,11 @@ pub struct MirEmit {
     /// are per-unit elapsed timers that overlap under parallel emit and become
     /// wall-clock measurements under `sequential`.
     pub phases: Vec<(&'static str, std::time::Duration)>,
-    /// `(hits, misses)` of the ABI-plan memo over the emitting context's
-    /// lifetime (== this emission for a full build, cumulative across edits on
-    /// the incremental paths). Counts, so load-immune: `hits > 0` on any real
-    /// corpus is the memo's non-vacuity witness. Surfaced by `backend-stats`.
-    pub abi_plan_stats: (u64, u64),
+    /// ABI-plan memo counters over the emitting context's lifetime (== this
+    /// emission for a full build, cumulative across edits on the incremental
+    /// paths). Counts, so load-immune: `hits() > 0` on any real corpus is the
+    /// memo's non-vacuity witness. Surfaced by `backend-stats`.
+    pub abi_plan_stats: skull_mir::lower::AbiPlanMemoStats,
 }
 
 /// Coarse per-stage wall-clock for one emitted definition. Summed across every
@@ -3480,8 +3480,10 @@ fn emit_full_in_with_mutation(
 
     let t_setup = Instant::now();
     // Pruned dependency bodies have no concrete plan and must not enter the fanout.
-    // The CPU artifact and shader artifact only read the shared graph, so their
-    // views can be realized independently.
+    // The two branches share no mutable view state, so they can be realized
+    // independently -- but they are not read-only: CPU artifact realization can
+    // intern new types through the graph's shared `MonoInterner` (same
+    // lock-safe monotonic arena the body fanout later races).
     let ((lua_view, scx), shader_result) = parallel_join(
         || {
             let lua_view = crate::artifact::realize(
@@ -4723,16 +4725,20 @@ fn main() { let result = first() }
             ws.modules.iter().find(|m| m.id != ModuleId::builtin()).expect("test module").id;
         let (emit, cache) = emit_full_in_with_test_mutation(&ws, mid, BodyMutation::None)
             .expect("intact emission");
-        let (hits, misses) = cache.scx.abi_plan_stats();
+        let stats = cache.scx.abi_plan_stats();
+        let (hits, misses) = (stats.hits(), stats.requests() - stats.hits());
         assert!(misses > 0, "no ABI-plan question consulted the memo (hits={hits})");
         assert!(
             hits > 0,
             "three helper call sites repeat the callee question; zero hits means the \
              production path is not consulting the memo (misses={misses})"
         );
+        assert!(
+            stats.stores > 0 && stats.unique_keys > 0,
+            "derivations must commit to the table: {stats:?}"
+        );
         assert_eq!(
-            emit.abi_plan_stats,
-            (hits, misses),
+            emit.abi_plan_stats, stats,
             "the reported stats must be the context's own counters"
         );
     }

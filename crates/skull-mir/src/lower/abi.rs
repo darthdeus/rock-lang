@@ -365,6 +365,46 @@ pub enum AbiPlanKey {
     Owner(crate::instance::Instance),
 }
 
+/// ABI-plan memo counters, split by key space so each question's population
+/// carries its own denominator: `requests = hits + misses` per space,
+/// `stores` is the number of derivations committed (only `Ok` derivations
+/// store), and `duplicate_cold_stores` counts a store that found the key
+/// already present -- two workers racing the same cold key, each deriving.
+/// `cloned_param_slots` is the `Vec<RepId>` slots cloned by memo hits, a cheap
+/// proxy for what serving plans by handle instead of by clone would save.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AbiPlanMemoStats {
+    pub owner_hits: u64,
+    pub owner_misses: u64,
+    pub callee_hits: u64,
+    pub callee_misses: u64,
+    pub stores: u64,
+    pub duplicate_cold_stores: u64,
+    pub unique_keys: u64,
+    pub cloned_param_slots: u64,
+}
+
+impl AbiPlanMemoStats {
+    pub fn requests(&self) -> u64 {
+        self.owner_hits + self.owner_misses + self.callee_hits + self.callee_misses
+    }
+
+    pub fn hits(&self) -> u64 {
+        self.owner_hits + self.callee_hits
+    }
+
+    pub fn merge(&mut self, other: &Self) {
+        self.owner_hits += other.owner_hits;
+        self.owner_misses += other.owner_misses;
+        self.callee_hits += other.callee_hits;
+        self.callee_misses += other.callee_misses;
+        self.stores += other.stores;
+        self.duplicate_cold_stores += other.duplicate_cold_stores;
+        self.unique_keys += other.unique_keys;
+        self.cloned_param_slots += other.cloned_param_slots;
+    }
+}
+
 /// Build-scoped memo for [`BackendFnAbiPlan`] derivations, owned by
 /// [`ScalarCtx`] so every target/value-mode context has its own table and the
 /// context's one mutation point ([`ScalarCtx::update_body`]) clears it. A plan
@@ -374,34 +414,65 @@ pub enum AbiPlanKey {
 #[derive(Debug, Default)]
 pub(super) struct AbiPlanCache {
     plans: Mutex<HashMap<AbiPlanKey, BackendFnAbiPlan>>,
-    hits: std::sync::atomic::AtomicU64,
-    misses: std::sync::atomic::AtomicU64,
+    owner_hits: std::sync::atomic::AtomicU64,
+    owner_misses: std::sync::atomic::AtomicU64,
+    callee_hits: std::sync::atomic::AtomicU64,
+    callee_misses: std::sync::atomic::AtomicU64,
+    stores: std::sync::atomic::AtomicU64,
+    duplicate_cold_stores: std::sync::atomic::AtomicU64,
+    cloned_param_slots: std::sync::atomic::AtomicU64,
 }
 
 impl AbiPlanCache {
     pub(super) fn lookup(&self, key: &AbiPlanKey) -> Option<BackendFnAbiPlan> {
         use std::sync::atomic::Ordering;
         let found = self.plans.lock().expect("abi plan cache poisoned").get(key).cloned();
+        let (hits, misses) = match key {
+            AbiPlanKey::Owner(_) => (&self.owner_hits, &self.owner_misses),
+            AbiPlanKey::Callee(_) => (&self.callee_hits, &self.callee_misses),
+        };
         match &found {
-            Some(_) => self.hits.fetch_add(1, Ordering::Relaxed),
-            None => self.misses.fetch_add(1, Ordering::Relaxed),
+            Some(plan) => {
+                hits.fetch_add(1, Ordering::Relaxed);
+                self.cloned_param_slots
+                    .fetch_add(plan.representation.params.len() as u64, Ordering::Relaxed);
+            }
+            None => {
+                misses.fetch_add(1, Ordering::Relaxed);
+            }
         };
         found
     }
 
     pub(super) fn store(&self, key: AbiPlanKey, plan: &BackendFnAbiPlan) {
-        self.plans.lock().expect("abi plan cache poisoned").insert(key, plan.clone());
+        use std::sync::atomic::Ordering;
+        let replaced =
+            self.plans.lock().expect("abi plan cache poisoned").insert(key, plan.clone());
+        self.stores.fetch_add(1, Ordering::Relaxed);
+        if replaced.is_some() {
+            self.duplicate_cold_stores.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     pub(super) fn clear(&self) {
         self.plans.lock().expect("abi plan cache poisoned").clear();
     }
 
-    /// `(hits, misses)` across the cache's lifetime. Lookups are counted where
-    /// they happen, so `hits + misses` is the number of cached questions asked.
-    pub(super) fn stats(&self) -> (u64, u64) {
+    /// Lifetime counters plus the table's current population. Lookups are
+    /// counted where they happen, so per-space `hits + misses` is the number of
+    /// cached questions asked in that key space.
+    pub(super) fn stats(&self) -> AbiPlanMemoStats {
         use std::sync::atomic::Ordering;
-        (self.hits.load(Ordering::Relaxed), self.misses.load(Ordering::Relaxed))
+        AbiPlanMemoStats {
+            owner_hits: self.owner_hits.load(Ordering::Relaxed),
+            owner_misses: self.owner_misses.load(Ordering::Relaxed),
+            callee_hits: self.callee_hits.load(Ordering::Relaxed),
+            callee_misses: self.callee_misses.load(Ordering::Relaxed),
+            stores: self.stores.load(Ordering::Relaxed),
+            duplicate_cold_stores: self.duplicate_cold_stores.load(Ordering::Relaxed),
+            unique_keys: self.plans.lock().expect("abi plan cache poisoned").len() as u64,
+            cloned_param_slots: self.cloned_param_slots.load(Ordering::Relaxed),
+        }
     }
 }
 
@@ -1183,6 +1254,29 @@ pub fn owner_abi_plan(
     plans: &crate::concrete::ConcretePlans,
     owner: &crate::instance::Instance,
 ) -> Result<BackendFnAbiPlan, skull_parser::CompilerError> {
+    owner_abi_plan_impl(ws, scx, plans, owner, None)
+}
+
+/// [`owner_abi_plan`] for the caller that already holds the owner's concrete
+/// plan -- definition lowering, whose standalone-specialization plans are not
+/// in the shared map. Same key, same memo, same derivation policy.
+pub fn owner_abi_plan_for_body(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    plans: &crate::concrete::ConcretePlans,
+    owner: &crate::instance::Instance,
+    body_plan: &ConcreteBodyPlan,
+) -> Result<BackendFnAbiPlan, skull_parser::CompilerError> {
+    owner_abi_plan_impl(ws, scx, plans, owner, Some(body_plan))
+}
+
+fn owner_abi_plan_impl(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    plans: &crate::concrete::ConcretePlans,
+    owner: &crate::instance::Instance,
+    in_hand: Option<&ConcreteBodyPlan>,
+) -> Result<BackendFnAbiPlan, skull_parser::CompilerError> {
     let key = AbiPlanKey::Owner(owner.clone());
     if let Some(plan) = scx.abi_plan_cached(&key) {
         return Ok(plan);
@@ -1190,7 +1284,7 @@ pub fn owner_abi_plan(
     let derived = if !requires_concrete_body_plan(ws, owner) {
         BackendFnAbiPlan::for_boundary_instance(ws, scx, owner)
     } else {
-        let plan = plans.get(owner).ok_or_else(|| {
+        let plan = in_hand.or_else(|| plans.get(owner)).ok_or_else(|| {
             skull_parser::CompilerError::new_no_location(format!(
                 "internal: concrete ABI plan is missing for owner `{}` ({})",
                 ws.module(owner.func.module).functions[owner.func.func].name,
@@ -1201,6 +1295,31 @@ pub fn owner_abi_plan(
     };
     scx.abi_plan_store(key, &derived);
     Ok(derived)
+}
+
+/// ABI of the target-selected SIBLING body serving a canonical instance: the
+/// sibling's own concrete plan when the registry has one, the canonical plan's
+/// signature under the sibling's declaration otherwise, and the opaque
+/// boundary when the sibling needs no body plan. Shared by call-site
+/// resolution (`Builder::callee_abi_plan_for_instance`'s selected arm) and
+/// the JS emitter's scalar-ABI check. NOT memoized here: the signature rung's
+/// answer depends on the canonical plan, which no single-instance key names --
+/// the Builder memoizes the whole callee question under `Callee(inst)`, where
+/// the canonical identity is part of the key.
+pub fn selected_sibling_abi_plan(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    plans: &crate::concrete::ConcretePlans,
+    selected: &crate::instance::Instance,
+    canonical: &ConcreteBodyPlan,
+) -> BackendFnAbiPlan {
+    if !requires_concrete_body_plan(ws, selected) {
+        return BackendFnAbiPlan::for_boundary_instance(ws, scx, selected);
+    }
+    if let Some(selected_plan) = plans.get(selected) {
+        return BackendFnAbiPlan::for_concrete_plan(ws, scx, selected_plan);
+    }
+    BackendFnAbiPlan::for_concrete_signature(ws, scx, selected, &canonical.signature)
 }
 
 pub fn requires_concrete_body_plan(

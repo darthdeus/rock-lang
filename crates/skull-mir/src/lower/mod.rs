@@ -73,8 +73,9 @@ pub use shape::*;
 mod abi;
 pub use abi::{
     boundary_requires_boxed_representation, declared_boundary_class, owner_abi_plan,
-    requires_concrete_body_plan,
-    AbiPlanKey, BackendFnAbiPlan, BoundaryClass, FunctionRepPlan, GlobalPlan, RepArena, RepError,
+    owner_abi_plan_for_body, requires_concrete_body_plan, selected_sibling_abi_plan,
+    AbiPlanKey, AbiPlanMemoStats, BackendFnAbiPlan, BoundaryClass, FunctionRepPlan, GlobalPlan,
+    RepArena, RepError,
     RepId, RepLayout,
     RepGuarantees, RepPlan, RepUse, RepUseFacts,
 };
@@ -343,10 +344,10 @@ impl ScalarCtx {
         self.abi_plans.store(key, plan);
     }
 
-    /// `(hits, misses)` of the ABI-plan memo. A full emission over a real
-    /// workspace must show hits: the duplicate-derivation population it exists
-    /// to remove is the normal case, not an optimization corner.
-    pub fn abi_plan_stats(&self) -> (u64, u64) {
+    /// ABI-plan memo counters. A full emission over a real workspace must show
+    /// hits: the duplicate-derivation population it exists to remove is the
+    /// normal case, not an optimization corner.
+    pub fn abi_plan_stats(&self) -> AbiPlanMemoStats {
         self.abi_plans.stats()
     }
 
@@ -1168,19 +1169,10 @@ fn lower_body(
     let cur = f.entry();
     // Scalar value ABI: when this fn participates, each value param expands to
     // leaf cells and a value return becomes a multi-value `Return`. This body's
-    // own ABI comes from the one plan the calls that target it read -- and it
-    // is memoized under the same Owner key those consumers use, derived from
-    // the plan in hand because a standalone specialization's plan may not be
-    // in the shared map.
-    let abi_key = AbiPlanKey::Owner(subject.clone());
-    let abi = match scx.abi_plan_cached(&abi_key) {
-        Some(plan) => plan,
-        None => {
-            let derived = BackendFnAbiPlan::for_concrete_plan(ws, scx, concrete_plan);
-            scx.abi_plan_store(abi_key, &derived);
-            derived
-        }
-    };
+    // own ABI is the one Owner-keyed plan the calls that target it read; the
+    // plan in hand rides along because a standalone specialization's plan may
+    // not be in the shared map.
+    let abi = owner_abi_plan_for_body(ws, scx, concrete_plans, &subject, concrete_plan)?;
     f.abi_plan = Some(abi.clone());
     let param_reps = abi.representation().params().to_vec();
     let ret_rep = abi.representation().result();

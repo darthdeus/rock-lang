@@ -93,8 +93,8 @@ pub struct SkullPhaseTimes {
     /// scaffold+misc), from `MirEmit::phases`. Empty if bone rejected the
     /// workspace (emit never ran). Summed element-wise across timed runs.
     pub emit_phases: Vec<(&'static str, Duration)>,
-    /// `(hits, misses)` of skull's ABI-plan memo, from `MirEmit::abi_plan_stats`.
-    pub abi_plan_stats: (u64, u64),
+    /// skull's ABI-plan memo counters, from `MirEmit::abi_plan_stats`.
+    pub abi_plan_stats: skull_mir::lower::AbiPlanMemoStats,
 }
 
 /// Whole-project skull timing: parse all user files, type-check them together

@@ -389,6 +389,26 @@ fn an_instantiation_that_returns_after_being_pruned_is_rebuilt_not_reused() {
     );
 }
 
+/// The same ABI-width flip on the `emit_incremental` path: taking `foo` by
+/// value flips `taken_by_ref`, which invalidates every memoized ABI plan, so
+/// the reassembled program must equal a fresh full emit rather than serve
+/// plans derived under the old ABI state.
+#[test]
+fn an_incremental_emit_matches_fresh_after_a_taken_by_ref_flip() {
+    let v1 = "value V2 { x: float, y: float }\n\
+              fn foo(v: V2) -> float { v.x }\n\
+              fn other() -> float { foo(V2 { x: 2.0, y: 3.0 }) }\n\
+              fn use_ref() -> float { other() }";
+    let v2 = "value V2 { x: float, y: float }\n\
+              fn foo(v: V2) -> float { v.x }\n\
+              fn other() -> float { foo(V2 { x: 2.0, y: 3.0 }) }\n\
+              fn use_ref() -> float {\n\
+                let f = foo\n\
+                f(V2 { x: 1.0, y: 2.0 })\
+              }";
+    check_edit_with(crate::common::ws_with_stdlib, v1, v2, &["use_ref"]);
+}
+
 #[test]
 fn an_overlay_reemits_a_definition_after_a_scalar_abi_width_flip() {
     let v1 = "value V2 { x: float, y: float }\n\

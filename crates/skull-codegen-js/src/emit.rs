@@ -2661,6 +2661,7 @@ pub fn emit_with_closure(
         out.push_str(&emit_inline_js_fn(
             ws,
             &scx,
+            &st.concrete,
             &body.instance,
             body.decl,
             st.names.get(&body.instance).expect("emitted body has a name"),
@@ -3142,7 +3143,7 @@ fn assemble_program_core(
     // 2b. inline(js) fns, emitted verbatim.
     for body in &st.inline_js {
         let name = st.names.get(&body.instance).expect("emitted body has a name");
-        match emit_inline_js_fn(ws, scx, &body.instance, body.decl, name) {
+        match emit_inline_js_fn(ws, scx, &st.concrete, &body.instance, body.decl, name) {
             Ok(definition) => {
                 out.push_str(&definition);
                 stable.push_str(&definition);
@@ -3318,6 +3319,12 @@ impl JsEmitCache {
 
     pub fn graph_update(&self) -> Option<JsGraphUpdate> {
         self.session.last_update.clone()
+    }
+
+    /// The session context's ABI-plan memo counters (parity with the Lua
+    /// path's `MirEmit::abi_plan_stats`).
+    pub fn abi_plan_stats(&self) -> skull_mir::lower::AbiPlanMemoStats {
+        self.scx.abi_plan_stats()
     }
 }
 
@@ -3543,6 +3550,7 @@ pub fn emit_overlay(
         out.push_str(&emit_inline_js_fn(
             ws,
             &cache.scx,
+            &cache.session.concrete,
             &rebind_instance,
             rebind,
             "__rock_rebind_system",
@@ -3805,6 +3813,7 @@ impl WorklistState {
 fn emit_inline_js_fn(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
+    plans: &skull_mir::concrete::ConcretePlans,
     instance: &Instance,
     fr: FuncRef,
     js_name: &str,
@@ -3814,7 +3823,7 @@ fn emit_inline_js_fn(
     // `<name>__<leaf>` scalars, same as the lua path, so the exploded call
     // sites and the raw body's leaf names agree.
     let selected = Instance { func: fr, args: instance.args.clone() };
-    let abi = skull_mir::lower::BackendFnAbiPlan::for_boundary_instance(ws, scx, &selected);
+    let abi = skull_mir::lower::owner_abi_plan(ws, scx, plans, &selected)?;
     let lua_param_names = abi.lua_param_names(ws);
     let params = match &lua_param_names {
         Some(names) => names.join(", "),
@@ -4391,53 +4400,37 @@ fn check_scalar_abi(
                 let selected = artifact_decls
                     .get(&body)
                     .map(|decl| Instance { func: *decl, args: body.args.clone() });
-                let selected_sibling = selected.as_ref().is_some_and(|inst| inst.func != body.func);
-                let abi = concrete.get(&body).or_else(|| {
-                    selected
-                        .as_ref()
-                        .and_then(|inst| concrete.get(inst))
-                });
-                let required = match abi {
-                    Some(plan) => {
-                        let abi = if selected_sibling {
-                            let selected = selected.as_ref().expect("selected sibling was checked above");
-                            skull_mir::lower::BackendFnAbiPlan::for_concrete_signature(
-                                ws,
-                                scx,
-                                selected,
-                                &plan.signature,
-                            )
-                        } else {
-                            skull_mir::lower::BackendFnAbiPlan::for_concrete_plan(ws, scx, plan)
-                        };
-                        required_arg_count(ws, &abi, arity)
-                    }
-                    None if selected_sibling => {
-                        let selected = selected.expect("selected sibling was checked above");
-                        if skull_mir::lower::requires_concrete_body_plan(ws, &selected) {
-                            findings.push(err(format!(
-                                "JS subset: no concrete ABI signature for selected {what}`{}`",
-                                ws.module(callee.module).functions[callee.func].name,
-                            )));
-                            continue;
+                // The ABI is the shared oracle's answer about that emitted
+                // body; the arms only decide which entry point matches the
+                // selection: `owner_abi_plan` for a body serving its own
+                // canonical instance, the sibling entry point when the
+                // artifact selected a different declaration.
+                let abi = match selected.as_ref().filter(|inst| inst.func != body.func) {
+                    Some(selected) => {
+                        match concrete.get(&body).or_else(|| concrete.get(selected)) {
+                            Some(plan) => Ok(skull_mir::lower::selected_sibling_abi_plan(
+                                ws, scx, concrete, selected, plan,
+                            )),
+                            None if skull_mir::lower::requires_concrete_body_plan(ws, selected) => {
+                                findings.push(err(format!(
+                                    "JS subset: no concrete ABI signature for selected {what}`{}`",
+                                    ws.module(callee.module).functions[callee.func].name,
+                                )));
+                                continue;
+                            }
+                            None => skull_mir::lower::owner_abi_plan(ws, scx, concrete, selected),
                         }
-                        let abi = skull_mir::lower::BackendFnAbiPlan::for_boundary_instance(
-                            ws, scx, &selected,
-                        );
-                        required_arg_count(ws, &abi, arity)
                     }
-                    None if skull_mir::lower::requires_concrete_body_plan(ws, &body) => {
+                    None => skull_mir::lower::owner_abi_plan(ws, scx, concrete, &body),
+                };
+                let required = match abi {
+                    Ok(abi) => required_arg_count(ws, &abi, arity),
+                    Err(_) => {
                         findings.push(err(format!(
                             "JS subset: no concrete ABI plan for {what}`{}`",
                             ws.module(callee.module).functions[callee.func].name,
                         )));
                         continue;
-                    }
-                    None => {
-                        let abi = skull_mir::lower::BackendFnAbiPlan::for_boundary_instance(
-                            ws, scx, &body,
-                        );
-                        required_arg_count(ws, &abi, arity)
                     }
                 };
                 if argc < required || argc > arity {

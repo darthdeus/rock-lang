@@ -66,9 +66,9 @@ struct SkullStats {
     /// entries are direct wall-clock measurements; the remaining entries are
     /// per-unit elapsed timers that overlap under parallel emit.
     emit_phases: Vec<(&'static str, Duration)>,
-    /// ABI-plan memo `(hits, misses)` summed across timed runs. Counts, not
-    /// times, so they are load-immune and identical run to run.
-    abi_plan_stats: (u64, u64),
+    /// ABI-plan memo counters summed across timed runs. Counts, not times, so
+    /// they are load-immune and identical run to run.
+    abi_plan_stats: skull_mir::lower::AbiPlanMemoStats,
 }
 
 pub fn do_backend_stats(input: &str, iters: usize, warmup: usize) -> Result<()> {
@@ -139,8 +139,7 @@ fn run_skull(sources: &SourceFiles, iters: usize, warmup: usize) -> SkullStats {
         stats.times.semantic += times.semantic;
         stats.times.emit += times.emit;
         merge_phases(&mut stats.emit_phases, &times.emit_phases);
-        stats.abi_plan_stats.0 += times.abi_plan_stats.0;
-        stats.abi_plan_stats.1 += times.abi_plan_stats.1;
+        stats.abi_plan_stats.merge(&times.abi_plan_stats);
     }
     stats.files = sources.files.len();
     stats
@@ -252,13 +251,29 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
             println!("    {:28} {:>9.3} ms  (timer overhead / unbracketed)", "overhead", ms(overhead));
         }
     }
-    let (hits, misses) = skull.abi_plan_stats;
-    if hits + misses > 0 {
-        let asked = (hits + misses) / iters as u64;
-        let hit = hits / iters as u64;
+    let memo = &skull.abi_plan_stats;
+    if memo.requests() > 0 {
+        let per_run = |v: u64| v / iters as u64;
+        let asked = per_run(memo.requests());
+        let hit = per_run(memo.hits());
         let rate = hit as f64 / asked as f64 * 100.0;
         println!(
             "  abi-plan memo  : {asked} asked, {hit} hit per run ({rate:.1}% hit rate)"
+        );
+        println!(
+            "                   owner {}/{} hit, callee {}/{} hit per run",
+            per_run(memo.owner_hits),
+            per_run(memo.owner_hits + memo.owner_misses),
+            per_run(memo.callee_hits),
+            per_run(memo.callee_hits + memo.callee_misses),
+        );
+        println!(
+            "                   {} derivations over {} unique keys per run \
+             ({} duplicate cold), {} param slots cloned by hits",
+            per_run(memo.stores),
+            per_run(memo.unique_keys),
+            per_run(memo.duplicate_cold_stores),
+            per_run(memo.cloned_param_slots),
         );
     }
     println!("  post-parse     : {:>9.3} ms", ms(skull_postparse));

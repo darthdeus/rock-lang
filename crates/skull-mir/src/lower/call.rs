@@ -248,17 +248,12 @@ impl Builder<'_> {
             ))
         })?;
         if selected.func != inst.func {
-            if !crate::lower::requires_concrete_body_plan(self.ws, &selected) {
-                return Ok(BackendFnAbiPlan::for_boundary_instance(self.ws, self.scx, &selected));
-            }
-            if let Some(selected_plan) = self.concrete_plans.get(&selected) {
-                return Ok(BackendFnAbiPlan::for_concrete_plan(self.ws, self.scx, selected_plan));
-            }
-            return Ok(BackendFnAbiPlan::for_concrete_signature(
+            return Ok(crate::lower::selected_sibling_abi_plan(
                 self.ws,
                 self.scx,
+                self.concrete_plans,
                 &selected,
-                &plan.signature,
+                plan,
             ));
         }
         Ok(BackendFnAbiPlan::for_concrete_plan(self.ws, self.scx, plan))
