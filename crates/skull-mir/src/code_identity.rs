@@ -35,24 +35,55 @@ impl LambdaSiteId {
     }
 }
 
+/// The concrete owner of a callable artifact. Ordinary function bodies use the
+/// mono `Instance`; always-emitted global/decorator roots have no declaration,
+/// so their source artifact is named directly.
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+pub enum CodeOwner {
+    Instance(Instance),
+    Artifact { kind: CodeOwnerKind, module: Ustr, name: Ustr },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+pub enum CodeOwnerKind {
+    Global,
+    Decorator,
+}
+
 /// Compiler-owned identity of an emitted Rock callable body.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
 pub enum CodeIdentity {
     /// A top-level declaration at one concrete mono instantiation.
     Named(Instance),
+    /// An always-emitted artifact root. It is not itself an escaping value, but
+    /// it owns lambda identities stored in a global or decorator artifact.
+    Artifact(CodeOwner),
     /// A lambda literal in a concrete declaration body.
-    Lambda { enclosing: Instance, site: LambdaSiteId },
+    Lambda { enclosing: CodeOwner, site: LambdaSiteId },
     /// A source-named nested function. It is still owned by the enclosing
     /// concrete declaration because nested functions do not enter the mono
     /// declaration graph as independent top-level declarations.
-    Nested { enclosing: Instance, site: LambdaSiteId, name: Ustr },
+    Nested { enclosing: CodeOwner, site: LambdaSiteId, name: Ustr },
 }
 
 impl CodeIdentity {
     pub fn enclosing(&self) -> Option<&Instance> {
         match self {
             Self::Named(i) => Some(i),
-            Self::Lambda { enclosing, .. } | Self::Nested { enclosing, .. } => Some(enclosing),
+            Self::Lambda { enclosing: CodeOwner::Instance(i), .. }
+            | Self::Nested { enclosing: CodeOwner::Instance(i), .. } => Some(i),
+            Self::Artifact(_)
+            | Self::Lambda { enclosing: CodeOwner::Artifact { .. }, .. }
+            | Self::Nested { enclosing: CodeOwner::Artifact { .. }, .. } => None,
+        }
+    }
+
+    pub fn owner(&self) -> Option<CodeOwner> {
+        match self {
+            Self::Named(i) => Some(CodeOwner::Instance(i.clone())),
+            Self::Artifact(owner)
+            | Self::Lambda { enclosing: owner, .. }
+            | Self::Nested { enclosing: owner, .. } => Some(owner.clone()),
         }
     }
 
@@ -78,17 +109,24 @@ impl CodeIdentity {
                 .join(",");
             format!("{}::{}<{}>", module.file, function.name, args)
         };
+        let owner_key = |owner: &CodeOwner| match owner {
+            CodeOwner::Instance(instance) => instance_key(instance),
+            CodeOwner::Artifact { kind, module, name } => {
+                format!("artifact:{kind:?}:{}::{name}", module)
+            }
+        };
         match self {
             Self::Named(instance) => format!("named:{}", instance_key(instance)),
+            Self::Artifact(owner) => format!("artifact-root:{}", owner_key(owner)),
             Self::Lambda { enclosing, site } => format!(
                 "lambda:{}@{}:{}",
-                instance_key(enclosing),
+                owner_key(enclosing),
                 site.file,
                 site.offset
             ),
             Self::Nested { enclosing, site, name } => format!(
                 "nested:{}::{}@{}:{}",
-                instance_key(enclosing),
+                owner_key(enclosing),
                 name,
                 site.file,
                 site.offset
@@ -285,7 +323,9 @@ impl CodeArtifact {
             .values()
             .filter_map(|identity| match identity {
                 CodeIdentity::Named(instance) => Some(instance.func),
-                CodeIdentity::Lambda { .. } | CodeIdentity::Nested { .. } => None,
+                CodeIdentity::Artifact(_)
+                | CodeIdentity::Lambda { .. }
+                | CodeIdentity::Nested { .. } => None,
             })
             .collect();
         for block in crate::cfg::reachable_blocks_from(mf, mf.entry) {
@@ -314,7 +354,9 @@ impl CodeArtifact {
             self.census.examined += 1;
             self.census.assigned += 1;
             match &entry.identity {
-                CodeIdentity::Named(_) | CodeIdentity::Nested { .. } => self.census.named_values += 1,
+                CodeIdentity::Named(_) | CodeIdentity::Artifact(_) | CodeIdentity::Nested { .. } => {
+                    self.census.named_values += 1
+                }
                 CodeIdentity::Lambda { .. } => {
                     self.census.lambda_values += 1;
                     if entry.capture_free {
@@ -411,7 +453,9 @@ impl CodeArtifact {
 
     fn count_kind(&mut self, identity: &CodeIdentity, capture_free: bool) {
         match identity {
-            CodeIdentity::Named(_) | CodeIdentity::Nested { .. } => self.census.named_values += 1,
+            CodeIdentity::Named(_) | CodeIdentity::Artifact(_) | CodeIdentity::Nested { .. } => {
+                self.census.named_values += 1
+            }
             CodeIdentity::Lambda { .. } => {
                 self.census.lambda_values += 1;
                 if capture_free {
@@ -457,9 +501,9 @@ impl CodeArtifact {
         {
             return false;
         }
-        let mut owners: BTreeMap<&Instance, LambdaTopologyFingerprint> = BTreeMap::new();
+        let mut owners: BTreeMap<CodeOwner, LambdaTopologyFingerprint> = BTreeMap::new();
         for entry in self.entries.values().chain(next.entries.values()) {
-            let Some(owner) = entry.identity.enclosing() else { continue };
+            let Some(owner) = entry.identity.owner() else { continue };
             let topology = entry.compatibility.lambda_topology;
             if let Some(previous) = owners.insert(owner, topology) {
                 if previous != topology {
@@ -495,7 +539,9 @@ impl CodeArtifact {
             census.examined += 1;
             census.assigned += 1;
             match &entry.identity {
-                CodeIdentity::Named(_) | CodeIdentity::Nested { .. } => census.named_values += 1,
+                CodeIdentity::Named(_) | CodeIdentity::Artifact(_) | CodeIdentity::Nested { .. } => {
+                    census.named_values += 1
+                }
                 CodeIdentity::Lambda { .. } => {
                     census.lambda_values += 1;
                     if entry.capture_free {
@@ -583,8 +629,14 @@ mod tests {
         );
         let site = LambdaSiteId { file: Ustr::from("same.rock"), offset: 12 };
         assert_ne!(
-            CodeIdentity::Lambda { enclosing: int_instance, site },
-            CodeIdentity::Lambda { enclosing: float_instance, site },
+            CodeIdentity::Lambda {
+                enclosing: CodeOwner::Instance(int_instance),
+                site,
+            },
+            CodeIdentity::Lambda {
+                enclosing: CodeOwner::Instance(float_instance),
+                site,
+            },
             "the enclosing concrete instance is part of lambda identity"
         );
     }

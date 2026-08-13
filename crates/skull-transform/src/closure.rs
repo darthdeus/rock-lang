@@ -402,8 +402,7 @@ pub fn convert_closures_framed(
         let code_identity = mf
             .code_identity
             .as_ref()
-            .and_then(CodeIdentity::enclosing)
-            .cloned()
+            .and_then(CodeIdentity::owner)
             .zip(
                 mf.inst_spans
                     .get(lambda)

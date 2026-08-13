@@ -1784,7 +1784,7 @@ mod tests {
             .keys()
             .filter_map(|identity| match identity {
                 skull_mir::code_identity::CodeIdentity::Lambda { enclosing, site }
-                    if *enclosing == owner => Some(*site),
+                    if *enclosing == skull_mir::code_identity::CodeOwner::Instance(owner.clone()) => Some(*site),
                 _ => None,
             })
             .collect();
@@ -1823,7 +1823,10 @@ mod tests {
             frame: None,
             lambda_topology: topology,
         };
-        let id = CodeIdentity::Lambda { enclosing: owner.clone(), site: site_b };
+        let id = CodeIdentity::Lambda {
+            enclosing: skull_mir::code_identity::CodeOwner::Instance(owner.clone()),
+            site: site_b,
+        };
         let mut old = CodeArtifact::default();
         old.insert(CodeEntry {
             identity: id.clone(),
@@ -1856,7 +1859,7 @@ mod tests {
         let mut removal_edit = CodeArtifact::default();
         removal_edit.insert(CodeEntry {
             identity: CodeIdentity::Lambda {
-                enclosing: owner.clone(),
+                enclosing: skull_mir::code_identity::CodeOwner::Instance(owner.clone()),
                 site: site_b,
             },
             compatibility: compat(removed),
@@ -1872,7 +1875,7 @@ mod tests {
         incompatible_capture.complete = false;
         capture_edit.insert(CodeEntry {
             identity: CodeIdentity::Lambda {
-                enclosing: owner,
+                enclosing: skull_mir::code_identity::CodeOwner::Instance(owner),
                 site: site_b,
             },
             compatibility: CodeCompatibility {
@@ -2672,8 +2675,7 @@ pub fn lower_detached_region(
     aux.code_identity = source
         .code_identity
         .as_ref()
-        .and_then(skull_mir::code_identity::CodeIdentity::enclosing)
-        .cloned()
+        .and_then(skull_mir::code_identity::CodeIdentity::owner)
         .zip(detached_region_site(source, &region))
         .map(|(enclosing, site)| skull_mir::code_identity::CodeIdentity::Nested {
             enclosing,

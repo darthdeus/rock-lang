@@ -1242,7 +1242,14 @@ fn lower_global_inner(
     let inf = ws
         .inference(mid)
         .and_then(|ir| ir.per_fn.get(&BodyOwner::Global(gid)));
-    let f = MirFunc::new(name);
+    let mut f = MirFunc::new(name);
+    f.code_identity = Some(crate::code_identity::CodeIdentity::Artifact(
+        crate::code_identity::CodeOwner::Artifact {
+            kind: crate::code_identity::CodeOwnerKind::Global,
+            module: module.file,
+            name: module.globals[gid].name,
+        },
+    ));
     let cur = f.entry();
     let mut b = Builder {
         ws,
@@ -1549,7 +1556,14 @@ fn lower_decorator_inner(
     let target = body
         .deco_target
         .ok_or_else(|| gap("decorator body has no target binding"))?;
-    let f = MirFunc::new(name);
+    let mut f = MirFunc::new(name);
+    f.code_identity = Some(crate::code_identity::CodeIdentity::Artifact(
+        crate::code_identity::CodeOwner::Artifact {
+            kind: crate::code_identity::CodeOwnerKind::Decorator,
+            module: module.file,
+            name: module.decorators[did].name,
+        },
+    ));
     let cur = f.entry();
     let mut b = Builder {
         ws,

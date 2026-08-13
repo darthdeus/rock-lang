@@ -128,7 +128,7 @@ impl Builder<'_> {
             .clone()
             .zip(crate::code_identity::LambdaSiteId::from_span(self.body.expr_spans[body]))
             .map(|(enclosing, site)| crate::code_identity::CodeIdentity::Nested {
-                enclosing,
+                enclosing: crate::code_identity::CodeOwner::Instance(enclosing),
                 site,
                 name: sname,
             });
