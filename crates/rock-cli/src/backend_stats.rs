@@ -61,8 +61,10 @@ struct SkullStats {
     times: SkullPhaseTimes,
     files: usize,
     ok: bool,
-    /// skull's emit sub-phases summed across timed runs (mean = value / iters),
-    /// in run order — same element-wise accumulation as bone's `phases`.
+    /// skull's emit phases summed across timed runs (mean = value / iters), in
+    /// run order — same element-wise accumulation as bone's `phases`. `setup:`
+    /// entries are direct wall-clock measurements; the remaining entries are
+    /// per-unit elapsed timers that overlap under parallel emit.
     emit_phases: Vec<(&'static str, Duration)>,
 }
 
@@ -190,39 +192,58 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
     println!("  semantic       : {:>9.3} ms  (bone front-half)", ms(skull.times.semantic));
     println!("  emit           : {:>9.3} ms  (skull codegen delta)", ms(skull.times.emit));
     if !skull.emit_phases.is_empty() {
-        let phase_sum: Duration = skull.emit_phases.iter().map(|(_, d)| *d).sum();
+        let setup_sum: Duration = skull
+            .emit_phases
+            .iter()
+            .filter(|(name, _)| name.starts_with("setup: "))
+            .map(|(_, d)| *d)
+            .sum();
+        let emit_phases: Vec<_> = skull
+            .emit_phases
+            .iter()
+            .filter(|(name, _)| !name.starts_with("setup: "))
+            .collect();
+        if setup_sum > Duration::ZERO {
+            println!("  emit setup (direct wall-clock):");
+            for (name, dur) in &skull.emit_phases {
+                if name.starts_with("setup: ") {
+                    println!("    {:28} {:>9.3} ms", name, ms(*dur));
+                }
+            }
+            println!("    {:28} {:>9.3} ms", "= setup total", ms(setup_sum));
+        }
+        let phase_sum: Duration = emit_phases.iter().map(|(_, d)| *d).sum();
+        let emit_body = skull.times.emit.saturating_sub(setup_sum);
         // skull emits PIPELINE-parallel: each function runs its whole
         // lower->cleanup->regalloc->stringify pipeline on one rayon worker, so the
-        // per-unit phase timers are CPU-time and their SUM exceeds the wall-clock
+        // per-unit phase timers are elapsed-time measurements and their SUM exceeds the wall-clock
         // `emit` line (phases interleave across workers — there is no global
-        // per-phase wall span to measure). Report each phase's WALL-CLOCK SHARE
-        // instead: `phase_cpu / total_cpu * emit_wall`, which sums back to `emit`
-        // and reads as "this phase is ~N ms of the real emit time". It's an
-        // estimate (assumes each phase parallelizes evenly), so the raw CPU sum is
-        // kept in parens for "where's the work". `--features sequential` makes the
-        // phase timers true wall-clock (parallelism 1x), so the scaling is a no-op.
-        let parallel = phase_sum > skull.times.emit;
+        // per-phase wall span to measure). Setup is already a direct wall-clock
+        // measurement, so estimate only the remaining emit time from the
+        // per-unit elapsed share. `--features sequential` makes the phase timers
+        // non-overlapping wall-clock measurements, so the scaling is a no-op.
+        let parallel = phase_sum > emit_body;
         if parallel {
             println!(
-                "  emit phases (est. wall-clock share of the {:.3} ms emit; raw CPU sum in parens):",
-                ms(skull.times.emit)
+                "  emit phases (est. wall-clock share of the {:.3} ms after setup; elapsed sum in parens):",
+                ms(emit_body)
             );
             let total = ms(phase_sum);
-            let wall = ms(skull.times.emit);
-            for (name, dur) in &skull.emit_phases {
+            let wall = ms(emit_body);
+            for (name, dur) in &emit_phases {
                 let share = if total > 0.0 { ms(*dur) / total * wall } else { 0.0 };
-                println!("    {:28} {:>9.3} ms  (CPU {:>8.3} ms)", name, share, ms(*dur));
+                println!("    {:28} {:>9.3} ms  (elapsed {:>8.3} ms)", name, share, ms(*dur));
             }
-            let ratio = if skull.times.emit.is_zero() { 0.0 } else { total / wall };
-            println!("    {:28} {:>8.2}x", "effective parallelism", ratio);
+            let ratio = if emit_body.is_zero() { 0.0 } else { total / wall };
+            println!("    {:28} {:>8.2}x", "elapsed overlap factor", ratio);
         } else {
             println!("  emit phases:");
-            for (name, dur) in &skull.emit_phases {
+            for (name, dur) in &emit_phases {
                 println!("    {:28} {:>9.3} ms", name, ms(*dur));
             }
             // Wall-clock around the emit call captures alloc/setup the phase timers
-            // don't bracket: overhead = emit - sum(phases).
-            let overhead = skull.times.emit.saturating_sub(phase_sum);
+            // don't bracket: overhead = emit remainder - sum(phases).
+            let overhead = emit_body.saturating_sub(phase_sum);
             println!("    {:28} {:>9.3} ms  (timer overhead / unbracketed)", "overhead", ms(overhead));
         }
     }

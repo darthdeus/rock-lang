@@ -70,6 +70,16 @@ fn par_map_with<T, R, S>(items: Vec<T>, init: impl Fn() -> S, f: impl Fn(&mut S,
     items.into_iter().map(|t| f(&mut state, t)).collect()
 }
 
+#[cfg(not(feature = "sequential"))]
+fn parallel_join<A: Send, B: Send>(left: impl FnOnce() -> A + Send, right: impl FnOnce() -> B + Send) -> (A, B) {
+    rayon::join(left, right)
+}
+
+#[cfg(feature = "sequential")]
+fn parallel_join<A, B>(left: impl FnOnce() -> A, right: impl FnOnce() -> B) -> (A, B) {
+    (left(), right())
+}
+
 /// The globals a function reads DIRECTLY plus the (statically-resolved) functions
 /// it calls, walking only blocks reachable from `mf.entry`. A lambda's body is a
 /// sub-CFG unreachable from entry (its reads fire when the closure is later
@@ -444,11 +454,11 @@ pub struct MirEmit {
     pub lua: String,
     /// `(lua_name, reason)` for every definition the new path skipped.
     pub skipped: Vec<(String, String)>,
-    /// Coarse per-stage time for the emit, in run order: HIR->MIR lowering, MIR
-    /// cleanup, and Lua emission (regalloc + stringify) — each summed across every
-    /// fn/decorator/global (CPU-time under parallel emit, wall-clock under
-    /// `--features sequential`) — plus the directly-timed sequential scaffolding /
-    /// global-init ordering / deco application. Surfaced by `rock backend-stats`.
+    /// Coarse per-stage time for the emit, in run order. `setup:` entries are
+    /// direct wall-clock measurements; the remaining entries cover HIR->MIR
+    /// lowering, MIR cleanup, Lua emission, and sequential assembly. The latter
+    /// are per-unit elapsed timers that overlap under parallel emit and become
+    /// wall-clock measurements under `sequential`.
     pub phases: Vec<(&'static str, std::time::Duration)>,
 }
 
@@ -1422,7 +1432,8 @@ fn emit_coroutine_chunk(
 /// Emit one ordinary or coroutine function body to a cacheable [`Chunk`]. Extern
 /// and `inline(lua)` functions are NOT handled here — they are cheap and
 /// regenerated in [`assemble`]. Captures per-stage emit time into the chunk so the
-/// parallel chunk fan-out's CPU time still rolls up into `backend-stats`.
+/// parallel chunk fan-out's per-unit elapsed time still rolls up into
+/// `backend-stats`.
 fn emit_body_chunk(
     ws: &Workspace,
     cg: &CodegenCtx,
@@ -2743,7 +2754,7 @@ fn assemble(
     // Per-stage lower/cleanup/emit/regalloc times: chunk times (captured during the
     // parallel `emit_full`/`emit_incremental` chunk build) summed in as chunks are
     // pulled, plus the decorator/global units re-emitted here. Under parallel emit
-    // these are summed CPU time across workers (so they exceed the wall-clock emit
+    // these are summed per-unit elapsed time across workers (so they exceed the wall-clock emit
     // total `backend-stats` measures). `t_scaffold` is the directly-timed
     // SEQUENTIAL remainder (prelude/value-structs/type-tables + global-init
     // ordering + deco application).
@@ -3315,6 +3326,8 @@ fn emit_full_in_with_mutation(
     mutation: BodyMutation,
     renderer_target: RendererTarget,
 ) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
+    let mut setup_phases = Vec::new();
+    let t_setup = Instant::now();
     let project_root = canonical_project_root(ws, project_root)?;
     let project_root = project_root.as_deref();
     validate_on_reload_nomangle(ws)?;
@@ -3350,6 +3363,9 @@ fn emit_full_in_with_mutation(
         return Err(CompilerError::new_with_label(span, msg));
     }
     let cg = CodegenCtx::new(ws);
+    setup_phases.push(("setup: validation+context", t_setup.elapsed()));
+
+    let t_setup = Instant::now();
     // **The graph is built FIRST, into a fresh arena, and `scx` shares that
     // arena rather than minting its own.** An `Instance` the graph mints has to
     // mean something to lowering, and a second arena would be a second identity
@@ -3371,6 +3387,9 @@ fn emit_full_in_with_mutation(
     if let Some(err) = graph_rejection_error(ws, &graph) {
         return Err(err);
     }
+    setup_phases.push(("setup: graph", t_setup.elapsed()));
+
+    let t_setup = Instant::now();
     #[allow(unused_mut)]
     let mut concrete = crate::concrete_body::build(ws, &mut graph);
     #[cfg(test)]
@@ -3452,34 +3471,50 @@ fn emit_full_in_with_mutation(
             "cannot build concrete always-emitted lowering plan for {owner:?}: {reason:?}"
         )));
     }
+    setup_phases.push(("setup: concrete plans", t_setup.elapsed()));
+
+    let t_setup = Instant::now();
     // Pruned dependency bodies have no concrete plan and must not enter the fanout.
-    let lua_view = crate::artifact::realize(
-        ws,
-        &graph,
-        &crate::artifact::ArtifactRequest::new(
-            crate::target_projection::LUAJIT_DESKTOP,
-            &emission_roots,
-        ),
+    // The CPU artifact and shader artifact only read the shared graph, so their
+    // views can be realized independently.
+    let ((lua_view, scx), shader_result) = parallel_join(
+        || {
+            let lua_view = crate::artifact::realize(
+                ws,
+                &graph,
+                &crate::artifact::ArtifactRequest::new(
+                    crate::target_projection::LUAJIT_DESKTOP,
+                    &emission_roots,
+                ),
+            );
+            let scx =
+                skull_mir::lower::ScalarCtx::new(ws).sharing(std::sync::Arc::clone(graph.interner()));
+            (lua_view, scx)
+        },
+        || {
+            // The overload set lives in `cg` (computed once there); borrow it
+            // rather than rescanning the workspace.
+            let shader_scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
+                .sharing(std::sync::Arc::clone(graph.interner()));
+            let shader_view = realize_shader_view(ws, &graph, &shader_programs, &compute_programs, &shader_scx)?;
+            let shader_registrations = shader_registration_lines(
+                ws,
+                &shader_scx,
+                &shader_collection,
+                &compute_collection,
+                &shader_view,
+                renderer_target,
+            )?;
+            Ok::<_, CompilerError>((shader_view, shader_registrations))
+        },
     );
-    // The overload set lives in `cg` (computed once there); borrow it rather than
-    // rescanning the workspace.
-    let scx =
-        skull_mir::lower::ScalarCtx::new(ws).sharing(std::sync::Arc::clone(graph.interner()));
-    let shader_scx = skull_mir::lower::ScalarCtx::new_values_first_class(ws)
-        .sharing(std::sync::Arc::clone(graph.interner()));
-    let shader_view = realize_shader_view(ws, &graph, &shader_programs, &compute_programs, &shader_scx)?;
-    let shader_registrations = shader_registration_lines(
-        ws,
-        &shader_scx,
-        &shader_collection,
-        &compute_collection,
-        &shader_view,
-        renderer_target,
-    )?;
+    let (shader_view, shader_registrations) = shader_result?;
+    setup_phases.push(("setup: artifact+shader views", t_setup.elapsed()));
 
     // The emitted param list must be injective. Checked per SIGNATURE, over every
     // function rather than just the emitted set: a duplicate Lua param is illegal
     // regardless of which filter would have reached the body.
+    let t_setup = Instant::now();
     for m in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
         for (fid, _) in m.functions.iter() {
             let fref = FuncRef { module: m.id, func: fid };
@@ -3488,6 +3523,7 @@ fn emit_full_in_with_mutation(
             }
         }
     }
+    setup_phases.push(("setup: ABI validation", t_setup.elapsed()));
 
     let fn_items: Vec<(FuncRef, &bone_semantic::hir::Function)> = ws
         .modules
@@ -3551,7 +3587,10 @@ fn emit_full_in_with_mutation(
         renderer_target,
     };
     let mut built_specs: Vec<(Instance, Chunk)> = Vec::new();
-    let (emit, emitted) = assemble(ws, &cache.cg, &cache.scx, &cache, &mut built_specs)?;
+    let (mut emit, emitted) = assemble(ws, &cache.cg, &cache.scx, &cache, &mut built_specs)?;
+    let mut phases = setup_phases;
+    phases.extend(emit.phases);
+    emit.phases = phases;
     let mut cache = cache;
     cache.emitted = emitted;
     cache.absorb_spec_chunks(built_specs);
@@ -4348,6 +4387,50 @@ mod wgpu_projection_tests {
 }
 
 #[cfg(test)]
+mod setup_parallel_tests {
+    use super::*;
+
+    #[cfg(not(feature = "sequential"))]
+    #[test]
+    fn independent_setup_branches_can_overlap() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .expect("two-thread test pool");
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        pool.install(|| {
+            parallel_join(
+                {
+                    let active = Arc::clone(&active);
+                    let peak = Arc::clone(&peak);
+                    move || {
+                        let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(now, Ordering::SeqCst);
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                        active.fetch_sub(1, Ordering::SeqCst);
+                    }
+                },
+                {
+                    let active = Arc::clone(&active);
+                    let peak = Arc::clone(&peak);
+                    move || {
+                        let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(now, Ordering::SeqCst);
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                        active.fetch_sub(1, Ordering::SeqCst);
+                    }
+                },
+            );
+        });
+        assert_eq!(peak.load(Ordering::SeqCst), 2);
+    }
+}
+
+#[cfg(test)]
 mod missing_owner_tests {
     use super::*;
     use bone_semantic::inference::Workspace;
@@ -4613,5 +4696,26 @@ fn main() {
             err.message.contains("concrete ABI plan is missing for callee `next`"),
             "the missing iterator bound plan must fail at its production consumer, got: {err:?}"
         );
+    }
+
+    #[test]
+    fn full_emission_reports_pre_assembly_setup_work() {
+        let (_, _, emit) = emit_with_mutation(BodyMutation::None).expect("intact emission");
+        let setup = emit
+            .phases
+            .iter()
+            .filter(|(name, _)| name.starts_with("setup: "))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            setup.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+            [
+                "setup: validation+context",
+                "setup: graph",
+                "setup: concrete plans",
+                "setup: artifact+shader views",
+                "setup: ABI validation",
+            ]
+        );
+        assert!(setup.iter().all(|(_, duration)| *duration > Duration::ZERO));
     }
 }
