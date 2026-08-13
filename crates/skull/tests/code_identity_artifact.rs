@@ -1,6 +1,6 @@
 mod common;
 
-use common::emit_mir;
+use common::{emit_mir, run_luajit};
 
 #[test]
 fn emitted_lua_artifact_has_a_total_escaping_function_census() {
@@ -87,4 +87,9 @@ fn main() {}
     let second = emit.lua.find("name = \"second\", stage = 7").expect("second plan entry");
     let defaulted = emit.lua.find("name = \"defaulted\", stage = 100").expect("defaulted plan entry");
     assert!(first < second && second < defaulted, "compiler plan must preserve equal-stage declaration order and read the declared default");
+    let out = run_luajit(
+        &format!("{}\nlocal p = _G.__ROCK_LIFECYCLE_PLAN.update; print(p.len .. ':' .. p._data[1].func.key)", emit.lua),
+        "lifecycle_plan_root",
+    );
+    assert!(out.starts_with("3:named:<test>::first<>"), "plan targets must be admitted CodeRef roots: {out}");
 }
