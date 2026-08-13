@@ -218,6 +218,23 @@ fn validate_one(
             at(anno, pos, AnnoPos::StructField)?;
             no_args(anno)
         }
+        "lifecycle" => {
+            at(anno, pos, AnnoPos::DecoItem)?;
+            const KEYS: &[&str] = &["phase", "owner", "stage_param"];
+            for arg in &anno.args {
+                let Some(key) = arg.name.as_ref() else {
+                    comp_error!(anno.span, "`@lifecycle` arguments must be named: phase=, owner=, stage_param=");
+                };
+                if !KEYS.contains(&key.name.as_str()) || !matches!(arg.value, AnnoValue::String(_)) {
+                    comp_error!(anno.span, "`@lifecycle` accepts string arguments phase=, owner=, and optional stage_param=");
+                }
+            }
+            let has = |name: &str| anno.args.iter().any(|a| a.name.as_ref().is_some_and(|n| n.name.as_str() == name));
+            if !has("phase") || !has("owner") {
+                comp_error!(anno.span, "`@lifecycle` requires phase= and owner=");
+            }
+            Ok(())
+        }
         _ if deco_names.contains(&name) => at(anno, pos, AnnoPos::FnItem),
         _ => {
             comp_error!(anno.span, "unknown annotation `@{name}` (registry: docs/annotations-design.md)");

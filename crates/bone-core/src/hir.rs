@@ -896,6 +896,8 @@ pub struct DecoratorDef {
     pub span: Span,
     pub param_decls: Vec<ParamDecl>,
     pub num_required: usize,
+    /// Compiler-known metadata on the decorator declaration itself.
+    pub annotations: Vec<Annotation>,
 }
 
 #[derive(Clone, Debug)]

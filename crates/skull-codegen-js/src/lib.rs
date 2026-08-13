@@ -243,13 +243,20 @@ function __rock_code_slot_ref(key) {
   return slot;
 }
 var __rock_code_slot_pending_slots = Object.create(null);
+var __rock_lifecycle_plan_pending = null;
 function __rock_code_slot_begin() {
   __rock_code_slot_stage = Object.create(null);
   __rock_code_slot_pending_slots = Object.create(null);
+  __rock_lifecycle_plan_pending = null;
 }
 function __rock_code_slot_abort() {
   __rock_code_slot_stage = null;
   __rock_code_slot_pending_slots = Object.create(null);
+  __rock_lifecycle_plan_pending = null;
+}
+function __rock_lifecycle_plan_stage(plan) {
+  if (__rock_code_slot_stage === null) throw new Error("Rock code slot stage not open");
+  __rock_lifecycle_plan_pending = plan;
 }
 function __rock_code_slot_stage_one(key, body, abi) {
   var old = __rock_code_slots[key];
@@ -272,8 +279,10 @@ function __rock_code_slot_publish() {
       };
     }
   });
+  if (__rock_lifecycle_plan_pending !== null) __G.__ROCK_LIFECYCLE_PLAN = __rock_lifecycle_plan_pending;
   __rock_code_slot_stage = null;
   __rock_code_slot_pending_slots = Object.create(null);
+  __rock_lifecycle_plan_pending = null;
 }
 function __rock_code_ref_kind(v) {
   if (v === null || typeof v !== "object") return null;

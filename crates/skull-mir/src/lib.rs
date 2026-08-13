@@ -14,6 +14,7 @@ pub mod cfg;
 pub mod concrete;
 pub mod code_identity;
 pub mod decorator;
+pub mod lifecycle;
 pub mod gpu_layout;
 pub mod display;
 pub mod intrinsics;

@@ -91,3 +91,25 @@ if not ok and before == after and after() == 1 then print("PASS") else print("FA
     let out = run_luajit(&format!("{lua}{driver}"), "slot_transaction");
     assert_eq!(out, "PASS", "a failed compatibility stage must not publish or replace its slot: {out}");
 }
+
+#[test]
+fn lifecycle_plan_publishes_in_the_code_slot_transaction() {
+    let lua = emit_module("fn main() { let f = () => 1; print(f()) }\n");
+    let driver = r#"
+__rock_code_slot_begin()
+__rock_code_slot_stage("probe", function() return 1 end, "abi")
+__rock_lifecycle_plan_stage({ update = { len = 1 } })
+__rock_code_slot_publish()
+local old_plan = _G.__ROCK_LIFECYCLE_PLAN
+local ok = pcall(function()
+  __rock_code_slot_begin()
+  __rock_lifecycle_plan_stage({ update = { len = 2 } })
+  __rock_code_slot_stage("probe", function() return 2 end, "changed-abi")
+  __rock_code_slot_publish()
+end)
+if not ok and _G.__ROCK_LIFECYCLE_PLAN == old_plan and old_plan.update.len == 1
+   and __rock_code_slot_ref("probe")() == 1 then print("PASS") else print("FAIL") end
+"#;
+    let out = run_luajit(&format!("{lua}{driver}"), "lifecycle_transaction");
+    assert_eq!(out, "PASS", "failed staging must retain both old plan membership and old bodies: {out}");
+}

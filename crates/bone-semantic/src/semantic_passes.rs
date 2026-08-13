@@ -796,7 +796,7 @@ pub fn pass_lower_functions(a: &Ast, ctx: &mut LowerCtx) -> Result<(), CompilerE
             }
 
             ItemKind::Decorator(d) => {
-                lower_decorator_def(ctx, a, d)?;
+                lower_decorator_def(ctx, a, d, &item.annotations)?;
             }
 
             ItemKind::Comment(_)

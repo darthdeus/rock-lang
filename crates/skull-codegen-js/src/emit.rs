@@ -3081,6 +3081,9 @@ fn assemble_program_core(
     let mut deco_bodies: Vec<(String, MirFunc)> = Vec::new();
     for module in ws.modules.iter() {
         for (did, d) in module.decorators.iter() {
+            if d.annotations.iter().any(|a| a.name.name.as_str() == "lifecycle") {
+                continue;
+            }
             if !applied.contains(&d.name) {
                 continue;
             }
@@ -3277,8 +3280,10 @@ fn assemble_program_core(
         }
     }
     mark_generated_code_values(ws, &mut code_artifact);
+    let lifecycle_plan = skull_mir::lifecycle::collect(ws)?;
     let code_slot_stage = code_slot_registration_js(ws, scx.interner(), &code_artifact)?;
     out.push_str(&code_slot_stage);
+    out.push_str(&lifecycle_plan_stage_js(ws, scx.interner(), &lifecycle_plan)?);
     // 5. decorator applications (AFTER inits: a deco body pushes into a ginit-
     //    initialized registry -- D4).
     let applications = decorator_application_lines_js(ws, &deco_names, scx.interner(), &st.names)?;
@@ -4619,6 +4624,30 @@ fn code_slot_publish_js(artifact: &CodeArtifact) -> &'static str {
     }
 }
 
+fn lifecycle_plan_stage_js(
+    ws: &Workspace,
+    interner: &skull_mir::monoty::MonoInterner,
+    plan: &skull_mir::lifecycle::LifecyclePlan,
+) -> Result<String, CompilerError> {
+    if plan.census.declarations == 0 { return Ok(String::new()); }
+    let mut out = String::from("__rock_lifecycle_plan_stage({\n");
+    let mut phases: BTreeMap<ustr::Ustr, Vec<_>> = BTreeMap::new();
+    for entry in &plan.entries { phases.entry(entry.phase).or_default().push(entry); }
+    for (phase, entries) in phases {
+        writeln!(out, "[{}]: {{len: {}, _data: [", js_string_lit(phase.as_str())?, entries.len()).unwrap();
+        for entry in entries {
+        let key = entry.identity.logical_key(ws, interner);
+        writeln!(out, "{{phase: {}, owner: {}, key: {}, name: {}, stage: {}, ordinal: {}, func: __rock_code_slot_ref({})}},",
+            js_string_lit(entry.phase.as_str())?, js_string_lit(entry.owner.as_str())?,
+            js_string_lit(&key)?, js_string_lit(entry.diagnostic_name.as_str())?,
+            entry.stage, entry.declaration_ordinal, js_string_lit(&key)?).unwrap();
+        }
+        out.push_str("]},\n");
+    }
+    out.push_str("});\n");
+    Ok(out)
+}
+
 /// Mark function values introduced by generated registration glue. Decorator
 /// applications and `@sim` registration are outside MIR, but their targets are
 /// still escaping Rock values and must use the same mono-owned CodeRefs.
@@ -4945,6 +4974,9 @@ fn decorator_application_lines_js(
                 }
                 let &(dmid, did) = deco_map.get(&ann.name.name).expect("decorator name resolves");
                 let d = &ws.module(dmid).decorators[did];
+                if d.annotations.iter().any(|a| a.name.name.as_str() == "lifecycle") {
+                    continue;
+                }
                 let fr = FuncRef { module: module.id, func: fid };
                 let instance = Instance::base(fr);
                 let _js_fn = names.get(&instance).ok_or_else(|| {

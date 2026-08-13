@@ -2816,6 +2816,7 @@ pub fn lower_decorator_def(
     ctx: &mut LowerCtx,
     a: &Ast,
     d: &skull_parser::DecoratorDef,
+    annotations: &[skull_parser::Annotation],
 ) -> Result<Idx<DecoratorDef>, CompilerError> {
     ctx.generics_in_scope.clear();
     let mut body = Body::default();
@@ -2907,6 +2908,7 @@ pub fn lower_decorator_def(
         span: d.span,
         param_decls,
         num_required,
+        annotations: lower_annotations(a, annotations),
     });
 
     ctx.module.insert_body(BodyOwner::Decorator(idx), body);

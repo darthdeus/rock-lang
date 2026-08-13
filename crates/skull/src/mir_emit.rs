@@ -2236,7 +2236,9 @@ pub(crate) fn build_deco_map(ws: &Workspace) -> (DecoMap, Vec<(ModuleId, Idx<bon
     for module in ws.modules.iter() {
         for (did, d) in module.decorators.iter() {
             deco_map.insert(d.name, (module.id, did));
-            deco_items.push((module.id, did));
+            if !d.annotations.iter().any(|a| a.name.name.as_str() == "lifecycle") {
+                deco_items.push((module.id, did));
+            }
         }
     }
     (deco_map, deco_items)
@@ -2266,6 +2268,9 @@ fn decorator_application_lines(
                     continue;
                 };
                 let d = &ws.module(dmid).decorators[did];
+                if d.annotations.iter().any(|a| a.name.name.as_str() == "lifecycle") {
+                    continue;
+                }
                 let identity = skull_mir::code_identity::CodeIdentity::Named(Instance::base(
                     FuncRef { module: module.id, func: _fid },
                 ));
@@ -3146,6 +3151,12 @@ fn assemble(
     // unrelated to a body that cannot emit.
     rejections.into_result()?;
     mark_generated_code_values(ws, &mut code_artifact);
+    let lifecycle_plan = skull_mir::lifecycle::collect(ws)?;
+    if lifecycle_plan.census.applications != lifecycle_plan.census.admitted {
+        return Err(CompilerError::new_no_location(format!(
+            "incomplete LifecyclePlan census: {:?}", lifecycle_plan.census
+        )));
+    }
 
     // Globals: an init fn + a dependency-ordered `<NAME> = __skull_ginit_<NAME>()`.
     // (Lowered above, so the walk could see their call edges; appended here, in
@@ -3159,6 +3170,7 @@ fn assemble(
     // defined, so slot staging must follow them but precede initializer calls.
     let code_slot_stage = code_slot_registration_lua(ws, scx, &code_artifact)?;
     out.push_str(&code_slot_stage);
+    out.push_str(&lifecycle_plan_stage_lua(ws, scx, &lifecycle_plan));
 
     // Order the init lines by their transitive global-read closure over the full
     // call graph (now that every fn's direct facts are recorded).
@@ -3382,6 +3394,35 @@ fn mark_generated_code_values(
             }
         }
     }
+}
+
+fn lifecycle_plan_stage_lua(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    plan: &skull_mir::lifecycle::LifecyclePlan,
+) -> String {
+    if plan.census.declarations == 0 {
+        return String::new();
+    }
+    let mut out = String::from("__rock_lifecycle_plan_stage({\n");
+    let mut phases: std::collections::BTreeMap<Ustr, Vec<_>> = std::collections::BTreeMap::new();
+    for entry in &plan.entries { phases.entry(entry.phase).or_default().push(entry); }
+    for (phase, entries) in phases {
+        let _ = writeln!(out, "[{}] = {{ len = {}, _data = {{", skull_codegen_lua::lua_string(phase.as_str()), entries.len());
+        for (index, entry) in entries.into_iter().enumerate() {
+        let key = entry.identity.logical_key(ws, scx.interner());
+        let _ = writeln!(out, "[{}] = {{ phase = {}, owner = {}, key = {}, name = {}, stage = {}, ordinal = {}, func = __rock_code_slot_ref({}) }},", index + 1,
+            skull_codegen_lua::lua_string(entry.phase.as_str()),
+            skull_codegen_lua::lua_string(entry.owner.as_str()),
+            skull_codegen_lua::lua_string(&key),
+            skull_codegen_lua::lua_string(entry.diagnostic_name.as_str()),
+            entry.stage, entry.declaration_ordinal,
+            skull_codegen_lua::lua_string(&key));
+        }
+        out.push_str("} },\n");
+    }
+    out.push_str("})\n");
+    out
 }
 
 /// Full emit: populate the chunk cache for every retained ordinary/coroutine
