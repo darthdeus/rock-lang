@@ -634,14 +634,13 @@ value SceneBuilder {
     return obj.__ty
 """
 
-// A capturing-lambda env record (`setmetatable({__fn=..,..}, __rock_fn_mt)`) is
-// the one metatable-carrying value in skull output. Every generic table-walker
-// (__op_eq, inspect, serialize) must treat it as an opaque callable LEAF, not a
-// data table -- this is the shared probe (mirrors __rock_get_type sharing). The
-// global is guarded for a bare test harness with no runtime prelude; on a
-// non-table `v`, getmetatable returns nil so the compare is false.
+// A Rock CodeRef slot or env record is the callable value in skull output.
+// Every generic table-walker (__op_eq, inspect, serialize) must treat it as an
+// opaque callable LEAF, not a data table. The classification itself lives in
+// the backend prelude so snapshot/checkpoint walks and ordinary value helpers
+// ask the same question.
 @nomangle inline(lua) fn __rock_is_fn_record(v: any) -> bool = """
-    return _G.__rock_fn_mt ~= nil and getmetatable(v) == _G.__rock_fn_mt
+    return _G.__rock_code_ref_kind ~= nil and _G.__rock_code_ref_kind(v) ~= nil
 """
 
 // Register a callback to fire after each hot reload. Two forms:
@@ -1911,11 +1910,10 @@ const EPSILON: float = 0.0000001
 
     -- table case
     local t = v
-    -- A capturing-lambda env record is a callable value, not a data table --
-    -- render it as its function (the hoisted `__fn`), matching a capture-free
-    -- lambda (a raw Lua function), never by walking its capture fields.
+    -- A CodeRef env record is a callable value, not a data table -- render it
+    -- as a function leaf, never by walking its capture fields.
     if __rock_is_fn_record(t) then
-        return tostring(t.__fn)
+        return "function: " .. tostring(t.__slot and t.__slot.key or t)
     end
     if visited then
         if visited[t] then

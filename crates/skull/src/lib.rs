@@ -510,7 +510,7 @@ _G.__rock_global_set = function(name, v)
   if a then a.set(v) else _G[name] = v end
 end
 -- Shared metatable of capturing-lambda env records (docs/closure-env-records-plan.md):
--- a record { __fn = <top-level fn>, <captures> } is callable as f(...) via __call.
+-- a record { __slot = <CodeRef>, <captures> } is callable as f(...) via __call.
 -- Preserved across reload so pre- and post-reload records share metatable identity.
 {FN_MT}
 if _G.__ROCK_RELEASE == nil then _G.__ROCK_RELEASE = false end

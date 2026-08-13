@@ -96,3 +96,34 @@ fn vec_copy_is_independent() {
     let js = emit_closure(&ws, "root").expect("vec deepcopy emits");
     eval_int(&js, "root", 1001);
 }
+
+#[test]
+fn copied_code_ref_env_shares_logical_slot() {
+    if !node_available() {
+        eprintln!("SKIP: node not found");
+        return;
+    }
+    let program = format!(
+        "{}{}\n\
+         function old(e) {{ return e.c + 1; }}\n\
+         function edited(e) {{ return e.c + 100; }}\n\
+         __rock_code_slot_begin();\n\
+         __rock_code_slot_stage_one(\"probe\", old, \"probe-abi\");\n\
+         __rock_code_slot_publish();\n\
+         var original = {{ __slot: __rock_code_slot_ref(\"probe\"), c: 7 }};\n\
+         var copy = deepcopy(original);\n\
+         __rock_code_slot_begin();\n\
+         __rock_code_slot_stage_one(\"probe\", edited, \"probe-abi\");\n\
+         __rock_code_slot_publish();\n\
+         console.log(__rock_call(copy));",
+        skull_codegen_js::JS_CALL_HELPER,
+        skull_codegen_js::JS_DEEPCOPY_RUNTIME,
+    );
+    let out = crate::common::node().arg("-e").arg(&program).output().expect("spawn node");
+    assert!(
+        out.status.success(),
+        "node failed:\n{program}\n--- stderr ---\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "107", "{program}");
+}

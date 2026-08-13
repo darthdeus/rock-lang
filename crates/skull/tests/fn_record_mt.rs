@@ -16,7 +16,8 @@ use crate::common::{emit_module, run_luajit};
 fn prelude_defines_shared_fn_metatable() {
     let lua = emit_module("fn main() {}\n");
     assert!(
-        lua.contains("if not _G.__rock_fn_mt then") && lua.contains("e.__fn(e, ...)")
+        lua.contains("if not _G.__rock_fn_mt then")
+            && lua.contains("invalid Rock CodeRef environment")
             && lua.contains("e.__slot.current_body(e, ...)") ,
         "the prelude must define the shared CodeRef-aware __rock_fn_mt metatable:\n(searched the prelude)"
     );
@@ -26,18 +27,19 @@ fn prelude_defines_shared_fn_metatable() {
     );
 }
 
-/// A hand-built record routes a plain `f(args)` call through `__call` to
-/// `__fn(record, args)`, reading its captured field. This is the exact shape
-/// P2.6 will emit.
+/// A hand-built CodeRef record routes a plain `f(args)` call through `__call`
+/// to the current slot body, reading its captured field.
 #[test]
 fn record_is_callable_via_call_metamethod() {
     let lua = emit_module("fn main() {}\n");
     let driver = "\n\
-        local body = function(e, y) return e.x + y end\n\
-        local rec = setmetatable({ __fn = body, x = 100 }, _G.__rock_fn_mt)\n\
+        __rock_code_slot_begin()\n\
+        __rock_code_slot_stage(\"record\", function(e, y) return e.x + y end, \"record-abi\")\n\
+        __rock_code_slot_publish()\n\
+        local rec = setmetatable({ __slot = __rock_code_slot_ref(\"record\"), x = 100 }, _G.__rock_fn_mt)\n\
         print(rec(5))\n";
     let out = run_luajit(&format!("{lua}{driver}"), "call");
-    assert_eq!(out, "105", "f(5) must route through __call to __fn(rec, 5) reading rec.x; got: {out}");
+    assert_eq!(out, "105", "f(5) must route through the CodeRef slot reading rec.x; got: {out}");
 }
 
 /// Metatable identity is preserved across a reload: a record built before the
@@ -50,9 +52,12 @@ fn metatable_identity_preserved_across_reload() {
     let script = format!(
         "_G.HOT_RELOAD = false\n{prog}\n\
          local mt_before = _G.__rock_fn_mt\n\
-         local rec_before = setmetatable({{ __fn = function(e) return 1 end }}, _G.__rock_fn_mt)\n\
+         __rock_code_slot_begin()\n\
+         __rock_code_slot_stage(\"record\", function(e) return 1 end, \"record-abi\")\n\
+         __rock_code_slot_publish()\n\
+         local rec_before = setmetatable({{ __slot = __rock_code_slot_ref(\"record\") }}, _G.__rock_fn_mt)\n\
          _G.HOT_RELOAD = true\n{prog}\n\
-         local rec_after = setmetatable({{ __fn = function(e) return 2 end }}, _G.__rock_fn_mt)\n\
+         local rec_after = setmetatable({{ __slot = __rock_code_slot_ref(\"record\") }}, _G.__rock_fn_mt)\n\
          if getmetatable(rec_before) == getmetatable(rec_after) and _G.__rock_fn_mt == mt_before then\n\
            print(\"PASS\")\n\
          else print(\"FAIL\") end\n"

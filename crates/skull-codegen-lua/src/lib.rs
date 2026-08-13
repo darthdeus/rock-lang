@@ -68,6 +68,7 @@ function __rock_code_slot_publish()
       slot.abi = staged.abi
     else
       _G.__rock_code_slots[key] = setmetatable({
+        __rock_code_slot = true,
         key = key, current_body = staged.body, abi = staged.abi
       }, _G.__rock_code_slot_mt)
     end
@@ -77,10 +78,22 @@ end
 if not _G.__rock_fn_mt then
   _G.__rock_fn_mt = {
     __call = function(e, ...)
-      if e.__slot then return e.__slot.current_body(e, ...) end
-      return e.__fn(e, ...)
+      if not e.__slot then error("invalid Rock CodeRef environment", 0) end
+      return e.__slot.current_body(e, ...)
     end
   }
+end
+function __rock_code_ref_kind(v)
+  if type(v) ~= "table" then return nil end
+  if rawget(v, "__rock_code_slot") == true
+      and getmetatable(v) == _G.__rock_code_slot_mt then
+    return "slot"
+  end
+  if getmetatable(v) == _G.__rock_fn_mt then
+    local slot = rawget(v, "__slot")
+    if slot ~= nil and __rock_code_ref_kind(slot) == "slot" then return "env" end
+  end
+  return nil
 end
 "#;
 
@@ -1962,16 +1975,16 @@ impl Emitter<'_> {
             // fns AND the coroutine step, S2+S3) now routes through the pass, so
             // `MakeEnv` is the only capturing closure shape codegen sees.
             Inst::MakeEnv { fn_ref, fields } => match fn_ref {
-                Some(name) => {
+                Some(_name) => {
                     out.push_str("setmetatable({ ");
-                    if let Some(identity) = self.func.code_value_identities.get(&id) {
-                        out.push_str("__slot = __rock_code_slot_ref(");
-                        out.push_str(&lua_string(&identity.logical_key(self.ws, self.interner)));
-                        out.push(')');
-                    } else {
-                        out.push_str("__fn = ");
-                        out.push_str(name.as_str());
-                    }
+                    let identity = self
+                        .func
+                        .code_value_identities
+                        .get(&id)
+                        .expect("Rock closure MakeEnv missing compiler-owned CodeRef identity");
+                    out.push_str("__slot = __rock_code_slot_ref(");
+                    out.push_str(&lua_string(&identity.logical_key(self.ws, self.interner)));
+                    out.push(')');
                     for (f, v) in fields {
                         out.push_str(", ");
                         out.push_str(f.as_str());

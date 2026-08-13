@@ -364,13 +364,15 @@ fn decorated_function_overlay_rebinds_the_registered_function_value() {
         "var output = [];\n\
          function print(value) {{ output.push(value); }}\n\
          {}\n\
+         {}\n\
          var __G = {{}};\n\
          {}\n\
-         __G.SYSTEMS._data[0].func();\n\
+         __rock_call(__G.SYSTEMS._data[0].func);\n\
          (0, eval)({:?});\n\
-         __G.SYSTEMS._data[0].func();\n\
+         __rock_call(__G.SYSTEMS._data[0].func);\n\
          console.log(output.join(','));",
         skull_codegen_js::JS_TABLE_PRIM,
+        skull_codegen_js::JS_CALL_HELPER,
         program.program,
         overlay
     ));

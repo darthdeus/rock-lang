@@ -62,9 +62,9 @@ inline(js) fn ffi_string(ptr: any, len: int?) -> string = """
 
 // Reports LUA type names, not JS ones -- the return value is compared against
 // `"table"` / `"function"` in Rock source, so the names are the contract and JS
-// is the thing being translated. An env record `{__fn, ..}` deliberately reports
+// is the thing being translated. A CodeRef env record `{__slot, ..}` deliberately reports
 // `table`, because that is what `type()` says about luajit's
-// `setmetatable({__fn=..}, __rock_fn_mt)` -- only a CAPTURE-FREE lambda is a
+// `setmetatable({__slot=..}, __rock_fn_mt)` -- only a CAPTURE-FREE lambda is a
 // bare function on either backend. `cdata`/`userdata`/`thread` have no JS side,
 // so a NativeBuffer `{ptr, len}` reports `table` where luajit says `cdata`.
 @inline inline(js) fn typeof(x: any) -> string = """

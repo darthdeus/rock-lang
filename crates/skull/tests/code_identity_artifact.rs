@@ -44,3 +44,29 @@ fn main() {
     assert!(!direct_body.contains("__rock_code_slot_ref"), "direct calls must not pay the slot indirection: {direct_body}");
     assert!(census.is_total(), "emitted artifact census is not self-validating: {census:?}");
 }
+
+#[test]
+fn generated_decorator_function_values_use_logical_slots() {
+    let emit = emit_mir(
+        r#"
+global SYSTEMS: [fn() -> ()] = []
+deco init system { SYSTEMS.push(transmute(target.func)) }
+@system
+fn alpha() { }
+fn main() { }
+"#,
+    );
+    let application = emit
+        .lua
+        .lines()
+        .find(|line| line.contains("__deco_system({"))
+        .expect("decorator application");
+    assert!(
+        application.contains("__rock_code_slot_ref(\"named:<test>::alpha<>\")"),
+        "generated decorator target must be a CodeRef: {application}"
+    );
+    assert!(
+        !application.contains("func = alpha_ret_unit"),
+        "generated decorator target must not freeze the backend body: {application}"
+    );
+}

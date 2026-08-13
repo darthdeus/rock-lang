@@ -483,7 +483,7 @@ pub enum Inst {
     /// Produced by `skull_transform::convert_closures` (the shared
     /// closure-conversion pass), NEVER by lowering. Two shapes:
     ///   - `fn_ref = Some(name)` is a callable RECORD -- a capturing lambda's
-    ///     value: `{ __fn = <name>, c<A> = .. }`, invoked through the target's
+    ///     value: `{ __slot = <CodeRef>, c<A> = .. }`, invoked through the target's
     ///     `__call` convention (Lua `setmetatable({..}, __rock_fn_mt)`, JS the
     ///     `__rock_call` dispatch helper). A capture-FREE lambda is a bare
     ///     [`Inst::Global`] instead (no record, no alloc).

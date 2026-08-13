@@ -13,7 +13,7 @@ use rustc_hash::FxHashSet;
 use ustr::Ustr;
 
 use crate::instance::Instance;
-use crate::mir::MirFunc;
+use crate::mir::{Inst, MirFunc};
 use crate::monoty::MonoInterner;
 
 /// The source location used to identify a lambda within one concrete owner.
@@ -64,6 +64,9 @@ pub enum CodeIdentity {
     /// concrete declaration because nested functions do not enter the mono
     /// declaration graph as independent top-level declarations.
     Nested { enclosing: CodeOwner, site: LambdaSiteId, name: Ustr },
+    /// Compiler-generated callable machinery stored in a Rock runtime record,
+    /// such as a coroutine's resume/advance/defer/hook entry.
+    Generated { enclosing: CodeOwner, role: Ustr },
 }
 
 impl CodeIdentity {
@@ -71,10 +74,12 @@ impl CodeIdentity {
         match self {
             Self::Named(i) => Some(i),
             Self::Lambda { enclosing: CodeOwner::Instance(i), .. }
-            | Self::Nested { enclosing: CodeOwner::Instance(i), .. } => Some(i),
+            | Self::Nested { enclosing: CodeOwner::Instance(i), .. }
+            | Self::Generated { enclosing: CodeOwner::Instance(i), .. } => Some(i),
             Self::Artifact(_)
             | Self::Lambda { enclosing: CodeOwner::Artifact { .. }, .. }
-            | Self::Nested { enclosing: CodeOwner::Artifact { .. }, .. } => None,
+            | Self::Nested { enclosing: CodeOwner::Artifact { .. }, .. }
+            | Self::Generated { enclosing: CodeOwner::Artifact { .. }, .. } => None,
         }
     }
 
@@ -83,7 +88,8 @@ impl CodeIdentity {
             Self::Named(i) => Some(CodeOwner::Instance(i.clone())),
             Self::Artifact(owner)
             | Self::Lambda { enclosing: owner, .. }
-            | Self::Nested { enclosing: owner, .. } => Some(owner.clone()),
+            | Self::Nested { enclosing: owner, .. }
+            | Self::Generated { enclosing: owner, .. } => Some(owner.clone()),
         }
     }
 
@@ -131,6 +137,9 @@ impl CodeIdentity {
                 site.file,
                 site.offset
             ),
+            Self::Generated { enclosing, role } => {
+                format!("generated:{}::{}", owner_key(enclosing), role)
+            }
         }
     }
 }
@@ -325,7 +334,8 @@ impl CodeArtifact {
                 CodeIdentity::Named(instance) => Some(instance.func),
                 CodeIdentity::Artifact(_)
                 | CodeIdentity::Lambda { .. }
-                | CodeIdentity::Nested { .. } => None,
+                | CodeIdentity::Nested { .. }
+                | CodeIdentity::Generated { .. } => None,
             })
             .collect();
         for block in crate::cfg::reachable_blocks_from(mf, mf.entry) {
@@ -345,7 +355,13 @@ impl CodeArtifact {
         }
     }
 
-    fn mark_value(&mut self, identity: CodeIdentity) {
+    /// Mark a compiler-generated or MIR-observed function value as escaping.
+    ///
+    /// Generated registration glue (decorators and `@sim`) is outside MIR, but
+    /// it still creates the same logical function value. Keeping this operation
+    /// on the artifact prevents those glue paths from becoming a second identity
+    /// mechanism.
+    pub fn mark_value(&mut self, identity: CodeIdentity) {
         if let Some(entry) = self.entries.get_mut(&identity) {
             if entry.escaping {
                 return;
@@ -354,7 +370,10 @@ impl CodeArtifact {
             self.census.examined += 1;
             self.census.assigned += 1;
             match &entry.identity {
-                CodeIdentity::Named(_) | CodeIdentity::Artifact(_) | CodeIdentity::Nested { .. } => {
+                CodeIdentity::Named(_)
+                | CodeIdentity::Artifact(_)
+                | CodeIdentity::Nested { .. }
+                | CodeIdentity::Generated { .. } => {
                     self.census.named_values += 1
                 }
                 CodeIdentity::Lambda { .. } => {
@@ -382,6 +401,28 @@ impl CodeArtifact {
             capture_free: true,
         });
     }
+
+    /// Add a compiler-generated callable whose body is emitted outside MIR.
+    /// The runtime still sees the same logical identity table as an ordinary
+    /// escaping value.
+    pub fn add_generated_value(
+        &mut self,
+        identity: CodeIdentity,
+        compatibility: CodeCompatibility,
+        body_name: &str,
+    ) {
+        let mut fingerprint = Fnv64::new();
+        fingerprint.write_str(&format!("{identity:?}"));
+        self.insert(CodeEntry {
+            identity,
+            compatibility,
+            body_fingerprint: fingerprint.finish(),
+            body_name: Some(Ustr::from(body_name)),
+            escaping: true,
+            capture_free: true,
+        });
+    }
+
     pub fn insert(&mut self, entry: CodeEntry) {
         if self.entries.contains_key(&entry.identity) {
             let mut newly_counted = None;
@@ -453,7 +494,10 @@ impl CodeArtifact {
 
     fn count_kind(&mut self, identity: &CodeIdentity, capture_free: bool) {
         match identity {
-            CodeIdentity::Named(_) | CodeIdentity::Artifact(_) | CodeIdentity::Nested { .. } => {
+            CodeIdentity::Named(_)
+            | CodeIdentity::Artifact(_)
+            | CodeIdentity::Nested { .. }
+            | CodeIdentity::Generated { .. } => {
                 self.census.named_values += 1
             }
             CodeIdentity::Lambda { .. } => {
@@ -539,7 +583,10 @@ impl CodeArtifact {
             census.examined += 1;
             census.assigned += 1;
             match &entry.identity {
-                CodeIdentity::Named(_) | CodeIdentity::Artifact(_) | CodeIdentity::Nested { .. } => {
+                CodeIdentity::Named(_)
+                | CodeIdentity::Artifact(_)
+                | CodeIdentity::Nested { .. }
+                | CodeIdentity::Generated { .. } => {
                     census.named_values += 1
                 }
                 CodeIdentity::Lambda { .. } => {
@@ -563,11 +610,83 @@ impl CodeArtifact {
 
 fn body_fingerprint(mf: &MirFunc) -> u64 {
     // This is a duplicate-body witness only. It intentionally excludes the
-    // identity/compatibility fields and may include MIR-local arena spelling;
+    // identity/compatibility fields and is canonicalized across MIR clones;
     // it is never used to find a slot.
+    let mut normalized = mf.clone();
+    let aliases: BTreeMap<Ustr, Ustr> = mf
+        .nested_fn_identities
+        .iter()
+        .map(|(name, identity)| {
+            (*name, Ustr::from(format!("__rock_nested_{identity:?}").as_str()))
+        })
+        .collect();
+    for (_, inst) in normalized.insts.iter_mut() {
+        match inst {
+            Inst::Global(name) => {
+                if let Some(alias) = aliases.get(name) {
+                    *name = *alias;
+                }
+            }
+            Inst::MakeEnv { fn_ref: Some(name), .. } => {
+                if let Some(alias) = aliases.get(name) {
+                    *name = *alias;
+                }
+            }
+            _ => {}
+        }
+    }
+    let debug = canonicalize_arena_indices(&format!(
+        "{:?}{:?}{:?}",
+        normalized.blocks, normalized.insts, normalized.cells
+    ));
     let mut h = Fnv64::new();
-    h.write_str(&format!("{:?}{:?}{:?}", mf.blocks, mf.insts, mf.cells));
+    h.write_str(&debug);
     h.finish()
+}
+
+fn canonicalize_arena_indices(debug: &str) -> String {
+    let marker = "Idx::<";
+    let mut out = String::with_capacity(debug.len());
+    let mut maps: BTreeMap<String, BTreeMap<u64, usize>> = BTreeMap::new();
+    let mut cursor = 0;
+    while let Some(relative) = debug[cursor..].find(marker) {
+        let start = cursor + relative;
+        out.push_str(&debug[cursor..start]);
+        let type_start = start + marker.len();
+        let Some(type_end_relative) = debug[type_start..].find(">(") else {
+            out.push_str(&debug[start..]);
+            return out;
+        };
+        let type_end = type_start + type_end_relative;
+        let number_start = type_end + 2;
+        let Some(number_end_relative) = debug[number_start..].find(')') else {
+            out.push_str(&debug[start..]);
+            return out;
+        };
+        let number_end = number_start + number_end_relative;
+        let Ok(original) = debug[number_start..number_end].parse::<u64>() else {
+            out.push_str(&debug[start..number_end + 1]);
+            cursor = number_end + 1;
+            continue;
+        };
+        let kind = &debug[type_start..type_end];
+        let values = maps.entry(kind.to_string()).or_default();
+        let canonical = if let Some(canonical) = values.get(&original) {
+            *canonical
+        } else {
+            let canonical = values.len();
+            values.insert(original, canonical);
+            canonical
+        };
+        out.push_str(marker);
+        out.push_str(kind);
+        out.push_str(">(");
+        out.push_str(&canonical.to_string());
+        out.push(')');
+        cursor = number_end + 1;
+    }
+    out.push_str(&debug[cursor..]);
+    out
 }
 
 struct Fnv64(u64);

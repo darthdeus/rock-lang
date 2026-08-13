@@ -2703,6 +2703,9 @@ pub fn lower_detached_region(
     aux.nested_fns.clear();
     aux.closure_env_plans.clear();
     aux.hoisted_fn_globals.clear();
+    aux.code_value_identities.retain(|inst, _| {
+        !matches!(aux.insts[*inst], Inst::Lambda { entry, .. } if !region.contains(&entry))
+    });
 
     // The hook's outer lambda is a registration artifact, not a closure inside
     // the detached body. Remove it from the clone before ScopeTree sees it;
@@ -2745,6 +2748,17 @@ pub fn erase_detached_lambdas(func: &mut MirFunc, entries: impl IntoIterator<Ite
     let mut detached = HashSet::default();
     for entry in entries {
         detached.extend(detached_region_blocks(func, entry));
+    }
+    let detached_values: Vec<_> = func
+        .code_value_identities
+        .keys()
+        .copied()
+        .filter(|inst| {
+            matches!(func.insts[*inst], Inst::Lambda { entry, .. } if detached.contains(&entry))
+        })
+        .collect();
+    for inst in detached_values {
+        func.code_value_identities.remove(&inst);
     }
     for (_, inst) in func.insts.iter_mut() {
         if let Inst::Lambda { entry, .. } = inst

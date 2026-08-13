@@ -4,16 +4,81 @@
 //! this module is the Lua-printing consumer (unfuck #57: the transform crate is
 //! printer-free).
 
+use std::collections::HashSet;
+
 use bone_semantic::inference::Workspace;
 use comfy_la_arena::Idx;
 use skull_codegen_lua::{emit_named_framed, CodegenCtx, FrameCtx};
-use skull_mir::code_identity::CodeArtifact;
+use skull_mir::code_identity::{CaptureSchema, CodeArtifact, CodeCompatibility, CodeIdentity};
 use skull_mir::lower::CoroutinePlan;
 use skull_mir::mir::*;
 use skull_transform::{CoroLowered, STATE};
+use ustr::Ustr;
 
 fn raw<T>(i: Idx<T>) -> u32 {
     i.into_raw().into()
+}
+
+fn collect_nested_code_identities(mf: &MirFunc, out: &mut HashSet<CodeIdentity>) {
+    for nested in &mf.nested_fns {
+        if let Some(identity) = &nested.code_identity {
+            out.insert(identity.clone());
+        }
+        collect_nested_code_identities(nested, out);
+    }
+}
+
+fn add_coroutine_code_values(
+    ws: &Workspace,
+    interner: &skull_mir::monoty::MonoInterner,
+    plan: &CoroutinePlan,
+    lowered: &CoroLowered,
+    artifact: &mut CodeArtifact,
+    defer_funcs: &[MirFunc],
+    hook_funcs: &[(CoroHookKind, MirFunc)],
+) -> (Option<String>, String, Vec<String>, Vec<String>) {
+    let root = lowered.step.code_identity.as_ref().expect("co fn identity");
+    let owner = root.owner().expect("co fn owner");
+    let root_compatibility = artifact
+        .entries
+        .get(root)
+        .expect("co fn artifact entry")
+        .compatibility
+        .clone();
+    let generated_compatibility = |role: &str| CodeCompatibility {
+        call_abi: format!("coroutine:{role};{}", root_compatibility.call_abi),
+        capture: CaptureSchema::empty(),
+        frame: root_compatibility.frame.clone(),
+        lambda_topology: root_compatibility.lambda_topology,
+    };
+    let mut generated = |role: &str, body: &str| {
+        let identity = CodeIdentity::Generated {
+            enclosing: owner.clone(),
+            role: Ustr::from(role),
+        };
+        artifact.add_generated_value(identity.clone(), generated_compatibility(role), body);
+        identity.logical_key(ws, interner)
+    };
+    let resume_body = plan.resume();
+    let resume_key = generated("resume", &resume_body);
+    let advance_key = plan.advance().map(|body| generated("advance", &body));
+    let defer_keys = defer_funcs
+        .iter()
+        .map(|aux| {
+            let identity = aux.code_identity.clone().expect("defer identity");
+            artifact.mark_value(identity.clone());
+            identity.logical_key(ws, interner)
+        })
+        .collect();
+    let hook_keys = hook_funcs
+        .iter()
+        .map(|(_, aux)| {
+            let identity = aux.code_identity.clone().expect("hook identity");
+            artifact.mark_value(identity.clone());
+            identity.logical_key(ws, interner)
+        })
+        .collect();
+    (advance_key, resume_key, defer_keys, hook_keys)
 }
 
 /// Emit a `co fn` as its stackless `__step` (via the dumb printer, with a frame
@@ -99,6 +164,17 @@ pub fn emit_coroutine_with_artifact(
         Some(&frame_info),
         Some((&lowered.step_tree, &lowered.step_own)),
     );
+    let mut detached_identities = HashSet::new();
+    for aux in &defer_funcs {
+        collect_nested_code_identities(aux, &mut detached_identities);
+    }
+    for (_, aux) in &hook_funcs {
+        collect_nested_code_identities(aux, &mut detached_identities);
+    }
+    lowered
+        .step
+        .nested_fns
+        .retain(|nested| nested.code_identity.as_ref().is_none_or(|id| !detached_identities.contains(id)));
     // Route each pass-hoisted `<step>__lambda<k>` through the synthetic-name
     // collision guard (a user fn colliding with the minted name must reject).
     for nf in lowered.step.nested_fns[pre_nested..].iter() {
@@ -119,11 +195,15 @@ pub fn emit_coroutine_with_artifact(
             .push_str(&skull_codegen_lua::emit_named(ws, ctx, interner, nf.name.as_str(), nf));
     }
     lowered.step.nested_fns = hoisted;
-    // Terminal-cleanup defers and lifecycle hooks are now ordinary functions,
-    // with their converted lambda siblings emitted beside them. Their function
-    // values are still stored in the coroutine constructor by name.
+    // Terminal-cleanup defers and lifecycle hooks are ordinary functions, with
+    // their converted lambda siblings emitted beside them.
     let mut code_artifact = CodeArtifact::from_mir_tree(&lowered.step);
     code_artifact.set_body_names(&lowered.step, &step_name);
+    if let Some(identity) = &lowered.step.code_identity {
+        if let Some(entry) = code_artifact.entries.get_mut(identity) {
+            entry.body_name = Some(Ustr::from(plan.base()));
+        }
+    }
     for aux in &defer_funcs {
         let mut artifact = CodeArtifact::from_mir_tree(aux);
         artifact.set_body_names(aux, aux.name.as_str());
@@ -134,6 +214,15 @@ pub fn emit_coroutine_with_artifact(
         artifact.set_body_names(aux, aux.name.as_str());
         code_artifact.merge(artifact);
     }
+    let (advance_key, resume_key, defer_keys, hook_keys) = add_coroutine_code_values(
+        ws,
+        interner,
+        plan,
+        &lowered,
+        &mut code_artifact,
+        &defer_funcs,
+        &hook_funcs,
+    );
     let mut defer_luas = String::new();
     for mut aux in defer_funcs {
         skull_transform::cleanup_with_nobox(ws, &mut aux);
@@ -162,7 +251,15 @@ pub fn emit_coroutine_with_artifact(
             ));
         }
     }
-    let ctor = emit_constructor(plan, &step_name, &lowered);
+    let ctor = emit_constructor(
+        plan,
+        &step_name,
+        &lowered,
+        advance_key.as_deref(),
+        &resume_key,
+        &defer_keys,
+        &hook_keys,
+    );
     let _ = lowered.num_states;
     (
         format!("{step_lua}{nested_luas}{defer_luas}{hook_luas}{ctor}"),
@@ -182,7 +279,15 @@ pub fn emit_coroutine_with_artifact(
 /// frame slot), which is BOTH the ctor's Lua param name and the table field
 /// name; the state-table local `c<raw(s_cell)>` keeps the raw id (a plain
 /// local, `s` has no slot).
-fn emit_constructor(plan: &CoroutinePlan, step_name: &str, lowered: &CoroLowered) -> String {
+fn emit_constructor(
+    plan: &CoroutinePlan,
+    step_name: &str,
+    lowered: &CoroLowered,
+    advance_key: Option<&str>,
+    resume_key: &str,
+    defer_keys: &[String],
+    hook_keys: &[String],
+) -> String {
     use std::fmt::Write as _;
     let name = plan.base();
     let channel = plan.channel.as_ref();
@@ -208,22 +313,23 @@ fn emit_constructor(plan: &CoroutinePlan, step_name: &str, lowered: &CoroLowered
     for pf in &param_fields {
         init.push(format!("{pf} = {pf}"));
     }
-    // Terminal-cleanup defer fns, stored BY VALUE (site order; runners iterate
-    // in reverse for LIFO) -- a stale frame must run ITS OWN layout's cleanup,
-    // never the current code's (the step is name-resolved, cleanup is not).
-    let n_defers = lowered.step.coro_defers.len();
-    if n_defers > 0 {
-        let list: Vec<String> = (0..n_defers).map(|k| plan.defer(k)).collect();
+    // Terminal-cleanup CodeRefs retain the old frame's logical body across a
+    // compatible overlay; runners iterate them in reverse for LIFO.
+    if !defer_keys.is_empty() {
+        let list: Vec<String> = defer_keys
+            .iter()
+            .map(|key| format!("__rock_code_slot_ref({})", skull_codegen_lua::lua_string(key)))
+            .collect();
         init.push(format!("__defers = {{ {} }}", list.join(", ")));
     }
 
-    // Lifecycle hooks are fn-value fields pointing at the per-co-fn top-level
-    // hoisted bodies (`__on_killed = <name>__on_killed`, emitted by
-    // `emit_coroutine`) -- a plain reference, no per-construction closure. The
-    // `if s.__on_killed then s.__on_killed(s) end` call sites pass the frame.
-    for (kind, _) in &lowered.hooks {
+    // Lifecycle hook fields are logical CodeRefs, not copied backend bodies.
+    for ((kind, _), key) in lowered.hooks.iter().zip(hook_keys) {
         let field = kind.slot();
-        init.push(format!("{field} = {}", plan.hook(field)));
+        init.push(format!(
+            "{field} = __rock_code_slot_ref({})",
+            skull_codegen_lua::lua_string(key)
+        ));
     }
 
     // The pure readers (result/status/last_error/kill/fire_hot_reload) are NOT
@@ -253,15 +359,16 @@ fn emit_constructor(plan: &CoroutinePlan, step_name: &str, lowered: &CoroLowered
             let _ = write!(box_fields, ", {rf} = s.{}", skull_mir::lower::yield_slot(1 + ch.tuple_width + j));
         }
         box_fields.push('}');
-        // `__advance`/`__resume` are PER-CO-FN top-level fns (emitted once, next
-        // to the step), stored in the table literal as plain fn-value fields --
-        // zero closures per creation. Hot-reload staleness is identical to the
-        // closure form: a live object's stale v0 fn values resolve the step (and
-        // `{name}__advance`) by GLOBAL name at call time, so a BodyOnly overlay's
-        // new step is picked up mid-flight (guarded by
-        // `live_flat_enum_coroutine_survives_overlay_and_threads_new_body`).
         let advance = plan.advance().expect("a channel is what makes `__advance` exist");
         let resume = plan.resume();
+        let advance_ref = format!(
+            "__rock_code_slot_ref({})",
+            skull_codegen_lua::lua_string(advance_key.expect("advance CodeRef"))
+        );
+        let resume_ref = format!(
+            "__rock_code_slot_ref({})",
+            skull_codegen_lua::lua_string(resume_key)
+        );
         return format!(
             "function {advance}(s, arg)\n\
              \x20 if s.{STATE} < 0 then return true end\n\
@@ -275,15 +382,21 @@ fn emit_constructor(plan: &CoroutinePlan, step_name: &str, lowered: &CoroLowered
              \x20 return {box_fields}\n\
              end\n\
              function {name}({paramlist})\n\
-             \x20 local {svar} = {{ {fields}, __advance = {advance}, __resume = {resume} }}\n\
+             \x20 local {svar} = {{ {fields}, __advance = {advance_ref}, __resume = {resume_ref} }}\n\
              \x20 return {svar}\n\
              end\n",
             paramlist = param_fields.join(", "),
             fields = init.join(", "),
+            advance_ref = advance_ref,
+            resume_ref = resume_ref,
         );
     }
 
     let resume = plan.resume();
+    let resume_ref = format!(
+        "__rock_code_slot_ref({})",
+        skull_codegen_lua::lua_string(resume_key)
+    );
     format!(
         "function {resume}(s, arg)\n\
          \x20 if s.{STATE} < 0 then return nil end\n\
@@ -293,10 +406,11 @@ fn emit_constructor(plan: &CoroutinePlan, step_name: &str, lowered: &CoroLowered
          \x20 return val\n\
          end\n\
          function {name}({paramlist})\n\
-         \x20 local {svar} = {{ {fields}, __resume = {resume} }}\n\
+         \x20 local {svar} = {{ {fields}, __resume = {resume_ref} }}\n\
          \x20 return {svar}\n\
          end\n",
         paramlist = param_fields.join(", "),
         fields = init.join(", "),
+        resume_ref = resume_ref,
     )
 }

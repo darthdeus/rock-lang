@@ -422,7 +422,8 @@ pub fn convert_closures_framed(
             lambda_topology: topology,
         });
         if let Some(identity) = code_identity.clone() {
-            mf.code_value_identities.insert(lambda, identity);
+            mf.code_value_identities.insert(lambda, identity.clone());
+            mf.nested_fn_identities.insert(hoisted_name[&sid], identity);
         }
         nested.push(MirFunc {
             name: hoisted_name[&sid],

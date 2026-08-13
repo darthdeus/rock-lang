@@ -2199,6 +2199,7 @@ pub(crate) fn build_deco_map(ws: &Workspace) -> (DecoMap, Vec<(ModuleId, Idx<bon
 fn decorator_application_lines(
     ws: &Workspace,
     deco_map: &DecoMap,
+    scx: &skull_mir::lower::ScalarCtx,
     skipped: &mut Vec<(String, String)>,
 ) -> String {
     let mut deco_lines = String::new();
@@ -2207,13 +2208,23 @@ fn decorator_application_lines(
             continue;
         }
         for (_fid, f) in module.functions.iter() {
+            if f.backend == bone_semantic::hir::FnBackend::Js {
+                continue;
+            }
             for ann in &f.annotations {
                 let Some(&(dmid, did)) = deco_map.get(&ann.name.name) else {
                     continue;
                 };
                 let d = &ws.module(dmid).decorators[did];
-                let mangled = mangle_fn(ws, f);
-                let target = format!("{{ name = {:?}, params = {{}}, func = {} }}", f.name.as_str(), mangled);
+                let identity = skull_mir::code_identity::CodeIdentity::Named(Instance::base(
+                    FuncRef { module: module.id, func: _fid },
+                ));
+                let key = identity.logical_key(ws, scx.interner());
+                let target = format!(
+                    "{{ name = {:?}, params = {{}}, func = __rock_code_slot_ref({:?}) }}",
+                    f.name.as_str(),
+                    key
+                );
                 match crate::decorator_call_args(d, ann) {
                     Ok(args) => {
                         let mut call_args = vec![target];
@@ -2339,6 +2350,7 @@ fn all_roots(
 
 fn sim_registration_lines(
     ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
 ) -> Result<String, CompilerError> {
     let sims = collect_sim_fns(ws);
     if sims.is_empty() {
@@ -2356,8 +2368,19 @@ fn sim_registration_lines(
 
     let mut out = String::new();
     for (f, wire) in sims {
-        let mangled = mangle_fn(ws, f);
-        let _ = writeln!(out, "{}({:?}, {})", register_name, wire, mangled);
+        if f.backend == bone_semantic::hir::FnBackend::Js {
+            continue;
+        }
+        let fref = ws.modules.iter().find_map(|module| {
+            module.functions.iter().find_map(|(fid, candidate)| {
+                std::ptr::eq(candidate, f).then_some(FuncRef { module: module.id, func: fid })
+            })
+        }).ok_or_else(|| {
+            CompilerError::new_no_location(format!("cannot locate @sim `{}`", f.name))
+        })?;
+        let identity = skull_mir::code_identity::CodeIdentity::Named(Instance::base(fref));
+        let key = identity.logical_key(ws, scx.interner());
+        let _ = writeln!(out, "{}({:?}, __rock_code_slot_ref({:?}))", register_name, wire, key);
     }
     Ok(out)
 }
@@ -3087,6 +3110,9 @@ fn assemble(
         &mut all_statics,
         &mut out,
     ));
+    for chunk in spec_chunks.values() {
+        code_artifact.merge(chunk.code_artifact.clone());
+    }
     for (_, chunk) in built_specs.iter() {
         code_artifact.merge(chunk.code_artifact.clone());
     }
@@ -3096,6 +3122,7 @@ fn assemble(
     // scaffolding (init ordering, deco application) whose own errors are
     // unrelated to a body that cannot emit.
     rejections.into_result()?;
+    mark_generated_code_values(ws, &mut code_artifact);
     out.push_str(&code_slot_registration_lua(ws, scx, &code_artifact)?);
 
     // Globals: an init fn + a dependency-ordered `<NAME> = __skull_ginit_<NAME>()`.
@@ -3192,9 +3219,9 @@ fn assemble(
     out.push_str("}\n");
 
     // Decorator APPLICATIONS (after global inits so a deco body can push a global).
-    out.push_str(&decorator_application_lines(ws, &deco_map, &mut skipped));
+    out.push_str(&decorator_application_lines(ws, &deco_map, scx, &mut skipped));
     // `@sim` registrations (after fn + global defs; same init slot as rock).
-    out.push_str(&sim_registration_lines(ws)?);
+    out.push_str(&sim_registration_lines(ws, scx)?);
     // `rock_shader` pipeline registrations (docs/shaders.md):
     // one top-level `__rock_shader_register(key, glsl)` per distinct pair, so a
     // reload re-`dofile`s them with the new source (hot-reload parity).
@@ -3284,6 +3311,40 @@ fn code_slot_registration_lua(
     }
     out.push_str("__rock_code_slot_publish()\n");
     Ok(out)
+}
+
+/// Generated registration calls are escaping-value sites even though they do
+/// not have a MIR instruction. Mark their declaration identities before the
+/// artifact publishes slots, so lifecycle and sim registries receive the same
+/// CodeRef shape as an ordinary `let f = ...` value.
+fn mark_generated_code_values(
+    ws: &Workspace,
+    artifact: &mut skull_mir::code_identity::CodeArtifact,
+) {
+    let decorator_names: FxHashSet<Ustr> = ws
+        .modules
+        .iter()
+        .flat_map(|m| m.decorators.iter().map(|(_, d)| d.name))
+        .collect();
+    for module in ws.modules.iter() {
+        if module.id == ModuleId::builtin() {
+            continue;
+        }
+        for (fid, f) in module.functions.iter() {
+            if f.backend == bone_semantic::hir::FnBackend::Js {
+                continue;
+            }
+            let generated_value = f.annotations.iter().any(|ann| {
+                ann.name.name.as_str() == "sim"
+                    || decorator_names.contains(&ann.name.name)
+            });
+            if generated_value {
+                artifact.mark_value(skull_mir::code_identity::CodeIdentity::Named(
+                    Instance::base(FuncRef { module: module.id, func: fid }),
+                ));
+            }
+        }
+    }
 }
 
 /// Full emit: populate the chunk cache for every retained ordinary/coroutine

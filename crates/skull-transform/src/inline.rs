@@ -878,10 +878,13 @@ fn collect_nested_names(nested: &[MirFunc], out: &mut Vec<Ustr>) {
 }
 
 fn remap_nested_global(inst: &mut Inst, names: &HashMap<Ustr, Ustr>) {
-    if let Inst::Global(name) = inst {
-        if let Some(&new) = names.get(name) {
-            *name = new;
+    match inst {
+        Inst::Global(name) | Inst::MakeEnv { fn_ref: Some(name), .. } => {
+            if let Some(&new) = names.get(name) {
+                *name = new;
+            }
         }
+        _ => {}
     }
 }
 
@@ -893,6 +896,11 @@ fn rename_nested_tree(nested: &mut [MirFunc], names: &HashMap<Ustr, Ustr>) {
         for (_, inst) in nf.insts.iter_mut() {
             remap_nested_global(inst, names);
         }
+        nf.nested_fn_identities = nf
+            .nested_fn_identities
+            .iter()
+            .map(|(name, identity)| (names.get(name).copied().unwrap_or(*name), identity.clone()))
+            .collect();
         nf.hoisted_fn_globals = nf
             .hoisted_fn_globals
             .iter()

@@ -1,6 +1,6 @@
 //! P1 of docs/closure-env-records-plan.md: a co-fn lifecycle hook
 //! (`on_killed`/`on_resume`/`on_hot_reload`) must compile to a per-co-fn
-//! top-level Lua fn taking the frame `s`, stored as a plain fn-value field --
+//! top-level Lua fn taking the frame `s`, stored as a compiler-owned CodeRef --
 //! NOT a per-construction closure over the frame table.
 //!
 //! Premise (verified: `worker__step` reads its param `seed` as `c<s>.c1` and
@@ -38,8 +38,8 @@ fn main() {
 /// never collide.
 
 /// SHAPE: the `on_killed` hook hoists to a shared top-level `worker__on_killed`
-/// and the ctor stores it as a fn-value field -- no inline `function() .. end`
-/// closure per construction. RED until P1 lands.
+/// and the ctor stores its compiler-owned slot -- no inline closure per
+/// construction.
 #[test]
 fn on_killed_hook_hoisted_to_shared_toplevel_fn() {
     let lua = emit_module(ON_KILLED);
@@ -49,8 +49,8 @@ fn on_killed_hook_hoisted_to_shared_toplevel_fn() {
         "on_killed must hoist to a top-level `{hook}`:\n{lua}"
     );
     assert!(
-        lua.contains(&format!("__on_killed = {hook}")),
-        "the ctor must store the hoisted fn by value (`__on_killed = {hook}`):\n{lua}"
+        lua.contains("__on_killed = __rock_code_slot_ref("),
+        "the ctor must store the hoisted hook through a CodeRef slot:\n{lua}"
     );
     assert!(
         !lua.contains("__on_killed = function"),
@@ -59,7 +59,7 @@ fn on_killed_hook_hoisted_to_shared_toplevel_fn() {
 }
 
 /// SNAPSHOT-SHAPE: EVERY function-typed field on a handle is shared between two
-/// constructions (a top-level fn value, not a fresh per-construction closure)
+/// constructions (a CodeRef, not a fresh per-construction closure)
 /// -- the property a deep-copy/snapshot needs, asserted over the whole table so
 /// a regression adding a per-construction closure to ANY field (a wrapped
 /// defer, a future channel helper) goes red, not just the hook fields. And

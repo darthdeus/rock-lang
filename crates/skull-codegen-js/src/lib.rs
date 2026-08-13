@@ -254,11 +254,22 @@ function __rock_code_slot_publish() {
   });
   __rock_code_slot_stage = null;
 }
+function __rock_code_ref_kind(v) {
+  if (v === null || typeof v !== "object") return null;
+  if (v.__rock_code_slot === true
+      && Object.prototype.hasOwnProperty.call(v, "key")
+      && Object.prototype.hasOwnProperty.call(v, "current_body")) return "slot";
+  if (Object.prototype.hasOwnProperty.call(v, "__slot")
+      && __rock_code_ref_kind(v.__slot) === "slot") return "env";
+  return null;
+}
 function __rock_call(f) {
   var a = Array.prototype.slice.call(arguments, 1);
-  if (f && f.__rock_code_slot === true) return f.current_body.apply(null, a);
+  var kind = __rock_code_ref_kind(f);
+  if (kind === "slot") return f.current_body.apply(null, a);
   if (typeof f === "function") return f.apply(null, a);
-  return f.__slot.current_body.apply(null, [f].concat(a));
+  if (kind === "env") return f.__slot.current_body.apply(null, [f].concat(a));
+  throw new Error("cannot call a value that is not a Rock CodeRef or foreign function");
 }
 // `try_call(f)`: run `f` and report whether it errored (Lua `pcall`; returns
 // `not ok`). A JS throw is the pcall failure; the error itself is discarded by
@@ -293,9 +304,8 @@ function __op_eq(a, b) {
   if (an || bn) return an && bn;
   if (a === b) return true;
   if (typeof a !== "object" || typeof b !== "object") return a === b;
-  if (a.__rock_code_slot === true || b.__rock_code_slot === true
-      || a.__slot !== undefined || b.__slot !== undefined
-      || a.__fn !== undefined || b.__fn !== undefined) return a === b;
+  if (typeof __rock_code_ref_kind === "function" &&
+      (__rock_code_ref_kind(a) !== null || __rock_code_ref_kind(b) !== null)) return a === b;
   // A Vec compares by tracked `len` over `_data[0..len)` (len-bounded, like
   // luajit's pairs-walk), so a drained tail slot beyond `len` never breaks eq.
   if (a.__ty === "Vec" || b.__ty === "Vec") {
@@ -436,7 +446,7 @@ function __rock_inspect_value(v, indent, path, visited, precision) {
   var t = v;
   // A capturing-lambda env record is a callable LEAF (never walked) -- rendered
   // as its function, same `function: ` form as a raw fn.
-  if (t.__slot !== undefined || t.__rock_code_slot === true || t.__fn !== undefined) return "function: builtin";
+  if (typeof __rock_code_ref_kind === "function" && __rock_code_ref_kind(t) !== null) return "function: builtin";
   if (visited) {
     if (visited.has(t)) return "<CYCLE: " + visited.get(t) + ">";
     visited.set(t, path);
@@ -548,7 +558,7 @@ function __rock_deepcopy_value(obj, seen) {
   var t = typeof obj;
   if (t !== "object" && t !== "function") return obj;
   if (t === "function") return obj;
-  if (obj.__rock_code_slot === true) return obj;
+  if (typeof __rock_code_ref_kind === "function" && __rock_code_ref_kind(obj) === "slot") return obj;
   if (seen.has(obj)) return seen.get(obj);
   if (ArrayBuffer.isView(obj)) { var tc = obj.slice(); seen.set(obj, tc); return tc; }
   if (obj instanceof Map) {
@@ -2723,7 +2733,7 @@ function error(m) { throw new Error(m); }
 function __rock_coroutine_run_defers(c) {
   if (!c.__defers) return;
   for (var i = c.__defers.length - 1; i >= 0; i--) {
-    try { c.__defers[i](c); } catch (e) {
+    try { __rock_call(c.__defers[i], c); } catch (e) {
       var m = (e && e.message !== undefined) ? e.message : e;
       process.stderr.write("coroutine defer failed during cleanup: " + m + "\n");
     }
@@ -2734,7 +2744,7 @@ function __rock_coroutine_kill(c) {
   c.__state = -1;
   if (c.__inner) { __rock_coroutine_kill(c.__inner); }
   __rock_coroutine_run_defers(c);
-  if (c.__on_killed) { c.__on_killed(c); }
+  if (c.__on_killed) { __rock_call(c.__on_killed, c); }
 }
 "#;
 

@@ -14,7 +14,7 @@ use std::fmt::Write as _;
 
 use bone_semantic::inference::Workspace;
 use comfy_la_arena::Idx;
-use skull_mir::code_identity::CodeArtifact;
+use skull_mir::code_identity::{CaptureSchema, CodeArtifact, CodeCompatibility, CodeIdentity};
 use skull_mir::intrinsics::{Emission, IntrinsicTable};
 use skull_mir::instance::Instance;
 use skull_mir::lower::BackendFnAbiPlan;
@@ -32,18 +32,30 @@ fn raw<T>(idx: Idx<T>) -> u32 {
     idx.into_raw().into()
 }
 
+fn collect_nested_code_identities(
+    mf: &MirFunc,
+    out: &mut HashSet<skull_mir::code_identity::CodeIdentity>,
+) {
+    for nested in &mf.nested_fns {
+        if let Some(identity) = &nested.code_identity {
+            out.insert(identity.clone());
+        }
+        collect_nested_code_identities(nested, out);
+    }
+}
+
 /// The module-global surface an emitted body may reference through `Inst::Global`
 /// / `Inst::StoreGlobal`. Module-level `let`/`global` STATE renders into a scoped
 /// `__G` object (`__G.<name>`) so no user global can collide with or be shadowed
 /// by an emitted body local (`r<N>`/`v<N>`/`c<N>`/`__rock_env`); a top-level fn
-/// referenced as a VALUE renders as its co-emitted JS name (a bare function, so
-/// `__rock_call` invokes it directly). Built once per program in
+/// referenced as a VALUE renders as a logical CodeRef slot (foreign functions
+/// remain bare JS functions). Built once per program in
 /// [`emit_with_closure`]; empty for the standalone [`emit_fn`] entry.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct GlobalCtx {
     /// Names that are module-level STATE (-> `__G.<name>`).
     state: HashSet<ustr::Ustr>,
-    /// A top-level fn used as a value -> its co-emitted JS name.
+    /// A top-level fn used as a value -> its co-emitted JS name for direct calls.
     fns: HashMap<ustr::Ustr, String>,
     /// `__rock_enum_<E>_<V>` singletons / `__rock_enum_<E>_names` tables the body
     /// reads (rendered as a bare top-level name; the def is emitted per program).
@@ -1927,7 +1939,7 @@ impl Emitter<'_> {
             // box `{ v }` (a shared mutable capture) -- built by `convert_closures`.
             Inst::MakeEnv { fn_ref, fields } => {
                 let mut parts: Vec<String> = Vec::new();
-                if let Some(name) = fn_ref {
+                if let Some(_name) = fn_ref {
                     if let Some(identity) = self.mf.code_value_identities.get(&iid) {
                         let key = self
                             .globals
@@ -1936,7 +1948,7 @@ impl Emitter<'_> {
                             .ok_or_else(|| err("JS: Rock closure has no CodeRef slot"))?;
                         parts.push(format!("__slot: __rock_code_slot_ref({})", js_string_lit(key)?));
                     } else {
-                        parts.push(format!("__fn: {name}"));
+                        return Err(err("JS: Rock closure missing compiler-owned CodeRef identity"));
                     }
                 }
                 for (f, v) in fields {
@@ -3250,10 +3262,11 @@ fn assemble_program_core(
             stable.push_str(&init.js);
         }
     }
+    mark_generated_code_values(ws, &mut code_artifact);
     out.push_str(&code_slot_registration_js(ws, scx.interner(), &code_artifact)?);
     // 5. decorator applications (AFTER inits: a deco body pushes into a ginit-
     //    initialized registry -- D4).
-    let applications = decorator_application_lines_js(ws, &deco_names, &st.names)?;
+    let applications = decorator_application_lines_js(ws, &deco_names, scx.interner(), &st.names)?;
     out.push_str(&applications);
     stable.push_str(&applications);
 
@@ -4349,7 +4362,7 @@ fn emit_lowered_fn(
             js_name.to_string(),
         )
         .map_err(|reason| err(format!("JS: cannot build concrete coroutine plan: {}", reason.bucket())))?;
-        return emit_coroutine_js(ws, &plan, mf, names, hoisted, gctx);
+        return emit_coroutine_js(ws, interner, &plan, mf, names, hoisted, gctx);
     }
     let mut out = emit_fn_with_callees(ws, mf, js_name, names, hoisted, gctx)?;
     for nf in &mf.nested_fns {
@@ -4615,6 +4628,39 @@ fn code_slot_registration_js(
     }
     out.push_str("__rock_code_slot_publish();\n");
     Ok(out)
+}
+
+/// Mark function values introduced by generated registration glue. Decorator
+/// applications and `@sim` registration are outside MIR, but their targets are
+/// still escaping Rock values and must use the same mono-owned CodeRefs.
+fn mark_generated_code_values(
+    ws: &Workspace,
+    artifact: &mut CodeArtifact,
+) {
+    let decorator_names: HashSet<ustr::Ustr> = ws
+        .modules
+        .iter()
+        .flat_map(|m| m.decorators.iter().map(|(_, d)| d.name))
+        .collect();
+    for module in ws.modules.iter() {
+        if module.id == bone_semantic::prelude::ModuleId::builtin() {
+            continue;
+        }
+        for (fid, f) in module.functions.iter() {
+            if f.backend == bone_semantic::hir::FnBackend::Lua {
+                continue;
+            }
+            let generated_value = f.annotations.iter().any(|ann| {
+                ann.name.name.as_str() == "sim"
+                    || decorator_names.contains(&ann.name.name)
+            });
+            if generated_value {
+                artifact.mark_value(skull_mir::code_identity::CodeIdentity::Named(
+                    Instance::base(FuncRef { module: module.id, func: fid }),
+                ));
+            }
+        }
+    }
 }
 
 /// Boxed-enum singleton / names-table defs the emitted bodies read, in name
@@ -4887,6 +4933,7 @@ fn decorator_call_args_js(
 fn decorator_application_lines_js(
     ws: &Workspace,
     deco_names: &HashSet<ustr::Ustr>,
+    interner: &skull_mir::monoty::MonoInterner,
     names: &CalleeNames,
 ) -> Result<String, CompilerError> {
     let deco_map: HashMap<ustr::Ustr, (bone_semantic::prelude::ModuleId, Idx<bone_semantic::hir::DecoratorDef>)> = ws
@@ -4904,17 +4951,24 @@ fn decorator_application_lines_js(
                 if !deco_names.contains(&ann.name.name) {
                     continue;
                 }
+                if f.backend == bone_semantic::hir::FnBackend::Lua {
+                    continue;
+                }
                 let &(dmid, did) = deco_map.get(&ann.name.name).expect("decorator name resolves");
                 let d = &ws.module(dmid).decorators[did];
                 let fr = FuncRef { module: module.id, func: fid };
-                let js_fn = names.get(&Instance::base(fr)).ok_or_else(|| {
+                let instance = Instance::base(fr);
+                let _js_fn = names.get(&instance).ok_or_else(|| {
                     err(format!(
                         "JS subset: decorated fn `{}` was not emitted (not a program root)",
                         f.name
                     ))
                 })?;
+                let identity = skull_mir::code_identity::CodeIdentity::Named(instance);
+                let key = identity.logical_key(ws, interner);
+                let code_ref = format!("__rock_code_slot_ref({})", js_string_lit(&key)?);
                 let descriptor = format!(
-                    "{{name: {}, params: [], func: {js_fn}}}",
+                    "{{name: {}, params: [], func: {code_ref}}}",
                     js_string_lit(f.name.as_str())?
                 );
                 let mut call_args = vec![descriptor];
@@ -5783,8 +5837,62 @@ fn build_vt_eq_defs(ws: &Workspace, names: &BTreeSet<ustr::Ustr>) -> Result<Stri
 /// arena, and the JS ctor (the exact Lua ctor contract: the object IS the
 /// frame; `__resume`/`__advance` drive the step; `JS_CORO_RUNTIME` supplies
 /// `__rock_coroutine_kill`/`__rock_coroutine_run_defers`/`error`).
+fn add_coroutine_code_values(
+    ws: &Workspace,
+    interner: &skull_mir::monoty::MonoInterner,
+    plan: &skull_mir::lower::CoroutinePlan,
+    lowered: &skull_transform::CoroLowered,
+    artifact: &mut CodeArtifact,
+    defer_funcs: &[MirFunc],
+    hook_funcs: &[(&'static str, MirFunc)],
+) -> (Option<String>, String, Vec<String>, Vec<String>) {
+    let root = lowered.step.code_identity.as_ref().expect("co fn identity");
+    let owner = root.owner().expect("co fn owner");
+    let root_compatibility = artifact
+        .entries
+        .get(root)
+        .expect("co fn artifact entry")
+        .compatibility
+        .clone();
+    let generated_compatibility = |role: &str| CodeCompatibility {
+        call_abi: format!("coroutine:{role};{}", root_compatibility.call_abi),
+        capture: CaptureSchema::empty(),
+        frame: root_compatibility.frame.clone(),
+        lambda_topology: root_compatibility.lambda_topology,
+    };
+    let mut generated = |role: &str, body: &str| {
+        let identity = CodeIdentity::Generated {
+            enclosing: owner.clone(),
+            role: Ustr::from(role),
+        };
+        artifact.add_generated_value(identity.clone(), generated_compatibility(role), body);
+        identity.logical_key(ws, interner)
+    };
+    let resume_body = plan.resume();
+    let resume_key = generated("resume", &resume_body);
+    let advance_key = plan.advance().map(|body| generated("advance", &body));
+    let defer_keys = defer_funcs
+        .iter()
+        .map(|aux| {
+            let identity = aux.code_identity.clone().expect("defer identity");
+            artifact.mark_value(identity.clone());
+            identity.logical_key(ws, interner)
+        })
+        .collect();
+    let hook_keys = hook_funcs
+        .iter()
+        .map(|(_, aux)| {
+            let identity = aux.code_identity.clone().expect("hook identity");
+            artifact.mark_value(identity.clone());
+            identity.logical_key(ws, interner)
+        })
+        .collect();
+    (advance_key, resume_key, defer_keys, hook_keys)
+}
+
 fn emit_coroutine_js(
     ws: &Workspace,
+    interner: &skull_mir::monoty::MonoInterner,
     plan: &skull_mir::lower::CoroutinePlan,
     mf: &MirFunc,
     callees: &CalleeNames,
@@ -5837,6 +5945,17 @@ fn emit_coroutine_js(
         Some(&frame_info),
         Some((&lowered.step_tree, &lowered.step_own)),
     );
+    let mut detached_identities = HashSet::new();
+    for aux in &defer_funcs {
+        collect_nested_code_identities(aux, &mut detached_identities);
+    }
+    for (_, aux) in &hook_funcs {
+        collect_nested_code_identities(aux, &mut detached_identities);
+    }
+    lowered
+        .step
+        .nested_fns
+        .retain(|nested| nested.code_identity.as_ref().is_none_or(|id| !detached_identities.contains(id)));
     // This coroutine's hoisted lambda names are referenced only from its own
     // bodies, so extend the program set locally.
     let mut hoisted = hoisted.clone();
@@ -5855,6 +5974,11 @@ fn emit_coroutine_js(
     );
     let mut code_artifact = CodeArtifact::from_mir_tree(&lowered.step);
     code_artifact.set_body_names(&lowered.step, &step_name);
+    if let Some(identity) = &lowered.step.code_identity {
+        if let Some(entry) = code_artifact.entries.get_mut(identity) {
+            entry.body_name = Some(Ustr::from(plan.base()));
+        }
+    }
     for aux in &defer_funcs {
         let mut artifact = CodeArtifact::from_mir_tree(aux);
         artifact.set_body_names(aux, aux.name.as_str());
@@ -5865,13 +5989,30 @@ fn emit_coroutine_js(
         artifact.set_body_names(aux, aux.name.as_str());
         code_artifact.merge(artifact);
     }
+    let (advance_key, resume_key, defer_keys, hook_keys) = add_coroutine_code_values(
+        ws,
+        interner,
+        plan,
+        &lowered,
+        &mut code_artifact,
+        &defer_funcs,
+        &hook_funcs,
+    );
+    let mut globals = globals.clone();
+    register_code_slots(ws, interner, &lowered.step, &mut globals);
+    for aux in &defer_funcs {
+        register_code_slots(ws, interner, aux, &mut globals);
+    }
+    for (_, aux) in &hook_funcs {
+        register_code_slots(ws, interner, aux, &mut globals);
+    }
     let mut out = emit_fn_trampoline(
         ws,
         &lowered.step,
         &step_name,
         callees,
         &hoisted,
-        globals,
+        &globals,
         lowered.step.entry,
         &[lowered.s_cell, resume_arg],
         false,
@@ -5882,7 +6023,7 @@ fn emit_coroutine_js(
     for nf in nested.iter_mut() {
         skull_transform::cleanup_with_nobox(ws, nf);
         skull_transform::recover_counted_loops(ws, nf);
-        out.push_str(&emit_fn_with_callees(ws, nf, nf.name.as_str(), callees, &hoisted, globals)?);
+        out.push_str(&emit_fn_with_callees(ws, nf, nf.name.as_str(), callees, &hoisted, &globals)?);
     }
     lowered.step.nested_fns = nested;
     for mut aux in defer_funcs {
@@ -5893,7 +6034,7 @@ fn emit_coroutine_js(
             aux.name.as_str(),
             callees,
             &hoisted,
-            globals,
+            &globals,
         )?);
         let mut nested = std::mem::take(&mut aux.nested_fns);
         for nf in nested.iter_mut() {
@@ -5905,7 +6046,7 @@ fn emit_coroutine_js(
                 nf.name.as_str(),
                 callees,
                 &hoisted,
-                globals,
+                &globals,
             )?);
         }
     }
@@ -5917,7 +6058,7 @@ fn emit_coroutine_js(
             aux.name.as_str(),
             callees,
             &hoisted,
-            globals,
+            &globals,
         )?);
         let mut nested = std::mem::take(&mut aux.nested_fns);
         for nf in nested.iter_mut() {
@@ -5929,11 +6070,19 @@ fn emit_coroutine_js(
                 nf.name.as_str(),
                 callees,
                 &hoisted,
-                globals,
+                &globals,
             )?);
         }
     }
-    out.push_str(&emit_js_constructor(plan, &step_name, &lowered)?);
+    out.push_str(&emit_js_constructor(
+        plan,
+        &step_name,
+        &lowered,
+        advance_key.as_deref(),
+        &resume_key,
+        &defer_keys,
+        &hook_keys,
+    )?);
     Ok((out, code_artifact))
 }
 
@@ -5945,6 +6094,10 @@ fn emit_js_constructor(
     plan: &skull_mir::lower::CoroutinePlan,
     step_name: &str,
     lowered: &skull_transform::CoroLowered,
+    advance_key: Option<&str>,
+    resume_key: &str,
+    defer_keys: &[String],
+    hook_keys: &[String],
 ) -> Result<String, CompilerError> {
     use std::fmt::Write as _;
     let name = plan.base();
@@ -5968,21 +6121,26 @@ fn emit_js_constructor(
     for pf in &param_fields {
         init.push(format!("{pf}: {pf}"));
     }
-    let n_defers = lowered.step.coro_defers.len();
-    if n_defers > 0 {
-        let list: Vec<String> = (0..n_defers).map(|k| plan.defer(k)).collect();
+    if !defer_keys.is_empty() {
+        let list: Vec<String> = defer_keys
+            .iter()
+            .map(|key| Ok(format!("__rock_code_slot_ref({})", js_string_lit(key)?)))
+            .collect::<Result<_, CompilerError>>()?;
         init.push(format!("__defers: [{}]", list.join(", ")));
     }
-    for (kind, _) in &lowered.hooks {
+    for ((kind, _), key) in lowered.hooks.iter().zip(hook_keys) {
         let field = kind.slot();
-        init.push(format!("{field}: {}", plan.hook(field)));
+        init.push(format!(
+            "{field}: __rock_code_slot_ref({})",
+            js_string_lit(key)?
+        ));
     }
     // The step-raise recovery shared by both resume shapes: errored terminal,
     // kill the delegated inner, run defers LIFO, fire on_killed.
     let catch_body = "s.__state = -2; s.__error = (e && e.message !== undefined) ? e.message : e; \
                       if (s.__inner) { __rock_coroutine_kill(s.__inner); s.__inner = null; } \
                       __rock_coroutine_run_defers(s); \
-                      if (s.__on_killed) { s.__on_killed(s); }";
+                      if (s.__on_killed) { __rock_call(s.__on_killed, s); }";
     if let Some(ch) = channel {
         let mut box_fields = format!(
             "{{ __variant: s.{tag}, __ty: {ty}",
@@ -6005,10 +6163,15 @@ fn emit_js_constructor(
         box_fields.push_str(" }");
         let advance = plan.advance().expect("a channel is what makes `__advance` exist");
         let resume = plan.resume();
+        let advance_ref = format!(
+            "__rock_code_slot_ref({})",
+            js_string_lit(advance_key.expect("advance CodeRef"))?
+        );
+        let resume_ref = format!("__rock_code_slot_ref({})", js_string_lit(resume_key)?);
         return Ok(format!(
             "function {advance}(s, arg) {{\n\
              \x20 if (s.__state < 0) return true;\n\
-             \x20 if (s.__on_resume) s.__on_resume(s);\n\
+             \x20 if (s.__on_resume) __rock_call(s.__on_resume, s);\n\
              \x20 try {{ {step_name}(s, arg); }} catch (e) {{ {catch_body} return true; }}\n\
              \x20 return s.__state < 0;\n\
              }}\n\
@@ -6017,26 +6180,30 @@ fn emit_js_constructor(
              \x20 return {box_fields};\n\
              }}\n\
              function {name}({paramlist}) {{\n\
-             \x20 return {{ {fields}, __advance: {advance}, __resume: {resume} }};\n\
+             \x20 return {{ {fields}, __advance: {advance_ref}, __resume: {resume_ref} }};\n\
              }}\n",
             paramlist = param_fields.join(", "),
             fields = init.join(", "),
+            advance_ref = advance_ref,
+            resume_ref = resume_ref,
         ));
     }
     let resume = plan.resume();
+    let resume_ref = format!("__rock_code_slot_ref({})", js_string_lit(resume_key)?);
     Ok(format!(
         "function {resume}(s, arg) {{\n\
          \x20 if (s.__state < 0) return null;\n\
-         \x20 if (s.__on_resume) s.__on_resume(s);\n\
+         \x20 if (s.__on_resume) __rock_call(s.__on_resume, s);\n\
          \x20 var val;\n\
          \x20 try {{ val = {step_name}(s, arg); }} catch (e) {{ {catch_body} return null; }}\n\
          \x20 return val === undefined ? null : val;\n\
          }}\n\
          function {name}({paramlist}) {{\n\
-         \x20 return {{ {fields}, __resume: {resume} }};\n\
+         \x20 return {{ {fields}, __resume: {resume_ref} }};\n\
          }}\n",
         paramlist = param_fields.join(", "),
         fields = init.join(", "),
+        resume_ref = resume_ref,
     ))
 }
 
@@ -6293,14 +6460,14 @@ fn host_fn_template(cf: &bone_semantic::hir::Function) -> Option<&'static str> {
         // IIFEs where an arg is read twice; `undefined -> null` normalization so
         // an unset frame field reads as Rock null (Lua nil parity). `resume` has
         // two arities (overload-by-arity: `c.resume()` vs `c.resume(arg)`).
-        ("resume", 1) => Some("(function(c){var v=c.__resume(c);return v===undefined?null:v;})($1)"),
-        ("resume", 2) => Some("(function(c,a){var v=c.__resume(c,a);return v===undefined?null:v;})($1, $2)"),
+        ("resume", 1) => Some("(function(c){var v=__rock_call(c.__resume,c);return v===undefined?null:v;})($1)"),
+        ("resume", 2) => Some("(function(c,a){var v=__rock_call(c.__resume,c,a);return v===undefined?null:v;})($1, $2)"),
         ("result", 1) => Some("(function(c){var v=c.__return;return v===undefined?null:v;})($1)"),
         ("status", 1) => Some("(function(c){return c.__state === -2 ? \"errored\" : (c.__state < 0 ? \"dead\" : \"suspended\");})($1)"),
         ("completed", 1) => Some("($1.__state === -3)"),
         ("last_error", 1) => Some("(function(c){var v=c.__error;return v===undefined?null:v;})($1)"),
         ("kill", 1) => Some("__rock_coroutine_kill($1)"),
-        ("fire_hot_reload", 1) => Some("(function(c){ if (c.__state >= 0 && c.__on_hot_reload) c.__on_hot_reload(c); })($1)"),
+        ("fire_hot_reload", 1) => Some("(function(c){ if (c.__state >= 0 && c.__on_hot_reload) __rock_call(c.__on_hot_reload,c); })($1)"),
         // `error(msg)` diverges; the message is already a string. Wrapped in a
         // throwing IIFE so it is a valid EXPRESSION -- the lowering stores a
         // diverging call's (dead) result into an if-result cell, and a bare
