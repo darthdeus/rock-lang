@@ -488,21 +488,82 @@ struct RepArenaInner {
 ///
 /// The counters ride outside `inner` so [`RepArenaInner`]'s derived equality
 /// (the [`BackendFnAbiPlan`] identity check) never compares them.
-#[derive(Debug, Default)]
+///
+/// READS ARE SERVED THROUGH A WORKER-LOCAL CACHE. The arena is monotonic
+/// (plans push-only, `by_key` insert-only, nothing published ever changes), so
+/// a thread may keep private copies of the `(RepId -> RepPlan)` and
+/// `(key -> RepId)` facts it has already paid the mutex for; a cold id or key
+/// reads through to the lock. `arena_gen` is a process-unique id keying that
+/// cache, so two live arenas (the Lua and shader contexts) or an arena
+/// allocated at a reused address can never serve each other's plans.
+#[derive(Debug)]
 pub struct RepArena {
     inner: Mutex<RepArenaInner>,
+    arena_gen: u64,
     get_calls: std::sync::atomic::AtomicU64,
+    local_get_hits: std::sync::atomic::AtomicU64,
     intern_attempts: std::sync::atomic::AtomicU64,
+    local_intern_hits: std::sync::atomic::AtomicU64,
     intern_new: std::sync::atomic::AtomicU64,
 }
 
-/// Lifetime traffic counters for one [`RepArena`]: every [`RepArena::get`] is
-/// a mutex acquisition plus a deep [`RepPlan`] clone, so `get_calls` is also
-/// the cloned-plan population a frozen read view would serve borrow-free.
+impl Default for RepArena {
+    fn default() -> Self {
+        static ARENA_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self {
+            inner: Mutex::default(),
+            arena_gen: ARENA_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            get_calls: Default::default(),
+            local_get_hits: Default::default(),
+            intern_attempts: Default::default(),
+            local_intern_hits: Default::default(),
+            intern_new: Default::default(),
+        }
+    }
+}
+
+type RepKey = (FnBackend, RepUse, RepLayout, Option<ValueStorage>, bool, bool);
+
+#[derive(Default)]
+struct RepReadCache {
+    arena_gen: u64,
+    plans: Vec<Option<RepPlan>>,
+    by_key: rustc_hash::FxHashMap<RepKey, RepId>,
+}
+
+impl RepReadCache {
+    fn reset_for(&mut self, arena_gen: u64) {
+        if self.arena_gen != arena_gen {
+            self.arena_gen = arena_gen;
+            self.plans.clear();
+            self.by_key.clear();
+        }
+    }
+
+    fn record_plan(&mut self, id: RepId, plan: &RepPlan) {
+        let idx = id.0 as usize;
+        if self.plans.len() <= idx {
+            self.plans.resize(idx + 1, None);
+        }
+        self.plans[idx] = Some(plan.clone());
+    }
+}
+
+thread_local! {
+    static REP_READ_CACHE: std::cell::RefCell<RepReadCache> =
+        std::cell::RefCell::new(RepReadCache::default());
+}
+
+/// Lifetime traffic counters for one [`RepArena`]. `local_*_hits` are the
+/// reads the worker-local cache served without touching the mutex; the
+/// remainder paid a lock acquisition (gets also a deep [`RepPlan`] clone from
+/// shared memory).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RepArenaStats {
     pub get_calls: u64,
+    pub local_get_hits: u64,
     pub intern_attempts: u64,
+    pub local_intern_hits: u64,
     pub intern_new: u64,
     pub plans: u64,
 }
@@ -577,24 +638,40 @@ impl RepArena {
         nobox: bool,
     ) -> RepId {
         self.intern_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let mut inner = self.inner.lock().expect("RepArena lock poisoned");
-        let key = (target, use_context, layout.clone(), storage, column_eligible, nobox);
-        if let Some(id) = inner.by_key.get(&key) {
-            return *id;
-        }
-        self.intern_new.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let id = RepId(inner.plans.len() as u32);
-        inner.plans.push(RepPlan {
-            id,
-            target,
-            use_context,
-            layout,
-            storage,
-            column_eligible,
-            nobox,
-        });
-        inner.by_key.insert(key, id);
-        id
+        let key = (target, use_context, layout, storage, column_eligible, nobox);
+        REP_READ_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            cache.reset_for(self.arena_gen);
+            if let Some(id) = cache.by_key.get(&key) {
+                self.local_intern_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return *id;
+            }
+            let id = {
+                let mut inner = self.inner.lock().expect("RepArena lock poisoned");
+                match inner.by_key.get(&key) {
+                    Some(id) => *id,
+                    None => {
+                        self.intern_new.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let id = RepId(inner.plans.len() as u32);
+                        let (target, use_context, layout, storage, column_eligible, nobox) =
+                            key.clone();
+                        inner.plans.push(RepPlan {
+                            id,
+                            target,
+                            use_context,
+                            layout,
+                            storage,
+                            column_eligible,
+                            nobox,
+                        });
+                        inner.by_key.insert(key.clone(), id);
+                        id
+                    }
+                }
+            };
+            cache.by_key.insert(key, id);
+            id
+        })
     }
 
     pub(crate) fn column_eligible(&self, id: RepId) -> bool {
@@ -619,20 +696,33 @@ impl RepArena {
 
     pub fn get(&self, id: RepId) -> RepPlan {
         self.get_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.inner
-            .lock()
-            .expect("RepArena lock poisoned")
-            .plans
-            .get(id.0 as usize)
-            .cloned()
-            .expect("RepId must belong to its build arena")
+        REP_READ_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            cache.reset_for(self.arena_gen);
+            if let Some(Some(plan)) = cache.plans.get(id.0 as usize) {
+                self.local_get_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return plan.clone();
+            }
+            let plan = self
+                .inner
+                .lock()
+                .expect("RepArena lock poisoned")
+                .plans
+                .get(id.0 as usize)
+                .cloned()
+                .expect("RepId must belong to its build arena");
+            cache.record_plan(id, &plan);
+            plan
+        })
     }
 
     pub fn stats(&self) -> RepArenaStats {
         use std::sync::atomic::Ordering;
         RepArenaStats {
             get_calls: self.get_calls.load(Ordering::Relaxed),
+            local_get_hits: self.local_get_hits.load(Ordering::Relaxed),
             intern_attempts: self.intern_attempts.load(Ordering::Relaxed),
+            local_intern_hits: self.local_intern_hits.load(Ordering::Relaxed),
             intern_new: self.intern_new.load(Ordering::Relaxed),
             plans: self.inner.lock().expect("RepArena lock poisoned").plans.len() as u64,
         }
@@ -1660,5 +1750,45 @@ impl BackendFnAbiPlan {
     pub fn param_leaf_widths(&self) -> Option<Vec<usize>> {
         self.uses_scalar_abi()
             .then(|| self.param_shapes().iter().map(RetSlot::slot_count).collect())
+    }
+}
+
+#[cfg(test)]
+mod rep_read_cache_tests {
+    use super::*;
+    use bone_semantic::hir::FnBackend;
+
+    /// Two live arenas mint the same numeric ids for different plans; the
+    /// worker-local cache must never serve one arena's plan for the other's id.
+    #[test]
+    fn worker_local_reads_stay_arena_scoped() {
+        let a = RepArena::default();
+        let b = RepArena::default();
+        let ia = a.intern(FnBackend::Lua, RepUse::Return, RepLayout::Opaque);
+        let ib = b.intern(
+            FnBackend::Lua,
+            RepUse::Return,
+            RepLayout::Foreign { reason: Ustr::from("test") },
+        );
+        assert_eq!(ia, ib, "both arenas must mint id 0 for the fixture to discriminate");
+        for _ in 0..2 {
+            assert!(matches!(a.get(ia).layout(), RepLayout::Opaque));
+            assert!(matches!(b.get(ib).layout(), RepLayout::Foreign { .. }));
+        }
+        let ib2 = b.intern(FnBackend::Lua, RepUse::Return, RepLayout::Opaque);
+        assert_ne!(ib, ib2, "b's opaque return must not be served a's local mapping");
+    }
+
+    /// An insert AFTER this thread warmed its local cache must still be
+    /// readable -- a cold id reads through to the shared arena.
+    #[test]
+    fn a_post_warm_insert_reads_through() {
+        let a = RepArena::default();
+        let first = a.intern(FnBackend::Lua, RepUse::Return, RepLayout::Opaque);
+        let _ = a.get(first);
+        let second = a.intern(FnBackend::Lua, RepUse::Parameter, RepLayout::Opaque);
+        assert_ne!(first, second);
+        assert_eq!(a.get(second).use_context(), RepUse::Parameter);
+        assert_eq!(a.get(second).id(), second);
     }
 }

@@ -284,21 +284,24 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
     if traffic.rep_final.get_calls > 0 {
         let (rs, rf) = (&traffic.rep_setup, &traffic.rep_final);
         println!(
-            "  rep arena      : {} gets ({} post-setup), {} intern attempts ({} post-setup), \
-             {} new plans ({} post-setup), one run",
+            "  rep arena      : {} gets ({} post-setup, {} worker-local), {} intern attempts \
+             ({} post-setup, {} worker-local), {} new plans ({} post-setup), one run",
             rf.get_calls,
             rf.get_calls - rs.get_calls,
+            rf.local_get_hits,
             rf.intern_attempts,
             rf.intern_attempts - rs.intern_attempts,
+            rf.local_intern_hits,
             rf.intern_new,
             rf.intern_new - rs.intern_new,
         );
         let (ms, mf) = (&traffic.mono_setup, &traffic.mono_final);
         println!(
-            "  mono interner  : {} read acqs ({} post-setup), {} write acqs ({} post-setup), \
-             {} new types ({} post-setup) of {}, one run",
+            "  mono interner  : {} read lock acqs ({} post-setup, {} worker-local reads), \
+             {} write acqs ({} post-setup), {} new types ({} post-setup) of {}, one run",
             mf.read_acqs,
             mf.read_acqs - ms.read_acqs,
+            mf.local_read_hits,
             mf.write_acqs,
             mf.write_acqs - ms.write_acqs,
             mf.intern_new,
