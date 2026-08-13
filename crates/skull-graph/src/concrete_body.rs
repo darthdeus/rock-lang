@@ -523,9 +523,34 @@ pub fn convert_body(
     subst: &MonoSubst,
 ) -> Converted {
     let mut c = Converted::default();
+    // Slots repeat inferred TyIds ~4x within a body (measured on mag:
+    // 139,559 slots over 34,237 unique ids), so the conversion is memoized per
+    // body. The `generics_bound` census counts PER SLOT exactly as before --
+    // each hit replays the cached delta -- and an error replays its reason, so
+    // per-slot failure entries are unchanged.
+    let mut memo: FxHashMap<TyId, Result<(MonoTyId, usize), MonoTyReason>> =
+        FxHashMap::default();
+    let mut convert_memo = |arena: &mut MonoArena, ty: TyId, generics_bound: &mut usize| {
+        match memo.entry(ty) {
+            std::collections::hash_map::Entry::Occupied(hit) => match hit.get() {
+                Ok((id, delta)) => {
+                    *generics_bound += delta;
+                    Ok(*id)
+                }
+                Err(reason) => Err(reason.clone()),
+            },
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                let mut delta = 0usize;
+                let converted = arena.convert_counting(ws, inf, ty, subst, &mut delta);
+                *generics_bound += delta;
+                slot.insert(converted.clone().map(|id| (id, delta)));
+                converted
+            }
+        }
+    };
     for (e, ty) in inf.expr_types.iter() {
         c.expr_examined += 1;
-        match arena.convert_counting(ws, inf, *ty, subst, &mut c.generics_bound) {
+        match convert_memo(arena, *ty, &mut c.generics_bound) {
             Ok(id) => {
                 c.expr_types.insert(e, id);
             }
@@ -554,7 +579,7 @@ pub fn convert_body(
 
     for (b, ty) in inf.binding_types.iter() {
         c.binding_examined += 1;
-        match arena.convert_counting(ws, inf, *ty, subst, &mut c.generics_bound) {
+        match convert_memo(arena, *ty, &mut c.generics_bound) {
             Ok(id) => {
                 c.binding_types.insert(b, id);
             }
@@ -903,6 +928,29 @@ where
     Ok(out)
 }
 
+/// Per-build memo for [`concrete_signature`]: the signature is a pure function
+/// of `(ws, g, instance)` (the substitution comes from the graph), and the
+/// same callee instance appears at every one of its call sites, so computing
+/// it per site re-converts and re-interns identical declaration types
+/// thousands of times. Errors are never cached, so failure reasons re-derive
+/// exactly as before.
+type SignatureCache = FxHashMap<Instance, ConcreteSignature>;
+
+fn cached_concrete_signature(
+    ws: &Workspace,
+    g: &InstanceGraph,
+    instance: &Instance,
+    cache: &mut SignatureCache,
+) -> Result<ConcreteSignature, MonoTyReason> {
+    if let Some(sig) = cache.get(instance) {
+        return Ok(sig.clone());
+    }
+    let subst = g.substitution(instance).cloned().ok_or(MonoTyReason::NoNode)?;
+    let sig = concrete_signature(ws, g, instance, &subst)?;
+    cache.insert(instance.clone(), sig.clone());
+    Ok(sig)
+}
+
 fn concrete_plan(
     ws: &Workspace,
     g: &InstanceGraph,
@@ -911,13 +959,14 @@ fn concrete_plan(
     inf: &BodyInference,
     hir_body: &Body,
     body: &ConcreteBody,
+    sig_cache: &mut SignatureCache,
 ) -> Result<ConcreteBodyPlan, MonoTyReason> {
     let mut callees = BTreeMap::new();
     let mut callee_signatures = BTreeMap::new();
     for (site, callee) in body.callees() {
         let instance = callee.instance().clone();
-        let subst = g.substitution(&instance).cloned().ok_or(MonoTyReason::NoNode)?;
-        callee_signatures.insert(site.clone(), concrete_signature(ws, g, &instance, &subst)?);
+        callee_signatures
+            .insert(site.clone(), cached_concrete_signature(ws, g, &instance, sig_cache)?);
         callees.insert(site, instance);
     }
     let failed_sites = g
@@ -955,7 +1004,7 @@ fn concrete_plan(
             struct_field_types,
         },
         foreign_domains,
-        signature: concrete_signature(ws, g, inst, subst)?,
+        signature: cached_concrete_signature(ws, g, inst, sig_cache)?,
         callees,
         callee_signatures,
         failed_sites,
@@ -968,6 +1017,7 @@ fn concrete_always_plan(
     g: &InstanceGraph,
     module: bone_semantic::prelude::ModuleId,
     owner: BodyOwner,
+    sig_cache: &mut SignatureCache,
 ) -> Result<Option<ConcreteBodyPlan>, MonoTyReason> {
     let body = ws.module(module).bodies.get(&owner).ok_or(MonoTyReason::NoNode)?;
     if matches!(owner, BodyOwner::Global(_)) && body.root.is_none() {
@@ -1000,10 +1050,9 @@ fn concrete_always_plan(
     for (site, record) in &contribution.always_call_sites {
         match &record.outcome {
             SiteOutcome::Resolved(instance) => {
-                let subst = g.substitution(instance).cloned().ok_or(MonoTyReason::NoNode)?;
                 callee_signatures.insert(
                     site.clone(),
-                    concrete_signature(ws, g, instance, &subst)?,
+                    cached_concrete_signature(ws, g, instance, sig_cache)?,
                 );
                 callees.insert(site.clone(), instance.clone());
             }
@@ -1080,7 +1129,10 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
     let mut unique_decls: FxHashSet<FuncRef> = FxHashSet::default();
     let mut out = ConcreteBodies::default();
     let mut plans = skull_mir::concrete::ConcretePlans::new();
+    let mut sig_cache = SignatureCache::default();
     let expanded: Vec<Instance> = g.expanded().cloned().collect();
+    let mut slot_tyids = 0usize;
+    let mut unique_slot_tyids = 0usize;
     for inst in expanded {
         let t_inst = std::time::Instant::now();
         unique_decls.insert(inst.func);
@@ -1107,6 +1159,16 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
                 continue;
             }
         };
+        if log::log_enabled!(log::Level::Debug) {
+            let tyids: FxHashSet<TyId> = inf
+                .expr_types
+                .iter()
+                .map(|(_, ty)| *ty)
+                .chain(inf.binding_types.iter().map(|(_, ty)| *ty))
+                .collect();
+            slot_tyids += inf.expr_types.iter().count() + inf.binding_types.iter().count();
+            unique_slot_tyids += tyids.len();
+        }
         let t = std::time::Instant::now();
         let c = g.interner().with_mut(|a| convert_body(a, ws, inf, body, &subst));
         t_convert += t.elapsed();
@@ -1164,7 +1226,7 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
             out.untyped.push((inst.clone(), u));
         }
         let t = std::time::Instant::now();
-        match concrete_plan(ws, g, &inst, &subst, inf, body, &concrete) {
+        match concrete_plan(ws, g, &inst, &subst, inf, body, &concrete, &mut sig_cache) {
             Ok(plan) => {
                 plans.insert(inst.clone(), plan);
             }
@@ -1176,7 +1238,7 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
     }
     for owner in g.contributions.keys() {
         let Owner::AlwaysEmitted(module, body_owner) = owner else { continue };
-        match concrete_always_plan(ws, g, *module, *body_owner) {
+        match concrete_always_plan(ws, g, *module, *body_owner, &mut sig_cache) {
             Ok(Some(plan)) => {
                 out.always_plans.insert(plan.owner.clone(), plan);
             }
@@ -1222,7 +1284,7 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
             "concrete build: {} expanded over {} decls ({} generic bodies), {} plans, {} gaps; \
              slots {} expr + {} binding; convert {:?}, callee tables {:?}, plans {:?}, \
              total {:?}; per-instance p50 {:?} p95 {:?} max {:?}, top [{}]; \
-             mono interns {} attempts -> {} new during build",
+             slot tyids {} / {} unique per-body; mono interns {} attempts -> {} new during build",
             per_inst.len(),
             unique_decls.len(),
             out.generic_bodies,
@@ -1238,6 +1300,8 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
             pct(95),
             pct(100),
             top.join(", "),
+            slot_tyids,
+            unique_slot_tyids,
             intern_after.intern_attempts - intern_before.intern_attempts,
             intern_after.intern_new - intern_before.intern_new,
         );
