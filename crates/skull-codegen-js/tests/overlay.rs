@@ -152,6 +152,98 @@ fn overlay_redefines_a_function_without_reinitializing_global_state() {
 }
 
 #[test]
+fn retained_named_and_capture_free_values_refresh_through_slots() {
+    let source = |named_delta: i32, free_value: i32| {
+        format!(
+            "global NAMED: (fn(int) -> int)? = null\n\
+             global FREE: (fn() -> int)? = null\n\
+             @nomangle fn named(x: int) -> int {{ return x + {named_delta} }}\n\
+             @nomangle fn make_free() -> fn() -> int {{ return () => {free_value} }}\n\
+             @nomangle fn start() {{\n\
+               NAMED = named\n\
+               FREE = make_free()\n\
+             }}\n\
+             @nomangle fn invoke() -> int {{\n\
+               let a = NAMED\n\
+               let b = FREE\n\
+               if a != null {{ if b != null {{ return a(3) + b() }} }}\n\
+               return -1\n\
+             }}\n\
+             fn main() {{ start(); invoke() }}\n"
+        )
+    };
+    let before = ws_with(&source(1, 10));
+    let after = ws_with(&source(2, 20));
+    let mid = function(&before, "main").module;
+    let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
+    let named = function(&after, "named");
+    let free = function(&after, "make_free");
+    let overlay = skull_codegen_js::emit::emit_overlay(
+        &after,
+        mid,
+        &mut cache,
+        &[
+            (named.module, BodyOwner::Function(named.func)),
+            (free.module, BodyOwner::Function(free.func)),
+        ],
+    )
+    .unwrap()
+    .expect_overlay();
+    let output = node(&format!(
+        "{}\nvar __G = {{}};\n{}\nstart();\nconsole.log(invoke());\n(0, eval)({:?});\nconsole.log(invoke());",
+        skull_codegen_js::JS_CALL_HELPER, program.program, overlay
+    ));
+    assert_eq!(output.trim(), "14\n25");
+    assert!(overlay.contains("__rock_code_slot_stage_one"));
+}
+
+#[test]
+fn retained_capturing_value_refreshes_while_keeping_mutable_capture() {
+    let source = |tail: i32| {
+        format!(
+            "global CALLBACK: (fn() -> int)? = null\n\
+             @nomangle fn make() -> fn() -> int {{\n\
+               let n = 0\n\
+               return () => {{ n = n + 1 n + {tail} }}\n\
+             }}\n\
+             @nomangle fn start() {{ CALLBACK = make() }}\n\
+             @nomangle fn invoke() -> int {{\n\
+               let f = CALLBACK\n\
+               if f != null {{ return f() }}\n\
+               -1\n\
+             }}\n\
+             fn main() {{ start(); invoke() }}\n"
+        )
+    };
+    let before = ws_with(&source(0));
+    let after = ws_with(&source(10));
+    let mid = function(&before, "main").module;
+    let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
+    let make = function(&after, "make");
+    let overlay = skull_codegen_js::emit::emit_overlay(
+        &after,
+        mid,
+        &mut cache,
+        &[(make.module, BodyOwner::Function(make.func))],
+    )
+    .unwrap()
+    .expect_overlay();
+    let output = node(&format!(
+        "{}\nvar __G = {{}};\n{}\nstart();\nconsole.log(invoke());\n(0, eval)({:?});\nconsole.log(invoke());",
+        skull_codegen_js::JS_CALL_HELPER, program.program, overlay
+    ));
+    assert_eq!(output.trim(), "1\n12");
+    assert!(overlay.contains("__rock_code_slot_stage_one"));
+
+    let (fresh, _) = skull_codegen_js::emit::emit_program_cached(&after, mid).unwrap();
+    let fresh_output = node(&format!(
+        "{}\nvar __G = {{}};\n{}\nstart();\nconsole.log(invoke());",
+        skull_codegen_js::JS_CALL_HELPER, fresh.program
+    ));
+    assert_eq!(fresh_output.trim(), "11");
+}
+
+#[test]
 fn successive_overlays_accumulate_changed_function_definitions() {
     let v0 = ws_with(
         "@nomangle fn first() -> int { 1 }\n\

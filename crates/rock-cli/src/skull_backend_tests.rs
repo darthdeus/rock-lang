@@ -2311,15 +2311,11 @@ mod overlay_runtime_tests {
         }
     }
 
-    /// The snapshot-at-creation contract (Risks / watch-outs: "Record staleness
-    /// across hot reload is the same contract as the old inline closure"). A
-    /// LIVE coroutine created BEFORE the reload survives a layout-stable body
-    /// edit. A record created before the reload holds a STALE `__fn` value (the
-    /// global was read into the table at creation); a record created after
-    /// resume-post-reload reads the NEW global. This deliberately diverges from
-    /// a fresh full build (which is uniformly v1), so it is a raw assertion.
+    /// A LIVE coroutine created BEFORE the reload survives a layout-stable body
+    /// edit, and its stored capturing record resolves the edited body through
+    /// the same logical CodeRef as a record created afterwards.
     #[test]
-    fn cofn_lambda_record_snapshot_stale_across_reload_new_record_fresh() {
+    fn cofn_lambda_record_snapshot_refreshes_across_reload() {
         let prog = |op: char| {
             format!(
                 "enum Ev {{ Tick(int), Act(() -> ()) }}\n\
@@ -2354,18 +2350,66 @@ mod overlay_runtime_tests {
         let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
         assert!(overlay.lua.contains("gen_ret_Coroutine_Ev_unit_unit__step__lambda1"), "overlay must carry the hoisted g body");
 
-        // start() + pump() under v0: f = record snapshotting the OLD lambda0
-        // (x+5), f(3)=8. Overlay (op *). pump #2 on the SAME live coroutine:
-        // the stored record f is STALE (still x+5) -> 8. pump #3 creates a fresh
-        // record g reading the NEW lambda1 (x*5) -> 15. pump #4 done -> -1.
+        // start() + pump() under v0: f(3)=8. Overlay (op *). The same stored
+        // record now resolves lambda0's edited body, then g uses lambda1.
         let composed = run_parts(&[&full0.lua, stub_for(&full0.lua), "start()", "pump()", &overlay.lua, "pump()", "pump()", "pump()"]);
         match composed {
             ExecOutcome::Output(o) => assert_eq!(
                 normalize_stdout(&o).trim(),
-                "8\n8\n15\n-1",
-                "a pre-reload record is a stale fn snapshot (8), a post-reload record is fresh (15)"
+                "8\n15\n15\n-1",
+                "both pre- and post-reload records must resolve compatible edited bodies"
             ),
-            ExecOutcome::Errored(_) => panic!("live coroutine with stale lambda record failed to run"),
+            ExecOutcome::Errored(_) => panic!("live coroutine CodeRef record failed to run"),
+        }
+    }
+
+    #[test]
+    fn named_and_capture_free_values_refresh_through_reusable_slots() {
+        let program = |named_delta: i32, free_value: i32| {
+            format!(
+                "global NAMED: (fn(int) -> int)? = null\n\
+                 global FREE: (fn() -> int)? = null\n\
+                 @nomangle fn named(x: int) -> int {{ return x + {named_delta} }}\n\
+                 @nomangle fn make_free() -> fn() -> int {{ return () => {free_value} }}\n\
+                 @nomangle fn start() {{\n\
+                   NAMED = named\n\
+                   FREE = make_free()\n\
+                 }}\n\
+                 @nomangle fn invoke() {{\n\
+                   let a = NAMED\n\
+                   let b = FREE\n\
+                   if a != null {{ if b != null {{ print(\"{{a(3)}} {{b()}}\") }} }}\n\
+                 }}\n"
+            )
+        };
+        let v0 = program(1, 10);
+        let v1 = program(2, 20);
+        let mut session = bone_session(files(&v0)).expect("session v0");
+        let mid = skull::user_module_id(session.workspace()).unwrap();
+        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let baseline = run_parts(&[&full0.lua, "start()", "invoke()"]);
+        match baseline {
+            ExecOutcome::Output(output) => assert_eq!(normalize_stdout(&output).trim(), "4 10"),
+            ExecOutcome::Errored(error) => panic!("baseline named/capture-free values failed: {error}"),
+        }
+
+        let update = session.update_file("main.rock", &v1).expect("update v1");
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &update.reinferred);
+        assert!(overlay.lua.contains("__rock_code_slot_stage"));
+        assert!(overlay.lua.contains("__rock_code_slot_publish"));
+        let composed = run_parts(&[&full0.lua, "start()", &overlay.lua, "invoke()"]);
+        let fresh = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v1").0;
+        let fresh_run = run_parts(&[&fresh.lua, "start()", "invoke()"]);
+        match (composed, fresh_run) {
+            (ExecOutcome::Output(composed), ExecOutcome::Output(fresh)) => {
+                assert_eq!(normalize_stdout(&composed).trim(), "5 20");
+                assert_eq!(normalize_stdout(&composed), normalize_stdout(&fresh));
+            }
+            (ExecOutcome::Errored(composed), ExecOutcome::Errored(fresh)) => {
+                panic!("slot values both failed: composed={composed}; fresh={fresh}")
+            }
+            (ExecOutcome::Errored(composed), _) => panic!("composed slot values failed: {composed}"),
+            (_, ExecOutcome::Errored(fresh)) => panic!("fresh slot values failed: {fresh}"),
         }
     }
 

@@ -218,18 +218,47 @@ function __map_next(m, k) {
 "#;
 
 /// The uniform indirect-call dispatch helper (`docs/closure-conversion-mir-plan.md`):
-/// a fn value is either a raw JS function (a named fn / capture-free hoisted
-/// lambda, referenced by global name) or a closure ENV RECORD `{ __fn, .. }`
-/// (a capturing lambda, built by `convert_closures`). `__rock_call` invokes both
-/// -- a function directly, a record through its `__fn(record, ...)` -- so every
-/// `CallValue` emits `__rock_call(f, ...args)`. Prepend to any emitted program
-/// that calls a fn value. (The Lua path uses a `__call` metatable instead; JS
-/// objects carry no metatable, so the dispatch is explicit here.)
+/// Rock values are reusable slot objects, and capturing records carry a slot
+/// plus their captures. Raw JS functions remain an explicit foreign boundary.
 pub const JS_CALL_HELPER: &str = r#"
+var __rock_code_slots = Object.create(null);
+var __rock_code_slot_stage = null;
+function __rock_code_slot_ref(key) {
+  var slot = __rock_code_slots[key];
+  if (!slot) throw new Error("missing Rock code slot " + key);
+  return slot;
+}
+function __rock_code_slot_begin() {
+  __rock_code_slot_stage = Object.create(null);
+}
+function __rock_code_slot_stage_one(key, body, abi) {
+  var old = __rock_code_slots[key];
+  if (old && old.abi !== abi) throw new Error("incompatible Rock code slot " + key);
+  if (__rock_code_slot_stage === null) throw new Error("Rock code slot stage not open");
+  __rock_code_slot_stage[key] = { body: body, abi: abi };
+}
+function __rock_code_slot_publish() {
+  if (__rock_code_slot_stage === null) throw new Error("Rock code slot stage not open");
+  var stage = __rock_code_slot_stage;
+  Object.keys(stage).forEach(function(key) {
+    var staged = stage[key], slot = __rock_code_slots[key];
+    if (slot) {
+      slot.current_body = staged.body;
+      slot.abi = staged.abi;
+    } else {
+      __rock_code_slots[key] = {
+        __rock_code_slot: true, key: key,
+        current_body: staged.body, abi: staged.abi
+      };
+    }
+  });
+  __rock_code_slot_stage = null;
+}
 function __rock_call(f) {
   var a = Array.prototype.slice.call(arguments, 1);
+  if (f && f.__rock_code_slot === true) return f.current_body.apply(null, a);
   if (typeof f === "function") return f.apply(null, a);
-  return f.__fn.apply(null, [f].concat(a));
+  return f.__slot.current_body.apply(null, [f].concat(a));
 }
 // `try_call(f)`: run `f` and report whether it errored (Lua `pcall`; returns
 // `not ok`). A JS throw is the pcall failure; the error itself is discarded by
@@ -249,8 +278,8 @@ function __try_call(f) {
 /// Structs are `{__ty, ...}` plain objects (the
 /// `__rock_create_struct` shape: a `__ty` string tag, no metatable), so a
 /// key-walk that includes `__ty` covers the type check for free. A capturing
-/// lambda is a closure ENV RECORD `{ __fn, .. }` (`convert_closures`): a callable
-/// value, so -- like a raw fn -- it compares by IDENTITY, never by walking its
+/// lambda is a CodeRef env record `{ __slot, .. }` (`convert_closures`): a callable
+/// value, so -- like a raw foreign fn -- it compares by IDENTITY, never by walking its
 /// captures (matching luajit's `__rock_fn_mt` identity-leaf rule and pre-arc
 /// arrow `===`).
 pub const JS_STRUCTURAL_EQ: &str = r#"
@@ -264,7 +293,9 @@ function __op_eq(a, b) {
   if (an || bn) return an && bn;
   if (a === b) return true;
   if (typeof a !== "object" || typeof b !== "object") return a === b;
-  if (a.__fn !== undefined || b.__fn !== undefined) return a === b;
+  if (a.__rock_code_slot === true || b.__rock_code_slot === true
+      || a.__slot !== undefined || b.__slot !== undefined
+      || a.__fn !== undefined || b.__fn !== undefined) return a === b;
   // A Vec compares by tracked `len` over `_data[0..len)` (len-bounded, like
   // luajit's pairs-walk), so a drained tail slot beyond `len` never breaks eq.
   if (a.__ty === "Vec" || b.__ty === "Vec") {
@@ -323,7 +354,7 @@ function __rock_make_enum(variant, ty, kv) {
 /// object (keys sorted by `lua_tostring`, `__ty`/`__variant` skipped), a Vec
 /// `{_data (0-based), len, __ty:"Vec"}`, a JS `Map` (raw-table
 /// analog), a JS array (Lua array-table analog), and scalars. A capturing-lambda
-/// env record (`__fn`) is an opaque callable LEAF (`String(fn)`), matching the
+/// CodeRef env record (`__slot`) is an opaque callable LEAF (`String(fn)`), matching the
 /// luajit `__rock_fn_mt` rule; a `visited` Map detects cycles. NOTE: most inspect
 /// tests are VACUOUS -- a `@test(output=..)` whose expected contains `{` is an
 /// interpolated string, so its expectation is dropped (`out=nil`) and the test
@@ -405,7 +436,7 @@ function __rock_inspect_value(v, indent, path, visited, precision) {
   var t = v;
   // A capturing-lambda env record is a callable LEAF (never walked) -- rendered
   // as its function, same `function: ` form as a raw fn.
-  if (t.__fn !== undefined) return "function: builtin";
+  if (t.__slot !== undefined || t.__rock_code_slot === true || t.__fn !== undefined) return "function: builtin";
   if (visited) {
     if (visited.has(t)) return "<CYCLE: " + visited.get(t) + ">";
     visited.set(t, path);
@@ -505,19 +536,19 @@ function inspect_formatted(obj, precision) { return inspect(obj, true, precision
 
 /// `deepcopy`: the recursive `__rock_deepcopy_value` clone (stdlib/unified.rock).
 /// A `seen` Map (object identity) preserves the graph -- a shared reference copies
-/// ONCE, a cycle terminates. Primitives and bare functions (a closure's `__fn`)
-/// pass through by identity; a TypedArray (NativeBuffer `.ptr`) is `.slice()`d; a
-/// `Map` and an array (a Vec's `_data`) copy element-wise; every other object (a
-/// struct `{__ty,...}`, an env record `{__fn,...}`, a box) copies own keys. A
-/// copied env record keeps its `__fn` and its copied box, so `__rock_call` still
-/// dispatches and shared-box aliasing survives (the closures read captures from
-/// the record arg, not lexically).
+/// ONCE, a cycle terminates. Primitives and bare functions pass through by identity;
+/// a TypedArray (NativeBuffer `.ptr`) is `.slice()`d; a `Map` and an array (a Vec's
+/// `_data`) copy element-wise; every other object (a struct `{__ty,...}`, a CodeRef
+/// env record `{__slot,...}`, a box) copies own keys. A copied env record keeps its
+/// logical slot and copies its captures, so calls remain fresh while mutable boxes
+/// do not alias the source.
 pub const JS_DEEPCOPY_RUNTIME: &str = r#"
 function __rock_deepcopy_value(obj, seen) {
   if (obj === null || obj === undefined) return obj;
   var t = typeof obj;
   if (t !== "object" && t !== "function") return obj;
   if (t === "function") return obj;
+  if (obj.__rock_code_slot === true) return obj;
   if (seen.has(obj)) return seen.get(obj);
   if (ArrayBuffer.isView(obj)) { var tc = obj.slice(); seen.set(obj, tc); return tc; }
   if (obj instanceof Map) {

@@ -9,11 +9,12 @@
 use std::collections::BTreeMap;
 
 use bone_semantic::prelude::Span;
-use ustr::Ustr;
 use rustc_hash::FxHashSet;
+use ustr::Ustr;
 
 use crate::instance::Instance;
 use crate::mir::MirFunc;
+use crate::monoty::MonoInterner;
 
 /// The source location used to identify a lambda within one concrete owner.
 /// The start offset is stable when the lambda body changes; the enclosing
@@ -57,6 +58,42 @@ impl CodeIdentity {
 
     pub fn is_lambda(&self) -> bool {
         matches!(self, Self::Lambda { .. })
+    }
+
+    /// A stable runtime key. It names the compiler-owned source/mono identity
+    /// and deliberately excludes backend symbols, arena indices and pointers.
+    pub fn logical_key(
+        &self,
+        ws: &bone_semantic::inference::Workspace,
+        interner: &MonoInterner,
+    ) -> String {
+        let instance_key = |instance: &Instance| {
+            let module = ws.module(instance.func.module);
+            let function = &module.functions[instance.func.func];
+            let args = instance
+                .arg_types(interner)
+                .iter()
+                .map(|ty| ty.canonical())
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{}::{}<{}>", module.file, function.name, args)
+        };
+        match self {
+            Self::Named(instance) => format!("named:{}", instance_key(instance)),
+            Self::Lambda { enclosing, site } => format!(
+                "lambda:{}@{}:{}",
+                instance_key(enclosing),
+                site.file,
+                site.offset
+            ),
+            Self::Nested { enclosing, site, name } => format!(
+                "nested:{}::{}@{}:{}",
+                instance_key(enclosing),
+                name,
+                site.file,
+                site.offset
+            ),
+        }
     }
 }
 
@@ -147,6 +184,9 @@ pub struct CodeEntry {
     /// A body-content witness used only to reject duplicate identities naming
     /// different bodies. It is not used as identity.
     pub body_fingerprint: u64,
+    /// The current backend body realization. This is payload, not identity;
+    /// overlays replace it only after logical compatibility succeeds.
+    pub body_name: Option<Ustr>,
     pub escaping: bool,
     pub capture_free: bool,
 }
@@ -196,6 +236,23 @@ impl CodeArtifact {
         }
     }
 
+    /// Attach backend payload names after emission has chosen its physical
+    /// symbols. The logical keys remain unchanged.
+    pub fn set_body_names(&mut self, root: &MirFunc, root_name: &str) {
+        fn visit(artifact: &mut CodeArtifact, mf: &MirFunc, body_name: &str) {
+            if let Some(identity) = &mf.code_identity {
+                if let Some(entry) = artifact.entries.get_mut(identity) {
+                    entry.body_name = Some(Ustr::from(body_name));
+                }
+            }
+            for nested in &mf.nested_fns {
+                visit(artifact, nested, nested.name.as_str());
+            }
+        }
+
+        visit(self, root, root_name);
+    }
+
     /// Build the identity table for one transformed MIR tree. The root body is
     /// a definition and is not automatically a slot; nested lambda bodies are
     /// escaping values. Named value mints are marked separately, so a direct
@@ -213,6 +270,7 @@ impl CodeArtifact {
                 identity: identity.clone(),
                 compatibility: compatibility.clone(),
                 body_fingerprint: body_fingerprint(mf),
+                body_name: Some(mf.name),
                 escaping,
                 capture_free: compatibility.capture.fields.is_empty(),
             }),
@@ -277,6 +335,7 @@ impl CodeArtifact {
                 lambda_topology: LambdaTopologyFingerprint::default(),
             },
             body_fingerprint: 0,
+            body_name: None,
             escaping: true,
             capture_free: true,
         });
@@ -286,11 +345,18 @@ impl CodeArtifact {
             let mut newly_counted = None;
             let mut resolved = false;
             let mut duplicate = false;
+            let mut capture_kind_change = None;
             {
                 let old = self.entries.get_mut(&entry.identity).expect("identity still present");
                 if old.body_fingerprint == 0 && entry.body_fingerprint != 0 {
                     resolved = old.escaping;
                     let was_escaping = old.escaping;
+                    if old.escaping
+                        && matches!(old.identity, CodeIdentity::Lambda { .. })
+                        && old.capture_free != entry.capture_free
+                    {
+                        capture_kind_change = Some((old.capture_free, entry.capture_free));
+                    }
                     let escaping = old.escaping || entry.escaping;
                     *old = entry;
                     old.escaping = escaping;
@@ -312,6 +378,18 @@ impl CodeArtifact {
             }
             if resolved {
                 self.census.unresolved_body = self.census.unresolved_body.saturating_sub(1);
+            }
+            if let Some((was_free, is_free)) = capture_kind_change {
+                if was_free {
+                    self.census.capture_free_lambdas = self.census.capture_free_lambdas.saturating_sub(1);
+                } else {
+                    self.census.capturing_lambdas = self.census.capturing_lambdas.saturating_sub(1);
+                }
+                if is_free {
+                    self.census.capture_free_lambdas += 1;
+                } else {
+                    self.census.capturing_lambdas += 1;
+                }
             }
             if let Some((identity, capture_free)) = newly_counted {
                 self.census.examined += 1;
@@ -359,12 +437,25 @@ impl CodeArtifact {
     /// compatible.
     pub fn compatible_overlay(&self, next: &Self) -> bool {
         for (identity, old) in &self.entries {
-            let Some(new) = next.entries.get(identity) else { continue };
+            if !old.escaping {
+                continue;
+            }
+            let Some(new) = next.entries.get(identity) else { return false };
+            if !new.escaping {
+                return false;
+            }
             if old.compatibility.lambda_topology != new.compatibility.lambda_topology
                 || !old.compatibility.compatible_with(&new.compatibility)
             {
                 return false;
             }
+        }
+        if next
+            .entries
+            .values()
+            .any(|entry| entry.escaping && !self.entries.contains_key(&entry.identity))
+        {
+            return false;
         }
         let mut owners: BTreeMap<&Instance, LambdaTopologyFingerprint> = BTreeMap::new();
         for entry in self.entries.values().chain(next.entries.values()) {
@@ -378,6 +469,50 @@ impl CodeArtifact {
         }
         true
     }
+
+    /// Replace backend body payloads from an already-built compatible artifact.
+    /// The identity keys remain those of `self`; this is the overlay operation's
+    /// explicit separation between logical slot identity and current body name.
+    pub fn with_replacements(&self, replacements: &[&Self]) -> Self {
+        let mut next = self.clone();
+        for replacement in replacements {
+            for (identity, entry) in &replacement.entries {
+                if entry.body_fingerprint != 0 || !next.entries.contains_key(identity) {
+                    let mut entry = entry.clone();
+                    if next.entries.get(identity).is_some_and(|old| old.escaping) {
+                        entry.escaping = true;
+                    }
+                    next.entries.insert(identity.clone(), entry);
+                }
+            }
+        }
+        let direct_call_only = self.census.direct_call_only;
+        let mut census = CodeIdentityCensus { direct_call_only, ..Default::default() };
+        for entry in next.entries.values() {
+            if !entry.escaping {
+                continue;
+            }
+            census.examined += 1;
+            census.assigned += 1;
+            match &entry.identity {
+                CodeIdentity::Named(_) | CodeIdentity::Nested { .. } => census.named_values += 1,
+                CodeIdentity::Lambda { .. } => {
+                    census.lambda_values += 1;
+                    if entry.capture_free {
+                        census.capture_free_lambdas += 1;
+                    } else {
+                        census.capturing_lambdas += 1;
+                    }
+                }
+            }
+            if entry.body_fingerprint == 0 {
+                census.unresolved_body += 1;
+            }
+        }
+        next.census = census;
+        next
+    }
+
 }
 
 fn body_fingerprint(mf: &MirFunc) -> u64 {
@@ -467,6 +602,7 @@ mod tests {
             identity: identity.clone(),
             compatibility: compatibility.clone(),
             body_fingerprint,
+            body_name: Some(Ustr::from("body")),
             escaping: true,
             capture_free: true,
         };

@@ -10,6 +10,7 @@
 //! backend.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::fmt::Write as _;
 
 use bone_semantic::inference::Workspace;
 use comfy_la_arena::Idx;
@@ -47,6 +48,9 @@ pub struct GlobalCtx {
     /// `__rock_enum_<E>_<V>` singletons / `__rock_enum_<E>_names` tables the body
     /// reads (rendered as a bare top-level name; the def is emitted per program).
     enum_globals: HashSet<ustr::Ustr>,
+    /// Logical Rock callable identities to their runtime slot keys. Foreign
+    /// function values are intentionally absent from this map.
+    code_slots: HashMap<skull_mir::code_identity::CodeIdentity, String>,
 }
 
 fn err(msg: impl Into<String>) -> CompilerError {
@@ -1885,18 +1889,26 @@ impl Emitter<'_> {
                 format!("((({a} % {b}) + {b}) % {b})")
             }
             Inst::Call { func, args } => self.render_call(iid, *func, args)?,
-            // A capture-free hoisted closure: a bare reference to its top-level
-            // fn (`convert_closures` emits `Inst::Global(<name>__lambda<k>)`).
-            // Same-site references share one value -> `==` (P3 identity parity).
+            // A capture-free hoisted closure resolves its reusable logical slot.
             // Any OTHER global read (module `let`, enum name table, named fn as a
             // value) is not emitted, so it stays out of subset. `error` is the
             // one runtime global: the coroutine transform's layout raise and
             // `await`'s re-raise read it as a value (`JS_CORO_RUNTIME` defines it).
+            Inst::Global(name)
+                if self.mf.code_value_identities.contains_key(&iid) =>
+            {
+                let identity = &self.mf.code_value_identities[&iid];
+                let key = self
+                    .globals
+                    .code_slots
+                    .get(identity)
+                    .ok_or_else(|| err("JS: Rock function value has no CodeRef slot"))?;
+                format!("__rock_code_slot_ref({})", js_string_lit(key)?)
+            }
             Inst::Global(name) if self.hoisted.contains(name) || name.as_str() == "error" => {
                 name.to_string()
             }
-            // A top-level fn referenced as a value: its co-emitted JS name (a
-            // bare function; `__rock_call` invokes it directly).
+            // A boundary function referenced as a value: its co-emitted JS name.
             Inst::Global(name) if self.globals.fns.contains_key(name) => {
                 self.globals.fns[name].clone()
             }
@@ -1911,20 +1923,29 @@ impl Emitter<'_> {
             Inst::Global(name) => {
                 return Err(err(format!("JS subset: global read `{name}` not supported")))
             }
-            // A closure ENV record `{ __fn, c<A>.. }` (capturing lambda) or a box
-            // `{ v }` (a shared mutable capture) -- built by `convert_closures`.
+            // A CodeRef env record `{ __slot, c<A>.. }` (capturing lambda) or a
+            // box `{ v }` (a shared mutable capture) -- built by `convert_closures`.
             Inst::MakeEnv { fn_ref, fields } => {
                 let mut parts: Vec<String> = Vec::new();
                 if let Some(name) = fn_ref {
-                    parts.push(format!("__fn: {name}"));
+                    if let Some(identity) = self.mf.code_value_identities.get(&iid) {
+                        let key = self
+                            .globals
+                            .code_slots
+                            .get(identity)
+                            .ok_or_else(|| err("JS: Rock closure has no CodeRef slot"))?;
+                        parts.push(format!("__slot: __rock_code_slot_ref({})", js_string_lit(key)?));
+                    } else {
+                        parts.push(format!("__fn: {name}"));
+                    }
                 }
                 for (f, v) in fields {
                     parts.push(format!("{f}: {}", self.render_val(*v)?));
                 }
                 format!("({{{}}})", parts.join(", "))
             }
-            // An indirect call: a raw fn value calls directly, an env record routes
-            // through its `__fn` -- the `__rock_call` dispatch helper handles both.
+            // An indirect call: foreign raw functions call directly; Rock values
+            // resolve their slot through `__rock_call`.
             Inst::CallValue { callee, args } => {
                 let mut rendered = vec![self.render_val(*callee)?];
                 for a in args {
@@ -2612,6 +2633,15 @@ pub fn emit_with_closure(
     )?;
     drain_worklists(ws, &scx, &mut st)?;
     st.canonicalize_emission_order();
+    for (_, mf) in &st.lowered {
+        register_code_slots(ws, scx.interner(), mf, &mut st.gctx);
+    }
+    for (_, mf) in &st.spec_lowered {
+        register_code_slots(ws, scx.interner(), mf, &mut st.gctx);
+    }
+    for g in &st.ginits {
+        register_code_slots(ws, scx.interner(), &g.mf, &mut st.gctx);
+    }
     let mut rejections = std::mem::take(&mut st.rejections);
     let bodies = st.top_bodies();
     rejections.extend(check_scalar_abi(
@@ -2626,6 +2656,7 @@ pub fn emit_with_closure(
     let hoisted = collect_hoisted(&bodies);
 
     let mut out = String::new();
+    let mut code_artifact = CodeArtifact::default();
     out.push_str(&emit_enum_singletons(&st.gctx, &st.enum_defs));
     out.push_str(&emit_vt_eq(ws, &bodies)?);
     out.push_str(&emit_inspect_ty(ws, &bodies)?);
@@ -2638,7 +2669,12 @@ pub fn emit_with_closure(
     // program path reorders these; per-test order is pinned by the JS suite.)
     for g in &st.ginits {
         match emit_ginit_with_nested(ws, g, &st.names, &hoisted, &st.gctx) {
-            Ok(js) => out.push_str(&js),
+            Ok(js) => {
+                out.push_str(&js);
+                let mut artifact = CodeArtifact::from_mir_tree(&g.mf);
+                artifact.set_body_names(&g.mf, &g.init_name);
+                code_artifact.merge(artifact);
+            }
             Err(e) => rejections.push((g.init_name.clone(), e)),
         }
     }
@@ -2652,12 +2688,16 @@ pub fn emit_with_closure(
             .get(&Instance::base(*fr))
             .ok_or_else(|| err(format!("JS: no concrete plan for `{name}`")))?;
         match emit_lowered_fn(ws, scx.interner(), mf, name, plan, &st.names, &hoisted, &st.gctx) {
-            Ok((js, _code_artifact)) => out.push_str(&js),
+            Ok((js, artifact)) => {
+                out.push_str(&js);
+                code_artifact.merge(artifact);
+            }
             Err(e) => rejections.push((name.clone(), e)),
         }
     }
     out.push_str(&emit_spec_bodies(ws, scx.interner(), &st, &hoisted, &mut rejections));
     combine_rejections(rejections)?;
+    out.push_str(&code_slot_registration_js(ws, scx.interner(), &code_artifact)?);
     for body in &st.inline_js {
         out.push_str(&emit_inline_js_fn(
             ws,
@@ -3078,6 +3118,18 @@ fn assemble_program_core(
 
     drain_worklists(ws, scx, &mut st)?;
     st.canonicalize_emission_order();
+    for (_, mf) in &st.lowered {
+        register_code_slots(ws, scx.interner(), mf, &mut st.gctx);
+    }
+    for (_, mf) in &st.spec_lowered {
+        register_code_slots(ws, scx.interner(), mf, &mut st.gctx);
+    }
+    for g in &st.ginits {
+        register_code_slots(ws, scx.interner(), &g.mf, &mut st.gctx);
+    }
+    for (_, mf) in &deco_bodies {
+        register_code_slots(ws, scx.interner(), mf, &mut st.gctx);
+    }
 
     let mut rejections = std::mem::take(&mut st.rejections);
     let mut bodies = st.top_bodies();
@@ -3096,8 +3148,10 @@ fn assemble_program_core(
     let mut out = String::new();
     let mut stable = String::new();
     let mut code_artifact = CodeArtifact::default();
-    for (_, mf) in &deco_bodies {
-        code_artifact.merge(CodeArtifact::from_mir_tree(mf));
+    for (name, mf) in &deco_bodies {
+        let mut artifact = CodeArtifact::from_mir_tree(mf);
+        artifact.set_body_names(mf, name);
+        code_artifact.merge(artifact);
     }
     let enum_singletons = emit_enum_singletons(&st.gctx, &st.enum_defs);
     out.push_str(&enum_singletons);
@@ -3176,7 +3230,9 @@ fn assemble_program_core(
             }
         };
         out.push_str(&definition);
-        code_artifact.merge(CodeArtifact::from_mir_tree(&g.mf));
+        let mut artifact = CodeArtifact::from_mir_tree(&g.mf);
+        artifact.set_body_names(&g.mf, &g.init_name);
+        code_artifact.merge(artifact);
         if g.is_const {
             const_chunks.entry(g.name).or_insert_with(String::new).push_str(&definition);
         } else {
@@ -3194,6 +3250,7 @@ fn assemble_program_core(
             stable.push_str(&init.js);
         }
     }
+    out.push_str(&code_slot_registration_js(ws, scx.interner(), &code_artifact)?);
     // 5. decorator applications (AFTER inits: a deco body pushes into a ginit-
     //    initialized registry -- D4).
     let applications = decorator_application_lines_js(ws, &deco_names, &st.names)?;
@@ -3416,6 +3473,9 @@ pub fn emit_overlay(
     }
     update_js_session(ws, &mut cache.session, &root_plan.refs, reinferred);
     let current = assemble_program_core(ws, &cache.scx, &root_plan.named, &cache.session)?;
+    if !cache.build.code_artifact.compatible_overlay(&current.code_artifact) {
+        return Ok(JsReload::FullRequired);
+    }
     let update = cache
         .session
         .last_update
@@ -3548,6 +3608,11 @@ pub fn emit_overlay(
     for chunk in changed_specs {
         out.push_str(&chunk.js);
     }
+    out.push_str(&code_slot_registration_js(
+        ws,
+        cache.scx.interner(),
+        &current.code_artifact,
+    )?);
 
     let decorator_names = decorator_names(ws);
     let decorated: Vec<FuncRef> = order
@@ -4290,7 +4355,9 @@ fn emit_lowered_fn(
     for nf in &mf.nested_fns {
         out.push_str(&emit_fn_with_callees(ws, nf, nf.name.as_str(), names, hoisted, gctx)?);
     }
-    Ok((out, CodeArtifact::from_mir_tree(mf)))
+    let mut code_artifact = CodeArtifact::from_mir_tree(mf);
+    code_artifact.set_body_names(mf, js_name);
+    Ok((out, code_artifact))
 }
 
 /// The standalone specialized copies, each under its `spec_fn_name`.
@@ -4489,6 +4556,65 @@ fn check_scalar_abi(
 /// lambda creation site may reference. Flat: nesting is one level.
 fn collect_hoisted(bodies: &[&MirFunc]) -> HashSet<ustr::Ustr> {
     bodies.iter().flat_map(|mf| mf.nested_fns.iter().map(|nf| nf.name)).collect()
+}
+
+fn register_code_slots(
+    ws: &Workspace,
+    interner: &skull_mir::monoty::MonoInterner,
+    mf: &MirFunc,
+    gctx: &mut GlobalCtx,
+) {
+    if let Some(identity) = &mf.code_identity {
+        gctx.code_slots
+            .entry(identity.clone())
+            .or_insert_with(|| identity.logical_key(ws, interner));
+    }
+    for identity in mf.code_value_identities.values() {
+        gctx.code_slots
+            .entry(identity.clone())
+            .or_insert_with(|| identity.logical_key(ws, interner));
+    }
+    for nested in &mf.nested_fns {
+        register_code_slots(ws, interner, nested, gctx);
+    }
+}
+
+fn code_slot_registration_js(
+    ws: &Workspace,
+    interner: &skull_mir::monoty::MonoInterner,
+    artifact: &CodeArtifact,
+) -> Result<String, CompilerError> {
+    if !artifact.census.is_total() {
+        return Err(err(format!(
+            "cannot publish incomplete Rock CodeRef census: {:?}",
+            artifact.census
+        )));
+    }
+    let mut entries: Vec<_> = artifact.entries.values().filter(|entry| entry.escaping).collect();
+    entries.sort_by_key(|entry| entry.identity.logical_key(ws, interner));
+    if entries.is_empty() {
+        return Ok(String::new());
+    }
+    let mut out = String::new();
+    out.push_str("__rock_code_slot_begin();\n");
+    for entry in entries {
+        let Some(body) = entry.body_name else {
+            return Err(err(format!(
+                "Rock CodeRef `{}` has no emitted body",
+                entry.identity.logical_key(ws, interner)
+            )));
+        };
+        writeln!(
+            out,
+            "__rock_code_slot_stage_one({}, {}, {});",
+            js_string_lit(&entry.identity.logical_key(ws, interner))?,
+            body,
+            js_string_lit(&entry.compatibility.call_abi)?,
+        )
+        .expect("writing a String cannot fail");
+    }
+    out.push_str("__rock_code_slot_publish();\n");
+    Ok(out)
 }
 
 /// Boxed-enum singleton / names-table defs the emitted bodies read, in name
@@ -5728,11 +5854,16 @@ fn emit_coroutine_js(
         lowered.frame_plan.slots(),
     );
     let mut code_artifact = CodeArtifact::from_mir_tree(&lowered.step);
+    code_artifact.set_body_names(&lowered.step, &step_name);
     for aux in &defer_funcs {
-        code_artifact.merge(CodeArtifact::from_mir_tree(aux));
+        let mut artifact = CodeArtifact::from_mir_tree(aux);
+        artifact.set_body_names(aux, aux.name.as_str());
+        code_artifact.merge(artifact);
     }
     for (_, aux) in &hook_funcs {
-        code_artifact.merge(CodeArtifact::from_mir_tree(aux));
+        let mut artifact = CodeArtifact::from_mir_tree(aux);
+        artifact.set_body_names(aux, aux.name.as_str());
+        code_artifact.merge(artifact);
     }
     let mut out = emit_fn_trampoline(
         ws,

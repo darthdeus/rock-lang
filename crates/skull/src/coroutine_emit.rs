@@ -123,11 +123,16 @@ pub fn emit_coroutine_with_artifact(
     // with their converted lambda siblings emitted beside them. Their function
     // values are still stored in the coroutine constructor by name.
     let mut code_artifact = CodeArtifact::from_mir_tree(&lowered.step);
+    code_artifact.set_body_names(&lowered.step, &step_name);
     for aux in &defer_funcs {
-        code_artifact.merge(CodeArtifact::from_mir_tree(aux));
+        let mut artifact = CodeArtifact::from_mir_tree(aux);
+        artifact.set_body_names(aux, aux.name.as_str());
+        code_artifact.merge(artifact);
     }
     for (_, aux) in &hook_funcs {
-        code_artifact.merge(CodeArtifact::from_mir_tree(aux));
+        let mut artifact = CodeArtifact::from_mir_tree(aux);
+        artifact.set_body_names(aux, aux.name.as_str());
+        code_artifact.merge(artifact);
     }
     let mut defer_luas = String::new();
     for mut aux in defer_funcs {

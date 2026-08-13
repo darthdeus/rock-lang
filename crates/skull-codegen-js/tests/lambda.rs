@@ -1,10 +1,9 @@
-//! Closure / lambda emission (docs/multi-backend-testing-plan.md T5). An
-//! `Inst::Lambda` renders as a JS arrow `(<params>) => { <body> }` whose body is
-//! the lambda's sub-CFG (same arenas); a captured cell renders to the same
-//! `c<N>` name it carries in the enclosing scope, so JS lexical capture stands in
-//! for the Lua upvalue -- no explicit env record. `Inst::CallValue` is an
-//! indirect call `(<callee>)(args)`. The structural pins fix the emitted shape;
-//! the node-executed behavioral checks are the correctness oracle.
+//! Closure / lambda emission (docs/multi-backend-testing-plan.md T5). Closure
+//! conversion lowers each lambda to a hoisted sibling plus either a reusable
+//! CodeRef or a CodeRef-bearing environment record. `Inst::CallValue` is an
+//! indirect dispatch through `__rock_call`; direct calls retain their physical
+//! callee. Structural pins fix the emitted shape; node checks are the behavior
+//! oracle.
 
 use skull_mir::mir::FuncRef;
 use crate::common::{emit_user, ws_with};
@@ -57,7 +56,21 @@ fn callvalue_through_fn_param() {
     assert!(js.contains("__rock_call(v0, v1)"), "indirect call via __rock_call:\n{js}");
 }
 
-// A capturing lambda becomes an env RECORD `{ __fn: <name>, c<A>: .. }` at its
+#[test]
+fn direct_calls_remain_direct_while_values_use_slots() {
+    let ws = ws_with(
+        "fn target(x: int) -> int { x + 1 }\n\
+         fn direct() -> int { target(1) }\n\
+         fn main() { direct() }\n",
+    );
+    let js = emit_closure(&ws, "main");
+    let start = js.find("function direct").expect("direct body");
+    let body = js[start..].split("\n}\n").next().expect("direct body");
+    assert!(body.contains("target_"), "direct call keeps its physical call: {body}");
+    assert!(!body.contains("__rock_code_slot_ref"), "direct call must not route through a CodeRef: {body}");
+}
+
+// A capturing lambda becomes an env record `{ __slot, c<A>: .. }` at its
 // creation site plus a hoisted sibling fn reading the capture from its env.
 #[test]
 fn capturing_lambda_builds_env_record() {
@@ -68,20 +81,21 @@ fn capturing_lambda_builds_env_record() {
          }",
     );
     let js = emit_closure(&ws, "capture");
-    assert!(js.contains("__fn: capture__lambda0"), "creation site builds the record:\n{js}");
+    assert!(js.contains("__slot: __rock_code_slot_ref("), "creation site builds a CodeRef record:\n{js}");
+    assert!(!js.contains("__fn: capture__lambda0"), "Rock closures must not freeze a backend body:\n{js}");
     assert!(js.contains("function capture__lambda0("), "hoisted sibling body:\n{js}");
 }
 
-// A capture-free lambda is a bare reference to its hoisted top-level fn (no
-// record, no alloc): same-site references share one value -> `==` (luajit P3).
+// A capture-free lambda resolves one reusable slot (no env allocation):
+// same-site references share one callable identity.
 #[test]
 fn capture_free_lambda_is_hoisted() {
     let ws = ws_with("fn mk() -> fn() -> int { () => 42 }");
     let js = emit_closure(&ws, "mk");
     assert!(js.contains("function mk__lambda0("), "hoisted top-level fn:\n{js}");
     assert!(js.contains("return 42;"), "hoisted body:\n{js}");
-    // Capture-free -> a bare global reference, NOT a `{ __fn }` record.
-    assert!(!js.contains("__fn: mk__lambda0"), "no record for a capture-free lambda:\n{js}");
+    assert!(js.contains("__rock_code_slot_ref("), "capture-free values use the reusable slot:\n{js}");
+    assert!(!js.contains("__fn: mk__lambda0"), "no frozen backend body for a capture-free lambda:\n{js}");
 }
 
 // --- behavioral (node) oracle: emit through the full pipeline (the pass runs

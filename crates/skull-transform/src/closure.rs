@@ -422,6 +422,9 @@ pub fn convert_closures_framed(
             frame: frame_schema(frame),
             lambda_topology: topology,
         });
+        if let Some(identity) = code_identity.clone() {
+            mf.code_value_identities.insert(lambda, identity);
+        }
         nested.push(MirFunc {
             name: hoisted_name[&sid],
             code_identity,

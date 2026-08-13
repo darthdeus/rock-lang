@@ -36,14 +36,53 @@ use skull_mir::monoty::MonoInterner;
 
 pub use skull_mir::mangle::mangle_fn;
 
-/// The shared metatable of capturing-lambda env records
-/// (`docs/closure-env-records-plan.md`): a record `{ __fn = <top-level fn>,
-/// <captures> }` is callable as `f(...)` via `__call`. Reload-guarded so pre- and
-/// post-reload records share metatable identity. THE canonical definition -- both
-/// `skull::runtime_prelude` (the load-time scaffolding) and the codegen test
-/// harness reference this one constant, not a copy.
-pub const FN_MT_PRELUDE: &str =
-    "if not _G.__rock_fn_mt then _G.__rock_fn_mt = { __call = function(e, ...) return e.__fn(e, ...) end } end";
+/// Runtime support for callable CodeRefs and capturing environment records.
+/// Slots are mutated in place only by the publish step, so existing values see
+/// a compatible body edit while a failed stage leaves the previous body live.
+pub const FN_MT_PRELUDE: &str = r#"
+if not _G.__rock_code_slot_mt then
+  _G.__rock_code_slot_mt = { __call = function(s, ...) return s.current_body(...) end }
+end
+if not _G.__rock_code_slots then _G.__rock_code_slots = {} end
+function __rock_code_slot_ref(key)
+  local slot = _G.__rock_code_slots[key]
+  if not slot then error("missing Rock code slot " .. key, 0) end
+  return slot
+end
+function __rock_code_slot_begin()
+  _G.__rock_code_slot_pending = {}
+end
+function __rock_code_slot_stage(key, body, abi)
+  local old = _G.__rock_code_slots[key]
+  if old and old.abi ~= abi then error("incompatible Rock code slot " .. key, 0) end
+  if not _G.__rock_code_slot_pending then error("Rock code slot stage not open", 0) end
+  _G.__rock_code_slot_pending[key] = { body = body, abi = abi }
+end
+function __rock_code_slot_publish()
+  local stage = _G.__rock_code_slot_pending
+  if not stage then error("Rock code slot stage not open", 0) end
+  for key, staged in pairs(stage) do
+    local slot = _G.__rock_code_slots[key]
+    if slot then
+      slot.current_body = staged.body
+      slot.abi = staged.abi
+    else
+      _G.__rock_code_slots[key] = setmetatable({
+        key = key, current_body = staged.body, abi = staged.abi
+      }, _G.__rock_code_slot_mt)
+    end
+  end
+  _G.__rock_code_slot_pending = nil
+end
+if not _G.__rock_fn_mt then
+  _G.__rock_fn_mt = {
+    __call = function(e, ...)
+      if e.__slot then return e.__slot.current_body(e, ...) end
+      return e.__fn(e, ...)
+    end
+  }
+end
+"#;
 
 /// Lua shims for the checked Vec indexing helpers codegen emits
 /// (`__vec_checked_get`/`__vec_checked_set`). In real builds the stdlib
@@ -1530,7 +1569,15 @@ impl Emitter<'_> {
     fn write_value(&self, out: &mut String, id: Idx<Inst>, inst: &Inst) {
         match inst {
             Inst::Const(l) => write_lit(out, l),
-            Inst::Global(g) => out.push_str(g.as_str()),
+            Inst::Global(g) => {
+                if let Some(identity) = self.func.code_value_identities.get(&id) {
+                    out.push_str("__rock_code_slot_ref(");
+                    out.push_str(&lua_string(&identity.logical_key(self.ws, self.interner)));
+                    out.push(')');
+                } else {
+                    out.push_str(g.as_str());
+                }
+            }
             Inst::Load(c) => write_cellname(out, self.frame, self.cell_colors, *c),
 
             Inst::IntAdd(a, b) | Inst::FloatAdd(a, b) => self.write_bin(out, "+", a, b),
@@ -1908,7 +1955,7 @@ impl Emitter<'_> {
             // The shared closure-conversion pass (`skull_transform::convert_closures`)
             // materializes a capturing lambda as an env record and a shared mutable
             // capture as a box, both as `MakeEnv`. `fn_ref = Some(name)` is a
-            // callable record `setmetatable({ __fn = name, c<raw> = .., .. },
+            // callable record `setmetatable({ __slot = ..., c<raw> = .., .. },
             // __rock_fn_mt)` (invoked via `__call`); `fn_ref = None` is a box `{}`
             // / `{ v = <seed> }`. Field access (`e.c<raw>`, `.v`) already flows
             // through `Inst::Field`/`Inst::StoreField`. EVERY servable path (ordinary
@@ -1916,8 +1963,15 @@ impl Emitter<'_> {
             // `MakeEnv` is the only capturing closure shape codegen sees.
             Inst::MakeEnv { fn_ref, fields } => match fn_ref {
                 Some(name) => {
-                    out.push_str("setmetatable({ __fn = ");
-                    out.push_str(name.as_str());
+                    out.push_str("setmetatable({ ");
+                    if let Some(identity) = self.func.code_value_identities.get(&id) {
+                        out.push_str("__slot = __rock_code_slot_ref(");
+                        out.push_str(&lua_string(&identity.logical_key(self.ws, self.interner)));
+                        out.push(')');
+                    } else {
+                        out.push_str("__fn = ");
+                        out.push_str(name.as_str());
+                    }
                     for (f, v) in fields {
                         out.push_str(", ");
                         out.push_str(f.as_str());

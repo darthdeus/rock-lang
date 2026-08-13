@@ -1,5 +1,5 @@
 //! P2 step 4 of docs/closure-env-records-plan.md: the `__rock_fn_mt` runtime
-//! helper -- a shared metatable making an env record `{ __fn = <fn>, <captures> }`
+//! helper -- a shared metatable making an env record `{ __slot = <CodeRef>, <captures> }`
 //! callable as `f(...)` via `__call`, initialized once at load with the
 //! preservation idiom so pre- and post-reload records share metatable identity.
 //!
@@ -16,8 +16,9 @@ use crate::common::{emit_module, run_luajit};
 fn prelude_defines_shared_fn_metatable() {
     let lua = emit_module("fn main() {}\n");
     assert!(
-        lua.contains("_G.__rock_fn_mt = { __call = function(e, ...) return e.__fn(e, ...) end }"),
-        "the prelude must define the shared __rock_fn_mt metatable:\n(searched the prelude)"
+        lua.contains("if not _G.__rock_fn_mt then") && lua.contains("e.__fn(e, ...)")
+            && lua.contains("e.__slot.current_body(e, ...)") ,
+        "the prelude must define the shared CodeRef-aware __rock_fn_mt metatable:\n(searched the prelude)"
     );
     assert!(
         lua.contains("if not _G.__rock_fn_mt then"),
@@ -58,4 +59,24 @@ fn metatable_identity_preserved_across_reload() {
     );
     let out = run_luajit(&script, "reload");
     assert_eq!(out, "PASS", "records built across a reload must share metatable identity; got: {out}");
+}
+
+#[test]
+fn code_slot_publish_is_transactional_and_preserves_slot_identity() {
+    let lua = emit_module("fn main() {}\n");
+    let driver = r#"
+__rock_code_slot_begin()
+__rock_code_slot_stage("probe", function() return 1 end, "abi")
+__rock_code_slot_publish()
+local before = __rock_code_slot_ref("probe")
+local ok = pcall(function()
+  __rock_code_slot_begin()
+  __rock_code_slot_stage("probe", function() return 2 end, "changed-abi")
+  __rock_code_slot_publish()
+end)
+local after = __rock_code_slot_ref("probe")
+if not ok and before == after and after() == 1 then print("PASS") else print("FAIL") end
+"#;
+    let out = run_luajit(&format!("{lua}{driver}"), "slot_transaction");
+    assert_eq!(out, "PASS", "a failed compatibility stage must not publish or replace its slot: {out}");
 }

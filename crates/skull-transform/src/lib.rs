@@ -1829,6 +1829,7 @@ mod tests {
             identity: id.clone(),
             compatibility: compat(topology),
             body_fingerprint: 1,
+            body_name: Some(Ustr::from("old")),
             escaping: true,
             capture_free: true,
         });
@@ -1837,6 +1838,7 @@ mod tests {
             identity: id.clone(),
             compatibility: compat(topology),
             body_fingerprint: 2,
+            body_name: Some(Ustr::from("edited")),
             escaping: true,
             capture_free: true,
         });
@@ -1846,6 +1848,7 @@ mod tests {
             identity: id,
             compatibility: compat(inserted),
             body_fingerprint: 3,
+            body_name: Some(Ustr::from("inserted")),
             escaping: true,
             capture_free: true,
         });
@@ -1858,6 +1861,7 @@ mod tests {
             },
             compatibility: compat(removed),
             body_fingerprint: 4,
+            body_name: Some(Ustr::from("removed")),
             escaping: true,
             capture_free: true,
         });
@@ -1876,6 +1880,7 @@ mod tests {
                 ..compat(topology)
             },
             body_fingerprint: 5,
+            body_name: Some(Ustr::from("capture")),
             escaping: true,
             capture_free: false,
         });
@@ -2676,7 +2681,19 @@ pub fn lower_detached_region(
             name: aux.name,
         });
     aux.code_abi_fingerprint = Some(format!("detached:{name}"));
-    aux.code_compatibility = None;
+    let slots = {
+        let mut slots: Vec<u32> = frame.slots.values().copied().collect();
+        slots.sort_unstable();
+        slots
+    };
+    aux.code_compatibility = aux.code_identity.as_ref().map(|_| {
+        skull_mir::code_identity::CodeCompatibility {
+            call_abi: format!("detached:{name}"),
+            capture: skull_mir::code_identity::CaptureSchema::empty(),
+            frame: Some(skull_mir::code_identity::FrameSchema { slots }),
+            lambda_topology: Default::default(),
+        }
+    });
     aux.params = vec![frame.s_cell];
     aux.is_coroutine = false;
     aux.resume_arg = None;

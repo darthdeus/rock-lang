@@ -518,6 +518,7 @@ fn emit_lowered(
     out: &mut UnitOut,
     mf: &MirFunc,
     lua: String,
+    body_name: &str,
     collect_refs: Option<Ustr>,
     t_emit: Duration,
 ) {
@@ -529,6 +530,7 @@ fn emit_lowered(
     out.global_names = skull_mir::reach::global_ref_names(mf);
     out.lua = lua;
     out.code_artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree(mf);
+    out.code_artifact.set_body_names(mf, body_name);
     out.times.emit = t_emit;
     out.times.regalloc = skull_codegen_lua::regalloc_time_elapsed().min(t_emit);
 }
@@ -593,7 +595,15 @@ fn emit_decorator_unit(
             let te = Instant::now();
             let mut lua = emit_named(ws, cg, scx.interner(), &deco_name, &mf);
             emit_pass_nested_fns(ws, cg, scx, &mut mf.nested_fns, &mut lua);
-            emit_lowered(ws, &mut out, &mf, lua, Some(Ustr::from(&deco_name)), te.elapsed());
+            emit_lowered(
+                ws,
+                &mut out,
+                &mf,
+                lua,
+                &deco_name,
+                Some(Ustr::from(&deco_name)),
+                te.elapsed(),
+            );
         }
         Err(e) => out.skipped = Some((deco_name, e.message)),
     }
@@ -697,7 +707,7 @@ fn emit_global_unit(
             let te = Instant::now();
             let mut lua = emit_named(ws, cg, scx.interner(), &init_name, &mf);
             emit_pass_nested_fns(ws, cg, scx, &mut mf.nested_fns, &mut lua);
-            emit_lowered(ws, &mut out, &mf, lua, Some(key), te.elapsed());
+            emit_lowered(ws, &mut out, &mf, lua, &init_name, Some(key), te.elapsed());
             // Hot-reload init line. A `const` is a compile-time constant: tweaking
             // the source literal should show the new value next reload, so its init
             // runs UNCONDITIONALLY (no preserve guard), mirroring rock-codegen's
@@ -1541,7 +1551,8 @@ fn emit_body_chunk_with_mutation(
     );
     validate_emitted_body(ws, &ctx, &mf, &mut specs).map_err(|r| r.into_error(f.name_span, ""))?;
     collect_callee_frefs(&mf, &mut deps);
-    let code_artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree(&mf);
+    let mut code_artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree(&mf);
+    code_artifact.set_body_names(&mf, &mangle_fn(ws, f));
     let (direct_globals, direct_calls) = direct_refs(ws, &mf);
     skull_codegen_lua::regalloc_time_reset();
     let te = Instant::now();
@@ -1785,7 +1796,8 @@ fn emit_spec_chunk(
     validate_emitted_body(ws, &ctx, &mf, specs)
         .map_err(|r| r.into_error(f.name_span, &format!("cannot emit specialized `{name}`: ")))?;
     let specs = specs[before..].to_vec();
-    let code_artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree(&mf);
+    let mut code_artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree(&mf);
+    code_artifact.set_body_names(&mf, name);
     let mut lua = emit_named(ws, cg, scx.interner(), name, &mf);
     let mut statics = mf.statics.clone();
     let mut nested = std::mem::take(&mut mf.nested_fns);
@@ -3084,6 +3096,7 @@ fn assemble(
     // scaffolding (init ordering, deco application) whose own errors are
     // unrelated to a body that cannot emit.
     rejections.into_result()?;
+    out.push_str(&code_slot_registration_lua(ws, scx, &code_artifact)?);
 
     // Globals: an init fn + a dependency-ordered `<NAME> = __skull_ginit_<NAME>()`.
     // (Lowered above, so the walk could see their call edges; appended here, in
@@ -3233,6 +3246,44 @@ fn assemble(
     }
     emitted_bodies.extend(spec_chunks.keys().cloned());
     Ok((MirEmit { lua: out, code_artifact, skipped, phases }, emitted_bodies))
+}
+
+fn code_slot_registration_lua(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    artifact: &skull_mir::code_identity::CodeArtifact,
+) -> Result<String, CompilerError> {
+    if !artifact.census.is_total() {
+        return Err(CompilerError::new_no_location(format!(
+            "cannot publish incomplete Rock CodeRef census: {:?}",
+            artifact.census
+        )));
+    }
+    let mut entries: Vec<_> = artifact.entries.values().filter(|entry| entry.escaping).collect();
+    entries.sort_by_key(|entry| entry.identity.logical_key(ws, scx.interner()));
+    if entries.is_empty() {
+        return Ok(String::new());
+    }
+    let mut out = String::new();
+    out.push_str("__rock_code_slot_begin()\n");
+    for entry in entries {
+        let Some(body) = entry.body_name else {
+            return Err(CompilerError::new_no_location(format!(
+                "Rock CodeRef `{}` has no emitted body",
+                entry.identity.logical_key(ws, scx.interner())
+            )));
+        };
+        writeln!(
+            out,
+            "__rock_code_slot_stage({}, {}, {})",
+            skull_codegen_lua::lua_string(&entry.identity.logical_key(ws, scx.interner())),
+            body,
+            skull_codegen_lua::lua_string(&entry.compatibility.call_abi),
+        )
+        .expect("writing a String cannot fail");
+    }
+    out.push_str("__rock_code_slot_publish()\n");
+    Ok(out)
 }
 
 /// Full emit: populate the chunk cache for every retained ordinary/coroutine
@@ -4077,7 +4128,7 @@ fn assemble_overlay(
     ws: &Workspace,
     cache: &SkullEmitCache,
     shader_changed: bool,
-) -> MirEmit {
+) -> Result<MirEmit, CompilerError> {
     let mut out = String::from("-- skull incremental overlay (loaded after main.lua)\n");
     let mut skipped: Vec<(String, String)> = Vec::new();
 
@@ -4097,6 +4148,7 @@ fn assemble_overlay(
             None => {}
         }
     }
+    out.push_str(&code_slot_registration_lua(ws, &cache.scx, &cache.code_artifact)?);
 
     // Reset `static` cells whose initializer MEANING changed since the last full
     // build (`type@init_hash` key differs from the baseline). A static is
@@ -4257,12 +4309,12 @@ fn assemble_overlay(
         out.push_str(&cache.shader_registrations.lua);
     }
 
-    MirEmit {
+    Ok(MirEmit {
         lua: out,
         code_artifact: cache.code_artifact.clone(),
         skipped,
         phases: Vec::new(),
-    }
+    })
 }
 
 /// `__rock_rebind_system("<name>", <func>)` for each CHANGED decorated function
@@ -4329,9 +4381,22 @@ pub fn emit_overlay(
             }
         }
     }
+    let replacements: Vec<&skull_mir::code_identity::CodeArtifact> = cache
+        .changed_since_full
+        .iter()
+        .filter_map(|body| cache.chunks.get(body).and_then(|chunk| chunk.as_ref().ok()))
+        .map(|chunk| &chunk.code_artifact)
+        .collect();
+    let next_code_artifact = cache.code_artifact.with_replacements(&replacements);
+    if !cache.code_artifact.compatible_overlay(&next_code_artifact) {
+        return Err(CompilerError::new_no_location(
+            "Rock CodeRef compatibility requires a safe restart".to_string(),
+        ));
+    }
+    cache.code_artifact = next_code_artifact;
     let t_relower = t2.elapsed();
     let t3 = Instant::now();
-    let mut emit = assemble_overlay(ws, cache, shader_changed);
+    let mut emit = assemble_overlay(ws, cache, shader_changed)?;
     // Advance the static baseline to the keys now in effect. A reset line fires on
     // the reload that dofiles the overlay carrying it, so once THIS overlay resets a
     // cell (or leaves it unchanged), a LATER overlay must not reset it again -- else
