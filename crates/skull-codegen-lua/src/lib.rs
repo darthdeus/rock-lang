@@ -46,11 +46,31 @@ end
 if not _G.__rock_code_slots then _G.__rock_code_slots = {} end
 function __rock_code_slot_ref(key)
   local slot = _G.__rock_code_slots[key]
+  if not slot and _G.__rock_code_slot_pending then
+    local staged = _G.__rock_code_slot_pending[key]
+    if staged then
+      local pending = _G.__rock_code_slot_pending_slots
+      local temporary = pending[key]
+      if not temporary then
+        temporary = setmetatable({
+          __rock_code_slot = true,
+          key = key, current_body = staged.body, abi = staged.abi
+        }, _G.__rock_code_slot_mt)
+        pending[key] = temporary
+      end
+      return temporary
+    end
+  end
   if not slot then error("missing Rock code slot " .. key, 0) end
   return slot
 end
 function __rock_code_slot_begin()
   _G.__rock_code_slot_pending = {}
+  _G.__rock_code_slot_pending_slots = {}
+end
+function __rock_code_slot_abort()
+  _G.__rock_code_slot_pending = nil
+  _G.__rock_code_slot_pending_slots = nil
 end
 function __rock_code_slot_stage(key, body, abi)
   local old = _G.__rock_code_slots[key]
@@ -67,13 +87,15 @@ function __rock_code_slot_publish()
       slot.current_body = staged.body
       slot.abi = staged.abi
     else
-      _G.__rock_code_slots[key] = setmetatable({
-        __rock_code_slot = true,
-        key = key, current_body = staged.body, abi = staged.abi
-      }, _G.__rock_code_slot_mt)
+      local pending = _G.__rock_code_slot_pending_slots
+      _G.__rock_code_slots[key] = pending[key] or setmetatable({
+          __rock_code_slot = true,
+          key = key, current_body = staged.body, abi = staged.abi
+        }, _G.__rock_code_slot_mt)
     end
   end
   _G.__rock_code_slot_pending = nil
+  _G.__rock_code_slot_pending_slots = nil
 end
 if not _G.__rock_fn_mt then
   _G.__rock_fn_mt = {

@@ -155,6 +155,7 @@ fn run(src: &str, driver: &str) -> String {
         .filter(|entry| entry.escaping)
         .collect();
     entries.sort_by_key(|entry| entry.identity.logical_key(&ws, scx.interner()));
+    let has_entries = !entries.is_empty();
     if !entries.is_empty() {
         lua.push_str("__rock_code_slot_begin()\n");
         for entry in entries {
@@ -168,7 +169,6 @@ fn run(src: &str, driver: &str) -> String {
                 skull_codegen_lua::lua_string(&entry.compatibility.call_abi),
             ));
         }
-        lua.push_str("__rock_code_slot_publish()\n");
     }
     // Alias the user module's uniquely-named fns back to their bare source names
     // so the `driver` can call them by source name (every non-exempt fn mangles).
@@ -189,6 +189,9 @@ fn run(src: &str, driver: &str) -> String {
                 lua.push_str(&format!("_G[\"{}\"] = {}\n", f.name, m));
             }
         }
+    }
+    if has_entries {
+        lua.push_str("__rock_code_slot_publish()\n");
     }
     lua.push_str(&format!("print({})\n", driver));
     // Unique per call: parallel tests must not clobber a shared temp file.

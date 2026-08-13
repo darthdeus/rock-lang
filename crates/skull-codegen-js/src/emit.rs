@@ -2709,7 +2709,8 @@ pub fn emit_with_closure(
     }
     out.push_str(&emit_spec_bodies(ws, scx.interner(), &st, &hoisted, &mut rejections));
     combine_rejections(rejections)?;
-    out.push_str(&code_slot_registration_js(ws, scx.interner(), &code_artifact)?);
+    let code_slot_stage = code_slot_registration_js(ws, scx.interner(), &code_artifact)?;
+    out.push_str(&code_slot_stage);
     for body in &st.inline_js {
         out.push_str(&emit_inline_js_fn(
             ws,
@@ -2719,6 +2720,7 @@ pub fn emit_with_closure(
             st.names.get(&body.instance).expect("emitted body has a name"),
         )?);
     }
+    out.push_str(code_slot_publish_js(&code_artifact));
     Ok(out)
 }
 
@@ -3275,12 +3277,14 @@ fn assemble_program_core(
         }
     }
     mark_generated_code_values(ws, &mut code_artifact);
-    out.push_str(&code_slot_registration_js(ws, scx.interner(), &code_artifact)?);
+    let code_slot_stage = code_slot_registration_js(ws, scx.interner(), &code_artifact)?;
+    out.push_str(&code_slot_stage);
     // 5. decorator applications (AFTER inits: a deco body pushes into a ginit-
     //    initialized registry -- D4).
     let applications = decorator_application_lines_js(ws, &deco_names, scx.interner(), &st.names)?;
     out.push_str(&applications);
     stable.push_str(&applications);
+    out.push_str(code_slot_publish_js(&code_artifact));
 
     // Every definition has been visited, so this is the earliest point where the
     // whole rejection list exists. A non-empty list fails the build and the
@@ -3593,7 +3597,11 @@ pub fn emit_overlay(
     }
     cache.changed_since_full.extend(changed_now.iter().copied());
 
+    let has_code_slots = current.code_artifact.entries.values().any(|entry| entry.escaping);
     let mut out = String::from("// skull JS incremental overlay\n");
+    if has_code_slots {
+        out.push_str("try {\n");
+    }
     for name in &current.const_order {
         if changed_consts.contains(name) {
             out.push_str(&current.const_chunks[name]);
@@ -3633,17 +3641,25 @@ pub fn emit_overlay(
     for chunk in changed_specs {
         out.push_str(&chunk.js);
     }
-    out.push_str(&code_slot_registration_js(
+    let code_slot_stage = code_slot_registration_js(
         ws,
         cache.scx.interner(),
         &current.code_artifact,
-    )?);
+    )?;
+    out.push_str(&code_slot_stage);
 
     if let Some(wire) = find_plain_function(ws, "run_wire_systems") {
         let wire_name = callee_js_name(ws, wire);
         if current.chunks.contains_key(&wire) {
             out.push_str(&format!("{wire_name}();\n"));
         }
+    }
+    out.push_str(code_slot_publish_js(&current.code_artifact));
+    if has_code_slots {
+        out.push_str("} catch (e) {\n");
+        out.push_str("  __rock_code_slot_abort();\n");
+        out.push_str("  throw e;\n");
+        out.push_str("}\n");
     }
 
     cache.build = current;
@@ -4565,7 +4581,7 @@ fn code_slot_registration_js(
 ) -> Result<String, CompilerError> {
     if !artifact.census.is_total() {
         return Err(err(format!(
-            "cannot publish incomplete Rock CodeRef census: {:?}",
+            "cannot stage incomplete Rock CodeRef census: {:?}",
             artifact.census
         )));
     }
@@ -4592,8 +4608,15 @@ fn code_slot_registration_js(
         )
         .expect("writing a String cannot fail");
     }
-    out.push_str("__rock_code_slot_publish();\n");
     Ok(out)
+}
+
+fn code_slot_publish_js(artifact: &CodeArtifact) -> &'static str {
+    if artifact.entries.values().any(|entry| entry.escaping) {
+        "__rock_code_slot_publish();\n"
+    } else {
+        ""
+    }
 }
 
 /// Mark function values introduced by generated registration glue. Decorator

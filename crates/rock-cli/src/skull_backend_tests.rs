@@ -1205,6 +1205,62 @@ mod overlay_runtime_tests {
         }
     }
 
+    /// Slot publication belongs to the OUTER successful overlay boundary. A
+    /// later top-level initializer failure must leave an already-stored value
+    /// on v0, even though the overlay has staged the edited callback body.
+    #[test]
+    fn failed_overlay_after_late_top_level_work_keeps_retained_code_ref_old() {
+        let v0 = format!(
+            "const LATE: int = 0\nfn explode() -> int {{ error(\"late overlay failure\") return 0 }}\n{}",
+            sim_fixture(1).replace("TICK_OUT = 1", "TICK_OUT = 1 + LATE")
+        );
+        let v1 = format!(
+            "const LATE: int = explode()\nfn explode() -> int {{ error(\"late overlay failure\") return 0 }}\n{}",
+            sim_fixture(2).replace("TICK_OUT = 2", "TICK_OUT = 2 + LATE")
+        );
+        let mut session = bone_session(files(&v0)).expect("session v0");
+        let mid = skull::user_module_id(session.workspace()).unwrap();
+        let (full0, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+
+        let result = session.update_file("main.rock", &v1).expect("update v1");
+        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
+        let late_line = overlay
+            .lua
+            .lines()
+            .position(|line| line.trim_start().starts_with("LATE ="))
+            .expect("v1 overlay must execute the changed top-level initializer");
+        assert!(
+            overlay.lua.contains("__rock_code_slot_stage")
+                && overlay.lua.contains("__rock_code_slot_publish"),
+            "the failing overlay must stage a compatible callback body:\n{}",
+            overlay.lua
+        );
+
+        let mut failing = String::new();
+        for (index, line) in overlay.lua.lines().enumerate() {
+            if index == late_line {
+                failing.push_str("error('late overlay failure')\n");
+            }
+            failing.push_str(line);
+            failing.push('\n');
+        }
+        let script = format!(
+            "{}\n{}\nlocal ok, err = xpcall(function()\n{}end, debug.traceback)\nif not ok then __rock_code_slot_abort() end\nprint(ok)\nprint(_G.__rock_code_slot_pending == nil)\nrun_frame()\nprint(TICK_OUT)",
+            full0.lua, SYS_STUB, failing
+        );
+
+        match exec_lua(&script) {
+            ExecOutcome::Output(output) => assert_eq!(
+                normalize_stdout(&output).trim(),
+                "false\ntrue\n1",
+                "a failed overlay must report failure and keep the retained v0 CodeRef"
+            ),
+            ExecOutcome::Errored(diagnostic) => {
+                panic!("the loader failure must be caught so the old CodeRef can run: {diagnostic}")
+            }
+        }
+    }
+
     /// A `co fn` BODY edit, delivered through a REAL `Session.update_file`, must
     /// re-emit the coroutine into the overlay so a fresh invocation runs the new
     /// body -- exactly like an ordinary fn. The corpus sweep can't catch this: it

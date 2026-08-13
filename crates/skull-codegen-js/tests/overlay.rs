@@ -244,6 +244,43 @@ fn retained_capturing_value_refreshes_while_keeping_mutable_capture() {
 }
 
 #[test]
+fn failed_overlay_after_late_top_level_work_keeps_retained_code_ref_old() {
+    let source = |delta: i32, wire: &str| {
+        format!(
+            "global CALLBACK: (fn() -> int)? = null\n\
+             @nomangle fn make() -> fn() -> int {{ return () => {delta} }}\n\
+             @nomangle fn start() {{ CALLBACK = make() }}\n\
+             @nomangle fn run_wire_systems() {{ {wire} }}\n\
+             fn main() {{ start(); run_wire_systems() }}\n"
+        )
+    };
+    let before = ws_with(&source(0, ""));
+    let after = ws_with(&source(10, "error(\"late overlay failure\")"));
+    let mid = function(&before, "main").module;
+    let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
+    let make = function(&after, "make");
+    let wire = function(&after, "run_wire_systems");
+    let overlay = skull_codegen_js::emit::emit_overlay(
+        &after,
+        mid,
+        &mut cache,
+        &[(make.module, BodyOwner::Function(make.func)), (wire.module, BodyOwner::Function(wire.func))],
+    )
+    .unwrap()
+    .expect_overlay();
+    assert!(overlay.contains("__rock_code_slot_stage_one"));
+    assert!(overlay.contains("run_wire_systems();"), "overlay must contain the later top-level hook:\n{overlay}");
+
+    let output = node(&format!(
+        "{}\nvar __G = {{}};\n{}\nstart();\ntry {{ (0, eval)({:?}); }} catch (e) {{ console.log(false); }}\nconsole.log(__rock_code_slot_stage === null);\nconsole.log(__rock_call(__G.CALLBACK));",
+        skull_codegen_js::JS_CALL_HELPER,
+        program.program,
+        overlay
+    ));
+    assert_eq!(output.trim(), "false\ntrue\n0");
+}
+
+#[test]
 fn successive_overlays_accumulate_changed_function_definitions() {
     let v0 = ws_with(
         "@nomangle fn first() -> int { 1 }\n\

@@ -225,11 +225,31 @@ var __rock_code_slots = Object.create(null);
 var __rock_code_slot_stage = null;
 function __rock_code_slot_ref(key) {
   var slot = __rock_code_slots[key];
+  if (!slot && __rock_code_slot_stage !== null) {
+    var staged = __rock_code_slot_stage[key];
+    if (staged) {
+      var temporary = __rock_code_slot_pending_slots[key];
+      if (!temporary) {
+        temporary = {
+          __rock_code_slot: true, key: key,
+          current_body: staged.body, abi: staged.abi
+        };
+        __rock_code_slot_pending_slots[key] = temporary;
+      }
+      return temporary;
+    }
+  }
   if (!slot) throw new Error("missing Rock code slot " + key);
   return slot;
 }
+var __rock_code_slot_pending_slots = Object.create(null);
 function __rock_code_slot_begin() {
   __rock_code_slot_stage = Object.create(null);
+  __rock_code_slot_pending_slots = Object.create(null);
+}
+function __rock_code_slot_abort() {
+  __rock_code_slot_stage = null;
+  __rock_code_slot_pending_slots = Object.create(null);
 }
 function __rock_code_slot_stage_one(key, body, abi) {
   var old = __rock_code_slots[key];
@@ -246,13 +266,14 @@ function __rock_code_slot_publish() {
       slot.current_body = staged.body;
       slot.abi = staged.abi;
     } else {
-      __rock_code_slots[key] = {
+      __rock_code_slots[key] = __rock_code_slot_pending_slots[key] || {
         __rock_code_slot: true, key: key,
         current_body: staged.body, abi: staged.abi
       };
     }
   });
   __rock_code_slot_stage = null;
+  __rock_code_slot_pending_slots = Object.create(null);
 }
 function __rock_code_ref_kind(v) {
   if (v === null || typeof v !== "object") return null;

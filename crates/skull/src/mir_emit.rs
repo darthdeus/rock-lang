@@ -3135,7 +3135,8 @@ fn assemble(
     }
     // Global initializer bodies (including their escaping lambdas) are now
     // defined, so slot staging must follow them but precede initializer calls.
-    out.push_str(&code_slot_registration_lua(ws, scx, &code_artifact)?);
+    let code_slot_stage = code_slot_registration_lua(ws, scx, &code_artifact)?;
+    out.push_str(&code_slot_stage);
 
     // Order the init lines by their transitive global-read closure over the full
     // call graph (now that every fn's direct facts are recorded).
@@ -3232,6 +3233,7 @@ fn assemble(
     // one top-level `__rock_shader_register(key, glsl)` per distinct pair, so a
     // reload re-`dofile`s them with the new source (hot-reload parity).
     out.push_str(&cache.shader_registrations.lua);
+    out.push_str(code_slot_publish_lua(&code_artifact));
     t_scaffold += ts.elapsed();
 
     // `times.emit` brackets emit_function/emit_named/emit_coroutine; `times.regalloc`
@@ -3288,7 +3290,7 @@ fn code_slot_registration_lua(
 ) -> Result<String, CompilerError> {
     if !artifact.census.is_total() {
         return Err(CompilerError::new_no_location(format!(
-            "cannot publish incomplete Rock CodeRef census: {:?}",
+            "cannot stage incomplete Rock CodeRef census: {:?}",
             artifact.census
         )));
     }
@@ -3315,8 +3317,15 @@ fn code_slot_registration_lua(
         )
         .expect("writing a String cannot fail");
     }
-    out.push_str("__rock_code_slot_publish()\n");
     Ok(out)
+}
+
+fn code_slot_publish_lua(artifact: &skull_mir::code_identity::CodeArtifact) -> &'static str {
+    if artifact.entries.values().any(|entry| entry.escaping) {
+        "__rock_code_slot_publish()\n"
+    } else {
+        ""
+    }
 }
 
 /// Generated registration calls are escaping-value sites even though they do
@@ -4181,7 +4190,8 @@ fn assemble_overlay(
             None => {}
         }
     }
-    out.push_str(&code_slot_registration_lua(ws, &cache.scx, &cache.code_artifact)?);
+    let code_slot_stage = code_slot_registration_lua(ws, &cache.scx, &cache.code_artifact)?;
+    out.push_str(&code_slot_stage);
 
     // Reset `static` cells whose initializer MEANING changed since the last full
     // build (`type@init_hash` key differs from the baseline). A static is
@@ -4326,6 +4336,7 @@ fn assemble_overlay(
     if shader_changed {
         out.push_str(&cache.shader_registrations.lua);
     }
+    out.push_str(code_slot_publish_lua(&cache.code_artifact));
 
     Ok(MirEmit {
         lua: out,

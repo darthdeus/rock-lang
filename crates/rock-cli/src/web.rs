@@ -348,6 +348,17 @@ enum WebCompile {
     Reload,
 }
 
+fn insert_js_overlay_before_publish(overlay: &mut String, tail: &str) {
+    let marker = "__rock_code_slot_publish();\n";
+    let count = overlay.matches(marker).count();
+    assert!(count <= 1, "an overlay must contain at most one CodeRef publication");
+    if let Some(index) = overlay.rfind(marker) {
+        overlay.insert_str(index, tail);
+    } else {
+        overlay.push_str(tail);
+    }
+}
+
 struct WebCompiler {
     project: crate::live_project::LiveProject,
     cache: skull_codegen_js::emit::JsEmitCache,
@@ -405,10 +416,11 @@ impl WebCompiler {
                     crate::skull_backend::render_project_err(self.project.sources(), &error)
                 ))? {
                     skull_codegen_js::emit::JsReload::Overlay(mut overlay) => {
-                        overlay.push_str(&shader_register_lines_js(
+                        let shader_lines = shader_register_lines_js(
                             self.project.workspace(),
                             &self.cache,
-                        )?);
+                        )?;
+                        insert_js_overlay_before_publish(&mut overlay, &shader_lines);
                         rock_host::project::write_atomic(
                             &out_dir.join("incremental.js"),
                             &overlay,
@@ -1323,5 +1335,19 @@ mod tests {
         };
         let bundle = assemble_web_program(&emitted, "", &[], "games/test");
         assert!(bundle.contains("__rock_code_slot_begin"), "escaping value lost CodeRef runtime");
+    }
+
+    #[test]
+    fn web_overlay_tail_runs_before_code_ref_publication() {
+        let mut overlay =
+            "try {\n__rock_code_slot_stage_one();\n__rock_code_slot_publish();\n} catch (e) {}\n"
+                .to_string();
+        insert_js_overlay_before_publish(&mut overlay, "__rock_shader_register();\n");
+        let shader = overlay.find("__rock_shader_register").expect("shader tail");
+        let publish = overlay.find("__rock_code_slot_publish").expect("publish");
+        assert!(
+            shader < publish,
+            "shader work must be inside the successful boundary"
+        );
     }
 }
