@@ -1394,13 +1394,13 @@ fn validate_explicit_interface(
         }
     }
     match &iface.fragment_output {
-        FragmentOutput::Single(WireKind::F32x4) => {}
+        FragmentOutput::Single(WireKind::F32x4 | WireKind::I32) => {}
         FragmentOutput::Single(kind) => {
             return Err(unsupported_err(
                 span,
                 "non-RGBA single fragment output",
                 format!(
-                    "WGSL explicit projection requires a vec4<f32> single fragment output, found {}",
+                    "WGSL explicit projection requires a vec4<f32> or i32 single fragment output, found {}",
                     kind.code()
                 ),
             ));

@@ -43,6 +43,15 @@ const ROOTS: &[(&str, &str, &str)] = &[
 const ENTITY_ID_DEBUG: &str = include_str!("../../../stone/engine/shaders/rendering/entity_id_debug_shader.rock");
 const NONFINITE: &str = include_str!("../../../stone/engine/shaders/debug/nonfinite_shader.rock");
 
+fn outline_target_source() -> String {
+    format!(
+        "{}\nvalue Vertex {{ pos: Vec2, uv: Vec2, color: Vec4, pivot_y: float, entity_id: float }}\n{}\n{}",
+        include_str!("../../../stone/engine/rendering/engine_uniforms.rock"),
+        include_str!("../../../stone/engine/shaders/common/pass_textures.rock"),
+        include_str!("../../../stone/engine/shaders/rendering/outline_target_shader.rock"),
+    )
+}
+
 fn workspace(
     src: &str,
 ) -> (
@@ -174,6 +183,42 @@ fn nonfinite_intrinsics_emit_typed_ieee_predicates_and_bool_vectors() {
     assert!(artifact.source.contains("any("));
     assert!(artifact.source.contains("select(vec3<f32>(0.0), vec3<f32>(1.0)"));
     assert!(artifact.source.contains(" > "));
+}
+
+#[test]
+fn outline_target_emits_an_integer_fragment_output_for_r32i() {
+    let source = outline_target_source();
+    let (ws, mid) = workspace(&source);
+    let glsl = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
+        &ws,
+        mid,
+        "outline_target_vert",
+        "outline_target_frag",
+        skull_codegen_glsl::GlslProfile::Core330,
+    )
+    .expect("the current outline target compiler plan");
+    assert!(matches!(
+        glsl.interface.fragment_output,
+        skull_mir::shader_ir::FragmentOutput::Single(skull_mir::gpu_layout::WireKind::I32)
+    ));
+    let abi = WgslAbiPlan::explicit(
+        &glsl.interface,
+        "vertex_main",
+        "fragment_main",
+        Span::default(),
+    )
+    .expect("R32I outline target is a supported explicit WGSL output");
+    let artifact = skull_codegen_wgsl::emit_explicit_shader(
+        &ws,
+        &glsl.ir,
+        &glsl.interface,
+        &abi,
+        Span::default(),
+    )
+    .expect("the outline target WGSL artifact");
+    naga_validate(&artifact.source);
+    assert_eq!(artifact.abi.fragment_outputs[0].kind, skull_mir::gpu_layout::WireKind::I32);
+    assert!(artifact.source.contains("@location(0) i32"), "{}", artifact.source);
 }
 
 #[test]
