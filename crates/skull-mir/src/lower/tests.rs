@@ -134,3 +134,24 @@ fn non_generic_declared_generic_rejects() {
     .expect_err("a non-generic declared generic must reject");
     assert!(err.message.contains("is not a generic type variable"), "{}", err.message);
 }
+
+/// `update_body` is the one ABI-state mutation crossing emissions, and its
+/// clear must reach the WORKER-LOCAL memo mirrors too: this thread first takes
+/// a hit (populating its mirror), so a survivor here is the mirror serving a
+/// plan the context already invalidated.
+#[test]
+fn a_cleared_abi_memo_cannot_serve_a_worker_mirror() {
+    let (ws, mid) = spec_ws("fn f(x: int) -> int { x }\nfn main() { let y = f(1) }");
+    let mut scx = ScalarCtx::new(&ws);
+    let inst = crate::instance::Instance::base(spec_fn(&ws, mid, "f"));
+    let plan = BackendFnAbiPlan::for_boundary_instance(&ws, &scx, &inst);
+    let key = AbiPlanKey::Owner(inst);
+    scx.abi_plan_store(key.clone(), &plan);
+    assert!(scx.abi_plan_cached(&key).is_some(), "the stored plan must hit before the clear");
+    let main_fn = spec_fn(&ws, mid, "main").func;
+    let _ = scx.update_body(&ws, mid, BodyOwner::Function(main_fn));
+    assert!(
+        scx.abi_plan_cached(&key).is_none(),
+        "update_body cleared the memo; a hit can only be a stale worker-local mirror"
+    );
+}

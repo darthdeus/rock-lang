@@ -273,11 +273,12 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
             "  abi-plan memo  : {asked} asked, {hit} hit per run ({rate:.1}% hit rate)"
         );
         println!(
-            "                   owner {}/{} hit, callee {}/{} hit per run",
+            "                   owner {}/{} hit, callee {}/{} hit ({} worker-local) per run",
             per_run(memo.owner_hits),
             per_run(memo.owner_hits + memo.owner_misses),
             per_run(memo.callee_hits),
             per_run(memo.callee_hits + memo.callee_misses),
+            per_run(memo.worker_local_hits),
         );
         println!(
             "                   {} derivations over {} unique keys per run \

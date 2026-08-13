@@ -378,6 +378,9 @@ pub struct AbiPlanMemoStats {
     pub owner_misses: u64,
     pub callee_hits: u64,
     pub callee_misses: u64,
+    /// Hits served by a worker's own mirror without touching the mutex
+    /// (a subset of the per-space hit counts above).
+    pub worker_local_hits: u64,
     pub stores: u64,
     pub duplicate_cold_stores: u64,
     pub unique_keys: u64,
@@ -398,6 +401,7 @@ impl AbiPlanMemoStats {
         self.owner_misses += other.owner_misses;
         self.callee_hits += other.callee_hits;
         self.callee_misses += other.callee_misses;
+        self.worker_local_hits += other.worker_local_hits;
         self.stores += other.stores;
         self.duplicate_cold_stores += other.duplicate_cold_stores;
         self.unique_keys += other.unique_keys;
@@ -411,11 +415,43 @@ impl AbiPlanMemoStats {
 /// is a pure function of its key under a fixed (workspace, context, concrete
 /// plans), so equal keys always store equal plans; caching only the `Ok` side
 /// keeps every error path re-derived and spanned exactly as before.
-#[derive(Debug, Default)]
+/// A stored plan is immutable until [`AbiPlanCache::clear`], so each worker
+/// mirrors the entries it has already paid the mutex for. The mirror is keyed
+/// by a process-unique epoch that `clear()` REPLACES, which is what makes the
+/// one invalidation point (`ScalarCtx::update_body`) reach every thread: a
+/// stale mirror simply never matches the new epoch again.
+#[derive(Default)]
+struct AbiPlanLocalCache {
+    epoch: u64,
+    plans: rustc_hash::FxHashMap<AbiPlanKey, BackendFnAbiPlan>,
+}
+
+impl AbiPlanLocalCache {
+    fn reset_for(&mut self, epoch: u64) {
+        if self.epoch != epoch {
+            self.epoch = epoch;
+            self.plans.clear();
+        }
+    }
+}
+
+thread_local! {
+    static ABI_PLAN_LOCAL: std::cell::RefCell<AbiPlanLocalCache> =
+        std::cell::RefCell::new(AbiPlanLocalCache::default());
+}
+
+fn next_abi_epoch() -> u64 {
+    static EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+#[derive(Debug)]
 pub(super) struct AbiPlanCache {
     plans: Mutex<HashMap<AbiPlanKey, BackendFnAbiPlan>>,
+    epoch: std::sync::atomic::AtomicU64,
     owner_hits: std::sync::atomic::AtomicU64,
     owner_misses: std::sync::atomic::AtomicU64,
+    local_hits: std::sync::atomic::AtomicU64,
     callee_hits: std::sync::atomic::AtomicU64,
     callee_misses: std::sync::atomic::AtomicU64,
     stores: std::sync::atomic::AtomicU64,
@@ -423,10 +459,40 @@ pub(super) struct AbiPlanCache {
     cloned_param_slots: std::sync::atomic::AtomicU64,
 }
 
+impl Default for AbiPlanCache {
+    fn default() -> Self {
+        Self {
+            plans: Mutex::default(),
+            epoch: std::sync::atomic::AtomicU64::new(next_abi_epoch()),
+            owner_hits: Default::default(),
+            owner_misses: Default::default(),
+            local_hits: Default::default(),
+            callee_hits: Default::default(),
+            callee_misses: Default::default(),
+            stores: Default::default(),
+            duplicate_cold_stores: Default::default(),
+            cloned_param_slots: Default::default(),
+        }
+    }
+}
+
 impl AbiPlanCache {
     pub(super) fn lookup(&self, key: &AbiPlanKey) -> Option<BackendFnAbiPlan> {
         use std::sync::atomic::Ordering;
-        let found = self.plans.lock().expect("abi plan cache poisoned").get(key).cloned();
+        let epoch = self.epoch.load(Ordering::Acquire);
+        let found = ABI_PLAN_LOCAL.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            cache.reset_for(epoch);
+            if let Some(plan) = cache.plans.get(key) {
+                self.local_hits.fetch_add(1, Ordering::Relaxed);
+                return Some(plan.clone());
+            }
+            let found = self.plans.lock().expect("abi plan cache poisoned").get(key).cloned();
+            if let Some(plan) = &found {
+                cache.plans.insert(key.clone(), plan.clone());
+            }
+            found
+        });
         let (hits, misses) = match key {
             AbiPlanKey::Owner(_) => (&self.owner_hits, &self.owner_misses),
             AbiPlanKey::Callee(_) => (&self.callee_hits, &self.callee_misses),
@@ -446,8 +512,14 @@ impl AbiPlanCache {
 
     pub(super) fn store(&self, key: AbiPlanKey, plan: &BackendFnAbiPlan) {
         use std::sync::atomic::Ordering;
+        let epoch = self.epoch.load(Ordering::Acquire);
         let replaced =
-            self.plans.lock().expect("abi plan cache poisoned").insert(key, plan.clone());
+            self.plans.lock().expect("abi plan cache poisoned").insert(key.clone(), plan.clone());
+        ABI_PLAN_LOCAL.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            cache.reset_for(epoch);
+            cache.plans.insert(key, plan.clone());
+        });
         self.stores.fetch_add(1, Ordering::Relaxed);
         if replaced.is_some() {
             self.duplicate_cold_stores.fetch_add(1, Ordering::Relaxed);
@@ -455,6 +527,9 @@ impl AbiPlanCache {
     }
 
     pub(super) fn clear(&self) {
+        // New epoch FIRST: a worker that raced the old epoch into its mirror
+        // re-reads the shared map (now cleared) rather than serving stale plans.
+        self.epoch.store(next_abi_epoch(), std::sync::atomic::Ordering::Release);
         self.plans.lock().expect("abi plan cache poisoned").clear();
     }
 
@@ -468,6 +543,7 @@ impl AbiPlanCache {
             owner_misses: self.owner_misses.load(Ordering::Relaxed),
             callee_hits: self.callee_hits.load(Ordering::Relaxed),
             callee_misses: self.callee_misses.load(Ordering::Relaxed),
+            worker_local_hits: self.local_hits.load(Ordering::Relaxed),
             stores: self.stores.load(Ordering::Relaxed),
             duplicate_cold_stores: self.duplicate_cold_stores.load(Ordering::Relaxed),
             unique_keys: self.plans.lock().expect("abi plan cache poisoned").len() as u64,

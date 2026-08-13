@@ -1384,11 +1384,40 @@ pub fn build_in(
     perturb: bool,
     interner: std::sync::Arc<MonoInterner>,
 ) -> InstanceGraph {
+    let t_build = std::time::Instant::now();
+    let intern_before = interner.stats();
     let mut g = InstanceGraph::empty_in(interner);
+    let t = std::time::Instant::now();
     g.seed_roots(ws, canonical_roots(ws, roots, perturb));
     let pending = g.always_emitted_owners(ws);
-    g.run(ws, pending);
+    let t_seed = t.elapsed();
+    let t = std::time::Instant::now();
+    let stats = g.run(ws, pending);
+    let t_run = t.elapsed();
+    let t = std::time::Instant::now();
     g.derive(ws, false);
+    let t_derive = t.elapsed();
+    if log::log_enabled!(log::Level::Debug) {
+        let intern_after = g.interner().stats();
+        let sites: usize = g.contributions.values().map(|c| c.call_sites.len()).sum();
+        log::debug!(
+            "graph build: seed {:?}, run {:?} ({} owner walks, {} settle rounds), \
+             derive {:?}, total {:?}; {} instances, {} contributions, {} call sites, \
+             {} rejections; mono interns {} attempts -> {} new during build",
+            t_seed,
+            t_run,
+            stats.expanded,
+            stats.settle_rounds,
+            t_derive,
+            t_build.elapsed(),
+            g.instances.len(),
+            g.contributions.len(),
+            sites,
+            g.rejections().count(),
+            intern_after.intern_attempts - intern_before.intern_attempts,
+            intern_after.intern_new - intern_before.intern_new,
+        );
+    }
     g
 }
 

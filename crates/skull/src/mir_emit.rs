@@ -3416,6 +3416,9 @@ fn emit_full_in_with_mutation(
         .chain(compute_programs.iter().map(|program| program.entry))
         .collect();
     let emission_roots = all_roots(ws, project_root, &shader_roots);
+    setup_phases.push(("setup: root collection", t_setup.elapsed()));
+
+    let t_setup = Instant::now();
     let mut graph = crate::instance_graph::build(ws, emission_roots.clone(), false);
     if let Some(err) = graph_rejection_error(ws, &graph) {
         return Err(err);
@@ -4830,6 +4833,7 @@ fn main() { let result = first() }
             setup.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
             [
                 "setup: validation+context",
+                "setup: root collection",
                 "setup: graph",
                 "setup: concrete plans",
                 "setup: artifact+shader views",
