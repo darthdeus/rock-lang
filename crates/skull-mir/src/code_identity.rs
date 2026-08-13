@@ -7,6 +7,7 @@
 //! artifact identity.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 
 use bone_semantic::prelude::Span;
 use rustc_hash::FxHashSet;
@@ -641,9 +642,10 @@ fn body_fingerprint(mf: &MirFunc) -> u64 {
                 }
                 _ => {}
             }
-            body.push_str(&format!("{inst:?};"));
+            write!(&mut body, "{inst:?};").expect("writing a String cannot fail");
         }
-        body.push_str(&format!("term:{:?};", mf.blocks[block].term));
+        write!(&mut body, "term:{:?};", mf.blocks[block].term)
+            .expect("writing a String cannot fail");
     }
     let debug = canonicalize_arena_indices(&body);
     let mut h = Fnv64::new();
