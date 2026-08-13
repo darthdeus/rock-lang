@@ -85,6 +85,25 @@ fn application_line_content() {
     assert!(beta_app.trim_end().ends_with(", null);"), "defaulted stage -> null: {beta_app}");
 }
 
+#[test]
+fn lifecycle_metadata_uses_the_shared_sorted_plan_in_js() {
+    let ws = ws_with(r#"
+@lifecycle(phase="update", owner="session", stage_param="stage")
+deco init tick(stage: int = 100) {}
+@tick(stage=7) fn first() {}
+@tick(stage=7) fn second() {}
+@tick fn defaulted() {}
+fn main() {}
+"#);
+    let js = emit_program(&ws);
+    assert!(!js.contains("function __deco_tick("));
+    assert!(!js.contains("__deco_tick({"));
+    let first = js.find("name: \"first\", stage: 7").expect("first plan entry");
+    let second = js.find("name: \"second\", stage: 7").expect("second plan entry");
+    let defaulted = js.find("name: \"defaulted\", stage: 100").expect("default plan entry");
+    assert!(first < second && second < defaulted);
+}
+
 /// A concrete operation whose ONLY caller is a decorator body is still served.
 ///
 /// A `deco` body is a third body kind beside plain fns and global initializers,

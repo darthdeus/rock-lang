@@ -70,3 +70,21 @@ fn main() { }
         "generated decorator target must not freeze the backend body: {application}"
     );
 }
+
+#[test]
+fn lifecycle_metadata_emits_a_sorted_plan_without_executing_the_decorator() {
+    let emit = emit_mir(r#"
+@lifecycle(phase="update", owner="session", stage_param="stage")
+deco init tick(stage: int = 100) {}
+@tick(stage=7) fn first() {}
+@tick(stage=7) fn second() {}
+@tick fn defaulted() {}
+fn main() {}
+"#);
+    assert!(!emit.lua.contains("function __deco_tick("), "lifecycle declaration bodies are not executable registration code");
+    assert!(!emit.lua.contains("__deco_tick({"), "lifecycle applications must not execute decorator side effects");
+    let first = emit.lua.find("name = \"first\", stage = 7").expect("first plan entry");
+    let second = emit.lua.find("name = \"second\", stage = 7").expect("second plan entry");
+    let defaulted = emit.lua.find("name = \"defaulted\", stage = 100").expect("defaulted plan entry");
+    assert!(first < second && second < defaulted, "compiler plan must preserve equal-stage declaration order and read the declared default");
+}
