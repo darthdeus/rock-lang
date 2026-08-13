@@ -778,7 +778,8 @@ function __sw_sdl_keycode(e) {
 function __sw_push_event(type, key, btn, x, y, scancode, modifiers, repeat) {
   __SW.events.push({
     type: type, key: key, scancode: scancode || 0, modifiers: modifiers || 0,
-    repeat: !!repeat, mouse_button: btn, mouse_x: x, mouse_y: y
+    repeat: !!repeat, mouse_button: btn, mouse_x: x, mouse_y: y,
+    pad_instance_id: -1, pad_button: "", pad_axis: "", pad_value: 0, pad_sync: false
   });
 }
 
@@ -957,6 +958,9 @@ function stone_poll_event(ev) {
   ev.type = e.type; ev.key = e.key; ev.mouse_button = e.mouse_button;
   ev.scancode = e.scancode || 0; ev.modifiers = e.modifiers || 0;
   ev.repeat = !!e.repeat; ev.mouse_x = e.mouse_x; ev.mouse_y = e.mouse_y;
+  ev.pad_instance_id = e.pad_instance_id == null ? -1 : e.pad_instance_id;
+  ev.pad_button = e.pad_button || ""; ev.pad_axis = e.pad_axis || "";
+  ev.pad_value = e.pad_value || 0; ev.pad_sync = !!e.pad_sync;
   return true;
 }
 function stone_get_mouse_position(px, py) { px[0] = Math.round(__SW.mouseX); py[0] = Math.round(__SW.mouseY); }
