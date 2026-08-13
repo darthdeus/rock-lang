@@ -72,9 +72,10 @@ pub use shape::*;
 /// it from two places.
 mod abi;
 pub use abi::{
-    boundary_requires_boxed_representation, declared_boundary_class, requires_concrete_body_plan,
-    BackendFnAbiPlan, BoundaryClass, FunctionRepPlan, GlobalPlan, RepArena, RepError, RepId,
-    RepLayout,
+    boundary_requires_boxed_representation, declared_boundary_class, owner_abi_plan,
+    requires_concrete_body_plan,
+    AbiPlanKey, BackendFnAbiPlan, BoundaryClass, FunctionRepPlan, GlobalPlan, RepArena, RepError,
+    RepId, RepLayout,
     RepGuarantees, RepPlan, RepUse, RepUseFacts,
 };
 
@@ -250,6 +251,11 @@ pub struct ScalarCtx {
     /// so target-specific ABI identities survive from body entry through calls
     /// and publishers.
     rep_arena: std::sync::Arc<abi::RepArena>,
+    /// Memoized [`BackendFnAbiPlan`] derivations. Lives here because a plan is
+    /// only valid under this context's target/value-mode/taken-by-ref state,
+    /// and [`ScalarCtx::update_body`] -- the one mutation crossing emissions --
+    /// clears it.
+    abi_plans: abi::AbiPlanCache,
 }
 
 /// The fn-names a single body references by value (`Expr::Global(name)` whose
@@ -295,6 +301,7 @@ impl ScalarCtx {
             target: bone_semantic::hir::FnBackend::Lua,
             interner: std::sync::Arc::new(crate::monoty::MonoInterner::new()),
             rep_arena: std::sync::Arc::new(abi::RepArena::default()),
+            abi_plans: abi::AbiPlanCache::default(),
         }
     }
 
@@ -326,6 +333,21 @@ impl ScalarCtx {
 
     pub(crate) fn rep_arena(&self) -> std::sync::Arc<abi::RepArena> {
         std::sync::Arc::clone(&self.rep_arena)
+    }
+
+    pub(crate) fn abi_plan_cached(&self, key: &AbiPlanKey) -> Option<BackendFnAbiPlan> {
+        self.abi_plans.lookup(key)
+    }
+
+    pub(crate) fn abi_plan_store(&self, key: AbiPlanKey, plan: &BackendFnAbiPlan) {
+        self.abi_plans.store(key, plan);
+    }
+
+    /// `(hits, misses)` of the ABI-plan memo. A full emission over a real
+    /// workspace must show hits: the duplicate-derivation population it exists
+    /// to remove is the normal case, not an optimization corner.
+    pub fn abi_plan_stats(&self) -> (u64, u64) {
+        self.abi_plans.stats()
     }
 
     /// Set the codegen backend this lowering feeds (see [`target`]).
@@ -362,6 +384,10 @@ impl ScalarCtx {
     /// Body edits keep the body SET fixed (add/remove fn is interface-tier ->
     /// full rebuild), so diffing only the re-inferred bodies is complete.
     pub fn update_body(&mut self, ws: &Workspace, mid: ModuleId, owner: BodyOwner) -> Vec<Ustr> {
+        // An edit can flip taken-by-ref membership, and the memoized ABI plans
+        // read it -- drop them all rather than tracking which flips reach which
+        // plan. Cheaper than one stale plan is worth.
+        self.abi_plans.clear();
         let key = (mid, owner);
         let old = self.per_body.remove(&key).unwrap_or_default();
         let new = match ws.module(mid).bodies.get(&owner) {
@@ -1142,8 +1168,19 @@ fn lower_body(
     let cur = f.entry();
     // Scalar value ABI: when this fn participates, each value param expands to
     // leaf cells and a value return becomes a multi-value `Return`. This body's
-    // own ABI comes from the one plan the calls that target it read.
-    let abi = BackendFnAbiPlan::for_concrete_plan(ws, scx, concrete_plan);
+    // own ABI comes from the one plan the calls that target it read -- and it
+    // is memoized under the same Owner key those consumers use, derived from
+    // the plan in hand because a standalone specialization's plan may not be
+    // in the shared map.
+    let abi_key = AbiPlanKey::Owner(subject.clone());
+    let abi = match scx.abi_plan_cached(&abi_key) {
+        Some(plan) => plan,
+        None => {
+            let derived = BackendFnAbiPlan::for_concrete_plan(ws, scx, concrete_plan);
+            scx.abi_plan_store(abi_key, &derived);
+            derived
+        }
+    };
     f.abi_plan = Some(abi.clone());
     let param_reps = abi.representation().params().to_vec();
     let ret_rep = abi.representation().result();

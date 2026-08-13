@@ -201,6 +201,23 @@ impl Builder<'_> {
         &self,
         inst: &crate::instance::Instance,
     ) -> Result<BackendFnAbiPlan, CompilerError> {
+        // The derivation below is a pure function of the requested instance
+        // under this build's context, and the same instance is requested at
+        // every one of its call sites -- memoize the Ok side. Errors re-derive
+        // so rejection spans and messages are untouched.
+        let key = crate::lower::AbiPlanKey::Callee(inst.clone());
+        if let Some(plan) = self.scx.abi_plan_cached(&key) {
+            return Ok(plan);
+        }
+        let plan = self.callee_abi_plan_uncached(inst)?;
+        self.scx.abi_plan_store(key, &plan);
+        Ok(plan)
+    }
+
+    fn callee_abi_plan_uncached(
+        &self,
+        inst: &crate::instance::Instance,
+    ) -> Result<BackendFnAbiPlan, CompilerError> {
         let selected = self.selected_abi_instance(inst)?;
         if !crate::lower::requires_concrete_body_plan(self.ws, inst) {
             return Ok(BackendFnAbiPlan::for_boundary_instance(self.ws, self.scx, &selected));

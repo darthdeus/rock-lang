@@ -355,6 +355,56 @@ impl FunctionRepPlan {
     }
 }
 
+/// One memo key per QUESTION, because the same instance answers two of them
+/// differently: `Callee` is "the ABI a call site uses for the requested
+/// instance" (backend-variant selection included), `Owner` is "the ABI of this
+/// already-selected owner's own definition".
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub enum AbiPlanKey {
+    Callee(crate::instance::Instance),
+    Owner(crate::instance::Instance),
+}
+
+/// Build-scoped memo for [`BackendFnAbiPlan`] derivations, owned by
+/// [`ScalarCtx`] so every target/value-mode context has its own table and the
+/// context's one mutation point ([`ScalarCtx::update_body`]) clears it. A plan
+/// is a pure function of its key under a fixed (workspace, context, concrete
+/// plans), so equal keys always store equal plans; caching only the `Ok` side
+/// keeps every error path re-derived and spanned exactly as before.
+#[derive(Debug, Default)]
+pub(super) struct AbiPlanCache {
+    plans: Mutex<HashMap<AbiPlanKey, BackendFnAbiPlan>>,
+    hits: std::sync::atomic::AtomicU64,
+    misses: std::sync::atomic::AtomicU64,
+}
+
+impl AbiPlanCache {
+    pub(super) fn lookup(&self, key: &AbiPlanKey) -> Option<BackendFnAbiPlan> {
+        use std::sync::atomic::Ordering;
+        let found = self.plans.lock().expect("abi plan cache poisoned").get(key).cloned();
+        match &found {
+            Some(_) => self.hits.fetch_add(1, Ordering::Relaxed),
+            None => self.misses.fetch_add(1, Ordering::Relaxed),
+        };
+        found
+    }
+
+    pub(super) fn store(&self, key: AbiPlanKey, plan: &BackendFnAbiPlan) {
+        self.plans.lock().expect("abi plan cache poisoned").insert(key, plan.clone());
+    }
+
+    pub(super) fn clear(&self) {
+        self.plans.lock().expect("abi plan cache poisoned").clear();
+    }
+
+    /// `(hits, misses)` across the cache's lifetime. Lookups are counted where
+    /// they happen, so `hits + misses` is the number of cached questions asked.
+    pub(super) fn stats(&self) -> (u64, u64) {
+        use std::sync::atomic::Ordering;
+        (self.hits.load(Ordering::Relaxed), self.misses.load(Ordering::Relaxed))
+    }
+}
+
 #[derive(Debug, Default, PartialEq, Eq)]
 struct RepArenaInner {
     plans: Vec<RepPlan>,
@@ -1121,6 +1171,38 @@ impl RepArena {
 /// contain. Foreign, compile-time expansion, and native-required intrinsic
 /// declarations still have an ABI, but no body plan exists for them because
 /// their backend or lowering arm supplies the body itself.
+/// The ABI of an ALREADY-SELECTED owner instance -- its concrete plan when the
+/// owner requires one, the opaque boundary otherwise. The one entry point for
+/// consumers holding a resolved owner (bound rewrites, inline snapshots,
+/// definition lowering); call-site resolution goes through
+/// `Builder::callee_abi_plan_for_instance`, which also selects the backend
+/// variant. Memoized under [`AbiPlanKey::Owner`].
+pub fn owner_abi_plan(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    plans: &crate::concrete::ConcretePlans,
+    owner: &crate::instance::Instance,
+) -> Result<BackendFnAbiPlan, skull_parser::CompilerError> {
+    let key = AbiPlanKey::Owner(owner.clone());
+    if let Some(plan) = scx.abi_plan_cached(&key) {
+        return Ok(plan);
+    }
+    let derived = if !requires_concrete_body_plan(ws, owner) {
+        BackendFnAbiPlan::for_boundary_instance(ws, scx, owner)
+    } else {
+        let plan = plans.get(owner).ok_or_else(|| {
+            skull_parser::CompilerError::new_no_location(format!(
+                "internal: concrete ABI plan is missing for owner `{}` ({})",
+                ws.module(owner.func.module).functions[owner.func.func].name,
+                owner.func.func.into_raw().into_u32(),
+            ))
+        })?;
+        BackendFnAbiPlan::for_concrete_plan(ws, scx, plan)
+    };
+    scx.abi_plan_store(key, &derived);
+    Ok(derived)
+}
+
 pub fn requires_concrete_body_plan(
     ws: &Workspace,
     inst: &crate::instance::Instance,

@@ -215,7 +215,7 @@ fn classify(
     // instantiation (`docs/flatvec-plan.md`); a non-generic instance's is the
     // declaration's own body.
     let plan = concrete_plans.get(inst)?;
-    let abi = BackendFnAbiPlan::for_concrete_plan(ws, scx, plan);
+    let abi = skull_mir::lower::owner_abi_plan(ws, scx, concrete_plans, inst).ok()?;
     let mut mf = skull_mir::lower::lower_instance_with_plans(ws, scx, plan, concrete_plans).ok()?;
     // Cleanup first so the size gate reflects emitted size and the splice clones
     // a tight body (the caller re-runs cleanup over the whole result anyway).

@@ -157,17 +157,7 @@ fn substitute_bound_call_inner(
     let (dests, args) = (dests.clone(), args.clone());
     func.insts[call] = Inst::CallMulti { dests, func: owner.func, args };
     skull_mir::site::record_call_owner(func, call, &owner);
-    let abi = if !skull_mir::lower::requires_concrete_body_plan(ws, &owner) {
-        skull_mir::lower::BackendFnAbiPlan::for_boundary_instance(ws, scx, &owner)
-    } else {
-        let plan = concrete_plans.get(&owner).ok_or_else(|| {
-            CompilerError::new_no_location(format!(
-                "internal: concrete ABI plan is missing for bound callee `{}`",
-                owner.func.func.into_raw().into_u32()
-            ))
-        })?;
-        skull_mir::lower::BackendFnAbiPlan::for_concrete_plan(ws, scx, plan)
-    };
+    let abi = skull_mir::lower::owner_abi_plan(ws, scx, concrete_plans, &owner)?;
     func.call_abi_plans.insert(call, abi);
     if !owner.args.is_empty() {
         func.spec_bindings.insert(call, owner.clone());

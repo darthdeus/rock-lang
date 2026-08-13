@@ -4699,6 +4699,35 @@ fn main() {
     }
 
     #[test]
+    fn full_emission_deduplicates_abi_plan_derivations() {
+        // Its own fixture: `helper` must be CALLED from more than one site, or
+        // the callee question is asked once and a zero hit count cannot
+        // distinguish "no duplicates" from "memo not consulted".
+        const DEDUP_SRC: &str = r#"
+fn helper(x: int) -> int { return x }
+fn first() -> int { return helper(1) }
+fn second() -> int { return helper(2) }
+fn main() { let result = first() }
+"#;
+        let mut modules = vec![
+            skull_parser::parse_module_clean(DEDUP_SRC, Ustr::from("<abi-dedup-test>"))
+                .expect("parse"),
+        ];
+        let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic");
+        let mid =
+            ws.modules.iter().find(|m| m.id != ModuleId::builtin()).expect("test module").id;
+        let (_, cache) = emit_full_in_with_test_mutation(&ws, mid, BodyMutation::None)
+            .expect("intact emission");
+        let (hits, misses) = cache.scx.abi_plan_stats();
+        assert!(misses > 0, "no ABI-plan question consulted the memo (hits={hits})");
+        assert!(
+            hits > 0,
+            "three helper call sites repeat the callee question; zero hits means the \
+             production path is not consulting the memo (misses={misses})"
+        );
+    }
+
+    #[test]
     fn full_emission_reports_pre_assembly_setup_work() {
         let (_, _, emit) = emit_with_mutation(BodyMutation::None).expect("intact emission");
         let setup = emit
