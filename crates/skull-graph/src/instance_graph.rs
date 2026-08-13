@@ -1615,6 +1615,16 @@ impl InstanceGraph {
             }
         }
         let timing_enabled = graph_timing_enabled();
+        let mut queued = BTreeSet::new();
+        let mut unique_pending = Vec::with_capacity(pending.len());
+        for owner in pending {
+            if queued.insert(owner.clone()) {
+                unique_pending.push(owner);
+            } else {
+                stats.duplicate_pending_suppressed += 1;
+            }
+        }
+        pending = unique_pending;
         let initially_forced: BTreeSet<Owner> = pending
             .iter()
             .filter(|owner| self.contributions.contains_key(*owner))
@@ -1628,6 +1638,7 @@ impl InstanceGraph {
         let mut rounds = 0usize;
         loop {
             while let Some(owner) = pending.pop() {
+                queued.remove(&owner);
                 stats.owner_visits += 1;
                 // **An instance that lost its last namer DURING this run is not
                 // walkable, and is not an invariant break.**
@@ -1695,7 +1706,13 @@ impl InstanceGraph {
                 let (demanded, install_timing) = self.install(owner, c, timing_enabled);
                 stats.uninstall_ns += install_timing.uninstall_ns;
                 stats.index_maintenance_ns += install_timing.index_maintenance_ns;
-                pending.extend(demanded);
+                for owner in demanded {
+                    if queued.insert(owner.clone()) {
+                        pending.push(owner);
+                    } else {
+                        stats.duplicate_pending_suppressed += 1;
+                    }
+                }
             }
             // The fixpoint: an owner whose witnesses moved while it was already
             // walked must be walked again, or its callees are the ones the old
@@ -1720,6 +1737,7 @@ impl InstanceGraph {
                 stale.len()
             );
             pending = stale;
+            queued = pending.iter().cloned().collect();
         }
         assert_eq!(
             stats.owner_visits,
@@ -2620,6 +2638,7 @@ pub struct RunStats {
     pub expanded: usize,
     pub first_owner_visits: usize,
     pub duplicate_pending_visits: usize,
+    pub duplicate_pending_suppressed: usize,
     pub witness_settlement_rewalks: usize,
     pub incremental_forced_rewalks: usize,
     pub skipped_stranded_owners: usize,

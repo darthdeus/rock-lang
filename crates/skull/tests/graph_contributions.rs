@@ -144,8 +144,12 @@ fn the_operational_censuses_are_sums_of_the_primary_records() {
     let census = &g.run_stats;
     assert!(census.owner_visits > 0 && census.first_owner_visits > 0);
     assert!(
-        census.duplicate_pending_visits > 0,
+        census.duplicate_pending_suppressed > 0,
         "the fixture must expose duplicate pending owners before deduplication"
+    );
+    assert_eq!(
+        census.duplicate_pending_visits, 0,
+        "the production pending queue should not revisit an owner already queued"
     );
     assert_eq!(
         census.owner_visits,
