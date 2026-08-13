@@ -141,4 +141,27 @@ fn the_operational_censuses_are_sums_of_the_primary_records() {
         g.call_sites().map(|(_, m)| m).map(|s| s.len()).sum::<usize>(),
         sum(|c| c.call_sites.len())
     );
+    let census = &g.run_stats;
+    assert!(census.owner_visits > 0 && census.first_owner_visits > 0);
+    assert!(
+        census.duplicate_pending_visits > 0,
+        "the fixture must expose duplicate pending owners before deduplication"
+    );
+    assert_eq!(
+        census.owner_visits,
+        census.first_owner_visits
+            + census.duplicate_pending_visits
+            + census.witness_settlement_rewalks
+            + census.incremental_forced_rewalks
+            + census.skipped_stranded_owners,
+        "the graph census denominator lost an owner population"
+    );
+    assert_eq!(
+        census.expanded,
+        census.first_owner_visits
+            + census.duplicate_pending_visits
+            + census.witness_settlement_rewalks
+            + census.incremental_forced_rewalks,
+        "the graph census expanded denominator lost an owner population"
+    );
 }

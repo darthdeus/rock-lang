@@ -31,6 +31,7 @@
 //! instantiation reached. Full accounting: `docs/mono-stage0d-manifest.md`.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Instant;
 
 use bone_semantic::hir::{Body, BodyOwner, Function, TypeExpr, VarId};
 use bone_semantic::inference::{BodyInference, Workspace};
@@ -413,6 +414,32 @@ pub struct Contribution {
     pub always_emitted_seeds: usize,
     pub synthesized_examined: usize,
     pub synthesized_approximated: usize,
+    pub(crate) timing: ExpandTiming,
+}
+
+/// Conditional timings for one owner walk. The fields are zero unless debug
+/// logging is enabled; the counters and their denominators remain durable.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ExpandTiming {
+    pub admissibility_ns: u64,
+    pub body_prep_ns: u64,
+    pub signature_type_conversion_ns: u64,
+    pub call_site_resolution_ns: u64,
+    pub witness_bound_tree_ns: u64,
+    pub walk_body_edges_ns: u64,
+    pub walk_struct_default_edges_ns: u64,
+}
+
+fn graph_timing_enabled() -> bool {
+    log::log_enabled!(log::Level::Debug)
+}
+
+fn elapsed_ns(start: Option<Instant>) -> u64 {
+    start.map_or(0, |start| start.elapsed().as_nanos() as u64)
+}
+
+fn add_elapsed(slot: &mut u64, start: Option<Instant>) {
+    *slot += elapsed_ns(start);
 }
 
 /// **The one walk context.** A full build and an incremental re-walk both run
@@ -427,9 +454,14 @@ struct Walk<'a> {
     interner: &'a MonoInterner,
     owner_tree: Option<&'a InstanceBoundTree>,
     out: &'a mut Contribution,
+    timing_enabled: bool,
 }
 
 impl Walk<'_> {
+    fn timer(&self) -> Option<Instant> {
+        self.timing_enabled.then(Instant::now)
+    }
+
     /// Record what one source operation resolved to.
     ///
     /// Every recorder funnels through here, so a site cannot be recorded in one
@@ -650,6 +682,10 @@ pub struct InstanceGraph {
     /// starts here and at every always-emitted target.
     pub root_instances: BTreeSet<Instance>,
     pub instances: BTreeSet<Instance>,
+    /// The last expansion census. It is diagnostic state, not part of graph
+    /// identity; keeping it here makes the denominator available to tests and
+    /// callers without a second graph walk.
+    pub run_stats: RunStats,
     /// Constructions the model refuses that no single body produced:
     /// [`detect_changing_instance_recursion`] is a WHOLE-GRAPH search over the
     /// edge set, so its findings belong to the graph rather than to an owner.
@@ -1393,6 +1429,7 @@ pub fn build_in(
     let t_seed = t.elapsed();
     let t = std::time::Instant::now();
     let stats = g.run(ws, pending);
+    g.run_stats = stats;
     let t_run = t.elapsed();
     let t = std::time::Instant::now();
     g.derive(ws, false);
@@ -1416,6 +1453,32 @@ pub fn build_in(
             g.rejections().count(),
             intern_after.intern_attempts - intern_before.intern_attempts,
             intern_after.intern_new - intern_before.intern_new,
+        );
+        log::debug!(
+            "graph census: first {} ({:.3}ms), duplicate-pending {} ({:.3}ms), \
+             witness-settlement {} ({:.3}ms), incremental-forced {} ({:.3}ms), \
+             stranded-skipped {}; phases admissibility {:.3}ms, body-prep {:.3}ms, \
+             signature/type {:.3}ms, call-resolution {:.3}ms, witness/bound {:.3}ms, \
+             body-walk {:.3}ms, struct-default-walk {:.3}ms, uninstall {:.3}ms, \
+             index-maintenance {:.3}ms",
+            stats.first_owner_visits,
+            stats.first_owner_ns as f64 / 1_000_000.0,
+            stats.duplicate_pending_visits,
+            stats.duplicate_pending_ns as f64 / 1_000_000.0,
+            stats.witness_settlement_rewalks,
+            stats.witness_settlement_ns as f64 / 1_000_000.0,
+            stats.incremental_forced_rewalks,
+            stats.incremental_forced_ns as f64 / 1_000_000.0,
+            stats.skipped_stranded_owners,
+            stats.admissibility_ns as f64 / 1_000_000.0,
+            stats.body_prep_ns as f64 / 1_000_000.0,
+            stats.signature_type_conversion_ns as f64 / 1_000_000.0,
+            stats.call_site_resolution_ns as f64 / 1_000_000.0,
+            stats.witness_bound_tree_ns as f64 / 1_000_000.0,
+            stats.walk_body_edges_ns as f64 / 1_000_000.0,
+            stats.walk_struct_default_edges_ns as f64 / 1_000_000.0,
+            stats.uninstall_ns as f64 / 1_000_000.0,
+            stats.index_maintenance_ns as f64 / 1_000_000.0,
         );
     }
     g
@@ -1461,7 +1524,8 @@ impl InstanceGraph {
         contributions: BTreeMap::new(),
         lost: BTreeSet::new(),
         root_instances: BTreeSet::new(),
-        instances: BTreeSet::new(),
+            instances: BTreeSet::new(),
+            run_stats: RunStats::default(),
         index: Indices::default(),
         graph_rejections: Vec::new(),
         uninstantiated_roots: BTreeMap::new(),
@@ -1550,6 +1614,13 @@ impl InstanceGraph {
                 pending.push(Owner::Instance(i));
             }
         }
+        let timing_enabled = graph_timing_enabled();
+        let initially_forced: BTreeSet<Owner> = pending
+            .iter()
+            .filter(|owner| self.contributions.contains_key(*owner))
+            .cloned()
+            .collect();
+        let mut first_pass_seen = BTreeSet::new();
         // A conformance tree is supplied by an owner's CALLER, so an owner
         // walked before its caller was re-walked read a stale one. Recorded
         // here and re-checked below rather than assumed away by walk order.
@@ -1557,6 +1628,7 @@ impl InstanceGraph {
         let mut rounds = 0usize;
         loop {
             while let Some(owner) = pending.pop() {
+                stats.owner_visits += 1;
                 // **An instance that lost its last namer DURING this run is not
                 // walkable, and is not an invariant break.**
                 //
@@ -1577,13 +1649,53 @@ impl InstanceGraph {
                 // the edited file and never reaches this loop.
                 if let Owner::Instance(i) = &owner {
                     if self.substitution(i).is_none() {
+                        stats.skipped_stranded_owners += 1;
                         continue;
                     }
                     walked_with.insert(i.clone(), self.bound_tree(i).cloned().unwrap_or_default());
                 }
-                let c = self.expand(ws, &owner);
+                let visit_kind = if rounds > 0 {
+                    VisitKind::WitnessSettlement
+                } else if !first_pass_seen.insert(owner.clone()) {
+                    VisitKind::DuplicatePending
+                } else if initially_forced.contains(&owner) {
+                    VisitKind::IncrementalForced
+                } else {
+                    VisitKind::FirstOwner
+                };
+                let visit_start = timing_enabled.then(Instant::now);
+                let c = self.expand(ws, &owner, timing_enabled);
+                let visit_ns = elapsed_ns(visit_start);
                 stats.expanded += 1;
-                pending.extend(self.install(owner, c));
+                match visit_kind {
+                    VisitKind::FirstOwner => {
+                        stats.first_owner_visits += 1;
+                        stats.first_owner_ns += visit_ns;
+                    }
+                    VisitKind::DuplicatePending => {
+                        stats.duplicate_pending_visits += 1;
+                        stats.duplicate_pending_ns += visit_ns;
+                    }
+                    VisitKind::WitnessSettlement => {
+                        stats.witness_settlement_rewalks += 1;
+                        stats.witness_settlement_ns += visit_ns;
+                    }
+                    VisitKind::IncrementalForced => {
+                        stats.incremental_forced_rewalks += 1;
+                        stats.incremental_forced_ns += visit_ns;
+                    }
+                }
+                stats.admissibility_ns += c.timing.admissibility_ns;
+                stats.body_prep_ns += c.timing.body_prep_ns;
+                stats.signature_type_conversion_ns += c.timing.signature_type_conversion_ns;
+                stats.call_site_resolution_ns += c.timing.call_site_resolution_ns;
+                stats.witness_bound_tree_ns += c.timing.witness_bound_tree_ns;
+                stats.walk_body_edges_ns += c.timing.walk_body_edges_ns;
+                stats.walk_struct_default_edges_ns += c.timing.walk_struct_default_edges_ns;
+                let (demanded, install_timing) = self.install(owner, c, timing_enabled);
+                stats.uninstall_ns += install_timing.uninstall_ns;
+                stats.index_maintenance_ns += install_timing.index_maintenance_ns;
+                pending.extend(demanded);
             }
             // The fixpoint: an owner whose witnesses moved while it was already
             // walked must be walked again, or its callees are the ones the old
@@ -1609,25 +1721,52 @@ impl InstanceGraph {
             );
             pending = stale;
         }
+        assert_eq!(
+            stats.owner_visits,
+            stats.first_owner_visits
+                + stats.duplicate_pending_visits
+                + stats.witness_settlement_rewalks
+                + stats.incremental_forced_rewalks
+                + stats.skipped_stranded_owners,
+            "graph census owner-visit denominator lost a population"
+        );
+        assert_eq!(
+            stats.expanded,
+            stats.first_owner_visits
+                + stats.duplicate_pending_visits
+                + stats.witness_settlement_rewalks
+                + stats.incremental_forced_rewalks,
+            "graph census expanded denominator lost a population"
+        );
         stats
     }
 
     /// Walk ONE owner's body. The only producer of a [`Contribution`], so a
     /// full build and an incremental re-walk cannot record different facts.
-    fn expand(&mut self, ws: &Workspace, owner: &Owner) -> Contribution {
+    fn expand(&mut self, ws: &Workspace, owner: &Owner, timing_enabled: bool) -> Contribution {
         let mut out = Contribution::default();
         match owner {
             Owner::AlwaysEmitted(module, body_owner) => {
+                let prep_start = timing_enabled.then(Instant::now);
                 let Some(inf) =
                     ws.inference(*module).and_then(|ir| ir.per_fn.get(body_owner))
                 else {
+                    add_elapsed(&mut out.timing.body_prep_ns, prep_start);
                     return out;
                 };
                 let body = ws.module(*module).bodies.get(body_owner);
-                let mut w = Walk { interner: &self.interner, owner_tree: None, out: &mut out };
+                add_elapsed(&mut out.timing.body_prep_ns, prep_start);
+                let mut w = Walk {
+                    interner: &self.interner,
+                    owner_tree: None,
+                    out: &mut out,
+                    timing_enabled,
+                };
+                let walk_start = w.timer();
                 walk_body_edges(
                     &mut w, ws, inf, body, None, &MonoSubst::default(), &SiteDomain::Own, None,
                 );
+                add_elapsed(&mut w.out.timing.walk_body_edges_ns, walk_start);
                 // An always-emitted body's struct literals omit fields too --
                 // `global POLLER: CoroutinePoller = CoroutinePoller {}` reaches
                 // `coroutines: Arena<CoState> = arena_new()` exactly as an
@@ -1639,22 +1778,34 @@ impl InstanceGraph {
                 // identically on every corpus project (`arena_new<CoState>` and
                 // its own `__arena_new_owned<int>` call).
                 if let Some(body) = body {
+                    let defaults_start = w.timer();
                     walk_struct_default_edges(&mut w, ws, *module, body, *body_owner, None, &MonoSubst::default());
+                    add_elapsed(&mut w.out.timing.walk_struct_default_edges_ns, defaults_start);
                 }
             }
             Owner::Instance(inst) => {
                 // The one admissibility oracle, shared with both emitters. The
                 // graph DECLINES to expand where they reject: a capped instance
                 // is a changing-instance-recursion candidate, not yet a verdict.
-                if skull_mir::monoty::too_deep_to_instantiate(
+                let admissibility_start = timing_enabled.then(Instant::now);
+                let too_deep = skull_mir::monoty::too_deep_to_instantiate(
                     inst.args.iter().map(|a| self.interner.get(*a)).collect::<Vec<_>>().iter(),
                 )
-                .is_some()
-                {
+                .is_some();
+                if too_deep {
+                    add_elapsed(&mut out.timing.admissibility_ns, admissibility_start);
                     out.depth_capped = true;
                     return out;
                 }
+                let f = &ws.module(inst.func.module).functions[inst.func.func];
+                let is_boundary = declared_boundary(f).is_some();
+                add_elapsed(&mut out.timing.admissibility_ns, admissibility_start);
+                if is_boundary {
+                    return out;
+                }
+                let prep_start = timing_enabled.then(Instant::now);
                 let FunctionBody::Ready { inf, body } = function_body(ws, inst.func) else {
+                    add_elapsed(&mut out.timing.body_prep_ns, prep_start);
                     return out;
                 };
                 // A boundary's Rock body is not the one emission uses -- it
@@ -1664,10 +1815,6 @@ impl InstanceGraph {
                 // no callees while the graph carried them, and a
                 // `@native_required` fallback body reached callees emission
                 // never routes through.
-                let f = &ws.module(inst.func.module).functions[inst.func.func];
-                if declared_boundary(f).is_some() {
-                    return out;
-                }
                 out.expanded = true;
                 // A body's own substitution is the one its caller reached it
                 // under, which the contribution set already answers. An
@@ -1678,14 +1825,19 @@ impl InstanceGraph {
                     .cloned()
                     .expect("every reached instance has a recorded substitution");
                 let owner_tree = self.bound_tree(inst).cloned().unwrap_or_default();
+                add_elapsed(&mut out.timing.body_prep_ns, prep_start);
                 let mut w = Walk {
                     interner: &self.interner,
                     owner_tree: Some(&owner_tree),
                     out: &mut out,
+                    timing_enabled,
                 };
+                let walk_start = w.timer();
                 walk_body_edges(
                     &mut w, ws, inf, Some(body), Some(inst), &subst, &SiteDomain::Own, None,
                 );
+                add_elapsed(&mut w.out.timing.walk_body_edges_ns, walk_start);
+                let defaults_start = w.timer();
                 walk_struct_default_edges(
                     &mut w,
                     ws,
@@ -1695,6 +1847,7 @@ impl InstanceGraph {
                     Some(inst),
                     &subst,
                 );
+                add_elapsed(&mut w.out.timing.walk_struct_default_edges_ns, defaults_start);
             }
         }
         out
@@ -1710,8 +1863,16 @@ impl InstanceGraph {
     /// used to be.
     ///
     /// Returns the owners the contribution newly demands.
-    fn install(&mut self, owner: Owner, c: Contribution) -> Vec<Owner> {
+    fn install(
+        &mut self,
+        owner: Owner,
+        c: Contribution,
+        timing_enabled: bool,
+    ) -> (Vec<Owner>, InstallTiming) {
+        let uninstall_start = timing_enabled.then(Instant::now);
         self.uninstall(&owner);
+        let uninstall_ns = elapsed_ns(uninstall_start);
+        let index_start = timing_enabled.then(Instant::now);
         // Every callee is in `reached`, an always-emitted body's included --
         // `always_emitted_targets` marks which of them are ROOTS, it is not a
         // second population.
@@ -1760,7 +1921,10 @@ impl InstanceGraph {
             .collect();
         demanded.sort();
         demanded.dedup();
-        demanded
+        (
+            demanded,
+            InstallTiming { uninstall_ns, index_maintenance_ns: elapsed_ns(index_start) },
+        )
     }
 
     /// Remove a contribution and everything the indices held on its behalf.
@@ -2024,6 +2188,7 @@ impl InstanceGraph {
         // loop stood here and was inert -- mutation-verified.
         let affected = self.affected_owners(ws, changed);
         let run = self.run(ws, affected.clone());
+        self.run_stats = run;
         let prune = self.derive(ws, true);
         let changed_decls = changed.iter().filter_map(|(module, owner)| match owner {
             BodyOwner::Function(func) => Some(skull_mir::lower::canonical_variant(
@@ -2044,6 +2209,7 @@ impl InstanceGraph {
             owners: self.contributions.len(),
             instances: self.instances.len(),
             settle_rounds: run.settle_rounds,
+            census: run,
         }
     }
 
@@ -2431,11 +2597,45 @@ impl InstanceGraph {
     }
 }
 
+#[derive(Clone, Copy)]
+enum VisitKind {
+    FirstOwner,
+    DuplicatePending,
+    WitnessSettlement,
+    IncrementalForced,
+}
+
+#[derive(Default)]
+struct InstallTiming {
+    uninstall_ns: u64,
+    index_maintenance_ns: u64,
+}
+
 /// What one [`InstanceGraph::run`] actually walked. Operational, and the check
 /// that an update touched the affected region rather than the program.
 #[derive(Default, Debug, Clone, Copy)]
 pub struct RunStats {
+    /// Every owner popped from the pending worklist, including stranded skips.
+    pub owner_visits: usize,
     pub expanded: usize,
+    pub first_owner_visits: usize,
+    pub duplicate_pending_visits: usize,
+    pub witness_settlement_rewalks: usize,
+    pub incremental_forced_rewalks: usize,
+    pub skipped_stranded_owners: usize,
+    pub first_owner_ns: u64,
+    pub duplicate_pending_ns: u64,
+    pub witness_settlement_ns: u64,
+    pub incremental_forced_ns: u64,
+    pub admissibility_ns: u64,
+    pub body_prep_ns: u64,
+    pub signature_type_conversion_ns: u64,
+    pub call_site_resolution_ns: u64,
+    pub witness_bound_tree_ns: u64,
+    pub walk_body_edges_ns: u64,
+    pub walk_struct_default_edges_ns: u64,
+    pub uninstall_ns: u64,
+    pub index_maintenance_ns: u64,
     /// How many times the conformance fixpoint had to walk owners again.
     ///
     /// Published because a guard with no population reads as load-bearing when
@@ -2498,6 +2698,9 @@ pub struct UpdateStats {
     pub instances: usize,
     /// See [`RunStats::settle_rounds`].
     pub settle_rounds: usize,
+    /// The same denominator and phase census retained on the graph after the
+    /// update, so callers do not need to infer a full rebuild from `expanded`.
+    pub census: RunStats,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2575,10 +2778,12 @@ fn walk_body_edges(
         }
 
         let mut failures: Vec<(Idx<bone_semantic::hir::Expr>, MonoTyReason)> = Vec::new();
+        let conversion_start = w.timer();
         let sites = compiler_generated_sites(
             ws, inf, body, subst, &mut w.out.synthesized_examined, &mut failures,
             &mut w.out.synthesized_approximated,
         );
+        add_elapsed(&mut w.out.timing.signature_type_conversion_ns, conversion_start);
         for (e, reason) in failures {
             w.out.storage_failures.push(reason.clone());
             let Some(from) = from else { continue };
@@ -2734,13 +2939,35 @@ fn record_call(
     span: Span,
     site: Site,
 ) -> Option<Instance> {
+    let started = w.timer();
+    let result = record_call_impl(w, ws, inf, from, subst, callee, bindings, kind, span, site);
+    add_elapsed(&mut w.out.timing.call_site_resolution_ns, started);
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_call_impl(
+    w: &mut Walk,
+    ws: &Workspace,
+    inf: &BodyInference,
+    from: Option<&Instance>,
+    subst: &MonoSubst,
+    callee: FuncRef,
+    bindings: Option<&Vec<bone_semantic::prelude::TyId>>,
+    kind: EdgeKind,
+    span: Span,
+    site: Site,
+) -> Option<Instance> {
     if from.is_none() {
         w.out.always_emitted_seeds += 1;
     }
     let cf = &ws.module(callee.module).functions[callee.func];
-    let (args, callee_subst) = match w.interner.with_mut(|a| {
+    let conversion_start = w.timer();
+    let instantiated = w.interner.with_mut(|a| {
         instantiate(a, ws, inf, callee.module, callee.func, cf, bindings, subst)
-    }) {
+    });
+    add_elapsed(&mut w.out.timing.signature_type_conversion_ns, conversion_start);
+    let (args, callee_subst) = match instantiated {
         Ok(v) => v,
         // An always-emitted body has no `from` to file against, but the
         // CLASSIFICATION is the same one an instantiated body's call gets:
@@ -2928,6 +3155,7 @@ fn record_witness(
     kind: EdgeKind,
     site: Site,
 ) {
+    let started = w.timer();
     if from.is_none() {
         w.out.always_emitted_seeds += 1;
     }
@@ -2935,7 +3163,12 @@ fn record_witness(
     let resolved = &ws.module(rep.module).functions[rep.func];
     let callee = rep;
     let cf = &ws.module(callee.module).functions[callee.func];
-    match w.interner.with_mut(|a| instantiate_witness(a, ws, inf, resolved, cf, &witness.generics, subst)) {
+    let conversion_start = w.timer();
+    let instantiated = w.interner.with_mut(|a| {
+        instantiate_witness(a, ws, inf, resolved, cf, &witness.generics, subst)
+    });
+    add_elapsed(&mut w.out.timing.signature_type_conversion_ns, conversion_start);
+    match instantiated {
         Ok((args, callee_subst)) => {
             let to = Instance { func: callee, args };
             match from {
@@ -2990,6 +3223,7 @@ fn record_witness(
             w.record_site(from, site, SiteOutcome::Failed(fail.reason()), span);
         }
     }
+    add_elapsed(&mut w.out.timing.witness_bound_tree_ns, started);
 }
 
 /// The callee obligations an instance picks up from the field DEFAULTS of the
@@ -3202,7 +3436,12 @@ fn record_bound_next(
     if from.is_none() {
         w.out.always_emitted_seeds += 1;
     }
-    match w.interner.with_mut(|a| instantiate_witness(a, ws, inf, resolved, cf, next_generics, subst)) {
+    let conversion_start = w.timer();
+    let instantiated = w.interner.with_mut(|a| {
+        instantiate_witness(a, ws, inf, resolved, cf, next_generics, subst)
+    });
+    add_elapsed(&mut w.out.timing.signature_type_conversion_ns, conversion_start);
+    match instantiated {
         Ok((args, callee_subst)) => {
             let to = Instance { func: callee, args };
             match from {
@@ -3282,6 +3521,7 @@ fn walk_bound_tree(
     domain: &SiteDomain,
     path: &[usize],
 ) -> InstanceBoundTree {
+    let started = w.timer();
     let mut resolved = InstanceBoundTree::default();
     let mut keys: Vec<&usize> = tree.next.keys().collect();
     keys.sort();
@@ -3297,6 +3537,7 @@ fn walk_bound_tree(
             resolved.next.insert(*k, next);
         }
     }
+    add_elapsed(&mut w.out.timing.witness_bound_tree_ns, started);
     resolved
 }
 
