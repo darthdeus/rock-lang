@@ -2780,6 +2780,24 @@ pub fn resolve_comptime_value(
     match kind {
         ExpandKind::BuildVar => match ws.comptime_inputs.vars.get(&key) {
             Some(var) => Ok(ResolvedComptime { value: var.value.clone(), file_abs: None }),
+            // A fully-default inputs struct means resolution never RAN for
+            // this compile (no stick.toml found, or an entry point that did
+            // not stamp declared inputs) -- blaming the project's [build.vars]
+            // there sent people at the wrong file. A stamped project always
+            // carries at least its embed_root.
+            None if ws.comptime_inputs.embed_root.is_none()
+                && ws.comptime_inputs.vars.is_empty()
+                && ws.comptime_inputs.channel.is_empty() =>
+            {
+                Err(reject(
+                    call_expr,
+                    format!(
+                        "`build_var(\"{key}\")`: no [build.vars] were resolved for this \
+                         compile (no stick.toml found at or above the entry point, or \
+                         this rock entry point did not resolve declared inputs)"
+                    ),
+                ))
+            }
             None => Err(reject(
                 call_expr,
                 format!("`build_var(\"{key}\")`: {key} is not declared in this project's [build.vars]"),
