@@ -58,6 +58,27 @@ fn use_all() -> string {
 }
 "#;
 
+const NONFINITE_PROJECTION_SRC: &str = r#"
+struct SrcTex { src_tex: Sampler2D }
+
+@shader(fragment)
+fn nonfinite_frag(@textures t: SrcTex, tc: Vec2) -> Vec4 {
+    let c = texture(t.src_tex, tc)
+    let bad = bvec3(
+        isinf(c.r) || isnan(c.r),
+        isinf(c.g) || isnan(c.g),
+        isinf(c.b) || isnan(c.b),
+    )
+    if any(bad) { return v(to_vec3(bad), 1.0) }
+    if any(greater_than(c.rgb.abs(), v(60000.0, 60000.0, 60000.0))) {
+        return v(1.0, 1.0, 0.0, 1.0)
+    }
+    return v(0.0, 0.0, 0.0, 1.0)
+}
+
+fn use_all() -> string { return rock_shader(nonfinite_frag) }
+"#;
+
 fn emit_overlay(
     ws: &Workspace,
     cache: &mut SkullEmitCache,
@@ -674,4 +695,17 @@ fn selected_wgpu_entity_id_projection_is_admitted() {
     assert_eq!(census.admitted, 2, "entity-id and its real outline consumer must be admitted: {census:?}");
     assert_eq!(census.omitted, 0, "typed projection omissions remain: {census:?}");
     assert!(emit.lua.contains("__rock_wgpu_shader_register(\"entity_id_debug_frag\""));
+}
+
+#[test]
+fn nonfinite_projection_reaches_selected_wgpu() {
+    let ws = ws_with_stdlib(NONFINITE_PROJECTION_SRC);
+    let mid = test_mid(&ws);
+    let (emit, cache) = emit_full_in_for_renderer(&ws, mid, None, RendererTarget::Wgpu)
+        .expect("the nonfinite shader must have a GL control");
+    let census = cache.wgpu_projection_census().expect("WGPU projection census");
+    assert_eq!(census.examined, 1);
+    assert_eq!(census.admitted, 1, "nonfinite shader remains omitted: {census:?}");
+    assert_eq!(census.omitted, 0, "nonfinite shader projection failed: {census:?}");
+    assert!(emit.lua.contains("__rock_wgpu_shader_register(\"nonfinite_frag\""));
 }

@@ -96,10 +96,8 @@ enum ResultKind {
 }
 
 /// The WGSL tier-0 builtin table: one row per (name, arity) -> WGSL spelling and
-/// result shape. This is the twin of `GLSL_INTRINSICS`, and it is deliberately
-/// NOT a superset: a GLSL row with no faithful WGSL spelling (`isnan`, `bvec3`,
-/// `vertex_id`) is absent so the call REJECTS rather than emitting something
-/// that merely parses.
+/// result shape. Intrinsics whose result needs typed validation or a
+/// Rock-to-WGSL lowering of its own stay in `WgslIntrinsic` below.
 const WGSL_BUILTINS: &[(&str, usize, &str, ResultKind)] = &[
     ("sin", 1, "sin", ResultKind::FirstArg),
     ("cos", 1, "cos", ResultKind::FirstArg),
@@ -145,6 +143,12 @@ enum WgslIntrinsic {
     Texture,
     TextureId,
     TextureSize,
+    IsNan,
+    IsInf,
+    Bvec3,
+    Any,
+    GreaterThan,
+    ToVec3,
     At,
     FragCoord,
     Discard,
@@ -196,6 +200,12 @@ impl WgslIntrinsic {
             ("texture", 2) => Self::Texture,
             ("texture_id", 2) => Self::TextureId,
             ("texture_size", 1) => Self::TextureSize,
+            ("isnan", 1) => Self::IsNan,
+            ("isinf", 1) => Self::IsInf,
+            ("bvec3", 3) => Self::Bvec3,
+            ("any", 1) => Self::Any,
+            ("greater_than", 2) => Self::GreaterThan,
+            ("to_vec3", 1) => Self::ToVec3,
             ("frag_coord", 0) => Self::FragCoord,
             ("discard", 0) => Self::Discard,
             ("at", 2) => Self::At,
@@ -276,15 +286,7 @@ impl ShaderPlannerPolicy for WgslShaderPolicy {
                 Some(format!("unsupported WGSL operator `{}`", function.name))
             }
             Some(_) => None,
-            None => match function.name.as_str() {
-                "isnan" | "isinf" => Some("non-finite predicate intrinsic".to_string()),
-                "any" => Some("boolean-vector reduction intrinsic".to_string()),
-                "texture_id" => Some("integer texture sampling intrinsic".to_string()),
-                "greater_than" => Some("boolean-vector comparison intrinsic".to_string()),
-                "bvec3" => Some("boolean-vector constructor".to_string()),
-                "to_vec3" => Some("boolean-vector conversion intrinsic".to_string()),
-                _ => None,
-            },
+            None => None,
         }
     }
 }
@@ -2711,6 +2713,7 @@ enum ValueKind {
     I32,
     U32,
     Bool,
+    BVec3,
     Vec2,
     Vec3,
     Vec4,
@@ -2726,6 +2729,7 @@ impl ValueKind {
             Self::I32 => Some(WireKind::I32),
             Self::U32 => Some(WireKind::U32),
             Self::Bool => None,
+            Self::BVec3 => None,
             Self::Vec2 => Some(WireKind::F32x2),
             Self::Vec3 => Some(WireKind::F32x3),
             Self::Vec4 => Some(WireKind::F32x4),
@@ -2736,12 +2740,17 @@ impl ValueKind {
     }
 
     fn wgsl(self) -> Option<&'static str> {
-        self.wire().and_then(wgsl_type)
+        match self {
+            Self::Bool => Some("bool"),
+            Self::BVec3 => Some("vec3<bool>"),
+            other => other.wire().and_then(wgsl_type),
+        }
     }
 
     fn components(self) -> usize {
         match self {
             Self::F32 | Self::I32 | Self::U32 | Self::Bool => 1,
+            Self::BVec3 => 3,
             Self::Vec2 => 2,
             Self::Vec3 => 3,
             Self::Vec4 => 4,
@@ -2817,6 +2826,7 @@ fn value_kind_for_type(ws: &Workspace, ty: TyId) -> Option<ValueKind> {
             "Vec2" => Some(ValueKind::Vec2),
             "Vec3" => Some(ValueKind::Vec3),
             "Vec4" => Some(ValueKind::Vec4),
+            "Bvec3" => Some(ValueKind::BVec3),
             "Mat4" => Some(ValueKind::Mat4),
             "Sampler2D" => Some(ValueKind::Sampler(SamplerKind::Float)),
             "ISampler2D" => Some(ValueKind::Sampler(SamplerKind::Int)),
@@ -2849,6 +2859,7 @@ fn value_kind_for_instance_type(
             "Vec2" => Some(ValueKind::Vec2),
             "Vec3" => Some(ValueKind::Vec3),
             "Vec4" => Some(ValueKind::Vec4),
+            "Bvec3" => Some(ValueKind::BVec3),
             "Mat4" => Some(ValueKind::Mat4),
             "Sampler2D" => Some(ValueKind::Sampler(SamplerKind::Float)),
             "ISampler2D" => Some(ValueKind::Sampler(SamplerKind::Int)),
@@ -2864,7 +2875,6 @@ fn value_kind_for_instance_type(
 fn wgsl_value_type(kind: ValueKind) -> Option<String> {
     match kind {
         ValueKind::Struct(name) => Some(name.to_string()),
-        ValueKind::Bool => Some("bool".to_string()),
         other => other.wgsl().map(str::to_string),
     }
 }
@@ -4223,6 +4233,47 @@ impl<'a> FunctionEmitter<'a> {
                 Ok(ValueKind::I32)
             }
             Some(WgslIntrinsic::TextureSize) => Ok(ValueKind::Vec2),
+            Some(WgslIntrinsic::IsNan | WgslIntrinsic::IsInf) => {
+                self.require_value_kind(args, 1, ValueKind::F32, "WGSL non-finite predicate")?;
+                Ok(ValueKind::Bool)
+            }
+            Some(WgslIntrinsic::Bvec3) => {
+                if args.len() != 3 {
+                    return Err(err(
+                        self.span,
+                        "WGSL bvec3 requires three bool arguments",
+                    ));
+                }
+                for arg in args {
+                    if self.value_kind(*arg)? != ValueKind::Bool {
+                        return Err(err(
+                            self.span,
+                            "WGSL bvec3 requires three bool arguments",
+                        ));
+                    }
+                }
+                Ok(ValueKind::BVec3)
+            }
+            Some(WgslIntrinsic::Any) => {
+                self.require_value_kind(args, 1, ValueKind::BVec3, "WGSL any")?;
+                Ok(ValueKind::Bool)
+            }
+            Some(WgslIntrinsic::GreaterThan) => {
+                if args.len() != 2
+                    || self.value_kind(args[0])? != ValueKind::Vec3
+                    || self.value_kind(args[1])? != ValueKind::Vec3
+                {
+                    return Err(err(
+                        self.span,
+                        "WGSL greater_than requires two Vec3 arguments",
+                    ));
+                }
+                Ok(ValueKind::BVec3)
+            }
+            Some(WgslIntrinsic::ToVec3) => {
+                self.require_value_kind(args, 1, ValueKind::BVec3, "WGSL to_vec3")?;
+                Ok(ValueKind::Vec3)
+            }
             Some(WgslIntrinsic::FragCoord) => Ok(ValueKind::Vec4),
             Some(WgslIntrinsic::Discard) => Err(err(
                 self.span,
@@ -4913,6 +4964,44 @@ impl<'a> FunctionEmitter<'a> {
                 let texture_arg = self.texture_expression(args[0])?;
                 Ok(format!("vec2<f32>(textureDimensions({texture_arg}))"))
             }
+            Some(WgslIntrinsic::IsNan | WgslIntrinsic::IsInf) => {
+                self.call_kind(iid, func, args)?;
+                let bits = format!("bitcast<u32>({})", self.render_val(args[0])?);
+                let exponent = format!("({bits} & 0x7f800000u)");
+                let mantissa = format!("({bits} & 0x007fffffu)");
+                if matches!(WgslIntrinsic::classify(function), Some(WgslIntrinsic::IsNan)) {
+                    Ok(format!(
+                        "({exponent} == 0x7f800000u && {mantissa} != 0u)"
+                    ))
+                } else {
+                    Ok(format!(
+                        "({exponent} == 0x7f800000u && {mantissa} == 0u)"
+                    ))
+                }
+            }
+            Some(WgslIntrinsic::Bvec3) => {
+                self.call_kind(iid, func, args)?;
+                let rendered = args
+                    .iter()
+                    .map(|arg| self.render_val(*arg))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(format!("vec3<bool>({})", rendered.join(", ")))
+            }
+            Some(WgslIntrinsic::Any) => {
+                self.call_kind(iid, func, args)?;
+                Ok(format!("any({})", self.render_val(args[0])?))
+            }
+            Some(WgslIntrinsic::GreaterThan) => {
+                self.call_kind(iid, func, args)?;
+                Ok(format!("({} > {})", self.render_val(args[0])?, self.render_val(args[1])?))
+            }
+            Some(WgslIntrinsic::ToVec3) => {
+                self.call_kind(iid, func, args)?;
+                Ok(format!(
+                    "select(vec3<f32>(0.0), vec3<f32>(1.0), {})",
+                    self.render_val(args[0])?
+                ))
+            }
             Some(WgslIntrinsic::FragCoord) => self.frag_coord.clone().ok_or_else(|| {
                 err(
                     self.span,
@@ -5090,6 +5179,30 @@ impl<'a> FunctionEmitter<'a> {
         Ok(())
     }
 
+    fn require_value_kind(
+        &self,
+        args: &[Idx<Inst>],
+        arity: usize,
+        expected: ValueKind,
+        intrinsic: &str,
+    ) -> Result<(), CompilerError> {
+        if args.len() != arity {
+            return Err(err(
+                self.span,
+                format!("{intrinsic} requires {arity} {:?} argument(s)", expected),
+            ));
+        }
+        for arg in args {
+            if self.value_kind(*arg)? != expected {
+                return Err(err(
+                    self.span,
+                    format!("{intrinsic} requires {arity} {:?} argument(s)", expected),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn texture_expression(&self, iid: Idx<Inst>) -> Result<String, CompilerError> {
         if let Inst::Load(cell) = self.body.insts[iid] {
             if self.sampler_params.contains(&cell) {
@@ -5222,6 +5335,7 @@ fn swizzle_kind(base: ValueKind, field: &str) -> Option<ValueKind> {
         ValueKind::Vec2 => 2,
         ValueKind::Vec3 => 3,
         ValueKind::Vec4 => 4,
+        ValueKind::BVec3 => 3,
         _ => return None,
     };
     if field.is_empty() || field.len() > 4 {
@@ -5243,12 +5357,20 @@ fn swizzle_kind(base: ValueKind, field: &str) -> Option<ValueKind> {
             return None;
         }
     }
-    match field.len() {
-        1 => Some(ValueKind::F32),
-        2 => Some(ValueKind::Vec2),
-        3 => Some(ValueKind::Vec3),
-        _ => Some(ValueKind::Vec4),
+    let kind = match field.len() {
+        1 => ValueKind::F32,
+        2 => ValueKind::Vec2,
+        3 => ValueKind::Vec3,
+        _ => ValueKind::Vec4,
+    };
+    if base == ValueKind::BVec3 {
+        return Some(match field.len() {
+            1 => ValueKind::Bool,
+            3 => ValueKind::BVec3,
+            _ => return None,
+        });
     }
+    Some(kind)
 }
 
 fn struct_field_kind_by_name(ws: &Workspace, name: Ustr, field: Ustr) -> Option<ValueKind> {
@@ -5265,6 +5387,7 @@ fn value_struct_kind(name: Ustr) -> Option<ValueKind> {
         "Vec2" => Some(ValueKind::Vec2),
         "Vec3" => Some(ValueKind::Vec3),
         "Vec4" => Some(ValueKind::Vec4),
+        "Bvec3" => Some(ValueKind::BVec3),
         "Mat4" => Some(ValueKind::Mat4),
         _ => Some(ValueKind::Struct(name)),
     }
@@ -5276,6 +5399,7 @@ fn zero_value(kind: ValueKind) -> String {
         ValueKind::I32 => "0".into(),
         ValueKind::U32 => "0u".into(),
         ValueKind::Bool => "false".into(),
+        ValueKind::BVec3 => "vec3<bool>(false)".into(),
         ValueKind::Vec2 => "vec2<f32>(0.0)".into(),
         ValueKind::Vec3 => "vec3<f32>(0.0)".into(),
         ValueKind::Vec4 => "vec4<f32>(0.0)".into(),
@@ -5321,6 +5445,12 @@ fn main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
         assert!(
             WgslIntrinsic::classify_name_arity("texture_id", 2).is_some_and(WgslIntrinsic::is_admitted)
         );
+        for (name, arity) in [("isnan", 1), ("isinf", 1), ("bvec3", 3), ("any", 1), ("greater_than", 2), ("to_vec3", 1)] {
+            assert!(
+                WgslIntrinsic::classify_name_arity(name, arity).is_some_and(WgslIntrinsic::is_admitted),
+                "{name}/{arity} must be admitted"
+            );
+        }
         assert!(WgslIntrinsic::classify_name_arity("v", 2).is_some_and(WgslIntrinsic::is_admitted));
         assert_eq!(
             WgslIntrinsic::classify_name_arity("clamp", 3),
@@ -5342,15 +5472,22 @@ fn main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f32> {
             Some(WgslIntrinsic::Operator(WgslOperator::Add))
         );
         assert_eq!(WgslIntrinsic::classify_name_arity("helper", 1), None);
-        // Present in the GLSL table with no faithful WGSL spelling: absent here
-        // so the call rejects rather than emitting a plausible substitute.
-        for absent in ["isnan", "isinf", "any", "greater_than"] {
+        for absent in ["isnan", "isinf", "bvec3", "any", "greater_than", "to_vec3"] {
             for arity in 0..=3 {
-                assert_eq!(
-                    WgslIntrinsic::classify_name_arity(absent, arity),
-                    None,
-                    "`{absent}` must not be admitted"
-                );
+                let expected = match absent {
+                    "isnan" | "isinf" | "any" => 1,
+                    "bvec3" => 3,
+                    "greater_than" => 2,
+                    "to_vec3" => 1,
+                    _ => unreachable!(),
+                };
+                if arity != expected {
+                    assert_eq!(
+                        WgslIntrinsic::classify_name_arity(absent, arity),
+                        None,
+                        "`{absent}` must not admit arity {arity}"
+                    );
+                }
             }
         }
         assert!(WgslIntrinsic::classify_name_arity("vertex_id", 0).is_some());

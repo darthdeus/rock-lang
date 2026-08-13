@@ -41,6 +41,7 @@ const ROOTS: &[(&str, &str, &str)] = &[
 ];
 
 const ENTITY_ID_DEBUG: &str = include_str!("../../../stone/engine/shaders/rendering/entity_id_debug_shader.rock");
+const NONFINITE: &str = include_str!("../../../stone/engine/shaders/debug/nonfinite_shader.rock");
 
 fn workspace(
     src: &str,
@@ -156,6 +157,23 @@ fn bad_entity_id_frag(@textures t: BadEntityIdTex, tc: Vec2) -> Vec4 {
 "#;
     let result = try_artifact("bad_entity_id_frag", source);
     assert!(result.is_err(), "texture_id must reject a filterable float sampler");
+}
+
+#[test]
+fn nonfinite_intrinsics_emit_typed_ieee_predicates_and_bool_vectors() {
+    let artifact = artifact("nonfinite_frag", NONFINITE);
+    let module = naga::front::wgsl::parse_str(&artifact.source).expect("WGSL parses");
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .expect("nonfinite WGSL validates");
+    assert!(artifact.source.contains("bitcast<u32>"));
+    assert!(artifact.source.contains("vec3<bool>"));
+    assert!(artifact.source.contains("any("));
+    assert!(artifact.source.contains("select(vec3<f32>(0.0), vec3<f32>(1.0)"));
+    assert!(artifact.source.contains(" > "));
 }
 
 #[test]
