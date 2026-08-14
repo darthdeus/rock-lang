@@ -17,6 +17,13 @@ fn no_code_ref_values_omit_code_ref_runtime() {
     assert!(!lua.contains("if not _G.__rock_code_slot_mt then"));
 }
 
+#[test]
+fn programs_without_definition_roles_do_not_stage_an_empty_plan() {
+    let lua = emit_module("fn main() {}\n");
+    assert!(!lua.contains("__rock_definition_plan_stage("));
+    assert_eq!(run_luajit(&format!("{lua}\nprint('PASS')"), "empty_definition_plan"), "PASS");
+}
+
 /// An escaping Rock function value enables the shared CodeRef runtime.
 #[test]
 fn prelude_defines_shared_fn_metatable() {

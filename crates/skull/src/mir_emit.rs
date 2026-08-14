@@ -3382,6 +3382,9 @@ fn definition_plan_stage_lua(
     scx: &skull_mir::lower::ScalarCtx,
     plan: &skull_mir::definition::DefinitionPlan,
 ) -> String {
+    if plan.census.declarations == 0 {
+        return String::new();
+    }
     let mut out = String::from("__rock_definition_plan_stage({\n");
     let mut catalogs: std::collections::BTreeMap<Ustr, Vec<_>> = std::collections::BTreeMap::new();
     for entry in &plan.entries {
