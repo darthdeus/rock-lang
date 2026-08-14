@@ -533,16 +533,20 @@ fn main() {
     let ws = check(src);
     let roots = skull::mir_emit::emission_roots(&ws, None);
 
-    skull_mir::ablation::set_enabled(false);
-    let normal = instance_graph::build(&ws, roots.clone(), false);
-    let normal_text = instance_graph::render_manifest(&ws, &normal);
-
-    skull_mir::ablation::set_enabled(true);
-    let no_inline = instance_graph::build(&ws, roots.clone(), false);
-    let no_inline_text = instance_graph::render_manifest(&ws, &no_inline);
-    // Perturbed order AND inlining disabled, the two S 0g knobs together.
-    let no_inline_rev = instance_graph::build(&ws, roots, true);
-    skull_mir::ablation::set_enabled(false);
+    let (normal, normal_text) = {
+        let _mode = crate::common::AblationGuard::off();
+        let normal = instance_graph::build(&ws, roots.clone(), false);
+        let normal_text = instance_graph::render_manifest(&ws, &normal);
+        (normal, normal_text)
+    };
+    let (no_inline_text, no_inline_rev) = {
+        let _mode = crate::common::AblationGuard::on();
+        let no_inline = instance_graph::build(&ws, roots.clone(), false);
+        let no_inline_text = instance_graph::render_manifest(&ws, &no_inline);
+        // Perturbed order AND inlining disabled, the two S 0g knobs together.
+        let no_inline_rev = instance_graph::build(&ws, roots, true);
+        (no_inline_text, no_inline_rev)
+    };
 
     assert_eq!(
         normal_text, no_inline_text,

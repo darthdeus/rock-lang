@@ -89,6 +89,8 @@ mod inline_lua_column_container_param_sentinel;
 mod inline_value_specialization;
 #[path = "inline_stats.rs"]
 mod inline_stats;
+#[path = "parallel_inline_mode.rs"]
+mod parallel_inline_mode;
 #[path = "graph_contributions.rs"]
 mod graph_contributions;
 

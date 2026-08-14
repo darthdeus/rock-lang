@@ -39,9 +39,42 @@ use ustr::Ustr;
 /// `emit_*_unit` is independent (read-only `ws`/`scx`/`cg`, owns its own
 /// `MirFunc`), so the lower+cleanup+emit work fans out cleanly per definition.
 #[cfg(not(feature = "sequential"))]
+struct WorkerMode {
+    inline_off: bool,
+    ablation: skull_mir::ablation::Context,
+}
+
+#[cfg(not(feature = "sequential"))]
+impl WorkerMode {
+    fn capture() -> Self {
+        Self {
+            inline_off: skull_transform::inline_off_active(),
+            ablation: skull_mir::ablation::current_context(),
+        }
+    }
+
+    fn enter(&self) -> WorkerScope {
+        WorkerScope {
+            _inline: self.inline_off.then(skull_transform::inline_off_guard),
+            _ablation: skull_mir::ablation::enter_context(self.ablation.clone()),
+        }
+    }
+}
+
+#[cfg(not(feature = "sequential"))]
+struct WorkerScope {
+    _inline: Option<skull_transform::InlineOffGuard>,
+    _ablation: skull_mir::ablation::ContextGuard,
+}
+
+#[cfg(not(feature = "sequential"))]
 fn par_map<T: Send, R: Send>(items: Vec<T>, f: impl Fn(T) -> R + Sync + Send) -> Vec<R> {
     use rayon::prelude::*;
-    items.into_par_iter().map(f).collect()
+    let mode = WorkerMode::capture();
+    items
+        .into_par_iter()
+        .map_init(move || mode.enter(), move |_, item| f(item))
+        .collect()
 }
 #[cfg(feature = "sequential")]
 fn par_map<T, R>(items: Vec<T>, f: impl Fn(T) -> R) -> Vec<R> {
@@ -62,7 +95,11 @@ fn par_map_with<T: Send, R: Send, S>(
     f: impl Fn(&mut S, T) -> R + Sync + Send,
 ) -> Vec<R> {
     use rayon::prelude::*;
-    items.into_par_iter().map_init(init, f).collect()
+    let mode = WorkerMode::capture();
+    items
+        .into_par_iter()
+        .map_init(move || (init(), mode.enter()), move |state, item| f(&mut state.0, item))
+        .collect()
 }
 #[cfg(feature = "sequential")]
 fn par_map_with<T, R, S>(items: Vec<T>, init: impl Fn() -> S, f: impl Fn(&mut S, T) -> R) -> Vec<R> {
@@ -4637,30 +4674,12 @@ fn main() {
             .collect()
     });
 
-    static INLINE_OFF: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     #[allow(dead_code)]
-    struct InlineOff(std::sync::MutexGuard<'static, ()>, Option<String>);
+    struct InlineOff(skull_transform::InlineOffGuard, skull_mir::ablation::Scope);
 
     impl InlineOff {
         fn on() -> Self {
-            let guard = INLINE_OFF.lock().unwrap_or_else(|e| e.into_inner());
-            let previous = std::env::var("SKULL_INLINE_OFF").ok();
-            unsafe { std::env::set_var("SKULL_INLINE_OFF", "1") };
-            skull_mir::ablation::clear();
-            skull_mir::ablation::set_enabled(true);
-            Self(guard, previous)
-        }
-    }
-
-    impl Drop for InlineOff {
-        fn drop(&mut self) {
-            skull_mir::ablation::set_enabled(false);
-            skull_mir::ablation::clear();
-            match &self.1 {
-                Some(value) => unsafe { std::env::set_var("SKULL_INLINE_OFF", value) },
-                None => unsafe { std::env::remove_var("SKULL_INLINE_OFF") },
-            }
+            Self(skull_transform::inline_off_guard(), skull_mir::ablation::scope(true))
         }
     }
 

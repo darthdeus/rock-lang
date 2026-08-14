@@ -71,6 +71,10 @@ pub fn inline_off_guard() -> InlineOffGuard {
     InlineOffGuard { previous }
 }
 
+pub fn inline_off_active() -> bool {
+    INLINE_OFF.with(|off| off.get())
+}
+
 impl Drop for InlineOffGuard {
     fn drop(&mut self) {
         INLINE_OFF.with(|off| off.set(self.previous));
@@ -78,7 +82,7 @@ impl Drop for InlineOffGuard {
 }
 
 fn inline_disabled() -> bool {
-    INLINE_OFF.with(|off| off.get()) || std::env::var_os("SKULL_INLINE_OFF").is_some()
+    inline_off_active()
 }
 
 /// Whether a candidate callee is a single straight-line block or a CFG.
