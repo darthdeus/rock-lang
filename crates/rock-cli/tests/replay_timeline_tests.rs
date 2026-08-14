@@ -705,7 +705,19 @@ fn record_log_with_keys(game: &str, frames: u32, keys_at: &[(usize, &str)]) -> t
 /// ignored".
 #[test]
 fn recorded_keys_cannot_toggle_engine_debug_windows() {
-    let dir = record_log_with_keys("bitgun", 40, &[(20, "o"), (25, "f8"), (30, "f6")]);
+    let dir = record_log_with_keys(
+        "bitgun",
+        40,
+        &[
+            (20, "o"),
+            (21, "f8"),
+            (22, "f6"),
+            (23, "f10"),
+            (24, "lctrl,f8"),
+            (25, "lctrl,f6"),
+            (26, "lctrl,f10"),
+        ],
+    );
     let log = dir.path().join("keys.replay");
     let log_s = log.to_string_lossy().into_owned();
 
@@ -713,17 +725,18 @@ fn recorded_keys_cannot_toggle_engine_debug_windows() {
         "bitgun", 40, &["--replay", &log_s], &[("STONE_TOOL_KEY_PROBE", "1")],
     );
     let engine = &replayed["stone"]["ENGINE"];
-    // Every field these keys reach, not only the windows: f6 and f8 are each
-    // bound TWICE (sfx browser + KEY_DEBUG_VISIBILITY, pipeline inspector +
-    // KEY_DEBUG_PROFILER), so asserting the window alone would pass with the
-    // lights.rock half still reading recorded input -- which it was.
-    for (field, key) in [
-        ("show_graphics_stats_window", "o"),
+    // Every field these keys reach, not only the windows: F6 and F8 are each
+    // bound twice (SFX browser + visibility, pipeline inspector + profiler),
+    // and F10 has its graphics-stats window consumer.
+    let recorded_consumers = [
+        ("show_graphics_stats_window", "o/F10"),
         ("show_pipeline_inspector", "f8"),
         ("show_sfx_browser", "f6"),
         ("debug_draw_visibility", "f6"),
         ("profiler_enabled", "f8"),
-    ] {
+    ];
+    assert_eq!(recorded_consumers.len(), 5, "recorded consumer census must be nonzero");
+    for (field, key) in recorded_consumers {
         assert_eq!(
             engine[field].as_bool(), Some(false),
             "a recorded '{key}' must not toggle {field}: {engine}"
@@ -750,15 +763,53 @@ fn recorded_keys_cannot_toggle_engine_debug_windows() {
         injected["stone"]["ENGINE"]
     );
 
-    let injected_function = run_frame_env(
-        "bitgun", 20, &[],
-        &[("STONE_TIMELINE_KEY_AT", "5"), ("STONE_TIMELINE_KEY", "f8")],
-    );
-    assert_eq!(
-        injected_function["stone"]["ENGINE"]["show_pipeline_inspector"].as_bool(), Some(true),
-        "a live F8 must still open the pipeline inspector: {}",
-        injected_function["stone"]["ENGINE"]
-    );
+    let bare_function_consumers = [
+        ("f6", vec!["show_sfx_browser", "debug_draw_visibility"]),
+        ("f8", vec!["show_pipeline_inspector", "profiler_enabled"]),
+        ("f10", vec!["show_graphics_stats_window"]),
+    ];
+    let bare_consumer_count: usize = bare_function_consumers.iter().map(|(_, fields)| fields.len()).sum();
+    assert_eq!(bare_consumer_count, 5, "bare F-key consumer census must be nonzero");
+    for (key, fields) in bare_function_consumers {
+        let bare = run_frame_env(
+            "bitgun", 20, &[],
+            &[("STONE_TIMELINE_KEY_AT", "5"), ("STONE_TIMELINE_KEY", key)],
+        );
+        for field in fields {
+            assert_eq!(
+                bare["stone"]["ENGINE"][field].as_bool(), Some(false),
+                "a live bare '{key}' must remain inert for {field}: {}",
+                bare["stone"]["ENGINE"]
+            );
+        }
+    }
+
+    let live_chords = [
+        ("f6", vec!["show_sfx_browser", "debug_draw_visibility"]),
+        ("f8", vec!["show_pipeline_inspector", "profiler_enabled"]),
+        ("f10", vec!["show_graphics_stats_window"]),
+    ];
+    let live_consumer_count: usize = live_chords.iter().map(|(_, fields)| fields.len()).sum();
+    assert_eq!(live_consumer_count, 5, "Ctrl+F consumer census must be nonzero");
+    for (key, fields) in live_chords {
+        let chord = run_frame_env(
+            "bitgun",
+            20,
+            &[],
+            &[
+                ("STONE_TIMELINE_KEY_AT", "5"),
+                ("STONE_TIMELINE_KEY", key),
+                ("STONE_TIMELINE_KEY_2", "lctrl"),
+            ],
+        );
+        for field in fields {
+            assert_eq!(
+                chord["stone"]["ENGINE"][field].as_bool(), Some(true),
+                "a live Ctrl+'{key}' must reach {field}: {}",
+                chord["stone"]["ENGINE"]
+            );
+        }
+    }
 
     let dynamic = run_frame_stderr(
         "bitgun", 20, &[],
