@@ -2720,7 +2720,7 @@ pub fn emit_with_closure(
             st.names.get(&body.instance).expect("emitted body has a name"),
         )?);
     }
-    out.push_str(code_slot_publish_js(&code_artifact));
+    out.push_str(code_slot_publish_js(&code_artifact, false));
     Ok(out)
 }
 
@@ -3081,7 +3081,7 @@ fn assemble_program_core(
     let mut deco_bodies: Vec<(String, MirFunc)> = Vec::new();
     for module in ws.modules.iter() {
         for (did, d) in module.decorators.iter() {
-            if d.annotations.iter().any(|a| a.name.name.as_str() == "lifecycle") {
+            if skull_mir::definition::is_compiler_owned_decorator(d) {
                 continue;
             }
             if !applied.contains(&d.name) {
@@ -3280,16 +3280,28 @@ fn assemble_program_core(
         }
     }
     mark_generated_code_values(ws, &mut code_artifact);
+    let definition_plan = skull_mir::definition::collect(ws)?;
+    if definition_plan.census.applications != definition_plan.census.admitted {
+        return Err(err(format!(
+            "incomplete DefinitionPlan census: {:?}",
+            definition_plan.census
+        )));
+    }
     let lifecycle_plan = skull_mir::lifecycle::collect(ws)?;
+    let has_definition_plan = definition_plan.census.declarations > 0;
     let code_slot_stage = code_slot_registration_js(ws, scx.interner(), &code_artifact)?;
     out.push_str(&code_slot_stage);
+    if has_definition_plan && !code_artifact.entries.values().any(|entry| entry.escaping) {
+        out.push_str("__rock_code_slot_begin();\n");
+    }
+    out.push_str(&definition_plan_stage_js(ws, scx.interner(), &definition_plan)?);
     out.push_str(&lifecycle_plan_stage_js(ws, scx.interner(), &lifecycle_plan)?);
     // 5. decorator applications (AFTER inits: a deco body pushes into a ginit-
     //    initialized registry -- D4).
     let applications = decorator_application_lines_js(ws, &deco_names, scx.interner(), &st.names)?;
     out.push_str(&applications);
     stable.push_str(&applications);
-    out.push_str(code_slot_publish_js(&code_artifact));
+    out.push_str(code_slot_publish_js(&code_artifact, has_definition_plan));
 
     // Every definition has been visited, so this is the earliest point where the
     // whole rejection list exists. A non-empty list fails the build and the
@@ -3659,7 +3671,7 @@ pub fn emit_overlay(
             out.push_str(&format!("{wire_name}();\n"));
         }
     }
-    out.push_str(code_slot_publish_js(&current.code_artifact));
+    out.push_str(code_slot_publish_js(&current.code_artifact, false));
     if has_code_slots {
         out.push_str("} catch (e) {\n");
         out.push_str("  __rock_code_slot_abort();\n");
@@ -4616,12 +4628,50 @@ fn code_slot_registration_js(
     Ok(out)
 }
 
-fn code_slot_publish_js(artifact: &CodeArtifact) -> &'static str {
-    if artifact.entries.values().any(|entry| entry.escaping) {
+fn code_slot_publish_js(artifact: &CodeArtifact, has_definition_plan: bool) -> &'static str {
+    if artifact.entries.values().any(|entry| entry.escaping) || has_definition_plan {
         "__rock_code_slot_publish();\n"
     } else {
         ""
     }
+}
+
+fn definition_plan_stage_js(
+    ws: &Workspace,
+    interner: &skull_mir::monoty::MonoInterner,
+    plan: &skull_mir::definition::DefinitionPlan,
+) -> Result<String, CompilerError> {
+    let mut out = String::from("__rock_definition_plan_stage({\n");
+    let mut catalogs: BTreeMap<ustr::Ustr, Vec<_>> = BTreeMap::new();
+    for entry in &plan.entries {
+        catalogs.entry(entry.catalog).or_default().push(entry);
+    }
+    for (catalog, entries) in catalogs {
+        writeln!(
+            out,
+            "{}: {{catalog: {}, len: {}, _data: [",
+            js_string_lit(catalog.as_str())?,
+            js_string_lit(catalog.as_str())?,
+            entries.len()
+        )
+        .unwrap();
+        for entry in entries {
+            let key = entry.identity.logical_key(ws, interner);
+            writeln!(
+                out,
+                "{{catalog: {}, key: {}, name: {}, ordinal: {}, factory: __rock_code_slot_ref({})}},",
+                js_string_lit(entry.catalog.as_str())?,
+                js_string_lit(entry.key.as_str())?,
+                js_string_lit(entry.diagnostic_name.as_str())?,
+                entry.declaration_ordinal,
+                js_string_lit(&key)?,
+            )
+            .unwrap();
+        }
+        out.push_str("]},\n");
+    }
+    out.push_str("});\n");
+    Ok(out)
 }
 
 fn lifecycle_plan_stage_js(
@@ -4974,7 +5024,7 @@ fn decorator_application_lines_js(
                 }
                 let &(dmid, did) = deco_map.get(&ann.name.name).expect("decorator name resolves");
                 let d = &ws.module(dmid).decorators[did];
-                if d.annotations.iter().any(|a| a.name.name.as_str() == "lifecycle") {
+                if skull_mir::definition::is_compiler_owned_decorator(d) {
                     continue;
                 }
                 let fr = FuncRef { module: module.id, func: fid };

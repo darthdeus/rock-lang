@@ -95,6 +95,32 @@ fn main() {}
 }
 
 #[test]
+fn artifact_definition_metadata_emits_a_keyed_plan_without_running_the_decorator() {
+    let emit = emit_mir(r#"
+@artifact_definition(catalog="widgets", key_param="key")
+deco init widget(key: string) {}
+@widget(key="alpha") fn make_alpha() -> int { return 1 }
+@widget(key="beta") fn make_beta() -> int { return 2 }
+fn main() {}
+"#);
+    assert!(!emit.lua.contains("function __deco_widget("), "definition roles are compiler-owned");
+    assert!(!emit.lua.contains("__deco_widget({"), "definition applications do not execute the decorator");
+    assert!(emit.lua.contains("__rock_definition_plan_stage({"));
+    let alpha = emit.lua.find("key = \"alpha\"").expect("alpha plan entry");
+    let beta = emit.lua.find("key = \"beta\"").expect("beta plan entry");
+    assert!(alpha < beta, "definition order is declaration order");
+    assert!(emit.lua.contains("factory = __rock_code_slot_ref(\"named:<test>::make_alpha<>\")"));
+    let out = run_luajit(
+        &format!(
+            "{}\nlocal p = _G.__ROCK_DEFINITION_PLAN.widgets; print(p.len .. ':' .. p._data[1].key .. ':' .. p._data[1].factory())",
+            emit.lua
+        ),
+        "definition_plan_root",
+    );
+    assert_eq!(out, "2:alpha:1");
+}
+
+#[test]
 fn full_publication_replaces_lifecycle_membership_by_logical_key() {
     let v0 = emit_mir(r#"
 @lifecycle(phase="update", owner="session") deco init tick {}

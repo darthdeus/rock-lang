@@ -235,6 +235,38 @@ fn validate_one(
             }
             Ok(())
         }
+        "artifact_definition" => {
+            at(anno, pos, AnnoPos::DecoItem)?;
+            const KEYS: &[&str] = &["catalog", "key_param"];
+            for arg in &anno.args {
+                let Some(key) = arg.name.as_ref() else {
+                    comp_error!(
+                        anno.span,
+                        "`@artifact_definition` arguments must be named: catalog=, key_param="
+                    );
+                };
+                if !KEYS.contains(&key.name.as_str())
+                    || !matches!(arg.value, AnnoValue::String(_))
+                {
+                    comp_error!(
+                        anno.span,
+                        "`@artifact_definition` accepts string arguments catalog= and key_param="
+                    );
+                }
+            }
+            let has = |name: &str| {
+                anno.args
+                    .iter()
+                    .any(|a| a.name.as_ref().is_some_and(|n| n.name.as_str() == name))
+            };
+            if !has("catalog") || !has("key_param") {
+                comp_error!(
+                    anno.span,
+                    "`@artifact_definition` requires catalog= and key_param="
+                );
+            }
+            Ok(())
+        }
         _ if deco_names.contains(&name) => at(anno, pos, AnnoPos::FnItem),
         _ => {
             comp_error!(anno.span, "unknown annotation `@{name}` (registry: docs/annotations-design.md)");

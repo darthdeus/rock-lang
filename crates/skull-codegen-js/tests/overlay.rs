@@ -51,6 +51,32 @@ fn node(source: &str) -> String {
 }
 
 #[test]
+fn definition_plan_publishes_and_aborts_with_the_code_slot_transaction() {
+    let output = node(&format!(
+        "{}\nvar __G = {{}};\n\
+         __rock_code_slot_begin();\n\
+         __rock_code_slot_stage_one(\"probe\", function() {{ return 1; }}, \"abi\");\n\
+         __rock_definition_plan_stage({{panels: {{len: 1, _data: [{{key: \"old\"}}]}}}});\n\
+         __rock_code_slot_publish();\n\
+         var oldPlan = __G.__ROCK_DEFINITION_PLAN;\n\
+         var ok = false;\n\
+         try {{\n\
+           __rock_code_slot_begin();\n\
+           __rock_definition_plan_stage({{panels: {{len: 2, _data: []}}}});\n\
+           __rock_code_slot_stage_one(\"probe\", function() {{ return 2; }}, \"changed-abi\");\n\
+           __rock_code_slot_publish();\n\
+         }} catch (e) {{ ok = true; }}\n\
+         __rock_code_slot_abort();\n\
+         console.log(ok && __rock_definition_plan_pending === null\n\
+           && __G.__ROCK_DEFINITION_PLAN === oldPlan\n\
+           && oldPlan.panels.len === 1\n\
+           && __rock_code_slot_ref(\"probe\").current_body() === 1);",
+        skull_codegen_js::JS_CALL_HELPER
+    ));
+    assert_eq!(output.trim(), "true");
+}
+
+#[test]
 fn const_value_overlay_redefines_users_without_reinitializing_state() {
     let before = ws_with(
         "const WISP_COUNT: int = 5\n\

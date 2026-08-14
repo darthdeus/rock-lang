@@ -68,11 +68,13 @@ function __rock_code_slot_begin()
   _G.__rock_code_slot_pending = {}
   _G.__rock_code_slot_pending_slots = {}
   _G.__rock_lifecycle_plan_pending = nil
+  _G.__rock_definition_plan_pending = nil
 end
 function __rock_code_slot_abort()
   _G.__rock_code_slot_pending = nil
   _G.__rock_code_slot_pending_slots = nil
   _G.__rock_lifecycle_plan_pending = nil
+  _G.__rock_definition_plan_pending = nil
   local pending_wgpu = rawget(_G, "PENDING_WGPU_SHADER_SRCS")
   if pending_wgpu then
     for key in pairs(pending_wgpu) do pending_wgpu[key] = nil end
@@ -87,6 +89,10 @@ end
 function __rock_lifecycle_plan_stage(plan)
   if not _G.__rock_code_slot_pending then error("Rock code slot stage not open", 0) end
   _G.__rock_lifecycle_plan_pending = plan
+end
+function __rock_definition_plan_stage(plan)
+  if not _G.__rock_code_slot_pending then error("Rock code slot stage not open", 0) end
+  _G.__rock_definition_plan_pending = plan
 end
 function __rock_code_slot_publish()
   local pending_wgpu = rawget(_G, "PENDING_WGPU_SHADER_SRCS")
@@ -126,9 +132,13 @@ function __rock_code_slot_publish()
   if _G.__rock_lifecycle_plan_pending ~= nil then
     _G.__ROCK_LIFECYCLE_PLAN = _G.__rock_lifecycle_plan_pending
   end
+  if _G.__rock_definition_plan_pending ~= nil then
+    _G.__ROCK_DEFINITION_PLAN = _G.__rock_definition_plan_pending
+  end
   _G.__rock_code_slot_pending = nil
   _G.__rock_code_slot_pending_slots = nil
   _G.__rock_lifecycle_plan_pending = nil
+  _G.__rock_definition_plan_pending = nil
 end
 if not _G.__rock_fn_mt then
   _G.__rock_fn_mt = {

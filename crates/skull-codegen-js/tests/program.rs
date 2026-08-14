@@ -7,7 +7,7 @@
 //! (`crates/rock-cli/tests/js_run_gate.rs`); this file pins the assembly ORDER
 //! and application-line CONTENT in the emitted string.
 
-use crate::common::ws_with;
+use crate::common::{node, ws_with};
 
 fn emit_program(ws: &bone_semantic::inference::Workspace) -> String {
     let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
@@ -102,6 +102,36 @@ fn main() {}
     let second = js.find("name: \"second\", stage: 7").expect("second plan entry");
     let defaulted = js.find("name: \"defaulted\", stage: 100").expect("default plan entry");
     assert!(first < second && second < defaulted);
+}
+
+#[test]
+fn artifact_definition_metadata_uses_the_shared_keyed_plan_in_js() {
+    let ws = ws_with(r#"
+@artifact_definition(catalog="widgets", key_param="key")
+deco init widget(key: string) {}
+@widget(key="alpha") fn make_alpha() -> int { return 1 }
+@widget(key="beta") fn make_beta() -> int { return 2 }
+fn main() {}
+"#);
+    let js = emit_program(&ws);
+    assert!(!js.contains("function __deco_widget("));
+    assert!(!js.contains("__deco_widget({"));
+    assert!(js.contains("__rock_definition_plan_stage({"));
+    let alpha = js.find("key: \"alpha\"").expect("alpha plan entry");
+    let beta = js.find("key: \"beta\"").expect("beta plan entry");
+    assert!(alpha < beta);
+    assert!(js.contains("factory: __rock_code_slot_ref(\"named:<test>::make_alpha<>\")"));
+    let source = format!(
+        "var __G = {{}};\n{}\n{}\nconsole.log(__G.__ROCK_DEFINITION_PLAN.widgets.len + ':' + __G.__ROCK_DEFINITION_PLAN.widgets._data[0].key + ':' + __rock_call(__G.__ROCK_DEFINITION_PLAN.widgets._data[0].factory));",
+        skull_codegen_js::JS_CALL_HELPER,
+        js
+    );
+    let output = node()
+        .args(["-e", &source])
+        .output()
+        .expect("node");
+    assert!(output.status.success(), "node failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "2:alpha:1");
 }
 
 /// A concrete operation whose ONLY caller is a decorator body is still served.

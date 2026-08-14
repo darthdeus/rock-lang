@@ -115,3 +115,28 @@ if not ok and _G.__rock_lifecycle_plan_pending == nil
     let out = run_luajit(&format!("{lua}{driver}"), "lifecycle_transaction");
     assert_eq!(out, "PASS", "failed staging must retain both old plan membership and old bodies: {out}");
 }
+
+#[test]
+fn definition_plan_publishes_and_aborts_with_the_code_slot_transaction() {
+    let lua = emit_module("fn main() { let f = () => 1; print(f()) }\n");
+    let driver = r#"
+__rock_code_slot_begin()
+__rock_code_slot_stage("probe", function() return 1 end, "abi")
+__rock_definition_plan_stage({ panels = { len = 1, _data = { [1] = { key = "old" } } } })
+__rock_code_slot_publish()
+local old_plan = _G.__ROCK_DEFINITION_PLAN
+local ok = pcall(function()
+  __rock_code_slot_begin()
+  __rock_definition_plan_stage({ panels = { len = 2, _data = {} } })
+  __rock_code_slot_stage("probe", function() return 2 end, "changed-abi")
+  __rock_code_slot_publish()
+end)
+__rock_code_slot_abort()
+if not ok and _G.__rock_definition_plan_pending == nil
+   and _G.__ROCK_DEFINITION_PLAN == old_plan
+   and old_plan.panels.len == 1
+   and __rock_code_slot_ref("probe")() == 1 then print("PASS") else print("FAIL") end
+"#;
+    let out = run_luajit(&format!("{lua}{driver}"), "definition_transaction");
+    assert_eq!(out, "PASS", "failed staging must retain the old definition plan and clear pending state: {out}");
+}

@@ -2236,7 +2236,7 @@ pub(crate) fn build_deco_map(ws: &Workspace) -> (DecoMap, Vec<(ModuleId, Idx<bon
     for module in ws.modules.iter() {
         for (did, d) in module.decorators.iter() {
             deco_map.insert(d.name, (module.id, did));
-            if !d.annotations.iter().any(|a| a.name.name.as_str() == "lifecycle") {
+            if !skull_mir::definition::is_compiler_owned_decorator(d) {
                 deco_items.push((module.id, did));
             }
         }
@@ -2268,7 +2268,7 @@ fn decorator_application_lines(
                     continue;
                 };
                 let d = &ws.module(dmid).decorators[did];
-                if d.annotations.iter().any(|a| a.name.name.as_str() == "lifecycle") {
+                if skull_mir::definition::is_compiler_owned_decorator(d) {
                     continue;
                 }
                 let identity = skull_mir::code_identity::CodeIdentity::Named(Instance::base(
@@ -3151,6 +3151,13 @@ fn assemble(
     // unrelated to a body that cannot emit.
     rejections.into_result()?;
     mark_generated_code_values(ws, &mut code_artifact);
+    let definition_plan = skull_mir::definition::collect(ws)?;
+    if definition_plan.census.applications != definition_plan.census.admitted {
+        return Err(CompilerError::new_no_location(format!(
+            "incomplete DefinitionPlan census: {:?}",
+            definition_plan.census
+        )));
+    }
     let lifecycle_plan = skull_mir::lifecycle::collect(ws)?;
     if lifecycle_plan.census.applications != lifecycle_plan.census.admitted {
         return Err(CompilerError::new_no_location(format!(
@@ -3163,13 +3170,18 @@ fn assemble(
     // the original slot, so the emitted text is unchanged.)
     out.push_str(&globals_lua);
     skipped.extend(global_skipped);
-    if code_artifact.entries.values().any(|entry| entry.escaping) {
+    let has_definition_plan = definition_plan.census.declarations > 0;
+    if code_artifact.entries.values().any(|entry| entry.escaping) || has_definition_plan {
         out.push_str(skull_codegen_lua::FN_MT_PRELUDE);
     }
     // Global initializer bodies (including their escaping lambdas) are now
     // defined, so slot staging must follow them but precede initializer calls.
     let code_slot_stage = code_slot_registration_lua(ws, scx, &code_artifact)?;
     out.push_str(&code_slot_stage);
+    if has_definition_plan && !code_artifact.entries.values().any(|entry| entry.escaping) {
+        out.push_str("__rock_code_slot_begin()\n");
+    }
+    out.push_str(&definition_plan_stage_lua(ws, scx, &definition_plan));
     out.push_str(&lifecycle_plan_stage_lua(ws, scx, &lifecycle_plan));
 
     // Order the init lines by their transitive global-read closure over the full
@@ -3267,7 +3279,7 @@ fn assemble(
     // one top-level `__rock_shader_register(key, glsl)` per distinct pair, so a
     // reload re-`dofile`s them with the new source (hot-reload parity).
     out.push_str(&cache.shader_registrations.lua);
-    out.push_str(code_slot_publish_lua(&code_artifact));
+    out.push_str(code_slot_publish_lua(&code_artifact, has_definition_plan));
     t_scaffold += ts.elapsed();
 
     // `times.emit` brackets emit_function/emit_named/emit_coroutine; `times.regalloc`
@@ -3354,12 +3366,52 @@ fn code_slot_registration_lua(
     Ok(out)
 }
 
-fn code_slot_publish_lua(artifact: &skull_mir::code_identity::CodeArtifact) -> &'static str {
-    if artifact.entries.values().any(|entry| entry.escaping) {
+fn code_slot_publish_lua(
+    artifact: &skull_mir::code_identity::CodeArtifact,
+    has_definition_plan: bool,
+) -> &'static str {
+    if artifact.entries.values().any(|entry| entry.escaping) || has_definition_plan {
         "__rock_code_slot_publish()\n"
     } else {
         ""
     }
+}
+
+fn definition_plan_stage_lua(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    plan: &skull_mir::definition::DefinitionPlan,
+) -> String {
+    let mut out = String::from("__rock_definition_plan_stage({\n");
+    let mut catalogs: std::collections::BTreeMap<Ustr, Vec<_>> = std::collections::BTreeMap::new();
+    for entry in &plan.entries {
+        catalogs.entry(entry.catalog).or_default().push(entry);
+    }
+    for (catalog, entries) in catalogs {
+        let _ = writeln!(
+            out,
+            "[{}] = {{ catalog = {}, len = {}, _data = {{",
+            skull_codegen_lua::lua_string(catalog.as_str()),
+            skull_codegen_lua::lua_string(catalog.as_str()),
+            entries.len()
+        );
+        for (index, entry) in entries.into_iter().enumerate() {
+            let key = entry.identity.logical_key(ws, scx.interner());
+            let _ = writeln!(
+                out,
+                "[{}] = {{ catalog = {}, key = {}, name = {}, ordinal = {}, factory = __rock_code_slot_ref({}) }},",
+                index + 1,
+                skull_codegen_lua::lua_string(entry.catalog.as_str()),
+                skull_codegen_lua::lua_string(entry.key.as_str()),
+                skull_codegen_lua::lua_string(entry.diagnostic_name.as_str()),
+                entry.declaration_ordinal,
+                skull_codegen_lua::lua_string(&key),
+            );
+        }
+        out.push_str("} },\n");
+    }
+    out.push_str("})\n");
+    out
 }
 
 /// Generated registration calls are escaping-value sites even though they do
@@ -4403,7 +4455,7 @@ fn assemble_overlay(
     if shader_changed {
         out.push_str(&cache.shader_registrations.lua);
     }
-    out.push_str(code_slot_publish_lua(&cache.code_artifact));
+    out.push_str(code_slot_publish_lua(&cache.code_artifact, false));
 
     Ok(MirEmit {
         lua: out,
