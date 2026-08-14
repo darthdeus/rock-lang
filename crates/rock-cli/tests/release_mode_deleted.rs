@@ -19,6 +19,15 @@ fn tmp(tag: &str) -> std::path::PathBuf {
 }
 
 #[test]
+fn js_emitter_has_no_release_mode_compatibility_surface() {
+    let emitter = include_str!("../../skull-codegen-js/src/emit.rs");
+    assert!(
+        !emitter.contains("is_release_mode") && !emitter.contains("__ROCK_RELEASE"),
+        "the deleted release-mode hook resurfaced in the JS emitter"
+    );
+}
+
+#[test]
 fn the_global_release_flag_is_rejected() {
     let dir = tmp("flag");
     let src = dir.join("main.rock");

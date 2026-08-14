@@ -218,7 +218,8 @@ fn build_var_change_reaches_incremental_and_overlay() {
     let ws1b = ws_with_inputs(INCR_SRC, inputs_with_var("SHA", "first-sha-value"));
     let (_, mut cache2) = emit_full(&ws1b, mid).expect("emit_full v1b");
     let ws3 = ws_with_inputs(INCR_SRC, inputs_with_var("SHA", "third-sha-value"));
-    let overlay = emit_overlay(&ws3, &mut cache2, &[reinferred_of(&ws3, "other")]);
+    let overlay = emit_overlay(&ws3, &mut cache2, &[reinferred_of(&ws3, "other")])
+        .expect("emit_overlay");
     assert!(
         overlay.lua.contains("third-sha-value"),
         "the overlay must redefine the body reading the changed var:\n{}",
@@ -282,7 +283,8 @@ fn other() -> int {
 
     std::fs::write(dir.path().join("data.txt"), "fn-embed-v2").unwrap();
     let ws2 = ws_with_inputs(src, inputs);
-    let overlay = emit_overlay(&ws2, &mut cache, &[reinferred_of(&ws2, "other")]);
+    let overlay = emit_overlay(&ws2, &mut cache, &[reinferred_of(&ws2, "other")])
+        .expect("emit_overlay");
     assert!(
         overlay.lua.contains("fn-embed-v2"),
         "the overlay must redefine the body embedding the edited file:\n{}",
@@ -364,7 +366,8 @@ fn global_const_build_var_change_reaches_the_overlay() {
 
     // The session saw only an unrelated body edit; the var moved underneath.
     let ws2 = ws_with_inputs(GLOBAL_VAR_SRC, inputs_with_var("SHA", "second-sha-value"));
-    let overlay = emit_overlay(&ws2, &mut cache, &[reinferred_of(&ws2, "other")]);
+    let overlay = emit_overlay(&ws2, &mut cache, &[reinferred_of(&ws2, "other")])
+        .expect("emit_overlay");
     assert!(
         overlay.lua.contains("second-sha-value"),
         "the overlay must re-emit a const init whose build var moved:\n{}",
@@ -400,7 +403,8 @@ fn main() {
 
     std::fs::write(dir.path().join("data.txt"), "overlay-embed-v2").unwrap();
     let ws2 = ws_with_inputs(src, inputs);
-    let overlay = emit_overlay(&ws2, &mut cache, &[reinferred_of(&ws2, "other")]);
+    let overlay = emit_overlay(&ws2, &mut cache, &[reinferred_of(&ws2, "other")])
+        .expect("emit_overlay");
     assert!(
         overlay.lua.contains("overlay-embed-v2"),
         "the overlay must re-emit a const init whose embedded file changed:\n{}",
