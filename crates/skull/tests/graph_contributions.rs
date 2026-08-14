@@ -131,18 +131,40 @@ fn the_operational_censuses_are_sums_of_the_primary_records() {
     let sum = |f: fn(&skull::instance_graph::Contribution) -> usize| -> usize {
         g.contributions.values().map(f).sum()
     };
+    let census = &g.run_stats;
     assert!(g.sites_attempted > 0, "the fixture attempted no sites");
     assert_eq!(g.sites_attempted, sum(|c| c.sites_attempted));
     assert_eq!(g.always_emitted_seeds, sum(|c| c.always_emitted_seeds));
     assert_eq!(g.synthesized_examined, sum(|c| c.synthesized_examined));
     assert_eq!(g.synthesized_approximated, sum(|c| c.synthesized_approximated));
+    assert_eq!(census.body_exprs_scanned, sum(|c| c.body_exprs_scanned));
+    assert_eq!(census.resolved_overload_rows, sum(|c| c.resolved_overload_rows));
+    assert_eq!(census.fn_value_rows, sum(|c| c.fn_value_rows));
+    assert_eq!(census.generated_rows, sum(|c| c.generated_rows));
+    assert_eq!(census.dispatched_rows, sum(|c| c.dispatched_rows));
+    assert_eq!(census.implicit_iter_rows, sum(|c| c.implicit_iter_rows));
+    assert_eq!(census.bound_tree_rows, sum(|c| c.bound_tree_rows));
+    assert_eq!(census.bound_call_rows, sum(|c| c.bound_call_rows));
+    assert_eq!(census.iterator_rows, sum(|c| c.iterator_rows));
     assert_eq!(g.edges().count(), sum(|c| c.edges.len()));
     assert_eq!(
         g.call_sites().map(|(_, m)| m).map(|s| s.len()).sum::<usize>(),
         sum(|c| c.call_sites.len())
     );
-    let census = &g.run_stats;
     assert!(census.owner_visits > 0 && census.first_owner_visits > 0);
+    assert!(
+        census.body_exprs_scanned > 0
+            && census.resolved_overload_rows > 0
+            && census.fn_value_rows > 0
+            && census.bound_tree_rows > 0
+            && census.bound_call_rows > 0
+            && census.iterator_rows > 0,
+        "the repeated body-fact census has no production population: {census:?}"
+    );
+    assert!(
+        census.first_owner_visits > 1 && census.body_exprs_scanned > census.first_owner_visits,
+        "the fixture did not expose repeated source-body materialization: {census:?}"
+    );
     assert!(
         census.duplicate_pending_suppressed > 0,
         "the fixture must expose duplicate pending owners before deduplication"

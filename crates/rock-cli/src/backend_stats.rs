@@ -79,6 +79,8 @@ struct SkullStats {
     /// Setup-lane census from the LAST timed run; overlap is an interval fact,
     /// not a ratio inferred from noisy wall-clock totals.
     setup_lanes: skull::mir_emit::SetupLaneAttribution,
+    /// Graph operation census from the LAST timed run.
+    graph_census: skull::instance_graph::RunStats,
 }
 
 pub fn do_backend_stats(input: &str, iters: usize, warmup: usize) -> Result<()> {
@@ -153,6 +155,7 @@ fn run_skull(sources: &SourceFiles, iters: usize, warmup: usize) -> SkullStats {
         stats.arena_traffic = times.arena_traffic;
         stats.attribution = times.attribution;
         stats.setup_lanes = times.setup_lanes;
+        stats.graph_census = times.graph_census;
     }
     stats.files = sources.files.len();
     stats
@@ -356,6 +359,23 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
             lanes.cpu_shader_overlap,
             lanes.abi_cpu_overlap,
             lanes.abi_shader_overlap,
+        );
+    }
+    let graph = &skull.graph_census;
+    if graph.owner_visits > 0 {
+        println!(
+            "  graph body facts (one timed run): {} owners, {} expanded; expressions {}, overloads {}, fn-values {}, generated {}, dispatched {}, implicit-iter {}, bound-trees {}, bound-calls {}, iterators {}",
+            graph.owner_visits,
+            graph.expanded,
+            graph.body_exprs_scanned,
+            graph.resolved_overload_rows,
+            graph.fn_value_rows,
+            graph.generated_rows,
+            graph.dispatched_rows,
+            graph.implicit_iter_rows,
+            graph.bound_tree_rows,
+            graph.bound_call_rows,
+            graph.iterator_rows,
         );
     }
     let memo = &skull.abi_plan_stats;

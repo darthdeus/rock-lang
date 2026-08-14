@@ -477,6 +477,9 @@ pub struct MirEmit {
     /// The overlap bits come from the lanes' actual execution intervals, not
     /// from a wall-clock estimate.
     pub setup_lanes: SetupLaneAttribution,
+    /// Operational graph work and repeated source-fact populations from the
+    /// graph used by this emission.
+    pub graph_census: crate::instance_graph::RunStats,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -3862,6 +3865,7 @@ fn assemble(
             attribution: attribution.finish(),
             arena_traffic: ArenaTraffic::default(),
             setup_lanes: SetupLaneAttribution::default(),
+            graph_census: crate::instance_graph::RunStats::default(),
         },
         emitted_bodies,
     ))
@@ -4338,6 +4342,7 @@ fn emit_full_in_with_mutation(
     let mut cache = cache;
     cache.emitted = emitted;
     cache.absorb_spec_chunks(built_specs);
+    emit.graph_census = cache.graph.run_stats;
     Ok((emit, cache))
 }
 
@@ -5019,6 +5024,7 @@ fn assemble_overlay(
         attribution: EmitAttribution::default(),
         arena_traffic: ArenaTraffic::default(),
         setup_lanes: SetupLaneAttribution::default(),
+        graph_census: crate::instance_graph::RunStats::default(),
     }
 }
 

@@ -411,6 +411,15 @@ pub struct Contribution {
     /// The expansion was cut by [`MAX_INSTANTIATION_DEPTH`].
     pub depth_capped: bool,
     pub sites_attempted: usize,
+    pub body_exprs_scanned: usize,
+    pub resolved_overload_rows: usize,
+    pub fn_value_rows: usize,
+    pub generated_rows: usize,
+    pub dispatched_rows: usize,
+    pub implicit_iter_rows: usize,
+    pub bound_tree_rows: usize,
+    pub bound_call_rows: usize,
+    pub iterator_rows: usize,
     pub always_emitted_seeds: usize,
     pub synthesized_examined: usize,
     pub synthesized_approximated: usize,
@@ -1482,6 +1491,20 @@ pub fn build_in(
             stats.uninstall_ns as f64 / 1_000_000.0,
             stats.index_maintenance_ns as f64 / 1_000_000.0,
         );
+        log::debug!(
+            "graph body-fact census: expression rows {}, overload rows {}, fn-value rows {}, \
+             generated rows {}, dispatched rows {}, implicit-iter rows {}, bound-tree rows {}, \
+             bound-call rows {}, iterator rows {}",
+            stats.body_exprs_scanned,
+            stats.resolved_overload_rows,
+            stats.fn_value_rows,
+            stats.generated_rows,
+            stats.dispatched_rows,
+            stats.implicit_iter_rows,
+            stats.bound_tree_rows,
+            stats.bound_call_rows,
+            stats.iterator_rows,
+        );
     }
     g
 }
@@ -1705,6 +1728,15 @@ impl InstanceGraph {
                 stats.witness_bound_tree_ns += c.timing.witness_bound_tree_ns;
                 stats.walk_body_edges_ns += c.timing.walk_body_edges_ns;
                 stats.walk_struct_default_edges_ns += c.timing.walk_struct_default_edges_ns;
+                stats.body_exprs_scanned += c.body_exprs_scanned;
+                stats.resolved_overload_rows += c.resolved_overload_rows;
+                stats.fn_value_rows += c.fn_value_rows;
+                stats.generated_rows += c.generated_rows;
+                stats.dispatched_rows += c.dispatched_rows;
+                stats.implicit_iter_rows += c.implicit_iter_rows;
+                stats.bound_tree_rows += c.bound_tree_rows;
+                stats.bound_call_rows += c.bound_call_rows;
+                stats.iterator_rows += c.iterator_rows;
                 let (demanded, install_timing) = self.install(owner, c, timing_enabled);
                 stats.uninstall_ns += install_timing.uninstall_ns;
                 stats.index_maintenance_ns += install_timing.index_maintenance_ns;
@@ -2657,6 +2689,15 @@ pub struct RunStats {
     pub walk_struct_default_edges_ns: u64,
     pub uninstall_ns: u64,
     pub index_maintenance_ns: u64,
+    pub body_exprs_scanned: usize,
+    pub resolved_overload_rows: usize,
+    pub fn_value_rows: usize,
+    pub generated_rows: usize,
+    pub dispatched_rows: usize,
+    pub implicit_iter_rows: usize,
+    pub bound_tree_rows: usize,
+    pub bound_call_rows: usize,
+    pub iterator_rows: usize,
     /// How many times the conformance fixpoint had to walk owners again.
     ///
     /// Published because a guard with no population reads as load-bearing when
@@ -2739,6 +2780,14 @@ fn walk_body_edges(
     only: Option<&FxHashSet<Idx<bone_semantic::hir::Expr>>>,
 ) {
     let reached = |e: Idx<bone_semantic::hir::Expr>| only.is_none_or(|s| s.contains(&e));
+    if let Some(body) = body {
+        w.out.body_exprs_scanned += body.expr_arena.len();
+    }
+    w.out.resolved_overload_rows += inf.resolved_overload_calls.len();
+    w.out.implicit_iter_rows += inf.implicit_iter_args.len();
+    w.out.bound_tree_rows += inf.bound_call_trees.len();
+    w.out.bound_call_rows += inf.bound_calls.len();
+    w.out.iterator_rows += inf.for_iter_protocol.len();
     let mut resolved_calls: FxHashMap<Idx<bone_semantic::hir::Expr>, Instance> =
         FxHashMap::default();
     let mut calls: Vec<(Idx<bone_semantic::hir::Expr>, (ModuleId, Idx<Function>))> =
@@ -2763,7 +2812,9 @@ fn walk_body_edges(
     }
 
     if let Some(body) = body {
-        for (e, callee) in fn_value_sites(ws, inf, body).into_iter().filter(|(e, _)| reached(*e)) {
+        let fn_values = fn_value_sites(ws, inf, body);
+        w.out.fn_value_rows += fn_values.len();
+        for (e, callee) in fn_values.into_iter().filter(|(e, _)| reached(*e)) {
             let span = body.expr_spans.get(e).copied().unwrap_or_else(Span::unknown);
             let cf = &ws.module(callee.module).functions[callee.func];
             if cf.generics.is_empty() {
@@ -2804,6 +2855,7 @@ fn walk_body_edges(
             ws, inf, body, subst, &mut w.out.synthesized_examined, &mut failures,
             &mut w.out.synthesized_approximated,
         );
+        w.out.generated_rows += sites.len();
         add_elapsed(&mut w.out.timing.signature_type_conversion_ns, conversion_start);
         for (e, reason) in failures {
             w.out.storage_failures.push(reason.clone());
@@ -2833,7 +2885,9 @@ fn walk_body_edges(
         // ORDINARY stdlib declaration whose own boundary class already answers
         // for it -- filing `inspect` as an erased runtime entry would relabel a
         // real `inline(lua)` body.
-        let dispatched = dispatched_sites(ws, inf, body, subst, domain)
+        let dispatched_sites = dispatched_sites(ws, inf, body, subst, domain);
+        w.out.dispatched_rows += dispatched_sites.len();
+        let dispatched = dispatched_sites
             .into_iter()
             .map(|(site, name)| (site, name, false));
         let generated = sites
