@@ -400,7 +400,7 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
             graph.frontier_same_frontier_dependency_owners,
         );
         println!(
-            "  graph expansion: total/p50/p95/max {} / {} / {} / {} us; mono attempts/new/read/write {}/{}/{}/{}; interner elapsed {:.3} ms",
+            "  graph expansion: total/p50/p95/max {} / {} / {} / {} us; mono attempts/new/read/write {}/{}/{}/{}; expansion elapsed {:.3} ms",
             graph.expansion_ns_total / 1_000,
             graph.expansion_ns_p50 / 1_000,
             graph.expansion_ns_p95 / 1_000,
