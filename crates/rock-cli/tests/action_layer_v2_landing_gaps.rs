@@ -99,6 +99,11 @@ fn binding_changes_survive_a_fresh_process() {
         binding_path.is_file(),
         "writer must leave the pref-root binding file"
     );
+    let settings_path = data.join("darth.games").join("mag").join("settings.json");
+    assert!(
+        settings_path.is_file(),
+        "writer must leave the pref-root settings file"
+    );
 
     let reader = run("bindings_restart_reader");
     assert_sim_pass("bindings_restart_reader", &reader);
