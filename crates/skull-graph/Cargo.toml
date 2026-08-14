@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
+sequential = []
 test-hooks = []
 
 # The TARGET-NEUTRAL instance graph and the per-artifact views over it

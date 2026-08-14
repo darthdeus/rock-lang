@@ -9,10 +9,10 @@ autotests = false
 # Lua, independent of rock's `rock-codegen`. See docs/skull-plan.md.
 
 [features]
-# Swap skull's parallel emit/inline (rayon) for sequential iteration, so a
+# Swap skull's and skull-graph's Rayon fanouts for sequential iteration, so a
 # sampling profiler attributes codegen samples to one thread (clean flamegraphs).
 # Mirrors bone's `sequential`. Wired through rock-cli's `sequential` feature.
-sequential = []
+sequential = ["skull-graph/sequential"]
 
 [dependencies]
 bone-semantic = { path = "../bone-semantic" }

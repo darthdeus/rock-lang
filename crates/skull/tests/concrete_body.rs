@@ -1237,6 +1237,7 @@ fn concrete_result_order_gate_exercises_the_reversed_merge_population() {
 }
 
 #[test]
+#[cfg(not(feature = "sequential"))]
 fn concrete_reverse_completion_gate_exercises_parallel_publication() {
     let ws = check(RICH);
     let roots = skull::mir_emit::emission_roots(&ws, None);
@@ -1281,6 +1282,21 @@ fn concrete_reverse_completion_gate_exercises_parallel_publication() {
     assert!(census.iterator_ops.values().sum::<usize>() > 0, "fixture published no iterator rows");
     assert!(census.synthesized_calls > 0, "fixture published no synthesized-call rows");
     assert!(!scheduled.always_plans.is_empty(), "fixture published no always-emitted plans");
+}
+
+#[cfg(feature = "sequential")]
+#[test]
+fn concrete_sequential_route_uses_one_worker_without_parallel_handshake() {
+    let ws = check(RICH);
+    let roots = skull::mir_emit::emission_roots(&ws, None);
+    let graph = instance_graph::build(&ws, roots, false);
+    let (scheduled, trace) = concrete_body::build_with_default_trace(&ws, &graph);
+
+    assert!(scheduled.plans.len() > 1, "fixture exposed too few ordinary plans");
+    assert!(!scheduled.always_plans.is_empty(), "fixture exposed no always-emitted plans");
+    assert_eq!(trace.worker_count, 1, "sequential ordinary production used multiple workers");
+    assert_eq!(trace.always_worker_count, 1, "sequential always-emitted production used multiple workers");
+    assert_eq!(trace.scheduler_entries, 0, "sequential production entered the parallel scheduler handshake");
 }
 
 #[test]
