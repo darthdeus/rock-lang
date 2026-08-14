@@ -537,6 +537,7 @@ pub struct AttributionPhase {
     pub concrete_mono_derivations: usize,
     pub concrete_mono_cloned_nodes: usize,
     pub abi_param_copy_volume: usize,
+    pub abi_param_shared_views: usize,
     pub mir_instruction_allocations: usize,
     pub mir_instruction_reallocations: usize,
     pub mir_instruction_capacity: usize,
@@ -789,6 +790,7 @@ impl AttributionAccumulator {
         self.result.lower.concrete_mono_derivations += unit.lower_facts.concrete_mono_derivations;
         self.result.lower.concrete_mono_cloned_nodes += unit.lower_facts.concrete_mono_cloned_nodes;
         self.result.lower.abi_param_copy_volume += unit.lower_facts.abi_param_copy_volume;
+        self.result.lower.abi_param_shared_views += unit.lower_facts.abi_param_shared_views;
         self.result.lower.mir_instruction_allocations += unit.lower_facts.mir_instruction_allocations;
         self.result.lower.mir_instruction_reallocations += unit.lower_facts.mir_instruction_reallocations;
         self.result.lower.mir_instruction_capacity += unit.lower_facts.mir_instruction_capacity;
@@ -5735,8 +5737,8 @@ fn main() { let result = first() }
             bounded_emit.attribution
         );
         assert!(
-            bounded_emit.attribution.lower.abi_param_copy_volume > 0,
-            "the parameter-representation copy census has no bounded-body population: {:?}",
+            bounded_emit.attribution.lower.abi_param_shared_views > 0,
+            "lowerer did not exercise the shared ABI parameter view: {:?}",
             bounded_emit.attribution
         );
 

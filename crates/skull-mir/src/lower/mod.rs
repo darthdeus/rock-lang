@@ -47,6 +47,7 @@ pub struct LowerAttribution {
     pub concrete_mono_derivations: usize,
     pub concrete_mono_cloned_nodes: usize,
     pub abi_param_copy_volume: usize,
+    pub abi_param_shared_views: usize,
     pub mir_instruction_allocations: usize,
     pub mir_instruction_reallocations: usize,
     pub mir_instruction_capacity: usize,
@@ -65,6 +66,7 @@ impl LowerAttribution {
         self.concrete_mono_derivations += other.concrete_mono_derivations;
         self.concrete_mono_cloned_nodes += other.concrete_mono_cloned_nodes;
         self.abi_param_copy_volume += other.abi_param_copy_volume;
+        self.abi_param_shared_views += other.abi_param_shared_views;
         self.mir_instruction_allocations += other.mir_instruction_allocations;
         self.mir_instruction_reallocations += other.mir_instruction_reallocations;
         self.mir_instruction_capacity += other.mir_instruction_capacity;
@@ -1303,7 +1305,7 @@ fn lower_body(
     // not be in the shared map.
     let abi = owner_abi_plan_for_body(ws, scx, concrete_plans, &subject, concrete_plan)?;
     f.abi_plan = Some(abi.clone());
-    let param_reps = abi.representation().params().to_vec();
+    let param_rep_count = abi.representation().params().len();
     let ret_rep = abi.representation().result();
     let mut b = Builder {
         ws,
@@ -1312,7 +1314,8 @@ fn lower_body(
         concrete_plans,
         concrete_type_cache: RefCell::new(rustc_hash::FxHashMap::default()),
         lower_attribution: RefCell::new(LowerAttribution {
-            abi_param_copy_volume: param_reps.len(),
+            abi_param_copy_volume: 0,
+            abi_param_shared_views: usize::from(param_rep_count > 0),
             ..LowerAttribution::default()
         }),
         generic_bounds: &func.generic_bounds,
@@ -1328,7 +1331,8 @@ fn lower_body(
         resume_arg,
         // A coroutine body emits via `emit_coroutine` before `inline_functions`
         // runs, so it is never spliced -- box value args (see field docs).
-        param_reps,
+        param_reps: Vec::new(),
+        param_plan: Some(abi.clone()),
         ret_rep,
         fn_name_span: Some(func.name_span),
         cur_span: None,
@@ -1425,6 +1429,7 @@ fn lower_global_inner(
         resume_arg: None,
         // Global-init bodies never run `inline_functions` -- box value args.
         param_reps: Vec::new(),
+        param_plan: None,
         ret_rep: None,
         fn_name_span: None,
         cur_span: None,
@@ -1734,6 +1739,7 @@ fn lower_decorator_inner(
         resume_arg: None,
         // Decorator bodies never run `inline_functions` -- box value args.
         param_reps: Vec::new(),
+        param_plan: None,
         ret_rep: None,
         fn_name_span: None,
         cur_span: None,
@@ -1810,6 +1816,8 @@ struct Builder<'a> {
     /// `body.param_bindings`. Shape structs are projected only at the
     /// flatten/rebuild seams; this is the body-owned ABI answer.
     param_reps: Vec<RepId>,
+    /// The ordinary body's ABI owns this immutable parameter slice.
+    param_plan: Option<BackendFnAbiPlanHandle>,
     /// The body's physical result representation identity, if it has one.
     ret_rep: Option<RepId>,
     /// The fn's name span, for spanned emit-time rejections that have no better
@@ -1895,9 +1903,11 @@ impl Builder<'_> {
     }
 
     fn param_slot(&self, index: usize) -> RetSlot {
-        self.param_reps
-            .get(index)
+        self.param_plan
+            .as_ref()
+            .and_then(|plan| plan.representation().params().get(index))
             .copied()
+            .or_else(|| self.param_reps.get(index).copied())
             .map(|id| self.rep_slot(id))
             .unwrap_or(RetSlot::Opaque)
     }

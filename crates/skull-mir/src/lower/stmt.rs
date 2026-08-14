@@ -149,6 +149,7 @@ impl Builder<'_> {
             // A hoisted nested fn is emitted via `emit_nested_fns`, which never
             // runs `inline_functions` -- box value args.
             param_reps,
+            param_plan: None,
             ret_rep: abi.representation.result(),
             // A nested fn is emitted as a sibling top-level Lua fn and is never a
             // GLSL callee (referenced indirectly), so a return coercion here is
