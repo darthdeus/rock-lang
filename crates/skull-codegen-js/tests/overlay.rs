@@ -77,6 +77,16 @@ fn definition_plan_publishes_and_aborts_with_the_code_slot_transaction() {
 }
 
 #[test]
+fn programs_without_definition_roles_do_not_stage_an_empty_plan() {
+    let ws = ws_with("fn main() {}\n");
+    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).expect("test module");
+    let program = skull_codegen_js::emit::emit_program(&ws, mid).expect("emit program").program;
+    assert!(!program.contains("__rock_definition_plan_stage("));
+    let output = node(&format!("var __G = {{}};\n{}\nconsole.log('PASS');", program));
+    assert_eq!(output.trim(), "PASS");
+}
+
+#[test]
 fn const_value_overlay_redefines_users_without_reinitializing_state() {
     let before = ws_with(
         "const WISP_COUNT: int = 5\n\

@@ -4641,6 +4641,9 @@ fn definition_plan_stage_js(
     interner: &skull_mir::monoty::MonoInterner,
     plan: &skull_mir::definition::DefinitionPlan,
 ) -> Result<String, CompilerError> {
+    if plan.census.declarations == 0 {
+        return Ok(String::new());
+    }
     let mut out = String::from("__rock_definition_plan_stage({\n");
     let mut catalogs: BTreeMap<ustr::Ustr, Vec<_>> = BTreeMap::new();
     for entry in &plan.entries {
