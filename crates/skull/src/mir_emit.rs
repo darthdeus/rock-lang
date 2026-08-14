@@ -492,6 +492,17 @@ pub struct SetupLaneAttribution {
     pub cpu_shader_overlap: bool,
     pub abi_cpu_overlap: bool,
     pub abi_shader_overlap: bool,
+    pub first_started_lane: Option<SetupLaneKind>,
+    pub mono_write_acqs_during_join: u64,
+    pub mono_intern_attempts_during_join: u64,
+    pub mono_intern_new_during_join: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SetupLaneKind {
+    CpuArtifact,
+    Shader,
+    AbiWarm,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -503,6 +514,21 @@ struct SetupLaneWindow {
 
 fn setup_lanes_overlap(left: SetupLaneWindow, right: SetupLaneWindow) -> bool {
     left.started < right.finished && right.started < left.finished
+}
+
+fn first_setup_lane(
+    cpu: SetupLaneWindow,
+    shader: SetupLaneWindow,
+    abi: SetupLaneWindow,
+) -> SetupLaneKind {
+    let mut first = (cpu.started, SetupLaneKind::CpuArtifact);
+    if shader.started < first.0 {
+        first = (shader.started, SetupLaneKind::Shader);
+    }
+    if abi.started < first.0 {
+        first = (abi.started, SetupLaneKind::AbiWarm);
+    }
+    first.1
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1553,6 +1579,59 @@ enum BodyMutation {
     ClearIteratorWitnessInstance { body: FuncRef },
     #[cfg(test)]
     SkipAbiPlanPublish,
+    #[cfg(test)]
+    SetupLaneSchedule(SetupLaneSchedule),
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+enum SetupLaneSchedule {
+    CpuFirst,
+    AbiFirst,
+}
+
+#[cfg(all(test, not(feature = "sequential")))]
+struct SetupLaneScheduler {
+    first: SetupLaneKind,
+    finished: std::sync::Mutex<bool>,
+    wake: std::sync::Condvar,
+}
+
+#[cfg(all(test, not(feature = "sequential")))]
+impl SetupLaneScheduler {
+    fn new(first: SetupLaneKind) -> Self {
+        Self {
+            first,
+            finished: std::sync::Mutex::new(false),
+            wake: std::sync::Condvar::new(),
+        }
+    }
+
+    fn wait(&self, lane: SetupLaneKind) {
+        if lane == self.first {
+            return;
+        }
+        let mut finished = self.finished.lock().expect("setup scheduler lock");
+        while !*finished {
+            finished = self.wake.wait(finished).expect("setup scheduler wait");
+        }
+    }
+
+    fn finish(&self, lane: SetupLaneKind) {
+        if lane != self.first {
+            return;
+        }
+        *self.finished.lock().expect("setup scheduler lock") = true;
+        self.wake.notify_all();
+    }
+}
+
+#[cfg(all(test, not(feature = "sequential")))]
+fn setup_lane_first(schedule: SetupLaneSchedule) -> SetupLaneKind {
+    match schedule {
+        SetupLaneSchedule::CpuFirst => SetupLaneKind::CpuArtifact,
+        SetupLaneSchedule::AbiFirst => SetupLaneKind::AbiWarm,
+    }
 }
 
 /// The shared body of `fref` -- the id under which a declaration's own
@@ -2009,7 +2088,8 @@ fn emit_body_chunk_with_mutation(
                 BodyMutation::ClearBoundPlan { .. } => unreachable!(),
                 BodyMutation::ClearCoroutineResultPlan { .. } => unreachable!(),
                 BodyMutation::ClearIteratorWitnessInstance { .. }
-                | BodyMutation::SkipAbiPlanPublish => unreachable!(),
+                | BodyMutation::SkipAbiPlanPublish
+                | BodyMutation::SetupLaneSchedule(_) => unreachable!(),
             }
         }
         #[cfg(test)]
@@ -4173,16 +4253,30 @@ fn emit_full_in_with_mutation(
     #[cfg(not(test))]
     let skip_abi_plan_publish = false;
 
+    #[cfg(all(test, not(feature = "sequential")))]
+    let setup_scheduler = match mutation {
+        BodyMutation::SetupLaneSchedule(schedule) => Some(std::sync::Arc::new(
+            SetupLaneScheduler::new(setup_lane_first(schedule)),
+        )),
+        _ => None,
+    };
+
     let t_setup = Instant::now();
-    // These lanes only read the graph after construction. ABI plans carry their
-    // own representation arena, so the warmed context is adopted after join.
+    // The graph is complete before these lanes start; shared interning remains
+    // synchronized. ABI plans carry their own representation arena, so the
+    // warmed context is adopted after join.
     let shader_plans = std::sync::Arc::clone(&concrete.plans);
     let abi_plans = std::sync::Arc::clone(&concrete.plans);
     let abi_always_plans = &concrete.always_plans;
+    let mono_before_lanes = graph.interner().stats();
     let ((cpu_result, shader_result), (abi_scx, abi_lane)) = parallel_join(
         || {
             parallel_join(
                 || {
+                    #[cfg(all(test, not(feature = "sequential")))]
+                    setup_scheduler
+                        .as_deref()
+                        .map(|scheduler| scheduler.wait(SetupLaneKind::CpuArtifact));
                     let started = Instant::now();
                     let lua_view = crate::artifact::realize(
                         ws,
@@ -4196,6 +4290,10 @@ fn emit_full_in_with_mutation(
                     let scx = skull_mir::lower::ScalarCtx::new(ws)
                         .sharing(std::sync::Arc::clone(graph.interner()));
                     let finished = Instant::now();
+                    #[cfg(all(test, not(feature = "sequential")))]
+                    setup_scheduler
+                        .as_deref()
+                        .map(|scheduler| scheduler.finish(SetupLaneKind::CpuArtifact));
                     (
                         lua_view,
                         scx,
@@ -4203,6 +4301,10 @@ fn emit_full_in_with_mutation(
                     )
                 },
                 || {
+                    #[cfg(all(test, not(feature = "sequential")))]
+                    setup_scheduler
+                        .as_deref()
+                        .map(|scheduler| scheduler.wait(SetupLaneKind::Shader));
                     let started = Instant::now();
                     // The overload set lives in `cg` (computed once there);
                     // borrow it rather than rescanning the workspace.
@@ -4232,6 +4334,10 @@ fn emit_full_in_with_mutation(
                     })();
                     let population = result.as_ref().map(|(_, _, population)| *population).unwrap_or(0);
                     let finished = Instant::now();
+                    #[cfg(all(test, not(feature = "sequential")))]
+                    setup_scheduler
+                        .as_deref()
+                        .map(|scheduler| scheduler.finish(SetupLaneKind::Shader));
                     (
                         result.map(|(view, registrations, _)| (view, registrations)),
                         SetupLaneWindow { started, finished, population },
@@ -4240,6 +4346,10 @@ fn emit_full_in_with_mutation(
             )
         },
         || {
+            #[cfg(all(test, not(feature = "sequential")))]
+            setup_scheduler
+                .as_deref()
+                .map(|scheduler| scheduler.wait(SetupLaneKind::AbiWarm));
             let started = Instant::now();
             let mut abi_scx = skull_mir::lower::ScalarCtx::new(ws)
                 .sharing(std::sync::Arc::clone(graph.interner()));
@@ -4248,12 +4358,17 @@ fn emit_full_in_with_mutation(
             }
             let population = abi_scx.abi_plan_stats().warm_keys as usize;
             let finished = Instant::now();
+            #[cfg(all(test, not(feature = "sequential")))]
+            setup_scheduler
+                .as_deref()
+                .map(|scheduler| scheduler.finish(SetupLaneKind::AbiWarm));
             (
                 abi_scx,
                 SetupLaneWindow { started, finished, population },
             )
         },
     );
+    let mono_after_lanes = graph.interner().stats();
     let (lua_view, mut scx, cpu_lane) = cpu_result;
     let (shader_result, shader_lane) = shader_result;
     let (shader_view, shader_registrations) = shader_result?;
@@ -4265,6 +4380,16 @@ fn emit_full_in_with_mutation(
         cpu_shader_overlap: setup_lanes_overlap(cpu_lane, shader_lane),
         abi_cpu_overlap: setup_lanes_overlap(abi_lane, cpu_lane),
         abi_shader_overlap: setup_lanes_overlap(abi_lane, shader_lane),
+        first_started_lane: Some(first_setup_lane(cpu_lane, shader_lane, abi_lane)),
+        mono_write_acqs_during_join: mono_after_lanes
+            .write_acqs
+            .saturating_sub(mono_before_lanes.write_acqs),
+        mono_intern_attempts_during_join: mono_after_lanes
+            .intern_attempts
+            .saturating_sub(mono_before_lanes.intern_attempts),
+        mono_intern_new_during_join: mono_after_lanes
+            .intern_new
+            .saturating_sub(mono_before_lanes.intern_new),
     };
     setup_phases.push(("setup: artifact+shader+ABI lanes", t_setup.elapsed()));
     setup_phases.push(("join: cpu artifact branch", cpu_lane.finished - cpu_lane.started));
@@ -5277,10 +5402,15 @@ fn main() { let result = top() }
 "#;
 
     const SETUP_SRC: &str = r#"
+@nomangle inline(lua) fn publish(value: int) -> int = "return value"
+
 @shader(fragment)
 fn frag(tc: Vec2) -> Vec4 { return v(tc.x, 0.0, 0.0, 1.0) }
 
-fn main() { let shader = rock_shader(frag) }
+fn main() {
+    let shader = rock_shader(frag)
+    let published = publish(7)
+}
 "#;
 
     static STDLIB: std::sync::LazyLock<Vec<skull_parser::Ast>> = std::sync::LazyLock::new(|| {
@@ -5818,6 +5948,82 @@ fn main() { let result = outer(1) }
         assert!(
             !lanes.cpu_shader_overlap && !lanes.abi_cpu_overlap && !lanes.abi_shader_overlap,
             "sequential setup must not report overlap: {lanes:?}"
+        );
+    }
+
+    #[cfg(not(feature = "sequential"))]
+    #[test]
+    fn setup_lanes_preserve_identity_under_reversed_scheduling() {
+        let _inline = InlineOn::on();
+        let ws = setup_workspace();
+        let mid = *ws
+            .module_ids
+            .get(&Ustr::from("<setup-lane-test>"))
+            .expect("setup test module");
+        let emit = |schedule| {
+            emit_full_in_with_test_mutation(
+                &ws,
+                mid,
+                BodyMutation::SetupLaneSchedule(schedule),
+            )
+            .expect("setup lane emission")
+        };
+        let (cpu_first, cpu_cache) = emit(SetupLaneSchedule::CpuFirst);
+        let (abi_first, abi_cache) = emit(SetupLaneSchedule::AbiFirst);
+
+        for (name, emit, cache, expected_first) in [
+            (
+                "CPU-first",
+                &cpu_first,
+                &cpu_cache,
+                SetupLaneKind::CpuArtifact,
+            ),
+            ("ABI-first", &abi_first, &abi_cache, SetupLaneKind::AbiWarm),
+        ] {
+            assert!(
+                emit.setup_lanes.cpu_population > 0
+                    && emit.setup_lanes.shader_population > 0
+                    && emit.setup_lanes.abi_population > 0,
+                "{name} schedule must exercise every setup lane: {:?}",
+                emit.setup_lanes
+            );
+            assert_eq!(
+                emit.setup_lanes.first_started_lane,
+                Some(expected_first),
+                "{name} schedule did not force the requested first lane: {:?}",
+                emit.setup_lanes
+            );
+            assert!(
+                emit.setup_lanes.mono_write_acqs_during_join > 0
+                    && emit.setup_lanes.mono_intern_attempts_during_join > 0,
+                "{name} fixture must expose the shared interner write population: {:?}",
+                emit.setup_lanes
+            );
+            assert!(
+                cache.lua_view().publisher_lanes.len() > 0,
+                "{name} fixture must publish a concrete foreign body: {:?}",
+                cache.lua_view().census()
+            );
+            assert!(
+                cache.shader_view().roots.len() > 0,
+                "{name} fixture must retain a shader root: {:?}",
+                cache.shader_view().roots.len()
+            );
+        }
+
+        assert_eq!(
+            cpu_first.lua, abi_first.lua,
+            "reversing setup scheduling changed the Lua artifact"
+        );
+        assert_eq!(
+            cpu_cache.lua_view().publisher_lanes,
+            abi_cache.lua_view().publisher_lanes,
+            "reversing setup scheduling changed publisher ABI identity"
+        );
+        assert_eq!(
+            cpu_cache.shader_registration_contracts(),
+            abi_cache.shader_registration_contracts(),
+            "reversing setup scheduling changed shader ABI identity"
         );
     }
 }
