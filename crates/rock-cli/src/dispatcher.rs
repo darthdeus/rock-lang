@@ -278,6 +278,7 @@ impl CommandContext {
             self.args.replay.as_deref(),
             self.args.checkpoint_interval,
             &self.args.app_args,
+            self.args.renderer,
         )
     }
 

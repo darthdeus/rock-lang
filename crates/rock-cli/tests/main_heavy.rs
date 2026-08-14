@@ -28,6 +28,10 @@ mod engine_cdylib_freshness_gate;
 
 #[path = "frame_error_gate.rs"]
 mod frame_error_gate;
+#[path = "frame_watchdog_gate.rs"]
+mod frame_watchdog_gate;
+#[path = "macos_wgpu_lifecycle_gate.rs"]
+mod macos_wgpu_lifecycle_gate;
 #[path = "wgpu_refusal_gate.rs"]
 mod wgpu_refusal_gate;
 #[path = "wgpu_capture_gate.rs"]

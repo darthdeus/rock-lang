@@ -994,34 +994,32 @@ pub fn do_perf(
     Ok(())
 }
 
-/// Wall-clock watchdog for a `rock frame` run: a startup allowance plus a
-/// per-frame budget, so the ceiling tracks the work actually requested. A flat
-/// budget starved slow-booting games -- mag spends ~1.5s registering props and
-/// loading the level before frame 1, leaving `-n 100` at ~24ms/frame no room.
-/// ROCK_FRAME_TIMEOUT_SECS overrides it outright.
-fn frame_timeout(frames: usize, dump_state: bool, app_args: &[String]) -> Duration {
-    if let Some(secs) = std::env::var("ROCK_FRAME_TIMEOUT_SECS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-    {
-        return Duration::from_secs(secs);
+/// A bounded frame run gets a startup allowance, then must report completed
+/// frames often enough to show it is alive. The old total budget grew with the
+/// requested frame count and killed legitimate slow runs. The explicit env
+/// override remains the escape hatch for unusually slow startup or frames.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FrameWatchdogConfig {
+    startup: Duration,
+    inactivity: Duration,
+    override_secs: Option<u64>,
+}
+
+fn frame_watchdog_config(override_secs: Option<u64>) -> FrameWatchdogConfig {
+    let duration = override_secs.map(Duration::from_secs);
+    FrameWatchdogConfig {
+        startup: duration.unwrap_or(Duration::from_secs(5)),
+        inactivity: duration.unwrap_or(Duration::from_secs(5)),
+        override_secs,
     }
+}
 
-    const STARTUP: Duration = Duration::from_secs(5);
-    const PER_FRAME: Duration = Duration::from_millis(50);
-
-    // app_args (headless video extraction) and dump_state (JSON-serializing
-    // every global) add work the frame count doesn't predict, so they raise the
-    // floor -- a big -n still outgrows it.
-    let floor = if !app_args.is_empty() {
-        Duration::from_secs(30)
-    } else if dump_state {
-        Duration::from_secs(15)
-    } else {
-        Duration::ZERO
-    };
-
-    (STARTUP + PER_FRAME * frames as u32).max(floor)
+fn frame_watchdog() -> FrameWatchdogConfig {
+    frame_watchdog_config(
+        std::env::var("ROCK_FRAME_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok()),
+    )
 }
 
 fn apply_headless_audio_env(cmd: &mut Command) {
@@ -1045,6 +1043,7 @@ pub fn do_one_frame(
     replay: Option<&str>,
     checkpoint_interval: Option<usize>,
     app_args: &[String],
+    requested_renderer: Option<RendererBackend>,
 ) -> Result<()> {
     use crate::common::ProcessManager;
 
@@ -1060,7 +1059,8 @@ pub fn do_one_frame(
     let mut cmd = rock_host::project::build_luajit_command(&lua_file, app_args);
     cmd.env("FRAME_COUNT", frames.to_string())
         .env("TAKE_SCREENSHOT", "1")  // Always take screenshot when running frames
-        .env("STONE_HEADLESS", "1");  // No visible window for frame runs
+        .env("STONE_HEADLESS", "1")  // No visible window for frame runs
+        .env("ROCK_FRAME_WATCHDOG", "1");
     apply_headless_audio_env(&mut cmd);
     // Replay record/playback (docs/replay-scrub-plan.md). The game process
     // reads these env vars in stone/engine/replay.rock, same pattern as
@@ -1075,64 +1075,67 @@ pub fn do_one_frame(
         cmd.env("STONE_CHECKPOINT_INTERVAL", n.to_string());
     }
     if dump_state {
-        // Capture stdout to parse the DUMP_STATE JSON out of it.
-        cmd.env("DUMP_STATE", "1")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-    } else {
-        // Stream the game's output live so long runs (e.g. `just pac bake`,
-        // ~80s) show progress instead of buffering until the process exits.
-        cmd.stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
+        cmd.env("DUMP_STATE", "1");
     }
+    // ProcessManager drains both pipes in background threads, so the
+    // watchdog can observe frame markers without risking a full pipe.
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-    // Use spawn instead of output to implement timeout
+    // Use spawn instead of output to implement the progress watchdog.
     let mut child = cmd.spawn()?;
 
-    let timeout_duration = frame_timeout(frames, dump_state, app_args);
-    let process_result = ProcessManager::wait_with_timeout(&mut child, timeout_duration)?;
+    let watchdog = frame_watchdog();
+    let process_result = ProcessManager::wait_with_frame_watchdog(
+        &mut child,
+        watchdog.startup,
+        watchdog.inactivity,
+        !dump_state,
+        true,
+    )?;
 
-    // Print stdout and stderr.
-    // In dump_state mode: game logs go to stderr, only the extracted JSON goes to stdout.
-    // In normal mode: everything goes to stdout as before.
-    if !process_result.output.stdout.is_empty() {
+    // In dump_state mode, game stdout carries the JSON result while stderr was
+    // already forwarded by ProcessManager. Normal output was forwarded live.
+    if dump_state && !process_result.output.stdout.is_empty() {
         let stdout_str = String::from_utf8_lossy(&process_result.output.stdout);
         const DELIMITER: &str = "--- DUMP_STATE ---";
-        if dump_state {
-            if let Some(idx) = stdout_str.find(DELIMITER) {
-                let before = stdout_str[..idx].trim();
-                if !before.is_empty() {
-                    // Result output, NOT logging: forwarding the spawned
-                    // game's own stdout (pre-JSON) verbatim.
-                    eprint!("{}", before);
-                }
-                let json = stdout_str[idx + DELIMITER.len()..].trim();
-                // Result output, NOT logging: the dumped state JSON is the
-                // command's answer, written to stdout for consumption.
-                println!("{}", json);
-            } else {
-                // Result output, NOT logging: raw game stdout passthrough.
-                print!("{}", stdout_str);
+        if let Some(idx) = stdout_str.find(DELIMITER) {
+            let before = stdout_str[..idx].trim();
+            if !before.is_empty() {
+                // Result output, NOT logging: forwarding the spawned
+                // game's own stdout (pre-JSON) verbatim.
+                eprint!("{}", before);
             }
+            let json = stdout_str[idx + DELIMITER.len()..].trim();
+            // Result output, NOT logging: the dumped state JSON is the
+            // command's answer, written to stdout for consumption.
+            println!("{}", json);
         } else {
             // Result output, NOT logging: raw game stdout passthrough.
             print!("{}", stdout_str);
         }
-    }
-    if !process_result.output.stderr.is_empty() {
-        // Result output, NOT logging: forwarding the spawned game
-        // process's own stderr verbatim, not rock-cli diagnostics.
-        eprint!("{}", String::from_utf8_lossy(&process_result.output.stderr));
     }
 
     // A watchdog timeout means the run did NOT complete -- treat it as a failure
     // (nonzero exit), not a warning-and-exit-0. Exiting 0 on timeout is precisely
     // how a load-starved run once masqueraded as a clean-but-empty log
     // (docs/replay-scrub-plan.md note 6).
-    frame_exit_result(
+    let timeout_secs = if process_result.frame_progress.is_some() {
+        watchdog.inactivity.as_secs()
+    } else {
+        watchdog.startup.as_secs()
+    };
+    let requested_renderer = requested_renderer.map(|renderer| match renderer {
+        RendererBackend::Gl => "gl",
+        RendererBackend::Wgpu => "wgpu",
+    });
+    frame_exit_result_with_progress(
         process_result.timed_out,
         &process_result.output.status,
-        timeout_duration.as_secs(),
+        timeout_secs,
+        frames,
+        requested_renderer,
+        process_result.frame_progress.as_ref(),
+        process_result.progress_stopped,
     )?;
     if frames == 1 {
         info!("One frame executed successfully");
@@ -1152,11 +1155,32 @@ fn frame_exit_result(
     status: &std::process::ExitStatus,
     timeout_secs: u64,
 ) -> Result<()> {
+    frame_exit_result_with_progress(timed_out, status, timeout_secs, 0, None, None, false)
+}
+
+fn frame_exit_result_with_progress(
+    timed_out: bool,
+    status: &std::process::ExitStatus,
+    timeout_secs: u64,
+    requested: usize,
+    requested_renderer: Option<&str>,
+    progress: Option<&crate::common::FrameProgress>,
+    progress_stopped: bool,
+) -> Result<()> {
     if timed_out {
+        let (renderer, completed, requested) = match progress {
+            Some(progress) => (
+                progress.renderer.as_str(),
+                progress.completed,
+                progress.requested.unwrap_or(requested),
+            ),
+            None => (requested_renderer.unwrap_or("unknown"), 0, requested),
+        };
         anyhow::bail!(
-            "Stone process timed out after {timeout_secs}s -- no clean exit (a hang, \
-             an infinite loop, or a run starved past the watchdog). For a legitimately \
-             long run, raise ROCK_FRAME_TIMEOUT_SECS."
+            "Stone process timed out after {timeout_secs}s -- renderer={renderer}, \
+             completed/requested={completed}/{requested}, progress_stopped={progress_stopped}; \
+             no clean exit (a hang, an infinite loop, or a run starved past the watchdog). \
+             For a legitimately slow run, raise ROCK_FRAME_TIMEOUT_SECS."
         );
     }
     if !status.success() {
@@ -1210,10 +1234,11 @@ pub fn do_replay_window(
 mod tests {
     use super::{
         apply_run_env, build_id_for_lua, consume_request_file, ensure_flight_dir,
-        flight_recorder_for, frame_exit_result, frame_timeout, session_usage,
+        flight_recorder_for, frame_exit_result, frame_watchdog_config, session_usage,
         session_usage_warning, FlightRecorder, SESSION_USAGE_WARN_BYTES,
     };
     use crate::watch::is_compiler_source;
+    use std::time::Duration;
 
     /// The whole point of the private session dir: `rock stone` must not write
     /// the slot every other command writes. A shared `tmp/main.lua` is loaded
@@ -1468,31 +1493,19 @@ mod tests {
         assert!(!is_compiler_source("some/rocky/src/x.rs"));
     }
 
-    /// The `rock frame` watchdog scales with the frames requested: a flat
-    /// budget starved any slow-booting game (mag spends ~1.5s on prop
-    /// registration + level load before frame 1, so `-n 100` at ~24ms/frame
-    /// needs ~3.9s and died under the old flat 3s).
+    /// The frame watchdog bounds startup and inactivity independently of the
+    /// requested frame count. A legitimate slow run can therefore outlive its
+    /// old total budget, while a child that stops reporting still fails.
     #[test]
-    fn frame_timeout_scales_with_frame_count() {
-        let secs = |n| frame_timeout(n, false, &[]).as_secs_f64();
+    fn frame_watchdog_preserves_progress_and_override_contracts() {
+        let default = frame_watchdog_config(None);
+        assert_eq!(default.startup, Duration::from_secs(5));
+        assert_eq!(default.inactivity, Duration::from_secs(5));
+        assert_eq!(default.override_secs, None);
 
-        // Startup allowance dominates a short run; still bounded, so a genuine
-        // hang on `-n 5` fails fast rather than waiting out a long budget.
-        assert_eq!(secs(1), 5.05, "1 frame = 5s startup + 50ms");
-        assert!(secs(5) < 6.0, "short runs stay tight");
-
-        // The case that regressed: mag's real numbers now fit.
-        assert_eq!(secs(100), 10.0, "5s startup + 100 * 50ms");
-        assert!(secs(100) > 3.9, "must exceed mag's measured -n 100 cost");
-
-        // Strictly increasing in frames -- no cap that reintroduces a flat wall.
-        assert!(secs(1000) > secs(100), "budget keeps growing with -n");
-
-        // dump_state / app_args floors still apply, and never shrink the budget.
-        assert!(frame_timeout(1, true, &[]) >= frame_timeout(1, false, &[]));
-        assert!(
-            frame_timeout(10_000, false, &[]) >= frame_timeout(10_000, true, &[]),
-            "a large -n outgrows the dump_state floor rather than being clamped to it"
-        );
+        let override_config = frame_watchdog_config(Some(60));
+        assert_eq!(override_config.startup, Duration::from_secs(60));
+        assert_eq!(override_config.inactivity, Duration::from_secs(60));
+        assert_eq!(override_config.override_secs, Some(60));
     }
 }
