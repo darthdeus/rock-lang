@@ -3129,7 +3129,7 @@ fn assemble(
                     times.add(&chunk.times);
                     if emit_def {
                         out.push_str(&chunk.lua);
-                        code_artifact.merge(chunk.code_artifact.clone());
+                        code_artifact.merge_ref(&chunk.code_artifact);
                         // A dropped definition's `static` cells do not exist, so
                         // they must not be registered for hot-reload preservation.
                         all_statics.extend(chunk.statics.iter().cloned());
@@ -3176,10 +3176,10 @@ fn assemble(
         &mut out,
     ));
     for chunk in spec_chunks.values() {
-        code_artifact.merge(chunk.code_artifact.clone());
+        code_artifact.merge_ref(&chunk.code_artifact);
     }
     for (_, chunk) in built_specs.iter() {
-        code_artifact.merge(chunk.code_artifact.clone());
+        code_artifact.merge_ref(&chunk.code_artifact);
     }
 
     // Every emitted definition has now been visited, so this is the earliest
